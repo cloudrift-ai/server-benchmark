@@ -1,6 +1,7 @@
 import os
 import time
 from huggingface_hub import snapshot_download
+from argparse import ArgumentParser
 from tqdm.auto import tqdm
 
 
@@ -72,7 +73,12 @@ def download_and_track(repo_id, local_dir=None):
 
 # Example usage:
 if __name__ == "__main__":
+    parser = ArgumentParser()
+    parser.add_argument('--model-name', default="meta-llama/Llama-3.1-8B-Instruct")
+    parser.add_argument("--hg-dir", default="../models")
+    args = parser.parse_args()
     # Replace "bert-base-uncased" with the actual model ID you want to download
+
     model_id = "meta-llama/Llama-3.1-8B-Instruct"
     model_id = "Qwen/Qwen2.5-Omni-3B"
 
@@ -80,4 +86,4 @@ if __name__ == "__main__":
     # For example: local_save_path = "./my_downloaded_models"
     local_save_path = "../models"
 
-    download_and_track(model_id, local_dir=local_save_path)
+    download_and_track(args.model_name, local_dir=args.hg_dir)

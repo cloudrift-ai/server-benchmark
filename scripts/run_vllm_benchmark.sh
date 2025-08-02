@@ -1,25 +1,44 @@
 #!/bin/bash
 
-set -e
+set -o allexport
 # Configuration
 IMAGE_NAME="vllm/vllm-openai:latest"
 CONTAINER_NAME="vllm_benchmark_container"
-MODEL_NAME="facebook/opt-125m"  # Replace with your model
-BENCHMARK_CMD="python3 benchmarks/benchmark_serving.py --model $MODEL_NAME"
+MODEL_NAME="meta-llama/Llama-3.1-8B-Instruct" # Replace with your model
+BENCHMARK_CMD="python3 benchmarks/benchmark_serving.py --model $MODEL_NAME --dataset-name random --random-input-len 1000 --random-output-len 1000 --max-concurrency 20 --num-prompts 20 --ignore-eos --backend openai-chat --endpoint /v1/chat/completions  --percentile_metrics ttft,tpot,itl,e2el"
 READY_STRING="Application startup complete."
-HF_DIRECTORY=""
+
+BENCHMARK_RESULTS_FILE="benchmark_results.txt"
+source ./.env
+HF_DIRECTORY="/hf_models"
+# Disable automatic export
+set +o allexport
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+
+echo "Hugging face download speed test" >> $BENCHMARK_RESULTS_FILE
+echo "---------------------------------" >> $BENCHMARK_RESULTS_FILE
+python $SCRIPT_DIR/download_model.py --model-name $MODEL_NAME --hg-dir $HF_DIRECTORY/$MODEL_NAME | tee -a $BENCHMARK_RESULTS_FILE
 
 # Start the vLLM container in the background
 echo "Starting vLLM container..."
-docker run --runtime nvidia --gpus all \
+docker run --rm --gpus all \
     -d \
     --name $CONTAINER_NAME \
     -v $HF_DIRECTORY:$HF_DIRECTORY \
     --env "HUGGING_FACE_HUB_TOKEN=$HUGGING_FACE_HUB_TOKEN" \
+    --env "VLLM_WORKER_MULTIPROC_METHOD=spawn" \
+    --env "OMP_NUM_THREADS=16" \
+    --env "VLLM_USE_V1=0" \
+    --env "CUDA_VISIBLE_DEVICES=0" \
     -p 8000:8000 \
     --ipc=host \
     vllm/vllm-openai:latest \
-    --model "$MODEL_NAME"
+    --disable-log-requests --no-enable-chunked-prefill --trust-remote-code \
+    --tensor-parallel-size=1  --max-seq-len-to-capture=16384 \
+    --max-model-len=16384 --gpu-memory-utilization=0.90\
+    --host 0.0.0.0 --port 8000 \
+    --model $HF_DIRECTORY/$MODEL_NAME \
+    --served-model-name $MODEL_NAME
 
 
 # Wait until model is loaded and server is ready
@@ -42,8 +61,19 @@ if [ $i -eq $RETRIES ]; then
     exit 1
 fi
 
+
 # Run benchmark inside the container
 echo "Running benchmark inside the container..."
-docker exec $CONTAINER_NAME $BENCHMARK_CMD
+docker exec $CONTAINER_NAME pip install pandas datasets
 
+echo "" >> $BENCHMARK_RESULTS_FILE
+echo "vllm model gpu benchmark" >> $BENCHMARK_RESULTS_FILE
+echo "---------------------------------" >> $BENCHMARK_RESULTS_FILE
+docker exec $CONTAINER_NAME $BENCHMARK_CMD | awk '/^============/ {found=1} found' benchmark_results.txt | tee -a $BENCHMARK_RESULTS_FILE
+
+docker stop $CONTAINER_NAME
+echo ""
+echo ""
 echo "✅ Benchmark completed."
+echo "Results:"
+cat $BENCHMARK_RESULTS_FILE

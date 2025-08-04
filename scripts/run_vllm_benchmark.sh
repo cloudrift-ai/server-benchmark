@@ -7,6 +7,7 @@ CONTAINER_NAME="vllm_benchmark_container"
 MODEL_NAME="meta-llama/Llama-3.1-8B-Instruct" # Replace with your model
 BENCHMARK_CMD="python3 benchmarks/benchmark_serving.py --model $MODEL_NAME --dataset-name random --random-input-len 1000 --random-output-len 1000 --max-concurrency 20 --num-prompts 20 --ignore-eos --backend openai-chat --endpoint /v1/chat/completions  --percentile_metrics ttft,tpot,itl,e2el"
 READY_STRING="Application startup complete."
+$GPU_NUMBER=$( nvidia-smi --list-gpus | wc -l )
 
 BENCHMARK_RESULTS_FILE="benchmark_results.txt"
 source ./.env
@@ -34,9 +35,10 @@ docker run --rm --gpus all \
     --ipc=host \
     vllm/vllm-openai:latest \
     --disable-log-requests --no-enable-chunked-prefill --trust-remote-code \
-    --tensor-parallel-size=1  --max-seq-len-to-capture=16384 \
-    --max-model-len=16384 --gpu-memory-utilization=0.90\
+    --max-seq-len-to-capture=8192 \
+    --max-model-len=8192 --gpu-memory-utilization=0.90\
     --host 0.0.0.0 --port 8000 \
+    -tp $GPU_NUMBER \
     --model $HF_DIRECTORY/$MODEL_NAME \
     --served-model-name $MODEL_NAME
 

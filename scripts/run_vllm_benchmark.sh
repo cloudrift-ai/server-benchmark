@@ -29,8 +29,6 @@ docker run --rm --gpus all \
     --env "HUGGING_FACE_HUB_TOKEN=$HUGGING_FACE_HUB_TOKEN" \
     --env "VLLM_WORKER_MULTIPROC_METHOD=spawn" \
     --env "OMP_NUM_THREADS=16" \
-    --env "VLLM_USE_V1=0" \
-    --env "CUDA_VISIBLE_DEVICES=0" \
     -p 8000:8000 \
     --ipc=host \
     vllm/vllm-openai:latest \
@@ -71,7 +69,7 @@ docker exec $CONTAINER_NAME pip install pandas datasets
 echo "" >> $BENCHMARK_RESULTS_FILE
 echo "vllm model gpu benchmark" >> $BENCHMARK_RESULTS_FILE
 echo "---------------------------------" >> $BENCHMARK_RESULTS_FILE
-docker exec $CONTAINER_NAME $BENCHMARK_CMD | awk '/^============/ {found=1} found' benchmark_results.txt | tee -a $BENCHMARK_RESULTS_FILE
+docker exec $CONTAINER_NAME $BENCHMARK_CMD | awk '/^============/ {found=1} found' | tee -a $BENCHMARK_RESULTS_FILE
 
 docker stop $CONTAINER_NAME
 echo ""

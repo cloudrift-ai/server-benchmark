@@ -16,7 +16,7 @@ HF_DIRECTORY="/hf_models"
 set +o allexport
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
-echo "Hugging face download speed test" >> $BENCHMARK_RESULTS_FILE
+echo "Hugging face download speed test" > $BENCHMARK_RESULTS_FILE
 echo "---------------------------------" >> $BENCHMARK_RESULTS_FILE
 python $SCRIPT_DIR/download_model.py --model-name $MODEL_NAME --hg-dir $HF_DIRECTORY/$MODEL_NAME | tee -a $BENCHMARK_RESULTS_FILE
 
@@ -44,14 +44,14 @@ docker run --rm --gpus all \
 # Wait until model is loaded and server is ready
 echo "Waiting for vLLM server to start and model to load..."
 
-RETRIES=10
+RETRIES=11
 for i in $(seq 1 $RETRIES); do
+    sleep $((2 ** i))
     if docker logs $CONTAINER_NAME 2>&1 | grep -q "$READY_STRING"; then
         echo "vLLM server is ready!"
         break
     fi
     echo "Waiting... ($i/$RETRIES)"
-    sleep $((2 ** i))
 done
 
 # Exit if timeout exceeded

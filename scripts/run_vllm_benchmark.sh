@@ -5,7 +5,7 @@ set -o allexport
 IMAGE_NAME="vllm/vllm-openai:latest"
 CONTAINER_NAME="vllm_benchmark_container"
 #MODEL_NAME="meta-llama/Llama-3.1-8B-Instruct" # Replace with your model
-MODEL_NAME="Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
+MODEL_NAME="Qwen/Qwen3-Coder-30B-A3B-Instruct" #"Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
 BENCHMARK_CMD="python3 benchmarks/benchmark_serving.py --model $MODEL_NAME --dataset-name random --random-input-len 1000 --random-output-len 1000 --max-concurrency 20 --num-prompts 20 --ignore-eos --backend openai-chat --endpoint /v1/chat/completions  --percentile_metrics ttft,tpot,itl,e2el"
 READY_STRING="Application startup complete."
 GPU_NUMBER=$( nvidia-smi --list-gpus | wc -l )

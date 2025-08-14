@@ -11,7 +11,6 @@ READY_STRING="Application startup complete."
 GPU_NUMBER=$( nvidia-smi --list-gpus | wc -l )
 
 BENCHMARK_RESULTS_FILE="benchmark_results.txt"
-source ./.env
 HF_DIRECTORY="/hf_models"
 # Disable automatic export
 set +o allexport
@@ -19,11 +18,11 @@ SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
 echo "Hugging face download speed test" > $BENCHMARK_RESULTS_FILE
 echo "---------------------------------" >> $BENCHMARK_RESULTS_FILE
-python $SCRIPT_DIR/download_model.py --model-name $MODEL_NAME --hg-dir $HF_DIRECTORY/$MODEL_NAME | tee -a $BENCHMARK_RESULTS_FILE
+sudo -E ./venv/bin/python $SCRIPT_DIR/download_model.py --model-name $MODEL_NAME --hg-dir $HF_DIRECTORY/$MODEL_NAME | tee -a $BENCHMARK_RESULTS_FILE
 
 # Start the vLLM container in the background
 echo "Starting vLLM container..."
-docker run --rm --gpus all \
+sudo -E docker run --rm --gpus all \
     -d \
     --name $CONTAINER_NAME \
     -v $HF_DIRECTORY:$HF_DIRECTORY \
@@ -48,7 +47,7 @@ echo "Waiting for vLLM server to start and model to load..."
 RETRIES=11
 for i in $(seq 1 $RETRIES); do
     sleep $((2 ** i))
-    if docker logs $CONTAINER_NAME 2>&1 | grep -q "$READY_STRING"; then
+    if sudo -E docker logs $CONTAINER_NAME 2>&1 | grep -q "$READY_STRING"; then
         echo "vLLM server is ready!"
         break
     fi
@@ -58,21 +57,21 @@ done
 # Exit if timeout exceeded
 if [ $i -eq $RETRIES ]; then
     echo "❌ Timeout: Server did not become ready in time."
-    docker logs $CONTAINER_NAME
+    sudo docker logs $CONTAINER_NAME
     exit 1
 fi
 
 
 # Run benchmark inside the container
 echo "Running benchmark inside the container..."
-docker exec $CONTAINER_NAME pip install pandas datasets
+sudo -E docker exec $CONTAINER_NAME pip install pandas datasets
 
 echo "" >> $BENCHMARK_RESULTS_FILE
 echo "vllm model gpu benchmark" >> $BENCHMARK_RESULTS_FILE
 echo "---------------------------------" >> $BENCHMARK_RESULTS_FILE
-docker exec $CONTAINER_NAME $BENCHMARK_CMD | awk '/^============/ {found=1} found' | tee -a $BENCHMARK_RESULTS_FILE
+sudo -E docker exec $CONTAINER_NAME $BENCHMARK_CMD | awk '/^============/ {found=1} found' | tee -a $BENCHMARK_RESULTS_FILE
 
-docker stop $CONTAINER_NAME
+sudo docker stop $CONTAINER_NAME
 echo ""
 echo ""
 echo "✅ Benchmark completed."

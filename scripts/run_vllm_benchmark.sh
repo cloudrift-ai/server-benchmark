@@ -9,7 +9,7 @@ RANDOM_INPUT_LEN="${RANDOM_INPUT_LEN:-1000}"
 RANDOM_OUTPUT_LEN="${RANDOM_OUTPUT_LEN:-1000}"
 MAX_CONCURRENCY="${MAX_CONCURRENCY:-200}"
 NUM_PROMPTS="${NUM_PROMPTS:-1000}"
-BENCHMARK_CMD="python3 benchmarks/benchmark_serving.py --model $MODEL_NAME --dataset-name random --random-input-len $RANDOM_INPUT_LEN --random-output-len $RANDOM_OUTPUT_LEN --max-concurrency $MAX_CONCURRENCY --num-prompts $NUM_PROMPTS --ignore-eos --backend openai-chat --endpoint /v1/chat/completions  --percentile_metrics ttft,tpot,itl,e2el"
+BENCHMARK_CMD="vllm bench serve --model $MODEL_NAME --dataset-name random --random-input-len $RANDOM_INPUT_LEN --random-output-len $RANDOM_OUTPUT_LEN --max-concurrency $MAX_CONCURRENCY --num-prompts $NUM_PROMPTS --ignore-eos --backend openai-chat --endpoint /v1/chat/completions  --percentile-metrics ttft,tpot,itl,e2el"
 READY_STRING="Application startup complete."
 GPU_NUMBER=$( nvidia-smi --list-gpus | wc -l )
 
@@ -28,13 +28,9 @@ sudo -E ./venv/bin/python $SCRIPT_DIR/download_model.py --model-name $MODEL_NAME
 
 MODEL_PATH="$HF_DIRECTORY/$MODEL_NAME"
 
-# Clean up any existing containers
+# Clean up any existing container with the same name
 echo "Cleaning up any existing containers..."
-# Stop and remove container by name if it exists
 sudo docker rm -f $CONTAINER_NAME 2>/dev/null || true
-# Also stop any vLLM containers that might be running
-sudo docker ps -q --filter "ancestor=vllm/vllm-openai:latest" | xargs -r sudo docker stop
-sudo docker ps -aq --filter "ancestor=vllm/vllm-openai:latest" | xargs -r sudo docker rm
 
 # Start the vLLM container in the background
 echo "Starting vLLM container..."
@@ -91,7 +87,7 @@ sudo -E docker exec $CONTAINER_NAME pip install pandas datasets
 echo "" >> $BENCHMARK_RESULTS_FILE
 echo "vllm model gpu benchmark" >> $BENCHMARK_RESULTS_FILE
 echo "---------------------------------" >> $BENCHMARK_RESULTS_FILE
-sudo -E docker exec $CONTAINER_NAME $BENCHMARK_CMD | awk '/^============/ {found=1} found' | tee -a $BENCHMARK_RESULTS_FILE
+sudo -E docker exec $CONTAINER_NAME bash -c "$BENCHMARK_CMD" | awk '/^============/ {found=1} found' | tee -a $BENCHMARK_RESULTS_FILE
 
 sudo docker stop $CONTAINER_NAME
 echo ""

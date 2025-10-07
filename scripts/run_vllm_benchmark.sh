@@ -44,11 +44,10 @@ sudo -E docker run --rm --gpus all \
     -p 8000:8000 \
     --ipc=host \
     vllm/vllm-openai:latest \
-    --disable-log-requests --no-enable-chunked-prefill --trust-remote-code \
-    --max-seq-len-to-capture=8192 \
-    --max-model-len=8192 --gpu-memory-utilization=0.90\
+    --disable-log-requests --trust-remote-code \
+    --max-model-len=8192 --gpu-memory-utilization=0.90 \
     --host 0.0.0.0 --port 8000 \
-    -tp $GPU_NUMBER \
+    --tensor-parallel-size $GPU_NUMBER \
     --model $MODEL_PATH \
     --served-model-name $MODEL_NAME
 

@@ -1,0 +1,14 @@
+# Benchmark run logs
+*.log
+
+# Python virtual environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Docker Compose generated files
+docker-compose.vllm.yml
+nginx.vllm.conf

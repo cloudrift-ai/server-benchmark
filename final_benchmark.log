@@ -1,477 +1,0 @@
-From https://github.com/cloudrift-ai/server-benchmark
-   e2f735b..2d56053  main       -> origin/main
-Updating e2f735b..2d56053
-Fast-forward
- benchmarks/3_vllm_benchmark.sh                     |    1 +
- clean_benchmark_run.log                            | 2039 ++++++++++++++++++++
- clean_test_run.log                                 |  634 ++++++
- latest_benchmark.log                               |  259 +++
- ...wen3-Coder-30B-A3B-Instruct-AWQ_hf_download.txt |    6 +
- ...wen3-Coder-30B-A3B-Instruct-AWQ_system_info.txt |  191 ++
- ...3-Coder-30B-A3B-Instruct-AWQ_vllm_benchmark.txt |   38 +
- ...wen3-Coder-30B-A3B-Instruct-AWQ_hf_download.txt |    6 +
- ...wen3-Coder-30B-A3B-Instruct-AWQ_system_info.txt |  213 ++
- ...wen3-Coder-30B-A3B-Instruct-AWQ_hf_download.txt |    6 +
- ...wen3-Coder-30B-A3B-Instruct-AWQ_system_info.txt |  257 +++
- setup.sh                                           |    2 +-
- 12 files changed, 3651 insertions(+), 1 deletion(-)
- create mode 100644 clean_benchmark_run.log
- create mode 100644 clean_test_run.log
- create mode 100644 latest_benchmark.log
- create mode 100644 results/rtx4090_x_1_QuantTrio_Qwen3-Coder-30B-A3B-Instruct-AWQ_hf_download.txt
- create mode 100644 results/rtx4090_x_1_QuantTrio_Qwen3-Coder-30B-A3B-Instruct-AWQ_system_info.txt
- create mode 100644 results/rtx4090_x_1_QuantTrio_Qwen3-Coder-30B-A3B-Instruct-AWQ_vllm_benchmark.txt
- create mode 100644 results/rtx4090_x_2_QuantTrio_Qwen3-Coder-30B-A3B-Instruct-AWQ_hf_download.txt
- create mode 100644 results/rtx4090_x_2_QuantTrio_Qwen3-Coder-30B-A3B-Instruct-AWQ_system_info.txt
- create mode 100644 results/rtx4090_x_4_QuantTrio_Qwen3-Coder-30B-A3B-Instruct-AWQ_hf_download.txt
- create mode 100644 results/rtx4090_x_4_QuantTrio_Qwen3-Coder-30B-A3B-Instruct-AWQ_system_info.txt
-From https://github.com/cloudrift-ai/server-benchmark
-   e2f735b..2d56053  main       -> origin/main
-Updating e2f735b..2d56053
-Fast-forward
- benchmarks/3_vllm_benchmark.sh                     |    1 +
- clean_benchmark_run.log                            | 2039 ++++++++++++++++++++
- clean_test_run.log                                 |  634 ++++++
- latest_benchmark.log                               |  259 +++
- ...wen3-Coder-30B-A3B-Instruct-AWQ_hf_download.txt |    6 +
- ...wen3-Coder-30B-A3B-Instruct-AWQ_system_info.txt |  191 ++
- ...3-Coder-30B-A3B-Instruct-AWQ_vllm_benchmark.txt |   38 +
- ...wen3-Coder-30B-A3B-Instruct-AWQ_hf_download.txt |    6 +
- ...wen3-Coder-30B-A3B-Instruct-AWQ_system_info.txt |  213 ++
- ...wen3-Coder-30B-A3B-Instruct-AWQ_hf_download.txt |    6 +
- ...wen3-Coder-30B-A3B-Instruct-AWQ_system_info.txt |  257 +++
- setup.sh                                           |    2 +-
- 12 files changed, 3651 insertions(+), 1 deletion(-)
- create mode 100644 clean_benchmark_run.log
- create mode 100644 clean_test_run.log
- create mode 100644 latest_benchmark.log
- create mode 100644 results/rtx4090_x_1_QuantTrio_Qwen3-Coder-30B-A3B-Instruct-AWQ_hf_download.txt
- create mode 100644 results/rtx4090_x_1_QuantTrio_Qwen3-Coder-30B-A3B-Instruct-AWQ_system_info.txt
- create mode 100644 results/rtx4090_x_1_QuantTrio_Qwen3-Coder-30B-A3B-Instruct-AWQ_vllm_benchmark.txt
- create mode 100644 results/rtx4090_x_2_QuantTrio_Qwen3-Coder-30B-A3B-Instruct-AWQ_hf_download.txt
- create mode 100644 results/rtx4090_x_2_QuantTrio_Qwen3-Coder-30B-A3B-Instruct-AWQ_system_info.txt
- create mode 100644 results/rtx4090_x_4_QuantTrio_Qwen3-Coder-30B-A3B-Instruct-AWQ_hf_download.txt
- create mode 100644 results/rtx4090_x_4_QuantTrio_Qwen3-Coder-30B-A3B-Instruct-AWQ_system_info.txt
-From https://github.com/cloudrift-ai/server-benchmark
-   e2f735b..2d56053  main       -> origin/main
-Updating e2f735b..2d56053
-Fast-forward
- benchmarks/3_vllm_benchmark.sh                     |    1 +
- clean_benchmark_run.log                            | 2039 ++++++++++++++++++++
- clean_test_run.log                                 |  634 ++++++
- latest_benchmark.log                               |  259 +++
- ...wen3-Coder-30B-A3B-Instruct-AWQ_hf_download.txt |    6 +
- ...wen3-Coder-30B-A3B-Instruct-AWQ_system_info.txt |  191 ++
- ...3-Coder-30B-A3B-Instruct-AWQ_vllm_benchmark.txt |   38 +
- ...wen3-Coder-30B-A3B-Instruct-AWQ_hf_download.txt |    6 +
- ...wen3-Coder-30B-A3B-Instruct-AWQ_system_info.txt |  213 ++
- ...wen3-Coder-30B-A3B-Instruct-AWQ_hf_download.txt |    6 +
- ...wen3-Coder-30B-A3B-Instruct-AWQ_system_info.txt |  257 +++
- setup.sh                                           |    2 +-
- 12 files changed, 3651 insertions(+), 1 deletion(-)
- create mode 100644 clean_benchmark_run.log
- create mode 100644 clean_test_run.log
- create mode 100644 latest_benchmark.log
- create mode 100644 results/rtx4090_x_1_QuantTrio_Qwen3-Coder-30B-A3B-Instruct-AWQ_hf_download.txt
- create mode 100644 results/rtx4090_x_1_QuantTrio_Qwen3-Coder-30B-A3B-Instruct-AWQ_system_info.txt
- create mode 100644 results/rtx4090_x_1_QuantTrio_Qwen3-Coder-30B-A3B-Instruct-AWQ_vllm_benchmark.txt
- create mode 100644 results/rtx4090_x_2_QuantTrio_Qwen3-Coder-30B-A3B-Instruct-AWQ_hf_download.txt
- create mode 100644 results/rtx4090_x_2_QuantTrio_Qwen3-Coder-30B-A3B-Instruct-AWQ_system_info.txt
- create mode 100644 results/rtx4090_x_4_QuantTrio_Qwen3-Coder-30B-A3B-Instruct-AWQ_hf_download.txt
- create mode 100644 results/rtx4090_x_4_QuantTrio_Qwen3-Coder-30B-A3B-Instruct-AWQ_system_info.txt
-Installing system dependencies...
-
-WARNING: apt does not have a stable CLI interface. Use with caution in scripts.
-
-Installing system dependencies...
-
-WARNING: apt does not have a stable CLI interface. Use with caution in scripts.
-
-Installing system dependencies...
-Get:1 https://nvidia.github.io/libnvidia-container/stable/deb/amd64  InRelease [1477 B]
-
-WARNING: apt does not have a stable CLI interface. Use with caution in scripts.
-
-Hit:2 https://download.docker.com/linux/ubuntu noble InRelease
-Hit:3 https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64  InRelease
-Hit:1 http://security.ubuntu.com/ubuntu noble-security InRelease
-Get:2 https://nvidia.github.io/libnvidia-container/stable/deb/amd64  InRelease [1477 B]
-Hit:4 http://archive.ubuntu.com/ubuntu noble InRelease
-Hit:5 http://security.ubuntu.com/ubuntu noble-security InRelease
-Hit:3 https://download.docker.com/linux/ubuntu noble InRelease
-Hit:4 https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64  InRelease
-Get:1 https://nvidia.github.io/libnvidia-container/stable/deb/amd64  InRelease [1477 B]
-Hit:6 http://archive.ubuntu.com/ubuntu noble-updates InRelease
-Hit:5 http://archive.ubuntu.com/ubuntu noble InRelease
-Hit:2 https://download.docker.com/linux/ubuntu noble InRelease
-Hit:3 https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64  InRelease
-Hit:7 http://archive.ubuntu.com/ubuntu noble-backports InRelease
-Hit:4 http://archive.ubuntu.com/ubuntu noble InRelease
-Hit:5 http://security.ubuntu.com/ubuntu noble-security InRelease
-Hit:6 http://archive.ubuntu.com/ubuntu noble-updates InRelease
-Hit:6 http://archive.ubuntu.com/ubuntu noble-updates InRelease
-Hit:7 http://archive.ubuntu.com/ubuntu noble-backports InRelease
-Hit:7 http://archive.ubuntu.com/ubuntu noble-backports InRelease
-Fetched 1477 B in 1s (2178 B/s)
-Reading package lists...Fetched 1477 B in 1s (1489 B/s)
-Reading package lists...Fetched 1477 B in 1s (1360 B/s)
-Reading package lists...
-Building dependency tree...
-
-Reading state information...
-Building dependency tree...259 packages can be upgraded. Run 'apt list --upgradable' to see them.
-
-WARNING: apt does not have a stable CLI interface. Use with caution in scripts.
-
-Reading package lists...
-Building dependency tree...
-Reading state information...
-259 packages can be upgraded. Run 'apt list --upgradable' to see them.
-
-WARNING: apt does not have a stable CLI interface. Use with caution in scripts.
-
-Reading package lists...
-Building dependency tree...
-Reading state information...
-
-Building dependency tree...
-Reading state information...
-python3-venv is already the newest version (3.12.3-0ubuntu2).
-The following additional packages will be installed:
-  containerd.io docker-ce docker-ce-cli
-Suggested packages:
-  cgroupfs-mount | cgroup-lite docker-model-plugin
-Recommended packages:
-  docker.io
-The following NEW packages will be installed:
-
-Reading state information...  docker-compose-v2
-The following packages will be upgraded:
-
-  containerd.io docker-ce docker-ce-cli
-259 packages can be upgraded. Run 'apt list --upgradable' to see them.
-3 upgraded, 1 newly installed, 0 to remove and 256 not upgraded.
-python3-venv is already the newest version (3.12.3-0ubuntu2).
-The following additional packages will be installed:
-  containerd.io docker-ce docker-ce-cli
-Suggested packages:
-  cgroupfs-mount | cgroup-lite docker-model-plugin
-Recommended packages:
-  docker.io
-
-WARNING: apt does not have a stable CLI interface. Use with caution in scripts.
-
-Reading package lists...
-The following NEW packages will be installed:
-  docker-compose-v2
-The following packages will be upgraded:
-  containerd.io docker-ce docker-ce-cli
-Building dependency tree...Need to get 82.4 MB of archives.
-After this operation, 70.5 MB of additional disk space will be used.
-Get:1 https://download.docker.com/linux/ubuntu noble/stable amd64 docker-ce-cli amd64 5:28.5.0-1~ubuntu.24.04~noble [16.4 MB]
-3 upgraded, 1 newly installed, 0 to remove and 256 not upgraded.
-Need to get 82.4 MB of archives.
-After this operation, 70.5 MB of additional disk space will be used.
-Get:1 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 docker-compose-v2 amd64 2.37.1+ds1-0ubuntu2~24.04.1 [14.4 MB]
-Get:2 https://download.docker.com/linux/ubuntu noble/stable amd64 docker-ce-cli amd64 5:28.5.0-1~ubuntu.24.04~noble [16.4 MB]
-Get:2 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 docker-compose-v2 amd64 2.37.1+ds1-0ubuntu2~24.04.1 [14.4 MB]
-Get:3 https://download.docker.com/linux/ubuntu noble/stable amd64 containerd.io amd64 1.7.28-0~ubuntu.24.04~noble [31.9 MB]
-Get:3 https://download.docker.com/linux/ubuntu noble/stable amd64 containerd.io amd64 1.7.28-0~ubuntu.24.04~noble [31.9 MB]
-
-Reading state information...
-Get:4 https://download.docker.com/linux/ubuntu noble/stable amd64 docker-ce amd64 5:28.5.0-1~ubuntu.24.04~noble [19.7 MB]
-Get:4 https://download.docker.com/linux/ubuntu noble/stable amd64 docker-ce amd64 5:28.5.0-1~ubuntu.24.04~noble [19.7 MB]
-python3-venv is already the newest version (3.12.3-0ubuntu2).
-The following additional packages will be installed:
-  containerd.io docker-ce docker-ce-cli
-Suggested packages:
-  cgroupfs-mount | cgroup-lite docker-model-plugin
-Recommended packages:
-  docker.io
-The following NEW packages will be installed:
-  docker-compose-v2
-The following packages will be upgraded:
-  containerd.io docker-ce docker-ce-cli
-3 upgraded, 1 newly installed, 0 to remove and 256 not upgraded.
-debconf: unable to initialize frontend: Dialog
-debconf: (Dialog frontend will not work on a dumb terminal, an emacs shell buffer, or without a controlling terminal.)
-debconf: falling back to frontend: Readline
-debconf: unable to initialize frontend: Readline
-debconf: (This frontend requires a controlling tty.)
-debconf: falling back to frontend: Teletype
-dpkg-preconfigure: unable to re-open stdin: 
-Fetched 82.4 MB in 1s (160 MB/s)
-Need to get 82.4 MB of archives.
-After this operation, 70.5 MB of additional disk space will be used.
-Get:1 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 docker-compose-v2 amd64 2.37.1+ds1-0ubuntu2~24.04.1 [14.4 MB]
-Get:2 https://download.docker.com/linux/ubuntu noble/stable amd64 docker-ce-cli amd64 5:28.5.0-1~ubuntu.24.04~noble [16.4 MB]
-(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 99919 files and directories currently installed.)
-Preparing to unpack .../docker-ce-cli_5%3a28.5.0-1~ubuntu.24.04~noble_amd64.deb ...
-Unpacking docker-ce-cli (5:28.5.0-1~ubuntu.24.04~noble) over (5:28.3.3-1~ubuntu.24.04~noble) ...
-Get:3 https://download.docker.com/linux/ubuntu noble/stable amd64 containerd.io amd64 1.7.28-0~ubuntu.24.04~noble [31.9 MB]
-Get:4 https://download.docker.com/linux/ubuntu noble/stable amd64 docker-ce amd64 5:28.5.0-1~ubuntu.24.04~noble [19.7 MB]
-Preparing to unpack .../containerd.io_1.7.28-0~ubuntu.24.04~noble_amd64.deb ...
-Unpacking containerd.io (1.7.28-0~ubuntu.24.04~noble) over (1.7.27-1) ...
-debconf: unable to initialize frontend: Dialog
-debconf: (Dialog frontend will not work on a dumb terminal, an emacs shell buffer, or without a controlling terminal.)
-debconf: falling back to frontend: Readline
-debconf: unable to initialize frontend: Readline
-debconf: (This frontend requires a controlling tty.)
-debconf: falling back to frontend: Teletype
-dpkg-preconfigure: unable to re-open stdin: 
-Fetched 82.4 MB in 1s (146 MB/s)
-debconf: unable to initialize frontend: Dialog
-debconf: (Dialog frontend will not work on a dumb terminal, an emacs shell buffer, or without a controlling terminal.)
-debconf: falling back to frontend: Readline
-debconf: unable to initialize frontend: Readline
-debconf: (This frontend requires a controlling tty.)
-debconf: falling back to frontend: Teletype
-dpkg-preconfigure: unable to re-open stdin: 
-(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%Fetched 82.4 MB in 1s (57.0 MB/s)
-(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 99919 files and directories currently installed.)
-Preparing to unpack .../docker-ce-cli_5%3a28.5.0-1~ubuntu.24.04~noble_amd64.deb ...
-Unpacking docker-ce-cli (5:28.5.0-1~ubuntu.24.04~noble) over (5:28.3.3-1~ubuntu.24.04~noble) ...
-(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 99919 files and directories currently installed.)
-Preparing to unpack .../docker-ce-cli_5%3a28.5.0-1~ubuntu.24.04~noble_amd64.deb ...
-Unpacking docker-ce-cli (5:28.5.0-1~ubuntu.24.04~noble) over (5:28.3.3-1~ubuntu.24.04~noble) ...
-Preparing to unpack .../docker-ce_5%3a28.5.0-1~ubuntu.24.04~noble_amd64.deb ...
-Preparing to unpack .../containerd.io_1.7.28-0~ubuntu.24.04~noble_amd64.deb ...
-Unpacking containerd.io (1.7.28-0~ubuntu.24.04~noble) over (1.7.27-1) ...
-Unpacking docker-ce (5:28.5.0-1~ubuntu.24.04~noble) over (5:28.3.3-1~ubuntu.24.04~noble) ...
-Preparing to unpack .../containerd.io_1.7.28-0~ubuntu.24.04~noble_amd64.deb ...
-Unpacking containerd.io (1.7.28-0~ubuntu.24.04~noble) over (1.7.27-1) ...
-Selecting previously unselected package docker-compose-v2.
-Preparing to unpack .../docker-compose-v2_2.37.1+ds1-0ubuntu2~24.04.1_amd64.deb ...
-Unpacking docker-compose-v2 (2.37.1+ds1-0ubuntu2~24.04.1) ...
-dpkg: error processing archive /var/cache/apt/archives/docker-compose-v2_2.37.1+ds1-0ubuntu2~24.04.1_amd64.deb (--unpack):
- trying to overwrite '/usr/libexec/docker/cli-plugins/docker-compose', which is also in package docker-compose-plugin 2.39.1-1~ubuntu.24.04~noble
-dpkg-deb: error: paste subprocess was killed by signal (Broken pipe)
-Errors were encountered while processing:
- /var/cache/apt/archives/docker-compose-v2_2.37.1+ds1-0ubuntu2~24.04.1_amd64.deb
-Preparing to unpack .../docker-ce_5%3a28.5.0-1~ubuntu.24.04~noble_amd64.deb ...
-Unpacking docker-ce (5:28.5.0-1~ubuntu.24.04~noble) over (5:28.3.3-1~ubuntu.24.04~noble) ...
-needrestart is being skipped since dpkg has failed
-Preparing to unpack .../docker-ce_5%3a28.5.0-1~ubuntu.24.04~noble_amd64.deb ...
-Unpacking docker-ce (5:28.5.0-1~ubuntu.24.04~noble) over (5:28.3.3-1~ubuntu.24.04~noble) ...
-Selecting previously unselected package docker-compose-v2.
-Preparing to unpack .../docker-compose-v2_2.37.1+ds1-0ubuntu2~24.04.1_amd64.deb ...
-Unpacking docker-compose-v2 (2.37.1+ds1-0ubuntu2~24.04.1) ...
-dpkg: error processing archive /var/cache/apt/archives/docker-compose-v2_2.37.1+ds1-0ubuntu2~24.04.1_amd64.deb (--unpack):
- trying to overwrite '/usr/libexec/docker/cli-plugins/docker-compose', which is also in package docker-compose-plugin 2.39.1-1~ubuntu.24.04~noble
-dpkg-deb: error: paste subprocess was killed by signal (Broken pipe)
-Errors were encountered while processing:
- /var/cache/apt/archives/docker-compose-v2_2.37.1+ds1-0ubuntu2~24.04.1_amd64.deb
-needrestart is being skipped since dpkg has failed
-E: Sub-process /usr/bin/dpkg returned an error code (1)
-Selecting previously unselected package docker-compose-v2.
-Preparing to unpack .../docker-compose-v2_2.37.1+ds1-0ubuntu2~24.04.1_amd64.deb ...
-Unpacking docker-compose-v2 (2.37.1+ds1-0ubuntu2~24.04.1) ...
-dpkg: error processing archive /var/cache/apt/archives/docker-compose-v2_2.37.1+ds1-0ubuntu2~24.04.1_amd64.deb (--unpack):
- trying to overwrite '/usr/libexec/docker/cli-plugins/docker-compose', which is also in package docker-compose-plugin 2.39.1-1~ubuntu.24.04~noble
-dpkg-deb: error: paste subprocess was killed by signal (Broken pipe)
-Errors were encountered while processing:
- /var/cache/apt/archives/docker-compose-v2_2.37.1+ds1-0ubuntu2~24.04.1_amd64.deb
-needrestart is being skipped since dpkg has failed
-E: Sub-process /usr/bin/dpkg returned an error code (1)
-Already up to date.
-E: Sub-process /usr/bin/dpkg returned an error code (1)
-Installing system dependencies...
-
-WARNING: apt does not have a stable CLI interface. Use with caution in scripts.
-
-Already up to date.
-Hit:1 http://security.ubuntu.com/ubuntu noble-security InRelease
-Hit:2 https://download.docker.com/linux/ubuntu noble InRelease
-Get:3 https://nvidia.github.io/libnvidia-container/stable/deb/amd64  InRelease [1477 B]
-Hit:4 https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64  InRelease
-Hit:5 http://archive.ubuntu.com/ubuntu noble InRelease
-Hit:6 http://archive.ubuntu.com/ubuntu noble-updates InRelease
-Hit:7 http://archive.ubuntu.com/ubuntu noble-backports InRelease
-Installing system dependencies...
-
-WARNING: apt does not have a stable CLI interface. Use with caution in scripts.
-
-Fetched 1477 B in 1s (1495 B/s)
-Reading package lists...Hit:1 https://download.docker.com/linux/ubuntu noble InRelease
-Get:2 https://nvidia.github.io/libnvidia-container/stable/deb/amd64  InRelease [1477 B]
-Hit:3 https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64  InRelease
-Hit:4 http://archive.ubuntu.com/ubuntu noble InRelease
-Hit:5 http://security.ubuntu.com/ubuntu noble-security InRelease
-Hit:6 http://archive.ubuntu.com/ubuntu noble-updates InRelease
-Hit:7 http://archive.ubuntu.com/ubuntu noble-backports InRelease
-
-Building dependency tree...Fetched 1477 B in 1s (1587 B/s)
-Reading package lists...
-Reading state information...
-256 packages can be upgraded. Run 'apt list --upgradable' to see them.
-
-WARNING: apt does not have a stable CLI interface. Use with caution in scripts.
-
-Reading package lists...
-Building dependency tree...
-Reading state information...
-python3-venv is already the newest version (3.12.3-0ubuntu2).
-Recommended packages:
-  docker.io
-The following NEW packages will be installed:
-  docker-compose-v2
-0 upgraded, 1 newly installed, 0 to remove and 256 not upgraded.
-3 not fully installed or removed.
-debconf: unable to initialize frontend: Dialog
-debconf: (Dialog frontend will not work on a dumb terminal, an emacs shell buffer, or without a controlling terminal.)
-debconf: falling back to frontend: Readline
-debconf: unable to initialize frontend: Readline
-debconf: (This frontend requires a controlling tty.)
-debconf: falling back to frontend: Teletype
-dpkg-preconfigure: unable to re-open stdin: 
-Need to get 0 B/14.4 MB of archives.
-After this operation, 64.8 MB of additional disk space will be used.
-
-(Reading database ... Building dependency tree...(Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 99919 files and directories currently installed.)
-Preparing to unpack .../docker-compose-v2_2.37.1+ds1-0ubuntu2~24.04.1_amd64.deb ...
-Unpacking docker-compose-v2 (2.37.1+ds1-0ubuntu2~24.04.1) ...
-dpkg: error processing archive /var/cache/apt/archives/docker-compose-v2_2.37.1+ds1-0ubuntu2~24.04.1_amd64.deb (--unpack):
- trying to overwrite '/usr/libexec/docker/cli-plugins/docker-compose', which is also in package docker-compose-plugin 2.39.1-1~ubuntu.24.04~noble
-dpkg-deb: error: paste subprocess was killed by signal (Broken pipe)
-Errors were encountered while processing:
- /var/cache/apt/archives/docker-compose-v2_2.37.1+ds1-0ubuntu2~24.04.1_amd64.deb
-
-Reading state information...
-256 packages can be upgraded. Run 'apt list --upgradable' to see them.
-needrestart is being skipped since dpkg has failed
-
-WARNING: apt does not have a stable CLI interface. Use with caution in scripts.
-
-Reading package lists...
-Building dependency tree...
-Reading state information...
-python3-venv is already the newest version (3.12.3-0ubuntu2).
-Recommended packages:
-  docker.io
-The following NEW packages will be installed:
-  docker-compose-v2
-0 upgraded, 1 newly installed, 0 to remove and 256 not upgraded.
-3 not fully installed or removed.
-debconf: unable to initialize frontend: Dialog
-debconf: (Dialog frontend will not work on a dumb terminal, an emacs shell buffer, or without a controlling terminal.)
-debconf: falling back to frontend: Readline
-debconf: unable to initialize frontend: Readline
-debconf: (This frontend requires a controlling tty.)
-debconf: falling back to frontend: Teletype
-dpkg-preconfigure: unable to re-open stdin: 
-Need to get 0 B/14.4 MB of archives.
-After this operation, 64.8 MB of additional disk space will be used.
-(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 99919 files and directories currently installed.)
-Preparing to unpack .../docker-compose-v2_2.37.1+ds1-0ubuntu2~24.04.1_amd64.deb ...
-Unpacking docker-compose-v2 (2.37.1+ds1-0ubuntu2~24.04.1) ...
-dpkg: error processing archive /var/cache/apt/archives/docker-compose-v2_2.37.1+ds1-0ubuntu2~24.04.1_amd64.deb (--unpack):
- trying to overwrite '/usr/libexec/docker/cli-plugins/docker-compose', which is also in package docker-compose-plugin 2.39.1-1~ubuntu.24.04~noble
-dpkg-deb: error: paste subprocess was killed by signal (Broken pipe)
-Errors were encountered while processing:
- /var/cache/apt/archives/docker-compose-v2_2.37.1+ds1-0ubuntu2~24.04.1_amd64.deb
-needrestart is being skipped since dpkg has failed
-E: Sub-process /usr/bin/dpkg returned an error code (1)
-E: Sub-process /usr/bin/dpkg returned an error code (1)
-📊 Running benchmarks for 5 server-model combination(s) across 3 server(s)
-🚀 Parallel mode: Servers will run in parallel (max workers: 3)
-
-
-================================================================================
-Starting benchmarks for server: rtx4090_x_1
-================================================================================
-
-
-================================================================================
-Server: rtx4090_x_1 | Model: QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ
-================================================================================
-
-🚀 Starting benchmarks for model: QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ
-📡 Connecting to: riftuser@142.214.185.238 (rtx4090_x_1)
-📦 Setting up repository on remote server...
-
-================================================================================
-Starting benchmarks for server: rtx4090_x_2
-================================================================================
-
-
-================================================================================
-Server: rtx4090_x_2 | Model: QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ
-================================================================================
-
-🚀 Starting benchmarks for model: QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ
-📡 Connecting to: riftuser@142.214.185.150 (rtx4090_x_2)
-📦 Setting up repository on remote server...
-
-================================================================================
-Starting benchmarks for server: rtx4090_x_4
-================================================================================
-
-
-================================================================================
-Server: rtx4090_x_4 | Model: QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ
-================================================================================
-
-🚀 Starting benchmarks for model: QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ
-📡 Connecting to: riftuser@142.214.185.230 (rtx4090_x_4)
-📦 Setting up repository on remote server...
-✅ Repository ready on remote server
-🔧 Installing dependencies on remote server...
-✅ Repository ready on remote server
-🔧 Installing dependencies on remote server...
-✅ Repository ready on remote server
-🔧 Installing dependencies on remote server...
-❌ Failed to install dependencies: Command '['ssh', '-i', '/home/dikobraz/.ssh/id_ed25519', '-p', '22', '-o', 'StrictHostKeyChecking=no', 'riftuser@142.214.185.230', 'cd server-benchmark && ./setup.sh']' returned non-zero exit status 100.
-
-================================================================================
-Server: rtx4090_x_4 | Model: Qwen/Qwen2.5-72B-Instruct-AWQ
-================================================================================
-
-🚀 Starting benchmarks for model: Qwen/Qwen2.5-72B-Instruct-AWQ
-📡 Connecting to: riftuser@142.214.185.230 (rtx4090_x_4)
-📦 Setting up repository on remote server...
-❌ Failed to install dependencies: Command '['ssh', '-i', '/home/dikobraz/.ssh/id_ed25519', '-p', '22', '-o', 'StrictHostKeyChecking=no', 'riftuser@142.214.185.150', 'cd server-benchmark && ./setup.sh']' returned non-zero exit status 100.
-
-================================================================================
-Server: rtx4090_x_2 | Model: Qwen/Qwen2.5-72B-Instruct-AWQ
-================================================================================
-
-🚀 Starting benchmarks for model: Qwen/Qwen2.5-72B-Instruct-AWQ
-📡 Connecting to: riftuser@142.214.185.150 (rtx4090_x_2)
-📦 Setting up repository on remote server...
-✅ Repository ready on remote server
-🔧 Installing dependencies on remote server...
-❌ Failed to install dependencies: Command '['ssh', '-i', '/home/dikobraz/.ssh/id_ed25519', '-p', '22', '-o', 'StrictHostKeyChecking=no', 'riftuser@142.214.185.238', 'cd server-benchmark && ./setup.sh']' returned non-zero exit status 100.
-
-================================================================================
-Completed benchmarks for server: rtx4090_x_1
-================================================================================
-
-✅ Repository ready on remote server
-🔧 Installing dependencies on remote server...
-❌ Failed to install dependencies: Command '['ssh', '-i', '/home/dikobraz/.ssh/id_ed25519', '-p', '22', '-o', 'StrictHostKeyChecking=no', 'riftuser@142.214.185.230', 'cd server-benchmark && ./setup.sh']' returned non-zero exit status 100.
-
-================================================================================
-Completed benchmarks for server: rtx4090_x_4
-================================================================================
-
-❌ Failed to install dependencies: Command '['ssh', '-i', '/home/dikobraz/.ssh/id_ed25519', '-p', '22', '-o', 'StrictHostKeyChecking=no', 'riftuser@142.214.185.150', 'cd server-benchmark && ./setup.sh']' returned non-zero exit status 100.
-
-================================================================================
-Completed benchmarks for server: rtx4090_x_2
-================================================================================
-
-
-================================================================================
-📋 SUMMARY
-================================================================================
-
-✅ Successful: 0/5
-
-❌ Failed: 5/5
-   - rtx4090_x_1 × QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ
-   - rtx4090_x_4 × QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ
-   - rtx4090_x_4 × Qwen/Qwen2.5-72B-Instruct-AWQ
-   - rtx4090_x_2 × QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ
-   - rtx4090_x_2 × Qwen/Qwen2.5-72B-Instruct-AWQ
-
-🎉 All done!

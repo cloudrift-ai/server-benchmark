@@ -1,6 +1,0 @@
-Model: QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ
----------------------------------
-Downloading model: QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ...
-Model download complete! Saved to: /hf_models/QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ
-Download took 0.14 seconds.
-Average download speed: 913077.70 MiB/s

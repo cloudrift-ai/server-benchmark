@@ -34,7 +34,7 @@ sudo docker rm -f $CONTAINER_NAME 2>/dev/null || true
 
 # Start the vLLM container in the background
 echo "Starting vLLM container..."
-sudo -E docker run --rm --gpus all \
+sudo -E docker run --gpus all \
     -d \
     --name $CONTAINER_NAME \
     -v $HF_DIRECTORY:$HF_DIRECTORY \

@@ -11,6 +11,7 @@ import argparse
 import os
 import sys
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional, List, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -181,99 +182,158 @@ def run_benchmark(server: dict, model_name: str, config: dict) -> bool:
     random_input_len = benchmark_params.get('random_input_len', 1000)
     random_output_len = benchmark_params.get('random_output_len', 1000)
 
-    # Run the benchmark with environment variables
-    print("⏳ Running benchmark (this may take a while)...")
-    try:
-        ssh_key = expand_path(server['ssh_key'])
-        address = server['address']
-        port = server.get('port', 22)
-
-        # Build environment variables command
-        env_vars = (
-            f'MODEL_NAME="{model_name}" '
-            f'MAX_CONCURRENCY={max_concurrency} '
-            f'NUM_PROMPTS={num_prompts} '
-            f'RANDOM_INPUT_LEN={random_input_len} '
-            f'RANDOM_OUTPUT_LEN={random_output_len}'
-        )
-
-        ssh_cmd = [
-            'ssh',
-            '-i', ssh_key,
-            '-p', str(port),
-            '-o', 'StrictHostKeyChecking=no',
-            address,
-            f'cd server-benchmark && {env_vars} ./scripts/run_benchmarks.sh'
-        ]
-        subprocess.run(ssh_cmd, check=True)
-        print("✅ Benchmark completed successfully!")
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Benchmark failed: {e}")
-        return False
-
-
-def download_results(server: dict, model_name: str, config: dict) -> bool:
-    """Download benchmark results from the remote server. Returns True if successful."""
+    # Clean up old marker files
     ssh_key = expand_path(server['ssh_key'])
     address = server['address']
     port = server.get('port', 22)
-    results_file = config['benchmark']['results_file']
+
+    cleanup_cmd = [
+        'ssh',
+        '-i', ssh_key,
+        '-p', str(port),
+        '-o', 'StrictHostKeyChecking=no',
+        address,
+        'cd server-benchmark && rm -f *.marker'
+    ]
+    subprocess.run(cleanup_cmd, capture_output=True)
+
+    # Start the benchmark in background
+    print("⏳ Starting benchmark in background...")
+    env_vars = (
+        f'MODEL_NAME="{model_name}" '
+        f'MAX_CONCURRENCY={max_concurrency} '
+        f'NUM_PROMPTS={num_prompts} '
+        f'RANDOM_INPUT_LEN={random_input_len} '
+        f'RANDOM_OUTPUT_LEN={random_output_len}'
+    )
+
+    ssh_cmd = [
+        'ssh',
+        '-i', ssh_key,
+        '-p', str(port),
+        '-o', 'StrictHostKeyChecking=no',
+        address,
+        f'cd server-benchmark && nohup bash -c "{env_vars} ./scripts/run_benchmarks.sh" > benchmark.log 2>&1 &'
+    ]
+
+    try:
+        subprocess.run(ssh_cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Failed to start benchmark: {e}")
+        return False
+
+    # Monitor for marker files and download results as they become available
+    print("📊 Monitoring benchmark progress and downloading results as they complete...")
+
+    downloaded = {
+        'system_info': False,
+        'vllm': False,
+        'yabs': False
+    }
+
     system_info_file = config['benchmark'].get('system_info_file', 'system_info.txt')
+    results_file = config['benchmark']['results_file']
+
+    # Poll for marker files (check every 30 seconds, timeout after 2 hours)
+    max_wait = 7200  # 2 hours
+    check_interval = 30
+    elapsed = 0
+
+    while elapsed < max_wait:
+        # Check system info
+        if not downloaded['system_info'] and check_marker_exists(server, 'system_info_ready.marker'):
+            print("\n✅ System information ready!")
+            download_single_file(server, model_name, config, system_info_file, system_info_file)
+            downloaded['system_info'] = True
+
+        # Check vLLM benchmark
+        if not downloaded['vllm'] and check_marker_exists(server, 'vllm_benchmark_ready.marker'):
+            print("\n✅ vLLM benchmark completed!")
+            download_single_file(server, model_name, config, results_file, results_file)
+            downloaded['vllm'] = True
+
+        # Check YABS
+        if not downloaded['yabs'] and check_marker_exists(server, 'yabs_ready.marker'):
+            print("\n✅ YABS benchmark completed!")
+            download_single_file(server, model_name, config, 'yabs_results.txt', 'yabs_results.txt')
+            downloaded['yabs'] = True
+
+        # If all downloaded, we're done
+        if all(downloaded.values()):
+            print("\n🎉 All benchmark results downloaded successfully!")
+            return True
+
+        # Wait before next check
+        time.sleep(check_interval)
+        elapsed += check_interval
+
+        # Print progress
+        completed = sum(downloaded.values())
+        print(f"⏳ Progress: {completed}/3 results downloaded... (elapsed: {elapsed}s)")
+
+    print(f"\n⚠️  Timeout after {max_wait}s. Downloaded {sum(downloaded.values())}/3 results.")
+    return sum(downloaded.values()) >= 2  # Consider success if we got at least system info and vLLM
+
+
+def check_marker_exists(server: dict, marker_file: str) -> bool:
+    """Check if a marker file exists on the remote server."""
+    ssh_key = expand_path(server['ssh_key'])
+    address = server['address']
+    port = server.get('port', 22)
+
+    ssh_cmd = [
+        'ssh',
+        '-i', ssh_key,
+        '-p', str(port),
+        '-o', 'StrictHostKeyChecking=no',
+        address,
+        f'[ -f server-benchmark/{marker_file} ] && echo "EXISTS" || echo "NOT_FOUND"'
+    ]
+
+    try:
+        result = subprocess.run(ssh_cmd, capture_output=True, text=True, check=True)
+        return result.stdout.strip() == "EXISTS"
+    except subprocess.CalledProcessError:
+        return False
+
+
+def download_single_file(server: dict, model_name: str, config: dict, remote_file: str, local_prefix: str) -> bool:
+    """Download a single result file from remote server."""
+    ssh_key = expand_path(server['ssh_key'])
+    address = server['address']
+    port = server.get('port', 22)
     model_name_safe = model_name.replace('/', '_')
     server_name = server['name']
 
-    # Create local results directory (flat structure)
+    # Create local results directory
     local_results_dir = Path(expand_path(config['benchmark']['local_results_dir']))
     local_results_dir.mkdir(parents=True, exist_ok=True)
 
-    # Download benchmark results with prefix
-    prefixed_results_file = f"{server_name}_{model_name_safe}_{results_file}"
-    local_results_path = local_results_dir / prefixed_results_file
-    remote_results_path = f"server-benchmark/{results_file}"
+    # Build local and remote paths
+    local_file = f"{server_name}_{model_name_safe}_{local_prefix}"
+    local_path = local_results_dir / local_file
+    remote_path = f"server-benchmark/{remote_file}"
 
-    print(f"📥 Downloading benchmark results to: {local_results_path}")
+    print(f"📥 Downloading {local_prefix} to: {local_path}")
 
     scp_cmd = [
         'scp',
         '-i', ssh_key,
         '-P', str(port),
         '-o', 'StrictHostKeyChecking=no',
-        f'{address}:{remote_results_path}',
-        str(local_results_path)
+        f'{address}:{remote_path}',
+        str(local_path)
     ]
 
     try:
         subprocess.run(scp_cmd, check=True)
-        print(f"✅ Benchmark results saved to: {local_results_path}")
+        print(f"✅ {local_prefix} saved")
+        return True
     except subprocess.CalledProcessError as e:
-        print(f"❌ Failed to download benchmark results: {e}")
+        print(f"⚠️  Warning: Failed to download {local_prefix}: {e}")
         return False
 
-    # Download system info with prefix
-    prefixed_system_info_file = f"{server_name}_{model_name_safe}_{system_info_file}"
-    local_system_info_path = local_results_dir / prefixed_system_info_file
-    remote_system_info_path = f"server-benchmark/{system_info_file}"
 
-    print(f"📥 Downloading system info to: {local_system_info_path}")
-
-    scp_cmd = [
-        'scp',
-        '-i', ssh_key,
-        '-P', str(port),
-        '-o', 'StrictHostKeyChecking=no',
-        f'{address}:{remote_system_info_path}',
-        str(local_system_info_path)
-    ]
-
-    try:
-        subprocess.run(scp_cmd, check=True)
-        print(f"✅ System info saved to: {local_system_info_path}")
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"⚠️  Warning: Failed to download system info: {e}")
-        # Don't fail the entire operation if system info download fails
-        return True
 
 
 def run_benchmark_combination(server: dict, model: str, config: dict, force: bool = False) -> tuple:
@@ -293,10 +353,8 @@ def run_benchmark_combination(server: dict, model: str, config: dict, force: boo
         print("   Skipping...\n")
         return (server_name, model, True)
 
-    # Run benchmark and download results
+    # Run benchmark (downloads results incrementally)
     success = run_benchmark(server, model, config)
-    if success:
-        success = download_results(server, model, config)
 
     return (server_name, model, success)
 

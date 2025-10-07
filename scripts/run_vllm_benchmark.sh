@@ -52,20 +52,26 @@ sudo -E docker run --rm --gpus all \
 # Wait until model is loaded and server is ready
 echo "Waiting for vLLM server to start and model to load..."
 
-RETRIES=11
-for i in $(seq 1 $RETRIES); do
-    sleep $((2 ** i))
+# Check every 10 seconds for up to 10 minutes (60 checks)
+MAX_WAIT_TIME=600  # 10 minutes
+CHECK_INTERVAL=10  # 10 seconds
+MAX_CHECKS=$((MAX_WAIT_TIME / CHECK_INTERVAL))
+
+for i in $(seq 1 $MAX_CHECKS); do
+    sleep $CHECK_INTERVAL
     if sudo -E docker logs $CONTAINER_NAME 2>&1 | grep -q "$READY_STRING"; then
         echo "vLLM server is ready!"
         break
     fi
-    echo "Waiting... ($i/$RETRIES)"
+    elapsed=$((i * CHECK_INTERVAL))
+    echo "Waiting... (${elapsed}s / ${MAX_WAIT_TIME}s)"
 done
 
 # Exit if timeout exceeded
-if [ $i -eq $RETRIES ]; then
-    echo "❌ Timeout: Server did not become ready in time."
-    sudo docker logs $CONTAINER_NAME
+if [ $i -eq $MAX_CHECKS ]; then
+    echo "❌ Timeout: Server did not become ready in ${MAX_WAIT_TIME} seconds."
+    echo "Last 50 lines of container logs:"
+    sudo docker logs $CONTAINER_NAME 2>&1 | tail -50
     exit 1
 fi
 

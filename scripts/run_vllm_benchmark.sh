@@ -28,9 +28,13 @@ sudo -E ./venv/bin/python $SCRIPT_DIR/download_model.py --model-name $MODEL_NAME
 
 MODEL_PATH="$HF_DIRECTORY/$MODEL_NAME"
 
-# Clean up any existing container with the same name
+# Clean up any existing containers
 echo "Cleaning up any existing containers..."
+# Stop and remove container by name if it exists
 sudo docker rm -f $CONTAINER_NAME 2>/dev/null || true
+# Also stop any vLLM containers that might be running
+sudo docker ps -q --filter "ancestor=vllm/vllm-openai:latest" | xargs -r sudo docker stop
+sudo docker ps -aq --filter "ancestor=vllm/vllm-openai:latest" | xargs -r sudo docker rm
 
 # Start the vLLM container in the background
 echo "Starting vLLM container..."

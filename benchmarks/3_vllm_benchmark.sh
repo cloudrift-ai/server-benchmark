@@ -18,12 +18,9 @@ HF_DIRECTORY="${HF_DIRECTORY:-/hf_models}"
 set +o allexport
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
-echo "Model: $MODEL_NAME" > $BENCHMARK_RESULTS_FILE
-echo "---------------------------------" >> $BENCHMARK_RESULTS_FILE
-
 # Pre-download the model
-echo "Pre-downloading model from Hugging Face..." | tee -a $BENCHMARK_RESULTS_FILE
-sudo -E ./venv/bin/python utils/download_model.py --model-name $MODEL_NAME --hg-dir $HF_DIRECTORY/$MODEL_NAME | tee -a $BENCHMARK_RESULTS_FILE
+echo "Pre-downloading model from Hugging Face..."
+sudo -E ./venv/bin/python utils/download_model.py --model-name $MODEL_NAME --hg-dir $HF_DIRECTORY/$MODEL_NAME
 
 MODEL_PATH="$HF_DIRECTORY/$MODEL_NAME"
 
@@ -31,13 +28,13 @@ MODEL_PATH="$HF_DIRECTORY/$MODEL_NAME"
 GPUS_PER_INSTANCE=$TENSOR_PARALLEL_SIZE
 TOTAL_GPUS=$((GPUS_PER_INSTANCE * NUM_INSTANCES))
 
-echo "" | tee -a $BENCHMARK_RESULTS_FILE
-echo "Configuration:" | tee -a $BENCHMARK_RESULTS_FILE
-echo "  Instances: $NUM_INSTANCES" | tee -a $BENCHMARK_RESULTS_FILE
-echo "  Tensor Parallel Size: $TENSOR_PARALLEL_SIZE" | tee -a $BENCHMARK_RESULTS_FILE
-echo "  GPUs per instance: $GPUS_PER_INSTANCE" | tee -a $BENCHMARK_RESULTS_FILE
-echo "  Total GPUs used: $TOTAL_GPUS" | tee -a $BENCHMARK_RESULTS_FILE
-echo "" | tee -a $BENCHMARK_RESULTS_FILE
+echo ""
+echo "Configuration:"
+echo "  Instances: $NUM_INSTANCES"
+echo "  Tensor Parallel Size: $TENSOR_PARALLEL_SIZE"
+echo "  GPUs per instance: $GPUS_PER_INSTANCE"
+echo "  Total GPUs used: $TOTAL_GPUS"
+echo ""
 
 # Generate docker-compose configuration
 COMPOSE_FILE="docker-compose.vllm.yml"
@@ -139,16 +136,16 @@ sudo -E docker exec ${CONTAINER_NAME}_0 pip install pandas datasets >/dev/null 2
 # Determine benchmark endpoint
 if [ $NUM_INSTANCES -gt 1 ]; then
     BENCHMARK_ENDPOINT="http://localhost:8080"
-    echo "" | tee -a $BENCHMARK_RESULTS_FILE
-    echo "Using nginx load balancer at $BENCHMARK_ENDPOINT" | tee -a $BENCHMARK_RESULTS_FILE
+    echo ""
+    echo "Using nginx load balancer at $BENCHMARK_ENDPOINT"
 else
     BENCHMARK_ENDPOINT="http://localhost:8000"
 fi
 
 # Run benchmark
-echo "" | tee -a $BENCHMARK_RESULTS_FILE
-echo "Running benchmark against: $BENCHMARK_ENDPOINT" | tee -a $BENCHMARK_RESULTS_FILE
-echo "---------------------------------" | tee -a $BENCHMARK_RESULTS_FILE
+echo ""
+echo "Running benchmark against: $BENCHMARK_ENDPOINT"
+echo "---------------------------------"
 
 BENCHMARK_CMD="vllm bench serve \
     --model $MODEL_NAME \
@@ -163,8 +160,8 @@ BENCHMARK_CMD="vllm bench serve \
     --percentile-metrics ttft,tpot,itl,e2el \
     --base-url $BENCHMARK_ENDPOINT"
 
-echo "Running benchmark..." | tee -a $BENCHMARK_RESULTS_FILE
-sudo -E docker exec ${CONTAINER_NAME}_0 bash -c "$BENCHMARK_CMD" | awk '/^============/ {found=1} found' | tee -a $BENCHMARK_RESULTS_FILE
+echo "Running benchmark..."
+sudo -E docker exec ${CONTAINER_NAME}_0 bash -c "$BENCHMARK_CMD" | awk '/^============/ {found=1} found' > $BENCHMARK_RESULTS_FILE
 
 # Stop all services
 echo ""

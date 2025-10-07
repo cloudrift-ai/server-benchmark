@@ -88,6 +88,13 @@ models:
 - And so on...
 
 **Benchmark Behavior:**
-- The benchmark splits total prompts evenly across instances
-- All instances run benchmarks concurrently
-- Results are aggregated to show total throughput and average latencies
+- For multi-instance setups, an nginx load balancer is automatically deployed
+- Nginx uses round-robin to distribute requests across all instances
+- All instances process requests concurrently from a single benchmark run
+- Results reflect true aggregate throughput of the multi-instance setup
+
+**Implementation Details:**
+- Uses Docker Compose for orchestrating multiple vLLM containers + nginx
+- Nginx container provides production-grade load balancing
+- GPU assignment handled via Docker Compose device reservations
+- Health checks ensure all instances are ready before benchmarking begins

@@ -27,7 +27,8 @@ servers:
     port: 22
     models:
       - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-        tensor_parallel_size: 1  # 30B model fits on single GPU
+        tensor_parallel_size: 1  # Each instance uses 1 GPU
+        num_instances: 2         # Run 2 instances for 2x throughput
       - name: "Qwen/Qwen2.5-72B-Instruct-AWQ"
         tensor_parallel_size: 2  # 72B model needs multi-GPU
 
@@ -37,10 +38,11 @@ servers:
     port: 22
     models:
       - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-        tensor_parallel_size: 1  # 30B model fits on single GPU
+        tensor_parallel_size: 1  # Each instance uses 1 GPU
+        num_instances: 4         # Run 4 instances for 4x throughput
       - name: "Qwen/Qwen2.5-72B-Instruct-AWQ"
-        tensor_parallel_size: 2  # 72B model uses 2 GPUs
-        num_instances: 2  # Run 2 instances (GPU 0-1, GPU 2-3)
+        tensor_parallel_size: 2  # 72B model uses 2 GPUs per instance
+        num_instances: 2         # Run 2 instances (GPU 0-1, GPU 2-3)
 
   - name: "rtx5090_x_1"
     address: "riftuser@217.138.104.159"
@@ -57,6 +59,7 @@ servers:
     models:
       - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
         tensor_parallel_size: 1
+        num_instances: 2
       - name: "Qwen/Qwen2.5-72B-Instruct-AWQ"
         tensor_parallel_size: 2
 
@@ -67,6 +70,7 @@ servers:
     models:
       - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
         tensor_parallel_size: 1
+        num_instances: 4
       - name: "Qwen/Qwen2.5-72B-Instruct-AWQ"
         tensor_parallel_size: 2
         num_instances: 2

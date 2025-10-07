@@ -193,7 +193,9 @@ def main():
         with open(args.nginx_conf_output, 'w') as f:
             f.write(nginx_conf_content)
 
-        nginx_conf_path = args.nginx_conf_output
+        # Convert to absolute path for Docker Compose
+        import os
+        nginx_conf_path = os.path.abspath(args.nginx_conf_output)
     else:
         nginx_conf_path = None
 

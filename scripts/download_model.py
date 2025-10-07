@@ -38,7 +38,6 @@ def download_and_track(repo_id, local_dir=None):
     download_path = snapshot_download(
         repo_id=repo_id,
         local_dir=local_dir,
-        force_download=True,
         # You can add a progress_callback to snapshot_download for more granular control,
         # but for simplicity, we'll track the overall download time for average speed.
     )

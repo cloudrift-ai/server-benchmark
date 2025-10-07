@@ -12,9 +12,12 @@ cd server-benchmark
 
 Install dependencies:
 ```bash
-./scripts/setup.sh
+./setup.sh
 ```
-Run the benchmark
+Run individual benchmarks:
 ```bash
-./scripts/run_benchmarks.sh
+./benchmarks/run_system_info.sh
+./benchmarks/run_hf_download.sh
+./benchmarks/run_vllm_benchmark.sh
+./benchmarks/run_yabs.sh
 ```

@@ -13,7 +13,7 @@ BENCHMARK_CMD="vllm bench serve --model $MODEL_NAME --dataset-name random --rand
 READY_STRING="Application startup complete."
 GPU_NUMBER=$( nvidia-smi --list-gpus | wc -l )
 
-BENCHMARK_RESULTS_FILE="${BENCHMARK_RESULTS_FILE:-benchmark_results.txt}"
+BENCHMARK_RESULTS_FILE="${BENCHMARK_RESULTS_FILE:-vllm_results.txt}"
 HF_DIRECTORY="${HF_DIRECTORY:-/hf_models}"
 # Disable automatic export
 set +o allexport

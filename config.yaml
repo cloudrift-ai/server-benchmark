@@ -2,10 +2,7 @@
 
 # Global benchmark settings
 benchmark:
-  results_file: "benchmark_results.txt"  # Name of the results file on remote server
-  system_info_file: "system_info.txt"    # Name of the system info file on remote server
   local_results_dir: "results"           # Local directory to store results
-  skip_if_exists: true                   # Skip benchmark if results already exist locally
 
 # Optional: Override benchmark parameters
 # benchmark_params:
@@ -17,12 +14,28 @@ benchmark:
 # Define servers with their models to benchmark
 servers:
   - name: "rtx4090_x_1"
-    address: "riftuser@142.214.185.238"  # SSH address (user@hostname or user@ip)
-    ssh_key: "~/.ssh/id_ed25519"         # Path to SSH private key
-    port: 22                              # SSH port (default: 22)
-    models:                               # List of models to benchmark on this server
+    address: "riftuser@142.214.185.238"
+    ssh_key: "~/.ssh/id_ed25519"
+    port: 22
+    models:
       - "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"  # 4-bit quantized, similar to Q4_K_M
 
+  - name: "rtx4090_x_2"
+    address: "riftuser@142.214.185.150"
+    ssh_key: "~/.ssh/id_ed25519"
+    port: 22
+    models:
+      - "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
+
+  - name: "rtx4090_x_4"
+    address: "riftuser@142.214.185.230"
+    ssh_key: "~/.ssh/id_ed25519"
+    port: 22
+    models:
+      - "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
+
 # Results will be saved with flat structure using prefixes:
-#   {local_results_dir}/{server_name}_{model_name}_{results_file}
-#   {local_results_dir}/{server_name}_{model_name}_{system_info_file}
+#   {local_results_dir}/{server_name}_{model_name}_system_info.txt
+#   {local_results_dir}/{server_name}_{model_name}_hf_download_results.txt
+#   {local_results_dir}/{server_name}_{model_name}_vllm_results.txt
+#   {local_results_dir}/{server_name}_{model_name}_yabs_results.txt

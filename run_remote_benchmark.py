@@ -45,7 +45,7 @@ def validate_config(config: dict) -> None:
         sys.exit(1)
 
     # Check benchmark fields
-    required_benchmark_fields = ['results_file', 'local_results_dir']
+    required_benchmark_fields = ['local_results_dir']
     for field in required_benchmark_fields:
         if field not in config['benchmark']:
             print(f"❌ Error: Missing '{field}' in 'benchmark' section.")
@@ -70,15 +70,13 @@ def expand_path(path: str) -> str:
     return os.path.expanduser(os.path.expandvars(path))
 
 
-def check_results_exist(server: dict, model_name: str, config: dict) -> bool:
-    """Check if benchmark results already exist locally."""
+def check_result_file_exists(server: dict, model_name: str, config: dict, result_file: str) -> bool:
+    """Check if a specific result file already exists locally."""
     local_results_dir = Path(expand_path(config['benchmark']['local_results_dir']))
-    results_file = config['benchmark']['results_file']
     model_name_safe = model_name.replace('/', '_')
     server_name = server['name']
 
-    # Flat structure with prefix: {server_name}_{model_name}_{results_file}
-    prefixed_results_file = f"{server_name}_{model_name_safe}_{results_file}"
+    prefixed_results_file = f"{server_name}_{model_name_safe}_{result_file}"
     local_results_path = local_results_dir / prefixed_results_file
 
     return local_results_path.exists()
@@ -147,7 +145,7 @@ def setup_remote_repo(server: dict) -> bool:
 
     # Run setup script to install dependencies
     print("🔧 Installing dependencies on remote server...")
-    setup_script_cmd = 'cd server-benchmark && ./scripts/setup.sh'
+    setup_script_cmd = 'cd server-benchmark && ./setup.sh'
 
     try:
         ssh_cmd = [
@@ -166,14 +164,32 @@ def setup_remote_repo(server: dict) -> bool:
         return False
 
 
-def run_benchmark(server: dict, model_name: str, config: dict) -> bool:
-    """Run the benchmark on the remote server. Returns True if successful, False otherwise."""
-    print(f"🚀 Starting benchmark for model: {model_name}")
-    print(f"📡 Connecting to: {server['address']} ({server['name']})")
+def run_benchmark_step(server: dict, model_name: str, config: dict, step_name: str, script_name: str, result_file: str, force: bool = False) -> bool:
+    """Run a single benchmark step if result doesn't exist, then download the result.
 
-    # Setup repository on remote server
-    if not setup_remote_repo(server):
-        return False
+    Args:
+        server: Server configuration dict
+        model_name: Model name for environment variables
+        config: Full config dict
+        step_name: Display name (e.g., "System Info", "HF Download")
+        script_name: Shell script to run (e.g., "run_system_info.sh")
+        result_file: Result file to download (e.g., "system_info.txt")
+        force: Force re-run even if result exists
+
+    Returns:
+        True if successful (either skipped or downloaded), False on failure
+    """
+    # Check if result already exists
+    if not force and check_result_file_exists(server, model_name, config, result_file):
+        print(f"⏭️  {step_name} result already exists, skipping...")
+        return True
+
+    # Run the benchmark step
+    print(f"🚀 Running {step_name}...")
+
+    ssh_key = expand_path(server['ssh_key'])
+    address = server['address']
+    port = server.get('port', 22)
 
     # Get benchmark parameters from config (if any)
     benchmark_params = config.get('benchmark_params', {})
@@ -182,23 +198,6 @@ def run_benchmark(server: dict, model_name: str, config: dict) -> bool:
     random_input_len = benchmark_params.get('random_input_len', 1000)
     random_output_len = benchmark_params.get('random_output_len', 1000)
 
-    # Clean up old marker files
-    ssh_key = expand_path(server['ssh_key'])
-    address = server['address']
-    port = server.get('port', 22)
-
-    cleanup_cmd = [
-        'ssh',
-        '-i', ssh_key,
-        '-p', str(port),
-        '-o', 'StrictHostKeyChecking=no',
-        address,
-        'cd server-benchmark && rm -f *.marker'
-    ]
-    subprocess.run(cleanup_cmd, capture_output=True)
-
-    # Start the benchmark in background
-    print("⏳ Starting benchmark in background...")
     env_vars = (
         f'MODEL_NAME="{model_name}" '
         f'MAX_CONCURRENCY={max_concurrency} '
@@ -213,88 +212,59 @@ def run_benchmark(server: dict, model_name: str, config: dict) -> bool:
         '-p', str(port),
         '-o', 'StrictHostKeyChecking=no',
         address,
-        f'cd server-benchmark && nohup bash -c "{env_vars} ./scripts/run_benchmarks.sh" > benchmark.log 2>&1 &'
+        f'cd server-benchmark && {env_vars} ./benchmarks/{script_name}'
     ]
 
     try:
         subprocess.run(ssh_cmd, check=True)
     except subprocess.CalledProcessError as e:
-        print(f"❌ Failed to start benchmark: {e}")
+        print(f"❌ Failed to run {step_name}: {e}")
         return False
 
-    # Monitor for marker files and download results as they become available
-    print("📊 Monitoring benchmark progress and downloading results as they complete...")
+    # Download the result file
+    print(f"📥 Downloading {step_name} results...")
+    success = download_single_file(server, model_name, config, result_file, result_file)
 
-    downloaded = {
-        'system_info': False,
-        'vllm': False,
-        'yabs': False
-    }
+    if success:
+        print(f"✅ {step_name} completed")
+    else:
+        print(f"⚠️  {step_name} completed but download failed")
 
-    system_info_file = config['benchmark'].get('system_info_file', 'system_info.txt')
-    results_file = config['benchmark']['results_file']
-
-    # Poll for marker files (check every 30 seconds, timeout after 2 hours)
-    max_wait = 7200  # 2 hours
-    check_interval = 30
-    elapsed = 0
-
-    while elapsed < max_wait:
-        # Check system info
-        if not downloaded['system_info'] and check_marker_exists(server, 'system_info_ready.marker'):
-            print("\n✅ System information ready!")
-            download_single_file(server, model_name, config, system_info_file, system_info_file)
-            downloaded['system_info'] = True
-
-        # Check vLLM benchmark
-        if not downloaded['vllm'] and check_marker_exists(server, 'vllm_benchmark_ready.marker'):
-            print("\n✅ vLLM benchmark completed!")
-            download_single_file(server, model_name, config, results_file, results_file)
-            downloaded['vllm'] = True
-
-        # Check YABS
-        if not downloaded['yabs'] and check_marker_exists(server, 'yabs_ready.marker'):
-            print("\n✅ YABS benchmark completed!")
-            download_single_file(server, model_name, config, 'yabs_results.txt', 'yabs_results.txt')
-            downloaded['yabs'] = True
-
-        # If all downloaded, we're done
-        if all(downloaded.values()):
-            print("\n🎉 All benchmark results downloaded successfully!")
-            return True
-
-        # Wait before next check
-        time.sleep(check_interval)
-        elapsed += check_interval
-
-        # Print progress
-        completed = sum(downloaded.values())
-        print(f"⏳ Progress: {completed}/3 results downloaded... (elapsed: {elapsed}s)")
-
-    print(f"\n⚠️  Timeout after {max_wait}s. Downloaded {sum(downloaded.values())}/3 results.")
-    return sum(downloaded.values()) >= 2  # Consider success if we got at least system info and vLLM
+    return success
 
 
-def check_marker_exists(server: dict, marker_file: str) -> bool:
-    """Check if a marker file exists on the remote server."""
-    ssh_key = expand_path(server['ssh_key'])
-    address = server['address']
-    port = server.get('port', 22)
+def run_benchmark(server: dict, model_name: str, config: dict, force: bool = False) -> bool:
+    """Run all benchmark steps sequentially. Returns True if successful, False otherwise."""
+    print(f"🚀 Starting benchmarks for model: {model_name}")
+    print(f"📡 Connecting to: {server['address']} ({server['name']})")
 
-    ssh_cmd = [
-        'ssh',
-        '-i', ssh_key,
-        '-p', str(port),
-        '-o', 'StrictHostKeyChecking=no',
-        address,
-        f'[ -f server-benchmark/{marker_file} ] && echo "EXISTS" || echo "NOT_FOUND"'
+    # Setup repository on remote server
+    if not setup_remote_repo(server):
+        return False
+
+    # Run each benchmark step sequentially
+    steps = [
+        ("System Info", "run_system_info.sh", "system_info.txt"),
+        ("HF Download", "run_hf_download.sh", "hf_download_results.txt"),
+        ("vLLM Benchmark", "run_vllm_benchmark.sh", "vllm_results.txt"),
+        ("YABS Benchmark", "run_yabs.sh", "yabs_results.txt"),
     ]
 
-    try:
-        result = subprocess.run(ssh_cmd, capture_output=True, text=True, check=True)
-        return result.stdout.strip() == "EXISTS"
-    except subprocess.CalledProcessError:
-        return False
+    all_success = True
+    for step_name, script_name, result_file in steps:
+        print(f"\n{'─'*60}")
+        success = run_benchmark_step(server, model_name, config, step_name, script_name, result_file, force)
+        if not success:
+            print(f"⚠️  Warning: {step_name} failed")
+            all_success = False
+        print(f"{'─'*60}")
+
+    if all_success:
+        print("\n🎉 All benchmark steps completed successfully!")
+    else:
+        print("\n⚠️  Some benchmark steps failed")
+
+    return all_success
 
 
 def download_single_file(server: dict, model_name: str, config: dict, remote_file: str, local_prefix: str) -> bool:
@@ -339,22 +309,9 @@ def download_single_file(server: dict, model_name: str, config: dict, remote_fil
 def run_benchmark_combination(server: dict, model: str, config: dict, force: bool = False) -> tuple:
     """Run a single server-model combination benchmark. Returns (server_name, model, success)."""
     server_name = server['name']
-    skip_if_exists = config['benchmark'].get('skip_if_exists', True)
 
-    # Check if results already exist
-    if skip_if_exists and not force and check_results_exist(server, model, config):
-        local_results_dir = Path(expand_path(config['benchmark']['local_results_dir']))
-        results_file = config['benchmark']['results_file']
-        model_name_safe = model.replace('/', '_')
-        prefixed_results_file = f"{server_name}_{model_name_safe}_{results_file}"
-        local_results_path = local_results_dir / prefixed_results_file
-
-        print(f"⏭️  Benchmark results already exist: {local_results_path}")
-        print("   Skipping...\n")
-        return (server_name, model, True)
-
-    # Run benchmark (downloads results incrementally)
-    success = run_benchmark(server, model, config)
+    # Run benchmark (with per-step skip logic)
+    success = run_benchmark(server, model, config, force)
 
     return (server_name, model, success)
 

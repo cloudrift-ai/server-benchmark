@@ -1,0 +1,36 @@
+# Server Benchmark Configuration
+
+# Global benchmark settings
+benchmark:
+  results_file: "benchmark_results.txt"  # Name of the results file on remote server
+  system_info_file: "system_info.txt"    # Name of the system info file on remote server
+  local_results_dir: "results"           # Local directory to store results
+  skip_if_exists: true                   # Skip benchmark if results already exist locally
+
+# Optional: Override benchmark parameters
+# benchmark_params:
+#   max_concurrency: 200
+#   num_prompts: 1000
+#   random_input_len: 1000
+#   random_output_len: 1000
+
+# Define servers with their models to benchmark
+servers:
+  - name: "server1"
+    address: "user@example.com"  # SSH address (user@hostname or user@ip)
+    ssh_key: "~/.ssh/id_rsa"     # Path to SSH private key
+    port: 22                      # SSH port (default: 22)
+    models:                       # List of models to benchmark on this server
+      - "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+      - "meta-llama/Llama-3.1-8B-Instruct"
+
+  - name: "server2"
+    address: "user@example2.com"
+    ssh_key: "~/.ssh/id_rsa"
+    port: 22
+    models:
+      - "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+
+# Results will be saved with flat structure using prefixes:
+#   {local_results_dir}/{server_name}_{model_name}_{results_file}
+#   {local_results_dir}/{server_name}_{model_name}_{system_info_file}

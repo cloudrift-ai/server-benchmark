@@ -18,23 +18,29 @@ servers:
     ssh_key: "~/.ssh/id_ed25519"
     port: 22
     models:
-      - "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"  # 4-bit quantized, similar to Q4_K_M
+      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"  # 4-bit quantized, similar to Q4_K_M
+        tensor_parallel_size: 1
 
   - name: "rtx4090_x_2"
     address: "riftuser@142.214.185.150"
     ssh_key: "~/.ssh/id_ed25519"
     port: 22
     models:
-      - "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-      - "Qwen/Qwen2.5-72B-Instruct-AWQ"
+      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
+        tensor_parallel_size: 1  # 30B model fits on single GPU
+      - name: "Qwen/Qwen2.5-72B-Instruct-AWQ"
+        tensor_parallel_size: 2  # 72B model needs multi-GPU
 
   - name: "rtx4090_x_4"
     address: "riftuser@142.214.185.230"
     ssh_key: "~/.ssh/id_ed25519"
     port: 22
     models:
-      - "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-      - "Qwen/Qwen2.5-72B-Instruct-AWQ"
+      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
+        tensor_parallel_size: 1  # 30B model fits on single GPU
+      - name: "Qwen/Qwen2.5-72B-Instruct-AWQ"
+        tensor_parallel_size: 2  # 72B model uses 2 GPUs
+        num_instances: 2  # Run 2 instances (GPU 0-1, GPU 2-3)
 
 
 # Results will be saved with flat structure using prefixes:

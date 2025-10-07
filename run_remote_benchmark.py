@@ -168,12 +168,12 @@ def setup_remote_repo(server: dict) -> bool:
         return False
 
 
-def run_benchmark_step(server: dict, model_name: str, config: dict, step_name: str, script_name: str, result_file: str, force: bool = False) -> bool:
+def run_benchmark_step(server: dict, model_config: dict, config: dict, step_name: str, script_name: str, result_file: str, force: bool = False) -> bool:
     """Run a single benchmark step if result doesn't exist, then download the result.
 
     Args:
         server: Server configuration dict
-        model_name: Model name for environment variables
+        model_config: Model configuration dict with 'name' and optional 'tensor_parallel_size'
         config: Full config dict
         step_name: Display name (e.g., "System Info", "HF Download")
         script_name: Shell script to run (e.g., "run_system_info.sh")
@@ -183,6 +183,8 @@ def run_benchmark_step(server: dict, model_name: str, config: dict, step_name: s
     Returns:
         True if successful (either skipped or downloaded), False on failure
     """
+    model_name = model_config['name']
+
     # Check if result already exists
     if not force and check_result_file_exists(server, model_name, config, result_file):
         print(f"⏭️  {step_name} result already exists, skipping...")
@@ -202,8 +204,14 @@ def run_benchmark_step(server: dict, model_name: str, config: dict, step_name: s
     random_input_len = benchmark_params.get('random_input_len', 1000)
     random_output_len = benchmark_params.get('random_output_len', 1000)
 
+    # Get tensor_parallel_size from model config (default to 1 if not specified)
+    tensor_parallel_size = model_config.get('tensor_parallel_size', 1)
+    num_instances = model_config.get('num_instances', 1)
+
     env_vars = (
         f'MODEL_NAME="{model_name}" '
+        f'TENSOR_PARALLEL_SIZE={tensor_parallel_size} '
+        f'NUM_INSTANCES={num_instances} '
         f'MAX_CONCURRENCY={max_concurrency} '
         f'NUM_PROMPTS={num_prompts} '
         f'RANDOM_INPUT_LEN={random_input_len} '
@@ -308,8 +316,9 @@ def discover_benchmarks(server: dict) -> List[str]:
         return []
 
 
-def run_benchmark(server: dict, model_name: str, config: dict, force: bool = False) -> bool:
+def run_benchmark(server: dict, model_config: dict, config: dict, force: bool = False) -> bool:
     """Run all benchmark steps sequentially. Returns True if successful, False otherwise."""
+    model_name = model_config['name']
     print(f"🚀 Starting benchmarks for model: {model_name}")
     print(f"📡 Connecting to: {server['address']} ({server['name']})")
 
@@ -338,7 +347,7 @@ def run_benchmark(server: dict, model_name: str, config: dict, force: bool = Fal
         result_file = get_benchmark_result_file(benchmark_name)
 
         print(f"\n{'─'*60}")
-        success = run_benchmark_step(server, model_name, config, display_name, script_name, result_file, force)
+        success = run_benchmark_step(server, model_config, config, display_name, script_name, result_file, force)
         if not success:
             print(f"⚠️  Warning: {display_name} failed")
             all_success = False
@@ -391,18 +400,41 @@ def download_single_file(server: dict, model_name: str, config: dict, remote_fil
 
 
 
-def run_benchmark_combination(server: dict, model: str, config: dict, force: bool = False) -> tuple:
-    """Run a single server-model combination benchmark. Returns (server_name, model, success)."""
+def normalize_model_config(model) -> dict:
+    """Normalize model configuration to dict format.
+
+    Args:
+        model: Either a string (model name) or dict (model config)
+
+    Returns:
+        Dict with 'name' and optional 'tensor_parallel_size'
+    """
+    if isinstance(model, str):
+        return {'name': model, 'tensor_parallel_size': 1}
+    elif isinstance(model, dict):
+        if 'name' not in model:
+            raise ValueError(f"Model config must have 'name' field: {model}")
+        # Set default tensor_parallel_size if not specified
+        if 'tensor_parallel_size' not in model:
+            model['tensor_parallel_size'] = 1
+        return model
+    else:
+        raise ValueError(f"Model must be string or dict, got: {type(model)}")
+
+
+def run_benchmark_combination(server: dict, model_config: dict, config: dict, force: bool = False) -> tuple:
+    """Run a single server-model combination benchmark. Returns (server_name, model_name, success)."""
     server_name = server['name']
+    model_name = model_config['name']
 
     # Run benchmark (with per-step skip logic)
-    success = run_benchmark(server, model, config, force)
+    success = run_benchmark(server, model_config, config, force)
 
-    return (server_name, model, success)
+    return (server_name, model_name, success)
 
 
-def run_server_benchmarks(server: dict, models: List[str], config: dict, force: bool = False) -> List[tuple]:
-    """Run all benchmarks for a single server sequentially. Returns list of (server_name, model, success)."""
+def run_server_benchmarks(server: dict, models: List, config: dict, force: bool = False) -> List[tuple]:
+    """Run all benchmarks for a single server sequentially. Returns list of (server_name, model_name, success)."""
     results = []
     server_name = server['name']
 
@@ -411,11 +443,14 @@ def run_server_benchmarks(server: dict, models: List[str], config: dict, force: 
     print(f"{'='*80}\n")
 
     for model in models:
+        model_config = normalize_model_config(model)
+        model_name = model_config['name']
+
         print(f"\n{'='*80}")
-        print(f"Server: {server_name} | Model: {model}")
+        print(f"Server: {server_name} | Model: {model_name}")
         print(f"{'='*80}\n")
 
-        result = run_benchmark_combination(server, model, config, force)
+        result = run_benchmark_combination(server, model_config, config, force)
         results.append(result)
 
     print(f"\n{'='*80}")
@@ -483,10 +518,18 @@ def main():
 
         # Filter models if specified
         if args.model:
-            models = [m for m in models if m == args.model]
-            if not models:
+            # Handle both string and dict model formats
+            filtered_models = []
+            for m in models:
+                model_name = m if isinstance(m, str) else m.get('name')
+                if model_name == args.model:
+                    filtered_models.append(m)
+
+            if not filtered_models:
                 print(f"⚠️  Warning: Model '{args.model}' not found in server '{server['name']}'. Skipping this server.")
                 continue
+
+            models = filtered_models
 
         server_tasks.append((server, models))
         total_combinations += len(models)

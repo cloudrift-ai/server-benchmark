@@ -28,6 +28,10 @@ sudo -E ./venv/bin/python $SCRIPT_DIR/download_model.py --model-name $MODEL_NAME
 
 MODEL_PATH="$HF_DIRECTORY/$MODEL_NAME"
 
+# Clean up any existing container with the same name
+echo "Cleaning up any existing containers..."
+sudo docker rm -f $CONTAINER_NAME 2>/dev/null || true
+
 # Start the vLLM container in the background
 echo "Starting vLLM container..."
 sudo -E docker run --rm --gpus all \

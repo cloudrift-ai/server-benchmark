@@ -98,3 +98,20 @@ models:
 - Nginx container provides production-grade load balancing
 - GPU assignment handled via Docker Compose device reservations
 - Health checks ensure all instances are ready before benchmarking begins
+
+## Project Structure
+
+```
+server-benchmark/
+├── benchmarks/           # Benchmark scripts (auto-discovered by naming convention)
+│   ├── 1_system_info.sh
+│   ├── 2_hf_download.sh
+│   ├── 3_vllm_benchmark.sh
+│   └── _4_yabs.sh       # Disabled (underscore prefix)
+├── utils/               # Helper utilities
+│   ├── download_model.py        # HuggingFace model downloader
+│   └── generate_compose.py      # Docker Compose generator
+├── config.yaml          # Server and model configuration
+├── setup.sh            # Environment setup script
+└── run_remote_benchmark.py  # Main orchestration script
+```

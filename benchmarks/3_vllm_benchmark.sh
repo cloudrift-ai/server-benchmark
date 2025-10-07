@@ -23,7 +23,7 @@ echo "---------------------------------" >> $BENCHMARK_RESULTS_FILE
 
 # Pre-download the model
 echo "Pre-downloading model from Hugging Face..." | tee -a $BENCHMARK_RESULTS_FILE
-sudo -E ./venv/bin/python $SCRIPT_DIR/download_model.py --model-name $MODEL_NAME --hg-dir $HF_DIRECTORY/$MODEL_NAME | tee -a $BENCHMARK_RESULTS_FILE
+sudo -E ./venv/bin/python utils/download_model.py --model-name $MODEL_NAME --hg-dir $HF_DIRECTORY/$MODEL_NAME | tee -a $BENCHMARK_RESULTS_FILE
 
 MODEL_PATH="$HF_DIRECTORY/$MODEL_NAME"
 
@@ -46,7 +46,7 @@ NGINX_CONF=$(mktemp --suffix=.conf)
 echo "Generating docker-compose configuration..."
 if [ $NUM_INSTANCES -gt 1 ]; then
     # Multi-instance with nginx
-    sudo -E ./venv/bin/python $SCRIPT_DIR/generate_compose.py \
+    sudo -E ./venv/bin/python utils/generate_compose.py \
         --num-instances $NUM_INSTANCES \
         --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
         --container-name $CONTAINER_NAME \
@@ -58,7 +58,7 @@ if [ $NUM_INSTANCES -gt 1 ]; then
         --nginx-conf-output $NGINX_CONF
 else
     # Single instance
-    sudo -E ./venv/bin/python $SCRIPT_DIR/generate_compose.py \
+    sudo -E ./venv/bin/python utils/generate_compose.py \
         --num-instances $NUM_INSTANCES \
         --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
         --container-name $CONTAINER_NAME \

@@ -1,0 +1,38 @@
+Model: QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ
+---------------------------------
+Pre-downloading model from Hugging Face...
+Downloading model: QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ...
+Model download complete! Saved to: /hf_models/QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ
+Download took 1.27 seconds.
+Average download speed: 101406.72 MiB/s
+
+vllm model gpu benchmark
+---------------------------------
+============ Serving Benchmark Result ============
+Successful requests:                     1000      
+Maximum request concurrency:             200       
+Benchmark duration (s):                  875.29    
+Total input tokens:                      997272    
+Total generated tokens:                  1000000   
+Request throughput (req/s):              1.14      
+Output token throughput (tok/s):         1142.48   
+Peak output token throughput (tok/s):    1989.00   
+Peak concurrent requests:                215.00    
+Total Token throughput (tok/s):          2281.84   
+---------------Time to First Token----------------
+Mean TTFT (ms):                          124375.95 
+Median TTFT (ms):                        128940.00 
+P99 TTFT (ms):                           155899.92 
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          36.18     
+Median TPOT (ms):                        29.69     
+P99 TPOT (ms):                           56.94     
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           36.18     
+Median ITL (ms):                         25.39     
+P99 ITL (ms):                            160.96    
+----------------End-to-end Latency----------------
+Mean E2EL (ms):                          160520.95 
+Median E2EL (ms):                        174341.04 
+P99 E2EL (ms):                           185459.89 
+==================================================

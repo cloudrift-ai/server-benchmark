@@ -26,6 +26,7 @@ servers:
     port: 22
     models:
       - "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
+      - "Qwen/Qwen2.5-72B-Instruct-AWQ"
 
   - name: "rtx4090_x_4"
     address: "riftuser@142.214.185.230"
@@ -33,6 +34,8 @@ servers:
     port: 22
     models:
       - "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
+      - "Qwen/Qwen2.5-72B-Instruct-AWQ"
+
 
 # Results will be saved with flat structure using prefixes:
 #   {local_results_dir}/{server_name}_{model_name}_system_info.txt

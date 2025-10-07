@@ -13,6 +13,7 @@ import sys
 import subprocess
 from pathlib import Path
 from typing import Optional, List, Dict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import yaml
 
@@ -300,6 +301,30 @@ def run_benchmark_combination(server: dict, model: str, config: dict, force: boo
     return (server_name, model, success)
 
 
+def run_server_benchmarks(server: dict, models: List[str], config: dict, force: bool = False) -> List[tuple]:
+    """Run all benchmarks for a single server sequentially. Returns list of (server_name, model, success)."""
+    results = []
+    server_name = server['name']
+
+    print(f"\n{'='*80}")
+    print(f"Starting benchmarks for server: {server_name}")
+    print(f"{'='*80}\n")
+
+    for model in models:
+        print(f"\n{'='*80}")
+        print(f"Server: {server_name} | Model: {model}")
+        print(f"{'='*80}\n")
+
+        result = run_benchmark_combination(server, model, config, force)
+        results.append(result)
+
+    print(f"\n{'='*80}")
+    print(f"Completed benchmarks for server: {server_name}")
+    print(f"{'='*80}\n")
+
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Run LLM benchmarks on remote servers via SSH for multiple server-model combinations'
@@ -322,6 +347,17 @@ def main():
         '--model',
         help='Run benchmarks only for a specific model'
     )
+    parser.add_argument(
+        '--parallel',
+        action='store_true',
+        help='Run benchmarks on different servers in parallel (models on same server run sequentially)'
+    )
+    parser.add_argument(
+        '--max-workers',
+        type=int,
+        default=None,
+        help='Maximum number of parallel server benchmarks (default: number of servers)'
+    )
 
     args = parser.parse_args()
 
@@ -338,8 +374,10 @@ def main():
             print(f"❌ Error: Server '{args.server}' not found in config.")
             sys.exit(1)
 
-    # Build list of (server, model) combinations
-    combinations = []
+    # Build list of (server, models) tuples for parallel execution
+    server_tasks = []
+    total_combinations = 0
+
     for server in servers:
         models = server['models']
 
@@ -350,26 +388,51 @@ def main():
                 print(f"⚠️  Warning: Model '{args.model}' not found in server '{server['name']}'. Skipping this server.")
                 continue
 
-        for model in models:
-            combinations.append((server, model))
+        server_tasks.append((server, models))
+        total_combinations += len(models)
 
-    if not combinations:
+    if not server_tasks:
         print("❌ Error: No server-model combinations to benchmark.")
         sys.exit(1)
 
-    print(f"📊 Running benchmarks for {len(combinations)} server-model combination(s)\n")
+    print(f"📊 Running benchmarks for {total_combinations} server-model combination(s) across {len(server_tasks)} server(s)")
+    if args.parallel:
+        print(f"🚀 Parallel mode: Servers will run in parallel (max workers: {args.max_workers or len(server_tasks)})\n")
+    else:
+        print("⏳ Sequential mode: Servers will run one at a time\n")
 
     # Track results
     results = []
 
-    # Run benchmarks for all combinations
-    for server, model in combinations:
-        print(f"\n{'='*80}")
-        print(f"Server: {server['name']} | Model: {model}")
-        print(f"{'='*80}\n")
+    # Run benchmarks - either in parallel or sequentially
+    if args.parallel:
+        # Parallel execution: each server runs in its own thread
+        max_workers = args.max_workers or len(server_tasks)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all server benchmark tasks
+            future_to_server = {
+                executor.submit(run_server_benchmarks, server, models, config, args.force): server['name']
+                for server, models in server_tasks
+            }
 
-        result = run_benchmark_combination(server, model, config, args.force)
-        results.append(result)
+            # Collect results as they complete
+            for future in as_completed(future_to_server):
+                server_name = future_to_server[future]
+                try:
+                    server_results = future.result()
+                    results.extend(server_results)
+                except Exception as exc:
+                    print(f"❌ Server {server_name} generated an exception: {exc}")
+                    # Add failed results for all models on this server
+                    for server, models in server_tasks:
+                        if server['name'] == server_name:
+                            for model in models:
+                                results.append((server_name, model, False))
+    else:
+        # Sequential execution
+        for server, models in server_tasks:
+            server_results = run_server_benchmarks(server, models, config, args.force)
+            results.extend(server_results)
 
     # Print summary
     print(f"\n{'='*80}")

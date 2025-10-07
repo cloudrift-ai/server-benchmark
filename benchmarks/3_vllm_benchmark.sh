@@ -40,9 +40,8 @@ echo "  Total GPUs used: $TOTAL_GPUS" | tee -a $BENCHMARK_RESULTS_FILE
 echo "" | tee -a $BENCHMARK_RESULTS_FILE
 
 # Generate docker-compose configuration
-COMPOSE_FILE=$(mktemp --suffix=.yml)
-NGINX_CONF=$(mktemp --suffix=.conf)
-chmod 666 $COMPOSE_FILE $NGINX_CONF  # Make writable for sudo python
+COMPOSE_FILE="docker-compose.vllm.yml"
+NGINX_CONF="nginx.vllm.conf"
 
 echo "Generating docker-compose configuration..."
 if [ $NUM_INSTANCES -gt 1 ]; then
@@ -83,12 +82,12 @@ fi
 # Clean up previous deployment
 echo ""
 echo "Cleaning up previous deployment..."
-sudo -E docker-compose -f $COMPOSE_FILE -p vllm_benchmark down 2>/dev/null || true
+sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark down 2>/dev/null || true
 
 # Start all services
 echo ""
-echo "Starting services with docker-compose..."
-sudo -E docker-compose -f $COMPOSE_FILE -p vllm_benchmark up -d
+echo "Starting services with docker compose..."
+sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark up -d
 
 # Wait for all vLLM instances to be ready
 echo ""
@@ -124,11 +123,11 @@ done
 if [ $check -eq $MAX_CHECKS ]; then
     echo "❌ Timeout: Instances did not become healthy in ${MAX_WAIT_TIME} seconds."
     echo "Container status:"
-    sudo -E docker-compose -f $COMPOSE_FILE -p vllm_benchmark ps
+    sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark ps
     echo ""
     echo "Logs from containers:"
-    sudo -E docker-compose -f $COMPOSE_FILE -p vllm_benchmark logs
-    sudo -E docker-compose -f $COMPOSE_FILE -p vllm_benchmark down
+    sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark logs
+    sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark down
     rm -f $COMPOSE_FILE $NGINX_CONF
     exit 1
 fi
@@ -170,7 +169,7 @@ sudo -E docker exec ${CONTAINER_NAME}_0 bash -c "$BENCHMARK_CMD" | awk '/^======
 # Stop all services
 echo ""
 echo "Stopping all services..."
-sudo -E docker-compose -f $COMPOSE_FILE -p vllm_benchmark down
+sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark down
 
 # Clean up temporary files
 rm -f $COMPOSE_FILE $NGINX_CONF

@@ -11,7 +11,6 @@ MAX_CONCURRENCY="${MAX_CONCURRENCY:-200}"
 NUM_PROMPTS="${NUM_PROMPTS:-1000}"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 NUM_INSTANCES="${NUM_INSTANCES:-1}"
-READY_STRING="Application startup complete."
 
 BENCHMARK_RESULTS_FILE="${BENCHMARK_RESULTS_FILE:-vllm_benchmark.txt}"
 HF_DIRECTORY="${HF_DIRECTORY:-/hf_models}"
@@ -40,142 +39,45 @@ echo "  GPUs per instance: $GPUS_PER_INSTANCE" | tee -a $BENCHMARK_RESULTS_FILE
 echo "  Total GPUs used: $TOTAL_GPUS" | tee -a $BENCHMARK_RESULTS_FILE
 echo "" | tee -a $BENCHMARK_RESULTS_FILE
 
-# Generate docker-compose.yml
+# Generate docker-compose configuration
 COMPOSE_FILE=$(mktemp --suffix=.yml)
+NGINX_CONF=$(mktemp --suffix=.conf)
+
 echo "Generating docker-compose configuration..."
-
-cat > $COMPOSE_FILE <<'COMPOSE_HEADER'
-version: '3.8'
-
-services:
-COMPOSE_HEADER
-
-# Add vLLM service instances
-for i in $(seq 0 $((NUM_INSTANCES - 1))); do
-    GPU_START=$((i * GPUS_PER_INSTANCE))
-    GPU_LIST=""
-    for g in $(seq $GPU_START $((GPU_START + GPUS_PER_INSTANCE - 1))); do
-        if [ -z "$GPU_LIST" ]; then
-            GPU_LIST="$g"
-        else
-            GPU_LIST="$GPU_LIST,$g"
-        fi
-    done
-
-    PORT=$((8000 + i))
-
-    cat >> $COMPOSE_FILE <<EOF
-  vllm_$i:
-    image: vllm/vllm-openai:latest
-    container_name: ${CONTAINER_NAME}_${i}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ['$GPU_LIST']
-              capabilities: [gpu]
-    volumes:
-      - $HF_DIRECTORY:$HF_DIRECTORY
-    environment:
-      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
-      - VLLM_WORKER_MULTIPROC_METHOD=spawn
-      - OMP_NUM_THREADS=16
-      - CUDA_VISIBLE_DEVICES=$GPU_LIST
-    ports:
-      - "$PORT:8000"
-    shm_size: '16gb'
-    ipc: host
-    command: >
-      --disable-log-requests
-      --trust-remote-code
-      --max-model-len=8192
-      --gpu-memory-utilization=0.90
-      --host 0.0.0.0
-      --port 8000
-      --tensor-parallel-size $TENSOR_PARALLEL_SIZE
-      --model $MODEL_PATH
-      --served-model-name $MODEL_NAME
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 300s
-
-EOF
-done
-
-# Add nginx load balancer if multiple instances
 if [ $NUM_INSTANCES -gt 1 ]; then
-    # Create nginx config
-    NGINX_CONF=$(mktemp)
-    cat > $NGINX_CONF <<'NGINX_HEADER'
-events {
-    worker_connections 4096;
-}
-
-http {
-    upstream vllm_backend {
-NGINX_HEADER
-
-    # Add upstream servers
-    for i in $(seq 0 $((NUM_INSTANCES - 1))); do
-        echo "        server vllm_$i:8000;" >> $NGINX_CONF
-    done
-
-    cat >> $NGINX_CONF <<'NGINX_FOOTER'
-    }
-
-    server {
-        listen 8080;
-
-        location / {
-            proxy_pass http://vllm_backend;
-            proxy_http_version 1.1;
-            proxy_set_header Connection "";
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-
-            # Increase timeouts for long-running LLM requests
-            proxy_connect_timeout 600s;
-            proxy_send_timeout 600s;
-            proxy_read_timeout 600s;
-
-            # Disable buffering for streaming responses
-            proxy_buffering off;
-        }
-    }
-}
-NGINX_FOOTER
-
-    # Add nginx service to compose file
-    cat >> $COMPOSE_FILE <<EOF
-  nginx:
-    image: nginx:alpine
-    container_name: nginx_lb
-    ports:
-      - "8080:8080"
-    volumes:
-      - $NGINX_CONF:/etc/nginx/nginx.conf:ro
-    depends_on:
-EOF
-
-    # Add dependencies on all vLLM instances
-    for i in $(seq 0 $((NUM_INSTANCES - 1))); do
-        cat >> $COMPOSE_FILE <<EOF
-      - vllm_$i
-EOF
-    done
-
-    # Clean up nginx config on exit
-    trap "rm -f $NGINX_CONF" EXIT
+    # Multi-instance with nginx
+    sudo -E ./venv/bin/python $SCRIPT_DIR/generate_compose.py \
+        --num-instances $NUM_INSTANCES \
+        --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
+        --container-name $CONTAINER_NAME \
+        --model-path $MODEL_PATH \
+        --model-name "$MODEL_NAME" \
+        --hf-directory $HF_DIRECTORY \
+        --hf-token "${HUGGING_FACE_HUB_TOKEN:-}" \
+        --output $COMPOSE_FILE \
+        --nginx-conf-output $NGINX_CONF
+else
+    # Single instance
+    sudo -E ./venv/bin/python $SCRIPT_DIR/generate_compose.py \
+        --num-instances $NUM_INSTANCES \
+        --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
+        --container-name $CONTAINER_NAME \
+        --model-path $MODEL_PATH \
+        --model-name "$MODEL_NAME" \
+        --hf-directory $HF_DIRECTORY \
+        --hf-token "${HUGGING_FACE_HUB_TOKEN:-}" \
+        --output $COMPOSE_FILE
 fi
 
-echo "Docker Compose configuration:"
+echo ""
+echo "Generated docker-compose.yml:"
 cat $COMPOSE_FILE
+
+if [ $NUM_INSTANCES -gt 1 ]; then
+    echo ""
+    echo "Generated nginx.conf:"
+    cat $NGINX_CONF
+fi
 
 # Clean up previous deployment
 echo ""
@@ -226,7 +128,7 @@ if [ $check -eq $MAX_CHECKS ]; then
     echo "Logs from containers:"
     sudo -E docker-compose -f $COMPOSE_FILE -p vllm_benchmark logs
     sudo -E docker-compose -f $COMPOSE_FILE -p vllm_benchmark down
-    rm -f $COMPOSE_FILE
+    rm -f $COMPOSE_FILE $NGINX_CONF
     exit 1
 fi
 
@@ -269,8 +171,8 @@ echo ""
 echo "Stopping all services..."
 sudo -E docker-compose -f $COMPOSE_FILE -p vllm_benchmark down
 
-# Clean up compose file
-rm -f $COMPOSE_FILE
+# Clean up temporary files
+rm -f $COMPOSE_FILE $NGINX_CONF
 
 echo ""
 echo "✅ Benchmark completed."

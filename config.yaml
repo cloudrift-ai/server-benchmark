@@ -42,6 +42,35 @@ servers:
         tensor_parallel_size: 2  # 72B model uses 2 GPUs
         num_instances: 2  # Run 2 instances (GPU 0-1, GPU 2-3)
 
+  - name: "rtx5090_x_1"
+    address: "riftuser@217.138.104.159"
+    ssh_key: "~/.ssh/id_ed25519"
+    port: 22
+    models:
+      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
+        tensor_parallel_size: 1
+
+  - name: "rtx5090_x_2"
+    address: "riftuser@217.138.104.153"
+    ssh_key: "~/.ssh/id_ed25519"
+    port: 22
+    models:
+      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
+        tensor_parallel_size: 1
+      - name: "Qwen/Qwen2.5-72B-Instruct-AWQ"
+        tensor_parallel_size: 2
+
+  - name: "rtx5090_x_4"
+    address: "riftuser@217.138.104.158"
+    ssh_key: "~/.ssh/id_ed25519"
+    port: 22
+    models:
+      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
+        tensor_parallel_size: 1
+      - name: "Qwen/Qwen2.5-72B-Instruct-AWQ"
+        tensor_parallel_size: 2
+        num_instances: 2
+
 
 # Results will be saved with flat structure using prefixes:
 #   {local_results_dir}/{server_name}_{model_name}_system_info.txt

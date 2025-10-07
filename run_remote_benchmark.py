@@ -5,6 +5,9 @@ Automated LLM Benchmark Runner
 This script reads configuration from config.yaml and runs benchmarks on remote servers via SSH.
 It supports multiple servers and models, running all combinations.
 It will skip benchmarks if the results file already exists locally.
+
+Benchmark scripts follow the naming convention: <step_index>_<benchmark_name>.sh
+Result files follow the naming convention: <benchmark_name>_results.txt
 """
 
 import argparse
@@ -12,8 +15,9 @@ import os
 import sys
 import subprocess
 import time
+import re
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import yaml
@@ -233,6 +237,59 @@ def run_benchmark_step(server: dict, model_name: str, config: dict, step_name: s
     return success
 
 
+def discover_benchmarks(server: dict) -> List[Tuple[str, str, str]]:
+    """Discover benchmark scripts from the remote server's benchmarks directory.
+
+    Returns a list of tuples: (display_name, script_name, result_file)
+    Scripts must follow naming convention: <step_index>_<benchmark_name>.sh
+    Result files follow convention: <benchmark_name>_results.txt
+    """
+    ssh_key = expand_path(server['ssh_key'])
+    address = server['address']
+    port = server.get('port', 22)
+
+    # List benchmark scripts matching pattern: <digit>_*.sh
+    ssh_cmd = [
+        'ssh',
+        '-i', ssh_key,
+        '-p', str(port),
+        '-o', 'StrictHostKeyChecking=no',
+        address,
+        'ls server-benchmark/benchmarks/[0-9]*_*.sh 2>/dev/null | sort'
+    ]
+
+    try:
+        result = subprocess.run(ssh_cmd, capture_output=True, text=True, check=True)
+        script_paths = result.stdout.strip().split('\n')
+
+        if not script_paths or script_paths == ['']:
+            print("⚠️  Warning: No benchmark scripts found matching pattern [0-9]*_*.sh")
+            return []
+
+        benchmarks = []
+        for script_path in script_paths:
+            # Extract filename from path
+            script_name = script_path.split('/')[-1]
+
+            # Parse: <step_index>_<benchmark_name>.sh
+            match = re.match(r'(\d+)_(.+)\.sh$', script_name)
+            if match:
+                step_index, benchmark_name = match.groups()
+
+                # Create display name (capitalize and replace underscores)
+                display_name = benchmark_name.replace('_', ' ').title()
+
+                # Result file convention: <benchmark_name>_results.txt
+                result_file = f"{benchmark_name}_results.txt"
+
+                benchmarks.append((display_name, script_name, result_file))
+
+        return benchmarks
+    except subprocess.CalledProcessError as e:
+        print(f"⚠️  Warning: Failed to discover benchmarks: {e}")
+        return []
+
+
 def run_benchmark(server: dict, model_name: str, config: dict, force: bool = False) -> bool:
     """Run all benchmark steps sequentially. Returns True if successful, False otherwise."""
     print(f"🚀 Starting benchmarks for model: {model_name}")
@@ -242,13 +299,16 @@ def run_benchmark(server: dict, model_name: str, config: dict, force: bool = Fal
     if not setup_remote_repo(server):
         return False
 
-    # Run each benchmark step sequentially
-    steps = [
-        ("System Info", "run_system_info.sh", "system_info.txt"),
-        ("HF Download", "run_hf_download.sh", "hf_download_results.txt"),
-        ("vLLM Benchmark", "run_vllm_benchmark.sh", "vllm_results.txt"),
-        ("YABS Benchmark", "run_yabs.sh", "yabs_results.txt"),
-    ]
+    # Discover benchmark steps from remote server
+    steps = discover_benchmarks(server)
+
+    if not steps:
+        print("❌ No benchmark steps found. Ensure scripts follow naming convention: <step_index>_<benchmark_name>.sh")
+        return False
+
+    print(f"\n📋 Found {len(steps)} benchmark step(s):")
+    for display_name, script_name, result_file in steps:
+        print(f"   • {display_name} ({script_name} → {result_file})")
 
     all_success = True
     for step_name, script_name, result_file in steps:

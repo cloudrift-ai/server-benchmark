@@ -111,25 +111,90 @@ def run_ssh_command(server: dict, command: str, capture_output: bool = False) ->
         return None
 
 
-def run_benchmark(server: dict, model_name: str) -> bool:
+def setup_remote_repo(server: dict) -> bool:
+    """Clone or update the server-benchmark repository on remote server. Returns True if successful."""
+    print("📦 Setting up repository on remote server...")
+
+    ssh_key = expand_path(server['ssh_key'])
+    address = server['address']
+    port = server.get('port', 22)
+
+    # Check if repo exists, clone if not, update if it does
+    setup_cmd = (
+        'if [ ! -d "server-benchmark" ]; then '
+        'git clone https://github.com/cloudrift-ai/server-benchmark.git; '
+        'else '
+        'cd server-benchmark && git pull; '
+        'fi'
+    )
+
+    try:
+        ssh_cmd = [
+            'ssh',
+            '-i', ssh_key,
+            '-p', str(port),
+            '-o', 'StrictHostKeyChecking=no',
+            address,
+            setup_cmd
+        ]
+        subprocess.run(ssh_cmd, check=True)
+        print("✅ Repository ready on remote server")
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Failed to setup repository: {e}")
+        return False
+
+    # Run setup script to install dependencies
+    print("🔧 Installing dependencies on remote server...")
+    setup_script_cmd = 'cd server-benchmark && ./scripts/setup.sh'
+
+    try:
+        ssh_cmd = [
+            'ssh',
+            '-i', ssh_key,
+            '-p', str(port),
+            '-o', 'StrictHostKeyChecking=no',
+            address,
+            setup_script_cmd
+        ]
+        subprocess.run(ssh_cmd, check=True)
+        print("✅ Dependencies installed successfully")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Failed to install dependencies: {e}")
+        return False
+
+
+def run_benchmark(server: dict, model_name: str, config: dict) -> bool:
     """Run the benchmark on the remote server. Returns True if successful, False otherwise."""
     print(f"🚀 Starting benchmark for model: {model_name}")
     print(f"📡 Connecting to: {server['address']} ({server['name']})")
 
-    # Update the model name in the remote script
-    print("📝 Updating model configuration on remote server...")
-    update_model_cmd = f'cd server-benchmark && sed -i "s|^MODEL_NAME=.*|MODEL_NAME=\\"{model_name}\\"|" scripts/run_vllm_benchmark.sh'
-    result = run_ssh_command(server, update_model_cmd)
-    if result is None and not isinstance(result, str):
-        # Check if command succeeded (when capture_output=False, result is None on success)
-        pass
+    # Setup repository on remote server
+    if not setup_remote_repo(server):
+        return False
 
-    # Run the benchmark
+    # Get benchmark parameters from config (if any)
+    benchmark_params = config.get('benchmark_params', {})
+    max_concurrency = benchmark_params.get('max_concurrency', 200)
+    num_prompts = benchmark_params.get('num_prompts', 1000)
+    random_input_len = benchmark_params.get('random_input_len', 1000)
+    random_output_len = benchmark_params.get('random_output_len', 1000)
+
+    # Run the benchmark with environment variables
     print("⏳ Running benchmark (this may take a while)...")
     try:
         ssh_key = expand_path(server['ssh_key'])
         address = server['address']
         port = server.get('port', 22)
+
+        # Build environment variables command
+        env_vars = (
+            f'MODEL_NAME="{model_name}" '
+            f'MAX_CONCURRENCY={max_concurrency} '
+            f'NUM_PROMPTS={num_prompts} '
+            f'RANDOM_INPUT_LEN={random_input_len} '
+            f'RANDOM_OUTPUT_LEN={random_output_len}'
+        )
 
         ssh_cmd = [
             'ssh',
@@ -137,7 +202,7 @@ def run_benchmark(server: dict, model_name: str) -> bool:
             '-p', str(port),
             '-o', 'StrictHostKeyChecking=no',
             address,
-            'cd server-benchmark && ./scripts/run_benchmarks.sh'
+            f'cd server-benchmark && {env_vars} ./scripts/run_benchmarks.sh'
         ]
         subprocess.run(ssh_cmd, check=True)
         print("✅ Benchmark completed successfully!")
@@ -228,7 +293,7 @@ def run_benchmark_combination(server: dict, model: str, config: dict, force: boo
         return (server_name, model, True)
 
     # Run benchmark and download results
-    success = run_benchmark(server, model)
+    success = run_benchmark(server, model, config)
     if success:
         success = download_results(server, model, config)
 

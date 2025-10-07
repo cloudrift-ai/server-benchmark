@@ -1,24 +1,32 @@
 #!/bin/bash
 
 set -o allexport
-# Configuration
-IMAGE_NAME="vllm/vllm-openai:latest"
-CONTAINER_NAME="vllm_benchmark_container"
-#MODEL_NAME="meta-llama/Llama-3.1-8B-Instruct" # Replace with your model
-MODEL_NAME="Qwen/Qwen3-Coder-30B-A3B-Instruct" #"Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
-BENCHMARK_CMD="python3 benchmarks/benchmark_serving.py --model $MODEL_NAME --dataset-name random --random-input-len 1000 --random-output-len 1000 --max-concurrency 200 --num-prompts 1000 --ignore-eos --backend openai-chat --endpoint /v1/chat/completions  --percentile_metrics ttft,tpot,itl,e2el"
+# Configuration - using environment variables with defaults
+IMAGE_NAME="${IMAGE_NAME:-vllm/vllm-openai:latest}"
+CONTAINER_NAME="${CONTAINER_NAME:-vllm_benchmark_container}"
+MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-Coder-30B-A3B-Instruct}"
+RANDOM_INPUT_LEN="${RANDOM_INPUT_LEN:-1000}"
+RANDOM_OUTPUT_LEN="${RANDOM_OUTPUT_LEN:-1000}"
+MAX_CONCURRENCY="${MAX_CONCURRENCY:-200}"
+NUM_PROMPTS="${NUM_PROMPTS:-1000}"
+BENCHMARK_CMD="python3 benchmarks/benchmark_serving.py --model $MODEL_NAME --dataset-name random --random-input-len $RANDOM_INPUT_LEN --random-output-len $RANDOM_OUTPUT_LEN --max-concurrency $MAX_CONCURRENCY --num-prompts $NUM_PROMPTS --ignore-eos --backend openai-chat --endpoint /v1/chat/completions  --percentile_metrics ttft,tpot,itl,e2el"
 READY_STRING="Application startup complete."
 GPU_NUMBER=$( nvidia-smi --list-gpus | wc -l )
 
-BENCHMARK_RESULTS_FILE="benchmark_results.txt"
-HF_DIRECTORY="/hf_models"
+BENCHMARK_RESULTS_FILE="${BENCHMARK_RESULTS_FILE:-benchmark_results.txt}"
+HF_DIRECTORY="${HF_DIRECTORY:-/hf_models}"
 # Disable automatic export
 set +o allexport
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
-echo "Hugging face download speed test" > $BENCHMARK_RESULTS_FILE
+echo "Model: $MODEL_NAME" > $BENCHMARK_RESULTS_FILE
 echo "---------------------------------" >> $BENCHMARK_RESULTS_FILE
+
+# Pre-download the model
+echo "Pre-downloading model from Hugging Face..." | tee -a $BENCHMARK_RESULTS_FILE
 sudo -E ./venv/bin/python $SCRIPT_DIR/download_model.py --model-name $MODEL_NAME --hg-dir $HF_DIRECTORY/$MODEL_NAME | tee -a $BENCHMARK_RESULTS_FILE
+
+MODEL_PATH="$HF_DIRECTORY/$MODEL_NAME"
 
 # Start the vLLM container in the background
 echo "Starting vLLM container..."
@@ -37,7 +45,7 @@ sudo -E docker run --rm --gpus all \
     --max-model-len=8192 --gpu-memory-utilization=0.90\
     --host 0.0.0.0 --port 8000 \
     -tp $GPU_NUMBER \
-    --model $HF_DIRECTORY/$MODEL_NAME \
+    --model $MODEL_PATH \
     --served-model-name $MODEL_NAME
 
 

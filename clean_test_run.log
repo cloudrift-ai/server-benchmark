@@ -1,0 +1,634 @@
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!
+Someone could be eavesdropping on you right now (man-in-the-middle attack)!
+It is also possible that a host key has just been changed.
+The fingerprint for the ED25519 key sent by the remote host is
+SHA256:kXFQnqjRkTRQyPaBfxXpUmVtg9hNpf+F65Lzux+Jzzg.
+Please contact your system administrator.
+Add correct host key in /home/dikobraz/.ssh/known_hosts to get rid of this message.
+Offending ECDSA key in /home/dikobraz/.ssh/known_hosts:361
+  remove with:
+  ssh-keygen -f '/home/dikobraz/.ssh/known_hosts' -R '142.214.185.150'
+Password authentication is disabled to avoid man-in-the-middle attacks.
+Keyboard-interactive authentication is disabled to avoid man-in-the-middle attacks.
+UpdateHostkeys is disabled because the host key is not trusted.
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!
+Someone could be eavesdropping on you right now (man-in-the-middle attack)!
+It is also possible that a host key has just been changed.
+The fingerprint for the ED25519 key sent by the remote host is
+SHA256:rm6OwrAaDqYdfP+k/sg/fyqeCgtaUbZdkWr5WB/I5Kw.
+Please contact your system administrator.
+Add correct host key in /home/dikobraz/.ssh/known_hosts to get rid of this message.
+Offending ECDSA key in /home/dikobraz/.ssh/known_hosts:351
+  remove with:
+  ssh-keygen -f '/home/dikobraz/.ssh/known_hosts' -R '142.214.185.230'
+Password authentication is disabled to avoid man-in-the-middle attacks.
+Keyboard-interactive authentication is disabled to avoid man-in-the-middle attacks.
+UpdateHostkeys is disabled because the host key is not trusted.
+From https://github.com/cloudrift-ai/server-benchmark
+   bc56dea..c74fdb3  main       -> origin/main
+Updating bc56dea..c74fdb3
+Fast-forward
+ README.md                                          |   9 +-
+ {scripts => benchmarks}/collect_system_info.sh     |   0
+ {scripts => benchmarks}/download_model.py          |   0
+ benchmarks/run_hf_download.sh                      |  16 ++
+ .../run_system_info.sh                             |  10 +-
+ {scripts => benchmarks}/run_vllm_benchmark.sh      |   2 +-
+ benchmarks/run_yabs.sh                             |   6 +
+ config.yaml                                        |  31 ++-
+ run_remote_benchmark.py                            | 296 +++++++++++++--------
+ scripts/setup.sh => setup.sh                       |   0
+ 10 files changed, 239 insertions(+), 131 deletions(-)
+ rename {scripts => benchmarks}/collect_system_info.sh (100%)
+ rename {scripts => benchmarks}/download_model.py (100%)
+ create mode 100755 benchmarks/run_hf_download.sh
+ rename scripts/run_benchmarks.sh => benchmarks/run_system_info.sh (57%)
+ rename {scripts => benchmarks}/run_vllm_benchmark.sh (98%)
+ create mode 100755 benchmarks/run_yabs.sh
+ rename scripts/setup.sh => setup.sh (100%)
+Cloning into 'server-benchmark'...
+Cloning into 'server-benchmark'...
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!
+Someone could be eavesdropping on you right now (man-in-the-middle attack)!
+It is also possible that a host key has just been changed.
+The fingerprint for the ED25519 key sent by the remote host is
+SHA256:rm6OwrAaDqYdfP+k/sg/fyqeCgtaUbZdkWr5WB/I5Kw.
+Please contact your system administrator.
+Add correct host key in /home/dikobraz/.ssh/known_hosts to get rid of this message.
+Offending ECDSA key in /home/dikobraz/.ssh/known_hosts:351
+  remove with:
+  ssh-keygen -f '/home/dikobraz/.ssh/known_hosts' -R '142.214.185.230'
+Password authentication is disabled to avoid man-in-the-middle attacks.
+Keyboard-interactive authentication is disabled to avoid man-in-the-middle attacks.
+UpdateHostkeys is disabled because the host key is not trusted.
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!
+Someone could be eavesdropping on you right now (man-in-the-middle attack)!
+It is also possible that a host key has just been changed.
+The fingerprint for the ED25519 key sent by the remote host is
+SHA256:kXFQnqjRkTRQyPaBfxXpUmVtg9hNpf+F65Lzux+Jzzg.
+Please contact your system administrator.
+Add correct host key in /home/dikobraz/.ssh/known_hosts to get rid of this message.
+Offending ECDSA key in /home/dikobraz/.ssh/known_hosts:361
+  remove with:
+  ssh-keygen -f '/home/dikobraz/.ssh/known_hosts' -R '142.214.185.150'
+Password authentication is disabled to avoid man-in-the-middle attacks.
+Keyboard-interactive authentication is disabled to avoid man-in-the-middle attacks.
+UpdateHostkeys is disabled because the host key is not trusted.
+Installing system dependencies...
+
+WARNING: apt does not have a stable CLI interface. Use with caution in scripts.
+
+Hit:1 http://archive.ubuntu.com/ubuntu noble InRelease
+Get:2 http://security.ubuntu.com/ubuntu noble-security InRelease [126 kB]
+Get:3 http://archive.ubuntu.com/ubuntu noble-updates InRelease [126 kB]
+Get:4 https://nvidia.github.io/libnvidia-container/stable/deb/amd64  InRelease [1477 B]
+Hit:5 https://download.docker.com/linux/ubuntu noble InRelease
+Hit:6 https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64  InRelease
+Get:7 http://archive.ubuntu.com/ubuntu noble-backports InRelease [126 kB]
+Installing system dependencies...
+Installing system dependencies...
+
+WARNING: apt does not have a stable CLI interface. Use with caution in scripts.
+
+
+WARNING: apt does not have a stable CLI interface. Use with caution in scripts.
+
+Get:8 http://security.ubuntu.com/ubuntu noble-security/main amd64 Components [21.6 kB]
+Get:9 http://security.ubuntu.com/ubuntu noble-security/universe amd64 Components [52.2 kB]
+Get:10 http://security.ubuntu.com/ubuntu noble-security/restricted amd64 Components [212 B]
+Get:11 http://security.ubuntu.com/ubuntu noble-security/multiverse amd64 Components [212 B]
+Get:12 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 Components [175 kB]
+Hit:1 http://archive.ubuntu.com/ubuntu noble InRelease
+Get:2 http://security.ubuntu.com/ubuntu noble-security InRelease [126 kB]
+Get:3 http://archive.ubuntu.com/ubuntu noble-updates InRelease [126 kB]
+Get:13 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 Components [378 kB]
+Hit:4 https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64  InRelease
+Get:14 http://archive.ubuntu.com/ubuntu noble-updates/restricted amd64 Components [212 B]
+Get:15 http://archive.ubuntu.com/ubuntu noble-updates/multiverse amd64 Components [940 B]
+Hit:5 https://download.docker.com/linux/ubuntu noble InRelease
+Get:6 http://archive.ubuntu.com/ubuntu noble-backports InRelease [126 kB]
+Hit:1 http://archive.ubuntu.com/ubuntu noble InRelease
+Hit:2 https://download.docker.com/linux/ubuntu noble InRelease
+Get:3 https://nvidia.github.io/libnvidia-container/stable/deb/amd64  InRelease [1477 B]
+Get:7 https://nvidia.github.io/libnvidia-container/stable/deb/amd64  InRelease [1477 B]
+Hit:4 https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64  InRelease
+Get:16 http://archive.ubuntu.com/ubuntu noble-backports/main amd64 Components [7160 B]
+Get:5 http://archive.ubuntu.com/ubuntu noble-updates InRelease [126 kB]
+Get:17 http://archive.ubuntu.com/ubuntu noble-backports/universe amd64 Components [11.0 kB]
+Get:18 http://archive.ubuntu.com/ubuntu noble-backports/restricted amd64 Components [216 B]
+Get:19 http://archive.ubuntu.com/ubuntu noble-backports/multiverse amd64 Components [212 B]
+Get:6 http://security.ubuntu.com/ubuntu noble-security InRelease [126 kB]
+Get:7 http://archive.ubuntu.com/ubuntu noble-backports InRelease [126 kB]
+Get:8 http://security.ubuntu.com/ubuntu noble-security/main amd64 Components [21.6 kB]
+Get:9 http://security.ubuntu.com/ubuntu noble-security/universe amd64 Components [52.2 kB]
+Get:10 http://security.ubuntu.com/ubuntu noble-security/restricted amd64 Components [212 B]
+Get:11 http://security.ubuntu.com/ubuntu noble-security/multiverse amd64 Components [212 B]
+Get:12 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 Components [175 kB]
+Get:13 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 Components [378 kB]
+Get:14 http://archive.ubuntu.com/ubuntu noble-updates/restricted amd64 Components [212 B]
+Get:15 http://archive.ubuntu.com/ubuntu noble-updates/multiverse amd64 Components [940 B]
+Get:8 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 Components [175 kB]
+Get:9 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 Components [378 kB]
+Get:10 http://archive.ubuntu.com/ubuntu noble-updates/restricted amd64 Components [212 B]
+Get:11 http://archive.ubuntu.com/ubuntu noble-updates/multiverse amd64 Components [940 B]
+Get:16 http://archive.ubuntu.com/ubuntu noble-backports/main amd64 Components [7160 B]
+Get:12 http://archive.ubuntu.com/ubuntu noble-backports/main amd64 Components [7160 B]
+Get:17 http://archive.ubuntu.com/ubuntu noble-backports/universe amd64 Components [11.0 kB]
+Get:18 http://archive.ubuntu.com/ubuntu noble-backports/restricted amd64 Components [216 B]
+Get:19 http://archive.ubuntu.com/ubuntu noble-backports/multiverse amd64 Components [212 B]
+Get:13 http://archive.ubuntu.com/ubuntu noble-backports/universe amd64 Components [11.0 kB]
+Get:14 http://archive.ubuntu.com/ubuntu noble-backports/restricted amd64 Components [216 B]
+Get:15 http://archive.ubuntu.com/ubuntu noble-backports/multiverse amd64 Components [212 B]
+Get:16 http://security.ubuntu.com/ubuntu noble-security/main amd64 Components [21.6 kB]
+Get:17 http://security.ubuntu.com/ubuntu noble-security/universe amd64 Components [52.2 kB]
+Get:18 http://security.ubuntu.com/ubuntu noble-security/restricted amd64 Components [212 B]
+Get:19 http://security.ubuntu.com/ubuntu noble-security/multiverse amd64 Components [212 B]
+Fetched 1026 kB in 1s (1027 kB/s)
+Reading package lists...Fetched 1026 kB in 1s (1064 kB/s)
+Reading package lists...Fetched 1026 kB in 1s (781 kB/s)
+Reading package lists...
+Building dependency tree...
+Reading state information...
+266 packages can be upgraded. Run 'apt list --upgradable' to see them.
+
+WARNING: apt does not have a stable CLI interface. Use with caution in scripts.
+
+Reading package lists...
+Building dependency tree...
+Building dependency tree...
+Reading state information...
+
+Building dependency tree...
+Reading state information...
+The following additional packages will be installed:
+  libpython3.12-minimal libpython3.12-stdlib libpython3.12t64 python3-pip-whl
+  python3-pkg-resources python3-setuptools python3-setuptools-whl python3.12
+  python3.12-minimal python3.12-venv
+Suggested packages:
+  python-setuptools-doc python3.12-doc binfmt-support
+259 packages can be upgraded. Run 'apt list --upgradable' to see them.
+
+WARNING: apt does not have a stable CLI interface. Use with caution in scripts.
+
+Reading package lists...
+Reading state information...
+The following NEW packages will be installed:
+  python3-pip-whl python3-setuptools-whl python3-venv python3.12-venv
+The following packages will be upgraded:
+  libpython3.12-minimal libpython3.12-stdlib libpython3.12t64
+  python3-pkg-resources python3-setuptools python3.12 python3.12-minimal
+
+266 packages can be upgraded. Run 'apt list --upgradable' to see them.
+Building dependency tree...
+WARNING: apt does not have a stable CLI interface. Use with caution in scripts.
+
+7 upgraded, 4 newly installed, 0 to remove and 259 not upgraded.
+Reading package lists...
+Building dependency tree...
+Reading state information...
+Need to get 11.2 MB of archives.
+After this operation, 2816 kB of additional disk space will be used.
+Get:1 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libpython3.12t64 amd64 3.12.3-1ubuntu0.8 [2355 kB]
+
+Reading state information...
+python3-venv is already the newest version (3.12.3-0ubuntu2).
+0 upgraded, 0 newly installed, 0 to remove and 259 not upgraded.
+Creating virtual environment...
+The following additional packages will be installed:
+  libpython3.12-minimal libpython3.12-stdlib libpython3.12t64 python3-pip-whl
+  python3-pkg-resources python3-setuptools python3-setuptools-whl python3.12
+  python3.12-minimal python3.12-venv
+Suggested packages:
+  python-setuptools-doc python3.12-doc binfmt-support
+The following NEW packages will be installed:
+  python3-pip-whl python3-setuptools-whl python3-venv python3.12-venv
+The following packages will be upgraded:
+  libpython3.12-minimal libpython3.12-stdlib libpython3.12t64
+  python3-pkg-resources python3-setuptools python3.12 python3.12-minimal
+7 upgraded, 4 newly installed, 0 to remove and 259 not upgraded.
+Need to get 11.2 MB of archives.
+After this operation, 2816 kB of additional disk space will be used.
+Get:1 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libpython3.12t64 amd64 3.12.3-1ubuntu0.8 [2355 kB]
+Get:2 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 python3.12 amd64 3.12.3-1ubuntu0.8 [651 kB]
+Get:3 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libpython3.12-stdlib amd64 3.12.3-1ubuntu0.8 [2068 kB]
+Get:4 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 python3.12-minimal amd64 3.12.3-1ubuntu0.8 [2334 kB]
+Get:5 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libpython3.12-minimal amd64 3.12.3-1ubuntu0.8 [836 kB]
+Get:6 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 python3-setuptools all 68.1.2-2ubuntu1.2 [397 kB]
+Get:7 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 python3-pkg-resources all 68.1.2-2ubuntu1.2 [168 kB]
+Get:8 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 python3-pip-whl all 24.0+dfsg-1ubuntu1.3 [1707 kB]
+Get:9 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 python3-setuptools-whl all 68.1.2-2ubuntu1.2 [716 kB]
+Get:10 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 python3.12-venv amd64 3.12.3-1ubuntu0.8 [5678 B]
+Get:11 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 python3-venv amd64 3.12.3-0ubuntu2 [1034 B]
+debconf: unable to initialize frontend: Dialog
+debconf: (Dialog frontend will not work on a dumb terminal, an emacs shell buffer, or without a controlling terminal.)
+debconf: falling back to frontend: Readline
+debconf: unable to initialize frontend: Readline
+debconf: (This frontend requires a controlling tty.)
+debconf: falling back to frontend: Teletype
+dpkg-preconfigure: unable to re-open stdin: 
+Fetched 11.2 MB in 1s (8990 kB/s)
+Get:2 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 python3.12 amd64 3.12.3-1ubuntu0.8 [651 kB]
+Get:3 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libpython3.12-stdlib amd64 3.12.3-1ubuntu0.8 [2068 kB]
+(Reading database ... Get:4 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 python3.12-minimal amd64 3.12.3-1ubuntu0.8 [2334 kB]
+(Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%Get:5 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libpython3.12-minimal amd64 3.12.3-1ubuntu0.8 [836 kB]
+(Reading database ... 60%Get:6 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 python3-setuptools all 68.1.2-2ubuntu1.2 [397 kB]
+Get:7 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 python3-pkg-resources all 68.1.2-2ubuntu1.2 [168 kB]
+Get:8 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 python3-pip-whl all 24.0+dfsg-1ubuntu1.3 [1707 kB]
+Get:9 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 python3-setuptools-whl all 68.1.2-2ubuntu1.2 [716 kB]
+(Reading database ... 65%Get:10 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 python3.12-venv amd64 3.12.3-1ubuntu0.8 [5678 B]
+Get:11 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 python3-venv amd64 3.12.3-0ubuntu2 [1034 B]
+(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%debconf: unable to initialize frontend: Dialog
+debconf: (Dialog frontend will not work on a dumb terminal, an emacs shell buffer, or without a controlling terminal.)
+debconf: falling back to frontend: Readline
+(Reading database ... 85%debconf: unable to initialize frontend: Readline
+debconf: (This frontend requires a controlling tty.)
+debconf: falling back to frontend: Teletype
+dpkg-preconfigure: unable to re-open stdin: 
+(Reading database ... 90%Fetched 11.2 MB in 1s (8983 kB/s)
+(Reading database ... 95%(Reading database ... (Reading database ... 100%(Reading database ... 99902 files and directories currently installed.)
+Preparing to unpack .../00-libpython3.12t64_3.12.3-1ubuntu0.8_amd64.deb ...
+(Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%Unpacking libpython3.12t64:amd64 (3.12.3-1ubuntu0.8) over (3.12.3-1ubuntu0.3) ...
+(Reading database ... 60%(Reading database ... 65%Preparing to unpack .../01-python3.12_3.12.3-1ubuntu0.8_amd64.deb ...
+(Reading database ... 70%Installing Python dependencies...
+(Reading database ... 75%Unpacking python3.12 (3.12.3-1ubuntu0.8) over (3.12.3-1ubuntu0.3) ...
+(Reading database ... 80%(Reading database ... 85%Preparing to unpack .../02-libpython3.12-stdlib_3.12.3-1ubuntu0.8_amd64.deb ...
+(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 99902 files and directories currently installed.)
+Preparing to unpack .../00-libpython3.12t64_3.12.3-1ubuntu0.8_amd64.deb ...
+Unpacking libpython3.12t64:amd64 (3.12.3-1ubuntu0.8) over (3.12.3-1ubuntu0.3) ...
+Unpacking libpython3.12-stdlib:amd64 (3.12.3-1ubuntu0.8) over (3.12.3-1ubuntu0.3) ...
+Requirement already satisfied: pyyaml in ./venv/lib/python3.12/site-packages (from -r requirements.txt (line 2)) (6.0.3)
+Requirement already satisfied: huggingface_hub[cli,hf_transfer] in ./venv/lib/python3.12/site-packages (from -r requirements.txt (line 1)) (0.35.3)
+Preparing to unpack .../01-python3.12_3.12.3-1ubuntu0.8_amd64.deb ...
+Requirement already satisfied: filelock in ./venv/lib/python3.12/site-packages (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1)) (3.19.1)
+Requirement already satisfied: fsspec>=2023.5.0 in ./venv/lib/python3.12/site-packages (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1)) (2025.9.0)
+Requirement already satisfied: packaging>=20.9 in ./venv/lib/python3.12/site-packages (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1)) (25.0)
+Requirement already satisfied: requests in ./venv/lib/python3.12/site-packages (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1)) (2.32.5)
+Requirement already satisfied: tqdm>=4.42.1 in ./venv/lib/python3.12/site-packages (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1)) (4.67.1)
+Preparing to unpack .../03-python3.12-minimal_3.12.3-1ubuntu0.8_amd64.deb ...
+Requirement already satisfied: typing-extensions>=3.7.4.3 in ./venv/lib/python3.12/site-packages (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1)) (4.15.0)
+Requirement already satisfied: hf-xet<2.0.0,>=1.1.3 in ./venv/lib/python3.12/site-packages (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1)) (1.1.10)
+Requirement already satisfied: InquirerPy==0.3.4 in ./venv/lib/python3.12/site-packages (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1)) (0.3.4)
+Requirement already satisfied: hf-transfer>=0.1.4 in ./venv/lib/python3.12/site-packages (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1)) (0.1.9)
+Requirement already satisfied: pfzy<0.4.0,>=0.3.1 in ./venv/lib/python3.12/site-packages (from InquirerPy==0.3.4->huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1)) (0.3.4)
+Unpacking python3.12-minimal (3.12.3-1ubuntu0.8) over (3.12.3-1ubuntu0.3) ...
+Unpacking python3.12 (3.12.3-1ubuntu0.8) over (3.12.3-1ubuntu0.3) ...
+Requirement already satisfied: prompt-toolkit<4.0.0,>=3.0.1 in ./venv/lib/python3.12/site-packages (from InquirerPy==0.3.4->huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1)) (3.0.52)
+Preparing to unpack .../02-libpython3.12-stdlib_3.12.3-1ubuntu0.8_amd64.deb ...
+Preparing to unpack .../04-libpython3.12-minimal_3.12.3-1ubuntu0.8_amd64.deb ...
+Requirement already satisfied: charset_normalizer<4,>=2 in ./venv/lib/python3.12/site-packages (from requests->huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1)) (3.4.3)
+Requirement already satisfied: idna<4,>=2.5 in ./venv/lib/python3.12/site-packages (from requests->huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1)) (3.10)
+Requirement already satisfied: urllib3<3,>=1.21.1 in ./venv/lib/python3.12/site-packages (from requests->huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1)) (2.5.0)
+Requirement already satisfied: certifi>=2017.4.17 in ./venv/lib/python3.12/site-packages (from requests->huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1)) (2025.10.5)
+Requirement already satisfied: wcwidth in ./venv/lib/python3.12/site-packages (from prompt-toolkit<4.0.0,>=3.0.1->InquirerPy==0.3.4->huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1)) (0.2.14)
+Unpacking libpython3.12-stdlib:amd64 (3.12.3-1ubuntu0.8) over (3.12.3-1ubuntu0.3) ...
+Unpacking libpython3.12-minimal:amd64 (3.12.3-1ubuntu0.8) over (3.12.3-1ubuntu0.3) ...
+Preparing to unpack .../03-python3.12-minimal_3.12.3-1ubuntu0.8_amd64.deb ...
+Preparing to unpack .../05-python3-setuptools_68.1.2-2ubuntu1.2_all.deb ...
+Unpacking python3.12-minimal (3.12.3-1ubuntu0.8) over (3.12.3-1ubuntu0.3) ...
+Setup complete!
+Preparing to unpack .../04-libpython3.12-minimal_3.12.3-1ubuntu0.8_amd64.deb ...
+Unpacking libpython3.12-minimal:amd64 (3.12.3-1ubuntu0.8) over (3.12.3-1ubuntu0.3) ...
+Unpacking python3-setuptools (68.1.2-2ubuntu1.2) over (68.1.2-2ubuntu1.1) ...
+Preparing to unpack .../05-python3-setuptools_68.1.2-2ubuntu1.2_all.deb ...
+Preparing to unpack .../06-python3-pkg-resources_68.1.2-2ubuntu1.2_all.deb ...
+Unpacking python3-pkg-resources (68.1.2-2ubuntu1.2) over (68.1.2-2ubuntu1.1) ...
+Selecting previously unselected package python3-pip-whl.
+Preparing to unpack .../07-python3-pip-whl_24.0+dfsg-1ubuntu1.3_all.deb ...
+Unpacking python3-pip-whl (24.0+dfsg-1ubuntu1.3) ...
+Unpacking python3-setuptools (68.1.2-2ubuntu1.2) over (68.1.2-2ubuntu1.1) ...
+Selecting previously unselected package python3-setuptools-whl.
+Preparing to unpack .../08-python3-setuptools-whl_68.1.2-2ubuntu1.2_all.deb ...
+Unpacking python3-setuptools-whl (68.1.2-2ubuntu1.2) ...
+Selecting previously unselected package python3.12-venv.
+Preparing to unpack .../06-python3-pkg-resources_68.1.2-2ubuntu1.2_all.deb ...
+Preparing to unpack .../09-python3.12-venv_3.12.3-1ubuntu0.8_amd64.deb ...
+Unpacking python3.12-venv (3.12.3-1ubuntu0.8) ...
+Selecting previously unselected package python3-venv.
+Preparing to unpack .../10-python3-venv_3.12.3-0ubuntu2_amd64.deb ...
+Unpacking python3-venv (3.12.3-0ubuntu2) ...
+Unpacking python3-pkg-resources (68.1.2-2ubuntu1.2) over (68.1.2-2ubuntu1.1) ...
+Setting up python3-pkg-resources (68.1.2-2ubuntu1.2) ...
+Selecting previously unselected package python3-pip-whl.
+Preparing to unpack .../07-python3-pip-whl_24.0+dfsg-1ubuntu1.3_all.deb ...
+Unpacking python3-pip-whl (24.0+dfsg-1ubuntu1.3) ...
+Selecting previously unselected package python3-setuptools-whl.
+Preparing to unpack .../08-python3-setuptools-whl_68.1.2-2ubuntu1.2_all.deb ...
+Unpacking python3-setuptools-whl (68.1.2-2ubuntu1.2) ...
+Selecting previously unselected package python3.12-venv.
+Preparing to unpack .../09-python3.12-venv_3.12.3-1ubuntu0.8_amd64.deb ...
+Unpacking python3.12-venv (3.12.3-1ubuntu0.8) ...
+Selecting previously unselected package python3-venv.
+Preparing to unpack .../10-python3-venv_3.12.3-0ubuntu2_amd64.deb ...Setting up python3-setuptools-whl (68.1.2-2ubuntu1.2) ...
+
+Unpacking python3-venv (3.12.3-0ubuntu2) ...
+Setting up python3-setuptools (68.1.2-2ubuntu1.2) ...
+Setting up python3-pkg-resources (68.1.2-2ubuntu1.2) ...
+Setting up python3-setuptools-whl (68.1.2-2ubuntu1.2) ...
+Setting up python3-setuptools (68.1.2-2ubuntu1.2) ...
+Setting up python3-pip-whl (24.0+dfsg-1ubuntu1.3) ...
+Setting up libpython3.12-minimal:amd64 (3.12.3-1ubuntu0.8) ...
+Setting up python3.12-minimal (3.12.3-1ubuntu0.8) ...
+Setting up python3-pip-whl (24.0+dfsg-1ubuntu1.3) ...
+Setting up libpython3.12-minimal:amd64 (3.12.3-1ubuntu0.8) ...
+Setting up python3.12-minimal (3.12.3-1ubuntu0.8) ...
+Setting up libpython3.12-stdlib:amd64 (3.12.3-1ubuntu0.8) ...
+Setting up python3.12 (3.12.3-1ubuntu0.8) ...
+Setting up libpython3.12-stdlib:amd64 (3.12.3-1ubuntu0.8) ...
+Setting up python3.12 (3.12.3-1ubuntu0.8) ...
+Setting up libpython3.12t64:amd64 (3.12.3-1ubuntu0.8) ...
+Setting up python3.12-venv (3.12.3-1ubuntu0.8) ...
+Setting up python3-venv (3.12.3-0ubuntu2) ...
+Processing triggers for systemd (255.4-1ubuntu8.4) ...
+Processing triggers for man-db (2.12.0-4build2) ...
+Setting up libpython3.12t64:amd64 (3.12.3-1ubuntu0.8) ...
+Setting up python3.12-venv (3.12.3-1ubuntu0.8) ...
+Setting up python3-venv (3.12.3-0ubuntu2) ...
+Processing triggers for systemd (255.4-1ubuntu8.4) ...
+Processing triggers for man-db (2.12.0-4build2) ...
+Processing triggers for libc-bin (2.39-0ubuntu8.3) ...
+Processing triggers for libc-bin (2.39-0ubuntu8.3) ...
+debconf: unable to initialize frontend: Dialog
+debconf: (Dialog frontend will not work on a dumb terminal, an emacs shell buffer, or without a controlling terminal.)
+debconf: falling back to frontend: Readline
+debconf: unable to initialize frontend: Dialog
+debconf: (Dialog frontend will not work on a dumb terminal, an emacs shell buffer, or without a controlling terminal.)
+debconf: falling back to frontend: Readline
+debconf: unable to initialize frontend: Readline
+debconf: (This frontend requires a controlling tty.)
+debconf: falling back to frontend: Teletype
+debconf: unable to initialize frontend: Readline
+debconf: (This frontend requires a controlling tty.)
+debconf: falling back to frontend: Teletype
+
+Running kernel seems to be up-to-date.
+
+Restarting services...
+
+Running kernel seems to be up-to-date.
+
+Restarting services...
+
+Service restarts being deferred:
+ systemctl restart unattended-upgrades.service
+
+No containers need to be restarted.
+
+No user sessions are running outdated binaries.
+
+No VM guests are running outdated hypervisor (qemu) binaries on this host.
+
+Service restarts being deferred:
+ systemctl restart unattended-upgrades.service
+
+No containers need to be restarted.
+
+No user sessions are running outdated binaries.
+
+No VM guests are running outdated hypervisor (qemu) binaries on this host.
+Creating virtual environment...
+Creating virtual environment...
+Installing Python dependencies...
+Installing Python dependencies...
+Collecting pyyaml (from -r requirements.txt (line 2))
+Collecting pyyaml (from -r requirements.txt (line 2))
+  Downloading pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (2.4 kB)
+  Downloading pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (2.4 kB)
+Collecting huggingface_hub[cli,hf_transfer] (from -r requirements.txt (line 1))
+  Downloading huggingface_hub-0.35.3-py3-none-any.whl.metadata (14 kB)
+Collecting huggingface_hub[cli,hf_transfer] (from -r requirements.txt (line 1))
+  Downloading huggingface_hub-0.35.3-py3-none-any.whl.metadata (14 kB)
+Collecting filelock (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+  Downloading filelock-3.19.1-py3-none-any.whl.metadata (2.1 kB)
+Collecting filelock (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+  Downloading filelock-3.19.1-py3-none-any.whl.metadata (2.1 kB)
+Collecting fsspec>=2023.5.0 (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+  Downloading fsspec-2025.9.0-py3-none-any.whl.metadata (10 kB)
+Collecting fsspec>=2023.5.0 (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+  Downloading fsspec-2025.9.0-py3-none-any.whl.metadata (10 kB)
+Collecting packaging>=20.9 (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+Collecting packaging>=20.9 (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+  Downloading packaging-25.0-py3-none-any.whl.metadata (3.3 kB)
+  Downloading packaging-25.0-py3-none-any.whl.metadata (3.3 kB)
+Collecting requests (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+Collecting requests (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+  Downloading requests-2.32.5-py3-none-any.whl.metadata (4.9 kB)
+  Downloading requests-2.32.5-py3-none-any.whl.metadata (4.9 kB)
+Collecting tqdm>=4.42.1 (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+  Downloading tqdm-4.67.1-py3-none-any.whl.metadata (57 kB)
+Collecting tqdm>=4.42.1 (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 57.7/57.7 kB 3.0 MB/s eta 0:00:00
+  Downloading tqdm-4.67.1-py3-none-any.whl.metadata (57 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 57.7/57.7 kB 2.9 MB/s eta 0:00:00
+Collecting typing-extensions>=3.7.4.3 (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+  Downloading typing_extensions-4.15.0-py3-none-any.whl.metadata (3.3 kB)
+Collecting typing-extensions>=3.7.4.3 (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+  Downloading typing_extensions-4.15.0-py3-none-any.whl.metadata (3.3 kB)
+Collecting hf-xet<2.0.0,>=1.1.3 (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+  Downloading hf_xet-1.1.10-cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (4.7 kB)
+Collecting hf-xet<2.0.0,>=1.1.3 (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+  Downloading hf_xet-1.1.10-cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (4.7 kB)
+Collecting InquirerPy==0.3.4 (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+  Downloading InquirerPy-0.3.4-py3-none-any.whl.metadata (8.1 kB)
+Collecting InquirerPy==0.3.4 (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+  Downloading InquirerPy-0.3.4-py3-none-any.whl.metadata (8.1 kB)
+Collecting hf-transfer>=0.1.4 (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+  Downloading hf_transfer-0.1.9-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (1.7 kB)
+Collecting pfzy<0.4.0,>=0.3.1 (from InquirerPy==0.3.4->huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+Collecting hf-transfer>=0.1.4 (from huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+  Downloading pfzy-0.3.4-py3-none-any.whl.metadata (4.9 kB)
+  Downloading hf_transfer-0.1.9-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (1.7 kB)
+Collecting prompt-toolkit<4.0.0,>=3.0.1 (from InquirerPy==0.3.4->huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+  Downloading prompt_toolkit-3.0.52-py3-none-any.whl.metadata (6.4 kB)
+Collecting pfzy<0.4.0,>=0.3.1 (from InquirerPy==0.3.4->huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+  Downloading pfzy-0.3.4-py3-none-any.whl.metadata (4.9 kB)
+Collecting prompt-toolkit<4.0.0,>=3.0.1 (from InquirerPy==0.3.4->huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+  Downloading prompt_toolkit-3.0.52-py3-none-any.whl.metadata (6.4 kB)
+Collecting charset_normalizer<4,>=2 (from requests->huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+  Downloading charset_normalizer-3.4.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (36 kB)
+Collecting idna<4,>=2.5 (from requests->huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+  Downloading idna-3.10-py3-none-any.whl.metadata (10 kB)
+Collecting charset_normalizer<4,>=2 (from requests->huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+Collecting urllib3<3,>=1.21.1 (from requests->huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+  Downloading charset_normalizer-3.4.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (36 kB)
+  Downloading urllib3-2.5.0-py3-none-any.whl.metadata (6.5 kB)
+Collecting idna<4,>=2.5 (from requests->huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+Collecting certifi>=2017.4.17 (from requests->huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+  Downloading idna-3.10-py3-none-any.whl.metadata (10 kB)
+  Downloading certifi-2025.10.5-py3-none-any.whl.metadata (2.5 kB)
+Collecting wcwidth (from prompt-toolkit<4.0.0,>=3.0.1->InquirerPy==0.3.4->huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+Collecting urllib3<3,>=1.21.1 (from requests->huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+  Downloading wcwidth-0.2.14-py2.py3-none-any.whl.metadata (15 kB)
+  Downloading urllib3-2.5.0-py3-none-any.whl.metadata (6.5 kB)
+Downloading InquirerPy-0.3.4-py3-none-any.whl (67 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 67.7/67.7 kB 8.0 MB/s eta 0:00:00
+Collecting certifi>=2017.4.17 (from requests->huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+Downloading pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (807 kB)
+  Downloading certifi-2025.10.5-py3-none-any.whl.metadata (2.5 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 807.9/807.9 kB 22.5 MB/s eta 0:00:00
+Downloading fsspec-2025.9.0-py3-none-any.whl (199 kB)
+Collecting wcwidth (from prompt-toolkit<4.0.0,>=3.0.1->InquirerPy==0.3.4->huggingface_hub[cli,hf_transfer]->-r requirements.txt (line 1))
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 199.3/199.3 kB 19.3 MB/s eta 0:00:00
+  Downloading wcwidth-0.2.14-py2.py3-none-any.whl.metadata (15 kB)
+Downloading hf_transfer-0.1.9-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (3.6 MB)
+Downloading InquirerPy-0.3.4-py3-none-any.whl (67 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 67.7/67.7 kB 7.9 MB/s eta 0:00:00
+Downloading pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (807 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.6/3.6 MB 73.3 MB/s eta 0:00:00
+Downloading hf_xet-1.1.10-cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (3.2 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 807.9/807.9 kB 23.0 MB/s eta 0:00:00
+Downloading fsspec-2025.9.0-py3-none-any.whl (199 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 199.3/199.3 kB 18.2 MB/s eta 0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.2/3.2 MB 67.1 MB/s eta 0:00:00
+Downloading hf_transfer-0.1.9-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (3.6 MB)
+Downloading packaging-25.0-py3-none-any.whl (66 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 66.5/66.5 kB 6.7 MB/s eta 0:00:00
+Downloading tqdm-4.67.1-py3-none-any.whl (78 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 78.5/78.5 kB 7.6 MB/s eta 0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.6/3.6 MB 78.1 MB/s eta 0:00:00
+Downloading typing_extensions-4.15.0-py3-none-any.whl (44 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 44.6/44.6 kB 4.3 MB/s eta 0:00:00Downloading hf_xet-1.1.10-cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (3.2 MB)
+
+Downloading filelock-3.19.1-py3-none-any.whl (15 kB)
+Downloading huggingface_hub-0.35.3-py3-none-any.whl (564 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 564.3/564.3 kB 37.7 MB/s eta 0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.2/3.2 MB 51.5 MB/s eta 0:00:00
+Downloading requests-2.32.5-py3-none-any.whl (64 kB)
+Downloading packaging-25.0-py3-none-any.whl (66 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 64.7/64.7 kB 6.1 MB/s eta 0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 66.5/66.5 kB 6.7 MB/s eta 0:00:00
+Downloading certifi-2025.10.5-py3-none-any.whl (163 kB)
+Downloading tqdm-4.67.1-py3-none-any.whl (78 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 163.3/163.3 kB 11.1 MB/s eta 0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 78.5/78.5 kB 7.9 MB/s eta 0:00:00
+Downloading charset_normalizer-3.4.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (151 kB)
+Downloading typing_extensions-4.15.0-py3-none-any.whl (44 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 44.6/44.6 kB 4.4 MB/s eta 0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 151.8/151.8 kB 14.1 MB/s eta 0:00:00
+Downloading filelock-3.19.1-py3-none-any.whl (15 kB)
+Downloading idna-3.10-py3-none-any.whl (70 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 70.4/70.4 kB 7.5 MB/s eta 0:00:00
+Downloading huggingface_hub-0.35.3-py3-none-any.whl (564 kB)
+Downloading pfzy-0.3.4-py3-none-any.whl (8.5 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 564.3/564.3 kB 38.0 MB/s eta 0:00:00
+Downloading requests-2.32.5-py3-none-any.whl (64 kB)
+Downloading prompt_toolkit-3.0.52-py3-none-any.whl (391 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 64.7/64.7 kB 6.7 MB/s eta 0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 391.4/391.4 kB 29.8 MB/s eta 0:00:00
+Downloading certifi-2025.10.5-py3-none-any.whl (163 kB)
+Downloading urllib3-2.5.0-py3-none-any.whl (129 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 163.3/163.3 kB 16.7 MB/s eta 0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 129.8/129.8 kB 13.5 MB/s eta 0:00:00
+Downloading charset_normalizer-3.4.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (151 kB)
+Downloading wcwidth-0.2.14-py2.py3-none-any.whl (37 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 151.8/151.8 kB 13.2 MB/s eta 0:00:00
+Downloading idna-3.10-py3-none-any.whl (70 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 70.4/70.4 kB 7.1 MB/s eta 0:00:00
+Downloading pfzy-0.3.4-py3-none-any.whl (8.5 kB)
+Downloading prompt_toolkit-3.0.52-py3-none-any.whl (391 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 391.4/391.4 kB 31.9 MB/s eta 0:00:00
+Downloading urllib3-2.5.0-py3-none-any.whl (129 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 129.8/129.8 kB 13.7 MB/s eta 0:00:00
+Downloading wcwidth-0.2.14-py2.py3-none-any.whl (37 kB)
+Installing collected packages: wcwidth, urllib3, typing-extensions, tqdm, pyyaml, pfzy, packaging, idna, hf-xet, hf-transfer, fsspec, filelock, charset_normalizer, certifi, requests, prompt-toolkit, InquirerPy, huggingface_hub
+Installing collected packages: wcwidth, urllib3, typing-extensions, tqdm, pyyaml, pfzy, packaging, idna, hf-xet, hf-transfer, fsspec, filelock, charset_normalizer, certifi, requests, prompt-toolkit, InquirerPy, huggingface_hub
+Successfully installed InquirerPy-0.3.4 certifi-2025.10.5 charset_normalizer-3.4.3 filelock-3.19.1 fsspec-2025.9.0 hf-transfer-0.1.9 hf-xet-1.1.10 huggingface_hub-0.35.3 idna-3.10 packaging-25.0 pfzy-0.3.4 prompt-toolkit-3.0.52 pyyaml-6.0.3 requests-2.32.5 tqdm-4.67.1 typing-extensions-4.15.0 urllib3-2.5.0 wcwidth-0.2.14
+Successfully installed InquirerPy-0.3.4 certifi-2025.10.5 charset_normalizer-3.4.3 filelock-3.19.1 fsspec-2025.9.0 hf-transfer-0.1.9 hf-xet-1.1.10 huggingface_hub-0.35.3 idna-3.10 packaging-25.0 pfzy-0.3.4 prompt-toolkit-3.0.52 pyyaml-6.0.3 requests-2.32.5 tqdm-4.67.1 typing-extensions-4.15.0 urllib3-2.5.0 wcwidth-0.2.14
+Setup complete!
+Setup complete!
+📊 Running benchmarks for 3 server-model combination(s) across 3 server(s)
+🚀 Parallel mode: Servers will run in parallel (max workers: 3)
+
+
+================================================================================
+Starting benchmarks for server: rtx4090_x_1
+================================================================================
+
+
+================================================================================
+Server: rtx4090_x_1 | Model: QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ
+================================================================================
+
+🚀 Starting benchmarks for model: QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ
+📡 Connecting to: riftuser@142.214.185.238 (rtx4090_x_1)
+📦 Setting up repository on remote server...
+
+================================================================================
+Starting benchmarks for server: rtx4090_x_2
+================================================================================
+
+
+================================================================================
+Server: rtx4090_x_2 | Model: QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ
+================================================================================
+
+🚀 Starting benchmarks for model: QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ
+📡 Connecting to: riftuser@142.214.185.150 (rtx4090_x_2)
+📦 Setting up repository on remote server...
+
+================================================================================
+Starting benchmarks for server: rtx4090_x_4
+================================================================================
+
+
+================================================================================
+Server: rtx4090_x_4 | Model: QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ
+================================================================================
+
+🚀 Starting benchmarks for model: QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ
+📡 Connecting to: riftuser@142.214.185.230 (rtx4090_x_4)
+📦 Setting up repository on remote server...
+✅ Repository ready on remote server
+🔧 Installing dependencies on remote server...
+✅ Repository ready on remote server
+🔧 Installing dependencies on remote server...
+✅ Repository ready on remote server
+🔧 Installing dependencies on remote server...
+✅ Dependencies installed successfully
+⚠️  Warning: No benchmark scripts found matching pattern [0-9]*_*.sh
+❌ No benchmark steps found. Ensure scripts follow naming convention: <step_index>_<benchmark_name>.sh
+
+================================================================================
+Completed benchmarks for server: rtx4090_x_1
+================================================================================
+
+✅ Dependencies installed successfully
+✅ Dependencies installed successfully
+⚠️  Warning: No benchmark scripts found matching pattern [0-9]*_*.sh
+❌ No benchmark steps found. Ensure scripts follow naming convention: <step_index>_<benchmark_name>.sh
+
+================================================================================
+Completed benchmarks for server: rtx4090_x_2
+================================================================================
+
+⚠️  Warning: No benchmark scripts found matching pattern [0-9]*_*.sh
+❌ No benchmark steps found. Ensure scripts follow naming convention: <step_index>_<benchmark_name>.sh
+
+================================================================================
+Completed benchmarks for server: rtx4090_x_4
+================================================================================
+
+
+================================================================================
+📋 SUMMARY
+================================================================================
+
+✅ Successful: 0/3
+
+❌ Failed: 3/3
+   - rtx4090_x_1 × QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ
+   - rtx4090_x_2 × QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ
+   - rtx4090_x_4 × QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ
+
+🎉 All done!

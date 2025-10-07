@@ -4,7 +4,7 @@ set -e  # Exit on error
 
 echo "Installing system dependencies..."
 sudo apt update
-sudo apt install -y python3-venv
+sudo apt install -y python3-venv docker-compose-v2
 
 echo "Creating virtual environment..."
 python3 -m venv venv

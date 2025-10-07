@@ -42,6 +42,7 @@ echo "" | tee -a $BENCHMARK_RESULTS_FILE
 # Generate docker-compose configuration
 COMPOSE_FILE=$(mktemp --suffix=.yml)
 NGINX_CONF=$(mktemp --suffix=.conf)
+chmod 666 $COMPOSE_FILE $NGINX_CONF  # Make writable for sudo python
 
 echo "Generating docker-compose configuration..."
 if [ $NUM_INSTANCES -gt 1 ]; then

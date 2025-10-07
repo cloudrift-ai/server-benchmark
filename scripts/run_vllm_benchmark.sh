@@ -56,9 +56,9 @@ sudo -E docker run --rm --gpus all \
 # Wait until model is loaded and server is ready
 echo "Waiting for vLLM server to start and model to load..."
 
-# Check every 10 seconds for up to 10 minutes (60 checks)
-MAX_WAIT_TIME=600  # 10 minutes
-CHECK_INTERVAL=10  # 10 seconds
+# Check every 10 seconds for up to 30 minutes (180 checks)
+MAX_WAIT_TIME=1800  # 30 minutes
+CHECK_INTERVAL=10   # 10 seconds
 MAX_CHECKS=$((MAX_WAIT_TIME / CHECK_INTERVAL))
 
 for i in $(seq 1 $MAX_CHECKS); do

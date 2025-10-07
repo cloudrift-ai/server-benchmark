@@ -35,7 +35,7 @@ servers:
       - "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
 
 # Results will be saved with flat structure using prefixes:
-#   {local_results_dir}/{server_name}_{model_name}_system_info_results.txt
-#   {local_results_dir}/{server_name}_{model_name}_hf_download_results.txt
-#   {local_results_dir}/{server_name}_{model_name}_vllm_benchmark_results.txt
-#   {local_results_dir}/{server_name}_{model_name}_yabs_results.txt
+#   {local_results_dir}/{server_name}_{model_name}_system_info.txt
+#   {local_results_dir}/{server_name}_{model_name}_hf_download.txt
+#   {local_results_dir}/{server_name}_{model_name}_vllm_benchmark.txt
+#   {local_results_dir}/{server_name}_{model_name}_yabs.txt

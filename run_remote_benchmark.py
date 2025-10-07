@@ -7,7 +7,7 @@ It supports multiple servers and models, running all combinations.
 It will skip benchmarks if the results file already exists locally.
 
 Benchmark scripts follow the naming convention: <step_index>_<benchmark_name>.sh
-Result files follow the naming convention: <benchmark_name>_results.txt
+Result files follow the naming convention: <benchmark_name>.txt
 """
 
 import argparse
@@ -17,7 +17,7 @@ import subprocess
 import time
 import re
 from pathlib import Path
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import yaml
@@ -237,12 +237,39 @@ def run_benchmark_step(server: dict, model_name: str, config: dict, step_name: s
     return success
 
 
-def discover_benchmarks(server: dict) -> List[Tuple[str, str, str]]:
+def extract_benchmark_name(script_name: str) -> str:
+    """Extract benchmark name from script name.
+
+    Example: '1_system_info.sh' -> 'system_info'
+    """
+    match = re.match(r'\d+_(.+)\.sh$', script_name)
+    if match:
+        return match.group(1)
+    return script_name
+
+
+def get_benchmark_display_name(benchmark_name: str) -> str:
+    """Convert benchmark_name to a display name.
+
+    Example: 'system_info' -> 'System Info'
+    """
+    return benchmark_name.replace('_', ' ').title()
+
+
+def get_benchmark_result_file(benchmark_name: str) -> str:
+    """Get the result file name for a benchmark.
+
+    Example: 'system_info' -> 'system_info.txt'
+    """
+    return f"{benchmark_name}.txt"
+
+
+def discover_benchmarks(server: dict) -> List[str]:
     """Discover benchmark scripts from the remote server's benchmarks directory.
 
-    Returns a list of tuples: (display_name, script_name, result_file)
+    Returns a list of script names (e.g., ['1_system_info.sh', '2_hf_download.sh']).
     Scripts must follow naming convention: <step_index>_<benchmark_name>.sh
-    Result files follow convention: <benchmark_name>_results.txt
+    Result files follow convention: <benchmark_name>.txt
     """
     ssh_key = expand_path(server['ssh_key'])
     address = server['address']
@@ -266,25 +293,16 @@ def discover_benchmarks(server: dict) -> List[Tuple[str, str, str]]:
             print("⚠️  Warning: No benchmark scripts found matching pattern [0-9]*_*.sh")
             return []
 
-        benchmarks = []
+        script_names = []
         for script_path in script_paths:
             # Extract filename from path
             script_name = script_path.split('/')[-1]
 
-            # Parse: <step_index>_<benchmark_name>.sh
-            match = re.match(r'(\d+)_(.+)\.sh$', script_name)
-            if match:
-                step_index, benchmark_name = match.groups()
+            # Validate: <step_index>_<benchmark_name>.sh
+            if re.match(r'\d+_.+\.sh$', script_name):
+                script_names.append(script_name)
 
-                # Create display name (capitalize and replace underscores)
-                display_name = benchmark_name.replace('_', ' ').title()
-
-                # Result file convention: <benchmark_name>_results.txt
-                result_file = f"{benchmark_name}_results.txt"
-
-                benchmarks.append((display_name, script_name, result_file))
-
-        return benchmarks
+        return script_names
     except subprocess.CalledProcessError as e:
         print(f"⚠️  Warning: Failed to discover benchmarks: {e}")
         return []
@@ -299,23 +317,30 @@ def run_benchmark(server: dict, model_name: str, config: dict, force: bool = Fal
     if not setup_remote_repo(server):
         return False
 
-    # Discover benchmark steps from remote server
-    steps = discover_benchmarks(server)
+    # Discover benchmark scripts from remote server
+    script_names = discover_benchmarks(server)
 
-    if not steps:
+    if not script_names:
         print("❌ No benchmark steps found. Ensure scripts follow naming convention: <step_index>_<benchmark_name>.sh")
         return False
 
-    print(f"\n📋 Found {len(steps)} benchmark step(s):")
-    for display_name, script_name, result_file in steps:
-        print(f"   • {display_name} ({script_name} → {result_file})")
+    print(f"\n📋 Found {len(script_names)} benchmark step(s):")
+    for script_name in script_names:
+        benchmark_name = extract_benchmark_name(script_name)
+        display_name = get_benchmark_display_name(benchmark_name)
+        result_file = get_benchmark_result_file(benchmark_name)
+        print(f"   • {display_name} → {result_file}")
 
     all_success = True
-    for step_name, script_name, result_file in steps:
+    for script_name in script_names:
+        benchmark_name = extract_benchmark_name(script_name)
+        display_name = get_benchmark_display_name(benchmark_name)
+        result_file = get_benchmark_result_file(benchmark_name)
+
         print(f"\n{'─'*60}")
-        success = run_benchmark_step(server, model_name, config, step_name, script_name, result_file, force)
+        success = run_benchmark_step(server, model_name, config, display_name, script_name, result_file, force)
         if not success:
-            print(f"⚠️  Warning: {step_name} failed")
+            print(f"⚠️  Warning: {display_name} failed")
             all_success = False
         print(f"{'─'*60}")
 

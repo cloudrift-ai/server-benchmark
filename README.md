@@ -14,10 +14,27 @@ Install dependencies:
 ```bash
 ./setup.sh
 ```
-Run individual benchmarks:
+
+Run benchmarks automatically via SSH on remote servers:
 ```bash
-./benchmarks/run_system_info.sh
-./benchmarks/run_hf_download.sh
-./benchmarks/run_vllm_benchmark.sh
-./benchmarks/run_yabs.sh
+./run_remote_benchmark.py
 ```
+
+Or run individual benchmarks manually:
+```bash
+./benchmarks/1_system_info.sh
+./benchmarks/2_hf_download.sh
+./benchmarks/3_vllm_benchmark.sh
+./benchmarks/4_yabs.sh
+```
+
+## Benchmark Naming Convention
+
+Benchmark scripts follow the naming convention: `<step_index>_<benchmark_name>.sh`
+- The script automatically discovers and runs benchmarks in order
+- Result files are named: `<benchmark_name>.txt`
+
+To add a new benchmark:
+1. Create a script: `benchmarks/5_my_benchmark.sh`
+2. Ensure it outputs to: `my_benchmark.txt`
+3. The script will be automatically discovered and run

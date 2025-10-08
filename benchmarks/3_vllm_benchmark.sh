@@ -109,8 +109,24 @@ fi
 
 # Start benchmark client container
 echo "Starting benchmark client container..."
-# Add delay to ensure Docker network is fully initialized
-sleep 3
+# Verify network exists and is stable
+NETWORK_NAME="vllm_benchmark_default"
+for i in {1..10}; do
+    if docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
+        echo "Network $NETWORK_NAME verified"
+        break
+    fi
+    echo "Waiting for network... (attempt $i/10)"
+    sleep 1
+done
+
+if ! docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
+    echo "❌ Network $NETWORK_NAME not found after waiting"
+    docker compose -f $COMPOSE_FILE -p vllm_benchmark down
+    rm -f $COMPOSE_FILE $NGINX_CONF
+    exit 1
+fi
+
 docker compose -f $COMPOSE_FILE -p vllm_benchmark --profile tools up -d benchmark
 # Wait for benchmark client to be running
 sleep 2

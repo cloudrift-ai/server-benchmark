@@ -43,6 +43,9 @@ servers:
       - name: "Qwen/Qwen2.5-72B-Instruct-AWQ"
         tensor_parallel_size: 2  # 72B model uses 2 GPUs per instance
         num_instances: 2         # Run 2 instances (GPU 0-1, GPU 2-3)
+      - name: "QuantTrio/GLM-4.5-AWQ"
+        tensor_parallel_size: 2  # GLM-4.5 uses 2 GPUs per instance
+        num_instances: 2         # Run 2 instances (GPU 0-1, GPU 2-3)
 
   - name: "rtx5090_x_1"
     address: "riftuser@217.138.104.159"
@@ -72,6 +75,9 @@ servers:
         tensor_parallel_size: 1
         num_instances: 4
       - name: "Qwen/Qwen2.5-72B-Instruct-AWQ"
+        tensor_parallel_size: 2
+        num_instances: 2
+      - name: "QuantTrio/GLM-4.5-AWQ"
         tensor_parallel_size: 2
         num_instances: 2
 

@@ -1,0 +1,6 @@
+Model: kosbu/Llama-3.3-70B-Instruct-AWQ
+---------------------------------
+Downloading model: kosbu/Llama-3.3-70B-Instruct-AWQ...
+Model download complete! Saved to: /hf_models/kosbu/Llama-3.3-70B-Instruct-AWQ
+Download took 70.72 seconds.
+Average download speed: 4292.23 MiB/s

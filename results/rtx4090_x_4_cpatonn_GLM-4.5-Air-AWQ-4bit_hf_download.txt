@@ -1,0 +1,6 @@
+Model: cpatonn/GLM-4.5-Air-AWQ-4bit
+---------------------------------
+Downloading model: cpatonn/GLM-4.5-Air-AWQ-4bit...
+Model download complete! Saved to: /hf_models/cpatonn/GLM-4.5-Air-AWQ-4bit
+Download took 94.80 seconds.
+Average download speed: 5104.68 MiB/s

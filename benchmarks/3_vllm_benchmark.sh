@@ -129,7 +129,18 @@ BENCHMARK_CMD="vllm bench serve \
     --base-url $BENCHMARK_ENDPOINT"
 
 echo "Running benchmark (endpoint: $BENCHMARK_ENDPOINT)..."
-docker exec vllm_benchmark_client bash -c "$BENCHMARK_CMD" | awk '/^============/ {found=1} found' > $BENCHMARK_RESULTS_FILE
+# Capture full output to temp file, then filter for results
+TEMP_OUTPUT=$(mktemp)
+if docker exec vllm_benchmark_client bash -c "$BENCHMARK_CMD" > "$TEMP_OUTPUT" 2>&1; then
+    # Extract results section
+    awk '/^============/ {found=1} found' "$TEMP_OUTPUT" > $BENCHMARK_RESULTS_FILE
+    rm -f "$TEMP_OUTPUT"
+else
+    echo "❌ Benchmark command failed. Output:"
+    cat "$TEMP_OUTPUT"
+    rm -f "$TEMP_OUTPUT"
+    exit 1
+fi
 
 # Stop all services
 echo "Stopping containers..."

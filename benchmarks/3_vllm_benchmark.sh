@@ -103,10 +103,6 @@ fi
 echo "Starting benchmark client container..."
 docker compose -f $COMPOSE_FILE -p vllm_benchmark --profile tools up -d benchmark
 
-# Install benchmark dependencies in benchmark container
-echo "Installing benchmark dependencies..."
-docker exec vllm_benchmark_client pip install vllm pandas datasets
-
 # Determine benchmark endpoint
 if [ $NUM_INSTANCES -gt 1 ]; then
     BENCHMARK_ENDPOINT="http://nginx_lb:8080"

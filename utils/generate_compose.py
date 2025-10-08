@@ -88,12 +88,20 @@ def generate_benchmark_service(hf_directory: str, hf_token: str) -> str:
     """Generate benchmark client service definition."""
     return f"""
   benchmark:
-    image: python:3.12-slim
+    image: vllm/vllm-openai:latest
     container_name: vllm_benchmark_client
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
     volumes:
       - {hf_directory}:{hf_directory}
     environment:
       - HUGGING_FACE_HUB_TOKEN={hf_token}
+      - CUDA_VISIBLE_DEVICES=0
     command: sleep infinity
     profiles:
       - tools

@@ -73,10 +73,23 @@ docker compose -f $COMPOSE_FILE -p vllm_benchmark down 2>/dev/null || true
 # Start all services and wait for health
 echo "Starting containers (may take up to 30min for multi-GPU)..."
 
-# Start containers and wait for health
-if docker compose -f $COMPOSE_FILE -p vllm_benchmark up -d --wait --wait-timeout 1800; then
+# Start containers and wait for health in background
+docker compose -f $COMPOSE_FILE -p vllm_benchmark up -d --wait --wait-timeout 1800 &
+UP_PID=$!
+
+# Give containers a moment to be created, then start streaming logs
+sleep 2
+docker compose -f $COMPOSE_FILE -p vllm_benchmark logs -f &
+LOGS_PID=$!
+
+# Wait for the up command to complete
+if wait $UP_PID; then
+    kill $LOGS_PID 2>/dev/null || true
+    wait $LOGS_PID 2>/dev/null || true
     echo "✅ Containers healthy"
 else
+    kill $LOGS_PID 2>/dev/null || true
+    wait $LOGS_PID 2>/dev/null || true
     echo "❌ Container startup failed or timeout"
     echo "Container status:"
     docker compose -f $COMPOSE_FILE -p vllm_benchmark ps

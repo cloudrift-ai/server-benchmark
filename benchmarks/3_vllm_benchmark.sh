@@ -19,10 +19,7 @@ HF_DIRECTORY="${HF_DIRECTORY:-/hf_models}"
 set +o allexport
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
-# Pre-download the model
-echo "Downloading model $MODEL_NAME..."
-sudo -E ./venv/bin/python utils/download_model.py --model-name $MODEL_NAME --hg-dir $HF_DIRECTORY/$MODEL_NAME
-
+# Model was already downloaded in 2_hf_download.sh
 MODEL_PATH="$HF_DIRECTORY/$MODEL_NAME"
 
 # Calculate GPU assignments

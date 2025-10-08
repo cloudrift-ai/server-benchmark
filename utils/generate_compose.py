@@ -89,13 +89,18 @@ def generate_benchmark_service(hf_directory: str, hf_token: str) -> str:
   benchmark:
     image: vllm/vllm-openai:latest
     container_name: vllm_benchmark_client
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     volumes:
       - {hf_directory}:{hf_directory}
     environment:
       - HUGGING_FACE_HUB_TOKEN={hf_token}
       - CUDA_VISIBLE_DEVICES=""
-      - VLLM_TARGET_DEVICE=cpu
-      - VLLM_WORKER_MULTIPROC_METHOD=spawn
     entrypoint: ["/bin/bash", "-c"]
     command: ["sleep infinity"]
     profiles:

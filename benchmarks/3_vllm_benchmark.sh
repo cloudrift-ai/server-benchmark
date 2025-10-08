@@ -148,12 +148,22 @@ fi
 awk '/^============ Serving Benchmark Result ============$/ {found=1} found' "$TEMP_OUTPUT" > $BENCHMARK_RESULTS_FILE
 rm -f "$TEMP_OUTPUT"
 
+# Append docker-compose config and benchmark command to results file
+echo "" >> $BENCHMARK_RESULTS_FILE
+echo "============ Docker Compose Configuration ============" >> $BENCHMARK_RESULTS_FILE
+cat $COMPOSE_FILE >> $BENCHMARK_RESULTS_FILE
+echo "" >> $BENCHMARK_RESULTS_FILE
+echo "============ Benchmark Command ============" >> $BENCHMARK_RESULTS_FILE
+echo "$BENCHMARK_CMD" >> $BENCHMARK_RESULTS_FILE
+echo "==================================================" >> $BENCHMARK_RESULTS_FILE
+
 # Stop all services
 echo "Stopping containers..."
 docker compose -f $COMPOSE_FILE -p vllm_benchmark down
 
-# Clean up temporary files
-rm -f $COMPOSE_FILE $NGINX_CONF
+# Keep docker-compose files for inspection (don't delete)
+echo "Docker compose files kept at: $COMPOSE_FILE"
+[ -f "$NGINX_CONF" ] && echo "Nginx config kept at: $NGINX_CONF"
 
 echo "✅ Benchmark completed"
 echo "Results:"

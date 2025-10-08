@@ -50,7 +50,6 @@ def generate_vllm_service(instance_id: int, gpu_list: str, port: int,
     shm_size: '16gb'
     ipc: host
     command: >
-      --disable-log-requests
       --trust-remote-code
       --max-model-len=8192
       --gpu-memory-utilization=0.90
@@ -144,7 +143,7 @@ def generate_compose_file(
 ) -> str:
     """Generate complete docker-compose.yml content."""
 
-    compose_content = "version: '3.8'\n\nservices:"
+    compose_content = "services:"
 
     # Add vLLM service instances
     for i in range(num_instances):

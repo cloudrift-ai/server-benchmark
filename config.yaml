@@ -92,7 +92,7 @@ servers:
         extra_args: "--dtype float16 --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel"
 
   - name: "pro6000_x_1"
-    address: "riftuser@74.81.65.21"
+    address: "riftuser@74.81.65.29"
     ssh_key: "~/.ssh/id_ed25519"
     port: 22
     models:

@@ -31,7 +31,7 @@ servers:
         num_instances: 2         # Run 2 instances for 2x throughput
       - name: "kosbu/Llama-3.3-70B-Instruct-AWQ"
         tensor_parallel_size: 2  # 72B model needs multi-GPU
-        extra_args: "--max-model-len 8192"
+        extra_args: "--max-model-len 4096"  # Reduced ctx
 
   - name: "rtx4090_x_4"
     address: "riftuser@142.214.185.230"
@@ -44,7 +44,7 @@ servers:
       - name: "kosbu/Llama-3.3-70B-Instruct-AWQ"
         tensor_parallel_size: 2  # 72B model uses 2 GPUs per instance
         num_instances: 2         # Run 2 instances (GPU 0-1, GPU 2-3)
-        extra_args: "--max-model-len 8192"
+        extra_args: "--max-model-len 4096"
       - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
         tensor_parallel_size: 4  # 106B model uses 4 GPUs
         extra_args: "--dtype float16 --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192"
@@ -67,7 +67,7 @@ servers:
         num_instances: 2
       - name: "kosbu/Llama-3.3-70B-Instruct-AWQ"
         tensor_parallel_size: 2
-        extra_args: "--max-model-len 8192"
+        extra_args: "--max-model-len 4096"  # Reduced ctx
 
   - name: "rtx5090_x_4"
     address: "riftuser@217.138.104.158"
@@ -80,7 +80,7 @@ servers:
       - name: "kosbu/Llama-3.3-70B-Instruct-AWQ"
         tensor_parallel_size: 2
         num_instances: 2
-        extra_args: "--max-model-len 8192"
+        extra_args: "--max-model-len 4096"  # Reduced ctx
       - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
         tensor_parallel_size: 4
         extra_args: "--dtype float16 --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192"

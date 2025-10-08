@@ -61,9 +61,18 @@ def setup_logging() -> str:
     file_handler.setFormatter(file_formatter)
     root_logger.addHandler(file_handler)
 
-    # Console handler - simpler format
+    # Console handler - custom format to split server.model into [server] [model]
     console_handler = logging.StreamHandler(sys.stdout)
-    console_formatter = logging.Formatter('[%(name)s] %(message)s')
+
+    class CustomConsoleFormatter(logging.Formatter):
+        def format(self, record):
+            # Split logger name into server and model parts
+            if '.' in record.name:
+                server, model = record.name.split('.', 1)
+                record.name = f"{server}] [{model}"
+            return super().format(record)
+
+    console_formatter = CustomConsoleFormatter('[%(name)s] %(message)s')
     console_handler.setFormatter(console_formatter)
     root_logger.addHandler(console_handler)
 
@@ -588,7 +597,8 @@ def run_server_benchmarks(server: dict, models: List, config: dict, force: bool 
 
         logger.info(f"Server: {server_name} | Model: {model_name}")
 
-        result = run_benchmark_combination(server, model_config, config, force, logger)
+        # Don't pass logger - let run_benchmark_combination create model-specific logger
+        result = run_benchmark_combination(server, model_config, config, force)
         results.append(result)
 
     logger.info(f"Completed benchmarks for server: {server_name}")

@@ -52,7 +52,7 @@ def generate_vllm_service(instance_id: int, gpu_list: str, port: int,
     command: >
       --trust-remote-code
       --max-model-len=4096
-      --gpu-memory-utilization=0.85
+      --gpu-memory-utilization=0.9
       --host 0.0.0.0
       --port 8000
       --tensor-parallel-size {tensor_parallel_size}
@@ -90,18 +90,11 @@ def generate_benchmark_service(hf_directory: str, hf_token: str) -> str:
   benchmark:
     image: vllm/vllm-openai:latest
     container_name: vllm_benchmark_client
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ['0']
-              capabilities: [gpu]
     volumes:
       - {hf_directory}:{hf_directory}
     environment:
       - HUGGING_FACE_HUB_TOKEN={hf_token}
-      - CUDA_VISIBLE_DEVICES=0
+      - CUDA_VISIBLE_DEVICES=""
     entrypoint: ["/bin/bash", "-c"]
     command: ["sleep infinity"]
     profiles:

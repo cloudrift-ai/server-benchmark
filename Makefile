@@ -13,28 +13,22 @@ help:
 	@echo "  test-compose   - Test docker-compose generation with sample config"
 
 setup:
-	@echo "Installing system dependencies..."
-	@sudo apt update
-	@sudo apt install -y make python3-venv
-	@echo "Creating virtual environment..."
-	@python3 -m venv venv
-	@echo "Installing Python dependencies..."
-	@./venv/bin/pip install -r requirements.txt
-	@echo "✅ Setup complete!"
-
-bench:
 	@if [ ! -d "venv" ]; then \
-		echo "❌ Virtual environment not found. Run 'make setup' first."; \
-		exit 1; \
+		echo "Installing system dependencies..."; \
+		sudo apt update; \
+		sudo apt install -y make python3-venv; \
+		echo "Creating virtual environment..."; \
+		python3 -m venv venv; \
+		echo "Installing Python dependencies..."; \
+		./venv/bin/pip install -r requirements.txt; \
+		echo "✅ Setup complete!"; \
 	fi
+
+bench: setup
 	@echo "Running benchmarks in parallel..."
 	./run_remote_benchmark.py --parallel
 
-bench-force:
-	@if [ ! -d "venv" ]; then \
-		echo "❌ Virtual environment not found. Run 'make setup' first."; \
-		exit 1; \
-	fi
+bench-force: setup
 	@echo "Running benchmarks in parallel (force mode)..."
 	./run_remote_benchmark.py --parallel --force
 

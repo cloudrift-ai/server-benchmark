@@ -41,29 +41,37 @@ COMPOSE_FILE="docker-compose.vllm.yml"
 NGINX_CONF="nginx.vllm.conf"
 if [ $NUM_INSTANCES -gt 1 ]; then
     # Multi-instance with nginx
-    ./venv/bin/python utils/generate_compose.py \
-        --num-instances $NUM_INSTANCES \
-        --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
-        --container-name $CONTAINER_NAME \
-        --model-path $MODEL_PATH \
-        --model-name "$MODEL_NAME" \
-        --hf-directory $HF_DIRECTORY \
-        --hf-token "${HUGGING_FACE_HUB_TOKEN:-}" \
-        --extra-args "$VLLM_EXTRA_ARGS" \
-        --output $COMPOSE_FILE \
+    COMPOSE_CMD=(
+        ./venv/bin/python utils/generate_compose.py
+        --num-instances $NUM_INSTANCES
+        --tensor-parallel-size $TENSOR_PARALLEL_SIZE
+        --container-name $CONTAINER_NAME
+        --model-path $MODEL_PATH
+        --model-name "$MODEL_NAME"
+        --hf-directory $HF_DIRECTORY
+        --hf-token "${HUGGING_FACE_HUB_TOKEN:-}"
+    )
+    [ -n "$VLLM_EXTRA_ARGS" ] && COMPOSE_CMD+=(--extra-args "$VLLM_EXTRA_ARGS")
+    COMPOSE_CMD+=(
+        --output $COMPOSE_FILE
         --nginx-conf-output $NGINX_CONF
+    )
+    "${COMPOSE_CMD[@]}"
 else
     # Single instance
-    ./venv/bin/python utils/generate_compose.py \
-        --num-instances $NUM_INSTANCES \
-        --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
-        --container-name $CONTAINER_NAME \
-        --model-path $MODEL_PATH \
-        --model-name "$MODEL_NAME" \
-        --hf-directory $HF_DIRECTORY \
-        --hf-token "${HUGGING_FACE_HUB_TOKEN:-}" \
-        --extra-args "$VLLM_EXTRA_ARGS" \
-        --output $COMPOSE_FILE
+    COMPOSE_CMD=(
+        ./venv/bin/python utils/generate_compose.py
+        --num-instances $NUM_INSTANCES
+        --tensor-parallel-size $TENSOR_PARALLEL_SIZE
+        --container-name $CONTAINER_NAME
+        --model-path $MODEL_PATH
+        --model-name "$MODEL_NAME"
+        --hf-directory $HF_DIRECTORY
+        --hf-token "${HUGGING_FACE_HUB_TOKEN:-}"
+    )
+    [ -n "$VLLM_EXTRA_ARGS" ] && COMPOSE_CMD+=(--extra-args "$VLLM_EXTRA_ARGS")
+    COMPOSE_CMD+=(--output $COMPOSE_FILE)
+    "${COMPOSE_CMD[@]}"
 fi
 
 # Clean up previous deployment

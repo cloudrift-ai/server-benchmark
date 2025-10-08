@@ -31,6 +31,7 @@ servers:
         num_instances: 2         # Run 2 instances for 2x throughput
       - name: "Qwen/Qwen2.5-72B-Instruct-AWQ"
         tensor_parallel_size: 2  # 72B model needs multi-GPU
+        extra_args: "--max-model-len 4096"
 
   - name: "rtx4090_x_4"
     address: "riftuser@142.214.185.230"
@@ -43,9 +44,10 @@ servers:
       - name: "Qwen/Qwen2.5-72B-Instruct-AWQ"
         tensor_parallel_size: 2  # 72B model uses 2 GPUs per instance
         num_instances: 2         # Run 2 instances (GPU 0-1, GPU 2-3)
+        extra_args: "--max-model-len 4096"
       - name: "QuantTrio/GLM-4.5-Air-AWQ-FP16Mix"
         tensor_parallel_size: 4  # 106B model uses 4 GPUs
-        extra_args: "--enable-expert-parallel"
+        extra_args: "--enable-expert-parallel --max-model-len 8192"
 
   - name: "rtx5090_x_1"
     address: "riftuser@217.138.104.159"
@@ -65,6 +67,7 @@ servers:
         num_instances: 2
       - name: "Qwen/Qwen2.5-72B-Instruct-AWQ"
         tensor_parallel_size: 2
+        extra_args: "--max-model-len 4096"
 
   - name: "rtx5090_x_4"
     address: "riftuser@217.138.104.158"
@@ -77,9 +80,10 @@ servers:
       - name: "Qwen/Qwen2.5-72B-Instruct-AWQ"
         tensor_parallel_size: 2
         num_instances: 2
+        extra_args: "--max-model-len 4096"
       - name: "QuantTrio/GLM-4.5-Air-AWQ-FP16Mix"
         tensor_parallel_size: 4
-        extra_args: "--enable-expert-parallel"
+        extra_args: "--enable-expert-parallel --max-model-len 8192"
 
 
 # Results will be saved with flat structure using prefixes:

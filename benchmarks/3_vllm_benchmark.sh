@@ -65,12 +65,15 @@ sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark down 2>/dev/null || tr
 # Start all services and wait for health
 echo "Starting containers (may take up to 30min for multi-GPU)..."
 
-# Stream logs in background
+# Start containers in detached mode first
+sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark up -d
+
+# Now stream logs in background
 sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark logs -f 2>&1 &
 LOGS_PID=$!
 
 # Wait for containers to become healthy
-if sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark up -d --wait --wait-timeout 1800; then
+if sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark wait --timeout 1800; then
     kill $LOGS_PID 2>/dev/null || true
     wait $LOGS_PID 2>/dev/null || true
     echo "✅ Containers healthy"

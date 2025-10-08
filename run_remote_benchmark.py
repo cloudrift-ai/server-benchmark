@@ -503,6 +503,14 @@ def download_single_file(server: dict, model_name: str, config: dict, remote_fil
 
     try:
         subprocess.run(scp_cmd, check=True)
+
+        # Check if downloaded file is empty
+        if local_path.stat().st_size == 0:
+            print(f"❌ Error: Downloaded {local_prefix} is empty (benchmark likely failed)")
+            # Remove the empty file
+            local_path.unlink()
+            return False
+
         print(f"✅ {local_prefix} saved")
         return True
     except subprocess.CalledProcessError as e:

@@ -16,6 +16,9 @@ def generate_vllm_service(instance_id: int, gpu_list: str, port: int,
     # Build command with extra args if provided
     extra_args_str = f"\n      {extra_args}" if extra_args.strip() else ""
 
+    # Format GPU list for YAML: ['0', '1'] instead of ['0,1']
+    gpu_ids_yaml = ", ".join(f"'{gpu}'" for gpu in gpu_list.split(','))
+
     return f"""
   vllm_{instance_id}:
     image: vllm/vllm-openai:latest
@@ -25,7 +28,7 @@ def generate_vllm_service(instance_id: int, gpu_list: str, port: int,
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ['{gpu_list}']
+              device_ids: [{gpu_ids_yaml}]
               capabilities: [gpu]
     volumes:
       - {hf_directory}:{hf_directory}

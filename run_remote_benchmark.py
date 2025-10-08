@@ -447,7 +447,7 @@ def run_benchmark(server: dict, model_config: dict, config: dict, force: bool = 
         logger.error("❌ No benchmark steps found. Ensure scripts follow naming convention: <step_index>_<benchmark_name>.sh")
         return False
 
-    logger.info(f"\n📋 Found {len(script_names)} benchmark step(s):")
+    logger.info(f"📋 Found {len(script_names)} benchmark step(s):")
     for script_name in script_names:
         benchmark_name = extract_benchmark_name(script_name)
         display_name = get_benchmark_display_name(benchmark_name)
@@ -460,17 +460,15 @@ def run_benchmark(server: dict, model_config: dict, config: dict, force: bool = 
         display_name = get_benchmark_display_name(benchmark_name)
         result_file = get_benchmark_result_file(benchmark_name)
 
-        logger.info(f"\n{'─'*60}")
         success = run_benchmark_step(server, model_config, config, display_name, script_name, result_file, force, logger)
         if not success:
             logger.warning(f"⚠️  Warning: {display_name} failed")
             all_success = False
-        logger.info(f"{'─'*60}")
 
     if all_success:
-        logger.info("\n🎉 All benchmark steps completed successfully!")
+        logger.info("🎉 All benchmark steps completed successfully!")
     else:
-        logger.warning("\n⚠️  Some benchmark steps failed")
+        logger.warning("⚠️  Some benchmark steps failed")
 
     return all_success
 
@@ -559,9 +557,7 @@ def run_server_benchmarks(server: dict, models: List, config: dict, force: bool 
     # Create logger for this server
     logger = get_server_logger(server_name)
 
-    logger.info(f"\n{'='*80}")
     logger.info(f"Starting benchmarks for server: {server_name}")
-    logger.info(f"{'='*80}\n")
 
     # Setup repository with logging
     if not setup_remote_repo(server, logger):
@@ -575,16 +571,12 @@ def run_server_benchmarks(server: dict, models: List, config: dict, force: bool 
         model_config = normalize_model_config(model)
         model_name = model_config['name']
 
-        logger.info(f"\n{'='*80}")
         logger.info(f"Server: {server_name} | Model: {model_name}")
-        logger.info(f"{'='*80}\n")
 
         result = run_benchmark_combination(server, model_config, config, force, logger)
         results.append(result)
 
-    logger.info(f"\n{'='*80}")
     logger.info(f"Completed benchmarks for server: {server_name}")
-    logger.info(f"{'='*80}\n")
 
     return results
 
@@ -714,9 +706,7 @@ def main():
             results.extend(server_results)
 
     # Print summary
-    root_logger.info(f"\n{'='*80}")
     root_logger.info("📋 SUMMARY")
-    root_logger.info(f"{'='*80}\n")
 
     successful = [r for r in results if r[2]]
     failed = [r for r in results if not r[2]]

@@ -51,8 +51,8 @@ def generate_vllm_service(instance_id: int, gpu_list: str, port: int,
     ipc: host
     command: >
       --trust-remote-code
-      --max-model-len=8192
-      --gpu-memory-utilization=0.90
+      --max-model-len=4096
+      --gpu-memory-utilization=0.85
       --host 0.0.0.0
       --port 8000
       --tensor-parallel-size {tensor_parallel_size}

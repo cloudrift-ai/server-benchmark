@@ -98,14 +98,12 @@ servers:
     models:
       - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
         tensor_parallel_size: 1
-        num_instances: 4
         extra_args: "--max-model-len 8192"
       - name: "kosbu/Llama-3.3-70B-Instruct-AWQ"
-        tensor_parallel_size: 2
-        num_instances: 2
+        tensor_parallel_size: 1
         extra_args: "--max-model-len 2048"  # Reduced ctx
       - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
-        tensor_parallel_size: 4
+        tensor_parallel_size: 1
         extra_args: "--dtype float16 --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel"
 
 

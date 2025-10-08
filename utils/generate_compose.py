@@ -84,6 +84,22 @@ def generate_nginx_service(num_instances: int, nginx_conf_path: str) -> str:
 """
 
 
+def generate_benchmark_service(hf_directory: str, hf_token: str) -> str:
+    """Generate benchmark client service definition."""
+    return f"""
+  benchmark:
+    image: vllm/vllm-openai:latest
+    container_name: vllm_benchmark_client
+    volumes:
+      - {hf_directory}:{hf_directory}
+    environment:
+      - HUGGING_FACE_HUB_TOKEN={hf_token}
+    command: sleep infinity
+    profiles:
+      - tools
+"""
+
+
 def generate_nginx_conf(num_instances: int) -> str:
     """Generate nginx configuration file content."""
     upstream_servers = "\n".join([
@@ -167,6 +183,9 @@ def generate_compose_file(
     # Add nginx load balancer if multiple instances
     if num_instances > 1 and nginx_conf_path:
         compose_content += generate_nginx_service(num_instances, nginx_conf_path)
+
+    # Add benchmark client service
+    compose_content += generate_benchmark_service(hf_directory, hf_token)
 
     return compose_content
 

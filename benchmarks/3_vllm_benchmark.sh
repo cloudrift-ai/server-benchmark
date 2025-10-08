@@ -62,31 +62,47 @@ fi
 echo "Cleaning up previous deployment..."
 sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark down 2>/dev/null || true
 
-# Start all services and wait for health checks
+# Start all services and stream logs in background
 echo "Starting containers (may take up to 30min for multi-GPU)..."
 
-if sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark up -d --wait --wait-timeout 1800; then
+# Start containers in detached mode
+sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark up -d
+
+# Stream logs in background while waiting for health
+sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark logs -f &
+LOGS_PID=$!
+
+# Wait for containers to be healthy
+if sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark up --wait --wait-timeout 1800; then
     echo "✅ Containers healthy"
+    # Stop streaming logs
+    kill $LOGS_PID 2>/dev/null || true
+    wait $LOGS_PID 2>/dev/null || true
 else
     echo "❌ Container startup failed or timeout"
+    # Stop streaming logs
+    kill $LOGS_PID 2>/dev/null || true
+    wait $LOGS_PID 2>/dev/null || true
     echo "Container status:"
     sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark ps
-    echo "Container logs:"
-    sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark logs
     sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark down
     rm -f $COMPOSE_FILE $NGINX_CONF
     exit 1
 fi
 
-# Install benchmark dependencies in first container
+# Start benchmark client container
+echo "Starting benchmark client container..."
+sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark --profile tools up -d benchmark
+
+# Install benchmark dependencies in benchmark container
 echo "Installing benchmark dependencies..."
-sudo -E docker exec ${CONTAINER_NAME}_0 pip install pandas datasets >/dev/null 2>&1
+sudo -E docker exec vllm_benchmark_client pip install pandas datasets >/dev/null 2>&1
 
 # Determine benchmark endpoint
 if [ $NUM_INSTANCES -gt 1 ]; then
-    BENCHMARK_ENDPOINT="http://localhost:8080"
+    BENCHMARK_ENDPOINT="http://nginx_lb:8080"
 else
-    BENCHMARK_ENDPOINT="http://localhost:8000"
+    BENCHMARK_ENDPOINT="http://vllm_0:8000"
 fi
 
 # Run benchmark
@@ -104,7 +120,7 @@ BENCHMARK_CMD="vllm bench serve \
     --base-url $BENCHMARK_ENDPOINT"
 
 echo "Running benchmark (endpoint: $BENCHMARK_ENDPOINT)..."
-sudo -E docker exec ${CONTAINER_NAME}_0 bash -c "$BENCHMARK_CMD" | awk '/^============/ {found=1} found' > $BENCHMARK_RESULTS_FILE
+sudo -E docker exec vllm_benchmark_client bash -c "$BENCHMARK_CMD" | awk '/^============/ {found=1} found' > $BENCHMARK_RESULTS_FILE
 
 # Stop all services
 echo "Stopping containers..."

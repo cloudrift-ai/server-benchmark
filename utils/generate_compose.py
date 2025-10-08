@@ -42,8 +42,6 @@ def generate_vllm_service(instance_id: int, gpu_list: str, port: int,
       - {hf_directory}:{hf_directory}
     environment:
       - HUGGING_FACE_HUB_TOKEN={hf_token}
-      - VLLM_WORKER_MULTIPROC_METHOD=spawn
-      - OMP_NUM_THREADS=16
       - CUDA_VISIBLE_DEVICES={cuda_visible_devices}
     ports:
       - "{port}:8000"

@@ -109,7 +109,11 @@ fi
 
 # Start benchmark client container
 echo "Starting benchmark client container..."
+# Add delay to ensure Docker network is fully initialized
+sleep 3
 docker compose -f $COMPOSE_FILE -p vllm_benchmark --profile tools up -d benchmark
+# Wait for benchmark client to be running
+sleep 2
 
 # Determine benchmark endpoint
 if [ $NUM_INSTANCES -gt 1 ]; then

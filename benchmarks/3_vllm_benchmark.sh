@@ -77,12 +77,12 @@ if sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark up --wait --wait-ti
     echo "✅ Containers healthy"
     # Stop streaming logs
     kill $LOGS_PID 2>/dev/null || true
-    wait $LOGS_PID 2>/dev/null || true
+    sleep 1  # Give the process a moment to terminate
 else
     echo "❌ Container startup failed or timeout"
     # Stop streaming logs
     kill $LOGS_PID 2>/dev/null || true
-    wait $LOGS_PID 2>/dev/null || true
+    sleep 1  # Give the process a moment to terminate
     echo "Container status:"
     sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark ps
     sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark down

@@ -84,11 +84,11 @@ LOGS_PID=$!
 
 # Wait for the up command to complete
 if wait $UP_PID; then
-    kill $LOGS_PID 2>/dev/null || true
+    kill -KILL $LOGS_PID 2>/dev/null || true
     wait $LOGS_PID 2>/dev/null || true
     echo "✅ Containers healthy"
 else
-    kill $LOGS_PID 2>/dev/null || true
+    kill -KILL $LOGS_PID 2>/dev/null || true
     wait $LOGS_PID 2>/dev/null || true
     echo "❌ Container startup failed or timeout"
     echo "Container status:"

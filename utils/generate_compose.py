@@ -11,7 +11,7 @@ from typing import List
 def generate_vllm_service(instance_id: int, gpu_list: str, port: int,
                           container_name: str, tensor_parallel_size: int,
                           model_path: str, model_name: str, hf_directory: str,
-                          hf_token: str, extra_args: str = "") -> str:
+                          hf_token: str, extra_args: str = "", num_instances: int = 1) -> str:
     """Generate a single vLLM service definition."""
     # Build command with extra args if provided
     extra_args_str = f"\n      {extra_args}" if extra_args.strip() else ""
@@ -19,11 +19,19 @@ def generate_vllm_service(instance_id: int, gpu_list: str, port: int,
     # Format GPU list for YAML: ['0', '1'] instead of ['0,1']
     gpu_ids_yaml = ", ".join(f"'{gpu}'" for gpu in gpu_list.split(','))
 
+    # Add depends_on for sequential startup in multi-instance setups
+    depends_on = ""
+    if num_instances > 1 and instance_id > 0:
+        depends_on = f"""    depends_on:
+      vllm_{instance_id - 1}:
+        condition: service_healthy
+"""
+
     return f"""
   vllm_{instance_id}:
     image: vllm/vllm-openai:latest
     container_name: {container_name}_{instance_id}
-    deploy:
+{depends_on}    deploy:
       resources:
         reservations:
           devices:
@@ -153,7 +161,8 @@ def generate_compose_file(
             model_name=model_name,
             hf_directory=hf_directory,
             hf_token=hf_token,
-            extra_args=extra_args
+            extra_args=extra_args,
+            num_instances=num_instances
         )
 
     # Add nginx load balancer if multiple instances

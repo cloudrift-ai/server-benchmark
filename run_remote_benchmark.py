@@ -316,12 +316,20 @@ def run_benchmark_step(server: dict, model_config: dict, config: dict, step_name
     address = server['address']
     port = server.get('port', 22)
 
-    # Get benchmark parameters from config (if any)
-    benchmark_params = config.get('benchmark_params', {})
-    max_concurrency = benchmark_params.get('max_concurrency', 200)
-    num_prompts = benchmark_params.get('num_prompts', 1000)
-    random_input_len = benchmark_params.get('random_input_len', 1000)
-    random_output_len = benchmark_params.get('random_output_len', 1000)
+    # Get benchmark parameters from config (required)
+    if 'benchmark_params' not in config:
+        raise ValueError("benchmark_params must be defined in config.yaml")
+
+    benchmark_params = config['benchmark_params']
+    required_params = ['max_concurrency', 'num_prompts', 'random_input_len', 'random_output_len']
+    for param in required_params:
+        if param not in benchmark_params:
+            raise ValueError(f"benchmark_params.{param} must be defined in config.yaml")
+
+    max_concurrency = benchmark_params['max_concurrency']
+    num_prompts = benchmark_params['num_prompts']
+    random_input_len = benchmark_params['random_input_len']
+    random_output_len = benchmark_params['random_output_len']
 
     # Get tensor_parallel_size from model config (default to 1 if not specified)
     tensor_parallel_size = model_config.get('tensor_parallel_size', 1)
@@ -329,6 +337,8 @@ def run_benchmark_step(server: dict, model_config: dict, config: dict, step_name
     extra_args = model_config.get('extra_args', '')
 
     env_vars = (
+        f'IMAGE_NAME="vllm/vllm-openai:latest" '
+        f'CONTAINER_NAME="vllm_benchmark_container" '
         f'MODEL_NAME="{model_name}" '
         f'TENSOR_PARALLEL_SIZE={tensor_parallel_size} '
         f'NUM_INSTANCES={num_instances} '
@@ -336,7 +346,9 @@ def run_benchmark_step(server: dict, model_config: dict, config: dict, step_name
         f'MAX_CONCURRENCY={max_concurrency} '
         f'NUM_PROMPTS={num_prompts} '
         f'RANDOM_INPUT_LEN={random_input_len} '
-        f'RANDOM_OUTPUT_LEN={random_output_len}'
+        f'RANDOM_OUTPUT_LEN={random_output_len} '
+        f'BENCHMARK_RESULTS_FILE="vllm_benchmark.txt" '
+        f'HF_DIRECTORY="/hf_models"'
     )
 
     ssh_cmd = [

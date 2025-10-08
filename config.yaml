@@ -4,12 +4,12 @@
 benchmark:
   local_results_dir: "results"           # Local directory to store results
 
-# Optional: Override benchmark parameters
-# benchmark_params:
-#   max_concurrency: 200
-#   num_prompts: 1000
-#   random_input_len: 1000
-#   random_output_len: 1000
+# Benchmark parameters (required)
+benchmark_params:
+  max_concurrency: 400       # Maximum concurrent requests
+  num_prompts: 1200          # Number of prompts to benchmark
+  random_input_len: 1000     # Random input length for benchmark
+  random_output_len: 1000    # Random output length for benchmark
 
 # Define servers with their models to benchmark
 servers:

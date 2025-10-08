@@ -1,20 +1,20 @@
 #!/bin/bash
 
 set -o allexport
-# Configuration - using environment variables with defaults
-IMAGE_NAME="${IMAGE_NAME:-vllm/vllm-openai:latest}"
-CONTAINER_NAME="${CONTAINER_NAME:-vllm_benchmark_container}"
-MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-Coder-30B-A3B-Instruct}"
-RANDOM_INPUT_LEN="${RANDOM_INPUT_LEN:-1000}"
-RANDOM_OUTPUT_LEN="${RANDOM_OUTPUT_LEN:-1000}"
-MAX_CONCURRENCY="${MAX_CONCURRENCY:-500}"
-NUM_PROMPTS="${NUM_PROMPTS:-1000}"
-TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
-NUM_INSTANCES="${NUM_INSTANCES:-1}"
-VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
-
-BENCHMARK_RESULTS_FILE="${BENCHMARK_RESULTS_FILE:-vllm_benchmark.txt}"
-HF_DIRECTORY="${HF_DIRECTORY:-/hf_models}"
+# Configuration - using required environment variables
+# These must be set by the caller (run_remote_benchmark.py)
+: "${IMAGE_NAME:?IMAGE_NAME must be set}"
+: "${CONTAINER_NAME:?CONTAINER_NAME must be set}"
+: "${MODEL_NAME:?MODEL_NAME must be set}"
+: "${RANDOM_INPUT_LEN:?RANDOM_INPUT_LEN must be set}"
+: "${RANDOM_OUTPUT_LEN:?RANDOM_OUTPUT_LEN must be set}"
+: "${MAX_CONCURRENCY:?MAX_CONCURRENCY must be set}"
+: "${NUM_PROMPTS:?NUM_PROMPTS must be set}"
+: "${TENSOR_PARALLEL_SIZE:?TENSOR_PARALLEL_SIZE must be set}"
+: "${NUM_INSTANCES:?NUM_INSTANCES must be set}"
+: "${VLLM_EXTRA_ARGS:?VLLM_EXTRA_ARGS must be set}"
+: "${BENCHMARK_RESULTS_FILE:?BENCHMARK_RESULTS_FILE must be set}"
+: "${HF_DIRECTORY:?HF_DIRECTORY must be set}"
 # Disable automatic export
 set +o allexport
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )

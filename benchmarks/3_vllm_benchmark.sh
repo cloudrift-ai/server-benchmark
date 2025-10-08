@@ -129,16 +129,10 @@ BENCHMARK_CMD="vllm bench serve \
     --base-url $BENCHMARK_ENDPOINT"
 
 echo "Running benchmark (endpoint: $BENCHMARK_ENDPOINT)..."
-# Capture full output to temp file, then filter for results
-TEMP_OUTPUT=$(mktemp)
-if docker exec vllm_benchmark_client bash -c "$BENCHMARK_CMD" > "$TEMP_OUTPUT" 2>&1; then
-    # Extract results section
-    awk '/^============/ {found=1} found' "$TEMP_OUTPUT" > $BENCHMARK_RESULTS_FILE
-    rm -f "$TEMP_OUTPUT"
-else
-    echo "❌ Benchmark command failed. Output:"
-    cat "$TEMP_OUTPUT"
-    rm -f "$TEMP_OUTPUT"
+# Stream output to both console and results file
+docker exec vllm_benchmark_client bash -c "$BENCHMARK_CMD" 2>&1 | tee $BENCHMARK_RESULTS_FILE
+if [ ${PIPESTATUS[0]} -ne 0 ]; then
+    echo "❌ Benchmark command failed"
     exit 1
 fi
 

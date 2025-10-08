@@ -51,7 +51,7 @@ def generate_vllm_service(instance_id: int, gpu_list: str, port: int,
     ipc: host
     command: >
       --trust-remote-code
-      --max-model-len=4096
+      --max-model-len=2048
       --gpu-memory-utilization=0.9
       --host 0.0.0.0
       --port 8000

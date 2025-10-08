@@ -70,16 +70,23 @@ def setup_logging() -> str:
     return str(LOG_FILE)
 
 
-def get_server_logger(server_name: str) -> logging.Logger:
-    """Get or create a logger for a specific server.
+def get_server_logger(server_name: str, model_name: Optional[str] = None) -> logging.Logger:
+    """Get or create a logger for a specific server and model.
 
     Args:
         server_name: Name of the server (e.g., 'rtx5090_x_1')
+        model_name: Name of the model (e.g., 'kosbu/Llama-3.3-70B-Instruct-AWQ')
 
     Returns:
-        Logger instance for this server
+        Logger instance for this server/model combination
     """
-    return logging.getLogger(server_name)
+    if model_name:
+        # Extract just the model name without organization prefix for brevity
+        short_model = model_name.split('/')[-1] if '/' in model_name else model_name
+        logger_name = f"{server_name}.{short_model}"
+    else:
+        logger_name = server_name
+    return logging.getLogger(logger_name)
 
 
 def run_ssh_command_with_logging(
@@ -286,7 +293,7 @@ def run_benchmark_step(server: dict, model_config: dict, config: dict, step_name
 
     # Use provided logger or get one for this server
     if logger is None:
-        logger = get_server_logger(server_name)
+        logger = get_server_logger(server_name, model_name)
 
     # Check if result already exists
     if not force and check_result_file_exists(server, model_name, config, result_file):
@@ -389,7 +396,7 @@ def discover_benchmarks(server: dict, logger: logging.Logger = None) -> List[str
     """
     server_name = server['name']
     if logger is None:
-        logger = get_server_logger(server_name)
+        logger = get_server_logger(server_name)  # No model context for discovery
 
     ssh_key = expand_path(server['ssh_key'])
     address = server['address']
@@ -435,7 +442,7 @@ def run_benchmark(server: dict, model_config: dict, config: dict, force: bool = 
 
     # Use provided logger or get one for this server
     if logger is None:
-        logger = get_server_logger(server_name)
+        logger = get_server_logger(server_name, model_name)
 
     logger.info(f"🚀 Starting benchmarks for model: {model_name}")
     logger.info(f"📡 Connecting to: {server['address']} ({server_name})")
@@ -549,7 +556,7 @@ def run_benchmark_combination(server: dict, model_config: dict, config: dict, fo
 
     # Use provided logger or get one for this server
     if logger is None:
-        logger = get_server_logger(server_name)
+        logger = get_server_logger(server_name, model_name)
 
     # Run benchmark (with per-step skip logic)
     success = run_benchmark(server, model_config, config, force, logger)
@@ -562,7 +569,7 @@ def run_server_benchmarks(server: dict, models: List, config: dict, force: bool 
     results = []
     server_name = server['name']
 
-    # Create logger for this server
+    # Create logger for this server (no model context yet)
     logger = get_server_logger(server_name)
 
     logger.info(f"Starting benchmarks for server: {server_name}")

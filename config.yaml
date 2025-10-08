@@ -20,6 +20,7 @@ servers:
     models:
       - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"  # 4-bit quantized, similar to Q4_K_M
         tensor_parallel_size: 1
+        extra_args: "--max-model-len 8192"
 
   - name: "rtx4090_x_2"
     address: "riftuser@142.214.185.150"
@@ -29,6 +30,7 @@ servers:
       - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
         tensor_parallel_size: 1  # Each instance uses 1 GPU
         num_instances: 2         # Run 2 instances for 2x throughput
+        extra_args: "--max-model-len 8192"
       - name: "kosbu/Llama-3.3-70B-Instruct-AWQ"
         tensor_parallel_size: 2  # 72B model needs multi-GPU
         extra_args: "--max-model-len 4096"  # Reduced ctx
@@ -41,6 +43,7 @@ servers:
       - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
         tensor_parallel_size: 1  # Each instance uses 1 GPU
         num_instances: 4         # Run 4 instances for 4x throughput
+        extra_args: "--max-model-len 8192"
       - name: "kosbu/Llama-3.3-70B-Instruct-AWQ"
         tensor_parallel_size: 2  # 72B model uses 2 GPUs per instance
         num_instances: 2         # Run 2 instances (GPU 0-1, GPU 2-3)
@@ -56,6 +59,7 @@ servers:
     models:
       - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
         tensor_parallel_size: 1
+        extra_args: "--max-model-len 8192"
 
   - name: "rtx5090_x_2"
     address: "riftuser@217.138.104.153"
@@ -65,6 +69,7 @@ servers:
       - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
         tensor_parallel_size: 1
         num_instances: 2
+        extra_args: "--max-model-len 8192"
       - name: "kosbu/Llama-3.3-70B-Instruct-AWQ"
         tensor_parallel_size: 2
         extra_args: "--max-model-len 4096"  # Reduced ctx
@@ -77,6 +82,7 @@ servers:
       - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
         tensor_parallel_size: 1
         num_instances: 4
+        extra_args: "--max-model-len 8192"
       - name: "kosbu/Llama-3.3-70B-Instruct-AWQ"
         tensor_parallel_size: 2
         num_instances: 2

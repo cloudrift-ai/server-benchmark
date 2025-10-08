@@ -19,6 +19,14 @@ HF_DIRECTORY="${HF_DIRECTORY:-/hf_models}"
 set +o allexport
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
+# Ensure user can run docker without sudo
+if ! docker ps >/dev/null 2>&1; then
+    echo "Adding user to docker group..."
+    sudo usermod -aG docker $USER
+    echo "⚠️  You've been added to the docker group. Re-running with newgrp..."
+    exec sg docker "$0 $@"
+fi
+
 # Model was already downloaded in 2_hf_download.sh
 MODEL_PATH="$HF_DIRECTORY/$MODEL_NAME"
 
@@ -33,7 +41,7 @@ COMPOSE_FILE="docker-compose.vllm.yml"
 NGINX_CONF="nginx.vllm.conf"
 if [ $NUM_INSTANCES -gt 1 ]; then
     # Multi-instance with nginx
-    sudo -E ./venv/bin/python utils/generate_compose.py \
+    ./venv/bin/python utils/generate_compose.py \
         --num-instances $NUM_INSTANCES \
         --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
         --container-name $CONTAINER_NAME \
@@ -46,7 +54,7 @@ if [ $NUM_INSTANCES -gt 1 ]; then
         --nginx-conf-output $NGINX_CONF
 else
     # Single instance
-    sudo -E ./venv/bin/python utils/generate_compose.py \
+    ./venv/bin/python utils/generate_compose.py \
         --num-instances $NUM_INSTANCES \
         --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
         --container-name $CONTAINER_NAME \
@@ -60,44 +68,31 @@ fi
 
 # Clean up previous deployment
 echo "Cleaning up previous deployment..."
-sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark down 2>/dev/null || true
+docker compose -f $COMPOSE_FILE -p vllm_benchmark down 2>/dev/null || true
 
 # Start all services and wait for health
 echo "Starting containers (may take up to 30min for multi-GPU)..."
 
-# Start containers and wait for health in background
-sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark up -d --wait --wait-timeout 1800 &
-UP_PID=$!
-
-# Give containers a moment to be created, then start streaming logs
-sleep 2
-sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark logs -f 2>&1 &
-LOGS_PID=$!
-
-# Wait for the up command to complete
-if wait $UP_PID; then
-    kill $LOGS_PID 2>/dev/null || true
-    wait $LOGS_PID 2>/dev/null || true
+# Start containers and wait for health
+if docker compose -f $COMPOSE_FILE -p vllm_benchmark up -d --wait --wait-timeout 1800; then
     echo "✅ Containers healthy"
 else
-    kill $LOGS_PID 2>/dev/null || true
-    wait $LOGS_PID 2>/dev/null || true
     echo "❌ Container startup failed or timeout"
     echo "Container status:"
-    sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark ps
-    sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark logs --tail=100
-    sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark down
+    docker compose -f $COMPOSE_FILE -p vllm_benchmark ps
+    docker compose -f $COMPOSE_FILE -p vllm_benchmark logs --tail=100
+    docker compose -f $COMPOSE_FILE -p vllm_benchmark down
     rm -f $COMPOSE_FILE $NGINX_CONF
     exit 1
 fi
 
 # Start benchmark client container
 echo "Starting benchmark client container..."
-sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark --profile tools up -d benchmark
+docker compose -f $COMPOSE_FILE -p vllm_benchmark --profile tools up -d benchmark
 
 # Install benchmark dependencies in benchmark container
 echo "Installing benchmark dependencies..."
-sudo -E docker exec vllm_benchmark_client pip install pandas datasets >/dev/null 2>&1
+docker exec vllm_benchmark_client pip install pandas datasets >/dev/null 2>&1
 
 # Determine benchmark endpoint
 if [ $NUM_INSTANCES -gt 1 ]; then
@@ -121,11 +116,11 @@ BENCHMARK_CMD="vllm bench serve \
     --base-url $BENCHMARK_ENDPOINT"
 
 echo "Running benchmark (endpoint: $BENCHMARK_ENDPOINT)..."
-sudo -E docker exec vllm_benchmark_client bash -c "$BENCHMARK_CMD" | awk '/^============/ {found=1} found' > $BENCHMARK_RESULTS_FILE
+docker exec vllm_benchmark_client bash -c "$BENCHMARK_CMD" | awk '/^============/ {found=1} found' > $BENCHMARK_RESULTS_FILE
 
 # Stop all services
 echo "Stopping containers..."
-sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark down
+docker compose -f $COMPOSE_FILE -p vllm_benchmark down
 
 # Clean up temporary files
 rm -f $COMPOSE_FILE $NGINX_CONF

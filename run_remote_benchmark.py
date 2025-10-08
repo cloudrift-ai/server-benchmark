@@ -717,11 +717,13 @@ def main():
             root_logger.info(f"   - {server_name} × {model}")
 
     if failed:
-        root_logger.info(f"\n❌ Failed: {len(failed)}/{len(results)}")
+        root_logger.info("")
+        root_logger.info(f"❌ Failed: {len(failed)}/{len(results)}")
         for server_name, model, _ in failed:
             root_logger.info(f"   - {server_name} × {model}")
 
-    root_logger.info("\n🎉 All done!")
+    root_logger.info("")
+    root_logger.info("🎉 All done!")
     root_logger.info(f"📝 Full logs saved to: {log_file_path}")
 
 

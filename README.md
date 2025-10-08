@@ -12,21 +12,15 @@ cd server-benchmark
 
 Install dependencies:
 ```bash
-./setup.sh
+make setup
 ```
 
 Run benchmarks automatically via SSH on remote servers:
 ```bash
-./run_remote_benchmark.py
+make bench
 ```
 
-Or run individual benchmarks manually:
-```bash
-./benchmarks/1_system_info.sh
-./benchmarks/2_hf_download.sh
-./benchmarks/3_vllm_benchmark.sh
-./benchmarks/4_yabs.sh
-```
+For more commands, run `make help`
 
 ## Benchmark Naming Convention
 
@@ -112,6 +106,6 @@ server-benchmark/
 │   ├── download_model.py        # HuggingFace model downloader
 │   └── generate_compose.py      # Docker Compose generator
 ├── config.yaml          # Server and model configuration
-├── setup.sh            # Environment setup script
+├── Makefile            # Build automation and helper commands
 └── run_remote_benchmark.py  # Main orchestration script
 ```

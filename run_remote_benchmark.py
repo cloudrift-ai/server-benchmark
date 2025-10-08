@@ -241,9 +241,9 @@ def setup_remote_repo(server: dict, logger: logging.Logger) -> bool:
         logger.error(f"❌ Failed to setup repository: {e}")
         return False
 
-    # Run setup script to install dependencies
+    # Run setup to install dependencies
     logger.info("🔧 Installing dependencies on remote server...")
-    setup_script_cmd = 'cd server-benchmark && ./setup.sh'
+    setup_script_cmd = 'cd server-benchmark && make setup'
 
     try:
         ssh_cmd = [

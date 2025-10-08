@@ -1,0 +1,28 @@
+============ Serving Benchmark Result ============
+Successful requests:                     1000      
+Maximum request concurrency:             200       
+Benchmark duration (s):                  875.02    
+Total input tokens:                      997272    
+Total generated tokens:                  1000000   
+Request throughput (req/s):              1.14      
+Output token throughput (tok/s):         1142.83   
+Peak output token throughput (tok/s):    1977.00   
+Peak concurrent requests:                214.00    
+Total Token throughput (tok/s):          2282.54   
+---------------Time to First Token----------------
+Mean TTFT (ms):                          124283.79 
+Median TTFT (ms):                        128942.49 
+P99 TTFT (ms):                           155818.49 
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          36.13     
+Median TPOT (ms):                        29.57     
+P99 TPOT (ms):                           56.59     
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           36.12     
+Median ITL (ms):                         25.25     
+P99 ITL (ms):                            162.46    
+----------------End-to-end Latency----------------
+Mean E2EL (ms):                          160374.52 
+Median E2EL (ms):                        174569.44 
+P99 E2EL (ms):                           185014.43 
+==================================================

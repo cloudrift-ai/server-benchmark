@@ -1,0 +1,6 @@
+Model: Qwen/Qwen2.5-72B-Instruct-AWQ
+---------------------------------
+Downloading model: Qwen/Qwen2.5-72B-Instruct-AWQ...
+Model download complete! Saved to: /hf_models/Qwen/Qwen2.5-72B-Instruct-AWQ
+Download took 65.41 seconds.
+Average download speed: 4852.96 MiB/s

@@ -1,0 +1,6 @@
+Model: QuantTrio/GLM-4.5-Air-AWQ-FP16Mix
+---------------------------------
+Downloading model: QuantTrio/GLM-4.5-Air-AWQ-FP16Mix...
+Model download complete! Saved to: /hf_models/QuantTrio/GLM-4.5-Air-AWQ-FP16Mix
+Download took 95.05 seconds.
+Average download speed: 5863.87 MiB/s

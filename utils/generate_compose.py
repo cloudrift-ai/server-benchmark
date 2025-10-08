@@ -19,19 +19,19 @@ def generate_vllm_service(instance_id: int, gpu_list: str, port: int,
     # Format GPU list for YAML: ['0', '1'] instead of ['0,1']
     gpu_ids_yaml = ", ".join(f"'{gpu}'" for gpu in gpu_list.split(','))
 
-    # Add depends_on for sequential startup in multi-instance setups
-    depends_on = ""
-    if num_instances > 1 and instance_id > 0:
-        depends_on = f"""    depends_on:
-      vllm_{instance_id - 1}:
-        condition: service_healthy
-"""
+    # Docker remaps GPUs, so from container's perspective GPUs are always 0,1,2...
+    # If tensor_parallel_size > 1, we need 0,1,2... sequence
+    # If tensor_parallel_size == 1, we only need GPU 0
+    if tensor_parallel_size > 1:
+        cuda_visible_devices = ",".join(str(i) for i in range(tensor_parallel_size))
+    else:
+        cuda_visible_devices = "0"
 
     return f"""
   vllm_{instance_id}:
     image: vllm/vllm-openai:latest
     container_name: {container_name}_{instance_id}
-{depends_on}    deploy:
+    deploy:
       resources:
         reservations:
           devices:
@@ -44,7 +44,7 @@ def generate_vllm_service(instance_id: int, gpu_list: str, port: int,
       - HUGGING_FACE_HUB_TOKEN={hf_token}
       - VLLM_WORKER_MULTIPROC_METHOD=spawn
       - OMP_NUM_THREADS=16
-      - CUDA_VISIBLE_DEVICES={gpu_list}
+      - CUDA_VISIBLE_DEVICES={cuda_visible_devices}
     ports:
       - "{port}:8000"
     shm_size: '16gb'

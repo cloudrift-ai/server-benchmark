@@ -88,7 +88,7 @@ def generate_benchmark_service(hf_directory: str, hf_token: str) -> str:
     """Generate benchmark client service definition."""
     return f"""
   benchmark:
-    image: vllm/vllm-openai:latest
+    image: python:3.12-slim
     container_name: vllm_benchmark_client
     volumes:
       - {hf_directory}:{hf_directory}

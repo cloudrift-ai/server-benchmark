@@ -105,7 +105,7 @@ docker compose -f $COMPOSE_FILE -p vllm_benchmark --profile tools up -d benchmar
 
 # Install benchmark dependencies in benchmark container
 echo "Installing benchmark dependencies..."
-docker exec vllm_benchmark_client pip install pandas datasets >/dev/null 2>&1
+docker exec vllm_benchmark_client pip install vllm pandas datasets >/dev/null 2>&1
 
 # Determine benchmark endpoint
 if [ $NUM_INSTANCES -gt 1 ]; then

@@ -49,11 +49,11 @@ def generate_vllm_service(instance_id: int, gpu_list: str, port: int,
       --model {model_path}
       --served-model-name {model_name}{extra_args_str}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "bash", "-c", "curl -f http://localhost:8000/health && curl -f http://localhost:8000/v1/models | grep -q '\"object\":\"list\"'"]
       interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 300s
+      timeout: 10s
+      retries: 180
+      start_period: 600s
 """
 
 

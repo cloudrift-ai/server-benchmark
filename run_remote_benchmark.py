@@ -16,11 +16,104 @@ import sys
 import subprocess
 import time
 import re
+import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import yaml
+
+
+# Global log file path
+LOG_FILE = None
+
+
+def setup_logging() -> str:
+    """Setup logging with timestamped log file and console output.
+
+    Returns:
+        Path to the log file
+    """
+    global LOG_FILE
+
+    # Create logs directory if it doesn't exist
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+
+    # Generate timestamped log filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    LOG_FILE = log_dir / f"benchmark_{timestamp}.log"
+
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+
+    # Remove any existing handlers
+    root_logger.handlers.clear()
+
+    # File handler - detailed format with timestamps
+    file_handler = logging.FileHandler(LOG_FILE, encoding='utf-8')
+    file_formatter = logging.Formatter(
+        '[%(asctime)s] [%(name)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    file_handler.setFormatter(file_formatter)
+    root_logger.addHandler(file_handler)
+
+    # Console handler - simpler format
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_formatter = logging.Formatter('[%(name)s] %(message)s')
+    console_handler.setFormatter(console_formatter)
+    root_logger.addHandler(console_handler)
+
+    return str(LOG_FILE)
+
+
+def get_server_logger(server_name: str) -> logging.Logger:
+    """Get or create a logger for a specific server.
+
+    Args:
+        server_name: Name of the server (e.g., 'rtx5090_x_1')
+
+    Returns:
+        Logger instance for this server
+    """
+    return logging.getLogger(server_name)
+
+
+def run_ssh_command_with_logging(
+    server_name: str,
+    ssh_cmd: List[str],
+    logger: logging.Logger
+) -> int:
+    """Run SSH command and log output line-by-line with server prefix.
+
+    Args:
+        server_name: Name of the server
+        ssh_cmd: SSH command as list of arguments
+        logger: Logger instance for this server
+
+    Returns:
+        Return code from the SSH command
+    """
+    process = subprocess.Popen(
+        ssh_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        universal_newlines=True
+    )
+
+    # Stream output line by line
+    for line in iter(process.stdout.readline, ''):
+        if line:
+            # Log to file with full context, print to console with server prefix
+            logger.info(line.rstrip())
+
+    returncode = process.wait()
+    return returncode
 
 
 def load_config(config_path: str = "config.yaml") -> dict:
@@ -115,21 +208,19 @@ def run_ssh_command(server: dict, command: str, capture_output: bool = False) ->
         return None
 
 
-def setup_remote_repo(server: dict) -> bool:
+def setup_remote_repo(server: dict, logger: logging.Logger) -> bool:
     """Clone or update the server-benchmark repository on remote server. Returns True if successful."""
-    print("📦 Setting up repository on remote server...")
+    server_name = server['name']
+    logger.info("📦 Setting up repository on remote server...")
 
     ssh_key = expand_path(server['ssh_key'])
     address = server['address']
     port = server.get('port', 22)
 
-    # Check if repo exists, clone if not, update if it does
+    # Clean checkout: remove old repo and clone fresh to ensure latest code
     setup_cmd = (
-        'if [ ! -d "server-benchmark" ]; then '
-        'git clone https://github.com/cloudrift-ai/server-benchmark.git; '
-        'else '
-        'cd server-benchmark && git pull; '
-        'fi'
+        'rm -rf server-benchmark && '
+        'git clone https://github.com/cloudrift-ai/server-benchmark.git'
     )
 
     try:
@@ -141,14 +232,17 @@ def setup_remote_repo(server: dict) -> bool:
             address,
             setup_cmd
         ]
-        subprocess.run(ssh_cmd, check=True)
-        print("✅ Repository ready on remote server")
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Failed to setup repository: {e}")
+        returncode = run_ssh_command_with_logging(server_name, ssh_cmd, logger)
+        if returncode != 0:
+            logger.error(f"❌ Failed to setup repository (exit code: {returncode})")
+            return False
+        logger.info("✅ Repository ready on remote server")
+    except Exception as e:
+        logger.error(f"❌ Failed to setup repository: {e}")
         return False
 
     # Run setup script to install dependencies
-    print("🔧 Installing dependencies on remote server...")
+    logger.info("🔧 Installing dependencies on remote server...")
     setup_script_cmd = 'cd server-benchmark && ./setup.sh'
 
     try:
@@ -160,15 +254,18 @@ def setup_remote_repo(server: dict) -> bool:
             address,
             setup_script_cmd
         ]
-        subprocess.run(ssh_cmd, check=True)
-        print("✅ Dependencies installed successfully")
+        returncode = run_ssh_command_with_logging(server_name, ssh_cmd, logger)
+        if returncode != 0:
+            logger.error(f"❌ Failed to install dependencies (exit code: {returncode})")
+            return False
+        logger.info("✅ Dependencies installed successfully")
         return True
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Failed to install dependencies: {e}")
+    except Exception as e:
+        logger.error(f"❌ Failed to install dependencies: {e}")
         return False
 
 
-def run_benchmark_step(server: dict, model_config: dict, config: dict, step_name: str, script_name: str, result_file: str, force: bool = False) -> bool:
+def run_benchmark_step(server: dict, model_config: dict, config: dict, step_name: str, script_name: str, result_file: str, force: bool = False, logger: logging.Logger = None) -> bool:
     """Run a single benchmark step if result doesn't exist, then download the result.
 
     Args:
@@ -179,19 +276,25 @@ def run_benchmark_step(server: dict, model_config: dict, config: dict, step_name
         script_name: Shell script to run (e.g., "run_system_info.sh")
         result_file: Result file to download (e.g., "system_info.txt")
         force: Force re-run even if result exists
+        logger: Logger instance for this server
 
     Returns:
         True if successful (either skipped or downloaded), False on failure
     """
+    server_name = server['name']
     model_name = model_config['name']
+
+    # Use provided logger or get one for this server
+    if logger is None:
+        logger = get_server_logger(server_name)
 
     # Check if result already exists
     if not force and check_result_file_exists(server, model_name, config, result_file):
-        print(f"⏭️  {step_name} result already exists, skipping...")
+        logger.info(f"⏭️  {step_name} result already exists, skipping...")
         return True
 
     # Run the benchmark step
-    print(f"🚀 Running {step_name}...")
+    logger.info(f"🚀 Running {step_name}...")
 
     ssh_key = expand_path(server['ssh_key'])
     address = server['address']
@@ -230,19 +333,22 @@ def run_benchmark_step(server: dict, model_config: dict, config: dict, step_name
     ]
 
     try:
-        subprocess.run(ssh_cmd, check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Failed to run {step_name}: {e}")
+        returncode = run_ssh_command_with_logging(server_name, ssh_cmd, logger)
+        if returncode != 0:
+            logger.error(f"❌ Failed to run {step_name} (exit code: {returncode})")
+            return False
+    except Exception as e:
+        logger.error(f"❌ Failed to run {step_name}: {e}")
         return False
 
     # Download the result file
-    print(f"📥 Downloading {step_name} results...")
+    logger.info(f"📥 Downloading {step_name} results...")
     success = download_single_file(server, model_name, config, result_file, result_file)
 
     if success:
-        print(f"✅ {step_name} completed")
+        logger.info(f"✅ {step_name} completed")
     else:
-        print(f"⚠️  {step_name} completed but download failed")
+        logger.warning(f"⚠️  {step_name} completed but download failed")
 
     return success
 
@@ -274,13 +380,17 @@ def get_benchmark_result_file(benchmark_name: str) -> str:
     return f"{benchmark_name}.txt"
 
 
-def discover_benchmarks(server: dict) -> List[str]:
+def discover_benchmarks(server: dict, logger: logging.Logger = None) -> List[str]:
     """Discover benchmark scripts from the remote server's benchmarks directory.
 
     Returns a list of script names (e.g., ['1_system_info.sh', '2_hf_download.sh']).
     Scripts must follow naming convention: <step_index>_<benchmark_name>.sh
     Result files follow convention: <benchmark_name>.txt
     """
+    server_name = server['name']
+    if logger is None:
+        logger = get_server_logger(server_name)
+
     ssh_key = expand_path(server['ssh_key'])
     address = server['address']
     port = server.get('port', 22)
@@ -300,7 +410,7 @@ def discover_benchmarks(server: dict) -> List[str]:
         script_paths = result.stdout.strip().split('\n')
 
         if not script_paths or script_paths == ['']:
-            print("⚠️  Warning: No benchmark scripts found matching pattern [0-9]*_*.sh")
+            logger.warning("⚠️  Warning: No benchmark scripts found matching pattern [0-9]*_*.sh")
             return []
 
         script_names = []
@@ -314,33 +424,35 @@ def discover_benchmarks(server: dict) -> List[str]:
 
         return script_names
     except subprocess.CalledProcessError as e:
-        print(f"⚠️  Warning: Failed to discover benchmarks: {e}")
+        logger.warning(f"⚠️  Warning: Failed to discover benchmarks: {e}")
         return []
 
 
-def run_benchmark(server: dict, model_config: dict, config: dict, force: bool = False) -> bool:
+def run_benchmark(server: dict, model_config: dict, config: dict, force: bool = False, logger: logging.Logger = None) -> bool:
     """Run all benchmark steps sequentially. Returns True if successful, False otherwise."""
     model_name = model_config['name']
-    print(f"🚀 Starting benchmarks for model: {model_name}")
-    print(f"📡 Connecting to: {server['address']} ({server['name']})")
+    server_name = server['name']
 
-    # Setup repository on remote server
-    if not setup_remote_repo(server):
-        return False
+    # Use provided logger or get one for this server
+    if logger is None:
+        logger = get_server_logger(server_name)
+
+    logger.info(f"🚀 Starting benchmarks for model: {model_name}")
+    logger.info(f"📡 Connecting to: {server['address']} ({server_name})")
 
     # Discover benchmark scripts from remote server
-    script_names = discover_benchmarks(server)
+    script_names = discover_benchmarks(server, logger)
 
     if not script_names:
-        print("❌ No benchmark steps found. Ensure scripts follow naming convention: <step_index>_<benchmark_name>.sh")
+        logger.error("❌ No benchmark steps found. Ensure scripts follow naming convention: <step_index>_<benchmark_name>.sh")
         return False
 
-    print(f"\n📋 Found {len(script_names)} benchmark step(s):")
+    logger.info(f"\n📋 Found {len(script_names)} benchmark step(s):")
     for script_name in script_names:
         benchmark_name = extract_benchmark_name(script_name)
         display_name = get_benchmark_display_name(benchmark_name)
         result_file = get_benchmark_result_file(benchmark_name)
-        print(f"   • {display_name} → {result_file}")
+        logger.info(f"   • {display_name} → {result_file}")
 
     all_success = True
     for script_name in script_names:
@@ -348,17 +460,17 @@ def run_benchmark(server: dict, model_config: dict, config: dict, force: bool = 
         display_name = get_benchmark_display_name(benchmark_name)
         result_file = get_benchmark_result_file(benchmark_name)
 
-        print(f"\n{'─'*60}")
-        success = run_benchmark_step(server, model_config, config, display_name, script_name, result_file, force)
+        logger.info(f"\n{'─'*60}")
+        success = run_benchmark_step(server, model_config, config, display_name, script_name, result_file, force, logger)
         if not success:
-            print(f"⚠️  Warning: {display_name} failed")
+            logger.warning(f"⚠️  Warning: {display_name} failed")
             all_success = False
-        print(f"{'─'*60}")
+        logger.info(f"{'─'*60}")
 
     if all_success:
-        print("\n🎉 All benchmark steps completed successfully!")
+        logger.info("\n🎉 All benchmark steps completed successfully!")
     else:
-        print("\n⚠️  Some benchmark steps failed")
+        logger.warning("\n⚠️  Some benchmark steps failed")
 
     return all_success
 
@@ -424,13 +536,17 @@ def normalize_model_config(model) -> dict:
         raise ValueError(f"Model must be string or dict, got: {type(model)}")
 
 
-def run_benchmark_combination(server: dict, model_config: dict, config: dict, force: bool = False) -> tuple:
+def run_benchmark_combination(server: dict, model_config: dict, config: dict, force: bool = False, logger: logging.Logger = None) -> tuple:
     """Run a single server-model combination benchmark. Returns (server_name, model_name, success)."""
     server_name = server['name']
     model_name = model_config['name']
 
+    # Use provided logger or get one for this server
+    if logger is None:
+        logger = get_server_logger(server_name)
+
     # Run benchmark (with per-step skip logic)
-    success = run_benchmark(server, model_config, config, force)
+    success = run_benchmark(server, model_config, config, force, logger)
 
     return (server_name, model_name, success)
 
@@ -440,24 +556,35 @@ def run_server_benchmarks(server: dict, models: List, config: dict, force: bool 
     results = []
     server_name = server['name']
 
-    print(f"\n{'='*80}")
-    print(f"Starting benchmarks for server: {server_name}")
-    print(f"{'='*80}\n")
+    # Create logger for this server
+    logger = get_server_logger(server_name)
+
+    logger.info(f"\n{'='*80}")
+    logger.info(f"Starting benchmarks for server: {server_name}")
+    logger.info(f"{'='*80}\n")
+
+    # Setup repository with logging
+    if not setup_remote_repo(server, logger):
+        logger.error(f"Failed to setup repository on {server_name}, skipping all benchmarks for this server")
+        for model in models:
+            model_config = normalize_model_config(model)
+            results.append((server_name, model_config['name'], False))
+        return results
 
     for model in models:
         model_config = normalize_model_config(model)
         model_name = model_config['name']
 
-        print(f"\n{'='*80}")
-        print(f"Server: {server_name} | Model: {model_name}")
-        print(f"{'='*80}\n")
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Server: {server_name} | Model: {model_name}")
+        logger.info(f"{'='*80}\n")
 
-        result = run_benchmark_combination(server, model_config, config, force)
+        result = run_benchmark_combination(server, model_config, config, force, logger)
         results.append(result)
 
-    print(f"\n{'='*80}")
-    print(f"Completed benchmarks for server: {server_name}")
-    print(f"{'='*80}\n")
+    logger.info(f"\n{'='*80}")
+    logger.info(f"Completed benchmarks for server: {server_name}")
+    logger.info(f"{'='*80}\n")
 
     return results
 
@@ -498,6 +625,12 @@ def main():
 
     args = parser.parse_args()
 
+    # Setup logging
+    log_file_path = setup_logging()
+    root_logger = logging.getLogger()
+    root_logger.info(f"📝 Logging to: {log_file_path}")
+    root_logger.info("")
+
     # Load and validate configuration
     config = load_config(args.config)
     validate_config(config)
@@ -508,7 +641,7 @@ def main():
     if args.server:
         servers = [s for s in servers if s['name'] == args.server]
         if not servers:
-            print(f"❌ Error: Server '{args.server}' not found in config.")
+            root_logger.error(f"❌ Error: Server '{args.server}' not found in config.")
             sys.exit(1)
 
     # Build list of (server, models) tuples for parallel execution
@@ -528,7 +661,7 @@ def main():
                     filtered_models.append(m)
 
             if not filtered_models:
-                print(f"⚠️  Warning: Model '{args.model}' not found in server '{server['name']}'. Skipping this server.")
+                root_logger.warning(f"⚠️  Warning: Model '{args.model}' not found in server '{server['name']}'. Skipping this server.")
                 continue
 
             models = filtered_models
@@ -537,14 +670,15 @@ def main():
         total_combinations += len(models)
 
     if not server_tasks:
-        print("❌ Error: No server-model combinations to benchmark.")
+        root_logger.error("❌ Error: No server-model combinations to benchmark.")
         sys.exit(1)
 
-    print(f"📊 Running benchmarks for {total_combinations} server-model combination(s) across {len(server_tasks)} server(s)")
+    root_logger.info(f"📊 Running benchmarks for {total_combinations} server-model combination(s) across {len(server_tasks)} server(s)")
     if args.parallel:
-        print(f"🚀 Parallel mode: Servers will run in parallel (max workers: {args.max_workers or len(server_tasks)})\n")
+        root_logger.info(f"🚀 Parallel mode: Servers will run in parallel (max workers: {args.max_workers or len(server_tasks)})")
     else:
-        print("⏳ Sequential mode: Servers will run one at a time\n")
+        root_logger.info("⏳ Sequential mode: Servers will run one at a time")
+    root_logger.info("")
 
     # Track results
     results = []
@@ -567,7 +701,7 @@ def main():
                     server_results = future.result()
                     results.extend(server_results)
                 except Exception as exc:
-                    print(f"❌ Server {server_name} generated an exception: {exc}")
+                    root_logger.error(f"❌ Server {server_name} generated an exception: {exc}")
                     # Add failed results for all models on this server
                     for server, models in server_tasks:
                         if server['name'] == server_name:
@@ -580,24 +714,25 @@ def main():
             results.extend(server_results)
 
     # Print summary
-    print(f"\n{'='*80}")
-    print("📋 SUMMARY")
-    print(f"{'='*80}\n")
+    root_logger.info(f"\n{'='*80}")
+    root_logger.info("📋 SUMMARY")
+    root_logger.info(f"{'='*80}\n")
 
     successful = [r for r in results if r[2]]
     failed = [r for r in results if not r[2]]
 
-    print(f"✅ Successful: {len(successful)}/{len(results)}")
+    root_logger.info(f"✅ Successful: {len(successful)}/{len(results)}")
     if successful:
         for server_name, model, _ in successful:
-            print(f"   - {server_name} × {model}")
+            root_logger.info(f"   - {server_name} × {model}")
 
     if failed:
-        print(f"\n❌ Failed: {len(failed)}/{len(results)}")
+        root_logger.info(f"\n❌ Failed: {len(failed)}/{len(results)}")
         for server_name, model, _ in failed:
-            print(f"   - {server_name} × {model}")
+            root_logger.info(f"   - {server_name} × {model}")
 
-    print("\n🎉 All done!")
+    root_logger.info("\n🎉 All done!")
+    root_logger.info(f"📝 Full logs saved to: {log_file_path}")
 
 
 if __name__ == '__main__':

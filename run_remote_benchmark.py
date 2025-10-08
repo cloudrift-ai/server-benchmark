@@ -207,11 +207,13 @@ def run_benchmark_step(server: dict, model_config: dict, config: dict, step_name
     # Get tensor_parallel_size from model config (default to 1 if not specified)
     tensor_parallel_size = model_config.get('tensor_parallel_size', 1)
     num_instances = model_config.get('num_instances', 1)
+    extra_args = model_config.get('extra_args', '')
 
     env_vars = (
         f'MODEL_NAME="{model_name}" '
         f'TENSOR_PARALLEL_SIZE={tensor_parallel_size} '
         f'NUM_INSTANCES={num_instances} '
+        f'VLLM_EXTRA_ARGS="{extra_args}" '
         f'MAX_CONCURRENCY={max_concurrency} '
         f'NUM_PROMPTS={num_prompts} '
         f'RANDOM_INPUT_LEN={random_input_len} '

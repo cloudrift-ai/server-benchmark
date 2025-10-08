@@ -11,6 +11,7 @@ MAX_CONCURRENCY="${MAX_CONCURRENCY:-200}"
 NUM_PROMPTS="${NUM_PROMPTS:-1000}"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 NUM_INSTANCES="${NUM_INSTANCES:-1}"
+VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
 
 BENCHMARK_RESULTS_FILE="${BENCHMARK_RESULTS_FILE:-vllm_benchmark.txt}"
 HF_DIRECTORY="${HF_DIRECTORY:-/hf_models}"
@@ -51,6 +52,7 @@ if [ $NUM_INSTANCES -gt 1 ]; then
         --model-name "$MODEL_NAME" \
         --hf-directory $HF_DIRECTORY \
         --hf-token "${HUGGING_FACE_HUB_TOKEN:-}" \
+        --extra-args "$VLLM_EXTRA_ARGS" \
         --output $COMPOSE_FILE \
         --nginx-conf-output $NGINX_CONF
 else
@@ -63,6 +65,7 @@ else
         --model-name "$MODEL_NAME" \
         --hf-directory $HF_DIRECTORY \
         --hf-token "${HUGGING_FACE_HUB_TOKEN:-}" \
+        --extra-args "$VLLM_EXTRA_ARGS" \
         --output $COMPOSE_FILE
 fi
 

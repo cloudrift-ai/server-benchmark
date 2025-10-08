@@ -11,8 +11,11 @@ from typing import List
 def generate_vllm_service(instance_id: int, gpu_list: str, port: int,
                           container_name: str, tensor_parallel_size: int,
                           model_path: str, model_name: str, hf_directory: str,
-                          hf_token: str) -> str:
+                          hf_token: str, extra_args: str = "") -> str:
     """Generate a single vLLM service definition."""
+    # Build command with extra args if provided
+    extra_args_str = f"\n      {extra_args}" if extra_args.strip() else ""
+
     return f"""
   vllm_{instance_id}:
     image: vllm/vllm-openai:latest
@@ -44,7 +47,7 @@ def generate_vllm_service(instance_id: int, gpu_list: str, port: int,
       --port 8000
       --tensor-parallel-size {tensor_parallel_size}
       --model {model_path}
-      --served-model-name {model_name}
+      --served-model-name {model_name}{extra_args_str}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -125,7 +128,8 @@ def generate_compose_file(
     model_name: str,
     hf_directory: str,
     hf_token: str,
-    nginx_conf_path: str = None
+    nginx_conf_path: str = None,
+    extra_args: str = ""
 ) -> str:
     """Generate complete docker-compose.yml content."""
 
@@ -145,7 +149,8 @@ def generate_compose_file(
             model_path=model_path,
             model_name=model_name,
             hf_directory=hf_directory,
-            hf_token=hf_token
+            hf_token=hf_token,
+            extra_args=extra_args
         )
 
     # Add nginx load balancer if multiple instances
@@ -173,6 +178,8 @@ def main():
                         help='HuggingFace cache directory')
     parser.add_argument('--hf-token', default='',
                         help='HuggingFace token')
+    parser.add_argument('--extra-args', default='',
+                        help='Extra vLLM arguments (e.g., "--enable-expert-parallel --swap-space 16")')
     parser.add_argument('--nginx-conf', default=None,
                         help='Path to nginx config file (for multi-instance)')
     parser.add_argument('--output', '-o', required=True,
@@ -208,7 +215,8 @@ def main():
         model_name=args.model_name,
         hf_directory=args.hf_directory,
         hf_token=args.hf_token,
-        nginx_conf_path=nginx_conf_path
+        nginx_conf_path=nginx_conf_path,
+        extra_args=args.extra_args
     )
 
     with open(args.output, 'w') as f:

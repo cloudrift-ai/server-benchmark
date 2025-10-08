@@ -43,9 +43,9 @@ servers:
       - name: "Qwen/Qwen2.5-72B-Instruct-AWQ"
         tensor_parallel_size: 2  # 72B model uses 2 GPUs per instance
         num_instances: 2         # Run 2 instances (GPU 0-1, GPU 2-3)
-      - name: "QuantTrio/GLM-4.5-AWQ"
-        tensor_parallel_size: 2  # GLM-4.5 uses 2 GPUs per instance
-        num_instances: 2         # Run 2 instances (GPU 0-1, GPU 2-3)
+      - name: "QuantTrio/GLM-4.5-Air-AWQ-FP16Mix"
+        tensor_parallel_size: 4  # 106B model uses 4 GPUs
+        extra_args: "--enable-expert-parallel --swap-space 16 --max-num-seqs 512 --max-model-len 32768 --max-seq-len-to-capture 32768"
 
   - name: "rtx5090_x_1"
     address: "riftuser@217.138.104.159"
@@ -77,9 +77,9 @@ servers:
       - name: "Qwen/Qwen2.5-72B-Instruct-AWQ"
         tensor_parallel_size: 2
         num_instances: 2
-      - name: "QuantTrio/GLM-4.5-AWQ"
-        tensor_parallel_size: 2
-        num_instances: 2
+      - name: "QuantTrio/GLM-4.5-Air-AWQ-FP16Mix"
+        tensor_parallel_size: 4
+        extra_args: "--enable-expert-parallel --swap-space 16 --max-num-seqs 512 --max-model-len 32768 --max-seq-len-to-capture 32768"
 
 
 # Results will be saved with flat structure using prefixes:

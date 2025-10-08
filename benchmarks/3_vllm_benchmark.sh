@@ -62,29 +62,17 @@ fi
 echo "Cleaning up previous deployment..."
 sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark down 2>/dev/null || true
 
-# Start all services and stream logs in background
+# Start all services and wait for health
 echo "Starting containers (may take up to 30min for multi-GPU)..."
 
-# Start containers in detached mode
-sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark up -d
-
-# Stream logs in background while waiting for health
-sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark logs -f &
-LOGS_PID=$!
-
-# Wait for containers to be healthy
-if sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark up --wait --wait-timeout 1800; then
+# Start containers, stream logs, and wait for health checks
+if sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark up --wait --wait-timeout 1800 2>&1; then
     echo "✅ Containers healthy"
-    # Stop streaming logs
-    kill $LOGS_PID 2>/dev/null || true
-    sleep 1  # Give the process a moment to terminate
 else
     echo "❌ Container startup failed or timeout"
-    # Stop streaming logs
-    kill $LOGS_PID 2>/dev/null || true
-    sleep 1  # Give the process a moment to terminate
     echo "Container status:"
     sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark ps
+    sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark logs --tail=100
     sudo -E docker compose -f $COMPOSE_FILE -p vllm_benchmark down
     rm -f $COMPOSE_FILE $NGINX_CONF
     exit 1

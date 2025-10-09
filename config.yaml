@@ -11,6 +11,12 @@ benchmark_params:
   random_input_len: 1000     # Random input length for benchmark
   random_output_len: 1000    # Random output length for benchmark
 
+# GPU Pricing ($ per hour per GPU)
+pricing:
+  rtx4090: 0.39     # RTX 4090 price per GPU per hour
+  rtx5090: 0.65     # RTX 5090 price per GPU per hour
+  pro6000: 1.29     # RTX 6000 / Pro 6000 price per GPU per hour
+
 # Define servers with their models to benchmark
 servers:
   - name: "rtx4090_x_1"

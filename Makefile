@@ -1,4 +1,4 @@
-.PHONY: help setup clean bench bench-force logs clean-logs test-compose
+.PHONY: help setup clean bench bench-force logs clean-logs test-compose report
 
 help:
 	@echo "Server Benchmark Makefile"
@@ -7,6 +7,7 @@ help:
 	@echo "  setup          - Install system dependencies, create venv, and install Python packages"
 	@echo "  bench          - Run benchmarks in parallel"
 	@echo "  bench-force    - Run benchmarks in parallel (force re-run, skip cached results)"
+	@echo "  report         - Generate Excel report from benchmark results"
 	@echo "  logs           - Show the latest benchmark log"
 	@echo "  clean-logs     - Remove all log files"
 	@echo "  clean          - Remove virtual environment and generated files"
@@ -31,6 +32,11 @@ bench: setup
 bench-force: setup
 	@echo "Running benchmarks in parallel (force mode)..."
 	./run_remote_benchmark.py --parallel --force
+
+report: setup
+	@echo "Generating Excel report from benchmark results..."
+	./venv/bin/python generate_benchmark_report.py
+	@echo "✅ Report generated: benchmark_report.xlsx"
 
 logs:
 	@if [ ! -d "logs" ]; then \

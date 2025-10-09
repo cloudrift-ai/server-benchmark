@@ -1,30 +1,30 @@
 ============ Serving Benchmark Result ============
 Successful requests:                     1200      
 Maximum request concurrency:             400       
-Benchmark duration (s):                  1194.24   
+Benchmark duration (s):                  1385.06   
 Total input tokens:                      1198147   
 Total generated tokens:                  1200000   
-Request throughput (req/s):              1.00      
-Output token throughput (tok/s):         1004.82   
-Peak output token throughput (tok/s):    2100.00   
-Peak concurrent requests:                410.00    
-Total Token throughput (tok/s):          2008.10   
+Request throughput (req/s):              0.87      
+Output token throughput (tok/s):         866.39    
+Peak output token throughput (tok/s):    1576.00   
+Peak concurrent requests:                415.00    
+Total Token throughput (tok/s):          1731.44   
 ---------------Time to First Token----------------
-Mean TTFT (ms):                          237422.60 
-Median TTFT (ms):                        274254.58 
-P99 TTFT (ms):                           362530.17 
+Mean TTFT (ms):                          285543.10 
+Median TTFT (ms):                        310070.13 
+P99 TTFT (ms):                           390143.52 
 -----Time per Output Token (excl. 1st token)------
-Mean TPOT (ms):                          104.93    
-Median TPOT (ms):                        86.84     
-P99 TPOT (ms):                           162.94    
+Mean TPOT (ms):                          112.74    
+Median TPOT (ms):                        94.01     
+P99 TPOT (ms):                           178.26    
 ---------------Inter-token Latency----------------
-Mean ITL (ms):                           105.02    
-Median ITL (ms):                         69.92     
-P99 ITL (ms):                            940.94    
+Mean ITL (ms):                           113.49    
+Median ITL (ms):                         76.78     
+P99 ITL (ms):                            522.60    
 ----------------End-to-end Latency----------------
-Mean E2EL (ms):                          342250.34 
-Median E2EL (ms):                        366503.48 
-P99 E2EL (ms):                           447470.17 
+Mean E2EL (ms):                          398174.54 
+Median E2EL (ms):                        453936.36 
+P99 E2EL (ms):                           480906.83 
 ==================================================
 
 ============ Docker Compose Configuration ============
@@ -37,13 +37,12 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ['0']
+              device_ids: ['0', '1', '2', '3']
               capabilities: [gpu]
     volumes:
       - /hf_models:/hf_models
     environment:
       - HUGGING_FACE_HUB_TOKEN=
-      - CUDA_VISIBLE_DEVICES=0
     ports:
       - "8000:8000"
     shm_size: '16gb'
@@ -54,6 +53,7 @@ services:
       --host 0.0.0.0
       --port 8000
       --tensor-parallel-size 1
+      --pipeline-parallel-size 4
       --model /hf_models/cpatonn/GLM-4.5-Air-AWQ-4bit
       --served-model-name cpatonn/GLM-4.5-Air-AWQ-4bit
       --dtype float16 --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel

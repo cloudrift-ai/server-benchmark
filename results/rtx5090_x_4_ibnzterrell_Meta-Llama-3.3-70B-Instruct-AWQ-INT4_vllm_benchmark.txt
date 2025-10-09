@@ -1,0 +1,135 @@
+============ Serving Benchmark Result ============
+Successful requests:                     386       
+Maximum request concurrency:             400       
+Benchmark duration (s):                  308.16    
+Total input tokens:                      384827    
+Total generated tokens:                  386000    
+Request throughput (req/s):              1.25      
+Output token throughput (tok/s):         1252.59   
+Peak output token throughput (tok/s):    3436.00   
+Peak concurrent requests:                386.00    
+Total Token throughput (tok/s):          2501.38   
+---------------Time to First Token----------------
+Mean TTFT (ms):                          90584.09  
+Median TTFT (ms):                        36659.85  
+P99 TTFT (ms):                           265174.65 
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          116.96    
+Median TPOT (ms):                        95.43     
+P99 TPOT (ms):                           215.19    
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           116.84    
+Median ITL (ms):                         54.71     
+P99 ITL (ms):                            1422.09   
+----------------End-to-end Latency----------------
+Mean E2EL (ms):                          207423.35 
+Median E2EL (ms):                        230901.60 
+P99 E2EL (ms):                           307921.34 
+==================================================
+
+============ Docker Compose Configuration ============
+services:
+  vllm_0:
+    image: vllm/vllm-openai:latest
+    container_name: vllm_benchmark_container_0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0', '1']
+              capabilities: [gpu]
+    volumes:
+      - /hf_models:/hf_models
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=
+    ports:
+      - "8000:8000"
+    shm_size: '16gb'
+    ipc: host
+    command: >
+      --trust-remote-code
+      --gpu-memory-utilization=0.9
+      --host 0.0.0.0
+      --port 8000
+      --tensor-parallel-size 1
+      --pipeline-parallel-size 2
+      --model /hf_models/ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4
+      --served-model-name ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4
+      --max-model-len 8192 --kv-cache-dtype fp8
+    healthcheck:
+      test: ["CMD", "bash", "-c", "curl -f http://localhost:8000/health && curl -f http://localhost:8000/v1/models | grep -q 'object.*list'"]
+      interval: 10s
+      timeout: 10s
+      retries: 180
+      start_period: 600s
+
+  vllm_1:
+    image: vllm/vllm-openai:latest
+    container_name: vllm_benchmark_container_1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['2', '3']
+              capabilities: [gpu]
+    volumes:
+      - /hf_models:/hf_models
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=
+    ports:
+      - "8001:8000"
+    shm_size: '16gb'
+    ipc: host
+    command: >
+      --trust-remote-code
+      --gpu-memory-utilization=0.9
+      --host 0.0.0.0
+      --port 8000
+      --tensor-parallel-size 1
+      --pipeline-parallel-size 2
+      --model /hf_models/ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4
+      --served-model-name ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4
+      --max-model-len 8192 --kv-cache-dtype fp8
+    healthcheck:
+      test: ["CMD", "bash", "-c", "curl -f http://localhost:8000/health && curl -f http://localhost:8000/v1/models | grep -q 'object.*list'"]
+      interval: 10s
+      timeout: 10s
+      retries: 180
+      start_period: 600s
+
+  nginx:
+    image: nginx:alpine
+    container_name: nginx_lb
+    ports:
+      - "8080:8080"
+    volumes:
+      - /home/riftuser/server-benchmark/nginx.vllm.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - vllm_0
+      - vllm_1
+
+  benchmark:
+    image: vllm/vllm-openai:latest
+    container_name: vllm_benchmark_client
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - /hf_models:/hf_models
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=
+      - CUDA_VISIBLE_DEVICES=""
+    entrypoint: ["/bin/bash", "-c"]
+    command: ["sleep infinity"]
+    profiles:
+      - tools
+
+============ Benchmark Command ============
+vllm bench serve     --model ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4     --dataset-name random     --random-input-len 1000     --random-output-len 1000     --max-concurrency 400     --num-prompts 1200     --ignore-eos     --backend openai-chat     --endpoint /v1/chat/completions     --percentile-metrics ttft,tpot,itl,e2el     --base-url http://nginx_lb:8080
+==================================================

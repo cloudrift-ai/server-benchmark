@@ -53,7 +53,7 @@ servers:
         extra_args: "--max-model-len 8192 --kv-cache-dtype fp8"
       - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
         pipeline_parallel_size: 4
-        extra_args: "--dtype float16 --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel"
+        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8"
 
   - name: "rtx5090_x_1"
     address: "riftuser@217.138.104.159"
@@ -88,8 +88,8 @@ servers:
         num_instances: 2
         extra_args: "--max-model-len 8192 --kv-cache-dtype fp8"
       - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
-        tensor_parallel_size: 4
-        extra_args: "--dtype float16 --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel"
+        pipeline_parallel_size: 4
+        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8"
 
   - name: "pro6000_x_1"
     address: "riftuser@74.81.65.29"
@@ -101,7 +101,7 @@ servers:
       - name: "ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4"
         extra_args: "--max-model-len 8192 --kv-cache-dtype fp8"
       - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
-        extra_args: "--dtype float16 --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel"
+        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8"
 
 
 # Results will be saved with flat structure using prefixes:

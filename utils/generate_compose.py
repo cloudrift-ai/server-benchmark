@@ -20,14 +20,6 @@ def generate_vllm_service(instance_id: int, gpu_list: str, port: int,
     # Format GPU list for YAML: ['0', '1'] instead of ['0,1']
     gpu_ids_yaml = ", ".join(f"'{gpu}'" for gpu in gpu_list.split(','))
 
-    # Docker remaps GPUs, so from container's perspective GPUs are always 0,1,2...
-    # Total GPUs = tensor_parallel * pipeline_parallel
-    total_gpus_per_instance = tensor_parallel_size * pipeline_parallel_size
-    if total_gpus_per_instance > 1:
-        cuda_visible_devices = ",".join(str(i) for i in range(total_gpus_per_instance))
-    else:
-        cuda_visible_devices = "0"
-
     return f"""
   vllm_{instance_id}:
     image: vllm/vllm-openai:latest
@@ -43,7 +35,6 @@ def generate_vllm_service(instance_id: int, gpu_list: str, port: int,
       - {hf_directory}:{hf_directory}
     environment:
       - HUGGING_FACE_HUB_TOKEN={hf_token}
-      - CUDA_VISIBLE_DEVICES={cuda_visible_devices}
     ports:
       - "{port}:8000"
     shm_size: '16gb'

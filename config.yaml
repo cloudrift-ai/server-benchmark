@@ -19,28 +19,28 @@ pricing:
 
 # Define servers with their models to benchmark
 servers:
-  - name: "rtx4090_x_1"
-    address: "riftuser@142.214.185.238"
-    ssh_key: "~/.ssh/id_ed25519"
-    port: 22
-    models:
-      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-        extra_args: "--max-model-len 8192"
+#  - name: "rtx4090_x_1"
+#    address: "riftuser@142.214.185.238"
+#    ssh_key: "~/.ssh/id_ed25519"
+#    port: 22
+#    models:
+#      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
+#        extra_args: "--max-model-len 8192"
 
-  - name: "rtx4090_x_2"
-    address: "riftuser@142.214.185.150"
-    ssh_key: "~/.ssh/id_ed25519"
-    port: 22
-    models:
-      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-        num_instances: 2
-        extra_args: "--max-model-len 8192"
-      - name: "ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4"
-        pipeline_parallel_size: 2
-        extra_args: "--max-model-len 8192 --kv-cache-dtype fp8"
+#  - name: "rtx4090_x_2"
+#    address: "riftuser@142.214.185.151"
+#    ssh_key: "~/.ssh/id_ed25519"
+#    port: 22
+#    models:
+#      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
+#        num_instances: 2
+#        extra_args: "--max-model-len 8192"
+#      - name: "ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4"
+#        pipeline_parallel_size: 2
+#        extra_args: "--max-model-len 8192 --kv-cache-dtype fp8"
 
   - name: "rtx4090_x_4"
-    address: "riftuser@142.214.185.230"
+    address: "riftuser@142.214.185.239"
     ssh_key: "~/.ssh/id_ed25519"
     port: 22
     models:
@@ -55,53 +55,53 @@ servers:
         pipeline_parallel_size: 4
         extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8"
 
-  - name: "rtx5090_x_1"
-    address: "riftuser@217.138.104.159"
-    ssh_key: "~/.ssh/id_ed25519"
-    port: 22
-    models:
-      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-        extra_args: "--max-model-len 8192"
+#  - name: "rtx5090_x_1"
+#    address: "riftuser@217.138.104.159"
+#    ssh_key: "~/.ssh/id_ed25519"
+#    port: 22
+#    models:
+#      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
+#        extra_args: "--max-model-len 8192"
 
-  - name: "rtx5090_x_2"
-    address: "riftuser@217.138.104.153"
-    ssh_key: "~/.ssh/id_ed25519"
-    port: 22
-    models:
-      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-        num_instances: 2
-        extra_args: "--max-model-len 8192"
-      - name: "ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4"
-        pipeline_parallel_size: 2
-        extra_args: "--max-model-len 8192 --kv-cache-dtype fp8"
+#  - name: "rtx5090_x_2"
+#    address: "riftuser@217.138.104.153"
+#    ssh_key: "~/.ssh/id_ed25519"
+#    port: 22
+#    models:
+#      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
+#        num_instances: 2
+#        extra_args: "--max-model-len 8192"
+#      - name: "ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4"
+#        pipeline_parallel_size: 2
+#        extra_args: "--max-model-len 8192 --kv-cache-dtype fp8"
 
-  - name: "rtx5090_x_4"
-    address: "riftuser@217.138.104.158"
-    ssh_key: "~/.ssh/id_ed25519"
-    port: 22
-    models:
-      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-        num_instances: 4
-        extra_args: "--max-model-len 8192"
-      - name: "ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4"
-        pipeline_parallel_size: 2
-        num_instances: 2
-        extra_args: "--max-model-len 8192 --kv-cache-dtype fp8"
-      - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
-        pipeline_parallel_size: 4
-        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8"
+#  - name: "rtx5090_x_4"
+#    address: "riftuser@217.138.104.155"
+#    ssh_key: "~/.ssh/id_ed25519"
+#    port: 22
+#    models:
+#      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
+#        num_instances: 4
+#        extra_args: "--max-model-len 8192"
+#      - name: "ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4"
+#        pipeline_parallel_size: 2
+#        num_instances: 2
+#        extra_args: "--max-model-len 8192 --kv-cache-dtype fp8"
+#      - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
+#        pipeline_parallel_size: 4
+#        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8"
 
-  - name: "pro6000_x_1"
-    address: "riftuser@74.81.65.29"
-    ssh_key: "~/.ssh/id_ed25519"
-    port: 22
-    models:
-      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-        extra_args: "--max-model-len 8192"
-      - name: "ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4"
-        extra_args: "--max-model-len 8192 --kv-cache-dtype fp8"
-      - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
-        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8"
+#  - name: "pro6000_x_1"
+#    address: "riftuser@74.81.65.29"
+#    ssh_key: "~/.ssh/id_ed25519"
+#    port: 22
+#    models:
+#      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
+#        extra_args: "--max-model-len 8192"
+#      - name: "ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4"
+#        extra_args: "--max-model-len 8192 --kv-cache-dtype fp8"
+#      - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
+#        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8"
 
 
 # Results will be saved with flat structure using prefixes:

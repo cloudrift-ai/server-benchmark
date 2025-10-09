@@ -1,6 +1,6 @@
 ================================
 SYSTEM INFORMATION
-Collected: Wed Oct  8 23:16:54 UTC 2025
+Collected: Thu Oct  9 05:07:21 UTC 2025
 ================================
 
 === HOSTNAME ===
@@ -72,7 +72,7 @@ Logical CPUs (threads): 28
 
 === MEMORY INFORMATION ===
                total        used        free      shared  buff/cache   available
-Mem:           196Gi       3.5Gi       176Gi       1.3Mi        18Gi       193Gi
+Mem:           196Gi       2.3Gi       194Gi       1.3Mi       1.2Gi       194Gi
 Swap:             0B          0B          0B
 
 === DETAILED MEMORY ===
@@ -151,7 +151,7 @@ index, name, driver_version, memory.total [MiB], compute_cap
 3, NVIDIA GeForce RTX 4090, 575.57.08, 24564 MiB, 8.9
 
 === NVIDIA-SMI FULL OUTPUT ===
-Wed Oct  8 23:16:59 2025       
+Thu Oct  9 05:07:27 2025       
 +-----------------------------------------------------------------------------------------+
 | NVIDIA-SMI 575.57.08              Driver Version: 575.57.08      CUDA Version: 12.9     |
 |-----------------------------------------+------------------------+----------------------+
@@ -160,19 +160,19 @@ Wed Oct  8 23:16:59 2025
 |                                         |                        |               MIG M. |
 |=========================================+========================+======================|
 |   0  NVIDIA GeForce RTX 4090        Off |   00000000:00:10.0 Off |                  Off |
-| 30%   34C    P0             64W /  450W |       0MiB /  24564MiB |      0%      Default |
+| 30%   37C    P0             67W /  450W |       0MiB /  24564MiB |      0%      Default |
 |                                         |                        |                  N/A |
 +-----------------------------------------+------------------------+----------------------+
 |   1  NVIDIA GeForce RTX 4090        Off |   00000000:00:11.0 Off |                  Off |
-| 30%   35C    P0             68W /  450W |       0MiB /  24564MiB |      2%      Default |
+| 30%   38C    P0             74W /  450W |       0MiB /  24564MiB |      0%      Default |
 |                                         |                        |                  N/A |
 +-----------------------------------------+------------------------+----------------------+
 |   2  NVIDIA GeForce RTX 4090        Off |   00000000:00:12.0 Off |                  Off |
-| 30%   32C    P0             76W /  450W |       0MiB /  24564MiB |      0%      Default |
+| 30%   34C    P0             77W /  450W |       0MiB /  24564MiB |      0%      Default |
 |                                         |                        |                  N/A |
 +-----------------------------------------+------------------------+----------------------+
 |   3  NVIDIA GeForce RTX 4090        Off |   00000000:00:13.0 Off |                  Off |
-| 30%   31C    P0             74W /  450W |       0MiB /  24564MiB |      0%      Default |
+| 30%   33C    P0             76W /  450W |       0MiB /  24564MiB |      2%      Default |
 |                                         |                        |                  N/A |
 +-----------------------------------------+------------------------+----------------------+
                                                                                          
@@ -186,8 +186,8 @@ Wed Oct  8 23:16:59 2025
 
 === DISK INFORMATION ===
 Filesystem      Size  Used Avail Use% Mounted on
-tmpfs            20G  1.7M   20G   1% /run
-/dev/vda1       1.9T  267G  1.7T  14% /
+tmpfs            20G  1.3M   20G   1% /run
+/dev/vda1       1.9T   18G  1.9T   1% /
 tmpfs            99G     0   99G   0% /dev/shm
 tmpfs           5.0M     0  5.0M   0% /run/lock
 /dev/vda16      881M   62M  758M   8% /boot
@@ -207,16 +207,9 @@ vda        2T disk
 1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
     inet 127.0.0.1/8 scope host lo
 2: enp1s0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP group default qlen 1000
-    inet 142.214.185.230/24 brd 142.214.185.255 scope global enp1s0
-4: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN group default 
+    inet 142.214.185.239/24 brd 142.214.185.255 scope global enp1s0
+3: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN group default 
     inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0
-16: br-04a000a763ae: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP group default 
-    inet 172.18.0.1/16 brd 172.18.255.255 scope global br-04a000a763ae
-17: veth0ac4caf@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue master br-04a000a763ae state UP group default 
-18: veth55428a1@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue master br-04a000a763ae state UP group default 
-19: veth14bbc4e@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue master br-04a000a763ae state UP group default 
-20: veth208a448@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue master br-04a000a763ae state UP group default 
-21: vethb82b9c9@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue master br-04a000a763ae state UP group default 
 
 === PCI DEVICES ===
 00:00.0 Host bridge: Intel Corporation 82G33/G31/P35/P31 Express DRAM Controller
@@ -242,16 +235,16 @@ vda        2T disk
 04:00.0 Unclassified device [00ff]: Red Hat, Inc. Virtio 1.0 memory balloon (rev 01)
 
 === SYSTEM UPTIME ===
- 23:17:00 up  1:11,  2 users,  load average: 1.87, 0.53, 0.32
+ 05:07:28 up 2 min,  1 user,  load average: 0.58, 0.20, 0.07
 
 === LOAD AVERAGE ===
-1.87 0.53 0.32 20/845 45391
+0.58 0.20 0.07 2/554 3257
 
 === DOCKER VERSION ===
-Docker version 28.5.0, build 887030f
+Docker version 28.3.3, build 980b856
 
 Docker Info:
- Server Version: 28.5.0
+ Server Version: 28.3.3
  Storage Driver: overlay2
  Operating System: Ubuntu 24.04.1 LTS
  CPUs: 28

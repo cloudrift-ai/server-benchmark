@@ -1,30 +1,30 @@
 ============ Serving Benchmark Result ============
-Successful requests:                     386       
+Successful requests:                     1200      
 Maximum request concurrency:             400       
-Benchmark duration (s):                  308.16    
-Total input tokens:                      384827    
-Total generated tokens:                  386000    
-Request throughput (req/s):              1.25      
-Output token throughput (tok/s):         1252.59   
-Peak output token throughput (tok/s):    3436.00   
-Peak concurrent requests:                386.00    
-Total Token throughput (tok/s):          2501.38   
+Benchmark duration (s):                  980.85    
+Total input tokens:                      1196743   
+Total generated tokens:                  1200000   
+Request throughput (req/s):              1.22      
+Output token throughput (tok/s):         1223.42   
+Peak output token throughput (tok/s):    3343.00   
+Peak concurrent requests:                408.00    
+Total Token throughput (tok/s):          2443.53   
 ---------------Time to First Token----------------
-Mean TTFT (ms):                          90584.09  
-Median TTFT (ms):                        36659.85  
-P99 TTFT (ms):                           265174.65 
+Mean TTFT (ms):                          158275.93 
+Median TTFT (ms):                        166262.87 
+P99 TTFT (ms):                           273238.49 
 -----Time per Output Token (excl. 1st token)------
-Mean TPOT (ms):                          116.96    
-Median TPOT (ms):                        95.43     
-P99 TPOT (ms):                           215.19    
+Mean TPOT (ms):                          134.71    
+Median TPOT (ms):                        123.86    
+P99 TPOT (ms):                           216.70    
 ---------------Inter-token Latency----------------
-Mean ITL (ms):                           116.84    
-Median ITL (ms):                         54.71     
-P99 ITL (ms):                            1422.09   
+Mean ITL (ms):                           134.57    
+Median ITL (ms):                         55.98     
+P99 ITL (ms):                            1408.24   
 ----------------End-to-end Latency----------------
-Mean E2EL (ms):                          207423.35 
-Median E2EL (ms):                        230901.60 
-P99 E2EL (ms):                           307921.34 
+Mean E2EL (ms):                          292848.13 
+Median E2EL (ms):                        311149.01 
+P99 E2EL (ms):                           399504.14 
 ==================================================
 
 ============ Docker Compose Configuration ============

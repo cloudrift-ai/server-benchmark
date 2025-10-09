@@ -1,0 +1,12 @@
+Model: cpatonn/GLM-4.5-Air-AWQ-4bit
+---------------------------------
+Downloading model: cpatonn/GLM-4.5-Air-AWQ-4bit...
+  [2m2025-10-08T23:00:49.063217Z[0m [33m WARN[0m  [33mStatus Code: 504. Retrying..., [1;33mrequest_id[0m[33m: ""[0m
+    [2;3mat[0m /home/runner/work/xet-core/xet-core/cas_client/src/http_client.rs:227
+
+  [2m2025-10-08T23:00:49.063256Z[0m [33m WARN[0m  [33mRetry attempt #0. Sleeping 2.04549225s before the next attempt[0m
+    [2;3mat[0m /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reqwest-retry-0.7.0/src/middleware.rs:171
+
+Model download complete! Saved to: /hf_models/cpatonn/GLM-4.5-Air-AWQ-4bit
+Download took 100.25 seconds.
+Average download speed: 4826.83 MiB/s

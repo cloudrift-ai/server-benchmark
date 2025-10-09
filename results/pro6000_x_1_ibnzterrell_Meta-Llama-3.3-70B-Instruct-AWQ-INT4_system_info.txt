@@ -1,0 +1,214 @@
+================================
+SYSTEM INFORMATION
+Collected: Wed Oct  8 22:14:51 UTC 2025
+================================
+
+=== HOSTNAME ===
+riftvm
+
+=== OPERATING SYSTEM ===
+PRETTY_NAME="Ubuntu 24.04.1 LTS"
+NAME="Ubuntu"
+VERSION_ID="24.04"
+VERSION="24.04.1 LTS (Noble Numbat)"
+VERSION_CODENAME=noble
+ID=ubuntu
+ID_LIKE=debian
+HOME_URL="https://www.ubuntu.com/"
+SUPPORT_URL="https://help.ubuntu.com/"
+BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"
+UBUNTU_CODENAME=noble
+LOGO=ubuntu-logo
+
+=== KERNEL VERSION ===
+6.8.0-51-generic
+
+=== CPU INFORMATION ===
+Architecture:                         x86_64
+CPU op-mode(s):                       32-bit, 64-bit
+Address sizes:                        52 bits physical, 57 bits virtual
+Byte Order:                           Little Endian
+CPU(s):                               7
+On-line CPU(s) list:                  0-6
+Vendor ID:                            AuthenticAMD
+Model name:                           AMD EPYC 9374F 32-Core Processor
+CPU family:                           25
+Model:                                17
+Thread(s) per core:                   1
+Core(s) per socket:                   1
+Socket(s):                            7
+Stepping:                             1
+BogoMIPS:                             7699.99
+Flags:                                fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm rep_good nopl cpuid extd_apicid tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw perfctr_core ssbd ibrs ibpb stibp ibrs_enhanced vmmcall fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves avx512_bf16 clzero xsaveerptr wbnoinvd arat npt lbrv nrip_save tsc_scale vmcb_clean flushbyasid pausefilter pfthreshold v_vmsave_vmload vgif vnmi avx512vbmi umip pku ospke avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq la57 rdpid fsrm flush_l1d arch_capabilities
+Virtualization:                       AMD-V
+Hypervisor vendor:                    KVM
+Virtualization type:                  full
+L1d cache:                            448 KiB (7 instances)
+L1i cache:                            448 KiB (7 instances)
+L2 cache:                             3.5 MiB (7 instances)
+L3 cache:                             112 MiB (7 instances)
+NUMA node(s):                         1
+NUMA node0 CPU(s):                    0-6
+Vulnerability Gather data sampling:   Not affected
+Vulnerability Itlb multihit:          Not affected
+Vulnerability L1tf:                   Not affected
+Vulnerability Mds:                    Not affected
+Vulnerability Meltdown:               Not affected
+Vulnerability Mmio stale data:        Not affected
+Vulnerability Reg file data sampling: Not affected
+Vulnerability Retbleed:               Not affected
+Vulnerability Spec rstack overflow:   Mitigation; Safe RET
+Vulnerability Spec store bypass:      Mitigation; Speculative Store Bypass disabled via prctl
+Vulnerability Spectre v1:             Mitigation; usercopy/swapgs barriers and __user pointer sanitization
+Vulnerability Spectre v2:             Mitigation; Enhanced / Automatic IBRS; IBPB conditional; STIBP disabled; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected
+Vulnerability Srbds:                  Not affected
+Vulnerability Tsx async abort:        Not affected
+
+=== CPU COUNT ===
+Physical CPUs: 7
+CPU Cores: 1
+Logical CPUs (threads): 7
+
+=== MEMORY INFORMATION ===
+               total        used        free      shared  buff/cache   available
+Mem:           117Gi       3.3Gi        25Gi       1.3Mi        90Gi       114Gi
+Swap:             0B          0B          0B
+
+=== DETAILED MEMORY ===
+	Error Correction Type: Multi-bit ECC
+	Size: 16 GB
+	Type: RAM
+	Speed: Unknown
+	Manufacturer: QEMU
+	Configured Memory Speed: Unknown
+	Size: 16 GB
+	Type: RAM
+	Speed: Unknown
+	Manufacturer: QEMU
+	Configured Memory Speed: Unknown
+	Size: 16 GB
+	Type: RAM
+	Speed: Unknown
+	Manufacturer: QEMU
+	Configured Memory Speed: Unknown
+	Size: 16 GB
+	Type: RAM
+	Speed: Unknown
+	Manufacturer: QEMU
+	Configured Memory Speed: Unknown
+	Size: 16 GB
+	Type: RAM
+	Speed: Unknown
+	Manufacturer: QEMU
+	Configured Memory Speed: Unknown
+	Size: 16 GB
+	Type: RAM
+	Speed: Unknown
+	Manufacturer: QEMU
+	Configured Memory Speed: Unknown
+	Size: 16 GB
+	Type: RAM
+	Speed: Unknown
+	Manufacturer: QEMU
+	Configured Memory Speed: Unknown
+	Size: 8 GB
+	Type: RAM
+	Speed: Unknown
+	Manufacturer: QEMU
+	Configured Memory Speed: Unknown
+
+=== GPU INFORMATION ===
+index, name, driver_version, memory.total [MiB], compute_cap
+0, NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 575.57.08, 97887 MiB, 12.0
+
+=== NVIDIA-SMI FULL OUTPUT ===
+Wed Oct  8 22:14:54 2025       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 575.57.08              Driver Version: 575.57.08      CUDA Version: 12.9     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA RTX PRO 6000 Blac...    Off |   00000000:00:10.0 Off |                  Off |
+| 40%   57C    P0             92W /  600W |       0MiB /  97887MiB |      2%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+
+=== DISK INFORMATION ===
+Filesystem      Size  Used Avail Use% Mounted on
+tmpfs            12G  1.3M   12G   1% /run
+/dev/vda1       1.5T  104G  1.4T   8% /
+tmpfs            59G     0   59G   0% /dev/shm
+tmpfs           5.0M     0  5.0M   0% /run/lock
+/dev/vda16      881M   62M  758M   8% /boot
+/dev/vda15      105M  8.4M   97M   8% /boot/efi
+tmpfs            12G   20K   12G   1% /run/user/1000
+
+=== DISK DETAILS ===
+NAME     SIZE TYPE MOUNTPOINT FSTYPE  MODEL
+sr0      368K rom             iso9660 QEMU DVD-ROM
+vda      1.5T disk                    
+├─vda1   1.5T part /          ext4    
+├─vda14    4M part                    
+├─vda15  106M part /boot/efi  vfat    
+└─vda16  913M part /boot      ext4    
+
+=== NETWORK INTERFACES ===
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    inet 127.0.0.1/8 scope host lo
+2: enp1s0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP group default qlen 1000
+    inet 74.81.65.29/24 brd 74.81.65.255 scope global enp1s0
+3: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN group default 
+    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0
+4: br-c72a9ec2b8fe: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP group default 
+    inet 172.18.0.1/16 brd 172.18.255.255 scope global br-c72a9ec2b8fe
+6: veth4c85d2e@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue master br-c72a9ec2b8fe state UP group default 
+
+=== PCI DEVICES ===
+00:00.0 Host bridge: Intel Corporation 82G33/G31/P35/P31 Express DRAM Controller
+00:01.0 VGA compatible controller: Cirrus Logic GD 5446
+00:02.0 PCI bridge: Red Hat, Inc. QEMU PCIe Root port
+00:02.1 PCI bridge: Red Hat, Inc. QEMU PCIe Root port
+00:02.2 PCI bridge: Red Hat, Inc. QEMU PCIe Root port
+00:02.3 PCI bridge: Red Hat, Inc. QEMU PCIe Root port
+00:10.0 VGA compatible controller: NVIDIA Corporation Device 2bb1 (rev a1)
+00:10.1 Audio device: NVIDIA Corporation Device 22e8 (rev a1)
+00:1f.0 ISA bridge: Intel Corporation 82801IB (ICH9) LPC Interface Controller (rev 02)
+00:1f.2 SATA controller: Intel Corporation 82801IR/IO/IH (ICH9R/DO/DH) 6 port SATA Controller [AHCI mode] (rev 02)
+00:1f.3 SMBus: Intel Corporation 82801I (ICH9 Family) SMBus Controller (rev 02)
+01:00.0 Ethernet controller: Red Hat, Inc. Virtio 1.0 network device (rev 01)
+02:00.0 USB controller: Red Hat, Inc. QEMU XHCI Host Controller (rev 01)
+03:00.0 SCSI storage controller: Red Hat, Inc. Virtio 1.0 block device (rev 01)
+04:00.0 Unclassified device [00ff]: Red Hat, Inc. Virtio 1.0 memory balloon (rev 01)
+
+=== SYSTEM UPTIME ===
+ 22:14:54 up 39 min,  1 user,  load average: 2.38, 2.16, 1.75
+
+=== LOAD AVERAGE ===
+2.38 2.16 1.75 2/256 13036
+
+=== DOCKER VERSION ===
+Docker version 28.3.3, build 980b856
+
+Docker Info:
+ Server Version: 28.3.3
+ Storage Driver: overlay2
+ Operating System: Ubuntu 24.04.1 LTS
+ CPUs: 7
+ Total Memory: 117.9GiB
+ Docker Root Dir: /var/lib/docker
+
+================================
+System information collected successfully!
+Saved to: system_info.txt
+================================

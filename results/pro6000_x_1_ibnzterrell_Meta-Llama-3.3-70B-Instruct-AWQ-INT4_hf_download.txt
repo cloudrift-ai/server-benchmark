@@ -1,0 +1,6 @@
+Model: ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4
+---------------------------------
+Downloading model: ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4...
+Model download complete! Saved to: /hf_models/ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4
+Download took 55.34 seconds.
+Average download speed: 5484.53 MiB/s

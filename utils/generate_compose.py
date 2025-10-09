@@ -105,12 +105,17 @@ def generate_nginx_conf(num_instances: int) -> str:
         f"        server vllm_{i}:8000;" for i in range(num_instances)
     ])
 
-    return f"""events {{
+    return f"""# Use all available CPU cores
+worker_processes auto;
+
+events {{
     worker_connections 4096;
 }}
 
 http {{
     upstream vllm_backend {{
+        # Use least connections for better load distribution
+        least_conn;
 {upstream_servers}
     }}
 

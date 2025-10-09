@@ -10,6 +10,7 @@ from typing import List
 
 def generate_vllm_service(instance_id: int, gpu_list: str, port: int,
                           container_name: str, tensor_parallel_size: int,
+                          pipeline_parallel_size: int,
                           model_path: str, model_name: str, hf_directory: str,
                           hf_token: str, extra_args: str = "", num_instances: int = 1) -> str:
     """Generate a single vLLM service definition."""
@@ -20,10 +21,10 @@ def generate_vllm_service(instance_id: int, gpu_list: str, port: int,
     gpu_ids_yaml = ", ".join(f"'{gpu}'" for gpu in gpu_list.split(','))
 
     # Docker remaps GPUs, so from container's perspective GPUs are always 0,1,2...
-    # If tensor_parallel_size > 1, we need 0,1,2... sequence
-    # If tensor_parallel_size == 1, we only need GPU 0
-    if tensor_parallel_size > 1:
-        cuda_visible_devices = ",".join(str(i) for i in range(tensor_parallel_size))
+    # Total GPUs = tensor_parallel * pipeline_parallel
+    total_gpus_per_instance = tensor_parallel_size * pipeline_parallel_size
+    if total_gpus_per_instance > 1:
+        cuda_visible_devices = ",".join(str(i) for i in range(total_gpus_per_instance))
     else:
         cuda_visible_devices = "0"
 
@@ -53,6 +54,7 @@ def generate_vllm_service(instance_id: int, gpu_list: str, port: int,
       --host 0.0.0.0
       --port 8000
       --tensor-parallel-size {tensor_parallel_size}
+      --pipeline-parallel-size {pipeline_parallel_size}
       --model {model_path}
       --served-model-name {model_name}{extra_args_str}
     healthcheck:
@@ -155,6 +157,7 @@ def calculate_gpu_list(instance_id: int, gpus_per_instance: int) -> str:
 def generate_compose_file(
     num_instances: int,
     tensor_parallel_size: int,
+    pipeline_parallel_size: int,
     container_name: str,
     model_path: str,
     model_name: str,
@@ -167,9 +170,12 @@ def generate_compose_file(
 
     compose_content = "services:"
 
+    # Calculate total GPUs per instance (tensor_parallel * pipeline_parallel)
+    gpus_per_instance = tensor_parallel_size * pipeline_parallel_size
+
     # Add vLLM service instances
     for i in range(num_instances):
-        gpu_list = calculate_gpu_list(i, tensor_parallel_size)
+        gpu_list = calculate_gpu_list(i, gpus_per_instance)
         port = 8000 + i
 
         compose_content += generate_vllm_service(
@@ -178,6 +184,7 @@ def generate_compose_file(
             port=port,
             container_name=container_name,
             tensor_parallel_size=tensor_parallel_size,
+            pipeline_parallel_size=pipeline_parallel_size,
             model_path=model_path,
             model_name=model_name,
             hf_directory=hf_directory,
@@ -203,7 +210,9 @@ def main():
     parser.add_argument('--num-instances', type=int, required=True,
                         help='Number of vLLM instances')
     parser.add_argument('--tensor-parallel-size', type=int, required=True,
-                        help='Tensor parallel size (GPUs per instance)')
+                        help='Tensor parallel size')
+    parser.add_argument('--pipeline-parallel-size', type=int, default=1,
+                        help='Pipeline parallel size (default: 1)')
     parser.add_argument('--container-name', required=True,
                         help='Base container name')
     parser.add_argument('--model-path', required=True,
@@ -246,6 +255,7 @@ def main():
     compose_content = generate_compose_file(
         num_instances=args.num_instances,
         tensor_parallel_size=args.tensor_parallel_size,
+        pipeline_parallel_size=args.pipeline_parallel_size,
         container_name=args.container_name,
         model_path=args.model_path,
         model_name=args.model_name,

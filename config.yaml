@@ -18,8 +18,7 @@ servers:
     ssh_key: "~/.ssh/id_ed25519"
     port: 22
     models:
-      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"  # 4-bit quantized, similar to Q4_K_M
-        tensor_parallel_size: 1
+      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
         extra_args: "--max-model-len 8192"
 
   - name: "rtx4090_x_2"
@@ -28,12 +27,11 @@ servers:
     port: 22
     models:
       - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-        tensor_parallel_size: 1  # Each instance uses 1 GPU
-        num_instances: 2         # Run 2 instances for 2x throughput
+        num_instances: 2
         extra_args: "--max-model-len 8192"
       - name: "ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4"
-        tensor_parallel_size: 2  # 72B model needs multi-GPU
-        extra_args: "--max-model-len 2048 --kv-cache-dtype fp8"  # Reduced ctx
+        pipeline_parallel_size: 2
+        extra_args: "--max-model-len 8192 --kv-cache-dtype fp8"
 
   - name: "rtx4090_x_4"
     address: "riftuser@142.214.185.230"
@@ -41,15 +39,14 @@ servers:
     port: 22
     models:
       - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-        tensor_parallel_size: 1  # Each instance uses 1 GPU
-        num_instances: 4         # Run 4 instances for 4x throughput
+        num_instances: 4
         extra_args: "--max-model-len 8192"
       - name: "ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4"
-        tensor_parallel_size: 2  # 72B model uses 2 GPUs per instance
-        num_instances: 2         # Run 2 instances (GPU 0-1, GPU 2-3)
-        extra_args: "--max-model-len 2048 --kv-cache-dtype fp8"
+        pipeline_parallel_size: 2
+        num_instances: 2
+        extra_args: "--max-model-len 8192 --kv-cache-dtype fp8"
       - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
-        tensor_parallel_size: 4  # 106B model uses 4 GPUs
+        pipeline_parallel_size: 4
         extra_args: "--dtype float16 --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel"
 
   - name: "rtx5090_x_1"
@@ -58,7 +55,6 @@ servers:
     port: 22
     models:
       - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-        tensor_parallel_size: 1
         extra_args: "--max-model-len 8192"
 
   - name: "rtx5090_x_2"
@@ -67,12 +63,11 @@ servers:
     port: 22
     models:
       - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-        tensor_parallel_size: 1
         num_instances: 2
         extra_args: "--max-model-len 8192"
       - name: "ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4"
-        tensor_parallel_size: 2
-        extra_args: "--max-model-len 2048 --kv-cache-dtype fp8"  # Reduced ctx
+        pipeline_parallel_size: 2
+        extra_args: "--max-model-len 8192 --kv-cache-dtype fp8"
 
   - name: "rtx5090_x_4"
     address: "riftuser@217.138.104.158"
@@ -80,13 +75,12 @@ servers:
     port: 22
     models:
       - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-        tensor_parallel_size: 1
         num_instances: 4
         extra_args: "--max-model-len 8192"
       - name: "ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4"
-        tensor_parallel_size: 2
+        pipeline_parallel_size: 2
         num_instances: 2
-        extra_args: "--max-model-len 2048 --kv-cache-dtype fp8"  # Reduced ctx
+        extra_args: "--max-model-len 8192 --kv-cache-dtype fp8"
       - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
         tensor_parallel_size: 4
         extra_args: "--dtype float16 --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel"
@@ -97,13 +91,10 @@ servers:
     port: 22
     models:
       - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-        tensor_parallel_size: 1
         extra_args: "--max-model-len 8192"
       - name: "ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4"
-        tensor_parallel_size: 1
-        extra_args: "--max-model-len 2048 --kv-cache-dtype fp8"  # Reduced ctx
+        extra_args: "--max-model-len 8192 --kv-cache-dtype fp8"
       - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
-        tensor_parallel_size: 1
         extra_args: "--dtype float16 --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel"
 
 

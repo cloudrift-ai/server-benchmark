@@ -11,6 +11,7 @@ set -o allexport
 : "${MAX_CONCURRENCY:?MAX_CONCURRENCY must be set}"
 : "${NUM_PROMPTS:?NUM_PROMPTS must be set}"
 : "${TENSOR_PARALLEL_SIZE:?TENSOR_PARALLEL_SIZE must be set}"
+: "${PIPELINE_PARALLEL_SIZE:?PIPELINE_PARALLEL_SIZE must be set}"
 : "${NUM_INSTANCES:?NUM_INSTANCES must be set}"
 : "${VLLM_EXTRA_ARGS:?VLLM_EXTRA_ARGS must be set}"
 : "${BENCHMARK_RESULTS_FILE:?BENCHMARK_RESULTS_FILE must be set}"
@@ -31,10 +32,11 @@ fi
 MODEL_PATH="$HF_DIRECTORY/$MODEL_NAME"
 
 # Calculate GPU assignments
-GPUS_PER_INSTANCE=$TENSOR_PARALLEL_SIZE
+# Total GPUs per instance = tensor_parallel * pipeline_parallel
+GPUS_PER_INSTANCE=$((TENSOR_PARALLEL_SIZE * PIPELINE_PARALLEL_SIZE))
 TOTAL_GPUS=$((GPUS_PER_INSTANCE * NUM_INSTANCES))
 
-echo "Config: ${NUM_INSTANCES}x instances, tensor_parallel=${TENSOR_PARALLEL_SIZE}, total_gpus=${TOTAL_GPUS}"
+echo "Config: ${NUM_INSTANCES}x instances, tensor_parallel=${TENSOR_PARALLEL_SIZE}, pipeline_parallel=${PIPELINE_PARALLEL_SIZE}, total_gpus=${TOTAL_GPUS}"
 
 # Generate docker-compose configuration
 COMPOSE_FILE="docker-compose.vllm.yml"
@@ -45,6 +47,7 @@ if [ $NUM_INSTANCES -gt 1 ]; then
         ./venv/bin/python utils/generate_compose.py
         --num-instances $NUM_INSTANCES
         --tensor-parallel-size $TENSOR_PARALLEL_SIZE
+        --pipeline-parallel-size $PIPELINE_PARALLEL_SIZE
         --container-name $CONTAINER_NAME
         --model-path $MODEL_PATH
         --model-name "$MODEL_NAME"
@@ -63,6 +66,7 @@ else
         ./venv/bin/python utils/generate_compose.py
         --num-instances $NUM_INSTANCES
         --tensor-parallel-size $TENSOR_PARALLEL_SIZE
+        --pipeline-parallel-size $PIPELINE_PARALLEL_SIZE
         --container-name $CONTAINER_NAME
         --model-path $MODEL_PATH
         --model-name "$MODEL_NAME"

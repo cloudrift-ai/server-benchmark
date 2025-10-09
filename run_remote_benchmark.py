@@ -331,8 +331,9 @@ def run_benchmark_step(server: dict, model_config: dict, config: dict, step_name
     random_input_len = benchmark_params['random_input_len']
     random_output_len = benchmark_params['random_output_len']
 
-    # Get tensor_parallel_size from model config (default to 1 if not specified)
+    # Get parallelism parameters from model config (default to 1 if not specified)
     tensor_parallel_size = model_config.get('tensor_parallel_size', 1)
+    pipeline_parallel_size = model_config.get('pipeline_parallel_size', 1)
     num_instances = model_config.get('num_instances', 1)
     extra_args = model_config.get('extra_args', '')
 
@@ -341,6 +342,7 @@ def run_benchmark_step(server: dict, model_config: dict, config: dict, step_name
         f'CONTAINER_NAME="vllm_benchmark_container" '
         f'MODEL_NAME="{model_name}" '
         f'TENSOR_PARALLEL_SIZE={tensor_parallel_size} '
+        f'PIPELINE_PARALLEL_SIZE={pipeline_parallel_size} '
         f'NUM_INSTANCES={num_instances} '
         f'VLLM_EXTRA_ARGS="{extra_args}" '
         f'MAX_CONCURRENCY={max_concurrency} '

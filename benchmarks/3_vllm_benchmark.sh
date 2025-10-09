@@ -76,7 +76,12 @@ fi
 
 # Clean up previous deployment
 echo "Cleaning up previous deployment..."
-docker compose -f $COMPOSE_FILE -p vllm_benchmark down 2>/dev/null || true
+docker compose -f $COMPOSE_FILE -p vllm_benchmark down || true
+# Remove dangling containers, networks and volumes (but keep images)
+docker container prune -f || true
+docker volume prune -f || true
+docker network prune -f || true
+echo "Cleanup completed"
 
 # Start all services and wait for health
 echo "Starting containers (may take up to 30min for multi-GPU)..."
@@ -127,9 +132,7 @@ if ! docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
     exit 1
 fi
 
-docker compose -f $COMPOSE_FILE -p vllm_benchmark --profile tools up -d benchmark
-# Wait for benchmark client to be running
-sleep 2
+docker compose -f $COMPOSE_FILE -p vllm_benchmark --profile tools up -d --wait benchmark
 
 # Determine benchmark endpoint
 if [ $NUM_INSTANCES -gt 1 ]; then

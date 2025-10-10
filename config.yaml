@@ -6,7 +6,7 @@ benchmark:
 
 # Benchmark parameters (required)
 benchmark_params:
-  max_concurrency: 200       # Maximum concurrent requests
+  max_concurrency: 400       # Maximum concurrent requests
   num_prompts: 1200          # Number of prompts to benchmark
   random_input_len: 1000     # Random input length for benchmark
   random_output_len: 1000    # Random output length for benchmark

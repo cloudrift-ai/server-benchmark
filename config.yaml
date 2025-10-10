@@ -75,11 +75,11 @@ servers:
 #        pipeline_parallel_size: 2
 #        extra_args: "--max-model-len 8192 --kv-cache-dtype fp8"
 
-#  - name: "rtx5090_x_4"
-#    address: "riftuser@217.138.104.155"
-#    ssh_key: "~/.ssh/id_ed25519"
-#    port: 22
-#    models:
+  - name: "rtx5090_x_4"
+    address: "riftuser@217.138.104.164"
+    ssh_key: "~/.ssh/id_ed25519"
+    port: 22
+    models:
 #      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
 #        num_instances: 4
 #        extra_args: "--max-model-len 8192"
@@ -87,9 +87,9 @@ servers:
 #        pipeline_parallel_size: 2
 #        num_instances: 2
 #        extra_args: "--max-model-len 8192 --kv-cache-dtype fp8"
-#      - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
-#        pipeline_parallel_size: 4
-#        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8"
+      - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
+        tensor_parallel_size: 4
+        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --max-num-seqs 128 --enable-expert-parallel --kv-cache-dtype fp8"
 
 #  - name: "pro6000_x_1"
 #    address: "riftuser@74.81.65.29"
@@ -103,20 +103,20 @@ servers:
 #      - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
 #        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8"
 
-  - name: "l40s_x_2"
-    address: "riftuser@91.201.219.165"
-    ssh_key: "~/.ssh/id_ed25519"
-    port: 22
-    models:
-      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-        num_instances: 2
-        extra_args: "--max-model-len 8192"
-      - name: "ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4"
-        num_instances: 2
-        extra_args: "--max-model-len 8192 --kv-cache-dtype fp8"
-      - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
-        pipeline_parallel_size: 2
-        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8"
+#  - name: "l40s_x_2"
+#    address: "riftuser@91.201.219.165"
+#    ssh_key: "~/.ssh/id_ed25519"
+#    port: 22
+#    models:
+#      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
+#        num_instances: 2
+#        extra_args: "--max-model-len 8192"
+#      - name: "ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4"
+#        num_instances: 2
+#        extra_args: "--max-model-len 8192 --kv-cache-dtype fp8"
+#      - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
+#        pipeline_parallel_size: 2
+#        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8"
 
 #  - name: "h200_x_1"
 #    address: "riftuser@91.201.219.167"

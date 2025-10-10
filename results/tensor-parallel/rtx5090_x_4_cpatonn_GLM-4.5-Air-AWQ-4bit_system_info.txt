@@ -1,6 +1,6 @@
 ================================
 SYSTEM INFORMATION
-Collected: Fri Oct 10 19:48:22 UTC 2025
+Collected: Fri Oct 10 20:54:33 UTC 2025
 ================================
 
 === HOSTNAME ===
@@ -72,7 +72,7 @@ Logical CPUs (threads): 28
 
 === MEMORY INFORMATION ===
                total        used        free      shared  buff/cache   available
-Mem:           196Gi       2.3Gi       194Gi       1.3Mi       1.2Gi       194Gi
+Mem:           196Gi       4.7Gi        96Gi       1.4Mi        97Gi       191Gi
 Swap:             0B          0B          0B
 
 === DETAILED MEMORY ===
@@ -151,7 +151,7 @@ index, name, driver_version, memory.total [MiB], compute_cap
 3, NVIDIA GeForce RTX 5090, 575.57.08, 32607 MiB, 12.0
 
 === NVIDIA-SMI FULL OUTPUT ===
-Fri Oct 10 19:48:27 2025       
+Fri Oct 10 20:54:38 2025       
 +-----------------------------------------------------------------------------------------+
 | NVIDIA-SMI 575.57.08              Driver Version: 575.57.08      CUDA Version: 12.9     |
 |-----------------------------------------+------------------------+----------------------+
@@ -160,19 +160,19 @@ Fri Oct 10 19:48:27 2025
 |                                         |                        |               MIG M. |
 |=========================================+========================+======================|
 |   0  NVIDIA GeForce RTX 5090        Off |   00000000:00:10.0 Off |                  N/A |
-|  0%   39C    P0             64W /  575W |       0MiB /  32607MiB |      0%      Default |
+|  0%   45C    P0             67W /  575W |       0MiB /  32607MiB |      0%      Default |
 |                                         |                        |                  N/A |
 +-----------------------------------------+------------------------+----------------------+
 |   1  NVIDIA GeForce RTX 5090        Off |   00000000:00:11.0 Off |                  N/A |
-|  0%   39C    P0             64W /  575W |       0MiB /  32607MiB |      0%      Default |
+|  0%   43C    P0             64W /  575W |       0MiB /  32607MiB |      0%      Default |
 |                                         |                        |                  N/A |
 +-----------------------------------------+------------------------+----------------------+
 |   2  NVIDIA GeForce RTX 5090        Off |   00000000:00:12.0 Off |                  N/A |
-| 40%   40C    P0             61W /  575W |       0MiB /  32607MiB |      2%      Default |
+|  0%   42C    P0             61W /  575W |       0MiB /  32607MiB |      0%      Default |
 |                                         |                        |                  N/A |
 +-----------------------------------------+------------------------+----------------------+
 |   3  NVIDIA GeForce RTX 5090        Off |   00000000:00:13.0 Off |                  N/A |
-|  0%   41C    P0             67W /  575W |       0MiB /  32607MiB |      0%      Default |
+| 40%   39C    P0             67W /  575W |       0MiB /  32607MiB |      0%      Default |
 |                                         |                        |                  N/A |
 +-----------------------------------------+------------------------+----------------------+
                                                                                          
@@ -186,8 +186,8 @@ Fri Oct 10 19:48:27 2025
 
 === DISK INFORMATION ===
 Filesystem      Size  Used Avail Use% Mounted on
-tmpfs            20G  1.3M   20G   1% /run
-/dev/vda1       1.6T   18G  1.5T   2% /
+tmpfs            20G  1.4M   20G   1% /run
+/dev/vda1       1.6T  110G  1.5T   8% /
 tmpfs            99G     0   99G   0% /dev/shm
 tmpfs           5.0M     0  5.0M   0% /run/lock
 /dev/vda16      881M   62M  758M   8% /boot
@@ -210,6 +210,9 @@ vda      1.6T disk
     inet 172.16.50.164/24 brd 172.16.50.255 scope global enp1s0
 3: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN group default 
     inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0
+4: br-b79cd9246f3b: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP group default 
+    inet 172.18.0.1/16 brd 172.18.255.255 scope global br-b79cd9246f3b
+6: veth292e525@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue master br-b79cd9246f3b state UP group default 
 
 === PCI DEVICES ===
 00:00.0 Host bridge: Intel Corporation 82G33/G31/P35/P31 Express DRAM Controller
@@ -235,10 +238,10 @@ vda      1.6T disk
 04:00.0 Unclassified device [00ff]: Red Hat, Inc. Virtio 1.0 memory balloon (rev 01)
 
 === SYSTEM UPTIME ===
- 19:48:28 up 4 min,  1 user,  load average: 0.54, 0.23, 0.09
+ 20:54:39 up  1:10,  1 user,  load average: 0.33, 1.88, 3.10
 
 === LOAD AVERAGE ===
-0.54 0.23 0.09 2/546 3245
+0.33 1.88 3.10 2/551 23023
 
 === DOCKER VERSION ===
 Docker version 28.3.3, build 980b856

@@ -1,30 +1,30 @@
 ============ Serving Benchmark Result ============
 Successful requests:                     1200      
 Maximum request concurrency:             200       
-Benchmark duration (s):                  1080.82   
+Benchmark duration (s):                  1040.30   
 Total input tokens:                      1198147   
 Total generated tokens:                  1200000   
-Request throughput (req/s):              1.11      
-Output token throughput (tok/s):         1110.27   
-Peak output token throughput (tok/s):    1792.00   
+Request throughput (req/s):              1.15      
+Output token throughput (tok/s):         1153.51   
+Peak output token throughput (tok/s):    1951.00   
 Peak concurrent requests:                204.00    
-Total Token throughput (tok/s):          2218.82   
+Total Token throughput (tok/s):          2305.24   
 ---------------Time to First Token----------------
-Mean TTFT (ms):                          63741.65  
-Median TTFT (ms):                        95030.51  
-P99 TTFT (ms):                           136043.37 
+Mean TTFT (ms):                          13699.58  
+Median TTFT (ms):                        4198.01   
+P99 TTFT (ms):                           97809.07  
 -----Time per Output Token (excl. 1st token)------
-Mean TPOT (ms):                          109.34    
-Median TPOT (ms):                        112.88    
-P99 TPOT (ms):                           113.53    
+Mean TPOT (ms):                          154.70    
+Median TPOT (ms):                        162.22    
+P99 TPOT (ms):                           163.05    
 ---------------Inter-token Latency----------------
-Mean ITL (ms):                           109.44    
-Median ITL (ms):                         75.57     
-P99 ITL (ms):                            651.22    
+Mean ITL (ms):                           154.83    
+Median ITL (ms):                         101.51    
+P99 ITL (ms):                            700.92    
 ----------------End-to-end Latency----------------
-Mean E2EL (ms):                          172969.97 
-Median E2EL (ms):                        151617.83 
-P99 E2EL (ms):                           248930.80 
+Mean E2EL (ms):                          168242.86 
+Median E2EL (ms):                        166539.07 
+P99 E2EL (ms):                           259874.01 
 ==================================================
 
 ============ Docker Compose Configuration ============
@@ -56,7 +56,7 @@ services:
       --pipeline-parallel-size 1
       --model /hf_models/cpatonn/GLM-4.5-Air-AWQ-4bit
       --served-model-name cpatonn/GLM-4.5-Air-AWQ-4bit
-      --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --max-num-seqs 128 --enable-expert-parallel --kv-cache-dtype fp8
+      --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --max-num-seqs 192 --enable-expert-parallel --kv-cache-dtype fp8
     healthcheck:
       test: ["CMD", "bash", "-c", "curl -f http://localhost:8000/health && curl -f http://localhost:8000/v1/models | grep -q 'object.*list'"]
       interval: 10s

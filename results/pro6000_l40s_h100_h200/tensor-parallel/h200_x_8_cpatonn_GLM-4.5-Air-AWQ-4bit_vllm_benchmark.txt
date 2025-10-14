@@ -1,0 +1,89 @@
+============ Serving Benchmark Result ============
+Successful requests:                     1200      
+Maximum request concurrency:             400       
+Benchmark duration (s):                  137.15    
+Total input tokens:                      1198147   
+Total generated tokens:                  1200000   
+Request throughput (req/s):              8.75      
+Output token throughput (tok/s):         8749.62   
+Peak output token throughput (tok/s):    12404.00  
+Peak concurrent requests:                488.00    
+Total Token throughput (tok/s):          17485.73  
+---------------Time to First Token----------------
+Mean TTFT (ms):                          5026.62   
+Median TTFT (ms):                        4021.25   
+P99 TTFT (ms):                           15557.63  
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          40.47     
+Median TPOT (ms):                        41.48     
+P99 TPOT (ms):                           43.23     
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           40.52     
+Median ITL (ms):                         33.26     
+P99 ITL (ms):                            235.05    
+----------------End-to-end Latency----------------
+Mean E2EL (ms):                          45458.84  
+Median E2EL (ms):                        46401.13  
+P99 E2EL (ms):                           55071.52  
+==================================================
+
+============ Docker Compose Configuration ============
+services:
+  vllm_0:
+    image: vllm/vllm-openai:latest
+    container_name: vllm_benchmark_container_0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0', '1', '2', '3', '4', '5', '6', '7']
+              capabilities: [gpu]
+    volumes:
+      - /hf_models:/hf_models
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=
+    ports:
+      - "8000:8000"
+    shm_size: '16gb'
+    ipc: host
+    command: >
+      --trust-remote-code
+      --gpu-memory-utilization=0.9
+      --host 0.0.0.0
+      --port 8000
+      --tensor-parallel-size 8
+      --pipeline-parallel-size 1
+      --model /hf_models/cpatonn/GLM-4.5-Air-AWQ-4bit
+      --served-model-name cpatonn/GLM-4.5-Air-AWQ-4bit
+      --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8
+    healthcheck:
+      test: ["CMD", "bash", "-c", "curl -f http://localhost:8000/health && curl -f http://localhost:8000/v1/models | grep -q 'object.*list'"]
+      interval: 10s
+      timeout: 10s
+      retries: 180
+      start_period: 600s
+
+  benchmark:
+    image: vllm/vllm-openai:latest
+    container_name: vllm_benchmark_client
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - /hf_models:/hf_models
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=
+      - CUDA_VISIBLE_DEVICES=""
+    entrypoint: ["/bin/bash", "-c"]
+    command: ["sleep infinity"]
+    profiles:
+      - tools
+
+============ Benchmark Command ============
+vllm bench serve     --model cpatonn/GLM-4.5-Air-AWQ-4bit     --dataset-name random     --random-input-len 1000     --random-output-len 1000     --max-concurrency 400     --num-prompts 1200     --ignore-eos     --backend openai-chat     --endpoint /v1/chat/completions     --percentile-metrics ttft,tpot,itl,e2el     --base-url http://vllm_0:8000
+==================================================

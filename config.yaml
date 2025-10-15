@@ -7,8 +7,8 @@ benchmark:
 
 # Benchmark parameters (required)
 benchmark_params:
-  max_concurrency: 400       # Maximum concurrent requests
-  num_prompts: 1200          # Number of prompts to benchmark
+  max_concurrency: 2048      # Maximum concurrent requests
+  num_prompts: 2048          # Number of prompts to benchmark
   random_input_len: 1000     # Random input length for benchmark
   random_output_len: 1000    # Random output length for benchmark
 
@@ -93,7 +93,7 @@ servers:
 #        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --max-num-seqs 128 --enable-expert-parallel --kv-cache-dtype fp8"
 
 #  - name: "pro6000_x_1"
-#    address: "riftuser@74.81.65.29"
+#    address: "riftuser@74.81.65.42"
 #    ssh_key: "~/.ssh/id_ed25519"
 #    port: 22
 #    models:
@@ -102,7 +102,7 @@ servers:
 #      - name: "ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4"
 #        extra_args: "--max-model-len 8192 --kv-cache-dtype fp8"
 #      - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
-#        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8"
+#        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --max-num-seqs 256 --enable-expert-parallel --kv-cache-dtype fp8"
 
 #  - name: "l40s_x_2"
 #    address: "riftuser@91.201.219.165"
@@ -119,13 +119,13 @@ servers:
 #        pipeline_parallel_size: 2
 #        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8"
 
-  - name: "h200_x_1"
-    address: "riftuser@91.201.219.161"
-    ssh_key: "~/.ssh/id_ed25519"
-    port: 22
-    models:
-      - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
-        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --max-num-seqs 384 --enable-expert-parallel --kv-cache-dtype fp8"
+#  - name: "h200_x_1"
+#    address: "riftuser@91.201.219.161"
+#    ssh_key: "~/.ssh/id_ed25519"
+#    port: 22
+#    models:
+#      - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
+#        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --max-num-seqs 256 --enable-expert-parallel --kv-cache-dtype fp8"
 
 #  - name: "h200_x_8"
 #    address: "hc-h200-1"
@@ -134,7 +134,7 @@ servers:
 #    models:
 #      - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
 #        num_instances: 8
-#        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8"
+#        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --max-num-seqs 256 --enable-expert-parallel --kv-cache-dtype fp8"
 #      - name: "QuantTrio/Qwen3-Coder-480B-A35B-Instruct-AWQ"
 #        tensor_parallel_size: 4
 #        num_instances: 2

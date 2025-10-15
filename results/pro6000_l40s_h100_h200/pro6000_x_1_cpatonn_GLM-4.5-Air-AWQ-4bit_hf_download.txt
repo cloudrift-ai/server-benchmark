@@ -4,5 +4,5 @@ HF_HOME: /hf_models
 ---------------------------------
 Downloading model: cpatonn/GLM-4.5-Air-AWQ-4bit...
 Model download complete! Saved to: /hf_models/cpatonn/GLM-4.5-Air-AWQ-4bit
-Download took 533.02 seconds.
-Average download speed: 907.85 MiB/s
+Download took 115.66 seconds.
+Average download speed: 4183.92 MiB/s

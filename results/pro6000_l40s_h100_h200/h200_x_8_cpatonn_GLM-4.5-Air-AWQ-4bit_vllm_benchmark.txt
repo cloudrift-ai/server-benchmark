@@ -1,30 +1,30 @@
 ============ Serving Benchmark Result ============
-Successful requests:                     1200      
-Maximum request concurrency:             400       
-Benchmark duration (s):                  119.78    
-Total input tokens:                      1198147   
-Total generated tokens:                  1200000   
-Request throughput (req/s):              10.02     
-Output token throughput (tok/s):         10018.75  
-Peak output token throughput (tok/s):    13508.00  
-Peak concurrent requests:                728.00    
-Total Token throughput (tok/s):          20022.03  
+Successful requests:                     2048      
+Maximum request concurrency:             2048      
+Benchmark duration (s):                  140.55    
+Total input tokens:                      2045447   
+Total generated tokens:                  2048000   
+Request throughput (req/s):              14.57     
+Output token throughput (tok/s):         14570.99  
+Peak output token throughput (tok/s):    31294.00  
+Peak concurrent requests:                2048.00   
+Total Token throughput (tok/s):          29123.82  
 ---------------Time to First Token----------------
-Mean TTFT (ms):                          3503.35   
-Median TTFT (ms):                        2808.31   
-P99 TTFT (ms):                           13568.71  
+Mean TTFT (ms):                          17657.42  
+Median TTFT (ms):                        14381.36  
+P99 TTFT (ms):                           97753.91  
 -----Time per Output Token (excl. 1st token)------
-Mean TPOT (ms):                          32.94     
-Median TPOT (ms):                        27.96     
-P99 TPOT (ms):                           58.56     
+Mean TPOT (ms):                          76.44     
+Median TPOT (ms):                        77.75     
+P99 TPOT (ms):                           88.57     
 ---------------Inter-token Latency----------------
-Mean ITL (ms):                           32.97     
-Median ITL (ms):                         26.75     
-P99 ITL (ms):                            52.40     
+Mean ITL (ms):                           76.49     
+Median ITL (ms):                         66.26     
+P99 ITL (ms):                            779.50    
 ----------------End-to-end Latency----------------
-Mean E2EL (ms):                          36409.39  
-Median E2EL (ms):                        30090.52  
-P99 E2EL (ms):                           61109.89  
+Mean E2EL (ms):                          94023.01  
+Median E2EL (ms):                        90831.29  
+P99 E2EL (ms):                           139614.25 
 ==================================================
 
 ============ Docker Compose Configuration ============
@@ -43,6 +43,7 @@ services:
       - /hf_models:/hf_models
     environment:
       - HUGGING_FACE_HUB_TOKEN=
+      - HF_HOME=/hf_models
     ports:
       - "8000:8000"
     shm_size: '16gb'
@@ -56,7 +57,7 @@ services:
       --pipeline-parallel-size 1
       --model /hf_models/cpatonn/GLM-4.5-Air-AWQ-4bit
       --served-model-name cpatonn/GLM-4.5-Air-AWQ-4bit
-      --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8
+      --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --max-num-seqs 256 --enable-expert-parallel --kv-cache-dtype fp8
     healthcheck:
       test: ["CMD", "bash", "-c", "curl -f http://localhost:8000/health && curl -f http://localhost:8000/v1/models | grep -q 'object.*list'"]
       interval: 10s
@@ -78,6 +79,7 @@ services:
       - /hf_models:/hf_models
     environment:
       - HUGGING_FACE_HUB_TOKEN=
+      - HF_HOME=/hf_models
     ports:
       - "8001:8000"
     shm_size: '16gb'
@@ -91,7 +93,7 @@ services:
       --pipeline-parallel-size 1
       --model /hf_models/cpatonn/GLM-4.5-Air-AWQ-4bit
       --served-model-name cpatonn/GLM-4.5-Air-AWQ-4bit
-      --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8
+      --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --max-num-seqs 256 --enable-expert-parallel --kv-cache-dtype fp8
     healthcheck:
       test: ["CMD", "bash", "-c", "curl -f http://localhost:8000/health && curl -f http://localhost:8000/v1/models | grep -q 'object.*list'"]
       interval: 10s
@@ -113,6 +115,7 @@ services:
       - /hf_models:/hf_models
     environment:
       - HUGGING_FACE_HUB_TOKEN=
+      - HF_HOME=/hf_models
     ports:
       - "8002:8000"
     shm_size: '16gb'
@@ -126,7 +129,7 @@ services:
       --pipeline-parallel-size 1
       --model /hf_models/cpatonn/GLM-4.5-Air-AWQ-4bit
       --served-model-name cpatonn/GLM-4.5-Air-AWQ-4bit
-      --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8
+      --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --max-num-seqs 256 --enable-expert-parallel --kv-cache-dtype fp8
     healthcheck:
       test: ["CMD", "bash", "-c", "curl -f http://localhost:8000/health && curl -f http://localhost:8000/v1/models | grep -q 'object.*list'"]
       interval: 10s
@@ -148,6 +151,7 @@ services:
       - /hf_models:/hf_models
     environment:
       - HUGGING_FACE_HUB_TOKEN=
+      - HF_HOME=/hf_models
     ports:
       - "8003:8000"
     shm_size: '16gb'
@@ -161,7 +165,7 @@ services:
       --pipeline-parallel-size 1
       --model /hf_models/cpatonn/GLM-4.5-Air-AWQ-4bit
       --served-model-name cpatonn/GLM-4.5-Air-AWQ-4bit
-      --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8
+      --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --max-num-seqs 256 --enable-expert-parallel --kv-cache-dtype fp8
     healthcheck:
       test: ["CMD", "bash", "-c", "curl -f http://localhost:8000/health && curl -f http://localhost:8000/v1/models | grep -q 'object.*list'"]
       interval: 10s
@@ -183,6 +187,7 @@ services:
       - /hf_models:/hf_models
     environment:
       - HUGGING_FACE_HUB_TOKEN=
+      - HF_HOME=/hf_models
     ports:
       - "8004:8000"
     shm_size: '16gb'
@@ -196,7 +201,7 @@ services:
       --pipeline-parallel-size 1
       --model /hf_models/cpatonn/GLM-4.5-Air-AWQ-4bit
       --served-model-name cpatonn/GLM-4.5-Air-AWQ-4bit
-      --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8
+      --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --max-num-seqs 256 --enable-expert-parallel --kv-cache-dtype fp8
     healthcheck:
       test: ["CMD", "bash", "-c", "curl -f http://localhost:8000/health && curl -f http://localhost:8000/v1/models | grep -q 'object.*list'"]
       interval: 10s
@@ -218,6 +223,7 @@ services:
       - /hf_models:/hf_models
     environment:
       - HUGGING_FACE_HUB_TOKEN=
+      - HF_HOME=/hf_models
     ports:
       - "8005:8000"
     shm_size: '16gb'
@@ -231,7 +237,7 @@ services:
       --pipeline-parallel-size 1
       --model /hf_models/cpatonn/GLM-4.5-Air-AWQ-4bit
       --served-model-name cpatonn/GLM-4.5-Air-AWQ-4bit
-      --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8
+      --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --max-num-seqs 256 --enable-expert-parallel --kv-cache-dtype fp8
     healthcheck:
       test: ["CMD", "bash", "-c", "curl -f http://localhost:8000/health && curl -f http://localhost:8000/v1/models | grep -q 'object.*list'"]
       interval: 10s
@@ -253,6 +259,7 @@ services:
       - /hf_models:/hf_models
     environment:
       - HUGGING_FACE_HUB_TOKEN=
+      - HF_HOME=/hf_models
     ports:
       - "8006:8000"
     shm_size: '16gb'
@@ -266,7 +273,7 @@ services:
       --pipeline-parallel-size 1
       --model /hf_models/cpatonn/GLM-4.5-Air-AWQ-4bit
       --served-model-name cpatonn/GLM-4.5-Air-AWQ-4bit
-      --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8
+      --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --max-num-seqs 256 --enable-expert-parallel --kv-cache-dtype fp8
     healthcheck:
       test: ["CMD", "bash", "-c", "curl -f http://localhost:8000/health && curl -f http://localhost:8000/v1/models | grep -q 'object.*list'"]
       interval: 10s
@@ -288,6 +295,7 @@ services:
       - /hf_models:/hf_models
     environment:
       - HUGGING_FACE_HUB_TOKEN=
+      - HF_HOME=/hf_models
     ports:
       - "8007:8000"
     shm_size: '16gb'
@@ -301,7 +309,7 @@ services:
       --pipeline-parallel-size 1
       --model /hf_models/cpatonn/GLM-4.5-Air-AWQ-4bit
       --served-model-name cpatonn/GLM-4.5-Air-AWQ-4bit
-      --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --enable-expert-parallel --kv-cache-dtype fp8
+      --tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --max-num-seqs 256 --enable-expert-parallel --kv-cache-dtype fp8
     healthcheck:
       test: ["CMD", "bash", "-c", "curl -f http://localhost:8000/health && curl -f http://localhost:8000/v1/models | grep -q 'object.*list'"]
       interval: 10s
@@ -340,6 +348,7 @@ services:
       - /hf_models:/hf_models
     environment:
       - HUGGING_FACE_HUB_TOKEN=
+      - HF_HOME=/hf_models
       - CUDA_VISIBLE_DEVICES=""
     entrypoint: ["/bin/bash", "-c"]
     command: ["sleep infinity"]
@@ -347,5 +356,5 @@ services:
       - tools
 
 ============ Benchmark Command ============
-vllm bench serve     --model cpatonn/GLM-4.5-Air-AWQ-4bit     --dataset-name random     --random-input-len 1000     --random-output-len 1000     --max-concurrency 400     --num-prompts 1200     --ignore-eos     --backend openai-chat     --endpoint /v1/chat/completions     --percentile-metrics ttft,tpot,itl,e2el     --base-url http://nginx_lb:8080
+vllm bench serve     --model cpatonn/GLM-4.5-Air-AWQ-4bit     --dataset-name random     --random-input-len 1000     --random-output-len 1000     --max-concurrency 2048     --num-prompts 2048     --ignore-eos     --backend openai-chat     --endpoint /v1/chat/completions     --percentile-metrics ttft,tpot,itl,e2el     --base-url http://nginx_lb:8080
 ==================================================

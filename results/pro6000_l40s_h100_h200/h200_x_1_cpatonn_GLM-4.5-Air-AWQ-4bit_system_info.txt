@@ -1,0 +1,221 @@
+================================
+SYSTEM INFORMATION
+Collected: Wed Oct 15 00:38:21 UTC 2025
+================================
+
+=== HOSTNAME ===
+riftvm
+
+=== OPERATING SYSTEM ===
+PRETTY_NAME="Ubuntu 24.04.1 LTS"
+NAME="Ubuntu"
+VERSION_ID="24.04"
+VERSION="24.04.1 LTS (Noble Numbat)"
+VERSION_CODENAME=noble
+ID=ubuntu
+ID_LIKE=debian
+HOME_URL="https://www.ubuntu.com/"
+SUPPORT_URL="https://help.ubuntu.com/"
+BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"
+UBUNTU_CODENAME=noble
+LOGO=ubuntu-logo
+
+=== KERNEL VERSION ===
+6.8.0-51-generic
+
+=== CPU INFORMATION ===
+Architecture:                         x86_64
+CPU op-mode(s):                       32-bit, 64-bit
+Address sizes:                        46 bits physical, 57 bits virtual
+Byte Order:                           Little Endian
+CPU(s):                               12
+On-line CPU(s) list:                  0-11
+Vendor ID:                            GenuineIntel
+Model name:                           Intel(R) Xeon(R) Platinum 8480+
+CPU family:                           6
+Model:                                143
+Thread(s) per core:                   1
+Core(s) per socket:                   1
+Socket(s):                            12
+Stepping:                             8
+BogoMIPS:                             4000.00
+Flags:                                fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts mmx fxsr sse sse2 ss syscall nx pdpe1gb rdtscp lm constant_tsc arch_perfmon pebs bts rep_good nopl xtopology cpuid tsc_known_freq pni pclmulqdq dtes64 vmx ssse3 fma cx16 pdcm pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch cpuid_fault ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow flexpriority ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves avx_vnni avx512_bf16 wbnoinvd arat vnmi avx512vbmi umip pku ospke waitpkg avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq la57 rdpid bus_lock_detect cldemote movdiri movdir64b fsrm md_clear serialize tsxldtrk amx_bf16 avx512_fp16 amx_tile amx_int8 flush_l1d arch_capabilities
+Virtualization:                       VT-x
+Hypervisor vendor:                    KVM
+Virtualization type:                  full
+L1d cache:                            384 KiB (12 instances)
+L1i cache:                            384 KiB (12 instances)
+L2 cache:                             48 MiB (12 instances)
+L3 cache:                             192 MiB (12 instances)
+NUMA node(s):                         1
+NUMA node0 CPU(s):                    0-11
+Vulnerability Gather data sampling:   Not affected
+Vulnerability Itlb multihit:          Not affected
+Vulnerability L1tf:                   Not affected
+Vulnerability Mds:                    Not affected
+Vulnerability Meltdown:               Not affected
+Vulnerability Mmio stale data:        Not affected
+Vulnerability Reg file data sampling: Not affected
+Vulnerability Retbleed:               Not affected
+Vulnerability Spec rstack overflow:   Not affected
+Vulnerability Spec store bypass:      Mitigation; Speculative Store Bypass disabled via prctl
+Vulnerability Spectre v1:             Mitigation; usercopy/swapgs barriers and __user pointer sanitization
+Vulnerability Spectre v2:             Mitigation; Enhanced / Automatic IBRS; IBPB conditional; RSB filling; PBRSB-eIBRS SW sequence; BHI SW loop, KVM SW loop
+Vulnerability Srbds:                  Not affected
+Vulnerability Tsx async abort:        Mitigation; TSX disabled
+
+=== CPU COUNT ===
+Physical CPUs: 12
+CPU Cores: 1
+Logical CPUs (threads): 12
+
+=== MEMORY INFORMATION ===
+               total        used        free      shared  buff/cache   available
+Mem:           157Gi       1.8Gi       155Gi       1.2Mi       1.1Gi       155Gi
+Swap:             0B          0B          0B
+
+=== DETAILED MEMORY ===
+	Error Correction Type: Multi-bit ECC
+	Size: 16 GB
+	Type: RAM
+	Speed: Unknown
+	Manufacturer: QEMU
+	Configured Memory Speed: Unknown
+	Size: 16 GB
+	Type: RAM
+	Speed: Unknown
+	Manufacturer: QEMU
+	Configured Memory Speed: Unknown
+	Size: 16 GB
+	Type: RAM
+	Speed: Unknown
+	Manufacturer: QEMU
+	Configured Memory Speed: Unknown
+	Size: 16 GB
+	Type: RAM
+	Speed: Unknown
+	Manufacturer: QEMU
+	Configured Memory Speed: Unknown
+	Size: 16 GB
+	Type: RAM
+	Speed: Unknown
+	Manufacturer: QEMU
+	Configured Memory Speed: Unknown
+	Size: 16 GB
+	Type: RAM
+	Speed: Unknown
+	Manufacturer: QEMU
+	Configured Memory Speed: Unknown
+	Size: 16 GB
+	Type: RAM
+	Speed: Unknown
+	Manufacturer: QEMU
+	Configured Memory Speed: Unknown
+	Size: 16 GB
+	Type: RAM
+	Speed: Unknown
+	Manufacturer: QEMU
+	Configured Memory Speed: Unknown
+	Size: 16 GB
+	Type: RAM
+	Speed: Unknown
+	Manufacturer: QEMU
+	Configured Memory Speed: Unknown
+	Size: 16 GB
+	Type: RAM
+	Speed: Unknown
+	Manufacturer: QEMU
+	Configured Memory Speed: Unknown
+
+=== GPU INFORMATION ===
+index, name, driver_version, memory.total [MiB], compute_cap
+0, NVIDIA H200, 570.172.08, 143771 MiB, 9.0
+
+=== NVIDIA-SMI FULL OUTPUT ===
+Wed Oct 15 00:38:21 2025       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 570.172.08             Driver Version: 570.172.08     CUDA Version: 12.8     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H200                    On  |   00000000:01:00.0 Off |                    0 |
+| N/A   23C    P0             75W /  700W |       0MiB / 143771MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+
+=== DISK INFORMATION ===
+Filesystem      Size  Used Avail Use% Mounted on
+tmpfs            16G  1.2M   16G   1% /run
+/dev/vda1       484G   12G  472G   3% /
+tmpfs            79G     0   79G   0% /dev/shm
+tmpfs           5.0M     0  5.0M   0% /run/lock
+/dev/vda16      881M   62M  758M   8% /boot
+/dev/vda15      105M  6.1M   99M   6% /boot/efi
+tmpfs            16G   20K   16G   1% /run/user/1000
+
+=== DISK DETAILS ===
+NAME     SIZE TYPE MOUNTPOINT FSTYPE  MODEL
+sr0      368K rom             iso9660 QEMU DVD-ROM
+vda      500G disk                    
+├─vda1   499G part /          ext4    
+├─vda14    4M part                    
+├─vda15  106M part /boot/efi  vfat    
+└─vda16  913M part /boot      ext4    
+
+=== NETWORK INTERFACES ===
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    inet 127.0.0.1/8 scope host lo
+2: enp2s0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP group default qlen 1000
+    inet 10.4.0.42/24 brd 10.4.0.255 scope global enp2s0
+3: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN group default 
+    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0
+
+=== PCI DEVICES ===
+00:00.0 Host bridge: Intel Corporation 82G33/G31/P35/P31 Express DRAM Controller
+00:01.0 VGA compatible controller: Cirrus Logic GD 5446
+00:02.0 PCI bridge: Red Hat, Inc. QEMU PCIe Root port
+00:02.1 PCI bridge: Red Hat, Inc. QEMU PCIe Root port
+00:02.2 PCI bridge: Red Hat, Inc. QEMU PCIe Root port
+00:02.3 PCI bridge: Red Hat, Inc. QEMU PCIe Root port
+00:02.4 PCI bridge: Red Hat, Inc. QEMU PCIe Root port
+00:1f.0 ISA bridge: Intel Corporation 82801IB (ICH9) LPC Interface Controller (rev 02)
+00:1f.2 SATA controller: Intel Corporation 82801IR/IO/IH (ICH9R/DO/DH) 6 port SATA Controller [AHCI mode] (rev 02)
+00:1f.3 SMBus: Intel Corporation 82801I (ICH9 Family) SMBus Controller (rev 02)
+01:00.0 3D controller: NVIDIA Corporation GH100 [H200 SXM 141GB] (rev a1)
+02:00.0 Ethernet controller: Red Hat, Inc. Virtio 1.0 network device (rev 01)
+03:00.0 USB controller: Red Hat, Inc. QEMU XHCI Host Controller (rev 01)
+04:00.0 SCSI storage controller: Red Hat, Inc. Virtio 1.0 block device (rev 01)
+05:00.0 Unclassified device [00ff]: Red Hat, Inc. Virtio 1.0 memory balloon (rev 01)
+
+=== SYSTEM UPTIME ===
+ 00:38:21 up 20 min,  2 users,  load average: 0.40, 0.14, 0.11
+
+=== LOAD AVERAGE ===
+0.40 0.14 0.11 2/322 3138
+
+=== DOCKER VERSION ===
+Docker version 28.3.2, build 578ccf6
+
+Docker Info:
+ Server Version: 28.3.2
+ Storage Driver: overlay2
+ Operating System: Ubuntu 24.04.1 LTS
+ CPUs: 12
+ Total Memory: 157.2GiB
+ Docker Root Dir: /var/lib/docker
+
+================================
+System information collected successfully!
+Saved to: system_info.txt
+================================

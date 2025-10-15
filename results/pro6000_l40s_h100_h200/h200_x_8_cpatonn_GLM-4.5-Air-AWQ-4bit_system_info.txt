@@ -1,6 +1,6 @@
 ================================
 SYSTEM INFORMATION
-Collected: Tue Oct 14 01:42:02 AM UTC 2025
+Collected: Wed Oct 15 01:05:06 AM UTC 2025
 ================================
 
 === HOSTNAME ===
@@ -39,7 +39,7 @@ Thread(s) per core:                   1
 Core(s) per socket:                   56
 Socket(s):                            2
 Stepping:                             8
-CPU(s) scaling MHz:                   31%
+CPU(s) scaling MHz:                   29%
 CPU max MHz:                          3800.0000
 CPU min MHz:                          800.0000
 BogoMIPS:                             4000.00
@@ -74,7 +74,7 @@ Logical CPUs (threads): 112
 
 === MEMORY INFORMATION ===
                total        used        free      shared  buff/cache   available
-Mem:           2.0Ti        18Gi       2.0Ti       7.5Mi       6.9Gi       1.9Ti
+Mem:           2.0Ti        18Gi       2.0Ti       7.4Mi       4.2Gi       2.0Ti
 Swap:             0B          0B          0B
 
 === DETAILED MEMORY ===
@@ -380,7 +380,7 @@ index, name, driver_version, memory.total [MiB], compute_cap
 7, NVIDIA H200, 580.95.05, 143771 MiB, 9.0
 
 === NVIDIA-SMI FULL OUTPUT ===
-Tue Oct 14 01:42:18 2025       
+Wed Oct 15 01:05:23 2025       
 +-----------------------------------------------------------------------------------------+
 | NVIDIA-SMI 580.95.05              Driver Version: 580.95.05      CUDA Version: 13.0     |
 +-----------------------------------------+------------------------+----------------------+
@@ -388,16 +388,16 @@ Tue Oct 14 01:42:18 2025
 | Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
 |                                         |                        |               MIG M. |
 |=========================================+========================+======================|
-|   0  NVIDIA H200                    Off |   00000000:19:00.0 Off |                    0 |
-| N/A   31C    P0            116W /  700W |       0MiB / 143771MiB |      0%      Default |
-|                                         |                        |             Disabled |
+|   0  NVIDIA H200                    Off |   00000000:19:00.0 Off |                   On |
+| N/A   31C    P0            119W /  700W |      87MiB / 143771MiB |     N/A      Default |
+|                                         |                        |              Enabled |
 +-----------------------------------------+------------------------+----------------------+
 |   1  NVIDIA H200                    Off |   00000000:3B:00.0 Off |                    0 |
-| N/A   27C    P0            113W /  700W |       0MiB / 143771MiB |      0%      Default |
+| N/A   27C    P0            114W /  700W |       0MiB / 143771MiB |      0%      Default |
 |                                         |                        |             Disabled |
 +-----------------------------------------+------------------------+----------------------+
 |   2  NVIDIA H200                    Off |   00000000:4C:00.0 Off |                    0 |
-| N/A   27C    P0            115W /  700W |       0MiB / 143771MiB |      0%      Default |
+| N/A   27C    P0            116W /  700W |       0MiB / 143771MiB |      0%      Default |
 |                                         |                        |             Disabled |
 +-----------------------------------------+------------------------+----------------------+
 |   3  NVIDIA H200                    Off |   00000000:5D:00.0 Off |                    0 |
@@ -405,11 +405,11 @@ Tue Oct 14 01:42:18 2025
 |                                         |                        |             Disabled |
 +-----------------------------------------+------------------------+----------------------+
 |   4  NVIDIA H200                    Off |   00000000:9B:00.0 Off |                    0 |
-| N/A   30C    P0            119W /  700W |       0MiB / 143771MiB |      0%      Default |
+| N/A   30C    P0            120W /  700W |       0MiB / 143771MiB |      0%      Default |
 |                                         |                        |             Disabled |
 +-----------------------------------------+------------------------+----------------------+
 |   5  NVIDIA H200                    Off |   00000000:BB:00.0 Off |                    0 |
-| N/A   28C    P0            120W /  700W |       0MiB / 143771MiB |      0%      Default |
+| N/A   28C    P0            117W /  700W |       0MiB / 143771MiB |      0%      Default |
 |                                         |                        |             Disabled |
 +-----------------------------------------+------------------------+----------------------+
 |   6  NVIDIA H200                    Off |   00000000:CB:00.0 Off |                    0 |
@@ -417,9 +417,23 @@ Tue Oct 14 01:42:18 2025
 |                                         |                        |             Disabled |
 +-----------------------------------------+------------------------+----------------------+
 |   7  NVIDIA H200                    Off |   00000000:DB:00.0 Off |                    0 |
-| N/A   26C    P0            115W /  700W |       0MiB / 143771MiB |      0%      Default |
+| N/A   25C    P0            118W /  700W |       0MiB / 143771MiB |      0%      Default |
 |                                         |                        |             Disabled |
 +-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| MIG devices:                                                                            |
++------------------+----------------------------------+-----------+-----------------------+
+| GPU  GI  CI  MIG |              Shared Memory-Usage |        Vol|        Shared         |
+|      ID  ID  Dev |                Shared BAR1-Usage | SM     Unc| CE ENC  DEC  OFA  JPG |
+|                  |                                  |        ECC|                       |
+|==================+==================================+===========+=======================|
+|  0    1   0   0  |              44MiB / 71424MiB    | 60      0 |  3   0    3    0    3 |
+|                  |               0MiB / 59237MiB    |           |                       |
++------------------+----------------------------------+-----------+-----------------------+
+|  0    2   0   1  |              44MiB / 71424MiB    | 60      0 |  3   0    3    0    3 |
+|                  |               0MiB / 59237MiB    |           |                       |
++------------------+----------------------------------+-----------+-----------------------+
 
 +-----------------------------------------------------------------------------------------+
 | Processes:                                                                              |
@@ -431,40 +445,40 @@ Tue Oct 14 01:42:18 2025
 
 === DISK INFORMATION ===
 Filesystem                                                                                                                        Size  Used Avail Use% Mounted on
-tmpfs                                                                                                                             202G  4.6M  202G   1% /run
-efivarfs                                                                                                                          304K  238K   62K  80% /sys/firmware/efi/efivars
-/dev/mapper/ubuntu--vg-ubuntu--lv                                                                                                 877G  209G  632G  25% /
+tmpfs                                                                                                                             202G  4.4M  202G   1% /run
+efivarfs                                                                                                                          304K  163K  136K  55% /sys/firmware/efi/efivars
+/dev/mapper/ubuntu--vg-ubuntu--lv                                                                                                 877G  127G  714G  16% /
 tmpfs                                                                                                                            1008G     0 1008G   0% /dev/shm
 tmpfs                                                                                                                             5.0M     0  5.0M   0% /run/lock
 tmpfs                                                                                                                            1008G     0 1008G   0% /run/qemu
-/dev/nvme2n1p2                                                                                                                    2.0G  196M  1.6G  11% /boot
-/dev/nvme2n1p1                                                                                                                    1.1G  6.2M  1.1G   1% /boot/efi
+/dev/nvme4n1p2                                                                                                                    2.0G  196M  1.6G  11% /boot
+/dev/nvme4n1p1                                                                                                                    1.1G  6.2M  1.1G   1% /boot/efi
 /dev/md0                                                                                                                           25T   24K   24T   1% /media/cloudrift
-10.3.0.201@tcp,10.3.0.202@tcp:10.3.0.205@tcp,10.3.0.206@tcp:10.3.0.207@tcp,10.3.0.208@tcp:10.3.0.203@tcp,10.3.0.204@tcp:/ddnaifs  259T  139G  257T   1% /exa
+10.3.0.201@tcp,10.3.0.202@tcp:10.3.0.205@tcp,10.3.0.206@tcp:10.3.0.207@tcp,10.3.0.208@tcp:10.3.0.203@tcp,10.3.0.204@tcp:/ddnaifs  259T  275G  257T   1% /exa
 tmpfs                                                                                                                             202G   20K  202G   1% /run/user/1000
 
 === DISK DETAILS ===
 NAME                        SIZE TYPE  MOUNTPOINT       FSTYPE            MODEL
-nvme2n1                   894.2G disk                                     Dell BOSS-N1
-├─nvme2n1p1                   1G part  /boot/efi        vfat              
-├─nvme2n1p2                   2G part  /boot            ext4              
-└─nvme2n1p3               891.1G part                   LVM2_member       
+nvme2n1                     3.5T disk                   linux_raid_member Dell DC NVMe ISE PE8110 RI U.2 3840GB
+└─md0                      24.5T raid5 /media/cloudrift ext4              
+nvme4n1                   894.2G disk                                     Dell BOSS-N1
+├─nvme4n1p1                   1G part  /boot/efi        vfat              
+├─nvme4n1p2                   2G part  /boot            ext4              
+└─nvme4n1p3               891.1G part                   LVM2_member       
   └─ubuntu--vg-ubuntu--lv 891.1G lvm   /                ext4              
-nvme1n1                     3.5T disk                   linux_raid_member Dell DC NVMe ISE PE8110 RI U.2 3840GB
-└─md0                      24.5T raid5 /media/cloudrift ext4              
-nvme5n1                     3.5T disk                   linux_raid_member Dell DC NVMe ISE PE8110 RI U.2 3840GB
-└─md0                      24.5T raid5 /media/cloudrift ext4              
 nvme0n1                     3.5T disk                   linux_raid_member Dell DC NVMe ISE PE8110 RI U.2 3840GB
 └─md0                      24.5T raid5 /media/cloudrift ext4              
 nvme3n1                     3.5T disk                   linux_raid_member Dell DC NVMe ISE PE8110 RI U.2 3840GB
 └─md0                      24.5T raid5 /media/cloudrift ext4              
-nvme4n1                     3.5T disk                   linux_raid_member Dell DC NVMe ISE PE8110 RI U.2 3840GB
+nvme1n1                     3.5T disk                   linux_raid_member Dell DC NVMe ISE PE8110 RI U.2 3840GB
+└─md0                      24.5T raid5 /media/cloudrift ext4              
+nvme8n1                     3.5T disk                   linux_raid_member Dell DC NVMe ISE PE8110 RI U.2 3840GB
 └─md0                      24.5T raid5 /media/cloudrift ext4              
 nvme7n1                     3.5T disk                   linux_raid_member Dell DC NVMe ISE PE8110 RI U.2 3840GB
 └─md0                      24.5T raid5 /media/cloudrift ext4              
-nvme6n1                     3.5T disk                   linux_raid_member Dell DC NVMe ISE PE8110 RI U.2 3840GB
+nvme5n1                     3.5T disk                   linux_raid_member Dell DC NVMe ISE PE8110 RI U.2 3840GB
 └─md0                      24.5T raid5 /media/cloudrift ext4              
-nvme8n1                     3.5T disk                   linux_raid_member Dell DC NVMe ISE PE8110 RI U.2 3840GB
+nvme6n1                     3.5T disk                   linux_raid_member Dell DC NVMe ISE PE8110 RI U.2 3840GB
 └─md0                      24.5T raid5 /media/cloudrift ext4              
 
 === NETWORK INTERFACES ===
@@ -472,8 +486,8 @@ nvme8n1                     3.5T disk                   linux_raid_member Dell D
     inet 127.0.0.1/8 scope host lo
 2: eno12399np0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc mq state DOWN group default qlen 1000
 3: eno8303: <BROADCAST,MULTICAST,SLAVE,UP,LOWER_UP> mtu 1500 qdisc mq master bond0 state UP group default qlen 1000
-4: eno12409np1: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc mq state DOWN group default qlen 1000
-5: eno8403: <BROADCAST,MULTICAST,SLAVE,UP,LOWER_UP> mtu 1500 qdisc mq master bond0 state UP group default qlen 1000
+4: eno8403: <BROADCAST,MULTICAST,SLAVE,UP,LOWER_UP> mtu 1500 qdisc mq master bond0 state UP group default qlen 1000
+5: eno12409np1: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc mq state DOWN group default qlen 1000
 6: eno12419np2: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc mq state DOWN group default qlen 1000
 7: eno12429np3: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc mq state DOWN group default qlen 1000
 8: enp27s0f0np0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc mq state DOWN group default qlen 1000
@@ -504,10 +518,6 @@ nvme8n1                     3.5T disk                   linux_raid_member Dell D
     inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0
 23: virbr0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN group default qlen 1000
     inet 192.168.122.1/24 brd 192.168.122.255 scope global virbr0
-24: flannel.1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1450 qdisc noqueue state UNKNOWN group default 
-    inet 10.244.6.0/32 scope global flannel.1
-25: cni0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN group default qlen 1000
-    inet 10.244.6.1/24 brd 10.244.6.255 scope global cni0
 
 === PCI DEVICES ===
 00:00.0 System peripheral: Intel Corporation Ice Lake Memory Map/VT-d (rev 20)
@@ -1034,10 +1044,10 @@ ff:1e.6 System peripheral: Intel Corporation Device 325e (rev 08)
 ff:1e.7 System peripheral: Intel Corporation Device 325f (rev 08)
 
 === SYSTEM UPTIME ===
- 01:42:21 up 2 days, 43 min,  1 user,  load average: 2.45, 0.63, 0.23
+ 01:05:26 up  5:27,  3 users,  load average: 2.14, 0.53, 0.22
 
 === LOAD AVERAGE ===
-2.45 0.63 0.23 2/2010 773789
+2.14 0.53 0.22 2/2005 38987
 
 === DOCKER VERSION ===
 Docker version 28.5.1, build e180ab8

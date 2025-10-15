@@ -337,6 +337,9 @@ def run_benchmark_step(server: dict, model_config: dict, config: dict, step_name
     num_instances = model_config.get('num_instances', 1)
     extra_args = model_config.get('extra_args', '')
 
+    # Get HuggingFace cache directory from config (default to /hf_models for backwards compatibility)
+    hf_cache_dir = config['benchmark'].get('huggingface_cache_dir', '/hf_models')
+
     env_vars = (
         f'IMAGE_NAME="vllm/vllm-openai:latest" '
         f'CONTAINER_NAME="vllm_benchmark_container" '
@@ -350,7 +353,7 @@ def run_benchmark_step(server: dict, model_config: dict, config: dict, step_name
         f'RANDOM_INPUT_LEN={random_input_len} '
         f'RANDOM_OUTPUT_LEN={random_output_len} '
         f'BENCHMARK_RESULTS_FILE="vllm_benchmark.txt" '
-        f'HF_DIRECTORY="/hf_models"'
+        f'HF_DIRECTORY="{hf_cache_dir}"'
     )
 
     ssh_cmd = [

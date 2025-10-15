@@ -13,6 +13,10 @@ def download_and_track(repo_id, local_dir=None):
         repo_id (str): The ID of the model repository on Hugging Face (e.g., "bert-base-uncased").
         local_dir (str, optional): The local directory to save the model to.
                                    If None, it will be saved in the Hugging Face cache.
+
+    Note:
+        Set the HF_HOME environment variable before calling this function to control
+        where HuggingFace stores all cache data (tokens, temp files, etc.)
     """
 
     # Enable hf_transfer for potentially faster downloads
@@ -73,16 +77,10 @@ def download_and_track(repo_id, local_dir=None):
 # Example usage:
 if __name__ == "__main__":
     parser = ArgumentParser()
-    parser.add_argument('--model-name', default="meta-llama/Llama-3.1-8B-Instruct")
-    parser.add_argument("--hg-dir", default="../models")
+    parser.add_argument('--model-name', default="meta-llama/Llama-3.1-8B-Instruct",
+                        help='HuggingFace model repository ID')
+    parser.add_argument("--hg-dir", default="../models",
+                        help='Directory to download the model to')
     args = parser.parse_args()
-    # Replace "bert-base-uncased" with the actual model ID you want to download
-
-    model_id = "meta-llama/Llama-3.1-8B-Instruct"
-    model_id = "Qwen/Qwen2.5-Omni-3B"
-
-    # You can specify a local directory to save the model, otherwise it goes to the cache.
-    # For example: local_save_path = "./my_downloaded_models"
-    local_save_path = "../models"
 
     download_and_track(args.model_name, local_dir=args.hg_dir)

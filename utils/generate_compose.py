@@ -35,6 +35,7 @@ def generate_vllm_service(instance_id: int, gpu_list: str, port: int,
       - {hf_directory}:{hf_directory}
     environment:
       - HUGGING_FACE_HUB_TOKEN={hf_token}
+      - HF_HOME={hf_directory}
     ports:
       - "{port}:8000"
     shm_size: '16gb'
@@ -91,6 +92,7 @@ def generate_benchmark_service(hf_directory: str, hf_token: str) -> str:
       - {hf_directory}:{hf_directory}
     environment:
       - HUGGING_FACE_HUB_TOKEN={hf_token}
+      - HF_HOME={hf_directory}
       - CUDA_VISIBLE_DEVICES=""
     entrypoint: ["/bin/bash", "-c"]
     command: ["sleep infinity"]

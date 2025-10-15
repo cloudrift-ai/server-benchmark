@@ -16,6 +16,8 @@ set -o allexport
 : "${VLLM_EXTRA_ARGS:?VLLM_EXTRA_ARGS must be set}"
 : "${BENCHMARK_RESULTS_FILE:?BENCHMARK_RESULTS_FILE must be set}"
 : "${HF_DIRECTORY:?HF_DIRECTORY must be set}"
+# Set HF_HOME to control where HuggingFace stores cache, tokens, and temp files
+HF_HOME="${HF_DIRECTORY}"
 # Disable automatic export
 set +o allexport
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )

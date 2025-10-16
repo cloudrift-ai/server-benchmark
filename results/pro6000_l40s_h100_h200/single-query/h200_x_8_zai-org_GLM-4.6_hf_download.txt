@@ -1,0 +1,8 @@
+Model: zai-org/GLM-4.6
+HF_DIRECTORY: /media/cloudrift/hf_models
+HF_HOME: /media/cloudrift/hf_models
+---------------------------------
+Downloading model: zai-org/GLM-4.6...
+Model download complete! Saved to: /media/cloudrift/hf_models/zai-org/GLM-4.6
+Download took 1.06 seconds.
+Average download speed: 5158774.02 MiB/s

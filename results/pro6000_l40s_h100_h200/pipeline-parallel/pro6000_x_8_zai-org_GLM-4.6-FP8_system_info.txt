@@ -1,0 +1,600 @@
+================================
+SYSTEM INFORMATION
+Collected: Thu Oct 16 20:12:02 EDT 2025
+================================
+
+=== HOSTNAME ===
+nr-ral-ai135
+
+=== OPERATING SYSTEM ===
+PRETTY_NAME="Ubuntu 22.04.5 LTS"
+NAME="Ubuntu"
+VERSION_ID="22.04"
+VERSION="22.04.5 LTS (Jammy Jellyfish)"
+VERSION_CODENAME=jammy
+ID=ubuntu
+ID_LIKE=debian
+HOME_URL="https://www.ubuntu.com/"
+SUPPORT_URL="https://help.ubuntu.com/"
+BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"
+UBUNTU_CODENAME=jammy
+
+=== KERNEL VERSION ===
+5.15.0-153-generic
+
+=== CPU INFORMATION ===
+Architecture:                            x86_64
+CPU op-mode(s):                          32-bit, 64-bit
+Address sizes:                           52 bits physical, 57 bits virtual
+Byte Order:                              Little Endian
+CPU(s):                                  128
+On-line CPU(s) list:                     0-127
+Vendor ID:                               AuthenticAMD
+Model name:                              AMD EPYC 9374F 32-Core Processor
+CPU family:                              25
+Model:                                   17
+Thread(s) per core:                      2
+Core(s) per socket:                      32
+Socket(s):                               2
+Stepping:                                1
+Frequency boost:                         enabled
+CPU max MHz:                             3850.0000
+CPU min MHz:                             1500.0000
+BogoMIPS:                                7699.79
+Flags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 invpcid_single hw_pstate ssbd mba ibrs ibpb stibp ibrs_enhanced vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local avx512_bf16 clzero irperf xsaveerptr rdpru wbnoinvd amd_ppin cppc arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl avx512vbmi umip pku ospke avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq la57 rdpid overflow_recov succor smca fsrm flush_l1d
+Virtualization:                          AMD-V
+L1d cache:                               2 MiB (64 instances)
+L1i cache:                               2 MiB (64 instances)
+L2 cache:                                64 MiB (64 instances)
+L3 cache:                                512 MiB (16 instances)
+NUMA node(s):                            2
+NUMA node0 CPU(s):                       0-31,64-95
+NUMA node1 CPU(s):                       32-63,96-127
+Vulnerability Gather data sampling:      Not affected
+Vulnerability Indirect target selection: Not affected
+Vulnerability Itlb multihit:             Not affected
+Vulnerability L1tf:                      Not affected
+Vulnerability Mds:                       Not affected
+Vulnerability Meltdown:                  Not affected
+Vulnerability Mmio stale data:           Not affected
+Vulnerability Reg file data sampling:    Not affected
+Vulnerability Retbleed:                  Not affected
+Vulnerability Spec rstack overflow:      Mitigation; safe RET
+Vulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl and seccomp
+Vulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization
+Vulnerability Spectre v2:                Mitigation; Enhanced / Automatic IBRS; IBPB disabled; STIBP disabled; PBRSB-eIBRS Not affected; BHI Not affected
+Vulnerability Srbds:                     Not affected
+Vulnerability Tsx async abort:           Not affected
+
+=== CPU COUNT ===
+Physical CPUs: 2
+CPU Cores: 32
+Logical CPUs (threads): 128
+
+=== MEMORY INFORMATION ===
+               total        used        free      shared  buff/cache   available
+Mem:           1.5Ti       8.9Gi       472Gi        35Mi       1.0Ti       1.5Ti
+Swap:          8.0Gi          0B       8.0Gi
+
+=== DETAILED MEMORY ===
+	Error Correction Type: Multi-bit ECC
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+	Size: 64 GB
+	Type: DDR5
+	Speed: 5600 MT/s
+	Manufacturer: Micron Technology
+	Configured Memory Speed: 4800 MT/s
+	Non-Volatile Size: None
+	Volatile Size: 64 GB
+	Cache Size: None
+	Logical Size: None
+
+=== GPU INFORMATION ===
+index, name, driver_version, memory.total [MiB], compute_cap
+0, NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 580.95.05, 97887 MiB, 12.0
+1, NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 580.95.05, 97887 MiB, 12.0
+2, NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 580.95.05, 97887 MiB, 12.0
+3, NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 580.95.05, 97887 MiB, 12.0
+4, NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 580.95.05, 97887 MiB, 12.0
+5, NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 580.95.05, 97887 MiB, 12.0
+6, NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 580.95.05, 97887 MiB, 12.0
+7, NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 580.95.05, 97887 MiB, 12.0
+
+=== NVIDIA-SMI FULL OUTPUT ===
+Thu Oct 16 20:12:03 2025       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.95.05              Driver Version: 580.95.05      CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA RTX PRO 6000 Blac...    On  |   00000000:01:00.0 Off |                  Off |
+| 49%   34C    P3             53W /  600W |       1MiB /  97887MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA RTX PRO 6000 Blac...    On  |   00000000:21:00.0 Off |                  Off |
+| 49%   34C    P3             53W /  600W |       1MiB /  97887MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   2  NVIDIA RTX PRO 6000 Blac...    On  |   00000000:41:00.0 Off |                  Off |
+| 49%   33C    P8             15W /  600W |       1MiB /  97887MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   3  NVIDIA RTX PRO 6000 Blac...    On  |   00000000:61:00.0 Off |                  Off |
+| 50%   34C    P8             22W /  600W |       1MiB /  97887MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   4  NVIDIA RTX PRO 6000 Blac...    On  |   00000000:81:00.0 Off |                  Off |
+| 76%   42C    P8             32W /  600W |       1MiB /  97887MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   5  NVIDIA RTX PRO 6000 Blac...    On  |   00000000:A1:00.0 Off |                  Off |
+| 74%   42C    P8             24W /  600W |       1MiB /  97887MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   6  NVIDIA RTX PRO 6000 Blac...    On  |   00000000:C1:00.0 Off |                  Off |
+| 78%   43C    P5             31W /  600W |       1MiB /  97887MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   7  NVIDIA RTX PRO 6000 Blac...    On  |   00000000:E1:00.0 Off |                  Off |
+| 75%   42C    P8             10W /  600W |       1MiB /  97887MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+
+=== DISK INFORMATION ===
+Filesystem      Size  Used Avail Use% Mounted on
+tmpfs           152G   36M  152G   1% /run
+/dev/nvme0n1p2  879G   90G  745G  11% /
+tmpfs           756G     0  756G   0% /dev/shm
+tmpfs           5.0M     0  5.0M   0% /run/lock
+tmpfs           4.0M     0  4.0M   0% /sys/fs/cgroup
+tmpfs           756G     0  756G   0% /run/qemu
+/dev/nvme0n1p1  511M  6.1M  505M   2% /boot/efi
+/dev/md0         15T  970G   14T   7% /media/cloudrift
+tmpfs           152G  8.0K  152G   1% /run/user/1001
+
+=== DISK DETAILS ===
+NAME          SIZE TYPE  MOUNTPOINT        FSTYPE            MODEL
+loop0        63.8M loop  /snap/core20/2599 squashfs          
+loop1        63.8M loop  /snap/core20/2669 squashfs          
+loop2        89.4M loop  /snap/lxd/31333   squashfs          
+loop3        91.4M loop  /snap/lxd/35819   squashfs          
+loop4        49.3M loop  /snap/snapd/24792 squashfs          
+loop5        50.8M loop  /snap/snapd/25202 squashfs          
+nvme0n1     894.3G disk                                      Micron_7450_MTFDKCC960TFR
+├─nvme0n1p1   512M part  /boot/efi         vfat              
+└─nvme0n1p2 893.8G part  /                 ext4              
+nvme2n1       3.5T disk                    linux_raid_member Micron_7450_MTFDKCC3T8TFR
+└─md0        14.8T raid0 /media/cloudrift  ext4              
+nvme1n1     894.3G disk                    linux_raid_member Micron_7450_MTFDKCC960TFR
+└─md0        14.8T raid0 /media/cloudrift  ext4              
+nvme4n1       3.5T disk                    linux_raid_member Micron_7450_MTFDKCC3T8TFR
+└─md0        14.8T raid0 /media/cloudrift  ext4              
+nvme5n1       3.5T disk                    linux_raid_member Micron_7450_MTFDKCC3T8TFR
+└─md0        14.8T raid0 /media/cloudrift  ext4              
+nvme3n1       3.5T disk                    linux_raid_member Micron_7450_MTFDKCC3T8TFR
+└─md0        14.8T raid0 /media/cloudrift  ext4              
+
+=== NETWORK INTERFACES ===
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    inet 127.0.0.1/8 scope host lo
+2: enp227s0f0: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN group default qlen 1000
+3: ens33f0np0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP group default qlen 1000
+    inet 74.81.65.240/24 brd 74.81.65.255 scope global ens33f0np0
+4: enp227s0f1: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN group default qlen 1000
+5: ens33f1np1: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN group default qlen 1000
+6: enxdee8a6116fd9: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN group default qlen 1000
+7: virbr0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN group default qlen 1000
+    inet 192.168.122.1/24 brd 192.168.122.255 scope global virbr0
+8: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN group default 
+    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0
+9: br-44105776f58c: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP group default 
+    inet 172.18.0.1/16 brd 172.18.255.255 scope global br-44105776f58c
+19: veth578369b@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue master br-44105776f58c state UP group default 
+
+=== PCI DEVICES ===
+00:00.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14a4 (rev 01)
+00:00.2 IOMMU: Advanced Micro Devices, Inc. [AMD] Device 149e (rev 01)
+00:00.3 Generic system peripheral [0807]: Advanced Micro Devices, Inc. [AMD] Device 14a6
+00:01.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+00:01.1 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14ab (rev 01)
+00:02.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+00:03.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+00:04.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+00:05.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+00:07.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+00:07.1 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14a7 (rev 01)
+00:14.0 SMBus: Advanced Micro Devices, Inc. [AMD] FCH SMBus Controller (rev 71)
+00:14.3 ISA bridge: Advanced Micro Devices, Inc. [AMD] FCH LPC Bridge (rev 51)
+00:18.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14ad
+00:18.1 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14ae
+00:18.2 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14af
+00:18.3 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14b0
+00:18.4 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14b1
+00:18.5 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14b2
+00:18.6 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14b3
+00:18.7 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14b4
+00:19.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14ad
+00:19.1 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14ae
+00:19.2 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14af
+00:19.3 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14b0
+00:19.4 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14b1
+00:19.5 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14b2
+00:19.6 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14b3
+00:19.7 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14b4
+01:00.0 VGA compatible controller: NVIDIA Corporation Device 2bb1 (rev a1)
+01:00.1 Audio device: NVIDIA Corporation Device 22e8 (rev a1)
+03:00.0 Non-Essential Instrumentation [1300]: Advanced Micro Devices, Inc. [AMD] Device 14ac (rev 01)
+03:00.1 System peripheral: Advanced Micro Devices, Inc. [AMD] Device 14dc
+03:00.4 USB controller: Advanced Micro Devices, Inc. [AMD] Device 14c9 (rev da)
+03:00.5 Encryption controller: Advanced Micro Devices, Inc. [AMD] Device 14ca
+20:00.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14a4 (rev 01)
+20:00.2 IOMMU: Advanced Micro Devices, Inc. [AMD] Device 149e (rev 01)
+20:00.3 Generic system peripheral [0807]: Advanced Micro Devices, Inc. [AMD] Device 14a6
+20:01.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+20:01.1 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14ab (rev 01)
+20:02.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+20:03.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+20:03.1 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14a5 (rev 01)
+20:03.3 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14a5 (rev 01)
+20:03.4 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14a5 (rev 01)
+20:04.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+20:05.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+20:07.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+20:07.1 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14a7 (rev 01)
+21:00.0 VGA compatible controller: NVIDIA Corporation Device 2bb1 (rev a1)
+21:00.1 Audio device: NVIDIA Corporation Device 22e8 (rev a1)
+23:00.0 Ethernet controller: Intel Corporation Ethernet Controller XXV710 for 25GbE SFP28 (rev 02)
+23:00.1 Ethernet controller: Intel Corporation Ethernet Controller XXV710 for 25GbE SFP28 (rev 02)
+25:00.0 Non-Volatile memory controller: Micron Technology Inc Device 51c3 (rev 01)
+27:00.0 Non-Volatile memory controller: Micron Technology Inc Device 51c3 (rev 01)
+29:00.0 Non-Essential Instrumentation [1300]: Advanced Micro Devices, Inc. [AMD] Device 14ac (rev 01)
+29:00.1 System peripheral: Advanced Micro Devices, Inc. [AMD] Device 14dc
+40:00.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14a4 (rev 01)
+40:00.2 IOMMU: Advanced Micro Devices, Inc. [AMD] Device 149e (rev 01)
+40:00.3 Generic system peripheral [0807]: Advanced Micro Devices, Inc. [AMD] Device 14a6
+40:01.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+40:01.1 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14ab (rev 01)
+40:02.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+40:03.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+40:04.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+40:05.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+40:07.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+40:07.1 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14a7 (rev 01)
+41:00.0 VGA compatible controller: NVIDIA Corporation Device 2bb1 (rev a1)
+41:00.1 Audio device: NVIDIA Corporation Device 22e8 (rev a1)
+42:00.0 Non-Essential Instrumentation [1300]: Advanced Micro Devices, Inc. [AMD] Device 14ac (rev 01)
+42:00.1 System peripheral: Advanced Micro Devices, Inc. [AMD] Device 14dc
+60:00.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14a4 (rev 01)
+60:00.2 IOMMU: Advanced Micro Devices, Inc. [AMD] Device 149e (rev 01)
+60:00.3 Generic system peripheral [0807]: Advanced Micro Devices, Inc. [AMD] Device 14a6
+60:01.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+60:01.1 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14ab (rev 01)
+60:02.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+60:03.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+60:04.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+60:05.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+60:05.3 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14aa (rev 01)
+60:05.4 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14aa (rev 01)
+60:07.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+60:07.1 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14a7 (rev 01)
+61:00.0 VGA compatible controller: NVIDIA Corporation Device 2bb1 (rev a1)
+61:00.1 Audio device: NVIDIA Corporation Device 22e8 (rev a1)
+63:00.0 PCI bridge: ASRock Incorporation Device 1150 (rev 06)
+64:00.0 VGA compatible controller: ASPEED Technology, Inc. ASPEED Graphics Family (rev 52)
+65:00.0 SATA controller: ASMedia Technology Inc. Device 0622 (rev 01)
+66:00.0 Non-Essential Instrumentation [1300]: Advanced Micro Devices, Inc. [AMD] Device 14ac (rev 01)
+66:00.1 System peripheral: Advanced Micro Devices, Inc. [AMD] Device 14dc
+66:00.4 USB controller: Advanced Micro Devices, Inc. [AMD] Device 14c9 (rev da)
+80:00.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14a4 (rev 01)
+80:00.2 IOMMU: Advanced Micro Devices, Inc. [AMD] Device 149e (rev 01)
+80:00.3 Generic system peripheral [0807]: Advanced Micro Devices, Inc. [AMD] Device 14a6
+80:01.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+80:01.1 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14ab (rev 01)
+80:02.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+80:03.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+80:04.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+80:05.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+80:07.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+80:07.1 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14a7 (rev 01)
+81:00.0 VGA compatible controller: NVIDIA Corporation Device 2bb1 (rev a1)
+81:00.1 Audio device: NVIDIA Corporation Device 22e8 (rev a1)
+83:00.0 Non-Essential Instrumentation [1300]: Advanced Micro Devices, Inc. [AMD] Device 14ac (rev 01)
+83:00.1 System peripheral: Advanced Micro Devices, Inc. [AMD] Device 14dc
+83:00.4 USB controller: Advanced Micro Devices, Inc. [AMD] Device 14c9 (rev da)
+83:00.5 Encryption controller: Advanced Micro Devices, Inc. [AMD] Device 14ca
+a0:00.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14a4 (rev 01)
+a0:00.2 IOMMU: Advanced Micro Devices, Inc. [AMD] Device 149e (rev 01)
+a0:00.3 Generic system peripheral [0807]: Advanced Micro Devices, Inc. [AMD] Device 14a6
+a0:01.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+a0:01.1 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14ab (rev 01)
+a0:02.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+a0:03.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+a0:04.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+a0:05.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+a0:07.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+a0:07.1 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14a7 (rev 01)
+a1:00.0 VGA compatible controller: NVIDIA Corporation Device 2bb1 (rev a1)
+a1:00.1 Audio device: NVIDIA Corporation Device 22e8 (rev a1)
+a3:00.0 Non-Essential Instrumentation [1300]: Advanced Micro Devices, Inc. [AMD] Device 14ac (rev 01)
+a3:00.1 System peripheral: Advanced Micro Devices, Inc. [AMD] Device 14dc
+c0:00.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14a4 (rev 01)
+c0:00.2 IOMMU: Advanced Micro Devices, Inc. [AMD] Device 149e (rev 01)
+c0:00.3 Generic system peripheral [0807]: Advanced Micro Devices, Inc. [AMD] Device 14a6
+c0:01.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+c0:01.1 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14ab (rev 01)
+c0:02.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+c0:03.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+c0:03.1 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14a5 (rev 01)
+c0:03.2 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14a5 (rev 01)
+c0:03.3 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14a5 (rev 01)
+c0:03.4 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14a5 (rev 01)
+c0:04.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+c0:05.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+c0:07.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+c0:07.1 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14a7 (rev 01)
+c1:00.0 VGA compatible controller: NVIDIA Corporation Device 2bb1 (rev a1)
+c1:00.1 Audio device: NVIDIA Corporation Device 22e8 (rev a1)
+c3:00.0 Non-Volatile memory controller: Micron Technology Inc Device 51c3 (rev 01)
+c5:00.0 Non-Volatile memory controller: Micron Technology Inc Device 51c3 (rev 01)
+c7:00.0 Non-Volatile memory controller: Micron Technology Inc Device 51c3 (rev 01)
+c9:00.0 Non-Volatile memory controller: Micron Technology Inc Device 51c3 (rev 01)
+cb:00.0 Non-Essential Instrumentation [1300]: Advanced Micro Devices, Inc. [AMD] Device 14ac (rev 01)
+cb:00.1 System peripheral: Advanced Micro Devices, Inc. [AMD] Device 14dc
+e0:00.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 14a4 (rev 01)
+e0:00.2 IOMMU: Advanced Micro Devices, Inc. [AMD] Device 149e (rev 01)
+e0:00.3 Generic system peripheral [0807]: Advanced Micro Devices, Inc. [AMD] Device 14a6
+e0:01.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+e0:01.1 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14ab (rev 01)
+e0:02.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+e0:03.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+e0:04.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+e0:05.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+e0:05.2 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14aa (rev 01)
+e0:07.0 Host bridge: Advanced Micro Devices, Inc. [AMD] Device 149f (rev 01)
+e0:07.1 PCI bridge: Advanced Micro Devices, Inc. [AMD] Device 14a7 (rev 01)
+e1:00.0 VGA compatible controller: NVIDIA Corporation Device 2bb1 (rev a1)
+e1:00.1 Audio device: NVIDIA Corporation Device 22e8 (rev a1)
+e3:00.0 Ethernet controller: Intel Corporation I350 Gigabit Network Connection (rev 01)
+e3:00.1 Ethernet controller: Intel Corporation I350 Gigabit Network Connection (rev 01)
+e4:00.0 Non-Essential Instrumentation [1300]: Advanced Micro Devices, Inc. [AMD] Device 14ac (rev 01)
+e4:00.1 System peripheral: Advanced Micro Devices, Inc. [AMD] Device 14dc
+e4:00.4 USB controller: Advanced Micro Devices, Inc. [AMD] Device 14c9 (rev da)
+
+=== SYSTEM UPTIME ===
+ 20:12:03 up  1:11,  1 user,  load average: 5.87, 5.91, 5.75
+
+=== LOAD AVERAGE ===
+5.87 5.91 5.75 1/1761 133764
+
+=== DOCKER VERSION ===
+Docker version 28.5.1, build e180ab8
+
+Docker Info:
+ Server Version: 28.5.1
+ Storage Driver: overlay2
+ Operating System: Ubuntu 22.04.5 LTS
+ CPUs: 128
+ Total Memory: 1.476TiB
+ Docker Root Dir: /var/lib/docker
+
+================================
+System information collected successfully!
+Saved to: system_info.txt
+================================

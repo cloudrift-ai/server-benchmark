@@ -1,0 +1,91 @@
+============ Serving Benchmark Result ============
+Successful requests:                     1024      
+Maximum request concurrency:             256       
+Benchmark duration (s):                  1230.44   
+Total input tokens:                      1022553   
+Total generated tokens:                  1024000   
+Request throughput (req/s):              0.83      
+Output token throughput (tok/s):         832.22    
+Peak output token throughput (tok/s):    1191.00   
+Peak concurrent requests:                321.00    
+Total Token throughput (tok/s):          1663.27   
+---------------Time to First Token----------------
+Mean TTFT (ms):                          5247.91   
+Median TTFT (ms):                        3951.99   
+P99 TTFT (ms):                           14126.00  
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          302.54    
+Median TPOT (ms):                        301.15    
+P99 TPOT (ms):                           310.62    
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           309.99    
+Median ITL (ms):                         300.37    
+P99 ITL (ms):                            586.09    
+----------------End-to-end Latency----------------
+Mean E2EL (ms):                          307484.80 
+Median E2EL (ms):                        304804.13 
+P99 E2EL (ms):                           322686.17 
+==================================================
+
+============ Docker Compose Configuration ============
+services:
+  vllm_0:
+    image: vllm/vllm-openai:latest
+    container_name: vllm_benchmark_container_0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0', '1', '2', '3', '4', '5', '6', '7']
+              capabilities: [gpu]
+    volumes:
+      - /media/cloudrift/hf_models:/media/cloudrift/hf_models
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=
+      - HF_HOME=/media/cloudrift/hf_models
+    ports:
+      - "8000:8000"
+    shm_size: '16gb'
+    ipc: host
+    command: >
+      --trust-remote-code
+      --gpu-memory-utilization=0.9
+      --host 0.0.0.0
+      --port 8000
+      --tensor-parallel-size 1
+      --pipeline-parallel-size 8
+      --model /media/cloudrift/hf_models/zai-org/GLM-4.6-FP8
+      --served-model-name zai-org/GLM-4.6-FP8
+      --tool-call-parser glm45 --reasoning-parser glm45 --max-num-seqs 256 --max-model-len 8192 --kv-cache-dtype fp8
+    healthcheck:
+      test: ["CMD", "bash", "-c", "curl -f http://localhost:8000/health && curl -f http://localhost:8000/v1/models | grep -q 'object.*list'"]
+      interval: 10s
+      timeout: 10s
+      retries: 180
+      start_period: 600s
+
+  benchmark:
+    image: vllm/vllm-openai:latest
+    container_name: vllm_benchmark_client
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - /media/cloudrift/hf_models:/media/cloudrift/hf_models
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=
+      - HF_HOME=/media/cloudrift/hf_models
+      - CUDA_VISIBLE_DEVICES=""
+    entrypoint: ["/bin/bash", "-c"]
+    command: ["sleep infinity"]
+    profiles:
+      - tools
+
+============ Benchmark Command ============
+vllm bench serve     --model zai-org/GLM-4.6-FP8     --dataset-name random     --random-input-len 1000     --random-output-len 1000     --max-concurrency 256     --num-prompts 1024     --ignore-eos     --backend openai-chat     --endpoint /v1/chat/completions     --percentile-metrics ttft,tpot,itl,e2el     --base-url http://vllm_0:8000
+==================================================

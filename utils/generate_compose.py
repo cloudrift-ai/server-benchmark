@@ -4,8 +4,43 @@ Generate docker-compose.yml for multi-instance vLLM deployment with nginx load b
 """
 
 import argparse
+import subprocess
 import sys
 from typing import List
+
+
+def get_total_gpu_count() -> tuple[int, bool]:
+    """Get the total number of GPUs available on the system.
+
+    Returns:
+        tuple: (gpu_count, has_mig)
+            - gpu_count: Number of usable GPU devices (MIG instances if present, else physical GPUs)
+            - has_mig: True if MIG devices are detected
+    """
+    try:
+        result = subprocess.run(
+            ['nvidia-smi', '-L'],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        lines = result.stdout.strip().split('\n')
+
+        # Count MIG devices (lines that start with whitespace and contain "MIG")
+        mig_devices = [line for line in lines if line.startswith(' ') and 'MIG' in line]
+
+        # Count physical GPUs (lines that start with "GPU")
+        physical_gpus = [line for line in lines if line.startswith('GPU')]
+
+        # If MIG devices exist, use MIG count; otherwise use physical GPU count
+        if mig_devices:
+            return len(mig_devices), True
+        else:
+            return len(physical_gpus), False
+
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        # If nvidia-smi is not available, return 0
+        return 0, False
 
 
 def generate_vllm_service(instance_id: int, gpu_list: str, port: int,
@@ -17,8 +52,15 @@ def generate_vllm_service(instance_id: int, gpu_list: str, port: int,
     # Build command with extra args if provided
     extra_args_str = f"\n      {extra_args}" if extra_args.strip() else ""
 
-    # Format GPU list for YAML: ['0', '1'] instead of ['0,1']
-    gpu_ids_yaml = ", ".join(f"'{gpu}'" for gpu in gpu_list.split(','))
+    # Determine GPU configuration
+    # If gpu_list is "all", use count: all
+    # Otherwise, use device_ids with specific IDs
+    if gpu_list.lower() == "all":
+        gpu_config = """count: all"""
+    else:
+        # Format GPU list for YAML: ['0', '1'] instead of ['0,1']
+        gpu_ids_yaml = ", ".join(f"'{gpu}'" for gpu in gpu_list.split(','))
+        gpu_config = f"""device_ids: [{gpu_ids_yaml}]"""
 
     return f"""
   vllm_{instance_id}:
@@ -29,7 +71,7 @@ def generate_vllm_service(instance_id: int, gpu_list: str, port: int,
         reservations:
           devices:
             - driver: nvidia
-              device_ids: [{gpu_ids_yaml}]
+              {gpu_config}
               capabilities: [gpu]
     volumes:
       - {hf_directory}:{hf_directory}
@@ -164,16 +206,31 @@ def generate_compose_file(
     nginx_conf_path: str = None,
     extra_args: str = ""
 ) -> str:
-    """Generate complete docker-compose.yml content."""
+    """Generate complete docker-compose.yml content.
+
+    Automatically uses 'count: all' instead of specific device IDs when:
+    - Single instance (num_instances == 1)
+    - GPUs per instance equals total system GPUs
+    This is useful for MIG devices and simplifies configuration.
+    """
 
     compose_content = "services:"
 
     # Calculate total GPUs per instance (tensor_parallel * pipeline_parallel)
     gpus_per_instance = tensor_parallel_size * pipeline_parallel_size
 
+    # Get total GPU count from system (properly handles MIG devices)
+    total_gpus, has_mig = get_total_gpu_count()
+
+    # Automatically determine if we should use "all" GPUs:
+    # Use "all" if single instance and requesting all system GPUs
+    # This works correctly with MIG since we count MIG devices as the total
+    use_all_gpus = (num_instances == 1 and total_gpus > 0 and gpus_per_instance == total_gpus)
+
     # Add vLLM service instances
     for i in range(num_instances):
-        gpu_list = calculate_gpu_list(i, gpus_per_instance)
+        # Use "all" to get all GPUs, or calculate specific device IDs
+        gpu_list = "all" if use_all_gpus else calculate_gpu_list(i, gpus_per_instance)
         port = 8000 + i
 
         compose_content += generate_vllm_service(

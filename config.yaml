@@ -3,7 +3,7 @@
 # Global benchmark settings
 benchmark:
   local_results_dir: "results"           # Local directory to store results
-  huggingface_cache_dir: "/media/cloudrift/hf_models"    # Directory on remote servers to store HuggingFace models and cache
+  huggingface_cache_dir: "/hf_models"    # Directory on remote servers to store HuggingFace models and cache
 
 # Benchmark parameters (required)
 benchmark_params:
@@ -28,17 +28,13 @@ servers:
 #      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
 #        extra_args: "--max-model-len 8192"
 
-#  - name: "rtx4090_x_2"
-#    address: "riftuser@142.214.185.151"
-#    ssh_key: "~/.ssh/id_ed25519"
-#    port: 22
-#    models:
-#      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-#        num_instances: 2
-#        extra_args: "--max-model-len 8192"
-#      - name: "ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4"
-#        pipeline_parallel_size: 2
-#        extra_args: "--max-model-len 8192 --kv-cache-dtype fp8"
+  - name: "H200_2g35gb"
+    address: "riftuser@91.201.219.162"
+    ssh_key: "~/.ssh/mig_instance"
+    port: 22
+    models:
+      - name: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
+        extra_args: "--max-model-len 8192"
 
 #  - name: "rtx4090_x_4"
 #    address: "riftuser@142.214.185.239"
@@ -127,21 +123,21 @@ servers:
 #      - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
 #        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --max-num-seqs 256 --enable-expert-parallel --kv-cache-dtype fp8"
 
-  - name: "h200_x_8"
-    address: "hc-h200-1"
-    ssh_key: "~/.ssh/hc_h200_1"
-    port: 22
-    models:
-      - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
-        num_instances: 8
-        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --max-num-seqs 256 --enable-expert-parallel --kv-cache-dtype fp8"
-      - name: "QuantTrio/Qwen3-Coder-480B-A35B-Instruct-AWQ"
-        tensor_parallel_size: 4
-        num_instances: 2
-        extra_args: "--max-num-seqs 512 --max-model-len 8192 --enable-expert-parallel"
-      - name: "zai-org/GLM-4.6"
-        tensor_parallel_size: 8
-        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-num-seqs 512 --max-model-len 8192"
+#  - name: "h200_x_8"
+#    address: "hc-h200-1"
+#    ssh_key: "~/.ssh/hc_h200_1"
+#    port: 22
+#    models:
+#      - name: "cpatonn/GLM-4.5-Air-AWQ-4bit"
+#        num_instances: 8
+#        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-model-len 8192 --max-num-seqs 256 --enable-expert-parallel --kv-cache-dtype fp8"
+#      - name: "QuantTrio/Qwen3-Coder-480B-A35B-Instruct-AWQ"
+#        tensor_parallel_size: 4
+#        num_instances: 2
+#        extra_args: "--max-num-seqs 512 --max-model-len 8192 --enable-expert-parallel"
+#      - name: "zai-org/GLM-4.6"
+#        tensor_parallel_size: 8
+#        extra_args: "--tool-call-parser glm45 --reasoning-parser glm45 --max-num-seqs 512 --max-model-len 8192"
 
 # Results will be saved with flat structure using prefixes:
 #   {local_results_dir}/{server_name}_{model_name}_system_info.txt

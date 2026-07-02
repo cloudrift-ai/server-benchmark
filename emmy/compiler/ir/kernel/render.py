@@ -51,9 +51,16 @@ static __device__ __forceinline__ void mbarrier_arrive_expect_tx(unsigned long l
 static __device__ __forceinline__ void mbarrier_arrive(unsigned long long* mbar) {
     // Simple arrive — no transaction-byte count. Used by warp-specialized
     // consumer warps to signal "slot empty" after the producer's
-    // expect-tx round has been consumed.
+    // expect-tx round has been consumed. The async-proxy fence orders the
+    // consumer's GENERIC-proxy slab reads (ldmatrix) before the producer's
+    // next ASYNC-proxy write into the slot (cp.async.bulk.tensor) — the
+    // mbarrier release alone does not cross the proxy boundary, and without
+    // the fence the refill can overtake in-flight reads (silent corruption
+    // under scheduling pressure). Mirrors CUTLASS PipelineTmaAsync's
+    // consumer_release (fence_view_async_shared + arrive).
     unsigned int addr = __cvta_generic_to_shared(mbar);
     unsigned long long state;
+    asm volatile("fence.proxy.async.shared::cta;\\n" ::: "memory");
     asm volatile("mbarrier.arrive.shared.b64 %0, [%1];\\n"
                  : "=l"(state) : "r"(addr) : "memory");
 }
@@ -543,7 +550,7 @@ def _launch_bounds_for(kernel_op: KernelOp) -> int:
 
     for s in kernel_op.body.iter_of_type(Tile):
         if s.block_threads is not None:
-            return s.block_threads
+            return s.block_threads + s.aux_threads  # the warp-specialized producer band launches too
     return _BLOCK_SIZE
 
 

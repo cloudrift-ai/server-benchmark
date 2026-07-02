@@ -414,21 +414,22 @@ unchanged. The grammar collapses int and pair widths into one tuple kind and sup
 `WSPEC` role case); the one non-uniform value codec is the `REDUCE` `g<n>[a|k]` finalize letter, kept inside the value
 so the round-trip stays byte-identical.
 
-`WSPEC` (warp specialization) is the worker-mapping pin — a role→warp-count allocation (`WarpSpec`; role descriptors in
-`schedule.py`, the COMPUTE consumer implicit and sized by `TilePlan.units`) carried on an **orthogonal**
+`WSPEC` (warp specialization) is the worker-mapping codec — a role→warp-count allocation (`WarpSpec`; role descriptors
+in `schedule.py`, the COMPUTE consumer implicit and sized by `TilePlan.units`) carried on an **orthogonal**
 `workers: WarpSpec | None` field of the uniform schedule (`None` = uniform SIMT), **not** a union arm: it adds a warp
-split over the fixed pipeline rather than replacing it. While the materializer does not consume `TileOp.workers` (no producer/consumer codegen yet), a structurally
-legal `EMMY_WSPEC` pin is REFUSED (warning + no stamp, uniform SIMT) — accepting it would record warp splits
-in the perf DB that no kernel ever ran; an illegal / unparseable pin degrades to uniform silently. Stamping
-returns when wspec codegen lands.
+split over the fixed pipeline rather than replacing it. The producer role (`p<n>`) is legal over a resolved **TMA**
+stage only (`RoleKind.legal` — the box copy is issued by one elected thread and lands on a slot mbarrier any thread
+can parity-wait, so the fill moves warp bands freely; cp.async's wait-group is issuing-thread-scoped and a `sync`
+compute-fill has no async load half). An illegal / unparseable spec — or one carrying the reserved producer `q`
+param — degrades to uniform silently; a legal one stamps and the staged K-loop materializes the split
+(`lowering/kernel/_stage._wspec_kloop`).
 
 `tile/ops.py` `lower(op)` returns the `Map`'s body verbatim — the loop nest with its annotated reduce `Loop`s, the
 carriers already dissolved into loose folds + the streaming `merge` at recognition; `pretty(op)` renders it for
-dumps. The tensor-core,
-cooperative-combine, and staging (cp.async / TMA) tiers are materialized downstream in `lowering/kernel` against the
-op tree + schedule; warp specialization has its schedule codec (`WSPEC` → `workers`) but the materializer does not yet
-consume `workers`, so it is inert until Phase 4. The older tile-level `GridTile` / `ThreadTile` / `Stage` structures were removed in the
-tile-IR rebuild and are being rebuilt there as the schedules return (see `pipeline/passes/ARCHITECTURE.md`).
+dumps. The tensor-core, cooperative-combine, staging (cp.async / TMA), and warp-specialization tiers are materialized
+downstream in `lowering/kernel` against the op tree + schedule. The older tile-level `GridTile` / `ThreadTile` /
+`Stage` structures were removed in the tile-IR rebuild and are being rebuilt there as the schedules return (see
+`pipeline/passes/ARCHITECTURE.md`).
 
 ## `kernel/`
 

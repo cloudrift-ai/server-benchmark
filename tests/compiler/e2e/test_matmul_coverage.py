@@ -328,47 +328,91 @@ def test_scalar_ring_matches_gmem_direct_bit_for_bit(monkeypatch, stage):
     np.testing.assert_allclose(staged.reshape(M, N), a @ b, atol=1e-3, rtol=1e-3)
 
 
-def test_warp_matmul_refuses_wspec_while_inert(monkeypatch, caplog) -> None:
-    """A structurally LEGAL ``WSPEC`` pin is refused (warn + no stamp, uniform SIMT) while the
-    producer/consumer materialization is not built — an accepted pin would record a warp split in
-    the perf DB that no kernel ever ran. Flips back to stamping when wspec codegen lands."""
-    import logging as _logging  # noqa: PLC0415
-
+def test_warp_matmul_stamps_wspec(monkeypatch) -> None:
+    """A legal ``WSPEC`` split — a warp tile over a resolved TMA stage — STAMPS: ``workers``
+    resolves on the ``TileOp`` and the codec rides ``knobs`` bare (root-global). The
+    honest-stamping rule holds because the staged K-loop now materializes the split (the
+    producer/compute band split in ``_stage._wspec_kloop``)."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
 
     monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x2/f2x2/k2")  # warp (mma) tier
-    monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the subject is the WSPEC refusal, not the split fork
-    monkeypatch.setenv("EMMY_STAGE", "d2/cp")
-    monkeypatch.setenv("EMMY_WSPEC", "p2:q8")
-    with caplog.at_level(_logging.WARNING):
-        out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((9, 0)))
+    monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the subject is the WSPEC split, not the split fork
+    monkeypatch.setenv("EMMY_STAGE", "d2/tma/ring")
+    monkeypatch.setenv("EMMY_WSPEC", "p1")
+    out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((9, 0)))
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
-    assert tile_op.knobs.get("WSPEC", "") == "", tile_op.knobs.get("WSPEC")  # not stamped
-    assert tile_op.workers is None, tile_op.workers  # uniform SIMT
-    assert any("not materialized" in r.message for r in caplog.records), caplog.records
+    assert tile_op.knobs.get("WSPEC", "") == "p1", tile_op.knobs  # stamped: the split materializes
+    assert tile_op.workers is not None and tile_op.workers.aux_warps == 1, tile_op.workers
 
 
 @pytest.mark.parametrize(
-    ("tile", "stage"),
+    ("tile", "stage", "wspec"),
     [
-        ("a:mma_m16n8k16_f16/w2x2/f2x2/k2", None),  # warp tier, no STAGE → producer has nothing to drive
-        ("n32x8/f4x4", "d2/cp"),  # scalar tier — WSPEC is only read on the warp path
+        ("a:mma_m16n8k16_f16/w2x2/f2x2/k2", None, "p2"),  # warp tier, no STAGE → producer has nothing to drive
+        ("a:mma_m16n8k16_f16/w2x2/f2x2/k2", "d2/cp", "p2"),  # cp.async: wait-group is issuing-thread-scoped — not driveable
+        ("a:mma_m16n8k16_f16/w2x2/f2x2/k2", "d2/tma/ring", "p1:q8"),  # the producer q window is reserved (inert)
+        ("n32x8/f4x4", "d2/cp", "p2"),  # scalar tier — WSPEC is only read on the warp path
     ],
 )
-def test_wspec_degrades_to_uniform(monkeypatch, tile: str, stage: str | None) -> None:
-    """The ``WSPEC`` pin degrades to uniform (``workers=None``) when the producer is illegal — no
-    ``STAGE`` to drive, or the scalar tier (no mma consumer). The same pin-validity rule the other
-    codecs follow; the knob is then not explicitly stamped (only the ``off=""`` default)."""
+def test_wspec_degrades_to_uniform(monkeypatch, tile: str, stage: str | None, wspec: str) -> None:
+    """The ``WSPEC`` pin degrades to uniform (``workers=None``) when the split can't materialize —
+    no ``STAGE`` to drive, a non-TMA transport, a reserved per-role param (``q``), or the scalar
+    tier (no mma consumer). The same pin-validity rule the other codecs follow; the knob is then
+    not explicitly stamped (only the ``off=""`` default)."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
 
     monkeypatch.setenv("EMMY_TILE", tile)
     if stage is not None:
         monkeypatch.setenv("EMMY_STAGE", stage)
-    monkeypatch.setenv("EMMY_WSPEC", "p2")
+    monkeypatch.setenv("EMMY_WSPEC", wspec)
     out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((9, 0)))
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
     assert tile_op.workers is None
     assert tile_op.knobs.get("WSPEC", "") == ""  # off-default only, no explicit pin stamped
+
+
+@requires_cuda
+@requires_sm90
+@pytest.mark.parametrize(
+    ("wspec", "stage", "M"),
+    [
+        ("p1", "d2/tma/ring", 128),  # the ring split (the golden-config shape family)
+        ("p2", "d2/tma/ring", 128),  # two producer warps
+        ("p1", "d1/tma", 128),  # single-buffer split (no prefetch, handshake only)
+        ("p1", "d2/tma/ring", 100),  # masked M — the producer's box zero-fills, the store guards
+    ],
+)
+def test_warp_specialized_matmul_matches_reference(monkeypatch, wspec: str, stage: str, M: int) -> None:
+    """The warp-SPECIALIZED staged mma matmul (``WSPEC=p<n>`` over a TMA stage) matches numpy: the
+    producer band rides past ``block_threads`` (the launch widens, the grid decode wraps), the TMA
+    fill moves to the producer's elected thread, and the compute band drains through the data /
+    empty mbarrier handshake. Accuracy-gated (bit-identity vs the uniform pipeline is NOT expected —
+    the split changes scheduling, not the mma math)."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
+
+    N, K = 128, 256
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("a", (M, K), dtype=F16), node_id="a")
+    g.add_node(InputOp(), [], Tensor("b", (K, N), dtype=F16), node_id="b")
+    g.add_node(MatmulOp(), ["a", "b"], Tensor("o", (M, N), dtype=F16), node_id="o")
+    g.inputs, g.outputs = ["a", "b"], ["o"]
+    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x2/f2x2/k2")
+    monkeypatch.setenv("EMMY_STAGE", stage)
+    monkeypatch.setenv("EMMY_WSPEC", wspec)
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    rng = np.random.default_rng(0)
+    a = rng.standard_normal((M, K)).astype(np.float16)
+    b = rng.standard_normal((K, N)).astype(np.float16)
+    be = CudaBackend()
+    compiled = be.compile(g)
+    src = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if getattr(n.op, "kernel_source", None))
+    aux = 32 * int(wspec[1:])
+    assert f"__launch_bounds__({128 + aux})" in src, "the producer band must widen the launch"
+    assert "threadIdx.x % 128" in src, "the grid decode must wrap the aux band onto the CTA's cells"
+    assert "mbarrier_arrive(" in src, "the compute band must release ring slots on the empty mbarrier"
+    got = np.asarray(be.run(compiled, input_data={"a": a, "b": b})[0].outputs["o"])
+    ref = a.astype(np.float32) @ b.astype(np.float32)
+    np.testing.assert_allclose(got.astype(np.float32), ref, atol=0.25, rtol=1e-2)
 
 
 @requires_cuda

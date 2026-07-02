@@ -191,22 +191,35 @@ class Tile(Stmt):
     (the linear ``_gid`` decode then groups ``block_threads`` consecutive cells
     per CTA, the innermost being the cooperative lanes). ``None`` is the scalar
     tier (one thread per cell, ``blockDim = _BLOCK_SIZE``).
+
+    ``aux_threads`` is the warp-specialized producer band appended PAST the
+    cooperative cells (``blockDim = block_threads + aux_threads``, the grid
+    still ``N / block_threads``). The decode becomes ``_gid = blockIdx.x ·
+    block_threads + threadIdx.x % block_threads``: a compute thread decodes its
+    own cell exactly as before, while an aux thread wraps onto the CTA's first
+    cells — its BLOCK-axis vars (functions of ``blockIdx`` alone) are correct
+    (the producer fill needs the CTA tile origin), its unit/lane vars alias a
+    compute cell and are never read (the producer branch guards on the raw
+    ``threadIdx.x``, and the store side is guarded to compute threads).
     """
 
     axes: tuple[Axis, ...]
     body: Body
     block_threads: int | None = None
+    aux_threads: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.body, Body):
             object.__setattr__(self, "body", Body(self.body))
+        if self.aux_threads and self.block_threads is None:
+            raise ValueError("Tile.aux_threads requires a cooperative block_threads")
 
     def nested(self) -> tuple[Body, ...]:
         return (self.body,)
 
     def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
         (body,) = bodies
-        return Tile(axes=self.axes, body=body, block_threads=self.block_threads)
+        return Tile(axes=self.axes, body=body, block_threads=self.block_threads, aux_threads=self.aux_threads)
 
     def binds_axes(self) -> frozenset[str]:
         return frozenset(a.name for a in self.axes)
@@ -264,8 +277,15 @@ class Tile(Stmt):
 
             inner = ctx.child()
             n = _stride_c(list(self.axes), inner)
+            # Same aux-band decode as the static path below: blockDim includes the producer band,
+            # so the cell id must be derived from ``block_threads``, not ``blockDim``.
+            sgid = (
+                f"blockIdx.x * {self.block_threads} + threadIdx.x % {self.block_threads}"
+                if self.aux_threads
+                else "blockIdx.x * blockDim.x + threadIdx.x"
+            )
             out = [
-                f"{pad}int _gid = blockIdx.x * blockDim.x + threadIdx.x;",
+                f"{pad}int _gid = {sgid};",
                 f"{pad}if (_gid < {n}) {{",
             ]
             out.extend(_render_grid_axis_decode(self.axes, "_gid", inner))
@@ -280,8 +300,16 @@ class Tile(Stmt):
             strides[i] = acc
             acc *= extents[i]
         n = self.n_elements
+        # A warp-specialized producer band (``aux_threads``) launches PAST the cooperative cells:
+        # decode off ``blockIdx·block_threads + threadIdx % block_threads`` so an aux thread wraps
+        # onto this CTA's cells (correct block coords; its unit/lane aliases are never read).
+        gid = (
+            f"blockIdx.x * {self.block_threads} + threadIdx.x % {self.block_threads}"
+            if self.aux_threads
+            else "blockIdx.x * blockDim.x + threadIdx.x"
+        )
         out = [
-            f"{pad}int _gid = blockIdx.x * blockDim.x + threadIdx.x;",
+            f"{pad}int _gid = {gid};",
             f"{pad}if (_gid < {n}) {{",
         ]
         inner = ctx.child()

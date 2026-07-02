@@ -157,6 +157,21 @@ value, `Contraction.folds`) fills one B slab per channel, drains N mma chains of
 into per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the channels per element in the
 store's `RegEpilogue` (`extra_accs`).
 
+**Warp specialization (`WSPEC` → `TileOp.workers`).** A resolved `WarpSpec` splits the SAME staged phases across two
+warp bands instead of software-pipelining them in-warp (`_stage._wspec_kloop` — the workers arm of `staged_kloop`,
+TMA transport only per the scheduler's legality): the **producer** band rides at the TAIL of the thread block
+(`blockDim = block_threads + 32·aux_warps`; the `Tile` decode wraps `threadIdx.x % block_threads`, so the compute
+warps' cell decode is untouched, an aux thread gets correct BLOCK coords for the tile origin, and the transport's
+`linear_tid == 0` election lands on exactly the band's first thread — the TMA fill is reused verbatim). Its elected
+thread primes the ring, then per chunk parity-waits the consumers' slot release (`_mbar_empty`, one u64 per slot,
+count 1) and arms + box-copies the prefetch chunk. The **compute** band parity-waits the data mbarrier, drains
+(ldmatrix + mma), closes on a named `bar.sync` (a CTA-wide `__syncthreads()` is UB on the divergent role branch) and
+ONE elected thread releases the slot — `mbarrier_arrive`'s `fence.proxy.async` orders the band's GENERIC slab reads
+before the producer's next ASYNC box copy into the slot (without it the refill overtakes in-flight reads; silent
+corruption under scheduling pressure). `SetMaxNReg` redistributes registers between the bands when the raised total
+fits the 64K regfile. Stores are guarded to the compute band (`grid_tile`), and the launch/`__launch_bounds__`
+account for the aux band (`Tile.aux_threads`). Accuracy-gated, not bit-identical — the split changes scheduling.
+
 The **scalar** contraction tier stages too, under the same `STAGE` codec, through the **same** `_staged` driver — the
 scheduler's `_resolve_scalar_stage` sizes the slab (the depth-aware fit-to-smem K-chunk `bk_elems`, not a codec field;
 the depth steps down when no chunk fits) and its `staged_drain` is the plain-`Load` inner loop (`_scalar_drain`,

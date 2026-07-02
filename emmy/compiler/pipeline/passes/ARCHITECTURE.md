@@ -85,5 +85,9 @@ just that node gaining a warp `TilePlan` — no new path.
 1024`) with per-cell `""` as the conservative option-0, crossed with the warp / reduce / stage move families by
 `_schedule._tile_rows` for an unpinned contraction so `compile` / `tune` explores the space (each row → a structural
 `Contraction`-node leaf keyed `TILE@<k_axis>` in a hierarchical `build_fork_tree`; an env pin wins via `Knob.narrow`).
-A computed-A (fused-cone) contraction enumerates its own warp-only rows (`_schedule._computed_a_rows` — the mandatory
-resolved `sync` compute-fill stage, no scalar / gmem-direct / split-K rows).
+`wspec_moves()` is the fourth level (bare `WSPEC`, option-0 `""` = uniform SIMT) — offered only on a warp row over a
+resolved **TMA** stage without a cross-CTA split, and resolved/thread-budget-gated at materialization
+(`_wspec_workers`; an ineligible spec degrades to uniform). A computed-A (fused-cone) contraction enumerates its own
+warp-only rows (`_schedule._computed_a_rows` — the mandatory resolved `sync` compute-fill stage, no scalar /
+gmem-direct / split-K / WSPEC rows; the compute-producer role for the fused edge is the anticipated `RoleKind`
+extension).

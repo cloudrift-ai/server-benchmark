@@ -47,7 +47,7 @@ from dataclasses import dataclass, replace
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, Literal, Var
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
 from emmy.compiler.ir.schedule import Stage
@@ -135,6 +135,7 @@ def grid_tile(
     state_decls: Callable[[list[tuple[int, int]]], list[Stmt]],
     reduce_region: Callable[..., tuple[list[Stmt], list[Stmt]]],
     store: Callable[..., list[Stmt]],
+    workers: object = None,
 ) -> Tile:
     """The GRID level + finalize — the ONE seal every kernel binds through: bind the block axes (the
     shrunk grid), set the per-axis grid term ``block·tile``, append any leading (untiled) grid axes
@@ -148,7 +149,11 @@ def grid_tile(
     ``mn[0] is None`` is a 1-D output grid (only ``n`` tiled) — no ``m`` block axis is bound.
     ``mn == (None, None)`` is the fully-untiled output (the reduce tier / degenerate fold): one cell
     per thread, no block axis at all — the whole grid rides ``lead_axes``, and a tiled REDUCE axis
-    contributes its lane through ``t.axes``. ``lanes == 1`` (scalar) emits no ``_lane`` axis."""
+    contributes its lane through ``t.axes``. ``lanes == 1`` (scalar) emits no ``_lane`` axis.
+
+    ``workers`` (a resolved :class:`WarpSpec`) appends its producer band as ``Tile.aux_threads`` and
+    guards the stores to the compute band — an aux thread's wrapped decode aliases a compute cell,
+    so an unguarded ``store`` would double-write it."""
     offset = tuple(replace(o, block_var=s.block) if s is not None else o for o, s in zip(t.offset, mn, strict=True))
     block_axes = tuple(shrink_axis(Axis(name=s.block, extent=s.axis.extent, source_axis=s.axis), s.tile) for s in mn if s is not None)
     lane_axes = (Axis(name="_lane", extent=lanes),) if lanes > 1 else ()
@@ -158,7 +163,11 @@ def grid_tile(
     state = state_decls(cells)
     top_decls, kstmts = reduce_region(cells, offset, mn)
     stores = [s for (i, j) in cells for s in store(i, j, offset, mn)]
-    return Tile(axes=axes, body=Body((*state, *top_decls, *kstmts, *stores)), block_threads=block_threads)
+    aux_threads = 0
+    if workers is not None:
+        aux_threads = 32 * workers.aux_warps
+        stores = [Cond(cond=BinaryExpr("<", Builtin("thread_idx.x"), Literal(block_threads, "int")), body=tuple(stores))]
+    return Tile(axes=axes, body=Body((*state, *top_decls, *kstmts, *stores)), block_threads=block_threads, aux_threads=aux_threads)
 
 
 # ---- the recursive node walk: Ctx down, Frag up ------------------------------------------------ #
@@ -211,6 +220,7 @@ class Ctx:
     inputs: dict | None = None
     stage: Stage | None = None
     output: str = ""
+    workers: object = None  # the resolved WarpSpec worker split (None = uniform SIMT)
 
 
 def _emit(op, ctx: Ctx) -> Frag:
@@ -283,7 +293,13 @@ def factorize(tile, root, store=None) -> Tile:
     (the kernel's finalized output SSA name — the root node's produced :class:`Handle`) is resolved
     once here and threaded down for the store glue."""
     op = tile.op
-    ctx = Ctx(grid=tuple(tile.place.grid), inputs=tile.inputs, stage=tile.stage, output=(root.output.name if root is not None else ""))
+    ctx = Ctx(
+        grid=tuple(tile.place.grid),
+        inputs=tile.inputs,
+        stage=tile.stage,
+        output=(root.output.name if root is not None else ""),
+        workers=tile.workers,
+    )
     out_val = _emit_wire(op).name if op is not None else ""
     return _factorize(op, ctx, tail=(), out_val=out_val, store=store)
 
@@ -351,7 +367,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
         if not has_write(epi):
             epi = with_store(epi, ctx.output, grid, op.out)
         c = replace(op, epilogue=Body(tuple(epi)))
-        state_decls, reduce_region = reduce_codegen(c, ctx.stage, ctx.inputs)
+        state_decls, reduce_region = reduce_codegen(c, ctx.stage, ctx.inputs, ctx.workers)
         sink = store if store is not None else store_sink(c)
         t = unit_tile(register_tile(atomize(c.atom.shape[:2]), c.mn), c.mn)
         mn, lead, bt, lanes = c.mn, c.lead_axes, c.block_threads, c.atom.lanes
@@ -394,7 +410,15 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
             return close
 
     return grid_tile(
-        t, mn=mn, lead_axes=lead, block_threads=bt, lanes=lanes, state_decls=state_decls, reduce_region=reduce_region, store=sink
+        t,
+        mn=mn,
+        lead_axes=lead,
+        block_threads=bt,
+        lanes=lanes,
+        state_decls=state_decls,
+        reduce_region=reduce_region,
+        store=sink,
+        workers=ctx.workers if isinstance(op, Contraction) else None,
     )
 
 

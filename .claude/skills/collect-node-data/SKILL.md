@@ -1,6 +1,6 @@
 ---
 name: collect-node-data
-description: Use this skill when the user wants to populate or refresh the autotune DB's node table (the cross-hardware search-tree node store) with data measured on a SPECIFIC GPU — e.g. "collect node data for an H200", "tune the goldens on a rented <GPU> and merge the nodes back", "gather cross-hardware node-store data", "populate / update the node table from <hardware>", "run the golden node sweep on a remote <GPU>". Rents a fresh single-GPU server (via start-remote-server; --billing-exempt for CloudRift), rsyncs + sets up emmy there, runs `emmy tune --dataset golden`, then merges the remote node rows into the local `~/.cache/emmy/autotune.db` (nodes table only, keep-min, GPU-keyed so cards never collide), and tears the server down.
+description: Use this skill when the user wants to populate or refresh the autotune DB's node table (the cross-hardware search-tree node store) with data measured on a SPECIFIC GPU — e.g. "collect node data for an H200", "tune the goldens on a rented <GPU> and merge the nodes back", "gather cross-hardware node-store data", "populate / update the node table from <hardware>", "run the golden node sweep on a remote <GPU>". Rents a fresh single-GPU server (via start-remote-server; --billing-exempt for CloudRift), rsyncs + sets up emmy there, runs `emmy tune --dataset golden --explore-eps 0.25` (ε-greedy so the node data covers siblings the incumbent prior would skip), then merges the remote node rows into the local `~/.cache/emmy/autotune.db` (nodes table only, keep-min, GPU-keyed so cards never collide), and tears the server down.
 version: 0.1.0
 ---
 
@@ -12,8 +12,16 @@ the prior sees. It is read by `emmy eval prior --dataset nodes` (per-card fork s
 and feeds prior diagnostics. Because your dev box (and most of the fleet) has no local CUDA GPU, the data for any given
 card must be **measured on that card** and brought back.
 
-This skill does exactly that for one GPU: rent it → set up emmy → `emmy tune --dataset golden` → merge the new
-card's node rows into the local DB → tear the server down.
+This skill does exactly that for one GPU: rent it → set up emmy → `emmy tune --dataset golden --explore-eps 0.25`
+→ merge the new card's node rows into the local DB → tear the server down.
+
+**Why the tune runs with ε-greedy exploration (`--explore-eps 0.25`).** The node store's labels are
+value-of-position minimums over the branches the search actually benched, and deterministic PUCT (eps 0) only benches
+the branches the incumbent prior already prefers — so eps-0 data just confirms the current prior (a censoring feedback
+loop) and leaves most forks with a single explored child, useless for the fork sibling-ranking dataset. ε-greedy
+collection visits the other siblings too, so a *better* prior can be trained and evaluated on them. This default lives
+in `scripts/remote_node_tune.py` (its `--explore-eps` flag overrides it); plain `emmy tune` elsewhere keeps its
+deterministic eps-0 default.
 
 **Why merging into the single local DB is safe (read this once).** The node store is keyed by GPU:
 `node_key = digest(context_key, gpu, op_sig, tunable-knobs)` and the `node` table carries a `gpu` column
@@ -69,7 +77,8 @@ Do not wrap the command in a retry loop — the orchestrator handles fallback it
 `scripts/remote_node_tune.py` does the whole core in **one process**: ensures the Python 3.12 venv/dev packages +
 `nvcc`, rsyncs your working tree (exact local code, incl. uncommitted changes) to `~/.local/share/emmy/node-tune/`
 (the repo's `REMOTE_DEPLOY_DIR` layout), runs `make setup` (output to `setup.log` in that dir — only a tail returns on
-failure), launches `emmy tune --dataset golden` detached, **polls the remote log internally** until it finishes,
+failure), launches `emmy tune --dataset golden --explore-eps 0.25` detached (off-policy collection — see the intro;
+override with the script's `--explore-eps`), **polls the remote log internally** until it finishes,
 then **fetches the node rows back and merges them** into the local
 `~/.cache/emmy/autotune.db` (keep-min, `node` table only, GPU-keyed so other cards are untouched) and prints the
 per-card receipt. The robustness traps are baked in: argv-list ssh (no zsh word-split), `[e]mmy tune` bracket-pgrep

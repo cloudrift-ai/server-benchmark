@@ -25,7 +25,16 @@ tree). `two_level.py` is the two-level tuner (outer structural MCTS, inner per-o
 `prior/`: a `Prior` ABC with the cold `AnalyticPrior` and the learned `CatBoostPrior` composed behind `FallbackPrior`
 (`load_prior`). `data/` is the harmonized read-view over the three data sources (golden configs / DB `perf` rows / prior
 reservoir) — `Sample`, `Dataset`, and `ShapeKey` (the single golden↔measured join key). `golden.py` holds
-`GoldenConfig` and its matmul / reduce / pointwise subclasses (the `AnalyticPrior`'s ground truth). `keys.py` defines
+`GoldenConfig` and its matmul / reduce / pointwise subclasses (the `AnalyticPrior`'s ground truth); every kind carries
+`shape_key()` / `snippet()` / `dtype`, so `tune --dataset golden` and the `run --bench --golden` A/B cover the reduce /
+pointwise entries too, not just matmul. The A/B itself carries two integrity gates — an arithmetic-intensity floor
+(a row whose shape-implied FLOP/s exceeds the live card's recorded `GpuSpec` peak is flagged as a wrong bench, not a
+fast kernel) and a wrong-answer check (each pinned config executes once on the greedy run's inputs and its outputs are
+compared, catching the silently-wrong `g2a` skipped-finalize class) — plus `--json PATH`, a machine-readable record of
+the whole comparison (backends / greedy kernels / pinned rows with their flags) so sweep judgments trace to flagged
+fields instead of parsed terminal text. Golden rows attach to the run's SHAPE, not a kernel node: a pinned row whose
+shape matches no greedy kernel (greedy deployed a split partial+finalize pair) still prints and lands in the record.
+`keys.py` defines
 `op_cache_key` / `dialect_of` / `source_chain`; `slice.py` isolates one finalized kernel into a standalone graph;
 `diagnostics.py` (under `prior/`) backs the `eval` reachability / calibration reports.
 

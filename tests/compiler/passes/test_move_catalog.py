@@ -27,14 +27,13 @@ from emmy.compiler.pipeline.search.space import scalar_tile_moves
 # The hand-computed legal product as explicit literals — per-cell option-0, then the (par × reg) grid
 # spelled through the codec (the default ``f1x1`` register sub-tile suppresses, so ``reg=(1,1)`` is the
 # bare ``n<par_n>x<par_m>``). Written out (not recomputed from ``_SCALAR_*``) so a change to the grid,
-# the ordering, or the legality filter is caught here explicitly.
-_EXPECTED_MOVES = [
-    "",
-    "n16x8", "n16x8/f2x2", "n16x8/f4x4", "n16x8/f2x4", "n16x8/f4x2",
-    "n16x16", "n16x16/f2x2", "n16x16/f4x4", "n16x16/f2x4", "n16x16/f4x2",
-    "n32x8", "n32x8/f2x2", "n32x8/f4x4", "n32x8/f2x4", "n32x8/f4x2",
-    "n32x16", "n32x16/f2x2", "n32x16/f4x4", "n32x16/f2x4", "n32x16/f4x2",
+# the ordering, or the legality filter is caught here explicitly. The per-par register list is the
+# square/skewed core plus the golden-informed deep-FM points (f2x6..f2x14, f4x6..f4x26).
+_REG_SUFFIXES = [
+    "", "/f2x2", "/f4x4", "/f2x4", "/f4x2",
+    "/f2x6", "/f2x8", "/f2x14", "/f4x6", "/f4x8", "/f4x10", "/f4x12", "/f4x14", "/f4x26",
 ]  # fmt: skip
+_EXPECTED_MOVES = [""] + [f"n{pn}x{pm}{reg}" for pn, pm in ((16, 8), (16, 16), (32, 8), (32, 16), (64, 16)) for reg in _REG_SUFFIXES]
 
 
 def test_scalar_tile_moves_equals_hand_product():

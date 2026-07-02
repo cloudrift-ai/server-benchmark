@@ -930,6 +930,10 @@ def transport(request, monkeypatch) -> str:
     ``d2/cp`` = cp.async, ``d2/tma`` = cp.async.bulk.tensor). The "pinned knobs" fixture."""
     monkeypatch.setenv("EMMY_TILE", _WARP_CODEC)
     monkeypatch.setenv("EMMY_STAGE", "d2/tma" if request.param == "tma" else "d2/cp")
+    # REDUCE pinned serial: without it the pick may ride a g<w>k split sibling (a partial +
+    # finalize PAIR — these tests assert on the single ``o`` kernel), depending on how the
+    # live prior ranks the split rows. The pinned path must not hang on prior rank order.
+    monkeypatch.setenv("EMMY_REDUCE", "")
     return request.param
 
 
@@ -1109,6 +1113,26 @@ def test_tma_deep_ring_matches_gmem_direct_bit_for_bit(monkeypatch, depth, M):
     np.testing.assert_array_equal(ring, gmem)  # bit-identical: the mbarrier-phased prefetch perturbs nothing
     assert f"_mbar[{depth}]" in ring_src, f"a depth-{depth} TMA ring must declare a {depth}-slot mbarrier array"
     assert ring_src.count("mbarrier_init(&_mbar[") == depth, f"each of the {depth} ring slots' mbarriers must be initialized"
+
+
+def test_tma_staged_slab_is_swizzled(monkeypatch):
+    """A TMA-staged mma kernel swizzles its operand slabs (CPU render, forced sm_120): the
+    descriptors carry a non-NONE mode picked from each slab's inner span (``_WARP_CODEC``'s
+    ``tile_n`` = 2·2·8 = 32 fp16 elems = 64 B rows → B64, same for A's 32-elem K chunk) and every
+    staged ``ldmatrix`` read XORs its address to undo the hardware chunk permutation. Swizzle
+    relocates smem bytes only — the bit-identity tests above pin the numerics; this pins the mode
+    ON (the rebuilt transport shipped NONE-swizzle slabs and the conflict-bound drain cost the
+    fp16 squares ~1.3-1.5× vs the pre-rebuild swizzled bar)."""
+    monkeypatch.setenv("EMMY_TILE", _WARP_CODEC)
+    monkeypatch.setenv("EMMY_STAGE", "d2/tma")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    lowered = Pipeline.build(CUDA_PASSES).run(_parity_mma_graph("static", M=256), ctx=Context(compute_capability=(12, 0)))
+    op = lowered.nodes["o"].op
+    modes = {d.name: d.swizzle for d in op.tma_descriptors}
+    assert modes and all(m != "NONE" for m in modes.values()), f"TMA slabs must swizzle: {modes}"
+    assert modes["_desc_b"] == "B64", f"B slab (tile_n=32 fp16 = 64 B rows) must pick B64: {modes}"
+    # Every staged ldmatrix applies the XOR (the `(e) ^ ((((e) >> 6) & mask) << 3)` form).
+    assert ") ^ ((((" in op.kernel_source, "the staged ldmatrix drain must XOR its slab address"
 
 
 @requires_sm90
@@ -1299,8 +1323,10 @@ def test_tile_block_within_limit_ok(monkeypatch) -> None:
 # off-hint / straddling sizes (1, 31, 130, 700 — NOT tile-divisor multiples), which exercise the
 # boundary-guard + clamp + zero-fill interplay the tile-divisor parity sweep cannot reach.
 _MASK_WARP = "a:mma_m16n8k16_f16/w2x2/f2x2/k2"
-_CP_KNOBS = {"TILE": _MASK_WARP, "STAGE": "d2/cp"}
-_TMA_KNOBS = {"TILE": _MASK_WARP, "STAGE": "d2/tma"}
+# REDUCE pinned serial for the same reason as the ``transport`` fixture: a g<w>k split
+# sibling deploys a partial+finalize pair, and these tests assert on the one ``o`` kernel.
+_CP_KNOBS = {"TILE": _MASK_WARP, "STAGE": "d2/cp", "REDUCE": ""}
+_TMA_KNOBS = {"TILE": _MASK_WARP, "STAGE": "d2/tma", "REDUCE": ""}
 
 
 def _symbolic_m_graph(*, K: int = 512, N: int = 1024) -> Graph:

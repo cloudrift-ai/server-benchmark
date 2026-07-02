@@ -157,9 +157,9 @@ def resolve_golden_arg(args) -> None:
     # their own fall back to the full set (the seed / transfer flow).
     matches = Dataset.from_golden(name=name, live_gpu=True).samples
     if not matches:
-        from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS, MatmulGoldenConfig
+        from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS
 
-        names = ", ".join(sorted({g.name for g in GOLDEN_CONFIGS if isinstance(g, MatmulGoldenConfig)}))
+        names = ", ".join(sorted({g.name for g in GOLDEN_CONFIGS}))
         logger.error("unknown golden config %r.\nAvailable: %s", name, names)
         sys.exit(2)
     # All configs under one name share the shape (and dynamic spec), so any

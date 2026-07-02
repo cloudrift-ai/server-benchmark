@@ -30,12 +30,11 @@ hardware on both sides, so the ratio is apples-to-apples vs cuBLAS. On sm_90+ th
 autotuner lands these on the swizzled s16816 ``mma_m16n8k16_f16`` (ldmatrix +
 mma.sync) atom — the swizzled smem slab avoids shared-load bank conflicts (a
 fragment load reading smem opaquely cannot), so mma.sync is the faster fp16
-GEMM. On sm_120 the pre-rebuild warp-tier prior + greedy landed on a square
-**64×64 output tile on a 4-warp warp-specialized CTA**, measured at / above cuBLAS
-across the squares (2048²: 106.7 µs / 1.06×; 4096²: 746 µs / 1.03×; 1024²: 0.94×) —
-the perf bar the rebuilt tiers re-tune against. Ranking lives in
-``search/prior/AnalyticPrior`` (the ``D_*`` geometry features over
-``features.knob_features``).
+GEMM. On sm_120 the pre-rebuild bar (2048²: 106.7 µs / 1.06× on a 4-warp
+warp-specialized CTA) was re-met and beaten by the rebuilt swizzled TMA tier
+(2048²: 95.9 µs / 0.99× on ``w1x4/f4x2/k2 d4/tma/ring``, the 2026-07-02 seventh
+sweep). Ranking lives in ``search/prior/AnalyticPrior`` (the ``D_*`` geometry
+features over ``features.knob_features``).
 """
 
 from __future__ import annotations
@@ -116,6 +115,11 @@ class GoldenConfig:
 
         spec = gpu.by_name(self.gpu_name)
         return spec.sm_count if spec else None
+
+    def dynamic_specs(self) -> list[str]:
+        """``--dynamic NAME@INPUT:AXIS`` spec strings for the tracer. Only a matmul
+        golden can be dynamic today; the base is always static (empty)."""
+        return []
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -211,9 +215,17 @@ class ReduceGoldenConfig(GoldenConfig):
 
     M: int
     K: int
+    dtype: str = "fp32"  # the snippet is fp32-only; recorded so Sample.from_golden is kind-agnostic
 
     def snippet(self) -> str:
         return f"torch.sum(torch.randn({self.M},{self.K}),dim=-1)"
+
+    def shape_key(self):
+        """The reduce's arithmetic join key — free dims ``(M,)``, reduce extent ``K``,
+        matching what ``992_stamp_structural_features`` stamps on the reduce kernel."""
+        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
+
+        return ShapeKey(free_prod=self.M, reduce_max=self.K, is_warp=False)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -225,9 +237,17 @@ class PointwiseGoldenConfig(GoldenConfig):
 
     M: int
     N: int
+    dtype: str = "fp32"  # the snippet is fp32-only; recorded so Sample.from_golden is kind-agnostic
 
     def snippet(self) -> str:
         return f"torch.relu(torch.randn({self.M},{self.N}))"
+
+    def shape_key(self):
+        """The pointwise map's arithmetic join key — free product ``M·N``, no reduce
+        axis (``reduce_max=0``, the ``from_s_features`` default for an unstamped extent)."""
+        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
+
+        return ShapeKey(free_prod=self.M * self.N, reduce_max=0, is_warp=False)
 
 
 _GOLDENS_DIR = Path(__file__).parent / "goldens"

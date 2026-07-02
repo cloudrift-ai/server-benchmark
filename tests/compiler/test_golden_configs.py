@@ -113,6 +113,42 @@ def test_goldens_speak_native_codecs_and_featurize():
             assert feats.get("D_threads", 0) > 0 and "D_tile_m" in feats, f"{g.name} featurized to empty tile geometry"
 
 
+def test_golden_knobs_are_members_of_the_move_catalog():
+    """Permanence: every recorded golden knob set stays REACHABLE by the search — its ``TILE``
+    codec is a member of the enumerated move grids (scalar and warp tiers alike), its ``STAGE``
+    is a resolved spelling the stage catalog offers, and its ``REDUCE`` partition is an
+    enumerated split / coop move. A future space edit can never silently orphan a golden again
+    (the sixth sweep's finding 3: the ``.s512`` goldens' ``f2x14``/``f4x8``/``f4x10``/``f4x26``
+    register tiles fell out of ``_SCALAR_REG`` and no tune patience could reach them —
+    exactly the 1.29-1.49× perf-gap shapes). Pointwise goldens are exempt (their kernel forks
+    nothing today, so there is no catalog to be a member of); a reduce golden's ``TILE`` is
+    likewise uncatalogued (the reduce fork partitions K only), so only its ``REDUCE`` is pinned."""
+    from emmy.compiler.ir.schedule import TilePlan, is_warp_codec
+    from emmy.compiler.pipeline.search.space import coop_reduce_moves, scalar_tile_moves, splitk_moves, stage_moves, warp_tile_moves
+
+    scalar_moves = set(scalar_tile_moves())
+    for g in GOLDEN_CONFIGS:
+        where = f"{g.name} ({g.gpu_name})"
+        if isinstance(g, ReduceGoldenConfig):
+            reduce_spec = g.knobs.get("REDUCE", "")
+            assert not reduce_spec or reduce_spec in coop_reduce_moves(), f"{where}: REDUCE {reduce_spec!r} not enumerable"
+            continue
+        if not isinstance(g, MatmulGoldenConfig):
+            continue
+        tile = g.knobs.get("TILE", "")
+        warp = is_warp_codec(tile)
+        if tile:
+            plan = TilePlan.parse(tile)
+            pool = set(warp_tile_moves((plan.atom.name,))) if warp else scalar_moves
+            assert plan.spell() in pool, f"{where}: TILE {tile!r} not in the enumerated {'warp' if warp else 'scalar'} grid"
+        stage = g.knobs.get("STAGE", "")
+        assert not stage or stage in stage_moves(warp=warp), f"{where}: STAGE {stage!r} not a catalog spelling"
+        reduce_spec = g.knobs.get("REDUCE", "")
+        assert not reduce_spec or reduce_spec in splitk_moves(warp=warp) + coop_reduce_moves(), (
+            f"{where}: REDUCE {reduce_spec!r} not enumerable"
+        )
+
+
 # --- dynamic (symbolic-axis) matmul goldens ----------------------------------
 
 

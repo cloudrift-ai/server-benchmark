@@ -64,9 +64,9 @@ configs:
     N: 1024
     K: 1024
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16/w1x4/f4x2/k2', WARPSPEC: true}
-    emmy_us: 18.5
-    cublas_us: 17.0
+    knobs: {TILE: 'a:mma_m16n8k16_f16/w1x4/f4x2/k2', STAGE: 'd4/tma/ring'}
+    emmy_us: 16.3
+    cublas_us: 14.4
   - kernel: matmul
     name: square.1024.fp16
     M: 1024
@@ -74,26 +74,17 @@ configs:
     K: 1024
     dtype: fp16
     knobs: {TILE: 'a:mma_m16n8k16_f16/w2x2/f2x4', STAGE: 'd4/tma/ring'}
-    emmy_us: 21.9
-    cublas_us: 17.0
+    emmy_us: 17.9
+    cublas_us: 14.4
   - kernel: matmul
     name: square.2048.fp16
     M: 2048
     N: 2048
     K: 2048
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16/w1x4/f4x2/k2', WARPSPEC: true}
-    emmy_us: 106.7
-    cublas_us: 113.0
-  - kernel: matmul
-    name: square.2048.fp16
-    M: 2048
-    N: 2048
-    K: 2048
-    dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16/w1x8/f2x2/k2', STAGE: 'd2/tma/ring', WARPSPEC: true}
-    emmy_us: 108.3
-    cublas_us: 97.2
+    knobs: {TILE: 'a:mma_m16n8k16_f16/w1x4/f4x2/k2', STAGE: 'd4/tma/ring'}
+    emmy_us: 95.9
+    cublas_us: 96.9
   - kernel: matmul
     name: square.4096.fp16
     M: 4096
@@ -101,8 +92,8 @@ configs:
     K: 4096
     dtype: fp16
     knobs: {TILE: 'a:mma_m16n8k16_f16/w2x2/f4x8', STAGE: 'd4/tma/ring'}
-    emmy_us: 744.7
-    cublas_us: 728.0
+    emmy_us: 706.3
+    cublas_us: 646.6
   - kernel: matmul
     name: qwen3_06b.q_proj.s32
     M: 32
@@ -252,9 +243,9 @@ configs:
     M: 512
     N: 1024
     K: 1024
-    knobs: {TILE: 'n16x8/f2x14', REDUCE: 'g2a', STAGE: 'd2/tma/ring'}
-    emmy_us: 24.6
-    cublas_us: 39.6
+    knobs: {TILE: 'n32x8/f2x8', STAGE: 'd4/tma/ring'}
+    emmy_us: 27.7
+    cublas_us: 33.6
   - kernel: matmul
     name: qwen3_06b.o_proj.s512
     M: 512
@@ -264,6 +255,14 @@ configs:
     emmy_us: 50.5
     cublas_us: 58.6
   - kernel: matmul
+    name: qwen3_06b.o_proj.s512
+    M: 512
+    N: 1024
+    K: 2048
+    knobs: {TILE: 'n32x8/f2x8', STAGE: 'd4/tma/ring'}
+    emmy_us: 54.3
+    cublas_us: 51.1
+  - kernel: matmul
     name: qwen3_06b.gate_up_proj.s512
     M: 512
     N: 3072
@@ -271,6 +270,14 @@ configs:
     knobs: {TILE: 'n32x8/f4x10', STAGE: 'd3/tma/ring'}
     emmy_us: 52.4
     cublas_us: 82.2
+  - kernel: matmul
+    name: qwen3_06b.gate_up_proj.s512
+    M: 512
+    N: 3072
+    K: 1024
+    knobs: {TILE: 'n32x8/f4x10', STAGE: 'd4/tma/ring'}
+    emmy_us: 55.0
+    cublas_us: 68.7
   - kernel: matmul
     name: qwen3_06b.down_proj.s512
     M: 512

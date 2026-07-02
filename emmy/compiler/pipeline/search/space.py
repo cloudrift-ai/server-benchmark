@@ -219,11 +219,18 @@ MAX_BLOCK_THREADS = 1024
 
 # The scalar register-tile candidate grid: ``(par_n, par_m)`` parallel thread-tile widths ×
 # ``(reg_n, reg_m)`` per-thread register sub-tile widths. Bounded and hand-computable — the product the
-# structural-coverage test recomputes independently. The parallel widths stay well inside the thread
-# budget (``32·16 = 512 ≤ 1024``); the register widths span the square + skewed sub-tiles the prior
-# ranks by occupancy / reuse.
-_SCALAR_PAR: tuple[tuple[int, int], ...] = ((16, 8), (16, 16), (32, 8), (32, 16))  # (par_n, par_m)
-_SCALAR_REG: tuple[tuple[int, int], ...] = ((1, 1), (2, 2), (4, 4), (2, 4), (4, 2))  # (reg_n, reg_m)
+# structural-coverage test recomputes independently. The parallel widths stay inside the thread budget
+# (``64·16 = 1024 ≤ 1024``); the register widths span the square + skewed sub-tiles the prior ranks by
+# occupancy / reuse PLUS the golden-informed deep-FM points — every ``(reg_n, reg_m)`` here is a
+# recorded golden winner on some card (the ``f2x14`` / ``f4x8`` / ``f4x10`` / ``f4x26`` family that the
+# post-rebuild grid orphaned — the sixth sweep's 1.29-1.49× reachability losses). The permanence test
+# (``tests/compiler/test_golden_configs.py``) asserts every golden TILE stays a member of this product.
+_SCALAR_PAR: tuple[tuple[int, int], ...] = ((16, 8), (16, 16), (32, 8), (32, 16), (64, 16))  # (par_n, par_m)
+_SCALAR_REG: tuple[tuple[int, int], ...] = (
+    (1, 1), (2, 2), (4, 4), (2, 4), (4, 2),  # the square / skewed core
+    (2, 6), (2, 8), (2, 14),  # golden-informed deep-FM, narrow-par rows
+    (4, 6), (4, 8), (4, 10), (4, 12), (4, 14), (4, 26),  # golden-informed deep-FM, wide rows
+)  # fmt: skip  # (reg_n, reg_m)
 
 
 def scalar_tile_moves() -> list[str]:
@@ -242,11 +249,13 @@ def scalar_tile_moves() -> list[str]:
 
 # The warp (tensor-core) tile candidate grid: ``(WM, WN)`` warp counts × ``(FM, FN)`` per-warp
 # register fragments × ``bk`` K-chunks, spelled ``a:<atom>/w..x../f..x../k..``. Bounded to shapes the
-# golden sweeps have deployed (≤ 4 warps, ``FM·FN ≤ 32`` C-fragment cells, shallow pipelined bk).
+# golden sweeps have deployed (``FM·FN ≤ 32`` C-fragment cells, shallow pipelined bk; ``(8, 2)`` and
+# ``(2, 8)`` are recorded golden winners on the RTX 4090 / PRO 6000 — the permanence test keeps them).
 # Per-node legality — the atom's operand dtype and the ``_check_warp_static_k`` K-divisibility —
 # is the scheduler's (``_schedule``), not the grid's.
-_WARP_UNITS: tuple[tuple[int, int], ...] = ((1, 1), (2, 1), (1, 2), (2, 2), (4, 1), (1, 4), (2, 4), (4, 2), (4, 4), (1, 8))  # (WM, WN)
-_WARP_REGS: tuple[tuple[int, int], ...] = ((1, 1), (2, 2), (1, 4), (4, 1), (2, 4), (4, 2), (4, 4), (4, 8))  # (FM, FN)
+# (WM, WN) / (FM, FN)
+_WARP_UNITS: tuple[tuple[int, int], ...] = ((1, 1), (2, 1), (1, 2), (2, 2), (4, 1), (1, 4), (2, 4), (4, 2), (4, 4), (1, 8), (8, 2))
+_WARP_REGS: tuple[tuple[int, int], ...] = ((1, 1), (2, 2), (1, 4), (4, 1), (2, 4), (4, 2), (4, 4), (4, 8), (2, 8))
 _WARP_BK: tuple[int, ...] = (1, 2, 4, 8)
 
 
@@ -297,5 +306,7 @@ def splitk_moves(*, warp: bool) -> list[str]:
 def coop_reduce_moves() -> list[str]:
     """The cooperative / ILP K-partition ``REDUCE`` codec candidates for a NON-output-tiled
     contraction (``_coop_reduce_spec``'s contract — the per-cell tier folds K across ``b`` coop
-    threads / ``r`` ILP register chains). These EXTEND the serial ``""`` option-0."""
-    return ["b4", "b8", "r2", "r4", "r2/b4"]
+    threads / ``r`` ILP register chains). These EXTEND the serial ``""`` option-0. ``b16`` /
+    ``b32`` are recorded reduce-golden winners (the wide-row coop folds) — kept enumerable so
+    the reduce goldens stay reachable."""
+    return ["b4", "b8", "b16", "b32", "r2", "r4", "r2/b4"]

@@ -244,7 +244,7 @@ def test_bench_golden_variants_retraces_with_dynamic_spec(monkeypatch):
     monkeypatch.setattr(tmod, "graph_from_code", fake_graph_from_code)
 
     async def fake_benchmark_async(g, *, warmup, num_iters):
-        return SimpleNamespace()
+        return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[])
 
     backend = SimpleNamespace(compile=lambda g: g, benchmark_async=fake_benchmark_async)
     dyn = SimpleNamespace(name="g.dynM", knobs={"TILE": "n16x8/f2x2"}, shape=None, dynamic=("seq_len@x0:0",))
@@ -255,6 +255,67 @@ def test_bench_golden_variants_retraces_with_dynamic_spec(monkeypatch):
     assert len(benches) == 2
     assert seen[0] is not None and 0 in seen[0]["x0"]  # {x0: {0: Dim(seq_len)}}
     assert seen[1] is None
+
+
+def test_intensity_floor_flags_impossible_row(monkeypatch):
+    """The finding-4 gate: a benched row whose shape-implied FLOP/s exceeds the device's
+    recorded peak is flagged (the sixth sweep's 8.2 µs "2 PFLOP/s" 2048³ golden row); a
+    plausible latency passes, and an unregistered device degrades to no gate."""
+    from types import SimpleNamespace
+
+    from emmy import gpu
+    from emmy.commands.run import _intensity_floor_flag
+    from emmy.compiler.pipeline.search.data.shape import ShapeKey
+
+    monkeypatch.setattr(gpu, "live_name", lambda: "NVIDIA GeForce RTX 5090")
+    s = SimpleNamespace(shape=ShapeKey.from_matmul(2048, 2048, 2048, "fp32"), dtype="fp32")
+    assert "impossible" in _intensity_floor_flag(s, 8.2)  # 2 PFLOP/s on a 104.8 TFLOP/s card
+    assert _intensity_floor_flag(s, 300.0) is None  # ~57 TFLOP/s — plausible
+    # A dynamic shape benches at the hint: FLOPs include the hint-sized M.
+    d = SimpleNamespace(shape=ShapeKey.from_matmul(512, 512, 512, "fp32", dynamic=True), dtype="fp32")
+    assert "impossible" in _intensity_floor_flag(d, 0.5)
+    assert _intensity_floor_flag(d, 9.0) is None
+    # Shapeless (--ab) rows and unknown devices are ungateable.
+    assert _intensity_floor_flag(SimpleNamespace(shape=None, dtype="fp32"), 1.0) is None
+    monkeypatch.setattr(gpu, "live_name", lambda: "Some Unknown GPU")
+    assert _intensity_floor_flag(s, 8.2) is None
+
+
+def test_wrong_answer_flag_catches_bad_pinned_output():
+    """The pinned-row output gate: identical outputs pass, reduction-reorder noise passes
+    the loose 5% tolerance, a silently-wrong kernel (the g2a skipped-finalize class) flags,
+    and a missing / mis-shaped output flags rather than crashing."""
+    import numpy as np
+
+    from emmy.commands.run import _wrong_answer_flag
+
+    ref = {"o": np.full((4, 4), 100.0)}
+    assert _wrong_answer_flag({"o": ref["o"].copy()}, ref) is None
+    assert _wrong_answer_flag({"o": ref["o"] + 1.0}, ref) is None  # 1% off — reorder noise
+    assert "wrong-answer" in _wrong_answer_flag({"o": ref["o"] * 0.5}, ref)
+    assert "missing" in _wrong_answer_flag({}, ref)
+    assert "shape" in _wrong_answer_flag({"o": np.zeros((2, 2))}, ref)
+
+
+@requires_cuda
+def test_run_golden_bench_json_record(run_cli, tmp_path):
+    """``run --bench --golden NAME --json PATH`` writes the machine-readable A/B record:
+    backends, the greedy kernel rows, and one pinned entry per recorded golden config with
+    its integrity ``flags`` field and recorded reference latencies."""
+    import json
+
+    out = tmp_path / "ab.json"
+    rc, stdout, stderr = run_cli("run", "--golden", "square.512", "--bench", "--warmup", "2", "--iters", "5", "--json", str(out))
+    assert rc == 0, f"stderr: {stderr}"
+    rec = json.loads(out.read_text())
+    assert rec["golden"] == "square.512"
+    assert rec["greedy"]["kernels"] and rec["greedy"]["total_us"] > 0
+    assert rec["pinned"] and all(p["kind"] == "golden" for p in rec["pinned"])
+    for p in rec["pinned"]:
+        assert "flags" in p and p["total_us"] > 0 and p["pinned_knobs"]
+        assert p["recorded_emmy_us"] > 0 and p["recorded_ref_us"] > 0
+    # Eager + emmy backend rows made it into the record.
+    assert any("Eager" in k for k in rec["backends"])
 
 
 _NCU_CSV = """"ID","Kernel Name","Metric Name","Metric Unit","Metric Value"

@@ -119,17 +119,21 @@ def _carrier_identities(carrier) -> dict[str, float]:
     return {s.name: s.op.identity for s in carrier.merge if isinstance(s, Accum)}
 
 
-def _mapped(op, grid, *, name: str = "", tier=None, stage=None) -> TileOp:
+def _mapped(op, grid, *, name: str = "", tier=None, stage=None, knobs: dict | None = None) -> TileOp:
     """A **mapped** ``TileOp`` wrapping ``op`` over ``grid`` (so ``_schedule`` skips it). ``tier``
     preserves a contraction's scalar output tier (:class:`TilePlan`); ``stage`` threads the
     scheduler-resolved operand :class:`Stage` onto a split partial (resolved against the sliced
     inner node by ``_splitk_option``); a residual reduce partition rides the op's
-    :class:`Reduction` **node** (:func:`nodify_reduce`), not a ``TileOp`` field."""
+    :class:`Reduction` **node** (:func:`nodify_reduce`), not a ``TileOp`` field. ``knobs`` carries
+    the split node's decided knob row (schedule codecs + stamped ``S_*``) onto the **partial** —
+    the engine merges knobs forward on 1:1 rebinds only, so without this the graph splice drops
+    them and the deployed split kernels record no schedule identity (the A/B table / ``--json``
+    then can't say what greedy deployed, and a golden's ``ShapeKey`` matches no kernel)."""
     place = Placement(free=tuple(grid), grid=tuple(grid))
     kw: dict = {}
     if axis_role(op) is AxisRole.CONTRACTION and tier is not None:
         kw["tier"] = tier
-    return TileOp(op=op, name=name, place=place, stage=stage, **kw)
+    return TileOp(op=op, name=name, place=place, stage=stage, knobs=dict(knobs or {}), **kw)
 
 
 def _split_contraction(match: Match, root: Node, tile: TileOp, contraction: Contraction, carrier, plan: ReducePlan, split: Axis):
@@ -175,7 +179,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, contraction: Cont
         else:
             atomic_epi = (Write(output=out.name, index=cell, value=acc, atomic=True),)
         part = replace(contraction, lead_axes=lead, epilogue=Body(atomic_epi))
-        return _mapped(part, (split, *grid), name=tile.name, stage=tile.stage)
+        return _mapped(part, (split, *grid), name=tile.name, stage=tile.stage, knobs=tile.knobs)
 
     # --- deferred kernel finalize: partial writes raw ``acc`` to ``ws[ksplit, *cell]`` -----------
     # The workspace shape MUST match the rank of the index the writes/loads use — ``(ksplit,
@@ -187,7 +191,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, contraction: Cont
     ws_shape = (Dim(plan.cta), *(a.extent for a in grid))
     ws_write = Write(output=ws_name, index=(Var(split.name), *cell), value=acc)
     part = replace(contraction, lead_axes=lead, epilogue=Body((ws_write,)))
-    partial_tile = _mapped(part, (split, *grid), name=f"{tile.name}__partial", stage=tile.stage)
+    partial_tile = _mapped(part, (split, *grid), name=f"{tile.name}__partial", stage=tile.stage, knobs=tile.knobs)
 
     # --- finalize kernel: seed ``acc``, fold ``ws`` over ``ksplit`` (``as_state_merge``), then the
     # original projection epilogue (or a bare store) — the same additive finalize the residual path uses.
@@ -288,7 +292,7 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
             # the atomic ``Write`` of the carrier state directly.
             atomic_proj = (Write(output=out.name, index=cell, values=states, atomic=True),)
         atomic_op = Map(body=Body((*before, sliced_loop, *atomic_proj)))
-        return _mapped(_residual(atomic_op, plan), (split, *grid), name=tile.name, tier=tile_plan)
+        return _mapped(_residual(atomic_op, plan), (split, *grid), name=tile.name, tier=tile_plan, knobs=tile.knobs)
 
     # The ``__partial`` workspace packs every carrier-state component: ``ws[comp, cta, *free]``
     # (the ``comp`` leading axis dropped for a single-component additive carrier, so the
@@ -304,7 +308,7 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     # --- partial kernel: reduce a CTA's slice, write its carrier state to the workspace -----
     ws_writes = tuple(Write(output=ws_name, index=ws_index(i), value=states[i]) for i in range(n_comp))
     partial_op = Map(body=Body((*before, sliced_loop, *ws_writes)))
-    partial_tile = _mapped(_residual(partial_op, plan), (split, *grid), name=f"{tile.name}__partial", tier=tile_plan)
+    partial_tile = _mapped(_residual(partial_op, plan), (split, *grid), name=f"{tile.name}__partial", tier=tile_plan, knobs=tile.knobs)
 
     # --- finalize kernel: seed the carrier state, then fold each partition's state from the
     # workspace over the split axis via the carrier's ``as_state_merge`` (a renderable

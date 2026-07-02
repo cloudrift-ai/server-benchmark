@@ -85,6 +85,13 @@ class GpuSpec:
     regs_per_block: int = _REGS_PER_BLOCK
     warp_size: int = 32
     vram_mib: int | None = None
+    # Peak dense throughput ceilings (nominal boost-clock spec, no sparsity) — used as a
+    # physical-impossibility gate on benchmark rows (a measured latency implying more FLOP/s
+    # than the silicon has is a wrong bench, not a fast kernel). ``fp32`` is the CUDA-core FMA
+    # peak; ``fp16`` the tensor-core dense peak at fp16 accumulate (the HGEMM ceiling).
+    # ``None`` = unknown (the gate degrades to off).
+    peak_fp32_tflops: float | None = None
+    peak_fp16_tflops: float | None = None
     aliases: tuple[str, ...] = field(default=())  # alternate reported names
 
     @property
@@ -95,6 +102,11 @@ class GpuSpec:
     def smem_optin(self) -> int:
         """Per-block dynamic-smem opt-in cap (cc-derived; static cap if unknown)."""
         return MAX_DYNAMIC_SMEM_BY_CC.get(self.compute_capability, STATIC_SMEM_CAP)
+
+    def peak_tflops(self, dtype: str) -> float | None:
+        """The dense-throughput ceiling for a matmul of ``dtype`` (``"fp32"`` → CUDA-core FMA
+        peak, ``"fp16"``/``"bf16"`` → tensor-core dense peak), or ``None`` when unrecorded."""
+        return self.peak_fp32_tflops if dtype == "fp32" else self.peak_fp16_tflops
 
     @property
     def tensor_core_gen(self) -> int | None:
@@ -137,6 +149,8 @@ KNOWN_GPUS: tuple[GpuSpec, ...] = (
         sm_count=128,
         smem_per_sm=102400,
         vram_mib=24564,
+        peak_fp32_tflops=82.6,
+        peak_fp16_tflops=330.3,
     ),  # measured
     GpuSpec(
         name="NVIDIA GeForce RTX 5090",
@@ -146,6 +160,8 @@ KNOWN_GPUS: tuple[GpuSpec, ...] = (
         sm_count=170,
         smem_per_sm=102400,
         vram_mib=32607,
+        peak_fp32_tflops=104.8,
+        peak_fp16_tflops=419.0,
     ),  # measured
     GpuSpec(
         name="NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
@@ -155,6 +171,8 @@ KNOWN_GPUS: tuple[GpuSpec, ...] = (
         sm_count=188,
         smem_per_sm=102400,
         vram_mib=97887,
+        peak_fp32_tflops=126.0,
+        peak_fp16_tflops=504.0,
     ),  # measured
     # --- other PRO 6000 Blackwell variants (same GB202 die, cc 12.0) ------
     GpuSpec(

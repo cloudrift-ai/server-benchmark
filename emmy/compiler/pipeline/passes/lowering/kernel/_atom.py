@@ -46,6 +46,7 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     SyncOperand,
     SyncTransport,
     TmaTransport,
+    pick_swizzle_atom,
     staged_kloop,
     sync_stat_fill,
 )
@@ -150,8 +151,9 @@ def _warp_epilogue(
 
 # ---- operand staging (smem slab + ldmatrix drain) ---------------------------------------------- #
 # The warp tier's smem operand pipeline, driven off the node's :class:`Stage`. cp.async and TMA
-# share the (plain row-major, NONE-swizzle) slab + the staged-``LdmatrixLoad`` drain
-# (:func:`_staged_inner_atom_loop`); only the producer differs. Staging is a **pure perf
+# share the slab + the staged-``LdmatrixLoad`` drain (:func:`_staged_inner_atom_loop`); only the
+# producer differs — a cp.async slab is plain row-major (NONE-swizzle), a TMA slab is
+# hardware-swizzled in-copy with the drain XOR undoing it (:meth:`_MmaOps.slab_swizzles`). Staging is a **pure perf
 # transform**: an ineligible kernel silently falls back to gmem-direct, and a staged kernel is
 # bit-identical to its gmem-direct baseline. The transport primitives (the fill loops + the
 # commit/wait / mbarrier handshakes) live in ``_stage.py``; these functions schedule them onto the
@@ -163,7 +165,7 @@ def _fold_frag(base: str, fold: int) -> str:
 
 
 def _staged_inner_atom_loop(
-    *, slabs: tuple[str, ...], mn: tuple[Side, Side], atom, bk_elems, ki, reg_depth: int = 1, offs=None
+    *, slabs: tuple[str, ...], mn: tuple[Side, Side], atom, bk_elems, ki, reg_depth: int = 1, offs=None, swizzles=None
 ) -> list[Stmt]:
     """The inner atom-K drain shared by the cp.async and TMA staged paths: read the A/B ``slabs`` via
     ``LdmatrixLoad(staged=True)`` + ``MmaSyncPtx``. ``slabs`` is ``(A, B…)`` — one B slab per fold
@@ -182,28 +184,34 @@ def _staged_inner_atom_loop(
 
     ``offs`` (the gmem→smem ring, ``STAGE`` depth>1): the per-slab read SLOT row offsets — added to
     each slab's ROW (A's tile row / B's K row) so the drain reads the ring slot the producer already
-    filled, while a later chunk prefetches into another slot."""
+    filled, while a later chunk prefetches into another slot.
+
+    ``swizzles`` (per-slab, aligned with ``slabs``): the TMA smem swizzle mode each slab was written
+    with — threaded onto each ``LdmatrixLoad`` so its address XOR undoes the hardware chunk
+    permutation (``"NONE"`` reads the plain row-major slab)."""
     (a_slab, *b_slabs), (m, n) = slabs, mn
     offs = offs if offs is not None else (None,) * len(slabs)
+    swizzles = swizzles if swizzles is not None else ("NONE",) * len(slabs)
     atom_m, atom_n, atom_k = atom.shape
     n_steps = bk_elems // atom_k
     # Per-operand drain spec: (frag base fn, slab, ldm, tile-is-slab-row, reg count, warp-unit var,
-    # atom dim, slot row off). A stacks the tile axis on the slab row (K the col); B swaps (K the
-    # row, tile the col); the slot offset always lands on the ROW. All share ONE emission loop.
-    specs = [(lambda x: f"_a{x}", "a", a_slab, bk_elems, True, m.reg, m.unit, atom_m, offs[0])]
+    # atom dim, slot row off, swizzle). A stacks the tile axis on the slab row (K the col); B swaps
+    # (K the row, tile the col); the slot offset always lands on the ROW. All share ONE emission loop.
+    specs = [(lambda x: f"_a{x}", "a", a_slab, bk_elems, True, m.reg, m.unit, atom_m, offs[0], swizzles[0])]
     for f, bs in enumerate(b_slabs):
-        specs.append(((lambda ff: lambda x: _fold_frag(f"_b{x}", ff))(f), "b", bs, n.tile, False, n.reg, n.unit, atom_n, offs[1 + f]))
+        frag_of = (lambda ff: lambda x: _fold_frag(f"_b{x}", ff))(f)
+        specs.append((frag_of, "b", bs, n.tile, False, n.reg, n.unit, atom_n, offs[1 + f], swizzles[1 + f]))
 
     def ldms(kexpr, suffix):  # every operand's ldmatrix reads at K position `kexpr`, into fragment slot `suffix`
         reads: list[Stmt] = []
-        for frag_of, role, slab, ldm, is_row, reg, unit, adim, off in specs:
+        for frag_of, role, slab, ldm, is_row, reg, unit, adim, off, swz in specs:
             for x in range(reg):  # within-tile coord for register cell x: warp·(reg·adim) + x·adim
                 prim = BinaryExpr("+", BinaryExpr("*", Var(unit), Literal(reg * adim, "int")), Literal(x * adim, "int"))
                 row, col = (prim, kexpr) if is_row else (kexpr, prim)
                 if off is not None:
                     row = BinaryExpr("+", off, row)
                 frag = f"{frag_of(x)}{suffix}"
-                reads.append(LdmatrixLoad(frag=frag, src_buffer=slab, src_index=(row, col), role=role, staged=True, ldm=ldm))
+                reads.append(LdmatrixLoad(frag=frag, src_buffer=slab, src_index=(row, col), role=role, staged=True, ldm=ldm, swizzle=swz))
         return reads
 
     def mmas(suffix):  # every fold channel × (i, j) cell's mma.sync over the `suffix`-slotted operand fragments
@@ -293,12 +301,22 @@ def _box_origin(operand_index, *, tile: Side, tile_base: Expr, k_axis):
     return at
 
 
-def _slab_operands(*, index_srcs: tuple, bufs: tuple[str, str], mn: tuple[Side, Side], k_axis, bk_elems: int, base: tuple[Expr, Expr]):
+def _slab_operands(
+    *,
+    index_srcs: tuple,
+    bufs: tuple[str, str],
+    mn: tuple[Side, Side],
+    k_axis,
+    bk_elems: int,
+    base: tuple[Expr, Expr],
+    swizzles: tuple[str, str] = ("NONE", "NONE"),
+):
     """The staged ``(A, B)`` :class:`Operand` pair — the one operand-geometry factory both tiers build,
     looped over the two operands. A is ``(tile_m × bk)`` indexed by the M tile axis (the slab ROW); B is
     ``(bk × tile_n)`` by the N tile axis (the slab COL) — ``is_row`` flips the slot shape + the TMA box
     origin. ``base`` is the ``(row_base, col_base)`` CTA tile origin; ``index_srcs`` are the operands'
-    gmem index expressions (``load.index``)."""
+    gmem index expressions (``load.index``); ``swizzles`` the per-operand TMA smem swizzle modes (the
+    mma tier's :meth:`_MmaOps.slab_swizzles` — ``("NONE", "NONE")`` everywhere else)."""
     ops: list[Operand] = []
     for i, (tag, is_row) in enumerate((("a", True), ("b", False))):
         tile, tile_base = mn[i], base[i]
@@ -310,6 +328,7 @@ def _slab_operands(*, index_srcs: tuple, bufs: tuple[str, str], mn: tuple[Side, 
                 shape=shape,
                 coords=_box_origin(index_srcs[i], tile=tile, tile_base=tile_base, k_axis=k_axis),
                 index=_slab_index(index_srcs[i], tile=tile, tile_base=tile_base, k_axis=k_axis, tile_is_row=is_row),
+                swizzle=swizzles[i],
             )
         )
     return tuple(ops)
@@ -442,6 +461,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             k_axis=k_axis,
             bk_elems=stage.bk_elems,
             base=_tile_base(mn),
+            swizzles=ops.slab_swizzles(mn, elem.nbytes) if stage.transport == "tma" else ("NONE", "NONE"),
         )
         common = dict(
             operands=operands,
@@ -618,6 +638,12 @@ class _AtomOps:
             return _staged(self, cells, offset, mn)
         return _contract_kloop(self.c, cells, **self.gmem_leaves(offset, mn))
 
+    def slab_swizzles(self, mn, elem_bytes: int) -> tuple[str, str]:  # noqa: ARG002
+        """The per-operand TMA smem swizzle modes for the ``(A, B)`` slabs — ``NONE`` on this
+        base: only a drain that applies the matching address XOR may read a swizzled slab, and
+        the scalar tier's plain-``Load`` drain doesn't (:class:`_MmaOps` overrides)."""
+        return ("NONE", "NONE")
+
 
 class _MmaOps(_AtomOps):
     """Tensor-core atom — ``ldmatrix`` fragment reads + ``mma.sync``, a ``RegStore`` sink."""
@@ -629,7 +655,8 @@ class _MmaOps(_AtomOps):
     def staged_drain(self, operands, slot, cells, offset, mn):
         """The mma slab drain — the ``ldmatrix`` + ``mma.sync`` leaf reading ring ``slot``
         (:func:`_staged_inner_atom_loop`; the cells ride ``mn``'s reg counts, so ``cells`` /
-        ``offset`` are unused here)."""
+        ``offset`` are unused here). Each slab's swizzle mode rides its operand (``NONE`` on the
+        sync transport's :class:`SyncOperand`, which has no swizzle field)."""
         return _staged_inner_atom_loop(
             slabs=tuple(op.slab for op in operands),
             offs=tuple(op.slot_row(slot) for op in operands),
@@ -638,6 +665,19 @@ class _MmaOps(_AtomOps):
             bk_elems=self.stage.bk_elems,
             ki="_ki",
             reg_depth=self.stage.reg_depth,
+            swizzles=tuple(getattr(op, "swizzle", "NONE") for op in operands),
+        )
+
+    def slab_swizzles(self, mn, elem_bytes: int) -> tuple[str, str]:
+        """The TMA smem swizzle mode per operand slab, from each slab's inner (contiguous) row
+        span — A's is ``bk_elems`` (the K chunk), B's ``tile_n``. The pre-rebuild bar for the fp16
+        squares (``square.2048.fp16`` at 106.7 µs / 1.06× cuBLAS) was set by swizzled slabs; the
+        rebuilt NONE-swizzle transport left the ``ldmatrix`` drain bank-conflict-bound. Modes are
+        DERIVED, not tuned — the widest atom that divides the span (matching the pre-rebuild
+        behavior: A → B64 on a 32-elem fp16 chunk, B → B128 on a 64-elem row)."""
+        return (
+            pick_swizzle_atom(self.stage.bk_elems, elem_bytes)[1],
+            pick_swizzle_atom(mn[1].tile, elem_bytes)[1],
         )
 
     def state(self, cells):

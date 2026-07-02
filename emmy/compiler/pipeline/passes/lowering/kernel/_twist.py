@@ -78,6 +78,13 @@ _COMPS = ("0", "1")
 #: the expect contraction's A operand (pinned by the e2e recovery contract).
 _PV_SMEM = "flash_pv_smem"
 
+#: Slab row padding, in halves (16 B — one ldmatrix row, so alignment holds). A power-of-two row
+#: span (the 128 B head_dim/d_v/bn rows) lands every ldmatrix row read on one bank group (8-way
+#: replays, the measured 132 M-conflict profile); +16 B shifts consecutive rows across groups.
+#: Applied to the cp.async K/V slabs and the C→A handoff — the cp.async-path counterpart of the
+#: TMA slab's hardware swizzle.
+_PAD = 8
+
 #: The per-CTA warp index axis (bound by the ``Tile`` decode when the schedule maps more than one
 #: warp per CTA — ``qk.tile.units[0] > 1``); each warp owns its own ``atom_m`` query-row block.
 FLASH_WARP_AXIS = "_wq"
@@ -318,7 +325,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # ---- state: the C→A slab + running stats + output accumulators ---------------------------- #
     # The handoff slab gains a leading per-warp dim when the CTA runs several warps (each warp's
     # P block is private — the ldmatrix reads its own warp's rows).
-    slab_extents = (um, shape[0], bn) if um > 1 else (shape[0], bn)
+    slab_extents = (um, shape[0], bn + _PAD) if um > 1 else (shape[0], bn + _PAD)
     wq_idx: tuple[Expr, ...] = (Var(FLASH_WARP_AXIS),) if um > 1 else ()
     state: list[Stmt] = [Smem(name=_PV_SMEM, extents=slab_extents, dtype=_cuda(atom.operand_dtype("a")))]
     for c in _COMPS:
@@ -353,7 +360,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             mask=qk_mask,
             b_slab="_k_smem" if staged else None,
             b_slot=k_slot,
-            b_ldm=qk.k_axis.extent.as_static() if staged else 0,
+            b_ldm=qk.k_axis.extent.as_static() + _PAD if staged else 0,
         )
 
         hoisted, pro = _realize_prologue(partial[1:], qk, sfrags, col_bases, row_base, set(names))
@@ -393,7 +400,11 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         for t, pf in enumerate(pfrags):
             stream.append(
                 RegStore(
-                    dst_buffer=_PV_SMEM, dst_index=(*wq_idx, Literal(0, "int"), Literal(t * atom_n, "int")), frag=pf, shape=shape, ldm=bn
+                    dst_buffer=_PV_SMEM,
+                    dst_index=(*wq_idx, Literal(0, "int"), Literal(t * atom_n, "int")),
+                    frag=pf,
+                    shape=shape,
+                    ldm=bn + _PAD,
                 )
             )
         stream.append(Sync())
@@ -407,7 +418,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
                 src: tuple[Expr, ...] = (*wq_idx, Literal(0, "int"), Literal(s * shape[2], "int"))
             else:
                 src = (Literal(0, "int"),)
-            stream.append(LdmatrixLoad(frag=paf, src_buffer=_PV_SMEM, src_index=src, role="a", ldm=bn, staged=True))
+            stream.append(LdmatrixLoad(frag=paf, src_buffer=_PV_SMEM, src_index=src, role="a", ldm=bn + _PAD, staged=True))
         pv_mask = {kv_axis.name: (kv0_var, seq)} if symbolic_k else {}
         stream += _frag_contraction(
             _pv_streamed(pv, kv_axis),
@@ -421,7 +432,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             a_frags=pa_frags if pv_bk > 1 else (),
             b_slab="_v_smem" if staged else None,
             b_slot=v_slot,
-            b_ldm=d_v if staged else 0,
+            b_ldm=d_v + _PAD if staged else 0,
         )
         stream += _rebind(pivot_name, "_mn")  # advance the running pivot: m = mn
         return stream
@@ -446,8 +457,8 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         def _v_index(k0: Expr):
             return lambda row, col: _idx(v_load, {kv_axis.name: BinaryExpr("+", k0, row), vn: col})
 
-        k_op = Operand(tag="k", buf=k_load.input, shape=(bn, head_dim), index=_k_index, coords=lambda k0: ())
-        v_op = Operand(tag="v", buf=v_load.input, shape=(bn, d_v), index=_v_index, coords=lambda k0: ())
+        k_op = Operand(tag="k", buf=k_load.input, shape=(bn, head_dim), index=_k_index, coords=lambda k0: (), pad_cols=_PAD)
+        v_op = Operand(tag="v", buf=v_load.input, shape=(bn, d_v), index=_v_index, coords=lambda k0: (), pad_cols=_PAD)
         transport = CpAsyncTransport(
             operands=(k_op, v_op),
             slab_dtype=_cuda(atom.operand_dtype("b")),

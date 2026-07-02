@@ -285,6 +285,12 @@ class Operand:
     # in-copy and the ldmatrix drain applies the matching XOR; a scalar plain-`Load` drain and the
     # cp.async/sync write paths stay NONE).
     swizzle: str = "NONE"
+    # Extra smem columns padding each slab row (cp.async transport only — a TMA box deposit is
+    # dense). The pad breaks the same-bank stride of a power-of-two row (the bank-conflict fix the
+    # cp.async path has in place of TMA's hardware swizzle); the fill's logical (row, col) writes
+    # stride the padded decl automatically (``render_index`` flattens against it), and the drain's
+    # ``ldm`` carries the padded stride. Data cells only — a chunk never straddles the pad.
+    pad_cols: int = 0
 
     @property
     def slab(self) -> str:
@@ -410,7 +416,7 @@ class CpAsyncTransport:
     cta: CtaTile
 
     def slab_decls(self, ring: int) -> list[Stmt]:
-        return [slab_smem(op.slab, ring * op.shape[0], op.shape[1], self.slab_dtype) for op in self.operands]
+        return [slab_smem(op.slab, ring * op.shape[0], op.shape[1] + op.pad_cols, self.slab_dtype) for op in self.operands]
 
     def prologue(self, ring: int) -> list[Stmt]:
         return []

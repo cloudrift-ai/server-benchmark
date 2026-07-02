@@ -140,7 +140,11 @@ streaming step (both mmas + the fragment softmax merge) riding `staged_kloop` as
 fill, `d2+/ring` the prefetch ring overlapping the next KV block's copies with this block's mma work. Each slab keeps
 its operand's own layout (K stays N-major, V K-major; verbatim row copies), so the transposed-B K slab drains via the
 **plain `x2` (no `.trans`) staged ldmatrix** — its 8×8 rows ARE the mma's col-major B columns (the `LdmatrixLoad`
-render's third variant) — and the V slab via the canonical `x2.trans`. cp.async only (TMA's 2-D box cannot encode the
+render's third variant) — and the V slab via the canonical `x2.trans`. The K/V slab rows and the `flash_pv_smem`
+handoff rows are **padded +16 B** (`Operand.pad_cols` / `_twist._PAD`) — the cp.async-path counterpart of the TMA
+slab swizzle: a power-of-two row span lands every ldmatrix row read on one bank group (a measured ~8-way replay
+profile), and the pad shifts consecutive rows across groups. Intrinsic, not a fork (a near-strict win, like the
+masked-K alignment pad); padding relocates smem bytes only. cp.async only (TMA's 2-D box cannot encode the
 batched K/V operands), static block-divisible kv only (the symbolic stream keeps its masked gmem-direct loads), and
 bit-identity to the gmem-direct sibling holds — same values, same mma order.
 

@@ -1234,34 +1234,29 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     return TileOp(op=node, name=name, place=place, tier=wt, stage=stage, knobs=stamped)
 
 
-def _resolve_twisted_stage(
-    stage: Stage, kv_extent, bn: int, head_dim: int, d_v: int, elem_bytes: int, budget: int, handoff_bytes: int = 0
-) -> Stage | None:
+def _resolve_twisted_stage(stage: Stage, kv_extent, bn: int, head_dim: int, d_v: int, elem_bytes: int, budget: int) -> Stage | None:
     """Resolve an operand ``Stage`` against a warp-flash streaming pair — the K/V slabs of one
     ``bn``-key streaming step (K ``bn × head_dim`` in its native N-major layout, V ``bn × d_v``
     K-major; both verbatim row copies, so staging stays bit-identical to gmem-direct). cp.async
     only: TMA's 2-D descriptor cannot encode the batched K/V operands, and ``sync`` has nothing to
     overlap. A symbolic or non-block-divisible kv stays gmem-direct (its masked fragment loads
     already clamp; slab zero-fill is a follow-up). ``depth`` clamps so the ring's K+V slot pairs
-    fit the smem ``budget`` NET of the kernel's resident ``flash_pv_smem`` C→A handoff slab
-    (``handoff_bytes`` — same pool, so an unclamped ring materialize-fails past the device cap);
-    ``reg_depth`` clamps to 1 (no ldmatrix ping-pong on the streaming drain yet); ``bk_elems``
-    records the streamed keys per step."""
+    fit the smem ``budget`` (the padded rows add ``_twist._PAD`` cols per slot — negligible, and
+    the clamp errs safe via the materializer's validate backstop); ``reg_depth`` clamps to 1 (no
+    ldmatrix ping-pong on the streaming drain yet); ``bk_elems`` records the streamed keys per
+    step."""
     if stage.transport != "cp.async":
         return None
     if not kv_extent.is_static or kv_extent.as_static() % bn != 0:
         return None
-    slot_bytes = bn * (head_dim + d_v) * elem_bytes
-    avail = budget - handoff_bytes
-    if slot_bytes > avail:
+    slot_bytes = bn * (head_dim + d_v + 16) * elem_bytes  # +16: the two slabs' padded rows (2 × _PAD)
+    if slot_bytes > budget:
         return None
-    depth = min(stage.depth, avail // slot_bytes)
+    depth = min(stage.depth, budget // slot_bytes)
     return replace(stage, depth=depth, ring=stage.ring and depth >= 2, reg_depth=1, bk_elems=bn)
 
 
-def _twisted_stage_candidates(
-    kv_extent, bn: int, head_dim: int, d_v: int, elem_bytes: int, budget: int, handoff_bytes: int = 0
-) -> list[Stage | None]:
+def _twisted_stage_candidates(kv_extent, bn: int, head_dim: int, d_v: int, elem_bytes: int, budget: int) -> list[Stage | None]:
     """The K/V operand-stage candidates for one warp-flash geometry row — gmem-direct ``None``
     first (the conservative option-0), then every ``stage_moves`` entry that RESOLVES against the
     stream (:func:`_resolve_twisted_stage`), deduped on the resolved spelling (a ``p2`` move clamps
@@ -1270,7 +1265,7 @@ def _twisted_stage_candidates(
     line when it declines — the same pin-validity degrade as the warp ``TILE`` pin."""
 
     def resolve(spec: str) -> Stage | None:
-        return _resolve_twisted_stage(Stage.parse(spec), kv_extent, bn, head_dim, d_v, elem_bytes, budget, handoff_bytes)
+        return _resolve_twisted_stage(Stage.parse(spec), kv_extent, bn, head_dim, d_v, elem_bytes, budget)
 
     if STAGE.raw() is not None:
         pinned = STAGE.narrow([""])[0]
@@ -1335,6 +1330,8 @@ def _twisted_warp_options(tile: TileOp, name: str, knobs: dict, budget: int = ST
     if atom_name is None:
         return []
     atom = ATOM_REGISTRY[atom_name]
+    if not atom.c_to_a_repack:
+        return []  # the fragment realizer feeds P@V via the C→A register repack — an atom without it has no tier
     atom_m, atom_n, atom_k = atom.shape
     head_dim, d_v = head.k_axis.extent, pv.n_axis.extent
     if not (head_dim.is_static and head_dim.as_static() % atom_k == 0 and d_v.is_static and d_v.as_static() % atom_n == 0):
@@ -1359,6 +1356,11 @@ def _twisted_warp_options(tile: TileOp, name: str, knobs: dict, budget: int = ST
                 bk,
             )
             return []
+        if (want.regs[1] * atom_n) % atom_k:
+            # The streamed key block must be a multiple of the P@V atom-K step — an odd nt leaves a
+            # partial expect fold (the C→A repack pairs k-adjacent score fragments). Loud, per the
+            # pin contract (divisibility violation).
+            raise ValueError(f"warp TILE pin: key block {want.regs[1] * atom_n} is not a multiple of the P@V atom K-step {atom_k}")
         pairs = [(want.units[0], want.regs[1])]
     else:
         pairs = twisted_warp_moves()
@@ -1392,10 +1394,7 @@ def _twisted_warp_options(tile: TileOp, name: str, knobs: dict, budget: int = ST
         # partition decided-empty, and the K/V operand stage on the STREAM axis (the resolved
         # spelling, or the explicit OFF ``""`` — the honest-stamping rule), so every flash leaf
         # row spells the same key set.
-        # The resident C→A handoff slab (``flash_pv_smem``: um × atom_m × bn halves) shares the
-        # smem pool with the K/V ring — the resolver budgets net of it.
-        handoff_bytes = um * atom_m * bn * elem_bytes
-        for stage in _twisted_stage_candidates(kv_ext, bn, head_dim.as_static(), d_v.as_static(), elem_bytes, budget, handoff_bytes):
+        for stage in _twisted_stage_candidates(kv_ext, bn, head_dim.as_static(), d_v.as_static(), elem_bytes, budget):
             stamped = {
                 **knobs,
                 _at(TILE, head.k_axis.name): qk_plan.spell(),

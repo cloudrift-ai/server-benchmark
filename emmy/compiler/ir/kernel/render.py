@@ -152,6 +152,25 @@ static __device__ __forceinline__ void dpl_ldmatrix_x2(unsigned* r, const void* 
                  : "=r"(r[0]), "=r"(r[1]) : "r"(addr));
 }
 
+// C->A register repack: the m16n8k16 f32 C fragment is lane-map ALIGNED with the
+// 16-bit A fragment's k-halves, so two k-adjacent C fragments (c0 low, c1 high)
+// convert into one A operand fragment per lane — no shuffle, no smem round-trip.
+// cvt.rn packs (hi, lo) with round-to-nearest-even — the same rounding the
+// retired smem handoff's RegStore vec2 pack applied, so the repack is bit-identical.
+static __device__ __forceinline__ void dpl_c_to_a_f16(unsigned* a, const float* c0, const float* c1) {
+    asm("cvt.rn.f16x2.f32 %0, %1, %2;\\n" : "=r"(a[0]) : "f"(c0[1]), "f"(c0[0]));
+    asm("cvt.rn.f16x2.f32 %0, %1, %2;\\n" : "=r"(a[1]) : "f"(c0[3]), "f"(c0[2]));
+    asm("cvt.rn.f16x2.f32 %0, %1, %2;\\n" : "=r"(a[2]) : "f"(c1[1]), "f"(c1[0]));
+    asm("cvt.rn.f16x2.f32 %0, %1, %2;\\n" : "=r"(a[3]) : "f"(c1[3]), "f"(c1[2]));
+}
+
+static __device__ __forceinline__ void dpl_c_to_a_bf16(unsigned* a, const float* c0, const float* c1) {
+    asm("cvt.rn.bf16x2.f32 %0, %1, %2;\\n" : "=r"(a[0]) : "f"(c0[1]), "f"(c0[0]));
+    asm("cvt.rn.bf16x2.f32 %0, %1, %2;\\n" : "=r"(a[1]) : "f"(c0[3]), "f"(c0[2]));
+    asm("cvt.rn.bf16x2.f32 %0, %1, %2;\\n" : "=r"(a[2]) : "f"(c1[1]), "f"(c1[0]));
+    asm("cvt.rn.bf16x2.f32 %0, %1, %2;\\n" : "=r"(a[3]) : "f"(c1[3]), "f"(c1[2]));
+}
+
 // gmem-direct fragment loads — the fallback when an mma.sync operand was NOT
 // staged into shared memory (ldmatrix is smem-only, so we read the fragment
 // straight from gmem instead, replicating the PTX m16n8k16 lane→element map).

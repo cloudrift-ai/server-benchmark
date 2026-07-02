@@ -266,7 +266,7 @@ def test_flash_chain_matches_torch(monkeypatch, B, H, S, D):
 # Tensor-core flash — the fragment-resident warp tier.
 # =========================================================================== #
 # These cases expect a fp16/bf16 SDPA to lower to a single ``mma.sync`` kernel (the warp chain:
-# tiled + atomized contractions, fragment online-softmax, C->A smem handoff) — realized through the
+# tiled + atomized contractions, fragment online-softmax, C->A register repack) — realized through the
 # ONE pipeline: ``_schedule._twisted_warp_options`` stamps the mma ``TilePlan``\ s on the Q@K / P@V
 # ``Contraction``\ s and ``_bind``'s reduce arm realizes the TWISTED carrier at fragment residence
 # (``_twist``). No private emitter exists; a bespoke path would be the mandate violation the
@@ -288,7 +288,7 @@ def test_generated_tensorcore_flash_matches_torch(monkeypatch, B, H, S, D):
     assert len(kernels) == 1, f"fused TC flash should be one kernel, got {len(kernels)}"
     src = compiled.nodes[kernels[0]].op.kernel_source
     assert "dpl_mma_m16n8k16_f16" in src and "dpl_ldmatrix_x4" in src, "the generated kernel must use the shared tensor-core ops"
-    assert "flash_pv_smem" in src, "the generated kernel must be the fused warp-chain (C->A smem handoff)"
+    assert "dpl_c_to_a" in src, "the generated kernel must be the fused warp-chain (C->A register repack)"
 
     def ref():
         with torch.no_grad():
@@ -349,7 +349,7 @@ def test_warp_flash_geometry_pin_matches_torch(monkeypatch, um, nt):
     backend, compiled, graph, kernels = _compile_tc(q, k, v)
     assert len(kernels) == 1, f"pinned warp flash should be one kernel, got {len(kernels)}"
     src = compiled.nodes[kernels[0]].op.kernel_source
-    assert "flash_pv_smem" in src, "must be the fused warp form (C->A smem handoff)"
+    assert "dpl_c_to_a" in src, "must be the fused warp form (C->A register repack)"
 
     def ref():
         with torch.no_grad():
@@ -476,7 +476,7 @@ def test_staged_flash_symbolic_declines_to_gmem_direct(monkeypatch):
     seed = tuple(torch.randn(B, H, 16, D, dtype=torch.float16) for _ in range(3))
     backend, compiled, graph, kernels = _trace(_Sdpa(), seed, dynamic_shapes={"q": {2: sd}, "k": {2: sd}, "v": {2: sd}})
     src = compiled.nodes[kernels[0]].op.kernel_source
-    assert "flash_pv_smem" in src, "must still be the fused warp form"
+    assert "dpl_c_to_a" in src, "must still be the fused warp form"
     assert "_k_smem" not in src and "_v_smem" not in src, "a symbolic stream must decline the K/V stage"
 
     torch.manual_seed(37)
@@ -503,7 +503,7 @@ def test_generated_tensorcore_flash_bf16_matches_torch(monkeypatch, B, H, S, D):
     assert len(kernels) == 1, f"fused TC flash should be one kernel, got {len(kernels)}"
     src = compiled.nodes[kernels[0]].op.kernel_source
     assert "dpl_mma_m16n8k16_bf16" in src, "the bf16 flash must use the bf16 mma atom"
-    assert "flash_pv_smem" in src, "the generated kernel must be the fused warp-chain (C->A smem handoff)"
+    assert "dpl_c_to_a" in src, "the generated kernel must be the fused warp-chain (C->A register repack)"
 
     def ref():
         with torch.no_grad():
@@ -528,7 +528,7 @@ def test_generated_tensorcore_flash_causal_bf16_matches_torch(monkeypatch, B, H,
     backend, compiled, graph, kernels = _compile_tc(q, k, v, module=_Causal())
     assert len(kernels) == 1, f"fused causal bf16 TC flash should be one kernel, got {len(kernels)}"
     src = compiled.nodes[kernels[0]].op.kernel_source
-    assert "dpl_mma_m16n8k16_bf16" in src and "flash_pv_smem" in src
+    assert "dpl_mma_m16n8k16_bf16" in src and "dpl_c_to_a" in src
 
     def ref():
         with torch.no_grad():
@@ -558,7 +558,7 @@ def test_generated_tensorcore_flash_causal_matches_torch(monkeypatch, B, H, S, D
     q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
     backend, compiled, graph, kernels = _compile_tc(q, k, v, module=_Causal())
     assert len(kernels) == 1, f"fused causal TC flash should be one kernel, got {len(kernels)}"
-    assert "flash_pv_smem" in compiled.nodes[kernels[0]].op.kernel_source, "must be the fused warp-chain"
+    assert "dpl_c_to_a" in compiled.nodes[kernels[0]].op.kernel_source, "must be the fused warp-chain"
 
     def ref():
         with torch.no_grad():
@@ -590,7 +590,7 @@ def test_warp_chain_dynamic_matches_torch(monkeypatch, seq):
     backend, compiled, graph, kernels = _trace(_Sdpa(), seed, dynamic_shapes={"q": {2: sd}, "k": {2: sd}, "v": {2: sd}})
     assert len(kernels) == 1, f"dynamic warp-chain flash should fuse to one kernel, got {len(kernels)}"
     src = compiled.nodes[kernels[0]].op.kernel_source
-    assert "flash_pv_smem" in src, "the symbolic flash must be the fused warp-chain (C->A smem handoff)"
+    assert "dpl_c_to_a" in src, "the symbolic flash must be the fused warp-chain (C->A register repack)"
     assert "int seq_len" in src, "the symbolic warp-chain must carry the runtime seq_len arg"
 
     torch.manual_seed(seq)
@@ -619,7 +619,7 @@ def test_warp_chain_causal_dynamic_matches_torch(monkeypatch, seq):
     seed = tuple(torch.randn(B, H, 16, D, dtype=torch.float16) for _ in range(3))
     backend, compiled, graph, kernels = _trace(_Causal(), seed, dynamic_shapes={"q": {2: sd}, "k": {2: sd}, "v": {2: sd}})
     assert len(kernels) == 1, f"dynamic causal warp-chain flash should fuse to one kernel, got {len(kernels)}"
-    assert "flash_pv_smem" in compiled.nodes[kernels[0]].op.kernel_source, "must be the fused warp-chain"
+    assert "dpl_c_to_a" in compiled.nodes[kernels[0]].op.kernel_source, "must be the fused warp-chain"
 
     torch.manual_seed(seq)
     q, k, v = (torch.randn(B, H, seq, D, dtype=torch.float16) for _ in range(3))
@@ -652,7 +652,7 @@ def test_warp_chain_gqa_static_matches_torch(monkeypatch, Hq, Hkv, S, D):
     k, v = (torch.randn(1, Hkv, S, D, dtype=torch.float16) for _ in range(2))
     backend, compiled, graph, kernels = _compile_tc(q, k, v, module=_Gqa())
     assert len(kernels) == 1, f"static GQA warp-chain flash should be one kernel, got {len(kernels)}"
-    assert "flash_pv_smem" in compiled.nodes[kernels[0]].op.kernel_source, "must be the fused warp-chain"
+    assert "dpl_c_to_a" in compiled.nodes[kernels[0]].op.kernel_source, "must be the fused warp-chain"
 
     def ref():
         with torch.no_grad():
@@ -687,7 +687,7 @@ def test_warp_chain_gqa_dynamic_matches_torch(monkeypatch, seq):
     backend, compiled, graph, kernels = _trace(_Gqa(), seed, dynamic_shapes={"q": {2: sd}, "k": {2: sd}, "v": {2: sd}})
     assert len(kernels) == 1, f"dynamic GQA warp-chain flash should fuse to one kernel, got {len(kernels)}"
     src = compiled.nodes[kernels[0]].op.kernel_source
-    assert "flash_pv_smem" in src and "int seq_len" in src, "must be the symbolic fused warp-chain"
+    assert "dpl_c_to_a" in src and "int seq_len" in src, "must be the symbolic fused warp-chain"
 
     torch.manual_seed(seq)
     q = torch.randn(B, Hq, seq, D, dtype=torch.float16)

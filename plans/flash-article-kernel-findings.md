@@ -60,8 +60,9 @@ register-shuffle handoff).
 | Move 1 — scalar streaming chain (`EMMY_TILE=""`) | FA-2 scalar form | 24943 | — |
 | Move 2 — mma, gmem-direct (unpadded handoff, best geom) | fragment loads from gmem | 612 | 41× |
 | Move 4 — + K/V smem staging (`d1/cp`, unpadded) | cp.async fill, ldmatrix drain | 511 | 1.20× |
-| + slab padding (the bank-conflict fix; new best geom w4n8) | +16 B rows on slabs + handoff | **315** | 1.62× |
-| torch eager SDPA (FA-2 backend) | reference | 206 | emmy best = 0.65× |
+| + slab padding (the bank-conflict fix; new best geom w4n8) | +16 B rows on slabs + handoff | 315 | 1.62× |
+| + C→A register repack (the handoff eliminated) | `FragmentRepack`, no smem round-trip | **271** | 1.16× |
+| torch eager SDPA (FA-2 backend) | reference | 206 | emmy best = 0.76× |
 
 The `d2+` prefetch ring (Move 5's software pipelining) is built and emits correctly (primed ring, clamped
 prefetch) but REGRESSES at every geometry — the honest finding: the smem doubling costs occupancy and the
@@ -84,23 +85,39 @@ count (4.7× FA-2's) — the `flash_pv_smem` C→A round-trip and the per-step l
 
 ## The barrier experiment (run, hypothesis REFUTED — the convoy is not the bottleneck)
 
-The handoff `__syncthreads` was warp-scoped (`Sync(warp=True)` — the slab is warp-private; kept as a
-correctness-preserving cleanup and a WSPEC prerequisite), and it moved nothing: d1 315→314, d2 322→320,
-gmem-direct 679→673 (all noise). Post-padding, the staged loop's transport barriers (the per-step
-`wait_group` + trailing sync around the CTA-shared K/V slabs) re-converge the warps anyway — the remaining
-gap is the LSU **volume** (the handoff's stores/loads and the per-step Q reload), not the barrier around it.
-The d2 ring now nearly ties d1 (320 vs 314) but still never beats it.
+The handoff `__syncthreads` was warp-scoped (`Sync(warp=True)`), and it moved nothing: d1 315→314,
+d2 322→320, gmem-direct 679→673 (all noise). Post-padding, the staged loop's transport barriers re-converge
+the warps anyway — the gap was the LSU **volume**, not the barrier around it. (The whole handoff — slab,
+sync, and all — was then retired by the register repack below.)
 
-## Follow-ups (in expected-payoff order — padding + barrier scoping are DONE)
+## The register repack (DONE — the C→A handoff eliminated)
 
-1. Register-repack C→A handoff (kills most of the 4.7× LSU excess — the QK C-fragment layout is
-   A-fragment-compatible, FA-2 does this conversion fully in registers).
-2. Hoist the loop-invariant Q fragments out of the stream (bk gmem-direct A loads re-issued every KV block).
+The m16n8k16 C fragment is lane-map ALIGNED with the A fragment's k-halves, so P converts straight into its
+P@V A-operand fragments per lane (`FragmentRepack` → `dpl_c_to_a_{f16,bf16}`, four `cvt.rn.*x2.f32` packs —
+same round-to-nearest-even as the retired `RegStore`, so bit-identical). The `flash_pv_smem` slab, its sync,
+and its pad are gone; `AtomKind.c_to_a_repack` gates the tier at schedule time. Measured (perf shape):
+
+| config | with smem handoff | with register repack |
+|--------|------------------:|---------------------:|
+| w4n8 d1/cp | 315 µs | **271 µs** |
+| w4n8 gmem-direct | 673 µs | 586 µs |
+| w4n16 d1/cp | 375 µs | 283 µs |
+| w4n8 d2/cp/ring | 320 µs | 303 µs (still loses to d1) |
+
+NCU (w4n8 d1): smem now SPOTLESS — 109 load conflicts, 0 store conflicts; LSU 20.6M → 18.0M; occupancy
+20.6%, SM 27.8% (FA-2: 33.0%). emmy best = **271 µs vs FA-2 206 µs = 1.32×** (was 2.5× at the start of the
+session). The remaining gap is pure fragment-load volume: the per-step loop-invariant Q reload (16 gmem
+loads/warp/step) and the per-B-fragment `x2` ldmatrix drains (an `x4` loads two B fragments at once), plus
+the `expf`-vs-`exp2f` ALU path.
+
+## Follow-ups (in expected-payoff order — padding, barrier scoping, register repack are DONE)
+
+1. Hoist the loop-invariant Q fragments out of the stream (bk gmem-direct A loads re-issued every KV block).
+2. Pair the B-fragment drains into `ldmatrix.x4` (halves the K/V drain LSU count).
 3. `exp2f` + scale folding (we emit libm `expf` and a per-element scale multiply; FA-2 folds scale/log2e and
    hits MUFU.EX2 directly).
-4. TMA rank-3 descriptor for batched K/V (`(B·H, S, D)` box) — not for occupancy (smem-bound, and FA-2 runs
-   at 11.8%); it's the gateway to WSPEC-on-flash (the handoff sync is now warp-scope, so the band split is
-   no longer UB-blocked on it).
+4. TMA rank-3 descriptor for batched K/V (`(B·H, S, D)` box) — not for occupancy; the gateway to
+   WSPEC-on-flash (no intra-step CTA sync remains to block the band split).
 5. Causal tile-skip (unchanged; the example is non-causal).
 
 ## Accuracy table (listing shape (1,4,128,64), vs an fp64 torch reference — the Numerics placeholder)

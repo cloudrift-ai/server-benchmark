@@ -140,13 +140,13 @@ streaming step (both mmas + the fragment softmax merge) riding `staged_kloop` as
 fill, `d2+/ring` the prefetch ring overlapping the next KV block's copies with this block's mma work. Each slab keeps
 its operand's own layout (K stays N-major, V K-major; verbatim row copies), so the transposed-B K slab drains via the
 **plain `x2` (no `.trans`) staged ldmatrix** — its 8×8 rows ARE the mma's col-major B columns (the `LdmatrixLoad`
-render's third variant) — and the V slab via the canonical `x2.trans`. The K/V slab rows and the `flash_pv_smem`
-handoff rows are **padded +16 B** (`Operand.pad_cols` / `_twist._PAD`) — the cp.async-path counterpart of the TMA
-slab swizzle: a power-of-two row span lands every ldmatrix row read on one bank group (a measured ~8-way replay
-profile), and the pad shifts consecutive rows across groups. Intrinsic, not a fork (a near-strict win, like the
-masked-K alignment pad); padding relocates smem bytes only. cp.async only (TMA's 2-D box cannot encode the
-batched K/V operands), static block-divisible kv only (the symbolic stream keeps its masked gmem-direct loads), and
-bit-identity to the gmem-direct sibling holds — same values, same mma order.
+render's third variant) — and the V slab via the canonical `x2.trans`. The K/V slab rows are **padded +16 B**
+(`Operand.pad_cols` / `_twist._PAD`) — the cp.async-path counterpart of the TMA slab swizzle: a power-of-two row
+span lands every ldmatrix row read on one bank group (a measured ~8-way replay profile), and the pad shifts
+consecutive rows across groups. Intrinsic, not a fork (a near-strict win, like the masked-K alignment pad); padding
+relocates smem bytes only. cp.async only (TMA's 2-D box cannot encode the batched K/V operands), static
+block-divisible kv only (the symbolic stream keeps its masked gmem-direct loads), and bit-identity to the
+gmem-direct sibling holds — same values, same mma order.
 
 **The fused edge — the mma tier's `sync` transport.** A demoted-cone matmul (`f(x, …) @ w`) takes the warp tier
 under a warp `TILE` pin: `_schedule._demoted_warp_option` nodifies the PLANAR ⊗-fold to a computed-A `Contraction`
@@ -222,8 +222,12 @@ residence-specific realization differs. Everything realizes from structure — t
 head contraction's `ldmatrix`/`mma.sync` off its node geometry (`_frag_contraction`); the score prologue stmt-by-stmt
 (`Assign` → `FragmentApply`, a coordinate `Select` → `FragmentMask` with the keep-predicate negated, loop-invariant
 constant `Load`s hoisted); the streaming merge REGENERATED from the carrier's channel spec (pivot → rowmax + running
-stats + α-rescale; denom → rowsum; the expect channel's ⊗ `lift` IS the P@V node, its register-resident A operand fed
-through the `flash_pv_smem` C→A smem handoff); the projection tail as an in-place `FragmentApply` + the `RegStore`
+stats + α-rescale; denom → rowsum; the expect channel's ⊗ `lift` IS the P@V node, the register-resident P converted
+straight into its A-operand fragments by the **C→A register repack** (`FragmentRepack` — the `AtomKind.c_to_a_repack`
+lane-map compatibility: the m16n8 C fragment is elementwise lane-aligned with the m16k16 A fragment's k-halves, so
+two k-adjacent score fragments convert per lane with no shuffle, no smem round-trip, and no sync; gated at schedule
+time, and bit-identical to the retired `flash_pv_smem` smem handoff — same round-to-nearest-even conversion); the
+projection tail as an in-place `FragmentApply` + the `RegStore`
 close. Symbolic seq masks at the fragment (`FragmentMask(col ≥ seq)`) with the gmem reads clamped; causal composes as
 another mask. A resolved K/V `Stage` on the `TileOp` re-parents the streaming step under `staged_kloop` (the step
 builder takes the ring-slot offsets; see the operand-staging section above) — gmem-direct and staged are one body,

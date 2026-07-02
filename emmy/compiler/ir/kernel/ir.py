@@ -1286,6 +1286,33 @@ class MmaSyncPtx(Stmt):
 
 
 @dataclass(frozen=True)
+class FragmentRepack(Stmt):
+    """Convert two k-adjacent mma **C fragments** (f32, m16n8) into one 16-bit **A operand
+    fragment** (m16k16) IN REGISTERS — the ``AtomKind.c_to_a_repack`` lane-map compatibility:
+    per lane, ``srcs[0]``'s four values are exactly the A fragment's low k-half pairs and
+    ``srcs[1]``'s its high k-half, so the conversion is four ``cvt.rn.{f16,bf16}x2.f32`` packs
+    with no shuffle and no smem round-trip (the flash P→A handoff; same round-to-nearest-even
+    the smem path's ``RegStore`` applied, so the repack is bit-identical to it). The emitter
+    gates on the atom capability at schedule time — this node assumes it."""
+
+    frag: str  # destination A fragment (4 × u32)
+    srcs: tuple[str, str]  # (low k-half, high k-half) C fragments (4 × f32 each)
+    ab_dtype: str = "f16"
+
+    def deps(self) -> tuple[str, ...]:
+        return self.srcs
+
+    def defines(self) -> tuple[str, ...]:
+        return (self.frag,)
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}FragmentRepack {self.frag} <- ({self.srcs[0]}, {self.srcs[1]}) ({self.ab_dtype})"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        return [f"{_pad(ctx.indent)}dpl_c_to_a_{self.ab_dtype}({self.frag}, {self.srcs[0]}, {self.srcs[1]});"]
+
+
+@dataclass(frozen=True)
 class EpilogueLoad:
     """One leaf operand of a fused pointwise epilogue (see :class:`RegEpilogue`).
 

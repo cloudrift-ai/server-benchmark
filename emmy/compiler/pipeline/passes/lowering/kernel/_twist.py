@@ -19,8 +19,9 @@ residence — the fragment row of the placement-keyed fold (a within-warp ``Frag
   ``fold`` op (rowmax) + the running-stat update / rescale; a ``denom`` channel (no lift)
   row-reduces the exp-weight fragments (rowsum) into ``l = l·α + Σp``; an ``expect`` channel
   (``lift = multiply``) IS the P@V :class:`Contraction` node — its ⊗ lowers to ``mma.sync`` with
-  the register-resident probability fed through the ``flash_pv_smem`` C→A handoff (``RegStore`` →
-  ``ldmatrix``), the one genuinely new data-move of this tier;
+  the register-resident probability converted straight into its A-operand fragments by the C→A
+  REGISTER repack (``FragmentRepack``, the ``AtomKind.c_to_a_repack`` lane-map compatibility —
+  no smem round-trip, no sync; gated at schedule time);
 - the projection tail (``O / l``) realizes as an in-place ``FragmentApply`` + the ``RegStore``
   output close;
 - a resolved K/V ``Stage`` on the ``TileOp`` (``ctx.stage`` — ``_schedule._resolve_twisted_stage``,
@@ -51,14 +52,13 @@ from emmy.compiler.ir.kernel.ir import (
     UNIFORM,
     FragmentApply,
     FragmentMask,
+    FragmentRepack,
     FragmentRowReduce,
     LdmatrixLoad,
     MmaSyncPtx,
     Reassign,
     RegFragment,
     RegStore,
-    Smem,
-    Sync,
 )
 from emmy.compiler.ir.schedule import Fold, Level, ReduceStage
 from emmy.compiler.ir.sigma import Sigma
@@ -74,15 +74,11 @@ _EXP = ElementwiseImpl("exp")
 #: The 2 C-fragment rows per lane the m16n8 stats distribute over (the ``0`` / ``1`` suffixes).
 _COMPS = ("0", "1")
 
-#: The C→A handoff slab — the probability C-fragments staged to smem and ``ldmatrix``-read back as
-#: the expect contraction's A operand (pinned by the e2e recovery contract).
-_PV_SMEM = "flash_pv_smem"
-
 #: Slab row padding, in halves (16 B — one ldmatrix row, so alignment holds). A power-of-two row
-#: span (the 128 B head_dim/d_v/bn rows) lands every ldmatrix row read on one bank group (8-way
+#: span (the 128 B head_dim/d_v rows) lands every ldmatrix row read on one bank group (8-way
 #: replays, the measured 132 M-conflict profile); +16 B shifts consecutive rows across groups.
-#: Applied to the cp.async K/V slabs and the C→A handoff — the cp.async-path counterpart of the
-#: TMA slab's hardware swizzle.
+#: Applied to the cp.async K/V slabs — the cp.async-path counterpart of the TMA slab's hardware
+#: swizzle.
 _PAD = 8
 
 #: The per-CTA warp index axis (bound by the ``Tile`` decode when the schedule maps more than one
@@ -322,12 +318,8 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     expect_name = next(n for n, ch in zip(names, channels, strict=True) if ch.lift is not None)
     denom_name = next(n for n, ch in zip(names[1:], channels[1:], strict=True) if ch.lift is None)
 
-    # ---- state: the C→A slab + running stats + output accumulators ---------------------------- #
-    # The handoff slab gains a leading per-warp dim when the CTA runs several warps (each warp's
-    # P block is private — the ldmatrix reads its own warp's rows).
-    slab_extents = (um, shape[0], bn + _PAD) if um > 1 else (shape[0], bn + _PAD)
-    wq_idx: tuple[Expr, ...] = (Var(FLASH_WARP_AXIS),) if um > 1 else ()
-    state: list[Stmt] = [Smem(name=_PV_SMEM, extents=slab_extents, dtype=_cuda(atom.operand_dtype("a")))]
+    # ---- state: running stats + output accumulators ------------------------------------------- #
+    state: list[Stmt] = []
     for c in _COMPS:
         state.append(Init(name=f"{pivot_name}{c}", identity=-1e30, dtype=F32))
         state.append(Init(name=f"{denom_name}{c}", identity=0.0, dtype=F32))
@@ -394,35 +386,18 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         stream += _stats(f"{denom_name}__n", _ADD, (f"{denom_name}__s", "_rsm"))
         stream += _rebind(denom_name, f"{denom_name}__n")
         # expect (lift = ⊗): rescale the accumulator, then the lift IS the P@V contraction — the
-        # register-resident P fed through the flash_pv_smem C→A handoff as its A operand.
+        # register-resident P repacked straight into its A-operand fragments.
         for f in ofrags:
             stream.append(FragmentApply(out=f, op=_MUL, args=(f, _row_pair("_al")), kinds=(FRAG, ROW), in_place=True))
-        for t, pf in enumerate(pfrags):
-            stream.append(
-                RegStore(
-                    dst_buffer=_PV_SMEM,
-                    dst_index=(*wq_idx, Literal(0, "int"), Literal(t * atom_n, "int")),
-                    frag=pf,
-                    shape=shape,
-                    ldm=bn + _PAD,
-                )
-            )
-        # The handoff slab is WARP-private (each warp writes and re-reads its own rows), so the
-        # write→ldmatrix ordering needs only warp scope — post-Volta the sync is still required,
-        # but a CTA-wide barrier here convoys the block's warps every streaming step for no
-        # ordering benefit.
-        stream.append(Sync(warp=True))
-        # One resident A slice per ``atom_k`` chunk of the streamed block (``pv.tile.bk`` slices —
-        # one for the conservative ``2·atom_n`` block, more when the key block is wider).
+        # The C→A REGISTER repack (``atom.c_to_a_repack``, gated at schedule time): one A slice per
+        # ``atom_k`` chunk of the streamed block (``pv.tile.bk`` slices), each converted per lane
+        # from its two k-adjacent P C-fragments — no smem round-trip, no sync (bit-identical to the
+        # retired ``flash_pv_smem`` handoff: same round-to-nearest-even conversion).
         pv_bk = max(1, pv.tile.bk)
         pa_frags = tuple(f"_pa{s}" for s in range(pv_bk)) if pv_bk > 1 else ("_pa",)
         for s, paf in enumerate(pa_frags):
             stream.append(RegFragment(name=paf, role="a", shape=shape, dtype=atom.operand_dtype("a")))
-            if um > 1 or pv_bk > 1:
-                src: tuple[Expr, ...] = (*wq_idx, Literal(0, "int"), Literal(s * shape[2], "int"))
-            else:
-                src = (Literal(0, "int"),)
-            stream.append(LdmatrixLoad(frag=paf, src_buffer=_PV_SMEM, src_index=src, role="a", ldm=bn + _PAD, staged=True))
+            stream.append(FragmentRepack(frag=paf, srcs=(pfrags[2 * s], pfrags[2 * s + 1]), ab_dtype=atom.ab_dtype))
         pv_mask = {kv_axis.name: (kv0_var, seq)} if symbolic_k else {}
         stream += _frag_contraction(
             _pv_streamed(pv, kv_axis),

@@ -1109,11 +1109,12 @@ async def _rebench_o3_async(cand, backend):
     errors (best-effort — a re-bench hiccup must never abort the sweep). The winner
     already benched OK at -O1, so the only added cost is one -O3 compile (cubin-cached)."""
     from emmy import config  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.policy.mcts import O3_NVCC_FLAGS  # noqa: PLC0415
 
     if "-O3" in config.nvcc_flags():
         return None
     try:
-        result = await backend.benchmark_async(cand.graph, nvcc_flags="-Xcicc -O3")
+        result = await backend.benchmark_async(cand.graph, nvcc_flags=O3_NVCC_FLAGS)
     except Exception:  # noqa: BLE001 — a re-bench failure is non-fatal to tuning
         return None
     return result.time_ms * 1000.0 if result.time_ms else None

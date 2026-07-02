@@ -84,6 +84,20 @@ class _CountingBackend:
         return self.benchmark(graph, num_iters=num_iters)
 
 
+class _O3CountingBackend(_CountingBackend):
+    """Counting backend whose async bench ALSO accepts ``nvcc_flags`` — so the -O3
+    re-bench path runs instead of rejecting, for the O3-node-row integration test."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.o3_calls = 0
+
+    async def benchmark_async(self, graph, num_iters="auto", nvcc_flags=None) -> BenchmarkResult:
+        if nvcc_flags is not None:
+            self.o3_calls += 1
+        return self.benchmark(graph, num_iters=num_iters)
+
+
 def _matmul(g: Graph, prefix: str, M: int, K: int, N: int) -> str:
     a, b, c = f"{prefix}a", f"{prefix}b", f"{prefix}c"
     g.add_node(InputOp(), [], Tensor(a, (M, K)), node_id=a)
@@ -170,19 +184,89 @@ def test_inner_reward_is_separable_not_a_product() -> None:
 def test_inner_reward_records_nodes() -> None:
     """The post-search walk persists tree nodes to the ``node`` table — keyed by
     the run's context, one op_sig group per distinct kernel, with every non-null
-    parent_key referencing a recorded node (valid ancestry edges)."""
+    parent_key referencing a recorded node (valid ancestry edges) — and each row
+    carries the label-quality columns: benched-descendant visits, the session
+    run_id, a measurement timestamp, and per-leaf bench stats."""
     fused = _fuse(_two_distinct_matmuls())
     ctx = Context.from_target((8, 0))
     db = SearchDB()
-    run_inner_reward(fused, ctx=ctx, db=db, backend=_CountingBackend(), patience=_PATIENCE)
+    run_inner_reward(fused, ctx=ctx, db=db, backend=_CountingBackend(), patience=_PATIENCE, run_id="testrun")
 
-    rows = db._conn.execute("SELECT node_key, parent_key, context_key, op_sig, value_us FROM node").fetchall()
+    rows = db._conn.execute(
+        "SELECT node_key, parent_key, context_key, op_sig, value_us, visits, is_leaf, n_samples, status, run_id, measured_at FROM node"
+    ).fetchall()
     assert rows, "expected node rows recorded from the finished search trees"
     assert {r[2] for r in rows} == {ctx.structural_key()}  # all under the run's regime
     assert all(r[4] > 0 for r in rows)  # positive value-of-position
     assert len({r[3] for r in rows}) >= 2  # two distinct matmuls → ≥2 op_sig groups
     keys = {r[0] for r in rows}
     assert all(r[1] in keys for r in rows if r[1] is not None)  # parents reference recorded nodes
+    assert all(r[5] > 0 for r in rows)  # every recorded node has a benched descendant
+    assert all((r[8], r[9]) == ("ok", "testrun") for r in rows)  # clean benches, session-tagged
+    assert all(r[10] for r in rows)  # measured_at stamped
+    leaves = [r for r in rows if r[6] == 1]
+    assert leaves and all(r[7] is not None for r in leaves)  # leaf rows carry their bench n_samples
+
+
+def test_inner_reward_records_o3_regime_rows(monkeypatch) -> None:
+    """With a backend whose bench accepts ``nvcc_flags`` (the -O3 re-bench path runs),
+    the near-best configs' deployable re-benches land in the ``node`` table under
+    their OWN context key — the tune context with the -O3 flags substituted — as
+    parentless ``H_opt=3`` leaf rows, alongside (not colliding with) the -O1 tree."""
+    from dataclasses import replace
+
+    from emmy.compiler.pipeline.search.policy.mcts import O3_NVCC_FLAGS
+
+    monkeypatch.setenv("EMMY_NVCC_FLAGS", "-Xcicc -O1")  # the tune regime; re-bench not skipped
+    fused = _fuse(_two_distinct_matmuls())
+    ctx = Context.from_target((8, 0))
+    db = SearchDB()
+    backend = _O3CountingBackend()
+    run_inner_reward(fused, ctx=ctx, db=db, backend=backend, patience=_PATIENCE, run_id="o3run")
+
+    assert backend.o3_calls > 0  # the re-bench path actually ran
+    o3_key = replace(ctx, compile_flags=O3_NVCC_FLAGS).structural_key()
+    rows = db._conn.execute("SELECT context_key, parent_key, is_leaf, features, run_id FROM node").fetchall()
+    assert {r[0] for r in rows} == {ctx.structural_key(), o3_key}  # both regimes present, distinct keys
+    o3_rows = [r for r in rows if r[0] == o3_key]
+    assert o3_rows
+    for _, parent_key, is_leaf, feats_json, run_id in o3_rows:
+        assert parent_key is None and is_leaf == 1 and run_id == "o3run"
+        assert '"H_opt": 3.0' in feats_json  # the deployable-regime stamp
+
+
+def test_node_rows_are_fold_ready(monkeypatch) -> None:
+    """End-to-end group-holdout readiness: after a real tune (O3 re-benches on),
+    every node row carries its fold keys, fold-by-op keeps each op atomic —
+    the -O1 tree AND its -O3 regime rows in one fold, parent edges resolving
+    inside it — and fold-by-gpu puts this single-card run in one fold."""
+    from emmy.compiler.pipeline.search.data import Dataset
+
+    monkeypatch.setenv("EMMY_NVCC_FLAGS", "-Xcicc -O1")
+    fused = _fuse(_two_distinct_matmuls())
+    ctx = Context.from_target((8, 0))
+    db = SearchDB()
+    run_inner_reward(fused, ctx=ctx, db=db, backend=_O3CountingBackend(), patience=_PATIENCE, run_id="foldrun")
+
+    rows = list(db.iter_nodes())
+    assert rows
+    assert all(r.op_sig and r.gpu and r.run_id for r in rows)  # every fold key populated
+
+    by_op = Dataset.fold_node_rows(rows, by="op")
+    assert len(by_op) >= 2  # two distinct matmuls → at least two op folds
+    assert sum(len(v) for v in by_op.values()) == len(rows)  # a partition
+    o3_folds = 0
+    for fold in by_op.values():
+        keys = {r.node_key for r in fold}
+        assert all(r.parent_key in keys for r in fold if r.parent_key is not None)  # edges stay inside
+        if len({r.context_key for r in fold}) == 2:  # -O1 tree + -O3 regime rows together
+            o3_folds += 1
+    assert o3_folds > 0
+
+    by_gpu = Dataset.fold_node_rows(rows, by="gpu")
+    assert len(by_gpu) == 1  # one card tuned → one gpu fold holding everything
+    (gpu_fold,) = by_gpu.values()
+    assert len(gpu_fold) == len(rows)
 
 
 def test_inner_reward_rerun_is_replay_dominated() -> None:

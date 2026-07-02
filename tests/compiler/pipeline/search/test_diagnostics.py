@@ -207,6 +207,39 @@ def test_node_report_separates_hardware():
     assert "[NVIDIA H100 80GB]" in text and "[NVIDIA H200 141GB]" in text
 
 
+def test_node_report_excludes_bench_fail_rows():
+    """``bench_fail`` rows (sentinel latency, not a measurement) are dropped before
+    any metric: injecting a huge-value failed sibling leaves the fork ranking and
+    the node count identical to the fail-free store."""
+    from dataclasses import replace  # noqa: PLC0415
+
+    clean = _fork_nodes()
+    with_fail = [*clean, replace(_child("cfail", 16, 3e7), status="bench_fail")]
+    text_clean = diagnostics.node_report(_BMPrior(), clean)
+    text_fail = diagnostics.node_report(_BMPrior(), with_fail)
+    assert text_fail == text_clean  # metrics AND the "N nodes" count unaffected
+    assert "node store: 4 nodes" in text_clean
+
+
+def test_node_report_splits_compile_regimes_per_card():
+    """One card whose rows span two ``H_opt`` regimes (the -O1 tune tree + the
+    deployable -O3 re-bench rows) renders one sub-block per regime — their
+    latencies aren't comparable, so pooling them would corrupt leaf reachability."""
+    from dataclasses import replace  # noqa: PLC0415
+
+    mm = {"S_reduce_add": 1.0, "S_pw_multiply": 1.0, "S_n_distinct_input": 2.0, "S_ext_free_max": 512.0, "H_opt": 1.0}
+    o1 = [
+        _child("P", 0, 1.0, parent=None),
+        _child("c8", 8, 1.0),
+        _child("c64", 64, 3.0),
+    ]
+    o1 = [replace(n, features={**mm, **n.features}) for n in o1]
+    o3 = [replace(_child("d8", 8, 0.5, parent=None), features={**mm, "H_opt": 3.0, "BM": 8})]
+    text = diagnostics.node_report(_BMPrior(), o1 + o3)
+    assert "@ -O1" in text and "@ -O3" in text  # one sub-block per regime
+    assert "3 nodes" in text and "1 nodes" in text
+
+
 def test_node_report_kernel_filter_selects_ops_by_label():
     """``--kernel`` filters the node store by op label (derived from each node's
     ``S_*`` features) — whole ops drop atomically, and a non-matching filter prints

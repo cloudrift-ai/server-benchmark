@@ -232,7 +232,19 @@ def drain_tune(pipeline, graph, *, on=None, **kwargs):
 
 
 def run_inner_reward(
-    fused_graph, *, ctx, db, backend=None, backends=None, patience, ucb_c=None, explore_eps=0.0, seed=0, progress=None, prior=None
+    fused_graph,
+    *,
+    ctx,
+    db,
+    backend=None,
+    backends=None,
+    patience,
+    ucb_c=None,
+    explore_eps=0.0,
+    seed=0,
+    progress=None,
+    prior=None,
+    run_id="",
 ):
     """Synchronously run the async per-op inner reward for tests.
 
@@ -260,6 +272,7 @@ def run_inner_reward(
             seed=seed,
             progress=progress,
             prior=prior,
+            run_id=run_id,
         )
     )
 

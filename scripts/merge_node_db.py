@@ -4,7 +4,8 @@
 The autotune ``node`` table is a **cross-hardware** dataset — its key folds the GPU
 identity (``digest(context_key, gpu, op_sig, knobs)``) — so node rows measured on a
 rented GPU can be merged into the single canonical local DB without colliding with
-other cards (keep-min collapses rows only within a card). This is the copy-back step
+other cards (the upsert — branch keep-min / leaf newest-measurement — collapses rows
+only within a card). This is the copy-back step
 of the ``collect-node-data`` skill: it wraps the tested core
 :meth:`SearchDB.merge_nodes`.
 
@@ -122,7 +123,7 @@ def fetch_and_merge(
     remote_db: str = "~/.cache/emmy/autotune.db",
     dest: str | None = None,
 ) -> int:
-    """Snapshot the remote autotune DB, scp it back, keep-min merge its node rows into
+    """Snapshot the remote autotune DB, scp it back, merge its node rows into
     ``dest`` (default: the local tune DB), and print the per-card receipt. Returns the
     rows merged. The reusable entry point shared by this CLI and the folded-in merge
     step of ``remote_node_tune.py``."""

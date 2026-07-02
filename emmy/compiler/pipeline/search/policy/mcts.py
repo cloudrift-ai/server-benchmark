@@ -31,12 +31,12 @@ from __future__ import annotations
 
 import math
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from emmy import config
 from emmy.compiler.pipeline.search.candidate import LazyCandidate
-from emmy.compiler.pipeline.search.db import PerfStats
+from emmy.compiler.pipeline.search.db import NodeRow, PerfStats
 from emmy.compiler.pipeline.search.policy.base import Search
 from emmy.compiler.structural import digest
 
@@ -52,6 +52,11 @@ if TYPE_CHECKING:
 # ``EMMY_O3_TOL`` (a fraction, e.g. ``0.15`` for 15%).
 O3_REBENCH_TOL = 0.15
 
+# The nvcc flags of that deployable re-bench (``pipeline._rebench_o3_async``) — also
+# the regime the re-bench's node rows are keyed under (``two_level`` derives their
+# ``context_key`` from the tune context with these flags substituted).
+O3_NVCC_FLAGS = "-Xcicc -O3"
+
 
 @dataclass
 class SearchNode:
@@ -66,6 +71,16 @@ class SearchNode:
     # Set on directly-benched leaves in ``observe``; ``None`` on branches, which
     # keep their partial fork-prefix for value-of-position.
     realized_knobs: dict | None = field(default=None, repr=False)
+    # The direct bench's measurement stats + status (``'ok'`` / ``'bench_fail'``),
+    # set alongside ``realized_knobs`` in ``observe``; ``None`` on branches (never
+    # directly benched). Read back by ``_collect_node_records`` so the node store
+    # keeps the leaf's variance / n_samples and its failure outcome.
+    bench_stats: PerfStats | None = field(default=None, repr=False)
+    bench_status: str | None = field(default=None, repr=False)
+    # The leaf's deployable -O3 re-bench median (``observe_o3``), ``None`` when the
+    # config wasn't in the re-bench tolerance band (or the sweep already ran at -O3).
+    # Read back by ``_collect_node_records`` to emit the leaf's -O3-regime node row.
+    o3_us: float | None = field(default=None, repr=False)
 
 
 class SearchTree:
@@ -176,6 +191,8 @@ class TuningSearch(Search):
         # steps (FK / BK / STAGE / …) reach the prior. Falls back to the
         # fork-prefix when no candidate is supplied.
         token.realized_knobs = self._realized_knobs(candidate) if candidate is not None else self._node_knobs(token)
+        token.bench_stats = stats
+        token.bench_status = status
         reward = (1.0 / stats.median) if status == "ok" and stats.median > 0 else 0.0
         prev_best = self.tree.best_reward
         self.tree.record_terminal(token, reward)
@@ -205,9 +222,11 @@ class TuningSearch(Search):
         labeled with the -O3 median latency (µs) — the prior's regression target
         is latency, converted to reward only in the MCTS selection loop. The prior
         can then rank winners by -O3 cost where -O1 ties them; ``H_opt`` lets the
-        -O1 and -O3 rows coexist."""
+        -O1 and -O3 rows coexist. Also stashed on the token so
+        :meth:`_collect_node_records` emits the leaf's -O3-regime node row."""
         if o3_us <= 0 or not isinstance(token, SearchNode) or token.realized_knobs is None:
             return
+        token.o3_us = o3_us
         knobs = dict(token.realized_knobs)
         knobs["H_opt"] = 3.0
         self.o3_rows.append((knobs, o3_us))
@@ -377,42 +396,150 @@ class TuningSearch(Search):
         tun = tuple(sorted((k, str(v)) for k, v in feats.items() if not k.startswith(("S_", "H_"))))
         return digest(context_key, gpu, op_sig, tun)
 
-    def _collect_node_records(self, *, context_key: str, op_sig: str, gpu: str = "") -> list[tuple]:
-        """Post-search tree walk producing keyed, parent-linked node records for
-        :meth:`SearchDB.record_nodes` — the persistent/keyed/deduped sibling of
-        :meth:`_collect_rows` (which feeds the prior's in-memory reservoir).
+    def _collect_node_records(
+        self, *, context_key: str, op_sig: str, gpu: str = "", run_id: str = "", o3_context_key: str | None = None
+    ) -> list[NodeRow]:
+        """Post-search tree walk producing keyed, parent-linked :class:`NodeRow`
+        records for :meth:`SearchDB.record_nodes` — the persistent/keyed/deduped
+        sibling of :meth:`_collect_rows` (which feeds the prior's in-memory
+        reservoir).
 
         Pre-order descent from the top forks (the sentinel root is skipped); each
         node passing the same ``visits > 0 and best_reward > 0`` guard as
-        ``_collect_rows`` emits ``(node_key, parent_key, features, value_us, depth)``:
-        ``features`` is the full dict the prior sees (``realized_knobs`` on a benched
-        leaf — incl. deterministically-stamped knobs — else the partial fork-prefix
-        from ``_node_knobs``), ``value_us`` is the value-of-position ``1/best_reward``.
+        ``_collect_rows`` emits an ``ok`` row: ``features`` is the full dict the
+        prior sees (``realized_knobs`` on a benched leaf — incl. deterministically-
+        stamped knobs — else the partial fork-prefix from ``_node_knobs``),
+        ``value_us`` the value-of-position ``1/best_reward``, ``visits`` the benched-
+        descendant count (the label's confidence weight), ``is_leaf`` whether the
+        node was directly benched, and ``variance`` / ``n_samples`` the leaf's OWN
+        bench stats — a leaf whose subtree found a faster descendant keeps
+        ``value_us`` = min-over-subtree while the stats describe its direct bench.
 
-        ``parent_key`` is the *nearest emitted ancestor*'s ``node_key`` (a skipped
+        A directly-benched leaf whose bench FAILED (``bench_status == 'bench_fail'``,
+        reward 0 — previously invisible) is now emitted too, as a ``bench_fail`` row
+        with the watchdog's sentinel latency as ``value_us``: the negative examples a
+        search prior needs. Fail rows are leaf-only and never value anchors — they
+        skip the monotone assert, don't update ``parent_value``, and children keep
+        the inherited ``parent_key``; a branch whose descendants ALL failed stays
+        unrecorded (``best_reward == 0``).
+
+        A leaf carrying an ``o3_us`` (the deployable :data:`O3_NVCC_FLAGS` re-bench
+        of a near-best config — ``observe_o3``) additionally emits an **-O3-regime
+        row** when ``o3_context_key`` is given: keyed under that context (so it never
+        collides with its -O1 twin), features stamped ``H_opt=3.0`` (the reservoir
+        convention), ``parent_key=None`` (a regime re-measurement, not part of this
+        tree — it never enters a fork sibling group), ``visits=1`` per re-bench, and
+        no variance/n_samples (the re-bench returns a bare median).
+
+        ``parent_key`` is the *nearest emitted ok ancestor*'s ``node_key`` (a skipped
         intermediate node passes its own inherited parent down), so it always
         references a recorded row — true ancestry from the live ``parent`` edge,
         not knob-subset inference (which a leaf's extra stamped knobs would break).
         Asserts the monotone ``parent.value_us <= child.value_us`` invariant — it
         holds because ``record_terminal`` max-propagates ``best_reward`` up the
-        chain, transitively across skipped nodes."""
-        out: list[tuple] = []
+        chain, transitively across skipped nodes.
+
+        Deterministic single-option steps can stamp no knob delta, so a child's
+        accumulated knob set (and thus ``node_key``) can equal its parent's;
+        duplicates within the batch are collapsed to one row per key — preferring
+        the directly-benched (``is_leaf``) row, which carries the bench stats, and
+        taking the max (not sum) of the duplicates' ``visits`` so
+        ``record_nodes``'s SUM accumulation never double-counts within one run."""
+        out: dict[str, NodeRow] = {}
+
+        def emit(row: NodeRow) -> None:
+            prev = out.get(row.node_key)
+            if prev is None:
+                out[row.node_key] = row
+                return
+            # Within-batch duplicate (empty knob-delta chain): keep one row per key.
+            # An ``ok`` row always beats a ``bench_fail`` (record_perf's policy);
+            # among same-status rows prefer the directly-benched one (it carries the
+            # bench stats) with the min value. Either way the survivor takes the
+            # first-seen depth/parent and the max (not sum) of the visits, so
+            # ``record_nodes``'s SUM accumulation never double-counts one run.
+            keep = prev
+            if (row.status, prev.status) == ("ok", "bench_fail") or (row.status == prev.status and row.is_leaf and not prev.is_leaf):
+                keep = row
+            value_us = min(prev.value_us, row.value_us) if prev.status == row.status else keep.value_us
+            out[row.node_key] = replace(
+                keep, visits=max(prev.visits, row.visits), depth=prev.depth, parent_key=prev.parent_key, value_us=value_us
+            )
 
         def visit(node: SearchNode, parent_key: str | None, parent_value: float | None, depth: int) -> None:
             nk = parent_key
-            if node.candidate is not None and node.visits > 0 and node.best_reward > 0:
-                feats = node.realized_knobs if node.realized_knobs is not None else self._node_knobs(node)
-                value_us = 1.0 / node.best_reward
-                assert parent_value is None or value_us >= parent_value - 1e-9, "value-of-position not monotone up the tree"
-                nk = self._node_key(feats, op_sig, context_key, gpu)
-                out.append((nk, parent_key, feats, value_us, depth))
-                parent_value = value_us
+            if node.candidate is not None:
+                is_leaf = node.realized_knobs is not None
+                stats = node.bench_stats if is_leaf else None
+                if node.visits > 0 and node.best_reward > 0:
+                    feats = node.realized_knobs if is_leaf else self._node_knobs(node)
+                    value_us = 1.0 / node.best_reward
+                    assert parent_value is None or value_us >= parent_value - 1e-9, "value-of-position not monotone up the tree"
+                    nk = self._node_key(feats, op_sig, context_key, gpu)
+                    emit(
+                        NodeRow(
+                            node_key=nk,
+                            parent_key=parent_key,
+                            context_key=context_key,
+                            op_sig=op_sig,
+                            features=feats,
+                            value_us=value_us,
+                            depth=depth,
+                            gpu=gpu,
+                            visits=node.visits,
+                            is_leaf=is_leaf,
+                            variance=stats.variance if stats is not None else None,
+                            n_samples=stats.n_samples if stats is not None else None,
+                            status="ok",
+                            run_id=run_id,
+                        )
+                    )
+                    parent_value = value_us
+                    if is_leaf and node.o3_us is not None and o3_context_key is not None:
+                        feats_o3 = {**node.realized_knobs, "H_opt": 3.0}
+                        emit(
+                            NodeRow(
+                                node_key=self._node_key(feats_o3, op_sig, o3_context_key, gpu),
+                                parent_key=None,
+                                context_key=o3_context_key,
+                                op_sig=op_sig,
+                                features=feats_o3,
+                                value_us=node.o3_us,
+                                depth=depth,
+                                gpu=gpu,
+                                visits=1,
+                                is_leaf=True,
+                                status="ok",
+                                run_id=run_id,
+                            )
+                        )
+                elif is_leaf and node.bench_status == "bench_fail" and stats is not None:
+                    # Sentinel latency from the failed bench; NOT a value anchor — no
+                    # assert, no parent_value update, children keep the inherited nk.
+                    emit(
+                        NodeRow(
+                            node_key=self._node_key(node.realized_knobs, op_sig, context_key, gpu),
+                            parent_key=parent_key,
+                            context_key=context_key,
+                            op_sig=op_sig,
+                            features=node.realized_knobs,
+                            value_us=stats.median,
+                            depth=depth,
+                            gpu=gpu,
+                            visits=node.visits,
+                            is_leaf=True,
+                            variance=stats.variance,
+                            n_samples=stats.n_samples,
+                            status="bench_fail",
+                            run_id=run_id,
+                        )
+                    )
             for child in node.children:
                 visit(child, nk, parent_value, depth + 1)
 
         for child in self.tree.root.children:
             visit(child, None, None, 1)
-        return out
+        return list(out.values())
 
     def _should_stop(self) -> bool:
         if self.stop_reason is not None:

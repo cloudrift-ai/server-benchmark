@@ -103,6 +103,47 @@ class Dataset:
 
     # --- grouping ----------------------------------------------------------
 
+    @staticmethod
+    def fold_node_rows(rows, by: str) -> dict[str, list]:
+        """Partition node rows into **group-holdout folds** — the split unit for
+        out-of-sample prior evaluation (train on all-but-one fold, evaluate on the
+        held-out one). Operates on :class:`db.NodeRow`s (not :class:`Sample`s) so a
+        fold keeps every column the future train/eval sides need, and so fold
+        atomicity is guaranteed by the row's own group key, never inferred from
+        features.
+
+        ``by`` selects the axis:
+
+        - ``"op"`` — key on ``op_sig``: leave-one-op-out. An op's -O1 tree, its
+          -O3 regime rows, and its ``bench_fail`` leaves all share one ``op_sig``
+          (and ``parent_key`` edges never leave an op's tree), so the whole op
+          moves to one side atomically — a row-level split would leak the
+          value-correlated parent/child chains and the O1/O3 twins.
+        - ``"gpu"`` — key on ``gpu``: leave-one-GPU-out (cross-hardware transfer).
+
+        ``"run"`` is **rejected**: ``run_id`` is provenance, not a fold axis — the
+        table keeps ONE deduped row per config across sessions (branch keep-min /
+        leaf newest-measurement), so a config measured in several runs carries only
+        the surviving run's id and a per-run split would mis-assign it.
+
+        Rows missing the key (pre-enrichment ``gpu``/``op_sig`` gaps) land in the
+        ``""`` bucket — filter or drop it before splitting."""
+        from collections import defaultdict  # noqa: PLC0415
+
+        keys = {"op": "op_sig", "gpu": "gpu"}
+        if by not in keys:
+            if by == "run":
+                raise ValueError(
+                    "run is not a fold axis: node rows are deduped per config across sessions, so run_id is "
+                    "provenance of the surviving value only — fold by 'op' or 'gpu'"
+                )
+            raise ValueError(f"unknown fold axis {by!r} — expected 'op' or 'gpu'")
+        attr = keys[by]
+        folds: dict[str, list] = defaultdict(list)
+        for r in rows:
+            folds[getattr(r, attr) or ""].append(r)
+        return dict(folds)
+
     def group_by_op(self) -> dict[tuple, list[Sample]]:
         """Group by the full ``S_*`` structural signature (sorted items) — the key
         the prior diagnostics group on, so structurally-distinct same-extent ops

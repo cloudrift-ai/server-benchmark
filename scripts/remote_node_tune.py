@@ -9,6 +9,15 @@ comes back on failure), launches ``emmy tune --dataset golden`` detached, then
 **polls the remote log internally** until the tune finishes. All the per-poll ssh
 chatter happens inside this process, so it never reaches the agent's context.
 
+The tune runs with ``--explore-eps 0.25`` by default (``--explore-eps`` here
+overrides): node-data collection is where the search-tree dataset is grown, and
+deterministic PUCT (eps 0) only ever benches the branches the incumbent prior
+already likes — the labels and sibling coverage then just confirm it (the
+censoring feedback loop). ε-greedy collection visits the other siblings too, so
+the fork-ranking dataset covers the alternatives a *better* prior would need to
+rank. Plain ``emmy tune`` keeps its deterministic default; off-policy exploration
+is a property of this collection workflow, not of tuning in general.
+
 Run it from the agent in the BACKGROUND (Bash ``run_in_background: true``) — the tune
 takes ~30–45 min, well past a foreground tool timeout; the harness re-invokes the
 agent with just the final summary when this exits.
@@ -106,6 +115,12 @@ def main() -> int:
     ap.add_argument("--poll", type=int, default=60, help="Seconds between completion polls (default 60)")
     ap.add_argument("--timeout", type=int, default=7200, help="Max seconds to wait for the tune (default 7200)")
     ap.add_argument("--no-merge", action="store_true", help="Skip the folded-in node-row merge after a successful tune")
+    ap.add_argument(
+        "--explore-eps",
+        type=float,
+        default=0.25,
+        help="ε-greedy exploration for the remote tune (default 0.25 — off-policy node collection; see module docstring)",
+    )
     args = ap.parse_args()
 
     remote, key, port = args.remote, args.ssh_key, args.port
@@ -181,11 +196,9 @@ def main() -> int:
     #    channel (`< /dev/null` + `> <tune log> 2>&1`) and use ssh -n (detach=True),
     #    else ssh holds the channel open past the `&` and this call times out *after*
     #    a successful launch.
-    _log(f"launching `emmy tune --dataset golden` (detached -> {_TUNE_LOG}) ...")
-    launch = (
-        f"cd {_REMOTE_DIR} && {_CUDA_EXPORT} && "
-        f"nohup ./venv/bin/emmy tune --dataset golden > {_TUNE_LOG} 2>&1 < /dev/null & echo tune_launched"
-    )
+    tune_cmd = f"emmy tune --dataset golden --explore-eps {args.explore_eps}"
+    _log(f"launching `{tune_cmd}` (detached -> {_TUNE_LOG}) ...")
+    launch = f"cd {_REMOTE_DIR} && {_CUDA_EXPORT} && nohup ./venv/bin/{tune_cmd} > {_TUNE_LOG} 2>&1 < /dev/null & echo tune_launched"
     rc, out = _run(remote, key, port, launch, timeout=60, detach=True)
     if "tune_launched" not in out:
         # Belt-and-suspenders: if the launch ssh still didn't confirm, the tune may
@@ -224,6 +237,7 @@ def main() -> int:
             print("\n=== remote_node_tune summary ===", flush=True)
             print("status: ok", flush=True)
             print(f"shapes: {shapes}", flush=True)
+            print(f"explore_eps: {args.explore_eps}", flush=True)
             print(f"bench_fails: {bench_fails}", flush=True)
             print(f"elapsed (wait only): {elapsed}s", flush=True)
             print(f"remote log: {remote}:{_TUNE_LOG}", flush=True)

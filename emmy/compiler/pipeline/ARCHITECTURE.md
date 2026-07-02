@@ -222,16 +222,28 @@ edge table (one row per rewrite hop carrying the knob delta plus a best-median u
 chain to resolve a pre-final op's measured cost; loop→loop source hops are skipped as structural/decision hops), a
 backend-partitioned `perf` table (full stats + `backend` + `status` + `knobs` + `captured`), and a `node` table — one
 row per **search-tree node** (every partial branch + leaf of a per-kernel search), keyed by `digest(context_key, gpu,
-op_sig, tunable-knob set)`, carrying the full feature dict the prior sees, a keep-the-minimum value-of-position latency,
-a `parent_key` pointer, a `gpu` column, and depth bookkeeping (written by `record_nodes`). The `gpu` identity
+op_sig, tunable-knob set)`, carrying the full feature dict the prior sees, a value-of-position latency with a
+**per-kind upsert** (branch rows keep-min — a coverage bound a faster descendant genuinely tightens; leaf rows take
+the **newest measurement**, since a leaf is a re-measurement of one config and min-of-K noisy medians drifts to the
+noise floor), a `parent_key` pointer, a `gpu` column, and depth bookkeeping (written by `record_nodes`). Each row also
+carries **label-quality columns** (additive migration; old rows degrade to unknowns): `visits` (benched-descendant
+count — the label's confidence weight, SUM-accumulated across writes and merges, unlike the write-batch `n_updates`),
+`is_leaf` (a real measurement vs a min over explored descendants), `variance`/`n_samples` (the leaf's own bench
+stats), `status` (`ok`/`bench_fail` — failed leaves ARE recorded with the watchdog sentinel as `value_us`, the
+negative examples a search prior needs; an `ok` row is never downgraded by a later fail), and `run_id`/`measured_at`
+(the tune session — one id per CLI invocation — and time that produced the CURRENT `value_us`, replaced only when the
+value is). The `gpu` identity
 (`Context.hardware_id`, the PCIe product name) is folded into the node key so a cross-hardware dataset never collides:
 `context_key` (cc + opt) can't separate same-die SKUs (H100 vs H200 share cc + SM count), so without `gpu` their rows
-would merge and keep-min would silently drop one card's data (the `H_total_mem` VRAM feature is what then lets the prior
-model the difference). `node` and `perf` are content-keyed (parent-tree-independent) and survive a `_SCHEMA_VERSION`
-bump; only the topology-keyed `lowering` table is dropped on mismatch. `SearchDB.merge_nodes(src_path)` is the
-cross-hardware accumulation entry point: it reads another autotune DB's `node` rows read-only and re-upserts them
-through the same keep-min path, so a card's node data measured on a rented GPU (no local CUDA) folds into one
-canonical DB without cross-card collision — driven by `scripts/merge_node_db.py` / the `collect-node-data` skill.
+would merge and the upsert would silently drop one card's data (the `H_total_mem` VRAM feature is what then lets the
+prior model the difference). `node` and `perf` are content-keyed (parent-tree-independent) and survive a
+`_SCHEMA_VERSION` bump; only the topology-keyed `lowering` table is dropped on mismatch.
+`SearchDB.merge_nodes(src_path)` is the cross-hardware accumulation entry point: it reads another autotune DB's
+`node` rows read-only and re-upserts them through the same per-kind path (direction-independent — a stale leaf
+snapshot never resurrects; `visits` SUMs on a shared key), so a card's node data measured on a rented GPU (no local
+CUDA) folds into one canonical DB without cross-card collision — driven by `scripts/merge_node_db.py` / the
+`collect-node-data` skill, whose sweeps run ε-greedy (`remote_node_tune.py` launches the remote tune with
+`--explore-eps 0.25` by default) so the collected labels and fork coverage de-correlate from the incumbent prior.
 
 **`SearchTree`** (`policy/mcts.py`) is pure-Python in-memory MCTS state, colocated with `TuningSearch` because MCTS is
 the only policy that reads it. Each tree node wraps a `LazyCandidate` and carries `visits`, `best_reward` (max reward
@@ -337,10 +349,24 @@ FULL config read off the resolved graph's op in `observe` (so knobs stamped at d
 
 Alongside that reservoir feed, the same finished tree is walked once by `_collect_node_records` and persisted to the
 `node` SQLite table via `record_nodes` — the keyed, deduplicated, parent-linked counterpart to the unkeyed/sampled
-reservoir. The prior still *trains* from the in-memory reservoir, but the `node` store is *read back* by `eval prior
+reservoir. The walk fills the label-quality columns (see the `SearchDB` paragraph): `SearchNode.visits`, the leaf's
+`bench_stats`/`bench_status` stashed by `observe`, `is_leaf` from `realized_knobs`. It also emits **`bench_fail`
+leaves** (leaf-only; never value anchors — no monotone participation, children anchor past them, an all-failed branch
+stays unrecorded) and, for a leaf the tune re-benched at the deployable `-Xcicc -O3` (`observe_o3` stashes
+`SearchNode.o3_us`), an **-O3-regime row**: keyed under the tune context with `O3_NVCC_FLAGS` substituted (never
+colliding with the -O1 twin), features stamped `H_opt=3.0` (the reservoir convention), parentless (a regime
+re-measurement, not part of the tree — never in a fork sibling group). Within one batch, a deterministic no-knob-delta
+step can give a child its parent's exact knob set (same `node_key`); duplicates collapse to one row (leaf's stats, max
+— not sum — of their visits) so `record_nodes`'s SUM accumulation never double-counts a run. The store is
+**group-holdout-fold ready** (`Dataset.fold_node_rows`, by `op_sig` / `gpu`): an op's -O1 tree, -O3 rows, and fail
+leaves move to one side atomically and parent edges never cross a fold (`run_id` is provenance of the surviving
+deduped value, deliberately NOT a fold axis). The prior still *trains* from the in-memory reservoir, but the `node`
+store is *read back* by `eval prior
 --dataset nodes` (`iter_nodes` → `diagnostics.node_report`): **per card**, it groups nodes by `parent_key` and scores the
 **fork sibling-ranking** — does the prior order each fork's children (the partial configs it ranks during `_select`) by
-their best-reachable latency? — the search-faithful evaluation no leaf-only view can give. The per-card grouping matters
+their best-reachable latency? — the search-faithful evaluation no leaf-only view can give. `node_report` drops
+`bench_fail` rows up front (their `value_us` is the watchdog sentinel, not a measurement) and splits a card's block per
+`H_opt` regime so -O1 and -O3 latencies never pool in leaf reachability. The per-card grouping matters
 for a cross-hardware dataset: same-die SKUs (H100/H200) share an `S_*` op signature but not their latencies, so mixing
 them would corrupt both metrics — the `gpu` key keeps their rows distinct.
 
@@ -361,7 +387,9 @@ writes it, `compile` / `run` read it.
 differ at -O3, e.g. a `REDUCE` ILP fold or a warp tile's `WSPEC`). So whenever a bench lands **within `EMMY_O3_TOL`
 (default 15%, `config.o3_tol`) of the best -O1 so far** — a band wider than a strict new best, so near-tied contenders all
 qualify — the engine re-benches it at `-Xcicc -O3` (`_rebench_o3`) and `observe_o3` records an extra row with the same
-realized knobs tagged `H_opt=3` (the deployable regime). Each config is re-benched at most once. The `H_*` feature lets
+realized knobs tagged `H_opt=3` (the deployable regime) — into the reservoir AND the `node` table, where it lands as a
+parentless leaf row under its own -O3 `context_key` (see the node-store paragraph above). Each config is re-benched at
+most once. The `H_*` feature lets
 the -O1 (broad) and -O3 (near-best) rows coexist; `compile` / `run` run at -O3 (`H_opt=3`) so greedy ranks by the
 deployable rows and reaches the true optimum. The `nvcc_flags` override rides the bench request to the worker, so only
 winners pay the -O3 recompile and the cubin cache keys on the flags. All tune/bench timings are **CUDA-graph-captured** by

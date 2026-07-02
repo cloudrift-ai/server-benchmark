@@ -213,3 +213,65 @@ def test_from_prior_group_by_op_matches_op_sig() -> None:
     (sig,) = groups
     assert sig == (("S_kind", 1.0),)  # only S_* enters the signature
     assert len(groups[sig]) == 3
+
+
+# ---------------------------------------------------------------------------
+# fold partitioning (group-holdout readiness)
+# ---------------------------------------------------------------------------
+
+
+def _nrow(key: str, *, op_sig: str = "mm", gpu: str = "H100", run_id: str = "r1", parent: str | None = None, status: str = "ok"):
+    from emmy.compiler.pipeline.search.db import NodeRow  # noqa: PLC0415
+
+    return NodeRow(
+        node_key=key,
+        parent_key=parent,
+        context_key="ctx",
+        op_sig=op_sig,
+        features={},
+        value_us=1.0,
+        depth=1,
+        gpu=gpu,
+        run_id=run_id,
+        status=status,
+    )
+
+
+def test_fold_node_rows_by_op_keeps_op_atomic() -> None:
+    """Fold by op groups on the ``op_sig`` column: an op's -O1 tree rows, its
+    -O3-regime rows (different ``context_key``, same ``op_sig``), and its
+    ``bench_fail`` leaves all land in ONE fold."""
+    from dataclasses import replace  # noqa: PLC0415
+
+    rows = [
+        _nrow("mm_branch"),
+        _nrow("mm_leaf", parent="mm_branch"),
+        replace(_nrow("mm_o3"), context_key="ctx_o3"),  # the -O3 regime twin
+        _nrow("mm_fail", status="bench_fail", parent="mm_branch"),
+        _nrow("rd_leaf", op_sig="rd"),
+    ]
+    folds = Dataset.fold_node_rows(rows, by="op")
+    assert set(folds) == {"mm", "rd"}
+    assert {r.node_key for r in folds["mm"]} == {"mm_branch", "mm_leaf", "mm_o3", "mm_fail"}
+    # parent edges resolve within the fold — nothing to leak across the split
+    keys = {r.node_key for r in folds["mm"]}
+    assert all(r.parent_key in keys for r in folds["mm"] if r.parent_key is not None)
+
+
+def test_fold_node_rows_by_gpu_and_unknown_bucket() -> None:
+    rows = [_nrow("a"), _nrow("b", gpu="H200"), _nrow("c", gpu="")]
+    folds = Dataset.fold_node_rows(rows, by="gpu")
+    assert set(folds) == {"H100", "H200", ""}  # pre-migration rows land in the filterable "" bucket
+    assert sum(len(v) for v in folds.values()) == len(rows)  # a partition: complete + disjoint
+
+
+def test_fold_node_rows_rejects_run_axis() -> None:
+    """``run_id`` is provenance of the surviving value, not a fold axis — the table
+    keeps one deduped row per config across sessions, so a per-run split would
+    mis-assign multi-run configs. The helper encodes that as a hard error."""
+    import pytest  # noqa: PLC0415
+
+    with pytest.raises(ValueError, match="provenance"):
+        Dataset.fold_node_rows([_nrow("a")], by="run")
+    with pytest.raises(ValueError, match="unknown fold axis"):
+        Dataset.fold_node_rows([_nrow("a")], by="context")

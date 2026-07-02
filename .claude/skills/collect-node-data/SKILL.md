@@ -1,6 +1,6 @@
 ---
 name: collect-node-data
-description: Use this skill when the user wants to populate or refresh the autotune DB's node table (the cross-hardware search-tree node store) with data measured on a SPECIFIC GPU — e.g. "collect node data for an H200", "tune the goldens on a rented <GPU> and merge the nodes back", "gather cross-hardware node-store data", "populate / update the node table from <hardware>", "run the golden node sweep on a remote <GPU>". Rents a fresh single-GPU server (via start-remote-server; --billing-exempt for CloudRift), rsyncs + sets up emmy there, runs `emmy tune --dataset golden`, then merges the remote node rows into the local `~/.cache/emmy/autotune.db` (nodes table only, keep-min, GPU-keyed so cards never collide), and tears the server down.
+description: Use this skill when the user wants to populate or refresh the autotune DB's node table (the cross-hardware search-tree node store) with data measured on a SPECIFIC GPU — e.g. "collect node data for an H200", "tune the goldens on a rented <GPU> and merge the nodes back", "gather cross-hardware node-store data", "populate / update the node table from <hardware>", "run the golden node sweep on a remote <GPU>". Rents a fresh single-GPU server (via start-remote-server; --billing-exempt for CloudRift), rsyncs + sets up emmy there, runs `emmy tune --dataset golden --explore-eps 0.25` (ε-greedy so the node data covers siblings the incumbent prior would skip), then merges the remote node rows into the local `~/.cache/emmy/autotune.db` (nodes table only, GPU-keyed so cards never collide), and tears the server down.
 version: 0.1.0
 ---
 
@@ -12,13 +12,22 @@ the prior sees. It is read by `emmy eval prior --dataset nodes` (per-card fork s
 and feeds prior diagnostics. Because your dev box (and most of the fleet) has no local CUDA GPU, the data for any given
 card must be **measured on that card** and brought back.
 
-This skill does exactly that for one GPU: rent it → set up emmy → `emmy tune --dataset golden` → merge the new
-card's node rows into the local DB → tear the server down.
+This skill does exactly that for one GPU: rent it → set up emmy → `emmy tune --dataset golden --explore-eps 0.25`
+→ merge the new card's node rows into the local DB → tear the server down.
+
+**Why the tune runs with ε-greedy exploration (`--explore-eps 0.25`).** The node store's labels are
+value-of-position minimums over the branches the search actually benched, and deterministic PUCT (eps 0) only benches
+the branches the incumbent prior already prefers — so eps-0 data just confirms the current prior (a censoring feedback
+loop) and leaves most forks with a single explored child, useless for the fork sibling-ranking dataset. ε-greedy
+collection visits the other siblings too, so a *better* prior can be trained and evaluated on them. This default lives
+in `scripts/remote_node_tune.py` (its `--explore-eps` flag overrides it); plain `emmy tune` elsewhere keeps its
+deterministic eps-0 default.
 
 **Why merging into the single local DB is safe (read this once).** The node store is keyed by GPU:
 `node_key = digest(context_key, gpu, op_sig, tunable-knobs)` and the `node` table carries a `gpu` column
-(`Context.hardware_id()` — the canonicalized PCIe product name). Different cards therefore **never collide** — keep-min
-only collapses rows *within one card*. So accumulating many GPUs' node rows in the one canonical
+(`Context.hardware_id()` — the canonicalized PCIe product name). Different cards therefore **never collide** — the
+upsert (branch keep-min / leaf newest-measurement) only collapses rows *within one card*. So accumulating many GPUs'
+node rows in the one canonical
 `~/.cache/emmy/autotune.db` is the intended design (that is what makes it a cross-hardware dataset). Do **not** keep
 per-GPU DB files.
 
@@ -69,9 +78,10 @@ Do not wrap the command in a retry loop — the orchestrator handles fallback it
 `scripts/remote_node_tune.py` does the whole core in **one process**: ensures the Python 3.12 venv/dev packages +
 `nvcc`, rsyncs your working tree (exact local code, incl. uncommitted changes) to `~/.local/share/emmy/node-tune/`
 (the repo's `REMOTE_DEPLOY_DIR` layout), runs `make setup` (output to `setup.log` in that dir — only a tail returns on
-failure), launches `emmy tune --dataset golden` detached, **polls the remote log internally** until it finishes,
+failure), launches `emmy tune --dataset golden --explore-eps 0.25` detached (off-policy collection — see the intro;
+override with the script's `--explore-eps`), **polls the remote log internally** until it finishes,
 then **fetches the node rows back and merges them** into the local
-`~/.cache/emmy/autotune.db` (keep-min, `node` table only, GPU-keyed so other cards are untouched) and prints the
+`~/.cache/emmy/autotune.db` (`node` table only, GPU-keyed so other cards are untouched) and prints the
 per-card receipt. The robustness traps are baked in: argv-list ssh (no zsh word-split), `[e]mmy tune` bracket-pgrep
 (no self-match), one short ssh per poll (no broken-pipe), venv/dev always installed, and a non-tty-safe detached launch.
 
@@ -90,12 +100,13 @@ When it exits you get one compact result:
   unchanged. Because merge is folded in, there is **no separate merge step to launch** — the local DB is already updated.
 - **failure** → `status: FAILED (<phase>)` or `merge FAILED: …` plus the last 40 lines of the relevant remote log
   (`setup.log` / `tune.log` in that dir). Fix and re-run — the script is idempotent (rsync + `make setup` no-op when already
-  done; the keep-min merge is safe to repeat). `--no-merge` runs the tune only.
+  done; the merge is safe to repeat — a re-merged snapshot's rows are equal-timestamped, so they never churn values).
+  `--no-merge` runs the tune only.
 
 **Re-merge / manual fallback.** If the merge step failed (or you used `--no-merge`), merge the rented card's rows without
 re-tuning: `./venv/bin/python scripts/merge_node_db.py --remote "<user@host>" [--ssh-key … --port …]` (or `--src
-<snapshot.db>` for an already-fetched file; `--db <path>` to override the destination). Same keep-min, `node`-only
-semantics.
+<snapshot.db>` for an already-fetched file; `--db <path>` to override the destination). Same `node`-only, per-kind
+upsert semantics.
 
 **Manual debugging** (only if the script fails and you need to poke the box): the harness shell is zsh, so pass ssh
 options as an **array** — `SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i
@@ -142,7 +153,7 @@ If any check fails, report the failure + raw output instead of claiming success.
 - **Don't keep per-GPU DB files.** The node key includes `gpu`, so the single `~/.cache/emmy/autotune.db` is the
   correct cross-hardware accumulator. Splitting it defeats the design and breaks the per-card `eval` views.
 - **Don't `scp` over the local DB / merge the whole DB.** That clobbers other cards' node rows (and the unrelated
-  `perf`/`cuda_op`/`lowering` tables). Use `scripts/merge_node_db.py` — keep-min, `node` table only.
+  `perf`/`cuda_op`/`lowering` tables). Use `scripts/merge_node_db.py` — the per-kind upsert, `node` table only.
 - **Don't forget the `nvcc` PATH/CUDA_HOME export** in both `make setup` and the tune invocation — without it kernel
   compiles hard-fail (there is no NVRTC fallback).
 - **Don't set `HF_TOKEN` or expect model downloads** — the golden tune is pure torch snippets.

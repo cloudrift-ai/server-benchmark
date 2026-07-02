@@ -299,7 +299,7 @@ def _as_list(scheduled) -> list:
     return scheduled if isinstance(scheduled, list) else [scheduled]
 
 
-def rewrite(match: Match, root: Node) -> Fork | list[TileOp] | TileOp | Graph | None:
+def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp | Graph | None:
     # (0) Schedule an UNMAPPED ``TileOp`` — a kernel that recognition emitted as a *graph
     # rewrite* (flash's fused fragment, ``try_flash``) rather than scheduling inline, because a
     # graph fragment can't embed a scheduling fork. The fused ``TileOp`` re-enters this same pass
@@ -309,7 +309,7 @@ def rewrite(match: Match, root: Node) -> Fork | list[TileOp] | TileOp | Graph | 
         tile: TileOp = root.op
         if tile.op is None or tile.place.is_mapped:
             raise RuleSkipped("TileOp already scheduled / nothing to map")
-        return schedule(tile, tile.name, tile.knobs)
+        return schedule(tile, tile.name, tile.knobs, ctx)
     # (1) Flash attention — a graph rewrite that fuses a softmax-then-P@V kernel with its
     # scaled-QK producer. Tried first on every node; flash precedes online-softmax precedes
     # normalize, each consuming the Accums the next would match. The downstream-fold
@@ -352,7 +352,7 @@ def rewrite(match: Match, root: Node) -> Fork | list[TileOp] | TileOp | Graph | 
     map_tile = TileOp(op=node, place=Placement(free=free), inputs=dict(loop.inputs))
     pro = bind_prologue_contraction(node, free) if place_decision("cone") == "fuse" else None
     if pro is None:
-        return schedule(map_tile, loop.name, knob_base)
+        return schedule(map_tile, loop.name, knob_base, ctx)
     # (4) The MONOID-producer composition — the fused norm→linear edge (``rmsnorm(x)·nw @ w``, and
     # its N-channel form, the gate/up MLP edge): the tail fold(s) ALSO nodify to
     # ``Map(body=projection, source=Contraction)`` — a computed-A :class:`Contraction` whose A cone
@@ -370,9 +370,9 @@ def rewrite(match: Match, root: Node) -> Fork | list[TileOp] | TileOp | Graph | 
     src = c_map.source
     con_base, map_base = prologue_knob_bases(src.k_axis.name, src.a_operand[0].axis.name)
     con_tile = TileOp(op=c_map, place=Placement(free=(*free, n_ax)), inputs=dict(loop.inputs))
-    con = _as_list(schedule(con_tile, loop.name, {**knob_base, **con_base}))
+    con = _as_list(schedule(con_tile, loop.name, {**knob_base, **con_base}, ctx))
     if con and warp_tile_pinned():
         return con if len(con) > 1 else con[0]
-    maps = _as_list(schedule(map_tile, loop.name, {**knob_base, **map_base}))
+    maps = _as_list(schedule(map_tile, loop.name, {**knob_base, **map_base}, ctx))
     merged = [*maps, *con]
     return merged if len(merged) > 1 else merged[0]

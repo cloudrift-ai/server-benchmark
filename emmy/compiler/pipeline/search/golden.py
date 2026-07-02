@@ -30,12 +30,11 @@ hardware on both sides, so the ratio is apples-to-apples vs cuBLAS. On sm_90+ th
 autotuner lands these on the swizzled s16816 ``mma_m16n8k16_f16`` (ldmatrix +
 mma.sync) atom — the swizzled smem slab avoids shared-load bank conflicts (a
 fragment load reading smem opaquely cannot), so mma.sync is the faster fp16
-GEMM. On sm_120 the pre-rebuild warp-tier prior + greedy landed on a square
-**64×64 output tile on a 4-warp warp-specialized CTA**, measured at / above cuBLAS
-across the squares (2048²: 106.7 µs / 1.06×; 4096²: 746 µs / 1.03×; 1024²: 0.94×) —
-the perf bar the rebuilt tiers re-tune against. Ranking lives in
-``search/prior/AnalyticPrior`` (the ``D_*`` geometry features over
-``features.knob_features``).
+GEMM. On sm_120 the pre-rebuild bar (2048²: 106.7 µs / 1.06× on a 4-warp
+warp-specialized CTA) was re-met and beaten by the rebuilt swizzled TMA tier
+(2048²: 95.9 µs / 0.99× on ``w1x4/f4x2/k2 d4/tma/ring``, the 2026-07-02 seventh
+sweep). Ranking lives in ``search/prior/AnalyticPrior`` (the ``D_*`` geometry
+features over ``features.knob_features``).
 """
 
 from __future__ import annotations

@@ -16,7 +16,7 @@ per-node schedule slices ride the structural nodes themselves (a
 :class:`Contraction`'s ``tile``, a :class:`Reduction`'s
 ``reduce`` — EVERY reduce partition rides its node, none on the ``TileOp``); the residual root fields
 (``tier`` / ``stage``) hold the schedule for the not-yet-nodified forms (a non-tiled
-contraction's output tile, the pin-only ``STAGE`` / ``WSPEC``; flash is now a
+contraction's output tile, the resolved ``STAGE`` / ``WSPEC``; flash is now a
 ``Map(source=Reduction(partial=[Contraction(QK), …, Contraction(PV)]))`` node tree, so its
 partition rides the node). There is no per-kind kernel/schedule type: the algebra is read
 structurally off the axes' :class:`~emmy.compiler.ir.axis.AxisRole`

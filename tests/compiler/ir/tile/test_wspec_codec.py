@@ -47,8 +47,12 @@ def test_malformed_raises_value_error(spec: str) -> None:
         WarpSpec.parse(spec)
 
 
-def test_producer_legality_needs_stage() -> None:
-    # The producer role is meaningful only when the schedule stages operands (a stage to drive).
+def test_producer_legality_needs_tma_stage() -> None:
+    # The producer role is meaningful only over a TMA stage — the elected-thread box copy lands on
+    # a slot mbarrier any warp band can parity-wait; cp.async's wait-group is issuing-thread-scoped
+    # and a sync compute-fill has no async load half.
     ws = WarpSpec.parse("p2")
-    assert ws.is_legal(types.SimpleNamespace(stage=object()))
+    assert ws.is_legal(types.SimpleNamespace(stage=types.SimpleNamespace(transport="tma")))
+    assert not ws.is_legal(types.SimpleNamespace(stage=types.SimpleNamespace(transport="cp.async")))
+    assert not ws.is_legal(types.SimpleNamespace(stage=types.SimpleNamespace(transport="sync")))
     assert not ws.is_legal(types.SimpleNamespace(stage=None))

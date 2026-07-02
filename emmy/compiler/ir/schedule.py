@@ -312,9 +312,19 @@ def _always(_sched: object) -> bool:
     return True
 
 
-def _has_stage(sched: object) -> bool:
-    """The producer band is only meaningful when the pipeline actually stages operands."""
-    return getattr(sched, "stage", None) is not None
+def _never(_sched: object) -> bool:
+    return False
+
+
+def _drives_tma_stage(sched: object) -> bool:
+    """The producer band is only meaningful when the pipeline stages operands over a transport a
+    dedicated warp can drive for other warps — TMA this cut: the box copy is issued by one elected
+    thread and lands on the slot mbarrier any thread can parity-wait, so the fill moves warps
+    freely. ``cp.async``'s wait-group is issuing-thread-scoped (a consumer cannot observe a
+    producer's commit groups without the ``cp.async.mbarrier.arrive`` bridge, which the kernel IR
+    does not carry) and a ``sync`` compute-fill has no async load half — both stay uniform."""
+    stage = getattr(sched, "stage", None)
+    return stage is not None and getattr(stage, "transport", None) == "tma"
 
 
 @dataclass(frozen=True)
@@ -339,11 +349,11 @@ class RoleKind:
 ROLE_REGISTRY: dict[str, RoleKind] = {
     "p": RoleKind(
         "p",
-        help="producer warps — drive the Stage gmem→smem load half",
-        params=(Field("q", FieldKind.TUPLE),),  # in-flight op window (producer-local; not STAGE.depth)
-        legal=_has_stage,
+        help="producer warps — drive the Stage gmem→smem load half (TMA transport)",
+        params=(Field("q", FieldKind.TUPLE),),  # in-flight op window (producer-local; RESERVED — a q pin degrades to uniform)
+        legal=_drives_tma_stage,
     ),
-    "s": RoleKind("s", help="sfu / transcendental combine warps — reserved example role"),
+    "s": RoleKind("s", help="sfu / transcendental combine warps — reserved example role (does not materialize)", legal=_never),
 }
 
 
@@ -681,10 +691,10 @@ class Placement:
 
 
 # --------------------------------------------------------------------------- #
-# The operand-transport + warp-split descriptors. ``Stage`` (cp.async / TMA) is built and
-# materialized; ``WarpSpec`` (the WSPEC worker split) is pin-only this cut — its codec + schedule
-# field land, but the materializer does not yet consume ``TileOp.workers`` (no producer/consumer
-# warp codegen), so a pinned WSPEC is inert. Phase 4 wires it.
+# The operand-transport + warp-split descriptors. ``Stage`` (sync / cp.async / TMA) is the operand
+# pipeline; ``WarpSpec`` (the WSPEC worker split) partitions the CTA's warps into producer /
+# compute bands over that fixed pipeline — both resolved scheduler-side and applied verbatim by
+# the materializer (``lowering/kernel/_stage.staged_kloop``).
 # --------------------------------------------------------------------------- #
 
 
@@ -812,9 +822,11 @@ class WarpSpec:
     ``WarpSpec`` means specialization is on. Spelled by the ``WSPEC`` codec ``<token><np>[:<param>,
     ...]`` per role (``p2`` / ``p2:q8`` / ``p2:q8/s1``), decided in ``_schedule`` (inside ``010_recognize``).
 
-    **Reserved this cut**: the schedule field + the codec land (pin-only), but the materializer does
-    not yet consume ``TileOp.workers`` (no producer/consumer warp codegen), so a pinned WSPEC is
-    inert. Phase 4 wires it."""
+    Materialized by the staged K-loop (``lowering/kernel/_stage.staged_kloop``): the producer band
+    rides at the TAIL of the thread block (``threadIdx.x >= block_threads``), so the compute warps'
+    grid decode is untouched; the producer drives the TMA fill (one elected thread arms the slot
+    mbarrier), the compute warps parity-wait, drain and release the slot on an "empty" mbarrier
+    ring, with ``SetMaxNReg`` register redistribution between the branches."""
 
     roles: tuple[RoleAlloc, ...] = ()
 

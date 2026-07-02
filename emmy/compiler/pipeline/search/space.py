@@ -84,16 +84,43 @@ STAGE = Knob(
 # all three: the pipeline (what's staged, the mma tile, the reduce partition) is fixed by those pins;
 # ``WSPEC`` only splits the warps that run it into roles (``p<np>`` producer warps drive the ``STAGE``
 # load half; the compute warps stay on the mma). ``off=""`` is uniform SIMT (every warp does both
-# halves). Resolved into the schedule's :class:`WarpSpec` (``None`` = uniform). **Pin-only, and
-# gated** on a warp ``TILE`` + a ``STAGE``; the producer/consumer materialization is a follow-up.
+# halves). Resolved into the schedule's :class:`WarpSpec` (``None`` = uniform) and gated on a warp
+# ``TILE`` + a resolved **TMA** ``STAGE`` (the producer band drives the box-copy mbarrier ring;
+# cp.async's wait-group is issuing-thread-scoped and a sync compute-fill has no async load half).
+
+
+def _wspec_features(val) -> dict[str, float]:
+    """The ``WSPEC`` sub-features for the learned prior — the dedicated (non-COMPUTE) warp count
+    (``0.0`` = uniform SIMT). The producer ``q`` window is reserved (inert) and not featurized."""
+    if not val:
+        return {"D_wspec_warps": 0.0}
+    from emmy.compiler.ir.schedule import WarpSpec  # noqa: PLC0415 — schedule imports this module's knobs' consumers
+
+    try:
+        ws = WarpSpec.parse(str(val))
+    except ValueError:
+        return {"D_wspec_warps": 0.0}
+    return {"D_wspec_warps": float(ws.aux_warps)}
+
+
 WSPEC = Knob(
     "WSPEC",
     KnobType.STR,
     help="Warp-specialization codec — role→warp split over the fixed pipeline "
-    "(p<np> producer[:q<window>], s<ns> sfu, …; compute warps implicit = TilePlan.units; empty=uniform SIMT). "
-    "Decided in lowering/tile/010_recognize (the _schedule helper); materialization reserved (TODO).",
+    "(p<np> producer[:q<window>, reserved], s<ns> sfu, …; compute warps implicit = TilePlan.units; empty=uniform SIMT). "
+    "Decided in lowering/tile/010_recognize (the _schedule helper), materialized in lowering/kernel/010_materialize "
+    "(the staged K-loop's producer/compute band split; warp TILE + TMA STAGE only).",
+    features=_wspec_features,
     off="",
 )
+
+
+def wspec_moves() -> list[str]:
+    """The warp-specialization ``WSPEC`` codec candidates — uniform ``""`` first (the conservative
+    option-0), then the producer-band splits. Per-row legality (a warp tile over a resolved TMA
+    stage, the ``block_threads + 32·aux ≤ 1024`` and ``32·aux ≤ block_threads`` thread budgets) is
+    the scheduler's (``_schedule._wspec_candidates`` / ``_wspec_workers``)."""
+    return ["", "p1", "p2"]
 
 
 # --- The structural placement pin (PLACE) -----------------------------------

@@ -83,16 +83,17 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     # A cooperative tile fixes the per-CTA thread count (``coop · ∏block-cells``): one CTA
     # per output-cell group, ``blockDim = block_threads``, ``gridDim = N / block_threads``
     # (the linear ``_gid`` decode groups ``block_threads`` consecutive cells per CTA). The
-    # scalar tier is one thread per cell over the fixed ``_BLOCK_SIZE`` block.
-    blockdim = tile.block_threads if tile.block_threads is not None else _BLOCK_SIZE
+    # scalar tier is one thread per cell over the fixed ``_BLOCK_SIZE`` block. A warp-specialized
+    # producer band (``aux_threads``) widens ``blockDim`` only — the grid still covers the cells.
+    cells = tile.block_threads if tile.block_threads is not None else _BLOCK_SIZE
     if tile.is_static_grid:
         n = tile.n_elements
-        grid = (((n + blockdim - 1) // blockdim,), (1,), (1,))
+        grid = (((n + cells - 1) // cells,), (1,), (1,))
     else:
         # Symbolic grid (a dynamic free axis): ``ceil(∏extents / blockDim)`` CTAs, the symbolic
         # factor resolved from ``sym_values`` at launch (the ``Expr`` grid factor).
-        grid = ((tile.n_dim.ceil_div(blockdim).expr,), (1,), (1,))
-    block = ((blockdim,), (1,), (1,))
+        grid = ((tile.n_dim.ceil_div(cells).expr,), (1,), (1,))
+    block = ((cells + tile.aux_threads,), (1,), (1,))
     # Signature / arg order: buffers, then the TMA descriptor params (bound to the
     # launch-encoded ``CUtensorMap`` device arrays), then the symbolic ``int`` args
     # (tail-appended in ``_launch``) — matching ``render_kernelop``'s param layout.

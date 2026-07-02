@@ -73,8 +73,9 @@ def _knobs_env(knobs: dict) -> str:
     """Render a knobs dict as a ``EMMY_KNOBS`` value: ``TILE=n32x8/f4x26,STAGE=d2/tma``.
 
     Structural-feature knobs (``STRUCT_PREFIX``) are dropped — a repro command
-    pins tuning decisions, not the kernel's structural identity. ``WARPSPEC`` (a passthrough
-    until the warp-spec codec lands) rides through like any other knob."""
+    pins tuning decisions, not the kernel's structural identity. ``WARPSPEC`` (the pre-rebuild
+    boolean spelling still on old golden rows; the live codec is ``WSPEC``) rides through like
+    any other knob."""
     return ",".join(f"{k}={v}" for k, v in knobs.items() if not k.startswith(STRUCT_PREFIX))
 
 

@@ -64,6 +64,7 @@ from emmy.compiler.pipeline.search.space import (
     splitk_moves,
     stage_moves,
     warp_tile_moves,
+    wspec_moves,
 )
 
 logger = logging.getLogger(__name__)
@@ -396,11 +397,28 @@ def _reduce_candidates(kernel, place, plan: TilePlan, probe: Contraction | None 
     return out
 
 
+def _wspec_candidates(plan: TilePlan, stage_spelling: str, red: str) -> list[str]:
+    """The ``WSPEC`` candidates for one enumerated (tile, stage, reduce) row — uniform ``""``
+    alone unless the row can drive a producer band: a warp tile over a resolved **TMA** stage
+    (:func:`_wspec_workers`'s legality, pre-filtered here so the fork doesn't spawn rows that
+    materialize identically) and no cross-CTA split (the split partial re-resolves its own
+    pipeline; wiring WSPEC through ``030_split`` is a follow-up). The env pin narrows as usual —
+    and only eligible rows offer it, so a pinned split on an ineligible row degrades to uniform
+    at materialization rather than multiplying dead rows here."""
+    try:
+        needs_split = bool(red) and ReducePlan.parse(red).needs_split
+    except ValueError:
+        needs_split = False
+    if not (plan.is_warp and "tma" in stage_spelling and not needs_split):
+        return [""]
+    return list(WSPEC.narrow(wspec_moves()))
+
+
 def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], str]:
-    """The contraction's enumerated knob rows (the tile × stage × reduce legal product, each row
-    keyed ``FAMILY@<k_axis>``) and the k-axis name. Env pins narrow each family (``Knob.narrow``);
-    the unpinned families come from the ``search/space.py`` move catalog, legality-guarded here
-    (the per-node half of the space)."""
+    """The contraction's enumerated knob rows (the tile × stage × reduce × wspec legal product,
+    each schedule family keyed ``FAMILY@<k_axis>``, ``WSPEC`` bare/root-global) and the k-axis
+    name. Env pins narrow each family (``Knob.narrow``); the unpinned families come from the
+    ``search/space.py`` move catalog, legality-guarded here (the per-node half of the space)."""
     kaxis = reduce_loop(kernel.op).axis.name
     try:
         probe = _contraction_node(kernel.op, place, TilePlan())
@@ -434,7 +452,8 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], str]:
                 # gmem-direct), distinguishable from an absent (never-offered) family. The
                 # evidence pick's prefix-consistency depends on it: an absent key reads as
                 # "free" and would let a gmem-direct leaf inherit a staged row's measurement.
-                rows.append({_at(TILE, kaxis): spec, _at(STAGE, kaxis): stage, _at(REDUCE, kaxis): red})
+                for wspec in _wspec_candidates(plan, stage, red):
+                    rows.append({_at(TILE, kaxis): spec, _at(STAGE, kaxis): stage, _at(REDUCE, kaxis): red, WSPEC.name: wspec})
     return rows, kaxis
 
 
@@ -709,26 +728,31 @@ def _computed_a_rows(kernel, place, probe: Contraction, kaxis: str, budget: int 
     return rows
 
 
-def _wspec_workers(stage) -> tuple[WarpSpec | None, str]:
-    """The pinned ``WSPEC`` worker split for a pipeline with the given ``stage``, or ``(None, "")`` —
-    uniform SIMT. A pin that doesn't parse, names no role, or whose roles are illegal (a producer needs
-    a ``stage`` to drive) degrades to uniform silently — the same pin-validity rule the other codecs
-    follow. A pin that IS legal is **refused loudly while the materialization is inert**: the emitter
-    does not split warps into roles yet, so accepting it would stamp (and record in the perf DB) a warp
-    split that never existed. When wspec codegen lands, this refusal is what flips back to
-    ``return ws, pinned``."""
-    pinned = WSPEC.narrow([""])[0]
-    if not pinned:
+def _wspec_workers(spec: str, stage, block_threads: int | None) -> tuple[WarpSpec | None, str]:
+    """The resolved ``WSPEC`` worker split for a pipeline with the given ``stage`` and compute-band
+    ``block_threads``, or ``(None, "")`` — uniform SIMT. A spec that doesn't parse, names no role,
+    carries a reserved per-role param (the producer ``q`` window — inert this cut, so stamping it
+    would claim a pipeline that never ran), or whose roles are illegal (a producer drives a resolved
+    **TMA** stage only — ``RoleKind.legal``) degrades to uniform silently — the same pin-validity
+    rule the other codecs follow. Two thread-budget gates: ``block_threads + 32·aux_warps`` must fit
+    the CTA limit, and the aux band must not exceed the compute band (``32·aux ≤ block_threads`` —
+    the wrapped aux decode elects the fill thread via ``threadIdx % block_threads == 0``, which must
+    match exactly one aux thread)."""
+    if not spec:
         return None, ""
     try:
-        ws = WarpSpec.parse(pinned)
+        ws = WarpSpec.parse(spec)
     except ValueError:
         return None, ""
-    # ``is_legal`` reads only ``.stage`` off its arg (the producer-needs-a-stage rule) — pass a probe.
-    if not ws.roles or not ws.is_legal(SimpleNamespace(stage=stage)):
+    if not ws.roles or any(a.params for a in ws.roles):
         return None, ""
-    logger.warning("WSPEC pin %r ignored: warp specialization is not materialized yet — the kernel runs uniform SIMT", pinned)
-    return None, ""
+    # ``is_legal`` reads only ``.stage`` off its arg (the producer-drives-TMA rule) — pass a probe.
+    if not ws.is_legal(SimpleNamespace(stage=stage)):
+        return None, ""
+    aux = 32 * ws.aux_warps
+    if block_threads is None or aux > block_threads or block_threads + aux > MAX_BLOCK_THREADS:
+        return None, ""
+    return ws, spec
 
 
 def _check_warp_static_k(kernel, wt) -> None:
@@ -862,7 +886,9 @@ def _splitk_option(
     return TileOp(op=op, name=name, place=place, tier=inner.tile, stage=stage, knobs=stamped)
 
 
-def _warp_option(tile, place, spec: str, name: str, knobs: dict, stage_spec: str = "", budget: int = STATIC_SMEM_CAP) -> TileOp:
+def _warp_option(
+    tile, place, spec: str, name: str, knobs: dict, stage_spec: str = "", budget: int = STATIC_SMEM_CAP, wspec_spec: str = ""
+) -> TileOp:
     """One scheduled warp-tier contraction ``TileOp``: ``place`` mapped onto the grid + the warp
     form of the ``TILE`` spec resolved into the warp-atom :class:`TilePlan`, plus an optional operand
     ``STAGE`` resolved into a :class:`Stage`. The tiled :class:`Contraction` leaf is built here (``op``),
@@ -885,10 +911,10 @@ def _warp_option(tile, place, spec: str, name: str, knobs: dict, stage_spec: str
     # Re-wrap the recognizer's projecting ``Map`` around the tiled node (materialize peels it into
     # the store tail — the same ``project ∘ contract`` spelling the Reduction tiers use).
     emitted = replace(tile.op, source=op) if isinstance(tile.op, Map) and isinstance(tile.op.source, Contraction) else op
-    # Warp specialization rides ORTHOGONAL to the tile/stage just resolved: an optional WSPEC pin
-    # splits the warps into roles over this fixed pipeline (gated on the RESOLVED ``stage`` — an
-    # ineligible pin leaves no pipeline for a producer to drive, so WSPEC degrades to uniform).
-    workers, wspec_spec = _wspec_workers(stage)
+    # Warp specialization rides ORTHOGONAL to the tile/stage just resolved: an optional WSPEC row /
+    # pin splits the warps into roles over this fixed pipeline (gated on the RESOLVED ``stage`` — an
+    # ineligible spec leaves no pipeline for a producer to drive, so WSPEC degrades to uniform).
+    workers, wspec_spec = _wspec_workers(wspec_spec, stage, op.block_threads)
     # The per-node schedule codecs key ``@<k_axis>`` (the contraction axis this node schedules), so a
     # multi-node kernel can address each node; ``WSPEC`` stays root-global (bare).
     kaxis = op.k_axis.name
@@ -1002,7 +1028,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
             if red and ReducePlan.parse(red).needs_split:
                 return _splitk_option(tile, place, spec, red, name, knobs, stage_spec, _smem_budget(ctx))
             if is_warp_codec(spec):
-                return _warp_option(tile, place, spec, name, knobs, stage_spec, _smem_budget(ctx))
+                return _warp_option(tile, place, spec, name, knobs, stage_spec, _smem_budget(ctx), row.get(WSPEC.name, ""))
             return _tile_option(tile, place, spec, name, knobs, red, stage_spec, _smem_budget(ctx))
 
         if len(rows) == 1:
@@ -1011,7 +1037,9 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         def _level(key: str) -> Level:
             return Level((key,), key=lambda r: (r.get(key, ""),))
 
-        levels = [_level(_at(k, kaxis)) for k in (TILE, STAGE, REDUCE)]
+        # The worker split (``WSPEC``, bare/root-global) is the fourth level, under the pipeline it
+        # splits — option-0 ``""`` is uniform SIMT.
+        levels = [_level(_at(k, kaxis)) for k in (TILE, STAGE, REDUCE)] + [_level(WSPEC.name)]
         return build_fork_tree(params=rows, levels=levels, materialize=_materialize)
     # A TWISTED streaming reduce whose per-step partial is a contraction pair takes the WARP
     # (fragment-resident) tier when the mma atom is eligible, then the scalar register-vector CHAIN

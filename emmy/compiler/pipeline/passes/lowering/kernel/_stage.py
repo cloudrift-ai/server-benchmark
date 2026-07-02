@@ -31,14 +31,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.kernel.ir import (
     CpAsyncCommit,
     CpAsyncCopy,
     CpAsyncWait,
+    MbarrierArrive,
     MbarrierArriveExpectTx,
     MbarrierInit,
     MbarrierWait,
+    SetMaxNReg,
     Smem,
     Sync,
     TmaDescriptor,
@@ -450,8 +452,117 @@ class TmaTransport:
         return [MbarrierWait(mbar=self.mbar, phase=phase, slot=slot)]
 
 
+# The warp-specialized slot-release ring — consumers arrive after draining a slot, the producer
+# parity-waits before refilling it (the reverse handshake the uniform path's trailing CTA barrier
+# provided). One u64 mbarrier per ring slot, arrive count = the compute-thread count.
+_EMPTY_MBAR = "_mbar_empty"
+
+# Register redistribution between the bands (``setmaxnreg``, sm_90+ — every warp-spec kernel is
+# TMA-gated, so the ``sm_<nn>a`` compile arch is already in effect). The proven pre-rebuild split:
+# producers drop to the 24-register floor, consumers raise to 240. ``setmaxnreg.inc`` claims from
+# the SM's per-CTA pool, so emit the pair only when the raised total provably fits the 64K-register
+# file — past that envelope the split still runs, just without redistribution.
+_PRODUCER_REGS = 24
+_CONSUMER_REGS = 240
+_SM_REGFILE = 65536
+
+
+def _wspec_kloop(
+    *,
+    transport: TmaTransport,
+    drain: Callable[[Expr], list[Stmt]],
+    ring: int,
+    bk_elems: int,
+    n_chunks: int,
+    k_extent: int,
+    aux_threads: int,
+    block_threads: int,
+) -> tuple[list[Stmt], list[Stmt]]:
+    """The warp-SPECIALIZED staged K-loop — the same fill → wait → drain phases as the uniform
+    skeleton below, split across two warp bands instead of software-pipelined in-warp. The producer
+    band rides at the TAIL of the thread block (``threadIdx.x >= block_threads`` — the compute
+    warps' grid decode is untouched, and the wrapped aux decode makes ``linear_tid == 0`` elect
+    exactly the first producer thread for the TMA fill, so the transport is reused verbatim):
+
+    - **producer** (``aux_threads``): its ELECTED thread (the transport's ``linear_tid == 0`` —
+      the wrapped aux decode makes that exactly the band's first thread) primes slots
+      ``0..ring-2``, then per chunk parity-waits the consumers' release of the target slot
+      (:data:`_EMPTY_MBAR`, skipped on the first lap) and arms + box-copies the prefetch chunk.
+      The non-elected producer threads run an empty loop and park.
+    - **compute** (``block_threads``): per chunk parity-waits the data mbarrier, drains the slot
+      (ldmatrix + mma), then a named ``bar.sync`` over the compute band (a CTA-wide
+      ``__syncthreads()`` is UB on the divergent role branch) and ONE elected arrive releases the
+      slot — the elected release rides the barrier's happens-before, so the empty mbarrier counts
+      1, not ``block_threads`` (one smem atomic per chunk instead of one per thread; the
+      pre-rebuild split used the same shape). The arrive helper carries the ``fence.proxy.async``
+      that orders the band's GENERIC slab reads before the producer's next ASYNC box-copy into
+      the slot.
+
+    ``SetMaxNReg`` redistributes the register file between the branches when the raised total fits.
+    """
+    tid = Builtin("thread_idx.x")
+    decls = transport.slab_decls(ring)
+    decls.append(Smem(name=_EMPTY_MBAR, extents=(ring,), dtype="unsigned long long"))
+    # Prologue (pre-split, CTA-wide): ONE raw-tid-elected thread inits both mbarrier rings — the
+    # transport's wrapped ``linear_tid == 0`` election would match one compute AND one aux thread
+    # here — then a CTA barrier publishes the init. The transport's own prologue is not used.
+    inits = tuple(MbarrierInit(mbar=transport.mbar, count=1, slot=_lit(s)) for s in range(ring))
+    inits += tuple(MbarrierInit(mbar=_EMPTY_MBAR, count=1, slot=_lit(s)) for s in range(ring))
+    pre: list[Stmt] = [Cond(cond=BinaryExpr("==", tid, _lit(0)), body=inits), Sync()]
+
+    k0, K = "_ks", k_extent
+    i_expr = BinaryExpr("/", Var(k0), _lit(bk_elems))
+    kaxis = Axis(name=k0, extent=K)
+    setmaxnreg = _CONSUMER_REGS * block_threads + _PRODUCER_REGS * aux_threads <= _SM_REGFILE
+
+    # Producer: prefetch chunk ``c = i + ring - 1`` into slot ``c % ring`` (k0 clamped to the last
+    # chunk on the overrun tail, exactly as the uniform ring does); from the second lap on
+    # (``c >= ring`` ⟺ ``i >= 1``) wait release generation ``c/ring - 1`` first. The empty-wait
+    # rides INSIDE the transport's elected-thread fill ``Cond`` — only the thread that issues the
+    # box copy needs the slot's release.
+    pref_chunk = BinaryExpr("+", i_expr, _lit(ring - 1))
+    pref_slot = BinaryExpr("%", pref_chunk, _lit(ring))
+    empty_phase = BinaryExpr("%", BinaryExpr("-", BinaryExpr("/", pref_chunk, _lit(ring)), _lit(1)), _lit(2))
+    if ring >= 2:
+        k0_next = BinaryExpr("+", Var(k0), _lit((ring - 1) * bk_elems))
+        k0_pref = TernaryExpr(cond=BinaryExpr("<", k0_next, _lit(K)), if_true=k0_next, if_false=_lit((n_chunks - 1) * bk_elems))
+    else:
+        k0_pref = Var(k0)
+    (fill_cond,) = transport.fill(k0=k0_pref, slot=pref_slot)
+    assert isinstance(fill_cond, Cond), "TmaTransport.fill is the elected-thread Cond"
+    empty_wait = Cond(cond=BinaryExpr(">=", i_expr, _lit(1)), body=(MbarrierWait(mbar=_EMPTY_MBAR, phase=empty_phase, slot=pref_slot),))
+    prod_body: list[Stmt] = [Cond(cond=fill_cond.cond, body=(empty_wait, *fill_cond.body))]
+    prod: list[Stmt] = [SetMaxNReg(_PRODUCER_REGS, "dec")] if setmaxnreg else []
+    for s in range(ring - 1):  # prime chunks 0..ring-2 into slots 0..ring-2 (release generation 0)
+        prod += transport.fill(k0=_lit(s * bk_elems), slot=_lit(s))
+    prod.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(prod_body)), unroll=False))
+
+    # Compute: wait the data parity, drain the slot, close the band on the named barrier, release.
+    read_slot = BinaryExpr("%", i_expr, _lit(ring))
+    read_phase = BinaryExpr("%", BinaryExpr("/", i_expr, _lit(ring)), _lit(2))
+    cons_body: list[Stmt] = list(transport.wait(in_flight=ring - 1, slot=read_slot, phase=read_phase))
+    cons_body += drain(read_slot)
+    cons_body.append(Sync(barrier_id=1, count=block_threads))
+    cons_body.append(
+        Cond(cond=BinaryExpr("==", transport.cta.linear_tid, _lit(0)), body=(MbarrierArrive(mbar=_EMPTY_MBAR, slot=read_slot),))
+    )
+    cons: list[Stmt] = [SetMaxNReg(_CONSUMER_REGS, "inc")] if setmaxnreg else []
+    cons.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(cons_body)), unroll=False))
+
+    role = Cond(cond=BinaryExpr(">=", tid, _lit(block_threads)), body=tuple(prod), else_body=tuple(cons))
+    return decls, [*pre, role]
+
+
 def staged_kloop(
-    *, transport, drain: Callable[[Expr], list[Stmt]], depth: int, bk_elems: int, n_chunks: int, k_extent: int
+    *,
+    transport,
+    drain: Callable[[Expr], list[Stmt]],
+    depth: int,
+    bk_elems: int,
+    n_chunks: int,
+    k_extent: int,
+    workers=None,
+    block_threads: int | None = None,
 ) -> tuple[list[Stmt], list[Stmt]]:
     """The **one** staged K-loop skeleton — ``fill → commit → wait → drain → Sync`` over the K-chunks,
     with ``depth`` the sole buffering knob and ``transport`` the sole producer seam. Returns
@@ -467,8 +578,25 @@ def staged_kloop(
 
     ``transport`` supplies fill/commit/wait + the slab layout; ``drain(slot)`` is the atom leaf reading
     ring ``slot`` (``ldmatrix`` fragments / scalar slab ``Load``\\ s). For TMA the wait phase toggles per
-    slot generation (``chunk // ring``); cp.async ignores it (it gates on the commit group instead)."""
+    slot generation (``chunk // ring``); cp.async ignores it (it gates on the commit group instead).
+
+    ``workers`` (a resolved :class:`~emmy.compiler.ir.schedule.WarpSpec`) splits the same phases
+    across producer / compute warp bands instead (:func:`_wspec_kloop`) — TMA transport only (the
+    scheduler's legality gate), ``block_threads`` naming the compute band."""
     ring = min(depth, n_chunks) if n_chunks >= 2 else 1
+    if workers is not None:
+        assert isinstance(transport, TmaTransport), "warp specialization drives the TMA transport only (scheduler legality)"
+        assert block_threads is not None, "warp specialization needs the compute-band thread count"
+        return _wspec_kloop(
+            transport=transport,
+            drain=drain,
+            ring=ring,
+            bk_elems=bk_elems,
+            n_chunks=n_chunks,
+            k_extent=k_extent,
+            aux_threads=32 * workers.aux_warps,
+            block_threads=block_threads,
+        )
     k0, K = "_ks", k_extent
     decls = transport.slab_decls(ring)
     pre = transport.prologue(ring)

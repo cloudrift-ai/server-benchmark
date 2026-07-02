@@ -455,7 +455,14 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         return ops.staged_drain(operands, slot, cells, offset, mn)
 
     return staged_kloop(
-        transport=transport, drain=drain, depth=stage.depth, bk_elems=stage.bk_elems, n_chunks=K // stage.bk_elems, k_extent=K
+        transport=transport,
+        drain=drain,
+        depth=stage.depth,
+        bk_elems=stage.bk_elems,
+        n_chunks=K // stage.bk_elems,
+        k_extent=K,
+        workers=ops.workers,
+        block_threads=c.block_threads,
     )
 
 
@@ -600,6 +607,7 @@ class _AtomOps:
     c: Contraction
     stage: Stage | None = None
     inputs: object = None
+    workers: object = None  # the resolved WarpSpec (None = uniform SIMT) — consumed by _staged
 
     def reduce(self, cells, offset, mn):
         """The contraction K-loop — the ONE driver both atoms flow through, deciding nothing: a
@@ -811,18 +819,19 @@ class _ScalarOps(_AtomOps):
         return _dedup_loads(cell)
 
 
-def _atom_ops(c: Contraction, stage: Stage | None = None, inputs=None) -> _AtomOps:
+def _atom_ops(c: Contraction, stage: Stage | None = None, inputs=None, workers=None) -> _AtomOps:
     """The **one** atom dispatch — select the codegen strategy off the atom kind."""
-    return _MmaOps(c, stage, inputs) if isinstance(c.atom, AtomKind) else _ScalarOps(c, stage, inputs)
+    return _MmaOps(c, stage, inputs, workers) if isinstance(c.atom, AtomKind) else _ScalarOps(c, stage, inputs, workers)
 
 
-def reduce_codegen(c: Contraction, stage: Stage | None = None, inputs=None):
+def reduce_codegen(c: Contraction, stage: Stage | None = None, inputs=None, workers=None):
     """The reusable, **sink-agnostic** ``(state_decls, reduce_region)`` from the atom strategy — the
     accumulator decls + the contraction K-loop (the ONE :meth:`_AtomOps.reduce` driver: the shared
     :func:`_contract_kloop` spine gmem-direct, the shared :func:`_staged` fill→drain skeleton staged).
     ``stage`` / ``inputs`` bind operand staging (both atoms stage the same smem slab off it, differing
-    only in the drain leaf — ``ldmatrix`` vs plain ``Load``)."""
-    ops = _atom_ops(c, stage, inputs)
+    only in the drain leaf — ``ldmatrix`` vs plain ``Load``); ``workers`` splits the staged phases
+    across producer / compute warp bands (the resolved :class:`WarpSpec`; ``None`` = uniform)."""
+    ops = _atom_ops(c, stage, inputs, workers)
     return ops.state, ops.reduce
 
 

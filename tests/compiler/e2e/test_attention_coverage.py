@@ -263,14 +263,16 @@ def test_flash_chain_matches_torch(monkeypatch, B, H, S, D):
 
 
 # =========================================================================== #
-# Tensor-core flash — XFAILED (capability removed as a deviation).
+# Tensor-core flash — the fragment-resident warp tier.
 # =========================================================================== #
 # These cases expect a fp16/bf16 SDPA to lower to a single ``mma.sync`` kernel (the warp chain:
 # tiled + atomized contractions, fragment online-softmax, C->A smem handoff) — realized through the
-# ONE pipeline: ``_schedule._twisted_warp_option`` stamps the mma ``TilePlan``\ s on the Q@K / P@V
+# ONE pipeline: ``_schedule._twisted_warp_options`` stamps the mma ``TilePlan``\ s on the Q@K / P@V
 # ``Contraction``\ s and ``_bind``'s reduce arm realizes the TWISTED carrier at fragment residence
 # (``_twist``). No private emitter exists; a bespoke path would be the mandate violation the
-# demolition removed.
+# demolition removed. Unpinned, the warp rows are fork SIBLINGS of the chain / reduce-partition
+# forms (the flash-form fork) — the cold ``AnalyticPrior`` pick stays warp-when-eligible, which is
+# what these cold-compile cases pin.
 
 
 def _compile_tc(q, k, v, module=None):
@@ -297,6 +299,57 @@ def test_generated_tensorcore_flash_matches_torch(monkeypatch, B, H, S, D):
     got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
     max_diff = float(np.max(np.abs(got - eager)))
     assert max_diff < 5e-3, f"generated TC flash {(B, H, S, D)} max_diff={max_diff:.2e}"
+
+
+def test_flash_form_fork_offers_geometry_grid():
+    """The flash-form fork's enumerated rows (live-fork capture, no GPU): fp16 offers the full
+    warp move grid (every divisibility-legal ``(warps_m, key_atoms)`` point) plus the chain and the
+    per-cell serial escape, every row spelling the SAME ``TILE@dd`` / ``TILE@pj`` / ``REDUCE@kv``
+    key set (the evidence pick's prefix-consistency); f32 (no mma atom) offers chain + serial."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.ir.schedule import is_warp_codec  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.analytic import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import twisted_warp_moves  # noqa: PLC0415
+    from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
+
+    ctx = Context.from_target((12, 0))
+    for dtype, want_warp in ((torch.float16, len(twisted_warp_moves())), (torch.float32, 0)):
+        q, k, v = (torch.randn(1, 4, 128, 64, dtype=dtype) for _ in range(3))
+        graph = trace_module(_Sdpa().cpu(), (q, k, v))
+        rows = [r for r in enumerate_graph(graph, ctx) if "TILE@dd" in r or "TILE@pj" in r or "REDUCE@kv" in r]
+        assert all({"TILE@dd", "TILE@pj", "REDUCE@kv"} <= set(r) for r in rows), "flash rows must spell one uniform key set"
+        warp = [r for r in rows if is_warp_codec(r["TILE@dd"])]
+        chain = [r for r in rows if not is_warp_codec(r["TILE@dd"]) and r["TILE@pj"]]
+        serial = [r for r in rows if not r["TILE@dd"] and not r["TILE@pj"]]
+        # (1, 4, 128, 64): every (warps_m, key_atoms) point is divisibility-legal (128 % (um·16) == 0,
+        # 128 % (nt·8) == 0), so the fp16 pool is the whole grid.
+        assert len(warp) == want_warp, f"{dtype}: expected {want_warp} warp rows, got {len(warp)}"
+        assert len(chain) == 1 and len(serial) >= 1, f"{dtype}: chain/serial siblings missing ({len(chain)}/{len(serial)})"
+
+
+@requires_cuda
+@pytest.mark.parametrize(("um", "nt"), [(2, 4), (4, 8)])
+def test_warp_flash_geometry_pin_matches_torch(monkeypatch, um, nt):
+    """A pinned non-conservative warp-flash geometry — several warps per CTA, a wide streaming key
+    block (the per-step C→A slices) — still lowers through the one fragment realizer and matches
+    torch. Pins the move grid's realizability, not just the conservative option-0 the cold pick takes."""
+    monkeypatch.setenv("EMMY_TILE", f"a:mma_m16n8k16_f16/w{um}x1/f1x{nt}/k4")
+    torch.manual_seed(um * 10 + nt)
+    q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
+    backend, compiled, graph, kernels = _compile_tc(q, k, v)
+    assert len(kernels) == 1, f"pinned warp flash should be one kernel, got {len(kernels)}"
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "flash_pv_smem" in src, "must be the fused warp form (C->A smem handoff)"
+
+    def ref():
+        with torch.no_grad():
+            return torch.nn.functional.scaled_dot_product_attention(q.cuda(), k.cuda(), v.cuda()).cpu().flatten().float().numpy()
+
+    data = {n: t for n, t in zip(graph.inputs, (q.numpy(), k.numpy(), v.numpy()), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=ref)
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    max_diff = float(np.max(np.abs(got - eager)))
+    assert max_diff < 5e-3, f"pinned warp flash w{um}/f1x{nt} max_diff={max_diff:.2e}"
 
 
 @requires_cuda

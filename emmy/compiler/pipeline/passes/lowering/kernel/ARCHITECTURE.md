@@ -191,9 +191,14 @@ the operand's own index evaluated at the tile base — an offset operand lands t
 ## The fragment realizer (`_twist.py`) — a TWISTED carrier at warp-fragment residence
 
 A `TWISTED` streaming reduce whose contractions carry mma `TilePlan`s (stamped by
-`_schedule._twisted_warp_option` — tensor-core flash) realizes at FRAGMENT residence: `_bind`'s reduce arm keys on the
+`_schedule._twisted_warp_options` — tensor-core flash) realizes at FRAGMENT residence: `_bind`'s reduce arm keys on the
 structural warp-tile read (`_twist.warp_source`) and `realize_warp_twist` produces the `(state, fold, close)` triple
-the one pipeline seals, the kernel warp-collective through the same `lanes` parameter `grid_tile` already takes. This
+the one pipeline seals, the kernel warp-collective through the same `lanes` parameter `grid_tile` already takes. The
+geometry is read off the stamped plans, never fixed: the streaming key-block width is the Q@K plan's `regs[1]` (the
+C→A handoff stages one resident A slice per `atom_k` chunk of the block — `pv.tile.bk` `ldmatrix` reads, each mma
+K-step consuming its own slice, the symbolic-KV zero-fill origin advancing per step), and `units[0] > 1` maps several
+warps per CTA — each owning its own `atom_m` query-row block via the `FLASH_WARP_AXIS` term the `Tile` decode binds
+ahead of the lane axis, the handoff slab gaining a leading per-warp dim. This
 is the placement-keyed fold's **fragment row**: where the scalar tier folds in-thread, the fragment tier's per-block
 fold is a `FragmentRowReduce` `__shfl` butterfly over the C-fragment lanes. The fold MOVE itself is never re-decided
 per site: `ReduceStage.combine` (`ir/schedule.py`) is the ONE placement-keyed selector — within-warp → `SHFL`,

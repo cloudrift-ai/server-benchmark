@@ -113,6 +113,33 @@ def _static(d) -> int | None:
     return d.as_static() if d.is_static else None
 
 
+def _struct_features(batch: list[int], s_q: Dim, s_k: Dim, head_dim: int, d_v: int) -> dict[str, float]:
+    """The ``S_ext_*`` structural skeleton for the fused flash kernel — the same extent features
+    ``loop/stamp``'s ``020_stamp_structural_features`` would put on a ``LoopOp``, computed here
+    because the fused fragment is BUILT as a ``TileOp`` (it never passes the loop-dialect stamp).
+    Free = the grid ``(batch…, m, d)``, reduce = the streamed ``kv`` + the score ``dd``; a symbolic
+    seq axis is excluded from the products and counted in ``S_ext_n_symbolic_axis`` (the flag the
+    ``AnalyticPrior`` selects its masked-tier weight set on). Riding the ``TileOp`` knob base, they
+    reach every flash fork leaf row, so the prior's occupancy terms fire when ranking the forms."""
+    free = [*batch, d_v]
+    reduce_ = [head_dim]
+    n_symbolic = 0
+    for dim, bucket in ((s_q, free), (s_k, reduce_)):
+        if dim.is_static:
+            bucket.append(dim.as_static())
+        else:
+            n_symbolic += 1
+    return {
+        "S_ext_n_free_axis": float(len(free)),
+        "S_ext_free_prod": float(math.prod(free)),
+        "S_ext_free_max": float(max(free)),
+        "S_ext_n_reduce_axis": float(len(reduce_)),
+        "S_ext_reduce_prod": float(math.prod(reduce_)),
+        "S_ext_reduce_max": float(max(reduce_)),
+        "S_ext_n_symbolic_axis": float(n_symbolic),
+    }
+
+
 def gqa_group(q_shape: tuple, k_shape: tuple) -> int | None:
     """The grouped-query head ratio ``q_heads // kv_heads`` (1 when equal-head),
     or ``None`` when the head axis isn't statically divisible. The head axis is the
@@ -207,8 +234,11 @@ def build_flash_frag(
     # like every other recognizer; ``_schedule`` (inside ``010_recognize``) maps ``free`` onto the grid.
     # ``PLACE@fold=fuse`` is the RESOLVED downstream-fold placement this fragment realizes (the fused
     # flash kernel vs the cut's separate score + softmax-P@V kernels) — root-global, ridden through
-    # scheduling on ``knobs`` so the DB row / featurizer sees the structural decision.
-    tile = TileOp(op=flash_op, place=Placement(free=grid), knobs={"PLACE@fold": "fuse"})
+    # scheduling on ``knobs`` so the DB row / featurizer sees the structural decision. The
+    # ``S_ext_*`` skeleton rides alongside (:func:`_struct_features` — the fused fragment never
+    # passes the loop-dialect stamp) so the prior can price the flash forms' occupancy.
+    knobs = {"PLACE@fold": "fuse", **_struct_features(batch, s_q_dim, s_k_dim, head_dim, d_v)}
+    tile = TileOp(op=flash_op, place=Placement(free=grid), knobs=knobs)
 
     frag = Graph()
     for nid, shp in ((q_id, q_shape), (k_id, k_shape), (v_id, v_shape)):
@@ -566,6 +596,24 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
     return build_flash_frag(
         q_id, k_id, v_id, q_shape, k_shape, v_shape, root.output, causal=(mask_kind == "causal"), group=group, mask=mask
     )
+
+
+def fused_producer_ids(graph: Graph, root: Node) -> tuple[str, ...]:
+    """The producer node ids a flash fusion of ``root`` would CONSUME — the score ``LoopOp``
+    absent from the fused fragment — or ``()`` (``root`` is not a fusable softmax-then-P@V
+    consumer, or the ``PLACE@fold`` pin forces the cut). The two-level tuner's slicing reads
+    this: the inner per-op slice for ``root`` must carry the consumed producer as a REAL node
+    (not a synthetic input boundary), otherwise ``try_flash`` can never re-fuse inside the
+    slice and every tune trajectory silently degrades to the cut — the fused flash fork would
+    be unreachable under tune."""
+    from emmy.compiler.pipeline.search.space import place_decision  # noqa: PLC0415
+
+    if place_decision("fold") != "fuse":
+        return ()
+    frag = try_flash(graph, root)
+    if frag is None:
+        return ()
+    return tuple(nid for nid in root.inputs if nid not in frag.nodes and isinstance(graph.nodes[nid].op, LoopOp))
 
 
 def is_flash_score_producer(graph: Graph, root: Node) -> bool:

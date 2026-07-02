@@ -57,7 +57,7 @@ from emmy.compiler.ir.tile import Fold, Level, ReduceStage
 from emmy.compiler.ir.tile.ir import Contraction, Map, Reduction, Side
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import copy_cell, reduce_codegen, shrink_axis, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import sync_row_fill
-from emmy.compiler.pipeline.passes.lowering.kernel._twist import realize_warp_twist, warp_source
+from emmy.compiler.pipeline.passes.lowering.kernel._twist import FLASH_WARP_AXIS, realize_warp_twist, warp_source
 
 
 # ---- generic tiling layer: atomize → register_tile → unit_tile → grid_tile ---------------------- #
@@ -384,10 +384,15 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
             # A warp-tiled TWISTED tree (the schedule stamped mma TilePlans on its contractions):
             # the per-step values live in mma C-fragments, so the whole reduce realizes at fragment
             # residence (``_twist``) and the kernel is warp-collective — the same ``lanes`` seam the
-            # output-tiled contraction arm uses.
+            # output-tiled contraction arm uses. ``units[0] > 1`` warps per CTA each own their own
+            # query-row block: the warp axis joins the Tile decode ahead of the lane axis, and the
+            # block launches ``units[0]`` warps.
             state, fold, close = realize_warp_twist(op, ctx, tail)
             lanes = wsrc.tile.atom.lanes
-            bt = lanes
+            um = wsrc.tile.units[0]
+            if um > 1:
+                t = replace(t, axes=(Axis(name=FLASH_WARP_AXIS, extent=um),))
+            bt = lanes * um
         elif csrc is not None:
             # The chain schedule — the expect column axis rides a per-thread register vector (the
             # FA-2 shared-score form); one thread per (grid) cell, the column index a literal.

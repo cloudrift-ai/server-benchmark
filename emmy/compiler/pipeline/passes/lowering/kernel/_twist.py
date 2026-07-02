@@ -71,6 +71,10 @@ _COMPS = ("0", "1")
 #: the expect contraction's A operand (pinned by the e2e recovery contract).
 _PV_SMEM = "flash_pv_smem"
 
+#: The per-CTA warp index axis (bound by the ``Tile`` decode when the schedule maps more than one
+#: warp per CTA — ``qk.tile.units[0] > 1``); each warp owns its own ``atom_m`` query-row block.
+FLASH_WARP_AXIS = "_wq"
+
 #: Negation of a comparison — a ``Select`` KEEPS where its predicate holds; a ``FragmentMask``
 #: FILLS where its predicate holds, so the keep-predicate flips.
 _NEGATE = {"<=": ">", "<": ">=", ">=": "<", ">": "<=", "==": "!="}
@@ -125,13 +129,15 @@ def _reads(s: Stmt) -> set[str]:
 
 
 def _frag_contraction(
-    c: Contraction, acc_frags: tuple[str, ...], a_frag: str, *, m_sub: Expr, n_sub, k_sub: Expr, mask: dict
+    c: Contraction, acc_frags: tuple[str, ...], a_frag: str, *, m_sub: Expr, n_sub, k_sub: Expr, mask: dict, a_frags: tuple[str, ...] = ()
 ) -> list[Stmt]:
     """One warp-tiled :class:`Contraction` step as fragment codegen — the ``read → ⊗ → fold`` spine
     at fragment residence, geometry off the node (``b_trans`` / operand indices / ``ldm``) and its
     stamped :class:`TilePlan` (``regs`` / ``bk``). ``a_frag`` is the A-operand fragment: filled per
     K-step from the node's ``a_operand`` gmem ``Load`` when it is one, else already resident (the
-    caller ran the C→A handoff). ``m_sub`` / ``n_sub(t)`` / ``k_sub`` give each axis's tile-origin
+    caller ran the C→A handoff); ``a_frags`` optionally names one resident fragment PER K-step (the
+    wide-key-block handoff stages ``bk`` A slices, one per ``atom_k`` chunk of the streamed block).
+    ``m_sub`` / ``n_sub(t)`` / ``k_sub`` give each axis's tile-origin
     expr; ``mask`` maps an axis name to its ``(coord, extent)`` overhang guard — a masked A row
     clamp-reads (``gmem_guard``), a masked B column clamp-reads (transposed-B ``gmem_guard``) or
     zero-fills its overhanging K rows (canonical-B ``k_zero``)."""
@@ -149,10 +155,11 @@ def _frag_contraction(
     for step in range(c.tile.bk):
         off = Literal(step * shape[2], "int")
         k0 = k_sub if step == 0 else (off if isinstance(k_sub, Literal) and k_sub.value == 0 else BinaryExpr("+", k_sub, off))
+        step_a = a_frags[step] if a_frags else a_frag
         if a_load is not None:
             out.append(
                 LdmatrixLoad(
-                    frag=a_frag,
+                    frag=step_a,
                     src_buffer=a_load.input,
                     src_index=_idx(a_load, {m_name: m_sub, k_name: k0}),
                     role="a",
@@ -164,6 +171,7 @@ def _frag_contraction(
         for t in range(nt):
             col = n_sub(t)
             n_guard = mask.get(n_name)
+            kz = mask.get(k_name) if not b_trans else None
             out.append(
                 LdmatrixLoad(
                     frag=f"_{c.acc}_b{t}",
@@ -174,10 +182,12 @@ def _frag_contraction(
                     staged=False,
                     b_trans=b_trans,
                     gmem_guard=(col, n_guard[1]) if (n_guard is not None and b_trans) else None,
-                    k_zero=mask.get(k_name) if not b_trans else None,
+                    # The zero-fill origin advances with the K step (this slice's own base), so a
+                    # symbolic bound masks each ``atom_k`` chunk of a wide block correctly.
+                    k_zero=(k0, kz[1]) if kz is not None else None,
                 )
             )
-            out.append(MmaSyncPtx(c_frag=acc_frags[t], a_frag=a_frag, b_frag=f"_{c.acc}_b{t}", shape=shape, ab_dtype=atom.ab_dtype))
+            out.append(MmaSyncPtx(c_frag=acc_frags[t], a_frag=step_a, b_frag=f"_{c.acc}_b{t}", shape=shape, ab_dtype=atom.ab_dtype))
     return out
 
 
@@ -243,10 +253,15 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     bn = nt * atom_n  # the streaming KV block width
     d_v = pv.n_axis.extent.as_static()
 
-    # The ambient warp cell: the last grid axis is the shrunk query-block axis (one warp per
-    # ``atom_m`` query rows); the stream rides the reduce axis in ``bn``-key blocks.
+    # The ambient warp cell: the last grid axis is the shrunk query-block axis (``um`` warps per
+    # CTA, each owning ``atom_m`` query rows — the ``FLASH_WARP_AXIS`` term is bound by the
+    # ``Tile`` decode when ``um > 1``); the stream rides the reduce axis in ``bn``-key blocks.
     grid = tuple(ctx.grid)
-    row_base = BinaryExpr("*", Var(grid[-1].name), Literal(shape[0], "int"))
+    um = qk.tile.units[0]  # warps per CTA over the query rows
+    m_blk: Expr = Var(grid[-1].name)
+    if um > 1:
+        m_blk = BinaryExpr("+", BinaryExpr("*", m_blk, Literal(um, "int")), Var(FLASH_WARP_AXIS))
+    row_base = BinaryExpr("*", m_blk, Literal(shape[0], "int"))
     kv_axis = red.axis
     kv0 = Axis(name=f"{kv_axis.name}0", extent=kv_axis.extent)
     kv0_var = Var(kv0.name)
@@ -264,7 +279,11 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     denom_name = next(n for n, ch in zip(names[1:], channels[1:], strict=True) if ch.lift is None)
 
     # ---- state: the C→A slab + running stats + output accumulators ---------------------------- #
-    state: list[Stmt] = [Smem(name=_PV_SMEM, extents=(shape[0], bn), dtype=_cuda(atom.operand_dtype("a")))]
+    # The handoff slab gains a leading per-warp dim when the CTA runs several warps (each warp's
+    # P block is private — the ldmatrix reads its own warp's rows).
+    slab_extents = (um, shape[0], bn) if um > 1 else (shape[0], bn)
+    wq_idx: tuple[Expr, ...] = (Var(FLASH_WARP_AXIS),) if um > 1 else ()
+    state: list[Stmt] = [Smem(name=_PV_SMEM, extents=slab_extents, dtype=_cuda(atom.operand_dtype("a")))]
     for c in _COMPS:
         state.append(Init(name=f"{pivot_name}{c}", identity=-1e30, dtype=F32))
         state.append(Init(name=f"{denom_name}{c}", identity=0.0, dtype=F32))
@@ -323,14 +342,30 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         stream.append(FragmentApply(out=f, op=_MUL, args=(f, _row_pair("_al")), kinds=(FRAG, ROW), in_place=True))
     for t, pf in enumerate(pfrags):
         stream.append(
-            RegStore(dst_buffer=_PV_SMEM, dst_index=(Literal(0, "int"), Literal(t * atom_n, "int")), frag=pf, shape=shape, ldm=bn)
+            RegStore(dst_buffer=_PV_SMEM, dst_index=(*wq_idx, Literal(0, "int"), Literal(t * atom_n, "int")), frag=pf, shape=shape, ldm=bn)
         )
     stream.append(Sync())
-    stream.append(RegFragment(name="_pa", role="a", shape=shape, dtype=atom.operand_dtype("a")))
-    stream.append(LdmatrixLoad(frag="_pa", src_buffer=_PV_SMEM, src_index=(Literal(0, "int"),), role="a", ldm=bn, staged=True))
+    # One resident A slice per ``atom_k`` chunk of the streamed block (``pv.tile.bk`` slices —
+    # one for the conservative ``2·atom_n`` block, more when the key block is wider).
+    pv_bk = max(1, pv.tile.bk)
+    pa_frags = tuple(f"_pa{s}" for s in range(pv_bk)) if pv_bk > 1 else ("_pa",)
+    for s, paf in enumerate(pa_frags):
+        stream.append(RegFragment(name=paf, role="a", shape=shape, dtype=atom.operand_dtype("a")))
+        if um > 1 or pv_bk > 1:
+            src: tuple[Expr, ...] = (*wq_idx, Literal(0, "int"), Literal(s * shape[2], "int"))
+        else:
+            src = (Literal(0, "int"),)
+        stream.append(LdmatrixLoad(frag=paf, src_buffer=_PV_SMEM, src_index=src, role="a", ldm=bn, staged=True))
     pv_mask = {kv_axis.name: (kv0_var, seq)} if symbolic_k else {}
     stream += _frag_contraction(
-        _pv_streamed(pv, kv_axis), ofrags, "_pa", m_sub=row_base, n_sub=lambda j: Literal(j * atom_n, "int"), k_sub=kv0_var, mask=pv_mask
+        _pv_streamed(pv, kv_axis),
+        ofrags,
+        pa_frags[0],
+        m_sub=row_base,
+        n_sub=lambda j: Literal(j * atom_n, "int"),
+        k_sub=kv0_var,
+        mask=pv_mask,
+        a_frags=pa_frags if pv_bk > 1 else (),
     )
     stream += _rebind(pivot_name, "_mn")  # advance the running pivot: m = mn
 

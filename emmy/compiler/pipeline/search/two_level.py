@@ -267,6 +267,7 @@ async def _inner_reward_async(
     kernel's best by its node count (order-stable, identical to per-node iteration)."""
     from collections import OrderedDict  # noqa: PLC0415
 
+    from emmy.compiler.pipeline.passes.lowering.tile._flash import fused_producer_ids  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import variant_label  # noqa: PLC0415
 
     ctx_key = ctx.structural_key()
@@ -277,12 +278,24 @@ async def _inner_reward_async(
     # the two keys would coincide).
     o3_ctx_key = replace(ctx, compile_flags=O3_NVCC_FLAGS).structural_key() if "-O3" not in ctx.compile_flags else None
     backend_name = getattr(pool[0], "name", "cuda")
+    # Fold-aware slicing: a flash fold offer site's slice must CARRY the score producer its
+    # fusion consumes (``absorbed[producer] = consumer``) — a single-node slice turns the
+    # producer into a synthetic input, ``try_flash`` can never re-fuse, and every tune
+    # trajectory silently degrades to the cut (benching fragment kernels that greedy deploy
+    # never picks). The absorbed producer loses its own slice — the offer site's slice benches
+    # the whole attention (fused: one kernel; a cut trajectory: both), so the Σ stays honest.
+    absorbed: dict[str, str] = {}
+    for nid, _op in _kernel_nodes(fused_graph):
+        for pid in fused_producer_ids(fused_graph, fused_graph.nodes[nid]):
+            absorbed[pid] = nid
     # Group structurally-identical LoopOps under one ``op_cache_key`` —
     # insertion order = first occurrence (drives the progress tail name).
     # Ops with no cache key are unreachable through the bench path so they
     # don't enter the dedup map at all (matches the previous filter).
     unique: OrderedDict[str, tuple[str, object, int]] = OrderedDict()
     for nid, op in _kernel_nodes(fused_graph):
+        if nid in absorbed:
+            continue  # tuned inside its consumer's fold-offer slice
         key = op_cache_key(op)
         if key is None:
             continue
@@ -307,7 +320,7 @@ async def _inner_reward_async(
         try:
             if progress is not None:
                 progress.op_start(name, slot=op_idx)
-            sub = single_node_graph(fused_graph, nid)
+            sub = single_node_graph(fused_graph, nid, absorb=frozenset(p for p, c in absorbed.items() if c == nid))
             # Base knobs the prior sees on every row: the LoopOp's ``S_*``
             # structural identity (op-aware rows) + the ``H_*`` host/hardware
             # regime (GPU + nvcc opt level), so one global prior spans ops and

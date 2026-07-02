@@ -34,7 +34,7 @@ tests/perf/.results/
 _test_data
 
 # Experiment outputs
-experiments/
+/experiments/
 # Benchmark run dirs: keep result files (*.txt / *.json) + the run's recipe.yaml snapshot,
 # but drop generated logs/state. (Ignore the dir *contents*, not the dir itself, so the
 # negations below can re-include specific files.)

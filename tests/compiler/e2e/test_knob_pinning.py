@@ -37,7 +37,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from ..conftest import dyn_M, requires_cuda
+from ..conftest import dyn_M, requires_cuda, requires_sm90
 
 
 def _format_knobs(knobs: dict) -> str:
@@ -149,6 +149,30 @@ def test_norm_linear_fp16_scalar_reduce_tma_alignment(shape_mode, monkeypatch):
     ref = _reference(static_graph, inputs, out_name)
     forced = _run_with_knobs(forced_graph, inputs, out_name, _NORM_REDUCE_WEDGE_KNOBS, monkeypatch)
     # fp16 reduction drift over H=128 — same looser bound the other fp16 tests use.
+    peak = float(np.max(np.abs(ref.astype(np.float32))))
+    atol = max(5e-1, 0.1 * peak)
+    np.testing.assert_allclose(forced.astype(np.float32), ref.astype(np.float32), atol=atol, rtol=0.1)
+
+
+# The recognize-nodified MONOID fused edge (norm→linear as a computed-A ``Contraction``) pinned to
+# the warp mma tier at a 64-row tile: S=32 overhangs it, so the STATIC mode exercises the masked
+# static-M sync compute-fill (clamped A/stat σ + guarded ``RegStore``) and the DYNAMIC mode the
+# symbolic-M form of the same clamps. K=128 / N=512 exactly cover (the sync fill's N/K contract).
+_NORM_WARP_FUSED_KNOBS = {"TILE": "a:mma_m16n8k16_f16/w2x2/f2x2/k2"}
+
+
+@requires_cuda
+@requires_sm90
+def test_norm_linear_warp_fused_masked_m(shape_mode, monkeypatch):
+    """fp16 ``RmsNorm(x) @ W.T`` pinned to the warp mma tier — the fused edge is ONE mma kernel
+    whose statistic prologue rides the A cone (no separate norm-reduce producer), with the M tail
+    masked in both shape modes."""
+    static_graph, input_shapes, (out_name, _) = _build_norm_linear_graph(_NORM_DIMS)
+    forced_graph, _, _ = _build_norm_linear_graph(_NORM_DIMS, mode=shape_mode)
+    rng = np.random.default_rng(0)
+    inputs = {name: (rng.standard_normal(shape, dtype=np.float32) * 0.1).astype(np.float16) for name, shape in input_shapes.items()}
+    ref = _reference(static_graph, inputs, out_name)
+    forced = _run_with_knobs(forced_graph, inputs, out_name, _NORM_WARP_FUSED_KNOBS, monkeypatch)
     peak = float(np.max(np.abs(ref.astype(np.float32))))
     atol = max(5e-1, 0.1 * peak)
     np.testing.assert_allclose(forced.astype(np.float32), ref.astype(np.float32), atol=atol, rtol=0.1)

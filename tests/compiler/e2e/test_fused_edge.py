@@ -8,9 +8,10 @@ structural pin lives with ``test_fused_prologue_compiles_in_budget``).
 
 The **warp tier** engages under a warp ``TILE`` pin: the demoted cone nodifies to a computed-A
 ``Contraction`` (``_schedule._demoted_warp_option``) and the producer COMPUTE-FILLS the A slab the
-``ldmatrix`` drain reads (the mma tier's ``sync`` transport). Two cells stay xfailed via the
-registry: the broadcast producer recognizes as a flat un-annotated ``Map`` (a recognition gap), and
-the MONOID (rmsnorm) cone carries a reduce — not compute-fillable per cell.
+``ldmatrix`` drain reads (the mma tier's ``sync`` transport). The MONOID (rmsnorm) cone is
+recognize-nodified (``010_recognize``'s ``bind_prologue_contraction`` merge): its statistic reduce
+rides the A cone as a per-row prologue (``sync_stat_fill``), the warp rows are real fork siblings
+of the coop ``Map`` form (exercised unpinned below), and a masked / symbolic M clamp-reads.
 """
 
 from __future__ import annotations
@@ -19,11 +20,12 @@ import numpy as np
 import pytest
 
 from emmy.compiler import dtype as _dt
+from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, RmsNormOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
-from tests.compiler.conftest import requires_cuda
+from tests.compiler.conftest import requires_cuda, requires_sm90
 
 F16 = _dt.get("f16")
 _M, _K, _N = 32, 64, 32  # M != K so the row / col broadcasts are unambiguous
@@ -112,7 +114,8 @@ def test_fused_rmsnorm_linear(tier, monkeypatch):
     numpy reference (whether the linear's N axis rides the grid or a tail sweep is the schedule's
     choice — the staged-shared-row structural pin lives with `test_fused_prologue_compiles_in_budget`,
     whose shape keeps the sweep in-tail). The ``warp`` cell demands the mma tier on the fused
-    matmul (xfailed — the MONOID-producer warp fused edge is not rebuilt)."""
+    matmul — the recognize-nodified computed-A ``Contraction`` (the statistic prologue rides the
+    A cone, run once per tile row by the sync stat fill)."""
     if tier == "warp":
         monkeypatch.setenv("EMMY_TILE", _WARP_TILE)
     S, H, inter = 32, 1024, 3072
@@ -140,3 +143,96 @@ def test_fused_rmsnorm_linear(tier, monkeypatch):
     # rms-scale reduce + fp16 matmul accumulate at K=1024) — rtol=0.1 catches a regression without
     # flaking; atol absorbs near-zero elements where relative error is meaningless.
     np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), rms @ wg.T, atol=0.5, rtol=0.1)
+
+
+def _rmsnorm_linear_graph(S, H: int, inter: int) -> Graph:
+    """``rmsnorm(x)·nw @ wg`` — ``S`` is an int (static) or a ``Dim`` (symbolic seq)."""
+    Sd = S if isinstance(S, Dim) else S
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (1, Sd, H), F16), node_id="x")
+    g.add_node(InputOp(), [], Tensor("nw", (H,), F16), node_id="nw")
+    g.add_node(InputOp(), [], Tensor("wg", (inter, H), F16), node_id="wg")
+    g.add_node(RmsNormOp(eps=1e-6), ["x", "nw"], Tensor("xn", (1, Sd, H), F16), node_id="xn")
+    g.add_node(LinearOp(), ["xn", "wg"], Tensor("o", (1, Sd, inter), F16), node_id="o")
+    g.inputs, g.outputs = ["x", "nw", "wg"], ["o"]
+    return g
+
+
+def _rmsnorm_linear_check(g: Graph, S: int, H: int, inter: int, *, want_mma: bool) -> None:
+    rng = np.random.default_rng(0)
+    ins = {
+        "x": (rng.standard_normal((1, S, H)) * 0.3).astype(np.float16),
+        "nw": (rng.standard_normal((H,)) * 0.3).astype(np.float16),
+        "wg": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
+    }
+    got, srcs = _compile_run(g, ins)
+    assert len(srcs) == 1, f"the fused norm→linear must be ONE kernel, got {len(srcs)}"
+    if want_mma:
+        assert "dpl_mma" in srcs[0], "the pinned mma tier must engage on the fused matmul"
+    x, nw, wg = (ins[k].astype(np.float32) for k in ("x", "nw", "wg"))
+    rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
+    np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), rms @ wg.T, atol=0.5, rtol=0.1)
+
+
+@requires_cuda
+@requires_sm90
+@pytest.mark.parametrize("runtime_s", [31, 130])
+def test_fused_rmsnorm_linear_symbolic_m(runtime_s, monkeypatch):
+    """The MONOID warp fused edge over a **symbolic seq axis** — ONE masked-M mma kernel deployed
+    at the hint and run at off-hint sizes straddling the 64-row tile (31 under, 130 over + tail):
+    the sync compute-fill / stat-prologue σ clamp the overhanging rows and the ``RegStore`` guard
+    discards their store."""
+    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x2/f2x2/k2")  # tile 64×32 — every runtime S is masked
+    H, inter = 256, 512
+    g = _rmsnorm_linear_graph(Dim("seq_len", hint=64), H, inter)
+    _rmsnorm_linear_check(g, runtime_s, H, inter, want_mma=True)
+
+
+@requires_cuda
+def test_fused_rmsnorm_linear_unpinned():
+    """UNPINNED greedy on the fused norm→linear: the merged fork (coop ``Map`` rows + the
+    computed-A Contraction's warp rows) lowers and matches numpy whichever row the prior picks —
+    the fork-integrity e2e (runs on any CUDA device; option-0 stays the coop row)."""
+    S, H, inter = 32, 256, 512
+    _rmsnorm_linear_check(_rmsnorm_linear_graph(S, H, inter), S, H, inter, want_mma=False)
+
+
+@requires_cuda
+@requires_sm90
+@pytest.mark.parametrize("runtime_s", [31, 130])
+def test_fused_gate_up_swiglu_symbolic_m(runtime_s, monkeypatch):
+    """The MULTI-FOLD (product-monoid) fused edge — ``swiglu(rmsnorm(x)·nw @ Wg, rmsnorm(x)·nw @
+    Wu)`` in ONE mma kernel: the two folds share the compute-filled A slab (one ldmatrix'd A
+    fragment feeding per-fold B slabs / C fragments) and the SwiGLU combine rides the store's
+    fragment epilogue; the seq axis is symbolic with a masked M tail (31 under / 130 over the
+    64-row tile)."""
+    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x2/f2x2/k2")
+    S, H, inter = runtime_s, 256, 512
+    Sd = Dim("seq_len", hint=64)
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (1, Sd, H), F16), node_id="x")
+    g.add_node(InputOp(), [], Tensor("nw", (H,), F16), node_id="nw")
+    g.add_node(InputOp(), [], Tensor("wg", (inter, H), F16), node_id="wg")
+    g.add_node(InputOp(), [], Tensor("wu", (inter, H), F16), node_id="wu")
+    g.add_node(RmsNormOp(eps=1e-6), ["x", "nw"], Tensor("xn", (1, Sd, H), F16), node_id="xn")
+    g.add_node(LinearOp(), ["xn", "wg"], Tensor("gate", (1, Sd, inter), F16), node_id="gate")
+    g.add_node(LinearOp(), ["xn", "wu"], Tensor("up", (1, Sd, inter), F16), node_id="up")
+    g.add_node(ElementwiseOp("silu"), ["gate"], Tensor("sg", (1, Sd, inter), F16), node_id="sg")
+    g.add_node(ElementwiseOp("multiply"), ["sg", "up"], Tensor("o", (1, Sd, inter), F16), node_id="o")
+    g.inputs, g.outputs = ["x", "nw", "wg", "wu"], ["o"]
+
+    rng = np.random.default_rng(0)
+    ins = {
+        "x": (rng.standard_normal((1, S, H)) * 0.3).astype(np.float16),
+        "nw": (rng.standard_normal((H,)) * 0.3).astype(np.float16),
+        "wg": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
+        "wu": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
+    }
+    got, srcs = _compile_run(g, ins)
+    assert len(srcs) == 1, f"the fused gate/up edge must be ONE kernel, got {len(srcs)}"
+    assert "dpl_mma" in srcs[0], "the pinned mma tier must engage on the multi-fold contraction"
+    x, nw, wg, wu = (ins[k].astype(np.float32) for k in ("x", "nw", "wg", "wu"))
+    rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
+    gate, up = rms @ wg.T, rms @ wu.T
+    ref = gate * _sigmoid(gate) * up
+    np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), ref, atol=0.5, rtol=0.1)

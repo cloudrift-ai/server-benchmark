@@ -260,8 +260,7 @@ def _split_pv(merge: list, o: str, v: str, v_buf: str, v_idx: tuple, m_axis: Axi
         axes=(m_axis, d_axis),
         k_axis=Axis(name="pj", extent=Dim(1)),  # block=1: a singleton intra-block reduce
         a_operand=Body((Assign(name=f"{o}__p", op="copy", args=(p_name,)),)),  # A = P, register-resident
-        b_load=Load(name=v, input=v_buf, index=v_idx),  # B = V (the value tile)
-        acc=f"{o}__pv",
+        folds=((Load(name=v, input=v_buf, index=v_idx), f"{o}__pv"),),  # B = V (the value tile)
         tile=TilePlan(),
     )
     out: list = []
@@ -323,8 +322,7 @@ def _flash_op(
         axes=(Axis(name="m", extent=s_q), Axis(name="kv", extent=s_k)),
         k_axis=Axis(name="dd", extent=Dim(head_dim)),
         a_operand=Load(name="q_e", input=q_buf, index=q_idx),
-        b_load=Load(name="k_e", input=k_buf, index=k_idx),
-        acc="sacc",
+        folds=((Load(name="k_e", input=k_buf, index=k_idx), "sacc"),),
         tile=TilePlan(),
     )
     score_post = [

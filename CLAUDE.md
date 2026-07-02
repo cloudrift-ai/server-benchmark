@@ -18,10 +18,15 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   a tree of **structural nodes** (all in `ir/tile/ir.py`): a `PLANAR`/`TWISTED` reduce lifts to a typed `Reduction`
   (its `Carrier` + reduce `axis` + `partial` split out, the fold `Loop` synthesized on demand, holding no
   projection); EVERY recognized contraction — per-cell scalar included — is a `Contraction` node (nodified at
-  recognize time with a deferred `TilePlan()`; an unbindable one demotes to `PLANAR`); the lift / projection wrapper
-  is a `Map` (`body` + an optional `source: Reduction | Contraction | None` — `project ∘ reduce`). A bare reduce is
-  the root `Reduction`; softmax/RMSNorm is a `Map(body=sweep, source=Reduction)`; a pure pointwise cell is a
-  `Map(source=None)`; the only annotated `Loop`s still riding a flat `Map.body` are `030_split`'s sliced partials.
+  recognize time with a deferred `TilePlan()`; an unbindable one demotes to `PLANAR`), carrying its ⊗-folds as
+  `folds` **channels** — `(B, acc)` pairs sharing one A operand (the product-monoid fold: one channel is a plain
+  matmul, N channels the fused gate/up MLP edge); the lift / projection wrapper is a `Map` (`body` + an optional
+  `source: Reduction | Contraction | None` — `project ∘ reduce`). A bare reduce is the root `Reduction`;
+  softmax/RMSNorm is a `Map(body=sweep, source=Reduction)`; the fused norm→linear / gate-up composition is a
+  `Map(body=combine, source=Contraction)` whose computed A cone carries the statistic prologue (a fork sibling of
+  its coop-reduce form — option-0 stays coop; the warp mma rows ride the sync compute-fill); a pure pointwise cell
+  is a `Map(source=None)`; the only annotated `Loop`s still riding a flat `Map.body` are `030_split`'s sliced
+  partials.
   Dispatch reads the role/carrier off the node (`ops.axis_role`/`reduce_loop` recurse through `Map.source`), and
   `ops.lower` flattens any node back to the same loop nest — there is no stored `Monoid`/`Semiring` node kind (those
   wrappers were retired). Flash attention is the `TWISTED` reduce on the streaming schedule, a twisted monoid is a

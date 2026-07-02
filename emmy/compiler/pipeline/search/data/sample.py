@@ -7,7 +7,7 @@ structural identity, and (for golden) a reference latency. ``Sample`` is that
 normal form. The split into ``knobs`` (tunable) / ``context`` (``H_*``) /
 ``s_features`` (``S_*``) is by key prefix and therefore lossless — :meth:`all_knobs`
 re-merges them to the exact original dict, and :meth:`features` runs the single
-featurizer (:func:`knob.knob_features`) on that merge, so a ``Sample`` reproduces
+featurizer (:func:`features.knob_features`) on that merge, so a ``Sample`` reproduces
 the feature vector each source built inline today.
 
 Featurization fidelity (the load-bearing invariant): a trained ``CatBoostPrior``
@@ -26,9 +26,9 @@ import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 
-from emmy.compiler.pipeline import knob
 from emmy.compiler.pipeline.knob import CTX_PREFIX, STRUCT_PREFIX
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
+from emmy.compiler.pipeline.search.features import knob_features
 
 # The C identifier of a CUDA kernel, parsed from ``cuda_op.pretty`` — the grouping
 # key for the per-knob regret analysis. Kept here so the DB-row adapter and the
@@ -120,18 +120,25 @@ class Sample:
         featurizer over the merged dict. Merge order ``context, s_*, knobs`` matches
         the inline construction the eval / prior code used (knobs win on collision,
         though the prefixes are disjoint)."""
-        return knob.knob_features(self.all_knobs())
+        return knob_features(self.all_knobs())
 
     @classmethod
     def from_golden(cls, cfg, *, compile_s_feats: bool = False) -> Sample:
-        """A golden ``MatmulGoldenConfig`` as a ``Sample``. ``compile_s_feats``
-        derives the full ``S_*`` histogram (for the learned-prior featurization);
-        leave it off for the cold-analytic / grouping / bench paths."""
+        """A golden config (matmul / reduce / pointwise — every kind carries
+        ``shape_key()`` / ``snippet()`` / ``dtype`` / ``dynamic_specs()``) as a
+        ``Sample``. ``compile_s_feats`` derives the full ``S_*`` histogram (for the
+        learned-prior featurization; matmul-only — the arithmetic key suffices for
+        the other kinds); leave it off for the cold-analytic / grouping / bench paths."""
         from emmy.compiler.context import Context  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig  # noqa: PLC0415
 
         tunable, _ctx, _s = _split_by_prefix(cfg.knobs)
         dyn_specs = tuple(cfg.dynamic_specs())
-        s_full = dict(compiled_s_features(cfg.M, cfg.N, cfg.K, cfg.dtype, cfg.compute_cap, dyn_specs)) if compile_s_feats else None
+        s_full = (
+            dict(compiled_s_features(cfg.M, cfg.N, cfg.K, cfg.dtype, cfg.compute_cap, dyn_specs))
+            if compile_s_feats and isinstance(cfg, MatmulGoldenConfig)
+            else None
+        )
         return cls(
             knobs=tunable,
             latency_us=cfg.emmy_us,

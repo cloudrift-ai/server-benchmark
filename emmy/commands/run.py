@@ -113,6 +113,17 @@ def register_run_command(subparsers):
             "gains an ``int <NAME>`` runtime arg per dim. Example: ``--dynamic seq_len@x:1``."
         ),
     )
+    parser.add_argument(
+        "--json",
+        metavar="PATH",
+        default=None,
+        help=(
+            "With --bench: also write the whole comparison as machine-readable JSON to PATH — the "
+            "backend table (eager / torch.compile / emmy), the per-kernel greedy rows, and every "
+            "--golden / --ab A/B row with its integrity flags (arithmetic-intensity floor, "
+            "wrong-answer check). Retires ad-hoc table parsing in the golden-sweep workflow."
+        ),
+    )
     parser.add_argument("--dump-dir", default=None, help="Directory to dump intermediate compilation artifacts.")
     parser.add_argument("--debug", action="store_true", help="Per-launch tensor dumps in the emmy backend.")
     parser.add_argument(
@@ -220,6 +231,7 @@ def handle_run(args):
     # the ``k_*`` rows.
     skip_accuracy = config.ncu_child()
 
+    ab_ref = None  # (input_data, greedy outputs) for the pinned-row wrong-answer gate
     try:
         if not skip_accuracy:
             run_result, _ = backend.run(compiled, input_data=input_data)
@@ -228,6 +240,7 @@ def handle_run(args):
 
             eager_out = _eager_output(module, example_args, example_kwargs)
             _check_accuracy(run_result.outputs, eager_out)
+            ab_ref = (input_data, run_result.outputs)
         else:
             # ncu child: one emmy launch (our metrics) + one eager forward
             # (the reference rows for the comparison table); no accuracy diff.
@@ -316,12 +329,14 @@ def handle_run(args):
     golden_benches = None
     pinned = list(getattr(args, "golden_configs", None) or []) + (_ab_samples(args.ab, dynamic=args.dynamic) if args.ab else [])
     if pinned:
-        golden_benches = asyncio.run(_bench_golden_variants(backend, args.code, pinned, warmup=args.warmup, iters=args.iters))
+        golden_benches = asyncio.run(_bench_golden_variants(backend, args.code, pinned, warmup=args.warmup, iters=args.iters, ref=ab_ref))
 
     capture_note = None if captured else "(graph-capture fallback: timings include host launch overhead)"
     notes = [n for n in (_symbolic_bench_note(bench_sym_env), capture_note) if n]
     _print_table(results, note="\n".join(notes) if notes else None)
     _print_kernel_stats(compiled, bench, golden_benches=golden_benches)
+    if getattr(args, "json", None):
+        _write_ab_json(args, results, compiled, bench, golden_benches)
     if args.profile:
         _run_ncu_profile(args, dump_dir=dump.dir if dump else None)
 
@@ -395,7 +410,62 @@ def _dump_bench_compare(dump_dir, results: dict, warmup: int, iters: int) -> Non
 
 
 # One recorded golden config compiled + benched with its knobs pinned this run.
-_GoldenBench = namedtuple("_GoldenBench", "sample graph bench")
+# ``flags`` are the integrity-gate verdicts (empty = clean): the arithmetic-intensity
+# floor and the wrong-answer check against the greedy run's outputs.
+_GoldenBench = namedtuple("_GoldenBench", "sample graph bench flags")
+
+
+def _intensity_floor_flag(sample, total_us: float) -> str | None:
+    """The arithmetic-intensity floor gate: the FLOP/s a benched row implies from its
+    shape must stay below the device's peak dense throughput — a row above it is a wrong
+    bench (skipped finalize, silent failure), not a fast kernel (the 8.2 µs "2 PFLOP/s"
+    2048³ golden row of the sixth sweep). Returns a flag string, or ``None`` when clean /
+    ungateable (no shape, no FLOPs, unknown device peak)."""
+    shape = getattr(sample, "shape", None)
+    if shape is None or total_us <= 0:
+        return None
+    from emmy import gpu  # noqa: PLC0415
+    from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415
+
+    # 2·M·N·K for a matmul; a symbolic-M shape excludes M from ``free_prod`` and benches
+    # at the hint. Reduce/pointwise shapes imply far fewer FLOPs than any peak, so the
+    # same formula is a safe (never-firing) ceiling for them.
+    flops = 2.0 * shape.free_prod * shape.reduce_max * (DEFAULT_SEQ_HINT if shape.is_dyn else 1)
+    if flops <= 0:
+        return None
+    spec = gpu.by_name(gpu.live_name() or "")
+    peak = spec.peak_tflops(getattr(sample, "dtype", None) or "fp32") if spec else None
+    if peak is None:
+        return None
+    implied = flops / total_us / 1e6  # FLOP / µs → TFLOP/s
+    if implied > peak:
+        return f"impossible: implies {implied:.0f} TFLOP/s > {peak:.0f} device peak"
+    return None
+
+
+def _wrong_answer_flag(outputs: dict, ref_outputs: dict) -> str | None:
+    """Output-correctness gate for a pinned A/B row: compare the pinned kernel's outputs
+    against the greedy run's on the SAME inputs. Both sides are emmy kernels over one
+    graph, so they agree to reduction-reorder noise — a large deviation means the pinned
+    config computed the wrong answer (the ``g2a`` atomic-split re-bench class: a skipped
+    zero-init / finalize benches fast and silently wrong). Returns a flag string or
+    ``None``; loose 5% relative tolerance so split-K / atomic reorders never trip it."""
+    import numpy as np  # noqa: PLC0415
+
+    worst = 0.0
+    for nid, ref in ref_outputs.items():
+        got = outputs.get(nid)
+        if got is None:
+            return f"wrong-answer: output {nid!r} missing"
+        a = np.asarray(got, dtype=np.float64)
+        b = np.asarray(ref, dtype=np.float64)
+        if a.shape != b.shape:
+            return f"wrong-answer: output {nid!r} shape {a.shape} != greedy {b.shape}"
+        denom = float(np.abs(b).max()) or 1.0
+        worst = max(worst, float(np.abs(a - b).max()) / denom)
+    if worst > 0.05:
+        return f"wrong-answer: rel err {worst:.3f} vs greedy output"
+    return None
 
 
 @contextlib.contextmanager
@@ -433,7 +503,7 @@ def _ab_samples(specs, dynamic=None):
     return [SimpleNamespace(name=f"ab {raw}", knobs=parse_knob_spec(raw), shape=None, dynamic=dyn) for raw in specs]
 
 
-async def _bench_golden_variants(backend, code, golden_configs, *, warmup, iters):
+async def _bench_golden_variants(backend, code, golden_configs, *, warmup, iters, ref=None):
     """Compile + bench each recorded golden config with its knobs pinned, returning
     a ``_GoldenBench`` per config so :func:`_print_kernel_stats` can show each as a
     measured row beside the greedy pick. ``golden_configs`` are
@@ -446,24 +516,43 @@ async def _bench_golden_variants(backend, code, golden_configs, *, warmup, iters
     specs (a dynamic golden, or an ``--ab`` row of a ``--dynamic`` run) re-traces
     symbolically, so the pinned kernel is the same masked-tile artifact the greedy
     run deployed and benches at the same hint. Best-effort: a config whose pinned
-    knobs fail to compile / bench for the live device is skipped with a warning."""
+    knobs fail to compile / bench for the live device is skipped with a warning.
+
+    Two integrity gates flag (never drop) each row: the arithmetic-intensity floor
+    (:func:`_intensity_floor_flag`) and — when ``ref`` carries the greedy run's
+    ``(input_data, outputs)`` — a wrong-answer check that executes the pinned kernel
+    once on the greedy run's inputs and compares outputs (:func:`_wrong_answer_flag`).
+    Flags render as a ``!`` marker in the table and ride the ``--json`` record."""
     from emmy.commands.trace import graph_from_code  # noqa: PLC0415
     from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs  # noqa: PLC0415
 
     out = []
     for sample in golden_configs or []:
         dyn = getattr(sample, "dynamic", None)
+        flags = []
         try:
             dynamic_shapes = build_torch_dynamic_shapes(parse_position_specs(list(dyn))) if dyn else None
             with _pinned_knobs(sample.knobs):
                 # Fresh graph; knobs baked into the kernel source here.
                 graph, _, _ = graph_from_code(code, dynamic_shapes=dynamic_shapes)
                 g_compiled = backend.compile(graph)
+            if ref is not None:
+                ref_inputs, ref_outputs = ref
+                run_result, _ = backend.run(g_compiled, input_data=ref_inputs)
+                flag = _wrong_answer_flag(run_result.outputs, ref_outputs)
+                if flag:
+                    flags.append(flag)
             g_bench = await backend.benchmark_async(g_compiled, warmup=warmup, num_iters=iters)
         except Exception as exc:  # noqa: BLE001 — a bad pin must not abort the run's own bench table
             logger.warning("[golden] %s: compile/bench of the pinned config failed (%s) — skipping its row", sample.name, exc)
             continue
-        out.append(_GoldenBench(sample, g_compiled, g_bench))
+        total_us = (g_bench.min_ms if g_bench.min_ms is not None else g_bench.time_ms) * 1000
+        flag = _intensity_floor_flag(sample, total_us)
+        if flag:
+            flags.append(flag)
+        for f in flags:
+            logger.warning("[golden] %s: %s — row flagged (marked ! in the table, flagged in --json)", sample.name, f)
+        out.append(_GoldenBench(sample, g_compiled, g_bench, flags))
     return out
 
 
@@ -520,21 +609,25 @@ def _print_kernel_stats(graph, bench, golden_benches=None):
         return ShapeKey.from_s_features(getattr(op, "knobs", {}) or {})
 
     used_ab: set[int] = set()
+    matched_golden: set[int] = set()
 
     def _matching(op):
         """Benched pinned variants whose shape matches this kernel — keyed via
         ``ShapeKey.from_s_features`` over the op's stamped ``S_*`` features, the
         same join key the prior diagnostics match goldens on (so the dtype flag
-        splits fp32/fp16 twins here too). A golden carries its matmul ``ShapeKey``
+        splits fp32/fp16 twins here too). A golden carries its ``ShapeKey``
         on ``sample.shape``; a shapeless ``--ab`` entry matches through its own
         benched kernels' signatures and nests under the first greedy kernel it
-        matches (``used_ab`` dedups; unmatched entries are appended after the
-        greedy rows so a row is never silently dropped)."""
+        matches (``used_ab`` / ``matched_golden`` track placement; every unmatched
+        entry — including a golden whose shape matches NO greedy kernel because
+        greedy deployed a split partial+finalize pair — is appended after the
+        greedy rows, so a row is never silently dropped)."""
         sig = _op_sig(op)
         out = []
         for gb in golden_benches or []:
             if gb.sample.shape is not None:
                 if gb.sample.shape == sig:
+                    matched_golden.add(id(gb))
                     out.append(gb)
             elif id(gb) not in used_ab and any(_op_sig(n.op) == sig for n in gb.graph.nodes.values() if isinstance(n.op, CudaOp)):
                 used_ab.add(id(gb))
@@ -549,8 +642,11 @@ def _print_kernel_stats(graph, bench, golden_benches=None):
 
     def _gb_rows(gb, ref):
         """Append the rows of one benched pinned variant (golden / --ab), each
-        kernel's knobs diffed red against ``ref`` (the greedy pick's knobs)."""
+        kernel's knobs diffed red against ``ref`` (the greedy pick's knobs). A
+        flagged row (intensity floor / wrong-answer) gets a ``!`` marker."""
         label = f"golden {gb.sample.name}" if gb.sample.shape is not None else gb.sample.name
+        if gb.flags:
+            label = f"! {label}"
         g_times = {lt.idx: (min(lt.samples) if lt.samples else lt.time_ms) * 1000 for lt in (gb.bench.per_launch or [])}
         g_attrs = _collect_kernel_attrs(gb.graph)
         g_nodes = [n for n in gb.graph.nodes.values() if isinstance(n.op, CudaOp)]
@@ -566,8 +662,11 @@ def _print_kernel_stats(graph, bench, golden_benches=None):
         records.append((op.kernel_name, t_us, f"{pct:.1f}%", _geom(op, attrs_by_kname), gknobs, None))
         for gb in _matching(op):
             _gb_rows(gb, gknobs)
+    # Catch-all: pinned rows that matched no greedy kernel still print — the golden
+    # rows attach to the SHAPE (the run), not to a kernel node, so a greedy split
+    # partial+finalize deploy can no longer silently drop the shape's golden A/B rows.
     for gb in golden_benches or []:
-        if gb.sample.shape is None and id(gb) not in used_ab:
+        if id(gb) not in used_ab and id(gb) not in matched_golden:
             _gb_rows(gb, None)
 
     kcols, kcells = knob_columns(
@@ -601,6 +700,71 @@ def _print_kernel_stats(graph, bench, golden_benches=None):
     print("knobs (greedy pick); golden / ab rows are red where they differ from the greedy pick:")
     for line in render_table(columns, data):
         print(line)
+    for gb in golden_benches or []:
+        for flag in gb.flags:
+            print(f"! {gb.sample.name}: {flag}")
+
+
+def _write_ab_json(args, results: dict, graph, bench, golden_benches) -> None:
+    """``--json PATH``: the whole ``--bench`` comparison as one machine-readable record —
+    the backend table (eager / torch.compile / emmy), the per-kernel greedy rows, and every
+    ``--golden`` / ``--ab`` pinned row with its recorded reference latencies and integrity
+    flags. This is the golden-sweep workflow's parse target (it retires the ad-hoc stdout
+    table parsers) and where the intensity-floor / wrong-answer verdicts become fields —
+    the confirm-twice rule diffs two of these files instead of two terminal scrollbacks."""
+    import json as _json  # noqa: PLC0415
+
+    from emmy import gpu  # noqa: PLC0415
+    from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
+
+    def _kernel_rows(g, b) -> list[dict]:
+        times = {lt.idx: (min(lt.samples) if lt.samples else lt.time_ms) * 1000 for lt in (b.per_launch or [])}
+        rows = []
+        for idx, node in enumerate(n for n in g.nodes.values() if isinstance(n.op, CudaOp)):
+            op = node.op
+            rows.append(
+                {
+                    "kernel": op.kernel_name,
+                    "us": times.get(idx, 0.0),
+                    "smem_bytes": op.smem_bytes,
+                    "knobs": {k: str(v) for k, v in tuning_knob_items(op.knobs or {})},
+                }
+            )
+        return rows
+
+    def _total_us(b) -> float:
+        return (b.min_ms if b.min_ms is not None else b.time_ms) * 1000
+
+    pinned = []
+    for gb in golden_benches or []:
+        sample = gb.sample
+        pinned.append(
+            {
+                "name": sample.name,
+                "kind": "golden" if sample.shape is not None else "ab",
+                "pinned_knobs": {k: str(v) for k, v in sample.knobs.items()},
+                "total_us": _total_us(gb.bench),
+                "kernels": _kernel_rows(gb.graph, gb.bench),
+                "flags": list(gb.flags),
+                "recorded_emmy_us": getattr(sample, "latency_us", None),
+                "recorded_ref_us": getattr(sample, "ref_us", None),
+            }
+        )
+    payload = {
+        "input": args.code or args.input or getattr(args, "ir", None),
+        "golden": getattr(args, "golden", None),
+        "dynamic": list(args.dynamic) if getattr(args, "dynamic", None) else [],
+        "gpu": gpu.live_name(),
+        "warmup": args.warmup,
+        "iters": args.iters,
+        "backends": {name: {"latency_us": us} for name, us in (results or {}).items()},
+        "greedy": {"total_us": _total_us(bench), "kernels": _kernel_rows(graph, bench)},
+        "pinned": pinned,
+    }
+    out = Path(args.json)
+    out.write_text(_json.dumps(payload, indent=2, default=str))
+    print(f"A/B record → {out}")
 
 
 def _collect_kernel_attrs(graph) -> dict[str, dict]:
@@ -1194,6 +1358,8 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
             else:
                 logger.warning("--ab ignored: %s IR is fully lowered (no forks left to pin)", stage)
         _print_kernel_stats(graph, bench, golden_benches=ab_benches)
+        if getattr(args, "json", None):
+            _write_ab_json(args, results, graph, bench, ab_benches)
     if args.profile:
         _run_ncu_profile(args, dump_dir=dump.dir if dump else None)
 
@@ -1220,7 +1386,7 @@ async def _bench_ab_variants_ir(backend, ir_path, tail, specs, *, warmup, iters,
         except Exception as exc:  # noqa: BLE001 — a bad pin must not abort the run's own table
             logger.warning("[ab] %s: compile/bench of the pinned config failed (%s) — skipping its row", sample.name, exc)
             continue
-        out.append(_GoldenBench(sample, g, g_bench))
+        out.append(_GoldenBench(sample, g, g_bench, []))
     return out
 
 
@@ -1709,8 +1875,7 @@ async def _bench_interleaved(module, args, kwargs, backend, compiled_graph, warm
     # Whole-program (e2e) time when available — windows around replays of one
     # all-launches CUDA graph, the same semantics the captured torch closures
     # above get. The fallback sums per-launch solo windows, which is not an
-    # end-to-end number (no cross-kernel cache effects) — see finding 6 of
-    # plans/qwen3-embedding-layer0-tune-findings.md.
+    # end-to-end number (no cross-kernel cache effects).
     dep_ms = bench.e2e_min_ms if bench.e2e_min_ms is not None else (bench.min_ms if bench.min_ms is not None else bench.time_ms)
     results["Emmy"] = dep_ms * 1000
     return results, bench

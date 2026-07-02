@@ -1,11 +1,11 @@
 """Analytic prior — a stateless, hand-weighted :class:`Prior` over
-``knob.knob_features``.
+``features.knob_features``.
 
 This is the *untrained* prior: the cold-start ranking the search uses before any
 tuning data exists. It replaces the old hand-coded matmul heuristic
 (``score_matmul_thread`` + the ``_priority_matmul_*`` enumeration sort) — same
 features, now expressed as a fixed linear model over the one shared feature dict
-``knob.knob_features`` produces, so there is a SINGLE ranking path: a config is
+``features.knob_features`` produces, so there is a SINGLE ranking path: a config is
 scored by a ``Prior`` (this one cold, ``CatBoostPrior`` once trained), composed
 behind :class:`~emmy.compiler.pipeline.search.prior.fallback.FallbackPrior`.
 
@@ -28,15 +28,20 @@ from __future__ import annotations
 
 import math
 
-from emmy.compiler.pipeline import knob
+from emmy.compiler.pipeline.search.features import knob_features
 from emmy.compiler.pipeline.search.prior.base import Prior
 
-# Linear weights over ``knob.knob_features`` (``D_*`` geometry keys + ``MMA_tier``),
+# Linear weights over ``features.knob_features`` (``D_*`` geometry keys + ``MMA_tier``),
 # fit offline by ``scripts/golden_knob_heuristics.py`` jointly over ALL kernel
 # regimes — fp32-scalar + fp16/bf16-warp matmul, cooperative reduce, and pointwise
 # goldens — tier-balanced (each regime weighted equally so the sparse
 # reduce/pointwise tiers aren't drowned by the matmul shapes), minimizing the
-# goldens' tier-weighted mean ``log2(rank+1)``. Dominant terms: occupancy
+# goldens' tier-weighted mean ``log2(rank+1)``. Refit 2026-07-02 over the deep-FM-widened
+# ``_SCALAR_REG`` grid (the reachability fix): live-5090 golden median rank 4 (top10 22/42),
+# all-cards static median 37 — the wider pool inflates raw ranks, so compare medians only
+# within one grid. (The reduce/pointwise cases currently enumerate zero rows — the rebuilt
+# reduce fork emits nothing through the live-fork capture — so this fit is matmul-only in
+# practice; the reduce tier's cold rank signal is an open gap.) Dominant terms: occupancy
 # (``D_ctas_ge_sm``/``D_near_waves`` — keep #CTAs ≈ 2 waves over the SMs), the
 # ``D_bm_band`` thread-tile band, the tier-split warp BK target (``D_w_near_bk`` —
 # BK≈2 on the TMA tile), the positive ``MMA_tier`` (fp16/bf16 prefer the warp
@@ -47,52 +52,52 @@ from emmy.compiler.pipeline.search.prior.base import Prior
 # compromise across regimes (e.g. ``D_bn_band`` is mildly negative — matmul wants
 # the band but reduce wants BN=1; the fit trades it for occupancy).
 _W_A: dict[str, float] = {
-    "D_splitk_le2": 8.407426536981845,
-    "D_ctas_ge_sm": -7.948709567336204,
-    "D_bn_band": -7.821722985417555,
-    "D_w_near_bk": 6.921170033543419,
-    "MMA_tier": 5.106063905982595,
-    "D_bm_band": 4.79269048276045,
-    "D_bn_ge_bm": 4.1047225430800305,
+    "D_pow2_threads": 56.06460471525204,
+    "D_splitk_le2": 18.435656861012102,
+    "D_ctas_ge_sm": -9.973442761046039,
+    "D_wspec_warps": -9.057401908053343,
+    "D_bm_band": 7.893496726828649,
+    "D_bn_band": -7.823384305652918,
+    "MMA_tier": 7.172491368387892,
+    "D_stage_async": -6.214925214371601,
+    "D_bn_ge_bm": 6.175249346262891,
+    "D_stage_ring": 5.193701747343408,
+    "D_splitk_excess": -4.918184039295852,
+    "D_near_waves": 4.779627471036479,
     "D_w_l2_bk": 3.8318001959254397,
-    "D_near_waves": 3.3396197822131195,
-    "D_square": 3.0592744803555165,
-    "D_near_area": 2.570603647930318,
+    "D_l2_bm": -3.4096523889221046,
+    "D_tilen_clean": 3.304726391558603,
+    "D_near_kchunks": -2.4803958401849546,
+    "D_square": 2.4682813427691133,
     "D_bk_ge32": -2.250612760379462,
-    "D_near_intensity": -2.040435217053873,
-    "D_near_tilen": -1.8722293684790128,
-    "D_log2_area": -1.5867630330619453,
-    "D_l2_reuse": 1.2797850818471639,
-    "D_l2_bm": -1.011700520817604,
-    "D_l2_bn": -1.0011925751885005,
+    "D_stage_tma": 2.038360258227803,
+    "D_near_tilen": -1.872229368479013,
+    "D_near_area": 1.661659507348094,
+    "D_near_threads": 1.6102345635910087,
+    "D_l2_reuse": 1.279785081847164,
+    "D_l2_bn": -1.1315248840332646,
+    "D_log2_area": -1.038544031822043,
     "D_l2_bk": 0.9757523358723075,
-    # Per-role split of the former ``D_neg_overhang`` (the fit kept the three roles at
-    # one shared weight here; the dynamic set below separates them).
-    # See plans/drop-overhang-knob-structural-masked-feature.md.
+    "D_l2_threads": -0.9542014237345692,
+    "D_splitk": -0.947829756669734,
     "D_neg_masked_k": -0.8646029028646691,
     "D_neg_masked_m": -0.8646029028646691,
     "D_neg_masked_n": -0.8646029028646691,
-    "D_aspect": -0.700694025296909,
-    "D_splitk": -0.5742697587615958,
-    "D_pow2_threads": -0.4401714077219094,
-    # Pinned positive (not the fit's small negative): a clean coalesced ``tile_n`` ∈
-    # {32,64,128} is genuinely good, but the gate fixes ``tile_n`` inside that set for
-    # every thread-tier candidate, so the feature is ~constant in-pool and the fit
-    # can't identify its sign — the negative it drifts to stops penalizing the
-    # out-of-pool degenerate tiles the geometry prior must still reject.
-    "D_tilen_clean": 6.416225259656883,
-    "D_near_kchunks": -0.42097617675856036,
+    "D_l2_cells_occ": 0.6315974578405096,
+    "D_stage_reg_depth": 0.5176041698192284,
+    "D_w_near_bk": -0.31416170403853766,
+    "D_near_intensity": -0.31230584089622293,
     "D_log2_waves": -0.3096053721652958,
-    "D_log2_ctas": 0.23685242485122074,
-    "D_l2_threads": -0.15663789439639914,
-    "D_near_threads": 0.10459439545995662,
-    "D_cells_cap": -0.10275127787239871,
-    "D_reuse": -0.056740960131700914,
-    "D_near_cells": -0.03521970822845533,
-    "D_cells": -0.007608072063392554,
-    "D_tile_n": -0.00653684883131978,
-    "D_threads": -0.004295893049161819,
-    "D_tile_m": -0.003968686543542194,
+    "D_aspect": -0.26074058469642597,
+    "D_log2_ctas": -0.19597136958382297,
+    "D_near_cells": -0.17771621148992126,
+    "D_cells_cap": -0.14767192811087732,
+    "D_cells": -0.09744937254034974,
+    "D_tile_n": -0.014204261399731513,
+    "D_stage_depth": 0.00521186749996049,
+    "D_reuse": -0.004804011945045964,
+    "D_tile_m": 0.003385545472191824,
+    "D_threads": -0.0009447333009831508,
 }
 
 
@@ -105,46 +110,53 @@ _W_A: dict[str, float] = {
 # ``SPLITK 1/2`` — the dynM seed report's finding 4). Selected at score time on
 # the stamped ``S_ext_n_symbolic_axis`` flag.
 _W_A_DYN: dict[str, float] = {
-    "D_tilen_clean": 10.363634177205995,
-    "D_near_intensity": 3.09585000821334,
-    "D_neg_masked_k": -2.408294505214342,
-    "D_splitk_excess": 2.236560261975075,
-    "MMA_tier": -1.9996703527801165,
-    "D_near_area": 1.9510266862031242,
-    "D_neg_masked_m": -1.722865029661352,
-    "D_pow2_threads": 1.6440224154568588,
-    "D_bk_ge32": 1.5892280540195423,
-    "D_bn_band": 1.5086869426362757,
-    "D_near_kchunks": 1.4505052863521672,
-    "D_square": 1.438076875853351,
-    "D_aspect": -1.3341905081108296,
-    "D_splitk_le2": -1.3014214723301045,
-    "D_neg_masked_n": -1.2811932144523817,
-    "D_near_threads": 1.0880770996884204,
-    "D_l2_bn": -0.9187480426321503,
-    "D_l2_bm": -0.8970572684808231,
-    "D_bm_band": -0.8778374540375237,
-    "D_w_near_bk": -0.7969716930759126,
-    "D_l2_bk": -0.7809453874933684,
-    "D_splitk": 0.7629320265655761,
-    "D_l2_reuse": -0.6541889260273863,
-    "D_log2_area": -0.48773112125719426,
-    "D_bn_ge_bm": 0.45582853484702923,
-    "D_w_l2_bk": -0.39622597910562535,
-    "D_log2_waves": 0.35143754110462044,
-    "D_near_tilen": 0.23048989068226083,
-    "D_near_waves": -0.1884370133305674,
-    "D_ctas_ge_sm": 0.18711232101396888,
-    "D_log2_ctas": 0.16701343971466798,
-    "D_l2_threads": -0.15145005431309883,
-    "D_reuse": 0.09057112060934554,
-    "D_cells_cap": 0.0770135861998017,
-    "D_l2_cells_occ": 0.06394837142353067,
-    "D_cells": -0.05085462688421328,
-    "D_near_cells": 0.04398218666306179,
-    "D_tile_m": -0.004569744643930981,
-    "D_threads": -0.0034359526994655843,
-    "D_tile_n": 0.0014055838910050466,
+    "D_bn_ge_bm": 29.091202180536612,
+    "D_pow2_threads": 23.65447078887027,
+    "D_bn_band": -9.138301229433685,
+    "D_splitk_le2": 8.851870276397179,
+    "D_stage_ring": 8.777780679871912,
+    "D_tilen_clean": 8.52693539113956,
+    "D_stage_reg_depth": 6.736960175814597,
+    "D_near_intensity": 2.392190948851187,
+    "D_stage_async": -2.0320068546391834,
+    "D_l2_reuse": 1.8681983470879955,
+    "MMA_tier": 1.7552176661523013,
+    "D_near_kchunks": -1.7130624007475037,
+    "D_neg_masked_n": 1.530693967366285,
+    "D_l2_cells_occ": 1.3384329760351499,
+    "D_l2_threads": -1.2050378329188671,
+    "D_l2_bm": 1.009411004025198,
+    "D_log2_area": 0.9736863575933378,
+    "D_splitk_excess": 0.8125364060881499,
+    "D_l2_bn": 0.8080440773215448,
+    "D_near_threads": -0.7934464755376106,
+    "D_log2_ctas": 0.725388935679812,
+    "D_finalize_kernel": 0.7228032885783091,
+    "D_near_area": 0.7038721356461611,
+    "D_ctas_ge_sm": -0.6321039678466663,
+    "D_square": -0.6044064340650371,
+    "D_stage_tma": 0.5363490830273171,
+    "D_stage_depth": -0.5361135152050349,
+    "D_w_near_bk": 0.5090684305617744,
+    "D_bk_ge32": -0.464971270614175,
+    "D_wspec_warps": -0.4316300045789512,
+    "D_neg_masked_m": 0.41524836579466956,
+    "D_near_waves": 0.39762092130521237,
+    "D_l2_bk": 0.3672230100309279,
+    "D_w_l2_bk": -0.31827887234260926,
+    "D_neg_masked_k": -0.2879577100154291,
+    "D_near_tilen": 0.26386485391760567,
+    "D_aspect": -0.21238835007727114,
+    "D_splitk": -0.2107799156606975,
+    "D_bm_band": -0.03762392372832574,
+    "D_tile_m": -0.03232815946339648,
+    "D_cells_cap": -0.028425160802643994,
+    "D_near_cells": 0.02653167689849943,
+    "D_reuse": 0.02443375012860443,
+    "D_cells": 0.018664990742985107,
+    "D_log2_waves": 0.01723420071744958,
+    "D_threads": -0.004922510053396705,
+    "D_tile_n": -0.003742777319737122,
 }
 
 
@@ -172,7 +184,7 @@ class AnalyticPrior(Prior):
         # exp() argument scale — keeps the proxy in a finite, sane range; does not
         # affect ranking (monotone), only the proxy's magnitude.
         self._scale = scale
-        # Atomic-free split-K preference (see plans/atomic-free-monoid-combine.md).
+        # Atomic-free split-K preference.
         # Hardcoded — NOT fit into ``_W_A`` (a plain linear weight can't express the
         # "good when split wide, bad when split narrow" interaction). The learned
         # CatBoostPrior takes over once real atomic-vs-free ``H_opt=3`` rows exist.
@@ -200,7 +212,7 @@ class AnalyticPrior(Prior):
         weights have no opinion on (no ``D_*`` features — e.g. a non-tiled kernel)
         scores the neutral ``1.0``, so ties fall to enumeration order. Symbolic-axis
         (masked-tile) kernels rank under the dynamic weight set."""
-        feats = knob.knob_features(knobs)
+        feats = knob_features(knobs)
         w_set = self._w_dyn if feats.get("S_ext_n_symbolic_axis", 0.0) > 0 else self._w
         quality = sum(w * feats.get(k, 0.0) for k, w in w_set.items())
         # Deferred-kernel split-K finalize gate (local term — see __init__). The

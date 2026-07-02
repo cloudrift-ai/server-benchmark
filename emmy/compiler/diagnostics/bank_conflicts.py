@@ -1,46 +1,35 @@
-"""Smem bank-conflict analysis.
+"""Smem bank-conflict analysis, against the kernel-IR slab layouts.
 
 Two layers:
 
-* :func:`lane_bank_distribution` — pure oracle used by the lowering
-  passes (009/014). Decodes ``threadIdx.x = warp_id*32 + lane`` per the
-  same axis flattening as ``Tile.render`` in ``ir/stmt/blocks.py``,
-  evaluates a Load's cache-relative ``Expr`` index per lane against
-  row-major strides over the smem layout, and tallies per-bank distinct
-  addresses (``addr % 32``). Free vars not in ``thread_axes`` and not in
-  ``extra_env`` are zero-bound (bank distribution is invariant to
-  warp-uniform offsets).
+* :func:`lane_bank_distribution` — pure lane→bank oracle. Decodes an intra-CTA thread id
+  ``warp_id*32 + lane`` per the same axis flattening as ``Tile.render``, evaluates a Load's
+  slab-relative ``Expr`` index per lane against row-major strides over the slab extents, and
+  tallies per-bank distinct addresses (4-byte banks — a sub-word element dtype packs
+  ``4 // elem_bytes`` elements per bank word). Free vars not in ``thread_axes`` and not in
+  ``extra_env`` are zero-bound (bank distribution is invariant to warp-uniform offsets).
 
-* :func:`simulate_graph` — Kernel-IR-level analyzer used by the
-  visualizer. Lowers the graph through ``KERNEL_PASSES`` (idempotent —
-  re-applies any unmet Tile lowering, then ``lowering/kernel``), then
-  walks each ``KernelOp`` body for smem ``Load``s, evaluates per-lane
-  addresses via :func:`lane_bank_distribution` against ``Smem.extents``
-  (pad already folded), runs :func:`annotate_lds128` over sibling
-  chains, and computes per-cell access provenance over the inner-loop
-  sweep. Pure static — no GPU run.
+* :func:`find_all_bindings` / :func:`simulate_graph` — the Kernel-IR walk + analyzer the
+  visualizer (``scripts/visualize_bank_conflicts.py``) consumes. ``find_all_bindings`` lowers
+  nothing: it walks each ``KernelOp`` body for the ``Smem`` slab decls (the staged operand slabs
+  ``_a_smem`` / ``_b_smem``, the shared-row / stat rows) and every scalar ``Load`` reading one,
+  paired with the ``Tile``'s intra-CTA thread axes and the enclosing loop axes.
+  ``simulate_graph`` lowers the graph through ``KERNEL_PASSES`` first (idempotent), evaluates
+  each binding via :func:`lane_bank_distribution`, runs :func:`annotate_lds128` over sibling
+  chains, and computes per-cell access provenance over the inner-loop sweep. Pure static — no
+  GPU run. ``LdmatrixLoad`` slab reads are NOT modeled (the ldmatrix 8×8 lane protocol has its
+  own fixed address pattern); the oracle covers the scalar drains and fills.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass, field
+from math import prod
 
-from emmy.compiler.backend.cuda.dtype import nbytes_of as _nbytes_of
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr
-from emmy.compiler.ir.stmt import Cond, Load
-from emmy.compiler.ir.tile.ir import (
-    GridTile,
-    ParallelTile,
-    RegisterTile,
-    SerialTile,
-    StageBundle,
-    StridedTile,
-    ThreadTile,
-    TileOp,
-)
+from emmy.compiler.ir.stmt import Load
 
 WARP_SIZE = 32
 BANKS = 32
@@ -53,19 +42,16 @@ BANKS = 32
 
 @dataclass
 class StageBinding:
-    """One ``(StageBundle, Source, body-Load reading it)`` triple plus context.
+    """One ``(smem slab, body-Load reading it)`` pair plus its thread/loop context — the
+    kernel-IR unit bank-conflict analysis runs per. ``slab`` is the ``Smem`` decl (extents +
+    element dtype, pad already folded into the extents); ``thread_axes`` are the ``Tile``'s
+    trailing intra-CTA axes (the ones an ``_gid % block_threads`` decode varies per lane)."""
 
-    A StageBundle carries multiple Sources, each with its own smem buffer
-    and cache layout — bank-conflict analysis runs per-Source.
-    """
-
-    stage: StageBundle
+    slab: object  # the Smem decl (kernel IR)
     load: Load
-    tile: ParallelTile  # the per-thread scope (ThreadTile, or GridTile+ThreadTile nest's ThreadTile)
+    thread_axes: tuple[Axis, ...]
     enclosing_loop_axes: tuple[Axis, ...]  # outermost-first
     tile_op_name: str = ""
-    source: object = None  # the matching Source (carries .name / .buf / .cache_axes / .pad)
-    block_axes: tuple[Axis, ...] = ()  # outer GridTile axes (empty for pointwise)
 
 
 @dataclass
@@ -114,93 +100,58 @@ class BankConflictResult:
 # ---------------------------------------------------------------------------
 
 
+def _thread_axes_of(tile) -> tuple[Axis, ...]:
+    """The ``Tile``'s intra-CTA thread axes — the minimal trailing run of grid axes an
+    ``_gid % blockDim`` decode varies per thread. A cooperative tile groups exactly
+    ``block_threads`` consecutive cells per CTA (take trailing axes up to that product); the
+    scalar tier (``block_threads is None``) has no fixed grouping — take trailing axes until a
+    warp is covered (bank patterns repeat past 32 lanes)."""
+    axes = list(tile.axes)
+    want = tile.block_threads if tile.block_threads else WARP_SIZE
+    out: list[Axis] = []
+    covered = 1
+    while axes and covered < want:
+        ax = axes.pop()
+        if not ax.extent.is_static:
+            break
+        out.insert(0, ax)
+        covered *= ax.extent.as_static()
+    return tuple(out)
+
+
 def find_all_bindings(graph: Graph, stage_filter: set[str] | None = None) -> list[StageBinding]:
-    """Yield one ``StageBinding`` per (Source, body Load) pair across every
-    ``TileOp`` in ``graph``. Each StageBundle source declared inside the
-    (single) Tile body is matched against every body Load whose ``input`` is
-    the staged name; enclosing ``Loop`` / ``StridedLoop`` axes are propagated
-    so callers can pin the inner-iter axis at simulation time.
-    """
+    """Every ``(smem slab, scalar body-Load reading it)`` pair across the graph's ``KernelOp``\\ s
+    — the staged operand drains (``_a_smem`` / ``_b_smem``), the shared-row / stat-row reads —
+    each with the ``Tile``'s intra-CTA thread axes and its enclosing loop axes. ``stage_filter``
+    keeps only the named slabs. Graphs holding no ``KernelOp`` yield nothing (run
+    ``KERNEL_PASSES`` first — :func:`simulate_graph` does)."""
+    from emmy.compiler.ir.kernel import KernelOp  # noqa: PLC0415
+    from emmy.compiler.ir.kernel.ir import Smem, Tile  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import Loop, StridedLoop  # noqa: PLC0415
+
     out: list[StageBinding] = []
     for node in graph.nodes.values():
-        if not isinstance(node.op, TileOp):
+        if not isinstance(node.op, KernelOp):
             continue
-        tile_op = node.op
-        for top in tile_op.body:
-            block_axes: tuple[Axis, ...] = ()
-            if isinstance(top, GridTile):
-                block_axes = top.axes
-                # Find the inner ThreadTile.
-                tt: ThreadTile | None = None
-                for child in top.body:
-                    if isinstance(child, ThreadTile):
-                        tt = child
-                        break
-                if tt is None:
-                    continue
-            elif isinstance(top, ThreadTile):
-                tt = top
-            else:
-                continue
-            # Map smem buffer name → (StageBundle, Source) for every staged
-            # buffer. A StageBundle carries multiple Sources, each with its own
-            # smem name — bank-conflict bindings are per-Source.
-            sources: dict[str, tuple[StageBundle, object]] = {}
-            for s in _walk(tt.body):
-                if isinstance(s, StageBundle):
-                    for src in s.sources:
-                        if stage_filter is None or src.name in stage_filter:
-                            sources.setdefault(src.name, (s, src))
-            for load, axes in _walk_loads(tt.body, ()):
-                if load.input in sources:
-                    stage, src = sources[load.input]
-                    out.append(
-                        StageBinding(
-                            stage=stage,
-                            source=src,
-                            load=load,
-                            tile=tt,
-                            enclosing_loop_axes=axes,
-                            tile_op_name=tile_op.name or "",
-                            block_axes=block_axes,
+        slabs: dict[str, Smem] = {}
+        tiles = [s for s in node.op.body if isinstance(s, Tile)]
+        thread_axes = _thread_axes_of(tiles[0]) if tiles else ()
+
+        def walk(stmts, loops: tuple[Axis, ...], *, taxes=thread_axes, slabs=slabs, kname=node.op.name):
+            for s in stmts:
+                if isinstance(s, Smem):
+                    slabs[s.name] = s
+                elif isinstance(s, Load) and s.is_scalar and s.input in slabs:
+                    if stage_filter is None or s.input in stage_filter:
+                        out.append(
+                            StageBinding(slab=slabs[s.input], load=s, thread_axes=taxes, enclosing_loop_axes=loops, tile_op_name=kname)
                         )
-                    )
+                inner = (*loops, s.axis) if isinstance(s, (Loop, StridedLoop)) else loops
+                for b in s.nested():
+                    walk(list(b), inner)
+
+        walk(list(node.op.body), ())
     return out
-
-
-def _walk(body) -> Iterable:
-    # body may be a Body (recursive iter via nested()) or a plain tuple
-    # from a legacy caller. Body.iter() descends into every nested body
-    # (the StageBundle compute phase + consumer body), so the bundles
-    # themselves are yielded directly.
-    if hasattr(body, "iter"):
-        yield from body.iter()
-        return
-    for s in body:
-        yield s
-        for attr in ("body", "else_body"):
-            inner = getattr(s, attr, None)
-            if isinstance(inner, tuple) and inner and hasattr(inner[0], "deps"):
-                yield from _walk(inner)
-
-
-def _walk_loads(body, axes: tuple[Axis, ...]):
-    for s in body:
-        if isinstance(s, Load):
-            yield s, axes
-        if isinstance(s, (SerialTile, StridedTile)):
-            yield from _walk_loads(s.body, (*axes, s.axis))
-        elif isinstance(s, RegisterTile):
-            yield from _walk_loads(s.body, axes + tuple(s.axes))
-        elif isinstance(s, (GridTile, ThreadTile)):
-            yield from _walk_loads(s.body, axes)
-        elif isinstance(s, Cond):
-            yield from _walk_loads(s.body, axes)
-            yield from _walk_loads(s.else_body, axes)
-        elif isinstance(s, StageBundle):
-            # StageBundle: descend into the consumer body where the Loads
-            # from staged smem live.
-            yield from _walk_loads(s.body, axes)
 
 
 # ---------------------------------------------------------------------------
@@ -269,18 +220,22 @@ def lane_bank_distribution(
     *,
     extra_env: dict[str, int] | None = None,
     warp_id: int = 0,
+    elem_bytes: int = 4,
 ) -> BankDistribution | None:
-    """Decode ``threadIdx.x = warp_id*WARP_SIZE + lane`` into per-axis
-    ints, evaluate ``cache_index`` per lane against row-major strides
-    over ``cache_extents``, and tally per-bank distinct-address counts.
+    """Decode an intra-CTA thread id ``warp_id*WARP_SIZE + lane`` into
+    per-axis ints, evaluate ``cache_index`` per lane against row-major
+    strides over ``cache_extents``, and tally per-bank distinct-address
+    counts. Banks are 4-byte words: ``elem_bytes`` scales element
+    addresses into bank words (an ``__half`` slab packs two elements per
+    word), and the distinct-address model counts distinct WORDS.
 
     ``cache_index`` must already be trimmed to ``len(cache_extents)``
-    cache dimensions (e.g. drop a ``BufferedStage``'s leading slot
-    index — uniform across the warp at one moment, doesn't shift the
-    bank pattern). Free vars in ``cache_index`` not in ``thread_axes``
-    and not in ``extra_env`` are zero-bound; bank distribution is
-    invariant to additive warp-uniform offsets. Pass ``extra_env`` to
-    pin a specific loop iter or block coord (e.g. ``{k_loop: 5}``).
+    slab dimensions (a ring slot's row offset is warp-uniform at one
+    moment, so it doesn't shift the bank pattern). Free vars in
+    ``cache_index`` not in ``thread_axes`` and not in ``extra_env`` are
+    zero-bound; bank distribution is invariant to additive warp-uniform
+    offsets. Pass ``extra_env`` to pin a specific loop iter or block
+    coord (e.g. ``{k_loop: 5}``).
 
     Returns ``None`` if ``len(cache_index) != len(cache_extents)`` or
     if ``Expr.eval`` raises (KeyError / TypeError) for any lane.
@@ -308,8 +263,9 @@ def lane_bank_distribution(
         except (KeyError, TypeError):
             return None
         addr = sum(c * s for c, s in zip(coords, strides, strict=True))
-        lane_addrs.append(addr)
-        lane_banks.append(addr % BANKS)
+        word = (addr * elem_bytes) // 4  # element address → 4-byte bank word
+        lane_addrs.append(word)
+        lane_banks.append(word % BANKS)
 
     counts = [0] * BANKS
     addrs_per_bank: list[set[int]] = [set() for _ in range(BANKS)]
@@ -397,130 +353,32 @@ def annotate_lds128(results: list[BankConflictResult]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def simulate_graph(
-    graph: Graph,
-    stage_filter: set[str] | None = None,
-    k_iter: int = 0,
-    warp_id: int = 0,
-    load_filter: set[str] | None = None,
-) -> list[BankConflictResult]:
-    """Lower ``graph`` through ``KERNEL_PASSES`` and statically analyze every
-    smem ``Load`` in each ``KernelOp``.
-
-    ``k_iter`` pins the deepest enclosing loop axis at the per-lane snapshot;
-    the full-sweep cell maps fold every iteration regardless. ``warp_id``
-    selects the warp within the CTA.
-    """
-    from emmy.compiler.ir.kernel.ir import KernelOp, Smem
-    from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline
-
-    g = Pipeline.build(KERNEL_PASSES).run(graph.copy())
-
-    out: list[BankConflictResult] = []
-    for node in g.nodes.values():
-        if isinstance(node.op, KernelOp):
-            out.extend(_analyze_kernel(node.op, Smem, stage_filter, k_iter, warp_id))
-
-    annotate_lds128(out)
-    if load_filter is not None:
-        out = [r for r in out if r.load_name in load_filter]
-    return out
+_ELEM_BYTES = {"float": 4, "__half": 2, "__nv_bfloat16": 2, "double": 8, "int": 4}
 
 
-def _analyze_kernel(kernel_op, Smem, stage_filter, k_iter: int, warp_id: int) -> list[BankConflictResult]:
-    body = kernel_op.body
-    smem_decls = {s.name: s for s in body.iter_of_type(Smem) if stage_filter is None or s.name in stage_filter}
-    if not smem_decls:
-        return []
-    # Locate the per-thread scope (ThreadTile) + block_axes (GridTile if any).
-    tt: ThreadTile | None = None
-    block_axes: tuple[Axis, ...] = ()
-    for s in body:
-        if isinstance(s, GridTile):
-            block_axes = s.axes
-            for child in s.body:
-                if isinstance(child, ThreadTile):
-                    tt = child
-                    break
-            if tt is not None:
-                break
-        elif isinstance(s, ThreadTile):
-            tt = s
-            break
-    if tt is None:
-        return []
-
-    # Walk for smem Loads with their enclosing tile axes.
-    bindings: list[tuple[object, Load, tuple[Axis, ...]]] = []
-
-    def walk(b, encl: tuple[Axis, ...]):
-        for s in b:
-            if isinstance(s, Load) and s.input in smem_decls:
-                bindings.append((smem_decls[s.input], s, encl))
-            if isinstance(s, (SerialTile, StridedTile)):
-                walk(s.body, (*encl, s.axis))
-            elif isinstance(s, RegisterTile):
-                walk(s.body, encl + tuple(s.axes))
-            elif isinstance(s, (GridTile, ThreadTile)):
-                walk(s.body, encl)
-            elif isinstance(s, Cond):
-                walk(s.body, encl)
-                walk(s.else_body, encl)
-
-    walk(body, ())
-
-    out: list[BankConflictResult] = []
-    seen: set[tuple] = set()
-    for smem, load, encl in bindings:
-        # Vector Loads share lane-0 name as the identifier — the
-        # analyzer keys on Load identity, not per-lane SSA.
-        key = (kernel_op.name, smem.name, load.names[0])
-        if key in seen:
-            continue
-        seen.add(key)
-        r = _build_kernel_result(kernel_op, smem, load, encl, tt, block_axes, k_iter, warp_id)
-        if r is not None:
-            out.append(r)
-    return out
-
-
-def _build_kernel_result(
-    kernel_op, smem, load: Load, encl: tuple[Axis, ...], tt: ThreadTile, block_axes: tuple[Axis, ...], k_iter: int, warp_id: int
-) -> BankConflictResult | None:
-    if not smem.extents or len(load.index) < len(smem.extents):
-        return None
-    cache_idx = tuple(load.index[-len(smem.extents) :])
-
-    extra_env: dict[str, int] = {ax.name: 0 for ax in block_axes}
-    if encl:
-        for ax in encl[:-1]:
-            extra_env.setdefault(ax.name, 0)
-        extra_env[encl[-1].name] = k_iter
-
-    dist = lane_bank_distribution(cache_idx, smem.extents, tt.axes, extra_env=extra_env, warp_id=warp_id)
+def _binding_result(b: StageBinding, k_iter: int, warp_id: int) -> BankConflictResult | None:
+    """Evaluate one binding into a :class:`BankConflictResult` (or ``None`` — un-evaluable)."""
+    extents = tuple(int(e) for e in b.slab.extents)
+    elem_bytes = _ELEM_BYTES.get(b.slab.dtype, 4)
+    extra_env: dict[str, int] = {}
+    for ax in b.enclosing_loop_axes:
+        hi = ax.extent.as_static() - 1 if ax.extent.is_static else 0
+        extra_env[ax.name] = min(k_iter, max(hi, 0))
+    dist = lane_bank_distribution(tuple(b.load.index), extents, b.thread_axes, extra_env=extra_env, warp_id=warp_id, elem_bytes=elem_bytes)
     if dist is None:
         return None
-
-    nz = [c for c in dist.counts if c > 0]
-    avg = sum(nz) / len(nz) if nz else 0.0
-
-    full_sweep_touched, full_sweep_conflict = _full_sweep_static(cache_idx, smem.extents, tt, block_axes, encl, warp_id)
-
-    smem_bytes = _nbytes_of(smem.dtype)
-    for e in smem.extents:
-        smem_bytes *= int(e)
-
+    rows, cols = (extents[0], extents[1]) if len(extents) == 2 else (1, extents[0])
     return BankConflictResult(
-        stage_name=smem.name,
-        buf=smem.name,
-        stage_class="Smem",
-        rows=int(smem.extents[0]),
-        cols=int(smem.extents[1]) if len(smem.extents) > 1 else 1,
-        pad=(),  # already folded into Smem.extents at materialize_tile
-        smem_bytes=smem_bytes,
-        load_name=load.names[0],
-        tile_op_name=kernel_op.name or "",
-        index_repr=tuple(e.pretty() for e in cache_idx),
+        stage_name=b.slab.name,
+        buf=b.slab.name,
+        stage_class=b.slab.dtype,
+        rows=rows,
+        cols=cols,
+        pad=(),
+        smem_bytes=prod(extents) * elem_bytes,
+        load_name=b.load.names[0],
+        tile_op_name=b.tile_op_name,
+        index_repr=tuple(e.pretty() for e in b.load.index),
         lane_banks=dist.lane_banks,
         lane_addrs=dist.lane_addrs,
         counts=dist.counts,
@@ -528,66 +386,62 @@ def _build_kernel_result(
         max_way=dist.max_way,
         raw_max_way=dist.raw_max_way,
         conflict_events=dist.conflict_events,
-        lds128_events=dist.conflict_events,  # annotate_lds128 may rewrite later
-        vec_group_size=1,
-        avg_way=avg,
-        full_sweep_touched=full_sweep_touched,
-        full_sweep_conflict_cells=full_sweep_conflict,
+        lds128_events=dist.conflict_events,
+        avg_way=(sum(d for d in dist.distinct_addrs if d) / max(1, sum(1 for d in dist.distinct_addrs if d))),
     )
 
 
-def _full_sweep_static(
-    cache_idx: tuple[Expr, ...],
-    extents: tuple[int, ...],
-    tt: ThreadTile,
-    block_axes: tuple[Axis, ...],
-    encl: tuple[Axis, ...],
-    warp_id: int,
-) -> tuple[dict[tuple[int, int], list[tuple[int, int]]], set[tuple[int, int]]]:
-    """Sweep the deepest enclosing loop axis; record every (row, col) cell
-    touched by any (lane, k_iter) pair, plus the cells participating in a
-    real bank conflict at some k_iter (their LDS had > 1 distinct address
-    on the cell's bank).
-    """
-    if not extents:
-        return {}, set()
-    strides = _row_major_strides(extents)
-    row_stride = strides[0] if strides else 1
+def _full_sweep(b: StageBinding, r: BankConflictResult, warp_id: int) -> None:
+    """Populate the visualizer's per-cell provenance: sweep the innermost enclosing loop
+    (static extents only), touch each lane's 2-D slab cell, and mark the cells of any bank with
+    more than one distinct word that iteration. 2-D slabs only (the ring slot offset rides the
+    row expr, so it is swept naturally)."""
+    extents = tuple(int(e) for e in b.slab.extents)
+    if len(extents) != 2:
+        return
+    elem_bytes = _ELEM_BYTES.get(b.slab.dtype, 4)
+    inner = b.enclosing_loop_axes[-1] if b.enclosing_loop_axes else None
+    iters = inner.extent.as_static() if inner is not None and inner.extent.is_static else 1
+    outer_env = {ax.name: 0 for ax in b.enclosing_loop_axes[:-1]}
+    for it in range(min(iters, 512)):  # cap the sweep — the pattern repeats
+        env = dict(outer_env)
+        if inner is not None:
+            env[inner.name] = it
+        dist = lane_bank_distribution(tuple(b.load.index), extents, b.thread_axes, extra_env=env, warp_id=warp_id, elem_bytes=elem_bytes)
+        if dist is None:
+            return
+        conflict_banks = {bank for bank, d in enumerate(dist.distinct_addrs) if d > 1}
+        for lane, word in enumerate(dist.lane_addrs):
+            addr = (word * 4) // elem_bytes  # bank word → element address
+            cell = (addr // extents[1], addr % extents[1])
+            r.full_sweep_touched.setdefault(cell, []).append((it, lane))
+            if word % BANKS in conflict_banks:
+                r.full_sweep_conflict_cells.add(cell)
 
-    if not encl:
-        loop_extent = 1
-        loop_axis_name = None
-    else:
-        loop_extent = encl[-1].extent.as_static()
-        loop_axis_name = encl[-1].name
 
-    base_env: dict[str, int] = {ax.name: 0 for ax in block_axes}
-    for ax in encl[:-1]:
-        base_env.setdefault(ax.name, 0)
+def simulate_graph(
+    graph: Graph,
+    stage_filter: set[str] | None = None,
+    k_iter: int = 0,
+    warp_id: int = 0,
+    load_filter: set[str] | None = None,
+) -> list[BankConflictResult]:
+    """Kernel-IR static bank-conflict analysis (the visualizer's oracle): lower ``graph`` through
+    ``KERNEL_PASSES`` (idempotent — re-applies any unmet tile lowering), find every smem-slab
+    scalar Load (:func:`find_all_bindings`), evaluate each via :func:`lane_bank_distribution` at
+    loop iter ``k_iter`` / ``warp_id``, annotate LDS.128 vector chains, and populate the per-cell
+    sweep provenance. Pure static — no GPU run."""
+    from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline  # noqa: PLC0415
 
-    touched: dict[tuple[int, int], list[tuple[int, int]]] = {}
-    conflict_cells: set[tuple[int, int]] = set()
-
-    for k in range(loop_extent):
-        env_k = dict(base_env)
-        if loop_axis_name is not None:
-            env_k[loop_axis_name] = k
-        lds_addrs_per_bank: list[set[int]] = [set() for _ in range(BANKS)]
-        lds_cells: list[tuple[int, int, int]] = []
-        for lane in range(WARP_SIZE):
-            env: dict[str, object] = dict(env_k)
-            env.update(_thread_axis_env(tt.axes, warp_id * WARP_SIZE + lane))
-            try:
-                coords = [int(idx.eval(env)) for idx in cache_idx]
-            except (KeyError, TypeError):
-                return {}, set()
-            addr = sum(c * s for c, s in zip(coords, strides, strict=True))
-            r, c = divmod(addr, row_stride) if row_stride else (0, addr)
-            bank = addr % BANKS
-            touched.setdefault((r, c), []).append((k, lane))
-            lds_addrs_per_bank[bank].add(addr)
-            lds_cells.append((r, c, bank))
-        for r, c, bank in lds_cells:
-            if len(lds_addrs_per_bank[bank]) > 1:
-                conflict_cells.add((r, c))
-    return touched, conflict_cells
+    lowered = Pipeline.build(KERNEL_PASSES).run(graph)
+    results: list[BankConflictResult] = []
+    for b in find_all_bindings(lowered, stage_filter):
+        if load_filter is not None and b.load.names[0] not in load_filter:
+            continue
+        r = _binding_result(b, k_iter, warp_id)
+        if r is None:
+            continue
+        _full_sweep(b, r, warp_id)
+        results.append(r)
+    annotate_lds128(results)
+    return results

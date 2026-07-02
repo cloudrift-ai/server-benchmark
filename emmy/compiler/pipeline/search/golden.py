@@ -30,13 +30,11 @@ hardware on both sides, so the ratio is apples-to-apples vs cuBLAS. On sm_90+ th
 autotuner lands these on the swizzled s16816 ``mma_m16n8k16_f16`` (ldmatrix +
 mma.sync) atom — the swizzled smem slab avoids shared-load bank conflicts (a
 fragment load reading smem opaquely cannot), so mma.sync is the faster fp16
-GEMM. On sm_120 the warp-tier prior + greedy now land on a square
-**64×64 output tile on a 4-warp CTA with WARP_SPECIALIZE=1** (producer warp issues
-TMA, consumer warps run the mma chain), measured at / above cuBLAS across the
-squares (2048²: 106.7 µs / 1.06×; 4096²: 746 µs / 1.03×; 1024²: 0.94×). See the
-warp-tier ranking in ``search/prior/AnalyticPrior`` (the ``D_*`` geometry features
-over ``knob.knob_features``) and the WS=1-first emission order in
-``085_warp_specialize``.
+GEMM. On sm_120 the pre-rebuild bar (2048²: 106.7 µs / 1.06× on a 4-warp
+warp-specialized CTA) was re-met and beaten by the rebuilt swizzled TMA tier
+(2048²: 95.9 µs / 0.99× on ``w1x4/f4x2/k2 d4/tma/ring``, the 2026-07-02 seventh
+sweep). Ranking lives in ``search/prior/AnalyticPrior`` (the ``D_*`` geometry
+features over ``features.knob_features``).
 """
 
 from __future__ import annotations
@@ -71,10 +69,12 @@ def matmul_snippet(M: int, N: int, K: int, dtype: str = "fp32") -> str:
 
 
 def _knobs_env(knobs: dict) -> str:
-    """Render a knobs dict as a ``EMMY_KNOBS`` value: ``BM=8,BN=32,...``.
+    """Render a knobs dict as a ``EMMY_KNOBS`` value: ``TILE=n32x8/f4x26,STAGE=d2/tma``.
 
     Structural-feature knobs (``STRUCT_PREFIX``) are dropped — a repro command
-    pins tuning decisions, not the kernel's structural identity."""
+    pins tuning decisions, not the kernel's structural identity. ``WARPSPEC`` (the pre-rebuild
+    boolean spelling still on old golden rows; the live codec is ``WSPEC``) rides through like
+    any other knob."""
     return ",".join(f"{k}={v}" for k, v in knobs.items() if not k.startswith(STRUCT_PREFIX))
 
 
@@ -115,6 +115,11 @@ class GoldenConfig:
 
         spec = gpu.by_name(self.gpu_name)
         return spec.sm_count if spec else None
+
+    def dynamic_specs(self) -> list[str]:
+        """``--dynamic NAME@INPUT:AXIS`` spec strings for the tracer. Only a matmul
+        golden can be dynamic today; the base is always static (empty)."""
+        return []
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -193,7 +198,7 @@ class MatmulGoldenConfig(GoldenConfig):
     def repro_command(self, ir: str = "cuda") -> str:
         """A runnable ``emmy`` command that rebuilds this config's kernel.
 
-        e.g. ``EMMY_KNOBS="BM=8,..." emmy compile -c "torch.matmul(...)" --ir cuda``
+        e.g. ``EMMY_KNOBS="TILE=n32x8/f4x26,STAGE=d2/tma" emmy compile -c "torch.matmul(...)" --ir cuda``
         """
         dyn = "".join(f" --dynamic {s}" for s in self.dynamic_specs())
         return f'EMMY_KNOBS="{_knobs_env(self.knobs)}" emmy compile -c "{self.snippet()}"{dyn} --ir {ir}'
@@ -210,9 +215,17 @@ class ReduceGoldenConfig(GoldenConfig):
 
     M: int
     K: int
+    dtype: str = "fp32"  # the snippet is fp32-only; recorded so Sample.from_golden is kind-agnostic
 
     def snippet(self) -> str:
         return f"torch.sum(torch.randn({self.M},{self.K}),dim=-1)"
+
+    def shape_key(self):
+        """The reduce's arithmetic join key — free dims ``(M,)``, reduce extent ``K``,
+        matching what ``992_stamp_structural_features`` stamps on the reduce kernel."""
+        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
+
+        return ShapeKey(free_prod=self.M, reduce_max=self.K, is_warp=False)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -224,9 +237,17 @@ class PointwiseGoldenConfig(GoldenConfig):
 
     M: int
     N: int
+    dtype: str = "fp32"  # the snippet is fp32-only; recorded so Sample.from_golden is kind-agnostic
 
     def snippet(self) -> str:
         return f"torch.relu(torch.randn({self.M},{self.N}))"
+
+    def shape_key(self):
+        """The pointwise map's arithmetic join key — free product ``M·N``, no reduce
+        axis (``reduce_max=0``, the ``from_s_features`` default for an unstamped extent)."""
+        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
+
+        return ShapeKey(free_prod=self.M * self.N, reduce_max=0, is_warp=False)
 
 
 _GOLDENS_DIR = Path(__file__).parent / "goldens"

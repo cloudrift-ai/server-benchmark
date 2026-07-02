@@ -239,6 +239,40 @@ def test_inner_reward_records_o3_regime_rows(monkeypatch) -> None:
         assert '"H_opt": 3.0' in feats_json  # the deployable-regime stamp
 
 
+def test_node_rows_are_fold_ready(monkeypatch) -> None:
+    """End-to-end group-holdout readiness: after a real tune (O3 re-benches on),
+    every node row carries its fold keys, fold-by-op keeps each op atomic —
+    the -O1 tree AND its -O3 regime rows in one fold, parent edges resolving
+    inside it — and fold-by-gpu puts this single-card run in one fold."""
+    from emmy.compiler.pipeline.search.data import Dataset
+
+    monkeypatch.setenv("EMMY_NVCC_FLAGS", "-Xcicc -O1")
+    fused = _fuse(_two_distinct_matmuls())
+    ctx = Context.from_target((8, 0))
+    db = SearchDB()
+    run_inner_reward(fused, ctx=ctx, db=db, backend=_O3CountingBackend(), patience=_PATIENCE, run_id="foldrun")
+
+    rows = list(db.iter_nodes())
+    assert rows
+    assert all(r.op_sig and r.gpu and r.run_id for r in rows)  # every fold key populated
+
+    by_op = Dataset.fold_node_rows(rows, by="op")
+    assert len(by_op) >= 2  # two distinct matmuls → at least two op folds
+    assert sum(len(v) for v in by_op.values()) == len(rows)  # a partition
+    o3_folds = 0
+    for fold in by_op.values():
+        keys = {r.node_key for r in fold}
+        assert all(r.parent_key in keys for r in fold if r.parent_key is not None)  # edges stay inside
+        if len({r.context_key for r in fold}) == 2:  # -O1 tree + -O3 regime rows together
+            o3_folds += 1
+    assert o3_folds > 0
+
+    by_gpu = Dataset.fold_node_rows(rows, by="gpu")
+    assert len(by_gpu) == 1  # one card tuned → one gpu fold holding everything
+    (gpu_fold,) = by_gpu.values()
+    assert len(gpu_fold) == len(rows)
+
+
 def test_inner_reward_rerun_is_replay_dominated() -> None:
     """A second pass at the same patience is replay-dominated and never regresses:
     the warm perf cache serves almost every terminal, so the rerun benches far

@@ -13,7 +13,7 @@ pipeline/
 │   ├── candidate.py  # Candidate / LazyCandidate / Cursor data classes
 │   ├── policy/       # Search ABC (base.py) + TuningSearch (mcts.py, tune) + greedy_decide (greedy.py, the Run.resolve pick for compile/run); both rank via the Prior
 │   ├── db.py         # SearchDB SQLite store: op inventory + lowering edges + perf (per-variant replay cache) + node (keyed/deduped/parent-linked search-tree nodes via record_nodes); open_readonly + iter_perf_samples (perf ⋈ cuda_op) back the data layer
-│   ├── data/         # harmonized read-view over the 3 sources (golden / DB perf / prior reservoir): Sample (one normalized row + the single knob_features path; golden rows carry the config's `--dynamic` specs in `.dynamic`), Dataset (from_golden/from_db/from_prior/from_node_rows + group_by_op/group_by_kernel_name), ShapeKey (arithmetic S_* identity AND the single golden↔measured join key: `from_matmul` / `MatmulGoldenConfig.shape_key()` build the golden side, `from_s_features` the stamped-op side — dtype flag from `S_dtype_f32`, never `S_n_mma`, which is 0 on every stamped row; `is_dyn` splits a symbolic-axis golden from its static twin, mirroring the 992 stamp's symbolic-excluded extent products + `S_ext_n_symbolic_axis` flag; all diagnostics joins + run's golden A/B kernel matching key through it)
+│   ├── data/         # harmonized read-view over the 3 sources (golden / DB perf / prior reservoir): Sample (one normalized row + the single knob_features path; golden rows carry the config's `--dynamic` specs in `.dynamic`), Dataset (from_golden/from_db/from_prior/from_node_rows + group_by_op/group_by_kernel_name + fold_node_rows — group-holdout folds over node rows by op_sig/gpu for out-of-sample prior eval; run_id is provenance, not a fold axis), ShapeKey (arithmetic S_* identity AND the single golden↔measured join key: `from_matmul` / `MatmulGoldenConfig.shape_key()` build the golden side, `from_s_features` the stamped-op side — dtype flag from `S_dtype_f32`, never `S_n_mma`, which is 0 on every stamped row; `is_dyn` splits a symbolic-axis golden from its static twin, mirroring the 992 stamp's symbolic-excluded extent products + `S_ext_n_symbolic_axis` flag; all diagnostics joins + run's golden A/B kernel matching key through it)
 │   ├── keys.py       # op_cache_key / dialect_of / source_chain
 │   ├── slice.py      # single_node_graph: isolate one finalized kernel into a standalone graph
 │   ├── two_level.py  # two-level tuner: outer structural MCTS + inner separable per-op reward
@@ -606,7 +606,10 @@ it never collides with the -O1 twin), features stamped `H_opt=3.0` (the reservoi
 source featurizes identically), parentless (a regime re-measurement, not part of the tree, so it never enters a
 fork sibling group), and with no bench stats (the re-bench returns a bare median); the leaf newest-measurement
 upsert applies. `node_report` splits a card's block per `H_opt` regime so -O1 and -O3 latencies never pool in leaf
-reachability. Within one batch, a deterministic no-knob-delta
+reachability. The store is **group-holdout-fold ready** (`Dataset.fold_node_rows`): every row carries its fold keys,
+and fold-by-`op_sig` / fold-by-`gpu` keep each group atomic — an op's -O1 tree, -O3 rows, and fail leaves move to one
+side together, parent edges never cross a fold (`run_id` is provenance of the surviving deduped value, deliberately
+NOT a fold axis). Within one batch, a deterministic no-knob-delta
 step can give a child its parent's exact knob set (→ same `node_key`); the walk collapses such duplicates to one row
 (preferring the leaf's stats, max — not sum — of their visits) so `record_nodes`'s SUM accumulation never
 double-counts a single run.

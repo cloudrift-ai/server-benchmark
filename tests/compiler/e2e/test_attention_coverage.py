@@ -303,9 +303,11 @@ def test_generated_tensorcore_flash_matches_torch(monkeypatch, B, H, S, D):
 
 def test_flash_form_fork_offers_geometry_grid():
     """The flash-form fork's enumerated rows (live-fork capture, no GPU): fp16 offers the full
-    warp move grid (every divisibility-legal ``(warps_m, key_atoms)`` point) plus the chain and the
-    per-cell serial escape, every row spelling the SAME ``TILE@dd`` / ``TILE@pj`` / ``REDUCE@kv``
-    key set (the evidence pick's prefix-consistency); f32 (no mma atom) offers chain + serial."""
+    warp move grid (every divisibility-legal ``(warps_m, key_atoms)`` point), each geometry crossed
+    with its K/V operand-stage candidates (gmem-direct option-0 + the resolver-gated cp.async ring
+    depths), plus the chain and the per-cell serial escape — every row spelling the SAME
+    ``TILE@dd`` / ``TILE@pj`` / ``REDUCE@kv`` / ``STAGE@kv`` key set (the evidence pick's
+    prefix-consistency); f32 (no mma atom) offers chain + serial."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.schedule import is_warp_codec  # noqa: PLC0415
     from emmy.compiler.pipeline.search.analytic import enumerate_graph  # noqa: PLC0415
@@ -317,13 +319,21 @@ def test_flash_form_fork_offers_geometry_grid():
         q, k, v = (torch.randn(1, 4, 128, 64, dtype=dtype) for _ in range(3))
         graph = trace_module(_Sdpa().cpu(), (q, k, v))
         rows = [r for r in enumerate_graph(graph, ctx) if "TILE@dd" in r or "TILE@pj" in r or "REDUCE@kv" in r]
-        assert all({"TILE@dd", "TILE@pj", "REDUCE@kv"} <= set(r) for r in rows), "flash rows must spell one uniform key set"
+        assert all({"TILE@dd", "TILE@pj", "REDUCE@kv", "STAGE@kv"} <= set(r) for r in rows), "flash rows must spell one uniform key set"
         warp = [r for r in rows if is_warp_codec(r["TILE@dd"])]
         chain = [r for r in rows if not is_warp_codec(r["TILE@dd"]) and r["TILE@pj"]]
         serial = [r for r in rows if not r["TILE@dd"] and not r["TILE@pj"]]
         # (1, 4, 128, 64): every (warps_m, key_atoms) point is divisibility-legal (128 % (um·16) == 0,
-        # 128 % (nt·8) == 0), so the fp16 pool is the whole grid.
-        assert len(warp) == want_warp, f"{dtype}: expected {want_warp} warp rows, got {len(warp)}"
+        # 128 % (nt·8) == 0), so the fp16 pool spans the whole geometry grid; each geometry offers a
+        # gmem-direct row plus at least one resolved cp.async stage row (the exact stage count is
+        # budget-dependent — the depth clamp dedups on the resolved spelling).
+        geoms = {r["TILE@dd"] for r in warp}
+        assert len(geoms) == want_warp, f"{dtype}: expected {want_warp} warp geometries, got {len(geoms)}"
+        for g in geoms:
+            stages = {r["STAGE@kv"] for r in warp if r["TILE@dd"] == g}
+            assert "" in stages, f"{dtype} {g}: the gmem-direct option-0 row is missing"
+            assert any("cp" in s for s in stages), f"{dtype} {g}: no resolved cp.async stage row"
+        assert all(not r["STAGE@kv"] for r in [*chain, *serial]), "chain/serial rows stamp the decided-empty stage"
         assert len(chain) == 1 and len(serial) >= 1, f"{dtype}: chain/serial siblings missing ({len(chain)}/{len(serial)})"
 
 
@@ -350,6 +360,136 @@ def test_warp_flash_geometry_pin_matches_torch(monkeypatch, um, nt):
     got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
     max_diff = float(np.max(np.abs(got - eager)))
     assert max_diff < 5e-3, f"pinned warp flash w{um}/f1x{nt} max_diff={max_diff:.2e}"
+
+
+# --------------------------------------------------------------------------- #
+# Staged K/V (the ``STAGE@<kv>`` cp.async stream) — Moves 4/5 on the warp tier.
+# --------------------------------------------------------------------------- #
+
+
+def _run_flash(backend, compiled, graph, tensors) -> np.ndarray:
+    data = {n: t.numpy() for n, t in zip(graph.inputs, tensors, strict=True)}
+    run_result, _ = backend.run(compiled, input_data=data)
+    return list(run_result.outputs.values())[0].flatten()
+
+
+@requires_cuda
+@pytest.mark.parametrize("stage", ["d1/cp", "d2/cp/ring", "d3/cp/ring"])
+def test_staged_warp_flash_matches_torch(monkeypatch, stage):
+    """A pinned K/V operand ``STAGE`` on the warp-flash stream: the kernel fills per-block K/V smem
+    slabs via cp.async (``d1`` single-buffer; ``d2+/ring`` the prefetch ring overlapping the next
+    block's loads with this block's mma work) and drains them via the staged ldmatrix variants
+    (plain ``x2`` for the N-major K slab, ``x2.trans`` for the K-major V slab). Matches torch."""
+    monkeypatch.setenv("EMMY_STAGE", stage)
+    torch.manual_seed(7)
+    q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
+    backend, compiled, graph, kernels = _compile_tc(q, k, v)
+    assert len(kernels) == 1, f"staged warp flash should be one kernel, got {len(kernels)}"
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "cp.async" in src and "_k_smem" in src and "_v_smem" in src, "the staged stream must fill K/V slabs via cp.async"
+    assert "dpl_ldmatrix_x2(" in src, "the N-major K slab drains via the plain (no .trans) staged x2"
+
+    def ref():
+        with torch.no_grad():
+            return torch.nn.functional.scaled_dot_product_attention(q.cuda(), k.cuda(), v.cuda()).cpu().flatten().float().numpy()
+
+    data = {n: t for n, t in zip(graph.inputs, (q.numpy(), k.numpy(), v.numpy()), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=ref)
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    max_diff = float(np.max(np.abs(got - eager)))
+    assert max_diff < 5e-3, f"staged ({stage}) warp flash max_diff={max_diff:.2e}"
+
+
+@requires_cuda
+@pytest.mark.parametrize("stage", ["d1/cp", "d2/cp/ring"])
+def test_staged_warp_flash_bit_identical_to_gmem_direct(monkeypatch, stage):
+    """Staging is a pure perf transform (the matmul tier's invariant, carried to the stream): the
+    K/V slab fills are verbatim row copies and the mma order is unchanged, so the staged kernel's
+    output is BIT-identical to its gmem-direct sibling on the same inputs and geometry."""
+    torch.manual_seed(11)
+    q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
+    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x1/f1x4/k4")
+    backend, compiled, graph, _ = _compile_tc(q, k, v)
+    base = _run_flash(backend, compiled, graph, (q, k, v))
+    monkeypatch.setenv("EMMY_STAGE", stage)
+    backend2, compiled2, graph2, kernels2 = _compile_tc(q, k, v)
+    assert "cp.async" in compiled2.nodes[kernels2[0]].op.kernel_source
+    staged = _run_flash(backend2, compiled2, graph2, (q, k, v))
+    assert np.array_equal(base, staged), f"staged ({stage}) output differs from its gmem-direct sibling"
+
+
+@requires_cuda
+def test_staged_warp_flash_causal_and_gqa_match_torch(monkeypatch):
+    """The staged stream composes with the fragment causal mask and the GQA ``head // group`` K/V
+    indexing — both ride the slab fill's operand index verbatim (the σ passes batch/head terms
+    through), so no staging-side special case exists to regress."""
+    monkeypatch.setenv("EMMY_STAGE", "d2/cp/ring")
+    torch.manual_seed(13)
+    q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
+    backend, compiled, graph, kernels = _compile_tc(q, k, v, module=_Causal())
+    assert "cp.async" in compiled.nodes[kernels[0]].op.kernel_source
+
+    def ref():
+        with torch.no_grad():
+            return (
+                torch.nn.functional.scaled_dot_product_attention(q.cuda(), k.cuda(), v.cuda(), is_causal=True)
+                .cpu()
+                .flatten()
+                .float()
+                .numpy()
+            )
+
+    data = {n: t for n, t in zip(graph.inputs, (q.numpy(), k.numpy(), v.numpy()), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=ref)
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    assert float(np.max(np.abs(got - eager))) < 5e-3, "staged causal warp flash drifted from torch"
+
+    qg = torch.randn(1, 4, 128, 32, dtype=torch.float16)
+    kg, vg = (torch.randn(1, 2, 128, 32, dtype=torch.float16) for _ in range(2))
+    backend, compiled, graph, kernels = _compile_tc(qg, kg, vg, module=_Gqa())
+    assert "cp.async" in compiled.nodes[kernels[0]].op.kernel_source
+
+    def rg():
+        with torch.no_grad():
+            return (
+                torch.nn.functional.scaled_dot_product_attention(qg.cuda(), kg.cuda(), vg.cuda(), is_causal=True, enable_gqa=True)
+                .cpu()
+                .flatten()
+                .float()
+                .numpy()
+            )
+
+    data = {n: t for n, t in zip(graph.inputs, (qg.numpy(), kg.numpy(), vg.numpy()), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=rg)
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    assert float(np.max(np.abs(got - eager))) < 5e-3, "staged GQA warp flash drifted from torch"
+
+
+@requires_cuda
+def test_staged_flash_symbolic_declines_to_gmem_direct(monkeypatch):
+    """A ``STAGE`` pin on a SYMBOLIC ``seq_len`` flash declines (the resolver stages a static,
+    block-divisible kv only — the masked gmem-direct fragment loads keep the symbolic path correct)
+    and the kernel still compiles and matches torch — the standard pin-validity degrade."""
+    monkeypatch.setenv("EMMY_STAGE", "d2/cp/ring")
+    B, H, D = 1, 2, 32
+    sd = torch.export.Dim("seq_len", min=4, max=4096)
+    seed = tuple(torch.randn(B, H, 16, D, dtype=torch.float16) for _ in range(3))
+    backend, compiled, graph, kernels = _trace(_Sdpa(), seed, dynamic_shapes={"q": {2: sd}, "k": {2: sd}, "v": {2: sd}})
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "flash_pv_smem" in src, "must still be the fused warp form"
+    assert "_k_smem" not in src and "_v_smem" not in src, "a symbolic stream must decline the K/V stage"
+
+    torch.manual_seed(37)
+    q, k, v = (torch.randn(B, H, 37, D, dtype=torch.float16) for _ in range(3))
+
+    def ref():
+        with torch.no_grad():
+            return torch.nn.functional.scaled_dot_product_attention(q.cuda(), k.cuda(), v.cuda()).cpu().flatten().float().numpy()
+
+    data = {n: t for n, t in zip(graph.inputs, (q.numpy(), k.numpy(), v.numpy()), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=ref)
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    assert float(np.max(np.abs(got - eager))) < 5e-3, "declined-stage symbolic flash drifted from torch"
 
 
 @requires_cuda

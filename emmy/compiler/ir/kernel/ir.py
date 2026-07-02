@@ -1140,7 +1140,7 @@ class LdmatrixLoad(Stmt):
     staged: bool = True  # False → gmem-direct fragment load (operand not in smem)
     gmem_guard: tuple[Expr, Expr] | None = None  # masked-axis (base, bound); gmem-direct only
     k_zero: tuple[Expr, Expr] | None = None  # masked-K reduce axis (base, bound); gmem-direct only
-    b_trans: bool = False  # role "b" only: B stored N×K (Q@K^T native col-major) → gmem-direct trans helper
+    b_trans: bool = False  # role "b" only: B stored N×K (Q@K^T native col-major) → gmem-direct trans helper / staged plain x2
 
     def deps(self) -> tuple[str, ...]:
         return (self.frag,)
@@ -1158,7 +1158,7 @@ class LdmatrixLoad(Stmt):
 
     def pretty(self, indent: str = "") -> list[str]:
         idx = ", ".join(e.pretty() for e in self.src_index)
-        variant = ("x4" if self.role == "a" else "x2.trans") if self.staged else "gmem-direct"
+        variant = ("x4" if self.role == "a" else ("x2" if self.b_trans else "x2.trans")) if self.staged else "gmem-direct"
         guard = "" if self.gmem_guard is None else f" guard<{self.gmem_guard[1].pretty()}"
         return [f"{indent}LdmatrixLoad {self.frag} <- {self.src_buffer}[{idx}] ({variant}{guard}, ldm={self.ldm or 'auto'})"]
 
@@ -1213,15 +1213,15 @@ class LdmatrixLoad(Stmt):
             elem = f"{flat} + ({lane} % 16) * {ldm} + ({lane} / 16) * 8"
             addr = self._swizzled_addr(elem)
             return [f"{_pad(ctx.indent)}dpl_ldmatrix_x4({self.frag}, {addr});"]
-        # Transposed-B (Q@K^T) is the native col-major B and would need a plain
-        # x2 (no .trans) staged load whose ldmatrix lane→element map differs from
-        # the canonical x2.trans below. That staged variant isn't implemented yet
-        # — ``tile/020_stage_inputs`` excludes the transposed-B operand so it
-        # lowers gmem-direct (the ``staged=False`` branch above). Fail loud if a
-        # transposed-B operand ever reaches the staged path rather than silently
-        # emitting the wrong (canonical) lane map.
+        # Transposed-B (Q@K^T): the slab keeps the operand's native N-major layout
+        # (N rows × K cols), which IS the mma's col-major B — a plain x2 (no
+        # .trans) with N-row addresses: lanes 0-7 address the 8 N rows of the k16
+        # half 0, lanes 8-15 the same rows at K col 8 (each 8x8 matrix's rows land
+        # as the fragment's (k, k+1) pairs, cf. ``dpl_mma_load_b_gmem_trans``).
         if self.b_trans:
-            raise NotImplementedError("staged ldmatrix for transposed-B (Q@K^T) not supported — must lower gmem-direct")
+            elem = f"{flat} + ({lane} % 8) * {ldm} + (({lane} / 8) % 2) * 8"
+            addr = self._swizzled_addr(elem)
+            return [f"{_pad(ctx.indent)}dpl_ldmatrix_x2({self.frag}, {addr});"]
         # 16×8 B: x2.trans — lane addresses K-row (lane%16); .trans yields col-major.
         elem = f"{flat} + ({lane} % 16) * {ldm}"
         addr = self._swizzled_addr(elem)

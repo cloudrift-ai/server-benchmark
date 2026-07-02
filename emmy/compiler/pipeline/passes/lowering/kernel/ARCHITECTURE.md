@@ -134,6 +134,16 @@ flash operand) silently falls back to gmem-direct, and a staged kernel is
 **bit-identical** to its gmem-direct baseline. Unpinned, the schedule fork enumerates the resolver-gated stage grid
 (`search/space.stage_moves`) alongside the tile / reduce moves; a `EMMY_STAGE` pin stays authoritative.
 
+**The warp-flash stream stages too** (`STAGE@<kv>`, resolved by `_schedule._resolve_twisted_stage`): the K and V
+operands of the TWISTED streaming pair fill per-block smem slabs through the same `CpAsyncTransport` seam, the whole
+streaming step (both mmas + the fragment softmax merge) riding `staged_kloop` as its drain — `d1` the single-buffer
+fill, `d2+/ring` the prefetch ring overlapping the next KV block's copies with this block's mma work. Each slab keeps
+its operand's own layout (K stays N-major, V K-major; verbatim row copies), so the transposed-B K slab drains via the
+**plain `x2` (no `.trans`) staged ldmatrix** — its 8×8 rows ARE the mma's col-major B columns (the `LdmatrixLoad`
+render's third variant) — and the V slab via the canonical `x2.trans`. cp.async only (TMA's 2-D box cannot encode the
+batched K/V operands), static block-divisible kv only (the symbolic stream keeps its masked gmem-direct loads), and
+bit-identity to the gmem-direct sibling holds — same values, same mma order.
+
 **The fused edge — the mma tier's `sync` transport.** A demoted-cone matmul (`f(x, …) @ w`) takes the warp tier
 under a warp `TILE` pin: `_schedule._demoted_warp_option` nodifies the PLANAR ⊗-fold to a computed-A `Contraction`
 (the same `a_operand = Body` flash P@V rides) and stamps a `sync` `Stage`; `_staged` then builds a `SyncTransport`
@@ -211,8 +221,10 @@ constant `Load`s hoisted); the streaming merge REGENERATED from the carrier's ch
 stats + α-rescale; denom → rowsum; the expect channel's ⊗ `lift` IS the P@V node, its register-resident A operand fed
 through the `flash_pv_smem` C→A smem handoff); the projection tail as an in-place `FragmentApply` + the `RegStore`
 close. Symbolic seq masks at the fragment (`FragmentMask(col ≥ seq)`) with the gmem reads clamped; causal composes as
-another mask. No kernel-identity dispatch anywhere — an unrealizable tree is rejected at schedule time (the additive
-`(m, kv)` score bias, a non-exp family), never here.
+another mask. A resolved K/V `Stage` on the `TileOp` re-parents the streaming step under `staged_kloop` (the step
+builder takes the ring-slot offsets; see the operand-staging section above) — gmem-direct and staged are one body,
+differing only in where the B fragments read. No kernel-identity dispatch anywhere — an unrealizable tree is rejected
+at schedule time (the additive `(m, kv)` score bias, a non-exp family), never here.
 
 **Shared-row staging (`_tile_reduce_axis`) — the reduce tier's `sync` transport.** The fused norm→linear prologue is a
 cooperative reduce: an input row folded by the cooperative reduce AND re-read per output column of a contraction tail (a

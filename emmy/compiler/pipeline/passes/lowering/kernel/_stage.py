@@ -625,6 +625,7 @@ def staged_kloop(
     k_extent: int,
     workers=None,
     block_threads: int | None = None,
+    k0: str = "_ks",
 ) -> tuple[list[Stmt], list[Stmt]]:
     """The **one** staged K-loop skeleton — ``fill → commit → wait → drain → Sync`` over the K-chunks,
     with ``depth`` the sole buffering knob and ``transport`` the sole producer seam. Returns
@@ -644,7 +645,10 @@ def staged_kloop(
 
     ``workers`` (a resolved :class:`~emmy.compiler.ir.schedule.WarpSpec`) splits the same phases
     across producer / compute warp bands instead (:func:`_wspec_kloop`) — TMA transport only (the
-    scheduler's legality gate), ``block_threads`` naming the compute band."""
+    scheduler's legality gate), ``block_threads`` naming the compute band.
+
+    ``k0`` names the chunk loop variable (default ``"_ks"``) — a drain whose body references the
+    chunk base by name (the warp-flash stream's absolute score columns) passes its own axis name."""
     ring = min(depth, n_chunks) if n_chunks >= 2 else 1
     if workers is not None:
         assert isinstance(transport, TmaTransport), "warp specialization drives the TMA transport only (scheduler legality)"
@@ -659,7 +663,7 @@ def staged_kloop(
             aux_threads=32 * workers.aux_warps,
             block_threads=block_threads,
         )
-    k0, K = "_ks", k_extent
+    K = k_extent
     decls = transport.slab_decls(ring)
     pre = transport.prologue(ring)
     for s in range(ring - 1):  # prime chunks 0..ring-2 into slots 0..ring-2 (phase 0)

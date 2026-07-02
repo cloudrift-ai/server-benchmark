@@ -103,8 +103,12 @@ register-vector CHAIN (the FA-2 shared-score form), then the cooperative / per-c
 leaf row spelling the same `TILE@<qk_k>` / `TILE@<pv_k>` / `REDUCE@<kv>` key set (decided-empty where a form doesn't
 tile). A non-empty `REDUCE` pin remains the scalar escape; a warp `TILE` pin keeps the mma rows alone (loud on a
 divisibility violation, declining with a log line when the pin doesn't fit the flash form — a bare warp pin may target
-another kernel). K/V operand staging on the warp-flash stream (the `Stage` seam) and the causal tile-skip are
-follow-ups.
+another kernel). Each warp geometry row crosses with its **K/V operand-stage** candidates (`STAGE@<kv>` —
+`_schedule._twisted_stage_candidates`: gmem-direct option-0, then the resolver-gated cp.async ring depths; cp.async
+only — TMA's 2-D descriptor cannot encode the batched K/V operands — over a static, block-divisible kv; the resolved
+`Stage` rides the `TileOp` and the streaming step becomes the `staged_kloop` drain, K/V slabs kept in each operand's
+own layout so staging stays bit-identical to gmem-direct). The chain / coop / serial escapes stamp the decided-empty
+`STAGE@<kv>: ""`. The causal tile-skip is the remaining flash follow-up.
 Two catalog invariants hold: every recorded golden's `TILE`/`STAGE`/`REDUCE` stays a **member** of the enumerated
 grids (the permanence test in `tests/compiler/test_golden_configs.py` — a space edit can never silently orphan a
 golden into unreachability again, the sixth sweep's `.s512` regression class; the scalar reg grid carries the

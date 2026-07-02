@@ -1072,13 +1072,13 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         pair = _twisted_pair(tile.op)
         if pair is not None:
             red, head, pv = pair
-            warps = _twisted_warp_options(tile, name, knobs)
+            warps = _twisted_warp_options(tile, name, knobs, _smem_budget(ctx))
             if warps and TILE.raw() is not None:  # a live warp pin — the mma rows alone (the pin contract)
                 return warps if len(warps) > 1 else warps[0]
             chain = _twisted_chain_option(tile, place, name, knobs)
             forms = [*warps, *([chain] if chain is not None else [])]
             if forms:
-                empty = {_at(TILE, head.k_axis.name): "", _at(TILE, pv.k_axis.name): ""}
+                empty = {_at(TILE, head.k_axis.name): "", _at(TILE, pv.k_axis.name): "", _at(STAGE, red.axis.name): ""}
                 forms += [_option(tile, place, spec, name, {**knobs, **empty}) for spec in _reduce_specs(tile, place)]
                 return forms if len(forms) > 1 else forms[0]
         else:
@@ -1144,7 +1144,13 @@ def _twisted_chain_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp
     # stamped (keyed on the PV contraction's k axis, like every per-node schedule codec) — the row
     # identity the DB / prior separate it from the per-cell serial by — and the sibling families it
     # does NOT schedule are decided-empty so every flash leaf row spells the same key set.
-    stamped = {**knobs, _at(TILE, pv.k_axis.name): pv2.tile.spell(), _at(TILE, head.k_axis.name): "", _at(REDUCE, red.axis.name): ""}
+    stamped = {
+        **knobs,
+        _at(TILE, pv.k_axis.name): pv2.tile.spell(),
+        _at(TILE, head.k_axis.name): "",
+        _at(REDUCE, red.axis.name): "",
+        _at(STAGE, red.axis.name): "",
+    }
     return TileOp(op=op2, name=name, place=Placement(free=tile.place.free, grid=tuple(grid[:-1])), knobs=stamped)
 
 
@@ -1228,7 +1234,66 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     return TileOp(op=node, name=name, place=place, tier=wt, stage=stage, knobs=stamped)
 
 
-def _twisted_warp_options(tile: TileOp, name: str, knobs: dict) -> list[TileOp]:
+def _resolve_twisted_stage(stage: Stage, kv_extent, bn: int, head_dim: int, d_v: int, elem_bytes: int, budget: int) -> Stage | None:
+    """Resolve an operand ``Stage`` against a warp-flash streaming pair — the K/V slabs of one
+    ``bn``-key streaming step (K ``bn × head_dim`` in its native N-major layout, V ``bn × d_v``
+    K-major; both verbatim row copies, so staging stays bit-identical to gmem-direct). cp.async
+    only: TMA's 2-D descriptor cannot encode the batched K/V operands, and ``sync`` has nothing to
+    overlap. A symbolic or non-block-divisible kv stays gmem-direct (its masked fragment loads
+    already clamp; slab zero-fill is a follow-up). ``depth`` clamps so the ring's K+V slot pairs
+    fit the smem ``budget``; ``reg_depth`` clamps to 1 (no ldmatrix ping-pong on the streaming
+    drain yet); ``bk_elems`` records the streamed keys per step."""
+    if stage.transport != "cp.async":
+        return None
+    if not kv_extent.is_static or kv_extent.as_static() % bn != 0:
+        return None
+    slot_bytes = bn * (head_dim + d_v) * elem_bytes
+    if slot_bytes > budget:
+        return None
+    depth = min(stage.depth, budget // slot_bytes)
+    return replace(stage, depth=depth, ring=stage.ring and depth >= 2, reg_depth=1, bk_elems=bn)
+
+
+def _twisted_stage_candidates(kv_extent, bn: int, head_dim: int, d_v: int, elem_bytes: int, budget: int) -> list[Stage | None]:
+    """The K/V operand-stage candidates for one warp-flash geometry row — gmem-direct ``None``
+    first (the conservative option-0), then every ``stage_moves`` entry that RESOLVES against the
+    stream (:func:`_resolve_twisted_stage`), deduped on the resolved spelling (a ``p2`` move clamps
+    to the same pipeline as its ``p1`` sibling and drops). A pinned ``STAGE`` is authoritative:
+    the resolved pin alone, or gmem-direct with a log line when it declines — the same
+    pin-validity degrade as the warp ``TILE`` pin."""
+
+    def resolve(spec: str) -> Stage | None:
+        return _resolve_twisted_stage(Stage.parse(spec), kv_extent, bn, head_dim, d_v, elem_bytes, budget)
+
+    if STAGE.raw() is not None:
+        pinned = STAGE.narrow([""])[0]
+        if pinned:
+            try:
+                r = resolve(pinned)
+            except ValueError:
+                r = None
+            if r is not None:
+                return [r]
+            logger.warning(
+                "STAGE pin %r does not resolve against the warp-flash stream (cp.async over a static, "
+                "%d-key-block-divisible kv); the flash kernel stays gmem-direct",
+                pinned,
+                bn,
+            )
+        return [None]
+    out: list[Stage | None] = [None]
+    spelled: set[str] = set()
+    for move in stage_moves(warp=True):
+        if not move:
+            continue
+        r = resolve(move)
+        if r is not None and r.spell() not in spelled:
+            spelled.add(r.spell())
+            out.append(r)
+    return out
+
+
+def _twisted_warp_options(tile: TileOp, name: str, knobs: dict, budget: int = STATIC_SMEM_CAP) -> list[TileOp]:
     """The fragment-resident (tensor-core) candidates for a ``TWISTED`` streaming reduce — the
     warp-flash MOVE GRID over :func:`~emmy.compiler.pipeline.search.space.twisted_warp_moves`'s
     ``(warps_m, key_atoms)`` geometry — or ``[]`` (not eligible: the scalar options stand alone).
@@ -1240,7 +1305,9 @@ def _twisted_warp_options(tile: TileOp, name: str, knobs: dict) -> list[TileOp]:
     same-per-node stamping rule as ``_warp_option``: the two contractions get their mma
     :class:`TilePlan`\\ s — the Q@K score block ``key_atoms·atom_n`` keys wide, the value dim folded
     into the expect tile whose ``bk`` covers the block — and the placement maps ``warps_m`` warps
-    per CTA, each owning ``atom_m`` query rows; the value axis leaves the grid. An additive
+    per CTA, each owning ``atom_m`` query rows; the value axis leaves the grid. Each geometry row
+    crosses with its K/V operand-stage candidates (:func:`_twisted_stage_candidates` — gmem-direct
+    option-0, then the resolver-gated cp.async ring depths, keyed ``STAGE@<kv>``). An additive
     ``(m, kv)`` score bias is not realizable at the fragment tier → ``[]``. A warp ``TILE`` pin
     narrows the grid to the pinned geometry (loud on a divisibility violation — the pin contract);
     a pin that doesn't fit the flash form (wrong atom / a column split / a foreign ``bk``) declines
@@ -1289,6 +1356,7 @@ def _twisted_warp_options(tile: TileOp, name: str, knobs: dict) -> list[TileOp]:
     else:
         pairs = twisted_warp_moves()
     out: list[TileOp] = []
+    elem_bytes = atom.operand_dtype("b").nbytes
     for um, nt in pairs:
         bn = nt * atom_n  # the streaming block: nt key atoms per step
         if kv_ext.is_static and kv_ext.as_static() % bn != 0:
@@ -1313,13 +1381,17 @@ def _twisted_warp_options(tile: TileOp, name: str, knobs: dict) -> list[TileOp]:
             if ax.name != pv.n_axis.name
         )
         place = Placement(free=tile.place.free, grid=grid)
-        # Both contractions' plans are stamped (each keyed on its node's k axis) + the reduce
-        # partition decided-empty, so every flash leaf row spells the same key set.
-        stamped = {
-            **knobs,
-            _at(TILE, head.k_axis.name): qk_plan.spell(),
-            _at(TILE, pv.k_axis.name): pv_plan.spell(),
-            _at(REDUCE, kv_name): "",
-        }
-        out.append(TileOp(op=op2, name=name, place=place, knobs=stamped))
+        # Both contractions' plans are stamped (each keyed on its node's k axis), the reduce
+        # partition decided-empty, and the K/V operand stage on the STREAM axis (the resolved
+        # spelling, or the explicit OFF ``""`` — the honest-stamping rule), so every flash leaf
+        # row spells the same key set.
+        for stage in _twisted_stage_candidates(kv_ext, bn, head_dim.as_static(), d_v.as_static(), elem_bytes, budget):
+            stamped = {
+                **knobs,
+                _at(TILE, head.k_axis.name): qk_plan.spell(),
+                _at(TILE, pv.k_axis.name): pv_plan.spell(),
+                _at(REDUCE, kv_name): "",
+                _at(STAGE, kv_name): stage.spell() if stage is not None else "",
+            }
+            out.append(TileOp(op=op2, name=name, place=place, stage=stage, knobs=stamped))
     return out

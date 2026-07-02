@@ -22,7 +22,13 @@ residence — the fragment row of the placement-keyed fold (a within-warp ``Frag
   the register-resident probability fed through the ``flash_pv_smem`` C→A handoff (``RegStore`` →
   ``ldmatrix``), the one genuinely new data-move of this tier;
 - the projection tail (``O / l``) realizes as an in-place ``FragmentApply`` + the ``RegStore``
-  output close.
+  output close;
+- a resolved K/V ``Stage`` on the ``TileOp`` (``ctx.stage`` — ``_schedule._resolve_twisted_stage``,
+  cp.async over a static block-divisible kv) re-parents the streaming step under the same
+  ``staged_kloop`` skeleton the matmul tier runs: the K/V slabs fill per KV block (each in its
+  operand's own layout — verbatim row copies, so staged stays bit-identical to gmem-direct) and
+  the step's B fragments drain them via the staged ldmatrix variants (plain ``x2`` for the
+  N-major K slab, ``x2.trans`` for the K-major V slab).
 
 Nothing here keys on a kernel *identity* — the walk reads node structure, channel algebra, and the
 stamped schedule; an unrealizable tree is rejected at schedule time (``_schedule._twisted_warp_
@@ -36,7 +42,7 @@ from dataclasses import replace
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, Literal, Var
 from emmy.compiler.ir.kernel.ir import (
     FRAG,
     FRAG_COL,
@@ -58,6 +64,7 @@ from emmy.compiler.ir.schedule import Fold, Level, ReduceStage
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Select, Stmt, StridedLoop
 from emmy.compiler.ir.tile.ir import Contraction, Map, Reduction
+from emmy.compiler.pipeline.passes.lowering.kernel._stage import CpAsyncTransport, CtaTile, Operand, staged_kloop
 
 _ADD = ElementwiseImpl("add")
 _SUB = ElementwiseImpl("subtract")
@@ -129,7 +136,18 @@ def _reads(s: Stmt) -> set[str]:
 
 
 def _frag_contraction(
-    c: Contraction, acc_frags: tuple[str, ...], a_frag: str, *, m_sub: Expr, n_sub, k_sub: Expr, mask: dict, a_frags: tuple[str, ...] = ()
+    c: Contraction,
+    acc_frags: tuple[str, ...],
+    a_frag: str,
+    *,
+    m_sub: Expr,
+    n_sub,
+    k_sub: Expr,
+    mask: dict,
+    a_frags: tuple[str, ...] = (),
+    b_slab: str | None = None,
+    b_slot: Expr | None = None,
+    b_ldm: int = 0,
 ) -> list[Stmt]:
     """One warp-tiled :class:`Contraction` step as fragment codegen — the ``read → ⊗ → fold`` spine
     at fragment residence, geometry off the node (``b_trans`` / operand indices / ``ldm``) and its
@@ -140,14 +158,20 @@ def _frag_contraction(
     ``m_sub`` / ``n_sub(t)`` / ``k_sub`` give each axis's tile-origin
     expr; ``mask`` maps an axis name to its ``(coord, extent)`` overhang guard — a masked A row
     clamp-reads (``gmem_guard``), a masked B column clamp-reads (transposed-B ``gmem_guard``) or
-    zero-fills its overhanging K rows (canonical-B ``k_zero``)."""
+    zero-fills its overhanging K rows (canonical-B ``k_zero``).
+
+    ``b_slab`` (the staged K/V stream): the B operand reads its smem slab instead of gmem — the
+    slab keeps the operand's own layout (transposed-B N-major / canonical-B K-major, the stream
+    axis on the slab ROW either way), ``b_slot`` is the ring-slot row offset, ``b_ldm`` the slab
+    row stride, and the caller passes SLAB-LOCAL ``n_sub`` / ``k_sub`` origins (the resolver
+    guaranteed exact cover, so no B-side masks ride the staged path)."""
     atom = c.tile.atom
     shape = atom.shape
     nt = c.tile.regs[1]  # output n-atoms per step (warp order (FM, FN))
     m_name, n_name, k_name = c.m_axis.name, c.n_axis.name, c.k_axis.name
     b_trans = c.b_trans
     a_load = c.a_operand if isinstance(c.a_operand, Load) else None
-    ldm_b = c.k_axis.extent.as_static() if b_trans else c.n_axis.extent.as_static()
+    ldm_b = b_ldm if b_slab is not None else (c.k_axis.extent.as_static() if b_trans else c.n_axis.extent.as_static())
 
     out: list[Stmt] = []
     for t in range(nt):
@@ -170,23 +194,36 @@ def _frag_contraction(
             )
         for t in range(nt):
             col = n_sub(t)
-            n_guard = mask.get(n_name)
-            kz = mask.get(k_name) if not b_trans else None
-            out.append(
-                LdmatrixLoad(
-                    frag=f"_{c.acc}_b{t}",
-                    src_buffer=c.b_load.input,
-                    src_index=_idx(c.b_load, {n_name: col, k_name: k0}),
-                    role="b",
-                    ldm=ldm_b,
-                    staged=False,
-                    b_trans=b_trans,
-                    gmem_guard=(col, n_guard[1]) if (n_guard is not None and b_trans) else None,
-                    # The zero-fill origin advances with the K step (this slice's own base), so a
-                    # symbolic bound masks each ``atom_k`` chunk of a wide block correctly.
-                    k_zero=(k0, kz[1]) if kz is not None else None,
+            if b_slab is not None:
+                # The slab keeps the operand's own layout, stream axis on the ROW: transposed-B's
+                # rows are its N (key) coords, canonical-B's its K coords — the slot offset lands
+                # on the row either way.
+                row0, col0 = (col, k0) if b_trans else (k0, col)
+                if b_slot is not None:
+                    row0 = BinaryExpr("+", b_slot, row0)
+                out.append(
+                    LdmatrixLoad(
+                        frag=f"_{c.acc}_b{t}", src_buffer=b_slab, src_index=(row0, col0), role="b", ldm=ldm_b, staged=True, b_trans=b_trans
+                    )
                 )
-            )
+            else:
+                n_guard = mask.get(n_name)
+                kz = mask.get(k_name) if not b_trans else None
+                out.append(
+                    LdmatrixLoad(
+                        frag=f"_{c.acc}_b{t}",
+                        src_buffer=c.b_load.input,
+                        src_index=_idx(c.b_load, {n_name: col, k_name: k0}),
+                        role="b",
+                        ldm=ldm_b,
+                        staged=False,
+                        b_trans=b_trans,
+                        gmem_guard=(col, n_guard[1]) if (n_guard is not None and b_trans) else None,
+                        # The zero-fill origin advances with the K step (this slice's own base), so a
+                        # symbolic bound masks each ``atom_k`` chunk of a wide block correctly.
+                        k_zero=(k0, kz[1]) if kz is not None else None,
+                    )
+                )
             out.append(MmaSyncPtx(c_frag=acc_frags[t], a_frag=step_a, b_frag=f"_{c.acc}_b{t}", shape=shape, ab_dtype=atom.ab_dtype))
     return out
 
@@ -291,86 +328,146 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     for f in ofrags:
         state.append(RegFragment(name=f, role="c", shape=shape, dtype=F32))
 
-    # ---- the streaming step -------------------------------------------------------------------- #
-    stream: list[Stmt] = []
-    sfrags = tuple(f"{qk.acc}_f{t}" for t in range(nt))
-    for f in sfrags:
-        stream.append(RegFragment(name=f, role="c", shape=shape, dtype=F32))
-    stream.append(RegFragment(name=f"_{qk.acc}_a", role="a", shape=shape, dtype=atom.operand_dtype("a")))
-    qk_mask: dict[str, tuple] = {}
-    if symbolic_q:
-        qk_mask[qk.m_axis.name] = (row_base, _ext(qk.m_axis))
-    if symbolic_k:
-        qk_mask[qk.n_axis.name] = (kv0_var, seq)
-    stream += _frag_contraction(
-        qk, sfrags, f"_{qk.acc}_a", m_sub=row_base, n_sub=lambda t: col_bases[t], k_sub=Literal(0, "int"), mask=qk_mask
-    )
-
-    hoisted, pro = _realize_prologue(partial[1:], qk, sfrags, col_bases, row_base, set(names))
-    state += hoisted
-    stream += pro
-    if symbolic_k:
-        # The blocked stream may overrun a symbolic extent — clamp the overhanging keys to the
-        # pivot's fold identity so they contribute nothing (the gmem reads were already clamped).
-        for t, f in enumerate(sfrags):
-            stream.append(FragmentMask(frag=f, mask_when=BinaryExpr(">=", Var(FRAG_COL), seq), col_base=col_bases[t]))
-
-    # ---- the merge, regenerated from the channel spec at fragment residence ------------------- #
-    # The per-block fold move derives from the ONE placement-keyed selector: the streamed block
-    # lives within one warp, so ReduceStage.combine(BLOCK, 32) yields the SHFL move — realized
-    # here at FRAGMENT residence as the FragmentRowReduce __shfl butterfly (the same move
-    # _factor.emit_combine realizes as a WarpShuffle over scalar registers).
-    (row_move,) = ReduceStage(Level.BLOCK, 32).combine(warp_size=32)
-    assert row_move is Fold.SHFL, row_move
-    # pivot: the per-block fold (rowmax) then the running update mn = fold(m, rowmax(S)) + rescale α.
-    stream.append(FragmentRowReduce(top="_rmx0", bot="_rmx1", frags=sfrags, op=channels[0].fold, group=4))
-    stream += _stats("_mn", channels[0].fold, (pivot_name, "_rmx"))
-    stream += _stats("_al__d", _SUB, (pivot_name, "_mn"))  # α = exp(m − mn)
-    stream += _stats("_al", _EXP, ("_al__d",))
-    pfrags = tuple(f"_p_f{t}" for t in range(nt))  # the softmax weights P = exp(S − mn)
-    for sf, pf in zip(sfrags, pfrags, strict=True):
-        stream.append(FragmentApply(out=pf, op=_SUB, args=(sf, _row_pair("_mn")), kinds=(FRAG, ROW)))
-        stream.append(FragmentApply(out=pf, op=_EXP, args=(pf,), kinds=(FRAG,), in_place=True))
-    # denom (no lift): the per-block fold is the exp-weight rowsum; l = l·α + Σp.
-    stream.append(FragmentRowReduce(top="_rsm0", bot="_rsm1", frags=pfrags, op=channels[1].fold, group=4))
-    stream += _stats(f"{denom_name}__s", _MUL, (denom_name, "_al"))
-    stream += _stats(f"{denom_name}__n", _ADD, (f"{denom_name}__s", "_rsm"))
-    stream += _rebind(denom_name, f"{denom_name}__n")
-    # expect (lift = ⊗): rescale the accumulator, then the lift IS the P@V contraction — the
-    # register-resident P fed through the flash_pv_smem C→A handoff as its A operand.
-    for f in ofrags:
-        stream.append(FragmentApply(out=f, op=_MUL, args=(f, _row_pair("_al")), kinds=(FRAG, ROW), in_place=True))
-    for t, pf in enumerate(pfrags):
-        stream.append(
-            RegStore(dst_buffer=_PV_SMEM, dst_index=(*wq_idx, Literal(0, "int"), Literal(t * atom_n, "int")), frag=pf, shape=shape, ldm=bn)
+    # ---- the streaming step (a builder — the staged path re-parents it under the ring drain) --- #
+    def _stream_step(k_slot: Expr | None = None, v_slot: Expr | None = None, staged: bool = False) -> list[Stmt]:
+        stream: list[Stmt] = []
+        sfrags = tuple(f"{qk.acc}_f{t}" for t in range(nt))
+        for f in sfrags:
+            stream.append(RegFragment(name=f, role="c", shape=shape, dtype=F32))
+        stream.append(RegFragment(name=f"_{qk.acc}_a", role="a", shape=shape, dtype=atom.operand_dtype("a")))
+        qk_mask: dict[str, tuple] = {}
+        if symbolic_q:
+            qk_mask[qk.m_axis.name] = (row_base, _ext(qk.m_axis))
+        if symbolic_k:
+            qk_mask[qk.n_axis.name] = (kv0_var, seq)
+        stream += _frag_contraction(
+            qk,
+            sfrags,
+            f"_{qk.acc}_a",
+            m_sub=row_base,
+            # Staged: the K slab is slot-local (its rows are this block's keys), so the score
+            # column origin is the in-block offset; the absolute ``col_bases`` still name the
+            # score columns for the masks below.
+            n_sub=(lambda t: Literal(t * atom_n, "int")) if staged else (lambda t: col_bases[t]),
+            k_sub=Literal(0, "int"),
+            mask=qk_mask,
+            b_slab="_k_smem" if staged else None,
+            b_slot=k_slot,
+            b_ldm=qk.k_axis.extent.as_static() if staged else 0,
         )
-    stream.append(Sync())
-    # One resident A slice per ``atom_k`` chunk of the streamed block (``pv.tile.bk`` slices —
-    # one for the conservative ``2·atom_n`` block, more when the key block is wider).
-    pv_bk = max(1, pv.tile.bk)
-    pa_frags = tuple(f"_pa{s}" for s in range(pv_bk)) if pv_bk > 1 else ("_pa",)
-    for s, paf in enumerate(pa_frags):
-        stream.append(RegFragment(name=paf, role="a", shape=shape, dtype=atom.operand_dtype("a")))
-        if um > 1 or pv_bk > 1:
-            src: tuple[Expr, ...] = (*wq_idx, Literal(0, "int"), Literal(s * shape[2], "int"))
-        else:
-            src = (Literal(0, "int"),)
-        stream.append(LdmatrixLoad(frag=paf, src_buffer=_PV_SMEM, src_index=src, role="a", ldm=bn, staged=True))
-    pv_mask = {kv_axis.name: (kv0_var, seq)} if symbolic_k else {}
-    stream += _frag_contraction(
-        _pv_streamed(pv, kv_axis),
-        ofrags,
-        pa_frags[0],
-        m_sub=row_base,
-        n_sub=lambda j: Literal(j * atom_n, "int"),
-        k_sub=kv0_var,
-        mask=pv_mask,
-        a_frags=pa_frags if pv_bk > 1 else (),
-    )
-    stream += _rebind(pivot_name, "_mn")  # advance the running pivot: m = mn
 
-    static_small = kv_axis.extent.is_static and kv_axis.extent.as_static() <= 128
-    fold = [StridedLoop(axis=kv0, start=Literal(0, "int"), step=Literal(bn, "int"), body=Body(tuple(stream)), unroll=static_small)]
+        hoisted, pro = _realize_prologue(partial[1:], qk, sfrags, col_bases, row_base, set(names))
+        state.extend(hoisted)
+        stream += pro
+        if symbolic_k:
+            # The blocked stream may overrun a symbolic extent — clamp the overhanging keys to the
+            # pivot's fold identity so they contribute nothing (the gmem reads were already clamped).
+            for t, f in enumerate(sfrags):
+                stream.append(FragmentMask(frag=f, mask_when=BinaryExpr(">=", Var(FRAG_COL), seq), col_base=col_bases[t]))
+
+        # ---- the merge, regenerated from the channel spec at fragment residence --------------- #
+        # The per-block fold move derives from the ONE placement-keyed selector: the streamed block
+        # lives within one warp, so ReduceStage.combine(BLOCK, 32) yields the SHFL move — realized
+        # here at FRAGMENT residence as the FragmentRowReduce __shfl butterfly (the same move
+        # _factor.emit_combine realizes as a WarpShuffle over scalar registers).
+        (row_move,) = ReduceStage(Level.BLOCK, 32).combine(warp_size=32)
+        assert row_move is Fold.SHFL, row_move
+        # pivot: the per-block fold (rowmax) then the running update mn = fold(m, rowmax(S)) + rescale α.
+        stream.append(FragmentRowReduce(top="_rmx0", bot="_rmx1", frags=sfrags, op=channels[0].fold, group=4))
+        stream += _stats("_mn", channels[0].fold, (pivot_name, "_rmx"))
+        stream += _stats("_al__d", _SUB, (pivot_name, "_mn"))  # α = exp(m − mn)
+        stream += _stats("_al", _EXP, ("_al__d",))
+        pfrags = tuple(f"_p_f{t}" for t in range(nt))  # the softmax weights P = exp(S − mn)
+        for sf, pf in zip(sfrags, pfrags, strict=True):
+            stream.append(FragmentApply(out=pf, op=_SUB, args=(sf, _row_pair("_mn")), kinds=(FRAG, ROW)))
+            stream.append(FragmentApply(out=pf, op=_EXP, args=(pf,), kinds=(FRAG,), in_place=True))
+        # denom (no lift): the per-block fold is the exp-weight rowsum; l = l·α + Σp.
+        stream.append(FragmentRowReduce(top="_rsm0", bot="_rsm1", frags=pfrags, op=channels[1].fold, group=4))
+        stream += _stats(f"{denom_name}__s", _MUL, (denom_name, "_al"))
+        stream += _stats(f"{denom_name}__n", _ADD, (f"{denom_name}__s", "_rsm"))
+        stream += _rebind(denom_name, f"{denom_name}__n")
+        # expect (lift = ⊗): rescale the accumulator, then the lift IS the P@V contraction — the
+        # register-resident P fed through the flash_pv_smem C→A handoff as its A operand.
+        for f in ofrags:
+            stream.append(FragmentApply(out=f, op=_MUL, args=(f, _row_pair("_al")), kinds=(FRAG, ROW), in_place=True))
+        for t, pf in enumerate(pfrags):
+            stream.append(
+                RegStore(
+                    dst_buffer=_PV_SMEM, dst_index=(*wq_idx, Literal(0, "int"), Literal(t * atom_n, "int")), frag=pf, shape=shape, ldm=bn
+                )
+            )
+        stream.append(Sync())
+        # One resident A slice per ``atom_k`` chunk of the streamed block (``pv.tile.bk`` slices —
+        # one for the conservative ``2·atom_n`` block, more when the key block is wider).
+        pv_bk = max(1, pv.tile.bk)
+        pa_frags = tuple(f"_pa{s}" for s in range(pv_bk)) if pv_bk > 1 else ("_pa",)
+        for s, paf in enumerate(pa_frags):
+            stream.append(RegFragment(name=paf, role="a", shape=shape, dtype=atom.operand_dtype("a")))
+            if um > 1 or pv_bk > 1:
+                src: tuple[Expr, ...] = (*wq_idx, Literal(0, "int"), Literal(s * shape[2], "int"))
+            else:
+                src = (Literal(0, "int"),)
+            stream.append(LdmatrixLoad(frag=paf, src_buffer=_PV_SMEM, src_index=src, role="a", ldm=bn, staged=True))
+        pv_mask = {kv_axis.name: (kv0_var, seq)} if symbolic_k else {}
+        stream += _frag_contraction(
+            _pv_streamed(pv, kv_axis),
+            ofrags,
+            pa_frags[0],
+            m_sub=row_base,
+            n_sub=lambda j: Literal(j * atom_n, "int"),
+            # Staged: the V slab is slot-local too (K rows are this block's keys).
+            k_sub=Literal(0, "int") if staged else kv0_var,
+            mask=pv_mask,
+            a_frags=pa_frags if pv_bk > 1 else (),
+            b_slab="_v_smem" if staged else None,
+            b_slot=v_slot,
+            b_ldm=d_v if staged else 0,
+        )
+        stream += _rebind(pivot_name, "_mn")  # advance the running pivot: m = mn
+        return stream
+
+    stage = ctx.stage
+    if stage is not None:
+        # The staged K/V stream: the resolved cp.async ``Stage`` (``_schedule._resolve_twisted_stage``
+        # — static, block-divisible kv only) rides the SAME ``staged_kloop`` skeleton the matmul tier
+        # runs, the streaming step as its drain. The K slab keeps K's own N-major layout (``bn`` key
+        # rows × head_dim) and the V slab V's K-major one (``bn`` key rows × d_v) — the fills are
+        # verbatim row copies, so the staged kernel stays bit-identical to its gmem-direct sibling.
+        assert stage.transport == "cp.async", f"warp-flash stages via cp.async only, got {stage.transport}"
+        K = kv_axis.extent.as_static()
+        head_dim = qk.k_axis.extent.as_static()
+        elem_bytes = atom.operand_dtype("b").nbytes
+        k_load, v_load = qk.b_load, pv.b_load
+        kn, kk, vn = qk.n_axis.name, qk.k_axis.name, pv.n_axis.name
+
+        def _k_index(k0: Expr):
+            return lambda row, col: _idx(k_load, {kn: BinaryExpr("+", k0, row), kk: col})
+
+        def _v_index(k0: Expr):
+            return lambda row, col: _idx(v_load, {kv_axis.name: BinaryExpr("+", k0, row), vn: col})
+
+        k_op = Operand(tag="k", buf=k_load.input, shape=(bn, head_dim), index=_k_index, coords=lambda k0: ())
+        v_op = Operand(tag="v", buf=v_load.input, shape=(bn, d_v), index=_v_index, coords=lambda k0: ())
+        transport = CpAsyncTransport(
+            operands=(k_op, v_op),
+            slab_dtype=_cuda(atom.operand_dtype("b")),
+            elem_bytes=elem_bytes,
+            cta=CtaTile(linear_tid=Builtin("thread_idx.x"), n_threads=32 * um),
+        )
+        decls, fold = staged_kloop(
+            transport=transport,
+            drain=lambda slot: _stream_step(k_op.slot_row(slot), v_op.slot_row(slot), staged=True),
+            depth=stage.depth,
+            bk_elems=bn,
+            n_chunks=K // bn,
+            k_extent=K,
+            k0=kv0.name,
+        )
+        state = decls + state
+    else:
+        static_small = kv_axis.extent.is_static and kv_axis.extent.as_static() <= 128
+        body = Body(tuple(_stream_step()))
+        fold = [StridedLoop(axis=kv0, start=Literal(0, "int"), step=Literal(bn, "int"), body=body, unroll=static_small)]
 
     # ---- close: the projection tail realized on the output fragments + the store -------------- #
     close: list[Stmt] = []

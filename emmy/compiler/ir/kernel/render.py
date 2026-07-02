@@ -143,6 +143,15 @@ static __device__ __forceinline__ void dpl_ldmatrix_x2_trans(unsigned* r, const 
                  : "=r"(r[0]), "=r"(r[1]) : "r"(addr));
 }
 
+// Plain (no .trans) x2: a transposed-B operand staged as its native N-major
+// slab (Q@K^T's K rows) — each 8x8 matrix's rows ARE the mma B fragment's
+// col-major columns, so no transpose is needed (cf. dpl_mma_load_b_gmem_trans).
+static __device__ __forceinline__ void dpl_ldmatrix_x2(unsigned* r, const void* smem) {
+    unsigned addr = __cvta_generic_to_shared(smem);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];\\n"
+                 : "=r"(r[0]), "=r"(r[1]) : "r"(addr));
+}
+
 // gmem-direct fragment loads — the fallback when an mma.sync operand was NOT
 // staged into shared memory (ldmatrix is smem-only, so we read the fragment
 // straight from gmem instead, replicating the PTX m16n8k16 lane→element map).

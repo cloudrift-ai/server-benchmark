@@ -44,7 +44,7 @@ from emmy.compiler.ir.kernel.ir import (
     TmaDescriptor,
     TmaLoad,
 )
-from emmy.compiler.ir.stmt import Body, Cond, Load, Stmt, StridedLoop, Write
+from emmy.compiler.ir.stmt import Body, Cond, Load, Loop, Stmt, StridedLoop, Write
 
 
 def _mul(a: Expr, b: Expr) -> Expr:
@@ -158,15 +158,31 @@ def sync_stat_fill(
     *, stats: tuple[str, ...], slab_of, row_axis: Axis, row_body: list[Stmt], cta: CtaTile, dtype: str = "float"
 ) -> list[Stmt]:
     """The ``sync``-transport per-row STATISTIC prologue — the fused norm→linear warp edge's
-    cooperative prologue, run ONCE before the staged K-loop: the CTA's threads stripe the tile's
-    rows (``for r = tid; r < rows; r += n_threads``); each runs ``row_body`` (the computed-A cone's
-    k-invariant prefix — the stat reduce ``Loop`` + its scalar epilogue, already σ-rebased to the
-    tile row ``row_axis``) and writes each bridged ``stats`` value into its length-``rows`` smem
-    row (``slab_of(name)``); one CTA barrier publishes them to the A compute-fill. The same
-    linear-tid / thread-count striping seam as every other fill here."""
-    body = (*row_body, *(Write(output=slab_of(nm), index=(Var(row_axis.name),), value=nm) for nm in stats))
-    loop = StridedLoop(axis=row_axis, start=cta.linear_tid, step=_lit(cta.n_threads), body=Body(body), unroll=False)
+    cooperative prologue, run ONCE before the staged K-loop: the CTA stripes the tile's rows **one
+    row per WARP** (``for r = warp; r < rows; r += n_warps``); the warp's 32 lanes stride the row's
+    stat reduce ``Loop`` (coalesced — consecutive lanes read consecutive elements) and close the
+    fold with the carrier's shuffle butterfly (:func:`emit_combine` at warp width — the state
+    broadcasts to every lane), each lane then runs the scalar epilogue redundantly and lane 0
+    writes each bridged ``stats`` value into its length-``rows`` smem row (``slab_of(name)``); one
+    CTA barrier publishes them to the A compute-fill. A ``row_body`` with no foldable reduce
+    ``Loop`` (or a sub-warp CTA) falls back to the serial one-row-per-THREAD stripe."""
     decls: list[Stmt] = [Smem(name=slab_of(nm), extents=(row_axis.extent.as_static(),), dtype=dtype) for nm in stats]
+    writes = tuple(Write(output=slab_of(nm), index=(Var(row_axis.name),), value=nm) for nm in stats)
+    rl_i = next((i for i, s in enumerate(row_body) if isinstance(s, Loop) and s.is_reduce and s.carrier is not None), None)
+    if rl_i is None or cta.n_threads % 32 or cta.n_threads < 32:
+        body = (*row_body, *writes)
+        loop = StridedLoop(axis=row_axis, start=cta.linear_tid, step=_lit(cta.n_threads), body=Body(body), unroll=False)
+        return [*decls, loop, Sync()]
+    from emmy.compiler.pipeline.passes.lowering.kernel._factor import emit_combine  # noqa: PLC0415 — avoid an import cycle
+
+    rl = row_body[rl_i]
+    lane = BinaryExpr("%", cta.linear_tid, _lit(32))
+    warp = BinaryExpr("/", cta.linear_tid, _lit(32))
+    fold = StridedLoop(axis=rl.axis, start=lane, step=_lit(32), body=rl.body, unroll=False)
+    combine = emit_combine(rl.carrier, t="_lane", n_threads=32)
+    guarded = Cond(cond=BinaryExpr("==", lane, _lit(0)), body=writes)
+    body = (*row_body[:rl_i], fold, *combine, *row_body[rl_i + 1 :], guarded)
+    loop = StridedLoop(axis=row_axis, start=warp, step=_lit(cta.n_threads // 32), body=Body(body), unroll=False)
     return [*decls, loop, Sync()]
 
 
@@ -249,25 +265,34 @@ class SyncOperand:
     computed tile materializes straight into the slab the ``ldmatrix`` drain reads)."""
 
     tag: str  # "a" / "b" — the smem-slab suffix
-    shape: tuple[int, int]  # (rows, cols) of the (single-buffer) slab
+    shape: tuple[int, int]  # (rows, cols) of one ring slot
     value: Callable[[Expr, Expr, Expr], tuple[list[Stmt], str]]  # (k0, row, col) -> (stmts, name)
 
     @property
     def slab(self) -> str:
         return f"_{self.tag}_smem"
 
-    def slot_row(self, slot: Expr) -> Expr | None:  # noqa: ARG002 — single-buffer: no ring slot
-        return None
+    def slot_row(self, slot: Expr) -> Expr | None:
+        """The ring-slot row offset into this operand's multi-slot slab (``None`` for slot 0)."""
+        return _slot_row(slot, self.shape[0])
 
 
 @dataclass(frozen=True)
 class SyncTransport:
-    """The ``sync`` producer — plain compute/copy fills (each CTA thread produces slab cells,
-    striped by the linear tid) closed by ONE CTA barrier; no async handshake, single-buffer
-    (``depth == 1``). This is the mma tier's ``sync`` transport: the fused-edge compute-fill (a
-    producer cone materializing the A tile) and the plain smem copy are the same fill with a
-    different ``value`` producer, behind the same ``fill``/``commit``/``wait`` seam as cp.async /
-    TMA."""
+    """The ``sync`` producer — per-thread compute/copy fills closed by ONE CTA barrier. This is the
+    mma tier's ``sync`` transport: the fused-edge compute-fill (a producer cone materializing the A
+    tile) rides ``operands``; plain-copy operands (the fused edge's B weights) ride
+    ``async_operands`` as vectorized ``cp.async`` fills issued BEFORE the compute fill, so the
+    hardware copies fly underneath it — the same ``fill``/``commit``/``wait`` seam as the pure
+    cp.async / TMA producers, closed by one ``CpAsyncWait`` + CTA barrier. ``depth >= 2`` rings
+    every slab (the sync compute fill writes its prefetch slot like any producer; the wait keeps
+    ``ring-1`` cp.async groups in flight, so the B copies overlap the drain across chunks).
+
+    The compute fill assigns each thread a run of ``V`` **contiguous** slab cells (``V`` = the
+    16-byte vector width, always dividing the slab's inner extent): the ``row``/``col`` derivation
+    hoists out of the per-cell code (one div/mod per run, not per cell), the per-thread gmem reads
+    and smem stores are contiguous (nvcc merges them into wide accesses), and the cone stmts are
+    replicated per lane-local cell with a ``__c<j>`` SSA suffix."""
 
     operands: tuple[SyncOperand, ...]
     slab_dtype: str
@@ -275,30 +300,58 @@ class SyncTransport:
     # The optional one-shot per-row statistic prologue (:func:`sync_stat_fill` — the fused
     # norm→linear cone's cooperative reduce), emitted once ahead of the K-loop.
     prologue_stmts: tuple[Stmt, ...] = ()
+    # Plain-copy operands filled by vectorized ``cp.async`` instead of the per-thread compute loop.
+    async_operands: tuple[Operand, ...] = ()
+    elem_bytes: int = 2
 
-    def slab_decls(self, ring: int) -> list[Stmt]:  # noqa: ARG002 — always single-buffer
-        return [slab_smem(op.slab, op.shape[0], op.shape[1], self.slab_dtype) for op in self.operands]
+    def slab_decls(self, ring: int) -> list[Stmt]:
+        return [slab_smem(op.slab, ring * op.shape[0], op.shape[1], self.slab_dtype) for op in (*self.operands, *self.async_operands)]
 
     def prologue(self, ring: int) -> list[Stmt]:  # noqa: ARG002
         return list(self.prologue_stmts)
 
-    def fill(self, *, k0: Expr, slot: Expr) -> list[Stmt]:  # noqa: ARG002 — no ring slot
+    def fill(self, *, k0: Expr, slot: Expr) -> list[Stmt]:
         out: list[Stmt] = []
+        # Issue the async copies FIRST — they are in flight while the compute fill below runs.
+        for op in self.async_operands:
+            out += cp_async_fill(
+                slab=op.slab,
+                shape=op.shape,
+                src=op.buf,
+                gmem_index=op.index(k0),
+                cta=self.cta,
+                elem_bytes=self.elem_bytes,
+                name=op.tag,
+                row_offset=op.slot_row(slot),
+            )
         for op in self.operands:
             rows, cols = op.shape
-            fe = Axis(name=f"_f{op.tag}", extent=rows * cols)
-            row = BinaryExpr("/", Var(fe.name), _lit(cols))
-            col = BinaryExpr("%", Var(fe.name), _lit(cols))
-            stmts, val = op.value(k0, row, col)
-            body = (*stmts, Write(output=op.slab, index=(row, col), value=val))
-            out.append(StridedLoop(axis=fe, start=self.cta.linear_tid, step=_lit(self.cta.n_threads), body=Body(body), unroll=False))
+            v = _cp_async_width(cols, self.elem_bytes)
+            fe = Axis(name=f"_f{op.tag}", extent=(rows * cols) // v)
+            base = _mul(Var(fe.name), _lit(v))
+            row = BinaryExpr("/", base, _lit(cols))  # constant across the run: v divides cols
+            col = BinaryExpr("%", base, _lit(cols))
+            off = op.slot_row(slot)
+            smem_row = _add(off, row) if off is not None else row
+            body: list[Stmt] = []
+            for j in range(v):
+                cell_col = _add(col, _lit(j)) if j else col
+                stmts, val = op.value(k0, row, cell_col)
+                # Suffix only the run-LOCAL defs (each cell replica binds fresh SSA); references to
+                # externally-defined names — grid vars, the loop axis, ``k0`` — pass through.
+                local = {nm for st in stmts for nm in st.defines()}
+                sfx = f"__c{j}"
+                ren = lambda nm, local=local, sfx=sfx: f"{nm}{sfx}" if nm in local else nm  # noqa: E731
+                body += [st.rewrite(ren) for st in stmts]
+                body.append(Write(output=op.slab, index=(smem_row, cell_col), value=f"{val}{sfx}"))
+            out.append(StridedLoop(axis=fe, start=self.cta.linear_tid, step=_lit(self.cta.n_threads), body=Body(tuple(body)), unroll=False))
         return out
 
     def commit(self) -> list[Stmt]:
-        return []
+        return cp_async_commit() if self.async_operands else []
 
     def wait(self, *, in_flight: int, slot: Expr, phase: Expr) -> list[Stmt]:  # noqa: ARG002
-        return [Sync()]
+        return cp_async_wait(in_flight) if self.async_operands else [Sync()]
 
 
 @dataclass(frozen=True)

@@ -621,20 +621,25 @@ def _resolve_sync_stage(c: Contraction) -> Stage | None:
     """The ``sync`` compute-fill :class:`Stage` for a **computed-A** warp contraction with tile plan
     ``c.tile`` — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A; cp.async /
     TMA are copy transports that cannot evaluate a producer cone), so there is no gmem-direct ``""``
-    sibling and a ``STAGE`` pin degrades to this resolved row. ``None`` when the slabs don't fit the
-    48 KiB smem budget: the A/B operand slabs (single-buffer — ``SyncTransport`` has no ring) plus
-    one fp32 row per bridged statistic (``sync_stat_fill``'s decls — the same
-    ``Contraction.stat_prologue`` seam the materializer fills through)."""
+    sibling and a ``STAGE`` pin degrades to this resolved row. ``None`` when the slabs don't fit
+    the 48 KiB smem budget: the A/B operand slabs plus one fp32 row per bridged statistic
+    (``sync_stat_fill``'s decls — the same ``Contraction.stat_prologue`` seam the materializer
+    fills through). A canonical (non-transposed) B rides the vectorized ``cp.async`` fill, so when
+    a two-slot ring ALSO fits the budget the stage resolves at ``depth=2`` — the B copies of the
+    prefetched chunk stay in flight across the current chunk's drain; a transposed-B (all-sync)
+    pipeline has nothing async to overlap and stays single-buffer."""
     atom = c.atom
     bk_elems = c.tile.bk * atom.atom_k
     a_nbytes = atom.operand_dtype("a").nbytes
     _, _, stats = c.stat_prologue()
     # One A slab + one B slab per fold channel (the multi-channel gate/up node fills a B slab per
     # projection) + one fp32 stat row per bridged statistic.
-    slab_bytes = (c.m.tile + len(c.folds) * c.n.tile) * bk_elems * a_nbytes + len(stats) * c.m.tile * 4
-    if slab_bytes > 48 * 1024:
+    slot_bytes = (c.m.tile + len(c.folds) * c.n.tile) * bk_elems * a_nbytes
+    stat_bytes = len(stats) * c.m.tile * 4
+    if slot_bytes + stat_bytes > 48 * 1024:
         return None
-    return Stage(transport="sync", smem=(c.a_name,), bk_elems=bk_elems)
+    depth = 2 if not c.b_trans and 2 * slot_bytes + stat_bytes <= 48 * 1024 else 1
+    return Stage(depth=depth, transport="sync", smem=(c.a_name,), bk_elems=bk_elems)
 
 
 def _computed_a_rows(kernel, place, probe: Contraction, kaxis: str) -> list[dict]:

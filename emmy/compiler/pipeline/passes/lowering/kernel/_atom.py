@@ -333,19 +333,22 @@ def _stat_slab(name: str) -> str:
 
 def _sync_operands(
     c: Contraction, bk_elems: int, mn: tuple[Side, Side], cta: CtaTile
-) -> tuple[tuple[SyncOperand, SyncOperand], list[Stmt]]:
-    """The ``sync``-transport (fused-edge) operand pair + the one-shot prologue stmts: A
-    **compute-filled** from the node's producer cone (``a_operand`` is a ``Body`` — each thread
-    evaluates the cone at the slab cell's absolute ``(m, k)`` coords and writes the result), B
-    copy-filled from its gmem ``Load``. A cone with a k-invariant prefix (the fused norm→linear
-    per-row statistic — its reduce ``Loop`` + scalar epilogue) is split at the K seam
+) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...], list[Stmt]]:
+    """The ``sync``-transport (fused-edge) operands + the one-shot prologue stmts, returned as
+    ``(drain-ordered operands, compute-filled, cp.async-filled, prologue)``: A is **compute-filled**
+    from the node's producer cone (``a_operand`` is a ``Body`` — each thread evaluates the cone at
+    the slab cell's absolute ``(m, k)`` coords and writes the result); each fold channel's B is a
+    plain weight copy, so a canonical (non-transposed) B rides a vectorized ``cp.async``
+    :class:`Operand` that flies UNDER the compute fill (a transposed B keeps the per-thread copy
+    fill — its slab cells aren't gmem-contiguous). A cone with a k-invariant prefix (the fused
+    norm→linear per-row statistic — its reduce ``Loop`` + scalar epilogue) is split at the K seam
     (``Contraction.stat_prologue`` — the node-owned seam the scheduler also sizes the stat rows
-    off): the prefix runs ONCE per tile row (:func:`sync_stat_fill`,
-    returned as the transport prologue) and the per-cell fill reads the bridged values back from
-    the stat smem rows. The schedule's eligibility guarantees exact cover on N and K only; a
-    masked / symbolic **M** clamp-reads the overhanging rows in-bounds (the A fill σ and the stat
-    prologue σ — a duplicate of the last valid row is computed and its store discarded by the
-    ``RegStore`` guard, the same contract the copy transports follow)."""
+    off): the prefix runs ONCE per tile row (:func:`sync_stat_fill`, returned as the transport
+    prologue) and the per-cell fill reads the bridged values back from the stat smem rows. The
+    schedule's eligibility guarantees exact cover on N and K only; a masked / symbolic **M**
+    clamp-reads the overhanging rows in-bounds (the A fill σ and the stat prologue σ — a duplicate
+    of the last valid row is computed and its store discarded by the ``RegStore`` guard, the same
+    contract the copy transports follow)."""
     m_name, n_name, k_name = c.m_axis.name, c.n_axis.name, c.k_axis.name
     row_base, col_base = _tile_base(mn)
     pro, cell, stats = c.stat_prologue()
@@ -374,16 +377,28 @@ def _sync_operands(
         sigma = Sigma({m_name: m_coord(Var(row_axis.name))})
         row_body = [s.rewrite(lambda nm: nm, sigma) for s in pro]
         prologue = sync_stat_fill(stats=stats, slab_of=_stat_slab, row_axis=row_axis, row_body=row_body, cta=cta)
-    # One B slab per fold channel (the multi-B node copy-fills each projection's weights alongside
-    # the one compute-filled A slab).
-    operands = (
-        SyncOperand(tag="a", shape=(mn[0].tile, bk_elems), value=a_value),
-        *(
-            SyncOperand(tag="b" if f == 0 else f"b_x{f}", shape=(bk_elems, mn[1].tile), value=b_value_of(bl))
-            for f, (bl, _) in enumerate(c.folds)
-        ),
-    )
-    return operands, prologue
+    # One B slab per fold channel (the multi-B node fills each projection's weights alongside the
+    # one compute-filled A slab); drain order is (A, B0, B1, …) regardless of which fill each rides.
+    a_op = SyncOperand(tag="a", shape=(mn[0].tile, bk_elems), value=a_value)
+    drain: list = [a_op]
+    sync_ops: list[SyncOperand] = [a_op]
+    async_ops: list[Operand] = []
+    for f, (bl, _) in enumerate(c.folds):
+        tag = "b" if f == 0 else f"b_x{f}"
+        if c.b_trans:
+            op = SyncOperand(tag=tag, shape=(bk_elems, mn[1].tile), value=b_value_of(bl))
+            sync_ops.append(op)
+        else:
+            op = Operand(
+                tag=tag,
+                buf=bl.input,
+                shape=(bk_elems, mn[1].tile),
+                coords=_box_origin(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.k_axis),
+                index=_slab_index(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.k_axis, tile_is_row=False),
+            )
+            async_ops.append(op)
+        drain.append(op)
+    return tuple(drain), tuple(sync_ops), tuple(async_ops), prologue
 
 
 def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
@@ -404,12 +419,20 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     elem = ops.slab_elem()
     cta = _cta(mn, c.atom.lanes, c.block_threads)
     if stage.transport == "sync":
-        # The fused-edge compute-fill: the A tile is COMPUTED into its slab (the producer cone),
-        # B plain-copied — the mma tier's ``sync`` transport; single-buffer, one CTA barrier. A
-        # k-invariant cone prefix (the fused norm→linear per-row statistic) rides the transport
-        # prologue, run once ahead of the K-loop.
-        operands, stat_pro = _sync_operands(c, stage.bk_elems, mn, cta)
-        transport = SyncTransport(operands=operands, slab_dtype=cuda_name(elem), cta=cta, prologue_stmts=tuple(stat_pro))
+        # The fused-edge compute-fill: the A tile is COMPUTED into its slab (the producer cone), a
+        # canonical B rides a vectorized cp.async that flies UNDER the compute fill — the mma
+        # tier's ``sync`` transport; single-buffer, one wait + CTA barrier. A k-invariant cone
+        # prefix (the fused norm→linear per-row statistic) rides the transport prologue, run once
+        # ahead of the K-loop.
+        operands, sync_ops, async_ops, stat_pro = _sync_operands(c, stage.bk_elems, mn, cta)
+        transport = SyncTransport(
+            operands=sync_ops,
+            async_operands=async_ops,
+            slab_dtype=cuda_name(elem),
+            elem_bytes=elem.nbytes,
+            cta=cta,
+            prologue_stmts=tuple(stat_pro),
+        )
     else:
         assert len(c.folds) == 1, "cp.async / TMA staging is single-fold — a multi-B node rides the sync compute-fill"
         operands = _slab_operands(

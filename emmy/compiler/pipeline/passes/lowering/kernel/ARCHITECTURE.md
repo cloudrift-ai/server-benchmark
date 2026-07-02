@@ -137,19 +137,25 @@ flash operand) silently falls back to gmem-direct, and a staged kernel is
 **The fused edge — the mma tier's `sync` transport.** A demoted-cone matmul (`f(x, …) @ w`) takes the warp tier
 under a warp `TILE` pin: `_schedule._demoted_warp_option` nodifies the PLANAR ⊗-fold to a computed-A `Contraction`
 (the same `a_operand = Body` flash P@V rides) and stamps a `sync` `Stage`; `_staged` then builds a `SyncTransport`
-whose A fill is the producer CONE evaluated per slab cell (compute-fill) and whose B fill is a plain copy — the same
-`fill`/`commit`/`wait` seam, single-buffer, one CTA barrier, feeding the unchanged `ldmatrix` drain. A
+whose A fill is the producer CONE evaluated per slab cell (compute-fill) — the same `fill`/`commit`/`wait` seam,
+feeding the unchanged `ldmatrix` drain. The compute fill assigns each thread a 16-byte run of CONTIGUOUS slab
+cells (the row/col derivation hoists out of the per-cell code; per-thread gmem reads and smem stores merge into
+wide accesses; the cone replicates per cell with a `__c<j>` SSA suffix). A canonical (non-transposed) **B** is a
+plain weight copy and rides a vectorized `cp.async` issued BEFORE the compute fill, so the hardware copies fly
+underneath it (a transposed B keeps the per-thread copy fill); when a two-slot ring also fits the smem budget the
+stage resolves at `depth=2` and the prefetched chunk's B copies stay in flight across the current chunk's drain. A
 **reduce-bearing (MONOID) cone** — the fused norm→linear edge — is nodified at RECOGNIZE time
 (`_atomize.bind_prologue_contraction`; real fork rows, not a pin rescue): the A cone carries its k-invariant prefix
 (the per-row statistic reduce `Loop` + scalar epilogue), split off at the K seam by `_sync_operands`
-(`_split_stat_prologue`) and run ONCE per tile row as the transport prologue (`_stage.sync_stat_fill` — threads
-stripe the tile's rows, each folds its row's statistic into a stat smem row, one barrier); the per-cell compute-fill
-reads the bridged values back from the stat rows. The prologue is a one-shot `SyncTransport.prologue`, ahead of the
-staged K-loop. Geometry: exact cover on N/K only — a masked / symbolic **M** clamp-reads (the A / stat-prologue σ
-ride `_clamp_last`; the overhang store is discarded by the `RegStore` guard). A **multi-fold** node (the gate/up MLP
-edge — N `(B, acc)` channels folding one shared A value, `Contraction.folds`) fills one B slab per channel, drains N
-mma chains off the ONE ldmatrix'd A fragment into per-channel C fragments (`_fold_frag`), and the projection
-(SwiGLU) combines the channels per element in the store's `RegEpilogue` (`extra_accs`).
+(`Contraction.stat_prologue`, the node-owned seam) and run ONCE per tile row as the transport prologue
+(`_stage.sync_stat_fill` — one row per WARP: the 32 lanes stride the row's reduce coalesced and close the fold with
+the carrier's shuffle butterfly (`emit_combine`), lane 0 writing the bridged stat into its smem row; one barrier);
+the per-cell compute-fill reads the bridged values back from the stat rows. Geometry: exact cover on N/K only — a
+masked / symbolic **M** clamp-reads (the A / stat-prologue σ ride `_clamp_last`; the overhang store is discarded by
+the `RegStore` guard). A **multi-fold** node (the gate/up MLP edge — N `(B, acc)` channels folding one shared A
+value, `Contraction.folds`) fills one B slab per channel, drains N mma chains off the ONE ldmatrix'd A fragment
+into per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the channels per element in the
+store's `RegEpilogue` (`extra_accs`).
 
 The **scalar** contraction tier stages too, under the same `STAGE` codec, through the **same** `_staged` driver — the
 scheduler's `_resolve_scalar_stage` sizes the slab (the depth-aware fit-to-smem K-chunk `bk_elems`, not a codec field;

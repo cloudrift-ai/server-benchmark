@@ -117,6 +117,11 @@ class GoldenConfig:
         spec = gpu.by_name(self.gpu_name)
         return spec.sm_count if spec else None
 
+    def dynamic_specs(self) -> list[str]:
+        """``--dynamic NAME@INPUT:AXIS`` spec strings for the tracer. Only a matmul
+        golden can be dynamic today; the base is always static (empty)."""
+        return []
+
 
 @dataclass(frozen=True, kw_only=True)
 class MatmulGoldenConfig(GoldenConfig):
@@ -211,9 +216,17 @@ class ReduceGoldenConfig(GoldenConfig):
 
     M: int
     K: int
+    dtype: str = "fp32"  # the snippet is fp32-only; recorded so Sample.from_golden is kind-agnostic
 
     def snippet(self) -> str:
         return f"torch.sum(torch.randn({self.M},{self.K}),dim=-1)"
+
+    def shape_key(self):
+        """The reduce's arithmetic join key — free dims ``(M,)``, reduce extent ``K``,
+        matching what ``992_stamp_structural_features`` stamps on the reduce kernel."""
+        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
+
+        return ShapeKey(free_prod=self.M, reduce_max=self.K, is_warp=False)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -225,9 +238,17 @@ class PointwiseGoldenConfig(GoldenConfig):
 
     M: int
     N: int
+    dtype: str = "fp32"  # the snippet is fp32-only; recorded so Sample.from_golden is kind-agnostic
 
     def snippet(self) -> str:
         return f"torch.relu(torch.randn({self.M},{self.N}))"
+
+    def shape_key(self):
+        """The pointwise map's arithmetic join key — free product ``M·N``, no reduce
+        axis (``reduce_max=0``, the ``from_s_features`` default for an unstamped extent)."""
+        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
+
+        return ShapeKey(free_prod=self.M * self.N, reduce_max=0, is_warp=False)
 
 
 _GOLDENS_DIR = Path(__file__).parent / "goldens"

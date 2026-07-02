@@ -617,6 +617,14 @@ def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = ST
     # register tile like tile_n=832 must decline TMA; cp.async has no box).
     if stage.transport == "tma" and max(c.m.tile, c.n.tile) > 256:
         return None
+    # cuTensorMapEncodeTiled: every global stride must be 16 B-aligned — A's inner global
+    # stride is K (row-major (M,K)), B's is N ((K,N)). The warp resolver's
+    # ``_can_stage_warp_tma`` gates the same; without it an odd-width shape (e.g. N=5 fp32,
+    # a 20 B row stride) resolver-accepts and then crashes at descriptor encode time.
+    if stage.transport == "tma":
+        n_ext = c.n.axis.extent
+        if not n_ext.is_static or ((K * elem_bytes) % 16 or (n_ext.as_static() * elem_bytes) % 16):
+            return None
     depth, bk_elems = max(1, stage.depth), 0
     while depth >= 1:
         cap = budget // (depth * max(1, c.m.tile + c.n.tile) * elem_bytes)
@@ -850,6 +858,14 @@ def _splitk_option(
     ``ksplit`` / ``kslice``), keeping the kernel single-eligible-axis so golden bare-collapse + the
     prior featurizer stay invariant vs the residual/golden spelling."""
     wt = TilePlan.parse(tile_spec)
+    # Same 1024-thread/CTA guard as ``_tile_option`` — the split partial launches the same
+    # ``par_n · par_m`` block, so an over-limit pinned tile must not escape through the split
+    # arm to an opaque late CUDA_ERROR_INVALID_VALUE.
+    if not wt.is_warp and wt.block_threads > MAX_BLOCK_THREADS:
+        raise ValueError(
+            f"TILE parallel block {wt.units_n}×{wt.units_m}={wt.block_threads} threads exceeds the "
+            f"{MAX_BLOCK_THREADS}-thread/CTA limit; shrink n/m or move work to the f register sub-tile."
+        )
     inner = _contraction_node(tile.op, place, wt)
     if inner.a_computed:
         raise ValueError(

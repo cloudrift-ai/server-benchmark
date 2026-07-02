@@ -124,14 +124,21 @@ class Sample:
 
     @classmethod
     def from_golden(cls, cfg, *, compile_s_feats: bool = False) -> Sample:
-        """A golden ``MatmulGoldenConfig`` as a ``Sample``. ``compile_s_feats``
-        derives the full ``S_*`` histogram (for the learned-prior featurization);
-        leave it off for the cold-analytic / grouping / bench paths."""
+        """A golden config (matmul / reduce / pointwise — every kind carries
+        ``shape_key()`` / ``snippet()`` / ``dtype`` / ``dynamic_specs()``) as a
+        ``Sample``. ``compile_s_feats`` derives the full ``S_*`` histogram (for the
+        learned-prior featurization; matmul-only — the arithmetic key suffices for
+        the other kinds); leave it off for the cold-analytic / grouping / bench paths."""
         from emmy.compiler.context import Context  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig  # noqa: PLC0415
 
         tunable, _ctx, _s = _split_by_prefix(cfg.knobs)
         dyn_specs = tuple(cfg.dynamic_specs())
-        s_full = dict(compiled_s_features(cfg.M, cfg.N, cfg.K, cfg.dtype, cfg.compute_cap, dyn_specs)) if compile_s_feats else None
+        s_full = (
+            dict(compiled_s_features(cfg.M, cfg.N, cfg.K, cfg.dtype, cfg.compute_cap, dyn_specs))
+            if compile_s_feats and isinstance(cfg, MatmulGoldenConfig)
+            else None
+        )
         return cls(
             knobs=tunable,
             latency_us=cfg.emmy_us,

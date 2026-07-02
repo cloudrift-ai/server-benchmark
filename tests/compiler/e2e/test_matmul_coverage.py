@@ -930,6 +930,10 @@ def transport(request, monkeypatch) -> str:
     ``d2/cp`` = cp.async, ``d2/tma`` = cp.async.bulk.tensor). The "pinned knobs" fixture."""
     monkeypatch.setenv("EMMY_TILE", _WARP_CODEC)
     monkeypatch.setenv("EMMY_STAGE", "d2/tma" if request.param == "tma" else "d2/cp")
+    # REDUCE pinned serial: without it the pick may ride a g<w>k split sibling (a partial +
+    # finalize PAIR — these tests assert on the single ``o`` kernel), depending on how the
+    # live prior ranks the split rows. The pinned path must not hang on prior rank order.
+    monkeypatch.setenv("EMMY_REDUCE", "")
     return request.param
 
 
@@ -1299,8 +1303,10 @@ def test_tile_block_within_limit_ok(monkeypatch) -> None:
 # off-hint / straddling sizes (1, 31, 130, 700 — NOT tile-divisor multiples), which exercise the
 # boundary-guard + clamp + zero-fill interplay the tile-divisor parity sweep cannot reach.
 _MASK_WARP = "a:mma_m16n8k16_f16/w2x2/f2x2/k2"
-_CP_KNOBS = {"TILE": _MASK_WARP, "STAGE": "d2/cp"}
-_TMA_KNOBS = {"TILE": _MASK_WARP, "STAGE": "d2/tma"}
+# REDUCE pinned serial for the same reason as the ``transport`` fixture: a g<w>k split
+# sibling deploys a partial+finalize pair, and these tests assert on the one ``o`` kernel.
+_CP_KNOBS = {"TILE": _MASK_WARP, "STAGE": "d2/cp", "REDUCE": ""}
+_TMA_KNOBS = {"TILE": _MASK_WARP, "STAGE": "d2/tma", "REDUCE": ""}
 
 
 def _symbolic_m_graph(*, K: int = 512, N: int = 1024) -> Graph:

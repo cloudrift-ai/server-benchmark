@@ -45,16 +45,16 @@ class Dataset:
         compile_s_feats: bool = False,
         live_gpu: bool = False,
     ) -> Dataset:
-        """The matmul golden configs, optionally narrowed by exact ``name``, name
-        substring ``kernel``, or ``dtype``. ``compile_s_feats`` derives the full
-        ``S_*`` histogram per config (needed only for learned-prior featurization).
-        ``live_gpu`` scopes to the live card's goldens (:func:`goldens_for_live_gpu`)
-        — so a multi-GPU goldens dir doesn't return another card's config under the
-        same name (cards with no recorded golden fall back to the full set)."""
-        from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS, MatmulGoldenConfig, goldens_for_live_gpu  # noqa: PLC0415
+        """Every golden config (matmul / reduce / pointwise), optionally narrowed by
+        exact ``name``, name substring ``kernel``, or ``dtype``. ``compile_s_feats``
+        derives the full ``S_*`` histogram per config (needed only for learned-prior
+        featurization). ``live_gpu`` scopes to the live card's goldens
+        (:func:`goldens_for_live_gpu`) — so a multi-GPU goldens dir doesn't return
+        another card's config under the same name (cards with no recorded golden fall
+        back to the full set)."""
+        from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS, goldens_for_live_gpu  # noqa: PLC0415
 
-        source = goldens_for_live_gpu() if live_gpu else GOLDEN_CONFIGS
-        configs = [g for g in source if isinstance(g, MatmulGoldenConfig)]
+        configs = list(goldens_for_live_gpu() if live_gpu else GOLDEN_CONFIGS)
         if name is not None:
             configs = [g for g in configs if g.name == name]
         if kernel:

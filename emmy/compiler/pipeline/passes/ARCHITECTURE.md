@@ -91,3 +91,10 @@ resolved **TMA** stage without a cross-CTA split, and resolved/thread-budget-gat
 warp-only rows (`_schedule._computed_a_rows` — the mandatory resolved `sync` compute-fill stage, no scalar /
 gmem-direct / split-K / WSPEC rows; the compute-producer role for the fused edge is the anticipated `RoleKind`
 extension).
+Two catalog invariants hold: every recorded golden's `TILE`/`STAGE`/`REDUCE` stays a **member** of the enumerated
+grids (the permanence test in `tests/compiler/test_golden_configs.py` — a space edit can never silently orphan a
+golden into unreachability again, the sixth sweep's `.s512` regression class; the scalar reg grid carries the
+golden-informed deep-FM points `f2x6..f2x14`, `f4x6..f4x26` for exactly this reason), and a cross-CTA split deploy
+(`030_split`) stamps the decided knob row onto its **partial** kernel — the engine merges knobs forward on 1:1
+rebinds only, so without the explicit stamp the graph splice dropped them and the deployed split recorded no
+schedule identity (the A/B table then couldn't say what greedy deployed).

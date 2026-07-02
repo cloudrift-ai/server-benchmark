@@ -82,15 +82,26 @@ The bank-conflict hypothesis is CONFIRMED: +16 B row padding removed 13,000× of
 FA-2's own count) and bought 1.62× end-to-end. The remaining 1.5× gap to FA-2 tracks the LSU instruction
 count (4.7× FA-2's) — the `flash_pv_smem` C→A round-trip and the per-step loop-invariant Q reload.
 
-## Follow-ups (in expected-payoff order — padding is DONE)
+## The barrier experiment (run, hypothesis REFUTED — the convoy is not the bottleneck)
 
-1. Register-shuffle C→A handoff (kills most of the 4.7× LSU excess + the per-step `__syncthreads`; also
-   unblocks the d2+ ring payoff).
+The handoff `__syncthreads` was warp-scoped (`Sync(warp=True)` — the slab is warp-private; kept as a
+correctness-preserving cleanup and a WSPEC prerequisite), and it moved nothing: d1 315→314, d2 322→320,
+gmem-direct 679→673 (all noise). Post-padding, the staged loop's transport barriers (the per-step
+`wait_group` + trailing sync around the CTA-shared K/V slabs) re-converge the warps anyway — the remaining
+gap is the LSU **volume** (the handoff's stores/loads and the per-step Q reload), not the barrier around it.
+The d2 ring now nearly ties d1 (320 vs 314) but still never beats it.
+
+## Follow-ups (in expected-payoff order — padding + barrier scoping are DONE)
+
+1. Register-repack C→A handoff (kills most of the 4.7× LSU excess — the QK C-fragment layout is
+   A-fragment-compatible, FA-2 does this conversion fully in registers).
 2. Hoist the loop-invariant Q fragments out of the stream (bk gmem-direct A loads re-issued every KV block).
-3. TMA rank-3 descriptor for batched K/V (`(B·H, S, D)` box) — not for occupancy (smem-bound, and FA-2 runs
-   at 11.8%); it's the gateway to WSPEC-on-flash, which needs the handoff barrier gone first (a CTA-wide
-   sync is UB on the divergent producer/consumer split).
-4. Causal tile-skip (unchanged; the example is non-causal).
+3. `exp2f` + scale folding (we emit libm `expf` and a per-element scale multiply; FA-2 folds scale/log2e and
+   hits MUFU.EX2 directly).
+4. TMA rank-3 descriptor for batched K/V (`(B·H, S, D)` box) — not for occupancy (smem-bound, and FA-2 runs
+   at 11.8%); it's the gateway to WSPEC-on-flash (the handoff sync is now warp-scope, so the band split is
+   no longer UB-blocked on it).
+5. Causal tile-skip (unchanged; the example is non-causal).
 
 ## Accuracy table (listing shape (1,4,128,64), vs an fp64 torch reference — the Numerics placeholder)
 

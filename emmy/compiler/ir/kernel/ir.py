@@ -130,6 +130,12 @@ class Sync(Stmt):
 
     ``barrier_id == 0`` (default): ``__syncthreads();`` — CTA-wide.
 
+    ``warp=True``: ``__syncwarp();`` — warp-scope only. For ordering a warp's own
+    smem writes before its own reads of a WARP-PRIVATE buffer (the flash C→A
+    handoff slab): post-Volta independent thread scheduling means even
+    intra-warp write→read needs the sync, but a CTA-wide barrier there convoys
+    the block's warps for no ordering benefit.
+
     ``barrier_id > 0`` and ``count`` set: ``bar.sync <id>, <count>;`` —
     named-barrier synchronizing exactly ``count`` threads on barrier id
     ``<id>`` (one of 1..15). Used inside warp-specialized branches where
@@ -140,14 +146,21 @@ class Sync(Stmt):
 
     barrier_id: int = 0
     count: int | None = None
+    warp: bool = False  # warp-scope __syncwarp() (barrier_id must stay 0)
 
     def pretty(self, indent: str = "") -> list[str]:
+        if self.warp:
+            return [f"{indent}Sync(warp)"]
         if self.barrier_id == 0:
             return [f"{indent}Sync"]
         return [f"{indent}Sync(bar={self.barrier_id}, count={self.count})"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         pad = _pad(ctx.indent)
+        if self.warp:
+            if self.barrier_id != 0:
+                raise ValueError("Sync(warp=True) cannot carry a named barrier_id")
+            return [f"{pad}__syncwarp();"]
         if self.barrier_id == 0:
             return [f"{pad}__syncthreads();"]
         if self.count is None:

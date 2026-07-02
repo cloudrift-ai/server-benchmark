@@ -407,7 +407,11 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
                     ldm=bn + _PAD,
                 )
             )
-        stream.append(Sync())
+        # The handoff slab is WARP-private (each warp writes and re-reads its own rows), so the
+        # write→ldmatrix ordering needs only warp scope — post-Volta the sync is still required,
+        # but a CTA-wide barrier here convoys the block's warps every streaming step for no
+        # ordering benefit.
+        stream.append(Sync(warp=True))
         # One resident A slice per ``atom_k`` chunk of the streamed block (``pv.tile.bk`` slices —
         # one for the conservative ``2·atom_n`` block, more when the key block is wider).
         pv_bk = max(1, pv.tile.bk)

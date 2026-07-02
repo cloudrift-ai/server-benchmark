@@ -89,10 +89,11 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
     Reads the facts straight off the loop body — no op-tree node: the contraction operands are the
     ``Load``\\ s in the loop indexed over the reduce (K) axis; A/B are bound by which output axis
     each one's index carries; the fold accumulator is the loop body's ``Accum`` target. A clean
-    gmem-direct contraction has plain-``Load`` operands (a computed-cone / demoted matmul never
-    reaches CONTRACTION — recognition leaves it a flat reduce), so an unbindable body (no m/n-bearing
-    K-load) raises, matching the warp gmem-direct guard. ``b_trans`` is not returned — the
-    ``Contraction`` node re-derives it off ``b_load``."""
+    gmem-direct contraction has plain-``Load`` operands (a computed-cone matmul binds elsewhere:
+    the MONOID-producer composition via :func:`bind_prologue_contraction`, flash's PV at fusion; the
+    stat-free demoted cone stays a flat reduce), so an unbindable body (no m/n-bearing K-load)
+    raises, matching the warp gmem-direct guard. ``b_trans`` is not returned — the ``Contraction``
+    node re-derives it off its fold's ``b_load``."""
     k_name = loop.axis.name
     loads = [s for s in loop.body if isinstance(s, Load) and k_name in _idx_vars(s.index)]
     a_leaf = next((ld for ld in loads if m_name in _idx_vars(ld.index)), None)
@@ -122,15 +123,35 @@ def semiring_binding(node, grid) -> tuple[Load, Load, str, Body]:
     return bind_contraction(stmts[ridx], grid[-2].name, grid[-1].name, epilogue)
 
 
-def bind_prologue_contraction(op, free: tuple) -> tuple[Contraction, Axis] | None:
+def _cone_value_key(name: str, defs: dict) -> tuple:
+    """The canonical value tree of SSA ``name`` within a k-loop body — Loads keyed by (buffer,
+    index), Assigns by (op, child keys), a name defined outside the body by itself. Two folds
+    share one A operand iff their lift values have EQUAL keys: fusion duplicates the producer
+    cone per consumer (fresh SSA names, interleaved body order), so name/order equality is too
+    strict but value-tree equality is exact."""
+    st = defs.get(name)
+    if st is None:
+        return ("free", name)
+    if isinstance(st, Load):
+        return ("load", st.input, tuple(e.pretty() for e in st.index))
+    return ("op", st.op.name, tuple(_cone_value_key(a, defs) for a in st.args))
+
+
+def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis] | None:
     """Nodify the **reduce-bearing (MONOID) producer cone** composition — the fused norm→linear
-    edge (``rmsnorm(x)·nw @ w``): a projecting ``Map`` whose ``source`` is a per-row ``PLANAR``
-    statistic reduce and whose body is that statistic's scalar epilogue followed by a fresh free
-    (column) ``Loop`` over an ⊗-fold contraction whose A cone reads the statistic. Returns the
-    computed-A :class:`Contraction` — its A cone **carries the statistic prologue** (the annotated
-    stat reduce ``Loop`` + its scalar epilogue ahead of the per-cell map stmts, the k-invariant
-    prefix) with a **deferred** ``TilePlan()`` — plus the column axis (the scheduler adds it to the
-    grid), or ``None`` (not this shape; the ``Map`` form stands alone).
+    edge: a projecting ``Map`` whose ``source`` is a per-row ``PLANAR`` statistic reduce and whose
+    body is that statistic's scalar epilogue followed by a fresh free (column) ``Loop`` over one or
+    more ⊗-folds whose shared A cone reads the statistic. One fold channel is the plain norm→linear
+    (``rmsnorm(x)·nw @ w``); N channels sharing ONE A value with a pointwise combine tail is the
+    fused gate/up MLP edge (``swiglu(x̂@Wg, x̂@Wu)`` — a product-monoid fold; fusion duplicates the
+    cone SSA per channel, deduped by value-tree equality). Returns the same
+    ``Map(body=projection, source=node)`` factorization the ``Reduction`` spelling uses: the
+    ``source`` is the computed-A :class:`Contraction` — its A cone **carries the statistic
+    prologue** (the annotated stat reduce ``Loop`` + its scalar epilogue ahead of the per-cell map
+    stmts, the k-invariant prefix), its ``folds`` the ``(B, acc)`` channels, a **deferred**
+    ``TilePlan()`` — and the ``body`` is the projection (the combine tail + any stat-free prefix
+    defs it reads + the ``Write``). Plus the column axis (the scheduler adds it to the grid), or
+    ``None`` (not this shape; the reduce ``Map`` form stands alone).
 
     STRUCTURE-ONLY: no dtype / geometry / pin legality here — those are per-move scheduling guards
     (``_schedule``), so the same node offers whatever tiers the target legally supports."""
@@ -147,9 +168,11 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Contraction, Axis] | Non
         return None
     n_ax = nloop.axis
     inner = list(nloop.body)
-    if len(inner) != 2 or not isinstance(inner[0], Loop) or not inner[0].is_reduce or not isinstance(inner[1], Write):
+    if len(inner) < 2 or not isinstance(inner[0], Loop) or not inner[0].is_reduce or not isinstance(inner[-1], Write):
         return None
-    kloop, write = inner
+    kloop, tail_ops, write = inner[0], inner[1:-1], inner[-1]
+    if not all(isinstance(s, Assign) for s in tail_ops):
+        return None  # the combine tail is a pure pointwise chain (Loads ride the stat-free prefix)
     k_ax = kloop.axis
     grid = list(free)
     if not grid:
@@ -157,26 +180,32 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Contraction, Axis] | Non
     m_ax = grid[-1]
     kbody = list(kloop.body)
     accums = [st for st in kbody if isinstance(st, Accum)]
-    if len(accums) != 1 or accums[0].op.name != "add":
-        return None
-    acc = accums[0]
-    if write.values != (acc.name,) or not write.is_scalar:
+    if not accums or any(a.op.name != "add" for a in accums):
         return None
     defs = {st.name: st for st in kbody if isinstance(st, Assign)}
-    lift = defs.get(acc.value)
-    if lift is None or lift.op.name != "multiply" or len(lift.args) != 2:
-        return None
     loads = {st.names[0]: st for st in kbody if isinstance(st, Load)}
+    kdefs = {**loads, **defs}
 
     def _load_vars(nm: str) -> set | None:
         ld = loads.get(nm)
         return {v for e in ld.index for v in e.free_vars()} if ld is not None else None
 
-    b_name = next((a for a in lift.args if (vs := _load_vars(a)) and n_ax.name in vs and k_ax.name in vs), None)
-    if b_name is None:
-        return None
-    a_name = next(a for a in lift.args if a != b_name)
-    cone = map_cone(kbody, a_name)
+    # Bind each fold's (B, acc, A-value): the B operand is the (n, k)-indexed load of the ⊗ lift;
+    # the other arg is the fold's A value. Every fold must share ONE A value (key equality).
+    folds: list[tuple[Load, str]] = []
+    a_names: list[str] = []
+    for acc in accums:
+        lift = defs.get(acc.value)
+        if lift is None or lift.op.name != "multiply" or len(lift.args) != 2:
+            return None
+        b_name = next((a for a in lift.args if (vs := _load_vars(a)) and n_ax.name in vs and k_ax.name in vs), None)
+        if b_name is None:
+            return None
+        a_names.append(next(a for a in lift.args if a != b_name))
+        folds.append((loads[b_name], acc.name))
+    if len({_cone_value_key(nm, kdefs) for nm in a_names}) != 1:
+        return None  # per-fold A values differ — not a shared-operand multi-fold
+    cone = map_cone(kbody, a_names[0])
     if cone is None or not cone:
         return None
     for st in cone:
@@ -193,17 +222,44 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Contraction, Axis] | Non
     # but never the column / contraction axes.
     if _idx_vars_deep([*red.partial, *stat_epi]) & {n_ax.name, k_ax.name}:
         return None
+    # The combine tail: its reads must be the fold accumulators, its own defs, or STAT-FREE prefix
+    # defs (a k/n-invariant value like SiLU's ``1.0`` scalar — its backward cone within the prefix
+    # is prepended to the node epilogue so the store-side fragment epilogue can re-evaluate it; a
+    # stat-DERIVED read would need the reduce's state at the store, which the fragment path has no
+    # channel for). The Write stores one scalar from the tail chain (or the bare primary acc).
+    derived = {red.out}
+    for s in stat_epi:
+        if set(s.deps()) & derived:
+            derived |= set(s.defines())
+    acc_names = {a.name for a in accums}
+    tail_defs = {s.name for s in tail_ops}
+    prefix_needs: list[str] = []
+    for s in tail_ops:
+        for a in s.args:
+            if a in acc_names or a in tail_defs:
+                continue
+            if a in stat_defs - derived:
+                prefix_needs.append(a)
+                continue
+            return None
+    prefix: list[Stmt] = []
+    seen: set[int] = set()
+    for nm in prefix_needs:
+        for st in map_cone(list(stat_epi), nm) or ():
+            if id(st) not in seen:
+                seen.add(id(st))
+                prefix.append(st)
+    if not write.is_scalar or write.values != ((tail_ops[-1].name,) if tail_ops else (folds[0][1],)):
+        return None
     node = Contraction(
         axes=(m_ax, n_ax),
         k_axis=k_ax,
         a_operand=Body((red.loop, *stat_epi, *cone)),
-        b_load=loads[b_name],
-        acc=acc.name,
+        folds=tuple(folds),
         tile=TilePlan(),
         lead_axes=tuple(grid[:-1]),
-        epilogue=Body((write,)),
     )
-    return node, n_ax
+    return Map(body=Body((*prefix, *tail_ops, write)), source=node), n_ax
 
 
 __all__ = ["bind_contraction", "bind_prologue_contraction", "map_cone", "semiring_binding"]

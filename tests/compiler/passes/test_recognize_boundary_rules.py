@@ -114,18 +114,21 @@ def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
 
 
 def test_norm_linear_warp_pick_is_computed_a_contraction():
-    """Picking a warp row materializes the recognize-built node: a computed-A :class:`Contraction`
-    whose A cone is headed by the annotated PLANAR statistic reduce ``Loop``, its (m, n) output on
-    the grid (the column axis joined), the bare ``Write`` epilogue, and the knob stamps the DB rows
-    key on (``PLACE@cone`` + the decided-empty stat ``REDUCE``)."""
+    """Picking a warp row materializes the recognize-built ``Map(body=projection, source=node)``
+    tree — the same ``project ∘ contract`` spelling the Reduction tiers use: the source is a
+    computed-A :class:`Contraction` whose A cone is headed by the annotated PLANAR statistic reduce
+    ``Loop``, one fold channel, its (m, n) output on the grid (the column axis joined); the ``Map``
+    body carries the ``Write``; and the knob stamps the DB rows key on (``PLACE@cone`` + the
+    decided-empty stat ``REDUCE``)."""
     _, tile = _resolve(_norm_linear_graph(), pick=_is_warp_row)
-    c = tile.op
-    assert isinstance(c, Contraction) and c.a_computed
+    assert isinstance(tile.op, Map)
+    c = tile.op.source
+    assert isinstance(c, Contraction) and c.a_computed and len(c.folds) == 1
     stat_loop = c.a_operand[0]
     assert isinstance(stat_loop, Loop) and stat_loop.is_reduce and stat_loop.role is AxisRole.PLANAR
     assert [a.extent.as_static() for a in c.axes] == [32, 3072]
     assert c.axes[0].name == tile.place.grid[-2].name and c.axes[1].name == tile.place.grid[-1].name
-    assert [type(s) for s in c.epilogue] == [Write]
+    assert len(c.epilogue) == 0 and [type(s) for s in tile.op.body] == [Write]
     assert {"x", "wn", "w"} <= set(c.external_reads())
     assert tile.stage is not None and tile.stage.transport == "sync" and tile.stage.bk_elems > 0
     assert tile.knobs.get("PLACE@cone") == "fuse"
@@ -149,9 +152,7 @@ def test_norm_linear_symbolic_m_offers_warp_rows():
     assert any(_is_warp_row(r) for r in rows)
 
 
-def test_mlp_two_linear_tail_stays_map_form():
-    """The gate/up MLP fusion (TWO column loops behind the statistic) is not the composition —
-    the matcher declines and the kernel keeps today's ``Map`` form with no sync rows."""
+def _mlp_gate_up_graph() -> Graph:
     S, H, inter = 32, 1024, 3072
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (1, Dim(S), Dim(H)), dtype=F16), node_id="x")
@@ -164,7 +165,19 @@ def test_mlp_two_linear_tail_stays_map_form():
     g.add_node(ElementwiseOp("silu"), ["gate"], Tensor("sg", (1, Dim(S), Dim(inter)), dtype=F16), node_id="sg")
     g.add_node(ElementwiseOp("multiply"), ["sg", "up"], Tensor("o", (1, Dim(S), Dim(inter)), dtype=F16), node_id="o")
     g.inputs, g.outputs = ["x", "wn", "wg", "wu"], ["o"]
+    return g
 
-    rows, tile = _resolve(g)
-    assert isinstance(tile.op, Map)
-    assert not any("d1/sync" in str(v) for r in rows for v in r.values())
+
+def test_mlp_gate_up_nodifies_as_two_fold_contraction():
+    """The fused gate/up MLP edge — TWO ⊗-folds sharing one normalized-row A value (fusion
+    duplicates the cone SSA per fold; the matcher dedupes by value-tree equality) with the SwiGLU
+    combine as projection — nodifies to ``Map(body=combine…Write, source=Contraction(folds=2))``,
+    the product-monoid fold, and offers warp sync rows."""
+    rows, tile = _resolve(_mlp_gate_up_graph(), pick=_is_warp_row)
+    assert isinstance(tile.op, Map) and isinstance(tile.op.source, Contraction)
+    c = tile.op.source
+    assert len(c.folds) == 2 and c.a_computed
+    assert {bl.input for bl, _ in c.folds} == {"wg", "wu"}
+    assert isinstance(tile.op.body[-1], Write)
+    assert any(_is_warp_row(r) for r in rows)
+    assert not _is_warp_row(rows[0]), "option-0 stays the coop reduce row"

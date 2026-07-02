@@ -119,8 +119,7 @@ def _contraction(epilogue: Body | None = None) -> Contraction:
         axes=(Axis("m", 128), Axis("n", 128)),
         k_axis=Axis("k", 256),
         a_operand=a,
-        b_load=b,
-        acc="acc",
+        folds=((b, "acc"),),
         tile=TilePlan.parse("n2/f2"),
         epilogue=epilogue or Body(()),
     )
@@ -211,7 +210,7 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
         c,
         k_axis=kslice,
         a_operand=replace(c.a_operand, index=tuple(sigma.apply(e) for e in c.a_operand.index)),
-        b_load=replace(c.b_load, index=tuple(sigma.apply(e) for e in c.b_load.index)),
+        folds=tuple((replace(bl, index=tuple(sigma.apply(e) for e in bl.index)), acc) for bl, acc in c.folds),
     )
     carrier = Accum(name="acc", value="acc__v", op=ElementwiseImpl("add")).as_carrier()
     red = Reduction(carrier=carrier, axis=ksplit, role=AxisRole.CONTRACTION, source=inner, reduce=ReducePlan.of(cta=2, finalize="atomic"))
@@ -234,7 +233,8 @@ def test_reduce_partial_flattens_a_nested_pv_contraction() -> None:
     loop in place — one recursion rule, so the scalar tier expands ``for kv:[QK loop; P; PV loop;
     fold]``. This is the structural seam warp-flash rides."""
     qk = _contraction()  # Σ_k A·B -> acc (the score S)
-    pv = replace(_contraction(), axes=(Axis("m", 128), Axis("d", 64)), k_axis=Axis("j", 32), acc="oblk")
+    pv = replace(_contraction(), axes=(Axis("m", 128), Axis("d", 64)), k_axis=Axis("j", 32))
+    pv = replace(pv, folds=((pv.b_load, "oblk"),))
     prob = Assign(name="p", op="exp", args=("acc",))  # softmax weight between the two contractions
     fold = Accum(name="O_i", value="oblk", op="add")
     red = Reduction(carrier=fold.as_carrier(), axis=Axis("kv", 128), partial=Body((prob, pv, fold)), role=AxisRole.TWISTED, source=qk)
@@ -287,8 +287,7 @@ def _pv_contraction(tile: str = "") -> Contraction:
         axes=(Axis("m", 8), Axis("d", 8)),
         k_axis=Axis("j", 8),
         a_operand=a_body,
-        b_load=Load(name="v_e", input="V", index=(Var("j"), Var("d"))),
-        acc="oblk",
+        folds=((Load(name="v_e", input="V", index=(Var("j"), Var("d"))), "oblk"),),
         tile=TilePlan.parse(tile) if tile else TilePlan(),
         epilogue=Body((Write(output="out", index=(Var("m"), Var("d")), value="oblk"),)),
     )

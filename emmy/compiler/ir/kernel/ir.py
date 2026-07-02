@@ -1286,6 +1286,10 @@ class RegEpilogue:
     # carries ``__M__`` / ``__N__`` placeholder Vars the store substitutes with
     # the fragment element's own (row, col); the last branch is the else.
     selects: tuple[tuple[str, tuple[tuple[Expr | None, str], ...]], ...] = ()
+    # Additional ``(acc_name, frag_name)`` accumulator bindings — a multi-fold contraction's
+    # extra C fragments (the fused gate/up edge): each name substitutes to its fragment's
+    # element alongside ``acc``, so the chain combines the folds per cell (SwiGLU et al).
+    extra_accs: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1329,7 +1333,8 @@ class RegStore(Stmt):
     n_guard: tuple[Expr, Expr] | None = None
 
     def deps(self) -> tuple[str, ...]:
-        return (self.frag,)
+        extra = () if self.epilogue is None else tuple(fr for _, fr in self.epilogue.extra_accs)
+        return (self.frag, *extra)
 
     def external_reads(self) -> tuple[str, ...]:
         # The fused epilogue's leaf loads are gmem reads this stmt performs
@@ -1397,7 +1402,7 @@ class RegStore(Stmt):
             row = "_g" if i < 2 else "(_g + 8)"
             col = f"(_t * 2 + {i & 1})"
             lines: list[str] = []
-            env = {epi.acc: f"{self.frag}[{i}]"}
+            env = {epi.acc: f"{self.frag}[{i}]", **{a: f"{fr}[{i}]" for a, fr in epi.extra_accs}}
             for ld in epi.loads:
                 temp = f"{ld.name}_e{i}"
                 if ld.buffer in ctx.literal_constants:

@@ -18,11 +18,11 @@ layout rules that drift apart) and silently narrows coverage to the shapes someo
 
 How to comply:
 
-- **Write the rule per element, not per shape.** Example: `lowering/tile/split/010_split_demoted.try_split_demoted`
-  classifies each multiply operand independently (plain `Load` stays put; computed cone becomes a producer
-  materialized over exactly the axes it reads). Norm→linear, scale→matmul, SDPA P@V, and rotary QK^T are
-  *instances* of that one rule, not branches — and a shape nobody designed for (a weight-side dequant cone) is
-  covered for free.
+- **Write the rule per element, not per shape.** Example: `lowering/tile/_atomize.map_cone` /
+  `bind_prologue_contraction` classify each ⊗-fold operand independently (plain `Load` stays put; a computed cone is
+  bound as the shared A value by value-tree equality, however many fold channels read it). Norm→linear, gate/up +
+  SwiGLU, scale→matmul, SDPA P@V, and rotary QK^T are *instances* of that one rule, not branches — and a shape
+  nobody designed for (a weight-side dequant cone) is covered for free.
 - **Gate in the negative.** Enumerating admissible shapes is shape matching by another name. Walk the body and
   report the first thing the transform *fundamentally cannot do*, like `lowering/_predicates.classify_fragment_epilogue`
   (the epilogue folds unless it has an ineligible op/dependency) — the eligible set then grows with the renderer
@@ -58,6 +58,15 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   option builders resolve it against the built node ONCE (`_resolve_warp_stage` / `_resolve_scalar_stage` — transport
   eligibility, the slab K-chunk `bk_elems`, the depth clamps) and stamp the resolved `Stage` (or `None`, gmem-direct)
   on the `TileOp`, so the materializer's one staged driver applies it verbatim, deciding nothing.
+- the **MONOID-producer composition** — the fused norm→linear edge and its N-channel form, the gate/up MLP edge —
+  binds at recognize time too (`_atomize.bind_prologue_contraction`, structure-only): a projecting `Map` over a
+  per-row `PLANAR` statistic whose tail is one or more ⊗-folds of one shared A value nodifies to
+  `Map(body=projection, source=Contraction)` — the computed-A `Contraction` carrying the statistic prologue in its A
+  cone and the `(B, acc)` channels on `folds` (a product-monoid fold: channels never interact per step; the combine
+  — SwiGLU — is projection, riding the wrapping `Map.body`). `010_recognize` schedules it as a fork SIBLING of the
+  cooperative reduce form (option-0 stays the coop row; the warp mma rows ride the mandatory `sync` compute-fill;
+  dtype / geometry legality stays schedule-side in `_computed_a_rows`). This retired the pin-only
+  `_prologue_warp_option` rescue.
 - a cooperative / ILP reduce (`PLANAR` / `TWISTED`, or a non-output-tiled `CONTRACTION`) needs **no** binding here — its
   accumulator dtype + the shuffle/tree fold mechanism are **derived** at materialize time (`emit_combine` off the carrier
   + `ReduceStage.combine`), never stored. Its one schedule-time staging decision follows the same
@@ -71,9 +80,10 @@ reuse it on flash's nested QK^T / PV; flash's inner score IS now a structural `C
 `TilePlan()` today, `source` of the streaming `Reduction` — the `Reduction ⊃ Contraction` composition), so warp-flash is
 just that node gaining a warp `TilePlan` — no new path.
 
-**The move catalog** (`lowering/tile/_catalog.py`) is the permitted-move enumeration the schedule emit forks over, keyed
-on `AxisRole`: `scalar_tile_moves()` is the legality-guarded scalar register-tile product (`par × reg`, `block_threads ≤
-1024`) with per-cell `""` as the conservative option-0, returned by `_schedule._tile_specs` for an unpinned contraction
-so `compile` / `tune` explores the tile space (each spec → a structural `Contraction`-node leaf under `TILE@<k_axis>`; an
-env pin wins via `Knob.narrow`). Warp / reduce / stage move families and the hierarchical `build_fork_tree` levels (the
-MCTS laziness + multi-node flash bundling) fold in next; a flat list suffices for today's single-node scalar product.
+**The move catalog** (`search/space.py`) is the permitted-move enumeration the schedule emit forks over, keyed on
+`AxisRole`: `scalar_tile_moves()` is the legality-guarded scalar register-tile product (`par × reg`, `block_threads ≤
+1024`) with per-cell `""` as the conservative option-0, crossed with the warp / reduce / stage move families by
+`_schedule._tile_rows` for an unpinned contraction so `compile` / `tune` explores the space (each row → a structural
+`Contraction`-node leaf keyed `TILE@<k_axis>` in a hierarchical `build_fork_tree`; an env pin wins via `Knob.narrow`).
+A computed-A (fused-cone) contraction enumerates its own warp-only rows (`_schedule._computed_a_rows` — the mandatory
+resolved `sync` compute-fill stage, no scalar / gmem-direct / split-K rows).

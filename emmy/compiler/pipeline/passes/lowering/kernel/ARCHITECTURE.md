@@ -138,14 +138,18 @@ flash operand) silently falls back to gmem-direct, and a staged kernel is
 under a warp `TILE` pin: `_schedule._demoted_warp_option` nodifies the PLANAR ⊗-fold to a computed-A `Contraction`
 (the same `a_operand = Body` flash P@V rides) and stamps a `sync` `Stage`; `_staged` then builds a `SyncTransport`
 whose A fill is the producer CONE evaluated per slab cell (compute-fill) and whose B fill is a plain copy — the same
-`fill`/`commit`/`wait` seam, single-buffer, one CTA barrier, feeding the unchanged `ldmatrix` drain. Pin-driven,
-exact-cover geometry (static M/N/K divisible; masks are a follow-on). A **reduce-bearing (MONOID) cone** — the fused
-norm→linear edge (`_schedule._prologue_warp_option`) — fuses too: the A cone carries its k-invariant prefix (the
-per-row statistic reduce `Loop` + scalar epilogue), split off at the K seam by `_sync_operands`
+`fill`/`commit`/`wait` seam, single-buffer, one CTA barrier, feeding the unchanged `ldmatrix` drain. A
+**reduce-bearing (MONOID) cone** — the fused norm→linear edge — is nodified at RECOGNIZE time
+(`_atomize.bind_prologue_contraction`; real fork rows, not a pin rescue): the A cone carries its k-invariant prefix
+(the per-row statistic reduce `Loop` + scalar epilogue), split off at the K seam by `_sync_operands`
 (`_split_stat_prologue`) and run ONCE per tile row as the transport prologue (`_stage.sync_stat_fill` — threads
 stripe the tile's rows, each folds its row's statistic into a stat smem row, one barrier); the per-cell compute-fill
 reads the bridged values back from the stat rows. The prologue is a one-shot `SyncTransport.prologue`, ahead of the
-staged K-loop.
+staged K-loop. Geometry: exact cover on N/K only — a masked / symbolic **M** clamp-reads (the A / stat-prologue σ
+ride `_clamp_last`; the overhang store is discarded by the `RegStore` guard). A **multi-fold** node (the gate/up MLP
+edge — N `(B, acc)` channels folding one shared A value, `Contraction.folds`) fills one B slab per channel, drains N
+mma chains off the ONE ldmatrix'd A fragment into per-channel C fragments (`_fold_frag`), and the projection
+(SwiGLU) combines the channels per element in the store's `RegEpilogue` (`extra_accs`).
 
 The **scalar** contraction tier stages too, under the same `STAGE` codec, through the **same** `_staged` driver — the
 scheduler's `_resolve_scalar_stage` sizes the slab (the depth-aware fit-to-smem K-chunk `bk_elems`, not a codec field;

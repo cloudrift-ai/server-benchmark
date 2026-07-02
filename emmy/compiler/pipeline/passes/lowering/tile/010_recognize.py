@@ -37,12 +37,14 @@ step unconditional — no knobs):
    the lift can't cleanly factor (no reduce, several reduces, or a nested non-flash reduce) stays a
    flat un-annotated ``Map`` (→ the scalar tier).
 4. **The MONOID-producer composition** — a lifted ``Map(source=Reduction)`` whose body is the
-   statistic's scalar epilogue + a fresh free (column) ``Loop`` over an ⊗-fold contraction reading
-   the statistic (the fused norm→linear edge, ``rmsnorm(x)·nw @ w``) ALSO nodifies to a computed-A
-   :class:`Contraction` whose A cone carries the per-row statistic prologue
-   (``_atomize.bind_prologue_contraction``, structure-only), its column axis joining the grid. Both
-   forms are scheduled and merged into ONE fork — the ``Map`` rows first (option-0 stays the
-   conservative coop pick), then the Contraction form's warp (mma) rows over the ``sync``
+   statistic's scalar epilogue + a fresh free (column) ``Loop`` over one or more ⊗-folds of ONE
+   shared A value reading the statistic (the fused norm→linear edge ``rmsnorm(x)·nw @ w``; its
+   N-channel form the gate/up MLP edge ``swiglu(x̂@Wg, x̂@Wu)`` — a product-monoid fold) ALSO
+   nodifies to ``Map(body=projection, source=Contraction)``: a computed-A :class:`Contraction`
+   whose A cone carries the per-row statistic prologue and whose ``folds`` are the ``(B, acc)``
+   channels (``_atomize.bind_prologue_contraction``, structure-only), its column axis joining the
+   grid. Both forms are scheduled and merged into ONE fork — the reduce rows first (option-0 stays
+   the conservative coop pick), then the Contraction form's warp (mma) rows over the ``sync``
    compute-fill stage; a warp ``TILE`` pin keeps the Contraction rows alone.
 
 Flash must precede online-softmax which must precede the lift: each later step consumes the
@@ -251,8 +253,7 @@ def _nodify_contraction(node, free: tuple):
                 axes=(free[-2], free[-1]),
                 k_axis=rloop.axis,
                 a_operand=a_load,
-                b_load=b_load,
-                acc=acc,
+                folds=((b_load, acc),),
                 tile=TilePlan(),
                 lead_axes=tuple(free[:-2]),
                 epilogue=epi,
@@ -352,20 +353,23 @@ def rewrite(match: Match, root: Node) -> Fork | list[TileOp] | TileOp | Graph | 
     pro = bind_prologue_contraction(node, free) if place_decision("cone") == "fuse" else None
     if pro is None:
         return schedule(map_tile, loop.name, knob_base)
-    # (4) The MONOID-producer composition — the fused norm→linear edge (``rmsnorm(x)·nw @ w``):
-    # the tail contraction ALSO nodifies to a computed-A :class:`Contraction` whose A cone carries
-    # the per-row statistic prologue (:func:`bind_prologue_contraction`), its column axis joining
-    # the grid. Both forms are scheduled and their candidates merged into ONE fork: the ``Map``
-    # rows first (the cooperative / serial reduce tiers — option-0 stays the conservative coop
-    # pick, lowerable everywhere), then the Contraction form's warp (mma) rows (the sync
-    # compute-fill tier — zero rows on fp32 / no atoms / bad geometry). A warp ``TILE`` pin is
-    # authoritative: the Contraction rows alone (the pin demands the mma tier; offering the Map
-    # sibling would let cold greedy pick past the pin). Each form's rows carry the OTHER form's
-    # family keys as decided-empty stamps, so every leaf row spells the same key set (the
-    # evidence pick's prefix-consistency: an absent key reads as "free").
-    c_node, n_ax = pro
-    con_base, map_base = prologue_knob_bases(c_node.k_axis.name, c_node.a_operand[0].axis.name)
-    con_tile = TileOp(op=c_node, place=Placement(free=(*free, n_ax)), inputs=dict(loop.inputs))
+    # (4) The MONOID-producer composition — the fused norm→linear edge (``rmsnorm(x)·nw @ w``, and
+    # its N-channel form, the gate/up MLP edge): the tail fold(s) ALSO nodify to
+    # ``Map(body=projection, source=Contraction)`` — a computed-A :class:`Contraction` whose A cone
+    # carries the per-row statistic prologue and whose ``folds`` are the ``(B, acc)`` channels
+    # (:func:`bind_prologue_contraction`), its column axis joining the grid. Both forms are
+    # scheduled and their candidates merged into ONE fork: the reduce-``Map`` rows first (the
+    # cooperative / serial tiers — option-0 stays the conservative coop pick, lowerable
+    # everywhere), then the Contraction form's warp (mma) rows (the sync compute-fill tier — zero
+    # rows on fp32 / no atoms / bad geometry). A warp ``TILE`` pin is authoritative: the
+    # Contraction rows alone (the pin demands the mma tier; offering the reduce sibling would let
+    # cold greedy pick past the pin). Each form's rows carry the OTHER form's family keys as
+    # decided-empty stamps, so every leaf row spells the same key set (the evidence pick's
+    # prefix-consistency: an absent key reads as "free").
+    c_map, n_ax = pro
+    src = c_map.source
+    con_base, map_base = prologue_knob_bases(src.k_axis.name, src.a_operand[0].axis.name)
+    con_tile = TileOp(op=c_map, place=Placement(free=(*free, n_ax)), inputs=dict(loop.inputs))
     con = _as_list(schedule(con_tile, loop.name, {**knob_base, **con_base}))
     if con and warp_tile_pinned():
         return con if len(con) > 1 else con[0]

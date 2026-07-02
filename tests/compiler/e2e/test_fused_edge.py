@@ -195,3 +195,44 @@ def test_fused_rmsnorm_linear_unpinned():
     the fork-integrity e2e (runs on any CUDA device; option-0 stays the coop row)."""
     S, H, inter = 32, 256, 512
     _rmsnorm_linear_check(_rmsnorm_linear_graph(S, H, inter), S, H, inter, want_mma=False)
+
+
+@requires_cuda
+@requires_sm90
+@pytest.mark.parametrize("runtime_s", [31, 130])
+def test_fused_gate_up_swiglu_symbolic_m(runtime_s, monkeypatch):
+    """The MULTI-FOLD (product-monoid) fused edge — ``swiglu(rmsnorm(x)·nw @ Wg, rmsnorm(x)·nw @
+    Wu)`` in ONE mma kernel: the two folds share the compute-filled A slab (one ldmatrix'd A
+    fragment feeding per-fold B slabs / C fragments) and the SwiGLU combine rides the store's
+    fragment epilogue; the seq axis is symbolic with a masked M tail (31 under / 130 over the
+    64-row tile)."""
+    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x2/f2x2/k2")
+    S, H, inter = runtime_s, 256, 512
+    Sd = Dim("seq_len", hint=64)
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (1, Sd, H), F16), node_id="x")
+    g.add_node(InputOp(), [], Tensor("nw", (H,), F16), node_id="nw")
+    g.add_node(InputOp(), [], Tensor("wg", (inter, H), F16), node_id="wg")
+    g.add_node(InputOp(), [], Tensor("wu", (inter, H), F16), node_id="wu")
+    g.add_node(RmsNormOp(eps=1e-6), ["x", "nw"], Tensor("xn", (1, Sd, H), F16), node_id="xn")
+    g.add_node(LinearOp(), ["xn", "wg"], Tensor("gate", (1, Sd, inter), F16), node_id="gate")
+    g.add_node(LinearOp(), ["xn", "wu"], Tensor("up", (1, Sd, inter), F16), node_id="up")
+    g.add_node(ElementwiseOp("silu"), ["gate"], Tensor("sg", (1, Sd, inter), F16), node_id="sg")
+    g.add_node(ElementwiseOp("multiply"), ["sg", "up"], Tensor("o", (1, Sd, inter), F16), node_id="o")
+    g.inputs, g.outputs = ["x", "nw", "wg", "wu"], ["o"]
+
+    rng = np.random.default_rng(0)
+    ins = {
+        "x": (rng.standard_normal((1, S, H)) * 0.3).astype(np.float16),
+        "nw": (rng.standard_normal((H,)) * 0.3).astype(np.float16),
+        "wg": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
+        "wu": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
+    }
+    got, srcs = _compile_run(g, ins)
+    assert len(srcs) == 1, f"the fused gate/up edge must be ONE kernel, got {len(srcs)}"
+    assert "dpl_mma" in srcs[0], "the pinned mma tier must engage on the multi-fold contraction"
+    x, nw, wg, wu = (ins[k].astype(np.float32) for k in ("x", "nw", "wg", "wu"))
+    rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
+    gate, up = rms @ wg.T, rms @ wu.T
+    ref = gate * _sigmoid(gate) * up
+    np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), ref, atol=0.5, rtol=0.1)

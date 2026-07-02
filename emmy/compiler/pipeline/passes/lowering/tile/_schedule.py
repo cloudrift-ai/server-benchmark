@@ -624,14 +624,14 @@ def _resolve_sync_stage(c: Contraction) -> Stage | None:
     sibling and a ``STAGE`` pin degrades to this resolved row. ``None`` when the slabs don't fit the
     48 KiB smem budget: the A/B operand slabs (single-buffer — ``SyncTransport`` has no ring) plus
     one fp32 row per bridged statistic (``sync_stat_fill``'s decls — the same
-    ``_split_stat_prologue`` seam the materializer fills through)."""
-    from emmy.compiler.pipeline.passes.lowering.kernel._atom import _split_stat_prologue  # noqa: PLC0415 — avoid an import cycle
-
+    ``Contraction.stat_prologue`` seam the materializer fills through)."""
     atom = c.atom
     bk_elems = c.tile.bk * atom.atom_k
     a_nbytes = atom.operand_dtype("a").nbytes
-    _, _, stats = _split_stat_prologue(c.a_body, c.k_axis.name)
-    slab_bytes = (c.m.tile + c.n.tile) * bk_elems * a_nbytes + len(stats) * c.m.tile * 4
+    _, _, stats = c.stat_prologue()
+    # One A slab + one B slab per fold channel (the multi-channel gate/up node fills a B slab per
+    # projection) + one fp32 stat row per bridged statistic.
+    slab_bytes = (c.m.tile + len(c.folds) * c.n.tile) * bk_elems * a_nbytes + len(stats) * c.m.tile * 4
     if slab_bytes > 48 * 1024:
         return None
     return Stage(transport="sync", smem=(c.a_name,), bk_elems=bk_elems)
@@ -651,10 +651,15 @@ def _computed_a_rows(kernel, place, probe: Contraction, kaxis: str) -> list[dict
     sibling's business); ``REDUCE`` rides :func:`_reduce_candidates` (split-K is excluded unpinned;
     a ``g<w>`` pin raises in :func:`_splitk_option`); a ``STAGE`` pin is ignored in favor of the
     resolved sync row."""
+    # The projection rides the recognizer's ``Map`` wrapper (plus any node epilogue) — the store
+    # folds it into the fragment epilogue, so it must be fragment-realizable (no gather chains).
+    tail = (*probe.epilogue, *kernel.op.body) if isinstance(kernel.op, Map) else tuple(probe.epilogue)
+    if not _fragment_epilogue_ok(Body(tail)):
+        return []
     if TILE.raw() is not None:
         spec = TILE.narrow([""])[0]
-        if not is_warp_codec(spec):
-            return []
+        if not is_warp_codec(spec) or not _warp_atoms(kernel, probe):
+            return []  # a scalar/empty pin, or no dtype-eligible atom (fp32) — the reduce sibling's business
         wt = TilePlan.parse(spec)
         _check_warp_static_k(kernel, wt)
         if not probe.k_axis.extent.is_static:
@@ -739,6 +744,11 @@ def _contraction_node(node, place, tile_plan: TilePlan) -> Contraction:
     binding's body verbatim — the synthesized grid-``Write`` for a bare contraction stays a
     materialize concern (it needs ``root.output``), appended there when the epilogue carries no
     ``Write``."""
+    if isinstance(node, Map) and isinstance(node.source, Contraction):
+        # The recognizer's ``Map(body=projection, source=Contraction)`` spelling — the node under
+        # the wrapper is the schedulable contraction; the projection stays on the ``Map`` (the
+        # option builders re-wrap, materialize peels it into the store tail).
+        return replace(node.source, tile=tile_plan)
     if isinstance(node, Contraction):
         return replace(node, tile=tile_plan)
     grid = list(place.grid)
@@ -747,8 +757,7 @@ def _contraction_node(node, place, tile_plan: TilePlan) -> Contraction:
         axes=(grid[-2], grid[-1]),
         k_axis=reduce_loop(node).axis,
         a_operand=a_load,
-        b_load=b_load,
-        acc=acc,
+        folds=((b_load, acc),),
         tile=tile_plan,
         lead_axes=tuple(grid[:-2]),
         epilogue=epilogue,
@@ -817,7 +826,7 @@ def _splitk_option(tile, place, tile_spec: str, split_spec: str, name: str, knob
         inner,
         k_axis=kslice,
         a_operand=replace(inner.a_operand, index=tuple(sigma.apply(e) for e in inner.a_operand.index)),
-        b_load=replace(inner.b_load, index=tuple(sigma.apply(e) for e in inner.b_load.index)),
+        folds=tuple((replace(bl, index=tuple(sigma.apply(e) for e in bl.index)), acc) for bl, acc in inner.folds),
     )
     stage = None
     if stage_spec:
@@ -851,6 +860,9 @@ def _warp_option(tile, place, spec: str, name: str, knobs: dict, stage_spec: str
         assert stage is not None, "computed-A row enumerated past its smem budget"  # _computed_a_rows resolved this
     else:
         stage = _resolve_warp_stage(op, Stage.parse(stage_spec)) if stage_spec else None
+    # Re-wrap the recognizer's projecting ``Map`` around the tiled node (materialize peels it into
+    # the store tail — the same ``project ∘ contract`` spelling the Reduction tiers use).
+    emitted = replace(tile.op, source=op) if isinstance(tile.op, Map) and isinstance(tile.op.source, Contraction) else op
     # Warp specialization rides ORTHOGONAL to the tile/stage just resolved: an optional WSPEC pin
     # splits the warps into roles over this fixed pipeline (gated on the RESOLVED ``stage`` — an
     # ineligible pin leaves no pipeline for a producer to drive, so WSPEC degrades to uniform).
@@ -867,7 +879,7 @@ def _warp_option(tile, place, spec: str, name: str, knobs: dict, stage_spec: str
     stamped[_at(STAGE, kaxis)] = stage.spell() if stage is not None else ""
     if wspec_spec:
         stamped[WSPEC.name] = wspec_spec
-    return TileOp(op=op, name=name, place=place, tier=wt, stage=stage, workers=workers, knobs=stamped)
+    return TileOp(op=emitted, name=name, place=place, tier=wt, stage=stage, workers=workers, knobs=stamped)
 
 
 def _tile_option(tile, place, spec: str, name: str, knobs: dict, reduce_spec: str = "", stage_spec: str = "") -> TileOp:
@@ -1112,8 +1124,7 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
         axes=(m_ax, n_ax),
         k_axis=k_ax,
         a_operand=Body(tuple(cone)),
-        b_load=loads[b_name],
-        acc=acc.name,
+        folds=((loads[b_name], acc.name),),
         tile=wt,
         lead_axes=tuple(grid[:-2]),
         epilogue=epilogue,

@@ -47,7 +47,7 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.expr import Expr, Literal
 from emmy.compiler.ir.schedule import Placement, ReducePlan, Stage, TilePlan, WarpSpec
-from emmy.compiler.ir.stmt import INDENT, Accum, Body, Carrier, Load, Loop, RenderCtx, Stmt, pretty_body
+from emmy.compiler.ir.stmt import INDENT, Accum, Assign, Body, Carrier, Load, Loop, RenderCtx, Stmt, pretty_body
 
 if TYPE_CHECKING:
     from emmy.compiler.ir.atom import Atom
@@ -192,6 +192,33 @@ class Side:
         return _ext_expr(self.axis)
 
 
+def _deep_defines(s: Stmt) -> set[str]:
+    """Every SSA name defined in ``s`` (deep — a stat reduce ``Loop``'s ``Accum`` counts)."""
+    out = set(s.defines())
+    for b in s.nested():
+        for child in b:
+            out |= _deep_defines(child)
+    return out
+
+
+def _deep_reads(stmts: list[Stmt]) -> set[str]:
+    """Every SSA name read anywhere in ``stmts`` (deep)."""
+    out: set[str] = set()
+    for s in stmts:
+        out |= set(s.deps())
+        for b in s.nested():
+            out |= _deep_reads(list(b))
+    return out
+
+
+def _refs_axis(s: Stmt, name: str) -> bool:
+    """``s`` references axis ``name`` in any index expr (deep)."""
+    idx = getattr(s, "index", None)
+    if idx and any(name in e.free_vars() for e in idx):
+        return True
+    return any(_refs_axis(child, name) for b in s.nested() for child in b)
+
+
 @dataclass(frozen=True)
 class Contraction(Stmt):
     """A contraction **before** atom factorization — built **recognize-side** at fork-emit
@@ -202,8 +229,8 @@ class Contraction(Stmt):
     register-tiles through the shared ``_contract_kloop`` skeleton. **ONE
     flat node** that cleanly splits the **algebra params** (what to contract) from the **schedule**
     (how to tile it): the params are the tiled output ``axes`` ``(m, n)``, the contraction ``k_axis``,
-    the leading batch ``lead_axes``, the structured A/B operand ``Load``\\ s, the fold accumulator
-    ``acc``, and the projection ``epilogue`` (which carries the output ``Write``); the schedule is the
+    the leading batch ``lead_axes``, the A operand, the ``folds`` fold channels (``(b_load, acc)``
+    pairs), and the projection ``epilogue`` (which carries the output ``Write``); the schedule is the
     one ``tile`` field — a resolved :class:`~emmy.compiler.ir.schedule.TilePlan` carrying the
     leaf ``atom`` (tensor-core :class:`AtomKind` or the ``1×1`` :class:`ScalarAtom`), the per-CTA
     **UNIT** grid + per-unit **REGISTER** sub-tile, and the K-chunk. Keeping the schedule a single
@@ -223,8 +250,14 @@ class Contraction(Stmt):
     axes: tuple[Axis, Axis]  # the tiled output (m_axis, n_axis) — params
     k_axis: Axis  # the contraction axis — params
     a_operand: Load | Body  # A: a gmem ``Load`` OR a computed register-resident ``Body`` (flash PV's ``P = exp(S − M)``) — params
-    b_load: Load  # params
-    acc: str  # params
+    # The fold CHANNELS — ``(b_load, acc)`` per channel, every channel folding the SAME lifted A
+    # value over the same ``(m, n, k)`` space: the product-monoid carrier specialized to
+    # contractions. One channel is the ordinary matmul; N channels is the fused gate/up MLP edge
+    # (``swiglu(x̂@Wg, x̂@Wu)`` — the combine is projection, riding the wrapping ``Map.body``, never
+    # per-step state). A multi-channel node is computed-A only and lowers through the warp ``sync``
+    # compute-fill tier alone: one A fragment reused across the per-channel mma chains, one C
+    # fragment per channel.
+    folds: tuple[tuple[Load, str], ...]
     tile: TilePlan  # the schedule: leaf atom + unit/register widths + K-chunk (the only schedule field)
     lead_axes: tuple[Axis, ...] = ()  # params
     epilogue: Body = field(default_factory=Body)  # params
@@ -232,11 +265,26 @@ class Contraction(Stmt):
     def __post_init__(self) -> None:
         if not isinstance(self.epilogue, Body):
             object.__setattr__(self, "epilogue", Body(self.epilogue))
+        assert self.folds, "a Contraction needs at least one fold channel"
+        k = self.k_axis.name
+        assert len({k in bl.index[-1].free_vars() for bl, _ in self.folds}) == 1, (
+            "every fold channel's B layout must agree (one b_trans per node)"
+        )
+
+    # ---- the primary fold channel unpacked (the single-fold common case; every multi-channel
+    # consumer iterates ``folds`` itself) ---------- #
+    @property
+    def b_load(self) -> Load:
+        return self.folds[0][0]
+
+    @property
+    def acc(self) -> str:
+        return self.folds[0][1]
 
     @property
     def out(self) -> str:
-        """The bound output name — the fold accumulator (a bare contraction's grid ``Write`` stores
-        ``acc`` at the cell; a fused-epilogue contraction carries its own ``Write`` in ``epilogue``)."""
+        """The bound output name — the primary fold accumulator (a bare contraction's grid ``Write``
+        stores it at the cell; a fused-projection contraction carries its own ``Write``)."""
         return self.acc
 
     @property
@@ -257,6 +305,23 @@ class Contraction(Stmt):
         """The A operand's bound SSA name (its producing body's last def)."""
         return self.a_body[-1].defines()[-1]
 
+    def stat_prologue(self) -> tuple[tuple[Stmt, ...], tuple[Stmt, ...], tuple[str, ...]]:
+        """Split the computed-A body at the contraction-axis seam: the maximal leading run of stmts
+        that never index the K axis is the **per-row statistic prologue** (the fused norm→linear
+        cone's stat reduce ``Loop`` + scalar epilogue — or a broadcast row scale), the remainder the
+        **per-cell** cone. Returns ``(prologue, cell, stats)`` — ``stats`` are the prologue defs the
+        cell reads, the values bridged through the stat smem rows (a prologue whose defs go unread
+        is dropped). The ONE seam both sides read: the scheduler sizes the stat rows into the sync
+        stage's smem budget, the materializer fills them (``sync_stat_fill``)."""
+        body = list(self.a_body)
+        pro: list[Stmt] = []
+        while body and not _refs_axis(body[0], self.k_axis.name):
+            pro.append(body.pop(0))
+        if not pro:
+            return (), tuple(body), ()
+        stats = tuple(sorted({nm for s in pro for nm in _deep_defines(s)} & _deep_reads(body)))
+        return (tuple(pro), tuple(body), stats) if stats else ((), tuple(body), ())
+
     @property
     def loop(self) -> Loop:
         """The synthesized ``CONTRACTION`` reduce ``Loop`` — the canonical ``for k: v = a*b; acc += v``
@@ -266,12 +331,22 @@ class Contraction(Stmt):
         from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
         from emmy.compiler.ir.tile.ops import contraction_loop  # noqa: PLC0415 — avoid an import cycle
 
-        return contraction_loop(
+        base = contraction_loop(
             lift=ElementwiseImpl("multiply"),
             fold=Accum(name=self.acc, value=f"{self.acc}__v", op=ElementwiseImpl("add"), axes=(self.k_axis.name,)),
             operand_bodies=([self.b_load], self.a_body),  # B[k, n], A[m, k] (or A's computed body) — keep B-then-A load reuse
             reduce_axis=self.k_axis,
         )
+        if len(self.folds) == 1:
+            return base
+        # Each extra fold channel splices its ``b_load → lift → accum`` triple after the primary's,
+        # reusing the shared A value (the carrier stays the primary channel's — a multi-channel node
+        # never rides the coop / split tiers, so the carrier only serves role/axis reads).
+        extra: list[Stmt] = []
+        for bl, acc in self.folds[1:]:
+            lift = Assign(name=f"{acc}__v", op=ElementwiseImpl("multiply"), args=(self.a_name, bl.names[0]))
+            extra += [bl, lift, Accum(name=acc, value=lift.name, op=ElementwiseImpl("add"), axes=(self.k_axis.name,))]
+        return Loop(axis=base.axis, body=Body((*base.body, *extra)), unroll=base.unroll, role=base.role, carrier=base.carrier)
 
     def lower(self) -> list[Stmt]:
         """Flatten to the loop-IR body — the synthesized reduce ``Loop`` followed by the projection
@@ -337,7 +412,7 @@ class Contraction(Stmt):
         return replace(self, epilogue=epilogue)
 
     def defines(self) -> tuple[str, ...]:
-        return (self.acc,)
+        return tuple(acc for _, acc in self.folds)
 
     def external_reads(self) -> tuple[str, ...]:
         def loads(stmts):
@@ -349,12 +424,14 @@ class Contraction(Stmt):
 
         # Deep over the A body — a computed cone may nest its loads (the fused norm→linear cone's
         # per-row statistic reduce ``Loop``).
-        return (*dict.fromkeys(loads(self.a_body)), self.b_load.input)
+        return (*dict.fromkeys(loads(self.a_body)), *(bl.input for bl, _ in self.folds))
 
     def pretty(self, indent: str = "") -> list[str]:
         t = " trans" if self.b_trans else ""
         a_src = self.a_operand.input if isinstance(self.a_operand, Load) else self.a_name
-        ops = f"{a_src} @ {self.b_load.input}{t} -> {self.acc} ({self.atom.name})"
+        bs = " + ".join(bl.input for bl, _ in self.folds)
+        accs = ", ".join(acc for _, acc in self.folds)
+        ops = f"{a_src} @ {bs}{t} -> {accs} ({self.atom.name})"
         return [f"{indent}Contraction [{self.m_axis.name}, {self.n_axis.name}] {ops}", *pretty_body(self.epilogue, indent + INDENT)]
 
     def render(self, ctx: RenderCtx) -> list[str]:
@@ -380,8 +457,7 @@ def _(s: Contraction, rename, sigma, axis_fn):
         axes=tuple(axis_fn(a) for a in s.axes),
         k_axis=axis_fn(s.k_axis),
         a_operand=a_operand,
-        b_load=_rewrite(s.b_load, rename, sigma, axis_fn),
-        acc=rename(s.acc),
+        folds=tuple((_rewrite(bl, rename, sigma, axis_fn), rename(acc)) for bl, acc in s.folds),
         tile=s.tile,
         lead_axes=tuple(axis_fn(a) for a in s.lead_axes),
         epilogue=Body(tuple(_rewrite(c, rename, sigma, axis_fn) for c in s.epilogue)),

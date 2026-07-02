@@ -276,6 +276,23 @@ def warp_tile_moves(atom_names: tuple[str, ...]) -> list[str]:
     return moves
 
 
+# The warp-flash (fragment-resident TWISTED) tile grid: warps per CTA over the query rows ×
+# score n-atoms per streaming key block. The conservative pair leads (one warp, the ``2·atom_n``
+# key block — today's deterministic stamp), so a cold tie keeps the historical geometry. Per-node
+# legality (kv / query-row divisibility, the dtype atom) is the scheduler's
+# (``_schedule._twisted_warp_options``), not the grid's.
+_FLASH_WARPS: tuple[int, ...] = (1, 2, 4)  # warps per CTA, each owning its own atom_m query-row block
+_FLASH_KEY_ATOMS: tuple[int, ...] = (2, 4, 8, 16)  # score n-atoms per streaming block (bn = n·atom_n keys)
+
+
+def twisted_warp_moves() -> list[tuple[int, int]]:
+    """The warp-flash geometry candidates ``(warps_m, key_atoms)`` — the :data:`_FLASH_WARPS` ×
+    :data:`_FLASH_KEY_ATOMS` grid, conservative option-0 ``(1, 2)`` first. Each pair resolves into
+    the Q@K / P@V mma :class:`TilePlan`\\ s in ``_schedule._twisted_warp_options`` (the ``TILE``
+    codec spells the full plan; this grid only generates the free geometry — ``bk`` is shape-derived)."""
+    return [(um, nt) for um in _FLASH_WARPS for nt in _FLASH_KEY_ATOMS]
+
+
 def stage_moves(*, warp: bool) -> list[str]:
     """The operand-staging ``STAGE`` codec candidates — gmem-direct ``""`` first (the conservative
     option-0), then the transport / depth / double-buffer variants. Both tiers offer the gmem→smem

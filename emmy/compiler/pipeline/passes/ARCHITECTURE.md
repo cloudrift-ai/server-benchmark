@@ -95,7 +95,16 @@ resolved **TMA** stage without a cross-CTA split, and resolved/thread-budget-gat
 (`_wspec_workers`; an ineligible spec degrades to uniform). A computed-A (fused-cone) contraction enumerates its own
 warp-only rows (`_schedule._computed_a_rows` — the mandatory resolved `sync` compute-fill stage, no scalar /
 gmem-direct / split-K / WSPEC rows; the compute-producer role for the fused edge is the anticipated `RoleKind`
-extension).
+extension). The **flash-form fork**: a `TWISTED` streaming contraction pair (the flash tree) offers its
+structurally-different schedules as ONE prior-ranked fork — the warp (fragment-resident) rows over
+`twisted_warp_moves()`'s `(warps-per-CTA × key-atoms-per-block)` geometry grid (option-0 = the conservative one-warp /
+`2·atom_n` block; the Q@K / P@V mma `TilePlan`s are derived per point, `_schedule._twisted_warp_options`), the scalar
+register-vector CHAIN (the FA-2 shared-score form), then the cooperative / per-cell reduce-partition escapes — every
+leaf row spelling the same `TILE@<qk_k>` / `TILE@<pv_k>` / `REDUCE@<kv>` key set (decided-empty where a form doesn't
+tile). A non-empty `REDUCE` pin remains the scalar escape; a warp `TILE` pin keeps the mma rows alone (loud on a
+divisibility violation, declining with a log line when the pin doesn't fit the flash form — a bare warp pin may target
+another kernel). K/V operand staging on the warp-flash stream (the `Stage` seam) and the causal tile-skip are
+follow-ups.
 Two catalog invariants hold: every recorded golden's `TILE`/`STAGE`/`REDUCE` stays a **member** of the enumerated
 grids (the permanence test in `tests/compiler/test_golden_configs.py` — a space edit can never silently orphan a
 golden into unreachability again, the sixth sweep's `.s512` regression class; the scalar reg grid carries the

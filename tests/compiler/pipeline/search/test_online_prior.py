@@ -397,6 +397,47 @@ def test_collect_node_records_within_batch_duplicate_key_max_visits():
     assert r.parent_key is None and r.depth == 1  # first-seen (branch) position
 
 
+def test_collect_node_records_emits_o3_regime_row():
+    """A leaf re-benched at -O3 (``observe_o3``) additionally emits an -O3-regime
+    row when the walk is given ``o3_context_key``: keyed under that context (never
+    colliding with the -O1 twin), features stamped ``H_opt=3.0``, no parent (it's a
+    regime re-measurement, not part of the tree), one visit, no bench stats."""
+    tree = SearchTree()
+    leaf = _node({"BR": 1, "BM": 64}, tree.root)
+    leaf.realized_knobs = {"H_opt": 1.0, "BR": 1, "BM": 64}
+    leaf.bench_status = "ok"
+    leaf.bench_stats = _leaf_stats(1.0)
+    tree.root.children = [leaf]
+    tree.record_terminal(leaf, 1.0)
+    s = TuningSearch(tree=tree)
+    s.observe_o3(leaf, 7.0)
+    recs = s._collect_node_records(context_key="ctx", op_sig="sig", run_id="r1", o3_context_key="ctx_o3")
+    by_ctx = {r.context_key: r for r in recs}
+    assert set(by_ctx) == {"ctx", "ctx_o3"}
+    o1, o3 = by_ctx["ctx"], by_ctx["ctx_o3"]
+    assert o1.features["H_opt"] == 1.0 and abs(o1.value_us - 1.0) < 1e-12
+    assert o3.features["H_opt"] == 3.0 and o3.value_us == 7.0
+    assert o3.node_key != o1.node_key  # same tunables, different regime → distinct keys
+    assert o3.parent_key is None and o3.is_leaf and o3.visits == 1 and o3.run_id == "r1"
+    assert o3.variance is None and o3.n_samples is None  # the re-bench returns a bare median
+
+
+def test_collect_node_records_o3_rows_need_context_key():
+    """Without ``o3_context_key`` (a sweep already at -O3, or a caller that doesn't
+    thread it) the stashed ``o3_us`` emits nothing — only the -O1 rows appear."""
+    tree = SearchTree()
+    leaf = _node({"BR": 1, "BM": 64}, tree.root)
+    leaf.realized_knobs = {"H_opt": 1.0, "BR": 1, "BM": 64}
+    leaf.bench_status = "ok"
+    leaf.bench_stats = _leaf_stats(1.0)
+    tree.root.children = [leaf]
+    tree.record_terminal(leaf, 1.0)
+    s = TuningSearch(tree=tree)
+    s.observe_o3(leaf, 7.0)
+    recs = s._collect_node_records(context_key="ctx", op_sig="sig")
+    assert [r.context_key for r in recs] == ["ctx"]
+
+
 def test_node_key_excludes_s_and_h():
     """Within one op (op_sig) + regime (context_key) + card (gpu), node identity is the
     tunable knob set only — two nodes differing solely in ``S_*``/``H_*`` collide, and a

@@ -58,12 +58,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pass, Pipeline, TuningSearch
 from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
 from emmy.compiler.pipeline.search.keys import op_cache_key
+from emmy.compiler.pipeline.search.policy.mcts import O3_NVCC_FLAGS
 from emmy.compiler.pipeline.search.slice import single_node_graph
 from emmy.compiler.structural import digest
 
@@ -274,6 +275,12 @@ async def _inner_reward_async(
     from emmy.compiler.pipeline.pipeline import variant_label  # noqa: PLC0415
 
     ctx_key = ctx.structural_key()
+    # The regime the deployable -O3 re-benches (``pipeline._rebench_o3_async``) are
+    # keyed under in the node store — the tune context with the re-bench's flags
+    # substituted, so an -O3 leaf row never collides with its -O1 twin. ``None``
+    # when the sweep itself already runs at -O3 (the re-bench is a no-op there and
+    # the two keys would coincide).
+    o3_ctx_key = replace(ctx, compile_flags=O3_NVCC_FLAGS).structural_key() if "-O3" not in ctx.compile_flags else None
     backend_name = getattr(pool[0], "name", "cuda")
     # Group structurally-identical LoopOps under one ``op_cache_key`` —
     # insertion order = first occurrence (drives the progress tail name).
@@ -357,7 +364,8 @@ async def _inner_reward_async(
                 if prior.maybe_refit():
                     prior.checkpoint()
             # Persist every search-tree node (partial branches + leaves, plus failed
-            # leaves) to the keyed/deduped ``node`` table — alongside the reservoir
+            # leaves and the near-best configs' -O3-regime re-bench rows) to the
+            # keyed/deduped ``node`` table — alongside the reservoir
             # feed above, and independent of whether a prior is attached. ``op_sig``
             # is the op's ``S_*`` structural signature; ``gpu`` is the card identity
             # (folded into the key so same-die SKUs don't collide); ``run_id`` tags
@@ -365,7 +373,9 @@ async def _inner_reward_async(
             # parent_key/value/visits/stats/depth.
             op_sig = digest(*sorted((k, v) for k, v in op.knobs.items() if k.startswith("S_")))
             gpu = ctx.hardware_id()
-            db.record_nodes(inner._collect_node_records(context_key=ctx_key, op_sig=op_sig, gpu=gpu, run_id=run_id))
+            db.record_nodes(
+                inner._collect_node_records(context_key=ctx_key, op_sig=op_sig, gpu=gpu, run_id=run_id, o3_context_key=o3_ctx_key)
+            )
             best = db.best_per_op_time(ctx_key, key, backend=backend_name)
             results[op_idx] = OpResult(name=name, op_key=key, best_us=best, multiplicity=count)
             if progress is not None:

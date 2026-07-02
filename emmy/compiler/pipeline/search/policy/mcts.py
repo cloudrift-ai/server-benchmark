@@ -52,6 +52,11 @@ if TYPE_CHECKING:
 # ``EMMY_O3_TOL`` (a fraction, e.g. ``0.15`` for 15%).
 O3_REBENCH_TOL = 0.15
 
+# The nvcc flags of that deployable re-bench (``pipeline._rebench_o3_async``) — also
+# the regime the re-bench's node rows are keyed under (``two_level`` derives their
+# ``context_key`` from the tune context with these flags substituted).
+O3_NVCC_FLAGS = "-Xcicc -O3"
+
 
 @dataclass
 class SearchNode:
@@ -72,6 +77,10 @@ class SearchNode:
     # keeps the leaf's variance / n_samples and its failure outcome.
     bench_stats: PerfStats | None = field(default=None, repr=False)
     bench_status: str | None = field(default=None, repr=False)
+    # The leaf's deployable -O3 re-bench median (``observe_o3``), ``None`` when the
+    # config wasn't in the re-bench tolerance band (or the sweep already ran at -O3).
+    # Read back by ``_collect_node_records`` to emit the leaf's -O3-regime node row.
+    o3_us: float | None = field(default=None, repr=False)
 
 
 class SearchTree:
@@ -213,9 +222,11 @@ class TuningSearch(Search):
         labeled with the -O3 median latency (µs) — the prior's regression target
         is latency, converted to reward only in the MCTS selection loop. The prior
         can then rank winners by -O3 cost where -O1 ties them; ``H_opt`` lets the
-        -O1 and -O3 rows coexist."""
+        -O1 and -O3 rows coexist. Also stashed on the token so
+        :meth:`_collect_node_records` emits the leaf's -O3-regime node row."""
         if o3_us <= 0 or not isinstance(token, SearchNode) or token.realized_knobs is None:
             return
+        token.o3_us = o3_us
         knobs = dict(token.realized_knobs)
         knobs["H_opt"] = 3.0
         self.o3_rows.append((knobs, o3_us))
@@ -385,7 +396,9 @@ class TuningSearch(Search):
         tun = tuple(sorted((k, str(v)) for k, v in feats.items() if not k.startswith(("S_", "H_"))))
         return digest(context_key, gpu, op_sig, tun)
 
-    def _collect_node_records(self, *, context_key: str, op_sig: str, gpu: str = "", run_id: str = "") -> list[NodeRow]:
+    def _collect_node_records(
+        self, *, context_key: str, op_sig: str, gpu: str = "", run_id: str = "", o3_context_key: str | None = None
+    ) -> list[NodeRow]:
         """Post-search tree walk producing keyed, parent-linked :class:`NodeRow`
         records for :meth:`SearchDB.record_nodes` — the persistent/keyed/deduped
         sibling of :meth:`_collect_rows` (which feeds the prior's in-memory
@@ -409,6 +422,14 @@ class TuningSearch(Search):
         skip the monotone assert, don't update ``parent_value``, and children keep
         the inherited ``parent_key``; a branch whose descendants ALL failed stays
         unrecorded (``best_reward == 0``).
+
+        A leaf carrying an ``o3_us`` (the deployable :data:`O3_NVCC_FLAGS` re-bench
+        of a near-best config — ``observe_o3``) additionally emits an **-O3-regime
+        row** when ``o3_context_key`` is given: keyed under that context (so it never
+        collides with its -O1 twin), features stamped ``H_opt=3.0`` (the reservoir
+        convention), ``parent_key=None`` (a regime re-measurement, not part of this
+        tree — it never enters a fork sibling group), ``visits=1`` per re-bench, and
+        no variance/n_samples (the re-bench returns a bare median).
 
         ``parent_key`` is the *nearest emitted ok ancestor*'s ``node_key`` (a skipped
         intermediate node passes its own inherited parent down), so it always
@@ -474,6 +495,24 @@ class TuningSearch(Search):
                         )
                     )
                     parent_value = value_us
+                    if is_leaf and node.o3_us is not None and o3_context_key is not None:
+                        feats_o3 = {**node.realized_knobs, "H_opt": 3.0}
+                        emit(
+                            NodeRow(
+                                node_key=self._node_key(feats_o3, op_sig, o3_context_key, gpu),
+                                parent_key=None,
+                                context_key=o3_context_key,
+                                op_sig=op_sig,
+                                features=feats_o3,
+                                value_us=node.o3_us,
+                                depth=depth,
+                                gpu=gpu,
+                                visits=1,
+                                is_leaf=True,
+                                status="ok",
+                                run_id=run_id,
+                            )
+                        )
                 elif is_leaf and node.bench_status == "bench_fail" and stats is not None:
                     # Sentinel latency from the failed bench; NOT a value anchor — no
                     # assert, no parent_value update, children keep the inherited nk.

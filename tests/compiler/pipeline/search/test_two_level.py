@@ -88,6 +88,20 @@ class _CountingBackend:
         return self.benchmark(graph, num_iters=num_iters)
 
 
+class _O3CountingBackend(_CountingBackend):
+    """Counting backend whose async bench ALSO accepts ``nvcc_flags`` — so the -O3
+    re-bench path runs instead of rejecting, for the O3-node-row integration test."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.o3_calls = 0
+
+    async def benchmark_async(self, graph, num_iters="auto", nvcc_flags=None) -> BenchmarkResult:
+        if nvcc_flags is not None:
+            self.o3_calls += 1
+        return self.benchmark(graph, num_iters=num_iters)
+
+
 def _matmul(g: Graph, prefix: str, M: int, K: int, N: int) -> str:
     a, b, c = f"{prefix}a", f"{prefix}b", f"{prefix}c"
     g.add_node(InputOp(), [], Tensor(a, (M, K)), node_id=a)
@@ -196,6 +210,33 @@ def test_inner_reward_records_nodes() -> None:
     assert all(r[10] for r in rows)  # measured_at stamped
     leaves = [r for r in rows if r[6] == 1]
     assert leaves and all(r[7] is not None for r in leaves)  # leaf rows carry their bench n_samples
+
+
+def test_inner_reward_records_o3_regime_rows(monkeypatch) -> None:
+    """With a backend whose bench accepts ``nvcc_flags`` (the -O3 re-bench path runs),
+    the near-best configs' deployable re-benches land in the ``node`` table under
+    their OWN context key — the tune context with the -O3 flags substituted — as
+    parentless ``H_opt=3`` leaf rows, alongside (not colliding with) the -O1 tree."""
+    from dataclasses import replace
+
+    from emmy.compiler.pipeline.search.policy.mcts import O3_NVCC_FLAGS
+
+    monkeypatch.setenv("EMMY_NVCC_FLAGS", "-Xcicc -O1")  # the tune regime; re-bench not skipped
+    fused = _fuse(_two_distinct_matmuls())
+    ctx = Context.from_target((8, 0))
+    db = SearchDB()
+    backend = _O3CountingBackend()
+    run_inner_reward(fused, ctx=ctx, db=db, backend=backend, patience=_PATIENCE, run_id="o3run")
+
+    assert backend.o3_calls > 0  # the re-bench path actually ran
+    o3_key = replace(ctx, compile_flags=O3_NVCC_FLAGS).structural_key()
+    rows = db._conn.execute("SELECT context_key, parent_key, is_leaf, features, run_id FROM node").fetchall()
+    assert {r[0] for r in rows} == {ctx.structural_key(), o3_key}  # both regimes present, distinct keys
+    o3_rows = [r for r in rows if r[0] == o3_key]
+    assert o3_rows
+    for _, parent_key, is_leaf, feats_json, run_id in o3_rows:
+        assert parent_key is None and is_leaf == 1 and run_id == "o3run"
+        assert '"H_opt": 3.0' in feats_json  # the deployable-regime stamp
 
 
 def test_inner_reward_rerun_is_replay_dominated() -> None:

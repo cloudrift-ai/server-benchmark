@@ -599,7 +599,14 @@ live `node.parent` edge so ancestry is recoverable. Each row also carries the la
 `is_leaf` / `variance` / `n_samples` / `status` / `run_id` / `measured_at` — see the `SearchDB` bullet above): the
 walk reads `SearchNode.visits`, the leaf's `bench_stats`/`bench_status` stashed by `observe`, and now emits
 `bench_fail` leaves too (leaf-only — they are never value anchors: no monotone participation, children anchor past
-them, and a branch whose descendants all failed stays unrecorded). Within one batch, a deterministic no-knob-delta
+them, and a branch whose descendants all failed stays unrecorded). A leaf the tune re-benched at the deployable
+`-Xcicc -O3` (`observe_o3` stashes `SearchNode.o3_us`) additionally lands as an **-O3-regime row**: keyed under the
+tune context with the -O3 flags substituted (`two_level` derives it via `dataclasses.replace` + `O3_NVCC_FLAGS`, so
+it never collides with the -O1 twin), features stamped `H_opt=3.0` (the reservoir convention — either training
+source featurizes identically), parentless (a regime re-measurement, not part of the tree, so it never enters a
+fork sibling group), and with no bench stats (the re-bench returns a bare median); the leaf newest-measurement
+upsert applies. `node_report` splits a card's block per `H_opt` regime so -O1 and -O3 latencies never pool in leaf
+reachability. Within one batch, a deterministic no-knob-delta
 step can give a child its parent's exact knob set (→ same `node_key`); the walk collapses such duplicates to one row
 (preferring the leaf's stats, max — not sum — of their visits) so `record_nodes`'s SUM accumulation never
 double-counts a single run.

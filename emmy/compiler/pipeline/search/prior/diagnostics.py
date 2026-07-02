@@ -343,7 +343,10 @@ def node_report(prior, nodes, *, kernel_filter: str | None = None) -> str:
     to this dataset) plus leaf reachability / calibration. Per-card grouping is what
     makes a cross-hardware dataset (H100, H200, …) evaluate correctly — same-die SKUs
     share an ``S_*`` op signature but not their latencies, so mixing them would corrupt
-    both metrics. ``nodes`` is a list of :class:`db.NodeRow` from
+    both metrics. A card whose rows span several **compile regimes** (``H_opt`` — the
+    -O1 tune rows vs the deployable -O3 re-bench rows the tune also records) splits
+    into one sub-block per regime for the same reason: the latencies aren't comparable
+    across opt levels. ``nodes`` is a list of :class:`db.NodeRow` from
     :meth:`SearchDB.iter_nodes`; ``kernel_filter`` keeps only nodes whose op label
     contains the substring (``--kernel``). ``bench_fail`` rows are excluded up front —
     their ``value_us`` is the watchdog sentinel, not a measurement, and would corrupt
@@ -368,5 +371,13 @@ def node_report(prior, nodes, *, kernel_filter: str | None = None) -> str:
     if not prior.fitted:
         lines.append("  no fitted prior — the cold AnalyticPrior ranks by D_* geometry only; run `emmy tune`")
     for gpu in sorted(by_gpu):
-        lines.extend(_node_gpu_block(prior, gpu, by_gpu[gpu]))
+        gnodes = by_gpu[gpu]
+        regimes = sorted({n.features.get("H_opt") for n in gnodes}, key=lambda v: (v is None, v))
+        if len(regimes) <= 1:  # single regime → the header stays the bare card name
+            lines.extend(_node_gpu_block(prior, gpu, gnodes))
+            continue
+        for opt in regimes:
+            sub = [n for n in gnodes if n.features.get("H_opt") == opt]
+            label = f"{gpu} @ -O{int(opt)}" if opt is not None else f"{gpu} @ -O?"
+            lines.extend(_node_gpu_block(prior, label, sub))
     return "\n".join(lines)

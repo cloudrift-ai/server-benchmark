@@ -147,8 +147,10 @@ same worker.
   slower than -O3, so tuned latencies are a *ranking* signal, not deployable numbers (re-bench the winner with
   `--bench` below, or `run --bench`). To keep the **learned prior** deployable anyway, the engine **re-benches at
   `-Xcicc -O3`** every config **within `EMMY_O3_TOL` (default 15%) of the best -O1 so far** — not just a strict new
-  global-best — and feeds each as an extra training row tagged `H_opt=3` (so `compile` / `run`, which run at -O3, rank by
-  the deployable numbers — the -O1 sweep alone ties configs that differ at -O3, e.g. a reduction's `FK` or a warp tile's
+  global-best — and feeds each as an extra training row tagged `H_opt=3` — into the prior's reservoir AND the node
+  table, where it lands as a parentless leaf row under its own -O3 context key (so `compile` / `run`, which run at
+  -O3, rank by the deployable numbers — the -O1 sweep alone ties configs that differ at -O3, e.g. a reduction's
+  `FK` or a warp tile's
   `WARPSPEC`). The tolerance band gives the prior an -O3 truth sample for every near-best contender, not only the winner;
   each config is re-benched at most once. See `plans/golden-sweep-report.md`.
   Override the opt level / flags with `--nvcc-flags "…"` (e.g. `-Xcicc -O3`); the
@@ -251,7 +253,9 @@ fails fast with a specific message.
   measures — plus **leaf reachability / calibration** reused on the deduped persistent store. The node store keys on
   the **GPU product name** (`Context.hardware_id`) so a cross-hardware dataset (H100, H200, …) never collides — same-die
   SKUs share cc + SM features but differ in VRAM, captured as the `H_total_mem` feature so the prior can model them —
-  and the report blocks per card so same-die SKUs are never compared against each other. `--kernel` filters by **op
+  and the report blocks per card so same-die SKUs are never compared against each other (a card whose rows span
+  compile regimes — -O1 tune rows vs the -O3 re-bench rows — further splits into one `@ -O<N>` sub-block per
+  regime). `--kernel` filters by **op
   label** (the nodes carry no kernel C-identifier; `--kernel matmul` / `reduce` / `free=512` keeps whole ops atomically
   since all of an op's nodes share one `S_*` label). Reads the prior JSON (`EMMY_PRIOR_FILE` or `--prior`;
   option-0 when none loaded). `--features` (golden mode) also
@@ -268,7 +272,8 @@ fails fast with a specific message.
   `commands/table` view), with the config the global `Prior` would deploy marked `◄` + ranked (`pick: rank R/N, X.XXx
   of best`, flagged when >1.2x — the per-kernel drill-down behind `eval prior --dataset db`'s aggregate reachability),
   the kernel's `bench_fail` count in the header, and a `-O3 us` column where the prior reservoir holds an `H_opt=3`
-  re-bench for the config (the -O3 re-bench feeds only the reservoir, never a `perf` row, so DB latencies are the
+  re-bench for the config (the -O3 re-bench feeds the reservoir + the node table, never a `perf` row, so DB
+  latencies are the
   tune's -O1 ranking numbers). `--dataset golden` is rejected (goldens carry no per-variant measurements). The view
   that answers "did the search/prior reach the best measured config for this kernel, and which knobs distinguish it?"
   without hand-written SQL.

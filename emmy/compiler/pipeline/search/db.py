@@ -38,7 +38,9 @@ Pure persistence layer — no MCTS state, no propagation walks. Tables:
   ``status`` (``ok`` / ``bench_fail`` — fail leaves ARE recorded, with the bench
   watchdog's sentinel latency as ``value_us``; an ``ok`` row is never downgraded
   by a later fail), and ``run_id`` / ``measured_at`` (the tune session + time
-  that produced the current ``value_us`` — replaced only on improvement).
+  that produced the current ``value_us`` — replaced only on improvement). The
+  tune's deployable -O3 re-benches land as extra parentless ``H_opt=3`` leaf
+  rows under their own -O3 ``context_key`` (never colliding with the -O1 twin).
 
 Concurrency: opened in WAL mode so parallel benches can read while one
 writes. The connection is kept open for the DB's lifetime; callers can

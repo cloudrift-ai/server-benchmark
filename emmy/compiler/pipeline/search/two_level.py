@@ -62,7 +62,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pass, Pipeline, TuningSearch
-from emmy.compiler.pipeline.search.db import NodeRow, PerfStats, SearchDB
+from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
 from emmy.compiler.pipeline.search.keys import op_cache_key
 from emmy.compiler.pipeline.search.slice import single_node_graph
 from emmy.compiler.structural import digest
@@ -169,6 +169,15 @@ def _point_stats(us: float) -> PerfStats:
     return PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=0)
 
 
+def _mint_run_id() -> str:
+    """A sortable, unique tune-session id stamped on this run's ``node`` rows —
+    UTC timestamp + a uuid tail (two sessions in the same second stay distinct)."""
+    from datetime import UTC, datetime  # noqa: PLC0415
+    from uuid import uuid4  # noqa: PLC0415
+
+    return f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{uuid4().hex[:8]}"
+
+
 def _kernel_nodes(graph: Graph) -> list[tuple[str, object]]:
     """Post-fusion kernel nodes — ``(node_id, op)`` for every kernel-bearing op.
 
@@ -229,7 +238,9 @@ def _decomposition_rows(graph: Graph, per_op: list[OpResult], ctx: Context) -> l
     return [(feats, float(sum(labels))) for feats, labels in groups.values() if labels and all(us is not None for us in labels)]
 
 
-async def _inner_reward_async(fused_graph, *, ctx, db, pool, patience, ucb_c, explore_eps, seed, progress, prior) -> InnerReward:
+async def _inner_reward_async(
+    fused_graph, *, ctx, db, pool, patience, ucb_c, explore_eps, seed, progress, prior, run_id: str = ""
+) -> InnerReward:
     """Tune every post-fusion kernel of ``fused_graph`` in its own single-node slice
     and return ``Σ best-per-op time`` — the outer terminal reward.
 
@@ -345,20 +356,16 @@ async def _inner_reward_async(fused_graph, *, ctx, db, pool, patience, ucb_c, ex
                 prior.add_rows(inner._collect_rows() + inner.o3_rows)
                 if prior.maybe_refit():
                     prior.checkpoint()
-            # Persist every search-tree node (partial branches + leaves) to the
-            # keyed/deduped ``node`` table — alongside the reservoir feed above, and
-            # independent of whether a prior is attached. ``op_sig`` is the op's
-            # ``S_*`` structural signature; ``gpu`` is the card identity (folded into
-            # the key so same-die SKUs don't collide); the walk threads
-            # parent_key/value/depth.
+            # Persist every search-tree node (partial branches + leaves, plus failed
+            # leaves) to the keyed/deduped ``node`` table — alongside the reservoir
+            # feed above, and independent of whether a prior is attached. ``op_sig``
+            # is the op's ``S_*`` structural signature; ``gpu`` is the card identity
+            # (folded into the key so same-die SKUs don't collide); ``run_id`` tags
+            # the rows with this tune session; the walk threads
+            # parent_key/value/visits/stats/depth.
             op_sig = digest(*sorted((k, v) for k, v in op.knobs.items() if k.startswith("S_")))
             gpu = ctx.hardware_id()
-            db.record_nodes(
-                [
-                    NodeRow(node_key=nk, parent_key=pk, context_key=ctx_key, op_sig=op_sig, features=feats, value_us=v, depth=d, gpu=gpu)
-                    for nk, pk, feats, v, d in inner._collect_node_records(context_key=ctx_key, op_sig=op_sig, gpu=gpu)
-                ]
-            )
+            db.record_nodes(inner._collect_node_records(context_key=ctx_key, op_sig=op_sig, gpu=gpu, run_id=run_id))
             best = db.best_per_op_time(ctx_key, key, backend=backend_name)
             results[op_idx] = OpResult(name=name, op_key=key, best_us=best, multiplicity=count)
             if progress is not None:
@@ -408,6 +415,7 @@ async def run_two_level_tune(
     dump=None,
     progress=None,
     prior_seed: int = 0,
+    run_id: str | None = None,
 ) -> TwoLevelResult:
     """Drive the outer structural search, scoring each terminal by
     :func:`_inner_reward_async`, then greedy-assemble the DB-best kernels and bench
@@ -432,6 +440,9 @@ async def run_two_level_tune(
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
 
     provenance.seed(graph)
+    # One session id for every node row this run writes — minted by the caller
+    # (``handle_tune``: one id per CLI invocation) or here as a fallback.
+    run_id = run_id or _mint_run_id()
     # ONE global prior for the whole run — the learned ``CatBoostPrior`` (warm-
     # started from its checkpoint) behind an ``AnalyticPrior`` cold-start
     # fallback, so the first op's inner search is heuristic-guided, not uniform.
@@ -470,6 +481,7 @@ async def run_two_level_tune(
             seed=prior_seed,
             progress=progress,
             prior=prior,
+            run_id=run_id,
         )
         stats = PerfStats(median=reward.total_us, min=reward.total_us, max=reward.total_us, mean=reward.total_us, variance=0.0, n_samples=0)
         outer.observe(token, stats, "ok" if reward.ok else "bench_fail")

@@ -207,6 +207,20 @@ def test_node_report_separates_hardware():
     assert "[NVIDIA H100 80GB]" in text and "[NVIDIA H200 141GB]" in text
 
 
+def test_node_report_excludes_bench_fail_rows():
+    """``bench_fail`` rows (sentinel latency, not a measurement) are dropped before
+    any metric: injecting a huge-value failed sibling leaves the fork ranking and
+    the node count identical to the fail-free store."""
+    from dataclasses import replace  # noqa: PLC0415
+
+    clean = _fork_nodes()
+    with_fail = [*clean, replace(_child("cfail", 16, 3e7), status="bench_fail")]
+    text_clean = diagnostics.node_report(_BMPrior(), clean)
+    text_fail = diagnostics.node_report(_BMPrior(), with_fail)
+    assert text_fail == text_clean  # metrics AND the "N nodes" count unaffected
+    assert "node store: 4 nodes" in text_clean
+
+
 def test_node_report_kernel_filter_selects_ops_by_label():
     """``--kernel`` filters the node store by op label (derived from each node's
     ``S_*`` features) — whole ops drop atomically, and a non-matching filter prints

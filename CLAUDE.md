@@ -134,8 +134,12 @@ same worker.
   ever-changing global prior can steer the same-patience search down a new trajectory and bench only the genuinely-new
   variants it surfaces (the old `op_effort` skip-already-tuned gate, which suppressed that re-exploration, is gone).
   Persists `perf` / `lowering` / inventory rows — plus a `node` row per search-tree node (keyed/deduped,
-  keep-min value-of-position latency, full feature dict + `parent_key`; written alongside the prior's reservoir,
-  read by `eval prior --dataset nodes`) — to the SQLite cache (path from `EMMY_TUNE_DB` or `~/.cache/emmy/autotune.db`). The inner MCTS (PUCT over the global learned `CatBoostPrior`) stops on
+  keep-min value-of-position latency, full feature dict + `parent_key`, and the label-quality columns:
+  `visits` benched-descendant count (SUM-accumulated), `is_leaf`, per-leaf `variance`/`n_samples`, `status` —
+  failed benches are recorded as `bench_fail` leaf rows with the watchdog sentinel latency — and the tune
+  session's `run_id`/`measured_at`; written alongside the prior's reservoir, read by `eval prior --dataset
+  nodes`, which scores `ok` rows only) — to the SQLite cache (path from `EMMY_TUNE_DB` or
+  `~/.cache/emmy/autotune.db`). The inner MCTS (PUCT over the global learned `CatBoostPrior`) stops on
   patience (N consecutive measured terminals without a new best). `--clean` nukes the tuning DB + cubin/kernel caches
   first. **tune compiles kernels at `-Xcicc -O1`** (fast nvcc compile — dodges a cicc/LLVM blowup on big unrolled
   register-tile kernels, up to ~200×) — but **-O1 is NOT runtime-optimal**: reduction/attention kernels can run 1.5–3×
@@ -286,7 +290,8 @@ fails fast with a specific message.
 - Cross-hardware node-store merge: `python scripts/merge_node_db.py {--src DB | --remote user@host [--ssh-key PATH]
   [--port N] [--remote-db PATH]} [--db DEST]` — merge the `node` table from another autotune DB (a local snapshot, or a
   WAL-safe `VACUUM INTO` snapshot fetched from a remote host over SSH) into the local canonical DB via the tested
-  `SearchDB.merge_nodes` (keep-min per `node_key`; the GPU-folded key means other cards' rows are never clobbered).
+  `SearchDB.merge_nodes` (keep-min per `node_key`; the GPU-folded key means other cards' rows are never clobbered; the
+  label-quality columns carry over — `visits` SUMs on a shared key, so re-merging the same snapshot double-counts it).
   Prints a per-card row-count receipt. The copy-back step of the `collect-node-data` skill (rent a GPU → `tune --dataset
   golden` there → merge its node rows home).
 - Remote node-tune driver: `python scripts/remote_node_tune.py --remote user@host [--ssh-key PATH] [--port N] [--repo

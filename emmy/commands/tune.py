@@ -197,7 +197,7 @@ def _require_homogeneous_devices(devices: list[int | None]) -> None:
         sys.exit(2)
 
 
-def _tune_one(args, *, backends, db, ctx, dump):
+def _tune_one(args, *, backends, db, ctx, dump, run_id=None):
     """Trace ``args.code`` / ``args.input`` and run the two-level tune on that one
     graph; return ``(result, bench_bundle)``. Manages the live progress bar (closed
     in ``finally``) and prints the per-op ``done`` summary. Lets ``KeyboardInterrupt``
@@ -240,6 +240,7 @@ def _tune_one(args, *, backends, db, ctx, dump):
                 dump=dump,
                 progress=progress,
                 prior_seed=args.seed,
+                run_id=run_id,
             )
         )
     finally:
@@ -349,6 +350,12 @@ def handle_tune(args):
     if len(backends) > 1:
         sys.stderr.write(f"[tune] per-kernel parallel across {len(backends)} GPUs: {[d for d in devices]}\n")
     ctx = Context.probe()
+    # One session id per CLI invocation (a golden sweep = one collection session) —
+    # stamped on every node row this run writes, so cross-run keep-min drift in the
+    # node store is traceable to its tune session.
+    from emmy.compiler.pipeline.search.two_level import _mint_run_id
+
+    run_id = _mint_run_id()
 
     multi = len(targets) > 1
     if multi:
@@ -360,7 +367,7 @@ def handle_tune(args):
             sys.stderr.write(f"\n[tune] === {i + 1}/{len(targets)}: {label} → {code} ===\n")
         dump, tmp_dump = _bench_dump(args)
         try:
-            result, bench_bundle = _tune_one(args, backends=backends, db=db, ctx=ctx, dump=dump)
+            result, bench_bundle = _tune_one(args, backends=backends, db=db, ctx=ctx, dump=dump, run_id=run_id)
         except KeyboardInterrupt:
             # Per-op bests already landed in the DB as they were measured, so a re-run resumes.
             sys.stderr.write(f"\n[tune] interrupted{f' at {label}' if multi else ''} — partial per-op results are in the DB\n")

@@ -224,7 +224,9 @@ def test_open_readonly_missing_file_raises(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _node_row(node_key: str, value_us: float, *, parent_key=None, op_sig="sig", features=None, depth=1, gpu="") -> NodeRow:
+def _node_row(node_key: str, value_us: float, *, parent_key=None, op_sig="sig", features=None, depth=1, gpu="", **extra) -> NodeRow:
+    """``extra`` passes the label-quality kwargs (visits / is_leaf / variance /
+    n_samples / status / run_id / measured_at) straight through."""
     return NodeRow(
         node_key=node_key,
         parent_key=parent_key,
@@ -234,6 +236,7 @@ def _node_row(node_key: str, value_us: float, *, parent_key=None, op_sig="sig", 
         value_us=value_us,
         depth=depth,
         gpu=gpu,
+        **extra,
     )
 
 
@@ -369,6 +372,7 @@ def test_node_gpu_column_added_to_pre_gpu_db(tmp_path) -> None:
     con.close()
     db = SearchDB(path)  # writer migrates: ALTER adds gpu, then node_gpu index builds
     assert db._has_node_gpu_column()
+    assert db._has_node_enrich_columns()  # the later label-quality generation arrives in the same open
     assert list(db.iter_nodes())[0].gpu == ""  # pre-existing row defaults
     db.record_nodes([_node_row("new", 2.0, gpu="NVIDIA H100 80GB")])
     assert {n.node_key: n.gpu for n in db.iter_nodes()}["new"] == "NVIDIA H100 80GB"
@@ -433,6 +437,142 @@ def test_merge_nodes_into_pre_node_dest_autocreates(tmp_path) -> None:
     assert dst.merge_nodes(tmp_path / "src.db") == 1
     (n,) = list(dst.iter_nodes())
     assert (n.node_key, n.value_us, n.gpu) == ("n1", 4.0, "NVIDIA H200 141GB")
+
+
+def test_record_nodes_enriched_columns_roundtrip(tmp_path) -> None:
+    """The label-quality columns round-trip through ``record_nodes`` → ``iter_nodes``;
+    ``measured_at`` is stamped at write time when the row carries none."""
+    db = SearchDB(tmp_path / "t.db")
+    db.record_nodes(
+        [
+            _node_row("leaf", 2.0, visits=3, is_leaf=True, variance=0.25, n_samples=9, run_id="r1"),
+            _node_row("branch", 2.0, visits=5, is_leaf=False, run_id="r1"),
+        ]
+    )
+    by_key = {n.node_key: n for n in db.iter_nodes()}
+    leaf, branch = by_key["leaf"], by_key["branch"]
+    assert (leaf.visits, leaf.is_leaf, leaf.variance, leaf.n_samples) == (3, True, 0.25, 9)
+    assert (leaf.status, leaf.run_id) == ("ok", "r1")
+    assert leaf.measured_at  # stamped now when the row carried none
+    assert (branch.is_leaf, branch.variance, branch.n_samples) == (False, None, None)
+
+
+def test_record_nodes_accumulates_visits() -> None:
+    """``visits`` SUM-accumulates on every write path — improving and non-improving."""
+    db = SearchDB()
+    db.record_nodes([_node_row("n1", 5.0, visits=3)])
+    db.record_nodes([_node_row("n1", 2.0, visits=2)])  # improving
+    db.record_nodes([_node_row("n1", 9.0, visits=1)])  # non-improving
+    (visits,) = db._conn.execute("SELECT visits FROM node WHERE node_key = 'n1'").fetchone()
+    assert visits == 6
+
+
+def test_record_nodes_ok_never_downgraded_by_fail() -> None:
+    """A ``bench_fail`` write never replaces an ``ok`` row — even with a smaller
+    ``value_us`` — but its visits still accumulate (record_perf's keep-best-ok)."""
+    db = SearchDB()
+    db.record_nodes([_node_row("n1", 5.0, visits=1, is_leaf=True, variance=0.1, n_samples=5, run_id="r1")])
+    db.record_nodes([_node_row("n1", 1.0, visits=1, is_leaf=True, status="bench_fail", run_id="r2")])
+    (n,) = list(db.iter_nodes())
+    assert (n.status, n.value_us, n.run_id, n.variance) == ("ok", 5.0, "r1", 0.1)
+    assert n.visits == 2
+
+
+def test_record_nodes_fail_upgrades_to_ok() -> None:
+    """An ``ok`` write replaces a ``bench_fail`` row unconditionally (even at a higher
+    ``value_us`` than the fail sentinel), carrying its value-paired columns; a second
+    fail keeps the min sentinel."""
+    db = SearchDB()
+    db.record_nodes([_node_row("n1", 3e7, is_leaf=True, status="bench_fail", run_id="r1")])
+    db.record_nodes([_node_row("n1", 4e7, is_leaf=True, status="bench_fail", run_id="r2")])  # fail-vs-fail: min kept
+    (n,) = list(db.iter_nodes())
+    assert (n.status, n.value_us, n.run_id) == ("bench_fail", 3e7, "r1")
+    db.record_nodes([_node_row("n1", 9e9, is_leaf=True, variance=0.2, n_samples=4, status="ok", run_id="r3")])
+    (n,) = list(db.iter_nodes())
+    assert (n.status, n.value_us, n.run_id, n.variance, n.n_samples) == ("ok", 9e9, "r3", 0.2, 4)
+
+
+def test_record_nodes_stats_pair_with_value() -> None:
+    """The value-paired columns (variance / n_samples / run_id / measured_at) replace
+    on an improving write and stay untouched on a non-improving one."""
+    db = SearchDB()
+    db.record_nodes([_node_row("n1", 5.0, is_leaf=True, variance=0.5, n_samples=3, run_id="r1", measured_at="t1")])
+    db.record_nodes([_node_row("n1", 2.0, is_leaf=True, variance=0.2, n_samples=9, run_id="r2", measured_at="t2")])  # improving
+    db.record_nodes([_node_row("n1", 8.0, is_leaf=True, variance=0.8, n_samples=1, run_id="r3", measured_at="t3")])  # non-improving
+    (n,) = list(db.iter_nodes())
+    assert (n.value_us, n.variance, n.n_samples, n.run_id, n.measured_at) == (2.0, 0.2, 9, "r2", "t2")
+
+
+# Today's-before-enrichment ``node`` schema (gpu present, no label-quality columns) —
+# the fixture for the additive-migration pair below, mirroring ``_PRE_GPU_NODE_SCHEMA``.
+_PRE_ENRICH_NODE_SCHEMA = (
+    "CREATE TABLE node (node_key TEXT PRIMARY KEY, parent_key TEXT, context_key TEXT NOT NULL, "
+    "op_sig TEXT NOT NULL, gpu TEXT NOT NULL DEFAULT '', features TEXT NOT NULL DEFAULT '{}', "
+    "value_us REAL NOT NULL, depth INTEGER NOT NULL, n_updates INTEGER NOT NULL DEFAULT 1, "
+    "updated_at TEXT NOT NULL); "
+    "INSERT INTO node VALUES ('old', NULL, 'ctx', 'mm', 'NVIDIA H100 80GB', '{}', 3.0, 1, 1, 'now');"
+)
+
+
+def test_node_enrich_columns_added_to_pre_enrich_db(tmp_path) -> None:
+    """A pre-enrichment ``node`` table gains the label-quality columns on the next
+    writer open; old rows degrade to the unknowns (visits 0, status 'ok', run_id '',
+    is_leaf/variance/n_samples/measured_at NULL)."""
+    path = tmp_path / "old.db"
+    con = sqlite3.connect(path)
+    con.executescript(_PRE_ENRICH_NODE_SCHEMA)
+    con.commit()
+    con.close()
+    db = SearchDB(path)
+    assert db._has_node_enrich_columns()
+    old = next(n for n in db.iter_nodes() if n.node_key == "old")
+    assert (old.visits, old.is_leaf, old.status, old.run_id, old.measured_at) == (0, None, "ok", "", None)
+    db.record_nodes([_node_row("new", 2.0, visits=1, is_leaf=True, run_id="r1")])
+    assert {n.node_key: n.run_id for n in db.iter_nodes()}["new"] == "r1"
+
+
+def test_iter_nodes_pre_enrich_readonly_degrades(tmp_path) -> None:
+    """A read-only open of a pre-enrichment DB degrades the new fields to the
+    NodeRow defaults rather than raising (the additive ALTERs are writer-side only)."""
+    path = tmp_path / "ro.db"
+    con = sqlite3.connect(path)
+    con.executescript(_PRE_ENRICH_NODE_SCHEMA)
+    con.commit()
+    con.close()
+    ro = SearchDB.open_readonly(path)
+    assert not ro._has_node_enrich_columns()
+    (n,) = list(ro.iter_nodes())
+    assert (n.visits, n.is_leaf, n.status, n.run_id, n.measured_at) == (0, None, "ok", "", None)
+    assert n.gpu == "NVIDIA H100 80GB"  # the gpu generation is still read normally
+    ro.close()
+
+
+def test_merge_nodes_carries_enriched_fields_and_sums_visits(tmp_path) -> None:
+    """``merge_nodes`` propagates the label-quality fields through ``iter_nodes`` →
+    ``record_nodes``: a winning source row carries its status/run_id/stats, visits
+    SUM on a key collision, and a fail source row never downgrades an ok dest row."""
+    dst = SearchDB(tmp_path / "dst.db")
+    dst.record_nodes(
+        [
+            _node_row("shared", 5.0, visits=2, is_leaf=True, run_id="dst"),
+            _node_row("ok_here", 4.0, visits=1, is_leaf=True, run_id="dst"),
+        ]
+    )
+    src = SearchDB(tmp_path / "src.db")
+    src.record_nodes(
+        [
+            _node_row("shared", 2.0, visits=3, is_leaf=True, variance=0.3, n_samples=6, run_id="src"),  # wins
+            _node_row("ok_here", 1.0, visits=1, is_leaf=True, status="bench_fail", run_id="src"),  # must NOT downgrade
+        ]
+    )
+    src.close()
+    assert dst.merge_nodes(tmp_path / "src.db") == 2
+    by_key = {n.node_key: n for n in dst.iter_nodes()}
+    shared, ok_here = by_key["shared"], by_key["ok_here"]
+    assert (shared.value_us, shared.run_id, shared.variance, shared.n_samples) == (2.0, "src", 0.3, 6)
+    assert shared.visits == 5  # 2 (dst) + 3 (src)
+    assert (ok_here.status, ok_here.value_us, ok_here.run_id) == ("ok", 4.0, "dst")
+    assert ok_here.visits == 2
 
 
 # ---------------------------------------------------------------------------

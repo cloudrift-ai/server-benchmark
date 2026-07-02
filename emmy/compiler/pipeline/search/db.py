@@ -30,7 +30,14 @@ Pure persistence layer — no MCTS state, no propagation walks. Tables:
   (parent-tree-independent), so it survives schema-version drops like ``perf``.
   Written once per finished search by :meth:`SearchDB.record_nodes`, fed by the
   post-order tree walk ``TuningSearch._collect_node_records`` — alongside (not
-  replacing) the learned prior's reservoir feed.
+  replacing) the learned prior's reservoir feed. Label-quality columns (additive
+  migration; old rows degrade to unknowns): ``visits`` (benched-descendant count,
+  SUM-accumulated — the label's confidence weight), ``is_leaf`` (directly-benched
+  terminal vs branch), ``variance`` / ``n_samples`` (the leaf's own bench stats),
+  ``status`` (``ok`` / ``bench_fail`` — fail leaves ARE recorded, with the bench
+  watchdog's sentinel latency as ``value_us``; an ``ok`` row is never downgraded
+  by a later fail), and ``run_id`` / ``measured_at`` (the tune session + time
+  that produced the current ``value_us`` — replaced only on improvement).
 
 Concurrency: opened in WAL mode so parallel benches can read while one
 writes. The connection is kept open for the DB's lifetime; callers can
@@ -143,7 +150,22 @@ class NodeRow:
     structure + tunable knobs). ``value_us`` is the value-of-position latency (best
     reachable below the node); :meth:`SearchDB.record_nodes` keeps the minimum on
     re-encounter. ``depth`` is the node's distance from the sentinel root (top
-    forks = 1)."""
+    forks = 1).
+
+    Label-quality columns (all default to the pre-enrichment unknowns so old rows
+    and positional constructions keep working): ``visits`` is the benched-descendant
+    count — the confidence weight for the value-of-position label (distinct from the
+    table's ``n_updates``, which counts write batches, and SUM-accumulated across
+    writes/merges); ``is_leaf`` marks a directly-benched terminal (its ``value_us``
+    is a real measurement) vs a branch (a min over explored descendants) — ``None``
+    on pre-enrichment rows; ``variance`` / ``n_samples`` are the leaf's own direct
+    bench stats (``None`` on branches; a leaf whose subtree found a faster descendant
+    keeps ``value_us`` = min-over-subtree while these describe its own bench);
+    ``status`` is ``'ok'`` or ``'bench_fail'`` — a fail row's ``value_us`` is the
+    bench watchdog's sentinel latency, NOT a measurement; ``run_id`` /
+    ``measured_at`` identify the tune session + time that produced the CURRENT
+    ``value_us`` (they replace only when the value improves — ``updated_at`` is the
+    one that refreshes on every write)."""
 
     node_key: str
     parent_key: str | None
@@ -153,6 +175,13 @@ class NodeRow:
     value_us: float
     depth: int
     gpu: str = ""
+    visits: int = 0  # benched-descendant count (0 = unknown / pre-enrichment)
+    is_leaf: bool | None = None  # True = directly-benched terminal; None = unknown (old rows)
+    variance: float | None = None  # leaf measurement stats (None on branches / old rows)
+    n_samples: int | None = None
+    status: str = "ok"  # 'ok' | 'bench_fail'
+    run_id: str = ""  # tune-session id ('' = unknown / old rows)
+    measured_at: str | None = None  # when the CURRENT value_us was measured (None -> record_nodes stamps now)
 
 
 # The ``perf`` SELECT column list — order must match ``_row_to_perf``.
@@ -264,7 +293,14 @@ class SearchDB:
             value_us     REAL NOT NULL,
             depth        INTEGER NOT NULL,
             n_updates    INTEGER NOT NULL DEFAULT 1,
-            updated_at   TEXT NOT NULL
+            updated_at   TEXT NOT NULL,
+            visits       INTEGER NOT NULL DEFAULT 0,
+            is_leaf      INTEGER,
+            variance     REAL,
+            n_samples    INTEGER,
+            status       TEXT NOT NULL DEFAULT 'ok',
+            run_id       TEXT NOT NULL DEFAULT '',
+            measured_at  TEXT
         )
         """,
         "CREATE INDEX IF NOT EXISTS node_parent ON node (parent_key)",
@@ -301,12 +337,38 @@ class SearchDB:
         # ``error``, so unlike ``node.gpu`` this can run after the schema loop.)
         if not self._has_perf_error_column():
             self._conn.execute("ALTER TABLE perf ADD COLUMN error TEXT")
+        # Additive ``node`` label-quality columns (visits / is_leaf / variance /
+        # n_samples / status / run_id / measured_at). Per-column ALTERs so a
+        # crash-interrupted migration self-heals on the next open; no index
+        # references them, so like ``perf.error`` this runs after the schema loop.
+        have = {r[1] for r in self._conn.execute("PRAGMA table_info(node)")}
+        for col, ddl in self._NODE_ENRICH_COLUMNS:
+            if col not in have:
+                self._conn.execute(f"ALTER TABLE node ADD COLUMN {col} {ddl}")  # noqa: S608 — fixed literal pairs
+
+    # The label-quality columns added to ``node`` after the ``gpu`` generation —
+    # kept as (name, DDL) pairs shared by the CREATE literal above and the additive
+    # migration loop. Old rows degrade to the defaults (unknowns).
+    _NODE_ENRICH_COLUMNS = (
+        ("visits", "INTEGER NOT NULL DEFAULT 0"),
+        ("is_leaf", "INTEGER"),
+        ("variance", "REAL"),
+        ("n_samples", "INTEGER"),
+        ("status", "TEXT NOT NULL DEFAULT 'ok'"),
+        ("run_id", "TEXT NOT NULL DEFAULT ''"),
+        ("measured_at", "TEXT"),
+    )
 
     def _has_perf_error_column(self) -> bool:
         return any(r[1] == "error" for r in self._conn.execute("PRAGMA table_info(perf)"))
 
     def _has_node_gpu_column(self) -> bool:
         return any(r[1] == "gpu" for r in self._conn.execute("PRAGMA table_info(node)"))
+
+    def _has_node_enrich_columns(self) -> bool:
+        # ``status`` proxies the whole enrichment generation (the seven columns ship
+        # as one migration; the writer-side loop self-heals partial applications).
+        return any(r[1] == "status" for r in self._conn.execute("PRAGMA table_info(node)"))
 
     def _has_node_table(self) -> bool:
         # A read-only open of a pre-``node`` DB never ran ``CREATE TABLE IF NOT
@@ -496,6 +558,16 @@ class SearchDB:
         ``node_key`` and re-stamp identically. ``n_updates`` counts writes (incl.
         non-improving re-encounters) and ``updated_at`` refreshes each time.
 
+        Label-quality columns: ``visits`` SUM-accumulates on every write (the total
+        benched descendants ever informing this node's label — a confidence weight,
+        not an exact ledger); the value-paired columns (``is_leaf`` / ``variance`` /
+        ``n_samples`` / ``status`` / ``run_id`` / ``measured_at``, stamped ``now``
+        when the row carries none) travel WITH ``value_us`` — replaced on an
+        improving write, untouched otherwise. Status follows ``record_perf``'s
+        keep-best-``ok`` policy: an ``ok`` row is never downgraded by a later
+        ``bench_fail`` (whatever the fail's sentinel ``value_us``), while a fail row
+        upgrades to ``ok`` unconditionally; fail-vs-fail keeps the min sentinel.
+
         Manual lookup-guard + INSERT/UPDATE (the ``record_perf`` / ``record_lowering``
         idiom) rather than ``INSERT OR REPLACE`` — the latter would reset
         ``n_updates`` and drop the old value. Row-at-a-time autocommit like the rest
@@ -503,23 +575,54 @@ class SearchDB:
         now = datetime.now(UTC).isoformat()
         for r in rows:
             feats_json = json.dumps(r.features, sort_keys=True, default=str)
-            existing = self._conn.execute("SELECT value_us, n_updates FROM node WHERE node_key = ?", (r.node_key,)).fetchone()
+            is_leaf = None if r.is_leaf is None else int(r.is_leaf)
+            measured = r.measured_at or now
+            existing = self._conn.execute(
+                "SELECT value_us, n_updates, visits, status FROM node WHERE node_key = ?", (r.node_key,)
+            ).fetchone()
             if existing is None:
                 self._conn.execute(
                     "INSERT INTO node "
-                    "(node_key, parent_key, context_key, op_sig, gpu, features, value_us, depth, n_updates, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (r.node_key, r.parent_key, r.context_key, r.op_sig, r.gpu, feats_json, r.value_us, r.depth, 1, now),
+                    "(node_key, parent_key, context_key, op_sig, gpu, features, value_us, depth, n_updates, updated_at, "
+                    " visits, is_leaf, variance, n_samples, status, run_id, measured_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        r.node_key,
+                        r.parent_key,
+                        r.context_key,
+                        r.op_sig,
+                        r.gpu,
+                        feats_json,
+                        r.value_us,
+                        r.depth,
+                        1,
+                        now,
+                        r.visits,
+                        is_leaf,
+                        r.variance,
+                        r.n_samples,
+                        r.status,
+                        r.run_id,
+                        measured,
+                    ),
                 )
-            elif r.value_us < existing[0]:
+                continue
+            cur_val, n_upd, cur_visits, cur_status = existing
+            visits = (cur_visits or 0) + r.visits
+            ok_downgrade = cur_status == "ok" and r.status != "ok"
+            improving = (cur_status != "ok" and r.status == "ok") or (not ok_downgrade and r.value_us < cur_val)
+            if improving:
                 self._conn.execute(
-                    "UPDATE node SET value_us = ?, features = ?, parent_key = ?, n_updates = ?, updated_at = ? WHERE node_key = ?",
-                    (r.value_us, feats_json, r.parent_key, existing[1] + 1, now, r.node_key),
+                    "UPDATE node SET value_us = ?, features = ?, parent_key = ?, n_updates = ?, updated_at = ?, "
+                    "visits = ?, is_leaf = ?, variance = ?, n_samples = ?, status = ?, run_id = ?, measured_at = ? "
+                    "WHERE node_key = ?",
+                    (r.value_us, feats_json, r.parent_key, n_upd + 1, now, visits, is_leaf, r.variance, r.n_samples)
+                    + (r.status, r.run_id, measured, r.node_key),
                 )
             else:
                 self._conn.execute(
-                    "UPDATE node SET n_updates = ?, updated_at = ? WHERE node_key = ?",
-                    (existing[1] + 1, now, r.node_key),
+                    "UPDATE node SET n_updates = ?, updated_at = ?, visits = ? WHERE node_key = ?",
+                    (n_upd + 1, now, visits, r.node_key),
                 )
 
     # ------------------------------------------------------------------
@@ -537,8 +640,14 @@ class SearchDB:
             return
         # ``gpu`` degrades to '' on a pre-``gpu``-column DB opened read-only (the
         # additive migration runs writer-side only) — same pattern as perf.error.
+        # The enrichment columns degrade as one generation to their unknowns.
         gpu_col = "gpu" if self._has_node_gpu_column() else "''"
-        sql = f"SELECT node_key, parent_key, context_key, op_sig, {gpu_col}, features, value_us, depth FROM node"  # noqa: S608
+        enrich_cols = (
+            "visits, is_leaf, variance, n_samples, status, run_id, measured_at"
+            if self._has_node_enrich_columns()
+            else "0, NULL, NULL, NULL, 'ok', '', NULL"
+        )
+        sql = f"SELECT node_key, parent_key, context_key, op_sig, {gpu_col}, features, value_us, depth, {enrich_cols} FROM node"  # noqa: S608
         clauses: list[str] = []
         params: list = []
         if context_key is not None:
@@ -549,7 +658,9 @@ class SearchDB:
             params.append(op_sig)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        for node_key, parent_key, ck, sig, gpu, feats_json, value_us, depth in self._conn.execute(sql, params):
+        for row in self._conn.execute(sql, params):
+            node_key, parent_key, ck, sig, gpu, feats_json, value_us, depth = row[:8]
+            visits, is_leaf, var, n_samp, status, run_id, measured = row[8:]
             try:
                 features = json.loads(feats_json) if feats_json else {}
             except (TypeError, json.JSONDecodeError):
@@ -563,6 +674,13 @@ class SearchDB:
                 value_us=value_us,
                 depth=depth,
                 gpu=gpu,
+                visits=visits or 0,
+                is_leaf=None if is_leaf is None else bool(is_leaf),
+                variance=var,
+                n_samples=n_samp,
+                status=status,
+                run_id=run_id,
+                measured_at=measured,
             )
 
     def merge_nodes(self, src_path: Path | str) -> int:
@@ -578,9 +696,12 @@ class SearchDB:
         case is bringing per-card node data measured on a rented GPU back to a single
         canonical DB (``scripts/merge_node_db.py``).
 
-        Caveat: :meth:`iter_nodes` doesn't carry ``n_updates``, so each merged row
-        re-enters as one ``record_nodes`` bump rather than carrying the source's visit
-        count — acceptable, since ``n_updates`` is bookkeeping only."""
+        Caveats: :meth:`iter_nodes` doesn't carry ``n_updates``, so each merged row
+        re-enters as one ``record_nodes`` bump rather than carrying the source's write
+        count — acceptable, since ``n_updates`` is bookkeeping only. ``visits`` DOES
+        carry and SUM-accumulates on a key collision — right for the one-shot
+        rent→tune→merge flow; re-merging the same snapshot double-counts (accepted:
+        ``visits`` is a confidence weight, not an exact ledger)."""
         src = SearchDB.open_readonly(src_path)
         try:
             rows = list(src.iter_nodes())

@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 from types import SimpleNamespace
 
+from emmy.compiler.pipeline.search.db import PerfStats
 from emmy.compiler.pipeline.search.policy.mcts import SearchNode, SearchTree, TuningSearch
 from emmy.compiler.pipeline.search.prior import CatBoostPrior, prior_from_json
 
@@ -20,6 +21,12 @@ def _node(knobs: dict, parent: SearchNode) -> SearchNode:
     """A SearchNode whose candidate exposes ``fork.knobs`` — the only thing
     ``_node_knobs`` reads."""
     return SearchNode(candidate=SimpleNamespace(fork=SimpleNamespace(knobs=knobs)), parent=parent)
+
+
+def _leaf_stats(us: float, *, variance: float = 0.5, n_samples: int = 7) -> PerfStats:
+    """A PerfStats for a hand-benched leaf (the fields ``observe`` stashes) — named
+    apart from the PUCT section's ``_stats(median)`` helper further down."""
+    return PerfStats(median=us, min=us, max=us, mean=us, variance=variance, n_samples=n_samples)
 
 
 def _fit(rows, **kw):
@@ -255,12 +262,12 @@ def test_collect_node_records_parent_linkage():
     branch.children = [leaf]
     tree.record_terminal(leaf, 2.0)
     recs = TuningSearch(tree=tree)._collect_node_records(context_key="ctx", op_sig="sig")
-    by_depth = {d: (nk, pk, feats) for nk, pk, feats, _, d in recs}
-    branch_key, branch_parent, branch_feats = by_depth[1]
-    leaf_key, leaf_parent, leaf_feats = by_depth[2]
-    assert branch_parent is None  # top fork → no recorded parent
-    assert leaf_parent == branch_key  # leaf → branch edge from node.parent
-    assert "FK" in leaf_feats and "FK" not in branch_feats  # stamped knob only on the leaf
+    by_depth = {r.depth: r for r in recs}
+    branch_rec, leaf_rec = by_depth[1], by_depth[2]
+    assert branch_rec.parent_key is None  # top fork → no recorded parent
+    assert leaf_rec.parent_key == branch_rec.node_key  # leaf → branch edge from node.parent
+    assert "FK" in leaf_rec.features and "FK" not in branch_rec.features  # stamped knob only on the leaf
+    assert leaf_rec.is_leaf and not branch_rec.is_leaf  # realized_knobs marks the directly-benched terminal
 
 
 def test_collect_node_records_value_min_invariant():
@@ -275,7 +282,7 @@ def test_collect_node_records_value_min_invariant():
     tree.record_terminal(leaf_slow, 1.0)
     tree.record_terminal(leaf_fast, 2.0)
     recs = TuningSearch(tree=tree)._collect_node_records(context_key="ctx", op_sig="sig")
-    by_key = {nk: (pk, v) for nk, pk, _, v, _ in recs}
+    by_key = {r.node_key: (r.parent_key, r.value_us) for r in recs}
     assert any(pk is not None for pk, _ in by_key.values())  # at least one real edge exercised
     for pk, v in by_key.values():
         if pk is not None:
@@ -292,9 +299,102 @@ def test_collect_node_records_skips_unbenched_and_sentinel():
     tree.record_terminal(visited, 1.5)
     recs = TuningSearch(tree=tree)._collect_node_records(context_key="ctx", op_sig="sig")
     assert len(recs) == 1
-    nk, pk, _, v, d = recs[0]
-    assert pk is None and d == 1
-    assert abs(v - 1 / 1.5) < 1e-12
+    r = recs[0]
+    assert r.parent_key is None and r.depth == 1
+    assert abs(r.value_us - 1 / 1.5) < 1e-12
+
+
+def test_collect_node_records_records_failed_leaf():
+    """A directly-benched leaf whose bench FAILED is emitted as a ``bench_fail`` row
+    (the watchdog sentinel as ``value_us``, own stats) — previously invisible; the
+    sibling ok leaf's row is unaffected and the monotone assert never trips."""
+    tree = SearchTree()
+    branch = _node({"BR": 1}, tree.root)
+    ok_leaf = _node({"BR": 1, "BM": 64}, branch)
+    fail_leaf = _node({"BR": 1, "BM": 32}, branch)
+    ok_leaf.realized_knobs = {"BR": 1, "BM": 64}
+    ok_leaf.bench_status = "ok"
+    ok_leaf.bench_stats = _leaf_stats(0.5)
+    fail_leaf.realized_knobs = {"BR": 1, "BM": 32}
+    fail_leaf.bench_status = "bench_fail"
+    fail_leaf.bench_stats = _leaf_stats(3e7, variance=0.0, n_samples=0)  # timeout sentinel
+    tree.root.children = [branch]
+    branch.children = [ok_leaf, fail_leaf]
+    tree.record_terminal(ok_leaf, 2.0)
+    tree.record_terminal(fail_leaf, 0.0)
+    recs = TuningSearch(tree=tree)._collect_node_records(context_key="ctx", op_sig="sig", run_id="r1")
+    by_status = {r.status: r for r in recs if r.is_leaf}
+    fail = by_status["bench_fail"]
+    assert fail.value_us == 3e7 and fail.is_leaf and fail.n_samples == 0
+    branch_rec = next(r for r in recs if not r.is_leaf)
+    assert fail.parent_key == branch_rec.node_key  # real tree edge, like any ok leaf
+    ok = by_status["ok"]
+    assert abs(ok.value_us - 0.5) < 1e-12 and ok.run_id == "r1"
+    assert abs(branch_rec.value_us - 0.5) < 1e-12  # the fail sentinel never enters the min
+
+
+def test_collect_node_records_all_failed_branch_skipped():
+    """A branch whose descendants ALL failed stays unrecorded (best_reward == 0) —
+    only the leaf fail rows are emitted."""
+    tree = SearchTree()
+    branch = _node({"BR": 1}, tree.root)
+    fail_leaf = _node({"BR": 1, "BM": 32}, branch)
+    fail_leaf.realized_knobs = {"BR": 1, "BM": 32}
+    fail_leaf.bench_status = "bench_fail"
+    fail_leaf.bench_stats = _leaf_stats(3e7, variance=0.0, n_samples=0)
+    tree.root.children = [branch]
+    branch.children = [fail_leaf]
+    tree.record_terminal(fail_leaf, 0.0)
+    recs = TuningSearch(tree=tree)._collect_node_records(context_key="ctx", op_sig="sig")
+    assert [r.status for r in recs] == ["bench_fail"]
+    assert recs[0].parent_key is None  # the unrecorded branch passed its parent down
+
+
+def test_collect_node_records_carries_visits_and_leaf_stats():
+    """A branch over two benched leaves carries ``visits=2`` (its benched-descendant
+    count) with no stats of its own; each leaf carries ``visits=1`` plus its OWN
+    bench variance / n_samples."""
+    tree = SearchTree()
+    branch = _node({"BR": 1}, tree.root)
+    slow = _node({"BR": 1, "BM": 32}, branch)
+    fast = _node({"BR": 1, "BM": 64}, branch)
+    for leaf, us in ((slow, 1.0), (fast, 0.5)):
+        leaf.realized_knobs = dict(leaf.candidate.fork.knobs)
+        leaf.bench_status = "ok"
+        leaf.bench_stats = _leaf_stats(us, variance=us / 10, n_samples=5)
+    tree.root.children = [branch]
+    branch.children = [slow, fast]
+    tree.record_terminal(slow, 1.0)
+    tree.record_terminal(fast, 2.0)
+    recs = TuningSearch(tree=tree)._collect_node_records(context_key="ctx", op_sig="sig")
+    branch_rec = next(r for r in recs if not r.is_leaf)
+    assert branch_rec.visits == 2 and branch_rec.variance is None and branch_rec.n_samples is None
+    fast_rec = next(r for r in recs if r.is_leaf and abs(r.value_us - 0.5) < 1e-12)
+    assert fast_rec.visits == 1 and fast_rec.variance == 0.05 and fast_rec.n_samples == 5
+    assert branch_rec.value_us == fast_rec.value_us  # value-of-position = min over the subtree
+
+
+def test_collect_node_records_within_batch_duplicate_key_max_visits():
+    """A deterministic no-knob-delta step gives a child the same accumulated knob set
+    (→ same node_key) as its parent; the batch collapses them to ONE row taking the
+    max (not sum) of the duplicates' visits — so ``record_nodes``'s SUM accumulation
+    never double-counts a single run — preferring the leaf row's stats and keeping
+    the first-seen depth/parent."""
+    tree = SearchTree()
+    branch = _node({"BR": 1, "BM": 64}, tree.root)
+    chained_leaf = _node({}, branch)  # empty delta → same accumulated knobs as branch
+    chained_leaf.realized_knobs = {"BR": 1, "BM": 64}
+    chained_leaf.bench_status = "ok"
+    chained_leaf.bench_stats = _leaf_stats(0.5)
+    tree.root.children = [branch]
+    branch.children = [chained_leaf]
+    tree.record_terminal(chained_leaf, 2.0)
+    recs = TuningSearch(tree=tree)._collect_node_records(context_key="ctx", op_sig="sig")
+    assert len(recs) == 1  # branch + leaf collapsed onto one key
+    r = recs[0]
+    assert r.visits == 1  # max, not 1 + 1
+    assert r.is_leaf and r.n_samples == 7  # the leaf row's stats survived
+    assert r.parent_key is None and r.depth == 1  # first-seen (branch) position
 
 
 def test_node_key_excludes_s_and_h():

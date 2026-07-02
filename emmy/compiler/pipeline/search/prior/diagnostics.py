@@ -345,9 +345,12 @@ def node_report(prior, nodes, *, kernel_filter: str | None = None) -> str:
     share an ``S_*`` op signature but not their latencies, so mixing them would corrupt
     both metrics. ``nodes`` is a list of :class:`db.NodeRow` from
     :meth:`SearchDB.iter_nodes`; ``kernel_filter`` keeps only nodes whose op label
-    contains the substring (``--kernel``)."""
+    contains the substring (``--kernel``). ``bench_fail`` rows are excluded up front —
+    their ``value_us`` is the watchdog sentinel, not a measurement, and would corrupt
+    the ranking/reachability metrics (pre-enrichment rows default to ``ok``)."""
     from collections import defaultdict  # noqa: PLC0415
 
+    nodes = [n for n in nodes if n.status == "ok"]
     total = len(nodes)
     if kernel_filter:
         nodes = [n for n in nodes if kernel_filter in _node_op_label(n.features)]

@@ -384,7 +384,15 @@ The autotune state is split across two cooperating modules:
   value-of-position latency (`1/best_reward`), a `parent_key` pointer (ancestry
   is the live tree edge, not knob-subset inference), a `gpu` column, and
   `depth`/`n_updates` bookkeeping (written by `record_nodes`, fed by
-  `TuningSearch._collect_node_records`). The `gpu` identity (`Context.hardware_id` —
+  `TuningSearch._collect_node_records`). **Label-quality columns** (additive migration; old rows degrade to
+  unknowns): `visits` (benched-descendant count — the label's confidence weight, SUM-accumulated across writes
+  and merges, unlike the write-batch `n_updates`), `is_leaf` (directly-benched terminal — a real measurement —
+  vs branch — a min over explored descendants; NULL on pre-migration rows), `variance`/`n_samples` (the leaf's
+  own bench stats), `status` (`ok`/`bench_fail` — failed leaves ARE recorded, with the bench watchdog's sentinel
+  latency as `value_us`, the negative examples a search prior needs; an `ok` row is never downgraded by a later
+  fail, a fail upgrades to `ok` unconditionally), and `run_id`/`measured_at` (the tune session — one id per CLI
+  invocation, minted in `handle_tune` — and time that produced the CURRENT `value_us`; they replace only on an
+  improving write, so cross-run keep-min drift is traceable). The `gpu` identity (`Context.hardware_id` —
   the PCIe product name) is folded into the key so a **cross-hardware** dataset
   never collides: `context_key` (cc + opt only) can't separate same-die SKUs (H100
   vs H200 share cc + SM count), so without `gpu` their rows would merge and keep-min
@@ -582,12 +590,22 @@ Alongside that reservoir feed (not replacing it), the same finished tree is walk
 deduplicated, parent-linked counterpart to the unkeyed/sampled reservoir. Each node keys on
 `digest(context_key, op_sig, tunable-knob set)`, so the same position re-encountered across runs collapses to one row with a
 keep-the-minimum value-of-position latency; it carries the full `knob_features` input dict, and stores `parent_key` from the
-live `node.parent` edge so ancestry is recoverable. The prior still *trains* from the in-memory reservoir, but the `node`
+live `node.parent` edge so ancestry is recoverable. Each row also carries the label-quality columns (`visits` /
+`is_leaf` / `variance` / `n_samples` / `status` / `run_id` / `measured_at` — see the `SearchDB` bullet above): the
+walk reads `SearchNode.visits`, the leaf's `bench_stats`/`bench_status` stashed by `observe`, and now emits
+`bench_fail` leaves too (leaf-only — they are never value anchors: no monotone participation, children anchor past
+them, and a branch whose descendants all failed stays unrecorded). Within one batch, a deterministic no-knob-delta
+step can give a child its parent's exact knob set (→ same `node_key`); the walk collapses such duplicates to one row
+(preferring the leaf's stats, max — not sum — of their visits) so `record_nodes`'s SUM accumulation never
+double-counts a single run.
+The prior still *trains* from the in-memory reservoir, but the `node`
 store is *read back* by `eval prior --dataset nodes` (`SearchDB.iter_nodes` → `diagnostics.node_report`): **per card**,
 it groups nodes by `parent_key` and scores the **fork sibling-ranking** — does the prior order each fork's children (the
 partial configs it ranks during `_select`) by their best-reachable latency (top-1 hit + per-fork Spearman)? — the
 search-faithful evaluation no leaf-only view can give, alongside leaf reachability/calibration reused on the deduped
-store. The per-card grouping matters for a cross-hardware dataset: same-die SKUs (H100/H200) share an `S_*` op signature
+store. `node_report` drops `bench_fail` rows up front (their `value_us` is the watchdog sentinel, not a measurement),
+so the metrics stay bit-identical to the pre-enrichment behavior. The per-card grouping matters for a cross-hardware
+dataset: same-die SKUs (H100/H200) share an `S_*` op signature
 (the leaf-reachability group key) but not their latencies, so mixing them would corrupt both metrics — the `gpu` key
 keeps their rows distinct and `node_report` reports them in separate blocks.
 

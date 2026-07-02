@@ -254,6 +254,8 @@ def test_record_nodes_then_read() -> None:
 
 
 def test_record_nodes_keeps_min() -> None:
+    """Default rows carry no ``is_leaf`` (unknown kind), which keeps the conservative
+    branch keep-min — leaves are latest-measurement-wins, tested further down."""
     db = SearchDB()
     db.record_nodes([_node_row("n1", 5.0)])
     db.record_nodes([_node_row("n1", 2.0)])  # improves → kept
@@ -480,27 +482,45 @@ def test_record_nodes_ok_never_downgraded_by_fail() -> None:
 
 def test_record_nodes_fail_upgrades_to_ok() -> None:
     """An ``ok`` write replaces a ``bench_fail`` row unconditionally (even at a higher
-    ``value_us`` than the fail sentinel), carrying its value-paired columns; a second
-    fail keeps the min sentinel."""
+    ``value_us`` than the fail sentinel), carrying its value-paired columns; a
+    fail-vs-fail leaf follows the newest-measurement rule (the current watchdog
+    sentinel, not the historical min)."""
     db = SearchDB()
-    db.record_nodes([_node_row("n1", 3e7, is_leaf=True, status="bench_fail", run_id="r1")])
-    db.record_nodes([_node_row("n1", 4e7, is_leaf=True, status="bench_fail", run_id="r2")])  # fail-vs-fail: min kept
+    db.record_nodes([_node_row("n1", 3e7, is_leaf=True, status="bench_fail", run_id="r1", measured_at="2026-01-01T00:00:00+00:00")])
+    db.record_nodes([_node_row("n1", 4e7, is_leaf=True, status="bench_fail", run_id="r2", measured_at="2026-02-01T00:00:00+00:00")])
     (n,) = list(db.iter_nodes())
-    assert (n.status, n.value_us, n.run_id) == ("bench_fail", 3e7, "r1")
+    assert (n.status, n.value_us, n.run_id) == ("bench_fail", 4e7, "r2")  # newer fail wins
     db.record_nodes([_node_row("n1", 9e9, is_leaf=True, variance=0.2, n_samples=4, status="ok", run_id="r3")])
     (n,) = list(db.iter_nodes())
     assert (n.status, n.value_us, n.run_id, n.variance, n.n_samples) == ("ok", 9e9, "r3", 0.2, 4)
 
 
-def test_record_nodes_stats_pair_with_value() -> None:
-    """The value-paired columns (variance / n_samples / run_id / measured_at) replace
-    on an improving write and stay untouched on a non-improving one."""
+def test_record_nodes_leaf_latest_measurement_wins() -> None:
+    """A leaf row is a re-measurement of ONE config, not a bound: the newest
+    measurement replaces — value-paired columns travel with it — even when SLOWER
+    (keep-min would drift the label to the min-of-noise floor), and a stale
+    measurement (older ``measured_at``, e.g. re-merging an old snapshot) never
+    resurrects."""
     db = SearchDB()
-    db.record_nodes([_node_row("n1", 5.0, is_leaf=True, variance=0.5, n_samples=3, run_id="r1", measured_at="t1")])
-    db.record_nodes([_node_row("n1", 2.0, is_leaf=True, variance=0.2, n_samples=9, run_id="r2", measured_at="t2")])  # improving
-    db.record_nodes([_node_row("n1", 8.0, is_leaf=True, variance=0.8, n_samples=1, run_id="r3", measured_at="t3")])  # non-improving
+    db.record_nodes([_node_row("n1", 5.0, is_leaf=True, variance=0.5, n_samples=3, run_id="r1", measured_at="2026-01-01T00:00:00+00:00")])
+    db.record_nodes([_node_row("n1", 8.0, is_leaf=True, variance=0.8, n_samples=9, run_id="r2", measured_at="2026-02-01T00:00:00+00:00")])
     (n,) = list(db.iter_nodes())
-    assert (n.value_us, n.variance, n.n_samples, n.run_id, n.measured_at) == (2.0, 0.2, 9, "r2", "t2")
+    assert (n.value_us, n.variance, n.n_samples, n.run_id) == (8.0, 0.8, 9, "r2")  # newer-but-slower replaced
+    db.record_nodes([_node_row("n1", 1.0, is_leaf=True, run_id="r0", measured_at="2025-12-01T00:00:00+00:00")])  # stale
+    (n,) = list(db.iter_nodes())
+    assert (n.value_us, n.run_id) == (8.0, "r2")  # the old fast sample did not resurrect
+
+
+def test_record_nodes_branch_keeps_min_with_paired_columns() -> None:
+    """A branch row stays keep-min (its value is a coverage bound, so a faster
+    descendant genuinely tightens it); the value-paired columns replace on the
+    improving write and stay untouched on a non-improving one — even a newer one."""
+    db = SearchDB()
+    db.record_nodes([_node_row("b1", 5.0, is_leaf=False, run_id="r1", measured_at="2026-01-01T00:00:00+00:00")])
+    db.record_nodes([_node_row("b1", 2.0, is_leaf=False, run_id="r2", measured_at="2026-02-01T00:00:00+00:00")])  # improving
+    db.record_nodes([_node_row("b1", 9.0, is_leaf=False, run_id="r3", measured_at="2026-03-01T00:00:00+00:00")])  # worse + newer
+    (n,) = list(db.iter_nodes())
+    assert (n.value_us, n.run_id, n.measured_at) == (2.0, "r2", "2026-02-01T00:00:00+00:00")
 
 
 # Today's-before-enrichment ``node`` schema (gpu present, no label-quality columns) —
@@ -549,20 +569,23 @@ def test_iter_nodes_pre_enrich_readonly_degrades(tmp_path) -> None:
 
 def test_merge_nodes_carries_enriched_fields_and_sums_visits(tmp_path) -> None:
     """``merge_nodes`` propagates the label-quality fields through ``iter_nodes`` →
-    ``record_nodes``: a winning source row carries its status/run_id/stats, visits
-    SUM on a key collision, and a fail source row never downgrades an ok dest row."""
+    ``record_nodes``: a source leaf with the NEWER measurement carries its
+    status/run_id/stats over, visits SUM on a key collision, and a fail source row
+    never downgrades an ok dest row."""
     dst = SearchDB(tmp_path / "dst.db")
     dst.record_nodes(
         [
-            _node_row("shared", 5.0, visits=2, is_leaf=True, run_id="dst"),
-            _node_row("ok_here", 4.0, visits=1, is_leaf=True, run_id="dst"),
+            _node_row("shared", 5.0, visits=2, is_leaf=True, run_id="dst", measured_at="2026-01-01"),
+            _node_row("ok_here", 4.0, visits=1, is_leaf=True, run_id="dst", measured_at="2026-01-01"),
         ]
     )
     src = SearchDB(tmp_path / "src.db")
     src.record_nodes(
         [
-            _node_row("shared", 2.0, visits=3, is_leaf=True, variance=0.3, n_samples=6, run_id="src"),  # wins
-            _node_row("ok_here", 1.0, visits=1, is_leaf=True, status="bench_fail", run_id="src"),  # must NOT downgrade
+            # newer measurement → wins the shared key
+            _node_row("shared", 2.0, visits=3, is_leaf=True, variance=0.3, n_samples=6, run_id="src", measured_at="2026-02-01"),
+            # newer but a fail → must NOT downgrade the ok dest row
+            _node_row("ok_here", 1.0, visits=1, is_leaf=True, status="bench_fail", run_id="src", measured_at="2026-02-01"),
         ]
     )
     src.close()

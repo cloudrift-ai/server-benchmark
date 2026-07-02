@@ -24,8 +24,9 @@ Pure persistence layer — no MCTS state, no propagation walks. Tables:
 - ``node`` — one row per search-tree node (every partial branch + leaf of a
   per-kernel autotune search), keyed by ``digest(context_key, op_sig,
   tunable-knob set)``. Each row carries the full feature dict passed to the
-  prior (``H_*`` + ``S_*`` + knobs), a keep-the-minimum value-of-position
-  latency (``1/best_reward`` — the best latency reachable below the node), and
+  prior (``H_*`` + ``S_*`` + knobs), a value-of-position latency (``1/best_reward``
+  — the best latency reachable below the node; keep-min across sessions for
+  branches, newest-measurement for leaves), and
   a ``parent_key`` pointer so ancestry between rows is recoverable. Content-keyed
   (parent-tree-independent), so it survives schema-version drops like ``perf``.
   Written once per finished search by :meth:`SearchDB.record_nodes`, fed by the
@@ -148,9 +149,10 @@ class NodeRow:
     collide, and kept as a column so the dataset groups/filters by hardware.
     ``features`` is the full feature dict the prior sees (``H_*`` regime + ``S_*``
     structure + tunable knobs). ``value_us`` is the value-of-position latency (best
-    reachable below the node); :meth:`SearchDB.record_nodes` keeps the minimum on
-    re-encounter. ``depth`` is the node's distance from the sentinel root (top
-    forks = 1).
+    reachable below the node); on re-encounter :meth:`SearchDB.record_nodes` keeps
+    the minimum for branches (a coverage bound) but takes the NEWEST measurement for
+    leaves (a re-measurement — keep-min would drift to the noise floor). ``depth``
+    is the node's distance from the sentinel root (top forks = 1).
 
     Label-quality columns (all default to the pre-enrichment unknowns so old rows
     and positional constructions keep working): ``visits`` is the benched-descendant
@@ -551,22 +553,32 @@ class SearchDB:
     # ------------------------------------------------------------------
 
     def record_nodes(self, rows: list[NodeRow]) -> None:
-        """Keep-the-minimum upsert a batch of search-tree node rows (one finished
-        per-kernel search's worth). ``value_us`` is a value-of-position label that
-        only falls on re-encounter, so a worse-or-equal value never overwrites a
-        known one; ``context_key`` / ``op_sig`` / ``parent_key`` are functions of
-        ``node_key`` and re-stamp identically. ``n_updates`` counts writes (incl.
-        non-improving re-encounters) and ``updated_at`` refreshes each time.
+        """Upsert a batch of search-tree node rows (one finished per-kernel search's
+        worth), with **per-kind value semantics**: a *branch*'s ``value_us`` is a
+        value-of-position coverage bound (min over whatever its sessions explored
+        below it), so keep-the-minimum is right — a session that found a better
+        descendant genuinely tightened the bound. A *leaf*'s ``value_us`` is a
+        re-measurement of ONE config, where min-of-K noisy medians drifts to the
+        noise floor (selectively, on the configs revisited most) — so a leaf row is
+        **newest-measurement-wins**, ordered by ``measured_at`` (ISO-8601 UTC compares
+        lexicographically; a stale measurement never resurrects, which also makes
+        ``merge_nodes`` direction-independent). Rows with unknown leaf-ness
+        (pre-enrichment, ``is_leaf`` NULL) keep the conservative branch behavior.
+        Consequence: a cross-session tree is no longer value-monotone — an ancestor
+        branch may hold a historical bound below its leaf's current measurement.
+        ``context_key`` / ``op_sig`` / ``parent_key`` are functions of ``node_key``
+        and re-stamp identically. ``n_updates`` counts writes (incl. non-replacing
+        re-encounters) and ``updated_at`` refreshes each time.
 
         Label-quality columns: ``visits`` SUM-accumulates on every write (the total
         benched descendants ever informing this node's label — a confidence weight,
         not an exact ledger); the value-paired columns (``is_leaf`` / ``variance`` /
         ``n_samples`` / ``status`` / ``run_id`` / ``measured_at``, stamped ``now``
-        when the row carries none) travel WITH ``value_us`` — replaced on an
-        improving write, untouched otherwise. Status follows ``record_perf``'s
-        keep-best-``ok`` policy: an ``ok`` row is never downgraded by a later
-        ``bench_fail`` (whatever the fail's sentinel ``value_us``), while a fail row
-        upgrades to ``ok`` unconditionally; fail-vs-fail keeps the min sentinel.
+        when the row carries none) travel WITH ``value_us`` — replaced together,
+        untouched otherwise. Status follows ``record_perf``'s keep-best-``ok``
+        policy: an ``ok`` row is never downgraded by a later ``bench_fail``
+        (whatever the fail's sentinel ``value_us``), while a fail row upgrades to
+        ``ok`` unconditionally; fail-vs-fail follows the leaf rule (newest sentinel).
 
         Manual lookup-guard + INSERT/UPDATE (the ``record_perf`` / ``record_lowering``
         idiom) rather than ``INSERT OR REPLACE`` — the latter would reset
@@ -578,7 +590,7 @@ class SearchDB:
             is_leaf = None if r.is_leaf is None else int(r.is_leaf)
             measured = r.measured_at or now
             existing = self._conn.execute(
-                "SELECT value_us, n_updates, visits, status FROM node WHERE node_key = ?", (r.node_key,)
+                "SELECT value_us, n_updates, visits, status, measured_at FROM node WHERE node_key = ?", (r.node_key,)
             ).fetchone()
             if existing is None:
                 self._conn.execute(
@@ -607,11 +619,20 @@ class SearchDB:
                     ),
                 )
                 continue
-            cur_val, n_upd, cur_visits, cur_status = existing
+            cur_val, n_upd, cur_visits, cur_status, cur_measured = existing
             visits = (cur_visits or 0) + r.visits
-            ok_downgrade = cur_status == "ok" and r.status != "ok"
-            improving = (cur_status != "ok" and r.status == "ok") or (not ok_downgrade and r.value_us < cur_val)
-            if improving:
+            if cur_status == "ok" and r.status != "ok":
+                replace = False  # a failure never downgrades a good row
+            elif cur_status != "ok" and r.status == "ok":
+                replace = True  # a clean measurement always supersedes a fail sentinel
+            elif r.is_leaf:
+                # Re-measurement of one config: strictly-newer wins (NULL = pre-
+                # timestamp row, always superseded); equal timestamps (same batch /
+                # re-merged snapshot) don't churn the row.
+                replace = cur_measured is None or measured > cur_measured
+            else:
+                replace = r.value_us < cur_val  # branch: keep the coverage bound
+            if replace:
                 self._conn.execute(
                     "UPDATE node SET value_us = ?, features = ?, parent_key = ?, n_updates = ?, updated_at = ?, "
                     "visits = ?, is_leaf = ?, variance = ?, n_samples = ?, status = ?, run_id = ?, measured_at = ? "
@@ -684,12 +705,14 @@ class SearchDB:
             )
 
     def merge_nodes(self, src_path: Path | str) -> int:
-        """Keep-min merge the ``node`` table from the autotune DB at ``src_path`` into
-        this DB, and return the number of source node rows processed.
+        """Merge the ``node`` table from the autotune DB at ``src_path`` into this
+        DB, and return the number of source node rows processed.
 
         Source rows are read read-only (:meth:`open_readonly`) and re-upserted through
-        :meth:`record_nodes`, so they inherit its exact keep-the-minimum semantics: a
-        source row wins only when strictly faster for the same ``node_key``. Because
+        :meth:`record_nodes`, so they inherit its exact per-kind semantics: on a shared
+        ``node_key`` a source *branch* wins only when strictly faster (keep-min) and a
+        source *leaf* only when its measurement is strictly newer — so the merge is
+        direction-independent. Because
         ``node_key`` folds the ``gpu`` identity, that collision never happens *across
         cards* — so merging another GPU's node store into this one accumulates a
         cross-hardware dataset and leaves every other card's rows untouched. The use
@@ -710,8 +733,8 @@ class SearchDB:
         # One transaction around the whole batch. ``record_nodes`` runs row-at-a-time on
         # this autocommit connection (``isolation_level=None``), which for a cross-card
         # merge of 10k+ rows would mean one fsync per row; an explicit BEGIN/COMMIT
-        # collapses it to a single commit (keep-min within the batch still sees prior
-        # inserts on the same connection).
+        # collapses it to a single commit (the per-kind upsert within the batch still
+        # sees prior inserts on the same connection).
         self._conn.execute("BEGIN")
         try:
             self.record_nodes(rows)

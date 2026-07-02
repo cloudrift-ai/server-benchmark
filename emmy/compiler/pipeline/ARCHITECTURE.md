@@ -380,8 +380,10 @@ The autotune state is split across two cooperating modules:
   `n_samples`, `backend`, `status`, `knobs`), and a `node` table — one
   row per **search-tree node** (every partial branch + leaf of a per-kernel
   search), keyed by `digest(context_key, gpu, op_sig, tunable-knob set)`, carrying
-  the full feature dict the prior sees (`H_*` + `S_*` + knobs), a keep-the-minimum
-  value-of-position latency (`1/best_reward`), a `parent_key` pointer (ancestry
+  the full feature dict the prior sees (`H_*` + `S_*` + knobs), a value-of-position
+  latency (`1/best_reward`; **per-kind upsert** — branch rows keep-min, a coverage bound a faster descendant
+  genuinely tightens, while leaf rows take the **newest measurement**, since a leaf is a re-measurement of one
+  config and min-of-K noisy medians drifts to the noise floor), a `parent_key` pointer (ancestry
   is the live tree edge, not knob-subset inference), a `gpu` column, and
   `depth`/`n_updates` bookkeeping (written by `record_nodes`, fed by
   `TuningSearch._collect_node_records`). **Label-quality columns** (additive migration; old rows degrade to
@@ -391,16 +393,18 @@ The autotune state is split across two cooperating modules:
   own bench stats), `status` (`ok`/`bench_fail` — failed leaves ARE recorded, with the bench watchdog's sentinel
   latency as `value_us`, the negative examples a search prior needs; an `ok` row is never downgraded by a later
   fail, a fail upgrades to `ok` unconditionally), and `run_id`/`measured_at` (the tune session — one id per CLI
-  invocation, minted in `handle_tune` — and time that produced the CURRENT `value_us`; they replace only on an
-  improving write, so cross-run keep-min drift is traceable). The `gpu` identity (`Context.hardware_id` —
+  invocation, minted in `handle_tune` — and time that produced the CURRENT `value_us`; they replace only when the
+  value does, so the branch rows' remaining cross-run keep-min is traceable). The `gpu` identity
+  (`Context.hardware_id` —
   the PCIe product name) is folded into the key so a **cross-hardware** dataset
   never collides: `context_key` (cc + opt only) can't separate same-die SKUs (H100
-  vs H200 share cc + SM count), so without `gpu` their rows would merge and keep-min
+  vs H200 share cc + SM count), so without `gpu` their rows would merge and the upsert
   would silently drop one card's data (the `H_total_mem` VRAM feature is what then
   lets the prior model the difference). `SearchDB.merge_nodes(src_db)` is the
   cross-hardware accumulation entry point: it reads another autotune DB's `node`
   rows read-only and re-upserts them through `record_nodes`, so a card's node data
-  measured on a rented GPU folds into one canonical DB with the same keep-min and
+  measured on a rented GPU folds into one canonical DB with the same per-kind upsert
+  (direction-independent: a stale leaf snapshot never resurrects) and
   no cross-card collision (driven by `scripts/merge_node_db.py` / the
   `collect-node-data` skill).
   `node` is content-keyed like `perf` (parent-tree-independent) and survives a
@@ -588,8 +592,9 @@ saw `FK`, the dominant knob for a reduction, and greedy stayed on `FK=1`.)
 Alongside that reservoir feed (not replacing it), the same finished tree is walked once by
 `TuningSearch._collect_node_records` and persisted to the `node` SQLite table via `SearchDB.record_nodes` — the keyed,
 deduplicated, parent-linked counterpart to the unkeyed/sampled reservoir. Each node keys on
-`digest(context_key, op_sig, tunable-knob set)`, so the same position re-encountered across runs collapses to one row with a
-keep-the-minimum value-of-position latency; it carries the full `knob_features` input dict, and stores `parent_key` from the
+`digest(context_key, op_sig, tunable-knob set)`, so the same position re-encountered across runs collapses to one row
+(branches keep the min — a coverage bound; leaves take the newest measurement, so re-benches don't drift the label to
+the min-of-noise floor); it carries the full `knob_features` input dict, and stores `parent_key` from the
 live `node.parent` edge so ancestry is recoverable. Each row also carries the label-quality columns (`visits` /
 `is_leaf` / `variance` / `n_samples` / `status` / `run_id` / `measured_at` — see the `SearchDB` bullet above): the
 walk reads `SearchNode.visits`, the leaf's `bench_stats`/`bench_status` stashed by `observe`, and now emits

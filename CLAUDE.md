@@ -134,7 +134,8 @@ same worker.
   ever-changing global prior can steer the same-patience search down a new trajectory and bench only the genuinely-new
   variants it surfaces (the old `op_effort` skip-already-tuned gate, which suppressed that re-exploration, is gone).
   Persists `perf` / `lowering` / inventory rows — plus a `node` row per search-tree node (keyed/deduped,
-  keep-min value-of-position latency, full feature dict + `parent_key`, and the label-quality columns:
+  value-of-position latency — keep-min for branches, newest-measurement for leaves so re-benches don't drift
+  the label to the noise floor — full feature dict + `parent_key`, and the label-quality columns:
   `visits` benched-descendant count (SUM-accumulated), `is_leaf`, per-leaf `variance`/`n_samples`, `status` —
   failed benches are recorded as `bench_fail` leaf rows with the watchdog sentinel latency — and the tune
   session's `run_id`/`measured_at`; written alongside the prior's reservoir, read by `eval prior --dataset
@@ -290,7 +291,8 @@ fails fast with a specific message.
 - Cross-hardware node-store merge: `python scripts/merge_node_db.py {--src DB | --remote user@host [--ssh-key PATH]
   [--port N] [--remote-db PATH]} [--db DEST]` — merge the `node` table from another autotune DB (a local snapshot, or a
   WAL-safe `VACUUM INTO` snapshot fetched from a remote host over SSH) into the local canonical DB via the tested
-  `SearchDB.merge_nodes` (keep-min per `node_key`; the GPU-folded key means other cards' rows are never clobbered; the
+  `SearchDB.merge_nodes` (per-kind upsert per `node_key` — branch keep-min, leaf newest-measurement, so a stale
+  snapshot never resurrects an old fast sample; the GPU-folded key means other cards' rows are never clobbered; the
   label-quality columns carry over — `visits` SUMs on a shared key, so re-merging the same snapshot double-counts it).
   Prints a per-card row-count receipt. The copy-back step of the `collect-node-data` skill (rent a GPU → `tune --dataset
   golden` there → merge its node rows home).
@@ -303,7 +305,7 @@ fails fast with a specific message.
   **by default for node collection only** — deterministic PUCT would bench just the incumbent prior's preferred
   branches, so the node dataset would only ever confirm it; plain `emmy tune` keeps eps 0), polls the remote log
   **internally** until done, then (unless `--no-merge`) reuses
-  `merge_node_db.fetch_and_merge` to fetch + keep-min merge the node rows into the local DB and print the per-card
+  `merge_node_db.fetch_and_merge` to fetch + merge the node rows into the local DB and print the per-card
   receipt — ending `status: COMPLETE (tune + merge done)`. One compact summary; a log tail only on failure. Robustness
   baked in: argv-list ssh (zsh-safe), `[e]mmy tune` bracket-pgrep, one ssh per poll, non-tty-safe detached launch
   (`-n` + `< /dev/null`, so `nohup … &` doesn't hang the launch ssh). Run via Bash `run_in_background: true` (the tune is

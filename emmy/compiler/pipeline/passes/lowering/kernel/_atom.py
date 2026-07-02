@@ -364,14 +364,20 @@ def _sync_operands(
     per-row statistic — its reduce ``Loop`` + scalar epilogue) is split at the K seam
     (:func:`_split_stat_prologue`): the prefix runs ONCE per tile row (:func:`sync_stat_fill`,
     returned as the transport prologue) and the per-cell fill reads the bridged values back from
-    the stat smem rows. The schedule's eligibility guarantees exact-cover geometry (no masked
-    overhang), so the σ needs no clamps."""
+    the stat smem rows. The schedule's eligibility guarantees exact cover on N and K only; a
+    masked / symbolic **M** clamp-reads the overhanging rows in-bounds (the A fill σ and the stat
+    prologue σ — a duplicate of the last valid row is computed and its store discarded by the
+    ``RegStore`` guard, the same contract the copy transports follow)."""
     m_name, n_name, k_name = c.m_axis.name, c.n_axis.name, c.k_axis.name
     row_base, col_base = _tile_base(mn)
     pro, cell, stats = _split_stat_prologue(c.a_body, k_name)
 
+    def m_coord(row) -> Expr:
+        t = BinaryExpr("+", row_base, row)
+        return _clamp_last(t, mn[0].ext) if mn[0].mask else t
+
     def a_value(k0, row, col):
-        sigma = Sigma({m_name: BinaryExpr("+", row_base, row), k_name: BinaryExpr("+", k0, col)})
+        sigma = Sigma({m_name: m_coord(row), k_name: BinaryExpr("+", k0, col)})
         stmts: list[Stmt] = [Load(names=(nm,), input=_stat_slab(nm), index=(row,)) for nm in stats]
         stmts += [s.rewrite(lambda nm: nm, sigma) for s in cell]
         return stmts, c.a_name
@@ -384,7 +390,7 @@ def _sync_operands(
     prologue: list[Stmt] = []
     if stats:
         row_axis = Axis(name="_sr", extent=mn[0].tile)
-        sigma = Sigma({m_name: BinaryExpr("+", row_base, Var(row_axis.name))})
+        sigma = Sigma({m_name: m_coord(Var(row_axis.name))})
         row_body = [s.rewrite(lambda nm: nm, sigma) for s in pro]
         prologue = sync_stat_fill(stats=stats, slab_of=_stat_slab, row_axis=row_axis, row_body=row_body, cta=cta)
     operands = (

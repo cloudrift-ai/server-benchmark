@@ -36,6 +36,14 @@ step unconditional — no knobs):
    the ``TileOp``'s schedule (the root's concern); ``_schedule`` maps them onto the grid. A cell
    the lift can't cleanly factor (no reduce, several reduces, or a nested non-flash reduce) stays a
    flat un-annotated ``Map`` (→ the scalar tier).
+4. **The MONOID-producer composition** — a lifted ``Map(source=Reduction)`` whose body is the
+   statistic's scalar epilogue + a fresh free (column) ``Loop`` over an ⊗-fold contraction reading
+   the statistic (the fused norm→linear edge, ``rmsnorm(x)·nw @ w``) ALSO nodifies to a computed-A
+   :class:`Contraction` whose A cone carries the per-row statistic prologue
+   (``_atomize.bind_prologue_contraction``, structure-only), its column axis joining the grid. Both
+   forms are scheduled and merged into ONE fork — the ``Map`` rows first (option-0 stays the
+   conservative coop pick), then the Contraction form's warp (mma) rows over the ``sync``
+   compute-fill stage; a warp ``TILE`` pin keeps the Contraction rows alone.
 
 Flash must precede online-softmax which must precede the lift: each later step consumes the
 ``Accum``\\ s an earlier one matches. A **symbolic** axis (dynamic ``seq_len``) is left
@@ -57,9 +65,13 @@ from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.tile import Contraction, Map, Placement, Reduction, TileOp, TilePlan
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import Fork
-from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction
+
+# NOTE: no ``Knob`` objects (``TILE`` / ``REDUCE`` / ``STAGE``) may be imported here — ``Pass.load``
+# scans rule modules for ``Knob`` attrs and OFF-fills any it finds bare onto every variant of the
+# pass. Pin reads / knob-key spelling ride the ``_schedule`` helpers instead.
+from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction, bind_prologue_contraction
 from emmy.compiler.pipeline.passes.lowering.tile._flash import is_flash_score_producer, is_fold_offer_site, try_flash
-from emmy.compiler.pipeline.passes.lowering.tile._schedule import schedule
+from emmy.compiler.pipeline.passes.lowering.tile._schedule import prologue_knob_bases, schedule, warp_tile_pinned
 from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse
 from emmy.compiler.pipeline.pipeline import LoweringError
 from emmy.compiler.pipeline.search.space import place_decision
@@ -280,6 +292,12 @@ def _order_free_by_output(node: Map | Reduction, free: list) -> tuple:
     return tuple(sorted(free, key=lambda ax: pos[ax.name]))
 
 
+def _as_list(scheduled) -> list:
+    """Normalize a ``schedule()`` result (a single ``TileOp``, a branch ``Fork``, or a candidate
+    list — possibly empty) into a flat options list for the recognizer's structural merge."""
+    return scheduled if isinstance(scheduled, list) else [scheduled]
+
+
 def rewrite(match: Match, root: Node) -> Fork | list[TileOp] | TileOp | Graph | None:
     # (0) Schedule an UNMAPPED ``TileOp`` — a kernel that recognition emitted as a *graph
     # rewrite* (flash's fused fragment, ``try_flash``) rather than scheduling inline, because a
@@ -330,4 +348,27 @@ def rewrite(match: Match, root: Node) -> Fork | list[TileOp] | TileOp | Graph | 
     # ``inputs`` is seeded from the matched ``LoopOp`` (the matcher populated its real Tensors) so
     # the scheduler can read operand shapes (the shared-row stage detection); the matcher refreshes
     # it from the graph again when a later pass matches the scheduled op.
-    return schedule(TileOp(op=node, place=Placement(free=free), inputs=dict(loop.inputs)), loop.name, knob_base)
+    map_tile = TileOp(op=node, place=Placement(free=free), inputs=dict(loop.inputs))
+    pro = bind_prologue_contraction(node, free) if place_decision("cone") == "fuse" else None
+    if pro is None:
+        return schedule(map_tile, loop.name, knob_base)
+    # (4) The MONOID-producer composition — the fused norm→linear edge (``rmsnorm(x)·nw @ w``):
+    # the tail contraction ALSO nodifies to a computed-A :class:`Contraction` whose A cone carries
+    # the per-row statistic prologue (:func:`bind_prologue_contraction`), its column axis joining
+    # the grid. Both forms are scheduled and their candidates merged into ONE fork: the ``Map``
+    # rows first (the cooperative / serial reduce tiers — option-0 stays the conservative coop
+    # pick, lowerable everywhere), then the Contraction form's warp (mma) rows (the sync
+    # compute-fill tier — zero rows on fp32 / no atoms / bad geometry). A warp ``TILE`` pin is
+    # authoritative: the Contraction rows alone (the pin demands the mma tier; offering the Map
+    # sibling would let cold greedy pick past the pin). Each form's rows carry the OTHER form's
+    # family keys as decided-empty stamps, so every leaf row spells the same key set (the
+    # evidence pick's prefix-consistency: an absent key reads as "free").
+    c_node, n_ax = pro
+    con_base, map_base = prologue_knob_bases(c_node.k_axis.name, c_node.a_operand[0].axis.name)
+    con_tile = TileOp(op=c_node, place=Placement(free=(*free, n_ax)), inputs=dict(loop.inputs))
+    con = _as_list(schedule(con_tile, loop.name, {**knob_base, **con_base}))
+    if con and warp_tile_pinned():
+        return con if len(con) > 1 else con[0]
+    maps = _as_list(schedule(map_tile, loop.name, {**knob_base, **map_base}))
+    merged = [*maps, *con]
+    return merged if len(merged) > 1 else merged[0]

@@ -16,10 +16,13 @@ pair instead of spelling A then B. The staged K-loop itself is ONE
 skeleton, :func:`staged_kloop` (``fill → commit → wait → drain → Sync``, ``depth`` the sole
 buffering knob), driven by a :class:`Transport` strategy (:class:`CpAsyncTransport` /
 :class:`TmaTransport`) — the two producers put behind one ``fill``/``commit``/``wait`` seam. The
-(plain row-major, NONE-swizzle) slab feeds the same staged ``LdmatrixLoad`` / scalar ``Load`` drain
-regardless of which producer (cp.async / TMA) filled it; ``_atom._staged`` — the one atom-agnostic
-driver — builds the transport, asks the atom strategy for the drain leaf, and calls
-:func:`staged_kloop`.
+slab feeds the same staged ``LdmatrixLoad`` / scalar ``Load`` drain regardless of which producer
+(cp.async / TMA) filled it. cp.async/sync slabs are plain row-major (NONE-swizzle, linear writes
+and reads); a TMA slab feeding an mma drain is **swizzled** (:func:`pick_swizzle_atom` per operand
+— the hardware permutes 16 B chunks during the box copy and each staged ``LdmatrixLoad`` applies
+the matching address XOR), which is what keeps the ldmatrix drain free of smem bank conflicts.
+``_atom._staged`` — the one atom-agnostic driver — builds the transport, asks the atom strategy
+for the drain leaf, and calls :func:`staged_kloop`.
 
 Leading ``_`` so the pass loader (globs ``*.py``, skips ``_``-prefixed) skips it.
 """
@@ -195,17 +198,50 @@ def sync_stat_fill(
 # --------------------------------------------------------------------------- #
 
 # TMA destination smem must be aligned (``cp.async.bulk.tensor`` faults otherwise);
-# 128 B satisfies the NONE-swizzle box copy.
+# 128 B satisfies the NONE-swizzle box copy. A swizzled slab aligns to the full swizzle
+# atom (8 rows × width) — the coordinate-only ldmatrix XOR only reproduces the hardware
+# deposit when the slab base zeroes the swizzle's source address bits.
 TMA_SLAB_ALIGN = 128
+_SWIZZLE_SLAB_ALIGN = {"NONE": TMA_SLAB_ALIGN, "B32": 256, "B64": 512, "B128": 1024}
+
+# TMA hardware-swizzle atom widths in bytes, widest-first. The widest atom that divides a
+# slab's inner-row byte span wins (best bank-conflict spread on the ldmatrix drain).
+_SWIZZLE_BY_BYTES: tuple[tuple[int, str], ...] = ((128, "B128"), (64, "B64"), (32, "B32"))
 
 
-def tma_descriptor(name: str, src: str, box: tuple[int, int], dtype: str) -> TmaDescriptor:
+def pick_swizzle_atom(inner_elems: int, elem_bytes: int) -> tuple[int, str]:
+    """The TMA swizzle atom for a slab whose inner (contiguous) row is ``inner_elems``
+    elements of ``elem_bytes``. Returns ``(atom_elems, mode)``: the widest atom in
+    ``{128, 64, 32}`` B that fits and divides the span wins — a 256 B inner (128 fp16
+    elems) picks ``B128`` (64 elems, descriptor box split ``[2, 64]``); a 64 B inner (32
+    fp16 elems) picks ``B64`` (32 elems, no split). ``(inner_elems, "NONE")`` when no
+    atom fits (the descriptor keeps the unswizzled box). Shared by the descriptor build,
+    the box-coordinate split, and the drain's per-slab mode derivation so all three agree
+    (a disagreement makes the descriptor's swizzle claim a width its box doesn't have —
+    a TMA copy deadlock)."""
+    inner_bytes = inner_elems * elem_bytes
+    for wb, mode in _SWIZZLE_BY_BYTES:
+        we = wb // elem_bytes
+        if 1 <= we <= inner_elems and inner_elems % we == 0 and inner_bytes % wb == 0:
+            return we, mode
+    return inner_elems, "NONE"
+
+
+def tma_descriptor(name: str, src: str, box: tuple[int, int], dtype: str, *, swizzle: str = "NONE", elem_bytes: int = 4) -> TmaDescriptor:
     """A host-encoded ``CUtensorMap`` for the operand ``src`` with a ``box`` tile
     (C-order). The source globalDim is resolved from the bound array at launch, so a
     symbolic (masked-M) extent rides the runtime shape and TMA zero-fills the box
-    overhang. NONE swizzle: the plain row-major slab feeds the staged ``LdmatrixLoad``
-    drain directly."""
-    return TmaDescriptor(name=name, src_buf=src, src_shape=(), box_extents=box, swizzle="NONE", dtype=dtype)
+    overhang. ``swizzle="NONE"``: the plain row-major slab feeds the staged
+    ``LdmatrixLoad`` drain directly. A swizzled descriptor whose inner box span exceeds
+    the swizzle atom SPLITS the inner dim down to the atom (TMA rejects a swizzle
+    narrower than the inner box dim; the linear smem deposit is unchanged — ``[rows,
+    cols/atom, atom]`` is the same contiguous layout), the matching box-coordinate split
+    living in :meth:`TmaTransport.fill`."""
+    if swizzle != "NONE":
+        atom, _ = pick_swizzle_atom(box[-1], elem_bytes)
+        if atom < box[-1]:
+            box = (*box[:-1], box[-1] // atom, atom)
+    return TmaDescriptor(name=name, src_buf=src, src_shape=(), box_extents=box, swizzle=swizzle, dtype=dtype)
 
 
 # --------------------------------------------------------------------------- #
@@ -244,6 +280,11 @@ class Operand:
     shape: tuple[int, int]  # (rows, cols) of one ring slot
     index: Callable[[Expr], Callable]  # k0 -> ((row, col) -> gmem index)   (cp.async)
     coords: Callable[[Expr], tuple]  # k0 -> gmem box origin                (TMA)
+    # TMA smem swizzle mode this operand's slab is written with ("NONE"/"B32"/"B64"/"B128") —
+    # derived by the mma tier (`_MmaOps.slab_swizzles`, TMA transport only: the hardware swizzles
+    # in-copy and the ldmatrix drain applies the matching XOR; a scalar plain-`Load` drain and the
+    # cp.async/sync write paths stay NONE).
+    swizzle: str = "NONE"
 
     @property
     def slab(self) -> str:
@@ -418,11 +459,32 @@ class TmaTransport:
         return sum(math.prod(op.shape) for op in self.operands) * self.elem_bytes
 
     def slab_decls(self, ring: int) -> list[Stmt]:
-        # TMA destination smem must be 128 B-aligned; one mbarrier per ring slot.
-        decls: list[Stmt] = [tma_descriptor(op.desc, op.buf, op.shape, self.slab_dtype) for op in self.operands]
-        decls += [slab_smem(op.slab, ring * op.shape[0], op.shape[1], self.slab_dtype, align=TMA_SLAB_ALIGN) for op in self.operands]
+        # TMA destination smem must be 128 B-aligned (a swizzled slab to its full atom period,
+        # so the drain's from-base XOR matches the hardware deposit); one mbarrier per ring slot.
+        decls: list[Stmt] = [
+            tma_descriptor(op.desc, op.buf, op.shape, self.slab_dtype, swizzle=op.swizzle, elem_bytes=self.elem_bytes)
+            for op in self.operands
+        ]
+        decls += [
+            slab_smem(op.slab, ring * op.shape[0], op.shape[1], self.slab_dtype, align=_SWIZZLE_SLAB_ALIGN[op.swizzle])
+            for op in self.operands
+        ]
         decls.append(Smem(name=self.mbar, extents=(ring,), dtype="unsigned long long"))
         return decls
+
+    def _box_coords(self, op: Operand, k0: Expr) -> tuple:
+        """The operand's TMA box-origin coordinates at K-chunk ``k0`` — split to match a
+        swizzle-split descriptor box: when the box's inner dim was split down to the swizzle atom,
+        the origin's inner coordinate divides by the atom width and a literal-0 atom coordinate is
+        appended (the origin is always atom-aligned: the inner coordinate is a multiple of the slab
+        inner span — ``bk_elems`` steps for A, ``tile_n`` blocks for B — which the atom divides)."""
+        coords = op.coords(k0)
+        if op.swizzle == "NONE":
+            return coords
+        atom, _ = pick_swizzle_atom(op.shape[-1], self.elem_bytes)
+        if atom >= op.shape[-1]:
+            return coords
+        return (*coords[:-1], BinaryExpr("/", coords[-1], _lit(atom)), _lit(0))
 
     def prologue(self, ring: int) -> list[Stmt]:
         # Init every ring slot's mbarrier (one producer ``arrive`` per phase), then a CTA barrier so
@@ -438,7 +500,7 @@ class TmaTransport:
                     smem=op.slab,
                     smem_index=(op.slot_row(slot) or _lit(0), _lit(0)),
                     desc=op.desc,
-                    coords=op.coords(k0),
+                    coords=self._box_coords(op, k0),
                     mbar=self.mbar,
                     mbar_slot=slot,
                 )

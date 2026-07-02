@@ -1115,6 +1115,26 @@ def test_tma_deep_ring_matches_gmem_direct_bit_for_bit(monkeypatch, depth, M):
     assert ring_src.count("mbarrier_init(&_mbar[") == depth, f"each of the {depth} ring slots' mbarriers must be initialized"
 
 
+def test_tma_staged_slab_is_swizzled(monkeypatch):
+    """A TMA-staged mma kernel swizzles its operand slabs (CPU render, forced sm_120): the
+    descriptors carry a non-NONE mode picked from each slab's inner span (``_WARP_CODEC``'s
+    ``tile_n`` = 2·2·8 = 32 fp16 elems = 64 B rows → B64, same for A's 32-elem K chunk) and every
+    staged ``ldmatrix`` read XORs its address to undo the hardware chunk permutation. Swizzle
+    relocates smem bytes only — the bit-identity tests above pin the numerics; this pins the mode
+    ON (the rebuilt transport shipped NONE-swizzle slabs and the conflict-bound drain cost the
+    fp16 squares ~1.3-1.5× vs the pre-rebuild swizzled bar)."""
+    monkeypatch.setenv("EMMY_TILE", _WARP_CODEC)
+    monkeypatch.setenv("EMMY_STAGE", "d2/tma")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    lowered = Pipeline.build(CUDA_PASSES).run(_parity_mma_graph("static", M=256), ctx=Context(compute_capability=(12, 0)))
+    op = lowered.nodes["o"].op
+    modes = {d.name: d.swizzle for d in op.tma_descriptors}
+    assert modes and all(m != "NONE" for m in modes.values()), f"TMA slabs must swizzle: {modes}"
+    assert modes["_desc_b"] == "B64", f"B slab (tile_n=32 fp16 = 64 B rows) must pick B64: {modes}"
+    # Every staged ldmatrix applies the XOR (the `(e) ^ ((((e) >> 6) & mask) << 3)` form).
+    assert ") ^ ((((" in op.kernel_source, "the staged ldmatrix drain must XOR its slab address"
+
+
 @requires_sm90
 @requires_cuda
 def test_bf16_operands_stage_via_cp_async(monkeypatch):

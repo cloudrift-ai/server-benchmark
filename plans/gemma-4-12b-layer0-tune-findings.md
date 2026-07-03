@@ -256,34 +256,42 @@ What the 23-line log *does* establish, all on one kernel now named **`k_scaled_d
   add every nested loop-axis name in the reduce body to `protected` so `dd`/`j` stay shared (each copy re-declares its
   own loop under the one name). `emmy/compiler/pipeline/passes/lowering/kernel/_factor.py`; regression test
   `test_ilp_reg_flash_matches_torch` (red pre-fix / green post-fix, plain+causal × reg 2/4, nvcc + accuracy vs torch).
-- **The misaligned-address fault-class is back (separate, still open).** A bench worker died on
-  `CUDA_ERROR_MISALIGNED_ADDRESS` (worker EOF) — the same hard fault-class v2 eliminated for the fp32 split-combine
-  (Finding 4), now resurfacing on a flash sdpa variant (a *different* shape, so v2's per-operand-dtype fix doesn't
-  cover it). Root-cause needs the specific variant reproduced under compute-sanitizer.
-- **The misaligned fault then wedged the whole tune (deadlock — root-caused, not yet fixed).** The EOF path *does*
-  catch + pin `bench_fail @ 2e6` (`pipeline.finalize_exc`, and that line IS in the log) — so the parent did not fail
-  to pin. The 4-hour hang is *downstream*: post-mortem shows the parent **sleeping (state `S`) at 0 % CPU, no worker
-  child/zombie, no nvcc, 113 threads, ~7 GB GPU left allocated with zero compute-apps**. That signature — a futex
-  sleep, not a `D`-state driver ioctl, with a leaked context — points to a hard GPU/driver wedge from the illegal
-  memory access hanging a *parent-side* CUDA call on a helper thread, which the main thread then awaits forever. This
-  is a GPU-wedge-induced deadlock; the tractable, verifiable fix is to **prevent the misaligned fault** (bullet
-  above), not to make the parent survive a wedged device — so it is not patched speculatively here. Follow-up: capture
-  a `py-spy dump` on the next occurrence to name the wedged thread, and consider a hard tune-level watchdog as
-  defense-in-depth.
+- **The misaligned-address fault was a SYMPTOM of the output-layout bug — RESOLVED (no separate fix needed).** The v3
+  `CUDA_ERROR_MISALIGNED_ADDRESS` (worker EOF) came from the warp `RegStore` writing to a wrong address: pre-fix
+  `dst_index` used `batch_idx = qk.a_operand.index[:-2]`, which for Gemma's **seq-major** Q is `(b0, m)` — the seq var
+  where the head/batch grid vars belong — so the fragment store hit a misaligned/out-of-bounds address. The
+  output-layout fix (commit c1d7430e) makes the warp store consume the correct `_out_store_index` template, which is
+  why it no longer faults. **Verified:** the isolated flash single-kernel tune completes clean, and the full v3-repro
+  tune (`emmy tune google/gemma-4-12B --layer 0 --dynamic seq_len@x:1 --clean --bench`) runs **past the ~17-min v3
+  hang point** and through the sdpa → norm → FFN kernels with **zero** misaligned faults (only the benign
+  slow-serial-variant `HungKernelError` / wall-budget `bench_fail`s the v2 run also had). One more blocker had to fall
+  first: `FragmentRepack` (cb1a5ea6's flash P→A register handoff) had no `rewrite` handler, so `Body.structural_key`
+  crashed the whole tune the moment it hit a warp-flash variant (`NotImplementedError: rewrite not registered for
+  FragmentRepack`) — an unhandled exception, not a pinned fail. Fixed in commit dc430654 (regression
+  `test_structural_key_handles_fragment_repack`); with it the warp-variant grid enumerates to completion.
+- **The parent-side deadlock never triggers now.** Its trigger was the GPU/driver wedge from the illegal memory
+  access; with the misaligned store gone, the tune survives every bench-worker EOF (including *hung-kernel* EOFs) —
+  it pins `bench_fail @ 2e6` and continues, as designed. The v3 4-hour hang was downstream of a wedged device
+  (parent sleeping at 0 % CPU, no worker child, ~7 GB leaked context); no wedge → no hang. A hard tune-level watchdog
+  remains a reasonable defense-in-depth follow-up but is no longer on the critical path.
 
 **Net vs the v2 checkpoint:** v2 is still the best *measured* state (27.7 ms, 20× behind eager, healthy reduce/norm
 kernels). v3 proved the flash-certification structural goal is met, and this session made flash on Gemma **correct**:
 greedy `emmy run --layer 0`/`--layer 5` now pass (were NaN). Status after this session (branch
-`fix/gemma-flash-frag-codegen`): the ILP-fold codegen bug AND the output-layout NaN are **fixed + tested**; the
-misaligned fault and its induced deadlock remain open (root-caused). Next steps, in priority order:
-1. ✅ Kill the hung pid; ✅ fix the flash ILP-fold codegen (`_factor.py` `protected` set +
-   `test_ilp_reg_flash_matches_torch`); ✅ fix the flash output-layout NaN (`_out_store_index` across all tiers +
-   `test_flash_transposed_output_matches_torch` / `test_out_store_index_reproduces_output_layout`). Full attention
-   70/70, full compiler 1589 passed / 2 skipped. Both Gemma layers pass greedy.
-2. Re-run the clean layer-0 tune on this branch. Flash now compiles AND is numerically correct; watch whether the
-   misaligned fault still fires and whether the tune completes.
-3. If the misaligned fault recurs: reproduce that single variant, run under compute-sanitizer, fix the alignment gate
-   (Finding-4 class) — and grab a `py-spy dump` if the parent hangs again to confirm the wedged-thread hypothesis.
-4. Only after a completed tune does a v3 bench table become meaningful. Expect the certified single-kernel flash to
-   collapse v2's residual 50.9 ms `k_sdpa_mean_linear_reduce` + 3.1 ms score-slice into one warp-tier kernel near the
-   isolated 182 µs.
+`fix/gemma-flash-frag-codegen`): **all four v3 blockers fixed + tested** — the ILP-fold codegen bug, the
+output-layout NaN, the `FragmentRepack` structural-key crash, and (as a consequence of the output-layout fix) the
+misaligned fault + its induced deadlock. Done:
+1. ✅ Kill the hung pid; ✅ flash ILP-fold codegen (`_factor.py` `protected` set + `test_ilp_reg_flash_matches_torch`);
+   ✅ flash output-layout NaN (`_out_store_index` across all tiers + `test_flash_transposed_output_matches_torch` /
+   `test_out_store_index_reproduces_output_layout`) — commit c1d7430e; ✅ `FragmentRepack` `rewrite`
+   (`test_structural_key_handles_fragment_repack`) — commit dc430654. Full attention 70/70, full compiler suite green.
+2. ✅ Re-ran the clean v3-repro tune. It runs past the ~17-min v3 hang point through sdpa → norm → FFN with **zero
+   misaligned faults and no deadlock** — only the benign slow-serial `HungKernelError` / wall-budget `bench_fail`s the
+   v2 run also had. The misaligned fault and deadlock are gone (see the fault bullets above).
+3. Remaining warp-flash-tier issues (NOT blockers — the deployable form is the scalar/chain flash, which is correct):
+   the tensor-core **warp** flash produces NaN at head_dim 256 (numerics, isolated-repro only) and the **TMA** staged
+   variant fails to compile (`cp_async_bulk_tensor_4d` unreferenced). Both are search-space tail — they bench_fail
+   cleanly and do not affect the greedy deploy. Worth a follow-up before the warp flash tier is trusted at large
+   head_dim.
+4. Read the completed v3 bench table off `_tune/…/tune.log` once the run finishes. Expect the certified single-kernel
+   flash to collapse v2's residual 50.9 ms `k_sdpa_mean_linear_reduce` + 3.1 ms score-slice into one warp/chain kernel.

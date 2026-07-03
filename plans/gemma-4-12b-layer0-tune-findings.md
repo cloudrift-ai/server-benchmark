@@ -164,3 +164,49 @@ this; Gemma is a good test case (its every kernel is a fusion chain).
   which reads as "never enumerated" — a `0 ok rows (1 bench_fail)` stub row would distinguish lockout from wipeout.
 - **From the Qwen report's notes**: the `.torch.json` reproducer + `--bench-backends` flow worked unchanged; the
   missing-reference gap (Finding 5) was already on file and remains the biggest attribution hole.
+
+## Post-fix retune (2026-07-03, same branch — findings 1/3/4 addressed, no CUTs)
+
+Fixes applied scheduler-first (per the "cuts hide weak spots" rule — no structural CUT was added), then the same
+clean tune + -O3 bench re-run (`_tune/tune-model-gemma4-12b-l0-v2/`, 918 benches vs the baseline's 538 — the
+restored forks nearly doubled the explored space):
+
+- **Findings 1+3 (serial reduce schedules)** were largely closed by the ninth-golden-sweep scheduler fixes already
+  on the branch: the restored `_reduce_specs` catalog fork reaches every norm/mean chain (verified: `k_mean` and
+  both `k_mean_linear_reduce` chains now fork the full `b4..b32/r2/r4` catalog), and the sdpa fragments enumerate
+  the TWISTED coop rows plus the flash warp move grid (`k_sdpa_reduce_60081d`: 32 leaves incl.
+  `a:mma…/w1x1/f1x32`-class tiles; was ONE serial variant).
+- **Finding 4 (misaligned cluster) — root-caused and fixed for real**: the staged fill/slab/descriptor/budget all
+  sized both operands with A's element width; a mixed fp32-A × fp16-B contraction issued 16 B ``cp.async`` chunks
+  at fp32 spacing over fp16 memory. Per-operand `Operand.dtype`/`elem_bytes` now flow through both transports
+  (`test_scalar_cpasync_mixed_dtype_slabs`, red pre-fix / green post-fix; the pinned reproducer runs 421 µs
+  clean). **Zero misaligned-address rows in the retune** (was 36); the 18 remaining `bench_fail`s are slow serial
+  sdpa variants exceeding wall budgets — search cost, not faults.
+
+| Backend | baseline | post-fix | |
+|---|---|---|---|
+| Eager PyTorch | 1394 | 1394 | |
+| torch.compile | 1211 | 1220 | |
+| **Emmy** | **96459** | **27695** | **3.5× better; 69× → 20× behind eager** |
+
+Per-kernel -O3 (isolated reproducers, µs):
+
+| Kernel | baseline | post-fix | vs eager now |
+|---|---|---|---|
+| k_sdpa_mean_linear_reduce | 50821 | 50885 | — (unchanged — see below) |
+| k_sdpa_reduce (score slice) | 33718 | 3076 | 0.08× (11× better, still 12× behind) |
+| k_sdpa_reduce (drain slice) | 73118 | 115 | 0.27× (635× better) |
+| k_mean (input layernorm) | 1521 | 21 | **7.8× FASTER than eager** |
+| k_mean_linear_reduce (post-attn) | 2332 | 117 | **2.15× faster** |
+| k_mean_linear_reduce (post-FFN) | 2586 | 412 | **1.16× faster** |
+| k_linear_reduce (matmul) | 367 | 367 | 0.79× |
+
+Accuracy: `emmy run google/gemma-4-12B --layer 0` passes post-fixes.
+
+**What remains is exactly the finding-2 flash-certification case**: the residual gap is concentrated in
+`k_sdpa_mean_linear_reduce` (50.9 ms, byte-for-byte the baseline number — the fused sdpa+norm+linear chain whose
+TWISTED reduce sits inside a `Map` composite no reduce-partition tier can rescue) and the score-slice
+`k_sdpa_reduce` (3.1 ms — coop-partitioned now, but the streaming flash form is what eager's 251 µs corresponds
+to). Both are the finding-2 fix track (a): widen `try_flash`'s `_recognize`/`_extract_qk` to Gemma's
+mask-as-separate-op + q/k-norm'd/RoPE'd Q/K cones so QK+softmax+PV certifies as ONE flash kernel in model context
+— the fused schedule-friendly form, not a CUT.

@@ -265,3 +265,17 @@ def test_structural_key_changes_after_mutation() -> None:
     g.inputs = ["x", "y", "z"]
     k2 = g.structural_key()
     assert k1 != k2
+
+
+def test_structural_key_handles_fragment_repack() -> None:
+    """``Body.structural_key`` normalizes through ``rewrite`` — every kernel-dialect stmt must
+    register a ``rewrite`` handler or the digest crashes mid-tune. ``FragmentRepack`` (the flash
+    warp P→A register handoff) was missing one, so any warp-flash variant killed the whole tune with
+    ``NotImplementedError: rewrite not registered for FragmentRepack``. Pins that it normalizes, and
+    that the SSA-name canonicalization the digest relies on actually renames its fragments."""
+    from emmy.compiler.ir.kernel.ir import FragmentRepack
+
+    s = FragmentRepack(frag="a0", srcs=("c0", "c1"), ab_dtype="f16")
+    Body((s,)).structural_key()  # must not raise
+    renamed = s.rewrite(lambda n: {"a0": "a9", "c0": "c8", "c1": "c7"}.get(n, n))
+    assert (renamed.frag, renamed.srcs, renamed.ab_dtype) == ("a9", ("c8", "c7"), "f16")

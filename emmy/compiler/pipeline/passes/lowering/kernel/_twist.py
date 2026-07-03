@@ -65,7 +65,14 @@ from emmy.compiler.ir.schedule import Fold, Level, ReduceStage
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Select, Stmt, StridedLoop
 from emmy.compiler.ir.tile.ir import Contraction, Map, Reduction
-from emmy.compiler.pipeline.passes.lowering.kernel._stage import CpAsyncTransport, CtaTile, Operand, staged_kloop
+from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
+    CpAsyncTransport,
+    CtaTile,
+    Operand,
+    TmaTransport,
+    pick_swizzle_atom,
+    staged_kloop,
+)
 
 _ADD = ElementwiseImpl("add")
 _SUB = ElementwiseImpl("subtract")
@@ -149,6 +156,7 @@ def _frag_contraction(
     b_slab: str | None = None,
     b_slot: Expr | None = None,
     b_ldm: int = 0,
+    b_swizzle: str = "NONE",
 ) -> list[Stmt]:
     """One warp-tiled :class:`Contraction` step as fragment codegen — the ``read → ⊗ → fold`` spine
     at fragment residence, geometry off the node (``b_trans`` / operand indices / ``ldm``) and its
@@ -191,7 +199,14 @@ def _frag_contraction(
                     row0 = BinaryExpr("+", b_slot, row0)
                 out.append(
                     LdmatrixLoad(
-                        frag=f"_{c.acc}_b{t}", src_buffer=b_slab, src_index=(row0, col0), role="b", ldm=ldm_b, staged=True, b_trans=b_trans
+                        frag=f"_{c.acc}_b{t}",
+                        src_buffer=b_slab,
+                        src_index=(row0, col0),
+                        role="b",
+                        ldm=ldm_b,
+                        staged=True,
+                        b_trans=b_trans,
+                        swizzle=b_swizzle,
                     )
                 )
             else:
@@ -360,6 +375,16 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
                 )
             )
 
+    # Per-transport staging facts, visible to the stream builder's drains: cp.async slabs take the
+    # +16 B row pad (the bank-conflict break), TMA slabs stay dense and take the hardware swizzle
+    # (``pick_swizzle_atom`` per operand) with the drain's address XOR undoing it.
+    stage = ctx.stage
+    is_tma = stage is not None and stage.transport == "tma"
+    elem_bytes = atom.operand_dtype("b").nbytes
+    kv_pad = 0 if is_tma else _PAD
+    k_swz = pick_swizzle_atom(qk.k_axis.extent.as_static(), elem_bytes)[1] if is_tma else "NONE"
+    v_swz = pick_swizzle_atom(d_v, elem_bytes)[1] if is_tma else "NONE"
+
     # ---- the streaming step (a builder — the staged path re-parents it under the ring drain) --- #
     def _stream_step(k_slot: Expr | None = None, v_slot: Expr | None = None, staged: bool = False) -> list[Stmt]:
         stream: list[Stmt] = []
@@ -380,7 +405,8 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             mask=qk_mask,
             b_slab="_k_smem" if staged else None,
             b_slot=k_slot,
-            b_ldm=qk.k_axis.extent.as_static() + _PAD if staged else 0,
+            b_ldm=qk.k_axis.extent.as_static() + kv_pad if staged else 0,
+            b_swizzle=k_swz if staged else "NONE",
         )
 
         for qi, qt in enumerate(qtiles):
@@ -436,23 +462,24 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             mask=pv_mask,
             b_slab="_v_smem" if staged else None,
             b_slot=v_slot,
-            b_ldm=d_v + _PAD if staged else 0,
+            b_ldm=d_v + kv_pad if staged else 0,
+            b_swizzle=v_swz if staged else "NONE",
         )
         for qt in qtiles:
             stream += _rebind(qt.pivot, f"_mn{qt.sfx}")  # advance the running pivot: m = mn
         return stream
 
-    stage = ctx.stage
     if stage is not None:
-        # The staged K/V stream: the resolved cp.async ``Stage`` (``_schedule._resolve_twisted_stage``
-        # — static, block-divisible kv only) rides the SAME ``staged_kloop`` skeleton the matmul tier
+        # The staged K/V stream: the resolved ``Stage`` (``_schedule._resolve_twisted_stage`` —
+        # static, block-divisible kv only) rides the SAME ``staged_kloop`` skeleton the matmul tier
         # runs, the streaming step as its drain. The K slab keeps K's own N-major layout (``bn`` key
         # rows × head_dim) and the V slab V's K-major one (``bn`` key rows × d_v) — the fills are
         # verbatim row copies, so the staged kernel stays bit-identical to its gmem-direct sibling.
-        assert stage.transport == "cp.async", f"warp-flash stages via cp.async only, got {stage.transport}"
+        # cp.async fills cooperatively into padded rows; TMA box-copies the batched operands via
+        # rank-N descriptors (leading extent-1 box dims, the load's own batch/head index exprs as
+        # origin coords — GQA's ``h // group`` rides through) into dense hardware-swizzled slabs.
         K = kv_axis.extent.as_static()
         head_dim = qk.k_axis.extent.as_static()
-        elem_bytes = atom.operand_dtype("b").nbytes
         k_load, v_load = qk.b_load, pv.b_load
         kn, kk, vn = qk.n_axis.name, qk.k_axis.name, pv.n_axis.name
 
@@ -462,9 +489,29 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         def _v_index(k0: Expr):
             return lambda row, col: _idx(v_load, {kv_axis.name: BinaryExpr("+", k0, row), vn: col})
 
-        k_op = Operand(tag="k", buf=k_load.input, shape=(bn, head_dim), index=_k_index, coords=lambda k0: (), pad_cols=_PAD)
-        v_op = Operand(tag="v", buf=v_load.input, shape=(bn, d_v), index=_v_index, coords=lambda k0: (), pad_cols=_PAD)
-        transport = CpAsyncTransport(
+        k_batch, v_batch = tuple(k_load.index[:-2]), tuple(v_load.index[:-2])
+        k_op = Operand(
+            tag="k",
+            buf=k_load.input,
+            shape=(bn, head_dim),
+            index=_k_index,
+            coords=lambda k0: (*k_batch, k0, Literal(0, "int")),
+            pad_cols=kv_pad,
+            swizzle=k_swz,
+            box=(1,) * len(k_batch) + (bn, head_dim) if is_tma else None,
+        )
+        v_op = Operand(
+            tag="v",
+            buf=v_load.input,
+            shape=(bn, d_v),
+            index=_v_index,
+            coords=lambda k0: (*v_batch, k0, Literal(0, "int")),
+            pad_cols=kv_pad,
+            swizzle=v_swz,
+            box=(1,) * len(v_batch) + (bn, d_v) if is_tma else None,
+        )
+        transport_cls = TmaTransport if is_tma else CpAsyncTransport
+        transport = transport_cls(
             operands=(k_op, v_op),
             slab_dtype=_cuda(atom.operand_dtype("b")),
             elem_bytes=elem_bytes,

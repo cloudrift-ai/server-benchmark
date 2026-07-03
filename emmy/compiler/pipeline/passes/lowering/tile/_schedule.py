@@ -1237,19 +1237,30 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
 def _resolve_twisted_stage(stage: Stage, kv_extent, bn: int, head_dim: int, d_v: int, elem_bytes: int, budget: int) -> Stage | None:
     """Resolve an operand ``Stage`` against a warp-flash streaming pair — the K/V slabs of one
     ``bn``-key streaming step (K ``bn × head_dim`` in its native N-major layout, V ``bn × d_v``
-    K-major; both verbatim row copies, so staging stays bit-identical to gmem-direct). cp.async
-    only: TMA's 2-D descriptor cannot encode the batched K/V operands, and ``sync`` has nothing to
-    overlap. A symbolic or non-block-divisible kv stays gmem-direct (its masked fragment loads
-    already clamp; slab zero-fill is a follow-up). ``depth`` clamps so the ring's K+V slot pairs
-    fit the smem ``budget`` (the padded rows add ``_twist._PAD`` cols per slot — negligible, and
-    the clamp errs safe via the materializer's validate backstop); ``reg_depth`` clamps to 1 (no
-    ldmatrix ping-pong on the streaming drain yet); ``bk_elems`` records the streamed keys per
-    step."""
-    if stage.transport != "cp.async":
+    K-major; both verbatim row copies, so staging stays bit-identical to gmem-direct). Two
+    transports resolve: **cp.async** (cooperative fills, +16 B padded rows for the bank-conflict
+    break) and **TMA** (the batched K/V encode as rank-N boxes with leading extent-1 dims —
+    ``(1, 1, bn, head_dim)`` — the load's own batch/head index exprs supplying the origin coords;
+    the slabs stay dense and take the hardware swizzle + drain XOR instead of padding; box dims
+    cap at the 256 hardware limit). ``sync`` has nothing to overlap. A symbolic or
+    non-block-divisible kv stays gmem-direct (its masked fragment loads already clamp; slab
+    zero-fill is a follow-up). ``depth`` clamps so the ring's K+V slot pairs fit the smem
+    ``budget``; ``reg_depth`` clamps to 1 (no ldmatrix ping-pong on the streaming drain yet);
+    ``bk_elems`` records the streamed keys per step."""
+    if stage.transport not in ("cp.async", "tma"):
         return None
     if not kv_extent.is_static or kv_extent.as_static() % bn != 0:
         return None
-    slot_bytes = bn * (head_dim + d_v + 16) * elem_bytes  # +16: the two slabs' padded rows (2 × _PAD)
+    if stage.transport == "tma":
+        # Box dims must fit the 1..256 hardware range, and the inner (contiguous) row spans must
+        # be 16 B-aligned for the box copy (guaranteed ≥ the mma divisibility gates, checked for
+        # form). Rank ≤ 5 holds structurally: SDPA operands are (batch…, S, D) rank ≤ 4.
+        if bn > 256 or head_dim > 256 or d_v > 256 or (head_dim * elem_bytes) % 16 or (d_v * elem_bytes) % 16:
+            return None
+        pad = 0  # TMA deposits dense — the hardware swizzle replaces the row pad
+    else:
+        pad = 16  # the two slabs' padded rows (2 × _twist._PAD)
+    slot_bytes = bn * (head_dim + d_v + pad) * elem_bytes
     if slot_bytes > budget:
         return None
     depth = min(stage.depth, budget // slot_bytes)

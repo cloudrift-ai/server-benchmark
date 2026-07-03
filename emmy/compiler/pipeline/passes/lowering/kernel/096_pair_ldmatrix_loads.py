@@ -10,8 +10,9 @@ emitter change — same family as ``050_vectorize_loads``): the warp-flash strea
 
 Legality, judged structurally on the two loads:
 
-- both staged role-``"b"``, same slab / ``ldm`` / ``b_trans``, NONE-swizzle (a swizzled slab's
-  per-lane XOR does not commute with the paired lane map), no masks (staged loads carry none);
+- both staged role-``"b"``, same slab / ``ldm`` / ``b_trans`` / swizzle mode (the drain's
+  swizzle XOR is per-lane address-based, so it commutes with the paired lane map — each lane
+  un-permutes its own 16 B chunk), no masks (staged loads carry none);
 - **transposed-B** (N-major slab): equal K col, N row exactly ``+8`` — the pair is one plain
   ``x4`` (lanes 16-31 address the ``+8`` N rows);
 - **canonical-B** (K-major slab): equal K row, col exactly ``+8`` — the pair is one
@@ -96,15 +97,13 @@ def _delta(a: Expr, b: Expr) -> int | None:
 
 
 def _candidate(s: Stmt) -> bool:
-    return (
-        isinstance(s, LdmatrixLoad) and s.staged and s.role == "b" and s.swizzle == "NONE" and s.pair_frag is None and len(s.src_index) == 2
-    )
+    return isinstance(s, LdmatrixLoad) and s.staged and s.role == "b" and s.pair_frag is None and len(s.src_index) == 2
 
 
 def _pairs_with(a: LdmatrixLoad, b: LdmatrixLoad) -> bool:
     """``b`` is ``a``'s slab-adjacent partner: the SECOND fragment of one x4 (the ``+8``
     matrices lanes 16-31 address)."""
-    if a.src_buffer != b.src_buffer or a.ldm != b.ldm or a.b_trans != b.b_trans:
+    if a.src_buffer != b.src_buffer or a.ldm != b.ldm or a.b_trans != b.b_trans or a.swizzle != b.swizzle:
         return False
     row_d, col_d = _delta(a.src_index[0], b.src_index[0]), _delta(a.src_index[1], b.src_index[1])
     if a.b_trans:  # N-major slab: N rows adjacent, same K col

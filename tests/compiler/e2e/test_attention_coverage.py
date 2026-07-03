@@ -374,20 +374,24 @@ def _run_flash(backend, compiled, graph, tensors) -> np.ndarray:
 
 
 @requires_cuda
-@pytest.mark.parametrize("stage", ["d1/cp", "d2/cp/ring", "d3/cp/ring"])
+@pytest.mark.parametrize("stage", ["d1/cp", "d2/cp/ring", "d3/cp/ring", "d1/tma", "d2/tma/ring"])
 def test_staged_warp_flash_matches_torch(monkeypatch, stage):
     """A pinned K/V operand ``STAGE`` on the warp-flash stream: the kernel fills per-block K/V smem
-    slabs via cp.async (``d1`` single-buffer; ``d2+/ring`` the prefetch ring overlapping the next
-    block's loads with this block's mma work) and drains them via the staged ldmatrix variants
-    (plain ``x2`` for the N-major K slab, ``x2.trans`` for the K-major V slab). Matches torch."""
+    slabs (cooperative cp.async into padded rows, or rank-N TMA box copies into dense
+    hardware-swizzled slabs — the batched operands encode with leading extent-1 box dims) and
+    drains them via the staged ldmatrix variants. ``d1`` single-buffer; ``d2+/ring`` the prefetch
+    ring overlapping the next block's loads with this block's mma work. Matches torch."""
     monkeypatch.setenv("EMMY_STAGE", stage)
     torch.manual_seed(7)
     q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
     backend, compiled, graph, kernels = _compile_tc(q, k, v)
     assert len(kernels) == 1, f"staged warp flash should be one kernel, got {len(kernels)}"
     src = compiled.nodes[kernels[0]].op.kernel_source
-    assert "cp.async" in src and "_k_smem" in src and "_v_smem" in src, "the staged stream must fill K/V slabs via cp.async"
-    assert "dpl_ldmatrix_x2(" in src, "the N-major K slab drains via the plain (no .trans) staged x2"
+    assert "_k_smem" in src and "_v_smem" in src, "the staged stream must fill K/V slabs"
+    if "tma" in stage:
+        assert "cp_async_bulk_tensor_4d" in src, "the batched K/V must box-copy via the rank-4 TMA descriptor"
+    else:
+        assert "cp.async" in src, "the cp transport must fill via cp.async"
 
     def ref():
         with torch.no_grad():
@@ -419,15 +423,17 @@ def test_staged_warp_flash_bit_identical_to_gmem_direct(monkeypatch, stage):
 
 
 @requires_cuda
-def test_staged_warp_flash_causal_and_gqa_match_torch(monkeypatch):
+@pytest.mark.parametrize("stage", ["d2/cp/ring", "d2/tma/ring"])
+def test_staged_warp_flash_causal_and_gqa_match_torch(monkeypatch, stage):
     """The staged stream composes with the fragment causal mask and the GQA ``head // group`` K/V
     indexing — both ride the slab fill's operand index verbatim (the σ passes batch/head terms
-    through), so no staging-side special case exists to regress."""
-    monkeypatch.setenv("EMMY_STAGE", "d2/cp/ring")
+    through; the TMA transport carries them as box-origin coords), so no staging-side special
+    case exists to regress."""
+    monkeypatch.setenv("EMMY_STAGE", stage)
     torch.manual_seed(13)
     q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
     backend, compiled, graph, kernels = _compile_tc(q, k, v, module=_Causal())
-    assert "cp.async" in compiled.nodes[kernels[0]].op.kernel_source
+    assert ("cp_async_bulk_tensor" if "tma" in stage else "cp.async") in compiled.nodes[kernels[0]].op.kernel_source
 
     def ref():
         with torch.no_grad():
@@ -447,7 +453,7 @@ def test_staged_warp_flash_causal_and_gqa_match_torch(monkeypatch):
     qg = torch.randn(1, 4, 128, 32, dtype=torch.float16)
     kg, vg = (torch.randn(1, 2, 128, 32, dtype=torch.float16) for _ in range(2))
     backend, compiled, graph, kernels = _compile_tc(qg, kg, vg, module=_Gqa())
-    assert "cp.async" in compiled.nodes[kernels[0]].op.kernel_source
+    assert ("cp_async_bulk_tensor" if "tma" in stage else "cp.async") in compiled.nodes[kernels[0]].op.kernel_source
 
     def rg():
         with torch.no_grad():

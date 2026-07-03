@@ -291,6 +291,12 @@ class Operand:
     # stride the padded decl automatically (``render_index`` flattens against it), and the drain's
     # ``ldm`` carries the padded stride. Data cells only — a chunk never straddles the pad.
     pad_cols: int = 0
+    # The TMA descriptor box, when it differs from the 2-D slab ``shape`` — a BATCHED operand
+    # (flash K/V: gmem ``(B, H, S, D)``) boxes as rank-N with leading extent-1 dims
+    # (``(1, 1, bn, head_dim)``); the ``coords`` closure supplies the matching leading origin
+    # coordinates (the load's own batch/head index exprs — GQA's ``h // group`` rides through).
+    # ``None`` = the 2-D ``shape`` (the matmul tier's plain operands).
+    box: tuple[int, ...] | None = None
 
     @property
     def slab(self) -> str:
@@ -468,7 +474,7 @@ class TmaTransport:
         # TMA destination smem must be 128 B-aligned (a swizzled slab to its full atom period,
         # so the drain's from-base XOR matches the hardware deposit); one mbarrier per ring slot.
         decls: list[Stmt] = [
-            tma_descriptor(op.desc, op.buf, op.shape, self.slab_dtype, swizzle=op.swizzle, elem_bytes=self.elem_bytes)
+            tma_descriptor(op.desc, op.buf, op.box or op.shape, self.slab_dtype, swizzle=op.swizzle, elem_bytes=self.elem_bytes)
             for op in self.operands
         ]
         decls += [
@@ -487,8 +493,9 @@ class TmaTransport:
         coords = op.coords(k0)
         if op.swizzle == "NONE":
             return coords
-        atom, _ = pick_swizzle_atom(op.shape[-1], self.elem_bytes)
-        if atom >= op.shape[-1]:
+        inner = (op.box or op.shape)[-1]
+        atom, _ = pick_swizzle_atom(inner, self.elem_bytes)
+        if atom >= inner:
             return coords
         return (*coords[:-1], BinaryExpr("/", coords[-1], _lit(atom)), _lit(0))
 

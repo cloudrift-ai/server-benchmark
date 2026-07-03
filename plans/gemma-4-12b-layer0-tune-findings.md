@@ -293,20 +293,24 @@ misaligned fault + its induced deadlock. Done:
    variant fails to compile (`cp_async_bulk_tensor_4d` unreferenced). Both are search-space tail — they bench_fail
    cleanly and do not affect the greedy deploy. Worth a follow-up before the warp flash tier is trusted at large
    head_dim.
-4. ✅ The completed v4 tune (the fixed v3-repro, `--dynamic seq_len@x:1 --clean --bench`, 936 benches, 20 benign
-   `bench_fail`s, **0 misaligned**, ~30 min) — the certified single-kernel flash collapses v2's 54 ms of fragmented
-   sdpa into ONE 99 µs kernel:
+4. ✅ The completed v4 tune — the certified single-kernel flash collapses v2's 54 ms of fragmented sdpa into ONE ~95 µs
+   kernel, **0 misaligned**, tune completes clean. Two runs agree: the pre-rebase run (936 benches, e2e 2865 µs, flash
+   99 µs) and the definitive **clean tune on the merged PR branch** (`origin/main` + the four flash fixes, #304/#305
+   integrated; 772 benches, 17 benign `bench_fail`s — 3 compile-budget / 6 hung / 5 hung-EOF **survived** / 1
+   wall-budget, 0 misaligned; ~24 min). Numbers below are the merged-branch clean tune (`emmy tune google/gemma-4-12B
+   --layer 0 --dynamic seq_len@x:1 --clean --bench`, `_tune/tune-model-gemma4-12b-l0-v4/`):
 
-| Backend | v2 (post-fix) | **v4 (flash correct)** | vs eager |
+| Backend | v2 (post-fix) | **v4 (merged branch)** | vs eager |
 |---|---|---|---|
-| Eager PyTorch | 1394 | 1527 | 1.00× |
-| torch.compile | 1220 | 1308 | 1.17× |
-| **Emmy** | **27695** | **2865** | **0.53× (1.9× behind — was 20×)** |
+| Eager PyTorch | 1394 | 1400 | 1.00× |
+| torch.compile | 1220 | 1224 | 1.14× |
+| **Emmy** | **27695** | **2998** | **0.47× (2.1× behind — was 20×)** |
 
-Per-kernel v4 (µs, `-` = no torch ref wired): `k_scaled_dot_product_attention_reduce` **99** (eager 33, 0.33× — the
-certified flash, was v2's 50885 µs `k_sdpa_mean_linear_reduce`); `k_linear_sdpa_reduce` 475 (eager 129, 0.27× — the
+Per-kernel v4 (µs, `-` = no torch ref wired): `k_scaled_dot_product_attention_reduce` **92** (eager 33, 0.35× — the
+certified flash, was v2's 50885 µs `k_sdpa_mean_linear_reduce`); `k_linear_sdpa_reduce` 522 (eager 129, 0.25× — the
 o_proj drain, now the biggest single gap); `k_mean` 21 (eager 143 — **6.9× faster**); the `k_mean_linear_reduce` norm
-chains 136–409 (up to **1.99× faster**); `k_linear_reduce` matmuls 166–363 (0.89×). **Emmy is now 1.9× behind eager on
-this layer (was 20×) — a 9.7× end-to-end improvement, all from the flash fix.** Next lever: the `k_linear_sdpa_reduce`
-o_proj drain (475 µs, 0.27×) and the two non-blocking warp-flash-tier issues (head_dim-256 NaN, TMA compile) from
-step 3.
+chains 134–479 (up to **1.87× faster**); `k_linear_reduce` matmuls 165–437 (0.66×); one `k_linear_mean_reduce` at
+1163 (no ref). **Emmy is now ~2× behind eager on this layer (was 20×) — a ~9× end-to-end improvement, all from the
+flash fix.** The 5 hung-kernel EOFs that the tune SURVIVED (pinned + continued) are the direct proof the v3
+GPU-wedge deadlock is gone. Next lever: the `k_linear_sdpa_reduce` o_proj drain (522 µs, 0.25×) and the two
+non-blocking warp-flash-tier issues (head_dim-256 NaN, TMA compile) from step 3. Shipped as PR #307.

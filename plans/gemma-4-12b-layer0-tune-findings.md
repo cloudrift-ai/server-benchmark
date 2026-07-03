@@ -88,8 +88,19 @@ fp16 shapes when it is offered; the fused chain form is what locks it out.
 no structural un-fuse escape, and the fused computed-A cone keeps the contraction off the warp tier. Known
 limitation, recorded here because it is 124 ms of this layer.
 
-**Fix (priority 1, existing follow-up)**: the structural CUT producer with a bandwidth-model fusion gate — already
-the top follow-up from the Qwen report; Gemma raises its stakes from ~72× (serving) to ~2000× (attention layers).
+**Fix (priority 1, two complementary tracks — CUT is not the only lever)**: verified with a `PLACE@fold=fuse`
+pin: `try_flash`'s `_recognize` returns `None` on Gemma's graph BEFORE any eligibility guard (no degrade warning
+fires; the kernel set is unchanged) — the sliding-window mask lands as a separate op between score and softmax,
+and Q/K are q/k-RMSNorm + in-graph-RoPE cones, not the plain Loads `_extract_qk` demands. So the fused
+schedule-friendly kernel already exists (the flash TWISTED form, FA-2 parity in isolation) and simply never
+certifies on a model trace. (a) **Widen flash recognition** — mask-tolerant matching plus computed Q/K cones,
+the same computed-operand precedent `bind_prologue_contraction` set for norm→linear — keeping QK+softmax+PV as
+ONE warp-tier kernel; this is why the flash campaign's isolated win never appears in any model tune (every
+per-layer trace has in-graph RoPE). (b) **The bandwidth-gated structural CUT for the chain edges** (qkv-proj /
+o_proj / norm drains — the boundaries every production attention stack cuts at; the `__partial` mma evidence
+shows the pieces are healthy alone). Scheduling the whole sdpa→norm→linear composite on the warp tier as-is (a
+chained second contraction inside the streaming loop) is ruled out — highest effort, no production precedent,
+and (a)+(b) deliver the same µs.
 
 ## Finding 3 — every norm/mean chain lowers one-thread-per-row: 6.4 ms across five kernels
 

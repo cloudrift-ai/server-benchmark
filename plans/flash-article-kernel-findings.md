@@ -147,6 +147,34 @@ tensor cores fed, so a dedicated producer band only costs occupancy. This matche
 framing: warp specialization is FA-3's Hopper/wgmma story (deep pipelines, big CTAs), not an sm_120 win —
 and now that claim is measured, not assumed.
 
+## The warp-private ring (built, measured, REVERTED — the sixth honest negative)
+
+The beyond-FA-2 candidate: per-warp K/V ring slices + private mbarriers, each warp's lane 0 its elected
+TMA producer, slab reuse ordered by `__syncwarp` alone — ZERO CTA barriers in the streaming loop, warps
+free-running their streams (a `wp` scope flag on the `Stage` codec; ~150 lines across codec/resolver/
+`_warp_ring_kloop`/realizer). It lowered correctly and passed accuracy — and measured **291µs vs the
+CTA-shared ring's 206** (flat across d1/d2/d3). NCU + arithmetic explain it architecturally:
+
+- flash's K/V are read by EVERY warp — the CTA-shared slab is exactly the reuse that justified Move 4.
+  Warp-private slabs replicate the same data `um`×: at um=4 the ×4 smem replication blew the budget so
+  every depth clamped to single-buffer (hence the flat 291s), occupancy fell to 8.4%, SM to 22.7%.
+- the benefit side was ALREADY known to be zero: the barrier experiment (ec87aa70) measured the CTA
+  convoy as costless — so the wp ring's only differential was the negative one.
+
+The move is structurally dominated FOR FLASH (any kernel whose staged operands are CTA-shared). The code
+was reverted per the no-dead-moves rule; the finding stays. It would only make sense where warps stream
+DISJOINT operand data — e.g. a future within-CTA split-KV — noted for the move catalog, not built.
+
+## Beyond-FA-2: the honest verdict
+
+At 206µs the kernel runs ~167 TFLOPS ≈ **80% of the 5090's f16/fp32-acc tensor roofline — the same point
+FA-2 sits at**. Every instruction-shaving lever is now measured (exp path flat twice; LSU already below
+FA-2's; conflicts ~0; wave-quantization probes negative), and the two synchronization levers both
+declined (WSPEC, warp-private ring). What remains is the shared last-20%-of-roofline territory: drain
+reg-depth `p2` (the ldmatrix ping-pong, clamped to 1 — plausible low single digits), and fp8 QK^T (FA-3's
+lever — a different accuracy class and a different article chapter). Parity, reached from a generic
+moveset with every attribution measured, is the story.
+
 ## Follow-ups (padding, barrier scoping, repack, Q-hoist, x4 pairing, reg_m, TMA, WSPEC are DONE)
 
 The x4 pairing landed as the `096_pair_ldmatrix_loads` kernel-IR peephole (LSU 14.1M → 9.87M, 222 → 219µs

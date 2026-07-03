@@ -293,5 +293,20 @@ misaligned fault + its induced deadlock. Done:
    variant fails to compile (`cp_async_bulk_tensor_4d` unreferenced). Both are search-space tail — they bench_fail
    cleanly and do not affect the greedy deploy. Worth a follow-up before the warp flash tier is trusted at large
    head_dim.
-4. Read the completed v3 bench table off `_tune/…/tune.log` once the run finishes. Expect the certified single-kernel
-   flash to collapse v2's residual 50.9 ms `k_sdpa_mean_linear_reduce` + 3.1 ms score-slice into one warp/chain kernel.
+4. ✅ The completed v4 tune (the fixed v3-repro, `--dynamic seq_len@x:1 --clean --bench`, 936 benches, 20 benign
+   `bench_fail`s, **0 misaligned**, ~30 min) — the certified single-kernel flash collapses v2's 54 ms of fragmented
+   sdpa into ONE 99 µs kernel:
+
+| Backend | v2 (post-fix) | **v4 (flash correct)** | vs eager |
+|---|---|---|---|
+| Eager PyTorch | 1394 | 1527 | 1.00× |
+| torch.compile | 1220 | 1308 | 1.17× |
+| **Emmy** | **27695** | **2865** | **0.53× (1.9× behind — was 20×)** |
+
+Per-kernel v4 (µs, `-` = no torch ref wired): `k_scaled_dot_product_attention_reduce` **99** (eager 33, 0.33× — the
+certified flash, was v2's 50885 µs `k_sdpa_mean_linear_reduce`); `k_linear_sdpa_reduce` 475 (eager 129, 0.27× — the
+o_proj drain, now the biggest single gap); `k_mean` 21 (eager 143 — **6.9× faster**); the `k_mean_linear_reduce` norm
+chains 136–409 (up to **1.99× faster**); `k_linear_reduce` matmuls 166–363 (0.89×). **Emmy is now 1.9× behind eager on
+this layer (was 20×) — a 9.7× end-to-end improvement, all from the flash fix.** Next lever: the `k_linear_sdpa_reduce`
+o_proj drain (475 µs, 0.27×) and the two non-blocking warp-flash-tier issues (head_dim-256 NaN, TMA compile) from
+step 3.

@@ -423,7 +423,9 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
         state_decls=state_decls,
         reduce_region=reduce_region,
         store=sink,
-        workers=ctx.workers if isinstance(op, Contraction) else None,
+        # The scheduler stamps ``workers`` on a contraction row or a warp-flash (TWISTED) row only;
+        # every other arm arrives with ``None`` — safe to thread unconditionally.
+        workers=ctx.workers,
     )
 
 

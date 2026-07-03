@@ -130,6 +130,12 @@ class Sync(Stmt):
 
     ``barrier_id == 0`` (default): ``__syncthreads();`` — CTA-wide.
 
+    ``warp=True``: ``__syncwarp();`` — warp-scope only. For ordering a warp's own
+    smem writes before its own reads of a WARP-PRIVATE buffer (the flash C→A
+    handoff slab): post-Volta independent thread scheduling means even
+    intra-warp write→read needs the sync, but a CTA-wide barrier there convoys
+    the block's warps for no ordering benefit.
+
     ``barrier_id > 0`` and ``count`` set: ``bar.sync <id>, <count>;`` —
     named-barrier synchronizing exactly ``count`` threads on barrier id
     ``<id>`` (one of 1..15). Used inside warp-specialized branches where
@@ -140,14 +146,21 @@ class Sync(Stmt):
 
     barrier_id: int = 0
     count: int | None = None
+    warp: bool = False  # warp-scope __syncwarp() (barrier_id must stay 0)
 
     def pretty(self, indent: str = "") -> list[str]:
+        if self.warp:
+            return [f"{indent}Sync(warp)"]
         if self.barrier_id == 0:
             return [f"{indent}Sync"]
         return [f"{indent}Sync(bar={self.barrier_id}, count={self.count})"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         pad = _pad(ctx.indent)
+        if self.warp:
+            if self.barrier_id != 0:
+                raise ValueError("Sync(warp=True) cannot carry a named barrier_id")
+            return [f"{pad}__syncwarp();"]
         if self.barrier_id == 0:
             return [f"{pad}__syncthreads();"]
         if self.count is None:
@@ -1140,13 +1153,18 @@ class LdmatrixLoad(Stmt):
     staged: bool = True  # False → gmem-direct fragment load (operand not in smem)
     gmem_guard: tuple[Expr, Expr] | None = None  # masked-axis (base, bound); gmem-direct only
     k_zero: tuple[Expr, Expr] | None = None  # masked-K reduce axis (base, bound); gmem-direct only
-    b_trans: bool = False  # role "b" only: B stored N×K (Q@K^T native col-major) → gmem-direct trans helper
+    b_trans: bool = False  # role "b" only: B stored N×K (Q@K^T native col-major) → gmem-direct trans helper / staged plain x2
+    # A second B fragment filled by the SAME ldmatrix (the ``096_pair_ldmatrix_loads`` peephole):
+    # the paired x4 loads two slab-adjacent B fragments in one instruction — ``frag`` gets the
+    # matrices addressed by lanes 0-15, ``pair_frag`` those of lanes 16-31. Staged role-"b"
+    # NONE-swizzle only; ``src_index`` stays the FIRST (low) fragment's tile base.
+    pair_frag: str | None = None
 
     def deps(self) -> tuple[str, ...]:
-        return (self.frag,)
+        return (self.frag,) if self.pair_frag is None else (self.frag, self.pair_frag)
 
     def defines(self) -> tuple[str, ...]:
-        return (self.frag,)
+        return (self.frag,) if self.pair_frag is None else (self.frag, self.pair_frag)
 
     def external_reads(self) -> tuple[str, ...]:
         return (self.src_buffer,)
@@ -1158,7 +1176,11 @@ class LdmatrixLoad(Stmt):
 
     def pretty(self, indent: str = "") -> list[str]:
         idx = ", ".join(e.pretty() for e in self.src_index)
-        variant = ("x4" if self.role == "a" else "x2.trans") if self.staged else "gmem-direct"
+        if self.pair_frag is not None:
+            variant = "x4 pair" if self.b_trans else "x4.trans pair"
+            pair = f"({self.frag}, {self.pair_frag})"
+            return [f"{indent}LdmatrixLoad {pair} <- {self.src_buffer}[{idx}] ({variant}, ldm={self.ldm or 'auto'})"]
+        variant = ("x4" if self.role == "a" else ("x2" if self.b_trans else "x2.trans")) if self.staged else "gmem-direct"
         guard = "" if self.gmem_guard is None else f" guard<{self.gmem_guard[1].pretty()}"
         return [f"{indent}LdmatrixLoad {self.frag} <- {self.src_buffer}[{idx}] ({variant}{guard}, ldm={self.ldm or 'auto'})"]
 
@@ -1208,20 +1230,39 @@ class LdmatrixLoad(Stmt):
                 helper = "dpl_mma_load_b_gmem_trans" if self.b_trans else "dpl_mma_load_b_gmem"
             return [f"{_pad(ctx.indent)}{helper}({self.frag}, &{self.src_buffer}[{flat}], {ldm});"]
         lane = "(threadIdx.x & 31)"
+        if self.pair_frag is not None:
+            # Paired x4 — two slab-adjacent B fragments in one ldmatrix (096_pair_ldmatrix_loads).
+            # Transposed-B (N-major slab): the pair is N-adjacent — lanes 0-15 address ``frag``'s 8
+            # N rows × two k8 col-halves, lanes 16-31 the same at N+8 (plain x4). Canonical-B
+            # (K-major slab): the pair is N(col)-adjacent — lanes 0-15 address the 16 K rows at
+            # ``frag``'s col, lanes 16-31 at col+8 (x4.trans).
+            assert self.role == "b" and self.staged, "paired ldmatrix is a staged B-operand fusion"
+            if self.b_trans:
+                elem = f"{flat} + (({lane} % 8) + ({lane} / 16) * 8) * {ldm} + (({lane} / 8) % 2) * 8"
+                helper = "dpl_ldmatrix_x4"
+            else:
+                elem = f"{flat} + ({lane} % 16) * {ldm} + ({lane} / 16) * 8"
+                helper = "dpl_ldmatrix_x4_trans"
+            addr = self._swizzled_addr(elem)
+            pad = _pad(ctx.indent)
+            return [
+                f"{pad}{{ unsigned _p4[4]; {helper}(_p4, {addr});",
+                f"{pad}  {self.frag}[0] = _p4[0]; {self.frag}[1] = _p4[1]; {self.pair_frag}[0] = _p4[2]; {self.pair_frag}[1] = _p4[3]; }}",
+            ]
         if self.role == "a":
             # 16×16 A: x4 — lane addresses M-row (lane%16), K-col block (lane/16)*8.
             elem = f"{flat} + ({lane} % 16) * {ldm} + ({lane} / 16) * 8"
             addr = self._swizzled_addr(elem)
             return [f"{_pad(ctx.indent)}dpl_ldmatrix_x4({self.frag}, {addr});"]
-        # Transposed-B (Q@K^T) is the native col-major B and would need a plain
-        # x2 (no .trans) staged load whose ldmatrix lane→element map differs from
-        # the canonical x2.trans below. That staged variant isn't implemented yet
-        # — ``tile/020_stage_inputs`` excludes the transposed-B operand so it
-        # lowers gmem-direct (the ``staged=False`` branch above). Fail loud if a
-        # transposed-B operand ever reaches the staged path rather than silently
-        # emitting the wrong (canonical) lane map.
+        # Transposed-B (Q@K^T): the slab keeps the operand's native N-major layout
+        # (N rows × K cols), which IS the mma's col-major B — a plain x2 (no
+        # .trans) with N-row addresses: lanes 0-7 address the 8 N rows of the k16
+        # half 0, lanes 8-15 the same rows at K col 8 (each 8x8 matrix's rows land
+        # as the fragment's (k, k+1) pairs, cf. ``dpl_mma_load_b_gmem_trans``).
         if self.b_trans:
-            raise NotImplementedError("staged ldmatrix for transposed-B (Q@K^T) not supported — must lower gmem-direct")
+            elem = f"{flat} + ({lane} % 8) * {ldm} + (({lane} / 8) % 2) * 8"
+            addr = self._swizzled_addr(elem)
+            return [f"{_pad(ctx.indent)}dpl_ldmatrix_x2({self.frag}, {addr});"]
         # 16×8 B: x2.trans — lane addresses K-row (lane%16); .trans yields col-major.
         elem = f"{flat} + ({lane} % 16) * {ldm}"
         addr = self._swizzled_addr(elem)
@@ -1270,6 +1311,33 @@ class MmaSyncPtx(Stmt):
         m, n, k = self.shape
         # ``c`` is passed for both the ``d`` (out) and ``c`` (in) operands.
         return [f"{_pad(ctx.indent)}dpl_mma_m{m}n{n}k{k}_{self.ab_dtype}({self.c_frag}, {self.a_frag}, {self.b_frag}, {self.c_frag});"]
+
+
+@dataclass(frozen=True)
+class FragmentRepack(Stmt):
+    """Convert two k-adjacent mma **C fragments** (f32, m16n8) into one 16-bit **A operand
+    fragment** (m16k16) IN REGISTERS — the ``AtomKind.c_to_a_repack`` lane-map compatibility:
+    per lane, ``srcs[0]``'s four values are exactly the A fragment's low k-half pairs and
+    ``srcs[1]``'s its high k-half, so the conversion is four ``cvt.rn.{f16,bf16}x2.f32`` packs
+    with no shuffle and no smem round-trip (the flash P→A handoff; same round-to-nearest-even
+    the smem path's ``RegStore`` applied, so the repack is bit-identical to it). The emitter
+    gates on the atom capability at schedule time — this node assumes it."""
+
+    frag: str  # destination A fragment (4 × u32)
+    srcs: tuple[str, str]  # (low k-half, high k-half) C fragments (4 × f32 each)
+    ab_dtype: str = "f16"
+
+    def deps(self) -> tuple[str, ...]:
+        return self.srcs
+
+    def defines(self) -> tuple[str, ...]:
+        return (self.frag,)
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}FragmentRepack {self.frag} <- ({self.srcs[0]}, {self.srcs[1]}) ({self.ab_dtype})"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        return [f"{_pad(ctx.indent)}dpl_c_to_a_{self.ab_dtype}({self.frag}, {self.srcs[0]}, {self.srcs[1]});"]
 
 
 @dataclass(frozen=True)
@@ -1962,6 +2030,7 @@ def _(s: LdmatrixLoad, rename, sigma, axis_fn):
         gmem_guard=None if s.gmem_guard is None else (sigma.apply(s.gmem_guard[0]), sigma.apply(s.gmem_guard[1])),
         k_zero=None if s.k_zero is None else (sigma.apply(s.k_zero[0]), sigma.apply(s.k_zero[1])),
         b_trans=s.b_trans,
+        pair_frag=None if s.pair_frag is None else rename(s.pair_frag),
     )
 
 

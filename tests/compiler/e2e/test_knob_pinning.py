@@ -235,6 +235,27 @@ def test_mma_matmul_k_split_staged(M: int, N: int, K: int, monkeypatch):
     np.testing.assert_allclose(forced.astype(np.float32), ref.astype(np.float32), atol=atol, rtol=0.1)
 
 
+# The eighth-golden-sweep TMA box regression: a warp register tile with tile_m > 256 (16 mma rows
+# × w4 × f8 = 512) paired with a TMA stage encoded an A box of (512, bk) and crashed at
+# ``cuTensorMapEncodeTiled`` ("TMA box dim 0 extent 512 outside the hardware range 1..256"). The
+# warp stage resolver now declines TMA for any tile whose box side exceeds 256 (a pinned tma stage
+# has no cp.async fallback, so the kernel lowers gmem-direct); the pinned config must produce
+# correct output rather than raise at descriptor-encode time.
+_OVERSIZED_BOX_KNOBS = {"TILE": "a:mma_m16n8k16_f16/w4x2/f8x2/k2", "STAGE": "d2/tma/ring"}
+
+
+@requires_cuda
+def test_warp_tma_declines_oversized_box(monkeypatch):
+    """fp16 warp matmul pinned to a 512-row register tile + TMA stage — the box-extent gate must
+    decline TMA (→ gmem-direct) instead of encoding an illegal (512, bk) descriptor box."""
+    M = N = K = 512
+    g, inputs, ref = _build_f16_matmul_graph(M, N, K)
+    forced = _run_with_knobs(g, inputs, "c", _OVERSIZED_BOX_KNOBS, monkeypatch)
+    peak = float(np.max(np.abs(ref.astype(np.float32))))
+    atol = max(5e-1, 0.1 * peak)
+    np.testing.assert_allclose(forced.astype(np.float32), ref.astype(np.float32), atol=atol, rtol=0.1)
+
+
 # Scalar-FMA fp16 regression (prerequisite for the split-pipe GEMM). On cc>=9.0 the F16 atom is
 # eligible whenever the K-loads are F16, so at >=512^3 the greedy compile
 # *prefers* the tensor-core variant; a scalar ``TILE`` codec (no ``a:`` atom) is what forces the

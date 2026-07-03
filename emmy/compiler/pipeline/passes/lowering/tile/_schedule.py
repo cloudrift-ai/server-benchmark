@@ -575,7 +575,13 @@ def _resolve_warp_stage(c: Contraction, stage: Stage, budget: int = STATIC_SMEM_
     # has no descriptor (its fill closure carries the extra index dims verbatim), so it stays
     # eligible for those.
     tma_rank_ok = isinstance(c.a_operand, Load) and len(c.a_operand.index) == 2 and len(c.b_load.index) == 2
-    tma_ok = tma_rank_ok and _can_stage_warp_tma(stage, c.k_axis, n.axis, n.tile, bk, atom.atom_k, a_nbytes, n.mask, c.b_trans)
+    # TMA hardware: every box dim must be 1..256 — the slot shapes are A (tile_m, bk) / B (bk,
+    # tile_n), so an oversized warp register tile (e.g. tile_m = 512 at w4/f8) must decline TMA
+    # (the scalar resolver gates the same; cp.async has no box).
+    tma_box_ok = max(m.tile, n.tile, bk * atom.atom_k) <= 256
+    tma_ok = (
+        tma_rank_ok and tma_box_ok and _can_stage_warp_tma(stage, c.k_axis, n.axis, n.tile, bk, atom.atom_k, a_nbytes, n.mask, c.b_trans)
+    )
     cp_ok = (not tma_ok) and _can_stage_warp(stage, c.k_axis, m.tile, n.tile, bk, atom.atom_k, m.mask, n.mask, c.b_trans)
     if not (tma_ok or cp_ok):
         return None

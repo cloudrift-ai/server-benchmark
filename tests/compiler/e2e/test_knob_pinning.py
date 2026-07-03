@@ -235,6 +235,27 @@ def test_mma_matmul_k_split_staged(M: int, N: int, K: int, monkeypatch):
     np.testing.assert_allclose(forced.astype(np.float32), ref.astype(np.float32), atol=atol, rtol=0.1)
 
 
+# The eighth-golden-sweep TMA box regression: a warp register tile with tile_m > 256 (16 mma rows
+# × w4 × f8 = 512) paired with a TMA stage encoded an A box of (512, bk) and crashed at
+# ``cuTensorMapEncodeTiled`` ("TMA box dim 0 extent 512 outside the hardware range 1..256"). The
+# warp stage resolver now declines TMA for any tile whose box side exceeds 256 (a pinned tma stage
+# has no cp.async fallback, so the kernel lowers gmem-direct); the pinned config must produce
+# correct output rather than raise at descriptor-encode time.
+_OVERSIZED_BOX_KNOBS = {"TILE": "a:mma_m16n8k16_f16/w4x2/f8x2/k2", "STAGE": "d2/tma/ring"}
+
+
+@requires_cuda
+def test_warp_tma_declines_oversized_box(monkeypatch):
+    """fp16 warp matmul pinned to a 512-row register tile + TMA stage — the box-extent gate must
+    decline TMA (→ gmem-direct) instead of encoding an illegal (512, bk) descriptor box."""
+    M = N = K = 512
+    g, inputs, ref = _build_f16_matmul_graph(M, N, K)
+    forced = _run_with_knobs(g, inputs, "c", _OVERSIZED_BOX_KNOBS, monkeypatch)
+    peak = float(np.max(np.abs(ref.astype(np.float32))))
+    atol = max(5e-1, 0.1 * peak)
+    np.testing.assert_allclose(forced.astype(np.float32), ref.astype(np.float32), atol=atol, rtol=0.1)
+
+
 # Scalar-FMA fp16 regression (prerequisite for the split-pipe GEMM). On cc>=9.0 the F16 atom is
 # eligible whenever the K-loads are F16, so at >=512^3 the greedy compile
 # *prefers* the tensor-core variant; a scalar ``TILE`` codec (no ``a:`` atom) is what forces the
@@ -453,3 +474,70 @@ def test_masked_tile_accuracy_configs(label: str, dims: dict, knobs: dict, env: 
     ref = _reference(graph, inputs, out_name)
     forced = _run_with_knobs_and_env(graph, inputs, out_name, knobs, env, monkeypatch)
     _assert_match(forced, ref)
+
+
+# The ninth-golden-sweep cp.async alignment regression: a (M,K)@(K,N) matmul whose B rows are NOT
+# 16 B-aligned (N=3 fp32 → 12 B stride) pinned to a cp.async staging ring issued vectorized
+# ``cp.async`` copies at misaligned global addresses — ``CUDA_ERROR_MISALIGNED_ADDRESS`` + a 1 s
+# watchdog hang at runtime. The scalar stage resolver's 16 B inner-stride gate (previously
+# TMA-only) now covers cp.async too: the pinned stage resolver-declines and the kernel lowers
+# gmem-direct with correct output.
+_ODD_STRIDE_CPASYNC_KNOBS = {"TILE": "n16x8/f2x4", "STAGE": "d2/cp/ring"}
+
+
+@requires_cuda
+def test_scalar_cpasync_declines_odd_stride(monkeypatch):
+    """fp32 matmul with a 12 B B-row stride pinned to a cp.async ring — the alignment gate must
+    decline staging (→ gmem-direct) instead of issuing misaligned ``cp.async`` copies."""
+    from emmy.compiler.dtype import F32
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.frontend.ir import MatmulOp
+
+    M, K, N = 4, 8, 3
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("a", (M, K), dtype=F32), node_id="a")
+    g.add_node(InputOp(), [], Tensor("b", (K, N), dtype=F32), node_id="b")
+    g.add_node(MatmulOp(), ["a", "b"], Tensor("c", (M, N), dtype=F32), node_id="c")
+    g.inputs, g.outputs = ["a", "b"], ["c"]
+    rng = np.random.default_rng(0)
+    inputs = {"a": rng.standard_normal((M, K), dtype=np.float32), "b": rng.standard_normal((K, N), dtype=np.float32)}
+    ref = inputs["a"] @ inputs["b"]
+    forced = _run_with_knobs(g, inputs, "c", _ODD_STRIDE_CPASYNC_KNOBS, monkeypatch)
+    np.testing.assert_allclose(forced, ref, atol=1e-3, rtol=1e-3)
+
+
+# The Gemma finding-4 cluster: a MIXED-dtype staged contraction (fp32 A × fp16 B — the
+# norm→linear split-combine shape) sized BOTH slab fills with A's element width, so the B fill
+# issued 16 B ``cp.async`` chunks at fp32 spacing over fp16 memory — misaligned addresses +
+# overlapped data (36 bench_fail rows: ``CUDA_ERROR_MISALIGNED_ADDRESS`` + watchdog hangs). The
+# staged path now sizes each slab, fill, and descriptor by the operand's OWN dtype
+# (``Operand.dtype``/``elem_bytes``; ``_ScalarOps.slab_elems``); the drain's fma converts like
+# the gmem-direct path. Strides here are 16 B-aligned (K=128, N=96 → 192 B fp16 rows), so the
+# inner-stride gate passes and the mixed-dtype fill itself is what's under test.
+_MIXED_DTYPE_STAGED_KNOBS = {"TILE": "n16x8/f2x4", "STAGE": "d1/cp"}
+
+
+@requires_cuda
+def test_scalar_cpasync_mixed_dtype_slabs(monkeypatch):
+    """fp32 A × fp16 B matmul pinned to a cp.async stage — each operand's slab and fill must be
+    sized by its own element width; pre-fix the B fill misaligned and the kernel hung."""
+    from emmy.compiler.dtype import F16, F32
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.frontend.ir import MatmulOp
+
+    M, K, N = 64, 128, 96
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("a", (M, K), dtype=F32), node_id="a")
+    g.add_node(InputOp(), [], Tensor("b", (K, N), dtype=F16), node_id="b")
+    g.add_node(MatmulOp(), ["a", "b"], Tensor("c", (M, N), dtype=F32), node_id="c")
+    g.inputs, g.outputs = ["a", "b"], ["c"]
+    rng = np.random.default_rng(0)
+    inputs = {
+        "a": rng.standard_normal((M, K), dtype=np.float32) * 0.1,
+        "b": (rng.standard_normal((K, N), dtype=np.float32) * 0.1).astype(np.float16),
+    }
+    ref = inputs["a"] @ inputs["b"].astype(np.float32)
+    forced = _run_with_knobs(g, inputs, "c", _MIXED_DTYPE_STAGED_KNOBS, monkeypatch)
+    np.testing.assert_allclose(forced, ref, atol=1e-3, rtol=1e-3)

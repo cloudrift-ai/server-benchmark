@@ -153,9 +153,13 @@ def _reduce_specs(kernel, place) -> list[str]:
     hierarchy. A kernel the cooperative tier can't partition (pointwise, or a twisted /
     full-row / contraction reduce) is the lone scalar fold ``[""]`` — the ``REDUCE`` pin is
     ignored there, since it only governs the cooperative reduce tier. An eligible reduce
-    offers ``[conservative coop, scalar]`` (a fork the search / prior ranks, option-0 = the
-    conservative pick so a cold greedy compile keeps cooperating), with an env pin
-    (``EMMY_REDUCE``) authoritative over the candidates (``Knob.narrow``)."""
+    offers option-0 = the conservative heuristic pick (``_pick_coop`` — so a cold greedy
+    compile keeps its historical deploy), then the full legal :func:`coop_reduce_moves`
+    catalog + serial as fork siblings for the search / prior to rank. The catalog rows are
+    what keep the reduce goldens (``b16``/``b32``) reachable: the heuristic alone offered a
+    single spec on any free grid past ``_FREE_CAP`` (no fork), so a bare 2048-row sum tuned
+    exactly one serial variant, 53× behind its pinned golden (eighth-sweep finding 3). An env
+    pin (``EMMY_REDUCE``) stays authoritative over the candidates (``Knob.narrow``)."""
     carrier = _coop_carrier(kernel)
     if carrier is None:
         return [""]  # not cooperative-eligible — scalar serial fold; the pin doesn't apply
@@ -169,7 +173,13 @@ def _reduce_specs(kernel, place) -> list[str]:
     free = prod(_hint_extent(a) for a in place.free) if place.free else 1
     tail = list(kernel.op.body) if isinstance(kernel.op, Map) else []
     coop = _pick_coop(extent, free, has_tail=_has_contraction_tail(tail))
-    cands = [f"b{coop}", ""] if coop > 1 else [""]  # conservative coop first (cold greedy → option-0)
+    cands = [f"b{coop}" if coop > 1 else ""]  # conservative heuristic pick first (cold greedy → option-0)
+    for move in coop_reduce_moves():
+        p = ReducePlan.parse(move)
+        if p.coop <= extent and p.reg <= extent and move not in cands:
+            cands.append(move)
+    if "" not in cands:
+        cands.append("")
     return list(REDUCE.narrow(cands))
 
 
@@ -575,7 +585,13 @@ def _resolve_warp_stage(c: Contraction, stage: Stage, budget: int = STATIC_SMEM_
     # has no descriptor (its fill closure carries the extra index dims verbatim), so it stays
     # eligible for those.
     tma_rank_ok = isinstance(c.a_operand, Load) and len(c.a_operand.index) == 2 and len(c.b_load.index) == 2
-    tma_ok = tma_rank_ok and _can_stage_warp_tma(stage, c.k_axis, n.axis, n.tile, bk, atom.atom_k, a_nbytes, n.mask, c.b_trans)
+    # TMA hardware: every box dim must be 1..256 — the slot shapes are A (tile_m, bk) / B (bk,
+    # tile_n), so an oversized warp register tile (e.g. tile_m = 512 at w4/f8) must decline TMA
+    # (the scalar resolver gates the same; cp.async has no box).
+    tma_box_ok = max(m.tile, n.tile, bk * atom.atom_k) <= 256
+    tma_ok = (
+        tma_rank_ok and tma_box_ok and _can_stage_warp_tma(stage, c.k_axis, n.axis, n.tile, bk, atom.atom_k, a_nbytes, n.mask, c.b_trans)
+    )
     cp_ok = (not tma_ok) and _can_stage_warp(stage, c.k_axis, m.tile, n.tile, bk, atom.atom_k, m.mask, n.mask, c.b_trans)
     if not (tma_ok or cp_ok):
         return None
@@ -618,17 +634,24 @@ def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = ST
     # register tile like tile_n=832 must decline TMA; cp.async has no box).
     if stage.transport == "tma" and max(c.m.tile, c.n.tile) > 256:
         return None
-    # cuTensorMapEncodeTiled: every global stride must be 16 B-aligned — A's inner global
-    # stride is K (row-major (M,K)), B's is N ((K,N)). The warp resolver's
-    # ``_can_stage_warp_tma`` gates the same; without it an odd-width shape (e.g. N=5 fp32,
-    # a 20 B row stride) resolver-accepts and then crashes at descriptor encode time.
-    if stage.transport == "tma":
-        n_ext = c.n.axis.extent
-        if not n_ext.is_static or ((K * elem_bytes) % 16 or (n_ext.as_static() * elem_bytes) % 16):
-            return None
+    # Every staged transport needs 16 B-aligned inner global strides — A's is K (row-major
+    # (M,K)), B's is N ((K,N)). TMA: cuTensorMapEncodeTiled's global-stride rule (crashes at
+    # descriptor encode otherwise — the N=5 fp32 / 20 B case). cp.async: the fill's vectorized
+    # copies inherit the row base alignment, so a 12 B-stride operand (N=3 fp32) issues
+    # ``cp.async`` at misaligned addresses and faults at RUNTIME (``CUDA_ERROR_MISALIGNED_ADDRESS``
+    # + watchdog hang — the ninth-sweep e2e regression on a (8,3) fp32 B; the Gemma
+    # ``k_linear_reduce`` bench_fail cluster shares the signature and likely the class).
+    # Gate both transports: an odd-stride shape stays gmem-direct.
+    n_ext = c.n.axis.extent
+    if not n_ext.is_static or ((K * elem_bytes) % 16 or (n_ext.as_static() * elem_bytes) % 16):
+        return None
+    # Per-operand slot bytes: A's slab is (tile_m × bk) at A's element size, B's (bk × tile_n) at
+    # B's — the operands may differ (fp32 split partials × fp16 weights), so sizing both with A's
+    # element over-books the budget on the mixed shape.
+    b_bytes = inputs[c.b_load.input].dtype.nbytes if c.b_load.input in inputs else elem_bytes
     depth, bk_elems = max(1, stage.depth), 0
     while depth >= 1:
-        cap = budget // (depth * max(1, c.m.tile + c.n.tile) * elem_bytes)
+        cap = budget // (depth * max(1, c.m.tile * elem_bytes + c.n.tile * b_bytes))
         bk_elems = next((v for v in (128, 64, 32, 16, 8, 4) if v <= cap and K % v == 0), 0)
         if bk_elems >= 4:
             break

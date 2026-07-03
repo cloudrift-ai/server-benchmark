@@ -522,7 +522,7 @@ class Pipeline:
         for _attempt in range(_MAX_GREEDY_RETRIES):
             rejections: list[tuple[str, str, str]] = []
             run = Run(pipeline=self, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
-            decide = greedy_decide(blocked=blocked, price_structural=allow_structural)
+            decide = greedy_decide(blocked=blocked, price_structural=allow_structural, db=db)
             terminal, trace = run.resolve(graph.copy(), decide)
             failed = _unlowered_tiles(terminal, rejections)
             if not failed:

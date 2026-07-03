@@ -114,9 +114,10 @@ def encode_tiled(
         raise ValueError(f"TMA rank must be 1..5, got {rank}")
     # Hardware limit: each boxDim must be 1..256. The driver rejects
     # violations with the opaque ``CUresult=1`` (CUDA_ERROR_INVALID_VALUE);
-    # name the offending dim instead. The lowering eligibility gate
-    # (``050_use_tma._source_eligible``) filters these before codegen, so
-    # tripping this means a gate regression upstream.
+    # name the offending dim instead. The lowering eligibility gates (the
+    # scalar / warp stage resolvers in ``lowering/tile/_schedule.py``)
+    # filter these before codegen, so tripping this means a gate
+    # regression upstream.
     for d, b in enumerate(box_extents):
         if not 1 <= int(b) <= 256:
             raise ValueError(f"TMA box dim {d} extent {b} outside the hardware range 1..256 (box_extents={box_extents!r})")

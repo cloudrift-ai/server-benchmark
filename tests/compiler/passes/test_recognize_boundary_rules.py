@@ -11,6 +11,8 @@ a computed-A ``Contraction`` fork sibling of the ``Map`` form.
 
 from __future__ import annotations
 
+import pytest
+
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16, F32
@@ -181,3 +183,44 @@ def test_mlp_gate_up_nodifies_as_two_fold_contraction():
     assert isinstance(tile.op.body[-1], Write)
     assert any(_is_warp_row(r) for r in rows)
     assert not _is_warp_row(rows[0]), "option-0 stays the coop reduce row"
+
+
+def _normed_sdpa_graph():
+    """Gemma-shaped attention, torch-traced: RMSNorm'd Q/K/V (computed operand cones), GQA
+    (16 q / 8 kv heads), causal, head_dim 256 — the fusion-boundary case where the flash unit
+    used to fragment (the V-norm fused into the P@V product first, the halves merge then
+    tripped the work-blowup guard, and the P@V materialized its full weight×V outer product)."""
+    from emmy.commands.trace import graph_from_code
+
+    norm = "(lambda t: t*torch.rsqrt((t.float()*t.float()).mean(-1,keepdim=True)+1e-6).to(t.dtype))"
+    code = (
+        f"torch.nn.functional.scaled_dot_product_attention({norm}(torch.randn(1,16,128,256,dtype=torch.float16)), "
+        f"{norm}(torch.randn(1,8,128,256,dtype=torch.float16)), {norm}(torch.randn(1,8,128,256,dtype=torch.float16)), "
+        "is_causal=True, enable_gqa=True)"
+    )
+    graph, _, _ = graph_from_code(code)
+    return graph
+
+
+def test_normed_gqa_sdpa_certifies_flash():
+    """The fused flash form must certify when Q/K/V ride computed (RMSNorm) cones — the
+    fusion-boundary guards keep the cones materialized (flash streams plain buffers) instead
+    of letting them de-certify the unit: the P@V product merges with its sum-reduce FIRST
+    (`_pending_contraction_half`), nothing compute-bearing fuses into the (future) offer site
+    (`_sum_contracts_exp_producer` / `is_fold_offer_site`), and the score producer keeps
+    plain-Load Q/K (`_feeds_softmax`). Pre-guards this graph lowered to a fragmented sdpa
+    whose P@V wrote its full [b,h,m,n,d] outer product (Gemma finding 2)."""
+    pytest.importorskip("torch")
+
+    def decide(fp):
+        return flatten_leaves(fp.options)[0]
+
+    terminal, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_normed_sdpa_graph(), decide)
+    flash = [
+        n.op
+        for n in terminal.nodes.values()
+        if type(n.op).__name__ == "TileOp" and isinstance(n.op.op, Map) and getattr(n.op.op.source, "role", None) is AxisRole.TWISTED
+    ]
+    assert flash, "no TWISTED flash kernel certified for the normed GQA sdpa"
+    src = flash[0].op.source
+    assert isinstance(src.partial[0], Contraction), "flash did not absorb the score contraction (fold stayed cut)"

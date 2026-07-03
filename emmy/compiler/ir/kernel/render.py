@@ -417,6 +417,7 @@ static __device__ __forceinline__ void dpl_mma_m16n8k16_bf16(float* d, const uns
 
 _INTRINSIC_TO_CUDA: dict[str, str] = {
     "exp": "expf",
+    "exp_fast": "__expf",
     "rsqrt": "rsqrtf",
     "tanh": "tanhf",
     "fabs": "fabsf",

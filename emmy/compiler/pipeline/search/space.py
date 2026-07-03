@@ -194,6 +194,18 @@ INTERLEAVE_LOADS = Knob(
     off=False,
 )
 
+FAST_EXP = Knob(
+    "FAST_EXP",
+    KnobType.BOOL,
+    # Off by default and not a search dimension — the ONE policy knob that is not bit-exact
+    # (__expf ≈ 2 ulp vs correctly-rounded expf; numerically benign for the softmax family —
+    # the α rescale never amplifies and the carrier stays fp32 — but it must be a deliberate,
+    # pinnable choice, never a silent default). Manual override via EMMY_FAST_EXP=1.
+    hints=(False,),
+    help="Lower f32 exp through the SFU fast path (__expf: one FMUL + MUFU.EX2) instead of libm expf.",
+    off=False,
+)
+
 
 # --- Enumeration value grids -------------------------------------------------
 #

@@ -127,14 +127,21 @@ The x4 pairing landed as the `096_pair_ldmatrix_loads` kernel-IR peephole (LSU 1
 — by then the kernel was no longer LSU-bound, but the pass also serves the matmul staged drains and buys
 headroom for deeper rings/WSPEC). Remaining:
 
-1. `exp2f` + scale folding (we emit libm `expf` ~34×/lane/step and a per-element scale multiply; FA-2 folds
-   scale/log2e and hits MUFU.EX2 directly). NOT bit-identical — accuracy-gated, its own measured step. The
-   last first-order item: fma-pipe 7.4% vs FA-2's 7.9% at equal SM utilization.
-2. TMA rank-3 descriptor for batched K/V (`(B·H, S, D)` box) — not for occupancy; the gateway to
-   WSPEC-on-flash (no intra-step CTA sync remains to block the band split).
-3. Causal tile-skip (unchanged; the example is non-causal).
-4. Past-parity territory: FA-2 keeps ~255 regs of ILP in flight (2 KV tiles per iteration) — for us that is
-   `reg_m > 1` warp-geometry rows in the flash grid, future move-catalog work.
+1. ~~`exp2f` / fast exp~~ — RUN, hypothesis REFUTED for this kernel: `EMMY_FAST_EXP=1` (the new pin-only
+   BOOL policy knob — `085_fast_exp`, exp → `__expf` = FMUL+MUFU.EX2, ~2 ulp, the one non-bit-exact knob)
+   measured **flat** (219 → 220µs, noise). The exp sequence wasn't binding — the counters said 7.4%
+   fma-pipe and meant it. Corollary: the full base-2 fold (score pre-scale by log₂e absorbed into the
+   existing 1/√d multiply → whole loop in exp2, NO end correction needed) is algebraically free and exact
+   but would also measure ~0 here — designed, not built. NOTE: a bare "exp2 in the loop + correct at the
+   end" WITHOUT the score pre-scale is NOT valid algebra (base-2 vs base-e weights differ per element; no
+   scalar end-correction exists) — the pre-scale is what makes it exact.
+2. The remaining ~6% to FA-2 is now attributed to per-step dependency-chain latency at low occupancy
+   (QK mma → rowmax shuffle → exp → rescale → PV mma, hidden only by 14% occupancy) — the fix is ILP
+   restructuring: `reg_m > 1` flash geometry rows / FA-2's 2-KV-tile software pipeline. Move-catalog work,
+   past this PR.
+3. TMA rank-3 descriptor for batched K/V (`(B·H, S, D)` box) — the render prelude already carries 3d/4d/5d
+   `cp.async.bulk.tensor` helpers; the gateway to WSPEC-on-flash.
+4. Causal tile-skip (unchanged; the example is non-causal).
 
 ## Accuracy table (listing shape (1,4,128,64), vs an fp64 torch reference — the Numerics placeholder)
 

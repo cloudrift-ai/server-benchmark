@@ -126,3 +126,39 @@ def test_schedule_leaves_key_tile_by_contraction_axis():
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_matmul_graph(), decide)
     assert axes and None not in axes  # every TILE key is axis-named (TILE@<k>), never bare
     assert len(axes) == 1  # one contraction → one eligible k-axis
+
+
+def _reduce_graph() -> Graph:
+    """A bare full-row sum reduce (the ``reduce.2048x2048`` golden shape) — a lifted
+    :class:`Reduction` with a 2048-cell free grid, well past the coop heuristic's free cap."""
+    from emmy.compiler.ir.frontend.ir import MeanOp
+
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (2048, 2048)), node_id="x")
+    g.add_node(MeanOp(), ["x"], Tensor("y", (2048, 1)), node_id="y")
+    g.inputs, g.outputs = ["x"], ["y"]
+    return g
+
+
+def test_bare_reduce_forks_the_coop_catalog():
+    """A bare reduce must fork the full legal ``coop_reduce_moves()`` catalog beside serial, even
+    when the free grid exceeds the conservative heuristic's cap — the heuristic previously
+    collapsed the fork to ONE serial spec (no options offered), so the tune benched a single
+    variant and greedy deployed 53× behind the pinned ``b16``/``b32`` reduce goldens (eighth
+    golden sweep, finding 3). Option-0 stays the heuristic's conservative pick (cold-greedy
+    deploys are unchanged); the catalog rows are what keep the reduce goldens reachable."""
+    from emmy.compiler.pipeline.search.space import coop_reduce_moves
+
+    rows: list[dict] = []
+
+    def decide(fp):
+        leaves = flatten_leaves(fp.options)
+        for leaf in leaves:
+            rows.append(dict(getattr(leaf, "knobs", {}) or {}))
+        return leaves[0]
+
+    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_reduce_graph(), decide)
+    assert rows, "no fork was offered for the bare reduce"
+    reduces = [str(family_value(r, "REDUCE")) for r in rows]
+    assert reduces[0] == ""  # 2048 free cells > _FREE_CAP: the conservative heuristic pick leads
+    assert set(reduces) == {"", *coop_reduce_moves()}, f"catalog rows missing: {reduces}"

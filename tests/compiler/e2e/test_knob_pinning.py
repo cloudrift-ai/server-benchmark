@@ -474,3 +474,34 @@ def test_masked_tile_accuracy_configs(label: str, dims: dict, knobs: dict, env: 
     ref = _reference(graph, inputs, out_name)
     forced = _run_with_knobs_and_env(graph, inputs, out_name, knobs, env, monkeypatch)
     _assert_match(forced, ref)
+
+
+# The ninth-golden-sweep cp.async alignment regression: a (M,K)@(K,N) matmul whose B rows are NOT
+# 16 B-aligned (N=3 fp32 → 12 B stride) pinned to a cp.async staging ring issued vectorized
+# ``cp.async`` copies at misaligned global addresses — ``CUDA_ERROR_MISALIGNED_ADDRESS`` + a 1 s
+# watchdog hang at runtime. The scalar stage resolver's 16 B inner-stride gate (previously
+# TMA-only) now covers cp.async too: the pinned stage resolver-declines and the kernel lowers
+# gmem-direct with correct output.
+_ODD_STRIDE_CPASYNC_KNOBS = {"TILE": "n16x8/f2x4", "STAGE": "d2/cp/ring"}
+
+
+@requires_cuda
+def test_scalar_cpasync_declines_odd_stride(monkeypatch):
+    """fp32 matmul with a 12 B B-row stride pinned to a cp.async ring — the alignment gate must
+    decline staging (→ gmem-direct) instead of issuing misaligned ``cp.async`` copies."""
+    from emmy.compiler.dtype import F32
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.frontend.ir import MatmulOp
+
+    M, K, N = 4, 8, 3
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("a", (M, K), dtype=F32), node_id="a")
+    g.add_node(InputOp(), [], Tensor("b", (K, N), dtype=F32), node_id="b")
+    g.add_node(MatmulOp(), ["a", "b"], Tensor("c", (M, N), dtype=F32), node_id="c")
+    g.inputs, g.outputs = ["a", "b"], ["c"]
+    rng = np.random.default_rng(0)
+    inputs = {"a": rng.standard_normal((M, K), dtype=np.float32), "b": rng.standard_normal((K, N), dtype=np.float32)}
+    ref = inputs["a"] @ inputs["b"]
+    forced = _run_with_knobs(g, inputs, "c", _ODD_STRIDE_CPASYNC_KNOBS, monkeypatch)
+    np.testing.assert_allclose(forced, ref, atol=1e-3, rtol=1e-3)

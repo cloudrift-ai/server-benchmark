@@ -136,6 +136,10 @@ def _tune_offline(args):
         sys.exit(1)
     sys.stderr.write(f"[tune] offline refit on {len(prior._dataset)} rows from {config.prior_path()}\n")
     prior.fit()  # unconditional re-fit on the whole accumulated dataset
+    prior.calibration = prior._reservoir_calibration()  # refresh the trustworthy gate's input alongside the fit
+    if prior.calibration is not None:
+        verdict = "owns deploys" if prior.trustworthy else "QUARANTINED — deploys stay analytic"
+        sys.stderr.write(f"[tune] reservoir calibration {prior.calibration:+.2f} → learned model {verdict}\n")
     prior.checkpoint()
     sys.stderr.write(diagnostics.report(prior) + "\n")
     sys.stderr.write(diagnostics.golden_prior_eval(prior) + "\n")

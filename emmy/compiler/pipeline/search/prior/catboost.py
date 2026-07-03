@@ -28,7 +28,7 @@ import tempfile
 
 import numpy as np
 
-from emmy.compiler.pipeline.search.features import knob_features
+from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, knob_features
 from emmy.compiler.pipeline.search.prior.base import Prior
 
 
@@ -56,8 +56,9 @@ class CatBoostPrior(Prior):
         missing-value handling (``nan_mode="Min"``) can split "this knob isn't
         present on this row" off from a knob that is present *and* legitimately
         zero (a BOOL ``False`` → ``0.0``, ``STAGE="00"`` → ``popcount 0.0``).
-        Since every *realized leaf* now stamps every declared knob (tier-foreign
-        knobs get an explicit OFF value via ``knob.apply_off_defaults`` — see the
+        Since every *realized leaf* now stamps every declared knob (the schedule
+        codecs get their explicit OFF value ``""`` from ``_schedule``'s option-0
+        stamping; bare-stamped knobs via ``knob.apply_off_defaults`` — see the
         knob-stamp invariant), an absent feature means **only** "not-yet-decided"
         — a partial fork-prefix row scored / collected mid-descent (``_node_knobs``).
         ``NaN`` keeps that distinct from a decided-unused OFF value (``WM=0`` /
@@ -118,26 +119,41 @@ class CatBoostPrior(Prior):
 
     def to_json(self) -> dict | None:
         """Serialize the CatBoost model (native ``cbm`` blob, base64'd) + the
-        reservoir dataset + counters (``None`` when there's nothing yet)."""
+        reservoir dataset + counters (``None`` when there's nothing yet).
+        ``feat_ver`` stamps the knob vocabulary the rows are spelled in
+        (:data:`~emmy.compiler.pipeline.search.features.FEATURIZER_VERSION`);
+        ``calibration`` carries the last fit's reservoir Spearman so a loaded
+        checkpoint keeps its ``trustworthy`` verdict."""
         if self._model is None and not self._dataset:
             return None
         return {
+            "feat_ver": FEATURIZER_VERSION,
             "model": self._model_b64(),
             "cols": self._cols,
             "dataset": [[dict(k), float(v)] for k, v in self._dataset],
             "seen": self._seen,
             "since_fit": self._since_fit,
+            "calibration": self.calibration,
         }
 
     @classmethod
     def from_json(cls, obj: dict) -> CatBoostPrior:
         """Reconstruct a checkpointed prior from :meth:`to_json` — model (for
         inference / warm-start) plus the reservoir dataset (so a tune keeps
-        accumulating). Tolerant of a stale checkpoint: an incompatible / corrupt
+        accumulating). A checkpoint from another ``FEATURIZER_VERSION`` is dropped
+        WHOLE — model and rows alike: its rows are spelled in a knob vocabulary this
+        featurizer can't read, and a model refit on them collapses to constant
+        predictions (worse-than-random ranking; the 2026-07 tile-IR rebuild's
+        stale-checkpoint failure). A missing stamp means the retired version 1.
+        Otherwise tolerant of a stale checkpoint: an incompatible / corrupt
         model blob is dropped (the rows are still salvaged and a refit rebuilds
         the model), so e.g. a pre-CatBoost prior file migrates instead of crashing."""
+        if int(obj.get("feat_ver", 1)) != FEATURIZER_VERSION:
+            return cls()  # cross-vocabulary checkpoint — start fresh
         p = cls()
         p._cols = obj.get("cols")
+        cal = obj.get("calibration")
+        p.calibration = float(cal) if cal is not None else None
         raw = obj.get("dataset") or []
         p._dataset = [(dict(k), float(v)) for k, v in raw]
         p._seen = int(obj.get("seen", len(p._dataset)))

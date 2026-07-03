@@ -471,3 +471,16 @@ def test_render_table_ansi_aware_width():
     plain = [re.sub(r"\033\[[0-9]+m", "", line) for line in lines]
     assert plain[1] == " 1  x"  # "1" right-aligned in a width-2 column
     assert plain[2] == "22  y"  # coloured "22" fills the column; "y" still aligns under "x"
+
+
+def test_bare_families_canonicalizes_axis_suffixed_knobs():
+    """The golden-reproduction table compares the greedy pick against golden YAML rows,
+    whose knobs are spelled bare — but resolved ops carry axis-suffixed codec keys
+    (``TILE@a2``). ``_bare_families`` bridges the two; compared raw, every found cell
+    rendered ``-`` over perfectly good picks (the post-rebuild 0/29 table)."""
+    from emmy.commands.eval import _bare_families
+
+    got = _bare_families({"TILE@a2": "n16x8/f2x4", "STAGE@a2": "d3/tma/ring", "REDUCE@a2": "g2a", "WSPEC": ""})
+    assert got == {"TILE": "n16x8/f2x4", "STAGE": "d3/tma/ring", "REDUCE": "g2a", "WSPEC": ""}
+    # bare keys pass through; first key wins a family collision (single-node picks in practice)
+    assert _bare_families({"TILE": "a", "TILE@x": "b"}) == {"TILE": "a"}

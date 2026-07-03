@@ -24,6 +24,16 @@ from emmy.compiler.pipeline.knob import (
     get,
 )
 
+# Version of the knob vocabulary + feature encoding this module reads. Rows recorded under a
+# different version featurize to garbage (the 2026-07 tile-IR rebuild replaced ``BM/BN/FM/FN/…``
+# with the ``TILE``/``STAGE``/``REDUCE`` codecs; a pre-rebuild reservoir scored by this featurizer
+# collapses to constant predictions — worse than random). Every persisted training artifact (the
+# prior checkpoint's reservoir, the autotune DB's ``node`` rows) is stamped with this version, and
+# readers drop rows from another version. Version 1 is the retired pre-rebuild vocabulary (old
+# artifacts carry no stamp and default to it). Bump on any incompatible knob-spelling or
+# feature-encoding change.
+FEATURIZER_VERSION = 2
+
 
 def masked_axis_features(*, m: bool = False, n: bool = False, k: bool = False) -> dict[str, float]:
     """The per-role boundary-masked structural features (``S_masked_m/n/k``).

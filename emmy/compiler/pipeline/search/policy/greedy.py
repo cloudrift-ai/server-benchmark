@@ -199,14 +199,16 @@ def _pick_structural(fp: ForkPoint, leaves: list, prior, memo: dict[str, float |
     kernel's partition fork, obtained by a nested deterministic resolution of
     the kernel's single-node slice (``lowering/tile`` only, no backend,
     CPU-only — :func:`_price_kernel`); a structural option's price is the Σ
-    over its fragment's kernels. Gated on the *trained* ``CatBoostPrior``
-    (``prior.fitted``): Σ-comparisons through the analytic cold-start model
-    are unvalidated, and a cold compile must never change kernel sets. Greedy
+    over its fragment's kernels. Gated on the *trusted* ``CatBoostPrior``
+    (``prior.trustworthy`` — trained AND passing the reservoir calibration
+    gate): Σ-comparisons through the analytic cold-start model are
+    unvalidated, and neither a cold compile nor a mis-calibrated model may
+    change kernel sets. Greedy
     is prior-only by design — the price never reads the DB (the learned-prior
     work removed ``_best_fork`` replay deliberately)."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
-    if not price_structural or prior is None or not getattr(prior, "fitted", False):
+    if not price_structural or prior is None or not getattr(prior, "trustworthy", False):
         return None
     op_leaves = [o for o in leaves if not _is_structural_option(o)]
     if not op_leaves:

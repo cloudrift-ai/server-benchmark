@@ -163,15 +163,16 @@ def test_prior_file_checkpoint_round_trips(tmp_path):
 
 
 def test_load_tolerates_stale_checkpoint(tmp_path):
-    """A checkpoint with an incompatible ``model`` blob (e.g. a pre-CatBoost sklearn
-    estimator-state dict) migrates instead of crashing: the unusable model is dropped,
-    the ``dataset`` rows are salvaged, and the next refit rebuilds it. (The pre-rebuild
-    ``archived_rows`` dataset key is retired — a checkpoint that old is discarded whole,
-    its rows being suspect under the restored knob schema.)"""
+    """A same-vocabulary checkpoint with an incompatible ``model`` blob (e.g. a
+    pre-CatBoost sklearn estimator-state dict) migrates instead of crashing: the
+    unusable model is dropped, the ``dataset`` rows are salvaged, and the next refit
+    rebuilds it."""
     from emmy import storage
+    from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 
     path = tmp_path / "prior.json"
     stale = {
+        "feat_ver": FEATURIZER_VERSION,
         "cols": ["BM"],
         "model": {"class": "BayesianRidge", "state": {}},  # sklearn estimator state, not a cbm blob
         "dataset": [[{"BM": bm}, math.log(bm)] for bm in (2, 4, 8, 16)],
@@ -183,6 +184,66 @@ def test_load_tolerates_stale_checkpoint(tmp_path):
     p.add_rows(_bm_rows())
     p.fit()
     assert p.fitted  # rebuilt fine from salvaged + new rows
+
+
+def test_load_discards_cross_vocabulary_checkpoint(tmp_path):
+    """A checkpoint from another ``FEATURIZER_VERSION`` (or with no stamp — the
+    retired pre-rebuild vocabulary) is discarded WHOLE, rows included: its knob
+    spellings featurize to garbage under the current vocabulary, and a model refit on
+    them collapses to constant predictions (the worse-than-random-ranking failure the
+    RTX 5090 sweeps hit)."""
+    from emmy import storage
+
+    path = tmp_path / "prior.json"
+    for stamp in ({}, {"feat_ver": 1}):  # missing stamp == version 1
+        old = {**stamp, "cols": ["BM"], "dataset": [[{"BM": bm}, math.log(bm)] for bm in (2, 4, 8, 16)]}
+        storage.write_json(path, old)
+        p = CatBoostPrior.load(path=path)
+        assert not p.fitted and not p._dataset  # dropped whole — model AND rows
+
+
+def test_checkpoint_persists_feat_ver_and_calibration():
+    """``to_json`` stamps the featurizer version and the last calibration; the
+    round-trip restores both so a loaded model keeps its ``trustworthy`` verdict."""
+    from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
+
+    p = _fit(_bm_rows())
+    p.calibration = 0.12
+    obj = p.to_json()
+    assert obj["feat_ver"] == FEATURIZER_VERSION
+    q = prior_from_json(obj)
+    assert q.calibration == 0.12
+    assert q.fitted and not q.trustworthy  # mis-calibrated verdict survives the reload
+
+
+def test_maybe_refit_measures_calibration_and_gates_trustworthy():
+    """``maybe_refit`` refreshes ``calibration`` from the reservoir after each fit:
+    a rankable dataset yields a high Spearman (trustworthy), and a model whose
+    predictions can't rank its own rows quarantines (``trustworthy`` False)."""
+    p = CatBoostPrior(seed=0, iterations=40, min_rows=3, refit_every=1)
+    p.add_rows([({"S_kind": 1.0, "BM": bm}, 100.0 / bm) for bm in (2, 4, 8, 16, 32, 64) for _ in range(6)])
+    assert p.maybe_refit()
+    assert p.calibration is not None and p.calibration > 0.9
+    assert p.trustworthy
+    p.calibration = 0.0  # a measured collapse (e.g. cross-vocabulary rows) flips the gate
+    assert p.fitted and not p.trustworthy
+
+
+def test_fallback_prior_quarantines_miscalibrated_learned():
+    """``FallbackPrior`` routes deploys/PUCT through the learned model only while
+    ``trustworthy`` — a fitted-but-mis-calibrated model falls back to analytic
+    (deploy: ``mean_score``; selection: ``score``), and recovers once calibration does."""
+    from emmy.compiler.pipeline.search.prior.fallback import FallbackPrior
+
+    learned = _fit(_bm_rows())
+    fb = FallbackPrior(learned)
+    learned.calibration = 0.9
+    assert fb.trustworthy
+    assert fb.mean_score({"BM": 32}) == learned.mean_score({"BM": 32})
+    learned.calibration = 0.1  # below CALIBRATION_MIN → quarantined
+    assert fb.fitted and not fb.trustworthy
+    assert fb.mean_score({"BM": 32}) == fb.analytic.mean_score({"BM": 32})
+    assert fb.score({"BM": 32}) == fb.analytic.score({"BM": 32})
 
 
 def test_diagnostics_report_reachability():

@@ -353,10 +353,17 @@ def node_report(prior, nodes, *, kernel_filter: str | None = None) -> str:
     :meth:`SearchDB.iter_nodes`; ``kernel_filter`` keeps only nodes whose op label
     contains the substring (``--kernel``). ``bench_fail`` rows are excluded up front —
     their ``value_us`` is the watchdog sentinel, not a measurement, and would corrupt
-    the ranking/reachability metrics (pre-enrichment rows default to ``ok``)."""
+    the ranking/reachability metrics (pre-enrichment rows default to ``ok``). Rows from
+    another ``FEATURIZER_VERSION`` are excluded too, with a printed count: their
+    ``features`` are spelled in a knob vocabulary the prior can't read, so scoring them
+    yields constant predictions and a worse-than-random report about a healthy model
+    (the 2026-07 tile-IR-rebuild failure class)."""
     from collections import defaultdict  # noqa: PLC0415
 
-    nodes = [n for n in nodes if n.status == "ok"]
+    from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION  # noqa: PLC0415
+
+    stale = sum(1 for n in nodes if n.feat_ver != FEATURIZER_VERSION)
+    nodes = [n for n in nodes if n.status == "ok" and n.feat_ver == FEATURIZER_VERSION]
     total = len(nodes)
     if kernel_filter:
         nodes = [n for n in nodes if kernel_filter in _node_op_label(n.features)]
@@ -365,6 +372,11 @@ def node_report(prior, nodes, *, kernel_filter: str | None = None) -> str:
         by_gpu[n.gpu or "(unknown card)"].append(n)
     suffix = f" matching --kernel {kernel_filter!r}" if kernel_filter else ""
     lines = [f"[prior] node store: {len(nodes)} nodes{suffix} across {len(by_gpu)} card(s), fitted={prior.fitted}"]
+    if stale:
+        lines.append(
+            f"  skipped {stale} row(s) from another featurizer vocabulary (feat_ver != {FEATURIZER_VERSION}) — "
+            "unreadable by this prior; re-collect with `collect-node-data`"
+        )
     if not nodes:
         if kernel_filter and total:
             lines.append(f"  no nodes match --kernel {kernel_filter!r} ({total} in store) — try an op label like 'matmul' / 'reduce'")

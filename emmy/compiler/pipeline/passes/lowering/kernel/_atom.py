@@ -310,17 +310,21 @@ def _slab_operands(
     bk_elems: int,
     base: tuple[Expr, Expr],
     swizzles: tuple[str, str] = ("NONE", "NONE"),
+    elems: tuple = (None, None),
 ):
     """The staged ``(A, B)`` :class:`Operand` pair — the one operand-geometry factory both tiers build,
     looped over the two operands. A is ``(tile_m × bk)`` indexed by the M tile axis (the slab ROW); B is
     ``(bk × tile_n)`` by the N tile axis (the slab COL) — ``is_row`` flips the slot shape + the TMA box
     origin. ``base`` is the ``(row_base, col_base)`` CTA tile origin; ``index_srcs`` are the operands'
     gmem index expressions (``load.index``); ``swizzles`` the per-operand TMA smem swizzle modes (the
-    mma tier's :meth:`_MmaOps.slab_swizzles` — ``("NONE", "NONE")`` everywhere else)."""
+    mma tier's :meth:`_MmaOps.slab_swizzles` — ``("NONE", "NONE")`` everywhere else). ``elems`` are the
+    per-operand element dtypes (``DataType`` or ``None`` = the transport-level dtype) — a mixed-dtype
+    scalar contraction (fp32 A × fp16 B) must size each slab and fill by its OWN element width."""
     ops: list[Operand] = []
     for i, (tag, is_row) in enumerate((("a", True), ("b", False))):
         tile, tile_base = mn[i], base[i]
         shape = (tile.tile, bk_elems) if is_row else (bk_elems, tile.tile)
+        elem = elems[i]
         ops.append(
             Operand(
                 tag=tag,
@@ -329,6 +333,8 @@ def _slab_operands(
                 coords=_box_origin(index_srcs[i], tile=tile, tile_base=tile_base, k_axis=k_axis),
                 index=_slab_index(index_srcs[i], tile=tile, tile_base=tile_base, k_axis=k_axis, tile_is_row=is_row),
                 swizzle=swizzles[i],
+                dtype=cuda_name(elem) if elem is not None else None,
+                elem_bytes=elem.nbytes if elem is not None else None,
             )
         )
     return tuple(ops)
@@ -462,6 +468,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             bk_elems=stage.bk_elems,
             base=_tile_base(mn),
             swizzles=ops.slab_swizzles(mn, elem.nbytes) if stage.transport == "tma" else ("NONE", "NONE"),
+            elems=ops.slab_elems(),
         )
         common = dict(
             operands=operands,
@@ -644,6 +651,16 @@ class _AtomOps:
         the scalar tier's plain-``Load`` drain doesn't (:class:`_MmaOps` overrides)."""
         return ("NONE", "NONE")
 
+    def slab_elems(self) -> tuple:
+        """The per-operand ``(A, B)`` slab element dtypes. The mma tier's operands share the atom
+        dtype (16-bit fragments, dtype-gated at enumeration), so this base returns the one
+        :meth:`slab_elem` twice; :class:`_ScalarOps` overrides with each gmem operand's OWN dtype —
+        a mixed fp32-A × fp16-B contraction (the norm→linear split-combine shape) must size each
+        slab and its ``cp.async`` fill by its own element width, or the B fill issues 16 B chunks
+        at fp32 spacing over fp16 memory (misaligned + overlapped — the Gemma bench_fail cluster)."""
+        elem = self.slab_elem()
+        return (elem, elem)
+
 
 class _MmaOps(_AtomOps):
     """Tensor-core atom — ``ldmatrix`` fragment reads + ``mma.sync``, a ``RegStore`` sink."""
@@ -795,6 +812,11 @@ class _ScalarOps(_AtomOps):
     def slab_elem(self):
         """The slab element dtype — the gmem operand's own dtype (fp32 SGEMM stages fp32)."""
         return self.inputs[self.c.a_operand.input].dtype
+
+    def slab_elems(self) -> tuple:
+        """Each gmem operand's OWN dtype — A and B may differ on the scalar tier (fp32 split
+        partials × fp16 weights); the drain's fma converts like the gmem-direct path does."""
+        return (self.inputs[self.c.a_operand.input].dtype, self.inputs[self.c.b_load.input].dtype)
 
     def staged_drain(self, operands, slot, cells, offset, mn):
         """The scalar slab drain — the plain-``Load`` fma leaf (:func:`_scalar_drain`), reading by

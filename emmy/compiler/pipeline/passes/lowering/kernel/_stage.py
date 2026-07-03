@@ -297,6 +297,13 @@ class Operand:
     # coordinates (the load's own batch/head index exprs — GQA's ``h // group`` rides through).
     # ``None`` = the 2-D ``shape`` (the matmul tier's plain operands).
     box: tuple[int, ...] | None = None
+    # This operand's OWN element dtype / size, when it differs from the transport-level
+    # ``slab_dtype`` / ``elem_bytes`` (a mixed-dtype scalar contraction — fp32 A × fp16 B, the
+    # norm→linear split-combine shape). ``None`` inherits the transport's. Sizing the B fill with
+    # A's element width issued 16 B ``cp.async`` chunks at fp32 spacing over fp16 memory —
+    # misaligned addresses + overlapped data (the Gemma ``k_linear_reduce`` bench_fail cluster).
+    dtype: str | None = None
+    elem_bytes: int | None = None
 
     @property
     def slab(self) -> str:
@@ -422,7 +429,7 @@ class CpAsyncTransport:
     cta: CtaTile
 
     def slab_decls(self, ring: int) -> list[Stmt]:
-        return [slab_smem(op.slab, ring * op.shape[0], op.shape[1] + op.pad_cols, self.slab_dtype) for op in self.operands]
+        return [slab_smem(op.slab, ring * op.shape[0], op.shape[1] + op.pad_cols, op.dtype or self.slab_dtype) for op in self.operands]
 
     def prologue(self, ring: int) -> list[Stmt]:
         return []
@@ -436,7 +443,7 @@ class CpAsyncTransport:
                 src=op.buf,
                 gmem_index=op.index(k0),
                 cta=self.cta,
-                elem_bytes=self.elem_bytes,
+                elem_bytes=op.elem_bytes or self.elem_bytes,
                 name=op.tag,
                 row_offset=op.slot_row(slot),
             )
@@ -468,17 +475,24 @@ class TmaTransport:
 
     @property
     def _total_bytes(self) -> int:
-        return sum(math.prod(op.shape) for op in self.operands) * self.elem_bytes
+        return sum(math.prod(op.shape) * (op.elem_bytes or self.elem_bytes) for op in self.operands)
 
     def slab_decls(self, ring: int) -> list[Stmt]:
         # TMA destination smem must be 128 B-aligned (a swizzled slab to its full atom period,
         # so the drain's from-base XOR matches the hardware deposit); one mbarrier per ring slot.
         decls: list[Stmt] = [
-            tma_descriptor(op.desc, op.buf, op.box or op.shape, self.slab_dtype, swizzle=op.swizzle, elem_bytes=self.elem_bytes)
+            tma_descriptor(
+                op.desc,
+                op.buf,
+                op.box or op.shape,
+                op.dtype or self.slab_dtype,
+                swizzle=op.swizzle,
+                elem_bytes=op.elem_bytes or self.elem_bytes,
+            )
             for op in self.operands
         ]
         decls += [
-            slab_smem(op.slab, ring * op.shape[0], op.shape[1], self.slab_dtype, align=_SWIZZLE_SLAB_ALIGN[op.swizzle])
+            slab_smem(op.slab, ring * op.shape[0], op.shape[1], op.dtype or self.slab_dtype, align=_SWIZZLE_SLAB_ALIGN[op.swizzle])
             for op in self.operands
         ]
         decls.append(Smem(name=self.mbar, extents=(ring,), dtype="unsigned long long"))
@@ -494,7 +508,7 @@ class TmaTransport:
         if op.swizzle == "NONE":
             return coords
         inner = (op.box or op.shape)[-1]
-        atom, _ = pick_swizzle_atom(inner, self.elem_bytes)
+        atom, _ = pick_swizzle_atom(inner, op.elem_bytes or self.elem_bytes)
         if atom >= inner:
             return coords
         return (*coords[:-1], BinaryExpr("/", coords[-1], _lit(atom)), _lit(0))

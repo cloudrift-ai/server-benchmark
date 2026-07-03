@@ -206,6 +206,8 @@ def build_flash_frag(
     causal: bool,
     group: int = 1,
     mask: tuple[str, tuple] | None = None,
+    layouts: tuple = (None, None, None),
+    raw_shapes: tuple | None = None,
 ) -> Graph:
     """Build the fragment graph holding the fused flash ``TileOp`` (+ its scale /
     -inf constants). The caller guarantees :func:`flash_shape_eligible`.
@@ -218,7 +220,10 @@ def build_flash_frag(
     isn't stored here.
 
     ``group`` is the GQA head ratio (K/V indexed at ``head // group``); ``mask`` is
-    an optional ``(buffer_id, shape)`` additive bias loaded per ``(m, kv)``."""
+    an optional ``(buffer_id, shape)`` additive bias loaded per ``(m, kv)``. ``q/k/v_shape``
+    are CANONICAL ``(batch…, seq, last)``; ``layouts`` are the per-operand ``(seq_pos,
+    last_pos)`` slot orders the loads permute back into (``None`` = head-major identity),
+    and ``raw_shapes`` the operands' traced shapes for the fragment's input decls."""
     batch = [_static(d) for d in q_shape[:-2]]
     head_dim, d_v = _static(q_shape[-1]), _static(v_shape[-1])
     s_q_dim, s_k_dim = q_shape[-2], k_shape[-2]  # Dim instances — static int or symbolic seq_len
@@ -226,7 +231,19 @@ def build_flash_frag(
     mask_buf, mask_shape = mask if mask is not None else (None, None)
 
     flash_op = _flash_op(
-        q_id, k_id, v_id, batch, s_q_dim, s_k_dim, head_dim, d_v, causal=causal, group=group, mask_buf=mask_buf, mask_shape=mask_shape
+        q_id,
+        k_id,
+        v_id,
+        batch,
+        s_q_dim,
+        s_k_dim,
+        head_dim,
+        d_v,
+        causal=causal,
+        group=group,
+        mask_buf=mask_buf,
+        mask_shape=mask_shape,
+        layouts=layouts,
     )
     batch_axes = tuple(Axis(name=f"b{i}", extent=Dim(b)) for i, b in enumerate(batch))
     grid = (*batch_axes, Axis(name="m", extent=s_q_dim), Axis(name="d", extent=Dim(d_v)))
@@ -241,7 +258,8 @@ def build_flash_frag(
     tile = TileOp(op=flash_op, place=Placement(free=grid), knobs=knobs)
 
     frag = Graph()
-    for nid, shp in ((q_id, q_shape), (k_id, k_shape), (v_id, v_shape)):
+    in_shapes = raw_shapes if raw_shapes is not None else (q_shape, k_shape, v_shape)
+    for nid, shp in zip((q_id, k_id, v_id), in_shapes, strict=True):
         frag.add_node(op=InputOp(), inputs=[], output=Tensor(nid, shp, out.dtype), node_id=nid)
     inputs = [q_id, k_id, v_id, "_flash_scale"]
     frag.add_node(
@@ -319,6 +337,7 @@ def _flash_op(
     group: int = 1,
     mask_buf: str | None = None,
     mask_shape: tuple | None = None,
+    layouts: tuple = (None, None, None),
 ) -> Map:
     """The per-output-element ``(…, m, d)`` compute as the structural-node tree: flash is
     ``Map(body=[O/l projection], source=Reduction(role=TWISTED, axis=kv, partial=[Contraction(QK), …,
@@ -340,9 +359,10 @@ def _flash_op(
     bvars = _batch_vars(len(batch))
     head_axis = len(batch) - 1  # last batch dim is the head (when there is one)
     kv_bvars = tuple(BinaryExpr("/", bv, Literal(group, "int")) if (group > 1 and i == head_axis) else bv for i, bv in enumerate(bvars))
-    q_idx = (*bvars, Var("m"), Var("dd"))
-    k_idx = (*kv_bvars, Var("kv"), Var("dd"))
-    v_idx = (*kv_bvars, Var("kv"), Var("d"))
+    q_layout, k_layout, v_layout = layouts
+    q_idx = _permute_idx((*bvars, Var("m"), Var("dd")), q_layout)
+    k_idx = _permute_idx((*kv_bvars, Var("kv"), Var("dd")), k_layout)
+    v_idx = _permute_idx((*kv_bvars, Var("kv"), Var("d")), v_layout)
 
     # s = Σ_dd Q·K — the inner contraction as a high-level :class:`Contraction` structural node, the
     # ``source`` of the streaming kv :class:`Reduction`. Per-cell scalar (``TilePlan()``): the
@@ -436,10 +456,48 @@ def _var_at(index: tuple, pos: int) -> str | None:
     return e.name if isinstance(e, Var) else None
 
 
-def _extract_qk(xnode: Node) -> tuple[str, str, object] | None:
-    """From the scaled-QK^T producer of the score buffer, return ``(q_id, k_id,
-    head_dim_extent)``. Q vs K by index (fusion reorders the operands): the matmul
-    operand whose seq index equals the score's row (M) axis is Q."""
+def _slot_of(index: tuple, name: str) -> int | None:
+    """The position of the plain ``Var(name)`` in ``index``, or None."""
+    for i, e in enumerate(index):
+        if isinstance(e, Var) and e.name == name:
+            return i
+    return None
+
+
+def _canon_shape(shape: tuple, layout: tuple[int, int] | None) -> tuple:
+    """``shape`` reordered to the canonical ``(batch…, seq, last)`` given the operand's
+    ``(seq_pos, last_pos)`` layout — identity for ``None`` (already head-major)."""
+    if layout is None:
+        return tuple(shape)
+    s_pos, l_pos = layout
+    rest = tuple(d for i, d in enumerate(shape) if i not in (s_pos, l_pos))
+    return (*rest, shape[s_pos], shape[l_pos])
+
+
+def _permute_idx(comps: tuple, layout: tuple[int, int] | None) -> tuple:
+    """Place the canonical index components ``(batch…, seq, last)`` into the operand's own
+    slot order — the trace layout a fused transpose baked into the load index (HF's
+    per-layer Q/K/V arrive ``(b, s, h, d)``, seq-major). ``None`` = head-major identity."""
+    if layout is None:
+        return comps
+    s_pos, l_pos = layout
+    idx: list = [None] * len(comps)
+    idx[s_pos], idx[l_pos] = comps[-2], comps[-1]
+    rest = iter(comps[:-2])
+    for i in range(len(comps)):
+        if idx[i] is None:
+            idx[i] = next(rest)
+    return tuple(idx)
+
+
+def _extract_qk(xnode: Node) -> tuple[tuple[str, tuple[int, int]], tuple[str, tuple[int, int]], object] | None:
+    """From the scaled-QK^T producer of the score buffer, return
+    ``((q_id, q_layout), (k_id, k_layout), head_dim_extent)``. Q vs K by index (fusion
+    reorders the operands): the operand indexed by the score's row (M) var is Q — at ANY
+    index slot, not just -2: a fused transpose bakes the trace layout into the load index
+    (HF's per-layer Q/K arrive ``(b, s, h, d)``, seq-major). Each operand's
+    ``(seq_pos, last_pos)`` layout rides along so the fragment builder emits loads in the
+    operand's own slot order."""
     op = xnode.op
     if not isinstance(op, LoopOp):
         return None
@@ -447,21 +505,27 @@ def _extract_qk(xnode: Node) -> tuple[str, str, object] | None:
     if len(writes) != 1:
         return None
     m_var = _var_at(writes[0].index, -2)  # score [..., M (query), N (kv)] → row var
-    if m_var is None:
+    n_var = _var_at(writes[0].index, -1)  # … and the streamed key (column) var
+    if m_var is None or n_var is None:
         return None
     for lp in _accum_loops(op):
         loads = [s for s in lp.body if isinstance(s, Load)]
         accs = [s for s in lp.body if isinstance(s, Accum)]
         muls = [s for s in lp.body if isinstance(s, Assign) and s.op.semiring_product]
         if len(loads) == 2 and len(accs) == 1 and _is_sum(accs[0]) and muls:
-            q_id = k_id = None
+            q = k = None
             for ld in loads:
-                if _var_at(ld.index, -2) == m_var:
-                    q_id = ld.input
-                else:
-                    k_id = ld.input
-            if q_id is not None and k_id is not None:
-                return q_id, k_id, lp.axis.extent
+                dd_pos = _slot_of(ld.index, lp.axis.name)
+                if dd_pos is None:
+                    continue
+                q_pos = _slot_of(ld.index, m_var)
+                k_pos = _slot_of(ld.index, n_var)
+                if q_pos is not None:
+                    q = (ld.input, (q_pos, dd_pos))
+                elif k_pos is not None:
+                    k = (ld.input, (k_pos, dd_pos))
+            if q is not None and k is not None:
+                return q, k, lp.axis.extent
     return None
 
 
@@ -559,6 +623,28 @@ def _fuse_degraded(root: Node, reason: str) -> None:
         logger.warning("PLACE@fold=fuse: flash fuse of %r not certifiable (%s); degrading to cut", root.name, reason)
 
 
+def _extract_v_layout(root: Node, v_buf: str) -> tuple[int, int] | None:
+    """The V operand's ``(kv_pos, d_pos)`` slot layout, from the P@V accum loop's own V
+    ``Load``: ``kv`` is the accum loop's axis, ``d`` the out-write's last var. ``None`` when
+    either var is not a plain index slot (an un-permutable V — the caller degrades)."""
+    op = root.op
+    writes = [s for s in op.body.iter() if isinstance(s, Write)]
+    if len(writes) != 1:
+        return None
+    d_var = _var_at(writes[0].index, -1)
+    if d_var is None:
+        return None
+    for lp in _accum_loops(op):
+        if not any(isinstance(s, Accum) and s.name == writes[0].value and _is_sum(s) for s in lp.body):
+            continue
+        for ld in lp.body:
+            if isinstance(ld, Load) and ld.input == v_buf:
+                kv_pos, d_pos = _slot_of(ld.index, lp.axis.name), _slot_of(ld.index, d_var)
+                if kv_pos is not None and d_pos is not None:
+                    return (kv_pos, d_pos)
+    return None
+
+
 def try_flash(graph: Graph, root: Node) -> Graph | None:
     """Recognize SDPA on ``root`` and return the fused flash ``Graph`` fragment (a
     ``TileOp`` holding the flash ``Map`` (a ``TWISTED`` kv loop) + its scale / -inf constants), or ``None``
@@ -578,12 +664,19 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
     if qk is None:
         _fuse_degraded(root, "score producer's Q/K are not plain loads (e.g. RoPE'd QK)")
         return None
-    q_id, k_id, _head_dim = qk
+    (q_id, q_layout), (k_id, k_layout), _head_dim = qk
     if q_id not in graph.nodes or k_id not in graph.nodes:
         return None
-    q_shape = graph.nodes[q_id].output.shape
-    k_shape = graph.nodes[k_id].output.shape
-    v_shape = graph.nodes[v_id].output.shape
+    v_layout = _extract_v_layout(root, v_id)
+    if v_layout is None:
+        _fuse_degraded(root, "P@V's V load is not plainly indexed")
+        return None
+    # Shapes canonicalize to (batch…, seq, last) per each operand's traced layout — the
+    # eligibility predicates and the fragment's grid work on canonical shapes; the LOAD
+    # indices permute back to each operand's own slot order (``_permute_idx``).
+    q_shape = _canon_shape(graph.nodes[q_id].output.shape, q_layout)
+    k_shape = _canon_shape(graph.nodes[k_id].output.shape, k_layout)
+    v_shape = _canon_shape(graph.nodes[v_id].output.shape, v_layout)
     group = gqa_group(q_shape, k_shape)
     if group is None:
         _fuse_degraded(root, "head axis not statically GQA-divisible")
@@ -594,7 +687,22 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
         return None
     mask = (mask_buf, mask_shape) if mask_kind == "additive" else None
     return build_flash_frag(
-        q_id, k_id, v_id, q_shape, k_shape, v_shape, root.output, causal=(mask_kind == "causal"), group=group, mask=mask
+        q_id,
+        k_id,
+        v_id,
+        q_shape,
+        k_shape,
+        v_shape,
+        root.output,
+        causal=(mask_kind == "causal"),
+        group=group,
+        mask=mask,
+        layouts=(q_layout, k_layout, v_layout),
+        raw_shapes=(
+            tuple(graph.nodes[q_id].output.shape),
+            tuple(graph.nodes[k_id].output.shape),
+            tuple(graph.nodes[v_id].output.shape),
+        ),
     )
 
 

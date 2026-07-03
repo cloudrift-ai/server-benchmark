@@ -122,6 +122,123 @@ def _count_loads_from(consumer_op: LoopOp, producer_buf: str) -> int:
     return sum(1 for ld in consumer_op.body.loads if ld.input == producer_buf)
 
 
+def _pending_contraction_half(graph: Graph, consumer: Node) -> bool:
+    """``consumer`` is the bare-product half of a decomposed matmul (``matmul_decompose``'s
+    ``*_ew`` node: an accum-free elementwise body) whose sum-reduce partner has not merged in
+    yet — its single user is a ``LoopOp`` that sum-``Accum``\\ s a ``Load`` of this buffer. The
+    halves must merge FIRST: a compute-bearing producer spliced into the bare product beforehand
+    rides under the partner's reduce loop on the later merge, so that merge trips the work-blowup
+    guard and the contraction stays MATERIALIZED — sdpa's P@V wrote its full ``[b,h,m,n,d]``
+    weight×V outer product to gmem and the flash form never certified (the Gemma finding-2
+    chain: the V-norm cone fused into the P@V product first)."""
+    op = consumer.op
+    if any(isinstance(s, Accum) for s in op.body.iter()):
+        return False  # has its own reduce — a full kernel, not a bare product half
+    users = graph.users(consumer.id)
+    if len(users) != 1:
+        return False
+    partner = graph.nodes.get(next(iter(users)))
+    if partner is None or not isinstance(partner.op, LoopOp):
+        return False
+    reads_product = any(ld.input == consumer.id for ld in partner.op.body.loads)
+    sums = any(isinstance(s, Accum) and s.op.reduce_canon == "add" for s in partner.op.body.iter())
+    return reads_product and sums
+
+
+def _is_softmax_shaped(op) -> bool:
+    """The op carries softmax's structural signature — an ``exp`` Assign AND a ``maximum``
+    Accum (the rowmax). Distinguishes a softmax half from other exp-bearing kernels (a
+    tanh-approx gelu has ``exp`` but no rowmax), so the flash boundary guards below never
+    tax the FFN's fused norm→linear/gelu edges."""
+    if not isinstance(op, LoopOp):
+        return False
+    has_exp = any(isinstance(s, Assign) and s.op.name == "exp" for s in op.body.iter())
+    has_rowmax = any(isinstance(s, Accum) and s.op.reduce_canon == "maximum" for s in op.body.iter())
+    return has_exp and has_rowmax
+
+
+def _is_flash_offer_shaped(op) -> bool:
+    """``op`` already contains the whole softmax-then-P@V composite — softmax-shaped
+    (:func:`_is_softmax_shaped`) AND sum-contracting. Structural on purpose (NOT
+    ``is_fold_offer_site``): the recognizer's verdict flips false while an operand cone is
+    fused in, which would disarm this guard exactly when it is needed — the circularity that
+    let Gemma's V-norm scale-mul re-fuse after the softmax merged in."""
+    return (
+        isinstance(op, LoopOp)
+        and _is_softmax_shaped(op)
+        and any(isinstance(s, Accum) and s.op.reduce_canon == "add" for s in op.body.iter())
+    )
+
+
+def _sum_contracts_exp_producer(graph: Graph, consumer: Node, producer: Node) -> bool:
+    """``consumer`` is a sum-contraction one of whose OTHER operands is (or is one producer hop
+    away from) an exp-bearing ``LoopOp`` — the P@V kernel before its softmax fuses in, at any
+    point of the softmax's own assembly. Once it does, the kernel is the flash offer site; a
+    compute producer fused into the V side in the meantime breaks the certification just as
+    surely, so it is deferred the same way. The softmax-side operand itself (``producer``) is
+    exempt — that IS the softmax fusing in. A gelu chain feeding a contraction stays fuseable:
+    the gelu IS the producer there, so the other-input scan never sees its exp."""
+    op = consumer.op
+    if not any(isinstance(s, Accum) and s.op.reduce_canon == "add" for s in op.body.iter()):
+        return False
+
+    def has_exp(node) -> bool:
+        return isinstance(node.op, LoopOp) and any(isinstance(s, Assign) and s.op.name == "exp" for s in node.op.body.iter())
+
+    for inp in consumer.inputs:
+        if inp == producer.id:
+            continue
+        n = graph.nodes.get(inp)
+        if n is None or not isinstance(n.op, LoopOp):
+            continue
+        # The softmax may still be mid-assembly: the div piece feeding the P@V carries no exp of
+        # its own until the exp piece merges in, so scan one producer hop deeper too.
+        if has_exp(n) or any(has_exp(graph.nodes[i]) for i in n.inputs if i in graph.nodes):
+            return True
+    return False
+
+
+def _is_reduce_partner_merge(producer: Node, consumer: Node) -> bool:
+    """This merge IS the contraction-halves merge: some add-``Accum`` in ``consumer`` sums the
+    producer's buffer DIRECTLY — its accumulated value is the name a ``Load`` of ``producer``
+    binds, with nothing in between (``acc += load(product)``, ``matmul_decompose``'s reduce
+    partner, even after scale/mask epilogues fused into it). An operand cone feeding a merged
+    contraction never matches: its load is multiplied before the accumulate, so the ``Accum``
+    value is an ``Assign``'s name, not the Load's."""
+    op = consumer.op
+    product_names = {nm for ld in op.body.loads if ld.input == producer.id for nm in ld.names}
+    if not product_names:
+        return False
+    return any(isinstance(s, Accum) and s.op.reduce_canon == "add" and s.value in product_names for s in op.body.iter())
+
+
+def _has_rowmax(op) -> bool:
+    """A ``maximum`` Accum — softmax's rowmax signature, present from the decomposition's very
+    first kernels (before the exp piece merges in), and absent from every non-softmax consumer
+    a matmul feeds in practice (gelu has ``exp`` but no rowmax)."""
+    return isinstance(op, LoopOp) and any(isinstance(s, Accum) and s.op.reduce_canon == "maximum" for s in op.body.iter())
+
+
+def _feeds_softmax(graph: Graph, consumer: Node) -> bool:
+    """``consumer``'s output reaches a softmax rowmax within two user hops — the attention
+    SCORE producer (QK^T, possibly through the additive-mask elementwise between it and the
+    softmax), at any point of the softmax's own assembly. Flash recovers Q/K from the score
+    producer as plain ``Load``\\ s (``_extract_qk``), so a compute producer (RoPE / q-k-norm)
+    fused into it de-certifies the whole unit; those cones stay materialized instead (the
+    B-track — computing them inside the flash nest — replaces this materialization later)."""
+    for uid in graph.users(consumer.id):
+        u = graph.nodes.get(uid)
+        if u is None or not isinstance(u.op, LoopOp):
+            continue
+        if _has_rowmax(u.op):
+            return True
+        for uid2 in graph.users(uid):
+            u2 = graph.nodes.get(uid2)
+            if u2 is not None and _has_rowmax(getattr(u2, "op", None)):
+                return True
+    return False
+
+
 PATTERN = [
     Pattern("producer", LoopOp),
     Pattern("consumer", LoopOp),
@@ -147,6 +264,44 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
     # can hoist — stay fuseable.
     if _reduce_heavy(producer.op) and _count_loads_from(consumer.op, producer.id) > 1:
         raise RuleSkipped("reduce-heavy producer feeds consumer through >1 Load — fusion would duplicate the reduce")
+
+    # Contraction-half protection: only the product's own indexmap plumbing (unsqueeze /
+    # broadcast scaffolding) may fuse into a bare matmul product before its sum-reduce partner
+    # does — see :func:`_pending_contraction_half`. The blocked producer isn't lost: once the
+    # halves merge, it retries against the full contraction kernel on a later fixpoint sweep.
+    if not _is_pure_indexmap(producer.op) and _pending_contraction_half(graph, consumer):
+        raise RuleSkipped("consumer is an unfused contraction half — the product merges with its reduce first")
+
+    # Flash-consumer protection: a softmax-then-P@V kernel (the flash recognizer's offer site) is
+    # owned by ``try_flash`` — a compute-bearing producer fused into it lands extra Loads in the
+    # P@V accum loop and the V-operand extraction fails (``others == 1``), so the flash form
+    # silently never certifies (a computed V — Gemma's V-norm — was the finding-2 chain's second
+    # link). The producer stays materialized; flash streams it as the plain-buffer V. The test is
+    # deliberately PREDICTIVE as well (``_sum_contracts_exp_producer``), and the formed-composite test is structural
+    # (``_is_flash_offer_shaped``) rather than the recognizer's verdict: fusion order is free, so
+    # the V-side producer can arrive while the kernel is still a bare P@V contraction whose
+    # softmax half hasn't fused in yet — the offer site only forms afterwards, too late to
+    # protect. The score producer's mirror-image deferral lives in tile recognition
+    # (``is_flash_score_producer``).
+    if not _is_pure_indexmap(producer.op) and (
+        _is_flash_offer_shaped(consumer.op) or _sum_contracts_exp_producer(graph, consumer, producer)
+    ):
+        raise RuleSkipped("consumer is a (future) flash softmax-then-P@V offer site — its operands stay materialized")
+
+    # Flash score-producer protection, the Q/K mirror of the above: the score matmul feeding a
+    # softmax must keep its Q/K as plain ``Load``\\ s for ``_extract_qk`` — an inlined RoPE /
+    # q-k-norm cone de-certifies the flash unit ("score producer's Q/K are not plain loads").
+    # Only accum-free elementwise producers defer (the operand-cone shape: RoPE's mul/trig
+    # chain, the norm's final scale-mul) — reduce-bearing producers are the score's own
+    # dataflow assembling itself (the QK contraction fusing into its scale/mask epilogue) and
+    # pass through, as does the bare-product half merging with its reduce partner.
+    if (
+        not _is_pure_indexmap(producer.op)
+        and not any(isinstance(s, Accum) for s in producer.op.body.iter())
+        and not _is_reduce_partner_merge(producer, consumer)
+        and _feeds_softmax(graph, consumer)
+    ):
+        raise RuleSkipped("consumer feeds a softmax (attention score producer) — Q/K cones stay materialized")
 
     # ``build_merged_op`` hands a two-node subgraph to ``splice_graph`` and
     # returns None on any unsupported pattern: σ-solve failure (writer/reader

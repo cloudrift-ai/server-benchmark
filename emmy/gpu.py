@@ -153,6 +153,15 @@ KNOWN_GPUS: tuple[GpuSpec, ...] = (
         peak_fp16_tflops=330.3,
     ),  # measured
     GpuSpec(
+        name="NVIDIA GeForce RTX 4080",
+        pci_device_ids=("2704",),
+        short_name="rtx4080",
+        compute_capability=(8, 9),
+        sm_count=76,
+        smem_per_sm=102400,
+        vram_mib=15946,
+    ),  # measured
+    GpuSpec(
         name="NVIDIA GeForce RTX 5090",
         pci_device_ids=("2b85",),
         short_name="rtx5090",

@@ -605,9 +605,11 @@ def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = ST
     """Resolve a pinned operand ``Stage`` against the scalar register-tile contraction ``c``, or
     ``None`` (gmem-direct). Staging is **opt-in behind a ``STAGE`` pin**: eligible when the transport
     is ``tma`` / ``cp.async`` and K is static (a computed-A contraction never reaches here — it keeps
-    the ``Map`` form). A masked (overhanging) M / N is fine — the drain reads the slab by LOCAL tile
-    coords and the overhanging store is guarded, so TMA zero-fills the box overhang and cp.async
-    clamps the gmem read. The slab K-chunk ``bk_elems`` is **derived** to fit ``depth``
+    the ``Map`` form). A masked (overhanging) **M** is fine — the drain reads the slab by LOCAL tile
+    coords and the overhanging store is guarded. A masked **N** or a transposed **B** stays gmem-direct:
+    the B-slab fill would clamp a chunk-start column into a row-crossing gmem address and hang the kernel
+    on the misaligned cp.async / TMA copy — the same refusal the warp tier makes (:func:`_can_stage_warp`
+    / :func:`_can_stage_warp_tma`). The slab K-chunk ``bk_elems`` is **derived** to fit ``depth``
     ``tile_m×bk + bk×tile_n`` operand slots in the smem ``budget`` (largest power-of-two dividing K; ``inputs``
     supplies the element dtype) — not spelled by a codec, so no schema change. ``depth >= 2`` is the
     scalar gmem→smem prefetch ring — the same ``staged_kloop`` phases the warp tier runs, the atom
@@ -615,6 +617,11 @@ def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = ST
     down (a smaller ring beats gmem-direct), single-buffer last. ``reg_depth`` stays 1 (the
     smem→register double-buffer is an ``ldmatrix`` transform, no scalar counterpart)."""
     if not c.k_axis.extent.is_static or stage.transport not in ("tma", "cp.async"):
+        return None
+    # A masked-N (overhanging inner dim) or transposed-B B-slab fill would clamp a chunk-start column
+    # into a row-crossing gmem address and hang on the misaligned 16 B copy — the warp tier refuses the
+    # same (:func:`_can_stage_warp` / :func:`_can_stage_warp_tma`).
+    if c.n.mask or c.b_trans:
         return None
     if not inputs or c.a_operand.input not in inputs:
         return None

@@ -64,10 +64,11 @@ def test_schedule_leaf_set_equals_catalog():
     - distinct ``TILE`` values = exactly ``scalar_tile_moves()`` (f32 → no warp moves);
     - the per-cell tile rides serial + the coop/ILP moves (non-output-tiled tier only), no split-K
       (one thread per cell already saturates the 64×64 grid — the occupancy gate);
-    - every tiled tile rides the RESOLVED stage spellings (gmem-direct + the resolver-deduped
-      cp.async / TMA ring depths) × (serial + the divisor-guarded split-K widths) — staging
-      composes with split-K (``_splitk_option`` re-resolves against the sliced inner node and
-      ``030_split`` threads the stage onto the partial).
+    - every clean tiled tile rides the RESOLVED stage spellings (gmem-direct + the resolver-deduped
+      cp.async / TMA ring depths) × (serial + the divisor-guarded split-K widths); a masked-N tile
+      (tile_n overhangs N) declines staging and rides gmem-direct only — staging composes with
+      split-K (``_splitk_option`` re-resolves against the sliced inner node and ``030_split`` threads
+      the stage onto the partial).
     """
     from emmy.compiler.pipeline.search.space import coop_reduce_moves, splitk_moves
 
@@ -98,7 +99,14 @@ def test_schedule_leaf_set_equals_catalog():
         if not tile_spec:
             continue
         stages = {str(family_value(r, "STAGE")) for r in tiled if not family_value(r, "REDUCE")}
-        assert {"", "d1/cp"} <= stages, f"{tile_spec}: missing the base resolved stages: {stages}"
+        # A masked-N tile (tile_n overhangs the fixture's N=64) declines cp.async / TMA staging — the
+        # B-slab fill would fault a row-crossing copy — so it rides gmem-direct only, mirroring the
+        # warp tier's refusal. A clean tile carries the full resolved stage spellings.
+        plan = TilePlan.parse(tile_spec)
+        if plan.units_n * plan.reg_n > 64:
+            assert stages == {""}, f"{tile_spec}: masked-N must decline staging: {stages}"
+        else:
+            assert {"", "d1/cp"} <= stages, f"{tile_spec}: missing the base resolved stages: {stages}"
         # This matmul is BATCHED (a leading literal batch dim in A's gmem index): TMA's 2-D
         # descriptor box cannot encode the extra dim, so every tma move resolver-declines —
         # cp.async (whose fill closure carries the dim verbatim) is the only transport offered.

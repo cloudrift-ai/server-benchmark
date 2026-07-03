@@ -196,9 +196,10 @@ reading the ring slot via the same slot-row seam as the mma drain). `depth >= 2`
 ring — the identical `staged_kloop` cp.async / TMA-mbarrier phases the warp tier runs; only `p<n>` (the
 smem→register double-buffer) stays warp-only (an `ldmatrix` transform). The nested outer-slab / inner-drain
 accumulator lifetime is handled by seeding the per-cell accumulators once in `_ScalarOps.state` (outside the outer
-loop) and marking the inner drain `Loop(seed=False)` so it folds without re-declaring. Masked M / N is supported (TMA
-zero-fills / cp.async clamps; the drain indexes the slab by LOCAL tile coords). Unstaged is byte-identical
-gmem-direct.
+loop) and marking the inner drain `Loop(seed=False)` so it folds without re-declaring. A masked **M** is supported
+(the drain indexes the slab by LOCAL tile coords, so an overhanging row reads in-slab and its store is guarded); a
+masked **N** or a transposed **B** declines staging (gmem-direct) — the B-slab fill would fault a row-crossing copy.
+Unstaged is byte-identical gmem-direct.
 
 **Split-K composes with staging.** `_splitk_option` resolves a `STAGE` spec against the SLICED inner `Contraction`
 (the `kslice` extent + the `ksplit`-offset operand indices) and `030_split` threads the resolved `Stage` onto its

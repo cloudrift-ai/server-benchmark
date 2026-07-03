@@ -295,6 +295,23 @@ def test_scalar_matmul_stages_through_pipeline(monkeypatch) -> None:
     assert tile_op.stage is None, tile_op.stage  # resolved: ineligible pin ⇒ gmem-direct
 
 
+def test_scalar_masked_n_stage_declines(monkeypatch) -> None:
+    """A masked-N (overhanging inner dim) or transposed-B contraction must DECLINE cp.async / TMA
+    staging: the B-slab fill would clamp a chunk-start column into a row-crossing gmem address and
+    hang the kernel on the misaligned 16 B copy (the warp tier refuses the same via
+    ``_can_stage_warp``). The pin resolves to gmem-direct — ``stage=None``, OFF-stamped."""
+    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+
+    monkeypatch.setenv("EMMY_TILE", "n16x16/f2x2")  # tile_n=32 overhangs N=48 ⇒ masked-N
+    monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: isolate the stage resolution
+    for stage in ("d1/cp", "d2/cp/ring", "d2/tma"):
+        monkeypatch.setenv("EMMY_STAGE", stage)
+        out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(M=64, N=48, K=64), ctx=Context.from_target((9, 0)))
+        tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
+        assert tile_op.stage is None, (stage, tile_op.stage)  # masked-N declines staging (no row-crossing fill)
+        assert family_value(tile_op.knobs, "STAGE") == "", (stage, tile_op.knobs)  # OFF-stamped (gmem-direct)
+
+
 @requires_cuda
 @pytest.mark.parametrize("stage", ["d2/cp/ring", "d3/cp/ring"])
 def test_scalar_ring_matches_gmem_direct_bit_for_bit(monkeypatch, stage):

@@ -1348,9 +1348,9 @@ def _twisted_warp_options(tile: TileOp, name: str, knobs: dict, budget: int = ST
         if not is_warp_codec(spec):
             return []  # a scalar / empty pin asks for a tier this form doesn't offer
         want = TilePlan.parse(spec)
-        if want.atom.name != atom_name or want.units[1] != 1 or want.regs[0] != 1 or want.bk != bk:
+        if want.atom.name != atom_name or want.units[1] != 1 or want.bk != bk:
             logger.warning(
-                "warp TILE pin %r does not fit the flash form (atom %s, w<um>x1/f1x<nt>/k%d); the flash kernel stays scalar",
+                "warp TILE pin %r does not fit the flash form (atom %s, w<um>x1/f<fm>x<nt>/k%d); the flash kernel stays scalar",
                 spec,
                 atom_name,
                 bk,
@@ -1361,31 +1361,33 @@ def _twisted_warp_options(tile: TileOp, name: str, knobs: dict, budget: int = ST
             # partial expect fold (the C→A repack pairs k-adjacent score fragments). Loud, per the
             # pin contract (divisibility violation).
             raise ValueError(f"warp TILE pin: key block {want.regs[1] * atom_n} is not a multiple of the P@V atom K-step {atom_k}")
-        pairs = [(want.units[0], want.regs[1])]
+        triples = [(want.units[0], want.regs[1], want.regs[0])]
     else:
-        pairs = twisted_warp_moves()
+        triples = twisted_warp_moves()
     out: list[TileOp] = []
     elem_bytes = atom.operand_dtype("b").nbytes
-    for um, nt in pairs:
+    for um, nt, fm in triples:
         bn = nt * atom_n  # the streaming block: nt key atoms per step
         if kv_ext.is_static and kv_ext.as_static() % bn != 0:
             if pinned:
                 raise ValueError(f"warp TILE pin: key block {bn} does not divide the static KV extent {kv_ext.as_static()}")
             continue
-        if m_ext.is_static and m_ext.as_static() % (um * atom_m) != 0:
+        if m_ext.is_static and m_ext.as_static() % (um * fm * atom_m) != 0:
             if pinned:
-                raise ValueError(f"warp TILE pin: {um} warps × {atom_m} query rows do not divide the static M extent {m_ext.as_static()}")
+                raise ValueError(
+                    f"warp TILE pin: {um} warps × {fm} query tiles × {atom_m} rows do not divide the static M extent {m_ext.as_static()}"
+                )
             continue
-        qk_plan = TilePlan(atom=atom, units=(um, 1), regs=(1, nt), bk=bk)
-        pv_plan = TilePlan(atom=atom, units=(um, 1), regs=(1, d_v.as_static() // atom_n), bk=max(1, bn // atom_k))
+        qk_plan = TilePlan(atom=atom, units=(um, 1), regs=(fm, nt), bk=bk)
+        pv_plan = TilePlan(atom=atom, units=(um, 1), regs=(fm, d_v.as_static() // atom_n), bk=max(1, bn // atom_k))
         partial = tuple(replace(s, tile=qk_plan) if s is head else (replace(s, tile=pv_plan) if s is pv else s) for s in red.partial)
         red2 = replace(red, partial=type(red.partial)(partial))
         op2 = replace(op, source=red2) if isinstance(op, Map) else red2
-        # ``um`` warps per CTA, each owning ``atom_m`` query rows: the query axis shrinks to its
-        # CTA-block count; the value (expect output) axis folds into the fragment tile and leaves
-        # the grid.
+        # ``um`` warps per CTA, each owning ``fm`` register query tiles of ``atom_m`` rows: the
+        # query axis shrinks to its CTA-block count; the value (expect output) axis folds into the
+        # fragment tile and leaves the grid.
         grid = tuple(
-            Axis(name=ax.name, extent=ax.extent.ceil_div(um * atom_m), source_axis=ax.source_axis or ax) if ax.name == m_name else ax
+            Axis(name=ax.name, extent=ax.extent.ceil_div(um * fm * atom_m), source_axis=ax.source_axis or ax) if ax.name == m_name else ax
             for ax in tile.place.free
             if ax.name != pv.n_axis.name
         )

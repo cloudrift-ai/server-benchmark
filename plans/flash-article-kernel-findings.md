@@ -11,11 +11,11 @@ the manual pinned-knob sweeps and everything the article needs; delete once the 
 Winner on the perf shape `(1, 8, 4096, 64)` f16, non-causal, RTX 5090 (sm_120), `emmy run --bench` (100 iters):
 
 ```bash
-EMMY_TILE="a:mma_m16n8k16_f16/w4x1/f1x8/k4"    # 4 warps/CTA, 64-key streaming block
+EMMY_TILE="a:mma_m16n8k16_f16/w4x1/f2x8/k4"    # 4 warps/CTA, 2 query tiles/warp (reg_m), 64-key block
 EMMY_STAGE="d2/cp/ring"                         # 2-slot cp.async prefetch ring (padded rows)
 ```
 
-(**222 µs** — post Q-hoist the ring finally beats single-buffer d1's 233; see the ladder below.)
+(**212 µs**, 1.03× of FA-2 — the `f2` reg_m tile is the final rung; see the ladder below.)
 
 ## The padded sweep (µs; padding on — the shipped configuration; eager torch SDPA flash = 205–208 µs)
 
@@ -66,8 +66,15 @@ register-shuffle handoff).
 | + C→A register repack (the handoff eliminated) | `FragmentRepack`, no smem round-trip | 271 | 1.16× |
 | + Q-fragment hoist (loop-invariant loads out of the stream) | resident `qa` fragments, d1 | 233 | 1.16× |
 | Move 5 arrives — the `d2/cp/ring` prefetch NOW wins | copy/math overlap, finally exposed | 222 | 1.05× |
-| + `096_pair_ldmatrix_loads` (x2→x4 drain pairing pass) | halves the staged-drain LSU count | **219** | 1.01× |
-| torch eager SDPA (FA-2 backend) | reference | 206 | emmy best = **0.94×** |
+| + `096_pair_ldmatrix_loads` (x2→x4 drain pairing pass) | halves the staged-drain LSU count | 219 | 1.01× |
+| + reg_m query tiles (`f2x8` — the register-tile move, on flash) | 2 independent (m,l,O) chains/warp | **212** | 1.03× |
+| torch eager SDPA (FA-2 backend) | reference | 206 | emmy best = **0.97×** |
+
+The reg_m rung is the article's closing symmetry: the SAME register-tiling move that opened the matmul story
+(Move 0 of the GPU-matmul article, 5.2×) closes the flash gap — `f<FM>x<FN>` on the flash geometry grid gives
+each warp FM independent softmax chains against shared K/V fragments. The NCU convergence is the money shot:
+**232 regs vs FA-2's 255, 11.6% occupancy vs 11.8%, LSU 5.5M vs 4.4M, SM 31.8% vs 33.3%** — the generated
+kernel now has FlashAttention-2's structure, arrived at through generic prior-ranked moves.
 
 The Move-5 story is the article's best sequence: the ring lost at every step (occupancy cost, nothing to
 overlap) until the repack + Q-hoist thinned the streaming step enough to EXPOSE the copy latency — then the
@@ -135,10 +142,10 @@ headroom for deeper rings/WSPEC). Remaining:
    but would also measure ~0 here — designed, not built. NOTE: a bare "exp2 in the loop + correct at the
    end" WITHOUT the score pre-scale is NOT valid algebra (base-2 vs base-e weights differ per element; no
    scalar end-correction exists) — the pre-scale is what makes it exact.
-2. The remaining ~6% to FA-2 is now attributed to per-step dependency-chain latency at low occupancy
-   (QK mma → rowmax shuffle → exp → rescale → PV mma, hidden only by 14% occupancy) — the fix is ILP
-   restructuring: `reg_m > 1` flash geometry rows / FA-2's 2-KV-tile software pipeline. Move-catalog work,
-   past this PR.
+2. ~~ILP restructuring~~ — DONE: the reg_m query-tile dimension (`_FLASH_QTILES`, the geometry grid's third
+   axis) closed the dependency-chain gap: 219 → 212µs, and the NCU profile converged to FA-2's structure
+   (232 regs / 11.6% occ / 5.5M LSU vs 255 / 11.8% / 4.4M). The last ~3% is FA-2's remaining LSU edge and
+   scheduling polish — diminishing-returns territory.
 3. TMA rank-3 descriptor for batched K/V (`(B·H, S, D)` box) — the render prelude already carries 3d/4d/5d
    `cp.async.bulk.tensor` helpers; the gateway to WSPEC-on-flash.
 4. Causal tile-skip (unchanged; the example is non-causal).

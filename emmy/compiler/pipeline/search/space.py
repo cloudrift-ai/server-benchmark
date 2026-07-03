@@ -293,16 +293,21 @@ def warp_tile_moves(atom_names: tuple[str, ...]) -> list[str]:
 # key block — today's deterministic stamp), so a cold tie keeps the historical geometry. Per-node
 # legality (kv / query-row divisibility, the dtype atom) is the scheduler's
 # (``_schedule._twisted_warp_options``), not the grid's.
-_FLASH_WARPS: tuple[int, ...] = (1, 2, 4)  # warps per CTA, each owning its own atom_m query-row block
+_FLASH_WARPS: tuple[int, ...] = (1, 2, 4)  # warps per CTA, each owning its own query-row block
 _FLASH_KEY_ATOMS: tuple[int, ...] = (2, 4, 8, 16)  # score n-atoms per streaming block (bn = n·atom_n keys)
+_FLASH_QTILES: tuple[int, ...] = (1, 2)  # register query tiles per warp (reg_m — FA-2's in-flight ILP)
 
 
-def twisted_warp_moves() -> list[tuple[int, int]]:
-    """The warp-flash geometry candidates ``(warps_m, key_atoms)`` — the :data:`_FLASH_WARPS` ×
-    :data:`_FLASH_KEY_ATOMS` grid, conservative option-0 ``(1, 2)`` first. Each pair resolves into
+def twisted_warp_moves() -> list[tuple[int, int, int]]:
+    """The warp-flash geometry candidates ``(warps_m, key_atoms, q_tiles)`` — the
+    :data:`_FLASH_WARPS` × :data:`_FLASH_KEY_ATOMS` × :data:`_FLASH_QTILES` grid, conservative
+    option-0 ``(1, 2, 1)`` first. ``q_tiles`` is the register query-tile count per warp (the
+    ``TILE`` codec's ``f<FM>x<FN>`` reg_m): each warp streams ``q_tiles`` independent ``(m, l, O)``
+    chains against shared K/V fragments — FA-2's in-flight ILP, hiding the per-step
+    mma → rowmax → exp → rescale dependency chain without more warps. Each triple resolves into
     the Q@K / P@V mma :class:`TilePlan`\\ s in ``_schedule._twisted_warp_options`` (the ``TILE``
     codec spells the full plan; this grid only generates the free geometry — ``bk`` is shape-derived)."""
-    return [(um, nt) for um in _FLASH_WARPS for nt in _FLASH_KEY_ATOMS]
+    return [(um, nt, fm) for fm in _FLASH_QTILES for um in _FLASH_WARPS for nt in _FLASH_KEY_ATOMS]
 
 
 def stage_moves(*, warp: bool) -> list[str]:

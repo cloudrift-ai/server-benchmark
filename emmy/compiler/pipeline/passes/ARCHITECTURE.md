@@ -97,8 +97,10 @@ warp-only rows (`_schedule._computed_a_rows` — the mandatory resolved `sync` c
 gmem-direct / split-K / WSPEC rows; the compute-producer role for the fused edge is the anticipated `RoleKind`
 extension). The **flash-form fork**: a `TWISTED` streaming contraction pair (the flash tree) offers its
 structurally-different schedules as ONE prior-ranked fork — the warp (fragment-resident) rows over
-`twisted_warp_moves()`'s `(warps-per-CTA × key-atoms-per-block)` geometry grid (option-0 = the conservative one-warp /
-`2·atom_n` block; the Q@K / P@V mma `TilePlan`s are derived per point, `_schedule._twisted_warp_options`), the scalar
+`twisted_warp_moves()`'s `(warps-per-CTA × key-atoms-per-block × query-tiles-per-warp)` geometry grid (option-0 = the
+conservative one-warp / `2·atom_n` block / one tile; the third dimension is the `TILE` codec's `f<FM>x<FN>` reg_m —
+each warp streams `fm` independent `(m, l, O)` chains against shared K/V fragments, FA-2's in-flight ILP; the Q@K /
+P@V mma `TilePlan`s are derived per point, `_schedule._twisted_warp_options`), the scalar
 register-vector CHAIN (the FA-2 shared-score form), then the cooperative / per-cell reduce-partition escapes — every
 leaf row spelling the same `TILE@<qk_k>` / `TILE@<pv_k>` / `REDUCE@<kv>` key set (decided-empty where a form doesn't
 tile). A non-empty `REDUCE` pin remains the scalar escape; a warp `TILE` pin keeps the mma rows alone (loud on a

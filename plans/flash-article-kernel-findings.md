@@ -223,50 +223,47 @@ reg-depth `p2` (the ldmatrix ping-pong, clamped to 1 — plausible low single di
 lever — a different accuracy class and a different article chapter). Parity, reached from a generic
 moveset with every attribution measured, is the story.
 
-## Follow-ups (padding, barrier scoping, repack, Q-hoist, x4 pairing, reg_m, TMA, WSPEC are DONE)
+## Future enhancements (the campaign on THIS shape is closed at parity — these are the next chapters)
 
-The x4 pairing landed as the `096_pair_ldmatrix_loads` kernel-IR peephole (LSU 14.1M → 9.87M, 222 → 219µs
-— by then the kernel was no longer LSU-bound, but the pass also serves the matmul staged drains and buys
-headroom for deeper rings/WSPEC). Remaining:
+Everything below has a stated precondition; none pays on the article's large-S non-causal self-attention
+shape, where both kernels sit at ~80% of the f16 tensor roofline and every remaining lever measured flat
+or negative. Ordered by expected reader/product value:
 
-1. ~~`exp2f` / fast exp~~ — RUN, hypothesis REFUTED for this kernel: `EMMY_FAST_EXP=1` (the new pin-only
-   BOOL policy knob — `085_fast_exp`, exp → `__expf` = FMUL+MUFU.EX2, ~2 ulp, the one non-bit-exact knob)
-   measured **flat** (219 → 220µs, noise). The exp sequence wasn't binding — the counters said 7.4%
-   fma-pipe and meant it. Corollary: the full base-2 fold (score pre-scale by log₂e absorbed into the
-   existing 1/√d multiply → whole loop in exp2, NO end correction needed) is algebraically free and exact
-   but would also measure ~0 here — designed, not built. NOTE: a bare "exp2 in the loop + correct at the
-   end" WITHOUT the score pre-scale is NOT valid algebra (base-2 vs base-e weights differ per element; no
-   scalar end-correction exists) — the pre-scale is what makes it exact.
-2. ~~ILP restructuring~~ — DONE: the reg_m query-tile dimension (`_FLASH_QTILES`, the geometry grid's third
-   axis) closed the dependency-chain gap: 219 → 212µs, and the NCU profile converged to FA-2's structure
-   (232 regs / 11.6% occ / 5.5M LSU vs 255 / 11.8% / 4.4M). The last ~3% is FA-2's remaining LSU edge and
-   scheduling polish — diminishing-returns territory.
-3. TMA rank-3 descriptor for batched K/V (`(B·H, S, D)` box) — the render prelude already carries 3d/4d/5d
-   `cp.async.bulk.tensor` helpers; the gateway to WSPEC-on-flash.
-4. Causal tile-skip (unchanged; the example is non-causal).
+1. **Causal tile-skip** (causal workloads — ~2× algorithmic). FA-2's form: peel the masked KV steps into a
+   short masked loop, skip fully-masked blocks via the loop bounds, run the steady state unmasked. Ours
+   would be a schedule-side split of the streaming extent (the causal `Select` gives the per-row bound
+   structurally) — no realizer change, the masked steps keep the existing `FragmentMask`. Restores parity
+   on causal shapes (FA-2 skips too); the article example is non-causal so it never showed.
+2. **The decode package: split-KV + within-CTA coop-KV + warp-private rings** (decode shapes — 1 query row
+   × long KV cache, grid starvation). Three findings compose: the `REDUCE` codec's `g<n>k` deferred
+   finalize is already documented as the only legal arm for the twisted `(m,l,O)` carrier; the standalone
+   decode-combine kernel is the missing piece (`030_split`'s carrier-general combine builder is the seam);
+   and the REVERTED warp-private ring (9b8acf2a) becomes CORRECT here — coop-KV warps stream DISJOINT
+   K/V, so per-warp TMA rings with zero CTA barriers no longer forfeit any sharing. File under
+   Flash-Decoding / the inference chapter.
+3. **fp8 QK^T** (throughput at a different accuracy class — FA-3's low-precision pillar; sm_120 HAS fp8
+   tensor cores, the one FA-3 pillar this chip can take). Needs: an fp8 mma atom in `ATOM_REGISTRY`, the
+   flash eligibility to accept it, per-tensor scales through the recognizer, and Part 1's
+   dequantize-bijection story for the numerics section. A real (separate) article chapter.
+4. **The base-2 twist family** (exp-dense scalar kernels / ALU-bound shapes — NOT this kernel, measured
+   flat twice). The proper shape, recorded so nobody re-derives it: `TwistSpec` gains `base` as data
+   (family stays "exp" — the algebra class is unchanged); the recognizer folds `log₂e` into the
+   synthesized `_flash_scale` constant when base=2 (constant folding at the source — the per-element
+   multiply already exists, so the domain shift is free and EXACT, no end correction); both realizers key
+   the exp emission off the base; `exp2` is a one-line numpy-aligned `ElementwiseImpl`. WARNING preserved:
+   bare "exp2 in the loop + correct at the end" without the score pre-scale is invalid algebra.
+5. **`FAST_EXP` default-on evaluation** (the pin-only knob exists, `085_fast_exp`): flat on flash, but
+   exp-dense scalar kernels (softmax/RMSNorm tails, small-head-dim attention) may collect the libm-vs-MUFU
+   gap. Needs an accuracy-gated A/B across the golden set before any default flip.
+6. **TMA rank-N for the matmul tier** (the flash rank-4 box machinery generalizes; the matmul resolver
+   still gates on rank-2 operands — batched matmuls would stage through the same descriptors).
+7. **WSPEC re-audit on future hardware** (built, correct, 213 vs 206 on sm_120): the producer/consumer
+   split pays only with asynchronous MMA the issuing warp can walk away from (`wgmma`/`tcgen05`). If a
+   consumer part ever ships async MMA, the flash WSPEC rows are already wired — re-measure, don't rebuild.
+8. **Persistent-kernel / megakernel exploration** (whole-model shapes): out of scope for one-kernel
+   articles; noted because the 256-CTA single-wave residency here is the friendly case, and multi-layer
+   decode is not.
 
-## Accuracy table (listing shape (1,4,128,64), vs an fp64 torch reference — the Numerics placeholder)
-
-| kernel | max abs err | mean abs err |
-|--------|-------------|--------------|
-| scalar fp32 flash | 4.352e-07 | 3.951e-08 |
-| f16-mma flash (gmem-direct) | 7.045e-04 | 4.888e-05 |
-| f16-mma flash (staged d2/cp/ring) | 7.045e-04 | 4.888e-05 |
-
-The staged and gmem-direct rows are IDENTICAL — bit-identity (staging is a pure perf transform) made visible;
-padding relocates smem bytes only, so it preserves the same guarantee (test-enforced). The fp32 carrier keeps
-the f16-matmul error at input-rounding scale, per Part 1's perturbation bound.
-
-## Article stale-claim fixes (Part 2, cloudrift-landing)
-
-1. "the static-shape and fp32 paths still lower to the Move-1 scalar kernel" — **static is stale** post-#300:
-   block-divisible static shapes atomize (only ragged static tails stay scalar). fp32-stays-scalar remains true.
-2. The cited test path `tests/compiler/e2e/test_flash_tensorcore_*` is now `tests/compiler/e2e/test_attention_coverage.py`.
-3. "gated behind a knob today (`DEPLODOCK_FLASH=1`)" — stale: `PLACE`'s built-in `auto` resolves to fuse, so greedy
-   ships the fused flash kernel by default; `PLACE@fold=cut` is the multi-kernel escape.
-4. Moves 4–5 can now show real listings: `--ir cuda` with the pins above emits the cp.async fills / commit / wait
-   (`d1/cp`) and the primed ring with the clamped prefetch (`d2/cp/ring`); keyed pins ride
-   `EMMY_KNOBS="TILE@dd=…,STAGE@kv=…"` or the bare `EMMY_TILE`/`EMMY_STAGE` env vars on a single-kernel graph.
-5. The padding narrative writes itself: Move 4 lands, NCU shows the 132 M-conflict profile of the plain
-   row-major slabs, +16 B row padding (the article's own padding section, on the cp.async transport exactly as
-   framed) deletes them and buys 1.62× — with the swizzle section as the TMA-transport counterpart.
+The article rewrite (2026-07-02) consumed this file's ladder, NCU tables, FA-2 comparison, and the
+graveyard; the stale-claim fixes are applied in the published text. This file can be deleted once the
+article ships and the enhancement list above moves to an issue tracker.

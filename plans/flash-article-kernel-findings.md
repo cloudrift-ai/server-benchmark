@@ -174,6 +174,45 @@ consume; load placement only, bit-identical). Measured at the winner: `d2/tma/ri
 occupancy. Kept (unlike the wp ring) because it is not dominated: it removes a silent pin clamp (a
 ``p2`` pin on flash now applies instead of degrading), costs ~40 lines, and measured best-equal.
 
+## Side-by-side vs the FA-2 source (Dao-AILab v2.7.4, as shipped in torch 2.11)
+
+The exact instantiation torch ran on the 5090 (from NCU):
+`flash_fwd_kernel<Flash_fwd_kernel_traits<64, 128, 128, 4, /*Is_Q_in_regs=*/0, /*Share_Q_K_smem=*/0, half_t>>`
+— Headdim 64, **kBlockM=128, kBlockN=128, 4 warps**. Against our winner
+(`w4x1/f2x8/k4` + `d2/tma/ring`, M=128 = 4 warps × 2 reg tiles × 16 rows, bn=64):
+
+| dimension | emmy (generated) | FA-2 (hand-written) |
+|---|---|---|
+| CTA query tile | 128 rows — 4 warps × fm=2 × m16 | 128 rows (kBlockM) — 4 warps × MMA_M=2 × m16 |
+| per-warp ILP | 2 independent (m,l,O) chains | 2 m-atoms per warp — **identical** |
+| KV block | 64 keys | 128 keys |
+| Q residency | hoisted register fragments, loaded once | Q in SMEM, re-read per KV block (`Is_Q_in_regs=false` shipped default!) |
+| K/V transport | rank-4 TMA boxes, hw swizzle, elected single-thread issue | cooperative cp.async fills, `Swizzle<3,3,3>` smem layout |
+| pipelining | d2 ring (2 slots/operand), chunk i+1 under chunk i | phase-interleaved: V loads under the QK gemm, next-K under PV |
+| barriers | 2 `__syncthreads` per 64 keys | 2 per 128 keys (measured equivalent — the convoy is costless both ways) |
+| P → A operand | `FragmentRepack` (cvt.rn in registers) | `convert_layout_acc_Aregs` — **the same register trick** |
+| exp path | libm `expf` (fast-exp measured flat) | `exp2f` + scale·log₂e fold (`softmax_scale_log2`) |
+| causal | per-element fragment mask each step | peeled masking steps + block-skip via loop bounds (the tile-skip) |
+
+Article-ready observations:
+
+1. **Convergent geometry.** The autotuner's winning point matches Dao's hand-tuned constants — 128 rows,
+   4 warps, 2 m-atoms per warp. Better: the FA-2 source COMMENTS read like our sweep table ("Using 8
+   warps is 18% slower… block (256 x 64) is 85% slower, because of register spilling" — our f4 point
+   spilled to 341 µs the same way). The hand-tuning notebook and the measured fork rows agree.
+2. **The repack is the reference's own move**: `convert_layout_acc_Aregs` is exactly our
+   `FragmentRepack` — the C→A lane-map reuse, independently required.
+3. **Two places we are structurally AHEAD**: Q lives in registers for the whole stream (FA-2 ships
+   `Is_Q_in_regs=false` and re-reads Q from smem every block — our Q-hoist is their disabled variant,
+   and our measurements say it wins at bn=64), and the TMA ring (single-thread box copies vs their
+   per-thread cp.async fill loops — the LSU gap, 3.31M vs 4.36M, is exactly this).
+4. **One place the trick differs and doesn't matter**: they fold scale·log₂e into `exp2f`; our `expf`
+   measured flat twice. Their exp hygiene isn't where their speed is either — the pipe is.
+5. **KV block width** (their 128 vs our 64): each is right for its transport — their cooperative
+   fills amortize over bigger blocks; our TMA ring measured best at 64 (bn=128 rows cost occupancy).
+6. **Causal**: their peeled-steps + block-skip is the causal tile-skip still on our follow-up list —
+   the one behavior they have that we haven't built (non-causal shapes unaffected).
+
 ## Beyond-FA-2: the honest verdict
 
 At 206µs the kernel runs ~167 TFLOPS ≈ **80% of the 5090's f16/fp32-acc tensor roofline — the same point

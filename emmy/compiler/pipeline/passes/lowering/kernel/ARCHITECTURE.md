@@ -144,9 +144,12 @@ render's third variant) — and the V slab via the canonical `x2.trans`. The K/V
 (`Operand.pad_cols` / `_twist._PAD`) — the cp.async-path counterpart of the TMA slab swizzle: a power-of-two row
 span lands every ldmatrix row read on one bank group (a measured ~8-way replay profile), and the pad shifts
 consecutive rows across groups. Intrinsic, not a fork (a near-strict win, like the masked-K alignment pad); padding
-relocates smem bytes only. cp.async only (TMA's 2-D box cannot encode the batched K/V operands), static
-block-divisible kv only (the symbolic stream keeps its masked gmem-direct loads), and bit-identity to the
-gmem-direct sibling holds — same values, same mma order.
+relocates smem bytes only. The **TMA transport** boxes the batched K/V via rank-N descriptors (leading
+extent-1 box dims; the load's batch/head index exprs as origin coords — GQA's `h // group` included) into dense
+1024 B-aligned slabs under the hardware swizzle, the drains' address XOR undoing it; under a `WSPEC` band split the
+transport's elected fill thread rides the WRAPPED linear tid (`threadIdx.x % block_threads` — the raw tid would elect
+a compute thread and the producer band would never fill). Static block-divisible kv only (the symbolic stream keeps
+its masked gmem-direct loads), and bit-identity to the gmem-direct sibling holds — same values, same mma order.
 
 **The fused edge — the mma tier's `sync` transport.** A demoted-cone matmul (`f(x, …) @ w`) takes the warp tier
 under a warp `TILE` pin: `_schedule._demoted_warp_option` nodifies the PLANAR ⊗-fold to a computed-A `Contraction`

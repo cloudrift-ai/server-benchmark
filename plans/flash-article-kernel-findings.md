@@ -12,10 +12,10 @@ Winner on the perf shape `(1, 8, 4096, 64)` f16, non-causal, RTX 5090 (sm_120), 
 
 ```bash
 EMMY_TILE="a:mma_m16n8k16_f16/w4x1/f2x8/k4"    # 4 warps/CTA, 2 query tiles/warp (reg_m), 64-key block
-EMMY_STAGE="d2/cp/ring"                         # 2-slot cp.async prefetch ring (padded rows)
+EMMY_STAGE="d2/tma/ring"                        # 2-slot TMA prefetch ring (rank-4 boxes, hw swizzle)
 ```
 
-(**212 µs**, 1.03× of FA-2 — the `f2` reg_m tile is the final rung; see the ladder below.)
+(**206 µs — parity with eager FA-2**; see the ladder below.)
 
 ## The padded sweep (µs; padding on — the shipped configuration; eager torch SDPA flash = 205–208 µs)
 
@@ -67,8 +67,9 @@ register-shuffle handoff).
 | + Q-fragment hoist (loop-invariant loads out of the stream) | resident `qa` fragments, d1 | 233 | 1.16× |
 | Move 5 arrives — the `d2/cp/ring` prefetch NOW wins | copy/math overlap, finally exposed | 222 | 1.05× |
 | + `096_pair_ldmatrix_loads` (x2→x4 drain pairing pass) | halves the staged-drain LSU count | 219 | 1.01× |
-| + reg_m query tiles (`f2x8` — the register-tile move, on flash) | 2 independent (m,l,O) chains/warp | **212** | 1.03× |
-| torch eager SDPA (FA-2 backend) | reference | 206 | emmy best = **0.97×** |
+| + reg_m query tiles (`f2x8` — the register-tile move, on flash) | 2 independent (m,l,O) chains/warp | 212 | 1.03× |
+| + TMA transport (`d2/tma/ring` — rank-4 box copies, hw swizzle) | single-thread fills, dense slabs | **206** | 1.03× |
+| torch eager SDPA (FA-2 backend) | reference | 206 | emmy best = **1.00× — PARITY** |
 
 The reg_m rung is the article's closing symmetry: the SAME register-tiling move that opened the matmul story
 (Move 0 of the GPU-matmul article, 5.2×) closes the flash gap — `f<FM>x<FN>` on the flash geometry grid gives
@@ -128,7 +129,25 @@ session). The remaining gap is pure fragment-load volume: the per-step loop-inva
 loads/warp/step) and the per-B-fragment `x2` ldmatrix drains (an `x4` loads two B fragments at once), plus
 the `expf`-vs-`exp2f` ALU path.
 
-## Follow-ups (padding, barrier scoping, repack, Q-hoist, x4 pairing are DONE)
+## TMA + WSPEC (DONE — parity reached; WSPEC measured and declined)
+
+The "2-D descriptor" gate was plumbing: `encode_tiled` does rank 1–5 and `TmaLoad` renders
+`cp_async_bulk_tensor_<rank>d`, so the batched K/V encode as rank-4 boxes `(1, 1, bn, head_dim)` with the
+load's own batch/head index exprs as origin coords (GQA's `h // group` included). TMA slabs stay dense
+under the hardware swizzle (`pick_swizzle_atom`; the x4-pairing pass now fuses equal-swizzle pairs — the
+drain XOR is per-lane address-based). **`w4x1/f2x8/k4` + `d2/tma/ring` = 206 µs — PARITY with FA-2**, and
+the NCU profile now beats the reference on memory: LSU **3.31M vs FA-2's 4.36M** (single-thread box copies
+replaced the per-thread fill loops), conflicts 4K vs 22K, 233 regs / 11.4% occ.
+
+**WSPEC on flash: built, correct, measured SLOWER** (213 vs 206 at the winner — the fifth honest negative).
+The producer-band split is now offered on resolved-TMA flash rows (the matmul legality; the transport's
+elected fill thread rides the WRAPPED linear tid — the raw tid would elect a compute thread and never
+fill), and it lowers + passes accuracy — but at flash's CTA scale the uniform TMA ring already keeps the
+tensor cores fed, so a dedicated producer band only costs occupancy. This matches the article's own
+framing: warp specialization is FA-3's Hopper/wgmma story (deep pipelines, big CTAs), not an sm_120 win —
+and now that claim is measured, not assumed.
+
+## Follow-ups (padding, barrier scoping, repack, Q-hoist, x4 pairing, reg_m, TMA, WSPEC are DONE)
 
 The x4 pairing landed as the `096_pair_ldmatrix_loads` kernel-IR peephole (LSU 14.1M → 9.87M, 222 → 219µs
 — by then the kernel was no longer LSU-bound, but the pass also serves the matmul staged drains and buys

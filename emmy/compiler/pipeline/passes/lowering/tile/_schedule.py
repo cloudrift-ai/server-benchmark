@@ -1406,14 +1406,25 @@ def _twisted_warp_options(tile: TileOp, name: str, knobs: dict, budget: int = ST
         # Both contractions' plans are stamped (each keyed on its node's k axis), the reduce
         # partition decided-empty, and the K/V operand stage on the STREAM axis (the resolved
         # spelling, or the explicit OFF ``""`` — the honest-stamping rule), so every flash leaf
-        # row spells the same key set.
+        # row spells the same key set. A resolved **TMA** stage additionally offers the WSPEC
+        # producer-band splits (the same legality as the matmul tier's ``_wspec_candidates``:
+        # ``_wspec_workers`` gates the thread budgets — the aux band must not exceed the
+        # ``32·um`` compute band); a degraded candidate is skipped rather than duplicating the
+        # uniform row.
         for stage in _twisted_stage_candidates(kv_ext, bn, head_dim.as_static(), d_v.as_static(), elem_bytes, budget):
-            stamped = {
-                **knobs,
-                _at(TILE, head.k_axis.name): qk_plan.spell(),
-                _at(TILE, pv.k_axis.name): pv_plan.spell(),
-                _at(REDUCE, kv_name): "",
-                _at(STAGE, kv_name): stage.spell() if stage is not None else "",
-            }
-            out.append(TileOp(op=op2, name=name, place=place, stage=stage, knobs=stamped))
+            wspecs = list(WSPEC.narrow(wspec_moves())) if (stage is not None and stage.transport == "tma") else [""]
+            for wspec_cand in wspecs:
+                workers, wspec_spec = _wspec_workers(wspec_cand, stage, 32 * um)
+                if wspec_cand and workers is None:
+                    continue  # over-budget / illegal split — identical to the uniform row
+                stamped = {
+                    **knobs,
+                    _at(TILE, head.k_axis.name): qk_plan.spell(),
+                    _at(TILE, pv.k_axis.name): pv_plan.spell(),
+                    _at(REDUCE, kv_name): "",
+                    _at(STAGE, kv_name): stage.spell() if stage is not None else "",
+                }
+                if wspec_spec:
+                    stamped[WSPEC.name] = wspec_spec
+                out.append(TileOp(op=op2, name=name, place=place, stage=stage, workers=workers, knobs=stamped))
     return out

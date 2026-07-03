@@ -25,11 +25,13 @@ residence — the fragment row of the placement-keyed fold (a within-warp ``Frag
 - the projection tail (``O / l``) realizes as an in-place ``FragmentApply`` + the ``RegStore``
   output close;
 - a resolved K/V ``Stage`` on the ``TileOp`` (``ctx.stage`` — ``_schedule._resolve_twisted_stage``,
-  cp.async over a static block-divisible kv) re-parents the streaming step under the same
+  cp.async or TMA over a static block-divisible kv) re-parents the streaming step under the same
   ``staged_kloop`` skeleton the matmul tier runs: the K/V slabs fill per KV block (each in its
   operand's own layout — verbatim row copies, so staged stays bit-identical to gmem-direct) and
   the step's B fragments drain them via the staged ldmatrix variants (plain ``x2`` for the
-  N-major K slab, ``x2.trans`` for the K-major V slab).
+  N-major K slab, ``x2.trans`` for the K-major V slab). cp.async fills pad the rows +16 B; TMA
+  box-copies the batched operands via rank-N descriptors into dense hardware-swizzled slabs, and
+  a stamped ``WSPEC`` split rides ``_wspec_kloop`` with the wrapped elected fill tid.
 
 Nothing here keys on a kernel *identity* — the walk reads node structure, channel algebra, and the
 stamped schedule; an unrealizable tree is rejected at schedule time (``_schedule._twisted_warp_
@@ -511,11 +513,19 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             box=(1,) * len(v_batch) + (bn, d_v) if is_tma else None,
         )
         transport_cls = TmaTransport if is_tma else CpAsyncTransport
+        # Under a WSPEC band split the fill's elected thread must be the PRODUCER band's first —
+        # the wrapped linear tid (``threadIdx.x % block_threads``) maps aux thread ``block_threads``
+        # to 0, so the transport's ``linear_tid == 0`` election lands there verbatim (the raw tid
+        # would elect a compute thread and the producer branch would never fill).
+        block_threads = 32 * um
+        ltid: Expr = (
+            BinaryExpr("%", Builtin("thread_idx.x"), Literal(block_threads, "int")) if ctx.workers is not None else Builtin("thread_idx.x")
+        )
         transport = transport_cls(
             operands=(k_op, v_op),
             slab_dtype=_cuda(atom.operand_dtype("b")),
             elem_bytes=elem_bytes,
-            cta=CtaTile(linear_tid=Builtin("thread_idx.x"), n_threads=32 * um),
+            cta=CtaTile(linear_tid=ltid, n_threads=block_threads),
         )
         decls, fold = staged_kloop(
             transport=transport,
@@ -525,6 +535,8 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             n_chunks=K // bn,
             k_extent=K,
             k0=kv0.name,
+            workers=ctx.workers,
+            block_threads=block_threads,
         )
         state = decls + state
     else:

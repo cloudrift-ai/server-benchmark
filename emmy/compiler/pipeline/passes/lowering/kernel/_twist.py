@@ -65,7 +65,7 @@ from emmy.compiler.ir.kernel.ir import (
 )
 from emmy.compiler.ir.schedule import Fold, Level, ReduceStage
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Select, Stmt, StridedLoop
+from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Select, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile.ir import Contraction, Map, Reduction
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
@@ -575,10 +575,18 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         fold = [StridedLoop(axis=kv0, start=Literal(0, "int"), step=Literal(bn, "int"), body=body, unroll=static_small)]
 
     # ---- close: the projection tail realized on the output fragments + the store, per tile ---- #
+    # A layout-aware output ``Write`` the node carries (flash's ``_out_store_index``) is the store
+    # TEMPLATE — its index places the output at the buffer's real slots (a fused transpose, size-1
+    # broadcast dims). Split it off the projection stmts; each fragment store reuses the template with
+    # the row (m) axis → the query-tile base and the column (n) axis → the atom-n literal. Absent it,
+    # fall back to the bare ``(batch…, row, n)`` grid store (the head-major identity).
+    store_tmpl = tail[-1] if tail and isinstance(tail[-1], Write) else None
+    proj_tail = tail[:-1] if store_tmpl is not None else tail
+    m_name, n_name = qk.m_axis.name, pv.n_axis.name
     close: list[Stmt] = []
-    batch_idx = tuple(qk.a_operand.index[:-2])  # (batch…, head) — passthrough grid vars
+    batch_idx = tuple(qk.a_operand.index[:-2])  # (batch…, head) — passthrough grid vars (fallback)
     for qt in qtiles:
-        for s in tail:
+        for s in proj_tail:
             if isinstance(s, Assign) and expect_name in s.args:
                 others = tuple(_row_pair(f"{a}{qt.sfx}") if a in names else a for a in s.args if a != expect_name)
                 kinds = tuple(ROW if a in names else UNIFORM for a in s.args if a != expect_name)
@@ -588,16 +596,13 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             raise NotImplementedError(f"fragment realizer: unrealizable projection stmt {type(s).__name__}")
         m_guard = (qt.row_base, _ext(qk.m_axis)) if symbolic_q else None
         for j, f in enumerate(qt.ofrags):
-            close.append(
-                RegStore(
-                    dst_buffer=ctx.output,
-                    dst_index=(*batch_idx, qt.row_base, Literal(j * atom_n, "int")),
-                    frag=f,
-                    shape=shape,
-                    ldm=d_v,
-                    m_guard=m_guard,
-                )
-            )
+            col_lit = Literal(j * atom_n, "int")
+            if store_tmpl is not None:
+                sub = {m_name: qt.row_base, n_name: col_lit}  # row/col axis motion; batch / broadcast slots pass through
+                dst_index = tuple(sub.get(e.name, e) if isinstance(e, Var) else e for e in store_tmpl.index)
+            else:
+                dst_index = (*batch_idx, qt.row_base, col_lit)
+            close.append(RegStore(dst_buffer=ctx.output, dst_index=dst_index, frag=f, shape=shape, ldm=d_v, m_guard=m_guard))
     return state, fold, close
 
 

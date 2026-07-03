@@ -32,6 +32,13 @@ halves:
 score producer until its softmax-then-P@V consumer has fused (the fusion reads the
 producer's Q/K as plain ``Load``\\ s, so it must stay a ``LoopOp`` until then).
 
+Layout-agnostic on BOTH sides. The input loads permute the canonical ``(batch…, seq, last)`` index
+back into each operand's own traced slot order (``_permute_idx`` — HF's per-layer Q/K/V arrive
+seq-major); the output ``Write`` reproduces the root buffer's real layout — a fused output transpose
+and size-1 broadcast / unsqueeze dims (HF's ``[b, h, s, 1, d]``) — via ``_out_store_index`` (the store
+index each lowering tier uses, mapping grid axes onto the output slots by dim extent). A bare
+grid-order store mis-strides a non-canonical output (all elements alias, the rest uninitialized → NaN).
+
 (Online softmax — flash's softmax-stats half without the P@V — lives in ``_softmax``.)
 
 Scope is the **clean** scaled-QK producer (Q/K recoverable as plain ``Load``\\ s). A
@@ -208,9 +215,12 @@ def build_flash_frag(
     mask: tuple[str, tuple] | None = None,
     layouts: tuple = (None, None, None),
     raw_shapes: tuple | None = None,
-) -> Graph:
+    out_index: tuple | None = None,
+) -> Graph | None:
     """Build the fragment graph holding the fused flash ``TileOp`` (+ its scale /
-    -inf constants). The caller guarantees :func:`flash_shape_eligible`.
+    -inf constants), or ``None`` when the root's output layout can't be reproduced on the grid
+    (:func:`_out_store_index` — the caller degrades to cut). The caller guarantees
+    :func:`flash_shape_eligible`.
 
     The compute is the op tree itself — a ``Map`` whose body is the ``(m,l,O)`` LSE
     ``TWISTED`` reduce ``Loop`` then the ``O/l`` projection, carried unlowered on the ``TileOp`` with an empty
@@ -230,6 +240,21 @@ def build_flash_frag(
     scale = 1.0 / math.sqrt(head_dim)
     mask_buf, mask_shape = mask if mask is not None else (None, None)
 
+    batch_axes = tuple(Axis(name=f"b{i}", extent=Dim(b)) for i, b in enumerate(batch))
+    grid = (*batch_axes, Axis(name="m", extent=s_q_dim), Axis(name="d", extent=Dim(d_v)))
+
+    # The output store must match the root buffer's real rank + layout (transpose / broadcast dims),
+    # not the bare grid order. ``out_index`` is the root kernel's own output ``Write`` index; map its
+    # per-axis vars onto the grid axes (:func:`_out_store_index`). ``None`` there = an un-reproducible
+    # output layout → decline flash (the caller degrades to cut). With no ``out_index`` (isolated
+    # fragment / tests), the materializer's bare grid-order glue stores the head-major identity.
+    out_store: tuple[str, tuple] | None = None
+    if out_index is not None:
+        store_idx = _out_store_index(out_index, out.shape, grid)
+        if store_idx is None:
+            return None
+        out_store = (out.name, store_idx)
+
     flash_op = _flash_op(
         q_id,
         k_id,
@@ -244,9 +269,8 @@ def build_flash_frag(
         mask_buf=mask_buf,
         mask_shape=mask_shape,
         layouts=layouts,
+        out_store=out_store,
     )
-    batch_axes = tuple(Axis(name=f"b{i}", extent=Dim(b)) for i, b in enumerate(batch))
-    grid = (*batch_axes, Axis(name="m", extent=s_q_dim), Axis(name="d", extent=Dim(d_v)))
     # The free axes are the schedule's, carried on the ``TileOp`` with an UNMAPPED grid —
     # like every other recognizer; ``_schedule`` (inside ``010_recognize``) maps ``free`` onto the grid.
     # ``PLACE@fold=fuse`` is the RESOLVED downstream-fold placement this fragment realizes (the fused
@@ -338,6 +362,7 @@ def _flash_op(
     mask_buf: str | None = None,
     mask_shape: tuple | None = None,
     layouts: tuple = (None, None, None),
+    out_store: tuple[str, tuple] | None = None,
 ) -> Map:
     """The per-output-element ``(…, m, d)`` compute as the structural-node tree: flash is
     ``Map(body=[O/l projection], source=Reduction(role=TWISTED, axis=kv, partial=[Contraction(QK), …,
@@ -422,9 +447,17 @@ def _flash_op(
         role=AxisRole.TWISTED,
     )
     # φ projection: normalize the streamed (unnormalized) output by the LSE denominator —
-    # O_i / l_i after the kv loop, the ``Map`` body over the reduction ``source``.
-    proj = Assign(name="O_i__proj", op="divide", args=("O_i", "l_i"))
-    return Map(body=Body((proj,)), source=reduction)
+    # O_i / l_i after the kv loop, the ``Map`` body over the reduction ``source``. When the caller
+    # supplies ``out_store`` (``(buffer, index)``), the body ALSO carries the explicit output
+    # ``Write`` at that index — the output-layout-aware store (:func:`_out_store_index`) that
+    # reproduces the root's real buffer rank / transpose / broadcast dims. Its presence short-circuits
+    # the materializer's bare grid-order ``with_store`` glue (``has_write``). Absent it, the glue
+    # writes the bare grid cell (the head-major identity path — isolated fragments, tests).
+    proj: tuple[Stmt, ...] = (Assign(name="O_i__proj", op="divide", args=("O_i", "l_i")),)
+    if out_store is not None:
+        out_buf, out_idx = out_store
+        proj = (*proj, Write(output=out_buf, index=out_idx, value="O_i__proj"))
+    return Map(body=Body(proj), source=reduction)
 
 
 # --------------------------------------------------------------------------- #
@@ -487,6 +520,38 @@ def _permute_idx(comps: tuple, layout: tuple[int, int] | None) -> tuple:
     for i in range(len(comps)):
         if idx[i] is None:
             idx[i] = next(rest)
+    return tuple(idx)
+
+
+def _out_store_index(out_index: tuple, out_shape: tuple, grid: tuple) -> tuple | None:
+    """The output ``Write`` index for the flash store — the OUTPUT counterpart to :func:`_permute_idx`.
+
+    The store must match the output buffer's REAL rank + layout, not the bare grid order: the model's
+    sdpa output can be transposed (a fused ``transpose``) and can carry size-1 broadcast / unsqueeze
+    dims (e.g. HF's ``[b, h, s, 1, d]``), so a bare 4-var ``(batch…, m, d)`` grid write mis-strides
+    against a 5-D buffer (all the outputs alias, the rest stays uninitialized → NaN downstream). This
+    reproduces the ROOT kernel's own output ``Write`` (``out_index`` over ``out_shape``), substituting
+    each per-axis loop ``Var`` with the fragment's grid axis of matching dim extent, and KEEPING every
+    ``Literal`` slot (size-1 batch dims and pure broadcast dims — index 0). ``None`` when a ``Var``
+    slot's extent has no unused grid axis (an un-reproducible layout — the caller declines to cut)."""
+    from collections import defaultdict  # noqa: PLC0415
+
+    buckets: dict = defaultdict(list)
+    for ax in grid:
+        buckets[ax.extent].append(Var(ax.name))
+    used: dict = defaultdict(int)
+    idx: list = []
+    for pos, e in enumerate(out_index):
+        if isinstance(e, Var):
+            ext = out_shape[pos]
+            cands = buckets.get(ext, ())
+            k = used[ext]
+            if k >= len(cands):
+                return None  # no unused grid axis for this dim — decline (fall back to cut)
+            used[ext] += 1
+            idx.append(cands[k])
+        else:
+            idx.append(e)  # a Literal slot (size-1 batch / broadcast dim) — index 0, kept verbatim
     return tuple(idx)
 
 
@@ -686,7 +751,12 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
         _fuse_degraded(root, "shape not flash-eligible")
         return None
     mask = (mask_buf, mask_shape) if mask_kind == "additive" else None
-    return build_flash_frag(
+    # The root's own output ``Write`` index — the store's target layout (buffer rank, a fused output
+    # transpose, size-1 broadcast dims). The fragment reproduces it (``_out_store_index``) instead of
+    # a bare grid-order write, which would mis-stride a transposed / higher-rank output → NaN.
+    out_writes = [s for s in root.op.body.iter() if isinstance(s, Write)]
+    out_index = tuple(out_writes[0].index) if len(out_writes) == 1 else None
+    frag = build_flash_frag(
         q_id,
         k_id,
         v_id,
@@ -703,7 +773,11 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
             tuple(graph.nodes[k_id].output.shape),
             tuple(graph.nodes[v_id].output.shape),
         ),
+        out_index=out_index,
     )
+    if frag is None:
+        _fuse_degraded(root, "output layout not reproducible on the flash grid")
+    return frag
 
 
 def fused_producer_ids(graph: Graph, root: Node) -> tuple[str, ...]:

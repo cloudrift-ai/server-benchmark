@@ -666,17 +666,29 @@ def _realize_chain(op, ctx: Ctx, tail: tuple, pv: Contraction) -> tuple[list[Stm
     axis = pv.n_axis.name
     count = pv.tile.regs[0]  # scalar reg order (reg_n, reg_m) — the column (n) register vector
     (rloop,) = _emit(op, ctx).body
-    all_stmts = [*rloop.body, *tail]
+    # A layout-aware output ``Write`` the node carries (flash's ``_out_store_index``) is the store
+    # TEMPLATE — its index already places the grid axes at the output buffer's real slots (transpose /
+    # broadcast dims). Split it off the projection tail; the per-column store reuses its index with the
+    # column (n) axis substituted by the register literal ``j``. Absent it, fall back to the bare
+    # grid-cell store (grid vars + the column literal) — the head-major identity.
+    store_tmpl = tail[-1] if tail and isinstance(tail[-1], Write) else None
+    proj_tail = tuple(tail[:-1]) if store_tmpl is not None else tail
+    all_stmts = [*rloop.body, *proj_tail]
     tainted = _taint(all_stmts, axis)
     protected = frozenset({nm for s in _flat_stmts(all_stmts) for nm in (*s.defines(), *_stmt_reads(s))} - tainted)
     body = _vectorize_axis(list(rloop.body), axis, count, tainted, protected)
     fold = [replace(rloop, body=Body(tuple(body)), carrier=_vector_carrier(rloop.carrier, tainted, count))]
-    close = _vectorize_axis(list(tail), axis, count, tainted, protected)
-    grid_vars = tuple(Var(a.name) for a in ctx.grid)
-    out_val = tail[-1].defines()[-1] if tail else pv.acc
+    close = _vectorize_axis(list(proj_tail), axis, count, tainted, protected)
+    if store_tmpl is not None:
+        out_val = store_tmpl.values[-1]
+        base_index = store_tmpl.index
+    else:
+        out_val = proj_tail[-1].defines()[-1] if proj_tail else pv.acc
+        base_index = (*(Var(a.name) for a in ctx.grid), Var(axis))
     for j in range(count):
         val = f"{out_val}_{j}" if out_val in tainted else out_val
-        close.append(Write(output=ctx.output, index=(*grid_vars, Literal(j, "int")), value=val))
+        idx = tuple(Literal(j, "int") if (isinstance(e, Var) and e.name == axis) else e for e in base_index)
+        close.append(Write(output=ctx.output, index=idx, value=val))
     return [], fold, close
 
 
@@ -742,9 +754,14 @@ def _tile_reduce_axis(op: Reduction, plan, ctx: Ctx, tail: tuple, out_val: str) 
     # accumulator (``StridedLoop.render``).
     # The shared iteration coordinates (grid + reduce + lane axis vars) and the symbolic
     # extent's runtime arg(s) (e.g. ``seq_len``) are common to every register copy — exclude
-    # them from the per-copy SSA rename.
+    # them from the per-copy SSA rename. So too any NESTED loop-axis var (a flash Q@K / P@V
+    # contraction's own reduce coordinate ``dd`` / ``j``): ``copy_cell``'s ``rewrite`` renames
+    # a var's USES but not a ``Loop``'s own axis DECLARATION, so suffixing the uses (``dd__r1``)
+    # while the ``for`` decl stays ``dd`` emits an undefined identifier. Each copy re-declares
+    # its own nested loop, so a shared name is correct (loop-scoped).
+    nested_axes = {lp.axis.name for lp in rloop.body.iter_of_type(Loop, StridedLoop)}
     protected = frozenset(
-        {axis.name, *(ax.name for ax in grid), *axis.extent_expr().free_vars()} | ({lane.name} if lane is not None else set())
+        {axis.name, *(ax.name for ax in grid), *axis.extent_expr().free_vars(), *nested_axes} | ({lane.name} if lane is not None else set())
     )
     copies: list[Stmt] = []
     for r in range(reg):

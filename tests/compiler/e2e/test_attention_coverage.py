@@ -240,6 +240,38 @@ def test_flash_causal_and_gqa_match_torch(monkeypatch):
     assert _max_diff(backend, compiled, {"q": qg.numpy(), "k": kg.numpy(), "v": vg.numpy()}, rg) < 1e-4
 
 
+class _SdpaTranspose(torch.nn.Module):
+    """SDPA whose ``(b, h, s, d)`` output is transposed to ``(b, s, h, d)`` — the ``attn.transpose(1, 2)``
+    every HF attention does before the reshape to ``(b, s, hidden)``. The transpose is a view that fuses
+    INTO the flash kernel (the store writes the transposed layout), so the output buffer's real layout is
+    NOT the bare grid order."""
+
+    def forward(self, q, k, v):
+        return F.scaled_dot_product_attention(q, k, v).transpose(1, 2)
+
+
+@requires_cuda
+def test_flash_transposed_output_matches_torch(monkeypatch):
+    """The flash store must match the OUTPUT buffer's real rank + layout, not the bare ``(batch…, m, d)``
+    grid order: a fused output transpose (and, in models, size-1 broadcast / unsqueeze dims) makes the
+    root's output non-canonical, so a grid-order write mis-strides — all elements alias, the rest stays
+    uninitialized → NaN (the Gemma model-trace flash NaN). This pins the layout-aware store
+    (``_out_store_index``): SDPA + absorbed transpose fuses to ONE kernel and matches torch."""
+    torch.manual_seed(0)
+    for cfg in [(1, 4, 16, 16), (2, 3, 32, 16)]:
+        q, k, v = (torch.randn(*cfg) for _ in range(3))
+        backend, compiled, _graph, kernels = _trace(_SdpaTranspose(), (q, k, v))
+        assert len(kernels) == 1, f"{cfg}: sdpa+transpose should fuse to one kernel, got {len(kernels)}"
+        cq, ck, cv = q.cuda(), k.cuda(), v.cuda()
+
+        def ref(cq=cq, ck=ck, cv=cv):
+            with torch.no_grad():
+                return F.scaled_dot_product_attention(cq, ck, cv).transpose(1, 2).contiguous().cpu().flatten().numpy()
+
+        md = _max_diff(backend, compiled, {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}, ref)
+        assert md < 1e-4, f"{cfg}: transposed-output flash vs torch max_diff={md:.6e}"
+
+
 @requires_cuda
 @pytest.mark.parametrize(("B", "H", "S", "D"), [(1, 1, 8, 8), (1, 2, 16, 8), (2, 3, 32, 16)])
 def test_flash_chain_matches_torch(monkeypatch, B, H, S, D):
@@ -741,6 +773,34 @@ def test_cooperative_flash_matches_torch(monkeypatch, br, B, H, S, D):
     def eager():
         with torch.no_grad():
             return F.scaled_dot_product_attention(cq, ck, cv).cpu().flatten().numpy()
+
+    assert _max_diff(backend, compiled, {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}, eager) < 1e-4
+
+
+@requires_cuda
+@pytest.mark.parametrize("reg", ["2", "4"])
+@pytest.mark.parametrize("causal", [False, True])
+def test_ilp_reg_flash_matches_torch(monkeypatch, reg, causal):
+    """The ILP register fold (``EMMY_REDUCE=r{reg}``) over the flash ``kv`` streaming reduce: ``reg``
+    interleaved ``(m, l, O)`` accumulator chains merged by the monoid REG-tree fold. The reduce body
+    holds the NESTED ``dd`` (Q@K) / ``j`` (P@V) contraction loops, whose own axis vars ``copy_cell``
+    must leave shared across copies — a per-copy suffix (``dd__r1``) on the load USE while the ``for``
+    DECL stays ``dd`` emits an undefined identifier (the flash-certification model-tune regression).
+    Pins the exact path that nvcc-failed on Gemma; asserts the copies are emitted and match torch."""
+    monkeypatch.setenv("EMMY_REDUCE", f"r{reg}")
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(2, 3, 32, 16) for _ in range(3))
+    module = _Causal() if causal else _Sdpa()
+    backend, compiled, _graph, kernels = _trace(module, (q, k, v))
+    assert len(kernels) == 1, f"flash should fuse to one kernel, got {len(kernels)}"
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "sacc__r1" in src, "the ILP fold must replicate the score accumulator per copy"
+    assert "dd__r" not in src, "the nested contraction's reduce axis must stay shared (no dd__r{r} — the undefined-id bug)"
+    cq, ck, cv = q.cuda(), k.cuda(), v.cuda()
+
+    def eager():
+        with torch.no_grad():
+            return F.scaled_dot_product_attention(cq, ck, cv, is_causal=causal).cpu().flatten().numpy()
 
     assert _max_diff(backend, compiled, {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}, eager) < 1e-4
 

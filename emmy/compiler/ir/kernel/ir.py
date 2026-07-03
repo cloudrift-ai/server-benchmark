@@ -2100,6 +2100,13 @@ def _(s: FragmentApply, rename, sigma, axis_fn):
 
 
 @_rewrite.register
+def _(s: FragmentRepack, rename, sigma, axis_fn):
+    # Pure register (the flash P→A handoff): route the dest + the two source C fragments through
+    # ``rename`` (SSA canonicalizer / per-cell replicator); no index / axis to σ-substitute.
+    return FragmentRepack(frag=rename(s.frag), srcs=(rename(s.srcs[0]), rename(s.srcs[1])), ab_dtype=s.ab_dtype)
+
+
+@_rewrite.register
 def _(s: FragmentRowReduce, rename, sigma, axis_fn):
     return FragmentRowReduce(
         top=rename(s.top), bot=rename(s.bot), frags=tuple(rename(f) for f in s.frags), op=s.op, group=s.group, dtype=s.dtype

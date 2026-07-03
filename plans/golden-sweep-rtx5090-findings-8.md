@@ -178,6 +178,48 @@ confirm A/B passes at ~5 min each). Fixes, with their in-sweep verification:
 - **Finding 4's fix held in production: zero `bench_fail` rows in the entire ninth sweep** (sweep 8 had 37; the 4
   TMA box-extent crashes are gone and the misaligned-address cluster was Gemma-shape-specific).
 
+### Per-shape outcomes — ninth sweep (pass-max over 2 A/B passes, -O3 live, learned-prior + evidence deploys)
+
+`cuBLAS µs` is the live `Eager PyTorch` row from the same `run --bench` (min across passes); `vs cuBLAS` =
+greedy / cuBLAS (>1 = emmy slower than PyTorch). Ratios are against the sweep-8-updated YAML records.
+
+| shape | greedy µs | best-golden µs | ratio | cuBLAS µs | vs cuBLAS | category |
+|---|---|---|---|---|---|---|
+| square.512 | 8.7 | 8.7 | 1.00 | 12.3 | 0.71 | parity (greedy = recorded knobs) |
+| square.1024 | 39.2 | 40.5 | 0.97 | 44.7 | 0.88 | same → added (`n32x8/f4x8 d2`) |
+| square.2048 | 242.6 | 241.8 | 1.00 | 253.0 | 0.96 | parity, same knobs; µs refreshed 243.6→241.8 |
+| square.4096 | 2134.7 | 1964.9 | 1.09 | 2091.7 | 1.02 | worse (marginal); both golden rows re-benched faster and µs-refreshed |
+| square.512.fp16 | 3.8 | 3.8 | 1.00 | 6.1 | 0.62 | parity (greedy = recorded knobs) |
+| square.1024.fp16 | 15.2 | 15.4 | 0.98 | 14.4 | 1.06 | same → added (`w2x4/f2x2/k4 d2`) |
+| square.2048.fp16 | 91.6 | 91.7 | 1.00 | 96.6 | 0.95 | parity (greedy = recorded knobs) |
+| square.4096.fp16 | 627.5 | 634.4 | 0.99 | 640.2 | 0.98 | parity (greedy = recorded knobs) |
+| qwen3_06b.q_proj.s32 | 6.0 | 7.4 | 0.81 | 8.2 | 0.73 | **replaced** (`n32x8/f4x4 g8k d3`) |
+| qwen3_06b.kv_proj.s32 | 4.6 | 5.4 | 0.85 | 6.1 | 0.74 | **replaced** (`n32x8/f2x4 g8k d3`) |
+| qwen3_06b.o_proj.s32 | 6.3 | 8.8 | 0.72 | 8.2 | 0.76 | **replaced** (`n32x8/f2x4 g8k d4`); both old rows pruned |
+| qwen3_06b.gate_up_proj.s32 | 9.0 | 9.6 | 0.93 | 12.3 | 0.73 | **replaced** (`n32x8/f4x4 g4k d4`); three old rows pruned |
+| qwen3_06b.down_proj.s32 | 8.4 | 9.6 | 0.87 | 10.2 | 0.82 | **replaced** (`n32x8/f2x4 g8k d3`) |
+| qwen3_06b.q_proj.s128 | 13.4 | 14.2 | 0.94 | 16.4 | 0.82 | **replaced** (`n32x8/f4x8 g4k d2`) |
+| qwen3_06b.kv_proj.s128 | 8.3 | 9.3 | 0.90 | 10.2 | 0.81 | **replaced** (`n32x8/f4x8 g8k d3`) |
+| qwen3_06b.o_proj.s128 | 13.3 | 13.5 | 0.98 | 15.2 | 0.88 | same → added (`d3` beside refreshed `d2`) |
+| qwen3_06b.gate_up_proj.s128 | 20.2 | 20.1 | 1.00 | 32.8 | 0.62 | parity; µs refreshed |
+| qwen3_06b.down_proj.s128 | 18.0 | 18.1 | 1.00 | 85.8 | 0.21 | same → added (`d3` beside refreshed `d2`) |
+| qwen3_06b.q_proj.s512 | 39.1 | 39.1 | 1.00 | 44.6 | 0.88 | parity (greedy = recorded knobs) |
+| qwen3_06b.kv_proj.s512 | 23.0 | 22.8 | 1.01 | 34.3 | 0.67 | parity (greedy = recorded knobs) |
+| qwen3_06b.o_proj.s512 | 43.5 | 41.6 | 1.05 | 51.3 | 0.85 | worse (marginal); golden µs refreshed 42.6→41.6 |
+| qwen3_06b.gate_up_proj.s512 | 53.2 | 53.5 | 0.99 | 69.1 | 0.77 | same → added (`d2`); stale `d4` row pruned |
+| qwen3_06b.down_proj.s512 | 60.5 | 60.2 | 1.00 | 66.8 | 0.91 | parity, same knobs; µs refreshed 63.8→60.2 |
+| square.512.dynM | 9.2 | 10.1 | 0.92 | 12.3 | 0.75 | **replaced** (`n16x16/f2x4 d4`) |
+| qwen3_06b.q_proj.s512.dynM | 51.7 | 47.5 | 1.09 | 44.9 | 1.15 | worse — search-coverage miss (golden unmeasured in 124 variants) |
+| qwen3_06b.kv_proj.s512.dynM | 23.7 | 33.0 | 0.72 | 34.0 | 0.70 | **replaced** (`n16x8/f4x8 d3`; sweep-8 record didn't reproduce) |
+| qwen3_06b.o_proj.s512.dynM | 44.5 | 45.1 | 0.99 | 51.2 | 0.87 | parity (greedy = recorded knobs) |
+| qwen3_06b.gate_up_proj.s512.dynM | 66.6 | 76.2 | 0.87 | 68.7 | 0.97 | **replaced** (`n16x16/f4x8 g4k d2`; sweep-8 record didn't reproduce) |
+| qwen3_06b.down_proj.s512.dynM | 65.5 | 63.5 | 1.03 | 66.7 | 0.98 | worse (marginal) |
+| reduce.2048x2048 | 3.2 | 3.4 | 0.95 | 6.1 | 0.53 | **replaced** (`b32`) — restored fork, beats eager 1.9× |
+| reduce.1024x512 | 1.2 | 3.0 | 0.41 | 4.1 | 0.31 | **replaced** (`b16`) — restored fork, beats eager 3.4× |
+| reduce.2048x128 | 1.6 | 3.1 | 0.52 | 2.0 | 0.78 | **replaced** (`b4`) — restored fork |
+| pointwise.2048x2048 | 8.1 | 8.1 | 1.00 | 8.2 | 0.99 | parity |
+| pointwise.512x4096 | 4.3 | 4.3 | 1.00 | 4.1 | 1.05 | parity |
+
 Ninth-sweep tally (vs the sweep-8-updated YAML, pass-max over two passes, learned prior calibration +0.92):
 **14 replaced / 4 added (+2 pruned stale alternates) / 12 knob-reproductions / 4 worse** — the worse set is
 down_proj.s512.dynM 1.03, o_proj.s512 1.05, q_proj.s512.dynM 1.09 (all three the dynM/search-coverage class above)

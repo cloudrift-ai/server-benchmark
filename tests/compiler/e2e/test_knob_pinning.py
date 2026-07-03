@@ -505,3 +505,39 @@ def test_scalar_cpasync_declines_odd_stride(monkeypatch):
     ref = inputs["a"] @ inputs["b"]
     forced = _run_with_knobs(g, inputs, "c", _ODD_STRIDE_CPASYNC_KNOBS, monkeypatch)
     np.testing.assert_allclose(forced, ref, atol=1e-3, rtol=1e-3)
+
+
+# The Gemma finding-4 cluster: a MIXED-dtype staged contraction (fp32 A × fp16 B — the
+# norm→linear split-combine shape) sized BOTH slab fills with A's element width, so the B fill
+# issued 16 B ``cp.async`` chunks at fp32 spacing over fp16 memory — misaligned addresses +
+# overlapped data (36 bench_fail rows: ``CUDA_ERROR_MISALIGNED_ADDRESS`` + watchdog hangs). The
+# staged path now sizes each slab, fill, and descriptor by the operand's OWN dtype
+# (``Operand.dtype``/``elem_bytes``; ``_ScalarOps.slab_elems``); the drain's fma converts like
+# the gmem-direct path. Strides here are 16 B-aligned (K=128, N=96 → 192 B fp16 rows), so the
+# inner-stride gate passes and the mixed-dtype fill itself is what's under test.
+_MIXED_DTYPE_STAGED_KNOBS = {"TILE": "n16x8/f2x4", "STAGE": "d1/cp"}
+
+
+@requires_cuda
+def test_scalar_cpasync_mixed_dtype_slabs(monkeypatch):
+    """fp32 A × fp16 B matmul pinned to a cp.async stage — each operand's slab and fill must be
+    sized by its own element width; pre-fix the B fill misaligned and the kernel hung."""
+    from emmy.compiler.dtype import F16, F32
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.frontend.ir import MatmulOp
+
+    M, K, N = 64, 128, 96
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("a", (M, K), dtype=F32), node_id="a")
+    g.add_node(InputOp(), [], Tensor("b", (K, N), dtype=F16), node_id="b")
+    g.add_node(MatmulOp(), ["a", "b"], Tensor("c", (M, N), dtype=F32), node_id="c")
+    g.inputs, g.outputs = ["a", "b"], ["c"]
+    rng = np.random.default_rng(0)
+    inputs = {
+        "a": rng.standard_normal((M, K), dtype=np.float32) * 0.1,
+        "b": (rng.standard_normal((K, N), dtype=np.float32) * 0.1).astype(np.float16),
+    }
+    ref = inputs["a"] @ inputs["b"].astype(np.float32)
+    forced = _run_with_knobs(g, inputs, "c", _MIXED_DTYPE_STAGED_KNOBS, monkeypatch)
+    np.testing.assert_allclose(forced, ref, atol=1e-3, rtol=1e-3)

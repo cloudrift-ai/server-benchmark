@@ -645,9 +645,13 @@ def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = ST
     n_ext = c.n.axis.extent
     if not n_ext.is_static or ((K * elem_bytes) % 16 or (n_ext.as_static() * elem_bytes) % 16):
         return None
+    # Per-operand slot bytes: A's slab is (tile_m × bk) at A's element size, B's (bk × tile_n) at
+    # B's — the operands may differ (fp32 split partials × fp16 weights), so sizing both with A's
+    # element over-books the budget on the mixed shape.
+    b_bytes = inputs[c.b_load.input].dtype.nbytes if c.b_load.input in inputs else elem_bytes
     depth, bk_elems = max(1, stage.depth), 0
     while depth >= 1:
-        cap = budget // (depth * max(1, c.m.tile + c.n.tile) * elem_bytes)
+        cap = budget // (depth * max(1, c.m.tile * elem_bytes + c.n.tile * b_bytes))
         bk_elems = next((v for v in (128, 64, 32, 16, 8, 4) if v <= cap and K % v == 0), 0)
         if bk_elems >= 4:
             break

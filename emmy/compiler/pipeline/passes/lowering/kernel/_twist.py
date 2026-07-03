@@ -148,6 +148,7 @@ def _frag_contraction(
     k_sub: Expr,
     mask: dict,
     a_frags: tuple[str, ...] = (),
+    a_resident: bool = False,
     b_slab: str | None = None,
     b_slot: Expr | None = None,
     b_ldm: int = 0,
@@ -156,8 +157,11 @@ def _frag_contraction(
     at fragment residence, geometry off the node (``b_trans`` / operand indices / ``ldm``) and its
     stamped :class:`TilePlan` (``regs`` / ``bk``). ``a_frag`` is the A-operand fragment: filled per
     K-step from the node's ``a_operand`` gmem ``Load`` when it is one, else already resident (the
-    caller ran the C→A handoff); ``a_frags`` optionally names one resident fragment PER K-step (the
-    wide-key-block handoff stages ``bk`` A slices, one per ``atom_k`` chunk of the streamed block).
+    caller ran the C→A repack); ``a_frags`` optionally names one resident fragment PER K-step (the
+    repack converts ``bk`` A slices, one per ``atom_k`` chunk of the streamed block).
+    ``a_resident=True`` suppresses the per-step A load even when ``a_operand`` IS a gmem ``Load`` —
+    the caller hoisted the loop-invariant fills into its own region (flash Q, whose index never
+    carries the stream axis) and ``a_frags`` name the already-filled fragments.
     ``m_sub`` / ``n_sub(t)`` / ``k_sub`` give each axis's tile-origin
     expr; ``mask`` maps an axis name to its ``(coord, extent)`` overhang guard — a masked A row
     clamp-reads (``gmem_guard``), a masked B column clamp-reads (transposed-B ``gmem_guard``) or
@@ -183,7 +187,7 @@ def _frag_contraction(
         off = Literal(step * shape[2], "int")
         k0 = k_sub if step == 0 else (off if isinstance(k_sub, Literal) and k_sub.value == 0 else BinaryExpr("+", k_sub, off))
         step_a = a_frags[step] if a_frags else a_frag
-        if a_load is not None:
+        if a_load is not None and not a_resident:
             out.append(
                 LdmatrixLoad(
                     frag=step_a,
@@ -327,13 +331,32 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     for f in ofrags:
         state.append(RegFragment(name=f, role="c", shape=shape, dtype=F32))
 
+    # The Q A-fragments are loop-INVARIANT (Q's index carries the query/head-dim axes, never the
+    # stream axis — structural: the contraction binder puts the m-carrying load on A), so they
+    # load ONCE ahead of the stream — ``bk`` resident fragments instead of ``bk`` gmem fills per
+    # KV block. Same loads, same values: bit-identical to the in-loop form.
+    qa_frags = tuple(f"_{qk.acc}_a{s}" for s in range(qk.tile.bk))
+    q_guard = (row_base, _ext(qk.m_axis)) if symbolic_q else None
+    for s, qaf in enumerate(qa_frags):
+        state.append(RegFragment(name=qaf, role="a", shape=shape, dtype=atom.operand_dtype("a")))
+        state.append(
+            LdmatrixLoad(
+                frag=qaf,
+                src_buffer=qk.a_operand.input,
+                src_index=_idx(qk.a_operand, {qk.m_axis.name: row_base, qk.k_axis.name: Literal(s * atom.atom_k, "int")}),
+                role="a",
+                ldm=qk.k_axis.extent.as_static(),
+                staged=False,
+                gmem_guard=q_guard,
+            )
+        )
+
     # ---- the streaming step (a builder — the staged path re-parents it under the ring drain) --- #
     def _stream_step(k_slot: Expr | None = None, v_slot: Expr | None = None, staged: bool = False) -> list[Stmt]:
         stream: list[Stmt] = []
         sfrags = tuple(f"{qk.acc}_f{t}" for t in range(nt))
         for f in sfrags:
             stream.append(RegFragment(name=f, role="c", shape=shape, dtype=F32))
-        stream.append(RegFragment(name=f"_{qk.acc}_a", role="a", shape=shape, dtype=atom.operand_dtype("a")))
         qk_mask: dict[str, tuple] = {}
         if symbolic_q:
             qk_mask[qk.m_axis.name] = (row_base, _ext(qk.m_axis))
@@ -342,7 +365,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         stream += _frag_contraction(
             qk,
             sfrags,
-            f"_{qk.acc}_a",
+            qa_frags[0],
             m_sub=row_base,
             # Staged: the K slab is slot-local (its rows are this block's keys), so the score
             # column origin is the in-block offset; the absolute ``col_bases`` still name the
@@ -350,6 +373,8 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             n_sub=(lambda t: Literal(t * atom_n, "int")) if staged else (lambda t: col_bases[t]),
             k_sub=Literal(0, "int"),
             mask=qk_mask,
+            a_frags=qa_frags,
+            a_resident=True,
             b_slab="_k_smem" if staged else None,
             b_slot=k_slot,
             b_ldm=qk.k_axis.extent.as_static() + _PAD if staged else 0,

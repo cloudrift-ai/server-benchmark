@@ -12,8 +12,10 @@ Winner on the perf shape `(1, 8, 4096, 64)` f16, non-causal, RTX 5090 (sm_120), 
 
 ```bash
 EMMY_TILE="a:mma_m16n8k16_f16/w4x1/f1x8/k4"    # 4 warps/CTA, 64-key streaming block
-EMMY_STAGE="d1/cp"                              # single-buffer cp.async K/V slabs (padded rows)
+EMMY_STAGE="d2/cp/ring"                         # 2-slot cp.async prefetch ring (padded rows)
 ```
+
+(**222 µs** — post Q-hoist the ring finally beats single-buffer d1's 233; see the ladder below.)
 
 ## The padded sweep (µs; padding on — the shipped configuration; eager torch SDPA flash = 205–208 µs)
 
@@ -61,8 +63,16 @@ register-shuffle handoff).
 | Move 2 — mma, gmem-direct (unpadded handoff, best geom) | fragment loads from gmem | 612 | 41× |
 | Move 4 — + K/V smem staging (`d1/cp`, unpadded) | cp.async fill, ldmatrix drain | 511 | 1.20× |
 | + slab padding (the bank-conflict fix; new best geom w4n8) | +16 B rows on slabs + handoff | 315 | 1.62× |
-| + C→A register repack (the handoff eliminated) | `FragmentRepack`, no smem round-trip | **271** | 1.16× |
-| torch eager SDPA (FA-2 backend) | reference | 206 | emmy best = 0.76× |
+| + C→A register repack (the handoff eliminated) | `FragmentRepack`, no smem round-trip | 271 | 1.16× |
+| + Q-fragment hoist (loop-invariant loads out of the stream) | resident `qa` fragments, d1 | 233 | 1.16× |
+| **Move 5 arrives** — the `d2/cp/ring` prefetch NOW wins | copy/math overlap, finally exposed | **222** | 1.05× |
+| torch eager SDPA (FA-2 backend) | reference | 206 | emmy best = **0.93×** |
+
+The Move-5 story is the article's best sequence: the ring lost at every step (occupancy cost, nothing to
+overlap) until the repack + Q-hoist thinned the streaming step enough to EXPOSE the copy latency — then the
+same `d2/cp/ring` knob that regressed all session flipped to the win. Software pipelining pays only when the
+loop body stops being its own latency blanket. NCU at the winner: SM 32.6% vs FA-2's 33.2% — the kernel is
+as busy as FlashAttention-2; the residual 1.08× is LSU count (14.1M vs 4.4M: x2-vs-x4 drains) + the `expf` path.
 
 The `d2+` prefetch ring (Move 5's software pipelining) is built and emits correctly (primed ring, clamped
 prefetch) but REGRESSES at every geometry — the honest finding: the smem doubling costs occupancy and the
@@ -110,15 +120,19 @@ session). The remaining gap is pure fragment-load volume: the per-step loop-inva
 loads/warp/step) and the per-B-fragment `x2` ldmatrix drains (an `x4` loads two B fragments at once), plus
 the `expf`-vs-`exp2f` ALU path.
 
-## Follow-ups (in expected-payoff order — padding, barrier scoping, register repack are DONE)
+## Follow-ups (in expected-payoff order — padding, barrier scoping, repack, Q-hoist are DONE)
 
-1. Hoist the loop-invariant Q fragments out of the stream (bk gmem-direct A loads re-issued every KV block).
-2. Pair the B-fragment drains into `ldmatrix.x4` (halves the K/V drain LSU count).
-3. `exp2f` + scale folding (we emit libm `expf` and a per-element scale multiply; FA-2 folds scale/log2e and
-   hits MUFU.EX2 directly).
-4. TMA rank-3 descriptor for batched K/V (`(B·H, S, D)` box) — not for occupancy; the gateway to
+1. Pair the B-fragment drains into `ldmatrix.x4` (halves the K/V drain LSU count — most of the 3.2×
+   residual LSU vs FA-2). Genuinely a kernel-IR peephole pass, not an emitter change: the matmul tier's
+   staged drains (`_staged_inner_atom_loop`, per-(reg, step) `x2` loads) are a second client — the same
+   pass family as `050_vectorize_loads`.
+2. `exp2f` + scale folding (we emit libm `expf` and a per-element scale multiply; FA-2 folds scale/log2e and
+   hits MUFU.EX2 directly). NOT bit-identical — accuracy-gated, its own measured step.
+3. TMA rank-3 descriptor for batched K/V (`(B·H, S, D)` box) — not for occupancy; the gateway to
    WSPEC-on-flash (no intra-step CTA sync remains to block the band split).
-5. Causal tile-skip (unchanged; the example is non-causal).
+4. Causal tile-skip (unchanged; the example is non-causal).
+5. Past-parity territory: FA-2 keeps ~255 regs of ILP in flight (2 KV tiles per iteration) — for us that is
+   `reg_m > 1` warp-geometry rows in the flash grid, future move-catalog work.
 
 ## Accuracy table (listing shape (1,4,128,64), vs an fp64 torch reference — the Numerics placeholder)
 

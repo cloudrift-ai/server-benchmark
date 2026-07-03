@@ -210,3 +210,80 @@ TWISTED reduce sits inside a `Map` composite no reduce-partition tier can rescue
 to). Both are the finding-2 fix track (a): widen `try_flash`'s `_recognize`/`_extract_qk` to Gemma's
 mask-as-separate-op + q/k-norm'd/RoPE'd Q/K cones so QK+softmax+PV certifies as ONE flash kernel in model context
 — the fused schedule-friendly form, not a CUT.
+
+## v3 flash-certification run (2026-07-03 04:10, commit cb1a5ea6) — CERTIFIES, but HUNG on broken flash codegen
+
+Track (a) landed as commit cb1a5ea6 ("Flash certifies on model graphs: fusion boundaries + layout-agnostic frag") and
+this run (`_tune/tune-model-gemma4-12b-l0-v3/`) is the first model tune against it. **The certification worked; the
+run did not.** Status as of 08:48: the `emmy tune` process (pid 3826767) is **deadlocked** — sleeping at 0 % CPU, no
+worker children, no nvcc/cicc running, GPU idle, log frozen since **04:27** (~4 h20 m with zero progress). No exit
+line, no `62_kernel_bench.json`, no `08_lowering_cuda.kernels/` — only `00_input.*` dumped. **There are no v3 bench
+numbers to compare against the v2 table**; the tune wedged inside the very first kernel's bench sweep.
+
+- **The certified flash kernel was numerically WRONG on Gemma (NaN) — FOUND + FIXED this session.** Greedy
+  `emmy run google/gemma-4-12B --layer 0` (and `--layer 5`) failed `CORRECTNESS FAIL: output mul_ contains NaN`;
+  `EMMY_KNOBS=PLACE@fold=cut` (flash OFF) passed → pinned to the flash kernel. **Root cause — a codegen bug, NOT the
+  activations** (the isolated `.torch.json` reproducer passed only because the slicer wired it a clean 4-D
+  grid-matched output; the bug needs the real model buffer). cb1a5ea6 made the input LOADS layout-agnostic
+  (`_permute_idx`) but left the output STORE writing the bare 4-var grid tuple `(b0, b1, m, d)`. Gemma's sdpa output
+  is 5-D `[1, 16, 32, 1, 256]` (a size-1 broadcast dim between seq and head_dim, plus the absorbed `transpose_2`), so
+  the 4-component index mis-strided against the 5-D buffer → `[b0 + b1 + m + d]` (all outputs alias addresses 0–301,
+  the rest uninitialized) → NaN in the downstream `mul_` (o_proj). **Fix:** `_out_store_index` (the output counterpart
+  to `_permute_idx`) reproduces the root buffer's real rank + layout — mapping grid axes onto the output slots by dim
+  extent, keeping the size-1 `Literal` slots — and every lowering tier's store consumes it (scalar `with_store` via a
+  Map-body `Write`; the chain `_realize_chain` and the warp `_twist` `RegStore` substitute the row/col axis motion).
+  An un-reproducible layout declines to cut. Files: `tile/_flash.py`, `kernel/_factor.py`, `kernel/_twist.py`.
+  Verified: both Gemma layers pass (exit 0), the store is now `[b1*8192 + m*256 + d]` (correct strides); regression
+  tests `test_flash_transposed_output_matches_torch` (e2e, absorbed transpose) +
+  `test_out_store_index_reproduces_output_layout` (unit — unit-dim / transpose / decline), red pre-fix / green
+  post-fix; full attention suite 70/70, full compiler suite 1589 passed / 2 skipped.
+
+What the 23-line log *does* establish, all on one kernel now named **`k_scaled_dot_product_attention_reduce`**:
+
+- **Flash certifies on the model graph (the intended win).** The attention op is no longer split into v2's
+  `k_sdpa_reduce` / `k_sdpa_mean_linear_reduce` / `k_linear_sdpa_reduce` fragments — it forms a single
+  `scaled_dot_product_attention` kernel (the flash TWISTED form). Finding 2 track (a) — mask-tolerant `_recognize`
+  plus computed-Q/K `_extract_qk` — is real on a Gemma trace, exactly as the commit claims (182 µs vs eager 86 µs on
+  the *pinned* warp variant in isolation).
+- **…but the flash reduce's ILP register fold did not compile.** Variants nvcc-fail with `identifier "dd__r1"
+  undefined` / `"dd__r3" undefined`. Root cause (found + fixed): `_coop_carrier` accepts the flash TWISTED reduce, so
+  the full `coop_reduce_moves()` catalog — **including the `r2`/`r4` ILP register folds** — reaches the `kv` streaming
+  reduce. But that reduce body holds the NESTED `dd` (Q@K) / `j` (P@V) contraction loops (flash is the first
+  register-tiled reduce with a nested loop in its body — a plain matmul's reduce body is flat). `_factor._replicate`'s
+  `copy_cell` renames a var's USES but not a nested `Loop`'s own axis DECLARATION, and the nested reduce axis was
+  absent from `protected` — so copy r1 emitted `for (int dd …)` (unrenamed) with loads reading `dd__r1` (renamed):
+  undefined. **Not** a frag-permute-layout bug (my first read) — it reproduces with plain non-permuted loads. Fix:
+  add every nested loop-axis name in the reduce body to `protected` so `dd`/`j` stay shared (each copy re-declares its
+  own loop under the one name). `emmy/compiler/pipeline/passes/lowering/kernel/_factor.py`; regression test
+  `test_ilp_reg_flash_matches_torch` (red pre-fix / green post-fix, plain+causal × reg 2/4, nvcc + accuracy vs torch).
+- **The misaligned-address fault-class is back (separate, still open).** A bench worker died on
+  `CUDA_ERROR_MISALIGNED_ADDRESS` (worker EOF) — the same hard fault-class v2 eliminated for the fp32 split-combine
+  (Finding 4), now resurfacing on a flash sdpa variant (a *different* shape, so v2's per-operand-dtype fix doesn't
+  cover it). Root-cause needs the specific variant reproduced under compute-sanitizer.
+- **The misaligned fault then wedged the whole tune (deadlock — root-caused, not yet fixed).** The EOF path *does*
+  catch + pin `bench_fail @ 2e6` (`pipeline.finalize_exc`, and that line IS in the log) — so the parent did not fail
+  to pin. The 4-hour hang is *downstream*: post-mortem shows the parent **sleeping (state `S`) at 0 % CPU, no worker
+  child/zombie, no nvcc, 113 threads, ~7 GB GPU left allocated with zero compute-apps**. That signature — a futex
+  sleep, not a `D`-state driver ioctl, with a leaked context — points to a hard GPU/driver wedge from the illegal
+  memory access hanging a *parent-side* CUDA call on a helper thread, which the main thread then awaits forever. This
+  is a GPU-wedge-induced deadlock; the tractable, verifiable fix is to **prevent the misaligned fault** (bullet
+  above), not to make the parent survive a wedged device — so it is not patched speculatively here. Follow-up: capture
+  a `py-spy dump` on the next occurrence to name the wedged thread, and consider a hard tune-level watchdog as
+  defense-in-depth.
+
+**Net vs the v2 checkpoint:** v2 is still the best *measured* state (27.7 ms, 20× behind eager, healthy reduce/norm
+kernels). v3 proved the flash-certification structural goal is met, and this session made flash on Gemma **correct**:
+greedy `emmy run --layer 0`/`--layer 5` now pass (were NaN). Status after this session (branch
+`fix/gemma-flash-frag-codegen`): the ILP-fold codegen bug AND the output-layout NaN are **fixed + tested**; the
+misaligned fault and its induced deadlock remain open (root-caused). Next steps, in priority order:
+1. ✅ Kill the hung pid; ✅ fix the flash ILP-fold codegen (`_factor.py` `protected` set +
+   `test_ilp_reg_flash_matches_torch`); ✅ fix the flash output-layout NaN (`_out_store_index` across all tiers +
+   `test_flash_transposed_output_matches_torch` / `test_out_store_index_reproduces_output_layout`). Full attention
+   70/70, full compiler 1589 passed / 2 skipped. Both Gemma layers pass greedy.
+2. Re-run the clean layer-0 tune on this branch. Flash now compiles AND is numerically correct; watch whether the
+   misaligned fault still fires and whether the tune completes.
+3. If the misaligned fault recurs: reproduce that single variant, run under compute-sanitizer, fix the alignment gate
+   (Finding-4 class) — and grab a `py-spy dump` if the parent hangs again to confirm the wedged-thread hypothesis.
+4. Only after a completed tune does a v3 bench table become meaningful. Expect the certified single-kernel flash to
+   collapse v2's residual 50.9 ms `k_sdpa_mean_linear_reduce` + 3.1 ms score-slice into one warp-tier kernel near the
+   isolated 182 µs.

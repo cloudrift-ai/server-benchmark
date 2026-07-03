@@ -69,7 +69,10 @@ the grid via the **ONE** root binder, `_bind` — a single pipeline that reads W
 and seals through the one `grid_tile` finalizer. A tiled `Contraction` tiles its OUTPUT `(m, n)` axes (register / warp
 cells; the reduce K serial per cell); a cooperating `Reduction` tiles its REDUCE axis instead (`_tile_reduce_axis` —
 BLOCK `coop` lanes at the unit level, REG `reg` ILP chains at the register level, the carrier merge closing the fold),
-its per-cell reduce loop built via `_emit` off the node; anything else tiles nothing and folds serially one thread per
+its per-cell reduce loop built via `_emit` off the node; each ILP copy suffixes only its per-copy SSA temps (`__r{r}`)
+— the shared iteration coordinates, **including any nested contraction's own reduce-axis var** (flash's `dd` Q@K / `j`
+P@V loops, whose `for` declarations `copy_cell` does not rename), stay shared, so each copy re-declares its own nested
+loop under the one name; anything else tiles nothing and folds serially one thread per
 output cell (the degenerate `_emit(op)` + `with_store`) — there is **no** separate "scalar tier" branch, and no
 per-kind emitter: which axis is tiled is schedule data, not a kernel identity. The projection sink and the store value
 (`out_val`, the root node's produced `Handle`) are threaded down the recursion, so `with_store` is node-agnostic. The

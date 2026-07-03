@@ -1154,12 +1154,17 @@ class LdmatrixLoad(Stmt):
     gmem_guard: tuple[Expr, Expr] | None = None  # masked-axis (base, bound); gmem-direct only
     k_zero: tuple[Expr, Expr] | None = None  # masked-K reduce axis (base, bound); gmem-direct only
     b_trans: bool = False  # role "b" only: B stored N×K (Q@K^T native col-major) → gmem-direct trans helper / staged plain x2
+    # A second B fragment filled by the SAME ldmatrix (the ``096_pair_ldmatrix_loads`` peephole):
+    # the paired x4 loads two slab-adjacent B fragments in one instruction — ``frag`` gets the
+    # matrices addressed by lanes 0-15, ``pair_frag`` those of lanes 16-31. Staged role-"b"
+    # NONE-swizzle only; ``src_index`` stays the FIRST (low) fragment's tile base.
+    pair_frag: str | None = None
 
     def deps(self) -> tuple[str, ...]:
-        return (self.frag,)
+        return (self.frag,) if self.pair_frag is None else (self.frag, self.pair_frag)
 
     def defines(self) -> tuple[str, ...]:
-        return (self.frag,)
+        return (self.frag,) if self.pair_frag is None else (self.frag, self.pair_frag)
 
     def external_reads(self) -> tuple[str, ...]:
         return (self.src_buffer,)
@@ -1171,6 +1176,10 @@ class LdmatrixLoad(Stmt):
 
     def pretty(self, indent: str = "") -> list[str]:
         idx = ", ".join(e.pretty() for e in self.src_index)
+        if self.pair_frag is not None:
+            variant = "x4 pair" if self.b_trans else "x4.trans pair"
+            pair = f"({self.frag}, {self.pair_frag})"
+            return [f"{indent}LdmatrixLoad {pair} <- {self.src_buffer}[{idx}] ({variant}, ldm={self.ldm or 'auto'})"]
         variant = ("x4" if self.role == "a" else ("x2" if self.b_trans else "x2.trans")) if self.staged else "gmem-direct"
         guard = "" if self.gmem_guard is None else f" guard<{self.gmem_guard[1].pretty()}"
         return [f"{indent}LdmatrixLoad {self.frag} <- {self.src_buffer}[{idx}] ({variant}{guard}, ldm={self.ldm or 'auto'})"]
@@ -1221,6 +1230,25 @@ class LdmatrixLoad(Stmt):
                 helper = "dpl_mma_load_b_gmem_trans" if self.b_trans else "dpl_mma_load_b_gmem"
             return [f"{_pad(ctx.indent)}{helper}({self.frag}, &{self.src_buffer}[{flat}], {ldm});"]
         lane = "(threadIdx.x & 31)"
+        if self.pair_frag is not None:
+            # Paired x4 — two slab-adjacent B fragments in one ldmatrix (096_pair_ldmatrix_loads).
+            # Transposed-B (N-major slab): the pair is N-adjacent — lanes 0-15 address ``frag``'s 8
+            # N rows × two k8 col-halves, lanes 16-31 the same at N+8 (plain x4). Canonical-B
+            # (K-major slab): the pair is N(col)-adjacent — lanes 0-15 address the 16 K rows at
+            # ``frag``'s col, lanes 16-31 at col+8 (x4.trans).
+            assert self.role == "b" and self.staged, "paired ldmatrix is a staged B-operand fusion"
+            if self.b_trans:
+                elem = f"{flat} + (({lane} % 8) + ({lane} / 16) * 8) * {ldm} + (({lane} / 8) % 2) * 8"
+                helper = "dpl_ldmatrix_x4"
+            else:
+                elem = f"{flat} + ({lane} % 16) * {ldm} + ({lane} / 16) * 8"
+                helper = "dpl_ldmatrix_x4_trans"
+            addr = self._swizzled_addr(elem)
+            pad = _pad(ctx.indent)
+            return [
+                f"{pad}{{ unsigned _p4[4]; {helper}(_p4, {addr});",
+                f"{pad}  {self.frag}[0] = _p4[0]; {self.frag}[1] = _p4[1]; {self.pair_frag}[0] = _p4[2]; {self.pair_frag}[1] = _p4[3]; }}",
+            ]
         if self.role == "a":
             # 16×16 A: x4 — lane addresses M-row (lane%16), K-col block (lane/16)*8.
             elem = f"{flat} + ({lane} % 16) * {ldm} + ({lane} / 16) * 8"
@@ -2002,6 +2030,7 @@ def _(s: LdmatrixLoad, rename, sigma, axis_fn):
         gmem_guard=None if s.gmem_guard is None else (sigma.apply(s.gmem_guard[0]), sigma.apply(s.gmem_guard[1])),
         k_zero=None if s.k_zero is None else (sigma.apply(s.k_zero[0]), sigma.apply(s.k_zero[1])),
         b_trans=s.b_trans,
+        pair_frag=None if s.pair_frag is None else rename(s.pair_frag),
     )
 
 

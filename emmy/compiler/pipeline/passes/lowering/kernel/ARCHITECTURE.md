@@ -248,6 +248,10 @@ the two apply paths stay distinct on a coop-K contraction.
 ## Kernel-IR peepholes
 
 `030_stamp_types` / `040_demote_to_write_dtype` resolve element dtypes; `050_vectorize_loads` / `080_vectorize_stores` /
-`095_interleave_loads` pack/reorder memory ops; `110_drop_redundant_syncs` collapses the defensive `Sync`s the
+`095_interleave_loads` pack/reorder memory ops; `096_pair_ldmatrix_loads` fuses slab-adjacent staged `x2` B-fragment
+`LdmatrixLoad`s into one `x4` (`pair_frag` — plain `x4` for an N-adjacent transposed-B pair, `x4.trans` for a
+col-adjacent canonical pair; NONE-swizzle only, halves the staged drains' LSU count, bit-identical; fires on both the
+warp-flash streaming drains and the matmul tier's staged drains — two emitters, one pass, which is why it is a pass);
+`110_drop_redundant_syncs` collapses the defensive `Sync`s the
 cooperative / shared-row templates emit (body-level only — a slab `Smem` decl flags `smem_seen`, so a load-bearing
 prologue `Sync` is correctly retained; `with_bodies` preserves the cooperative tile's `block_threads`).

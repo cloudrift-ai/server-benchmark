@@ -65,8 +65,9 @@ register-shuffle handoff).
 | + slab padding (the bank-conflict fix; new best geom w4n8) | +16 B rows on slabs + handoff | 315 | 1.62× |
 | + C→A register repack (the handoff eliminated) | `FragmentRepack`, no smem round-trip | 271 | 1.16× |
 | + Q-fragment hoist (loop-invariant loads out of the stream) | resident `qa` fragments, d1 | 233 | 1.16× |
-| **Move 5 arrives** — the `d2/cp/ring` prefetch NOW wins | copy/math overlap, finally exposed | **222** | 1.05× |
-| torch eager SDPA (FA-2 backend) | reference | 206 | emmy best = **0.93×** |
+| Move 5 arrives — the `d2/cp/ring` prefetch NOW wins | copy/math overlap, finally exposed | 222 | 1.05× |
+| + `096_pair_ldmatrix_loads` (x2→x4 drain pairing pass) | halves the staged-drain LSU count | **219** | 1.01× |
+| torch eager SDPA (FA-2 backend) | reference | 206 | emmy best = **0.94×** |
 
 The Move-5 story is the article's best sequence: the ring lost at every step (occupancy cost, nothing to
 overlap) until the repack + Q-hoist thinned the streaming step enough to EXPOSE the copy latency — then the
@@ -120,18 +121,19 @@ session). The remaining gap is pure fragment-load volume: the per-step loop-inva
 loads/warp/step) and the per-B-fragment `x2` ldmatrix drains (an `x4` loads two B fragments at once), plus
 the `expf`-vs-`exp2f` ALU path.
 
-## Follow-ups (in expected-payoff order — padding, barrier scoping, repack, Q-hoist are DONE)
+## Follow-ups (padding, barrier scoping, repack, Q-hoist, x4 pairing are DONE)
 
-1. Pair the B-fragment drains into `ldmatrix.x4` (halves the K/V drain LSU count — most of the 3.2×
-   residual LSU vs FA-2). Genuinely a kernel-IR peephole pass, not an emitter change: the matmul tier's
-   staged drains (`_staged_inner_atom_loop`, per-(reg, step) `x2` loads) are a second client — the same
-   pass family as `050_vectorize_loads`.
-2. `exp2f` + scale folding (we emit libm `expf` and a per-element scale multiply; FA-2 folds scale/log2e and
-   hits MUFU.EX2 directly). NOT bit-identical — accuracy-gated, its own measured step.
-3. TMA rank-3 descriptor for batched K/V (`(B·H, S, D)` box) — not for occupancy; the gateway to
+The x4 pairing landed as the `096_pair_ldmatrix_loads` kernel-IR peephole (LSU 14.1M → 9.87M, 222 → 219µs
+— by then the kernel was no longer LSU-bound, but the pass also serves the matmul staged drains and buys
+headroom for deeper rings/WSPEC). Remaining:
+
+1. `exp2f` + scale folding (we emit libm `expf` ~34×/lane/step and a per-element scale multiply; FA-2 folds
+   scale/log2e and hits MUFU.EX2 directly). NOT bit-identical — accuracy-gated, its own measured step. The
+   last first-order item: fma-pipe 7.4% vs FA-2's 7.9% at equal SM utilization.
+2. TMA rank-3 descriptor for batched K/V (`(B·H, S, D)` box) — not for occupancy; the gateway to
    WSPEC-on-flash (no intra-step CTA sync remains to block the band split).
-4. Causal tile-skip (unchanged; the example is non-causal).
-5. Past-parity territory: FA-2 keeps ~255 regs of ILP in flight (2 KV tiles per iteration) — for us that is
+3. Causal tile-skip (unchanged; the example is non-causal).
+4. Past-parity territory: FA-2 keeps ~255 regs of ILP in flight (2 KV tiles per iteration) — for us that is
    `reg_m > 1` warp-geometry rows in the flash grid, future move-catalog work.
 
 ## Accuracy table (listing shape (1,4,128,64), vs an fp64 torch reference — the Numerics placeholder)

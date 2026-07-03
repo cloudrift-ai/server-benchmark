@@ -142,3 +142,48 @@ shows the per-row noise floor on small shapes can far exceed the documented 10�
   hazard is **resolved** by the calibration gate (this sweep intentionally judged WITH the learned prior); the -O1/-O3
   ranking-lane inversion wasn't re-audited (deploys no longer route through the -O1 lane's argmax, lowering its
   stakes).
+
+## Post-fix retune — ninth sweep (2026-07-03, same branch)
+
+Findings 1–3 were fixed and the full sweep re-run (`tune --dataset golden --clean`, 34 shapes, ~72 min; two
+confirm A/B passes at ~5 min each). Fixes, with their in-sweep verification:
+
+- **Finding 3 (reduce fork) — FIXED.** `_reduce_specs` only ever emitted the single `_pick_coop` heuristic spec
+  (`_FREE_CAP=256` collapsed every golden reduce to serial-only, no fork). It now forks option-0 (the unchanged
+  conservative pick — cold-greedy deploys identical) plus the full legal `coop_reduce_moves()` catalog, gated on the
+  hint extent like the contraction path. In-sweep: `reduce.2048x2048` tuned **14 benches** (was 3), and the A/B
+  deploys are transformed — greedy 3.2 / 1.2 / 1.6 µs on the three reduce shapes (was 180.5 / 45.6 / 12.0), i.e.
+  **1.3–3.4× faster than eager** where sweep 8 was 4–53× behind the pinned goldens. All three reduce goldens
+  replaced (`b32` / `b16` / `b4`, 0.41–0.95× of the old records). Regression test:
+  `test_bare_reduce_forks_the_coop_catalog`.
+- **Finding 2 (evidence-over-prior) — IMPLEMENTED, and it re-frames the residual.** Greedy's deploy hierarchy is now
+  -O3 reservoir evidence → tune-DB measured best on exact `S_*` signature (new: `_db_measured_pick`, querying the
+  deploy context AND the `-Xcicc -O1` tune-lane twin, `evidence_pick` prefix-consistency) → model argmin
+  (`policy/greedy.py`; tests in `test_db_evidence_deploy.py`). q_proj.s512.dynM still misses (1.09×), but the DB
+  now proves why: its golden `n32x8/f4x14 g2a` was **never measured this tune** (124 variants benched for the
+  shape, golden not among them) while the deploy ranks **4/124 within 1.2% of the measured -O1 best** — the deploy
+  policy is honest; the residual is *search coverage* of the deep-FM `g2a` masked-tile region (an
+  `--explore-eps` / patience re-tune or a `D_*` fold-family feature is the next lever, not deploy plumbing).
+- **Finding 1 (analytic refit) — attempted; weights HELD BACK, one exposed bug fixed.** The
+  `golden_knob_heuristics.py` refit over the sweep-8 YAML gained little (all-cards top1 1→6/79, median 45→43 — no
+  `D_*` feature sees the fold-partition family, the durable cold-start gap), and shipping the new weights steered
+  cold deploys onto TWO latent hang/misalign variants (`test_e2e_matmul`'s (8,3) fp32 B under a vectorized
+  cp.async ring; a `k_sdpa_linear_reduce__partial` split). The first is a real gate hole and was FIXED — the
+  scalar stage resolver's 16 B inner-stride rule now covers cp.async as well as TMA (an odd-stride operand stays
+  gmem-direct; regression test `test_scalar_cpasync_declines_odd_stride`, and this likely also explains the Gemma
+  `k_linear_reduce` bench_fail cluster's signature). The sdpa-split variant is unfixed, so the old weights stay:
+  re-attempt the refit only after hardening the cold-deploy variants it reaches (tune survives them via
+  bench_fail pins; greedy deploys cannot). Sweep-9 deploys were learned-prior-owned (+0.92), so its records are
+  unaffected by the revert.
+- **Finding 4's fix held in production: zero `bench_fail` rows in the entire ninth sweep** (sweep 8 had 37; the 4
+  TMA box-extent crashes are gone and the misaligned-address cluster was Gemma-shape-specific).
+
+Ninth-sweep tally (vs the sweep-8-updated YAML, pass-max over two passes, learned prior calibration +0.92):
+**14 replaced / 4 added (+2 pruned stale alternates) / 12 knob-reproductions / 4 worse** — the worse set is
+down_proj.s512.dynM 1.03, o_proj.s512 1.05, q_proj.s512.dynM 1.09 (all three the dynM/search-coverage class above)
+and square.4096 1.09 (its two golden rows re-benched *faster* than recorded — 1964.9 / 2030.8 — and were refreshed;
+the greedy pick's 2134.7 same-knob re-bench sits 5% above its own pinned twin, i.e. inside this 2 ms kernel's
+run-to-run band). Every emmy golden µs in the YAML now beats its cuBLAS reference except square.1024.fp16 (1.06×)
+and pointwise.512x4096 (1.05×, memory-bound parity). Notable instability caught by the live A/B: the two dynM
+records from sweep 8 (gate_up 59.9, kv 23.3) re-benched at 76.2 / 33.0 this sweep — masked-tile shapes swing far
+beyond the documented noise band across sessions; their entries were replaced with configs that reproduced.

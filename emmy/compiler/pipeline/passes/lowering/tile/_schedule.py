@@ -1264,7 +1264,10 @@ def _resolve_twisted_stage(stage: Stage, kv_extent, bn: int, head_dim: int, d_v:
     if slot_bytes > budget:
         return None
     depth = min(stage.depth, budget // slot_bytes)
-    return replace(stage, depth=depth, ring=stage.ring and depth >= 2, reg_depth=1, bk_elems=bn)
+    # ``reg_depth`` ≤ 2: the streaming drains support the two-slot ldmatrix ping-pong (the next
+    # atom-K step's B fragments load while the current step's mmas consume — breaking the WAR
+    # hazard on the fragment registers); deeper ping-pongs cost registers the fm chains don't have.
+    return replace(stage, depth=depth, ring=stage.ring and depth >= 2, reg_depth=min(stage.reg_depth, 2), bk_elems=bn)
 
 
 def _twisted_stage_candidates(kv_extent, bn: int, head_dim: int, d_v: int, elem_bytes: int, budget: int) -> list[Stage | None]:

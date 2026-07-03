@@ -159,6 +159,7 @@ def _frag_contraction(
     b_slot: Expr | None = None,
     b_ldm: int = 0,
     b_swizzle: str = "NONE",
+    reg_depth: int = 1,
 ) -> list[Stmt]:
     """One warp-tiled :class:`Contraction` step as fragment codegen — the ``read → ⊗ → fold`` spine
     at fragment residence, geometry off the node (``b_trans`` / operand indices / ``ldm``) and its
@@ -184,55 +185,82 @@ def _frag_contraction(
     b_trans = c.b_trans
     ldm_b = b_ldm if b_slab is not None else (c.k_axis.extent.as_static() if b_trans else c.n_axis.extent.as_static())
 
+    bk = c.tile.bk
+    # ``reg_depth == 2`` (the ``STAGE`` codec's ``p2``, staged drains with ≥ 2 atom-K steps): the
+    # two-slot ldmatrix ping-pong — step ``s+1``'s B fragments load into the alternate slot while
+    # step ``s``'s mmas consume the current one, breaking the WAR hazard on the fragment
+    # registers. Load PLACEMENT only: the mma order (and every value) is unchanged, so the ``p2``
+    # kernel stays bit-identical to its ``p1`` sibling.
+    slots = 2 if (reg_depth >= 2 and b_slab is not None and bk >= 2) else 1
+
+    def _bname(t: int, step: int) -> str:
+        return f"_{c.acc}_b{t}" if slots == 1 else f"_{c.acc}_b{t}_s{step % 2}"
+
+    def _k0(step: int) -> Expr:
+        off = Literal(step * shape[2], "int")
+        return k_sub if step == 0 else (off if isinstance(k_sub, Literal) and k_sub.value == 0 else BinaryExpr("+", k_sub, off))
+
+    def _b_load(t: int, step: int) -> LdmatrixLoad:
+        col, k0 = n_sub(t), _k0(step)
+        if b_slab is not None:
+            # The slab keeps the operand's own layout, stream axis on the ROW: transposed-B's
+            # rows are its N (key) coords, canonical-B's its K coords — the slot offset lands
+            # on the row either way.
+            row0, col0 = (col, k0) if b_trans else (k0, col)
+            if b_slot is not None:
+                row0 = BinaryExpr("+", b_slot, row0)
+            return LdmatrixLoad(
+                frag=_bname(t, step),
+                src_buffer=b_slab,
+                src_index=(row0, col0),
+                role="b",
+                ldm=ldm_b,
+                staged=True,
+                b_trans=b_trans,
+                swizzle=b_swizzle,
+            )
+        n_guard = mask.get(n_name)
+        kz = mask.get(k_name) if not b_trans else None
+        return LdmatrixLoad(
+            frag=_bname(t, step),
+            src_buffer=c.b_load.input,
+            src_index=_idx(c.b_load, {n_name: col, k_name: k0}),
+            role="b",
+            ldm=ldm_b,
+            staged=False,
+            b_trans=b_trans,
+            gmem_guard=(col, n_guard[1]) if (n_guard is not None and b_trans) else None,
+            # The zero-fill origin advances with the K step (this slice's own base), so a
+            # symbolic bound masks each ``atom_k`` chunk of a wide block correctly.
+            k_zero=(k0, kz[1]) if kz is not None else None,
+        )
+
+    def _mmas(t: int, step: int) -> list[Stmt]:
+        return [
+            MmaSyncPtx(c_frag=acc_frags[t], a_frag=a_frags[step], b_frag=_bname(t, step), shape=shape, ab_dtype=atom.ab_dtype)
+            for acc_frags, a_frags in tiles
+        ]
+
     out: list[Stmt] = []
     for t in range(nt):
-        out.append(RegFragment(name=f"_{c.acc}_b{t}", role="b", shape=shape, dtype=atom.operand_dtype("b")))
-    for step in range(c.tile.bk):
-        off = Literal(step * shape[2], "int")
-        k0 = k_sub if step == 0 else (off if isinstance(k_sub, Literal) and k_sub.value == 0 else BinaryExpr("+", k_sub, off))
-        for t in range(nt):
-            col = n_sub(t)
-            if b_slab is not None:
-                # The slab keeps the operand's own layout, stream axis on the ROW: transposed-B's
-                # rows are its N (key) coords, canonical-B's its K coords — the slot offset lands
-                # on the row either way.
-                row0, col0 = (col, k0) if b_trans else (k0, col)
-                if b_slot is not None:
-                    row0 = BinaryExpr("+", b_slot, row0)
-                out.append(
-                    LdmatrixLoad(
-                        frag=f"_{c.acc}_b{t}",
-                        src_buffer=b_slab,
-                        src_index=(row0, col0),
-                        role="b",
-                        ldm=ldm_b,
-                        staged=True,
-                        b_trans=b_trans,
-                        swizzle=b_swizzle,
-                    )
+        for sl in range(slots):
+            out.append(
+                RegFragment(
+                    name=f"_{c.acc}_b{t}" if slots == 1 else f"_{c.acc}_b{t}_s{sl}", role="b", shape=shape, dtype=atom.operand_dtype("b")
                 )
-            else:
-                n_guard = mask.get(n_name)
-                kz = mask.get(k_name) if not b_trans else None
-                out.append(
-                    LdmatrixLoad(
-                        frag=f"_{c.acc}_b{t}",
-                        src_buffer=c.b_load.input,
-                        src_index=_idx(c.b_load, {n_name: col, k_name: k0}),
-                        role="b",
-                        ldm=ldm_b,
-                        staged=False,
-                        b_trans=b_trans,
-                        gmem_guard=(col, n_guard[1]) if (n_guard is not None and b_trans) else None,
-                        # The zero-fill origin advances with the K step (this slice's own base), so a
-                        # symbolic bound masks each ``atom_k`` chunk of a wide block correctly.
-                        k_zero=(k0, kz[1]) if kz is not None else None,
-                    )
-                )
-            for acc_frags, a_frags in tiles:
-                out.append(
-                    MmaSyncPtx(c_frag=acc_frags[t], a_frag=a_frags[step], b_frag=f"_{c.acc}_b{t}", shape=shape, ab_dtype=atom.ab_dtype)
-                )
+            )
+    if slots == 1:
+        for step in range(bk):
+            for t in range(nt):
+                out.append(_b_load(t, step))
+                out += _mmas(t, step)
+    else:
+        out += [_b_load(t, 0) for t in range(nt)]  # prime slot 0
+        for step in range(bk):
+            if step + 1 < bk:
+                out += [_b_load(t, step + 1) for t in range(nt)]  # prefetch the alternate slot
+            for t in range(nt):
+                out += _mmas(t, step)
     return out
 
 
@@ -409,6 +437,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             b_slot=k_slot,
             b_ldm=qk.k_axis.extent.as_static() + kv_pad if staged else 0,
             b_swizzle=k_swz if staged else "NONE",
+            reg_depth=stage.reg_depth if staged else 1,
         )
 
         for qi, qt in enumerate(qtiles):
@@ -466,6 +495,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             b_slot=v_slot,
             b_ldm=d_v + kv_pad if staged else 0,
             b_swizzle=v_swz if staged else "NONE",
+            reg_depth=stage.reg_depth if staged else 1,
         )
         for qt in qtiles:
             stream += _rebind(qt.pivot, f"_mn{qt.sfx}")  # advance the running pivot: m = mn

@@ -165,6 +165,15 @@ The move is structurally dominated FOR FLASH (any kernel whose staged operands a
 was reverted per the no-dead-moves rule; the finding stays. It would only make sense where warps stream
 DISJOINT operand data — e.g. a future within-CTA split-KV — noted for the move catalog, not built.
 
+## Drain reg-depth p2 (built, measured FLAT — kept as a codec-uniformity fix)
+
+The last lever: the flash drains now honor the ``STAGE`` codec's ``p<reg_depth>`` field (the two-slot
+ldmatrix ping-pong — step ``s+1``'s B fragments load into the alternate slot while step ``s``'s mmas
+consume; load placement only, bit-identical). Measured at the winner: `d2/tma/ring/p2` = **206 vs 207µs**
+— flat, the seventh null: ptxas already schedules the straight-line unrolled drain effectively at this
+occupancy. Kept (unlike the wp ring) because it is not dominated: it removes a silent pin clamp (a
+``p2`` pin on flash now applies instead of degrading), costs ~40 lines, and measured best-equal.
+
 ## Beyond-FA-2: the honest verdict
 
 At 206µs the kernel runs ~167 TFLOPS ≈ **80% of the 5090's f16/fp32-acc tensor roofline — the same point

@@ -84,6 +84,16 @@ def _smem_budget(ctx) -> int:
     return ctx.max_dynamic_smem if ctx is not None else STATIC_SMEM_CAP
 
 
+def _tma_allowed(ctx) -> bool:
+    """Whether ``TMA`` (``cp.async.bulk.tensor``) stage moves may be offered for this target. TMA is
+    a Hopper (sm_90) feature — Ada / Ampere and older have no TMA, and nvcc has no ``sm_89a`` target,
+    so a TMA stage there fails to compile (``nvcc fatal: Unsupported gpu architecture 'sm_89a'``).
+    Gate the ``d*/tma*`` moves off below sm_90, mirroring the frontend TMA-fold gate in
+    :mod:`~emmy.compiler.pipeline.passes.frontend.decomposition._fold_constant` (``cc < (9, 0)``).
+    ``ctx is None`` (direct unit-test drive, no target) allows it — those paths never reach nvcc."""
+    return ctx is None or ctx.compute_capability >= (9, 0)
+
+
 def _at(knob, axis_name: str) -> str:
     """The axis-named knob key ``FAMILY@<axis>`` (e.g. ``TILE@d``) — the per-node schedule codec keyed
     by the reduce/contraction axis it schedules, so a multi-node kernel addresses each node."""
@@ -339,18 +349,22 @@ def _tile_area(plan: TilePlan) -> int:
     return max(plan.units_m * plan.reg_m * am * plan.units_n * plan.reg_n * an, 1)
 
 
-def _stage_candidates(kernel, probe, plan: TilePlan, budget: int = STATIC_SMEM_CAP) -> list[str]:
+def _stage_candidates(kernel, probe, plan: TilePlan, budget: int = STATIC_SMEM_CAP, tma_ok: bool = True) -> list[str]:
     """The RESOLVED operand-stage spellings for one tile candidate — gmem-direct ``""`` first, then
     every grid move that resolves against the node with this ``plan`` (:func:`_resolve_warp_stage` /
     :func:`_resolve_scalar_stage`); the row carries the resolved spelling so the leaf identity, the
     stamped knobs, and the kernel agree. A pinned ``STAGE`` is authoritative: the resolved pin
-    alone, or gmem-direct when it declines (the standard pin-validity degrade)."""
+    alone, or gmem-direct when it declines (the standard pin-validity degrade). ``tma_ok`` is the
+    target's TMA availability (:func:`_tma_allowed`): below sm_90 a ``d*/tma*`` move / pin declines
+    here (stays gmem-direct) rather than being offered and failing to compile."""
     if probe is None or not plan.is_tiled:
         return [""]  # per-cell / unbindable — no operand slab to stage
     node = replace(probe, tile=plan)
 
     def resolve(spec: str) -> str | None:
         st = Stage.parse(spec)
+        if st.transport == "tma" and not tma_ok:
+            return None  # TMA is Hopper+ (sm_90); nvcc has no sm_89a — decline below it
         r = _resolve_warp_stage(node, st, budget) if plan.is_warp else _resolve_scalar_stage(node, st, kernel.inputs, budget)
         return r.spell() if r is not None else None
 
@@ -454,7 +468,7 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], str]:
                     "load (a data-dependent index) — the fragment epilogue cannot thread it; "
                     "drop the a:<atom> token to use the scalar tier."
                 )
-        for stage in _stage_candidates(kernel, probe, plan, _smem_budget(ctx)):
+        for stage in _stage_candidates(kernel, probe, plan, _smem_budget(ctx), _tma_allowed(ctx)):
             for red in _reduce_candidates(kernel, place, plan, probe):
                 # A staged split row is legal: ``_splitk_option`` re-resolves the stage against the
                 # SLICED inner node (the warp slice divisibility already held in
@@ -1102,7 +1116,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         pair = _twisted_pair(tile.op)
         if pair is not None:
             red, head, pv = pair
-            warps = _twisted_warp_options(tile, name, knobs, _smem_budget(ctx))
+            warps = _twisted_warp_options(tile, name, knobs, _smem_budget(ctx), _tma_allowed(ctx))
             if warps and TILE.raw() is not None:  # a live warp pin — the mma rows alone (the pin contract)
                 return warps if len(warps) > 1 else warps[0]
             chain = _twisted_chain_option(tile, place, name, knobs)
@@ -1300,16 +1314,23 @@ def _resolve_twisted_stage(stage: Stage, kv_extent, bn: int, head_dim: int, d_v:
     return replace(stage, depth=depth, ring=stage.ring and depth >= 2, reg_depth=min(stage.reg_depth, 2), bk_elems=bn)
 
 
-def _twisted_stage_candidates(kv_extent, bn: int, head_dim: int, d_v: int, elem_bytes: int, budget: int) -> list[Stage | None]:
+def _twisted_stage_candidates(
+    kv_extent, bn: int, head_dim: int, d_v: int, elem_bytes: int, budget: int, tma_ok: bool = True
+) -> list[Stage | None]:
     """The K/V operand-stage candidates for one warp-flash geometry row — gmem-direct ``None``
     first (the conservative option-0), then every ``stage_moves`` entry that RESOLVES against the
     stream (:func:`_resolve_twisted_stage`), deduped on the resolved spelling (a ``p2`` move clamps
     to the same pipeline as its ``p1`` sibling and drops; an over-budget depth clamps down the same
     way). A pinned ``STAGE`` is authoritative: the resolved pin alone, or gmem-direct with a log
-    line when it declines — the same pin-validity degrade as the warp ``TILE`` pin."""
+    line when it declines — the same pin-validity degrade as the warp ``TILE`` pin. ``tma_ok`` is
+    the target's TMA availability (:func:`_tma_allowed`): below sm_90 a ``d*/tma*`` move / pin
+    declines here rather than being offered and failing to compile."""
 
     def resolve(spec: str) -> Stage | None:
-        return _resolve_twisted_stage(Stage.parse(spec), kv_extent, bn, head_dim, d_v, elem_bytes, budget)
+        st = Stage.parse(spec)
+        if st.transport == "tma" and not tma_ok:
+            return None  # TMA is Hopper+ (sm_90); nvcc has no sm_89a — decline below it
+        return _resolve_twisted_stage(st, kv_extent, bn, head_dim, d_v, elem_bytes, budget)
 
     if STAGE.raw() is not None:
         pinned = STAGE.narrow([""])[0]
@@ -1339,7 +1360,7 @@ def _twisted_stage_candidates(kv_extent, bn: int, head_dim: int, d_v: int, elem_
     return out
 
 
-def _twisted_warp_options(tile: TileOp, name: str, knobs: dict, budget: int = STATIC_SMEM_CAP) -> list[TileOp]:
+def _twisted_warp_options(tile: TileOp, name: str, knobs: dict, budget: int = STATIC_SMEM_CAP, tma_ok: bool = True) -> list[TileOp]:
     """The fragment-resident (tensor-core) candidates for a ``TWISTED`` streaming reduce — the
     warp-flash MOVE GRID over :func:`~emmy.compiler.pipeline.search.space.twisted_warp_moves`'s
     ``(warps_m, key_atoms)`` geometry — or ``[]`` (not eligible: the scalar options stand alone).
@@ -1444,7 +1465,7 @@ def _twisted_warp_options(tile: TileOp, name: str, knobs: dict, budget: int = ST
         # ``_wspec_workers`` gates the thread budgets — the aux band must not exceed the
         # ``32·um`` compute band); a degraded candidate is skipped rather than duplicating the
         # uniform row.
-        for stage in _twisted_stage_candidates(kv_ext, bn, head_dim.as_static(), d_v.as_static(), elem_bytes, budget):
+        for stage in _twisted_stage_candidates(kv_ext, bn, head_dim.as_static(), d_v.as_static(), elem_bytes, budget, tma_ok):
             wspecs = list(WSPEC.narrow(wspec_moves())) if (stage is not None and stage.transport == "tma") else [""]
             for wspec_cand in wspecs:
                 workers, wspec_spec = _wspec_workers(wspec_cand, stage, 32 * um)

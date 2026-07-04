@@ -134,8 +134,12 @@ verbatim. The `Stage` spells two buffering levels:
 `p<reg_depth>` is the smem→register double-buffer (the `ldmatrix` ping-pong over the inner atom-K steps). Staging is a
 **pure perf transform** — an ineligible kernel (transposed-B, masked N, symbolic / non-divisible K, or a computed-A
 flash operand) silently falls back to gmem-direct, and a staged kernel is
-**bit-identical** to its gmem-direct baseline. Unpinned, the schedule fork enumerates the resolver-gated stage grid
-(`search/space.stage_moves`) alongside the tile / reduce moves; a `EMMY_STAGE` pin stays authoritative.
+**bit-identical** to its gmem-direct baseline. The **TMA** transport additionally requires **sm_90+**
+(Hopper/Blackwell): below it (`_schedule._tma_allowed`, mirroring the frontend TMA-fold gate) the `d*/tma*` moves are
+never offered and a `tma` pin declines to cp.async / gmem-direct — Ada/Ampere have no `cp.async.bulk.tensor` and nvcc
+has no `sm_89a` target, so a TMA kernel there would fail to compile. Unpinned, the schedule fork enumerates the
+resolver-gated stage grid (`search/space.stage_moves`) alongside the tile / reduce moves; a `EMMY_STAGE` pin stays
+authoritative.
 
 **The warp-flash stream stages too** (`STAGE@<kv>`, resolved by `_schedule._resolve_twisted_stage`): the K and V
 operands of the TWISTED streaming pair fill per-block smem slabs through the same `CpAsyncTransport` seam, the whole

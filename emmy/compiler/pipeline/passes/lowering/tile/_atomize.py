@@ -20,12 +20,12 @@ Leading ``_`` so the pass loader skips this module.
 
 **Flash contractions are not recursively atomized.** Flash is a ``TWISTED`` kv
 ``Reduction`` over a ``Q@K`` :class:`~emmy.compiler.ir.tile.ir.Contraction` ``source`` +
-a ``P@V`` one in the ``partial``, lowered on the scalar tier (block=1) — each contraction carries a
-scalar ``TilePlan()`` and factorizes through the one ``_factor`` contraction path. A tensor-core
-flash tier would attach an mma ``TilePlan`` to those same nodes and route through that same path (no
-bespoke emitter); ``bind_contraction`` stays loop-addressable (it binds the root contraction
-structurally), and the recursive-atomize path is unused — the flash tree carries its per-node
-geometry."""
+a ``P@V`` one in the ``partial``; each contraction factorizes through the one ``_factor``
+contraction path — the scalar tier (block=1) with a scalar ``TilePlan()``, or the tensor-core tier
+(``_schedule._twisted_warp_options`` attaches an mma ``TilePlan`` to those same nodes; realized by
+``kernel/_twist``, no bespoke emitter). ``bind_contraction`` stays loop-addressable (it binds the
+root contraction structurally), and the recursive-atomize path is unused — the flash tree carries
+its per-node geometry."""
 
 from __future__ import annotations
 

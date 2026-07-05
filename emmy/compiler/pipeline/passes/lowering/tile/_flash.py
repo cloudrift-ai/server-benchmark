@@ -23,10 +23,11 @@ halves:
   contraction's ``Σ Q·K`` loop ahead of the partial, the scalar tier expanding the same loop nest) +
   generates the output-store glue (the ``Write`` at the grid cell — not stored).
 
-  A tensor-core flash tier is **not** a bespoke emitter: the mandate is that giving the Q@K / P@V
-  contractions an mma ``TilePlan`` (a schedule field on the node) must route through the same
-  ``_factor`` contraction path as any other mma matmul. Until that lands the whole way through the one
-  emitter, flash lowers **only** on the scalar tier below — there is no divergent flash codegen path.
+  The tensor-core flash tier follows the same mandate — **not** a bespoke emitter:
+  ``_schedule._twisted_warp_options`` attaches mma ``TilePlan``\\ s to the Q@K / P@V contractions and
+  ``_factor``'s one binder realizes them at fragment residence (``kernel/_twist.realize_warp_twist``:
+  ldmatrix + mma.sync + the C→A register repack). The scalar tier below is the block=1 streaming
+  degenerate of the same tree — there is no divergent flash codegen path.
 
 ``is_flash_score_producer`` lets ``010_recognize`` defer the general lift of a scaled-QK
 score producer until its softmax-then-P@V consumer has fused (the fusion reads the
@@ -44,7 +45,11 @@ grid-order store mis-strides a non-canonical output (all elements alias, the res
 Scope is the **clean** scaled-QK producer (Q/K recoverable as plain ``Load``\\ s). A
 fused score producer whose Q/K are computed SSA — RoPE'd QK — is NOT recognized as
 flash (it falls back to its un-fused tiers); a producer-splicing builder for that case
-was removed rather than kept half-converted to the op tree.
+was removed rather than kept half-converted to the op tree. The fusion boundary
+(``loop/fusion``) keeps RoPE / q-k-norm cones out of the score producer and — the V-side
+counterpart — keeps an axis-folding V layout indexmap (a flat ``[s, h·d]`` projection's
+reshape, whose fused Load slot would de-certify ``_extract_v_layout``) materialized, so
+both sides arrive slot-plain and model-graph attention certifies.
 
 The fragment fuses scaled-dot-product attention into ONE kernel that tiles the KV
 (reduce) axis and never materializes the ``[S_q, S_k]`` score matrix. The scalar tier
@@ -147,23 +152,27 @@ def _struct_features(batch: list[int], s_q: Dim, s_k: Dim, head_dim: int, d_v: i
     }
 
 
-def gqa_group(q_shape: tuple, k_shape: tuple) -> int | None:
-    """The grouped-query head ratio ``q_heads // kv_heads`` (1 when equal-head),
-    or ``None`` when the head axis isn't statically divisible. The head axis is the
-    last batch dim (``shape[-3]``); rank < 3 has no head (group 1)."""
+def gqa_group(q_shape: tuple, kv_shape: tuple) -> int | None:
+    """The grouped-query head ratio ``q_heads // kv_heads`` against ONE KV-side operand
+    (1 when equal-head), or ``None`` when the head axis isn't statically divisible.
+    Computed per operand — K and V can arrive at different head counts (a materialized
+    V layout copy carries the repeat baked in while K's slot-plain ``head // g`` repeat
+    fused into the score producer). The head axis is the last batch dim (``shape[-3]``);
+    rank < 3 has no head (group 1)."""
     qh = _static(q_shape[-3]) if len(q_shape) >= 3 else 1
-    kh = _static(k_shape[-3]) if len(k_shape) >= 3 else 1
+    kh = _static(kv_shape[-3]) if len(kv_shape) >= 3 else 1
     if qh is None or kh is None or kh == 0 or qh % kh != 0:
         return None
     return qh // kh
 
 
-def flash_shape_eligible(q_shape: tuple, k_shape: tuple, v_shape: tuple, *, group: int, mask_shape: tuple | None) -> bool:
+def flash_shape_eligible(q_shape: tuple, k_shape: tuple, v_shape: tuple, *, group_k: int, group_v: int, mask_shape: tuple | None) -> bool:
     """True iff the flash nest can serve this SDPA — static batch/head (only the
     seq axis may be symbolic), an optional broadcastable additive mask, and GQA
-    where ``q_heads == group · kv_heads``. The K/V head axis is read at
-    ``head // group`` directly in the nest (no materialized broadcast). The
-    recognizer and this predicate MUST agree, so both call it."""
+    where ``q_heads == group_k · k_heads == group_v · v_heads`` (per-operand groups —
+    each KV operand's head axis is read at ``head // group`` directly in the nest, no
+    materialized broadcast; ``group == 1`` is the identity). The recognizer and this
+    predicate MUST agree, so both call it."""
     if len(q_shape) < 2 or len(k_shape) < 2 or len(v_shape) < 2:
         return False
     q_batch = [_static(d) for d in q_shape[:-2]]
@@ -175,12 +184,12 @@ def flash_shape_eligible(q_shape: tuple, k_shape: tuple, v_shape: tuple, *, grou
         return False
     if q_batch:
         # Leading (non-head) batch dims must match exactly; the head axis (last
-        # batch dim) is q = group · kv.
+        # batch dim) is q = group · kv, per operand.
         if q_batch[:-1] != k_batch[:-1] or q_batch[:-1] != v_batch[:-1]:
             return False
-        if k_batch[-1] != v_batch[-1] or q_batch[-1] != group * k_batch[-1]:
+        if q_batch[-1] != group_k * k_batch[-1] or q_batch[-1] != group_v * v_batch[-1]:
             return False
-    elif group != 1:
+    elif group_k != 1 or group_v != 1:
         return False  # no head axis but a non-trivial group makes no sense
     head_dim, d_v = _static(q_shape[-1]), _static(v_shape[-1])
     if head_dim is None or d_v is None:
@@ -211,7 +220,7 @@ def build_flash_frag(
     out: Tensor,
     *,
     causal: bool,
-    group: int = 1,
+    groups: tuple[int, int] = (1, 1),
     mask: tuple[str, tuple] | None = None,
     layouts: tuple = (None, None, None),
     raw_shapes: tuple | None = None,
@@ -229,7 +238,8 @@ def build_flash_frag(
     the node and generates the output-store glue (the ``Write`` at the grid cell) — it
     isn't stored here.
 
-    ``group`` is the GQA head ratio (K/V indexed at ``head // group``); ``mask`` is
+    ``groups`` is the per-operand ``(group_k, group_v)`` GQA head ratio (K / V indexed at
+    ``head // group``); ``mask`` is
     an optional ``(buffer_id, shape)`` additive bias loaded per ``(m, kv)``. ``q/k/v_shape``
     are CANONICAL ``(batch…, seq, last)``; ``layouts`` are the per-operand ``(seq_pos,
     last_pos)`` slot orders the loads permute back into (``None`` = head-major identity),
@@ -265,7 +275,7 @@ def build_flash_frag(
         head_dim,
         d_v,
         causal=causal,
-        group=group,
+        groups=groups,
         mask_buf=mask_buf,
         mask_shape=mask_shape,
         layouts=layouts,
@@ -358,7 +368,7 @@ def _flash_op(
     d_v: int,
     *,
     causal: bool = False,
-    group: int = 1,
+    groups: tuple[int, int] = (1, 1),
     mask_buf: str | None = None,
     mask_shape: tuple | None = None,
     layouts: tuple = (None, None, None),
@@ -374,20 +384,26 @@ def _flash_op(
     ``(batch…, m, d)`` axes are the ``TileOp``'s grid, not loops here; the output store is glue
     generated at materialize.
 
-    GQA: the K/V head axis (last batch dim) is read at ``head // group``, the same
-    ``//group`` the upstream ``IndexMapOp`` encodes, moved into the load index so the
-    kv_heads-many K/V are read without materializing the q_heads expansion. An additive
+    GQA: each KV operand's head axis (last batch dim) is read at ``head // group`` with its
+    OWN ``groups = (group_k, group_v)`` ratio — the same ``//group`` the upstream
+    ``IndexMapOp`` encodes, moved into the load index so the kv_heads-many K/V are read
+    without materializing the q_heads expansion (``group == 1`` is the identity: a
+    materialized V layout copy already carries the repeat baked in). An additive
     ``mask_buf`` (broadcast leading dims) is added to the score; causal masking is a
     ``Select`` stmt (``kv ≤ m`` else −inf) in the score ``Map`` — the index predicate
     lives in the op tree, never in the carrier. Both make ``exp(s − m_new) = 0``, so
     masked keys contribute nothing."""
     bvars = _batch_vars(len(batch))
     head_axis = len(batch) - 1  # last batch dim is the head (when there is one)
-    kv_bvars = tuple(BinaryExpr("/", bv, Literal(group, "int")) if (group > 1 and i == head_axis) else bv for i, bv in enumerate(bvars))
+    group_k, group_v = groups
+
+    def _grouped(group: int) -> tuple:
+        return tuple(BinaryExpr("/", bv, Literal(group, "int")) if (group > 1 and i == head_axis) else bv for i, bv in enumerate(bvars))
+
     q_layout, k_layout, v_layout = layouts
     q_idx = _permute_idx((*bvars, Var("m"), Var("dd")), q_layout)
-    k_idx = _permute_idx((*kv_bvars, Var("kv"), Var("dd")), k_layout)
-    v_idx = _permute_idx((*kv_bvars, Var("kv"), Var("d")), v_layout)
+    k_idx = _permute_idx((*_grouped(group_k), Var("kv"), Var("dd")), k_layout)
+    v_idx = _permute_idx((*_grouped(group_v), Var("kv"), Var("d")), v_layout)
 
     # s = Σ_dd Q·K — the inner contraction as a high-level :class:`Contraction` structural node, the
     # ``source`` of the streaming kv :class:`Reduction`. Per-cell scalar (``TilePlan()``): the
@@ -742,12 +758,12 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
     q_shape = _canon_shape(graph.nodes[q_id].output.shape, q_layout)
     k_shape = _canon_shape(graph.nodes[k_id].output.shape, k_layout)
     v_shape = _canon_shape(graph.nodes[v_id].output.shape, v_layout)
-    group = gqa_group(q_shape, k_shape)
-    if group is None:
+    group_k, group_v = gqa_group(q_shape, k_shape), gqa_group(q_shape, v_shape)
+    if group_k is None or group_v is None:
         _fuse_degraded(root, "head axis not statically GQA-divisible")
         return None
     mask_shape = graph.nodes[mask_buf].output.shape if mask_buf is not None else None
-    if not flash_shape_eligible(q_shape, k_shape, v_shape, group=group, mask_shape=mask_shape):
+    if not flash_shape_eligible(q_shape, k_shape, v_shape, group_k=group_k, group_v=group_v, mask_shape=mask_shape):
         _fuse_degraded(root, "shape not flash-eligible")
         return None
     mask = (mask_buf, mask_shape) if mask_kind == "additive" else None
@@ -765,7 +781,7 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
         v_shape,
         root.output,
         causal=(mask_kind == "causal"),
-        group=group,
+        groups=(group_k, group_v),
         mask=mask,
         layouts=(q_layout, k_layout, v_layout),
         raw_shapes=(

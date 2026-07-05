@@ -39,7 +39,14 @@ from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop import Load, LoopOp, splice_loop_ops
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.passes.loop.fusion._helpers import is_pure_indexmap, rename_write_output
+from emmy.compiler.pipeline.passes.loop.fusion._helpers import (
+    folds_axes,
+    is_flash_offer_shaped,
+    is_pure_indexmap,
+    rename_write_output,
+    sum_contracts_exp_producer,
+    through_indexmap_users,
+)
 
 PATTERN = [Pattern("producer", LoopOp)]
 
@@ -64,6 +71,14 @@ def rewrite(match: Match, producer: Node) -> Graph | None:
     consumers = sorted(graph.consumers(producer.id))
     if len(consumers) < 2:
         raise RuleSkipped("producer is not shared (< 2 consumers) — single-consumer folds are merge's job")
+    # Same narrowing as ``010_merge_loop_ops``'s flash guards: an AXIS-FOLDING indexmap
+    # (``folds_axes``) fused into a (future) flash offer site — possibly through the matmul's
+    # scaffolding indexmaps (``through_indexmap_users``) — leaves that operand not plainly
+    # indexed per slot and the flash form silently de-certifies — it stays materialized instead.
+    if folds_axes(producer.op):
+        sites = [through_indexmap_users(graph, graph.nodes[cid]) for cid in consumers]
+        if any(is_flash_offer_shaped(s.op) or sum_contracts_exp_producer(graph, s, producer) for s in sites):
+            raise RuleSkipped("axis-folding indexmap feeds a flash offer site — stays materialized (plain-slot operands)")
 
     frag = Graph()
     output_map: dict[str, str] = {}  # old consumer id -> fragment output node id

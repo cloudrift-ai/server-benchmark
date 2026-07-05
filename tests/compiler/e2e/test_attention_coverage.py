@@ -3,11 +3,10 @@ r"""Attention coverage — flash (the twisted ``(m, l, O)`` MONOID on the stream
 Attention is the hybrid algebra: a SEMIRING contraction (QK^T, P@V) wrapped in a MONOID streaming
 softmax reduce. This file pins every tier of it:
 
-- **scalar-tier flash** (``FLASH`` knob, the Loop-IR ``025_recognize_flash`` pass) — non-causal /
-  causal / GQA / additive-mask SDPA fuses to ONE streaming online-softmax kernel matching torch,
-  static AND dynamic (symbolic ``seq_len``); KV tiling; the default-path guards. This is the ONLY
-  flash tier that lowers today — the two-``Contraction`` ``TWISTED`` reduce tree at block=1, through
-  the one ``_factor`` contraction path.
+- **scalar-tier flash** — non-causal / causal / GQA / additive-mask SDPA fuses to ONE streaming
+  online-softmax kernel matching torch, static AND dynamic (symbolic ``seq_len``); KV tiling; the
+  default-path guards. The two-``Contraction`` ``TWISTED`` reduce tree at block=1, through the one
+  ``_factor`` contraction path.
 - **tensor-core flash** — RECOVERED through the one emitter: ``_schedule._twisted_warp_option`` stamps
   the mma ``TilePlan``\ s on the Q@K / P@V ``Contraction``\ s and the tree realizes at fragment
   residence (``_twist``) — no private emitter. The ``test_generated_tensorcore_flash_*`` /
@@ -747,6 +746,127 @@ def test_warp_chain_gqa_dynamic_matches_torch(monkeypatch, seq):
     assert not np.any(np.isnan(got)), f"GQA symbolic warp-chain flash seq={seq} produced NaN"
     max_diff = float(np.max(np.abs(got - eager)))
     assert max_diff < 5e-3, f"GQA symbolic warp-chain flash seq={seq} max_diff={max_diff:.2e}"
+
+
+# --------------------------------------------------------------------------- #
+# Model-graph V layout: V from the flat ``[B, S, Hkv·D]`` projection, reshaped /
+# transposed to head-major INSIDE the module — the axis-folding indexmap chain every
+# HF decoder layer feeds SDPA through. The fusion boundary must keep the folding
+# reshape materialized (a small layout copy) so the P@V's V load stays plainly
+# indexed per slot and flash certifies; fusing it folded ``kv_head·D + d`` into one
+# load slot and the whole attention fell to the un-fused 3-kernel scalar path
+# (qwen3-embedding layer-0, ~65× behind eager on the softmax→P@V slice).
+# --------------------------------------------------------------------------- #
+
+
+class _FoldedVSdpa(torch.nn.Module):
+    """GQA SDPA whose V arrives in the flat projection layout (folded head)."""
+
+    def __init__(self, hkv: int, d: int):
+        super().__init__()
+        self.hkv, self.d = hkv, d
+
+    def forward(self, q, k, v_flat):
+        v = v_flat.view(1, -1, self.hkv, self.d).transpose(1, 2)
+        return torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=False, enable_gqa=True)
+
+
+class _FoldedVRepeatedKv(torch.nn.Module):
+    """The explicit-repeat HF idiom: K/V repeated to the q heads before SDPA, V additionally
+    from the flat projection layout. Exercises PER-OPERAND GQA groups: the slot-plain K repeat
+    fuses into the score producer (``head // g`` in its own slot) while the folding V chain
+    stays materialized — K and V reach recognition at different head counts."""
+
+    def __init__(self, g: int, hkv: int, d: int):
+        super().__init__()
+        self.g, self.hkv, self.d = g, hkv, d
+
+    def _repeat_kv(self, x):
+        b, h, s, d = x.shape
+        return x[:, :, None, :, :].expand(b, h, self.g, s, d).reshape(b, h * self.g, s, d)
+
+    def forward(self, q, k, v_flat):
+        v = v_flat.view(1, -1, self.hkv, self.d).transpose(1, 2)
+        return torch.nn.functional.scaled_dot_product_attention(q, self._repeat_kv(k), self._repeat_kv(v))
+
+
+@requires_cuda
+def test_tensorcore_flash_folded_v_projection_fuses(monkeypatch):
+    """The folded-V model layout fuses to ONE warp-flash kernel (+ the materialized V layout
+    copy) and matches torch — fusion asserted, not just accuracy."""
+    torch.manual_seed(7)
+    Hq, Hkv, S, D = 4, 2, 128, 32
+    q = torch.randn(1, Hq, S, D, dtype=torch.float16)
+    k = torch.randn(1, Hkv, S, D, dtype=torch.float16)
+    v_flat = torch.randn(1, S, Hkv * D, dtype=torch.float16)
+    backend, compiled, graph, kernels = _trace(_FoldedVSdpa(Hkv, D), (q, k, v_flat))
+    # The OUTPUT kernel must be the fused warp flash — anchoring on the output node catches the
+    # degraded cut (whose output kernel is the scalar softmax+P@V with the folded V load).
+    out_src = compiled.nodes[compiled.outputs[0]].op.kernel_source
+    assert "dpl_c_to_a" in out_src and "dpl_mma_m16n8k16_f16" in out_src, "output kernel must be the fused warp flash"
+    assert len(kernels) <= 2, f"expected flash + at most the V layout copy, got {len(kernels)}: {kernels}"
+
+    def ref():
+        with torch.no_grad():
+            v = v_flat.view(1, -1, Hkv, D).transpose(1, 2)
+            out = torch.nn.functional.scaled_dot_product_attention(q.cuda(), k.cuda(), v.cuda(), is_causal=True, enable_gqa=True)
+            return out.cpu().flatten().float().numpy()
+
+    data = {n: t for n, t in zip(graph.inputs, (q.numpy(), k.numpy(), v_flat.numpy()), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=ref)
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    max_diff = float(np.max(np.abs(got - eager)))
+    assert max_diff < 5e-3, f"folded-V warp flash max_diff={max_diff:.2e}"
+
+
+@requires_cuda
+def test_flash_folded_v_with_repeated_kv_fuses(monkeypatch):
+    """Explicit KV repeat + folded V fuses to ONE warp-flash kernel and matches torch — the
+    per-operand ``(group_k, group_v)`` recognition (K slot-plain at ``head // g``, V via its
+    materialized layout copy)."""
+    torch.manual_seed(11)
+    Hq, Hkv, S, D = 4, 2, 128, 32
+    g = Hq // Hkv
+    q = torch.randn(1, Hq, S, D, dtype=torch.float16)
+    k = torch.randn(1, Hkv, S, D, dtype=torch.float16)
+    v_flat = torch.randn(1, S, Hkv * D, dtype=torch.float16)
+    backend, compiled, graph, kernels = _trace(_FoldedVRepeatedKv(g, Hkv, D), (q, k, v_flat))
+    out_src = compiled.nodes[compiled.outputs[0]].op.kernel_source
+    assert "dpl_c_to_a" in out_src and "dpl_mma_m16n8k16_f16" in out_src, "output kernel must be the fused warp flash"
+    assert len(kernels) <= 2, f"expected flash + at most the V layout copy, got {len(kernels)}: {kernels}"
+
+    def ref():
+        with torch.no_grad():
+            v = v_flat.view(1, -1, Hkv, D).transpose(1, 2)
+            kk, vv = (t.repeat_interleave(g, dim=1) for t in (k, v))
+            out = torch.nn.functional.scaled_dot_product_attention(q.cuda(), kk.cuda(), vv.cuda())
+            return out.cpu().flatten().float().numpy()
+
+    data = {n: t for n, t in zip(graph.inputs, (q.numpy(), k.numpy(), v_flat.numpy()), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=ref)
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    max_diff = float(np.max(np.abs(got - eager)))
+    assert max_diff < 5e-3, f"repeated-KV folded-V warp flash max_diff={max_diff:.2e}"
+
+
+def test_flash_fork_offered_with_folded_v():
+    """Recognition certifies the folded-V model layout (no GPU): the flash-form fork rows are
+    enumerated — the folding V indexmap stayed materialized at the fusion boundary instead of
+    de-certifying the offer site — and fp16 offers warp geometries."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.ir.schedule import is_warp_codec  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.analytic import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
+
+    ctx = Context.from_target((12, 0))
+    Hq, Hkv, S, D = 4, 2, 128, 32
+    q = torch.randn(1, Hq, S, D, dtype=torch.float16)
+    k = torch.randn(1, Hkv, S, D, dtype=torch.float16)
+    v_flat = torch.randn(1, S, Hkv * D, dtype=torch.float16)
+    graph = trace_module(_FoldedVSdpa(Hkv, D).cpu(), (q, k, v_flat))
+    rows = [r for r in enumerate_graph(graph, ctx) if "TILE@dd" in r]
+    assert rows, "flash fork rows must be enumerated for the folded-V layout"
+    assert any(is_warp_codec(r["TILE@dd"]) for r in rows), "fp16 folded-V must offer warp geometries"
 
 
 # =========================================================================== #

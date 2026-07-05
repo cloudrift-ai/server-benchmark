@@ -43,6 +43,18 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
         raise RuleSkipped(f"producer has {len(producer_op.sources)} sources; only single-source composes")
     p_src = producer_op.sources[0]
 
+    # An axis-FOLDING producer (a coord entry reading ≥2 output placeholders — a split-reshape's
+    # ``h·D + d``) composes through RANK-PRESERVING maps only (transpose, the GQA repeat): the
+    # composition stops at the rank-changing matmul scaffolding (unsqueeze/broadcast). When the
+    # loop-fusion flash guards later materialize the fold (its Load slot de-certifies the flash
+    # offer site's plain-slot recognition), the composite's output is then the operand in its
+    # canonical pre-scaffolding shape — the clean ``(b, h, s, d)`` V buffer the warp tier's
+    # fragment loaders assume — not a scaffolding composite with extra broadcast rank. Non-flash
+    # paths lose nothing: the fold still lands in the consumer kernel's loads at loop fusion,
+    # one pass later.
+    if any(len(e.free_vars()) > 1 for e in p_src.coord_map) and len(consumer_op.out_shape) != len(producer_op.out_shape):
+        raise RuleSkipped("axis-folding indexmap composes only rank-preserving (folds into kernels at loop fusion)")
+
     # The producer feeds exactly the consumer sources whose input_idx
     # points at the producer node. Any other consumer source stays as-is.
     producer_input_id = producer.inputs[p_src.input_idx]

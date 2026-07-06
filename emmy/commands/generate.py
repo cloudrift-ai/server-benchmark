@@ -14,6 +14,8 @@ from __future__ import annotations
 import logging
 import sys
 
+from emmy.compiler.dim import DEFAULT_SEQ_HINT
+
 logger = logging.getLogger(__name__)
 
 
@@ -27,7 +29,7 @@ def register_generate_command(subparsers):
     parser.add_argument("--top-p", type=float, default=1.0, help="Top-p / nucleus filter (1.0 = off)")
     parser.add_argument("--seed", type=int, default=0, help="Sampling RNG seed")
     parser.add_argument("--chat", action="store_true", help="Apply the tokenizer chat template to the prompt")
-    parser.add_argument("--seq-len", type=int, default=32, help="Example seq_len for the dynamic trace")
+    parser.add_argument("--seq-len", type=int, default=DEFAULT_SEQ_HINT, help="Example seq_len for the dynamic trace (default: 512)")
     parser.set_defaults(func=handle_generate)
 
 
@@ -134,7 +136,7 @@ class _CompiledLM:
         self._output_name = output_name
 
     @classmethod
-    def create(cls, model_id, *, seq_len=32):
+    def create(cls, model_id, *, seq_len=DEFAULT_SEQ_HINT):
         import torch
         from transformers import AutoModelForCausalLM
 
@@ -145,7 +147,7 @@ class _CompiledLM:
             return cls.from_model(model, seq_len=seq_len)
 
     @classmethod
-    def from_model(cls, model, *, seq_len=32):
+    def from_model(cls, model, *, seq_len=DEFAULT_SEQ_HINT):
         """Build from an already-loaded fp16 CausalLM module (the network-free path used
         by hermetic random-weight tests). ``model`` must be on CPU for the trace."""
         import numpy as np

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from emmy import config
+from emmy.compiler.dim import DEFAULT_SEQ_HINT
 from emmy.compiler.pipeline import (
     CUDA_PASSES,
     KERNEL_PASSES,
@@ -85,9 +86,10 @@ def add_input_args(parser) -> None:
     parser.add_argument(
         "--seq-len",
         type=int,
-        default=32,
+        default=DEFAULT_SEQ_HINT,
         help=(
-            "Sequence length for full-model tracing (default: 32). With ``--dynamic``, only "
+            "Sequence length for full-model tracing (default: 512, matching ``DEFAULT_SEQ_HINT``). With "
+            "``--dynamic``, only "
             "sizes the example tensors handed to ``torch.export``; the value doesn't appear "
             "in the resulting kernels since torch makes the dim symbolic. The tuner / planner "
             "instead tile a symbolic axis for ``Dim``'s default hint (DEFAULT_SEQ_HINT=512), "
@@ -434,7 +436,16 @@ def _trace_model(model_id: str, layer: int | None, seq_len: int, *, dynamic_shap
 
     logger.info("Pulling %s...", model_id)
     dtype = torch.float32 if layer is None else torch.float16
-    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype)
+    try:
+        model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype)
+    except ValueError as e:
+        # Only fall back to executing the repo's custom modeling code when
+        # transformers explicitly requires it (e.g. MiniCPM3). Models that ship
+        # remote code but also have a built-in class (e.g. Phi-4-mini) must use
+        # the built-in path — their remote code may not match this transformers.
+        if "trust_remote_code" not in str(e):
+            raise
+        model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype, trust_remote_code=True)
     model.eval()
 
     if layer is None:

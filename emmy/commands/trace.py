@@ -9,6 +9,8 @@ logger = logging.getLogger(__name__)
 
 
 def register_trace_command(subparsers):
+    from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415
+
     parser = subparsers.add_parser(
         "trace",
         help="Trace a transformer layer or inline torch module to Graph IR",
@@ -37,8 +39,8 @@ def register_trace_command(subparsers):
     parser.add_argument(
         "--seq-len",
         type=int,
-        default=32,
-        help="Sequence length for the example input (default: 32).",
+        default=DEFAULT_SEQ_HINT,
+        help="Sequence length for the example input (default: 512, matching ``DEFAULT_SEQ_HINT``).",
     )
     parser.add_argument("--output", "-o", help="Output JSON path (default: auto-generated)")
     parser.set_defaults(func=handle_trace)

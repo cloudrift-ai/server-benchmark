@@ -92,6 +92,7 @@ class GoldenConfig:
     knobs: dict = field(default_factory=dict)  # dict(cuda_op.knobs), verbatim
     emmy_us: float = 0.0
     cublas_us: float = 0.0
+    dynamic: bool = False  # symbolic seq/row axis → masked-tile kernel (``.dynM`` name convention)
 
     @property
     def ratio(self) -> float:
@@ -116,65 +117,44 @@ class GoldenConfig:
         spec = gpu.by_name(self.gpu_name)
         return spec.sm_count if spec else None
 
+    def _require_dynamic_hint(self, axis_size: int) -> None:
+        """A dynamic golden's symbolic axis is tiled / benched at the GLOBAL ``Dim`` hint, so its
+        traced size must equal ``DEFAULT_SEQ_HINT`` — otherwise it silently measures a different
+        shape than the one recorded. Each kind calls this from ``__post_init__`` with its seq/row axis."""
+        if not self.dynamic:
+            return
+        from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415 — int constant, import stays light
+
+        if axis_size != DEFAULT_SEQ_HINT:
+            raise ValueError(
+                f"{self.name}: a dynamic golden's symbolic axis (traced size {axis_size}) must equal "
+                f"DEFAULT_SEQ_HINT ({DEFAULT_SEQ_HINT}); the pipeline benches a symbolic axis at the hint"
+            )
+
     def dynamic_specs(self) -> list[str]:
-        """``--dynamic NAME@INPUT:AXIS`` spec strings for the tracer. Only a matmul
-        golden can be dynamic today; the base is always static (empty)."""
+        """``--dynamic NAME@INPUT:AXIS`` spec strings for the tracer — empty when static.
+        Each kind overrides with the axis(es) of its snippet's inputs that go symbolic."""
         return []
 
 
 @dataclass(frozen=True, kw_only=True)
 class MatmulGoldenConfig(GoldenConfig):
-    """A golden config for a plain 2-D matmul ``(M,K) @ (K,N)``.
+    """A golden config for a 2-D matmul ``(M, K) @ (K, N)``.
 
-    ``dynamic`` (optional, YAML form ``dynamic: {seq_len: {input: x0, axis: 0}}``) marks an
-    axis of a traced snippet input as symbolic: the shape compiles as a masked-tile kernel
-    (``--dynamic NAME@INPUT:AXIS`` semantics) and ``M`` doubles as the ``Dim`` hint the tile
-    is sized / benched at. A dynamic golden is a different deployment artifact than its
-    static twin (boundary guards, masked tiers, different variant space), so it gets its own
-    name (``.dynM`` suffix by convention) and is never merged with the static config. Only
-    the M axis — ``x0`` is the snippet's lhs ``(M,K)`` — may be symbolic for now: that's
-    what the masked thread tier / masked warp MMA / symbolic-row splits deploy today
-    (symbolic K is future work, kept out of the schema until the lowering exists)."""
+    When ``dynamic: true``, the M axis (``x0``, the lhs rows / seq) is symbolic: the shape
+    compiles as a masked-tile kernel and M doubles as the ``Dim`` hint it is sized / benched at
+    (so M must equal ``DEFAULT_SEQ_HINT``). A dynamic golden is a different deployment artifact
+    than its static twin (boundary guards, masked tiers), so it gets its own ``.dynM`` name and
+    is never merged with the static config. Only the M axis may be symbolic today (symbolic
+    K/N is future work, kept out of the schema until the lowering exists)."""
 
     M: int
     N: int
     K: int
     dtype: str = "fp32"
-    dynamic: dict | None = None  # {NAME: {input: str, axis: int}}, e.g. {seq_len: {input: x0, axis: 0}}
 
     def __post_init__(self):
-        if self.dynamic is None:
-            return
-        if not isinstance(self.dynamic, dict) or not self.dynamic:
-            raise ValueError(f"{self.name}: dynamic must be a non-empty mapping of NAME -> {{input, axis}}")
-        if self.M < 1:
-            raise ValueError(f"{self.name}: M doubles as the symbolic-axis hint and must be >= 1, got {self.M}")
-        from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415 — int constant, import stays light
-
-        if self.M != DEFAULT_SEQ_HINT:
-            # The pipeline tiles/benches a symbolic axis at the GLOBAL Dim hint, not
-            # at the traced M — an M=1024 dynamic golden would silently be measured
-            # at 512 and duplicate the (N, K, hint-512) shape (seen live: a 1024³
-            # symbolic-M seed benched the exact kv_proj.s512.dynM kernel). Reject
-            # until per-Dim hints are plumbed through trace + golden schema.
-            raise ValueError(
-                f"{self.name}: a dynamic golden's M is the Dim hint and must equal DEFAULT_SEQ_HINT "
-                f"({DEFAULT_SEQ_HINT}) — the pipeline ignores any other trace size; got M={self.M}"
-            )
-        for sym, loc in self.dynamic.items():
-            if not isinstance(sym, str) or not sym:
-                raise ValueError(f"{self.name}: dynamic NAME must be a non-empty string, got {sym!r}")
-            if not isinstance(loc, dict) or set(loc) != {"input", "axis"}:
-                raise ValueError(f"{self.name}: dynamic[{sym!r}] must be {{input: NAME, axis: INT}}, got {loc!r}")
-            if not isinstance(loc["input"], str) or not loc["input"]:
-                raise ValueError(f"{self.name}: dynamic[{sym!r}] input must be a non-empty string, got {loc['input']!r}")
-            if not isinstance(loc["axis"], int) or isinstance(loc["axis"], bool) or loc["axis"] < 0:
-                raise ValueError(f"{self.name}: dynamic[{sym!r}] axis must be an int >= 0, got {loc['axis']!r}")
-            if (loc["input"], loc["axis"]) != ("x0", 0):
-                raise ValueError(
-                    f"{self.name}: dynamic[{sym!r}] must mark the M axis (input x0, axis 0) — "
-                    "symbolic K/N matmul goldens are not supported yet"
-                )
+        self._require_dynamic_hint(self.M)
 
     def snippet(self) -> str:
         """The torch expression this config tunes / benches / reproduces."""
@@ -182,18 +162,13 @@ class MatmulGoldenConfig(GoldenConfig):
 
     def shape_key(self):
         """This config's :class:`~emmy.compiler.pipeline.search.data.ShapeKey` —
-        the single golden-side join key (``Sample.from_golden`` and every
-        diagnostics join build it here, so the dynamic flag can't be forgotten at
-        a call site). Import deferred to keep this module import-light."""
+        the single golden-side join key. Import deferred to keep this module import-light."""
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
-        return ShapeKey.from_matmul(self.M, self.N, self.K, self.dtype, dynamic=bool(self.dynamic))
+        return ShapeKey.from_matmul(self.M, self.N, self.K, self.dtype, dynamic=self.dynamic)
 
     def dynamic_specs(self) -> list[str]:
-        """``--dynamic NAME@INPUT:AXIS`` spec strings for the tracer — empty for a
-        static config. The snippet stays the hint-shaped code; these mark which of
-        its traced inputs' axes go symbolic."""
-        return [f"{name}@{loc['input']}:{loc['axis']}" for name, loc in (self.dynamic or {}).items()]
+        return ["seq_len@x0:0"] if self.dynamic else []
 
     def repro_command(self, ir: str = "cuda") -> str:
         """A runnable ``emmy`` command that rebuilds this config's kernel.
@@ -217,6 +192,12 @@ class ReduceGoldenConfig(GoldenConfig):
     K: int
     dtype: str = "fp32"  # the snippet is fp32-only; recorded so Sample.from_golden is kind-agnostic
 
+    def __post_init__(self):
+        self._require_dynamic_hint(self.M)
+
+    def dynamic_specs(self) -> list[str]:
+        return ["seq_len@x:0"] if self.dynamic else []
+
     def snippet(self) -> str:
         return f"torch.sum(torch.randn({self.M},{self.K}),dim=-1)"
 
@@ -225,7 +206,7 @@ class ReduceGoldenConfig(GoldenConfig):
         matching what ``992_stamp_structural_features`` stamps on the reduce kernel."""
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
-        return ShapeKey(free_prod=self.M, reduce_max=self.K, is_warp=False)
+        return ShapeKey(free_prod=self.M, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -239,6 +220,12 @@ class PointwiseGoldenConfig(GoldenConfig):
     N: int
     dtype: str = "fp32"  # the snippet is fp32-only; recorded so Sample.from_golden is kind-agnostic
 
+    def __post_init__(self):
+        self._require_dynamic_hint(self.M)
+
+    def dynamic_specs(self) -> list[str]:
+        return ["seq_len@x:0"] if self.dynamic else []
+
     def snippet(self) -> str:
         return f"torch.relu(torch.randn({self.M},{self.N}))"
 
@@ -247,7 +234,7 @@ class PointwiseGoldenConfig(GoldenConfig):
         axis (``reduce_max=0``, the ``from_s_features`` default for an unstamped extent)."""
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
-        return ShapeKey(free_prod=self.M * self.N, reduce_max=0, is_warp=False)
+        return ShapeKey(free_prod=self.M * self.N, reduce_max=0, is_warp=False, is_dyn=self.dynamic)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -265,6 +252,12 @@ class RmsNormGoldenConfig(GoldenConfig):
     K: int
     dtype: str = "fp32"  # snippet is fp32; recorded so Sample.from_golden is kind-agnostic
 
+    def __post_init__(self):
+        self._require_dynamic_hint(self.M)
+
+    def dynamic_specs(self) -> list[str]:
+        return ["seq_len@x:0"] if self.dynamic else []
+
     def snippet(self) -> str:
         return f"torch.nn.RMSNorm({self.K})(torch.randn({self.M},{self.K}))"
 
@@ -273,7 +266,68 @@ class RmsNormGoldenConfig(GoldenConfig):
         matching the mean-of-squares Reduction its ``k_rms_norm`` Map is built over."""
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
-        return ShapeKey(free_prod=self.M, reduce_max=self.K, is_warp=False)
+        return ShapeKey(free_prod=self.M, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic)
+
+
+@dataclass(frozen=True, kw_only=True)
+class SoftmaxGoldenConfig(GoldenConfig):
+    """Row-softmax ``(M, K) → (M, K)`` over the last axis (``torch.softmax(dim=-1)``).
+
+    A twisted Reduction (max / exp / sum) + a normalize sweep — the ``k_softmax`` kernel.
+    Reduce-tier: free rows ``(M,)``, reduce extent ``K``, cooperative ``REDUCE`` over ``K``. The
+    reference is torch softmax eager (fp32), so the ratio compares emmy's fused softmax vs PyTorch."""
+
+    M: int
+    K: int
+    dtype: str = "fp32"
+
+    def __post_init__(self):
+        self._require_dynamic_hint(self.M)
+
+    def dynamic_specs(self) -> list[str]:
+        return ["seq_len@x:0"] if self.dynamic else []
+
+    def snippet(self) -> str:
+        return f"torch.softmax(torch.randn({self.M},{self.K}),dim=-1)"
+
+    def shape_key(self):
+        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
+
+        return ShapeKey(free_prod=self.M, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic)
+
+
+@dataclass(frozen=True, kw_only=True)
+class AttentionGoldenConfig(GoldenConfig):
+    """Scaled-dot-product (flash) attention over ``(1, n_heads, seq, head_dim)`` inputs, causal
+    (``F.scaled_dot_product_attention(q, k, v, is_causal=True)``).
+
+    The ``k_scaled_dot_product_attention`` kernel is a TWISTED streaming Reduction over the KV
+    axis (online-softmax flash) fused with the QKᵀ / ·V matmuls. When ``dynamic: true`` the seq
+    axis (``x{0,1,2}:2`` of q / k / v) is symbolic — the masked-tile flash, the deployable
+    artifact. The reference is torch SDPA (its own fused path), so the ratio is vs PyTorch."""
+
+    n_heads: int
+    seq: int
+    head_dim: int
+    dtype: str = "fp16"
+    causal: bool = True
+
+    def __post_init__(self):
+        self._require_dynamic_hint(self.seq)
+
+    def dynamic_specs(self) -> list[str]:
+        return ["seq_len@x0:2", "seq_len@x1:2", "seq_len@x2:2"] if self.dynamic else []
+
+    def snippet(self) -> str:
+        tdt = {"fp32": "", "fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16"}[self.dtype]
+        qkv = f"torch.randn(1,{self.n_heads},{self.seq},{self.head_dim}{tdt})"
+        return f"F.scaled_dot_product_attention({qkv}, {qkv}, {qkv}, is_causal={self.causal})"
+
+    def shape_key(self):
+        # Flash: free = heads × query rows, reduce = kv seq; tensor-core (warp) tier for fp16.
+        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
+
+        return ShapeKey(free_prod=self.n_heads * self.seq, reduce_max=self.seq, is_warp=self.dtype != "fp32", is_dyn=self.dynamic)
 
 
 _GOLDENS_DIR = Path(__file__).parent / "goldens"
@@ -282,6 +336,8 @@ _KERNEL_CLASSES = {
     "reduce": ReduceGoldenConfig,
     "pointwise": PointwiseGoldenConfig,
     "rms_norm": RmsNormGoldenConfig,
+    "softmax": SoftmaxGoldenConfig,
+    "attention": AttentionGoldenConfig,
 }
 
 
@@ -290,7 +346,7 @@ def _load_goldens() -> list[GoldenConfig]:
 
     One file per GPU: a ``gpu_name`` / ``compute_cap`` header (stamped onto every
     config so it isn't repeated per entry) plus a ``configs`` list, each tagged with
-    a ``kernel`` discriminator (``matmul`` / ``reduce`` / ``rms_norm`` / ``pointwise``) selecting the
+    a ``kernel`` discriminator (``matmul`` / ``attention`` / ``softmax`` / ``reduce`` / ``rms_norm`` / ``pointwise``) selecting the
     dataclass. All files are concatenated — a ``name`` may recur across GPUs.
 
     NOTE: ``compute_cap`` does **not** uniquely identify a GPU — two different cards

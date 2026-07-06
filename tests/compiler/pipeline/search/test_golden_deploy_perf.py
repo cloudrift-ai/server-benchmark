@@ -62,8 +62,8 @@ def _row(free_prod, reduce_max, *, fp32, h_opt, latency):
 
 
 def test_dtype_separation_and_o3_filter():
-    g32 = goldens_by_name("square.512")[0].emmy_us  # fp32 golden latency (-O3)
-    g16 = goldens_by_name("square.512.fp16")[0].emmy_us
+    g32 = goldens_by_name("matmul.square.512")[0].emmy_us  # fp32 golden latency (-O3)
+    g16 = goldens_by_name("matmul.square.512.fp16")[0].emmy_us
     fp = 512 * 512  # both square.512 and .fp16 share (free_prod, reduce)
 
     prior = _FakePrior(
@@ -77,28 +77,28 @@ def test_dtype_separation_and_o3_filter():
 
     # Each dtype matches its own -O3 row — no cross-contamination (the merge bug would
     # make the fp32 row pick the smaller fp16 latency).
-    assert perf["square.512"] == pytest.approx(2.0)
-    assert perf["square.512.fp16"] == pytest.approx(0.5)
+    assert perf["matmul.square.512"] == pytest.approx(2.0)
+    assert perf["matmul.square.512.fp16"] == pytest.approx(0.5)
 
 
 def test_shape_without_o3_is_omitted():
     # square.1024 has only an -O1 row → no deployable measurement → omitted ('—').
     prior = _FakePrior([_row(1024 * 1024, 1024, fp32=True, h_opt=1, latency=50.0)])
     perf = diagnostics.golden_deploy_perf(prior)
-    assert "square.1024" not in perf
+    assert "matmul.square.1024" not in perf
 
 
 def test_kernel_filter_restricts_shapes():
-    g32 = goldens_by_name("square.512")[0].emmy_us
+    g32 = goldens_by_name("matmul.square.512")[0].emmy_us
     prior = _FakePrior([_row(512 * 512, 512, fp32=True, h_opt=3, latency=g32)])
-    assert set(diagnostics.golden_deploy_perf(prior, "square.512")) <= {"square.512"}
+    assert set(diagnostics.golden_deploy_perf(prior, "matmul.square.512")) <= {"matmul.square.512"}
 
 
 def test_non_matmul_group_with_colliding_extents_is_excluded():
     """A reduce-shaped op group that happens to share a matmul golden's
     (free_prod, reduce_max, dtype) must not satisfy the join — the index admits
     only matmul-histogram groups (``_matmul_sig``)."""
-    g32 = goldens_by_name("square.512")[0].emmy_us
+    g32 = goldens_by_name("matmul.square.512")[0].emmy_us
     knobs, latency = _row(512 * 512, 512, fp32=True, h_opt=3, latency=g32 * 0.1)
     knobs.pop("S_pw_multiply")  # no product feeding the reduce → not a matmul body
-    assert "square.512" not in diagnostics.golden_deploy_perf(_FakePrior([(knobs, latency)]))
+    assert "matmul.square.512" not in diagnostics.golden_deploy_perf(_FakePrior([(knobs, latency)]))

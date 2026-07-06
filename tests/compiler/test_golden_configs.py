@@ -14,11 +14,13 @@ from emmy.compiler.pipeline.search.golden import (
     _GOLDENS_DIR,
     _KERNEL_CLASSES,
     GOLDEN_CONFIGS,
+    AttentionGoldenConfig,
     GoldenConfig,
     MatmulGoldenConfig,
     PointwiseGoldenConfig,
     ReduceGoldenConfig,
     RmsNormGoldenConfig,
+    SoftmaxGoldenConfig,
     _load_goldens,
     matmul_snippet,
 )
@@ -54,18 +56,30 @@ def test_repro_command_round_trips_knobs_and_snippet():
 
 def test_golden_configs_set_is_well_formed():
     for c in GOLDEN_CONFIGS:
-        # Every regime: matmul (M,N,K), reduce (M,K), rms_norm (M,K), pointwise (M,N).
-        assert isinstance(c, (MatmulGoldenConfig, ReduceGoldenConfig, RmsNormGoldenConfig, PointwiseGoldenConfig)), c.name
+        # Every regime: matmul (M,N,K), reduce/rms_norm/softmax (M,K), pointwise (M,N), attention.
+        assert isinstance(
+            c,
+            (
+                MatmulGoldenConfig,
+                ReduceGoldenConfig,
+                RmsNormGoldenConfig,
+                SoftmaxGoldenConfig,
+                PointwiseGoldenConfig,
+                AttentionGoldenConfig,
+            ),
+        ), c.name
         if isinstance(c, MatmulGoldenConfig):
             assert c.M > 0 and c.N > 0 and c.K > 0, c.name
-        elif isinstance(c, (ReduceGoldenConfig, RmsNormGoldenConfig)):
+        elif isinstance(c, (ReduceGoldenConfig, RmsNormGoldenConfig, SoftmaxGoldenConfig)):
             from emmy.compiler.ir.schedule import ReducePlan
 
             assert c.M > 0 and c.K > 0, c.name
-            # RMSNorm's reduce knob is axis-qualified (``REDUCE@a1``); the pure reduce's is bare (``REDUCE``).
+            # The reduce knob is axis-qualified on a Map (``REDUCE@a1`` for rms/softmax); bare on a pure reduce.
             red = next((v for k, v in c.knobs.items() if k == "REDUCE" or k.startswith("REDUCE@")), None)
             coop = ReducePlan.parse(red).coop
-            assert coop > 1, f"{c.name} reduce/rms golden must be cooperative (REDUCE coop>1, got {coop})"
+            assert coop > 1, f"{c.name} reduce-family golden must be cooperative (REDUCE coop>1, got {coop})"
+        elif isinstance(c, AttentionGoldenConfig):
+            assert c.n_heads > 0 and c.seq > 0 and c.head_dim > 0, c.name
         else:
             assert c.M > 0 and c.N > 0, c.name
         assert c.emmy_us > 0 and c.cublas_us > 0, c.name
@@ -132,8 +146,8 @@ def test_golden_knobs_are_members_of_the_move_catalog():
     scalar_moves = set(scalar_tile_moves())
     for g in GOLDEN_CONFIGS:
         where = f"{g.name} ({g.gpu_name})"
-        if isinstance(g, (ReduceGoldenConfig, RmsNormGoldenConfig)):
-            # RMSNorm's reduce knob is axis-qualified (``REDUCE@a1``); the pure reduce's is bare (``REDUCE``).
+        if isinstance(g, (ReduceGoldenConfig, RmsNormGoldenConfig, SoftmaxGoldenConfig)):
+            # The reduce knob is axis-qualified on a Map (``REDUCE@a1`` for rms/softmax); bare on a pure reduce.
             reduce_spec = next((v for k, v in g.knobs.items() if k == "REDUCE" or k.startswith("REDUCE@")), "")
             assert not reduce_spec or reduce_spec in coop_reduce_moves(), f"{where}: REDUCE {reduce_spec!r} not enumerable"
             continue
@@ -153,89 +167,78 @@ def test_golden_knobs_are_members_of_the_move_catalog():
         )
 
 
-# --- dynamic (symbolic-axis) matmul goldens ----------------------------------
+# --- dynamic (symbolic-axis) goldens -----------------------------------------
 
 
-def _dyn(dynamic, M=512):
-    return MatmulGoldenConfig(name="square.512.dynM", M=M, N=512, K=512, dynamic=dynamic)
+def _dyn(M=512):
+    return MatmulGoldenConfig(name="matmul.square.512.dynM", M=M, N=512, K=512, dynamic=True)
 
 
 def test_dynamic_golden_specs_snippet_and_repro():
     """A dynamic golden keeps the hint-shaped snippet (M doubles as the hint) and
     additionally carries the ``--dynamic NAME@INPUT:AXIS`` spec for the tracer;
-    ``repro_command`` includes the flag so the repro rebuilds the masked-tile
-    kernel, not the static twin."""
-    c = _dyn({"seq_len": {"input": "x0", "axis": 0}})
+    ``repro_command`` includes the flag so the repro rebuilds the masked-tile kernel."""
+    c = _dyn()
     assert c.dynamic_specs() == ["seq_len@x0:0"]
     assert c.snippet() == matmul_snippet(512, 512, 512)  # unchanged hint-shaped code
     assert "--dynamic seq_len@x0:0" in c.repro_command()
 
 
 def test_static_golden_has_no_dynamic_specs():
-    c = MatmulGoldenConfig(name="square.512", M=512, N=512, K=512)
+    c = MatmulGoldenConfig(name="matmul.square.512", M=512, N=512, K=512)
     assert c.dynamic_specs() == []
     assert "--dynamic" not in c.repro_command()
 
 
-@pytest.mark.parametrize(
-    "dynamic",
-    [
-        {},  # empty mapping
-        {"seq_len": {"input": "x0"}},  # missing axis
-        {"seq_len": {"input": "x0", "axis": "0"}},  # axis not an int
-        {"seq_len": {"input": "x0", "axis": True}},  # bool is not an axis
-        {"seq_len": {"input": "x0", "axis": -1}},  # negative axis
-        {"seq_len": {"input": "", "axis": 0}},  # empty input name
-        {"": {"input": "x0", "axis": 0}},  # empty NAME
-        {"seq_len": {"input": "x0", "axis": 1}},  # K axis — lowering not supported yet
-        {"seq_len": {"input": "x1", "axis": 1}},  # N axis — lowering not supported yet
-    ],
-)
-def test_dynamic_golden_schema_rejects_malformed(dynamic):
-    with pytest.raises(ValueError):
-        _dyn(dynamic)
-
-
-def test_dynamic_golden_hint_must_be_positive():
-    with pytest.raises(ValueError, match="hint"):
-        _dyn({"seq_len": {"input": "x0", "axis": 0}}, M=0)
-
-
 def test_dynamic_golden_hint_must_equal_default_seq_hint():
-    """The pipeline tiles/benches a symbolic axis at the global ``DEFAULT_SEQ_HINT``,
-    not the traced M — an M=1024 dynamic golden would silently be measured at 512
-    and duplicate the (N, K, hint-512) shape. Rejected until per-Dim hints exist."""
+    """The pipeline tiles/benches a symbolic axis at the global ``DEFAULT_SEQ_HINT``, not the
+    traced M — an M=1024 dynamic golden would silently be measured at 512. Rejected until
+    per-Dim hints exist; the rule holds for every kind (matmul M / reduce rows / attention seq)."""
     from emmy.compiler.dim import DEFAULT_SEQ_HINT
 
     with pytest.raises(ValueError, match="DEFAULT_SEQ_HINT"):
-        _dyn({"seq_len": {"input": "x0", "axis": 0}}, M=1024)
-    _dyn({"seq_len": {"input": "x0", "axis": 0}}, M=DEFAULT_SEQ_HINT)  # the only valid hint today
+        _dyn(M=1024)
+    with pytest.raises(ValueError, match="DEFAULT_SEQ_HINT"):
+        SoftmaxGoldenConfig(name="softmax.k2048.dynM", M=1024, K=2048, dynamic=True)
+    with pytest.raises(ValueError, match="DEFAULT_SEQ_HINT"):
+        AttentionGoldenConfig(name="attention.hd128.dynM", n_heads=8, seq=1024, head_dim=128, dynamic=True)
+    _dyn(M=DEFAULT_SEQ_HINT)  # the only valid hint today
+    SoftmaxGoldenConfig(name="softmax.k2048.dynM", M=DEFAULT_SEQ_HINT, K=2048, dynamic=True)
 
 
-def test_dynamic_is_matmul_only():
-    """``dynamic`` is a MatmulGoldenConfig field only — reduce / pointwise goldens
-    reject it at construction (the symbolic lowering for those shapes is the split,
-    not a masked golden)."""
-    with pytest.raises(TypeError):
-        ReduceGoldenConfig(name="r", M=512, K=512, dynamic={"seq_len": {"input": "x0", "axis": 0}})
+def test_dynamic_supported_for_all_kinds():
+    """Every kind can be static or dynamic (a symbolic seq / row axis → masked-tile kernel),
+    each emitting its own ``--dynamic`` spec: 1-input kinds mark ``x:0``, matmul marks its lhs
+    ``x0:0``, attention marks the seq axis of all three q/k/v inputs (``x{0,1,2}:2``)."""
+    one_input = [
+        ReduceGoldenConfig(name="reduce.k2048.dynM", M=512, K=2048, dynamic=True),
+        RmsNormGoldenConfig(name="rms_norm.k2048.dynM", M=512, K=2048, dynamic=True),
+        SoftmaxGoldenConfig(name="softmax.k2048.dynM", M=512, K=2048, dynamic=True),
+        PointwiseGoldenConfig(name="pointwise.n4096.dynM", M=512, N=4096, dynamic=True),
+    ]
+    assert all(c.dynamic_specs() == ["seq_len@x:0"] for c in one_input)
+    att = AttentionGoldenConfig(name="attention.hd128.dynM", n_heads=8, seq=512, head_dim=128, dynamic=True)
+    assert att.dynamic_specs() == ["seq_len@x0:2", "seq_len@x1:2", "seq_len@x2:2"]
+    assert att.snippet().startswith("F.scaled_dot_product_attention(")
+    # static kinds carry no specs
+    assert ReduceGoldenConfig(name="reduce.k2048", M=512, K=2048).dynamic_specs() == []
 
 
 def test_sample_from_golden_carries_dynamic_specs():
     from emmy.compiler.pipeline.search.data import Sample
 
-    dyn = Sample.from_golden(_dyn({"seq_len": {"input": "x0", "axis": 0}}))
+    dyn = Sample.from_golden(_dyn())
     assert dyn.dynamic == ("seq_len@x0:0",)
-    static = Sample.from_golden(MatmulGoldenConfig(name="square.512", M=512, N=512, K=512))
+    static = Sample.from_golden(MatmulGoldenConfig(name="matmul.square.512", M=512, N=512, K=512))
     assert static.dynamic is None
 
 
 def test_shape_key_carries_dynamic_flag():
-    """``shape_key()`` is the single golden-side join key: static keys are the
-    full ``M*N`` product; a dynamic config's key excludes the symbolic M (mirroring
-    the 992 stamp) and sets ``is_dyn``, so the twins never share a key."""
+    """``shape_key()`` is the single golden-side join key: static keys are the full ``M*N``
+    product; a dynamic config's key excludes the symbolic M and sets ``is_dyn``."""
     static = MatmulGoldenConfig(name="s", M=512, N=256, K=64)
     assert (static.shape_key().free_prod, static.shape_key().is_dyn) == (512 * 256, False)
-    dyn = _dyn({"seq_len": {"input": "x0", "axis": 0}})  # M=N=K=512
+    dyn = _dyn()  # M=N=K=512
     assert (dyn.shape_key().free_prod, dyn.shape_key().is_dyn) == (512, True)
     assert dyn.shape_key() != MatmulGoldenConfig(name="t", M=512, N=512, K=512).shape_key()
 
@@ -298,7 +301,7 @@ def test_resolve_golden_arg_applies_dynamic_spec(monkeypatch):
         knobs={"TILE": "n16x8/f2x2"},
         emmy_us=12.0,
         cublas_us=14.0,
-        dynamic={"seq_len": {"input": "x0", "axis": 0}},
+        dynamic=True,
     )
     monkeypatch.setattr(gmod, "GOLDEN_CONFIGS", [dyn])
 

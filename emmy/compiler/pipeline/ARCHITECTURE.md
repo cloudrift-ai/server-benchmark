@@ -25,7 +25,7 @@ tree). `two_level.py` is the two-level tuner (outer structural MCTS, inner per-o
 `prior/`: a `Prior` ABC with the cold `AnalyticPrior` and the learned `CatBoostPrior` composed behind `FallbackPrior`
 (`load_prior`). `data/` is the harmonized read-view over the three data sources (golden configs / DB `perf` rows / prior
 reservoir) — `Sample`, `Dataset`, and `ShapeKey` (the single golden↔measured join key). `golden.py` holds
-`GoldenConfig` and its matmul / reduce / pointwise subclasses (the `AnalyticPrior`'s ground truth); every kind carries
+`GoldenConfig` and its matmul / attention / softmax / reduce / rms_norm / pointwise subclasses (the `AnalyticPrior`'s ground truth); every kind carries
 `shape_key()` / `snippet()` / `dtype`, so `tune --dataset golden` and the `run --bench --golden` A/B cover the reduce /
 pointwise entries too, not just matmul. The A/B itself carries two integrity gates — an arithmetic-intensity floor
 (a row whose shape-implied FLOP/s exceeds the live card's recorded `GpuSpec` peak is flagged as a wrong bench, not a

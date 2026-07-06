@@ -52,6 +52,15 @@ if TYPE_CHECKING:
 # ``EMMY_O3_TOL`` (a fraction, e.g. ``0.15`` for 15%).
 O3_REBENCH_TOL = 0.15
 
+# Warp (mma) rows get a wider -O3-worthiness band: the -O1 ranking lane systematically
+# overprices register-tile mma kernels (1.5–3× vs -O3 — the cicc unroll blowup the -O1
+# ranking compile dodges), so an mma config that loses the 15% -O1 band can still be the
+# -O3 deploy winner. Without a deployable sample the evidence-first deploy hierarchy only
+# ever sees scalar -O3 rows and keeps deploying them (the qwen3-emb layer-0 projections:
+# scalar g2a evidence at 394 µs deployed over the 70 µs-class mma picks). Cost is
+# bounded: ``_o3_done`` dedups per config, one -O3 compile + short bench each.
+O3_WARP_REBENCH_TOL = 2.0
+
 # The nvcc flags of that deployable re-bench (``pipeline._rebench_o3_async``) — also
 # the regime the re-bench's node rows are keyed under (``two_level`` derives their
 # ``context_key`` from the tune context with these flags substituted).
@@ -204,8 +213,12 @@ class TuningSearch(Search):
         # winner. Dedup via ``_o3_done`` so each config is -O3'd at most once.
         self.last_o3_worthy = False
         if status == "ok" and stats.median > 0 and self.tree.best_reward > 0:
+            from emmy.compiler.pipeline.search.features import is_warp  # noqa: PLC0415
+
             best_lat = 1.0 / self.tree.best_reward
             tol = config.o3_tol(O3_REBENCH_TOL)
+            if is_warp(token.realized_knobs or {}):
+                tol = max(tol, O3_WARP_REBENCH_TOL)  # the -O1 lane overprices mma — see O3_WARP_REBENCH_TOL
             sig = self._o3_sig(token.realized_knobs)
             if stats.median <= best_lat * (1.0 + tol) and sig not in self._o3_done:
                 self._o3_done.add(sig)

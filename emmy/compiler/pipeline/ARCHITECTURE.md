@@ -95,7 +95,10 @@ Ranking is always the policy's job over a single `Prior` — Forks carry NO scor
 `Prior` featurizes the row knobs directly (`features.knob_features`). There is ONE ranking path: the hand-coded
 `AnalyticPrior` cold (a real heuristic *score* over the engineered `D_*` geometry / occupancy features, not emission
 order; a separate `_W_A_DYN` weight set ranks symbolic-axis masked-tile kernels, selected on the stamped
-`S_ext_n_symbolic_axis`) and the learned `CatBoostPrior` once trained, composed behind `FallbackPrior`. `TuningSearch`
+`S_ext_n_symbolic_axis`; two hard-coded interaction gates ride outside the linear weights — the atomic-free split-K
+term, and the tensor-core preference pair `D_scalar_on_warp_eligible` / `D_splitk_roundtrip` off the scheduler's
+per-kernel `S_warp_eligible` row stamp, which stops a warp-eligible f16 contraction deploying a scalar split tile)
+and the learned `CatBoostPrior` once trained, composed behind `FallbackPrior`. `TuningSearch`
 (`tune`) ranks the PUCT frontier; `greedy_decide` (`compile` / `run`, via `Run.resolve`) picks via `Prior.pick` —
 measured -O3 reservoir evidence first (`evidence_pick`: the candidate prefix-consistent with the fastest `H_opt=3` row of
 the same op), the `mean_score` argmin otherwise.

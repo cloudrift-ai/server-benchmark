@@ -24,9 +24,9 @@ fp16 → cuBLAS HGEMM (fp32 `square.512` → SGEMM at default tf32, a *soft* ref
 | matmul.mlp_down.h4096 | sta | 346.67 | 296.95 | 0.86 | #1 |
 | matmul.square.512.dynM | dyn | 6.14 | 6.14 | 1.00 | #2 (deployed greedy 0.75) |
 | matmul.qkv.h4096.dynM | dyn | 258.46 | 249.82 | 0.97 | |
-| matmul.o_proj.h4096.dynM | dyn | 100.93 | 95.08 | 0.94 | #1 |
-| matmul.mlp_gate_up.h4096.dynM | dyn | 596.30 | 553.70 | 0.93 | #1 |
-| matmul.mlp_down.h4096.dynM | dyn | 348.71 | 295.03 | 0.85 | #1 |
+| matmul.o_proj.h4096.dynM | dyn | 100.93 | 95.08 | 0.94 | (= static twin) |
+| matmul.mlp_gate_up.h4096.dynM | dyn | 596.30 | 553.70 | 0.93 | (= static twin) |
+| matmul.mlp_down.h4096.dynM | dyn | 352.80 | 295.03 | 0.84 | #1 |
 | attention.hd64 | sta | 9.25 | 10.24 | 1.11 | |
 | attention.hd128 | sta | 16.51 | 18.42 | 1.12 | |
 | attention.hd64.dynM | dyn | 19.63 | 10.23 | 0.52 | #5 |
@@ -50,13 +50,31 @@ fp16 → cuBLAS HGEMM (fp32 `square.512` → SGEMM at default tf32, a *soft* ref
 | pointwise.n16384 | sta | 15.81 | 12.51 | 0.79 | memory-bound, near ref |
 | pointwise.n16384.dynM | dyn | 15.98 | 12.52 | 0.78 | memory-bound, near ref |
 
-## 1 — masked-tile residual on the big `.dynM` GEMMs
+## 1 — the K-heavy `mlp_down` HGEMM trails cuBLAS ~0.84×, static and dynamic alike (not a dynamic tax)
 
-The three big `N`/`K`-heavy dynamic GEMMs land below their static twins: `mlp_down.dynM` 0.85 (worst),
-`mlp_gate_up.dynM` 0.93, `o_proj.dynM` 0.94. Now that they are on the MMA tier, the remaining gap is the
-masked-tile tax — the boundary guard plus the loss of the static tile's staged prologue on a symbolic-M row.
-`mlp_down.dynM` (K=14336, split-K + a reduction pass) is the lead. **Next:** profile `mlp_down.dynM` vs its
-static twin to isolate guard overhead vs split-K reduction cost.
+`mlp_down` (M=512, N=4096, **K=14336**) is the one golden matmul meaningfully below parity — and the gap is
+**shared by its static and dynamic twins**, not a `.dynM` masked-tile tax. Re-benched side-by-side on RTX 5090
+(-O3, this build): static `w8x2` **347 µs / 0.84× eager**, dynamic greedy `w4x2` **353 µs / 0.84× eager** — the
+same ratio within run-to-run noise (the table's earlier 0.86 vs 0.85 was rounding on two noisy re-benches).
+`o_proj.dynM` is even *faster* than its static twin (100.93 vs 101.54), so "dynamic lands below static" does not
+hold as a pattern.
+
+Diffing the two generated kernels confirms it: they are **byte-identical through the entire compute prologue and
+the K-loop**; the only `.dynM`-specific codegen is (a) ceil-div grid arithmetic (`(seq_len+255)/256`, a few int
+ops per thread) and (b) epilogue store guards (`if (… < seq_len)`, run once per output tile, *not* in the
+K-loop). Neither touches the MMA inner loop — hence the identical ratio, and no measurable masked-tile tax to
+isolate. The larger structural difference in the diff is split-K, which is a **knob choice, not a consequence of
+being dynamic**: the recorded dynamic golden used `w8x2`+g2k (two kernels), while the greedy pick — now recorded
+as the golden — is `w4x2` single-kernel and reproducibly ~3% faster (352.8 vs ~362 e2e over 4 runs), which is
+why the stale `emmy_us: 348.71` was refreshed to 352.8.
+
+So the ~16% gap is a **static K-heavy HGEMM efficiency problem** at K=14336, shared by both twins. **Next:**
+attack it on the *static* `mlp_down` shape (no symbolic axis, identical gap, simpler) — profile the K=14336 MMA
+main loop against cuBLAS HGEMM (staging depth / prologue overlap on a K-dominant tile). The earlier "profile
+`mlp_down.dynM` vs its static twin to isolate guard overhead vs split-K reduction cost" direction is a dead end:
+guard overhead measures ≈0. `mlp_gate_up` (0.93–0.94) and `o_proj` (0.94) are the same GEMM family one notch
+milder, sit near the 0.95 golden threshold, and likewise show no static/dynamic split — a secondary tail, not
+the lead.
 
 ## 2 — deployed greedy picks a suboptimal MMA tile for `square.512.dynM`
 

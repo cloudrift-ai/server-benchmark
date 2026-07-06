@@ -130,8 +130,8 @@ configs:
     K: 14336
     dtype: 'fp16'
     dynamic: true
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16/w8x2/f2x4/k4', VECTORIZE_LOADS: true}
-    emmy_us: 348.71
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16/w4x2/f2x4/k4', VECTORIZE_LOADS: true}
+    emmy_us: 352.8
     cublas_us: 295.03
   - kernel: softmax
     name: softmax.k2048

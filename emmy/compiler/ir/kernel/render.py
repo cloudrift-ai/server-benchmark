@@ -143,6 +143,43 @@ static __device__ __forceinline__ void dpl_ldmatrix_x2_trans(unsigned* r, const 
                  : "=r"(r[0]), "=r"(r[1]) : "r"(addr));
 }
 
+// x4.trans: two col-adjacent canonical-B fragments in one ldmatrix — lanes 0-15
+// address the 16 K rows at the first fragment's column, lanes 16-31 at col+8
+// (the 096_pair_ldmatrix_loads fusion; r[0..1] / r[2..3] are the two fragments).
+static __device__ __forceinline__ void dpl_ldmatrix_x4_trans(unsigned* r, const void* smem) {
+    unsigned addr = __cvta_generic_to_shared(smem);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\\n"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(addr));
+}
+
+// Plain (no .trans) x2: a transposed-B operand staged as its native N-major
+// slab (Q@K^T's K rows) — each 8x8 matrix's rows ARE the mma B fragment's
+// col-major columns, so no transpose is needed (cf. dpl_mma_load_b_gmem_trans).
+static __device__ __forceinline__ void dpl_ldmatrix_x2(unsigned* r, const void* smem) {
+    unsigned addr = __cvta_generic_to_shared(smem);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];\\n"
+                 : "=r"(r[0]), "=r"(r[1]) : "r"(addr));
+}
+
+// C->A register repack: the m16n8k16 f32 C fragment is lane-map ALIGNED with the
+// 16-bit A fragment's k-halves, so two k-adjacent C fragments (c0 low, c1 high)
+// convert into one A operand fragment per lane — no shuffle, no smem round-trip.
+// cvt.rn packs (hi, lo) with round-to-nearest-even — the same rounding the
+// retired smem handoff's RegStore vec2 pack applied, so the repack is bit-identical.
+static __device__ __forceinline__ void dpl_c_to_a_f16(unsigned* a, const float* c0, const float* c1) {
+    asm("cvt.rn.f16x2.f32 %0, %1, %2;\\n" : "=r"(a[0]) : "f"(c0[1]), "f"(c0[0]));
+    asm("cvt.rn.f16x2.f32 %0, %1, %2;\\n" : "=r"(a[1]) : "f"(c0[3]), "f"(c0[2]));
+    asm("cvt.rn.f16x2.f32 %0, %1, %2;\\n" : "=r"(a[2]) : "f"(c1[1]), "f"(c1[0]));
+    asm("cvt.rn.f16x2.f32 %0, %1, %2;\\n" : "=r"(a[3]) : "f"(c1[3]), "f"(c1[2]));
+}
+
+static __device__ __forceinline__ void dpl_c_to_a_bf16(unsigned* a, const float* c0, const float* c1) {
+    asm("cvt.rn.bf16x2.f32 %0, %1, %2;\\n" : "=r"(a[0]) : "f"(c0[1]), "f"(c0[0]));
+    asm("cvt.rn.bf16x2.f32 %0, %1, %2;\\n" : "=r"(a[1]) : "f"(c0[3]), "f"(c0[2]));
+    asm("cvt.rn.bf16x2.f32 %0, %1, %2;\\n" : "=r"(a[2]) : "f"(c1[1]), "f"(c1[0]));
+    asm("cvt.rn.bf16x2.f32 %0, %1, %2;\\n" : "=r"(a[3]) : "f"(c1[3]), "f"(c1[2]));
+}
+
 // gmem-direct fragment loads — the fallback when an mma.sync operand was NOT
 // staged into shared memory (ldmatrix is smem-only, so we read the fragment
 // straight from gmem instead, replicating the PTX m16n8k16 lane→element map).
@@ -380,6 +417,7 @@ static __device__ __forceinline__ void dpl_mma_m16n8k16_bf16(float* d, const uns
 
 _INTRINSIC_TO_CUDA: dict[str, str] = {
     "exp": "expf",
+    "exp_fast": "__expf",
     "rsqrt": "rsqrtf",
     "tanh": "tanhf",
     "fabs": "fabsf",

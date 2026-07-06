@@ -84,6 +84,16 @@ def _smem_budget(ctx) -> int:
     return ctx.max_dynamic_smem if ctx is not None else STATIC_SMEM_CAP
 
 
+def _tma_allowed(ctx) -> bool:
+    """Whether ``TMA`` (``cp.async.bulk.tensor``) stage moves may be offered for this target. TMA is
+    a Hopper (sm_90) feature — Ada / Ampere and older have no TMA, and nvcc has no ``sm_89a`` target,
+    so a TMA stage there fails to compile (``nvcc fatal: Unsupported gpu architecture 'sm_89a'``).
+    Gate the ``d*/tma*`` moves off below sm_90, mirroring the frontend TMA-fold gate in
+    :mod:`~emmy.compiler.pipeline.passes.frontend.decomposition._fold_constant` (``cc < (9, 0)``).
+    ``ctx is None`` (direct unit-test drive, no target) allows it — those paths never reach nvcc."""
+    return ctx is None or ctx.compute_capability >= (9, 0)
+
+
 def _at(knob, axis_name: str) -> str:
     """The axis-named knob key ``FAMILY@<axis>`` (e.g. ``TILE@d``) — the per-node schedule codec keyed
     by the reduce/contraction axis it schedules, so a multi-node kernel addresses each node."""
@@ -153,9 +163,13 @@ def _reduce_specs(kernel, place) -> list[str]:
     hierarchy. A kernel the cooperative tier can't partition (pointwise, or a twisted /
     full-row / contraction reduce) is the lone scalar fold ``[""]`` — the ``REDUCE`` pin is
     ignored there, since it only governs the cooperative reduce tier. An eligible reduce
-    offers ``[conservative coop, scalar]`` (a fork the search / prior ranks, option-0 = the
-    conservative pick so a cold greedy compile keeps cooperating), with an env pin
-    (``EMMY_REDUCE``) authoritative over the candidates (``Knob.narrow``)."""
+    offers option-0 = the conservative heuristic pick (``_pick_coop`` — so a cold greedy
+    compile keeps its historical deploy), then the full legal :func:`coop_reduce_moves`
+    catalog + serial as fork siblings for the search / prior to rank. The catalog rows are
+    what keep the reduce goldens (``b16``/``b32``) reachable: the heuristic alone offered a
+    single spec on any free grid past ``_FREE_CAP`` (no fork), so a bare 2048-row sum tuned
+    exactly one serial variant, 53× behind its pinned golden (eighth-sweep finding 3). An env
+    pin (``EMMY_REDUCE``) stays authoritative over the candidates (``Knob.narrow``)."""
     carrier = _coop_carrier(kernel)
     if carrier is None:
         return [""]  # not cooperative-eligible — scalar serial fold; the pin doesn't apply
@@ -169,7 +183,13 @@ def _reduce_specs(kernel, place) -> list[str]:
     free = prod(_hint_extent(a) for a in place.free) if place.free else 1
     tail = list(kernel.op.body) if isinstance(kernel.op, Map) else []
     coop = _pick_coop(extent, free, has_tail=_has_contraction_tail(tail))
-    cands = [f"b{coop}", ""] if coop > 1 else [""]  # conservative coop first (cold greedy → option-0)
+    cands = [f"b{coop}" if coop > 1 else ""]  # conservative heuristic pick first (cold greedy → option-0)
+    for move in coop_reduce_moves():
+        p = ReducePlan.parse(move)
+        if p.coop <= extent and p.reg <= extent and move not in cands:
+            cands.append(move)
+    if "" not in cands:
+        cands.append("")
     return list(REDUCE.narrow(cands))
 
 
@@ -329,18 +349,22 @@ def _tile_area(plan: TilePlan) -> int:
     return max(plan.units_m * plan.reg_m * am * plan.units_n * plan.reg_n * an, 1)
 
 
-def _stage_candidates(kernel, probe, plan: TilePlan, budget: int = STATIC_SMEM_CAP) -> list[str]:
+def _stage_candidates(kernel, probe, plan: TilePlan, budget: int = STATIC_SMEM_CAP, tma_ok: bool = True) -> list[str]:
     """The RESOLVED operand-stage spellings for one tile candidate — gmem-direct ``""`` first, then
     every grid move that resolves against the node with this ``plan`` (:func:`_resolve_warp_stage` /
     :func:`_resolve_scalar_stage`); the row carries the resolved spelling so the leaf identity, the
     stamped knobs, and the kernel agree. A pinned ``STAGE`` is authoritative: the resolved pin
-    alone, or gmem-direct when it declines (the standard pin-validity degrade)."""
+    alone, or gmem-direct when it declines (the standard pin-validity degrade). ``tma_ok`` is the
+    target's TMA availability (:func:`_tma_allowed`): below sm_90 a ``d*/tma*`` move / pin declines
+    here (stays gmem-direct) rather than being offered and failing to compile."""
     if probe is None or not plan.is_tiled:
         return [""]  # per-cell / unbindable — no operand slab to stage
     node = replace(probe, tile=plan)
 
     def resolve(spec: str) -> str | None:
         st = Stage.parse(spec)
+        if st.transport == "tma" and not tma_ok:
+            return None  # TMA is Hopper+ (sm_90); nvcc has no sm_89a — decline below it
         r = _resolve_warp_stage(node, st, budget) if plan.is_warp else _resolve_scalar_stage(node, st, kernel.inputs, budget)
         return r.spell() if r is not None else None
 
@@ -444,7 +468,7 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], str]:
                     "load (a data-dependent index) — the fragment epilogue cannot thread it; "
                     "drop the a:<atom> token to use the scalar tier."
                 )
-        for stage in _stage_candidates(kernel, probe, plan, _smem_budget(ctx)):
+        for stage in _stage_candidates(kernel, probe, plan, _smem_budget(ctx), _tma_allowed(ctx)):
             for red in _reduce_candidates(kernel, place, plan, probe):
                 # A staged split row is legal: ``_splitk_option`` re-resolves the stage against the
                 # SLICED inner node (the warp slice divisibility already held in
@@ -575,7 +599,13 @@ def _resolve_warp_stage(c: Contraction, stage: Stage, budget: int = STATIC_SMEM_
     # has no descriptor (its fill closure carries the extra index dims verbatim), so it stays
     # eligible for those.
     tma_rank_ok = isinstance(c.a_operand, Load) and len(c.a_operand.index) == 2 and len(c.b_load.index) == 2
-    tma_ok = tma_rank_ok and _can_stage_warp_tma(stage, c.k_axis, n.axis, n.tile, bk, atom.atom_k, a_nbytes, n.mask, c.b_trans)
+    # TMA hardware: every box dim must be 1..256 — the slot shapes are A (tile_m, bk) / B (bk,
+    # tile_n), so an oversized warp register tile (e.g. tile_m = 512 at w4/f8) must decline TMA
+    # (the scalar resolver gates the same; cp.async has no box).
+    tma_box_ok = max(m.tile, n.tile, bk * atom.atom_k) <= 256
+    tma_ok = (
+        tma_rank_ok and tma_box_ok and _can_stage_warp_tma(stage, c.k_axis, n.axis, n.tile, bk, atom.atom_k, a_nbytes, n.mask, c.b_trans)
+    )
     cp_ok = (not tma_ok) and _can_stage_warp(stage, c.k_axis, m.tile, n.tile, bk, atom.atom_k, m.mask, n.mask, c.b_trans)
     if not (tma_ok or cp_ok):
         return None
@@ -589,9 +619,11 @@ def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = ST
     """Resolve a pinned operand ``Stage`` against the scalar register-tile contraction ``c``, or
     ``None`` (gmem-direct). Staging is **opt-in behind a ``STAGE`` pin**: eligible when the transport
     is ``tma`` / ``cp.async`` and K is static (a computed-A contraction never reaches here — it keeps
-    the ``Map`` form). A masked (overhanging) M / N is fine — the drain reads the slab by LOCAL tile
-    coords and the overhanging store is guarded, so TMA zero-fills the box overhang and cp.async
-    clamps the gmem read. The slab K-chunk ``bk_elems`` is **derived** to fit ``depth``
+    the ``Map`` form). A masked (overhanging) **M** is fine — the drain reads the slab by LOCAL tile
+    coords and the overhanging store is guarded. A masked **N** or a transposed **B** stays gmem-direct:
+    the B-slab fill would clamp a chunk-start column into a row-crossing gmem address and hang the kernel
+    on the misaligned cp.async / TMA copy — the same refusal the warp tier makes (:func:`_can_stage_warp`
+    / :func:`_can_stage_warp_tma`). The slab K-chunk ``bk_elems`` is **derived** to fit ``depth``
     ``tile_m×bk + bk×tile_n`` operand slots in the smem ``budget`` (largest power-of-two dividing K; ``inputs``
     supplies the element dtype) — not spelled by a codec, so no schema change. ``depth >= 2`` is the
     scalar gmem→smem prefetch ring — the same ``staged_kloop`` phases the warp tier runs, the atom
@@ -599,6 +631,11 @@ def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = ST
     down (a smaller ring beats gmem-direct), single-buffer last. ``reg_depth`` stays 1 (the
     smem→register double-buffer is an ``ldmatrix`` transform, no scalar counterpart)."""
     if not c.k_axis.extent.is_static or stage.transport not in ("tma", "cp.async"):
+        return None
+    # A masked-N (overhanging inner dim) or transposed-B B-slab fill would clamp a chunk-start column
+    # into a row-crossing gmem address and hang on the misaligned 16 B copy — the warp tier refuses the
+    # same (:func:`_can_stage_warp` / :func:`_can_stage_warp_tma`).
+    if c.n.mask or c.b_trans:
         return None
     if not inputs or c.a_operand.input not in inputs:
         return None
@@ -618,17 +655,24 @@ def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = ST
     # register tile like tile_n=832 must decline TMA; cp.async has no box).
     if stage.transport == "tma" and max(c.m.tile, c.n.tile) > 256:
         return None
-    # cuTensorMapEncodeTiled: every global stride must be 16 B-aligned — A's inner global
-    # stride is K (row-major (M,K)), B's is N ((K,N)). The warp resolver's
-    # ``_can_stage_warp_tma`` gates the same; without it an odd-width shape (e.g. N=5 fp32,
-    # a 20 B row stride) resolver-accepts and then crashes at descriptor encode time.
-    if stage.transport == "tma":
-        n_ext = c.n.axis.extent
-        if not n_ext.is_static or ((K * elem_bytes) % 16 or (n_ext.as_static() * elem_bytes) % 16):
-            return None
+    # Every staged transport needs 16 B-aligned inner global strides — A's is K (row-major
+    # (M,K)), B's is N ((K,N)). TMA: cuTensorMapEncodeTiled's global-stride rule (crashes at
+    # descriptor encode otherwise — the N=5 fp32 / 20 B case). cp.async: the fill's vectorized
+    # copies inherit the row base alignment, so a 12 B-stride operand (N=3 fp32) issues
+    # ``cp.async`` at misaligned addresses and faults at RUNTIME (``CUDA_ERROR_MISALIGNED_ADDRESS``
+    # + watchdog hang — the ninth-sweep e2e regression on a (8,3) fp32 B; the Gemma
+    # ``k_linear_reduce`` bench_fail cluster shares the signature and likely the class).
+    # Gate both transports: an odd-stride shape stays gmem-direct.
+    n_ext = c.n.axis.extent
+    if not n_ext.is_static or ((K * elem_bytes) % 16 or (n_ext.as_static() * elem_bytes) % 16):
+        return None
+    # Per-operand slot bytes: A's slab is (tile_m × bk) at A's element size, B's (bk × tile_n) at
+    # B's — the operands may differ (fp32 split partials × fp16 weights), so sizing both with A's
+    # element over-books the budget on the mixed shape.
+    b_bytes = inputs[c.b_load.input].dtype.nbytes if c.b_load.input in inputs else elem_bytes
     depth, bk_elems = max(1, stage.depth), 0
     while depth >= 1:
-        cap = budget // (depth * max(1, c.m.tile + c.n.tile) * elem_bytes)
+        cap = budget // (depth * max(1, c.m.tile * elem_bytes + c.n.tile * b_bytes))
         bk_elems = next((v for v in (128, 64, 32, 16, 8, 4) if v <= cap and K % v == 0), 0)
         if bk_elems >= 4:
             break
@@ -1072,13 +1116,13 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         pair = _twisted_pair(tile.op)
         if pair is not None:
             red, head, pv = pair
-            warps = _twisted_warp_options(tile, name, knobs)
+            warps = _twisted_warp_options(tile, name, knobs, _smem_budget(ctx), _tma_allowed(ctx))
             if warps and TILE.raw() is not None:  # a live warp pin — the mma rows alone (the pin contract)
                 return warps if len(warps) > 1 else warps[0]
             chain = _twisted_chain_option(tile, place, name, knobs)
             forms = [*warps, *([chain] if chain is not None else [])]
             if forms:
-                empty = {_at(TILE, head.k_axis.name): "", _at(TILE, pv.k_axis.name): ""}
+                empty = {_at(TILE, head.k_axis.name): "", _at(TILE, pv.k_axis.name): "", _at(STAGE, red.axis.name): ""}
                 forms += [_option(tile, place, spec, name, {**knobs, **empty}) for spec in _reduce_specs(tile, place)]
                 return forms if len(forms) > 1 else forms[0]
         else:
@@ -1144,7 +1188,13 @@ def _twisted_chain_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp
     # stamped (keyed on the PV contraction's k axis, like every per-node schedule codec) — the row
     # identity the DB / prior separate it from the per-cell serial by — and the sibling families it
     # does NOT schedule are decided-empty so every flash leaf row spells the same key set.
-    stamped = {**knobs, _at(TILE, pv.k_axis.name): pv2.tile.spell(), _at(TILE, head.k_axis.name): "", _at(REDUCE, red.axis.name): ""}
+    stamped = {
+        **knobs,
+        _at(TILE, pv.k_axis.name): pv2.tile.spell(),
+        _at(TILE, head.k_axis.name): "",
+        _at(REDUCE, red.axis.name): "",
+        _at(STAGE, red.axis.name): "",
+    }
     return TileOp(op=op2, name=name, place=Placement(free=tile.place.free, grid=tuple(grid[:-1])), knobs=stamped)
 
 
@@ -1228,7 +1278,89 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     return TileOp(op=node, name=name, place=place, tier=wt, stage=stage, knobs=stamped)
 
 
-def _twisted_warp_options(tile: TileOp, name: str, knobs: dict) -> list[TileOp]:
+def _resolve_twisted_stage(stage: Stage, kv_extent, bn: int, head_dim: int, d_v: int, elem_bytes: int, budget: int) -> Stage | None:
+    """Resolve an operand ``Stage`` against a warp-flash streaming pair — the K/V slabs of one
+    ``bn``-key streaming step (K ``bn × head_dim`` in its native N-major layout, V ``bn × d_v``
+    K-major; both verbatim row copies, so staging stays bit-identical to gmem-direct). Two
+    transports resolve: **cp.async** (cooperative fills, +16 B padded rows for the bank-conflict
+    break) and **TMA** (the batched K/V encode as rank-N boxes with leading extent-1 dims —
+    ``(1, 1, bn, head_dim)`` — the load's own batch/head index exprs supplying the origin coords;
+    the slabs stay dense and take the hardware swizzle + drain XOR instead of padding; box dims
+    cap at the 256 hardware limit). ``sync`` has nothing to overlap. A symbolic or
+    non-block-divisible kv stays gmem-direct (its masked fragment loads already clamp; slab
+    zero-fill is a follow-up). ``depth`` clamps so the ring's K+V slot pairs fit the smem
+    ``budget``; ``reg_depth`` clamps to 1 (no ldmatrix ping-pong on the streaming drain yet);
+    ``bk_elems`` records the streamed keys per step."""
+    if stage.transport not in ("cp.async", "tma"):
+        return None
+    if not kv_extent.is_static or kv_extent.as_static() % bn != 0:
+        return None
+    if stage.transport == "tma":
+        # Box dims must fit the 1..256 hardware range, and the inner (contiguous) row spans must
+        # be 16 B-aligned for the box copy (guaranteed ≥ the mma divisibility gates, checked for
+        # form). Rank ≤ 5 holds structurally: SDPA operands are (batch…, S, D) rank ≤ 4.
+        if bn > 256 or head_dim > 256 or d_v > 256 or (head_dim * elem_bytes) % 16 or (d_v * elem_bytes) % 16:
+            return None
+        pad = 0  # TMA deposits dense — the hardware swizzle replaces the row pad
+    else:
+        pad = 16  # the two slabs' padded rows (2 × _twist._PAD)
+    slot_bytes = bn * (head_dim + d_v + pad) * elem_bytes
+    if slot_bytes > budget:
+        return None
+    depth = min(stage.depth, budget // slot_bytes)
+    # ``reg_depth`` ≤ 2: the streaming drains support the two-slot ldmatrix ping-pong (the next
+    # atom-K step's B fragments load while the current step's mmas consume — breaking the WAR
+    # hazard on the fragment registers); deeper ping-pongs cost registers the fm chains don't have.
+    return replace(stage, depth=depth, ring=stage.ring and depth >= 2, reg_depth=min(stage.reg_depth, 2), bk_elems=bn)
+
+
+def _twisted_stage_candidates(
+    kv_extent, bn: int, head_dim: int, d_v: int, elem_bytes: int, budget: int, tma_ok: bool = True
+) -> list[Stage | None]:
+    """The K/V operand-stage candidates for one warp-flash geometry row — gmem-direct ``None``
+    first (the conservative option-0), then every ``stage_moves`` entry that RESOLVES against the
+    stream (:func:`_resolve_twisted_stage`), deduped on the resolved spelling (a ``p2`` move clamps
+    to the same pipeline as its ``p1`` sibling and drops; an over-budget depth clamps down the same
+    way). A pinned ``STAGE`` is authoritative: the resolved pin alone, or gmem-direct with a log
+    line when it declines — the same pin-validity degrade as the warp ``TILE`` pin. ``tma_ok`` is
+    the target's TMA availability (:func:`_tma_allowed`): below sm_90 a ``d*/tma*`` move / pin
+    declines here rather than being offered and failing to compile."""
+
+    def resolve(spec: str) -> Stage | None:
+        st = Stage.parse(spec)
+        if st.transport == "tma" and not tma_ok:
+            return None  # TMA is Hopper+ (sm_90); nvcc has no sm_89a — decline below it
+        return _resolve_twisted_stage(st, kv_extent, bn, head_dim, d_v, elem_bytes, budget)
+
+    if STAGE.raw() is not None:
+        pinned = STAGE.narrow([""])[0]
+        if pinned:
+            try:
+                r = resolve(pinned)
+            except ValueError:
+                r = None
+            if r is not None:
+                return [r]
+            logger.warning(
+                "STAGE pin %r does not resolve against the warp-flash stream (cp.async over a static, "
+                "%d-key-block-divisible kv); the flash kernel stays gmem-direct",
+                pinned,
+                bn,
+            )
+        return [None]
+    out: list[Stage | None] = [None]
+    spelled: set[str] = set()
+    for move in stage_moves(warp=True):
+        if not move:
+            continue
+        r = resolve(move)
+        if r is not None and r.spell() not in spelled:
+            spelled.add(r.spell())
+            out.append(r)
+    return out
+
+
+def _twisted_warp_options(tile: TileOp, name: str, knobs: dict, budget: int = STATIC_SMEM_CAP, tma_ok: bool = True) -> list[TileOp]:
     """The fragment-resident (tensor-core) candidates for a ``TWISTED`` streaming reduce — the
     warp-flash MOVE GRID over :func:`~emmy.compiler.pipeline.search.space.twisted_warp_moves`'s
     ``(warps_m, key_atoms)`` geometry — or ``[]`` (not eligible: the scalar options stand alone).
@@ -1240,7 +1372,9 @@ def _twisted_warp_options(tile: TileOp, name: str, knobs: dict) -> list[TileOp]:
     same-per-node stamping rule as ``_warp_option``: the two contractions get their mma
     :class:`TilePlan`\\ s — the Q@K score block ``key_atoms·atom_n`` keys wide, the value dim folded
     into the expect tile whose ``bk`` covers the block — and the placement maps ``warps_m`` warps
-    per CTA, each owning ``atom_m`` query rows; the value axis leaves the grid. An additive
+    per CTA, each owning ``atom_m`` query rows; the value axis leaves the grid. Each geometry row
+    crosses with its K/V operand-stage candidates (:func:`_twisted_stage_candidates` — gmem-direct
+    option-0, then the resolver-gated cp.async ring depths, keyed ``STAGE@<kv>``). An additive
     ``(m, kv)`` score bias is not realizable at the fragment tier → ``[]``. A warp ``TILE`` pin
     narrows the grid to the pinned geometry (loud on a divisibility violation — the pin contract);
     a pin that doesn't fit the flash form (wrong atom / a column split / a foreign ``bk``) declines
@@ -1261,6 +1395,8 @@ def _twisted_warp_options(tile: TileOp, name: str, knobs: dict) -> list[TileOp]:
     if atom_name is None:
         return []
     atom = ATOM_REGISTRY[atom_name]
+    if not atom.c_to_a_repack:
+        return []  # the fragment realizer feeds P@V via the C→A register repack — an atom without it has no tier
     atom_m, atom_n, atom_k = atom.shape
     head_dim, d_v = head.k_axis.extent, pv.n_axis.extent
     if not (head_dim.is_static and head_dim.as_static() % atom_k == 0 and d_v.is_static and d_v.as_static() % atom_n == 0):
@@ -1277,49 +1413,72 @@ def _twisted_warp_options(tile: TileOp, name: str, knobs: dict) -> list[TileOp]:
         if not is_warp_codec(spec):
             return []  # a scalar / empty pin asks for a tier this form doesn't offer
         want = TilePlan.parse(spec)
-        if want.atom.name != atom_name or want.units[1] != 1 or want.regs[0] != 1 or want.bk != bk:
+        if want.atom.name != atom_name or want.units[1] != 1 or want.bk != bk:
             logger.warning(
-                "warp TILE pin %r does not fit the flash form (atom %s, w<um>x1/f1x<nt>/k%d); the flash kernel stays scalar",
+                "warp TILE pin %r does not fit the flash form (atom %s, w<um>x1/f<fm>x<nt>/k%d); the flash kernel stays scalar",
                 spec,
                 atom_name,
                 bk,
             )
             return []
-        pairs = [(want.units[0], want.regs[1])]
+        if (want.regs[1] * atom_n) % atom_k:
+            # The streamed key block must be a multiple of the P@V atom-K step — an odd nt leaves a
+            # partial expect fold (the C→A repack pairs k-adjacent score fragments). Loud, per the
+            # pin contract (divisibility violation).
+            raise ValueError(f"warp TILE pin: key block {want.regs[1] * atom_n} is not a multiple of the P@V atom K-step {atom_k}")
+        triples = [(want.units[0], want.regs[1], want.regs[0])]
     else:
-        pairs = twisted_warp_moves()
+        triples = twisted_warp_moves()
     out: list[TileOp] = []
-    for um, nt in pairs:
+    elem_bytes = atom.operand_dtype("b").nbytes
+    for um, nt, fm in triples:
         bn = nt * atom_n  # the streaming block: nt key atoms per step
         if kv_ext.is_static and kv_ext.as_static() % bn != 0:
             if pinned:
                 raise ValueError(f"warp TILE pin: key block {bn} does not divide the static KV extent {kv_ext.as_static()}")
             continue
-        if m_ext.is_static and m_ext.as_static() % (um * atom_m) != 0:
+        if m_ext.is_static and m_ext.as_static() % (um * fm * atom_m) != 0:
             if pinned:
-                raise ValueError(f"warp TILE pin: {um} warps × {atom_m} query rows do not divide the static M extent {m_ext.as_static()}")
+                raise ValueError(
+                    f"warp TILE pin: {um} warps × {fm} query tiles × {atom_m} rows do not divide the static M extent {m_ext.as_static()}"
+                )
             continue
-        qk_plan = TilePlan(atom=atom, units=(um, 1), regs=(1, nt), bk=bk)
-        pv_plan = TilePlan(atom=atom, units=(um, 1), regs=(1, d_v.as_static() // atom_n), bk=max(1, bn // atom_k))
+        qk_plan = TilePlan(atom=atom, units=(um, 1), regs=(fm, nt), bk=bk)
+        pv_plan = TilePlan(atom=atom, units=(um, 1), regs=(fm, d_v.as_static() // atom_n), bk=max(1, bn // atom_k))
         partial = tuple(replace(s, tile=qk_plan) if s is head else (replace(s, tile=pv_plan) if s is pv else s) for s in red.partial)
         red2 = replace(red, partial=type(red.partial)(partial))
         op2 = replace(op, source=red2) if isinstance(op, Map) else red2
-        # ``um`` warps per CTA, each owning ``atom_m`` query rows: the query axis shrinks to its
-        # CTA-block count; the value (expect output) axis folds into the fragment tile and leaves
-        # the grid.
+        # ``um`` warps per CTA, each owning ``fm`` register query tiles of ``atom_m`` rows: the
+        # query axis shrinks to its CTA-block count; the value (expect output) axis folds into the
+        # fragment tile and leaves the grid.
         grid = tuple(
-            Axis(name=ax.name, extent=ax.extent.ceil_div(um * atom_m), source_axis=ax.source_axis or ax) if ax.name == m_name else ax
+            Axis(name=ax.name, extent=ax.extent.ceil_div(um * fm * atom_m), source_axis=ax.source_axis or ax) if ax.name == m_name else ax
             for ax in tile.place.free
             if ax.name != pv.n_axis.name
         )
         place = Placement(free=tile.place.free, grid=grid)
-        # Both contractions' plans are stamped (each keyed on its node's k axis) + the reduce
-        # partition decided-empty, so every flash leaf row spells the same key set.
-        stamped = {
-            **knobs,
-            _at(TILE, head.k_axis.name): qk_plan.spell(),
-            _at(TILE, pv.k_axis.name): pv_plan.spell(),
-            _at(REDUCE, kv_name): "",
-        }
-        out.append(TileOp(op=op2, name=name, place=place, knobs=stamped))
+        # Both contractions' plans are stamped (each keyed on its node's k axis), the reduce
+        # partition decided-empty, and the K/V operand stage on the STREAM axis (the resolved
+        # spelling, or the explicit OFF ``""`` — the honest-stamping rule), so every flash leaf
+        # row spells the same key set. A resolved **TMA** stage additionally offers the WSPEC
+        # producer-band splits (the same legality as the matmul tier's ``_wspec_candidates``:
+        # ``_wspec_workers`` gates the thread budgets — the aux band must not exceed the
+        # ``32·um`` compute band); a degraded candidate is skipped rather than duplicating the
+        # uniform row.
+        for stage in _twisted_stage_candidates(kv_ext, bn, head_dim.as_static(), d_v.as_static(), elem_bytes, budget, tma_ok):
+            wspecs = list(WSPEC.narrow(wspec_moves())) if (stage is not None and stage.transport == "tma") else [""]
+            for wspec_cand in wspecs:
+                workers, wspec_spec = _wspec_workers(wspec_cand, stage, 32 * um)
+                if wspec_cand and workers is None:
+                    continue  # over-budget / illegal split — identical to the uniform row
+                stamped = {
+                    **knobs,
+                    _at(TILE, head.k_axis.name): qk_plan.spell(),
+                    _at(TILE, pv.k_axis.name): pv_plan.spell(),
+                    _at(REDUCE, kv_name): "",
+                    _at(STAGE, kv_name): stage.spell() if stage is not None else "",
+                }
+                if wspec_spec:
+                    stamped[WSPEC.name] = wspec_spec
+                out.append(TileOp(op=op2, name=name, place=place, stage=stage, workers=workers, knobs=stamped))
     return out

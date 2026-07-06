@@ -2,11 +2,14 @@
 ranking surface the search consumes.
 
 ``mean_score`` / ``mean_scores`` / ``pick`` (the deploy + eval + diagnostics
-surface) use the learned :class:`CatBoostPrior` once it's ``fitted`` and fall
+surface) use the learned :class:`CatBoostPrior` once it's ``trustworthy`` —
+``fitted`` AND passing the reservoir calibration gate (``Prior.trustworthy``;
+a fitted-but-mis-calibrated model is quarantined to analytic instead of owning
+deploys) — and fall
 back to the :class:`AnalyticPrior` (cold-start heuristic) otherwise — so the
 policies always get a usable ranking and no longer special-case "cold → emission
 order". :meth:`score` (the MCTS *selection* signal — see :mod:`policy.mcts`) is
-the one surface that BLENDS the two even when fitted, so PUCT explores the region
+the one surface that BLENDS the two even when trusted, so PUCT explores the region
 the heuristic prices well but the data-poor learned model buries (the golden-sweep
 fp16 finding). Everything else (training: ``add_rows`` / ``maybe_refit`` /
 ``checkpoint`` / ``fit`` / ``to_json``, and inspection: ``_dataset`` /
@@ -37,8 +40,9 @@ from emmy.compiler.pipeline.search.prior.catboost import CatBoostPrior
 class FallbackPrior(Prior):
     """Learned prior with an analytic cold-start fallback. Not a dataset owner —
     its training / inspection surface is the ``learned`` prior's. ``mean_score`` /
-    ``mean_scores`` fall back to analytic only while cold; ``score`` (the MCTS
-    selection signal) blends the analytic multiplier in even when fitted."""
+    ``mean_scores`` fall back to analytic while cold or quarantined
+    (``trustworthy`` — the calibration gate); ``score`` (the MCTS
+    selection signal) blends the analytic multiplier in even when trusted."""
 
     def __init__(self, learned: Prior, analytic: Prior | None = None) -> None:
         # Deliberately NOT calling super().__init__() — this prior holds no
@@ -54,17 +58,26 @@ class FallbackPrior(Prior):
         # always call score()/mean_score(), which fall back to analytic when cold.
         return self.learned.fitted
 
+    @property
+    def trustworthy(self) -> bool:
+        # The promotion gate: fitted AND not demonstrably mis-calibrated
+        # (``Prior.trustworthy`` — reservoir Spearman vs ``CALIBRATION_MIN``).
+        # ``fitted`` alone let a garbage model own deploys silently (the RTX 5090
+        # sweep-7 finding 3); a quarantined model keeps training and checkpointing
+        # while decisions stay analytic.
+        return self.learned.trustworthy
+
     def score(self, knobs: dict) -> float:
         # MCTS-selection signal ONLY (deploy/eval go through mean_score/pick).
-        # Cold: the analytic prior IS the ranking. Fitted: keep the learned µs as
-        # the scale and tilt it by the analytic's dimensionless ranking multiplier
-        # (``analytic**W``, neutral 1.0) so PUCT still explores a region the
+        # Cold or quarantined: the analytic prior IS the ranking. Trusted: keep the
+        # learned µs as the scale and tilt it by the analytic's dimensionless ranking
+        # multiplier (``analytic**W``, neutral 1.0) so PUCT still explores a region the
         # heuristic prices well but the learned model — having never measured it —
         # buries (the fp16 small-BK warp tiles at large squares). ``W=0`` recovers
         # pure-learned selection. Scale-correct because the analytic factor is
         # centered at its no-opinion 1.0, so a config the heuristic has no view on
         # leaves the learned prediction untouched.
-        if not self.learned.fitted:
+        if not self.trustworthy:
             return self.analytic.score(knobs)
         w = config.analytic_tilt()
         learned = self.learned.score(knobs)
@@ -73,10 +86,10 @@ class FallbackPrior(Prior):
         return learned * self.analytic.score(knobs) ** w
 
     def mean_score(self, knobs: dict) -> float:
-        return self.learned.mean_score(knobs) if self.learned.fitted else self.analytic.mean_score(knobs)
+        return self.learned.mean_score(knobs) if self.trustworthy else self.analytic.mean_score(knobs)
 
     def mean_scores(self, knobs_list: list[dict]) -> list[float]:
-        return self.learned.mean_scores(knobs_list) if self.learned.fitted else self.analytic.mean_scores(knobs_list)
+        return self.learned.mean_scores(knobs_list) if self.trustworthy else self.analytic.mean_scores(knobs_list)
 
     def pick(self, rows: list[dict]) -> tuple[int, float]:
         # Measured -O3 evidence lives in the LEARNED half's reservoir (the

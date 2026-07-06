@@ -58,6 +58,9 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   concrete `(cos, sin)` kwargs — those specialise rotary to the trace seq_len, which is exactly what dynamic mode must
   avoid. Forward arg is named `x`, so the CLI spec is `--dynamic seq_len@x:1`
   (`tests/compiler/ir/test_dynamic_shapes.py::test_qwen_layer_dynamic_compiles_and_matches_eager`).
+  Gemma-nano PLE blocks (those exposing `hidden_size_per_layer_input`) additionally get a seeded synthetic
+  `per_layer_input` buffer sliced in-graph the same way — kernel shapes and latencies are the deployed model's,
+  numerics are synthetic; non-PLE architectures take the unchanged path (`tests/compiler/trace/test_huggingface.py`).
 
 `SliceOp` nodes record `dim`/`start` as **op fields** at trace time (`torch.py`'s slice handler reads the raw FX
 args): the legacy constant-input convention can't represent a `None` start (`x[:, :s]`) or a SymInt end —

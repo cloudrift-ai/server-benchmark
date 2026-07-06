@@ -32,6 +32,13 @@ halves:
 score producer until its softmax-then-P@V consumer has fused (the fusion reads the
 producer's Q/K as plain ``Load``\\ s, so it must stay a ``LoopOp`` until then).
 
+Layout-agnostic on BOTH sides. The input loads permute the canonical ``(batch…, seq, last)`` index
+back into each operand's own traced slot order (``_permute_idx`` — HF's per-layer Q/K/V arrive
+seq-major); the output ``Write`` reproduces the root buffer's real layout — a fused output transpose
+and size-1 broadcast / unsqueeze dims (HF's ``[b, h, s, 1, d]``) — via ``_out_store_index`` (the store
+index each lowering tier uses, mapping grid axes onto the output slots by dim extent). A bare
+grid-order store mis-strides a non-canonical output (all elements alias, the rest uninitialized → NaN).
+
 (Online softmax — flash's softmax-stats half without the P@V — lives in ``_softmax``.)
 
 Scope is the **clean** scaled-QK producer (Q/K recoverable as plain ``Load``\\ s). A
@@ -206,9 +213,14 @@ def build_flash_frag(
     causal: bool,
     group: int = 1,
     mask: tuple[str, tuple] | None = None,
-) -> Graph:
+    layouts: tuple = (None, None, None),
+    raw_shapes: tuple | None = None,
+    out_index: tuple | None = None,
+) -> Graph | None:
     """Build the fragment graph holding the fused flash ``TileOp`` (+ its scale /
-    -inf constants). The caller guarantees :func:`flash_shape_eligible`.
+    -inf constants), or ``None`` when the root's output layout can't be reproduced on the grid
+    (:func:`_out_store_index` — the caller degrades to cut). The caller guarantees
+    :func:`flash_shape_eligible`.
 
     The compute is the op tree itself — a ``Map`` whose body is the ``(m,l,O)`` LSE
     ``TWISTED`` reduce ``Loop`` then the ``O/l`` projection, carried unlowered on the ``TileOp`` with an empty
@@ -218,18 +230,47 @@ def build_flash_frag(
     isn't stored here.
 
     ``group`` is the GQA head ratio (K/V indexed at ``head // group``); ``mask`` is
-    an optional ``(buffer_id, shape)`` additive bias loaded per ``(m, kv)``."""
+    an optional ``(buffer_id, shape)`` additive bias loaded per ``(m, kv)``. ``q/k/v_shape``
+    are CANONICAL ``(batch…, seq, last)``; ``layouts`` are the per-operand ``(seq_pos,
+    last_pos)`` slot orders the loads permute back into (``None`` = head-major identity),
+    and ``raw_shapes`` the operands' traced shapes for the fragment's input decls."""
     batch = [_static(d) for d in q_shape[:-2]]
     head_dim, d_v = _static(q_shape[-1]), _static(v_shape[-1])
     s_q_dim, s_k_dim = q_shape[-2], k_shape[-2]  # Dim instances — static int or symbolic seq_len
     scale = 1.0 / math.sqrt(head_dim)
     mask_buf, mask_shape = mask if mask is not None else (None, None)
 
-    flash_op = _flash_op(
-        q_id, k_id, v_id, batch, s_q_dim, s_k_dim, head_dim, d_v, causal=causal, group=group, mask_buf=mask_buf, mask_shape=mask_shape
-    )
     batch_axes = tuple(Axis(name=f"b{i}", extent=Dim(b)) for i, b in enumerate(batch))
     grid = (*batch_axes, Axis(name="m", extent=s_q_dim), Axis(name="d", extent=Dim(d_v)))
+
+    # The output store must match the root buffer's real rank + layout (transpose / broadcast dims),
+    # not the bare grid order. ``out_index`` is the root kernel's own output ``Write`` index; map its
+    # per-axis vars onto the grid axes (:func:`_out_store_index`). ``None`` there = an un-reproducible
+    # output layout → decline flash (the caller degrades to cut). With no ``out_index`` (isolated
+    # fragment / tests), the materializer's bare grid-order glue stores the head-major identity.
+    out_store: tuple[str, tuple] | None = None
+    if out_index is not None:
+        store_idx = _out_store_index(out_index, out.shape, grid)
+        if store_idx is None:
+            return None
+        out_store = (out.name, store_idx)
+
+    flash_op = _flash_op(
+        q_id,
+        k_id,
+        v_id,
+        batch,
+        s_q_dim,
+        s_k_dim,
+        head_dim,
+        d_v,
+        causal=causal,
+        group=group,
+        mask_buf=mask_buf,
+        mask_shape=mask_shape,
+        layouts=layouts,
+        out_store=out_store,
+    )
     # The free axes are the schedule's, carried on the ``TileOp`` with an UNMAPPED grid —
     # like every other recognizer; ``_schedule`` (inside ``010_recognize``) maps ``free`` onto the grid.
     # ``PLACE@fold=fuse`` is the RESOLVED downstream-fold placement this fragment realizes (the fused
@@ -241,7 +282,8 @@ def build_flash_frag(
     tile = TileOp(op=flash_op, place=Placement(free=grid), knobs=knobs)
 
     frag = Graph()
-    for nid, shp in ((q_id, q_shape), (k_id, k_shape), (v_id, v_shape)):
+    in_shapes = raw_shapes if raw_shapes is not None else (q_shape, k_shape, v_shape)
+    for nid, shp in zip((q_id, k_id, v_id), in_shapes, strict=True):
         frag.add_node(op=InputOp(), inputs=[], output=Tensor(nid, shp, out.dtype), node_id=nid)
     inputs = [q_id, k_id, v_id, "_flash_scale"]
     frag.add_node(
@@ -319,6 +361,8 @@ def _flash_op(
     group: int = 1,
     mask_buf: str | None = None,
     mask_shape: tuple | None = None,
+    layouts: tuple = (None, None, None),
+    out_store: tuple[str, tuple] | None = None,
 ) -> Map:
     """The per-output-element ``(…, m, d)`` compute as the structural-node tree: flash is
     ``Map(body=[O/l projection], source=Reduction(role=TWISTED, axis=kv, partial=[Contraction(QK), …,
@@ -340,9 +384,10 @@ def _flash_op(
     bvars = _batch_vars(len(batch))
     head_axis = len(batch) - 1  # last batch dim is the head (when there is one)
     kv_bvars = tuple(BinaryExpr("/", bv, Literal(group, "int")) if (group > 1 and i == head_axis) else bv for i, bv in enumerate(bvars))
-    q_idx = (*bvars, Var("m"), Var("dd"))
-    k_idx = (*kv_bvars, Var("kv"), Var("dd"))
-    v_idx = (*kv_bvars, Var("kv"), Var("d"))
+    q_layout, k_layout, v_layout = layouts
+    q_idx = _permute_idx((*bvars, Var("m"), Var("dd")), q_layout)
+    k_idx = _permute_idx((*kv_bvars, Var("kv"), Var("dd")), k_layout)
+    v_idx = _permute_idx((*kv_bvars, Var("kv"), Var("d")), v_layout)
 
     # s = Σ_dd Q·K — the inner contraction as a high-level :class:`Contraction` structural node, the
     # ``source`` of the streaming kv :class:`Reduction`. Per-cell scalar (``TilePlan()``): the
@@ -402,9 +447,17 @@ def _flash_op(
         role=AxisRole.TWISTED,
     )
     # φ projection: normalize the streamed (unnormalized) output by the LSE denominator —
-    # O_i / l_i after the kv loop, the ``Map`` body over the reduction ``source``.
-    proj = Assign(name="O_i__proj", op="divide", args=("O_i", "l_i"))
-    return Map(body=Body((proj,)), source=reduction)
+    # O_i / l_i after the kv loop, the ``Map`` body over the reduction ``source``. When the caller
+    # supplies ``out_store`` (``(buffer, index)``), the body ALSO carries the explicit output
+    # ``Write`` at that index — the output-layout-aware store (:func:`_out_store_index`) that
+    # reproduces the root's real buffer rank / transpose / broadcast dims. Its presence short-circuits
+    # the materializer's bare grid-order ``with_store`` glue (``has_write``). Absent it, the glue
+    # writes the bare grid cell (the head-major identity path — isolated fragments, tests).
+    proj: tuple[Stmt, ...] = (Assign(name="O_i__proj", op="divide", args=("O_i", "l_i")),)
+    if out_store is not None:
+        out_buf, out_idx = out_store
+        proj = (*proj, Write(output=out_buf, index=out_idx, value="O_i__proj"))
+    return Map(body=Body(proj), source=reduction)
 
 
 # --------------------------------------------------------------------------- #
@@ -436,10 +489,80 @@ def _var_at(index: tuple, pos: int) -> str | None:
     return e.name if isinstance(e, Var) else None
 
 
-def _extract_qk(xnode: Node) -> tuple[str, str, object] | None:
-    """From the scaled-QK^T producer of the score buffer, return ``(q_id, k_id,
-    head_dim_extent)``. Q vs K by index (fusion reorders the operands): the matmul
-    operand whose seq index equals the score's row (M) axis is Q."""
+def _slot_of(index: tuple, name: str) -> int | None:
+    """The position of the plain ``Var(name)`` in ``index``, or None."""
+    for i, e in enumerate(index):
+        if isinstance(e, Var) and e.name == name:
+            return i
+    return None
+
+
+def _canon_shape(shape: tuple, layout: tuple[int, int] | None) -> tuple:
+    """``shape`` reordered to the canonical ``(batch…, seq, last)`` given the operand's
+    ``(seq_pos, last_pos)`` layout — identity for ``None`` (already head-major)."""
+    if layout is None:
+        return tuple(shape)
+    s_pos, l_pos = layout
+    rest = tuple(d for i, d in enumerate(shape) if i not in (s_pos, l_pos))
+    return (*rest, shape[s_pos], shape[l_pos])
+
+
+def _permute_idx(comps: tuple, layout: tuple[int, int] | None) -> tuple:
+    """Place the canonical index components ``(batch…, seq, last)`` into the operand's own
+    slot order — the trace layout a fused transpose baked into the load index (HF's
+    per-layer Q/K/V arrive ``(b, s, h, d)``, seq-major). ``None`` = head-major identity."""
+    if layout is None:
+        return comps
+    s_pos, l_pos = layout
+    idx: list = [None] * len(comps)
+    idx[s_pos], idx[l_pos] = comps[-2], comps[-1]
+    rest = iter(comps[:-2])
+    for i in range(len(comps)):
+        if idx[i] is None:
+            idx[i] = next(rest)
+    return tuple(idx)
+
+
+def _out_store_index(out_index: tuple, out_shape: tuple, grid: tuple) -> tuple | None:
+    """The output ``Write`` index for the flash store — the OUTPUT counterpart to :func:`_permute_idx`.
+
+    The store must match the output buffer's REAL rank + layout, not the bare grid order: the model's
+    sdpa output can be transposed (a fused ``transpose``) and can carry size-1 broadcast / unsqueeze
+    dims (e.g. HF's ``[b, h, s, 1, d]``), so a bare 4-var ``(batch…, m, d)`` grid write mis-strides
+    against a 5-D buffer (all the outputs alias, the rest stays uninitialized → NaN downstream). This
+    reproduces the ROOT kernel's own output ``Write`` (``out_index`` over ``out_shape``), substituting
+    each per-axis loop ``Var`` with the fragment's grid axis of matching dim extent, and KEEPING every
+    ``Literal`` slot (size-1 batch dims and pure broadcast dims — index 0). ``None`` when a ``Var``
+    slot's extent has no unused grid axis (an un-reproducible layout — the caller declines to cut)."""
+    from collections import defaultdict  # noqa: PLC0415
+
+    buckets: dict = defaultdict(list)
+    for ax in grid:
+        buckets[ax.extent].append(Var(ax.name))
+    used: dict = defaultdict(int)
+    idx: list = []
+    for pos, e in enumerate(out_index):
+        if isinstance(e, Var):
+            ext = out_shape[pos]
+            cands = buckets.get(ext, ())
+            k = used[ext]
+            if k >= len(cands):
+                return None  # no unused grid axis for this dim — decline (fall back to cut)
+            used[ext] += 1
+            idx.append(cands[k])
+        else:
+            idx.append(e)  # a Literal slot (size-1 batch / broadcast dim) — index 0, kept verbatim
+    return tuple(idx)
+
+
+def _extract_qk(xnode: Node) -> tuple[tuple[str, tuple[int, int]], tuple[str, tuple[int, int]], object] | None:
+    """From the scaled-QK^T producer of the score buffer, return
+    ``((q_id, q_layout), (k_id, k_layout), head_dim_extent)``. Q vs K by index (fusion
+    reorders the operands): the operand indexed by the score's row (M) var is Q — at ANY
+    index slot, not just -2: a fused transpose bakes the trace layout into the load index
+    (HF's per-layer Q/K arrive ``(b, s, h, d)``, seq-major). Each operand's
+    ``(seq_pos, last_pos)`` layout rides along so the fragment builder emits loads in the
+    operand's own slot order."""
     op = xnode.op
     if not isinstance(op, LoopOp):
         return None
@@ -447,21 +570,27 @@ def _extract_qk(xnode: Node) -> tuple[str, str, object] | None:
     if len(writes) != 1:
         return None
     m_var = _var_at(writes[0].index, -2)  # score [..., M (query), N (kv)] → row var
-    if m_var is None:
+    n_var = _var_at(writes[0].index, -1)  # … and the streamed key (column) var
+    if m_var is None or n_var is None:
         return None
     for lp in _accum_loops(op):
         loads = [s for s in lp.body if isinstance(s, Load)]
         accs = [s for s in lp.body if isinstance(s, Accum)]
         muls = [s for s in lp.body if isinstance(s, Assign) and s.op.semiring_product]
         if len(loads) == 2 and len(accs) == 1 and _is_sum(accs[0]) and muls:
-            q_id = k_id = None
+            q = k = None
             for ld in loads:
-                if _var_at(ld.index, -2) == m_var:
-                    q_id = ld.input
-                else:
-                    k_id = ld.input
-            if q_id is not None and k_id is not None:
-                return q_id, k_id, lp.axis.extent
+                dd_pos = _slot_of(ld.index, lp.axis.name)
+                if dd_pos is None:
+                    continue
+                q_pos = _slot_of(ld.index, m_var)
+                k_pos = _slot_of(ld.index, n_var)
+                if q_pos is not None:
+                    q = (ld.input, (q_pos, dd_pos))
+                elif k_pos is not None:
+                    k = (ld.input, (k_pos, dd_pos))
+            if q is not None and k is not None:
+                return q, k, lp.axis.extent
     return None
 
 
@@ -559,6 +688,28 @@ def _fuse_degraded(root: Node, reason: str) -> None:
         logger.warning("PLACE@fold=fuse: flash fuse of %r not certifiable (%s); degrading to cut", root.name, reason)
 
 
+def _extract_v_layout(root: Node, v_buf: str) -> tuple[int, int] | None:
+    """The V operand's ``(kv_pos, d_pos)`` slot layout, from the P@V accum loop's own V
+    ``Load``: ``kv`` is the accum loop's axis, ``d`` the out-write's last var. ``None`` when
+    either var is not a plain index slot (an un-permutable V — the caller degrades)."""
+    op = root.op
+    writes = [s for s in op.body.iter() if isinstance(s, Write)]
+    if len(writes) != 1:
+        return None
+    d_var = _var_at(writes[0].index, -1)
+    if d_var is None:
+        return None
+    for lp in _accum_loops(op):
+        if not any(isinstance(s, Accum) and s.name == writes[0].value and _is_sum(s) for s in lp.body):
+            continue
+        for ld in lp.body:
+            if isinstance(ld, Load) and ld.input == v_buf:
+                kv_pos, d_pos = _slot_of(ld.index, lp.axis.name), _slot_of(ld.index, d_var)
+                if kv_pos is not None and d_pos is not None:
+                    return (kv_pos, d_pos)
+    return None
+
+
 def try_flash(graph: Graph, root: Node) -> Graph | None:
     """Recognize SDPA on ``root`` and return the fused flash ``Graph`` fragment (a
     ``TileOp`` holding the flash ``Map`` (a ``TWISTED`` kv loop) + its scale / -inf constants), or ``None``
@@ -578,12 +729,19 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
     if qk is None:
         _fuse_degraded(root, "score producer's Q/K are not plain loads (e.g. RoPE'd QK)")
         return None
-    q_id, k_id, _head_dim = qk
+    (q_id, q_layout), (k_id, k_layout), _head_dim = qk
     if q_id not in graph.nodes or k_id not in graph.nodes:
         return None
-    q_shape = graph.nodes[q_id].output.shape
-    k_shape = graph.nodes[k_id].output.shape
-    v_shape = graph.nodes[v_id].output.shape
+    v_layout = _extract_v_layout(root, v_id)
+    if v_layout is None:
+        _fuse_degraded(root, "P@V's V load is not plainly indexed")
+        return None
+    # Shapes canonicalize to (batch…, seq, last) per each operand's traced layout — the
+    # eligibility predicates and the fragment's grid work on canonical shapes; the LOAD
+    # indices permute back to each operand's own slot order (``_permute_idx``).
+    q_shape = _canon_shape(graph.nodes[q_id].output.shape, q_layout)
+    k_shape = _canon_shape(graph.nodes[k_id].output.shape, k_layout)
+    v_shape = _canon_shape(graph.nodes[v_id].output.shape, v_layout)
     group = gqa_group(q_shape, k_shape)
     if group is None:
         _fuse_degraded(root, "head axis not statically GQA-divisible")
@@ -593,9 +751,33 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
         _fuse_degraded(root, "shape not flash-eligible")
         return None
     mask = (mask_buf, mask_shape) if mask_kind == "additive" else None
-    return build_flash_frag(
-        q_id, k_id, v_id, q_shape, k_shape, v_shape, root.output, causal=(mask_kind == "causal"), group=group, mask=mask
+    # The root's own output ``Write`` index — the store's target layout (buffer rank, a fused output
+    # transpose, size-1 broadcast dims). The fragment reproduces it (``_out_store_index``) instead of
+    # a bare grid-order write, which would mis-stride a transposed / higher-rank output → NaN.
+    out_writes = [s for s in root.op.body.iter() if isinstance(s, Write)]
+    out_index = tuple(out_writes[0].index) if len(out_writes) == 1 else None
+    frag = build_flash_frag(
+        q_id,
+        k_id,
+        v_id,
+        q_shape,
+        k_shape,
+        v_shape,
+        root.output,
+        causal=(mask_kind == "causal"),
+        group=group,
+        mask=mask,
+        layouts=(q_layout, k_layout, v_layout),
+        raw_shapes=(
+            tuple(graph.nodes[q_id].output.shape),
+            tuple(graph.nodes[k_id].output.shape),
+            tuple(graph.nodes[v_id].output.shape),
+        ),
+        out_index=out_index,
     )
+    if frag is None:
+        _fuse_degraded(root, "output layout not reproducible on the flash grid")
+    return frag
 
 
 def fused_producer_ids(graph: Graph, root: Node) -> tuple[str, ...]:

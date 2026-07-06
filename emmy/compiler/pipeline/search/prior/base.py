@@ -26,10 +26,15 @@ PUCT term).
 
 from __future__ import annotations
 
+import logging
 import math
+import statistics
 from abc import ABC, abstractmethod
+from collections import defaultdict
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # Dataset-size-tiered refit cadence: ``(size_threshold, interval)`` bands, ordered
 # by threshold. The refit interval is the first band whose threshold the current
@@ -45,6 +50,17 @@ MAX_ROWS = 100_000
 # config within ``EMMY_O3_TOL`` of the -O1 best at -O3 and feeds the row in
 # with this tag) — the measured ground truth :meth:`Prior.evidence_pick` ranks by.
 _O3_OPT = 3.0
+
+# The calibration gate: minimum median per-op Spearman (predicted vs measured latency over the
+# model's own reservoir, :meth:`Prior._reservoir_calibration`) below which :attr:`Prior.trustworthy`
+# is False and ``FallbackPrior`` keeps deploys / PUCT on the analytic prior. In-sample Spearman is a
+# deliberately lenient tripwire: a genuinely trained model scores ~+0.85, while the failure class it
+# guards (model and rows not speaking the same feature vocabulary — e.g. a checkpoint that crossed a
+# ``FEATURIZER_VERSION`` bump, RTX 5090 sweep-6 finding 2) collapses to ~0. A model that can't rank
+# even its own training data must not own decisions.
+CALIBRATION_MIN = 0.5
+# Minimum rows an op group needs to contribute to the calibration median (smaller groups are noise).
+_CALIBRATION_MIN_GROUP = 8
 
 
 class Prior(ABC):
@@ -70,6 +86,11 @@ class Prior(ABC):
         # bench order. ``_first_fit_idx`` marks the warmup/post boundary.
         self.trajectory: list[tuple[dict, float, str]] = []
         self._first_fit_idx: int | None = None
+        # Median per-op in-sample Spearman, refreshed by :meth:`maybe_refit` after
+        # each fit and persisted in the checkpoint — the :attr:`trustworthy` gate's
+        # input. ``None`` = not yet measured (ungated, so direct-``fit()`` callers
+        # and the analytic prior keep working).
+        self.calibration: float | None = None
         # Checkpoint binding — set by ``load``; lets :meth:`checkpoint` persist
         # without the caller threading a path.
         self._path = None
@@ -81,6 +102,15 @@ class Prior(ABC):
     @property
     @abstractmethod
     def fitted(self) -> bool: ...
+
+    @property
+    def trustworthy(self) -> bool:
+        """Whether this model may OWN decisions (deploys, PUCT, structural pricing):
+        fitted AND not demonstrably mis-calibrated (:data:`CALIBRATION_MIN` over the
+        reservoir). ``fitted`` alone let a garbage model ship silently — the 2026-07
+        RTX 5090 sweeps' finding class. An unmeasured calibration (``None``) passes:
+        the gate is a tripwire for measured failure, not a proof-of-quality demand."""
+        return self.fitted and (self.calibration is None or self.calibration >= CALIBRATION_MIN)
 
     @abstractmethod
     def fit(self) -> None:
@@ -215,7 +245,47 @@ class Prior(ABC):
         self.fit()
         self._since_fit = 0
         self._note_fit()
+        # Calibration gate input: can the fresh model rank its own reservoir? A
+        # measured collapse (feature/label vocabulary mismatch) flips
+        # :attr:`trustworthy` off, and ``FallbackPrior`` quarantines the model
+        # instead of shipping it to deploys. Logged so a quarantined model is
+        # visible rather than silently demoted.
+        self.calibration = self._reservoir_calibration()
+        if self.calibration is not None:
+            verdict = "owns deploys" if self.trustworthy else f"QUARANTINED (< {CALIBRATION_MIN}) — deploys stay analytic"
+            logger.info("[prior] reservoir calibration %+.2f → learned model %s", self.calibration, verdict)
         return True
+
+    def _reservoir_calibration(self) -> float | None:
+        """Median per-op in-sample Spearman ρ between the model's predicted latency
+        and the reservoir labels — ops grouped by their ``S_*`` signature, groups
+        under :data:`_CALIBRATION_MIN_GROUP` rows skipped. ``None`` when nothing is
+        measurable (no fitted model, no big-enough group, scipy absent). In-sample by
+        design: it costs one vectorized predict over rows already in memory, never
+        blocks a genuinely trained model, and catches exactly the "model and rows
+        don't speak the same feature language" collapse (constant predictions →
+        ρ ≈ 0)."""
+        if not self.fitted or not self._dataset:
+            return None
+        try:
+            from scipy.stats import spearmanr  # noqa: PLC0415
+        except ImportError:
+            return None
+        groups: dict[tuple, list[tuple[dict, float]]] = defaultdict(list)
+        for knobs, label in self._dataset:
+            if label <= 0:
+                continue
+            sig = tuple(sorted((k, v) for k, v in knobs.items() if k.startswith("S_")))
+            groups[sig].append((knobs, label))
+        rhos = []
+        for rows in groups.values():
+            if len(rows) < _CALIBRATION_MIN_GROUP:
+                continue
+            preds = self.mean_scores([k for k, _ in rows])
+            rho = spearmanr(preds, [v for _, v in rows]).statistic
+            if not math.isnan(rho):
+                rhos.append(float(rho))
+        return statistics.median(rhos) if rhos else None
 
     def record_bench(self, knobs: dict, median: float, status: str) -> None:
         """Append a benched leaf to the trajectory (for the summary stats)."""

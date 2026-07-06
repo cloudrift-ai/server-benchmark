@@ -355,6 +355,34 @@ def test_record_nodes_gpu_column_roundtrips(tmp_path) -> None:
     assert n.gpu == "NVIDIA H200 141GB"
 
 
+def test_record_nodes_feat_ver_roundtrips(tmp_path) -> None:
+    """Rows stamp the featurizer-vocabulary version they were recorded under: a fresh
+    row carries the current version, and a row constructed with a legacy version (e.g.
+    merged from an old snapshot) keeps it."""
+    from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
+
+    db = SearchDB(tmp_path / "t.db")
+    db.record_nodes([_node_row("cur", 5.0), _node_row("old", 6.0, feat_ver=1)])
+    by_key = {n.node_key: n for n in db.iter_nodes()}
+    assert by_key["cur"].feat_ver == FEATURIZER_VERSION
+    assert by_key["old"].feat_ver == 1
+
+
+def test_node_feat_ver_defaults_to_legacy_on_pre_stamp_db(tmp_path) -> None:
+    """A pre-``feat_ver`` node table gains the column on the next writer open (the
+    additive per-column migration); its existing rows default to version 1 — the
+    unknown/pre-rebuild vocabulary — so prior evaluation quarantines them instead of
+    scoring garbage features."""
+    path = tmp_path / "old.db"
+    con = sqlite3.connect(path)
+    con.executescript(_PRE_GPU_NODE_SCHEMA)
+    con.commit()
+    con.close()
+    db = SearchDB(path)
+    (n,) = list(db.iter_nodes())
+    assert n.feat_ver == 1
+
+
 _PRE_GPU_NODE_SCHEMA = (
     "CREATE TABLE node (node_key TEXT PRIMARY KEY, parent_key TEXT, context_key TEXT NOT NULL, "
     "op_sig TEXT NOT NULL, features TEXT NOT NULL DEFAULT '{}', value_us REAL NOT NULL, "

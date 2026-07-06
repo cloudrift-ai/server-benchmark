@@ -22,6 +22,7 @@ _TYPE_NAME: dict[str, str] = {"f32": "float", "f16": "__half", "f16x2": "__half2
 # by ``op_to_expr`` (``"exp"``, ``"fmax"``, ``"fabs"``, ...).
 _INTRINSIC_F32: dict[str, str] = {
     "exp": "expf",
+    "exp_fast": "__expf",
     "rsqrt": "rsqrtf",
     "tanh": "tanhf",
     "fabs": "fabsf",
@@ -34,6 +35,7 @@ _INTRINSIC_F32: dict[str, str] = {
 
 _INTRINSIC_F16: dict[str, str] = {
     "exp": "hexp",
+    "exp_fast": "hexp",
     "log": "hlog",
     "sqrt": "hsqrt",
     "rsqrt": "hrsqrt",

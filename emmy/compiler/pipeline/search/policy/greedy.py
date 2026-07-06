@@ -31,6 +31,7 @@ emitted sibling (option-0).
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
@@ -199,14 +200,16 @@ def _pick_structural(fp: ForkPoint, leaves: list, prior, memo: dict[str, float |
     kernel's partition fork, obtained by a nested deterministic resolution of
     the kernel's single-node slice (``lowering/tile`` only, no backend,
     CPU-only — :func:`_price_kernel`); a structural option's price is the Σ
-    over its fragment's kernels. Gated on the *trained* ``CatBoostPrior``
-    (``prior.fitted``): Σ-comparisons through the analytic cold-start model
-    are unvalidated, and a cold compile must never change kernel sets. Greedy
+    over its fragment's kernels. Gated on the *trusted* ``CatBoostPrior``
+    (``prior.trustworthy`` — trained AND passing the reservoir calibration
+    gate): Σ-comparisons through the analytic cold-start model are
+    unvalidated, and neither a cold compile nor a mis-calibrated model may
+    change kernel sets. Greedy
     is prior-only by design — the price never reads the DB (the learned-prior
     work removed ``_best_fork`` replay deliberately)."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
-    if not price_structural or prior is None or not getattr(prior, "fitted", False):
+    if not price_structural or prior is None or not getattr(prior, "trustworthy", False):
         return None
     op_leaves = [o for o in leaves if not _is_structural_option(o)]
     if not op_leaves:
@@ -222,11 +225,66 @@ def _pick_structural(fp: ForkPoint, leaves: list, prior, memo: dict[str, float |
     return best_split if best_split_us < min(fused_prices) else None
 
 
+# The tune ranking lane's default nvcc flags (``emmy/commands/tune.py``'s
+# ``apply_nvcc_flags(default=...)``) — the deploy-side DB consult queries the
+# perf rows recorded under this lane's ``context_key`` twin beside the deploy's own.
+_TUNE_RANKING_FLAGS = "-Xcicc -O1"
+
+
+def _db_measured_index(db, ctx) -> dict[frozenset, list[tuple[dict, float]]]:
+    """The tune DB's measured ``ok`` cuda perf rows, indexed by their ``S_*``
+    structural signature (stringified values — perf knobs round-trip JSON) —
+    the deploy-side analogue of ``Prior._o3_evidence``, sourced from the -O1
+    ranking lane. Queries the deploy context AND its ``-Xcicc -O1`` tune twin
+    (``context_key`` folds the nvcc flags, so tune rows live under the twin).
+    Best-effort: any failure returns an empty index (deploys fall back to the
+    prior, today's behavior)."""
+    index: dict[frozenset, list[tuple[dict, float]]] = {}
+    try:
+        keys = {ctx.structural_key(), replace(ctx, compile_flags=_TUNE_RANKING_FLAGS).structural_key()}
+        for ck in keys:
+            for row in db.iter_perf(ck, backend="cuda"):
+                if row.status != "ok" or row.stats.median <= 0:
+                    continue
+                sig = frozenset((k, str(v)) for k, v in row.knobs.items() if k.startswith("S_"))
+                tun = {k: str(v) for k, v in row.knobs.items() if not k.startswith(("S_", "H_"))}
+                index.setdefault(sig, []).append((tun, float(row.stats.median)))
+    except Exception:  # noqa: BLE001 — a DB consult failure must never break compile
+        return {}
+    return index
+
+
+def _db_measured_pick(index: dict[frozenset, list[tuple[dict, float]]], rows: list[dict]) -> tuple[int, float] | None:
+    """Measured-evidence argmin over candidate knob rows against the DB index —
+    the same prefix-consistency contract as ``Prior.evidence_pick`` (every
+    tunable knob the candidate specifies must match the measured row; undecided
+    knobs are free), on the -O1 ranking lane's medians. Keeps a config the tune
+    *measured* fastest from losing the deploy to an unmeasured model
+    extrapolation (eighth golden sweep, finding 2 — the deploy was a pure prior
+    argmax, so tune evidence never overrode it). -O3 reservoir evidence, where
+    present, takes precedence at the call site (a deployable measurement beats
+    a ranking-lane one)."""
+    best: tuple[int, float] | None = None
+    for i, cand in enumerate(rows):
+        sig = frozenset((k, str(v)) for k, v in cand.items() if k.startswith("S_"))
+        measured = index.get(sig)
+        if not measured:
+            continue
+        cand_tun = {k: str(v) for k, v in cand.items() if not k.startswith(("S_", "H_"))}
+        for row_tun, us in measured:
+            if any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items()):
+                continue
+            if best is None or us < best[1]:
+                best = (i, us)
+    return best
+
+
 def greedy_decide(
     blocked: dict[str, set[frozenset]] | None = None,
     *,
     prior: object = _LOAD_PRIOR,
     price_structural: bool = True,
+    db: object | None = None,
 ) -> Callable[[ForkPoint], object]:
     """The greedy compile pick as a :meth:`Run.resolve` ``decide`` callback:
     flatten the fork point to its complete leaves (:func:`flatten_leaves`),
@@ -260,9 +318,17 @@ def greedy_decide(
     memo: dict[str, float | None] = {}  # op_cache_key → predicted µs (None = unpriceable)
     loaded = prior is not _LOAD_PRIOR
     the_prior = prior if loaded else None
+    # Lazily-built per-compile DB evidence index (needs a fork point's ctx for the
+    # context keys); ``None`` sentinel = not built yet, ``{}`` = built and empty.
+    db_state: list = [None]
+
+    def db_index() -> dict:
+        return db_state[0] or {}
 
     def decide(fp: ForkPoint) -> object:
         nonlocal loaded, the_prior
+        if db is not None and db_state[0] is None:
+            db_state[0] = _db_measured_index(db, fp.ctx)
         if not loaded:
             loaded = True
             the_prior = _load_prior_safe()
@@ -310,11 +376,19 @@ def greedy_decide(
         rows = [{**base, **k} for _, k in live]
         picker = getattr(the_prior, "pick", None)
         if picker is not None:
-            # ``Prior.pick``: measured -O3 reservoir evidence first, model argmin
-            # otherwise — a config the tune proved fastest at -O3 must not lose
-            # the deploy to an unmeasured extrapolation (still prior-only: the
-            # evidence ships inside the prior's checkpoint, not the DB).
-            best_i, price = picker(rows)
+            # The deploy evidence hierarchy: measured -O3 reservoir evidence
+            # first (``Prior.evidence_pick`` — deployable-regime truth), then the
+            # tune DB's -O1 ranking-lane measured best on an exact ``S_*`` match
+            # (a config the tune measured must not lose the deploy to an
+            # unmeasured extrapolation — eighth-sweep finding 2), the model
+            # argmin only when no candidate has evidence at all.
+            got = None
+            ev = getattr(the_prior, "evidence_pick", None)
+            if ev is not None:
+                got = ev(rows)
+            if got is None and db_index():
+                got = _db_measured_pick(db_index(), rows)
+            best_i, price = got if got is not None else picker(rows)
         else:  # bare-mean_scores prior object (tests / custom callers)
             scores = the_prior.mean_scores(rows)
             best_i = min(range(len(live)), key=scores.__getitem__)

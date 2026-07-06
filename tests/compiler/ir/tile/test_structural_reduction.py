@@ -275,6 +275,30 @@ def test_flash_op_is_a_two_contraction_tree() -> None:
     assert o_fold.value == "O_i__pv", "the O-fold consumes the PV contraction's output, not an inline product"
 
 
+def test_out_store_index_reproduces_output_layout() -> None:
+    """``_out_store_index`` maps the fragment's grid axes onto the ROOT output buffer's real slots
+    (by dim extent), keeping ``Literal`` slots (size-1 batch / broadcast dims). The bare grid order
+    would mis-stride a higher-rank / transposed output → the Gemma model-trace flash NaN."""
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.pipeline.passes.lowering.tile._flash import _out_store_index
+
+    grid = (Axis("b0", Dim(1)), Axis("b1", Dim(16)), Axis("m", Dim(32)), Axis("d", Dim(256)))
+
+    # Gemma's ``[b, h, s, 1, d]`` — a unit broadcast dim between seq and head_dim (Literal slots kept).
+    out5 = (Literal(0, "int"), Var("h"), Var("s"), Literal(0, "int"), Var("hd"))
+    idx = _out_store_index(out5, (Dim(1), Dim(16), Dim(32), Dim(1), Dim(256)), grid)
+    assert idx == (Literal(0, "int"), Var("b1"), Var("m"), Literal(0, "int"), Var("d"))
+
+    # A transposed ``[b, s, h, d]`` output — extent-match routes seq→m, head→b1 to their real slots.
+    outT = (Literal(0, "int"), Var("s"), Var("h"), Var("hd"))
+    idxT = _out_store_index(outT, (Dim(1), Dim(32), Dim(16), Dim(256)), grid)
+    assert idxT == (Literal(0, "int"), Var("m"), Var("b1"), Var("d"))
+
+    # No grid axis for a Var slot's extent → decline (the caller degrades flash to cut).
+    assert _out_store_index((Var("x"),), (Dim(999),), grid) is None
+
+
 # --- computed (register-resident) A operand: the tensor-core-flash PV crux ---------------------- #
 
 

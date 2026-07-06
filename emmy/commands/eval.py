@@ -622,6 +622,22 @@ def _perf_cell(perf: dict | None, name: str) -> tuple[str, str] | None:
     return (f"{ratio:.2f}x", _perf_color(ratio))
 
 
+def _bare_families(knobs: dict) -> dict:
+    """Canonicalize a resolved op's tuning knobs to bare family spelling (``TILE@a2`` →
+    ``TILE``) so they compare/render against a golden YAML row, whose knobs are recorded
+    bare. The schedule passes stamp the codec knobs axis-suffixed since the tile-IR
+    rebuild — compared raw, ``got.get("TILE")`` never matched and the whole golden
+    reproduction table showed ``-``/0-matches over perfectly good picks. First key wins
+    on a family collision (a matmul golden's pick is single-node; a multi-node kernel
+    has no single bare row to compare against a golden anyway)."""
+    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
+
+    out: dict = {}
+    for k, v in knobs.items():
+        out.setdefault(family_of(k), v)
+    return out
+
+
 def _emit_prior_golden_check(configs: list, *, title: bool = True, perf: dict | None = None) -> None:
     """Greedy fork pick through the tile pipeline vs recorded golden. The pick reads
     the learned-prior JSON (``config.prior_path()``: ``EMMY_PRIOR_FILE`` /
@@ -656,7 +672,7 @@ def _emit_prior_golden_check(configs: list, *, title: bool = True, perf: dict | 
             k = getattr(node.op, "knobs", None)
             if k:
                 knobs.update(k)
-        return tunable(knobs)
+        return _bare_families(tunable(knobs))
 
     if title:
         prior_path = config.prior_path()

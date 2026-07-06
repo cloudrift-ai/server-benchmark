@@ -221,6 +221,20 @@ def test_node_report_excludes_bench_fail_rows():
     assert "node store: 4 nodes" in text_clean
 
 
+def test_node_report_skips_cross_vocabulary_rows():
+    """Rows recorded under another ``FEATURIZER_VERSION`` are excluded from every
+    metric — their features are spelled in a vocabulary the prior can't read, so
+    scoring them reports worse-than-random about a healthy model — and the skip is
+    printed so a mostly-stale store is visible rather than silently empty."""
+    from dataclasses import replace  # noqa: PLC0415
+
+    clean = _fork_nodes()
+    stale = [replace(n, node_key=n.node_key + "_v1", feat_ver=1) for n in clean]
+    text = diagnostics.node_report(_BMPrior(), clean + stale)
+    assert "node store: 4 nodes" in text  # the 4 stale rows don't count
+    assert "skipped 4 row(s) from another featurizer vocabulary" in text
+
+
 def test_node_report_splits_compile_regimes_per_card():
     """One card whose rows span two ``H_opt`` regimes (the -O1 tune tree + the
     deployable -O3 re-bench rows) renders one sub-block per regime — their

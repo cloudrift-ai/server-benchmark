@@ -74,6 +74,15 @@ class AtomKind:
         wrapper selects on (``dpl_mma_m16n8k16_{f16,bf16}``)."""
         return self.operand_dtype("a").name
 
+    @property
+    def c_to_a_repack(self) -> bool:
+        """C→A fragment lane-map compatibility: the m16n8k16 family's f32 C fragment (m16n8 —
+        per lane ``c[0..3]`` at ``(grp[, +8], tig·2[, +1])``) is elementwise lane-ALIGNED with the
+        16-bit A fragment's two k-halves, so two k-adjacent C fragments convert into one A operand
+        fragment per lane — no shuffle, no smem round-trip (``FragmentRepack``, the flash P→A
+        handoff). Holds exactly when the C tile is half the A tile's K width (n·2 == k) at m16."""
+        return self.shape == (16, 8, 16)
+
 
 @dataclass(frozen=True)
 class ScalarAtom:

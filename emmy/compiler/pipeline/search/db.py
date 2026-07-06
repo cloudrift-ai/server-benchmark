@@ -57,6 +57,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
+
 
 def _jsonable_geometry(geometry) -> list:
     """Render a launch grid/block to a JSON-safe nested list for the inventory
@@ -186,6 +188,10 @@ class NodeRow:
     status: str = "ok"  # 'ok' | 'bench_fail'
     run_id: str = ""  # tune-session id ('' = unknown / old rows)
     measured_at: str | None = None  # when the CURRENT value_us was measured (None -> record_nodes stamps now)
+    # Featurizer-vocabulary version the ``features`` dict is spelled in. Defaults to the CURRENT
+    # version (writers construct rows with live code); rows read back from a pre-stamp DB carry 1
+    # and are excluded from prior evaluation (cross-vocabulary features score as garbage).
+    feat_ver: int = FEATURIZER_VERSION
 
 
 # The ``perf`` SELECT column list — order must match ``_row_to_perf``.
@@ -304,7 +310,8 @@ class SearchDB:
             n_samples    INTEGER,
             status       TEXT NOT NULL DEFAULT 'ok',
             run_id       TEXT NOT NULL DEFAULT '',
-            measured_at  TEXT
+            measured_at  TEXT,
+            feat_ver     INTEGER NOT NULL DEFAULT 1
         )
         """,
         "CREATE INDEX IF NOT EXISTS node_parent ON node (parent_key)",
@@ -361,6 +368,14 @@ class SearchDB:
         ("status", "TEXT NOT NULL DEFAULT 'ok'"),
         ("run_id", "TEXT NOT NULL DEFAULT ''"),
         ("measured_at", "TEXT"),
+        # Featurizer-vocabulary stamp (``features.FEATURIZER_VERSION``). Default 1 =
+        # unknown/pre-stamp vocabulary: such rows are excluded from prior evaluation
+        # (``diagnostics.node_report``) — a cross-vocabulary row featurizes to garbage —
+        # but kept in the DB and carried by ``merge_nodes`` (data, not judgement).
+        # NOTE: rows written after the 2026-07 tile-IR rebuild but before this column
+        # shipped are spelled in the v2 vocabulary yet default to 1 — they quarantine
+        # conservatively; re-collect with the ``collect-node-data`` flow.
+        ("feat_ver", "INTEGER NOT NULL DEFAULT 1"),
     )
 
     def _has_perf_error_column(self) -> bool:
@@ -598,8 +613,8 @@ class SearchDB:
                 self._conn.execute(
                     "INSERT INTO node "
                     "(node_key, parent_key, context_key, op_sig, gpu, features, value_us, depth, n_updates, updated_at, "
-                    " visits, is_leaf, variance, n_samples, status, run_id, measured_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " visits, is_leaf, variance, n_samples, status, run_id, measured_at, feat_ver) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         r.node_key,
                         r.parent_key,
@@ -618,6 +633,7 @@ class SearchDB:
                         r.status,
                         r.run_id,
                         measured,
+                        r.feat_ver,
                     ),
                 )
                 continue
@@ -637,10 +653,10 @@ class SearchDB:
             if replace:
                 self._conn.execute(
                     "UPDATE node SET value_us = ?, features = ?, parent_key = ?, n_updates = ?, updated_at = ?, "
-                    "visits = ?, is_leaf = ?, variance = ?, n_samples = ?, status = ?, run_id = ?, measured_at = ? "
-                    "WHERE node_key = ?",
+                    "visits = ?, is_leaf = ?, variance = ?, n_samples = ?, status = ?, run_id = ?, measured_at = ?, "
+                    "feat_ver = ? WHERE node_key = ?",
                     (r.value_us, feats_json, r.parent_key, n_upd + 1, now, visits, is_leaf, r.variance, r.n_samples)
-                    + (r.status, r.run_id, measured, r.node_key),
+                    + (r.status, r.run_id, measured, r.feat_ver, r.node_key),
                 )
             else:
                 self._conn.execute(
@@ -670,7 +686,14 @@ class SearchDB:
             if self._has_node_enrich_columns()
             else "0, NULL, NULL, NULL, 'ok', '', NULL"
         )
-        sql = f"SELECT node_key, parent_key, context_key, op_sig, {gpu_col}, features, value_us, depth, {enrich_cols} FROM node"  # noqa: S608
+        # ``feat_ver`` ships after the enrichment generation, so it needs its own
+        # presence check (a read-only open never migrates); absent → 1 (unknown /
+        # pre-stamp vocabulary).
+        feat_ver_col = "feat_ver" if any(r[1] == "feat_ver" for r in self._conn.execute("PRAGMA table_info(node)")) else "1"
+        sql = (
+            f"SELECT node_key, parent_key, context_key, op_sig, {gpu_col}, features, value_us, depth, "  # noqa: S608
+            f"{enrich_cols}, {feat_ver_col} FROM node"
+        )
         clauses: list[str] = []
         params: list = []
         if context_key is not None:
@@ -683,7 +706,7 @@ class SearchDB:
             sql += " WHERE " + " AND ".join(clauses)
         for row in self._conn.execute(sql, params):
             node_key, parent_key, ck, sig, gpu, feats_json, value_us, depth = row[:8]
-            visits, is_leaf, var, n_samp, status, run_id, measured = row[8:]
+            visits, is_leaf, var, n_samp, status, run_id, measured, feat_ver = row[8:]
             try:
                 features = json.loads(feats_json) if feats_json else {}
             except (TypeError, json.JSONDecodeError):
@@ -704,6 +727,7 @@ class SearchDB:
                 status=status,
                 run_id=run_id,
                 measured_at=measured,
+                feat_ver=int(feat_ver) if feat_ver is not None else 1,
             )
 
     def merge_nodes(self, src_path: Path | str) -> int:

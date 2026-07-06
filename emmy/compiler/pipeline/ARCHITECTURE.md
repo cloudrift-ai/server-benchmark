@@ -100,10 +100,25 @@ order; a separate `_W_A_DYN` weight set ranks symbolic-axis masked-tile kernels,
 measured -O3 reservoir evidence first (`evidence_pick`: the candidate prefix-consistent with the fastest `H_opt=3` row of
 the same op), the `mean_score` argmin otherwise.
 
-`FallbackPrior` splits its two surfaces once the learned half is fitted: `mean_score` / `mean_scores` / `pick` (deploy +
+`FallbackPrior` splits its two surfaces once the learned half is **trustworthy** — fitted AND passing the **calibration
+gate** (`Prior.trustworthy`): after every fit, `maybe_refit` measures the median per-op in-sample Spearman between the
+model's predictions and its own reservoir labels (`_reservoir_calibration`, persisted in the checkpoint); below
+`CALIBRATION_MIN` the model is quarantined — it keeps training and checkpointing, but deploys, PUCT, and structural
+pricing (`greedy._pick_structural`) stay analytic, and the verdict is logged. `fitted` alone let a mis-calibrated model
+own deploys silently (the 2026-07 RTX 5090 sweeps); in-sample Spearman is a lenient tripwire that specifically catches
+the model-and-rows-don't-share-a-feature-vocabulary collapse (constant predictions, worse-than-random ranking). When
+trusted: `mean_score` / `mean_scores` / `pick` (deploy +
 eval) are pure-learned + evidence, but `score` — the MCTS *selection* signal — tilts the learned µs by the analytic's
 dimensionless ranking multiplier (`learned · analytic**W`, `W = config.analytic_tilt`, neutral 1.0), so PUCT still
 explores a region the cold heuristic prices well but the data-poor learned model buries.
+
+**Featurizer vocabulary versioning.** `features.FEATURIZER_VERSION` stamps every persisted training artifact: the prior
+checkpoint (`to_json`; `from_json` discards a checkpoint from another version WHOLE — model and reservoir rows alike,
+since rows spelled in a retired knob vocabulary featurize to garbage and a refit on them collapses to constant
+predictions) and the autotune DB's `node` rows (a `feat_ver` column, additively migrated; `diagnostics.node_report`
+excludes rows from another version with a printed count — pre-stamp rows default to version 1, the retired pre-rebuild
+vocabulary, and quarantine conservatively). Bump the constant on any incompatible knob-spelling or feature-encoding
+change; artifacts from the old vocabulary then age out instead of poisoning the model.
 
 **Lazy hierarchical forks.** `Fork` (`fork.py`) is an interface: `knobs` (the knob delta the fork pins — the variant
 identity the perf DB and prior key on, read without expanding), `is_leaf`, and `expand()` (the next level of options).
@@ -230,9 +245,11 @@ carries **label-quality columns** (additive migration; old rows degrade to unkno
 count — the label's confidence weight, SUM-accumulated across writes and merges, unlike the write-batch `n_updates`),
 `is_leaf` (a real measurement vs a min over explored descendants), `variance`/`n_samples` (the leaf's own bench
 stats), `status` (`ok`/`bench_fail` — failed leaves ARE recorded with the watchdog sentinel as `value_us`, the
-negative examples a search prior needs; an `ok` row is never downgraded by a later fail), and `run_id`/`measured_at`
+negative examples a search prior needs; an `ok` row is never downgraded by a later fail), `run_id`/`measured_at`
 (the tune session — one id per CLI invocation — and time that produced the CURRENT `value_us`, replaced only when the
-value is). The `gpu` identity
+value is), and `feat_ver` (the `features.FEATURIZER_VERSION` the row's feature dict is spelled in — pre-stamp rows
+default to the retired version 1 and are excluded from prior evaluation; see the featurizer-vocabulary-versioning
+paragraph above). The `gpu` identity
 (`Context.hardware_id`, the PCIe product name) is folded into the node key so a cross-hardware dataset never collides:
 `context_key` (cc + opt) can't separate same-die SKUs (H100 vs H200 share cc + SM count), so without `gpu` their rows
 would merge and the upsert would silently drop one card's data (the `H_total_mem` VRAM feature is what then lets the
@@ -468,7 +485,7 @@ per-rule mechanics — the "owning rule" for the schedule codecs is the `_schedu
 |----------|---------|-----------------------------------|-------------------------------------------------------------------------|
 | `TILE`   | STR (codec) | `lowering/tile/010_recognize` (`_schedule`) | **Unified output-fragment** codec — a contraction's output tile is *either* the **scalar** register sub-tile `n<N>[x<M>]/f<fn>[x<fm>]` (parallel thread-tile `n`/`m`, register sub-tile `f`) *or* the **warp** tensor-core mma tile `a:<atom>/w<WM>x<WN>/f<FM>x<FN>/k<bk>` (atom + warps + register sub-tile + K-chunk), never both. The value self-discriminates: an `a:<atom>` token selects the warp form (a tensor-core-atom `TilePlan`; `schedule.is_warp_codec`), otherwise the scalar `TilePlan`. Empty = per-cell. |
 | `REDUCE` | STR (codec) | `lowering/tile/010_recognize` (`_schedule`) | Reduce-axis partition codec `g<n>[a\|k]/b<n>/r<n>` — `g` cross-CTA split-K (+ finalize letter), `b` cooperative-thread fold, `r` ILP register fold. Empty = serial (the per-thread remainder is derived, never spelled). |
-| `STAGE`  | STR (codec) | `lowering/tile/010_recognize` (`_schedule`) → `lowering/kernel/010_materialize` | Operand-staging codec `d<depth>/sync\|cp\|tma[/ring][/p<reg_depth>]` on the typed `Stage` schedule struct (composes with both fragments of the `TILE` knob): `d<depth>` the gmem→smem ring depth, `sync`/`cp.async`/TMA transport, `p<reg_depth>` the smem→register double-buffer. `stage=None` (unset / unparseable) = gmem-direct. See `lowering/kernel/ARCHITECTURE.md`. |
+| `STAGE`  | STR (codec) | `lowering/tile/010_recognize` (`_schedule`) → `lowering/kernel/010_materialize` | Operand-staging codec `d<depth>/sync\|cp\|tma[/ring][/p<reg_depth>]` on the typed `Stage` schedule struct (composes with both fragments of the `TILE` knob): `d<depth>` the gmem→smem ring depth, `sync`/`cp.async`/TMA transport, `p<reg_depth>` the smem→register double-buffer. `stage=None` (unset / unparseable) = gmem-direct. Also rides the warp-flash TWISTED stream (`STAGE@<kv>` — the K/V slabs of one streaming block; cp.async only, `reg_depth` clamps to 1). See `lowering/kernel/ARCHITECTURE.md`. |
 | `WSPEC`  | STR (codec) | `lowering/tile/010_recognize` (`_schedule`) → `lowering/kernel/010_materialize` | Warp-specialization codec `p<np>` — a producer warp band split over the fixed pipeline (bare/root-global; the fourth schedule-fork level). Legal on a warp `TILE` over a resolved **TMA** `STAGE` within the thread budget (`block_threads + 32·aux ≤ 1024`, `32·aux ≤ block_threads`); anything else — including the reserved producer `q` param — degrades to uniform. Empty = uniform SIMT. Materialized as the staged K-loop's producer/compute band split (`_stage._wspec_kloop`). |
 | `PLACE`  | STR (pin-only) | `lowering/tile/010_recognize` | Structural placement of an intermediate edge — `auto` \| `fuse` \| `cut`, per edge-class element: `PLACE@cone` (producer-cone inlining), `PLACE@fold` (flash vs separate softmax + P@V kernels), `PLACE@tuple` (online softmax vs two-pass stats). Precedence `PLACE@<element>` > bare `PLACE` > built-in `auto` (today: fuse everywhere). `auto` is pin vocabulary only — the stamped value is the *resolved* `fuse`/`cut`, stamped for `fold`/`cone` only (`tuple` is dominance — never stamped, never enumerated). A forced `fuse` on an uncertifiable kernel (RoPE'd QK) degrades to `cut` with a log line. Since `@` is not a valid shell var character, per-element pins ride `EMMY_KNOBS` (e.g. `EMMY_KNOBS="PLACE@fold=cut"`); bare `EMMY_PLACE` pins every eligible edge. Never enumerated — the `auto` seam is the future search hook for `fold`/`cone`. |
 | `S_*`    | FLOAT   | `loop/stamp/020_stamp_structural_features` | The LoopOp's structural features (stmt/op histogram + loop extents + operand dtypes). Not tunable — identity facts that make a knob dict a complete variant identity (the learned prior's feature vector). Skipped by `format_tuning_knobs`. |

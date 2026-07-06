@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 
 
 def register_run_command(subparsers):
+    from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415
+
     parser = subparsers.add_parser("run", help="Compile + run a model / inline torch expression on the CUDA backend")
     parser.add_argument(
         "input",
@@ -62,8 +64,8 @@ def register_run_command(subparsers):
     parser.add_argument(
         "--seq-len",
         type=int,
-        default=32,
-        help="Sequence length for full-model tracing when the input is a model ID (default: 32).",
+        default=DEFAULT_SEQ_HINT,
+        help="Sequence length for full-model tracing when the input is a model ID (default: 512, matching ``DEFAULT_SEQ_HINT``).",
     )
     parser.add_argument("--bench", "-b", action="store_true", help="Benchmark eager / torch.compile / emmy and print a comparison table.")
     parser.add_argument(

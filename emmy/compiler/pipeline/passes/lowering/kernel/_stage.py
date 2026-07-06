@@ -285,6 +285,25 @@ class Operand:
     # in-copy and the ldmatrix drain applies the matching XOR; a scalar plain-`Load` drain and the
     # cp.async/sync write paths stay NONE).
     swizzle: str = "NONE"
+    # Extra smem columns padding each slab row (cp.async transport only — a TMA box deposit is
+    # dense). The pad breaks the same-bank stride of a power-of-two row (the bank-conflict fix the
+    # cp.async path has in place of TMA's hardware swizzle); the fill's logical (row, col) writes
+    # stride the padded decl automatically (``render_index`` flattens against it), and the drain's
+    # ``ldm`` carries the padded stride. Data cells only — a chunk never straddles the pad.
+    pad_cols: int = 0
+    # The TMA descriptor box, when it differs from the 2-D slab ``shape`` — a BATCHED operand
+    # (flash K/V: gmem ``(B, H, S, D)``) boxes as rank-N with leading extent-1 dims
+    # (``(1, 1, bn, head_dim)``); the ``coords`` closure supplies the matching leading origin
+    # coordinates (the load's own batch/head index exprs — GQA's ``h // group`` rides through).
+    # ``None`` = the 2-D ``shape`` (the matmul tier's plain operands).
+    box: tuple[int, ...] | None = None
+    # This operand's OWN element dtype / size, when it differs from the transport-level
+    # ``slab_dtype`` / ``elem_bytes`` (a mixed-dtype scalar contraction — fp32 A × fp16 B, the
+    # norm→linear split-combine shape). ``None`` inherits the transport's. Sizing the B fill with
+    # A's element width issued 16 B ``cp.async`` chunks at fp32 spacing over fp16 memory —
+    # misaligned addresses + overlapped data (the Gemma ``k_linear_reduce`` bench_fail cluster).
+    dtype: str | None = None
+    elem_bytes: int | None = None
 
     @property
     def slab(self) -> str:
@@ -410,7 +429,7 @@ class CpAsyncTransport:
     cta: CtaTile
 
     def slab_decls(self, ring: int) -> list[Stmt]:
-        return [slab_smem(op.slab, ring * op.shape[0], op.shape[1], self.slab_dtype) for op in self.operands]
+        return [slab_smem(op.slab, ring * op.shape[0], op.shape[1] + op.pad_cols, op.dtype or self.slab_dtype) for op in self.operands]
 
     def prologue(self, ring: int) -> list[Stmt]:
         return []
@@ -424,7 +443,7 @@ class CpAsyncTransport:
                 src=op.buf,
                 gmem_index=op.index(k0),
                 cta=self.cta,
-                elem_bytes=self.elem_bytes,
+                elem_bytes=op.elem_bytes or self.elem_bytes,
                 name=op.tag,
                 row_offset=op.slot_row(slot),
             )
@@ -456,17 +475,24 @@ class TmaTransport:
 
     @property
     def _total_bytes(self) -> int:
-        return sum(math.prod(op.shape) for op in self.operands) * self.elem_bytes
+        return sum(math.prod(op.shape) * (op.elem_bytes or self.elem_bytes) for op in self.operands)
 
     def slab_decls(self, ring: int) -> list[Stmt]:
         # TMA destination smem must be 128 B-aligned (a swizzled slab to its full atom period,
         # so the drain's from-base XOR matches the hardware deposit); one mbarrier per ring slot.
         decls: list[Stmt] = [
-            tma_descriptor(op.desc, op.buf, op.shape, self.slab_dtype, swizzle=op.swizzle, elem_bytes=self.elem_bytes)
+            tma_descriptor(
+                op.desc,
+                op.buf,
+                op.box or op.shape,
+                op.dtype or self.slab_dtype,
+                swizzle=op.swizzle,
+                elem_bytes=op.elem_bytes or self.elem_bytes,
+            )
             for op in self.operands
         ]
         decls += [
-            slab_smem(op.slab, ring * op.shape[0], op.shape[1], self.slab_dtype, align=_SWIZZLE_SLAB_ALIGN[op.swizzle])
+            slab_smem(op.slab, ring * op.shape[0], op.shape[1], op.dtype or self.slab_dtype, align=_SWIZZLE_SLAB_ALIGN[op.swizzle])
             for op in self.operands
         ]
         decls.append(Smem(name=self.mbar, extents=(ring,), dtype="unsigned long long"))
@@ -481,8 +507,9 @@ class TmaTransport:
         coords = op.coords(k0)
         if op.swizzle == "NONE":
             return coords
-        atom, _ = pick_swizzle_atom(op.shape[-1], self.elem_bytes)
-        if atom >= op.shape[-1]:
+        inner = (op.box or op.shape)[-1]
+        atom, _ = pick_swizzle_atom(inner, op.elem_bytes or self.elem_bytes)
+        if atom >= inner:
             return coords
         return (*coords[:-1], BinaryExpr("/", coords[-1], _lit(atom)), _lit(0))
 
@@ -625,6 +652,7 @@ def staged_kloop(
     k_extent: int,
     workers=None,
     block_threads: int | None = None,
+    k0: str = "_ks",
 ) -> tuple[list[Stmt], list[Stmt]]:
     """The **one** staged K-loop skeleton — ``fill → commit → wait → drain → Sync`` over the K-chunks,
     with ``depth`` the sole buffering knob and ``transport`` the sole producer seam. Returns
@@ -644,7 +672,10 @@ def staged_kloop(
 
     ``workers`` (a resolved :class:`~emmy.compiler.ir.schedule.WarpSpec`) splits the same phases
     across producer / compute warp bands instead (:func:`_wspec_kloop`) — TMA transport only (the
-    scheduler's legality gate), ``block_threads`` naming the compute band."""
+    scheduler's legality gate), ``block_threads`` naming the compute band.
+
+    ``k0`` names the chunk loop variable (default ``"_ks"``) — a drain whose body references the
+    chunk base by name (the warp-flash stream's absolute score columns) passes its own axis name."""
     ring = min(depth, n_chunks) if n_chunks >= 2 else 1
     if workers is not None:
         assert isinstance(transport, TmaTransport), "warp specialization drives the TMA transport only (scheduler legality)"
@@ -659,7 +690,7 @@ def staged_kloop(
             aux_threads=32 * workers.aux_warps,
             block_threads=block_threads,
         )
-    k0, K = "_ks", k_extent
+    K = k_extent
     decls = transport.slab_decls(ring)
     pre = transport.prologue(ring)
     for s in range(ring - 1):  # prime chunks 0..ring-2 into slots 0..ring-2 (phase 0)

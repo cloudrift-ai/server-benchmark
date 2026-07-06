@@ -64,10 +64,11 @@ def test_schedule_leaf_set_equals_catalog():
     - distinct ``TILE`` values = exactly ``scalar_tile_moves()`` (f32 → no warp moves);
     - the per-cell tile rides serial + the coop/ILP moves (non-output-tiled tier only), no split-K
       (one thread per cell already saturates the 64×64 grid — the occupancy gate);
-    - every tiled tile rides the RESOLVED stage spellings (gmem-direct + the resolver-deduped
-      cp.async / TMA ring depths) × (serial + the divisor-guarded split-K widths) — staging
-      composes with split-K (``_splitk_option`` re-resolves against the sliced inner node and
-      ``030_split`` threads the stage onto the partial).
+    - every clean tiled tile rides the RESOLVED stage spellings (gmem-direct + the resolver-deduped
+      cp.async / TMA ring depths) × (serial + the divisor-guarded split-K widths); a masked-N tile
+      (tile_n overhangs N) declines staging and rides gmem-direct only — staging composes with
+      split-K (``_splitk_option`` re-resolves against the sliced inner node and ``030_split`` threads
+      the stage onto the partial).
     """
     from emmy.compiler.pipeline.search.space import coop_reduce_moves, splitk_moves
 
@@ -98,7 +99,14 @@ def test_schedule_leaf_set_equals_catalog():
         if not tile_spec:
             continue
         stages = {str(family_value(r, "STAGE")) for r in tiled if not family_value(r, "REDUCE")}
-        assert {"", "d1/cp"} <= stages, f"{tile_spec}: missing the base resolved stages: {stages}"
+        # A masked-N tile (tile_n overhangs the fixture's N=64) declines cp.async / TMA staging — the
+        # B-slab fill would fault a row-crossing copy — so it rides gmem-direct only, mirroring the
+        # warp tier's refusal. A clean tile carries the full resolved stage spellings.
+        plan = TilePlan.parse(tile_spec)
+        if plan.units_n * plan.reg_n > 64:
+            assert stages == {""}, f"{tile_spec}: masked-N must decline staging: {stages}"
+        else:
+            assert {"", "d1/cp"} <= stages, f"{tile_spec}: missing the base resolved stages: {stages}"
         # This matmul is BATCHED (a leading literal batch dim in A's gmem index): TMA's 2-D
         # descriptor box cannot encode the extra dim, so every tma move resolver-declines —
         # cp.async (whose fill closure carries the dim verbatim) is the only transport offered.
@@ -126,3 +134,39 @@ def test_schedule_leaves_key_tile_by_contraction_axis():
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_matmul_graph(), decide)
     assert axes and None not in axes  # every TILE key is axis-named (TILE@<k>), never bare
     assert len(axes) == 1  # one contraction → one eligible k-axis
+
+
+def _reduce_graph() -> Graph:
+    """A bare full-row sum reduce (the ``reduce.2048x2048`` golden shape) — a lifted
+    :class:`Reduction` with a 2048-cell free grid, well past the coop heuristic's free cap."""
+    from emmy.compiler.ir.frontend.ir import MeanOp
+
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (2048, 2048)), node_id="x")
+    g.add_node(MeanOp(), ["x"], Tensor("y", (2048, 1)), node_id="y")
+    g.inputs, g.outputs = ["x"], ["y"]
+    return g
+
+
+def test_bare_reduce_forks_the_coop_catalog():
+    """A bare reduce must fork the full legal ``coop_reduce_moves()`` catalog beside serial, even
+    when the free grid exceeds the conservative heuristic's cap — the heuristic previously
+    collapsed the fork to ONE serial spec (no options offered), so the tune benched a single
+    variant and greedy deployed 53× behind the pinned ``b16``/``b32`` reduce goldens (eighth
+    golden sweep, finding 3). Option-0 stays the heuristic's conservative pick (cold-greedy
+    deploys are unchanged); the catalog rows are what keep the reduce goldens reachable."""
+    from emmy.compiler.pipeline.search.space import coop_reduce_moves
+
+    rows: list[dict] = []
+
+    def decide(fp):
+        leaves = flatten_leaves(fp.options)
+        for leaf in leaves:
+            rows.append(dict(getattr(leaf, "knobs", {}) or {}))
+        return leaves[0]
+
+    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_reduce_graph(), decide)
+    assert rows, "no fork was offered for the bare reduce"
+    reduces = [str(family_value(r, "REDUCE")) for r in rows]
+    assert reduces[0] == ""  # 2048 free cells > _FREE_CAP: the conservative heuristic pick leads
+    assert set(reduces) == {"", *coop_reduce_moves()}, f"catalog rows missing: {reduces}"

@@ -355,3 +355,24 @@ configs:
     knobs: {TILE: 'n128x8/f1x16'}
     emmy_us: 4.3
     cublas_us: 4.1
+  - kernel: rms_norm
+    name: rms_norm.512x2048
+    M: 512
+    K: 2048
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, 'REDUCE@a1': 'b32', VECTORIZE_LOADS: true}
+    emmy_us: 11.02
+    cublas_us: 4.10
+  - kernel: rms_norm
+    name: rms_norm.2048x4096
+    M: 2048
+    K: 4096
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, 'REDUCE@a1': 'b32', VECTORIZE_LOADS: true}
+    emmy_us: 26.02
+    cublas_us: 18.51
+  - kernel: rms_norm
+    name: rms_norm.2048x8192
+    M: 2048
+    K: 8192
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, 'REDUCE@a1': 'b32', VECTORIZE_LOADS: true}
+    emmy_us: 162.76
+    cublas_us: 83.72

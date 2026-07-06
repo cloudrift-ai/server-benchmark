@@ -18,6 +18,7 @@ from emmy.compiler.pipeline.search.golden import (
     MatmulGoldenConfig,
     PointwiseGoldenConfig,
     ReduceGoldenConfig,
+    RmsNormGoldenConfig,
     _load_goldens,
     matmul_snippet,
 )
@@ -53,16 +54,18 @@ def test_repro_command_round_trips_knobs_and_snippet():
 
 def test_golden_configs_set_is_well_formed():
     for c in GOLDEN_CONFIGS:
-        # Every regime: matmul (M,N,K), reduce (M,K), pointwise (M,N).
-        assert isinstance(c, (MatmulGoldenConfig, ReduceGoldenConfig, PointwiseGoldenConfig)), c.name
+        # Every regime: matmul (M,N,K), reduce (M,K), rms_norm (M,K), pointwise (M,N).
+        assert isinstance(c, (MatmulGoldenConfig, ReduceGoldenConfig, RmsNormGoldenConfig, PointwiseGoldenConfig)), c.name
         if isinstance(c, MatmulGoldenConfig):
             assert c.M > 0 and c.N > 0 and c.K > 0, c.name
-        elif isinstance(c, ReduceGoldenConfig):
+        elif isinstance(c, (ReduceGoldenConfig, RmsNormGoldenConfig)):
             from emmy.compiler.ir.schedule import ReducePlan
 
             assert c.M > 0 and c.K > 0, c.name
-            coop = ReducePlan.parse(c.knobs.get("REDUCE")).coop
-            assert coop > 1, f"{c.name} reduce golden must be cooperative (REDUCE coop>1, got {coop})"
+            # RMSNorm's reduce knob is axis-qualified (``REDUCE@a1``); the pure reduce's is bare (``REDUCE``).
+            red = next((v for k, v in c.knobs.items() if k == "REDUCE" or k.startswith("REDUCE@")), None)
+            coop = ReducePlan.parse(red).coop
+            assert coop > 1, f"{c.name} reduce/rms golden must be cooperative (REDUCE coop>1, got {coop})"
         else:
             assert c.M > 0 and c.N > 0, c.name
         assert c.emmy_us > 0 and c.cublas_us > 0, c.name
@@ -129,8 +132,9 @@ def test_golden_knobs_are_members_of_the_move_catalog():
     scalar_moves = set(scalar_tile_moves())
     for g in GOLDEN_CONFIGS:
         where = f"{g.name} ({g.gpu_name})"
-        if isinstance(g, ReduceGoldenConfig):
-            reduce_spec = g.knobs.get("REDUCE", "")
+        if isinstance(g, (ReduceGoldenConfig, RmsNormGoldenConfig)):
+            # RMSNorm's reduce knob is axis-qualified (``REDUCE@a1``); the pure reduce's is bare (``REDUCE``).
+            reduce_spec = next((v for k, v in g.knobs.items() if k == "REDUCE" or k.startswith("REDUCE@")), "")
             assert not reduce_spec or reduce_spec in coop_reduce_moves(), f"{where}: REDUCE {reduce_spec!r} not enumerable"
             continue
         if not isinstance(g, MatmulGoldenConfig):

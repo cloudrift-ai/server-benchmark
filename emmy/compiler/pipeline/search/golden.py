@@ -250,8 +250,39 @@ class PointwiseGoldenConfig(GoldenConfig):
         return ShapeKey(free_prod=self.M * self.N, reduce_max=0, is_warp=False)
 
 
+@dataclass(frozen=True, kw_only=True)
+class RmsNormGoldenConfig(GoldenConfig):
+    """A golden config for RMSNorm ``(M, K) → (M, K)`` (``torch.nn.RMSNorm(K)``).
+
+    RMSNorm is a ``Map(body=sweep, source=Reduction)``: a per-row mean-of-squares reduce
+    over ``K`` feeds an rsqrt that rescales every element of the row (the ``k_rms_norm``
+    kernel). It is reduce-tier — the good config reduces each row cooperatively
+    (``REDUCE`` coop>1), so it shares the reduce regime's arithmetic key (free=M, reduce=K)
+    and ``priority_mode="reduce"`` enumeration. The reference is ``torch.nn.RMSNorm`` eager
+    (fp32), so the ratio compares emmy's fused norm against PyTorch's, not cuBLAS."""
+
+    M: int
+    K: int
+    dtype: str = "fp32"  # snippet is fp32; recorded so Sample.from_golden is kind-agnostic
+
+    def snippet(self) -> str:
+        return f"torch.nn.RMSNorm({self.K})(torch.randn({self.M},{self.K}))"
+
+    def shape_key(self):
+        """The RMSNorm's reduce geometry — free rows ``(M,)``, reduce extent ``K`` —
+        matching the mean-of-squares Reduction its ``k_rms_norm`` Map is built over."""
+        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
+
+        return ShapeKey(free_prod=self.M, reduce_max=self.K, is_warp=False)
+
+
 _GOLDENS_DIR = Path(__file__).parent / "goldens"
-_KERNEL_CLASSES = {"matmul": MatmulGoldenConfig, "reduce": ReduceGoldenConfig, "pointwise": PointwiseGoldenConfig}
+_KERNEL_CLASSES = {
+    "matmul": MatmulGoldenConfig,
+    "reduce": ReduceGoldenConfig,
+    "pointwise": PointwiseGoldenConfig,
+    "rms_norm": RmsNormGoldenConfig,
+}
 
 
 def _load_goldens() -> list[GoldenConfig]:
@@ -259,7 +290,7 @@ def _load_goldens() -> list[GoldenConfig]:
 
     One file per GPU: a ``gpu_name`` / ``compute_cap`` header (stamped onto every
     config so it isn't repeated per entry) plus a ``configs`` list, each tagged with
-    a ``kernel`` discriminator (``matmul`` / ``reduce`` / ``pointwise``) selecting the
+    a ``kernel`` discriminator (``matmul`` / ``reduce`` / ``rms_norm`` / ``pointwise``) selecting the
     dataclass. All files are concatenated — a ``name`` may recur across GPUs.
 
     NOTE: ``compute_cap`` does **not** uniquely identify a GPU — two different cards

@@ -10,8 +10,8 @@ const config = {
   tagline: 'Benchmark and deploy optimized LLM models on GPU servers',
   favicon: 'img/favicon.ico',
 
-  url: 'https://emmy.docs.cloudrift.ai',
-  baseUrl: '/',
+  url: 'https://docs.riftstack.ai',
+  baseUrl: '/emmy/',
 
   organizationName: 'CloudRift',
   projectName: 'Emmy',

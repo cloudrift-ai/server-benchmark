@@ -159,3 +159,29 @@ def test_compile_dynamic_bad_spec_rejected(run_cli):
     )
     assert rc != 0
     assert "NAME@INPUT:AXIS" in stdout + stderr
+
+
+def test_compile_golden_substring_resolves_dynamic(run_cli):
+    """``compile --golden`` accepts the same name **substring** ``eval --kernel``
+    filters on, and a dynamic golden carries its recorded symbolic spec through — so
+    the rendered kernel gains an ``int seq_len`` arg (the masked-tile path), proving
+    the golden was resolved via compile, not just run."""
+    rc, stdout, stderr = run_cli("compile", "--golden", "o_proj.h4096.dynM", "--ir", "cuda")
+    assert rc == 0, f"stderr: {stderr}"
+    assert "int seq_len" in stdout, f"expected masked-tile ``int seq_len`` from the dynamic golden, got:\n{stdout[:500]}"
+
+
+def test_compile_golden_ambiguous_substring_lists_shapes(run_cli):
+    """A ``--golden`` substring spanning several shapes can't select one graph — it
+    exits 2 listing the matched shapes so the user can narrow it."""
+    rc, stdout, stderr = run_cli("compile", "--golden", "mlp_down", "--ir", "tile")
+    assert rc == 2, f"expected exit 2, got {rc}: {stdout}{stderr}"
+    out = stdout + stderr
+    assert "ambiguous" in out and "matmul.mlp_down.h4096" in out and "matmul.mlp_down.h4096.dynM" in out
+
+
+def test_compile_golden_unknown_lists_available(run_cli):
+    """An unknown ``--golden`` name exits 2 and lists the available golden names."""
+    rc, stdout, stderr = run_cli("compile", "--golden", "no_such_shape", "--ir", "tile")
+    assert rc == 2, f"expected exit 2, got {rc}"
+    assert "unknown golden config" in stdout + stderr

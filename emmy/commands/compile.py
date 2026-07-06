@@ -118,16 +118,18 @@ def add_input_args(parser) -> None:
 
 
 def add_golden_arg(parser) -> None:
-    """Register ``--golden NAME`` (shared by ``tune`` and ``run``) — a shorthand
-    that resolves to ``--code <the named golden config's snippet>``. Pair with
-    :func:`resolve_golden_arg` in the handler."""
+    """Register ``--golden NAME`` (shared by ``tune`` / ``run`` / ``compile``) — a
+    shorthand that resolves to ``--code <the named golden config's snippet>``. Pair
+    with :func:`resolve_golden_arg` in the handler."""
     parser.add_argument(
         "--golden",
         metavar="NAME",
         help=(
-            "Tune / run the named golden config from GOLDEN_CONFIGS (shorthand for --code <its snippet>) — lets you "
-            "build the learned prior up one shape at a time and `emmy eval golden` between runs. An unknown NAME "
-            "lists the available names. Mutually exclusive with --code / positional input / --ir."
+            "Compile / run / tune a golden config from GOLDEN_CONFIGS (shorthand for --code <its snippet>) — lets you "
+            "build the learned prior up one shape at a time and `emmy eval golden` between runs. NAME is an exact "
+            "golden name OR a name **substring** (the SAME identifier `emmy eval --kernel` filters on), as long as it "
+            "names a single shape; an ambiguous substring lists the matched shapes and an unknown one lists all "
+            "available names. Mutually exclusive with --code / positional input / --ir."
         ),
     )
 
@@ -138,16 +140,27 @@ def resolve_golden_arg(args) -> None:
     one shape may carry several golden knob sets; ``run --bench`` echoes each under
     its matching kernel). A **dynamic** golden also sets ``args.dynamic`` to its own
     recorded spec (the spec is part of the config, so a CLI ``--dynamic`` next to
-    ``--golden`` is rejected — the same way ``--ir`` rejects it). Exits 2 on an
-    unknown name (listing the available names) or a conflict with ``--code`` /
-    positional input / ``--ir`` / ``--dynamic``."""
+    ``--golden`` is rejected — the same way ``--ir`` rejects it).
+
+    ``NAME`` matches the same way ``emmy eval --kernel`` filters goldens: an exact
+    golden name first, else a name **substring** — so the identifier used to inspect
+    a golden (``eval golden --kernel <substr>``) can be reused verbatim to run /
+    compile / tune it. Because compile/run/tune build a single graph, the substring
+    must name **one** shape: a match spanning several shapes exits 2 listing them.
+    Exits 2 on an unknown name (listing the available names) or a conflict with
+    ``--code`` / positional input / ``--ir`` / ``--dynamic``."""
     name = getattr(args, "golden", None)
     args.golden_configs = []
     if not name:
         return
     from emmy.compiler.pipeline.search.data import Dataset
 
-    if args.code or args.input or getattr(args, "ir", None):
+    # ``compile``'s ``--ir`` is an output STAGE (a key of _IR_STAGES), not an input
+    # file — only ``run``'s ``--ir`` (a JSON path) conflicts with ``--golden``.
+    ir_input = getattr(args, "ir", None)
+    if ir_input in _IR_STAGES:
+        ir_input = None
+    if args.code or args.input or ir_input:
         logger.error("--golden is mutually exclusive with --code / positional input / --ir")
         sys.exit(2)
     if getattr(args, "dynamic", None):
@@ -156,13 +169,18 @@ def resolve_golden_arg(args) -> None:
     # Scope to the live card's golden(s): on a multi-GPU goldens dir, A/B-ing the
     # deployed pick against another card's recorded config (e.g. a PRO 6000 golden
     # on a 5090 — both cc 12.0) is meaningless. Cards with no recorded golden of
-    # their own fall back to the full set (the seed / transfer flow).
-    matches = Dataset.from_golden(name=name, live_gpu=True).samples
+    # their own fall back to the full set (the seed / transfer flow). Exact name
+    # first (the fast, unambiguous path), else a name substring.
+    matches = Dataset.from_golden(name=name, live_gpu=True).samples or Dataset.from_golden(kernel=name, live_gpu=True).samples
     if not matches:
         from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS
 
         names = ", ".join(sorted({g.name for g in GOLDEN_CONFIGS}))
         logger.error("unknown golden config %r.\nAvailable: %s", name, names)
+        sys.exit(2)
+    distinct = sorted({m.name for m in matches})
+    if len(distinct) > 1:
+        logger.error("golden %r is ambiguous — matches %d shapes: %s\nNarrow it to one.", name, len(distinct), ", ".join(distinct))
         sys.exit(2)
     # All configs under one name share the shape (and dynamic spec), so any
     # snippet is interchangeable.
@@ -273,6 +291,7 @@ def setup_pipeline_runtime(args) -> None:
 def register_compile_command(subparsers):
     parser = subparsers.add_parser("compile", help="Compile a model or IR through structural lowering")
     add_input_args(parser)
+    add_golden_arg(parser)
     parser.add_argument("--output", "-o", help="Output path for compiled IR")
     parser.add_argument(
         "--ir",
@@ -300,6 +319,7 @@ def register_compile_command(subparsers):
 
 
 def handle_compile(args):
+    resolve_golden_arg(args)  # --golden NAME → args.code (+ args.dynamic for a dynamic golden)
     if args.code and args.input:
         logger.error("--code and positional input are mutually exclusive")
         sys.exit(2)

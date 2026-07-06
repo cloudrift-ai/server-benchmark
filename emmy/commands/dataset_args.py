@@ -39,8 +39,9 @@ def add_dataset_args(parser, *, default: str, with_min_variants: bool = False) -
     parser.add_argument("--db", help="Tune DB path for --dataset db/nodes. Default: EMMY_TUNE_DB or ~/.cache/emmy/autotune.db.")
     parser.add_argument(
         "--kernel",
-        help="Filter by substring: golden name; kernel C identifier for --dataset db; op label (e.g. 'matmul', "
-        "'reduce', 'free=512') for --dataset nodes.",
+        help="Filter by substring: golden name (the SAME identifier `compile/run/tune --golden` selects a single "
+        "shape with); kernel C identifier for --dataset db; op label (e.g. 'matmul', 'reduce', 'free=512') for "
+        "--dataset nodes.",
     )
     if with_min_variants:
         parser.add_argument(

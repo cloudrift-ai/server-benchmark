@@ -16,6 +16,8 @@ instance — no ``register(...)`` wrapper, no manual bookkeeping.
 
 from __future__ import annotations
 
+import contextlib
+import os
 import sys
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -366,6 +368,29 @@ def apply_off_defaults(knobs: dict, declared: Iterable[Knob]) -> dict:
 
 
 # --- Aggregate env var ------------------------------------------------------
+
+
+@contextlib.contextmanager
+def pinned_knobs(knobs: dict):
+    """Pin ``EMMY_<KNOB>`` env vars for the duration of one compile, restoring the
+    prior environment on exit. A pinned knob collapses its fork to that value
+    (``Knob.narrow`` / the native ``pin()`` readers), so the pipeline lowers exactly
+    these knobs. Accepts both legacy names (``BK``) and native ``MOVE@element`` keys
+    (``SPLIT@a0`` — mapped to the ``EMMY_SPLIT_A0`` pin by ``config.knob_var``), i.e.
+    a recorded golden's ``knobs`` dict verbatim."""
+    saved: dict[str, str | None] = {}
+    try:
+        for name, value in knobs.items():
+            key = config.knob_var(name)
+            saved[key] = os.environ.get(key)
+            os.environ[key] = str(value)
+        yield
+    finally:
+        for key, prev in saved.items():
+            if prev is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = prev
 
 
 def apply_knobs_env(raw: str | None = None) -> dict[str, str]:

@@ -1,8 +1,10 @@
-# Re-baselined 2026-07-06 on post-#269 (Block-DAG Tile IR) codegen: same knobs, live -O3 `run --bench` latencies.
-# The #269 rewrite deliberately dropped optimizations (operand staging, cp.async ring, CTA swizzle) that are being
+# Re-baselined 2026-07-06 on post-#269 (Block-DAG Tile IR) codegen: live -O3 `run --bench` latencies. The #269
+# rewrite deliberately dropped optimizations (operand staging, cp.async ring, CTA swizzle) that are being
 # reintroduced gradually; the pre-#269 numbers are the long-term target — recover them via
 # `git show 272153d3:emmy/compiler/pipeline/search/goldens/rtx4090_sm89.yaml`. Context + per-shape drift:
-# plans/golden-sweep-rtx4090-findings.md.
+# plans/golden-sweep-rtx4090-findings.md. Six entries where the greedy pick beat the legacy-recorded knobs carry
+# greedy's config in the native `MOVE@element` vocabulary (new goldens speak native — see `_knob_legacy`); the
+# rest keep their legacy-keyed knobs (ingest-only ramp) at live latencies.
 gpu_name: NVIDIA GeForce RTX 4090
 compute_cap: [8, 9]
 configs:
@@ -44,8 +46,8 @@ configs:
     N: 512
     K: 512
     dtype: fp16
-    knobs: {WN: 1, WM: 2, FM: 1, FN: 4, BK: 2, SPLITK: 1, MMA: 'mma_m16n8k16_f16', RING: 4, STAGE: '11'}
-    emmy_us: 24.0
+    knobs: {ATOM@out: 'mma_m16n8k16_f16', SPLIT@a0: '8x1', SPLIT@a1: '1x2', REDUCE@a2: 's16/f1/c1/t1', PLACE@x1: 'smem:sync', FM: 2}
+    emmy_us: 11.1
     cublas_us: 5.8
   - kernel: matmul
     name: square.1024.fp16
@@ -53,8 +55,8 @@ configs:
     N: 1024
     K: 1024
     dtype: fp16
-    knobs: {WN: 1, WM: 4, FM: 1, FN: 4, BK: 2, SPLITK: 1, MMA: 'mma_m16n8k16_f16', RING: 2, STAGE: '11'}
-    emmy_us: 54.6
+    knobs: {ATOM@out: 'mma_m16n8k16_f16', SPLIT@a0: '8x1', SPLIT@a1: '1x4', REDUCE@a2: 's8/f1/c1/t1', PLACE@x1: 'smem:sync', FM: 4}
+    emmy_us: 50.6
     cublas_us: 18.1
   - kernel: matmul
     name: square.2048.fp16
@@ -62,8 +64,8 @@ configs:
     N: 2048
     K: 2048
     dtype: fp16
-    knobs: {WM: 2, WN: 2, FM: 4, FN: 8, BK: 2, SPLITK: 1, MMA: 'mma_m16n8k16_f16', RING: 2, STAGE: '11'}
-    emmy_us: 285.4
+    knobs: {ATOM@out: 'mma_m16n8k16_f16', SPLIT@a0: '4x2', SPLIT@a1: '4x4', REDUCE@a2: 's2/f1/c1/t1', PLACE@x0: 'smem:sync', PLACE@x1: 'smem:sync', FM: 2, FN: 4}
+    emmy_us: 261.4
     cublas_us: 115.2
   - kernel: matmul
     name: square.4096.fp16
@@ -143,8 +145,8 @@ configs:
     M: 128
     N: 3072
     K: 1024
-    knobs: {BM: 8, BN: 32, BK: 64, BR: 1, FM: 4, FN: 4, FK: 1, SPLITK: 1, RING: 2, STAGE: '11'}
-    emmy_us: 53.7
+    knobs: {ATOM@out: scalar, SPLIT@a0: '8x4', SPLIT@a1: '16x2', REDUCE@a2: 's32/f1/c1/t1', PLACE@x0: 'smem:sync', PLACE@x1: 'smem:sync', FM: 4, FN: 2}
+    emmy_us: 48.7
     cublas_us: 25.5
   - kernel: matmul
     name: qwen3_06b.down_proj.s128
@@ -227,8 +229,8 @@ configs:
     N: 1024
     K: 2048
     dynamic: {seq_len: {input: x0, axis: 0}}
-    knobs: {BM: 8, BN: 16, BK: 32, BR: 1, FM: 4, FN: 4, FK: 1, SPLITK: 1, RING: 3, STAGE: '11'}
-    emmy_us: 117.8
+    knobs: {ATOM@out: scalar, SPLIT@a0: '8x8', SPLIT@a1: '16x4', REDUCE@a2: 's32/f1/c2/t1', PLACE@x0: 'smem:sync', PLACE@x1: 'smem:sync', FM: 8, FN: 4}
+    emmy_us: 91.4
     cublas_us: 67.1
   - kernel: matmul
     name: qwen3_06b.gate_up_proj.s512.dynM
@@ -236,8 +238,8 @@ configs:
     N: 3072
     K: 1024
     dynamic: {seq_len: {input: x0, axis: 0}}
-    knobs: {BN: 16, BM: 8, FM: 8, FN: 4, FK: 1, BK: 32, SPLITK: 2, BR: 1, STAGE: '11', RING: 2}
-    emmy_us: 129.7
+    knobs: {ATOM@out: scalar, SPLIT@a0: '16x4', SPLIT@a1: '16x4', REDUCE@a2: 's64/f1/c1/t1', PLACE@x0: 'smem:sync', PLACE@x1: 'smem:sync', FM: 4, FN: 4}
+    emmy_us: 121.7
     cublas_us: 85.6
   - kernel: matmul
     name: qwen3_06b.down_proj.s512.dynM

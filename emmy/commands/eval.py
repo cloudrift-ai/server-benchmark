@@ -627,34 +627,42 @@ def _perf_cell(perf: dict | None, name: str) -> tuple[str, str] | None:
 
 
 def _emit_prior_golden_check(configs: list, *, title: bool = True, perf: dict | None = None) -> None:
-    """Greedy fork pick through the tile pipeline vs recorded golden. The pick reads
-    the learned-prior JSON (``config.prior_path()``: ``EMMY_PRIOR_FILE`` /
-    ``--prior``); option-0 with no fitted prior. Stops at the tile dialect (every
-    knob fork resolves there: no codegen / nvcc). One row per shape (configs sharing a
-    name share a snippet → one greedy pick): the pick is scored against the shape's
-    *closest* recorded golden (most knobs reproduced), so multiple goldens for a shape
-    don't duplicate rows. A trailing ``TOTAL`` row carries per-knob match counts over the
-    deduped rows + the exactly-reproduced row count. Rows print with column-aligned
-    ``found/golden`` knobs (canonical order). ``title`` prints the
+    """Greedy fork pick through the lowering pipeline vs recorded golden, diffed in
+    the **native** ``MOVE@element`` knob vocabulary. The pick reads the learned-prior
+    JSON (``config.prior_path()``: ``EMMY_PRIOR_FILE`` / ``--prior``); option-0 with no
+    fitted prior. Both sides are compiled to the kernel dialect (knob stamping
+    completes there — still no codegen / nvcc): the greedy side unpinned, the golden
+    side with the recorded ``knobs`` pinned (``pinned_knobs``), so a legacy-keyed
+    golden (``BM``/``BK``/…) is translated through the same ingest ramp the deploy
+    path uses and the diff is always native-vs-native. One row per shape (configs
+    sharing a name share a snippet → one greedy pick): the pick is scored against the
+    shape's *closest* recorded golden (most knobs reproduced), so multiple goldens for
+    a shape don't duplicate rows. A trailing ``TOTAL`` row carries per-knob match
+    counts over the deduped rows + the exactly-reproduced row count. Rows print with
+    column-aligned ``found/golden`` knobs (canonical order). ``title`` prints the
     ``Golden reproduction — … prior: <path>`` banner (``eval prior``); ``eval golden``
     passes ``title=False`` for just the table."""
     import logging as _logging  # noqa: PLC0415
 
     from emmy import config  # noqa: PLC0415
     from emmy.commands.trace import graph_from_code  # noqa: PLC0415
-    from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import pinned_knobs  # noqa: PLC0415
     from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs  # noqa: PLC0415
 
     def tunable(knobs: dict) -> dict:
         return {k: v for k, v in knobs.items() if not k.startswith(("S_", "H_"))}
 
-    def picked(snippet: str, dynamic: tuple[str, ...] = ()) -> dict:
+    def picked(snippet: str, dynamic: tuple[str, ...] = (), pins: dict | None = None) -> dict:
         # A dynamic golden's greedy pick must come from the symbolic (masked-tile)
         # trace — a static trace would compare the static twin's pick against the
         # dynamic golden's knobs (a different artifact / variant space).
         dynamic_shapes = build_torch_dynamic_shapes(parse_position_specs(list(dynamic))) if dynamic else None
         graph, _, _ = graph_from_code(snippet, dynamic_shapes=dynamic_shapes)
-        compiled = Pipeline.build(TILE_PASSES).run(graph)  # tile dialect only — no codegen/nvcc
+        with pinned_knobs(pins or {}):
+            # Kernel dialect, not tile: FM / the codegen control flags stamp during
+            # the kernel lowering, and the diff should cover them. No codegen/nvcc.
+            compiled = Pipeline.build(KERNEL_PASSES).run(graph)
         knobs: dict = {}
         for node in compiled.nodes.values():
             k = getattr(node.op, "knobs", None)
@@ -693,8 +701,20 @@ def _emit_prior_golden_check(configs: list, *, title: bool = True, perf: dict | 
             except Exception as e:  # noqa: BLE001 — one shape's error shouldn't abort the report
                 entries.append(("err", name, " ".join(f"{type(e).__name__}: {e}".split())[:100]))
                 continue
+
+            # Each golden's knobs are pinned and compiled to their native stamp (the
+            # legacy→native ingest ramp), so the diff below is native-vs-native even
+            # for a legacy-recorded golden. A golden whose pins fail to compile is
+            # scored against its raw dict (native-keyed entries still diff fine).
+            def native_gold(c) -> dict:
+                pins = tunable(c.knobs)
+                try:
+                    return picked(c.snippet(), tuple(getattr(c, "dynamic_specs", list)()), pins=pins)
+                except Exception:  # noqa: BLE001 — a stale/unlowerable golden shouldn't kill the row
+                    return pins
+
             # Closest golden: most knobs reproduced, tie-broken by match fraction.
-            scored = [(sum(1 for k in gd if (got.get(k) == gd[k])), gd) for gd in (tunable(c.knobs) for c in group)]
+            scored = [(sum(1 for k in gd if (got.get(k) == gd[k])), gd) for gd in (native_gold(c) for c in group)]
             matched, gold = max(scored, key=lambda t: (t[0], t[0] / len(t[1]) if t[1] else 1.0))
             n_match += matched == len(gold)
             n_rows += 1

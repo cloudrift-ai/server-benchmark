@@ -91,6 +91,33 @@ def test_env_property():
     assert Knob("STAGE", KnobType.BINMASK).env == "EMMY_STAGE"
 
 
+def test_knob_var_native_move_element_key():
+    # A native ``MOVE@element`` op.knobs key maps to the documented
+    # ``EMMY_<MOVE>_<ELEMENT>`` pin spelling — the one the enumeration's pin
+    # readers look up (``@`` is not a portable env-var character).
+    from emmy import config
+
+    assert config.knob_var("SPLIT@a0") == "EMMY_SPLIT_A0"
+    assert config.knob_var("REDUCE@a2") == "EMMY_REDUCE_A2"
+    assert config.knob_var("BK") == "EMMY_BK"
+
+
+def test_pinned_knobs_native_keys_roundtrip(monkeypatch):
+    # ``pinned_knobs`` accepts a recorded golden's knobs dict verbatim — native
+    # keys pin through the underscore env spelling and the prior env is restored.
+    import os
+
+    from emmy.compiler.pipeline.knob import pinned_knobs
+
+    monkeypatch.delenv("EMMY_SPLIT_A0", raising=False)
+    monkeypatch.setenv("EMMY_BK", "32")
+    with pinned_knobs({"SPLIT@a0": "8x1", "BK": 64}):
+        assert os.environ["EMMY_SPLIT_A0"] == "8x1"
+        assert os.environ["EMMY_BK"] == "64"
+    assert "EMMY_SPLIT_A0" not in os.environ
+    assert os.environ["EMMY_BK"] == "32"
+
+
 # ---------------------------------------------------------------------------
 # Knob.narrow — fold env pin into candidate enumeration
 # ---------------------------------------------------------------------------

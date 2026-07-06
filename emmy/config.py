@@ -57,8 +57,11 @@ def knob_var(name: str) -> str:
 
     Sole place the knob-name → env-var join lives. Used by
     :class:`~emmy.compiler.pipeline.knob.Knob` (via ``Knob.env``) and the
-    ``EMMY_KNOBS`` splat."""
-    return f"{PREFIX}{name.upper()}"
+    ``EMMY_KNOBS`` splat. A native ``MOVE@element`` knob key (the ``op.knobs``
+    spelling, e.g. ``SPLIT@a0``) maps to the documented ``EMMY_<MOVE>_<ELEMENT>``
+    pin (``EMMY_SPLIT_A0``) — ``@`` is not a portable env-var character, and the
+    enumeration's pin readers only ever look up the underscore spelling."""
+    return f"{PREFIX}{name.upper().replace('@', '_')}"
 
 
 def knob_raw(name: str) -> str | None:

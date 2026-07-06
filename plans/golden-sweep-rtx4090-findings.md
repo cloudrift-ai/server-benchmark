@@ -101,11 +101,12 @@ Finding-1 drift (live golden re-bench over the YAML's recorded `emmy_us`); `gree
 recorded `cublas_us` (>1 = emmy slower than PyTorch). The `better` rows all reproduced 3/3 (pass 2 re-ran each twice;
 golden rows were rock-steady, e.g. 24.0/23.9/23.9 and 117.8/117.9/117.9), so they are genuine on the current
 compiler — every one is a shape whose recorded knobs regressed hardest (`live/recorded` 4.07, 1.86, 2.39, 1.63,
-1.90, 1.42), i.e. greedy found configs that dodge the dropped optimizations. Their knob dicts could not be recorded
-this sweep — the kernel table's new schema doesn't expose the full YAML knob vocabulary and `eval golden` is broken
-(Finding 5) — so their re-baselined entries keep the old knobs at live µs; extracting greedy's configs for these six
-is a follow-up once Finding 5 is fixed. The `greedy vs cuBLAS` column is uniformly bad (1.09–4.69, vs 0.70–1.71 in
-the 2026-06-19 report) — the same regression seen from the absolute side.
+1.90, 1.42), i.e. greedy found configs that dodge the dropped optimizations. All six are recorded in the YAML with
+greedy's config in the **native `MOVE@element` vocabulary** (per the `_knob_legacy` policy: new goldens speak
+native) at their live µs — each stamp verified against the benched pass-1 kernel row, and the native replay chain
+validated live (`run --bench --golden square.512.fp16`: golden row 11.2 µs, knob-identical to greedy). Recording
+natively required the Finding-5 fixes below. The `greedy vs cuBLAS` column is uniformly bad (1.09–4.69, vs
+0.70–1.71 in the 2026-06-19 report) — the same regression seen from the absolute side.
 
 ## Finding 2 — greedy trails even the regressed goldens on 21/29 shapes; split-K probe wins on `square.512` (P1)
 
@@ -151,16 +152,28 @@ The search recovered (config pinned `bench_fail @ 2e6`), so impact on the sweep 
 **Recommendation (P2):** record the full nvcc stderr in the `error` column (or at least the *last* diagnostics, not
 the first), and emit only the selected atom's helper. Repro: pin the knobs above on the `square.2048.fp16` snippet.
 
-## Finding 5 — `eval prior --dataset golden` renders the greedy pick's knobs as all-dashes (P3)
+## Finding 5 — the golden knob-diff views were dead post-#269: legacy/native vocabulary schism (FIXED this sweep)
 
-In the post-sweep forecast, every shape's "found" knob cells printed `-` (`m/t 0/10` with `-/8`, `-/16`, …) while the
-same-process `run --bench` resolves and prints the greedy knobs fine. Either the view's greedy-pick resolution or its
-rendering is broken; as-is the per-knob found/golden diff — the view's whole point — is unreadable. (Its `vs gold`
-ratios were also silently inflated by Finding 1, since the denominator is the recorded µs; that is by design, but a
-drift flag would have surfaced the regression right there.)
+In the post-sweep forecast, every shape's "found" knob cells printed `-` (`m/t 0/10`) while the same-process
+`run --bench` printed greedy knobs fine. Root cause (not a display bug): #269 moved knob stamping to the **native
+`MOVE@element` vocabulary** (`SPLIT@a0='8x4'`, `REDUCE@a2='s64/f1/c1/t1'`, …) while the goldens record **legacy**
+GEMM-letter keys — the view diffed disjoint key sets. Two latent breaks underneath, both fixed on this branch:
 
-**Recommendation (P3):** fix the found-knob resolution in the golden view; consider a `live/recorded` drift column
-sourced from the reservoir's `H_opt=3` rows.
+1. **`config.knob_var` didn't map `@`→`_`**, so a native-keyed knobs dict pinned `EMMY_SPLIT@A0` — an env var no pin
+   reader looks up — making native-keyed golden replay (`_pinned_knobs`, `EMMY_KNOBS`, repro strings) a silent
+   no-op. `knob_var` now emits the documented `EMMY_<MOVE>_<ELEMENT>` spelling; unit-tested; validated live by
+   pinning a non-greedy native spec (the pin takes) and by the `square.512.fp16` golden-row replay (11.2 µs,
+   knob-identical to greedy).
+2. **`_emit_prior_golden_check` diffed at the tile dialect in whatever keys the YAML carried.** It now compiles both
+   sides to the kernel dialect (stamping completes there; still no nvcc) and diffs **native-vs-native** — the golden
+   side is compiled with its recorded knobs pinned, so legacy-keyed entries translate through the same
+   `_knob_legacy` ingest ramp the deploy path uses. The pin context was promoted from `run.py`'s private
+   `_pinned_knobs` to the shared `pipeline.knob.pinned_knobs`.
+
+The view now shows real diffs (e.g. `square.512`: greedy `s32/f1/c1/t1` vs golden `s64/f1/c4a/t1` — the SPLITK=4
+entry correctly ingested). Remaining (P3): the `vs gold` ratios are still computed against recorded µs with no
+drift flag — a `live/recorded` drift column sourced from the reservoir's `H_opt=3` rows would have surfaced
+Finding 1 right in this view.
 
 ## Workflow notes
 

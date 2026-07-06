@@ -9,7 +9,6 @@ the same shape as ``scripts/bench_block.py`` but for arbitrary inline ops.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import os
 import sys
@@ -17,6 +16,7 @@ from collections import namedtuple
 from pathlib import Path
 
 from emmy import config
+from emmy.compiler.pipeline.knob import pinned_knobs
 
 logger = logging.getLogger(__name__)
 
@@ -397,25 +397,9 @@ def _dump_bench_compare(dump_dir, results: dict, warmup: int, iters: int) -> Non
 # One recorded golden config compiled + benched with its knobs pinned this run.
 _GoldenBench = namedtuple("_GoldenBench", "sample graph bench")
 
-
-@contextlib.contextmanager
-def _pinned_knobs(knobs: dict):
-    """Pin ``EMMY_<KNOB>`` env vars for the duration of one compile, restoring
-    the prior environment on exit. A pinned knob collapses its fork to that value
-    (``Knob.narrow``), so ``backend.compile`` lowers exactly these knobs."""
-    saved: dict[str, str | None] = {}
-    try:
-        for name, value in knobs.items():
-            key = config.knob_var(name)
-            saved[key] = os.environ.get(key)
-            os.environ[key] = str(value)
-        yield
-    finally:
-        for key, prev in saved.items():
-            if prev is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = prev
+# The pin context lives in ``pipeline.knob`` (shared with ``eval``'s golden view);
+# the old private ``_pinned_knobs`` here was the same code.
+_pinned_knobs = pinned_knobs
 
 
 def _ab_samples(specs, dynamic=None):

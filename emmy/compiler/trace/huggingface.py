@@ -220,16 +220,37 @@ def build_layer_wrapper(block, rotary_emb, hidden_size: int, dtype, *, layer_typ
         except TypeError:
             cos, sin = rotary_emb(sample, full_pos)
 
+    # Gemma-nano (E2B/E4B) Per-Layer Embeddings: each decoder layer computes
+    # ``hidden * per_layer_input`` (modeling_gemma4). The real tensor is a per-layer
+    # token embedding the whole-model path supplies; the single-layer wrapper has no
+    # tokens, so stand in a deterministic synthetic one sized ``[1, S, ple_dim]`` and
+    # slice it in-graph like cos/sin. Perf-representative — the PLE gate/mul/projection/
+    # norm kernels depend on shape, not values, and the accuracy check stays valid
+    # (emmy and torch see the same buffer). Non-uniform (randn) so the elementwise mul
+    # isn't algebraically folded to identity. ``0`` for non-PLE architectures — they
+    # take the unchanged path below.
+    ple_dim = int(getattr(block, "hidden_size_per_layer_input", 0) or 0)
+    ple = None
+    if ple_dim:
+        with torch.no_grad():
+            g = torch.Generator().manual_seed(0)
+            ple = torch.randn((1, n_pos, ple_dim), generator=g, dtype=torch.float32).to(dtype)
+
     class LayerWrapper(nn.Module):
         def __init__(self) -> None:
             super().__init__()
             self.block = block
             self.register_buffer("cos", cos)
             self.register_buffer("sin", sin)
+            if ple is not None:
+                self.register_buffer("ple", ple)
 
         def forward(self, x):
             s = x.shape[1]
-            return self.block(x, position_embeddings=(self.cos[:, :s], self.sin[:, :s]))
+            pe = (self.cos[:, :s], self.sin[:, :s])
+            if ple_dim:
+                return self.block(x, per_layer_input=self.ple[:, :s], position_embeddings=pe)
+            return self.block(x, position_embeddings=pe)
 
     return LayerWrapper()
 

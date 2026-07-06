@@ -396,3 +396,29 @@ def test_trace_repeat_kv_correct():
     be = LoopBackend()
     out = list(be.run(be.compile(g), input_data={g.inputs[0]: k.numpy()})[0].outputs.values())[0]
     np.testing.assert_allclose(np.asarray(out).reshape(ref.shape), ref, rtol=1e-5, atol=1e-5)
+
+
+def test_dropout_traces_as_copy_passthrough():
+    """Inference dropout must trace as a ``copy`` no-op, not crash on an unknown op.
+
+    Phi3-family layers (Phi-4-mini) emit a ``dropout`` node; before the fix the trace
+    raised ``unknown elementwise op name: 'dropout'``.
+    """
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class M(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lin = nn.Linear(8, 8)
+            self.drop = nn.Dropout(0.5)
+
+        def forward(self, x):
+            return self.drop(self.lin(x))
+
+    g = trace_module(M().eval(), (torch.randn(2, 8),))
+    ew_names = [n.op.op.name for n in g.nodes.values() if type(n.op).__name__ == "ElementwiseOp"]
+    assert "dropout" not in ew_names
+    assert "copy" in ew_names

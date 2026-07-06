@@ -800,6 +800,12 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, str], *, s
         node_map[name] = nid
         return
 
+    if op_name == "dropout":
+        # Inference-time dropout is the identity. Drop the p / training args and
+        # lower it as a `copy` passthrough so it becomes a no-op in the graph.
+        input_ids = input_ids[:1]
+        op_name = "copy"
+
     # --- Fallback: unknown op becomes ElementwiseOp by torch-aten name ---
     logger.debug("Fallback elementwise for %s (%s)", op_name, fx_node.target)
     if input_ids:

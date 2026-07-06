@@ -192,6 +192,8 @@ def op_to_expr(fn: str, inputs: list[Expr]) -> Expr:
         return BinaryExpr("-", Literal(0.0, "float"), inputs[0])
     if fn == "copy":
         return inputs[0]
+    if fn == "square":
+        return BinaryExpr("*", inputs[0], inputs[0])
     if fn == "reciprocal":
         return BinaryExpr("/", Literal(1.0, "float"), inputs[0])
     if fn == "relu":

@@ -434,7 +434,16 @@ def _trace_model(model_id: str, layer: int | None, seq_len: int, *, dynamic_shap
 
     logger.info("Pulling %s...", model_id)
     dtype = torch.float32 if layer is None else torch.float16
-    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype)
+    try:
+        model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype)
+    except ValueError as e:
+        # Only fall back to executing the repo's custom modeling code when
+        # transformers explicitly requires it (e.g. MiniCPM3). Models that ship
+        # remote code but also have a built-in class (e.g. Phi-4-mini) must use
+        # the built-in path — their remote code may not match this transformers.
+        if "trust_remote_code" not in str(e):
+            raise
+        model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype, trust_remote_code=True)
     model.eval()
 
     if layer is None:

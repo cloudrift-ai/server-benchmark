@@ -71,10 +71,10 @@ def register_run_command(subparsers):
     parser.add_argument(
         "--profile",
         action="store_true",
-        help="After --bench, re-launch each kernel under ``ncu`` to collect hardware counters "
+        help="Re-launch each kernel under ``ncu`` to collect hardware counters "
         "(SM-active %%, FMA pipe util, L1/DRAM bandwidth, smem bank-conflict %%) and print a "
         "side-by-side table of the emmy kernels vs the torch/cuBLAS reference kernels. "
-        "Skipped if ncu is not on PATH or the user lacks performance-counter permissions.",
+        "Implies --bench. Skipped if ncu is not on PATH or the user lacks performance-counter permissions.",
     )
     parser.add_argument("--warmup", type=int, default=10, help="Warmup iterations for --bench (default: 10).")
     parser.add_argument("--iters", type=int, default=100, help="Measurement iterations for --bench (default: 100).")
@@ -153,6 +153,8 @@ def handle_run(args):
 
     apply_nvcc_flags(args, default="")  # run uses nvcc default -O3 (representative codegen)
     apply_target_arg(args)  # --target sm_NN gates TMA / cp.async like the target GPU would
+    if args.profile:
+        args.bench = True  # --profile re-launches under ncu via the bench path; profiling implies benching
     verbose = getattr(args, "verbose", 0)
     if verbose == 0:
         logging.getLogger().setLevel(logging.WARNING)
@@ -920,6 +922,12 @@ def _run_ncu_profile(args, *, dump_dir=None):
         cmd.extend(["--seq-len", str(args.seq_len)])
     if args.target is not None:
         cmd.extend(["--target", args.target])
+    # Forward the symbolic-dim specs so the child re-traces the SAME (masked-tile)
+    # graph the parent benched. ``args.dynamic`` is the ``NAME@INPUT:AXIS`` CLI form
+    # (a dynamic ``--golden`` sets it too, via ``resolve_golden_arg``); without this
+    # the child re-compiles the static twin and ncu profiles the wrong kernel.
+    for spec in getattr(args, "dynamic", None) or []:
+        cmd.extend(["--dynamic", spec])
     # ncu's per-launch overhead means we want one or two launches per
     # kernel — enough for the counters to populate, not so many that
     # the run drags out. Match ``emmy run --bench``'s minimal

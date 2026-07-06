@@ -1,214 +1,179 @@
-# Golden sweep findings — RTX 4090 (sm_89), 2026-06-19
+# Golden sweep findings — RTX 4090 (sm_89), 2026-07-01 → 2026-07-06
 
-- GPU: NVIDIA GeForce RTX 4090, sm_89, CUDA 12.9 (`nvcc` at `/usr/local/cuda`), local single-host sweep.
-- Sweep: `emmy tune --dataset golden --clean` (29 shapes, ~102 min compute) → per-shape A/B
-  `emmy run --bench --golden NAME` (29 shapes, ~6 min) → confirmation re-runs of the win candidates (~12 min).
-  Logs under the gitignored `_tune/golden-sweep-rtx4090/` (`tune.log`, `ab/`, `ab2/`).
-- Branch: `feature/golden-sweep-rtx4090`.
-- **Category tally: 12 replaced / 0 added / 11 unchanged / 6 worse (left).** All A/B numbers are -O3 `run --bench`,
-  never the -O1 tune DB.
+- GPU: NVIDIA GeForce RTX 4090, sm_89, driver 580.65.06, CUDA 12.9, VM `vm-perf-tuning` (`~/emmy` at `272153d3`).
+- Sweep: `emmy tune --dataset golden --clean` (29 shapes, ~171 min compute, 2026-07-01) → forecast
+  (`eval prior --dataset golden`) → per-shape A/B `emmy run --bench --golden NAME` (29 shapes) → confirmation re-runs
+  of every win candidate (2 extra runs each) → regression bisect on a pre-#269 clone (`~/emmy-pre269`).
+  Logs under the gitignored `_tune/golden-sweep-rtx4090/` (`tune.log`, `ab-pass1.log`, `ab-pass2.log`,
+  `eval-failures.log`).
+- Branch: `feature/golden-sweep-rtx4090-findings`. This file supersedes the 2026-06-19 sweep report (in git history:
+  `git show 272153d3:plans/golden-sweep-rtx4090-findings.md`). The recorded YAML numbers ARE that sweep's
+  `run --bench` output, same methodology and same GPU as this one, which is what makes the drift comparison in
+  Finding 1 apples-to-apples.
+- **Category tally (live A/B): 21 worse / 2 same / 6 better — but 0 recorded.** Every YAML edit is deliberately held:
+  Finding 1 shows the live baseline itself is regressed, so recording post-#269 numbers would overwrite the only
+  evidence of what the compiler used to achieve. All A/B numbers are -O3 `run --bench`, never the -O1 tune DB.
 
-## Headline: two prior-report findings closed before a single golden was re-recorded
+## Headline — Finding 1: PR #269 (Block-DAG Tile IR) is a 1.66× median codegen regression (P0)
 
-This sweep is the first 4090 golden refresh since the 2026-06-13 seed, and two of that report's blockers are now gone:
+The recorded golden knob sets, re-benched live on today's compiler, run at **median 1.66× their recorded latency**
+(worst `square.512.fp16` **4.07×**, `o_proj.s32` 2.85×, `q_proj.s32` 2.58×; every one of the 29 shapes drifted
+≥1.09×; full column in the table below). The cuBLAS reference reproduces its recorded value on all 29 shapes
+(e.g. 320.0 → 311, 20.2 → 20), so the harness, clocks, and measurement semantics are unchanged — the emmy kernels
+themselves got slower at identical knobs.
 
-- **Prev Finding 1 (fp16 tensor cores blocked on sm_89) — RESOLVED.** The 2026-06-13 file recorded all four fp16
-  squares as **scalar-tier fallback** (`BM/BN/FM/FN`, no `WM/WN/MMA`) at 3–5× cuBLAS HGEMM, because the warp/MMA
-  ldmatrix path faulted with an OOB `__shared__` read on Ada. The recent commits `28646fea fix ldmatrix bug` +
-  `c7fa9ff2 drop ldmatrix gate on sm_89` fixed that. This sweep's greedy pick now deploys the **warp/MMA tier**
-  (`MMA=mma_m16n8k16_f16`) for every fp16 square, passes the accuracy gate, and runs **2.9–3.0× faster** than the
-  recorded scalar goldens. All four are replaced (see table). The stale scalar goldens were not just slow — their
-  recorded `RING` knob **no longer fires** ("BUFFER_COUNT not promotable"), so `run --bench --golden` could not even
-  re-bench them; the warp-tier replacement is the only deployable config now.
+Bisect (pinned golden knobs, `square.512.fp16`, -O3 `run --bench` on the VM):
 
-- **Prev Finding 3 (hard `LoweringError` with no fallback on sm_89) — RESOLVED (this branch).** The 2026-06-13 report
-  recommended verbatim: *"the deterministic-compile path should fall back to the next-ranked tile when the chosen one
-  fails `validate(ctx)` rather than raising."* The sweep could not even start without this: with the freshly-trained
-  prior extrapolating a 112 KB-smem tile onto the tiny `qwen3_06b.q_proj.s32` (M=32) shape, the in-process tune crashed
-  at shape 9/29 with `LoweringError: ... smem 114688 > max_dynamic_smem 101376 ... no fallback`. The smem cap is
-  correct (`101376` is the genuine sm_89 per-block opt-in limit, sourced from the per-cc table in `gpu.py`), and the
-  `validate(ctx)` gate was doing its job. The bug was the recovery: `Pipeline.run`'s 8-retry blocklist
-  (`_MAX_GREEDY_RETRIES`) exhausts on the prior's over-budget picks and then *raised*. Fix (`pipeline/pipeline.py`): on
-  retry exhaustion, fall back to the conservative emission-order resolve (`greedy_decide(prior=None)` = option-0), which
-  is budget-safe by construction; it still raises when no in-budget tile exists (the single-option guardrail is
-  preserved). Regression test added in `tests/compiler/pipeline/test_lowering_error_guardrail.py`
-  (`test_greedy_run_falls_back_to_option0_when_prior_overflows`). With the fix the full 29-shape sweep ran to
-  completion, 0 crashes.
+| commit | date | golden-row µs |
+|---|---|---:|
+| `7b14aff6` (#270, parent of the rewrite) | 06-25 | **6.1** (recorded: 5.9 — reproduces) |
+| `8c7d2d54` **(#269, Block-DAG Tile IR)** | 06-26 | **24.0** |
+| `272153d3` (HEAD) | 07-01 | 24.0 |
 
-The remaining picture matches **prev Finding 2** (the cold sm_120-fit `AnalyticPrior` mis-prices sm_89): the recorded
-goldens were *transferred 5090 configs*, and the 4090's own warm-prior greedy now **beats** them on the whole s512 +
-gate_up.s128 family (0.55–0.78×, recorded), but still **loses** on `square.4096`, the masked-tile `.dynM` family, and
-two tiny s32 shapes — the shapes where the analytic geometry terms extrapolate worst.
+`o_proj.s32` confirms on the same clone: 13.9 µs at the parent (recorded 11.2) vs 31.9 today. The regression enters
+at exactly the tile-lowering rewrite and is single-commit.
 
-## Per-shape outcomes (-O3 `run --bench` A/B)
+Mechanism (identical-knob CUDA diff, `WN=1,WM=2,FM=1,FN=4,BK=2,RING=4,STAGE=11,MMA=mma_m16n8k16_f16`; dumps kept on
+the VM as `~/cuda-pre269.cu` / `~/cuda-head.cu`): the warp-tile mma math and epilogue are identical, but the new
+assembly drops three capabilities the old one applied under the same knobs —
 
-| shape                            | greedy µs | golden µs | ratio | cuBLAS µs | vs cuBLAS | category                         |
-|----------------------------------|----------:|----------:|------:|----------:|----------:|----------------------------------|
-| square.512                       |      13.6 |      13.5 |  1.01 |      10.8 |      1.26 | unchanged (same knobs)           |
-| square.1024                      |      74.2 |      71.0 |  1.05 |      45.4 |      1.63 | unchanged (same knobs; clean rerun) |
-| square.2048                      |     383.3 |     467.5 |  0.82 |     320.0 |      1.20 | **replaced** (golden un-rebenchable) |
-| square.4096                      |    4216.1 |    3192.8 |  1.32 |    2458.6 |      1.71 | worse → leave (Finding 1)        |
-| square.512.fp16                  |       5.9 |      17.7 |  0.33 |       5.8 |      1.02 | **replaced** (scalar→warp/MMA)   |
-| square.1024.fp16                 |      29.3 |      90.7 |  0.32 |      18.1 |      1.62 | **replaced** (scalar→warp/MMA)   |
-| square.2048.fp16                 |     119.3 |     512.5 |  0.23 |     115.2 |      1.04 | **replaced** (warp/MMA + 128×128 tile, Finding 5) |
-| square.4096.fp16                 |     889.9 |    2125.8 |  0.42 |     822.3 |      1.08 | **replaced** (scalar→warp/MMA)   |
-| qwen3_06b.q_proj.s32             |       7.8 |       7.8 |  1.00 |       9.9 |      0.79 | unchanged (same knobs)           |
-| qwen3_06b.kv_proj.s32            |       6.3 |       6.9 |  0.91 |       6.9 |      0.91 | unchanged (noise, ~0.4 µs)       |
-| qwen3_06b.o_proj.s32             |      11.3 |      11.9 |  0.95 |       9.9 |      1.14 | unchanged (noise)                |
-| qwen3_06b.gate_up_proj.s32       |      14.3 |      12.9 |  1.11 |      11.3 |      1.27 | worse → leave (Finding 4)        |
-| qwen3_06b.down_proj.s32          |      19.9 |      16.6 |  1.20 |      13.0 |      1.53 | worse → leave (Finding 2)        |
-| qwen3_06b.q_proj.s128            |      20.9 |      23.5 |  0.89 |      20.2 |      1.03 | **replaced** (12% under recorded) |
-| qwen3_06b.kv_proj.s128           |      14.2 |      13.5 |  1.05 |      12.4 |      1.15 | unchanged (noise)                |
-| qwen3_06b.o_proj.s128            |      23.2 |      24.4 |  0.95 |      19.0 |      1.22 | unchanged (noise)                |
-| qwen3_06b.gate_up_proj.s128      |      33.0 |      49.5 |  0.67 |      25.5 |      1.29 | **replaced**                     |
-| qwen3_06b.down_proj.s128         |      35.4 |      33.4 |  1.06 |      24.5 |      1.44 | unchanged (noise)                |
-| qwen3_06b.q_proj.s512            |      55.6 |      95.8 |  0.58 |      53.3 |      1.04 | **replaced**                     |
-| qwen3_06b.kv_proj.s512           |      34.3 |      44.5 |  0.77 |      38.9 |      0.88 | **replaced**                     |
-| qwen3_06b.o_proj.s512            |      55.6 |      87.9 |  0.63 |      67.8 |      0.82 | **replaced**                     |
-| qwen3_06b.gate_up_proj.s512      |     103.7 |     132.2 |  0.78 |      85.5 |      1.21 | **replaced**                     |
-| qwen3_06b.down_proj.s512         |      79.7 |     143.1 |  0.56 |     113.2 |      0.70 | **replaced**                     |
-| square.512.dynM                  |      13.9 |      12.9 |  1.08 |      10.8 |      1.29 | worse → leave (Finding 3)        |
-| qwen3_06b.q_proj.s512.dynM       |      67.7 |      67.1 |  1.01 |      53.0 |      1.28 | unchanged                        |
-| qwen3_06b.kv_proj.s512.dynM      |      38.8 |      35.3 |  1.10 |      37.0 |      1.05 | worse → leave (Finding 3)        |
-| qwen3_06b.o_proj.s512.dynM       |      69.9 |      61.7 |  1.13 |      67.1 |      1.04 | worse → leave (Finding 3)        |
-| qwen3_06b.gate_up_proj.s512.dynM |      91.5 |      96.0 |  0.95 |      85.6 |      1.07 | unchanged (noise, same knobs)    |
-| qwen3_06b.down_proj.s512.dynM    |      95.3 |      91.8 |  1.04 |     119.4 |      0.80 | unchanged (noise)                |
+1. **The A operand is never staged into smem.** HEAD emits the `dpl_mma_load_a_gmem` fallback (its own header
+   comment: "the fallback when an mma.sync operand was NOT staged into shared memory … Slower than ldmatrix (no smem
+   reuse)"), re-reading A fragments from global memory inside every mma step. Visible in the bench table as an empty
+   `PLACE@x0` cell on the golden row. Pre-#269 staged A into a 4 KB slab read via `ldmatrix.x4`.
+2. **`RING=4` / `STAGE=11` produce no pipeline.** Pre-#269: a true 4-deep cp.async ring (3-stage prologue,
+   `(a6+3)%4` indexing, `cp.async.wait_group 3` overlap, drain tail). HEAD: single 2 KB buffer, scalar `__half`
+   copies, `__syncthreads()`-load-`__syncthreads()`-compute, 16 serial iterations. The knobs are accepted but inert.
+3. **The `GROUP_M=8` L2 CTA swizzle is gone** (plain row-major block decode).
 
-`vs cuBLAS` = greedy µs / recorded `cublas_us` (torch eager: true-fp32 SGEMM with `allow_tf32=False`, or HGEMM for
-`*.fp16`), so **>1.0 = emmy is slower than PyTorch** — the absolute gap the relative greedy-vs-golden ratio hides.
-The worst cuBLAS losers are the large/regular GEMMs: `square.4096` 1.71×, `square.1024` 1.63×, `square.1024.fp16`
-1.62×, `square.2048.fp16` 1.54×, `down_proj.s32` 1.53×. Note the fp16 squares win their golden A/B 3× yet still trail
-cuBLAS HGEMM 1.5–1.6× (the win was vs the stale scalar golden, not vs PyTorch). emmy only *beats* cuBLAS on six
-rectangular projections (`down_proj.s512` 0.70×, `down_proj.s512.dynM` 0.80×, `o_proj.s512` 0.82×, `kv_proj.s512`
-0.88×, `q_proj.s32` 0.79×, `kv_proj.s32` 0.91×). The cuBLAS-loser shapes that are *also* golden-unchanged/worse are the
-real headroom; the `_W_A` refit (Findings 1/4) targets the worst of them.
+The resource fingerprints tell the same story from the bench table alone: same knobs, pre-#269 16 KB smem / 72 regs /
+25% occ vs HEAD 2 KB / 48 regs / 88% occ — high occupancy with no work per thread. The fp32 shapes drift too (same
+transport machinery), just less violently (1.09–1.65×).
 
-Both win families reproduced on a second independent `run --bench` (fp16 squares: 5.9 / 27.7 / 177.4 / 891.9; s512:
-q 53.7, kv 34.3, o 55.5, gate_up 98.0, down 79.6) — all well outside the ~10–13% small-shape noise band. The two flaky
-fp32 squares (1024, 2048) emitted `cudaErrorMisalignedAddress` at teardown in the `--golden` run; re-running greedy via
-`--code` (no golden-pin contamination) was clean (0 misalign, 74.2 / 383.3 µs), so the faults were the golden pin
-dirtying the context, not the greedy kernels. `square.1024` reproduces its golden (same knobs) → unchanged;
-`square.2048`'s recorded SPLITK=2 golden is un-re-benchable (times out >1000 ms), so its faster SPLITK=1 greedy
-(383 vs 467 µs) replaces it.
+**Recommendation (P0):** root-cause in `passes/lowering/tile/` (the #269 enumeration+assembly): why operand-staging,
+ring-transport, and swizzle moves stop being offered/applied for configs that pin them. The bisect clone, both venvs,
+and both CUDA dumps are live on the VM for whoever picks this up. Until fixed, the golden YAML is frozen (this
+report). Guard for the future: a drift check — live `run --bench --golden` vs recorded `emmy_us` per shape (the
+hand-built table below is exactly that) — belongs in an `eval` view so the next tile-IR rewrite cannot ship a silent
+1.66× (see Workflow notes).
 
-## Finding 1 — `square.4096` fp32: 32% slower than golden, deep on both priors (P1)
+## Per-shape outcomes (-O3 `run --bench` A/B, pass 1; win candidates re-confirmed twice in pass 2)
 
-`square.4096` is the worst miss: greedy 4216 µs vs golden 3193 µs (1.32×). Greedy picks `BM8 BK64 FM16 FN2 SPLITK1
-RING1`; the (transferred-5090) golden is `BM16 BK32 FM10 FN4 SPLITK1 RING2`. The golden ranks **43/1008 under the cold
-`AnalyticPrior`** (`eval analytic`) and **77/1008 under the learned prior** (`eval prior --dataset golden`) — deep on
-both, so neither patience nor the learned half recovers it. Interestingly `eval prior`'s `vs gold` reads **1.05×** —
-the prior's *best measured reservoir config* is within 5% of golden, but the live greedy pipeline deploys the 1.32×
-config. So two things compound: (a) the analytic geometry terms misprice the large fp32 square (the `FM/BK` tradeoff —
-this is exactly prev Finding 4: the 5090's large-`FM` tiles don't map onto the 4090's ⅓ fp32 throughput / smaller L2),
-and (b) the greedy pick diverges from the prior's own best-measured config.
+| shape | greedy µs | live-golden µs | greedy/golden | recorded µs | live/recorded | cuBLAS µs | greedy vs cuBLAS | category |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| square.512 | 31.8 | 19.3 | 1.65 | 13.5 | 1.43 | 10.8 | 2.94 | worse -> leave |
+| square.1024 | 87.0 | 77.6 | 1.12 | 71.0 | 1.09 | 45.4 | 1.92 | worse -> leave |
+| square.2048 | 744.4 | 556.5 | 1.34 | 383.3 | 1.45 | 320.0 | 2.33 | worse -> leave |
+| square.4096 | 5118.0 | 4609.9 | 1.11 | 4004.9 | 1.15 | 2458.6 | 2.08 | worse -> leave |
+| square.512.fp16 | 11.1 | 24.0 | 0.46 | 5.9 | 4.07 | 5.8 | 1.91 | better (not recorded) |
+| square.1024.fp16 | 50.6 | 54.6 | 0.93 | 29.3 | 1.86 | 18.1 | 2.80 | better (not recorded) |
+| square.2048.fp16 | 261.4 | 285.4 | 0.92 | 119.3 | 2.39 | 115.2 | 2.27 | better (not recorded) |
+| square.4096.fp16 | 2263.0 | 2001.9 | 1.13 | 889.9 | 2.25 | 822.3 | 2.75 | worse -> leave |
+| qwen3_06b.q_proj.s32 | 28.1 | 20.4 | 1.38 | 7.9 | 2.58 | 9.9 | 2.84 | worse -> leave |
+| qwen3_06b.kv_proj.s32 | 17.3 | 13.8 | 1.25 | 6.5 | 2.12 | 6.9 | 2.51 | worse -> leave |
+| qwen3_06b.o_proj.s32 | 36.9 | 31.9 | 1.16 | 11.2 | 2.85 | 9.9 | 3.73 | worse -> leave |
+| qwen3_06b.gate_up_proj.s32 | 35.3 | 21.4 | 1.65 | 12.1 | 1.77 | 11.3 | 3.12 | worse -> leave |
+| qwen3_06b.down_proj.s32 | 47.1 | 35.3 | 1.33 | 15.6 | 2.26 | 13.0 | 3.62 | worse -> leave |
+| qwen3_06b.q_proj.s128 | 59.5 | 38.0 | 1.57 | 20.9 | 1.82 | 20.2 | 2.95 | worse -> leave |
+| qwen3_06b.kv_proj.s128 | 35.3 | 21.9 | 1.61 | 12.9 | 1.70 | 12.4 | 2.85 | worse -> leave |
+| qwen3_06b.o_proj.s128 | 66.6 | 39.7 | 1.68 | 23.0 | 1.73 | 19.0 | 3.51 | worse -> leave |
+| qwen3_06b.gate_up_proj.s128 | 48.7 | 53.7 | 0.91 | 33.0 | 1.63 | 25.5 | 1.91 | better (not recorded) |
+| qwen3_06b.down_proj.s128 | 114.9 | 55.0 | 2.09 | 33.1 | 1.66 | 24.5 | 4.69 | worse -> leave |
+| qwen3_06b.q_proj.s512 | 123.9 | 89.4 | 1.39 | 55.6 | 1.61 | 53.3 | 2.32 | worse -> leave |
+| qwen3_06b.kv_proj.s512 | 60.1 | 52.8 | 1.14 | 34.3 | 1.54 | 38.9 | 1.54 | worse -> leave |
+| qwen3_06b.o_proj.s512 | 123.5 | 90.3 | 1.37 | 55.6 | 1.62 | 67.8 | 1.82 | worse -> leave |
+| qwen3_06b.gate_up_proj.s512 | 140.3 | 124.9 | 1.12 | 103.7 | 1.20 | 85.5 | 1.64 | worse -> leave |
+| qwen3_06b.down_proj.s512 | 178.0 | 131.1 | 1.36 | 79.7 | 1.64 | 113.2 | 1.57 | worse -> leave |
+| square.512.dynM | 25.6 | 23.1 | 1.11 | 12.8 | 1.80 | 10.8 | 2.37 | worse -> leave |
+| qwen3_06b.q_proj.s512.dynM | 96.6 | 89.2 | 1.08 | 63.8 | 1.40 | 53.0 | 1.82 | worse -> leave |
+| qwen3_06b.kv_proj.s512.dynM | 50.8 | 51.5 | 0.99 | 33.4 | 1.54 | 37.0 | 1.37 | same |
+| qwen3_06b.o_proj.s512.dynM | 91.3 | 117.8 | 0.78 | 62.0 | 1.90 | 67.1 | 1.36 | better (not recorded) |
+| qwen3_06b.gate_up_proj.s512.dynM | 121.6 | 129.7 | 0.94 | 91.1 | 1.42 | 85.6 | 1.42 | better (not recorded) |
+| qwen3_06b.down_proj.s512.dynM | 130.0 | 129.4 | 1.00 | 92.3 | 1.40 | 119.4 | 1.09 | same |
 
-**Recommendation (P1):** refit the cold `_W_A` analytic weights (`scripts/golden_knob_heuristics.py`) now that a real
-4090 golden set exists (this sweep populated the DB) — the 2026-06-13 Finding 2 recommendation, still unactioned. A
-capability-tier feature (or a `D_*` engineered occupancy term keyed on `H_sm_count`/fp32 throughput) would stop the
-sm_120-fit geometry priors from extrapolating onto Ada.
+Columns: `greedy/golden` is the live A/B (both sides benched this run, >1 = greedy slower); `live/recorded` is the
+Finding-1 drift (live golden re-bench over the YAML's recorded `emmy_us`); `greedy vs cuBLAS` is greedy µs over the
+recorded `cublas_us` (>1 = emmy slower than PyTorch). The `better` rows all reproduced 3/3 (pass 2 re-ran each twice;
+golden rows were rock-steady, e.g. 24.0/23.9/23.9 and 117.8/117.9/117.9), so they are genuine on the current
+compiler — but every one is "better than a #269-regressed baseline" (their `live/recorded` drifts are among the
+worst: 4.07, 1.86, 2.39, 1.63, 1.90, 1.42), which is why none is recorded. The `greedy vs cuBLAS` column is uniformly
+bad (1.09–4.69, vs 0.70–1.71 in the 2026-06-19 report) — the same regression seen from the absolute side.
 
-## Finding 2 — `down_proj.s32`: learned prior ranks the golden #3 yet greedy deploys 22% slower (P1)
+## Finding 2 — greedy trails even the regressed goldens on 21/29 shapes; split-K probe wins on `square.512` (P1)
 
-`down_proj.s32` greedy 19.9 µs vs golden 16.6 µs (1.20×). Unlike Finding 1 this is **not** a ranking failure: the
-golden ranks **3/1008 under the learned prior** (shallow) and the live `--golden` A/B confirms the golden knobs are
-genuinely faster at -O3 (16.6 vs 19.9, same process — so not a -O1/-O3 inversion). The only knob difference is `BK`
-(greedy 32, golden 64). So the prior *knows* `BK64` is best (rank 3) and it *is* best at -O3, but the greedy pipeline
-deploys `BK32`. This is a **reservoir/pick divergence**: `Prior.pick`'s evidence-first path should have deployed the
-measured-best config, but it didn't — either the `BK64` config never got an `H_opt=3` reservoir row (so `evidence_pick`
-couldn't see it), or the partition fork didn't offer it at the greedy site. `gate_up_proj.s32` (1.11×, learned rank 25,
-knob diffs `BN/BK/FM`) is the same family, milder.
+Independent of Finding 1, the deployed greedy pick loses the live A/B on 21/29 shapes (median ~1.35×, worst
+`down_proj.s128` 2.09×). Drill-down on `square.512` (fp32): greedy deploys `FM=2, s32 K-chunk, SPLITK=1` at 100%
+occupancy — 30.5–32.1 µs across three runs — while the golden knobs (`FM=4, s64`, 50% occ) hold 19.3. The inner loop
+of the greedy kernel does 2 FMAs per 3 smem reads (vs the golden's 8 per 6): the prior over-values occupancy and
+under-values per-thread reuse, the same `_W_A` mis-pricing family as the 06-19 report's Findings 1/4 (that refit is
+now unactioned across three reports).
 
-**Recommendation (P1):** check whether the golden config received an -O3 reservoir row during this tune (the
-`EMMY_O3_TOL` re-bench band) — if a measured-best leaf is missing from the reservoir, `evidence_pick` can't
-deploy it. If the row exists but greedy still diverged, the gap is in the greedy partition-fork enumeration vs the
-reservoir key (`op_cache_key`); instrument `greedy_decide`'s `pick` path on this op. A faithful repro: `emmy run
---bench --golden qwen3_06b.down_proj.s32 --ab "BM=8,BN=16,BK=64,FM=2,FN=2,SPLITK=2,RING=4"`.
+A manual `--ab` lever sweep on the same shape found `SPLITK=4` on top of the golden knobs (grid 256 → 1024, atomic
+combine epilogue) benches **17.3–17.6 µs across three runs** vs the live golden's 19.3 — a reproducible ~10% win and
+the best currently-reachable config for the shape (0.63× cuBLAS). `SPLITK=8` is slightly worse (18.0/18.9), bigger
+register tiles much worse (FM8/FN4 36.9, FM8/FN8 61.1 — occupancy collapse). Not recorded either: the recorded
+pre-#269 golden hit 13.5 µs *without* split-K, so the split-K win is likely compensating for regression-inflated
+per-CTA cost (an underfilled grid hurts more when each CTA is slower), and may evaporate once Finding 1 is fixed.
 
-## Finding 3 — masked-tile `.dynM` family: greedy oversizes the tile by one notch (P2)
+**Recommendation (P1):** re-run this whole sweep after the Finding-1 fix — greedy quality cannot be assessed against
+a regressed baseline. Then action the `_W_A` analytic refit (`scripts/golden_knob_heuristics.py`) the last two
+reports asked for, and check whether small-shape SPLITK preference belongs in the analytic occupancy term.
 
-Three of six `.dynM` shapes are worse: `o_proj.s512.dynM` 1.13×, `kv_proj.s512.dynM` 1.10×, `square.512.dynM` 1.08×.
-The pattern is consistent — greedy picks `BM16 BN32` where the golden wants `BM8 BN16` (one size larger on both the
-free-tile axes), e.g. `o_proj.s512.dynM` found `BM16 BN32` / golden `BM8 BN16`. Under the dedicated masked-tier
-`_W_A_DYN` analytic weights the goldens rank 4–40/1008 (`square.512.dynM` rank 4, `kv_proj` rank 12, `o_proj` rank 40),
-so the symbolic-axis weights systematically under-penalize the larger masked tile (more wasted lanes past the boundary
-guard at the hint extent). The other three dynM shapes are at parity (unchanged).
+## Finding 3 — pinning `SPLITK=6` dies late with an opaque lowering error (P2)
 
-**Recommendation (P2):** re-fit `_W_A_DYN` (`scripts/golden_knob_heuristics.py` prints both `_W_A` and `_W_A_DYN`) with
-these three goldens carrying more weight — the masked-tile occupancy term needs to prefer the smaller free tile at the
-512 hint. Lower priority than Findings 1–2: the deltas are 8–13% on shapes already near cuBLAS.
+`emmy run --bench --golden square.512 --ab "SPLITK=6,FM=4,FN=2"` fails with `CudaBackend: node 'matmul' has
+non-CudaOp 'TileGraphOp'; lowering must produce Graph[CudaOp]` — the tile pass declines the non-power-of-two split
+and leaves the op unlowered instead of rejecting the knob value up front. The search never offers SPLITK=6 (tune is
+unaffected); only pinned paths (`--ab`, `EMMY_KNOBS`) hit it.
 
-## Finding 4 — `gate_up_proj.s32`: 11% slower, small-shape ranking drift (P2)
+**Recommendation (P2):** validate pinned knob values against the enumeration's candidate domain when the pin is
+applied, and fail with "SPLITK=6 not in candidates {1,2,4,8} for this op" instead of a backend invariant violation.
 
-`gate_up_proj.s32` greedy 14.3 vs golden 12.9 µs (1.11×); golden ranks 19 (analytic) / 25 (learned). Greedy diverges
-on `BN` (16 vs 32), `BK` (32 vs 64) and `SPLITK` (1 vs 2). Same root cause family as Finding 1 (analytic mis-pricing on
-sm_89), at a tiny absolute (~1.4 µs). Folded into the Finding 1 `_W_A` refit; no separate action.
+## Finding 4 — fp16 sweep hit an nvcc compile failure; the recorded error hides the real diagnostics (P2)
 
-## Finding 5 — fp16 squares: we *do* use tensor cores, but the prior undersizes the warp tile (P1)
+One config of `square.2048.fp16` (`k_matmul_bed174`; knobs per `eval failures`: `FM=8, FN=2,
+ATOM@out=mma_m16n8k16_f16, REDUCE@a2=s1/f1/c1/t1, SPLIT@a0=1x8, SPLIT@a1=8x2, INTERLEAVE_LOADS, VECTORIZE_LOADS`)
+failed nvcc with "3 errors detected", but the `perf.error` column only preserves the first diagnostic — the unused
+`dpl_mma_m16n8k16_bf16` helper (`ir/kernel/render.py:322-336` emits both the f16 and bf16 helpers into every MMA
+kernel unconditionally, so the unused twin is present in *every* fp16 kernel; it cannot alone explain a
+config-specific failure). The two real errors are lost — the temp `k.cu` is deleted and the error text truncated.
+The search recovered (config pinned `bench_fail @ 2e6`), so impact on the sweep was one lost variant.
 
-Follow-up investigation into the emmy-vs-cuBLAS fp16 gap ("are we not able to use MMA there?"). Two structural
-facts first: (a) the atom registry holds only `mma_m16n8k16_f16` / `_bf16` — **there is no TF32 atom**, so fp32 matmuls
-have no tensor-core path at all (the fp32 squares run scalar CUDA-core FMA against true-SGEMM, by design); (b)
-**warp-specialization requires a TMA `StageBundle`** (`085_warp_specialize._eligible` → "no TMA StageBundle"), and TMA
-is sm_90+ — the RTX 4090 (sm_89) has no TMA, so `WARPSPEC` is structurally unavailable here (this is why the 5090 fp16
-goldens carry `WARPSPEC: true` and the 4090 ones cannot). So on the 4090 every fp16 square already rides the
-plain-`mma.sync` + cp.async tensor-core path — MMA *is* used.
+**Recommendation (P2):** record the full nvcc stderr in the `error` column (or at least the *last* diagnostics, not
+the first), and emit only the selected atom's helper. Repro: pin the knobs above on the `square.2048.fp16` snippet.
 
-The gap is **tile size**, not tier. The recorded fp16 squares used small warp tiles (≤64×128); cuBLAS HGEMM uses
-128×128–128×256. A manual tile sweep (10 warp-tile geometries × 4 shapes, all on the same mma.sync path — no
-warpspec — accuracy-checked, in `_tune/golden-sweep-rtx4090/fp16/`) found the best reachable config per shape:
+## Finding 5 — `eval prior --dataset golden` renders the greedy pick's knobs as all-dashes (P3)
 
-| shape            | recorded tile | was µs | best tile (`WM WN FM FN`)        | µs    | vs cuBLAS    | action          |
-|------------------|---------------|-------:|----------------------------------|------:|-------------:|-----------------|
-| square.512.fp16  | 32×32         |    5.9 | 32×32 (recorded is best)         |   5.9 | 1.02× (par)  | keep            |
-| square.1024.fp16 | 64×32         |   27.8 | 64×32 (no tile beats it)         |  27.8 | 1.7× ceiling | keep            |
-| square.2048.fp16 | 64×64         |  177.8 | **128×128 (`2 2 4 8`, BK2 RING2)**| 119.3 | 1.54×→**1.04×** | **replaced**  |
-| square.4096.fp16 | 64×128        |  889.9 | 64×128 (recorded is best)        | 889.9 | 1.08× (par)  | keep            |
+In the post-sweep forecast, every shape's "found" knob cells printed `-` (`m/t 0/10` with `-/8`, `-/16`, …) while the
+same-process `run --bench` resolves and prints the greedy knobs fine. Either the view's greedy-pick resolution or its
+rendering is broken; as-is the per-knob found/golden diff — the view's whole point — is unreadable. (Its `vs gold`
+ratios were also silently inflated by Finding 1, since the denominator is the recorded µs; that is by design, but a
+drift flag would have surfaced the regression right there.)
 
-Only `square.2048.fp16` had headroom: the 128×128 tile (`WM2 WN2 FM4 FN8`) lands **119.3 µs / 1.04× cuBLAS** — a
-**33% win** over the 178 µs the prior deploys, accuracy-checked and reproduced (119.3/119.7). The win is purely a
-larger output tile; `RING=3` on it drops occupancy to 17% and erases the gain. Note the deployed **greedy still picks
-the 64×64 (178 µs)** — the golden records the known-best, but the prior's warp-tier geometry terms **under-reward the
-larger tile's data reuse** on sm_89, so `compile`/`run` won't deploy it until the prior is refit. The other three are
-genuinely at their ceiling: `512`/`4096` are already ≤1.08× cuBLAS, and `1024.fp16`'s ~1.7× gap survives every tile
-(no warp-specialization to overlap the mma.sync K-loop the way HGEMM does at M=1024).
-
-**Recommendation (P1):** refit the warp-tier analytic weights / add a `D_*` tile-reuse feature so the prior prefers the
-128×64 fp16 tile (the `eval analytic` warp-tier ranking under-prices it on sm_89) — this is the same `_W_A` refit
-Findings 1/4 ask for, extended to cover the warp/MMA regime, not just scalar. The remaining fp16 ceiling
-(`square.1024.fp16`, and the residual on 2048) needs warp-specialization on sm_89, which is blocked on TMA hardware
-the 4090 lacks — a deeper codegen item (a cp.async-pipelined producer/consumer split without TMA), out of scope for a
-golden refresh.
+**Recommendation (P3):** fix the found-knob resolution in the golden view; consider a `live/recorded` drift column
+sourced from the reservoir's `H_opt=3` rows.
 
 ## Workflow notes
 
-- **Prev report's Finding 3 fix was a hard prerequisite, not optional.** The sweep cannot run at all on a freshly-cleaned
-  prior without the option-0 fallback — the in-process golden loop dies at the first tiny shape (q_proj.s32) when the
-  square-trained prior extrapolates an over-budget tile. *Symptom:* `tune --dataset golden --clean` aborts ~⅓ through
-  with a `LoweringError` and the per-shape bests for shapes 9–29 never get measured. *Improvement:* shipped (the
-  fallback + regression test); but the in-process loop should also **catch a per-shape assemble failure and continue to
-  the next shape** rather than letting one shape's compile abort the whole 29-shape sweep (today only a
-  saturated-queue `RuntimeError` is caught).
-- **`nvcc` not on `PATH` fails every bench silently-ish.** The first sweep attempt produced 29×N `bench_fail @ 2e6 us`
-  rows ("nvcc unavailable") and would have "completed" with a garbage prior. *Improvement:* `tune` should
-  **fail fast** with a clear error if `nvcc` resolves to nothing before benching the first variant, instead of pinning
-  bench_fail and training on noise.
-- **The golden-pin A/B dirties the CUDA context on the flaky fp32 squares.** `square.1024`/`square.2048` threw
-  `cudaErrorMisalignedAddress` at teardown *only* in the `--golden` run; the clean `--code` greedy run was fine. Each
-  win that skipped its golden row (5 fp16/fp32 squares) then needed a hand cross-check against the recorded number.
-  *Improvement:* when a pinned golden variant `bench_fail`s, reset the stream/context before the next config so the
-  contamination can't bleed into the greedy row's teardown (and ideally surface the greedy-vs-recorded delta in the
-  table when the live golden row is skipped).
-- **`eval variants --kernel <shape-name>` does not match by shape.** It keys on the kernel C-hash name (`k_matmul_…`),
-  so `--kernel down_proj.s32` returns "no measured variants" and the per-variant -O3 reachability drill-down for a
-  finding has to be assembled by hand from `eval prior --dataset golden` + a live `--ab`. *Improvement:* let `eval
-  variants` accept a golden/shape name (join through the same `ShapeKey` the other `eval` views use).
-- **Slowest step by far: the tune (~102 min compute).** The six `.dynM` shapes (~5 min each, 286 s for
-  `square.512.dynM`) and the fp32/fp16 4096 squares dominate; the A/B phase was only ~6 min for all 29. *Improvement:*
-  a `--kernel` narrowed re-tune is the lever (the skill already documents it); a per-shape patience cap for the
-  symbolic-axis shapes would cut the dynM tail.
-- **Status of the prior report's notes:** its Finding 1 (fp16 TC blocked) and Finding 3 (LoweringError no-fallback) are
-  both **fixed and confirmed held** here (warp-tier fp16 deploys + passes accuracy; the full sweep completes). Its
-  Finding 2 (cold `AnalyticPrior` mis-prices sm_89) is **partially addressed by data, not code** — the warm 4090 prior
-  now beats the transferred goldens on 11 shapes, but the `_W_A` refit it asked for is still unactioned and is the
-  root cause of Findings 1/4 here. Its "transfer mode as a first-class CLI flag" and "live-GPU golden filter" notes
-  remain open.
+- **The drift check that caught Finding 1 was hand-rolled** (a python+yaml join of `ab-pass1.log` against the golden
+  YAML). Nothing in the CLI compares live golden re-benches to recorded `emmy_us`. *Improvement:* a per-shape drift
+  column in `eval prior --dataset golden` (or a dedicated `eval drift`), plus a documented "if median drift exceeds
+  the noise band, stop and bisect before recording" rule in the tune-golden skill — this sweep nearly recorded
+  regressed numbers as wins.
+- **Tune compute grew 1.7× vs the 06-19 sweep** (~171 min vs ~102 min for the same 29 shapes; per-shape bench counts
+  62–144). Unclear whether patience, the `EMMY_O3_TOL` re-bench band, or the richer post-#269 enumeration is
+  responsible. *Improvement:* log per-shape bench/wall-time split so growth is attributable.
+- **`--dataset golden` and `--golden` disagree on the name universe.** Scripting the A/B loop from
+  `GOLDEN_CONFIGS` names crashed on `pointwise.*` entries that `run --golden` rejects (matmul-only). *Improvement:*
+  a `--golden list` (or promote the error message's "Available:" list to a first-class command) — the loop had to be
+  rebuilt from the error message.
+- **`eval variants` still cannot filter by shape** (06-19 note, still open, hit again): groups key on the kernel
+  C-hash and merge shapes, so mapping "the square.512 group" required fingerprint guessing, and the deploy-vs-search
+  shortfall diagnosis fell back to live `--ab` runs. *Improvement:* unchanged — join through `ShapeKey`.
+- **Golden A/B rows were far more stable than the documented 10–13% noise band** this sweep (pinned golden rows
+  repeated within ~1%: 19.3/19.3/19.3, 24.0/23.9/23.9, 117.8/117.9/117.9), so 3-run confirmation was cheap and
+  unambiguous. The band may be a property of older uncaptured timing; worth re-measuring where it stands now.
+- **Status of the 06-19 report's notes:** the option-0 fallback **held** (29/29 shapes, zero `LoweringError`
+  crashes); the `cudaErrorMisalignedAddress` golden-pin contamination **did not recur**; the nvcc-on-PATH fail-fast
+  is **untested** (nvcc was on PATH throughout); `eval variants` shape filtering **still open** (above); the `_W_A`
+  analytic refit **still unactioned** (Finding 2).

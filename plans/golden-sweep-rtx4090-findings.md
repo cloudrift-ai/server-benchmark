@@ -10,11 +10,14 @@
   `git show 272153d3:plans/golden-sweep-rtx4090-findings.md`). The recorded YAML numbers ARE that sweep's
   `run --bench` output, same methodology and same GPU as this one, which is what makes the drift comparison in
   Finding 1 apples-to-apples.
-- **Category tally (live A/B): 21 worse / 2 same / 6 better — but 0 recorded.** Every YAML edit is deliberately held:
-  Finding 1 shows the live baseline itself is regressed, so recording post-#269 numbers would overwrite the only
-  evidence of what the compiler used to achieve. All A/B numbers are -O3 `run --bench`, never the -O1 tune DB.
+- **Category tally (live A/B): 21 worse / 2 same / 6 better.** The YAML is **re-baselined** to the live post-#269
+  numbers (Finding 1: the regression is a known, accepted consequence of the rewrite — the team's plan is to
+  reintroduce the dropped optimizations gradually): every entry keeps its knobs with `emmy_us` re-recorded live, and
+  `square.512` additionally takes the confirmed `SPLITK=4` knob win. The pre-#269 numbers — the long-term target —
+  stay recoverable via `git show 272153d3:emmy/compiler/pipeline/search/goldens/rtx4090_sm89.yaml` (noted in the
+  YAML header). All A/B numbers are -O3 `run --bench`, never the -O1 tune DB.
 
-## Headline — Finding 1: PR #269 (Block-DAG Tile IR) is a 1.66× median codegen regression (P0)
+## Headline — Finding 1: PR #269 (Block-DAG Tile IR) is a 1.66× median codegen regression (known/accepted)
 
 The recorded golden knob sets, re-benched live on today's compiler, run at **median 1.66× their recorded latency**
 (worst `square.512.fp16` **4.07×**, `o_proj.s32` 2.85×, `q_proj.s32` 2.58×; every one of the 29 shapes drifted
@@ -50,12 +53,14 @@ The resource fingerprints tell the same story from the bench table alone: same k
 25% occ vs HEAD 2 KB / 48 regs / 88% occ — high occupancy with no work per thread. The fp32 shapes drift too (same
 transport machinery), just less violently (1.09–1.65×).
 
-**Recommendation (P0):** root-cause in `passes/lowering/tile/` (the #269 enumeration+assembly): why operand-staging,
-ring-transport, and swizzle moves stop being offered/applied for configs that pin them. The bisect clone, both venvs,
-and both CUDA dumps are live on the VM for whoever picks this up. Until fixed, the golden YAML is frozen (this
-report). Guard for the future: a drift check — live `run --bench --golden` vs recorded `emmy_us` per shape (the
-hand-built table below is exactly that) — belongs in an `eval` view so the next tile-IR rewrite cannot ship a silent
-1.66× (see Workflow notes).
+**Status: known and accepted.** The rewrite deliberately dropped pre-existing optimizations; the plan is to
+reintroduce them gradually and reach — then surpass — pre-#269 performance. This sweep's contribution is the
+concrete work-list and its per-shape cost: the three dropped capabilities above (A-operand staging is the largest,
+then the cp.async ring, then the swizzle), the per-shape drift column below as the scoreboard each reintroduction
+should move toward 1.0× (against the pre-#269 numbers at `git show 272153d3:...goldens/rtx4090_sm89.yaml`), and the
+bisect clone + identical-knob CUDA dumps on the VM as the reference codegen. Guard for the future: the drift check —
+live `run --bench --golden` vs recorded `emmy_us` per shape — belongs in an `eval` view so progress (and any new
+regression) is visible per sweep (see Workflow notes).
 
 ## Per-shape outcomes (-O3 `run --bench` A/B, pass 1; win candidates re-confirmed twice in pass 2)
 
@@ -95,9 +100,12 @@ Columns: `greedy/golden` is the live A/B (both sides benched this run, >1 = gree
 Finding-1 drift (live golden re-bench over the YAML's recorded `emmy_us`); `greedy vs cuBLAS` is greedy µs over the
 recorded `cublas_us` (>1 = emmy slower than PyTorch). The `better` rows all reproduced 3/3 (pass 2 re-ran each twice;
 golden rows were rock-steady, e.g. 24.0/23.9/23.9 and 117.8/117.9/117.9), so they are genuine on the current
-compiler — but every one is "better than a #269-regressed baseline" (their `live/recorded` drifts are among the
-worst: 4.07, 1.86, 2.39, 1.63, 1.90, 1.42), which is why none is recorded. The `greedy vs cuBLAS` column is uniformly
-bad (1.09–4.69, vs 0.70–1.71 in the 2026-06-19 report) — the same regression seen from the absolute side.
+compiler — every one is a shape whose recorded knobs regressed hardest (`live/recorded` 4.07, 1.86, 2.39, 1.63,
+1.90, 1.42), i.e. greedy found configs that dodge the dropped optimizations. Their knob dicts could not be recorded
+this sweep — the kernel table's new schema doesn't expose the full YAML knob vocabulary and `eval golden` is broken
+(Finding 5) — so their re-baselined entries keep the old knobs at live µs; extracting greedy's configs for these six
+is a follow-up once Finding 5 is fixed. The `greedy vs cuBLAS` column is uniformly bad (1.09–4.69, vs 0.70–1.71 in
+the 2026-06-19 report) — the same regression seen from the absolute side.
 
 ## Finding 2 — greedy trails even the regressed goldens on 21/29 shapes; split-K probe wins on `square.512` (P1)
 
@@ -115,9 +123,10 @@ register tiles much worse (FM8/FN4 36.9, FM8/FN8 61.1 — occupancy collapse). N
 pre-#269 golden hit 13.5 µs *without* split-K, so the split-K win is likely compensating for regression-inflated
 per-CTA cost (an underfilled grid hurts more when each CTA is slower), and may evaporate once Finding 1 is fixed.
 
-**Recommendation (P1):** re-run this whole sweep after the Finding-1 fix — greedy quality cannot be assessed against
-a regressed baseline. Then action the `_W_A` analytic refit (`scripts/golden_knob_heuristics.py`) the last two
-reports asked for, and check whether small-shape SPLITK preference belongs in the analytic occupancy term.
+**Recommendation (P1):** re-run this sweep after each optimization-reintroduction lands (the drift column is the
+scoreboard). Independently, action the `_W_A` analytic refit (`scripts/golden_knob_heuristics.py`) the last two
+reports asked for — the occupancy-over-reuse mis-pricing is visible on current codegen regardless — and check
+whether small-shape SPLITK preference belongs in the analytic occupancy term.
 
 ## Finding 3 — pinning `SPLITK=6` dies late with an opaque lowering error (P2)
 

@@ -518,6 +518,11 @@ _REDUCE_FEATURE_KEYS = (
     "D_splitk_excess",
     "D_finalize_kernel",
     "D_splitk_roundtrip",
+    # The scalar-on-warp-eligible guard MUST travel with the bonus features: a per-cell contraction
+    # leaf (TILE decided-OFF, REDUCE coop fold) is exactly a scalar row competing against tensor
+    # cores, and granting it the thread/occupancy bonuses without this penalty made greedy deploy a
+    # 1157us per-cell b256 kernel over the 3.5us mma golden (square.512.fp16, 2026-07-07 5090 gate).
+    "D_scalar_on_warp_eligible",
     "D_log2_ctas",
     "D_log2_waves",
     "D_near_waves",

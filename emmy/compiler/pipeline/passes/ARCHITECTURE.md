@@ -106,14 +106,19 @@ leaf row spelling the same `TILE@<qk_k>` / `TILE@<pv_k>` / `REDUCE@<kv>` key set
 tile). A non-empty `REDUCE` pin remains the scalar escape; a warp `TILE` pin keeps the mma rows alone (loud on a
 divisibility violation, declining with a log line when the pin doesn't fit the flash form — a bare warp pin may target
 another kernel). Each warp geometry row crosses with its **K/V operand-stage** candidates (`STAGE@<kv>` —
-`_schedule._twisted_stage_candidates`: gmem-direct option-0, then the resolver-gated cp.async AND TMA ring depths over
-a static, block-divisible kv — the batched K/V operands encode as rank-N TMA boxes with leading extent-1 dims, the
-load's own batch/head index exprs riding as origin coords; cp.async slabs take the +16 B row pad, TMA slabs stay dense
-under the hardware swizzle; the resolved `Stage` rides the `TileOp` and the streaming step becomes the `staged_kloop`
-drain, K/V slabs kept in each operand's own layout so staging stays bit-identical to gmem-direct). A resolved TMA row
-additionally offers the `WSPEC` producer-band splits (the matmul tier's legality, `32·aux ≤ 32·um`; measured
-occupancy-negative at flash's CTA scale — offered, honest, not the default). The chain / coop / serial escapes stamp
-the decided-empty `STAGE@<kv>: ""`. The causal tile-skip is the remaining flash follow-up.
+`_schedule._twisted_stage_candidates`: gmem-direct option-0, then the resolver-gated cp.async AND TMA ring depths — the
+batched K/V operands encode as rank-N TMA boxes with leading extent-1 dims, the load's own batch/head index exprs
+riding as origin coords; cp.async slabs take the +16 B row pad, TMA slabs stay dense under the hardware swizzle; the
+resolved `Stage` rides the `TileOp` and the streaming step becomes the `staged_kloop` drain, K/V slabs kept in each
+operand's own layout so staging stays bit-identical to gmem-direct). cp.async stages a **static, block-divisible** kv
+only; **TMA also stages a symbolic (dynamic-`seq_len`) kv** — the descriptor rides the runtime globalDim and zero-fills
+the box overhang past the last key, and the streaming drain's tail masks (the same clamp the gmem-direct symbolic path
+makes) zero those keys' contribution, so the masked-flash `.dynM` kernel stages at bit-identity to gmem-direct (the
+`staged_kloop` ring allocates the full depth and the last-chunk clamp / loop bound ride the symbolic `Dim`; WSPEC over a
+symbolic kv is not built). A resolved TMA row additionally offers the `WSPEC` producer-band splits (the matmul tier's
+legality, `32·aux ≤ 32·um`; measured occupancy-negative at flash's CTA scale — offered, honest, not the default). The
+chain / coop / serial escapes stamp the decided-empty `STAGE@<kv>: ""`. The causal tile-skip is the remaining flash
+follow-up.
 Two catalog invariants hold: every recorded golden's `TILE`/`STAGE`/`REDUCE` stays a **member** of the enumerated
 grids (the permanence test in `tests/compiler/test_golden_configs.py` — a space edit can never silently orphan a
 golden into unreachability again, the sixth sweep's `.s512` regression class; the scalar reg grid carries the

@@ -119,7 +119,22 @@ static twin (NCU) to attack the 2–3× residual; separately, the `hd128.dynM` K
 enumeration to prefer the uniform-k form — but that can't be diagnosed until `eval analytic`/`variants` learn to
 enumerate attention shapes (see Workflow notes).
 
-## Finding 3 — greedy picks `b256` over the faster `b512` on `softmax.k2048`
+Non-causal flash is *faster* than torch SDPA static (hd64/hd128 ~1.11–1.12×), but the `.dynM` masked flash is
+0.52–0.60× (golden), 1.7–1.9× behind static. `hd128.dynM` greedy (59.49) is a further 1.96× behind its own
+golden (30.43) — a prior shortfall on top of the masked-flash residual. Unlike the matmuls this is not a tier
+fallback (the flash goldens already use MMA); it is genuine masked-streaming-flash work.
+
+**Part A (the residual) — ADDRESSED, branch `feature/dynamic-flash-staging`.** The residual was *not* intrinsic
+masked-flash cost — it was the missing K/V staging. `_resolve_twisted_stage` only staged a static, block-divisible
+kv; TMA rides the runtime globalDim and zero-fills the box overhang, and the streaming drain already masks the tail
+keys, so the zero-filled tail contributes nothing — bit-identical to gmem-direct. Admitting a symbolic kv under **TMA**
+(cp.async stays static-only: no OOB zero-fill) + threading the symbolic `Dim` through `staged_kloop` makes `.dynM`
+flash stageable. 5090 `-O3`, `hd64.dynM` snippet, same warp tile, gmem→+TMA: `w1x1` 19.2→16.9, `w2x1` 22.2→9.2,
+**`w4x1` 26.3→9.1 µs** — best staged **0.89× cuBLAS** (torch SDPA 10.2), ~at the static hd64 8.6. Bit-identity
+test-enforced at a divisible (64) and overhanging (100) seq. **Part B (the pick, still open):** greedy does not yet
+*select* it — STAGE-free it deploys the unstaged `w2x1` (19.7), STAGE-pinned + TILE-free the flash fork falls to
+scalar. The fast config is now reachable; teaching the masked-tier prior to prefer a wider warp tile + TMA stage (and
+re-recording the `.dynM` goldens) is the lever. **Next:** Part B — the prior/fork selection, then re-record.
 
 Small but reproducible: `softmax.k2048` (static + `.dynM`) golden is `REDUCE=b512` at 3.7 µs; the greedy prior deploys
 `b256` at 3.8–3.9 µs (**~5%** slower, 3/3 re-benches: 3.9 / 3.8 / 3.9). This is a mild prior shortfall — the fold

@@ -1375,14 +1375,23 @@ def _resolve_twisted_stage(stage: Stage, kv_extent, bn: int, head_dim: int, d_v:
     break) and **TMA** (the batched K/V encode as rank-N boxes with leading extent-1 dims —
     ``(1, 1, bn, head_dim)`` — the load's own batch/head index exprs supplying the origin coords;
     the slabs stay dense and take the hardware swizzle + drain XOR instead of padding; box dims
-    cap at the 256 hardware limit). ``sync`` has nothing to overlap. A symbolic or
-    non-block-divisible kv stays gmem-direct (its masked fragment loads already clamp; slab
-    zero-fill is a follow-up). ``depth`` clamps so the ring's K+V slot pairs fit the smem
+    cap at the 256 hardware limit). ``sync`` has nothing to overlap. A **symbolic** kv stages
+    under TMA only — the descriptor rides the runtime globalDim and zero-fills the box overhang, so
+    the streaming drain's tail-key masks (the same clamp the gmem-direct symbolic path makes) keep
+    it bit-identical; cp.async has no such zero-fill and a static, non-block-divisible kv has no
+    tail mask, so both stay gmem-direct. ``depth`` clamps so the ring's K+V slot pairs fit the smem
     ``budget``; ``reg_depth`` clamps to 1 (no ldmatrix ping-pong on the streaming drain yet);
     ``bk_elems`` records the streamed keys per step."""
     if stage.transport not in ("cp.async", "tma"):
         return None
-    if not kv_extent.is_static or kv_extent.as_static() % bn != 0:
+    if stage.transport == "cp.async":
+        # cp.async has no OOB zero-fill — a symbolic / non-block-divisible kv would read the
+        # overhanging tail chunk out of bounds, so it stays static + block-divisible only.
+        if not kv_extent.is_static or kv_extent.as_static() % bn != 0:
+            return None
+    elif kv_extent.is_static and kv_extent.as_static() % bn != 0:
+        # TMA + a STATIC non-block-divisible kv has no tail mask (masking is symbolic-only) —
+        # stay gmem-direct. A symbolic kv falls through: TMA zero-fills its box overhang.
         return None
     if stage.transport == "tma":
         # Box dims must fit the 1..256 hardware range, and the inner (contiguous) row spans must

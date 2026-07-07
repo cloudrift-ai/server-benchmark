@@ -20,6 +20,15 @@ the fork to `b512` (`search/space.py`; `_reduce_candidates` gates each on `coop 
 `rms_norm`/`softmax` goldens (static + `.dynM`) at the per-K optimum — **`b512` for K=2048, `b256` for K≥4096** —
 now **0.92–1.41×** (8–16 warps/row, 100% occ); the tuner ranks `b256` #1 for `rms_norm.k8192`.
 
+**Resolved (pointwise):** `pointwise.n16384` sat at 0.79× because a pure `Map` (source=None) had **no
+register/vector fork** — it emitted scalar 1-element-per-thread code (NCU: 4.8× torch's LSU instructions; torch
+runs `vectorized_elementwise_kernel<4>`). Added a register-strip fork on the `FREE` schedule
+(`_schedule._map_strip_fork`) reusing the scalar `TILE` codec's `f<fn>` sub-tile — `f<r>` hands each thread `r`
+contiguous elements (blocked, unrolled + regrouped) that `050_vectorize_loads` / `080_vectorize_stores` merge into
+one `float<r>` access. Gated to flat elementwise bodies (sweeps/accumulators stay scalar). Ladder kept at `f2`/`f4`
+(`f8` regressed — register pressure). All four pointwise goldens re-recorded at `TILE=f2`/`f4` → **1.13–1.24×**;
+the tuner picks `f2` #1 for `n16384`.
+
 ## Full perf table (all 36 shapes)
 
 `emmy µs` / `cuBLAS µs` are the recorded golden latencies; `ratio = cuBLAS / emmy`. Reference per kind: matmul
@@ -61,10 +70,10 @@ fp16 → cuBLAS HGEMM (fp32 `square.512` → SGEMM at default tf32, a *soft* ref
 | reduce.k2048.dynM | dyn | 1.66 | 16.38 | 9.87 | |
 | reduce.k8192 | sta | 4.29 | 16.39 | 3.82 | |
 | reduce.k8192.dynM | dyn | 4.26 | 16.39 | 3.85 | |
-| pointwise.n4096 | sta | 4.30 | 4.10 | 0.95 | |
-| pointwise.n4096.dynM | dyn | 4.31 | 4.10 | 0.95 | |
-| pointwise.n16384 | sta | 15.81 | 12.51 | 0.79 | memory-bound, near ref |
-| pointwise.n16384.dynM | dyn | 15.98 | 12.52 | 0.78 | memory-bound, near ref |
+| pointwise.n4096 | sta | 3.30 | 4.10 | 1.24 | |
+| pointwise.n4096.dynM | dyn | 3.30 | 4.10 | 1.24 | |
+| pointwise.n16384 | sta | 11.10 | 12.51 | 1.13 | |
+| pointwise.n16384.dynM | dyn | 11.10 | 12.52 | 1.13 | |
 
 ## 1 — deployed greedy picks a suboptimal MMA tile for `square.512.dynM`
 

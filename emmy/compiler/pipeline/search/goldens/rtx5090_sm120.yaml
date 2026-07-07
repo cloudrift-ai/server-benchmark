@@ -186,15 +186,15 @@ configs:
     name: pointwise.n4096
     M: 512
     N: 4096
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, VECTORIZE_LOADS: true}
-    emmy_us: 4.3
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, TILE: 'f4', VECTORIZE_LOADS: true}
+    emmy_us: 3.3
     cublas_us: 4.1
   - kernel: pointwise
     name: pointwise.n16384
     M: 512
     N: 16384
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, VECTORIZE_LOADS: true}
-    emmy_us: 15.81
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, TILE: 'f2', VECTORIZE_LOADS: true}
+    emmy_us: 11.1
     cublas_us: 12.51
   - kernel: softmax
     name: softmax.k2048.dynM
@@ -257,16 +257,16 @@ configs:
     M: 512
     N: 4096
     dynamic: true
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, VECTORIZE_LOADS: true}
-    emmy_us: 4.31
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, TILE: 'f4', VECTORIZE_LOADS: true}
+    emmy_us: 3.3
     cublas_us: 4.1
   - kernel: pointwise
     name: pointwise.n16384.dynM
     M: 512
     N: 16384
     dynamic: true
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, VECTORIZE_LOADS: true}
-    emmy_us: 15.98
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, TILE: 'f2', VECTORIZE_LOADS: true}
+    emmy_us: 11.1
     cublas_us: 12.52
   - kernel: attention
     name: attention.hd64

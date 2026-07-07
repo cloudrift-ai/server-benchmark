@@ -144,8 +144,8 @@ configs:
     name: reduce.k2048
     M: 512
     K: 2048
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'b32', VECTORIZE_LOADS: true}
-    emmy_us: 1.67
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'b64', VECTORIZE_LOADS: true}
+    emmy_us: 1.5
     cublas_us: 16.38
   - kernel: softmax
     name: softmax.k8192
@@ -158,8 +158,8 @@ configs:
     name: reduce.k8192
     M: 512
     K: 8192
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'b32', VECTORIZE_LOADS: true}
-    emmy_us: 4.29
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'b128', VECTORIZE_LOADS: true}
+    emmy_us: 3.3
     cublas_us: 16.39
   - kernel: rms_norm
     name: rms_norm.k2048
@@ -209,8 +209,8 @@ configs:
     M: 512
     K: 2048
     dynamic: true
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'b32', VECTORIZE_LOADS: true}
-    emmy_us: 1.66
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'b64', VECTORIZE_LOADS: true}
+    emmy_us: 1.5
     cublas_us: 16.38
   - kernel: softmax
     name: softmax.k8192.dynM
@@ -225,8 +225,8 @@ configs:
     M: 512
     K: 8192
     dynamic: true
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'b32', VECTORIZE_LOADS: true}
-    emmy_us: 4.26
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'b128', VECTORIZE_LOADS: true}
+    emmy_us: 3.3
     cublas_us: 16.39
   - kernel: rms_norm
     name: rms_norm.k2048.dynM
@@ -275,8 +275,8 @@ configs:
     head_dim: 64
     dtype: 'fp16'
     causal: false
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, PLACE: 'fuse', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16/w1x1/f1x8/k4', VECTORIZE_LOADS: true}
-    emmy_us: 9.6
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, PLACE: 'fuse', STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16/w4x1/f1x8/k8', VECTORIZE_LOADS: true}
+    emmy_us: 8.6
     cublas_us: 10.24
   - kernel: attention
     name: attention.hd128

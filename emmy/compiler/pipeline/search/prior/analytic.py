@@ -129,7 +129,6 @@ _W_A_DYN: dict[str, float] = {
     "D_neg_masked_n": 1.2915904848884612,
     "D_near_threads": -0.990004931320281,
     "D_bk_ge32": -0.8965483150597096,
-    "D_finalize_kernel": 0.829960031801419,
     "D_w_l2_bk": -0.8189885344311161,
     "D_l2_cells_occ": 0.8105008956036689,
     "D_stage_async": 0.6848803259217643,
@@ -176,7 +175,7 @@ class AnalyticPrior(Prior):
         weights_dynamic: dict[str, float] | None = None,
         scale: float = 0.1,
         atomic_free_split_threshold: float = 4.0,
-        atomic_free_weight: float = 5.0,
+        atomic_free_weight: float = 0.0,
         scalar_on_warp_weight: float = 40.0,
         splitk_roundtrip_weight: float = 0.25,
     ) -> None:
@@ -190,6 +189,15 @@ class AnalyticPrior(Prior):
         # Hardcoded — NOT fit into ``_W_A`` (a plain linear weight can't express the
         # "good when split wide, bad when split narrow" interaction). The learned
         # CatBoostPrior takes over once real atomic-vs-free ``H_opt=3`` rows exist.
+        # Weight defaults to 0.0 (term OFF): its input ``D_finalize_kernel`` was dead
+        # (never forwarded by ``features._reduce_decomp``) when the ±5.0 params were
+        # written, so they were never validated — and activating them when the feature
+        # came alive (2026-07-07) regressed golden top-50 coverage 13→10 (the 5090's
+        # ``g2k`` split-2 golden contradicts the narrow-split penalty's sign). Re-enable
+        # only with refit params that pass the golden-rank gate. Same reason the fit
+        # noise weight on the then-constant ``D_finalize_kernel`` column was dropped
+        # from ``_W_A_DYN``: both changes keep the cold ranking byte-identical to the
+        # dead-feature era while the learned prior consumes the now-live signal.
         self._atomic_free_split_threshold = atomic_free_split_threshold
         self._atomic_free_weight = atomic_free_weight
         # Scalar-on-warp-eligible penalty + split-K workspace round-trip price.
@@ -201,6 +209,10 @@ class AnalyticPrior(Prior):
         # projection deploys landed scalar at 5-20× the -O3 cost of their enumerated mma
         # siblings). ``splitk_roundtrip_weight`` is a mild price (~5 quality at free_prod
         # ≈ 512·1024): the deferred finalize IS the right shape for wide mma splits.
+        # NOTE: this term was DEAD until 2026-07-07 (``D_finalize_kernel`` never forwarded —
+        # see ``features._reduce_decomp``); activation measured ~neutral on the golden gate
+        # (median 0 / top1 21 / top10 26 / top50 31 unchanged, top25 28→27; the g<n>k goldens
+        # sink within their pools, their non-split competitors rise).
         self._scalar_on_warp_weight = scalar_on_warp_weight
         self._splitk_roundtrip_weight = splitk_roundtrip_weight
 

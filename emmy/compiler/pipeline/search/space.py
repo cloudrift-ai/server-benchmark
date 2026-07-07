@@ -340,7 +340,13 @@ def splitk_moves(*, warp: bool) -> list[str]:
 def coop_reduce_moves() -> list[str]:
     """The cooperative / ILP K-partition ``REDUCE`` codec candidates for a NON-output-tiled
     contraction (``_coop_reduce_spec``'s contract — the per-cell tier folds K across ``b`` coop
-    threads / ``r`` ILP register chains). These EXTEND the serial ``""`` option-0. ``b16`` /
-    ``b32`` are recorded reduce-golden winners (the wide-row coop folds) — kept enumerable so
-    the reduce goldens stay reachable."""
-    return ["b4", "b8", "b16", "b32", "r2", "r4", "r2/b4"]
+    threads / ``r`` ILP register chains). These EXTEND the serial ``""`` option-0.
+
+    The ``b`` ladder runs to ``b512`` because the wide-row memory-bound norms (``rms_norm`` /
+    ``softmax`` over K=2048–8192) are bandwidth-bound and need MANY warps folding each row to
+    saturate DRAM: at ``b32`` (one warp/row) they hit ~9% of peak DRAM throughput (~0.25× torch's
+    fused norm); ``b256``/``b512`` (8–16 warps/row) reach ~40%+ and close the gap. ``_reduce_candidates``
+    legality-gates each move on ``coop <= K``, so the wide folds are offered only on rows wide enough
+    to use them; ``b1024`` is left off — it trips the ``block_threads + 32·aux <= 1024`` budget and
+    lost to ``b256``/``b512`` in the sweep anyway."""
+    return ["b4", "b8", "b16", "b32", "b64", "b128", "b256", "b512", "r2", "r4", "r2/b4"]

@@ -44,7 +44,7 @@ from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-from emmy.compiler.ir.schedule import Stage, WarpSpec, is_warp_codec
+from emmy.compiler.ir.schedule import Stage, WarpSpec, has_scalar_atom_alias, is_warp_codec
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.tile import Contraction, Map, Placement, ReducePlan, Reduction, TileOp, TilePlan
@@ -512,7 +512,11 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], str]:
             if demoted is not probe:
                 demoted_rows = _computed_a_rows(kernel, place, demoted, kaxis, _smem_budget(ctx))
                 warp_offered = bool(demoted_rows)
-    tiles = list(TILE.narrow(tiles))
+    # A pinned ``a:scalar`` / ``a:none`` is the explicit scalar-tier spelling — canonicalize it to the
+    # bare scalar codec (``""`` / ``n../f..``) so the pin-only alias never rides a stored knob row (it
+    # would otherwise leak into the prior/DB key and the golden YAML). Non-alias specs pass through
+    # untouched — no blanket re-spell.
+    tiles = [TilePlan.parse(t).spell() if has_scalar_atom_alias(t) else t for t in TILE.narrow(tiles)]
     if demoted_rows:
         # A warp TILE pin is already honored (or rejected) by the demoted rows — the plain loop
         # must not also emit it over the copy transports, which cannot convert the f32 A.

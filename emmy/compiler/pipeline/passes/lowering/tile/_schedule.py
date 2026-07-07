@@ -452,11 +452,21 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], str]:
     if probe is not None and probe.a_computed:
         return _computed_a_rows(kernel, place, probe, kaxis, _smem_budget(ctx)), kaxis
     tiles = scalar_tile_moves() if probe is not None else [""]
+    warp_offered = False
     if probe is not None:
         atoms = _warp_atoms(kernel, probe)
         if atoms:
-            tiles += [s for s in warp_tile_moves(atoms) if _warp_move_ok(kernel, s)]
+            warp_moves = [s for s in warp_tile_moves(atoms) if _warp_move_ok(kernel, s)]
+            tiles += warp_moves
+            warp_offered = bool(warp_moves)
     tiles = list(TILE.narrow(tiles))
+    # Warp-eligibility is a structural fact about the KERNEL: when the enumeration offers any
+    # tensor-core row, EVERY row (scalar and warp alike) carries ``S_warp_eligible`` so the
+    # priors can price "a scalar tile where tensor cores were on offer"
+    # (``features.D_scalar_on_warp_eligible``). ``S_``-prefixed — rides ``knob_features``'
+    # structural pass-through; not a schedule family, so tile identity / prefix-consistency
+    # and ``tile_signature`` are untouched.
+    stamp: dict = {"S_warp_eligible": 1.0} if warp_offered else {}
     rows: list[dict] = []
     for spec in tiles:
         plan = TilePlan.parse(spec)
@@ -478,7 +488,7 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], str]:
                 # evidence pick's prefix-consistency depends on it: an absent key reads as
                 # "free" and would let a gmem-direct leaf inherit a staged row's measurement.
                 for wspec in _wspec_candidates(plan, stage, red):
-                    rows.append({_at(TILE, kaxis): spec, _at(STAGE, kaxis): stage, _at(REDUCE, kaxis): red, WSPEC.name: wspec})
+                    rows.append({_at(TILE, kaxis): spec, _at(STAGE, kaxis): stage, _at(REDUCE, kaxis): red, WSPEC.name: wspec, **stamp})
     return rows, kaxis
 
 

@@ -177,6 +177,8 @@ class AnalyticPrior(Prior):
         scale: float = 0.1,
         atomic_free_split_threshold: float = 4.0,
         atomic_free_weight: float = 5.0,
+        scalar_on_warp_weight: float = 40.0,
+        splitk_roundtrip_weight: float = 0.25,
     ) -> None:
         super().__init__()
         self._w = weights if weights is not None else _W_A
@@ -190,6 +192,17 @@ class AnalyticPrior(Prior):
         # CatBoostPrior takes over once real atomic-vs-free ``H_opt=3`` rows exist.
         self._atomic_free_split_threshold = atomic_free_split_threshold
         self._atomic_free_weight = atomic_free_weight
+        # Scalar-on-warp-eligible penalty + split-K workspace round-trip price.
+        # Hardcoded like the atomic-free term — no training rows carry the new stamps yet,
+        # and a plain linear weight can't express "only bad when the alternative exists".
+        # ``scalar_on_warp_weight`` must outweigh the scalar tile's accumulated geometry
+        # bonuses under BOTH weight sets (the dyn set hands scalar rows ~+30 quality via
+        # ``D_bn_ge_bm`` / band features a warp row structurally cannot earn — the qwen3-emb
+        # projection deploys landed scalar at 5-20× the -O3 cost of their enumerated mma
+        # siblings). ``splitk_roundtrip_weight`` is a mild price (~5 quality at free_prod
+        # ≈ 512·1024): the deferred finalize IS the right shape for wide mma splits.
+        self._scalar_on_warp_weight = scalar_on_warp_weight
+        self._splitk_roundtrip_weight = splitk_roundtrip_weight
 
     @property
     def fitted(self) -> bool:
@@ -228,6 +241,11 @@ class AnalyticPrior(Prior):
             splitk = feats.get("D_splitk", 1.0)  # the split-K count (REDUCE@<k>.cta)
             many_splits = splitk >= self._atomic_free_split_threshold
             quality += self._atomic_free_weight * af_on * (1.0 if many_splits else -1.0)
+        # Tensor-core preference gates (see __init__): a scalar tile on a warp-eligible
+        # contraction eats the roofline penalty; a deferred split-K finalize pays its
+        # workspace round-trip. Both features are 0 wherever the stamps don't apply.
+        quality -= self._scalar_on_warp_weight * feats.get("D_scalar_on_warp_eligible", 0.0)
+        quality -= self._splitk_roundtrip_weight * feats.get("D_splitk_roundtrip", 0.0)
         return math.exp(-self._scale * max(min(quality, 80.0), -80.0))
 
     def mean_score(self, knobs: dict) -> float:

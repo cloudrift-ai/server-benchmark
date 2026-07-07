@@ -90,7 +90,12 @@ def test_schedule_leaf_set_equals_catalog():
     for r in rows:
         by_tile.setdefault(str(family_value(r, "TILE")), []).append(r)
     percell = by_tile[""]
-    assert {str(family_value(r, "REDUCE")) for r in percell} == {"", *coop_reduce_moves()}
+    # The coop ladder is legality-gated on ``coop <= K`` (``_reduce_candidates``): this matmul's
+    # K=64 keeps the narrow folds and filters the wide ``b128``/``b256``/``b512`` rows.
+    from emmy.compiler.ir.tile import ReducePlan  # noqa: PLC0415
+
+    legal_coop = [m for m in coop_reduce_moves() if ReducePlan.parse(m).coop <= 64 and ReducePlan.parse(m).reg <= 64]
+    assert {str(family_value(r, "REDUCE")) for r in percell} == {"", *legal_coop}
     assert all(family_value(r, "STAGE") == "" for r in percell), "per-cell has no operand slab to stage (decided-empty)"
     # Every tiled tile is the full (resolved stages) × (serial + split widths) product, the split
     # rows carrying the SAME stage spellings as the unsplit rows (staging composes with split-K).

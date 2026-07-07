@@ -46,7 +46,7 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.schedule import Stage, WarpSpec, is_warp_codec
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.tile import Contraction, Map, Placement, ReducePlan, Reduction, TileOp, TilePlan
 from emmy.compiler.ir.tile.ops import axis_role, nodify_reduce, reduce_loop
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
@@ -60,6 +60,7 @@ from emmy.compiler.pipeline.search.space import (
     TILE,
     WSPEC,
     coop_reduce_moves,
+    map_tile_moves,
     scalar_tile_moves,
     splitk_moves,
     stage_moves,
@@ -1055,6 +1056,84 @@ def _tile_option(
     return TileOp(op=op, name=name, place=place, tier=plan, stage=stage, knobs=stamped)
 
 
+def _map_reg_width(spec: str) -> int:
+    """The inner-axis register width of a scalar ``TILE`` codec applied to a pointwise ``Map`` — the
+    ``f<fn>`` register sub-tile's leading count (``regs[0]``), or ``0`` for a warp / atom / unparseable
+    codec (a map has no fragment tier — those don't apply)."""
+    try:
+        plan = TilePlan.parse(spec)
+    except (ValueError, KeyError):
+        return 0
+    return 0 if plan.is_warp else plan.regs[0]
+
+
+def _map_body_defs(body: Body) -> set[str]:
+    """The SSA value names a pointwise ``Map`` body defines (``Load`` names + ``Assign`` names) —
+    the set the register-strip unroll renames per copy (axis vars stay put)."""
+    defs: set[str] = set()
+    for s in body:
+        defs.update(s.defines())
+    return defs
+
+
+def _map_strip_option(tile: TileOp, place: Placement, inner: Axis, r: int, spec: str, name: str) -> TileOp:
+    """One register-strip candidate: hand each thread ``r`` **contiguous** inner-axis elements. The
+    inner free axis shrinks to ``extent/r`` (the grid walks it) and the ``Map`` body is unrolled ``r``
+    times — copy ``i`` reads/writes ``inner·r + i`` (blocked layout, contiguous per thread) with its SSA
+    names suffixed — then regrouped as ``r`` loads · ``r`` computes · ``r`` writes so the unit-stride
+    runs feed ``050_vectorize_loads`` / ``080_vectorize_stores`` (→ one ``float<r>`` access each). The
+    width rides the scalar ``TILE`` codec (``f<r>``), keyed by the tiled inner axis."""
+    op = tile.op
+    ssa = _map_body_defs(op.body)
+    loads: list[Stmt] = []
+    computes: list[Stmt] = []
+    writes: list[Stmt] = []
+    for i in range(r):
+
+        def rename(n: str, i: int = i) -> str:  # suffix only the body's SSA names per copy; axis vars stay
+            return f"{n}__u{i}" if n in ssa else n
+
+        sigma = Sigma({inner.name: BinaryExpr("+", BinaryExpr("*", Var(inner.name), Literal(r, "int")), Literal(i, "int"))})
+        for s in op.body:
+            s2 = s.rewrite(rename, sigma)
+            (loads if isinstance(s2, Load) else writes if isinstance(s2, Write) else computes).append(s2)
+    body = Body((*loads, *computes, *writes))
+    new_inner = replace(inner, extent=Dim(inner.extent.as_static() // r))
+    new_free = (*place.free[:-1], new_inner)
+    new_place = Placement(free=new_free, grid=new_free)
+    return TileOp(op=Map(body=body, source=None), name=name, place=new_place, knobs={_at(TILE, inner.name): spec})
+
+
+def _map_strip_fork(tile: TileOp, place: Placement, name: str) -> list[TileOp] | TileOp:
+    """The pointwise-map register-strip fork (the ``FREE`` dispatch): option-0 is one element per
+    thread (today's flat map, ``TILE=""``); ``f2``/``f4``/``f8`` hand each thread that many contiguous
+    inner-axis elements (:func:`_map_strip_option`). Reuses the scalar ``TILE`` codec's ``f<fn>``
+    register sub-tile — a pure ``Map`` is the degenerate output tile (no ``n`` unit-tile / atom).
+    Offered only for a pure ``Map`` (``source=None``) whose innermost free axis is static and divisible
+    by the width; a ``TILE`` pin narrows the ladder (``Knob.narrow``), one surviving candidate applies
+    directly (no fork)."""
+    op = tile.op
+    if not (isinstance(op, Map) and op.source is None) or not place.free:
+        return TileOp(op=op, name=name, place=place)
+    inner = place.free[-1]
+    base = TileOp(op=op, name=name, place=place, knobs={_at(TILE, inner.name): ""})
+    # Only a FLAT elementwise body (per-cell Load/Assign/Write, no nested Loop / Accum / carried
+    # state) is safely unrollable: every output cell is independent, so replicating adjacent cells
+    # and regrouping preserves semantics. A sweep / stateful-fallback Map (which also reaches the
+    # FREE dispatch) has cross-cell dependencies the naive copy would break — leave it at option-0.
+    if not inner.extent.is_static or not all(isinstance(s, (Load, Assign, Write)) for s in op.body):
+        return base
+    ext = inner.extent.as_static()
+    opts = [base]
+    for spec in TILE.narrow(map_tile_moves()):
+        r = _map_reg_width(spec)
+        if r > 1 and ext % r == 0:
+            opts.append(_map_strip_option(tile, place, inner, r, spec, name))
+    if TILE.raw() is not None:  # a live pin — the narrowed strip alone (option-0 only when the pin is "")
+        return opts[-1] if len(opts) > 1 else base
+    return opts if len(opts) > 1 else base
+
+
 def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[TileOp] | TileOp:
     """Map a freshly-recognized (UNMAPPED) ``tile`` onto the grid and offer its scheduling forks —
     the scheduling half of ``010_recognize``, called inline once recognition has built the tile op.
@@ -1068,7 +1147,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
     # directly; multiple fork for the search / prior to rank.
     role = axis_role(tile.op)
     if role is AxisRole.FREE:
-        return TileOp(op=tile.op, name=name, place=place)
+        return _map_strip_fork(tile, place, name)
     # A contraction picks its free-axis output tile (``TILE``); a reduction picks its reduce
     # partition (``REDUCE``). Each offers its candidate(s): one applies directly, multiple fork.
     # A contraction ALSO honors a cross-CTA split-K (``g``) / cooperative (``b``/``r``) ``REDUCE``

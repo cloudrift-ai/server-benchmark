@@ -123,6 +123,19 @@ def wspec_moves() -> list[str]:
     return ["", "p1", "p2"]
 
 
+def map_tile_moves() -> list[str]:
+    """The pointwise-map register-strip candidates — spelled in the **scalar ``TILE`` codec** (the same
+    ``f<fn>`` register sub-tile a contraction's output rides, here with no ``n`` unit-tile / atom since
+    the grid already parallelizes a pure ``Map``). ``f<r>`` hands each thread ``r`` **contiguous**
+    inner-axis elements (blocked: thread t owns ``[t·r, t·r+r)``) as ``r`` grouped loads + ``r`` grouped
+    writes, which ``050_vectorize_loads`` / ``080_vectorize_stores`` merge into one ``float<r>`` access
+    — matching torch's ``vectorized_elementwise_kernel<r>``. Option-0 (``""``, 1 elem/thread) leads.
+    Legality (a static inner free axis divisible by r) is the scheduler's (``_schedule._map_strip_fork``).
+    The ladder stops at ``f4``: ``f8`` regressed both pointwise goldens (register pressure — 22 vs 14
+    regs — outweighs the wider access), so it's left out until a shape wants it."""
+    return ["f2", "f4"]
+
+
 # --- The structural placement pin (PLACE) -----------------------------------
 #
 # ONE pin-only family controlling structural emission: where an intermediate edge lives — registers
@@ -340,7 +353,13 @@ def splitk_moves(*, warp: bool) -> list[str]:
 def coop_reduce_moves() -> list[str]:
     """The cooperative / ILP K-partition ``REDUCE`` codec candidates for a NON-output-tiled
     contraction (``_coop_reduce_spec``'s contract — the per-cell tier folds K across ``b`` coop
-    threads / ``r`` ILP register chains). These EXTEND the serial ``""`` option-0. ``b16`` /
-    ``b32`` are recorded reduce-golden winners (the wide-row coop folds) — kept enumerable so
-    the reduce goldens stay reachable."""
-    return ["b4", "b8", "b16", "b32", "r2", "r4", "r2/b4"]
+    threads / ``r`` ILP register chains). These EXTEND the serial ``""`` option-0.
+
+    The ``b`` ladder runs to ``b512`` because the wide-row memory-bound norms (``rms_norm`` /
+    ``softmax`` over K=2048–8192) are bandwidth-bound and need MANY warps folding each row to
+    saturate DRAM: at ``b32`` (one warp/row) they hit ~9% of peak DRAM throughput (~0.25× torch's
+    fused norm); ``b256``/``b512`` (8–16 warps/row) reach ~40%+ and close the gap. ``_reduce_candidates``
+    legality-gates each move on ``coop <= K``, so the wide folds are offered only on rows wide enough
+    to use them; ``b1024`` is left off — it trips the ``block_threads + 32·aux <= 1024`` budget and
+    lost to ``b256``/``b512`` in the sweep anyway."""
+    return ["b4", "b8", "b16", "b32", "b64", "b128", "b256", "b512", "r2", "r4", "r2/b4"]

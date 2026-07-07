@@ -314,6 +314,19 @@ class AttentionGoldenConfig(GoldenConfig):
 
     def __post_init__(self):
         self._require_dynamic_hint(self.seq)
+        # Flash TILE pinning is fragile — a golden must record the ONE form that reproduces its
+        # measured config (a wrong form silently re-benches a scalar fallback 100–1000× slow: the
+        # "flatten" pathology). The forms are shape-specific and there is no clean static rule (hd64
+        # reproduces from a bare TILE, hd128 needs per-axis TILE@dd/TILE@pj — the two contractions
+        # take different tiles there), so the recorder verifies each by re-bench. The ONE invariant we
+        # can guard statically: a DYNAMIC (masked-flash) golden's axis-keyed pin never resolves (the
+        # kernel keys its tile differently at pin time), so it MUST record a single bare TILE.
+        keyed = [k for k in self.knobs if k.startswith("TILE@")]
+        if self.dynamic and keyed:
+            raise ValueError(
+                f"{self.name}: dynamic attention golden has axis-keyed {keyed} — the masked-flash pin "
+                f"doesn't resolve TILE@<axis>; record a single bare TILE that applies to both contractions."
+            )
 
     def dynamic_specs(self) -> list[str]:
         return ["seq_len@x0:2", "seq_len@x1:2", "seq_len@x2:2"] if self.dynamic else []

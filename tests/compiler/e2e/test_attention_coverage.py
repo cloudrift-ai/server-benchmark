@@ -532,6 +532,23 @@ def test_staged_flash_symbolic_declines_to_gmem_direct(monkeypatch):
 
 
 @requires_cuda
+def test_staged_flash_stage_pin_keeps_warp_not_scalar(monkeypatch):
+    """A ``STAGE`` pin keeps the flash fork on the WARP (mma) tier — only the warp tier stages, so
+    the pin must not fall through to the chain / scalar reduce-partition siblings and let the prior
+    bury the (lower-occupancy) staged warp form under a higher-occupancy scalar form. At H=8/seq=512
+    the pre-fix prior did exactly that (a staged-flash A/B row read as a ~100× regression). The
+    kernel must be the fused warp form (`dpl_c_to_a`) with a live TMA-staged K/V slab, NOT scalar."""
+    monkeypatch.setenv("EMMY_STAGE", "d2/tma/ring")
+    B, H, D = 1, 8, 64  # H=8 is the scale where the pre-fix prior buried the staged form under scalar
+    sd = torch.export.Dim("seq_len", min=4, max=4096)
+    seed = tuple(torch.randn(B, H, 16, D, dtype=torch.float16) for _ in range(3))
+    _backend, compiled, _graph, kernels = _trace(_Sdpa(), seed, dynamic_shapes={"q": {2: sd}, "k": {2: sd}, "v": {2: sd}})
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "dpl_c_to_a" in src, "STAGE pin must keep the fused WARP flash form, not fall to scalar"
+    assert "_k_smem" in src and "cp_async_bulk_tensor" in src, "the warp form must carry the pinned TMA K/V stage"
+
+
+@requires_cuda
 def test_staged_flash_symbolic_tma_stages_and_matches_torch(monkeypatch):
     """A **TMA** ``STAGE`` pin on a SYMBOLIC ``seq_len`` flash STAGES the K/V stream (unlike
     cp.async, which declines): the descriptor rides the runtime globalDim and zero-fills the box

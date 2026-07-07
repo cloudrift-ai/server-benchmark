@@ -78,10 +78,19 @@ eager; reduce → `torch.sum` (unfused, **weak**); pointwise → torch `relu`.
 
 ## Finding 1 — greedy still misses `g8k` split-K on the K-heavy `mlp_down` GEMM
 
-The K-heavy `mlp_down` (M=512, N=4096, **K=14336**) is the biggest matmul shortfall, static and dynamic alike. The
-golden deploys `w4x4/f2x2/k4` + **`REDUCE=g8k`** (8-way split-K, 2048-CTA grid, 67% occ) at 303.6 / 305.1 µs. The
-greedy pick reaches the MMA tier but **no split-K**: `w8x2/f2x4/k4` with `REDUCE=-` at 346.7 µs (static, **1.14×**
-slower) and a *different-but-still-not-g8k* `w2x4/f2x2/k2` + `g2k` at 375.6 µs (dynamic, **1.23×** slower).
+**UPDATE — split-K candidacy feature + golden re-recorded (branch `feature/dynamic-flash-staging`).** The winning
+`mlp_down` config (`w4x4/f2x2/k4 + g8k`, ~303 µs) had been lost from the golden — re-recorded to the unstaged greedy
+tile at 346 µs; restored for static + `.dynM`. Root cause of the prior miss: split-K carried ONLY penalties in the
+feature space (`D_splitk_le2` / `D_splitk_excess`), never a reward when justified, and the occupancy-only `needed`
+credited zero split for K-heavy shapes whose free dims already fill the SMs. Added `D_splitk_deficit`: K-heaviness
+`K/√(M·N)` folds a second floor into `needed`, and under-splitting past it is a penalty (verified: `mlp_down` g8 in the
+sweet spot, balanced GEMMs still prefer g1). Masked-tier cold rank `mlp_down.dynM` 3833→1351 at no aggregate-median
+cost. **Static cold-prior limit:** the LINEAR `_W_A` cannot isolate the `g8k` geometry among the many balanced GEMMs
+(rank stays ~10k; any stronger deficit trades the aggregate median for a modest gain) — the static split-K deploy is a
+CatBoost lever (the refit's `build_cases` is matmul-only, and the nonlinear prior is the model that can price the
+interaction). The feature is in place for that retrain.
+
+## 2 — deployed greedy picks a suboptimal MMA tile for `square.512.dynM`
 
 Evidence:
 
@@ -99,7 +108,14 @@ GEMMs") — it is *unfixed*: the golden still holds because neither the analytic
 feature on `K / max(M,N)`), then refit the analytic weights over it — a 9116-deep analytic rank is a heuristic
 mispricing, not a search-patience problem, so patience bumps alone won't reach it.
 
-## Finding 2 — dynamic flash trails static badly; `hd128.dynM` greedy is 2× off its own golden
+**UPDATE — softmax coop-reduce ladder extended to `b512`; golden re-recorded.** `softmax.k2048` had regressed to
+`REDUCE=b32` (9.5 µs) because `space.coop_reduce_moves` capped the ladder at `b32`, so `b512` (3.7 µs — **2.6×**, 0.9×
+cuBLAS) was unreachable by the search. Restored the wide folds `b64`–`b512` (the scheduler's `_coop_reduce_spec`
+already gates per-shape legality, so it's safe on small K); re-recorded `softmax.k2048`(.dynM) at `b512`. **Greedy now
+DEPLOYS `b256` (3.9 µs)** — a 2.4× deploy win over the `b32` it shipped before — with `b512` the golden. (`rms_norm`'s
+bandwidth gap at wide K is untouched — a separate codegen lead.)
+
+## 4 — attention golden re-benches are pathological on the current build
 
 Non-causal static flash is *faster* than torch SDPA (`hd64` 0.84×, `hd128` 0.90× vs cuBLAS — both now at/above
 parity). The masked `.dynM` twins are far behind: `hd64.dynM` sits at **1.93× cuBLAS** (19.5 µs golden vs 10.2 µs
@@ -131,10 +147,19 @@ keys, so the zero-filled tail contributes nothing — bit-identical to gmem-dire
 (cp.async stays static-only: no OOB zero-fill) + threading the symbolic `Dim` through `staged_kloop` makes `.dynM`
 flash stageable. 5090 `-O3`, `hd64.dynM` snippet, same warp tile, gmem→+TMA: `w1x1` 19.2→16.9, `w2x1` 22.2→9.2,
 **`w4x1` 26.3→9.1 µs** — best staged **0.89× cuBLAS** (torch SDPA 10.2), ~at the static hd64 8.6. Bit-identity
-test-enforced at a divisible (64) and overhanging (100) seq. **Part B (the pick, still open):** greedy does not yet
-*select* it — STAGE-free it deploys the unstaged `w2x1` (19.7), STAGE-pinned + TILE-free the flash fork falls to
-scalar. The fast config is now reachable; teaching the masked-tier prior to prefer a wider warp tile + TMA stage (and
-re-recording the `.dynM` goldens) is the lever. **Next:** Part B — the prior/fork selection, then re-record.
+test-enforced at a divisible (64) and overhanging (100) seq.
+
+**Part B — golden re-recorded + scalar fallback fixed; greedy DEPLOY still open.** Re-recorded `hd64.dynM` (9.1 µs, was
+19.6; bare `w4x1/f1x8/k4` + `STAGE=d2/tma/ring`) and `hd128.dynM` (16.4 µs, was 30.8; `w2x1/f1x8/k8` + stage). Fixed the
+flash-form-fork **scalar fallback**: a `STAGE` pin now keeps the warp rows alone (only the warp tier stages), so the
+`--ab STAGE=…` / `emmy tune` staging probe and `EMMY_STAGE` no longer collapse to a ~100× scalar row (regression-tested
+at H=8/seq=512). Result: **static** flash greedy-deploys the staged form (8.5 µs); **dynamic** flash greedy still
+deploys the unstaged warp (19.6 µs) — the masked-tier LINEAR prior underprices the low-occupancy staged form, and the
+analytic refit can't learn it because `build_cases`/`eval analytic` are matmul-only (attention isn't enumerated).
+Boosting the dyn `D_stage_*` weights was inert (the flash gmem-vs-staged decision rides features the matmul-only eval
+can't surface). The staged config is reachable (golden / pin / `--ab`), so a served model that tunes deploys it;
+greedy-by-default staged `.dynM` flash is the remaining **CatBoost lever** (train over attention shapes). **Next:**
+retrain the CatBoost prior over the goldens (incl. attention) so greedy deploys the staged flash + `g8k` split-K.
 
 Small but reproducible: `softmax.k2048` (static + `.dynM`) golden is `REDUCE=b512` at 3.7 µs; the greedy prior deploys
 `b256` at 3.8–3.9 µs (**~5%** slower, 3/3 re-benches: 3.9 / 3.8 / 3.9). This is a mild prior shortfall — the fold

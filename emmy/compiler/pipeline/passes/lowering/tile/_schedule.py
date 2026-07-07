@@ -1206,7 +1206,15 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         if pair is not None:
             red, head, pv = pair
             warps = _twisted_warp_options(tile, name, knobs, _smem_budget(ctx), _tma_allowed(ctx))
-            if warps and TILE.raw() is not None:  # a live warp pin — the mma rows alone (the pin contract)
+            # A live warp ``TILE`` pin OR a non-empty ``STAGE`` pin keeps the mma rows alone: ONLY the
+            # warp tier stages, so a staging pin (the ``--ab STAGE=…`` / ``emmy tune`` staging probe,
+            # or ``EMMY_STAGE``) must not fall through to the chain / scalar reduce-partition siblings
+            # and let the prior bury the (necessarily lower-occupancy) staged warp form under a
+            # higher-occupancy scalar form — the scalar-fallback that made a staged-flash A/B row read
+            # as a 100× regression. ``warps == []`` (a non-warp-eligible flash) still degrades to
+            # scalar below, so a stage pin on such a shape stays a graceful no-op.
+            stage_pinned = STAGE.raw() is not None and bool(STAGE.narrow([""])[0])
+            if warps and (TILE.raw() is not None or stage_pinned):
                 return warps if len(warps) > 1 else warps[0]
             chain = _twisted_chain_option(tile, place, name, knobs)
             forms = [*warps, *([chain] if chain is not None else [])]

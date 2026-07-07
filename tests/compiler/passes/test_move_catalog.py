@@ -16,7 +16,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
-from emmy.compiler.ir.schedule import TilePlan
+from emmy.compiler.ir.schedule import ReducePlan, TilePlan
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.knob import axis_of, family_of, family_value
@@ -90,11 +90,10 @@ def test_schedule_leaf_set_equals_catalog():
     for r in rows:
         by_tile.setdefault(str(family_value(r, "TILE")), []).append(r)
     percell = by_tile[""]
-    # The coop ladder is legality-gated on ``coop <= K`` (``_reduce_candidates``): this matmul's
-    # K=64 keeps the narrow folds and filters the wide ``b128``/``b256``/``b512`` rows.
-    from emmy.compiler.ir.tile import ReducePlan  # noqa: PLC0415
-
-    legal_coop = [m for m in coop_reduce_moves() if ReducePlan.parse(m).coop <= 64 and ReducePlan.parse(m).reg <= 64]
+    # The per-cell tier offers serial + every coop/ILP move whose fold fits the reduce extent
+    # (``_reduce_specs``'s ``coop <= extent and reg <= extent`` gate) — so the wide ``b64``–``b512``
+    # folds drop out on this K=64 matmul, exactly as they would on any reduce narrower than the fold.
+    legal_coop = {m for m in coop_reduce_moves() if (p := ReducePlan.parse(m)).coop <= 64 and p.reg <= 64}
     assert {str(family_value(r, "REDUCE")) for r in percell} == {"", *legal_coop}
     assert all(family_value(r, "STAGE") == "" for r in percell), "per-cell has no operand slab to stage (decided-empty)"
     # Every tiled tile is the full (resolved stages) × (serial + split widths) product, the split

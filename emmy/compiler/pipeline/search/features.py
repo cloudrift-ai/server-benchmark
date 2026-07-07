@@ -478,8 +478,24 @@ def _geom_feats(
         # prior needs to separate the SPLITK=1/2 goldens from the SPLITK=8/16 tiles
         # the -O1 sweep over-ranks (the analytic prior already gets it via D_splitk_le2).
         free_ctas = float(free_prod) / area
-        needed = max(2.0 * sm / max(free_ctas, 1.0), 1.0)
+        # Split-K is justified to (a) lift occupancy toward ~2 waves AND (b) hide the K-streaming
+        # latency of a K-HEAVY GEMM — a long reduction per output tile parallelizes across the split
+        # CTAs even when the free dims already fill the machine. The occupancy-only ``needed`` mispriced
+        # exactly (b): mlp_down (M=512, N=4096, K=14336) has ``free_ctas`` alone saturating the SMs, so
+        # it credited ZERO split and ranked the winning ``g8k`` golden ~9000-deep. ``k_ext /
+        # sqrt(free_prod)`` is the K-per-output-linear-dim heaviness (config-independent; ≈1 for a
+        # square / balanced GEMM, large only when K ≫ √(M·N)) — a second floor on the split the shape
+        # justifies.
+        occ_need = 2.0 * sm / max(free_ctas, 1.0)
+        kheavy_need = k_ext / math.sqrt(max(float(free_prod), 1.0)) if k_ext > 0 else 1.0
+        needed = max(occ_need, kheavy_need, 1.0)
         out["D_splitk_excess"] = math.log2(max(splitk / needed, 1.0))
+        # The deficit side: UNDER-splitting a shape that justifies a wide split (``splitk < needed``)
+        # is the K-heavy miss — the penalty that lifts the ``g<w>k`` golden over the ``g1`` tile the
+        # occupancy terms alone rank as safe. Zero once ``splitk ≥ needed`` (and for every shape with
+        # ``needed == 1``, so the well-tuned non-split geometries are untouched). Was absent: split-K
+        # had only penalties (``D_splitk_le2`` / ``D_splitk_excess``), never a reward when justified.
+        out["D_splitk_deficit"] = math.log2(max(needed / max(float(splitk), 1.0), 1.0))
         # The deferred split-K finalize (``g<w>k``) writes + re-reads a full free-size partial
         # workspace and launches the combine kernel — the same round-trip volume axis
         # ``D_cut_roundtrip`` prices for the demoted-cone cut, un-priced here until now (the

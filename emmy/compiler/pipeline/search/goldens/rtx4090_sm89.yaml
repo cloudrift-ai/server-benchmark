@@ -6,32 +6,32 @@ configs:
     M: 512
     N: 512
     K: 512
-    knobs: {TILE: 'n16x8/f2x4', STAGE: 'd3/cp/ring'}
-    emmy_us: 13.5
+    knobs: {TILE: 'n32x8/f4x6', REDUCE: 'g2k', STAGE: 'd4/cp/ring'}
+    emmy_us: 14.4
     cublas_us: 10.8
   - kernel: matmul
     name: matmul.square.1024
     M: 1024
     N: 1024
     K: 1024
-    knobs: {TILE: 'n64x16/f2x8', REDUCE: 'g2a', STAGE: 'd1/cp'}
-    emmy_us: 71.0
+    knobs: {TILE: 'n32x8/f4x10', STAGE: 'd2/cp/ring'}
+    emmy_us: 60.1
     cublas_us: 45.4
   - kernel: matmul
     name: matmul.square.2048
     M: 2048
     N: 2048
     K: 2048
-    knobs: {TILE: 'n16x8/f4x8', STAGE: 'd2/cp/ring'}
-    emmy_us: 383.3
+    knobs: {TILE: 'n32x16/f4x8', STAGE: 'd2/cp/ring'}
+    emmy_us: 359.1
     cublas_us: 320.0
   - kernel: matmul
     name: matmul.square.4096
     M: 4096
     N: 4096
     K: 4096
-    knobs: {TILE: 'n32x16/f4x10', STAGE: 'd2/cp/ring', WARPSPEC: false}
-    emmy_us: 4004.9
+    knobs: {TILE: 'n32x16/f4x8', STAGE: 'd2/cp/ring'}
+    emmy_us: 2845.7
     cublas_us: 2458.6
   - kernel: matmul
     name: matmul.square.512.fp16
@@ -48,8 +48,8 @@ configs:
     N: 1024
     K: 1024
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16/w4x1/f1x4/k2', STAGE: 'd2/cp/ring'}
-    emmy_us: 29.3
+    knobs: {TILE: 'a:mma_m16n8k16_f16/w1x2/f4x4/k2', STAGE: 'd2/cp/ring'}
+    emmy_us: 22.2
     cublas_us: 18.1
   - kernel: matmul
     name: matmul.square.2048.fp16
@@ -57,8 +57,8 @@ configs:
     N: 2048
     K: 2048
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16/w2x2/f4x8/k2', STAGE: 'd2/cp/ring'}
-    emmy_us: 119.3
+    knobs: {TILE: 'a:mma_m16n8k16_f16/w1x4/f4x4', STAGE: 'd2/cp/ring'}
+    emmy_us: 119.4
     cublas_us: 115.2
   - kernel: matmul
     name: matmul.square.4096.fp16
@@ -75,6 +75,13 @@ configs:
     N: 512
     K: 512
     dynamic: true
-    knobs: {TILE: 'n16x8/f4x4', REDUCE: 'g2a', STAGE: 'd4/cp/ring'}
-    emmy_us: 12.8
+    knobs: {TILE: 'n32x8/f4x8', REDUCE: 'g4k', STAGE: 'd2/cp/ring'}
+    emmy_us: 11.5
     cublas_us: 10.8
+  - kernel: pointwise
+    name: pointwise.n4096
+    M: 512
+    N: 4096
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, VECTORIZE_LOADS: true}
+    emmy_us: 5.0
+    cublas_us: 5.0

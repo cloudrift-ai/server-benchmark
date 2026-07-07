@@ -67,6 +67,7 @@ from emmy.compiler.ir.schedule import Fold, Level, ReduceStage
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Select, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile.ir import Contraction, Map, Reduction
+from emmy.compiler.pipeline.passes.lowering.kernel._atom import unroll_ok
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
     CtaTile,
@@ -575,7 +576,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         )
         state = decls + state
     else:
-        static_small = kv_axis.extent.is_static and kv_axis.extent.as_static() <= 128
+        static_small = unroll_ok(kv_axis.extent, 128)
         body = Body(tuple(_stream_step()))
         fold = [StridedLoop(axis=kv0, start=Literal(0, "int"), step=Literal(bn, "int"), body=body, unroll=static_small)]
 

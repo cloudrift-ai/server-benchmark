@@ -1,7 +1,7 @@
 ---
 name: tune-golden
 description: Use this skill when the user asks to "tune the goldens", "update the golden configs", "re-tune the goldens", "run the golden sweep", "refresh golden matmul configs", "evaluate goldens and update", "tune/seed the dynamic goldens", or otherwise wants to re-tune the GOLDEN_CONFIGS matmul shapes (static and dynamic/.dynM symbolic-axis entries alike), A/B the greedy pick against the recorded golden, and record genuine improvements into the per-GPU golden YAML. Tunes the whole golden dataset, benches greedy-vs-golden per shape with `emmy tune` / `run --bench`, categorizes (better → replace, same → add, worse → leave), edits the goldens YAML by hand, and writes a findings report to plans/ — unlike tune-model, the target config is known here, so the report analyzes the analytic/learned prior's expectation against it (rank, per-knob misses, recommendations) plus workflow notes.
-version: 0.3.0
+version: 0.4.0
 ---
 
 # Evaluate and update the golden matmul configs
@@ -17,23 +17,49 @@ analysis can evaluate the *expectation* directly — where the golden ranks unde
 knobs the greedy pick misses, and whether the search ever measured it. Use the `emmy` CLI for all of it (`tune`,
 `run --bench --golden/--ab`, the `eval` views) — no ad-hoc bench scripts or hand-written SQL.
 
-Requires a CUDA GPU. The whole sweep is ~30 min (23 shapes). Goldens are **hand-maintained YAML** — never dump them with
-PyYAML (it destroys the flow-style `{BN: 16, ...}` knob dicts and key order); edit the YAML text directly.
+Requires a CUDA GPU. The set is ~36 shapes on the RTX 5090 (six kinds × sizes × static/`.dynM`). Budget ~2.5 h for the
+full single-invocation cold sweep (measured on a 4090, 2026-07-07); a per-shape loop of `tune -c <snippet> --clean`
+costs the same wall time but forfeits within-sweep prior transfer — use it only when a report explicitly needs
+unbiased per-shape cold-search behavior. Goldens are **hand-maintained YAML** — never dump them with PyYAML (it
+destroys the flow-style `{BN: 16, ...}` knob dicts and key order); edit the YAML text directly.
 
 Work dir: keep all temp data **inside the repo** under the untracked `_tune/` folder (e.g.
 `_tune/golden-sweep-<gpu>/`) — `_tune/` is gitignored, so the tee'd logs and any `--dump-dir` dumps persist across
 reboots (unlike `/tmp`) and the sweep stays reproducible later.
 
-## Step 1 — Tune the whole golden dataset
+## Step 1 — Tune the whole golden dataset (one invocation, cold)
 
 ```
 emmy tune --dataset golden --clean 2>&1 | tee _tune/golden-sweep-<gpu>/tune.log
 ```
 
 This tunes every golden shape in one in-process loop (`handle_tune` over `_tune_targets` — the same codepath as a
-single-shape tune, differing only in the dataset it builds), sharing one tune DB / bench worker / prior. `--clean`
-clears the DB + prior once up front, then accumulates across shapes. Narrow with `--kernel SUBSTR` (e.g.
-`--kernel square` or `--kernel q_proj`) to re-tune a subset. This trains the prior; it does not update goldens.
+single-shape tune, differing only in the dataset it builds), sharing one tune DB / bench worker / prior. This trains
+the prior; it does not update goldens.
+
+**Cold is the point — never reuse pre-sweep tuning data.** This skill runs when the existing tuning data is no
+longer valid (the compiler / kernels changed), so `--clean` is mandatory and seeding `EMMY_PRIOR_FILE` from an
+earlier checkpoint is forbidden: stale measurements don't just fail to help, they actively mislead — the 2026-07-07
+4090 A/B (`local_data/golden-ab-4090/ab-findings.md` on the dev box) showed a stale-context seed steering the fp16
+warp-`TILE` search into the wrong region (fp16 squares 1.6–2.6× slower than cold, even with more benches on some
+shapes). Within-sweep accumulation is different: after the one `--clean`, the prior learns across the sweep's own
+(fresh) shapes — which is why the sweep must be **one invocation, never a per-shape loop of `tune -c <snippet>
+--clean`** (36 cold restarts forfeit that transfer; the h4096 GEMMs and static/`.dynM` twins are near-identical to
+the search).
+
+Time levers that do NOT reuse old data:
+
+- **`--gpus N`** on a multi-GPU box: the shapes fan out near-linearly.
+- **`EMMY_O3_TOL=0.10`** (default 0.15) trims -O3 recompiles of non-contenders on the fp16 warp kernels. Do not
+  tighten below ~0.10: at 0.05 the 4090 A/B lost a real winner to the -O1/-O3 ranking inversion (a config 11% off
+  the -O1 best was the -O3 best; the 5% band skipped its rebench).
+- Narrow with `--kernel SUBSTR` (e.g. `--kernel square` or `--kernel q_proj`) to re-tune a subset. Routine sweeps
+  may skip the `.dynM` twins of the memory-bound kinds (softmax / rms_norm / reduce / pointwise): they land within
+  ~2% of their static twins (2026-07-06 5090 sweep — the masked-tile penalty is warp-tier-only), so the static
+  twin's fresh result stands in for them. The matmul / attention `.dynM` twins ARE worth every sweep — the masked
+  warp tile is where the static↔dynamic gap lives.
+- Do NOT cut `--patience` below the default 50: with a cold start the wide warp-`TILE` fork is found late (the
+  4090 A/B regressions were exactly early-stopped fp16 shapes).
 
 ## Step 2 — A/B the greedy pick vs the recorded golden, per shape
 
@@ -201,7 +227,8 @@ density of the `tune-model` reports (`plans/*-tune-findings.md`; executed ones a
   the search stops early, or an enumeration/eligibility gate (cite `file:line`) when the golden's config was never
   offered at all.
 - **End with `## Workflow notes`** — a retrospective on this loop itself, for whoever maintains the CLI and this
-  skill: slow steps (what dominated the ~30 min and whether a flag/cache/narrower `--kernel` could cut it),
+  skill: slow steps (what dominated the wall time — tune loop vs per-shape `--bench` A/Bs — and whether a
+  flag/cache/narrower `--kernel` could cut it; note the tune.log's `done: ... in N s` line and the sweep's total),
   many-step detours (answers assembled by hand across several commands — each is a missing `eval` view or column),
   flakiness (the noise-floor re-runs of step 4: which shapes, how many re-runs), and output friction (data only in
   logs, hand cross-referencing). One line of symptom + one line of proposed improvement each. If a previous sweep's

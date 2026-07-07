@@ -108,12 +108,22 @@ GEMMs") — it is *unfixed*: the golden still holds because neither the analytic
 feature on `K / max(M,N)`), then refit the analytic weights over it — a 9116-deep analytic rank is a heuristic
 mispricing, not a search-patience problem, so patience bumps alone won't reach it.
 
-**UPDATE — softmax coop-reduce ladder extended to `b512`; golden re-recorded.** `softmax.k2048` had regressed to
-`REDUCE=b32` (9.5 µs) because `space.coop_reduce_moves` capped the ladder at `b32`, so `b512` (3.7 µs — **2.6×**, 0.9×
-cuBLAS) was unreachable by the search. Restored the wide folds `b64`–`b512` (the scheduler's `_coop_reduce_spec`
-already gates per-shape legality, so it's safe on small K); re-recorded `softmax.k2048`(.dynM) at `b512`. **Greedy now
-DEPLOYS `b256` (3.9 µs)** — a 2.4× deploy win over the `b32` it shipped before — with `b512` the golden. (`rms_norm`'s
-bandwidth gap at wide K is untouched — a separate codegen lead.)
+**RESOLVED — it was the capped fold ladder, NOT bandwidth.** The whole family was stuck at `REDUCE=b32` because
+`space.coop_reduce_moves` capped the ladder at `b32`, so the wide folds a memory-bound normalizer needs were
+unreachable by the search. Restored `b64`–`b512` (the scheduler's `_coop_reduce_spec` gates per-shape legality, safe on
+small K). Greedy now **auto-deploys** the right fold and all eight kernels jump to at/above parity — re-recorded:
+
+| kernel | old `b32` | new fold | vs cuBLAS |
+|---|--:|--:|--:|
+| `softmax.k2048`(.dynM) | 9.5 µs | `b512` 3.7 | 1.11 |
+| `softmax.k8192`(.dynM) | 44.2 µs | `b256` 10.2 | **1.40** |
+| `rms_norm.k2048`(.dynM) | 11.0 µs | `b512` 3.9 | 1.05 |
+| `rms_norm.k4096`(.dynM) | 20.9 µs | `b512` 6.4 | 0.96 |
+| `rms_norm.k8192`(.dynM) | 41.0 µs | `b256` 10.2 | 1.00 |
+
+Optimum fold rises with K then backs off (`b512` at K≤4096, `b256` at K=8192 — wider drops occupancy). The finding's
+"memory-bound / bandwidth / vectorization" framing was **wrong**: these were never saturating a narrow fold, and no
+codegen change was needed — only the ladder cap. This is the single biggest parity swing of the sweep (up to 4×).
 
 ## 4 — attention golden re-benches are pathological on the current build
 

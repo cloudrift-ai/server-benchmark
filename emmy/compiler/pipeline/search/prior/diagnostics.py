@@ -257,46 +257,99 @@ def report(prior) -> str:
     return "\n".join(lines)
 
 
-def node_sibling_ranking(prior, nodes) -> tuple | None:
-    """Fork-level ranking over the autotune ``node`` store — the search-faithful
-    metric: group nodes by ``parent_key`` (each group = one fork's children, the
-    partial configs the prior actually ranks during ``_select``) and measure whether
-    the prior orders them by predicted latency the way their value-of-position labels
-    (``value_us`` = best latency reachable below) imply.
+# Sentinel for "key absent" in the fork-family delta — distinct from every real knob value.
+_ABSENT = object()
 
-    Returns ``(n_forks, top1_rate, median_spearman, n_children)`` — ``top1_rate`` is
-    the fraction of forks whose predicted-best child is a true-best child (its
-    ``value_us`` equals the fork's minimum); ``median_spearman`` is over forks with
-    ≥3 children (``None`` if none). Returns ``None`` when there are no multi-child
-    forks. Unlike :func:`reachability` it does NOT leaf-filter — siblings are already
-    one fork level (branches and leaves alike), and the prior is scored on each
-    node's full feature dict, exactly as ``mcts._select`` queries it."""
+
+def _fork_family(parent, sibs) -> str:
+    """The knob FAMILY a fork decides — the stable semantic notion of tree level (raw
+    ``depth`` is rule-step distance from the sentinel root: it renumbers whenever a
+    pass is added, and the live store shows forks only at depths 4–8/11–15). Primary:
+    the tunable keys the children carry beyond (or differing from) the ``parent``
+    row's; fallback when the parent row isn't in the store or the delta is empty
+    (cross-session gaps): the keys whose values differ across the siblings. Keys map
+    through ``knob.family_of`` (``TILE@d`` → ``TILE``); a fork deciding several
+    families at once joins them sorted (``FM+FN``); an undeterminable delta labels
+    ``?`` rather than dropping the fork."""
+    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
+
+    def tunable(feats: dict) -> dict:
+        return {k: v for k, v in feats.items() if not k.startswith(("S_", "H_"))}
+
+    keys: set[str] = set()
+    if parent is not None:
+        pk = tunable(parent.features)
+        for s in sibs:
+            keys |= {k for k, v in tunable(s.features).items() if pk.get(k, _ABSENT) != v}
+    if not keys:
+        rows = [tunable(s.features) for s in sibs]
+        keys = {k for k in set().union(*rows) if len({r.get(k, _ABSENT) for r in rows}) > 1} if rows else set()
+    fams = sorted({family_of(k) for k in keys})
+    return "+".join(fams) if fams else "?"
+
+
+def sibling_regret(prior, nodes) -> list[tuple[str, str, float, int]]:
+    """Fork-level **value regret** over the autotune ``node`` store — the search-faithful
+    metric: group nodes by ``parent_key`` (each group = one fork's children, the
+    partial configs the prior actually ranks during ``_select``) and price the prior's
+    pick against the fork's truth: ``regret = value_us(predicted-best child) /
+    min(value_us over siblings)``. The ratio is in latency units — 1.00 means the
+    prior steers the search into the best-reachable subtree, 1.15 reads as "following
+    the prior costs 15% at this fork". Predicted-score ties resolve pessimistically
+    (the WORST ``value_us`` among tied children): greedy breaks score ties by emission
+    order, so a tie is a miss, not a win — the ``rank_of_golden`` ``>=`` rule.
+
+    Returns one record ``(op_label, family, regret, n_children)`` per multi-child fork
+    — data, not text (aggregation and rendering live with the caller); ``family`` is
+    the knob family the fork decides (:func:`_fork_family`), the bucket the gate
+    thresholds by. Forks whose best ``value_us`` is non-positive are skipped (a
+    sentinel, not a measurement). Unlike :func:`reachability` it does NOT leaf-filter —
+    siblings are already one fork level (branches and leaves alike), and the prior is
+    scored on each node's full feature dict, exactly as ``mcts._select`` queries it."""
     from collections import defaultdict  # noqa: PLC0415
 
-    from scipy.stats import spearmanr  # noqa: PLC0415
-
+    by_key = {n.node_key: n for n in nodes}
     by_parent: dict = defaultdict(list)
     for n in nodes:
         if n.parent_key is not None:
             by_parent[n.parent_key].append(n)
 
-    top1, rhos, n_forks, n_children = 0, [], 0, 0
-    for sibs in by_parent.values():
+    records = []
+    for parent_key, sibs in by_parent.items():
         if len(sibs) < 2:
             continue
-        n_forks += 1
-        n_children += len(sibs)
+        true_best = min(s.value_us for s in sibs)
+        if true_best <= 0:
+            continue
         scored = [(prior.mean_score(s.features), s.value_us) for s in sibs]  # (predicted, measured)
-        pred_best_value = min(scored, key=lambda t: t[0])[1]  # value_us of the predicted-fastest child
-        if pred_best_value <= min(v for _, v in scored) + 1e-12:  # is it a true-best child? (measured ties OK)
-            top1 += 1
-        if len(sibs) >= 3:
-            rho = spearmanr([p for p, _ in scored], [v for _, v in scored]).statistic
-            if not math.isnan(rho):
-                rhos.append(rho)
-    if n_forks == 0:
-        return None
-    return (n_forks, top1 / n_forks, statistics.median(rhos) if rhos else None, n_children)
+        best_pred = min(p for p, _ in scored)
+        pick_value = max(v for p, v in scored if p == best_pred)  # ties → worst value (pessimistic)
+        family = _fork_family(by_key.get(parent_key), sibs)
+        records.append((_node_op_label(sibs[0].features), family, pick_value / true_best, len(sibs)))
+    return records
+
+
+def _regret_lines(records: list[tuple[str, str, float, int]]) -> list[str]:
+    """Render :func:`sibling_regret` records as the per-kernel × per-family table plus
+    the per-family aggregate line — the aggregate IS the gate number; the per-kernel
+    rows are the diagnostic view that says *which* kernels the prior misprices."""
+    fams = sorted({fam for _, fam, _, _ in records})
+    by_op: dict[str, dict[str, list[float]]] = {}
+    for op, fam, regret, _n in records:
+        by_op.setdefault(op, {}).setdefault(fam, []).append(regret)
+    w = max(26, *(len(op) for op in by_op))
+    cw = max(7, *(len(f) for f in fams))
+
+    def cell(vals: list[float] | None) -> str:
+        return (f"{statistics.median(vals):.2f}x" if vals else "-").rjust(cw)
+
+    lines = [f"      {'kernel':{w}}  " + "  ".join(f.rjust(cw) for f in fams) + "  forks"]
+    for op in sorted(by_op):
+        row = by_op[op]
+        lines.append(f"      {op:{w}}  " + "  ".join(cell(row.get(f)) for f in fams) + f"  {sum(len(v) for v in row.values())}")
+    agg = {f: [r for _, fam, r, _ in records if fam == f] for f in fams}
+    lines.append(f"      {'ALL (median)':{w}}  " + "  ".join(cell(agg[f]) for f in fams) + f"  {len(records)}")
+    return lines
 
 
 def _node_op_label(features: dict) -> str:
@@ -309,20 +362,17 @@ def _node_op_label(features: dict) -> str:
 
 
 def _node_gpu_block(prior, gpu: str, gnodes: list) -> list[str]:
-    """Per-card metrics: fork sibling-ranking + leaf reachability/calibration over ONE
+    """Per-card metrics: fork sibling regret + leaf reachability/calibration over ONE
     GPU's nodes. Grouping by card is what keeps same-die SKUs (H100 vs H200) from being
     compared against each other — their latencies differ but their ``S_*`` op signature
     (the leaf-reachability group key) is identical."""
     lines = [f"  [{gpu}] {len(gnodes)} nodes"]
-    sib = node_sibling_ranking(prior, gnodes)
-    if sib is None:
-        lines.append("    fork sibling-ranking: no multi-child forks")
+    recs = sibling_regret(prior, gnodes)
+    if not recs:
+        lines.append("    fork sibling regret: no multi-child forks")
     else:
-        n_forks, top1, rho, n_children = sib
-        rho_txt = f"{rho:+.2f}" if rho is not None else "n/a"
-        lines.append(
-            f"    fork sibling-ranking: top-1 {top1:.2f}  median per-fork Spearman {rho_txt}  ({n_forks} forks, {n_children} children)"
-        )
+        lines.append("    fork sibling regret (predicted-best child's reachable µs / fork best; 1.00x = optimal, ties pessimistic):")
+        lines.extend(_regret_lines(recs))
     groups = Dataset.from_node_rows(gnodes).group_by_op()
     rr = reachability(prior, groups)
     if rr:
@@ -342,8 +392,8 @@ def _node_gpu_block(prior, gpu: str, gnodes: list) -> list[str]:
 
 def node_report(prior, nodes, *, kernel_filter: str | None = None) -> str:
     """The ``eval prior --dataset nodes`` block. Groups the node store **by card**
-    (``NodeRow.gpu``) and, per card, reports the fork sibling-ranking (the metric unique
-    to this dataset) plus leaf reachability / calibration. Per-card grouping is what
+    (``NodeRow.gpu``) and, per card, reports the fork sibling regret (the metric unique
+    to this dataset — :func:`sibling_regret`) plus leaf reachability / calibration. Per-card grouping is what
     makes a cross-hardware dataset (H100, H200, …) evaluate correctly — same-die SKUs
     share an ``S_*`` op signature but not their latencies, so mixing them would corrupt
     both metrics. A card whose rows span several **compile regimes** (``H_opt`` — the

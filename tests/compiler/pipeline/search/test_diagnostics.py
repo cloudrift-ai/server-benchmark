@@ -117,7 +117,7 @@ def test_golden_prior_eval_warns_per_unjoinable_shape():
 
 
 # ---------------------------------------------------------------------------
-# node-store fork sibling-ranking
+# node-store fork sibling value regret
 # ---------------------------------------------------------------------------
 
 
@@ -134,6 +134,15 @@ class _BMPrior:
         return self._sign * float(feats.get("BM", 0.0))
 
 
+class _FlatPrior:
+    """A constant-score prior — every child ties, exercising the pessimistic tie rule."""
+
+    fitted = True
+
+    def mean_score(self, _feats) -> float:
+        return 1.0
+
+
 def _child(node_key, bm, value_us, *, parent="P"):
     from emmy.compiler.pipeline.search.db import NodeRow  # noqa: PLC0415
 
@@ -147,32 +156,74 @@ def _fork_nodes():
     return [NodeRow("P", None, "ctx", "mm", {}, 1.0, 1), _child("c8", 8, 1.0), _child("c32", 32, 2.0), _child("c64", 64, 3.0)]
 
 
-def test_node_sibling_ranking_recovers_best_and_order():
-    """The prior orders the fork's children by value-of-position: top-1 hit (its
-    predicted-best child IS the true-best) and Spearman +1."""
-    n_forks, top1, rho, n_children = diagnostics.node_sibling_ranking(_BMPrior(), _fork_nodes())
-    assert (n_forks, n_children) == (1, 3)
-    assert top1 == 1.0 and rho == 1.0
+def test_sibling_regret_perfect_prior_scores_one():
+    """A prior that orders the fork's children by value-of-position picks the true-best
+    subtree: regret 1.00; the fork buckets under the family its children decide (BM)."""
+    recs = diagnostics.sibling_regret(_BMPrior(), _fork_nodes())
+    assert len(recs) == 1
+    _op, family, regret, n_children = recs[0]
+    assert (family, regret, n_children) == ("BM", 1.0, 3)
 
 
-def test_node_sibling_ranking_penalizes_reversed_order():
-    """A prior that ranks the children backwards misses top-1 and scores Spearman -1."""
-    _, top1, rho, _ = diagnostics.node_sibling_ranking(_BMPrior(sign=-1.0), _fork_nodes())
-    assert top1 == 0.0  # predicted-best (BM=64) is the slowest child
-    assert rho == -1.0
+def test_sibling_regret_prices_a_reversed_prior():
+    """A prior that ranks the children backwards pays the value gap, not a rank: its
+    pick is the slowest subtree (3.0 µs, fork best 1.0), so regret = 3.00x."""
+    recs = diagnostics.sibling_regret(_BMPrior(sign=-1.0), _fork_nodes())
+    assert recs[0][2] == 3.0
 
 
-def test_node_sibling_ranking_ignores_singletons_and_top_forks():
+def test_sibling_regret_ties_resolve_pessimistically():
+    """A constant-score prior ties every child; a tie is a miss (greedy breaks score
+    ties by emission order — the ``rank_of_golden`` ``>=`` rule), so the pick prices
+    as the WORST tied value: 3.00x, not 1.00x."""
+    recs = diagnostics.sibling_regret(_FlatPrior(), _fork_nodes())
+    assert recs[0][2] == 3.0
+
+
+def test_sibling_regret_ignores_singletons_and_top_forks():
     """A top fork (parent None) and a single-child parent are not multi-child forks,
-    so there is nothing to rank."""
+    so there is nothing to price."""
     from emmy.compiler.pipeline.search.db import NodeRow  # noqa: PLC0415
 
     nodes = [NodeRow("P", None, "ctx", "mm", {}, 1.0, 1), _child("only", 8, 1.0)]
-    assert diagnostics.node_sibling_ranking(_BMPrior(), nodes) is None
+    assert diagnostics.sibling_regret(_BMPrior(), nodes) == []
+
+
+def test_sibling_regret_buckets_by_family_from_parent_delta():
+    """Fork family = the knob keys the children pin beyond their parent row, mapped
+    through ``family_of`` (``TILE@d`` → ``TILE``) — a TILE fork and a REDUCE fork under
+    one op land in their own buckets, keyed in the current axis-named vocabulary."""
+    from emmy.compiler.pipeline.search.db import NodeRow  # noqa: PLC0415
+
+    nodes = [
+        NodeRow("Pt", None, "ctx", "mm", {"REDUCE@d": "b64"}, 1.0, 1),
+        NodeRow("t1", "Pt", "ctx", "mm", {"REDUCE@d": "b64", "TILE@d": "n8x8/f2x2"}, 1.0, 2),
+        NodeRow("t2", "Pt", "ctx", "mm", {"REDUCE@d": "b64", "TILE@d": "n16x16/f4x4"}, 2.0, 2),
+        NodeRow("Pr", None, "ctx", "mm", {}, 1.0, 1),
+        NodeRow("r1", "Pr", "ctx", "mm", {"REDUCE@d": "b64"}, 1.0, 2),
+        NodeRow("r2", "Pr", "ctx", "mm", {"REDUCE@d": "g2k/b64"}, 2.0, 2),
+    ]
+    fams = sorted(fam for _, fam, _, _ in diagnostics.sibling_regret(_FlatPrior(), nodes))
+    assert fams == ["REDUCE", "TILE"]
+
+
+def test_sibling_regret_family_falls_back_without_parent_row():
+    """When the parent row isn't in the store (cross-session gap), the family comes from
+    the keys whose values differ ACROSS the siblings — a shared identical key (the
+    inherited ``REDUCE@d``) doesn't count."""
+    from emmy.compiler.pipeline.search.db import NodeRow  # noqa: PLC0415
+
+    nodes = [
+        NodeRow("s1", "GONE", "ctx", "mm", {"REDUCE@d": "b64", "STAGE@d": "d2/cp"}, 1.0, 5),
+        NodeRow("s2", "GONE", "ctx", "mm", {"REDUCE@d": "b64", "STAGE@d": "d3/tma"}, 2.0, 5),
+    ]
+    recs = diagnostics.sibling_regret(_BMPrior(), nodes)
+    assert len(recs) == 1
+    assert recs[0][1] == "STAGE"
 
 
 def test_node_report_combines_fork_and_leaf_sections():
-    """``node_report`` renders both the fork sibling-ranking and the leaf reachability
+    """``node_report`` renders both the fork sibling regret and the leaf reachability
     over the node store."""
     from emmy.compiler.pipeline.search.db import NodeRow  # noqa: PLC0415
 
@@ -184,7 +235,7 @@ def test_node_report_combines_fork_and_leaf_sections():
     ]
     text = diagnostics.node_report(_BMPrior(), nodes)
     assert "node store: 3 nodes" in text
-    assert "fork sibling-ranking" in text
+    assert "fork sibling regret" in text
     assert "leaf reachability" in text
 
 
@@ -271,6 +322,6 @@ def test_node_report_kernel_filter_selects_ops_by_label():
     ]
     out = diagnostics.node_report(_BMPrior(), nodes, kernel_filter="matmul")
     assert "3 nodes matching --kernel 'matmul'" in out  # only the matmul op's nodes survive
-    assert "fork sibling-ranking" in out
+    assert "fork sibling regret" in out
     miss = diagnostics.node_report(_BMPrior(), nodes, kernel_filter="zzz")
     assert "no nodes match --kernel 'zzz'" in miss

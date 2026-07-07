@@ -339,7 +339,7 @@ def test_prior_nodes_smoke(run_cli, tmp_path):
     rc, stdout, stderr = run_cli("eval", "prior", "--dataset", "nodes", "--db", str(db_path), "--prior", str(tmp_path / "missing.json"))
     assert rc == 0, f"stderr: {stderr}"
     assert "node store: 3 nodes" in stdout
-    assert "fork sibling-ranking" in stdout
+    assert "fork sibling regret" in stdout
     assert "leaf reachability" in stdout
     assert "traceback" not in (stdout + stderr).lower()
 

@@ -178,7 +178,7 @@ def handle_eval_prior(args) -> None:
     golden, the golden's rank under the prior, and (with ``--features``) the
     regressor input vector. With ``--dataset db`` instead reports the prior's pick
     reachability over the tune DB's *measured* variants (the orthogonal view); with
-    ``--dataset nodes`` reports fork sibling-ranking + leaf reachability over the tune
+    ``--dataset nodes`` reports fork sibling regret + leaf reachability over the tune
     DB's search-tree node store (the search-faithful, partial-config view)."""
     resolve_prior_arg(args)
     if args.dataset == "db":
@@ -571,10 +571,10 @@ def _emit_prior_db_reachability(args) -> None:
 
 def _emit_prior_nodes(args) -> None:
     """``eval prior --dataset nodes`` body: the prior over the tune DB's search-tree
-    ``node`` store (the value-of-position dataset). Reports the fork sibling-ranking
-    (does the prior order each fork's children — the partial configs it ranks during
-    search — by their best-reachable latency?) plus leaf reachability / calibration
-    on the persistent, deduped store. The search-faithful counterpart to
+    ``node`` store (the value-of-position dataset). Reports the fork sibling regret
+    (what following the prior's per-fork pick costs vs each fork's best-reachable
+    latency, bucketed by the knob family the fork decides) plus leaf reachability /
+    calibration on the persistent, deduped store. The search-faithful counterpart to
     ``--dataset db`` (which only scores fully-decided leaf variants)."""
     from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
     from emmy.compiler.pipeline.search.prior import diagnostics, load_prior  # noqa: PLC0415

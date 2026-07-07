@@ -386,9 +386,13 @@ step can give a child its parent's exact knob set (same `node_key`); duplicates 
 leaves move to one side atomically and parent edges never cross a fold (`run_id` is provenance of the surviving
 deduped value, deliberately NOT a fold axis). The prior still *trains* from the in-memory reservoir, but the `node`
 store is *read back* by `eval prior
---dataset nodes` (`iter_nodes` → `diagnostics.node_report`): **per card**, it groups nodes by `parent_key` and scores the
-**fork sibling-ranking** — does the prior order each fork's children (the partial configs it ranks during `_select`) by
-their best-reachable latency? — the search-faithful evaluation no leaf-only view can give. `node_report` drops
+--dataset nodes` (`iter_nodes` → `diagnostics.node_report`): **per card**, it groups nodes by `parent_key` and prices the
+**fork sibling regret** — what following the prior's per-fork pick costs, `value_us(predicted-best child) / value_us(true
+best)` (1.00x = the prior steers into the best-reachable subtree; predicted-score ties price pessimistically, since greedy
+breaks ties by emission order) — the search-faithful evaluation no leaf-only view can give. Each fork buckets by the knob
+FAMILY its children decide (`TILE` / `REDUCE` / `STAGE` / …, from the child-vs-parent knob delta) — the stable notion of
+tree level (raw `depth` is rule-step distance and renumbers as passes change) — rendered as a per-kernel × per-family
+regret table with a per-family aggregate line. `node_report` drops
 `bench_fail` rows up front (their `value_us` is the watchdog sentinel, not a measurement) and splits a card's block per
 `H_opt` regime so -O1 and -O3 latencies never pool in leaf reachability. The per-card grouping matters
 for a cross-hardware dataset: same-die SKUs (H100/H200) share an `S_*` op signature but not their latencies, so mixing

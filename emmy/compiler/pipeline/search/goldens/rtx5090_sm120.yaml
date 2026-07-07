@@ -90,8 +90,8 @@ configs:
     N: 4096
     K: 14336
     dtype: 'fp16'
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16/w8x2/f2x4/k4', VECTORIZE_LOADS: true}
-    emmy_us: 346.67
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'g8k', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16/w4x4/f2x2/k4', VECTORIZE_LOADS: true}
+    emmy_us: 303.6
     cublas_us: 296.95
   - kernel: matmul
     name: matmul.qkv.h4096.dynM
@@ -130,8 +130,8 @@ configs:
     K: 14336
     dtype: 'fp16'
     dynamic: true
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16/w4x2/f2x4/k4', VECTORIZE_LOADS: true}
-    emmy_us: 352.8
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'g8k', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16/w4x4/f2x2/k4', VECTORIZE_LOADS: true}
+    emmy_us: 305.1
     cublas_us: 295.03
   - kernel: softmax
     name: softmax.k2048

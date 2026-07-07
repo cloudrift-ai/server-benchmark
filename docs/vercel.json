@@ -1,0 +1,7 @@
+{
+  "redirects": [
+    { "source": "/", "destination": "/emmy/" },
+    { "source": "/cloudrift", "destination": "https://docs.cloudrift.ai/" },
+    { "source": "/cloudrift/:path*", "destination": "https://docs.cloudrift.ai/:path*" }
+  ]
+}

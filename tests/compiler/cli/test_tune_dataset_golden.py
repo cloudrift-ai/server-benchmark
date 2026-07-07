@@ -84,7 +84,7 @@ def _dyn_golden(name="square.512.dynM"):
         knobs={"TILE": "n16x8/f2x2"},
         emmy_us=10.0,
         cublas_us=12.0,
-        dynamic={"seq_len": {"input": "x0", "axis": 0}},
+        dynamic=True,
     )
 
 

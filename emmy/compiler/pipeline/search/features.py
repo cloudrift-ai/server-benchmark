@@ -455,6 +455,11 @@ def _geom_feats(
         "D_finalize_kernel": 1.0 if (splitk > 1 and finalize == "kernel") else 0.0,
         "D_tilen_clean": 1.0 if tile_n in (32, 64, 128) else 0.0,
         "D_near_tilen": -abs(l2(tile_n) - 6.0),
+        # A scalar tile on a warp-ELIGIBLE contraction (16-bit operands, atoms offered — the
+        # scheduler's ``S_warp_eligible`` kernel stamp) competes against tensor cores: the
+        # roofline bar none of the flat geometry terms can see. 0 on warp rows and on kernels
+        # with no warp offer, so fp32 / non-contraction ranking is untouched.
+        "D_scalar_on_warp_eligible": 1.0 if (not warp and float(knobs.get("S_warp_eligible", 0.0) or 0.0) > 0) else 0.0,
     }
     if free_prod:
         ctas = float(free_prod) / area * splitk
@@ -475,6 +480,11 @@ def _geom_feats(
         free_ctas = float(free_prod) / area
         needed = max(2.0 * sm / max(free_ctas, 1.0), 1.0)
         out["D_splitk_excess"] = math.log2(max(splitk / needed, 1.0))
+        # The deferred split-K finalize (``g<w>k``) writes + re-reads a full free-size partial
+        # workspace and launches the combine kernel — the same round-trip volume axis
+        # ``D_cut_roundtrip`` prices for the demoted-cone cut, un-priced here until now (the
+        # in-place atomic ``g<w>a`` finalize pays no workspace).
+        out["D_splitk_roundtrip"] = l2(free_prod) if out["D_finalize_kernel"] else 0.0
         # Register-tile intensity × occupancy interaction: a wide per-thread
         # register tile (big FM·FN) is a win only while the grid still covers
         # the SMs — the flat D_cells* terms can't express that, so the big-FM

@@ -3,6 +3,16 @@
 Supersedes `golden-sweep-rtx4090-findings.md` (2026-06-19, pre-#293 Tile-IR revision on the archived
 `feature/golden-sweep-rtx4090` branch); kept as a sibling for the older-revision history, not merged into this one.
 
+**Update (2026-07-07, post-merge with main):** #315 reworked the golden set into generic op-typed shapes
+(`matmul.square.*`, `matmul.qkv.h4096`, `reduce.k*`, `pointwise.n*`, …) and dropped the per-model `qwen3_06b.*`
+shapes. Of this sweep's findings, only those that map onto the new standardized shapes landed in the YAML: the **7
+matmul square/dynM wins** (`matmul.square.*`) and **`pointwise.n4096`** (our `pointwise.512x4096`, exact dim match,
+re-recorded in the new control-flag knob vocabulary). The 12 `qwen3_06b.*` projection re-tunes and the reduce /
+`pointwise.2048x2048` measurements have no slot in the new set (different hidden/rows) and were dropped from the YAML —
+they stand as measurements in the table below only. Populating the new 4090 matmul goldens (`matmul.qkv.h4096`,
+`o_proj`, `mlp_*`, `.dynM` — currently gaps) is a fresh `tune-golden` run on the standardized shapes (matmul = this
+card's owner; the other kernel types are seeded separately).
+
 **GPU:** NVIDIA GeForce RTX 4090 (sm_89, 128 SMs), driver 580.65.06, CUDA 12.9. **Code:** `main` @ `2a256f7a`
 (previous 4090 goldens seeded/refreshed at `272153d3`, before the #293 Tile-IR rebuild). **Relevant commits since the
 seed:** #293 (new `TILE/REDUCE/STAGE` knob codec), #305/#306/#307 (scalar-staging / TMA-gate / flash fixes), #308 (4080

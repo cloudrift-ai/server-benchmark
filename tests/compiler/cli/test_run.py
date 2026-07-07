@@ -184,9 +184,9 @@ def test_build_torch_fns_resets_dynamo_before_compile(monkeypatch):
 def test_run_golden_bench_shows_benched_golden_row(run_cli):
     """``run --golden NAME --bench`` compiles + benches the recorded golden (knobs
     pinned) and prints it as a ``golden NAME``-labeled row in the kernel table."""
-    rc, stdout, stderr = run_cli("run", "--golden", "square.512", "--bench")
+    rc, stdout, stderr = run_cli("run", "--golden", "matmul.square.512", "--bench")
     assert rc == 0, f"stderr: {stderr}"
-    assert "golden square.512" in stdout, stdout
+    assert "golden matmul.square.512" in stdout, stdout
 
 
 def test_run_ab_requires_bench(run_cli):
@@ -305,10 +305,10 @@ def test_run_golden_bench_json_record(run_cli, tmp_path):
     import json
 
     out = tmp_path / "ab.json"
-    rc, stdout, stderr = run_cli("run", "--golden", "square.512", "--bench", "--warmup", "2", "--iters", "5", "--json", str(out))
+    rc, stdout, stderr = run_cli("run", "--golden", "matmul.square.512", "--bench", "--warmup", "2", "--iters", "5", "--json", str(out))
     assert rc == 0, f"stderr: {stderr}"
     rec = json.loads(out.read_text())
-    assert rec["golden"] == "square.512"
+    assert rec["golden"] == "matmul.square.512"
     assert rec["greedy"]["kernels"] and rec["greedy"]["total_us"] > 0
     assert rec["pinned"] and all(p["kind"] == "golden" for p in rec["pinned"])
     for p in rec["pinned"]:

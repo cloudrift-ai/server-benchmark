@@ -110,53 +110,53 @@ _W_A: dict[str, float] = {
 # ``SPLITK 1/2`` — the dynM seed report's finding 4). Selected at score time on
 # the stamped ``S_ext_n_symbolic_axis`` flag.
 _W_A_DYN: dict[str, float] = {
-    "D_bn_ge_bm": 29.091202180536612,
-    "D_pow2_threads": 23.65447078887027,
-    "D_bn_band": -9.138301229433685,
-    "D_splitk_le2": 8.851870276397179,
-    "D_stage_ring": 8.777780679871912,
-    "D_tilen_clean": 8.52693539113956,
-    "D_stage_reg_depth": 6.736960175814597,
-    "D_near_intensity": 2.392190948851187,
-    "D_stage_async": -2.0320068546391834,
-    "D_l2_reuse": 1.8681983470879955,
-    "MMA_tier": 1.7552176661523013,
-    "D_near_kchunks": -1.7130624007475037,
-    "D_neg_masked_n": 1.530693967366285,
-    "D_l2_cells_occ": 1.3384329760351499,
-    "D_l2_threads": -1.2050378329188671,
-    "D_l2_bm": 1.009411004025198,
-    "D_log2_area": 0.9736863575933378,
-    "D_splitk_excess": 0.8125364060881499,
-    "D_l2_bn": 0.8080440773215448,
-    "D_near_threads": -0.7934464755376106,
-    "D_log2_ctas": 0.725388935679812,
-    "D_finalize_kernel": 0.7228032885783091,
-    "D_near_area": 0.7038721356461611,
-    "D_ctas_ge_sm": -0.6321039678466663,
-    "D_square": -0.6044064340650371,
-    "D_stage_tma": 0.5363490830273171,
-    "D_stage_depth": -0.5361135152050349,
-    "D_w_near_bk": 0.5090684305617744,
-    "D_bk_ge32": -0.464971270614175,
-    "D_wspec_warps": -0.4316300045789512,
-    "D_neg_masked_m": 0.41524836579466956,
-    "D_near_waves": 0.39762092130521237,
-    "D_l2_bk": 0.3672230100309279,
-    "D_w_l2_bk": -0.31827887234260926,
-    "D_neg_masked_k": -0.2879577100154291,
-    "D_near_tilen": 0.26386485391760567,
-    "D_aspect": -0.21238835007727114,
-    "D_splitk": -0.2107799156606975,
-    "D_bm_band": -0.03762392372832574,
-    "D_tile_m": -0.03232815946339648,
-    "D_cells_cap": -0.028425160802643994,
-    "D_near_cells": 0.02653167689849943,
-    "D_reuse": 0.02443375012860443,
-    "D_cells": 0.018664990742985107,
-    "D_log2_waves": 0.01723420071744958,
-    "D_threads": -0.004922510053396705,
-    "D_tile_n": -0.003742777319737122,
+    "D_pow2_threads": 42.714971542355855,
+    "D_ctas_ge_sm": -28.043989776686107,
+    "D_wspec_warps": -4.700049554908328,
+    "D_stage_tma": 4.310486931929542,
+    "D_w_near_bk": -3.9853062126276715,
+    "D_stage_ring": 3.8465338086843315,
+    "D_tilen_clean": 3.4047764061634527,
+    "D_l2_reuse": 3.14113185926559,
+    "D_bm_band": 3.0497898271941617,
+    "D_bn_band": -2.92853447908977,
+    "D_log2_ctas": -2.410572010507699,
+    "D_splitk_le2": 2.192469464704354,
+    "D_bn_ge_bm": 2.1731098324488607,
+    "D_l2_bm": -1.9983136234006313,
+    "D_splitk_excess": 1.6870439608853967,
+    "D_stage_reg_depth": -1.4904329902507725,
+    "D_l2_bn": -1.4404137279304239,
+    "D_neg_masked_n": 1.2915904848884612,
+    "D_bk_ge32": -0.8965483150597096,
+    "D_l2_threads": -0.8402838211441096,
+    "D_finalize_kernel": 0.829960031801419,
+    "D_w_l2_bk": -0.8189885344311161,
+    "D_l2_cells_occ": 0.8105008956036689,
+    "D_stage_async": 0.6859062649995931,
+    "D_near_intensity": -0.5882351447562264,
+    "D_neg_masked_m": 0.5582125267295052,
+    "D_neg_masked_k": -0.4296618098730851,
+    "D_near_area": 0.3686371039197252,
+    "D_near_threads": -0.3185998731002451,
+    "D_square": 0.31788924224270787,
+    "D_aspect": -0.26974344055814103,
+    "D_near_waves": -0.26508450064247524,
+    "D_near_kchunks": 0.23820227696760266,
+    "D_near_tilen": 0.22443802238715357,
+    "D_cells": -0.16199478709740808,
+    "D_cells_cap": -0.15015342859180322,
+    "D_splitk": 0.14913734988550814,
+    "D_stage_depth": -0.11947358017861708,
+    "MMA_tier": -0.10340824749158893,
+    "D_log2_area": -0.05594271212432451,
+    "D_l2_bk": 0.03966053994125637,
+    "D_reuse": 0.02983300600443265,
+    "D_tile_n": -0.02354169053544002,
+    "D_near_cells": 0.013724606743399325,
+    "D_log2_waves": -0.0032583000160762575,
+    "D_threads": -0.003179968274213939,
+    "D_tile_m": -0.00010695420800540532,
 }
 
 
@@ -177,6 +177,8 @@ class AnalyticPrior(Prior):
         scale: float = 0.1,
         atomic_free_split_threshold: float = 4.0,
         atomic_free_weight: float = 5.0,
+        scalar_on_warp_weight: float = 40.0,
+        splitk_roundtrip_weight: float = 0.25,
     ) -> None:
         super().__init__()
         self._w = weights if weights is not None else _W_A
@@ -190,6 +192,17 @@ class AnalyticPrior(Prior):
         # CatBoostPrior takes over once real atomic-vs-free ``H_opt=3`` rows exist.
         self._atomic_free_split_threshold = atomic_free_split_threshold
         self._atomic_free_weight = atomic_free_weight
+        # Scalar-on-warp-eligible penalty + split-K workspace round-trip price.
+        # Hardcoded like the atomic-free term — no training rows carry the new stamps yet,
+        # and a plain linear weight can't express "only bad when the alternative exists".
+        # ``scalar_on_warp_weight`` must outweigh the scalar tile's accumulated geometry
+        # bonuses under BOTH weight sets (the dyn set hands scalar rows ~+30 quality via
+        # ``D_bn_ge_bm`` / band features a warp row structurally cannot earn — the qwen3-emb
+        # projection deploys landed scalar at 5-20× the -O3 cost of their enumerated mma
+        # siblings). ``splitk_roundtrip_weight`` is a mild price (~5 quality at free_prod
+        # ≈ 512·1024): the deferred finalize IS the right shape for wide mma splits.
+        self._scalar_on_warp_weight = scalar_on_warp_weight
+        self._splitk_roundtrip_weight = splitk_roundtrip_weight
 
     @property
     def fitted(self) -> bool:
@@ -228,6 +241,11 @@ class AnalyticPrior(Prior):
             splitk = feats.get("D_splitk", 1.0)  # the split-K count (REDUCE@<k>.cta)
             many_splits = splitk >= self._atomic_free_split_threshold
             quality += self._atomic_free_weight * af_on * (1.0 if many_splits else -1.0)
+        # Tensor-core preference gates (see __init__): a scalar tile on a warp-eligible
+        # contraction eats the roofline penalty; a deferred split-K finalize pays its
+        # workspace round-trip. Both features are 0 wherever the stamps don't apply.
+        quality -= self._scalar_on_warp_weight * feats.get("D_scalar_on_warp_eligible", 0.0)
+        quality -= self._splitk_roundtrip_weight * feats.get("D_splitk_roundtrip", 0.0)
         return math.exp(-self._scale * max(min(quality, 80.0), -80.0))
 
     def mean_score(self, knobs: dict) -> float:

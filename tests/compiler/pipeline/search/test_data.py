@@ -77,7 +77,7 @@ def test_golden_dynamic_compile_s_feats_mirror() -> None:
     The op-side constructor closes the join on the full histogram."""
     from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig
 
-    g = MatmulGoldenConfig(name="square.512.dynM", M=512, N=512, K=512, dynamic={"seq_len": {"input": "x0", "axis": 0}})
+    g = MatmulGoldenConfig(name="matmul.square.512.dynM", M=512, N=512, K=512, dynamic=True)
     s = Sample.from_golden(g, compile_s_feats=True)
     assert s.shape is not None and s.shape.is_dyn is True
     full = s.s_features()
@@ -140,7 +140,7 @@ def test_golden_compile_s_feats_matches_inline(monkeypatch) -> None:
     from emmy.compiler.pipeline.knob import STRUCT_PREFIX
     from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS, MatmulGoldenConfig
 
-    g = next(c for c in GOLDEN_CONFIGS if isinstance(c, MatmulGoldenConfig) and c.name == "square.512")
+    g = next(c for c in GOLDEN_CONFIGS if isinstance(c, MatmulGoldenConfig) and c.name == "matmul.square.2048")
 
     graph, _, _ = graph_from_code(g.snippet())
     compiled = Pipeline.build(LOOP_PASSES).run(graph)
@@ -166,7 +166,7 @@ def test_golden_features_use_own_cards_sm_count() -> None:
     (RTX 5090 = 170 vs RTX PRO 6000 = 188 SMs) distinguishable in the model."""
     from emmy.compiler.pipeline.search.golden import goldens_by_name
 
-    by_gpu = {g.gpu_name: Sample.from_golden(g).context["H_sm_count"] for g in goldens_by_name("square.512")}
+    by_gpu = {g.gpu_name: Sample.from_golden(g).context["H_sm_count"] for g in goldens_by_name("matmul.square.2048")}
     assert by_gpu["NVIDIA GeForce RTX 4090"] == 128.0
     assert by_gpu["NVIDIA GeForce RTX 5090"] == 170.0
     assert by_gpu["NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"] == 188.0
@@ -179,8 +179,8 @@ def test_from_golden_filters() -> None:
     assert len(Dataset.from_golden()) == len(Dataset.from_golden(kernel="")) > 0
     assert all("square" in s.name for s in Dataset.from_golden(kernel="square"))
     assert all(s.dtype == "fp16" for s in Dataset.from_golden(dtype="fp16"))
-    named = Dataset.from_golden(name="square.512").samples
-    assert named and all(s.name == "square.512" for s in named)
+    named = Dataset.from_golden(name="matmul.square.2048").samples
+    assert named and all(s.name == "matmul.square.2048" for s in named)
 
 
 def test_from_db_grouping(tmp_path) -> None:

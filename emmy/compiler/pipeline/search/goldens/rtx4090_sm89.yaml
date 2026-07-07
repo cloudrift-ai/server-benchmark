@@ -2,7 +2,7 @@ gpu_name: NVIDIA GeForce RTX 4090
 compute_cap: [8, 9]
 configs:
   - kernel: matmul
-    name: square.512
+    name: matmul.square.512
     M: 512
     N: 512
     K: 512
@@ -10,7 +10,7 @@ configs:
     emmy_us: 14.4
     cublas_us: 10.8
   - kernel: matmul
-    name: square.1024
+    name: matmul.square.1024
     M: 1024
     N: 1024
     K: 1024
@@ -18,7 +18,7 @@ configs:
     emmy_us: 60.1
     cublas_us: 45.4
   - kernel: matmul
-    name: square.2048
+    name: matmul.square.2048
     M: 2048
     N: 2048
     K: 2048
@@ -26,7 +26,7 @@ configs:
     emmy_us: 359.1
     cublas_us: 320.0
   - kernel: matmul
-    name: square.4096
+    name: matmul.square.4096
     M: 4096
     N: 4096
     K: 4096
@@ -34,7 +34,7 @@ configs:
     emmy_us: 2845.7
     cublas_us: 2458.6
   - kernel: matmul
-    name: square.512.fp16
+    name: matmul.square.512.fp16
     M: 512
     N: 512
     K: 512
@@ -43,7 +43,7 @@ configs:
     emmy_us: 5.9
     cublas_us: 5.8
   - kernel: matmul
-    name: square.1024.fp16
+    name: matmul.square.1024.fp16
     M: 1024
     N: 1024
     K: 1024
@@ -52,7 +52,7 @@ configs:
     emmy_us: 22.2
     cublas_us: 18.1
   - kernel: matmul
-    name: square.2048.fp16
+    name: matmul.square.2048.fp16
     M: 2048
     N: 2048
     K: 2048
@@ -61,7 +61,7 @@ configs:
     emmy_us: 119.4
     cublas_us: 115.2
   - kernel: matmul
-    name: square.4096.fp16
+    name: matmul.square.4096.fp16
     M: 4096
     N: 4096
     K: 4096
@@ -70,227 +70,18 @@ configs:
     emmy_us: 889.9
     cublas_us: 822.3
   - kernel: matmul
-    name: qwen3_06b.q_proj.s32
-    M: 32
-    N: 2048
-    K: 1024
-    knobs: {TILE: 'n16x8/f2x4', REDUCE: 'g2a', STAGE: 'd2/cp/ring'}
-    emmy_us: 8.4
-    cublas_us: 9.9
-  - kernel: matmul
-    name: qwen3_06b.kv_proj.s32
-    M: 32
-    N: 1024
-    K: 1024
-    knobs: {TILE: 'n16x8/f2x2', REDUCE: 'g2a', STAGE: 'd2/cp/ring'}
-    emmy_us: 6.5
-    cublas_us: 6.9
-  - kernel: matmul
-    name: qwen3_06b.o_proj.s32
-    M: 32
-    N: 1024
-    K: 2048
-    knobs: {TILE: 'n16x8/f2x2', REDUCE: 'g2a', STAGE: 'd2/cp/ring'}
-    emmy_us: 11.2
-    cublas_us: 9.9
-  - kernel: matmul
-    name: qwen3_06b.gate_up_proj.s32
-    M: 32
-    N: 3072
-    K: 1024
-    knobs: {TILE: 'n32x8/f2x4', REDUCE: 'g2a', STAGE: 'd4/cp/ring'}
-    emmy_us: 12.1
-    cublas_us: 11.3
-  - kernel: matmul
-    name: qwen3_06b.down_proj.s32
-    M: 32
-    N: 1024
-    K: 3072
-    knobs: {TILE: 'n16x8/f2x2', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
-    emmy_us: 17.2
-    cublas_us: 13.0
-  - kernel: matmul
-    name: qwen3_06b.q_proj.s128
-    M: 128
-    N: 2048
-    K: 1024
-    knobs: {TILE: 'n16x8/f4x8', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
-    emmy_us: 16.8
-    cublas_us: 20.2
-  - kernel: matmul
-    name: qwen3_06b.kv_proj.s128
-    M: 128
-    N: 1024
-    K: 1024
-    knobs: {TILE: 'n32x8/f2x4', REDUCE: 'g2a', STAGE: 'd3/cp/ring'}
-    emmy_us: 12.9
-    cublas_us: 12.4
-  - kernel: matmul
-    name: qwen3_06b.kv_proj.s128
-    M: 128
-    N: 1024
-    K: 1024
-    knobs: {TILE: 'n16x8/f4x4', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
-    emmy_us: 12.6
-    cublas_us: 12.4
-  - kernel: matmul
-    name: qwen3_06b.o_proj.s128
-    M: 128
-    N: 1024
-    K: 2048
-    knobs: {TILE: 'n16x16/f2x4', REDUCE: 'g2a', STAGE: 'd4/cp/ring'}
-    emmy_us: 23.0
-    cublas_us: 19.0
-  - kernel: matmul
-    name: qwen3_06b.gate_up_proj.s128
-    M: 128
-    N: 3072
-    K: 1024
-    knobs: {TILE: 'n32x8/f2x8', STAGE: 'd2/cp/ring'}
-    emmy_us: 31.6
-    cublas_us: 25.5
-  - kernel: matmul
-    name: qwen3_06b.down_proj.s128
-    M: 128
-    N: 1024
-    K: 3072
-    knobs: {TILE: 'n16x8/f4x4', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
-    emmy_us: 30.9
-    cublas_us: 24.5
-  - kernel: matmul
-    name: qwen3_06b.q_proj.s512
-    M: 512
-    N: 2048
-    K: 1024
-    knobs: {TILE: 'n16x8/f4x8', STAGE: 'd2/cp/ring'}
-    emmy_us: 55.6
-    cublas_us: 53.3
-  - kernel: matmul
-    name: qwen3_06b.kv_proj.s512
-    M: 512
-    N: 1024
-    K: 1024
-    knobs: {TILE: 'n32x16/f2x8', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
-    emmy_us: 34.3
-    cublas_us: 38.9
-  - kernel: matmul
-    name: qwen3_06b.o_proj.s512
-    M: 512
-    N: 1024
-    K: 2048
-    knobs: {TILE: 'n16x16/f4x8', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
-    emmy_us: 56.0
-    cublas_us: 67.8
-  - kernel: matmul
-    name: qwen3_06b.gate_up_proj.s512
-    M: 512
-    N: 3072
-    K: 1024
-    knobs: {TILE: 'n32x16/f4x8', STAGE: 'd2/cp/ring'}
-    emmy_us: 103.7
-    cublas_us: 85.5
-  - kernel: matmul
-    name: qwen3_06b.down_proj.s512
-    M: 512
-    N: 1024
-    K: 3072
-    knobs: {TILE: 'n32x8/f4x8', REDUCE: 'g2a', STAGE: 'd2/cp/ring'}
-    emmy_us: 79.7
-    cublas_us: 113.2
-  - kernel: matmul
-    name: qwen3_06b.down_proj.s512
-    M: 512
-    N: 1024
-    K: 3072
-    knobs: {TILE: 'n16x16/f4x8', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
-    emmy_us: 78.4
-    cublas_us: 113.2
-  - kernel: matmul
-    name: square.512.dynM
+    name: matmul.square.512.dynM
     M: 512
     N: 512
     K: 512
-    dynamic: {seq_len: {input: x0, axis: 0}}
+    dynamic: true
     knobs: {TILE: 'n32x8/f4x8', REDUCE: 'g4k', STAGE: 'd2/cp/ring'}
     emmy_us: 11.5
     cublas_us: 10.8
-  - kernel: matmul
-    name: qwen3_06b.q_proj.s512.dynM
-    M: 512
-    N: 2048
-    K: 1024
-    dynamic: {seq_len: {input: x0, axis: 0}}
-    knobs: {TILE: 'n32x16/f4x8', REDUCE: 'g4k', STAGE: 'd2/cp/ring'}
-    emmy_us: 61.9
-    cublas_us: 53.0
-  - kernel: matmul
-    name: qwen3_06b.kv_proj.s512.dynM
-    M: 512
-    N: 1024
-    K: 1024
-    dynamic: {seq_len: {input: x0, axis: 0}}
-    knobs: {TILE: 'n32x8/f4x8', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
-    emmy_us: 28.8
-    cublas_us: 37.0
-  - kernel: matmul
-    name: qwen3_06b.o_proj.s512.dynM
-    M: 512
-    N: 1024
-    K: 2048
-    dynamic: {seq_len: {input: x0, axis: 0}}
-    knobs: {TILE: 'n32x8/f4x8', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
-    emmy_us: 51.2
-    cublas_us: 67.1
-  - kernel: matmul
-    name: qwen3_06b.gate_up_proj.s512.dynM
-    M: 512
-    N: 3072
-    K: 1024
-    dynamic: {seq_len: {input: x0, axis: 0}}
-    knobs: {TILE: 'n16x16/f4x8', STAGE: 'd2/cp/ring'}
-    emmy_us: 92.4
-    cublas_us: 85.6
-  - kernel: matmul
-    name: qwen3_06b.down_proj.s512.dynM
-    M: 512
-    N: 1024
-    K: 3072
-    dynamic: {seq_len: {input: x0, axis: 0}}
-    knobs: {TILE: 'n16x16/f4x8', REDUCE: 'g2a', STAGE: 'd2/cp/ring'}
-    emmy_us: 92.3
-    cublas_us: 119.4
-  - kernel: reduce
-    name: reduce.2048x2048
-    M: 2048
-    K: 2048
-    knobs: {REDUCE: 'b32'}
-    emmy_us: 4.7
-    cublas_us: 6.0
-  - kernel: reduce
-    name: reduce.1024x512
-    M: 1024
-    K: 512
-    knobs: {REDUCE: 'b32'}
-    emmy_us: 2.0
-    cublas_us: 4.0
-  - kernel: reduce
-    name: reduce.2048x128
-    M: 2048
-    K: 128
-    knobs: {REDUCE: 'b32'}
-    emmy_us: 2.1
-    cublas_us: 4.0
   - kernel: pointwise
-    name: pointwise.2048x2048
-    M: 2048
-    N: 2048
-    knobs: {TILE: 'n128x8/f1x8'}
-    emmy_us: 8.9
-    cublas_us: 9.0
-  - kernel: pointwise
-    name: pointwise.512x4096
+    name: pointwise.n4096
     M: 512
     N: 4096
-    knobs: {TILE: 'n128x8/f1x16'}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, VECTORIZE_LOADS: true}
     emmy_us: 5.0
     cublas_us: 5.0

@@ -150,13 +150,15 @@ def _tune_backend(device_id: int | None = None):
     ``_bench_worker`` **subprocess** (``bench_wall_timeout_s`` set → the isolated
     path in ``benchmark_async``), so a wedged kernel dies
     with the worker and the **parent** CUDA stream stays clean. Tight per-variant
-    budgets: tune benches isolated single kernels at -Xcicc -O1 (fast), so 4 s
-    compile / 2 s run is ample and the 8 s wall SIGKILLs any runaway (the wall keeps
-    a ~2 s margin over compile+run). ``device_id`` pins the async bench worker to a
-    physical GPU (multi-GPU tune)."""
+    budgets: tune benches isolated single kernels at -Xcicc -O1 (fast), but the
+    big-N warp-MMA variants (fp16 N=28672, ``matmul.mlp_gate_up.h4096``) need ~5 s
+    of cicc even then — a 4 s compile budget bench_fail-locks that whole family out
+    of the sweep, hence 12 s; 2 s run is ample and the wall SIGKILLs any runaway
+    (keeping a ~2 s margin over compile+run). ``device_id`` pins the async bench
+    worker to a physical GPU (multi-GPU tune)."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
 
-    return CudaBackend(bench_compile_timeout_s=4.0, bench_run_timeout_s=2.0, bench_wall_timeout_s=8.0, device_id=device_id)
+    return CudaBackend(bench_compile_timeout_s=12.0, bench_run_timeout_s=2.0, bench_wall_timeout_s=16.0, device_id=device_id)
 
 
 def _resolve_devices(args) -> list[int | None]:

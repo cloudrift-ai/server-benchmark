@@ -197,7 +197,9 @@ density of the `tune-model` reports (`plans/*-tune-findings.md`; executed ones a
 **as they happen** during steps 1–6 — don't reconstruct from memory at the end.
 
 - **Header**: date, GPU, the exact sweep command, wall time, and the category tally (N replaced / N added / N
-  unchanged / N worse).
+  unchanged / N worse). Include the sweep's **fork sibling regret** aggregate line (`emmy eval prior --dataset
+  nodes`, this card's `-O1` block): the per-family `ALL (median)` row scores how well the sweep's own freshly
+  trained prior steered its search — a family ≫1.00x is a steering gap even if every golden A/B passed.
 - **Per-shape outcome table**: shape name, greedy µs, best-golden µs, ratio (greedy/best-golden), category, **and a
   cuBLAS comparison when an estimate is available** — a `cuBLAS µs` column (the shape's recorded `cublas_us`, or the
   live `Eager PyTorch` row from the same `run --bench`) and a `vs cuBLAS` column (`greedy_us / cublas_us`, so >1.0 =
@@ -218,6 +220,10 @@ density of the `tune-model` reports (`plans/*-tune-findings.md`; executed ones a
     -O3 perf column. Deep analytic rank but shallow learned rank → the heuristic is the problem, not the search.
   - `emmy eval variants --kernel <SUBSTR>` — was the golden config ever *measured* this sweep (reachability),
     and where the deployed pick ranks among measured variants.
+  - `emmy eval prior --dataset nodes --kernel <SUBSTR>` — the per-family **fork sibling regret** for this op:
+    WHICH decision family (TILE / REDUCE / STAGE / …) the search was steered wrong at (regret ≫1.00x), and which
+    families to exonerate (1.00x). Locates the miss at a fork, where `eval golden`'s per-knob diff only names the
+    end-state knobs.
   - **Before calling a knob mismatch a search shortfall**, check the `-O3 us` column in `eval variants` or run one
     `run --bench --ab "<golden knobs>"` A/B: -O1 ranking flags often invert at -O3, so an apparent pick miss can be
     the -O1/-O3 gap, not the prior.

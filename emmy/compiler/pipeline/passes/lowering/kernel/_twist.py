@@ -510,7 +510,12 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         # cp.async fills cooperatively into padded rows; TMA box-copies the batched operands via
         # rank-N descriptors (leading extent-1 box dims, the load's own batch/head index exprs as
         # origin coords — GQA's ``h // group`` rides through) into dense hardware-swizzled slabs.
-        K = kv_axis.extent.as_static()
+        # A symbolic kv reaches here under TMA only (``_resolve_twisted_stage`` — cp.async stays
+        # static): the streaming loop bound / last-chunk clamp ride the symbolic ``Dim`` and the box
+        # zero-fills the overhang, so the drain's tail masks keep it bit-identical to gmem-direct.
+        assert not symbolic_k or is_tma, "symbolic-kv staging is TMA-only (no OOB zero-fill on cp.async)"
+        kv_ext = kv_axis.extent if symbolic_k else kv_axis.extent.as_static()
+        n_chunks = kv_axis.extent.ceil_div(bn) if symbolic_k else kv_axis.extent.as_static() // bn
         head_dim = qk.k_axis.extent.as_static()
         k_load, v_load = qk.b_load, pv.b_load
         kn, kk, vn = qk.n_axis.name, qk.k_axis.name, pv.n_axis.name
@@ -562,8 +567,8 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             drain=lambda slot: _stream_step(k_op.slot_row(slot), v_op.slot_row(slot), staged=True),
             depth=stage.depth,
             bk_elems=bn,
-            n_chunks=K // bn,
-            k_extent=K,
+            n_chunks=n_chunks,
+            k_extent=kv_ext,
             k0=kv0.name,
             workers=ctx.workers,
             block_threads=block_threads,

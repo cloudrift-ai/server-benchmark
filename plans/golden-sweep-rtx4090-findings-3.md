@@ -162,3 +162,55 @@ New this sweep:
   ~25 % on the small seeds (`o_proj` shows `vs gold` 0.77×/0.81× with *identical* knobs) — different bench
   contexts. Harmless for categorization (both sides of every A/B come from the same context) but confusing in
   eval output; worth a note in the eval header.
+
+## Epilogue (2026-07-08) — the misdeploys were dead evidence tiers, now fixed; every finding-shape resolved
+
+Findings 1–4 shared one root cause, found by instrumenting the deploy compile (a spy-probe over
+`policy/greedy` + `Prior.evidence_pick`, run against the live tune DB): **both measured-evidence tiers of the
+deploy hierarchy were silently dead**, so every greedy pick was a pure model argmin.
+
+- **The drift.** #311 (2026-07-07) added the `S_warp_eligible` scheduler stamp to deploy-time candidate rows.
+  No persisted perf row and no reservoir row carries it (0 of 2347 / 0 of 2449 in this sweep's DB), and both
+  evidence joins matched `S_*` signatures by strict frozenset equality — one added feature key disabled the
+  reservoir -O3 tier AND the DB tier against every existing store. Everything downstream (the gate_up scalar
+  and split misdeploys, findings 3–4's "prior shortfalls") was the untethered model, not the search.
+- **A second gap behind it:** all 2347 perf rows live under a single (-O1 ranking lane) context key — the
+  tune's -O3 re-benches never land in the perf table. With drift fixed but the reservoir tier still dead, -O1
+  medians decided deploys and their -O3 inversions regressed qkv (385→466 µs) and mlp_down (391→456 µs)
+  before the lane-preference + reservoir fixes landed.
+- **The `g2k` split is the `REDUCE` knob at the partition fork**, not a structural Graph splice —
+  `_pick_structural` never fires for these shapes (this epilogue corrects the Finding 1–2 framing above).
+  Prediction-only structural pricing (#222/#223, 2026-06-10) is real but was not the mechanism here; it got
+  the same evidence grounding as a byproduct.
+
+**The fix** (branch `feature/greedy-structural-evidence`, four commits): thread the deploy's `db` into the
+structural pricing probes; drift-tolerant `S_*` join (`Prior.sig_groups`, shared by both tiers — shared-key
+agreement, one-sided keys ignored, empty overlap matches nothing); the DB index spans the -O1/-O3/deploy
+context twins and prefers deployable-lane rows; the reservoir tier gets the same tolerant join.
+
+**Verification (fix4, 2 runs per shape, live golden A/B):** every finding-shape now deploys at-or-better than
+its recorded golden, and the sweep's "worse" category is empty:
+
+| shape | pre-fix deploy | post-fix deploy | note |
+|---|---|---|---|
+| mlp_gate_up.h4096 | 1273 (split) | **922.6–964.6** (golden's config) | F2 resolved |
+| mlp_gate_up.h4096.dynM | 5978 (scalar) | **922.6** (golden's config) | F1 resolved |
+| square.1024.fp16 | 26.1–30.7 | **22.1** (golden's config exactly) | F3 was a deploy bug, not a search miss |
+| square.512.fp16 | 7.3–7.8 | **6.1** (new config, beats the golden) | F4 likewise |
+| square.2048.fp16 | 118–129 | **116.0** (golden's config) | F5 likewise |
+| qkv / o_proj / mlp_down (+dynM) | mixed | at/under golden | o_proj 121.6/123.3 vs 160.8/153.9 seeds |
+
+The YAML was refreshed accordingly (8 config replacements incl. the o_proj pair at −24 %, qkv pair, both fp32
+square outliers, both fp16 square findings; 3 same-config `emmy_us` drops incl. both gate_up entries; the
+duplicate `square.4096.fp16` alternate pruned). Emmy-vs-cuBLAS on the matmul family improves to 1.02–1.26×.
+
+New workflow notes from the investigation:
+
+- **#321's staged-flash TMA tests fail `make test` on sm_89** (7–14 tests, confirmed failing on `main` too) —
+  TMA is sm_90+ hardware and the tests lack a compute-capability gate. First `make test` on sm_89 since #321.
+- **The tune records no perf rows under the -O3 lane** (one context key in the whole table) — the deployable
+  DB tier added by the fix is empty until `two_level` also records its -O3 re-benches as perf rows.
+- **`record_perf` doesn't persist fork-time stamps** (`S_warp_eligible` absent from every row) — recording
+  them would re-align the vocabularies going forward; the tolerant join remains necessary for old DBs.
+- A **decide-level probe** (spying `_db_measured_pick` / `evidence_pick` key diffs on a live compile) answered
+  in minutes what three A/B rounds could not — worth productizing as `emmy eval deploy --explain <shape>`.

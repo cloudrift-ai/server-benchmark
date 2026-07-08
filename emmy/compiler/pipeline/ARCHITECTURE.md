@@ -27,7 +27,10 @@ tree). `two_level.py` is the two-level tuner (outer structural MCTS, inner per-o
 reservoir) — `Sample`, `Dataset`, and `ShapeKey` (the single golden↔measured join key). `golden.py` holds
 `GoldenConfig` and its matmul / attention / softmax / reduce / rms_norm / pointwise subclasses (the `AnalyticPrior`'s ground truth); every kind carries
 `shape_key()` / `snippet()` / `dtype`, so `tune --dataset golden` and the `run --bench --golden` A/B cover the reduce /
-pointwise entries too, not just matmul. The A/B itself carries two integrity gates — an arithmetic-intensity floor
+pointwise entries too, not just matmul. `tune --dataset golden` scopes to the **live** card's goldens
+(`goldens_for_live_gpu`) — names repeat across per-GPU golden files with diverging shapes/dtypes, so the flat union
+would tune another card's config under the live card's name; off-GPU or for a card with no recorded goldens it falls
+back to the full union. The A/B itself carries two integrity gates — an arithmetic-intensity floor
 (a row whose shape-implied FLOP/s exceeds the live card's recorded `GpuSpec` peak is flagged as a wrong bench, not a
 fast kernel) and a wrong-answer check (each pinned config executes once on the greedy run's inputs and its outputs are
 compared, catching the silently-wrong `g2a` skipped-finalize class) — plus `--json PATH`, a machine-readable record of

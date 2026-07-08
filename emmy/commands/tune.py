@@ -268,8 +268,11 @@ def _exit_flushed(code: int) -> None:
 
 def _tune_targets(args) -> list[tuple[str, str | None, str | None, list[str] | None]]:
     """The ``(label, code, input, dynamic)`` shapes this invocation tunes — the **only**
-    place golden and non-golden diverge. ``--dataset golden`` expands to every recorded
-    golden shape (deduped by name, ``--kernel SUBSTR`` narrowing); otherwise it's the
+    place golden and non-golden diverge. ``--dataset golden`` expands to every golden
+    shape recorded for the **live** card (names repeat across per-GPU golden files with
+    diverging shapes/dtypes, so the union would shadow the live card's entry; off-GPU or
+    for a card with no recorded goldens it falls back to the full multi-card union —
+    deduped by name, ``--kernel SUBSTR`` narrowing); otherwise it's the
     single ``--code`` / positional input / ``--golden NAME`` target. ``dynamic`` is the
     ``--dynamic NAME@INPUT:AXIS`` spec list the target traces with: a dynamic golden's
     own recorded spec, or the CLI flag for an ad-hoc target. ``handle_tune`` then loops
@@ -288,7 +291,7 @@ def _tune_targets(args) -> list[tuple[str, str | None, str | None, list[str] | N
         # Configs under one name share the shape (and dynamic spec), so any one's
         # snippet is interchangeable.
         by_name: dict[str, tuple[str, list[str] | None]] = {}
-        for s in Dataset.from_golden(kernel=args.kernel).samples:
+        for s in Dataset.from_golden(kernel=args.kernel, live_gpu=True).samples:
             by_name.setdefault(s.name, (s.snippet, list(s.dynamic) if s.dynamic else None))
         if not by_name:
             logger.error("no golden shapes matched --kernel %r", args.kernel)

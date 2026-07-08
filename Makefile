@@ -1,4 +1,4 @@
-.PHONY: help setup clean bench bench-force bench-kernels bench-kernels-tune test-compose lint format
+.PHONY: help setup clean bench bench-force bench-kernels bench-kernels-tune test-compose lint typecheck format
 
 help:
 	@echo "Server Benchmark Makefile"
@@ -6,6 +6,7 @@ help:
 	@echo "Available targets:"
 	@echo "  setup          - Install system dependencies, create venv, and install Python packages"
 	@echo "  lint           - Run linter and format checks"
+	@echo "  typecheck      - Run pyright and mypy"
 	@echo "  format         - Auto-format code and fix lint violations"
 	@echo "  bench          - Run benchmarks in parallel"
 	@echo "  bench-force    - Run benchmarks in parallel (force re-run, skip cached results)"
@@ -32,6 +33,15 @@ setup-ci:
 lint: setup
 	./venv/bin/ruff check
 	./venv/bin/ruff format --check
+
+# Run BOTH checkers even if the first reports errors, but still fail the target if
+# either did — so one pass surfaces every finding instead of hiding mypy behind a
+# failing pyright (or vice versa). Same behavior CI relies on.
+typecheck: setup
+	@rc=0; \
+	./venv/bin/pyright || rc=1; \
+	./venv/bin/mypy || rc=1; \
+	exit $$rc
 
 format: setup
 	./venv/bin/ruff format

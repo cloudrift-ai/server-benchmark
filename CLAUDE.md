@@ -115,6 +115,8 @@ Quick test models / scripts (for local iteration):
 - `make test` — run `pytest` using the venv (skips `perf`-marked tests; see `tests/perf/ARCHITECTURE.md`). Compiles
   kernels at `-Xcicc -O1` for ~3× faster nvcc (correctness lane; perf tests use `-O3` via `make bench-kernels`)
 - `make lint` — run `ruff check` and `ruff format --check`
+- `make typecheck` — run pyright and mypy over `emmy/compiler` (both run even if one fails; fails if either does).
+  Work in progress — the checkers currently report a backlog of errors being burned down
 - `make format` — auto-format code and fix lint violations
 - `make bench` — run benchmarks (`emmy bench recipes/*`)
 - `make bench-kernels` — run per-kernel perf comparison vs PyTorch (`tests/perf/`, requires CUDA)

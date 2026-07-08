@@ -23,6 +23,9 @@ jobs:
       - name: Ruff format check
         run: ./venv/bin/ruff format --check
 
+      - name: Typecheck
+        run: make typecheck
+
   test:
     runs-on: ubuntu-latest
     steps:

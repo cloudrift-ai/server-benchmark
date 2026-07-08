@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff"]
+test = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff", "pyright", "mypy"]
 compile = ["torch", "transformers>=5.10", "cppyy==3.5.0", "safetensors"]
 # vLLM out-of-tree embedding plugin (emmy/serving); vllm pins its own torch.
 # fastapi<0.137 cap: vllm 0.22.1 pins fastapi only as `>=0.115.0` (no upper bound),
@@ -29,7 +29,7 @@ serving = ["vllm>=0.22.1,<0.23", "fastapi[standard]<0.137"]
 visualize = ["playwright>=1.40"]
 # flash-attn requires torch at build time, install separately:
 #   pip install flash-attn --no-build-isolation
-dev = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff", "matplotlib", "graphviz", "torch", "transformers>=5.10", "cupy-cuda12x; sys_platform == 'linux'", "cppyy==3.5.0", "safetensors", "playwright>=1.40"]
+dev = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff", "pyright", "mypy", "matplotlib", "graphviz", "torch", "transformers>=5.10", "cupy-cuda12x; sys_platform == 'linux'", "cppyy==3.5.0", "safetensors", "playwright>=1.40"]
 
 [tool.setuptools.packages.find]
 include = ["emmy*"]
@@ -48,6 +48,29 @@ asyncio_mode = "auto"
 markers = [
     "perf: GPU performance comparison vs PyTorch (deselected by default; run with `pytest -m perf`)",
 ]
+
+[tool.pyright]
+include = ["emmy/compiler"]
+venvPath = "."
+venv = "venv"                                # resolve imports against ./venv (what `make setup` builds)
+pythonVersion = "3.12"
+# basic (not strict): types-focused correctness lane — None-safety, arg counts,
+# attribute/return mismatches — without strict's whole-program annotation demands.
+typeCheckingMode = "basic"
+reportUnnecessaryTypeIgnoreComment = true   # stale `# type: ignore` becomes an error
+
+# mypy runs alongside pyright: it covers what pyright can't — banning explicit `Any`
+# and the extra error codes below. Untyped deps (cppyy, partial torch) are silenced
+# via ignore_missing_imports; the strictness stays scoped to our own compiler code.
+[tool.mypy]
+files = ["emmy/compiler"]
+python_version = "3.12"
+ignore_missing_imports = true
+strict_equality = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_any_explicit = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool", "possibly-undefined"]
 
 [tool.ruff]
 line-length = 140

@@ -423,10 +423,12 @@ def test_loopify_pin_matches_torch(monkeypatch, geom, stage, loopify):
     assert len(kernels) == 1, f"pinned warp flash should be one kernel, got {len(kernels)}"
     src = compiled.nodes[kernels[0]].op.kernel_source
     assert "[4] = {};" in src and "for (int _r" in src, "loopify must array a fragment family and emit a re-roll loop"
-    if not stage:  # the gmem-direct store epilogue re-rolls into a loop whose body carries the m16n8 lane ``_t``
-        assert any("for (int _r" in ln for ln in src.splitlines()) and "_r * 8 + _g * 64" in src, "the fragment stores must re-roll"
+    if not stage:  # the gmem-direct store epilogue re-rolls into a loop (var _r0) whose body carries the m16n8 lane _t
+        assert "_r0 * 8 + _g * 64" in src, "the fragment stores must re-roll (with the affine +_r0*8 column offset)"
     if loopify == 2 and geom == "w1x1/f1x2/k4":  # the 2-long QK sacc_f scale arrays only at the lower threshold
         assert any("sacc" in ln and "[2][4] = {}" in ln for ln in src.splitlines()), "LOOPIFY=2 must array the QK sacc_f family"
+        if not stage:  # the QK score contraction nests via the fixpoint: outer K-chunk (_r1) × inner N-atom (_r0)
+            assert "for (int _r1" in src and "_sacc_a[_r1]" in src, "the QK contraction must nest into two #pragma unroll loops"
 
     def ref():
         with torch.no_grad():

@@ -1907,10 +1907,16 @@ from emmy.compiler.ir.stmt.passes import rewrite as _rewrite  # noqa: E402
 @_rewrite.register
 def _(s: Tile, rename, sigma, axis_fn):
     # ``axes`` map through ``axis_fn``; the body's stmts route through the
-    # generic per-stmt rewrite so SSA names / Exprs canonicalize inside.
+    # generic per-stmt rewrite so SSA names / Exprs canonicalize inside. The
+    # per-CTA thread counts (``block_threads`` / ``aux_threads``) are geometry,
+    # not SSA — carry them through verbatim (dropping them silently falls the
+    # launch back to the scalar ``_BLOCK_SIZE``, over-launching a cooperative
+    # tile), exactly as ``Tile.with_bodies`` preserves them.
     return Tile(
         axes=tuple(axis_fn(a) for a in s.axes),
         body=Body(tuple(_rewrite(c, rename, sigma, axis_fn) for c in s.body)),
+        block_threads=s.block_threads,
+        aux_threads=s.aux_threads,
     )
 
 

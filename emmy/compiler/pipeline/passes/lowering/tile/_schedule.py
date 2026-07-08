@@ -319,7 +319,10 @@ def _warp_atoms(kernel, probe) -> tuple[str, ...]:
     """The dtype-eligible tensor-core atom names for this contraction, ``()`` when the warp tier
     doesn't apply (unbindable node, a non-16-bit operand dtype, or a fragment-unrealizable gather
     epilogue). A computed-A (fused-cone) node reads its operand dtype off the cone's K-indexed
-    ``Load`` — the value the sync compute-fill stores to the A slab."""
+    ``Load`` — the value the sync compute-fill stores to the A slab. A cone whose leaf is **f32**
+    may still ride the folds' 16-bit atom (:func:`_demoted_atoms`) — the fill demotes on the slab
+    store; the plain-``Load`` form stays 16-bit-only here (copy transports move raw bytes and can
+    never convert) and reaches the warp tier through :func:`_demote_mixed_a`'s cone wrap instead."""
     if probe is None or not kernel.inputs:
         return ()
     if not _fragment_epilogue_ok(probe.epilogue):
@@ -330,7 +333,47 @@ def _warp_atoms(kernel, probe) -> tuple[str, ...]:
         kname = probe.k_axis.name
         ld = next((st for st in probe.a_body if isinstance(st, Load) and kname in {v for e in st.index for v in e.free_vars()}), None)
     t = kernel.inputs.get(ld.input) if ld is not None else None
-    return _ATOMS_BY_DTYPE.get(getattr(getattr(t, "dtype", None), "name", None), ())
+    atoms = _ATOMS_BY_DTYPE.get(getattr(getattr(t, "dtype", None), "name", None), ())
+    if atoms or isinstance(probe.a_operand, Load) or getattr(getattr(t, "dtype", None), "name", None) != "f32":
+        return atoms
+    return _demoted_atoms(kernel, probe)
+
+
+def _demoted_atoms(kernel, con) -> tuple[str, ...]:
+    """The 16-bit atoms an **f32-A** contraction may ride by demoting A on the sync compute-fill's
+    slab store: the single 16-bit dtype shared by every fold's B ``Load``, or ``()``. The
+    ``f32-A × 16-bit-B`` signature can only enter a traced graph through an erased dtype cast —
+    torch cannot execute a mixed-dtype matmul, so the model itself cast one side (Gemma's
+    ``self._norm(x.float()).type_as(x)`` rounds A back to f16 before every projection; the tracer
+    maps ``to``/``type_as`` to identity pass-throughs, leaving the f32 tensor feeding the f16
+    weights). B's values genuinely carry 16 bits, the accumulate stays f32, and this is a fork
+    SIBLING (the scalar rows remain), so the demotion is searchable, pinnable, and costs ~2^-11
+    relative noise on A — the rounding the model performed anyway in the dominant erased-downcast
+    case. (The converse erased-upcast graph — ``w.float()`` on a 16-bit weight — shows B=f32 and
+    never triggers this.)"""
+    b_loads = [b for b, _ in con.folds]
+    if not b_loads or not all(isinstance(b, Load) for b in b_loads):
+        return ()
+    b_names = {getattr(getattr(kernel.inputs.get(b.input), "dtype", None), "name", None) for b in b_loads}
+    if len(b_names) == 1 and b_names <= set(_ATOMS_BY_DTYPE):
+        return _ATOMS_BY_DTYPE[next(iter(b_names))]
+    return ()
+
+
+def _demote_mixed_a(kernel, con):
+    """A mixed-dtype contraction — plain f32-A ``Load`` against 16-bit folds
+    (:func:`_demoted_atoms`) — re-expressed as a computed-A cone (``a_operand=Body((load,))``), so
+    it rides the mandatory ``sync`` compute-fill whose slab store demotes the value to the atom
+    dtype. The copy transports (gmem-direct ldmatrix / cp.async / TMA) move raw bytes and cannot
+    convert, which is why the demotion routes through the cone form instead of the plain warp
+    tier. Anything else (already-computed A, non-Load A, 16-bit A, non-16-bit folds) returns
+    unchanged."""
+    if con is None or not isinstance(con.a_operand, Load):
+        return con
+    a_t = kernel.inputs.get(con.a_operand.input)
+    if getattr(getattr(a_t, "dtype", None), "name", None) != "f32" or not _demoted_atoms(kernel, con):
+        return con
+    return replace(con, a_operand=Body((con.a_operand,)))
 
 
 def _warp_move_ok(kernel, spec: str) -> bool:
@@ -454,13 +497,26 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], str]:
         return _computed_a_rows(kernel, place, probe, kaxis, _smem_budget(ctx)), kaxis
     tiles = scalar_tile_moves() if probe is not None else [""]
     warp_offered = False
+    demoted_rows: list[dict] = []
     if probe is not None:
         atoms = _warp_atoms(kernel, probe)
         if atoms:
             warp_moves = [s for s in warp_tile_moves(atoms) if _warp_move_ok(kernel, s)]
             tiles += warp_moves
             warp_offered = bool(warp_moves)
+        else:
+            # Mixed-dtype (f32-A × 16-bit-B) contraction: the warp tier rides the demoting
+            # sync compute-fill through the cone form — pre-assembled rows (TILE+STAGE+REDUCE
+            # resolved, warp pins handled inside); the scalar rows below stay fork siblings.
+            demoted = _demote_mixed_a(kernel, probe)
+            if demoted is not probe:
+                demoted_rows = _computed_a_rows(kernel, place, demoted, kaxis, _smem_budget(ctx))
+                warp_offered = bool(demoted_rows)
     tiles = list(TILE.narrow(tiles))
+    if demoted_rows:
+        # A warp TILE pin is already honored (or rejected) by the demoted rows — the plain loop
+        # must not also emit it over the copy transports, which cannot convert the f32 A.
+        tiles = [t for t in tiles if not is_warp_codec(t)]
     # Warp-eligibility is a structural fact about the KERNEL: when the enumeration offers any
     # tensor-core row, EVERY row (scalar and warp alike) carries ``S_warp_eligible`` so the
     # priors can price "a scalar tile where tensor cores were on offer"
@@ -490,6 +546,7 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], str]:
                 # "free" and would let a gmem-direct leaf inherit a staged row's measurement.
                 for wspec in _wspec_candidates(plan, stage, red):
                     rows.append({_at(TILE, kaxis): spec, _at(STAGE, kaxis): stage, _at(REDUCE, kaxis): red, WSPEC.name: wspec, **stamp})
+    rows += [{**r, **stamp} for r in demoted_rows]
     return rows, kaxis
 
 
@@ -971,7 +1028,7 @@ def _warp_option(
     # Build the tiled Contraction node here — it resolves the operand→role facts internally, so an
     # unbindable atom (a non-Load operand: a computed-cone / demoted matmul) raises and is rejected
     # at fork construction, like the static-K check.
-    op = _contraction_node(tile.op, place, wt)
+    op = _demote_mixed_a(tile, _contraction_node(tile.op, place, wt))
     # A computed-A node's stage is the mandatory resolved ``sync`` compute-fill (its ``smem`` /
     # ``bk_elems`` are derived, not codec-spelled, so the row's ``"d1/sync"`` re-resolves here);
     # a Load-operand node resolves the copy transports as usual.
@@ -1334,7 +1391,11 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     b_name = next((a for a in lift.args if (vs := _load_vars(a)) and n_ax.name in vs and k_ax.name in vs), None)
     if b_name is None:
         return None
-    a_name = next(a for a in lift.args if a != b_name)
+    # A square fold (``multiply(x, x)`` — a mean-of-squares reduce) has no distinct A arg; it is
+    # not a matmul edge, so the pin degrades gracefully instead of raising StopIteration.
+    a_name = next((a for a in lift.args if a != b_name), None)
+    if a_name is None:
+        return None
     cone = map_cone(body, a_name)
     if cone is None or not cone:
         return None

@@ -236,3 +236,34 @@ def test_fused_gate_up_swiglu_symbolic_m(runtime_s, monkeypatch):
     gate, up = rms @ wg.T, rms @ wu.T
     ref = gate * _sigmoid(gate) * up
     np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), ref, atol=0.5, rtol=0.1)
+
+
+@requires_cuda
+@pytest.mark.parametrize("tier", ["scalar", "warp"])
+def test_mixed_dtype_matmul_demotes_a_to_mma(tier, monkeypatch):
+    """An **f32-A × f16-B** matmul — the erased-downcast signature (torch cannot execute a mixed
+    matmul, so the model itself rounded A; the tracer maps ``to``/``type_as`` to pass-throughs,
+    e.g. Gemma's ``self._norm(x.float()).type_as(x)`` feeding every f16-weight projection) —
+    reaches the mma tier through the demoting cone wrap (``_demote_mixed_a``): the sync
+    compute-fill converts the f32 value on the slab store, since the copy transports move raw
+    bytes and cannot. The scalar cell pins nothing and just checks the mixed kernel still
+    compiles and matches; both compare against the f16-rounded-A reference."""
+    if tier == "warp":
+        monkeypatch.setenv("EMMY_TILE", _WARP_TILE)
+    F32 = _dt.get("f32")
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (_M, _K), F32), node_id="x")
+    g.add_node(InputOp(), [], Tensor("w", (_K, _N), F16), node_id="w")
+    g.add_node(MatmulOp(), ["x", "w"], Tensor("o", (_M, _N), F16), node_id="o")
+    g.inputs, g.outputs = ["x", "w"], ["o"]
+
+    rng = np.random.default_rng(0)
+    ins = {
+        "x": (rng.standard_normal((_M, _K)) * 0.3).astype(np.float32),
+        "w": (rng.standard_normal((_K, _N)) * 0.3).astype(np.float16),
+    }
+    got, srcs = _compile_run(g, ins)
+    if tier == "warp":
+        assert any("dpl_mma" in s for s in srcs), "the mixed-dtype matmul must engage the mma tier via the demoting sync fill"
+    ref = ins["x"].astype(np.float16).astype(np.float32) @ ins["w"].astype(np.float32)
+    np.testing.assert_allclose(got.reshape(_M, _N).astype(np.float32), ref, atol=0.1, rtol=2e-2)

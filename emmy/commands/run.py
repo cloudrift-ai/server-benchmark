@@ -560,6 +560,16 @@ async def _bench_golden_variants(backend, code, golden_configs, *, warmup, iters
     return out
 
 
+def _launch_order_cuda_nodes(graph):
+    """CudaOp nodes in the backend's launch order (``graph.topological_order()`` — the order
+    ``bench.per_launch`` indexes). Graph dict order diverges from launch order after
+    node-splitting passes (a split partial lands after its consumer in dict order), which
+    cross-labels the per-kernel timings if used for pairing."""
+    from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
+
+    return [graph.nodes[nid] for nid in graph.topological_order() if isinstance(graph.nodes[nid].op, CudaOp)]
+
+
 def _print_kernel_stats(graph, bench, golden_benches=None):
     """Per-kernel breakdown. Pulls structural stats off each ``CudaOp``
     (block / grid / smem), per-launch timings from ``bench.per_launch``,
@@ -580,7 +590,7 @@ def _print_kernel_stats(graph, bench, golden_benches=None):
     from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
     from emmy.compiler.pipeline.search.data import ShapeKey  # noqa: PLC0415
 
-    cuda_nodes = [node for _, node in graph.nodes.items() if isinstance(node.op, CudaOp)]
+    cuda_nodes = _launch_order_cuda_nodes(graph)
     if not cuda_nodes:
         return
 
@@ -653,7 +663,7 @@ def _print_kernel_stats(graph, bench, golden_benches=None):
             label = f"! {label}"
         g_times = {lt.idx: (min(lt.samples) if lt.samples else lt.time_ms) * 1000 for lt in (gb.bench.per_launch or [])}
         g_attrs = _collect_kernel_attrs(gb.graph)
-        g_nodes = [n for n in gb.graph.nodes.values() if isinstance(n.op, CudaOp)]
+        g_nodes = _launch_order_cuda_nodes(gb.graph)
         for gidx, gnode in enumerate(g_nodes):
             gk = dict(tuning_knob_items(gnode.op.knobs or {}))
             records.append((label, g_times.get(gidx, 0.0), "--", _geom(gnode.op, g_attrs), gk, ref))
@@ -719,13 +729,12 @@ def _write_ab_json(args, results: dict, graph, bench, golden_benches) -> None:
     import json as _json  # noqa: PLC0415
 
     from emmy import gpu  # noqa: PLC0415
-    from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
 
     def _kernel_rows(g, b) -> list[dict]:
         times = {lt.idx: (min(lt.samples) if lt.samples else lt.time_ms) * 1000 for lt in (b.per_launch or [])}
         rows = []
-        for idx, node in enumerate(n for n in g.nodes.values() if isinstance(n.op, CudaOp)):
+        for idx, node in enumerate(_launch_order_cuda_nodes(g)):
             op = node.op
             rows.append(
                 {

@@ -201,7 +201,10 @@ engine loops (`drive` for exploration, `resolve` for deterministic resolution):
   `TuningSearch(patience=, ucb_c=)`; the async generator yields one terminal `Candidate` per fully-explored rollout, and
   `tune_async` benches each via `await _bench_terminal_async` (writes per-kernel `perf` / `lowering` / inventory rows,
   returns the aggregate `PerfStats`), then calls `search.observe(stats, status)`. With `backend=None` the bench is
-  stubbed to `latency_us=1.0` and nothing is persisted, so a backend-less sweep never overwrites tuned rows.
+  stubbed to `latency_us=1.0` and nothing is persisted, so a backend-less sweep never overwrites tuned rows. A terminal
+  still carrying an un-lowered kernel-bearing node (a validation-filtered rewrite) is a `bench_fail` decided before any
+  bench or cache lookup — the bench sums `CudaOp`s only, so without that guard the un-lowered kernel priced at zero and
+  a cached residual kernel's µs could stand in for the whole graph as an `ok` measurement (issue #327).
 - `Run.drive(graph) -> Iterator[(token, Candidate)]` — the exploration engine loop (`tune`). `Run` is the per-run state
   object (`pipeline` + `ctx` + `search` + `db` + `backend` + `dump` + `rejections`): `Pipeline` stays a frozen,
   shareable pass layout while every run-scoped sink lives on the Run, reached through the candidate (`cand.run.dump`,

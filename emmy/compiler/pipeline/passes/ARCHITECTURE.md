@@ -57,7 +57,11 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   instead of `lower()`-ing the contraction and pattern-matching the result. A `STAGE` pin follows the same rule: the
   option builders resolve it against the built node ONCE (`_resolve_warp_stage` / `_resolve_scalar_stage` — transport
   eligibility, the slab K-chunk `bk_elems`, the depth clamps) and stamp the resolved `Stage` (or `None`, gmem-direct)
-  on the `TileOp`, so the materializer's one staged driver applies it verbatim, deciding nothing. One staging fact
+  on the `TileOp`, so the materializer's one staged driver applies it verbatim, deciding nothing. Fitting the smem
+  budget is part of resolving: a tile whose single depth-1 slot already exceeds it declines to gmem-direct (the warp
+  slab is codec-sized and cannot shrink; the scalar resolver steps `bk_elems` / depth down first), so every offered
+  stage row materializes within budget — a resolved-but-unfittable row would only die at `validate(ctx)`, leaving an
+  un-lowered `TileOp` in the tune's terminal (issue #327). One staging fact
   is derived at materialization rather than resolved here because it is layout, not eligibility: a TMA slab feeding an
   mma drain is **swizzled** (`_stage.pick_swizzle_atom` picks B32/B64/B128 per operand from the slab's inner row span;
   the hardware permutes 16 B chunks in-copy, each staged `LdmatrixLoad` XORs the address back, and the kernel stays

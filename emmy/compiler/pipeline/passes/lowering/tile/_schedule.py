@@ -600,7 +600,11 @@ def _resolve_warp_stage(c: Contraction, stage: Stage, budget: int = STATIC_SMEM_
     in elements), ``depth`` clamped so the ring's slots fit the smem ``budget`` (the device's dynamic
     opt-in cap when a ``Context`` reaches the schedule, else the 48 KiB static floor; dropping
     ``ring`` when the clamp leaves nothing to cycle), and ``reg_depth`` clamped to ``bk`` (nothing to
-    ping-pong past the resident chunk)."""
+    ping-pong past the resident chunk). A tile whose single depth-1 slot already exceeds ``budget``
+    DECLINES (``None``, gmem-direct) — unlike the scalar resolver it cannot shrink the slab
+    (``bk_elems`` is codec-spelled here, not derived), and a resolved-but-unfittable stage would
+    sail through the fork only to be rejected at materialize (the issue-#327 unlowered-``TileOp``
+    bench fails)."""
     atom = c.atom
     a_nbytes = atom.operand_dtype("a").nbytes
     bk = c.tile.bk
@@ -622,7 +626,9 @@ def _resolve_warp_stage(c: Contraction, stage: Stage, budget: int = STATIC_SMEM_
         return None
     bk_elems = bk * atom.atom_k
     slot_bytes = (m.tile + n.tile) * bk_elems * a_nbytes
-    depth = min(stage.depth, max(1, budget // slot_bytes))
+    if slot_bytes > budget:
+        return None
+    depth = min(stage.depth, budget // slot_bytes)
     return replace(stage, depth=depth, ring=stage.ring and depth >= 2, reg_depth=min(stage.reg_depth, bk), bk_elems=bk_elems)
 
 

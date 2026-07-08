@@ -1129,13 +1129,23 @@ class _TerminalBench:
     :meth:`finalize_exc`) live here, so the only awaited step is the device bench."""
 
     def __init__(self, cand, *, backend, db) -> None:
+        from emmy.compiler.ir.base import ConstantOp, InputOp  # noqa: PLC0415
         from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
 
         self.backend = backend
         self.db = db
         self.graph = cand.graph
         self.context_key = cand.ctx.structural_key()
-        self.cuda_nodes = [self.graph.nodes[nid] for nid in self.graph.topological_order() if isinstance(self.graph.nodes[nid].op, CudaOp)]
+        order = self.graph.topological_order()
+        self.cuda_nodes = [self.graph.nodes[nid] for nid in order if isinstance(self.graph.nodes[nid].op, CudaOp)]
+        # Kernel-bearing nodes a rewrite left un-lowered (a validation-filtered rewrite under
+        # tune — see ``Candidate.try_rewrite``). The same membership test as the backend's
+        # ``_launches`` walk, so anything the backend would refuse is known BEFORE the bench:
+        # summing only ``cuda_nodes`` prices the un-lowered kernel at zero, and the cache-hit
+        # path would then report the residual kernels' Σ as an ``ok`` terminal measurement (the
+        # issue-#327 "impossibly fast" split-K rows — a finalize kernel's cached µs standing in
+        # for the whole matmul).
+        self.unlowered = [nid for nid in order if not isinstance(self.graph.nodes[nid].op, (CudaOp, InputOp, ConstantOp))]
         self.backend_name = getattr(backend, "name", "stub")
 
     @staticmethod
@@ -1280,6 +1290,20 @@ class _TerminalBench:
         stub backend), else ``("bench", None)`` — the caller obtains a
         ``BenchmarkResult`` and calls :meth:`finalize_result` / :meth:`finalize_exc`."""
         from emmy.compiler.pipeline.search.keys import op_cache_key  # noqa: PLC0415
+
+        # An un-lowered kernel-bearing node is a bench_fail terminal, decided here — never a
+        # backend call (it would raise the opaque ``non-CudaOp`` TypeError) and never the
+        # cache-hit / no-CudaOp paths below (they see only the RESIDUAL kernels and would report
+        # a partial Σ as ``ok``). Nothing is persisted: the residual kernels' own perf rows are
+        # honest, and the fail is the terminal's, not theirs.
+        if self.unlowered:
+            logger.warning(
+                "[tune] %d node(s) left un-lowered (%s) — bench_fail without benching",
+                len(self.unlowered),
+                ", ".join(f"{nid}: {type(self.graph.nodes[nid].op).__name__}" for nid in self.unlowered),
+            )
+            fail_s = self.backend.bench_run_timeout_s if self.backend is not None else 1.0
+            return "done", (self._point_stats(float(fail_s) * 1_000_000.0), "bench_fail")
 
         if not self.cuda_nodes:
             return "done", (self._point_stats(0.0), "ok")

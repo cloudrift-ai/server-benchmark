@@ -1,7 +1,7 @@
 ---
 name: tune-model
 description: Use this skill when the user asks to "tune model X", "analyze tune findings for <model>", "tune and analyze model X", "why is emmy slower than eager / torch.compile on X", "do a per-kernel performance analysis", "drill into kernel performance", "profile the compiled kernels with NCU", or otherwise wants a clean autotune of a model (or one layer), an end-to-end + per-kernel bench against PyTorch eager and torch.compile, a root-cause analysis of every underperforming kernel (search shortfall, tier/optimization lockout, codegen quality, bench failures), and a findings report saved to plans/. For a whole-model tune it also validates the full model end-to-end (eager / torch.compile / emmy) and, when the model is servable via `emmy serve` (an embedding model), benches the served model via `vllm bench serve` against vanilla vLLM. Modeled on plans/qwen3-embedding-layer0-tune-findings.md. For the golden matmul shapes use the tune-golden skill instead — there the target config is known, so the analysis evaluates the prior's expectation against it.
-version: 0.5.0
+version: 0.6.0
 ---
 
 # Tune a model and produce a per-kernel findings report
@@ -114,7 +114,10 @@ For each kernel meaningfully behind eager or tcompile, assign one (or more) of f
 
 1. **Search shortfall** (patience / prior pick-reachability): `eval variants` shows the pick ranked far from the
    measured best (`pick: rank R/N, X.XXx of best … <-- misses best`). Confirm with
-   `emmy eval prior --dataset db` (aggregate reachability) and `emmy eval knobs` (per-knob regret).
+   `emmy eval prior --dataset db` (aggregate reachability) and `emmy eval knobs` (per-knob regret), and localize
+   with `emmy eval prior --dataset nodes --kernel <SUBSTR>` — the per-family **fork sibling regret** names the
+   decision family (TILE / REDUCE / STAGE / …) where the prior steered the search into the wrong subtree
+   (regret ≫1.00x); families at 1.00x are exonerated, pointing at patience instead.
    The rank-1 row's knobs are your A/B pin for step 4.
 2. **Tier / optimization lockout**: every row in the `eval variants` leaderboard is scalar-tier (`MMA=0`, no
    warp tile) — the tensor-core variants were never *enumerated*, so an eligibility gate fired. Find it in

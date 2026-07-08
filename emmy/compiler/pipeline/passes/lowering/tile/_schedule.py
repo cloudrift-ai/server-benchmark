@@ -1232,11 +1232,18 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
             spec = row.get(_at(TILE, kaxis), "")
             stage_spec = row.get(_at(STAGE, kaxis), "")
             red = row.get(_at(REDUCE, kaxis), "")
+            # Thread the row's structural stamps (``S_warp_eligible``) onto the op. Fork rows carry
+            # them for branch identity, but the MATERIALIZED op is what ``realized_knobs`` reads —
+            # dropping them here left leaf/evidence rows unstamped while fork rows (deploy
+            # candidates) were stamped, fracturing the ``S_*`` evidence signature: deploy-time
+            # ``evidence_pick`` never joined the measured -O3 rows, and greedy shipped the learned
+            # model's unbenched per-cell extrapolation (the 2026-07-07 5090 gate's 330x fp16 miss).
+            op_knobs = {**knobs, **{k: v for k, v in row.items() if k.startswith("S_")}}
             if red and ReducePlan.parse(red).needs_split:
-                return _splitk_option(tile, place, spec, red, name, knobs, stage_spec, _smem_budget(ctx))
+                return _splitk_option(tile, place, spec, red, name, op_knobs, stage_spec, _smem_budget(ctx))
             if is_warp_codec(spec):
-                return _warp_option(tile, place, spec, name, knobs, stage_spec, _smem_budget(ctx), row.get(WSPEC.name, ""))
-            return _tile_option(tile, place, spec, name, knobs, red, stage_spec, _smem_budget(ctx))
+                return _warp_option(tile, place, spec, name, op_knobs, stage_spec, _smem_budget(ctx), row.get(WSPEC.name, ""))
+            return _tile_option(tile, place, spec, name, op_knobs, red, stage_spec, _smem_budget(ctx))
 
         if len(rows) == 1:
             return _materialize(rows[0])

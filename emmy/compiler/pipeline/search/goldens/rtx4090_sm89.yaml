@@ -179,3 +179,25 @@ configs:
     knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, VECTORIZE_LOADS: true}
     emmy_us: 5.0
     cublas_us: 5.0
+  - kernel: rms_norm
+    name: rms_norm.k3840
+    M: 512
+    K: 3840
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'b32', VECTORIZE_LOADS: true}
+    emmy_us: 18.4
+    cublas_us: 7.0
+  - kernel: rms_norm
+    name: gemma4_12b.qknorm.k256
+    M: 4096
+    K: 256
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'b32', VECTORIZE_LOADS: true}
+    emmy_us: 4.5
+    cublas_us: 5.0
+  - kernel: rms_norm
+    name: rms_norm.k3840.dynM
+    M: 512
+    K: 3840
+    dynamic: true
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'b32', VECTORIZE_LOADS: true}
+    emmy_us: 17.7
+    cublas_us: 7.0

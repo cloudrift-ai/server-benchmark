@@ -445,6 +445,31 @@ def test_loopify_pin_matches_torch(monkeypatch, geom, stage, loopify):
     assert max_diff < 5e-3, f"loopify {geom} stage={stage!r} LOOPIFY={loopify} max_diff={max_diff:.2e}"
 
 
+@requires_cuda
+def test_readable_scalar_chain_fold_matches_torch(monkeypatch):
+    """``EMMY_READABLE`` folds a single-use scalar ``Assign`` temp into its sole consumer's expression
+    — the scalar-tier softmax ``t1 = m − m'`` then ``t2 = expf(t1)`` collapses to ``expf(m − m')`` —
+    while a multi-use temp (``m_i__t0``, read by two subtracts) stays named. SASS-identical, so it
+    still matches torch. ``--no-readable`` (the default off) keeps the SSA ladder."""
+    monkeypatch.setenv("EMMY_TILE", "a:scalar")
+    monkeypatch.setenv("EMMY_READABLE", "1")
+    torch.manual_seed(7)
+    q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
+    backend, compiled, graph, kernels = _compile_tc(q, k, v)
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert any("expf((m_i - " in ln or "expf((s - " in ln for ln in src.splitlines()), "the scalar subtract→exp must fold"
+    assert "= fmaxf(m_i, s)" in src, "the multi-use rowmax temp must stay named (folding it would recompute fmaxf)"
+
+    def ref():
+        with torch.no_grad():
+            return torch.nn.functional.scaled_dot_product_attention(q.cuda(), k.cuda(), v.cuda()).cpu().flatten().float().numpy()
+
+    data = {n: t for n, t in zip(graph.inputs, (q.numpy(), k.numpy(), v.numpy()), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=ref)
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    assert float(np.max(np.abs(got - eager))) < 5e-3, "readable scalar fold must match torch"
+
+
 # --------------------------------------------------------------------------- #
 # Staged K/V (the ``STAGE@<kv>`` cp.async stream) — Moves 4/5 on the warp tier.
 # --------------------------------------------------------------------------- #

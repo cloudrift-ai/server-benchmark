@@ -69,6 +69,12 @@ class RenderCtx:
     # consumed by ``Var.render`` to inline the float at use sites instead
     # of emitting a named ``float in0 = 0.044f;`` decl.
     literal_ssa: dict[str, float] = field(default_factory=dict)
+    # Single-use scalar SSA temps folded into their sole consumer's expression — readability only
+    # (``EMMY_READABLE``), so ``m_i__t2 = expf(m_i__t1)`` with ``m_i__t1 = m_i - t0`` collapses to
+    # ``m_i__t2 = expf(m_i - t0)`` (the scalar-tier analogue of the fragment chain fusion). Populated
+    # by ``render_body`` (per flat body, in def order) and consumed by ``Var.render`` — exactly like
+    # ``literal_ssa`` but the inlined value is a rendered sub-expression, not a float.
+    inline_exprs: dict[str, str] = field(default_factory=dict)
     # Per-buffer byte offsets into a single ``extern __shared__`` pool
     # ``_smem_pool``. When non-empty, ``Smem.render`` emits a pointer
     # alias into the pool instead of a stand-alone ``__shared__`` array
@@ -553,9 +559,60 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
         if changed:
             ctx = replace(ctx, literal_ssa=new_map)
 
+    # Readability (EMMY_READABLE): fold each single-use scalar ``Assign`` temp into its sole
+    # consumer's expression — ``m_i__t2 = expf(m_i__t1)`` over ``m_i__t1 = m_i - t0`` becomes
+    # ``m_i__t2 = expf(m_i - t0)``. Only when the temp's ONE read is in this same flat body (a nested
+    # or repeated use keeps it named), so it never changes evaluation; SASS-identical.
+    from emmy.compiler.ir.stmt.leaves import Assign  # local — avoid cycle
+
+    inlined: set[str] = set()
+    if _readable():
+        from emmy.compiler.ir.expr import BinaryExpr, TernaryExpr, Var  # local — avoid cycle
+
+        total = _read_counts(body, {})
+        local: dict[str, int] = {}
+        for s in body:
+            for nm in s.deps():
+                local[nm] = local.get(nm, 0) + 1
+        inline = dict(ctx.inline_exprs)
+        for s in body:
+            if not (isinstance(s, Assign) and total.get(s.name, 0) == 1 and local.get(s.name, 0) == 1 and s.name not in inline):
+                continue
+            # The sole reader must render its operands through ``op_to_expr`` / ``Var.render`` (only
+            # ``Assign`` does) — folding into an ``Accum`` / ``Reassign`` / ``Write`` would drop the temp
+            # without substituting it, leaving an undefined reference.
+            reader = next((r for r in body if s.name in r.deps()), None)
+            if not isinstance(reader, Assign):
+                continue
+            expr = op_to_expr(s.op.name, [Var(a) for a in s.args])
+            rendered = expr.render(replace(ctx, inline_exprs=inline))
+            inline[s.name] = f"({rendered})" if isinstance(expr, (BinaryExpr, TernaryExpr)) else rendered
+            inlined.add(s.name)
+        if inlined:
+            ctx = replace(ctx, inline_exprs=inline)
+
     out: list[str] = []
     for s in body:
         if isinstance(s, Load) and s.is_scalar and s.name in ctx.literal_ssa and s.is_literal(ctx.literal_constants):
             continue
+        if isinstance(s, Assign) and s.name in inlined:
+            continue  # folded into its consumer
         out.extend(s.render(ctx))
     return out
+
+
+def _readable() -> bool:
+    from emmy import config  # local — avoid cycle
+
+    return config.readable()
+
+
+def _read_counts(body: Body, counts: dict[str, int]) -> dict[str, int]:
+    """Total reads of each SSA name across ``body`` and every nested body (a name read inside a loop
+    counts, so a temp used only in a nested scope is never folded at this level)."""
+    for s in body:
+        for nm in s.deps():
+            counts[nm] = counts.get(nm, 0) + 1
+        for b in s.nested():
+            _read_counts(b, counts)
+    return counts

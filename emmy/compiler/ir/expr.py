@@ -206,6 +206,12 @@ class Var(_ExprOps):
         lit_map = getattr(ctx, "literal_ssa", None)
         if lit_map and self.name in lit_map:
             return _float_lit(lit_map[self.name])
+        # A single-use scalar temp folded into its consumer (readability, EMMY_READABLE): inline the
+        # temp's rendered sub-expression, like the literal case above (``render_body`` populated it and
+        # skipped the temp's ``Assign``).
+        inl = getattr(ctx, "inline_exprs", None)
+        if inl and self.name in inl:
+            return inl[self.name]
         return self.name
 
     def simplify(self, ctx: SimplifyCtx) -> Expr:

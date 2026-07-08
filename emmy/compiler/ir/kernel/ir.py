@@ -256,6 +256,19 @@ class Tile(Stmt):
         return prod(self.extents) if self.axes else 1
 
     @property
+    def cells(self) -> int:
+        """The per-CTA cooperative cell count — ``block_threads`` when set, else the scalar tier's
+        ``_BLOCK_SIZE``. This is ``blockDim`` minus any aux band, i.e. the divisor the cuda lowering
+        uses for ``gridDim = ceil(n_elements / cells)``. So ``n_elements % cells == 0`` (and no aux
+        band) means the static grid covers the iteration space exactly — no partial last block, so
+        the ``_gid < N`` tail guard is provably always-true and :meth:`render` elides it."""
+        if self.block_threads is not None:
+            return self.block_threads
+        from emmy.compiler.ir.kernel.render import _BLOCK_SIZE  # noqa: PLC0415
+
+        return _BLOCK_SIZE
+
+    @property
     def is_static_grid(self) -> bool:
         """True iff every grid axis has a static extent (the static launch path)."""
         return all(a.extent.is_static for a in self.axes)
@@ -321,12 +334,17 @@ class Tile(Stmt):
             if self.aux_threads
             else "blockIdx.x * blockDim.x + threadIdx.x"
         )
-        out = [
-            f"{pad}int _gid = {gid};",
-            f"{pad}if (_gid < {n}) {{",
-        ]
-        inner = ctx.child()
+        # ``gridDim = ceil(n / cells)`` CTAs cover the cells. When ``cells`` divides ``n`` exactly and
+        # there is no warp-specialized aux band, every launched thread maps to a real cell — the tail
+        # guard ``_gid < n`` is always-true (and nvcc can't prove it: ``gridDim`` is a launch arg), so
+        # emit the decode + body flat. Otherwise the partial last block (or the aux threads that launch
+        # past the cells) needs masking.
+        guard = self.aux_threads != 0 or n % self.cells != 0
+        out = [f"{pad}int _gid = {gid};"]
+        inner = ctx.child() if guard else ctx
         ipad = _pad(inner.indent)
+        if guard:
+            out.append(f"{pad}if (_gid < {n}) {{")
         for i, a in enumerate(self.axes):
             s, e = strides[i], extents[i]
             term = "_gid" if s == 1 else f"_gid / {s}"
@@ -334,7 +352,8 @@ class Tile(Stmt):
             expr = term if i == 0 else f"({term}) % {e}"
             out.append(f"{ipad}int {a.name} = {expr};")
         out.extend(render_body(self.body, inner))
-        out.append(f"{pad}}}")
+        if guard:
+            out.append(f"{pad}}}")
         return out
 
 

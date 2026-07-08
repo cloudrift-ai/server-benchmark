@@ -266,3 +266,13 @@ warp-flash streaming drains and the matmul tier's staged drains — two emitters
 `110_drop_redundant_syncs` collapses the defensive `Sync`s the
 cooperative / shared-row templates emit (body-level only — a slab `Smem` decl flags `smem_seen`, so a load-bearing
 prologue `Sync` is correctly retained; `with_bodies` preserves the cooperative tile's `block_threads`).
+
+Two of these peepholes are **pin-only policy stamps** — off by default, byte-identical, decoupled from production
+codegen (each records its knob on the `KernelOp` for idempotence, like `095`, and returns the body unchanged when off,
+so the whole default pipeline is unaffected and there is no golden / snapshot churn): `085_fast_exp` (`EMMY_FAST_EXP=1`
+lowers f32 `exp` through the SFU `__expf`, the one non-bit-exact policy) and `100_loopify` (`EMMY_LOOPIFY=N` re-rolls a
+maximal run of ≥ `N` parallel per-fragment `FragmentApply` — the flash mma epilogue's `O_i_f` α-rescale / divide and, at
+`N=2`, the `sacc_f` QK scale — into a `#pragma unroll` loop over an arrayed fragment family: it collapses the family's
+`RegFragment` decls into one `count`-arrayed decl, renames `O_i_f{j}` → `O_i_f[j]` kernel-wide via the generic SSA
+rewrite, and fuses the run into a `StridedLoop` over `O_i_f[_t]`. Identical SASS, ~30% fewer listing lines — a
+readability lever for `--ir cuda` inspection, `N=4` the recommended sweet spot).

@@ -1084,12 +1084,20 @@ class RegFragment(Stmt):
     cell ``(M, N, K)``; the count
     derives from ``shape`` + ``role`` via :func:`_mma_sync_nregs`. The
     ``c`` array is zero-initialised at declaration, so the mma.sync path
-    needs no separate fill node."""
+    needs no separate fill node.
+
+    ``count`` (default 1) arrays a whole fragment FAMILY into one declaration —
+    ``float O_i_f[count][n_regs]`` — so a run of ``count`` sibling fragments
+    (``O_i_f0 … O_i_f{count-1}``) collapses to a single arrayed decl indexed
+    ``O_i_f[t]``. Only ``100_loopify`` sets ``count > 1`` (the pin-gated
+    re-roll); ``count == 1`` renders the flat ``float name[n_regs]`` form,
+    byte-identical."""
 
     name: str
     role: str  # "a" / "b" / "c"
     shape: tuple[int, int, int]
     dtype: DataType
+    count: int = 1  # >1 arrays the fragment family: ``<ty> name[count][n_regs]`` (loopify only)
 
     def defines(self) -> tuple[str, ...]:
         return (self.name,)
@@ -1099,15 +1107,19 @@ class RegFragment(Stmt):
 
     def pretty(self, indent: str = "") -> list[str]:
         m, n, k = self.shape
-        return [f"{indent}RegFragment {self.role}:{self.dtype.name} {self.name}[{_mma_sync_nregs(self.role, self.shape)}] ({m}x{n}x{k})"]
+        cnt = f"{self.count}][" if self.count > 1 else ""
+        dims = f"[{cnt}{_mma_sync_nregs(self.role, self.shape)}]"
+        return [f"{indent}RegFragment {self.role}:{self.dtype.name} {self.name}{dims} ({m}x{n}x{k})"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         n_regs = _mma_sync_nregs(self.role, self.shape)
         ctx.ssa_dtypes[self.name] = self.dtype.name
+        dims = f"[{self.count}][{n_regs}]" if self.count > 1 else f"[{n_regs}]"
         if self.role == "c":
-            zeros = ", ".join(["0.0f"] * n_regs)
-            return [f"{_pad(ctx.indent)}float {self.name}[{n_regs}] = {{{zeros}}};"]
-        return [f"{_pad(ctx.indent)}unsigned {self.name}[{n_regs}];"]
+            # Brace-init zeros the whole (arrayed) accumulator; ``= {0.0f, ...}`` stays the flat form.
+            init = " = {}" if self.count > 1 else f" = {{{', '.join(['0.0f'] * n_regs)}}}"
+            return [f"{_pad(ctx.indent)}float {self.name}{dims}{init};"]
+        return [f"{_pad(ctx.indent)}unsigned {self.name}{dims};"]
 
 
 # Per-lane fp16 element XOR matching the TMA hardware smem swizzle (the
@@ -2033,7 +2045,7 @@ def _(s: WarpShuffle, rename, sigma, axis_fn):
 
 @_rewrite.register
 def _(s: RegFragment, rename, sigma, axis_fn):
-    return RegFragment(name=rename(s.name), role=s.role, shape=s.shape, dtype=s.dtype)
+    return RegFragment(name=rename(s.name), role=s.role, shape=s.shape, dtype=s.dtype, count=s.count)
 
 
 @_rewrite.register

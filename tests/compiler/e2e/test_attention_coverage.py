@@ -394,6 +394,37 @@ def test_warp_flash_geometry_pin_matches_torch(monkeypatch, um, nt):
     assert max_diff < 5e-3, f"pinned warp flash w{um}/f1x{nt} max_diff={max_diff:.2e}"
 
 
+@requires_cuda
+@pytest.mark.parametrize(("geom", "loopify"), [("w1x1/f1x2/k4", 4), ("w1x1/f1x2/k4", 2), ("w1x1/f2x2/k4", 4)])
+def test_loopify_pin_matches_torch(monkeypatch, geom, loopify):
+    """``EMMY_LOOPIFY`` (100_loopify) re-rolls the flash mma epilogue's parallel per-fragment
+    ``FragmentApply`` runs — the ``O_i_f`` α rescale / divide, and at ``=2`` the ``sacc_f`` QK scale —
+    into ``#pragma unroll`` loops over an arrayed fragment family. Purely a listing shrink: the source
+    must still match torch, so this asserts the arrayed decl + fused loop render (``float O_i_f[...][4]``
+    and a ``for (int _t``) and that accuracy is unchanged. ``f2x2`` exercises the per-query-tile
+    suffixed families (``O_i_q0_f`` / ``O_i_q1_f``)."""
+    monkeypatch.setenv("EMMY_TILE", f"a:mma_m16n8k16_f16/{geom}")
+    monkeypatch.setenv("EMMY_LOOPIFY", str(loopify))
+    torch.manual_seed(loopify * 7 + len(geom))
+    q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
+    backend, compiled, graph, kernels = _compile_tc(q, k, v)
+    assert len(kernels) == 1, f"pinned warp flash should be one kernel, got {len(kernels)}"
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "[4] = {};" in src and "for (int _t" in src, "loopify must array a fragment family and emit a re-roll loop"
+    if loopify == 2:  # the 2-long QK ``sacc_f`` scale re-rolls only at the lower threshold → arrayed [2][4]
+        assert any("sacc" in ln and "[2][4] = {}" in ln for ln in src.splitlines()), "LOOPIFY=2 must array the QK sacc_f family"
+
+    def ref():
+        with torch.no_grad():
+            return torch.nn.functional.scaled_dot_product_attention(q.cuda(), k.cuda(), v.cuda()).cpu().flatten().float().numpy()
+
+    data = {n: t for n, t in zip(graph.inputs, (q.numpy(), k.numpy(), v.numpy()), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=ref)
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    max_diff = float(np.max(np.abs(got - eager)))
+    assert max_diff < 5e-3, f"loopify {geom} LOOPIFY={loopify} max_diff={max_diff:.2e}"
+
+
 # --------------------------------------------------------------------------- #
 # Staged K/V (the ``STAGE@<kv>`` cp.async stream) — Moves 4/5 on the warp tier.
 # --------------------------------------------------------------------------- #

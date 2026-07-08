@@ -404,12 +404,15 @@ class CpAsyncCopy(Stmt):
             f'asm volatile("cp.async.{qual}.shared.global [%0], [%1], {self.nbytes};\\n" '
             f':: "r"(_smem_addr), "l"(&{self.src}[{src_flat}]) : "memory");'
         )
-        return [
-            f"{pad}{{",
-            f"{pad}    unsigned int _smem_addr = __cvta_generic_to_shared(&{self.smem}[{smem_flat}]);",
-            f"{pad}    {asm}",
-            f"{pad}}}",
-        ]
+        # ``_smem_addr`` is declared once per C scope and reassigned after — no wrapping ``{ }``
+        # block, so a fill loop holding a single ``cp.async`` renders ``for (…) { … }`` flat.
+        cvta = f"__cvta_generic_to_shared(&{self.smem}[{smem_flat}])"
+        if "_smem_addr" in ctx.scope_decls:
+            addr_line = f"{pad}_smem_addr = {cvta};"
+        else:
+            ctx.scope_decls.add("_smem_addr")
+            addr_line = f"{pad}unsigned int _smem_addr = {cvta};"
+        return [addr_line, f"{pad}{asm}"]
 
 
 @dataclass(frozen=True)
@@ -847,6 +850,17 @@ def frag_layout(atom_m: int, atom_n: int) -> FragLayout:
     raise NotImplementedError(f"no fragment C-layout modeled for atom m{atom_m}n{atom_n}")
 
 
+def _lane_preamble(ctx: RenderCtx, pad: str, decl: str) -> list[str]:
+    """Emit the mma lane preamble (``_g`` / ``_t``) once per C scope: ``decl`` if ``_g`` is not yet
+    declared here (tracked in ``ctx.scope_decls``), else ``[]``. Every emitter defines ``_g``/``_t``
+    identically (``(threadIdx.x & 31) >> 2`` / ``& 3``), so a later stmt in the same scope reuses the
+    first declaration instead of re-scoping itself — no redundant ``{ }`` around the store / mask."""
+    if "_g" in ctx.scope_decls:
+        return []
+    ctx.scope_decls.update(("_g", "_t"))
+    return [f"{pad}{decl}"]
+
+
 @dataclass(frozen=True)
 class FragmentApply(Stmt):
     """Generic per-element pointwise op over ``mma.sync`` ``m16n8`` C-fragments — the
@@ -1033,14 +1047,13 @@ class FragmentMask(Stmt):
         pad = _pad(ctx.indent)
         lay = self.layout
         fill = ctx.identity_literal(self.fill, "f32")
-        lines = [f"{pad}{{ {lay.lane_decl}"]
+        lines = _lane_preamble(ctx, pad, lay.lane_decl)
         for i in range(lay.n_elems):
             sub: dict[str, Expr] = {FRAG_COL: BinaryExpr("+", self.col_base, lay.col_off[i])}
             if self.row_base is not None:
                 sub[FRAG_ROW] = BinaryExpr("+", self.row_base, lay.row_off[lay.elem_row[i]])
             pred = self.mask_when.substitute(sub).render(ctx)
-            lines.append(f"{pad}  if ({pred}) {self.frag}[{i}] = {fill};")
-        lines.append(f"{pad}}}")
+            lines.append(f"{pad}if ({pred}) {self.frag}[{i}] = {fill};")
         return lines
 
 
@@ -1590,26 +1603,36 @@ class RegStore(Stmt):
         # epilogue temps) per RegStore.
         if self.m_guard is not None or self.n_guard is not None:
             return self._render_guarded(ctx, flat=flat, ldm=ldm, dst_dt=dst_dt, pre=pre, vals=vals)
-        lines = [f"{pad}{{ const int _g = {lane} >> 2; const int _t = {lane} & 3;"]
-        lines += [f"{pad}  {ln}" for group in pre for ln in group]
+        lane_stmt = f"const int _g = {lane} >> 2; const int _t = {lane} & 3;"
+        if self.epilogue is None:
+            # Flash output store: no per-element epilogue temps, so declare _g/_t once per scope
+            # (reused by sibling stores) and emit the stores flat — no wrapping { } block, so a
+            # store re-rolled into a loop renders ``for (…) { … }`` not ``for (…) { { … } }``.
+            head, base, close = _lane_preamble(ctx, pad, lane_stmt), pad, ""
+        else:
+            # Fused epilogue: the { } scopes the per-element temps (they collide across sibling
+            # register-tile cells, which reuse the same names), so it stays.
+            head, base, close = [f"{pad}{{ {lane_stmt}"], f"{pad}  ", " }"
+        body = [f"{base}{ln}" for group in pre for ln in group]
         vec2 = {"f16": "__half2", "bf16": "__nv_bfloat162", "f32": "float2"}.get(dst_dt)
         if vec2 is not None:
             packer = {"f16": "__floats2half2_rn", "bf16": "__floats2bfloat162_rn", "f32": "make_float2"}[dst_dt]
             lo = f"{flat} + _g * {ldm} + _t * 2"
             hi = f"{flat} + (_g + 8) * {ldm} + _t * 2"
-            lines += [
-                f"{pad}  *reinterpret_cast<{vec2}*>(&{self.dst_buffer}[{lo}]) = {packer}({vals[0]}, {vals[1]});",
-                f"{pad}  *reinterpret_cast<{vec2}*>(&{self.dst_buffer}[{hi}]) = {packer}({vals[2]}, {vals[3]}); }}",
+            body += [
+                f"{base}*reinterpret_cast<{vec2}*>(&{self.dst_buffer}[{lo}]) = {packer}({vals[0]}, {vals[1]});",
+                f"{base}*reinterpret_cast<{vec2}*>(&{self.dst_buffer}[{hi}]) = {packer}({vals[2]}, {vals[3]});",
             ]
-            return lines
-        # Fallback: per-element scalar stores (dtypes without a 2-vector packer).
-        lines += [
-            f"{pad}  {self.dst_buffer}[{flat} + _g * {ldm} + _t * 2 + 0] = {vals[0]};",
-            f"{pad}  {self.dst_buffer}[{flat} + _g * {ldm} + _t * 2 + 1] = {vals[1]};",
-            f"{pad}  {self.dst_buffer}[{flat} + (_g + 8) * {ldm} + _t * 2 + 0] = {vals[2]};",
-            f"{pad}  {self.dst_buffer}[{flat} + (_g + 8) * {ldm} + _t * 2 + 1] = {vals[3]}; }}",
-        ]
-        return lines
+        else:  # per-element scalar stores (dtypes without a 2-vector packer)
+            body += [
+                f"{base}{self.dst_buffer}[{flat} + _g * {ldm} + _t * 2 + 0] = {vals[0]};",
+                f"{base}{self.dst_buffer}[{flat} + _g * {ldm} + _t * 2 + 1] = {vals[1]};",
+                f"{base}{self.dst_buffer}[{flat} + (_g + 8) * {ldm} + _t * 2 + 0] = {vals[2]};",
+                f"{base}{self.dst_buffer}[{flat} + (_g + 8) * {ldm} + _t * 2 + 1] = {vals[3]};",
+            ]
+        if close:
+            body[-1] += close
+        return head + body
 
     def _render_guarded(self, ctx: RenderCtx, *, flat: str, ldm, dst_dt: str, pre: list[list[str]], vals: list[str]) -> list[str]:
         """Masked-tile store: each fragment element's store (and its epilogue

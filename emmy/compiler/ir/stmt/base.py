@@ -92,14 +92,22 @@ class RenderCtx:
     # so they compose with non-default-dtype operands. Set transiently
     # by ``Assign.render`` around the native expression render.
     literal_default_dtype: str | None = None
+    # C-scope-local declared locals (the mma lane vars ``_g`` / ``_t``, the
+    # ``cp.async`` staging address ``_smem_addr``). A self-scoping stmt declares
+    # these once per ``{ }`` scope and reuses / reassigns them afterward instead
+    # of wrapping itself in a redundant block — so a loop body holding a single
+    # such stmt renders flat (``for (…) { … }``, not ``for (…) { { … } }``).
+    # UNLIKE the tables above this is **scope-local**: ``child()`` copies it (a
+    # new C scope inherits the enclosing scope's decls but its own additions do
+    # not leak back to the parent or across to siblings).
+    scope_decls: set[str] = field(default_factory=set)
 
     def child(self) -> RenderCtx:
-        """Return a new ctx one indent level deeper, sharing all tables.
-
-        ``replace`` shallow-copies every field, so the mutable tables (``shapes``,
-        ``ssa_dtypes``, …) stay shared by reference with the parent — only ``indent``
-        is bumped."""
-        return replace(self, indent=self.indent + 1)
+        """Return a new ctx one indent level deeper. The mutable tables (``shapes``,
+        ``ssa_dtypes``, …) stay shared by reference (SSA names are globally unique);
+        ``scope_decls`` is COPIED — it tracks per-C-scope local declarations, which an
+        inner scope inherits but must not leak back out of."""
+        return replace(self, indent=self.indent + 1, scope_decls=set(self.scope_decls))
 
     # ---- Convenience wrappers over ``self.target``. These exist so the
     # render methods read ``ctx.type_name(dt)`` instead of pulling the

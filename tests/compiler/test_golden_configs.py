@@ -36,6 +36,24 @@ def test_matmul_snippet_typed():
     assert "dtype=torch.float16" in matmul_snippet(128, 128, 128, "fp16")
 
 
+def test_matmul_snippet_mixed_erases_a_cast():
+    # The A downcast rides ``.to`` (erased by the tracer → f32-A × f16-B in the graph);
+    # B is born f16. Eager executes the cast, so the reference is HGEMM.
+    assert matmul_snippet(512, 4096, 3840, "mixed") == (
+        "torch.matmul(torch.randn(512,3840).to(torch.float16), torch.randn(3840,4096,dtype=torch.float16))"
+    )
+
+
+def test_mixed_shape_key_stays_in_scalar_bucket():
+    # A mixed contraction still loads an f32 operand, so the stamped op side keys
+    # ``is_warp=False`` (``S_dtype_f32`` ≠ 0) — the golden side must mirror the stamp.
+    from emmy.compiler.pipeline.search.data.shape import ShapeKey
+
+    key = ShapeKey.from_matmul(512, 4096, 3840, "mixed")
+    assert key == ShapeKey.from_matmul(512, 4096, 3840, "fp32")
+    assert not key.is_warp
+
+
 @pytest.mark.parametrize(
     ("emmy_us", "cublas_us", "ratio", "golden"),
     [(100.0, 99.0, 0.99, True), (100.0, 95.0, 0.95, True), (100.0, 80.0, 0.80, False), (0.0, 99.0, 0.0, False)],

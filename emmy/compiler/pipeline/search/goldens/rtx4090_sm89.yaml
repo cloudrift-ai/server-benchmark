@@ -215,6 +215,51 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16/w2x4/f4x4', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
     emmy_us: 412.9
     cublas_us: 388.0
+  - kernel: matmul
+    name: matmul.q_proj.h3840.mixed
+    M: 512
+    N: 4096
+    K: 3840
+    dtype: mixed
+    knobs: {TILE: 'a:mma_m16n8k16_f16/w1x4/f4x4/k2'}
+    emmy_us: 164.4
+    cublas_us: 109.0
+  - kernel: matmul
+    name: matmul.kv_proj.h3840.mixed
+    M: 512
+    N: 2048
+    K: 3840
+    dtype: mixed
+    knobs: {TILE: 'a:mma_m16n8k16_f16/w1x4/f4x4/k2'}
+    emmy_us: 142.8
+    cublas_us: 57.0
+  - kernel: matmul
+    name: matmul.mlp_gate_up.h3840.mixed
+    M: 512
+    N: 15360
+    K: 3840
+    dtype: mixed
+    knobs: {TILE: 'a:mma_m16n8k16_f16/w2x2/f4x8/k2'}
+    emmy_us: 611.8
+    cublas_us: 410.0
+  - kernel: matmul
+    name: matmul.o_proj.h3840
+    M: 512
+    N: 3840
+    K: 4096
+    dtype: fp16
+    knobs: {TILE: 'a:mma_m16n8k16_f16/w2x4/f4x4/k2', REDUCE: 'g2k', STAGE: 'd1/cp'}
+    emmy_us: 131.1
+    cublas_us: 113.0
+  - kernel: matmul
+    name: matmul.mlp_down.h3840
+    M: 512
+    N: 3840
+    K: 15360
+    dtype: fp16
+    knobs: {TILE: 'a:mma_m16n8k16_f16/w1x2/f4x8', REDUCE: 'g2k', STAGE: 'd3/cp/ring'}
+    emmy_us: 426.4
+    cublas_us: 385.0
   - kernel: pointwise
     name: pointwise.n4096
     M: 512

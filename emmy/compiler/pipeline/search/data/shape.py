@@ -45,8 +45,14 @@ class ShapeKey:
         axes are **excluded** from the extent products (``free_prod = N``, not the
         hint-sized ``M*N``) and flagged via ``S_ext_n_symbolic_axis`` — because
         the stamped histogram is the only identity the op side has (it doesn't
-        know the hint), so a hint-sized golden key would never join it."""
-        return cls(free_prod=N if dynamic else M * N, reduce_max=K, is_warp=dtype != "fp32", is_dyn=dynamic)
+        know the hint), so a hint-sized golden key would never join it.
+
+        ``mixed`` (f32-A × f16-B, the erased-cast signature) keys ``is_warp=False``
+        for the same mirror-the-stamp reason: the op side derives ``is_warp`` from
+        ``S_dtype_f32`` (see :meth:`from_s_features`), and a mixed contraction still
+        loads an f32 operand — even though post-demotion it *deploys* on the warp
+        tier. The key mirrors the stamp, not the tier."""
+        return cls(free_prod=N if dynamic else M * N, reduce_max=K, is_warp=dtype not in ("fp32", "mixed"), is_dyn=dynamic)
 
     @classmethod
     def from_s_features(cls, s: dict) -> ShapeKey:

@@ -61,9 +61,18 @@ def matmul_snippet(M: int, N: int, K: int, dtype: str = "fp32") -> str:
     config reproduces from the same call. fp32 is ``torch.randn``'s default, so
     no dtype kwarg is emitted for fp32 — matching the canonical example
     ``torch.matmul(torch.randn(2048,2048), torch.randn(2048,2048))``.
+
+    ``mixed`` is the f32-A × f16-B contraction: torch cannot execute a mixed
+    matmul, so the A downcast rides ``.to`` — which the tracer erases — leaving
+    f32-A × f16-B in the traced graph (the gemma norm→linear signature the
+    demoting sync compute-fill lowers onto the mma tier). Eager still executes
+    the cast, so the reference is cuBLAS HGEMM, matching the model's real
+    execution.
     """
     if dtype == "fp32":
         return f"torch.matmul(torch.randn({M},{K}), torch.randn({K},{N}))"
+    if dtype == "mixed":
+        return f"torch.matmul(torch.randn({M},{K}).to(torch.float16), torch.randn({K},{N},dtype=torch.float16))"
     tdt = {"fp16": "torch.float16", "bf16": "torch.bfloat16"}[dtype]
     return f"torch.matmul(torch.randn({M},{K},dtype={tdt}), torch.randn({K},{N},dtype={tdt}))"
 

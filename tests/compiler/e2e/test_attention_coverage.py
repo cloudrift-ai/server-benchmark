@@ -277,8 +277,8 @@ def test_flash_transposed_output_matches_torch(monkeypatch):
 def test_flash_chain_matches_torch(monkeypatch, B, H, S, D):
     """The FA-2 shared-score scalar chain — the P@V output ``d`` rides a register vector ``O[BM, D]``,
     the QK^T score computed once per KV step and shared across ``d`` (one kernel, scalar FMA P@V).
-    **Xfailed:** this scalar-chain restructuring is not yet rebuilt (no ``O_i_0`` register vector is
-    emitted today), so the ``O_i_0`` assertion below fails."""
+    Greedy: these fp32 shapes are not warp-eligible, so the prior picks the chain among the scalar
+    forms (the pinned selection has its own case below)."""
     torch.manual_seed(0)
     q, k, v = (torch.randn(B, H, S, D) for _ in range(3))
     backend, compiled, _graph, kernels = _trace(_Sdpa(), (q, k, v))
@@ -292,6 +292,37 @@ def test_flash_chain_matches_torch(monkeypatch, B, H, S, D):
 
     md = _max_diff(backend, compiled, {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}, ref)
     assert md < 1e-4, f"chain flash max_diff={md:.6e}"
+
+
+@requires_cuda
+def test_flash_chain_pin_selects_chain_on_warp_eligible_shape(monkeypatch):
+    """A ``TILE@<pv_k>=f<D>`` pin (with ``TILE=a:scalar`` covering the score node) selects the CHAIN
+    row on a shape where the mma tier is also on offer — the pinned spelling of the shared-score
+    scalar baseline. Regression: the fold dispatch used to route ANY live ``TILE`` pin to the warp
+    rows alone, so no pin could reach the chain and the scalar pin degraded to the per-cell tier
+    (the 64×-redundant score recompute)."""
+    # Individual EMMY_* vars, not the EMMY_KNOBS aggregate: the aggregate splats into per-knob env
+    # vars with overwrite=False, so a var another test already set (or left behind) would win over
+    # this test's aggregate under xdist; monkeypatch on the individual vars reverts cleanly.
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_TILE", "a:scalar")
+    monkeypatch.setenv("EMMY_TILE@PJ", "f64")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
+    backend, compiled, _graph, kernels = _trace(_Sdpa(), (q, k, v))
+    assert len(kernels) == 1, f"chain flash should fuse to one kernel, got {len(kernels)}"
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "O_i_0" in src, "chain form must carry the O[d] register vector"
+    assert "mma" not in src, "the scalar pin must not fall through to the warp tier"
+    cq, ck, cv = q.cuda(), k.cuda(), v.cuda()
+
+    def ref():
+        with torch.no_grad():
+            return F.scaled_dot_product_attention(cq, ck, cv).cpu().flatten().numpy()
+
+    md = _max_diff(backend, compiled, {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}, ref)
+    assert md < 5e-3, f"pinned chain flash max_diff={md:.6e}"
 
 
 # =========================================================================== #

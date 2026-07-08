@@ -1274,21 +1274,26 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         if pair is not None:
             red, head, pv = pair
             warps = _twisted_warp_options(tile, name, knobs, _smem_budget(ctx), _tma_allowed(ctx))
-            # A live warp ``TILE`` pin OR a non-empty ``STAGE`` pin keeps the mma rows alone: ONLY the
-            # warp tier stages, so a staging pin (the ``--ab STAGE=…`` / ``emmy tune`` staging probe,
-            # or ``EMMY_STAGE``) must not fall through to the chain / scalar reduce-partition siblings
-            # and let the prior bury the (necessarily lower-occupancy) staged warp form under a
-            # higher-occupancy scalar form — the scalar-fallback that made a staged-flash A/B row read
-            # as a 100× regression. ``warps == []`` (a non-warp-eligible flash) still degrades to
-            # scalar below, so a stage pin on such a shape stays a graceful no-op.
+            # A live **warp** ``TILE`` pin (``a:<atom>…``) OR a non-empty ``STAGE`` pin keeps the mma
+            # rows alone: ONLY the warp tier stages, so a staging pin (the ``--ab STAGE=…`` /
+            # ``emmy tune`` staging probe, or ``EMMY_STAGE``) must not fall through to the chain /
+            # scalar reduce-partition siblings and let the prior bury the (necessarily
+            # lower-occupancy) staged warp form under a higher-occupancy scalar form — the
+            # scalar-fallback that made a staged-flash A/B row read as a 100× regression.
+            # ``warps == []`` (a non-warp-eligible flash) still degrades to scalar below, so a stage
+            # pin on such a shape stays a graceful no-op. A NON-warp ``TILE`` pin (``a:scalar`` /
+            # ``""`` / the chain's ``f<d>``) falls through to the scalar forms and narrows them
+            # below (:func:`_narrow_flash_forms`) — routing on ANY pin locked the chain row out.
             stage_pinned = STAGE.raw() is not None and bool(STAGE.narrow([""])[0])
-            if warps and (TILE.raw() is not None or stage_pinned):
+            warp_pinned = TILE.raw() is not None and is_warp_codec(TILE.raw())
+            if warps and (warp_pinned or stage_pinned):
                 return warps if len(warps) > 1 else warps[0]
             chain = _twisted_chain_option(tile, place, name, knobs)
             forms = [*warps, *([chain] if chain is not None else [])]
             if forms:
                 empty = {_at(TILE, head.k_axis.name): "", _at(TILE, pv.k_axis.name): "", _at(STAGE, red.axis.name): ""}
                 forms += [_option(tile, place, spec, name, {**knobs, **empty}) for spec in _reduce_specs(tile, place)]
+                forms = _narrow_flash_forms(forms, head, pv)
                 return forms if len(forms) > 1 else forms[0]
         else:
             # A PLANAR ⊗-fold over a computed MAP cone — the fused producer → matmul edge — honors
@@ -1305,6 +1310,39 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
 
 
 _CHAIN_MAX_D = 64  # register-vector budget: the chain holds the whole output row per thread
+
+
+def _canon_tile_spec(spec: str) -> str:
+    """A ``TILE`` spelling canonicalized through the codec (``a:scalar`` ≡ ``""``, ``f64x1`` ≡
+    ``f64``) so pin-only aliases compare equal to stamped row spellings; an unparseable pin passes
+    through (it just won't match, and :func:`_narrow_flash_forms` degrades gracefully)."""
+    if not spec:
+        return ""
+    try:
+        return TilePlan.parse(spec).spell()
+    except Exception:  # noqa: BLE001 — an invalid pin must not crash the fork build
+        return spec
+
+
+def _narrow_flash_forms(forms: list[TileOp], head: Contraction, pv: Contraction) -> list[TileOp]:
+    """Narrow the flash fork's leaf rows by the live per-node ``TILE`` pins. Every flash row spells
+    the same key set (``TILE@<qk_k>`` / ``TILE@<pv_k>``), so a pin selects rows by their stamped
+    spelling: ``f<d>`` on the PV k-axis keeps the CHAIN row, ``""`` / ``a:scalar`` the per-cell
+    rows, a warp codec the mma rows (the bare-warp-pin fast path returns before this). A pin that
+    matches NO row keeps the full fork — the same graceful degrade as a warp pin that doesn't fit
+    the flash form (warned, greedy picks by prior)."""
+    live: dict[str, str] = {}
+    for ax in (head.k_axis.name, pv.k_axis.name):
+        pin = TILE.narrow_at(ax)
+        if pin is not None:
+            live[ax] = _canon_tile_spec(pin)
+    if not live:
+        return forms
+    kept = [f for f in forms if all(_canon_tile_spec(f.knobs.get(_at(TILE, ax), "")) == p for ax, p in live.items())]
+    if not kept:
+        logger.warning("TILE pin(s) %s match no flash form (warp / chain / per-cell); keeping the full fork", live)
+        return forms
+    return kept
 
 
 def _twisted_pair(op) -> tuple[Reduction, Contraction, Contraction] | None:

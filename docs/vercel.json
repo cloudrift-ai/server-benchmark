@@ -1,7 +1,12 @@
 {
   "redirects": [
-    { "source": "/", "destination": "/emmy/" },
+    { "source": "/", "destination": "/emmy/getting_started" },
+    { "source": "/emmy", "destination": "/emmy/getting_started" },
+    { "source": "/emmy/", "destination": "/emmy/getting_started" },
     { "source": "/cloudrift", "destination": "https://docs.cloudrift.ai/" },
     { "source": "/cloudrift/:path*", "destination": "https://docs.cloudrift.ai/:path*" }
+  ],
+  "rewrites": [
+    { "source": "/emmy/:path*", "destination": "/:path*" }
   ]
 }

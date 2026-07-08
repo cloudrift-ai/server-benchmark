@@ -28,6 +28,9 @@ Why this is better:
   number (see the cuda ARCHITECTURE.md note added on the finding-6 branch).
 - **Kills the mis-attribution class.** Finding 6's `mm0`/`mm1` artifact (identical work, 5.1 vs 0.8 µs solo
   windows) can't happen when each kernel is benched as its own program with its own warmup and calibration.
+  (2026-07-07: one member of this class turned out to be a plain ordering bug — the display paired `per_launch`
+  by graph dict order vs the backend's topo launch order, cross-labeling rows 400× apart on split programs;
+  fixed minimally in run.py `_launch_order_cuda_nodes`, nsys-verified. The refactor above remains the durable fix.)
 
 ## Current state (what already exists)
 

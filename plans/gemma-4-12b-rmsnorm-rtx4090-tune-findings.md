@@ -1,5 +1,13 @@
 # Gemma-4-12B RMSNorm kernel tune findings — RTX 4090 (sm_89)
 
+> **CORRECTION (2026-07-07, nsys-verified):** the per-kernel µs in this report are **cross-labeled** — `run --bench`
+> paired `per_launch` times to kernels by graph **dict** order while the backend launches in **topo** order (fixed in
+> `_launch_order_cuda_nodes`, run.py). The "626–1540 µs norm epilogues" are actually the **q/k projections running
+> scalar tiles** (the norm's f32 output feeds the f16 weights — a mixed-dtype matmul the f16 MMA tier never takes);
+> the norm kernels themselves are 4–5 µs and healthy. e4bb2c's "98 ms" is its reproducer's down-projection running
+> scalar, not the norm and not a hang; its 18 µs -O1 measurement was the true norm cost, not a wrong-bench. Findings
+> 2–3 below are superseded accordingly; the real open item is the **mixed-dtype scalar matmul fallback**.
+
 - **Scope:** targeted tune of the 7 RMSNorm-carrying kernels of `google/gemma-4-12B` layer 0 on a rented CloudRift
   RTX 4090 (24 GB, driver 580.65.06, CUDA 12.9, torch 2.12.1+cu130). Static shapes at the seq_len=512 hint. Each
   kernel tuned from its dump reproducer (`emmy tune <k>.torch.json --bench`), then greedy-benched

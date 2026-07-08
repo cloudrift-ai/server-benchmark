@@ -210,11 +210,10 @@ def _pick_structural(
     (``db`` threads the tune DB down), so each side's price is a *measurement*
     wherever the tune benched that kernel, and a structure the tune measured
     slower cannot displace a measured-faster fused config on a model
-    extrapolation alone. (Prediction-only pricing — the previous behavior —
-    deployed the ``mlp_gate_up.h4096`` split at 1.26× the measured-best fused
-    kernel: the model's absolute-µs error doesn't cancel across two different
-    kernel families, so Σ-of-predictions comparisons flip forks the DB already
-    refutes.) Gated on the *trusted* ``CatBoostPrior`` (``prior.trustworthy``
+    extrapolation alone — a Σ-of-predictions comparison across two different
+    kernel families is exposed to the model's absolute-µs error, which doesn't
+    cancel across sides the way it does among siblings of one fork. Gated on
+    the *trusted* ``CatBoostPrior`` (``prior.trustworthy``
     — trained AND passing the reservoir calibration gate): Σ-comparisons
     through the analytic cold-start model are unvalidated, and neither a cold
     compile nor a mis-calibrated model may change kernel sets."""
@@ -265,28 +264,50 @@ def _db_measured_index(db, ctx) -> dict[frozenset, list[tuple[dict, float]]]:
     return index
 
 
+def _sig_groups(index: dict[frozenset, list[tuple[dict, float]]], sig: frozenset) -> list[list[tuple[dict, float]]]:
+    """The index groups compatible with a candidate's ``S_*`` signature: the
+    exact hit when present, else every group agreeing on all *shared* ``S_*``
+    keys. A key present on one side only is featurizer-vocabulary drift, not a
+    shape difference — the deploy candidate's fork-time base carries scheduler
+    stamps the persisted perf rows may predate (e.g. #311's
+    ``S_warp_eligible``, absent from every row recorded before it), and a
+    strict-equality join lets one added feature silently kill the whole
+    evidence lane against every existing DB. Shapes always share the extent
+    keys, so shared-key agreement still separates them; an empty shared set
+    matches nothing (conservative)."""
+    if sig in index:
+        return [index[sig]]
+    cand = dict(sig)
+    groups = []
+    for row_sig, measured in index.items():
+        row = dict(row_sig)
+        shared = cand.keys() & row.keys()
+        if shared and all(cand[k] == row[k] for k in shared):
+            groups.append(measured)
+    return groups
+
+
 def _db_measured_pick(index: dict[frozenset, list[tuple[dict, float]]], rows: list[dict]) -> tuple[int, float] | None:
     """Measured-evidence argmin over candidate knob rows against the DB index —
     the same prefix-consistency contract as ``Prior.evidence_pick`` (every
     tunable knob the candidate specifies must match the measured row; undecided
-    knobs are free), on the -O1 ranking lane's medians. Keeps a config the tune
-    *measured* fastest from losing the deploy to an unmeasured model
-    extrapolation (eighth golden sweep, finding 2 — the deploy was a pure prior
-    argmax, so tune evidence never overrode it). -O3 reservoir evidence, where
-    present, takes precedence at the call site (a deployable measurement beats
-    a ranking-lane one)."""
+    knobs are free), on the -O1 ranking lane's medians. Signature matching is
+    drift-tolerant (:func:`_sig_groups`). Keeps a config the tune *measured*
+    fastest from losing the deploy to an unmeasured model extrapolation (eighth
+    golden sweep, finding 2 — the deploy was a pure prior argmax, so tune
+    evidence never overrode it). -O3 reservoir evidence, where present, takes
+    precedence at the call site (a deployable measurement beats a ranking-lane
+    one)."""
     best: tuple[int, float] | None = None
     for i, cand in enumerate(rows):
         sig = frozenset((k, str(v)) for k, v in cand.items() if k.startswith("S_"))
-        measured = index.get(sig)
-        if not measured:
-            continue
         cand_tun = {k: str(v) for k, v in cand.items() if not k.startswith(("S_", "H_"))}
-        for row_tun, us in measured:
-            if any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items()):
-                continue
-            if best is None or us < best[1]:
-                best = (i, us)
+        for measured in _sig_groups(index, sig):
+            for row_tun, us in measured:
+                if any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items()):
+                    continue
+                if best is None or us < best[1]:
+                    best = (i, us)
     return best
 
 

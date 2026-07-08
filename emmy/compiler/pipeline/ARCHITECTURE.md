@@ -194,9 +194,13 @@ engine loops (`drive` for exploration, `resolve` for deterministic resolution):
   partition-fork `Decision`, memoized per `op_cache_key`) and the cheaper kernel set wins, so an unpinned compile deploys
   the splits `tune` measured best. The nested resolve carries the deploy's `db`, so each kernel's price follows the same
   evidence hierarchy as a knob pick (reservoir -O3, then the -O1 ranking lane, model prediction only where unmeasured) —
-  a pure Σ-of-predictions comparison flips forks the DB refutes (the ninth-4090-sweep `mlp_gate_up` split misdeploy),
-  because the model's absolute-µs error doesn't cancel across different kernel families. Cold, or when a side is
-  unpriceable, the structural leaf is filtered — a cold compile never changes kernel sets. Retries are decide-wrappers over a deterministic re-resolve (every other choice replays
+  a pure Σ-of-predictions comparison is exposed to the model's absolute-µs error, which doesn't cancel across different
+  kernel families. Cold, or when a side is unpriceable, the structural leaf is filtered — a cold compile never changes
+  kernel sets. The DB join is **drift-tolerant** (`greedy._sig_groups`): a candidate's fork-time `S_*` base may carry
+  scheduler stamps the persisted perf rows predate (#311's `S_warp_eligible` is on no row recorded before it), and a
+  strict-equality signature join would let one added feature silently disable the whole evidence lane against every
+  existing DB — the ninth-4090-sweep `mlp_gate_up` misdeploy (the model's `g2k` pick beating the measured-faster fused
+  config it was never allowed to see). Retries are decide-wrappers over a deterministic re-resolve (every other choice replays
   identically — cheap non-chronological backtracking, no snapshots): a structural pick that leaves a fragment kernel
   un-lowered retires structural picks wholesale and re-resolves the keep-fused branch before falling back to tile
   blocklisting.

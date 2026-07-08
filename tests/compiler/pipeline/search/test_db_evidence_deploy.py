@@ -38,6 +38,25 @@ def test_db_pick_requires_signature_match():
     assert _db_measured_pick(index, [other_shape]) is None
 
 
+def test_db_pick_tolerates_signature_vocabulary_drift():
+    """A deploy candidate's fork-time base may carry ``S_*`` stamps the recorded rows
+    predate (#311's ``S_warp_eligible`` is on no perf row recorded before it) — the join
+    must match on the shared ``S_*`` keys, or one added feature silently disables the
+    whole evidence lane against every existing DB (the ninth-4090-sweep `mlp_gate_up`
+    misdeploy: the model's pick beat a measured-faster config the strict join hid)."""
+    index = _index_of(({"TILE": "n16x8/f4x8", "REDUCE": "g2a"}, 47.1))
+    drifted = {**_SIG, "S_warp_eligible": 1.0, "TILE": "n16x8/f4x8", "REDUCE": "g2a"}
+    assert _db_measured_pick(index, [drifted]) == (0, 47.1)
+
+
+def test_db_pick_drift_tolerance_still_separates_shapes():
+    """Shared-key agreement still rejects a different shape: the extent keys are on
+    both sides, so drift tolerance never crosses shapes."""
+    index = _index_of(({"TILE": "n16x8/f4x8"}, 10.0))
+    other = {"S_ext_free_prod": 512.0, "S_dtype_f32": 1.0, "S_warp_eligible": 1.0, "TILE": "n16x8/f4x8"}
+    assert _db_measured_pick(index, [other]) is None
+
+
 def test_db_pick_prefix_consistency_frees_undecided_knobs():
     # The measured row carries a STAGE the candidate hasn't decided — still a match
     # (value-of-position semantics); a *conflicting* decided knob is not.

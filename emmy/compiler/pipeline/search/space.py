@@ -232,6 +232,7 @@ LOOPIFY = Knob(
     hints=(0,),
     help="Min parallel FragmentApply run length to re-roll into a #pragma-unroll loop (0 = off, byte-identical).",
     off=0,
+    readability=True,  # SASS-identical listing re-spell — excluded from the feature vector; batch-enabled by EMMY_READABLE
 )
 
 

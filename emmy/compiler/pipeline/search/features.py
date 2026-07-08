@@ -253,6 +253,8 @@ def knob_features(knobs: dict) -> dict[str, float]:
             feats[name] = float(val)
             continue
         knob = get(name)
+        if knob is not None and knob.readability:
+            continue  # readability-only policy (LOOPIFY): SASS-identical, never a ranking feature
         if knob is not None and knob.features is not None:
             feats.update(knob.features(val))
             continue

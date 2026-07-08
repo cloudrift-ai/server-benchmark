@@ -55,6 +55,7 @@ import re
 from dataclasses import fields, is_dataclass, replace
 from itertools import count
 
+from emmy import config
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
@@ -76,7 +77,10 @@ def rewrite(root: Node) -> KernelOp | None:
     op: KernelOp = root.op
     if LOOPIFY.name in op.knobs:
         raise RuleSkipped("LOOPIFY already decided (idempotence via knob)")
-    n = LOOPIFY.read_int(0)
+    # Precedence: an explicit ``EMMY_LOOPIFY`` pin wins; else ``EMMY_READABLE`` defaults it to 2 (the
+    # fullest re-roll — QK nest + fusion); else off. So ``compile`` (readable-on) yields legible
+    # listings while tune / run / bench stay byte-identical.
+    n = LOOPIFY.read_int(2 if config.readable() else 0)
     knobs = {**op.knobs, LOOPIFY.name: n}
     if n < 2:  # 0 / unset / a lone iteration → off, byte-identical
         return KernelOp(body=op.body, name=op.name, knobs=knobs)

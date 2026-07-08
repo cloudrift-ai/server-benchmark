@@ -196,7 +196,8 @@ engine loops (`drive` for exploration, `resolve` for deterministic resolution):
   evidence hierarchy as a knob pick (reservoir -O3, then the -O1 ranking lane, model prediction only where unmeasured) —
   a pure Σ-of-predictions comparison is exposed to the model's absolute-µs error, which doesn't cancel across different
   kernel families. Cold, or when a side is unpriceable, the structural leaf is filtered — a cold compile never changes
-  kernel sets. The DB join is **drift-tolerant** (`greedy._sig_groups`): a candidate's fork-time `S_*` base may carry
+  kernel sets. Both evidence joins are **drift-tolerant** (`Prior.sig_groups` — one contract for the reservoir -O3
+  tier and the DB tier): a candidate's fork-time `S_*` base may carry
   scheduler stamps the persisted perf rows predate (#311's `S_warp_eligible` is on no row recorded before it), and a
   strict-equality signature join would let one added feature silently disable the whole evidence lane against every
   existing DB — the ninth-4090-sweep `mlp_gate_up` misdeploy (the model's `g2k` pick beating the measured-faster fused

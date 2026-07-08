@@ -272,26 +272,11 @@ def _db_measured_index(db, ctx) -> dict[frozenset, list[tuple[dict, float, bool]
 
 
 def _sig_groups(index: dict[frozenset, list[tuple[dict, float, bool]]], sig: frozenset) -> list[list[tuple[dict, float, bool]]]:
-    """The index groups compatible with a candidate's ``S_*`` signature: the
-    exact hit when present, else every group agreeing on all *shared* ``S_*``
-    keys. A key present on one side only is featurizer-vocabulary drift, not a
-    shape difference — the deploy candidate's fork-time base carries scheduler
-    stamps the persisted perf rows may predate (e.g. #311's
-    ``S_warp_eligible``, absent from every row recorded before it), and a
-    strict-equality join lets one added feature silently kill the whole
-    evidence lane against every existing DB. Shapes always share the extent
-    keys, so shared-key agreement still separates them; an empty shared set
-    matches nothing (conservative)."""
-    if sig in index:
-        return [index[sig]]
-    cand = dict(sig)
-    groups = []
-    for row_sig, measured in index.items():
-        row = dict(row_sig)
-        shared = cand.keys() & row.keys()
-        if shared and all(cand[k] == row[k] for k in shared):
-            groups.append(measured)
-    return groups
+    """Drift-tolerant signature match — see :meth:`Prior.sig_groups` (one
+    contract for the reservoir tier and this DB tier)."""
+    from emmy.compiler.pipeline.search.prior.base import Prior  # noqa: PLC0415
+
+    return Prior.sig_groups(index, sig)
 
 
 def _db_measured_pick(index: dict[frozenset, list[tuple[dict, float, bool]]], rows: list[dict]) -> tuple[int, float] | None:

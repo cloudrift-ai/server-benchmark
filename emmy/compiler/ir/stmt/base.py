@@ -562,7 +562,13 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
     # Readability (EMMY_READABLE): fold each single-use scalar ``Assign`` temp into its sole
     # consumer's expression — ``m_i__t2 = expf(m_i__t1)`` over ``m_i__t1 = m_i - t0`` becomes
     # ``m_i__t2 = expf(m_i - t0)``. Only when the temp's ONE read is in this same flat body (a nested
-    # or repeated use keeps it named), so it never changes evaluation; SASS-identical.
+    # or repeated use keeps it named), so it never changes evaluation; SASS-identical. Correctness
+    # rests on two premises: (1) every node's ``deps()`` is a COMPLETE account of the names its
+    # render references — ``_read_counts`` sees readers only through it, so an under-reporting node
+    # (a stashed name in a field ``deps`` skips) could hide a second reader of a folded temp; and
+    # (2) no statement between the def and its sole read redefines an operand the folded expression
+    # reads (a carrier commit — ``l_i = …`` — is a same-body redefinition). (2) is checked below
+    # (the straddle guard); (1) is each node's ``deps`` contract.
     from emmy.compiler.ir.stmt.leaves import Assign  # local — avoid cycle
 
     inlined: set[str] = set()
@@ -575,18 +581,29 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
             for nm in s.deps():
                 local[nm] = local.get(nm, 0) + 1
         inline = dict(ctx.inline_exprs)
-        for s in body:
+        bases: dict[str, frozenset[str]] = {}  # inlined temp → the base names its folded expression reads
+        stmts = list(body)
+        for di, s in enumerate(stmts):
             if not (isinstance(s, Assign) and total.get(s.name, 0) == 1 and local.get(s.name, 0) == 1 and s.name not in inline):
                 continue
             # The sole reader must render its operands through ``op_to_expr`` / ``Var.render`` (only
             # ``Assign`` does) — folding into an ``Accum`` / ``Reassign`` / ``Write`` would drop the temp
             # without substituting it, leaving an undefined reference.
-            reader = next((r for r in body if s.name in r.deps()), None)
-            if not isinstance(reader, Assign):
+            ri = next((j for j, r in enumerate(stmts) if s.name in r.deps()), None)
+            if ri is None or not isinstance(stmts[ri], Assign):
+                continue
+            # Straddle guard: the fold moves this computation from its def site to the read site, so
+            # every base operand — transitively, through already-inlined temps — must not be redefined
+            # by a statement in between (``defines()``: a state commit / Accum). Each link checks its
+            # own def→read window; chained folds compose, so the windows cover the full span from the
+            # earliest constituent's def to the final read.
+            names = frozenset(nm for a in s.args for nm in bases.get(a, (a,)))
+            if any(nm in st.defines() for st in stmts[di + 1 : ri] for nm in names):
                 continue
             expr = op_to_expr(s.op.name, [Var(a) for a in s.args])
             rendered = expr.render(replace(ctx, inline_exprs=inline))
             inline[s.name] = f"({rendered})" if isinstance(expr, (BinaryExpr, TernaryExpr)) else rendered
+            bases[s.name] = names
             inlined.add(s.name)
         if inlined:
             ctx = replace(ctx, inline_exprs=inline)

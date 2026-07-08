@@ -290,7 +290,10 @@ def build_flash_frag(
     frag.add_node(
         # fp32 constant: the score scale accumulates into the fp32 carrier, so a half-precision
         # ``_flash_scale`` would only add an ``__half2float`` at every use (and round ``1/√d`` to fp16).
-        op=ConstantOp(name="_flash_scale", value=scale), inputs=[], output=Tensor("_flash_scale", (1,), F32), node_id="_flash_scale"
+        op=ConstantOp(name="_flash_scale", value=scale),
+        inputs=[],
+        output=Tensor("_flash_scale", (1,), F32),
+        node_id="_flash_scale",
     )
     if mask_buf is not None:
         frag.add_node(op=InputOp(), inputs=[], output=Tensor(mask_buf, mask_shape, out.dtype), node_id=mask_buf)

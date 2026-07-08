@@ -114,7 +114,11 @@ For each kernel meaningfully behind eager or tcompile, assign one (or more) of f
 
 1. **Search shortfall** (patience / prior pick-reachability): `eval variants` shows the pick ranked far from the
    measured best (`pick: rank R/N, X.XXx of best … <-- misses best`). Confirm with
-   `emmy eval prior --dataset db` (aggregate reachability) and `emmy eval knobs` (per-knob regret).
+   `emmy eval prior --dataset db` (aggregate reachability) and `emmy eval knobs` (per-knob regret). Attribute the
+   miss with `emmy eval prior --dataset nodes --blame --kernel <SUBSTR>`: the per-feature blame table names the
+   features whose terms pushed the wrong pick (a BLIND fork = the featurizer can't separate the siblings — a
+   featurizer gap, not a weight problem); add `--ablate` for the masked-Δ view (`< 0` = actively misleading
+   feature). This replaces hand-deriving "which weight caused it" from `analytic.py`.
    The rank-1 row's knobs are your A/B pin for step 4.
 2. **Tier / optimization lockout**: every row in the `eval variants` leaderboard is scalar-tier (`MMA=0`, no
    warp tile) — the tensor-core variants were never *enumerated*, so an eligibility gate fired. Find it in

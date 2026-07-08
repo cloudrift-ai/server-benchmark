@@ -46,7 +46,7 @@ Read `emmy/compiler/pipeline/ARCHITECTURE.md` (sections: "Forks and the one rank
 - `search/analytic.py` — golden-eval glue: `enumerate_graph` (live-fork candidate capture), `evaluate_golden`.
 - `search/golden.py` + per-GPU golden YAMLs — the curated verified-optimum configs.
 - `scripts/golden_knob_heuristics.py` — the current offline fitter (random search + coordinate descent over linear
-  weights, golden-rank objective). Superseded by the Phase-3 fitter.
+  weights, golden-rank objective). Superseded by the Phase-4 fitter.
 - `search/data/` — `Sample` / `Dataset` / `ShapeKey`; `Dataset.fold_node_rows` (group-holdout folds by op_sig / gpu).
 
 Vocabulary: **leaf** = complete knob config with a direct bench; **branch** = partial knob prefix, value-of-position
@@ -116,7 +116,7 @@ verified-best configs (tuned + A/B'd with integrity gates), committed per-GPU.
    path-descent (presumes the golden's branch must win every level — a sibling branch may hold a near-equal config;
    sibling regret over measured values answers the same question honestly), top-1/top-k rates and Spearman (proxies
    for regret). A **feature-ablation robustness check** (mask each feature/family, measure metric collapse) is part
-   of the gate as a resilience verification, not a quality metric — built in Phase 3/7 where it's consumed.
+   of the gate as a resilience verification, not a quality metric — built in Phase 2 (blame + ablation tooling) and consumed by the Phase-8 gate.
    Promote only if ≥ incumbent; otherwise keep the old artifact and log the
    quarantine. CI: artifact `feat_ver == FEATURIZER_VERSION`, model cols ⊆ live featurizer keys, golden median rank ≤
    threshold, per-feature **distribution fingerprints** (training quantiles vs live golden-enumeration featurization —
@@ -163,15 +163,16 @@ verified-best configs (tuned + A/B'd with integrity gates), committed per-GPU.
 
 ## Phases
 
-Each phase is independently verifiable; 1–3 need no GPU (except the optional collection leg in 2); hardware spend
-concentrates in 6. Dependencies: 1 → 2 → 3 → {4, 5} → 6 → 7; 8 floats.
+Each phase is independently verifiable; 1–4 need no GPU (except the optional collection leg in 3); hardware spend
+concentrates in 7. Dependencies: 1 → {2, 3}; 3 → 4 → {5, 6} → 7 → 8; 9 floats. Phase 2 is diagnostic tooling —
+parallel with 3, consumed by 4's fitter loop and 8's gate.
 
 1. **Evaluation harness + incumbent baseline.** Exactly the two gate metrics (decision 9): flattened golden rank
    (exists — `eval analytic`) and family-bucketed fork sibling value regret (rework `node_sibling_ranking`:
    regret instead of top-1/Spearman, bucket by the fork delta's knob family). NO comparison runner — comparing
    priors = diffing two report files (the golden-sweep findings already track progress across dates this way);
-   the Phase-3 fitter emits the same report per CV fold. May add a `Prior`-internal score-on-features seam
-   (both priors already featurize-then-predict) — needed by the later ablation check and the Phase-3 fitter; no
+   the Phase-4 fitter emits the same report per CV fold. May add a `Prior`-internal score-on-features seam
+   (both priors already featurize-then-predict) — needed by the Phase-2 attribution tooling and the Phase-4 fitter; no
    behavior change, equivalence-tested. **Prerequisite: one fresh ε-greedy `collect-node-data` sweep on a rented
    card** — the 2026-07-06 audit found the local node store 100% retired-vocabulary (see assumptions), so no
    nodes-based metric has usable data until then; the sweep doubles as Phase-2/3 seed data. Deliverable: baseline
@@ -183,56 +184,82 @@ concentrates in 6. Dependencies: 1 → 2 → 3 → {4, 5} → 6 → 7; 8 floats.
    bottom, which IS the gate number; the per-kernel rows are the diagnostic view feeding the findings. Verify:
    read-only vs live DBs; unit tests on synthetic `NodeRow` sets + stub priors; `make test` green; no behavior
    change to compile/tune.
-2. **Committed measurement snapshot.** Exporter (fleet node DB → repo files, leaf-only, curated, provenance), loader
+2. **Per-feature regret attribution — blame decomposition + ablation Δ (diagnostic, NOT gate).** Two output modes
+   over the per-fork records the regret metric already produces. (a) **Blame**: for each missed fork, the
+   per-feature signed contribution to the pick-vs-best score gap — EXACT for the linear analytic prior
+   (`Σ_k w_k · (f_k(picked) − f_k(best))` sums to the gap by construction), SHAP-difference for CatBoost —
+   aggregated per family, regret-weighted: "which feature caused this misranking". (b) **Ablation Δ**: re-pick with
+   one feature/family masked; `Δregret = regret_masked − regret_full` per family — a negative Δ flags an actively
+   misleading feature. Motivation (2026-07-07): both headline baseline discoveries were manual instances of these
+   views — the identical-vector REDUCE blindness is blame's degenerate case ("no feature varies across siblings"),
+   and the post-#318 `_W_A` serial preference on reduce forks took a hand decomposition to find; the pending `_W_A`
+   reduce refit consumes the blame table directly. Deliverables: the linear blame table first (exact, ~small),
+   CatBoost SHAP mode + ablation Δ after; run for the incumbent on the fresh sweep data; and wire the new views
+   into the tune-golden / tune-model skill report templates (their finding-evidence lists — the regret block was
+   added there when it landed; blame replaces their hand-derived "per-knob misses" attribution step). STRICTLY diagnostic — the
+   gate stays two numbers (decision 9): attribution among correlated features is non-unique (ablation double-counts
+   redundancy, SHAP splits it arbitrarily), so never threshold on it. NaN-mask ablation is a fair proxy only once
+   the fitter's dropout training (phase 4) makes masked queries in-distribution — flag that in the output until
+   then. Verify: unit tests with stub priors (a planted weight's blame is recovered; the linear decomposition sums
+   exactly to the score gap); read-only against the node store.
+   **STATUS (2026-07-07): LANDED except the CatBoost SHAP mode** (deferred until a trained artifact exists to test
+   against — decided with the user; the out-of-distribution caveat flag ships now and fires for any non-analytic
+   prior). Shipped: `eval prior --dataset nodes --blame/--ablate` over a shared `ForkRecord` builder (the regret
+   metric is now a projection of it), the `Prior` features seam (`mean_score[s]_features` + exact
+   `explain_features`, the hardcoded interactions as `gate:*` pseudo-terms), the skill-template wiring, and the
+   incumbent run — `plans/analytic-blame-ablation-baseline-findings.md` (headline: 42/43 REDUCE misses BLIND at
+   ~89% of total regret-weight; `D_l2_reuse` actively misleading on TILE forks, Δ −0.56x; 21 weighted features
+   have zero fork support in the store).
+3. **Committed measurement snapshot.** Exporter (fleet node DB → repo files, leaf-only, curated, provenance), loader
    (re-featurizes through live code), format doc. Verify: coverage report; round-trip test vs the live DB path; loads
    in CI with no DB; optionally one fresh `collect-node-data` → merge → re-export to prove the refresh flow.
-3. **Training pipeline.** Prefix-row synthesis under the current fork structure, sibling-group ranking datasets,
+4. **Training pipeline.** Prefix-row synthesis under the current fork structure, sibling-group ranking datasets,
    pool-level masking augmentation, group-holdout k-fold (leave-one-op-out AND leave-one-card-out via
    `Dataset.fold_node_rows`), candidate CatBoost rankers with monotone constraints; every fold reported through the
    Phase-1 suite. Deliverable: the fitter (successor to `golden_knob_heuristics.py`) + CV report vs the linear
    baseline on identical folds. **This is where old-vs-new comparison lives.** Offline only.
-4. **Tier-1 artifact.** Format (feat_ver, cols, digest, fingerprints), the new prior class (contract per constraints),
+5. **Tier-1 artifact.** Format (feat_ver, cols, digest, fingerprints), the new prior class (contract per constraints),
    loading/quarantine path, one-command refit make target. Not yet the default. Verify: Phase-1 suite; refit-twice
    determinism; version-mismatch quarantine.
-5. **Tier-2 additive fallback.** Depth-1 fit stage + declared pair terms (atomic-free × split-width first), export to
+6. **Tier-2 additive fallback.** Depth-1 fit stage + declared pair terms (atomic-free × split-width first), export to
    source-literal table, skip-if-missing scorer; delete `_W_A` / `_W_A_DYN` once parity is shown. Verify: suite ≥
    linear baseline on goldens before removal; locality check (mask any feature → bounded, term-local degradation).
-6. **Integration + real-hardware A/B.** Wire tier-1 → tier-2 → option-0 into `FallbackPrior` / `load_prior` (greedy +
+7. **Integration + real-hardware A/B.** Wire tier-1 → tier-2 → option-0 into `FallbackPrior` / `load_prior` (greedy +
    PUCT + structural pricing paths), quarantine rules. Verify on a rented card: cold greedy deploy A/B (old vs new
    analytic prior, golden A/B harness), cold-tune search-efficiency A/B (benches-to-best, wall time), full `make test`.
-7. **Promotion gate + CI.** Formalize refit → eval → promote-or-keep; the CI checks from decision 9; ARCHITECTURE.md
+8. **Promotion gate + CI.** Formalize refit → eval → promote-or-keep; the CI checks from decision 9; ARCHITECTURE.md
    updates (the two-clock refit workflow). Verify: break it on purpose in a branch (rename a feature) → CI trips →
    refit target → green.
-8. **(Optional, deferrable) Version split.** Split `FEATURIZER_VERSION` into knob-spelling vs feature-encoding axes so
+9. **(Optional, deferrable) Version split.** Split `FEATURIZER_VERSION` into knob-spelling vs feature-encoding axes so
    encoding-only changes stop quarantining node rows / snapshots (most changes are encoding-only; raw knob dicts stay
    readable and a refit fully recovers). Touches `features.py`, the DB `feat_ver` stamp, checkpoint + snapshot formats.
 
 ## Open questions and assumptions
 
-Assumptions (verify early, Phase 2–3):
+Assumptions (verify early, Phase 3–4):
 - ~~The merged fleet node DB has enough leaf volume/coverage at the current `feat_ver`~~ **VERIFIED FALSE
   (2026-07-06 audit)**: the local store (`~/.cache/deplodock/autotune.db`) holds 23,971 nodes / ~536 multi-child
   forks across RTX 4090 + RTX 5090 — structurally enough — but 100% in the retired pre-tile-IR-rebuild knob
   vocabulary (`SPLIT@a0`, old `REDUCE` codec; pre-enrichment schema → migrates to `feat_ver=1`, fully quarantined
   at `FEATURIZER_VERSION=2`). No `prior.json` checkpoint exists locally either. Consequence: fresh ε-greedy
-  collection sweeps are a hard prerequisite for every nodes-based step (Phase 1 baseline regret, Phase 2 snapshot,
-  Phase 3 training); golden-based metrics are unaffected (live enumeration + committed goldens).
+  collection sweeps are a hard prerequisite for every nodes-based step (Phase 1 baseline regret, Phase 3 snapshot,
+  Phase 4 training); golden-based metrics are unaffected (live enumeration + committed goldens).
 - Known gap inherited from today: the reduce/pointwise tiers enumerate zero rows through the live-fork capture
   (`analytic.py`'s own comment) — path-descent/golden eval coverage for those tiers is limited until that's fixed.
 - CatBoost's JSON model dump is stable enough to mechanically collapse a stump ensemble into the tier-2 table.
 
 Open questions (each owned by its phase's detail discussion):
-- Phase 2: snapshot file format (YAML like goldens vs JSONL), per-card file layout, size cap / row budget, staleness
+- Phase 3: snapshot file format (YAML like goldens vs JSONL), per-card file layout, size cap / row budget, staleness
   policy (age-out vs re-measure), whether -O1 rows get a row budget separate from -O3.
-- Phase 3: exact ranking loss (YetiRank vs QueryRMSE vs PairLogit), depth-weighting scheme, masking rate p and replica
+- Phase 4: exact ranking loss (YetiRank vs QueryRMSE vs PairLogit), depth-weighting scheme, masking rate p and replica
   count K, monotone-constraint list (features + directions), tier-1 depth/regularization budget.
-- Phase 4: artifact location/format in-repo (base64 JSON vs `.cbm` binary — diff noise vs size), the exp-squash scale /
+- Phase 5: artifact location/format in-repo (base64 JSON vs `.cbm` binary — diff noise vs size), the exp-squash scale /
   normalization for the neutral-1.0 contract, how tier-1 quarantine composes with the learned prior's `trustworthy`
   (three-model precedence in `FallbackPrior` — needs a small design note).
-- Phase 5: pair-term whitelist beyond atomic-free × split-width; bin cap per shape function (legibility budget).
-- Phase 7: promotion thresholds (golden median rank, per-family sibling regret — hardest on shallow families,
+- Phase 6: pair-term whitelist beyond atomic-free × split-width; bin cap per shape function (legibility budget).
+- Phase 8: promotion thresholds (golden median rank, per-family sibling regret — hardest on shallow families,
   ablation-collapse tolerance); where the gate runs (CI-only vs also at artifact load).
-- Phase 8: do it as part of this effort or defer; interaction with the snapshot format if deferred.
+- Phase 9: do it as part of this effort or defer; interaction with the snapshot format if deferred.
 
 Needs further discussion / planning (beyond per-phase details):
 - Snapshot refresh cadence and ownership — what triggers a re-tune of goldens + sweep (tie to the tune-golden skill?).

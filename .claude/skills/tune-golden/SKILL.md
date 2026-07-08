@@ -188,6 +188,11 @@ density of the `tune-model` reports (`plans/*-tune-findings.md`; executed ones a
   - `emmy eval analytic --kernel <SUBSTR>` — the golden's rank under the cold `AnalyticPrior` over the full
     enumeration. A deep rank here is the "poor analytic heuristic on this config" signal: the hand-coded weights
     misprice this shape, and patience can't reach it cold.
+  - `emmy eval prior --dataset nodes --blame [--ablate] --kernel <SUBSTR>` — WHICH features caused the mispricing:
+    the per-feature blame table (regret-weighted term diff between the prior's pick and the measured-best sibling,
+    per fork family; a BLIND fork means no feature separates the siblings — a featurizer gap, not a weight problem)
+    and the ablation Δ (median regret with one feature masked; `< 0` = actively misleading). Cite the blame row in
+    the finding instead of hand-deriving per-knob misses from the weight table.
   - `emmy eval prior --dataset golden --kernel <SUBSTR>` — the rank under the *learned* prior + the `vs gold`
     -O3 perf column. Deep analytic rank but shallow learned rank → the heuristic is the problem, not the search.
   - `emmy eval variants --kernel <SUBSTR>` — was the golden config ever *measured* this sweep (reachability),

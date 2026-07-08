@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import logging
 import math
+import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -96,6 +97,18 @@ def register_eval_command(subparsers) -> None:
         "--features",
         action="store_true",
         help="Also print the exact feature vector the prior (CatBoost) regresses on per golden config (features.knob_features).",
+    )
+    pp.add_argument(
+        "--blame",
+        action="store_true",
+        help="With --dataset nodes: per-feature blame table — which features' terms pushed each missed fork's wrong pick, "
+        "regret-weighted per fork family (diagnostic, not a gate metric).",
+    )
+    pp.add_argument(
+        "--ablate",
+        action="store_true",
+        help="With --dataset nodes: ablation Δ table — each family's median regret change with one feature masked "
+        "(<0 = actively misleading), with per-feature fork support.",
     )
     pp.set_defaults(func=handle_eval_prior)
 
@@ -181,6 +194,9 @@ def handle_eval_prior(args) -> None:
     ``--dataset nodes`` reports fork sibling regret + leaf reachability over the tune
     DB's search-tree node store (the search-faithful, partial-config view)."""
     resolve_prior_arg(args)
+    if (args.blame or args.ablate) and args.dataset != "nodes":
+        logger.error("--blame/--ablate attribute fork records — they need --dataset nodes.")
+        sys.exit(2)
     if args.dataset == "db":
         _emit_prior_db_reachability(args)
         return
@@ -592,6 +608,9 @@ def _emit_prior_nodes(args) -> None:
     prior = load_prior()
     logger.info("")
     logger.info("%s", diagnostics.node_report(prior, nodes, kernel_filter=args.kernel))
+    if args.blame or args.ablate:
+        logger.info("")
+        logger.info("%s", diagnostics.attribution_report(prior, nodes, kernel_filter=args.kernel, blame=args.blame, ablate=args.ablate))
 
 
 def _mean(xs: list[float]) -> float:

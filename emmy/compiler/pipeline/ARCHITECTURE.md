@@ -398,6 +398,22 @@ regret table with a per-family aggregate line. `node_report` drops
 for a cross-hardware dataset: same-die SKUs (H100/H200) share an `S_*` op signature but not their latencies, so mixing
 them would corrupt both metrics — the `gpu` key keeps their rows distinct.
 
+The regret metric, and the **per-feature attribution views** behind `eval prior --dataset nodes --blame / --ablate`,
+all consume one shared per-fork record (`diagnostics.fork_records`: siblings, featurized rows, scores, the
+pessimistic pick, the measured best), so the three views agree on pick semantics by construction. They score through
+the `Prior` **features seam** — `mean_score_features` / `mean_scores_features` take an already-featurized row
+(contract: identical to `mean_score` on the raw knob dict), which is what lets the diagnostics mask individual `D_*`
+features that have no knob-level spelling. **Blame** diffs `Prior.explain_features` (a signed per-term quality
+decomposition; exact for the linear analytic prior, its hardcoded interactions included as `gate:*` pseudo-terms —
+the terms sum to the scored quality, unit-tested) between the pick and the measured-best sibling, regret-weighted per
+fork family; a missed fork no term separates is **BLIND** — a featurizer gap, not a weight problem. **Ablation Δ**
+re-picks every fork with one feature masked (each model's own absent semantics: `0.0` term for the linear prior =
+exact removal, `NaN` routing for CatBoost — flagged out-of-distribution until a dropout-trained model exists) and
+reports the per-family median-regret change with the feature's fork support. Both are **diagnostic only, never gate
+metrics**: attribution among correlated features is non-unique (masking any one of a redundant geometry block costs
+the same Δ). Unlike the per-card regret/reachability tables, attribution POOLS cards and regimes — regret is a
+within-fork ratio, so it compares safely.
+
 Why CatBoost (chosen by `scripts/prior_bakeoff.py`): the model's greedy pick must not run off to a degenerate corner. A
 linear model (the former `BayesianRidgePrior`) is monotone in every knob, so its optimum is always a corner of the
 candidate box — the `BR=1` blow-up (4us → 232us / invalid kernels). Any **bounded** tree ensemble is off-manifold-safe

@@ -202,6 +202,18 @@ parallel with 3, consumed by 4's fitter loop and 8's gate.
    the fitter's dropout training (phase 4) makes masked queries in-distribution — flag that in the output until
    then. Verify: unit tests with stub priors (a planted weight's blame is recovered; the linear decomposition sums
    exactly to the score gap); read-only against the node store.
+   **STATUS (2026-07-07): LANDED except the CatBoost SHAP mode** (deferred until a trained artifact exists to test
+   against — decided with the user; the out-of-distribution caveat flag ships now and fires for any non-analytic
+   prior). Shipped: `eval prior --dataset nodes --blame/--ablate` over a shared `ForkRecord` builder (the regret
+   metric is now a projection of it), the `Prior` features seam (`mean_score[s]_features` + exact
+   `explain_features`, the hardcoded interactions as `gate:*` pseudo-terms), the skill-template wiring, and the
+   incumbent run — `plans/analytic-blame-ablation-baseline-findings.md` (headline: 42/43 REDUCE misses BLIND at
+   ~89% of total regret-weight; `D_l2_reuse` actively misleading on TILE forks, Δ −0.56x).
+   **Re-run 2026-07-08 post-#322 + refit sweeps (same report, before/after): the acceptance check passed** —
+   REDUCE blind 42 → 0, regret-weight 1670 → 84, per-card medians 34–68x → 1.00–1.13x (PRO 6000 on re-featurized
+   old rows alone); `D_l2_reuse` rehabilitated by the refit; the worst class moved to the 4090's big-K TILE
+   goldens (215x — a Phase-4 priority test case), and `D_l2_bm` / the splitk-roundtrip gate are the new
+   misleading shortlist.
 3. **Committed measurement snapshot.** Exporter (fleet node DB → repo files, leaf-only, curated, provenance), loader
    (re-featurizes through live code), format doc. Verify: coverage report; round-trip test vs the live DB path; loads
    in CI with no DB; optionally one fresh `collect-node-data` → merge → re-export to prove the refresh flow.

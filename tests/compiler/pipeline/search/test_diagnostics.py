@@ -123,7 +123,9 @@ def test_golden_prior_eval_warns_per_unjoinable_shape():
 
 class _BMPrior:
     """A prior whose predicted latency is ``sign * features['BM']`` — so ``sign=+1``
-    predicts smaller BM as faster, ``sign=-1`` reverses the order."""
+    predicts smaller BM as faster, ``sign=-1`` reverses the order. ``BM`` is an
+    unregistered numeric knob, so ``knob_features`` passes it through by name and
+    the same read works on raw knob dicts and featurized rows alike."""
 
     fitted = True
 
@@ -133,6 +135,9 @@ class _BMPrior:
     def mean_score(self, feats) -> float:
         return self._sign * float(feats.get("BM", 0.0))
 
+    def mean_scores_features(self, feats_list) -> list[float]:
+        return [self.mean_score(f) for f in feats_list]
+
 
 class _FlatPrior:
     """A constant-score prior — every child ties, exercising the pessimistic tie rule."""
@@ -141,6 +146,9 @@ class _FlatPrior:
 
     def mean_score(self, _feats) -> float:
         return 1.0
+
+    def mean_scores_features(self, feats_list) -> list[float]:
+        return [1.0] * len(feats_list)
 
 
 def _child(node_key, bm, value_us, *, parent="P"):
@@ -303,6 +311,138 @@ def test_node_report_splits_compile_regimes_per_card():
     text = diagnostics.node_report(_BMPrior(), o1 + o3)
     assert "@ -O1" in text and "@ -O3" in text  # one sub-block per regime
     assert "3 nodes" in text and "1 nodes" in text
+
+
+# ---------------------------------------------------------------------------
+# per-feature regret attribution: blame decomposition + ablation Δ
+# ---------------------------------------------------------------------------
+
+
+def _planted_analytic(weights: dict[str, float]):
+    """An AnalyticPrior with ONLY the planted linear weights (both regimes), no
+    hand-fit table — attribution over it must recover exactly the planted terms."""
+    from emmy.compiler.pipeline.search.prior.analytic import AnalyticPrior  # noqa: PLC0415
+
+    return AnalyticPrior(weights=weights, weights_dynamic=weights)
+
+
+def test_analytic_explain_sums_to_the_scored_quality():
+    """The exact-sum invariant: ``explain_features`` terms (linear + the three
+    ``gate:*`` pseudo-terms) sum to the same quality ``mean_score_features``
+    exponentiates — so a two-row term diff IS the model's preference gap. The
+    atomic-free gate is enabled explicitly (it defaults OFF since the 2026-07-07
+    golden-gate check) so the interaction's sign flip stays covered."""
+    import math  # noqa: PLC0415
+
+    from emmy.compiler.pipeline.search.prior.analytic import AnalyticPrior  # noqa: PLC0415
+
+    p = AnalyticPrior(atomic_free_weight=5.0)
+    feats = {
+        "D_pow2_threads": 1.0,
+        "D_near_waves": 0.7,
+        "D_splitk": 8.0,  # ≥ threshold → the atomic-free gate REWARDS the deferred finalize
+        "D_finalize_kernel": 1.0,
+        "D_scalar_on_warp_eligible": 1.0,
+        "D_splitk_roundtrip": 19.0,
+    }
+    terms = p.explain_features(feats)
+    assert {"gate:atomic_free", "gate:scalar_on_warp", "gate:splitk_roundtrip"} <= set(terms)
+    assert terms["gate:atomic_free"] > 0 and terms["gate:scalar_on_warp"] < 0
+    assert math.isclose(p.mean_score_features(feats), math.exp(-p._scale * sum(terms.values())))
+    # Below the split threshold the gate flips to a penalty — and the sum still matches.
+    narrow = {**feats, "D_splitk": 2.0}
+    terms_n = p.explain_features(narrow)
+    assert terms_n["gate:atomic_free"] < 0
+    assert math.isclose(p.mean_score_features(narrow), math.exp(-p._scale * sum(terms_n.values())))
+
+
+def test_analytic_explain_selects_the_dynamic_weight_set():
+    """A symbolic-axis row decomposes under ``_W_A_DYN`` — the same selection
+    ``mean_score_features`` makes."""
+    from emmy.compiler.pipeline.search.prior.analytic import _W_A, _W_A_DYN, AnalyticPrior  # noqa: PLC0415
+
+    p = AnalyticPrior()
+    static = p.explain_features({"D_ctas_ge_sm": 1.0})
+    dyn = p.explain_features({"D_ctas_ge_sm": 1.0, "S_ext_n_symbolic_axis": 1.0})
+    assert static["D_ctas_ge_sm"] == _W_A["D_ctas_ge_sm"]
+    assert dyn["D_ctas_ge_sm"] == _W_A_DYN["D_ctas_ge_sm"]
+
+
+def _planted_fork():
+    """One fork the planted prior mispicks: D_x argues (wrongly) for the slow child,
+    D_y argues (rightly, but too weakly) for the fast one."""
+    from emmy.compiler.pipeline.search.db import NodeRow  # noqa: PLC0415
+
+    return [
+        NodeRow("P", None, "ctx", "mm", {}, 1.0, 1),
+        NodeRow("slow", "P", "ctx", "mm", {"D_x": 0.0, "D_y": 0.0}, 2.0, 2),
+        NodeRow("fast", "P", "ctx", "mm", {"D_x": 1.0, "D_y": 1.0}, 1.0, 2),
+    ]
+
+
+def test_blame_recovers_the_planted_weight():
+    """Blame on the planted misranking names D_x with exactly the regret-weighted
+    planted gap: term diff = 0 − (−10) = +10, weight = regret − 1 = 1.0."""
+    prior = _planted_analytic({"D_x": -10.0, "D_y": 1.0})
+    out = diagnostics.attribution_report(prior, _planted_fork())
+    line = next(ln for ln in out.splitlines() if ln.split() and ln.split()[0] == "D_x")
+    assert "+10.00" in line
+    # D_y argued for the right child and was overruled → negative blame.
+    line_y = next(ln for ln in out.splitlines() if ln.split() and ln.split()[0] == "D_y")
+    assert "-1.00" in line_y
+    assert "blind forks overall: 0" in out
+
+
+def test_ablation_flags_the_misleading_feature():
+    """Masking D_x lets D_y pick the fast child: Δ = 1.0 − 2.0 = −1.00x (actively
+    misleading); masking D_y leaves the D_x mispick → Δ = 0 (collapsed into the
+    zero line); single-fork support is flagged as noise."""
+    prior = _planted_analytic({"D_x": -10.0, "D_y": 1.0})
+    out = diagnostics.attribution_report(prior, _planted_fork(), blame=False, ablate=True)
+    line = next(ln for ln in out.splitlines() if ln.split() and ln.split()[0] == "D_x")
+    assert "-1.00x" in line and "1~" in line  # misleading, on one-fork support
+    assert "Δ = 0.00x everywhere" in out and "D_y" in out.split("everywhere")[1]
+
+
+def test_blame_counts_blind_forks():
+    """A missed fork whose siblings the prior's terms cannot separate (no weighted
+    feature varies) is BLIND — the identical-vector failure class — and surfaces as
+    a counter, not a silent empty row."""
+    from emmy.compiler.pipeline.search.db import NodeRow  # noqa: PLC0415
+
+    nodes = [
+        NodeRow("P", None, "ctx", "mm", {}, 1.0, 1),
+        NodeRow("a", "P", "ctx", "mm", {"KNOB": 1.0}, 2.0, 2),
+        NodeRow("b", "P", "ctx", "mm", {"KNOB": 2.0}, 1.0, 2),
+    ]
+    out = diagnostics.attribution_report(_planted_analytic({"D_x": -10.0}), nodes)
+    assert "BLIND" in out and "blind forks overall: 1" in out
+
+
+def test_blame_unavailable_without_a_decomposition():
+    """A prior with no ``explain_features`` decomposition (the base default) reports
+    blame as unavailable instead of crashing — ablation still works (it only
+    re-scores)."""
+
+    class _NoExplain(_BMPrior):
+        def explain_features(self, _feats):
+            return None
+
+    out = diagnostics.attribution_report(_NoExplain(sign=-1.0), _fork_nodes())
+    assert "blame unavailable" in out
+
+
+def test_attribution_pools_cards_and_respects_kernel_filter():
+    """Fork records build per card (identity never crosses), the tables pool; the
+    ``--kernel`` filter drops whole ops before attribution."""
+    from dataclasses import replace  # noqa: PLC0415
+
+    nodes = [replace(n, gpu="A") for n in _planted_fork()] + [replace(n, node_key=n.node_key + "b", gpu="B") for n in _planted_fork()]
+    prior = _planted_analytic({"D_x": -10.0, "D_y": 1.0})
+    out = diagnostics.attribution_report(prior, nodes)
+    assert "2 multi-child forks" in out and "pooled across 2 card(s)" in out
+    miss = diagnostics.attribution_report(prior, nodes, kernel_filter="zzz")
+    assert "no usable nodes" in miss
 
 
 def test_node_report_kernel_filter_selects_ops_by_label():

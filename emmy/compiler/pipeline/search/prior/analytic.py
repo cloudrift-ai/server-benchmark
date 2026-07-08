@@ -246,7 +246,15 @@ class AnalyticPrior(Prior):
         weights have no opinion on (no ``D_*`` features — e.g. a non-tiled kernel)
         scores the neutral ``1.0``, so ties fall to enumeration order. Symbolic-axis
         (masked-tile) kernels rank under the dynamic weight set."""
-        feats = knob_features(knobs)
+        return self.mean_score_features(knob_features(knobs))
+
+    def mean_score(self, knobs: dict) -> float:
+        return self.score(knobs)
+
+    def mean_score_features(self, feats: dict) -> float:
+        """:meth:`score` from an already-featurized row — the seam the attribution
+        diagnostics mask individual features through (a deleted key scores as its
+        ``0.0`` no-opinion default, which for a linear model is exact term removal)."""
         w_set = self._w_dyn if feats.get("S_ext_n_symbolic_axis", 0.0) > 0 else self._w
         quality = sum(w * feats.get(k, 0.0) for k, w in w_set.items())
         # Deferred-kernel split-K finalize gate (local term — see __init__). The
@@ -269,5 +277,23 @@ class AnalyticPrior(Prior):
         quality -= self._splitk_roundtrip_weight * feats.get("D_splitk_roundtrip", 0.0)
         return math.exp(-self._scale * max(min(quality, 80.0), -80.0))
 
-    def mean_score(self, knobs: dict) -> float:
-        return self.score(knobs)
+    def explain_features(self, feats: dict) -> dict[str, float]:
+        """EXACT per-term decomposition of the quality score (higher = predicted
+        faster): each nonzero linear term by its feature name, plus the three
+        hardcoded interaction gates as ``gate:*`` pseudo-terms — a blame table that
+        omitted the ±40 scalar-on-warp gate would misattribute exactly the misses it
+        dominates. Invariant (unit-tested): the terms sum to the same quality
+        :meth:`mean_score_features` exponentiates, so a two-row term diff is the
+        model's exact preference gap. (The ±80 clip inside the squash is ignored
+        here — it changes the proxy's magnitude at the extremes, never the terms.)"""
+        w_set = self._w_dyn if feats.get("S_ext_n_symbolic_axis", 0.0) > 0 else self._w
+        terms = {k: w * feats[k] for k, w in w_set.items() if feats.get(k, 0.0)}
+        af_on = feats.get("D_finalize_kernel", 0.0)
+        if af_on:
+            many_splits = feats.get("D_splitk", 1.0) >= self._atomic_free_split_threshold
+            terms["gate:atomic_free"] = self._atomic_free_weight * af_on * (1.0 if many_splits else -1.0)
+        if feats.get("D_scalar_on_warp_eligible", 0.0):
+            terms["gate:scalar_on_warp"] = -self._scalar_on_warp_weight * feats["D_scalar_on_warp_eligible"]
+        if feats.get("D_splitk_roundtrip", 0.0):
+            terms["gate:splitk_roundtrip"] = -self._splitk_roundtrip_weight * feats["D_splitk_roundtrip"]
+        return terms

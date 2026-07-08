@@ -172,6 +172,14 @@ path. (`train_probe.py`: ~20 lines — load node rows, `add_rows`, `fit`, checkp
 
 ## Baseline gate numbers (the bar for Phase 3+)
 
+> **SUPERSEDED 2026-07-08** for the fork-regret rows: PR #322 fixed the bug behind finding 1 (reduction knobs
+> were invisible to the feature encoding, so the prior could not tell reduce candidates apart), the linear
+> weights were refit, and fresh tuning sweeps were merged in. The REDUCE medians fell from 68.50x / 30.08x /
+> 34.13x to **1.09x / 1.13x / 1.00x**, and the worst remaining mispredictions are now tile-size picks on the
+> 4090's newly-added large-K matmul shapes. Current numbers, plus the per-feature attribution of what's left,
+> live in `plans/analytic-blame-ablation-baseline-findings.md`. The rows below are the pre-fix bar, kept for
+> the record.
+
 - Golden rank: **median 263, top10 5/42, top100 16/42**.
 - REDUCE regret: **68.50x / 30.08x / 34.13x** (4090 / 5090 / PRO 6000). TILE: 2.33x / 1.92x / 1.73x.
   STAGE: 1.05x / 1.00x / 1.01x (already near-optimal — do not regress).

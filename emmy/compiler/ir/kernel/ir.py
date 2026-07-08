@@ -884,6 +884,11 @@ class FragmentApply(Stmt):
     kinds: tuple[str, ...]  # per-arg: FRAG | ROW | UNIFORM
     in_place: bool = False
     layout: FragLayout = M16N8  # the per-atom C-fragment geometry (n_elems + elem→row)
+    # Extra UNARY ops composed onto the result, outermost last — so ``exp(s − m)`` is one node
+    # (``op=subtract``, ``post=(exp,)``) rendering ``out[_e] = expf(s[_e] − m)`` rather than a
+    # subtract stmt feeding an exp stmt. Populated only by ``100_loopify``'s pin-gated chain fusion;
+    # empty by default (the base op alone).
+    post: tuple[ElementwiseImpl, ...] = ()
 
     def deps(self) -> tuple[str, ...]:
         out: list[str] = []
@@ -899,13 +904,28 @@ class FragmentApply(Stmt):
             return f"{a}[]" if k == FRAG else (f"{list(a)}" if k == ROW else str(a))
 
         shown = ", ".join(_show(a, k) for a, k in zip(self.args, self.kinds, strict=True))
-        return [f"{indent}FragmentApply({self.out} {'*=' if self.in_place else '<-'} {self.op.name}({shown}))"]
+        chain = "".join(f" |> {p.name}" for p in self.post)
+        return [f"{indent}FragmentApply({self.out} {'*=' if self.in_place else '<-'} {self.op.name}({shown}){chain})"]
 
-    def _arg(self, name: object, kind: str, i: int, ctx: RenderCtx) -> Expr:
+    def _row_expr(self, names: tuple) -> Expr:
+        """The per-row scalar for the loop element ``_e`` — a ternary over the layout's row split
+        (m16n8: ``(_e < 2 ? row0 : row1)``). ``elem_row`` must be contiguous blocks (it is for every
+        modeled atom), so the boundaries are ``block = n_elems / rows_per_lane`` apart."""
+        lay = self.layout
+        rows, block = lay.rows_per_lane, lay.n_elems // lay.rows_per_lane
+        if list(lay.elem_row) != [r for r in range(rows) for _ in range(block)]:
+            raise NotImplementedError(f"FragmentApply loop render needs a contiguous elem_row, got {lay.elem_row!r}")
+        expr: Expr = Var(names[rows - 1])
+        for r in range(rows - 2, -1, -1):
+            expr = TernaryExpr(BinaryExpr("<", Var("_e"), Literal((r + 1) * block, "int")), Var(names[r]), expr)
+        return expr
+
+    def _arg_e(self, name: object, kind: str, ctx: RenderCtx) -> Expr:
+        """The loop-body operand expression (indexed by the element loop var ``_e``)."""
         if kind == FRAG:
-            return Var(f"{name}[{i}]")
+            return Var(f"{name}[_e]")
         if kind == ROW:
-            return Var(name[self.layout.elem_row[i]])  # the per-row scalar for element i's row
+            return self._row_expr(name)
         # UNIFORM — the fragment algebra is f32; a narrower scalar (e.g. an ``__half`` constant
         # load) converts through the target intrinsic, like the scalar ``Assign``'s promote rule.
         nm = str(name)
@@ -920,13 +940,25 @@ class FragmentApply(Stmt):
         return Var(nm)
 
     def render(self, ctx: RenderCtx) -> list[str]:
+        """One ``#pragma unroll`` loop over the fragment's ``n_elems`` — ``out[_e] = post…(op(args_e))``
+        — instead of ``n_elems`` straight-line assignments. The ROW operand renders as the row-split
+        ternary, so the m16n8 2-rows/lane structure stays legible (``_e < 2 ? row0 : row1``); identical
+        SASS (nvcc unrolls the pragma)."""
         from emmy.compiler.ir.stmt.base import op_to_expr  # noqa: PLC0415
 
         pad = _pad(ctx.indent)
-        lines = [] if self.in_place else [f"{pad}float {self.out}[{self.layout.n_elems}];"]
-        for i in range(self.layout.n_elems):
-            argvars = [self._arg(a, k, i, ctx) for a, k in zip(self.args, self.kinds, strict=True)]
-            lines.append(f"{pad}{self.out}[{i}] = {op_to_expr(self.op.name, argvars).render(ctx)};")
+        n = self.layout.n_elems
+        inner = ctx.child()
+        ipad = _pad(inner.indent)
+        argvars = [self._arg_e(a, k, inner) for a, k in zip(self.args, self.kinds, strict=True)]
+        expr = op_to_expr(self.op.name, argvars)
+        for post_op in self.post:  # compose the fused unary tail (outermost last)
+            expr = op_to_expr(post_op.name, [expr])
+        lines = [] if self.in_place else [f"{pad}float {self.out}[{n}];"]
+        lines.append(f"{pad}#pragma unroll")
+        lines.append(f"{pad}for (int _e = 0; _e < {n}; _e++) {{")
+        lines.append(f"{ipad}{self.out}[_e] = {expr.render(inner)};")
+        lines.append(f"{pad}}}")
         return lines
 
 
@@ -2147,7 +2179,7 @@ def _(s: Reassign, rename, sigma, axis_fn):
 @_rewrite.register
 def _(s: FragmentApply, rename, sigma, axis_fn):
     args = tuple((rename(a[0]), rename(a[1])) if k == ROW else rename(a) for a, k in zip(s.args, s.kinds, strict=True))
-    return FragmentApply(out=rename(s.out), op=s.op, args=args, kinds=s.kinds, in_place=s.in_place, layout=s.layout)
+    return FragmentApply(out=rename(s.out), op=s.op, args=args, kinds=s.kinds, in_place=s.in_place, layout=s.layout, post=s.post)
 
 
 @_rewrite.register

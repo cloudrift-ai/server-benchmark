@@ -76,7 +76,7 @@ own slot) keep fusing.
 
 - `test_tensorcore_flash_folded_v_projection_fuses` — model-style V: `(1,S,Hkv*D)` f16 → view/transpose → SDPA with
   `enable_gqa=True` (e.g. Hq=4, Hkv=2, S=128, D=32). Assert **fusion** (one SDPA kernel containing
-  `dpl_mma_m16n8k16_f16`, kernel count = flash + V copy), plus accuracy — pattern of
+  `emmy_mma_m16n8k16_f16`, kernel count = flash + V copy), plus accuracy — pattern of
   `test_generated_tensorcore_flash_matches_torch`.
 - `test_flash_folded_v_with_repeated_kv_fuses` — HF idiom (explicit KV repeat) exercising per-operand groups
   (`gk=2, gv=1`).

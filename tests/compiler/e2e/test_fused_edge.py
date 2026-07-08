@@ -101,7 +101,7 @@ def test_fused_map_matmul(tier, producer, monkeypatch):
     got, srcs = _compile_run(g, ins)
     assert len(srcs) == 1, f"{producer}/{tier}: the fused edge must be ONE kernel, got {len(srcs)}"
     if tier == "warp":
-        assert "dpl_mma" in srcs[0], f"{producer}/warp: the pinned warp tier must engage on the fused matmul"
+        assert "emmy_mma" in srcs[0], f"{producer}/warp: the pinned warp tier must engage on the fused matmul"
     f32 = {k: v.astype(np.float32) for k, v in ins.items()}
     ref = _PRODUCER_REFS[producer](f32) @ f32["w"]
     np.testing.assert_allclose(got.reshape(_M, _N).astype(np.float32), ref, atol=0.1, rtol=2e-2)
@@ -136,7 +136,7 @@ def test_fused_rmsnorm_linear(tier, monkeypatch):
     got, srcs = _compile_run(g, ins)
     assert len(srcs) == 1, f"the fused norm→linear must be ONE kernel, got {len(srcs)}"
     if tier == "warp":
-        assert "dpl_mma" in srcs[0], "warp: the pinned mma tier must engage on the fused matmul"
+        assert "emmy_mma" in srcs[0], "warp: the pinned mma tier must engage on the fused matmul"
     x, nw, wg = (ins[k].astype(np.float32) for k in ("x", "nw", "wg"))
     rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
     # The fp16 fused-prologue path carries a few % relative error on large elements (cooperative
@@ -168,7 +168,7 @@ def _rmsnorm_linear_check(g: Graph, S: int, H: int, inter: int, *, want_mma: boo
     got, srcs = _compile_run(g, ins)
     assert len(srcs) == 1, f"the fused norm→linear must be ONE kernel, got {len(srcs)}"
     if want_mma:
-        assert "dpl_mma" in srcs[0], "the pinned mma tier must engage on the fused matmul"
+        assert "emmy_mma" in srcs[0], "the pinned mma tier must engage on the fused matmul"
     x, nw, wg = (ins[k].astype(np.float32) for k in ("x", "nw", "wg"))
     rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
     np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), rms @ wg.T, atol=0.5, rtol=0.1)
@@ -230,7 +230,7 @@ def test_fused_gate_up_swiglu_symbolic_m(runtime_s, monkeypatch):
     }
     got, srcs = _compile_run(g, ins)
     assert len(srcs) == 1, f"the fused gate/up edge must be ONE kernel, got {len(srcs)}"
-    assert "dpl_mma" in srcs[0], "the pinned mma tier must engage on the multi-fold contraction"
+    assert "emmy_mma" in srcs[0], "the pinned mma tier must engage on the multi-fold contraction"
     x, nw, wg, wu = (ins[k].astype(np.float32) for k in ("x", "nw", "wg", "wu"))
     rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
     gate, up = rms @ wg.T, rms @ wu.T

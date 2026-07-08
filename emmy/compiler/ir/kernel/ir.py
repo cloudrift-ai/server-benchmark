@@ -399,20 +399,11 @@ class CpAsyncCopy(Stmt):
         smem_flat = render_index(self.smem, self.smem_index, ctx)
         src_flat = render_index(self.src, self.src_index, ctx)
         pad = _pad(ctx.indent)
-        qual = "cg" if self.nbytes == 16 else "ca"  # .cg is 16-byte-only (bypass L1)
-        asm = (
-            f'asm volatile("cp.async.{qual}.shared.global [%0], [%1], {self.nbytes};\\n" '
-            f':: "r"(_smem_addr), "l"(&{self.src}[{src_flat}]) : "memory");'
-        )
-        # ``_smem_addr`` is declared once per C scope and reassigned after — no wrapping ``{ }``
-        # block, so a fill loop holding a single ``cp.async`` renders ``for (…) { … }`` flat.
-        cvta = f"__cvta_generic_to_shared(&{self.smem}[{smem_flat}])"
-        if "_smem_addr" in ctx.scope_decls:
-            addr_line = f"{pad}_smem_addr = {cvta};"
-        else:
-            ctx.scope_decls.add("_smem_addr")
-            addr_line = f"{pad}unsigned int _smem_addr = {cvta};"
-        return [addr_line, f"{pad}{asm}"]
+        # ``emmy_cp_async_{cg,ca}`` (the cp.async prelude) does the ``cvta`` internally, so this is a
+        # single call — no ``_smem_addr`` local and no wrapping ``{ }`` block. .cg is 16-byte-only.
+        dst, src = f"&{self.smem}[{smem_flat}]", f"&{self.src}[{src_flat}]"
+        call = f"emmy_cp_async_cg({dst}, {src})" if self.nbytes == 16 else f"emmy_cp_async_ca<{self.nbytes}>({dst}, {src})"
+        return [f"{pad}{call};"]
 
 
 @dataclass(frozen=True)
@@ -425,7 +416,7 @@ class CpAsyncCommit(Stmt):
         return [f"{indent}cp.async.commit_group"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
-        return [f'{_pad(ctx.indent)}asm volatile("cp.async.commit_group;\\n" ::: "memory");']
+        return [f"{_pad(ctx.indent)}emmy_cp_async_commit();"]
 
 
 @dataclass(frozen=True)
@@ -440,7 +431,7 @@ class CpAsyncWait(Stmt):
         return [f"{indent}cp.async.wait_group({self.group})"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
-        return [f'{_pad(ctx.indent)}asm volatile("cp.async.wait_group {self.group};\\n" ::: "memory");']
+        return [f"{_pad(ctx.indent)}emmy_cp_async_wait<{self.group}>();"]
 
 
 @dataclass(frozen=True)
@@ -1174,7 +1165,7 @@ class LdmatrixLoad(Stmt):
     ``staged`` (default ``True``) selects the transport: ``ldmatrix`` is **smem
     only**, so when the operand was NOT staged into shared memory
     (``staged=False``, ``src_buffer`` is the gmem operand) the render emits the
-    ``dpl_mma_load_{a,b}_gmem`` helper instead — a gmem-direct fragment load that
+    ``emmy_mma_load_{a,b}_gmem`` helper instead — a gmem-direct fragment load that
     replicates the same lane→element map without ldmatrix. Slower (no smem reuse)
     but correct; ``005_lower_atom_tile`` picks per operand based on whether an
     enclosing ``StageBundle`` staged it.
@@ -1249,14 +1240,14 @@ class LdmatrixLoad(Stmt):
                     base, bound = self.gmem_guard[0].render(ctx), self.gmem_guard[1].render(ctx)
                     mn_left = f"({bound}) - ({base})"
                     if self.role == "a":
-                        helper = "dpl_mma_load_a_gmem_mclamp_kzero"
+                        helper = "emmy_mma_load_a_gmem_mclamp_kzero"
                     else:
-                        helper = "dpl_mma_load_b_gmem_trans_nclamp_kzero" if self.b_trans else "dpl_mma_load_b_gmem_nclamp_kzero"
+                        helper = "emmy_mma_load_b_gmem_trans_nclamp_kzero" if self.b_trans else "emmy_mma_load_b_gmem_nclamp_kzero"
                     return [f"{_pad(ctx.indent)}{helper}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {mn_left}, {k_left});"]
                 if self.role == "a":
-                    helper = "dpl_mma_load_a_gmem_kzero"
+                    helper = "emmy_mma_load_a_gmem_kzero"
                 else:
-                    helper = "dpl_mma_load_b_gmem_trans_kzero" if self.b_trans else "dpl_mma_load_b_gmem_kzero"
+                    helper = "emmy_mma_load_b_gmem_trans_kzero" if self.b_trans else "emmy_mma_load_b_gmem_kzero"
                 return [f"{_pad(ctx.indent)}{helper}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {k_left});"]
             if self.gmem_guard is not None:
                 # Masked axis: clamp the lane coordinate to the in-range
@@ -1264,14 +1255,14 @@ class LdmatrixLoad(Stmt):
                 # admitted the tile).
                 base, bound = self.gmem_guard[0].render(ctx), self.gmem_guard[1].render(ctx)
                 if self.role == "a":
-                    helper = "dpl_mma_load_a_gmem_mclamp"
+                    helper = "emmy_mma_load_a_gmem_mclamp"
                 else:
-                    helper = "dpl_mma_load_b_gmem_trans_nclamp" if self.b_trans else "dpl_mma_load_b_gmem_nclamp"
+                    helper = "emmy_mma_load_b_gmem_trans_nclamp" if self.b_trans else "emmy_mma_load_b_gmem_nclamp"
                 return [f"{_pad(ctx.indent)}{helper}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, ({bound}) - ({base}));"]
             if self.role == "a":
-                helper = "dpl_mma_load_a_gmem"
+                helper = "emmy_mma_load_a_gmem"
             else:
-                helper = "dpl_mma_load_b_gmem_trans" if self.b_trans else "dpl_mma_load_b_gmem"
+                helper = "emmy_mma_load_b_gmem_trans" if self.b_trans else "emmy_mma_load_b_gmem"
             return [f"{_pad(ctx.indent)}{helper}({self.frag}, &{self.src_buffer}[{flat}], {ldm});"]
         lane = "(threadIdx.x & 31)"
         if self.pair_frag is not None:
@@ -1283,10 +1274,10 @@ class LdmatrixLoad(Stmt):
             assert self.role == "b" and self.staged, "paired ldmatrix is a staged B-operand fusion"
             if self.b_trans:
                 elem = f"{flat} + (({lane} % 8) + ({lane} / 16) * 8) * {ldm} + (({lane} / 8) % 2) * 8"
-                helper = "dpl_ldmatrix_x4"
+                helper = "emmy_ldmatrix_x4"
             else:
                 elem = f"{flat} + ({lane} % 16) * {ldm} + ({lane} / 16) * 8"
-                helper = "dpl_ldmatrix_x4_trans"
+                helper = "emmy_ldmatrix_x4_trans"
             addr = self._swizzled_addr(elem)
             pad = _pad(ctx.indent)
             return [
@@ -1297,20 +1288,20 @@ class LdmatrixLoad(Stmt):
             # 16×16 A: x4 — lane addresses M-row (lane%16), K-col block (lane/16)*8.
             elem = f"{flat} + ({lane} % 16) * {ldm} + ({lane} / 16) * 8"
             addr = self._swizzled_addr(elem)
-            return [f"{_pad(ctx.indent)}dpl_ldmatrix_x4({self.frag}, {addr});"]
+            return [f"{_pad(ctx.indent)}emmy_ldmatrix_x4({self.frag}, {addr});"]
         # Transposed-B (Q@K^T): the slab keeps the operand's native N-major layout
         # (N rows × K cols), which IS the mma's col-major B — a plain x2 (no
         # .trans) with N-row addresses: lanes 0-7 address the 8 N rows of the k16
         # half 0, lanes 8-15 the same rows at K col 8 (each 8x8 matrix's rows land
-        # as the fragment's (k, k+1) pairs, cf. ``dpl_mma_load_b_gmem_trans``).
+        # as the fragment's (k, k+1) pairs, cf. ``emmy_mma_load_b_gmem_trans``).
         if self.b_trans:
             elem = f"{flat} + ({lane} % 8) * {ldm} + (({lane} / 8) % 2) * 8"
             addr = self._swizzled_addr(elem)
-            return [f"{_pad(ctx.indent)}dpl_ldmatrix_x2({self.frag}, {addr});"]
+            return [f"{_pad(ctx.indent)}emmy_ldmatrix_x2({self.frag}, {addr});"]
         # 16×8 B: x2.trans — lane addresses K-row (lane%16); .trans yields col-major.
         elem = f"{flat} + ({lane} % 16) * {ldm}"
         addr = self._swizzled_addr(elem)
-        return [f"{_pad(ctx.indent)}dpl_ldmatrix_x2_trans({self.frag}, {addr});"]
+        return [f"{_pad(ctx.indent)}emmy_ldmatrix_x2_trans({self.frag}, {addr});"]
 
     def _swizzled_addr(self, elem: str) -> str:
         params = _LDMATRIX_SWIZZLE_XOR.get(self.swizzle)
@@ -1332,7 +1323,7 @@ class MmaSyncPtx(Stmt):
     ``ab_dtype`` (``"f16"`` / ``"bf16"``) tags the operand element type —
     f16 and bf16 share the same fragment layout + ldmatrix path and differ
     only in the PTX instruction's dtype field, so the render just picks the
-    matching ``dpl_mma_…`` wrapper. The accumulate is always f32."""
+    matching ``emmy_mma_…`` wrapper. The accumulate is always f32."""
 
     c_frag: str
     a_frag: str
@@ -1354,7 +1345,7 @@ class MmaSyncPtx(Stmt):
     def render(self, ctx: RenderCtx) -> list[str]:
         m, n, k = self.shape
         # ``c`` is passed for both the ``d`` (out) and ``c`` (in) operands.
-        return [f"{_pad(ctx.indent)}dpl_mma_m{m}n{n}k{k}_{self.ab_dtype}({self.c_frag}, {self.a_frag}, {self.b_frag}, {self.c_frag});"]
+        return [f"{_pad(ctx.indent)}emmy_mma_m{m}n{n}k{k}_{self.ab_dtype}({self.c_frag}, {self.a_frag}, {self.b_frag}, {self.c_frag});"]
 
 
 @dataclass(frozen=True)
@@ -1381,7 +1372,7 @@ class FragmentRepack(Stmt):
         return [f"{indent}FragmentRepack {self.frag} <- ({self.srcs[0]}, {self.srcs[1]}) ({self.ab_dtype})"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
-        return [f"{_pad(ctx.indent)}dpl_c_to_a_{self.ab_dtype}({self.frag}, {self.srcs[0]}, {self.srcs[1]});"]
+        return [f"{_pad(ctx.indent)}emmy_c_to_a_{self.ab_dtype}({self.frag}, {self.srcs[0]}, {self.srcs[1]});"]
 
 
 @dataclass(frozen=True)

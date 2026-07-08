@@ -34,7 +34,7 @@ from emmy.compiler.pipeline.search.features import knob_features
 # key for the per-knob regret analysis. Kept here so the DB-row adapter and the
 # regret grouping share one source. Anchored on the ``__global__`` entry point
 # (``__launch_bounds__`` sits between it and ``void``) — MMA/TMA kernel sources
-# open with ``__device__`` helper preludes (``dpl_ldmatrix_x4``, ``mbarrier_init``),
+# open with ``__device__`` helper preludes (``emmy_ldmatrix_x4``, ``mbarrier_init``),
 # so a bare first-``void`` match would name the helper, collapsing distinct kernels
 # into one leaderboard bucket and hiding them from ``--kernel`` filters.
 KERNEL_NAME_RE = re.compile(r"__global__\s+(?:__launch_bounds__\([^)]*\)\s+)?void\s+(\w+)\s*\(")

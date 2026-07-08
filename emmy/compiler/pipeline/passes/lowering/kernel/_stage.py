@@ -33,6 +33,7 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.kernel.ir import (
@@ -648,8 +649,8 @@ def staged_kloop(
     drain: Callable[[Expr], list[Stmt]],
     depth: int,
     bk_elems: int,
-    n_chunks: int,
-    k_extent: int,
+    n_chunks: int | Dim,
+    k_extent: int | Dim,
     workers=None,
     block_threads: int | None = None,
     k0: str = "_ks",
@@ -676,8 +677,14 @@ def staged_kloop(
 
     ``k0`` names the chunk loop variable (default ``"_ks"``) — a drain whose body references the
     chunk base by name (the warp-flash stream's absolute score columns) passes its own axis name."""
-    ring = min(depth, n_chunks) if n_chunks >= 2 else 1
+    # A symbolic ``k_extent`` (warp-flash over a runtime seq_len) is a ``Dim``: the chunk count is a
+    # runtime value, so allocate the full ``depth`` ring (the tuned hint has ≥ depth chunks) and let
+    # the TMA box zero-fill any over-primed tail chunk — the drain masks those keys to the fold
+    # identity, so it stays bit-identical to gmem-direct. Static callers pass plain ``int``s.
+    symbolic = isinstance(k_extent, Dim)
+    ring = depth if symbolic else (min(depth, n_chunks) if n_chunks >= 2 else 1)
     if workers is not None:
+        assert not symbolic, "warp-spec + symbolic-kv staging is not built (WSPEC drives static-kv TMA only)"
         assert isinstance(transport, TmaTransport), "warp specialization drives the TMA transport only (scheduler legality)"
         assert block_threads is not None, "warp specialization needs the compute-band thread count"
         return _wspec_kloop(
@@ -711,9 +718,12 @@ def staged_kloop(
         pref_slot = BinaryExpr("%", pref_chunk, _lit(ring))
         read_slot = BinaryExpr("%", i_expr, _lit(ring))
         read_phase = BinaryExpr("%", BinaryExpr("/", i_expr, _lit(ring)), _lit(2))
-        last_k0 = (n_chunks - 1) * bk_elems
+        # The last chunk's base and the loop bound are runtime Exprs when kv is symbolic (``Dim``),
+        # else folded literals — the clamp pins an overhanging prefetch back onto the last chunk.
+        last_k0 = BinaryExpr("*", BinaryExpr("-", n_chunks.expr, _lit(1)), _lit(bk_elems)) if symbolic else _lit((n_chunks - 1) * bk_elems)
+        k_bound = k_extent.expr if symbolic else _lit(k_extent)
         k0_next = BinaryExpr("+", Var(k0), _lit((ring - 1) * bk_elems))
-        k0_pref = TernaryExpr(cond=BinaryExpr("<", k0_next, _lit(K)), if_true=k0_next, if_false=_lit(last_k0))
+        k0_pref = TernaryExpr(cond=BinaryExpr("<", k0_next, k_bound), if_true=k0_next, if_false=last_k0)
         body += transport.fill(k0=k0_pref, slot=pref_slot)
         body += transport.commit()
         body += transport.wait(in_flight=ring - 1, slot=read_slot, phase=read_phase)

@@ -319,7 +319,10 @@ def _warp_atoms(kernel, probe) -> tuple[str, ...]:
     """The dtype-eligible tensor-core atom names for this contraction, ``()`` when the warp tier
     doesn't apply (unbindable node, a non-16-bit operand dtype, or a fragment-unrealizable gather
     epilogue). A computed-A (fused-cone) node reads its operand dtype off the cone's K-indexed
-    ``Load`` — the value the sync compute-fill stores to the A slab."""
+    ``Load`` — the value the sync compute-fill stores to the A slab. A cone whose leaf is **f32**
+    may still ride the folds' 16-bit atom (:func:`_demoted_atoms`) — the fill demotes on the slab
+    store; the plain-``Load`` form stays 16-bit-only here (copy transports move raw bytes and can
+    never convert) and reaches the warp tier through :func:`_demote_mixed_a`'s cone wrap instead."""
     if probe is None or not kernel.inputs:
         return ()
     if not _fragment_epilogue_ok(probe.epilogue):
@@ -330,7 +333,47 @@ def _warp_atoms(kernel, probe) -> tuple[str, ...]:
         kname = probe.k_axis.name
         ld = next((st for st in probe.a_body if isinstance(st, Load) and kname in {v for e in st.index for v in e.free_vars()}), None)
     t = kernel.inputs.get(ld.input) if ld is not None else None
-    return _ATOMS_BY_DTYPE.get(getattr(getattr(t, "dtype", None), "name", None), ())
+    atoms = _ATOMS_BY_DTYPE.get(getattr(getattr(t, "dtype", None), "name", None), ())
+    if atoms or isinstance(probe.a_operand, Load) or getattr(getattr(t, "dtype", None), "name", None) != "f32":
+        return atoms
+    return _demoted_atoms(kernel, probe)
+
+
+def _demoted_atoms(kernel, con) -> tuple[str, ...]:
+    """The 16-bit atoms an **f32-A** contraction may ride by demoting A on the sync compute-fill's
+    slab store: the single 16-bit dtype shared by every fold's B ``Load``, or ``()``. The
+    ``f32-A × 16-bit-B`` signature can only enter a traced graph through an erased dtype cast —
+    torch cannot execute a mixed-dtype matmul, so the model itself cast one side (Gemma's
+    ``self._norm(x.float()).type_as(x)`` rounds A back to f16 before every projection; the tracer
+    maps ``to``/``type_as`` to identity pass-throughs, leaving the f32 tensor feeding the f16
+    weights). B's values genuinely carry 16 bits, the accumulate stays f32, and this is a fork
+    SIBLING (the scalar rows remain), so the demotion is searchable, pinnable, and costs ~2^-11
+    relative noise on A — the rounding the model performed anyway in the dominant erased-downcast
+    case. (The converse erased-upcast graph — ``w.float()`` on a 16-bit weight — shows B=f32 and
+    never triggers this.)"""
+    b_loads = [b for b, _ in con.folds]
+    if not b_loads or not all(isinstance(b, Load) for b in b_loads):
+        return ()
+    b_names = {getattr(getattr(kernel.inputs.get(b.input), "dtype", None), "name", None) for b in b_loads}
+    if len(b_names) == 1 and b_names <= set(_ATOMS_BY_DTYPE):
+        return _ATOMS_BY_DTYPE[next(iter(b_names))]
+    return ()
+
+
+def _demote_mixed_a(kernel, con):
+    """A mixed-dtype contraction — plain f32-A ``Load`` against 16-bit folds
+    (:func:`_demoted_atoms`) — re-expressed as a computed-A cone (``a_operand=Body((load,))``), so
+    it rides the mandatory ``sync`` compute-fill whose slab store demotes the value to the atom
+    dtype. The copy transports (gmem-direct ldmatrix / cp.async / TMA) move raw bytes and cannot
+    convert, which is why the demotion routes through the cone form instead of the plain warp
+    tier. Anything else (already-computed A, non-Load A, 16-bit A, non-16-bit folds) returns
+    unchanged."""
+    if con is None or not isinstance(con.a_operand, Load):
+        return con
+    a_t = kernel.inputs.get(con.a_operand.input)
+    if getattr(getattr(a_t, "dtype", None), "name", None) != "f32" or not _demoted_atoms(kernel, con):
+        return con
+    return replace(con, a_operand=Body((con.a_operand,)))
 
 
 def _warp_move_ok(kernel, spec: str) -> bool:
@@ -454,13 +497,26 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], str]:
         return _computed_a_rows(kernel, place, probe, kaxis, _smem_budget(ctx)), kaxis
     tiles = scalar_tile_moves() if probe is not None else [""]
     warp_offered = False
+    demoted_rows: list[dict] = []
     if probe is not None:
         atoms = _warp_atoms(kernel, probe)
         if atoms:
             warp_moves = [s for s in warp_tile_moves(atoms) if _warp_move_ok(kernel, s)]
             tiles += warp_moves
             warp_offered = bool(warp_moves)
+        else:
+            # Mixed-dtype (f32-A × 16-bit-B) contraction: the warp tier rides the demoting
+            # sync compute-fill through the cone form — pre-assembled rows (TILE+STAGE+REDUCE
+            # resolved, warp pins handled inside); the scalar rows below stay fork siblings.
+            demoted = _demote_mixed_a(kernel, probe)
+            if demoted is not probe:
+                demoted_rows = _computed_a_rows(kernel, place, demoted, kaxis, _smem_budget(ctx))
+                warp_offered = bool(demoted_rows)
     tiles = list(TILE.narrow(tiles))
+    if demoted_rows:
+        # A warp TILE pin is already honored (or rejected) by the demoted rows — the plain loop
+        # must not also emit it over the copy transports, which cannot convert the f32 A.
+        tiles = [t for t in tiles if not is_warp_codec(t)]
     # Warp-eligibility is a structural fact about the KERNEL: when the enumeration offers any
     # tensor-core row, EVERY row (scalar and warp alike) carries ``S_warp_eligible`` so the
     # priors can price "a scalar tile where tensor cores were on offer"
@@ -490,6 +546,7 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], str]:
                 # "free" and would let a gmem-direct leaf inherit a staged row's measurement.
                 for wspec in _wspec_candidates(plan, stage, red):
                     rows.append({_at(TILE, kaxis): spec, _at(STAGE, kaxis): stage, _at(REDUCE, kaxis): red, WSPEC.name: wspec, **stamp})
+    rows += [{**r, **stamp} for r in demoted_rows]
     return rows, kaxis
 
 
@@ -971,7 +1028,7 @@ def _warp_option(
     # Build the tiled Contraction node here — it resolves the operand→role facts internally, so an
     # unbindable atom (a non-Load operand: a computed-cone / demoted matmul) raises and is rejected
     # at fork construction, like the static-K check.
-    op = _contraction_node(tile.op, place, wt)
+    op = _demote_mixed_a(tile, _contraction_node(tile.op, place, wt))
     # A computed-A node's stage is the mandatory resolved ``sync`` compute-fill (its ``smem`` /
     # ``bk_elems`` are derived, not codec-spelled, so the row's ``"d1/sync"`` re-resolves here);
     # a Load-operand node resolves the copy transports as usual.
@@ -1175,11 +1232,18 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
             spec = row.get(_at(TILE, kaxis), "")
             stage_spec = row.get(_at(STAGE, kaxis), "")
             red = row.get(_at(REDUCE, kaxis), "")
+            # Thread the row's structural stamps (``S_warp_eligible``) onto the op. Fork rows carry
+            # them for branch identity, but the MATERIALIZED op is what ``realized_knobs`` reads —
+            # dropping them here left leaf/evidence rows unstamped while fork rows (deploy
+            # candidates) were stamped, fracturing the ``S_*`` evidence signature: deploy-time
+            # ``evidence_pick`` never joined the measured -O3 rows, and greedy shipped the learned
+            # model's unbenched per-cell extrapolation (the 2026-07-07 5090 gate's 330x fp16 miss).
+            op_knobs = {**knobs, **{k: v for k, v in row.items() if k.startswith("S_")}}
             if red and ReducePlan.parse(red).needs_split:
-                return _splitk_option(tile, place, spec, red, name, knobs, stage_spec, _smem_budget(ctx))
+                return _splitk_option(tile, place, spec, red, name, op_knobs, stage_spec, _smem_budget(ctx))
             if is_warp_codec(spec):
-                return _warp_option(tile, place, spec, name, knobs, stage_spec, _smem_budget(ctx), row.get(WSPEC.name, ""))
-            return _tile_option(tile, place, spec, name, knobs, red, stage_spec, _smem_budget(ctx))
+                return _warp_option(tile, place, spec, name, op_knobs, stage_spec, _smem_budget(ctx), row.get(WSPEC.name, ""))
+            return _tile_option(tile, place, spec, name, op_knobs, red, stage_spec, _smem_budget(ctx))
 
         if len(rows) == 1:
             return _materialize(rows[0])
@@ -1206,7 +1270,15 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         if pair is not None:
             red, head, pv = pair
             warps = _twisted_warp_options(tile, name, knobs, _smem_budget(ctx), _tma_allowed(ctx))
-            if warps and TILE.raw() is not None:  # a live warp pin — the mma rows alone (the pin contract)
+            # A live warp ``TILE`` pin OR a non-empty ``STAGE`` pin keeps the mma rows alone: ONLY the
+            # warp tier stages, so a staging pin (the ``--ab STAGE=…`` / ``emmy tune`` staging probe,
+            # or ``EMMY_STAGE``) must not fall through to the chain / scalar reduce-partition siblings
+            # and let the prior bury the (necessarily lower-occupancy) staged warp form under a
+            # higher-occupancy scalar form — the scalar-fallback that made a staged-flash A/B row read
+            # as a 100× regression. ``warps == []`` (a non-warp-eligible flash) still degrades to
+            # scalar below, so a stage pin on such a shape stays a graceful no-op.
+            stage_pinned = STAGE.raw() is not None and bool(STAGE.narrow([""])[0])
+            if warps and (TILE.raw() is not None or stage_pinned):
                 return warps if len(warps) > 1 else warps[0]
             chain = _twisted_chain_option(tile, place, name, knobs)
             forms = [*warps, *([chain] if chain is not None else [])]
@@ -1326,7 +1398,11 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     b_name = next((a for a in lift.args if (vs := _load_vars(a)) and n_ax.name in vs and k_ax.name in vs), None)
     if b_name is None:
         return None
-    a_name = next(a for a in lift.args if a != b_name)
+    # A square fold (``multiply(x, x)`` — a mean-of-squares reduce) has no distinct A arg; it is
+    # not a matmul edge, so the pin degrades gracefully instead of raising StopIteration.
+    a_name = next((a for a in lift.args if a != b_name), None)
+    if a_name is None:
+        return None
     cone = map_cone(body, a_name)
     if cone is None or not cone:
         return None
@@ -1375,14 +1451,23 @@ def _resolve_twisted_stage(stage: Stage, kv_extent, bn: int, head_dim: int, d_v:
     break) and **TMA** (the batched K/V encode as rank-N boxes with leading extent-1 dims —
     ``(1, 1, bn, head_dim)`` — the load's own batch/head index exprs supplying the origin coords;
     the slabs stay dense and take the hardware swizzle + drain XOR instead of padding; box dims
-    cap at the 256 hardware limit). ``sync`` has nothing to overlap. A symbolic or
-    non-block-divisible kv stays gmem-direct (its masked fragment loads already clamp; slab
-    zero-fill is a follow-up). ``depth`` clamps so the ring's K+V slot pairs fit the smem
+    cap at the 256 hardware limit). ``sync`` has nothing to overlap. A **symbolic** kv stages
+    under TMA only — the descriptor rides the runtime globalDim and zero-fills the box overhang, so
+    the streaming drain's tail-key masks (the same clamp the gmem-direct symbolic path makes) keep
+    it bit-identical; cp.async has no such zero-fill and a static, non-block-divisible kv has no
+    tail mask, so both stay gmem-direct. ``depth`` clamps so the ring's K+V slot pairs fit the smem
     ``budget``; ``reg_depth`` clamps to 1 (no ldmatrix ping-pong on the streaming drain yet);
     ``bk_elems`` records the streamed keys per step."""
     if stage.transport not in ("cp.async", "tma"):
         return None
-    if not kv_extent.is_static or kv_extent.as_static() % bn != 0:
+    if stage.transport == "cp.async":
+        # cp.async has no OOB zero-fill — a symbolic / non-block-divisible kv would read the
+        # overhanging tail chunk out of bounds, so it stays static + block-divisible only.
+        if not kv_extent.is_static or kv_extent.as_static() % bn != 0:
+            return None
+    elif kv_extent.is_static and kv_extent.as_static() % bn != 0:
+        # TMA + a STATIC non-block-divisible kv has no tail mask (masking is symbolic-only) —
+        # stay gmem-direct. A symbolic kv falls through: TMA zero-fills its box overhang.
         return None
     if stage.transport == "tma":
         # Box dims must fit the 1..256 hardware range, and the inner (contiguous) row spans must

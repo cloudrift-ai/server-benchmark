@@ -329,12 +329,14 @@ def _planted_analytic(weights: dict[str, float]):
 def test_analytic_explain_sums_to_the_scored_quality():
     """The exact-sum invariant: ``explain_features`` terms (linear + the three
     ``gate:*`` pseudo-terms) sum to the same quality ``mean_score_features``
-    exponentiates — so a two-row term diff IS the model's preference gap."""
+    exponentiates — so a two-row term diff IS the model's preference gap. The
+    atomic-free gate is enabled explicitly (it defaults OFF since the 2026-07-07
+    golden-gate check) so the interaction's sign flip stays covered."""
     import math  # noqa: PLC0415
 
     from emmy.compiler.pipeline.search.prior.analytic import AnalyticPrior  # noqa: PLC0415
 
-    p = AnalyticPrior()
+    p = AnalyticPrior(atomic_free_weight=5.0)
     feats = {
         "D_pow2_threads": 1.0,
         "D_near_waves": 0.7,

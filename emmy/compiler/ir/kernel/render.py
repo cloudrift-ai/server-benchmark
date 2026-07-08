@@ -183,6 +183,22 @@ static __device__ __forceinline__ void emmy_ldmatrix_x4_trans(unsigned* r, const
                  : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(addr));
 }
 
+// Paired x4 → two B fragments in one ldmatrix (096_pair_ldmatrix_loads): the four
+// loaded registers land DIRECTLY as b0[0..1] (lanes 0-15) and b1[0..1] (lanes 16-31)
+// — no staging temp / register shuffle. ``_pair`` is the plain x4 (transposed-B slab,
+// N-adjacent pair); ``_trans_pair`` is x4.trans (canonical-B slab, col-adjacent pair).
+static __device__ __forceinline__ void emmy_ldmatrix_x4_pair(unsigned* b0, unsigned* b1, const void* smem) {
+    unsigned addr = __cvta_generic_to_shared(smem);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\\n"
+                 : "=r"(b0[0]), "=r"(b0[1]), "=r"(b1[0]), "=r"(b1[1]) : "r"(addr));
+}
+
+static __device__ __forceinline__ void emmy_ldmatrix_x4_trans_pair(unsigned* b0, unsigned* b1, const void* smem) {
+    unsigned addr = __cvta_generic_to_shared(smem);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\\n"
+                 : "=r"(b0[0]), "=r"(b0[1]), "=r"(b1[0]), "=r"(b1[1]) : "r"(addr));
+}
+
 // Plain (no .trans) x2: a transposed-B operand staged as its native N-major
 // slab (Q@K^T's K rows) — each 8x8 matrix's rows ARE the mma B fragment's
 // col-major columns, so no transpose is needed (cf. emmy_mma_load_b_gmem_trans).

@@ -1306,16 +1306,12 @@ class LdmatrixLoad(Stmt):
             assert self.role == "b" and self.staged, "paired ldmatrix is a staged B-operand fusion"
             if self.b_trans:
                 elem = f"{flat} + (({lane} % 8) + ({lane} / 16) * 8) * {ldm} + (({lane} / 8) % 2) * 8"
-                helper = "emmy_ldmatrix_x4"
+                helper = "emmy_ldmatrix_x4_pair"
             else:
                 elem = f"{flat} + ({lane} % 16) * {ldm} + ({lane} / 16) * 8"
-                helper = "emmy_ldmatrix_x4_trans"
-            addr = self._swizzled_addr(elem)
-            pad = _pad(ctx.indent)
-            return [
-                f"{pad}{{ unsigned _p4[4]; {helper}(_p4, {addr});",
-                f"{pad}  {self.frag}[0] = _p4[0]; {self.frag}[1] = _p4[1]; {self.pair_frag}[0] = _p4[2]; {self.pair_frag}[1] = _p4[3]; }}",
-            ]
+                helper = "emmy_ldmatrix_x4_trans_pair"
+            # The helper loads both fragments' registers directly (no ``_p4`` staging temp / block).
+            return [f"{_pad(ctx.indent)}{helper}({self.frag}, {self.pair_frag}, {self._swizzled_addr(elem)});"]
         if self.role == "a":
             # 16×16 A: x4 — lane addresses M-row (lane%16), K-col block (lane/16)*8.
             elem = f"{flat} + ({lane} % 16) * {ldm} + ({lane} / 16) * 8"

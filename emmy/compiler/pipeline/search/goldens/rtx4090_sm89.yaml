@@ -6,8 +6,8 @@ configs:
     M: 512
     N: 512
     K: 512
-    knobs: {TILE: 'n32x16/f2x4', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
-    emmy_us: 12.5
+    knobs: {TILE: 'n16x8/f4x8', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
+    emmy_us: 10.1
     cublas_us: 10.8
   - kernel: matmul
     name: matmul.square.1024
@@ -75,17 +75,8 @@ configs:
     N: 512
     K: 512
     dynamic: true
-    knobs: {TILE: 'n32x8/f4x8', REDUCE: 'g4k', STAGE: 'd2/cp/ring'}
-    emmy_us: 11.5
-    cublas_us: 10.8
-  - kernel: matmul
-    name: matmul.square.512.dynM
-    M: 512
-    N: 512
-    K: 512
-    dynamic: true
-    knobs: {TILE: 'n16x8/f4x8', REDUCE: 'g2k', STAGE: 'd4/cp/ring'}
-    emmy_us: 11.2
+    knobs: {TILE: 'n16x8/f4x8', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
+    emmy_us: 10.8
     cublas_us: 10.8
   - kernel: matmul
     name: matmul.qkv.h4096

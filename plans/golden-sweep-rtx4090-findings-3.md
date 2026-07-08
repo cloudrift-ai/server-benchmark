@@ -214,3 +214,29 @@ New workflow notes from the investigation:
   them would re-align the vocabularies going forward; the tolerant join remains necessary for old DBs.
 - A **decide-level probe** (spying `_db_measured_pick` / `evidence_pick` key diffs on a live compile) answered
   in minutes what three A/B rounds could not — worth productizing as `emmy eval deploy --explain <shape>`.
+
+## Epilogue 2 (2026-07-08, post-fix ε-follow-up) — first cuBLAS win; a fast-but-wrong hazard found and contained
+
+A targeted ε-tune of the 512 family (`--kernel matmul.square.512`, patience 100, ε 0.25, ~27 min) found two
+confirmed wins (3/3 A/B runs each), recorded in the YAML:
+
+- `square.512` → `n16x8/f4x8 + g2k + d2/cp/ring`, 12.5 → **10.1 µs** — **0.94× cuBLAS (10.8), the first fp32
+  square at/under cuBLAS on this card**. The "fp32 squares are ceiling-bound" verdict above was wrong: the tile
+  the dynM twin already used transfers, three prior sweeps just never offered it to the static shape's deploy.
+- `square.512.dynM` → same config, **10.8 µs**; both older entries (g4k 11.5, g2k/d4 11.2) pruned (>3% slower).
+
+The same session's ε-tune of the gate_up pair (patience 100, ~50 min) produced no wins but exposed two bugs:
+
+- **Lowering bug: `w4x4/f4x8/k8` warp tiles emit broken programs.** With `g4k`/`d1/cp` the pipeline leaves the
+  `matmul__partial` node as an unlowered `TileOp` (bench worker `TypeError`, honest `bench_fail`); with `g2k` it
+  produces a *launchable kernel that computes garbage fast* — "best" 105.8/103.5 µs on a shape whose physical
+  floor is ~700 µs (>1 PFLOP-equivalent; the 93–99 % post-fit silly rates were the tell).
+- **Systemic: the tune has no numerics gate, and #326 made measurements load-bearing.** A fast-but-wrong bench
+  is recorded as `ok` evidence; post-fix, evidence decides deploys, so garbage latencies are a deploy hazard,
+  not a curiosity. This incident was contained by luck-of-architecture: the bogus rows never reached the perf
+  table, and their -O3 re-bench never landed in the reservoir (plausibly the broken config crashed the O3
+  recompile), so the `H_opt=3` evidence tier stayed clean and `run --bench` kept deploying the measured-good
+  config. Cleanup: 11 bogus `node` rows deleted; 36 bogus -O1 reservoir rows remain as (minor) training noise —
+  scrubbing `prior.json`'s dataset + an offline refit removes them if the model drifts. Recommendation: verify
+  a candidate's output against torch before its measurement becomes evidence — at minimum for new per-shape
+  bests and O3-rebench candidates.

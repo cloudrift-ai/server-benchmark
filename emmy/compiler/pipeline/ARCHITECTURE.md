@@ -192,8 +192,11 @@ engine loops (`drive` for exploration, `resolve` for deterministic resolution):
   are priced, never raw-scored**: with the trained prior loaded, `greedy_decide`'s `_pick_structural` prices each side
   (a nested `resolve` per kernel over a `lowering/tile`-only pipeline, the price being the `score` of its slice-resolve's
   partition-fork `Decision`, memoized per `op_cache_key`) and the cheaper kernel set wins, so an unpinned compile deploys
-  the splits `tune` measured best. Cold, or when a side is unpriceable, the structural leaf is filtered — a cold compile
-  never changes kernel sets. Retries are decide-wrappers over a deterministic re-resolve (every other choice replays
+  the splits `tune` measured best. The nested resolve carries the deploy's `db`, so each kernel's price follows the same
+  evidence hierarchy as a knob pick (reservoir -O3, then the -O1 ranking lane, model prediction only where unmeasured) —
+  a pure Σ-of-predictions comparison flips forks the DB refutes (the ninth-4090-sweep `mlp_gate_up` split misdeploy),
+  because the model's absolute-µs error doesn't cancel across different kernel families. Cold, or when a side is
+  unpriceable, the structural leaf is filtered — a cold compile never changes kernel sets. Retries are decide-wrappers over a deterministic re-resolve (every other choice replays
   identically — cheap non-chronological backtracking, no snapshots): a structural pick that leaves a fragment kernel
   un-lowered retires structural picks wholesale and re-resolves the keep-fused branch before falling back to tile
   blocklisting.

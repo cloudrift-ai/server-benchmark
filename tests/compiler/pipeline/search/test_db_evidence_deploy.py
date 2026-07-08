@@ -76,3 +76,32 @@ def test_db_index_skips_failed_rows(tmp_path):
     stats = PerfStats(median=2e6, min=2e6, max=2e6, mean=2e6, variance=0.0, n_samples=1)
     db.record_perf(ctx.structural_key(), "op-key-1", backend="cuda", status="bench_fail", stats=stats, knobs={**_SIG, "TILE": "n16x8/f4x8"})
     assert _db_measured_index(db, ctx) == {}
+
+
+def test_structural_price_probe_threads_db_evidence(monkeypatch):
+    """The structural fork's pricing probe (``_price_kernel``'s nested resolve) must
+    carry the same ``db`` evidence as a top-level knob pick. A prediction-only probe
+    is how a measured-slower split displaced the measured-faster fused
+    ``mlp_gate_up.h4096`` kernel (ninth 4090 sweep): the model's absolute-µs error
+    doesn't cancel across kernel families, so a Σ-of-predictions comparison can flip
+    a fork the DB's own measurements refute."""
+    from types import SimpleNamespace
+
+    from emmy.compiler.pipeline.search.policy import greedy
+
+    seen: dict = {}
+    real = greedy.greedy_decide
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(greedy, "greedy_decide", spy)
+    graph = SimpleNamespace(nodes={"n0": SimpleNamespace(op=SimpleNamespace())})
+    sentinel = object()
+    ctx = Context.from_target((12, 0))
+    # The dummy graph is unpriceable (no real op) — the probe must still have been
+    # built with the caller's db and with structural pricing off (no recursion).
+    assert greedy._price_kernel(graph, "n0", ctx, prior=None, memo={}, db=sentinel) is None
+    assert seen.get("db") is sentinel
+    assert seen.get("price_structural") is False

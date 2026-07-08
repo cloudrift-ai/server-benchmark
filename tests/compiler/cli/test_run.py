@@ -725,3 +725,32 @@ def test_bind_inputs_preserves_int_dtype():
     assert bound["activations"].dtype == np.float32
     # Values must round-trip without precision loss.
     np.testing.assert_array_equal(bound["position_ids"], np.arange(8, dtype=np.int32)[None, :])
+
+
+def test_launch_order_cuda_nodes_pairs_by_topo_not_dict_order():
+    """The per-kernel table pairs ``bench.per_launch`` times to kernels by launch index,
+    and the backend launches in ``graph.topological_order()`` — NOT graph dict order.
+    Node-splitting passes insert a producer (the split ``__partial``) after its consumer
+    in dict order, which used to cross-label the rows: the 4 µs norm kernel printed the
+    1573 µs matmul-partial's time and vice versa (nsys-verified on the gemma-4-12B
+    QK-norm reproducer). ``_launch_order_cuda_nodes`` must return topo order regardless
+    of insertion order."""
+    from emmy.commands.run import _launch_order_cuda_nodes
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.cuda import CudaOp
+
+    def _cuda_op(name, args):
+        return CudaOp(kernel_source="", kernel_name=name, arg_order=args, grid=(1, 1, 1), block=(1, 1, 1))
+
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("A", (8,)), node_id="A")
+    g.add_node(op=_cuda_op("k_producer", ("A", "T")), inputs=["A"], output=Tensor("T", (8,)), node_id="T")
+    g.add_node(op=_cuda_op("k_consumer", ("T", "C")), inputs=["T"], output=Tensor("C", (8,)), node_id="C")
+    g.inputs = ["A"]
+    g.outputs = ["C"]
+    # Simulate the split pass's dict layout: the consumer precedes its producer in insertion order.
+    g.nodes = {nid: g.nodes[nid] for nid in ("A", "C", "T")}
+
+    names = [n.op.kernel_name for n in _launch_order_cuda_nodes(g)]
+    assert names == ["k_producer", "k_consumer"]

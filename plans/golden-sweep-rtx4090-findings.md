@@ -1,5 +1,13 @@
 # Golden seeding findings — RTX 4090 (sm_89): first rms_norm entries
 
+> **CORRECTION (2026-07-07, nsys-verified):** Findings 1 and 3 were built on cross-labeled per-kernel benches
+> (`run --bench` paired times by graph dict order vs the backend's topo launch order — fixed in run.py's
+> `_launch_order_cuda_nodes`). The fused norm kernels are 4–5 µs (recognition + coop fork work fine; local variants:
+> b64 4.0 µs rank 1/11, serial 88 µs); the slow kernel in those programs is the **mixed-dtype (f32×f16) projection
+> matmul on scalar tiles**. e4bb2c's winner was never broken — its reproducer program contains the scalar
+> down-projection (~98 ms real). The seeded goldens (this file's table) are unaffected: single-kernel programs
+> can't cross-label. Finding 2 (dyn AI-floor false positive) and Finding 4 (refit skips rms_norm) stand.
+
 - **Date / GPU / box:** 2026-07-07, NVIDIA GeForce RTX 4090 24 GB (CloudRift rental, driver 580.65.06, nvcc 12.9 via
   `CUDA_HOME=/usr/local/cuda`), emmy at `main` (71bd34f3) + this branch.
 - **Scope:** NOT a full-dataset sweep — a seeding session adding the first `rms_norm` entries to `rtx4090_sm89.yaml`

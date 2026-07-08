@@ -83,6 +83,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from emmy.compiler.dim import Dim
+from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import ConstantOp, InputOp
@@ -287,7 +288,9 @@ def build_flash_frag(
         frag.add_node(op=InputOp(), inputs=[], output=Tensor(nid, shp, out.dtype), node_id=nid)
     inputs = [q_id, k_id, v_id, "_flash_scale"]
     frag.add_node(
-        op=ConstantOp(name="_flash_scale", value=scale), inputs=[], output=Tensor("_flash_scale", (1,), out.dtype), node_id="_flash_scale"
+        # fp32 constant: the score scale accumulates into the fp32 carrier, so a half-precision
+        # ``_flash_scale`` would only add an ``__half2float`` at every use (and round ``1/√d`` to fp16).
+        op=ConstantOp(name="_flash_scale", value=scale), inputs=[], output=Tensor("_flash_scale", (1,), F32), node_id="_flash_scale"
     )
     if mask_buf is not None:
         frag.add_node(op=InputOp(), inputs=[], output=Tensor(mask_buf, mask_shape, out.dtype), node_id=mask_buf)

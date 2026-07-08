@@ -264,6 +264,6 @@ def test_mixed_dtype_matmul_demotes_a_to_mma(tier, monkeypatch):
     }
     got, srcs = _compile_run(g, ins)
     if tier == "warp":
-        assert any("dpl_mma" in s for s in srcs), "the mixed-dtype matmul must engage the mma tier via the demoting sync fill"
+        assert any("emmy_mma" in s for s in srcs), "the mixed-dtype matmul must engage the mma tier via the demoting sync fill"
     ref = ins["x"].astype(np.float16).astype(np.float32) @ ins["w"].astype(np.float32)
     np.testing.assert_allclose(got.reshape(_M, _N).astype(np.float32), ref, atol=0.1, rtol=2e-2)

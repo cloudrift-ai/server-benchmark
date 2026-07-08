@@ -285,5 +285,10 @@ pass k re-rolls the inner N-atoms, pass k+1 sees the resulting sibling loops as 
 structural: an unrolled congruent run executes in the SAME order as the original straight-line statements, so a template
 that reproduces every window is byte-identical after nvcc unrolls — identical SASS, ~half the flash body's lines.
 A readability lever for `--ir cuda` inspection, `N=4` the recommended sweet spot (skips the 2-long runs and the QK nest).
+Two orthogonal readability transforms ride alongside: `FragmentApply` **always** renders as one element
+`#pragma unroll for (_e)` loop (the ROW operand as the row-split ternary `_e < 2 ? row0 : row1`), so a re-rolled family
+nests as `for (_r) { for (_e) … }`; and pin-gated **chain fusion** (`_fuse_chains`, before the re-roll) folds a
+`FragmentApply` immediately consumed by an in-place unary `FragmentApply` on the same fragment (`p <- s − m` then
+`p *= exp(p)`) into one node carrying the tail on its `post` field, so the softmax renders `p[_e] = expf(s[_e] − m)`.
 NOTE: the whole-body SSA rename this pass runs is why the shared `_rewrite` `Tile` handler must carry `block_threads` /
 `aux_threads` through verbatim — dropping them silently over-launches a cooperative tile.

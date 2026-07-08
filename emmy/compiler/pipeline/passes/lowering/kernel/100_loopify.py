@@ -1,11 +1,12 @@
 """Re-roll parallel per-fragment statement runs into ``#pragma unroll`` loops (``LOOPIFY`` — pin-only,
 off by default).
 
-A generic **loop re-roller**, iterated to a fixpoint so nested runs collapse to nested loops. The flash
-mma body emits long runs of near-identical straight-line statements — the per-fragment ``FragmentApply``
-epilogue (``O_i_f{t} *= α`` / ``/= l``, the ``sacc_f`` QK scale, the interleaved ``subtract``→``exp``),
-the ``P@V`` ``load``+``mma`` pairs, the fragment ``RegStore``s, the A-fragment loads, and the nested
-``QK`` score contraction (4 K-chunks × 2 N-atoms). Each run is N repetitions of a fixed K-statement
+A generic **loop re-roller**, iterated to a fixpoint so nested runs collapse to nested loops, plus a
+pin-gated **pointwise-chain fusion** (:func:`_fuse_chains`). The flash mma body emits long runs of
+near-identical straight-line statements — the per-fragment ``FragmentApply`` epilogue (``O_i_f{t} *= α``
+/ ``/= l``, the ``sacc_f`` QK scale), the ``P@V`` ``load``+``mma`` pairs, the fragment ``RegStore``s,
+the A-fragment loads, and the nested ``QK`` score contraction (4 K-chunks × 2 N-atoms). Each run is N
+repetitions of a fixed K-statement
 window that differ ONLY in (a) a **contiguous fragment family** index (``O_i_f0 … O_i_f{N-1}``,
 ``_sacc_a0 …``, or an already-arrayed ``fam[0] … fam[N-1]``) and (b) **affine address offsets** (a
 store's / load's ``+ t*8`` stride). This pass detects such a run, arrays each family into one
@@ -39,19 +40,26 @@ off; ``EMMY_LOOPIFY=4`` catches the 8-long runs while skipping the 2-long QK sca
 Only ``RegFragment``-declared families are arrayable ``float[4]`` / ``unsigned[N]`` fragments; a run over
 scalar carriers (``m_i`` / the ``_rmx`` row-reduce temps) or an inline-declared fragment (``_p_f``) is
 rejected. The arrayed decl is sized to the family's member count, never a single run's length.
+
+Chain fusion (also pin-gated, run before the re-roll): a ``FragmentApply`` whose result is immediately
+consumed by an in-place UNARY ``FragmentApply`` on the same fragment (``p <- s − m`` then ``p *= exp(p)``)
+folds into one node carrying the tail on its ``post`` field, so — with the element-loop render each
+``FragmentApply`` already uses — the softmax exp renders as ``p[_e] = expf(s[_e] − m)`` rather than a
+subtract loop feeding an exp loop. Valid because the tail reads only ``p`` and the next stmt is its sole
+consumer (no intermediate use to preserve).
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import fields, is_dataclass
+from dataclasses import fields, is_dataclass, replace
 from itertools import count
 
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.kernel.ir import RegFragment
+from emmy.compiler.ir.kernel.ir import FRAG, FragmentApply, RegFragment
 from emmy.compiler.ir.stmt import Body, StridedLoop
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import unroll_ok_n
@@ -72,7 +80,9 @@ def rewrite(root: Node) -> KernelOp | None:
     knobs = {**op.knobs, LOOPIFY.name: n}
     if n < 2:  # 0 / unset / a lone iteration → off, byte-identical
         return KernelOp(body=op.body, name=op.name, knobs=knobs)
-    body = op.body
+    # (2) Fuse each pointwise fragment chain (``p <- s − m`` then ``p *= exp(p)``) into one node
+    # carrying a ``post`` tail, so it renders as ``p[_e] = expf(s[_e] − m)`` instead of two loops.
+    body = _fuse_chains(op.body)
     # Iterate to a fixpoint: each pass re-rolls the runs it can see, then the next pass (fresh loop var)
     # sees the loops it produced as a new run and nests them. Terminates — every pass either shrinks the
     # flat statement count or leaves the body unchanged.
@@ -83,6 +93,35 @@ def rewrite(root: Node) -> KernelOp | None:
             break
         body = new_body
     return KernelOp(body=body, name=op.name, knobs=knobs)
+
+
+def _is_unary_post(s, out: str, layout) -> bool:
+    """``s`` is an in-place ``FragmentApply`` that applies ONE unary op to ``out`` (``out *= g(out)``)
+    — the fusable tail of a pointwise chain (the softmax ``p *= exp(p)`` after ``p <- s − m``)."""
+    return isinstance(s, FragmentApply) and s.in_place and s.out == out and s.layout == layout and s.kinds == (FRAG,) and s.args == (out,)
+
+
+def _fuse_chains(body: Body) -> Body:
+    """Merge a maximal chain of same-fragment pointwise ops — ``p <- f(args)`` immediately followed by
+    ``p *= g(p)`` (, then ``p *= h(p)`` …) — into one ``FragmentApply`` whose ``post`` carries the
+    unary tail. Correct because each tail op reads ONLY ``p`` and the next stmt is its sole consumer,
+    so there is no intermediate use to preserve. Recurses into nested bodies."""
+    stmts = list(body)
+    out: list = []
+    i = 0
+    while i < len(stmts):
+        s = stmts[i]
+        nested = s.nested()
+        if nested:
+            s = s.with_bodies(tuple(_fuse_chains(b) for b in nested))
+        if isinstance(s, FragmentApply):
+            while i + 1 < len(stmts) and _is_unary_post(stmts[i + 1], s.out, s.layout):
+                nxt = stmts[i + 1]
+                s = replace(s, post=s.post + (nxt.op, *nxt.post))
+                i += 1
+        out.append(s)
+        i += 1
+    return Body(tuple(out))
 
 
 def _one_pass(body: Body, min_run: int, loopvar: str) -> Body:

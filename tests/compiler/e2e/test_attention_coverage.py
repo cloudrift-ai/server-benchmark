@@ -423,6 +423,10 @@ def test_loopify_pin_matches_torch(monkeypatch, geom, stage, loopify):
     assert len(kernels) == 1, f"pinned warp flash should be one kernel, got {len(kernels)}"
     src = compiled.nodes[kernels[0]].op.kernel_source
     assert "[4] = {};" in src and "for (int _r" in src, "loopify must array a fragment family and emit a re-roll loop"
+    # Each fragment pointwise op renders as an element loop; the softmax subtract→exp fuses into one
+    # ``exp(s − m)`` per element (the ``post``-chain) under the pin.
+    assert "for (int _e" in src, "fragment pointwise ops must render as element loops"
+    assert any("= expf(" in ln and "((_e < 2)" in ln for ln in src.splitlines()), "subtract→exp must fuse into one exp(s − m)"
     if not stage:  # the gmem-direct store epilogue re-rolls into a loop (var _r0) whose body carries the m16n8 lane _t
         assert "_r0 * 8 + _g * 64" in src, "the fragment stores must re-roll (with the affine +_r0*8 column offset)"
     if loopify == 2 and geom == "w1x1/f1x2/k4":  # the 2-long QK sacc_f scale arrays only at the lower threshold

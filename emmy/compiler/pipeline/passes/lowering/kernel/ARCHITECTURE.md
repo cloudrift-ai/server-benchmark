@@ -270,9 +270,17 @@ prologue `Sync` is correctly retained; `with_bodies` preserves the cooperative t
 Two of these peepholes are **pin-only policy stamps** — off by default, byte-identical, decoupled from production
 codegen (each records its knob on the `KernelOp` for idempotence, like `095`, and returns the body unchanged when off,
 so the whole default pipeline is unaffected and there is no golden / snapshot churn): `085_fast_exp` (`EMMY_FAST_EXP=1`
-lowers f32 `exp` through the SFU `__expf`, the one non-bit-exact policy) and `100_loopify` (`EMMY_LOOPIFY=N` re-rolls a
-maximal run of ≥ `N` parallel per-fragment `FragmentApply` — the flash mma epilogue's `O_i_f` α-rescale / divide and, at
-`N=2`, the `sacc_f` QK scale — into a `#pragma unroll` loop over an arrayed fragment family: it collapses the family's
-`RegFragment` decls into one `count`-arrayed decl, renames `O_i_f{j}` → `O_i_f[j]` kernel-wide via the generic SSA
-rewrite, and fuses the run into a `StridedLoop` over `O_i_f[_t]`. Identical SASS, ~30% fewer listing lines — a
-readability lever for `--ir cuda` inspection, `N=4` the recommended sweet spot).
+lowers f32 `exp` through the SFU `__expf`, the one non-bit-exact policy) and `100_loopify` (`EMMY_LOOPIFY=N`, a generic
+**loop re-roller**). Loopify folds a maximal run of ≥ `N` congruent per-fragment statements — the flash mma epilogue's
+`O_i_f` α-rescale / divide (`FragmentApply`), the `P@V` load+mma pairs, the fragment `RegStore`s, and at `N=2` the
+`sacc_f` QK scale — into one `#pragma unroll` `StridedLoop` over `_r`. It is node-type-agnostic: a generic structural
+walk over each candidate window's Stmt/Expr trees classifies every per-iteration difference as either a **contiguous
+fragment family** index (`O_i_f0 … O_i_f{N-1}`, arrayed into one `count`-arrayed `RegFragment` decl and indexed
+`fam[_r]`) or an **affine address offset** (a store's / load's `+ t*8` N-column stride, folded to `_r*step`); anything
+else, or a family that is not `RegFragment`-declared (a scalar carrier / an inline-declared fragment), bails the run.
+Correctness is structural: an unrolled congruent run executes in the SAME order as the original straight-line
+statements, so every window `w` must equal window 0 with each family suffix → `w` and each affine literal →
+`base + w*step` — identical SASS, ~40% fewer epilogue lines. A readability lever for `--ir cuda` inspection, `N=4` the
+recommended sweet spot (skips the 2-long QK scale). NOTE: the whole-body SSA rename this pass runs is why the shared
+`_rewrite` `Tile` handler must carry `block_threads` / `aux_threads` through verbatim — dropping them silently
+over-launches a cooperative tile.

@@ -395,23 +395,37 @@ def test_warp_flash_geometry_pin_matches_torch(monkeypatch, um, nt):
 
 
 @requires_cuda
-@pytest.mark.parametrize(("geom", "loopify"), [("w1x1/f1x2/k4", 4), ("w1x1/f1x2/k4", 2), ("w1x1/f2x2/k4", 4)])
-def test_loopify_pin_matches_torch(monkeypatch, geom, loopify):
-    """``EMMY_LOOPIFY`` (100_loopify) re-rolls the flash mma epilogue's parallel per-fragment
-    ``FragmentApply`` runs — the ``O_i_f`` α rescale / divide, and at ``=2`` the ``sacc_f`` QK scale —
-    into ``#pragma unroll`` loops over an arrayed fragment family. Purely a listing shrink: the source
-    must still match torch, so this asserts the arrayed decl + fused loop render (``float O_i_f[...][4]``
-    and a ``for (int _t``) and that accuracy is unchanged. ``f2x2`` exercises the per-query-tile
-    suffixed families (``O_i_q0_f`` / ``O_i_q1_f``)."""
+@pytest.mark.parametrize(
+    ("geom", "stage", "loopify"),
+    [
+        ("w1x1/f1x2/k4", "", 4),  # gmem-direct: O_i_f rescale/divide + P@V load+mma + stores re-roll
+        ("w1x1/f1x2/k4", "", 2),  # LOOPIFY=2 also re-rolls the 2-long QK sacc_f scale
+        ("w1x1/f2x2/k4", "", 4),  # per-query-tile suffixed families (O_i_q0_f / O_i_q1_f)
+        ("w1x1/f1x2/k4", "d2/cp/ring", 4),  # staged: block_threads carried through the re-roll rename
+        ("w1x1/f2x2/k4", "d2/cp/ring", 2),  # staged + partial N-atom runs (arrayed to full family size)
+    ],
+)
+def test_loopify_pin_matches_torch(monkeypatch, geom, stage, loopify):
+    """``EMMY_LOOPIFY`` (100_loopify) is a generic loop re-roller: it folds a maximal run of congruent
+    per-fragment statements — the ``O_i_f`` α rescale / divide (``FragmentApply``), the ``P@V``
+    load+mma pairs, the fragment ``RegStore``s, and at ``=2`` the ``sacc_f`` QK scale — into a
+    ``#pragma unroll`` loop over an arrayed fragment family, with affine address offsets folded to
+    ``_r*step``. Purely a listing shrink (identical SASS), so the source must still match torch. Covers
+    the gmem-direct and staged (``cp.async`` ring) tiers, plain and ``f2x2`` per-query-tile geometries —
+    the staged tier exercises the ``block_threads`` carry-through and the partial-run arraying-to-full-
+    family-size guards."""
     monkeypatch.setenv("EMMY_TILE", f"a:mma_m16n8k16_f16/{geom}")
+    monkeypatch.setenv("EMMY_STAGE", stage)
     monkeypatch.setenv("EMMY_LOOPIFY", str(loopify))
-    torch.manual_seed(loopify * 7 + len(geom))
+    torch.manual_seed(loopify * 7 + len(geom) + len(stage))
     q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
     backend, compiled, graph, kernels = _compile_tc(q, k, v)
     assert len(kernels) == 1, f"pinned warp flash should be one kernel, got {len(kernels)}"
     src = compiled.nodes[kernels[0]].op.kernel_source
-    assert "[4] = {};" in src and "for (int _t" in src, "loopify must array a fragment family and emit a re-roll loop"
-    if loopify == 2:  # the 2-long QK ``sacc_f`` scale re-rolls only at the lower threshold → arrayed [2][4]
+    assert "[4] = {};" in src and "for (int _r" in src, "loopify must array a fragment family and emit a re-roll loop"
+    if not stage:  # the gmem-direct store epilogue re-rolls into a loop whose body carries the m16n8 lane ``_t``
+        assert any("for (int _r" in ln for ln in src.splitlines()) and "_r * 8 + _g * 64" in src, "the fragment stores must re-roll"
+    if loopify == 2 and geom == "w1x1/f1x2/k4":  # the 2-long QK sacc_f scale arrays only at the lower threshold
         assert any("sacc" in ln and "[2][4] = {}" in ln for ln in src.splitlines()), "LOOPIFY=2 must array the QK sacc_f family"
 
     def ref():
@@ -422,7 +436,7 @@ def test_loopify_pin_matches_torch(monkeypatch, geom, loopify):
     run_result, eager = backend.run(compiled, input_data=data, pre_run=ref)
     got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
     max_diff = float(np.max(np.abs(got - eager)))
-    assert max_diff < 5e-3, f"loopify {geom} LOOPIFY={loopify} max_diff={max_diff:.2e}"
+    assert max_diff < 5e-3, f"loopify {geom} stage={stage!r} LOOPIFY={loopify} max_diff={max_diff:.2e}"
 
 
 # --------------------------------------------------------------------------- #

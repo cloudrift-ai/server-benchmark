@@ -100,12 +100,13 @@ class Knob:
     # "not-yet-decided" (still absent → NaN-filled). ``_UNSET`` (the default)
     # means the knob is always stamped by its pass and is never auto-filled.
     off: Any = _UNSET
-    # A **readability-only** policy (``LOOPIFY``): it re-spells the emitted CUDA for ``--ir`` inspection
-    # but is SASS-identical, so it must never enter the learned-prior feature vector — it cannot
-    # disambiguate kernels by performance, and letting it perturb the features would split one perf
-    # class into spurious variants. ``knob_features`` skips these; they are batch-enabled via
-    # ``EMMY_READABLE`` (on by default only for the ``compile`` CLI) rather than tuned.
-    readability: bool = False
+    # A **cosmetic** policy: it changes only how the emitted source is spelled, never the compiled
+    # kernel (SASS-identical — e.g. ``LOOPIFY``'s ``--ir`` re-rolling). Because it cannot affect
+    # performance, it must never enter the learned-prior feature vector — it cannot disambiguate
+    # kernels, and letting it perturb the features would split one perf class into spurious
+    # variants. ``knob_features`` skips these; they are batch-enabled via ``EMMY_READABLE`` (on by
+    # default only for the ``compile`` CLI) rather than tuned.
+    cosmetic: bool = False
 
     @property
     def env(self) -> str:

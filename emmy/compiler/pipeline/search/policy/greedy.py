@@ -241,30 +241,37 @@ def _pick_structural(
 _TUNE_RANKING_FLAGS = "-Xcicc -O1"
 
 
-def _db_measured_index(db, ctx) -> dict[frozenset, list[tuple[dict, float]]]:
+def _db_measured_index(db, ctx) -> dict[frozenset, list[tuple[dict, float, bool]]]:
     """The tune DB's measured ``ok`` cuda perf rows, indexed by their ``S_*``
     structural signature (stringified values — perf knobs round-trip JSON) —
-    the deploy-side analogue of ``Prior._o3_evidence``, sourced from the -O1
-    ranking lane. Queries the deploy context AND its ``-Xcicc -O1`` tune twin
-    (``context_key`` folds the nvcc flags, so tune rows live under the twin).
-    Best-effort: any failure returns an empty index (deploys fall back to the
-    prior, today's behavior)."""
-    index: dict[frozenset, list[tuple[dict, float]]] = {}
+    the deploy-side analogue of ``Prior._o3_evidence``. Queries three context
+    keys (``context_key`` folds the nvcc flags): the deploy's own, the
+    ``-Xcicc -O1`` tune ranking twin, and the ``-Xcicc -O3`` twin where the
+    tune's deployable re-benches land. Each entry carries a ``deployable``
+    flag: an -O1-lane median is a *ranking* signal with known -O3 inversions,
+    so the pick must prefer deployable-lane rows wherever they exist (a
+    ranking-lane override of a well-trained model regressed qkv/mlp_down ~15%
+    in the ninth-4090-sweep verification). Best-effort: any failure returns an
+    empty index (deploys fall back to the prior)."""
+    from emmy.compiler.pipeline.search.policy.mcts import O3_NVCC_FLAGS  # noqa: PLC0415
+
+    index: dict[frozenset, list[tuple[dict, float, bool]]] = {}
     try:
-        keys = {ctx.structural_key(), replace(ctx, compile_flags=_TUNE_RANKING_FLAGS).structural_key()}
+        o1_key = replace(ctx, compile_flags=_TUNE_RANKING_FLAGS).structural_key()
+        keys = {ctx.structural_key(), o1_key, replace(ctx, compile_flags=O3_NVCC_FLAGS).structural_key()}
         for ck in keys:
             for row in db.iter_perf(ck, backend="cuda"):
                 if row.status != "ok" or row.stats.median <= 0:
                     continue
                 sig = frozenset((k, str(v)) for k, v in row.knobs.items() if k.startswith("S_"))
                 tun = {k: str(v) for k, v in row.knobs.items() if not k.startswith(("S_", "H_"))}
-                index.setdefault(sig, []).append((tun, float(row.stats.median)))
+                index.setdefault(sig, []).append((tun, float(row.stats.median), ck != o1_key))
     except Exception:  # noqa: BLE001 — a DB consult failure must never break compile
         return {}
     return index
 
 
-def _sig_groups(index: dict[frozenset, list[tuple[dict, float]]], sig: frozenset) -> list[list[tuple[dict, float]]]:
+def _sig_groups(index: dict[frozenset, list[tuple[dict, float, bool]]], sig: frozenset) -> list[list[tuple[dict, float, bool]]]:
     """The index groups compatible with a candidate's ``S_*`` signature: the
     exact hit when present, else every group agreeing on all *shared* ``S_*``
     keys. A key present on one side only is featurizer-vocabulary drift, not a
@@ -287,28 +294,34 @@ def _sig_groups(index: dict[frozenset, list[tuple[dict, float]]], sig: frozenset
     return groups
 
 
-def _db_measured_pick(index: dict[frozenset, list[tuple[dict, float]]], rows: list[dict]) -> tuple[int, float] | None:
+def _db_measured_pick(index: dict[frozenset, list[tuple[dict, float, bool]]], rows: list[dict]) -> tuple[int, float] | None:
     """Measured-evidence argmin over candidate knob rows against the DB index —
     the same prefix-consistency contract as ``Prior.evidence_pick`` (every
     tunable knob the candidate specifies must match the measured row; undecided
-    knobs are free), on the -O1 ranking lane's medians. Signature matching is
-    drift-tolerant (:func:`_sig_groups`). Keeps a config the tune *measured*
-    fastest from losing the deploy to an unmeasured model extrapolation (eighth
-    golden sweep, finding 2 — the deploy was a pure prior argmax, so tune
-    evidence never overrode it). -O3 reservoir evidence, where present, takes
-    precedence at the call site (a deployable measurement beats a ranking-lane
-    one)."""
-    best: tuple[int, float] | None = None
+    knobs are free). Signature matching is drift-tolerant (:func:`_sig_groups`).
+    Two-tier by lane: deployable-lane rows (the deploy's own + ``-O3`` twin
+    contexts) decide outright; ``-O1`` ranking-lane rows decide only when no
+    candidate has deployable evidence — an -O1 median is a ranking signal with
+    known -O3 inversions, and letting it override a well-trained model regressed
+    qkv/mlp_down ~15% in the ninth-4090-sweep verification. Keeps a config the
+    tune *measured* fastest from losing the deploy to an unmeasured model
+    extrapolation (eighth golden sweep, finding 2). -O3 reservoir evidence,
+    where present, still takes precedence at the call site."""
+    best: tuple[int, float] | None = None  # deployable lane
+    best_rank: tuple[int, float] | None = None  # -O1 ranking-lane fallback
     for i, cand in enumerate(rows):
         sig = frozenset((k, str(v)) for k, v in cand.items() if k.startswith("S_"))
         cand_tun = {k: str(v) for k, v in cand.items() if not k.startswith(("S_", "H_"))}
         for measured in _sig_groups(index, sig):
-            for row_tun, us in measured:
+            for row_tun, us, deployable in measured:
                 if any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items()):
                     continue
-                if best is None or us < best[1]:
-                    best = (i, us)
-    return best
+                if deployable:
+                    if best is None or us < best[1]:
+                        best = (i, us)
+                elif best_rank is None or us < best_rank[1]:
+                    best_rank = (i, us)
+    return best if best is not None else best_rank
 
 
 def greedy_decide(

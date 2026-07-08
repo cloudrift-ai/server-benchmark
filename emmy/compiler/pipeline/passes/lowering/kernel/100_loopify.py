@@ -51,8 +51,10 @@ consumer (no intermediate use to preserve).
 
 from __future__ import annotations
 
+import inspect
 import re
 from dataclasses import fields, is_dataclass, replace
+from functools import cache
 from itertools import count
 
 from emmy import config
@@ -179,6 +181,31 @@ def _peel(v):
     return v, 0
 
 
+@cache
+def _init_kwargs(cls) -> frozenset[str] | None:
+    """The keyword names ``cls.__init__`` accepts, or ``None`` when it takes ``**kwargs`` (any name).
+
+    Guards the generic dataclass re-roll below: it reconstructs a node as ``type(v0)(**{field: ...})``,
+    which is only valid when every ``init`` field name is also a constructor parameter. Most IR nodes
+    (``Expr`` subclasses, stmts) satisfy that, but ``Dim`` does not — it is ``dataclass(init=False)``
+    with a hand-written ``__init__(self, value, *, hint)`` whose param ``value`` populates the ``expr``
+    field, so ``Dim(expr=...)`` raises ``TypeError``. A run whose divergence bottoms out in such a node
+    is simply declined (``_FAIL``) rather than crashed on."""
+    try:
+        params = inspect.signature(cls.__init__).parameters
+    except (ValueError, TypeError):
+        return frozenset()
+    names: set[str] = set()
+    for name, p in params.items():
+        if name == "self":
+            continue
+        if p.kind is inspect.Parameter.VAR_KEYWORD:
+            return None  # **kwargs — accepts any field name
+        if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
+            names.add(name)
+    return frozenset(names)
+
+
 def _reroll(vals: list, loopvar: str, frag_stems: set[str]):
     """The template value generalizing this position across the run, or :data:`_FAIL`."""
     v0 = vals[0]
@@ -201,10 +228,13 @@ def _reroll(vals: list, loopvar: str, frag_stems: set[str]):
     if all(isinstance(v, tuple) for v in vals) and len({len(v) for v in vals}) == 1:
         return _recurse_seq(vals, loopvar, frag_stems, tuple)
     if all(type(v) is type(v0) for v in vals) and (isinstance(v0, Expr) or is_dataclass(v0)):
+        accepted = _init_kwargs(type(v0))
         kw = {}
         for f in fields(v0):
             if not f.init:
                 continue
+            if accepted is not None and f.name not in accepted:
+                return _FAIL  # non-standard constructor (field name != ctor param, e.g. Dim) — decline
             sub = _reroll([getattr(v, f.name) for v in vals], loopvar, frag_stems)
             if sub is _FAIL:
                 return _FAIL

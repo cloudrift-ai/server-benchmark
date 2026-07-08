@@ -12,7 +12,7 @@ from emmy.compiler.backend.cuda.dtype import cuda_includes, cuda_name
 from emmy.compiler.backend.cuda.dtype import nbytes_of as _nbytes_of
 from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
 from emmy.compiler.dtype import F32
-from emmy.compiler.ir.kernel.ir import KernelOp, Smem, TmaDescriptor, pack_smem
+from emmy.compiler.ir.kernel.ir import LDMATRIX_SWIZZLE_XOR, KernelOp, LdmatrixLoad, Smem, TmaDescriptor, pack_smem
 from emmy.compiler.ir.stmt import RenderCtx, render_body
 from emmy.compiler.tensor import Tensor
 
@@ -463,6 +463,26 @@ static __device__ __forceinline__ void emmy_mma_m16n8k16_bf16(float* d, const un
 
 """
 
+
+def _swizzle_prelude(kernel_op: KernelOp) -> str:
+    """One ``emmy_swizzle_<mode>`` helper per TMA swizzle mode the body's ``LdmatrixLoad`` drains
+    use — built from ``LDMATRIX_SWIZZLE_XOR`` (the single source of the shift/mask), so the drain
+    call sites spell their (often long) element index once instead of inlining it twice around the
+    XOR. ``__forceinline__``; same SASS as the inlined form."""
+    modes = sorted({s.swizzle for s in kernel_op.body.iter() if isinstance(s, LdmatrixLoad) and s.swizzle in LDMATRIX_SWIZZLE_XOR})
+    chunks = []
+    for mode in modes:
+        shift, mask = LDMATRIX_SWIZZLE_XOR[mode]
+        chunks.append(
+            f"// {mode} slab swizzle: XOR a b16 smem element index the way the TMA copy engine\n"
+            f"// permuted the 16-byte chunks on fill (the ldmatrix drain must read them back).\n"
+            f"static __device__ __forceinline__ int emmy_swizzle_{mode.lower()}(int e) {{\n"
+            f"    return e ^ (((e >> {shift}) & {mask}) << 3);\n"
+            f"}}\n\n"
+        )
+    return "".join(chunks)
+
+
 _INTRINSIC_TO_CUDA: dict[str, str] = {
     "exp": "expf",
     "exp_fast": "__expf",
@@ -606,7 +626,7 @@ def render_kernelop(
     mma_sync_prelude = _MMA_SYNC_PRELUDE if uses_mma_sync else ""
     uses_cp_async = any(isinstance(s, (CpAsyncCopy, CpAsyncCommit, CpAsyncWait)) for s in kernel_op.body.iter())
     cp_async_prelude = _CP_ASYNC_PRELUDE if uses_cp_async else ""
-    preludes = f"{includes}{mma_sync_prelude}{cp_async_prelude}{prelude}"
+    preludes = f"{includes}{mma_sync_prelude}{cp_async_prelude}{_swizzle_prelude(kernel_op)}{prelude}"
     header = f'{preludes}extern "C" __global__{launch_bounds} void {kernel_op.name}({params_text})'
     return f"{header} {{\n{body_text}\n}}\n"
 

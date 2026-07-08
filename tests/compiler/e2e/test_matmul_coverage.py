@@ -1187,8 +1187,10 @@ def test_tma_staged_slab_is_swizzled(monkeypatch):
     modes = {d.name: d.swizzle for d in op.tma_descriptors}
     assert modes and all(m != "NONE" for m in modes.values()), f"TMA slabs must swizzle: {modes}"
     assert modes["_desc_b"] == "B64", f"B slab (tile_n=32 fp16 = 64 B rows) must pick B64: {modes}"
-    # Every staged ldmatrix applies the XOR (the `(e) ^ ((((e) >> 6) & mask) << 3)` form).
-    assert ") ^ ((((" in op.kernel_source, "the staged ldmatrix drain must XOR its slab address"
+    # Every staged ldmatrix applies the XOR via the preamble helper (`emmy_swizzle_<mode>(e)` —
+    # `e ^ (((e >> 6) & mask) << 3)`), and the helper for the picked mode is defined.
+    assert "emmy_swizzle_b64(" in op.kernel_source, "the staged ldmatrix drain must XOR its slab address via the helper"
+    assert "int emmy_swizzle_b64(int e)" in op.kernel_source, "the swizzle helper must be emitted in the preamble"
 
 
 @requires_sm90

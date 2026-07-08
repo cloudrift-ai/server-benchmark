@@ -1173,7 +1173,7 @@ class RegFragment(Stmt):
 # 8-row × atom period divides the slab + slot strides, so the XOR is correct
 # measured from the buffer base. Maps mode → (element shift, row mask); the
 # chunk delta is always ``<< 3``.
-_LDMATRIX_SWIZZLE_XOR: dict[str, tuple[int, int]] = {
+LDMATRIX_SWIZZLE_XOR: dict[str, tuple[int, int]] = {
     "B128": (6, 0x7),
     "B64": (6, 0x3),
     "B32": (6, 0x1),
@@ -1332,12 +1332,12 @@ class LdmatrixLoad(Stmt):
         return [f"{_pad(ctx.indent)}emmy_ldmatrix_x2_trans({self.frag}, {addr});"]
 
     def _swizzled_addr(self, elem: str) -> str:
-        params = _LDMATRIX_SWIZZLE_XOR.get(self.swizzle)
-        if params is None:
+        if self.swizzle not in LDMATRIX_SWIZZLE_XOR:
             return f"&{self.src_buffer}[{elem}]"
-        shift, mask = params
-        # ``e ^ (((e >> shift) & mask) << 3)`` reproduces the TMA chunk swizzle.
-        return f"&{self.src_buffer}[({elem}) ^ (((({elem}) >> {shift}) & {mask}) << 3)]"
+        # ``emmy_swizzle_<mode>`` (preamble, built from ``LDMATRIX_SWIZZLE_XOR``) applies
+        # ``e ^ (((e >> shift) & mask) << 3)`` — the helper spells the (often long) element
+        # index once instead of inlining it twice around the XOR.
+        return f"&{self.src_buffer}[emmy_swizzle_{self.swizzle.lower()}({elem})]"
 
 
 @dataclass(frozen=True)

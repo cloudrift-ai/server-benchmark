@@ -658,6 +658,20 @@ def test_evidence_prefix_consistency():
     assert p.evidence_pick([_cand({"FM": 8})]) is None
 
 
+def test_evidence_tolerates_signature_vocabulary_drift():
+    """A deploy candidate's base can carry ``S_*`` stamps absent from every reservoir
+    row (#311's ``S_warp_eligible`` appears in no reservoir row) — the join must match
+    on the shared ``S_*`` keys, or one added feature silently disables the whole -O3
+    evidence tier (the ninth-4090-sweep gate_up misdeploys). A *conflicting* shared
+    key still rejects."""
+    p = CatBoostPrior(seed=0)
+    p.add_rows([_o3_row({"FM": 6}, 24.0)])
+    drifted = {**_cand({"FM": 6}), "S_warp_eligible": 1.0}
+    assert p.evidence_pick([drifted]) == (0, 24.0)
+    other_shape = {**_cand({"FM": 6}), "S_sig": 9.0, "S_warp_eligible": 1.0}
+    assert p.evidence_pick([other_shape]) is None
+
+
 def test_evidence_ignores_o1_rows_and_other_ops():
     """-O1 ranking rows (H_opt=1) and rows from a different S_* signature are not
     evidence; without -O3 rows the pick falls back to the model argmin."""

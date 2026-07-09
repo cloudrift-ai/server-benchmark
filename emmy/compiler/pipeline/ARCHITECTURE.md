@@ -30,7 +30,9 @@ reservoir) — `Sample`, `Dataset`, and `ShapeKey` (the single golden↔measured
 pointwise entries too, not just matmul. `tune --dataset golden` scopes to the **live** card's goldens
 (`goldens_for_live_gpu`) — names repeat across per-GPU golden files with diverging shapes/dtypes, so the flat union
 would tune another card's config under the live card's name; off-GPU or for a card with no recorded goldens it falls
-back to the full union. The A/B itself carries two integrity gates — an arithmetic-intensity floor
+back to the full union. The A/B itself carries three integrity gates — a realized-vs-pinned knob check (a structurally
+invalid pin silently falls back to the planner's own pick, so the row would compare greedy to itself and report a fake
+1.00×; the flag marks the row `unreproducible pin` with what actually ran), an arithmetic-intensity floor
 (a row whose shape-implied FLOP/s exceeds the live card's recorded `GpuSpec` peak is flagged as a wrong bench, not a
 fast kernel) and a wrong-answer check (each pinned config executes once on the greedy run's inputs and its outputs are
 compared, catching the silently-wrong `g2a` skipped-finalize class) — plus `--json PATH`, a machine-readable record of
@@ -494,7 +496,9 @@ Pinning replaces tuner choice (the rule emits exactly that variant instead of fo
 value outside the knob's hint tuple is honored, not silently dropped (`Knob.narrow` returns `(pinned,)` regardless of
 hint membership). Downstream structural gates (divisibility, threads-per-CTA budget, TMA eligibility) still apply, so a
 structurally invalid pin yields an empty enumeration and the per-call-site fallback takes over. This lets a tile shape the
-planner wouldn't reach on its own be explored manually.
+planner wouldn't reach on its own be explored manually. The replay paths (`run --bench --golden` / `--ab`) can't accept
+that silent fallback — it would substitute the planner's own pick and turn the A/B into greedy-vs-greedy — so they verify
+realized-vs-pinned knobs on every pinned row and flag mismatches `unreproducible pin` (see the integrity gates above).
 
 A few pins are rejected outright (a clear `ValueError`) rather than silently degraded — they would otherwise lower to a
 wrong or un-launchable kernel: a codec width must be `≥ 1` (a degenerate `b0` / `f0` / `n0` no longer parses to a

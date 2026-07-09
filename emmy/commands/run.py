@@ -472,6 +472,54 @@ def _wrong_answer_flag(outputs: dict, ref_outputs: dict) -> str | None:
     return None
 
 
+def _cuda_knob_dicts(graph) -> list[dict]:
+    """Raw ``op.knobs`` per ``CudaOp`` of a compiled pinned graph — the realized side
+    of the pin gate. Tolerates graph-less stubs (no ``nodes``) by returning ``[]``, so
+    the gate degrades to no-gate like the intensity floor on an unknown device."""
+    from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
+
+    nodes = getattr(graph, "nodes", None)
+    if not isinstance(nodes, dict):
+        return []
+    return [dict(n.op.knobs or {}) for n in nodes.values() if isinstance(n.op, CudaOp)]
+
+
+def _unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | None:
+    """Realized-vs-pinned gate for a golden / ``--ab`` row. A structurally invalid pin
+    yields an empty enumeration and the per-call-site fallback silently substitutes the
+    planner's own pick — the A/B then measures greedy-vs-greedy and reports a fake 1.00x
+    while the recorded config never ran (the retired ``w2x1`` hd128 flash form). Check
+    every pinned knob against the compiled graph's realized knobs: honored iff SOME
+    kernel carries the pinned value — matched case-insensitively on ``str`` (the env-var
+    pin round-trip stringifies values) against the raw ``op.knobs`` entry or the
+    collapsed :func:`tuning_knob_items` view (a single-axis ``TILE@d`` collapses back to
+    the bare ``TILE`` spelling golden YAMLs record); the any-kernel scan tolerates a
+    split main+finalize pair where a knob applies to one kernel only. Returns a flag
+    naming each dropped pin and what ran instead, or ``None`` when clean / ungateable
+    (no kernel knobs)."""
+    from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
+
+    if not kernel_knobs:
+        return None
+    misses: list[str] = []
+    for name, want in pinned.items():
+        seen: list[str] = []
+        hit = False
+        for raw in kernel_knobs:
+            for view in (raw, dict(tuning_knob_items(raw))):
+                if name in view:
+                    got = str(view[name])
+                    if got.strip().lower() == str(want).strip().lower():
+                        hit = True
+                    elif got not in seen:
+                        seen.append(got)
+            if hit:
+                break
+        if not hit:
+            misses.append(f"{name}={want} realized {'/'.join(seen) if seen else '(unset)'}")
+    return f"unreproducible pin: {'; '.join(misses)}" if misses else None
+
+
 @contextlib.contextmanager
 def _pinned_knobs(knobs: dict):
     """Pin ``EMMY_<KNOB>`` env vars for the duration of one compile, restoring
@@ -522,11 +570,14 @@ async def _bench_golden_variants(backend, code, golden_configs, *, warmup, iters
     run deployed and benches at the same hint. Best-effort: a config whose pinned
     knobs fail to compile / bench for the live device is skipped with a warning.
 
-    Two integrity gates flag (never drop) each row: the arithmetic-intensity floor
-    (:func:`_intensity_floor_flag`) and — when ``ref`` carries the greedy run's
-    ``(input_data, outputs)`` — a wrong-answer check that executes the pinned kernel
-    once on the greedy run's inputs and compares outputs (:func:`_wrong_answer_flag`).
-    Flags render as a ``!`` marker in the table and ride the ``--json`` record."""
+    Three integrity gates flag (never drop) each row: a realized-vs-pinned knob check
+    (:func:`_unreproducible_pin_flag` — a structurally invalid pin silently falls back
+    to the planner's own pick, so the row would compare greedy to itself), the
+    arithmetic-intensity floor (:func:`_intensity_floor_flag`) and — when ``ref``
+    carries the greedy run's ``(input_data, outputs)`` — a wrong-answer check that
+    executes the pinned kernel once on the greedy run's inputs and compares outputs
+    (:func:`_wrong_answer_flag`). Flags render as a ``!`` marker in the table and ride
+    the ``--json`` record."""
     from emmy.commands.trace import graph_from_code  # noqa: PLC0415
     from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs  # noqa: PLC0415
 
@@ -540,6 +591,9 @@ async def _bench_golden_variants(backend, code, golden_configs, *, warmup, iters
                 # Fresh graph; knobs baked into the kernel source here.
                 graph, _, _ = graph_from_code(code, dynamic_shapes=dynamic_shapes)
                 g_compiled = backend.compile(graph)
+            flag = _unreproducible_pin_flag(sample.knobs, _cuda_knob_dicts(g_compiled))
+            if flag:
+                flags.append(flag)
             if ref is not None:
                 ref_inputs, ref_outputs = ref
                 run_result, _ = backend.run(g_compiled, input_data=ref_inputs)
@@ -1388,7 +1442,8 @@ async def _bench_ab_variants_ir(backend, ir_path, tail, specs, *, warmup, iters,
     path: each config reloads the IR file fresh (the tail lowering mutates the graph
     in place) and re-lowers it with the knobs pinned, so the pin collapses every
     remaining fork. Best-effort like the golden path: a config that fails to
-    compile / bench is skipped with a warning."""
+    compile / bench is skipped with a warning, and a pin the lowering didn't realize
+    flags the row (:func:`_unreproducible_pin_flag`)."""
     import json as _json  # noqa: PLC0415
 
     from emmy.compiler.graph import Graph  # noqa: PLC0415
@@ -1405,7 +1460,12 @@ async def _bench_ab_variants_ir(backend, ir_path, tail, specs, *, warmup, iters,
         except Exception as exc:  # noqa: BLE001 — a bad pin must not abort the run's own table
             logger.warning("[ab] %s: compile/bench of the pinned config failed (%s) — skipping its row", sample.name, exc)
             continue
-        out.append(_GoldenBench(sample, g, g_bench, []))
+        flags = []
+        flag = _unreproducible_pin_flag(sample.knobs, _cuda_knob_dicts(g))
+        if flag:
+            flags.append(flag)
+            logger.warning("[ab] %s: %s — row flagged (marked ! in the table, flagged in --json)", sample.name, flag)
+        out.append(_GoldenBench(sample, g, g_bench, flags))
     return out
 
 

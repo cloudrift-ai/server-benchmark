@@ -297,6 +297,62 @@ def test_wrong_answer_flag_catches_bad_pinned_output():
     assert "shape" in _wrong_answer_flag({"o": np.zeros((2, 2))}, ref)
 
 
+def test_unreproducible_pin_flag():
+    """The realized-vs-pinned gate: a pin the compile silently dropped (the fallback
+    substituted the planner's own pick — the retired ``w2x1`` hd128 flash form) flags
+    with the pinned and realized values; a pin realized on ANY kernel of a multi-kernel
+    lowering passes; a bare ``TILE`` pin matches a collapsed single-axis ``TILE@d``
+    realization; value compare is case-insensitive (the env-var round-trip stringifies);
+    no kernel knobs → ungateable (stub compile)."""
+    from emmy.commands.run import _unreproducible_pin_flag
+
+    # Honored pin — realized exactly.
+    assert _unreproducible_pin_flag({"TILE": "w2x1/f1x8"}, [{"TILE": "w2x1/f1x8"}]) is None
+    # Silently swapped pin — the greedy-vs-greedy case the gate exists for.
+    flag = _unreproducible_pin_flag({"TILE": "w2x1/f1x8"}, [{"TILE": "w4x2/f2x4"}])
+    assert "unreproducible pin" in flag and "TILE=w2x1/f1x8" in flag and "w4x2/f2x4" in flag
+    # A pin that maps to nothing reports (unset).
+    assert "(unset)" in _unreproducible_pin_flag({"STAGE": "k8"}, [{"TILE": "w2x1"}])
+    # Multi-kernel lowering (split main + finalize): honored on the second kernel.
+    assert _unreproducible_pin_flag({"STAGE": "k8"}, [{"TILE": "w2x1"}, {"STAGE": "k8"}]) is None
+    # Bare pin vs single-axis @-keyed realization: the collapsed view matches.
+    assert _unreproducible_pin_flag({"TILE": "n16x8/f2x2"}, [{"TILE@d": "n16x8/f2x2"}]) is None
+    # Case-insensitive value compare (bool knob pinned via the string grammar).
+    assert _unreproducible_pin_flag({"FAST_EXP": "true"}, [{"FAST_EXP": True}]) is None
+    # No kernel knobs → ungateable, not a flag.
+    assert _unreproducible_pin_flag({"TILE": "w2x1"}, []) is None
+
+
+def test_bench_golden_variants_flags_unmappable_pin(monkeypatch):
+    """End-to-end through ``_bench_golden_variants``: a pinned config whose compiled
+    kernels realized different knobs gets an ``unreproducible pin`` flag on its row
+    (rendered ``!`` in the table, carried in ``--json``); a config whose pin was
+    honored stays clean."""
+    from types import SimpleNamespace
+
+    from emmy.commands import trace as tmod
+    from emmy.commands.run import _bench_golden_variants
+    from emmy.compiler.ir.cuda.ir import CudaOp
+
+    monkeypatch.setattr(tmod, "graph_from_code", lambda code, dynamic_shapes=None: (object(), "slug", (None, (), {})))
+
+    def graph_with(knobs):
+        return SimpleNamespace(nodes={"n0": SimpleNamespace(op=CudaOp(kernel_name="k", knobs=knobs))})
+
+    compiled = iter([graph_with({"TILE": "w4x2/f2x4"}), graph_with({"TILE": "w2x1/f1x8"})])
+
+    async def fake_benchmark_async(g, *, warmup, num_iters):
+        return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[])
+
+    backend = SimpleNamespace(compile=lambda g: next(compiled), benchmark_async=fake_benchmark_async)
+    dropped = SimpleNamespace(name="g.dropped", knobs={"TILE": "w2x1/f1x8"}, shape=None, dynamic=None)
+    honored = SimpleNamespace(name="g.honored", knobs={"TILE": "w2x1/f1x8"}, shape=None, dynamic=None)
+    benches = asyncio.run(_bench_golden_variants(backend, "torch.matmul(a, b)", [dropped, honored], warmup=1, iters=1))
+    assert len(benches) == 2
+    assert any("unreproducible pin" in f for f in benches[0].flags)
+    assert benches[1].flags == []
+
+
 @requires_cuda
 def test_run_golden_bench_json_record(run_cli, tmp_path):
     """``run --bench --golden NAME --json PATH`` writes the machine-readable A/B record:

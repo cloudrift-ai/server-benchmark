@@ -199,8 +199,6 @@ def _deserialize_field(k, v):
     Stmt instances. Nested-op dicts (``{"__op__": ..., "fields": ...}``)
     are reconstructed via ``_lookup_op_class``. The eval scope mirrors
     the IR's ``__all__`` exports — same classes the Stmt reprs reference."""
-    import re as _re
-
     from emmy.compiler.ir.elementwise import ElementwiseImpl
 
     if k == "op" and isinstance(v, str):
@@ -213,9 +211,7 @@ def _deserialize_field(k, v):
     # opens with a constructor whose name is a known IR class — so a plain string field
     # (a name / path / C source) that merely looks like ``Name(...)`` is never eval'd.
     if isinstance(v, str):
-        _m = _re.match(r"([A-Z]\w*)\(", v)
-        if _m and _m.group(1) in _stmt_eval_scope():
-            return _eval_stmt(v)
+        return _maybe_eval_ctor(v)
     if k == "body" and isinstance(v, list) and v and all(isinstance(e, str) for e in v):
         return tuple(_eval_stmt(e) for e in v)
     if k == "sources" and isinstance(v, list) and v and all(isinstance(e, str) and e.startswith("IndexSource(") for e in v):
@@ -229,8 +225,21 @@ def _deserialize_field(k, v):
     if isinstance(v, list) and v and all(isinstance(e, dict) and "__op__" in e for e in v):
         return tuple(_deserialize_field(k, e) for e in v)
     if isinstance(v, list):
-        return tuple(v)
+        # Constructor-repr string *elements* rehydrate under the same known-class guard —
+        # e.g. ``CudaOp.tma_descriptors``'s ``TmaDescMeta(...)`` reprs (stringified by the
+        # dump's ``json.dumps(default=str)``), which a plain ``tuple(v)`` left as strings.
+        return tuple(_maybe_eval_ctor(e) if isinstance(e, str) else e for e in v)
     return v
+
+
+def _maybe_eval_ctor(s: str):
+    """Eval ``s`` back to an IR object iff it opens with a constructor whose name is a known
+    IR class — so a plain string field (a name / path / C source) that merely looks like
+    ``Name(...)`` is never eval'd. Returns ``s`` unchanged otherwise."""
+    import re as _re
+
+    m = _re.match(r"([A-Z]\w*)\(", s)
+    return _eval_stmt(s) if m and m.group(1) in _stmt_eval_scope() else s
 
 
 def _eval_stmt(s: str):
@@ -333,14 +342,17 @@ def _stmt_eval_scope() -> dict:
     # schedule descriptors (``Placement`` / ``TilePlan`` / ``ReducePlan`` / ``Stage`` /
     # ``WarpSpec`` + their component dataclasses / enums) round-trip through ``TileOp``'s
     # repr-string fields (``op`` / ``place`` / ``reduce`` / ``tier`` / ``stage`` /
-    # ``workers``), so ``emmy run --ir <tile.json>`` can eval them back. Auto-populate
-    # every public class from those two modules (``setdefault`` so the explicit stmt/expr
-    # entries above win on any name clash) — a new node/knob field needs no edit here.
+    # ``workers``), and the cuda stage's ``CudaOp.tma_descriptors`` round-trips its
+    # ``TmaDescMeta`` reprs the same way, so ``emmy run --ir <stage.json>`` can eval them
+    # back. Auto-populate every public class from these modules (``setdefault`` so the
+    # explicit stmt/expr entries above win on any name clash) — a new node/knob field
+    # needs no edit here.
+    import emmy.compiler.ir.cuda.ir as _cuda_mod  # noqa: PLC0415
     import emmy.compiler.ir.kernel.ir as _kernel_mod  # noqa: PLC0415
     import emmy.compiler.ir.schedule as _sched_mod  # noqa: PLC0415
     import emmy.compiler.ir.tile.ir as _tile_mod  # noqa: PLC0415
 
-    for _mod in (_sched_mod, _tile_mod, _kernel_mod):
+    for _mod in (_sched_mod, _tile_mod, _kernel_mod, _cuda_mod):
         for _nm in dir(_mod):
             _obj = getattr(_mod, _nm)
             if isinstance(_obj, type):

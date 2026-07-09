@@ -324,7 +324,7 @@ def test_unstaged_atom_lowers_gmem_direct(monkeypatch):
     """When the greedy compile picks the tensor-core atom variant but its operands
     aren't staged for ``ldmatrix`` (``TMA=0`` + a deliberately-large warp register
     tile whose slabs don't fit the smem budget), ``005_lower_atom_tile`` lowers them
-    to a **gmem-direct fragment load** (``dpl_mma_load_{a,b}_gmem``) instead of
+    to a **gmem-direct fragment load** (``emmy_mma_load_{a,b}_gmem``) instead of
     raising — ldmatrix is smem-only, so the gmem path lets an unstageable MMA tile
     compile rather than crash. Compile-only (inspects the kernel source).
 
@@ -345,7 +345,7 @@ def test_unstaged_atom_lowers_gmem_direct(monkeypatch):
     monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w1x1/f26x4/k2")
     compiled = CudaBackend().compile(g)  # no longer raises
     src = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if isinstance(n.op, CudaOp))
-    assert "dpl_mma_load_a_gmem" in src and "dpl_mma_load_b_gmem" in src, "unstaged operands not loaded gmem-direct"
+    assert "emmy_mma_load_a_gmem" in src and "emmy_mma_load_b_gmem" in src, "unstaged operands not loaded gmem-direct"
     assert "mma.sync.aligned.m16n8k16" in src, "tensor-core path not taken (scalar fallback?)"
 
 

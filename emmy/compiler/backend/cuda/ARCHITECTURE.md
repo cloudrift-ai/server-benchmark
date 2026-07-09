@@ -53,6 +53,11 @@ arg_order).
   cubin cache key and `Context.structural_key` (the `perf` context key), so
   -O1-tuned and -O3 measurements never collide. The bench-worker subprocess
   inherits the env, so its compiles use the same flags.
+  `EMMY_UNROLL=<n>` caps which static loops emit `#pragma unroll` (the unroll budget — declared in
+  `lowering/kernel/_atom.py`, read at the extent-driven unroll sites there and in `_twist.py`). It is a
+  pin-only nvcc hint that steers cicc unrolling / register pressure / compile time; it does **not**
+  change the emitted-C listing size (the register-tile fragment grid is straight-line regardless).
+  Unset → each site's built-in cap; `0` → keep every loop rolled.
 - Builds a static launch plan: per launch, a tuple of
   `(kernel, arg_names, grid, block, smem_bytes, zero_outputs)`.
 

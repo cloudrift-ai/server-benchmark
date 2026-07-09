@@ -67,6 +67,7 @@ from emmy.compiler.ir.schedule import Fold, Level, ReduceStage
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Select, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile.ir import Contraction, Map, Reduction
+from emmy.compiler.pipeline.passes.lowering.kernel._atom import _clamp_last, unroll_ok
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
     CtaTile,
@@ -510,21 +511,29 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         # cp.async fills cooperatively into padded rows; TMA box-copies the batched operands via
         # rank-N descriptors (leading extent-1 box dims, the load's own batch/head index exprs as
         # origin coords — GQA's ``h // group`` rides through) into dense hardware-swizzled slabs.
-        # A symbolic kv reaches here under TMA only (``_resolve_twisted_stage`` — cp.async stays
-        # static): the streaming loop bound / last-chunk clamp ride the symbolic ``Dim`` and the box
-        # zero-fills the overhang, so the drain's tail masks keep it bit-identical to gmem-direct.
-        assert not symbolic_k or is_tma, "symbolic-kv staging is TMA-only (no OOB zero-fill on cp.async)"
+        # A symbolic kv stages under both: the streaming loop bound / last-chunk clamp ride the
+        # symbolic ``Dim``; TMA zero-fills the box overhang, cp.async clamp-reads the tail's key
+        # rows to the last valid key (``_key_row``). Either way the drain's tail masks zero the
+        # overhanging P columns, so the staged kernel stays bit-identical to gmem-direct.
         kv_ext = kv_axis.extent if symbolic_k else kv_axis.extent.as_static()
         n_chunks = kv_axis.extent.ceil_div(bn) if symbolic_k else kv_axis.extent.as_static() // bn
         head_dim = qk.k_axis.extent.as_static()
         k_load, v_load = qk.b_load, pv.b_load
         kn, kk, vn = qk.n_axis.name, qk.k_axis.name, pv.n_axis.name
 
+        def _key_row(k0: Expr, row) -> Expr:
+            # cp.async has no OOB zero-fill — clamp a symbolic tail's key rows to the last valid
+            # key. The drain's tail masks zero the overhanging P columns, so the duplicated rows
+            # contribute exactly 0 (the cp.async counterpart of TMA's box zero-fill, which needs
+            # no clamp).
+            key = BinaryExpr("+", k0, row)
+            return _clamp_last(key, seq) if symbolic_k and not is_tma else key
+
         def _k_index(k0: Expr):
-            return lambda row, col: _idx(k_load, {kn: BinaryExpr("+", k0, row), kk: col})
+            return lambda row, col: _idx(k_load, {kn: _key_row(k0, row), kk: col})
 
         def _v_index(k0: Expr):
-            return lambda row, col: _idx(v_load, {kv_axis.name: BinaryExpr("+", k0, row), vn: col})
+            return lambda row, col: _idx(v_load, {kv_axis.name: _key_row(k0, row), vn: col})
 
         k_batch, v_batch = tuple(k_load.index[:-2]), tuple(v_load.index[:-2])
         k_op = Operand(
@@ -575,7 +584,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         )
         state = decls + state
     else:
-        static_small = kv_axis.extent.is_static and kv_axis.extent.as_static() <= 128
+        static_small = unroll_ok(kv_axis.extent, 128)
         body = Body(tuple(_stream_step()))
         fold = [StridedLoop(axis=kv0, start=Literal(0, "int"), step=Literal(bn, "int"), body=body, unroll=static_small)]
 

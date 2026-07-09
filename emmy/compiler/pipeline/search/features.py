@@ -209,13 +209,19 @@ def _schedule_node_features(node_knobs: dict) -> dict[str, float]:
             feats.update(_atom_features(TilePlan.parse(tile_spec).atom))
         except ValueError:
             pass
-    feats.update(_tile_features(node_knobs))
+    tile_feats = _tile_features(node_knobs)
+    feats.update(tile_feats)
     # Warp-tier occupancy: the scalar ``_tile_features`` above models the thread tile (``BN·BM``) and
     # skips warp rows, so compute the SAME ``D_*`` family from the warp tile geometry instead — using
     # the atom cell dims read off the parsed warp ``TILE`` codec. Shared ``D_*`` names across tiers let
     # the prior learn occupancy / CTA-count uniformly.
     if is_warp(node_knobs):
         feats.update(_warp_tile_features(node_knobs))
+    elif not tile_feats:
+        # TILE-less row (a pure reduce kernel, or a contraction's REDUCE fork before the tile is
+        # decided): the REDUCE codec must still featurize, or the row is indistinguishable from its
+        # siblings — see ``_reduce_features``.
+        feats.update(_reduce_features(node_knobs))
     feats.update(_stage_features(node_knobs))  # operand-staging pipeline (STAGE codec); {} when gmem-direct
     return feats
 
@@ -247,6 +253,8 @@ def knob_features(knobs: dict) -> dict[str, float]:
             feats[name] = float(val)
             continue
         knob = get(name)
+        if knob is not None and knob.cosmetic:
+            continue  # cosmetic policy (e.g. LOOPIFY): never affects the kernel, never a ranking feature
         if knob is not None and knob.features is not None:
             feats.update(knob.features(val))
             continue
@@ -327,7 +335,11 @@ def _reduce_decomp(knobs: dict) -> _Decomp:
     from emmy.compiler.ir.schedule import ReducePlan  # noqa: PLC0415
 
     plan = ReducePlan.parse(family_value(knobs, "REDUCE"))
-    return _Decomp(fold=plan.reg, cta=plan.cta, coop=plan.coop)
+    # ``finalize`` must be forwarded: dropping it left ``_Decomp``'s "atomic" default in place, so
+    # ``D_finalize_kernel`` was dead (0.0) on EVERY row — including tiled g<n>k splits — and the
+    # analytic prior's atomic-free split interaction never fired (found by the 2026-07-07
+    # reduce-featurization tests).
+    return _Decomp(fold=plan.reg, cta=plan.cta, coop=plan.coop, finalize=plan.finalize)
 
 
 def tile_signature(knobs: dict) -> tuple:
@@ -510,13 +522,77 @@ def _geom_feats(
     return out
 
 
+# The reduce-partition slice of the shared ``_geom_feats`` block — the keys a TILE-less row keeps.
+# The tile-geometry keys (area / bands / aspect / cells) would be fabricated constants on a row
+# with no tile; the thread / split-K / finalize / occupancy keys carry the real partition signal
+# (``area=1`` makes ``#CTAs = free_prod·splitk`` — exactly the per-output-cell reduce grid).
+_REDUCE_FEATURE_KEYS = (
+    "D_threads",
+    "D_l2_threads",
+    "D_pow2_threads",
+    "D_near_threads",
+    "D_splitk",
+    "D_splitk_le2",
+    "D_splitk_excess",
+    "D_finalize_kernel",
+    "D_splitk_roundtrip",
+    # The scalar-on-warp-eligible guard MUST travel with the bonus features: a per-cell contraction
+    # leaf (TILE decided-OFF, REDUCE coop fold) is exactly a scalar row competing against tensor
+    # cores, and granting it the thread/occupancy bonuses without this penalty made greedy deploy a
+    # 1157us per-cell b256 kernel over the 3.5us mma golden (square.512.fp16, 2026-07-07 5090 gate).
+    "D_scalar_on_warp_eligible",
+    "D_log2_ctas",
+    "D_log2_waves",
+    "D_near_waves",
+    "D_ctas_ge_sm",
+)
+
+
+def _reduce_features(knobs: dict) -> dict[str, float]:
+    """Reduce-partition ``D_*`` features for a **TILE-less** row — a pure reduce kernel's rows
+    (leaves included) and the partial rows at a contraction's REDUCE fork, where no tile is decided
+    yet. Without this block the ``REDUCE`` codec featurized ONLY inside :func:`_tile_features` /
+    :func:`_warp_tile_features`, so a TILE-less row's siblings (serial vs ``b64`` coop vs ``g2k``
+    cross-CTA — 759 µs vs 17 µs subtrees) produced byte-identical vectors and NO prior could rank
+    them — the 2026-07-07 cold-baseline REDUCE-regret finding (30–68x median across three cards).
+    Runs the same :func:`_geom_feats` formulas with the tile degenerated to one output cell and
+    keeps the :data:`_REDUCE_FEATURE_KEYS` slice; the ILP register fold (``r<n>``) rides its own
+    ``D_reduce_ilp`` — serial and ``r4`` differ in neither threads nor split-K. Empty when the row
+    carries no ``REDUCE`` family key, so pointwise rows stay feature-free as before. Additive
+    encoding: raw knob dicts re-featurize at read time, so existing node rows / reservoirs gain
+    these keys on the next fit — no ``FEATURIZER_VERSION`` bump."""
+    if not any(family_of(k) == "REDUCE" for k in knobs):
+        return {}
+    d = _reduce_decomp(knobs)
+    g = _geom_feats(
+        knobs,
+        threads=d.coop,
+        cells=1,
+        tile_m=1,
+        tile_n=1,
+        splitk=d.cta,
+        bn=0,
+        bm=0,
+        bk=d.serial,
+        br=d.coop,
+        free_prod=knobs.get("S_ext_free_prod"),
+        sm=float(knobs.get("H_sm_count") or 170.0),
+        warp=False,
+        finalize=d.finalize,
+    )
+    out = {k: g[k] for k in _REDUCE_FEATURE_KEYS if k in g}
+    out["D_reduce_ilp"] = math.log2(max(float(d.fold), 1.0))
+    return out
+
+
 def _tile_features(knobs: dict) -> dict[str, float]:
     """Scalar thread-tile ``D_*`` features (``BN·BM`` threads, ``BM·FM × BN·FN``
     output). Empty unless the core tile knobs (``BN/BM/FM/FN``) are present, so
-    pointwise / non-tiled kernels are unaffected. Warp-tier (tensor-core) rows
-    are skipped here — :func:`knob_features` computes their occupancy via
-    :func:`_warp_tile_features` (the warp tile is ``WM·WN·32`` threads,
-    ``WM·FM·atom_m × WN·FN·atom_n`` output), so the warp ``BM=BN=0`` OFF
+    pointwise / non-tiled kernels are unaffected (a TILE-less row with a
+    ``REDUCE`` codec gets the :func:`_reduce_features` block instead). Warp-tier
+    (tensor-core) rows are skipped here — :func:`knob_features` computes their
+    occupancy via :func:`_warp_tile_features` (the warp tile is ``WM·WN·32``
+    threads, ``WM·FM·atom_m × WN·FN·atom_n`` output), so the warp ``BM=BN=0`` OFF
     sentinels don't feed a meaningless scalar tile."""
     if is_warp(knobs):
         return {}

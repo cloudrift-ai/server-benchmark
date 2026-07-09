@@ -36,12 +36,15 @@ from emmy.compiler.pipeline.search.prior.base import Prior
 # regimes — fp32-scalar + fp16/bf16-warp matmul, cooperative reduce, and pointwise
 # goldens — tier-balanced (each regime weighted equally so the sparse
 # reduce/pointwise tiers aren't drowned by the matmul shapes), minimizing the
-# goldens' tier-weighted mean ``log2(rank+1)``. Refit 2026-07-02 over the deep-FM-widened
-# ``_SCALAR_REG`` grid (the reachability fix): live-5090 golden median rank 4 (top10 22/42),
-# all-cards static median 37 — the wider pool inflates raw ranks, so compare medians only
-# within one grid. (The reduce/pointwise cases currently enumerate zero rows — the rebuilt
-# reduce fork emits nothing through the live-fork capture — so this fit is matmul-only in
-# practice; the reduce tier's cold rank signal is an open gap.) Dominant terms: occupancy
+# goldens' tier-weighted mean ``log2(rank+1)``. Refit 2026-07-07: the FIRST fit whose objective
+# actually includes the reduce / pointwise cases (the #318 fork widening makes them enumerate — 12
+# reduce-fork rows, 3 pointwise rows — and the TILE-less reduce featurization gives the fit
+# distinguishing columns; the reduce/pointwise goldens land at rank 0-2 in their pools). 49 static
+# + 12 dynamic cases: static median 30 → 27 (top1 5 → 8/49), dynamic median 1279 → 179. rms_norm /
+# softmax / attention goldens still enumerate zero rows through the live-fork capture — the
+# remaining cold-rank gap. The previously-dead ``D_finalize_kernel`` / ``D_reduce_ilp`` columns now
+# carry fit weights (the atomic-free hand-term in ``score`` stays 0 — the linear weight covers it,
+# fit against real pools). Dominant terms: occupancy
 # (``D_ctas_ge_sm``/``D_near_waves`` — keep #CTAs ≈ 2 waves over the SMs), the
 # ``D_bm_band`` thread-tile band, the tier-split warp BK target (``D_w_near_bk`` —
 # BK≈2 on the TMA tile), the positive ``MMA_tier`` (fp16/bf16 prefer the warp
@@ -53,49 +56,50 @@ from emmy.compiler.pipeline.search.prior.base import Prior
 # the band but reduce wants BN=1; the fit trades it for occupancy).
 _W_A: dict[str, float] = {
     "D_pow2_threads": 56.064604715252045,
-    "D_wspec_warps": -24.257928498394435,
+    "D_wspec_warps": -33.15221634161862,
+    "D_stage_tma": 32.5619562232261,
+    "D_stage_async": 26.39183708293144,
     "D_bn_band": -18.84269694844684,
-    "D_stage_tma": 18.717239275069474,
     "MMA_tier": 18.171894758846168,
-    "D_stage_async": 17.632064515181334,
+    "D_stage_reg_depth": -16.58897291874536,
     "D_splitk_le2": 14.3272884557364,
     "D_w_near_bk": -13.513445772588467,
-    "D_splitk_excess": -11.380927300585197,
-    "D_stage_reg_depth": -10.992053852671837,
-    "D_ctas_ge_sm": -9.973442761046039,
-    "D_stage_ring": 7.266411378449085,
+    "D_ctas_ge_sm": -11.19771419806356,
+    "D_splitk_excess": -10.802588660569542,
+    "D_stage_ring": 10.366457723870932,
     "D_bn_ge_bm": 6.175249346262891,
     "D_near_waves": 4.094219045750717,
     "D_w_l2_bk": 3.8318001959254397,
     "D_bm_band": -3.125815915965274,
-    "D_l2_bm": -2.813537060079752,
     "D_near_kchunks": -2.4803958401849546,
-    "D_square": 2.4682813427691133,
+    "D_square": 2.468281342769113,
     "D_bk_ge32": -2.250612760379462,
     "D_near_tilen": -1.872229368479013,
     "D_near_area": 1.661659507348094,
-    "D_l2_reuse": 1.2797850818471643,
-    "D_l2_bn": -1.1315248840332646,
-    "D_log2_area": -1.038544031822043,
+    "D_l2_bm": -1.6158716717578943,
+    "D_finalize_kernel": 1.5956135728297531,
+    "D_log2_area": -1.5817687429343905,
+    "D_l2_bn": -1.574803669326073,
+    "D_stage_depth": -1.5439384014596318,
     "D_l2_bk": 0.9757523358723075,
-    "D_l2_threads": -0.9542014237345692,
     "D_neg_masked_k": -0.8646029028646691,
     "D_neg_masked_m": -0.8646029028646691,
     "D_neg_masked_n": -0.8646029028646691,
-    "D_tilen_clean": 0.8575036370703841,
-    "D_stage_depth": -0.7706835774426998,
-    "D_splitk": -0.562782237146292,
+    "D_l2_reuse": 0.7423708659279166,
+    "D_l2_cells_occ": 0.6332227060795635,
+    "D_splitk": -0.3700227623235011,
+    "D_tilen_clean": -0.35717182254632074,
     "D_near_intensity": -0.31230584089622293,
     "D_log2_waves": -0.3096053721652958,
     "D_near_threads": 0.28478634495364613,
-    "D_aspect": -0.26074058469642597,
     "D_log2_ctas": -0.19597136958382297,
+    "D_l2_threads": -0.17842037213830914,
     "D_near_cells": -0.17771621148992126,
-    "D_cells": -0.15033533823472636,
     "D_cells_cap": -0.14767192811087732,
-    "D_l2_cells_occ": 0.10074311937306302,
-    "D_tile_m": 0.017878083455336286,
-    "D_tile_n": -0.014204261399731513,
+    "D_aspect": 0.12744471745958774,
+    "D_cells": -0.12397566865163606,
+    "D_tile_n": -0.014204261399731511,
+    "D_tile_m": 0.010710054894838165,
     "D_reuse": -0.004804011945045963,
     "D_threads": -0.0009447333009831508,
 }
@@ -110,53 +114,57 @@ _W_A: dict[str, float] = {
 # ``SPLITK 1/2`` — the dynM seed report's finding 4). Selected at score time on
 # the stamped ``S_ext_n_symbolic_axis`` flag.
 _W_A_DYN: dict[str, float] = {
-    "D_ctas_ge_sm": -28.049416306987936,
-    "D_stage_tma": 10.311663430135269,
-    "D_wspec_warps": -9.600205920261855,
-    "D_stage_ring": 8.031202386703683,
-    "D_pow2_threads": 5.536773836554719,
-    "D_bn_ge_bm": 4.415479530948023,
-    "D_splitk_le2": 4.282947897470383,
-    "D_w_near_bk": -3.9840434564414764,
-    "D_log2_ctas": -3.1515515658852546,
-    "D_bm_band": 3.0501575746742238,
-    "D_bn_band": -2.9288876054479727,
-    "D_tilen_clean": 2.1695047468026094,
-    "D_l2_bm": -1.9985579520331742,
-    "D_splitk_excess": 1.6870439608853967,
-    "D_near_tilen": 1.5992628367976942,
-    "D_stage_reg_depth": -1.4890000034419477,
-    "D_neg_masked_n": 1.2915904848884612,
-    "D_near_threads": -0.990004931320281,
-    "D_bk_ge32": -0.8965483150597096,
-    "D_finalize_kernel": 0.829960031801419,
-    "D_w_l2_bk": -0.8189885344311161,
-    "D_l2_cells_occ": 0.8105008956036689,
-    "D_stage_async": 0.6848803259217643,
-    "D_stage_depth": 0.6722793037663716,
-    "D_neg_masked_m": 0.5582125267295052,
-    "D_l2_bn": -0.5404307987580594,
-    "D_splitk": 0.5404191129714471,
-    "D_aspect": 0.5107250561585116,
-    "D_log2_waves": 0.4818492104433922,
-    "D_neg_masked_k": -0.4296618098730851,
-    "D_near_area": 0.36859820129924153,
-    "D_near_intensity": 0.3369825435390131,
-    "D_square": 0.3178616056231372,
-    "D_near_kchunks": 0.23771245195723872,
-    "D_l2_reuse": -0.12756603126978133,
-    "MMA_tier": -0.10337548227926727,
-    "D_cells_cap": -0.09509366379321203,
-    "D_near_cells": 0.0871595265752497,
-    "D_l2_threads": -0.06307751814009688,
-    "D_log2_area": -0.05544529821916362,
-    "D_l2_bk": 0.03966053994125637,
-    "D_reuse": 0.02982421937026558,
-    "D_cells": -0.02433851397356188,
-    "D_near_waves": -0.02229187068901151,
-    "D_tile_n": -0.00492814227331677,
-    "D_threads": -0.0011827346975242477,
-    "D_tile_m": -0.00010694165001567948,
+    "D_ctas_ge_sm": -55.0995930566978,
+    "D_stage_ring": 10.951342830425437,
+    "D_tilen_clean": 9.685684817491596,
+    "D_stage_tma": 9.585841340953724,
+    "D_stage_async": 8.6226259881481,
+    "D_wspec_warps": -8.170763174280758,
+    "D_bm_band": -7.696297249222813,
+    "D_l2_bm": -5.917302737054754,
+    "D_reduce_ilp": -4.7412059007017975,
+    "D_splitk_le2": 4.099138497296753,
+    "D_l2_bn": -3.7325772140202687,
+    "D_bn_band": -3.055387226748154,
+    "D_stage_reg_depth": -2.6238028157402304,
+    "D_finalize_kernel": 2.4906883450879302,
+    "D_bk_ge32": -2.2233103769171203,
+    "D_l2_reuse": 1.817193581778035,
+    "D_near_threads": 1.5380925641236074,
+    "D_l2_cells_occ": -1.5064022409948816,
+    "D_near_intensity": 1.4617597293167441,
+    "D_l2_threads": 1.2460209896517802,
+    "D_near_tilen": 1.1710600289545199,
+    "D_log2_waves": 1.144504757117072,
+    "MMA_tier": -1.1035900123520328,
+    "D_neg_masked_k": -1.0459504376900604,
+    "D_neg_masked_m": -0.9281200358297934,
+    "D_aspect": 0.8176927914797998,
+    "D_w_near_bk": 0.7924876827742086,
+    "D_bn_ge_bm": 0.7918160976812797,
+    "D_near_area": -0.7225529157665496,
+    "D_stage_depth": -0.7069903379500735,
+    "D_pow2_threads": -0.6813105499189333,
+    "D_log2_ctas": -0.672681467428078,
+    "D_w_l2_bk": 0.6302420986248254,
+    "D_splitk_deficit": 0.5486922919641324,
+    "D_square": 0.47034706031199186,
+    "D_splitk_excess": 0.407287717919608,
+    "D_l2_bk": -0.37734649580872437,
+    "D_scalar_on_warp_eligible": -0.31858143423103746,
+    "D_neg_masked_n": 0.3020294305526236,
+    "D_near_kchunks": 0.27736174281995984,
+    "D_near_waves": -0.07771740453571448,
+    "D_near_cells": 0.06941696449297546,
+    "D_cells": 0.05928378580061922,
+    "D_cells_cap": -0.052130783105436916,
+    "D_splitk": -0.04557545220595876,
+    "D_splitk_roundtrip": -0.036514710207531276,
+    "D_tile_n": 0.031124232993271682,
+    "D_reuse": 0.016910388388604272,
+    "D_log2_area": -0.014428403219019467,
+    "D_tile_m": -0.003545626958239249,
+    "D_threads": -0.0012922741731671568,
 }
 
 
@@ -176,7 +184,7 @@ class AnalyticPrior(Prior):
         weights_dynamic: dict[str, float] | None = None,
         scale: float = 0.1,
         atomic_free_split_threshold: float = 4.0,
-        atomic_free_weight: float = 5.0,
+        atomic_free_weight: float = 0.0,
         scalar_on_warp_weight: float = 40.0,
         splitk_roundtrip_weight: float = 0.25,
     ) -> None:
@@ -190,6 +198,15 @@ class AnalyticPrior(Prior):
         # Hardcoded — NOT fit into ``_W_A`` (a plain linear weight can't express the
         # "good when split wide, bad when split narrow" interaction). The learned
         # CatBoostPrior takes over once real atomic-vs-free ``H_opt=3`` rows exist.
+        # Weight defaults to 0.0 (term OFF): its input ``D_finalize_kernel`` was dead
+        # (never forwarded by ``features._reduce_decomp``) when the ±5.0 params were
+        # written, so they were never validated — and activating them when the feature
+        # came alive (2026-07-07) regressed golden top-50 coverage 13→10 (the 5090's
+        # ``g2k`` split-2 golden contradicts the narrow-split penalty's sign). Re-enable
+        # only with refit params that pass the golden-rank gate. Same reason the fit
+        # noise weight on the then-constant ``D_finalize_kernel`` column was dropped
+        # from ``_W_A_DYN``: both changes keep the cold ranking byte-identical to the
+        # dead-feature era while the learned prior consumes the now-live signal.
         self._atomic_free_split_threshold = atomic_free_split_threshold
         self._atomic_free_weight = atomic_free_weight
         # Scalar-on-warp-eligible penalty + split-K workspace round-trip price.
@@ -201,6 +218,10 @@ class AnalyticPrior(Prior):
         # projection deploys landed scalar at 5-20× the -O3 cost of their enumerated mma
         # siblings). ``splitk_roundtrip_weight`` is a mild price (~5 quality at free_prod
         # ≈ 512·1024): the deferred finalize IS the right shape for wide mma splits.
+        # NOTE: this term was DEAD until 2026-07-07 (``D_finalize_kernel`` never forwarded —
+        # see ``features._reduce_decomp``); activation measured ~neutral on the golden gate
+        # (median 0 / top1 21 / top10 26 / top50 31 unchanged, top25 28→27; the g<n>k goldens
+        # sink within their pools, their non-split competitors rise).
         self._scalar_on_warp_weight = scalar_on_warp_weight
         self._splitk_roundtrip_weight = splitk_roundtrip_weight
 
@@ -225,7 +246,15 @@ class AnalyticPrior(Prior):
         weights have no opinion on (no ``D_*`` features — e.g. a non-tiled kernel)
         scores the neutral ``1.0``, so ties fall to enumeration order. Symbolic-axis
         (masked-tile) kernels rank under the dynamic weight set."""
-        feats = knob_features(knobs)
+        return self.mean_score_features(knob_features(knobs))
+
+    def mean_score(self, knobs: dict) -> float:
+        return self.score(knobs)
+
+    def mean_score_features(self, feats: dict) -> float:
+        """:meth:`score` from an already-featurized row — the seam the attribution
+        diagnostics mask individual features through (a deleted key scores as its
+        ``0.0`` no-opinion default, which for a linear model is exact term removal)."""
         w_set = self._w_dyn if feats.get("S_ext_n_symbolic_axis", 0.0) > 0 else self._w
         quality = sum(w * feats.get(k, 0.0) for k, w in w_set.items())
         # Deferred-kernel split-K finalize gate (local term — see __init__). The
@@ -248,5 +277,23 @@ class AnalyticPrior(Prior):
         quality -= self._splitk_roundtrip_weight * feats.get("D_splitk_roundtrip", 0.0)
         return math.exp(-self._scale * max(min(quality, 80.0), -80.0))
 
-    def mean_score(self, knobs: dict) -> float:
-        return self.score(knobs)
+    def explain_features(self, feats: dict) -> dict[str, float]:
+        """EXACT per-term decomposition of the quality score (higher = predicted
+        faster): each nonzero linear term by its feature name, plus the three
+        hardcoded interaction gates as ``gate:*`` pseudo-terms — a blame table that
+        omitted the ±40 scalar-on-warp gate would misattribute exactly the misses it
+        dominates. Invariant (unit-tested): the terms sum to the same quality
+        :meth:`mean_score_features` exponentiates, so a two-row term diff is the
+        model's exact preference gap. (The ±80 clip inside the squash is ignored
+        here — it changes the proxy's magnitude at the extremes, never the terms.)"""
+        w_set = self._w_dyn if feats.get("S_ext_n_symbolic_axis", 0.0) > 0 else self._w
+        terms = {k: w * feats[k] for k, w in w_set.items() if feats.get(k, 0.0)}
+        af_on = feats.get("D_finalize_kernel", 0.0)
+        if af_on:
+            many_splits = feats.get("D_splitk", 1.0) >= self._atomic_free_split_threshold
+            terms["gate:atomic_free"] = self._atomic_free_weight * af_on * (1.0 if many_splits else -1.0)
+        if feats.get("D_scalar_on_warp_eligible", 0.0):
+            terms["gate:scalar_on_warp"] = -self._scalar_on_warp_weight * feats["D_scalar_on_warp_eligible"]
+        if feats.get("D_splitk_roundtrip", 0.0):
+            terms["gate:splitk_roundtrip"] = -self._splitk_roundtrip_weight * feats["D_splitk_roundtrip"]
+        return terms

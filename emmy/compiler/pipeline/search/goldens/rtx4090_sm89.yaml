@@ -43,6 +43,15 @@ configs:
     emmy_us: 6.1
     cublas_us: 5.8
   - kernel: matmul
+    name: matmul.square.512.fp16
+    M: 512
+    N: 512
+    K: 512
+    dtype: fp16
+    knobs: {TILE: 'a:mma_m16n8k16_f16/w1x2/f4x2/k2', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
+    emmy_us: 6.3
+    cublas_us: 5.8
+  - kernel: matmul
     name: matmul.square.1024.fp16
     M: 1024
     N: 1024
@@ -76,7 +85,7 @@ configs:
     K: 512
     dynamic: true
     knobs: {TILE: 'n16x8/f4x8', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
-    emmy_us: 10.8
+    emmy_us: 10.6
     cublas_us: 10.8
   - kernel: matmul
     name: matmul.qkv.h4096
@@ -86,6 +95,15 @@ configs:
     dtype: fp16
     knobs: {TILE: 'a:mma_m16n8k16_f16/w2x2/f4x4/k2', STAGE: 'd2/cp/ring'}
     emmy_us: 374.1
+    cublas_us: 328.0
+  - kernel: matmul
+    name: matmul.qkv.h4096
+    M: 512
+    N: 12288
+    K: 4096
+    dtype: fp16
+    knobs: {TILE: 'a:mma_m16n8k16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
+    emmy_us: 380.3
     cublas_us: 328.0
   - kernel: matmul
     name: matmul.o_proj.h4096
@@ -161,6 +179,176 @@ configs:
     knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, VECTORIZE_LOADS: true}
     emmy_us: 5.0
     cublas_us: 5.0
+  - kernel: pointwise
+    name: pointwise.n16384
+    M: 512
+    N: 16384
+    knobs: {TILE: 'f4'}
+    emmy_us: 17.4
+    cublas_us: 18.0
+  - kernel: pointwise
+    name: pointwise.n4096.dynM
+    M: 512
+    N: 4096
+    dynamic: true
+    knobs: {TILE: 'f2'}
+    emmy_us: 4.6
+    cublas_us: 5.0
+  - kernel: pointwise
+    name: pointwise.n16384.dynM
+    M: 512
+    N: 16384
+    dynamic: true
+    knobs: {TILE: 'f4'}
+    emmy_us: 16.5
+    cublas_us: 19.0
+  - kernel: softmax
+    name: softmax.k2048
+    M: 512
+    K: 2048
+    knobs: {REDUCE: 'b256'}
+    emmy_us: 3.5
+    cublas_us: 6.0
+  - kernel: softmax
+    name: softmax.k8192
+    M: 512
+    K: 8192
+    knobs: {REDUCE: 'b512'}
+    emmy_us: 12.4
+    cublas_us: 14.0
+  - kernel: softmax
+    name: softmax.k2048.dynM
+    M: 512
+    K: 2048
+    dynamic: true
+    knobs: {REDUCE: 'b128'}
+    emmy_us: 3.6
+    cublas_us: 6.0
+  - kernel: softmax
+    name: softmax.k8192.dynM
+    M: 512
+    K: 8192
+    dynamic: true
+    knobs: {REDUCE: 'b256'}
+    emmy_us: 13.2
+    cublas_us: 14.0
+  - kernel: reduce
+    name: reduce.k2048
+    M: 512
+    K: 2048
+    knobs: {REDUCE: 'b128'}
+    emmy_us: 2.1
+    cublas_us: 4.0
+  - kernel: reduce
+    name: reduce.k8192
+    M: 512
+    K: 8192
+    knobs: {REDUCE: 'b256'}
+    emmy_us: 4.5
+    cublas_us: 7.0
+  - kernel: reduce
+    name: reduce.k2048.dynM
+    M: 512
+    K: 2048
+    dynamic: true
+    knobs: {REDUCE: 'b128'}
+    emmy_us: 2.1
+    cublas_us: 4.0
+  - kernel: reduce
+    name: reduce.k8192.dynM
+    M: 512
+    K: 8192
+    dynamic: true
+    knobs: {REDUCE: 'b256'}
+    emmy_us: 4.6
+    cublas_us: 7.0
+  - kernel: rms_norm
+    name: rms_norm.k2048
+    M: 512
+    K: 2048
+    knobs: {REDUCE: 'b256'}
+    emmy_us: 4.1
+    cublas_us: 4.0
+  - kernel: rms_norm
+    name: rms_norm.k4096
+    M: 512
+    K: 4096
+    knobs: {REDUCE: 'b256'}
+    emmy_us: 7.2
+    cublas_us: 7.0
+  - kernel: rms_norm
+    name: rms_norm.k8192
+    M: 512
+    K: 8192
+    knobs: {REDUCE: 'b256'}
+    emmy_us: 13.8
+    cublas_us: 13.0
+  - kernel: rms_norm
+    name: rms_norm.k2048.dynM
+    M: 512
+    K: 2048
+    dynamic: true
+    knobs: {REDUCE: 'b256'}
+    emmy_us: 4.1
+    cublas_us: 4.0
+  - kernel: rms_norm
+    name: rms_norm.k4096.dynM
+    M: 512
+    K: 4096
+    dynamic: true
+    knobs: {REDUCE: 'b256'}
+    emmy_us: 7.2
+    cublas_us: 7.0
+  - kernel: rms_norm
+    name: rms_norm.k8192.dynM
+    M: 512
+    K: 8192
+    dynamic: true
+    knobs: {REDUCE: 'b256'}
+    emmy_us: 13.8
+    cublas_us: 13.0
+  - kernel: attention
+    name: attention.hd64
+    n_heads: 8
+    seq: 512
+    head_dim: 64
+    dtype: 'fp16'
+    causal: false
+    knobs: {PLACE: 'fuse', 'TILE@dd': 'a:mma_m16n8k16_f16/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16/w4x1/f1x8/k8', STAGE: 'd2/cp/ring'}
+    emmy_us: 10.6
+    cublas_us: 10.0
+  - kernel: attention
+    name: attention.hd128
+    n_heads: 8
+    seq: 512
+    head_dim: 128
+    dtype: 'fp16'
+    causal: false
+    knobs: {PLACE: 'fuse', 'TILE@dd': 'a:mma_m16n8k16_f16/w4x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16/w4x1/f1x16/k4', STAGE: 'd2/cp/ring'}
+    emmy_us: 19.9
+    cublas_us: 18.0
+  - kernel: attention
+    name: attention.hd64.dynM
+    n_heads: 8
+    seq: 512
+    head_dim: 64
+    dtype: 'fp16'
+    causal: false
+    dynamic: true
+    knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16/w4x1/f1x16/k4', STAGE: 'd2/cp/ring'}
+    emmy_us: 10.7
+    cublas_us: 11.0
+  - kernel: attention
+    name: attention.hd128.dynM
+    n_heads: 8
+    seq: 512
+    head_dim: 128
+    dtype: 'fp16'
+    causal: false
+    dynamic: true
+    knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16/w4x1/f1x8/k8', STAGE: 'd2/cp/ring'}
+    emmy_us: 20.3
+    cublas_us: 19.0
   - kernel: rms_norm
     name: rms_norm.k3840
     M: 512

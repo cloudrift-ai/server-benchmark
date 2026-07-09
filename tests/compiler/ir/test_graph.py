@@ -120,6 +120,38 @@ def test_fan_out():
     assert sorted(g.consumers("x")) == ["a", "b"]
 
 
+def test_cuda_op_tma_descriptors_roundtrip():
+    """A dumped cuda-stage graph must rehydrate ``CudaOp.tma_descriptors`` as
+    ``TmaDescMeta`` instances, not their repr strings (``json.dumps(default=str)``
+    stringifies the dataclasses on the way out; ``emmy run --ir <cuda.json>`` of a
+    TMA kernel crashed in ``_planner.compute_live_intervals`` on ``d.src_buf``)."""
+    import json
+
+    from emmy.compiler.ir.cuda.ir import CudaOp, TmaDescMeta
+
+    g = Graph()
+    k = g.add_node(op=InputOp(), inputs=[], output=Tensor("k", (1, 4, 128, 64), "f16"), node_id="k")
+    g.add_node(
+        op=CudaOp(
+            kernel_source='extern "C" __global__ void k_x() {}',
+            kernel_name="k_x",
+            arg_order=("k", "out", "_desc_k"),
+            grid=((256,), (1,), (1,)),
+            block=((128,), (1,), (1,)),
+            tma_descriptors=(TmaDescMeta(name="_desc_k", src_buf="k", box_extents=(1, 1, 64, 64), swizzle="B128"),),
+        ),
+        inputs=[k],
+        output=Tensor("out", (1, 4, 128, 64), "f16"),
+        node_id="out",
+    )
+    g.inputs, g.outputs = [k], ["out"]
+
+    loaded = Graph.from_dict(json.loads(json.dumps(g.to_dict(), default=str)))  # the EMMY_DUMP_DIR disk round-trip
+    descs = loaded.nodes["out"].op.tma_descriptors
+    assert descs and all(isinstance(d, TmaDescMeta) for d in descs), f"expected TmaDescMeta tuple, got {descs!r}"
+    assert descs[0].src_buf == "k" and descs[0].box_extents == (1, 1, 64, 64) and descs[0].swizzle == "B128"
+
+
 def test_to_dict_serializes_composite_shape_dim():
     """A node whose output shape carries a COMPOSITE Dim (``BinaryExpr``-backed —
     e.g. the demoted symbolic-N B operand's TMA-padded ``round_up(seq_len, 64)``

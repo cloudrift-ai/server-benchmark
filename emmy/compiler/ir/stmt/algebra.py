@@ -190,7 +190,15 @@ class StateMerge(Stmt):
     state_b: tuple[str, ...]
 
     def deps(self) -> tuple[str, ...]:
-        return self.state_b
+        """Every external name the render references: ``state_b`` plus any other outer name a
+        merge-program stmt reads (:func:`_merge_reads` — carried state and program-internal temps
+        excluded, matching the ``Accum`` convention that read-modify-written names live in
+        ``defines()``). ``deps`` must be the COMPLETE read set — read counters / liveness / the
+        splicer's rename resolve references through it, and the render walks the merge program
+        directly (``merge`` is not a nested ``Body``), so a read absent here is invisible to them."""
+        seen = set(self.state_b)
+        extra = tuple(n for n in _merge_reads(self.merge, self.state.names) if n not in seen)
+        return self.state_b + extra
 
     def defines(self) -> tuple[str, ...]:
         return self.state.names

@@ -256,6 +256,19 @@ class Tile(Stmt):
         return prod(self.extents) if self.axes else 1
 
     @property
+    def cells(self) -> int:
+        """The per-CTA cooperative cell count — ``block_threads`` when set, else the scalar tier's
+        ``_BLOCK_SIZE``. This is ``blockDim`` minus any aux band, i.e. the divisor the cuda lowering
+        uses for ``gridDim = ceil(n_elements / cells)``. So ``n_elements % cells == 0`` (and no aux
+        band) means the static grid covers the iteration space exactly — no partial last block, so
+        the ``_gid < N`` tail guard is provably always-true and :meth:`render` elides it."""
+        if self.block_threads is not None:
+            return self.block_threads
+        from emmy.compiler.ir.kernel.render import _BLOCK_SIZE  # noqa: PLC0415
+
+        return _BLOCK_SIZE
+
+    @property
     def is_static_grid(self) -> bool:
         """True iff every grid axis has a static extent (the static launch path)."""
         return all(a.extent.is_static for a in self.axes)
@@ -321,12 +334,17 @@ class Tile(Stmt):
             if self.aux_threads
             else "blockIdx.x * blockDim.x + threadIdx.x"
         )
-        out = [
-            f"{pad}int _gid = {gid};",
-            f"{pad}if (_gid < {n}) {{",
-        ]
-        inner = ctx.child()
+        # ``gridDim = ceil(n / cells)`` CTAs cover the cells. When ``cells`` divides ``n`` exactly and
+        # there is no warp-specialized aux band, every launched thread maps to a real cell — the tail
+        # guard ``_gid < n`` is always-true (and nvcc can't prove it: ``gridDim`` is a launch arg), so
+        # emit the decode + body flat. Otherwise the partial last block (or the aux threads that launch
+        # past the cells) needs masking.
+        guard = self.aux_threads != 0 or n % self.cells != 0
+        out = [f"{pad}int _gid = {gid};"]
+        inner = ctx.child() if guard else ctx
         ipad = _pad(inner.indent)
+        if guard:
+            out.append(f"{pad}if (_gid < {n}) {{")
         for i, a in enumerate(self.axes):
             s, e = strides[i], extents[i]
             term = "_gid" if s == 1 else f"_gid / {s}"
@@ -334,7 +352,8 @@ class Tile(Stmt):
             expr = term if i == 0 else f"({term}) % {e}"
             out.append(f"{ipad}int {a.name} = {expr};")
         out.extend(render_body(self.body, inner))
-        out.append(f"{pad}}}")
+        if guard:
+            out.append(f"{pad}}}")
         return out
 
 
@@ -380,17 +399,11 @@ class CpAsyncCopy(Stmt):
         smem_flat = render_index(self.smem, self.smem_index, ctx)
         src_flat = render_index(self.src, self.src_index, ctx)
         pad = _pad(ctx.indent)
-        qual = "cg" if self.nbytes == 16 else "ca"  # .cg is 16-byte-only (bypass L1)
-        asm = (
-            f'asm volatile("cp.async.{qual}.shared.global [%0], [%1], {self.nbytes};\\n" '
-            f':: "r"(_smem_addr), "l"(&{self.src}[{src_flat}]) : "memory");'
-        )
-        return [
-            f"{pad}{{",
-            f"{pad}    unsigned int _smem_addr = __cvta_generic_to_shared(&{self.smem}[{smem_flat}]);",
-            f"{pad}    {asm}",
-            f"{pad}}}",
-        ]
+        # ``emmy_cp_async_{cg,ca}`` (the cp.async prelude) does the ``cvta`` internally, so this is a
+        # single call — no ``_smem_addr`` local and no wrapping ``{ }`` block. .cg is 16-byte-only.
+        dst, src = f"&{self.smem}[{smem_flat}]", f"&{self.src}[{src_flat}]"
+        call = f"emmy_cp_async_cg({dst}, {src})" if self.nbytes == 16 else f"emmy_cp_async_ca<{self.nbytes}>({dst}, {src})"
+        return [f"{pad}{call};"]
 
 
 @dataclass(frozen=True)
@@ -403,7 +416,7 @@ class CpAsyncCommit(Stmt):
         return [f"{indent}cp.async.commit_group"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
-        return [f'{_pad(ctx.indent)}asm volatile("cp.async.commit_group;\\n" ::: "memory");']
+        return [f"{_pad(ctx.indent)}emmy_cp_async_commit();"]
 
 
 @dataclass(frozen=True)
@@ -418,7 +431,7 @@ class CpAsyncWait(Stmt):
         return [f"{indent}cp.async.wait_group({self.group})"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
-        return [f'{_pad(ctx.indent)}asm volatile("cp.async.wait_group {self.group};\\n" ::: "memory");']
+        return [f"{_pad(ctx.indent)}emmy_cp_async_wait<{self.group}>();"]
 
 
 @dataclass(frozen=True)
@@ -828,6 +841,17 @@ def frag_layout(atom_m: int, atom_n: int) -> FragLayout:
     raise NotImplementedError(f"no fragment C-layout modeled for atom m{atom_m}n{atom_n}")
 
 
+def _lane_preamble(ctx: RenderCtx, pad: str, decl: str) -> list[str]:
+    """Emit the mma lane preamble (``_g`` / ``_t``) once per C scope: ``decl`` if ``_g`` is not yet
+    declared here (tracked in ``ctx.scope_decls``), else ``[]``. Every emitter defines ``_g``/``_t``
+    identically (``(threadIdx.x & 31) >> 2`` / ``& 3``), so a later stmt in the same scope reuses the
+    first declaration instead of re-scoping itself — no redundant ``{ }`` around the store / mask."""
+    if "_g" in ctx.scope_decls:
+        return []
+    ctx.scope_decls.update(("_g", "_t"))
+    return [f"{pad}{decl}"]
+
+
 @dataclass(frozen=True)
 class FragmentApply(Stmt):
     """Generic per-element pointwise op over ``mma.sync`` ``m16n8`` C-fragments — the
@@ -860,6 +884,11 @@ class FragmentApply(Stmt):
     kinds: tuple[str, ...]  # per-arg: FRAG | ROW | UNIFORM
     in_place: bool = False
     layout: FragLayout = M16N8  # the per-atom C-fragment geometry (n_elems + elem→row)
+    # Extra UNARY ops composed onto the result, outermost last — so ``exp(s − m)`` is one node
+    # (``op=subtract``, ``post=(exp,)``) rendering ``out[_e] = expf(s[_e] − m)`` rather than a
+    # subtract stmt feeding an exp stmt. Populated only by ``100_loopify``'s pin-gated chain fusion;
+    # empty by default (the base op alone).
+    post: tuple[ElementwiseImpl, ...] = ()
 
     def deps(self) -> tuple[str, ...]:
         out: list[str] = []
@@ -875,13 +904,28 @@ class FragmentApply(Stmt):
             return f"{a}[]" if k == FRAG else (f"{list(a)}" if k == ROW else str(a))
 
         shown = ", ".join(_show(a, k) for a, k in zip(self.args, self.kinds, strict=True))
-        return [f"{indent}FragmentApply({self.out} {'*=' if self.in_place else '<-'} {self.op.name}({shown}))"]
+        chain = "".join(f" |> {p.name}" for p in self.post)
+        return [f"{indent}FragmentApply({self.out} {'*=' if self.in_place else '<-'} {self.op.name}({shown}){chain})"]
 
-    def _arg(self, name: object, kind: str, i: int, ctx: RenderCtx) -> Expr:
+    def _row_expr(self, names: tuple) -> Expr:
+        """The per-row scalar for the loop element ``_e`` — a ternary over the layout's row split
+        (m16n8: ``(_e < 2 ? row0 : row1)``). ``elem_row`` must be contiguous blocks (it is for every
+        modeled atom), so the boundaries are ``block = n_elems / rows_per_lane`` apart."""
+        lay = self.layout
+        rows, block = lay.rows_per_lane, lay.n_elems // lay.rows_per_lane
+        if list(lay.elem_row) != [r for r in range(rows) for _ in range(block)]:
+            raise NotImplementedError(f"FragmentApply loop render needs a contiguous elem_row, got {lay.elem_row!r}")
+        expr: Expr = Var(names[rows - 1])
+        for r in range(rows - 2, -1, -1):
+            expr = TernaryExpr(BinaryExpr("<", Var("_e"), Literal((r + 1) * block, "int")), Var(names[r]), expr)
+        return expr
+
+    def _arg_e(self, name: object, kind: str, ctx: RenderCtx) -> Expr:
+        """The loop-body operand expression (indexed by the element loop var ``_e``)."""
         if kind == FRAG:
-            return Var(f"{name}[{i}]")
+            return Var(f"{name}[_e]")
         if kind == ROW:
-            return Var(name[self.layout.elem_row[i]])  # the per-row scalar for element i's row
+            return self._row_expr(name)
         # UNIFORM — the fragment algebra is f32; a narrower scalar (e.g. an ``__half`` constant
         # load) converts through the target intrinsic, like the scalar ``Assign``'s promote rule.
         nm = str(name)
@@ -896,13 +940,25 @@ class FragmentApply(Stmt):
         return Var(nm)
 
     def render(self, ctx: RenderCtx) -> list[str]:
+        """One ``#pragma unroll`` loop over the fragment's ``n_elems`` — ``out[_e] = post…(op(args_e))``
+        — instead of ``n_elems`` straight-line assignments. The ROW operand renders as the row-split
+        ternary, so the m16n8 2-rows/lane structure stays legible (``_e < 2 ? row0 : row1``); identical
+        SASS (nvcc unrolls the pragma)."""
         from emmy.compiler.ir.stmt.base import op_to_expr  # noqa: PLC0415
 
         pad = _pad(ctx.indent)
-        lines = [] if self.in_place else [f"{pad}float {self.out}[{self.layout.n_elems}];"]
-        for i in range(self.layout.n_elems):
-            argvars = [self._arg(a, k, i, ctx) for a, k in zip(self.args, self.kinds, strict=True)]
-            lines.append(f"{pad}{self.out}[{i}] = {op_to_expr(self.op.name, argvars).render(ctx)};")
+        n = self.layout.n_elems
+        inner = ctx.child()
+        ipad = _pad(inner.indent)
+        argvars = [self._arg_e(a, k, inner) for a, k in zip(self.args, self.kinds, strict=True)]
+        expr = op_to_expr(self.op.name, argvars)
+        for post_op in self.post:  # compose the fused unary tail (outermost last)
+            expr = op_to_expr(post_op.name, [expr])
+        lines = [] if self.in_place else [f"{pad}float {self.out}[{n}];"]
+        lines.append(f"{pad}#pragma unroll")
+        lines.append(f"{pad}for (int _e = 0; _e < {n}; _e++) {{")
+        lines.append(f"{ipad}{self.out}[_e] = {expr.render(inner)};")
+        lines.append(f"{pad}}}")
         return lines
 
 
@@ -1014,14 +1070,13 @@ class FragmentMask(Stmt):
         pad = _pad(ctx.indent)
         lay = self.layout
         fill = ctx.identity_literal(self.fill, "f32")
-        lines = [f"{pad}{{ {lay.lane_decl}"]
+        lines = _lane_preamble(ctx, pad, lay.lane_decl)
         for i in range(lay.n_elems):
             sub: dict[str, Expr] = {FRAG_COL: BinaryExpr("+", self.col_base, lay.col_off[i])}
             if self.row_base is not None:
                 sub[FRAG_ROW] = BinaryExpr("+", self.row_base, lay.row_off[lay.elem_row[i]])
             pred = self.mask_when.substitute(sub).render(ctx)
-            lines.append(f"{pad}  if ({pred}) {self.frag}[{i}] = {fill};")
-        lines.append(f"{pad}}}")
+            lines.append(f"{pad}if ({pred}) {self.frag}[{i}] = {fill};")
         return lines
 
 
@@ -1065,12 +1120,20 @@ class RegFragment(Stmt):
     cell ``(M, N, K)``; the count
     derives from ``shape`` + ``role`` via :func:`_mma_sync_nregs`. The
     ``c`` array is zero-initialised at declaration, so the mma.sync path
-    needs no separate fill node."""
+    needs no separate fill node.
+
+    ``count`` (default 1) arrays a whole fragment FAMILY into one declaration —
+    ``float O_i_f[count][n_regs]`` — so a run of ``count`` sibling fragments
+    (``O_i_f0 … O_i_f{count-1}``) collapses to a single arrayed decl indexed
+    ``O_i_f[t]``. Only ``100_loopify`` sets ``count > 1`` (the pin-gated
+    re-roll); ``count == 1`` renders the flat ``float name[n_regs]`` form,
+    byte-identical."""
 
     name: str
     role: str  # "a" / "b" / "c"
     shape: tuple[int, int, int]
     dtype: DataType
+    count: int = 1  # >1 arrays the fragment family: ``<ty> name[count][n_regs]`` (loopify only)
 
     def defines(self) -> tuple[str, ...]:
         return (self.name,)
@@ -1080,15 +1143,19 @@ class RegFragment(Stmt):
 
     def pretty(self, indent: str = "") -> list[str]:
         m, n, k = self.shape
-        return [f"{indent}RegFragment {self.role}:{self.dtype.name} {self.name}[{_mma_sync_nregs(self.role, self.shape)}] ({m}x{n}x{k})"]
+        cnt = f"{self.count}][" if self.count > 1 else ""
+        dims = f"[{cnt}{_mma_sync_nregs(self.role, self.shape)}]"
+        return [f"{indent}RegFragment {self.role}:{self.dtype.name} {self.name}{dims} ({m}x{n}x{k})"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         n_regs = _mma_sync_nregs(self.role, self.shape)
         ctx.ssa_dtypes[self.name] = self.dtype.name
+        dims = f"[{self.count}][{n_regs}]" if self.count > 1 else f"[{n_regs}]"
         if self.role == "c":
-            zeros = ", ".join(["0.0f"] * n_regs)
-            return [f"{_pad(ctx.indent)}float {self.name}[{n_regs}] = {{{zeros}}};"]
-        return [f"{_pad(ctx.indent)}unsigned {self.name}[{n_regs}];"]
+            # Brace-init zeros the whole (arrayed) accumulator; ``= {0.0f, ...}`` stays the flat form.
+            init = " = {}" if self.count > 1 else f" = {{{', '.join(['0.0f'] * n_regs)}}}"
+            return [f"{_pad(ctx.indent)}float {self.name}{dims}{init};"]
+        return [f"{_pad(ctx.indent)}unsigned {self.name}{dims};"]
 
 
 # Per-lane fp16 element XOR matching the TMA hardware smem swizzle (the
@@ -1106,7 +1173,7 @@ class RegFragment(Stmt):
 # 8-row × atom period divides the slab + slot strides, so the XOR is correct
 # measured from the buffer base. Maps mode → (element shift, row mask); the
 # chunk delta is always ``<< 3``.
-_LDMATRIX_SWIZZLE_XOR: dict[str, tuple[int, int]] = {
+LDMATRIX_SWIZZLE_XOR: dict[str, tuple[int, int]] = {
     "B128": (6, 0x7),
     "B64": (6, 0x3),
     "B32": (6, 0x1),
@@ -1130,7 +1197,7 @@ class LdmatrixLoad(Stmt):
     ``staged`` (default ``True``) selects the transport: ``ldmatrix`` is **smem
     only**, so when the operand was NOT staged into shared memory
     (``staged=False``, ``src_buffer`` is the gmem operand) the render emits the
-    ``dpl_mma_load_{a,b}_gmem`` helper instead — a gmem-direct fragment load that
+    ``emmy_mma_load_{a,b}_gmem`` helper instead — a gmem-direct fragment load that
     replicates the same lane→element map without ldmatrix. Slower (no smem reuse)
     but correct; ``005_lower_atom_tile`` picks per operand based on whether an
     enclosing ``StageBundle`` staged it.
@@ -1205,14 +1272,14 @@ class LdmatrixLoad(Stmt):
                     base, bound = self.gmem_guard[0].render(ctx), self.gmem_guard[1].render(ctx)
                     mn_left = f"({bound}) - ({base})"
                     if self.role == "a":
-                        helper = "dpl_mma_load_a_gmem_mclamp_kzero"
+                        helper = "emmy_mma_load_a_gmem_mclamp_kzero"
                     else:
-                        helper = "dpl_mma_load_b_gmem_trans_nclamp_kzero" if self.b_trans else "dpl_mma_load_b_gmem_nclamp_kzero"
+                        helper = "emmy_mma_load_b_gmem_trans_nclamp_kzero" if self.b_trans else "emmy_mma_load_b_gmem_nclamp_kzero"
                     return [f"{_pad(ctx.indent)}{helper}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {mn_left}, {k_left});"]
                 if self.role == "a":
-                    helper = "dpl_mma_load_a_gmem_kzero"
+                    helper = "emmy_mma_load_a_gmem_kzero"
                 else:
-                    helper = "dpl_mma_load_b_gmem_trans_kzero" if self.b_trans else "dpl_mma_load_b_gmem_kzero"
+                    helper = "emmy_mma_load_b_gmem_trans_kzero" if self.b_trans else "emmy_mma_load_b_gmem_kzero"
                 return [f"{_pad(ctx.indent)}{helper}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {k_left});"]
             if self.gmem_guard is not None:
                 # Masked axis: clamp the lane coordinate to the in-range
@@ -1220,14 +1287,14 @@ class LdmatrixLoad(Stmt):
                 # admitted the tile).
                 base, bound = self.gmem_guard[0].render(ctx), self.gmem_guard[1].render(ctx)
                 if self.role == "a":
-                    helper = "dpl_mma_load_a_gmem_mclamp"
+                    helper = "emmy_mma_load_a_gmem_mclamp"
                 else:
-                    helper = "dpl_mma_load_b_gmem_trans_nclamp" if self.b_trans else "dpl_mma_load_b_gmem_nclamp"
+                    helper = "emmy_mma_load_b_gmem_trans_nclamp" if self.b_trans else "emmy_mma_load_b_gmem_nclamp"
                 return [f"{_pad(ctx.indent)}{helper}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, ({bound}) - ({base}));"]
             if self.role == "a":
-                helper = "dpl_mma_load_a_gmem"
+                helper = "emmy_mma_load_a_gmem"
             else:
-                helper = "dpl_mma_load_b_gmem_trans" if self.b_trans else "dpl_mma_load_b_gmem"
+                helper = "emmy_mma_load_b_gmem_trans" if self.b_trans else "emmy_mma_load_b_gmem"
             return [f"{_pad(ctx.indent)}{helper}({self.frag}, &{self.src_buffer}[{flat}], {ldm});"]
         lane = "(threadIdx.x & 31)"
         if self.pair_frag is not None:
@@ -1239,42 +1306,38 @@ class LdmatrixLoad(Stmt):
             assert self.role == "b" and self.staged, "paired ldmatrix is a staged B-operand fusion"
             if self.b_trans:
                 elem = f"{flat} + (({lane} % 8) + ({lane} / 16) * 8) * {ldm} + (({lane} / 8) % 2) * 8"
-                helper = "dpl_ldmatrix_x4"
+                helper = "emmy_ldmatrix_x4_pair"
             else:
                 elem = f"{flat} + ({lane} % 16) * {ldm} + ({lane} / 16) * 8"
-                helper = "dpl_ldmatrix_x4_trans"
-            addr = self._swizzled_addr(elem)
-            pad = _pad(ctx.indent)
-            return [
-                f"{pad}{{ unsigned _p4[4]; {helper}(_p4, {addr});",
-                f"{pad}  {self.frag}[0] = _p4[0]; {self.frag}[1] = _p4[1]; {self.pair_frag}[0] = _p4[2]; {self.pair_frag}[1] = _p4[3]; }}",
-            ]
+                helper = "emmy_ldmatrix_x4_trans_pair"
+            # The helper loads both fragments' registers directly (no ``_p4`` staging temp / block).
+            return [f"{_pad(ctx.indent)}{helper}({self.frag}, {self.pair_frag}, {self._swizzled_addr(elem)});"]
         if self.role == "a":
             # 16×16 A: x4 — lane addresses M-row (lane%16), K-col block (lane/16)*8.
             elem = f"{flat} + ({lane} % 16) * {ldm} + ({lane} / 16) * 8"
             addr = self._swizzled_addr(elem)
-            return [f"{_pad(ctx.indent)}dpl_ldmatrix_x4({self.frag}, {addr});"]
+            return [f"{_pad(ctx.indent)}emmy_ldmatrix_x4({self.frag}, {addr});"]
         # Transposed-B (Q@K^T): the slab keeps the operand's native N-major layout
         # (N rows × K cols), which IS the mma's col-major B — a plain x2 (no
         # .trans) with N-row addresses: lanes 0-7 address the 8 N rows of the k16
         # half 0, lanes 8-15 the same rows at K col 8 (each 8x8 matrix's rows land
-        # as the fragment's (k, k+1) pairs, cf. ``dpl_mma_load_b_gmem_trans``).
+        # as the fragment's (k, k+1) pairs, cf. ``emmy_mma_load_b_gmem_trans``).
         if self.b_trans:
             elem = f"{flat} + ({lane} % 8) * {ldm} + (({lane} / 8) % 2) * 8"
             addr = self._swizzled_addr(elem)
-            return [f"{_pad(ctx.indent)}dpl_ldmatrix_x2({self.frag}, {addr});"]
+            return [f"{_pad(ctx.indent)}emmy_ldmatrix_x2({self.frag}, {addr});"]
         # 16×8 B: x2.trans — lane addresses K-row (lane%16); .trans yields col-major.
         elem = f"{flat} + ({lane} % 16) * {ldm}"
         addr = self._swizzled_addr(elem)
-        return [f"{_pad(ctx.indent)}dpl_ldmatrix_x2_trans({self.frag}, {addr});"]
+        return [f"{_pad(ctx.indent)}emmy_ldmatrix_x2_trans({self.frag}, {addr});"]
 
     def _swizzled_addr(self, elem: str) -> str:
-        params = _LDMATRIX_SWIZZLE_XOR.get(self.swizzle)
-        if params is None:
+        if self.swizzle not in LDMATRIX_SWIZZLE_XOR:
             return f"&{self.src_buffer}[{elem}]"
-        shift, mask = params
-        # ``e ^ (((e >> shift) & mask) << 3)`` reproduces the TMA chunk swizzle.
-        return f"&{self.src_buffer}[({elem}) ^ (((({elem}) >> {shift}) & {mask}) << 3)]"
+        # ``emmy_swizzle_<mode>`` (preamble, built from ``LDMATRIX_SWIZZLE_XOR``) applies
+        # ``e ^ (((e >> shift) & mask) << 3)`` — the helper spells the (often long) element
+        # index once instead of inlining it twice around the XOR.
+        return f"&{self.src_buffer}[emmy_swizzle_{self.swizzle.lower()}({elem})]"
 
 
 @dataclass(frozen=True)
@@ -1288,7 +1351,7 @@ class MmaSyncPtx(Stmt):
     ``ab_dtype`` (``"f16"`` / ``"bf16"``) tags the operand element type —
     f16 and bf16 share the same fragment layout + ldmatrix path and differ
     only in the PTX instruction's dtype field, so the render just picks the
-    matching ``dpl_mma_…`` wrapper. The accumulate is always f32."""
+    matching ``emmy_mma_…`` wrapper. The accumulate is always f32."""
 
     c_frag: str
     a_frag: str
@@ -1310,7 +1373,7 @@ class MmaSyncPtx(Stmt):
     def render(self, ctx: RenderCtx) -> list[str]:
         m, n, k = self.shape
         # ``c`` is passed for both the ``d`` (out) and ``c`` (in) operands.
-        return [f"{_pad(ctx.indent)}dpl_mma_m{m}n{n}k{k}_{self.ab_dtype}({self.c_frag}, {self.a_frag}, {self.b_frag}, {self.c_frag});"]
+        return [f"{_pad(ctx.indent)}emmy_mma_m{m}n{n}k{k}_{self.ab_dtype}({self.c_frag}, {self.a_frag}, {self.b_frag}, {self.c_frag});"]
 
 
 @dataclass(frozen=True)
@@ -1337,7 +1400,7 @@ class FragmentRepack(Stmt):
         return [f"{indent}FragmentRepack {self.frag} <- ({self.srcs[0]}, {self.srcs[1]}) ({self.ab_dtype})"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
-        return [f"{_pad(ctx.indent)}dpl_c_to_a_{self.ab_dtype}({self.frag}, {self.srcs[0]}, {self.srcs[1]});"]
+        return [f"{_pad(ctx.indent)}emmy_c_to_a_{self.ab_dtype}({self.frag}, {self.srcs[0]}, {self.srcs[1]});"]
 
 
 @dataclass(frozen=True)
@@ -1559,26 +1622,36 @@ class RegStore(Stmt):
         # epilogue temps) per RegStore.
         if self.m_guard is not None or self.n_guard is not None:
             return self._render_guarded(ctx, flat=flat, ldm=ldm, dst_dt=dst_dt, pre=pre, vals=vals)
-        lines = [f"{pad}{{ const int _g = {lane} >> 2; const int _t = {lane} & 3;"]
-        lines += [f"{pad}  {ln}" for group in pre for ln in group]
+        lane_stmt = f"const int _g = {lane} >> 2; const int _t = {lane} & 3;"
+        if self.epilogue is None:
+            # Flash output store: no per-element epilogue temps, so declare _g/_t once per scope
+            # (reused by sibling stores) and emit the stores flat — no wrapping { } block, so a
+            # store re-rolled into a loop renders ``for (…) { … }`` not ``for (…) { { … } }``.
+            head, base, close = _lane_preamble(ctx, pad, lane_stmt), pad, ""
+        else:
+            # Fused epilogue: the { } scopes the per-element temps (they collide across sibling
+            # register-tile cells, which reuse the same names), so it stays.
+            head, base, close = [f"{pad}{{ {lane_stmt}"], f"{pad}  ", " }"
+        body = [f"{base}{ln}" for group in pre for ln in group]
         vec2 = {"f16": "__half2", "bf16": "__nv_bfloat162", "f32": "float2"}.get(dst_dt)
         if vec2 is not None:
             packer = {"f16": "__floats2half2_rn", "bf16": "__floats2bfloat162_rn", "f32": "make_float2"}[dst_dt]
             lo = f"{flat} + _g * {ldm} + _t * 2"
             hi = f"{flat} + (_g + 8) * {ldm} + _t * 2"
-            lines += [
-                f"{pad}  *reinterpret_cast<{vec2}*>(&{self.dst_buffer}[{lo}]) = {packer}({vals[0]}, {vals[1]});",
-                f"{pad}  *reinterpret_cast<{vec2}*>(&{self.dst_buffer}[{hi}]) = {packer}({vals[2]}, {vals[3]}); }}",
+            body += [
+                f"{base}*reinterpret_cast<{vec2}*>(&{self.dst_buffer}[{lo}]) = {packer}({vals[0]}, {vals[1]});",
+                f"{base}*reinterpret_cast<{vec2}*>(&{self.dst_buffer}[{hi}]) = {packer}({vals[2]}, {vals[3]});",
             ]
-            return lines
-        # Fallback: per-element scalar stores (dtypes without a 2-vector packer).
-        lines += [
-            f"{pad}  {self.dst_buffer}[{flat} + _g * {ldm} + _t * 2 + 0] = {vals[0]};",
-            f"{pad}  {self.dst_buffer}[{flat} + _g * {ldm} + _t * 2 + 1] = {vals[1]};",
-            f"{pad}  {self.dst_buffer}[{flat} + (_g + 8) * {ldm} + _t * 2 + 0] = {vals[2]};",
-            f"{pad}  {self.dst_buffer}[{flat} + (_g + 8) * {ldm} + _t * 2 + 1] = {vals[3]}; }}",
-        ]
-        return lines
+        else:  # per-element scalar stores (dtypes without a 2-vector packer)
+            body += [
+                f"{base}{self.dst_buffer}[{flat} + _g * {ldm} + _t * 2 + 0] = {vals[0]};",
+                f"{base}{self.dst_buffer}[{flat} + _g * {ldm} + _t * 2 + 1] = {vals[1]};",
+                f"{base}{self.dst_buffer}[{flat} + (_g + 8) * {ldm} + _t * 2 + 0] = {vals[2]};",
+                f"{base}{self.dst_buffer}[{flat} + (_g + 8) * {ldm} + _t * 2 + 1] = {vals[3]};",
+            ]
+        if close:
+            body[-1] += close
+        return head + body
 
     def _render_guarded(self, ctx: RenderCtx, *, flat: str, ldm, dst_dt: str, pre: list[list[str]], vals: list[str]) -> list[str]:
         """Masked-tile store: each fragment element's store (and its epilogue
@@ -1876,10 +1949,16 @@ from emmy.compiler.ir.stmt.passes import rewrite as _rewrite  # noqa: E402
 @_rewrite.register
 def _(s: Tile, rename, sigma, axis_fn):
     # ``axes`` map through ``axis_fn``; the body's stmts route through the
-    # generic per-stmt rewrite so SSA names / Exprs canonicalize inside.
+    # generic per-stmt rewrite so SSA names / Exprs canonicalize inside. The
+    # per-CTA thread counts (``block_threads`` / ``aux_threads``) are geometry,
+    # not SSA — carry them through verbatim (dropping them silently falls the
+    # launch back to the scalar ``_BLOCK_SIZE``, over-launching a cooperative
+    # tile), exactly as ``Tile.with_bodies`` preserves them.
     return Tile(
         axes=tuple(axis_fn(a) for a in s.axes),
         body=Body(tuple(_rewrite(c, rename, sigma, axis_fn) for c in s.body)),
+        block_threads=s.block_threads,
+        aux_threads=s.aux_threads,
     )
 
 
@@ -2014,7 +2093,7 @@ def _(s: WarpShuffle, rename, sigma, axis_fn):
 
 @_rewrite.register
 def _(s: RegFragment, rename, sigma, axis_fn):
-    return RegFragment(name=rename(s.name), role=s.role, shape=s.shape, dtype=s.dtype)
+    return RegFragment(name=rename(s.name), role=s.role, shape=s.shape, dtype=s.dtype, count=s.count)
 
 
 @_rewrite.register
@@ -2096,7 +2175,7 @@ def _(s: Reassign, rename, sigma, axis_fn):
 @_rewrite.register
 def _(s: FragmentApply, rename, sigma, axis_fn):
     args = tuple((rename(a[0]), rename(a[1])) if k == ROW else rename(a) for a, k in zip(s.args, s.kinds, strict=True))
-    return FragmentApply(out=rename(s.out), op=s.op, args=args, kinds=s.kinds, in_place=s.in_place, layout=s.layout)
+    return FragmentApply(out=rename(s.out), op=s.op, args=args, kinds=s.kinds, in_place=s.in_place, layout=s.layout, post=s.post)
 
 
 @_rewrite.register

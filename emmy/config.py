@@ -48,6 +48,7 @@ NO_NVCC = "EMMY_NO_NVCC"
 GPU_LOCK = "EMMY_GPU_LOCK"
 NCU_CHILD = "EMMY_NCU_CHILD"
 SERVING_STATIC = "EMMY_SERVING_STATIC"
+READABLE = "EMMY_READABLE"
 
 _CACHE_ROOT = Path.home() / ".cache" / "emmy"
 
@@ -178,6 +179,22 @@ def nvcc_flags_override(flags: str | None):
 def debug_enabled() -> bool:
     """``EMMY_DEBUG`` — per-launch debug dump path in the CUDA backend."""
     return _bool(DEBUG)
+
+
+def readable() -> bool:
+    """``EMMY_READABLE`` — batch-enable the readability-only codegen policies (currently ``LOOPIFY``),
+    which re-spell the emitted CUDA for legible ``--ir`` listings but are SASS-identical. Default off;
+    the ``compile`` CLI turns it on (so inspection output is readable) while ``tune`` / ``run`` /
+    ``bench`` leave it off to keep production codegen — and compiler work — minimal."""
+    return _bool(READABLE)
+
+
+def set_readable(on: bool, *, overwrite: bool = False) -> None:
+    """Set ``EMMY_READABLE`` in ``os.environ`` so the pipeline (and bench subprocesses) see it. With
+    ``overwrite=False`` (the default), an explicit user setting wins — the ``compile`` CLI calls this
+    to default readability ON without clobbering ``EMMY_READABLE=0``."""
+    if overwrite or READABLE not in os.environ:
+        os.environ[READABLE] = "1" if on else "0"
 
 
 def dump_dir() -> Path | None:

@@ -57,7 +57,11 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   instead of `lower()`-ing the contraction and pattern-matching the result. A `STAGE` pin follows the same rule: the
   option builders resolve it against the built node ONCE (`_resolve_warp_stage` / `_resolve_scalar_stage` — transport
   eligibility, the slab K-chunk `bk_elems`, the depth clamps) and stamp the resolved `Stage` (or `None`, gmem-direct)
-  on the `TileOp`, so the materializer's one staged driver applies it verbatim, deciding nothing. One staging fact
+  on the `TileOp`, so the materializer's one staged driver applies it verbatim, deciding nothing. Fitting the smem
+  budget is part of resolving: a tile whose single depth-1 slot already exceeds it declines to gmem-direct (the warp
+  slab is codec-sized and cannot shrink; the scalar resolver steps `bk_elems` / depth down first), so every offered
+  stage row materializes within budget — a resolved-but-unfittable row would only die at `validate(ctx)`, leaving an
+  un-lowered `TileOp` in the tune's terminal (issue #327). One staging fact
   is derived at materialization rather than resolved here because it is layout, not eligibility: a TMA slab feeding an
   mma drain is **swizzled** (`_stage.pick_swizzle_atom` picks B32/B64/B128 per operand from the slab's inner row span;
   the hardware permutes 16 B chunks in-copy, each staged `LdmatrixLoad` XORs the address back, and the kernel stays
@@ -103,19 +107,22 @@ each warp streams `fm` independent `(m, l, O)` chains against shared K/V fragmen
 P@V mma `TilePlan`s are derived per point, `_schedule._twisted_warp_options`), the scalar
 register-vector CHAIN (the FA-2 shared-score form), then the cooperative / per-cell reduce-partition escapes — every
 leaf row spelling the same `TILE@<qk_k>` / `TILE@<pv_k>` / `REDUCE@<kv>` key set (decided-empty where a form doesn't
-tile). A non-empty `REDUCE` pin remains the scalar escape; a warp `TILE` pin keeps the mma rows alone (loud on a
+tile). A non-empty `REDUCE` pin remains the scalar escape; a **warp** `TILE` pin keeps the mma rows alone (loud on a
 divisibility violation, declining with a log line when the pin doesn't fit the flash form — a bare warp pin may target
-another kernel). Each warp geometry row crosses with its **K/V operand-stage** candidates (`STAGE@<kv>` —
+another kernel), while a non-warp `TILE` pin narrows the flash rows by their stamped per-node spellings
+(`_schedule._narrow_flash_forms`, codec-canonicalized so `a:scalar` ≡ `""` and `f64x1` ≡ `f64`): `TILE=a:scalar` keeps
+the per-cell tier, `TILE=a:scalar,TILE@<pv_k>=f<d>` pins the CHAIN row deterministically, and an unmatched pin keeps
+the full prior-ranked fork. Each warp geometry row crosses with its **K/V operand-stage** candidates (`STAGE@<kv>` —
 `_schedule._twisted_stage_candidates`: gmem-direct option-0, then the resolver-gated cp.async AND TMA ring depths — the
 batched K/V operands encode as rank-N TMA boxes with leading extent-1 dims, the load's own batch/head index exprs
 riding as origin coords; cp.async slabs take the +16 B row pad, TMA slabs stay dense under the hardware swizzle; the
 resolved `Stage` rides the `TileOp` and the streaming step becomes the `staged_kloop` drain, K/V slabs kept in each
-operand's own layout so staging stays bit-identical to gmem-direct). cp.async stages a **static, block-divisible** kv
-only; **TMA also stages a symbolic (dynamic-`seq_len`) kv** — the descriptor rides the runtime globalDim and zero-fills
-the box overhang past the last key, and the streaming drain's tail masks (the same clamp the gmem-direct symbolic path
-makes) zero those keys' contribution, so the masked-flash `.dynM` kernel stages at bit-identity to gmem-direct (the
-`staged_kloop` ring allocates the full depth and the last-chunk clamp / loop bound ride the symbolic `Dim`; WSPEC over a
-symbolic kv is not built). A resolved TMA row additionally offers the `WSPEC` producer-band splits (the matmul tier's
+operand's own layout so staging stays bit-identical to gmem-direct). **Both transports also stage a symbolic
+(dynamic-`seq_len`) kv**: TMA rides the runtime globalDim and zero-fills the box overhang past the last key; cp.async
+(which has no OOB zero-fill) clamp-reads the tail chunk's key rows to the last valid key. Either way the streaming
+drain's tail masks (the same clamp the gmem-direct symbolic path makes) zero those keys' P columns exactly, so the
+masked-flash `.dynM` kernel stages at bit-identity to gmem-direct on any sm (the `staged_kloop` ring allocates the
+full depth and the last-chunk clamp / loop bound ride the symbolic `Dim`; WSPEC over a symbolic kv is not built). A resolved TMA row additionally offers the `WSPEC` producer-band splits (the matmul tier's
 legality, `32·aux ≤ 32·um`; measured occupancy-negative at flash's CTA scale — offered, honest, not the default). The
 chain / coop / serial escapes stamp the decided-empty `STAGE@<kv>: ""`. The causal tile-skip is the remaining flash
 follow-up.

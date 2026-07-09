@@ -679,8 +679,9 @@ def staged_kloop(
     chunk base by name (the warp-flash stream's absolute score columns) passes its own axis name."""
     # A symbolic ``k_extent`` (warp-flash over a runtime seq_len) is a ``Dim``: the chunk count is a
     # runtime value, so allocate the full ``depth`` ring (the tuned hint has ≥ depth chunks) and let
-    # the TMA box zero-fill any over-primed tail chunk — the drain masks those keys to the fold
-    # identity, so it stays bit-identical to gmem-direct. Static callers pass plain ``int``s.
+    # the transport absorb any over-primed tail chunk (TMA zero-fills its box; cp.async clamp-reads
+    # the last valid key rows) — the drain masks those keys to the fold identity, so it stays
+    # bit-identical to gmem-direct. Static callers pass plain ``int``s.
     symbolic = isinstance(k_extent, Dim)
     ring = depth if symbolic else (min(depth, n_chunks) if n_chunks >= 2 else 1)
     if workers is not None:

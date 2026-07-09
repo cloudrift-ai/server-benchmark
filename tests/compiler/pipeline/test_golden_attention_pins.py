@@ -1,0 +1,48 @@
+"""Every recorded STATIC attention golden's pins must still bind — resolve the golden's own
+snippet under its recorded knobs and assert the stamped ``TILE@*`` spellings match the record.
+
+The findings-5 F2 guard: a moveset / pin-routing change that silently stops a recorded config
+from binding turns every golden A/B for that shape into a lie (the "golden" row benches some
+other config). CPU-only — the pins bind (or not) at fork-build time, no kernel is compiled.
+Dynamic (``.dynM``) attention goldens record a bare ``TILE`` whose binding is exercised by the
+masked-flash e2e tests; the static axis-keyed pins are the spelling this guard pins down.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+torch = pytest.importorskip("torch")
+
+from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS, AttentionGoldenConfig  # noqa: E402
+
+_STATIC_ATTENTION = [g for g in GOLDEN_CONFIGS if isinstance(g, AttentionGoldenConfig) and not g.dynamic]
+
+
+@pytest.mark.parametrize("golden", _STATIC_ATTENTION, ids=lambda g: f"{g.name}@{g.gpu_name.split()[-1]}")
+def test_static_attention_golden_pins_bind(golden, monkeypatch):
+    from emmy.commands.run import _pinned_knobs
+    from emmy.commands.trace import trace_inline_code
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline import TILE_PASSES, Pipeline
+    from emmy.compiler.pipeline.fork import Fork
+    from emmy.compiler.pipeline.pipeline import Run
+
+    d = trace_inline_code(golden.snippet())
+    g = d["graph"] if isinstance(d, dict) else d
+
+    def decide(fp):
+        o = fp.options[0]
+        while isinstance(o, Fork) and not o.is_leaf:
+            o = o.expand()[0]
+        return o
+
+    ctx = Context(compute_capability=tuple(golden.compute_cap))
+    with _pinned_knobs(golden.knobs):
+        out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(g, decide)
+    tile_pins = {k: v for k, v in golden.knobs.items() if k.startswith("TILE@")}
+    assert tile_pins, f"{golden.name}: static attention golden should record axis-keyed TILE pins"
+    stamped = next((k for _, n in out.nodes.items() if (k := getattr(n.op, "knobs", None)) and set(tile_pins) <= set(k)), None)
+    assert stamped is not None, f"{golden.name}: no node stamps the recorded TILE keys {sorted(tile_pins)}"
+    for key, want in tile_pins.items():
+        assert stamped[key] == want, f"{golden.name}: recorded {key}={want!r} resolved to {stamped[key]!r}"

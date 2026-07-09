@@ -61,3 +61,58 @@ def test_alias_spelling_canonicalizes(monkeypatch):
 def test_unmatched_pin_keeps_the_full_fork(monkeypatch):
     monkeypatch.setenv("EMMY_TILE@PJ", "f32")  # no row stamps f32
     assert _tags(_narrow_flash_forms(_forms(), _HEAD, _PV)) == ["warp", "chain", "cell"]
+
+
+def test_keyed_only_ignores_the_bare_pin(monkeypatch):
+    # ``keyed_only`` is the warp-rows caller's mode: a bare warp pin was already consumed by
+    # ``_twisted_warp_options`` and must not be re-matched against the DERIVED pj spelling
+    # (it can never equal both axes' spellings — their ``k<bk>`` differ).
+    monkeypatch.setenv("EMMY_TILE", _WARP_SPEC)
+    assert _tags(_narrow_flash_forms(_forms(), _HEAD, _PV, keyed_only=True)) == ["warp", "chain", "cell"]
+
+
+def test_keyed_only_still_selects_by_axis_pins(monkeypatch):
+    monkeypatch.setenv("EMMY_TILE@DD", _WARP_SPEC)
+    monkeypatch.setenv("EMMY_TILE@PJ", _WARP_SPEC)
+    assert _tags(_narrow_flash_forms(_forms(), _HEAD, _PV, keyed_only=True)) == ["warp"]
+
+
+def test_stage_pin_does_not_bypass_keyed_tile_pins(monkeypatch):
+    """The findings-5 F2 regression: a static attention golden pins ``TILE@dd``/``TILE@pj`` AND
+    ``STAGE``; the dispatch's stage-pinned early return (mma rows alone) used to skip the
+    narrowing, so the golden A/B benched the prior's tile under the pinned stage. The full
+    trace→resolve path must stamp exactly the pinned pair."""
+    import pytest
+
+    torch = pytest.importorskip("torch")  # noqa: F841
+
+    from emmy.commands.run import _pinned_knobs
+    from emmy.commands.trace import trace_inline_code
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline import TILE_PASSES, Pipeline
+    from emmy.compiler.pipeline.fork import Fork
+    from emmy.compiler.pipeline.pipeline import Run
+
+    d = trace_inline_code(
+        "F.scaled_dot_product_attention(torch.randn(1,2,128,64,dtype=torch.float16), "
+        "torch.randn(1,2,128,64,dtype=torch.float16), torch.randn(1,2,128,64,dtype=torch.float16), is_causal=False)"
+    )
+    g = d["graph"] if isinstance(d, dict) else d
+    pins = {
+        "PLACE": "fuse",
+        "TILE@dd": "a:mma_m16n8k16_f16/w2x1/f1x8/k4",
+        "TILE@pj": "a:mma_m16n8k16_f16/w2x1/f1x8/k4",
+        "STAGE": "d2/cp/ring",
+    }
+
+    def decide(fp):
+        o = fp.options[0]
+        while isinstance(o, Fork) and not o.is_leaf:
+            o = o.expand()[0]
+        return o
+
+    with _pinned_knobs(pins):
+        out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context(compute_capability=(8, 9))).resolve(g, decide)
+    stamped = next(k for _, n in out.nodes.items() if (k := getattr(n.op, "knobs", None)) and "TILE@dd" in k)
+    assert stamped["TILE@dd"] == pins["TILE@dd"], stamped
+    assert stamped["TILE@pj"] == pins["TILE@pj"], stamped

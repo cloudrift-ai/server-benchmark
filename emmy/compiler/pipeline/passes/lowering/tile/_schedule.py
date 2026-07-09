@@ -1293,6 +1293,11 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
             stage_pinned = STAGE.raw() is not None and bool(STAGE.narrow([""])[0])
             warp_pinned = TILE.raw() is not None and is_warp_codec(TILE.raw())
             if warps and (warp_pinned or stage_pinned):
+                # The axis-keyed ``TILE@<dd>``/``TILE@<pj>`` pins (a static attention golden's
+                # spelling) must still select their geometry among the kept mma rows — this early
+                # return used to skip the narrowing entirely, so a golden that also pins ``STAGE``
+                # benched the prior's tile under the pinned stage (the findings-5 F2 coercion).
+                warps = _narrow_flash_forms(warps, head, pv, keyed_only=True)
                 return warps if len(warps) > 1 else warps[0]
             chain = _twisted_chain_option(tile, place, name, knobs)
             forms = [*warps, *([chain] if chain is not None else [])]
@@ -1330,16 +1335,21 @@ def _canon_tile_spec(spec: str) -> str:
         return spec
 
 
-def _narrow_flash_forms(forms: list[TileOp], head: Contraction, pv: Contraction) -> list[TileOp]:
+def _narrow_flash_forms(forms: list[TileOp], head: Contraction, pv: Contraction, *, keyed_only: bool = False) -> list[TileOp]:
     """Narrow the flash fork's leaf rows by the live per-node ``TILE`` pins. Every flash row spells
     the same key set (``TILE@<qk_k>`` / ``TILE@<pv_k>``), so a pin selects rows by their stamped
     spelling: ``f<d>`` on the PV k-axis keeps the CHAIN row, ``""`` / ``a:scalar`` the per-cell
     rows, a warp codec the mma rows (the bare-warp-pin fast path returns before this). A pin that
     matches NO row keeps the full fork — the same graceful degrade as a warp pin that doesn't fit
-    the flash form (warned, greedy picks by prior)."""
+    the flash form (warned, greedy picks by prior). ``keyed_only`` reads the explicit
+    ``TILE@<axis>`` pins alone, skipping ``narrow_at``'s bare-``TILE`` fallback — the warp-rows
+    caller has already consumed a bare pin in ``_twisted_warp_options``, and matching it against
+    the *derived* pj spelling would spuriously miss every row."""
+    from emmy import config  # noqa: PLC0415
+
     live: dict[str, str] = {}
     for ax in (head.k_axis.name, pv.k_axis.name):
-        pin = TILE.narrow_at(ax)
+        pin = config.knob_raw(f"{TILE.name}@{ax}") if keyed_only else TILE.narrow_at(ax)
         if pin is not None:
             live[ax] = _canon_tile_spec(pin)
     if not live:

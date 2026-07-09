@@ -266,3 +266,29 @@ warp-flash streaming drains and the matmul tier's staged drains — two emitters
 `110_drop_redundant_syncs` collapses the defensive `Sync`s the
 cooperative / shared-row templates emit (body-level only — a slab `Smem` decl flags `smem_seen`, so a load-bearing
 prologue `Sync` is correctly retained; `with_bodies` preserves the cooperative tile's `block_threads`).
+
+Two of these peepholes are **pin-only policy stamps** — off by default, byte-identical, decoupled from production
+codegen (each records its knob on the `KernelOp` for idempotence, like `095`, and returns the body unchanged when off,
+so the whole default pipeline is unaffected and there is no golden / snapshot churn): `085_fast_exp` (`EMMY_FAST_EXP=1`
+lowers f32 `exp` through the SFU `__expf`, the one non-bit-exact policy) and `100_loopify` (`EMMY_LOOPIFY=N`, a generic
+**loop re-roller** iterated to a fixpoint). Loopify folds a maximal run of ≥ `N` congruent per-fragment statements — the
+flash mma epilogue's `O_i_f` α-rescale / divide (`FragmentApply`), the `P@V` load+mma pairs, the fragment `RegStore`s,
+the A-fragment loads, the nested `QK` contraction (K-chunks × N-atoms), and at `N=2` the `sacc_f` QK scale — into
+`#pragma unroll` `StridedLoop`s over `_r{depth}`. The matcher (`_reroll`) is node-type-agnostic: a recursive structural
+walk over each candidate window's Stmt/Expr trees returns a template ONLY when every per-iteration difference is a
+**contiguous fragment family** index (`O_i_f0 … O_i_f{N-1}` or an already-arrayed `fam[0] …`, arrayed into one
+`count`-arrayed `RegFragment` decl and indexed `fam[_r]`) or an **affine address offset** — and it peels a trailing
+`± Literal` off each index Expr so a codegen-**folded** `kv0` (really `kv0 + 0*8`) reconciles with a sibling's `kv0 + 8`.
+A family that is not `RegFragment`-declared (a scalar carrier / an inline-declared fragment) bails the run. Iterating to
+a fixpoint (fresh `_r{depth}` per pass; already-arrayed `fam[i]` refs re-parsed) turns nested runs into nested loops:
+pass k re-rolls the inner N-atoms, pass k+1 sees the resulting sibling loops as a run and wraps them. Correctness is
+structural: an unrolled congruent run executes in the SAME order as the original straight-line statements, so a template
+that reproduces every window is byte-identical after nvcc unrolls — identical SASS, ~half the flash body's lines.
+A readability lever for `--ir cuda` inspection, `N=4` the recommended sweet spot (skips the 2-long runs and the QK nest).
+Two orthogonal readability transforms ride alongside: `FragmentApply` **always** renders as one element
+`#pragma unroll for (_e)` loop (the ROW operand as the row-split ternary `_e < 2 ? row0 : row1`), so a re-rolled family
+nests as `for (_r) { for (_e) … }`; and pin-gated **chain fusion** (`_fuse_chains`, before the re-roll) folds a
+`FragmentApply` immediately consumed by an in-place unary `FragmentApply` on the same fragment (`p <- s − m` then
+`p *= exp(p)`) into one node carrying the tail on its `post` field, so the softmax renders `p[_e] = expf(s[_e] − m)`.
+NOTE: the whole-body SSA rename this pass runs is why the shared `_rewrite` `Tile` handler must carry `block_threads` /
+`aux_threads` through verbatim — dropping them silently over-launches a cooperative tile.

@@ -601,3 +601,23 @@ def test_values_equal_canonicalizes_tile_atom_alias():
     assert values_equal("TILE@d", "a:mma_m16n8k16_bf16/w1x1/f1x2/k8", "a:mma_m16n8k16_bf16_f32/w1x1/f1x2/k8")
     assert not values_equal("TILE", "a:mma_m16n8k16_f16/w2x2/f2x2/k2", "a:mma_m16n8k16_f16_f16/w2x2/f2x2/k2")
     assert not values_equal("TILE", "a:mma_m16n8k16_f16/w2x2/f2x2/k2", "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k4")
+
+
+def test_knob_pinned_scopes_and_restores(monkeypatch):
+    """``Knob.pinned`` pins ``EMMY_<NAME>`` for the block and restores the prior state — absence
+    or the previous value — including on an exception (the regime-aware diagnostics' scoped gate)."""
+    import pytest
+
+    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC
+
+    monkeypatch.delenv("EMMY_F16_MMA_F32_ACC", raising=False)
+    with F16_MMA_F32_ACC.pinned("1"):
+        assert F16_MMA_F32_ACC.raw() == "1"
+    assert F16_MMA_F32_ACC.raw() is None
+    monkeypatch.setenv("EMMY_F16_MMA_F32_ACC", "0")
+    with F16_MMA_F32_ACC.pinned("1"):
+        assert F16_MMA_F32_ACC.raw() == "1"
+    assert F16_MMA_F32_ACC.raw() == "0"
+    with pytest.raises(RuntimeError), F16_MMA_F32_ACC.pinned("1"):
+        raise RuntimeError("boom")
+    assert F16_MMA_F32_ACC.raw() == "0", "the pin must restore on the exception path"

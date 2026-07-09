@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable, Iterable, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -201,6 +202,23 @@ class Knob:
             raise ValueError(f"Knob.narrow not supported for BINMASK ({self.name!r})")
         pinned = self.parse(raw)
         return (pinned,)
+
+    @contextmanager
+    def pinned(self, value: str):
+        """Temporarily pin ``EMMY_<NAME>=value`` for the enclosed block, restoring the prior
+        state (previous value or absence) on exit — the scoped form of the env pin, for
+        regime-aware diagnostics that must evaluate under a gate the caller didn't set (e.g.
+        ranking a fast-math golden inside the ``F16_MMA_F32_ACC``-gated enumeration). Process-
+        global like every env pin: not safe around concurrently-compiling threads."""
+        prev = self.raw()
+        config.set_knob(self.name, value)
+        try:
+            yield
+        finally:
+            if prev is None:
+                config.unset_knob(self.name)
+            else:
+                config.set_knob(self.name, prev)
 
     def narrow_at(self, element: str) -> str | None:
         """The env pin for this knob's ``<NAME>@<element>`` key, falling back to the bare

@@ -11,7 +11,13 @@ deployable-latency baseline to regression-test against.
 
 A ``name`` is **not** unique — one shape may carry several golden configs (e.g. a
 newly found faster knob set kept beside the old). Look configs up with
-:func:`goldens_by_name` (returns a list) and never assume a single match.
+:func:`goldens_by_name` (returns a list) and never assume a single match. One sanctioned
+duality is the **fast-math regime**: a sweep run under ``EMMY_FAST_MATH=1`` may record a
+precision-trading winner (an f16-accumulate ``TILE`` atom / ``FAST_EXP: true``) BESIDE the
+same shape's standard entry, never replacing it — a default (gate-off) compile can't reach
+the fast-math config, so replacing would orphan the shape's deployable golden. The regime is
+derived from the recorded knobs (``GoldenConfig.fast_math``), and the rank / reproduction
+views compare each entry against its own regime's enumeration.
 
 This module is import-light (no torch / cupy at module top) so passes and tests
 can read :data:`GOLDEN_CONFIGS` cheaply. The data lives as **one YAML file per GPU**
@@ -68,6 +74,30 @@ def matmul_snippet(M: int, N: int, K: int, dtype: str = "fp32") -> str:
     return f"torch.matmul(torch.randn({M},{K},dtype={tdt}), torch.randn({K},{N},dtype={tdt}))"
 
 
+def fast_math_knobs(knobs: dict) -> bool:
+    """Whether a realized knob dict carries a **precision-trading** realization — an
+    f16-accumulate mma atom on any ``TILE``-family value, or ``FAST_EXP: true``. This is the
+    golden entry's regime discriminator, DERIVED from the recorded knobs (never a stored flag,
+    which could drift from them): a fast-math entry is only reachable by an enumeration run
+    under the ``FAST_MATH`` / ``F16_MMA_F32_ACC`` gate, so regime-aware consumers (the
+    ``eval`` rank / reproduction views) pin the gate on before comparing against it. Replay
+    itself needs no gate — the recorded ``TILE`` pin is authoritative."""
+    from emmy.compiler.ir.schedule import TilePlan, is_warp_codec  # noqa: PLC0415 — keep module import-light
+
+    from .space import FAST_EXP  # noqa: PLC0415
+
+    for k, v in knobs.items():
+        if k.split("@", 1)[0] == "TILE" and is_warp_codec(str(v)):
+            try:
+                if TilePlan.parse(str(v)).atom.operand_dtype("c").nbytes == 2:
+                    return True
+            except ValueError:
+                continue  # an unparseable historic spelling can't name an f16acc atom
+        if k == FAST_EXP.name and str(v).strip().casefold() in {"true", "1", "yes", "on"}:
+            return True
+    return False
+
+
 def _knobs_env(knobs: dict) -> str:
     """Render a knobs dict as a ``EMMY_KNOBS`` value: ``TILE=n32x8/f4x26,STAGE=d2/tma``.
 
@@ -103,6 +133,14 @@ class GoldenConfig:
     def golden(self) -> bool:
         """Within 95% of cuBLAS or better."""
         return self.ratio >= 0.95
+
+    @property
+    def fast_math(self) -> bool:
+        """Whether this entry's recorded knobs carry a precision-trading realization
+        (:func:`fast_math_knobs`) — the golden's REGIME. A shape may carry a standard entry and
+        a fast-math entry side by side under one ``name`` (names are non-unique by design); the
+        regime-aware consumers compare each against its own regime's enumeration."""
+        return fast_math_knobs(self.knobs)
 
     @property
     def sm_count(self) -> int | None:

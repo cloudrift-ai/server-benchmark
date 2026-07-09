@@ -54,6 +54,17 @@ def test_mixed_shape_key_stays_in_scalar_bucket():
     assert not key.is_warp
 
 
+def test_mixed_matmul_graph_keeps_f32_a():
+    # The eval enumeration's synthetic graph must mirror the traced snippet: f32 A
+    # (erased cast), f16 B and output — not a ValueError on the 'mixed' spelling.
+    from emmy.compiler.pipeline.search.analytic import _matmul_graph
+
+    g = _matmul_graph(512, 4096, 3840, "mixed")
+    assert g.nodes["a"].output.dtype.name == "f32"
+    assert g.nodes["b"].output.dtype.name == "f16"
+    assert g.nodes["o"].output.dtype.name == "f16"
+
+
 @pytest.mark.parametrize(
     ("emmy_us", "cublas_us", "ratio", "golden"),
     [(100.0, 99.0, 0.99, True), (100.0, 95.0, 0.95, True), (100.0, 80.0, 0.80, False), (0.0, 99.0, 0.0, False)],

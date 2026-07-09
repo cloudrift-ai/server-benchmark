@@ -17,8 +17,10 @@ analysis can evaluate the *expectation* directly — where the golden ranks unde
 knobs the greedy pick misses, and whether the search ever measured it. Use the `emmy` CLI for all of it (`tune`,
 `run --bench --golden/--ab`, the `eval` views) — no ad-hoc bench scripts or hand-written SQL.
 
-Requires a CUDA GPU. The set is ~36 shapes on the RTX 5090 (six kinds × sizes × static/`.dynM`). Budget ~2.5 h for the
-full single-invocation cold sweep (measured on a 4090, 2026-07-07); a per-shape loop of `tune -c <snippet> --clean`
+Requires a CUDA GPU. The set is ~36 shapes on the RTX 5090 and 47 on the RTX 4090 (six kinds × sizes ×
+static/`.dynM`, plus per-model seeds). Budget ~4 h for the full single-invocation cold sweep (3 h 47 m for 47
+shapes on a 4090, 2026-07-09 — the fp16/h-size matmul family is ~¾ of the wall); a per-shape loop of
+`tune -c <snippet> --clean`
 costs the same wall time but forfeits within-sweep prior transfer — use it only when a report explicitly needs
 unbiased per-shape cold-search behavior. Goldens are **hand-maintained YAML** — never dump them with PyYAML (it
 destroys the flow-style `{BN: 16, ...}` knob dicts and key order); edit the YAML text directly.

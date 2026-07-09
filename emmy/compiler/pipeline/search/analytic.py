@@ -28,9 +28,14 @@ def _matmul_graph(M: int, N: int, K: int, dtype: str):
     from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
     from emmy.compiler.ir.frontend.ir import MatmulOp  # noqa: PLC0415
 
-    dt = _dt.get(_DTYPES.get(dtype, dtype))
+    if dtype == "mixed":
+        # f32-A × 16-bit-B, the erased-cast signature (see golden.matmul_snippet): A stays f32
+        # in the traced graph while B and the output are f16.
+        dt_a, dt = _dt.get("f32"), _dt.get("f16")
+    else:
+        dt_a = dt = _dt.get(_DTYPES.get(dtype, dtype))
     g = Graph()
-    g.add_node(InputOp(), [], Tensor("a", (M, K), dt), node_id="a")
+    g.add_node(InputOp(), [], Tensor("a", (M, K), dt_a), node_id="a")
     g.add_node(InputOp(), [], Tensor("b", (K, N), dt), node_id="b")
     g.add_node(MatmulOp(), ["a", "b"], Tensor("o", (M, N), dt), node_id="o")
     g.inputs, g.outputs = ["a", "b"], ["o"]

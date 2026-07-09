@@ -110,7 +110,7 @@ def test_kernel_name_skips_device_helper_preludes() -> None:
     must come from the ``__global__`` entry point, not the first ``void name(``
     in the source (which would be the helper)."""
     src = (
-        "static __device__ __forceinline__ void dpl_ldmatrix_x4(unsigned* r, const void* smem) { }\n"
+        "static __device__ __forceinline__ void emmy_ldmatrix_x4(unsigned* r, const void* smem) { }\n"
         "static __device__ __forceinline__ void mbarrier_init(unsigned long long* mbar, int count) { }\n"
         'extern "C" __global__\n__launch_bounds__(128) void k_linear_reduce_735349(const __half* x) { }\n'
     )

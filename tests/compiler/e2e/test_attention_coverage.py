@@ -277,8 +277,8 @@ def test_flash_transposed_output_matches_torch(monkeypatch):
 def test_flash_chain_matches_torch(monkeypatch, B, H, S, D):
     """The FA-2 shared-score scalar chain — the P@V output ``d`` rides a register vector ``O[BM, D]``,
     the QK^T score computed once per KV step and shared across ``d`` (one kernel, scalar FMA P@V).
-    **Xfailed:** this scalar-chain restructuring is not yet rebuilt (no ``O_i_0`` register vector is
-    emitted today), so the ``O_i_0`` assertion below fails."""
+    Greedy: these fp32 shapes are not warp-eligible, so the prior picks the chain among the scalar
+    forms (the pinned selection has its own case below)."""
     torch.manual_seed(0)
     q, k, v = (torch.randn(B, H, S, D) for _ in range(3))
     backend, compiled, _graph, kernels = _trace(_Sdpa(), (q, k, v))
@@ -292,6 +292,37 @@ def test_flash_chain_matches_torch(monkeypatch, B, H, S, D):
 
     md = _max_diff(backend, compiled, {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}, ref)
     assert md < 1e-4, f"chain flash max_diff={md:.6e}"
+
+
+@requires_cuda
+def test_flash_chain_pin_selects_chain_on_warp_eligible_shape(monkeypatch):
+    """A ``TILE@<pv_k>=f<D>`` pin (with ``TILE=a:scalar`` covering the score node) selects the CHAIN
+    row on a shape where the mma tier is also on offer — the pinned spelling of the shared-score
+    scalar baseline. Regression: the fold dispatch used to route ANY live ``TILE`` pin to the warp
+    rows alone, so no pin could reach the chain and the scalar pin degraded to the per-cell tier
+    (the 64×-redundant score recompute)."""
+    # Individual EMMY_* vars, not the EMMY_KNOBS aggregate: the aggregate splats into per-knob env
+    # vars with overwrite=False, so a var another test already set (or left behind) would win over
+    # this test's aggregate under xdist; monkeypatch on the individual vars reverts cleanly.
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_TILE", "a:scalar")
+    monkeypatch.setenv("EMMY_TILE@PJ", "f64")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
+    backend, compiled, _graph, kernels = _trace(_Sdpa(), (q, k, v))
+    assert len(kernels) == 1, f"chain flash should fuse to one kernel, got {len(kernels)}"
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "O_i_0" in src, "chain form must carry the O[d] register vector"
+    assert "mma" not in src, "the scalar pin must not fall through to the warp tier"
+    cq, ck, cv = q.cuda(), k.cuda(), v.cuda()
+
+    def ref():
+        with torch.no_grad():
+            return F.scaled_dot_product_attention(cq, ck, cv).cpu().flatten().numpy()
+
+    md = _max_diff(backend, compiled, {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}, ref)
+    assert md < 5e-3, f"pinned chain flash max_diff={md:.6e}"
 
 
 # =========================================================================== #
@@ -319,8 +350,8 @@ def test_generated_tensorcore_flash_matches_torch(monkeypatch, B, H, S, D):
     backend, compiled, graph, kernels = _compile_tc(q, k, v)
     assert len(kernels) == 1, f"fused TC flash should be one kernel, got {len(kernels)}"
     src = compiled.nodes[kernels[0]].op.kernel_source
-    assert "dpl_mma_m16n8k16_f16" in src and "dpl_ldmatrix_x4" in src, "the generated kernel must use the shared tensor-core ops"
-    assert "dpl_c_to_a" in src, "the generated kernel must be the fused warp-chain (C->A register repack)"
+    assert "emmy_mma_m16n8k16_f16" in src and "emmy_ldmatrix_x4" in src, "the generated kernel must use the shared tensor-core ops"
+    assert "emmy_c_to_a" in src, "the generated kernel must be the fused warp-chain (C->A register repack)"
 
     def ref():
         with torch.no_grad():
@@ -381,7 +412,7 @@ def test_warp_flash_geometry_pin_matches_torch(monkeypatch, um, nt):
     backend, compiled, graph, kernels = _compile_tc(q, k, v)
     assert len(kernels) == 1, f"pinned warp flash should be one kernel, got {len(kernels)}"
     src = compiled.nodes[kernels[0]].op.kernel_source
-    assert "dpl_c_to_a" in src, "must be the fused warp form (C->A register repack)"
+    assert "emmy_c_to_a" in src, "must be the fused warp form (C->A register repack)"
 
     def ref():
         with torch.no_grad():
@@ -392,6 +423,82 @@ def test_warp_flash_geometry_pin_matches_torch(monkeypatch, um, nt):
     got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
     max_diff = float(np.max(np.abs(got - eager)))
     assert max_diff < 5e-3, f"pinned warp flash w{um}/f1x{nt} max_diff={max_diff:.2e}"
+
+
+@requires_cuda
+@pytest.mark.parametrize(
+    ("geom", "stage", "loopify"),
+    [
+        ("w1x1/f1x2/k4", "", 4),  # gmem-direct: O_i_f rescale/divide + P@V load+mma + stores re-roll
+        ("w1x1/f1x2/k4", "", 2),  # LOOPIFY=2 also re-rolls the 2-long QK sacc_f scale
+        ("w1x1/f2x2/k4", "", 4),  # per-query-tile suffixed families (O_i_q0_f / O_i_q1_f)
+        ("w1x1/f1x2/k4", "d2/cp/ring", 4),  # staged: block_threads carried through the re-roll rename
+        ("w1x1/f2x2/k4", "d2/cp/ring", 2),  # staged + partial N-atom runs (arrayed to full family size)
+    ],
+)
+def test_loopify_pin_matches_torch(monkeypatch, geom, stage, loopify):
+    """``EMMY_LOOPIFY`` (100_loopify) is a generic loop re-roller: it folds a maximal run of congruent
+    per-fragment statements — the ``O_i_f`` α rescale / divide (``FragmentApply``), the ``P@V``
+    load+mma pairs, the fragment ``RegStore``s, and at ``=2`` the ``sacc_f`` QK scale — into a
+    ``#pragma unroll`` loop over an arrayed fragment family, with affine address offsets folded to
+    ``_r*step``. Purely a listing shrink (identical SASS), so the source must still match torch. Covers
+    the gmem-direct and staged (``cp.async`` ring) tiers, plain and ``f2x2`` per-query-tile geometries —
+    the staged tier exercises the ``block_threads`` carry-through and the partial-run arraying-to-full-
+    family-size guards."""
+    monkeypatch.setenv("EMMY_TILE", f"a:mma_m16n8k16_f16/{geom}")
+    monkeypatch.setenv("EMMY_STAGE", stage)
+    monkeypatch.setenv("EMMY_LOOPIFY", str(loopify))
+    torch.manual_seed(loopify * 7 + len(geom) + len(stage))
+    q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
+    backend, compiled, graph, kernels = _compile_tc(q, k, v)
+    assert len(kernels) == 1, f"pinned warp flash should be one kernel, got {len(kernels)}"
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "[4] = {};" in src and "for (int _r" in src, "loopify must array a fragment family and emit a re-roll loop"
+    # Each fragment pointwise op renders as an element loop; the softmax subtract→exp fuses into one
+    # ``exp(s − m)`` per element (the ``post``-chain) under the pin.
+    assert "for (int _e" in src, "fragment pointwise ops must render as element loops"
+    assert any("= expf(" in ln and "((_e < 2)" in ln for ln in src.splitlines()), "subtract→exp must fuse into one exp(s − m)"
+    if not stage:  # the gmem-direct store epilogue re-rolls into a loop (var _r0) whose body carries the m16n8 lane _t
+        assert "_r0 * 8 + _g * 64" in src, "the fragment stores must re-roll (with the affine +_r0*8 column offset)"
+    if loopify == 2 and geom == "w1x1/f1x2/k4":  # the 2-long QK sacc_f scale arrays only at the lower threshold
+        assert any("sacc" in ln and "[2][4] = {}" in ln for ln in src.splitlines()), "LOOPIFY=2 must array the QK sacc_f family"
+        if not stage:  # the QK score contraction nests via the fixpoint: outer K-chunk (_r1) × inner N-atom (_r0)
+            assert "for (int _r1" in src and "_sacc_a[_r1]" in src, "the QK contraction must nest into two #pragma unroll loops"
+
+    def ref():
+        with torch.no_grad():
+            return torch.nn.functional.scaled_dot_product_attention(q.cuda(), k.cuda(), v.cuda()).cpu().flatten().float().numpy()
+
+    data = {n: t for n, t in zip(graph.inputs, (q.numpy(), k.numpy(), v.numpy()), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=ref)
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    max_diff = float(np.max(np.abs(got - eager)))
+    assert max_diff < 5e-3, f"loopify {geom} stage={stage!r} LOOPIFY={loopify} max_diff={max_diff:.2e}"
+
+
+@requires_cuda
+def test_readable_scalar_chain_fold_matches_torch(monkeypatch):
+    """``EMMY_READABLE`` folds a single-use scalar ``Assign`` temp into its sole consumer's expression
+    — the scalar-tier softmax ``t1 = m − m'`` then ``t2 = expf(t1)`` collapses to ``expf(m − m')`` —
+    while a multi-use temp (``m_i__t0``, read by two subtracts) stays named. SASS-identical, so it
+    still matches torch. ``--no-readable`` (the default off) keeps the SSA ladder."""
+    monkeypatch.setenv("EMMY_TILE", "a:scalar")
+    monkeypatch.setenv("EMMY_READABLE", "1")
+    torch.manual_seed(7)
+    q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
+    backend, compiled, graph, kernels = _compile_tc(q, k, v)
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert any("expf((m_i - " in ln or "expf((s - " in ln for ln in src.splitlines()), "the scalar subtract→exp must fold"
+    assert "= fmaxf(m_i, s)" in src, "the multi-use rowmax temp must stay named (folding it would recompute fmaxf)"
+
+    def ref():
+        with torch.no_grad():
+            return torch.nn.functional.scaled_dot_product_attention(q.cuda(), k.cuda(), v.cuda()).cpu().flatten().float().numpy()
+
+    data = {n: t for n, t in zip(graph.inputs, (q.numpy(), k.numpy(), v.numpy()), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=ref)
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    assert float(np.max(np.abs(got - eager))) < 5e-3, "readable scalar fold must match torch"
 
 
 # --------------------------------------------------------------------------- #
@@ -515,7 +622,7 @@ def test_staged_flash_symbolic_declines_to_gmem_direct(monkeypatch):
     seed = tuple(torch.randn(B, H, 16, D, dtype=torch.float16) for _ in range(3))
     backend, compiled, graph, kernels = _trace(_Sdpa(), seed, dynamic_shapes={"q": {2: sd}, "k": {2: sd}, "v": {2: sd}})
     src = compiled.nodes[kernels[0]].op.kernel_source
-    assert "dpl_c_to_a" in src, "must still be the fused warp form"
+    assert "emmy_c_to_a" in src, "must still be the fused warp form"
     assert "_k_smem" not in src and "_v_smem" not in src, "a symbolic stream must decline the K/V stage"
 
     torch.manual_seed(37)
@@ -537,14 +644,14 @@ def test_staged_flash_stage_pin_keeps_warp_not_scalar(monkeypatch):
     the pin must not fall through to the chain / scalar reduce-partition siblings and let the prior
     bury the (lower-occupancy) staged warp form under a higher-occupancy scalar form. At H=8/seq=512
     the pre-fix prior did exactly that (a staged-flash A/B row read as a ~100× regression). The
-    kernel must be the fused warp form (`dpl_c_to_a`) with a live TMA-staged K/V slab, NOT scalar."""
+    kernel must be the fused warp form (`emmy_c_to_a`) with a live TMA-staged K/V slab, NOT scalar."""
     monkeypatch.setenv("EMMY_STAGE", "d2/tma/ring")
     B, H, D = 1, 8, 64  # H=8 is the scale where the pre-fix prior buried the staged form under scalar
     sd = torch.export.Dim("seq_len", min=4, max=4096)
     seed = tuple(torch.randn(B, H, 16, D, dtype=torch.float16) for _ in range(3))
     _backend, compiled, _graph, kernels = _trace(_Sdpa(), seed, dynamic_shapes={"q": {2: sd}, "k": {2: sd}, "v": {2: sd}})
     src = compiled.nodes[kernels[0]].op.kernel_source
-    assert "dpl_c_to_a" in src, "STAGE pin must keep the fused WARP flash form, not fall to scalar"
+    assert "emmy_c_to_a" in src, "STAGE pin must keep the fused WARP flash form, not fall to scalar"
     assert "_k_smem" in src and "cp_async_bulk_tensor" in src, "the warp form must carry the pinned TMA K/V stage"
 
 
@@ -614,8 +721,8 @@ def test_generated_tensorcore_flash_bf16_matches_torch(monkeypatch, B, H, S, D):
     backend, compiled, graph, kernels = _compile_tc(q, k, v)
     assert len(kernels) == 1, f"fused TC flash should be one kernel, got {len(kernels)}"
     src = compiled.nodes[kernels[0]].op.kernel_source
-    assert "dpl_mma_m16n8k16_bf16" in src, "the bf16 flash must use the bf16 mma atom"
-    assert "dpl_c_to_a" in src, "the generated kernel must be the fused warp-chain (C->A register repack)"
+    assert "emmy_mma_m16n8k16_bf16" in src, "the bf16 flash must use the bf16 mma atom"
+    assert "emmy_c_to_a" in src, "the generated kernel must be the fused warp-chain (C->A register repack)"
 
     def ref():
         with torch.no_grad():
@@ -640,7 +747,7 @@ def test_generated_tensorcore_flash_causal_bf16_matches_torch(monkeypatch, B, H,
     backend, compiled, graph, kernels = _compile_tc(q, k, v, module=_Causal())
     assert len(kernels) == 1, f"fused causal bf16 TC flash should be one kernel, got {len(kernels)}"
     src = compiled.nodes[kernels[0]].op.kernel_source
-    assert "dpl_mma_m16n8k16_bf16" in src and "dpl_c_to_a" in src
+    assert "emmy_mma_m16n8k16_bf16" in src and "emmy_c_to_a" in src
 
     def ref():
         with torch.no_grad():
@@ -670,7 +777,7 @@ def test_generated_tensorcore_flash_causal_matches_torch(monkeypatch, B, H, S, D
     q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
     backend, compiled, graph, kernels = _compile_tc(q, k, v, module=_Causal())
     assert len(kernels) == 1, f"fused causal TC flash should be one kernel, got {len(kernels)}"
-    assert "dpl_c_to_a" in compiled.nodes[kernels[0]].op.kernel_source, "must be the fused warp-chain"
+    assert "emmy_c_to_a" in compiled.nodes[kernels[0]].op.kernel_source, "must be the fused warp-chain"
 
     def ref():
         with torch.no_grad():
@@ -702,7 +809,7 @@ def test_warp_chain_dynamic_matches_torch(monkeypatch, seq):
     backend, compiled, graph, kernels = _trace(_Sdpa(), seed, dynamic_shapes={"q": {2: sd}, "k": {2: sd}, "v": {2: sd}})
     assert len(kernels) == 1, f"dynamic warp-chain flash should fuse to one kernel, got {len(kernels)}"
     src = compiled.nodes[kernels[0]].op.kernel_source
-    assert "dpl_c_to_a" in src, "the symbolic flash must be the fused warp-chain (C->A register repack)"
+    assert "emmy_c_to_a" in src, "the symbolic flash must be the fused warp-chain (C->A register repack)"
     assert "int seq_len" in src, "the symbolic warp-chain must carry the runtime seq_len arg"
 
     torch.manual_seed(seq)
@@ -731,7 +838,7 @@ def test_warp_chain_causal_dynamic_matches_torch(monkeypatch, seq):
     seed = tuple(torch.randn(B, H, 16, D, dtype=torch.float16) for _ in range(3))
     backend, compiled, graph, kernels = _trace(_Causal(), seed, dynamic_shapes={"q": {2: sd}, "k": {2: sd}, "v": {2: sd}})
     assert len(kernels) == 1, f"dynamic causal warp-chain flash should fuse to one kernel, got {len(kernels)}"
-    assert "dpl_c_to_a" in compiled.nodes[kernels[0]].op.kernel_source, "must be the fused warp-chain"
+    assert "emmy_c_to_a" in compiled.nodes[kernels[0]].op.kernel_source, "must be the fused warp-chain"
 
     torch.manual_seed(seq)
     q, k, v = (torch.randn(B, H, seq, D, dtype=torch.float16) for _ in range(3))
@@ -764,7 +871,7 @@ def test_warp_chain_gqa_static_matches_torch(monkeypatch, Hq, Hkv, S, D):
     k, v = (torch.randn(1, Hkv, S, D, dtype=torch.float16) for _ in range(2))
     backend, compiled, graph, kernels = _compile_tc(q, k, v, module=_Gqa())
     assert len(kernels) == 1, f"static GQA warp-chain flash should be one kernel, got {len(kernels)}"
-    assert "dpl_c_to_a" in compiled.nodes[kernels[0]].op.kernel_source, "must be the fused warp-chain"
+    assert "emmy_c_to_a" in compiled.nodes[kernels[0]].op.kernel_source, "must be the fused warp-chain"
 
     def ref():
         with torch.no_grad():
@@ -799,7 +906,7 @@ def test_warp_chain_gqa_dynamic_matches_torch(monkeypatch, seq):
     backend, compiled, graph, kernels = _trace(_Gqa(), seed, dynamic_shapes={"q": {2: sd}, "k": {2: sd}, "v": {2: sd}})
     assert len(kernels) == 1, f"dynamic GQA warp-chain flash should fuse to one kernel, got {len(kernels)}"
     src = compiled.nodes[kernels[0]].op.kernel_source
-    assert "dpl_c_to_a" in src and "int seq_len" in src, "must be the symbolic fused warp-chain"
+    assert "emmy_c_to_a" in src and "int seq_len" in src, "must be the symbolic fused warp-chain"
 
     torch.manual_seed(seq)
     q = torch.randn(B, Hq, seq, D, dtype=torch.float16)

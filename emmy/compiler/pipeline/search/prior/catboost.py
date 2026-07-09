@@ -96,23 +96,32 @@ class CatBoostPrior(Prior):
     def mean_score(self, knobs: dict) -> float:
         """Predicted median latency in µs (``exp`` of the regressed log-latency);
         ``0.0`` until the first fit. Lower is better."""
-        if self._model is None:
-            return 0.0
-        f = knob_features(knobs)
-        x = np.array([[f.get(c, np.nan) for c in self._cols]], dtype=float)  # absent → NaN, matching fit (see fit docstring)
-        return float(np.exp(self._model.predict(x)[0]))
+        return self.mean_score_features(knob_features(knobs))
 
     def mean_scores(self, knobs_list: list[dict]) -> list[float]:
         """Batched :meth:`mean_score` — featurize every candidate, then one
         vectorized ``model.predict`` over the whole ``N×cols`` matrix (CatBoost
         amortizes the per-call overhead that makes ``N`` separate ``mean_score``
         calls slow). The greedy flatten scores ~1k tiles per matmul this way."""
+        return self.mean_scores_features([knob_features(k) for k in knobs_list])
+
+    def mean_score_features(self, feats: dict) -> float:
         if self._model is None:
-            return [0.0] * len(knobs_list)
-        if not knobs_list:
+            return 0.0
+        x = np.array([[feats.get(c, np.nan) for c in self._cols]], dtype=float)  # absent → NaN, matching fit (see fit docstring)
+        return float(np.exp(self._model.predict(x)[0]))
+
+    def mean_scores_features(self, feats_list: list[dict]) -> list[float]:
+        """The featurized half of :meth:`mean_scores` — also the seam the attribution
+        diagnostics mask through: a deleted key fills to ``NaN``, CatBoost's absent
+        semantics. NOTE: masked queries are out-of-distribution for a model trained
+        without feature dropout (the attribution caller flags this) — the planned
+        offline fitter's masking augmentation is what makes them honest."""
+        if self._model is None:
+            return [0.0] * len(feats_list)
+        if not feats_list:
             return []
-        feats = [knob_features(k) for k in knobs_list]
-        x = np.array([[f.get(c, np.nan) for c in self._cols] for f in feats], dtype=float)
+        x = np.array([[f.get(c, np.nan) for c in self._cols] for f in feats_list], dtype=float)
         return [float(v) for v in np.exp(self._model.predict(x))]
 
     # --- persistence ------------------------------------------------------

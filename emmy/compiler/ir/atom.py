@@ -71,7 +71,7 @@ class AtomKind:
     @property
     def ab_dtype(self) -> str:
         """The shared multiplicand dtype token (``"f16"`` / ``"bf16"``) the ``MmaSyncPtx``
-        wrapper selects on (``dpl_mma_m16n8k16_{f16,bf16}``)."""
+        wrapper selects on (``emmy_mma_m16n8k16_{f16,bf16}``)."""
         return self.operand_dtype("a").name
 
     @property

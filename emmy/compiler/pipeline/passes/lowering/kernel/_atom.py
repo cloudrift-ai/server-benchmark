@@ -39,6 +39,7 @@ from emmy.compiler.ir.schedule import Stage
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile.ir import Contraction, Side
+from emmy.compiler.pipeline.knob import Knob, KnobType
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
     CtaTile,
@@ -55,6 +56,34 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
 #: realizes; in the scalar tier it is a plain scalar fma loop.
 _MUL = ElementwiseImpl("multiply")
 _ADD = ElementwiseImpl("add")
+
+
+#: The unroll budget — the max static loop trip count eligible for ``#pragma unroll``. Pin-only
+#: (``off`` defaults to ``_UNSET`` → never stamped / featurized / enumerated, so it can't perturb the
+#: search or the goldens): ``EMMY_UNROLL=0`` keeps every extent-driven loop **rolled** (compact,
+#: readable kernels — e.g. for a blog listing), a high value unrolls more. Unset → each call site's
+#: built-in cap (64 for an inner reduce, 128 for the flash KV fold, uncapped for the tensor-core
+#: K-chunk), so the default codegen is byte-identical.
+UNROLL = Knob(
+    "UNROLL",
+    KnobType.INT,
+    help="Max static loop trip count to #pragma-unroll (the unroll budget); pin 0 to keep loops rolled. Unset = per-site cap.",
+)
+
+
+def unroll_ok(extent, cap: int | None = None) -> bool:
+    """Whether a static-``extent`` loop should ``#pragma unroll`` — its trip count within the effective
+    budget: the ``EMMY_UNROLL`` pin when set, else the site's natural ``cap`` (``None`` = unroll any
+    static loop, the tensor-core K-chunk default). A non-static extent never unrolls."""
+    if not extent.is_static:
+        return False
+    n = extent.as_static()
+    return n <= UNROLL.read_int(n if cap is None else cap)
+
+
+def unroll_ok_n(trips: int, cap: int | None = None) -> bool:
+    """:func:`unroll_ok` for a loop whose static trip count ``trips`` is already a Python ``int``."""
+    return trips <= UNROLL.read_int(trips if cap is None else cap)
 
 
 # Shared axis-geometry helpers, used across this module (the atom-generic mma/scalar codegen) AND
@@ -519,8 +548,9 @@ def _contract_kloop(c, cells, *, read_row, read_col, contract, wrap):
 # ---- scalar (register-tile) tier --------------------------------------------------------------- #
 def _unroll_inner(axis) -> bool:
     """Mark the inner contraction loop for ``#pragma unroll`` when it's a small static reduce
-    (≤ 64 trips) — register-resident operand reuse + ILP, the scalar-SGEMM lever."""
-    return axis.extent.is_static and axis.extent.as_static() <= 64
+    (≤ 64 trips, or the ``EMMY_UNROLL`` budget) — register-resident operand reuse + ILP, the
+    scalar-SGEMM lever."""
+    return unroll_ok(axis.extent, 64)
 
 
 def _dedup_loads(stmts: list[Stmt]) -> list[Stmt]:
@@ -615,7 +645,7 @@ def _scalar_drain(
     body = _dedup_loads(body)
     # seed=False: the accumulators are pre-seeded once by _ScalarOps.state outside the outer slab loop, so
     # this inner drain must NOT re-declare (re-zero) them each slab iteration.
-    return Loop(axis=Axis(name=ki, extent=bk_elems), body=Body(tuple(body)), unroll=bk_elems <= 64, seed=False)
+    return Loop(axis=Axis(name=ki, extent=bk_elems), body=Body(tuple(body)), unroll=unroll_ok_n(bk_elems, 64), seed=False)
 
 
 @dataclass(frozen=True)
@@ -773,9 +803,8 @@ class _MmaOps(_AtomOps):
             return [MmaSyncPtx(c_frag=f"_c{i}_{j}", a_frag=f"_a{i}", b_frag=f"_b{j}", shape=atom.shape, ab_dtype=atom.ab_dtype)]
 
         def wrap(body):
-            return [
-                StridedLoop(axis=k_axis, start=Literal(0, "int"), step=Literal(atom.atom_k, "int"), body=Body(tuple(body)), unroll=k_static)
-            ]
+            step = Literal(atom.atom_k, "int")
+            return [StridedLoop(axis=k_axis, start=Literal(0, "int"), step=step, body=Body(tuple(body)), unroll=unroll_ok(k_axis.extent))]
 
         return dict(read_row=read_row, read_col=read_col, contract=contract, wrap=wrap)
 

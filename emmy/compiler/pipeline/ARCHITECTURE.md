@@ -398,6 +398,22 @@ regret table with a per-family aggregate line. `node_report` drops
 for a cross-hardware dataset: same-die SKUs (H100/H200) share an `S_*` op signature but not their latencies, so mixing
 them would corrupt both metrics — the `gpu` key keeps their rows distinct.
 
+The regret metric, and the **per-feature attribution views** behind `eval prior --dataset nodes --blame / --ablate`,
+all consume one shared per-fork record (`diagnostics.fork_records`: siblings, featurized rows, scores, the
+pessimistic pick, the measured best), so the three views agree on pick semantics by construction. They score through
+the `Prior` **features seam** — `mean_score_features` / `mean_scores_features` take an already-featurized row
+(contract: identical to `mean_score` on the raw knob dict), which is what lets the diagnostics mask individual `D_*`
+features that have no knob-level spelling. **Blame** diffs `Prior.explain_features` (a signed per-term quality
+decomposition; exact for the linear analytic prior, its hardcoded interactions included as `gate:*` pseudo-terms —
+the terms sum to the scored quality, unit-tested) between the pick and the measured-best sibling, regret-weighted per
+fork family; a missed fork no term separates is **BLIND** — a featurizer gap, not a weight problem. **Ablation Δ**
+re-picks every fork with one feature masked (each model's own absent semantics: `0.0` term for the linear prior =
+exact removal, `NaN` routing for CatBoost — flagged out-of-distribution until a dropout-trained model exists) and
+reports the per-family median-regret change with the feature's fork support. Both are **diagnostic only, never gate
+metrics**: attribution among correlated features is non-unique (masking any one of a redundant geometry block costs
+the same Δ). Unlike the per-card regret/reachability tables, attribution POOLS cards and regimes — regret is a
+within-fork ratio, so it compares safely.
+
 Why CatBoost (chosen by `scripts/prior_bakeoff.py`): the model's greedy pick must not run off to a degenerate corner. A
 linear model (the former `BayesianRidgePrior`) is monotone in every knob, so its optimum is always a corner of the
 candidate box — the `BR=1` blow-up (4us → 232us / invalid kernels). Any **bounded** tree ensemble is off-manifold-safe
@@ -490,7 +506,7 @@ per-rule mechanics — the "owning rule" for the schedule codecs is the `_schedu
 
 | Knob     | Type    | Owning rule                       | What it controls                                                        |
 |----------|---------|-----------------------------------|-------------------------------------------------------------------------|
-| `TILE`   | STR (codec) | `lowering/tile/010_recognize` (`_schedule`) | **Unified output-fragment** codec — a contraction's output tile is *either* the **scalar** register sub-tile `n<N>[x<M>]/f<fn>[x<fm>]` (parallel thread-tile `n`/`m`, register sub-tile `f`) *or* the **warp** tensor-core mma tile `a:<atom>/w<WM>x<WN>/f<FM>x<FN>/k<bk>` (atom + warps + register sub-tile + K-chunk), never both. The value self-discriminates: an `a:<atom>` token selects the warp form (a tensor-core-atom `TilePlan`; `schedule.is_warp_codec`), otherwise the scalar `TilePlan`. Empty = per-cell. |
+| `TILE`   | STR (codec) | `lowering/tile/010_recognize` (`_schedule`) | **Unified output-fragment** codec — a contraction's output tile is *either* the **scalar** register sub-tile `n<N>[x<M>]/f<fn>[x<fm>]` (parallel thread-tile `n`/`m`, register sub-tile `f`) *or* the **warp** tensor-core mma tile `a:<atom>/w<WM>x<WN>/f<FM>x<FN>/k<bk>` (atom + warps + register sub-tile + K-chunk), never both. The value self-discriminates: an `a:<atom>` token selects the warp form (a tensor-core-atom `TilePlan`; `schedule.is_warp_codec`), otherwise the scalar `TilePlan`. Empty = per-cell. A pin may spell the scalar tier explicitly as `a:scalar` (alias `a:none`) — the one `a:`-prefixed value that is *not* warp; pin-input vocabulary only, normalized back to the canonical scalar spelling (`""` / `n../f..`) so it never rides a stored knob (mirrors `PLACE`'s `auto`). |
 | `REDUCE` | STR (codec) | `lowering/tile/010_recognize` (`_schedule`) | Reduce-axis partition codec `g<n>[a\|k]/b<n>/r<n>` — `g` cross-CTA split-K (+ finalize letter), `b` cooperative-thread fold, `r` ILP register fold. Empty = serial (the per-thread remainder is derived, never spelled). |
 | `STAGE`  | STR (codec) | `lowering/tile/010_recognize` (`_schedule`) → `lowering/kernel/010_materialize` | Operand-staging codec `d<depth>/sync\|cp\|tma[/ring][/p<reg_depth>]` on the typed `Stage` schedule struct (composes with both fragments of the `TILE` knob): `d<depth>` the gmem→smem ring depth, `sync`/`cp.async`/TMA transport, `p<reg_depth>` the smem→register double-buffer. `stage=None` (unset / unparseable) = gmem-direct. Also rides the warp-flash TWISTED stream (`STAGE@<kv>` — the K/V slabs of one streaming block; cp.async only, `reg_depth` clamps to 1). See `lowering/kernel/ARCHITECTURE.md`. |
 | `WSPEC`  | STR (codec) | `lowering/tile/010_recognize` (`_schedule`) → `lowering/kernel/010_materialize` | Warp-specialization codec `p<np>` — a producer warp band split over the fixed pipeline (bare/root-global; the fourth schedule-fork level). Legal on a warp `TILE` over a resolved **TMA** `STAGE` within the thread budget (`block_threads + 32·aux ≤ 1024`, `32·aux ≤ block_threads`); anything else — including the reserved producer `q` param — degrades to uniform. Empty = uniform SIMT. Materialized as the staged K-loop's producer/compute band split (`_stage._wspec_kloop`). |

@@ -133,6 +133,32 @@ class Prior(ABC):
         default maps element-wise (fine for the cheap analytic prior)."""
         return [self.mean_score(k) for k in knobs_list]
 
+    # --- features seam (attribution / ablation / offline fitting) ----------
+
+    def mean_score_features(self, feats: dict) -> float:
+        """:meth:`mean_score` on an ALREADY-featurized row (``features.knob_features``
+        output). The seam the attribution diagnostics and the offline fitter score
+        through: they featurize once, then mask / perturb individual features —
+        which have no knob-level spelling — before scoring. Contract:
+        ``mean_score_features(knob_features(knobs)) == mean_score(knobs)``, and a
+        DELETED key carries each model's own absent-feature semantics (``0.0`` term
+        for the linear analytic prior, ``NaN`` routing for CatBoost)."""
+        raise NotImplementedError
+
+    def mean_scores_features(self, feats_list: list[dict]) -> list[float]:
+        """Batched :meth:`mean_score_features`; override for a vectorized predict."""
+        return [self.mean_score_features(f) for f in feats_list]
+
+    def explain_features(self, feats: dict) -> dict[str, float] | None:
+        """Signed per-term decomposition of this model's opinion on a featurized row,
+        in the model's own ranking-quality units (HIGHER = predicted faster) — the
+        blame view diffs two rows' terms to attribute a misranking to features.
+        ``None`` when the model has no decomposition (the default; the analytic
+        prior returns an exact one, a tree model may return SHAP values). Exactness
+        contract, when implemented: the terms sum to the model's full quality score
+        for the row, so ``Σ (term(a) − term(b))`` IS the model's preference gap."""
+        return None
+
     # --- deployable-evidence pick ------------------------------------------
 
     def _o3_evidence(self) -> dict[frozenset, list[tuple[dict, float]]]:

@@ -571,13 +571,37 @@ _WARP_SCHEMA = Schema(
 )
 
 
+#: Pin-input aliases for the scalar tier — an explicit ``a:``-prefixed spelling of the (atom-less)
+#: scalar output tile, symmetric with the warp form's ``a:<atom>``. ``a:scalar`` names the scalar atom
+#: (:data:`~emmy.compiler.ir.atom.SCALAR_ATOM`'s name); ``a:none`` is an alias. **Pin vocabulary only**
+#: — a producer never emits these: :meth:`TilePlan.parse` normalizes them to the canonical scalar
+#: spelling (``""`` / ``n../f..``), so the alias never rides a stored knob dict (mirrors ``PLACE``'s
+#: ``auto`` token). Lets a pin force the scalar tier explicitly instead of the invisible empty string.
+_SCALAR_ATOM_ALIASES = frozenset({"a:scalar", "a:none"})
+
+
+def has_scalar_atom_alias(spec: str | None) -> bool:
+    """True iff any ``/``-token of ``spec`` is an explicit scalar-atom alias (``a:scalar`` / ``a:none``)."""
+    return bool(spec) and any(t.strip() in _SCALAR_ATOM_ALIASES for t in spec.split("/"))
+
+
+def _strip_scalar_atom(spec: str | None) -> str:
+    """Drop any ``a:scalar`` / ``a:none`` token from ``spec``, returning the bare scalar body
+    (``""`` when the alias was the only token — the per-cell tier)."""
+    if not spec:
+        return spec or ""
+    return "/".join(t for t in spec.split("/") if t.strip() not in _SCALAR_ATOM_ALIASES)
+
+
 def is_warp_codec(spec: str | None) -> bool:
     """True iff a ``TILE`` codec value names a tensor-core atom (an ``a:<atom>`` token) — the **warp**
     form, vs the scalar register sub-tile (``n../f..``). This is the single string-side discriminator
     for the unified output-tile knob: a contraction's output tile is *either* the scalar fragment *or*
     the warp mma tile, never both, and the value self-describes which. Empty / ``None`` (the per-cell
-    scalar baseline) is not warp."""
-    return bool(spec) and any(t.strip().startswith("a:") for t in spec.split("/"))
+    scalar baseline) is not warp. The explicit scalar-atom aliases (``a:scalar`` / ``a:none``) carry an
+    ``a:`` prefix but name the *scalar* atom, so they are **not** warp — the one ``a:``-prefixed
+    exception."""
+    return bool(spec) and any(t.strip().startswith("a:") and t.strip() not in _SCALAR_ATOM_ALIASES for t in spec.split("/"))
 
 
 @dataclass(frozen=True)
@@ -607,12 +631,15 @@ class TilePlan:
     def parse(cls, spec: str | None) -> TilePlan:
         """Decode the unified ``TILE`` knob into a tile: the warp form (``a:<atom>/w../f../k..``) →
         an mma tile, or the scalar form (``n../f..``, no atom token) → a scalar register sub-tile
-        (``atom`` defaults to the scalar atom). Empty / ``None`` = the per-cell tier. Ser/de routes
-        through :func:`decode`."""
+        (``atom`` defaults to the scalar atom). Empty / ``None`` = the per-cell tier. The pin-only
+        scalar-atom aliases ``a:scalar`` / ``a:none`` (an explicit ``a:``-prefixed spelling of the
+        scalar tier, symmetric with ``a:<mma-atom>``) are stripped and the remainder decoded as scalar
+        — ``a:scalar`` alone → per-cell, ``a:scalar/f4x8`` → a register-tiled scalar. Ser/de routes
+        through :func:`decode`; :meth:`spell` re-emits the canonical scalar form, never the alias."""
         if is_warp_codec(spec):
             v = decode(_WARP_SCHEMA, spec)
             return cls(atom=v["a"], units=v["w"], regs=v["f"], bk=v["k"])
-        v = decode(_TILE_SCALAR_SCHEMA, spec)
+        v = decode(_TILE_SCALAR_SCHEMA, _strip_scalar_atom(spec))
         return cls(units=v["n"], regs=v["f"])
 
     def spell(self) -> str:
@@ -887,6 +914,7 @@ __all__ = [
     "desugar",
     "encode",
     "field_default",
+    "has_scalar_atom_alias",
     "is_warp_codec",
     "role_for",
 ]

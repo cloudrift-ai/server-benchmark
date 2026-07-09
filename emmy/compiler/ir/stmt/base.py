@@ -69,6 +69,12 @@ class RenderCtx:
     # consumed by ``Var.render`` to inline the float at use sites instead
     # of emitting a named ``float in0 = 0.044f;`` decl.
     literal_ssa: dict[str, float] = field(default_factory=dict)
+    # Single-use scalar SSA temps folded into their sole consumer's expression — readability only
+    # (``EMMY_READABLE``), so ``m_i__t2 = expf(m_i__t1)`` with ``m_i__t1 = m_i - t0`` collapses to
+    # ``m_i__t2 = expf(m_i - t0)`` (the scalar-tier analogue of the fragment chain fusion). Populated
+    # by ``render_body`` (per flat body, in def order) and consumed by ``Var.render`` — exactly like
+    # ``literal_ssa`` but the inlined value is a rendered sub-expression, not a float.
+    inline_exprs: dict[str, str] = field(default_factory=dict)
     # Per-buffer byte offsets into a single ``extern __shared__`` pool
     # ``_smem_pool``. When non-empty, ``Smem.render`` emits a pointer
     # alias into the pool instead of a stand-alone ``__shared__`` array
@@ -92,14 +98,22 @@ class RenderCtx:
     # so they compose with non-default-dtype operands. Set transiently
     # by ``Assign.render`` around the native expression render.
     literal_default_dtype: str | None = None
+    # C-scope-local declared locals (the mma lane vars ``_g`` / ``_t``, the
+    # ``cp.async`` staging address ``_smem_addr``). A self-scoping stmt declares
+    # these once per ``{ }`` scope and reuses / reassigns them afterward instead
+    # of wrapping itself in a redundant block — so a loop body holding a single
+    # such stmt renders flat (``for (…) { … }``, not ``for (…) { { … } }``).
+    # UNLIKE the tables above this is **scope-local**: ``child()`` copies it (a
+    # new C scope inherits the enclosing scope's decls but its own additions do
+    # not leak back to the parent or across to siblings).
+    scope_decls: set[str] = field(default_factory=set)
 
     def child(self) -> RenderCtx:
-        """Return a new ctx one indent level deeper, sharing all tables.
-
-        ``replace`` shallow-copies every field, so the mutable tables (``shapes``,
-        ``ssa_dtypes``, …) stay shared by reference with the parent — only ``indent``
-        is bumped."""
-        return replace(self, indent=self.indent + 1)
+        """Return a new ctx one indent level deeper. The mutable tables (``shapes``,
+        ``ssa_dtypes``, …) stay shared by reference (SSA names are globally unique);
+        ``scope_decls`` is COPIED — it tracks per-C-scope local declarations, which an
+        inner scope inherits but must not leak back out of."""
+        return replace(self, indent=self.indent + 1, scope_decls=set(self.scope_decls))
 
     # ---- Convenience wrappers over ``self.target``. These exist so the
     # render methods read ``ctx.type_name(dt)`` instead of pulling the
@@ -545,9 +559,77 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
         if changed:
             ctx = replace(ctx, literal_ssa=new_map)
 
+    # Readability (EMMY_READABLE): fold each single-use scalar ``Assign`` temp into its sole
+    # consumer's expression — ``m_i__t2 = expf(m_i__t1)`` over ``m_i__t1 = m_i - t0`` becomes
+    # ``m_i__t2 = expf(m_i - t0)``. Only when the temp's ONE read is in this same flat body (a nested
+    # or repeated use keeps it named), so it never changes evaluation; SASS-identical. Correctness
+    # rests on two premises: (1) every node's ``deps()`` is a COMPLETE account of the names its
+    # render references — ``_read_counts`` sees readers only through it, so an under-reporting node
+    # (a stashed name in a field ``deps`` skips) could hide a second reader of a folded temp; and
+    # (2) no statement between the def and its sole read redefines an operand the folded expression
+    # reads (a carrier commit — ``l_i = …`` — is a same-body redefinition). (2) is checked below
+    # (the straddle guard); (1) is each node's ``deps`` contract.
+    from emmy.compiler.ir.stmt.leaves import Assign  # local — avoid cycle
+
+    inlined: set[str] = set()
+    if _readable():
+        from emmy.compiler.ir.expr import BinaryExpr, TernaryExpr, Var  # local — avoid cycle
+
+        total = _read_counts(body, {})
+        local: dict[str, int] = {}
+        for s in body:
+            for nm in s.deps():
+                local[nm] = local.get(nm, 0) + 1
+        inline = dict(ctx.inline_exprs)
+        bases: dict[str, frozenset[str]] = {}  # inlined temp → the base names its folded expression reads
+        stmts = list(body)
+        for di, s in enumerate(stmts):
+            if not (isinstance(s, Assign) and total.get(s.name, 0) == 1 and local.get(s.name, 0) == 1 and s.name not in inline):
+                continue
+            # The sole reader must render its operands through ``op_to_expr`` / ``Var.render`` (only
+            # ``Assign`` does) — folding into an ``Accum`` / ``Reassign`` / ``Write`` would drop the temp
+            # without substituting it, leaving an undefined reference.
+            ri = next((j for j, r in enumerate(stmts) if s.name in r.deps()), None)
+            if ri is None or not isinstance(stmts[ri], Assign):
+                continue
+            # Straddle guard: the fold moves this computation from its def site to the read site, so
+            # every base operand — transitively, through already-inlined temps — must not be redefined
+            # by a statement in between (``defines()``: a state commit / Accum). Each link checks its
+            # own def→read window; chained folds compose, so the windows cover the full span from the
+            # earliest constituent's def to the final read.
+            names = frozenset(nm for a in s.args for nm in bases.get(a, (a,)))
+            if any(nm in st.defines() for st in stmts[di + 1 : ri] for nm in names):
+                continue
+            expr = op_to_expr(s.op.name, [Var(a) for a in s.args])
+            rendered = expr.render(replace(ctx, inline_exprs=inline))
+            inline[s.name] = f"({rendered})" if isinstance(expr, (BinaryExpr, TernaryExpr)) else rendered
+            bases[s.name] = names
+            inlined.add(s.name)
+        if inlined:
+            ctx = replace(ctx, inline_exprs=inline)
+
     out: list[str] = []
     for s in body:
         if isinstance(s, Load) and s.is_scalar and s.name in ctx.literal_ssa and s.is_literal(ctx.literal_constants):
             continue
+        if isinstance(s, Assign) and s.name in inlined:
+            continue  # folded into its consumer
         out.extend(s.render(ctx))
     return out
+
+
+def _readable() -> bool:
+    from emmy import config  # local — avoid cycle
+
+    return config.readable()
+
+
+def _read_counts(body: Body, counts: dict[str, int]) -> dict[str, int]:
+    """Total reads of each SSA name across ``body`` and every nested body (a name read inside a loop
+    counts, so a temp used only in a nested scope is never folded at this level)."""
+    for s in body:
+        for nm in s.deps():
+            counts[nm] = counts.get(nm, 0) + 1
+        for b in s.nested():
+            _read_counts(b, counts)
+    return counts

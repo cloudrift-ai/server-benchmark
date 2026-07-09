@@ -723,11 +723,11 @@ def test_matmul_mma_coverage(M, N, K, out, trans, mode, monkeypatch):
     assert diff < tol, f"{M}x{N}x{K} out={out} trans={trans}/{mode}: mma mismatch (max abs err {diff})"
 
     assert "mma.sync.aligned.m16n8k16" in src, "the s16816 mma.sync instruction must be emitted"
-    assert "dpl_mma_load_a_gmem" in src, "operands must load via the gmem-direct fragment helper"
+    assert "emmy_mma_load_a_gmem" in src, "operands must load via the gmem-direct fragment helper"
     assert "wmma::" not in src, "the mma.sync path must not mix in legacy wmma intrinsics"
     assert ("__floats2half2_rn" in src) == (out == _F16), "f16 output needs the fp32→fp16 __half2 downconvert"
     if trans:
-        assert "dpl_mma_load_b_gmem_trans" in src, "transposed-B must use the gmem-direct trans helper"
+        assert "emmy_mma_load_b_gmem_trans" in src, "transposed-B must use the gmem-direct trans helper"
     if mode == "dynamic":
         assert "int seq_len" in src, "the symbolic-M grid must carry the runtime extent arg"
 
@@ -784,7 +784,7 @@ def test_mma_batched_qk_matches_torch(B, H, M, N, D, monkeypatch):
     diff = float(np.abs(got.reshape(B, H, M, N) - ref).max())
     assert diff < 1e-2, f"batched QKᵀ {B}x{H}x{M}x{N}x{D}: mma mismatch (max abs err {diff})"
     assert "mma.sync.aligned.m16n8k16" in src, "the batched Q@Kᵀ must emit the s16816 mma.sync"
-    assert "dpl_mma_load_b_gmem_trans" in src, "transposed-B (K last) must use the gmem-direct trans helper"
+    assert "emmy_mma_load_b_gmem_trans" in src, "transposed-B (K last) must use the gmem-direct trans helper"
 
 
 def _mma_pv_graph(B: int, H: int, M: int, KV: int, D: int):
@@ -839,7 +839,7 @@ def test_mma_batched_pv_matches_torch(B, H, M, KV, D, monkeypatch):
     diff = float(np.abs(got.reshape(B, H, M, D) - ref).max())
     assert diff < 1e-2, f"batched P@V {B}x{H}x{M}x{KV}x{D}: mma mismatch (max abs err {diff})"
     assert "mma.sync.aligned.m16n8k16" in src, "the batched P@V must emit the s16816 mma.sync"
-    assert "dpl_mma_load_b_gmem(" in src, "canonical B (kv first) must use the gmem-direct non-trans helper"
+    assert "emmy_mma_load_b_gmem(" in src, "canonical B (kv first) must use the gmem-direct non-trans helper"
 
 
 # Fused epilogues over the warp tier — a projection ``Map`` (or a causal ``Select``) folds into
@@ -1130,7 +1130,9 @@ def test_cp_async_deep_ring_matches_gmem_direct_bit_for_bit(monkeypatch, depth, 
     ring, ring_src = _go(f"d{depth}/cp")
     gmem, _ = _go(None)
     np.testing.assert_array_equal(ring, gmem)  # bit-identical: prefetch perturbs nothing
-    assert ring_src.count("commit_group") == depth, f"a depth-{depth} ring must issue {depth} cp.async commit groups"
+    # ``depth`` ``emmy_cp_async_commit();`` CALLS in the body (the trailing ``;`` excludes the one
+    # ``emmy_cp_async_commit() {`` helper definition in the cp.async prelude).
+    assert ring_src.count("emmy_cp_async_commit();") == depth, f"a depth-{depth} ring must issue {depth} cp.async commit groups"
 
 
 @requires_sm90
@@ -1185,8 +1187,10 @@ def test_tma_staged_slab_is_swizzled(monkeypatch):
     modes = {d.name: d.swizzle for d in op.tma_descriptors}
     assert modes and all(m != "NONE" for m in modes.values()), f"TMA slabs must swizzle: {modes}"
     assert modes["_desc_b"] == "B64", f"B slab (tile_n=32 fp16 = 64 B rows) must pick B64: {modes}"
-    # Every staged ldmatrix applies the XOR (the `(e) ^ ((((e) >> 6) & mask) << 3)` form).
-    assert ") ^ ((((" in op.kernel_source, "the staged ldmatrix drain must XOR its slab address"
+    # Every staged ldmatrix applies the XOR via the preamble helper (`emmy_swizzle_<mode>(e)` —
+    # `e ^ (((e >> 6) & mask) << 3)`), and the helper for the picked mode is defined.
+    assert "emmy_swizzle_b64(" in op.kernel_source, "the staged ldmatrix drain must XOR its slab address via the helper"
+    assert "int emmy_swizzle_b64(int e)" in op.kernel_source, "the swizzle helper must be emitted in the preamble"
 
 
 @requires_sm90
@@ -1497,7 +1501,7 @@ def test_transposed_b_symbolic_k_zero_fills(monkeypatch):
     kop = lowered.nodes["c"].op
     src = kop.kernel_source
     assert "mma.sync.aligned.m16n8k16" in src, "transposed-B symbolic-K must reach the warp tier"
-    assert "dpl_mma_load_b_gmem_trans_kzero" in src, "transposed-B symbolic-K must zero-fill via the (n,k)-swapped trans helper"
+    assert "emmy_mma_load_b_gmem_trans_kzero" in src, "transposed-B symbolic-K must zero-fill via the (n,k)-swapped trans helper"
 
 
 # (label, env, seqs, make). ``make(seq)`` builds (graph, feed, want) for one off-hint runtime

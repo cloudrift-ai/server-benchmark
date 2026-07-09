@@ -91,6 +91,18 @@ class FallbackPrior(Prior):
     def mean_scores(self, knobs_list: list[dict]) -> list[float]:
         return self.learned.mean_scores(knobs_list) if self.trustworthy else self.analytic.mean_scores(knobs_list)
 
+    # Features-seam surface (attribution / ablation) — routed through the same
+    # trustworthy gate as mean_score/mean_scores, so the diagnostics decompose the
+    # model that actually owns decisions.
+    def mean_score_features(self, feats: dict) -> float:
+        return self.learned.mean_score_features(feats) if self.trustworthy else self.analytic.mean_score_features(feats)
+
+    def mean_scores_features(self, feats_list: list[dict]) -> list[float]:
+        return self.learned.mean_scores_features(feats_list) if self.trustworthy else self.analytic.mean_scores_features(feats_list)
+
+    def explain_features(self, feats: dict) -> dict[str, float] | None:
+        return self.learned.explain_features(feats) if self.trustworthy else self.analytic.explain_features(feats)
+
     def pick(self, rows: list[dict]) -> tuple[int, float]:
         # Measured -O3 evidence lives in the LEARNED half's reservoir (the
         # analytic prior has no dataset), and applies even while the model is

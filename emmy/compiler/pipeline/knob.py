@@ -377,10 +377,21 @@ def values_equal(name: str, want, got) -> bool:
     knob's canonical :meth:`Knob.parse` — a BOOL pinned ``1``/``yes``/``on`` matches a
     realized ``True``, a hex INT its decimal, a BINMASK spelling the stamped binary
     string (width taken from the realized binary spelling — the :meth:`Knob.pretty`
-    storage convention). An unregistered family compares by string only."""
+    storage convention). ``TILE`` values additionally canonicalize through the codec
+    (``TilePlan.parse(...).spell()``) so an atom-ALIAS pin (``a:mma_m16n8k16_f16/…``)
+    matches the canonically-stamped row (``a:mma_m16n8k16_f16_f32/…``) instead of
+    false-flagging ``unreproducible pin``. An unregistered family compares by string
+    only."""
     w, g = str(want).strip(), str(got).strip()
     if w.casefold() == g.casefold():
         return True
+    if family_of(name) == "TILE":
+        from emmy.compiler.ir.schedule import TilePlan  # noqa: PLC0415 — the codec layer sits above this descriptor module
+
+        try:
+            return TilePlan.parse(w).spell() == TilePlan.parse(g).spell()
+        except ValueError:
+            return False
     kn = get(family_of(name))
     if kn is None:
         return False

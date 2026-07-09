@@ -105,7 +105,7 @@ _F16ACC_CCS = frozenset({(8, 6), (8, 9), (12, 0)})
 
 
 def _f16acc_allowed(ctx) -> bool:
-    """Whether the f16-accumulate atom forks (``a:mma_m16n8k16_f16_f16acc``) may be OFFERED. A
+    """Whether the f16-accumulate atom forks (``a:mma_m16n8k16_f16_f16``) may be OFFERED. A
     precision-trading gate, off by default: the precise ``EMMY_F16_MMA_F32_ACC`` pin is
     authoritative on every target (1 offers everywhere — e.g. to measure the no-win case — 0
     never); unset, the ``EMMY_FAST_MATH`` umbrella offers it on the consumer-die targets
@@ -122,7 +122,7 @@ def _f16acc_allowed(ctx) -> bool:
 
 
 # The f16-accumulate sibling of each base atom (f16 only — mma.sync has no bf16-accumulate form).
-_F16ACC_ATOMS = {"mma_m16n8k16_f16": "mma_m16n8k16_f16_f16acc"}
+_F16ACC_ATOMS = {"mma_m16n8k16_f16_f32": "mma_m16n8k16_f16_f16"}
 
 
 def _with_f16acc(atoms: tuple[str, ...], ctx) -> tuple[str, ...]:
@@ -333,7 +333,7 @@ def _option(tile, place, spec: str, name: str, knobs: dict) -> TileOp:
 
 
 # The mma atoms eligible per operand dtype — the warp tier's dtype gate (16-bit operands only).
-_ATOMS_BY_DTYPE = {"f16": ("mma_m16n8k16_f16",), "bf16": ("mma_m16n8k16_bf16",)}
+_ATOMS_BY_DTYPE = {"f16": ("mma_m16n8k16_f16_f32",), "bf16": ("mma_m16n8k16_bf16_f32",)}
 
 # Emit unpinned split-K candidates only when the output grid alone leaves the GPU under-occupied —
 # split-K beyond the ~2-wave occupancy need is pure combine/workspace waste (the prior's
@@ -1669,7 +1669,9 @@ def _twisted_warp_options(
     if len(channels) != 3 or channels[1].lift is not None or channels[2].lift is None:
         return []
     q_tensor = tile.inputs.get(head.a_operand.input) if tile.inputs else None
-    atom_name = {"f16": "mma_m16n8k16_f16", "bf16": "mma_m16n8k16_bf16"}.get(getattr(getattr(q_tensor, "dtype", None), "name", None))
+    atom_name = {"f16": "mma_m16n8k16_f16_f32", "bf16": "mma_m16n8k16_bf16_f32"}.get(
+        getattr(getattr(q_tensor, "dtype", None), "name", None)
+    )
     if atom_name is None:
         return []
     atom = ATOM_REGISTRY[atom_name]

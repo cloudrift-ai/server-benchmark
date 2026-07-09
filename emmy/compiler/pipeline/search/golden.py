@@ -27,7 +27,7 @@ CUDA-core FMA kernel against a real SGEMM, not the ~5-10x faster TF32 tensor-cor
 path. The **fp16** squares (``*.fp16``) instead ride the warp-tier tensor-core path
 and compare against cuBLAS HGEMM (torch's default fp16 matmul) — same tensor-core
 hardware on both sides, so the ratio is apples-to-apples vs cuBLAS. On sm_90+ the
-autotuner lands these on the swizzled s16816 ``mma_m16n8k16_f16`` (ldmatrix +
+autotuner lands these on the swizzled s16816 ``mma_m16n8k16_f16_f32`` (ldmatrix +
 mma.sync) atom — the swizzled smem slab avoids shared-load bank conflicts (a
 fragment load reading smem opaquely cannot), so mma.sync is the faster fp16
 GEMM. On sm_120 the pre-rebuild bar (2048²: 106.7 µs / 1.06× on a 4-warp

@@ -49,7 +49,7 @@ ALWAYS_SCH = Schema("ALW", (_D, _TA), expect="d<n>/sync|cp")
         ("p2:q8", "p:2,q8"),
         ("cp", "cp"),  # bare CHOICE token — no glued value, unchanged
         ("ring", "ring"),  # bare FLAG token — unchanged
-        ("a:mma_m16n8k16_f16", "a:mma_m16n8k16_f16"),  # already colon-form
+        ("a:mma_m16n8k16_f16_f32", "a:mma_m16n8k16_f16_f32"),  # already colon-form
     ],
 )
 def test_desugar(glued: str, canonical: str) -> None:

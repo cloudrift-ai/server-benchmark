@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 from emmy.compiler.pipeline.passes.lowering.tile._schedule import _narrow_flash_forms
 
-_WARP_SPEC = "a:mma_m16n8k16_f16/w1x1/f1x2/k4"
+_WARP_SPEC = "a:mma_m16n8k16_f16_f32/w1x1/f1x2/k4"
 
 
 def _forms():
@@ -100,8 +100,8 @@ def test_stage_pin_does_not_bypass_keyed_tile_pins(monkeypatch):
     g = d["graph"] if isinstance(d, dict) else d
     pins = {
         "PLACE": "fuse",
-        "TILE@dd": "a:mma_m16n8k16_f16/w2x1/f1x8/k4",
-        "TILE@pj": "a:mma_m16n8k16_f16/w2x1/f1x8/k4",
+        "TILE@dd": "a:mma_m16n8k16_f16_f32/w2x1/f1x8/k4",
+        "TILE@pj": "a:mma_m16n8k16_f16_f32/w2x1/f1x8/k4",
         "STAGE": "d2/cp/ring",
     }
 

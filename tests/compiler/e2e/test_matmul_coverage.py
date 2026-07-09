@@ -742,7 +742,7 @@ def test_matmul_mma_coverage(M, N, K, out, trans, mode, monkeypatch):
 # ``test_f16acc_enumeration_gate``); accuracy is checked against BOTH the f32 reference and the
 # f32-accumulate SIBLING (same schedule, atom swapped) — the sibling bound is what the loose fp16
 # eager tolerance can't see.
-_F16ACC_PIN = "a:mma_m16n8k16_f16_f16acc/w2x2/f4x8/k2"
+_F16ACC_PIN = "a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2"
 _F16ACC_SIBLING_PIN = _WARP_PIN  # the same w2x2/f4x8/k2 schedule on the f32-accumulate atom
 _F16ACC_STAGES = {"gmem": "", "cp": "d2/cp/ring", "tma": "d4/tma/ring"}
 
@@ -775,7 +775,7 @@ def test_matmul_mma_f16acc_coverage(stage, mode, monkeypatch):
     sib_diff = float(np.abs(got.astype(np.float32) - sib.astype(np.float32)).max())
     assert sib_diff < 5e-3, f"f16acc {stage}/{mode}: drifted from the f32-accumulate sibling (max abs err {sib_diff})"
 
-    assert "emmy_mma_m16n8k16_f16_f16acc(_ch0_0" in src, "the mma chain must target the packed f16 fragments"
+    assert "emmy_mma_m16n8k16_f16_f16(_ch0_0" in src, "the mma chain must target the packed f16 fragments"
     assert "emmy_mma_promote_f16acc(_c0_0, _ch0_0);" in src, "the chunk promote into the f32 shadow must be emitted"
     assert "_ch0_0" not in sib_src, "the f32-accumulate sibling must not declare f16 mma fragments"
 
@@ -786,7 +786,7 @@ def test_matmul_mma_f16acc_symbolic_k(monkeypatch):
     """A SYMBOLIC-K f16acc matmul run at a non-multiple length: the masked-K tail zero-fills the
     operand fragments and the unconditional final promote (after the K-loop) folds the partial
     last chunk — the gmem-direct cadence path's tail case."""
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f16acc/w1x1/f1x1/k1")
+    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f16/w1x1/f1x1/k1")
     monkeypatch.delenv("EMMY_STAGE", raising=False)
     M = N = 128
     run_k = 70  # off the 16-step grid AND off the _F16ACC_STEPS·16 promote period
@@ -814,7 +814,7 @@ def test_f16acc_enumeration_gate(monkeypatch):
             monkeypatch.setenv(var, val)
         # A fresh graph per gate state — enumeration caches rows per graph object.
         rows = enumerate_graph(_mma_matmul_graph("static", 128, 128, 128, _F16, False), Context.from_target(cc))
-        return any("_f16acc" in str(v) for r in rows for kk, v in r.items() if kk.startswith("TILE"))
+        return any("mma_m16n8k16_f16_f16/" in str(v) for r in rows for kk, v in r.items() if kk.startswith("TILE"))
 
     assert not offers((12, 0)), "gate unset: no f16acc forks"
     assert offers((12, 0), EMMY_FAST_MATH="1"), "FAST_MATH on a consumer die must offer the forks"
@@ -1551,7 +1551,7 @@ def test_masked_symbolic_m_structure(transport, monkeypatch):
         monkeypatch.setenv(f"EMMY_{k}", v)
     lowered = Pipeline.build(CUDA_PASSES).run(_symbolic_m_graph(), ctx=Context(compute_capability=(12, 0)))
     kop = lowered.nodes["o"].op
-    assert mma_atom(kop.knobs) == "mma_m16n8k16_f16"
+    assert mma_atom(kop.knobs) == "mma_m16n8k16_f16_f32"
     src = kop.kernel_source
     assert "int seq_len" in src, "runtime extent must be a kernel arg"
     assert "mma.sync.aligned.m16n8k16" in src
@@ -1577,7 +1577,7 @@ def test_batched_symbolic_mk_reaches_warp(monkeypatch):
         monkeypatch.setenv(f"EMMY_{k}", v)
     lowered = Pipeline.build(CUDA_PASSES).run(_batched_symbolic_mk_graph(), ctx=Context(compute_capability=(12, 0)))
     kop = lowered.nodes["o"].op
-    assert mma_atom(kop.knobs) == "mma_m16n8k16_f16", "batched symbolic M+K matmul must reach the warp tier"
+    assert mma_atom(kop.knobs) == "mma_m16n8k16_f16_f32", "batched symbolic M+K matmul must reach the warp tier"
     src = kop.kernel_source
     assert "mma.sync.aligned.m16n8k16" in src and "ldmatrix" in src
     assert "int seq_len" in src, "runtime extent must be a kernel arg"

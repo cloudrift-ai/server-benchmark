@@ -30,7 +30,7 @@ from tests.compiler.conftest import requires_cuda, requires_sm90
 F16 = _dt.get("f16")
 _M, _K, _N = 32, 64, 32  # M != K so the row / col broadcasts are unambiguous
 
-_WARP_TILE = "a:mma_m16n8k16_f16/w1x1/f2x2/k2"  # tile 32x16, bk 32 — exact cover of the 32x64x32 shape
+_WARP_TILE = "a:mma_m16n8k16_f16_f32/w1x1/f2x2/k2"  # tile 32x16, bk 32 — exact cover of the 32x64x32 shape
 
 
 def _sigmoid(x):
@@ -182,7 +182,7 @@ def test_fused_rmsnorm_linear_symbolic_m(runtime_s, monkeypatch):
     at the hint and run at off-hint sizes straddling the 64-row tile (31 under, 130 over + tail):
     the sync compute-fill / stat-prologue σ clamp the overhanging rows and the ``RegStore`` guard
     discards their store."""
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x2/f2x2/k2")  # tile 64×32 — every runtime S is masked
+    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2")  # tile 64×32 — every runtime S is masked
     H, inter = 256, 512
     g = _rmsnorm_linear_graph(Dim("seq_len", hint=64), H, inter)
     _rmsnorm_linear_check(g, runtime_s, H, inter, want_mma=True)
@@ -206,7 +206,7 @@ def test_fused_gate_up_swiglu_symbolic_m(runtime_s, monkeypatch):
     fragment feeding per-fold B slabs / C fragments) and the SwiGLU combine rides the store's
     fragment epilogue; the seq axis is symbolic with a masked M tail (31 under / 130 over the
     64-row tile)."""
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x2/f2x2/k2")
+    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2")
     S, H, inter = runtime_s, 256, 512
     Sd = Dim("seq_len", hint=64)
     g = Graph()

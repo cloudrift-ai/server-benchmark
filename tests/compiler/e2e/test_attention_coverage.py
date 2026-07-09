@@ -449,13 +449,13 @@ def test_flash_form_fork_offers_f16acc_pv(monkeypatch):
 
     monkeypatch.setenv("EMMY_FAST_MATH", "1")
     rows = pv_rows((12, 0))
-    acc = [r for r in rows if "_f16acc" in r["TILE@pj"]]
-    base = [r for r in rows if is_warp_codec(r["TILE@dd"]) and "_f16acc" not in r["TILE@pj"]]
+    acc = [r for r in rows if "mma_m16n8k16_f16_f16/" in r["TILE@pj"]]
+    base = [r for r in rows if is_warp_codec(r["TILE@dd"]) and "mma_m16n8k16_f16_f16/" not in r["TILE@pj"]]
     assert len(acc) == len(base) > 0, f"FAST_MATH must double the warp pv rows ({len(acc)} vs {len(base)})"
-    assert not any("_f16acc" in r["TILE@dd"] for r in rows), "the score node must stay f32-accumulate"
-    assert not any("_f16acc" in r["TILE@pj"] for r in pv_rows((9, 0))), "no f16acc rows on a full-rate f32-acc target"
+    assert not any("mma_m16n8k16_f16_f16/" in r["TILE@dd"] for r in rows), "the score node must stay f32-accumulate"
+    assert not any("mma_m16n8k16_f16_f16/" in r["TILE@pj"] for r in pv_rows((9, 0))), "no f16acc rows on a full-rate f32-acc target"
     monkeypatch.delenv("EMMY_FAST_MATH")
-    assert not any("_f16acc" in r["TILE@pj"] for r in pv_rows((12, 0))), "gate unset: no f16acc rows"
+    assert not any("mma_m16n8k16_f16_f16/" in r["TILE@pj"] for r in pv_rows((12, 0))), "gate unset: no f16acc rows"
 
 
 @requires_cuda
@@ -467,7 +467,7 @@ def test_generated_tensorcore_flash_f16acc_matches_torch(monkeypatch, stage):
     into the f32 output shadows the rescale / projection / store read. Matches torch over the
     gmem-direct AND staged (cp.async ring) streams."""
     monkeypatch.setenv("EMMY_TILE@DD", "a:mma_m16n8k16_f16/w1x1/f1x2/k4")
-    monkeypatch.setenv("EMMY_TILE@PJ", "a:mma_m16n8k16_f16_f16acc/w1x1/f1x8")
+    monkeypatch.setenv("EMMY_TILE@PJ", "a:mma_m16n8k16_f16_f16/w1x1/f1x8")
     if stage:
         monkeypatch.setenv("EMMY_STAGE", stage)
     torch.manual_seed(11)

@@ -156,7 +156,7 @@ static __device__ __forceinline__ void emmy_cp_async_wait() {
 # Warp-level MMA prelude (the ``s16816`` path) — the sole tensor-core path.
 # Pure inline PTX (``ldmatrix`` + ``mma.sync.aligned``), so NVRTC needs no
 # ``<mma.h>``. ``__forceinline__`` wrappers keep the kernel body reading as
-# ``emmy_mma_m16n8k16_{f16,bf16}(c, a, b, c)`` rather than raw asm; same SASS.
+# ``emmy_mma_m16n8k16_{f16,bf16}_{f32,f16}(c, a, b, c)`` (the atom convention's <ab>_<acc> dtype pair) rather than raw asm; same SASS.
 # The ``a``/``b`` operands are ``unsigned`` 32-bit register arrays (two packed
 # 16-bit elems each); ``c``/``d`` are ``float`` (f32 accumulate). Lane→element
 # layout is the PTX-fixed mma.m16n8k16 fragment map (see the ``LdmatrixLoad`` /
@@ -445,7 +445,7 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_nclamp_kzero(
     }
 }
 
-static __device__ __forceinline__ void emmy_mma_m16n8k16_f16(float* d, const unsigned* a, const unsigned* b, const float* c) {
+static __device__ __forceinline__ void emmy_mma_m16n8k16_f16_f32(float* d, const unsigned* a, const unsigned* b, const float* c) {
     asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
                  "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, %13};\\n"
                  : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
@@ -453,7 +453,7 @@ static __device__ __forceinline__ void emmy_mma_m16n8k16_f16(float* d, const uns
                    "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
 }
 
-static __device__ __forceinline__ void emmy_mma_m16n8k16_bf16(float* d, const unsigned* a, const unsigned* b, const float* c) {
+static __device__ __forceinline__ void emmy_mma_m16n8k16_bf16_f32(float* d, const unsigned* a, const unsigned* b, const float* c) {
     asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
                  "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, %13};\\n"
                  : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
@@ -461,12 +461,12 @@ static __device__ __forceinline__ void emmy_mma_m16n8k16_bf16(float* d, const un
                    "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
 }
 
-// f16-accumulate HMMA (the ``_f16acc`` atom): on the consumer GeForce dies the .f32-accumulate
+// f16-accumulate HMMA (the ``mma_m16n8k16_f16_f16`` atom): on the consumer GeForce dies the .f32-accumulate
 // form above runs at HALF the tensor-core rate, so this variant keeps the whole mma chain on the
 // full-rate .f16 accumulator — ``c``/``d`` are 2 packed b32 regs (two halfs each, the same
 // element map as the four f32 regs, pair-packed). Paired with emmy_mma_promote_f16acc below,
 // which periodically folds the f16 partials into the f32 shadow accumulator.
-static __device__ __forceinline__ void emmy_mma_m16n8k16_f16_f16acc(unsigned* d, const unsigned* a, const unsigned* b, const unsigned* c) {
+static __device__ __forceinline__ void emmy_mma_m16n8k16_f16_f16(unsigned* d, const unsigned* a, const unsigned* b, const unsigned* c) {
     asm volatile("mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 "
                  "{%0, %1}, {%2, %3, %4, %5}, {%6, %7}, {%8, %9};\\n"
                  : "=r"(d[0]), "=r"(d[1])

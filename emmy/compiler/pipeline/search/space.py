@@ -243,7 +243,7 @@ F16_MMA_F32_ACC = Knob(
     "F16_MMA_F32_ACC",
     KnobType.BOOL,
     hints=(False,),
-    help="Offer the f16-mma / chunked-f32-accumulate atom forks (a:mma_m16n8k16_f16_f16acc — the mma "
+    help="Offer the f16-mma / chunked-f32-accumulate atom forks (a:mma_m16n8k16_f16_f16 — the mma "
     "chain accumulates in f16 at the full HMMA rate, with a periodic register promote into f32 "
     "shadows; ~2x mma throughput on consumer dies where f32-accumulate is half rate). "
     "Pin 1 to offer on every target, 0 never; unset follows FAST_MATH (consumer-die targets only). "

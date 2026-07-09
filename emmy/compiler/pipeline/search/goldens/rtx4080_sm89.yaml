@@ -39,7 +39,7 @@ configs:
     N: 512
     K: 512
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16/w2x1/f1x4/k2', STAGE: 'd4/cp/ring'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x1/f1x4/k2', STAGE: 'd4/cp/ring'}
     emmy_us: 8.3
     cublas_us: 6.0
   - kernel: matmul
@@ -48,7 +48,7 @@ configs:
     N: 1024
     K: 1024
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16/w2x1/f4x4/k2', STAGE: 'd1/cp'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x1/f4x4/k2', STAGE: 'd1/cp'}
     emmy_us: 35.7
     cublas_us: 27.0
   - kernel: matmul
@@ -57,7 +57,7 @@ configs:
     N: 1024
     K: 1024
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16/w4x1/f4x4/k2', STAGE: 'd2/cp/ring/p2'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f4x4/k2', STAGE: 'd2/cp/ring/p2'}
     emmy_us: 32.8
     cublas_us: 27.0
   - kernel: matmul
@@ -66,7 +66,7 @@ configs:
     N: 2048
     K: 2048
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16/w2x1/f4x4/k2', STAGE: 'd1/cp'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x1/f4x4/k2', STAGE: 'd1/cp'}
     emmy_us: 207.1
     cublas_us: 197.0
   - kernel: matmul
@@ -75,7 +75,7 @@ configs:
     N: 4096
     K: 4096
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16/w1x4/f4x4', STAGE: 'd2/cp/ring'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x4/f4x4', STAGE: 'd2/cp/ring'}
     emmy_us: 1399.8
     cublas_us: 1350.0
   - kernel: attention

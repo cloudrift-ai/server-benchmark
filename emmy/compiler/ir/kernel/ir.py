@@ -1385,9 +1385,10 @@ class MmaSyncPtx(Stmt):
 
     def render(self, ctx: RenderCtx) -> list[str]:
         m, n, k = self.shape
-        variant = self.ab_dtype if self.c_dtype == "f32" else f"{self.ab_dtype}_{self.c_dtype}acc"
+        # Wrapper names follow the atom convention's <ab>_<acc> dtype pair (emmy_mma_m16n8k16_f16_f32).
         # ``c`` is passed for both the ``d`` (out) and ``c`` (in) operands.
-        return [f"{_pad(ctx.indent)}emmy_mma_m{m}n{n}k{k}_{variant}({self.c_frag}, {self.a_frag}, {self.b_frag}, {self.c_frag});"]
+        wrapper = f"emmy_mma_m{m}n{n}k{k}_{self.ab_dtype}_{self.c_dtype}"
+        return [f"{_pad(ctx.indent)}{wrapper}({self.c_frag}, {self.a_frag}, {self.b_frag}, {self.c_frag});"]
 
 
 @dataclass(frozen=True)

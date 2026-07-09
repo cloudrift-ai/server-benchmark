@@ -158,7 +158,7 @@ def test_norm_linear_fp16_scalar_reduce_tma_alignment(shape_mode, monkeypatch):
 # the warp mma tier at a 64-row tile: S=32 overhangs it, so the STATIC mode exercises the masked
 # static-M sync compute-fill (clamped A/stat σ + guarded ``RegStore``) and the DYNAMIC mode the
 # symbolic-M form of the same clamps. K=128 / N=512 exactly cover (the sync fill's N/K contract).
-_NORM_WARP_FUSED_KNOBS = {"TILE": "a:mma_m16n8k16_f16/w2x2/f2x2/k2"}
+_NORM_WARP_FUSED_KNOBS = {"TILE": "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2"}
 
 
 @requires_cuda
@@ -214,7 +214,7 @@ def test_mma_matmul_k_split_staged(M: int, N: int, K: int, monkeypatch):
     from emmy.compiler.ir.base import InputOp
     from emmy.compiler.ir.frontend.ir import MatmulOp
 
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x2/f2x2/k2")  # force the warp (mma) tier
+    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2")  # force the warp (mma) tier
     g = Graph()
     g.add_node(op=InputOp(), inputs=[], output=Tensor("a", (M, K), dtype=F16), node_id="a")
     g.add_node(op=InputOp(), inputs=[], output=Tensor("b", (K, N), dtype=F16), node_id="b")
@@ -241,7 +241,7 @@ def test_mma_matmul_k_split_staged(M: int, N: int, K: int, monkeypatch):
 # warp stage resolver now declines TMA for any tile whose box side exceeds 256 (a pinned tma stage
 # has no cp.async fallback, so the kernel lowers gmem-direct); the pinned config must produce
 # correct output rather than raise at descriptor-encode time.
-_OVERSIZED_BOX_KNOBS = {"TILE": "a:mma_m16n8k16_f16/w4x2/f8x2/k2", "STAGE": "d2/tma/ring"}
+_OVERSIZED_BOX_KNOBS = {"TILE": "a:mma_m16n8k16_f16_f32/w4x2/f8x2/k2", "STAGE": "d2/tma/ring"}
 
 
 @requires_cuda
@@ -342,7 +342,7 @@ def test_unstaged_atom_lowers_gmem_direct(monkeypatch):
     # tile + atom-K chunk) and leave STAGE unpinned — an explicit STAGE pin is authoritative (no
     # budget filter), but here we want the budget-aware filter to decline the over-budget staging so
     # the operands fall to the gmem-direct path. The ``a:<atom>`` token forces the warp (mma) tier.
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w1x1/f26x4/k2")
+    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w1x1/f26x4/k2")
     compiled = CudaBackend().compile(g)  # no longer raises
     src = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if isinstance(n.op, CudaOp))
     assert "emmy_mma_load_a_gmem" in src and "emmy_mma_load_b_gmem" in src, "unstaged operands not loaded gmem-direct"
@@ -356,7 +356,7 @@ def test_unstaged_atom_mma_accuracy(monkeypatch):
     matmul (a warp ``TILE`` pin, STAGE unpinned ⇒ gmem-direct) and verify it matches
     the numpy reference. Guards the m16n8k16 fragment layout in the gmem helpers."""
     g, inputs, ref = _build_f16_matmul_graph(128, 128, 128)
-    knobs = {"TILE": "a:mma_m16n8k16_f16/w2x2/f2x2/k1"}
+    knobs = {"TILE": "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k1"}
     forced = _run_with_knobs(g, inputs, "c", knobs, monkeypatch)
     _assert_match(forced.astype(np.float32), ref.astype(np.float32))
 

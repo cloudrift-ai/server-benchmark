@@ -47,5 +47,5 @@ def test_alias_detection() -> None:
     assert has_scalar_atom_alias("a:scalar")
     assert has_scalar_atom_alias("a:none/f2x2")
     assert not has_scalar_atom_alias("n8x16")
-    assert not has_scalar_atom_alias("a:mma_m16n8k16_f16/w2x4/f2x2/k4")
+    assert not has_scalar_atom_alias("a:mma_m16n8k16_f16_f32/w2x4/f2x2/k4")
     assert not has_scalar_atom_alias("")

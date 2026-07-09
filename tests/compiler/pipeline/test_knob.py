@@ -14,8 +14,11 @@ from emmy.compiler.pipeline.knob import (
     family_of,
     family_value,
     format_tuning_knobs,
+    is_off_value,
+    pin_key_matches,
     resolve_axis,
     tuning_knob_items,
+    values_equal,
 )
 from emmy.compiler.pipeline.search.features import is_warp, knob_features, mma_atom, tile_signature
 
@@ -444,6 +447,62 @@ def test_family_value_reads_bare_or_suffixed():
     assert family_value({"TILE@d": "x"}, "TILE") == "x"
     assert family_value({"TILE": "x"}, "TILE") == "x"
     assert family_value({"REDUCE": "b8"}, "TILE") is None
+
+
+def test_pin_key_matches():
+    """A bare pin fans out to every axis and a bare golden spelling matches whatever
+    axis the lowering stamped — only two DIFFERING explicit axes never match."""
+    assert pin_key_matches("TILE", "TILE")
+    assert pin_key_matches("TILE", "TILE@dd")
+    assert pin_key_matches("TILE@dd", "TILE")
+    assert pin_key_matches("TILE@dd", "TILE@dd")
+    assert not pin_key_matches("TILE@dd", "TILE@pj")
+
+
+def _pin_registry(monkeypatch):
+    monkeypatch.setattr(
+        knob_mod,
+        "_REGISTRY",
+        {
+            "FAST_EXP": Knob("FAST_EXP", KnobType.BOOL, off=False),
+            "BN": Knob("BN", KnobType.INT),
+            "MASK": Knob("MASK", KnobType.BINMASK),
+            "TILE": Knob("TILE", KnobType.STR, off=""),
+        },
+    )
+
+
+def test_values_equal_registry_canonical(monkeypatch):
+    """Pinned-vs-realized value equality decodes both sides through the registered
+    knob's canonical ``parse``, so every accepted pin spelling matches its typed
+    realization: BOOL ``1``/``yes``/``on`` vs ``True``, hex INT vs decimal, BINMASK
+    ``0x5``/``all`` vs the stamped binary string (width from its length — the
+    ``pretty`` storage convention). Unregistered families compare by string only."""
+    _pin_registry(monkeypatch)
+    for spelling in ("1", "yes", "on", "TRUE"):  # the grammar 085_fast_exp advertises (EMMY_FAST_EXP=1)
+        assert values_equal("FAST_EXP", spelling, True)
+    assert values_equal("FAST_EXP", "0", False)
+    assert not values_equal("FAST_EXP", "1", False)  # genuinely swapped BOOL
+    assert values_equal("BN", "0x10", 16)  # hex pin vs decimal realization (int(s, 0))
+    assert values_equal("MASK", "0x5", "101")
+    assert values_equal("MASK", "all", "111")
+    assert not values_equal("MASK", "0x5", 5)  # realized side must be the binary pretty() spelling
+    # An @-keyed pin resolves through its family's knob.
+    assert values_equal("FAST_EXP@d", "on", True)
+    # Unregistered family: casefolded string equality only.
+    assert values_equal("NOSUCH", "ABC", "abc")
+    assert not values_equal("NOSUCH", "1", True)
+
+
+def test_is_off_value(monkeypatch):
+    """A family's declared OFF value means "declined / not applicable" — never a
+    conflicting realization; no declared OFF (or an unregistered family) → False."""
+    _pin_registry(monkeypatch)
+    assert is_off_value("TILE", "")
+    assert is_off_value("FAST_EXP", False)
+    assert not is_off_value("TILE", "w2x1")
+    assert not is_off_value("BN", 0)  # BN declares no OFF
+    assert not is_off_value("NOSUCH", "")
 
 
 def test_bare_and_axis_named_featurize_identically():

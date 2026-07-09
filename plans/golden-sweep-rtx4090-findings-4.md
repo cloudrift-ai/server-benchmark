@@ -1,5 +1,15 @@
 # Golden sweep — RTX 4090 (sm_89), full op-typed set, 2026-07-08
 
+> **CORRECTION (2026-07-08, artifact-verified):** this report's sentinel claims are wrong. The reservoir does NOT
+> "carry dense 2 000 000 µs sentinels" — the copied `prior.json`'s 25,037 labels max out at 313,204 µs (zero ≥ 1.9M;
+> every reservoir-feeding path is status-guarded). The "10,709× sentinel-poisoned TILE fork" is arithmetic on a
+> **status=ok, genuinely measured 313,204 µs config** (313,204 / 10,709.79 = 29.24 µs fork best) — i.e. a real
+> learned-prior steering failure onto a catastrophic config, not metric corruption. Finding 1's h4096 mispricing
+> stands, re-attributed to off-support extrapolation / search censoring (the 34 bench-fails still cost 34 wasted
+> exploration slots on this family, but never entered a label). The sweep's other two tooling bugs (cross-card golden
+> shadowing; silently no-op'd pins) were fixed on branch `fix/golden-sweep-tooling-bugs`; the sentinel-leak "bug 3"
+> was retracted — its plan executed and deleted.
+
 Fourth 4090 sweep report (siblings: `golden-sweep-rtx4090-findings-2.md` 2026-07-06, `golden-sweep-rtx4090-findings-3.md`
 2026-07-07 — findings-3 covered the matmul family only). **First sweep under the refit analytic weights** — the
 2026-07-07 reduce/pointwise-inclusive refit, branch `feature/reduce-featurizer-fix` @ `495962b3` — and the first to

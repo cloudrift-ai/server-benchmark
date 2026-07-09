@@ -474,57 +474,9 @@ def _wrong_answer_flag(outputs: dict, ref_outputs: dict) -> str | None:
 
 
 def _cuda_knob_dicts(graph) -> list[dict]:
-    """Raw ``op.knobs`` per ``CudaOp`` of a compiled pinned graph — the realized side
-    of the pin gate."""
-    from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
-
-    return [dict(n.op.knobs or {}) for n in graph.nodes.values() if isinstance(n.op, CudaOp)]
-
-
-def _pin_key_matches(name: str, key: str) -> bool:
-    """Whether a same-family realized ``key`` satisfies a pinned ``name``: exact, or
-    one side bare (the bare env pin fans out to every axis, and a bare golden spelling
-    matches whatever axis the lowering stamped). Two *differing* explicit axes never
-    match — the value still shows up in the miss diagnostic via the family scan."""
-    from emmy.compiler.pipeline.knob import axis_of  # noqa: PLC0415
-
-    return name == key or axis_of(name) is None or axis_of(key) is None
-
-
-def _knob_values_equal(name: str, want, got) -> bool:
-    """Pinned-vs-realized value compare: casefolded ``str`` equality (the env round-trip
-    stringifies), else both sides decoded through the registered knob's canonical
-    :meth:`Knob.parse` — so a BOOL pinned ``1``/``yes``/``on`` matches a realized
-    ``True``, a hex INT matches its decimal, a BINMASK spelling its binary string
-    (width taken from the realized binary spelling)."""
-    from emmy.compiler.pipeline.knob import KnobType, family_of, get  # noqa: PLC0415
-
-    w, g = str(want).strip(), str(got).strip()
-    if w.casefold() == g.casefold():
-        return True
-    kn = get(family_of(name))
-    if kn is None:
-        return False
-    width = None
-    if kn.type is KnobType.BINMASK:
-        if not (g and all(c in "01" for c in g)):
-            return False  # realized side isn't the canonical binary spelling — no width to decode with
-        width = len(g)
-    try:
-        return kn.parse(w, width=width) == kn.parse(g, width=width)
-    except ValueError:
-        return False
-
-
-def _is_off_value(fam: str, got) -> bool:
-    """Whether a realized value is the family's declared OFF value —
-    :func:`apply_off_defaults` stamps it on every variant the knob doesn't apply to
-    (``""`` for the codec knobs, ``False`` for the BOOL policies), so it means
-    "declined / not applicable", never a conflicting realization."""
-    from emmy.compiler.pipeline.knob import _UNSET, get  # noqa: PLC0415
-
-    kn = get(fam)
-    return kn is not None and kn.off is not _UNSET and str(got).strip().casefold() == str(kn.off).strip().casefold()
+    """Raw ``op.knobs`` per ``CudaOp`` of a compiled pinned graph, in launch order —
+    the realized side of the pin gate."""
+    return [dict(n.op.knobs or {}) for n in _launch_order_cuda_nodes(graph)]
 
 
 def _unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | None:
@@ -533,18 +485,23 @@ def _unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | No
     planner's own pick — the A/B then measures greedy-vs-greedy and reports a fake 1.00x
     while the recorded config never ran (the retired ``w2x1`` hd128 flash form). Check
     every pinned knob against the compiled graph's realized knobs: honored iff SOME
-    kernel carries a same-family key that satisfies the pin (:func:`_pin_key_matches` —
+    kernel carries a same-family key that satisfies the pin (``knob.pin_key_matches`` —
     a bare ``PLACE``/``TILE`` golden spelling matches the axis-stamped ``PLACE@fold`` /
-    ``TILE@dd``) with an equal value (:func:`_knob_values_equal` — registry-canonical,
-    so alias spellings like ``FAST_EXP=1`` don't false-flag). Declared OFF values are
-    "not applicable", never conflicts (:func:`_is_off_value`). The any-kernel scan
+    ``TILE@dd``) with an equal value (``knob.values_equal`` — registry-canonical, so
+    alias spellings like ``FAST_EXP=1`` don't false-flag). Declared OFF values are
+    "not applicable", never conflicts (``knob.is_off_value``). The any-kernel scan
     tolerates a split main+finalize pair where a knob applies to one kernel only — the
     accepted blind spot: a pin dropped on its target kernel that coincidentally matches
-    a sibling kernel's realized value passes undetected. Returns a flag naming each
-    dropped pin and what ran instead (``(off)`` / ``(unset)`` when nothing did), or
-    ``None`` when clean / ungateable (no kernel carries any knob — e.g. a reloaded
-    ``--ir`` graph, whose serialized ops drop ``knobs``)."""
-    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
+    a sibling kernel's realized value passes undetected.
+
+    A REGISTERED family with no realized key on ANY kernel is ungateable, not a miss:
+    serialization drops ``op.knobs``, so on a reloaded ``--ir`` graph an absent stamp is
+    indistinguishable from a dropped pin (on a full compile the OFF fill keeps declared
+    knobs present, so a genuinely dropped pin still surfaces as ``(off)`` or a
+    conflicting value). An UNREGISTERED family with no realized key is a typo in the
+    pin and flags ``(unset)``. Returns a flag naming each dropped pin and what ran
+    instead, or ``None`` when clean / ungateable."""
+    from emmy.compiler.pipeline.knob import family_of, get, is_off_value, pin_key_matches, values_equal  # noqa: PLC0415
 
     if not any(kernel_knobs):
         return None
@@ -558,9 +515,9 @@ def _unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | No
             for key, got in raw.items():
                 if family_of(key) != fam:
                     continue
-                if _pin_key_matches(name, key) and _knob_values_equal(name, want, got):
+                if pin_key_matches(name, key) and values_equal(name, want, got):
                     hit = True
-                elif _is_off_value(fam, got):
+                elif is_off_value(fam, got):
                     saw_off = True
                 else:
                     spell = f"{key}={got}" if key != name else str(got)
@@ -568,9 +525,12 @@ def _unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | No
                         others.append(spell)
             if hit:
                 break
-        if not hit:
-            ran = "/".join(others) if others else ("(off)" if saw_off else "(unset)")
-            misses.append(f"{name}={want} realized {ran}")
+        if hit:
+            continue
+        if not others and not saw_off and get(fam) is not None:
+            continue  # registered family, no stamp anywhere — ungateable (see docstring)
+        ran = "/".join(others) if others else ("(off)" if saw_off else "(unset)")
+        misses.append(f"{name}={want} realized {ran}")
     return f"unreproducible pin: {'; '.join(misses)}" if misses else None
 
 
@@ -1497,11 +1457,10 @@ async def _bench_ab_variants_ir(backend, ir_path, tail, specs, *, warmup, iters,
     in place) and re-lowers it with the knobs pinned, so the pin collapses every
     remaining fork. Best-effort like the golden path: a config that fails to
     compile / bench is skipped with a warning, and a pin the lowering didn't realize
-    flags the row (:func:`_unreproducible_pin_flag`). Caveat: serialized ops drop
-    ``knobs``, so only tail-lowered kernels carry realized values — on a late-stage
-    dump whose tail never re-decides a pinned knob, the row can read ``(unset)`` even
-    though the dumped IR embodies that pin (an all-knob-less reload is ungateable, not
-    flagged)."""
+    flags the row (:func:`_unreproducible_pin_flag`). Serialized ops drop ``knobs``,
+    so only tail-lowered kernels carry realized values — a pinned family the tail
+    never re-decides has no stamp to check and is skipped (ungateable), while a
+    family the tail did re-decide still verifies."""
     import json as _json  # noqa: PLC0415
 
     from emmy.compiler.graph import Graph  # noqa: PLC0415

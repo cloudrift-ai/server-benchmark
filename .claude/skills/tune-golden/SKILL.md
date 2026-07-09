@@ -197,13 +197,30 @@ density of the `tune-model` reports (`plans/*-tune-findings.md`; executed ones a
 **as they happen** during steps 1–6 — don't reconstruct from memory at the end.
 
 - **Header**: date, GPU, the exact sweep command, wall time, and the category tally (N replaced / N added / N
-  unchanged / N worse). Include the sweep's **fork sibling regret** aggregate lines (`emmy eval prior --dataset
-  nodes`, this card's `-O1` block): the per-family `ALL (median)` row scores how well the prior steered the
-  search — a family ≫1.00x is a steering gap even if every golden A/B passed. The command prints the block **twice,
-  labeled `=== analytic prior ===` and `=== learned prior ===`** — copy BOTH lines with their labels, never an
-  unlabeled "prior" number: analytic regret ⇒ the cold-start weights/features misprice (fix
-  `golden_knob_heuristics.py` weights); learned regret ⇒ the trained model / its training data is off (censoring,
-  calibration, featurization). The two point at different fixes, so mixing them destroys the diagnostic.
+  unchanged / N worse).
+- **A `## Fork sibling regret` section** (`emmy eval prior --dataset nodes`, this card's `-O1` block). The command
+  prints every metric TWICE, labeled `=== analytic prior ===` / `=== learned prior ===` — the two halves diagnose
+  different failures, so the section must keep them apart. Structure it as: (1) a 2–3 sentence intro naming the
+  columns (analytic = the cold-start ranking that decides what a cold sweep measures at all; learned = the CatBoost
+  this sweep trained); (2) ONE comparison table, one metric per row, one column per half:
+
+  ```
+  | metric (-O1, N forks)                     | analytic prior | learned prior (CatBoost) |
+  | --- | --- | --- |
+  | TILE fork regret (median)                 | …× | …× |
+  | <one row per other family: REDUCE / STAGE / WSPEC / structural medians> | | |
+  | worst / 2nd / 3rd-worst TILE fork (one ROW each, shape-labeled)         | | |
+  | leaf reachability (mean / median / worst) | | |
+  | leaf calibration (median per-op Spearman) | | |
+  ```
+
+  Mark any entry whose "best" baseline is physically impossible (FLOP-roofline sanity check on the shape) with
+  `(*)` and one footnote line under the table — worst-case entries sit on those baselines, medians are robust;
+  (3) a closing diagnosis paragraph that names WHICH half misprices: analytic regret ⇒ the cold-start
+  weights/features are wrong (fix via `scripts/golden_knob_heuristics.py`); learned regret with a cleaner analytic
+  ⇒ training-data / calibration / featurization problem (the learned half also inherits the analytic's censoring —
+  it never sees regions the cold ranking steered away from). Never paste raw eval output as the section body and
+  never quote an unlabeled "prior" number. A family ≫1.00x is a steering gap even if every golden A/B passed.
 - **Per-shape outcome table**: shape name, greedy µs, best-golden µs, ratio (greedy/best-golden), category, **and a
   cuBLAS comparison when an estimate is available** — a `cuBLAS µs` column (the shape's recorded `cublas_us`, or the
   live `Eager PyTorch` row from the same `run --bench`) and a `vs cuBLAS` column (`greedy_us / cublas_us`, so >1.0 =

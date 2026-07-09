@@ -408,11 +408,20 @@ def goldens_for_live_gpu() -> list[GoldenConfig]:
     (CI, pure-logic tests) there is no live card, so the unfiltered list is
     returned — callers that need determinism there should inject a single-GPU set.
     """
+    live = live_recorded_goldens()
+    return list(GOLDEN_CONFIGS) if live is None else (live or list(GOLDEN_CONFIGS))
+
+
+def live_recorded_goldens() -> list[GoldenConfig] | None:
+    """The live card's OWN recorded goldens — ``None`` when no CUDA device is visible
+    (or the probe fails), an **empty list** for a live card with no golden file. Unlike
+    :func:`goldens_for_live_gpu` there is no union fallback, so callers can tell an
+    uncovered card from an off-GPU run: ``tune`` errors on the former rather than tune
+    another card's config under this card's name (the cross-card shadowing bug)."""
     key = _live_gpu_key()
     if key is None:
-        return list(GOLDEN_CONFIGS)
-    live = [g for g in GOLDEN_CONFIGS if g.gpu_name == key[0] and tuple(g.compute_cap) == key[1]]
-    return live or list(GOLDEN_CONFIGS)
+        return None
+    return [g for g in GOLDEN_CONFIGS if g.gpu_name == key[0] and tuple(g.compute_cap) == key[1]]
 
 
 def _live_gpu_key() -> tuple[str, tuple[int, int]] | None:
@@ -426,20 +435,3 @@ def _live_gpu_key() -> tuple[str, tuple[int, int]] | None:
         return torch.cuda.get_device_name(0), tuple(torch.cuda.get_device_capability(0))
     except Exception:  # noqa: BLE001 — any probe failure ⇒ no live filter
         return None
-
-
-def goldens_live_preferred() -> list[GoldenConfig]:
-    """Per-**name** live-preference merge of :data:`GOLDEN_CONFIGS`: the live card's
-    goldens, plus every union entry whose name the live card hasn't recorded. Foreign
-    entries fill coverage gaps (the seed / transfer flow — tuning consumes only their
-    shape/snippet, never their knobs or latencies as a live baseline) but never shadow
-    a live entry, so a name recorded by several cards with diverging shapes/dtypes
-    always resolves to the live card's spelling. Off-GPU (or probe failure) this is the
-    full union, like :func:`goldens_for_live_gpu`'s fallback — which remains the strict
-    live-or-all view the shape-keyed diagnostics / ``eval`` joins need."""
-    key = _live_gpu_key()
-    if key is None:
-        return list(GOLDEN_CONFIGS)
-    live = [g for g in GOLDEN_CONFIGS if g.gpu_name == key[0] and tuple(g.compute_cap) == key[1]]
-    live_names = {g.name for g in live}
-    return live + [g for g in GOLDEN_CONFIGS if g.name not in live_names]

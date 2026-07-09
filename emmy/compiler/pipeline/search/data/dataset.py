@@ -48,14 +48,14 @@ class Dataset:
         """Every golden config (matmul / reduce / pointwise), optionally narrowed by
         exact ``name``, name substring ``kernel``, or ``dtype``. ``compile_s_feats``
         derives the full ``S_*`` histogram per config (needed only for learned-prior
-        featurization). ``live_gpu`` applies the per-name live-preference merge
-        (:func:`goldens_live_preferred`) — the live card's entry wins for names it
-        records (a multi-GPU goldens dir doesn't return another card's config under
-        the same name), while names recorded only by other cards stay available as
-        shape seeds; off-GPU it's the full union."""
-        from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS, goldens_live_preferred  # noqa: PLC0415
+        featurization). ``live_gpu`` scopes to the live card's goldens
+        (:func:`goldens_for_live_gpu`) — so a multi-GPU goldens dir doesn't return
+        another card's config under the same name (cards with no recorded golden fall
+        back to the full set; ``tune`` rejects that fallback via
+        :func:`live_recorded_goldens` — golden tuning targets the live card only)."""
+        from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS, goldens_for_live_gpu  # noqa: PLC0415
 
-        configs = list(goldens_live_preferred() if live_gpu else GOLDEN_CONFIGS)
+        configs = list(goldens_for_live_gpu() if live_gpu else GOLDEN_CONFIGS)
         if name is not None:
             configs = [g for g in configs if g.name == name]
         if kernel:

@@ -27,12 +27,20 @@ tree). `two_level.py` is the two-level tuner (outer structural MCTS, inner per-o
 reservoir) — `Sample`, `Dataset`, and `ShapeKey` (the single golden↔measured join key). `golden.py` holds
 `GoldenConfig` and its matmul / attention / softmax / reduce / rms_norm / pointwise subclasses (the `AnalyticPrior`'s ground truth); every kind carries
 `shape_key()` / `snippet()` / `dtype`, so `tune --dataset golden` and the `run --bench --golden` A/B cover the reduce /
-pointwise entries too, not just matmul. `tune --dataset golden` scopes to the **live** card's goldens
-(`goldens_for_live_gpu`) — names repeat across per-GPU golden files with diverging shapes/dtypes, so the flat union
-would tune another card's config under the live card's name; off-GPU or for a card with no recorded goldens it falls
-back to the full union. The A/B itself carries three integrity gates — a realized-vs-pinned knob check (a structurally
+pointwise entries too, not just matmul. `tune --dataset golden` (and `--golden NAME` resolution) uses the per-name
+**live-preference merge** (`goldens_live_preferred`): the live card's entry wins for every name it records — names
+repeat across per-GPU golden files with diverging shapes/dtypes, so a flat union would tune another card's config under
+the live card's name — while names recorded only by other cards stay available as shape seeds (the transfer flow; only
+their shape/snippet is consumed, never their knobs or latencies as a live baseline). Off-GPU it's the full union, and
+`tune` warns when the by-name dedup hides a residual cross-card divergence. The strict live-or-all view
+(`goldens_for_live_gpu`) remains what the shape-keyed `eval` / diagnostics joins use. The A/B itself carries three
+integrity gates — a realized-vs-pinned knob check (a structurally
 invalid pin silently falls back to the planner's own pick, so the row would compare greedy to itself and report a fake
-1.00×; the flag marks the row `unreproducible pin` with what actually ran), an arithmetic-intensity floor
+1.00×; the flag marks the row `unreproducible pin` with what actually ran — matching is family-aware, so a bare golden
+spelling like `PLACE: fuse` matches its axis-stamped `PLACE@fold` realization, and values compare through the
+registered knob's canonical `Knob.parse`, so alias spellings like `FAST_EXP=1` don't false-flag; a pin satisfied by ANY
+kernel counts as honored, which tolerates split main+finalize pairs but means a pin dropped on its target kernel that a
+sibling coincidentally matches passes undetected), an arithmetic-intensity floor
 (a row whose shape-implied FLOP/s exceeds the live card's recorded `GpuSpec` peak is flagged as a wrong bench, not a
 fast kernel) and a wrong-answer check (each pinned config executes once on the greedy run's inputs and its outputs are
 compared, catching the silently-wrong `g2a` skipped-finalize class) — plus `--json PATH`, a machine-readable record of

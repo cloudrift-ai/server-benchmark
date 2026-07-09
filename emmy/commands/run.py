@@ -122,8 +122,9 @@ def register_run_command(subparsers):
         help=(
             "With --bench: also write the whole comparison as machine-readable JSON to PATH — the "
             "backend table (eager / torch.compile / emmy), the per-kernel greedy rows, and every "
-            "--golden / --ab A/B row with its integrity flags (arithmetic-intensity floor, "
-            "wrong-answer check). Retires ad-hoc table parsing in the golden-sweep workflow."
+            "--golden / --ab A/B row with its integrity flags (realized-vs-pinned knob check, "
+            "arithmetic-intensity floor, wrong-answer check). Retires ad-hoc table parsing in "
+            "the golden-sweep workflow."
         ),
     )
     parser.add_argument("--dump-dir", default=None, help="Directory to dump intermediate compilation artifacts.")
@@ -474,14 +475,56 @@ def _wrong_answer_flag(outputs: dict, ref_outputs: dict) -> str | None:
 
 def _cuda_knob_dicts(graph) -> list[dict]:
     """Raw ``op.knobs`` per ``CudaOp`` of a compiled pinned graph — the realized side
-    of the pin gate. Tolerates graph-less stubs (no ``nodes``) by returning ``[]``, so
-    the gate degrades to no-gate like the intensity floor on an unknown device."""
+    of the pin gate."""
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
 
-    nodes = getattr(graph, "nodes", None)
-    if not isinstance(nodes, dict):
-        return []
-    return [dict(n.op.knobs or {}) for n in nodes.values() if isinstance(n.op, CudaOp)]
+    return [dict(n.op.knobs or {}) for n in graph.nodes.values() if isinstance(n.op, CudaOp)]
+
+
+def _pin_key_matches(name: str, key: str) -> bool:
+    """Whether a same-family realized ``key`` satisfies a pinned ``name``: exact, or
+    one side bare (the bare env pin fans out to every axis, and a bare golden spelling
+    matches whatever axis the lowering stamped). Two *differing* explicit axes never
+    match — the value still shows up in the miss diagnostic via the family scan."""
+    from emmy.compiler.pipeline.knob import axis_of  # noqa: PLC0415
+
+    return name == key or axis_of(name) is None or axis_of(key) is None
+
+
+def _knob_values_equal(name: str, want, got) -> bool:
+    """Pinned-vs-realized value compare: casefolded ``str`` equality (the env round-trip
+    stringifies), else both sides decoded through the registered knob's canonical
+    :meth:`Knob.parse` — so a BOOL pinned ``1``/``yes``/``on`` matches a realized
+    ``True``, a hex INT matches its decimal, a BINMASK spelling its binary string
+    (width taken from the realized binary spelling)."""
+    from emmy.compiler.pipeline.knob import KnobType, family_of, get  # noqa: PLC0415
+
+    w, g = str(want).strip(), str(got).strip()
+    if w.casefold() == g.casefold():
+        return True
+    kn = get(family_of(name))
+    if kn is None:
+        return False
+    width = None
+    if kn.type is KnobType.BINMASK:
+        if not (g and all(c in "01" for c in g)):
+            return False  # realized side isn't the canonical binary spelling — no width to decode with
+        width = len(g)
+    try:
+        return kn.parse(w, width=width) == kn.parse(g, width=width)
+    except ValueError:
+        return False
+
+
+def _is_off_value(fam: str, got) -> bool:
+    """Whether a realized value is the family's declared OFF value —
+    :func:`apply_off_defaults` stamps it on every variant the knob doesn't apply to
+    (``""`` for the codec knobs, ``False`` for the BOOL policies), so it means
+    "declined / not applicable", never a conflicting realization."""
+    from emmy.compiler.pipeline.knob import _UNSET, get  # noqa: PLC0415
+
+    kn = get(fam)
+    return kn is not None and kn.off is not _UNSET and str(got).strip().casefold() == str(kn.off).strip().casefold()
 
 
 def _unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | None:
@@ -490,33 +533,44 @@ def _unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | No
     planner's own pick — the A/B then measures greedy-vs-greedy and reports a fake 1.00x
     while the recorded config never ran (the retired ``w2x1`` hd128 flash form). Check
     every pinned knob against the compiled graph's realized knobs: honored iff SOME
-    kernel carries the pinned value — matched case-insensitively on ``str`` (the env-var
-    pin round-trip stringifies values) against the raw ``op.knobs`` entry or the
-    collapsed :func:`tuning_knob_items` view (a single-axis ``TILE@d`` collapses back to
-    the bare ``TILE`` spelling golden YAMLs record); the any-kernel scan tolerates a
-    split main+finalize pair where a knob applies to one kernel only. Returns a flag
-    naming each dropped pin and what ran instead, or ``None`` when clean / ungateable
-    (no kernel knobs)."""
-    from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
+    kernel carries a same-family key that satisfies the pin (:func:`_pin_key_matches` —
+    a bare ``PLACE``/``TILE`` golden spelling matches the axis-stamped ``PLACE@fold`` /
+    ``TILE@dd``) with an equal value (:func:`_knob_values_equal` — registry-canonical,
+    so alias spellings like ``FAST_EXP=1`` don't false-flag). Declared OFF values are
+    "not applicable", never conflicts (:func:`_is_off_value`). The any-kernel scan
+    tolerates a split main+finalize pair where a knob applies to one kernel only — the
+    accepted blind spot: a pin dropped on its target kernel that coincidentally matches
+    a sibling kernel's realized value passes undetected. Returns a flag naming each
+    dropped pin and what ran instead (``(off)`` / ``(unset)`` when nothing did), or
+    ``None`` when clean / ungateable (no kernel carries any knob — e.g. a reloaded
+    ``--ir`` graph, whose serialized ops drop ``knobs``)."""
+    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
 
-    if not kernel_knobs:
+    if not any(kernel_knobs):
         return None
     misses: list[str] = []
     for name, want in pinned.items():
-        seen: list[str] = []
+        fam = family_of(name)
+        others: list[str] = []
+        saw_off = False
         hit = False
         for raw in kernel_knobs:
-            for view in (raw, dict(tuning_knob_items(raw))):
-                if name in view:
-                    got = str(view[name])
-                    if got.strip().lower() == str(want).strip().lower():
-                        hit = True
-                    elif got not in seen:
-                        seen.append(got)
+            for key, got in raw.items():
+                if family_of(key) != fam:
+                    continue
+                if _pin_key_matches(name, key) and _knob_values_equal(name, want, got):
+                    hit = True
+                elif _is_off_value(fam, got):
+                    saw_off = True
+                else:
+                    spell = f"{key}={got}" if key != name else str(got)
+                    if spell not in others:
+                        others.append(spell)
             if hit:
                 break
         if not hit:
-            misses.append(f"{name}={want} realized {'/'.join(seen) if seen else '(unset)'}")
+            ran = "/".join(others) if others else ("(off)" if saw_off else "(unset)")
+            misses.append(f"{name}={want} realized {ran}")
     return f"unreproducible pin: {'; '.join(misses)}" if misses else None
 
 
@@ -591,9 +645,6 @@ async def _bench_golden_variants(backend, code, golden_configs, *, warmup, iters
                 # Fresh graph; knobs baked into the kernel source here.
                 graph, _, _ = graph_from_code(code, dynamic_shapes=dynamic_shapes)
                 g_compiled = backend.compile(graph)
-            flag = _unreproducible_pin_flag(sample.knobs, _cuda_knob_dicts(g_compiled))
-            if flag:
-                flags.append(flag)
             if ref is not None:
                 ref_inputs, ref_outputs = ref
                 run_result, _ = backend.run(g_compiled, input_data=ref_inputs)
@@ -604,6 +655,9 @@ async def _bench_golden_variants(backend, code, golden_configs, *, warmup, iters
         except Exception as exc:  # noqa: BLE001 — a bad pin must not abort the run's own bench table
             logger.warning("[golden] %s: compile/bench of the pinned config failed (%s) — skipping its row", sample.name, exc)
             continue
+        flag = _unreproducible_pin_flag(sample.knobs, _cuda_knob_dicts(g_compiled))
+        if flag:
+            flags.append(flag)
         total_us = (g_bench.min_ms if g_bench.min_ms is not None else g_bench.time_ms) * 1000
         flag = _intensity_floor_flag(sample, total_us)
         if flag:
@@ -1443,7 +1497,11 @@ async def _bench_ab_variants_ir(backend, ir_path, tail, specs, *, warmup, iters,
     in place) and re-lowers it with the knobs pinned, so the pin collapses every
     remaining fork. Best-effort like the golden path: a config that fails to
     compile / bench is skipped with a warning, and a pin the lowering didn't realize
-    flags the row (:func:`_unreproducible_pin_flag`)."""
+    flags the row (:func:`_unreproducible_pin_flag`). Caveat: serialized ops drop
+    ``knobs``, so only tail-lowered kernels carry realized values — on a late-stage
+    dump whose tail never re-decides a pinned knob, the row can read ``(unset)`` even
+    though the dumped IR embodies that pin (an all-knob-less reload is ungateable, not
+    flagged)."""
     import json as _json  # noqa: PLC0415
 
     from emmy.compiler.graph import Graph  # noqa: PLC0415

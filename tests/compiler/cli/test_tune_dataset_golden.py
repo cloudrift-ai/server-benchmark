@@ -163,6 +163,57 @@ def test_golden_dataset_full_union_off_gpu(monkeypatch):
     assert len(targets) == 1  # both cards' entries share the name — deduped
 
 
+def test_golden_dataset_merges_foreign_only_names(monkeypatch):
+    """Per-name live preference: the live card's entry wins for names it records, but
+    a name recorded ONLY by another card stays tunable as a shape seed (the strict
+    live-only scoping silently dropped every union-only name on partially-covered
+    cards, and --kernel narrowing to one of them exited 2)."""
+    import torch
+
+    from emmy.compiler.pipeline.search import golden as gmod
+    from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig
+
+    foreign_only = MatmulGoldenConfig(
+        name="wide.1024",
+        M=64,
+        N=1024,
+        K=1024,
+        knobs={"TILE": "n16x8/f2x2"},
+        emmy_us=20.0,
+        cublas_us=30.0,
+        gpu_name="NVIDIA GeForce RTX 4090",
+        compute_cap=(8, 9),
+        dtype="fp32",
+    )
+    monkeypatch.setattr(gmod, "GOLDEN_CONFIGS", [*_two_card_goldens(), foreign_only])
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _i=0: "NVIDIA GeForce RTX 5090")
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _i=0: (12, 0))
+    targets = {name: code for name, code, _inp, _dyn in tune._tune_targets(_args(dataset="golden"))}
+    assert set(targets) == {"square.512", "wide.1024"}
+    assert "dtype=torch.float16" in targets["square.512"]  # live 5090 entry, not the 4090's fp32
+
+
+def test_golden_dataset_warns_on_diverging_name(monkeypatch, caplog):
+    """A card with no goldens of its own gets the full union, where one name can be
+    recorded by several cards with diverging shapes/dtypes — the dedup picks the first
+    and WARNS instead of silently tuning an arbitrary card's spelling."""
+    import logging
+
+    import torch
+
+    from emmy.compiler.pipeline.search import golden as gmod
+
+    monkeypatch.setattr(gmod, "GOLDEN_CONFIGS", _two_card_goldens())
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _i=0: "NVIDIA H100")
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _i=0: (9, 0))
+    with caplog.at_level(logging.WARNING):
+        targets = tune._tune_targets(_args(dataset="golden"))
+    assert len(targets) == 1
+    assert "square.512" in caplog.text and "diverging" in caplog.text
+
+
 def test_dataset_golden_rejects_cli_dynamic():
     with pytest.raises(SystemExit) as exc:
         tune._tune_targets(_args(dataset="golden", dynamic=["seq_len@x0:0"]))

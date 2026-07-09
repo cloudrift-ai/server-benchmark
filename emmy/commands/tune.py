@@ -268,11 +268,13 @@ def _exit_flushed(code: int) -> None:
 
 def _tune_targets(args) -> list[tuple[str, str | None, str | None, list[str] | None]]:
     """The ``(label, code, input, dynamic)`` shapes this invocation tunes — the **only**
-    place golden and non-golden diverge. ``--dataset golden`` expands to every golden
-    shape recorded for the **live** card (names repeat across per-GPU golden files with
-    diverging shapes/dtypes, so the union would shadow the live card's entry; off-GPU or
-    for a card with no recorded goldens it falls back to the full multi-card union —
-    deduped by name, ``--kernel SUBSTR`` narrowing); otherwise it's the
+    place golden and non-golden diverge. ``--dataset golden`` expands to the per-name
+    live-preference merge of the golden files (:func:`goldens_live_preferred`): the live
+    card's entry wins for names it records (names repeat across per-GPU golden files
+    with diverging shapes/dtypes, so a flat union would shadow the live card's entry),
+    and names recorded only by other cards stay tunable as shape seeds — deduped by
+    name (a warning names any residual cross-card divergence), ``--kernel SUBSTR``
+    narrowing; otherwise it's the
     single ``--code`` / positional input / ``--golden NAME`` target. ``dynamic`` is the
     ``--dynamic NAME@INPUT:AXIS`` spec list the target traces with: a dynamic golden's
     own recorded spec, or the CLI flag for an ad-hoc target. ``handle_tune`` then loops
@@ -288,11 +290,26 @@ def _tune_targets(args) -> list[tuple[str, str | None, str | None, list[str] | N
         if getattr(args, "dynamic", None):
             logger.error("--dynamic is incompatible with --dataset golden (a dynamic golden's spec is part of its config)")
             sys.exit(2)
-        # Configs under one name share the shape (and dynamic spec), so any one's
-        # snippet is interchangeable.
+        # Configs under one name share the shape (and dynamic spec) on any single
+        # card, so any one's snippet is interchangeable — but foreign-only names can
+        # still collide across cards with diverging shapes/dtypes; warn when the
+        # dedup silently picks one.
         by_name: dict[str, tuple[str, list[str] | None]] = {}
+        chosen_dtype: dict[str, str | None] = {}
+        divergent: dict[str, set[str]] = {}
         for s in Dataset.from_golden(kernel=args.kernel, live_gpu=True).samples:
-            by_name.setdefault(s.name, (s.snippet, list(s.dynamic) if s.dynamic else None))
+            entry = (s.snippet, list(s.dynamic) if s.dynamic else None)
+            if s.name not in by_name:
+                by_name[s.name], chosen_dtype[s.name] = entry, s.dtype
+            elif by_name[s.name] != entry:
+                divergent.setdefault(s.name, set()).add(s.dtype or "?")
+        for gname, dtypes in sorted(divergent.items()):
+            logger.warning(
+                "golden %r is recorded with diverging shapes/dtypes across cards (also: %s) — tuning the first recorded entry (dtype=%s)",
+                gname,
+                ", ".join(sorted(dtypes)),
+                chosen_dtype[gname],
+            )
         if not by_name:
             logger.error("no golden shapes matched --kernel %r", args.kernel)
             sys.exit(2)

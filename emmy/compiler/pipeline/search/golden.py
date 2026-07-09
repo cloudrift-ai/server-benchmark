@@ -408,14 +408,38 @@ def goldens_for_live_gpu() -> list[GoldenConfig]:
     (CI, pure-logic tests) there is no live card, so the unfiltered list is
     returned — callers that need determinism there should inject a single-GPU set.
     """
+    key = _live_gpu_key()
+    if key is None:
+        return list(GOLDEN_CONFIGS)
+    live = [g for g in GOLDEN_CONFIGS if g.gpu_name == key[0] and tuple(g.compute_cap) == key[1]]
+    return live or list(GOLDEN_CONFIGS)
+
+
+def _live_gpu_key() -> tuple[str, tuple[int, int]] | None:
+    """The live card's ``(gpu_name, compute_cap)``, or ``None`` when no CUDA device
+    is visible (or the probe fails) — the join key the per-GPU golden scoping filters on."""
     try:
         import torch  # noqa: PLC0415
 
         if not torch.cuda.is_available():
-            return list(GOLDEN_CONFIGS)
-        name = torch.cuda.get_device_name(0)
-        major, minor = torch.cuda.get_device_capability(0)
+            return None
+        return torch.cuda.get_device_name(0), tuple(torch.cuda.get_device_capability(0))
     except Exception:  # noqa: BLE001 — any probe failure ⇒ no live filter
+        return None
+
+
+def goldens_live_preferred() -> list[GoldenConfig]:
+    """Per-**name** live-preference merge of :data:`GOLDEN_CONFIGS`: the live card's
+    goldens, plus every union entry whose name the live card hasn't recorded. Foreign
+    entries fill coverage gaps (the seed / transfer flow — tuning consumes only their
+    shape/snippet, never their knobs or latencies as a live baseline) but never shadow
+    a live entry, so a name recorded by several cards with diverging shapes/dtypes
+    always resolves to the live card's spelling. Off-GPU (or probe failure) this is the
+    full union, like :func:`goldens_for_live_gpu`'s fallback — which remains the strict
+    live-or-all view the shape-keyed diagnostics / ``eval`` joins need."""
+    key = _live_gpu_key()
+    if key is None:
         return list(GOLDEN_CONFIGS)
-    live = [g for g in GOLDEN_CONFIGS if g.gpu_name == name and tuple(g.compute_cap) == (major, minor)]
-    return live or list(GOLDEN_CONFIGS)
+    live = [g for g in GOLDEN_CONFIGS if g.gpu_name == key[0] and tuple(g.compute_cap) == key[1]]
+    live_names = {g.name for g in live}
+    return live + [g for g in GOLDEN_CONFIGS if g.name not in live_names]

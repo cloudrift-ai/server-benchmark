@@ -239,7 +239,7 @@ def test_bench_golden_variants_retraces_with_dynamic_spec(monkeypatch):
 
     def fake_graph_from_code(code, dynamic_shapes=None):
         seen.append(dynamic_shapes)
-        return object(), "slug", (None, (), {})
+        return SimpleNamespace(nodes={}), "slug", (None, (), {})
 
     monkeypatch.setattr(tmod, "graph_from_code", fake_graph_from_code)
 
@@ -301,9 +301,10 @@ def test_unreproducible_pin_flag():
     """The realized-vs-pinned gate: a pin the compile silently dropped (the fallback
     substituted the planner's own pick — the retired ``w2x1`` hd128 flash form) flags
     with the pinned and realized values; a pin realized on ANY kernel of a multi-kernel
-    lowering passes; a bare ``TILE`` pin matches a collapsed single-axis ``TILE@d``
-    realization; value compare is case-insensitive (the env-var round-trip stringifies);
-    no kernel knobs → ungateable (stub compile)."""
+    lowering passes; a bare pin matches its axis-stamped ``@``-keyed realizations
+    (``TILE@d``, multi-axis ``TILE@dd``/``TILE@pj``, the never-collapsed ``PLACE@fold``);
+    value compare is case-insensitive (the env-var round-trip stringifies); no kernel
+    knobs → ungateable (a reloaded ``--ir`` graph drops serialized knobs)."""
     from emmy.commands.run import _unreproducible_pin_flag
 
     # Honored pin — realized exactly.
@@ -315,12 +316,62 @@ def test_unreproducible_pin_flag():
     assert "(unset)" in _unreproducible_pin_flag({"STAGE": "k8"}, [{"TILE": "w2x1"}])
     # Multi-kernel lowering (split main + finalize): honored on the second kernel.
     assert _unreproducible_pin_flag({"STAGE": "k8"}, [{"TILE": "w2x1"}, {"STAGE": "k8"}]) is None
-    # Bare pin vs single-axis @-keyed realization: the collapsed view matches.
+    # Bare pin vs single-axis @-keyed realization.
     assert _unreproducible_pin_flag({"TILE": "n16x8/f2x2"}, [{"TILE@d": "n16x8/f2x2"}]) is None
+    # Bare pin vs a MULTI-axis realization (flash stamps two TILE@ keys — no collapse).
+    assert _unreproducible_pin_flag({"TILE": "w4x1/f1x16"}, [{"TILE@dd": "w4x1/f1x16", "TILE@pj": "w4x1/f1x16"}]) is None
+    # Bare PLACE (the golden YAML spelling) vs the fold/cone-stamped realization.
+    assert _unreproducible_pin_flag({"PLACE": "fuse"}, [{"PLACE@fold": "fuse", "PLACE@cone": "fuse"}]) is None
+    # An @-keyed pin whose axis the re-lowering renamed: a genuine miss, but the
+    # diagnostic names the family's realized value instead of (unset).
+    flag = _unreproducible_pin_flag({"TILE@dd": "w4x1/f1x16"}, [{"TILE@d2": "w2x1/f1x8"}])
+    assert "TILE@d2=w2x1/f1x8" in flag and "(unset)" not in flag
     # Case-insensitive value compare (bool knob pinned via the string grammar).
     assert _unreproducible_pin_flag({"FAST_EXP": "true"}, [{"FAST_EXP": True}]) is None
-    # No kernel knobs → ungateable, not a flag.
+    # No kernel knobs → ungateable, not a flag — [] and all-empty dicts alike.
     assert _unreproducible_pin_flag({"TILE": "w2x1"}, []) is None
+    assert _unreproducible_pin_flag({"TILE": "w2x1"}, [{}]) is None
+    assert _unreproducible_pin_flag({"TILE": "w2x1"}, [{}, {}]) is None
+
+
+def test_unreproducible_pin_flag_registry_canonical(monkeypatch):
+    """Value compare canonicalizes through the registered knob's ``Knob.parse``, so
+    every accepted pin spelling matches its typed realization: BOOL ``1``/``yes``/``on``
+    vs ``True``, hex INT vs decimal, BINMASK ``0x5``/``all`` vs the stamped binary
+    string. Declared OFF values mean "not applicable" — never a conflict: they don't
+    show as what-ran, and an off-only family reports ``(off)``."""
+    from emmy.commands.run import _unreproducible_pin_flag
+    from emmy.compiler.pipeline import knob as knob_mod
+    from emmy.compiler.pipeline.knob import Knob, KnobType
+
+    monkeypatch.setattr(
+        knob_mod,
+        "_REGISTRY",
+        {
+            "FAST_EXP": Knob("FAST_EXP", KnobType.BOOL, off=False),
+            "BN": Knob("BN", KnobType.INT),
+            "MASK": Knob("MASK", KnobType.BINMASK),
+            "TILE": Knob("TILE", KnobType.STR, off=""),
+            "STAGE": Knob("STAGE", KnobType.STR, off=""),
+        },
+    )
+    # BOOL alias spellings — the grammar 085_fast_exp itself advertises (EMMY_FAST_EXP=1).
+    for spelling in ("1", "yes", "on", "TRUE"):
+        assert _unreproducible_pin_flag({"FAST_EXP": spelling}, [{"FAST_EXP": True}]) is None
+    assert _unreproducible_pin_flag({"FAST_EXP": "0"}, [{"FAST_EXP": False}]) is None
+    # A genuinely swapped BOOL still flags.
+    assert "unreproducible pin" in _unreproducible_pin_flag({"FAST_EXP": "1"}, [{"FAST_EXP": False}])
+    # INT: hex pin vs decimal realization (Knob.parse uses int(s, 0)).
+    assert _unreproducible_pin_flag({"BN": "0x10"}, [{"BN": 16}]) is None
+    # BINMASK: hex / "all" spellings vs the stamped binary string (width from its length).
+    assert _unreproducible_pin_flag({"MASK": "0x5"}, [{"MASK": "101"}]) is None
+    assert _unreproducible_pin_flag({"MASK": "all"}, [{"MASK": "111"}]) is None
+    # OFF values are "declined", not conflicts: the honored axis wins, the off-stamped
+    # sibling never pollutes the diagnostic...
+    assert _unreproducible_pin_flag({"TILE": "w2x1"}, [{"TILE": ""}, {"TILE@d": "w2x1"}]) is None
+    # ...and a family realized ONLY as off reports (off), not the empty string.
+    flag = _unreproducible_pin_flag({"STAGE": "d2/tma/ring"}, [{"STAGE": ""}])
+    assert "realized (off)" in flag
 
 
 def test_bench_golden_variants_flags_unmappable_pin(monkeypatch):

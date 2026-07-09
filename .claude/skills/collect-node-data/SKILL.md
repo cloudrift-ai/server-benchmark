@@ -52,9 +52,7 @@ Ask only for what the user hasn't already given:
    a non-default cluster.
 4. **GPU count is fixed at 1.** Node data is per-card; one GPU is all the tune needs. Don't rent more.
 
-`--billing-exempt`: for **CloudRift** rentals, pass it — the user has standing authorization for this workflow. It is
-silently dropped for GCP candidates. (This is the one place the usual "ask before billing-exempt" rule is pre-answered;
-honor an explicit override if the user gives one this run.)
+Don't pass `--billing-exempt`: for any rentals
 
 ## Step 1 — Provision the server (delegate to `start-remote-server`)
 

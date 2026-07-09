@@ -29,6 +29,7 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.kernel.ir import (
     EpilogueLoad,
+    FragmentPromote,
     LdmatrixLoad,
     MmaSyncPtx,
     RegEpilogue,
@@ -193,6 +194,38 @@ def _fold_frag(base: str, fold: int) -> str:
     return base if fold == 0 else f"{base}_x{fold}"
 
 
+# The f16-accumulate (``_f16acc`` atom) chunked-promote scheme: the mma chain accumulates into
+# packed f16 fragments at the full HMMA rate, and a periodic ``FragmentPromote`` folds them into
+# f32 shadow fragments (which keep the ``_c{i}_{j}`` names the store / epilogue reads, so the sink
+# is untouched). Staged rows promote once per bk chunk (the chunk IS the cadence); the gmem-direct
+# K-loop promotes every ``_F16ACC_STEPS`` atom-K steps plus a final fold after the loop.
+_F16ACC_STEPS = 4  # gmem-direct promote cadence: atom-K steps per f16 chunk (64 K-elems at k16)
+
+
+def _f16acc(atom) -> bool:
+    """Whether ``atom`` is an f16-accumulate mma cell (a 16-bit C operand) — selects the chunked
+    f16→f32 promote scheme above."""
+    return isinstance(atom, AtomKind) and atom.operand_dtype("c").nbytes == 2
+
+
+def _mma_c_base(atom, i: int, j: int) -> str:
+    """The mma-target C fragment base name for cell ``(i, j)`` — the packed f16 ``_ch{i}_{j}`` on
+    an f16-accumulate atom (its f32 shadow keeps the ``_c{i}_{j}`` name the store reads), else the
+    plain ``_c{i}_{j}``."""
+    return f"_ch{i}_{j}" if _f16acc(atom) else f"_c{i}_{j}"
+
+
+def _f16acc_promotes(m_reg: int, n_reg: int, n_folds: int) -> list[Stmt]:
+    """One :class:`FragmentPromote` per C cell × fold channel — the f16 chunk fold into the f32
+    shadows (also the FINAL fold: the shadows carry the full sum only after it runs)."""
+    return [
+        FragmentPromote(dst=_fold_frag(f"_c{i}_{j}", f), src=_fold_frag(f"_ch{i}_{j}", f))
+        for f in range(n_folds)
+        for i in range(m_reg)
+        for j in range(n_reg)
+    ]
+
+
 def _staged_inner_atom_loop(
     *, slabs: tuple[str, ...], mn: tuple[Side, Side], atom, bk_elems, ki, reg_depth: int = 1, offs=None, swizzles=None
 ) -> list[Stmt]:
@@ -246,11 +279,12 @@ def _staged_inner_atom_loop(
     def mmas(suffix):  # every fold channel × (i, j) cell's mma.sync over the `suffix`-slotted operand fragments
         return [
             MmaSyncPtx(
-                c_frag=_fold_frag(f"_c{i}_{j}", f),
+                c_frag=_fold_frag(_mma_c_base(atom, i, j), f),
                 a_frag=f"_a{i}{suffix}",
                 b_frag=f"{_fold_frag(f'_b{j}', f)}{suffix}",
                 shape=atom.shape,
                 ab_dtype=atom.ab_dtype,
+                c_dtype=atom.operand_dtype("c").name,
             )
             for f in range(len(b_slabs))
             for i in range(m.reg)
@@ -703,8 +737,10 @@ class _MmaOps(_AtomOps):
         """The mma slab drain — the ``ldmatrix`` + ``mma.sync`` leaf reading ring ``slot``
         (:func:`_staged_inner_atom_loop`; the cells ride ``mn``'s reg counts, so ``cells`` /
         ``offset`` are unused here). Each slab's swizzle mode rides its operand (``NONE`` on the
-        sync transport's :class:`SyncOperand`, which has no swizzle field)."""
-        return _staged_inner_atom_loop(
+        sync transport's :class:`SyncOperand`, which has no swizzle field). An f16-accumulate
+        atom promote-folds its packed f16 fragments into the f32 shadows once per drain — the
+        bk chunk IS the promote cadence (the last chunk's fold doubles as the final one)."""
+        stmts = _staged_inner_atom_loop(
             slabs=tuple(op.slab for op in operands),
             offs=tuple(op.slot_row(slot) for op in operands),
             mn=mn,
@@ -714,6 +750,9 @@ class _MmaOps(_AtomOps):
             reg_depth=self.stage.reg_depth,
             swizzles=tuple(getattr(op, "swizzle", "NONE") for op in operands),
         )
+        if _f16acc(self.c.atom):
+            stmts = [*stmts, *_f16acc_promotes(mn[0].reg, mn[1].reg, len(self.c.folds))]
+        return stmts
 
     def slab_swizzles(self, mn, elem_bytes: int) -> tuple[str, str]:
         """The TMA smem swizzle mode per operand slab, from each slab's inner (contiguous) row
@@ -751,11 +790,20 @@ class _MmaOps(_AtomOps):
                 for nm in frags(lambda i, ff=f: _fold_frag(f"_b{i}", ff), n.reg)
             ]
         decls += [
-            RegFragment(name=_fold_frag(f"_c{i}_{j}", f), role="c", shape=atom.shape, dtype=atom.operand_dtype("c"))
+            RegFragment(name=_fold_frag(_mma_c_base(atom, i, j), f), role="c", shape=atom.shape, dtype=atom.operand_dtype("c"))
             for f in range(n_folds)
             for i in range(m.reg)
             for j in range(n.reg)
         ]
+        if _f16acc(atom):
+            # The f32 shadow accumulators — they keep the ``_c{i}_{j}`` names the store reads;
+            # the packed f16 mma targets above are the ``_ch{i}_{j}`` family FragmentPromote folds.
+            decls += [
+                RegFragment(name=_fold_frag(f"_c{i}_{j}", f), role="c", shape=atom.shape, dtype=F32)
+                for f in range(n_folds)
+                for i in range(m.reg)
+                for j in range(n.reg)
+            ]
         return decls
 
     def gmem_leaves(self, offset, mn):
@@ -800,11 +848,33 @@ class _MmaOps(_AtomOps):
             ]
 
         def contract(i, j):
-            return [MmaSyncPtx(c_frag=f"_c{i}_{j}", a_frag=f"_a{i}", b_frag=f"_b{j}", shape=atom.shape, ab_dtype=atom.ab_dtype)]
+            return [
+                MmaSyncPtx(
+                    c_frag=_mma_c_base(atom, i, j),
+                    a_frag=f"_a{i}",
+                    b_frag=f"_b{j}",
+                    shape=atom.shape,
+                    ab_dtype=atom.ab_dtype,
+                    c_dtype=atom.operand_dtype("c").name,
+                )
+            ]
 
         def wrap(body):
             step = Literal(atom.atom_k, "int")
-            return [StridedLoop(axis=k_axis, start=Literal(0, "int"), step=step, body=Body(tuple(body)), unroll=unroll_ok(k_axis.extent))]
+            stmts, tail = list(body), []
+            if _f16acc(atom):
+                # Promote every _F16ACC_STEPS atom-K steps (a compile-time-foldable modulo when
+                # the loop unrolls), plus the unconditional final fold after the loop — it also
+                # covers a symbolic / non-multiple K's partial last chunk.
+                promotes = _f16acc_promotes(m.reg, n.reg, 1)
+                period = atom.atom_k * _F16ACC_STEPS
+                fire = BinaryExpr("==", BinaryExpr("%", Var(k_axis.name), Literal(period, "int")), Literal(period - atom.atom_k, "int"))
+                stmts.append(Cond(cond=fire, body=tuple(promotes)))
+                tail = promotes
+            return [
+                StridedLoop(axis=k_axis, start=Literal(0, "int"), step=step, body=Body(tuple(stmts)), unroll=unroll_ok(k_axis.extent)),
+                *tail,
+            ]
 
         return dict(read_row=read_row, read_col=read_col, contract=contract, wrap=wrap)
 

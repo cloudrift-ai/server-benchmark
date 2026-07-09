@@ -210,14 +210,59 @@ INTERLEAVE_LOADS = Knob(
 FAST_EXP = Knob(
     "FAST_EXP",
     KnobType.BOOL,
-    # Off by default and not a search dimension — the ONE policy knob that is not bit-exact
-    # (__expf ≈ 2 ulp vs correctly-rounded expf; numerically benign for the softmax family —
-    # the α rescale never amplifies and the carrier stays fp32 — but it must be a deliberate,
-    # pinnable choice, never a silent default). Manual override via EMMY_FAST_EXP=1.
+    # Off by default and not a search dimension — a precision-trading knob (__expf ≈ 2 ulp vs
+    # correctly-rounded expf; numerically benign for the softmax family — the α rescale never
+    # amplifies and the carrier stays fp32 — but it must be a deliberate, pinnable choice, never
+    # a silent default). Enabled via EMMY_FAST_EXP=1 or the FAST_MATH umbrella.
     hints=(False,),
     help="Lower f32 exp through the SFU fast path (__expf: one FMUL + MUFU.EX2) instead of libm expf.",
     off=False,
 )
+
+
+# --- Precision-trading knobs (the FAST_MATH family) ---------------------------
+#
+# Knobs that trade numerical precision for throughput are NEVER silently on: each is off by
+# default and enabled by its own ``EMMY_<NAME>`` pin, or batch-enabled by the ``FAST_MATH``
+# umbrella (the ``-use_fast_math`` / ``-O3`` analogue). Precedence per knob: its own pin >
+# ``FAST_MATH`` > off (:func:`precision_pin`). The umbrella is a meta gate, not a kernel
+# property — the realized fork is already fully identified by what it enables (``FAST_EXP``'s
+# stamped BOOL, the ``TILE`` codec's ``a:<atom>`` token) — so it is ``unfeatured`` and never
+# stamped, enumerated, or featurized.
+
+FAST_MATH = Knob(
+    "FAST_MATH",
+    KnobType.BOOL,
+    hints=(False,),
+    help="Umbrella pin for the precision-trading knobs (FAST_EXP, F16_MMA_F32_ACC): "
+    "EMMY_FAST_MATH=1 enables each one not individually pinned; individual pins win.",
+    unfeatured=True,  # a meta gate over other knobs — must never enter the feature vector
+)
+
+F16_MMA_F32_ACC = Knob(
+    "F16_MMA_F32_ACC",
+    KnobType.BOOL,
+    hints=(False,),
+    help="Offer the f16-mma / chunked-f32-accumulate atom forks (a:mma_m16n8k16_f16_f16acc — the mma "
+    "chain accumulates in f16 at the full HMMA rate, with a periodic register promote into f32 "
+    "shadows; ~2x mma throughput on consumer dies where f32-accumulate is half rate). "
+    "Pin 1 to offer on every target, 0 never; unset follows FAST_MATH (consumer-die targets only). "
+    "Enumeration-gate only — the realized fork is identified by the TILE codec's atom token.",
+)
+
+
+def precision_pin(knob: Knob) -> bool | None:
+    """The effective pin for a precision-trading BOOL ``knob``: its own ``EMMY_<NAME>`` pin when
+    set, else the ``FAST_MATH`` umbrella pin, else ``None`` (neither set — the caller applies its
+    conservative default, and may keep target gates that an *individual* pin overrides)."""
+    raw = knob.raw()
+    if raw is not None:
+        return knob.parse(raw)
+    raw = FAST_MATH.raw()
+    if raw is not None:
+        return FAST_MATH.parse(raw)
+    return None
+
 
 LOOPIFY = Knob(
     "LOOPIFY",
@@ -232,7 +277,7 @@ LOOPIFY = Knob(
     hints=(0,),
     help="Min parallel FragmentApply run length to re-roll into a #pragma-unroll loop (0 = off, byte-identical).",
     off=0,
-    cosmetic=True,  # SASS-identical listing re-spell — excluded from the feature vector; batch-enabled by EMMY_READABLE
+    unfeatured=True,  # SASS-identical listing re-spell — excluded from the feature vector; batch-enabled by EMMY_READABLE
 )
 
 

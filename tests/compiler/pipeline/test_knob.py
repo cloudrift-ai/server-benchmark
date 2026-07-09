@@ -568,3 +568,24 @@ def test_node_slice_addresses_per_node_struct():
     assert _node_slice(knobs, "sk")["S_ext_reduce_prod"] == 512.0  # addressed override wins
     # One-node bare stamp: the slice for the sole node is the whole dict (byte-identical featurizer).
     assert _node_slice({"TILE": "n4/f2", "S_ext_reduce_prod": 8.0}, None) == {"TILE": "n4/f2", "S_ext_reduce_prod": 8.0}
+
+
+def test_precision_pin_precedence(monkeypatch):
+    """The precision-knob precedence (the FAST_MATH family): a knob's own ``EMMY_<NAME>`` pin >
+    the ``FAST_MATH`` umbrella > ``None`` (neither set — the caller's conservative default). The
+    umbrella itself is ``unfeatured`` (a meta gate over other knobs), so ``knob_features`` must
+    never see it as a ranking dimension."""
+    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FAST_EXP, FAST_MATH, precision_pin
+
+    for var in ("EMMY_FAST_MATH", "EMMY_FAST_EXP", "EMMY_F16_MMA_F32_ACC"):
+        monkeypatch.delenv(var, raising=False)
+    assert precision_pin(FAST_EXP) is None and precision_pin(F16_MMA_F32_ACC) is None
+    monkeypatch.setenv("EMMY_FAST_MATH", "1")
+    assert precision_pin(FAST_EXP) is True and precision_pin(F16_MMA_F32_ACC) is True
+    monkeypatch.setenv("EMMY_FAST_EXP", "0")
+    assert precision_pin(FAST_EXP) is False, "the individual pin must win over the umbrella"
+    assert precision_pin(F16_MMA_F32_ACC) is True
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
+    monkeypatch.setenv("EMMY_F16_MMA_F32_ACC", "1")
+    assert precision_pin(F16_MMA_F32_ACC) is True, "the individual pin must win in the enabling direction too"
+    assert FAST_MATH.unfeatured, "the umbrella is a meta gate — it must never enter the feature vector"

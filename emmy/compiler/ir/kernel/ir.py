@@ -1093,20 +1093,21 @@ class FragmentMask(Stmt):
 # ---------------------------------------------------------------------------
 
 
-def _mma_sync_nregs(role: str, shape: tuple[int, int, int]) -> int:
+def _mma_sync_nregs(role: str, shape: tuple[int, int, int], dtype: DataType | None = None) -> int:
     """Per-lane register count for an mma.sync operand of cell ``shape``.
 
     ``a`` (M×K f16) and ``b`` (K×N f16) pack two halfs per 32-bit register;
-    ``c`` (M×N f32) holds one float per register. For ``m16n8k16``:
-    ``a[4]`` (256 halfs / 32 lanes / 2), ``b[2]`` (128 / 32 / 2), ``c[4]``
-    (128 f32 / 32)."""
+    ``c`` holds one float per register (f32 accumulate) or two packed halfs
+    (the f16-accumulate atom — ``dtype`` is the C element type). For
+    ``m16n8k16``: ``a[4]`` (256 halfs / 32 lanes / 2), ``b[2]`` (128 / 32 / 2),
+    ``c[4]`` f32 (128 f32 / 32) / ``c[2]`` f16."""
     m, n, k = shape
     if role == "a":
         return (m * k) // 64
     if role == "b":
         return (k * n) // 64
     if role == "c":
-        return (m * n) // 32
+        return (m * n) // 64 if dtype is not None and dtype.nbytes == 2 else (m * n) // 32
     raise ValueError(f"mma.sync: unsupported role {role!r}; expected 'a', 'b', or 'c'")
 
 
@@ -1116,11 +1117,13 @@ class RegFragment(Stmt):
 
     mma.sync multiplicands are explicit per-lane register arrays —
     ``unsigned a[4]`` / ``unsigned b[2]`` (f16, two halfs per 32-bit
-    reg) — and the accumulator is ``float c[4]`` (f32). ``shape`` is the
-    cell ``(M, N, K)``; the count
-    derives from ``shape`` + ``role`` via :func:`_mma_sync_nregs`. The
-    ``c`` array is zero-initialised at declaration, so the mma.sync path
-    needs no separate fill node.
+    reg) — and the accumulator is ``float c[4]`` (f32) or, on the
+    f16-accumulate atom, packed ``unsigned c[2]`` (two halfs per reg —
+    the same element map, pair-packed). ``shape`` is the cell
+    ``(M, N, K)``; the count derives from ``shape`` + ``role`` (+ the C
+    dtype) via :func:`_mma_sync_nregs`. The ``c`` array is
+    zero-initialised at declaration, so the mma.sync path needs no
+    separate fill node.
 
     ``count`` (default 1) arrays a whole fragment FAMILY into one declaration —
     ``float O_i_f[count][n_regs]`` — so a run of ``count`` sibling fragments
@@ -1144,17 +1147,21 @@ class RegFragment(Stmt):
     def pretty(self, indent: str = "") -> list[str]:
         m, n, k = self.shape
         cnt = f"{self.count}][" if self.count > 1 else ""
-        dims = f"[{cnt}{_mma_sync_nregs(self.role, self.shape)}]"
+        dims = f"[{cnt}{_mma_sync_nregs(self.role, self.shape, self.dtype)}]"
         return [f"{indent}RegFragment {self.role}:{self.dtype.name} {self.name}{dims} ({m}x{n}x{k})"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
-        n_regs = _mma_sync_nregs(self.role, self.shape)
+        n_regs = _mma_sync_nregs(self.role, self.shape, self.dtype)
         ctx.ssa_dtypes[self.name] = self.dtype.name
         dims = f"[{self.count}][{n_regs}]" if self.count > 1 else f"[{n_regs}]"
-        if self.role == "c":
+        if self.role == "c" and self.dtype.nbytes != 2:
             # Brace-init zeros the whole (arrayed) accumulator; ``= {0.0f, ...}`` stays the flat form.
             init = " = {}" if self.count > 1 else f" = {{{', '.join(['0.0f'] * n_regs)}}}"
             return [f"{_pad(ctx.indent)}float {self.name}{dims}{init};"]
+        if self.role == "c":
+            # f16-accumulate C: packed half pairs, zero bits = 0.0h pairs (rezeroed by FragmentPromote).
+            init = " = {}" if self.count > 1 else f" = {{{', '.join(['0u'] * n_regs)}}}"
+            return [f"{_pad(ctx.indent)}unsigned {self.name}{dims}{init};"]
         return [f"{_pad(ctx.indent)}unsigned {self.name}{dims};"]
 
 
@@ -1345,19 +1352,24 @@ class MmaSyncPtx(Stmt):
     """``mma.sync.aligned.m{M}n{N}k{K}.row.col.f32.{ab}.{ab}.f32`` — one
     tensor-core MMA via inline PTX (the ``s16816`` instruction).
 
-    ``c_frag`` is the f32 accumulator array (both input and output —
+    ``c_frag`` is the accumulator array (both input and output —
     ``d = a·b + c``); ``a_frag`` / ``b_frag`` are the 16-bit multiplicand
     arrays filled by :class:`LdmatrixLoad`. ``shape`` spells the M/N/K.
     ``ab_dtype`` (``"f16"`` / ``"bf16"``) tags the operand element type —
     f16 and bf16 share the same fragment layout + ldmatrix path and differ
     only in the PTX instruction's dtype field, so the render just picks the
-    matching ``emmy_mma_…`` wrapper. The accumulate is always f32."""
+    matching ``emmy_mma_…`` wrapper. ``c_dtype`` is the accumulator element
+    type: ``"f32"`` (the default — ``float c[4]``) or ``"f16"`` (the
+    f16-accumulate atom — packed ``unsigned c[2]``, full HMMA rate on the
+    consumer dies; the lowering pairs it with a periodic
+    :class:`FragmentPromote` into an f32 shadow fragment)."""
 
     c_frag: str
     a_frag: str
     b_frag: str
     shape: tuple[int, int, int]
     ab_dtype: str = "f16"
+    c_dtype: str = "f32"
 
     def deps(self) -> tuple[str, ...]:
         return (self.c_frag, self.a_frag, self.b_frag)
@@ -1368,12 +1380,41 @@ class MmaSyncPtx(Stmt):
 
     def pretty(self, indent: str = "") -> list[str]:
         m, n, k = self.shape
-        return [f"{indent}MmaSyncPtx {self.c_frag} += {self.a_frag} @ {self.b_frag} (m{m}n{n}k{k} {self.ab_dtype})"]
+        acc = "" if self.c_dtype == "f32" else f" acc:{self.c_dtype}"
+        return [f"{indent}MmaSyncPtx {self.c_frag} += {self.a_frag} @ {self.b_frag} (m{m}n{n}k{k} {self.ab_dtype}{acc})"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         m, n, k = self.shape
+        variant = self.ab_dtype if self.c_dtype == "f32" else f"{self.ab_dtype}_{self.c_dtype}acc"
         # ``c`` is passed for both the ``d`` (out) and ``c`` (in) operands.
-        return [f"{_pad(ctx.indent)}emmy_mma_m{m}n{n}k{k}_{self.ab_dtype}({self.c_frag}, {self.a_frag}, {self.b_frag}, {self.c_frag});"]
+        return [f"{_pad(ctx.indent)}emmy_mma_m{m}n{n}k{k}_{variant}({self.c_frag}, {self.a_frag}, {self.b_frag}, {self.c_frag});"]
+
+
+@dataclass(frozen=True)
+class FragmentPromote(Stmt):
+    """Fold an f16-accumulate mma **C fragment** into its f32 **shadow fragment** and rezero it —
+    the chunked-accumulation promote of the ``_f16acc`` atom family: the mma chain accumulates at
+    the full f16-accumulate HMMA rate, and every K chunk this promote-adds the packed f16 partials
+    into the f32 shadow (``cvt.f32.f16`` + add per element) and re-zeros the f16 fragment, so the
+    accumulation error stays bounded by one chunk's length. ``dst`` is the f32 shadow the store /
+    epilogue reads (``float[4]``); ``src`` the packed f16 mma accumulator (``unsigned[2]``) —
+    both defined here (``src`` is rezeroed), so reorderings keep the promote pinned between the
+    mma chain and the store."""
+
+    dst: str  # f32 shadow accumulator fragment (4 × f32) — the store-side view
+    src: str  # packed f16 mma accumulator fragment (2 × u32) — rezeroed after the fold
+
+    def deps(self) -> tuple[str, ...]:
+        return (self.dst, self.src)
+
+    def defines(self) -> tuple[str, ...]:
+        return (self.dst, self.src)
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}FragmentPromote {self.dst} += {self.src} (f16acc chunk fold, {self.src} rezeroed)"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        return [f"{_pad(ctx.indent)}emmy_mma_promote_f16acc({self.dst}, {self.src});"]
 
 
 @dataclass(frozen=True)
@@ -2115,7 +2156,14 @@ def _(s: LdmatrixLoad, rename, sigma, axis_fn):
 
 @_rewrite.register
 def _(s: MmaSyncPtx, rename, sigma, axis_fn):
-    return MmaSyncPtx(c_frag=rename(s.c_frag), a_frag=rename(s.a_frag), b_frag=rename(s.b_frag), shape=s.shape, ab_dtype=s.ab_dtype)
+    return MmaSyncPtx(
+        c_frag=rename(s.c_frag), a_frag=rename(s.a_frag), b_frag=rename(s.b_frag), shape=s.shape, ab_dtype=s.ab_dtype, c_dtype=s.c_dtype
+    )
+
+
+@_rewrite.register
+def _(s: FragmentPromote, rename, sigma, axis_fn):
+    return FragmentPromote(dst=rename(s.dst), src=rename(s.src))
 
 
 @_rewrite.register

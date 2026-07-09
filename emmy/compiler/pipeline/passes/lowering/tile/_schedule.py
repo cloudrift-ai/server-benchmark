@@ -54,6 +54,7 @@ from emmy.compiler.pipeline.passes.lowering.tile._atomize import map_cone, semir
 from emmy.compiler.pipeline.passes.lowering.tile._carrier import projection_distributes
 from emmy.compiler.pipeline.pipeline import LoweringError
 from emmy.compiler.pipeline.search.space import (
+    F16_MMA_F32_ACC,
     MAX_BLOCK_THREADS,
     REDUCE,
     STAGE,
@@ -61,6 +62,7 @@ from emmy.compiler.pipeline.search.space import (
     WSPEC,
     coop_reduce_moves,
     map_tile_moves,
+    precision_pin,
     scalar_tile_moves,
     splitk_moves,
     stage_moves,
@@ -93,6 +95,44 @@ def _tma_allowed(ctx) -> bool:
     :mod:`~emmy.compiler.pipeline.passes.frontend.decomposition._fold_constant` (``cc < (9, 0)``).
     ``ctx is None`` (direct unit-test drive, no target) allows it — those paths never reach nvcc."""
     return ctx is None or ctx.compute_capability >= (9, 0)
+
+
+# The consumer-die compute capabilities where f32-accumulate HMMA runs at HALF the f16-accumulate
+# rate (GA102/AD102/GB202 silicon — RTX 3090 / 4090 / 5090 and their workstation SKUs). On the
+# datacenter parts (sm_90 H100, sm_100 B200) f32-accumulate is full rate, so the f16acc fork is
+# pure search noise there.
+_F16ACC_CCS = frozenset({(8, 6), (8, 9), (12, 0)})
+
+
+def _f16acc_allowed(ctx) -> bool:
+    """Whether the f16-accumulate atom forks (``a:mma_m16n8k16_f16_f16acc``) may be OFFERED. A
+    precision-trading gate, off by default: the precise ``EMMY_F16_MMA_F32_ACC`` pin is
+    authoritative on every target (1 offers everywhere — e.g. to measure the no-win case — 0
+    never); unset, the ``EMMY_FAST_MATH`` umbrella offers it on the consumer-die targets
+    (:data:`_F16ACC_CCS`) where the f32-accumulate half-rate nerf makes it profitable. ``ctx is
+    None`` (direct unit-test drive, no target) stays off — enumeration must not grow under a
+    bare umbrella with no known target. A ``TILE`` pin naming the atom bypasses this gate
+    entirely (pins are authoritative; :func:`_warp_atoms` only checks dtype eligibility)."""
+    raw = F16_MMA_F32_ACC.raw()
+    if raw is not None:
+        return F16_MMA_F32_ACC.parse(raw)
+    if not precision_pin(F16_MMA_F32_ACC):
+        return False
+    return ctx is not None and ctx.compute_capability in _F16ACC_CCS
+
+
+# The f16-accumulate sibling of each base atom (f16 only — mma.sync has no bf16-accumulate form).
+_F16ACC_ATOMS = {"mma_m16n8k16_f16": "mma_m16n8k16_f16_f16acc"}
+
+
+def _with_f16acc(atoms: tuple[str, ...], ctx) -> tuple[str, ...]:
+    """Extend the dtype-eligible ``atoms`` with their f16-accumulate siblings when
+    :func:`_f16acc_allowed` — the extended tuple rides :func:`warp_tile_moves` unchanged, so the
+    f16acc forks are ordinary ``TILE`` rows (identified by the ``a:<atom>`` token, priced by the
+    ``MMA_acc_bits`` feature)."""
+    if not atoms or not _f16acc_allowed(ctx):
+        return atoms
+    return atoms + tuple(_F16ACC_ATOMS[a] for a in atoms if a in _F16ACC_ATOMS)
 
 
 def _at(knob, axis_name: str) -> str:
@@ -494,12 +534,12 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], str]:
     except LoweringError:
         probe = None
     if probe is not None and probe.a_computed:
-        return _computed_a_rows(kernel, place, probe, kaxis, _smem_budget(ctx)), kaxis
+        return _computed_a_rows(kernel, place, probe, kaxis, _smem_budget(ctx), ctx), kaxis
     tiles = scalar_tile_moves() if probe is not None else [""]
     warp_offered = False
     demoted_rows: list[dict] = []
     if probe is not None:
-        atoms = _warp_atoms(kernel, probe)
+        atoms = _with_f16acc(_warp_atoms(kernel, probe), ctx)
         if atoms:
             warp_moves = [s for s in warp_tile_moves(atoms) if _warp_move_ok(kernel, s)]
             tiles += warp_moves
@@ -510,7 +550,7 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], str]:
             # resolved, warp pins handled inside); the scalar rows below stay fork siblings.
             demoted = _demote_mixed_a(kernel, probe)
             if demoted is not probe:
-                demoted_rows = _computed_a_rows(kernel, place, demoted, kaxis, _smem_budget(ctx))
+                demoted_rows = _computed_a_rows(kernel, place, demoted, kaxis, _smem_budget(ctx), ctx)
                 warp_offered = bool(demoted_rows)
     # A pinned ``a:scalar`` / ``a:none`` is the explicit scalar-tier spelling — canonicalize it to the
     # bare scalar codec (``""`` / ``n../f..``) so the pin-only alias never rides a stored knob row (it
@@ -806,7 +846,7 @@ def _resolve_sync_stage(c: Contraction, budget: int = STATIC_SMEM_CAP, want_dept
     return Stage(depth=depth, transport="sync", smem=(c.a_name,), bk_elems=bk_elems)
 
 
-def _computed_a_rows(kernel, place, probe: Contraction, kaxis: str, budget: int = STATIC_SMEM_CAP) -> list[dict]:
+def _computed_a_rows(kernel, place, probe: Contraction, kaxis: str, budget: int = STATIC_SMEM_CAP, ctx=None) -> list[dict]:
     """The knob rows for a **computed-A (fused-cone)** contraction — warp (mma) rows only, each
     riding the mandatory resolved ``sync`` stage. No scalar / per-cell ``""`` row: a per-cell
     expansion would re-run the embedded producer cone (the norm→linear statistic reduce) on every
@@ -840,7 +880,7 @@ def _computed_a_rows(kernel, place, probe: Contraction, kaxis: str, budget: int 
             )
         tiles = [spec]
     else:
-        atoms = _warp_atoms(kernel, probe)
+        atoms = _with_f16acc(_warp_atoms(kernel, probe), ctx)
         tiles = [
             s
             for s in warp_tile_moves(atoms)
@@ -1279,7 +1319,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         pair = _twisted_pair(tile.op)
         if pair is not None:
             red, head, pv = pair
-            warps = _twisted_warp_options(tile, name, knobs, _smem_budget(ctx), _tma_allowed(ctx))
+            warps = _twisted_warp_options(tile, name, knobs, _smem_budget(ctx), _tma_allowed(ctx), _f16acc_allowed(ctx))
             # A live **warp** ``TILE`` pin (``a:<atom>…``) OR a non-empty ``STAGE`` pin keeps the mma
             # rows alone: ONLY the warp tier stages, so a staging pin (the ``--ab STAGE=…`` /
             # ``emmy tune`` staging probe, or ``EMMY_STAGE``) must not fall through to the chain /
@@ -1596,7 +1636,9 @@ def _twisted_stage_candidates(
     return out
 
 
-def _twisted_warp_options(tile: TileOp, name: str, knobs: dict, budget: int = STATIC_SMEM_CAP, tma_ok: bool = True) -> list[TileOp]:
+def _twisted_warp_options(
+    tile: TileOp, name: str, knobs: dict, budget: int = STATIC_SMEM_CAP, tma_ok: bool = True, f16acc_ok: bool = False
+) -> list[TileOp]:
     """The fragment-resident (tensor-core) candidates for a ``TWISTED`` streaming reduce — the
     warp-flash MOVE GRID over :func:`~emmy.compiler.pipeline.search.space.twisted_warp_moves`'s
     ``(warps_m, key_atoms)`` geometry — or ``[]`` (not eligible: the scalar options stand alone).
@@ -1643,6 +1685,18 @@ def _twisted_warp_options(tile: TileOp, name: str, knobs: dict, budget: int = ST
         if isinstance(s, Load) and s.index and {m_name, kv_name} <= {v for e in s.index for v in e.free_vars()}:
             return []  # an additive (m, kv) score bias — fragment-unrealizable, stay scalar
     bk = head_dim.as_static() // atom_k
+    # The f16-accumulate PV sibling (``f16acc_ok`` — the F16_MMA_F32_ACC / FAST_MATH gate): each
+    # geometry row doubles with a variant whose **PV plan** rides the ``_f16acc`` atom (the O
+    # accumulator promotes per streaming block in the realizer; scores stay f32-accumulate). An
+    # axis-keyed ``TILE@<pv_k>`` pin naming the sibling (a recorded golden's spelling) also offers
+    # it, so the pinned row replays without the gate — pins are authoritative.
+    from emmy import config  # noqa: PLC0415 — the same deferred import _narrow_flash_forms uses
+
+    sibling = _F16ACC_ATOMS.get(atom_name)
+    pv_pin = config.knob_raw(f"{TILE.name}@{pv.k_axis.name}")
+    pv_atoms = [atom]
+    if sibling is not None and (f16acc_ok or (pv_pin is not None and f"a:{sibling}" in pv_pin)):
+        pv_atoms.append(ATOM_REGISTRY[sibling])
     pinned = TILE.raw() is not None
     if pinned:
         spec = TILE.narrow([""])[0]
@@ -1680,10 +1734,12 @@ def _twisted_warp_options(tile: TileOp, name: str, knobs: dict, budget: int = ST
                 )
             continue
         qk_plan = TilePlan(atom=atom, units=(um, 1), regs=(fm, nt), bk=bk)
-        pv_plan = TilePlan(atom=atom, units=(um, 1), regs=(fm, d_v.as_static() // atom_n), bk=max(1, bn // atom_k))
-        partial = tuple(replace(s, tile=qk_plan) if s is head else (replace(s, tile=pv_plan) if s is pv else s) for s in red.partial)
-        red2 = replace(red, partial=type(red.partial)(partial))
-        op2 = replace(op, source=red2) if isinstance(op, Map) else red2
+        variants: list[tuple[TilePlan, object]] = []
+        for pv_atom in pv_atoms:
+            pv_plan = TilePlan(atom=pv_atom, units=(um, 1), regs=(fm, d_v.as_static() // atom_n), bk=max(1, bn // atom_k))
+            partial = tuple(replace(s, tile=qk_plan) if s is head else (replace(s, tile=pv_plan) if s is pv else s) for s in red.partial)
+            red2 = replace(red, partial=type(red.partial)(partial))
+            variants.append((pv_plan, replace(op, source=red2) if isinstance(op, Map) else red2))
         # ``um`` warps per CTA, each owning ``fm`` register query tiles of ``atom_m`` rows: the
         # query axis shrinks to its CTA-block count; the value (expect output) axis folds into the
         # fragment tile and leaves the grid.
@@ -1707,14 +1763,15 @@ def _twisted_warp_options(tile: TileOp, name: str, knobs: dict, budget: int = ST
                 workers, wspec_spec = _wspec_workers(wspec_cand, stage, 32 * um)
                 if wspec_cand and workers is None:
                     continue  # over-budget / illegal split — identical to the uniform row
-                stamped = {
-                    **knobs,
-                    _at(TILE, head.k_axis.name): qk_plan.spell(),
-                    _at(TILE, pv.k_axis.name): pv_plan.spell(),
-                    _at(REDUCE, kv_name): "",
-                    _at(STAGE, kv_name): stage.spell() if stage is not None else "",
-                }
-                if wspec_spec:
-                    stamped[WSPEC.name] = wspec_spec
-                out.append(TileOp(op=op2, name=name, place=place, stage=stage, workers=workers, knobs=stamped))
+                for pv_plan, op2 in variants:
+                    stamped = {
+                        **knobs,
+                        _at(TILE, head.k_axis.name): qk_plan.spell(),
+                        _at(TILE, pv.k_axis.name): pv_plan.spell(),
+                        _at(REDUCE, kv_name): "",
+                        _at(STAGE, kv_name): stage.spell() if stage is not None else "",
+                    }
+                    if wspec_spec:
+                        stamped[WSPEC.name] = wspec_spec
+                    out.append(TileOp(op=op2, name=name, place=place, stage=stage, workers=workers, knobs=stamped))
     return out

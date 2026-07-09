@@ -89,6 +89,17 @@ reuse it on flash's nested QK^T / PV; flash's inner score IS now a structural `C
 `TilePlan()` today, `source` of the streaming `Reduction` — the `Reduction ⊃ Contraction` composition), so warp-flash is
 just that node gaining a warp `TilePlan` — no new path.
 
+**The f16-accumulate atom sibling** (`mma_m16n8k16_f16_f16acc`, C→f16): on the consumer GeForce dies (sm_86/89/120)
+f32-accumulate HMMA runs at HALF the f16-accumulate rate, so this atom keeps the whole mma chain on the full-rate f16
+accumulator and the lowering promote-folds the packed f16 partials into f32 shadow fragments per K chunk
+(`FragmentPromote` — the staged bk slab is the cadence; gmem-direct promotes every `_atom._F16ACC_STEPS` steps plus a
+final fold; flash promotes the P@V accumulator per streaming KV block, folded in at the `O·α` rescale point, while the
+score node ALWAYS stays f32-accumulate). Precision-gated enumeration, off by default: `_schedule._f16acc_allowed` —
+the precise `EMMY_F16_MMA_F32_ACC` pin is authoritative on any target, else the `EMMY_FAST_MATH` umbrella offers it on
+the consumer-die ccs only (`_F16ACC_CCS`); a `TILE` pin naming the atom (or the flash golden's axis-keyed
+`TILE@<pv_k>` spelling) bypasses the gate — pins are authoritative. The realized fork is identified by the `TILE`
+codec's atom token and priced by the `MMA_acc_bits` feature; f16 only (mma.sync has no bf16-accumulate form).
+
 **The move catalog** (`search/space.py`) is the permitted-move enumeration the schedule emit forks over, keyed on
 `AxisRole`: `scalar_tile_moves()` is the legality-guarded scalar register-tile product (`par × reg`, `block_threads ≤
 1024`) with per-cell `""` as the conservative option-0, crossed with the warp / reduce / stage move families by

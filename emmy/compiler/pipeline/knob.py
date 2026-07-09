@@ -100,13 +100,15 @@ class Knob:
     # "not-yet-decided" (still absent → NaN-filled). ``_UNSET`` (the default)
     # means the knob is always stamped by its pass and is never auto-filled.
     off: Any = _UNSET
-    # A **cosmetic** policy: it changes only how the emitted source is spelled, never the compiled
-    # kernel (SASS-identical — e.g. ``LOOPIFY``'s ``--ir`` re-rolling). Because it cannot affect
-    # performance, it must never enter the learned-prior feature vector — it cannot disambiguate
-    # kernels, and letting it perturb the features would split one perf class into spurious
-    # variants. ``knob_features`` skips these; they are batch-enabled via ``EMMY_READABLE`` (on by
-    # default only for the ``compile`` CLI) rather than tuned.
-    cosmetic: bool = False
+    # An **unfeatured** knob: it must never enter the learned-prior feature vector
+    # (``knob_features`` skips it). Two families qualify: a *cosmetic* policy that changes only how
+    # the emitted source is spelled, never the compiled kernel (SASS-identical — e.g. ``LOOPIFY``'s
+    # ``--ir`` re-rolling; batch-enabled via ``EMMY_READABLE`` rather than tuned), and a *meta /
+    # umbrella* pin that gates which forks are OFFERED without being a kernel property itself
+    # (``FAST_MATH`` — the realized fork is already fully identified by the knobs it enables, e.g.
+    # the ``TILE`` codec's atom token). Either way the value cannot disambiguate kernels, and
+    # letting it perturb the features would split one perf class into spurious variants.
+    unfeatured: bool = False
 
     @property
     def env(self) -> str:

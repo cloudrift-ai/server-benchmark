@@ -732,6 +732,97 @@ def test_matmul_mma_coverage(M, N, K, out, trans, mode, monkeypatch):
         assert "int seq_len" in src, "the symbolic-M grid must carry the runtime extent arg"
 
 
+# =========================================================================== #
+# f16-accumulate warp tier (the ``_f16acc`` atom — chunked f16→f32 register promote).
+# =========================================================================== #
+# The mma chain accumulates into packed f16 fragments (``_ch*``) at the full HMMA rate and a
+# periodic ``FragmentPromote`` folds them into the f32 shadows the store reads (``_c*``) —
+# staged rows promote per bk chunk, the gmem-direct K-loop every ``_F16ACC_STEPS`` plus a final
+# fold. Pin-driven here (the enumeration gate is F16_MMA_F32_ACC / FAST_MATH — covered by
+# ``test_f16acc_enumeration_gate``); accuracy is checked against BOTH the f32 reference and the
+# f32-accumulate SIBLING (same schedule, atom swapped) — the sibling bound is what the loose fp16
+# eager tolerance can't see.
+_F16ACC_PIN = "a:mma_m16n8k16_f16_f16acc/w2x2/f4x8/k2"
+_F16ACC_SIBLING_PIN = _WARP_PIN  # the same w2x2/f4x8/k2 schedule on the f32-accumulate atom
+_F16ACC_STAGES = {"gmem": "", "cp": "d2/cp/ring", "tma": "d4/tma/ring"}
+
+
+@pytest.mark.parametrize("stage", list(_F16ACC_STAGES))
+@pytest.mark.parametrize("mode", _SHAPES)
+@requires_sm90
+@requires_cuda
+def test_matmul_mma_f16acc_coverage(stage, mode, monkeypatch):
+    """The f16-accumulate atom over every transport (gmem-direct / cp.async ring / TMA) and a
+    static AND symbolic-M shape: the kernel carries the packed f16 mma targets + the chunk
+    promote, and agrees with the f32 reference and (tightly) with its f32-accumulate sibling."""
+    if stage == "tma" and not _supports_tma():
+        pytest.skip("TMA needs sm_90+")
+    M = N = K = 128
+    monkeypatch.setenv("EMMY_STAGE", _F16ACC_STAGES[stage])
+    run_m = M if mode == "static" else M + 2
+    rng = np.random.default_rng(0)
+    a = (rng.standard_normal((run_m, K)) * 0.1).astype(np.float16)
+    b = (rng.standard_normal((K, N)) * 0.1).astype(np.float16)
+    feed = {"a": a, "b": b}
+    monkeypatch.setenv("EMMY_TILE", _F16ACC_PIN)
+    got, src = _compile_run_mma(_mma_matmul_graph(mode, M, N, K, _F16, False), feed)
+    monkeypatch.setenv("EMMY_TILE", _F16ACC_SIBLING_PIN)
+    sib, sib_src = _compile_run_mma(_mma_matmul_graph(mode, M, N, K, _F16, False), feed)
+
+    ref = a.astype(np.float32) @ b.astype(np.float32)
+    diff = float(np.abs(got.reshape(run_m, N).astype(np.float32) - ref).max())
+    assert diff < 5e-2, f"f16acc {stage}/{mode}: mismatch vs f32 reference (max abs err {diff})"
+    sib_diff = float(np.abs(got.astype(np.float32) - sib.astype(np.float32)).max())
+    assert sib_diff < 5e-3, f"f16acc {stage}/{mode}: drifted from the f32-accumulate sibling (max abs err {sib_diff})"
+
+    assert "emmy_mma_m16n8k16_f16_f16acc(_ch0_0" in src, "the mma chain must target the packed f16 fragments"
+    assert "emmy_mma_promote_f16acc(_c0_0, _ch0_0);" in src, "the chunk promote into the f32 shadow must be emitted"
+    assert "_ch0_0" not in sib_src, "the f32-accumulate sibling must not declare f16 mma fragments"
+
+
+@requires_sm90
+@requires_cuda
+def test_matmul_mma_f16acc_symbolic_k(monkeypatch):
+    """A SYMBOLIC-K f16acc matmul run at a non-multiple length: the masked-K tail zero-fills the
+    operand fragments and the unconditional final promote (after the K-loop) folds the partial
+    last chunk — the gmem-direct cadence path's tail case."""
+    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f16acc/w1x1/f1x1/k1")
+    monkeypatch.delenv("EMMY_STAGE", raising=False)
+    M = N = 128
+    run_k = 70  # off the 16-step grid AND off the _F16ACC_STEPS·16 promote period
+    rng = np.random.default_rng(1)
+    a = (rng.standard_normal((M, run_k)) * 0.1).astype(np.float16)
+    b = (rng.standard_normal((run_k, N)) * 0.1).astype(np.float16)
+    got, src = _compile_run_mma(_mma_symbolic_k_graph(M, N, trans=False), {"a": a, "b": b})
+    ref = a.astype(np.float32) @ b.astype(np.float32)
+    diff = float(np.abs(got.reshape(M, N).astype(np.float32) - ref).max())
+    assert diff < 5e-2, f"f16acc symbolic-K: mismatch vs f32 reference (max abs err {diff})"
+    assert "emmy_mma_promote_f16acc(_c0_0, _ch0_0);" in src
+
+
+def test_f16acc_enumeration_gate(monkeypatch):
+    """The precision-gated enumeration (no GPU): unset, no f16acc forks anywhere; ``FAST_MATH``
+    offers them on the consumer dies (sm_120) but NOT the datacenter parts (sm_90, full-rate
+    f32-accumulate); the precise ``F16_MMA_F32_ACC`` pin is authoritative both ways."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.analytic import enumerate_graph  # noqa: PLC0415
+
+    def offers(cc, **env) -> bool:
+        for var in ("EMMY_FAST_MATH", "EMMY_F16_MMA_F32_ACC"):
+            monkeypatch.delenv(var, raising=False)
+        for var, val in env.items():
+            monkeypatch.setenv(var, val)
+        # A fresh graph per gate state — enumeration caches rows per graph object.
+        rows = enumerate_graph(_mma_matmul_graph("static", 128, 128, 128, _F16, False), Context.from_target(cc))
+        return any("_f16acc" in str(v) for r in rows for kk, v in r.items() if kk.startswith("TILE"))
+
+    assert not offers((12, 0)), "gate unset: no f16acc forks"
+    assert offers((12, 0), EMMY_FAST_MATH="1"), "FAST_MATH on a consumer die must offer the forks"
+    assert not offers((9, 0), EMMY_FAST_MATH="1"), "FAST_MATH must not offer them on a full-rate f32-acc target"
+    assert offers((9, 0), EMMY_F16_MMA_F32_ACC="1"), "the precise pin offers everywhere"
+    assert not offers((12, 0), EMMY_FAST_MATH="1", EMMY_F16_MMA_F32_ACC="0"), "the precise pin wins over the umbrella"
+
+
 def _mma_qk_graph(B: int, H: int, M: int, N: int, D: int):
     """A hand-built **batched, transposed-B** ``S[b,h,m,kv] = Σ_dd Q[b,h,m,dd]·K[b,h,kv,dd]`` over
     f16 operands — exactly the score contraction flash's warp materializer constructs (leading

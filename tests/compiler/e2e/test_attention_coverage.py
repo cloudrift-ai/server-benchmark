@@ -425,6 +425,70 @@ def test_warp_flash_geometry_pin_matches_torch(monkeypatch, um, nt):
     assert max_diff < 5e-3, f"pinned warp flash w{um}/f1x{nt} max_diff={max_diff:.2e}"
 
 
+# --------------------------------------------------------------------------- #
+# f16-accumulate PV (the ``_f16acc`` atom on the expect node — chunked f16→f32 promote).
+# --------------------------------------------------------------------------- #
+
+
+def test_flash_form_fork_offers_f16acc_pv(monkeypatch):
+    """The f16-accumulate PV sibling rows (live-fork capture, no GPU): under the ``FAST_MATH``
+    umbrella on a consumer-die target every warp geometry row doubles with a variant whose
+    ``TILE@pj`` rides the ``_f16acc`` atom — the P@V accumulator promotes per streaming block in
+    the realizer — while ``TILE@dd`` (the score node, softmax-bound) NEVER does. A datacenter
+    target (sm_90 — full-rate f32-accumulate) and the unset gate offer none."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.ir.schedule import is_warp_codec  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.analytic import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
+
+    q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
+    graph = trace_module(_Sdpa().cpu(), (q, k, v))
+
+    def pv_rows(cc):
+        return [r for r in enumerate_graph(graph, Context.from_target(cc)) if "TILE@pj" in r]
+
+    monkeypatch.setenv("EMMY_FAST_MATH", "1")
+    rows = pv_rows((12, 0))
+    acc = [r for r in rows if "_f16acc" in r["TILE@pj"]]
+    base = [r for r in rows if is_warp_codec(r["TILE@dd"]) and "_f16acc" not in r["TILE@pj"]]
+    assert len(acc) == len(base) > 0, f"FAST_MATH must double the warp pv rows ({len(acc)} vs {len(base)})"
+    assert not any("_f16acc" in r["TILE@dd"] for r in rows), "the score node must stay f32-accumulate"
+    assert not any("_f16acc" in r["TILE@pj"] for r in pv_rows((9, 0))), "no f16acc rows on a full-rate f32-acc target"
+    monkeypatch.delenv("EMMY_FAST_MATH")
+    assert not any("_f16acc" in r["TILE@pj"] for r in pv_rows((12, 0))), "gate unset: no f16acc rows"
+
+
+@requires_cuda
+@pytest.mark.parametrize("stage", ["", "d2/cp/ring"])
+def test_generated_tensorcore_flash_f16acc_matches_torch(monkeypatch, stage):
+    """A pinned f16acc-PV flash row (the axis-keyed ``TILE@dd``/``TILE@pj`` golden spelling — the
+    sibling atom in ``TILE@pj`` offers the row without the gate, pins are authoritative): the P@V
+    mma targets packed f16 fragments (``_h<j>``) and each streaming KV block promote-folds them
+    into the f32 output shadows the rescale / projection / store read. Matches torch over the
+    gmem-direct AND staged (cp.async ring) streams."""
+    monkeypatch.setenv("EMMY_TILE@DD", "a:mma_m16n8k16_f16/w1x1/f1x2/k4")
+    monkeypatch.setenv("EMMY_TILE@PJ", "a:mma_m16n8k16_f16_f16acc/w1x1/f1x8")
+    if stage:
+        monkeypatch.setenv("EMMY_STAGE", stage)
+    torch.manual_seed(11)
+    q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
+    backend, compiled, graph, kernels = _compile_tc(q, k, v)
+    assert len(kernels) == 1, f"f16acc flash should be one kernel, got {len(kernels)}"
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "_h0" in src and "_h0);" in src, "the P@V chain must target packed f16 fragments and promote per block"
+    assert "emmy_c_to_a" in src, "must stay the fused warp form (C->A register repack)"
+
+    def ref():
+        with torch.no_grad():
+            return torch.nn.functional.scaled_dot_product_attention(q.cuda(), k.cuda(), v.cuda()).cpu().flatten().float().numpy()
+
+    data = {n: t for n, t in zip(graph.inputs, (q.numpy(), k.numpy(), v.numpy()), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=ref)
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    max_diff = float(np.max(np.abs(got - eager)))
+    assert max_diff < 5e-3, f"f16acc flash stage={stage!r} max_diff={max_diff:.2e}"
+
+
 @requires_cuda
 @pytest.mark.parametrize(
     ("geom", "stage", "loopify"),

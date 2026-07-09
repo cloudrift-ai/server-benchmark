@@ -461,6 +461,37 @@ static __device__ __forceinline__ void emmy_mma_m16n8k16_bf16(float* d, const un
                    "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
 }
 
+// f16-accumulate HMMA (the ``_f16acc`` atom): on the consumer GeForce dies the .f32-accumulate
+// form above runs at HALF the tensor-core rate, so this variant keeps the whole mma chain on the
+// full-rate .f16 accumulator — ``c``/``d`` are 2 packed b32 regs (two halfs each, the same
+// element map as the four f32 regs, pair-packed). Paired with emmy_mma_promote_f16acc below,
+// which periodically folds the f16 partials into the f32 shadow accumulator.
+static __device__ __forceinline__ void emmy_mma_m16n8k16_f16_f16acc(unsigned* d, const unsigned* a, const unsigned* b, const unsigned* c) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 "
+                 "{%0, %1}, {%2, %3, %4, %5}, {%6, %7}, {%8, %9};\\n"
+                 : "=r"(d[0]), "=r"(d[1])
+                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]),
+                   "r"(c[0]), "r"(c[1]));
+}
+
+// The chunk promote of the f16-accumulate scheme: fold the packed f16 C fragment into the f32
+// shadow accumulator and rezero it, bounding the f16 accumulation error to one K chunk. Inline
+// PTX cvt (not __half2 intrinsics) keeps this prelude header-free, like the wrappers above.
+static __device__ __forceinline__ void emmy_mma_promote_f16acc(float* c, unsigned* h) {
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        float lo, hi;
+        asm("{.reg .b16 lo, hi;\\n\\t"
+            "mov.b32 {lo, hi}, %2;\\n\\t"
+            "cvt.f32.f16 %0, lo;\\n\\t"
+            "cvt.f32.f16 %1, hi;}\\n"
+            : "=f"(lo), "=f"(hi) : "r"(h[i]));
+        c[2 * i] += lo;
+        c[2 * i + 1] += hi;
+        h[i] = 0u;
+    }
+}
+
 """
 
 

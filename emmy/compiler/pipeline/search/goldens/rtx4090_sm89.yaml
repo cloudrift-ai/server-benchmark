@@ -378,8 +378,8 @@ configs:
     dtype: 'fp16'
     causal: false
     dynamic: true
-    knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16/w1x1/f1x16/k4'}
-    emmy_us: 20.6
+    knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16/w4x1/f1x16/k4', STAGE: 'd2/cp/ring'}
+    emmy_us: 10.7
     cublas_us: 11.0
   - kernel: attention
     name: attention.hd128.dynM
@@ -389,8 +389,8 @@ configs:
     dtype: 'fp16'
     causal: false
     dynamic: true
-    knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16/w2x1/f1x16/k8'}
-    emmy_us: 27.3
+    knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16/w4x1/f1x8/k8', STAGE: 'd2/cp/ring'}
+    emmy_us: 20.3
     cublas_us: 19.0
   - kernel: rms_norm
     name: rms_norm.k3840

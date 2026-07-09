@@ -45,19 +45,35 @@ land as "different knobs, same speed" — healthy, no action.
   number the golden no longer hits. Left for a codegen look, like the 4090's `square.1024`.
 - `matmul.square.512` (0.96×, 4.6% over live golden) — marginal, inside the noise band.
 
-## Fork sibling regret (this sweep's own prior, `eval prior --dataset nodes`, -O1)
+## Fork sibling regret (`eval prior --dataset nodes`, -O1 block — re-run 2026-07-09 per prior half)
 
-```
-family:  PLACE+R+S+T 1.03×   +WSPEC 1.09×   REDUCE 1.00×   STAGE 1.01×   TILE 7.20×   (ALL median, 69 forks)
-worst TILE forks:  free=4096 red=14336 → 24643×(*),  free=4096 red=4096 → 20.8×,  free=512 red=512 → 1.99×
-leaf reachability: mean 9.08×(*)  median 1.01×  worst 71.92×(*)   |   leaf calibration (Spearman): (per-op, healthy)
-(*) inflated by degenerate-fast benched variants — see Finding 3.
-```
+Re-measured with the per-half eval split: the **analytic** column is the cold-start ranking (it decides what a cold
+sweep measures at all), the **learned** column is the CatBoost model this sweep trained. The original report showed a
+single unlabeled block — those numbers were the learned prior's; the analytic half had never been shown, and the
+re-run also surfaced two learned worst-forks the original list missed (`free=12288 → 2574×`, `free=28672 → 22.3×`).
 
-**One-line diagnosis:** the **TILE fork is catastrophically mispriced on sm_120 — median 7.20×** (vs the 4090's 1.48×),
-and `eval golden` confirms the greedy matched the golden **TILE in 0/17** matmul shapes (STAGE 3/17, REDUCE 6/8). The
-5090 adds a Blackwell-only `WSPEC` (warp-spec) fork (1.09×) and leans on TMA staging (`d*/tma/ring`), enlarging the
-search space the cold prior must rank — and it ranks the warp tile essentially at random. REDUCE/PLACE stay ~optimal.
+| metric (-O1, 69 forks) | analytic prior | learned prior (CatBoost) |
+| --- | --- | --- |
+| TILE fork regret (median) | **11.49×** | **7.20×** |
+| WSPEC fork regret (median) | 2.91× | 1.09× |
+| structural PLACE+R+S+T (median) | 2.35× | 1.03× |
+| REDUCE / STAGE (median) | 1.00× / 1.00× | 1.00× / 1.01× |
+| worst TILE fork: `free=4096 red=14336` | 163.6× (*) | 24643× (*) |
+| 2nd-worst TILE fork | 33.5× (*) `free=4096 red=4096` | 2574× (*) `free=12288 red=4096` |
+| 3rd-worst TILE fork | 29.2× (*) `free=12288 red=4096` | 22.3× (*) `free=28672 red=4096` |
+| leaf reachability (mean / median / worst) | 10.96× (*) / 1.62× / 89.2× (*) | 9.08× (*) / 1.01× / 71.92× (*) |
+| leaf calibration (median per-op Spearman) | +0.50 | +0.79 |
+
+(*) inflated by degenerate-fast "best" baselines (9.17 µs / 26.3 µs on the h4096 family ⇒ ~2 000–6 700 TFLOP/s —
+physically impossible; Finding 3). The medians are robust to them.
+
+**One-line diagnosis (sharpened by the split):** the **TILE fork is catastrophically mispriced on sm_120 in BOTH
+halves** — analytic median 11.49× (vs the 4090's analytic 3.62×) and learned 7.20× (vs the 4090's 1.48×). Unlike the
+4090, the learned model does NOT recover here: it inherits the analytic's censoring on a much larger Blackwell search
+space (the extra `WSPEC` fork, TMA staging) *and* trains against the Finding-3-polluted baselines. `eval golden`
+confirms the greedy matched the golden **TILE in 0/17** matmul shapes (STAGE 3/17, REDUCE 6/8). REDUCE/STAGE/PLACE
+stay ~optimal in both halves — TILE is the sole regret carrier, and on this card both the analytic weights AND the
+node-store hygiene (Finding 3) need fixing before the learned half can be trusted on the big matmuls.
 
 ## Per-shape outcome table (live -O3 A/B, greedy vs best live golden)
 
@@ -92,8 +108,9 @@ plus the extra `WSPEC` fork make the space the analytic prior must price much la
 warp-tile weights are simply wrong for Blackwell.
 **Recommendation (high priority):** refit the analytic weights on the sm_120 goldens specifically
 (`scripts/golden_knob_heuristics.py`) — the sm_89 `_W_A`/`_W_A_DYN` fits do not transfer to sm_120 (different WSPEC/TMA
-fork structure). Consider a per-arch weight set keyed on the stamped WSPEC/TMA features. This is a weight problem (TILE
-is the sole regret carrier at 7.20×; REDUCE/STAGE/PLACE are ≤1.03×), not a patience problem.
+fork structure). Consider a per-arch weight set keyed on the stamped WSPEC/TMA features. This is a weight problem, not
+a patience problem: TILE is the sole regret carrier in **both** prior halves (analytic 11.49×, learned 7.20× median;
+REDUCE/STAGE/PLACE ≤1.03× in both).
 
 ## Finding 2 — split-K + TMA co-selection (the two recorded wins show the target region)
 
@@ -107,7 +124,8 @@ sweep after the refit to see whether Finding 1's `.dynM` losses recover once the
 
 ## Finding 3 — degenerate-fast benched variants corrupt the sm_120 node store
 
-`eval prior --dataset nodes` reports leaf reachability **mean 9.08×, worst 71.92×** and a TILE fork regret of
+`eval prior --dataset nodes` (learned-prior half; the analytic half reads mean 10.96× / worst 89.2× off the same
+baselines) reports leaf reachability **mean 9.08×, worst 71.92×** and a TILE fork regret of
 **24643×** on `free=4096 red=14336`. These are **not real** — the "best" baselines are physically impossible
 (`free=4096 red=14336` best 9.17 µs for a ~60 GFLOP fp16 matmul ⇒ ~6700 TFLOP/s; the 5090 peaks ~210). Some benched
 kernel variants return early / mis-measure and clock absurdly fast, poisoning the node store's value-of-position

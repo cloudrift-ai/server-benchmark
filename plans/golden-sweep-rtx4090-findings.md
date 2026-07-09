@@ -50,18 +50,32 @@ medianed over passes; `spread%` is the 2-pass greedy spread.
   Left untouched pending a look at the `n16x8/f4x8` regression.
 - `matmul.qkv.h4096` (0.95×), `matmul.mlp_down.h4096.dynM` (0.97×) — marginal (<7%), inside the noise band.
 
-## Fork sibling regret (this sweep's own prior, `eval prior --dataset nodes`, -O1)
+## Fork sibling regret (`eval prior --dataset nodes`, -O1 block — re-run 2026-07-09 per prior half)
 
-```
-family:  PLACE 1.03×   REDUCE 1.00×   STAGE 1.00×   TILE 1.48×   (ALL median, 102 forks)
-worst TILE forks:  free=4096 red=14336 → 34.9×,  free=12288 red=4096 → 13.8×,  free=28672 red=4096 → 11.1×
-leaf reachability: mean 1.17×  median 1.07×  worst 1.79×   |   leaf calibration (Spearman): +0.90
-```
+Re-measured with the per-half eval split: the **analytic** column is the cold-start ranking (it decides what a cold
+sweep measures at all), the **learned** column is the CatBoost model this sweep trained. The original report showed a
+single unlabeled block — those numbers were the learned prior's; the analytic half had never been shown.
 
-**One-line diagnosis:** the **TILE fork is the mispriced decision family**. PLACE/REDUCE/STAGE are ~optimal (≤1.03×);
-the prior ranks warp-tile siblings ~1.48× off (worst 34.9× on the big MLP matmuls). Within reached leaves the ranking
-is fine (calibration +0.90) — the miss is the cold search **not reaching** the best TILE leaf, confirmed by the deep
-golden ranks under the learned prior (below).
+| metric (-O1, 102 forks) | analytic prior | learned prior (CatBoost) |
+| --- | --- | --- |
+| TILE fork regret (median) | **3.62×** | **1.48×** |
+| structural PLACE+R+S+T (median) | 2.29× | 1.03× |
+| REDUCE / STAGE (median) | 1.03× / 1.00× | 1.00× / 1.00× |
+| worst TILE fork: `free=4096 red=14336` | 121.7× (*) | 34.9× (*) |
+| 2nd-worst TILE fork | 11.9× `free=12288 red=4096` | 13.8× `free=12288 red=4096` |
+| 3rd-worst TILE fork | 10.1× `free=28672 red=4096` | 11.1× `free=28672 red=4096` |
+| leaf reachability (mean / median / worst) | 4.15× (*) / 1.17× / 40.4× (*) | 1.17× / 1.07× / 1.79× |
+| leaf calibration (median per-op Spearman) | +0.46 | +0.90 |
+
+(*) inflated by a degenerate-fast "best" baseline (13.4 µs on `free=4096 red=14336` ⇒ ~2 200 TFLOP/s — physically
+impossible; see Workflow notes). The medians are robust to it.
+
+**One-line diagnosis (sharpened by the split):** the **analytic half is the mispriced one, and TILE is its family** —
+TILE 3.62× median / reachability mean 4.15× / calibration +0.46 cold, vs the learned half's 1.48× / 1.17× / +0.90 on
+the same nodes. The cold ranking steers the sweep away from the golden warp tiles (and censors what the learned model
+ever gets to see); the learned model largely recovers on what was measured. PLACE/REDUCE/STAGE are ~optimal in both
+halves. This directly confirms Finding 1's recommendation — refit the analytic TILE weights; the learned model is not
+the problem on this card.
 
 ## Per-shape outcome table (live -O3 A/B, greedy vs best live golden)
 

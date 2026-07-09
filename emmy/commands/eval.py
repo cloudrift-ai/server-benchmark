@@ -586,14 +586,21 @@ def _emit_prior_db_reachability(args) -> None:
 
 
 def _emit_prior_nodes(args) -> None:
-    """``eval prior --dataset nodes`` body: the prior over the tune DB's search-tree
-    ``node`` store (the value-of-position dataset). Reports the fork sibling regret
-    (what following the prior's per-fork pick costs vs each fork's best-reachable
-    latency, bucketed by the knob family the fork decides) plus leaf reachability /
-    calibration on the persistent, deduped store. The search-faithful counterpart to
-    ``--dataset db`` (which only scores fully-decided leaf variants)."""
+    """``eval prior --dataset nodes`` body: fork sibling regret (what following the
+    prior's per-fork pick costs vs each fork's best-reachable latency, bucketed by
+    the knob family the fork decides) plus leaf reachability / calibration over the
+    tune DB's search-tree ``node`` store. The search-faithful counterpart to
+    ``--dataset db`` (which only scores fully-decided leaf variants).
+
+    Reported ONCE PER PRIOR HALF, explicitly labeled — the composite ``FallbackPrior``
+    would answer with whichever half is active, mixing two distinct failure modes: the
+    cold ``AnalyticPrior`` decides what a cold sweep measures at all (its regret ⇒ fix
+    the analytic weights / features), while the learned ``CatBoostPrior`` owns deploys
+    once trustworthy (its regret ⇒ a training-data / featurization problem). Splitting
+    the blocks makes the diagnostic say WHERE the problem is."""
+    from emmy import config  # noqa: PLC0415
     from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.prior import diagnostics, load_prior  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.prior import AnalyticPrior, CatBoostPrior, diagnostics  # noqa: PLC0415
 
     db_path = Path(args.db) if args.db else resolve_tune_db()
     if not db_path.exists():
@@ -604,13 +611,22 @@ def _emit_prior_nodes(args) -> None:
         nodes = list(db.iter_nodes())
     finally:
         db.close()
-    # FallbackPrior: the learned CatBoost when fitted, else the cold AnalyticPrior — the same ranking compile/run use.
-    prior = load_prior()
-    logger.info("")
-    logger.info("%s", diagnostics.node_report(prior, nodes, kernel_filter=args.kernel))
-    if args.blame or args.ablate:
+    learned = CatBoostPrior.load()
+    calib = f"calibration={learned.calibration:+.2f}" if learned.calibration is not None else "calibration=n/a"
+    halves: list[tuple[str, object]] = [
+        ("=== analytic prior (cold-start ranking — decides what a cold sweep measures) ===", AnalyticPrior()),
+        (f"=== learned prior (CatBoost, {calib} — owns deploys once trustworthy) ===", learned),
+    ]
+    for header, prior in halves:
         logger.info("")
-        logger.info("%s", diagnostics.attribution_report(prior, nodes, kernel_filter=args.kernel, blame=args.blame, ablate=args.ablate))
+        logger.info("%s", header)
+        if not prior.fitted:
+            logger.info("  not fitted (no checkpoint at %s) — run `emmy tune` to train it.", config.prior_path())
+            continue
+        logger.info("%s", diagnostics.node_report(prior, nodes, kernel_filter=args.kernel))
+        if args.blame or args.ablate:
+            logger.info("")
+            logger.info("%s", diagnostics.attribution_report(prior, nodes, kernel_filter=args.kernel, blame=args.blame, ablate=args.ablate))
 
 
 def _mean(xs: list[float]) -> float:

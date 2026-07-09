@@ -50,7 +50,10 @@ SHAPE, not a kernel node: a pinned row whose shape matches no greedy kernel (gre
 pair) still prints and lands in the record.
 `keys.py` defines
 `op_cache_key` / `dialect_of` / `source_chain`; `slice.py` isolates one finalized kernel into a standalone graph;
-`diagnostics.py` (under `prior/`) backs the `eval` reachability / calibration reports.
+`diagnostics.py` (under `prior/`) backs the `eval` reachability / calibration reports; `eval prior --dataset nodes`
+renders its regret/reachability block once per prior **half** (analytic vs learned, labeled) — the composite would
+answer with whichever half is active, and the two halves' regrets point at different fixes (cold-start weights vs
+training data), so an unlabeled "prior" number destroys the diagnostic.
 
 The passes themselves are `passes/{frontend,loop,lowering}/`. Each pass directory's rules and invariants are documented
 in [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md); the per-pass overview table is near the end of this file.

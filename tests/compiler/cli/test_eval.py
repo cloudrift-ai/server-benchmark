@@ -322,7 +322,10 @@ def test_prior_db_reachability_smoke(run_cli, tmp_path):
 
 def test_prior_nodes_smoke(run_cli, tmp_path):
     """``eval prior --dataset nodes`` renders the fork sibling-ranking AND the leaf
-    reachability over the search-tree node store (one fork, two leaf children)."""
+    reachability over the search-tree node store (one fork, two leaf children) —
+    ONCE PER PRIOR HALF, explicitly labeled, so a regret number is never ambiguous
+    about which ranker (analytic vs learned) produced it. With no fitted checkpoint
+    the analytic block carries the metrics and the learned block says it's unfitted."""
     from emmy.compiler.pipeline.search.db import NodeRow, SearchDB
 
     db_path = tmp_path / "n.db"
@@ -338,9 +341,12 @@ def test_prior_nodes_smoke(run_cli, tmp_path):
     db.close()
     rc, stdout, stderr = run_cli("eval", "prior", "--dataset", "nodes", "--db", str(db_path), "--prior", str(tmp_path / "missing.json"))
     assert rc == 0, f"stderr: {stderr}"
-    assert "node store: 3 nodes" in stdout
+    assert "=== analytic prior" in stdout
+    assert "=== learned prior" in stdout
+    assert "node store: 3 nodes" in stdout  # the analytic block's metrics
     assert "fork sibling regret" in stdout
     assert "leaf reachability" in stdout
+    assert "not fitted" in stdout  # the learned block, with no checkpoint, says so instead of silently answering analytic
     assert "traceback" not in (stdout + stderr).lower()
 
 

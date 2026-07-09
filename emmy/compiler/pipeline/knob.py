@@ -361,6 +361,48 @@ def apply_off_defaults(knobs: dict, declared: Iterable[Knob]) -> dict:
     return knobs
 
 
+def pin_key_matches(pinned: str, realized: str) -> bool:
+    """Whether a realized same-family key satisfies a pinned key: exact, or one side
+    bare — a bare env pin fans out to every eligible axis, and a bare golden spelling
+    matches whatever axis the lowering stamped (``TILE`` ↔ ``TILE@dd``). Two
+    *differing* explicit axes never match."""
+    return pinned == realized or axis_of(pinned) is None or axis_of(realized) is None
+
+
+def values_equal(name: str, want, got) -> bool:
+    """Pinned-vs-realized value equality for knob ``name``: casefolded ``str`` equality
+    (the env round-trip stringifies), else both sides decoded through the registered
+    knob's canonical :meth:`Knob.parse` — a BOOL pinned ``1``/``yes``/``on`` matches a
+    realized ``True``, a hex INT its decimal, a BINMASK spelling the stamped binary
+    string (width taken from the realized binary spelling — the :meth:`Knob.pretty`
+    storage convention). An unregistered family compares by string only."""
+    w, g = str(want).strip(), str(got).strip()
+    if w.casefold() == g.casefold():
+        return True
+    kn = get(family_of(name))
+    if kn is None:
+        return False
+    width = None
+    if kn.type is KnobType.BINMASK:
+        if not (g and all(c in "01" for c in g)):
+            return False  # realized side isn't the canonical binary spelling — no width to decode with
+        width = len(g)
+    try:
+        return kn.parse(w, width=width) == kn.parse(g, width=width)
+    except ValueError:
+        return False
+
+
+def is_off_value(family: str, value) -> bool:
+    """Whether ``value`` is ``family``'s declared OFF value — :func:`apply_off_defaults`
+    stamps it on every variant the knob doesn't apply to (``""`` for the codec knobs,
+    ``False`` for the BOOL policies), so it means "declined / not applicable", never a
+    conflicting realization. ``False`` for an unregistered family or a knob with no
+    declared OFF."""
+    kn = get(family)
+    return kn is not None and kn.off is not _UNSET and str(value).strip().casefold() == str(kn.off).strip().casefold()
+
+
 # --- Aggregate env var ------------------------------------------------------
 
 

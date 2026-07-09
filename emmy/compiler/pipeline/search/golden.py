@@ -408,14 +408,30 @@ def goldens_for_live_gpu() -> list[GoldenConfig]:
     (CI, pure-logic tests) there is no live card, so the unfiltered list is
     returned — callers that need determinism there should inject a single-GPU set.
     """
+    live = live_recorded_goldens()
+    return list(GOLDEN_CONFIGS) if live is None else (live or list(GOLDEN_CONFIGS))
+
+
+def live_recorded_goldens() -> list[GoldenConfig] | None:
+    """The live card's OWN recorded goldens — ``None`` when no CUDA device is visible
+    (or the probe fails), an **empty list** for a live card with no golden file. Unlike
+    :func:`goldens_for_live_gpu` there is no union fallback, so callers can tell an
+    uncovered card from an off-GPU run: ``tune`` errors on the former rather than tune
+    another card's config under this card's name (the cross-card shadowing bug)."""
+    key = _live_gpu_key()
+    if key is None:
+        return None
+    return [g for g in GOLDEN_CONFIGS if g.gpu_name == key[0] and tuple(g.compute_cap) == key[1]]
+
+
+def _live_gpu_key() -> tuple[str, tuple[int, int]] | None:
+    """The live card's ``(gpu_name, compute_cap)``, or ``None`` when no CUDA device
+    is visible (or the probe fails) — the join key the per-GPU golden scoping filters on."""
     try:
         import torch  # noqa: PLC0415
 
         if not torch.cuda.is_available():
-            return list(GOLDEN_CONFIGS)
-        name = torch.cuda.get_device_name(0)
-        major, minor = torch.cuda.get_device_capability(0)
+            return None
+        return torch.cuda.get_device_name(0), tuple(torch.cuda.get_device_capability(0))
     except Exception:  # noqa: BLE001 — any probe failure ⇒ no live filter
-        return list(GOLDEN_CONFIGS)
-    live = [g for g in GOLDEN_CONFIGS if g.gpu_name == name and tuple(g.compute_cap) == (major, minor)]
-    return live or list(GOLDEN_CONFIGS)
+        return None

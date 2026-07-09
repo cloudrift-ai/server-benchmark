@@ -268,13 +268,30 @@ def _exit_flushed(code: int) -> None:
 
 def _tune_targets(args) -> list[tuple[str, str | None, str | None, list[str] | None]]:
     """The ``(label, code, input, dynamic)`` shapes this invocation tunes — the **only**
-    place golden and non-golden diverge. ``--dataset golden`` expands to every recorded
-    golden shape (deduped by name, ``--kernel SUBSTR`` narrowing); otherwise it's the
-    single ``--code`` / positional input / ``--golden NAME`` target. ``dynamic`` is the
-    ``--dynamic NAME@INPUT:AXIS`` spec list the target traces with: a dynamic golden's
-    own recorded spec, or the CLI flag for an ad-hoc target. ``handle_tune`` then loops
-    over this list uniformly, so one shape and the whole golden set share one codepath.
-    Exits 2 on a degenerate / conflicting source."""
+    place golden and non-golden diverge. ``--dataset golden`` expands to every golden
+    shape recorded for the **live** card (deduped by name, ``--kernel SUBSTR``
+    narrowing; off-GPU it's the full multi-card union, for pure-logic tests). Golden
+    targets are strictly the live card's own recordings — a live card with NO goldens
+    exits 2 instead of falling back to other cards' entries (tuning a foreign golden
+    under the live card's name was the cross-card shadowing bug; record goldens for
+    the card first). The same guard covers ``--golden NAME``, so a foreign-only name
+    never resolves as a tune target. Otherwise it's the single ``--code`` / positional
+    input / ``--golden NAME`` target. ``dynamic`` is the ``--dynamic NAME@INPUT:AXIS``
+    spec list the target traces with: a dynamic golden's own recorded spec, or the CLI
+    flag for an ad-hoc target. ``handle_tune`` then loops over this list uniformly, so
+    one shape and the whole golden set share one codepath. Exits 2 on a degenerate /
+    conflicting source."""
+    if getattr(args, "dataset", None) or getattr(args, "golden", None):
+        from emmy.compiler.pipeline.search.golden import live_recorded_goldens
+
+        live = live_recorded_goldens()
+        if live is not None and not live:
+            logger.error(
+                "the live GPU has no recorded goldens — golden tuning targets the live card's own goldens only "
+                "(tuning another card's config under this card's name corrupts the per-card records); "
+                "record goldens for this card (goldens/*.yaml) before running the sweep"
+            )
+            sys.exit(2)
     if getattr(args, "dataset", None):
         from emmy.compiler.pipeline.search.data import Dataset
 
@@ -285,10 +302,11 @@ def _tune_targets(args) -> list[tuple[str, str | None, str | None, list[str] | N
         if getattr(args, "dynamic", None):
             logger.error("--dynamic is incompatible with --dataset golden (a dynamic golden's spec is part of its config)")
             sys.exit(2)
-        # Configs under one name share the shape (and dynamic spec), so any one's
-        # snippet is interchangeable.
+        # Configs under one name share the shape (and dynamic spec) on any single
+        # card, so any one's snippet is interchangeable (the guard above pins the
+        # on-GPU set to the live card; the off-GPU union is tests-only).
         by_name: dict[str, tuple[str, list[str] | None]] = {}
-        for s in Dataset.from_golden(kernel=args.kernel).samples:
+        for s in Dataset.from_golden(kernel=args.kernel, live_gpu=True).samples:
             by_name.setdefault(s.name, (s.snippet, list(s.dynamic) if s.dynamic else None))
         if not by_name:
             logger.error("no golden shapes matched --kernel %r", args.kernel)

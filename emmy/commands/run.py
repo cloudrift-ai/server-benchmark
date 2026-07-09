@@ -122,8 +122,9 @@ def register_run_command(subparsers):
         help=(
             "With --bench: also write the whole comparison as machine-readable JSON to PATH — the "
             "backend table (eager / torch.compile / emmy), the per-kernel greedy rows, and every "
-            "--golden / --ab A/B row with its integrity flags (arithmetic-intensity floor, "
-            "wrong-answer check). Retires ad-hoc table parsing in the golden-sweep workflow."
+            "--golden / --ab A/B row with its integrity flags (realized-vs-pinned knob check, "
+            "arithmetic-intensity floor, wrong-answer check). Retires ad-hoc table parsing in "
+            "the golden-sweep workflow."
         ),
     )
     parser.add_argument("--dump-dir", default=None, help="Directory to dump intermediate compilation artifacts.")
@@ -472,6 +473,67 @@ def _wrong_answer_flag(outputs: dict, ref_outputs: dict) -> str | None:
     return None
 
 
+def _cuda_knob_dicts(graph) -> list[dict]:
+    """Raw ``op.knobs`` per ``CudaOp`` of a compiled pinned graph, in launch order —
+    the realized side of the pin gate."""
+    return [dict(n.op.knobs or {}) for n in _launch_order_cuda_nodes(graph)]
+
+
+def _unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | None:
+    """Realized-vs-pinned gate for a golden / ``--ab`` row. A structurally invalid pin
+    yields an empty enumeration and the per-call-site fallback silently substitutes the
+    planner's own pick — the A/B then measures greedy-vs-greedy and reports a fake 1.00x
+    while the recorded config never ran (the retired ``w2x1`` hd128 flash form). Check
+    every pinned knob against the compiled graph's realized knobs: honored iff SOME
+    kernel carries a same-family key that satisfies the pin (``knob.pin_key_matches`` —
+    a bare ``PLACE``/``TILE`` golden spelling matches the axis-stamped ``PLACE@fold`` /
+    ``TILE@dd``) with an equal value (``knob.values_equal`` — registry-canonical, so
+    alias spellings like ``FAST_EXP=1`` don't false-flag). Declared OFF values are
+    "not applicable", never conflicts (``knob.is_off_value``). The any-kernel scan
+    tolerates a split main+finalize pair where a knob applies to one kernel only — the
+    accepted blind spot: a pin dropped on its target kernel that coincidentally matches
+    a sibling kernel's realized value passes undetected.
+
+    A REGISTERED family with no realized key on ANY kernel is ungateable, not a miss:
+    serialization drops ``op.knobs``, so on a reloaded ``--ir`` graph an absent stamp is
+    indistinguishable from a dropped pin (on a full compile the OFF fill keeps declared
+    knobs present, so a genuinely dropped pin still surfaces as ``(off)`` or a
+    conflicting value). An UNREGISTERED family with no realized key is a typo in the
+    pin and flags ``(unset)``. Returns a flag naming each dropped pin and what ran
+    instead, or ``None`` when clean / ungateable."""
+    from emmy.compiler.pipeline.knob import family_of, get, is_off_value, pin_key_matches, values_equal  # noqa: PLC0415
+
+    if not any(kernel_knobs):
+        return None
+    misses: list[str] = []
+    for name, want in pinned.items():
+        fam = family_of(name)
+        others: list[str] = []
+        saw_off = False
+        hit = False
+        for raw in kernel_knobs:
+            for key, got in raw.items():
+                if family_of(key) != fam:
+                    continue
+                if pin_key_matches(name, key) and values_equal(name, want, got):
+                    hit = True
+                elif is_off_value(fam, got):
+                    saw_off = True
+                else:
+                    spell = f"{key}={got}" if key != name else str(got)
+                    if spell not in others:
+                        others.append(spell)
+            if hit:
+                break
+        if hit:
+            continue
+        if not others and not saw_off and get(fam) is not None:
+            continue  # registered family, no stamp anywhere — ungateable (see docstring)
+        ran = "/".join(others) if others else ("(off)" if saw_off else "(unset)")
+        misses.append(f"{name}={want} realized {ran}")
+    return f"unreproducible pin: {'; '.join(misses)}" if misses else None
+
+
 @contextlib.contextmanager
 def _pinned_knobs(knobs: dict):
     """Pin ``EMMY_<KNOB>`` env vars for the duration of one compile, restoring
@@ -522,11 +584,14 @@ async def _bench_golden_variants(backend, code, golden_configs, *, warmup, iters
     run deployed and benches at the same hint. Best-effort: a config whose pinned
     knobs fail to compile / bench for the live device is skipped with a warning.
 
-    Two integrity gates flag (never drop) each row: the arithmetic-intensity floor
-    (:func:`_intensity_floor_flag`) and — when ``ref`` carries the greedy run's
-    ``(input_data, outputs)`` — a wrong-answer check that executes the pinned kernel
-    once on the greedy run's inputs and compares outputs (:func:`_wrong_answer_flag`).
-    Flags render as a ``!`` marker in the table and ride the ``--json`` record."""
+    Three integrity gates flag (never drop) each row: a realized-vs-pinned knob check
+    (:func:`_unreproducible_pin_flag` — a structurally invalid pin silently falls back
+    to the planner's own pick, so the row would compare greedy to itself), the
+    arithmetic-intensity floor (:func:`_intensity_floor_flag`) and — when ``ref``
+    carries the greedy run's ``(input_data, outputs)`` — a wrong-answer check that
+    executes the pinned kernel once on the greedy run's inputs and compares outputs
+    (:func:`_wrong_answer_flag`). Flags render as a ``!`` marker in the table and ride
+    the ``--json`` record."""
     from emmy.commands.trace import graph_from_code  # noqa: PLC0415
     from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs  # noqa: PLC0415
 
@@ -550,6 +615,9 @@ async def _bench_golden_variants(backend, code, golden_configs, *, warmup, iters
         except Exception as exc:  # noqa: BLE001 — a bad pin must not abort the run's own bench table
             logger.warning("[golden] %s: compile/bench of the pinned config failed (%s) — skipping its row", sample.name, exc)
             continue
+        flag = _unreproducible_pin_flag(sample.knobs, _cuda_knob_dicts(g_compiled))
+        if flag:
+            flags.append(flag)
         total_us = (g_bench.min_ms if g_bench.min_ms is not None else g_bench.time_ms) * 1000
         flag = _intensity_floor_flag(sample, total_us)
         if flag:
@@ -1388,7 +1456,11 @@ async def _bench_ab_variants_ir(backend, ir_path, tail, specs, *, warmup, iters,
     path: each config reloads the IR file fresh (the tail lowering mutates the graph
     in place) and re-lowers it with the knobs pinned, so the pin collapses every
     remaining fork. Best-effort like the golden path: a config that fails to
-    compile / bench is skipped with a warning."""
+    compile / bench is skipped with a warning, and a pin the lowering didn't realize
+    flags the row (:func:`_unreproducible_pin_flag`). Serialized ops drop ``knobs``,
+    so only tail-lowered kernels carry realized values — a pinned family the tail
+    never re-decides has no stamp to check and is skipped (ungateable), while a
+    family the tail did re-decide still verifies."""
     import json as _json  # noqa: PLC0415
 
     from emmy.compiler.graph import Graph  # noqa: PLC0415
@@ -1405,7 +1477,12 @@ async def _bench_ab_variants_ir(backend, ir_path, tail, specs, *, warmup, iters,
         except Exception as exc:  # noqa: BLE001 — a bad pin must not abort the run's own table
             logger.warning("[ab] %s: compile/bench of the pinned config failed (%s) — skipping its row", sample.name, exc)
             continue
-        out.append(_GoldenBench(sample, g, g_bench, []))
+        flags = []
+        flag = _unreproducible_pin_flag(sample.knobs, _cuda_knob_dicts(g))
+        if flag:
+            flags.append(flag)
+            logger.warning("[ab] %s: %s — row flagged (marked ! in the table, flagged in --json)", sample.name, flag)
+        out.append(_GoldenBench(sample, g, g_bench, flags))
     return out
 
 

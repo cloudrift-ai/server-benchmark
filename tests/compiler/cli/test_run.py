@@ -234,12 +234,13 @@ def test_bench_golden_variants_retraces_with_dynamic_spec(monkeypatch):
 
     from emmy.commands import trace as tmod
     from emmy.commands.run import _bench_golden_variants
+    from emmy.compiler.graph import Graph
 
     seen = []
 
     def fake_graph_from_code(code, dynamic_shapes=None):
         seen.append(dynamic_shapes)
-        return object(), "slug", (None, (), {})
+        return Graph(), "slug", (None, (), {})
 
     monkeypatch.setattr(tmod, "graph_from_code", fake_graph_from_code)
 
@@ -295,6 +296,101 @@ def test_wrong_answer_flag_catches_bad_pinned_output():
     assert "wrong-answer" in _wrong_answer_flag({"o": ref["o"] * 0.5}, ref)
     assert "missing" in _wrong_answer_flag({}, ref)
     assert "shape" in _wrong_answer_flag({"o": np.zeros((2, 2))}, ref)
+
+
+def test_unreproducible_pin_flag(monkeypatch):
+    """The realized-vs-pinned gate: a pin the compile silently dropped (the fallback
+    substituted the planner's own pick — the retired ``w2x1`` hd128 flash form) flags
+    with the pinned and realized values; a pin realized on ANY kernel of a multi-kernel
+    lowering passes; a bare pin matches its axis-stamped ``@``-keyed realizations
+    (``TILE@d``, multi-axis ``TILE@dd``/``TILE@pj``, the never-collapsed ``PLACE@fold``);
+    value compare is registry-canonical (``knob.values_equal``); a registered family
+    with no stamp anywhere is ungateable (a reloaded ``--ir`` graph drops serialized
+    knobs, so absence ≠ dropped), while an unregistered family flags as a pin typo.
+    A synthetic registry (mirroring space.py's TILE/STAGE/PLACE/FAST_EXP declarations)
+    keeps the test independent of module-load order."""
+    from emmy.commands.run import _unreproducible_pin_flag
+    from emmy.compiler.pipeline import knob as knob_mod
+    from emmy.compiler.pipeline.knob import Knob, KnobType
+
+    monkeypatch.setattr(
+        knob_mod,
+        "_REGISTRY",
+        {
+            "TILE": Knob("TILE", KnobType.STR, off=""),
+            "STAGE": Knob("STAGE", KnobType.STR, off=""),
+            "PLACE": Knob("PLACE", KnobType.STR),
+            "FAST_EXP": Knob("FAST_EXP", KnobType.BOOL, off=False),
+        },
+    )
+
+    # Honored pin — realized exactly.
+    assert _unreproducible_pin_flag({"TILE": "w2x1/f1x8"}, [{"TILE": "w2x1/f1x8"}]) is None
+    # Silently swapped pin — the greedy-vs-greedy case the gate exists for.
+    flag = _unreproducible_pin_flag({"TILE": "w2x1/f1x8"}, [{"TILE": "w4x2/f2x4"}])
+    assert "unreproducible pin" in flag and "TILE=w2x1/f1x8" in flag and "w4x2/f2x4" in flag
+    # A REGISTERED family with no stamp on any kernel is ungateable, not a miss: on a
+    # partially re-lowered --ir reload the stamp may have been serialized away (a full
+    # compile OFF-fills declared knobs, so a dropped pin still shows as (off)/conflict).
+    assert _unreproducible_pin_flag({"STAGE": "k8"}, [{"TILE": "w2x1"}]) is None
+    # An UNREGISTERED family with no stamp is a typo in the pin — flagged.
+    assert "(unset)" in _unreproducible_pin_flag({"TIEL": "w2x1"}, [{"TILE": "w2x1"}])
+    # Multi-kernel lowering (split main + finalize): honored on the second kernel.
+    assert _unreproducible_pin_flag({"STAGE": "k8"}, [{"TILE": "w2x1"}, {"STAGE": "k8"}]) is None
+    # Bare pin vs single-axis @-keyed realization.
+    assert _unreproducible_pin_flag({"TILE": "n16x8/f2x2"}, [{"TILE@d": "n16x8/f2x2"}]) is None
+    # Bare pin vs a MULTI-axis realization (flash stamps two TILE@ keys — no collapse).
+    assert _unreproducible_pin_flag({"TILE": "w4x1/f1x16"}, [{"TILE@dd": "w4x1/f1x16", "TILE@pj": "w4x1/f1x16"}]) is None
+    # Bare PLACE (the golden YAML spelling) vs the fold/cone-stamped realization.
+    assert _unreproducible_pin_flag({"PLACE": "fuse"}, [{"PLACE@fold": "fuse", "PLACE@cone": "fuse"}]) is None
+    # An @-keyed pin whose axis the re-lowering renamed: a genuine miss, but the
+    # diagnostic names the family's realized value instead of (unset).
+    flag = _unreproducible_pin_flag({"TILE@dd": "w4x1/f1x16"}, [{"TILE@d2": "w2x1/f1x8"}])
+    assert "TILE@d2=w2x1/f1x8" in flag and "(unset)" not in flag
+    # Registry-canonical value compare (bool knob pinned via the string grammar).
+    assert _unreproducible_pin_flag({"FAST_EXP": "true"}, [{"FAST_EXP": True}]) is None
+    # OFF values are "declined", not conflicts: the honored axis wins, the off-stamped
+    # sibling never pollutes the diagnostic...
+    assert _unreproducible_pin_flag({"TILE": "w2x1"}, [{"TILE": ""}, {"TILE@d": "w2x1"}]) is None
+    # ...and a family realized ONLY as off reports (off), not the empty string.
+    assert "realized (off)" in _unreproducible_pin_flag({"STAGE": "d2/tma/ring"}, [{"STAGE": ""}])
+    # No kernel knobs → ungateable, not a flag — [] and all-empty dicts alike.
+    assert _unreproducible_pin_flag({"TILE": "w2x1"}, []) is None
+    assert _unreproducible_pin_flag({"TILE": "w2x1"}, [{}]) is None
+    assert _unreproducible_pin_flag({"TILE": "w2x1"}, [{}, {}]) is None
+
+
+def test_bench_golden_variants_flags_unmappable_pin(monkeypatch):
+    """End-to-end through ``_bench_golden_variants``: a pinned config whose compiled
+    kernels realized different knobs gets an ``unreproducible pin`` flag on its row
+    (rendered ``!`` in the table, carried in ``--json``); a config whose pin was
+    honored stays clean."""
+    from types import SimpleNamespace
+
+    from emmy.commands import trace as tmod
+    from emmy.commands.run import _bench_golden_variants
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.cuda.ir import CudaOp
+
+    monkeypatch.setattr(tmod, "graph_from_code", lambda code, dynamic_shapes=None: (object(), "slug", (None, (), {})))
+
+    def graph_with(knobs):
+        g = Graph()
+        g.add_node(op=CudaOp(kernel_name="k", knobs=knobs), inputs=[], output=Tensor("o", (4,)), node_id="n0")
+        return g
+
+    compiled = iter([graph_with({"TILE": "w4x2/f2x4"}), graph_with({"TILE": "w2x1/f1x8"})])
+
+    async def fake_benchmark_async(g, *, warmup, num_iters):
+        return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[])
+
+    backend = SimpleNamespace(compile=lambda g: next(compiled), benchmark_async=fake_benchmark_async)
+    dropped = SimpleNamespace(name="g.dropped", knobs={"TILE": "w2x1/f1x8"}, shape=None, dynamic=None)
+    honored = SimpleNamespace(name="g.honored", knobs={"TILE": "w2x1/f1x8"}, shape=None, dynamic=None)
+    benches = asyncio.run(_bench_golden_variants(backend, "torch.matmul(a, b)", [dropped, honored], warmup=1, iters=1))
+    assert len(benches) == 2
+    assert any("unreproducible pin" in f for f in benches[0].flags)
+    assert benches[1].flags == []
 
 
 @requires_cuda

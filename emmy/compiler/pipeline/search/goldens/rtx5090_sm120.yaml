@@ -35,8 +35,8 @@ configs:
     N: 2048
     K: 2048
     dtype: 'fp16'
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd4/tma/ring', TILE: 'a:mma_m16n8k16_f16/w4x1/f4x8', VECTORIZE_LOADS: true}
-    emmy_us: 101.95
+    knobs: {TILE: 'a:mma_m16n8k16_f16/w2x4/f2x2/k4', STAGE: 'd2/tma/ring'}
+    emmy_us: 88.5
     cublas_us: 98.36
   - kernel: matmul
     name: matmul.square.4096
@@ -72,8 +72,8 @@ configs:
     N: 4096
     K: 4096
     dtype: 'fp16'
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16/w8x2/f2x4/k4', VECTORIZE_LOADS: true}
-    emmy_us: 101.54
+    knobs: {TILE: 'a:mma_m16n8k16_f16/w4x2/f2x4/k2', REDUCE: 'g4k', STAGE: 'd2/tma/ring'}
+    emmy_us: 90.1
     cublas_us: 95.22
   - kernel: matmul
     name: matmul.mlp_gate_up.h4096

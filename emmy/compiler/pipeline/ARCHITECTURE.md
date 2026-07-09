@@ -27,16 +27,33 @@ tree). `two_level.py` is the two-level tuner (outer structural MCTS, inner per-o
 reservoir) — `Sample`, `Dataset`, and `ShapeKey` (the single golden↔measured join key). `golden.py` holds
 `GoldenConfig` and its matmul / attention / softmax / reduce / rms_norm / pointwise subclasses (the `AnalyticPrior`'s ground truth); every kind carries
 `shape_key()` / `snippet()` / `dtype`, so `tune --dataset golden` and the `run --bench --golden` A/B cover the reduce /
-pointwise entries too, not just matmul. The A/B itself carries two integrity gates — an arithmetic-intensity floor
-(a row whose shape-implied FLOP/s exceeds the live card's recorded `GpuSpec` peak is flagged as a wrong bench, not a
-fast kernel) and a wrong-answer check (each pinned config executes once on the greedy run's inputs and its outputs are
-compared, catching the silently-wrong `g2a` skipped-finalize class) — plus `--json PATH`, a machine-readable record of
-the whole comparison (backends / greedy kernels / pinned rows with their flags) so sweep judgments trace to flagged
-fields instead of parsed terminal text. Golden rows attach to the run's SHAPE, not a kernel node: a pinned row whose
-shape matches no greedy kernel (greedy deployed a split partial+finalize pair) still prints and lands in the record.
+pointwise entries too, not just matmul. `tune --dataset golden` (and `--golden NAME` resolution) scopes to the **live**
+card's goldens (`goldens_for_live_gpu`) — names repeat across per-GPU golden files with diverging shapes/dtypes, so a
+flat union would tune another card's config under the live card's name. For `tune` the scoping is strict: a live card
+with no recorded goldens exits with an error instead of inheriting the union fallback — golden tuning targets the live
+card's own recordings only, so an uncovered card is fixed by recording goldens for it, not papered over
+(`live_recorded_goldens` is the no-fallback probe that tells an uncovered card from an off-GPU run). `run`/`compile`
+`--golden` keep the union fallback on an uncovered card (the seed / transfer flow — the pinned config re-benches
+live), and off-GPU the full union is returned (pure-logic tests). The A/B itself carries three
+integrity gates — a realized-vs-pinned knob check (a structurally invalid pin silently falls back to the planner's own
+pick, so the row would compare greedy to itself and report a fake 1.00×; the flag marks the row `unreproducible pin`
+with what actually ran — matching is family-aware, so a bare golden spelling like `PLACE: fuse` matches its
+axis-stamped `PLACE@fold` realization, and values compare through the registered knob's canonical `Knob.parse`, so
+alias spellings like `FAST_EXP=1` don't false-flag; a pin satisfied by ANY kernel counts as honored, which tolerates
+split main+finalize pairs but means a pin dropped on its target kernel that a sibling coincidentally matches passes
+undetected), an arithmetic-intensity floor (a row whose shape-implied FLOP/s exceeds the live card's recorded `GpuSpec`
+peak is flagged as a wrong bench, not a fast kernel) and a wrong-answer check (each pinned config executes once on the
+greedy run's inputs and its outputs are compared, catching the silently-wrong `g2a` skipped-finalize class) — plus
+`--json PATH`, a machine-readable record of the whole comparison (backends / greedy kernels / pinned rows with their
+flags) so sweep judgments trace to flagged fields instead of parsed terminal text. Golden rows attach to the run's
+SHAPE, not a kernel node: a pinned row whose shape matches no greedy kernel (greedy deployed a split partial+finalize
+pair) still prints and lands in the record.
 `keys.py` defines
 `op_cache_key` / `dialect_of` / `source_chain`; `slice.py` isolates one finalized kernel into a standalone graph;
-`diagnostics.py` (under `prior/`) backs the `eval` reachability / calibration reports.
+`diagnostics.py` (under `prior/`) backs the `eval` reachability / calibration reports; `eval prior --dataset nodes`
+renders its regret/reachability block once per prior **half** (analytic vs learned, labeled) — the composite would
+answer with whichever half is active, and the two halves' regrets point at different fixes (cold-start weights vs
+training data), so an unlabeled "prior" number destroys the diagnostic.
 
 The passes themselves are `passes/{frontend,loop,lowering}/`. Each pass directory's rules and invariants are documented
 in [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md); the per-pass overview table is near the end of this file.
@@ -505,7 +522,9 @@ Pinning replaces tuner choice (the rule emits exactly that variant instead of fo
 value outside the knob's hint tuple is honored, not silently dropped (`Knob.narrow` returns `(pinned,)` regardless of
 hint membership). Downstream structural gates (divisibility, threads-per-CTA budget, TMA eligibility) still apply, so a
 structurally invalid pin yields an empty enumeration and the per-call-site fallback takes over. This lets a tile shape the
-planner wouldn't reach on its own be explored manually.
+planner wouldn't reach on its own be explored manually. The replay paths (`run --bench --golden` / `--ab`) can't accept
+that silent fallback — it would substitute the planner's own pick and turn the A/B into greedy-vs-greedy — so they verify
+realized-vs-pinned knobs on every pinned row and flag mismatches `unreproducible pin` (see the integrity gates above).
 
 A few pins are rejected outright (a clear `ValueError`) rather than silently degraded — they would otherwise lower to a
 wrong or un-launchable kernel: a codec width must be `≥ 1` (a degenerate `b0` / `f0` / `n0` no longer parses to a

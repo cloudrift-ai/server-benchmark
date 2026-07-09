@@ -168,9 +168,11 @@ def resolve_golden_arg(args) -> None:
         sys.exit(2)
     # Scope to the live card's golden(s): on a multi-GPU goldens dir, A/B-ing the
     # deployed pick against another card's recorded config (e.g. a PRO 6000 golden
-    # on a 5090 — both cc 12.0) is meaningless. Cards with no recorded golden of
-    # their own fall back to the full set (the seed / transfer flow). Exact name
-    # first (the fast, unambiguous path), else a name substring.
+    # on a 5090 — both cc 12.0) is meaningless. For run/compile, cards with no
+    # recorded golden of their own fall back to the full set (the seed / transfer
+    # flow — the pinned config re-benches live); tune rejects that fallback before
+    # calling here (golden tuning targets the live card only). Exact name first
+    # (the fast, unambiguous path), else a name substring.
     matches = Dataset.from_golden(name=name, live_gpu=True).samples or Dataset.from_golden(kernel=name, live_gpu=True).samples
     if not matches:
         from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS

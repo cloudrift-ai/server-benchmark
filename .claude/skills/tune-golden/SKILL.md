@@ -197,9 +197,30 @@ density of the `tune-model` reports (`plans/*-tune-findings.md`; executed ones a
 **as they happen** during steps 1–6 — don't reconstruct from memory at the end.
 
 - **Header**: date, GPU, the exact sweep command, wall time, and the category tally (N replaced / N added / N
-  unchanged / N worse). Include the sweep's **fork sibling regret** aggregate line (`emmy eval prior --dataset
-  nodes`, this card's `-O1` block): the per-family `ALL (median)` row scores how well the sweep's own freshly
-  trained prior steered its search — a family ≫1.00x is a steering gap even if every golden A/B passed.
+  unchanged / N worse).
+- **A `## Fork sibling regret` section** (`emmy eval prior --dataset nodes`, this card's `-O1` block). The command
+  prints every metric TWICE, labeled `=== analytic prior ===` / `=== learned prior ===` — the two halves diagnose
+  different failures, so the section must keep them apart. Structure it as: (1) a 2–3 sentence intro naming the
+  columns (analytic = the cold-start ranking that decides what a cold sweep measures at all; learned = the CatBoost
+  this sweep trained); (2) ONE comparison table, one metric per row, one column per half:
+
+  ```
+  | metric (-O1, N forks)                     | analytic prior | learned prior (CatBoost) |
+  | --- | --- | --- |
+  | TILE fork regret (median)                 | …× | …× |
+  | <one row per other family: REDUCE / STAGE / WSPEC / structural medians> | | |
+  | worst / 2nd / 3rd-worst TILE fork (one ROW each, shape-labeled)         | | |
+  | leaf reachability (mean / median / worst) | | |
+  | leaf calibration (median per-op Spearman) | | |
+  ```
+
+  Mark any entry whose "best" baseline is physically impossible (FLOP-roofline sanity check on the shape) with
+  `(*)` and one footnote line under the table — worst-case entries sit on those baselines, medians are robust;
+  (3) a closing diagnosis paragraph that names WHICH half misprices: analytic regret ⇒ the cold-start
+  weights/features are wrong (fix via `scripts/golden_knob_heuristics.py`); learned regret with a cleaner analytic
+  ⇒ training-data / calibration / featurization problem (the learned half also inherits the analytic's censoring —
+  it never sees regions the cold ranking steered away from). Never paste raw eval output as the section body and
+  never quote an unlabeled "prior" number. A family ≫1.00x is a steering gap even if every golden A/B passed.
 - **Per-shape outcome table**: shape name, greedy µs, best-golden µs, ratio (greedy/best-golden), category, **and a
   cuBLAS comparison when an estimate is available** — a `cuBLAS µs` column (the shape's recorded `cublas_us`, or the
   live `Eager PyTorch` row from the same `run --bench`) and a `vs cuBLAS` column (`greedy_us / cublas_us`, so >1.0 =
@@ -219,8 +240,10 @@ density of the `tune-model` reports (`plans/*-tune-findings.md`; executed ones a
   - `emmy eval prior --dataset nodes --blame [--ablate] --kernel <SUBSTR>` — WHICH features caused the mispricing:
     the per-feature blame table (regret-weighted term diff between the prior's pick and the measured-best sibling,
     per fork family; a BLIND fork means no feature separates the siblings — a featurizer gap, not a weight problem)
-    and the ablation Δ (median regret with one feature masked; `< 0` = actively misleading). Cite the blame row in
-    the finding instead of hand-deriving per-knob misses from the weight table.
+    and the ablation Δ (median regret with one feature masked; `< 0` = actively misleading). The command prints one
+    attribution per prior half — cite the `=== analytic prior ===` blame when recommending a weight refit, the
+    `=== learned prior ===` blame when the trained model is the suspect; never quote a blame row without its label.
+    Cite the blame row in the finding instead of hand-deriving per-knob misses from the weight table.
   - `emmy eval prior --dataset golden --kernel <SUBSTR>` — the rank under the *learned* prior + the `vs gold`
     -O3 perf column. Deep analytic rank but shallow learned rank → the heuristic is the problem, not the search.
   - `emmy eval variants --kernel <SUBSTR>` — was the golden config ever *measured* this sweep (reachability),
@@ -228,7 +251,10 @@ density of the `tune-model` reports (`plans/*-tune-findings.md`; executed ones a
   - `emmy eval prior --dataset nodes --kernel <SUBSTR>` — the per-family **fork sibling regret** for this op:
     WHICH decision family (TILE / REDUCE / STAGE / …) the search was steered wrong at (regret ≫1.00x), and which
     families to exonerate (1.00x). Locates the miss at a fork, where `eval golden`'s per-knob diff only names the
-    end-state knobs.
+    end-state knobs. Read the two labeled blocks separately: high ANALYTIC regret on a family ⇒ the cold-start
+    ranking steered the sweep away (it also censors what the learned model ever sees — fix weights/features);
+    high LEARNED regret with low analytic ⇒ the trained model unlearned a correct heuristic (training-data /
+    calibration problem). The diagnosis differs, so a finding must name which half its regret came from.
   - **Before calling a knob mismatch a search shortfall**, check the `-O3 us` column in `eval variants` or run one
     `run --bench --ab "<golden knobs>"` A/B: -O1 ranking flags often invert at -O3, so an apparent pick miss can be
     the -O1/-O3 gap, not the prior.

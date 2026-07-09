@@ -100,6 +100,133 @@ def test_golden_dataset_target_carries_dynamic_spec(monkeypatch):
     assert by_name == {"square.512": None, "square.512.dynM": ["seq_len@x0:0"]}
 
 
+def _two_card_goldens():
+    """The real 4090/5090 collision in miniature: one name recorded by two per-GPU
+    golden files with diverging dtypes."""
+    from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig
+
+    return [
+        MatmulGoldenConfig(
+            name="square.512",
+            M=512,
+            N=512,
+            K=512,
+            knobs={"TILE": "n16x8/f2x2"},
+            emmy_us=9.0,
+            cublas_us=14.0,
+            gpu_name="NVIDIA GeForce RTX 4090",
+            compute_cap=(8, 9),
+            dtype="fp32",
+        ),
+        MatmulGoldenConfig(
+            name="square.512",
+            M=512,
+            N=512,
+            K=512,
+            knobs={"TILE": "n16x8/f2x2"},
+            emmy_us=8.0,
+            cublas_us=12.0,
+            gpu_name="NVIDIA GeForce RTX 5090",
+            compute_cap=(12, 0),
+            dtype="fp16",
+        ),
+    ]
+
+
+def test_golden_dataset_scopes_to_live_card(monkeypatch):
+    """With per-GPU golden files sharing a name, the dataset resolves to the LIVE
+    card's entry — not the first card's spelling in the union (the 5090 sweep tuned
+    the 4090's fp32 shape under the 5090's name and A/B'd against the wrong config)."""
+    import torch
+
+    from emmy.compiler.pipeline.search import golden as gmod
+
+    monkeypatch.setattr(gmod, "GOLDEN_CONFIGS", _two_card_goldens())
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _i=0: "NVIDIA GeForce RTX 5090")
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _i=0: (12, 0))
+    targets = tune._tune_targets(_args(dataset="golden"))
+    assert len(targets) == 1
+    assert "dtype=torch.float16" in targets[0][1]  # the 5090's fp16 shape, not the 4090's fp32
+
+
+def test_golden_dataset_full_union_off_gpu(monkeypatch):
+    """No CUDA device → the full multi-card union (deduped by name), so CI and
+    GPU-less boxes keep resolving targets."""
+    import torch
+
+    from emmy.compiler.pipeline.search import golden as gmod
+
+    monkeypatch.setattr(gmod, "GOLDEN_CONFIGS", _two_card_goldens())
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    targets = tune._tune_targets(_args(dataset="golden"))
+    assert len(targets) == 1  # both cards' entries share the name — deduped
+
+
+def test_golden_dataset_excludes_foreign_only_names(monkeypatch):
+    """Golden tuning is strictly live-scoped: a name recorded ONLY by another card is
+    NOT a tune target — foreign entries never enter the sweep (their shapes belong to
+    the card that recorded them; an uncovered shape is fixed by recording a golden for
+    the live card, not by tuning another card's entry under its name)."""
+    import torch
+
+    from emmy.compiler.pipeline.search import golden as gmod
+    from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig
+
+    foreign_only = MatmulGoldenConfig(
+        name="wide.1024",
+        M=64,
+        N=1024,
+        K=1024,
+        knobs={"TILE": "n16x8/f2x2"},
+        emmy_us=20.0,
+        cublas_us=30.0,
+        gpu_name="NVIDIA GeForce RTX 4090",
+        compute_cap=(8, 9),
+        dtype="fp32",
+    )
+    monkeypatch.setattr(gmod, "GOLDEN_CONFIGS", [*_two_card_goldens(), foreign_only])
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _i=0: "NVIDIA GeForce RTX 5090")
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _i=0: (12, 0))
+    targets = {name: code for name, code, _inp, _dyn in tune._tune_targets(_args(dataset="golden"))}
+    assert set(targets) == {"square.512"}  # wide.1024 is the 4090's — not tuned here
+    assert "dtype=torch.float16" in targets["square.512"]  # live 5090 entry, not the 4090's fp32
+
+
+def test_golden_dataset_uncovered_card_errors(monkeypatch):
+    """A live card with NO recorded goldens exits 2 instead of inheriting the union
+    fallback — an uncovered card is the user's problem to fix (record goldens for it)
+    before running the sweep, not something to paper over with other cards' entries."""
+    import torch
+
+    from emmy.compiler.pipeline.search import golden as gmod
+
+    monkeypatch.setattr(gmod, "GOLDEN_CONFIGS", _two_card_goldens())
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _i=0: "NVIDIA H100")
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _i=0: (9, 0))
+    with pytest.raises(SystemExit) as exc:
+        tune._tune_targets(_args(dataset="golden"))
+    assert exc.value.code == 2
+
+
+def test_golden_name_uncovered_card_errors(monkeypatch):
+    """The uncovered-card guard covers ``tune --golden NAME`` too: without it, the
+    union fallback would resolve a foreign card's golden as the tune target."""
+    import torch
+
+    from emmy.compiler.pipeline.search import golden as gmod
+
+    monkeypatch.setattr(gmod, "GOLDEN_CONFIGS", _two_card_goldens())
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _i=0: "NVIDIA H100")
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _i=0: (9, 0))
+    with pytest.raises(SystemExit) as exc:
+        tune._tune_targets(_args(golden="square.512"))
+    assert exc.value.code == 2
+
+
 def test_dataset_golden_rejects_cli_dynamic():
     with pytest.raises(SystemExit) as exc:
         tune._tune_targets(_args(dataset="golden", dynamic=["seq_len@x0:0"]))

@@ -138,6 +138,58 @@ def test_tuning_does_not_raise_and_prunes_branch():
 
 
 # ---------------------------------------------------------------------------
+# Tune-side bench guard: a terminal still carrying an un-lowered node is a
+# bench_fail decided in ``_TerminalBench.prelude`` — never an ``ok``. Without
+# the guard the un-lowered node is invisible to the bench (it sums CudaOps
+# only): a no-CudaOp terminal reported ok @ 0 µs, and a cached residual kernel
+# (a split's finalize) reported its own µs as the terminal's — the issue-#327
+# "impossibly fast" ok rows that poisoned the tune DB.
+# ---------------------------------------------------------------------------
+
+
+def _terminal_bench(graph, *, backend, db):
+    from types import SimpleNamespace
+
+    from emmy.compiler.pipeline.pipeline import _TerminalBench
+
+    return _TerminalBench(SimpleNamespace(graph=graph, ctx=_small_smem_ctx()), backend=backend, db=db)
+
+
+def test_unlowered_terminal_is_bench_fail_without_cuda_nodes():
+    from emmy.compiler.pipeline.search.db import SearchDB
+
+    b = _terminal_bench(_graph_with_tile(), backend=None, db=SearchDB())
+    assert b.unlowered == ["y"]
+    kind, (_stats, status) = b.prelude()
+    assert kind == "done"
+    assert status == "bench_fail"
+
+
+def test_unlowered_terminal_is_bench_fail_despite_cached_residual_kernel():
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.pipeline.search.db import SearchDB
+    from emmy.compiler.pipeline.search.keys import op_cache_key
+
+    class _StubBackend:
+        name = "cuda"
+        bench_run_timeout_s = 1.0
+
+    # ``x -> y (TileOp) -> z (CudaOp)`` — the split shape: an un-lowered partial
+    # feeding a lowered finalize whose perf row is already cached.
+    g = _graph_with_tile()
+    cuda = CudaOp(kernel_source="__global__ void k_fin() {}", kernel_name="k_fin")
+    g.add_node(op=cuda, inputs=["y"], output=Tensor("z", (4,), "f32"), node_id="z")
+    g.outputs = ["z"]
+    db = SearchDB()
+    b = _terminal_bench(g, backend=_StubBackend(), db=db)
+    db.record_perf(b.context_key, op_cache_key(cuda), backend="cuda", status="ok", stats=b._point_stats(104.0))
+    kind, (stats, status) = b.prelude()
+    assert kind == "done"
+    assert status == "bench_fail"
+    assert stats.median > 104.0  # the pinned fail latency, not the residual kernel's cached µs
+
+
+# ---------------------------------------------------------------------------
 # Option-0 fallback: a prior that over-extrapolates large (over-budget) tiles
 # onto a small shape must not abort the greedy compile. The retry blocklist
 # exhausts on the prior-ranked over-budget tiles, then the conservative

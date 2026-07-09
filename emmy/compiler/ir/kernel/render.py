@@ -12,7 +12,7 @@ from emmy.compiler.backend.cuda.dtype import cuda_includes, cuda_name
 from emmy.compiler.backend.cuda.dtype import nbytes_of as _nbytes_of
 from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
 from emmy.compiler.dtype import F32
-from emmy.compiler.ir.kernel.ir import KernelOp, Smem, TmaDescriptor, pack_smem
+from emmy.compiler.ir.kernel.ir import LDMATRIX_SWIZZLE_XOR, KernelOp, LdmatrixLoad, Smem, TmaDescriptor, pack_smem
 from emmy.compiler.ir.stmt import RenderCtx, render_body
 from emmy.compiler.tensor import Tensor
 
@@ -122,22 +122,53 @@ static __device__ __forceinline__ void cp_async_bulk_tensor_5d(
 
 """
 
+# cp.async prelude — the sm_80+ cooperative gmem→smem copy that bypasses the
+# register file (the async analogue of an ``LDG`` + ``STS`` pair). Wraps the
+# inline PTX so the fill loop reads as ``emmy_cp_async_cg(&smem[i], &gmem[j])``
+# rather than a ``__cvta_generic_to_shared`` + raw ``asm volatile`` pair — the
+# same helper style the mma / mbarrier preludes use; same SASS. ``cg`` =
+# cache-global / bypass-L1 (16 B, the streaming form); ``ca`` = cache-all (4/8 B).
+# ``commit`` closes a batch of issued copies; ``wait<N>`` blocks until ≤ N of
+# those batches are still in flight.
+_CP_ASYNC_PRELUDE = """\
+static __device__ __forceinline__ void emmy_cp_async_cg(void* smem, const void* gmem) {
+    unsigned addr = __cvta_generic_to_shared(smem);
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\\n" :: "r"(addr), "l"(gmem) : "memory");
+}
+
+template <int Bytes>
+static __device__ __forceinline__ void emmy_cp_async_ca(void* smem, const void* gmem) {
+    unsigned addr = __cvta_generic_to_shared(smem);
+    asm volatile("cp.async.ca.shared.global [%0], [%1], %2;\\n" :: "r"(addr), "l"(gmem), "n"(Bytes) : "memory");
+}
+
+static __device__ __forceinline__ void emmy_cp_async_commit() {
+    asm volatile("cp.async.commit_group;\\n" ::: "memory");
+}
+
+template <int N>
+static __device__ __forceinline__ void emmy_cp_async_wait() {
+    asm volatile("cp.async.wait_group %0;\\n" :: "n"(N) : "memory");
+}
+
+"""
+
 # Warp-level MMA prelude (the ``s16816`` path) — the sole tensor-core path.
 # Pure inline PTX (``ldmatrix`` + ``mma.sync.aligned``), so NVRTC needs no
 # ``<mma.h>``. ``__forceinline__`` wrappers keep the kernel body reading as
-# ``dpl_mma_m16n8k16_{f16,bf16}(c, a, b, c)`` rather than raw asm; same SASS.
+# ``emmy_mma_m16n8k16_{f16,bf16}(c, a, b, c)`` rather than raw asm; same SASS.
 # The ``a``/``b`` operands are ``unsigned`` 32-bit register arrays (two packed
 # 16-bit elems each); ``c``/``d`` are ``float`` (f32 accumulate). Lane→element
 # layout is the PTX-fixed mma.m16n8k16 fragment map (see the ``LdmatrixLoad`` /
 # ``RegStore`` address arithmetic in ``ir/kernel/ir.py``).
 _MMA_SYNC_PRELUDE = """\
-static __device__ __forceinline__ void dpl_ldmatrix_x4(unsigned* r, const void* smem) {
+static __device__ __forceinline__ void emmy_ldmatrix_x4(unsigned* r, const void* smem) {
     unsigned addr = __cvta_generic_to_shared(smem);
     asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\\n"
                  : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(addr));
 }
 
-static __device__ __forceinline__ void dpl_ldmatrix_x2_trans(unsigned* r, const void* smem) {
+static __device__ __forceinline__ void emmy_ldmatrix_x2_trans(unsigned* r, const void* smem) {
     unsigned addr = __cvta_generic_to_shared(smem);
     asm volatile("ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0, %1}, [%2];\\n"
                  : "=r"(r[0]), "=r"(r[1]) : "r"(addr));
@@ -146,16 +177,32 @@ static __device__ __forceinline__ void dpl_ldmatrix_x2_trans(unsigned* r, const 
 // x4.trans: two col-adjacent canonical-B fragments in one ldmatrix — lanes 0-15
 // address the 16 K rows at the first fragment's column, lanes 16-31 at col+8
 // (the 096_pair_ldmatrix_loads fusion; r[0..1] / r[2..3] are the two fragments).
-static __device__ __forceinline__ void dpl_ldmatrix_x4_trans(unsigned* r, const void* smem) {
+static __device__ __forceinline__ void emmy_ldmatrix_x4_trans(unsigned* r, const void* smem) {
     unsigned addr = __cvta_generic_to_shared(smem);
     asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\\n"
                  : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(addr));
 }
 
+// Paired x4 → two B fragments in one ldmatrix (096_pair_ldmatrix_loads): the four
+// loaded registers land DIRECTLY as b0[0..1] (lanes 0-15) and b1[0..1] (lanes 16-31)
+// — no staging temp / register shuffle. ``_pair`` is the plain x4 (transposed-B slab,
+// N-adjacent pair); ``_trans_pair`` is x4.trans (canonical-B slab, col-adjacent pair).
+static __device__ __forceinline__ void emmy_ldmatrix_x4_pair(unsigned* b0, unsigned* b1, const void* smem) {
+    unsigned addr = __cvta_generic_to_shared(smem);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\\n"
+                 : "=r"(b0[0]), "=r"(b0[1]), "=r"(b1[0]), "=r"(b1[1]) : "r"(addr));
+}
+
+static __device__ __forceinline__ void emmy_ldmatrix_x4_trans_pair(unsigned* b0, unsigned* b1, const void* smem) {
+    unsigned addr = __cvta_generic_to_shared(smem);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\\n"
+                 : "=r"(b0[0]), "=r"(b0[1]), "=r"(b1[0]), "=r"(b1[1]) : "r"(addr));
+}
+
 // Plain (no .trans) x2: a transposed-B operand staged as its native N-major
 // slab (Q@K^T's K rows) — each 8x8 matrix's rows ARE the mma B fragment's
-// col-major columns, so no transpose is needed (cf. dpl_mma_load_b_gmem_trans).
-static __device__ __forceinline__ void dpl_ldmatrix_x2(unsigned* r, const void* smem) {
+// col-major columns, so no transpose is needed (cf. emmy_mma_load_b_gmem_trans).
+static __device__ __forceinline__ void emmy_ldmatrix_x2(unsigned* r, const void* smem) {
     unsigned addr = __cvta_generic_to_shared(smem);
     asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];\\n"
                  : "=r"(r[0]), "=r"(r[1]) : "r"(addr));
@@ -166,14 +213,14 @@ static __device__ __forceinline__ void dpl_ldmatrix_x2(unsigned* r, const void* 
 // convert into one A operand fragment per lane — no shuffle, no smem round-trip.
 // cvt.rn packs (hi, lo) with round-to-nearest-even — the same rounding the
 // retired smem handoff's RegStore vec2 pack applied, so the repack is bit-identical.
-static __device__ __forceinline__ void dpl_c_to_a_f16(unsigned* a, const float* c0, const float* c1) {
+static __device__ __forceinline__ void emmy_c_to_a_f16(unsigned* a, const float* c0, const float* c1) {
     asm("cvt.rn.f16x2.f32 %0, %1, %2;\\n" : "=r"(a[0]) : "f"(c0[1]), "f"(c0[0]));
     asm("cvt.rn.f16x2.f32 %0, %1, %2;\\n" : "=r"(a[1]) : "f"(c0[3]), "f"(c0[2]));
     asm("cvt.rn.f16x2.f32 %0, %1, %2;\\n" : "=r"(a[2]) : "f"(c1[1]), "f"(c1[0]));
     asm("cvt.rn.f16x2.f32 %0, %1, %2;\\n" : "=r"(a[3]) : "f"(c1[3]), "f"(c1[2]));
 }
 
-static __device__ __forceinline__ void dpl_c_to_a_bf16(unsigned* a, const float* c0, const float* c1) {
+static __device__ __forceinline__ void emmy_c_to_a_bf16(unsigned* a, const float* c0, const float* c1) {
     asm("cvt.rn.bf16x2.f32 %0, %1, %2;\\n" : "=r"(a[0]) : "f"(c0[1]), "f"(c0[0]));
     asm("cvt.rn.bf16x2.f32 %0, %1, %2;\\n" : "=r"(a[1]) : "f"(c0[3]), "f"(c0[2]));
     asm("cvt.rn.bf16x2.f32 %0, %1, %2;\\n" : "=r"(a[2]) : "f"(c1[1]), "f"(c1[0]));
@@ -188,7 +235,7 @@ static __device__ __forceinline__ void dpl_c_to_a_bf16(unsigned* a, const float*
 // (K for the row-major A[M,K]; N for the row-major B[K,N]); ``g`` points at the
 // atom cell's base element, each lane adds its own (row,col) within the tile.
 template <typename T>
-static __device__ __forceinline__ void dpl_mma_load_a_gmem(unsigned* r, const T* g, int ldm) {
+static __device__ __forceinline__ void emmy_mma_load_a_gmem(unsigned* r, const T* g, int ldm) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
     for (int i = 0; i < 4; ++i) {
@@ -203,7 +250,7 @@ static __device__ __forceinline__ void dpl_mma_load_a_gmem(unsigned* r, const T*
 }
 
 template <typename T>
-static __device__ __forceinline__ void dpl_mma_load_b_gmem(unsigned* r, const T* g, int ldm) {
+static __device__ __forceinline__ void emmy_mma_load_b_gmem(unsigned* r, const T* g, int ldm) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
     for (int i = 0; i < 2; ++i) {
@@ -224,7 +271,7 @@ static __device__ __forceinline__ void dpl_mma_load_b_gmem(unsigned* r, const T*
 // in-bounds value — harmless, their stores are masked by the RegStore guard.
 // Same contract as the staged path's slab-fill clamp (_clamp_source_index).
 template <typename T>
-static __device__ __forceinline__ void dpl_mma_load_a_gmem_mclamp(unsigned* r, const T* g, int ldm, int rows_left) {
+static __device__ __forceinline__ void emmy_mma_load_a_gmem_mclamp(unsigned* r, const T* g, int ldm, int rows_left) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
     for (int i = 0; i < 4; ++i) {
@@ -240,7 +287,7 @@ static __device__ __forceinline__ void dpl_mma_load_a_gmem_mclamp(unsigned* r, c
 }
 
 template <typename T>
-static __device__ __forceinline__ void dpl_mma_load_b_gmem_nclamp(unsigned* r, const T* g, int ldm, int cols_left) {
+static __device__ __forceinline__ void emmy_mma_load_b_gmem_nclamp(unsigned* r, const T* g, int ldm, int cols_left) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
     for (int i = 0; i < 2; ++i) {
@@ -258,10 +305,10 @@ static __device__ __forceinline__ void dpl_mma_load_b_gmem_nclamp(unsigned* r, c
 // ``mma.row.col`` col-major B, so no ldmatrix ``.trans`` is needed. The fragment
 // lane→element map is the same (n = groupID, k = 2·threadID_in_group + k16 half),
 // but each lane now reads a contiguous (k, k+1) pair from row ``n`` of B. ``ldm``
-// is B's gmem row stride (the K extent). Mirrors ``dpl_mma_load_b_gmem`` with the
+// is B's gmem row stride (the K extent). Mirrors ``emmy_mma_load_b_gmem`` with the
 // (k, n) index roles swapped to (n, k).
 template <typename T>
-static __device__ __forceinline__ void dpl_mma_load_b_gmem_trans(unsigned* r, const T* g, int ldm) {
+static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans(unsigned* r, const T* g, int ldm) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
     for (int i = 0; i < 2; ++i) {
@@ -279,7 +326,7 @@ static __device__ __forceinline__ void dpl_mma_load_b_gmem_trans(unsigned* r, co
 // which clamps N as the column). Clamped lanes read a duplicate in-bounds row;
 // their stores are masked by the RegStore guard.
 template <typename T>
-static __device__ __forceinline__ void dpl_mma_load_b_gmem_trans_nclamp(unsigned* r, const T* g, int ldm, int cols_left) {
+static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_nclamp(unsigned* r, const T* g, int ldm, int cols_left) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
     for (int i = 0; i < 2; ++i) {
@@ -301,7 +348,7 @@ static __device__ __forceinline__ void dpl_mma_load_b_gmem_trans_nclamp(unsigned
 // elements from the tile base; a half past it reads as +0.0 and is never
 // dereferenced. Mirrors the staged path's slab zero-fill (``_stage_expand``).
 template <typename T>
-static __device__ __forceinline__ void dpl_mma_load_a_gmem_kzero(unsigned* r, const T* g, int ldm, int k_left) {
+static __device__ __forceinline__ void emmy_mma_load_a_gmem_kzero(unsigned* r, const T* g, int ldm, int k_left) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
     for (int i = 0; i < 4; ++i) {
@@ -317,7 +364,7 @@ static __device__ __forceinline__ void dpl_mma_load_a_gmem_kzero(unsigned* r, co
 
 // A: masked-M (clamp rows) AND masked-K (zero-fill cols).
 template <typename T>
-static __device__ __forceinline__ void dpl_mma_load_a_gmem_mclamp_kzero(unsigned* r, const T* g, int ldm, int rows_left, int k_left) {
+static __device__ __forceinline__ void emmy_mma_load_a_gmem_mclamp_kzero(unsigned* r, const T* g, int ldm, int rows_left, int k_left) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
     for (int i = 0; i < 4; ++i) {
@@ -334,7 +381,7 @@ static __device__ __forceinline__ void dpl_mma_load_a_gmem_mclamp_kzero(unsigned
 
 // B (row-major K×N, NOT transposed): K is the row, zero-fill past the extent.
 template <typename T>
-static __device__ __forceinline__ void dpl_mma_load_b_gmem_kzero(unsigned* r, const T* g, int ldm, int k_left) {
+static __device__ __forceinline__ void emmy_mma_load_b_gmem_kzero(unsigned* r, const T* g, int ldm, int k_left) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
     for (int i = 0; i < 2; ++i) {
@@ -349,7 +396,7 @@ static __device__ __forceinline__ void dpl_mma_load_b_gmem_kzero(unsigned* r, co
 
 // B: masked-N (clamp col) AND masked-K (zero-fill row).
 template <typename T>
-static __device__ __forceinline__ void dpl_mma_load_b_gmem_nclamp_kzero(unsigned* r, const T* g, int ldm, int cols_left, int k_left) {
+static __device__ __forceinline__ void emmy_mma_load_b_gmem_nclamp_kzero(unsigned* r, const T* g, int ldm, int cols_left, int k_left) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
     for (int i = 0; i < 2; ++i) {
@@ -365,10 +412,10 @@ static __device__ __forceinline__ void dpl_mma_load_b_gmem_nclamp_kzero(unsigned
 
 // Transposed-B (Q@K^T, ``g[n][k]`` with K contiguous) masked-K: zero-fill the K
 // halves past the runtime extent. K is summed by the mma, so a past-extent element
-// must read as +0.0 (never a duplicate). Mirrors ``dpl_mma_load_b_gmem_kzero`` with
-// the (k, n) index roles swapped to (n, k) — cf. ``dpl_mma_load_b_gmem_trans``.
+// must read as +0.0 (never a duplicate). Mirrors ``emmy_mma_load_b_gmem_kzero`` with
+// the (k, n) index roles swapped to (n, k) — cf. ``emmy_mma_load_b_gmem_trans``.
 template <typename T>
-static __device__ __forceinline__ void dpl_mma_load_b_gmem_trans_kzero(unsigned* r, const T* g, int ldm, int k_left) {
+static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_kzero(unsigned* r, const T* g, int ldm, int k_left) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
     for (int i = 0; i < 2; ++i) {
@@ -383,7 +430,8 @@ static __device__ __forceinline__ void dpl_mma_load_b_gmem_trans_kzero(unsigned*
 
 // Transposed-B: masked-N (clamp the ``n`` row) AND masked-K (zero-fill the contiguous k).
 template <typename T>
-static __device__ __forceinline__ void dpl_mma_load_b_gmem_trans_nclamp_kzero(unsigned* r, const T* g, int ldm, int cols_left, int k_left) {
+static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_nclamp_kzero(
+    unsigned* r, const T* g, int ldm, int cols_left, int k_left) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
     for (int i = 0; i < 2; ++i) {
@@ -397,7 +445,7 @@ static __device__ __forceinline__ void dpl_mma_load_b_gmem_trans_nclamp_kzero(un
     }
 }
 
-static __device__ __forceinline__ void dpl_mma_m16n8k16_f16(float* d, const unsigned* a, const unsigned* b, const float* c) {
+static __device__ __forceinline__ void emmy_mma_m16n8k16_f16(float* d, const unsigned* a, const unsigned* b, const float* c) {
     asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
                  "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, %13};\\n"
                  : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
@@ -405,7 +453,7 @@ static __device__ __forceinline__ void dpl_mma_m16n8k16_f16(float* d, const unsi
                    "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
 }
 
-static __device__ __forceinline__ void dpl_mma_m16n8k16_bf16(float* d, const unsigned* a, const unsigned* b, const float* c) {
+static __device__ __forceinline__ void emmy_mma_m16n8k16_bf16(float* d, const unsigned* a, const unsigned* b, const float* c) {
     asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
                  "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, %13};\\n"
                  : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
@@ -414,6 +462,26 @@ static __device__ __forceinline__ void dpl_mma_m16n8k16_bf16(float* d, const uns
 }
 
 """
+
+
+def _swizzle_prelude(kernel_op: KernelOp) -> str:
+    """One ``emmy_swizzle_<mode>`` helper per TMA swizzle mode the body's ``LdmatrixLoad`` drains
+    use — built from ``LDMATRIX_SWIZZLE_XOR`` (the single source of the shift/mask), so the drain
+    call sites spell their (often long) element index once instead of inlining it twice around the
+    XOR. ``__forceinline__``; same SASS as the inlined form."""
+    modes = sorted({s.swizzle for s in kernel_op.body.iter() if isinstance(s, LdmatrixLoad) and s.swizzle in LDMATRIX_SWIZZLE_XOR})
+    chunks = []
+    for mode in modes:
+        shift, mask = LDMATRIX_SWIZZLE_XOR[mode]
+        chunks.append(
+            f"// {mode} slab swizzle: XOR a b16 smem element index the way the TMA copy engine\n"
+            f"// permuted the 16-byte chunks on fill (the ldmatrix drain must read them back).\n"
+            f"static __device__ __forceinline__ int emmy_swizzle_{mode.lower()}(int e) {{\n"
+            f"    return e ^ (((e >> {shift}) & {mask}) << 3);\n"
+            f"}}\n\n"
+        )
+    return "".join(chunks)
+
 
 _INTRINSIC_TO_CUDA: dict[str, str] = {
     "exp": "expf",
@@ -552,11 +620,14 @@ def render_kernelop(
     # The mma.sync (s16816) tensor-core path is pure inline PTX — its
     # ldmatrix / mma.sync wrappers are emitted in ``_MMA_SYNC_PRELUDE``, so
     # NVRTC needs no ``<mma.h>`` (the legacy ``nvcuda::wmma`` family is gone).
-    from emmy.compiler.ir.kernel.ir import MmaSyncPtx  # noqa: PLC0415
+    from emmy.compiler.ir.kernel.ir import CpAsyncCommit, CpAsyncCopy, CpAsyncWait, MmaSyncPtx  # noqa: PLC0415
 
     uses_mma_sync = any(isinstance(s, MmaSyncPtx) for s in kernel_op.body.iter())
     mma_sync_prelude = _MMA_SYNC_PRELUDE if uses_mma_sync else ""
-    header = f'{includes}{mma_sync_prelude}{prelude}extern "C" __global__{launch_bounds} void {kernel_op.name}({params_text})'
+    uses_cp_async = any(isinstance(s, (CpAsyncCopy, CpAsyncCommit, CpAsyncWait)) for s in kernel_op.body.iter())
+    cp_async_prelude = _CP_ASYNC_PRELUDE if uses_cp_async else ""
+    preludes = f"{includes}{mma_sync_prelude}{cp_async_prelude}{_swizzle_prelude(kernel_op)}{prelude}"
+    header = f'{preludes}extern "C" __global__{launch_bounds} void {kernel_op.name}({params_text})'
     return f"{header} {{\n{body_text}\n}}\n"
 
 

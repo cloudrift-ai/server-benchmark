@@ -73,7 +73,7 @@ un-fused tiers)" ([`_flash.py`](../emmy/compiler/pipeline/passes/lowering/tile/_
 the **un-fused multi-kernel path**, which realizes the one `scaled_dot_product_attention` op as three kernels
 (coverage 11/28 + 16/28 + 1/28 = 28/28):
 
-1. **`k_sdpa_reduce` — Q@Kᵀ scores, materialized to gmem.** Uses tensor cores (`dpl_mma_m16n8k16_f16`, 3 mma calls,
+1. **`k_sdpa_reduce` — Q@Kᵀ scores, materialized to gmem.** Uses tensor cores (`emmy_mma_m16n8k16_f16`, 3 mma calls,
    `__launch_bounds__(64)` = 2 warps). 2667 µs -O3. See finding 2.
 2. **`k_sdpa_linear_reduce` — softmax + P@V, fully SCALAR.** `mma.sync count: 0`, `__launch_bounds__(256)`. **6703 µs
    -O3 — the single biggest cost.** The emitted body

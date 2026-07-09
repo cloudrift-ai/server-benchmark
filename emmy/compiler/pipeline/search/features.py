@@ -253,6 +253,8 @@ def knob_features(knobs: dict) -> dict[str, float]:
             feats[name] = float(val)
             continue
         knob = get(name)
+        if knob is not None and knob.cosmetic:
+            continue  # cosmetic policy (e.g. LOOPIFY): never affects the kernel, never a ranking feature
         if knob is not None and knob.features is not None:
             feats.update(knob.features(val))
             continue

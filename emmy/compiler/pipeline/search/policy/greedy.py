@@ -138,13 +138,17 @@ def _leaf_graph(leaf: object) -> Graph:
     return leaf if isinstance(leaf, Graph) else leaf.option
 
 
-def _price_kernel(graph: Graph, nid: str, ctx: Context, prior, memo: dict[str, float | None]) -> float | None:
+def _price_kernel(graph: Graph, nid: str, ctx: Context, prior, memo: dict[str, float | None], db: object | None = None) -> float | None:
     """One kernel's price: a nested deterministic resolution of its
     single-node slice through ``lowering/tile`` only (the partition fork is
     where the prior prices a complete tile row; the kernel/cuda passes add
-    nothing and cost real CPU), reading the chosen leaf's predicted µs off the
-    slice-resolve's trace entry at the partition fork. Memoized per
-    ``op_cache_key`` so 28 identical per-layer kernels price once.
+    nothing and cost real CPU), reading the chosen leaf's µs off the
+    slice-resolve's trace entry at the partition fork. ``db`` rides into the
+    nested decide, so the partition-fork pick follows the same deploy evidence
+    hierarchy as a top-level knob pick (reservoir -O3 rows, then the tune DB's
+    -O1 ranking lane, model prediction only where nothing was measured) — the
+    priced µs is a measurement wherever the tune benched this kernel. Memoized
+    per ``op_cache_key`` so 28 identical per-layer kernels price once.
     Best-effort: any resolve failure prices as ``None`` (→ the caller keeps
     the op-variant path)."""
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
@@ -156,7 +160,7 @@ def _price_kernel(graph: Graph, nid: str, ctx: Context, prior, memo: dict[str, f
         return memo[key]
     us: float | None = None
     try:
-        nested = greedy_decide(prior=prior, price_structural=False)
+        nested = greedy_decide(prior=prior, price_structural=False, db=db)
         _, trace = Run(pipeline=_tile_pipeline(), ctx=ctx).resolve(single_node_graph(graph, nid), nested)
         us = next((d.score for d in trace if d.rule_name == PARTITION_RULE and d.node_id == nid), None)
     except Exception:  # noqa: BLE001 — a price-probe failure must never break compile
@@ -165,19 +169,19 @@ def _price_kernel(graph: Graph, nid: str, ctx: Context, prior, memo: dict[str, f
     return us
 
 
-def _price_graph(graph: Graph, ctx: Context, prior, memo: dict[str, float | None]) -> float | None:
-    """Σ of per-kernel predicted-best µs over ``graph``'s kernel-bearing
+def _price_graph(graph: Graph, ctx: Context, prior, memo: dict[str, float | None], db: object | None = None) -> float | None:
+    """Σ of per-kernel best-µs prices over ``graph``'s kernel-bearing
     nodes, or ``None`` when any kernel is unpriceable (no partition fork —
     e.g. a pre-tiled combine ``TileOp`` — or a failed nested resolve)."""
     from emmy.compiler.pipeline.search.keys import op_cache_key  # noqa: PLC0415
 
-    prices = [_price_kernel(graph, nid, ctx, prior, memo) for nid, n in graph.nodes.items() if op_cache_key(n.op) is not None]
+    prices = [_price_kernel(graph, nid, ctx, prior, memo, db) for nid, n in graph.nodes.items() if op_cache_key(n.op) is not None]
     if not prices or any(p is None for p in prices):
         return None
     return sum(prices)
 
 
-def _price_op_leaf(fp: ForkPoint, leaf: object, prior, memo: dict[str, float | None]) -> float | None:
+def _price_op_leaf(fp: ForkPoint, leaf: object, prior, memo: dict[str, float | None], db: object | None = None) -> float | None:
     """The keep-fused side's price: the leaf's ``Op`` rebound into a
     single-node slice of the current graph, priced like any kernel."""
     from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
@@ -187,26 +191,32 @@ def _price_op_leaf(fp: ForkPoint, leaf: object, prior, memo: dict[str, float | N
         return None
     sub = single_node_graph(fp.match.graph, fp.node_id)
     sub.nodes[fp.node_id].op = option
-    return _price_graph(sub, fp.ctx, prior, memo)
+    return _price_graph(sub, fp.ctx, prior, memo, db)
 
 
-def _pick_structural(fp: ForkPoint, leaves: list, prior, memo: dict[str, float | None], price_structural: bool) -> object | None:
+def _pick_structural(
+    fp: ForkPoint, leaves: list, prior, memo: dict[str, float | None], price_structural: bool, db: object | None = None
+) -> object | None:
     """Price the structural (``Graph``-splicing) leaves of one fork against
     the keep-fused ``Op`` side and return the winning structural leaf, or
     ``None`` to keep the op-variant path (cold prior, unpriceable option, or
-    fused predicted faster).
+    fused priced faster).
 
-    Both sides are priced the same way: the prior's predicted-best µs at each
-    kernel's partition fork, obtained by a nested deterministic resolution of
-    the kernel's single-node slice (``lowering/tile`` only, no backend,
-    CPU-only — :func:`_price_kernel`); a structural option's price is the Σ
-    over its fragment's kernels. Gated on the *trusted* ``CatBoostPrior``
-    (``prior.trustworthy`` — trained AND passing the reservoir calibration
-    gate): Σ-comparisons through the analytic cold-start model are
-    unvalidated, and neither a cold compile nor a mis-calibrated model may
-    change kernel sets. Greedy
-    is prior-only by design — the price never reads the DB (the learned-prior
-    work removed ``_best_fork`` replay deliberately)."""
+    Both sides are priced the same way: the best µs at each kernel's partition
+    fork, obtained by a nested deterministic resolution of the kernel's
+    single-node slice (``lowering/tile`` only, no backend, CPU-only —
+    :func:`_price_kernel`); a structural option's price is the Σ over its
+    fragment's kernels. The nested pick follows the deploy evidence hierarchy
+    (``db`` threads the tune DB down), so each side's price is a *measurement*
+    wherever the tune benched that kernel, and a structure the tune measured
+    slower cannot displace a measured-faster fused config on a model
+    extrapolation alone — a Σ-of-predictions comparison across two different
+    kernel families is exposed to the model's absolute-µs error, which doesn't
+    cancel across sides the way it does among siblings of one fork. Gated on
+    the *trusted* ``CatBoostPrior`` (``prior.trustworthy``
+    — trained AND passing the reservoir calibration gate): Σ-comparisons
+    through the analytic cold-start model are unvalidated, and neither a cold
+    compile nor a mis-calibrated model may change kernel sets."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
     if not price_structural or prior is None or not getattr(prior, "trustworthy", False):
@@ -214,10 +224,10 @@ def _pick_structural(fp: ForkPoint, leaves: list, prior, memo: dict[str, float |
     op_leaves = [o for o in leaves if not _is_structural_option(o)]
     if not op_leaves:
         return None  # nothing to compare against — the no-op-variant edge keeps today's scoring path
-    fused_prices = [_price_op_leaf(fp, o, prior, memo) for o in op_leaves]
+    fused_prices = [_price_op_leaf(fp, o, prior, memo, db) for o in op_leaves]
     if any(p is None for p in fused_prices):
         return None
-    split_prices = [(o, _price_graph(_leaf_graph(o), fp.ctx, prior, memo)) for o in leaves if _is_structural_option(o)]
+    split_prices = [(o, _price_graph(_leaf_graph(o), fp.ctx, prior, memo, db)) for o in leaves if _is_structural_option(o)]
     split_prices = [(o, p) for o, p in split_prices if p is not None]
     if not split_prices:
         return None
@@ -231,52 +241,72 @@ def _pick_structural(fp: ForkPoint, leaves: list, prior, memo: dict[str, float |
 _TUNE_RANKING_FLAGS = "-Xcicc -O1"
 
 
-def _db_measured_index(db, ctx) -> dict[frozenset, list[tuple[dict, float]]]:
+def _db_measured_index(db, ctx) -> dict[frozenset, list[tuple[dict, float, bool]]]:
     """The tune DB's measured ``ok`` cuda perf rows, indexed by their ``S_*``
     structural signature (stringified values — perf knobs round-trip JSON) —
-    the deploy-side analogue of ``Prior._o3_evidence``, sourced from the -O1
-    ranking lane. Queries the deploy context AND its ``-Xcicc -O1`` tune twin
-    (``context_key`` folds the nvcc flags, so tune rows live under the twin).
-    Best-effort: any failure returns an empty index (deploys fall back to the
-    prior, today's behavior)."""
-    index: dict[frozenset, list[tuple[dict, float]]] = {}
+    the deploy-side analogue of ``Prior._o3_evidence``. Queries three context
+    keys (``context_key`` folds the nvcc flags): the deploy's own, the
+    ``-Xcicc -O1`` tune ranking twin, and the ``-Xcicc -O3`` twin where the
+    tune's deployable re-benches land. Each entry carries a ``deployable``
+    flag: an -O1-lane median is a *ranking* signal with known -O3 inversions,
+    so the pick must prefer deployable-lane rows wherever they exist (a
+    ranking-lane override of a well-trained model regressed qkv/mlp_down ~15%
+    in the ninth-4090-sweep verification). Best-effort: any failure returns an
+    empty index (deploys fall back to the prior)."""
+    from emmy.compiler.pipeline.search.policy.mcts import O3_NVCC_FLAGS  # noqa: PLC0415
+
+    index: dict[frozenset, list[tuple[dict, float, bool]]] = {}
     try:
-        keys = {ctx.structural_key(), replace(ctx, compile_flags=_TUNE_RANKING_FLAGS).structural_key()}
+        o1_key = replace(ctx, compile_flags=_TUNE_RANKING_FLAGS).structural_key()
+        keys = {ctx.structural_key(), o1_key, replace(ctx, compile_flags=O3_NVCC_FLAGS).structural_key()}
         for ck in keys:
             for row in db.iter_perf(ck, backend="cuda"):
                 if row.status != "ok" or row.stats.median <= 0:
                     continue
                 sig = frozenset((k, str(v)) for k, v in row.knobs.items() if k.startswith("S_"))
                 tun = {k: str(v) for k, v in row.knobs.items() if not k.startswith(("S_", "H_"))}
-                index.setdefault(sig, []).append((tun, float(row.stats.median)))
+                index.setdefault(sig, []).append((tun, float(row.stats.median), ck != o1_key))
     except Exception:  # noqa: BLE001 — a DB consult failure must never break compile
         return {}
     return index
 
 
-def _db_measured_pick(index: dict[frozenset, list[tuple[dict, float]]], rows: list[dict]) -> tuple[int, float] | None:
+def _sig_groups(index: dict[frozenset, list[tuple[dict, float, bool]]], sig: frozenset) -> list[list[tuple[dict, float, bool]]]:
+    """Drift-tolerant signature match — see :meth:`Prior.sig_groups` (one
+    contract for the reservoir tier and this DB tier)."""
+    from emmy.compiler.pipeline.search.prior.base import Prior  # noqa: PLC0415
+
+    return Prior.sig_groups(index, sig)
+
+
+def _db_measured_pick(index: dict[frozenset, list[tuple[dict, float, bool]]], rows: list[dict]) -> tuple[int, float] | None:
     """Measured-evidence argmin over candidate knob rows against the DB index —
     the same prefix-consistency contract as ``Prior.evidence_pick`` (every
     tunable knob the candidate specifies must match the measured row; undecided
-    knobs are free), on the -O1 ranking lane's medians. Keeps a config the tune
-    *measured* fastest from losing the deploy to an unmeasured model
-    extrapolation (eighth golden sweep, finding 2 — the deploy was a pure prior
-    argmax, so tune evidence never overrode it). -O3 reservoir evidence, where
-    present, takes precedence at the call site (a deployable measurement beats
-    a ranking-lane one)."""
-    best: tuple[int, float] | None = None
+    knobs are free). Signature matching is drift-tolerant (:func:`_sig_groups`).
+    Two-tier by lane: deployable-lane rows (the deploy's own + ``-O3`` twin
+    contexts) decide outright; ``-O1`` ranking-lane rows decide only when no
+    candidate has deployable evidence — an -O1 median is a ranking signal with
+    known -O3 inversions, and letting it override a well-trained model regressed
+    qkv/mlp_down ~15% in the ninth-4090-sweep verification. Keeps a config the
+    tune *measured* fastest from losing the deploy to an unmeasured model
+    extrapolation (eighth golden sweep, finding 2). -O3 reservoir evidence,
+    where present, still takes precedence at the call site."""
+    best: tuple[int, float] | None = None  # deployable lane
+    best_rank: tuple[int, float] | None = None  # -O1 ranking-lane fallback
     for i, cand in enumerate(rows):
         sig = frozenset((k, str(v)) for k, v in cand.items() if k.startswith("S_"))
-        measured = index.get(sig)
-        if not measured:
-            continue
         cand_tun = {k: str(v) for k, v in cand.items() if not k.startswith(("S_", "H_"))}
-        for row_tun, us in measured:
-            if any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items()):
-                continue
-            if best is None or us < best[1]:
-                best = (i, us)
-    return best
+        for measured in _sig_groups(index, sig):
+            for row_tun, us, deployable in measured:
+                if any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items()):
+                    continue
+                if deployable:
+                    if best is None or us < best[1]:
+                        best = (i, us)
+                elif best_rank is None or us < best_rank[1]:
+                    best_rank = (i, us)
+    return best if best is not None else best_rank
 
 
 def greedy_decide(
@@ -305,9 +335,10 @@ def greedy_decide(
     validity signal must come from the retry).
 
     Structural (``Graph``-splicing) options are priced with the trained prior
-    — :func:`_pick_structural` — so an unpinned ``compile`` / ``run`` can
-    deploy the kernel sets ``tune`` measured best (the demoted-matmul split);
-    cold, the structural leaf is filtered and kernel sets stay unchanged.
+    grounded in measured DB evidence — :func:`_pick_structural` — so an
+    unpinned ``compile`` / ``run`` can deploy the kernel sets ``tune`` measured
+    best (the demoted-matmul split); cold, the structural leaf is filtered and
+    kernel sets stay unchanged.
     ``price_structural=False`` keeps the filter behavior — used by
     ``Pipeline.run``'s retry after a structural pick failed to lower, and by
     the nested pricing probes themselves (no recursive splitting inside a
@@ -353,7 +384,7 @@ def greedy_decide(
         # makes the Graph the rule's only option, which applies inline and
         # never reaches a decide.
         if any(_is_structural_option(o) for o in leaves):
-            pick = _pick_structural(fp, leaves, the_prior, memo, price_structural)
+            pick = _pick_structural(fp, leaves, the_prior, memo, price_structural, db)
             if pick is not None:
                 return pick
             op_leaves = [o for o in leaves if not _is_structural_option(o)]

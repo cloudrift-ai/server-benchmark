@@ -661,7 +661,11 @@ def _resolve_warp_stage(c: Contraction, stage: Stage, budget: int = STATIC_SMEM_
     in elements), ``depth`` clamped so the ring's slots fit the smem ``budget`` (the device's dynamic
     opt-in cap when a ``Context`` reaches the schedule, else the 48 KiB static floor; dropping
     ``ring`` when the clamp leaves nothing to cycle), and ``reg_depth`` clamped to ``bk`` (nothing to
-    ping-pong past the resident chunk)."""
+    ping-pong past the resident chunk). A tile whose single depth-1 slot already exceeds ``budget``
+    DECLINES (``None``, gmem-direct) — unlike the scalar resolver it cannot shrink the slab
+    (``bk_elems`` is codec-spelled here, not derived), and a resolved-but-unfittable stage would
+    sail through the fork only to be rejected at materialize (the issue-#327 unlowered-``TileOp``
+    bench fails)."""
     atom = c.atom
     a_nbytes = atom.operand_dtype("a").nbytes
     bk = c.tile.bk
@@ -683,7 +687,9 @@ def _resolve_warp_stage(c: Contraction, stage: Stage, budget: int = STATIC_SMEM_
         return None
     bk_elems = bk * atom.atom_k
     slot_bytes = (m.tile + n.tile) * bk_elems * a_nbytes
-    depth = min(stage.depth, max(1, budget // slot_bytes))
+    if slot_bytes > budget:
+        return None
+    depth = min(stage.depth, budget // slot_bytes)
     return replace(stage, depth=depth, ring=stage.ring and depth >= 2, reg_depth=min(stage.reg_depth, bk), bk_elems=bk_elems)
 
 
@@ -1494,18 +1500,22 @@ def _resolve_twisted_stage(stage: Stage, kv_extent, bn: int, head_dim: int, d_v:
     ``(1, 1, bn, head_dim)`` — the load's own batch/head index exprs supplying the origin coords;
     the slabs stay dense and take the hardware swizzle + drain XOR instead of padding; box dims
     cap at the 256 hardware limit). ``sync`` has nothing to overlap. A **symbolic** kv stages
-    under TMA only — the descriptor rides the runtime globalDim and zero-fills the box overhang, so
-    the streaming drain's tail-key masks (the same clamp the gmem-direct symbolic path makes) keep
-    it bit-identical; cp.async has no such zero-fill and a static, non-block-divisible kv has no
-    tail mask, so both stay gmem-direct. ``depth`` clamps so the ring's K+V slot pairs fit the smem
+    under both transports — TMA rides the runtime globalDim and zero-fills the box overhang;
+    cp.async clamp-reads the tail's key rows to the last valid key — and the streaming drain's
+    tail-key masks (the same clamp the gmem-direct symbolic path makes) keep either bit-identical.
+    A static, non-block-divisible kv has no tail mask, so it stays gmem-direct on both.
+    ``depth`` clamps so the ring's K+V slot pairs fit the smem
     ``budget``; ``reg_depth`` clamps to 1 (no ldmatrix ping-pong on the streaming drain yet);
     ``bk_elems`` records the streamed keys per step."""
     if stage.transport not in ("cp.async", "tma"):
         return None
     if stage.transport == "cp.async":
-        # cp.async has no OOB zero-fill — a symbolic / non-block-divisible kv would read the
-        # overhanging tail chunk out of bounds, so it stays static + block-divisible only.
-        if not kv_extent.is_static or kv_extent.as_static() % bn != 0:
+        # A symbolic kv stages: the fill clamp-reads the overhanging tail rows to the last valid
+        # key (cp.async has no OOB zero-fill) and the drain's tail masks zero their P columns, so
+        # the duplicates contribute exactly 0 — bit-identical to gmem-direct, the cp.async
+        # counterpart of TMA's box zero-fill. The static non-divisible guard below is defensive:
+        # the warp form's own divisibility gate rejects that geometry before any stage resolves.
+        if kv_extent.is_static and kv_extent.as_static() % bn != 0:
             return None
     elif kv_extent.is_static and kv_extent.as_static() % bn != 0:
         # TMA + a STATIC non-block-divisible kv has no tail mask (masking is symbolic-only) —

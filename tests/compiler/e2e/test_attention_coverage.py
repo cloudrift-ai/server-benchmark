@@ -611,11 +611,12 @@ def test_staged_warp_flash_causal_and_gqa_match_torch(monkeypatch, stage):
 
 
 @requires_cuda
-def test_staged_flash_symbolic_declines_to_gmem_direct(monkeypatch):
-    """A **cp.async** ``STAGE`` pin on a SYMBOLIC ``seq_len`` flash declines (cp.async has no OOB
-    zero-fill, so the resolver stages a static, block-divisible kv only — the masked gmem-direct
-    fragment loads keep the symbolic path correct) and the kernel still compiles and matches torch —
-    the standard pin-validity degrade. TMA stages the symbolic stream instead (see the TMA twins)."""
+def test_staged_flash_symbolic_cp_stages_and_matches_torch(monkeypatch):
+    """A **cp.async** ``STAGE`` pin on a SYMBOLIC ``seq_len`` flash STAGES the K/V stream: the fill
+    clamp-reads the tail chunk's key rows to the last valid key (cp.async has no OOB zero-fill) and
+    the drain's tail masks zero their P columns, so the duplicated rows contribute exactly 0. One
+    cached kernel carries ``int seq_len``; accurate vs torch at seq ∈ {37, 64, 100} (37/100
+    overhang the KV block)."""
     monkeypatch.setenv("EMMY_STAGE", "d2/cp/ring")
     B, H, D = 1, 2, 32
     sd = torch.export.Dim("seq_len", min=4, max=4096)
@@ -623,19 +624,47 @@ def test_staged_flash_symbolic_declines_to_gmem_direct(monkeypatch):
     backend, compiled, graph, kernels = _trace(_Sdpa(), seed, dynamic_shapes={"q": {2: sd}, "k": {2: sd}, "v": {2: sd}})
     src = compiled.nodes[kernels[0]].op.kernel_source
     assert "emmy_c_to_a" in src, "must still be the fused warp form"
-    assert "_k_smem" not in src and "_v_smem" not in src, "a symbolic stream must decline the K/V stage"
+    assert "int seq_len" in src, "dynamic kernel must carry the runtime seq_len arg"
+    assert "_k_smem" in src and "_v_smem" in src, "cp.async must stage the symbolic K/V stream"
+    assert "cp.async" in src and "cp_async_bulk_tensor" not in src, "the fill must be cp.async, not TMA"
 
-    torch.manual_seed(37)
-    q, k, v = (torch.randn(B, H, 37, D, dtype=torch.float16) for _ in range(3))
+    for s in (37, 64, 100):
+        torch.manual_seed(s)
+        q, k, v = (torch.randn(B, H, s, D, dtype=torch.float16) for _ in range(3))
 
-    def ref():
-        with torch.no_grad():
-            return torch.nn.functional.scaled_dot_product_attention(q.cuda(), k.cuda(), v.cuda()).cpu().flatten().float().numpy()
+        def ref(q=q, k=k, v=v):
+            with torch.no_grad():
+                return F.scaled_dot_product_attention(q.cuda(), k.cuda(), v.cuda()).cpu().flatten().float().numpy()
 
-    data = {n: t for n, t in zip(graph.inputs, (q.numpy(), k.numpy(), v.numpy()), strict=True)}
-    run_result, eager = backend.run(compiled, input_data=data, pre_run=ref)
-    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
-    assert float(np.max(np.abs(got - eager))) < 5e-3, "declined-stage symbolic flash drifted from torch"
+        data = {n: t for n, t in zip(graph.inputs, (q.numpy(), k.numpy(), v.numpy()), strict=True)}
+        run_result, eager = backend.run(compiled, input_data=data, pre_run=ref)
+        got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+        assert float(np.max(np.abs(got - eager))) < 5e-3, f"staged symbolic cp flash seq={s} drifted from torch"
+
+
+@requires_cuda
+@pytest.mark.parametrize("s", [64, 100])
+def test_staged_flash_symbolic_cp_bit_identical_to_gmem_direct(monkeypatch, s):
+    """The symbolic cp.async-staged stream is a pure perf transform: verbatim K/V row copies, and
+    the tail chunk's clamped (duplicated) key rows land on P columns the drain masks to exactly 0 —
+    so the staged output is BIT-identical to gmem-direct at both a block-divisible (64) and an
+    overhanging (100) seq. The cp.async counterpart of the TMA twin above."""
+    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x1/f1x4/k4")
+    B, H, D = 1, 4, 64
+    sd = torch.export.Dim("seq_len", min=4, max=4096)
+    seed = tuple(torch.randn(B, H, 16, D, dtype=torch.float16) for _ in range(3))
+    ds = {"q": {2: sd}, "k": {2: sd}, "v": {2: sd}}
+    torch.manual_seed(s)
+    q, k, v = (torch.randn(B, H, s, D, dtype=torch.float16) for _ in range(3))
+
+    backend, compiled, graph, _ = _trace(_Sdpa(), seed, dynamic_shapes=ds)
+    base = _run_flash(backend, compiled, graph, (q, k, v))
+    monkeypatch.setenv("EMMY_STAGE", "d2/cp/ring")
+    backend2, compiled2, graph2, kernels2 = _trace(_Sdpa(), seed, dynamic_shapes=ds)
+    src2 = compiled2.nodes[kernels2[0]].op.kernel_source
+    assert "_k_smem" in src2 and "cp.async" in src2, "cp.async must stage the symbolic stream"
+    staged = _run_flash(backend2, compiled2, graph2, (q, k, v))
+    assert np.array_equal(base, staged), f"staged symbolic cp (seq={s}) differs from gmem-direct sibling"
 
 
 @requires_cuda
@@ -657,11 +686,11 @@ def test_staged_flash_stage_pin_keeps_warp_not_scalar(monkeypatch):
 
 @requires_cuda
 def test_staged_flash_symbolic_tma_stages_and_matches_torch(monkeypatch):
-    """A **TMA** ``STAGE`` pin on a SYMBOLIC ``seq_len`` flash STAGES the K/V stream (unlike
-    cp.async, which declines): the descriptor rides the runtime globalDim and zero-fills the box
-    overhang past the last key, so the tail chunk of a non-block-divisible seq is safe and the
-    drain's tail masks keep it correct. One cached kernel carries ``int seq_len``; accurate vs torch
-    at seq ∈ {64, 100} (100 overhangs the KV block)."""
+    """A **TMA** ``STAGE`` pin on a SYMBOLIC ``seq_len`` flash STAGES the K/V stream: the
+    descriptor rides the runtime globalDim and zero-fills the box overhang past the last key, so
+    the tail chunk of a non-block-divisible seq is safe and the drain's tail masks keep it correct
+    (the cp.async twin clamp-reads instead of zero-filling). One cached kernel carries
+    ``int seq_len``; accurate vs torch at seq ∈ {64, 100} (100 overhangs the KV block)."""
     monkeypatch.setenv("EMMY_STAGE", "d2/tma/ring")
     B, H, D = 1, 4, 64
     sd = torch.export.Dim("seq_len", min=4, max=4096)

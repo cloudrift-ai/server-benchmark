@@ -161,6 +161,30 @@ class Prior(ABC):
 
     # --- deployable-evidence pick ------------------------------------------
 
+    @staticmethod
+    def sig_groups(index: dict[frozenset, list], sig: frozenset) -> list[list]:
+        """The index groups compatible with a candidate's ``S_*`` signature: the
+        exact hit when present, else every group agreeing on all *shared* keys.
+        A key present on one side only is featurizer-vocabulary drift, not a
+        shape difference — the deploy candidate's base can carry scheduler
+        stamps neither the reservoir rows nor persisted perf rows have (#311's
+        ``S_warp_eligible`` appears in no reservoir/perf row), and a
+        strict-equality join lets one added feature silently disable an entire
+        evidence tier. Shapes always share the extent keys, so shared-key
+        agreement still separates them; an empty shared set matches nothing.
+        Shared by this reservoir tier and the deploy-side DB tier
+        (``policy/greedy._db_measured_pick``)."""
+        if sig in index:
+            return [index[sig]]
+        cand = dict(sig)
+        groups = []
+        for row_sig, measured in index.items():
+            row = dict(row_sig)
+            shared = cand.keys() & row.keys()
+            if shared and all(cand[k] == row[k] for k in shared):
+                groups.append(measured)
+        return groups
+
     def _o3_evidence(self) -> dict[frozenset, list[tuple[dict, float]]]:
         """Reservoir rows tagged ``H_opt=3`` (real -O3 measurements), indexed by
         their ``S_*`` structural signature. Rebuilt lazily whenever the reservoir
@@ -201,15 +225,13 @@ class Prior(ABC):
         best: tuple[int, float] | None = None
         for i, cand in enumerate(rows):
             sig = frozenset((k, v) for k, v in cand.items() if k.startswith("S_"))
-            measured = index.get(sig)
-            if not measured:
-                continue
             cand_tun = {k: v for k, v in cand.items() if not k.startswith(("S_", "H_"))}
-            for row_tun, us in measured:
-                if any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items()):
-                    continue
-                if best is None or us < best[1]:
-                    best = (i, us)
+            for measured in self.sig_groups(index, sig):
+                for row_tun, us in measured:
+                    if any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items()):
+                        continue
+                    if best is None or us < best[1]:
+                        best = (i, us)
         return best
 
     def pick(self, rows: list[dict]) -> tuple[int, float]:

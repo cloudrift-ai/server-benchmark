@@ -206,8 +206,19 @@ engine loops (`drive` for exploration, `resolve` for deterministic resolution):
   are priced, never raw-scored**: with the trained prior loaded, `greedy_decide`'s `_pick_structural` prices each side
   (a nested `resolve` per kernel over a `lowering/tile`-only pipeline, the price being the `score` of its slice-resolve's
   partition-fork `Decision`, memoized per `op_cache_key`) and the cheaper kernel set wins, so an unpinned compile deploys
-  the splits `tune` measured best. Cold, or when a side is unpriceable, the structural leaf is filtered — a cold compile
-  never changes kernel sets. Retries are decide-wrappers over a deterministic re-resolve (every other choice replays
+  the splits `tune` measured best. The nested resolve carries the deploy's `db`, so each kernel's price follows the same
+  evidence hierarchy as a knob pick (reservoir -O3, then the -O1 ranking lane, model prediction only where unmeasured) —
+  a pure Σ-of-predictions comparison is exposed to the model's absolute-µs error, which doesn't cancel across different
+  kernel families. Cold, or when a side is unpriceable, the structural leaf is filtered — a cold compile never changes
+  kernel sets. Both evidence joins are **drift-tolerant** (`Prior.sig_groups` — one contract for the reservoir -O3
+  tier and the DB tier): a candidate's fork-time `S_*` base may carry
+  scheduler stamps the persisted perf rows predate (#311's `S_warp_eligible` is on no row recorded before it), and a
+  strict-equality signature join would let one added feature silently disable the whole evidence lane against every
+  existing DB — the ninth-4090-sweep `mlp_gate_up` misdeploy (the model's `g2k` pick beating the measured-faster fused
+  config it was never allowed to see). The index spans three context twins (the deploy's own flags, the `-Xcicc -O1`
+  ranking lane, the `-Xcicc -O3` lane where the tune's deployable re-benches land) and the pick is two-tier: a
+  deployable-lane row decides outright; `-O1` rows decide only when no candidate has deployable evidence, because an
+  -O1 median is a ranking signal with -O3 inversions and must not override a well-trained model on its own. Retries are decide-wrappers over a deterministic re-resolve (every other choice replays
   identically — cheap non-chronological backtracking, no snapshots): a structural pick that leaves a fragment kernel
   un-lowered retires structural picks wholesale and re-resolves the keep-fused branch before falling back to tile
   blocklisting.
@@ -215,7 +226,10 @@ engine loops (`drive` for exploration, `resolve` for deterministic resolution):
   `TuningSearch(patience=, ucb_c=)`; the async generator yields one terminal `Candidate` per fully-explored rollout, and
   `tune_async` benches each via `await _bench_terminal_async` (writes per-kernel `perf` / `lowering` / inventory rows,
   returns the aggregate `PerfStats`), then calls `search.observe(stats, status)`. With `backend=None` the bench is
-  stubbed to `latency_us=1.0` and nothing is persisted, so a backend-less sweep never overwrites tuned rows.
+  stubbed to `latency_us=1.0` and nothing is persisted, so a backend-less sweep never overwrites tuned rows. A terminal
+  still carrying an un-lowered kernel-bearing node (a validation-filtered rewrite) is a `bench_fail` decided before any
+  bench or cache lookup — the bench sums `CudaOp`s only, so without that guard the un-lowered kernel priced at zero and
+  a cached residual kernel's µs could stand in for the whole graph as an `ok` measurement (issue #327).
 - `Run.drive(graph) -> Iterator[(token, Candidate)]` — the exploration engine loop (`tune`). `Run` is the per-run state
   object (`pipeline` + `ctx` + `search` + `db` + `backend` + `dump` + `rejections`): `Pipeline` stays a frozen,
   shareable pass layout while every run-scoped sink lives on the Run, reached through the candidate (`cand.run.dump`,

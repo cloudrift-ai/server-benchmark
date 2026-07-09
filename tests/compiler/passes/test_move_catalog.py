@@ -140,6 +140,50 @@ def test_schedule_leaves_key_tile_by_contraction_axis():
     assert len(axes) == 1  # one contraction → one eligible k-axis
 
 
+def _fp16_matmul_graph() -> Graph:
+    """A static fp16 square matmul (K=512, tile-divisible for every ``bk``) — warp (mma) moves
+    are eligible, and the big 256×256 warp tiles fit unmasked."""
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("a", (Dim(512), Dim(512)), "f16"), node_id="a")
+    g.add_node(InputOp(), [], Tensor("b", (Dim(512), Dim(512)), "f16"), node_id="b")
+    g.add_node(MatmulOp(), ["a", "b"], Tensor("c", (Dim(512), Dim(512)), "f16"), node_id="c")
+    g.inputs, g.outputs = ["a", "b"], ["c"]
+    return g
+
+
+def test_warp_staged_rows_fit_the_smem_budget():
+    """Every enumerated warp row with a non-empty ``STAGE`` fits its depth-1 operand slot in the
+    ctx smem budget, and an over-budget tile still rides gmem-direct. The 256×256 ``w4x4/f4x8``
+    tile at ``k8`` needs a 128 KiB slot — over any current cap — and ``_resolve_warp_stage`` used
+    to floor the depth clamp at 1 instead of declining, so the row sailed through the fork and
+    died at materialize (`validate(ctx)`), leaving an un-lowered ``TileOp`` in the tune's terminal
+    (issue #327)."""
+    ctx = Context.from_target((8, 9))  # the issue's sm_89 cap (101376 B)
+    rows: list[dict] = []
+
+    def decide(fp):
+        leaves = flatten_leaves(fp.options)
+        for leaf in leaves:
+            row = dict(getattr(leaf, "knobs", {}) or {})
+            if any("TILE" in family_of(k) for k in row):
+                rows.append(row)
+        return leaves[0]
+
+    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(_fp16_matmul_graph(), decide)
+    staged = [r for r in rows if str(family_value(r, "TILE")).startswith("a:") and family_value(r, "STAGE")]
+    assert staged, "no staged warp rows were enumerated"
+    for r in staged:
+        plan = TilePlan.parse(str(family_value(r, "TILE")))
+        slot = (plan.tile_m + plan.tile_n) * plan.bk * plan.atom.atom_k * plan.atom.operand_dtype("a").nbytes
+        assert slot <= ctx.max_dynamic_smem, f"{family_value(r, 'TILE')} / {family_value(r, 'STAGE')}: slot {slot} over budget"
+    # The over-budget tile itself stays enumerable — gmem-direct only (its every staged sibling
+    # resolver-declines), split-K rows included.
+    big = [r for r in rows if family_value(r, "TILE") == "a:mma_m16n8k16_f16/w4x4/f4x8/k8"]
+    assert big, "the 256x256 warp tile dropped out of the enumeration"
+    assert all(family_value(r, "STAGE") == "" for r in big)
+    assert any(family_value(r, "REDUCE") for r in big), "split-K must still ride the gmem-direct rows"
+
+
 def _reduce_graph() -> Graph:
     """A bare full-row sum reduce (the ``reduce.2048x2048`` golden shape) — a lifted
     :class:`Reduction` with a 2048-cell free grid, well past the coop heuristic's free cap."""

@@ -483,3 +483,24 @@ def test_2d_segmented_coop_reduce_accuracy(monkeypatch):
     be = CudaBackend()
     out = be.run(be.compile(g), input_data={"x": x})[0].outputs["o"]
     np.testing.assert_allclose(out, x.sum(-1, keepdims=True), rtol=1e-4, atol=1e-4)
+
+
+@requires_cuda
+@pytest.mark.parametrize("seq", [17, 33, 301, 511])
+def test_symbolic_ilp_softmax_masked_tail(monkeypatch, seq):
+    """The masked ILP (register-fold) tail on a TWISTED carrier: one symbolic-reduce softmax
+    kernel pinned ``REDUCE=r4``, run at sizes off the 4-wide register stride, must clamp the
+    tail copies' STREAMED value to the pivot identity — per-``Accum`` masking alone lets the
+    merge's shared intermediates (``t0 = max(m, s_raw)`` → the ``l·exp(m − t0)`` rescale) read
+    the raw wrapped duplicate and silently down-scale the denominator when the duplicate beats
+    the running max (the 2026-07-09 refit regression: err up to 5.7e-3 at seq=33). Tight
+    tolerance — the bug is a numerics corruption, not fp noise. Also pins the symbolic-dim
+    protection in the ILP rename (``seq_len`` in buffer strides must not suffix to
+    ``seq_len__r3`` — an nvcc failure)."""
+    got, xs, src = _compile_run(_STRADDLE_SOFTMAX, {"EMMY_REDUCE": "r4"}, monkeypatch, dynamic="seq_len@x:1", seq=seq)
+    want = _ref_softmax(xs).reshape(got.shape)
+    assert got.shape == (8, seq)
+    diff = float(np.abs(got - want).max())
+    assert diff < 1e-5, f"seq={seq}: masked ILP twisted softmax mismatch (max abs err {diff})"
+    assert "__r3" in src, "the r4 pin must replicate register accumulator chains"
+    assert "seq_len__r" not in src, "the symbolic dim must never be suffixed by the ILP rename"

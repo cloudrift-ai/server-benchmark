@@ -160,6 +160,29 @@ should close the loop: after editing the YAML, one `run --bench --golden NAME` a
 ~3% of the just-written `emmy_us` (the #335 pin-verification gate checks knob fidelity, not latency
 reproducibility — this is the missing half).
 
+## Finding 6 — the refit surfaced two latent masked-ILP bugs (both fixed)
+
+Landing the recommended analytic refit (`golden_knob_heuristics.py` over this sweep's rows; dyn median rank
+1063 → 97, the fm rows reconstructed under the gate) steered the cold pick for the dynamic scalar softmax / SDPA
+kernels onto the ILP register fold (`_W_A_DYN`'s `D_reduce_ilp +25.5`) — a region the old weights never reached —
+and exposed two pre-existing bugs in `_factor`'s masked ILP tail, both fixed with regression tests:
+
+1. **The per-copy rename suffixed symbolic dims in buffer strides** (`seq_len` → `seq_len__r3`, an nvcc failure):
+   the protected set covered the reduce axis's own extent but not a symbolic dim entering through a flattened
+   4-D index's strides. Fix: protect every expression-read name the body doesn't define.
+2. **Per-`Accum` masking corrupts a TWISTED carrier's tail** (softmax r4 at seq=33: max err 5.7e-3): the merge's
+   shared intermediates (`t0 = max(m, s_raw)` feeding the `l·exp(m − t0)` rescale) read the raw wrapped duplicate,
+   silently down-scaling the denominator whenever the duplicate beat the running max — sizes passed or failed by
+   luck of the wrapped values. Fix: a twisted carrier's masked copy clamps the PIVOT TERM (the score) to the pivot
+   fold identity, which the monoid absorbs whole-chain (`max(m, −inf) = m`, rescale 1, weight 0, lifted `0·V`) —
+   the term, not the streamed loads, because a flash score is computed by a nested Q@K contraction whose input
+   loads must stay raw. Old coverage never caught it: the only ILP×twisted×dynamic case ran at seq=700 ≡ 0 (mod 4)
+   — no masked tail. New tests sweep off-stride sizes at 1e-5 tolerance.
+
+The episode is the fork-regret table's diagnosis in action: the analytic prior was censoring an entire region
+(ILP folds on dynamic reduce shapes), and the first weight set that priced it honestly immediately found broken
+codegen there. Post-fix, the full suite is green with the new weights (2277 tests).
+
 ## Finding 5 — attention.hd64 static: greedy 1.29× off its golden; the dynM twin reproduces
 
 Golden `w4x1/f1x16/k4` variants at 8.3 µs; static greedy lands 10.7 while the **dynM twin picks its golden exactly**

@@ -440,17 +440,50 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
 # shared with the other tiers; only the partition changes.
 
 
-def _mask_streamed(body: list[Stmt], axis: str, offset: int, extent) -> list[Stmt]:
-    """Clamp-to-identity the FOLD contribution of a masked tail copy. Each ``Accum``'s folded
-    ``value`` becomes a ``Select`` of the value when ``axis + offset < extent`` else the fold's
-    own identity (``op.identity`` — ``sum`` → 0, ``max`` → −inf), so an out-of-range copy folds a
-    no-op. The streamed ``Load`` index is already wrapped in-bounds (``% extent`` via the caller's
-    σ), so the read is safe; masking the FOLD (not the load) is what makes a **prologue** correct
-    — ``sum(x·x)`` past the extent needs the *additive* identity 0, which masking the load to the
-    *multiply* identity (1) would not give. A twisted carrier masks each component Accum to its
-    own identity (score → −inf keeps the running max + rescale a no-op; the exp/value sums → 0)."""
+def _mask_streamed(body: list[Stmt], axis: str, offset: int, extent, stream_identity: tuple[str, float] | None = None) -> list[Stmt]:
+    """Clamp-to-identity a masked tail copy's contribution. Two forms, selected by the CARRIER:
+
+    **Plain (``id``) carrier** (``stream_identity is None``): mask each ``Accum``'s folded
+    ``value`` — a ``Select`` of the value when ``axis + offset < extent`` else the fold's own
+    identity (``op.identity`` — ``sum`` → 0, ``max`` → −inf), so an out-of-range copy folds a
+    no-op. Masking the FOLD (not the load) is what makes a **prologue** correct — ``sum(x·x)``
+    past the extent needs the *additive* identity 0, which masking the load to the *multiply*
+    identity (1) would not give.
+
+    **Twisted carrier** (``stream_identity`` = ``(pivot term name in this copy, pivot fold
+    identity)`` — −inf for the ``exp`` family): mask the PIVOT TERM — the per-element score value
+    the whole merge chain derives from — which the twisted monoid absorbs by law (``max(m, −inf)
+    = m``, the rescale ``exp(m − m) = 1``, the weight ``exp(−inf − m) = 0``, a lifted value
+    channel folding ``0·V``). Per-``Accum`` masking is NOT sufficient there: the merge's shared
+    intermediates (``t0 = max(m, s_raw)`` feeding the ``l·exp(m − t0)`` rescale) read the raw
+    wrapped value, so a duplicate read larger than the running max silently down-scales the
+    denominator while the masked pivot stays put (the 2026-07-09 symbolic-softmax r4
+    miscompare). The clamp lands on the TERM, not the streamed loads: a flash score is computed
+    by a nested Q@K contraction whose INPUT loads must stay raw (a dot of clamped −inf inputs is
+    not the fold identity).
+
+    Either way the streamed ``Load`` index is already wrapped in-bounds (``% extent`` via the
+    caller's σ), so the read itself is safe."""
     cond = BinaryExpr("<", BinaryExpr("+", Var(axis), Literal(offset, "int")), extent)
     out: list[Stmt] = []
+    if stream_identity is not None:
+        term, identity = stream_identity
+        renames: dict[str, str] = {}
+        clamped = False
+        for s in body:
+            if renames:
+                s = s.rewrite(lambda n: renames.get(n, n))
+            out.append(s)
+            if not clamped:
+                defs = set(s.defines()) | {nm for b in s.nested() for st in b.iter() for nm in st.defines()}
+                if term in defs:
+                    ident, masked = f"{term}__id", f"{term}__mv"
+                    out.append(Init(name=ident, identity=identity, dtype=F32))
+                    out.append(Select(name=masked, branches=(SelectBranch(term, cond), SelectBranch(ident, Literal(1, "int")))))
+                    renames[term] = masked
+                    clamped = True
+        assert clamped, f"masked twisted ILP copy: pivot term {term!r} not defined in the reduce body"
+        return out
     for s in body:
         if isinstance(s, Accum):
             ident, masked = f"{s.value}__id", f"{s.value}__m"
@@ -462,13 +495,16 @@ def _mask_streamed(body: list[Stmt], axis: str, offset: int, extent) -> list[Stm
     return out
 
 
-def _replicate(body: Body, r: int, coop: int, axis: Axis, masked: bool, protected: frozenset[str]) -> list[Stmt]:
+def _replicate(
+    body: Body, r: int, coop: int, axis: Axis, masked: bool, protected: frozenset[str], stream_identity: tuple[str, float] | None = None
+) -> list[Stmt]:
     """Copy ``r`` of the reduce body for the REG (ILP) fold. Copy 0 is the body verbatim.
     Copy ``r > 0`` suffixes every per-copy SSA name with ``__r{r}`` (its accumulator + temps
     are an independent chain) — EXCEPT the shared iteration coordinates in ``protected`` (the
     grid / reduce / lane axis vars, common to all copies) — and offsets its streamed reads by
     ``r·coop`` (σ on the reduce axis). A ``masked`` copy wraps the read in-bounds (``% extent``)
-    and clamps the value to the fold identity past the extent (:func:`_mask_streamed`)."""
+    and clamps the tail contribution to a no-op (:func:`_mask_streamed`; ``stream_identity``
+    selects the twisted-carrier form)."""
     if r == 0:
         return list(body)
     offset = r * coop
@@ -476,7 +512,13 @@ def _replicate(body: Body, r: int, coop: int, axis: Axis, masked: bool, protecte
     index_expr = BinaryExpr("%", shifted, axis.extent_expr()) if masked else shifted
     sigma = Sigma({axis.name: index_expr})
     out = copy_cell(body, sigma, f"__r{r}", protected)
-    return _mask_streamed(out, axis.name, offset, axis.extent_expr()) if masked else out
+    if not masked:
+        return out
+    if stream_identity is not None:
+        term, identity = stream_identity
+        # The pivot term is body-defined, so this copy's spelling carries the copy suffix.
+        stream_identity = (term if term in protected else f"{term}__r{r}", identity)
+    return _mask_streamed(out, axis.name, offset, axis.extent_expr(), stream_identity)
 
 
 def _restage_loads(stmts: list[Stmt], buf: str, smem: str, n_grid: int, grid_vars: tuple) -> list[Stmt]:
@@ -760,12 +802,25 @@ def _tile_reduce_axis(op: Reduction, plan, ctx: Ctx, tail: tuple, out_val: str) 
     # while the ``for`` decl stays ``dd`` emits an undefined identifier. Each copy re-declares
     # its own nested loop, so a shared name is correct (loop-scoped).
     nested_axes = {lp.axis.name for lp in rloop.body.iter_of_type(Loop, StridedLoop)}
+    # ... and ANY external name the body's index/extent Exprs read without defining — a symbolic
+    # dim can enter through a buffer's flattened STRIDES (a 4-D tensor's ``seq_len``) on an op
+    # whose own reduce extent is static, where none of the named sets above cover it; renaming
+    # such a use (``seq_len__r3``) emits an undeclared identifier (surfaced by the 2026-07-09
+    # analytic refit steering dynamic scalar SDPA onto the ILP fold).
+    defined = {nm for s in rloop.body.iter() for nm in s.defines()}
+    expr_external = {v for s in rloop.body.iter() for e in s.exprs() for v in e.free_vars()} - defined
     protected = frozenset(
-        {axis.name, *(ax.name for ax in grid), *axis.extent_expr().free_vars(), *nested_axes} | ({lane.name} if lane is not None else set())
+        {axis.name, *(ax.name for ax in grid), *axis.extent_expr().free_vars(), *nested_axes, *expr_external}
+        | ({lane.name} if lane is not None else set())
     )
+    # A twisted carrier's masked tail clamps the STREAMED VALUE to the pivot fold's identity
+    # (the ``exp`` family's running max, −inf) — see :func:`_mask_streamed`'s twisted form.
+    twisted = carrier.twist.family is not None and carrier.twist.family != "id"
+    pivot = carrier.twist.channels[0] if twisted else None
+    stream_identity = (str(pivot.term), pivot.fold.identity) if twisted else None
     copies: list[Stmt] = []
     for r in range(reg):
-        copies.extend(_replicate(rloop.body, r, coop, axis, masked, protected))
+        copies.extend(_replicate(rloop.body, r, coop, axis, masked, protected, stream_identity))
     strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=rloop.unroll)
 
     # The carrier-driven partial merge: the REG-tree fold of the ``reg`` ILP copies into the survivor

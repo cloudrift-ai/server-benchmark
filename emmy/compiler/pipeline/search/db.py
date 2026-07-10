@@ -257,6 +257,48 @@ def implausible_value_reason(row: NodeRow) -> str | None:
     return None
 
 
+def impossible_kernel_reason(row: NodeRow) -> str | None:
+    """The *validity* companion to :func:`implausible_value_reason` — the reason the row's
+    stamped kernel could never have launched, or ``None``. A ``cp.async``-staged warp tile
+    whose slab (``depth · (tile_m + tile_n) · bk_elems · elem_bytes``, the
+    ``_resolve_warp_stage`` sizing) exceeds the card's dynamic-smem opt-in cap cannot
+    materialize — pre-#330 code stamped such stages anyway, the materializer rejected the
+    main kernel, and the bench recorded the surviving combine kernel's cached µs as an
+    ``ok`` measurement of the whole op. On shapes too small for the latency floor to
+    notice (square.512's combine implies a legal 133 TFLOP/s), THIS check is the only one
+    that catches the class: the measurement is of a kernel set that provably didn't
+    include the stamped kernel."""
+    if row.status != "ok" or row.feat_ver != FEATURIZER_VERSION:
+        return None
+    f = row.features
+    tile_spec = next((str(v) for k, v in f.items() if k.startswith("TILE") and v), "")
+    stage_spec = next((str(v) for k, v in f.items() if k.startswith("STAGE") and v), "")
+    if not tile_spec or not stage_spec.startswith("d"):
+        return None
+    from emmy.compiler.ir.schedule import Stage, TilePlan, is_warp_codec  # noqa: PLC0415
+
+    if not is_warp_codec(tile_spec):
+        return None
+    try:
+        tp, st = TilePlan.parse(tile_spec), Stage.parse(stage_spec)
+    except ValueError:
+        return None
+    if st.transport != "cp.async":
+        return None
+    from emmy import gpu  # noqa: PLC0415
+
+    spec = gpu.by_name(row.gpu) if row.gpu else None
+    if spec is None:
+        return None
+    atom = tp.atom
+    tile_m = tp.units_m * tp.reg_m * atom.atom_m
+    tile_n = tp.units_n * tp.reg_n * atom.atom_n
+    slab = st.depth * (tile_m + tile_n) * tp.bk * atom.atom_k * atom.operand_dtype("a").nbytes
+    if slab > spec.smem_optin:
+        return f"staged slab {slab} B > {spec.smem_optin} B dynamic-smem cap (kernel cannot launch)"
+    return None
+
+
 # The ``perf`` SELECT column list — order must match ``_row_to_perf``.
 _PERF_COLS = (
     "context_key, op_key, backend, status, latency_us_median, latency_us_min, latency_us_max, "
@@ -633,7 +675,7 @@ class SearchDB:
     # ------------------------------------------------------------------
 
     def _drop_implausible(self, row: NodeRow) -> bool:
-        reason = implausible_value_reason(row)
+        reason = implausible_value_reason(row) or impossible_kernel_reason(row)
         if reason is None:
             return False
         kind = "leaf" if row.is_leaf else "branch"
@@ -655,7 +697,7 @@ class SearchDB:
         materialize benched combine-kernel-only and landed as impossibly-fast ``ok``
         leaves, min-propagated up their ancestries."""
         rows = list(self.iter_nodes())
-        flagged = [r for r in rows if implausible_value_reason(r) is not None]
+        flagged = [r for r in rows if implausible_value_reason(r) is not None or impossible_kernel_reason(r) is not None]
         flagged_keys = {r.node_key for r in flagged}
         children: dict[str | None, list[NodeRow]] = {}
         for r in rows:

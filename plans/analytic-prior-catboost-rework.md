@@ -332,8 +332,23 @@ Assumptions (verify early, Phase 3–4):
   (44 leaves + 129 dead branches deleted, 19 branch bounds repaired). Post-purge the node metrics are trustworthy
   on BOTH cards: 5090 TILE fork regret 11.49× → 2.70×, reachability mean 10.96× → 1.73×, calibration +0.59
   (with the 2026-07-09 arch-features refit in place); 4090 TILE 2.24×, reachability mean 1.31×. Phase 3's freeze
-  sanity filter can now simply reuse `implausible_value_reason`. The standout post-cleanup regret carriers are the
-  5090's structural PLACE (4.87×) and WSPEC (2.91×) forks — real signals, not artifacts.
+  sanity filter can now simply reuse `implausible_value_reason`. A residual small-shape class needed a SECOND
+  predicate (`impossible_kernel_reason`): on `square.512.dynM` the combine-only ~2 µs implied a *legal* 133 TFLOP/s,
+  so only kernel validity catches it — a cp.async-staged slab over the card's dynamic-smem cap cannot have launched
+  (8 more rows purged; the 512² regret denominators are honest now, learned reachability there 11.76× → 2.89×).
+  **Follow-ups from the 2026-07-10 clean-data regret run (analytic + both sweep-trained checkpoints):**
+  - **The 5090 sweep checkpoint (`_tune/golden-sweep-5090/prior.json`) is itself poisoned** — trained on the fake
+    rewards, it still steers into the purged region: TILE fork regret 379.9× (qkv.dynM) / 524.4× (mlp_down.dynM)
+    on an otherwise-healthy 1.89× median. Do NOT reuse it; retrain from clean data (next sweep, or filter its
+    reservoir with the shared predicates). The 4090 checkpoint shows no spikes (TILE worst 2.73×).
+  - **The learned prior's reservoir feed (`record_bench` / `add_rows`) bypasses the node-store gate** — the bug
+    mechanism is dead (#330), but the training path has no plausibility defense-in-depth; add one when touching
+    the online loop (needs the card identity, which the reservoir rows don't carry today).
+  - **The now-real analytic targets, by size:** structural PLACE on small matmuls (5090 128²/64² at 5.5×/4.2× —
+    the keep-vs-cut pricing the learned model gets right at 1.03×), WSPEC 2.91×, the TILE/REDUCE K-heavy residuals
+    (mlp_down family 4.4–5.3× TILE with 2.5× REDUCE co-misses), and the 5090 512² TILE (7.1×).
+  - **Learned cross-card transfer quantified**: own-card TILE 1.48×/1.89× degrades to ~2.0× judging the other card,
+    calibration +0.90/+0.77 → ~+0.5 — the decision-11 `H_* × knob` interaction gap, now with clean numbers.
 - Known gap inherited from today: the reduce/pointwise tiers enumerate zero rows through the live-fork capture
   (`analytic.py`'s own comment) — path-descent/golden eval coverage for those tiers is limited until that's fixed.
 - CatBoost's JSON model dump is stable enough to mechanically collapse a stump ensemble into the tier-2 table.

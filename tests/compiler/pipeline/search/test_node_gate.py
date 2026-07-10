@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 
-from emmy.compiler.pipeline.search.db import NodeRow, SearchDB, implausible_value_reason
+from emmy.compiler.pipeline.search.db import NodeRow, SearchDB, implausible_value_reason, impossible_kernel_reason
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 
 _GPU = "NVIDIA GeForce RTX 5090"  # registry records fp32/fp16 peaks -> the gate is active
@@ -149,6 +149,26 @@ def test_overlapping_reduce_kinds_stay_ungated() -> None:
         "REDUCE@a1": "b32",
     }
     assert implausible_value_reason(_row("k", value_us=11.8, features=norm_dyn)) is None
+
+
+def test_over_budget_staged_kernel_is_flagged_at_any_shape() -> None:
+    # The square.512.dynM residue: a cp.async-staged warp tile whose slab (139 KB for
+    # w1x8/f2x8/k8) exceeds the ~99 KB dynamic-smem cap could never launch — but the
+    # combine-only 2 µs it left behind implies a LEGAL 133 TFLOP/s on that small shape,
+    # so only the validity check catches it. The same config unstaged is a real kernel.
+    small = {
+        **{k: v for k, v in _F16_FEATS.items() if not k.startswith(("S_ext_free", "S_ext_reduce"))},
+        "S_ext_free_prod": 512.0,
+        "S_ext_reduce_max": 512.0,
+        "STAGE@a2": "d1/cp",
+    }
+    assert impossible_kernel_reason(_row("k", value_us=2.02, features=small)) is not None
+    assert implausible_value_reason(_row("k", value_us=2.02, features=small)) is None  # latency floor is blind here
+    unstaged = {**small, "STAGE@a2": ""}
+    assert impossible_kernel_reason(_row("k", value_us=2.02, features=unstaged)) is None
+    db = SearchDB()
+    db.record_nodes([_row("bad", value_us=2.02, features=small), _row("ok", value_us=6.0, features=unstaged)])
+    assert _keys(db) == {"ok"}
 
 
 # ---------------------------------------------------------------------------

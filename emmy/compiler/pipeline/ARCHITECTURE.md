@@ -115,7 +115,13 @@ order; a separate `_W_A_DYN` weight set ranks symbolic-axis masked-tile kernels,
 `S_ext_n_symbolic_axis`; two hard-coded interaction gates ride outside the linear weights — the atomic-free split-K
 term, and the tensor-core preference pair `D_scalar_on_warp_eligible` / `D_splitk_roundtrip` off the scheduler's
 per-kernel `S_warp_eligible` row stamp, which stops a warp-eligible f16 contraction deploying a scalar split tile)
-and the learned `CatBoostPrior` once trained, composed behind `FallbackPrior`. `TuningSearch`
+and the learned `CatBoostPrior` once trained, composed behind `FallbackPrior`. The `H_*` regime features are constant
+across a pool's siblings, so no additive weight on them can change a within-pool ranking — architecture
+differentiation instead rides *per-candidate* features that only exist where the hardware offers them: the
+TMA-conditioned geometry interactions (`D_tma_*`, mirroring the tile geometry on TMA-staged rows) let one weight set
+price Hopper/Blackwell tiles separately from cp.async-era ones, and the warp-grid features (`D_w_grid_*`) separate
+same-tile different-grid siblings that were previously byte-identical (the 2026-07-09 4090/5090 golden-sweep TILE
+findings). `TuningSearch`
 (`tune`) ranks the PUCT frontier; `greedy_decide` (`compile` / `run`, via `Run.resolve`) picks via `Prior.pick` —
 measured -O3 reservoir evidence first (`evidence_pick`: the candidate prefix-consistent with the fastest `H_opt=3` row of
 the same op), the `mean_score` argmin otherwise.

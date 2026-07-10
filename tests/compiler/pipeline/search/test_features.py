@@ -77,3 +77,44 @@ def test_tileless_rows_keep_the_scalar_on_warp_guard():
     assert eligible["D_scalar_on_warp_eligible"] == 1.0
     plain = knob_features({**_CTX, "REDUCE@a1": "b256"})  # no warp offer -> guard stays 0
     assert plain["D_scalar_on_warp_eligible"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Warp-grid + TMA-conditioned features (the 2026-07-09 arch-differentiation additions)
+# ---------------------------------------------------------------------------
+
+
+def _warp_feats(tile_codec: str, **extra):
+    return knob_features({**_CTX, "TILE@a1": tile_codec, "REDUCE@a1": "", **extra})
+
+
+def test_warp_grid_separates_same_tile_different_grids():
+    """The load-bearing case from the 4090/5090 golden sweeps: two warp variants realizing the
+    SAME CTA tile (same threads, cells, tile_m x tile_n — every pre-existing geometry feature
+    ties) via a different warp-grid arrangement were byte-identical to every prior — only the
+    grid features separate them."""
+    a = _warp_feats("a:mma_m16n8k16_f16/w2x2/f2x2")  # 64x32 tile as a 2x2 warp grid
+    b = _warp_feats("a:mma_m16n8k16_f16/w4x1/f1x4")  # the same 64x32 tile as a 4x1 grid
+    for key in ("D_threads", "D_cells", "D_log2_area", "D_aspect"):
+        assert a[key] == b[key], key
+    assert (a["D_w_grid_m"], a["D_w_grid_n"]) != (b["D_w_grid_m"], b["D_w_grid_n"])
+
+
+def test_warp_grid_absent_on_scalar_rows():
+    """Grid features are warp-tier only — a scalar thread tile must not fabricate them (the
+    skip-if-missing 0.0 default is the tier-split convention, like ``D_w_*_bk``)."""
+    scalar = knob_features({**_CTX, "TILE@a1": "n16x8/f2x4", "REDUCE@a1": "b8"})
+    assert not any(k.startswith("D_w_grid") for k in scalar)
+
+
+def test_tma_interactions_fire_only_on_tma_stage():
+    """The TMA-conditioned geometry terms are the one-weight-set stand-in for a per-arch split:
+    they must mirror the geometry on a TMA-staged row and stay absent under cp.async, so
+    pre-Hopper pools rank exactly as before."""
+    tma = _warp_feats("a:mma_m16n8k16_f16/w2x4/f2x2", **{"STAGE@a1": "d2/tma/ring"})
+    cp = _warp_feats("a:mma_m16n8k16_f16/w2x4/f2x2", **{"STAGE@a1": "d2/cp/ring"})
+    assert tma["D_tma_grid_m"] == tma["D_w_grid_m"]
+    assert tma["D_tma_grid_n"] == tma["D_w_grid_n"]
+    assert tma["D_tma_aspect"] == tma["D_aspect"]
+    assert tma["D_tma_log2_area"] == tma["D_log2_area"]
+    assert not any(k.startswith("D_tma_") for k in cp)

@@ -322,9 +322,18 @@ Assumptions (verify early, Phase 3–4):
   **RESOLVED 2026-07-09: two ε-greedy `collect-node-data` sweeps landed** — 16,958 `feat_ver=2` rows / 6,036 leaves
   (6,009 ok + 27 `bench_fail`, 39% at `H_opt=3`) across RTX 4090 + RTX 5090, 42–43 op_sigs, 4 context regimes.
   Nodes-based phases are unblocked for these two cards; the old "-O3 rows are scarce" worry is moot (the deployable
-  re-bench lane produces plenty). CAVEAT (2026-07-09 golden sweeps): the 5090 rows include degenerate-fast leaves
-  (physically-impossible µs — see Phase 3's roofline floor), so no sm_120 training or regret number is trustworthy
-  until the freeze filter lands; the 4090 rows are mildly affected (worst fake regret 34.9× vs the 5090's 24643×).
+  re-bench lane produces plenty). ~~CAVEAT: the 5090 rows include degenerate-fast leaves~~ **ROOT-CAUSED AND FIXED
+  (2026-07-10)**: the impossible leaves were pre-#330 split-K variants whose over-budget staged main kernel was
+  rejected at materialize — the bench saw only the shared combine kernel and cache-hit its ~9 µs row as the whole
+  matmul (`ok`), min-propagated up the ancestries. #330 killed the mechanism; `SearchDB.record_nodes` now gates
+  every write on physical plausibility (`implausible_value_reason` — work certified by the stamp identity
+  `S_loop_depth == n_free + n_reduce + n_symbolic`, which exactly separates contraction/reduce kinds from
+  norm/softmax/attention where free×red overcounts), and `scripts/purge_node_store.py` purged the local store
+  (44 leaves + 129 dead branches deleted, 19 branch bounds repaired). Post-purge the node metrics are trustworthy
+  on BOTH cards: 5090 TILE fork regret 11.49× → 2.70×, reachability mean 10.96× → 1.73×, calibration +0.59
+  (with the 2026-07-09 arch-features refit in place); 4090 TILE 2.24×, reachability mean 1.31×. Phase 3's freeze
+  sanity filter can now simply reuse `implausible_value_reason`. The standout post-cleanup regret carriers are the
+  5090's structural PLACE (4.87×) and WSPEC (2.91×) forks — real signals, not artifacts.
 - Known gap inherited from today: the reduce/pointwise tiers enumerate zero rows through the live-fork capture
   (`analytic.py`'s own comment) — path-descent/golden eval coverage for those tiers is limited until that's fixed.
 - CatBoost's JSON model dump is stable enough to mechanically collapse a stump ensemble into the tier-2 table.

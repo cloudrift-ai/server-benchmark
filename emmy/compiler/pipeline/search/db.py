@@ -41,6 +41,10 @@ Pure persistence layer — no MCTS state, no propagation walks. Tables:
   that produced the current ``value_us`` — replaced only on improvement). The
   tune's deployable -O3 re-benches land as extra parentless ``H_opt=3`` leaf
   rows under their own -O3 ``context_key`` (never colliding with the -O1 twin).
+  Every write passes the physical-plausibility gate (:func:`implausible_value_reason`):
+  an ``ok`` row whose latency implies throughput above its card's recorded peak is a
+  mismeasurement, dropped with a warning — never stored (``purge_implausible`` is the
+  one-time repair for stores written before the gate existed).
 
 Concurrency: opened in WAL mode so parallel benches can read while one
 writes. The connection is kept open for the DB's lifetime; callers can
@@ -51,6 +55,7 @@ locking).
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -58,6 +63,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
+
+logger = logging.getLogger(__name__)
 
 
 def _jsonable_geometry(geometry) -> list:
@@ -192,6 +199,62 @@ class NodeRow:
     # version (writers construct rows with live code); rows read back from a pre-stamp DB carry 1
     # and are excluded from prior evaluation (cross-vocabulary features score as garbage).
     feat_ver: int = FEATURIZER_VERSION
+
+
+def implausible_value_reason(row: NodeRow) -> str | None:
+    """THE physical-plausibility predicate for a node row's ``value_us`` — the reason it
+    cannot be a real measurement, or ``None`` when it's plausible/ungateable. Shared by
+    :meth:`SearchDB.record_nodes`'s write-time gate and the one-time
+    :meth:`SearchDB.purge_implausible` repair (``scripts/purge_node_store.py``).
+
+    The bound is the arithmetic-intensity floor the golden A/B integrity gate uses: the
+    throughput a latency implies from the row's stamped shape must stay below the card's
+    recorded peak. ``2·free·reduce_max`` FLOPs is the true work ONLY when the reduce axes
+    are **disjoint** from the output — the iteration space is then exactly
+    ``free_prod × reduce`` (a contraction, or a pure output-shrinking reduce) — which the
+    stamps certify as ``S_loop_depth == n_free + n_reduce + n_symbolic`` (every loop of
+    the nest is either a counted free/symbolic output axis or a counted reduce axis). A
+    norm/softmax kernel fails that equality — its reduced axis is part of the full-size
+    output, so ``free_prod`` already contains it and the product overcounts by the reduce
+    extent (a cooperative norm legitimately runs ~100x its serial sibling, so a latency
+    floor there would flag honest rows); a fused multi-node kernel (attention) fails it
+    too. Both stay ungated rather than falsely flagged — the identity was verified
+    against every stamp combination in the 2026-07 sweep stores. ``reduce_max``, not
+    ``reduce_prod``, keeps the bound a lower estimate of work even off the exact case. A
+    symbolic axis is excluded from the stamped products and benched at the dynamic hint,
+    so it re-enters as one hint factor. Ungateable rows also pass on: non-``ok`` status
+    (a fail sentinel is not a measurement), no stamped shape, unknown card or unrecorded
+    peak, and rows outside the current featurizer vocabulary (their stamps aren't trusted
+    enough to judge)."""
+    if row.status != "ok" or row.value_us <= 0 or row.feat_ver != FEATURIZER_VERSION:
+        return None
+    f = row.features
+    free = float(f.get("S_ext_free_prod") or 0.0)
+    red = float(f.get("S_ext_reduce_max") or 0.0)
+    if free <= 0 or red <= 0:
+        return None
+    # Work = free x red only when every loop multiplies the iteration space (disjoint axes).
+    depth = float(f.get("S_loop_depth") or 0.0)
+    n_sym = float(f.get("S_ext_n_symbolic_axis") or 0.0)
+    n_axes = float(f.get("S_ext_n_free_axis") or 0.0) + float(f.get("S_ext_n_reduce_axis") or 0.0) + n_sym
+    if depth <= 0 or depth != n_axes:
+        return None
+    from emmy import gpu  # noqa: PLC0415
+
+    spec = gpu.by_name(row.gpu) if row.gpu else None
+    if spec is None:
+        return None
+    half = any(k.startswith("S_dtype_") and "f16" in k and v for k, v in f.items())  # f16 / bf16
+    peak = spec.peak_tflops("fp16" if half else "fp32")
+    if not peak:
+        return None
+    from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415
+
+    hint = DEFAULT_SEQ_HINT if n_sym > 0 else 1
+    implied = 2.0 * free * red * hint / row.value_us / 1e6  # FLOP / µs -> TFLOP/s
+    if implied > peak:
+        return f"implies {implied:.0f} TFLOP/s > {peak:.0f} device peak"
+    return None
 
 
 # The ``perf`` SELECT column list — order must match ``_row_to_perf``.
@@ -569,6 +632,68 @@ class SearchDB:
     # Search-tree nodes — write
     # ------------------------------------------------------------------
 
+    def _drop_implausible(self, row: NodeRow) -> bool:
+        reason = implausible_value_reason(row)
+        if reason is None:
+            return False
+        kind = "leaf" if row.is_leaf else "branch"
+        logger.warning("[node-store] dropping implausible %s row for %s on %s: %s", kind, row.op_sig[:12], row.gpu or "?", reason)
+        return True
+
+    def purge_implausible(self, *, dry_run: bool = False) -> dict[str, int]:
+        """One-time repair of a store that predates the :meth:`record_nodes` gate:
+        delete every row :func:`implausible_value_reason` flags, and REPAIR (not
+        delete) a flagged **branch** that still has surviving ``ok`` leaf descendants
+        — its value-of-position bound is recomputed as the min over them, so the
+        fork-tree structure the diagnostics group on survives the purge. A flagged
+        branch with no surviving ``ok`` leaf below it is deleted (matching the
+        "a branch whose descendants all failed stays unrecorded" convention).
+        Returns a receipt dict; ``dry_run`` computes it without writing.
+
+        Motivation: the 2026-07-08/09 golden sweeps ran before the #330 fix, so
+        split-K variants whose over-budget staged main kernel was rejected at
+        materialize benched combine-kernel-only and landed as impossibly-fast ``ok``
+        leaves, min-propagated up their ancestries."""
+        rows = list(self.iter_nodes())
+        flagged = [r for r in rows if implausible_value_reason(r) is not None]
+        flagged_keys = {r.node_key for r in flagged}
+        children: dict[str | None, list[NodeRow]] = {}
+        for r in rows:
+            children.setdefault(r.parent_key, []).append(r)
+
+        def surviving_leaf_min(key: str) -> float | None:
+            # Flagged LEAVES are excluded from the min (they're being deleted); flagged
+            # branches are still traversed — the honest leaves below them belong to
+            # every ancestor's subtree regardless of the intermediate's own fate.
+            best: float | None = None
+            stack = [key]
+            while stack:
+                for child in children.get(stack.pop(), ()):
+                    if child.is_leaf:
+                        if child.status == "ok" and child.node_key not in flagged_keys:
+                            best = child.value_us if best is None else min(best, child.value_us)
+                    else:
+                        stack.append(child.node_key)
+            return best
+
+        receipt = {"deleted_leaves": 0, "deleted_branches": 0, "repaired_branches": 0}
+        for r in flagged:
+            if r.is_leaf:
+                receipt["deleted_leaves"] += 1
+                if not dry_run:
+                    self._conn.execute("DELETE FROM node WHERE node_key = ?", (r.node_key,))
+                continue
+            repaired = surviving_leaf_min(r.node_key)
+            if repaired is None:
+                receipt["deleted_branches"] += 1
+                if not dry_run:
+                    self._conn.execute("DELETE FROM node WHERE node_key = ?", (r.node_key,))
+            else:
+                receipt["repaired_branches"] += 1
+                if not dry_run:
+                    self._conn.execute("UPDATE node SET value_us = ? WHERE node_key = ?", (repaired, r.node_key))
+        return receipt
+
     def record_nodes(self, rows: list[NodeRow]) -> None:
         """Upsert a batch of search-tree node rows (one finished per-kernel search's
         worth), with **per-kind value semantics**: a *branch*'s ``value_us`` is a
@@ -600,7 +725,18 @@ class SearchDB:
         Manual lookup-guard + INSERT/UPDATE (the ``record_perf`` / ``record_lowering``
         idiom) rather than ``INSERT OR REPLACE`` — the latter would reset
         ``n_updates`` and drop the old value. Row-at-a-time autocommit like the rest
-        of the file; a finished search is a few-hundred-row batch at most."""
+        of the file; a finished search is a few-hundred-row batch at most.
+
+        Every incoming row first passes the physical-plausibility gate
+        (:func:`implausible_value_reason`): an ``ok`` row whose ``value_us`` implies
+        throughput above its card's recorded peak is a mismeasurement (a fragment's
+        cost standing in for the whole op, a silently-failed launch, …), never a fast
+        kernel — it is dropped with a warning instead of stored. Applying the gate
+        HERE covers both writers (``_collect_node_records`` batches and
+        ``merge_nodes``' cross-card imports, whose source rows may predate the gate),
+        and dropping poisoned *branch* rows too (their value-of-position min trips
+        the same physics) keeps a poisoned in-batch chain from landing at all."""
+        rows = [r for r in rows if not self._drop_implausible(r)]
         now = datetime.now(UTC).isoformat()
         for r in rows:
             feats_json = json.dumps(r.features, sort_keys=True, default=str)

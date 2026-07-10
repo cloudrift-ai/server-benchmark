@@ -105,10 +105,9 @@ configs:
     N: 28672
     K: 4096
     dtype: 'fp16'
-    # 2026-07-09 sweep: replaced w2x2/f4x4/k4 d1/tma (recorded 605.5) — that exact pin now re-benches
-    # at 641.5 live (6x reproduced; cuBLAS steady at ~556, so a real codegen drift, see the sweep
-    # findings), while this config runs 608-612 live. Recorded emmy_us is higher than the old entry's
-    # because the old number is no longer reproducible.
+    # 2026-07-09 sweep: replaced w2x2/f4x4/k4 d1/tma (recorded 605.5) — that pin benches ~638 even at
+    # its own recording commit (8ab967cf, bisect-verified; cuBLAS steady), so the old 605.5 was a
+    # recording-fidelity miss, not codegen drift. This config runs 608-612 live (6x reproduced).
     knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd4/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x4/f4x4/k2', VECTORIZE_LOADS: true}
     emmy_us: 610.6
     cublas_us: 557.94

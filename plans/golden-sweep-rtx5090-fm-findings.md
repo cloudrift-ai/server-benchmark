@@ -91,8 +91,8 @@ category unreliable). vs cuBLAS = greedy_us / live eager row (>1 = emmy slower).
 | reduce k2048.dynM / k8192.dynM | 2.1 / 3.3 | 1.5(*) / 3.3(*) | 1.40(*) / 1.00(*) | unreliable golden re-bench | 5 / 6 | 0.42 / 0.55 |
 
 Replacement notes: all three replaces reproduced across 3–6 runs with <1% variance; the gate_up pair's recorded
-`emmy_us` is HIGHER than the old entries' recorded values because the old configs regressed live (Finding 4) — the
-old numbers are no longer reproducible, and the YAML entries carry inline comments explaining it.
+`emmy_us` is HIGHER than the old entries' recorded values because the old recordings were never reproducible under
+their own knobs (Finding 4, bisect-resolved) — the YAML entries carry inline comments explaining it.
 
 ## Finding 1 — gate-off greedy deploys a per-cell scalar kernel on qkv.h4096 (~1000×)
 
@@ -109,12 +109,16 @@ for this shape — the winner-focused -O3 rebench thinned the deployable evidenc
 (the f16acc row) **does not exist in the gate-off enumeration**, so the deploy-time evidence pick falls through to
 the model over rows it has thin/anti-correlated data for and lands on the scalar tier.
 
-Recommendation (two halves): (a) the tuner should -O3-rebench the best **standard-regime** row alongside the
-overall winner whenever a precision gate is on — one extra rebench per shape keeps the gate-off deploy lane
-evidence-grounded (`emmy/commands/tune.py`, the -O3 rebench selection); (b) the analytic TILE weights are
-anti-calibrated on this shape family (free=12288) — include this sweep's rows in a `golden_knob_heuristics.py`
-refit. Until (a) lands, gate-on sweeps should be followed by a gate-off `eval golden` spot-check (this is now in
-the skill's fast-math lane as the diagnostics step).
+**FIXED (2026-07-09, post-sweep).** Root cause: the -O3 rebench band (`mcts.TuningSearch.observe`) measured every
+row against the GLOBAL best -O1 latency; under the gate the f16acc row owned the best, and this sweep's
+`EMMY_O3_TOL=0.10` (the skill's time lever) put the best standard row (~8% off) outside the band — so the standard
+lane got zero -O3 evidence and the gate-off evidence-first deploy fell to the model argmin over anti-calibrated
+scores. The fix makes the band **per-regime**: a standard row competes against the best standard -O1 latency
+(`fast_math_knobs` discriminates; no gate → identical behavior), so the best standard row always reaches -O3.
+Verified: after a gate-on re-tune of the shape, the gate-off greedy deploys `w4x4/f2x2/k4 d2/tma/ring` at 250.8 µs
+(0.99x vs cuBLAS), and the same A/B now benches both golden rows — the `[fm]` entry replays at 240.1 µs gate-off
+via its pin. Remaining half: the analytic TILE weights stay anti-calibrated on free=12288 (Spearman −0.29) —
+include this sweep's rows in the next `golden_knob_heuristics.py` refit.
 
 ## Finding 2 — the freshly-trained learned prior buries the goldens (median rank 587) while the analytic ranks them #1
 
@@ -142,18 +146,19 @@ A/B hit. Recommendation: patience is already 50 and the golden ranks #1 analytic
 inversion on tiny kernels (`EMMY_O3_TOL=0.10` trims contenders whose -O1 rank is >10% off); for the ≤512 shapes
 specifically, widen the -O3 rebench band (or rebench top-N by count, not tolerance) in `emmy/commands/tune.py`.
 
-## Finding 4 — the old gate_up configs regressed ~6% on identical pins (codegen drift)
+## Finding 4 — the old gate_up recordings were never reproducible (recording fidelity, NOT codegen drift)
 
-The replaced `mlp_gate_up.h4096` golden (`w2x2/f4x4/k4 d1/tma`, recorded 605.5 µs) re-benches at **641.5 µs** live
-with the pin verified reproduced (6 runs, <1% spread; cuBLAS steady at ~556 vs its recorded 557.9, ruling out
-clocks). The dynM twin (`w8x2/f2x8/k4`, recorded 596.3) re-benches at 641.0 — with a second wrinkle: its recorded
-knob set never pinned `REDUCE`, and today's greedy fill adds `g2k` to the unpinned family (613.6 + 27.4 finalize),
-so its drift mixes codegen change with under-specified-pin drift. Something between the 2026-07-02 seventh sweep
-and today (candidates: #326/#327/#330/#335/#337/#338 — the f16acc PR does not touch f32-accumulate codegen) slowed
-these two configs. Recommendation: bisect with the repro command
-(`EMMY_KNOBS="TILE=a:mma_m16n8k16_f16_f32/w2x2/f4x4/k4,STAGE=d1/tma" emmy run --bench -c "<gate_up snippet>"`);
-and when recording goldens, always record the resolved `REDUCE` (even empty) — the honest-stamping rule the
-enumeration already follows, extended to the YAML.
+**Bisect-resolved (2026-07-09, post-sweep).** The replaced `mlp_gate_up.h4096` golden (`w2x2/f4x4/k4 d1/tma`,
+recorded 605.5 µs at commit 8ab967cf) re-benches at **638 µs at its own recording commit** and 639 at HEAD
+(worktree bisect, identical pin, cuBLAS steady at ~552-557 on both) — so no code change slowed it; the recorded
+605.5 was not produced by the recorded knob set. The pre-sweep tune-DB backup predates that sweep, so the original
+measurement row is unrecoverable; the mechanism is the same family as the dynM twin's wrinkle: its recorded knobs
+never pinned `REDUCE`, and today's greedy fill adds `g2k` (613.6 + 27.4 finalize = 641.0) — the recorded knob set
+under-specifies what actually ran. Recommendations: (a) when recording goldens, record every resolved schedule
+family (even the empty `REDUCE`) — the enumeration's honest-stamping rule extended to the YAML; (b) the recorder
+should close the loop: after editing the YAML, one `run --bench --golden NAME` and require the golden row within
+~3% of the just-written `emmy_us` (the #335 pin-verification gate checks knob fidelity, not latency
+reproducibility — this is the missing half).
 
 ## Finding 5 — attention.hd64 static: greedy 1.29× off its golden; the dynM twin reproduces
 

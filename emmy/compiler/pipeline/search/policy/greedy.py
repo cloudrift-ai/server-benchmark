@@ -30,6 +30,7 @@ emitted sibling (option-0).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import replace
 from functools import lru_cache
@@ -37,6 +38,8 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.graph import Graph
 from emmy.compiler.pipeline.fork import Fork, flatten_leaves
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from emmy.compiler.context import Context
@@ -309,6 +312,29 @@ def _db_measured_pick(index: dict[frozenset, list[tuple[dict, float, bool]]], ro
     return best if best is not None else best_rank
 
 
+def _warn_disjoint_evidence(index: dict[frozenset, list[tuple[dict, float, bool]]], rows: list[dict], node_id: str) -> None:
+    """Warn when a fork's candidate set is DISJOINT from its measured evidence:
+    the DB holds rows for this kernel's structural signature, yet
+    :func:`_db_measured_pick` matched none of them against any offered
+    candidate. That condition is exactly "the tune measured a schedule tier
+    the deploy did not offer" — the model then extrapolates over an
+    evidence-free candidate set, which shipped gemma o_proj on a scalar tile
+    16x its own measured mma rows (the stale-placeholder offer gap). A cold
+    compile (no rows for the signature at all) stays silent — extrapolation
+    is expected there."""
+    sigs = {frozenset((k, str(v)) for k, v in r.items() if k.startswith("S_")) for r in rows}
+    n_measured = sum(len(g) for sig in sigs for g in _sig_groups(index, sig))
+    if n_measured:
+        logger.warning(
+            "deploy: node %r has %d measured DB row(s) for its structural signature, but none matches any of the "
+            "%d offered candidates — the tune measured a schedule tier this compile did not offer; falling back to "
+            "the model prediction. Investigate the enumeration (offer gates) for this kernel.",
+            node_id,
+            n_measured,
+            len(rows),
+        )
+
+
 def greedy_decide(
     blocked: dict[str, set[frozenset]] | None = None,
     *,
@@ -419,6 +445,8 @@ def greedy_decide(
                 got = ev(rows)
             if got is None and db_index():
                 got = _db_measured_pick(db_index(), rows)
+                if got is None:
+                    _warn_disjoint_evidence(db_index(), rows, fp.node_id)
             best_i, price = got if got is not None else picker(rows)
         else:  # bare-mean_scores prior object (tests / custom callers)
             scores = the_prior.mean_scores(rows)

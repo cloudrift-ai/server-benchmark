@@ -126,3 +126,58 @@ def test_decide_score_lands_on_trace() -> None:
     run = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((8, 0)))
     _, trace = run.resolve(_f32_matmul_graph(), scored)
     assert trace and all(d.score == 42.0 for d in trace)
+
+
+# ---------------------------------------------------------------------------
+# Apply-time I/O refresh (the in-batch op-swap staleness guard)
+# ---------------------------------------------------------------------------
+
+
+def test_try_rewrite_refreshes_swapped_op_io() -> None:
+    """An earlier apply in the same rule batch can swap a consumed node's op for a rebuilt
+    instance whose I/O is still ``_seed_io_placeholders``' ``(f32, ())`` stubs — ``Match.is_alive``
+    snapshots ``Node`` identity and cannot see an op swap. ``Candidate.try_rewrite`` must refresh
+    each consumed node's op I/O against the live graph before invoking the rule: a rule reading
+    stale placeholder dtypes mis-schedules (the gemma o_proj misdeploy — ``_warp_atoms`` read
+    placeholder f32 off an all-f16 graph, never offered the mma tier, and greedy shipped a scalar
+    tile 16x the kernel's own measured mma rows)."""
+    from emmy.compiler.pipeline.pipeline import Cursor, Pattern, Rule, RuleSkipped
+    from emmy.compiler.pipeline.search.candidate import Candidate
+
+    class SpyMatmulOp(MatmulOp):
+        def __init__(self):
+            super().__init__()
+            self.pop_calls = 0
+
+        def populate_io(self, graph, node):
+            self.pop_calls += 1
+            super().populate_io(graph, node)
+
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("a", (4, 4)), node_id="a")
+    g.add_node(SpyMatmulOp(), ["a", "a"], Tensor("o", (4, 4)), node_id="o")
+    g.inputs, g.outputs = ["a"], ["o"]
+
+    seen: dict = {}
+
+    def rewrite(match):
+        seen["op"] = match.root.op
+        seen["inputs"] = dict(match.root.op.inputs)
+        raise RuleSkipped("probe only")
+
+    rule = Rule(name="probe", pattern=[Pattern("root", MatmulOp)], rewrite=rewrite, param_names=("match",))
+    pl = Pipeline.from_pattern([Pattern("root", MatmulOp)])
+    matches = pl.match(g, rule)
+    assert len(matches) == 1
+
+    # Simulate the in-batch swap: same Node object (``is_alive`` passes), fresh op instance whose
+    # I/O was never matcher-refreshed — exactly what an earlier apply's splice leaves behind.
+    fresh = SpyMatmulOp()
+    g.nodes["o"].op = fresh
+    assert fresh.pop_calls == 0
+
+    run = Run(pipeline=pl, ctx=Context.from_target((8, 0)))
+    Candidate(run=run, graph=g, cursor=Cursor(run=run)).try_rewrite(matches[0])
+    assert fresh.pop_calls == 1, "try_rewrite must refresh the consumed node's op I/O at apply time"
+    assert seen["op"] is fresh, "the rule must see the swapped-in op"
+    assert seen["inputs"].get("a") is g.nodes["a"].output, "the rule must see graph-true operand tensors, not placeholders"

@@ -23,7 +23,7 @@ from emmy.compiler import dtype as _dt
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, RmsNormOp
+from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, ReshapeOp, RmsNormOp, SdpaOp, TransposeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from tests.compiler.conftest import requires_cuda, requires_sm90
 
@@ -267,3 +267,44 @@ def test_mixed_dtype_matmul_demotes_a_to_mma(tier, monkeypatch):
         assert any("emmy_mma" in s for s in srcs), "the mixed-dtype matmul must engage the mma tier via the demoting sync fill"
     ref = ins["x"].astype(np.float16).astype(np.float32) @ ins["w"].astype(np.float32)
     np.testing.assert_allclose(got.reshape(_M, _N).astype(np.float32), ref, atol=0.1, rtol=2e-2)
+
+
+@requires_cuda
+def test_sdpa_consumer_projection_reaches_mma(monkeypatch):
+    """The attention output projection — ``linear(reshape(transpose(sdpa(q, k, v))))`` over a
+    **symbolic seq axis, causal**: gemma's o_proj composition — must reach the mma tier under a
+    warp ``TILE`` pin. The flash rewrite splices a REBUILT projection op into the graph mid-batch;
+    a later match applying against the swapped op used to read ``_seed_io_placeholders``'
+    ``(f32, ())`` stubs (``Match.is_alive`` snapshots node identity and cannot see an op swap), so
+    ``_warp_atoms`` refused the all-f16 contraction and the deploy fell to a scalar tile — 16x its
+    own measured mma rows on the gemma-4-12B layer. ``Candidate.try_rewrite``'s apply-time
+    ``populate_io`` refresh restores the graph-true dtypes; this pins it."""
+    monkeypatch.setenv("EMMY_TILE", _WARP_TILE)
+    B, H, S, D = 1, 4, 64, 64
+    NO = 96  # projection out-features
+    Sd = Dim("seq_len", hint=S)
+    g = Graph()
+    for name in ("q", "k", "v"):
+        g.add_node(InputOp(), [], Tensor(name, (B, H, Sd, D), F16), node_id=name)
+    g.add_node(InputOp(), [], Tensor("wo", (NO, H * D), F16), node_id="wo")
+    g.add_node(SdpaOp(is_causal=True), ["q", "k", "v"], Tensor("att", (B, H, Sd, D), F16), node_id="att")
+    g.add_node(TransposeOp(axes=(1, 2)), ["att"], Tensor("attt", (B, Sd, H, D), F16), node_id="attt")
+    g.add_node(ReshapeOp(shape=(B, Sd, H * D)), ["attt"], Tensor("attr", (B, Sd, H * D), F16), node_id="attr")
+    g.add_node(LinearOp(has_bias=False), ["attr", "wo"], Tensor("o", (B, Sd, NO), F16), node_id="o")
+    g.inputs, g.outputs = ["q", "k", "v", "wo"], ["o"]
+
+    rng = np.random.default_rng(0)
+    ins = {n: (rng.standard_normal((B, H, S, D)) * 0.3).astype(np.float16) for n in ("q", "k", "v")}
+    ins["wo"] = (rng.standard_normal((NO, H * D)) * 0.1).astype(np.float16)
+    got, srcs = _compile_run(g, ins)
+    proj = [s for s in srcs if "wo" in s]
+    assert proj, "no kernel references the projection weight"
+    assert any("emmy_mma" in s for s in proj), "the sdpa-consumer projection must honor the warp TILE pin (the placeholder-I/O offer gap)"
+    q, k, v, wo = (ins[n].astype(np.float32) for n in ("q", "k", "v", "wo"))
+    scores = (q[0] @ np.swapaxes(k[0], -1, -2)) / np.sqrt(D)
+    scores += np.triu(np.full((S, S), -np.inf, dtype=np.float32), k=1)  # causal mask
+    p = np.exp(scores - scores.max(axis=-1, keepdims=True))
+    p /= p.sum(axis=-1, keepdims=True)
+    att = p @ v[0]  # (H, S, D)
+    ref = np.transpose(att, (1, 0, 2)).reshape(S, H * D) @ wo.T
+    np.testing.assert_allclose(got.reshape(S, NO).astype(np.float32), ref, atol=0.5, rtol=0.1)

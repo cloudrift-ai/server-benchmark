@@ -178,8 +178,9 @@ first attention entry): cold greedy on this unseeded shape doesn't just misdeplo
 same hazard class as the run's 13 sdpa bench_fails, reproduced on a second card). Bare-TILE probe (the
 findings-4 F3 manual flow): `TILE=a:mma_m16n8k16_f16/w4x1/f1x2/k16` + `STAGE=d2/cp/ring` reproduces the
 axis-keyed optimum exactly (the pj contraction resolves its own `f1x32`); measured 68.4 µs vs torch SDPA 49.0
-(3-pass stable), replay through the golden plumbing 68.3 µs with clean integrity flags. A 4090 seed needs a box
-(follow-up).
+(3-pass stable), replay through the golden plumbing 68.3 µs with clean integrity flags. **The 4090 entry is
+seeded too** (second rented box): 44.1 µs vs torch SDPA 42.0 — **0.94×, at parity** — 3-pass stable, `/p2` within
+noise (44.3), replay validated 44.3 µs with clean flags. Both cards record the same knob spelling.
 
 New tooling findings from this pass:
 

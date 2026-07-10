@@ -89,6 +89,19 @@ class Candidate:
             # search loop would re-pop the same rule batch forever.
             self._advance_if_last(match)
             return None
+        # Refresh each consumed node's op I/O against the graph as it stands
+        # NOW: an earlier apply in this batch (e.g. the flash fragment splice)
+        # may have swapped a consumed node's op for a rebuilt instance whose
+        # ``inputs`` are still ``_seed_io_placeholders``' ``(f32, ())`` stubs —
+        # ``is_alive``'s node-identity check cannot see an op swap, and a rule
+        # reading placeholder dtypes mis-schedules (gemma o_proj deployed a
+        # scalar tile 16x its own measured mma rows because ``_warp_atoms``
+        # read the placeholder f32). Same contract as the match-time refresh;
+        # idempotent when nothing changed.
+        for nid in match.consumed:
+            node = match.graph.nodes.get(nid)
+            if node is not None:
+                node.op.populate_io(match.graph, node)
         rule = match.rule
         try:
             result = rule.rewrite(**_build_rewrite_kwargs(rule, match, self.ctx))

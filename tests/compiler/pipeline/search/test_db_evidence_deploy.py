@@ -158,3 +158,28 @@ def test_structural_price_probe_threads_db_evidence(monkeypatch):
     assert greedy._price_kernel(graph, "n0", ctx, prior=None, memo={}, db=sentinel) is None
     assert seen.get("db") is sentinel
     assert seen.get("price_structural") is False
+
+
+def test_disjoint_evidence_warns(caplog):
+    """When the DB holds measured rows for a fork's structural signature but NO offered
+    candidate prefix-matches any of them, the fallback to the model prediction must warn:
+    that condition is exactly "the tune measured a schedule tier this compile did not
+    offer" (the gemma o_proj scalar misdeploy — the DB held 34 mma rows while the deploy
+    fork offered 370 scalar-only candidates). A cold signature (no rows at all) stays
+    silent — extrapolation is expected there."""
+    import logging
+
+    from emmy.compiler.pipeline.search.policy.greedy import _warn_disjoint_evidence
+
+    index = _index_of(({"TILE": "a:mma_m16n8k16_f16/w2x2/f4x8", "REDUCE": "g2k"}, 225.2))
+    scalar_only = [{**_SIG, "TILE": "n32x8/f4x14", "REDUCE": "g2k"}, {**_SIG, "TILE": "n16x16/f4x8", "REDUCE": "b256"}]
+    assert _db_measured_pick(index, scalar_only) is None
+    with caplog.at_level(logging.WARNING):
+        _warn_disjoint_evidence(index, scalar_only, "linear_3")
+    assert any("measured a schedule tier" in r.message for r in caplog.records)
+
+    caplog.clear()
+    cold = [{"S_ext_free_prod": 99.0, "TILE": "n32x8/f4x14"}]
+    with caplog.at_level(logging.WARNING):
+        _warn_disjoint_evidence(index, cold, "linear_3")
+    assert not caplog.records, "a cold signature (no evidence at all) must stay silent"

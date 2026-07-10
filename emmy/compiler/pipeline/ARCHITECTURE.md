@@ -85,6 +85,12 @@ The dispatcher binds parameters by name. Reserved names: `graph`, `match`, `root
 `PATTERN` bind to matched `Node` objects. Anything else binds positionally to `root.inputs[i]`. Take only what you need —
 `ctx` is optional. Files starting with `_` (e.g. `_broadcast.py`) are **not** loaded as rules — they're shared helpers.
 
+A rule always sees **graph-true operand Tensors**: op `inputs` / `outputs` are refreshed from the graph at match build
+AND again at apply time (`Candidate.try_rewrite`) — an earlier apply in the same batch may have swapped a consumed
+node's op for a rebuilt instance still carrying its `(f32, ())` seeding placeholders, which `Match.is_alive`'s
+node-identity check cannot see (the gemma o_proj misdeploy: a scalar tile shipped at 16x the kernel's measured mma
+rows because `_warp_atoms` read placeholder dtypes off an all-f16 graph).
+
 The return type discriminates the rewrite flavor:
 
 - **Functional** — returns a `Graph` fragment, spliced in place of `match.output` (defaults to `match.root_node_id`);

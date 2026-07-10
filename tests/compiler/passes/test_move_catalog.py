@@ -178,7 +178,7 @@ def test_warp_staged_rows_fit_the_smem_budget():
         assert slot <= ctx.max_dynamic_smem, f"{family_value(r, 'TILE')} / {family_value(r, 'STAGE')}: slot {slot} over budget"
     # The over-budget tile itself stays enumerable — gmem-direct only (its every staged sibling
     # resolver-declines), split-K rows included.
-    big = [r for r in rows if family_value(r, "TILE") == "a:mma_m16n8k16_f16/w4x4/f4x8/k8"]
+    big = [r for r in rows if family_value(r, "TILE") == "a:mma_m16n8k16_f16_f32/w4x4/f4x8/k8"]
     assert big, "the 256x256 warp tile dropped out of the enumeration"
     assert all(family_value(r, "STAGE") == "" for r in big)
     assert any(family_value(r, "REDUCE") for r in big), "split-K must still ride the gmem-direct rows"

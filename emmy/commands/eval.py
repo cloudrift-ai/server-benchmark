@@ -726,6 +726,15 @@ def _emit_prior_golden_check(configs: list, *, title: bool = True, perf: dict | 
     # Group configs sharing a shape (same name → same snippet → same greedy pick) so the
     # table carries one row per shape, not one per recorded golden. Each shape's pick is
     # compared against its *closest* golden (the config it reproduces the most knobs of).
+    # A shape's FAST-MATH entries (``GoldenConfig.fast_math`` — precision-trading knobs) form
+    # their own row (``<name> [fm]``): their greedy pick runs under the pinned
+    # ``F16_MMA_F32_ACC`` gate (the only enumeration that offers their forks), and the
+    # standard row's pick never mixes with them — each regime reproduces against its own
+    # enumeration.
+    from contextlib import nullcontext  # noqa: PLC0415
+
+    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC  # noqa: PLC0415
+
     groups: dict[str, list] = {}
     for g in configs:
         groups.setdefault(g.name, []).append(g)
@@ -735,24 +744,30 @@ def _emit_prior_golden_check(configs: list, *, title: bool = True, perf: dict | 
     entries: list[tuple] = []  # ("row", lead_cells, gold, got) | ("err", name, message)
     try:
         for name, group in groups.items():
-            try:
-                got = picked(group[0].snippet(), tuple(getattr(group[0], "dynamic_specs", list)()))
-            except Exception as e:  # noqa: BLE001 — one shape's error shouldn't abort the report
-                entries.append(("err", name, " ".join(f"{type(e).__name__}: {e}".split())[:100]))
-                continue
-            # Closest golden: most knobs reproduced, tie-broken by match fraction.
-            scored = [(sum(1 for k in gd if (got.get(k) == gd[k])), gd) for gd in (tunable(c.knobs) for c in group)]
-            matched, gold = max(scored, key=lambda t: (t[0], t[0] / len(t[1]) if t[1] else 1.0))
-            n_match += matched == len(gold)
-            n_rows += 1
-            for k in gold:
-                knob_total[k] = knob_total.get(k, 0) + 1
-                knob_match[k] = knob_match.get(k, 0) + (got.get(k) == gold[k])
-            lead = [name, (f"{matched}/{len(gold)}", _ratio_color(matched, len(gold)))]
-            pc = _perf_cell(perf, name)
-            if pc is not None:
-                lead.append(pc)
-            entries.append(("row", lead, gold, got))
+            for fm in (False, True):
+                sub = [c for c in group if c.fast_math == fm]
+                if not sub:
+                    continue
+                label = f"{name} [fm]" if fm else name
+                try:
+                    with F16_MMA_F32_ACC.pinned("1") if fm else nullcontext():
+                        got = picked(sub[0].snippet(), tuple(getattr(sub[0], "dynamic_specs", list)()))
+                except Exception as e:  # noqa: BLE001 — one shape's error shouldn't abort the report
+                    entries.append(("err", label, " ".join(f"{type(e).__name__}: {e}".split())[:100]))
+                    continue
+                # Closest golden: most knobs reproduced, tie-broken by match fraction.
+                scored = [(sum(1 for k in gd if (got.get(k) == gd[k])), gd) for gd in (tunable(c.knobs) for c in sub)]
+                matched, gold = max(scored, key=lambda t: (t[0], t[0] / len(t[1]) if t[1] else 1.0))
+                n_match += matched == len(gold)
+                n_rows += 1
+                for k in gold:
+                    knob_total[k] = knob_total.get(k, 0) + 1
+                    knob_match[k] = knob_match.get(k, 0) + (got.get(k) == gold[k])
+                lead = [label, (f"{matched}/{len(gold)}", _ratio_color(matched, len(gold)))]
+                pc = _perf_cell(perf, name)
+                if pc is not None:
+                    lead.append(pc)
+                entries.append(("row", lead, gold, got))
     finally:
         for lg, lv in zip(quiet, prev, strict=True):
             lg.setLevel(lv)

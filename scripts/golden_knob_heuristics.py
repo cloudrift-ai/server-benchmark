@@ -125,7 +125,17 @@ def build_cases() -> list[tuple[str, str, int, list[dict[str, float]]]]:
         elif isinstance(g, MatmulGoldenConfig):
             dyn = bool(g.dynamic)
             base = _base(ctx, g.M, g.N, g.K, dynamic=dyn)
-            rows, _ = _enumerate(g.M, g.N, g.K, g.dtype, ctx)
+            # A fast-math golden's row only exists in the gate-on enumeration (the same
+            # self-gating seam as ``analytic.evaluate_golden``) — pin the gate for the
+            # reconstruction so the f16-accumulate rows are present and the fit anchors
+            # their ``MMA_acc_bits`` discriminator.
+            if g.fast_math:
+                from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC  # noqa: PLC0415
+
+                with F16_MMA_F32_ACC.pinned("1"):
+                    rows, _ = _enumerate(g.M, g.N, g.K, g.dtype, ctx)
+            else:
+                rows, _ = _enumerate(g.M, g.N, g.K, g.dtype, ctx)
             tier = "dyn" if dyn else ("thread" if g.dtype == "fp32" else "warp")
         else:
             continue

@@ -17,7 +17,7 @@ configs:
     N: 512
     K: 512
     dtype: 'fp16'
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'g2k', STAGE: 'd3/tma/ring', TILE: 'a:mma_m16n8k16_f16/w1x8/f4x1/k4', VECTORIZE_LOADS: true}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'g2k', STAGE: 'd3/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k4', VECTORIZE_LOADS: true}
     emmy_us: 4.2
     cublas_us: 6.14
   - kernel: matmul
@@ -26,7 +26,7 @@ configs:
     N: 1024
     K: 1024
     dtype: 'fp16'
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16/w4x4/f1x4/k8', VECTORIZE_LOADS: true}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x4/f1x4/k8', VECTORIZE_LOADS: true}
     emmy_us: 15.59
     cublas_us: 14.51
   - kernel: matmul
@@ -35,7 +35,7 @@ configs:
     N: 2048
     K: 2048
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16/w2x4/f2x2/k4', STAGE: 'd2/tma/ring'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x2/k4', STAGE: 'd2/tma/ring'}
     emmy_us: 88.5
     cublas_us: 98.36
   - kernel: matmul
@@ -44,7 +44,7 @@ configs:
     N: 4096
     K: 4096
     dtype: 'fp16'
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd4/tma/ring', TILE: 'a:mma_m16n8k16_f16/w2x4/f2x4', VECTORIZE_LOADS: true}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd4/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x4', VECTORIZE_LOADS: true}
     emmy_us: 640.83
     cublas_us: 640.93
   - kernel: matmul
@@ -54,8 +54,20 @@ configs:
     K: 512
     dtype: 'fp16'
     dynamic: true
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'g2k', STAGE: 'd4/tma/ring', TILE: 'a:mma_m16n8k16_f16/w2x4/f2x2/k4', VECTORIZE_LOADS: true}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'g2k', STAGE: 'd4/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x2/k4', VECTORIZE_LOADS: true}
     emmy_us: 6.14
+    cublas_us: 6.14
+  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): 3.6 µs vs the standard golden's live
+  # 4.2 (0.86x, reproduced 3x). Kept beside the standard entry — gate-off compiles can't reach it.
+  - kernel: matmul
+    name: matmul.square.512.dynM
+    M: 512
+    N: 512
+    K: 512
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f2x2/k8', VECTORIZE_LOADS: true}
+    emmy_us: 3.6
     cublas_us: 6.14
   - kernel: matmul
     name: matmul.qkv.h4096
@@ -63,8 +75,20 @@ configs:
     N: 12288
     K: 4096
     dtype: 'fp16'
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd4/tma/ring', TILE: 'a:mma_m16n8k16_f16/w2x4/f2x4', VECTORIZE_LOADS: true}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd4/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x4', VECTORIZE_LOADS: true}
     emmy_us: 258.47
+    cublas_us: 250.54
+  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane — torch-default fp16 numerics): kept
+  # BESIDE the standard entry, never replacing it (a gate-off compile can't reach this config).
+  # 2026-07-09 fm sweep: 238.5 µs vs the standard golden's live 258.9 (0.92x), 0.95x vs cuBLAS HGEMM.
+  - kernel: matmul
+    name: matmul.qkv.h4096
+    M: 512
+    N: 12288
+    K: 4096
+    dtype: 'fp16'
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd1/tma', TILE: 'a:mma_m16n8k16_f16_f16/w2x4/f2x4/k8', VECTORIZE_LOADS: true}
+    emmy_us: 238.5
     cublas_us: 250.54
   - kernel: matmul
     name: matmul.o_proj.h4096
@@ -72,7 +96,7 @@ configs:
     N: 4096
     K: 4096
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16/w4x2/f2x4/k2', REDUCE: 'g4k', STAGE: 'd2/tma/ring'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', STAGE: 'd2/tma/ring'}
     emmy_us: 90.1
     cublas_us: 95.22
   - kernel: matmul
@@ -81,8 +105,11 @@ configs:
     N: 28672
     K: 4096
     dtype: 'fp16'
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd1/tma', TILE: 'a:mma_m16n8k16_f16/w2x2/f4x4/k4', VECTORIZE_LOADS: true}
-    emmy_us: 605.5
+    # 2026-07-09 sweep: replaced w2x2/f4x4/k4 d1/tma (recorded 605.5) — that pin benches ~638 even at
+    # its own recording commit (8ab967cf, bisect-verified; cuBLAS steady), so the old 605.5 was a
+    # recording-fidelity miss, not codegen drift. This config runs 608-612 live (6x reproduced).
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd4/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x4/f4x4/k2', VECTORIZE_LOADS: true}
+    emmy_us: 610.6
     cublas_us: 557.94
   - kernel: matmul
     name: matmul.mlp_down.h4096
@@ -90,7 +117,7 @@ configs:
     N: 4096
     K: 14336
     dtype: 'fp16'
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'g8k', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16/w4x4/f2x2/k4', VECTORIZE_LOADS: true}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'g8k', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x4/f2x2/k4', VECTORIZE_LOADS: true}
     emmy_us: 303.0
     cublas_us: 296.95
   - kernel: matmul
@@ -100,8 +127,8 @@ configs:
     K: 4096
     dtype: 'fp16'
     dynamic: true
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd4/tma/ring', TILE: 'a:mma_m16n8k16_f16/w2x4/f2x4', VECTORIZE_LOADS: true}
-    emmy_us: 258.46
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x4/k2', VECTORIZE_LOADS: true}
+    emmy_us: 250.8
     cublas_us: 249.82
   - kernel: matmul
     name: matmul.o_proj.h4096.dynM
@@ -110,7 +137,7 @@ configs:
     K: 4096
     dtype: 'fp16'
     dynamic: true
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'g2k', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16/w2x4/f2x2/k4', VECTORIZE_LOADS: true}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'g2k', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x2/k4', VECTORIZE_LOADS: true}
     emmy_us: 97.7
     cublas_us: 95.08
   - kernel: matmul
@@ -120,8 +147,11 @@ configs:
     K: 4096
     dtype: 'fp16'
     dynamic: true
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16/w8x2/f2x8/k4', VECTORIZE_LOADS: true}
-    emmy_us: 596.30
+    # 2026-07-09 sweep: replaced w8x2/f2x8/k4 d2/tma/ring (recorded 596.3) — that entry's knob set
+    # left REDUCE unpinned and today's greedy fill adds g2k, re-benching at 641.0 live (613.6 + 27.4
+    # finalize), while this config runs 608-611 live. See the sweep findings.
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', VECTORIZE_LOADS: true}
+    emmy_us: 610.6
     cublas_us: 553.70
   - kernel: matmul
     name: matmul.mlp_down.h4096.dynM
@@ -130,7 +160,7 @@ configs:
     K: 14336
     dtype: 'fp16'
     dynamic: true
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'g8k', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16/w4x4/f2x2/k4', VECTORIZE_LOADS: true}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'g8k', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x4/f2x2/k4', VECTORIZE_LOADS: true}
     emmy_us: 304.0
     cublas_us: 295.03
   - kernel: softmax
@@ -275,7 +305,7 @@ configs:
     head_dim: 64
     dtype: 'fp16'
     causal: false
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, PLACE: 'fuse', STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16/w4x1/f1x8/k8', VECTORIZE_LOADS: true}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, PLACE: 'fuse', STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', VECTORIZE_LOADS: true}
     emmy_us: 8.6
     cublas_us: 10.24
   - kernel: attention
@@ -285,7 +315,7 @@ configs:
     head_dim: 128
     dtype: 'fp16'
     causal: false
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, PLACE: 'fuse', STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16/w2x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16/w2x1/f1x16/k4', VECTORIZE_LOADS: true}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, PLACE: 'fuse', STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w2x1/f1x16/k4', VECTORIZE_LOADS: true}
     emmy_us: 16.5
     cublas_us: 18.42
   - kernel: attention
@@ -296,7 +326,7 @@ configs:
     dtype: 'fp16'
     causal: false
     dynamic: true
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, PLACE: 'fuse', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16/w4x1/f1x16/k4', VECTORIZE_LOADS: true}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, PLACE: 'fuse', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', VECTORIZE_LOADS: true}
     emmy_us: 8.6
     cublas_us: 10.23
   - kernel: attention
@@ -307,6 +337,6 @@ configs:
     dtype: 'fp16'
     causal: false
     dynamic: true
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, PLACE: 'fuse', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16/w2x1/f1x8/k8', VECTORIZE_LOADS: true}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, PLACE: 'fuse', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k8', VECTORIZE_LOADS: true}
     emmy_us: 16.4
     cublas_us: 18.4

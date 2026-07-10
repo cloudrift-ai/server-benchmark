@@ -314,3 +314,53 @@ def test_resolve_golden_arg_applies_dynamic_spec(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         cmod.resolve_golden_arg(clash)
     assert exc.value.code == 2
+
+
+def test_fast_math_regime_derived_from_knobs():
+    """``GoldenConfig.fast_math`` derives the precision regime from the RECORDED knobs (never a
+    stored flag): an f16-accumulate ``TILE`` atom (bare or axis-keyed) or ``FAST_EXP: true`` marks
+    the entry fast-math; the acc-unspecified atom ALIAS resolves to f32-accumulate → standard."""
+    from emmy.compiler.pipeline.search.golden import fast_math_knobs
+
+    std = {"TILE": "a:mma_m16n8k16_f16_f32/w2x4/f2x4", "STAGE": "d4/tma/ring", "FAST_EXP": False}
+    alias = {"TILE": "a:mma_m16n8k16_f16/w2x2/f2x2/k2"}  # historic spelling = f32-acc
+    scalar = {"TILE": "n32x8/f4x4", "REDUCE": "b8"}
+    assert not fast_math_knobs(std) and not fast_math_knobs(alias) and not fast_math_knobs(scalar)
+    assert fast_math_knobs({"TILE@d": "a:mma_m16n8k16_f16_f16/w2x4/f2x4/k8"})
+    assert fast_math_knobs({"TILE": "n32x8/f4x4", "FAST_EXP": True})
+    fm_knobs = {"TILE@d": "a:mma_m16n8k16_f16_f16/w2x2/f2x2/k2"}
+    assert MatmulGoldenConfig(name="square.128.fp16", M=128, N=128, K=128, dtype="fp16", knobs=fm_knobs).fast_math
+    assert not MatmulGoldenConfig(name="square.128.fp16", M=128, N=128, K=128, dtype="fp16", knobs=std).fast_math
+
+
+def test_f16acc_golden_tile_stays_reachable():
+    """The permanence rule extends to a fast-math golden: the membership pool is built from the
+    entry's OWN parsed atom, so an f16-accumulate spelling is a member of its warp grid without
+    any gate."""
+    from emmy.compiler.ir.schedule import TilePlan
+    from emmy.compiler.pipeline.search.space import warp_tile_moves
+
+    plan = TilePlan.parse("a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2")
+    assert plan.spell() in set(warp_tile_moves((plan.atom.name,)))
+
+
+def test_fast_math_golden_ranks_in_gated_enumeration(monkeypatch):
+    """``evaluate_golden`` self-gates for a fast-math golden: its row is found in the enumeration
+    (rank not ``None``) with NO env set — the ``F16_MMA_F32_ACC`` pin is scoped to the call and
+    restored after — while a standard golden still ranks against the default enumeration."""
+    import os
+
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline.search import analytic
+
+    for var in ("EMMY_FAST_MATH", "EMMY_F16_MMA_F32_ACC"):
+        monkeypatch.delenv(var, raising=False)
+    ctx = Context.from_target((12, 0))
+    fm = {"TILE": "a:mma_m16n8k16_f16_f16/w2x2/f2x2/k2", "STAGE": "", "REDUCE": ""}
+    _, rank, pool = analytic.evaluate_golden(128, 128, 128, "fp16", fm, ctx)
+    assert rank is not None and pool > 0, "fast-math golden must rank inside the self-gated enumeration"
+    assert os.environ.get("EMMY_F16_MMA_F32_ACC") is None, "the scoped pin must restore"
+    std = {"TILE": "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2", "STAGE": "", "REDUCE": ""}
+    _, rank_std, pool_std = analytic.evaluate_golden(128, 128, 128, "fp16", std, ctx)
+    assert rank_std is not None
+    assert pool_std < pool, "the standard enumeration must not silently grow fast-math rows"

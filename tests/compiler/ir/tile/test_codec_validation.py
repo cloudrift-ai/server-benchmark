@@ -38,9 +38,9 @@ def test_tile_codec_allows_valid(spec: str) -> None:
 @pytest.mark.parametrize(
     "spec",
     [
-        "a:mma_m16n8k16_f16/w0x1/f1x1/k1",
-        "a:mma_m16n8k16_f16/w1x1/f0x1/k1",
-        "a:mma_m16n8k16_f16/w1x1/f1x1/k0",
+        "a:mma_m16n8k16_f16_f32/w0x1/f1x1/k1",
+        "a:mma_m16n8k16_f16_f32/w1x1/f0x1/k1",
+        "a:mma_m16n8k16_f16_f32/w1x1/f1x1/k0",
     ],
 )
 def test_warp_codec_rejects_degenerate(spec: str) -> None:
@@ -49,4 +49,4 @@ def test_warp_codec_rejects_degenerate(spec: str) -> None:
 
 
 def test_warp_codec_allows_identity() -> None:
-    TilePlan.parse("a:mma_m16n8k16_f16/w1x1/f1x1/k1")  # all-1 widths — no raise
+    TilePlan.parse("a:mma_m16n8k16_f16_f32/w1x1/f1x1/k1")  # all-1 widths — no raise

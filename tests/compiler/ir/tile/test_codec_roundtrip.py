@@ -26,13 +26,28 @@ def test_tile_scalar_round_trip(spec: str) -> None:
 @pytest.mark.parametrize(
     "spec",
     [
-        "a:mma_m16n8k16_f16/w1x1/f1x1",
-        "a:mma_m16n8k16_f16/w2x1/f1x2/k8",
-        "a:mma_m16n8k16_bf16/w2x2/f2x2/k4",
+        "a:mma_m16n8k16_f16_f32/w1x1/f1x1",
+        "a:mma_m16n8k16_f16_f32/w2x1/f1x2/k8",
+        "a:mma_m16n8k16_bf16_f32/w2x2/f2x2/k4",
+        "a:mma_m16n8k16_f16_f16/w2x2/f2x2/k4",
     ],
 )
 def test_warp_round_trip(spec: str) -> None:
     assert TilePlan.parse(spec).spell() == spec
+
+
+@pytest.mark.parametrize(
+    ("alias", "canonical"),
+    [
+        ("a:mma_m16n8k16_f16/w2x1/f1x2/k8", "a:mma_m16n8k16_f16_f32/w2x1/f1x2/k8"),
+        ("a:mma_m16n8k16_bf16/w2x2/f2x2/k4", "a:mma_m16n8k16_bf16_f32/w2x2/f2x2/k4"),
+    ],
+)
+def test_warp_alias_canonicalizes(alias: str, canonical: str) -> None:
+    """The historical acc-unspecified atom spellings stay parse ALIASES for the f32-accumulate
+    atoms (mma_<shape>_<ab>_<acc> is the canonical convention): an aliased spelling parses and
+    re-spells canonically, so old pins / goldens / DB rows join with new rows."""
+    assert TilePlan.parse(alias).spell() == canonical
 
 
 @pytest.mark.parametrize("spec", ["d1/sync", "d1/cp", "d2/cp/ring", "d3/tma/ring", "d4/cp/ring/p2"])

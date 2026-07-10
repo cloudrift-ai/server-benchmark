@@ -7,11 +7,12 @@ rewrite swaps every ``exp`` :class:`ElementwiseImpl` for ``exp_fast`` — an op 
 semantics are identical (``np.exp`` / libm on the loop runner, so references stay accurate) and
 whose CUDA render is ``__expf`` (f32; the f16 spellings keep ``hexp``, already hardware-native).
 
-This is the ONE policy knob that is **not bit-exact** (~2 ulp vs correctly-rounded ``expf``) —
-numerically benign for the softmax family (the α rescale never amplifies, the carrier stays
-fp32), but it must be a deliberate, pinnable choice: ``hints=(False,)``, never enumerated, so
-only ``EMMY_FAST_EXP=1`` turns it on. The knob is stamped either way (the realized config
-records the policy; idempotence rides the stamp, like ``095_interleave_loads``).
+This policy knob is **not bit-exact** (~2 ulp vs correctly-rounded ``expf``) — numerically
+benign for the softmax family (the α rescale never amplifies, the carrier stays fp32), but it
+must be a deliberate, pinnable choice: ``hints=(False,)``, never enumerated, so only
+``EMMY_FAST_EXP=1`` — or the ``EMMY_FAST_MATH`` umbrella, per the precision-knob precedence in
+``search/space.py`` (:func:`precision_pin`) — turns it on. The knob is stamped either way (the
+realized config records the policy; idempotence rides the stamp, like ``095_interleave_loads``).
 
 Why a kernel-IR pass and not a Loop-IR rewrite: the warp-flash softmax merge never comes from
 Loop IR — the fragment realizer REGENERATES it from the carrier's channel spec — so only a
@@ -27,7 +28,7 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Body, Stmt
 from emmy.compiler.pipeline import Pattern, RuleSkipped
-from emmy.compiler.pipeline.search.space import FAST_EXP
+from emmy.compiler.pipeline.search.space import FAST_EXP, precision_pin
 
 PATTERN = [Pattern("root", KernelOp)]
 
@@ -38,7 +39,7 @@ def rewrite(root: Node) -> KernelOp | None:
     op: KernelOp = root.op
     if FAST_EXP.name in op.knobs:
         raise RuleSkipped("FAST_EXP already decided (idempotence via knob)")
-    if not FAST_EXP.narrow((False,))[0]:
+    if not precision_pin(FAST_EXP):
         return KernelOp(body=op.body, name=op.name, knobs={**op.knobs, FAST_EXP.name: False})
     new_body, _ = _walk(op.body)
     return KernelOp(body=new_body, name=op.name, knobs={**op.knobs, FAST_EXP.name: True})

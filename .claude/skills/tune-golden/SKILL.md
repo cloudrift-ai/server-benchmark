@@ -88,6 +88,34 @@ Using the live A/B (greedy vs best golden row, same run):
 - **same, same knobs** — greedy reproduces a golden → nothing to do.
 - **worse** — greedy >3% slower → leave the golden untouched (the prior couldn't reach it).
 
+## Optional fast-math lane (`EMMY_FAST_MATH=1`)
+
+When the user asks for a fast-math sweep (or the card is a consumer die — sm_86/89/120 — where the f16-accumulate
+atom pays), run the Step-1 sweep with the umbrella on:
+
+```
+EMMY_FAST_MATH=1 emmy tune --dataset golden --clean ...
+```
+
+The gate-on enumeration is a **superset** (every standard row stays a fork sibling), so one sweep measures both
+regimes. Then categorize **within-regime** — the two lanes never mix:
+
+- **Standard lane**: Step-2/3 exactly as written (`emmy run --bench --golden NAME`, no env). Only configs whose
+  knobs carry NO precision-trading realization compete here; the Step-3 replace/add rules apply among them alone.
+- **Fast-math lane**: A/B under the gate — `EMMY_FAST_MATH=1 emmy run --bench --golden NAME` — and compare the
+  gate-on greedy against the shape's existing `[fm]` entries (those whose knobs carry an f16-accumulate `TILE`
+  atom (`…_f16_f16`) or `FAST_EXP: true` — `GoldenConfig.fast_math` is the discriminator, derived from the knobs).
+  A fast-math winner that beats the shape's standard golden is recorded as an **additional same-`name` entry
+  beside it, never replacing it**: a default (gate-off) compile can't reach a fast-math config, so replacing
+  would orphan the shape's deployable golden (and pins are authoritative — it would silently flip precision on
+  for default users). Same noise gates as Step 4.
+
+`emmy eval golden` prints the fast-math entries as separate `<name> [fm]` rows and evaluates each regime against
+its own enumeration (the rank/reproduction views self-gate on `GoldenConfig.fast_math`), so no env is needed for
+the diagnostics. Replay (`run --bench --golden`) needs no env either — the recorded `TILE` pin bypasses the gate.
+In the findings report, keep the two lanes' tables separate and note the fast-math accuracy contract (torch-default
+fp16 numerics; see the f16-accumulate evaluation in the PR #339 thread).
+
 ## Step 4 — Confirm wins above the noise floor (critical)
 
 The `golden NAME` row is a *live re-bench*, and it swings ~10–13% run-to-run for the smaller shapes. So a marginal

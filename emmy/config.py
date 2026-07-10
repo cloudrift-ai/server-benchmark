@@ -85,6 +85,12 @@ def set_knob(name: str, value: str, *, overwrite: bool = True) -> bool:
     return True
 
 
+def unset_knob(name: str) -> None:
+    """Remove the ``EMMY_<NAME>`` env var (no-op when absent) — the restore half of a
+    scoped knob pin (``Knob.pinned``)."""
+    os.environ.pop(knob_var(name), None)
+
+
 # --- Shared parse primitives -----------------------------------------------
 
 _TRUTHY = {"1", "true", "yes", "on"}

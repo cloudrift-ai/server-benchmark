@@ -390,3 +390,35 @@ def test_run_two_level_tune_single_terminal_assembles_bests() -> None:
     # The winning fusion was greedy-assembled into a Graph[CudaOp] from the DB.
     assert result.assembled is not None
     assert any(isinstance(n.op, CudaOp) for n in result.assembled.nodes.values())
+
+
+def test_o3_band_is_per_regime_under_a_precision_gate(monkeypatch):
+    """The -O3 rebench band splits by precision regime: when a fast-math row (an f16-accumulate
+    TILE) owns the global -O1 best, the best STANDARD row still qualifies for the deployable -O3
+    rebench in its own band — otherwise the gate-off deploy lane is left with no -O3 evidence for
+    the shape (the qkv.h4096 ~1000x scalar deploy, 2026-07-09 fm sweep). With no gate every row is
+    standard and the band equals the global best (unchanged behavior)."""
+    from emmy.compiler.pipeline.search.db import PerfStats
+    from emmy.compiler.pipeline.search.policy.mcts import SearchNode, TuningSearch
+
+    monkeypatch.setenv("EMMY_O3_TOL", "0.10")  # the tight band that starved the standard lane
+    # ``observe`` re-derives the token's knobs (``_node_knobs`` walks the fork prefix); this test
+    # drives bare tokens, so read the preset knobs off the token instead.
+    monkeypatch.setattr(TuningSearch, "_node_knobs", lambda self, t: t.realized_knobs or {})
+
+    def bench(search, knobs, median):
+        node = SearchNode(candidate=None, parent=search.tree.root)  # parented so record_terminal reaches the root
+        node.realized_knobs = knobs
+        search.observe(node, PerfStats(median=median, min=median, max=median, mean=median, variance=0.0, n_samples=5), "ok")
+        return search.last_o3_worthy
+
+    s = TuningSearch()
+    fm = {"TILE": "a:mma_m16n8k16_f16_f16/w2x4/f2x4/k8", "STAGE": "d1/tma"}
+    std_best = {"TILE": "a:mma_m16n8k16_f16_f32/w2x4/f2x4", "STAGE": "d4/tma/ring"}
+    std_near = {"TILE": "a:mma_m16n8k16_f16_f32/w2x4/f2x4/k2", "STAGE": "d2/tma/ring"}
+    std_far = {"TILE": "a:mma_m16n8k16_f16_f32/w1x1/f1x1", "STAGE": ""}
+    assert bench(s, fm, 238.0), "the global-best fast-math row rebenches"
+    assert bench(s, std_best, 259.0), "the best STANDARD row must rebench in its own band (8% off the fm best)"
+    assert bench(s, std_near, 262.0), "a standard row within tol of the standard best qualifies"
+    assert not bench(s, std_far, 400.0), "a standard row far outside its own band still does not"
+    assert not bench(s, {**fm, "STAGE": "d2/tma/ring"}, 300.0), "a fast-math row competes against the global best only"

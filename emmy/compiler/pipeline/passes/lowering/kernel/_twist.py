@@ -55,6 +55,7 @@ from emmy.compiler.ir.kernel.ir import (
     UNIFORM,
     FragmentApply,
     FragmentMask,
+    FragmentPromote,
     FragmentRepack,
     FragmentRowReduce,
     LdmatrixLoad,
@@ -67,7 +68,7 @@ from emmy.compiler.ir.schedule import Fold, Level, ReduceStage
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Select, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile.ir import Contraction, Map, Reduction
-from emmy.compiler.pipeline.passes.lowering.kernel._atom import _clamp_last, unroll_ok
+from emmy.compiler.pipeline.passes.lowering.kernel._atom import _clamp_last, _f16acc, unroll_ok
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
     CtaTile,
@@ -238,7 +239,14 @@ def _frag_contraction(
 
     def _mmas(t: int, step: int) -> list[Stmt]:
         return [
-            MmaSyncPtx(c_frag=acc_frags[t], a_frag=a_frags[step], b_frag=_bname(t, step), shape=shape, ab_dtype=atom.ab_dtype)
+            MmaSyncPtx(
+                c_frag=acc_frags[t],
+                a_frag=a_frags[step],
+                b_frag=_bname(t, step),
+                shape=shape,
+                ab_dtype=atom.ab_dtype,
+                c_dtype=atom.operand_dtype("c").name,
+            )
             for acc_frags, a_frags in tiles
         ]
 
@@ -363,6 +371,12 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # keeps today's bare names). The tiles are independent ``(m, l, O)`` chains against shared K/V
     # fragments — the per-warp ILP that hides the mma → rowmax → exp → rescale dependency chain.
     pv_bk = max(1, pv.tile.bk)
+    # An f16-accumulate PV atom (the ``_f16acc`` sibling — full-rate HMMA on the consumer dies):
+    # the P@V mma targets packed f16 fragments (``_h<j>``) and each streaming block promote-folds
+    # them into the f32 output shadows, which keep the ``ofrags`` names the rescale / projection /
+    # store read — the KV block IS the promote cadence, and the partial is overflow-safe (Σp ≤ 1
+    # per row, so a block's f16 partial is bounded by max|V|). Scores (Q@Kᵀ) stay f32-accumulate.
+    pv_f16acc = _f16acc(pv.tile.atom)
     qtiles: list[SimpleNamespace] = []
     for i in range(fm):
         sfx = f"_q{i}" if fm > 1 else ""
@@ -375,6 +389,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
                 sfrags=tuple(f"{qk.acc}{sfx}_f{t}" for t in range(nt)),
                 pfrags=tuple(f"_p{sfx}_f{t}" for t in range(nt)),
                 ofrags=tuple(f"{expect_name}{sfx}_f{j}" for j in range(nd)),
+                ohfrags=tuple(f"{expect_name}{sfx}_h{j}" for j in range(nd)) if pv_f16acc else (),
                 qa=tuple(f"_{qk.acc}{sfx}_a{s}" for s in range(qk.tile.bk)),
                 pa=tuple(f"_pa{sfx}{s}" for s in range(pv_bk)) if pv_bk > 1 else (f"_pa{sfx}",),
             )
@@ -422,6 +437,10 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         for qt in qtiles:
             for f in qt.sfrags:
                 stream.append(RegFragment(name=f, role="c", shape=shape, dtype=F32))
+            for f in qt.ohfrags:
+                # The per-block packed f16 P@V targets — zero-inited per step (block-scoped, like
+                # the score fragments); the promote below folds them into the f32 ``ofrags`` shadows.
+                stream.append(RegFragment(name=f, role="c", shape=shape, dtype=pv.tile.atom.operand_dtype("c")))
         qk_mask: dict[str, tuple] = {}
         if symbolic_k:
             qk_mask[qk.n_axis.name] = (kv0_var, seq)
@@ -487,7 +506,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         pv_mask = {kv_axis.name: (kv0_var, seq)} if symbolic_k else {}
         stream += _frag_contraction(
             _pv_streamed(pv, kv_axis),
-            [(qt.ofrags, qt.pa) for qt in qtiles],
+            [((qt.ohfrags if pv_f16acc else qt.ofrags), qt.pa) for qt in qtiles],
             n_sub=lambda j: Literal(j * atom_n, "int"),
             # Staged: the V slab is slot-local too (K rows are this block's keys).
             k_sub=Literal(0, "int") if staged else kv0_var,
@@ -498,6 +517,11 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             b_swizzle=v_swz if staged else "NONE",
             reg_depth=stage.reg_depth if staged else 1,
         )
+        if pv_f16acc:
+            # The block promote: fold the packed f16 P@V partials into the f32 output shadows
+            # (O = α·O — applied above — + promote(block P@V)). The rescale never touches f16.
+            for qt in qtiles:
+                stream += [FragmentPromote(dst=of, src=oh) for of, oh in zip(qt.ofrags, qt.ohfrags, strict=True)]
         for qt in qtiles:
             stream += _rebind(qt.pivot, f"_mn{qt.sfx}")  # advance the running pivot: m = mn
         return stream

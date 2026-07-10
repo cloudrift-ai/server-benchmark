@@ -180,8 +180,8 @@ def test_is_warp_and_mma_atom_tier_discriminator():
     assert not is_warp({}) and mma_atom({}) is None
     assert not is_warp({"TILE": ""}) and mma_atom({"TILE": ""}) is None
     assert not is_warp({"TILE": "n32x8/f2x4"})  # scalar fragment names no atom
-    assert is_warp({"TILE": "a:mma_m16n8k16_f16/w2x2/f2x2/k2"})
-    assert mma_atom({"TILE": "a:mma_m16n8k16_f16/w2x2/f2x2/k2"}) == "mma_m16n8k16_f16"
+    assert is_warp({"TILE": "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2"})
+    assert mma_atom({"TILE": "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2"}) == "mma_m16n8k16_f16_f32"
 
 
 def test_scalar_tile_features_from_thread_tile():
@@ -200,7 +200,7 @@ def test_warp_tile_features_from_warp_tile():
     ``m16n8k16``) are read off the parsed atom. A scalar ``TILE`` value → empty."""
     from emmy.compiler.pipeline.search.features import _warp_tile_features  # noqa: PLC0415
 
-    wf = _warp_tile_features({"TILE": "a:mma_m16n8k16_f16/w2x2/f2x2/k2", "S_ext_free_prod": 2048 * 2048})
+    wf = _warp_tile_features({"TILE": "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2", "S_ext_free_prod": 2048 * 2048})
     assert wf["D_threads"] == 128.0  # WM·WN·32
     assert wf["D_tile_m"] == 2 * 2 * 16  # WM·FM·atom_m
     assert wf["D_tile_n"] == 2 * 2 * 8  # WN·FN·atom_n
@@ -364,7 +364,7 @@ def test_stage_codec_reg_depth_roundtrip():
 def test_knob_features_mma_expansion():
     # The warp fragment names its atom on the ``TILE`` codec (``a:<atom>``); ``knob_features``
     # expands its physical cell / dtype properties into the ``MMA_*`` family.
-    feats = knob_features({"TILE": "a:mma_m16n8k16_f16/w1x1/f1x1"})
+    feats = knob_features({"TILE": "a:mma_m16n8k16_f16_f32/w1x1/f1x1"})
     assert feats["MMA_tier"] == 1.0
     assert (feats["MMA_atom_m"], feats["MMA_atom_n"], feats["MMA_atom_k"]) == (16.0, 8.0, 16.0)
     assert feats["MMA_a_bits"] == 16.0  # f16 operand
@@ -413,8 +413,8 @@ def test_format_tuning_knobs_skips_struct():
 def test_format_tuning_knobs_canonical_order():
     """The codec knobs render in canonical order (``KNOB_ORDER`` = ``TILE``, ``REDUCE``,
     ``STAGE``), not alphabetical — shared with the ``emmy eval`` golden tables."""
-    out = format_tuning_knobs({"STAGE": "d2/cp", "REDUCE": "b32", "TILE": "a:mma_m16n8k16_f16/w2x2"})
-    assert out == "TILE=a:mma_m16n8k16_f16/w2x2, REDUCE=b32, STAGE=d2/cp"
+    out = format_tuning_knobs({"STAGE": "d2/cp", "REDUCE": "b32", "TILE": "a:mma_m16n8k16_f16_f32/w2x2"})
+    assert out == "TILE=a:mma_m16n8k16_f16_f32/w2x2, REDUCE=b32, STAGE=d2/cp"
 
 
 def test_apply_knobs_env_no_raw_falls_back_to_env(monkeypatch):
@@ -508,12 +508,12 @@ def test_is_off_value(monkeypatch):
 def test_bare_and_axis_named_featurize_identically():
     """A single-node kernel's bare ``TILE`` / ``STAGE`` and their ``@<axis>`` forms parse, featurize,
     and match identically — the migration is invisible on one-node kernels (the parity bar)."""
-    bare = {"TILE": "a:mma_m16n8k16_f16/w2x2/f2x2/k2", "STAGE": "d2/cp", "S_ext_free_prod": 4096.0}
-    axed = {"TILE@d": "a:mma_m16n8k16_f16/w2x2/f2x2/k2", "STAGE@d": "d2/cp", "S_ext_free_prod": 4096.0}
+    bare = {"TILE": "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2", "STAGE": "d2/cp", "S_ext_free_prod": 4096.0}
+    axed = {"TILE@d": "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2", "STAGE@d": "d2/cp", "S_ext_free_prod": 4096.0}
     assert knob_features(bare) == knob_features(axed)
     assert tile_signature(bare) == tile_signature(axed)
     assert is_warp(bare) == is_warp(axed) is True
-    assert mma_atom(bare) == mma_atom(axed) == "mma_m16n8k16_f16"
+    assert mma_atom(bare) == mma_atom(axed) == "mma_m16n8k16_f16_f32"
 
 
 def test_display_collapses_single_axis_but_keeps_multi():
@@ -538,8 +538,8 @@ def test_multinode_flash_keys_apart_and_pools_per_node():
     ``MMA_tier`` = 2.0 over the two warp nodes. This is the case the flat one-key schema can't express."""
     from emmy.compiler.pipeline.search.features import _node_axes, _node_slice, _schedule_node_features
 
-    qk_tile = "a:mma_m16n8k16_f16/w4x1/f2x2/k2"  # WM·WN·32 = 128 threads
-    pv_tile = "a:mma_m16n8k16_f16/w2x2/f4x1/k2"  # WM·WN·32 = 128 threads
+    qk_tile = "a:mma_m16n8k16_f16_f32/w4x1/f2x2/k2"  # WM·WN·32 = 128 threads
+    pv_tile = "a:mma_m16n8k16_f16_f32/w2x2/f4x1/k2"  # WM·WN·32 = 128 threads
     knobs = {
         "TILE@d": qk_tile,
         "STAGE@d": "d2/cp",
@@ -568,3 +568,56 @@ def test_node_slice_addresses_per_node_struct():
     assert _node_slice(knobs, "sk")["S_ext_reduce_prod"] == 512.0  # addressed override wins
     # One-node bare stamp: the slice for the sole node is the whole dict (byte-identical featurizer).
     assert _node_slice({"TILE": "n4/f2", "S_ext_reduce_prod": 8.0}, None) == {"TILE": "n4/f2", "S_ext_reduce_prod": 8.0}
+
+
+def test_precision_pin_precedence(monkeypatch):
+    """The precision-knob precedence (the FAST_MATH family): a knob's own ``EMMY_<NAME>`` pin >
+    the ``FAST_MATH`` umbrella > ``None`` (neither set — the caller's conservative default). The
+    umbrella itself is ``unfeatured`` (a meta gate over other knobs), so ``knob_features`` must
+    never see it as a ranking dimension."""
+    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FAST_EXP, FAST_MATH, precision_pin
+
+    for var in ("EMMY_FAST_MATH", "EMMY_FAST_EXP", "EMMY_F16_MMA_F32_ACC"):
+        monkeypatch.delenv(var, raising=False)
+    assert precision_pin(FAST_EXP) is None and precision_pin(F16_MMA_F32_ACC) is None
+    monkeypatch.setenv("EMMY_FAST_MATH", "1")
+    assert precision_pin(FAST_EXP) is True and precision_pin(F16_MMA_F32_ACC) is True
+    monkeypatch.setenv("EMMY_FAST_EXP", "0")
+    assert precision_pin(FAST_EXP) is False, "the individual pin must win over the umbrella"
+    assert precision_pin(F16_MMA_F32_ACC) is True
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
+    monkeypatch.setenv("EMMY_F16_MMA_F32_ACC", "1")
+    assert precision_pin(F16_MMA_F32_ACC) is True, "the individual pin must win in the enabling direction too"
+    assert FAST_MATH.unfeatured, "the umbrella is a meta gate — it must never enter the feature vector"
+
+
+def test_values_equal_canonicalizes_tile_atom_alias():
+    """A ``TILE`` pin spelled with an acc-unspecified atom ALIAS matches the canonically-stamped
+    row (the pin-verification gate must not false-flag alias users), bare or axis-keyed; a
+    genuinely different tile still mismatches."""
+    from emmy.compiler.pipeline.knob import values_equal
+
+    assert values_equal("TILE", "a:mma_m16n8k16_f16/w2x2/f2x2/k2", "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2")
+    assert values_equal("TILE@d", "a:mma_m16n8k16_bf16/w1x1/f1x2/k8", "a:mma_m16n8k16_bf16_f32/w1x1/f1x2/k8")
+    assert not values_equal("TILE", "a:mma_m16n8k16_f16/w2x2/f2x2/k2", "a:mma_m16n8k16_f16_f16/w2x2/f2x2/k2")
+    assert not values_equal("TILE", "a:mma_m16n8k16_f16/w2x2/f2x2/k2", "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k4")
+
+
+def test_knob_pinned_scopes_and_restores(monkeypatch):
+    """``Knob.pinned`` pins ``EMMY_<NAME>`` for the block and restores the prior state — absence
+    or the previous value — including on an exception (the regime-aware diagnostics' scoped gate)."""
+    import pytest
+
+    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC
+
+    monkeypatch.delenv("EMMY_F16_MMA_F32_ACC", raising=False)
+    with F16_MMA_F32_ACC.pinned("1"):
+        assert F16_MMA_F32_ACC.raw() == "1"
+    assert F16_MMA_F32_ACC.raw() is None
+    monkeypatch.setenv("EMMY_F16_MMA_F32_ACC", "0")
+    with F16_MMA_F32_ACC.pinned("1"):
+        assert F16_MMA_F32_ACC.raw() == "1"
+    assert F16_MMA_F32_ACC.raw() == "0"
+    with pytest.raises(RuntimeError), F16_MMA_F32_ACC.pinned("1"):
+        raise RuntimeError("boom")
+    assert F16_MMA_F32_ACC.raw() == "0", "the pin must restore on the exception path"

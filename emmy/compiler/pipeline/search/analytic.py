@@ -112,8 +112,21 @@ def evaluate_golden(
     has to reach. ``scorer`` (``row → float``, higher better) defaults to the
     :class:`AnalyticPrior` (negated latency); the learned-prior diagnostics pass
     ``-prior.mean_score`` instead. Returns ``({}, None, 0)`` if nothing
-    enumerates."""
-    rows, _ = _enumerate(M, N, K, dtype, ctx)
+    enumerates.
+
+    A **fast-math** golden (its knobs carry a precision-trading realization —
+    ``golden.fast_math_knobs``) self-gates: its row only exists in the enumeration when the
+    ``F16_MMA_F32_ACC`` gate is on, so the rank is computed with the gate pinned for the scope
+    of this call — otherwise every fast-math entry would false-skip as "recorded knobs not in
+    the enumeration". Standard goldens rank against the default (gate-off) enumeration."""
+    from contextlib import nullcontext  # noqa: PLC0415
+
+    from emmy.compiler.pipeline.search.golden import fast_math_knobs  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC  # noqa: PLC0415
+
+    gate = F16_MMA_F32_ACC.pinned("1") if golden_knobs and fast_math_knobs(golden_knobs) else nullcontext()
+    with gate:
+        rows, _ = _enumerate(M, N, K, dtype, ctx)
     if not rows:
         return {}, None, 0
     if scorer is None:

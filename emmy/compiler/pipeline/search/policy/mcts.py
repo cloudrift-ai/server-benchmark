@@ -184,6 +184,14 @@ class TuningSearch(Search):
         self.last_o3_worthy = False
         self._o3_done: set[tuple] = set()
         self.o3_rows: list[tuple[dict, float]] = []
+        # Best -O1 latency among STANDARD-regime rows (no precision-trading realization). Under a
+        # precision gate (FAST_MATH / F16_MMA_F32_ACC) the global best is usually a fast-math row,
+        # and a regime-blind tolerance band would then starve the standard lane of -O3 samples —
+        # the gate-off deploy hierarchy is evidence-first, so a shape whose only -O3 rows are
+        # fast-math (absent from the gate-off enumeration) falls to the model argmin (the
+        # qkv.h4096 ~1000x scalar deploy, 2026-07-09 fm sweep). A standard row therefore competes
+        # in its OWN band; with no gate every row is standard and this equals the global best.
+        self._best_std_lat: float | None = None
 
     def observe(self, token: object | None, stats: PerfStats, status: str, candidate: object | None = None) -> None:
         self.last_stats = stats
@@ -207,10 +215,20 @@ class TuningSearch(Search):
         # winner. Dedup via ``_o3_done`` so each config is -O3'd at most once.
         self.last_o3_worthy = False
         if status == "ok" and stats.median > 0 and self.tree.best_reward > 0:
-            best_lat = 1.0 / self.tree.best_reward
+            from emmy.compiler.pipeline.search.golden import fast_math_knobs  # noqa: PLC0415 — layering: policy → search core
+
+            # A standard-regime row competes in its own band (see ``_best_std_lat``): the best
+            # standard row must reach -O3 even when a fast-math row owns the global best, or the
+            # gate-off deploy lane is left with no deployable evidence for this shape.
+            is_fm = fast_math_knobs(token.realized_knobs or {})
+            if not is_fm and (self._best_std_lat is None or stats.median < self._best_std_lat):
+                self._best_std_lat = stats.median
+            ref_lat = 1.0 / self.tree.best_reward
+            if not is_fm and self._best_std_lat is not None:
+                ref_lat = self._best_std_lat
             tol = config.o3_tol(O3_REBENCH_TOL)
             sig = self._o3_sig(token.realized_knobs)
-            if stats.median <= best_lat * (1.0 + tol) and sig not in self._o3_done:
+            if stats.median <= ref_lat * (1.0 + tol) and sig not in self._o3_done:
                 self._o3_done.add(sig)
                 self.last_o3_worthy = True
         if self.prior_model is not None:

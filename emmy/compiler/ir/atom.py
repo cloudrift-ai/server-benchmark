@@ -4,8 +4,10 @@ An atom is the smallest cell a :class:`~emmy.compiler.ir.tile.ir.Contraction` ti
 ways (GRID / UNIT / REGISTER / ATOM). Two kinds, one interface (``shape`` + :attr:`lanes`):
 
 - :class:`AtomKind` — a tensor-core ``mma.sync`` cell: a fixed ``(m, n, k)`` shape, per-operand
-  dtypes (``a``/``b`` the f16/bf16 multiplicands, ``c`` the f32 accumulator), and ``lanes == 32``
-  (the warp that executes one mma cooperatively — its 32 lanes hold the fixed PTX fragment layout).
+  dtypes (``a``/``b`` the f16/bf16 multiplicands, ``c`` the accumulator — f32, or f16 on the
+  ``..._f16_f16`` variant that runs the full-rate HMMA pipe with a chunked f32 register promotion
+  in the lowering), and ``lanes == 32`` (the warp that executes one mma cooperatively — its 32
+  lanes hold the fixed PTX fragment layout).
 - :class:`ScalarAtom` — a plain scalar fma cell: ``(1, 1, 1)`` and ``lanes == 1`` (one thread). No
   operand-dtype spec — the scalar cell folds the carrier directly, dtypes resolved by the body.
 
@@ -36,7 +38,8 @@ class AtomKind:
     """One tensor-core mma cell: a fixed ``(m, n, k)`` shape + per-operand dtypes.
 
     ``operand_dtypes`` maps each role (``"a"`` / ``"b"`` / ``"c"``) to its element dtype;
-    ``a``/``b`` are the multiplicands (f16 or bf16), ``c`` the f32 accumulator. Frozen + hashable so
+    ``a``/``b`` are the multiplicands (f16 or bf16), ``c`` the accumulator (f32, or f16 on the
+    ``..._f16_f16`` full-rate variant). Frozen + hashable so
     it rides on a frozen ``TilePlan`` / ``Contraction``. :attr:`lanes` is 32 — an mma is
     warp-cooperative (one warp executes a cell)."""
 
@@ -122,19 +125,38 @@ Atom = AtomKind | ScalarAtom
 
 
 #: The registered mma atoms, keyed by the name the ``TILE`` codec (``a:<name>``) spells.
-#: The s16816 mma.sync family — one cell shape, f16 / bf16 multiplicands, f32 accumulator.
+#: NAMING CONVENTION: ``mma_<shape>_<ab_dtype>_<acc_dtype>`` — the compressed form of the PTX /
+#: CUTLASS ``D.A.B.C`` dtype order (``mma.sync...f32.f16.f16.f32`` / ``SM80_16x8x16_F32F16F16F32``),
+#: since the s16816 family always has A ≡ B and D ≡ C; a future mixed atom would extend to the
+#: full four-slot form. The f16-accumulate variant (``..._f16_f16``): on the consumer GeForce dies
+#: f32-accumulate HMMA runs at HALF the f16-accumulate rate, so that atom keeps the mma chain at
+#: full rate and the lowering periodically promote-adds the f16 partials into an f32 shadow
+#: fragment (``FragmentPromote``), bounding the accumulation error to one K chunk. f16 only —
+#: mma.sync has no bf16-accumulate form. Enumeration is gated (``F16_MMA_F32_ACC`` / ``FAST_MATH``).
 ATOM_REGISTRY: dict[str, AtomKind] = {
-    "mma_m16n8k16_f16": AtomKind("mma_m16n8k16_f16", (16, 8, 16), (("a", F16), ("b", F16), ("c", F32))),
-    "mma_m16n8k16_bf16": AtomKind("mma_m16n8k16_bf16", (16, 8, 16), (("a", BF16), ("b", BF16), ("c", F32))),
+    "mma_m16n8k16_f16_f32": AtomKind("mma_m16n8k16_f16_f32", (16, 8, 16), (("a", F16), ("b", F16), ("c", F32))),
+    "mma_m16n8k16_bf16_f32": AtomKind("mma_m16n8k16_bf16_f32", (16, 8, 16), (("a", BF16), ("b", BF16), ("c", F32))),
+    "mma_m16n8k16_f16_f16": AtomKind("mma_m16n8k16_f16_f16", (16, 8, 16), (("a", F16), ("b", F16), ("c", F16))),
+}
+
+#: Convenience aliases — the historical acc-unspecified spellings resolve to the common
+#: f32-accumulate atoms (they are also what every pre-convention golden / tune-DB row / pin
+#: spells). Accepted by :func:`atom_for`, so parse canonicalizes: an aliased ``TILE`` spelling
+#: re-spells with the canonical name (``TilePlan.spell`` reads ``atom.name``), which keeps the
+#: prior/DB ``tile_signature`` join consistent across old and new rows.
+ATOM_ALIASES: dict[str, str] = {
+    "mma_m16n8k16_f16": "mma_m16n8k16_f16_f32",
+    "mma_m16n8k16_bf16": "mma_m16n8k16_bf16_f32",
 }
 
 
 def atom_for(name: str) -> AtomKind:
-    """The registered :class:`AtomKind` for ``name`` (the ``TILE`` codec's ``a:<name>``)."""
+    """The registered :class:`AtomKind` for ``name`` (the ``TILE`` codec's ``a:<name>``); the
+    acc-unspecified aliases (:data:`ATOM_ALIASES`) resolve to their f32-accumulate atoms."""
     try:
-        return ATOM_REGISTRY[name]
+        return ATOM_REGISTRY[ATOM_ALIASES.get(name, name)]
     except KeyError:
-        raise ValueError(f"unknown atom kind {name!r} (have {sorted(ATOM_REGISTRY)})") from None
+        raise ValueError(f"unknown atom kind {name!r} (have {sorted(ATOM_REGISTRY)} + aliases {sorted(ATOM_ALIASES)})") from None
 
 
-__all__ = ["ATOM_REGISTRY", "AtomKind", "atom_for"]
+__all__ = ["ATOM_ALIASES", "ATOM_REGISTRY", "AtomKind", "atom_for"]

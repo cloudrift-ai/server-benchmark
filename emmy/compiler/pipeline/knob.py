@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable, Iterable, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -100,13 +101,15 @@ class Knob:
     # "not-yet-decided" (still absent → NaN-filled). ``_UNSET`` (the default)
     # means the knob is always stamped by its pass and is never auto-filled.
     off: Any = _UNSET
-    # A **cosmetic** policy: it changes only how the emitted source is spelled, never the compiled
-    # kernel (SASS-identical — e.g. ``LOOPIFY``'s ``--ir`` re-rolling). Because it cannot affect
-    # performance, it must never enter the learned-prior feature vector — it cannot disambiguate
-    # kernels, and letting it perturb the features would split one perf class into spurious
-    # variants. ``knob_features`` skips these; they are batch-enabled via ``EMMY_READABLE`` (on by
-    # default only for the ``compile`` CLI) rather than tuned.
-    cosmetic: bool = False
+    # An **unfeatured** knob: it must never enter the learned-prior feature vector
+    # (``knob_features`` skips it). Two families qualify: a *cosmetic* policy that changes only how
+    # the emitted source is spelled, never the compiled kernel (SASS-identical — e.g. ``LOOPIFY``'s
+    # ``--ir`` re-rolling; batch-enabled via ``EMMY_READABLE`` rather than tuned), and a *meta /
+    # umbrella* pin that gates which forks are OFFERED without being a kernel property itself
+    # (``FAST_MATH`` — the realized fork is already fully identified by the knobs it enables, e.g.
+    # the ``TILE`` codec's atom token). Either way the value cannot disambiguate kernels, and
+    # letting it perturb the features would split one perf class into spurious variants.
+    unfeatured: bool = False
 
     @property
     def env(self) -> str:
@@ -199,6 +202,23 @@ class Knob:
             raise ValueError(f"Knob.narrow not supported for BINMASK ({self.name!r})")
         pinned = self.parse(raw)
         return (pinned,)
+
+    @contextmanager
+    def pinned(self, value: str):
+        """Temporarily pin ``EMMY_<NAME>=value`` for the enclosed block, restoring the prior
+        state (previous value or absence) on exit — the scoped form of the env pin, for
+        regime-aware diagnostics that must evaluate under a gate the caller didn't set (e.g.
+        ranking a fast-math golden inside the ``F16_MMA_F32_ACC``-gated enumeration). Process-
+        global like every env pin: not safe around concurrently-compiling threads."""
+        prev = self.raw()
+        config.set_knob(self.name, value)
+        try:
+            yield
+        finally:
+            if prev is None:
+                config.unset_knob(self.name)
+            else:
+                config.set_knob(self.name, prev)
 
     def narrow_at(self, element: str) -> str | None:
         """The env pin for this knob's ``<NAME>@<element>`` key, falling back to the bare
@@ -375,10 +395,21 @@ def values_equal(name: str, want, got) -> bool:
     knob's canonical :meth:`Knob.parse` — a BOOL pinned ``1``/``yes``/``on`` matches a
     realized ``True``, a hex INT its decimal, a BINMASK spelling the stamped binary
     string (width taken from the realized binary spelling — the :meth:`Knob.pretty`
-    storage convention). An unregistered family compares by string only."""
+    storage convention). ``TILE`` values additionally canonicalize through the codec
+    (``TilePlan.parse(...).spell()``) so an atom-ALIAS pin (``a:mma_m16n8k16_f16/…``)
+    matches the canonically-stamped row (``a:mma_m16n8k16_f16_f32/…``) instead of
+    false-flagging ``unreproducible pin``. An unregistered family compares by string
+    only."""
     w, g = str(want).strip(), str(got).strip()
     if w.casefold() == g.casefold():
         return True
+    if family_of(name) == "TILE":
+        from emmy.compiler.ir.schedule import TilePlan  # noqa: PLC0415 — the codec layer sits above this descriptor module
+
+        try:
+            return TilePlan.parse(w).spell() == TilePlan.parse(g).spell()
+        except ValueError:
+            return False
     kn = get(family_of(name))
     if kn is None:
         return False

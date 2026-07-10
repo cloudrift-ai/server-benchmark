@@ -223,6 +223,23 @@ def _schedule_node_features(node_knobs: dict) -> dict[str, float]:
         # siblings — see ``_reduce_features``.
         feats.update(_reduce_features(node_knobs))
     feats.update(_stage_features(node_knobs))  # operand-staging pipeline (STAGE codec); {} when gmem-direct
+    # TMA-conditioned tile pricing: TMA staging only enumerates where the hardware offers it
+    # (Hopper/Blackwell), so a geometry term gated on ``D_stage_tma`` is where one weight set
+    # prices those cards' tiles separately — no per-arch split needed. The 2026-07-09 5090
+    # sweep showed the golden TMA tiles want narrower/squarer warp grids and wider splits than
+    # the shared weights choose (TILE match 0/17); these give the fit that axis. Emitted only
+    # on a TMA-staged row (skip-if-missing 0.0 elsewhere).
+    if feats.get("D_stage_tma"):
+        for src, dst in (
+            ("D_aspect", "D_tma_aspect"),
+            ("D_log2_area", "D_tma_log2_area"),
+            ("D_w_grid_m", "D_tma_grid_m"),
+            ("D_w_grid_n", "D_tma_grid_n"),
+        ):
+            if src in feats:
+                feats[dst] = feats[src]
+        if "D_splitk" in feats:
+            feats["D_tma_l2_splitk"] = math.log2(max(feats["D_splitk"], 1.0))
     return feats
 
 
@@ -643,7 +660,7 @@ def _warp_tile_features(knobs: dict) -> dict[str, float]:
     if wm <= 0 or wn <= 0:
         return {}
     d = _reduce_decomp(knobs)
-    return _geom_feats(
+    out = _geom_feats(
         knobs,
         threads=wm * wn * 32,
         cells=fm * fn,
@@ -658,6 +675,17 @@ def _warp_tile_features(knobs: dict) -> dict[str, float]:
         sm=float(knobs.get("H_sm_count") or 170.0),
         warp=True,
     )
+    # The warp-grid arrangement: how the CTA's warps split across the two canonical free slots
+    # (``_free_slots``' wide/narrow ordering, same convention as the scalar ``D_l2_bn``/``D_l2_bm``
+    # pair). The CTA tile dims fold ``w·f·atom``, so no tile-level feature recovers the grid
+    # itself — yet it decides per-warp fragment reuse vs cross-warp parallelism. The 2026-07-09
+    # 5090 sweep's TILE misses were exactly wide-vs-narrow warp grids over the same pool (golden
+    # w2x4/w4x2 vs picked w4x1/w8x2). Absent on scalar rows (skip-if-missing 0.0), like the
+    # tier-split ``D_w_*_bk`` pair.
+    out["D_w_grid_m"] = math.log2(max(wm, 1))
+    out["D_w_grid_n"] = math.log2(max(wn, 1))
+    out["D_w_grid_aspect"] = math.log2(max(wm, 1)) - math.log2(max(wn, 1))
+    return out
 
 
 def _atom_features(atom) -> dict[str, float]:

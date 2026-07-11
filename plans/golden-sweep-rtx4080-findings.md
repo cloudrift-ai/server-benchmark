@@ -54,14 +54,20 @@ fp16 enumeration), the whole 4080 golden set was **re-swept cold on `main` (f7f3
 golden --clean`, ~34 min). **Result: zero YAML changes — every recorded golden is confirmed on #339.** What the
 re-sweep established:
 
-- **No f16-accumulate win is reachable by default — the atom is enumeration-gated.** Every fp16-square greedy
-  pick and golden still rides `mma_m16n8k16_f16_f32` (f32-accumulate); all 24 measured fp16-square configs are
-  f32-accum. The f16-accumulate atom `mma_m16n8k16_f16_f16` — #339's headline, running at **2× the f32-accum
-  rate on the 4080's consumer GeForce die** — is registered but its **enumeration is gated behind
-  `F16_MMA_F32_ACC` / `FAST_MATH`** ([`emmy/compiler/ir/atom.py:135`](emmy/compiler/ir/atom.py#L135)), which the
-  default sweep does not set, so it is never offered. Capturing #339's speedup on these goldens needs a sweep
-  with those flags on — an accuracy/speed trade (the f16-accum path bounds error to one K chunk via
-  `FragmentPromote`), a separate deliberate exercise, not a default re-tune.
+- **No f16-accumulate win — and enabling `FAST_MATH` makes these kernels SLOWER, not faster.** By default the
+  f16-accumulate atom `mma_m16n8k16_f16_f16` (#339's headline, ~2× the f32-accum mma-chain rate on the 4080's
+  consumer die) is off — its enumeration is gated behind `F16_MMA_F32_ACC` / `FAST_MATH`
+  ([`emmy/compiler/ir/atom.py:135`](emmy/compiler/ir/atom.py#L135); consumer-die gate `_f16acc_allowed`,
+  [`tile/_schedule.py:107`](emmy/compiler/pipeline/passes/lowering/tile/_schedule.py#L107)). **Exploration
+  (2026-07-10, `EMMY_FAST_MATH=1`):** re-tuning `2048.fp16` / `4096.fp16` with it on enumerated 32 f16-accum
+  configs head-to-head, and the tuner **still picked f32-accum** — because f16-accum is **17–23 % slower** on
+  these shapes. A direct multi-tile A/B on `2048.fp16` confirmed: every f16-accum tile 220–231 µs vs the
+  f32-accum golden 188.6 µs, with **register pressure blown to 228+ regs → 17 % occupancy** (the `FragmentPromote`
+  keeps both f16 accumulators and f32 shadows live). These GEMMs are occupancy/bandwidth-bound at their optimal
+  tiles, so the 2× mma-chain rate is wasted and the promote overhead dominates. Accuracy stayed within emmy's
+  wrong-answer gate (flags clean). **Conclusion: the f32-accum goldens are correct; `FAST_MATH` is a net loss
+  here** — it may still pay off on register-light, genuinely mma-bound kernels, untested. Data:
+  `_tune/fastmath-explore/`.
 - **The retrained #339 prior fixed the fp32 greedy reachability.** `square.1024` / `square.2048` greedy now
   *reach* their goldens (0.97–1.02× vs 1.09–1.14× on bad4e89d) — the two fp32 findings below are resolved on
   main (the picks match the golden knobs; nothing to record).

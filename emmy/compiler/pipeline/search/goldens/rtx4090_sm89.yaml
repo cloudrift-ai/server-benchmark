@@ -14,8 +14,8 @@ configs:
     M: 1024
     N: 1024
     K: 1024
-    knobs: {TILE: 'n16x8/f4x8', STAGE: 'd2/cp/ring'}
-    emmy_us: 55.4
+    knobs: {TILE: 'n32x8/f2x8', STAGE: 'd2/cp/ring'}
+    emmy_us: 57.9
     cublas_us: 45.4
   - kernel: matmul
     name: matmul.square.2048

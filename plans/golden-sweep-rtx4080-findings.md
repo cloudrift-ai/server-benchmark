@@ -47,6 +47,33 @@ run), medianed over passes. Golden rows were rock-stable (0.1–2.2 % spread); t
 New ratio `cublas/emmy = 197.0/188.3 = 1.046` (was 0.951) — the win crosses emmy from just-below to just-above cuBLAS
 HGEMM. The old `w2x1/f4x4/k2 d1/cp` entry is >3 % slower than the new one, so it was **deleted** (replace, not add).
 
+## Update — full cold re-sweep on `main` (#339 f16-accumulate), 2026-07-10
+
+After #339 landed (renamed the fp16 mma atom `_f16`→`_f16_f32`, registered an f16-accumulate atom, reshaped the
+fp16 enumeration), the whole 4080 golden set was **re-swept cold on `main` (f7f35a38)** (`emmy tune --dataset
+golden --clean`, ~34 min). **Result: zero YAML changes — every recorded golden is confirmed on #339.** What the
+re-sweep established:
+
+- **No f16-accumulate win is reachable by default — the atom is enumeration-gated.** Every fp16-square greedy
+  pick and golden still rides `mma_m16n8k16_f16_f32` (f32-accumulate); all 24 measured fp16-square configs are
+  f32-accum. The f16-accumulate atom `mma_m16n8k16_f16_f16` — #339's headline, running at **2× the f32-accum
+  rate on the 4080's consumer GeForce die** — is registered but its **enumeration is gated behind
+  `F16_MMA_F32_ACC` / `FAST_MATH`** ([`emmy/compiler/ir/atom.py:135`](emmy/compiler/ir/atom.py#L135)), which the
+  default sweep does not set, so it is never offered. Capturing #339's speedup on these goldens needs a sweep
+  with those flags on — an accuracy/speed trade (the f16-accum path bounds error to one K chunk via
+  `FragmentPromote`), a separate deliberate exercise, not a default re-tune.
+- **The retrained #339 prior fixed the fp32 greedy reachability.** `square.1024` / `square.2048` greedy now
+  *reach* their goldens (0.97–1.02× vs 1.09–1.14× on bad4e89d) — the two fp32 findings below are resolved on
+  main (the picks match the golden knobs; nothing to record).
+- **`square.2048.fp16` golden independently re-confirmed** at 188.6 µs (≈ the recorded 188.4); the greedy still
+  cannot reach it (218 µs, `w2x4/f4x4` — a persistent reachability regression on this one shape, worth its own
+  look).
+- **Left as marginal (sub-5 % floor):** `square.1024.fp16` greedy 3.2 % faster (31.9 vs 32.9, 0.3 % spread over
+  4 passes) and `square.512` 4.9 % faster — both reproducible but below the recording threshold.
+
+The findings and fork-regret analysis below are from the original `bad4e89d` sweep; the fp32 reachability
+findings are superseded by the re-sweep (fixed), the fp16 tier findings still stand (f16-accum still gated).
+
 ## Fork sibling regret (`emmy eval prior --dataset nodes`, -O1 block, 3173 nodes / 55 forks)
 
 The command prints every metric twice: `=== analytic prior ===` is the cold-start ranking that decides what a cold

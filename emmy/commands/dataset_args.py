@@ -63,3 +63,12 @@ def resolve_prior_arg(args) -> None:
         from emmy import config  # noqa: PLC0415
 
         os.environ[config.PRIOR_FILE] = str(Path(args.prior).expanduser())
+
+
+def resolve_analytic_arg(args) -> None:
+    """Publish ``--analytic-file`` into the env (``EMMY_ANALYTIC_FILE``) so the
+    analytic prior scores through that weights artifact — the eval-side A/B hook."""
+    if getattr(args, "analytic_file", None):
+        from emmy import config  # noqa: PLC0415
+
+        os.environ[config.ANALYTIC_FILE] = str(Path(args.analytic_file).expanduser())

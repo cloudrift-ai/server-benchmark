@@ -36,6 +36,7 @@ include = ["emmy*"]
 
 [tool.setuptools.package-data]
 "emmy.compiler.pipeline.search" = ["goldens/*.yaml"]
+"emmy.compiler.pipeline.search.prior" = ["*.json"]
 
 [project.scripts]
 emmy = "emmy.emmy:main"

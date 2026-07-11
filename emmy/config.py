@@ -34,6 +34,7 @@ from pathlib import Path
 PREFIX = "EMMY_"
 TUNE_DB = "EMMY_TUNE_DB"
 PRIOR_FILE = "EMMY_PRIOR_FILE"
+ANALYTIC_FILE = "EMMY_ANALYTIC_FILE"
 NVCC_FLAGS = "EMMY_NVCC_FLAGS"
 DEBUG = "EMMY_DEBUG"
 DUMP_DIR = "EMMY_DUMP_DIR"
@@ -150,6 +151,18 @@ def prior_path() -> Path:
     holding the one global prior; ``tune`` writes it, ``compile`` / ``run`` read it."""
     override = os.environ.get(PRIOR_FILE)
     return Path(override) if override else _CACHE_ROOT / "prior.json"
+
+
+def analytic_path() -> Path | None:
+    """Analytic-prior weights artifact override: ``EMMY_ANALYTIC_FILE`` → ``None``.
+
+    ``None`` means the repo-checked default (``analytic_weights.json`` next to
+    ``search/prior/analytic.py`` — package-relative, so it resolves there, not
+    here). Swap in a candidate fit for an A/B by pointing this at another
+    artifact; a version-mismatched or missing file is a hard error, never a
+    silent fallback."""
+    override = os.environ.get(ANALYTIC_FILE)
+    return Path(override) if override else None
 
 
 def nvcc_flags() -> str:

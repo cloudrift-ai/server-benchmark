@@ -53,11 +53,12 @@ def read_json(path: Path | str) -> Any | None:
         return None
 
 
-def write_json(path: Path | str, obj: Any) -> None:
+def write_json(path: Path | str, obj: Any, *, indent: int | None = None) -> None:
     """Write ``obj`` to ``path`` as JSON (numpy arrays base64-encoded), creating
-    parent dirs, via a temp file + atomic rename."""
+    parent dirs, via a temp file + atomic rename. ``indent`` pretty-prints — use it
+    for repo-checked artifacts where line-level diffs matter."""
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(json.dumps(obj, default=_default))
+    tmp.write_text(json.dumps(obj, default=_default, indent=indent) + ("\n" if indent else ""))
     tmp.replace(p)

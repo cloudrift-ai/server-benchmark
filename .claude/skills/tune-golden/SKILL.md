@@ -198,11 +198,12 @@ Everything in steps 1–7 applies unchanged — the spec is **part of the config
 - `eval prior --dataset golden` prints a per-shape `SKIPPED: no tuned rows` line for any golden (dynamic or static)
   whose shape has no tuned data — a `.dynM` entry skipping there means the symbolic shape was never tuned, not that
   the join failed.
-- The cold `AnalyticPrior` ranks `.dynM` shapes under a dedicated masked-tier weight set (`_W_A_DYN`, selected
-  on the stamped `S_ext_n_symbolic_axis`), fit by `scripts/golden_knob_heuristics.py` over the recorded dynamic
-  goldens (2026-06-12 evening refit: five of eight dynM rows rank ≤1, median ~6). Re-run the script after
-  recording new `.dynM` goldens — it
-  prints both `_W_A` and `_W_A_DYN` to paste into `search/prior/analytic.py`.
+- The cold `AnalyticPrior` ranks `.dynM` shapes under a dedicated masked-tier weight set (`weights_dynamic`,
+  selected on the stamped `S_ext_n_symbolic_axis`), fit by `scripts/golden_knob_heuristics.py` over the recorded
+  dynamic goldens (2026-06-12 evening refit: five of eight dynM rows rank ≤1, median ~6). Re-run the script after
+  recording new `.dynM` goldens — it writes both weight sets into the repo-checked
+  `search/prior/analytic_weights.json` artifact (use `--out` for a candidate file and A/B it via
+  `emmy eval analytic --analytic-file <file>` before overwriting the default).
 
 ## Step 6 — Validate
 

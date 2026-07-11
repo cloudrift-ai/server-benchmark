@@ -53,7 +53,7 @@ from pathlib import Path
 from statistics import median
 
 from emmy.commands.compile import resolve_tune_db
-from emmy.commands.dataset_args import add_dataset_args, require_source, resolve_prior_arg
+from emmy.commands.dataset_args import add_dataset_args, require_source, resolve_analytic_arg, resolve_prior_arg
 from emmy.commands.table import GREEN as _GREEN
 from emmy.commands.table import RED as _RED
 from emmy.commands.table import YELLOW as _YELLOW
@@ -80,6 +80,11 @@ def register_eval_command(subparsers) -> None:
         "analytic",
         help="Evaluate the cold-start AnalyticPrior on the golden configs (golden's rank under the prior over the enumeration)",
     )
+    ph.add_argument(
+        "--analytic-file",
+        help="Analytic weights artifact (JSON) to score with, for A/Bing candidate fits. "
+        "Default: EMMY_ANALYTIC_FILE or the repo-checked analytic_weights.json.",
+    )
     add_dataset_args(ph, default="golden")
     ph.set_defaults(func=handle_eval_analytic)
 
@@ -91,6 +96,11 @@ def register_eval_command(subparsers) -> None:
         "--prior",
         help="Path to the learned-prior JSON to load. Default: EMMY_PRIOR_FILE or ~/.cache/emmy/prior.json. "
         "(`emmy tune` writes this file; it is NOT the tune DB.)",
+    )
+    pp.add_argument(
+        "--analytic-file",
+        help="Analytic weights artifact (JSON) for the analytic blocks of this eval. "
+        "Default: EMMY_ANALYTIC_FILE or the repo-checked analytic_weights.json.",
     )
     add_dataset_args(pp, default="golden")
     pp.add_argument(
@@ -180,9 +190,20 @@ def handle_eval_knobs(args) -> None:
     _emit_interaction_matrix([r.knob for r in rows], interactions)
 
 
+def _check_analytic_artifact() -> None:
+    """Fail the command up front on an unloadable analytic weights artifact
+    (missing / feat_ver-mismatched override) — the per-shape eval harness catches
+    exceptions into ERR rows, which would let a broken A/B exit 0."""
+    from emmy.compiler.pipeline.search.prior import AnalyticPrior  # noqa: PLC0415
+
+    AnalyticPrior()
+
+
 def handle_eval_analytic(args) -> None:
     """``eval analytic`` — the cold-start AnalyticPrior's rank of each golden."""
     require_source(args, {"golden"}, "eval analytic ranks recorded golden configs — --dataset db has no golden to rank.")
+    resolve_analytic_arg(args)
+    _check_analytic_artifact()
     _emit_analytic_eval(args.kernel)
 
 
@@ -194,6 +215,8 @@ def handle_eval_prior(args) -> None:
     ``--dataset nodes`` reports fork sibling regret + leaf reachability over the tune
     DB's search-tree node store (the search-faithful, partial-config view)."""
     resolve_prior_arg(args)
+    resolve_analytic_arg(args)
+    _check_analytic_artifact()
     if (args.blame or args.ablate) and args.dataset != "nodes":
         logger.error("--blame/--ablate attribute fork records — they need --dataset nodes.")
         sys.exit(2)

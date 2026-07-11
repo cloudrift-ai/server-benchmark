@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Offline fit of the :class:`AnalyticPrior` weights (``_W_A``) over ``knob_features``.
+"""Offline fit of the :class:`AnalyticPrior` weights artifact over ``knob_features``.
 
 Motivation
 ----------
@@ -33,20 +33,24 @@ regime**: fp32-scalar + fp16/bf16-warp matmul, cooperative reduce, and pointwise
   4. Random-search + coordinate-descent the weights to minimize mean ``log2(rank+1)``
      across all goldens (both tiers jointly — the ``D_*`` features are tier-aware,
      so one weight vector serves both).
-  5. Print the winning weights as the ``_W_A`` dict to paste into
-     ``compiler/pipeline/search/prior/analytic.py``.
+  5. Write the winning weights (both sets + the carried-over scoring params +
+     provenance) to the ``AnalyticPrior`` weights artifact (``--out``, default the
+     repo-checked ``search/prior/analytic_weights.json``), and print them.
 
 Run:  ./venv/bin/python scripts/golden_knob_heuristics.py
-      ./venv/bin/python scripts/golden_knob_heuristics.py --samples 40000
+      ./venv/bin/python scripts/golden_knob_heuristics.py --samples 40000 --out /tmp/candidate.json
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime
 import math
+from pathlib import Path
 
 import numpy as np
 
+from emmy import config, storage
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import features
 from emmy.compiler.pipeline.search.analytic import _enumerate, enumerate_graph
@@ -242,21 +246,29 @@ def _fit(cases, names, sd_ref, *, seed_w, rng, samples):
     return best_w, best_ranks, mu, sd
 
 
-def _print_weights(var: str, names, best_w, sd) -> None:
+def _raw_weights(names, best_w, sd) -> dict[str, float]:
     # Fold the z-score into the weights so they apply to RAW features directly:
     # score = ((raw-mu)/sd)·w = raw·(w/sd) - const; the const drops out of ranking.
-    raw_w = {name: float(best_w[i] / sd[i]) for i, name in enumerate(names) if abs(best_w[i] / sd[i]) > 1e-4}
-    print(f"\n== {var} (paste into search/prior/analytic.py) ==")
-    print(f"{var}: dict[str, float] = {{")
+    return {name: float(best_w[i] / sd[i]) for i, name in enumerate(names) if abs(best_w[i] / sd[i]) > 1e-4}
+
+
+def _print_weights(var: str, raw_w: dict[str, float]) -> None:
+    print(f"\n== {var} ==")
     for name, wv in sorted(raw_w.items(), key=lambda t: -abs(t[1])):
         print(f"    {name!r}: {wv},")
-    print("}")
 
 
 def main() -> None:
+    from emmy.compiler.pipeline.search.prior.analytic import _DEFAULT_FILE  # noqa: PLC0415
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--samples", type=int, default=20000, help="random weight vectors to try")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--out",
+        default=str(_DEFAULT_FILE),
+        help="Weights artifact to write (default: the repo-checked analytic_weights.json).",
+    )
     args = ap.parse_args()
 
     rng = np.random.default_rng(args.seed)
@@ -268,22 +280,48 @@ def main() -> None:
     dyn_cases = [c for c in cases if c[1] == "dyn"]
     print(f"  {len(static_cases)} static + {len(dyn_cases)} dynamic golden cases, {len(names)} D_* features")
 
-    # Seed: the current _W_A so each search starts from today's weights and can
-    # only improve on the live ranking (the dyn fit seeds from the STATIC result
-    # — the masked tier shares most of the geometry priors and diverges where the
-    # boundary guard / occupancy differences demand).
-    from emmy.compiler.pipeline.search.prior.analytic import _W_A  # noqa: PLC0415
-
-    seed_raw = np.array([_W_A.get(n, 0.0) for n in names])
+    # Seed: the incumbent artifact's static weights so each search starts from
+    # today's ranking and can only improve on it (the dyn fit seeds from the STATIC
+    # result — the masked tier shares most of the geometry priors and diverges where
+    # the boundary guard / occupancy differences demand). Lenient read, no feat_ver
+    # gate: a refit after a featurizer change is exactly when versions mismatch, and
+    # a stale key simply seeds 0.0. The scoring params carry through unchanged —
+    # this script fits only the linear weights.
+    incumbent = storage.read_json(config.analytic_path() or _DEFAULT_FILE)
+    if not isinstance(incumbent, dict) or "params" not in incumbent:
+        raise SystemExit(f"no incumbent weights artifact to seed from at {config.analytic_path() or _DEFAULT_FILE}")
+    seed_weights = incumbent.get("weights", {})
+    seed_raw = np.array([seed_weights.get(n, 0.0) for n in names])
 
     print("\n== static fit (thread / warp / reduce / pointwise tiers) ==")
-    static_w, _, _, static_sd = _fit(static_cases, names, np.ones(len(names)), seed_w=seed_raw, rng=rng, samples=args.samples)
-    _print_weights("_W_A", names, static_w, static_sd)
+    static_w, static_ranks, _, static_sd = _fit(static_cases, names, np.ones(len(names)), seed_w=seed_raw, rng=rng, samples=args.samples)
+    static_raw = _raw_weights(names, static_w, static_sd)
+    _print_weights("weights (static)", static_raw)
 
+    dyn_raw, dyn_note = incumbent.get("weights_dynamic", static_raw), "carried from incumbent (no dynamic cases)"
     if dyn_cases:
         print("\n== dynamic fit (symbolic-axis masked-tile goldens) ==")
-        dyn_w, _, _, dyn_sd = _fit(dyn_cases, names, static_sd, seed_w=static_w, rng=rng, samples=args.samples)
-        _print_weights("_W_A_DYN", names, dyn_w, dyn_sd)
+        dyn_w, dyn_ranks, _, dyn_sd = _fit(dyn_cases, names, static_sd, seed_w=static_w, rng=rng, samples=args.samples)
+        dyn_raw = _raw_weights(names, dyn_w, dyn_sd)
+        dyn_note = f"dynamic {topk_table(dyn_ranks)}"
+        _print_weights("weights_dynamic", dyn_raw)
+
+    artifact = {
+        "feat_ver": features.FEATURIZER_VERSION,
+        "kind": "linear",
+        "weights": static_raw,
+        "weights_dynamic": dyn_raw,
+        "params": incumbent["params"],
+        "provenance": {
+            "fitted": datetime.date.today().isoformat(),
+            "script": "scripts/golden_knob_heuristics.py",
+            "args": {"samples": args.samples, "seed": args.seed},
+            "cases": {"static": len(static_cases), "dynamic": len(dyn_cases)},
+            "notes": f"static {topk_table(static_ranks)}; {dyn_note}",
+        },
+    }
+    storage.write_json(Path(args.out), artifact, indent=2)
+    print(f"\nwrote {args.out}")
 
 
 if __name__ == "__main__":

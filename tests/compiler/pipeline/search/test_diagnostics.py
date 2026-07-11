@@ -357,15 +357,16 @@ def test_analytic_explain_sums_to_the_scored_quality():
 
 
 def test_analytic_explain_selects_the_dynamic_weight_set():
-    """A symbolic-axis row decomposes under ``_W_A_DYN`` — the same selection
-    ``mean_score_features`` makes."""
-    from emmy.compiler.pipeline.search.prior.analytic import _W_A, _W_A_DYN, AnalyticPrior  # noqa: PLC0415
+    """A symbolic-axis row decomposes under the dynamic weight set — the same
+    selection ``mean_score_features`` makes."""
+    from emmy.compiler.pipeline.search.prior.analytic import AnalyticPrior  # noqa: PLC0415
 
     p = AnalyticPrior()
     static = p.explain_features({"D_ctas_ge_sm": 1.0})
     dyn = p.explain_features({"D_ctas_ge_sm": 1.0, "S_ext_n_symbolic_axis": 1.0})
-    assert static["D_ctas_ge_sm"] == _W_A["D_ctas_ge_sm"]
-    assert dyn["D_ctas_ge_sm"] == _W_A_DYN["D_ctas_ge_sm"]
+    assert static["D_ctas_ge_sm"] == p._w["D_ctas_ge_sm"]
+    assert dyn["D_ctas_ge_sm"] == p._w_dyn["D_ctas_ge_sm"]
+    assert p._w["D_ctas_ge_sm"] != p._w_dyn["D_ctas_ge_sm"]  # the sets genuinely differ on this key
 
 
 def _planted_fork():

@@ -35,6 +35,16 @@ def _isolate_prior_file(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_analytic_file(monkeypatch):
+    """Drop any dev-machine ``EMMY_ANALYTIC_FILE`` override so tests always score
+    through the repo-checked ``analytic_weights.json``. Unlike the prior file, the
+    default here must NOT be a tmp path — a missing analytic artifact is a hard
+    error by design (no silent fallback), and the shipped one is what tests
+    exercise."""
+    monkeypatch.delenv("EMMY_ANALYTIC_FILE", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _seed_rng():
     """Pin RNGs for every test so numerical-tolerance assertions
     (e.g. ``test_torch_ops.test_unary``) don't flake on inputs that

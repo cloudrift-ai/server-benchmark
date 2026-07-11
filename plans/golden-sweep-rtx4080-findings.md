@@ -65,9 +65,17 @@ re-sweep established:
   f32-accum golden 188.6 µs, with **register pressure blown to 228+ regs → 17 % occupancy** (the `FragmentPromote`
   keeps both f16 accumulators and f32 shadows live). These GEMMs are occupancy/bandwidth-bound at their optimal
   tiles, so the 2× mma-chain rate is wasted and the promote overhead dominates. Accuracy stayed within emmy's
-  wrong-answer gate (flags clean). **Conclusion: the f32-accum goldens are correct; `FAST_MATH` is a net loss
-  here** — it may still pay off on register-light, genuinely mma-bound kernels, untested. Data:
-  `_tune/fastmath-explore/`.
+  wrong-answer gate (flags clean). **Conclusion: the f32-accum goldens are correct; `FAST_MATH` is a net loss on
+  the squares.**
+- **Probe — where f16-accum DOES win: K-heavy, small-output-tile shapes (modest +3–9 %).** A follow-up probe
+  (matched-tile f16-accum-vs-f32-accum A/Bs) found the sign flips with the tile's occupancy profile. Small output
+  tile (`w2x1/f4x4`, ~6 extra regs → 33 % occ preserved) + deep K (mma-bound): synthetic **512²×K8192 +9 %**
+  (161.9 vs 178.3 µs), **256²×K16384 +7 %** (83.0 vs 89.5), gemma **`down_proj` K=15360 +3.3 %** (1272.8 vs
+  1316.2). Large output tile (the squares, gate/up N=15360): the `FragmentPromote` shadows crush occupancy to
+  17 % → **loss**. Even the wins are far below the theoretical 2× (memory traffic, smem staging, promote, split-K
+  reduction all dilute the mma-chain speedup). So f16-accum is **situational** — worth enabling only for genuinely
+  mma-bound, register-light kernels (deep-K reductions with small output tiles); correctly off-by-default, since a
+  blanket `FAST_MATH` slows more kernels than it speeds. Data: `_tune/fastmath-explore/`.
 - **The retrained #339 prior fixed the fp32 greedy reachability.** `square.1024` / `square.2048` greedy now
   *reach* their goldens (0.97–1.02× vs 1.09–1.14× on bad4e89d) — the two fp32 findings below are resolved on
   main (the picks match the golden knobs; nothing to record).

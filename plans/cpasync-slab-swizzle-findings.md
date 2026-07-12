@@ -49,6 +49,20 @@ with the paired lane map — verified in the emitted sm_89 kernel: paired `x4.tr
 Covered by `test_cp_staged_slab_is_swizzled` (mode pinned ON, fill+drain XOR presence, CPU render at sm_89) and
 the pre-existing staged-vs-gmem bit-identity suite, which now exercises swizzled cp kernels on GPU.
 
+**End-to-end verification (golden replays through the real pipeline, same 4090, `emmy run --bench --golden`):**
+
+| golden (rtx4090) | recorded µs | live w/ swizzle | delta | vs cuBLAS |
+| --- | --- | --- | --- | --- |
+| mlp_gate_up.h4096 [fm] | 786.9 | **662.0–664.6** (3×) | **−16%** | **0.92** (721.0) — was 1.08 |
+| mlp_gate_up.h4096 std | 964.6 (live ~940) | 918.4–919.5 | −2–5% | — |
+| mlp_down.h4096 [fm] | 348.5 | **273.6** (268.8 + 4.8 finalize) | **−21%** | **0.92** (297) — was 0.90 vs live-940-era std |
+| mlp_down.h4096 std | 371 | 372.9 | parity | — |
+| square.4096.fp16 [fm] | 750.6 | **631.3** | **−16%** | **0.78** (eager ~808) — was 0.93 |
+
+Accuracy checks pass (silent-success `emmy run`). **Every cp-transport matmul golden's recorded `emmy_us` is now
+stale-high across the sm_89 cards** — a golden refresh sweep (tune-golden flow, 4090 + 4080) is the follow-up, and
+greedy-vs-golden gaps will look larger until then since live replays already run swizzled.
+
 ## Implementation sketch (as scoped before landing)
 
 - The drain side already has the machinery: `LdmatrixLoad` carries a `swizzle` field and the pair-fusion

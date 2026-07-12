@@ -1690,8 +1690,10 @@ def _twisted_warp_options(
     # The f16-accumulate PV sibling (``f16acc_ok`` — the F16_MMA_F32_ACC / FAST_MATH gate): each
     # geometry row doubles with a variant whose **PV plan** rides the ``_f16acc`` atom (the O
     # accumulator promotes per streaming block in the realizer; scores stay f32-accumulate). An
-    # axis-keyed ``TILE@<pv_k>`` pin naming the sibling (a recorded golden's spelling) also offers
-    # it, so the pinned row replays without the gate — pins are authoritative.
+    # axis-keyed ``TILE@<pv_k>`` pin naming the sibling (a recorded STATIC golden's spelling) also
+    # offers it, as does a BARE ``TILE`` pin spelling the sibling PV plan (the masked-flash golden
+    # form — see the pinned branch below), so pinned rows replay without the gate — pins are
+    # authoritative.
     from emmy import config  # noqa: PLC0415 — the same deferred import _narrow_flash_forms uses
 
     sibling = _F16ACC_ATOMS.get(atom_name)
@@ -1705,20 +1707,40 @@ def _twisted_warp_options(
         if not is_warp_codec(spec):
             return []  # a scalar / empty pin asks for a tier this form doesn't offer
         want = TilePlan.parse(spec)
-        if want.atom.name != atom_name or want.units[1] != 1 or want.bk != bk:
-            logger.warning(
-                "warp TILE pin %r does not fit the flash form (atom %s, w<um>x1/f<fm>x<nt>/k%d); the flash kernel stays scalar",
-                spec,
-                atom_name,
-                bk,
-            )
-            return []
-        if (want.regs[1] * atom_n) % atom_k:
-            # The streamed key block must be a multiple of the P@V atom-K step — an odd nt leaves a
-            # partial expect fold (the C→A repack pairs k-adjacent score fragments). Loud, per the
-            # pin contract (divisibility violation).
-            raise ValueError(f"warp TILE pin: key block {want.regs[1] * atom_n} is not a multiple of the P@V atom K-step {atom_k}")
-        triples = [(want.units[0], want.regs[1], want.regs[0])]
+        if sibling is not None and want.atom.name == sibling:
+            # A bare pin naming the f16-accumulate SIBLING spells the **PV plan** verbatim — the
+            # masked-flash fast-math golden form: a symbolic trace resolves no ``TILE@<axis>`` key,
+            # so a dynamic ``[fm]`` golden records its PV plan (the exact string the static twin
+            # stamps on ``TILE@<pv_k>``) as its one bare ``TILE``, and the realized stamp then
+            # equals the pin — the replay integrity gate holds. Scores stay on the base
+            # f32-accumulate atom as always; the geometry recovers from the PV plan (``um``/``fm``
+            # shared, ``nt`` from its K-chunk — ``bk·atom_k/atom_n``, the streamed key block).
+            if want.units[1] != 1 or want.regs[1] != d_v.as_static() // atom_n or (want.bk * atom_k) % atom_n:
+                logger.warning(
+                    "bare f16-accumulate TILE pin %r does not spell this flash form's PV plan "
+                    "(w<um>x1/f<fm>x%d/k<block/%d>); the flash kernel stays scalar",
+                    spec,
+                    d_v.as_static() // atom_n,
+                    atom_k,
+                )
+                return []
+            pv_atoms = [ATOM_REGISTRY[sibling]]
+            triples = [(want.units[0], want.bk * atom_k // atom_n, want.regs[0])]
+        else:
+            if want.atom.name != atom_name or want.units[1] != 1 or want.bk != bk:
+                logger.warning(
+                    "warp TILE pin %r does not fit the flash form (atom %s, w<um>x1/f<fm>x<nt>/k%d); the flash kernel stays scalar",
+                    spec,
+                    atom_name,
+                    bk,
+                )
+                return []
+            if (want.regs[1] * atom_n) % atom_k:
+                # The streamed key block must be a multiple of the P@V atom-K step — an odd nt leaves a
+                # partial expect fold (the C→A repack pairs k-adjacent score fragments). Loud, per the
+                # pin contract (divisibility violation).
+                raise ValueError(f"warp TILE pin: key block {want.regs[1] * atom_n} is not a multiple of the P@V atom K-step {atom_k}")
+            triples = [(want.units[0], want.regs[1], want.regs[0])]
     else:
         triples = twisted_warp_moves()
     out: list[TileOp] = []

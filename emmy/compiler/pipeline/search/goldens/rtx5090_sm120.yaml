@@ -533,6 +533,21 @@ configs:
     knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, PLACE: 'fuse', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', VECTORIZE_LOADS: true, WSPEC: ''}
     emmy_us: 8.6
     cublas_us: 10.23
+  # Fast-math sibling (FAST_MATH lane): the masked-flash fm form — the bare TILE spells the
+  # f16-accumulate PV plan (the exact string the static twin stamps on TILE@pj); scores stay
+  # f32-acc. 7.5 µs vs the standard golden's live 8.5 (0.88x), 1.36x vs torch SDPA. 2026-07-12,
+  # 3x reproduced at zero spread post the bare-sibling-pin fix; dynamic accuracy vs torch passes.
+  - kernel: attention
+    name: attention.hd64.dynM
+    n_heads: 8
+    seq: 512
+    head_dim: 64
+    dtype: 'fp16'
+    causal: false
+    dynamic: true
+    knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f1x8/k8', WSPEC: ''}
+    emmy_us: 7.5
+    cublas_us: 10.23
   - kernel: attention
     name: attention.hd128.dynM
     n_heads: 8
@@ -543,4 +558,18 @@ configs:
     dynamic: true
     knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, PLACE: 'fuse', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k8', VECTORIZE_LOADS: true, WSPEC: ''}
     emmy_us: 16.4
+    cublas_us: 18.4
+  # Fast-math sibling (FAST_MATH lane): masked-flash fm form (bare TILE = the f16-accumulate PV
+  # plan; scores stay f32-acc). 15.3 µs vs the standard golden's live 16.5 (0.93x), 1.20x vs torch
+  # SDPA. 2026-07-12, 3x reproduced at zero spread; dynamic accuracy vs torch passes.
+  - kernel: attention
+    name: attention.hd128.dynM
+    n_heads: 8
+    seq: 512
+    head_dim: 128
+    dtype: 'fp16'
+    causal: false
+    dynamic: true
+    knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f16/w2x1/f1x16/k4', WSPEC: ''}
+    emmy_us: 15.3
     cublas_us: 18.4

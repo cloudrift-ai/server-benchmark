@@ -98,13 +98,17 @@ SDPA)** and **hd128 14.6 vs 16.4 (0.89×, 1.26×)**, each 3× reproduced at zero
 passing. Both recorded as `[fm]` entries. The both-contractions swap is refused by the flash form narrowing
 (the dd pin realizes f32-acc, integrity-flagged) — correct behavior, softmax stats need f32.
 
-**The dynM twins cannot record the same win**: dynamic attention goldens are schema-required to record a
-single bare `TILE` (the masked-flash pin doesn't resolve `TILE@<axis>`), and a bare f16acc `TILE` pin
-degrades to the **scalar fallback** (18.5 ms / 9.7 ms — the flatten pathology). So the f16acc PV sibling is
-unreachable on the masked-flash path both by pin and (presumably) by search. **Recommendation:** teach the
-masked-flash form narrowing to accept the f16acc atom on its PV contraction (or make the bare-TILE pin
-resolve per-contraction atoms), then mirror the two static wins to hd64.dynM / hd128.dynM — the deployable
-artifacts models actually run.
+**The dynM twins initially could not record the same win** — dynamic attention goldens are schema-required
+to record a single bare `TILE` (the masked-flash pin doesn't resolve `TILE@<axis>`), and a bare f16acc
+`TILE` pin failed `_twisted_warp_options`' base-atom check, declining the whole warp tier to the **scalar
+fallback** (18.5 ms / 9.7 ms — the flatten pathology). **FIXED same session**: the pinned branch now accepts
+a bare pin spelling the f16acc SIBLING's **PV plan** (the exact string the static twin stamps on
+`TILE@<pv_k>`, so the realized stamp equals the pin and the replay integrity gate holds); geometry recovers
+from the PV plan (`nt = bk·atom_k/atom_n`, the streamed key block) and scores stay f32-accumulate.
+Covered by `test_bare_sibling_pin_selects_the_f16acc_pv_plan` (static + dynM live-fork capture). Post-fix,
+both dynM twins recorded their `[fm]` entries: **hd64.dynM 7.5 vs 8.5 (0.88×, 1.36× vs SDPA)**,
+**hd128.dynM 15.3 vs 16.5 (0.93×, 1.20×)** — 3× reproduced at zero spread, zero integrity flags, dynamic
+accuracy vs torch passing.
 
 ## Finding 5 — deploy-side confirmations (audit follow-ups, not this task's scope)
 

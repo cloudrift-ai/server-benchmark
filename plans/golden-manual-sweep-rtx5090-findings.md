@@ -188,6 +188,20 @@ floor → memory time ~0.53×, flipping the kernel compute-bound — estimated 1
 cuBLAS (and the same double-stream exists in the 5090's wide-N shapes; its bigger pipe just hides it better).
 Secondary: cp.async address CSE (frees registers toward the N=128 tile sm_89 can't currently afford).
 
+**Post-implementation truth (both hypotheses measured, same day):** the rasterization landed as the `RASTER`
+codec and halved DRAM traffic exactly as designed (503.6 → 261.6 MB) — but wall time barely moved (qkv −4%
+recorded; gate_up fm +2.4%; rest neutral): DRAM bandwidth was NOT the binding pipe. NCU scheduler stats give
+the real constraint: **76.3% of issue cycles have zero eligible warps** (1.84 active / 0.27 eligible per
+scheduler) — the kernels are latency-starved at 2 CTAs/SM, register-bound by the *fragments* (the winning
+`f4x8` tile's accumulators+operands ≈ 224 of 250 regs; addressing is ~25). The **address-CSE hypothesis was
+then refuted by prototype**: hand-hoisting the K-loop fill addressing (pointer-stepping, clamp per chunk)
+on the real gate_up fm kernel freed 3 registers and ran **3.3% SLOWER** (797.1 → 823.0 µs, outputs
+bit-identical) — ptxas already CSEs optimally, and the hoist's loop-carried pointer chain destroys the fill
+burst's ILP. Not implemented. The residual ~8% to cuBLAS on sm_89 is structural to the tile architecture at
+2 CTAs/SM; the one credible remaining lever is **extending WSPEC to the cp.async transport** (a producer
+warp band owning fills would cut consumer-warp register pressure and add latency-hiding warps — today WSPEC
+is TMA-only by design), a substantial schedule/realizer work item, not a peephole.
+
 ## Workflow notes
 
 - **The `--ab` A/B harness is excellent for manual sweeps**: ~8–12 pinned variants per invocation, live golden

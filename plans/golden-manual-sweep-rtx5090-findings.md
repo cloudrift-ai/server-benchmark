@@ -139,7 +139,18 @@ mma-bound shapes, exactly the PR #339 K-heavy prediction, now recorded as 9 `[fm
 
 No f16acc win on o_proj (parity, left unrecorded). `attention.hd256.dynM`: the bare sibling-PV pin
 **resolves on sm_89 too** (the masked-flash fix is cross-card; PV plan `w4x1/f1x32`) at 43.4 vs 44.3 —
-parity, mechanism validated, nothing recorded. Also: `REDUCE: ''` stamped on the 8 session-verified
+parity, mechanism validated, nothing recorded.
+
+**Why the win is 15–20% here vs the 5090's 40% (roofline decomposition, nothing blocked):** on the 5090 the
+std kernels already sit AT the f32-accumulate ceiling (gate_up 202 vs ~210 TFLOP/s), so the f16acc atom's 2×
+rate translates nearly fully (325). On the 4090 the std kernels run at 123–133 TFLOP/s — **below even the
+f32-acc ceiling (~165, where cuBLAS sits exactly)** — because the cp.async pipeline (no TMA on AD102: copies
+burn SM instructions + registers) is the binding constraint. The fm atom lifts emmy to 153; the residual gap
+to cuBLAS's 165 is cp.async ring codegen cost, not a knob. The full reachable cp.async space was measured:
+d1/cp (1003.5 — loses), d3/cp/ring (occupancy halves at the 99KB smem cap — loses), k4 chunks (lose),
+`/p2` producer splits with the fm atom (gate_up 803.8 / down 381.6 / sq4096 850.9 — all lose vs the plain
+ring), and the 5090's big tiles peg the 255-reg ISA cap (cp.async addressing state eats exactly the headroom
+the f16 accumulator frees). TMA/WSPEC are hardware-gated off, correctly. Also: `REDUCE: ''` stamped on the 8 session-verified
 under-specified entries, and `emmy_us` refreshed where ≥3 passes drifted consistently ≥5% (mlp_down
 397.5→371, mlp_down.dynM 412.9→387.3, sq2048.fp16 116→123.4, sq1024.fp16 22.2→24.0 — partially the
 07-11 report's stale-value recommendation; gate_up/qkv/sq4096 wobbled around their recorded values and

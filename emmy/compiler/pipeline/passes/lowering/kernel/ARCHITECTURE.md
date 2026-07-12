@@ -151,8 +151,9 @@ render's third variant) — and the V slab via the canonical `x2.trans`. The K/V
 (`Operand.pad_cols` / `_twist._PAD`) — the flash stream's bank-conflict fix: a power-of-two row
 span lands every ldmatrix row read on one bank group (a measured ~8-way replay profile), and the pad shifts
 consecutive rows across groups. Intrinsic, not a fork (a near-strict win, like the masked-K alignment pad); padding
-relocates smem bytes only. (The matmul tier's cp.async slabs use the software swizzle XOR instead — same modes as
-TMA, applied on the fill destination index, zero smem growth; pad and swizzle are mutually exclusive per slab.) The **TMA transport** boxes the batched K/V via rank-N descriptors (leading
+relocates smem bytes only. (The matmul tier's cp.async slabs use the software swizzle XOR instead — same modes
+as TMA, applied on the fill destination index, zero smem growth; pad and swizzle are mutually exclusive per
+slab.) The **TMA transport** boxes the batched K/V via rank-N descriptors (leading
 extent-1 box dims; the load's batch/head index exprs as origin coords — GQA's `h // group` included) into dense
 1024 B-aligned slabs under the hardware swizzle, the drains' address XOR undoing it; under a `WSPEC` band split the
 transport's elected fill thread rides the WRAPPED linear tid (`threadIdx.x % block_threads` — the raw tid would elect

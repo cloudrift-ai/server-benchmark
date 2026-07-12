@@ -198,9 +198,11 @@ then refuted by prototype**: hand-hoisting the K-loop fill addressing (pointer-s
 on the real gate_up fm kernel freed 3 registers and ran **3.3% SLOWER** (797.1 → 823.0 µs, outputs
 bit-identical) — ptxas already CSEs optimally, and the hoist's loop-carried pointer chain destroys the fill
 burst's ILP. Not implemented. The residual ~8% to cuBLAS on sm_89 is structural to the tile architecture at
-2 CTAs/SM; the one credible remaining lever is **extending WSPEC to the cp.async transport** (a producer
+2 CTAs/SM; the one credible remaining lever was **extending WSPEC to the cp.async transport** (a producer
 warp band owning fills would cut consumer-warp register pressure and add latency-hiding warps — today WSPEC
-is TMA-only by design), a substantial schedule/realizer work item, not a peephole.
+is TMA-only by design). **Also prototyped and REFUTED (same box, next day)** — the sm_89 SMSP register
+banking makes a 9th resident warp cap the kernel at 168 regs, and at iso-warp-count the split is
+perf-neutral; see `wspec-cpasync-producer-band.md` for the measured refutation.
 
 ## Workflow notes
 

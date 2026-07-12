@@ -123,23 +123,23 @@ def register_tune_command(subparsers):
 
 
 def _tune_offline(args):
-    """``emmy tune`` with no op: refit the global learned prior on its
+    """``emmy tune`` with no op: refit the global online prior on its
     persisted reservoir dataset and print offline diagnostics — no GPU, no
     benching. Answers "can the prior reach the best configs?" over everything
     tuned so far."""
     from emmy import config
-    from emmy.compiler.pipeline.search.prior import CatBoostPrior, diagnostics
+    from emmy.compiler.pipeline.search.prior import OnlinePrior, diagnostics
 
-    prior = CatBoostPrior.load(seed=args.seed)
+    prior = OnlinePrior.load(seed=args.seed)
     if not prior._dataset:
-        logger.error("no prior dataset at %s — run `emmy tune <model>` first", config.prior_path())
+        logger.error("no prior dataset at %s — run `emmy tune <model>` first", config.online_path())
         sys.exit(1)
-    sys.stderr.write(f"[tune] offline refit on {len(prior._dataset)} rows from {config.prior_path()}\n")
+    sys.stderr.write(f"[tune] offline refit on {len(prior._dataset)} rows from {config.online_path()}\n")
     prior.fit()  # unconditional re-fit on the whole accumulated dataset
     prior.calibration = prior._reservoir_calibration()  # refresh the trustworthy gate's input alongside the fit
     if prior.calibration is not None:
-        verdict = "owns deploys" if prior.trustworthy else "QUARANTINED — deploys stay analytic"
-        sys.stderr.write(f"[tune] reservoir calibration {prior.calibration:+.2f} → learned model {verdict}\n")
+        verdict = "owns deploys" if prior.trustworthy else "QUARANTINED — deploys stay offline"
+        sys.stderr.write(f"[tune] reservoir calibration {prior.calibration:+.2f} → online model {verdict}\n")
     prior.checkpoint()
     sys.stderr.write(diagnostics.report(prior) + "\n")
     sys.stderr.write(diagnostics.golden_prior_eval(prior) + "\n")
@@ -252,7 +252,7 @@ def _tune_one(args, *, backends, db, ctx, dump, run_id=None):
     finally:
         progress.close()
     sys.stderr.write(f"\n[tune] done: {result.n_terminals} fused terminal(s) in {time.monotonic() - t0:.1f}s\n")
-    for block in result.prior_summaries:  # learned-prior pick-quality sanity stats
+    for block in result.prior_summaries:  # online-prior pick-quality sanity stats
         sys.stderr.write(block + "\n")
     return result, bench_bundle
 
@@ -338,7 +338,7 @@ def _bench_dump(args):
 
 def handle_tune(args):
     if not getattr(args, "dataset", None) and not args.code and not args.input and not getattr(args, "golden", None):
-        # No op to tune → offline mode: refit the learned prior on its persisted
+        # No op to tune → offline mode: refit the online prior on its persisted
         # dataset and print diagnostics (reachability, calibration, golden coverage).
         _tune_offline(args)
         return
@@ -446,8 +446,8 @@ def _clean_caches(db_path) -> None:
             if p.exists():
                 p.unlink()
                 removed.append(str(p))
-    # The learned-prior checkpoint file (a fresh sweep should start cold).
-    for p in (config.prior_path(), config.prior_path().with_suffix(config.prior_path().suffix + ".tmp")):
+    # The online-prior checkpoint file (a fresh sweep should start cold).
+    for p in (config.online_path(), config.online_path().with_suffix(config.online_path().suffix + ".tmp")):
         if p.exists():
             p.unlink()
             removed.append(str(p))

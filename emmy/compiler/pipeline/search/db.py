@@ -31,7 +31,7 @@ Pure persistence layer — no MCTS state, no propagation walks. Tables:
   (parent-tree-independent), so it survives schema-version drops like ``perf``.
   Written once per finished search by :meth:`SearchDB.record_nodes`, fed by the
   post-order tree walk ``TuningSearch._collect_node_records`` — alongside (not
-  replacing) the learned prior's reservoir feed. Label-quality columns (additive
+  replacing) the online prior's reservoir feed. Label-quality columns (additive
   migration; old rows degrade to unknowns): ``visits`` (benched-descendant count,
   SUM-accumulated — the label's confidence weight), ``is_leaf`` (directly-benched
   terminal vs branch), ``variance`` / ``n_samples`` (the leaf's own bench stats),
@@ -848,7 +848,7 @@ class SearchDB:
 
     def iter_nodes(self, *, context_key: str | None = None, op_sig: str | None = None) -> Iterator[NodeRow]:
         """Yield one :class:`NodeRow` per stored search-tree node (the value-of-position
-        dataset backing ``eval prior --dataset nodes``). Self-contained — no join.
+        dataset backing ``eval online --dataset nodes``). Self-contained — no join.
         A read-only open of a pre-``node`` DB has no such table, so this degrades to
         yielding nothing instead of raising (mirrors ``iter_perf_samples``'
         missing-column degrade). Optional ``context_key`` / ``op_sig`` scope to one

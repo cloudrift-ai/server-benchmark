@@ -58,7 +58,7 @@ def restamp_structural_features(op: LoopOp, graph: Graph | None = None) -> None:
     for its current body, in place. For fragment builders that rewrite a body
     *after* ``020_stamp_structural_features`` already ran (the pass runs once at
     fusion end and never revisits a spliced fragment) — without this the split
-    kernels would featurize as the fused kernel for the learned prior."""
+    kernels would featurize as the fused kernel for the online prior."""
     op.knobs = {k: v for k, v in op.knobs.items() if not k.startswith(STRUCT_PREFIX)}
     op.knobs.update(structure_features(op.body, graph))
 

@@ -1,4 +1,4 @@
-"""Unit tests for the learned prior (``search/prior/``) — CatBoost model, bounded
+"""Unit tests for the online prior (``search/prior/``) — CatBoost model, bounded
 reservoir dataset + batched refit — and its value-of-position label extraction +
 PUCT selection in the MCTS tree (``policy/mcts.py``).
 
@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 from emmy.compiler.pipeline.search.db import PerfStats
 from emmy.compiler.pipeline.search.policy.mcts import SearchNode, SearchTree, TuningSearch
-from emmy.compiler.pipeline.search.prior import CatBoostPrior, prior_from_json
+from emmy.compiler.pipeline.search.prior import OnlinePrior, prior_from_json
 
 
 def _node(knobs: dict, parent: SearchNode) -> SearchNode:
@@ -30,8 +30,8 @@ def _leaf_stats(us: float, *, variance: float = 0.5, n_samples: int = 7) -> Perf
 
 
 def _fit(rows, **kw):
-    """A CatBoostPrior fit on ``rows`` (fast: few iterations)."""
-    p = CatBoostPrior(seed=0, iterations=40, min_rows=3, **kw)
+    """A OnlinePrior fit on ``rows`` (fast: few iterations)."""
+    p = OnlinePrior(seed=0, iterations=40, min_rows=3, **kw)
     p.add_rows(rows)
     p.fit()
     return p
@@ -67,7 +67,7 @@ def test_partial_knob_dicts_fit_and_score():
 
 
 def test_score_is_zero_before_fit():
-    p = CatBoostPrior(seed=0)
+    p = OnlinePrior(seed=0)
     assert p.score({"BM": 64}) == 0.0
     assert p.mean_score({"BM": 64}) == 0.0
     assert not p.fitted
@@ -86,7 +86,7 @@ def test_score_equals_mean_and_is_deterministic():
 def test_add_rows_reservoir_caps_dataset():
     """``add_rows`` keeps the dataset at ``max_rows`` via reservoir sampling while
     counting every row ever seen."""
-    p = CatBoostPrior(seed=0, max_rows=20)
+    p = OnlinePrior(seed=0, max_rows=20)
     p.add_rows([({"BM": i}, float(i)) for i in range(36)])
     assert len(p._dataset) == 20  # capped
     assert p._seen == 36  # but all counted
@@ -96,7 +96,7 @@ def test_add_rows_reservoir_caps_dataset():
 def test_maybe_refit_fires_on_cadence_and_resets():
     """``maybe_refit`` fits only once ``refit_every`` rows have accumulated and
     the dataset clears ``min_rows``, then resets the counter."""
-    p = CatBoostPrior(seed=0, iterations=20, min_rows=5, refit_every=20)
+    p = OnlinePrior(seed=0, iterations=20, min_rows=5, refit_every=20)
     p.add_rows(_bm_rows(reps=2))  # 12 rows < refit_every
     assert not p.maybe_refit() and not p.fitted
     p.add_rows(_bm_rows(reps=2))  # now 24 >= 20
@@ -106,7 +106,7 @@ def test_maybe_refit_fires_on_cadence_and_resets():
 
 
 def test_maybe_refit_gated_by_min_rows():
-    p = CatBoostPrior(seed=0, iterations=20, min_rows=100, refit_every=5)
+    p = OnlinePrior(seed=0, iterations=20, min_rows=100, refit_every=5)
     p.add_rows(_bm_rows(reps=2))  # 12 rows: clears refit_every but not min_rows
     assert not p.maybe_refit() and not p.fitted
 
@@ -115,7 +115,7 @@ def test_force_refit_fits_small_dataset_below_tier():
     """A small tune whose rows never cross the first tier (100) still gets a model
     via ``force=True`` (end-of-run), as long as it clears ``min_rows``; a forced
     refit with nothing new since the last fit is a no-op."""
-    p = CatBoostPrior(seed=0, iterations=20, min_rows=10)
+    p = OnlinePrior(seed=0, iterations=20, min_rows=10)
     p.add_rows(_bm_rows(reps=6))  # 36 rows: below the 100 tier, above min_rows
     assert not p.maybe_refit()  # interval not reached
     assert p.maybe_refit(force=True) and p.fitted  # forced fit lands
@@ -125,7 +125,7 @@ def test_force_refit_fits_small_dataset_below_tier():
 def test_refit_interval_tiers_by_dataset_size():
     """Default (no ``refit_every`` override) coarsens the refit interval as the
     dataset grows: every 100 up to 1k, every 1k up to 10k, every 10k beyond."""
-    p = CatBoostPrior(seed=0)  # tiered schedule
+    p = OnlinePrior(seed=0)  # tiered schedule
     for n, expect in [(0, 100), (500, 100), (999, 100), (1000, 1000), (5000, 1000), (9999, 1000), (10_000, 10_000), (100_000, 10_000)]:
         p._dataset = [None] * n  # only len() matters for the interval
         assert p._refit_interval() == expect, f"size {n} → {p._refit_interval()}, want {expect}"
@@ -137,7 +137,7 @@ def test_refit_interval_tiers_by_dataset_size():
 def test_prior_persistence_round_trips():
     """``to_json`` → ``from_json`` reconstructs a prior whose ``mean_score``
     matches; an empty prior serializes to ``None``."""
-    assert CatBoostPrior(seed=0).to_json() is None
+    assert OnlinePrior(seed=0).to_json() is None
     p = _fit(_bm_rows())
     obj = p.to_json()
     assert obj is not None and obj["model"]
@@ -151,12 +151,12 @@ def test_prior_file_checkpoint_round_trips(tmp_path):
     """A fitted prior bound to a path checkpoints to JSON and reloads warm with
     matching predictions; loading a missing file yields a fresh unfit prior."""
     path = tmp_path / "prior.json"
-    assert not CatBoostPrior.load(path=path).fitted  # missing → fresh
+    assert not OnlinePrior.load(path=path).fitted  # missing → fresh
     p = _fit(_bm_rows())
     p._path = path
     p.checkpoint()
     assert path.exists()
-    q = CatBoostPrior.load(path=path)
+    q = OnlinePrior.load(path=path)
     assert q.fitted and q._first_fit_idx == 0 and len(q._dataset) == len(p._dataset)
     for bm in (4, 16, 64):
         assert abs(p.mean_score({"BM": bm}) - q.mean_score({"BM": bm})) < 1e-6
@@ -178,7 +178,7 @@ def test_load_tolerates_stale_checkpoint(tmp_path):
         "dataset": [[{"BM": bm}, math.log(bm)] for bm in (2, 4, 8, 16)],
     }
     storage.write_json(path, stale)
-    p = CatBoostPrior.load(path=path)
+    p = OnlinePrior.load(path=path)
     assert not p.fitted  # stale model discarded
     assert len(p._dataset) == 4  # rows salvaged
     p.add_rows(_bm_rows())
@@ -198,7 +198,7 @@ def test_load_discards_cross_vocabulary_checkpoint(tmp_path):
     for stamp in ({}, {"feat_ver": 1}):  # missing stamp == version 1
         old = {**stamp, "cols": ["BM"], "dataset": [[{"BM": bm}, math.log(bm)] for bm in (2, 4, 8, 16)]}
         storage.write_json(path, old)
-        p = CatBoostPrior.load(path=path)
+        p = OnlinePrior.load(path=path)
         assert not p.fitted and not p._dataset  # dropped whole — model AND rows
 
 
@@ -220,7 +220,7 @@ def test_maybe_refit_measures_calibration_and_gates_trustworthy():
     """``maybe_refit`` refreshes ``calibration`` from the reservoir after each fit:
     a rankable dataset yields a high Spearman (trustworthy), and a model whose
     predictions can't rank its own rows quarantines (``trustworthy`` False)."""
-    p = CatBoostPrior(seed=0, iterations=40, min_rows=3, refit_every=1)
+    p = OnlinePrior(seed=0, iterations=40, min_rows=3, refit_every=1)
     p.add_rows([({"S_kind": 1.0, "BM": bm}, 100.0 / bm) for bm in (2, 4, 8, 16, 32, 64) for _ in range(6)])
     assert p.maybe_refit()
     assert p.calibration is not None and p.calibration > 0.9
@@ -230,20 +230,20 @@ def test_maybe_refit_measures_calibration_and_gates_trustworthy():
 
 
 def test_fallback_prior_quarantines_miscalibrated_learned():
-    """``FallbackPrior`` routes deploys/PUCT through the learned model only while
-    ``trustworthy`` — a fitted-but-mis-calibrated model falls back to analytic
+    """``FallbackPrior`` routes deploys/PUCT through the online model only while
+    ``trustworthy`` — a fitted-but-mis-calibrated model falls back to offline
     (deploy: ``mean_score``; selection: ``score``), and recovers once calibration does."""
     from emmy.compiler.pipeline.search.prior.fallback import FallbackPrior
 
-    learned = _fit(_bm_rows())
-    fb = FallbackPrior(learned)
-    learned.calibration = 0.9
+    online = _fit(_bm_rows())
+    fb = FallbackPrior(online)
+    online.calibration = 0.9
     assert fb.trustworthy
-    assert fb.mean_score({"BM": 32}) == learned.mean_score({"BM": 32})
-    learned.calibration = 0.1  # below CALIBRATION_MIN → quarantined
+    assert fb.mean_score({"BM": 32}) == online.mean_score({"BM": 32})
+    online.calibration = 0.1  # below CALIBRATION_MIN → quarantined
     assert fb.fitted and not fb.trustworthy
-    assert fb.mean_score({"BM": 32}) == fb.analytic.mean_score({"BM": 32})
-    assert fb.score({"BM": 32}) == fb.analytic.score({"BM": 32})
+    assert fb.mean_score({"BM": 32}) == fb.offline.mean_score({"BM": 32})
+    assert fb.score({"BM": 32}) == fb.offline.score({"BM": 32})
 
 
 def test_diagnostics_report_reachability():
@@ -614,7 +614,7 @@ def test_cold_or_absent_prior_descends_emission_order():
     b = _node({"BM": 2}, tree.root)
     tree.root.children = [a, b]
     assert TuningSearch(tree=tree)._select([a, b], tree.root) is a
-    cold = CatBoostPrior(seed=0)
+    cold = OnlinePrior(seed=0)
     assert TuningSearch(tree=tree, prior_model=cold)._select([a, b], tree.root) is a
 
 
@@ -637,7 +637,7 @@ def test_evidence_pick_prefers_measured_best():
     the model would rank an unmeasured candidate lower (the golden-sweep
     gate_up_proj.s128 class: measured rank-1 config lost the deploy to an
     extrapolation)."""
-    p = CatBoostPrior(seed=0, iterations=40, min_rows=3)
+    p = OnlinePrior(seed=0, iterations=40, min_rows=3)
     p.add_rows([_o3_row({"FM": 6, "FN": 4}, 24.1), _o3_row({"FM": 4, "FN": 4}, 30.0)])
     p.add_rows(_bm_rows())  # unrelated S_-less rows give the model signal
     p.fit()
@@ -651,7 +651,7 @@ def test_evidence_prefix_consistency():
     """A partial candidate (knob undecided) inherits the best measured outcome
     consistent with its prefix — value-of-position semantics; a candidate that
     contradicts every measured row gets no evidence."""
-    p = CatBoostPrior(seed=0)
+    p = OnlinePrior(seed=0)
     p.add_rows([_o3_row({"FM": 6, "RING": 2}, 24.0), _o3_row({"FM": 6, "RING": 3}, 28.0)])
     ev = p.evidence_pick([_cand({"FM": 6}), _cand({"FM": 8})])
     assert ev == (0, 24.0)  # FM=6 prefix → min over its two measured rows
@@ -664,7 +664,7 @@ def test_evidence_tolerates_signature_vocabulary_drift():
     on the shared ``S_*`` keys, or one added feature silently disables the whole -O3
     evidence tier (the ninth-4090-sweep gate_up misdeploys). A *conflicting* shared
     key still rejects."""
-    p = CatBoostPrior(seed=0)
+    p = OnlinePrior(seed=0)
     p.add_rows([_o3_row({"FM": 6}, 24.0)])
     drifted = {**_cand({"FM": 6}), "S_warp_eligible": 1.0}
     assert p.evidence_pick([drifted]) == (0, 24.0)
@@ -675,7 +675,7 @@ def test_evidence_tolerates_signature_vocabulary_drift():
 def test_evidence_ignores_o1_rows_and_other_ops():
     """-O1 ranking rows (H_opt=1) and rows from a different S_* signature are not
     evidence; without -O3 rows the pick falls back to the model argmin."""
-    p = CatBoostPrior(seed=0, iterations=40, min_rows=3)
+    p = OnlinePrior(seed=0, iterations=40, min_rows=3)
     p.add_rows([({"S_sig": 7.0, "H_opt": 1.0, "FM": 6}, 5.0), ({"S_sig": 9.0, "H_opt": 3.0, "FM": 6}, 5.0)])
     assert p.evidence_pick([_cand({"FM": 6})]) is None
     p.add_rows(_bm_rows())
@@ -687,7 +687,7 @@ def test_evidence_ignores_o1_rows_and_other_ops():
 def test_evidence_skipped_off_o3_regime():
     """Deploying a non--O3 regime (e.g. ``--nvcc-flags -Xcicc -O1``) must not
     consult -O3 evidence."""
-    p = CatBoostPrior(seed=0)
+    p = OnlinePrior(seed=0)
     p.add_rows([_o3_row({"FM": 6}, 24.0)])
     assert p.evidence_pick([{"S_sig": 7.0, "H_opt": 1.0, "FM": 6}]) is None
 
@@ -697,24 +697,24 @@ def test_evidence_matches_masked_structural_feature():
     knob) joins the ``S_*`` evidence signature: a masked candidate matches a
     masked -O3 row, and the scalar float hashes cleanly into the frozenset
     signature (the whole point of moving it off the sequence-valued knob)."""
-    p = CatBoostPrior(seed=0)
+    p = OnlinePrior(seed=0)
     p.add_rows([_o3_row({"S_masked_m": 1.0, "FM": 6}, 24.0)])
     ev = p.evidence_pick([_cand({"S_masked_m": 1.0, "FM": 6})])
     assert ev == (0, 24.0)
 
 
 def test_fallback_pick_uses_learned_evidence_when_cold():
-    """FallbackPrior.pick consults the learned half's reservoir even before the
+    """FallbackPrior.pick consults the online half's reservoir even before the
     model is fitted (a freshly-seeded reservoir holds real measurements), and
-    falls through to the analytic ranking when no evidence matches."""
+    falls through to the offline ranking when no evidence matches."""
     from emmy.compiler.pipeline.search.prior import FallbackPrior
 
-    learned = CatBoostPrior(seed=0)
-    learned.add_rows([_o3_row({"FM": 6}, 24.0)])
-    fb = FallbackPrior(learned)
+    online = OnlinePrior(seed=0)
+    online.add_rows([_o3_row({"FM": 6}, 24.0)])
+    fb = FallbackPrior(online)
     assert not fb.fitted
     best_i, us = fb.pick([_cand({"FM": 8}), _cand({"FM": 6})])
     assert (best_i, us) == (1, 24.0)
-    # No evidence → analytic mean_scores argmin path (finite, in-range index).
+    # No evidence → offline mean_scores argmin path (finite, in-range index).
     best_i, score = fb.pick([_cand({"FM": 8}), _cand({"FM": 12})])
     assert best_i in (0, 1) and math.isfinite(score)

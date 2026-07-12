@@ -806,7 +806,7 @@ def _tile_reduce_axis(op: Reduction, plan, ctx: Ctx, tail: tuple, out_val: str) 
     # dim can enter through a buffer's flattened STRIDES (a 4-D tensor's ``seq_len``) on an op
     # whose own reduce extent is static, where none of the named sets above cover it; renaming
     # such a use (``seq_len__r3``) emits an undeclared identifier (surfaced by the 2026-07-09
-    # analytic refit steering dynamic scalar SDPA onto the ILP fold).
+    # offline-weights refit steering dynamic scalar SDPA onto the ILP fold).
     defined = {nm for s in rloop.body.iter() for nm in s.defines()}
     expr_external = {v for s in rloop.body.iter() for e in s.exprs() for v in e.free_vars()} - defined
     protected = frozenset(

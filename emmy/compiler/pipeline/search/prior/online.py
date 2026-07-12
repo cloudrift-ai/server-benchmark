@@ -32,7 +32,7 @@ from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, knob_feat
 from emmy.compiler.pipeline.search.prior.base import Prior
 
 
-class CatBoostPrior(Prior):
+class OnlinePrior(Prior):
     """CatBoost-backed global prior over knob features."""
 
     ITERATIONS = 400
@@ -146,7 +146,7 @@ class CatBoostPrior(Prior):
         }
 
     @classmethod
-    def from_json(cls, obj: dict) -> CatBoostPrior:
+    def from_json(cls, obj: dict) -> OnlinePrior:
         """Reconstruct a checkpointed prior from :meth:`to_json` — model (for
         inference / warm-start) plus the reservoir dataset (so a tune keeps
         accumulating). A checkpoint from another ``FEATURIZER_VERSION`` is dropped
@@ -180,14 +180,14 @@ class CatBoostPrior(Prior):
         return p
 
     @classmethod
-    def load(cls, *, seed: int = 0, path=None) -> CatBoostPrior:
+    def load(cls, *, seed: int = 0, path=None) -> OnlinePrior:
         """The one global prior — warm from its JSON checkpoint if present, else
         fresh — bound so :meth:`checkpoint` saves it back. ``path`` defaults to
-        ``config.prior_path()``. Best-effort: an unreadable / incompatible
+        ``config.online_path()``. Best-effort: an unreadable / incompatible
         checkpoint falls back to a fresh prior rather than failing the compile."""
         from emmy import config, storage  # noqa: PLC0415
 
-        path = path or config.prior_path()
+        path = path or config.online_path()
         obj = storage.read_json(path)
         try:
             p = cls.from_json(obj) if isinstance(obj, dict) else cls(seed=seed)

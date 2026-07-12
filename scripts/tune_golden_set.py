@@ -3,12 +3,12 @@
 golden (or better) config?
 
 Pipeline, all on an isolated prior + tune DB so the user's caches are untouched
-(``EMMY_PRIOR_FILE`` / ``EMMY_TUNE_DB`` default to /tmp paths here):
+(``EMMY_ONLINE_FILE`` / ``EMMY_TUNE_DB`` default to /tmp paths here):
 
   1. TUNE — for each ``GOLDEN_CONFIGS`` matmul, ``emmy tune --code <snippet>``
      (idempotent: ops already tuned to >= patience are skipped, and per-op results
      transfer across shapes that share kernel structure). This trains the one
-     global learned prior.
+     global online prior.
   2. BENCH — for each shape, ``emmy run --code <snippet> --bench`` does the
      greedy single-shot pick *from the trained prior* and benches it at -O3.
      Parse the Emmy latency and compare to the recorded golden ``emmy_us``
@@ -34,7 +34,7 @@ import subprocess
 import time
 from pathlib import Path
 
-os.environ.setdefault("EMMY_PRIOR_FILE", "/tmp/golden_exp_prior.json")
+os.environ.setdefault("EMMY_ONLINE_FILE", "/tmp/golden_exp_prior.json")
 os.environ.setdefault("EMMY_TUNE_DB", "/tmp/golden_exp_autotune.db")
 
 from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS, MatmulGoldenConfig  # noqa: E402
@@ -62,7 +62,7 @@ def main() -> None:
     args = ap.parse_args()
 
     configs = [g for g in GOLDEN_CONFIGS if isinstance(g, MatmulGoldenConfig)]
-    print(f"Prior:  {os.environ['EMMY_PRIOR_FILE']}")
+    print(f"Prior:  {os.environ['EMMY_ONLINE_FILE']}")
     print(f"DB:     {os.environ['EMMY_TUNE_DB']}")
     print(f"{len(configs)} golden shapes | patience={args.patience}\n", flush=True)
 

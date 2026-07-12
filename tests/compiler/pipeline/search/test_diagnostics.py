@@ -318,15 +318,15 @@ def test_node_report_splits_compile_regimes_per_card():
 # ---------------------------------------------------------------------------
 
 
-def _planted_analytic(weights: dict[str, float]):
-    """An AnalyticPrior with ONLY the planted linear weights (both regimes), no
+def _planted_offline(weights: dict[str, float]):
+    """An OfflinePrior with ONLY the planted linear weights (both regimes), no
     hand-fit table — attribution over it must recover exactly the planted terms."""
-    from emmy.compiler.pipeline.search.prior.analytic import AnalyticPrior  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.prior.offline import OfflinePrior  # noqa: PLC0415
 
-    return AnalyticPrior(weights=weights, weights_dynamic=weights)
+    return OfflinePrior(weights=weights, weights_dynamic=weights)
 
 
-def test_analytic_explain_sums_to_the_scored_quality():
+def test_offline_explain_sums_to_the_scored_quality():
     """The exact-sum invariant: ``explain_features`` terms (linear + the three
     ``gate:*`` pseudo-terms) sum to the same quality ``mean_score_features``
     exponentiates — so a two-row term diff IS the model's preference gap. The
@@ -334,9 +334,9 @@ def test_analytic_explain_sums_to_the_scored_quality():
     golden-gate check) so the interaction's sign flip stays covered."""
     import math  # noqa: PLC0415
 
-    from emmy.compiler.pipeline.search.prior.analytic import AnalyticPrior  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.prior.offline import OfflinePrior  # noqa: PLC0415
 
-    p = AnalyticPrior(atomic_free_weight=5.0)
+    p = OfflinePrior(atomic_free_weight=5.0)
     feats = {
         "D_pow2_threads": 1.0,
         "D_near_waves": 0.7,
@@ -356,12 +356,12 @@ def test_analytic_explain_sums_to_the_scored_quality():
     assert math.isclose(p.mean_score_features(narrow), math.exp(-p._scale * sum(terms_n.values())))
 
 
-def test_analytic_explain_selects_the_dynamic_weight_set():
+def test_offline_explain_selects_the_dynamic_weight_set():
     """A symbolic-axis row decomposes under the dynamic weight set — the same
     selection ``mean_score_features`` makes."""
-    from emmy.compiler.pipeline.search.prior.analytic import AnalyticPrior  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.prior.offline import OfflinePrior  # noqa: PLC0415
 
-    p = AnalyticPrior()
+    p = OfflinePrior()
     static = p.explain_features({"D_ctas_ge_sm": 1.0})
     dyn = p.explain_features({"D_ctas_ge_sm": 1.0, "S_ext_n_symbolic_axis": 1.0})
     assert static["D_ctas_ge_sm"] == p._w["D_ctas_ge_sm"]
@@ -384,7 +384,7 @@ def _planted_fork():
 def test_blame_recovers_the_planted_weight():
     """Blame on the planted misranking names D_x with exactly the regret-weighted
     planted gap: term diff = 0 − (−10) = +10, weight = regret − 1 = 1.0."""
-    prior = _planted_analytic({"D_x": -10.0, "D_y": 1.0})
+    prior = _planted_offline({"D_x": -10.0, "D_y": 1.0})
     out = diagnostics.attribution_report(prior, _planted_fork())
     line = next(ln for ln in out.splitlines() if ln.split() and ln.split()[0] == "D_x")
     assert "+10.00" in line
@@ -398,7 +398,7 @@ def test_ablation_flags_the_misleading_feature():
     """Masking D_x lets D_y pick the fast child: Δ = 1.0 − 2.0 = −1.00x (actively
     misleading); masking D_y leaves the D_x mispick → Δ = 0 (collapsed into the
     zero line); single-fork support is flagged as noise."""
-    prior = _planted_analytic({"D_x": -10.0, "D_y": 1.0})
+    prior = _planted_offline({"D_x": -10.0, "D_y": 1.0})
     out = diagnostics.attribution_report(prior, _planted_fork(), blame=False, ablate=True)
     line = next(ln for ln in out.splitlines() if ln.split() and ln.split()[0] == "D_x")
     assert "-1.00x" in line and "1~" in line  # misleading, on one-fork support
@@ -416,7 +416,7 @@ def test_blame_counts_blind_forks():
         NodeRow("a", "P", "ctx", "mm", {"KNOB": 1.0}, 2.0, 2),
         NodeRow("b", "P", "ctx", "mm", {"KNOB": 2.0}, 1.0, 2),
     ]
-    out = diagnostics.attribution_report(_planted_analytic({"D_x": -10.0}), nodes)
+    out = diagnostics.attribution_report(_planted_offline({"D_x": -10.0}), nodes)
     assert "BLIND" in out and "blind forks overall: 1" in out
 
 
@@ -439,7 +439,7 @@ def test_attribution_pools_cards_and_respects_kernel_filter():
     from dataclasses import replace  # noqa: PLC0415
 
     nodes = [replace(n, gpu="A") for n in _planted_fork()] + [replace(n, node_key=n.node_key + "b", gpu="B") for n in _planted_fork()]
-    prior = _planted_analytic({"D_x": -10.0, "D_y": 1.0})
+    prior = _planted_offline({"D_x": -10.0, "D_y": 1.0})
     out = diagnostics.attribution_report(prior, nodes)
     assert "2 multi-child forks" in out and "pooled across 2 card(s)" in out
     miss = diagnostics.attribution_report(prior, nodes, kernel_filter="zzz")

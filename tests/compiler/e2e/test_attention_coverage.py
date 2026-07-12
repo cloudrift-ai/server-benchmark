@@ -334,7 +334,7 @@ def test_flash_chain_pin_selects_chain_on_warp_eligible_shape(monkeypatch):
 # ``Contraction``\ s and ``_bind``'s reduce arm realizes the TWISTED carrier at fragment residence
 # (``_twist``). No private emitter exists; a bespoke path would be the mandate violation the
 # demolition removed. Unpinned, the warp rows are fork SIBLINGS of the chain / reduce-partition
-# forms (the flash-form fork) — the cold ``AnalyticPrior`` pick stays warp-when-eligible, which is
+# forms (the flash-form fork) — the cold ``OfflinePrior`` pick stays warp-when-eligible, which is
 # what these cold-compile cases pin.
 
 
@@ -373,7 +373,7 @@ def test_flash_form_fork_offers_geometry_grid():
     prefix-consistency); f32 (no mma atom) offers chain + serial."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.schedule import is_warp_codec  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.analytic import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import twisted_warp_moves  # noqa: PLC0415
     from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
 
@@ -438,7 +438,7 @@ def test_flash_form_fork_offers_f16acc_pv(monkeypatch):
     target (sm_90 — full-rate f32-accumulate) and the unset gate offer none."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.schedule import is_warp_codec  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.analytic import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
     from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
 
     q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))

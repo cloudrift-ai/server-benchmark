@@ -1,4 +1,4 @@
-"""The analytic prior's tensor-core preference gates.
+"""The offline prior's tensor-core preference gates.
 
 A warp-eligible f16 contraction enumerates scalar AND mma rows; the deploy pick must not
 land on a scalar tile when tensor cores are on offer. Historically the DYNAMIC (masked-tier)
@@ -6,7 +6,7 @@ weight set ranked scalar split-K rows first — the qwen3-emb / gemma-4-e2b laye
 deploys landed scalar at 5-20x the -O3 cost of their enumerated mma siblings — because no
 feature told the prior the alternative existed. The ``S_warp_eligible`` kernel stamp
 (``_schedule._tile_rows``) + ``D_scalar_on_warp_eligible`` / ``D_splitk_roundtrip``
-(``features._geom_feats``) + the hard-coded ``AnalyticPrior`` gates close that. No GPU.
+(``features._geom_feats``) + the hard-coded ``OfflinePrior`` gates close that. No GPU.
 """
 
 from __future__ import annotations
@@ -14,9 +14,9 @@ from __future__ import annotations
 import pytest
 
 from emmy.compiler.context import Context
-from emmy.compiler.pipeline.search.analytic import _enumerate
 from emmy.compiler.pipeline.search.features import knob_features
-from emmy.compiler.pipeline.search.prior import AnalyticPrior
+from emmy.compiler.pipeline.search.golden_eval import _enumerate
+from emmy.compiler.pipeline.search.prior import OfflinePrior
 
 CTX = Context.from_target((8, 9))
 
@@ -56,12 +56,12 @@ def test_scalar_on_warp_eligible_feature_fires_on_scalar_rows_only():
 
 
 @pytest.mark.parametrize("dynamic", [False, True], ids=["static", "dynamic"])
-def test_analytic_ranks_mma_above_every_scalar_split(dynamic):
+def test_offline_ranks_mma_above_every_scalar_split(dynamic):
     """The deploy-critical property: some mma row outranks EVERY scalar row (g?a / g?k
     splits included) on a warp-eligible f16 projection shape — in BOTH weight regimes.
     The dynamic (symbolic-M) regime is the one that historically ranked all-scalar."""
     rows, _ = _enumerate(512, 1024, 1024, "fp16", CTX)
-    ap = AnalyticPrior()
+    ap = OfflinePrior()
     base = _base(512, 1024, 1024, dynamic=dynamic)
     scored = sorted(rows, key=lambda r: ap.score({**base, **r}))
     assert "a:mma" in _tile_of(scored[0]), f"top pick must be a warp row, got {_tile_of(scored[0])!r}"

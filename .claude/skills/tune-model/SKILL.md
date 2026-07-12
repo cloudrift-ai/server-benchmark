@@ -93,7 +93,7 @@ but a full-model tune's deployable question is the whole model's standing.
   ```
 
   Run these in the **same environment as the tune** so the plugin's greedy pick reads the prior this run trained
-  (`EMMY_PRIOR_FILE` — `--clean` reset it, then the tune retrained it; the served kernels then reflect the
+  (`EMMY_ONLINE_FILE` — `--clean` reset it, then the tune retrained it; the served kernels then reflect the
   tune). Both invocations run `vllm bench serve --backend openai-embeddings` at the same `--max-model-len`, so it's
   apples-to-apples. **Match the bench params across the two runs** (`--num-prompts`, `--random-input-len`,
   `--max-concurrency`, `--bench-seed`) so request-throughput / TTFT / per-request latency compare directly. Needs the
@@ -114,17 +114,17 @@ For each kernel meaningfully behind eager or tcompile, assign one (or more) of f
 
 1. **Search shortfall** (patience / prior pick-reachability): `eval variants` shows the pick ranked far from the
    measured best (`pick: rank R/N, X.XXx of best … <-- misses best`). Confirm with
-   `emmy eval prior --dataset db` (aggregate reachability) and `emmy eval knobs` (per-knob regret), and localize
-   with `emmy eval prior --dataset nodes --kernel <SUBSTR>` — the per-family **fork sibling regret** names the
+   `emmy eval online --dataset db` (aggregate reachability) and `emmy eval knobs` (per-knob regret), and localize
+   with `emmy eval online --dataset nodes --kernel <SUBSTR>` — the per-family **fork sibling regret** names the
    decision family (TILE / REDUCE / STAGE / …) where the prior steered the search into the wrong subtree
    (regret ≫1.00x); families at 1.00x are exonerated, pointing at patience instead. The command reports every
-   metric once per prior half, labeled `=== analytic prior ===` / `=== learned prior ===` — note WHICH half
-   misprices (analytic ⇒ cold-start weight/feature fix; learned ⇒ training-data / calibration) and carry the
+   metric once per prior half, labeled `=== offline prior ===` / `=== online prior ===` — note WHICH half
+   misprices (offline ⇒ cold-start weight/feature fix; online ⇒ training-data / calibration) and carry the
    label into the finding. Then attribute the miss with
    `--blame`: the per-feature blame table names the features whose terms pushed the wrong pick (a BLIND fork =
    the featurizer can't separate the siblings — a featurizer gap, not a weight problem); add `--ablate` for the
    masked-Δ view (`< 0` = actively misleading feature); blame prints per half too — cite the half that matches
-   the diagnosis. This replaces hand-deriving "which weight caused it" from `analytic.py`.
+   the diagnosis. This replaces hand-deriving "which weight caused it" from `offline.py`.
    The rank-1 row's knobs are your A/B pin for step 4.
 2. **Tier / optimization lockout**: every row in the `eval variants` leaderboard is scalar-tier (`MMA=0`, no
    warp tile) — the tensor-core variants were never *enumerated*, so an eligibility gate fired. Find it in
@@ -203,12 +203,12 @@ doc's structure:
   observations), root cause or the best hypothesis with the distinguishing diagnostic (cite the gate as
   `file:line`), a repro command (reproducer path, `--ab` specs, and/or pinned knobs), and a suggested fix with
   priority.
-- **Any regret / reachability / calibration evidence must be per prior half, structured.** `eval prior --dataset
-  nodes` prints each metric twice (`=== analytic prior ===` / `=== learned prior ===`); present it as the
-  comparison table the tune-golden skill prescribes — one metric per row, `analytic prior` / `learned prior`
+- **Any regret / reachability / calibration evidence must be per prior half, structured.** `eval online --dataset
+  nodes` prints each metric twice (`=== offline prior ===` / `=== online prior ===`); present it as the
+  comparison table the tune-golden skill prescribes — one metric per row, `offline prior` / `online prior`
   columns, worst forks as separate shape-labeled rows, `(*)` + footnote on entries whose "best" baseline fails a
-  FLOP-roofline sanity check — and say which half the finding blames (analytic ⇒ cold-start weight/feature refit;
-  learned ⇒ training data / calibration). Never paste raw eval output or quote an unlabeled "prior" number.
+  FLOP-roofline sanity check — and say which half the finding blames (offline ⇒ cold-start weight/feature refit;
+  online ⇒ training data / calibration). Never paste raw eval output or quote an unlabeled "prior" number.
 - **Repro / artifacts** tail: log + dump locations and copy-pasteable repro blocks (compile-only repros that
   need no GPU are the most valuable).
 - Wrap to ~120 chars (repo-wide markdown rule); tables may overflow.

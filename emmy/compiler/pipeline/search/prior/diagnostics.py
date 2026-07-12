@@ -1,4 +1,4 @@
-"""Offline diagnostics for the learned tuning prior — "can the prior actually
+"""Offline diagnostics for the online tuning prior — "can the prior actually
 reach the best configs?", with no GPU.
 
 ``emmy tune`` with no model / ``--code`` refits the prior on its persisted
@@ -119,7 +119,7 @@ def golden_prior_eval(prior, kernel_filter: str | None = None) -> str:
     sweep's finding 6). Deploy reality is ``Prior.pick`` (measured -O3 evidence
     first); the faithful deploy check is ``eval golden``'s real greedy compile."""
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search import analytic  # noqa: PLC0415
+    from emmy.compiler.pipeline.search import golden_eval  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig, goldens_for_live_gpu  # noqa: PLC0415
 
     GOLDEN_CONFIGS = goldens_for_live_gpu()  # live card only — see golden_deploy_perf
@@ -154,7 +154,7 @@ def golden_prior_eval(prior, kernel_filter: str | None = None) -> str:
         gold = dict(tuning_knob_items(g.knobs))  # native codec knobs (TILE/REDUCE/STAGE), tier-agnostic
         # ``evaluate_golden`` ranks by descending score; the prior predicts latency
         # (lower = better), so negate to rank the predicted-fastest config first.
-        _, rank, pool = analytic.evaluate_golden(
+        _, rank, pool = golden_eval.evaluate_golden(
             g.M, g.N, g.K, g.dtype, gold, Context.from_target(g.compute_cap), scorer=lambda r, b=base: -prior.mean_score({**b, **r})
         )
         if rank is None:
@@ -449,7 +449,7 @@ def _usable_nodes(nodes, kernel_filter: str | None) -> tuple[list, int, int]:
 
 
 def node_report(prior, nodes, *, kernel_filter: str | None = None) -> str:
-    """The ``eval prior --dataset nodes`` block. Groups the node store **by card**
+    """The ``eval online --dataset nodes`` block. Groups the node store **by card**
     (``NodeRow.gpu``) and, per card, reports the fork sibling regret (the metric unique
     to this dataset — :func:`sibling_regret`) plus leaf reachability / calibration. Per-card grouping is what
     makes a cross-hardware dataset (H100, H200, …) evaluate correctly — same-die SKUs
@@ -488,7 +488,7 @@ def node_report(prior, nodes, *, kernel_filter: str | None = None) -> str:
             lines.append("  empty — run `emmy tune <model>` to populate the node table")
         return "\n".join(lines)
     if not prior.fitted:
-        lines.append("  no fitted prior — the cold AnalyticPrior ranks by D_* geometry only; run `emmy tune`")
+        lines.append("  no fitted prior — the cold OfflinePrior ranks by D_* geometry only; run `emmy tune`")
     for gpu in sorted(by_gpu):
         gnodes = by_gpu[gpu]
         regimes = sorted({n.features.get("H_opt") for n in gnodes}, key=lambda v: (v is None, v))
@@ -516,7 +516,7 @@ def _blame_lines(prior, records: list[ForkRecord], *, top: int = 8) -> list[str]
     """The blame table: per fork family, the features whose terms pushed the prior's
     pick above the measured-best sibling, regret-weighted. Per missed fork,
     ``blame_k = term_k(picked) − term_k(best)`` over :meth:`Prior.explain_features`
-    — exact for the linear analytic prior (the diffs sum to the model's preference
+    — exact for the linear offline prior (the diffs sum to the model's preference
     gap by construction) — weighted by the fork's excess cost ``regret − 1`` (a
     correct pick weighs zero, a 3× miss counts 20× a 1.1× one) and summed per
     family. Positive = the feature argued FOR the wrong child; negative = it argued
@@ -619,7 +619,7 @@ def _ablation_lines(prior, records: list[ForkRecord], *, min_support: int = 5) -
 
 
 def attribution_report(prior, nodes, *, kernel_filter: str | None = None, blame: bool = True, ablate: bool = False) -> str:
-    """The ``eval prior --dataset nodes --blame / --ablate`` block: per-feature
+    """The ``eval online --dataset nodes --blame / --ablate`` block: per-feature
     regret attribution over the node store's fork records. Fork records are built
     per card (fork identity never crosses cards) but the tables POOL them: regret is
     a within-fork ratio, so cards and compile regimes pool safely — unlike
@@ -644,7 +644,7 @@ def attribution_report(prior, nodes, *, kernel_filter: str | None = None, blame:
     if ablate:
         if not _mask_exact(prior):
             lines.append(
-                "    CAVEAT: masked queries are out-of-distribution for the learned model (no feature-dropout training yet) — "
+                "    CAVEAT: masked queries are out-of-distribution for the online model (no feature-dropout training yet) — "
                 "Δ is indicative only"
             )
         lines.extend(_ablation_lines(prior, records))
@@ -653,11 +653,11 @@ def attribution_report(prior, nodes, *, kernel_filter: str | None = None, blame:
 
 def _mask_exact(prior) -> bool:
     """Whether masking a feature is exact for the prior that owns decisions —
-    true for the linear analytic prior (a deleted key is exact term removal), false
-    for a learned model that never trained on masked rows."""
-    from emmy.compiler.pipeline.search.prior.analytic import AnalyticPrior  # noqa: PLC0415
+    true for the linear offline prior (a deleted key is exact term removal), false
+    for a online model that never trained on masked rows."""
+    from emmy.compiler.pipeline.search.prior.offline import OfflinePrior  # noqa: PLC0415
 
     active = prior
-    if hasattr(prior, "learned") and hasattr(prior, "analytic"):  # FallbackPrior composition
-        active = prior.learned if prior.trustworthy else prior.analytic
-    return isinstance(active, AnalyticPrior)
+    if hasattr(prior, "online") and hasattr(prior, "offline"):  # FallbackPrior composition
+        active = prior.online if prior.trustworthy else prior.offline
+    return isinstance(active, OfflinePrior)

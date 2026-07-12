@@ -46,7 +46,7 @@ prior effort. Replay is cheap, not gated: each benched terminal hits the
 per-variant ``perf`` cache (:class:`pipeline._TerminalBench`), so a variant
 already measured is served from the DB with no GPU bench. An identical re-run
 (same prior) re-walks the same deterministic trajectory → every terminal is a
-cache hit → zero benches and the same total. But the global learned prior keeps
+cache hit → zero benches and the same total. But the global online prior keeps
 changing (it refits across ops and runs), so the same patience can steer the
 MCTS down a *different* trajectory — re-running lets it reach and bench the
 genuinely-new variants the improved prior surfaces, replaying the rest for free.
@@ -144,7 +144,7 @@ class InnerReward:
     total_us: float
     ok: bool  # every kernel had a clean ``ok`` measurement
     per_op: list[OpResult] = field(default_factory=list)
-    # Learned-prior end-of-run sanity block(s) — printed by the command after
+    # Online-prior end-of-run sanity block(s) — printed by the command after
     # the progress bar closes.
     prior_summaries: list[str] = field(default_factory=list)
 
@@ -157,7 +157,7 @@ class TwoLevelResult:
     best_reward: InnerReward | None  # its Σ-per-op breakdown
     n_terminals: int  # outer terminals evaluated (1 today)
     assembled: Graph | None  # greedy DB-best Graph[CudaOp] assembled from the bests
-    prior_summaries: list[str] = field(default_factory=list)  # learned-prior stats
+    prior_summaries: list[str] = field(default_factory=list)  # online-prior stats
 
 
 def _point_stats(us: float) -> PerfStats:
@@ -461,10 +461,10 @@ async def run_two_level_tune(
     # One session id for every node row this run writes — minted by the caller
     # (``handle_tune``: one id per CLI invocation) or here as a fallback.
     run_id = run_id or _mint_run_id()
-    # ONE global prior for the whole run — the learned ``CatBoostPrior`` (warm-
-    # started from its checkpoint) behind an ``AnalyticPrior`` cold-start
+    # ONE global prior for the whole run — the ``OnlinePrior`` (warm-
+    # started from its checkpoint) behind an ``OfflinePrior`` cold-start
     # fallback, so the first op's inner search is heuristic-guided, not uniform.
-    # Training (add_rows / maybe_refit / checkpoint) delegates to the learned half
+    # Training (add_rows / maybe_refit / checkpoint) delegates to the online half
     # (lazy import keeps catboost off non-tune callers).
     from emmy.compiler.pipeline.search.prior import load_prior  # noqa: PLC0415
 

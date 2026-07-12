@@ -126,7 +126,7 @@ def add_golden_arg(parser) -> None:
         metavar="NAME",
         help=(
             "Compile / run / tune a golden config from GOLDEN_CONFIGS (shorthand for --code <its snippet>) — lets you "
-            "build the learned prior up one shape at a time and `emmy eval golden` between runs. NAME is an exact "
+            "build the online prior up one shape at a time and `emmy eval golden` between runs. NAME is an exact "
             "golden name OR a name **substring** (the SAME identifier `emmy eval --kernel` filters on), as long as it "
             "names a single shape; an ambiguous substring lists the matched shapes and an unknown one lists all "
             "available names. Mutually exclusive with --code / positional input / --ir."

@@ -26,7 +26,7 @@ from emmy import config, gpu
 # Maxwell; anything declared ``__shared__`` at compile time must fit; universal).
 # ``_MAX_DYNAMIC_SMEM_BY_CC`` — per-block dynamic-smem opt-in cap by cc
 # (``cudaDevAttrMaxSharedMemoryPerBlockOptin``). ``_TENSOR_CORE_GEN`` — coarse
-# tensor-core generation by cc for the learned prior's regime features.
+# tensor-core generation by cc for the online prior's regime features.
 STATIC_SMEM_CAP = gpu.STATIC_SMEM_CAP
 _MAX_DYNAMIC_SMEM_BY_CC = gpu.MAX_DYNAMIC_SMEM_BY_CC
 _TENSOR_CORE_GEN = gpu.TENSOR_CORE_GEN
@@ -36,7 +36,7 @@ _TENSOR_CORE_GEN = gpu.TENSOR_CORE_GEN
 # device the golden configs were measured on, so offline golden ranking matches).
 # The live count (``target.live_device_features`` → ``gpu.probe_live_features``)
 # overrides this in ``from_target`` / ``probe``. Consumed by the occupancy-aware
-# analytic prior (the ``D_*`` CTA / waves features in ``features.knob_features``) to
+# offline prior (the ``D_*`` CTA / waves features in ``features.knob_features``) to
 # size tiles to the device — keep CTA count near ~1-2 waves over the SMs.
 DEFAULT_SM_COUNT = gpu.DEFAULT_GPU.sm_count
 
@@ -193,7 +193,7 @@ class Context:
         return digest("hw", self.compute_capability, regime)
 
     def features(self) -> dict[str, float]:
-        """Host/hardware regime as ``H_*`` features for the learned prior, so a
+        """Host/hardware regime as ``H_*`` features for the online prior, so a
         SINGLE global prior spans every GPU and nvcc opt level (these are
         constant across a compile's sibling candidates → they never change the
         argmax; they only let the model fit per-regime offsets instead of

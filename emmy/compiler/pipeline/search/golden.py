@@ -39,7 +39,7 @@ fragment load reading smem opaquely cannot), so mma.sync is the faster fp16
 GEMM. On sm_120 the pre-rebuild bar (2048²: 106.7 µs / 1.06× on a 4-warp
 warp-specialized CTA) was re-met and beaten by the rebuilt swizzled TMA tier
 (2048²: 95.9 µs / 0.99× on ``w1x4/f4x2/k2 d4/tma/ring``, the 2026-07-02 seventh
-sweep). Ranking lives in ``search/prior/AnalyticPrior`` (the ``D_*`` geometry
+sweep). Ranking lives in ``search/prior/OfflinePrior`` (the ``D_*`` geometry
 features over ``features.knob_features``).
 """
 

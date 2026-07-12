@@ -28,7 +28,7 @@ from emmy.compiler.pipeline.pipeline import Run
 def _isolated_prior(monkeypatch, tmp_path):
     """Untrained prior file so any lazy prior load is deterministic; target
     reset after each test."""
-    monkeypatch.setenv("EMMY_PRIOR_FILE", str(tmp_path / "prior.json"))
+    monkeypatch.setenv("EMMY_ONLINE_FILE", str(tmp_path / "prior.json"))
     yield
     target_mod.set_target(None)
 

@@ -4,7 +4,7 @@ The scheduler stamps it into every fork option row (branch identity, deploy cand
 materialized op is what ``realized_knobs`` — and therefore every leaf / -O3 evidence row — reads.
 When ``_schedule``'s ``_materialize`` dropped it, one op's rows fractured into two ``S_*``
 signatures (fork rows stamped, leaf rows not), ``Prior.evidence_pick`` never joined the measured
--O3 rows at deploy time, and greedy shipped the learned model's unbenched per-cell extrapolation
+-O3 rows at deploy time, and greedy shipped the online model's unbenched per-cell extrapolation
 (the 2026-07-07 RTX 5090 gate: 1157 µs per-cell b256 vs the 3.5 µs mma golden, ~330x).
 """
 
@@ -14,7 +14,7 @@ from emmy.compiler.context import Context
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import Fork
 from emmy.compiler.pipeline.pipeline import Run
-from emmy.compiler.pipeline.search.analytic import _matmul_graph
+from emmy.compiler.pipeline.search.golden_eval import _matmul_graph
 
 
 def _resolve_option0(graph, ctx):

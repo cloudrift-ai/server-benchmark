@@ -121,4 +121,9 @@ consumers is roughly perf-neutral, so the 76%-no-eligible latency starvation is 
 it is the warp count itself, which this family cannot raise. Producer-band warp specialization on sm_89
 could only pay inside tile families that already fit ≥3 warps/SMSP (≤168 regs), and the manual sweeps
 showed those geometries lose the fm winners' margin outright. WSPEC stays TMA-only (sm_90+, where
-`setmaxnreg` also exists); the sm_89 residual ~8% to cuBLAS stands as structural at this tile size.
+`setmaxnreg` also exists).
+
+(Same-session postscript: the residual itself turned out NOT to be structural — it was ldmatrix bank
+conflicts from the unswizzled cp.async staging, prototyped at −12–17% and past cuBLAS; see
+`cpasync-slab-swizzle-findings.md`. The latency starvation these splits tried to fix was largely
+conflict-replay latency in the shared pipe.)

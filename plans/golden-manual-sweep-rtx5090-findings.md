@@ -202,7 +202,10 @@ burst's ILP. Not implemented. The residual ~8% to cuBLAS on sm_89 is structural 
 warp band owning fills would cut consumer-warp register pressure and add latency-hiding warps — today WSPEC
 is TMA-only by design). **Also prototyped and REFUTED (same box, next day)** — the sm_89 SMSP register
 banking makes a 9th resident warp cap the kernel at 168 regs, and at iso-warp-count the split is
-perf-neutral; see `wspec-cpasync-producer-band.md` for the measured refutation.
+perf-neutral; see `wspec-cpasync-producer-band.md` for the measured refutation. The gap then fell to a
+different lever entirely: the unswizzled cp.async slabs leave the ldmatrix drains 4–8-way bank-conflicted
+(81% of shared wavefronts were conflict replays), and the XOR-swizzle prototype wins −12–17%, past cuBLAS
+on gate_up — see `cpasync-slab-swizzle-findings.md`.
 
 ## Workflow notes
 

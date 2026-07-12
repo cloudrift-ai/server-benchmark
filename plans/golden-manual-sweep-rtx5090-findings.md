@@ -120,6 +120,33 @@ established by this session's earlier audit: the local DB is -O1-only and fm2-sk
 golden rank 3206 vs the analytic's 0). The newly recorded entries make the golden dataset the reliable
 source of truth for these shapes regardless of the deploy path chosen later.
 
+## RTX 4090 pass (same day, rented box 176.124.69.204) — the family is card-specific; atom-swap + mid-tiles win
+
+The same manual method on a rented 4090 (sm_89: cp.async staging, no TMA/WSPEC, 255-reg ceiling), 3 waves +
+2x confirmations, all winners accuracy-checked. **The 5090's big-tile `w4x2/f4x8/k4` family does NOT
+transfer** — it pegs the sm_89 register ceiling (255 regs) and loses on every shape. What wins instead is
+the **f16acc atom at (or near) the incumbent geometries** — the consumer-die 2× HMMA rate showing through on
+mma-bound shapes, exactly the PR #339 K-heavy prediction, now recorded as 9 `[fm]` entries:
+
+| shape | fm config | µs | std golden live | vs cuBLAS |
+| --- | --- | --- | --- | --- |
+| mlp_gate_up ±dynM | w4x1/f4x8/k2 | 786.9 / 802.8 | ~940 / ~955 (0.84×) | 1.08 |
+| mlp_down ±dynM | w2x2/f4x8/k2 g2k | 348.5 / 332.8 | 371 / 387 | **0.90 / 0.86 — beats cuBLAS** |
+| qkv ±dynM | w2x2/f4x8/k2 g2k | 336.8 / 332.0 | ~374 / 385 | ~1.01 parity |
+| square.4096.fp16 | w1x4/f4x8/k2 | 750.6 | 841 | **0.93 — beats cuBLAS** |
+| square.2048.fp16 | w1x4/f4x4 | 119.3 | 123.4 | 0.99 |
+| square.1024.fp16 | w1x2/f4x4/k2 | 19.9 | 24.0 | 1.10 |
+
+No f16acc win on o_proj (parity, left unrecorded). `attention.hd256.dynM`: the bare sibling-PV pin
+**resolves on sm_89 too** (the masked-flash fix is cross-card; PV plan `w4x1/f1x32`) at 43.4 vs 44.3 —
+parity, mechanism validated, nothing recorded. Also: `REDUCE: ''` stamped on the 8 session-verified
+under-specified entries, and `emmy_us` refreshed where ≥3 passes drifted consistently ≥5% (mlp_down
+397.5→371, mlp_down.dynM 412.9→387.3, sq2048.fp16 116→123.4, sq1024.fp16 22.2→24.0 — partially the
+07-11 report's stale-value recommendation; gate_up/qkv/sq4096 wobbled around their recorded values and
+were left). Setup notes for the skill: fresh CloudRift Ubuntu images need `python3.12-venv` +
+`python3.12-dev` apt packages, `make setup` must be re-run after `rm -rf venv` (it no-ops on an existing
+venv), and `/usr/local/cuda/bin` is not on the non-interactive ssh PATH.
+
 ## Workflow notes
 
 - **The `--ab` A/B harness is excellent for manual sweeps**: ~8–12 pinned variants per invocation, live golden

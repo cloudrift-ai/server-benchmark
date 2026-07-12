@@ -6,7 +6,7 @@ configs:
     M: 512
     N: 512
     K: 512
-    knobs: {TILE: 'n16x8/f4x8', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
+    knobs: {TILE: 'n16x8/f4x8', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 10.1
     cublas_us: 10.8
   - kernel: matmul
@@ -14,7 +14,7 @@ configs:
     M: 1024
     N: 1024
     K: 1024
-    knobs: {TILE: 'n32x8/f2x8', STAGE: 'd2/cp/ring'}
+    knobs: {TILE: 'n32x8/f2x8', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 57.9
     cublas_us: 45.4
   - kernel: matmul
@@ -22,7 +22,7 @@ configs:
     M: 2048
     N: 2048
     K: 2048
-    knobs: {TILE: 'n32x16/f4x8', STAGE: 'd2/cp/ring'}
+    knobs: {TILE: 'n32x16/f4x8', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 359.1
     cublas_us: 320.0
   - kernel: matmul
@@ -30,7 +30,7 @@ configs:
     M: 4096
     N: 4096
     K: 4096
-    knobs: {TILE: 'n32x8/f4x26', STAGE: 'd2/cp/ring'}
+    knobs: {TILE: 'n32x8/f4x26', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 2727.9
     cublas_us: 2458.6
   - kernel: matmul
@@ -39,7 +39,7 @@ configs:
     N: 512
     K: 512
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x2/f2x2/k4', STAGE: 'd2/cp/ring/p2'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x2/f2x2/k4', RASTER: '', STAGE: 'd2/cp/ring/p2'}
     emmy_us: 6.1
     cublas_us: 5.8
   - kernel: matmul
@@ -48,7 +48,7 @@ configs:
     N: 512
     K: 512
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x2/f4x2/k2', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x2/f4x2/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 6.3
     cublas_us: 5.8
   - kernel: matmul
@@ -57,8 +57,22 @@ configs:
     N: 1024
     K: 1024
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x2/f4x4/k2', STAGE: 'd2/cp/ring'}
-    emmy_us: 22.2
+    # 2026-07-12 manual sweep: REDUCE stamped '' (replayed fill-free); emmy_us refreshed 22.2 -> 24.0
+    # (live median of 4 passes; the recorded value reproduced once, drifted +8% on the other three).
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x2/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
+    emmy_us: 24.0
+    cublas_us: 18.1
+  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): atom-swap of the standard golden.
+  # 19.9 µs (4x reproduced at zero spread) vs the standard's live 24.0 (0.83x). 2026-07-12 manual
+  # sweep on a rented 4090. Kept beside the standard entry — gate-off compiles can't reach it.
+  - kernel: matmul
+    name: matmul.square.1024.fp16
+    M: 1024
+    N: 1024
+    K: 1024
+    dtype: fp16
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x2/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
+    emmy_us: 19.9
     cublas_us: 18.1
   - kernel: matmul
     name: matmul.square.2048.fp16
@@ -66,8 +80,21 @@ configs:
     N: 2048
     K: 2048
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x4/f4x4', STAGE: 'd2/cp/ring'}
-    emmy_us: 116.0
+    # 2026-07-12 manual sweep: REDUCE stamped '' (fill-free); emmy_us refreshed 116.0 -> 123.4
+    # (live median, 4 passes at 123.1-123.9 — consistent +6% drift).
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x4/f4x4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
+    emmy_us: 123.4
+    cublas_us: 115.2
+  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): atom-swap of the standard golden.
+  # 119.3 µs (4x, 119.0-119.3) vs the standard's live 123.4 (0.97x). 2026-07-12 manual sweep.
+  - kernel: matmul
+    name: matmul.square.2048.fp16
+    M: 2048
+    N: 2048
+    K: 2048
+    dtype: fp16
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x4/f4x4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
+    emmy_us: 119.3
     cublas_us: 115.2
   - kernel: matmul
     name: matmul.square.4096.fp16
@@ -75,8 +102,22 @@ configs:
     N: 4096
     K: 4096
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x4/f4x8', STAGE: 'd2/cp/ring'}
+    # 2026-07-12 manual sweep: REDUCE stamped '' (fill-free). emmy_us left at 869.4 — live replays
+    # wobbled 840-919 around it (median 841, -3.3%, under the 5% refresh gate).
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x4/f4x8', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 869.4
+    cublas_us: 822.3
+  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): the atom-swap + k2 chunking. 750.6 µs
+  # (3x, 731-767) vs the standard's live 841 (0.89x) and 0.93x vs cuBLAS HGEMM — beats cuBLAS.
+  # Accuracy vs torch passes. 2026-07-12 manual sweep.
+  - kernel: matmul
+    name: matmul.square.4096.fp16
+    M: 4096
+    N: 4096
+    K: 4096
+    dtype: fp16
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x4/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
+    emmy_us: 750.6
     cublas_us: 822.3
   - kernel: matmul
     name: matmul.square.512.dynM
@@ -84,7 +125,7 @@ configs:
     N: 512
     K: 512
     dynamic: true
-    knobs: {TILE: 'n16x8/f4x8', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
+    knobs: {TILE: 'n16x8/f4x8', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 10.6
     cublas_us: 10.8
   - kernel: matmul
@@ -93,8 +134,23 @@ configs:
     N: 12288
     K: 4096
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', STAGE: 'd2/cp/ring'}
+    # 2026-07-12 manual sweep: REDUCE stamped '' (fill-free). emmy_us kept — live wobbled 361-387.
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 374.1
+    cublas_us: 328.0
+  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): 336.8 µs total (324.2 + 12.6 finalize;
+  # 3x at <0.5% spread) vs the standard's live ~374 (0.90x), parity with cuBLAS HGEMM. 2026-07-12.
+  # Same day: RASTER 'gm8' recorded (the launch-order codec, grouped M stripes for L2 B-reuse) —
+  # 322.4/323.5 total through the codec pin, matching the pre-codec probe (324.1) and 0.99x vs
+  # cuBLAS. The one shape where rasterization measurably won on this card.
+  - kernel: matmul
+    name: matmul.qkv.h4096
+    M: 512
+    N: 12288
+    K: 4096
+    dtype: fp16
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: 'gm8', STAGE: 'd2/cp/ring'}
+    emmy_us: 323.5
     cublas_us: 328.0
   - kernel: matmul
     name: matmul.qkv.h4096
@@ -102,7 +158,7 @@ configs:
     N: 12288
     K: 4096
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8/k2', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 380.3
     cublas_us: 328.0
   - kernel: matmul
@@ -111,7 +167,7 @@ configs:
     N: 4096
     K: 4096
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x4/f4x4', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x4/f4x4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 119.9
     cublas_us: 119.0
   - kernel: matmul
@@ -120,7 +176,8 @@ configs:
     N: 4096
     K: 4096
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', STAGE: 'd2/cp/ring/p2'}
+    # 2026-07-12 manual sweep: REDUCE stamped '' (replayed fill-free at 117.4, 2x).
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring/p2'}
     emmy_us: 121.6
     cublas_us: 119.0
   - kernel: matmul
@@ -129,8 +186,21 @@ configs:
     N: 28672
     K: 4096
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f4x8/k2', STAGE: 'd2/cp/ring'}
+    # 2026-07-12 manual sweep: REDUCE stamped '' (fill-free). emmy_us kept — live wobbled 902-980.
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 964.6
+    cublas_us: 721.0
+  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): the atom-swap of the standard golden —
+  # the f16 accumulator's 2x HMMA rate on this mma-bound wide-N shape. 786.9 µs (4x, 750-788) vs
+  # the standard's live ~940 (0.84x), 1.08x vs cuBLAS. Accuracy vs torch passes. 2026-07-12.
+  - kernel: matmul
+    name: matmul.mlp_gate_up.h4096
+    M: 512
+    N: 28672
+    K: 4096
+    dtype: fp16
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
+    emmy_us: 786.9
     cublas_us: 721.0
   - kernel: matmul
     name: matmul.mlp_down.h4096
@@ -138,8 +208,22 @@ configs:
     N: 4096
     K: 14336
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
-    emmy_us: 397.5
+    # 2026-07-12 manual sweep: emmy_us refreshed 397.5 -> 371.0 (live median of 4 passes at
+    # 370.0-372.9 — the recorded value was 6.7% pessimistic).
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
+    emmy_us: 371.0
+    cublas_us: 388.0
+  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): 348.5 µs total (343.7 + 4.8 finalize;
+  # 3x at <0.3% spread) vs the standard's live 371 (0.94x), 0.90x vs cuBLAS HGEMM — beats cuBLAS on
+  # the deep-K (14336) shape. Accuracy vs torch passes. 2026-07-12 manual sweep.
+  - kernel: matmul
+    name: matmul.mlp_down.h4096
+    M: 512
+    N: 4096
+    K: 14336
+    dtype: fp16
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
+    emmy_us: 348.5
     cublas_us: 388.0
   - kernel: matmul
     name: matmul.qkv.h4096.dynM
@@ -148,8 +232,22 @@ configs:
     K: 4096
     dtype: fp16
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', STAGE: 'd2/cp/ring'}
+    # 2026-07-12 manual sweep: REDUCE stamped '' (fill-free).
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 370.0
+    cublas_us: 330.0
+  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): mirrors the static twin. 332.0 µs
+  # total (319.5 + 12.5 finalize) vs the standard's live 385.4 (0.86x), ~parity vs cuBLAS.
+  # 2026-07-12 manual sweep.
+  - kernel: matmul
+    name: matmul.qkv.h4096.dynM
+    M: 512
+    N: 12288
+    K: 4096
+    dtype: fp16
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
+    emmy_us: 332.0
     cublas_us: 330.0
   - kernel: matmul
     name: matmul.o_proj.h4096.dynM
@@ -158,7 +256,7 @@ configs:
     K: 4096
     dtype: fp16
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 123.3
     cublas_us: 112.0
   - kernel: matmul
@@ -168,8 +266,21 @@ configs:
     K: 4096
     dtype: fp16
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f4x8/k2', STAGE: 'd2/cp/ring'}
+    # 2026-07-12 manual sweep: REDUCE stamped '' (fill-free). emmy_us kept — live wobbled 904-985.
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 923.6
+    cublas_us: 742.0
+  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): mirrors the static twin. 802.8 µs
+  # (3x, 800.8-802.8) vs the standard's live ~955 (0.84x), 1.08x vs cuBLAS. 2026-07-12.
+  - kernel: matmul
+    name: matmul.mlp_gate_up.h4096.dynM
+    M: 512
+    N: 28672
+    K: 4096
+    dtype: fp16
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
+    emmy_us: 802.8
     cublas_us: 742.0
   - kernel: matmul
     name: matmul.mlp_down.h4096.dynM
@@ -178,8 +289,23 @@ configs:
     K: 14336
     dtype: fp16
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f4x4', REDUCE: 'g2k', STAGE: 'd2/cp/ring'}
-    emmy_us: 412.9
+    # 2026-07-12 manual sweep: emmy_us refreshed 412.9 -> 387.3 (live 382.5 + 4.8 finalize — the
+    # recorded value was 6.2% pessimistic).
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f4x4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
+    emmy_us: 387.3
+    cublas_us: 388.0
+  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): mirrors the static twin. 332.8 µs
+  # total (328.0 + 4.8 finalize) vs the standard's live 387.3 (0.86x), 0.86x vs cuBLAS HGEMM —
+  # beats cuBLAS. 2026-07-12 manual sweep.
+  - kernel: matmul
+    name: matmul.mlp_down.h4096.dynM
+    M: 512
+    N: 4096
+    K: 14336
+    dtype: fp16
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
+    emmy_us: 332.8
     cublas_us: 388.0
   - kernel: pointwise
     name: pointwise.n4096

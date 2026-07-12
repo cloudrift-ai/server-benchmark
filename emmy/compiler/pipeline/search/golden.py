@@ -358,7 +358,10 @@ class AttentionGoldenConfig(GoldenConfig):
         # reproduces from a bare TILE, hd128 needs per-axis TILE@dd/TILE@pj — the two contractions
         # take different tiles there), so the recorder verifies each by re-bench. The ONE invariant we
         # can guard statically: a DYNAMIC (masked-flash) golden's axis-keyed pin never resolves (the
-        # kernel keys its tile differently at pin time), so it MUST record a single bare TILE.
+        # kernel keys its tile differently at pin time), so it MUST record a single bare TILE. A
+        # dynamic FAST-MATH golden records the sibling-atom **PV plan** as that bare TILE (the exact
+        # string its static twin stamps on TILE@<pv_k>) — the pinned branch of
+        # ``_twisted_warp_options`` recovers the geometry from it and keeps scores f32-accumulate.
         keyed = [k for k in self.knobs if k.startswith("TILE@")]
         if self.dynamic and keyed:
             raise ValueError(

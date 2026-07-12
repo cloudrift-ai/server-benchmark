@@ -329,7 +329,11 @@ class SearchDB:
     #       knob (tier-foreign ones get an OFF value: WM/WN/MMA on scalar,
     #       BM/BN/BR/FK on warp), so ``op_cache_key`` (which folds the knob dict)
     #       shifts for every TileOp/KernelOp. Stale ``lowering`` rows won't match.
-    _SCHEMA_VERSION = 2
+    #   3: the RASTER launch-order codec — every contraction row now spells a fifth
+    #       schedule family (``RASTER: ''``/``gm8``), so ``op_cache_key`` shifts for every
+    #       matmul TileOp/KernelOp; cached pre-RASTER chains would silently replay
+    #       old-key kernels and starve the new rows of evidence.
+    _SCHEMA_VERSION = 3
 
     _SCHEMA = [
         """

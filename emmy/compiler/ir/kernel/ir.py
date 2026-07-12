@@ -220,6 +220,17 @@ class Tile(Stmt):
     body: Body
     block_threads: int | None = None
     aux_threads: int = 0
+    # The ``(m, n)`` BLOCK axis names of a 2-D-tiled contraction output — the structural
+    # eligibility for CTA rasterization, stamped by ``grid_tile`` (only there is the m/n
+    # identity known). ``None`` = not a 2-D contraction grid (reduce tier, 1-D output).
+    raster_axes: tuple[str, str] | None = None
+    # The resolved ``RASTER`` codec (grid_tile, off the TileOp's stamped knobs): the flat CTA
+    # order iterates ``raster_group`` block-tiles of the ``raster_orient`` axis fastest within
+    # each launch stripe, so consecutive CTAs share the same streamed operand slab and its
+    # repeat reads hit L2 instead of DRAM (``m`` groups M-tiles — B streamed; ``n`` the
+    # transpose — A streamed). ``None`` = the plain N-fastest row-major order.
+    raster_group: int | None = None
+    raster_orient: str = "m"
 
     def __post_init__(self) -> None:
         if not isinstance(self.body, Body):
@@ -232,7 +243,15 @@ class Tile(Stmt):
 
     def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
         (body,) = bodies
-        return Tile(axes=self.axes, body=body, block_threads=self.block_threads, aux_threads=self.aux_threads)
+        return Tile(
+            axes=self.axes,
+            body=body,
+            block_threads=self.block_threads,
+            aux_threads=self.aux_threads,
+            raster_axes=self.raster_axes,
+            raster_group=self.raster_group,
+            raster_orient=self.raster_orient,
+        )
 
     def binds_axes(self) -> frozenset[str]:
         return frozenset(a.name for a in self.axes)
@@ -345,8 +364,52 @@ class Tile(Stmt):
         ipad = _pad(inner.indent)
         if guard:
             out.append(f"{pad}if (_gid < {n}) {{")
+        # Grouped CTA rasterization (the resolved ``RASTER`` codec): remap the flat ``(m, n)``
+        # block sub-id so ``G`` block-tiles of the grouped axis iterate fastest within each
+        # launch stripe. Consecutive CTAs then share the same streamed operand slab (L2 reuse)
+        # instead of re-streaming it from DRAM once per row of the other axis (the flat
+        # N-fastest order's failure mode). With the grouped axis ``a`` (extent Ea) and the
+        # other axis ``b`` (extent Eb): ``a = grp·G + (sub % (G·Eb)) % gsz``,
+        # ``b = (sub % (G·Eb)) / gsz`` — the standard threadblock swizzle, with
+        # ``gsz = min(G, Ea − grp·G)`` handling the ragged last group.
+        raster = None  # (grouped_idx, other_idx, G) when active
+        if self.raster_group and self.raster_axes:
+            names = [a.name for a in self.axes]
+            if self.raster_axes[0] in names and self.raster_axes[1] in names:
+                mi, ni = names.index(self.raster_axes[0]), names.index(self.raster_axes[1])
+                if ni == mi + 1:
+                    gi, oi = (mi, ni) if self.raster_orient == "m" else (ni, mi)
+                    g_eff = min(self.raster_group, extents[gi])
+                    if extents[gi] > 1 and g_eff > 1:
+                        raster = (gi, oi, g_eff)
+        if raster is not None:
+            gi, oi, g = raster
+            ea, eb = extents[gi], extents[oi]
+            mi, ni = min(gi, oi), max(gi, oi)
+            sn = strides[ni]
+            sub = "_gid" if sn == 1 else f"_gid / {sn}"
+            # ``% (Em·En)`` drops when (m, n) are the outermost axes (the sub-id is bounded
+            # by the ``_gid < N`` guard / exact grid).
+            if mi != 0:
+                sub = f"({sub}) % {ea * eb}"
+            decls = [f"{ipad}int _rsub = {sub};"]
+            if ea % g == 0:
+                a_expr = f"(_rsub / {g * eb}) * {g} + _rsub % {g}"
+                b_expr = f"(_rsub % {g * eb}) / {g}"
+            else:
+                decls.append(f"{ipad}int _rgrp = _rsub / {g * eb};")
+                decls.append(f"{ipad}int _rsz = min({g}, {ea} - _rgrp * {g});")
+                a_expr = f"_rgrp * {g} + (_rsub % {g * eb}) % _rsz"
+                b_expr = f"(_rsub % {g * eb}) / _rsz"
         for i, a in enumerate(self.axes):
             s, e = strides[i], extents[i]
+            if raster is not None and i == mi:
+                out.extend(decls)
+                out.append(f"{ipad}int {a.name} = {a_expr if i == gi else b_expr};")
+                continue
+            if raster is not None and i == ni:
+                out.append(f"{ipad}int {a.name} = {a_expr if i == gi else b_expr};")
+                continue
             term = "_gid" if s == 1 else f"_gid / {s}"
             # The outermost axis needs no modulo (``_gid / s0 < e0`` since _gid < N).
             expr = term if i == 0 else f"({term}) % {e}"
@@ -1995,12 +2058,24 @@ def _(s: Tile, rename, sigma, axis_fn):
     # per-CTA thread counts (``block_threads`` / ``aux_threads``) are geometry,
     # not SSA — carry them through verbatim (dropping them silently falls the
     # launch back to the scalar ``_BLOCK_SIZE``, over-launching a cooperative
-    # tile), exactly as ``Tile.with_bodies`` preserves them.
+    # tile), exactly as ``Tile.with_bodies`` preserves them. The rasterization
+    # fields are geometry too — ``raster_axes`` names axes, so it follows the
+    # ``axis_fn`` renames (dropping it silently reverts the launch order to the
+    # ungrouped N-fastest raster — the exact silent-loss this handler's comment
+    # has always warned about).
+    new_axes = tuple(axis_fn(a) for a in s.axes)
+    raster_axes = s.raster_axes
+    if raster_axes is not None:
+        renames = {old.name: new.name for old, new in zip(s.axes, new_axes, strict=True)}
+        raster_axes = (renames.get(raster_axes[0], raster_axes[0]), renames.get(raster_axes[1], raster_axes[1]))
     return Tile(
-        axes=tuple(axis_fn(a) for a in s.axes),
+        axes=new_axes,
         body=Body(tuple(_rewrite(c, rename, sigma, axis_fn) for c in s.body)),
         block_threads=s.block_threads,
         aux_threads=s.aux_threads,
+        raster_axes=raster_axes,
+        raster_group=s.raster_group,
+        raster_orient=s.raster_orient,
     )
 
 

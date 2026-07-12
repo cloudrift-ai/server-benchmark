@@ -6,7 +6,7 @@ configs:
     M: 512
     N: 512
     K: 512
-    knobs: {TILE: 'n32x8/f2x8', STAGE: 'd2/cp/ring'}
+    knobs: {TILE: 'n32x8/f2x8', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 15.0
     cublas_us: 18.0
   - kernel: matmul
@@ -14,7 +14,7 @@ configs:
     M: 1024
     N: 1024
     K: 1024
-    knobs: {TILE: 'n32x16/f4x8', STAGE: 'd2/cp/ring'}
+    knobs: {TILE: 'n32x16/f4x8', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 85.2
     cublas_us: 77.0
   - kernel: matmul
@@ -22,7 +22,7 @@ configs:
     M: 2048
     N: 2048
     K: 2048
-    knobs: {TILE: 'n32x8/f4x8', STAGE: 'd2/cp/ring'}
+    knobs: {TILE: 'n32x8/f4x8', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 587.8
     cublas_us: 499.0
   - kernel: matmul
@@ -30,7 +30,7 @@ configs:
     M: 4096
     N: 4096
     K: 4096
-    knobs: {TILE: 'n32x16/f4x10', STAGE: 'd2/cp/ring'}
+    knobs: {TILE: 'n32x16/f4x10', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 4636.7
     cublas_us: 3922.0
   - kernel: matmul
@@ -39,7 +39,7 @@ configs:
     N: 512
     K: 512
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x1/f1x4/k2', STAGE: 'd4/cp/ring'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x1/f1x4/k2', RASTER: '', STAGE: 'd4/cp/ring'}
     emmy_us: 8.3
     cublas_us: 6.0
   - kernel: matmul
@@ -48,7 +48,7 @@ configs:
     N: 1024
     K: 1024
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x1/f4x4/k2', STAGE: 'd1/cp'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x1/f4x4/k2', RASTER: '', STAGE: 'd1/cp'}
     emmy_us: 35.7
     cublas_us: 27.0
   - kernel: matmul
@@ -57,7 +57,7 @@ configs:
     N: 1024
     K: 1024
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f4x4/k2', STAGE: 'd2/cp/ring/p2'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f4x4/k2', RASTER: '', STAGE: 'd2/cp/ring/p2'}
     emmy_us: 32.8
     cublas_us: 27.0
   - kernel: matmul
@@ -66,7 +66,7 @@ configs:
     N: 2048
     K: 2048
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x4/f4x4', STAGE: 'd2/cp/ring'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x4/f4x4', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 188.4
     cublas_us: 197.0
   - kernel: matmul
@@ -75,7 +75,7 @@ configs:
     N: 4096
     K: 4096
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x4/f4x4', STAGE: 'd2/cp/ring'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x4/f4x4', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 1399.8
     cublas_us: 1350.0
   - kernel: attention

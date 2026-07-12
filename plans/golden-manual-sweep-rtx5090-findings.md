@@ -1,0 +1,108 @@
+# Manual golden variant sweep — RTX 5090 (local), 2026-07-12
+
+**Method:** NO tuner — per the session's direction (tune exploration untrusted after the deploy-evidence audit),
+every shape was explored by hand: `emmy run --bench --golden NAME` plus batches of pinned `--ab` variants
+(coordinate descent around the incumbents + targeted regions: big-tile f16-accumulate, split-K, staging depth,
+WSPEC fills), all benched live against the recorded golden rows and the eager/cuBLAS reference in the same run.
+6 waves + 2 confirmation passes per winner, ~120 pinned variant benches total, ~3 h wall. Repo @ `main`
+`dfdc67a2`; logs and per-batch tables under `_tune/manual-golden-5090/`.
+
+**Tally:** **9 fast-math `[fm]` entries added** (square.2048, square.4096 parity-add, qkv.dynM, o_proj ±dynM,
+mlp_gate_up ±dynM, mlp_down ±dynM) / **2 standard-lane parity adds** (mlp_gate_up ±dynM) / **9 `REDUCE: ''`
+stamps** on under-specified entries / 0 replacements / all other incumbents confirmed best-known (square.512
+fp32+fp16, square.1024, square.512.dynM, qkv static, attention untouched, memory-bound kinds untouched).
+
+## Headline — one tile family beats cuBLAS by 1.4–1.6× across the warp-tier set (FAST_MATH lane)
+
+**`a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4 · d2/tma/ring` (+`g2k` where the un-split grid underfills the 170 SMs)**
+is the best-known config on 7 of the 10 fp16 matmul shapes. Mechanism: the f16 accumulator **halves register
+pressure**, so the `w4x2/f4x8` register tile — 242 regs/thread, unbuildable in the f32-accumulate lane — fits,
+and its 4× larger output tile amortizes everything else. This is a *joint* (atom × geometry) move: the earlier
+fm sweeps only atom-swapped at fixed geometry (the fm2 `square.4096` deep-bk find was the lone exception), so
+the region was never measured.
+
+Per-shape outcome (µs are totals incl. split-K finalize; golden = live replay same run; all winners 3×
+reproduced at <1% spread; `run` accuracy vs torch passes on the gate_up / mlp_down winners):
+
+| shape | new best (fm lane) | µs | golden live | cuBLAS µs | vs cuBLAS |
+| --- | --- | --- | --- | --- | --- |
+| square.2048 | w4x2/f4x8/k4 | **61.3** | 90.7 | 98.36 | **0.62** |
+| square.4096 | w4x2/f4x8/k4 | **481.1** | 494.8 (recorded [fm]) | 640.93 | **0.75** |
+| o_proj.h4096 | w4x2/f4x8/k4 g2k | **64.8** | 90.5 | 95.22 | **0.68** |
+| o_proj.h4096.dynM | w4x2/f4x8/k4 g2k | **64.9** | 91.9 | 95.08 | **0.68** |
+| mlp_gate_up.h4096 | w4x2/f4x8/k4 | **369.7** | 616.1 | 557.94 | **0.66** |
+| mlp_gate_up.h4096.dynM | w4x2/f4x8/k4 | **370.1** | 618.3 | 553.70 | **0.67** |
+| mlp_down.h4096 | w4x2/f4x8/k4 g2k | **201.3** | 295.5 | 296.95 | **0.68** |
+| mlp_down.h4096.dynM | w4x2/f4x8/k4 g2k | **201.8** | 297.4 | 295.03 | **0.68** |
+| qkv.h4096.dynM | w2x4/f2x4/k8 d1/tma | **240.6** | 251.0 | 249.82 | 0.96 |
+| qkv.h4096 | (recorded [fm] stands) | 240.1 | — | 250.54 | 0.96 |
+
+(vs cuBLAS = emmy/cuBLAS, <1.0 = emmy faster.) The dynM twins pay **no masked-tile penalty** in this family
+(369.6–370.4 dynamic vs 369.2–370.0 static). Where the family loses: square.1024 and smaller (the 256-wide
+output tile underfills the card — 20.7 vs 15.6), and qkv-class wide-N shallow-K (parity with the k8 entry).
+FAST_MATH's default-off stance is unchanged — these are `[fm]` entries beside the standard goldens, never
+replacing them.
+
+Standard lane: the same geometry with the f32-acc atom (`w4x2/f4x8/k4 d2/tma/ring`, 166 regs) is a parity-add
+on mlp_gate_up ±dynM (594.9 / 595.6 vs recorded 610.6, ~2.5% — under the 3% replace gate, 4× reproduced).
+Nothing else in the standard lane beat its incumbent beyond noise.
+
+## Finding 1 — why every tuned sweep missed this region (and what to fix)
+
+`emmy eval analytic` on the updated goldens ranks **every new entry at rank 0** (median 0, top-1 27/28) — the
+post-#347 analytic prior prices the big-tile f16acc family correctly, so the cold ranking is NOT the blocker.
+The prime suspect is the **`-Xcicc -O1` tune ranking lane**: big register tiles are exactly the
+cicc-unroll-sensitive class the -O1 lane exists to dodge (CLAUDE.md's "-O1 dodges the cicc/LLVM unroll blowup
+on big register-tile kernels"), so their -O1 medians plausibly rank so deep that the `EMMY_O3_TOL` band never
+grants them a deployable -O3 rebench — an *systematic anti-correlation* for this family, not noise.
+**Recommendation (high priority): verify by benching `w4x2/f4x8/k4` f16acc at -O1 on one shape; if confirmed,
+the -O3 rebench band needs a family-aware floor (always rebench the top-K per (atom, tile-size) bucket, not
+just the global -O1 top band).** The learned prior inherits the censoring either way — after merging, re-run
+`scripts/golden_knob_heuristics.py` and retrain so both halves see the region (the node store now has no
+measurements there at all; the goldens seed it).
+
+## Finding 2 — `REDUCE` is the fourth unpinned-family drift; every matmul entry now stamps it
+
+`matmul.mlp_gate_up.h4096` (static) recorded no `REDUCE` key; today's greedy fill adds `g2k`, so the golden
+replayed at 652.6 (625.1 + 27.5 finalize) vs its recorded 610.6 — a 7% phantom regression, the same class as
+the dynM-`REDUCE` / fill-order / `WSPEC` drifts (#345). With `REDUCE=` pinned the entry replays true (616.1).
+Every 5090 matmul entry lacking the key is now stamped `REDUCE: ''` (verified value-preserving by this
+session's replays); post-stamp the file replays clean end to end. The recorder-side fix (stamp every resolved
+schedule family at record time) remains open and is now urgent for the other card files — this is the fourth
+occurrence of the class.
+
+## Finding 3 — `square.512.dynM [fm]` replays 17% off its recorded value (left unrecorded, needs re-validation)
+
+The recorded fm entry (3.6 µs) replayed at 4.2 total (3.2 + a 1.0 finalize row from a `REDUCE` fill — it also
+lacks the key), and the std entry (recorded 6.14) replayed at 4.5. Both swings sit inside the small-shape
+noise band (~10–13%+ on 3–6 µs kernels) and the fm entry still wins live, so nothing was changed — but this
+shape needs a dedicated multi-pass re-validation before its `emmy_us` values are trusted, and its fm entry
+needs the `REDUCE` stamp decision (recorded value may include a fill finalize).
+
+## Finding 4 — deploy-side confirmations (audit follow-ups, not this task's scope)
+
+Greedy deployed above the golden on nearly every shape this session (qkv 279.7 vs 259.1, qkv.dynM 273.8 vs
+251.6, mlp_down 305–311 vs 295, gate_up 633–636 vs 616, downdyn 340 vs 297), with repeated disjoint-evidence
+warnings (`square.1024`: "181 measured rows, none matches the 4 offered candidates"). Root causes were
+established by this session's earlier audit: the local DB is -O1-only and fm2-skewed (regime starvation), the
+-O3 reservoir covers only slow families for some shapes, and the learned prior extrapolates poorly (median
+golden rank 3206 vs the analytic's 0). The newly recorded entries make the golden dataset the reliable
+source of truth for these shapes regardless of the deploy path chosen later.
+
+## Workflow notes
+
+- **The `--ab` A/B harness is excellent for manual sweeps**: ~8–12 pinned variants per invocation, live golden
+  + eager rows as controls in every batch, and `_unreproducible_pin_flag` caught every declined pin (d3/d4
+  stage pins clamping to d2 on 96K-smem tiles; a stage pin realizing `(off)`). Zero silent degrades reached
+  the results.
+- **Pin `REDUCE=` (and `WSPEC=`) explicitly in every `--ab` row** — an unpinned family gets planner fill
+  (wave 1 lost 3 rows to surprise `g2k` fills, +2.4–77 µs finalize noise in the comparison).
+- The split-K finalize prints as a separate knob-less row after its config — totals must be summed by hand.
+  The `golden NAME (total)` row proposal from the fm2 notes stands; it would also fix per-config grouping in
+  these logs.
+- `emmy run` accuracy checks are silent on success (exit 0, no output) — a one-line `accuracy: PASS (rel err
+  …)` would save a foreground rerun to confirm the check actually ran.
+- Confirmation economics: cubin caching made the 19 confirmation invocations ~1–2 min each; the expensive part
+  was first-compile of each variant (~30–60 s for the h4096/4096² kernels). Total ~120 variants ≈ 2 h GPU.
+- The disjoint-evidence deploy warning prints once per `--ab` row compile (11× per invocation on square.1024)
+  — it should dedupe per (node, compile session).

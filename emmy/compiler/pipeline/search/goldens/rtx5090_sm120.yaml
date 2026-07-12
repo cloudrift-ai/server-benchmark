@@ -26,7 +26,7 @@ configs:
     N: 1024
     K: 1024
     dtype: 'fp16'
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x4/f1x4/k8', VECTORIZE_LOADS: true, WSPEC: ''}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: '', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x4/f1x4/k8', VECTORIZE_LOADS: true, WSPEC: ''}
     emmy_us: 15.59
     cublas_us: 14.51
   - kernel: matmul
@@ -35,8 +35,22 @@ configs:
     N: 2048
     K: 2048
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x2/k4', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x2/k4', REDUCE: '', STAGE: 'd2/tma/ring', WSPEC: ''}
     emmy_us: 88.5
+    cublas_us: 98.36
+  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): the big-tile f16acc family — the f16
+  # accumulator halves register pressure, so the w4x2/f4x8 tile (unbuildable f32-acc) fits. 61.3 µs
+  # vs the standard golden's live 90.7 (0.68x) and 1.60x FASTER than cuBLAS HGEMM. 2026-07-12 manual
+  # variant sweep, 3x reproduced at <1% spread. Kept beside the standard entry — gate-off compiles
+  # can't reach it.
+  - kernel: matmul
+    name: matmul.square.2048
+    M: 2048
+    N: 2048
+    K: 2048
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 61.3
     cublas_us: 98.36
   - kernel: matmul
     name: matmul.square.4096
@@ -44,7 +58,7 @@ configs:
     N: 4096
     K: 4096
     dtype: 'fp16'
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd4/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x4', VECTORIZE_LOADS: true, WSPEC: ''}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: '', STAGE: 'd4/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x4', VECTORIZE_LOADS: true, WSPEC: ''}
     emmy_us: 640.83
     cublas_us: 640.93
   # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): the deep-bk region the 07-09 cold
@@ -57,8 +71,20 @@ configs:
     N: 4096
     K: 4096
     dtype: 'fp16'
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd1/tma', TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k4', VECTORIZE_LOADS: true, WSPEC: ''}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: '', STAGE: 'd1/tma', TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k4', VECTORIZE_LOADS: true, WSPEC: ''}
     emmy_us: 491.9
+    cublas_us: 640.93
+  # Second fast-math entry, at parity (2.8% vs the deep-bk entry's live 494.8 — under the 3% replace
+  # gate): the same big-tile w4x2/f4x8/k4 d2/tma/ring family that wins across the h4096 shapes.
+  # 2026-07-12 manual sweep, 3x reproduced (480.9/481.1/482.5).
+  - kernel: matmul
+    name: matmul.square.4096
+    M: 4096
+    N: 4096
+    K: 4096
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 481.1
     cublas_us: 640.93
   - kernel: matmul
     name: matmul.square.512.dynM
@@ -88,7 +114,7 @@ configs:
     N: 12288
     K: 4096
     dtype: 'fp16'
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd4/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x4', VECTORIZE_LOADS: true, WSPEC: ''}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: '', STAGE: 'd4/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x4', VECTORIZE_LOADS: true, WSPEC: ''}
     emmy_us: 258.47
     cublas_us: 250.54
   # Fast-math sibling (f16-accumulate atom, FAST_MATH lane — torch-default fp16 numerics): kept
@@ -100,7 +126,7 @@ configs:
     N: 12288
     K: 4096
     dtype: 'fp16'
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd1/tma', TILE: 'a:mma_m16n8k16_f16_f16/w2x4/f2x4/k8', VECTORIZE_LOADS: true, WSPEC: ''}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: '', STAGE: 'd1/tma', TILE: 'a:mma_m16n8k16_f16_f16/w2x4/f2x4/k8', VECTORIZE_LOADS: true, WSPEC: ''}
     emmy_us: 238.5
     cublas_us: 250.54
   - kernel: matmul
@@ -112,6 +138,19 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', STAGE: 'd2/tma/ring', WSPEC: ''}
     emmy_us: 90.1
     cublas_us: 95.22
+  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): big-tile family + g2k (the un-split
+  # 64-CTA grid underfills 170 SMs). 64.8 µs total (60.5 main + 4.3 finalize) vs the standard
+  # golden's live 90.5 (0.72x), 1.46x faster than cuBLAS HGEMM. 2026-07-12 manual sweep, 3x
+  # reproduced. Kept beside the standard entry — gate-off compiles can't reach it.
+  - kernel: matmul
+    name: matmul.o_proj.h4096
+    M: 512
+    N: 4096
+    K: 4096
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 64.8
+    cublas_us: 95.22
   - kernel: matmul
     name: matmul.mlp_gate_up.h4096
     M: 512
@@ -121,8 +160,34 @@ configs:
     # 2026-07-09 sweep: replaced w2x2/f4x4/k4 d1/tma (recorded 605.5) — that pin benches ~638 even at
     # its own recording commit (8ab967cf, bisect-verified; cuBLAS steady), so the old 605.5 was a
     # recording-fidelity miss, not codegen drift. This config runs 608-612 live (6x reproduced).
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd4/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x4/f4x4/k2', VECTORIZE_LOADS: true, WSPEC: ''}
+    # 2026-07-12: REDUCE stamped '' — unpinned, today's fill added g2k (+27.5 µs finalize, replaying
+    # 652.6); with REDUCE pinned off the entry replays true (616.1). Same drift class as WSPEC (#345).
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: '', STAGE: 'd4/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x4/f4x4/k2', VECTORIZE_LOADS: true, WSPEC: ''}
     emmy_us: 610.6
+    cublas_us: 557.94
+  # Parity alternate (2.6% under the d4 entry, within the 3% add gate): the w4x2/f4x8 big-tile
+  # geometry in the STANDARD f32-acc lane. 2026-07-12 manual sweep, 4x reproduced (593.7-595.8).
+  - kernel: matmul
+    name: matmul.mlp_gate_up.h4096
+    M: 512
+    N: 28672
+    K: 4096
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f4x8/k4', REDUCE: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 594.9
+    cublas_us: 557.94
+  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): the big-tile f16acc family. 369.7 µs vs
+  # the standard golden's clean live 616.1 (0.60x), 1.50x faster than cuBLAS HGEMM (~325 TFLOP/s;
+  # the f32-accumulate ceiling is ~210). 2026-07-12 manual sweep, 3x reproduced at <1% spread;
+  # accuracy vs torch passes. Kept beside the standard entries — gate-off compiles can't reach it.
+  - kernel: matmul
+    name: matmul.mlp_gate_up.h4096
+    M: 512
+    N: 28672
+    K: 4096
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 369.7
     cublas_us: 557.94
   - kernel: matmul
     name: matmul.mlp_down.h4096
@@ -133,6 +198,19 @@ configs:
     knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'g8k', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x4/f2x2/k4', VECTORIZE_LOADS: true, WSPEC: ''}
     emmy_us: 303.0
     cublas_us: 296.95
+  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): big-tile family + g2k. 201.3 µs total
+  # (197.0 main + 4.3 finalize) vs the standard golden's live 295.5 (0.68x), 1.44x faster than
+  # cuBLAS HGEMM — the deep-K (14336) shape is exactly the f16acc profile the 4090 findings flagged.
+  # 2026-07-12 manual sweep, 3x reproduced; accuracy vs torch passes. Kept beside the standard entry.
+  - kernel: matmul
+    name: matmul.mlp_down.h4096
+    M: 512
+    N: 4096
+    K: 14336
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 201.3
+    cublas_us: 296.95
   - kernel: matmul
     name: matmul.qkv.h4096.dynM
     M: 512
@@ -140,8 +218,21 @@ configs:
     K: 4096
     dtype: 'fp16'
     dynamic: true
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x4/k2', VECTORIZE_LOADS: true, WSPEC: ''}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: '', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x4/k2', VECTORIZE_LOADS: true, WSPEC: ''}
     emmy_us: 250.8
+    cublas_us: 249.82
+  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): mirrors the static twin's [fm] entry —
+  # the masked tile pays no penalty. 240.6 µs vs the standard golden's live 251.0 (0.96x), 1.04x vs
+  # cuBLAS HGEMM. 2026-07-12 manual sweep, 3x reproduced. Kept beside the standard entry.
+  - kernel: matmul
+    name: matmul.qkv.h4096.dynM
+    M: 512
+    N: 12288
+    K: 4096
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x4/f2x4/k8', REDUCE: '', STAGE: 'd1/tma', WSPEC: ''}
+    emmy_us: 240.6
     cublas_us: 249.82
   - kernel: matmul
     name: matmul.o_proj.h4096.dynM
@@ -155,6 +246,19 @@ configs:
     knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'g4k', STAGE: 'd1/tma', TILE: 'a:mma_m16n8k16_f16_f32/w1x4/f4x2/k4', VECTORIZE_LOADS: true, WSPEC: ''}
     emmy_us: 91.4
     cublas_us: 95.08
+  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): big-tile family + g2k, mirroring the
+  # static twin. 64.9 µs total (60.6 main + 4.3 finalize) vs the standard golden's live 91.9
+  # (0.71x), 1.45x faster than cuBLAS HGEMM. 2026-07-12 manual sweep, 3x reproduced.
+  - kernel: matmul
+    name: matmul.o_proj.h4096.dynM
+    M: 512
+    N: 4096
+    K: 4096
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 64.9
+    cublas_us: 95.08
   - kernel: matmul
     name: matmul.mlp_gate_up.h4096.dynM
     M: 512
@@ -165,8 +269,36 @@ configs:
     # 2026-07-09 sweep: replaced w8x2/f2x8/k4 d2/tma/ring (recorded 596.3) — that entry's knob set
     # left REDUCE unpinned and today's greedy fill adds g2k, re-benching at 641.0 live (613.6 + 27.4
     # finalize), while this config runs 608-611 live. See the sweep findings.
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', VECTORIZE_LOADS: true, WSPEC: ''}
+    # 2026-07-12: REDUCE stamped '' (replayed clean 617-620 this session; stamp is value-preserving).
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: '', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', VECTORIZE_LOADS: true, WSPEC: ''}
     emmy_us: 610.6
+    cublas_us: 553.70
+  # Parity alternate (2.5% under the incumbent, within the 3% add gate): the w4x2/f4x8 big-tile
+  # geometry in the STANDARD f32-acc lane, mirroring the static twin. 2026-07-12 manual sweep
+  # (595.6; the static twin's identical config 4x at 593.7-595.8).
+  - kernel: matmul
+    name: matmul.mlp_gate_up.h4096.dynM
+    M: 512
+    N: 28672
+    K: 4096
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f4x8/k4', REDUCE: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 595.6
+    cublas_us: 553.70
+  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): big-tile family, mirroring the static
+  # twin — the masked tile pays no penalty (369.6-370.4 vs static 369.2-370.0). 370.1 µs vs the
+  # standard golden's live 617-620 (0.60x), 1.50x faster than cuBLAS HGEMM. 2026-07-12 manual
+  # sweep, 3x reproduced. Kept beside the standard entries.
+  - kernel: matmul
+    name: matmul.mlp_gate_up.h4096.dynM
+    M: 512
+    N: 28672
+    K: 4096
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 370.1
     cublas_us: 553.70
   - kernel: matmul
     name: matmul.mlp_down.h4096.dynM
@@ -177,6 +309,19 @@ configs:
     dynamic: true
     knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'g8k', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x4/f2x2/k4', VECTORIZE_LOADS: true, WSPEC: ''}
     emmy_us: 304.0
+    cublas_us: 295.03
+  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): big-tile family + g2k, mirroring the
+  # static twin. 201.8 µs total (197.4 main + 4.4 finalize) vs the standard golden's live 297.4
+  # (0.68x), 1.44x faster than cuBLAS HGEMM. 2026-07-12 manual sweep, 3x reproduced.
+  - kernel: matmul
+    name: matmul.mlp_down.h4096.dynM
+    M: 512
+    N: 4096
+    K: 14336
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 201.8
     cublas_us: 295.03
   - kernel: softmax
     name: softmax.k2048

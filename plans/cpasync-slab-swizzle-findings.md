@@ -37,7 +37,19 @@ throughput" that motivated RASTER was the **shared-memory pipe**, not DRAM — w
 traffic moved nothing. At ~695 µs emmy passes cuBLAS on gate_up (~728 µs from the recorded 1.08× ratio):
 the "structural" sm_89 residual was bank conflicts.
 
-## Implementation sketch (not started)
+## Implementation — LANDED (same branch, same day)
+
+Exactly the sketch below: `_MmaOps.slab_swizzles` now feeds BOTH transports (the `transport == "tma"` gate at
+`_atom._staged` is gone), `cp_async_fill` threads the mode onto `CpAsyncCopy.swizzle`, and the render XORs the
+fill's flattened destination index through the same `emmy_swizzle_<mode>` helper the ldmatrix drain uses — fill
+and drain agree by construction, purely address-based, zero smem growth. The scalar tier (plain-`Load` drains)
+and the sync compute-fill stay NONE; the flash K/V slabs keep their `pad_cols` fix (pad and swizzle are asserted
+mutually exclusive). `096_pair_ldmatrix_loads` pairs swizzled loads as before (equal-mode check; the XOR commutes
+with the paired lane map — verified in the emitted sm_89 kernel: paired `x4.trans` drains read through the XOR).
+Covered by `test_cp_staged_slab_is_swizzled` (mode pinned ON, fill+drain XOR presence, CPU render at sm_89) and
+the pre-existing staged-vs-gmem bit-identity suite, which now exercises swizzled cp kernels on GPU.
+
+## Implementation sketch (as scoped before landing)
 
 - The drain side already has the machinery: `LdmatrixLoad` carries a `swizzle` field and the pair-fusion
   pass (`096_pair_ldmatrix_loads`) is swizzle-aware ("the swizzle XOR is per-lane address-based, so it

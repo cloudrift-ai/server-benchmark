@@ -181,9 +181,10 @@ def _warp_epilogue(
 
 # ---- operand staging (smem slab + ldmatrix drain) ---------------------------------------------- #
 # The warp tier's smem operand pipeline, driven off the node's :class:`Stage`. cp.async and TMA
-# share the slab + the staged-``LdmatrixLoad`` drain (:func:`_staged_inner_atom_loop`); only the
-# producer differs — a cp.async slab is plain row-major (NONE-swizzle), a TMA slab is
-# hardware-swizzled in-copy with the drain XOR undoing it (:meth:`_MmaOps.slab_swizzles`). Staging is a **pure perf
+# share the slab + the staged-``LdmatrixLoad`` drain (:func:`_staged_inner_atom_loop`) AND the
+# slab swizzle modes (:meth:`_MmaOps.slab_swizzles`); only who applies the fill-side permutation
+# differs — TMA swizzles in hardware during the box copy, a cp.async fill XORs its destination
+# index in software — and the drain XOR undoes either. Staging is a **pure perf
 # transform**: an ineligible kernel silently falls back to gmem-direct, and a staged kernel is
 # bit-identical to its gmem-direct baseline. The transport primitives (the fill loops + the
 # commit/wait / mbarrier handshakes) live in ``_stage.py``; these functions schedule them onto the
@@ -248,9 +249,10 @@ def _staged_inner_atom_loop(
     each slab's ROW (A's tile row / B's K row) so the drain reads the ring slot the producer already
     filled, while a later chunk prefetches into another slot.
 
-    ``swizzles`` (per-slab, aligned with ``slabs``): the TMA smem swizzle mode each slab was written
-    with — threaded onto each ``LdmatrixLoad`` so its address XOR undoes the hardware chunk
-    permutation (``"NONE"`` reads the plain row-major slab)."""
+    ``swizzles`` (per-slab, aligned with ``slabs``): the smem swizzle mode each slab was written
+    with (TMA in-copy, or the cp.async fill's software XOR) — threaded onto each ``LdmatrixLoad``
+    so its address XOR undoes the fill's chunk permutation (``"NONE"`` reads the plain row-major
+    slab)."""
     (a_slab, *b_slabs), (m, n) = slabs, mn
     offs = offs if offs is not None else (None,) * len(slabs)
     swizzles = swizzles if swizzles is not None else ("NONE",) * len(slabs)
@@ -379,7 +381,7 @@ def _slab_operands(
     looped over the two operands. A is ``(tile_m × bk)`` indexed by the M tile axis (the slab ROW); B is
     ``(bk × tile_n)`` by the N tile axis (the slab COL) — ``is_row`` flips the slot shape + the TMA box
     origin. ``base`` is the ``(row_base, col_base)`` CTA tile origin; ``index_srcs`` are the operands'
-    gmem index expressions (``load.index``); ``swizzles`` the per-operand TMA smem swizzle modes (the
+    gmem index expressions (``load.index``); ``swizzles`` the per-operand smem swizzle modes (the
     mma tier's :meth:`_MmaOps.slab_swizzles` — ``("NONE", "NONE")`` everywhere else). ``elems`` are the
     per-operand element dtypes (``DataType`` or ``None`` = the transport-level dtype) — a mixed-dtype
     scalar contraction (fp32 A × fp16 B) must size each slab and fill by its OWN element width."""
@@ -530,7 +532,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             k_axis=k_axis,
             bk_elems=stage.bk_elems,
             base=_tile_base(mn),
-            swizzles=ops.slab_swizzles(mn, elem.nbytes) if stage.transport == "tma" else ("NONE", "NONE"),
+            swizzles=ops.slab_swizzles(mn, elem.nbytes),
             elems=ops.slab_elems(),
         )
         common = dict(
@@ -755,10 +757,15 @@ class _MmaOps(_AtomOps):
         return stmts
 
     def slab_swizzles(self, mn, elem_bytes: int) -> tuple[str, str]:
-        """The TMA smem swizzle mode per operand slab, from each slab's inner (contiguous) row
-        span — A's is ``bk_elems`` (the K chunk), B's ``tile_n``. The pre-rebuild bar for the fp16
-        squares (``square.2048.fp16`` at 106.7 µs / 1.06× cuBLAS) was set by swizzled slabs; the
-        rebuilt NONE-swizzle transport left the ``ldmatrix`` drain bank-conflict-bound. Modes are
+        """The smem swizzle mode per operand slab, from each slab's inner (contiguous) row
+        span — A's is ``bk_elems`` (the K chunk), B's ``tile_n``. TMA applies the mode in
+        hardware (in-copy); the cp.async transport applies the identical XOR in software on
+        each fill's destination index — both drains read back through the same ldmatrix XOR.
+        The pre-rebuild bar for the fp16 squares (``square.2048.fp16`` at 106.7 µs / 1.06×
+        cuBLAS) was set by swizzled slabs; the rebuilt NONE-swizzle transport left the
+        ``ldmatrix`` drain bank-conflict-bound — and the never-swizzled cp path the same way
+        (4-way on 64 B rows / 8-way on 128 B; conflict replays were 81% of the sm_89 gate_up fm
+        golden's shared-mem wavefronts, the measured residual to cuBLAS). Modes are
         DERIVED, not tuned — the widest atom that divides the span (matching the pre-rebuild
         behavior: A → B64 on a 32-elem fp16 chunk, B → B128 on a 64-elem row)."""
         return (

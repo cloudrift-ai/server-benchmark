@@ -1284,6 +1284,30 @@ def test_tma_staged_slab_is_swizzled(monkeypatch):
     assert "int emmy_swizzle_b64(int e)" in op.kernel_source, "the swizzle helper must be emitted in the preamble"
 
 
+def test_cp_staged_slab_is_swizzled(monkeypatch):
+    """A cp.async-staged mma kernel swizzles its operand slabs in SOFTWARE (CPU render, forced
+    sm_89): the same modes the TMA path derives (``_WARP_CODEC``: A's 32-elem fp16 K chunk and
+    B's 32-elem tile_n rows are both 64 B → B64) are applied as an address XOR on each
+    ``cp.async`` fill DESTINATION and undone by the same XOR in the ldmatrix drain — fill and
+    drain agree by construction, so the staged-vs-gmem bit-identity tests above pin the
+    numerics; this pins the mode ON. The unswizzled cp slab left the drain 4-way (64 B rows) /
+    8-way (128 B rows) bank-conflicted — the measured sm_89 residual to cuBLAS (conflict
+    replays were 81% of the gate_up fm golden's shared-mem wavefronts; the XOR won −12–17%)."""
+    monkeypatch.setenv("EMMY_TILE", _WARP_CODEC)
+    monkeypatch.setenv("EMMY_STAGE", "d2/cp")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    lowered = Pipeline.build(CUDA_PASSES).run(_parity_mma_graph("static", M=256), ctx=Context(compute_capability=(8, 9)))
+    op = lowered.nodes["o"].op
+    src = op.kernel_source
+    assert not op.tma_descriptors, "sm_89 has no TMA — the fills must be cp.async"
+    assert "int emmy_swizzle_b64(int e)" in src, "the swizzle helper must be emitted in the preamble"
+    # Producer side: every cp.async fill writes through the XOR'd destination index...
+    assert "emmy_cp_async_cg(&_a_smem[emmy_swizzle_b64(" in src, "the A slab fill must XOR its smem destination"
+    assert "emmy_cp_async_cg(&_b_smem[emmy_swizzle_b64(" in src, "the B slab fill must XOR its smem destination"
+    # ...and the drain reads back through the identical XOR (fill/drain symmetry).
+    assert "emmy_ldmatrix" in src and src.count("emmy_swizzle_b64(") >= 4, "the ldmatrix drains must apply the matching XOR"
+
+
 @requires_sm90
 @requires_cuda
 def test_bf16_operands_stage_via_cp_async(monkeypatch):

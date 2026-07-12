@@ -148,10 +148,11 @@ fill, `d2+/ring` the prefetch ring overlapping the next KV block's copies with t
 its operand's own layout (K stays N-major, V K-major; verbatim row copies), so the transposed-B K slab drains via the
 **plain `x2` (no `.trans`) staged ldmatrix** — its 8×8 rows ARE the mma's col-major B columns (the `LdmatrixLoad`
 render's third variant) — and the V slab via the canonical `x2.trans`. The K/V slab rows are **padded +16 B**
-(`Operand.pad_cols` / `_twist._PAD`) — the cp.async-path counterpart of the TMA slab swizzle: a power-of-two row
+(`Operand.pad_cols` / `_twist._PAD`) — the flash stream's bank-conflict fix: a power-of-two row
 span lands every ldmatrix row read on one bank group (a measured ~8-way replay profile), and the pad shifts
 consecutive rows across groups. Intrinsic, not a fork (a near-strict win, like the masked-K alignment pad); padding
-relocates smem bytes only. The **TMA transport** boxes the batched K/V via rank-N descriptors (leading
+relocates smem bytes only. (The matmul tier's cp.async slabs use the software swizzle XOR instead — same modes as
+TMA, applied on the fill destination index, zero smem growth; pad and swizzle are mutually exclusive per slab.) The **TMA transport** boxes the batched K/V via rank-N descriptors (leading
 extent-1 box dims; the load's batch/head index exprs as origin coords — GQA's `h // group` included) into dense
 1024 B-aligned slabs under the hardware swizzle, the drains' address XOR undoing it; under a `WSPEC` band split the
 transport's elected fill thread rides the WRAPPED linear tid (`threadIdx.x % block_threads` — the raw tid would elect
@@ -261,7 +262,8 @@ the two apply paths stay distinct on a coop-K contraction.
 `030_stamp_types` / `040_demote_to_write_dtype` resolve element dtypes; `050_vectorize_loads` / `080_vectorize_stores` /
 `095_interleave_loads` pack/reorder memory ops; `096_pair_ldmatrix_loads` fuses slab-adjacent staged `x2` B-fragment
 `LdmatrixLoad`s into one `x4` (`pair_frag` — plain `x4` for an N-adjacent transposed-B pair, `x4.trans` for a
-col-adjacent canonical pair; NONE-swizzle only, halves the staged drains' LSU count, bit-identical; fires on both the
+col-adjacent canonical pair; equal swizzle modes pair too — the per-lane address XOR commutes with the paired lane
+map; halves the staged drains' LSU count, bit-identical; fires on both the
 warp-flash streaming drains and the matmul tier's staged drains — two emitters, one pass, which is why it is a pass);
 `110_drop_redundant_syncs` collapses the defensive `Sync`s the
 cooperative / shared-row templates emit (body-level only — a slab `Smem` decl flags `smem_seen`, so a load-bearing

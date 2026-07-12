@@ -12,7 +12,7 @@ from emmy.compiler.backend.cuda.dtype import cuda_includes, cuda_name
 from emmy.compiler.backend.cuda.dtype import nbytes_of as _nbytes_of
 from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
 from emmy.compiler.dtype import F32
-from emmy.compiler.ir.kernel.ir import LDMATRIX_SWIZZLE_XOR, KernelOp, LdmatrixLoad, Smem, TmaDescriptor, pack_smem
+from emmy.compiler.ir.kernel.ir import LDMATRIX_SWIZZLE_XOR, CpAsyncCopy, KernelOp, LdmatrixLoad, Smem, TmaDescriptor, pack_smem
 from emmy.compiler.ir.stmt import RenderCtx, render_body
 from emmy.compiler.tensor import Tensor
 
@@ -496,17 +496,22 @@ static __device__ __forceinline__ void emmy_mma_promote_f16acc(float* c, unsigne
 
 
 def _swizzle_prelude(kernel_op: KernelOp) -> str:
-    """One ``emmy_swizzle_<mode>`` helper per TMA swizzle mode the body's ``LdmatrixLoad`` drains
-    use — built from ``LDMATRIX_SWIZZLE_XOR`` (the single source of the shift/mask), so the drain
-    call sites spell their (often long) element index once instead of inlining it twice around the
-    XOR. ``__forceinline__``; same SASS as the inlined form."""
-    modes = sorted({s.swizzle for s in kernel_op.body.iter() if isinstance(s, LdmatrixLoad) and s.swizzle in LDMATRIX_SWIZZLE_XOR})
+    """One ``emmy_swizzle_<mode>`` helper per swizzle mode the body uses — on ``LdmatrixLoad``
+    drains (undoing the TMA hardware in-copy permutation, or reading back a software-swizzled
+    slab) and on ``CpAsyncCopy`` fills (the software swizzle's producer side). Built from
+    ``LDMATRIX_SWIZZLE_XOR`` (the single source of the shift/mask), so the call sites spell their
+    (often long) element index once instead of inlining it twice around the XOR.
+    ``__forceinline__``; same SASS as the inlined form."""
+    modes = sorted(
+        {s.swizzle for s in kernel_op.body.iter() if isinstance(s, (LdmatrixLoad, CpAsyncCopy)) and s.swizzle in LDMATRIX_SWIZZLE_XOR}
+    )
     chunks = []
     for mode in modes:
         shift, mask = LDMATRIX_SWIZZLE_XOR[mode]
         chunks.append(
-            f"// {mode} slab swizzle: XOR a b16 smem element index the way the TMA copy engine\n"
-            f"// permuted the 16-byte chunks on fill (the ldmatrix drain must read them back).\n"
+            f"// {mode} slab swizzle: XOR a b16 smem element index the way the fill permuted the\n"
+            f"// 16-byte chunks (TMA in-copy, or the same XOR on a cp.async fill destination);\n"
+            f"// the ldmatrix drain must read them back through the identical permutation.\n"
             f"static __device__ __forceinline__ int emmy_swizzle_{mode.lower()}(int e) {{\n"
             f"    return e ^ (((e >> {shift}) & {mask}) << 3);\n"
             f"}}\n\n"

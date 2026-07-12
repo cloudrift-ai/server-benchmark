@@ -45,7 +45,7 @@ Terms used throughout:
 | `pipeline.py` | Engine core: `Pattern` / `Match` / `Rule` / `Pass` / `Pipeline` (the frozen pass layout) plus `Run` — the per-run state and engine loop. |
 | `fork.py` | The `Fork` interface (`OptionFork`, `ThunkFork`) and the reusable `Level` + `build_fork_tree` lazy knob-cartesian tree builder. |
 | `knob.py` | The `Knob` descriptor system and the `EMMY_<KNOB>` env namespace (borrowing `config.knob_var` / `config.knob_raw`; `format_tuning_knobs` renders the real tuning knobs for `tune` output). Holds NO concrete knob declarations. |
-| `search/space.py` | **The single home of the search space.** Every `Knob` instance is declared here and nowhere else — the schedule codecs (`REDUCE` / `TILE` / `STAGE` / `WSPEC`), the pin-only structural `PLACE`, the kernel-lowering policy knobs (`VECTORIZE_LOADS` / `INTERLEAVE_LOADS`), and the enumeration value grids (`scalar_tile_moves` & co). A rule that decides a knob imports it from here; `knob.registry()` still discovers knobs by walking loaded modules (`space.py` loads at pipeline startup via those rules). |
+| `search/space.py` | **The single home of the search space.** Every `Knob` instance is declared here and nowhere else — the schedule codecs (`REDUCE` / `TILE` / `STAGE` / `WSPEC` / `RASTER`), the pin-only structural `PLACE`, the kernel-lowering policy knobs (`VECTORIZE_LOADS` / `INTERLEAVE_LOADS`), and the enumeration value grids (`scalar_tile_moves` & co). A rule that decides a knob imports it from here; `knob.registry()` still discovers knobs by walking loaded modules (`space.py` loads at pipeline startup via those rules). |
 | `search/features.py` | The featurizers (`knob_features`, `tile_signature`, the `D_*` / `MMA_*` encodings) — kept beside `space.py` so the whole space (dimensions × values × encoding) is analyzable in one package. |
 | `search/db.py` | `SearchDB`, the persistent SQLite store (see Part 6, "Search persistence"). |
 | `search/policy/mcts.py` | The in-memory MCTS (`SearchTree`) colocated with its only reader, `TuningSearch`. |
@@ -761,6 +761,15 @@ Legal on a warp `TILE` over a resolved **TMA** `STAGE` within the thread budget
 (`block_threads + 32·aux ≤ 1024`, `32·aux ≤ block_threads`); anything else — including the reserved producer `q`
 param — degrades to uniform. Empty = uniform SIMT. Materialized as the staged K-loop's producer/compute band split
 (`_stage._wspec_kloop`).
+
+**`RASTER`** (STR codec, `010_recognize` / `_schedule` → `lowering/kernel/010_materialize`) — the CTA launch-order
+codec (bare/root-global like `WSPEC`; the fifth schedule-fork level): `gm<G>` iterates `G` M block-tiles fastest per
+launch stripe so consecutive CTAs share the streamed B slab (L2 reuse — the flat order streams B from DRAM once per
+M-row: `A + C + B×2` measured on the 4090's `mlp_gate_up`, 503.6 vs cuBLAS's 365.8 MB); `gn<G>` is the transpose
+(A streamed); empty = the flat N-fastest row-major order (option-0, byte-identical to historical codegen). Changes
+no per-CTA work, layout, or schedule — only the block-id decode (`ir/kernel` `Tile.render`, `Tile.raster_axes` the
+`grid_tile` eligibility). Enumerated `('', 'gm8')` on 2-D contraction rows; wall-time effect is small and
+shape-dependent (±2–4% measured), so the search/goldens arbitrate per shape.
 
 **`PLACE`** (STR, pin-only, `010_recognize`) — structural placement of an intermediate edge: `auto` | `fuse` | `cut`,
 per edge-class element — `PLACE@cone` (producer-cone inlining), `PLACE@fold` (flash vs separate softmax + P@V

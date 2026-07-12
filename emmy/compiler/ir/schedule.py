@@ -891,6 +891,40 @@ class WarpSpec:
         return all(a.role.legal(sched) for a in self.roles)
 
 
+@dataclass(frozen=True)
+class Raster:
+    """The CTA rasterization order — the ``RASTER`` codec, kernel-scoped like ``WSPEC`` (one launch
+    order per grid; no ``@<axis>`` key). It changes NO per-CTA work, layout, or schedule — only
+    which flat CTA id maps to which ``(m, n)`` output block tile: ``gm<G>`` iterates ``G`` M
+    block-tiles fastest within each launch stripe (consecutive CTAs then share the streamed B
+    slab, so its repeat reads hit L2 instead of DRAM — the 2026-07-12 4090 NCU finding measured
+    the flat order streaming B once per M-row, ``A + C + B×2`` exactly); ``gn<G>`` is the
+    transpose (A the streamed operand). ``""`` / ``None`` = the flat N-fastest row-major order.
+    Eligible only on a 2-D-tiled contraction grid (``Tile.raster_axes``, stamped by the kernel
+    materializer's ``grid_tile`` seal)."""
+
+    orient: str  # "m" (group M block-tiles) | "n" (group N block-tiles)
+    group: int  # stripe group size, ≥ 2
+
+    @classmethod
+    def parse(cls, spec: str | None) -> Raster | None:
+        """Decode ``gm<G>`` / ``gn<G>`` (``""`` / ``None`` → ``None``, the flat order). Raises
+        ``ValueError`` on any other spelling — the loud pin contract."""
+        if not spec:
+            return None
+        m = _RASTER_RE.fullmatch(spec)
+        if m is None or int(m.group(2)) < 2:
+            raise ValueError(f"RASTER: expected gm<G> / gn<G> with G >= 2 (or empty for the flat order), got {spec!r}")
+        return cls(orient=m.group(1), group=int(m.group(2)))
+
+    def spell(self) -> str:
+        """The ``RASTER`` codec string (inverse of :meth:`parse`)."""
+        return f"g{self.orient}{self.group}"
+
+
+_RASTER_RE = re.compile(r"g([mn])(\d+)")
+
+
 __all__ = [
     "AtomKind",
     "Emit",
@@ -903,6 +937,7 @@ __all__ = [
     "ReducePlan",
     "ReduceStage",
     "RoleAlloc",
+    "Raster",
     "RoleKind",
     "Schema",
     "Stage",

@@ -70,7 +70,7 @@ def test_schedule_leaf_set_equals_catalog():
       split-K (``_splitk_option`` re-resolves against the sliced inner node and ``030_split`` threads
       the stage onto the partial).
     """
-    from emmy.compiler.pipeline.search.space import coop_reduce_moves, splitk_moves
+    from emmy.compiler.pipeline.search.space import coop_reduce_moves, raster_moves, splitk_moves
 
     rows: list[dict] = []
 
@@ -119,7 +119,11 @@ def test_schedule_leaf_set_equals_catalog():
         assert splits == set(splitk_moves(warp=False)), f"{tile_spec}: {splits}"
         split_stages = {str(family_value(r, "STAGE")) for r in tiled if family_value(r, "REDUCE")}
         assert split_stages == stages, f"{tile_spec}: split rows must carry the same stage spellings"
-        assert len(tiled) == len(stages) * n_reduces, f"{tile_spec}: {len(tiled)} rows"
+        # Every contraction row also spells the launch-order codec (``RASTER``, bare/root-global) —
+        # the flat ``""`` and the grouped ``gm8`` siblings, crossing the whole (stage × reduce)
+        # product; the fifth factor of the catalog.
+        assert {r.get("RASTER") for r in tiled} == set(raster_moves()), f"{tile_spec}: RASTER family incomplete"
+        assert len(tiled) == len(stages) * n_reduces * len(raster_moves()), f"{tile_spec}: {len(tiled)} rows"
 
 
 def test_schedule_leaves_key_tile_by_contraction_axis():

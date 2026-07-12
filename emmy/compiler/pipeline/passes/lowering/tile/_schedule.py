@@ -44,7 +44,7 @@ from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-from emmy.compiler.ir.schedule import Stage, WarpSpec, has_scalar_atom_alias, is_warp_codec
+from emmy.compiler.ir.schedule import Raster, Stage, WarpSpec, has_scalar_atom_alias, is_warp_codec
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.tile import Contraction, Map, Placement, ReducePlan, Reduction, TileOp, TilePlan
@@ -56,6 +56,7 @@ from emmy.compiler.pipeline.pipeline import LoweringError
 from emmy.compiler.pipeline.search.space import (
     F16_MMA_F32_ACC,
     MAX_BLOCK_THREADS,
+    RASTER,
     REDUCE,
     STAGE,
     TILE,
@@ -63,6 +64,7 @@ from emmy.compiler.pipeline.search.space import (
     coop_reduce_moves,
     map_tile_moves,
     precision_pin,
+    raster_moves,
     scalar_tile_moves,
     splitk_moves,
     stage_moves,
@@ -506,6 +508,21 @@ def _reduce_candidates(kernel, place, plan: TilePlan, probe: Contraction | None 
     return out
 
 
+def _raster_candidates(place) -> list[str]:
+    """The ``RASTER`` codec candidates for one contraction row — every matmul-tier output is a
+    2-D block-tile grid, so eligibility here is the grid's STATIC-ness (the reduce/pointwise
+    tiers never build these rows; the flash fork spells its own key set and stays flat). A
+    symbolic-axis (masked-tile) grid renders through the dynamic decode path, which does not
+    carry the swizzle yet — offering ``gm8`` there would stamp a launch order the kernel doesn't
+    realize (the silent-degrade family), so a symbolic grid decides the flat ``""`` only; an
+    explicit pin on one degrades likewise and the replay integrity gate reports it. The env pin
+    narrows as usual on static grids (``EMMY_RASTER=gm8`` / ``gn4`` — pins may spell values
+    outside :func:`raster_moves`)."""
+    if any(not ax.extent.is_static for ax in place.free):
+        return [""]
+    return list(RASTER.narrow(raster_moves()))
+
+
 def _wspec_candidates(plan: TilePlan, stage_spelling: str, red: str) -> list[str]:
     """The ``WSPEC`` candidates for one enumerated (tile, stage, reduce) row — uniform ``""``
     alone unless the row can drive a producer band: a warp tile over a resolved **TMA** stage
@@ -589,7 +606,17 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], str]:
                 # evidence pick's prefix-consistency depends on it: an absent key reads as
                 # "free" and would let a gmem-direct leaf inherit a staged row's measurement.
                 for wspec in _wspec_candidates(plan, stage, red):
-                    rows.append({_at(TILE, kaxis): spec, _at(STAGE, kaxis): stage, _at(REDUCE, kaxis): red, WSPEC.name: wspec, **stamp})
+                    for raster in _raster_candidates(place):
+                        rows.append(
+                            {
+                                _at(TILE, kaxis): spec,
+                                _at(STAGE, kaxis): stage,
+                                _at(REDUCE, kaxis): red,
+                                WSPEC.name: wspec,
+                                RASTER.name: raster,
+                                **stamp,
+                            }
+                        )
     rows += [{**r, **stamp} for r in demoted_rows]
     return rows, kaxis
 
@@ -1289,6 +1316,12 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
             # ``evidence_pick`` never joined the measured -O3 rows, and greedy shipped the learned
             # model's unbenched per-cell extrapolation (the 2026-07-07 5090 gate's 330x fp16 miss).
             op_knobs = {**knobs, **{k: v for k, v in row.items() if k.startswith("S_")}}
+            # The rasterization codec rides op-level knobs (kernel-scoped launch-order metadata,
+            # not a per-node schedule structure) — the kernel materializer's ``grid_tile`` seal
+            # reads it back off the TileOp and stamps the grouped decode on the ``Tile``.
+            raster_spec = row.get(RASTER.name, "")
+            Raster.parse(raster_spec)  # loud pin contract — a malformed spelling fails the row here
+            op_knobs = {**op_knobs, RASTER.name: raster_spec}
             if red and ReducePlan.parse(red).needs_split:
                 return _splitk_option(tile, place, spec, red, name, op_knobs, stage_spec, _smem_budget(ctx))
             if is_warp_codec(spec):
@@ -1302,8 +1335,9 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
             return Level((key,), key=lambda r: (r.get(key, ""),))
 
         # The worker split (``WSPEC``, bare/root-global) is the fourth level, under the pipeline it
-        # splits — option-0 ``""`` is uniform SIMT.
-        levels = [_level(_at(k, kaxis)) for k in (TILE, STAGE, REDUCE)] + [_level(WSPEC.name)]
+        # splits — option-0 ``""`` is uniform SIMT. The launch-order codec (``RASTER``, also bare —
+        # one grid, one order) is the fifth — option-0 ``""`` is the flat N-fastest raster.
+        levels = [_level(_at(k, kaxis)) for k in (TILE, STAGE, REDUCE)] + [_level(WSPEC.name), _level(RASTER.name)]
         return build_fork_tree(params=rows, levels=levels, materialize=_materialize)
     # A TWISTED streaming reduce whose per-step partial is a contraction pair (the flash tree,
     # :func:`_twisted_pair`) offers its structurally-different schedules as ONE prior-ranked fork:

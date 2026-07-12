@@ -7,10 +7,11 @@ WSPEC fills), all benched live against the recorded golden rows and the eager/cu
 6 waves + 2 confirmation passes per winner, ~120 pinned variant benches total, ~3 h wall. Repo @ `main`
 `dfdc67a2`; logs and per-batch tables under `_tune/manual-golden-5090/`.
 
-**Tally:** **9 fast-math `[fm]` entries added** (square.2048, square.4096 parity-add, qkv.dynM, o_proj ±dynM,
-mlp_gate_up ±dynM, mlp_down ±dynM) / **2 standard-lane parity adds** (mlp_gate_up ±dynM) / **9 `REDUCE: ''`
-stamps** on under-specified entries / 0 replacements / all other incumbents confirmed best-known (square.512
-fp32+fp16, square.1024, square.512.dynM, qkv static, attention untouched, memory-bound kinds untouched).
+**Tally:** **10 fast-math `[fm]` entries added** (square.512.fp16, square.2048, square.4096 parity-add,
+qkv.dynM, o_proj ±dynM, mlp_gate_up ±dynM, mlp_down ±dynM) / **2 standard-lane parity adds** (mlp_gate_up
+±dynM) / **10 `REDUCE: ''` stamps** on under-specified entries / 0 replacements / all other incumbents
+confirmed best-known (square.512 fp32, square.1024, square.512.dynM, qkv static, attention untouched,
+memory-bound kinds untouched).
 
 ## Headline — one tile family beats cuBLAS by 1.4–1.6× across the warp-tier set (FAST_MATH lane)
 
@@ -51,15 +52,21 @@ Nothing else in the standard lane beat its incumbent beyond noise.
 
 `emmy eval analytic` on the updated goldens ranks **every new entry at rank 0** (median 0, top-1 27/28) — the
 post-#347 analytic prior prices the big-tile f16acc family correctly, so the cold ranking is NOT the blocker.
-The prime suspect is the **`-Xcicc -O1` tune ranking lane**: big register tiles are exactly the
-cicc-unroll-sensitive class the -O1 lane exists to dodge (CLAUDE.md's "-O1 dodges the cicc/LLVM unroll blowup
-on big register-tile kernels"), so their -O1 medians plausibly rank so deep that the `EMMY_O3_TOL` band never
-grants them a deployable -O3 rebench — an *systematic anti-correlation* for this family, not noise.
-**Recommendation (high priority): verify by benching `w4x2/f4x8/k4` f16acc at -O1 on one shape; if confirmed,
-the -O3 rebench band needs a family-aware floor (always rebench the top-K per (atom, tile-size) bucket, not
-just the global -O1 top band).** The learned prior inherits the censoring either way — after merging, re-run
-`scripts/golden_knob_heuristics.py` and retrain so both halves see the region (the node store now has no
-measurements there at all; the goldens seed it).
+The culprit is the **`-Xcicc -O1` tune ranking lane, CONFIRMED by direct measurement**: replaying the recorded
+entries under `EMMY_NVCC_FLAGS="-Xcicc -O1"`, the big-tile fm config is **5.1× slower than the standard golden
+on mlp_down** (2008 vs 392 µs) and **4.7× slower on square.2048** (591 vs 126) — the same configs that are
+~32% *faster* at -O3. cicc at -O1 doesn't schedule the big unrolled register tiles (the very blowup the -O1
+test lane exists to dodge), so the family ranks dead last in the tune's -O1 ordering and the `EMMY_O3_TOL`
+band never grants it a deployable -O3 rebench. A ~5× *systematic inversion*, not noise.
+**Recommendation (high priority): the -O3 rebench band needs a family-aware floor — always rebench the top-K
+per (atom, tile-size) bucket, not just the global -O1 top band** (or rank the widest register tiles on -O3
+directly). The learned prior inherits the censoring either way; the node store has no measurements in the
+region, and the goldens now seed it.
+
+**Analytic refit: attempted and REJECTED.** Per the skill, `scripts/golden_knob_heuristics.py --out
+<candidate>` was re-run over the updated goldens; the candidate A/B'd worse than the checked-in weights
+(`eval analytic --analytic-file`: top-1 20/28 vs 27/28, `mlp_down.h4096.dynM` std dropping to rank 3449).
+The current `analytic_weights.json` already ranks all new entries #0, so it stands unchanged.
 
 ## Finding 2 — `REDUCE` is the fourth unpinned-family drift; every matmul entry now stamps it
 
@@ -71,13 +78,17 @@ session's replays); post-stamp the file replays clean end to end. The recorder-s
 schedule family at record time) remains open and is now urgent for the other card files — this is the fourth
 occurrence of the class.
 
-## Finding 3 — `square.512.dynM [fm]` replays 17% off its recorded value (left unrecorded, needs re-validation)
+## Finding 3 — `square.512.dynM [fm]` replay drift RESOLVED: another `REDUCE` fill, now stamped
 
-The recorded fm entry (3.6 µs) replayed at 4.2 total (3.2 + a 1.0 finalize row from a `REDUCE` fill — it also
-lacks the key), and the std entry (recorded 6.14) replayed at 4.5. Both swings sit inside the small-shape
-noise band (~10–13%+ on 3–6 µs kernels) and the fm entry still wins live, so nothing was changed — but this
-shape needs a dedicated multi-pass re-validation before its `emmy_us` values are trusted, and its fm entry
-needs the `REDUCE` stamp decision (recorded value may include a fill finalize).
+The recorded fm entry (3.6 µs) replayed at 4.2 total because the unpinned `REDUCE` drifted into a `g2k` fill
+(3.2 main + 1.0 finalize). With `REDUCE=` pinned off it benches **3.6–3.7 across 4 passes — exactly its
+recorded value**: the fm2 sweep measured it un-split, and the fill drift is Finding 2's class again. The entry
+is now stamped `REDUCE: ''` and replays true. (The std entry's recorded 6.14 vs live 4.5 remains a
+small-shape stale-`emmy_us` oddity — the config is unchanged and still golden, left as is.)
+
+Bonus small-shape coverage: `square.512.fp16` (static) gained its first `[fm]` entry — the atom-swap of its
+standard golden (`f16_f16/w1x8/f4x1/k4 g2k d3/tma/ring`) at **3.9 total vs the standard's live 4.4** (0.89×,
+1.57× vs cuBLAS), 3× reproduced at zero spread — mirroring the dynM twin's existing fm win.
 
 ## Finding 4 — deploy-side confirmations (audit follow-ups, not this task's scope)
 

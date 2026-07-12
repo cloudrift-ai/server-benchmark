@@ -20,6 +20,18 @@ configs:
     knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'g2k', STAGE: 'd3/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k4', VECTORIZE_LOADS: true, WSPEC: ''}
     emmy_us: 4.2
     cublas_us: 6.14
+  # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): atom-swap of the standard golden. 3.9 µs
+  # total (3.0 main + 0.9 finalize) vs the standard golden's live 4.4 (0.89x), 1.57x vs cuBLAS HGEMM.
+  # 2026-07-12 manual sweep, 3x reproduced at zero spread. Kept beside the standard entry.
+  - kernel: matmul
+    name: matmul.square.512.fp16
+    M: 512
+    N: 512
+    K: 512
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f4x1/k4', REDUCE: 'g2k', STAGE: 'd3/tma/ring', WSPEC: ''}
+    emmy_us: 3.9
+    cublas_us: 6.14
   - kernel: matmul
     name: matmul.square.1024
     M: 1024
@@ -98,6 +110,8 @@ configs:
     cublas_us: 6.14
   # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): 3.6 µs vs the standard golden's live
   # 4.2 (0.86x, reproduced 3x). Kept beside the standard entry — gate-off compiles can't reach it.
+  # 2026-07-12: REDUCE stamped '' — unpinned, the fill drifted the replay to a g2k split (3.2 + 1.0
+  # finalize = 4.2); with REDUCE pinned off it replays at its recorded 3.6 (4x reproduced).
   - kernel: matmul
     name: matmul.square.512.dynM
     M: 512
@@ -105,7 +119,7 @@ configs:
     K: 512
     dtype: 'fp16'
     dynamic: true
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f2x2/k8', VECTORIZE_LOADS: true, WSPEC: ''}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: '', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f2x2/k8', VECTORIZE_LOADS: true, WSPEC: ''}
     emmy_us: 3.6
     cublas_us: 6.14
   - kernel: matmul

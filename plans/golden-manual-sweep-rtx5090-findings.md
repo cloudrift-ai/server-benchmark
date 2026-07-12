@@ -158,6 +158,36 @@ were left). Setup notes for the skill: fresh CloudRift Ubuntu images need `pytho
 `python3.12-dev` apt packages, `make setup` must be re-run after `rm -rf venv` (it no-ops on an existing
 venv), and `/usr/local/cuda/bin` is not on the non-interactive ssh PATH.
 
+## 4090 codegen investigation — the gap to cuBLAS is B-operand DRAM double-streaming (grid rasterization)
+
+NCU + ptxas + SASS on the gate_up fm winner vs cuBLAS HGEMM on the identical shape (rented 4090, sudo NCU):
+
+| metric | emmy fm (`w4x1/f4x8/k2 d2/cp/ring`) | cuBLAS |
+| --- | --- | --- |
+| DRAM bytes | **503.6 MB** | 365.8 MB |
+| L2 hit rate | 80.2% | 85.4% |
+| Memory / SM throughput | **72.7% / 46.6%** | 52.8% / 48.5% |
+| registers (ptxas) | 250, **zero spills** | (std twin: 207, zero spills) |
+
+The GEMM's traffic floor is 268.9 MB (A 4.2 + B 235.2 + C 29.4). emmy's 503.6 = **A + C + B exactly twice**
+(504.0 predicted) — the B operand streams from DRAM once per M-row of CTAs. Root cause, read off the emitted
+kernel: the CTA grid is a flat `_gid` with the **N-tile index fastest-varying** (`a0_b = gid/57344`,
+`a1_b = (gid/128)%448`) — all 448 N-tiles of M-row 0 launch before any of M-row 1, so each 512 KB B slab's
+second read arrives ~448 CTAs later, L2-cold. emmy has **no grid rasterization** (every "swizzle" in the
+codebase is smem-level); the flat-gid decomposition is emitted in `ir/kernel/ir.py` from the tile
+`Placement`'s axis order. cuBLAS's threadblock swizzle keeps same-B CTAs concurrent, hence its 365.8 MB.
+
+Killed hypotheses: NOT register spills (250 regs, zero spill bytes — spills only appear on the 255-reg big
+tile, confirming why THAT loses), NOT issue-slot overhead (SM at 46.6% is not the wall; the 109-IMAD-per-64-
+HMMA static mix is secondary), NOT a blocked knob (d1/d3/k4/p2/splits all measured and lose).
+
+**Recommendation (priority 1, helps every card + both lanes): a GROUP_M-style CTA rasterization** — decompose
+`_gid` so a group of M-tiles iterates fastest (CUTLASS threadblock-swizzle class); pure index arithmetic in
+the grid decomposition, no memory-layout change. Removing the redundant 235 MB puts gate_up at the ~269 MB
+floor → memory time ~0.53×, flipping the kernel compute-bound — estimated 15–30% on this shape, likely past
+cuBLAS (and the same double-stream exists in the 5090's wide-N shapes; its bigger pipe just hides it better).
+Secondary: cp.async address CSE (frees registers toward the N=128 tile sm_89 can't currently afford).
+
 ## Workflow notes
 
 - **The `--ab` A/B harness is excellent for manual sweeps**: ~8–12 pinned variants per invocation, live golden

@@ -137,6 +137,36 @@ the trustworthy number; the recorded values are not.
 **Recommendation.** A full `emmy_us` refresh of `rtx4090_sm89.yaml` from this sweep's -O3 A/B (the recorded values
 drift across codegen changes); and a bisect of the `square.1024` fp32 regression (55.4 → 57.9 best-achievable).
 
+## FAST_MATH / f16-accumulate on the 4090 — situational (loses on squares, wins on K-heavy)
+
+`EMMY_FAST_MATH=1` enables the f16-accumulate mma atom (`mma_m16n8k16_f16_f16` — f16-accum at full HMMA rate with
+periodic f32-shadow promotes, ~2× the mma-chain rate on consumer dies). Freshly re-measured on a rented 4090 @
+latest `main`, same-tile atom-only A/Bs (f16-accum vs f32-accum at a *fixed* tile, isolating the atom):
+
+| shape (matched tile) | f16-accum µs | f32-accum µs | verdict |
+| --- | --- | --- | --- |
+| `square.2048.fp16` (`w1x4/f4x4`) | 124.0 | 120.2 | **loses −3.1 %** |
+| `square.4096.fp16` (`w1x4/f4x4`) | 941.1 | 919.5 | **loses −2.3 %** |
+| K-heavy `512²×8192` (`w2x1/f4x4`) | 164.5 | 180.8 | **wins +9.9 %** |
+| K-heavy `256²×16384` (`w2x1/f4x4`) | 326.7 | 357.4 | **wins +9.4 %** |
+| gemma `down_proj` `512×15360@15360×3840` (`w2x1/f4x4`) | 975.9 | 993.2 | **wins +1.8 %** |
+
+**It loses on the fp16 squares** (large output tiles → the `FragmentPromote` f32 shadows inflate registers →
+crush occupancy) but **wins ~+9–10 % on K-heavy, small-output-tile shapes** — where the small output stays
+register-light and the deep K keeps the kernel mma-bound, so the 2× mma-chain rate shows through. The gemma
+`down_proj` (K=15360) picks up a real, if modest, **+1.8 %**.
+
+**The K-heavy win is the same size on the 4090 as on the 4080 (~+9 %)** — it does **not** shrink on the bigger
+card. (An earlier one-off probe during the #339 comparison run had clocked the K-heavy shape at an anomalous
+~68 µs and read the win as +0.2 %; freshly re-measured here across five shapes at the reliable ~165 µs, the win is
++9.9 %. The "more SMs → underfill → win vanishes" idea does not hold up.)
+
+**Bottom line, unchanged from the 4080:** correctly **off by default** (a blanket `FAST_MATH` slows the fp16
+squares), and worth flipping on only for genuinely mma-bound, register-light kernels — deep-K reductions with
+small output tiles, of which the golden matmul set has none that benefit, though a real model's `down_proj`-class
+K-reductions do (marginally). It's an **atom eligibility** (`_f16acc_allowed`) + register mechanism, not a search
+outcome — so this is independent of the prior. Data: `_tune/fm-4090/*.json`.
+
 ## Repro / artifacts
 
 - Work dir `_tune/golden-full-4090/`: `ab/*.json` (43 shapes + noise-floor passes), `eval/*.txt` (the 7 views),

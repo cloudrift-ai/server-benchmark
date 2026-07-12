@@ -482,6 +482,21 @@ configs:
     knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, PLACE: 'fuse', STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', VECTORIZE_LOADS: true, WSPEC: ''}
     emmy_us: 8.6
     cublas_us: 10.24
+  # Fast-math sibling (FAST_MATH lane): the P·V contraction (TILE@pj) on the f16-accumulate atom;
+  # QK^T (TILE@dd) stays f32-acc — it feeds the online-softmax statistics (the dd f16acc pin is
+  # refused by the flash form narrowing, correctly). 7.2 µs vs the standard golden's live 8.3
+  # (0.87x), 1.39x vs torch SDPA. 2026-07-12 manual sweep, 3x reproduced at zero spread; accuracy
+  # vs torch passes. Kept beside the standard entry.
+  - kernel: attention
+    name: attention.hd64
+    n_heads: 8
+    seq: 512
+    head_dim: 64
+    dtype: 'fp16'
+    causal: false
+    knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x8/k8', WSPEC: ''}
+    emmy_us: 7.2
+    cublas_us: 10.24
   - kernel: attention
     name: attention.hd128
     n_heads: 8
@@ -491,6 +506,21 @@ configs:
     causal: false
     knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, PLACE: 'fuse', STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w2x1/f1x16/k4', VECTORIZE_LOADS: true, WSPEC: ''}
     emmy_us: 16.5
+    cublas_us: 18.42
+  # Fast-math sibling (FAST_MATH lane): P·V on the f16-accumulate atom, QK^T stays f32-acc (softmax
+  # statistics). 14.6 µs vs the standard golden's live 16.4 (0.89x), 1.26x vs torch SDPA. 2026-07-12
+  # manual sweep, 3x reproduced at zero spread; accuracy vs torch passes. Kept beside the standard
+  # entry. NOTE: the dynM twins cannot record an fm sibling today — the masked-flash path only takes
+  # a bare TILE (schema-enforced), and a bare f16acc TILE pin degrades to the scalar fallback.
+  - kernel: attention
+    name: attention.hd128
+    n_heads: 8
+    seq: 512
+    head_dim: 128
+    dtype: 'fp16'
+    causal: false
+    knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w2x1/f1x16/k4', WSPEC: ''}
+    emmy_us: 14.6
     cublas_us: 18.42
   - kernel: attention
     name: attention.hd64.dynM

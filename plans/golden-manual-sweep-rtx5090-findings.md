@@ -7,11 +7,11 @@ WSPEC fills), all benched live against the recorded golden rows and the eager/cu
 6 waves + 2 confirmation passes per winner, ~120 pinned variant benches total, ~3 h wall. Repo @ `main`
 `dfdc67a2`; logs and per-batch tables under `_tune/manual-golden-5090/`.
 
-**Tally:** **10 fast-math `[fm]` entries added** (square.512.fp16, square.2048, square.4096 parity-add,
-qkv.dynM, o_proj ±dynM, mlp_gate_up ±dynM, mlp_down ±dynM) / **2 standard-lane parity adds** (mlp_gate_up
-±dynM) / **10 `REDUCE: ''` stamps** on under-specified entries / 0 replacements / all other incumbents
-confirmed best-known (square.512 fp32, square.1024, square.512.dynM, qkv static, attention untouched,
-memory-bound kinds untouched).
+**Tally:** **12 fast-math `[fm]` entries added** (square.512.fp16, square.2048, square.4096 parity-add,
+qkv.dynM, o_proj ±dynM, mlp_gate_up ±dynM, mlp_down ±dynM, attention.hd64, attention.hd128) / **2
+standard-lane parity adds** (mlp_gate_up ±dynM) / **10 `REDUCE: ''` stamps** on under-specified entries / 0
+replacements / all other incumbents confirmed best-known (square.512 fp32, square.1024, square.512.dynM,
+qkv static, memory-bound kinds untouched).
 
 ## Headline — one tile family beats cuBLAS by 1.4–1.6× across the warp-tier set (FAST_MATH lane)
 
@@ -90,7 +90,23 @@ Bonus small-shape coverage: `square.512.fp16` (static) gained its first `[fm]` e
 standard golden (`f16_f16/w1x8/f4x1/k4 g2k d3/tma/ring`) at **3.9 total vs the standard's live 4.4** (0.89×,
 1.57× vs cuBLAS), 3× reproduced at zero spread — mirroring the dynM twin's existing fm win.
 
-## Finding 4 — deploy-side confirmations (audit follow-ups, not this task's scope)
+## Finding 4 — attention: PV-only f16acc wins ~11–13% on the static shapes; the masked-flash path can't record it
+
+Swapping only the P·V contraction (`TILE@pj`) to the f16-accumulate atom — QK^T stays f32-acc for the
+online-softmax statistics — wins on both static attention goldens: **hd64 7.2 vs 8.3 (0.87×, 1.39× vs torch
+SDPA)** and **hd128 14.6 vs 16.4 (0.89×, 1.26×)**, each 3× reproduced at zero spread, accuracy vs torch
+passing. Both recorded as `[fm]` entries. The both-contractions swap is refused by the flash form narrowing
+(the dd pin realizes f32-acc, integrity-flagged) — correct behavior, softmax stats need f32.
+
+**The dynM twins cannot record the same win**: dynamic attention goldens are schema-required to record a
+single bare `TILE` (the masked-flash pin doesn't resolve `TILE@<axis>`), and a bare f16acc `TILE` pin
+degrades to the **scalar fallback** (18.5 ms / 9.7 ms — the flatten pathology). So the f16acc PV sibling is
+unreachable on the masked-flash path both by pin and (presumably) by search. **Recommendation:** teach the
+masked-flash form narrowing to accept the f16acc atom on its PV contraction (or make the bare-TILE pin
+resolve per-contraction atoms), then mirror the two static wins to hd64.dynM / hd128.dynM — the deployable
+artifacts models actually run.
+
+## Finding 5 — deploy-side confirmations (audit follow-ups, not this task's scope)
 
 Greedy deployed above the golden on nearly every shape this session (qkv 279.7 vs 259.1, qkv.dynM 273.8 vs
 251.6, mlp_down 305–311 vs 295, gate_up 633–636 vs 616, downdyn 340 vs 297), with repeated disjoint-evidence

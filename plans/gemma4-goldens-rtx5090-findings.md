@@ -41,8 +41,8 @@
 | mlp_gate_up.dynM | same | 562.4 | 561.7 | 1.00× |
 | mlp_down | `w4x2/f2x4/k2 g4k d2/tma/ring` | 286.2 | 286.3 | 1.00× |
 | mlp_down.dynM | same | 286.2 | 286.3 | 1.00× |
-| attention.hd256 | `dd w4x1/f1x2/k16, pj w4x1/f1x32, d2/tma/ring` | 35.6 | 30.7 | **0.86×** |
-| attention.hd256.dynM | bare `w4x1/f1x2/k16, d2/tma/ring` | 36.4 | 30.7 | **0.84×** |
+| attention.hd256 | `dd w4x1/f1x4/k16, pj w4x1/f1x32/k2, d2/tma/ring` (nt=4 alt) | 34.8 | 30.7 | **0.88×** |
+| attention.hd256.dynM | bare `w4x1/f1x4/k16, d2/tma/ring` (nt=4 alt) | 35.5 | 30.7 | **0.86×** |
 | rms_norm.k3840 (+dynM) | `b256` | 6.3 | 6.1 | 0.97× |
 | qknorm.k256 | `b64` | 3.6 | 4.1 | **1.14×** |
 
@@ -85,8 +85,14 @@ recorded, and at parity with the masked twin (36.4)**. Two separate things had m
    were a no-match. Proposal stands from the 4090 report: a pin matching no offered row should FAIL rather
    than fall back with a flag, and an `emmy eval offer` view would have shown the w4x1 rows immediately.
 
-Torch SDPA is 30.7 µs; all four recorded entries now sit at 0.84–0.86× — the residual is the known hd256
-register-pressure codegen gap (255 regs), not search.
+Torch SDPA is 30.7 µs; the best recorded entries now sit at 0.86–0.88× — the residual is the known hd256
+register-pressure codegen gap (255 regs), not search. A follow-up exhaustion pass over the remaining flash
+knob space confirmed the frontier: the **nt=4 streaming block** (32 keys/step) is a consistent zero-spread
+~2.3% win over nt=2 on the std lane (static 34.8, dynM 35.5 — recorded as parity alternates beside the nt=2
+entries per the 3% gate), while every other direction loses or breaks — nt=8 fattens to 60 µs, the f2
+query-tile ILP forms spill (127–135 µs), the WSPEC producer bands **nvcc-fail** on this kernel (compile
+error, not a degrade), and FAST_EXP / d3 / d4 / p2 are neutral. Attention is the file's one sub-parity
+kernel and it is codegen-bound; every matmul entry is at or past cuBLAS and the norms sit at 0.97–1.14×.
 
 ## Finding 2 — the K/V transport preference is slab-size- and lane-dependent, not "cp beats tma"
 

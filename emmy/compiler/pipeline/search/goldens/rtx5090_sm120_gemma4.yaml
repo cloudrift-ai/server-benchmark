@@ -236,6 +236,20 @@ configs:
     knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32', WSPEC: ''}
     emmy_us: 35.6
     cublas_us: 30.7
+  # Parity alternate (2.2% under the nt=2 entry, within the 3% add gate; zero-spread both sides): the
+  # nt=4 streaming block (32 keys/step, 32 KB slabs). The knob frontier ends here — nt=8 fattens to
+  # 60 µs, f2 query-tile ILP spills to 127-135 µs, WSPEC bands nvcc-fail on this kernel, FAST_EXP /
+  # d3 / p2 neutral. The 0.88x residual vs torch SDPA is codegen (255 regs), not search.
+  - kernel: attention
+    name: gemma4_12b.attention.hd256
+    n_heads: 16
+    seq: 512
+    head_dim: 256
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x4/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k2', WSPEC: ''}
+    emmy_us: 34.8
+    cublas_us: 30.7
   # Fast-math sibling (FAST_MATH lane): P·V on the f16-accumulate atom, QK^T stays f32-acc (softmax
   # statistics). Rides cp, not tma (36.5 vs 38.8 — the lane-flipped transport preference above).
   # FAST_EXP adds nothing on top.
@@ -263,6 +277,19 @@ configs:
     dynamic: true
     knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', WSPEC: ''}
     emmy_us: 36.4
+    cublas_us: 30.7
+  # Parity alternate (2.5% under the nt=2 entry, zero-spread): the nt=4 streaming block, mirroring
+  # the static twin's alternate.
+  - kernel: attention
+    name: gemma4_12b.attention.hd256.dynM
+    n_heads: 16
+    seq: 512
+    head_dim: 256
+    dtype: 'fp16'
+    causal: true
+    dynamic: true
+    knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x4/k16', WSPEC: ''}
+    emmy_us: 35.5
     cublas_us: 30.7
   # Fast-math sibling: the bare TILE spells the f16-accumulate PV plan (the w4x1 form's realized
   # TILE@pj geometry, w4x1/f1x32); scores stay f32-acc. Pinning the f16acc atom at the dd spelling

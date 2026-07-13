@@ -17,7 +17,7 @@ eligibility, the ``_COOP_*`` constants) stays with the scheduler in
 
 Three groups:
 
-- **Schedule codec knobs** (``REDUCE`` / ``TILE`` / ``STAGE`` / ``WSPEC``) — the tile-lowering schedule
+- **Schedule codec knobs** (``REDUCE`` / ``TILE`` / ``STAGE`` / ``WSPEC`` / ``RASTER``) — the tile-lowering schedule
   fork points that spell the ir schedule codecs (:mod:`emmy.compiler.ir.schedule`). Decided in
   the ``_schedule`` helper inside ``lowering/tile/010_recognize`` and materialized in
   ``lowering/kernel/010_materialize``. Each is the **ephemeral** codec spelling: it resolves into a
@@ -121,6 +121,47 @@ def wspec_moves() -> list[str]:
     stage, the ``block_threads + 32·aux ≤ 1024`` and ``32·aux ≤ block_threads`` thread budgets) is
     the scheduler's (``_schedule._wspec_candidates`` / ``_wspec_workers``)."""
     return ["", "p1", "p2"]
+
+
+def _raster_features(val) -> dict[str, float]:
+    """The ``RASTER`` sub-features for the priors — the stripe group size (``0.0`` = the flat
+    N-fastest order) and the orientation flag (``1.0`` = ``gn``, the transposed grouping)."""
+    if not val:
+        return {"D_raster_group": 0.0, "D_raster_gn": 0.0}
+    from emmy.compiler.ir.schedule import Raster  # noqa: PLC0415 — same deferred pattern as _wspec_features
+
+    try:
+        r = Raster.parse(str(val))
+    except ValueError:
+        return {"D_raster_group": 0.0, "D_raster_gn": 0.0}
+    if r is None:
+        return {"D_raster_group": 0.0, "D_raster_gn": 0.0}
+    return {"D_raster_group": float(r.group), "D_raster_gn": 1.0 if r.orient == "n" else 0.0}
+
+
+RASTER = Knob(
+    "RASTER",
+    KnobType.STR,
+    help="CTA rasterization codec — the launch-order mapping of flat CTA ids onto the 2-D "
+    "(m, n) block-tile grid (gm<G>: G M block-tiles iterate fastest per stripe, L2 reuse of the "
+    "streamed B operand; gn<G>: the transpose, A streamed; empty = flat N-fastest row-major). "
+    "Kernel-scoped like WSPEC (no @<axis> key); changes no per-CTA work or layout, only the "
+    "block-id decode. Decided in lowering/tile/010_recognize (the _schedule row product), applied "
+    "at the kernel materializer's grid_tile seal; 2-D-tiled contraction grids only.",
+    features=_raster_features,
+    off="",
+)
+
+
+def raster_moves() -> list[str]:
+    """The ``RASTER`` codec candidates — the flat order ``""`` first (the conservative option-0,
+    byte-identical to the historical codegen), then the CUTLASS/Triton-conventional grouped-M
+    stripe of 8. Wall-time effect is shape-dependent and small (±2–4% measured on sm_89:
+    qkv −4%, gate_up fm +2.4%, most shapes neutral) while DRAM traffic on wide-N shapes halves
+    (503.6 → 261.6 MB on mlp_gate_up, the theoretical floor) — so the family is enumerated for
+    the search/goldens to arbitrate per shape, never a blanket policy. ``gn<G>`` spellings are
+    pin-only until a shape wants them."""
+    return ["", "gm8"]
 
 
 def map_tile_moves() -> list[str]:

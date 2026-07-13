@@ -1,5 +1,45 @@
 # Gemma-4-12B layer-0 tune findings — RTX 4090 (sm_89), dynamic
 
+> ## CURRENT STATE — 2026-07-11 re-run on `main` `cbc9805d` (#347; post-#342 o_proj fix + #347 analytic-prior rework)
+>
+> The detailed analysis further below is the **pre-#342 (#338) state**; its headline o_proj scalar misdeploy (48%
+> of the layer) is **FIXED by #342**. A fresh full `emmy tune google/gemma-4-12B --layer 0 --dynamic seq_len@x:1
+> --clean --bench` on a rented 4090 (autotune 2 751 s, torn down after) gives:
+>
+> **E2E** (benched at the seq_len=512 symbolic hint): Eager **1 774 µs** / torch.compile 1 553 / **Emmy 4 782 µs =
+> 0.37×** (2.7× behind). Down from **pre-#342's 8.07 ms** (the o_proj fix) *and* from the **#339 run's 5.41 ms** —
+> #347's new analytic prior improved the non-tier-locked deploy picks by ~12% (the tier-locked megakernel is
+> unchanged, so the gain is elsewhere).
+>
+> | Backend | µs | vs eager |
+> | --- | --: | --: |
+> | Eager PyTorch | 1 774 | 1.00× |
+> | torch.compile | 1 553 | 1.14× |
+> | **Emmy** | **4 782** | **0.37×** |
+>
+> **Per-kernel** (-O3 reproducer): `k_linear_mean_reduce` **2 283 µs ≈ 48%** (fused RMSNorm→gate_up MLP megakernel,
+> no eager ref) · `k_linear_reduce` 844 (down_proj, 0.45×) · `k_mean_linear_reduce` 833 (0.76×) ·
+> `k_linear_sdpa_reduce` 345 (0.44×) · `k_scaled_dot_product_attention_reduce` 60 (0.71×) · pointwise/mean/slice
+> 2–6 µs (14–32× wins). bench_fails: 6 "exceeded 2.0s" + 5 hung + 1 compile-budget.
+>
+> **The bottleneck is now the two compiler TIER LOCKOUTS (architectural — unchanged by #342/#347, and identical to
+> the 4080 gemma report's Findings 1–2):**
+> - **Fused gate_up megakernel locked to `d1/sync`** — **64/65** measured configs are `d1/sync`; cp.async
+>   pipelining is refused because the matmul's A-operand is the on-chip-computed normalized RMSNorm row. tune-DB
+>   -O3 2 141 ≈ reproducer 2 283 (real). #347's prior can't touch this — it's a lowering gate, not a ranking.
+> - **down_proj on a smem-LESS schedule** — `k_linear_reduce_f1b366` deploys `w2x2/f4x4`, **blank STAGE / 0 smem**,
+>   -O3 1 192 µs (0.45× eager); no tiling → no cp.async. The q/k projections deploy `d1/sync`.
+>
+> **4080 vs 4090:** same tier lockouts (architectural, both sm_89), ~1.6× faster absolute (megakernel 2 283 vs the
+> 4080's 7 582 µs — though the 4080 total was also bench-artifact-inflated). The **degenerate-fast tune-DB rows
+> reproduce** here (`k_mean_linear_reduce` tune-DB **3–6 µs** vs reproducer **202–833 µs**) — systemic on both
+> cards — but the layer-bench **inflation is milder** on the 4090 (reproducer `k_mean_linear_reduce` 833 ≈ eager
+> 633, vs the 4080's 2 189 = 2× eager).
+>
+> **Fix priorities (unchanged, help both cards):** (1) per-operand cp.async transport for the fused megakernel —
+> stage the plain-global weight B-operand even when the A-operand is a computed prologue; (2) the smem-tiled tier
+> for the `k_linear_reduce` K-reduction projections. Data: `_tune/gemma-4090-347/logs/tune.log`.
+
 - **Status: emmy is 4.4× behind eager on this layer (8.07 ms vs 1.83 ms), and 48% of that is ONE misdeploy** —
   the o_proj matmul ships a scalar `n32x8/f4x14` tile at 3 625 µs while the tune DB holds measured -O3 rows for
   the same kernel at **225–227 µs** (16×). The warp tier is *unreachable at deploy-time lowering* for this

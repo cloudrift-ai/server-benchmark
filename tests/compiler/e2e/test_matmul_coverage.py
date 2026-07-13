@@ -1284,6 +1284,30 @@ def test_tma_staged_slab_is_swizzled(monkeypatch):
     assert "int emmy_swizzle_b64(int e)" in op.kernel_source, "the swizzle helper must be emitted in the preamble"
 
 
+def test_cp_staged_slab_is_swizzled(monkeypatch):
+    """A cp.async-staged mma kernel swizzles its operand slabs in SOFTWARE (CPU render, forced
+    sm_89): the same modes the TMA path derives (``_WARP_CODEC``: A's 32-elem fp16 K chunk and
+    B's 32-elem tile_n rows are both 64 B → B64) are applied as an address XOR on each
+    ``cp.async`` fill DESTINATION and undone by the same XOR in the ldmatrix drain — fill and
+    drain agree by construction, so the staged-vs-gmem bit-identity tests above pin the
+    numerics; this pins the mode ON. The unswizzled cp slab left the drain 4-way (64 B rows) /
+    8-way (128 B rows) bank-conflicted — the measured sm_89 residual to cuBLAS (conflict
+    replays were 81% of the gate_up fm golden's shared-mem wavefronts; the XOR won −12–17%)."""
+    monkeypatch.setenv("EMMY_TILE", _WARP_CODEC)
+    monkeypatch.setenv("EMMY_STAGE", "d2/cp")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    lowered = Pipeline.build(CUDA_PASSES).run(_parity_mma_graph("static", M=256), ctx=Context(compute_capability=(8, 9)))
+    op = lowered.nodes["o"].op
+    src = op.kernel_source
+    assert not op.tma_descriptors, "sm_89 has no TMA — the fills must be cp.async"
+    assert "int emmy_swizzle_b64(int e)" in src, "the swizzle helper must be emitted in the preamble"
+    # Producer side: every cp.async fill writes through the XOR'd destination index...
+    assert "emmy_cp_async_cg(&_a_smem[emmy_swizzle_b64(" in src, "the A slab fill must XOR its smem destination"
+    assert "emmy_cp_async_cg(&_b_smem[emmy_swizzle_b64(" in src, "the B slab fill must XOR its smem destination"
+    # ...and the drain reads back through the identical XOR (fill/drain symmetry).
+    assert "emmy_ldmatrix" in src and src.count("emmy_swizzle_b64(") >= 4, "the ldmatrix drains must apply the matching XOR"
+
+
 @requires_sm90
 @requires_cuda
 def test_bf16_operands_stage_via_cp_async(monkeypatch):
@@ -1729,3 +1753,112 @@ def test_masked_symbolic_accuracy(label, seq, monkeypatch):
     assert got.shape == want.shape, f"{label}/seq={seq}: shape {got.shape} vs {want.shape}"
     diff = float(np.abs(got - want).max())
     assert diff < 5e-2, f"{label}/seq={seq}: masked symbolic mma mismatch (max abs err {diff})"
+
+
+# --------------------------------------------------------------------------- #
+# RASTER — the CTA launch-order codec (kernel-scoped like WSPEC; grouped stripes for L2 reuse
+# of the streamed operand).
+# --------------------------------------------------------------------------- #
+
+_RASTER_TILE = "a:mma_m16n8k16_f16_f32/w2x2/f2x4/k2"  # M-tile 64, N-tile 64 — Em = M/64, En = N/64
+
+
+def _raster_kop(monkeypatch, M: int, raster: str | None = None):
+    monkeypatch.setenv("EMMY_TILE", _RASTER_TILE)
+    monkeypatch.setenv("EMMY_STAGE", "d2/cp/ring")
+    if raster is not None:
+        monkeypatch.setenv("EMMY_RASTER", raster)
+    g = _mma_matmul_graph("static", M, 2048, 1024, "f16", False)
+    return Pipeline.build(CUDA_PASSES).run(g, ctx=Context(compute_capability=(12, 0))).nodes["c"].op
+
+
+def test_raster_gm_pin_groups_the_launch_order(monkeypatch):
+    """``EMMY_RASTER=gm8``: the 2-D contraction grid renders the grouped CTA decode — 8 M
+    block-tiles iterate fastest within each launch stripe, so consecutive CTAs share the
+    streamed B slab (the 2026-07-12 4090 NCU finding: the flat N-fastest order streamed B from
+    DRAM once per M-row, ``A + C + B×2`` measured exactly). ``Em = 1280/64 = 20`` is ragged
+    against the group of 8, so the decode carries the ``min``-clamped tail-group size; the
+    resolved codec value is stamped on the kernel knobs (honest stamping)."""
+    kop = _raster_kop(monkeypatch, 1280, raster="gm8")
+    assert kop.knobs.get("RASTER") == "gm8"
+    src = kop.kernel_source
+    assert "_rsub" in src, "the grouped (m, n) sub-id decode must be emitted"
+    assert "_rsz = min(8," in src, "a ragged Em (20 % 8) needs the tail-group clamp"
+
+
+def test_raster_gn_pin_groups_the_transpose(monkeypatch):
+    """``gn<G>`` groups N block-tiles fastest (the A-streamed regime); ``En = 2048/64 = 32``
+    divides 4, so the decode takes the clamp-free form."""
+    kop = _raster_kop(monkeypatch, 1280, raster="gn4")
+    assert kop.knobs.get("RASTER") == "gn4"
+    src = kop.kernel_source
+    assert "_rsub" in src and "_rsz" not in src
+
+
+def test_raster_default_is_the_flat_order(monkeypatch):
+    """Unpinned, a cold greedy pick takes the conservative option-0 (``""`` — the flat
+    N-fastest order, byte-identical to the historical codegen) and stamps the decided-empty
+    value; the ``gm8`` sibling is a fork row for the search/goldens to arbitrate, never a
+    silent default."""
+    kop = _raster_kop(monkeypatch, 1280)
+    assert kop.knobs.get("RASTER") == ""
+    assert "_rsub" not in kop.kernel_source
+
+
+def test_raster_fork_offers_both_orders(monkeypatch):
+    """The enumeration carries the ``RASTER`` family on every contraction row — the flat ``""``
+    and the ``gm8`` sibling — so the search can price them per shape (live-fork capture, no
+    GPU). Non-contraction kernels never spell the key."""
+    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
+
+    g = _mma_matmul_graph("static", 1280, 2048, 1024, "f16", False)
+    rows = enumerate_graph(g, Context.from_target((12, 0)))
+    vals = {r.get("RASTER") for r in rows if any(k.split("@")[0] == "TILE" for k in r)}
+    assert vals == {"", "gm8"}, f"every contraction row must spell RASTER, flat first: {vals}"
+
+
+@requires_sm90
+def test_raster_ragged_group_matches_torch(monkeypatch):
+    """Accuracy through a ragged tail group (``Em = 20``, groups of 8 → 8/8/4): every output
+    tile must be produced exactly once under the remapped CTA order."""
+    monkeypatch.setenv("EMMY_TILE", _RASTER_TILE)
+    monkeypatch.setenv("EMMY_STAGE", "d2/cp/ring")
+    monkeypatch.setenv("EMMY_RASTER", "gm8")
+    rng = np.random.default_rng(7)
+    a = rng.standard_normal((1280, 256), dtype=np.float32).astype(np.float16)
+    b = rng.standard_normal((256, 512), dtype=np.float32).astype(np.float16)
+    g = _mma_matmul_graph("static", 1280, 512, 256, "f16", False)
+    got, src = _compile_run_mma(g, {"a": a, "b": b})
+    assert "_rsub" in src, "the grouped decode must be live in the benched kernel"
+    want = a.astype(np.float32) @ b.astype(np.float32)
+    diff = float(np.abs(got.astype(np.float32) - want).max())
+    assert diff < 5e-2, f"grouped-raster matmul mismatch (max abs err {diff})"
+
+
+@requires_sm90
+def test_raster_gn_matches_torch(monkeypatch):
+    """The transposed grouping (``gn4``) — same exactly-once contract."""
+    monkeypatch.setenv("EMMY_TILE", _RASTER_TILE)
+    monkeypatch.setenv("EMMY_STAGE", "d2/cp/ring")
+    monkeypatch.setenv("EMMY_RASTER", "gn4")
+    rng = np.random.default_rng(11)
+    a = rng.standard_normal((1280, 256), dtype=np.float32).astype(np.float16)
+    b = rng.standard_normal((256, 512), dtype=np.float32).astype(np.float16)
+    g = _mma_matmul_graph("static", 1280, 512, 256, "f16", False)
+    got, src = _compile_run_mma(g, {"a": a, "b": b})
+    assert "_rsub" in src
+    want = a.astype(np.float32) @ b.astype(np.float32)
+    diff = float(np.abs(got.astype(np.float32) - want).max())
+    assert diff < 5e-2, f"gn-raster matmul mismatch (max abs err {diff})"
+
+
+def test_raster_symbolic_grid_stays_flat(monkeypatch):
+    """A symbolic-M (masked-tile) grid renders through the dynamic decode path, which does not
+    carry the swizzle — the enumeration must decide the flat ``""`` only there (offering ``gm8``
+    would stamp a launch order the kernel doesn't realize: the silent-degrade family)."""
+    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
+
+    g = _mma_matmul_graph("dynamic", 1280, 2048, 1024, "f16", False)
+    rows = enumerate_graph(g, Context.from_target((12, 0)))
+    vals = {r.get("RASTER") for r in rows if any(k.split("@")[0] == "TILE" for k in r)}
+    assert vals == {""}, f"symbolic grids must stay flat: {vals}"

@@ -62,11 +62,13 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   slab is codec-sized and cannot shrink; the scalar resolver steps `bk_elems` / depth down first), so every offered
   stage row materializes within budget — a resolved-but-unfittable row would only die at `validate(ctx)`, leaving an
   un-lowered `TileOp` in the tune's terminal (issue #327). One staging fact
-  is derived at materialization rather than resolved here because it is layout, not eligibility: a TMA slab feeding an
+  is derived at materialization rather than resolved here because it is layout, not eligibility: a slab feeding an
   mma drain is **swizzled** (`_stage.pick_swizzle_atom` picks B32/B64/B128 per operand from the slab's inner row span;
-  the hardware permutes 16 B chunks in-copy, each staged `LdmatrixLoad` XORs the address back, and the kernel stays
-  bit-identical to its unswizzled sibling — swizzle relocates smem bytes only, which is what keeps the ldmatrix drain
-  free of shared-memory bank conflicts; cp.async / sync slabs stay plain row-major).
+  TMA permutes the 16 B chunks in hardware during the box copy, a cp.async fill applies the identical XOR in software
+  on its destination index, each staged `LdmatrixLoad` XORs the address back, and the kernel stays bit-identical to
+  its unswizzled sibling — swizzle relocates smem bytes only, which is what keeps the ldmatrix drain free of
+  shared-memory bank conflicts; the unswizzled cp path was 4-way/8-way conflict-bound on sm_89, the measured residual
+  to cuBLAS there. Sync compute-fill slabs and scalar-`Load`-drained slabs stay plain row-major).
 - the **MONOID-producer composition** — the fused norm→linear edge and its N-channel form, the gate/up MLP edge —
   binds at recognize time too (`_atomize.bind_prologue_contraction`, structure-only): a projecting `Map` over a
   per-row `PLANAR` statistic whose tail is one or more ⊗-folds of one shared A value nodifies to

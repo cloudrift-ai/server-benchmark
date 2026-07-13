@@ -1,0 +1,226 @@
+# Manual golden variant sweep — RTX 5090 (local), 2026-07-12
+
+**Method:** NO tuner — per the session's direction (tune exploration untrusted after the deploy-evidence audit),
+every shape was explored by hand: `emmy run --bench --golden NAME` plus batches of pinned `--ab` variants
+(coordinate descent around the incumbents + targeted regions: big-tile f16-accumulate, split-K, staging depth,
+WSPEC fills), all benched live against the recorded golden rows and the eager/cuBLAS reference in the same run.
+6 waves + 2 confirmation passes per winner, ~120 pinned variant benches total, ~3 h wall. Repo @ `main`
+`dfdc67a2`; logs and per-batch tables under `_tune/manual-golden-5090/`.
+
+**Tally:** **12 fast-math `[fm]` entries added** (square.512.fp16, square.2048, square.4096 parity-add,
+qkv.dynM, o_proj ±dynM, mlp_gate_up ±dynM, mlp_down ±dynM, attention.hd64, attention.hd128) / **2
+standard-lane parity adds** (mlp_gate_up ±dynM) / **10 `REDUCE: ''` stamps** on under-specified entries / 0
+replacements / all other incumbents confirmed best-known (square.512 fp32, square.1024, square.512.dynM,
+qkv static, memory-bound kinds untouched).
+
+## Headline — one tile family beats cuBLAS by 1.4–1.6× across the warp-tier set (FAST_MATH lane)
+
+**`a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4 · d2/tma/ring` (+`g2k` where the un-split grid underfills the 170 SMs)**
+is the best-known config on 7 of the 10 fp16 matmul shapes. Mechanism: the f16 accumulator **halves register
+pressure**, so the `w4x2/f4x8` register tile — 242 regs/thread, unbuildable in the f32-accumulate lane — fits,
+and its 4× larger output tile amortizes everything else. This is a *joint* (atom × geometry) move: the earlier
+fm sweeps only atom-swapped at fixed geometry (the fm2 `square.4096` deep-bk find was the lone exception), so
+the region was never measured.
+
+Per-shape outcome (µs are totals incl. split-K finalize; golden = live replay same run; all winners 3×
+reproduced at <1% spread; `run` accuracy vs torch passes on the gate_up / mlp_down winners):
+
+| shape | new best (fm lane) | µs | golden live | cuBLAS µs | vs cuBLAS |
+| --- | --- | --- | --- | --- | --- |
+| square.2048 | w4x2/f4x8/k4 | **61.3** | 90.7 | 98.36 | **0.62** |
+| square.4096 | w4x2/f4x8/k4 | **481.1** | 494.8 (recorded [fm]) | 640.93 | **0.75** |
+| o_proj.h4096 | w4x2/f4x8/k4 g2k | **64.8** | 90.5 | 95.22 | **0.68** |
+| o_proj.h4096.dynM | w4x2/f4x8/k4 g2k | **64.9** | 91.9 | 95.08 | **0.68** |
+| mlp_gate_up.h4096 | w4x2/f4x8/k4 | **369.7** | 616.1 | 557.94 | **0.66** |
+| mlp_gate_up.h4096.dynM | w4x2/f4x8/k4 | **370.1** | 618.3 | 553.70 | **0.67** |
+| mlp_down.h4096 | w4x2/f4x8/k4 g2k | **201.3** | 295.5 | 296.95 | **0.68** |
+| mlp_down.h4096.dynM | w4x2/f4x8/k4 g2k | **201.8** | 297.4 | 295.03 | **0.68** |
+| qkv.h4096.dynM | w2x4/f2x4/k8 d1/tma | **240.6** | 251.0 | 249.82 | 0.96 |
+| qkv.h4096 | (recorded [fm] stands) | 240.1 | — | 250.54 | 0.96 |
+
+(vs cuBLAS = emmy/cuBLAS, <1.0 = emmy faster.) The dynM twins pay **no masked-tile penalty** in this family
+(369.6–370.4 dynamic vs 369.2–370.0 static). Where the family loses: square.1024 and smaller (the 256-wide
+output tile underfills the card — 20.7 vs 15.6), and qkv-class wide-N shallow-K (parity with the k8 entry).
+FAST_MATH's default-off stance is unchanged — these are `[fm]` entries beside the standard goldens, never
+replacing them.
+
+Standard lane: the same geometry with the f32-acc atom (`w4x2/f4x8/k4 d2/tma/ring`, 166 regs) is a parity-add
+on mlp_gate_up ±dynM (594.9 / 595.6 vs recorded 610.6, ~2.5% — under the 3% replace gate, 4× reproduced).
+Nothing else in the standard lane beat its incumbent beyond noise.
+
+## Finding 1 — why every tuned sweep missed this region (and what to fix)
+
+`emmy eval analytic` on the updated goldens ranks **every new entry at rank 0** (median 0, top-1 27/28) — the
+post-#347 analytic prior prices the big-tile f16acc family correctly, so the cold ranking is NOT the blocker.
+The culprit is the **`-Xcicc -O1` tune ranking lane, CONFIRMED by direct measurement**: replaying the recorded
+entries under `EMMY_NVCC_FLAGS="-Xcicc -O1"`, the big-tile fm config is **5.1× slower than the standard golden
+on mlp_down** (2008 vs 392 µs) and **4.7× slower on square.2048** (591 vs 126) — the same configs that are
+~32% *faster* at -O3. cicc at -O1 doesn't schedule the big unrolled register tiles (the very blowup the -O1
+test lane exists to dodge), so the family ranks dead last in the tune's -O1 ordering and the `EMMY_O3_TOL`
+band never grants it a deployable -O3 rebench. A ~5× *systematic inversion*, not noise.
+**Recommendation (high priority): the -O3 rebench band needs a family-aware floor — always rebench the top-K
+per (atom, tile-size) bucket, not just the global -O1 top band** (or rank the widest register tiles on -O3
+directly). The learned prior inherits the censoring either way; the node store has no measurements in the
+region, and the goldens now seed it.
+
+**Analytic refit: attempted and REJECTED.** Per the skill, `scripts/golden_knob_heuristics.py --out
+<candidate>` was re-run over the updated goldens; the candidate A/B'd worse than the checked-in weights
+(`eval analytic --analytic-file`: top-1 20/28 vs 27/28, `mlp_down.h4096.dynM` std dropping to rank 3449).
+The current `analytic_weights.json` already ranks all new entries #0, so it stands unchanged.
+
+## Finding 2 — `REDUCE` is the fourth unpinned-family drift; every matmul entry now stamps it
+
+`matmul.mlp_gate_up.h4096` (static) recorded no `REDUCE` key; today's greedy fill adds `g2k`, so the golden
+replayed at 652.6 (625.1 + 27.5 finalize) vs its recorded 610.6 — a 7% phantom regression, the same class as
+the dynM-`REDUCE` / fill-order / `WSPEC` drifts (#345). With `REDUCE=` pinned the entry replays true (616.1).
+Every 5090 matmul entry lacking the key is now stamped `REDUCE: ''` (verified value-preserving by this
+session's replays); post-stamp the file replays clean end to end. The recorder-side fix (stamp every resolved
+schedule family at record time) remains open and is now urgent for the other card files — this is the fourth
+occurrence of the class.
+
+## Finding 3 — `square.512.dynM [fm]` replay drift RESOLVED: another `REDUCE` fill, now stamped
+
+The recorded fm entry (3.6 µs) replayed at 4.2 total because the unpinned `REDUCE` drifted into a `g2k` fill
+(3.2 main + 1.0 finalize). With `REDUCE=` pinned off it benches **3.6–3.7 across 4 passes — exactly its
+recorded value**: the fm2 sweep measured it un-split, and the fill drift is Finding 2's class again. The entry
+is now stamped `REDUCE: ''` and replays true. (The std entry's recorded 6.14 vs live 4.5 remains a
+small-shape stale-`emmy_us` oddity — the config is unchanged and still golden, left as is.)
+
+Bonus small-shape coverage: `square.512.fp16` (static) gained its first `[fm]` entry — the atom-swap of its
+standard golden (`f16_f16/w1x8/f4x1/k4 g2k d3/tma/ring`) at **3.9 total vs the standard's live 4.4** (0.89×,
+1.57× vs cuBLAS), 3× reproduced at zero spread — mirroring the dynM twin's existing fm win.
+
+## Finding 4 — attention: PV-only f16acc wins ~11–13% on the static shapes; the masked-flash path can't record it
+
+Swapping only the P·V contraction (`TILE@pj`) to the f16-accumulate atom — QK^T stays f32-acc for the
+online-softmax statistics — wins on both static attention goldens: **hd64 7.2 vs 8.3 (0.87×, 1.39× vs torch
+SDPA)** and **hd128 14.6 vs 16.4 (0.89×, 1.26×)**, each 3× reproduced at zero spread, accuracy vs torch
+passing. Both recorded as `[fm]` entries. The both-contractions swap is refused by the flash form narrowing
+(the dd pin realizes f32-acc, integrity-flagged) — correct behavior, softmax stats need f32.
+
+**The dynM twins initially could not record the same win** — dynamic attention goldens are schema-required
+to record a single bare `TILE` (the masked-flash pin doesn't resolve `TILE@<axis>`), and a bare f16acc
+`TILE` pin failed `_twisted_warp_options`' base-atom check, declining the whole warp tier to the **scalar
+fallback** (18.5 ms / 9.7 ms — the flatten pathology). **FIXED same session**: the pinned branch now accepts
+a bare pin spelling the f16acc SIBLING's **PV plan** (the exact string the static twin stamps on
+`TILE@<pv_k>`, so the realized stamp equals the pin and the replay integrity gate holds); geometry recovers
+from the PV plan (`nt = bk·atom_k/atom_n`, the streamed key block) and scores stay f32-accumulate.
+Covered by `test_bare_sibling_pin_selects_the_f16acc_pv_plan` (static + dynM live-fork capture). Post-fix,
+both dynM twins recorded their `[fm]` entries: **hd64.dynM 7.5 vs 8.5 (0.88×, 1.36× vs SDPA)**,
+**hd128.dynM 15.3 vs 16.5 (0.93×, 1.20×)** — 3× reproduced at zero spread, zero integrity flags, dynamic
+accuracy vs torch passing.
+
+## Finding 5 — deploy-side confirmations (audit follow-ups, not this task's scope)
+
+Greedy deployed above the golden on nearly every shape this session (qkv 279.7 vs 259.1, qkv.dynM 273.8 vs
+251.6, mlp_down 305–311 vs 295, gate_up 633–636 vs 616, downdyn 340 vs 297), with repeated disjoint-evidence
+warnings (`square.1024`: "181 measured rows, none matches the 4 offered candidates"). Root causes were
+established by this session's earlier audit: the local DB is -O1-only and fm2-skewed (regime starvation), the
+-O3 reservoir covers only slow families for some shapes, and the learned prior extrapolates poorly (median
+golden rank 3206 vs the analytic's 0). The newly recorded entries make the golden dataset the reliable
+source of truth for these shapes regardless of the deploy path chosen later.
+
+## RTX 4090 pass (same day, rented box 176.124.69.204) — the family is card-specific; atom-swap + mid-tiles win
+
+The same manual method on a rented 4090 (sm_89: cp.async staging, no TMA/WSPEC, 255-reg ceiling), 3 waves +
+2x confirmations, all winners accuracy-checked. **The 5090's big-tile `w4x2/f4x8/k4` family does NOT
+transfer** — it pegs the sm_89 register ceiling (255 regs) and loses on every shape. What wins instead is
+the **f16acc atom at (or near) the incumbent geometries** — the consumer-die 2× HMMA rate showing through on
+mma-bound shapes, exactly the PR #339 K-heavy prediction, now recorded as 9 `[fm]` entries:
+
+| shape | fm config | µs | std golden live | vs cuBLAS |
+| --- | --- | --- | --- | --- |
+| mlp_gate_up ±dynM | w4x1/f4x8/k2 | 786.9 / 802.8 | ~940 / ~955 (0.84×) | 1.08 |
+| mlp_down ±dynM | w2x2/f4x8/k2 g2k | 348.5 / 332.8 | 371 / 387 | **0.90 / 0.86 — beats cuBLAS** |
+| qkv ±dynM | w2x2/f4x8/k2 g2k | 336.8 / 332.0 | ~374 / 385 | ~1.01 parity |
+| square.4096.fp16 | w1x4/f4x8/k2 | 750.6 | 841 | **0.93 — beats cuBLAS** |
+| square.2048.fp16 | w1x4/f4x4 | 119.3 | 123.4 | 0.99 |
+| square.1024.fp16 | w1x2/f4x4/k2 | 19.9 | 24.0 | 1.10 |
+
+No f16acc win on o_proj (parity, left unrecorded). `attention.hd256.dynM`: the bare sibling-PV pin
+**resolves on sm_89 too** (the masked-flash fix is cross-card; PV plan `w4x1/f1x32`) at 43.4 vs 44.3 —
+parity, mechanism validated, nothing recorded.
+
+**Why the win is 15–20% here vs the 5090's 40% (roofline decomposition, nothing blocked):** on the 5090 the
+std kernels already sit AT the f32-accumulate ceiling (gate_up 202 vs ~210 TFLOP/s), so the f16acc atom's 2×
+rate translates nearly fully (325). On the 4090 the std kernels run at 123–133 TFLOP/s — **below even the
+f32-acc ceiling (~165, where cuBLAS sits exactly)** — because the cp.async pipeline (no TMA on AD102: copies
+burn SM instructions + registers) is the binding constraint. The fm atom lifts emmy to 153; the residual gap
+to cuBLAS's 165 is cp.async ring codegen cost, not a knob. The full reachable cp.async space was measured:
+d1/cp (1003.5 — loses), d3/cp/ring (occupancy halves at the 99KB smem cap — loses), k4 chunks (lose),
+`/p2` producer splits with the fm atom (gate_up 803.8 / down 381.6 / sq4096 850.9 — all lose vs the plain
+ring), and the 5090's big tiles peg the 255-reg ISA cap (cp.async addressing state eats exactly the headroom
+the f16 accumulator frees). TMA/WSPEC are hardware-gated off, correctly. Also: `REDUCE: ''` stamped on the 8 session-verified
+under-specified entries, and `emmy_us` refreshed where ≥3 passes drifted consistently ≥5% (mlp_down
+397.5→371, mlp_down.dynM 412.9→387.3, sq2048.fp16 116→123.4, sq1024.fp16 22.2→24.0 — partially the
+07-11 report's stale-value recommendation; gate_up/qkv/sq4096 wobbled around their recorded values and
+were left). Setup notes for the skill: fresh CloudRift Ubuntu images need `python3.12-venv` +
+`python3.12-dev` apt packages, `make setup` must be re-run after `rm -rf venv` (it no-ops on an existing
+venv), and `/usr/local/cuda/bin` is not on the non-interactive ssh PATH.
+
+## 4090 codegen investigation — the gap to cuBLAS is B-operand DRAM double-streaming (grid rasterization)
+
+NCU + ptxas + SASS on the gate_up fm winner vs cuBLAS HGEMM on the identical shape (rented 4090, sudo NCU):
+
+| metric | emmy fm (`w4x1/f4x8/k2 d2/cp/ring`) | cuBLAS |
+| --- | --- | --- |
+| DRAM bytes | **503.6 MB** | 365.8 MB |
+| L2 hit rate | 80.2% | 85.4% |
+| Memory / SM throughput | **72.7% / 46.6%** | 52.8% / 48.5% |
+| registers (ptxas) | 250, **zero spills** | (std twin: 207, zero spills) |
+
+The GEMM's traffic floor is 268.9 MB (A 4.2 + B 235.2 + C 29.4). emmy's 503.6 = **A + C + B exactly twice**
+(504.0 predicted) — the B operand streams from DRAM once per M-row of CTAs. Root cause, read off the emitted
+kernel: the CTA grid is a flat `_gid` with the **N-tile index fastest-varying** (`a0_b = gid/57344`,
+`a1_b = (gid/128)%448`) — all 448 N-tiles of M-row 0 launch before any of M-row 1, so each 512 KB B slab's
+second read arrives ~448 CTAs later, L2-cold. emmy has **no grid rasterization** (every "swizzle" in the
+codebase is smem-level); the flat-gid decomposition is emitted in `ir/kernel/ir.py` from the tile
+`Placement`'s axis order. cuBLAS's threadblock swizzle keeps same-B CTAs concurrent, hence its 365.8 MB.
+
+Killed hypotheses: NOT register spills (250 regs, zero spill bytes — spills only appear on the 255-reg big
+tile, confirming why THAT loses), NOT issue-slot overhead (SM at 46.6% is not the wall; the 109-IMAD-per-64-
+HMMA static mix is secondary), NOT a blocked knob (d1/d3/k4/p2/splits all measured and lose).
+
+**Recommendation (priority 1, helps every card + both lanes): a GROUP_M-style CTA rasterization** — decompose
+`_gid` so a group of M-tiles iterates fastest (CUTLASS threadblock-swizzle class); pure index arithmetic in
+the grid decomposition, no memory-layout change. Removing the redundant 235 MB puts gate_up at the ~269 MB
+floor → memory time ~0.53×, flipping the kernel compute-bound — estimated 15–30% on this shape, likely past
+cuBLAS (and the same double-stream exists in the 5090's wide-N shapes; its bigger pipe just hides it better).
+Secondary: cp.async address CSE (frees registers toward the N=128 tile sm_89 can't currently afford).
+
+**Post-implementation truth (both hypotheses measured, same day):** the rasterization landed as the `RASTER`
+codec and halved DRAM traffic exactly as designed (503.6 → 261.6 MB) — but wall time barely moved (qkv −4%
+recorded; gate_up fm +2.4%; rest neutral): DRAM bandwidth was NOT the binding pipe. NCU scheduler stats give
+the real constraint: **76.3% of issue cycles have zero eligible warps** (1.84 active / 0.27 eligible per
+scheduler) — the kernels are latency-starved at 2 CTAs/SM, register-bound by the *fragments* (the winning
+`f4x8` tile's accumulators+operands ≈ 224 of 250 regs; addressing is ~25). The **address-CSE hypothesis was
+then refuted by prototype**: hand-hoisting the K-loop fill addressing (pointer-stepping, clamp per chunk)
+on the real gate_up fm kernel freed 3 registers and ran **3.3% SLOWER** (797.1 → 823.0 µs, outputs
+bit-identical) — ptxas already CSEs optimally, and the hoist's loop-carried pointer chain destroys the fill
+burst's ILP. Not implemented. The residual ~8% to cuBLAS on sm_89 is structural to the tile architecture at
+2 CTAs/SM; the one credible remaining lever was **extending WSPEC to the cp.async transport** (a producer
+warp band owning fills would cut consumer-warp register pressure and add latency-hiding warps — today WSPEC
+is TMA-only by design). **Also prototyped and REFUTED (same box, next day)** — the sm_89 SMSP register
+banking makes a 9th resident warp cap the kernel at 168 regs, and at iso-warp-count the split is
+perf-neutral; see `wspec-cpasync-producer-band.md` for the measured refutation. The gap then fell to a
+different lever entirely: the unswizzled cp.async slabs leave the ldmatrix drains 4–8-way bank-conflicted
+(81% of shared wavefronts were conflict replays), and the XOR-swizzle prototype wins −12–17%, past cuBLAS
+on gate_up — see `cpasync-slab-swizzle-findings.md`.
+
+## Workflow notes
+
+- **The `--ab` A/B harness is excellent for manual sweeps**: ~8–12 pinned variants per invocation, live golden
+  + eager rows as controls in every batch, and `_unreproducible_pin_flag` caught every declined pin (d3/d4
+  stage pins clamping to d2 on 96K-smem tiles; a stage pin realizing `(off)`). Zero silent degrades reached
+  the results.
+- **Pin `REDUCE=` (and `WSPEC=`) explicitly in every `--ab` row** — an unpinned family gets planner fill
+  (wave 1 lost 3 rows to surprise `g2k` fills, +2.4–77 µs finalize noise in the comparison).
+- The split-K finalize prints as a separate knob-less row after its config — totals must be summed by hand.
+  The `golden NAME (total)` row proposal from the fm2 notes stands; it would also fix per-config grouping in
+  these logs.
+- `emmy run` accuracy checks are silent on success (exit 0, no output) — a one-line `accuracy: PASS (rel err
+  …)` would save a foreground rerun to confirm the check actually ran.
+- Confirmation economics: cubin caching made the 19 confirmation invocations ~1–2 min each; the expensive part
+  was first-compile of each variant (~30–60 s for the h4096/4096² kernels). Total ~120 variants ≈ 2 h GPU.
+- The disjoint-evidence deploy warning prints once per `--ab` row compile (11× per invocation on square.1024)
+  — it should dedupe per (node, compile session).

@@ -458,6 +458,32 @@ def test_flash_form_fork_offers_f16acc_pv(monkeypatch):
     assert not any("mma_m16n8k16_f16_f16/" in r["TILE@pj"] for r in pv_rows((12, 0))), "gate unset: no f16acc rows"
 
 
+@pytest.mark.parametrize("dynamic", [False, True], ids=["static", "dynM"])
+def test_bare_sibling_pin_selects_the_f16acc_pv_plan(monkeypatch, dynamic):
+    """A bare ``TILE`` pin spelling the f16-accumulate SIBLING's **PV plan** (the masked-flash
+    golden form — a symbolic trace resolves no ``TILE@<axis>`` key, so a dynamic ``[fm]`` golden
+    records its PV plan as its one bare TILE) narrows the warp fork to that variant with the gate
+    OFF: ``TILE@pj`` rides the pinned spelling verbatim (so the replay integrity gate holds) and
+    ``TILE@dd`` stays on the base f32-accumulate atom. Regression: this pin used to fail the
+    pinned branch's base-atom check and decline the whole warp tier — the dynM attention twins
+    re-benched the scalar fallback (18.5 ms on hd64.dynM) and could not record their fast-math
+    win. hd64 geometry (um=2, nt=4, fm=1): QK = ``w2x1/f1x4/k4``, PV = ``w2x1/f1x8/k2``
+    (``regs[1] = d_v/atom_n``, ``bk = nt·atom_n/atom_k`` — the streamed key block)."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
+
+    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f16/w2x1/f1x8/k2")
+    q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
+    seq = torch.export.Dim("seq_len", min=4, max=4096)
+    ds = {"q": {2: seq}, "k": {2: seq}, "v": {2: seq}} if dynamic else None
+    graph = trace_module(_Sdpa().cpu(), (q, k, v), dynamic_shapes=ds)
+    warp = [r for r in enumerate_graph(graph, Context.from_target((12, 0))) if "TILE@pj" in r]
+    assert warp, "the bare sibling-PV pin must keep the warp tier (it used to decline to scalar)"
+    assert all(r["TILE@pj"] == "a:mma_m16n8k16_f16_f16/w2x1/f1x8/k2" for r in warp), "PV must ride the pinned sibling plan verbatim"
+    assert all(r["TILE@dd"] == "a:mma_m16n8k16_f16_f32/w2x1/f1x4/k4" for r in warp), "scores must stay on the base f32-accumulate atom"
+
+
 @requires_cuda
 @pytest.mark.parametrize("stage", ["", "d2/cp/ring"])
 def test_generated_tensorcore_flash_f16acc_matches_torch(monkeypatch, stage):

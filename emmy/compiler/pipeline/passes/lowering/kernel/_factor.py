@@ -136,6 +136,7 @@ def grid_tile(
     reduce_region: Callable[..., tuple[list[Stmt], list[Stmt]]],
     store: Callable[..., list[Stmt]],
     workers: object = None,
+    raster: object = None,
 ) -> Tile:
     """The GRID level + finalize — the ONE seal every kernel binds through: bind the block axes (the
     shrunk grid), set the per-axis grid term ``block·tile``, append any leading (untiled) grid axes
@@ -167,7 +168,20 @@ def grid_tile(
     if workers is not None:
         aux_threads = 32 * workers.aux_warps
         stores = [Cond(cond=BinaryExpr("<", Builtin("thread_idx.x"), Literal(block_threads, "int")), body=tuple(stores))]
-    return Tile(axes=axes, body=Body((*state, *top_decls, *kstmts, *stores)), block_threads=block_threads, aux_threads=aux_threads)
+    # A 2-D-tiled output (both mn Sides bound) marks its (m, n) block axes as
+    # rasterization-eligible — the structural fact only this seal knows; whether (and how) the
+    # CTA order actually groups them is the resolved ``RASTER`` codec threaded down off the
+    # TileOp's knobs (``None`` / ineligible ⇒ the flat N-fastest order, byte-identical codegen).
+    raster_axes = (mn[0].block, mn[1].block) if (mn[0] is not None and mn[1] is not None) else None
+    return Tile(
+        axes=axes,
+        body=Body((*state, *top_decls, *kstmts, *stores)),
+        block_threads=block_threads,
+        aux_threads=aux_threads,
+        raster_axes=raster_axes,
+        raster_group=(raster.group if raster is not None and raster_axes is not None else None),
+        raster_orient=(raster.orient if raster is not None else "m"),
+    )
 
 
 # ---- the recursive node walk: Ctx down, Frag up ------------------------------------------------ #
@@ -221,6 +235,7 @@ class Ctx:
     stage: Stage | None = None
     output: str = ""
     workers: object = None  # the resolved WarpSpec worker split (None = uniform SIMT)
+    raster: object = None  # the parsed RASTER codec (ir.schedule.Raster; None = flat launch order)
 
 
 def _emit(op, ctx: Ctx) -> Frag:
@@ -292,6 +307,8 @@ def factorize(tile, root, store=None) -> Tile:
     root graph node, then dispatch its ``op`` into a bound ``Tile`` via :func:`_factorize`. ``out_val``
     (the kernel's finalized output SSA name — the root node's produced :class:`Handle`) is resolved
     once here and threaded down for the store glue."""
+    from emmy.compiler.ir.schedule import Raster  # noqa: PLC0415 — keep the module torch-free at import
+
     op = tile.op
     ctx = Ctx(
         grid=tuple(tile.place.grid),
@@ -299,6 +316,10 @@ def factorize(tile, root, store=None) -> Tile:
         stage=tile.stage,
         output=(root.output.name if root is not None else ""),
         workers=tile.workers,
+        # The launch-order codec rides the TileOp's stamped knobs (kernel-scoped metadata, no
+        # per-node structure) — parse it once here; ``grid_tile`` applies it where the 2-D
+        # (m, n) block grid makes it meaningful.
+        raster=Raster.parse((tile.knobs or {}).get("RASTER", "")),
     )
     out_val = _emit_wire(op).name if op is not None else ""
     return _factorize(op, ctx, tail=(), out_val=out_val, store=store)
@@ -426,6 +447,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
         # The scheduler stamps ``workers`` on a contraction row or a warp-flash (TWISTED) row only;
         # every other arm arrives with ``None`` — safe to thread unconditionally.
         workers=ctx.workers,
+        raster=ctx.raster,
     )
 
 

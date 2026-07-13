@@ -194,7 +194,7 @@ def golden_deploy_perf(prior, kernel_filter: str | None = None) -> dict[str, flo
     Goldens are scoped to the live card (:func:`goldens_for_live_gpu`) so a multi-GPU
     goldens dir doesn't make a name's per-card entries collide on the GPU-blind
     ``ShapeKey`` (e.g. RTX 5090 / RTX PRO 6000 both ``(12, 0)``)."""
-    from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig, goldens_for_live_gpu  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig, fast_math_knobs, goldens_for_live_gpu  # noqa: PLC0415
 
     GOLDEN_CONFIGS = goldens_for_live_gpu()
 
@@ -222,9 +222,16 @@ def golden_deploy_perf(prior, kernel_filter: str | None = None) -> dict[str, flo
         if not leaves:
             continue
         best_i, _ = prior.pick([s.all_knobs() for s in leaves])
+        # Within-regime comparison (the golden.py convention: a shape's fast-math entry sits
+        # BESIDE its standard one, and each regime is judged against its own): a gate-off pick
+        # must not be measured against an [fm] golden it cannot reach — and vice versa. Skip
+        # cross-regime pairs; the pick's regime derives from its knobs like the golden's.
+        if fast_math_knobs(leaves[best_i].knobs) != g.fast_math:
+            continue
         ratio = leaves[best_i].latency_us / g.emmy_us
         # A shape may record several parity entries under one name — compare against the BEST
-        # (fastest) recorded golden, not whichever entry iterates last (max ratio = min emmy_us).
+        # (fastest) recorded golden of the pick's regime, not whichever entry iterates last
+        # (max ratio = min emmy_us).
         out[g.name] = max(out.get(g.name, ratio), ratio)
     return out
 

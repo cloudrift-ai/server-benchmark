@@ -17,10 +17,13 @@ skeleton, :func:`staged_kloop` (``fill → commit → wait → drain → Sync``,
 buffering knob), driven by a :class:`Transport` strategy (:class:`CpAsyncTransport` /
 :class:`TmaTransport`) — the two producers put behind one ``fill``/``commit``/``wait`` seam. The
 slab feeds the same staged ``LdmatrixLoad`` / scalar ``Load`` drain regardless of which producer
-(cp.async / TMA) filled it. cp.async/sync slabs are plain row-major (NONE-swizzle, linear writes
-and reads); a TMA slab feeding an mma drain is **swizzled** (:func:`pick_swizzle_atom` per operand
-— the hardware permutes 16 B chunks during the box copy and each staged ``LdmatrixLoad`` applies
-the matching address XOR), which is what keeps the ldmatrix drain free of smem bank conflicts.
+(cp.async / TMA) filled it. A slab feeding an mma drain is **swizzled** (:func:`pick_swizzle_atom`
+per operand): TMA permutes the 16 B chunks in hardware during the box copy, a cp.async fill applies
+the identical XOR in software on its destination index, and each staged ``LdmatrixLoad`` reads back
+through the matching address XOR — which is what keeps the ldmatrix drain free of smem bank
+conflicts (the unswizzled cp path was 4-way conflicted on 64 B rows / 8-way on 128 B ones — the
+sm_89 gap to cuBLAS). Sync compute-fill slabs and scalar-``Load``-drained slabs stay plain
+row-major (NONE-swizzle, linear writes and reads).
 ``_atom._staged`` — the one atom-agnostic driver — builds the transport, asks the atom strategy
 for the drain leaf, and calls :func:`staged_kloop`.
 
@@ -90,7 +93,16 @@ def _cp_async_width(slab_cols: int, elem_bytes: int) -> int:
 
 
 def cp_async_fill(
-    *, slab: str, shape: tuple[int, int], src: str, gmem_index, cta: CtaTile, elem_bytes: int, name: str, row_offset: Expr | None = None
+    *,
+    slab: str,
+    shape: tuple[int, int],
+    src: str,
+    gmem_index,
+    cta: CtaTile,
+    elem_bytes: int,
+    name: str,
+    row_offset: Expr | None = None,
+    swizzle: str = "NONE",
 ) -> list[Stmt]:
     """Cooperatively ``cp.async``-copy a ``rows × cols`` (= ``shape``) row-major smem
     ``slab`` from gmem ``src``. ``gmem_index(row_expr, col_expr)`` returns the gmem
@@ -103,7 +115,14 @@ def cp_async_fill(
 
     ``row_offset`` (the gmem→smem ring): when staging through a depth>1 slab, it picks
     the ring SLOT — the write row becomes ``row_offset + row`` (each slot is a contiguous
-    ``rows``-row block), so the fill targets one slot while the drain reads another."""
+    ``rows``-row block), so the fill targets one slot while the drain reads another.
+
+    ``swizzle`` (the cp.async SOFTWARE slab swizzle): XOR the flattened destination element
+    index (``CpAsyncCopy.swizzle`` → ``emmy_swizzle_<mode>``), permuting 16-byte chunks within
+    each swizzle row exactly as the TMA hardware would — the staged ``LdmatrixLoad`` drain
+    reads back through the same XOR, so fill and drain agree by construction and the un-XORed
+    NONE-swizzle kernel is bit-identical. This is the sm_89 bank-conflict fix: the plain
+    row-major slab leaves the drain 4-way (64 B rows) / 8-way (128 B rows) conflicted."""
     slab_rows, slab_cols = shape
     v = _cp_async_width(slab_cols, elem_bytes)
     n_chunks = (slab_rows * slab_cols) // v
@@ -118,6 +137,7 @@ def cp_async_fill(
         src=src,
         src_index=tuple(gmem_index(row, col)),
         nbytes=v * elem_bytes,
+        swizzle=swizzle,
     )
     loop = StridedLoop(axis=fe, start=cta.linear_tid, step=_lit(cta.n_threads), body=Body((copy,)), unroll=False)
     return [loop]
@@ -211,8 +231,10 @@ _SWIZZLE_BY_BYTES: tuple[tuple[int, str], ...] = ((128, "B128"), (64, "B64"), (3
 
 
 def pick_swizzle_atom(inner_elems: int, elem_bytes: int) -> tuple[int, str]:
-    """The TMA swizzle atom for a slab whose inner (contiguous) row is ``inner_elems``
-    elements of ``elem_bytes``. Returns ``(atom_elems, mode)``: the widest atom in
+    """The swizzle atom for a slab whose inner (contiguous) row is ``inner_elems``
+    elements of ``elem_bytes`` — the ONE mode derivation the TMA descriptor (hardware
+    in-copy swizzle) and the cp.async fill (software destination XOR) both consume.
+    Returns ``(atom_elems, mode)``: the widest atom in
     ``{128, 64, 32}`` B that fits and divides the span wins — a 256 B inner (128 fp16
     elems) picks ``B128`` (64 elems, descriptor box split ``[2, 64]``); a 64 B inner (32
     fp16 elems) picks ``B64`` (32 elems, no split). ``(inner_elems, "NONE")`` when no
@@ -281,16 +303,20 @@ class Operand:
     shape: tuple[int, int]  # (rows, cols) of one ring slot
     index: Callable[[Expr], Callable]  # k0 -> ((row, col) -> gmem index)   (cp.async)
     coords: Callable[[Expr], tuple]  # k0 -> gmem box origin                (TMA)
-    # TMA smem swizzle mode this operand's slab is written with ("NONE"/"B32"/"B64"/"B128") —
-    # derived by the mma tier (`_MmaOps.slab_swizzles`, TMA transport only: the hardware swizzles
-    # in-copy and the ldmatrix drain applies the matching XOR; a scalar plain-`Load` drain and the
-    # cp.async/sync write paths stay NONE).
+    # Smem swizzle mode this operand's slab is written with ("NONE"/"B32"/"B64"/"B128") — derived
+    # by the mma tier (`_MmaOps.slab_swizzles`). TMA transport: the hardware swizzles in-copy; the
+    # cp.async transport applies the same XOR in SOFTWARE on each fill's destination index
+    # (:func:`cp_async_fill` ``swizzle``). Either way the ldmatrix drain applies the matching XOR;
+    # a scalar plain-`Load` drain and the sync write path stay NONE.
     swizzle: str = "NONE"
     # Extra smem columns padding each slab row (cp.async transport only — a TMA box deposit is
-    # dense). The pad breaks the same-bank stride of a power-of-two row (the bank-conflict fix the
-    # cp.async path has in place of TMA's hardware swizzle); the fill's logical (row, col) writes
-    # stride the padded decl automatically (``render_index`` flattens against it), and the drain's
-    # ``ldm`` carries the padded stride. Data cells only — a chunk never straddles the pad.
+    # dense). The pad breaks the same-bank stride of a power-of-two row — the flash K/V slabs'
+    # bank-conflict fix (`_twist._PAD`), whose drains are not plain ldmatrix rows; the mma matmul
+    # tier uses the software ``swizzle`` above instead (zero smem growth). Mutually exclusive with
+    # a non-NONE ``swizzle`` (the XOR's atom derivation assumes dense rows). The fill's logical
+    # (row, col) writes stride the padded decl automatically (``render_index`` flattens against
+    # it), and the drain's ``ldm`` carries the padded stride. Data cells only — a chunk never
+    # straddles the pad.
     pad_cols: int = 0
     # The TMA descriptor box, when it differs from the 2-D slab ``shape`` — a BATCHED operand
     # (flash K/V: gmem ``(B, H, S, D)``) boxes as rank-N with leading extent-1 dims
@@ -386,6 +412,7 @@ class SyncTransport:
                 elem_bytes=self.elem_bytes,
                 name=op.tag,
                 row_offset=op.slot_row(slot),
+                swizzle=op.swizzle,
             )
         for op in self.operands:
             rows, cols = op.shape
@@ -438,6 +465,9 @@ class CpAsyncTransport:
     def fill(self, *, k0: Expr, slot: Expr) -> list[Stmt]:
         out: list[Stmt] = []
         for op in self.operands:
+            # The software swizzle XOR assumes dense power-of-two rows; a padded slab already
+            # breaks the same-bank stride another way — the two fixes are mutually exclusive.
+            assert op.swizzle == "NONE" or op.pad_cols == 0, "a padded slab must stay NONE-swizzle"
             out += cp_async_fill(
                 slab=op.slab,
                 shape=op.shape,
@@ -447,6 +477,7 @@ class CpAsyncTransport:
                 elem_bytes=op.elem_bytes or self.elem_bytes,
                 name=op.tag,
                 row_offset=op.slot_row(slot),
+                swizzle=op.swizzle,
             )
         return out
 

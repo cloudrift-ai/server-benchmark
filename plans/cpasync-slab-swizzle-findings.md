@@ -60,8 +60,10 @@ the pre-existing staged-vs-gmem bit-identity suite, which now exercises swizzled
 | square.4096.fp16 [fm] | 750.6 | **631.3** | **−16%** | **0.78** (eager ~808) — was 0.93 |
 
 Accuracy checks pass (silent-success `emmy run`). **Every cp-transport matmul golden's recorded `emmy_us` is now
-stale-high across the sm_89 cards** — a golden refresh sweep (tune-golden flow, 4090 + 4080) is the follow-up, and
-greedy-vs-golden gaps will look larger until then since live replays already run swizzled.
+stale-high across the sm_89 cards.** The 4090 file was refreshed the same day by a manual sweep — 15 value
+refreshes, 2 fm replaces, 4 fm adds, fm lane past cuBLAS on 9 of 11 fp16 shapes; see
+`golden-postswizzle-refresh-rtx4090-findings.md`. The 4080 file (and any other cp-transport cards) still needs the
+same refresh, and the tune DB / learned prior have no post-swizzle measurements at all.
 
 ## Implementation sketch (as scoped before landing)
 

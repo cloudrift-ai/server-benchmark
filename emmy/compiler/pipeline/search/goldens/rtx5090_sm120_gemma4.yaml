@@ -1,0 +1,298 @@
+# Gemma-4-12B kernel shapes (hidden 3840, intermediate 15360, 16 Q / 8 KV heads, head_dim 256) on the
+# RTX 5090 — seeded 2026-07-13 by a manual pinned --ab sweep (no tuner), each entry 3x reproduced at <1%
+# spread. cublas_us is the median live `Eager PyTorch` row across the shape's runs (cuBLAS HGEMM for the
+# fp16 matmuls, torch RMSNorm / torch SDPA for the norm / attention kinds).
+#
+# Why these exist: cold greedy on the unseeded projection shapes deploys a scalar b256 tile at ~37 ms
+# (~770x off cuBLAS), and on mlp_gate_up.dynM / attention.hd256.dynM it picks kernels that hang outright
+# (>1 s accuracy probe / >10 s bench cap) — the misdeploy + hang hazard class these goldens pin down.
+#
+# Fast-math [fm] siblings (f16-accumulate mma atom) are kept BESIDE the standard entries, never replacing
+# them (a gate-off compile can't reach an f16acc config). The big-tile f16acc family (w4x2/f4x8/k4
+# d2/tma/ring, split g2k on the small-N shapes) wins 1.3-1.6x vs cuBLAS on every projection — the same
+# family as the h4096 [fm] entries in rtx5090_sm120.yaml.
+gpu_name: NVIDIA GeForce RTX 5090
+compute_cap:
+  - 12
+  - 0
+configs:
+  # ---- attention projections -------------------------------------------------------------------------
+  - kernel: matmul
+    name: gemma4_12b.q_proj
+    M: 512
+    N: 4096
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 84.2
+    cublas_us: 97.6
+  - kernel: matmul
+    name: gemma4_12b.q_proj
+    M: 512
+    N: 4096
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 61.5
+    cublas_us: 97.6
+  - kernel: matmul
+    name: gemma4_12b.q_proj.dynM
+    M: 512
+    N: 4096
+    K: 3840
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 84.8
+    cublas_us: 98.7
+  - kernel: matmul
+    name: gemma4_12b.q_proj.dynM
+    M: 512
+    N: 4096
+    K: 3840
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 61.7
+    cublas_us: 98.7
+  # kv_proj: the k/v projections (8 KV heads x 256 = N 2048); the traced graph dedups k and v into one
+  # kernel launched twice. Cold greedy here was the 37 ms scalar b256 misdeploy.
+  - kernel: matmul
+    name: gemma4_12b.kv_proj
+    M: 512
+    N: 2048
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 45.3
+    cublas_us: 48.8
+  - kernel: matmul
+    name: gemma4_12b.kv_proj
+    M: 512
+    N: 2048
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x4/f2x4/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 36.4
+    cublas_us: 48.8
+  - kernel: matmul
+    name: gemma4_12b.kv_proj.dynM
+    M: 512
+    N: 2048
+    K: 3840
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 45.8
+    cublas_us: 48.9
+  - kernel: matmul
+    name: gemma4_12b.kv_proj.dynM
+    M: 512
+    N: 2048
+    K: 3840
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x4/f2x4/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 36.3
+    cublas_us: 48.9
+  - kernel: matmul
+    name: gemma4_12b.o_proj
+    M: 512
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 82.0
+    cublas_us: 103.3
+  - kernel: matmul
+    name: gemma4_12b.o_proj
+    M: 512
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 64.1
+    cublas_us: 103.3
+  - kernel: matmul
+    name: gemma4_12b.o_proj.dynM
+    M: 512
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 82.1
+    cublas_us: 99.8
+  - kernel: matmul
+    name: gemma4_12b.o_proj.dynM
+    M: 512
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 63.9
+    cublas_us: 99.8
+  # ---- MLP -------------------------------------------------------------------------------------------
+  # mlp_gate_up: the fused gate+up width (2 x 15360 = N 30720) — the shape of the gate/up ⊗-fold channels
+  # in the fused RMSNorm→gate⊗up→GeGLU megakernel. Cold greedy on the .dynM twin HANGS (>1 s accuracy
+  # probe, bench_fail) — the entry below is what unblocks it.
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up
+    M: 512
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 561.7
+    cublas_us: 573.3
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up
+    M: 512
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 362.4
+    cublas_us: 573.3
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up.dynM
+    M: 512
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 562.4
+    cublas_us: 561.7
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up.dynM
+    M: 512
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 362.4
+    cublas_us: 561.7
+  # mlp_down: deep-K (15360) — the classic f16acc profile; the [fm] entry is 1.34x past cuBLAS.
+  - kernel: matmul
+    name: gemma4_12b.mlp_down
+    M: 512
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 286.2
+    cublas_us: 286.3
+  - kernel: matmul
+    name: gemma4_12b.mlp_down
+    M: 512
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 214.2
+    cublas_us: 286.3
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.dynM
+    M: 512
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 286.2
+    cublas_us: 286.3
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.dynM
+    M: 512
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 214.2
+    cublas_us: 286.3
+  # ---- attention (flash, hd256) ----------------------------------------------------------------------
+  # The static form narrowing REFUSES the w4x1 dd geometry (every w4x1 pin realizes w2x1/f1x8/k16 +
+  # w2x1/f1x32/k4, loudly flagged) and degrades any d2+ stage to d1 — so the static best is the w2x1 form
+  # on d1/cp, 2.1x slower than its own masked .dynM twin (which DOES take w4x1 + d2/cp/ring). cp beats
+  # tma by ~16% on this kernel (d1/cp 82.0 vs d1/tma 97.5). Torch SDPA is 30.7 µs — emmy hd256 remains
+  # register-bound (255 regs, 4% occ static / 17% dynM), the known hd256 codegen gap.
+  - kernel: attention
+    name: gemma4_12b.attention.hd256
+    n_heads: 16
+    seq: 512
+    head_dim: 256
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', STAGE: 'd1/cp', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w2x1/f1x32/k4', WSPEC: ''}
+    emmy_us: 82.0
+    cublas_us: 30.7
+  # Fast-math sibling (FAST_MATH lane): P·V on the f16-accumulate atom, QK^T stays f32-acc (softmax
+  # statistics). FAST_EXP adds nothing on top (77.0 with, 77.1 without).
+  - kernel: attention
+    name: gemma4_12b.attention.hd256
+    n_heads: 16
+    seq: 512
+    head_dim: 256
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', STAGE: 'd1/cp', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w2x1/f1x32/k4', WSPEC: ''}
+    emmy_us: 77.1
+    cublas_us: 30.7
+  # Masked-flash twin: bare TILE (schema-enforced). Cold greedy on this unseeded shape picks a >10 s
+  # bench_fail hang — the same hazard the sm_89 cards hit (rtx4080 seeding note). The w4x1/f1x2/k16 form
+  # (the sm_89 golden geometry) IS reachable here, 2.1x faster than the static form's best; d3 / p2 are
+  # within noise of d2/cp/ring.
+  - kernel: attention
+    name: gemma4_12b.attention.hd256.dynM
+    n_heads: 16
+    seq: 512
+    head_dim: 256
+    dtype: 'fp16'
+    causal: true
+    dynamic: true
+    knobs: {PLACE: 'fuse', STAGE: 'd2/cp/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', WSPEC: ''}
+    emmy_us: 39.3
+    cublas_us: 30.7
+  # Fast-math sibling: the bare TILE spells the f16-accumulate PV plan (the w4x1 form's realized
+  # TILE@pj geometry, w4x1/f1x32); scores stay f32-acc. Pinning the f16acc atom at the dd spelling
+  # (w4x1/f1x2/k16) instead degrades to a >10 s hang — the PV-plan spelling is the ONE that reproduces.
+  - kernel: attention
+    name: gemma4_12b.attention.hd256.dynM
+    n_heads: 16
+    seq: 512
+    head_dim: 256
+    dtype: 'fp16'
+    causal: true
+    dynamic: true
+    knobs: {PLACE: 'fuse', STAGE: 'd2/cp/ring', TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f1x32', WSPEC: ''}
+    emmy_us: 36.1
+    cublas_us: 30.7
+  # ---- norms -----------------------------------------------------------------------------------------
+  - kernel: rms_norm
+    name: gemma4_12b.rms_norm.k3840
+    M: 512
+    K: 3840
+    knobs: {REDUCE: 'b256'}
+    emmy_us: 6.3
+    cublas_us: 6.1
+  - kernel: rms_norm
+    name: gemma4_12b.rms_norm.k3840.dynM
+    M: 512
+    K: 3840
+    dynamic: true
+    knobs: {REDUCE: 'b256'}
+    emmy_us: 6.3
+    cublas_us: 6.1
+  # Q/K-norm over head_dim: 512 rows x (16 heads x 256) reshaped to 4096 x 256 (mirrors the rtx4090
+  # gemma4_12b.qknorm.k256 entry). Greedy's b256 benches 4.3; b64 / b128 tie at 3.6.
+  - kernel: rms_norm
+    name: gemma4_12b.qknorm.k256
+    M: 4096
+    K: 256
+    knobs: {REDUCE: 'b64'}
+    emmy_us: 3.6
+    cublas_us: 4.1

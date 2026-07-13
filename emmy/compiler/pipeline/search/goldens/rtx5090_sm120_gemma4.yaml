@@ -215,11 +215,17 @@ configs:
     emmy_us: 214.2
     cublas_us: 286.3
   # ---- attention (flash, hd256) ----------------------------------------------------------------------
-  # The static form narrowing REFUSES the w4x1 dd geometry (every w4x1 pin realizes w2x1/f1x8/k16 +
-  # w2x1/f1x32/k4, loudly flagged) and degrades any d2+ stage to d1 — so the static best is the w2x1 form
-  # on d1/cp, 2.1x slower than its own masked .dynM twin (which DOES take w4x1 + d2/cp/ring). cp beats
-  # tma by ~16% on this kernel (d1/cp 82.0 vs d1/tma 97.5). Torch SDPA is 30.7 µs — emmy hd256 remains
-  # register-bound (255 regs, 4% occ static / 17% dynM), the known hd256 codegen gap.
+  # Best form on both lanes is w4x1/f1x2/k16 (the sm_89 golden geometry): 4 warps, 16-key streaming
+  # blocks, 16 KB K/V slabs. Cold greedy instead ranks the w2x1/f1x8/k16 form (64 KB slabs, 64-thread
+  # CTAs) at 97 µs, 2.7x off — a pure flash-form rank miss (the w4x1 rows sit in the same fork; verified
+  # by pinning). PIN-SPELLING CONTRACT for static hd256: BOTH keyed pins must name one enumerated row —
+  # TILE@dd is w<um>x1/f<fm>x<nt>/k16 (bk = 256/atom_k) and TILE@pj is w<um>x1/f<fm>x32 (32 = 256/atom_n,
+  # its k = block/atom_k elided at 1); a pj spelled like the dd plan matches nothing and the fork falls
+  # back to greedy. Transport is LANE-dependent at this geometry, both directions reproduced 3x: the
+  # std (f32-acc PV) lane prefers d2/tma/ring (35.6 vs cp 39.1), the fm (f16-acc PV) lane prefers
+  # d2/cp/ring (36.5 vs tma 38.8); on the fat 64 KB w2x1 slabs cp had beaten tma (82 vs 97.5) — slab
+  # size flips it. Torch SDPA is 30.7 µs; emmy hd256 sits at 0.84-0.86x, register-bound (255 regs),
+  # the known hd256 codegen gap.
   - kernel: attention
     name: gemma4_12b.attention.hd256
     n_heads: 16
@@ -227,11 +233,12 @@ configs:
     head_dim: 256
     dtype: 'fp16'
     causal: true
-    knobs: {PLACE: 'fuse', STAGE: 'd1/cp', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w2x1/f1x32/k4', WSPEC: ''}
-    emmy_us: 82.0
+    knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32', WSPEC: ''}
+    emmy_us: 35.6
     cublas_us: 30.7
   # Fast-math sibling (FAST_MATH lane): P·V on the f16-accumulate atom, QK^T stays f32-acc (softmax
-  # statistics). FAST_EXP adds nothing on top (77.0 with, 77.1 without).
+  # statistics). Rides cp, not tma (36.5 vs 38.8 — the lane-flipped transport preference above).
+  # FAST_EXP adds nothing on top.
   - kernel: attention
     name: gemma4_12b.attention.hd256
     n_heads: 16
@@ -239,13 +246,13 @@ configs:
     head_dim: 256
     dtype: 'fp16'
     causal: true
-    knobs: {PLACE: 'fuse', STAGE: 'd1/cp', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w2x1/f1x32/k4', WSPEC: ''}
-    emmy_us: 77.1
+    knobs: {PLACE: 'fuse', STAGE: 'd2/cp/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x32', WSPEC: ''}
+    emmy_us: 36.5
     cublas_us: 30.7
   # Masked-flash twin: bare TILE (schema-enforced). Cold greedy on this unseeded shape picks a >10 s
-  # bench_fail hang — the same hazard the sm_89 cards hit (rtx4080 seeding note). The w4x1/f1x2/k16 form
-  # (the sm_89 golden geometry) IS reachable here, 2.1x faster than the static form's best; d3 / p2 are
-  # within noise of d2/cp/ring.
+  # bench_fail hang — the same hazard the sm_89 cards hit (rtx4080 seeding note). Same geometry and
+  # lane-dependent transport as the static twin (std tma 36.4 vs cp 39.3; fm cp 36.1 vs tma 38.1);
+  # d3 / p2 are within noise.
   - kernel: attention
     name: gemma4_12b.attention.hd256.dynM
     n_heads: 16
@@ -254,8 +261,8 @@ configs:
     dtype: 'fp16'
     causal: true
     dynamic: true
-    knobs: {PLACE: 'fuse', STAGE: 'd2/cp/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', WSPEC: ''}
-    emmy_us: 39.3
+    knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', WSPEC: ''}
+    emmy_us: 36.4
     cublas_us: 30.7
   # Fast-math sibling: the bare TILE spells the f16-accumulate PV plan (the w4x1 form's realized
   # TILE@pj geometry, w4x1/f1x32); scores stay f32-acc. Pinning the f16acc atom at the dd spelling

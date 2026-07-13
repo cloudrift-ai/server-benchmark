@@ -41,8 +41,8 @@
 | mlp_gate_up.dynM | same | 562.4 | 561.7 | 1.00× |
 | mlp_down | `w4x2/f2x4/k2 g4k d2/tma/ring` | 286.2 | 286.3 | 1.00× |
 | mlp_down.dynM | same | 286.2 | 286.3 | 1.00× |
-| attention.hd256 | `dd w2x1/f1x8/k16, pj w2x1/f1x32/k4, d1/cp` | 82.0 | 30.7 | **0.37×** |
-| attention.hd256.dynM | bare `w4x1/f1x2/k16, d2/cp/ring` | 39.3 | 30.7 | **0.78×** |
+| attention.hd256 | `dd w4x1/f1x2/k16, pj w4x1/f1x32, d2/tma/ring` | 35.6 | 30.7 | **0.86×** |
+| attention.hd256.dynM | bare `w4x1/f1x2/k16, d2/tma/ring` | 36.4 | 30.7 | **0.84×** |
 | rms_norm.k3840 (+dynM) | `b256` | 6.3 | 6.1 | 0.97× |
 | qknorm.k256 | `b64` | 3.6 | 4.1 | **1.14×** |
 
@@ -59,31 +59,43 @@ where the small-N gemma projections live (their un-split grids underfill 170 SMs
 | o_proj (+dynM) | `f16acc w4x2/f4x8/k4 g2k d2/tma/ring` | 64.1 / 63.9 | 0.78× | **1.61×** |
 | mlp_gate_up (+dynM) | `f16acc w4x2/f4x8/k4 d2/tma/ring` | 362.4 | 0.65× | **1.58×** |
 | mlp_down (+dynM) | `f16acc w4x2/f4x8/k4 g2k d2/tma/ring` | 214.2 | 0.75× | **1.34×** |
-| attention.hd256 | fm P·V (`pj` f16acc) | 77.1 | 0.94× | 0.40× |
-| attention.hd256.dynM | bare fm PV plan `w4x1/f1x32` | 36.1 | 0.92× | **0.85×** |
+| attention.hd256 | fm P·V (`pj` f16acc), `d2/cp/ring` | 36.5 | 1.03× (loses) | 0.84× |
+| attention.hd256.dynM | bare fm PV plan `w4x1/f1x32`, `d2/cp/ring` | 36.1 | 0.99× | **0.85×** |
 
 The big-tile f16acc family sweeps the gemma projections exactly as it did the h4096 set (PR #350) — every
 matmul 1.3–1.6× past cuBLAS HGEMM. The masked (.dynM) tiles pay no penalty anywhere: dynM ≈ static within noise
 on all five matmuls, matching the 07-12 sweep's observation.
 
-## Finding 1 — static hd256 flash is locked out of the form its own masked twin runs (2.1×)
+## Finding 1 — the hd256 flash gap was a greedy rank miss + a pin-spelling trap, NOT a form lockout
 
-Every static `TILE@dd`/`TILE@pj` pin at the `w4x1` geometry is loudly rejected ("unreproducible pin": realized
-`w2x1/f1x8/k16` + `w2x1/f1x32/k4`), and any `d2+` STAGE degrades to `d1` — so the static flash tops out at
-82.0 µs (4% occupancy, 255 regs). The **masked dynM form takes `w4x1/f1x2/k16 + d2/cp/ring` happily and runs
-39.3 µs** — 2.1× faster, at 17% occupancy, on the *same* card and problem. The static form narrowing is leaving
-2× on the table for hd256; worth a look at whether the w4x1 static form is refused for a real correctness
-reason or just never offered. (The pin-verification gate from #335 made this a 2-minute diagnosis — every
-degrade was flagged, nothing silent.)
+**Corrected 2026-07-13 (same day, follow-up commit).** The sweep's first reading — "the static form narrowing
+refuses the `w4x1` geometry the masked twin runs" — was wrong. The `w4x1/f1x2/k16` rows sit in the static fork
+(the `twisted_warp_moves()` grid enumerates `(um=4, nt=2)`, and the 512-seq divisibility gates pass); pinned
+with the CORRECT spelling they realize cleanly and run **35.6 µs — 2.3× faster than the 82.0 µs the sweep first
+recorded, and at parity with the masked twin (36.4)**. Two separate things had masked it:
 
-Torch SDPA is 30.7 µs here, so even the best emmy flash (36.1 fm dynM) is 0.85× — the residual is the known
-hd256 register-pressure codegen gap (243–255 regs), not search.
+1. **Greedy misranks the flash forms**: cold greedy picks `w2x1/f1x8/k16` (64 KB K/V slabs, 64-thread CTAs,
+   97 µs) over the `w4x1` form (16 KB slabs, 35.6 µs) sitting in the same fork — a 2.7× rank miss. That's a
+   prior problem, and exactly what the recorded golden now pins.
+2. **The static pin contract is all-or-nothing across BOTH keyed pins**: `TILE@dd` and `TILE@pj` must together
+   name one enumerated row. The PV plan's spelling is NOT the dd plan's — for hd256 w4x1 it is `w4x1/f1x32`
+   (32 = head_dim/atom_n, the k suffix elided at 1). The sweep's first pins spelled pj like dd
+   (`f1x2/k16` / `f1x4/k8`), matched nothing, and `_narrow_flash_forms` kept the full fork → greedy's w2x1 row
+   benched under the pin's name, loudly flagged "unreproducible". The flags were read as a form refusal; they
+   were a no-match. Proposal stands from the 4090 report: a pin matching no offered row should FAIL rather
+   than fall back with a flag, and an `emmy eval offer` view would have shown the w4x1 rows immediately.
 
-## Finding 2 — cp.async beats TMA by ~16% on the hd256 flash K/V stream
+Torch SDPA is 30.7 µs; all four recorded entries now sit at 0.84–0.86× — the residual is the known hd256
+register-pressure codegen gap (255 regs), not search.
 
-`d1/cp` = 82.0 vs `d1/tma` = 97.5 µs (static), and the dynM winner is `d2/cp/ring` (39.3) vs `d1/tma` (44.5).
-All the 5090 hd64/hd128 attention goldens ride `d2/tma/ring` — hd256 inverts the transport preference. Deeper
-staging (`d3`) and `p2` are within noise of `d2/cp/ring`; `FAST_EXP` adds nothing (77.0 vs 77.1).
+## Finding 2 — the K/V transport preference is slab-size- and lane-dependent, not "cp beats tma"
+
+**Corrected alongside finding 1.** On the fat `w2x1` slabs (64 KB/step) cp.async beat TMA 16% (82.0 vs 97.5).
+At the winning `w4x1` geometry (16 KB slabs) it flips per lane, reproduced 3× in both directions and identical
+on the static and masked forms: the **std (f32-acc PV) lane prefers `d2/tma/ring`** (35.6 vs cp 39.1 static;
+36.4 vs 39.3 dynM), the **fm (f16-acc PV) lane prefers `d2/cp/ring`** (36.5 vs tma 38.8 static; 36.1 vs 38.1
+dynM). Deeper staging (`d3`, `d4`) and `p2` are within noise; `FAST_EXP` adds nothing. The recorded entries
+carry each lane's own transport.
 
 ## Finding 3 — the fm bare-TILE spelling for masked flash must be the PV plan, and the dd spelling hangs
 

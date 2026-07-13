@@ -20,11 +20,13 @@ derived from the recorded knobs (``GoldenConfig.fast_math``), and the rank / rep
 views compare each entry against its own regime's enumeration.
 
 This module is import-light (no torch / cupy at module top) so passes and tests
-can read :data:`GOLDEN_CONFIGS` cheaply. The data lives as **one YAML file per GPU**
+can read :data:`GOLDEN_CONFIGS` cheaply. The data lives as **per-GPU YAML files**
 under ``goldens/`` (e.g. ``goldens/rtx5090_sm120.yaml``): a ``gpu_name`` /
 ``compute_cap`` header plus a ``configs`` list, each tagged with a ``kernel``
-discriminator (``matmul`` / ``reduce`` / ``pointwise``). :func:`_load_goldens`
-concatenates every file into :data:`GOLDEN_CONFIGS`. The set is hand-maintained via
+discriminator (``matmul`` / ``reduce`` / ``pointwise``). A GPU may carry more than
+one file (a themed set such as ``rtx5090_sm120_gemma4.yaml`` beside the card's main
+file — same header, merged by the live-GPU ``(gpu_name, compute_cap)`` scoping).
+:func:`_load_goldens` concatenates every file into :data:`GOLDEN_CONFIGS`. The set is hand-maintained via
 the CLI golden workflow — ``emmy tune --golden NAME --bench`` records the
 winning knobs / latencies into the GPU's YAML, ``emmy eval golden`` validates.
 For the **fp32** configs the reference is

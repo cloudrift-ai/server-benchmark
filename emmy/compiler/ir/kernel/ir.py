@@ -447,6 +447,10 @@ class CpAsyncCopy(Stmt):
     src: str  # source global buffer name
     src_index: tuple
     nbytes: int = 4  # bytes per cp.async (4/8/16); 16 ⇒ .cg, else .ca
+    # Software smem swizzle mode ("NONE"/"B32"/"B64"/"B128"): XOR the flattened destination
+    # element index via ``emmy_swizzle_<mode>`` — the same address-based permutation the
+    # ``LdmatrixLoad`` drain applies, so a swizzled slab round-trips (``LDMATRIX_SWIZZLE_XOR``).
+    swizzle: str = "NONE"
 
     def external_reads(self) -> tuple[str, ...]:
         return (self.src,)
@@ -454,13 +458,16 @@ class CpAsyncCopy(Stmt):
     def pretty(self, indent: str = "") -> list[str]:
         smem_idx = ", ".join(e.pretty() for e in self.smem_index)
         src_idx = ", ".join(e.pretty() for e in self.src_index)
-        return [f"{indent}cp.async[{self.nbytes}B] {self.smem}[{smem_idx}] <- {self.src}[{src_idx}]"]
+        swz = f" swz={self.swizzle}" if self.swizzle in LDMATRIX_SWIZZLE_XOR else ""
+        return [f"{indent}cp.async[{self.nbytes}B] {self.smem}[{smem_idx}]{swz} <- {self.src}[{src_idx}]"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         from emmy.compiler.ir.stmt import render_index
 
         smem_flat = render_index(self.smem, self.smem_index, ctx)
         src_flat = render_index(self.src, self.src_index, ctx)
+        if self.swizzle in LDMATRIX_SWIZZLE_XOR:
+            smem_flat = f"emmy_swizzle_{self.swizzle.lower()}({smem_flat})"
         pad = _pad(ctx.indent)
         # ``emmy_cp_async_{cg,ca}`` (the cp.async prelude) does the ``cvta`` internally, so this is a
         # single call — no ``_smem_addr`` local and no wrapping ``{ }`` block. .cg is 16-byte-only.
@@ -1243,6 +1250,14 @@ class RegFragment(Stmt):
 # 8-row × atom period divides the slab + slot strides, so the XOR is correct
 # measured from the buffer base. Maps mode → (element shift, row mask); the
 # chunk delta is always ``<< 3``.
+#
+# The XOR is purely address-based, so it is also the SOFTWARE swizzle: a
+# ``cp.async``-filled slab applies the same helper to its fill DESTINATION
+# index (:class:`CpAsyncCopy` ``swizzle``) and the ldmatrix drain reads it
+# back through the identical XOR — fill and drain agree by construction, no
+# hardware copy engine involved. Intra-chunk bits (0..2) pass through, so
+# narrower 4/8-byte fills keep their offset inside the relocated 16-byte
+# chunk and ``cp.async`` address alignment is preserved.
 LDMATRIX_SWIZZLE_XOR: dict[str, tuple[int, int]] = {
     "B128": (6, 0x7),
     "B64": (6, 0x3),
@@ -2107,6 +2122,7 @@ def _(s: CpAsyncCopy, rename, sigma, axis_fn):
         src=s.src,
         src_index=tuple(sigma.apply(e) for e in s.src_index),
         nbytes=s.nbytes,
+        swizzle=s.swizzle,
     )
 
 

@@ -1,8 +1,9 @@
-# WSPEC over cp.async — producer fill band for the latency-starved sm_89 warp kernels (scoping)
+# WSPEC over cp.async — producer fill band for the latency-starved sm_89 warp kernels (REFUTED)
 
-> Scoping doc for the one remaining credible lever on the sm_89 residual gap to cuBLAS (~8% on the fm
-> winners), after two measured dead ends. Status: **not started; gated on a prototype** (see the phasing —
-> this family of hypotheses has a 0-for-2 record this week and earns no implementation before a measured win).
+> Status: **REFUTED by the phase-1 hand prototype (2026-07-12, rented 4090, 176.124.69.204) — do not
+> implement.** Six variants measured, all bit-identical to the baseline, best split −29% vs baseline; the
+> full result and the two hardware mechanisms the scoping math missed are in "Prototype result" at the
+> bottom. Phases 2–3 are dead. The scoping content below is kept as written for the record.
 
 ## Why (the evidence chain that leads here)
 
@@ -81,3 +82,48 @@ range: 0–8% (the full residual). It also composes with `RASTER` and the fm ato
    already opt-in via search/pins); coverage tests mirroring the TMA WSPEC ones.
 3. Manual `--ab` A/Bs on the 4090 golden set (`WSPEC=p1/p2` over the fm winners); record `[fm]`+WSPEC golden
    entries where they win; findings update.
+
+## Prototype result (2026-07-12, rented 4090 176.124.69.204) — REFUTED, gate failed decisively
+
+Hand prototype built exactly as phased: the dumped gate_up fm winner (`k_matmul_a8ecf3`, `w4x1/f4x8/k2
+d2/cp/ring`, 512×4096 @ 4096×28672) split into consumer warps + a producer band owning all `LDGSTS` fills,
+handed off through per-slot mbarriers (`cp.async.mbarrier.arrive.noinc` producer-side, spin on
+`mbarrier.test_wait.parity` consumer-side — no `try_wait` on sm_89 — consumers release each slot *before*
+their register-only promotes, no `__syncthreads` in the K loop). Harness + kernels on the box under
+`_tune/codegen/` (`wspec-proto.py`, `wspec_p1.cu`, `wspec_merged.cu`); every variant's output is
+**bit-identical** to the baseline (same per-accumulator op order), so the handoff machinery itself is sound
+and reusable. Three interleaved rounds each:
+
+| variant | warps/SM | ptxas regs (spill B) | µs (3 rounds) | vs fm |
+| --- | --- | --- | --- | --- |
+| fm baseline, 2 CTA/SM | 8 | 250 (0) | 796 / 802 / 830 | — |
+| fm forced 1 CTA/SM (41KB smem pad — iso-warp control) | 4 | 250 (0) | 1122 / 1070 / 1108 | +35% |
+| p1: 128 consumers + 32 producers | 5 | 238 (0) | 1171 / 1160 / 1190 | +45% |
+| p2: 128 + 64 | 6 | 238 (0) | 1034 / 1043 / 1060 | +29% |
+| p1 forced 2 CTA/SM (`__launch_bounds__(160,2)`) | 10 | 168 (452) | 2209–2212 | 2.7× |
+| merged super-CTA: 2 N-tiles sharing the A slab + 1 producer warp, 288 thr | 9 | 168 (436) | 1773–1831 | 2.2× |
+
+Two hardware facts kill the idea on sm_89, both missed by the scoping math above:
+
+1. **Registers are allocated uniformly per kernel** — there is no `setmaxnreg` before sm_90, so "32
+   producers × ~40 regs" does not exist: every producer warp costs the full kernel regcount. The scoping
+   doc's 30080-regs-still-2-CTAs arithmetic was unrealizable from the start.
+2. **The 64K regfile is banked 16K per SM sub-partition.** At 250 regs the baseline sits at exactly 2
+   warps/SMSP (16000/16384) — 8 warps/SM is a *hardware ceiling* for this tile family, and any 9th resident
+   warp puts 3 warps on one SMSP, capping the whole kernel at 16384/3/32 → **168 regs**. ptxas confirms:
+   both the 9-warp merged CTA and the 10-warp lb2 target compile to exactly 168 regs and spill ~60
+   accumulator registers (436–452 B) → the 2.2–2.7× rows. The merged shape was tried twice (A fragments
+   cached, then streamed per M-row to shave 12 regs) — ptxas lands on the same 168-reg plateau either way.
+
+And the iso-warp-count control shows there was no latent win to unlock anyway: at 4 compute warps/SM,
+self-filling (1100) vs producer-split (p1 1173, p2 1046) is **±6%** — decoupling fill issue from the
+consumers is roughly perf-neutral, so the 76%-no-eligible latency starvation is *not* fill-issue coupling;
+it is the warp count itself, which this family cannot raise. Producer-band warp specialization on sm_89
+could only pay inside tile families that already fit ≥3 warps/SMSP (≤168 regs), and the manual sweeps
+showed those geometries lose the fm winners' margin outright. WSPEC stays TMA-only (sm_90+, where
+`setmaxnreg` also exists).
+
+(Same-session postscript: the residual itself turned out NOT to be structural — it was ldmatrix bank
+conflicts from the unswizzled cp.async staging, prototyped at −12–17% and past cuBLAS; see
+`cpasync-slab-swizzle-findings.md`. The latency starvation these splits tried to fix was largely
+conflict-replay latency in the shared pipe.)

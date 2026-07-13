@@ -1,4 +1,4 @@
-# Gemma-4 golden seeding — RTX 5090 (sm_120), manual A/B sweep findings
+# Gemma-4 golden seeding — RTX 5090 (sm_120) + RTX 4090 (sm_89), manual A/B sweep findings
 
 - **Date / method**: 2026-07-13, local RTX 5090, manual pinned `--ab` exploration (no tuner runs, no search-code
   changes). Per shape: one broad round of 4–6 pinned candidates from the card's known winner families via
@@ -157,3 +157,64 @@ EMMY_KNOBS="TILE=a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4,REDUCE=g2k,RASTER=,STAGE=d2
 # golden replay (works for 11 of 15 names):
 venv/bin/emmy run --bench --golden gemma4_12b.q_proj
 ```
+
+---
+
+# Part 2 — RTX 4090 (sm_89), 2026-07-13 (post-#352 merge, branch feature/gemma4-goldens-rtx4090)
+
+- **Method**: same manual pinned `--ab` workflow, run over SSH on a rented CloudRift RTX 4090
+  (riftuser@176.124.69.202; fresh `make setup` — needed `python3.12-venv` + `python3.12-dev` apt packages and
+  `/usr/local/cuda/bin` on PATH for non-interactive shells; the Makefile's `setup` target silently no-ops when a
+  half-built `venv/` exists from a failed install). One broad round (candidates from the post-swizzle
+  `rtx4090_sm89.yaml` h4096 winner families), one refinement round, winners 3× reproduced at ≤1% spread. All runs
+  deploy-pinned via `EMMY_KNOBS` (dodges greedy hazards up front).
+- **Deliverable**: `goldens/rtx4090_sm89_gemma4.yaml` — **23 entries / 11 names**: the 5 matmul shapes ×
+  {static, dynM} × {standard, fm} + attention hd256 **static** (std + fm). The gemma norm entries and
+  `attention.hd256.dynM` already live in `rtx4090_sm89.yaml` and were not duplicated.
+
+## Per-shape outcomes (all -O3 `--ab` rows, 3× reproduced; split-K totals; ref = median live eager)
+
+### Standard lane (f32-accumulate)
+
+| shape | config | emmy µs | cuBLAS µs | vs cuBLAS |
+| --- | --- | --: | --: | --: |
+| q_proj (+dynM) | `w2x2/f4x4/k2 d2/cp/ring/p2` (un-split) | 102.3 / 101.9 | 104 / 103 | **1.02×** |
+| kv_proj (+dynM) | `w2x2/f4x4/k2 g2k d2/cp/ring` | 57.2 / 58.4 | 49.0 | **0.86× / 0.84×** |
+| o_proj (+dynM) | `w2x2/f4x4/k2 d2/cp/ring/p2` | 109.3 / 108.8 | 115.0 | **1.05×** |
+| mlp_gate_up (+dynM) | `w4x1/f4x8/k2 d2/cp/ring` | 877.6 / 879.6 | 801 / 799 | **0.91×** |
+| mlp_down (+dynM) | `w2x2/f4x8 g2k d2/cp/ring` | 395.3 / 395.8 | 392 / 393 | 0.99× |
+| attention.hd256 (static) | `dd w4x1/f1x2/k16, pj w4x1/f1x32, d2/cp/ring` | 44.3 | 41.0 | 0.93× |
+
+### Fast-math lane (f16-accumulate atom — the post-swizzle atom-swap family)
+
+| shape | config | emmy µs | vs cuBLAS |
+| --- | --- | --: | --: |
+| q_proj (+dynM) | `f16acc w2x2/f4x8/k2 g2k d2/cp/ring` | 84.5 / 84.0 | **1.23×** |
+| kv_proj (+dynM) | `f16acc w2x2/f4x8/k2 g4k` | 48.0 / 47.8 | **1.02×** |
+| o_proj (+dynM) | `f16acc w2x2/f4x8/k2 g2k` | 85.8 / 88.8 | **1.34× / 1.30×** |
+| mlp_gate_up (+dynM) | `f16acc w4x1/f4x8/k2` | 719.9 / 718.8 | **1.11×** |
+| mlp_down (+dynM) | `f16acc w2x2/f4x8/k2 g2k` | 291.7 / 293.0 | **1.34×** |
+| attention.hd256 (static) | fm P·V (`pj` f16acc), `d2/cp/ring` | 40.1 | **1.02× — beats torch SDPA** |
+
+## 4090-specific findings
+
+1. **The fm atom-swap family sweeps here too** (`w2x2/f4x8/k2`, gate_up on `w4x1/f4x8/k2`) at 1.02–1.34×, and
+   the attention fm sibling is the **first emmy-past-torch-SDPA hd256 entry on sm_89** (40.1 vs 41.0).
+2. **The std lane's q/o_proj winner is the un-split `p2` reg double-buffer** (not split-K as on the 5090) —
+   the post-swizzle "p2 newly pays on big tiles" observation extends to the gemma projections.
+3. **kv_proj and mlp_gate_up std stay below parity** (0.86× / 0.91×) with nothing in the knob space closing it
+   (g4k/g8k/p2/wide-f4x8/w1x4 all worse) — the known sm_89 latency-bound residual; the gemma gate_up shape is
+   nonetheless better than its h4096 twin (0.91× vs 0.78×).
+4. **Flash form realization is the mirror image of the 5090**: on sm_89 the `w2x1` static form is the one that
+   does NOT realize (flagged unreproducible), and the `nt=4` dd spelling realizes back to nt=2 — so the 5090's
+   nt=4 parity alternate has no sm_89 twin. The `w4x1` + PV-plan-spelled pj contract from Part 1 carries over
+   verbatim.
+5. Same pin-leak hazard hit once during replay validation: an un-keyed matmul `TILE` in `EMMY_KNOBS` leaked
+   onto the flash kernel of the attention golden's run and hung it (>10 s abort) — replay attention goldens with
+   a flash-shaped pin.
+
+## Repro / artifacts
+
+Box work dir `~/emmy/_tune/gemma4-goldens-4090/` (rented box — copy off or accept loss on teardown): sweep.log,
+rep.log, per-shape `--json` A/B records. Replay validated on-box for q_proj, kv_proj.dynM, mlp_gate_up,
+attention.hd256 (all within noise of the recordings, clean flags).

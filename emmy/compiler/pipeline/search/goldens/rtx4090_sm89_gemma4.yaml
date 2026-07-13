@@ -1,0 +1,243 @@
+# Gemma-4-12B kernel shapes (hidden 3840, intermediate 15360, 16 Q / 8 KV heads, head_dim 256) on the
+# RTX 4090 — seeded 2026-07-13 by a manual pinned --ab sweep on a rented CloudRift box (no tuner), each
+# entry 3x reproduced at <=1% spread. cublas_us is the median live `Eager PyTorch` row (cuBLAS HGEMM for
+# the matmuls, torch SDPA for attention). Companion of rtx5090_sm120_gemma4.yaml; the gemma norm entries
+# (rms_norm.k3840(+dynM), gemma4_12b.qknorm.k256) and attention.hd256.dynM already live in
+# rtx4090_sm89.yaml and are NOT duplicated here.
+#
+# sm_89 notes: all cp.async staging (no TMA tier on this cap). The std lane's q/o_proj winner is the
+# un-split w2x2/f4x4/k2 on d2/cp/ring/p2 (the ldmatrix reg double-buffer); kv_proj and mlp_gate_up std
+# sit BELOW parity (0.86x / 0.91x — the known sm_89 latency-bound residual; nothing in the knob space
+# closes it, matching the h4096 twins). The fm lane is the post-swizzle f16acc atom-swap family
+# (w2x2/f4x8/k2, w4x1/f4x8/k2 on gate_up) — 1.02-1.35x past cuBLAS everywhere, and the attention fm
+# sibling BEATS torch SDPA (40.1 vs 41.0).
+gpu_name: NVIDIA GeForce RTX 4090
+compute_cap:
+  - 8
+  - 9
+configs:
+  # ---- attention projections -------------------------------------------------------------------------
+  - kernel: matmul
+    name: gemma4_12b.q_proj
+    M: 512
+    N: 4096
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring/p2', WSPEC: ''}
+    emmy_us: 102.3
+    cublas_us: 104.0
+  - kernel: matmul
+    name: gemma4_12b.q_proj
+    M: 512
+    N: 4096
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 84.5
+    cublas_us: 104.0
+  - kernel: matmul
+    name: gemma4_12b.q_proj.dynM
+    M: 512
+    N: 4096
+    K: 3840
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring/p2', WSPEC: ''}
+    emmy_us: 101.9
+    cublas_us: 103.0
+  - kernel: matmul
+    name: gemma4_12b.q_proj.dynM
+    M: 512
+    N: 4096
+    K: 3840
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 84.0
+    cublas_us: 103.0
+  # kv_proj (8 KV heads x 256 = N 2048; k/v dedup into one kernel launched twice). The std lane tops out
+  # at 0.86x (w1x4/f4x4 g2k ties, g4k/g8k/p2/f4x8 all worse) — sm_89 residual; the fm g4k entry is the
+  # deployable winner at 1.02x.
+  - kernel: matmul
+    name: gemma4_12b.kv_proj
+    M: 512
+    N: 2048
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 57.2
+    cublas_us: 49.0
+  - kernel: matmul
+    name: gemma4_12b.kv_proj
+    M: 512
+    N: 2048
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 48.0
+    cublas_us: 49.0
+  - kernel: matmul
+    name: gemma4_12b.kv_proj.dynM
+    M: 512
+    N: 2048
+    K: 3840
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 58.4
+    cublas_us: 49.0
+  - kernel: matmul
+    name: gemma4_12b.kv_proj.dynM
+    M: 512
+    N: 2048
+    K: 3840
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 47.8
+    cublas_us: 49.0
+  - kernel: matmul
+    name: gemma4_12b.o_proj
+    M: 512
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring/p2', WSPEC: ''}
+    emmy_us: 109.3
+    cublas_us: 115.0
+  - kernel: matmul
+    name: gemma4_12b.o_proj
+    M: 512
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 85.8
+    cublas_us: 115.0
+  - kernel: matmul
+    name: gemma4_12b.o_proj.dynM
+    M: 512
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring/p2', WSPEC: ''}
+    emmy_us: 108.8
+    cublas_us: 115.0
+  - kernel: matmul
+    name: gemma4_12b.o_proj.dynM
+    M: 512
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 88.8
+    cublas_us: 115.0
+  # ---- MLP -------------------------------------------------------------------------------------------
+  # mlp_gate_up (fused gate+up, N 30720): std 0.91x — better than the h4096 twin's 0.78x but still the
+  # sm_89 gate_up gap (w4x1/f4x4/k2, w2x4/f4x4, w1x4/f4x8, w2x2 and p2 all worse). fm at 1.11x.
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up
+    M: 512
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 877.6
+    cublas_us: 801.0
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up
+    M: 512
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 719.9
+    cublas_us: 801.0
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up.dynM
+    M: 512
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 879.6
+    cublas_us: 799.0
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up.dynM
+    M: 512
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 718.8
+    cublas_us: 799.0
+  # mlp_down (deep K 15360): std at parity on the un-k'd wide tile; fm 1.34x.
+  - kernel: matmul
+    name: gemma4_12b.mlp_down
+    M: 512
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 395.3
+    cublas_us: 392.0
+  - kernel: matmul
+    name: gemma4_12b.mlp_down
+    M: 512
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 291.7
+    cublas_us: 392.0
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.dynM
+    M: 512
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 395.8
+    cublas_us: 393.0
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.dynM
+    M: 512
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 293.0
+    cublas_us: 393.0
+  # ---- attention (flash, hd256, STATIC — the .dynM golden lives in rtx4090_sm89.yaml) ----------------
+  # Same w4x1 geometry + pin-spelling contract as the 5090 file (TILE@pj is the PV plan w4x1/f1x32; a
+  # dd-spelled pj matches nothing). On sm_89 the w2x1 form does NOT realize (flagged unreproducible —
+  # the mirror image of the 5090, where w2x1 was the greedy pick) and the nt=4 dd spelling
+  # (w4x1/f1x4/k16) realizes back to nt=2. d3 / p2 within noise; no TMA tier on this cap.
+  - kernel: attention
+    name: gemma4_12b.attention.hd256
+    n_heads: 16
+    seq: 512
+    head_dim: 256
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', STAGE: 'd2/cp/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32', WSPEC: ''}
+    emmy_us: 44.3
+    cublas_us: 41.0
+  # Fast-math sibling (FAST_MATH lane): P·V on the f16-accumulate atom, QK^T stays f32-acc. BEATS torch
+  # SDPA (1.02x) — the first emmy-past-SDPA hd256 entry on sm_89.
+  - kernel: attention
+    name: gemma4_12b.attention.hd256
+    n_heads: 16
+    seq: 512
+    head_dim: 256
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', STAGE: 'd2/cp/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x32', WSPEC: ''}
+    emmy_us: 40.1
+    cublas_us: 41.0

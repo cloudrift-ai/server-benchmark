@@ -104,8 +104,10 @@ def _try_vec_store(stmts: Iterable[Stmt], start: int, n: int, top: KernelOp) -> 
     if not all(isinstance(s, Write) for s in writes):
         return None
     # Already-widened Writes in the run aren't safe to re-merge — bail. Atomic reduce-writes
-    # never vectorize (each contributing lane needs its own ``atomicAdd``).
-    if any(s.is_vector or s.atomic for s in writes):
+    # never vectorize (each contributing lane needs its own ``atomicAdd``). A swizzled-slab
+    # run may merge only with a UNIFORM mode (the alignment proof below then keeps the
+    # n-aligned run inside one 16-byte swizzle chunk, where the XOR passes bits 0..2 through).
+    if any(s.is_vector or s.atomic for s in writes) or len({s.swizzle for s in writes}) != 1:
         return None
 
     outputs = {s.output for s in writes}
@@ -165,4 +167,5 @@ def _try_vec_store(stmts: Iterable[Stmt], start: int, n: int, top: KernelOp) -> 
         index=writes[0].index,
         values=tuple(s.value for s in writes),
         value_dtype=writes[0].value_dtype,
+        swizzle=writes[0].swizzle,
     )

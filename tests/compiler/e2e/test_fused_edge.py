@@ -175,6 +175,44 @@ def _rmsnorm_linear_check(g: Graph, S: int, H: int, inter: int, *, want_mma: boo
 
 
 @requires_cuda
+@pytest.mark.parametrize(
+    "tile",
+    [
+        "a:mma_m16n8k16_f16_f32/w2x4/f2x4/k4",  # bk 64 elems + tile_n 128 → both slabs B128
+        "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2",  # bk 32 elems + tile_n 32 → both slabs B64
+    ],
+)
+def test_fused_sync_fill_slab_swizzle(tile, monkeypatch):
+    """The sync compute-fill's slab swizzle round-trips — fill-side ``Write`` XOR = drain-side
+    ``ldmatrix`` XOR, at both derived modes (B64 / B128). Regression for the silent fill-side
+    drop (a pass reconstructing ``Write`` without ``swizzle`` left the fill row-major under a
+    swizzled drain — a scrambled A tile whose matmul output still PASSED the runner's loose
+    accuracy tolerance, caught only by this rtol). The structural assert pins that the fill
+    actually swizzles — a future silent drop fails loudly here instead of shipping garbage."""
+    monkeypatch.setenv("EMMY_TILE", tile)
+    S, H, inter = 64, 1024, 3072
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (1, S, H), F16), node_id="x")
+    g.add_node(InputOp(), [], Tensor("nw", (H,), F16), node_id="nw")
+    g.add_node(InputOp(), [], Tensor("wg", (inter, H), F16), node_id="wg")
+    g.add_node(RmsNormOp(eps=1e-6), ["x", "nw"], Tensor("xn", (1, S, H), F16), node_id="xn")
+    g.add_node(LinearOp(), ["xn", "wg"], Tensor("o", (1, S, inter), F16), node_id="o")
+    g.inputs, g.outputs = ["x", "nw", "wg"], ["o"]
+    rng = np.random.default_rng(0)
+    ins = {
+        "x": (rng.standard_normal((1, S, H)) * 0.3).astype(np.float16),
+        "nw": (rng.standard_normal((H,)) * 0.3).astype(np.float16),
+        "wg": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
+    }
+    got, srcs = _compile_run(g, ins)
+    assert len(srcs) == 1 and "emmy_mma" in srcs[0]
+    assert "emmy_swizzle" in srcs[0], "the sync compute-fill must swizzle its slabs (fill-side Write XOR)"
+    x, nw, wg = (ins[k].astype(np.float32) for k in ("x", "nw", "wg"))
+    rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
+    np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), rms @ wg.T, atol=0.5, rtol=0.1)
+
+
+@requires_cuda
 @requires_sm90
 @pytest.mark.parametrize("runtime_s", [31, 130])
 def test_fused_rmsnorm_linear_symbolic_m(runtime_s, monkeypatch):

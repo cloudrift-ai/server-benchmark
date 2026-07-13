@@ -356,6 +356,11 @@ class SyncOperand:
     tag: str  # "a" / "b" — the smem-slab suffix
     shape: tuple[int, int]  # (rows, cols) of one ring slot
     value: Callable[[Expr, Expr, Expr], tuple[list[Stmt], str]]  # (k0, row, col) -> (stmts, name)
+    # Smem swizzle mode this slab is written with ("NONE"/"B32"/"B64"/"B128") — the mma tier's
+    # `_MmaOps.slab_swizzles`, applied by the fill's ``Write`` (the same flattened-index XOR the
+    # cp.async fill uses) and read back by the ``ldmatrix`` drain. NONE outside the mma tier
+    # (a plain-``Load`` drain cannot read a swizzled slab).
+    swizzle: str = "NONE"
 
     @property
     def slab(self) -> str:
@@ -424,6 +429,7 @@ class SyncTransport:
             off = op.slot_row(slot)
             smem_row = _add(off, row) if off is not None else row
             body: list[Stmt] = []
+            vals: list[str] = []
             for j in range(v):
                 cell_col = _add(col, _lit(j)) if j else col
                 stmts, val = op.value(k0, row, cell_col)
@@ -433,7 +439,14 @@ class SyncTransport:
                 sfx = f"__c{j}"
                 ren = lambda nm, local=local, sfx=sfx: f"{nm}{sfx}" if nm in local else nm  # noqa: E731
                 body += [st.rewrite(ren) for st in stmts]
-                body.append(Write(output=op.slab, index=(smem_row, cell_col), value=f"{val}{sfx}"))
+                vals.append(f"{val}{sfx}")
+            # ONE vector Write per run (the run is ``V`` contiguous 16-byte-aligned cells, so the
+            # store is a single st.128 like the cp.async fill's chunk deposit) — V scalar 2 B
+            # stores at 16 B thread stride were 8-way bank-conflicted, and the downstream
+            # vectorizer cannot re-merge them (the run base's ``(fe·V) % cols`` anchor defeats
+            # its affine alignment proof). A swizzled slab relocates the whole aligned chunk
+            # (the XOR passes intra-chunk bits through), so the vector store stays legal.
+            body.append(Write(output=op.slab, index=(smem_row, col), values=tuple(vals), swizzle=op.swizzle))
             out.append(StridedLoop(axis=fe, start=self.cta.linear_tid, step=_lit(self.cta.n_threads), body=Body(tuple(body)), unroll=False))
         return out
 

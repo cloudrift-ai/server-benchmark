@@ -422,7 +422,7 @@ def _stat_slab(name: str) -> str:
 
 
 def _sync_operands(
-    c: Contraction, bk_elems: int, mn: tuple[Side, Side], cta: CtaTile
+    c: Contraction, bk_elems: int, mn: tuple[Side, Side], cta: CtaTile, swizzles: tuple[str, str] = ("NONE", "NONE")
 ) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...], list[Stmt]]:
     """The ``sync``-transport (fused-edge) operands + the one-shot prologue stmts, returned as
     ``(drain-ordered operands, compute-filled, cp.async-filled, prologue)``: A is **compute-filled**
@@ -469,14 +469,20 @@ def _sync_operands(
         prologue = sync_stat_fill(stats=stats, slab_of=_stat_slab, row_axis=row_axis, row_body=row_body, cta=cta)
     # One B slab per fold channel (the multi-B node fills each projection's weights alongside the
     # one compute-filled A slab); drain order is (A, B0, B1, …) regardless of which fill each rides.
-    a_op = SyncOperand(tag="a", shape=(mn[0].tile, bk_elems), value=a_value)
+    # ``swizzles`` are the per-operand slab modes (the mma tier's ``slab_swizzles``; NONE elsewhere):
+    # every fill kind applies the same flattened-index XOR — the compute fill / transposed-B copy
+    # through the ``Write``'s ``swizzle``, the canonical-B cp.async through its ``Operand`` — and
+    # the ldmatrix drain reads each slab back through its own mode. Unswizzled these slabs drain
+    # 4-way (64 B A rows) / 8-way (128 B B rows) bank-conflicted — the measured megakernel residual
+    # (294.9 M ld conflicts / 82.5 M LSU inst on the gemma-shape fused edge, 5090).
+    a_op = SyncOperand(tag="a", shape=(mn[0].tile, bk_elems), value=a_value, swizzle=swizzles[0])
     drain: list = [a_op]
     sync_ops: list[SyncOperand] = [a_op]
     async_ops: list[Operand] = []
     for f, (bl, _) in enumerate(c.folds):
         tag = "b" if f == 0 else f"b_x{f}"
         if c.b_trans:
-            op = SyncOperand(tag=tag, shape=(bk_elems, mn[1].tile), value=b_value_of(bl))
+            op = SyncOperand(tag=tag, shape=(bk_elems, mn[1].tile), value=b_value_of(bl), swizzle=swizzles[1])
             sync_ops.append(op)
         else:
             op = Operand(
@@ -485,6 +491,7 @@ def _sync_operands(
                 shape=(bk_elems, mn[1].tile),
                 coords=_box_origin(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.k_axis),
                 index=_slab_index(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.k_axis, tile_is_row=False),
+                swizzle=swizzles[1],
             )
             async_ops.append(op)
         drain.append(op)
@@ -514,7 +521,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         # tier's ``sync`` transport; single-buffer, one wait + CTA barrier. A k-invariant cone
         # prefix (the fused norm→linear per-row statistic) rides the transport prologue, run once
         # ahead of the K-loop.
-        operands, sync_ops, async_ops, stat_pro = _sync_operands(c, stage.bk_elems, mn, cta)
+        operands, sync_ops, async_ops, stat_pro = _sync_operands(c, stage.bk_elems, mn, cta, ops.slab_swizzles(mn, elem.nbytes))
         transport = SyncTransport(
             operands=sync_ops,
             async_operands=async_ops,

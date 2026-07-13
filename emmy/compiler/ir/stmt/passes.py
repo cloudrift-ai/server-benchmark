@@ -209,6 +209,7 @@ def _(s: Write, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
         values=tuple(rename(n) for n in s.values),
         value_dtype=s.value_dtype,
         atomic=s.atomic,
+        swizzle=s.swizzle,
     )
 
 
@@ -281,6 +282,7 @@ def _(s: Write, ctx: SimplifyCtx) -> Stmt:
         values=s.values,
         value_dtype=s.value_dtype,
         atomic=s.atomic,
+        swizzle=s.swizzle,
     )
 
 

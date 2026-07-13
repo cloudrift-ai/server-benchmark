@@ -68,7 +68,12 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   on its destination index, each staged `LdmatrixLoad` XORs the address back, and the kernel stays bit-identical to
   its unswizzled sibling — swizzle relocates smem bytes only, which is what keeps the ldmatrix drain free of
   shared-memory bank conflicts; the unswizzled cp path was 4-way/8-way conflict-bound on sm_89, the measured residual
-  to cuBLAS there. Sync compute-fill slabs and scalar-`Load`-drained slabs stay plain row-major).
+  to cuBLAS there. The fused-edge **sync compute-fill** slabs swizzle the same way — the compute/copy
+  fill's slab `Write` carries the mode (the identical flattened-index XOR, one VECTOR store per 16 B run; V scalar
+  2 B stores at 16 B thread stride were 8-way store-conflicted), the canonical-B cp.async fill its `Operand`, and
+  the drain reads each slab back through its own mode. Unswizzled, the gemma-shape fused edge drained 294.9 M ld
+  conflicts / 82.5 M LSU inst on the 5090; the swizzle + vector fill store recovered -29% (std) / -41% (fm).
+  Scalar-`Load`-drained slabs stay plain row-major).
 - the **MONOID-producer composition** — the fused norm→linear edge and its N-channel form, the gate/up MLP edge —
   binds at recognize time too (`_atomize.bind_prologue_contraction`, structure-only): a projecting `Map` over a
   per-row `PLANAR` statistic whose tail is one or more ⊗-folds of one shared A value nodifies to

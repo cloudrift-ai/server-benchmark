@@ -26,10 +26,15 @@ order is meaningful; its neutral "no opinion" value is exactly ``1.0``). So
 dimensionless **multiplier** ``offline**W`` centered at that neutral 1.0 — the
 online half owns the per-shape µs anchor, the offline half contributes only its
 ranking. ``W`` (``config.offline_tilt``) sizes the nudge: small enough to
-perturb the online order, not replace it.
+perturb the online order, not replace it. The multiplier is clamped to
+``e**±8`` before the power: the offline proxy itself is unsaturated (strictly
+ordered up to the float-safety bound), so its raw magnitude would otherwise
+zero out or blow up the µs anchor.
 """
 
 from __future__ import annotations
+
+import math
 
 from emmy import config
 from emmy.compiler.pipeline.search.prior.base import Prior
@@ -83,7 +88,14 @@ class FallbackPrior(Prior):
         online = self.online.score(knobs)
         if w == 0.0 or online <= 0.0:
             return online
-        return online * self.offline.score(knobs) ** w
+        # The tilt is a bounded NUDGE on the online µs anchor, not a ranking: the
+        # offline proxy is strictly ordered over the full quality range (its exp
+        # argument clips only at the float-safety bound), so its raw magnitude can
+        # span e**±700 — fed straight into the product it would zero out or blow up
+        # the µs scale. Clamp the multiplier to e**±8 (the proxy's historical band)
+        # so a strong offline opinion tops out as a firm nudge.
+        offline = min(max(self.offline.score(knobs), math.exp(-8.0)), math.exp(8.0))
+        return online * offline**w
 
     def mean_score(self, knobs: dict) -> float:
         return self.online.mean_score(knobs) if self.trustworthy else self.offline.mean_score(knobs)

@@ -265,15 +265,19 @@ def build_attention_split_wrapper(block):
       ``q[T, Hq·D]``, ``k/v[T, Hkv·D]`` — exactly what vLLM's ``Attention.forward`` consumes.
       RoPE is applied downstream (by vLLM, or by the test/oracle reference).
     - ``post(attn_out[T, Hq·D], residual[T, H]) -> layer_out[T, H]`` runs ``o_proj`` →
-      ``residual +`` → ``post_attention_layernorm`` → ``mlp`` → second residual.
+      ``residual +`` → ``post_attention_layernorm`` → ``mlp`` → second residual. **Gemma-3/4** is
+      instead a 4-norm layer: ``o_proj(attn)`` and ``mlp(...)`` each get wrapped in their OWN
+      RMSNorm (``post_attention_layernorm`` / ``post_feedforward_layernorm``) BEFORE the residual
+      add, and the MLP input passes through ``pre_feedforward_layernorm`` — selected when those
+      feed-forward norms are present on the block.
 
     Reads the block's OWN submodules (not a ``self_attn`` substitution — HF
     ``self_attn.forward`` returns ``(attn_output, weights)``, and the block adds the
     residual after it, so swapping ``self_attn`` can't yield a clean pre-graph). NOTE: HF's
     ``.view(B,S,-1,D).transpose(1,2)`` assumes a ``[batch, seq, hidden]`` input; on the
     flattened ``[T, H]`` layout the reshape is ``.view(T, n_heads, D)`` with **no transpose**.
-    Qwen3 (q/k norm) and Llama (no q/k norm) are both handled; the architecture difference is
-    just the presence of ``q_norm`` / ``k_norm``."""
+    Qwen3 / Gemma-3/4 (q/k norm) and Llama (no q/k norm) all share the ``pre``; the ``post``
+    is the Llama/Qwen 2-norm form or the Gemma 4-norm form above."""
     import torch.nn as nn
 
     attn = block.self_attn
@@ -282,13 +286,14 @@ def build_attention_split_wrapper(block):
     num_kv_heads = attn.k_proj.out_features // head_dim
     q_norm = getattr(attn, "q_norm", None)
     k_norm = getattr(attn, "k_norm", None)
+    v_norm = getattr(attn, "v_norm", None)  # Gemma-4 RMSNorms V too; Qwen3 / Gemma-3 / Llama do not
 
     class Pre(nn.Module):
         def __init__(self) -> None:
             super().__init__()
             self.input_layernorm = block.input_layernorm
             self.q_proj, self.k_proj, self.v_proj = attn.q_proj, attn.k_proj, attn.v_proj
-            self.q_norm, self.k_norm = q_norm, k_norm
+            self.q_norm, self.k_norm, self.v_norm = q_norm, k_norm, v_norm
 
         def forward(self, hidden):
             h = self.input_layernorm(hidden)  # [T, H]
@@ -299,6 +304,8 @@ def build_attention_split_wrapper(block):
             if self.q_norm is not None:
                 q = self.q_norm(q)  # per-head RMSNorm over D
                 k = self.k_norm(k)
+            if self.v_norm is not None:
+                v = self.v_norm(v)  # Gemma-4: per-head RMSNorm over D on V as well
             return q.reshape(t, num_heads * head_dim), k.reshape(t, num_kv_heads * head_dim), v.reshape(t, num_kv_heads * head_dim)
 
     class Post(nn.Module):
@@ -307,9 +314,16 @@ def build_attention_split_wrapper(block):
             self.o_proj = attn.o_proj
             self.post_attention_layernorm = block.post_attention_layernorm
             self.mlp = block.mlp
+            # Gemma-3/4 is a 4-norm layer: these two extra norms wrap the attention output and the
+            # MLP, each applied BEFORE its residual add. Their presence selects the layout below.
+            self.pre_feedforward_layernorm = getattr(block, "pre_feedforward_layernorm", None)
+            self.post_feedforward_layernorm = getattr(block, "post_feedforward_layernorm", None)
 
         def forward(self, attn_out, residual):
-            h = residual + self.o_proj(attn_out)  # residual1 + o_proj(SDPA)
+            if self.pre_feedforward_layernorm is not None:  # Gemma 4-norm
+                h = residual + self.post_attention_layernorm(self.o_proj(attn_out))
+                return h + self.post_feedforward_layernorm(self.mlp(self.pre_feedforward_layernorm(h)))
+            h = residual + self.o_proj(attn_out)  # Llama/Qwen: residual1 + o_proj(SDPA)
             return h + self.mlp(self.post_attention_layernorm(h))  # residual2 + MLP
 
     return Pre(), Post()

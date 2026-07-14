@@ -210,6 +210,12 @@ class EmmyGenRunner:
                         decode_ok = False
 
         embed_weight = trunk.embed_tokens.weight.detach().cpu().to(torch.float32).numpy().astype(np_dtype, copy=False)
+        # Gemma scales embeddings by sqrt(hidden) (a ``Gemma3TextScaledWordEmbedding`` carries it as
+        # an ``embed_scale`` buffer); a plain ``nn.Embedding`` has none (scale 1). Fold it into the
+        # gather table so ``embed`` / ``embed_device`` both apply it with zero per-step cost.
+        embed_scale = float(getattr(trunk.embed_tokens, "embed_scale", 1.0))
+        if embed_scale != 1.0:
+            embed_weight = embed_weight * np_dtype.type(embed_scale)
         use_decode = decode_ok and len(pre_decode) == len(layers)
         return cls(
             embed_weight=embed_weight,

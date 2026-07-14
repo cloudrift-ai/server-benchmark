@@ -2,8 +2,9 @@
 
 Proves the carve is correct: for one decoder layer, running ``pre`` → reconstruct RoPE →
 external causal GQA torch SDPA → ``post`` reproduces the eager ``block(x)`` over the
-flattened ``[num_tokens, H]`` layout. Exercises GQA (num_kv_heads < num_heads) and Qwen3's
-per-head q/k norm. Pure eager, CPU, fp32 — no compile.
+flattened ``[num_tokens, H]`` layout. Exercises GQA (num_kv_heads < num_heads), Qwen3's
+per-head q/k norm, and Gemma-3/4's 4-norm decoder layer (a global layer, so the plain-causal
+reference matches). Pure eager, CPU, fp32 — no compile.
 """
 
 import pytest
@@ -41,7 +42,7 @@ def _split_path_output(pre, post, attn, hidden2d, cos, sin, mask, apply_rotary):
     return post(attn_out, hidden2d)
 
 
-@pytest.mark.parametrize("arch", ["qwen3", "llama"])
+@pytest.mark.parametrize("arch", ["qwen3", "llama", "gemma3"])
 def test_split_matches_eager_block(arch):
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
@@ -62,7 +63,7 @@ def test_split_matches_eager_block(arch):
         )
         model = transformers.Qwen3ForCausalLM(config)
         from transformers.models.qwen3.modeling_qwen3 import apply_rotary_pos_emb
-    else:
+    elif arch == "llama":
         config = transformers.LlamaConfig(
             vocab_size=64,
             hidden_size=64,
@@ -74,6 +75,22 @@ def test_split_matches_eager_block(arch):
         )
         model = transformers.LlamaForCausalLM(config)
         from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
+    else:  # gemma3: 4-norm layer + per-head q/k norm (no v_norm). sliding_window_pattern=1 forces
+        # layer 0 to full_attention (global) so the plain-causal reference SDPA matches.
+        config = transformers.Gemma3TextConfig(
+            vocab_size=64,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=16,
+            max_position_embeddings=64,
+            sliding_window=16,
+            sliding_window_pattern=1,
+        )
+        model = transformers.Gemma3ForCausalLM(config)
+        from transformers.models.gemma3.modeling_gemma3 import apply_rotary_pos_emb
 
     torch.manual_seed(0)
     model = model.eval()
@@ -84,7 +101,9 @@ def test_split_matches_eager_block(arch):
     t = 6
     hidden3d = torch.randn(1, t, config.hidden_size)
     position_ids = torch.arange(t).unsqueeze(0)
-    cos, sin = trunk.rotary_emb(hidden3d, position_ids)  # [1, T, D]
+    # Gemma's rotary is keyed per layer-type (local vs global); layer 0 here is global.
+    rotary_kwargs = {"layer_type": "full_attention"} if arch == "gemma3" else {}
+    cos, sin = trunk.rotary_emb(hidden3d, position_ids, **rotary_kwargs)  # [1, T, D]
     mask = build_causal_mask(t, torch.float32)  # [1, 1, T, T] additive
 
     with torch.no_grad():
@@ -93,6 +112,63 @@ def test_split_matches_eager_block(arch):
 
         pre, post = build_attention_split_wrapper(block)
         out = _split_path_output(pre, post, attn, hidden3d.squeeze(0), cos, sin, mask, apply_rotary_pos_emb)
+
+    assert tuple(out.shape) == (t, config.hidden_size)
+    torch.testing.assert_close(out, eager.squeeze(0), rtol=1e-4, atol=1e-4)
+
+
+def test_split_matches_eager_gemma4():
+    """Gemma-4 (the release target, ``Gemma4TextConfig``): 4-norm layer + per-head q/k/**v** norm
+    + partial/proportional RoPE. ``hidden_size_per_layer_input=0`` gives the dense (12B-style) layer
+    with no per-layer-input block; 1 layer is forced global, so a plain-causal reference matches.
+    Exercises the gemma-4-specific ``v_norm`` carve path and gemma-4's per-tensor ``apply_rotary``."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    pytest.importorskip("transformers.models.gemma4")
+
+    import torch.nn.functional as F
+    from transformers.models.gemma4.modeling_gemma4 import apply_rotary_pos_emb
+
+    from emmy.compiler.trace.huggingface import build_attention_split_wrapper, build_causal_mask
+
+    config = transformers.Gemma4TextConfig(
+        vocab_size=64,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        max_position_embeddings=64,
+        sliding_window=16,
+        hidden_size_per_layer_input=0,
+    )
+    torch.manual_seed(0)
+    trunk = transformers.Gemma4ForCausalLM(config).eval().model
+    block = trunk.layers[0]
+    attn = block.self_attn
+
+    t = 6
+    hidden3d = torch.randn(1, t, config.hidden_size)
+    position_ids = torch.arange(t).unsqueeze(0)
+    cos, sin = trunk.rotary_emb(hidden3d, position_ids, "full_attention")  # layer 0 forced global
+    mask = build_causal_mask(t, torch.float32)
+    hd, nh, nkv = attn.head_dim, config.num_attention_heads, config.num_key_value_heads
+
+    with torch.no_grad():
+        eager = block(hidden3d, position_embeddings=(cos, sin), attention_mask=mask, shared_kv_states={})
+        eager = eager[0] if isinstance(eager, tuple) else eager
+
+        pre, post = build_attention_split_wrapper(block)
+        q2, k2, v2 = pre(hidden3d.squeeze(0))
+        q = q2.view(t, nh, hd).transpose(0, 1).unsqueeze(0)
+        k = k2.view(t, nkv, hd).transpose(0, 1).unsqueeze(0)
+        v = v2.view(t, nkv, hd).transpose(0, 1).unsqueeze(0)
+        q, k = apply_rotary_pos_emb(q, cos, sin), apply_rotary_pos_emb(k, cos, sin)  # per-tensor (gemma-4)
+        k, v = _repeat_kv(k, nh // nkv), _repeat_kv(v, nh // nkv)
+        attn_out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, scale=attn.scaling)
+        attn_out = attn_out.transpose(1, 2).reshape(t, nh * hd)
+        out = post(attn_out, hidden3d.squeeze(0))
 
     assert tuple(out.shape) == (t, config.hidden_size)
     torch.testing.assert_close(out, eager.squeeze(0), rtol=1e-4, atol=1e-4)

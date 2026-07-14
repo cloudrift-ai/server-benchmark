@@ -109,7 +109,10 @@ def evaluate_golden(
     the scored order (``None`` if the golden isn't in the enumeration — pin / dtype
     mismatch), and the enumeration size. The rank — not whether the #1 pick equals
     the golden — is the metric that matters: it's where the tuner's patience budget
-    has to reach. ``scorer`` (``row → float``, higher better) defaults to the
+    has to reach. Ranking is tie-pessimistic: a row tied with the golden but earlier
+    in emission order counts against it, because that is exactly the row a greedy
+    argmin deploys instead — rank 0 therefore means "greedy finds the golden", not
+    "nothing scores strictly better". ``scorer`` (``row → float``, higher better) defaults to the
     :class:`OfflinePrior` (negated latency); the online-prior diagnostics pass
     ``-prior.mean_score`` instead. Returns ``({}, None, 0)`` if nothing
     enumerates.
@@ -138,7 +141,17 @@ def evaluate_golden(
     gidx = next((i for i, r in enumerate(rows) if tile_signature(r) == want), None) if want else None
     scores = [scorer(r) for r in rows]
     best = max(range(len(rows)), key=scores.__getitem__)
-    rank = sum(1 for s in scores if s > scores[gidx]) if gidx is not None else None
+    # Tie-PESSIMISTIC rank: greedy's argmin breaks score ties by emission order, so a
+    # golden tied with an earlier-emitted row loses the deploy — count those ties
+    # against it (mirroring the fork-regret metric's pessimistic tie pricing). The old
+    # strictly-greater count reported rank 0 for EVERY row inside a tie plateau, which
+    # is how a saturated prior scored "27/28 top-1" while real cold deploys shipped
+    # emission-order picks 12-29x off the golden.
+    if gidx is not None:
+        g = scores[gidx]
+        rank = sum(1 for i, s in enumerate(scores) if s > g or (s == g and i < gidx))
+    else:
+        rank = None
     return rows[best], rank, len(rows)
 
 

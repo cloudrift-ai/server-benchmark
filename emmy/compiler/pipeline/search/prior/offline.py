@@ -12,6 +12,13 @@ behind :class:`~emmy.compiler.pipeline.search.prior.fallback.FallbackPrior`.
 ``score`` returns a positive latency *proxy* (``exp(-scale · wᵀfeatures)``),
 **lower is better** — matching ``OnlinePrior``'s polarity. The proxy is not
 calibrated µs; only its ordering (greedy argmin / PUCT relative ``P``) matters.
+Because ordering is the whole contract, the squash must never saturate over live
+qualities: the exp argument is clipped only at the float-safety bound (±700), so
+equal qualities — and only equal qualities — score equal. (A former ±80 *quality*
+clip sat inside the live range and collapsed every good tile onto one plateau;
+greedy then deployed by emission order.) The proxy's magnitude may therefore span
+``e**±700`` — a consumer needing a bounded multiplier (the ``FallbackPrior`` tilt)
+bounds it itself.
 
 The weights live in the repo-checked artifact ``offline_weights.json`` next to
 this module (override with ``EMMY_OFFLINE_FILE`` / ``emmy eval … --offline-file``
@@ -195,7 +202,14 @@ class OfflinePrior(Prior):
         # workspace round-trip. Both features are 0 wherever the stamps don't apply.
         quality -= self._scalar_on_warp_weight * feats.get("D_scalar_on_warp_eligible", 0.0)
         quality -= self._splitk_roundtrip_weight * feats.get("D_splitk_roundtrip", 0.0)
-        return math.exp(-self._scale * max(min(quality, 80.0), -80.0))
+        # Clip the exp ARGUMENT at the float-safety bound, never the quality: the retired
+        # ±80 quality clip sat inside the live range (at scale 0.1 thousands of good warp
+        # tiles score past 80), so the whole good region collapsed onto one exp(-8)
+        # plateau — greedy's argmin then fell through to emission order (the w1x1 gemma
+        # misdeploys) while every tied golden "ranked 0". Within ±700 the proxy stays
+        # strictly ordered; beyond it exp() would overflow / underflow anyway. Consumers
+        # that need a BOUNDED value (the FallbackPrior tilt multiplier) clamp on their side.
+        return math.exp(max(min(-self._scale * quality, 700.0), -700.0))
 
     def explain_features(self, feats: dict) -> dict[str, float]:
         """EXACT per-term decomposition of the quality score (higher = predicted
@@ -204,8 +218,8 @@ class OfflinePrior(Prior):
         omitted the ±40 scalar-on-warp gate would misattribute exactly the misses it
         dominates. Invariant (unit-tested): the terms sum to the same quality
         :meth:`mean_score_features` exponentiates, so a two-row term diff is the
-        model's exact preference gap. (The ±80 clip inside the squash is ignored
-        here — it changes the proxy's magnitude at the extremes, never the terms.)"""
+        model's exact preference gap. (The float-safety clip on the exp argument is
+        ignored here — it exists for finiteness, never inside the live range.)"""
         w_set = self._w_dyn if feats.get("S_ext_n_symbolic_axis", 0.0) > 0 else self._w
         terms = {k: w * feats[k] for k, w in w_set.items() if feats.get(k, 0.0)}
         af_on = feats.get("D_finalize_kernel", 0.0)

@@ -198,6 +198,12 @@ The two halves of the one path:
   hard-coded interaction gates ride outside the linear weights: the atomic-free split-K term, and the tensor-core
   preference pair `D_scalar_on_warp_eligible` / `D_splitk_roundtrip` driven by the scheduler's per-kernel
   `S_warp_eligible` row stamp — which stops a warp-eligible f16 contraction deploying a scalar split tile.
+  The linear quality is squashed into a positive latency proxy (`exp(-scale·quality)`) whose exp argument clips only
+  at the float-safety bound (~±700) — **the squash must never saturate over live qualities**. A former ±80 *quality*
+  clip sat inside the live range: every good warp tile collapsed onto one `exp(-8)` plateau, greedy's argmin fell
+  through to emission order (the degenerate-`w1x1` gemma misdeploys, 12–29× off the golden on a real 4090) while the
+  golden-rank eval reported 0 for every tied row. The one consumer needing a bounded value — `FallbackPrior`'s tilt
+  multiplier — clamps to `e**±8` on its own side; ranking consumers get the strictly-ordered proxy.
 - **`OnlinePrior`** (online) — trained from tune measurements (Part 5), composed behind `FallbackPrior`.
 
 A subtlety about features: the `H_*` regime features (GPU / nvcc level) are constant across a pool's siblings, so no
@@ -642,6 +648,12 @@ run's SHAPE, not a kernel node: a pinned row whose shape matches no greedy kerne
 partial+finalize pair) still prints and lands in the record.
 
 ## Part 8: Evaluating the prior (`emmy eval`)
+
+**Golden rank is tie-pessimistic** (`eval offline` / `eval online`, via `golden_eval.evaluate_golden`): the golden's
+rank counts every row scoring strictly better PLUS every tied row emitted earlier — because greedy's argmin breaks
+score ties by emission order, a tie is a loss, not a win. The former strictly-greater count reported rank 0 for every
+row inside a tie plateau, which let a saturated prior score "top-1" on goldens that real cold deploys missed by
+12–29× (the same convention the fork-regret metric already used: predicted-score ties price pessimistically).
 
 **Golden evals featurize under the golden's own card.** `eval offline` / `eval online` rebuild each golden's compile
 context as `Context.from_target(compute_cap, gpu_name=…)` — the card recorded in the golden file, with its memorized

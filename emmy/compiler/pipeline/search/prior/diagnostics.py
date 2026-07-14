@@ -150,12 +150,13 @@ def golden_prior_eval(prior, kernel_filter: str | None = None) -> str:
             # every unjoinable shape gets a per-shape line instead.
             skipped.append((g.name, "no tuned rows for this shape in the prior dataset"))
             continue
-        base = {**Context.from_target(g.compute_cap).features(), **s_feats}
+        ctx = Context.from_target(g.compute_cap, gpu_name=g.gpu_name)  # the golden's own card, not the live host's
+        base = {**ctx.features(), **s_feats}
         gold = dict(tuning_knob_items(g.knobs))  # native codec knobs (TILE/REDUCE/STAGE), tier-agnostic
         # ``evaluate_golden`` ranks by descending score; the prior predicts latency
         # (lower = better), so negate to rank the predicted-fastest config first.
         _, rank, pool = golden_eval.evaluate_golden(
-            g.M, g.N, g.K, g.dtype, gold, Context.from_target(g.compute_cap), scorer=lambda r, b=base: -prior.mean_score({**b, **r})
+            g.M, g.N, g.K, g.dtype, gold, ctx, scorer=lambda r, b=base: -prior.mean_score({**b, **r})
         )
         if rank is None:
             skipped.append((g.name, f"recorded knobs not in the enumeration ({pool} rows) — pin/dtype mismatch?"))

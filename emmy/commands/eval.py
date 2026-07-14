@@ -552,7 +552,8 @@ def _emit_offline_eval(kernel_filter: str | None) -> None:
         gold = dict(tuning_knob_items(g.knobs))  # the native codec knobs (TILE/REDUCE/STAGE), tier-agnostic
         try:
             dyn = bool(getattr(g, "dynamic", None))
-            got, rank, pool = evaluate_golden(g.M, g.N, g.K, g.dtype, gold, Context.from_target(g.compute_cap), dynamic=dyn)
+            ctx = Context.from_target(g.compute_cap, gpu_name=g.gpu_name)  # the golden's own card, not the live host's
+            got, rank, pool = evaluate_golden(g.M, g.N, g.K, g.dtype, gold, ctx, dynamic=dyn)
         except Exception as e:  # noqa: BLE001 — one shape's error shouldn't abort the report
             entries.append(("err", g.name, " ".join(f"{type(e).__name__}: {e}".split())[:100]))
             continue

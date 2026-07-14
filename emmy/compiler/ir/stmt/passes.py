@@ -246,6 +246,7 @@ def _(s: StridedLoop, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
         unroll=s.unroll,
         role=s.role,
         carrier=s.carrier,
+        end=sigma.apply(s.end) if s.end is not None else None,
     )
 
 
@@ -309,6 +310,7 @@ def _(s: StridedLoop, ctx: SimplifyCtx) -> Stmt:
         unroll=s.unroll,
         role=s.role,
         carrier=s.carrier,
+        end=s.end.simplify(ctx) if s.end is not None else None,
     )
 
 

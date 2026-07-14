@@ -66,8 +66,9 @@ redundant, form::
 Scope: static OR dynamic (symbolic ``seq_len`` on Q/K/V dim -2 — one cached kernel
 carrying ``int seq_len`` serves every runtime size, the symbol landing on BOTH the
 masked-row M and the symbolic reduce), causal or non-causal (causal masks the
-score per element, ``kv ≤ m`` else −inf — tile-skip is a tensor-core-tier
-follow-up), an optional broadcast additive mask (the HF ``(1,1,S,S)`` float bias),
+score per element, ``kv ≤ m`` else −inf; the warp tier additionally tile-skips —
+``_twist`` bounds the stream at the CTA's last query row off that ``Select``'s
+shape), an optional broadcast additive mask (the HF ``(1,1,S,S)`` float bias),
 and GQA (``q_heads == group · kv_heads``; the K/V head axis read at ``head //
 group`` directly, no materialized broadcast). Fusion is the ``PLACE@fold`` placement
 (default ``fuse``; ``cut`` is the multi-kernel attention escape — gated in

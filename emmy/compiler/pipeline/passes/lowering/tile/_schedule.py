@@ -733,6 +733,9 @@ def _resolve_warp_stage(c: Contraction, stage: Stage, budget: int = STATIC_SMEM_
     (``bk_elems`` is codec-spelled here, not derived), and a resolved-but-unfittable stage would
     sail through the fork only to be rejected at materialize (the issue-#327 unlowered-``TileOp``
     bench fails)."""
+    if stage.alt:
+        return None  # the alternating single-slab pipeline is the warp-flash stream's (K/V phase split + staged Q)
+
     atom = c.atom
     a_nbytes = atom.operand_dtype("a").nbytes
     bk = c.tile.bk
@@ -775,6 +778,9 @@ def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = ST
     contributing only the slab drain; when no K-chunk fits at the requested depth, the depth steps
     down (a smaller ring beats gmem-direct), single-buffer last. ``reg_depth`` stays 1 (the
     smem→register double-buffer is an ``ldmatrix`` transform, no scalar counterpart)."""
+    if stage.alt:
+        return None  # the alternating single-slab pipeline is the warp-flash stream's (K/V phase split + staged Q)
+
     if not c.k_axis.extent.is_static or stage.transport not in ("tma", "cp.async"):
         return None
     # A masked-N (overhanging inner dim) or transposed-B B-slab fill would clamp a chunk-start column
@@ -1363,6 +1369,26 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
     # doesn't tile) — the evidence pick's prefix-consistency. Pins keep their contracts: a
     # non-empty ``REDUCE`` pin stays the scalar escape (it asks for a reduce partition only the
     # scalar tiers honor), a warp ``TILE`` pin keeps the mma rows alone.
+    # A cross-CTA ``g<n>k`` REDUCE pin on the flash tree selects the SPLIT-KV warp rows (the
+    # partial keeps fragment residence; ``030_split_reduce`` realizes partial + LSE-combine finalize) —
+    # pin-driven, like the demoted warp tier. Any other non-empty REDUCE pin keeps its scalar
+    # escape below (it asks for a reduce partition only the scalar tiers honor), as does a split
+    # pin no warp row can legally carry (symbolic / non-divisible kv, atomic finalize).
+    reduce_pin = REDUCE.raw()
+    if reduce_pin:
+        try:
+            rplan = ReducePlan.parse(reduce_pin)
+        except Exception:  # noqa: BLE001 — an unparseable pin keeps the historical scalar escape
+            rplan = None
+        if rplan is not None and rplan.needs_split and rplan.finalize == "kernel":
+            pair = _twisted_pair(tile.op)
+            if pair is not None:
+                red, head, pv = pair
+                warps = _twisted_warp_options(tile, name, knobs, _smem_budget(ctx), _tma_allowed(ctx), _f16acc_allowed(ctx))
+                rows = _stamp_twisted_split(warps, red.axis.name, rplan)
+                if rows:
+                    rows = _narrow_flash_forms(rows, head, pv, keyed_only=True)
+                    return rows if len(rows) > 1 else rows[0]
     if not REDUCE.narrow([""])[0]:
         pair = _twisted_pair(tile.op)
         if pair is not None:
@@ -1447,6 +1473,25 @@ def _narrow_flash_forms(forms: list[TileOp], head: Contraction, pv: Contraction,
         logger.warning("TILE pin(s) %s match no flash form (warp / chain / per-cell); keeping the full fork", live)
         return forms
     return kept
+
+
+def _stamp_twisted_split(rows: list[TileOp], kv_name: str, plan: ReducePlan) -> list[TileOp]:
+    """The flash split-KV rows: each warp row with the pinned cross-CTA partition stamped on its
+    :class:`Reduction` node (``030_split_reduce`` consumes it) and spelled on ``REDUCE@<kv>``. Per-row
+    legality: a static kv extent divisible by ``cta``, and a slice divisible by the row's own
+    streaming key block (the staged chunking + fragment masks assume block-whole slices); an
+    illegal row is dropped, not degraded."""
+    out: list[TileOp] = []
+    for r in rows:
+        red = r.op.source if isinstance(r.op, Map) else r.op
+        head = red.partial[0]
+        bn = head.tile.regs[1] * head.tile.atom.shape[1]
+        ext = red.axis.extent
+        if not ext.is_static or ext.as_static() % plan.cta != 0 or (ext.as_static() // plan.cta) % bn != 0:
+            continue
+        op2 = _with_reduce(r.op, plan)
+        out.append(replace(r, op=op2, knobs={**r.knobs, _at(REDUCE, kv_name): plan.spell()}))
+    return out
 
 
 def _twisted_pair(op) -> tuple[Reduction, Contraction, Contraction] | None:
@@ -1589,7 +1634,9 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     return TileOp(op=node, name=name, place=place, tier=wt, stage=stage, knobs=stamped)
 
 
-def _resolve_twisted_stage(stage: Stage, kv_extent, bn: int, head_dim: int, d_v: int, elem_bytes: int, budget: int) -> Stage | None:
+def _resolve_twisted_stage(
+    stage: Stage, kv_extent, bn: int, head_dim: int, d_v: int, elem_bytes: int, budget: int, m_rows: int = 0
+) -> Stage | None:
     """Resolve an operand ``Stage`` against a warp-flash streaming pair — the K/V slabs of one
     ``bn``-key streaming step (K ``bn × head_dim`` in its native N-major layout, V ``bn × d_v``
     K-major; both verbatim row copies, so staging stays bit-identical to gmem-direct). Two
@@ -1607,6 +1654,29 @@ def _resolve_twisted_stage(stage: Stage, kv_extent, bn: int, head_dim: int, d_v:
     ``bk_elems`` records the streamed keys per step."""
     if stage.transport not in ("cp.async", "tma"):
         return None
+    if stage.alt:
+        # The ALTERNATING single-slab pipeline (``d1/tma/alt``): one K slab + one V slab, each on
+        # its own mbarrier, refilled in the phase that no longer reads it (K under softmax + P·V,
+        # V under the next step's Q·K) — the FA-2 choreography that overlaps a WIDE (64-key)
+        # streaming block's copies in HALF the paired ring's smem. The Q (query) tile stages
+        # through smem too — a padded row-major slab filled once, its A fragments ldmatrix'd per
+        # atom-K chunk — which frees the resident Q registers that made the wide block spill.
+        # Static block-divisible kv only (the symbolic tail story is not built for the split
+        # phases). Both async transports ride the same seam: TMA arms per-operand mbarriers
+        # (``d1/tma/alt``); cp.async commits each fill into its own group and a uniform
+        # ``wait_group(1)`` completes the older sibling (``d1/cp/alt`` — the sm_89 form).
+        if not kv_extent.is_static or kv_extent.as_static() % bn != 0 or m_rows <= 0:
+            return None
+        if stage.transport == "tma":
+            if bn > 256 or head_dim > 256 or d_v > 256 or (head_dim * elem_bytes) % 16 or (d_v * elem_bytes) % 16:
+                return None
+            kv_pad = 0  # dense hardware-swizzled slabs
+        else:
+            kv_pad = 16  # the two K/V slabs' padded rows (2 x _twist._PAD elems)
+        q_bytes = m_rows * (head_dim + 8) * elem_bytes  # +8 elem row pad (the flash cp-path bank break)
+        if q_bytes + bn * (head_dim + d_v + kv_pad) * elem_bytes > budget:
+            return None
+        return replace(stage, reg_depth=1, bk_elems=bn)
     if stage.transport == "cp.async":
         # A symbolic kv stages: the fill clamp-reads the overhanging tail rows to the last valid
         # key (cp.async has no OOB zero-fill) and the drain's tail masks zero their P columns, so
@@ -1639,7 +1709,7 @@ def _resolve_twisted_stage(stage: Stage, kv_extent, bn: int, head_dim: int, d_v:
 
 
 def _twisted_stage_candidates(
-    kv_extent, bn: int, head_dim: int, d_v: int, elem_bytes: int, budget: int, tma_ok: bool = True
+    kv_extent, bn: int, head_dim: int, d_v: int, elem_bytes: int, budget: int, tma_ok: bool = True, m_rows: int = 0
 ) -> list[Stage | None]:
     """The K/V operand-stage candidates for one warp-flash geometry row — gmem-direct ``None``
     first (the conservative option-0), then every ``stage_moves`` entry that RESOLVES against the
@@ -1654,7 +1724,7 @@ def _twisted_stage_candidates(
         st = Stage.parse(spec)
         if st.transport == "tma" and not tma_ok:
             return None  # TMA is Hopper+ (sm_90); nvcc has no sm_89a — decline below it
-        return _resolve_twisted_stage(st, kv_extent, bn, head_dim, d_v, elem_bytes, budget)
+        return _resolve_twisted_stage(st, kv_extent, bn, head_dim, d_v, elem_bytes, budget, m_rows)
 
     if STAGE.raw() is not None:
         pinned = STAGE.narrow([""])[0]
@@ -1674,7 +1744,10 @@ def _twisted_stage_candidates(
         return [None]
     out: list[Stage | None] = [None]
     spelled: set[str] = set()
-    for move in stage_moves(warp=True):
+    # ``d1/tma/alt`` (the alternating single-slab pipeline) rides the flash candidate list only —
+    # it is not a ``stage_moves`` entry (the matmul resolvers decline it), and it resolves only
+    # where the wide-block Q+K+V slabs fit (:func:`_resolve_twisted_stage`).
+    for move in [*stage_moves(warp=True), "d1/tma/alt", "d1/cp/alt"]:
         if not move:
             continue
         r = resolve(move)
@@ -1829,8 +1902,10 @@ def _twisted_warp_options(
         # ``_wspec_workers`` gates the thread budgets — the aux band must not exceed the
         # ``32·um`` compute band); a degraded candidate is skipped rather than duplicating the
         # uniform row.
-        for stage in _twisted_stage_candidates(kv_ext, bn, head_dim.as_static(), d_v.as_static(), elem_bytes, budget, tma_ok):
-            wspecs = list(WSPEC.narrow(wspec_moves())) if (stage is not None and stage.transport == "tma") else [""]
+        for stage in _twisted_stage_candidates(
+            kv_ext, bn, head_dim.as_static(), d_v.as_static(), elem_bytes, budget, tma_ok, m_rows=um * fm * atom_m
+        ):
+            wspecs = list(WSPEC.narrow(wspec_moves())) if (stage is not None and stage.transport == "tma" and not stage.alt) else [""]
             for wspec_cand in wspecs:
                 workers, wspec_spec = _wspec_workers(wspec_cand, stage, 32 * um)
                 if wspec_cand and workers is None:

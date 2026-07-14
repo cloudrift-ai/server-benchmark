@@ -708,6 +708,7 @@ def _wspec_kloop(
     k_extent: int,
     aux_threads: int,
     block_threads: int,
+    k_end: Expr | None = None,
 ) -> tuple[list[Stmt], list[Stmt]]:
     """The warp-SPECIALIZED staged K-loop — the same fill → wait → drain phases as the uniform
     skeleton below, split across two warp bands instead of software-pipelined in-warp. The producer
@@ -756,7 +757,12 @@ def _wspec_kloop(
     empty_phase = BinaryExpr("%", BinaryExpr("-", BinaryExpr("/", pref_chunk, _lit(ring)), _lit(1)), _lit(2))
     if ring >= 2:
         k0_next = BinaryExpr("+", Var(k0), _lit((ring - 1) * bk_elems))
-        k0_pref = TernaryExpr(cond=BinaryExpr("<", k0_next, _lit(K)), if_true=k0_next, if_false=_lit((n_chunks - 1) * bk_elems))
+        if k_end is not None:  # clamp onto the last chunk this CTA drains (the causal early stop)
+            end_var = Var(f"{k0}_end")  # the loop's hoisted for-init bound (StridedLoop.end)
+            last_k0 = BinaryExpr("*", BinaryExpr("/", BinaryExpr("-", end_var, _lit(1)), _lit(bk_elems)), _lit(bk_elems))
+            k0_pref = TernaryExpr(cond=BinaryExpr("<", k0_next, end_var), if_true=k0_next, if_false=last_k0)
+        else:
+            k0_pref = TernaryExpr(cond=BinaryExpr("<", k0_next, _lit(K)), if_true=k0_next, if_false=_lit((n_chunks - 1) * bk_elems))
     else:
         k0_pref = Var(k0)
     (fill_cond,) = transport.fill(k0=k0_pref, slot=pref_slot)
@@ -766,7 +772,7 @@ def _wspec_kloop(
     prod: list[Stmt] = [SetMaxNReg(_PRODUCER_REGS, "dec")] if setmaxnreg else []
     for s in range(ring - 1):  # prime chunks 0..ring-2 into slots 0..ring-2 (release generation 0)
         prod += transport.fill(k0=_lit(s * bk_elems), slot=_lit(s))
-    prod.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(prod_body)), unroll=False))
+    prod.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(prod_body)), unroll=False, end=k_end))
 
     # Compute: wait the data parity, drain the slot, close the band on the named barrier, release.
     read_slot = BinaryExpr("%", i_expr, _lit(ring))
@@ -778,10 +784,77 @@ def _wspec_kloop(
         Cond(cond=BinaryExpr("==", transport.cta.linear_tid, _lit(0)), body=(MbarrierArrive(mbar=_EMPTY_MBAR, slot=read_slot),))
     )
     cons: list[Stmt] = [SetMaxNReg(_CONSUMER_REGS, "inc")] if setmaxnreg else []
-    cons.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(cons_body)), unroll=False))
+    cons.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(cons_body)), unroll=False, end=k_end))
 
     role = Cond(cond=BinaryExpr(">=", tid, _lit(block_threads)), body=tuple(prod), else_body=tuple(cons))
     return decls, [*pre, role]
+
+
+def alternating_kloop(
+    *,
+    k_transport,
+    v_transport,
+    qk_drain: Callable[[Expr], list[Stmt]],
+    mid: list[Stmt],
+    pv_drain: Callable[[Expr], list[Stmt]],
+    bk_elems: int,
+    k_extent: int,
+    k0: str,
+    k_end: Expr | None = None,
+) -> tuple[list[Stmt], list[Stmt]]:
+    """The ALTERNATING single-slab K-loop — the warp-flash stream's FA-2 choreography (the
+    ``d1/tma/alt`` stage). Each operand keeps ONE slab on its OWN mbarrier, and the refill lands
+    in the phase that no longer reads it, so both copies overlap compute without a second slot::
+
+        prologue: fill K_0, fill V_0
+        step i:   wait K_i | qk_drain | Sync | fill K_{i+1} | mid (softmax) |
+                  wait V_i | pv_drain | Sync | fill V_{i+1}
+
+    K_{i+1}'s copy runs under ``mid`` + the P·V mmas; V_{i+1}'s under step ``i+1``'s Q·K.
+    Both async transports ride the same seam: TMA parity-waits the operand's own mbarrier (the
+    single slot's parity alternates per generation, ``phase = i % 2``); cp.async commits each
+    fill into its own group — the K,V,K,V commits form a per-thread QUEUE, so a uniform
+    ``wait_group(1)`` at either wait point completes exactly the OLDER (this phase's) group while
+    the newer sibling stays in flight. The tail refills clamp onto the last needed chunk
+    (re-fetching it — harmless, never waited). ``k_end`` is the causal early stop (the hoisted
+    ``<k0>_end`` for-init bound, as :func:`staged_kloop`). Static block-divisible extents only
+    (the resolver's gate)."""
+    decls = k_transport.slab_decls(1) + v_transport.slab_decls(1)
+    pre = [*k_transport.prologue(1), *v_transport.prologue(1)]
+    pre += k_transport.fill(k0=_lit(0), slot=_lit(0))
+    pre += k_transport.commit()
+    pre += v_transport.fill(k0=_lit(0), slot=_lit(0))
+    pre += v_transport.commit()
+
+    i_expr = BinaryExpr("/", Var(k0), _lit(bk_elems))
+    phase = BinaryExpr("%", i_expr, _lit(2))
+    k0_next = BinaryExpr("+", Var(k0), _lit(bk_elems))
+    if k_end is not None:
+        end_var = Var(f"{k0}_end")  # the loop's hoisted for-init bound (StridedLoop.end)
+        last_k0 = BinaryExpr("*", BinaryExpr("/", BinaryExpr("-", end_var, _lit(1)), _lit(bk_elems)), _lit(bk_elems))
+        k0_pref = TernaryExpr(cond=BinaryExpr("<", k0_next, end_var), if_true=k0_next, if_false=last_k0)
+    else:
+        k0_pref = TernaryExpr(cond=BinaryExpr("<", k0_next, _lit(k_extent)), if_true=k0_next, if_false=_lit(k_extent - bk_elems))
+
+    body: list[Stmt] = []
+    # ``in_flight=1``: cp.async keeps the newer sibling group outstanding (TMA ignores it — the
+    # per-operand mbarrier parity is the gate there).
+    body += k_transport.wait(in_flight=1, slot=_lit(0), phase=phase)
+    body += qk_drain(_lit(0))
+    body.append(Sync())  # every warp done reading the K slab before its refill
+    body += k_transport.fill(k0=k0_pref, slot=_lit(0))
+    body += k_transport.commit()
+    body += mid
+    body += v_transport.wait(in_flight=1, slot=_lit(0), phase=phase)
+    body += pv_drain(_lit(0))
+    body.append(Sync())  # every warp done reading the V slab before its refill
+    body += v_transport.fill(k0=k0_pref, slot=_lit(0))
+    body += v_transport.commit()
+
+    outer = StridedLoop(
+        axis=Axis(name=k0, extent=k_extent), start=_lit(0), step=_lit(bk_elems), body=Body(tuple(body)), unroll=False, end=k_end
+    )
+    return decls, [*pre, outer]
 
 
 def staged_kloop(
@@ -795,6 +868,7 @@ def staged_kloop(
     workers=None,
     block_threads: int | None = None,
     k0: str = "_ks",
+    k_end: Expr | None = None,
 ) -> tuple[list[Stmt], list[Stmt]]:
     """The **one** staged K-loop skeleton — ``fill → commit → wait → drain → Sync`` over the K-chunks,
     with ``depth`` the sole buffering knob and ``transport`` the sole producer seam. Returns
@@ -817,7 +891,12 @@ def staged_kloop(
     scheduler's legality gate), ``block_threads`` naming the compute band.
 
     ``k0`` names the chunk loop variable (default ``"_ks"``) — a drain whose body references the
-    chunk base by name (the warp-flash stream's absolute score columns) passes its own axis name."""
+    chunk base by name (the warp-flash stream's absolute score columns) passes its own axis name.
+
+    ``k_end`` (an ``Expr`` over in-scope grid vars, CTA-uniform, ``≤ k_extent``) stops the chunk
+    loop early — the causal flash stream's triangular kv bound. Chunks past it fold the carrier
+    identity exactly, so skipping them is bit-identical; the prefetch clamp re-pins onto the last
+    NEEDED chunk (``((k_end − 1) / bk) · bk``). CTA-uniformity keeps the in-loop barriers legal."""
     # A symbolic ``k_extent`` (warp-flash over a runtime seq_len) is a ``Dim``: the chunk count is a
     # runtime value, so allocate the full ``depth`` ring (the tuned hint has ≥ depth chunks) and let
     # the transport absorb any over-primed tail chunk (TMA zero-fills its box; cp.async clamp-reads
@@ -838,6 +917,7 @@ def staged_kloop(
             k_extent=k_extent,
             aux_threads=32 * workers.aux_warps,
             block_threads=block_threads,
+            k_end=k_end,
         )
     K = k_extent
     decls = transport.slab_decls(ring)
@@ -862,8 +942,18 @@ def staged_kloop(
         read_phase = BinaryExpr("%", BinaryExpr("/", i_expr, _lit(ring)), _lit(2))
         # The last chunk's base and the loop bound are runtime Exprs when kv is symbolic (``Dim``),
         # else folded literals — the clamp pins an overhanging prefetch back onto the last chunk.
-        last_k0 = BinaryExpr("*", BinaryExpr("-", n_chunks.expr, _lit(1)), _lit(bk_elems)) if symbolic else _lit((n_chunks - 1) * bk_elems)
-        k_bound = k_extent.expr if symbolic else _lit(k_extent)
+        # A ``k_end`` early stop moves both onto the last chunk this CTA actually drains; the clamp
+        # reads the loop's hoisted ``<k0>_end`` (the ``StridedLoop.end`` for-init decl), not the
+        # raw expr — inlining it per iteration measurably spills.
+        if k_end is not None:
+            end_var = Var(f"{k0}_end")
+            last_k0 = BinaryExpr("*", BinaryExpr("/", BinaryExpr("-", end_var, _lit(1)), _lit(bk_elems)), _lit(bk_elems))
+            k_bound: Expr = end_var
+        else:
+            last_k0 = (
+                BinaryExpr("*", BinaryExpr("-", n_chunks.expr, _lit(1)), _lit(bk_elems)) if symbolic else _lit((n_chunks - 1) * bk_elems)
+            )
+            k_bound = k_extent.expr if symbolic else _lit(k_extent)
         k0_next = BinaryExpr("+", Var(k0), _lit((ring - 1) * bk_elems))
         k0_pref = TernaryExpr(cond=BinaryExpr("<", k0_next, k_bound), if_true=k0_next, if_false=last_k0)
         # ``k0_cur`` (the un-clamped loop base) is the sync transport's current-chunk handle —
@@ -875,5 +965,5 @@ def staged_kloop(
         body += drain(read_slot)
         body.append(Sync())  # done reading this slot before a later chunk prefetches into it
 
-    outer = StridedLoop(axis=Axis(name=k0, extent=K), start=_lit(0), step=_lit(bk_elems), body=Body(tuple(body)), unroll=False)
+    outer = StridedLoop(axis=Axis(name=k0, extent=K), start=_lit(0), step=_lit(bk_elems), body=Body(tuple(body)), unroll=False, end=k_end)
     return decls, [*pre, outer]

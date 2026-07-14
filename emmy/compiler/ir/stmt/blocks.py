@@ -284,6 +284,11 @@ class StridedLoop(Stmt):
     axis Var directly; the strided iteration shape is encoded by the
     loop construct itself rather than via affine indexing in the body.
 
+    ``end`` overrides the ``<`` bound with an arbitrary ``Expr`` over in-scope names
+    (default: the axis extent) — a data-independent early stop such as the causal
+    flash stream's triangular kv bound. The axis extent stays the analysis-visible
+    range; ``end`` must never exceed it.
+
     Reduction detection mirrors ``Loop``: a ``StridedLoop`` is a
     reduce-loop iff its annotated :attr:`role` folds or its body contains an ``Accum``."""
 
@@ -294,6 +299,7 @@ class StridedLoop(Stmt):
     unroll: bool = False
     role: AxisRole = AxisRole.FREE
     carrier: Carrier | None = None
+    end: Expr | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.body, Body):
@@ -308,14 +314,22 @@ class StridedLoop(Stmt):
     def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
         (body,) = bodies
         return StridedLoop(
-            axis=self.axis, start=self.start, step=self.step, body=body, unroll=self.unroll, role=self.role, carrier=self.carrier
+            axis=self.axis,
+            start=self.start,
+            step=self.step,
+            body=body,
+            unroll=self.unroll,
+            role=self.role,
+            carrier=self.carrier,
+            end=self.end,
         )
 
     def binds_axes(self) -> frozenset[str]:
         return frozenset({self.axis.name})
 
     def exprs(self) -> tuple[Expr, ...]:
-        return (self.start, self.step) if isinstance(self.step, Expr) else (self.start,)
+        out = (self.start, self.step) if isinstance(self.step, Expr) else (self.start,)
+        return (*out, self.end) if self.end is not None else out
 
     @property
     def is_reduce(self) -> bool:
@@ -326,7 +340,8 @@ class StridedLoop(Stmt):
     def pretty(self, indent: str = "") -> list[str]:
         start = self.start.pretty()
         step = self.step.pretty() if isinstance(self.step, Expr) else self.step
-        head = f"{indent}for {self.axis.name} in {start}..{self.axis.extent}:{step}{_source_suffix(self.axis)}"
+        bound = self.end.pretty() if self.end is not None else self.axis.extent
+        head = f"{indent}for {self.axis.name} in {start}..{bound}:{step}{_source_suffix(self.axis)}"
         return [head, *pretty_body(self.body, indent + INDENT)]
 
     def render(self, ctx: RenderCtx) -> list[str]:
@@ -353,7 +368,14 @@ class StridedLoop(Stmt):
         # its literal int.
         if self.unroll:
             out.append(f"{pad}#pragma unroll")
-        out.append(f"{pad}for (int {var} = {start_str}; {var} < {_extent_c(self.axis, ctx)}; {var} += {step_str}) {{")
+        if self.end is not None:
+            # Hoist the override bound into the for-init (``<var>_end``, referenceable by body
+            # stmts — the staged prefetch clamp) so a non-literal bound is evaluated once, not
+            # per iteration / per use (the inline form measurably spills on the flash stream).
+            init = f"int {var} = {start_str}, {var}_end = {self.end.render(ctx)}"
+            out.append(f"{pad}for ({init}; {var} < {var}_end; {var} += {step_str}) {{")
+        else:
+            out.append(f"{pad}for (int {var} = {start_str}; {var} < {_extent_c(self.axis, ctx)}; {var} += {step_str}) {{")
         inner = ctx.child()
         out.extend(render_body(self.body, inner))
         out.append(f"{pad}}}")

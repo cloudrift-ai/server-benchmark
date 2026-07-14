@@ -938,8 +938,9 @@ def test_warp_flash_causal_tile_skip(monkeypatch):
 
 
 @requires_cuda
+@pytest.mark.parametrize("stage", ["d1/tma/alt", "d1/cp/alt"])
 @pytest.mark.parametrize("variant", ["plain", "causal"])
-def test_warp_flash_alt_staging_matches_torch(monkeypatch, variant):
+def test_warp_flash_alt_staging_matches_torch(monkeypatch, variant, stage):
     """The ALTERNATING single-slab staging (``STAGE=d1/tma/alt``): one K slab + one V slab on
     separate mbarriers, refilled in the phase that no longer reads them (K under softmax + P·V,
     V under the next step's Q·K), and Q staged through a padded smem tile (its A fragments
@@ -947,14 +948,17 @@ def test_warp_flash_alt_staging_matches_torch(monkeypatch, variant):
     mbarriers + the Q slab), values vs torch — the fills are verbatim copies, so alt stays
     bit-identical to gmem-direct."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
-    monkeypatch.setenv("EMMY_STAGE", "d1/tma/alt")
+    monkeypatch.setenv("EMMY_STAGE", stage)
     torch.manual_seed(11)
     module = _Causal() if variant == "causal" else _Sdpa()
     q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
     backend, compiled, graph, kernels = _trace(module, (q, k, v))
     assert len(kernels) == 1
     src = compiled.nodes[kernels[0]].op.kernel_source
-    assert "_kbar" in src and "_vbar" in src, "alt staging must run the per-operand mbarrier pair"
+    if "tma" in stage:
+        assert "_kbar" in src and "_vbar" in src, "tma alt must run the per-operand mbarrier pair"
+    else:
+        assert "_kbar" not in src and "cp_async" in src, "cp alt rides commit groups, no mbarriers"
     assert "_q_smem" in src, "alt staging must stage Q through smem"
 
     def ref():

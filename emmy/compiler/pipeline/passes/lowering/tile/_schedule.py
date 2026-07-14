@@ -1661,14 +1661,20 @@ def _resolve_twisted_stage(
         # streaming block's copies in HALF the paired ring's smem. The Q (query) tile stages
         # through smem too — a padded row-major slab filled once, its A fragments ldmatrix'd per
         # atom-K chunk — which frees the resident Q registers that made the wide block spill.
-        # TMA + static block-divisible kv only (per-operand expect-tx arming; the symbolic
-        # tail/box-overhang story is not built for the split phases).
-        if stage.transport != "tma" or not kv_extent.is_static or kv_extent.as_static() % bn != 0 or m_rows <= 0:
+        # Static block-divisible kv only (the symbolic tail story is not built for the split
+        # phases). Both async transports ride the same seam: TMA arms per-operand mbarriers
+        # (``d1/tma/alt``); cp.async commits each fill into its own group and a uniform
+        # ``wait_group(1)`` completes the older sibling (``d1/cp/alt`` — the sm_89 form).
+        if not kv_extent.is_static or kv_extent.as_static() % bn != 0 or m_rows <= 0:
             return None
-        if bn > 256 or head_dim > 256 or d_v > 256 or (head_dim * elem_bytes) % 16 or (d_v * elem_bytes) % 16:
-            return None
+        if stage.transport == "tma":
+            if bn > 256 or head_dim > 256 or d_v > 256 or (head_dim * elem_bytes) % 16 or (d_v * elem_bytes) % 16:
+                return None
+            kv_pad = 0  # dense hardware-swizzled slabs
+        else:
+            kv_pad = 16  # the two K/V slabs' padded rows (2 x _twist._PAD elems)
         q_bytes = m_rows * (head_dim + 8) * elem_bytes  # +8 elem row pad (the flash cp-path bank break)
-        if q_bytes + bn * (head_dim + d_v) * elem_bytes > budget:
+        if q_bytes + bn * (head_dim + d_v + kv_pad) * elem_bytes > budget:
             return None
         return replace(stage, reg_depth=1, bk_elems=bn)
     if stage.transport == "cp.async":
@@ -1741,7 +1747,7 @@ def _twisted_stage_candidates(
     # ``d1/tma/alt`` (the alternating single-slab pipeline) rides the flash candidate list only —
     # it is not a ``stage_moves`` entry (the matmul resolvers decline it), and it resolves only
     # where the wide-block Q+K+V slabs fit (:func:`_resolve_twisted_stage`).
-    for move in [*stage_moves(warp=True), "d1/tma/alt"]:
+    for move in [*stage_moves(warp=True), "d1/tma/alt", "d1/cp/alt"]:
         if not move:
             continue
         r = resolve(move)

@@ -785,7 +785,8 @@ class Stage:
     # read them — K refills under softmax + P·V, V under the next step's Q·K — so a wide (64-key)
     # streaming block overlaps its copies within HALF the paired ring's smem. Implies the A (query)
     # operand stages through smem too (the freed resident fragments are what make the wide block's
-    # registers fit). ``d1/tma/alt``; flash stream only — the matmul resolvers decline it.
+    # registers fit). ``d1/tma/alt`` / ``d1/cp/alt``; flash stream only — the matmul resolvers
+    # decline it.
     alt: bool = False
 
     def __post_init__(self) -> None:

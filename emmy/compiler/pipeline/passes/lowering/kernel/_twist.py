@@ -701,12 +701,18 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             )
             state += cp_async_commit()
             state += cp_async_wait(0)
-            k_transport = TmaTransport(
-                operands=(k_op,), slab_dtype=_cuda(atom.operand_dtype("b")), elem_bytes=elem_bytes, cta=cta, mbar="_kbar"
-            )
-            v_transport = TmaTransport(
-                operands=(v_op,), slab_dtype=_cuda(atom.operand_dtype("b")), elem_bytes=elem_bytes, cta=cta, mbar="_vbar"
-            )
+            if is_tma:
+                k_transport = TmaTransport(
+                    operands=(k_op,), slab_dtype=_cuda(atom.operand_dtype("b")), elem_bytes=elem_bytes, cta=cta, mbar="_kbar"
+                )
+                v_transport = TmaTransport(
+                    operands=(v_op,), slab_dtype=_cuda(atom.operand_dtype("b")), elem_bytes=elem_bytes, cta=cta, mbar="_vbar"
+                )
+            else:
+                # cp.async: per-operand commit groups — the K,V,K,V commits queue per thread, and
+                # the skeleton's uniform ``wait_group(1)`` completes exactly the older sibling.
+                k_transport = CpAsyncTransport(operands=(k_op,), slab_dtype=_cuda(atom.operand_dtype("b")), elem_bytes=elem_bytes, cta=cta)
+                v_transport = CpAsyncTransport(operands=(v_op,), slab_dtype=_cuda(atom.operand_dtype("b")), elem_bytes=elem_bytes, cta=cta)
             qk_seg, mid_seg, pv_seg = _stream_segments(k_op.slot_row(Literal(0, "int")), v_op.slot_row(Literal(0, "int")), staged=True)
             decls, fold = alternating_kloop(
                 k_transport=k_transport,

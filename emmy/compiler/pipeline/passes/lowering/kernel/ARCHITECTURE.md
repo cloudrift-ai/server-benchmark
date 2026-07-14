@@ -174,8 +174,12 @@ V_{i+1}` — K's copy runs under softmax + P·V, V's under the next step's Q·K)
 copies within HALF the paired ring's smem. Q stages through smem too: a padded row-major tile (`head_dim + 8` element
 rows) cp.async-filled once before the stream, its A fragments ldmatrix'd per atom-K chunk INSIDE the step — the freed
 resident Q registers are what make the wide block's register file fit (the hd256 nt8 form went from 255 regs + 848 B
-spill loads to 240 regs / zero spills, 55.5 → 32.2 µs — past the nt4-d2 frontier). TMA + static block-divisible kv
-only; composes with the causal tile-skip (`k_end`) and the split-KV window; flash stream only (the matmul resolvers
+spill loads to 240 regs / zero spills, 55.5 → 31.7 µs — past the nt4-d2 frontier, and the fm sibling on `d1/cp/alt`
+is the first emmy-past-torch-SDPA hd256 entry on the 5090 at 29.7). Both async transports ride the skeleton: TMA arms
+per-operand mbarriers (`d1/tma/alt`); cp.async commits each fill into its own group — the K,V,K,V commits queue per
+thread, so a uniform `wait_group(1)` at either wait point completes exactly the older sibling (`d1/cp/alt`, the sm_89
+form — and the faster one on the 5090 too, the fm-prefers-cp lane rule again). Static block-divisible kv only;
+composes with the causal tile-skip (`k_end`) and the split-KV window; flash stream only (the matmul resolvers
 decline `alt`).
 
 **A split-KV partial windows the same stream** (`030_split_reduce._split_twisted_warp`, the flash `REDUCE=g<n>k` arm): the

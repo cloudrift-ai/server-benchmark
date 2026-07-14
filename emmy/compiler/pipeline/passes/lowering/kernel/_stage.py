@@ -369,9 +369,12 @@ class SyncOperand:
     def slab(self) -> str:
         return f"_{self.tag}_smem"
 
-    def slot_row(self, slot: Expr) -> Expr | None:
-        """The ring-slot row offset into this operand's multi-slot slab (``None`` for slot 0)."""
-        return _slot_row(slot, self.shape[0])
+    def slot_row(self, slot: Expr) -> Expr | None:  # noqa: ARG002
+        """Always ``None`` — a sync-filled slab is SINGLE-BUFFER by construction: the compute /
+        copy fill runs on the drain's own threads, so a prefetch slot for it buys no overlap
+        (the work is serial either way) while doubling the slab. The sync transport's ``depth``
+        rings its ``async_operands`` only (:class:`SyncTransport`)."""
+        return None
 
 
 @dataclass(frozen=True)
@@ -381,9 +384,13 @@ class SyncTransport:
     tile) rides ``operands``; plain-copy operands (the fused edge's B weights) ride
     ``async_operands`` as vectorized ``cp.async`` fills issued BEFORE the compute fill, so the
     hardware copies fly underneath it — the same ``fill``/``commit``/``wait`` seam as the pure
-    cp.async / TMA producers, closed by one ``CpAsyncWait`` + CTA barrier. ``depth >= 2`` rings
-    every slab (the sync compute fill writes its prefetch slot like any producer; the wait keeps
-    ``ring-1`` cp.async groups in flight, so the B copies overlap the drain across chunks).
+    cp.async / TMA producers, closed by one ``CpAsyncWait`` + CTA barrier. ``depth >= 2`` is the
+    **asymmetric (B-only) prefetch ring**: only the ``async_operands`` slabs ring (the cp.async
+    B copies for chunk ``i+ring-1`` fly under the A fill AND the drain of chunk ``i``), while the
+    sync-filled slabs stay single-buffer and fill the CURRENT chunk off the skeleton's ``k0_cur``
+    handle — ringing a compute fill buys no overlap (it runs on the drain's own threads). NOTE:
+    even the B-only ring measured slower on the reference gemma shape (the extra B slot crosses
+    the smem occupancy quantization) — the ring stays pin-only, ``d1`` the deployable form.
 
     The compute fill assigns each thread a run of ``V`` **contiguous** slab cells (``V`` = the
     16-byte vector width, always dividing the slab's inner extent): the ``row``/``col`` derivation
@@ -402,7 +409,12 @@ class SyncTransport:
     elem_bytes: int = 2
 
     def slab_decls(self, ring: int) -> list[Stmt]:
-        return [slab_smem(op.slab, ring * op.shape[0], op.shape[1], self.slab_dtype) for op in (*self.operands, *self.async_operands)]
+        # Sync-filled slabs are single-buffer (see :meth:`SyncOperand.slot_row`); only the
+        # async (cp.async B) slabs allocate the ring.
+        return [
+            *(slab_smem(op.slab, op.shape[0], op.shape[1], self.slab_dtype) for op in self.operands),
+            *(slab_smem(op.slab, ring * op.shape[0], op.shape[1], self.slab_dtype) for op in self.async_operands),
+        ]
 
     def prologue(self, ring: int) -> list[Stmt]:  # noqa: ARG002
         return list(self.prologue_stmts)
@@ -464,9 +476,11 @@ class SyncTransport:
             cell_defs |= set(a.defines())
         return plans
 
-    def fill(self, *, k0: Expr, slot: Expr) -> list[Stmt]:
+    def fill(self, *, k0: Expr, slot: Expr, k0_cur: Expr | None = None) -> list[Stmt]:
         out: list[Stmt] = []
-        # Issue the async copies FIRST — they are in flight while the compute fill below runs.
+        # Issue the async copies FIRST — at ``depth 1`` they are in flight while the compute fill
+        # below runs; at ``depth >= 2`` (the B-only ring) ``k0``/``slot`` are the skeleton's
+        # PREFETCH chunk/slot, so they additionally fly under the previous chunk's drain.
         for op in self.async_operands:
             out += cp_async_fill(
                 slab=op.slab,
@@ -479,6 +493,12 @@ class SyncTransport:
                 row_offset=op.slot_row(slot),
                 swizzle=op.swizzle,
             )
+        # The sync (compute / copy) fills target the CURRENT chunk in their single-buffer slabs —
+        # ``k0_cur`` (== ``k0`` at depth 1; the un-clamped loop base under a prefetch ring). The
+        # ring-priming call passes ``k0_cur=None``: there is no current chunk yet, so only the
+        # async prefetches issue.
+        if k0_cur is None:
+            return out
         for op in self.operands:
             rows, cols = op.shape
             v = _cp_async_width(cols, self.elem_bytes)
@@ -486,15 +506,14 @@ class SyncTransport:
             base = _mul(Var(fe.name), _lit(v))
             row = BinaryExpr("/", base, _lit(cols))  # constant across the run: v divides cols
             col = BinaryExpr("%", base, _lit(cols))
-            off = op.slot_row(slot)
-            smem_row = _add(off, row) if off is not None else row
+            smem_row = row
             plans = self._run_plans(op, v)
             body: list[Stmt] = []
             vals: list[str] = []
             cell_stmts: list[list[Stmt]] = []
             for j in range(v):
                 cell_col = _add(col, _lit(j)) if j else col
-                stmts, val = op.value(k0, row, cell_col)
+                stmts, val = op.value(k0_cur, row, cell_col)
                 cell_stmts.append(stmts)
                 vals.append(f"{val}__c{j}")
             # Per-cell SSA defs — the names each replica suffixes. HOISTED positions (run-invariant
@@ -553,7 +572,7 @@ class CpAsyncTransport:
     def prologue(self, ring: int) -> list[Stmt]:
         return []
 
-    def fill(self, *, k0: Expr, slot: Expr) -> list[Stmt]:
+    def fill(self, *, k0: Expr, slot: Expr, k0_cur: Expr | None = None) -> list[Stmt]:  # noqa: ARG002 — k0_cur is the sync transport's current-chunk handle
         out: list[Stmt] = []
         for op in self.operands:
             # The software swizzle XOR assumes dense power-of-two rows; a padded slab already
@@ -642,7 +661,7 @@ class TmaTransport:
         inits = tuple(MbarrierInit(mbar=self.mbar, count=1, slot=_lit(s)) for s in range(ring))
         return [Cond(cond=self._tid0, body=inits), Sync()]
 
-    def fill(self, *, k0: Expr, slot: Expr) -> list[Stmt]:
+    def fill(self, *, k0: Expr, slot: Expr, k0_cur: Expr | None = None) -> list[Stmt]:  # noqa: ARG002 — k0_cur is the sync transport's current-chunk handle
         body: list[Stmt] = [MbarrierArriveExpectTx(mbar=self.mbar, bytes_=self._total_bytes, slot=slot)]
         for op in self.operands:
             body.append(
@@ -831,7 +850,7 @@ def staged_kloop(
     body: list[Stmt] = []
     if ring == 1:
         phase = BinaryExpr("%", i_expr, _lit(2))
-        body += transport.fill(k0=Var(k0), slot=_lit(0))
+        body += transport.fill(k0=Var(k0), slot=_lit(0), k0_cur=Var(k0))
         body += transport.commit()
         body += transport.wait(in_flight=0, slot=_lit(0), phase=phase)
         body += drain(_lit(0))
@@ -847,7 +866,10 @@ def staged_kloop(
         k_bound = k_extent.expr if symbolic else _lit(k_extent)
         k0_next = BinaryExpr("+", Var(k0), _lit((ring - 1) * bk_elems))
         k0_pref = TernaryExpr(cond=BinaryExpr("<", k0_next, k_bound), if_true=k0_next, if_false=last_k0)
-        body += transport.fill(k0=k0_pref, slot=pref_slot)
+        # ``k0_cur`` (the un-clamped loop base) is the sync transport's current-chunk handle —
+        # its single-buffer compute fills target chunk ``i`` while the async prefetch targets
+        # ``i+ring-1``; the copy transports ignore it.
+        body += transport.fill(k0=k0_pref, slot=pref_slot, k0_cur=Var(k0))
         body += transport.commit()
         body += transport.wait(in_flight=ring - 1, slot=read_slot, phase=read_phase)
         body += drain(read_slot)

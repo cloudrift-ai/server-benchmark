@@ -851,25 +851,32 @@ def _resolve_sync_stage(c: Contraction, budget: int = STATIC_SMEM_CAP, want_dept
     sibling and a ``STAGE`` pin degrades to this resolved row. ``None`` when the slabs don't fit
     the 48 KiB smem budget: the A/B operand slabs plus one fp32 row per bridged statistic
     (``sync_stat_fill``'s decls — the same ``Contraction.stat_prologue`` seam the materializer
-    fills through). ``want_depth >= 2`` (a ``STAGE`` ``d<n>/sync`` pin — pin / tune-explorable,
-    never the unpinned default: the ring costs occupancy and measured slower on the reference
-    shapes) rings the slabs when a canonical B has cp.async copies to overlap and the ring fits
-    the budget; a transposed-B (all-sync) pipeline has nothing async to overlap and stays
-    single-buffer. ``budget`` is the device's per-block dynamic-smem opt-in cap
-    (``ctx.max_dynamic_smem`` — the backend declares an ``extern __shared__`` pool and sets the
-    func attribute past the 48 KiB static cap), falling back to the static cap when no context
-    reaches the schedule."""
+    fills through). ``want_depth >= 2`` (a ``STAGE`` ``d<n>/sync`` pin — pin / tune-explorable)
+    is the **asymmetric B-only prefetch ring**: only the canonical-B cp.async slabs ring (their
+    copies for chunk ``i+d-1`` fly under chunk ``i``'s compute fill AND drain), while the
+    compute-filled A slab and the stat rows stay single-buffer — ringing a compute fill buys no
+    overlap (it runs on the drain's own threads). Measured on the gemma gate_up fused edge
+    (5090): the B-only ring STILL loses (897 vs 665 µs at d2) — the extra B slot alone crosses
+    the smem occupancy quantization (3 → 2 CTAs/SM), the same cliff that killed the historical
+    full-slab ring; the depth stays pin-only and option-0 ``d1`` is the deployable form. A
+    transposed-B
+    (all-sync) pipeline has nothing async to overlap and stays single-buffer. ``budget`` is the
+    device's per-block dynamic-smem opt-in cap (``ctx.max_dynamic_smem`` — the backend declares
+    an ``extern __shared__`` pool and sets the func attribute past the 48 KiB static cap),
+    falling back to the static cap when no context reaches the schedule."""
     atom = c.atom
     bk_elems = c.tile.bk * atom.atom_k
     a_nbytes = atom.operand_dtype("a").nbytes
     _, _, stats = c.stat_prologue()
     # One A slab + one B slab per fold channel (the multi-channel gate/up node fills a B slab per
-    # projection) + one fp32 stat row per bridged statistic.
-    slot_bytes = (c.m.tile + len(c.folds) * c.n.tile) * bk_elems * a_nbytes
+    # projection) + one fp32 stat row per bridged statistic. Only the B slabs multiply by the
+    # ring depth (the asymmetric ring above).
+    a_bytes = c.m.tile * bk_elems * a_nbytes
+    b_bytes = len(c.folds) * c.n.tile * bk_elems * a_nbytes
     stat_bytes = len(stats) * c.m.tile * 4
-    if slot_bytes + stat_bytes > budget:
+    if a_bytes + b_bytes + stat_bytes > budget:
         return None
-    depth = want_depth if want_depth >= 2 and not c.b_trans and want_depth * slot_bytes + stat_bytes <= budget else 1
+    depth = want_depth if want_depth >= 2 and not c.b_trans and a_bytes + stat_bytes + want_depth * b_bytes <= budget else 1
     return Stage(depth=depth, transport="sync", smem=(c.a_name,), bk_elems=bk_elems)
 
 

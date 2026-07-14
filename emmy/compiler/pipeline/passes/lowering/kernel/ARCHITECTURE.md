@@ -165,8 +165,10 @@ slab.) The **TMA transport** boxes the batched K/V via rank-N descriptors (leadi
 extent-1 box dims; the load's batch/head index exprs as origin coords — GQA's `h // group` included) into dense
 1024 B-aligned slabs under the hardware swizzle, the drains' address XOR undoing it; under a `WSPEC` band split the
 transport's elected fill thread rides the WRAPPED linear tid (`threadIdx.x % block_threads` — the raw tid would elect
-a compute thread and the producer band would never fill). Static block-divisible kv only (the symbolic stream keeps
-its masked gmem-direct loads), and bit-identity to the gmem-direct sibling holds — same values, same mma order.
+a compute thread and the producer band would never fill). A symbolic kv stages too (TMA zero-fills the box overhang
+past the last key; cp.async clamp-reads the tail's key rows; the drain's tail masks zero the overhanging P columns);
+a static NON-block-divisible kv has no tail mask and stays gmem-direct. Bit-identity to the gmem-direct sibling
+holds either way — same values, same mma order.
 
 **A causal stream tile-skips** (staged and gmem-direct alike): when the score prologue carries the triangular
 `Select` (`kv ≤ m`, detected off the predicate shape in `_twist`), the stream stops at the CTA's last query row —
@@ -189,9 +191,13 @@ spill loads to 240 regs / zero spills, 55.5 → 31.7 µs — past the nt4-d2 fro
 is the first emmy-past-torch-SDPA hd256 entry on the 5090 at 29.7). Both async transports ride the skeleton: TMA arms
 per-operand mbarriers (`d1/tma/alt`); cp.async commits each fill into its own group — the K,V,K,V commits queue per
 thread, and the counting pass derives the uniform `wait_group(1)` that completes exactly the older sibling
-(`d1/cp/alt`, the sm_89 form — and the faster one on the 5090 too, the fm-prefers-cp lane rule again). Static
-block-divisible kv only; composes with the causal tile-skip (`k_end`) and the split-KV window; flash stream only
-(the matmul resolvers decline `alt`).
+(`d1/cp/alt`, the sm_89 form — and the faster one on the 5090 too, the fm-prefers-cp lane rule again). A symbolic
+kv rides the same runtime clamps as the ring: the kill-point refill clamps onto the runtime last chunk exactly as
+the ring prefetch does, and the staged-Q fill clamp-reads a tail CTA's overhanging query rows (their outputs are
+store-guarded) — the 5090 `attention.hd256.dynM` frontier moved 34.4 → 32.0 on `d1/cp/alt` and `hd128.dynM`
+13.5 on the fm `d1/tma/alt`, closing the symbolic-vs-static gap. A static non-block-divisible kv stays gmem-direct;
+composes with the causal tile-skip (`k_end`) and the split-KV window; flash stream only (the matmul resolvers
+decline `alt`).
 
 **A split-KV partial windows the same stream** (`030_split_reduce._split_twisted_warp`, the flash `REDUCE=g<n>k` arm): the
 `Reduction` arrives with its axis shrunk to the slice length and the slice's absolute base on `Reduction.offset` —

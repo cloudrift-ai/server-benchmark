@@ -974,6 +974,44 @@ def test_warp_flash_alt_staging_matches_torch(monkeypatch, variant, stage):
 
 
 @requires_cuda
+@pytest.mark.parametrize(("variant", "stage"), [("plain", "d1/cp/alt"), ("plain", "d1/tma/alt"), ("causal", "d1/cp/alt")])
+def test_warp_flash_alt_staging_symbolic_bit_identical(monkeypatch, variant, stage):
+    """The alternating staging over a SYMBOLIC ``seq_len`` — the resolver accepts it and the
+    liveness scheduler's kill-point refills ride the same runtime clamp as the ring prefetch:
+    cp.async clamp-reads the tail's key rows (TMA zero-fills its box), the staged-Q fill
+    clamp-reads a tail CTA's overhanging query rows (their outputs are store-guarded), and the
+    drain's tail masks zero the overhanging P columns. All fills are verbatim copies, so the alt
+    kernel is BIT-identical to its gmem-direct symbolic sibling at both a block-divisible (64)
+    and an overhanging (100) seq; the causal case composes the ``k_end`` early stop with the
+    symbolic clamp."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x1/f1x4/k4")
+    B, H, D = 1, 4, 64
+    sd = torch.export.Dim("seq_len", min=4, max=4096)
+    seed = tuple(torch.randn(B, H, 16, D, dtype=torch.float16) for _ in range(3))
+    ds = {"q": {2: sd}, "k": {2: sd}, "v": {2: sd}}
+    module = _Causal() if variant == "causal" else _Sdpa()
+
+    backend, compiled, graph, _ = _trace(module, seed, dynamic_shapes=ds)
+    monkeypatch.setenv("EMMY_STAGE", stage)
+    backend2, compiled2, graph2, kernels2 = _trace(module, seed, dynamic_shapes=ds)
+    src = compiled2.nodes[kernels2[0]].op.kernel_source
+    assert "int seq_len" in src, "the symbolic kernel must carry the runtime seq_len arg"
+    assert "_q_smem" in src, "alt staging must stage Q through smem"
+    if "tma" in stage:
+        assert "_kbar" in src and "_vbar" in src, "tma alt must run the per-operand mbarrier pair"
+    else:
+        assert "_kbar" not in src and "cp.async" in src, "cp alt rides commit groups, no mbarriers"
+
+    for s in (64, 100):
+        torch.manual_seed(s)
+        q, k, v = (torch.randn(B, H, s, D, dtype=torch.float16) for _ in range(3))
+        base = _run_flash(backend, compiled, graph, (q, k, v))
+        staged = _run_flash(backend2, compiled2, graph2, (q, k, v))
+        assert np.array_equal(base, staged), f"symbolic alt ({variant}/{stage}, seq={s}) differs from gmem-direct sibling"
+
+
+@requires_cuda
 @pytest.mark.parametrize("variant", ["plain", "causal"])
 def test_warp_flash_split_kv_matches_torch(monkeypatch, variant):
     """Flash split-KV (``REDUCE=g<n>k`` on the warp tier): the kv stream splits across CTAs, each

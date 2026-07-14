@@ -561,10 +561,28 @@ def test_print_ncu_compare_renders_dep_then_ref(capsys):
 @requires_cuda
 def test_run_ab_bench_shows_pinned_row(run_cli):
     """``run --code ... --bench --ab KNOBS`` benches the pinned config and prints it
-    as an ``ab KNOBS``-labeled row in the kernel table."""
-    rc, stdout, stderr = run_cli("run", "--code", "torch.matmul(torch.randn(64, 64), torch.randn(64, 64))", "--bench", "--ab", "BM=8,BN=16")
+    as an ``ab KNOBS``-labeled row in the kernel table. The pin must REALIZE (a valid
+    scalar-tile spelling for this shape) — an unmatched pin now fails its row loudly
+    and exits non-zero instead of benching the planner's pick under the pin's name."""
+    rc, stdout, stderr = run_cli(
+        "run", "--code", "torch.matmul(torch.randn(64, 64), torch.randn(64, 64))", "--bench", "--ab", "TILE=n16x16/f2x2"
+    )
     assert rc == 0, f"stderr: {stderr}"
-    assert "ab BM=8,BN=16" in stdout, stdout
+    assert "ab TILE=n16x16/f2x2" in stdout, stdout
+
+
+@requires_cuda
+def test_run_ab_bench_unmatched_pin_fails_loudly(run_cli):
+    """An ``--ab`` pin that matches no offered row (a knob family that does not exist)
+    is NOT benched — the row fails loudly (``unreproducible pin`` on the row, no timing)
+    and the run exits non-zero, instead of silently benching the planner's own pick
+    under the pin's name (the pin-spelling trap the golden sweeps kept hitting)."""
+    rc, stdout, _stderr = run_cli(
+        "run", "--code", "torch.matmul(torch.randn(64, 64), torch.randn(64, 64))", "--bench", "--ab", "BM=8,BN=16"
+    )
+    assert rc != 0, "an unmatched --ab pin must fail the run"
+    assert "unreproducible pin" in stdout, stdout
+    assert "! ab BM=8,BN=16" in stdout, stdout
 
 
 @requires_cuda

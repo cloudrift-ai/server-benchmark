@@ -604,6 +604,31 @@ configs:
     knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', STAGE: 'd2/cp/ring'}
     emmy_us: 20.3
     cublas_us: 19.0
+  # FAST_MATH-lane pair on the symbolic twin (2026-07-14 — the alternating pipeline now resolves on
+  # a symbolic kv): fm-alt 18.1 is the dynM frontier (fm-ring 18.6, std ring 20.0 live / 20.3
+  # recorded); std-alt loses (21.8). Mirrors the static hd128 fm pair above; cp.async only (sm_89).
+  - kernel: attention
+    name: attention.hd128.dynM
+    n_heads: 8
+    seq: 512
+    head_dim: 128
+    dtype: 'fp16'
+    causal: false
+    dynamic: true
+    knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f1x16/k4', STAGE: 'd2/cp/ring'}
+    emmy_us: 18.6
+    cublas_us: 19.0
+  - kernel: attention
+    name: attention.hd128.dynM
+    n_heads: 8
+    seq: 512
+    head_dim: 128
+    dtype: 'fp16'
+    causal: false
+    dynamic: true
+    knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f1x16/k4', STAGE: 'd1/cp/alt'}
+    emmy_us: 18.1
+    cublas_us: 19.0
   # Values re-measured 2026-07-13 after the causal tile-skip (3x reproduced): nt=2 44.1 → 40.4, and
   # the nt=4 streaming block (below) is the new twin frontier at 1.11x past torch SDPA — post-skip
   # the nt=4 form realizes on sm_89 (the pre-skip realize-back-to-nt2 note is obsolete).

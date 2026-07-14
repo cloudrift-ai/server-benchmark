@@ -278,3 +278,30 @@ configs:
     knobs: {PLACE: 'fuse', STAGE: 'd2/cp/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x32', WSPEC: ''}
     emmy_us: 37.6
     cublas_us: 41.0
+  # The norm rows (2026-07-14, 3x reproduced) — filled the coverage gap vs the 5090 file. b256 wins
+  # the block-split fork on both forms (b128 7.7 / b512 7.6); the greedy pick lands b128 (7.6) on
+  # the static shape, so the row matters. Note: a missing per-GPU row also blocks `run --golden`
+  # name resolution on this card (live_gpu scoping), which is how the gap surfaced.
+  - kernel: rms_norm
+    name: gemma4_12b.rms_norm.k3840
+    M: 512
+    K: 3840
+    knobs: {REDUCE: 'b256'}
+    emmy_us: 6.9
+    cublas_us: 7.0
+  - kernel: rms_norm
+    name: gemma4_12b.rms_norm.k3840.dynM
+    M: 512
+    K: 3840
+    dynamic: true
+    knobs: {REDUCE: 'b256'}
+    emmy_us: 6.9
+    cublas_us: 7.0
+  # qknorm: b64 wins (b128 3.85, b256 6.0, b512 11.2 — the wide splits starve the 4096-row grid).
+  - kernel: rms_norm
+    name: gemma4_12b.qknorm.k256
+    M: 4096
+    K: 256
+    knobs: {REDUCE: 'b64'}
+    emmy_us: 3.6
+    cublas_us: 4.8

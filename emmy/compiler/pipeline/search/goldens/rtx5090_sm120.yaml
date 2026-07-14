@@ -514,6 +514,19 @@ configs:
     knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, PLACE: 'fuse', STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w2x1/f1x16/k4', VECTORIZE_LOADS: true, WSPEC: ''}
     emmy_us: 16.5
     cublas_us: 18.42
+  # The std-lane PRIMARY (2026-07-14, alternating staging): the same w2x1 geometry on d1/tma/alt —
+  # 1.17x vs torch SDPA, 3x reproduced. hd64 keeps the paired ring (alt loses there: 9.2 vs 8.6 —
+  # its slabs already fit and the phase split's extra sync outweighs); nt16 (128-key) adds nothing.
+  - kernel: attention
+    name: attention.hd128
+    n_heads: 8
+    seq: 512
+    head_dim: 128
+    dtype: 'fp16'
+    causal: false
+    knobs: {PLACE: 'fuse', STAGE: 'd1/tma/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w2x1/f1x16/k4', WSPEC: ''}
+    emmy_us: 15.7
+    cublas_us: 18.42
   # Fast-math sibling (FAST_MATH lane): P·V on the f16-accumulate atom, QK^T stays f32-acc (softmax
   # statistics). 14.6 µs vs the standard golden's live 16.4 (0.89x), 1.26x vs torch SDPA. 2026-07-12
   # manual sweep, 3x reproduced at zero spread; accuracy vs torch passes. Kept beside the standard
@@ -528,6 +541,17 @@ configs:
     causal: false
     knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w2x1/f1x16/k4', WSPEC: ''}
     emmy_us: 14.6
+    cublas_us: 18.42
+  # The fm PRIMARY (2026-07-14): the fm sibling on d1/tma/alt — 1.36x vs torch SDPA, 3x reproduced.
+  - kernel: attention
+    name: attention.hd128
+    n_heads: 8
+    seq: 512
+    head_dim: 128
+    dtype: 'fp16'
+    causal: false
+    knobs: {PLACE: 'fuse', STAGE: 'd1/tma/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w2x1/f1x16/k4', WSPEC: ''}
+    emmy_us: 13.5
     cublas_us: 18.42
   - kernel: attention
     name: attention.hd64.dynM

@@ -679,6 +679,23 @@ The regret/reachability block renders once per prior **half** (offline vs online
 answer with whichever half is active, and the two halves' regrets point at different fixes (cold-start weights vs
 training data), so an unlabeled "prior" number destroys the diagnostic.
 
+**Golden-anchored descent** closes the regret view's structural blind spot: regret conditions on forks the search
+measured, so a golden in a subtree the search never built — or a shape with zero node data — was silence that read
+as health (how the 2026-07 prior-saturation bug hid from regret while the then-broken golden rank said top-1).
+Each card block ends with one row per golden recorded FOR that card (goldens never anchor against another card's
+rows): the coverage of the golden's path through the explored tree (branch matching is family-aware and
+registry-canonical, the A/B pin gate's rule), whether the prior's tie-pessimistic pick keeps the golden's subtree
+at each fork (with the measured same-regime gap when lost), and the loud absences — `NO TREE DATA` per unanchorable
+golden, a per-card count, and a closing line for cards with recorded goldens but no node rows at all. Coverage
+always renders with a denominator: a fully-followed path is exact (`followed 6/6 fork levels to a measured leaf`),
+while a partial match's total is an ESTIMATE marked `~` (`followed 2 of ~7 fork levels`) taken from the deepest
+sibling chain below the divergence fork — the golden's own branch topology was never materialized, so the
+siblings' depth is the only witness of how much tree remains. Regime
+discipline is hard: the golden's recorded µs is a deployable (-O3) number and never enters the -O1 walk or its
+gaps (the regimes systematically invert); it appears only in the `-O3 pick/golden` endpoint, computed over the
+op's `H_opt=3` regime rows with the fast-math regime matched (the `golden_deploy_perf` convention). Diagnostic,
+not a gate: a lost fork with a near-equal measured sibling is fine — the gap column is what says so.
+
 Both halves accept a candidate artifact for A/Bs: `--online-file` (legacy `--prior`) swaps the online checkpoint
 (`EMMY_ONLINE_FILE`), and
 `--offline-file` (on `eval offline` / `eval online`; env `EMMY_OFFLINE_FILE`) swaps the offline weights artifact —

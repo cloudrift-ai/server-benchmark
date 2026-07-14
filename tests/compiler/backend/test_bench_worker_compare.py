@@ -53,6 +53,102 @@ def test_compare_in_worker_returns_torch_and_emmy() -> None:
     assert bench is not None
 
 
+def _scripted_worker(child_src: str):
+    """An ``_AsyncBenchWorker`` whose child runs ``child_src`` instead of the real worker
+    module — the harness for exercising the transport against controlled child behavior
+    (no CUDA needed when the script never touches the GPU)."""
+    from emmy.compiler.backend.cuda.program import _AsyncBenchWorker
+
+    worker = _AsyncBenchWorker()
+
+    async def _spawn() -> None:
+        import asyncio as _a
+
+        worker._proc = await _a.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            child_src,
+            stdin=_a.subprocess.PIPE,
+            stdout=_a.subprocess.PIPE,
+            stderr=_a.subprocess.PIPE,
+        )
+        worker._stderr_tail = ""
+        worker._stderr_task = _a.ensure_future(worker._drain_stderr(worker._proc))
+        worker.cached_input_keys.clear()
+
+    worker._spawn = _spawn  # type: ignore[method-assign]
+    return worker
+
+
+def test_worker_systemexit_surfaces_cause_and_traceback(caplog) -> None:
+    """An in-child ``sys.exit`` (a CLI-style helper) no longer surfaces as an opaque
+    ``SystemExit(1)``: the response's error names the exit and points at the traceback,
+    which the parent logs instead of discarding."""
+    import logging
+
+    import pytest
+
+    from emmy.compiler.backend.cuda.program import BenchWorkerJobError
+
+    child = textwrap.dedent(
+        """
+        import sys
+        import emmy.compiler.backend.cuda._bench_worker as w
+        async def _boom(req):
+            sys.exit(1)
+        w._run_job = _boom
+        w.main()
+        """
+    )
+    worker = _scripted_worker(child)
+    with caplog.at_level(logging.ERROR, logger="emmy.compiler.backend.cuda.program"):
+        with pytest.raises(BenchWorkerJobError, match=r"sys\.exit\(1\)"):
+            asyncio.run(_job_then_close(worker, {"torch_spec": None, "kwargs": {}}, wall_timeout_s=60.0))
+    assert any("traceback" in rec.message.lower() for rec in caplog.records), "the child traceback must be logged, not discarded"
+
+
+def test_worker_chatty_stderr_does_not_block_the_job() -> None:
+    """A child that writes far past the ~64 KB stderr pipe buffer before responding must
+    not deadlock mid-job: the background drain keeps the pipe empty (and keeps only a
+    bounded tail)."""
+    child = textwrap.dedent(
+        """
+        import sys
+        import emmy.compiler.backend.cuda._bench_worker as w
+        sys.stderr.write("x" * 262144)
+        sys.stderr.flush()
+        async def _ok(req):
+            return {"result": "R", "results": None, "torch_available": False, "captured": True}
+        w._run_job = _ok
+        w.main()
+        """
+    )
+    worker = _scripted_worker(child)
+    resp = asyncio.run(_job_then_close(worker, {"torch_spec": None, "kwargs": {}}, wall_timeout_s=60.0))
+    assert resp["result"] == "R"
+    assert len(worker._stderr_tail) <= worker._STDERR_TAIL_CHARS
+
+
+def test_worker_wall_timeout_error_carries_stderr_tail() -> None:
+    """The SIGKILL-on-wall-timeout error includes the drained stderr tail — exactly the
+    context that matters when a hung kernel took the child down."""
+    import pytest
+
+    child = 'import sys, time; sys.stderr.write("MARKER-STDERR-TAIL"); sys.stderr.flush(); time.sleep(600)'
+    worker = _scripted_worker(child)
+    with pytest.raises(RuntimeError, match="MARKER-STDERR-TAIL"):
+        asyncio.run(_job_then_close(worker, {"torch_spec": None, "kwargs": {}}, wall_timeout_s=2.0))
+
+
+async def _job_then_close(worker, req: dict, *, wall_timeout_s: float):
+    """Run one job and tear the worker down inside the same event loop (its subprocess
+    transport binds to the loop)."""
+    try:
+        return await worker.run_job(req, wall_timeout_s=wall_timeout_s)
+    finally:
+        await worker.aclose()
+
+
 class _HangWorker:
     """An ``_AsyncBenchWorker`` whose child's ``_run_job`` launches a non-terminating GPU kernel and
     blocks on it forever — to exercise the parent's wall-timeout SIGKILL on a genuinely hung worker."""
@@ -128,6 +224,171 @@ def test_run_job_send_times_out_on_unresponsive_worker() -> None:
         asyncio.run(worker.run_job({"blob": b"x" * (1 << 20)}, wall_timeout_s=2.0))  # 1 MB >> pipe buffer
     assert time.time() - t0 < 20.0, "send must respect the wall budget, not block on the pipe"
     assert worker._proc is None, "the unresponsive worker must be killed and its handle released"
+
+
+def test_run_job_run_inputs_executes_before_bench(monkeypatch) -> None:
+    """A spec-None job with ``run_inputs`` executes the graph once on those inputs — the
+    pinned-row wrong-answer gate's measurement side — and ships the outputs back beside
+    the bench; without ``run_inputs`` no execution is attempted."""
+    from types import SimpleNamespace
+
+    import emmy.compiler.backend.cuda.backend as backend_mod
+    import emmy.compiler.backend.cuda.program as program_mod
+    from emmy.compiler.backend.cuda._bench_worker import _run_job
+
+    calls: list = []
+
+    class _FakeBackend:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def run(self, graph, *, input_data=None):
+            calls.append(("run", input_data))
+            return SimpleNamespace(outputs={"n0": [1.0]}), None
+
+    def _fake_bench(graph, **kwargs):
+        calls.append(("bench", graph))
+        return SimpleNamespace(captured=True)
+
+    monkeypatch.setattr(backend_mod, "CudaBackend", _FakeBackend)
+    monkeypatch.setattr(program_mod, "benchmark_program", _fake_bench)
+
+    req = {"graph": "G", "torch_spec": None, "run_inputs": {"x": [0.0]}, "kwargs": {"warmup": 1, "num_iters": 2}}
+    resp = asyncio.run(_run_job(req))
+    assert resp["run_outputs"] == {"n0": [1.0]}
+    assert [c[0] for c in calls] == ["run", "bench"]
+
+    calls.clear()
+    resp = asyncio.run(_run_job({"graph": "G", "torch_spec": None, "run_inputs": None, "kwargs": {}}))
+    assert resp["run_outputs"] is None
+    assert [c[0] for c in calls] == ["bench"]
+
+
+def test_run_job_caches_run_inputs_by_key(monkeypatch) -> None:
+    """The reference inputs cross the pipe once per child: a job carrying key + inputs
+    caches them, later key-only jobs reuse the cache, and a key the (respawned) child
+    doesn't hold raises the typed cache-miss the parent retries on."""
+    from types import SimpleNamespace
+
+    import pytest
+
+    import emmy.compiler.backend.cuda._bench_worker as worker_mod
+    import emmy.compiler.backend.cuda.backend as backend_mod
+    import emmy.compiler.backend.cuda.program as program_mod
+    from emmy.compiler.backend.cuda._bench_worker import InputsCacheMissError, _run_job
+
+    seen_inputs: list = []
+
+    class _FakeBackend:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def run(self, graph, *, input_data=None):
+            seen_inputs.append(input_data)
+            return SimpleNamespace(outputs={"n0": [1.0]}), None
+
+    monkeypatch.setattr(backend_mod, "CudaBackend", _FakeBackend)
+    monkeypatch.setattr(program_mod, "benchmark_program", lambda graph, **kwargs: SimpleNamespace(captured=True))
+    monkeypatch.setattr(worker_mod, "_RUN_INPUTS_CACHE", {})
+
+    inputs = {"x": [0.0]}
+    asyncio.run(_run_job({"graph": "G", "torch_spec": None, "run_inputs": inputs, "run_inputs_key": "K", "kwargs": {}}))
+    asyncio.run(_run_job({"graph": "G", "torch_spec": None, "run_inputs": None, "run_inputs_key": "K", "kwargs": {}}))
+    assert seen_inputs == [inputs, inputs]  # second job ran on the cached set
+    with pytest.raises(InputsCacheMissError):
+        asyncio.run(_run_job({"graph": "G", "torch_spec": None, "run_inputs": None, "run_inputs_key": "OTHER", "kwargs": {}}))
+
+
+def test_benchmark_pinned_isolated_async_ships_inputs_once_and_retries_on_miss() -> None:
+    """Parent side of the input cache: the first row sends the inputs, later rows send the
+    key alone, and a cache-miss job error (the child respawned after the key was tracked)
+    retries once with the inputs included."""
+    from emmy.compiler.backend.cuda.program import BenchWorkerJobError, benchmark_pinned_isolated_async
+
+    sent: list = []
+
+    class _FakeWorker:
+        def __init__(self) -> None:
+            self.cached_input_keys: set[str] = set()
+            self.fail_next = False
+
+        async def run_job(self, req, *, wall_timeout_s):
+            sent.append(req)
+            if self.fail_next:
+                self.fail_next = False
+                raise BenchWorkerJobError("bench worker error: run_inputs 'K' not cached", cache_miss=True)
+            return {"result": "B", "run_outputs": {"o": 1}}
+
+    worker = _FakeWorker()
+    inputs = {"x": [0.0]}
+
+    def _row():
+        return asyncio.run(
+            benchmark_pinned_isolated_async(
+                "G", worker=worker, wall_timeout_s=1.0, run_inputs=inputs, run_inputs_key="K", warmup=1, num_iters=1
+            )
+        )
+
+    _row()
+    assert sent[-1]["run_inputs"] == inputs  # first row ships the inputs
+    _row()
+    assert sent[-1]["run_inputs"] is None and sent[-1]["run_inputs_key"] == "K"  # later rows send the key alone
+    worker.fail_next = True  # child respawned since the key was tracked
+    bench, outputs = _row()
+    assert sent[-2]["run_inputs"] is None and sent[-1]["run_inputs"] == inputs  # miss → one retry with the inputs
+    assert bench == "B" and outputs == {"o": 1}
+
+
+def test_run_job_trace_args_accuracy_gates_the_bench(monkeypatch) -> None:
+    """A ``trace_args`` job with ``accuracy``: the child binds the rebuilt module's real
+    inputs, runs the emmy program on them, and compares vs eager. A numeric failure ships
+    the verdict back WITHOUT benching (the parent aborts on it — a latency table for a
+    miscompiling program is meaningless); a pass with ``want_ref`` returns that run's
+    ``(inputs, outputs)`` as the pinned rows' wrong-answer reference."""
+    from types import SimpleNamespace
+
+    import emmy.commands.compile as compile_mod
+    import emmy.commands.run as run_mod
+    import emmy.compiler.backend.cuda.backend as backend_mod
+    from emmy.compiler.backend.cuda._bench_worker import _run_job
+
+    class _FakeBackend:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def run(self, graph, *, input_data=None):
+            return SimpleNamespace(outputs={"n0": [2.0]}), None
+
+    benched: list = []
+
+    async def _fake_full_model(module, args_t, kwargs, graph, backend, *, warmup, iters, bench_backends):
+        benched.append(graph)
+        return {"Emmy": 1.0}, SimpleNamespace(captured=True), True
+
+    monkeypatch.setattr(compile_mod, "load_or_trace", lambda ns: (None, None, (object(), (), {})))
+    monkeypatch.setattr(backend_mod, "CudaBackend", _FakeBackend)
+    monkeypatch.setattr(run_mod, "_bind_inputs", lambda g, m, a, k: {"x": [0.0]})
+    monkeypatch.setattr(run_mod, "_eager_output", lambda m, a, k: "EAGER")
+    monkeypatch.setattr(run_mod, "bench_full_model_real", _fake_full_model)
+
+    req = {
+        "graph": "G",
+        "torch_spec": ("trace_args", {}),
+        "bench_backends": "emmy",
+        "warmup": 1,
+        "iters": 2,
+        "accuracy": True,
+        "want_ref": True,
+    }
+
+    monkeypatch.setattr(run_mod, "_check_accuracy", lambda outs, eager: "accuracy check failed vs eager: output n0")
+    resp = asyncio.run(_run_job(dict(req)))
+    assert resp["accuracy_error"] is not None and resp["result"] is None and not benched
+
+    monkeypatch.setattr(run_mod, "_check_accuracy", lambda outs, eager: None)
+    resp = asyncio.run(_run_job(dict(req)))
+    assert resp["accuracy_error"] is None and resp["run_io"] == ({"x": [0.0]}, {"n0": [2.0]})
+    assert benched and resp["results"] == {"Emmy": 1.0}
 
 
 @requires_cuda

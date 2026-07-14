@@ -7,10 +7,18 @@ Protocol (length-prefixed pickle on stdin/stdout):
 - Parent writes ``<8-byte little-endian length><pickled request>``.
 - One request shape, handled by :func:`_run_job`: ``{"graph": Graph, "nvcc_flags": str|None,
   "torch_spec": None | (...), ...}``. ``torch_spec`` selects the work — ``None`` is a pure
-  emmy bench (the autotune sweep, ``kwargs`` carries warmup / num_iters / timeouts), otherwise
-  the deployable eager / torch.compile / emmy comparison (``tune --bench`` / ``run --bench``),
-  rebuilt and run *here* so a hung kernel hangs this child (SIGKILL-recoverable).
-- Response: ``{"ok": True, "result": BenchmarkResult, "results": dict|None, "torch_available": bool}``
+  emmy bench (the autotune sweep and ``run --bench``'s pinned golden / ``--ab`` rows; ``kwargs``
+  carries warmup / num_iters / timeouts, an optional ``run_inputs`` ndarray dict adds one
+  pre-bench execution on those inputs with the outputs returned — the wrong-answer gate's
+  measurement side), otherwise the deployable eager / torch.compile / emmy comparison
+  (``tune --bench`` / ``run --bench``'s greedy row), rebuilt and run *here* so a hung kernel
+  hangs this child (SIGKILL-recoverable). A ``trace_args`` comparison honors two extra flags:
+  ``accuracy`` (bind the rebuilt module's real inputs, run the emmy program on them, compare vs
+  eager — the verdict rides back as ``accuracy_error``, and a numeric failure skips the bench)
+  and ``want_ref`` (return that run's ``(input_data, outputs)`` as ``run_io`` — the reference
+  the parent feeds each pinned row's wrong-answer check).
+- Response: ``{"ok": True, "result": BenchmarkResult, "results": dict|None, "torch_available": bool,
+  "captured": bool, "run_outputs": dict|None, "accuracy_error": str|None, "run_io": tuple|None}``
   or ``{"ok": False, "error": str, "traceback": str}`` on exception.
 - Worker imports cupy / torch lazily on first request, writes ``<8-byte length><pickled response>``.
 - EOF on stdin (or parent SIGKILL) terminates the worker.
@@ -49,6 +57,18 @@ def _read_n(fd: int, n: int) -> bytes:
     return bytes(out)
 
 
+class InputsCacheMissError(RuntimeError):
+    """A job referenced ``run_inputs_key`` but this worker holds no cached inputs for it —
+    the worker respawned since the inputs were shipped. The parent retries once with the
+    inputs included (``benchmark_pinned_isolated_async``)."""
+
+
+# Reference inputs cached across jobs of one run session (the pinned-row wrong-answer
+# gate re-executes every row on the SAME greedy inputs — ~hundreds of MB on the big
+# --code shapes, shipped once instead of per row). One entry: a new key evicts the old.
+_RUN_INPUTS_CACHE: dict[str, dict] = {}
+
+
 def _hung(exc: BaseException) -> bool:
     """``True`` iff ``exc`` is the per-launch hung-kernel watchdog. A hung kernel is still
     resident on the device, so :func:`_context_dirty`'s ``deviceSynchronize`` probe would block
@@ -82,18 +102,36 @@ async def _run_job(req: dict) -> dict:
         if spec is None:
             from emmy.compiler.backend.cuda.program import benchmark_program
 
+            run_outputs = None
+            run_inputs, key = req.get("run_inputs"), req.get("run_inputs_key")
+            if key is not None and run_inputs is not None:
+                _RUN_INPUTS_CACHE.clear()
+                _RUN_INPUTS_CACHE[key] = run_inputs
+            elif key is not None:
+                run_inputs = _RUN_INPUTS_CACHE.get(key)
+                if run_inputs is None:
+                    raise InputsCacheMissError(f"run_inputs {key!r} not cached in this worker (respawned?) — resend with the inputs")
+            if run_inputs is not None:
+                # One pre-bench execution on the caller's inputs — the pinned-row
+                # wrong-answer gate's measurement side (outputs cross back as ndarrays;
+                # ``CudaBackend.run`` resolves symbolic output shapes from the inputs).
+                from emmy.compiler.backend.cuda.backend import CudaBackend
+
+                run_result, _ = CudaBackend(bench_compile_timeout_s=60.0, bench_run_timeout_s=60.0).run(req["graph"], input_data=run_inputs)
+                run_outputs = run_result.outputs
             result = benchmark_program(req["graph"], **req["kwargs"])
-            return {"result": result, "results": None, "torch_available": False, "captured": result.captured}
+            return {"result": result, "results": None, "torch_available": False, "captured": result.captured, "run_outputs": run_outputs}
 
         from emmy.compiler.backend.cuda.backend import CudaBackend
 
         # In-process within this child — the parent's SIGKILL is the wall-timeout backstop.
         backend = CudaBackend(bench_compile_timeout_s=60.0, bench_run_timeout_s=60.0)
         kind, payload = spec
+        accuracy_error = run_io = None
         if kind == "frontend_graph":
             from emmy.commands.run import bench_lowered_vs_torch
 
-            results, bench, avail, captured = await bench_lowered_vs_torch(
+            results, bench, avail, captured, accuracy_error = await bench_lowered_vs_torch(
                 payload,
                 req["graph"],
                 backend,
@@ -113,6 +151,30 @@ async def _run_job(req: dict) -> dict:
             if bundle is None:
                 raise RuntimeError("trace_args produced no runnable module (--ir JSON path has none)")
             module, args_t, kwargs = bundle
+            if req.get("accuracy"):
+                # The run path's correctness gate, in-child: bind the rebuilt module's real
+                # inputs, run the emmy program on them, compare vs the eager forward. A
+                # numeric failure skips the bench — the parent aborts on the verdict, so
+                # benching a miscompiling program would be wasted GPU time. ``want_ref``
+                # ships this run's (inputs, outputs) back as the pinned rows' wrong-answer
+                # reference (bounded: pinned rows only exist for --code inputs).
+                from emmy.commands.run import _bind_inputs, _check_accuracy, _eager_output
+
+                input_data = _bind_inputs(req["graph"], module, args_t, kwargs)
+                run_result, _ = backend.run(req["graph"], input_data=input_data)
+                eager_out = _eager_output(module, args_t, kwargs)
+                accuracy_error = _check_accuracy(run_result.outputs, eager_out)
+                if accuracy_error is not None:
+                    return {
+                        "result": None,
+                        "results": None,
+                        "torch_available": True,
+                        "captured": False,
+                        "accuracy_error": accuracy_error,
+                        "run_io": None,
+                    }
+                if req.get("want_ref"):
+                    run_io = (input_data, run_result.outputs)
             results, bench, captured = await bench_full_model_real(
                 module,
                 args_t,
@@ -126,7 +188,14 @@ async def _run_job(req: dict) -> dict:
             avail = True
         else:
             raise ValueError(f"unknown torch_spec kind: {kind!r}")
-        return {"result": bench, "results": results, "torch_available": avail, "captured": captured}
+        return {
+            "result": bench,
+            "results": results,
+            "torch_available": avail,
+            "captured": captured,
+            "accuracy_error": accuracy_error,
+            "run_io": run_io,
+        }
 
 
 def _context_dirty() -> bool:
@@ -149,6 +218,13 @@ def _context_dirty() -> bool:
 
 
 def main() -> None:
+    # A bench worker never dumps compiler artifacts — but a child-built ``CudaBackend()``
+    # defaults its dump to ``CompilerDump.from_env()``, whose ``__post_init__`` rmtrees the
+    # directory. With ``EMMY_DUMP_DIR`` inherited from the parent that would wipe the
+    # parent's dump (the ``.torch.json`` reproducers a ``tune --bench`` is about to read).
+    from emmy import config
+
+    os.environ.pop(config.DUMP_DIR, None)
     in_fd = sys.stdin.buffer.fileno()
     out_fd = sys.stdout.buffer.fileno()
     while True:
@@ -163,7 +239,19 @@ def main() -> None:
         try:
             resp = {"ok": True, **asyncio.run(_run_job(pickle.loads(body)))}
         except BaseException as exc:  # noqa: BLE001 — surface every failure mode to the parent
-            resp = {"ok": False, "error": repr(exc), "traceback": traceback.format_exc()}
+            # A bare ``SystemExit`` repr hides the cause (a CLI-style ``sys.exit`` after a
+            # logged error) — point the parent at the traceback + stderr, where it lives.
+            error = (
+                f"child exited via sys.exit({exc.code}) — the cause is in the traceback / child stderr"
+                if isinstance(exc, SystemExit)
+                else repr(exc)
+            )
+            resp = {
+                "ok": False,
+                "error": error,
+                "traceback": traceback.format_exc(),
+                "cache_miss": isinstance(exc, InputsCacheMissError),
+            }
             dirty = _hung(exc) or _context_dirty()
         payload = pickle.dumps(resp, protocol=pickle.HIGHEST_PROTOCOL)
         os.write(out_fd, len(payload).to_bytes(8, "little"))

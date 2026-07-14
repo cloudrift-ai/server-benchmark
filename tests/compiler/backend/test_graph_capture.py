@@ -161,7 +161,7 @@ def test_bench_lowered_vs_torch_captures():
     from emmy.compiler.backend.cuda.backend import CudaBackend
 
     fe, lowered = _lowered_rmsnorm()
-    results, bench, torch_available, captured = asyncio.run(
+    results, bench, torch_available, captured, _accuracy = asyncio.run(
         bench_lowered_vs_torch(fe, lowered, CudaBackend(), seed=0, do_bench=True, warmup=2, iters=5, bench_backends="eager,emmy")
     )
     assert torch_available
@@ -182,7 +182,7 @@ def test_emmy_capture_failure_falls_back_uncaptured(monkeypatch):
 
     monkeypatch.setattr(CompiledProgram, "capture_launch_graphs", _boom)
     fe, lowered = _lowered_rmsnorm()
-    results, _, torch_available, captured = asyncio.run(
+    results, _, torch_available, captured, _accuracy = asyncio.run(
         bench_lowered_vs_torch(fe, lowered, CudaBackend(), seed=0, do_bench=True, warmup=2, iters=5, bench_backends="eager,emmy")
     )
     assert torch_available
@@ -206,7 +206,7 @@ def test_torch_capture_failure_disables_emmy_capture(monkeypatch):
     monkeypatch.setattr(CompiledProgram, "capture_launch_graphs", lambda self, bs: emmy_captures.append(bs) or orig(self, bs))
 
     fe, lowered = _lowered_rmsnorm()
-    results, _, torch_available, captured = asyncio.run(
+    results, _, torch_available, captured, _accuracy = asyncio.run(
         run_mod.bench_lowered_vs_torch(fe, lowered, CudaBackend(), seed=0, do_bench=True, warmup=2, iters=5, bench_backends="eager,emmy")
     )
     assert torch_available

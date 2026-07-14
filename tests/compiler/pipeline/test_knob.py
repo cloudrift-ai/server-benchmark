@@ -621,3 +621,27 @@ def test_knob_pinned_scopes_and_restores(monkeypatch):
     with pytest.raises(RuntimeError), F16_MMA_F32_ACC.pinned("1"):
         raise RuntimeError("boom")
     assert F16_MMA_F32_ACC.raw() == "0", "the pin must restore on the exception path"
+
+
+def test_stamp_schedule_families_fills_absent_families_with_off():
+    """The recording view stamps EVERY schedule codec family explicitly: realized values pass
+    through, and a family the compile never stamped (a target-gated pass — ``WSPEC`` off
+    Hopper/Blackwell) gains its registered OFF spelling. A recorded entry that omits a family
+    leaves it to the planner's replay-time fill, which drifts as the planner evolves (the
+    recurring unpinned-``REDUCE`` phantom-regression class) — this is the recorder-side fix."""
+    # The real registry: the schedule codecs are declared in search/space.py.
+    import emmy.compiler.pipeline.search.space  # noqa: F401
+    from emmy.compiler.pipeline.knob import stamp_schedule_families
+
+    knob_mod.reset_registry()
+    out = stamp_schedule_families({"TILE": "a:mma_m16n8k16_f16_f32/w1x1/f1x1", "REDUCE": "g2k", "STAGE": "", "S_ext_free_prod": 64.0})
+    # Realized values pass through; the struct stamp is dropped (not a tuning decision).
+    assert out["TILE"] == "a:mma_m16n8k16_f16_f32/w1x1/f1x1" and out["REDUCE"] == "g2k"
+    assert "S_ext_free_prod" not in out
+    # Families the compile never stamped are pinned as declined (OFF spelling).
+    assert out["WSPEC"] == "" and out["RASTER"] == "" and out["STAGE"] == ""
+    # Axis-keyed single-node spellings collapse to bare (the golden YAML convention),
+    # so the fill never duplicates a family that is present under an @axis key.
+    axed = stamp_schedule_families({"TILE@d": "n4/f2", "REDUCE@d": "b8"})
+    assert axed["TILE"] == "n4/f2" and axed["REDUCE"] == "b8"
+    assert "REDUCE@d" not in axed and axed["STAGE"] == "" and axed["WSPEC"] == "" and axed["RASTER"] == ""

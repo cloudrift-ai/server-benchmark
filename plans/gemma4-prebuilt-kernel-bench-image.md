@@ -132,15 +132,16 @@ regenerates at start.
 
 ### Cache-key parity contract
 
-- `source` — same emmy wheel + same GPU featurization (a real 5090) + analytic prior (pinned in wheel) + same serving
+- `source` — same emmy wheel + same GPU featurization (a real 5090) + offline prior (pinned in wheel) + same serving
   specs (dtype / max-model-len / decode bucket).
 - `name` — `op.kernel_name` verbatim.
 - `arch` — target cap + `uses_tma`: `sm_120` / `sm_120a` (5090).
 - `toolkit_tag` — warm with the **image's** `nvcc` (CUDA 13.0), not the host's 13.3.
 - `flags` — `-O3`: leave `EMMY_NVCC_FLAGS` empty; never warm with tune's `-Xcicc -O1`.
 
-`prior.json`: **analytic-only for v1** — the repo-pinned `AnalyticPrior` ships in the wheel and is deterministic at
-both ends; the learned prior falls back to it when absent/untrusted (`FallbackPrior`). One global, GPU-agnostic prior;
+`prior.json`: **offline-prior-only for v1** — the repo-pinned `OfflinePrior` (renamed from `AnalyticPrior`) ships in the
+wheel and is deterministic at both ends; the learned `OnlinePrior` falls back to it when absent/untrusted
+(`FallbackPrior`). One global, GPU-agnostic prior;
 no per-GPU file. A real-5090 tune is a later perf upgrade, not a blocker.
 
 ### Warming the serving cubins
@@ -177,7 +178,7 @@ on the 5090.
   minutes); there is no offline substitute for the serving path. (The CPU carve unit test de-risks Phase A cheaply
   before the rental.)
 - **`total_mem` featurization drift** (second-order): the memorized 5090 VRAM vs a live 5090's probed bytes differ
-  slightly; if the analytic prior is sensitive for any serving kernel, that kernel misses once and recompiles (correct,
+  slightly; if the offline prior is sensitive for any serving kernel, that kernel misses once and recompiles (correct,
   not free). The real-5090 hit-rate check catches it; fix by pinning the 5090 spec or wiring
   `probe_live_features(fallback_name=…)`.
 
@@ -187,7 +188,7 @@ on the 5090.
 - **Serving dtype / max-model-len / decode bucket** (open) — set which kernels get warmed; default to the `emmy serve`
   defaults (fp16, the runner's dynamic `num_tokens` specs + decode bucket 16). Confirm max-model-len for the release.
 - Image: single 5090 tag for v1 (arch-keyed cache; a 4090 set can be added later without collision).
-- Learned `prior.json`: **analytic-only for v1**; optional real-5090 tune later purely for perf.
+- `prior.json`: **offline-prior-only for v1**; optional real-5090 `OnlinePrior` tune later purely for perf.
 
 ## Notes
 

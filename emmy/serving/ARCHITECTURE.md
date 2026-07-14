@@ -65,8 +65,11 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   backend and samples with this. The generative *vLLM plugin* (`EmmyGenModel`) builds on this oracle.
 - `gen_runner.py` — `EmmyGenRunner` (Phase 2; sibling to `EmmyForwardRunner`). Carves SDPA out of every
   decoder layer (`build_attention_split_wrapper`), compiles **two dynamic-`num_tokens` programs per layer** (`pre` +
-  `post`) over the flattened `[num_tokens, H]` layout, and exposes `embed` / `forward_layer_pre(L,…)→(q,k,v)`
-  (un-rotated 2-D seam) / `forward_layer_post(L, attn_out, residual)→hidden` / `final_norm`. The caller stitches between
+  `post`) over the flattened `[num_tokens, H]` layout, and exposes `embed` (Gemma's √hidden embed-scale folded into the
+  gather table) / `forward_layer_pre(L,…)→(q,k,v)` (un-rotated 2-D seam; carves q/k/**v**-norm, and Gemma-4's global
+  `attention_k_eq_v` where V reuses K's projection) / `forward_layer_post(L, attn_out, residual)→hidden` / `final_norm`.
+  Attention dims are **per layer** (`layer_meta(L)` → head_dim / num_heads / num_kv / scaling) — Gemma-4's global layers
+  use a larger `global_head_dim` than its sliding ones, so each layer's `pre`/`post` compiles at its own width. The caller stitches between
   `pre` and `post` (a reference torch SDPA in the Phase-2 host stitch; vLLM paged `Attention` in Phase 3). **I/O:**
   prefill / `num_tokens > bucket` use the host numpy `rebind` path; the **decode hot path** (`num_tokens ≤ bucket`)
   is **device-resident** (Phase A — `run_device` / `embed_device` / `forward_layer_*_device` / `final_norm_device`:
@@ -76,12 +79,16 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `num_tokens ≤ bucket` (pad → run → slice the real rows) — the symbolic hint-512 M-tile is ~66× too slow at decode
   M=1; falls back to symbolic above the bucket or if a static compile fails. So
   up to 4 capacity programs/layer — a real memory-budget risk.
-- `vllm_model_gen.py` — `EmmyGenModel` (Phase 3; the generative vLLM model class). **NOT** `IsAttentionFree`: it
-  builds real vLLM `Attention` layers (one per decoder layer, unique `prefix` → vLLM allocates a KV-cache spec and runs
-  paged attention) + a shared `get_rope` module (a bare `Attention` does no RoPE) + `ParallelLMHead` + `LogitsProcessor`.
-  The trunk compute (embed + per-layer pre/post + final norm) is the `EmmyGenRunner`; vLLM owns only `lm_head`
-  (`load_weights` claims `lm_head.weight`, or the tied embed alias). `forward` brackets each `self.attn[L](q,k,v)` with
-  two emmy replays (pre/post), applying RoPE in between (A2). `forward` branches on `num_tokens`: the decode hot
+- `vllm_model_gen.py` — `EmmyGenModel` (Phase 3; the generative vLLM model class; Qwen3 / Llama / **Gemma-3/4**).
+  **NOT** `IsAttentionFree`: it builds real vLLM `Attention` layers (one per decoder layer, unique `prefix` → vLLM
+  allocates a KV-cache spec and runs paged attention; each is built at its **per-layer** dims (`runner.layer_meta` —
+  Gemma-4 global layers use a larger head_dim) and gets `per_layer_sliding_window` so Gemma's sliding/global layers
+  window correctly) + one RoPE module **per layer** (`_build_rotaries`: homogeneous models share one; Gemma-3/4
+  keys theta AND head_dim on layer type — local vs global — a bare `Attention` does no RoPE) + `ParallelLMHead` + `LogitsProcessor`
+  (`soft_cap=final_logit_softcapping`, so Gemma-4's final-logit softcap applies). The trunk compute (embed + per-layer
+  pre/post + final norm) is the `EmmyGenRunner`; vLLM owns only `lm_head` (`load_weights` claims `lm_head.weight`, or the
+  tied embed alias). `forward` brackets each `self.attn[L](q,k,v)` with two emmy replays (pre/post), applying that
+  layer's RoPE in between (A2). Uniform sliding-window (Qwen2-style `use_sliding_window`) and dual-chunk are rejected. `forward` branches on `num_tokens`: the decode hot
   path (`≤ bucket`) runs `_forward_device` (q/k/v + attn_out stay CUDA tensors through RoPE + attention, no host
   hop); prefill keeps the numpy path. Select via `--runner generate` +
   `--hf-overrides '{"architectures":["EmmyGenModel"]}'` + `--dtype float16` (the `serve --generate` branch forces

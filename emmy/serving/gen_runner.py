@@ -127,8 +127,16 @@ class EmmyGenRunner:
         self._pre_decode = pre_decode  # list[_Program] — static M=decode_bucket (or None → no bucket)
         self._post_decode = post_decode
         self._decode_bucket = decode_bucket
-        self.head_dim, self.num_heads, self.num_kv_heads, self.scaling = attn_meta
+        self._attn_meta = attn_meta  # per-layer list of (head_dim, num_heads, num_kv, scaling)
+        # Layer-0 convenience scalars — correct for homogeneous models (Qwen3 / Llama). Gemma-4's
+        # global layers differ, so the vLLM model reads per-layer dims via ``layer_meta``.
+        self.head_dim, self.num_heads, self.num_kv_heads, self.scaling = attn_meta[0]
         self._np_dtype = np_dtype
+
+    def layer_meta(self, layer: int) -> tuple[int, int, int, float]:
+        """Per-layer ``(head_dim, num_heads, num_kv_heads, scaling)``. Not uniform for Gemma-4:
+        its global (``full_attention``) layers use ``global_head_dim`` > the sliding layers' head_dim."""
+        return self._attn_meta[layer]
 
     @property
     def num_layers(self) -> int:
@@ -167,18 +175,22 @@ class EmmyGenRunner:
         np_dtype = np.dtype(dtype_str)
         trunk = getattr(model, "model", model)
         layers = trunk.layers
-        attn0 = layers[0].self_attn
-        head_dim = attn0.head_dim
-        num_heads = attn0.q_proj.out_features // head_dim
-        num_kv = attn0.k_proj.out_features // head_dim
-        scaling = attn0.scaling
         hidden = model.config.hidden_size
-        attn_width = num_heads * head_dim
 
+        def _meta(attn):
+            # Per-layer attention dims. Gemma-4's global layers use a larger head_dim
+            # (``global_head_dim``) than its sliding layers, so this is NOT uniform across layers.
+            hd = attn.head_dim
+            return hd, attn.q_proj.out_features // hd, attn.k_proj.out_features // hd, attn.scaling
+
+        attn_meta = []  # per-layer (head_dim, num_heads, num_kv, scaling)
         pre_programs, post_programs = [], []
         pre_decode, post_decode = [], []
         decode_ok = decode_bucket and decode_bucket > 0
         for i, block in enumerate(layers):
+            meta = _meta(block.self_attn)
+            attn_meta.append(meta)
+            attn_width = meta[1] * meta[0]  # this layer's num_heads * head_dim (gemma-4: global ≠ sliding)
             logger.info("[gen_runner] compiling layer %d/%d (pre + post%s)...", i + 1, len(layers), " + decode" if decode_ok else "")
             pre_w, post_w = build_attention_split_wrapper(block)
             with torch.device("cpu"):
@@ -210,13 +222,19 @@ class EmmyGenRunner:
                         decode_ok = False
 
         embed_weight = trunk.embed_tokens.weight.detach().cpu().to(torch.float32).numpy().astype(np_dtype, copy=False)
+        # Gemma scales embeddings by sqrt(hidden) (a ``Gemma3TextScaledWordEmbedding`` carries it as
+        # an ``embed_scale`` buffer); a plain ``nn.Embedding`` has none (scale 1). Fold it into the
+        # gather table so ``embed`` / ``embed_device`` both apply it with zero per-step cost.
+        embed_scale = float(getattr(trunk.embed_tokens, "embed_scale", 1.0))
+        if embed_scale != 1.0:
+            embed_weight = embed_weight * np_dtype.type(embed_scale)
         use_decode = decode_ok and len(pre_decode) == len(layers)
         return cls(
             embed_weight=embed_weight,
             norm=trunk.norm,
             pre=pre_programs,
             post=post_programs,
-            attn_meta=(head_dim, num_heads, num_kv, scaling),
+            attn_meta=attn_meta,
             np_dtype=np_dtype,
             pre_decode=pre_decode if use_decode else None,
             post_decode=post_decode if use_decode else None,

@@ -101,6 +101,11 @@ class Sample:
     s_full: dict | None = None  # full compiled S_* histogram when known (db/prior rows, or golden compile_s_feats)
     error: str | None = None  # bench_fail failure text (db rows only; None on ok rows)
     dynamic: tuple[str, ...] | None = None  # --dynamic NAME@INPUT:AXIS specs (dynamic goldens only; None = static)
+    # The config-side FLOP count (``GoldenConfig.flops()`` — never an overestimate; golden samples
+    # only). The intensity-floor gate reads THIS, not a ShapeKey reconstruction: the join key
+    # excludes symbolic axes on the matmul side but includes them on the reduce-tier side, so no
+    # one hint-multiplier formula over it can be right for both.
+    flops: float | None = None
 
     def s_features(self) -> dict[str, float]:
         """The ``S_*`` features this sample featurizes on: the full stamped histogram
@@ -146,6 +151,7 @@ class Sample:
             name=cfg.name,
             dtype=cfg.dtype,
             ref_us=cfg.cublas_us,
+            flops=cfg.flops(),
             # gpu_name pins the device-physical features (H_sm_count / smem / …) to
             # the golden's OWN card's memorized specs, not the live device's — so a
             # PRO 6000 golden ranked on a 5090 (both cc 12.0) gets 188 SMs, not 170.

@@ -211,7 +211,7 @@ masked **N** or a transposed **B** declines staging (gmem-direct) — the B-slab
 Unstaged is byte-identical gmem-direct.
 
 **Split-K composes with staging.** `_splitk_option` resolves a `STAGE` spec against the SLICED inner `Contraction`
-(the `kslice` extent + the `ksplit`-offset operand indices) and `030_split` threads the resolved `Stage` onto its
+(the `kslice` extent + the `ksplit`-offset operand indices) and `030_split_reduce` threads the resolved `Stage` onto its
 partial `TileOp`s, so the partial kernel's K-loop stages its slice through the same pipeline (the TMA box origin is
 the operand's own index evaluated at the tile base — an offset operand lands the box at absolute coordinates).
 
@@ -230,7 +230,7 @@ is the placement-keyed fold's **fragment row**: where the scalar tier folds in-t
 fold is a `FragmentRowReduce` `__shfl` butterfly over the C-fragment lanes. The fold MOVE itself is never re-decided
 per site: `ReduceStage.combine` (`ir/schedule.py`) is the ONE placement-keyed selector — within-warp → `SHFL`,
 within-block → `SHFL`+`SMEM` tree, cross-CTA → `ATOMIC`/`KERNEL` — and every emitter consumes its output
-(`emit_combine` at scalar residence, this realizer at fragment residence, `030_split` as the graph rewrite); only the
+(`emit_combine` at scalar residence, this realizer at fragment residence, `030_split_reduce` as the graph rewrite); only the
 residence-specific realization differs. Everything realizes from structure — the
 head contraction's `ldmatrix`/`mma.sync` off its node geometry (`_frag_contraction`); the score prologue stmt-by-stmt
 (`Assign` → `FragmentApply`, a coordinate `Select` → `FragmentMask` with the keep-predicate negated, loop-invariant

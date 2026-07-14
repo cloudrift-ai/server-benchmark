@@ -304,7 +304,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     # rewrite* (flash's fused fragment, ``try_flash``) rather than scheduling inline, because a
     # graph fragment can't embed a scheduling fork. The fused ``TileOp`` re-enters this same pass
     # and is scheduled here, the same ``_schedule.schedule`` the inline path uses. A mapped /
-    # kernel-less ``TileOp`` (already scheduled, or ``030_split``'s output) is left for materialize.
+    # kernel-less ``TileOp`` (already scheduled, or ``030_split_reduce``'s output) is left for materialize.
     if isinstance(root.op, TileOp):
         tile: TileOp = root.op
         if tile.op is None or tile.place.is_mapped:

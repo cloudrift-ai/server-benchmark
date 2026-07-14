@@ -3,13 +3,15 @@ compute_cap:
   - 12
   - 0
 configs:
+  # 2026-07-13 audit (PR #354 branch): same-knobs replay runs 8.5-8.6 (3x, zero spread) — a codegen
+  # win since recording; emmy_us refreshed from 10.24.
   - kernel: matmul
     name: matmul.square.512
     M: 512
     N: 512
     K: 512
     knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'g2k', RASTER: '', STAGE: 'd3/tma/ring', TILE: 'n16x8/f4x8', VECTORIZE_LOADS: true}
-    emmy_us: 10.24
+    emmy_us: 8.6
     cublas_us: 12.28
   - kernel: matmul
     name: matmul.square.512.fp16
@@ -98,6 +100,8 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
     emmy_us: 481.1
     cublas_us: 640.93
+  # 2026-07-13 audit: same-knobs replay runs 4.2 (3.2 main + 1.0 finalize; 3x, zero spread) — a
+  # codegen win since recording; emmy_us refreshed from 6.14.
   - kernel: matmul
     name: matmul.square.512.dynM
     M: 512
@@ -106,7 +110,7 @@ configs:
     dtype: 'fp16'
     dynamic: true
     knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'g2k', RASTER: '', STAGE: 'd4/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x2/k4', VECTORIZE_LOADS: true, WSPEC: ''}
-    emmy_us: 6.14
+    emmy_us: 4.2
     cublas_us: 6.14
   # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): 3.6 µs vs the standard golden's live
   # 4.2 (0.86x, reproduced 3x). Kept beside the standard entry — gate-off compiles can't reach it.
@@ -344,13 +348,16 @@ configs:
     knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'b512', VECTORIZE_LOADS: true}
     emmy_us: 3.7
     cublas_us: 4.1
+  # 2026-07-13 audit: the recorded torch.sum references (16.38/16.39) ran 3x the live eager
+  # (5.4/6.1 — stable across 3 passes; a torch-side reference improvement since recording, not a
+  # knob effect) — cublas_us corrected on all four reduce entries so the ratio is honest.
   - kernel: reduce
     name: reduce.k2048
     M: 512
     K: 2048
     knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'b64', VECTORIZE_LOADS: true}
     emmy_us: 1.5
-    cublas_us: 16.38
+    cublas_us: 5.4
   - kernel: softmax
     name: softmax.k8192
     M: 512
@@ -364,7 +371,7 @@ configs:
     K: 8192
     knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'b128', VECTORIZE_LOADS: true}
     emmy_us: 3.3
-    cublas_us: 16.39
+    cublas_us: 6.1
   - kernel: rms_norm
     name: rms_norm.k2048
     M: 512
@@ -415,7 +422,7 @@ configs:
     dynamic: true
     knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'b64', VECTORIZE_LOADS: true}
     emmy_us: 1.5
-    cublas_us: 16.38
+    cublas_us: 5.4
   - kernel: softmax
     name: softmax.k8192.dynM
     M: 512
@@ -431,7 +438,7 @@ configs:
     dynamic: true
     knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, REDUCE: 'b128', VECTORIZE_LOADS: true}
     emmy_us: 3.3
-    cublas_us: 16.39
+    cublas_us: 6.1
   - kernel: rms_norm
     name: rms_norm.k2048.dynM
     M: 512

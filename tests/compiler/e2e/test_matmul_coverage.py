@@ -1345,7 +1345,7 @@ def test_bf16_operands_stage_via_cp_async(monkeypatch):
 # --- atomic-free split-K on the warp tier -----------------------------------
 # MMA split-K rides the structural ``Reduction(axis=ksplit, source=Contraction(k_axis=kslice))`` fork
 # (``_schedule._splitk_option``): the inner ``Contraction`` factorizes to mma exactly like a non-split
-# matmul, and ``030_split`` retargets each partition's C-fragment into a ``ws[ksplit, M, N]`` workspace
+# matmul, and ``030_split_reduce`` retargets each partition's C-fragment into a ``ws[ksplit, M, N]`` workspace
 # summed by a sibling additive finalize kernel (deferred ``g2k``) — NO codegen ``atomicAdd``. The atomic
 # finalize (``g2a``) can't accumulate an mma C-fragment (``RegStore`` has no atomicAdd), so it is
 # refused; scalar-tier atomic split-K is covered by ``test_reduce_coverage``'s cross-CTA matrix.
@@ -1395,7 +1395,7 @@ def test_mma_splitk_finalize(monkeypatch, finalize):
 @pytest.mark.parametrize("transport", ["cp", "tma"])
 def test_staged_splitk_matches_gmem_direct_bit_for_bit(monkeypatch, transport):
     """Operand staging composes with split-K: the ``STAGE`` resolved against the SLICED inner node
-    threads onto the split partial (``030_split``), whose K-loop stages its slice through the smem
+    threads onto the split partial (``030_split_reduce``), whose K-loop stages its slice through the smem
     pipeline. A pure perf transform — the staged split is **bit-identical** to the gmem-direct
     split (same partials, same finalize), and the partial kernel actually stages."""
     if transport == "tma" and not _supports_tma():

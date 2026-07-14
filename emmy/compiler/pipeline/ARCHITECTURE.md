@@ -663,7 +663,7 @@ cards and regimes — regret is a within-fork ratio, so it compares safely.
 `AxisRole` + `Carrier`, then schedule inline via the `_schedule` helper — no separate `020` pass: map free axes to the
 grid, pick the reduce partition + output `TILE` fragment, and **atomize** — resolve the algebra→hardware-atom binding
 structurally onto the schedule as each warp / cooperative option is built, so an unbindable atom is rejected at fork
-construction; `_atomize.py`) → `030_split` (cross-CTA split-K as a graph rewrite). It **never dispatches on a named
+construction; `_atomize.py`) → `030_split_reduce` (cross-CTA split-K as a graph rewrite). It **never dispatches on a named
 shape** — every decision is gated on the reduce axes' carrier algebra read off the body (`MAP` / `SEMIRING` /
 `MONOID`; flash attention is the `MONOID` algebra on the streaming schedule, a twisted monoid is a monoid, selected
 structurally), not on a matmul / pointwise / attention archetype. The full design lives in
@@ -741,13 +741,13 @@ per-thread remainder is derived, never spelled). The cross-CTA split is the `g<n
 **finalize** is that field's trailing letter — `g<n>a` = in-place `atomicAdd` (one kernel, additive carriers only),
 `g<n>k` = deferred `__partial` workspace + a sibling combine kernel (any carrier; the only legal arm for the twisted
 flash `(m, l, O)` split-KV). Pin via `EMMY_REDUCE=g2k` (one flat knob — no per-axis `EMMY_REDUCE_<axis>`, no
-`EMMY_FINALIZE`). The split is consumed by `lowering/tile/030_split` as a graph rewrite (partial + finalize); the
+`EMMY_FINALIZE`). The split is consumed by `lowering/tile/030_split_reduce` as a graph rewrite (partial + finalize); the
 letter round-trips through `ReducePlan.parse`/`spell` and reads back as `ReducePlan.finalize`. The atomic finalize
 applies the kernel's projection epilogue **per partition** before the `atomicAdd`, so it is only correct when that
 projection *distributes* over the add (`Σ φ(xₛ) = φ(Σ xₛ)`): a constant scale like `mean`'s `×1/N` distributes and
 rides the atomic; a non-distributive epilogue (`l2`'s `sqrt`, a fused bias/activation) is refused
 (`NotImplementedError` → pin `g<n>k`, which projects once after the combine). The check is
-`030_split._projection_distributes`.
+`030_split_reduce._projection_distributes`.
 
 **`STAGE`** (STR codec, `010_recognize` / `_schedule` → `lowering/kernel/010_materialize`) — the operand-staging codec
 `d<depth>/sync|cp|tma[/ring][/p<reg_depth>]` on the typed `Stage` schedule struct (composes with both fragments of the
@@ -821,7 +821,7 @@ re-keys onto the axis-named identity (expected — the transfer handle for the p
 
 Pass files are numerically prefixed so `sorted()` pickup is deterministic. Pick a fresh prefix when adding a rule; the
 loader ignores the prefix itself — it's only for ordering readability. Per-pass authoring invariants are in
-[`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md); the tile passes (`010_recognize` → `030_split`) and the algebraic
+[`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md); the tile passes (`010_recognize` → `030_split_reduce`) and the algebraic
 moveset are also documented there.
 
 | Pass                      | What rules do                                                                                |
@@ -832,7 +832,7 @@ moveset are also documented there.
 | `loop/fusion/`            | `split_shared_indexmap` (first) fuses a fan-out pure-indexmap `LoopOp` into all its consumers in one rewrite; `merge_loop_ops` then splices adjacent single-consumer `LoopOp` pairs; `dedup_loads` drops identical `(input, index)` Loads. Folding scalar-constant broadcasts into consumers cuts Qwen3-Embedding-0.6B from 394 → 337 kernels. |
 | `loop/recognize/`         | Empty (retired) — flash / online-softmax recognition moved into `lowering/tile/010_recognize` (the `_flash` / `_softmax` helpers), so the loop dialect carries no pattern recognizers. |
 | `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) + `stamp_structural_features` (the `S_*` dict). Runs last in the loop dialect — after fusion and recognition — so every kernel is named / stamped against its final body. |
-| `lowering/tile/`          | `LoopOp → TileOp` over the block-DAG Tile IR: `010_recognize` (recognition + inline scheduling via the `_schedule` helper — maps the grid, picks the reduce/output fragment, and **atomizes** — resolves the algebra→atom binding onto the schedule via `_atomize.py` when each option is built, rejecting an unbindable atom at fork construction) → `030_split`. Dispatch is on the carrier algebra (`MAP` / `SEMIRING` / `MONOID`), never a named shape. |
+| `lowering/tile/`          | `LoopOp → TileOp` over the block-DAG Tile IR: `010_recognize` (recognition + inline scheduling via the `_schedule` helper — maps the grid, picks the reduce/output fragment, and **atomizes** — resolves the algebra→atom binding onto the schedule via `_atomize.py` when each option is built, rejecting an unbindable atom at fork construction) → `030_split_reduce`. Dispatch is on the carrier algebra (`MAP` / `SEMIRING` / `MONOID`), never a named shape. |
 | `lowering/kernel/`        | `010_materialize` is a `TileOp → KernelOp` tier dispatcher (scalar / `_reduce`). A tiled `CONTRACTION` arrives as a high-level `Contraction` node already **built recognize-side** (`lowering/tile/_schedule._contraction_node` at fork-emit — one flat node splitting the algebra params (axes / operands / acc / epilogue) from the schedule (a `tile: TilePlan`); seam #1), so materialize only synthesizes its bare grid-`Write` and **expands** it through the one atom-generic `_factor.factorize` over the shared tiling layer (in `_factor.py`) (the geometry is derived on the `Contraction` node; `_atom.reduce_codegen` emits the shared K-loop and a swappable `store` sink, dispatched off the atom). Then the Kernel-IR peepholes: `030_stamp_types` (+ `040_demote_to_write_dtype`) resolve dtypes, `050_vectorize_loads` / `080_vectorize_stores` / `095_interleave_loads` pack/reorder memory ops, `110_drop_redundant_syncs`. See [`passes/lowering/kernel/ARCHITECTURE.md`](passes/lowering/kernel/ARCHITECTURE.md). |
 | `lowering/cuda/`          | `lower_kernelop` renders the `KernelOp` body to a `__global__` source string (`ir/kernel/render.py::render_kernelop`) and mutates the node's op to `CudaOp` in place. |
 

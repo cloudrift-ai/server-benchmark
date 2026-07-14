@@ -25,7 +25,7 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   softmax/RMSNorm is a `Map(body=sweep, source=Reduction)`; the fused norm→linear / gate-up composition is a
   `Map(body=combine, source=Contraction)` whose computed A cone carries the statistic prologue (a fork sibling of
   its coop-reduce form — option-0 stays coop; the warp mma rows ride the sync compute-fill); a pure pointwise cell
-  is a `Map(source=None)`; the only annotated `Loop`s still riding a flat `Map.body` are `030_split`'s sliced
+  is a `Map(source=None)`; the only annotated `Loop`s still riding a flat `Map.body` are `030_split_reduce`'s sliced
   partials.
   Dispatch reads the role/carrier off the node (`ops.axis_role`/`reduce_loop` recurse through `Map.source`), and
   `ops.lower` flattens any node back to the same loop nest — there is no stored `Monoid`/`Semiring` node kind (those

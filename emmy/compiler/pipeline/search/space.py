@@ -182,7 +182,12 @@ def map_tile_moves() -> list[str]:
 # ONE pin-only family controlling structural emission: where an intermediate edge lives — registers
 # (``fuse``) or memory (``cut``). Elements are named by the MOVE, not the shape:
 #
-#   PLACE@cone   producer-cone inlining (the fused producer → matmul edge)
+#   PLACE@cone   producer-cone inlining (the fused producer → matmul edge). ``cut`` is realized
+#                by ``lowering/tile/020_cut_edge`` — a ``030_split_reduce``-style graph rewrite that
+#                splits the recognized cone kernel at the A seam (the producer materializes the
+#                cone value to a workspace; the matmul re-lowers with a plain gmem A) — and both
+#                halves re-enter recognition on the pass-scan restart, so each gets its own
+#                schedule / fork. The recognizer's nodification gate is the ``fuse`` half.
 #   PLACE@fold   downstream-fold absorption (flash vs separate softmax + P@V kernels)
 #   PLACE@tuple  sibling-fold tupling (online softmax vs two-pass stats)
 #

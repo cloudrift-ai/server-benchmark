@@ -68,7 +68,12 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   on its destination index, each staged `LdmatrixLoad` XORs the address back, and the kernel stays bit-identical to
   its unswizzled sibling — swizzle relocates smem bytes only, which is what keeps the ldmatrix drain free of
   shared-memory bank conflicts; the unswizzled cp path was 4-way/8-way conflict-bound on sm_89, the measured residual
-  to cuBLAS there. Sync compute-fill slabs and scalar-`Load`-drained slabs stay plain row-major).
+  to cuBLAS there. The fused-edge **sync compute-fill** slabs swizzle the same way — the compute/copy
+  fill's slab `Write` carries the mode (the identical flattened-index XOR, one VECTOR store per 16 B run; V scalar
+  2 B stores at 16 B thread stride were 8-way store-conflicted), the canonical-B cp.async fill its `Operand`, and
+  the drain reads each slab back through its own mode. Unswizzled, the gemma-shape fused edge drained 294.9 M ld
+  conflicts / 82.5 M LSU inst on the 5090; the swizzle + vector fill store recovered -29% (std) / -41% (fm).
+  Scalar-`Load`-drained slabs stay plain row-major).
 - the **MONOID-producer composition** — the fused norm→linear edge and its N-channel form, the gate/up MLP edge —
   binds at recognize time too (`_atomize.bind_prologue_contraction`, structure-only): a projecting `Map` over a
   per-row `PLANAR` statistic whose tail is one or more ⊗-folds of one shared A value nodifies to
@@ -84,6 +89,28 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   resolve-once-structurally rule: `_schedule._row_stage` detects the fused norm→linear shared row when the cooperative
   partition is chosen and stamps a `sync` `Stage` naming it (`smem`) on the `TileOp` — a derived schedule field, not a
   knob — so `_factor._tile_reduce_axis` only applies it, never re-detects.
+
+## The two divide rules: `cut` a dataflow edge vs `split` an iteration axis
+
+`lowering/tile` carries two one-kernel→graph-fragment rules whose names sound alike but divide along different
+dimensions, with OPPOSITE re-entry contracts — keep them apart:
+
+- **`020_cut_edge`** cuts the **dataflow** (the PLACE codec's memory edge, `PLACE@cone=cut` today): two different
+  computations that loop fusion welded together — the producer cone and its matmul — become separate kernels again,
+  the intermediate materialized to a workspace. Its pieces are emitted as plain **un-mapped `LoopOp`s** precisely so
+  the pass-scan restart hands them back to `010_recognize`: the fused kernel's schedule is meaningless for the
+  halves, and each must earn its own recognition, schedule and fork (the gmem-A matmul then reaches the staged
+  cp.async/TMA tiers a computed A can never ride). The statistic materializes as its OWN kernel — a nested
+  `for m: [stat…, for k: …]` producer only lifts `m` onto the grid, serializing the K sweep per thread.
+- **`030_split_reduce`** splits the **reduce axis** (the REDUCE codec's `g<w>` cross-CTA shard): the SAME
+  computation, its K partitioned across CTAs into a partial + finalize. It runs AFTER its decision — the `g` row was
+  chosen FOR the split form — so the partial carries the decided knob row verbatim and the finalize is deliberately
+  `_mapped`: both **opt out** of re-recognition, because re-entering would discard the very decision being realized.
+
+Same fragment idiom, inverted re-entry semantics, different decision altitude (placement: "should this be one
+kernel at all" vs schedule: "how does this kernel run"). The shared fixpoint is what lets them compose without
+knowing about each other: a cut consumer re-enters recognition, may pick a `g<w>k` row, and `030_split_reduce`
+then shards it — cut-then-split on what was originally one fused kernel.
 
 The atom spec is subtyped by kind (`ir/atom.py`: `AtomKind` is the fixed mma cell selected by name; `ScalarAtom`
 is the plain scalar fma cell). The contraction binder (`bind_contraction`) is loop-addressable so warp-flash can later
@@ -112,7 +139,9 @@ codec's atom token and priced by the `MMA_acc_bits` feature; f16 only (mma.sync 
 `wspec_moves()` is the fourth level (bare `WSPEC`, option-0 `""` = uniform SIMT) — offered only on a warp row over a
 resolved **TMA** stage without a cross-CTA split, and resolved/thread-budget-gated at materialization
 (`_wspec_workers`; an ineligible spec degrades to uniform). A computed-A (fused-cone) contraction enumerates its own
-warp-only rows (`_schedule._computed_a_rows` — the mandatory resolved `sync` compute-fill stage, no scalar /
+warp-only rows (`_schedule._computed_a_rows` — the mandatory resolved `sync` compute-fill stage crossed with the
+shared `RASTER` launch-order candidates (its B stripes re-stream per M-tile row, exactly the grouped order's L2
+reuse — `gn8` measured −8% on the gemma gate_up fused edge, 5090), no scalar /
 gmem-direct / split-K / WSPEC rows; the compute-producer role for the fused edge is the anticipated `RoleKind`
 extension). The **flash-form fork**: a `TWISTED` streaming contraction pair (the flash tree) offers its
 structurally-different schedules as ONE prior-ranked fork — the warp (fragment-resident) rows over
@@ -145,6 +174,6 @@ Two catalog invariants hold: every recorded golden's `TILE`/`STAGE`/`REDUCE` sta
 grids (the permanence test in `tests/compiler/test_golden_configs.py` — a space edit can never silently orphan a
 golden into unreachability again, the sixth sweep's `.s512` regression class; the scalar reg grid carries the
 golden-informed deep-FM points `f2x6..f2x14`, `f4x6..f4x26` for exactly this reason), and a cross-CTA split deploy
-(`030_split`) stamps the decided knob row onto its **partial** kernel — the engine merges knobs forward on 1:1
+(`030_split_reduce`) stamps the decided knob row onto its **partial** kernel — the engine merges knobs forward on 1:1
 rebinds only, so without the explicit stamp the graph splice dropped them and the deployed split recorded no
 schedule identity (the A/B table then couldn't say what greedy deployed).

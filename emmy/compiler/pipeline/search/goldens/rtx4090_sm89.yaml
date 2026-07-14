@@ -375,19 +375,22 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 275.5
     cublas_us: 388.0
+  # 2026-07-14 audit (post-#355 rebase): same-knobs replay runs 4.6 (3x, zero spread — now matching
+  # its .dynM twin's recorded 4.6); emmy_us refreshed from 5.0.
   - kernel: pointwise
     name: pointwise.n4096
     M: 512
     N: 4096
     knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, VECTORIZE_LOADS: true}
-    emmy_us: 5.0
+    emmy_us: 4.6
     cublas_us: 5.0
+  # 2026-07-14 audit: same-knobs replay runs 16.2-16.3 (3x); emmy_us refreshed from 17.4.
   - kernel: pointwise
     name: pointwise.n16384
     M: 512
     N: 16384
     knobs: {TILE: 'f4'}
-    emmy_us: 17.4
+    emmy_us: 16.3
     cublas_us: 18.0
   - kernel: pointwise
     name: pointwise.n4096.dynM

@@ -176,6 +176,18 @@ class GoldenConfig:
         Each kind overrides with the axis(es) of its snippet's inputs that go symbolic."""
         return []
 
+    def flops(self) -> float | None:
+        """A NEVER-OVERESTIMATED FLOP count for this config's benched problem (the config's
+        traced sizes — a dynamic golden's symbolic axis is sized at the hint it benches at, so
+        no hint multiplier is ever needed). Feeds the arithmetic-intensity floor gate
+        (``run``'s ``_intensity_floor_flag``): the floor flags a bench whose implied FLOP/s
+        exceeds the device peak, so an OVERestimate false-fires on a correct bench — the exact
+        bug this method retires (the old ShapeKey reconstruction multiplied the hint onto
+        reduce-tier dyn keys whose ``free_prod`` already includes the symbolic axis, a 512×
+        overcount flagging every reduce-tier ``.dynM`` replay "impossible"). ``None`` = the
+        kind is ungateable."""
+        return None
+
 
 @dataclass(frozen=True, kw_only=True)
 class MatmulGoldenConfig(GoldenConfig):
@@ -210,6 +222,9 @@ class MatmulGoldenConfig(GoldenConfig):
     def dynamic_specs(self) -> list[str]:
         return ["seq_len@x0:0"] if self.dynamic else []
 
+    def flops(self) -> float:
+        return 2.0 * self.M * self.N * self.K  # exact; M is the benched hint when dynamic
+
     def repro_command(self, ir: str = "cuda") -> str:
         """A runnable ``emmy`` command that rebuilds this config's kernel.
 
@@ -241,6 +256,9 @@ class ReduceGoldenConfig(GoldenConfig):
     def snippet(self) -> str:
         return f"torch.sum(torch.randn({self.M},{self.K}),dim=-1)"
 
+    def flops(self) -> float:
+        return float(self.M * self.K)  # one add per element
+
     def shape_key(self):
         """The reduce's arithmetic join key — free dims ``(M,)``, reduce extent ``K``,
         matching what ``992_stamp_structural_features`` stamps on the reduce kernel."""
@@ -268,6 +286,9 @@ class PointwiseGoldenConfig(GoldenConfig):
 
     def snippet(self) -> str:
         return f"torch.relu(torch.randn({self.M},{self.N}))"
+
+    def flops(self) -> float:
+        return float(self.M * self.N)  # one op per element
 
     def shape_key(self):
         """The pointwise map's arithmetic join key — free product ``M·N``, no reduce
@@ -301,6 +322,9 @@ class RmsNormGoldenConfig(GoldenConfig):
     def snippet(self) -> str:
         return f"torch.nn.RMSNorm({self.K})(torch.randn({self.M},{self.K}))"
 
+    def flops(self) -> float:
+        return 2.0 * self.M * self.K  # square+accumulate per element (the scale sweep is extra — stays an underestimate)
+
     def shape_key(self):
         """The RMSNorm's reduce geometry — free rows ``(M,)``, reduce extent ``K`` —
         matching the mean-of-squares Reduction its ``k_rms_norm`` Map is built over."""
@@ -329,6 +353,9 @@ class SoftmaxGoldenConfig(GoldenConfig):
 
     def snippet(self) -> str:
         return f"torch.softmax(torch.randn({self.M},{self.K}),dim=-1)"
+
+    def flops(self) -> float:
+        return 2.0 * self.M * self.K  # max+sum folds per element (exp/div extra — stays an underestimate)
 
     def shape_key(self):
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
@@ -373,6 +400,10 @@ class AttentionGoldenConfig(GoldenConfig):
 
     def dynamic_specs(self) -> list[str]:
         return ["seq_len@x0:2", "seq_len@x1:2", "seq_len@x2:2"] if self.dynamic else []
+
+    def flops(self) -> float:
+        # Half the dense 4·h·s²·d flash count — never an overestimate under a causal mask.
+        return 2.0 * self.n_heads * self.seq * self.seq * self.head_dim
 
     def snippet(self) -> str:
         tdt = {"fp32": "", "fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16"}[self.dtype]

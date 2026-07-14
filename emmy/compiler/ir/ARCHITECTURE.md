@@ -56,7 +56,7 @@ top-level layer/pass picture see `compiler/ARCHITECTURE.md`.
   (dynamic `seq_len`) is supported — the `StridedLoop`'s `< seq_len`
   bound is the runtime-extent mask (idle lanes fold the identity; no
   ceil-div / clamp) and the `Dim` name is threaded as a runtime `int`
-  arg. The cross-CTA split (`030_split`), `reg` fold, a symbolic FREE
+  arg. The cross-CTA split (`030_split_reduce`), `reg` fold, a symbolic FREE
   axis (dynamic grid), strided rows, and the tensor-core `warp_tile`
   (incl. flash's warp tier) are reserved future tiers.
 - **Kernel → CUDA** (after `lowering/cuda`): `KernelOp` replaced by
@@ -267,7 +267,7 @@ Construction never fails: unresolved names are data, and chaining scope levels m
 `backward_cone` with the previous one's `external_reads`. `Body.defs_die_at(members, roots=…, allowed=…)` is the
 matching escape check (may the cone be cut out, with only the designated consumers reading its roots?). This is
 the shared substrate behind the rules that slice cones (the demoted-operand producer cut in
-`lowering/tile/030_split`) — eligibility judgments stay in the rules, per `pipeline/passes/ARCHITECTURE.md`. The
+`lowering/tile/030_split_reduce`) — eligibility judgments stay in the rules, per `pipeline/passes/ARCHITECTURE.md`. The
 `classify_fragment_epilogue` walk (`ir/stmt/algebra.py`) deliberately does NOT use it: it is a single pass
 interleaving reduce-scope flags with its negative-form blocker reporting, a different operator than the cone's
 any-dep taint.

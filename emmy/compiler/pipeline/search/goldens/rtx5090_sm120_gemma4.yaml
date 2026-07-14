@@ -240,12 +240,14 @@ configs:
   # The PRIMARY post-tile-skip: the nt=4 streaming block (32 keys/step, 32 KB slabs) — 32.9, 7% past
   # the nt=2 entry (pre-skip they were parity alternates). The knob frontier ends here — nt=8 fattens
   # to 55 µs, w2x1 forms reach 35.1 (parity with nt=2, no longer the 97 µs hazard), w1x1 38.6,
-  # d3 34.0, WSPEC bands nvcc-fail on this kernel. The 0.93x residual vs torch SDPA is per-step
-  # PIPELINE DEPTH, not occupancy/registers and not search — refuted 2026-07-13: forcing 3 CTAs/SM
-  # (launch_bounds min-blocks, 168 regs + spills) runs 74.6, per-step Q reload 87.5, nt4/d1 (2 CTAs,
-  # no prefetch ring) 46.3, and split-KV g2k 34.9 — every occupancy/balance lever loses to the
-  # 1-CTA prefetch-ring form. Closing it needs cross-step software pipelining in the emitter (the
-  # f2 ILP chains are register-impossible at hd256: 2×128 O-accumulator regs).
+  # d3 34.0, WSPEC bands nvcc-fail on this kernel. The 0.93x residual vs torch SDPA is NOT search,
+  # NOT occupancy/registers (refuted 2026-07-13: forced 3 CTAs/SM 74.6, Q reload 87.5, nt4/d1 46.3,
+  # split-KV g2k 34.9), and NOT per-step schedule either (refuted 2026-07-14: three hand-edited
+  # cross-step pipeline variants — deferred PV, S-double-buffered QK_{i+1} adjacent to softmax_i,
+  # on d2/d3/nt2/nt4, one fully spill-free — all bench IDENTICAL to baseline via cubin-cache
+  # injection). Every reordering of the current dataflow is timing-neutral; attributing the
+  # residual needs NCU stall counters (root), not another schedule hypothesis. The f2 ILP chains
+  # stay register-impossible at hd256 (2×128 O-accumulator regs).
   - kernel: attention
     name: gemma4_12b.attention.hd256
     n_heads: 16

@@ -604,3 +604,29 @@ configs:
     knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f16/w2x1/f1x16/k4', WSPEC: ''}
     emmy_us: 15.3
     cublas_us: 18.4
+  # Symbolic-kv alt pair (2026-07-14): the alternating pipeline resolves on dynM and closes the gap
+  # to the static frontier — std tma-alt 16.0 (ring twin 16.6), fm tma-alt 13.5 = the static fm-alt
+  # value exactly (ring twin 15.4); both 3x zero-spread. cp-alt loses (17.1 std / 14.8 fm) — the
+  # hd128-prefers-tma transport rule carries over from the static rows.
+  - kernel: attention
+    name: attention.hd128.dynM
+    n_heads: 8
+    seq: 512
+    head_dim: 128
+    dtype: 'fp16'
+    causal: false
+    dynamic: true
+    knobs: {PLACE: 'fuse', STAGE: 'd1/tma/alt', TILE: 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k8', WSPEC: ''}
+    emmy_us: 16.0
+    cublas_us: 18.4
+  - kernel: attention
+    name: attention.hd128.dynM
+    n_heads: 8
+    seq: 512
+    head_dim: 128
+    dtype: 'fp16'
+    causal: false
+    dynamic: true
+    knobs: {PLACE: 'fuse', STAGE: 'd1/tma/alt', TILE: 'a:mma_m16n8k16_f16_f16/w2x1/f1x16/k4', WSPEC: ''}
+    emmy_us: 13.5
+    cublas_us: 18.4

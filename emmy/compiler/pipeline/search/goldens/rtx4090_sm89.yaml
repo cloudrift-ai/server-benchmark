@@ -523,6 +523,30 @@ configs:
     knobs: {PLACE: 'fuse', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', STAGE: 'd2/cp/ring'}
     emmy_us: 10.6
     cublas_us: 10.0
+  # FAST_MATH-lane pair (2026-07-14, 3x reproduced): the f16acc-PV sibling beats the std golden
+  # outright (9.6 ring / 9.3 alt vs 10.5), and within the fm lane the alternating single-slab
+  # staging wins the fork (9.3 vs 9.6 — cp.async alt, sm_89 has no TMA). std-lane alt is parity
+  # (10.6 vs 10.5) — not recorded; hd64 keeps the ring there, as on the 5090.
+  - kernel: attention
+    name: attention.hd64
+    n_heads: 8
+    seq: 512
+    head_dim: 64
+    dtype: 'fp16'
+    causal: false
+    knobs: {PLACE: 'fuse', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x8/k8', STAGE: 'd2/cp/ring'}
+    emmy_us: 9.6
+    cublas_us: 10.0
+  - kernel: attention
+    name: attention.hd64
+    n_heads: 8
+    seq: 512
+    head_dim: 64
+    dtype: 'fp16'
+    causal: false
+    knobs: {PLACE: 'fuse', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x8/k8', STAGE: 'd1/cp/alt'}
+    emmy_us: 9.3
+    cublas_us: 10.0
   - kernel: attention
     name: attention.hd128
     n_heads: 8
@@ -532,6 +556,31 @@ configs:
     causal: false
     knobs: {PLACE: 'fuse', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', STAGE: 'd2/cp/ring'}
     emmy_us: 19.9
+    cublas_us: 18.0
+  # FAST_MATH-lane pair (2026-07-14, 3x reproduced): fm-alt 17.7 is the hd128 frontier on this card
+  # — past torch SDPA (18.0) and the std golden (19.5 live / 19.9 recorded); fm-ring 18.2 kept as
+  # the fork sibling. cp.async alt (per-operand commit groups — sm_89 has no TMA); the 5090-winning
+  # w2x1 alt geometry loses here in the std lane (22.3) and ties fm (17.8) — w4x1 recorded.
+  # std-lane alt is parity (19.4 vs 19.5) — not recorded.
+  - kernel: attention
+    name: attention.hd128
+    n_heads: 8
+    seq: 512
+    head_dim: 128
+    dtype: 'fp16'
+    causal: false
+    knobs: {PLACE: 'fuse', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x16/k4', STAGE: 'd2/cp/ring'}
+    emmy_us: 18.2
+    cublas_us: 18.0
+  - kernel: attention
+    name: attention.hd128
+    n_heads: 8
+    seq: 512
+    head_dim: 128
+    dtype: 'fp16'
+    causal: false
+    knobs: {PLACE: 'fuse', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x16/k4', STAGE: 'd1/cp/alt'}
+    emmy_us: 17.7
     cublas_us: 18.0
   - kernel: attention
     name: attention.hd64.dynM
@@ -554,6 +603,31 @@ configs:
     dynamic: true
     knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', STAGE: 'd2/cp/ring'}
     emmy_us: 20.3
+    cublas_us: 19.0
+  # FAST_MATH-lane pair on the symbolic twin (2026-07-14 — the alternating pipeline now resolves on
+  # a symbolic kv): fm-alt 18.1 is the dynM frontier (fm-ring 18.6, std ring 20.0 live / 20.3
+  # recorded); std-alt loses (21.8). Mirrors the static hd128 fm pair above; cp.async only (sm_89).
+  - kernel: attention
+    name: attention.hd128.dynM
+    n_heads: 8
+    seq: 512
+    head_dim: 128
+    dtype: 'fp16'
+    causal: false
+    dynamic: true
+    knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f1x16/k4', STAGE: 'd2/cp/ring'}
+    emmy_us: 18.6
+    cublas_us: 19.0
+  - kernel: attention
+    name: attention.hd128.dynM
+    n_heads: 8
+    seq: 512
+    head_dim: 128
+    dtype: 'fp16'
+    causal: false
+    dynamic: true
+    knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f1x16/k4', STAGE: 'd1/cp/alt'}
+    emmy_us: 18.1
     cublas_us: 19.0
   # Values re-measured 2026-07-13 after the causal tile-skip (3x reproduced): nt=2 44.1 → 40.4, and
   # the nt=4 streaming block (below) is the new twin frontier at 1.11x past torch SDPA — post-skip

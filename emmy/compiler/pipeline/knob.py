@@ -515,6 +515,13 @@ _KNOB_RANK = {k: i for i, k in enumerate(KNOB_ORDER)}
 # the schedule reduce partition is the one reduce family, so ``REDUCE@<axis>`` bares out like the rest.
 _COLLAPSE_FAMILIES = ("TILE", "REDUCE", "STAGE")
 
+# The greedy-fillable schedule codec families a golden RECORDING must pin explicitly. An entry that
+# omits one leaves that family to the planner's fill at replay time, and the fill drifts as the
+# planner evolves — the recurring unpinned-``REDUCE`` phantom-regression class (a recorded un-split
+# config replaying with a surprise ``g2k`` fill). :func:`stamp_schedule_families` is the recording
+# view that closes the gap: every family explicit, OFF spelling (``""`` = decided unused) included.
+SCHEDULE_FAMILIES = ("TILE", "REDUCE", "STAGE", "WSPEC", "RASTER")
+
 
 def knob_sort_key(name: str) -> tuple[int, str]:
     """Sort key: native ``MOVE@element`` families first (by :data:`_FAMILY_ORDER`, then
@@ -569,3 +576,22 @@ def tuning_knob_items(knobs: dict) -> list[tuple[str, str]]:
         disp = fam if ("@" in k and fam in _COLLAPSE_FAMILIES and fam_counts[fam] == 1) else k
         rendered.append((disp, str(v)))
     return sorted(rendered, key=lambda kv: knob_sort_key(kv[0]))
+
+
+def stamp_schedule_families(knobs: dict) -> dict[str, str]:
+    """The ready-to-record knob map for one realized kernel: its tuning knobs
+    (:func:`tuning_knob_items`) plus an explicit OFF value for every :data:`SCHEDULE_FAMILIES`
+    family the realized dict never stamped. The pass-boundary OFF fill covers a pass that ran
+    and declined, but a family whose pass never loads for the target (e.g. ``WSPEC`` off
+    Hopper/Blackwell) can be absent from ``op.knobs`` entirely — a recording must still pin it
+    as declined, or the entry drifts when a later planner starts filling it. A family with no
+    registered OFF is skipped rather than invented."""
+    out = dict(tuning_knob_items(knobs))
+    present = {family_of(k) for k in out}
+    for fam in SCHEDULE_FAMILIES:
+        if fam in present:
+            continue
+        kn = get(fam)
+        if kn is not None and kn.off is not _UNSET:
+            out[fam] = str(kn.off)
+    return dict(sorted(out.items(), key=lambda kv: knob_sort_key(kv[0])))

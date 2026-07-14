@@ -352,6 +352,24 @@ configs:
     knobs: {PLACE: 'fuse', STAGE: 'd2/cp/ring', TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f1x32', WSPEC: ''}
     emmy_us: 35.5
     cublas_us: 30.7
+  # The dynM PRIMARY (2026-07-14, symbolic-kv alt): the alternating pipeline now resolves on a
+  # symbolic kv (the kill-point refill clamps onto the runtime last chunk like the ring prefetch;
+  # the staged-Q fill clamp-reads a tail CTA's overhanging query rows, store-guarded) — 32.0 vs the
+  # ring twin 34.4, 3x zero-spread, closing most of the dynM-vs-static gap (static std cp-alt 31.7).
+  # The geometry/lane preferences FLIP vs static: nt=4 alt (32.0) beats nt=8 alt (32.3; static nt8
+  # won), and the fm sibling LOSES on the symbolic form (34.7 — the static fm-alt 29.7 does not
+  # transfer), so std stays the dynM primary. tma-alt 35.4 (hd256 prefers cp, as static).
+  - kernel: attention
+    name: gemma4_12b.attention.hd256.dynM
+    n_heads: 16
+    seq: 512
+    head_dim: 256
+    dtype: 'fp16'
+    causal: true
+    dynamic: true
+    knobs: {PLACE: 'fuse', STAGE: 'd1/cp/alt', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x4/k16', WSPEC: ''}
+    emmy_us: 32.0
+    cublas_us: 30.7
   # ---- norms -----------------------------------------------------------------------------------------
   - kernel: rms_norm
     name: gemma4_12b.rms_norm.k3840

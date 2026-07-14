@@ -25,7 +25,7 @@ residence — the fragment row of the placement-keyed fold (a within-warp ``Frag
 - the projection tail (``O / l``) realizes as an in-place ``FragmentApply`` + the ``RegStore``
   output close;
 - a resolved K/V ``Stage`` on the ``TileOp`` (``ctx.stage`` — ``_schedule._resolve_twisted_stage``,
-  cp.async or TMA over a static block-divisible kv) re-parents the streaming step under the same
+  cp.async or TMA over a block-divisible-or-symbolic kv) re-parents the streaming step under the same
   ``staged_kloop`` skeleton the matmul tier runs: the K/V slabs fill per KV block (each in its
   operand's own layout — verbatim row copies, so staged stays bit-identical to gmem-direct) and
   the step's B fragments drain them via the staged ldmatrix variants (plain ``x2`` for the
@@ -74,11 +74,11 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CtaTile,
     Operand,
     TmaTransport,
-    alternating_kloop,
     cp_async_commit,
     cp_async_fill,
     cp_async_wait,
     pick_swizzle_atom,
+    pipelined_kloop,
     slab_smem,
     staged_kloop,
 )
@@ -510,10 +510,11 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             state.extend(_q_frag_stmts(qt, i))
 
     # ---- the streaming step (a builder — the staged path re-parents it under the ring drain; the
-    # alternating path takes the three segments separately, its K/V refills between them) -------- #
+    # alternating path hands the tagged segments to the liveness scheduler, which places the K/V
+    # refills at their kill points) -------------------------------------------------------------- #
     def _stream_segments(
         k_slot: Expr | None = None, v_slot: Expr | None = None, staged: bool = False
-    ) -> tuple[list[Stmt], list[Stmt], list[Stmt]]:
+    ) -> list[tuple[list[Stmt], frozenset[str]]]:
         stream: list[Stmt] = []
         for i, qt in enumerate(qtiles):
             if alt:
@@ -610,15 +611,21 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
                 stream += [FragmentPromote(dst=of, src=oh) for of, oh in zip(qt.ofrags, qt.ohfrags, strict=True)]
         for qt in qtiles:
             stream += _rebind(qt.pivot, f"_mn{qt.sfx}")  # advance the running pivot: m = mn
-        return qk_seg, mid_seg, stream
+        # Segments tagged by the slabs they READ — the liveness key ``pipelined_kloop`` derives
+        # each staged operand's live range from. The QK contraction drains the K slab (and, under
+        # ``alt``, the staged-Q slab — a loop-invariant prologue-only fill, never scheduled); the
+        # softmax merge reads none; the P·V contraction drains the V slab. The boundaries ARE the
+        # partial's node boundaries; gmem-direct segments read no slabs.
+        qk_reads = frozenset(("_k_smem", *(("_q_smem",) if alt else ()))) if staged else frozenset()
+        pv_reads = frozenset(("_v_smem",)) if staged else frozenset()
+        return [(qk_seg, qk_reads), (mid_seg, frozenset()), (stream, pv_reads)]
 
     def _stream_step(k_slot: Expr | None = None, v_slot: Expr | None = None, staged: bool = False) -> list[Stmt]:
-        qk_seg, mid_seg, pv_seg = _stream_segments(k_slot, v_slot, staged)
-        return [*qk_seg, *mid_seg, *pv_seg]
+        return [s for stmts, _reads in _stream_segments(k_slot, v_slot, staged) for s in stmts]
 
     if stage is not None:
         # The staged K/V stream: the resolved ``Stage`` (``_schedule._resolve_twisted_stage`` —
-        # static, block-divisible kv only) rides the SAME ``staged_kloop`` skeleton the matmul tier
+        # block-divisible or symbolic kv) rides the SAME ``staged_kloop`` skeleton the matmul tier
         # runs, the streaming step as its drain. The K slab keeps K's own N-major layout (``bn`` key
         # rows × head_dim) and the V slab V's K-major one (``bn`` key rows × d_v) — the fills are
         # verbatim row copies, so the staged kernel stays bit-identical to its gmem-direct sibling.
@@ -682,19 +689,31 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         cta = CtaTile(linear_tid=ltid, n_threads=block_threads)
         if alt:
             # The ALTERNATING single-slab pipeline (``d1/tma/alt``): one slab + one mbarrier per
-            # operand, the refills interleaved with the phases that no longer read them (K under
-            # softmax + P·V, V under the next step's Q·K — the FA-2 choreography). Q stages
+            # operand, each a depth-1 group whose refill ``pipelined_kloop`` places at its KILL
+            # POINT — K's live range ends at the QK segment so its refill lands under softmax +
+            # P·V, V's at the P·V segment so its refill lands under the next step's Q·K (the FA-2
+            # choreography, DERIVED from the tagged live ranges, not hand-assembled). Q stages
             # through smem: a padded row-major slab cooperatively cp.async-filled ONCE before the
-            # stream (verbatim copy — bit-identical values), its A fragments ldmatrix'd per
-            # atom-K chunk inside the step (``_q_frag_stmts``), freeing the resident Q registers.
+            # stream (verbatim copy — bit-identical values; the δ=0 loop-invariant degenerate —
+            # nothing advances, so its whole schedule is this prologue fill), its A fragments
+            # ldmatrix'd per atom-K chunk inside the step (``_q_frag_stmts``), freeing the
+            # resident Q registers.
             q_rows = um * fm * shape[0]
             cta_row0 = BinaryExpr("*", Var(grid[-1].name), Literal(q_rows, "int"))
+
+            def _q_row(row) -> Expr:
+                # A symbolic M clamp-reads the tail CTA's overhanging query rows to the last valid
+                # row (cp.async has no OOB zero-fill) — their outputs are store-guarded (the
+                # ``RegStore`` m_guard), so the duplicates are never written back.
+                r = BinaryExpr("+", cta_row0, row)
+                return _clamp_last(r, _ext(qk.m_axis)) if symbolic_q else r
+
             state.append(slab_smem("_q_smem", q_rows, q_ldm, _cuda(atom.operand_dtype("a")), align=16))
             state += cp_async_fill(
                 slab="_q_smem",
                 shape=(q_rows, head_dim_s),
                 src=qk.a_operand.input,
-                gmem_index=lambda row, col: _idx(qk.a_operand, {qk.m_axis.name: BinaryExpr("+", cta_row0, row), qk.k_axis.name: col}),
+                gmem_index=lambda row, col: _idx(qk.a_operand, {qk.m_axis.name: _q_row(row), qk.k_axis.name: col}),
                 cta=cta,
                 elem_bytes=elem_bytes,
                 name="q",
@@ -713,14 +732,11 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
                 # the skeleton's uniform ``wait_group(1)`` completes exactly the older sibling.
                 k_transport = CpAsyncTransport(operands=(k_op,), slab_dtype=_cuda(atom.operand_dtype("b")), elem_bytes=elem_bytes, cta=cta)
                 v_transport = CpAsyncTransport(operands=(v_op,), slab_dtype=_cuda(atom.operand_dtype("b")), elem_bytes=elem_bytes, cta=cta)
-            qk_seg, mid_seg, pv_seg = _stream_segments(k_op.slot_row(Literal(0, "int")), v_op.slot_row(Literal(0, "int")), staged=True)
-            decls, fold = alternating_kloop(
-                k_transport=k_transport,
-                v_transport=v_transport,
-                qk_drain=lambda _slot: qk_seg,
-                mid=mid_seg,
-                pv_drain=lambda _slot: pv_seg,
+            decls, fold = pipelined_kloop(
+                operands=((k_transport, 1), (v_transport, 1)),
+                build_segments=lambda slots: _stream_segments(k_op.slot_row(slots[0]), v_op.slot_row(slots[1]), staged=True),
                 bk_elems=bn,
+                n_chunks=n_chunks,
                 k_extent=kv_ext,
                 k0=kv0.name,
                 k_end=kv_end,

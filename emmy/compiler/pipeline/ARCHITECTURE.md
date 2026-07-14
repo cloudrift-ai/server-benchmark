@@ -597,9 +597,12 @@ live), and off-GPU the full union is returned (pure-logic tests).
 
 **The A/B carries three integrity gates:**
 
-1. **Realized-vs-pinned knob check.** A structurally invalid pin silently falls back to the planner's own pick, so the
-   row would compare greedy to itself and report a fake 1.00×; the flag marks the row `unreproducible pin` with what
-   actually ran. Matching is family-aware — a bare golden spelling like `PLACE: fuse` matches its axis-stamped
+1. **Realized-vs-pinned knob check — a miss FAILS the row before it benches.** A structurally invalid pin silently
+   falls back to the planner's own pick, so benching it would compare greedy to itself and report a fake 1.00× under
+   the pin's name (a misspelled hd256 flash pin was read as a form refusal this way). The check runs right after the
+   pinned compile: a pin matching no realized knob marks the row `pin_unmatched` / `unreproducible pin … NOT benched`
+   (loud error log, row kept in the table and `--json`, zero GPU time spent), and the remaining rows still run.
+   Matching is family-aware — a bare golden spelling like `PLACE: fuse` matches its axis-stamped
    `PLACE@fold` realization — and values compare through the registered knob's canonical `Knob.parse`, so alias
    spellings like `FAST_EXP=1` don't false-flag. A pin satisfied by ANY kernel counts as honored, which tolerates
    split main+finalize pairs but means a pin dropped on its target kernel that a sibling coincidentally matches passes
@@ -609,12 +612,44 @@ live), and off-GPU the full union is returned (pure-logic tests).
 3. **Wrong-answer check.** Each pinned config executes once on the greedy run's inputs and its outputs are compared —
    catching the silently-wrong `g2a` skipped-finalize class.
 
+**Every `run --bench` row measures in the SIGKILL-able bench worker — the parent never launches a kernel.** The
+greedy comparison (eager / torch.compile / emmy, the torch side rebuilt in-child — the same transport `tune --bench`
+uses) and every pinned golden / `--ab` row run as jobs on ONE persistent worker per run session. That makes the A/B
+survive any failed row by construction: a hung kernel dies with the SIGKILL'd child, the parent's CUDA context stays
+clean, the row is reported `bench_fail` (with the reason), and the next row's job respawns a fresh child — no
+escalation modes, no `os._exit`. NOTE: process placement is unified, the measurement *environment* is not — the
+greedy row benches interleaved with the live torch closures (torch allocator state, cuBLAS L2 carveouts resident),
+while a pinned row benches emmy-only in a job that never touches torch, so a greedy-row µs and a pinned-row µs for
+the same config are NOT directly comparable (the field-observed gap is ~7% on split-K pairs). Compare pinned rows
+against each other and record goldens from `--ab`/golden rows only, never from the greedy row's number. The greedy
+pick hanging or blowing the bench budget is a *finding* — the exact hazard a golden exists to pin — so pinned rows
+still bench after it; failed pinned rows (compile / bench) are kept as `bench_fail` rows, never dropped, and the run
+exits non-zero when any row failed. The greedy job also carries the accuracy check (the emmy program runs on the
+rebuilt module's real inputs in-child; a numeric failure aborts the run — a latency table for a miscompiling program
+is meaningless) and returns that run's `(inputs, outputs)` as the pinned rows' wrong-answer reference. Only the
+no-`--bench` accuracy probe still runs in-process (it hosts the `--debug` per-launch dumps and the ncu child's
+profiled launches), so with `--bench` those two want a separate plain `run`.
+
 Plus `--json PATH` — a machine-readable record of the whole comparison (backends / greedy kernels / pinned rows with
-their flags), so sweep judgments trace to flagged fields instead of parsed terminal text. Golden rows attach to the
+their flags and a `status` field: `ok` / `pin_unmatched` / `bench_fail`; a failed greedy block carries
+`status: bench_fail` + `error` with null timings), so sweep judgments trace to flagged fields instead of parsed
+terminal text. Each kernel row also carries **`record_knobs`** — the realized tuning knobs with every schedule codec
+family (`knob.SCHEDULE_FAMILIES`: TILE / REDUCE / STAGE / WSPEC / RASTER) explicitly stamped, OFF spelling included
+(`knob.stamp_schedule_families`). That is the map to copy verbatim into a golden YAML `knobs:` entry: an entry that
+omits a family leaves it to the planner's replay-time fill, which drifts as the planner evolves (the recurring
+unpinned-`REDUCE` phantom-regression class). Golden rows attach to the
 run's SHAPE, not a kernel node: a pinned row whose shape matches no greedy kernel (greedy deployed a split
 partial+finalize pair) still prints and lands in the record.
 
 ## Part 8: Evaluating the prior (`emmy eval`)
+
+**Golden evals featurize under the golden's own card.** `eval offline` / `eval online` rebuild each golden's compile
+context as `Context.from_target(compute_cap, gpu_name=…)` — the card recorded in the golden file, with its memorized
+SM count / smem specs — never the live host's. The host-context version silently made golden ranks
+machine-dependent (a 4090 golden scored on a 5090 host featurized as "sm_89 with 170 SMs"; on a GPU-less host, with
+the default SM count) — the occupancy features then priced tiles for a card that doesn't exist, reporting rank 0 on
+shapes the real card misdeployed 12–29×. The fitter (`golden_knob_heuristics`) always did this correctly; the eval
+gate now matches it.
 
 **Fork-sibling regret** (`eval online --dataset nodes`, via `iter_nodes` → `diagnostics.node_report`): **per card**, it
 groups nodes by `parent_key` and prices what following the prior's per-fork pick costs —
@@ -708,8 +743,8 @@ of hint membership). Downstream structural gates (divisibility, threads-per-CTA 
 so a structurally invalid pin yields an empty enumeration and the per-call-site fallback takes over. This lets a tile
 shape the planner wouldn't reach on its own be explored manually. The replay paths (`run --bench --golden` / `--ab`)
 can't accept that silent fallback — it would substitute the planner's own pick and turn the A/B into greedy-vs-greedy
-— so they verify realized-vs-pinned knobs on every pinned row and flag mismatches `unreproducible pin` (see the
-integrity gates in Part 7).
+— so they verify realized-vs-pinned knobs on every pinned row right after the pinned compile and FAIL a mismatched
+row (`unreproducible pin … NOT benched`) instead of benching the fallback (see the integrity gates in Part 7).
 
 A few pins are rejected outright (a clear `ValueError`) rather than silently degraded — they would otherwise lower to
 a wrong or un-launchable kernel:
@@ -755,9 +790,10 @@ of the `TILE` knob): `d<depth>` the gmem→smem ring depth, `sync`/`cp.async`/TM
 smem→register double-buffer. `stage=None` (unset / unparseable) = gmem-direct. Also rides the warp-flash TWISTED
 stream (`STAGE@<kv>` — the K/V slabs of one streaming block; `reg_depth` clamps to 1), where `d1/tma/alt` /
 `d1/cp/alt` is the **alternating single-slab pipeline**: one slab per operand (TMA: its own mbarrier; cp.async: its
-own commit group, a uniform `wait_group(1)` completing the older sibling), refills interleaved with the phases that
-no longer read them, Q staged through smem — the wide (64-key) streaming block's staging (flash stream only; the
-matmul resolvers decline it). See `lowering/kernel/ARCHITECTURE.md`.
+own commit group, a uniform `wait_group(1)` completing the older sibling), each refill placed at its operand's kill
+point by the liveness-scheduled skeleton (derived from the segment live ranges, not hand-assembled), Q staged through
+smem — the wide (64-key) streaming block's staging (flash stream only; the matmul resolvers decline it). See
+`lowering/kernel/ARCHITECTURE.md`.
 
 **`WSPEC`** (STR codec, `010_recognize` / `_schedule` → `lowering/kernel/010_materialize`) — the warp-specialization
 codec `p<np>`: a producer warp band split over the fixed pipeline (bare/root-global; the fourth schedule-fork level).

@@ -244,10 +244,10 @@ def test_bench_golden_variants_retraces_with_dynamic_spec(monkeypatch):
 
     monkeypatch.setattr(tmod, "graph_from_code", fake_graph_from_code)
 
-    async def fake_benchmark_async(g, *, warmup, num_iters):
-        return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[])
+    async def fake_bench_pinned_async(g, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
+        return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]), None
 
-    backend = SimpleNamespace(compile=lambda g: g, benchmark_async=fake_benchmark_async)
+    backend = SimpleNamespace(compile=lambda g: g, bench_pinned_async=fake_bench_pinned_async)
     dyn = SimpleNamespace(name="g.dynM", knobs={"TILE": "n16x8/f2x2"}, shape=None, dynamic=("seq_len@x0:0",))
     static = SimpleNamespace(name="g", knobs={"TILE": "n16x8/f2x2"}, shape=None, dynamic=None)
     benches = asyncio.run(
@@ -363,11 +363,13 @@ def test_unreproducible_pin_flag(monkeypatch):
     assert _unreproducible_pin_flag({"TILE": "w2x1"}, [{}, {}]) is None
 
 
-def test_bench_golden_variants_flags_unmappable_pin(monkeypatch):
+def test_bench_golden_variants_unmatched_pin_fails_row_without_benching(monkeypatch):
     """End-to-end through ``_bench_golden_variants``: a pinned config whose compiled
-    kernels realized different knobs gets an ``unreproducible pin`` flag on its row
-    (rendered ``!`` in the table, carried in ``--json``); a config whose pin was
-    honored stays clean."""
+    kernels realized different knobs FAILS its row loudly before any bench — status
+    ``pin_unmatched``, no bench (benching the fallback realization would measure the
+    planner's own pick under the pin's name, the sweep-misleading silent-degrade class) —
+    while a config whose pin was honored benches clean, so one bad pin never blocks the
+    remaining rows."""
     from types import SimpleNamespace
 
     from emmy.commands import trace as tmod
@@ -383,17 +385,113 @@ def test_bench_golden_variants_flags_unmappable_pin(monkeypatch):
         return g
 
     compiled = iter([graph_with({"TILE": "w4x2/f2x4"}), graph_with({"TILE": "w2x1/f1x8"})])
+    benched: list = []
 
-    async def fake_benchmark_async(g, *, warmup, num_iters):
-        return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[])
+    async def fake_bench_pinned_async(g, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
+        benched.append(g)
+        return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]), None
 
-    backend = SimpleNamespace(compile=lambda g: next(compiled), benchmark_async=fake_benchmark_async)
+    backend = SimpleNamespace(compile=lambda g: next(compiled), bench_pinned_async=fake_bench_pinned_async)
     dropped = SimpleNamespace(name="g.dropped", knobs={"TILE": "w2x1/f1x8"}, shape=None, dynamic=None)
     honored = SimpleNamespace(name="g.honored", knobs={"TILE": "w2x1/f1x8"}, shape=None, dynamic=None)
     benches = asyncio.run(_bench_golden_variants(backend, "torch.matmul(a, b)", [dropped, honored], warmup=1, iters=1))
     assert len(benches) == 2
-    assert any("unreproducible pin" in f for f in benches[0].flags)
-    assert benches[1].flags == []
+    assert benches[0].status == "pin_unmatched" and benches[0].bench is None
+    assert any("unreproducible pin" in f and "NOT benched" in f for f in benches[0].flags)
+    assert len(benched) == 1  # only the honored row spent GPU time
+    assert benches[1].status == "ok" and benches[1].flags == [] and benches[1].bench is not None
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("benchmark run stage exceeded 10.0s"),
+        RuntimeError("bench worker exceeded 100.0s wall budget — SIGKILL'd, stream cleaned"),
+    ],
+    ids=["budget", "hung-worker-sigkill"],
+)
+def test_bench_golden_variants_survives_row_bench_fail(monkeypatch, failure):
+    """A pinned config whose worker job fails is kept as a ``bench_fail`` row (never
+    dropped — the table / ``--json`` must show why) and the remaining rows still bench.
+    A HANG is not a special case anymore: it dies with the SIGKILL'd worker child and
+    surfaces as the same RuntimeError — the parent's CUDA context is never touched, so
+    there is no escalation path and no ``os._exit``."""
+    from types import SimpleNamespace
+
+    from emmy.commands import trace as tmod
+    from emmy.commands.run import _bench_golden_variants
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.cuda.ir import CudaOp
+
+    monkeypatch.setattr(tmod, "graph_from_code", lambda code, dynamic_shapes=None: (object(), "slug", (None, (), {})))
+
+    def graph_with(knobs):
+        g = Graph()
+        g.add_node(op=CudaOp(kernel_name="k", knobs=knobs), inputs=[], output=Tensor("o", (4,)), node_id="n0")
+        return g
+
+    compiled = iter([graph_with({"TILE": "w2x1/f1x8"}), graph_with({"TILE": "w2x1/f1x8"})])
+    calls = iter([failure, None])
+
+    async def fake_bench_pinned_async(g, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
+        exc = next(calls)
+        if exc is not None:
+            raise exc
+        return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]), None
+
+    backend = SimpleNamespace(compile=lambda g: next(compiled), bench_pinned_async=fake_bench_pinned_async)
+    rows = [
+        SimpleNamespace(name="g.slow", knobs={"TILE": "w2x1/f1x8"}, shape=None, dynamic=None),
+        SimpleNamespace(name="g.fine", knobs={"TILE": "w2x1/f1x8"}, shape=None, dynamic=None),
+    ]
+    benches = asyncio.run(_bench_golden_variants(backend, "torch.matmul(a, b)", rows, warmup=1, iters=1))
+    assert len(benches) == 2
+    assert benches[0].status == "bench_fail" and benches[0].bench is None
+    assert any("bench_fail" in f for f in benches[0].flags)
+    assert benches[1].status == "ok" and benches[1].bench is not None
+
+
+def test_bench_golden_variants_wrong_answer_gate_uses_worker_outputs(monkeypatch):
+    """With a greedy reference supplied, each row's worker job re-executes the pinned
+    config on the greedy run's inputs and the RETURNED outputs feed the wrong-answer
+    gate: matching outputs stay clean, a silently-wrong kernel flags. Without a
+    reference no execution is requested (``run_inputs is None``)."""
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from emmy.commands import trace as tmod
+    from emmy.commands.run import _bench_golden_variants
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.cuda.ir import CudaOp
+
+    monkeypatch.setattr(tmod, "graph_from_code", lambda code, dynamic_shapes=None: (object(), "slug", (None, (), {})))
+
+    def graph_with(knobs):
+        g = Graph()
+        g.add_node(op=CudaOp(kernel_name="k", knobs=knobs), inputs=[], output=Tensor("o", (4,)), node_id="n0")
+        return g
+
+    compiled = iter([graph_with({"TILE": "w2x1/f1x8"}), graph_with({"TILE": "w2x1/f1x8"})])
+    ref_outputs = {"n0": np.full((4,), 100.0)}
+    row_outputs = iter([{"n0": ref_outputs["n0"].copy()}, {"n0": ref_outputs["n0"] * 0.5}])
+    seen_inputs: list = []
+
+    async def fake_bench_pinned_async(g, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
+        seen_inputs.append(run_inputs)
+        outs = next(row_outputs) if run_inputs is not None else None
+        return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]), outs
+
+    backend = SimpleNamespace(compile=lambda g: next(compiled), bench_pinned_async=fake_bench_pinned_async)
+    rows = [
+        SimpleNamespace(name="g.good", knobs={"TILE": "w2x1/f1x8"}, shape=None, dynamic=None),
+        SimpleNamespace(name="g.bad", knobs={"TILE": "w2x1/f1x8"}, shape=None, dynamic=None),
+    ]
+    ref = ({"x": np.zeros((4,))}, ref_outputs)
+    benches = asyncio.run(_bench_golden_variants(backend, "torch.matmul(a, b)", rows, warmup=1, iters=1, ref=ref))
+    assert seen_inputs == [ref[0], ref[0]]  # the greedy inputs rode each row's job
+    assert benches[0].flags == []
+    assert any("wrong-answer" in f for f in benches[1].flags)
 
 
 @requires_cuda
@@ -463,10 +561,28 @@ def test_print_ncu_compare_renders_dep_then_ref(capsys):
 @requires_cuda
 def test_run_ab_bench_shows_pinned_row(run_cli):
     """``run --code ... --bench --ab KNOBS`` benches the pinned config and prints it
-    as an ``ab KNOBS``-labeled row in the kernel table."""
-    rc, stdout, stderr = run_cli("run", "--code", "torch.matmul(torch.randn(64, 64), torch.randn(64, 64))", "--bench", "--ab", "BM=8,BN=16")
+    as an ``ab KNOBS``-labeled row in the kernel table. The pin must REALIZE (a valid
+    scalar-tile spelling for this shape) — an unmatched pin now fails its row loudly
+    and exits non-zero instead of benching the planner's pick under the pin's name."""
+    rc, stdout, stderr = run_cli(
+        "run", "--code", "torch.matmul(torch.randn(64, 64), torch.randn(64, 64))", "--bench", "--ab", "TILE=n16x16/f2x2"
+    )
     assert rc == 0, f"stderr: {stderr}"
-    assert "ab BM=8,BN=16" in stdout, stdout
+    assert "ab TILE=n16x16/f2x2" in stdout, stdout
+
+
+@requires_cuda
+def test_run_ab_bench_unmatched_pin_fails_loudly(run_cli):
+    """An ``--ab`` pin that matches no offered row (a knob family that does not exist)
+    is NOT benched — the row fails loudly (``unreproducible pin`` on the row, no timing)
+    and the run exits non-zero, instead of silently benching the planner's own pick
+    under the pin's name (the pin-spelling trap the golden sweeps kept hitting)."""
+    rc, stdout, _stderr = run_cli(
+        "run", "--code", "torch.matmul(torch.randn(64, 64), torch.randn(64, 64))", "--bench", "--ab", "BM=8,BN=16"
+    )
+    assert rc != 0, "an unmatched --ab pin must fail the run"
+    assert "unreproducible pin" in stdout, stdout
+    assert "! ab BM=8,BN=16" in stdout, stdout
 
 
 @requires_cuda
@@ -826,6 +942,51 @@ def test_bind_inputs_preserves_int_dtype():
     np.testing.assert_array_equal(bound["position_ids"], np.arange(8, dtype=np.int32)[None, :])
 
 
+def test_bind_inputs_arity_mismatch_raises():
+    """Binding failures RAISE (with the real cause) instead of ``sys.exit`` — the function
+    also runs inside the bench worker child, where an exit(1) reached the parent as an
+    opaque ``SystemExit(1)`` with the cause stranded in the child's log stream."""
+    from emmy.commands.run import _bind_inputs
+    from emmy.compiler import dtype as dt
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4,), dt.F32), node_id="x")
+    g.inputs = ["x"]
+
+    class _EmptyModule:
+        def named_parameters(self, remove_duplicate=True):
+            return iter(())
+
+        def named_buffers(self, remove_duplicate=True):
+            return iter(())
+
+    with pytest.raises(RuntimeError, match="arity mismatch"):
+        _bind_inputs(g, _EmptyModule(), (), {})
+
+
+def test_compare_wall_s_scales_with_kernel_count():
+    """The comparison job's SIGKILL wall cap derives from the workload — a fixed cap
+    false-fails big-model runs whose child legitimately pays a first nvcc compile per
+    kernel (bounded by the in-child compile budget) before ever benching."""
+    from types import SimpleNamespace
+
+    from emmy.commands.run import _compare_wall_s
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.cuda.ir import CudaOp
+
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4,)), node_id="x")
+    for i in range(3):
+        g.add_node(op=CudaOp(kernel_name=f"k{i}"), inputs=[], output=Tensor(f"o{i}", (4,)), node_id=f"n{i}")
+    backend = SimpleNamespace(bench_compile_timeout_s=30.0, bench_run_timeout_s=10.0)
+    assert _compare_wall_s(g, backend, base_s=240.0) == 240.0 + 3 * 30.0 + 10.0
+    # A kernel-less graph still gets one compile budget of headroom.
+    assert _compare_wall_s(Graph(), backend, base_s=60.0) == 60.0 + 30.0 + 10.0
+
+
 def test_launch_order_cuda_nodes_pairs_by_topo_not_dict_order():
     """The per-kernel table pairs ``bench.per_launch`` times to kernels by launch index,
     and the backend launches in ``graph.topological_order()`` — NOT graph dict order.
@@ -855,7 +1016,7 @@ def test_launch_order_cuda_nodes_pairs_by_topo_not_dict_order():
     assert names == ["k_producer", "k_consumer"]
 
 
-def test_accuracy_check_fails_scrambled_output_passes_outliers(capsys):
+def test_accuracy_check_fails_scrambled_output_passes_outliers():
     """The accuracy verdict's three clauses each do their one job (the PR #354 sync-fill
     incident: a swizzle fill/drain mismatch SCRAMBLED the A slab and the old fp16 form —
     ``max ≤ peak OR mean ≤ peak`` — passed the permuted output at mean_diff 15% of peak):
@@ -864,7 +1025,10 @@ def test_accuracy_check_fails_scrambled_output_passes_outliers(capsys):
       though its max error can sit near the loose fp16 outlier ceiling;
     - a correct fp16 output with small noise plus a few atomic-reorder-style OUTLIERS must
       PASS (the near-zero mean vouches for them — the split-K escape hatch);
-    - a correct low-noise output must PASS the plain path."""
+    - a correct low-noise output must PASS the plain path.
+
+    The verdict is a pure return value (no print / exit — it runs in the bench worker
+    child, whose stdout is the pickle protocol channel)."""
     import numpy as np
     import torch
 
@@ -874,9 +1038,7 @@ def test_accuracy_check_fails_scrambled_output_passes_outliers(capsys):
     eager = torch.from_numpy((rng.standard_normal(1 << 16) * 20).astype(np.float32))
 
     def verdicts(arr):
-        capsys.readouterr()
-        _check_accuracy({"o": arr}, eager, fatal=False)
-        return "FAIL" in capsys.readouterr().out
+        return _check_accuracy({"o": arr}, eager) is not None
 
     base = eager.numpy()
     # Scrambled (permutation of the correct values): must FAIL.
@@ -887,3 +1049,82 @@ def test_accuracy_check_fails_scrambled_output_passes_outliers(capsys):
     assert not verdicts(noisy.astype(np.float16)), "outliers with a near-zero mean must pass (escape hatch)"
     # Correct low-noise: must PASS.
     assert not verdicts((base + rng.standard_normal(base.shape) * 0.001).astype(np.float16))
+
+
+def test_write_ab_json_greedy_bench_fail_and_record_knobs(tmp_path):
+    """The ``--json`` record survives a failed greedy row: the greedy block carries
+    ``status: bench_fail`` + ``error`` with null timings, pinned rows carry their own
+    ``status``, and every kernel row exposes ``record_knobs`` — the realized tuning knobs
+    with EVERY schedule family explicitly stamped (OFF included), the map a golden
+    recording copies verbatim so no family is left to the planner's replay-time fill."""
+    import json
+    from types import SimpleNamespace
+
+    import emmy.compiler.pipeline.knob as knob_mod
+    import emmy.compiler.pipeline.search.space  # noqa: F401 — the schedule codec declarations
+    from emmy.commands.run import _GoldenBench, _write_ab_json
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.cuda.ir import CudaOp
+
+    knob_mod.reset_registry()  # the lazy registry may predate the space import above
+
+    def graph_with(knobs):
+        g = Graph()
+        g.add_node(op=CudaOp(kernel_name="k", knobs=knobs), inputs=[], output=Tensor("o", (4,)), node_id="n0")
+        return g
+
+    greedy_graph = graph_with({"TILE": "a:mma_m16n8k16_f16_f32/w1x1/f1x1", "REDUCE": "g2k"})
+    unmatched = _GoldenBench(
+        SimpleNamespace(name="g.unmatched", knobs={"TILE": "w2x1/f1x8"}, shape=None, dynamic=None, latency_us=None, ref_us=None),
+        graph_with({"TILE": "w4x2/f2x4"}),
+        None,
+        ["unreproducible pin: TILE=w2x1/f1x8 realized w4x2/f2x4 — row NOT benched"],
+        "pin_unmatched",
+    )
+    args = SimpleNamespace(
+        json=str(tmp_path / "ab.json"), code="torch.matmul(a, b)", input=None, ir=None, golden=None, dynamic=None, warmup=1, iters=1
+    )
+    _write_ab_json(args, {}, greedy_graph, None, [unmatched], greedy_fail="greedy bench failed: hung")
+    rec = json.loads((tmp_path / "ab.json").read_text())
+    assert rec["greedy"]["status"] == "bench_fail" and "hung" in rec["greedy"]["error"]
+    assert rec["greedy"]["total_us"] is None
+    krow = rec["greedy"]["kernels"][0]
+    assert krow["us"] is None
+    # record_knobs: realized values + explicit OFF for families the compile never stamped.
+    assert krow["record_knobs"]["REDUCE"] == "g2k"
+    for fam in ("STAGE", "WSPEC", "RASTER"):
+        assert krow["record_knobs"][fam] == ""
+    row = rec["pinned"][0]
+    assert row["status"] == "pin_unmatched" and row["total_us"] is None
+    assert any("NOT benched" in f for f in row["flags"])
+
+
+def test_print_kernel_stats_greedy_bench_fail_row(capsys):
+    """Degraded kernel table: ``bench=None`` + ``greedy_fail`` prints the greedy kernels
+    with ``--`` timings, a ``bench_fail`` TOTAL, the failure reason as a ``!`` line, and the
+    pinned rows still render — the exact view the golden workflow needs when the greedy pick
+    hangs (previously the whole run aborted before any pinned row printed)."""
+    from types import SimpleNamespace
+
+    from emmy.commands.run import _GoldenBench, _print_kernel_stats
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.cuda.ir import CudaOp
+
+    def graph_with(knobs):
+        g = Graph()
+        g.add_node(op=CudaOp(kernel_name="k_pinned", knobs=knobs), inputs=[], output=Tensor("o", (4,)), node_id="n0")
+        return g
+
+    greedy = Graph()
+    greedy.add_node(op=CudaOp(kernel_name="k_greedy", knobs={"TILE": "w2x1/f1x8"}), inputs=[], output=Tensor("o", (4,)), node_id="n0")
+    pinned_bench = SimpleNamespace(min_ms=0.5, time_ms=0.5, per_launch=[], e2e_min_ms=None)
+    ok_row = _GoldenBench(
+        SimpleNamespace(name="ab TILE=w4x2/f2x4", knobs={"TILE": "w4x2/f2x4"}, shape=None, dynamic=None),
+        graph_with({"TILE": "w4x2/f2x4"}),
+        pinned_bench,
+        [],
+    )
+    _print_kernel_stats(greedy, None, golden_benches=[ok_row], greedy_fail="greedy bench failed: hung")
+    outp = capsys.readouterr().out
+    assert "bench_fail" in outp and "greedy bench failed: hung" in outp
+    assert "k_greedy" in outp and "ab TILE=w4x2/f2x4" in outp

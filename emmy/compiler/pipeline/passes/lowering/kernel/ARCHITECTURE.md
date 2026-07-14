@@ -118,11 +118,19 @@ carries any leading (batch) grid axes and supports a 1-D (m-absent) output. (The
 ## Operand staging — the warp-tier smem pipeline (`STAGE` codec → `Stage`)
 
 The warp (mma) tier stages its reused gmem operands through an smem slab, driven off the node's `STAGE` codec →
-`schedule.Stage`. Every staged path runs **one** K-loop skeleton, `staged_kloop` in **`_stage.py`**
-(`fill → commit → wait → drain → Sync`, `depth` the sole buffering knob — `depth == 1` is the single-buffer degenerate,
-`depth >= 2` a gmem→smem prefetch ring), behind a `Transport` strategy: `CpAsyncTransport` (fill → commit → wait-group)
-and `TmaTransport` (an `arrive.expect_tx` + box copy gated by a **per-slot mbarrier array**, so `depth` is a free knob
-for TMA too). The two producers — structurally different primitives — sit behind one `fill`/`commit`/`wait` seam, and
+`schedule.Stage`. Every staged path runs **one** liveness-scheduled K-loop skeleton, `pipelined_kloop` in
+**`_stage.py`**: the loop body arrives as ordered segments tagged with the slab names each READS, every staged
+operand-group is a `(transport, depth)` pair, and the fill / wait / barrier placement is DERIVED from each group's
+live range (`[first reader, last reader]` over the segments) — wait before the first reader, a CTA barrier past the
+last, `depth >= 2` prefetching chunk `i+ring-1` at the top of the body, whole-body `depth == 1` filling the current
+chunk (the single-buffer degenerate), and a `depth == 1` group live in a PROPER sub-interval refilling chunk `i+1` at
+its kill point so the copy overlaps every segment outside the live range. cp.async `wait_group(N)` counts are a
+static pass over the placed schedule (the commits younger than a group's fill at its wait point); the prologue primes
+exactly the fills the pre-loop iterations would have issued. `staged_kloop` is the whole-body single-group entry
+(the matmul tier's classic `fill → commit → wait → drain → Sync` phases fall out of the derivation). Behind it, a
+`Transport` strategy: `CpAsyncTransport` (fill → commit → wait-group) and `TmaTransport` (an `arrive.expect_tx` + box
+copy gated by a **per-slot mbarrier array**, so `depth` is a free knob for TMA too). The two producers —
+structurally different primitives — sit behind one `fill`/`commit`/`wait` seam, and
 **one atom-agnostic driver** (`_atom._staged`) builds the operand pair + the transport for either atom; the atom
 supplies only the slab drain leaf via `_AtomOps.staged_drain` (the shared inner `ldmatrix` drain
 `_staged_inner_atom_loop`, or the scalar `_scalar_drain`). The staging **decision** does not live here at all: the
@@ -157,8 +165,10 @@ slab.) The **TMA transport** boxes the batched K/V via rank-N descriptors (leadi
 extent-1 box dims; the load's batch/head index exprs as origin coords — GQA's `h // group` included) into dense
 1024 B-aligned slabs under the hardware swizzle, the drains' address XOR undoing it; under a `WSPEC` band split the
 transport's elected fill thread rides the WRAPPED linear tid (`threadIdx.x % block_threads` — the raw tid would elect
-a compute thread and the producer band would never fill). Static block-divisible kv only (the symbolic stream keeps
-its masked gmem-direct loads), and bit-identity to the gmem-direct sibling holds — same values, same mma order.
+a compute thread and the producer band would never fill). A symbolic kv stages too (TMA zero-fills the box overhang
+past the last key; cp.async clamp-reads the tail's key rows; the drain's tail masks zero the overhanging P columns);
+a static NON-block-divisible kv has no tail mask and stays gmem-direct. Bit-identity to the gmem-direct sibling
+holds either way — same values, same mma order.
 
 **A causal stream tile-skips** (staged and gmem-direct alike): when the score prologue carries the triangular
 `Select` (`kv ≤ m`, detected off the predicate shape in `_twist`), the stream stops at the CTA's last query row —
@@ -167,18 +177,25 @@ prefetch clamp re-pinned onto the last needed chunk. CTA-uniform (the in-loop ba
 (skipped steps fold the carrier's exact identity: `α = 1`, `P = expf(−1e30 − m_i) = 0`); it halves the streamed
 keys/mma work on average, paying wall-clock wherever the grid oversubscribes the SMs.
 
-**The alternating single-slab pipeline** (`STAGE=d1/tma/alt`, `_stage.alternating_kloop`) is the wide-block form of the
-same stream — the FA-2 choreography: one K slab and one V slab, each on its OWN mbarrier, with the refills interleaved
-into the phases that no longer read them (`wait K | Q·K | sync | fill K_{i+1} | softmax | wait V | P·V | sync | fill
-V_{i+1}` — K's copy runs under softmax + P·V, V's under the next step's Q·K), so a 64-key streaming block overlaps its
+**The alternating single-slab pipeline** (`STAGE=d1/tma/alt`) is the wide-block form of the same stream — not its own
+skeleton but `pipelined_kloop` run over the stream's three tagged segments (`_twist._stream_segments`: Q·K reads the
+K slab, the softmax merge reads none, P·V reads the V slab) with K and V as separate depth-1 groups: each live range
+is a proper sub-interval, so the scheduler places each refill at its kill point (`wait K | Q·K | sync | fill K_{i+1} |
+softmax | wait V | P·V | sync | fill V_{i+1}` — K's copy runs under softmax + P·V, V's under the next step's Q·K, the
+FA-2 choreography as a DERIVED consequence of where the live ranges end), so a 64-key streaming block overlaps its
 copies within HALF the paired ring's smem. Q stages through smem too: a padded row-major tile (`head_dim + 8` element
-rows) cp.async-filled once before the stream, its A fragments ldmatrix'd per atom-K chunk INSIDE the step — the freed
+rows) cp.async-filled once before the stream — the δ=0 loop-invariant degenerate, a prologue-only fill with no wait
+or refill to schedule — its A fragments ldmatrix'd per atom-K chunk INSIDE the step; the freed
 resident Q registers are what make the wide block's register file fit (the hd256 nt8 form went from 255 regs + 848 B
 spill loads to 240 regs / zero spills, 55.5 → 31.7 µs — past the nt4-d2 frontier, and the fm sibling on `d1/cp/alt`
 is the first emmy-past-torch-SDPA hd256 entry on the 5090 at 29.7). Both async transports ride the skeleton: TMA arms
 per-operand mbarriers (`d1/tma/alt`); cp.async commits each fill into its own group — the K,V,K,V commits queue per
-thread, so a uniform `wait_group(1)` at either wait point completes exactly the older sibling (`d1/cp/alt`, the sm_89
-form — and the faster one on the 5090 too, the fm-prefers-cp lane rule again). Static block-divisible kv only;
+thread, and the counting pass derives the uniform `wait_group(1)` that completes exactly the older sibling
+(`d1/cp/alt`, the sm_89 form — and the faster one on the 5090 too, the fm-prefers-cp lane rule again). A symbolic
+kv rides the same runtime clamps as the ring: the kill-point refill clamps onto the runtime last chunk exactly as
+the ring prefetch does, and the staged-Q fill clamp-reads a tail CTA's overhanging query rows (their outputs are
+store-guarded) — the 5090 `attention.hd256.dynM` frontier moved 34.4 → 32.0 on `d1/cp/alt` and `hd128.dynM`
+13.5 on the fm `d1/tma/alt`, closing the symbolic-vs-static gap. A static non-block-divisible kv stays gmem-direct;
 composes with the causal tile-skip (`k_end`) and the split-KV window; flash stream only (the matmul resolvers
 decline `alt`).
 

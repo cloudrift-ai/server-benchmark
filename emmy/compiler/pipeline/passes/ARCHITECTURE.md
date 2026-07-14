@@ -168,8 +168,14 @@ drain's tail masks (the same clamp the gmem-direct symbolic path makes) zero tho
 masked-flash `.dynM` kernel stages at bit-identity to gmem-direct on any sm (the `staged_kloop` ring allocates the
 full depth and the last-chunk clamp / loop bound ride the symbolic `Dim`; WSPEC over a symbolic kv is not built). A resolved TMA row additionally offers the `WSPEC` producer-band splits (the matmul tier's
 legality, `32·aux ≤ 32·um`; measured occupancy-negative at flash's CTA scale — offered, honest, not the default). The
-chain / coop / serial escapes stamp the decided-empty `STAGE@<kv>: ""`. The causal tile-skip is the remaining flash
-follow-up.
+chain / coop / serial escapes stamp the decided-empty `STAGE@<kv>: ""`. **A causal stream tile-skips**: when the score
+prologue carries the triangular `Select` (`kv ≤ m` — detected structurally off the predicate, never a kernel identity),
+the realizer bounds the stream at the CTA's last query row (`kv_end = min(seq, (grid_m + 1) · um·fm·atom_m)`, hoisted
+into the `StridedLoop`'s for-init `end` override; the staged prefetch clamp re-pins onto the last needed chunk). The
+bound is CTA-uniform (barriers stay legal) and every skipped step is the carrier's exact identity (`α = 1`,
+`P = expf(−1e30 − m_i) = 0`), so the early stop is bit-identical — it halves the streamed keys/mma work on average,
+paying wall-clock wherever the grid oversubscribes the SMs (1.67× on hd256 seq-2048) and re-opening the small-CTA flash
+forms that previously paid double K/V re-streaming.
 Two catalog invariants hold: every recorded golden's `TILE`/`STAGE`/`REDUCE` stays a **member** of the enumerated
 grids (the permanence test in `tests/compiler/test_golden_configs.py` — a space edit can never silently orphan a
 golden into unreachability again, the sixth sweep's `.s512` regression class; the scalar reg grid carries the

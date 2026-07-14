@@ -46,7 +46,7 @@ from types import SimpleNamespace
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.kernel.ir import (
     FRAG,
     FRAG_COL,
@@ -310,6 +310,26 @@ def _realize_prologue(stmts, qk: Contraction, frags: tuple[str, ...], col_bases,
     return [ld for ld in hoisted if set(ld.names) & used], stream
 
 
+def _causal_stream(stmts, qk: Contraction) -> bool:
+    """True when the score prologue carries the causal coordinate ``Select`` — keep ``kv ≤ m`` over
+    the contraction's own axis vars. Structural: the triangular kv bound below derives from the
+    predicate's shape, never from a kernel identity (an additive-mask or unmasked stream has no
+    such ``Select`` and streams the full extent)."""
+    for s in stmts:
+        if isinstance(s, Select):
+            keep = s.branches[0].select
+            if (
+                isinstance(keep, BinaryExpr)
+                and keep.op == "<="
+                and isinstance(keep.left, Var)
+                and keep.left.name == qk.n_axis.name
+                and isinstance(keep.right, Var)
+                and keep.right.name == qk.m_axis.name
+            ):
+                return True
+    return False
+
+
 def _pv_streamed(pv: Contraction, kv_axis: Axis) -> Contraction:
     """The expect contraction with its singleton intra-block axis swapped for the STREAM axis — the
     scalar tree contracts one key per step (``k_axis = pj``, extent 1); the fragment tier contracts
@@ -356,6 +376,18 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     symbolic_q = not qk.m_axis.extent.is_static
     seq = _ext(kv_axis)
     col_bases = tuple(BinaryExpr("+", kv0_var, Literal(t * atom_n, "int")) for t in range(nt))
+
+    # Causal tile-skip: a triangular score prologue (keep ``kv ≤ m``) bounds the stream at the
+    # CTA's last query row — ``kv_end = min(seq, (grid_m + 1) · um·fm·atom_m)``. Every skipped step
+    # is the carrier's exact identity (all-masked scores: ``α = 1``, ``P = expf(−1e30 − m_i) = 0``),
+    # so the early stop is bit-identical to the full stream. The bound is CTA-uniform (max over the
+    # block's warps/query tiles, the raw grid var — NOT the per-warp ``m_blk``), which keeps the
+    # staged path's in-loop barriers legal.
+    kv_end: Expr | None = None
+    if _causal_stream(partial[1:], qk):
+        cta_rows = Literal(um * fm * shape[0], "int")
+        causal_rows = BinaryExpr("*", BinaryExpr("+", Var(grid[-1].name), Literal(1, "int")), cta_rows)
+        kv_end = TernaryExpr(cond=BinaryExpr("<", causal_rows, seq), if_true=causal_rows, if_false=seq)
 
     # The channel spec (pivot first, one carried name per channel) — the merge is REGENERATED from
     # it at fragment residence. The expect channel's ⊗ is the pv node; the denom folds the weights.
@@ -605,12 +637,13 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             k0=kv0.name,
             workers=ctx.workers,
             block_threads=block_threads,
+            k_end=kv_end,
         )
         state = decls + state
     else:
-        static_small = unroll_ok(kv_axis.extent, 128)
+        static_small = unroll_ok(kv_axis.extent, 128) and kv_end is None
         body = Body(tuple(_stream_step()))
-        fold = [StridedLoop(axis=kv0, start=Literal(0, "int"), step=Literal(bn, "int"), body=body, unroll=static_small)]
+        fold = [StridedLoop(axis=kv0, start=Literal(0, "int"), step=Literal(bn, "int"), body=body, unroll=static_small, end=kv_end)]
 
     # ---- close: the projection tail realized on the output fragments + the store, per tile ---- #
     # A layout-aware output ``Write`` the node carries (flash's ``_out_store_index``) is the store

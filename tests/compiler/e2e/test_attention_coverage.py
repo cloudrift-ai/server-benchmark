@@ -916,6 +916,28 @@ def test_generated_tensorcore_flash_causal_matches_torch(monkeypatch, B, H, S, D
 
 
 @requires_cuda
+def test_warp_flash_causal_tile_skip(monkeypatch):
+    """The causal tile-skip: a triangular score prologue (``kv ≤ m``) bounds the warp-tier stream at
+    the CTA's last query row — the ``StridedLoop`` gets a hoisted ``kv0_end`` for-init bound instead
+    of the full extent (accuracy is pinned by the causal cases above; skipped steps fold the exact
+    carrier identity). A non-causal stream must NOT carry the bound — it is derived from the causal
+    ``Select``'s predicate shape, not from any kernel identity."""
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
+    _backend, compiled, _graph, kernels = _compile_tc(q, k, v, module=_Causal())
+    assert len(kernels) == 1
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "emmy_c_to_a" in src, "must be the fused warp-chain"
+    assert "kv0_end" in src, "causal warp flash must bound the stream at the CTA's last query row"
+
+    _backend, compiled, _graph, kernels = _compile_tc(q, k, v)
+    assert len(kernels) == 1
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "emmy_c_to_a" in src, "must be the fused warp-chain"
+    assert "kv0_end" not in src, "a non-causal stream must run the full extent"
+
+
+@requires_cuda
 @pytest.mark.parametrize("seq", [8, 16, 37, 64])
 def test_warp_chain_dynamic_matches_torch(monkeypatch, seq):
     """Symbolic ``seq_len`` warp-chain flash. ONE cached fused-TC kernel carrying ``int seq_len``

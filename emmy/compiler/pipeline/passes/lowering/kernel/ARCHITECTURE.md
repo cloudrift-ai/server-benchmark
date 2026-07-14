@@ -160,6 +160,13 @@ transport's elected fill thread rides the WRAPPED linear tid (`threadIdx.x % blo
 a compute thread and the producer band would never fill). Static block-divisible kv only (the symbolic stream keeps
 its masked gmem-direct loads), and bit-identity to the gmem-direct sibling holds — same values, same mma order.
 
+**A causal stream tile-skips** (staged and gmem-direct alike): when the score prologue carries the triangular
+`Select` (`kv ≤ m`, detected off the predicate shape in `_twist`), the stream stops at the CTA's last query row —
+`staged_kloop`'s `k_end` / the `StridedLoop.end` for-init override, `min(seq, (grid_m + 1) · um·fm·atom_m)`, with the
+prefetch clamp re-pinned onto the last needed chunk. CTA-uniform (the in-loop barriers stay legal) and bit-identical
+(skipped steps fold the carrier's exact identity: `α = 1`, `P = expf(−1e30 − m_i) = 0`); it halves the streamed
+keys/mma work on average, paying wall-clock wherever the grid oversubscribes the SMs.
+
 **The fused edge — the mma tier's `sync` transport.** A demoted-cone matmul (`f(x, …) @ w`) takes the warp tier
 under a warp `TILE` pin: `_schedule._demoted_warp_option` nodifies the PLANAR ⊗-fold to a computed-A `Contraction`
 (the same `a_operand = Body` flash P@V rides) and stamps a `sync` `Stage`; `_staged` then builds a `SyncTransport`

@@ -299,11 +299,14 @@ def build_attention_split_wrapper(block):
             h = self.input_layernorm(hidden)  # [T, H]
             t = h.shape[0]
             q = self.q_proj(h).view(t, num_heads, head_dim)  # [T, Hq, D] — NO transpose
-            k = self.k_proj(h).view(t, num_kv_heads, head_dim)
-            v = self.v_proj(h).view(t, num_kv_heads, head_dim)
+            kp = self.k_proj(h).view(t, num_kv_heads, head_dim)
+            # Gemma-4's global layers set attention_k_eq_v (no v_proj): V reuses K's projection
+            # (un-rotated; v_norm below still differs from k_norm). Otherwise V is its own projection.
+            v = self.v_proj(h).view(t, num_kv_heads, head_dim) if self.v_proj is not None else kp
+            k = kp
             if self.q_norm is not None:
                 q = self.q_norm(q)  # per-head RMSNorm over D
-                k = self.k_norm(k)
+                k = self.k_norm(kp)
             if self.v_norm is not None:
                 v = self.v_norm(v)  # Gemma-4: per-head RMSNorm over D on V as well
             return q.reshape(t, num_heads * head_dim), k.reshape(t, num_kv_heads * head_dim), v.reshape(t, num_kv_heads * head_dim)

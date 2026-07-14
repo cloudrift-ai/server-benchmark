@@ -57,20 +57,24 @@ def _build_rotary(config, head_dim, max_position):
     )
 
 
-def _build_rotaries(config, head_dim, n_layers, max_position):
-    """One RoPE module per decoder layer. Homogeneous models (Qwen3 / Llama) share a single rotary
-    across all layers; Gemma-3/4 keys RoPE theta on the layer's attention type (local θ for
-    ``sliding_attention``, global θ for ``full_attention``), so each layer gets the matching one —
-    ``config.rope_parameters`` is then a dict keyed by those layer types, not a flat spec."""
+def _build_rotaries(config, runner, n_layers, max_position):
+    """One RoPE module per decoder layer, built at the LAYER's head_dim. Homogeneous models
+    (Qwen3 / Llama) share a single rotary across all layers; Gemma-3/4 keys RoPE on the layer's
+    attention type (local θ for ``sliding_attention``, global θ + partial/proportional for
+    ``full_attention``) — and Gemma-4 also uses a larger head_dim on global layers — so one rotary
+    is built per layer type at that type's head_dim. ``config.rope_parameters`` is then a dict keyed
+    by those layer types, not a flat spec."""
     layer_types = getattr(config, "layer_types", None)
     rope_params = getattr(config, "rope_parameters", None)
     if layer_types and isinstance(rope_params, dict) and set(layer_types) <= set(rope_params):
-        by_type = {
-            lt: get_rope(head_dim, max_position=max_position, is_neox_style=True, rope_parameters=rope_params[lt])
-            for lt in set(layer_types)
-        }
+        by_type: dict = {}
+        for i in range(n_layers):
+            lt = layer_types[i]
+            if lt not in by_type:
+                hd = runner.layer_meta(i)[0]
+                by_type[lt] = get_rope(hd, max_position=max_position, is_neox_style=True, rope_parameters=rope_params[lt])
         return [by_type[layer_types[i]] for i in range(n_layers)]
-    return [_build_rotary(config, head_dim, max_position)] * n_layers
+    return [_build_rotary(config, runner.layer_meta(0)[0], max_position)] * n_layers
 
 
 class EmmyGenModel(nn.Module):
@@ -104,7 +108,6 @@ class EmmyGenModel(nn.Module):
 
         self.runner = EmmyGenRunner.create(model_id=mc.model, dtype_str=_trunk_dtype_str(mc.dtype))
         n_layers = self.runner.num_layers
-        head_dim = self.runner.head_dim
 
         sliding_window = getattr(config, "sliding_window", None)
 
@@ -118,25 +121,28 @@ class EmmyGenModel(nn.Module):
         # One real vLLM Attention per layer — unique prefix (vLLM keys static_forward_context /
         # cache-spec discovery by it and rejects duplicates). No weights. per_layer_sliding_window
         # makes vLLM's paged attention window that layer (and size its KV-cache spec accordingly).
-        self.attn = nn.ModuleList(
-            [
+        # Dims come from the runner PER LAYER: Gemma-4's global layers use a larger head_dim than
+        # its sliding ones, so a single (num_heads, head_dim) would misshape the global layers.
+        attn = []
+        for i in range(n_layers):
+            hd, nh, nkv, scaling = self.runner.layer_meta(i)
+            attn.append(
                 Attention(
-                    self.runner.num_heads,
-                    head_dim,
-                    self.runner.scaling,
-                    num_kv_heads=self.runner.num_kv_heads,
+                    nh,
+                    hd,
+                    scaling,
+                    num_kv_heads=nkv,
                     cache_config=vllm_config.cache_config,
                     quant_config=vllm_config.quant_config,
                     per_layer_sliding_window=_layer_window(i),
                     prefix=f"{prefix}.layers.{i}.self_attn.attn",
                 )
-                for i in range(n_layers)
-            ]
-        )
+            )
+        self.attn = nn.ModuleList(attn)
         # RoPE is NOT in Attention. One module per layer (applied between pre and attn): homogeneous
-        # models share a single rotary; Gemma-3/4 keys theta on layer type (local vs global).
+        # models share a single rotary; Gemma-3/4 keys theta AND head_dim on layer type (local/global).
         max_pos = getattr(config, "max_position_embeddings", 8192)
-        self.rotary_emb = nn.ModuleList(_build_rotaries(config, head_dim, n_layers, max_pos))
+        self.rotary_emb = nn.ModuleList(_build_rotaries(config, self.runner, n_layers, max_pos))
 
         # vLLM owns ONLY lm_head; the runner owns embed + the trunk.
         self.lm_head = ParallelLMHead(

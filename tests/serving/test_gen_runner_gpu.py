@@ -94,6 +94,77 @@ def test_gen_runner_stitch_matches_eager():
     assert int(np.argmax(logits_dep[-1])) == int(np.argmax(eager[-1]))
 
 
+def test_gen_runner_gemma4_heterogeneous_stitch():
+    """Gemma-4 (gap #9): global (``full_attention``) layers use a LARGER head_dim (``global_head_dim``)
+    and ``attention_k_eq_v`` (no ``v_proj`` → V reuses K's projection) than the sliding layers, so the
+    runner must carry PER-LAYER attention metadata — a single (num_heads, head_dim) misshapes the global
+    layers' ``o_proj``. Stitches the whole tiny gemma-4 trunk with per-layer dims + per-layer-type RoPE
+    (full-causal since T < sliding_window) and checks it against the HF trunk's own hidden states."""
+    pytest.importorskip("cupy")
+    pytest.importorskip("transformers.models.gemma4")
+    import torch
+    import torch.nn.functional as F
+    import transformers
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from transformers.models.gemma4.modeling_gemma4 import apply_rotary_pos_emb
+
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    config = transformers.Gemma4TextConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=4,  # 3 sliding + a forced-global last layer
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        global_head_dim=32,  # global layers: larger head_dim than sliding (16)
+        attention_k_eq_v=True,  # global layers: no v_proj (V reuses K)
+        num_global_key_value_heads=2,  # required when attention_k_eq_v
+        max_position_embeddings=128,
+        sliding_window=64,
+        hidden_size_per_layer_input=0,  # dense: no PLE
+    )
+    torch.manual_seed(0)
+    model = transformers.Gemma4ForCausalLM(config).to(torch.float32).eval()
+    trunk = model.model
+    # The heterogeneity must actually be present, else the test proves nothing.
+    assert trunk.layers[0].self_attn.head_dim != trunk.layers[-1].self_attn.head_dim
+    assert trunk.layers[-1].self_attn.v_proj is None  # global attention_k_eq_v
+
+    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16)
+    assert runner.num_layers == config.num_hidden_layers
+
+    t = 24  # > decode_bucket, < sliding_window (→ every layer is full-causal)
+    ids = torch.randint(0, config.vocab_size, (1, t))
+    pos = torch.arange(t).unsqueeze(0)
+    with torch.no_grad():
+        ref = trunk(input_ids=ids).last_hidden_state.squeeze(0)  # [T, H]
+    cos_sin = {lt: trunk.rotary_emb(ref[None], pos, lt) for lt in set(config.layer_types)}
+    causal = torch.triu(torch.full((t, t), float("-inf")), diagonal=1)[None, None]
+
+    hidden = runner.embed(ids.squeeze(0).numpy())
+    for layer in range(runner.num_layers):
+        hd, nh, nkv, sc = runner.layer_meta(layer)  # PER-LAYER dims
+        residual = hidden
+        q2, k2, v2 = runner.forward_layer_pre(layer, hidden)
+        q = torch.from_numpy(np.ascontiguousarray(q2)).view(t, nh, hd).transpose(0, 1)[None]
+        k = torch.from_numpy(np.ascontiguousarray(k2)).view(t, nkv, hd).transpose(0, 1)[None]
+        v = torch.from_numpy(np.ascontiguousarray(v2)).view(t, nkv, hd).transpose(0, 1)[None]
+        cos, sin = cos_sin[config.layer_types[layer]]  # per-layer-type rope (its own head_dim)
+        q, k = apply_rotary_pos_emb(q, cos, sin), apply_rotary_pos_emb(k, cos, sin)  # per-tensor (gemma-4)
+        k, v = _repeat_kv(k, nh // nkv), _repeat_kv(v, nh // nkv)
+        ao = F.scaled_dot_product_attention(q, k, v, attn_mask=causal, scale=sc)
+        ao = ao.transpose(1, 2).reshape(t, nh * hd).contiguous().numpy()
+        hidden = runner.forward_layer_post(layer, ao, residual)
+    got = runner.final_norm(hidden)
+
+    np.testing.assert_allclose(got, ref.numpy(), rtol=2e-3, atol=2e-3)
+
+
 def test_gen_runner_device_path_matches_host():
     """The device-resident decode path (``run_device`` / ``*_device``) must match the host numpy
     path for the real ``T`` rows (``T <= decode_bucket``) — stale prefix padding never leaks

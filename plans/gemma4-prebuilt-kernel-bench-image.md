@@ -44,10 +44,22 @@ Done + validated on this box (RTX 4080 / CPU):
 - **#6 final logit softcapping** — wired into the `LogitsProcessor` (`soft_cap=final_logit_softcapping`), as stock vLLM.
 - Guard relaxed to allow per-layer sliding (Gemma); uniform-sliding + dual-chunk still rejected.
 
-NOT yet validated — **needs a ≥24 GB card**: gemma-4-12B (~24 GB fp16) does **not fit the 16 GB 4080**, and E2B (which
-would fit) needs the deferred PLE/shared-KV work. So the full `emmy serve --generate google/gemma-4-12B` end-to-end
-(logits/text vs HF), the per-layer sliding-window + hybrid KV cache in real serving, and served-RoPE numerical parity
-all move to the 5090 session. Remaining Phase-A code: **#7** (`--generate --bench` wiring).
+**#7** (`--generate --bench` wiring) — done: generative bench drives `/v1/completions` + `--random-output-len`.
+
+**Gap #9 — heterogeneous per-layer attention — FOUND then RESOLVED via the on-hand 4080 validation.** An
+`EmmyGenRunner` forward on a tiny dense gemma-4 (no ≥24 GB card) surfaced that **gemma-4's global (`full_attention`)
+layers use a larger `head_dim` than sliding layers** (real 12B: sliding 256, `global_head_dim=512`; 8 global / 40
+sliding of 48) and set **`attention_k_eq_v=True`** (no `v_proj` → V reuses K). The runner / model assumed homogeneous
+layers (layer-0 metadata), feeding a sliding-width `attn_out` into a global `o_proj` (`[s,256·H] × [512·H,…]` mismatch).
+**Fixed:** the runner stores **per-layer** `(head_dim, num_heads, num_kv, scaling)` (`layer_meta`) and compiles each
+layer's `pre`/`post` at its own width; `EmmyGenModel` builds each vLLM `Attention` + RoPE at the layer's `head_dim`; the
+carve handles `v_proj=None`. **Validated end-to-end on the 4080**: the full tiny-gemma-4 trunk (heterogeneous
+`global_head_dim` + `attention_k_eq_v`) matches HF eager at ~1e-6 rel — committed as
+`test_gen_runner_gemma4_heterogeneous_stitch` (harness: `scratchpad/validate_gemma4_gen_runner.py`).
+
+The **emmy compute path for gemma-4 is now validated end-to-end on-hand.** What still needs a ≥24 GB card is the
+real-checkpoint **vLLM serve** run (`emmy serve --generate google/gemma-4-12B`): served logits/text vs HF, the per-layer
+sliding-window + hybrid KV cache under vLLM, and served-RoPE (`Gemma4RotaryEmbedding`) numeric parity.
 
 ## Phase A — gemma-4-12B generative serving support
 

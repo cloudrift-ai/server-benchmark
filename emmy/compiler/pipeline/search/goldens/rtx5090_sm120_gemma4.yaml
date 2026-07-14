@@ -215,17 +215,18 @@ configs:
     emmy_us: 214.2
     cublas_us: 286.3
   # ---- attention (flash, hd256) ----------------------------------------------------------------------
-  # Best form on both lanes is w4x1/f1x2/k16 (the sm_89 golden geometry): 4 warps, 16-key streaming
-  # blocks, 16 KB K/V slabs. Cold greedy instead ranks the w2x1/f1x8/k16 form (64 KB slabs, 64-thread
-  # CTAs) at 97 µs, 2.7x off — a pure flash-form rank miss (the w4x1 rows sit in the same fork; verified
-  # by pinning). PIN-SPELLING CONTRACT for static hd256: BOTH keyed pins must name one enumerated row —
-  # TILE@dd is w<um>x1/f<fm>x<nt>/k16 (bk = 256/atom_k) and TILE@pj is w<um>x1/f<fm>x32 (32 = 256/atom_n,
-  # its k = block/atom_k elided at 1); a pj spelled like the dd plan matches nothing and the fork falls
-  # back to greedy. Transport is LANE-dependent at this geometry, both directions reproduced 3x: the
-  # std (f32-acc PV) lane prefers d2/tma/ring (35.6 vs cp 39.1), the fm (f16-acc PV) lane prefers
-  # d2/cp/ring (36.5 vs tma 38.8); on the fat 64 KB w2x1 slabs cp had beaten tma (82 vs 97.5) — slab
-  # size flips it. Torch SDPA is 30.7 µs; emmy hd256 sits at 0.84-0.86x, register-bound (255 regs),
-  # the known hd256 codegen gap.
+  # Values re-measured 2026-07-13 after the causal tile-skip landed (the triangular kv bound — each CTA
+  # streams only min(seq, (grid_m+1)·rows) keys; 3x reproduced, ≤0.3 µs spread): at THIS shape (grid 128
+  # CTAs < 170 SMs) the wall is the diagonal-full CTA, so the skip pays 0-6% here but 1.67x at seq 2048
+  # (441 → 265 µs, 0.55x → 0.90x vs SDPA) where the grid oversubscribes. Best form moved to the nt=4
+  # streaming block (w4x1/f1x4/k16, 32 keys/step): 32.9 µs vs torch SDPA 30.7 — 0.93x, the residual
+  # still the hd256 register ceiling (255 regs, 1-2 CTAs/SM). Cold greedy ranks the w2x1/f1x8/k16 form
+  # (64 KB slabs, 64-thread CTAs) — a flash-form rank miss (post-skip that row is 35.1, pre-skip 97).
+  # PIN-SPELLING CONTRACT for static hd256: BOTH keyed pins must name one enumerated row — TILE@dd is
+  # w<um>x1/f<fm>x<nt>/k16 (bk = 256/atom_k) and TILE@pj is w<um>x1/f<fm>x32 (32 = 256/atom_n, its
+  # k = block/atom_k elided at 1); a pj spelled like the dd plan matches nothing and the fork falls
+  # back to greedy. Transport stays LANE-dependent: the std (f32-acc PV) lane prefers d2/tma/ring, the
+  # fm (f16-acc PV) lane d2/cp/ring (nt4 fm: cp 33.9 vs tma 37.2).
   - kernel: attention
     name: gemma4_12b.attention.hd256
     n_heads: 16
@@ -234,12 +235,17 @@ configs:
     dtype: 'fp16'
     causal: true
     knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32', WSPEC: ''}
-    emmy_us: 35.6
+    emmy_us: 35.5
     cublas_us: 30.7
-  # Parity alternate (2.2% under the nt=2 entry, within the 3% add gate; zero-spread both sides): the
-  # nt=4 streaming block (32 keys/step, 32 KB slabs). The knob frontier ends here — nt=8 fattens to
-  # 60 µs, f2 query-tile ILP spills to 127-135 µs, WSPEC bands nvcc-fail on this kernel, FAST_EXP /
-  # d3 / p2 neutral. The 0.88x residual vs torch SDPA is codegen (255 regs), not search.
+  # The PRIMARY post-tile-skip: the nt=4 streaming block (32 keys/step, 32 KB slabs) — 32.9, 7% past
+  # the nt=2 entry (pre-skip they were parity alternates). The knob frontier ends here — nt=8 fattens
+  # to 55 µs, w2x1 forms reach 35.1 (parity with nt=2, no longer the 97 µs hazard), w1x1 38.6,
+  # d3 34.0, WSPEC bands nvcc-fail on this kernel. The 0.93x residual vs torch SDPA is per-step
+  # PIPELINE DEPTH, not occupancy/registers and not search — refuted 2026-07-13: forcing 3 CTAs/SM
+  # (launch_bounds min-blocks, 168 regs + spills) runs 74.6, per-step Q reload 87.5, nt4/d1 (2 CTAs,
+  # no prefetch ring) 46.3, and split-KV g2k 34.9 — every occupancy/balance lever loses to the
+  # 1-CTA prefetch-ring form. Closing it needs cross-step software pipelining in the emitter (the
+  # f2 ILP chains are register-impossible at hd256: 2×128 O-accumulator regs).
   - kernel: attention
     name: gemma4_12b.attention.hd256
     n_heads: 16
@@ -248,11 +254,12 @@ configs:
     dtype: 'fp16'
     causal: true
     knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x4/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k2', WSPEC: ''}
-    emmy_us: 34.8
+    emmy_us: 32.9
     cublas_us: 30.7
   # Fast-math sibling (FAST_MATH lane): P·V on the f16-accumulate atom, QK^T stays f32-acc (softmax
-  # statistics). Rides cp, not tma (36.5 vs 38.8 — the lane-flipped transport preference above).
-  # FAST_EXP adds nothing on top.
+  # statistics). Post-tile-skip the fm frontier moved to nt=4 with the std lane (nt=2 fm is 35.4);
+  # rides cp, not tma (33.9 vs 37.2 — the lane-flipped transport preference above). FAST_EXP adds
+  # nothing on top.
   - kernel: attention
     name: gemma4_12b.attention.hd256
     n_heads: 16
@@ -260,13 +267,13 @@ configs:
     head_dim: 256
     dtype: 'fp16'
     causal: true
-    knobs: {PLACE: 'fuse', STAGE: 'd2/cp/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x32', WSPEC: ''}
-    emmy_us: 36.5
+    knobs: {PLACE: 'fuse', STAGE: 'd2/cp/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x4/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x32/k2', WSPEC: ''}
+    emmy_us: 33.9
     cublas_us: 30.7
   # Masked-flash twin: bare TILE (schema-enforced). Cold greedy on this unseeded shape picks a >10 s
   # bench_fail hang — the same hazard the sm_89 cards hit (rtx4080 seeding note). Same geometry and
-  # lane-dependent transport as the static twin (std tma 36.4 vs cp 39.3; fm cp 36.1 vs tma 38.1);
-  # d3 / p2 are within noise.
+  # lane-dependent transport as the static twin; d3 / p2 are within noise. Values re-measured post
+  # tile-skip (dynM ≈ static parity holds: the symbolic bound folds into the same triangular stop).
   - kernel: attention
     name: gemma4_12b.attention.hd256.dynM
     n_heads: 16
@@ -276,10 +283,10 @@ configs:
     causal: true
     dynamic: true
     knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', WSPEC: ''}
-    emmy_us: 36.4
+    emmy_us: 35.5
     cublas_us: 30.7
-  # Parity alternate (2.5% under the nt=2 entry, zero-spread): the nt=4 streaming block, mirroring
-  # the static twin's alternate.
+  # The faster dynM twin post-tile-skip (3% past nt=2, zero-spread): the nt=4 streaming block,
+  # mirroring the static primary.
   - kernel: attention
     name: gemma4_12b.attention.hd256.dynM
     n_heads: 16
@@ -289,7 +296,7 @@ configs:
     causal: true
     dynamic: true
     knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x4/k16', WSPEC: ''}
-    emmy_us: 35.5
+    emmy_us: 34.4
     cublas_us: 30.7
   # Fast-math sibling: the bare TILE spells the f16-accumulate PV plan (the w4x1 form's realized
   # TILE@pj geometry, w4x1/f1x32); scores stay f32-acc. Pinning the f16acc atom at the dd spelling
@@ -303,7 +310,7 @@ configs:
     causal: true
     dynamic: true
     knobs: {PLACE: 'fuse', STAGE: 'd2/cp/ring', TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f1x32', WSPEC: ''}
-    emmy_us: 36.1
+    emmy_us: 35.5
     cublas_us: 30.7
   # ---- norms -----------------------------------------------------------------------------------------
   - kernel: rms_norm

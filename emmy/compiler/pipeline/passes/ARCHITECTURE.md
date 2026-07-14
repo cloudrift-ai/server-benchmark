@@ -151,7 +151,13 @@ each warp streams `fm` independent `(m, l, O)` chains against shared K/V fragmen
 P@V mma `TilePlan`s are derived per point, `_schedule._twisted_warp_options`), the scalar
 register-vector CHAIN (the FA-2 shared-score form), then the cooperative / per-cell reduce-partition escapes — every
 leaf row spelling the same `TILE@<qk_k>` / `TILE@<pv_k>` / `REDUCE@<kv>` key set (decided-empty where a form doesn't
-tile). A non-empty `REDUCE` pin remains the scalar escape; a **warp** `TILE` pin keeps the mma rows alone (loud on a
+tile). A cross-CTA `REDUCE=g<n>k` pin selects the **flash split-KV** warp rows instead (pin-driven): the plan stamps
+onto each row's `Reduction` node and `030_split_reduce` realizes it as a fragment-resident partial (the kv stream windowed to
+the CTA's slice, its absolute base on `Reduction.offset`; raw `(m, l, O)` state to an f32 `__partial` workspace) plus
+an LSE-combine finalize — kernel finalize only (the twisted `e^{Δm}` rescale can't be an atomic), static
+block-divisible kv only, and it pays where the un-split grid starves the SMs (few heads / short query axis: the
+2-head hd256 seq-512 shape runs 33.6 → 11.3 µs under `g8k`, parity with torch SDPA's internally-split flash). Any
+other non-empty `REDUCE` pin remains the scalar escape; a **warp** `TILE` pin keeps the mma rows alone (loud on a
 divisibility violation, declining with a log line when the pin doesn't fit the flash form — a bare warp pin may target
 another kernel), while a non-warp `TILE` pin narrows the flash rows by their stamped per-node spellings
 (`_schedule._narrow_flash_forms`, codec-canonicalized so `a:scalar` ≡ `""` and `f64x1` ≡ `f64`): `TILE=a:scalar` keeps
@@ -168,8 +174,14 @@ drain's tail masks (the same clamp the gmem-direct symbolic path makes) zero tho
 masked-flash `.dynM` kernel stages at bit-identity to gmem-direct on any sm (the `staged_kloop` ring allocates the
 full depth and the last-chunk clamp / loop bound ride the symbolic `Dim`; WSPEC over a symbolic kv is not built). A resolved TMA row additionally offers the `WSPEC` producer-band splits (the matmul tier's
 legality, `32·aux ≤ 32·um`; measured occupancy-negative at flash's CTA scale — offered, honest, not the default). The
-chain / coop / serial escapes stamp the decided-empty `STAGE@<kv>: ""`. The causal tile-skip is the remaining flash
-follow-up.
+chain / coop / serial escapes stamp the decided-empty `STAGE@<kv>: ""`. **A causal stream tile-skips**: when the score
+prologue carries the triangular `Select` (`kv ≤ m` — detected structurally off the predicate, never a kernel identity),
+the realizer bounds the stream at the CTA's last query row (`kv_end = min(seq, (grid_m + 1) · um·fm·atom_m)`, hoisted
+into the `StridedLoop`'s for-init `end` override; the staged prefetch clamp re-pins onto the last needed chunk). The
+bound is CTA-uniform (barriers stay legal) and every skipped step is the carrier's exact identity (`α = 1`,
+`P = expf(−1e30 − m_i) = 0`), so the early stop is bit-identical — it halves the streamed keys/mma work on average,
+paying wall-clock wherever the grid oversubscribes the SMs (1.67× on hd256 seq-2048) and re-opening the small-CTA flash
+forms that previously paid double K/V re-streaming.
 Two catalog invariants hold: every recorded golden's `TILE`/`STAGE`/`REDUCE` stays a **member** of the enumerated
 grids (the permanence test in `tests/compiler/test_golden_configs.py` — a space edit can never silently orphan a
 golden into unreachability again, the sixth sweep's `.s512` regression class; the scalar reg grid carries the

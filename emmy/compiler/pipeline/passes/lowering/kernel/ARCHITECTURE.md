@@ -160,6 +160,21 @@ transport's elected fill thread rides the WRAPPED linear tid (`threadIdx.x % blo
 a compute thread and the producer band would never fill). Static block-divisible kv only (the symbolic stream keeps
 its masked gmem-direct loads), and bit-identity to the gmem-direct sibling holds — same values, same mma order.
 
+**A causal stream tile-skips** (staged and gmem-direct alike): when the score prologue carries the triangular
+`Select` (`kv ≤ m`, detected off the predicate shape in `_twist`), the stream stops at the CTA's last query row —
+`staged_kloop`'s `k_end` / the `StridedLoop.end` for-init override, `min(seq, (grid_m + 1) · um·fm·atom_m)`, with the
+prefetch clamp re-pinned onto the last needed chunk. CTA-uniform (the in-loop barriers stay legal) and bit-identical
+(skipped steps fold the carrier's exact identity: `α = 1`, `P = expf(−1e30 − m_i) = 0`); it halves the streamed
+keys/mma work on average, paying wall-clock wherever the grid oversubscribes the SMs.
+
+**A split-KV partial windows the same stream** (`030_split_reduce._split_twisted_warp`, the flash `REDUCE=g<n>k` arm): the
+`Reduction` arrives with its axis shrunk to the slice length and the slice's absolute base on `Reduction.offset` —
+the fold walks its local `[0, B)` window and `_twist` re-bases every absolute-key consumer (the score-column mask
+bases, the gmem/TMA operand coords, and the causal bound above, which goes slice-local so an above-the-diagonal
+slice runs zero steps). The close swaps the projection for RAW state stores when the tail is one `Write` per carrier
+state component: O rides the normal fragment store into the f32 `__partial` workspace; the d-invariant row stats
+(m, l) are written once per query row (the `_t == 0` lanes) at their template's pinned last slot.
+
 **The fused edge — the mma tier's `sync` transport.** A demoted-cone matmul (`f(x, …) @ w`) takes the warp tier
 under a warp `TILE` pin: `_schedule._demoted_warp_option` nodifies the PLANAR ⊗-fold to a computed-A `Contraction`
 (the same `a_operand = Body` flash P@V rides) and stamps a `sync` `Stage`; `_staged` then builds a `SyncTransport`

@@ -75,18 +75,29 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   also compiles a **static M=`decode_bucket` (default 16)** `pre`/`post` twin per layer and uses it when
   `num_tokens ≤ bucket` (pad → run → slice the real rows) — the symbolic hint-512 M-tile is ~66× too slow at decode
   M=1; falls back to symbolic above the bucket or if a static compile fails. So
-  up to 4 capacity programs/layer — a real memory-budget risk.
+  up to 4 capacity programs/layer — a real memory-budget risk. Architecture handling: the trunk is unwrapped through a
+  multimodal wrapper's `language_model` (gemma-4 unified) and config fields read via `text_config`; attention geometry
+  is **per layer** (`attn_metas` — gemma-4 global layers have a wider `global_head_dim` + fewer KV heads); a gemma
+  scaled embedding (×√H) is baked into the embed table; pre outputs are **cast to the runner dtype at the seam** (a
+  norm-ended pre graph — gemma's fp32-internal RMSNorm — can widen the compiled outputs to fp32; the cast is the eager
+  module's trailing `type_as`). When `rope_parameters` is keyed by layer type, the trunk's own rotary module rides the
+  runner (`rotary_emb`) for the vLLM side to apply.
 - `vllm_model_gen.py` — `EmmyGenModel` (Phase 3; the generative vLLM model class). **NOT** `IsAttentionFree`: it
   builds real vLLM `Attention` layers (one per decoder layer, unique `prefix` → vLLM allocates a KV-cache spec and runs
-  paged attention) + a shared `get_rope` module (a bare `Attention` does no RoPE) + `ParallelLMHead` + `LogitsProcessor`.
+  paged attention; per-layer geometry from `runner.attn_metas`, sliding layers pass `per_layer_sliding_window`) + RoPE
+  (a shared `get_rope` module, or the runner's HF rotary applied per layer_type) + `ParallelLMHead` + `LogitsProcessor`
+  (with `soft_cap` when the config carries `final_logit_softcapping`).
   The trunk compute (embed + per-layer pre/post + final norm) is the `EmmyGenRunner`; vLLM owns only `lm_head`
-  (`load_weights` claims `lm_head.weight`, or the tied embed alias). `forward` brackets each `self.attn[L](q,k,v)` with
+  (`load_weights` claims `lm_head.weight`, or the tied embed alias — including the nested `language_model.embed_tokens`
+  names). `forward` brackets each `self.attn[L](q,k,v)` with
   two emmy replays (pre/post), applying RoPE in between (A2). `forward` branches on `num_tokens`: the decode hot
   path (`≤ bucket`) runs `_forward_device` (q/k/v + attn_out stay CUDA tensors through RoPE + attention, no host
   hop); prefill keeps the numpy path. Select via `--runner generate` +
   `--hf-overrides '{"architectures":["EmmyGenModel"]}'` + `--dtype float16` (the `serve --generate` branch forces
-  this for seam coherence). Registered in `__init__.py`. Whole-step CUDA-graph capture (drop `--enforce-eager`) is
-  future work.
+  this for seam coherence). Registered in `__init__.py`. Supported: Qwen3 / Llama / gemma-4 text (sandwich norms,
+  k_eq_v, per-type rope — validated token-exact vs HF eager on a tiny random gemma-4). Rejected: legacy
+  `use_sliding_window` without `layer_types`, dual-chunk attention, cross-layer KV sharing
+  (`num_kv_shared_layers > 0`). Whole-step CUDA-graph capture (drop `--enforce-eager`) is future work.
 
 ## Static mode (`EMMY_SERVING_STATIC=1`) — static extents for both batch and seq
 

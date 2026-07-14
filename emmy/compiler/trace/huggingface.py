@@ -273,7 +273,11 @@ def build_attention_split_wrapper(block):
     ``.view(B,S,-1,D).transpose(1,2)`` assumes a ``[batch, seq, hidden]`` input; on the
     flattened ``[T, H]`` layout the reshape is ``.view(T, n_heads, D)`` with **no transpose**.
     Qwen3 (q/k norm) and Llama (no q/k norm) are both handled; the architecture difference is
-    just the presence of ``q_norm`` / ``k_norm``."""
+    just the presence of ``q_norm`` / ``k_norm``. Gemma-4 blocks are also handled: a missing
+    ``v_proj`` (``attention_k_eq_v`` — V is the raw ``k_proj`` output, taken BEFORE ``k_norm``),
+    the unscaled ``v_norm``, the sandwich norms (``post_attention_layernorm`` applied to the attn
+    OUTPUT, ``pre/post_feedforward_layernorm`` around the MLP — keyed on the presence of
+    ``pre_feedforward_layernorm``), and the trailing ``layer_scalar`` buffer."""
     import torch.nn as nn
 
     attn = block.self_attn
@@ -282,23 +286,28 @@ def build_attention_split_wrapper(block):
     num_kv_heads = attn.k_proj.out_features // head_dim
     q_norm = getattr(attn, "q_norm", None)
     k_norm = getattr(attn, "k_norm", None)
+    v_norm = getattr(attn, "v_norm", None)
+    v_proj = getattr(attn, "v_proj", None)  # None on gemma-4 k_eq_v (global) layers — V rides k_proj
+    pre_ff_norm = getattr(block, "pre_feedforward_layernorm", None)  # gemma sandwich-norm marker
 
     class Pre(nn.Module):
         def __init__(self) -> None:
             super().__init__()
             self.input_layernorm = block.input_layernorm
-            self.q_proj, self.k_proj, self.v_proj = attn.q_proj, attn.k_proj, attn.v_proj
-            self.q_norm, self.k_norm = q_norm, k_norm
+            self.q_proj, self.k_proj, self.v_proj = attn.q_proj, attn.k_proj, v_proj
+            self.q_norm, self.k_norm, self.v_norm = q_norm, k_norm, v_norm
 
         def forward(self, hidden):
             h = self.input_layernorm(hidden)  # [T, H]
             t = h.shape[0]
             q = self.q_proj(h).view(t, num_heads, head_dim)  # [T, Hq, D] — NO transpose
             k = self.k_proj(h).view(t, num_kv_heads, head_dim)
-            v = self.v_proj(h).view(t, num_kv_heads, head_dim)
+            v = self.v_proj(h).view(t, num_kv_heads, head_dim) if self.v_proj is not None else k  # k_eq_v: raw k, pre-k_norm
             if self.q_norm is not None:
                 q = self.q_norm(q)  # per-head RMSNorm over D
                 k = self.k_norm(k)
+            if self.v_norm is not None:
+                v = self.v_norm(v)
             return q.reshape(t, num_heads * head_dim), k.reshape(t, num_kv_heads * head_dim), v.reshape(t, num_kv_heads * head_dim)
 
     class Post(nn.Module):
@@ -307,8 +316,19 @@ def build_attention_split_wrapper(block):
             self.o_proj = attn.o_proj
             self.post_attention_layernorm = block.post_attention_layernorm
             self.mlp = block.mlp
+            self.pre_feedforward_layernorm = pre_ff_norm
+            self.post_feedforward_layernorm = getattr(block, "post_feedforward_layernorm", None)
+            scalar = getattr(block, "layer_scalar", None)
+            if scalar is not None:  # register as a buffer so the trace binds it as a constant, not a free input
+                self.register_buffer("layer_scalar", scalar)
+            else:
+                self.layer_scalar = None
 
         def forward(self, attn_out, residual):
+            if self.pre_feedforward_layernorm is not None:  # gemma sandwich norms
+                h = residual + self.post_attention_layernorm(self.o_proj(attn_out))
+                out = h + self.post_feedforward_layernorm(self.mlp(self.pre_feedforward_layernorm(h)))
+                return out * self.layer_scalar if self.layer_scalar is not None else out
             h = residual + self.o_proj(attn_out)  # residual1 + o_proj(SDPA)
             return h + self.mlp(self.post_attention_layernorm(h))  # residual2 + MLP
 

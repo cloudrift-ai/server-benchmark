@@ -98,6 +98,60 @@ def test_split_matches_eager_block(arch):
     torch.testing.assert_close(out, eager.squeeze(0), rtol=1e-4, atol=1e-4)
 
 
+@pytest.mark.parametrize("layer_idx", [0, 1], ids=["sliding", "global_k_eq_v"])
+def test_split_matches_eager_block_gemma4(layer_idx):
+    """Gemma-4 carve equivalence: sandwich norms + layer_scalar (both layers), and on the
+    global layer the k_eq_v missing ``v_proj`` (V = raw k_proj output), ``v_norm``, the wider
+    ``global_head_dim``, and single KV head. RoPE differs per layer type (partial/proportional
+    on global), reconstructed via the trunk's own rotary module."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    from emmy.compiler.trace.huggingface import build_attention_split_wrapper, build_causal_mask
+
+    config = transformers.Gemma4UnifiedTextConfig(
+        vocab_size=64,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_global_key_value_heads=1,
+        head_dim=16,
+        global_head_dim=32,
+        attention_k_eq_v=True,
+        layer_types=["sliding_attention", "full_attention"],
+        sliding_window=8,
+        max_position_embeddings=64,
+        num_kv_shared_layers=0,
+    )
+    from transformers.models.gemma4_unified.modeling_gemma4_unified import apply_rotary_pos_emb
+
+    torch.manual_seed(0)
+    model = transformers.Gemma4UnifiedForCausalLM(config).eval()
+    trunk = model.model
+    block = trunk.layers[layer_idx]
+    attn = block.self_attn
+    layer_type = config.layer_types[layer_idx]
+
+    t = 6  # within the sliding window — one causal mask serves both layer types
+    hidden3d = torch.randn(1, t, config.hidden_size)
+    position_ids = torch.arange(t).unsqueeze(0)
+    cos, sin = trunk.rotary_emb(hidden3d, position_ids, layer_type)  # [1, T, D_rot]
+    mask = build_causal_mask(t, torch.float32)
+
+    with torch.no_grad():
+        eager = block(hidden3d, shared_kv_states={}, position_embeddings=(cos, sin), attention_mask=mask)
+        eager = eager[0] if isinstance(eager, tuple) else eager
+
+        pre, post = build_attention_split_wrapper(block)
+        rotary = lambda q, k, c, s: (apply_rotary_pos_emb(q, c, s), apply_rotary_pos_emb(k, c, s))  # noqa: E731
+        out = _split_path_output(pre, post, attn, hidden3d.squeeze(0), cos, sin, mask, rotary)
+
+    assert tuple(out.shape) == (t, config.hidden_size)
+    torch.testing.assert_close(out, eager.squeeze(0), rtol=1e-4, atol=1e-4)
+
+
 def test_pre_emits_2d_seam_shapes():
     """The pre wrapper's seam ABI: q[T, Hq*D], k/v[T, Hkv*D] (2-D, no transpose)."""
     torch = pytest.importorskip("torch")

@@ -118,8 +118,28 @@ def _compile_split(wrapper, example_args, argnames, np_dtype):
     return _Program(program, list(compiled.inputs), list(compiled.outputs))
 
 
+def _per_type_rope(cfg) -> bool:
+    """True when ``rope_parameters`` is keyed by layer type (gemma-4) rather than a flat single-rope dict."""
+    rp = getattr(cfg, "rope_parameters", None)
+    return isinstance(rp, dict) and any(k in rp for k in ("full_attention", "sliding_attention"))
+
+
 class EmmyGenRunner:
-    def __init__(self, *, embed_weight, norm, pre, post, attn_meta, np_dtype, pre_decode=None, post_decode=None, decode_bucket=16):
+    def __init__(
+        self,
+        *,
+        embed_weight,
+        norm,
+        pre,
+        post,
+        attn_meta,
+        np_dtype,
+        pre_decode=None,
+        post_decode=None,
+        decode_bucket=16,
+        attn_metas=None,
+        rotary_emb=None,
+    ):
         self._embed_weight = embed_weight  # numpy [vocab, H]
         self._norm = norm  # torch module
         self._pre = pre  # list[_Program] — symbolic (prefill / any width)
@@ -128,6 +148,8 @@ class EmmyGenRunner:
         self._post_decode = post_decode
         self._decode_bucket = decode_bucket
         self.head_dim, self.num_heads, self.num_kv_heads, self.scaling = attn_meta
+        self.attn_metas = attn_metas or [attn_meta] * len(pre)  # per-layer (head_dim, nh, nkv, scaling) — heterogeneous (gemma-4)
+        self.rotary_emb = rotary_emb  # the trunk's own rotary module when per-layer-type (gemma-4); None → caller builds vLLM get_rope
         self._np_dtype = np_dtype
 
     @property
@@ -166,20 +188,23 @@ class EmmyGenRunner:
         dtype = getattr(torch, dtype_str)
         np_dtype = np.dtype(dtype_str)
         trunk = getattr(model, "model", model)
+        if not hasattr(trunk, "layers"):  # multimodal wrapper (gemma-4 unified) — the text decoder is a submodule
+            trunk = trunk.language_model
         layers = trunk.layers
-        attn0 = layers[0].self_attn
-        head_dim = attn0.head_dim
-        num_heads = attn0.q_proj.out_features // head_dim
-        num_kv = attn0.k_proj.out_features // head_dim
-        scaling = attn0.scaling
-        hidden = model.config.hidden_size
-        attn_width = num_heads * head_dim
+        cfg = getattr(model.config, "text_config", None) or model.config
+        attn_metas = []  # per-layer (head_dim, num_heads, num_kv, scaling) — heterogeneous on gemma-4
+        for block in layers:
+            attn = block.self_attn
+            d = attn.head_dim
+            attn_metas.append((d, attn.q_proj.out_features // d, attn.k_proj.out_features // d, attn.scaling))
+        hidden = cfg.hidden_size
 
         pre_programs, post_programs = [], []
         pre_decode, post_decode = [], []
         decode_ok = decode_bucket and decode_bucket > 0
         for i, block in enumerate(layers):
             logger.info("[gen_runner] compiling layer %d/%d (pre + post%s)...", i + 1, len(layers), " + decode" if decode_ok else "")
+            attn_width = attn_metas[i][1] * attn_metas[i][0]  # nh · head_dim for THIS layer
             pre_w, post_w = build_attention_split_wrapper(block)
             with torch.device("cpu"):
                 pre_programs.append(_compile_split(pre_w, [torch.zeros(8, hidden, dtype=dtype)], ["hidden"], np_dtype))
@@ -209,18 +234,27 @@ class EmmyGenRunner:
                         logger.warning("[gen_runner] decode-bucket compile failed at layer %d (%s); decode falls back to symbolic", i, ex)
                         decode_ok = False
 
-        embed_weight = trunk.embed_tokens.weight.detach().cpu().to(torch.float32).numpy().astype(np_dtype, copy=False)
+        embed_weight = trunk.embed_tokens.weight.detach().cpu().to(torch.float32).numpy()
+        embed_scale = getattr(trunk.embed_tokens, "embed_scale", None)  # gemma scaled embedding (×√H) — baked into the table
+        if embed_scale is not None:
+            embed_weight = embed_weight * float(embed_scale)
+        embed_weight = embed_weight.astype(np_dtype, copy=False)
         use_decode = decode_ok and len(pre_decode) == len(layers)
         return cls(
             embed_weight=embed_weight,
             norm=trunk.norm,
             pre=pre_programs,
             post=post_programs,
-            attn_meta=(head_dim, num_heads, num_kv, scaling),
+            attn_meta=attn_metas[0],
             np_dtype=np_dtype,
             pre_decode=pre_decode if use_decode else None,
             post_decode=post_decode if use_decode else None,
             decode_bucket=decode_bucket,
+            attn_metas=attn_metas,
+            # Per-layer-type rope (gemma-4): hand the trunk's own rotary module through, the vLLM
+            # side applies it per layer_type instead of a single get_rope. Keyed on rope_parameters
+            # being a PER-TYPE dict ({'full_attention': {...}, ...}), not the flat single-rope dict.
+            rotary_emb=trunk.rotary_emb if _per_type_rope(cfg) else None,
         )
 
     def embed(self, input_ids):
@@ -238,8 +272,13 @@ class EmmyGenRunner:
         t = h.shape[0]
         if self._pre_decode is not None and t <= self._decode_bucket:
             q, k, v = self._pre_decode[layer].run([_pad_rows(h, self._decode_bucket)])
-            return q[:t], k[:t], v[:t]
-        return tuple(self._pre[layer].run([h]))
+            q, k, v = q[:t], k[:t], v[:t]
+        else:
+            q, k, v = self._pre[layer].run([h])
+        # Cast to the runner dtype at the seam: a per-head norm ending the pre graph (gemma's
+        # fp32-internal RMSNorm) can widen the program outputs to fp32; the eager module's
+        # trailing ``type_as`` does exactly this cast.
+        return q.astype(self._np_dtype, copy=False), k.astype(self._np_dtype, copy=False), v.astype(self._np_dtype, copy=False)
 
     def forward_layer_post(self, layer, attn_out, residual):
         """``(attn_out[T,Hq·D], residual[T,H])`` numpy → ``layer_out[T, H]`` numpy. Decode-bucketed
@@ -286,8 +325,13 @@ class EmmyGenRunner:
 
     def forward_layer_pre_device(self, layer, hidden):
         """Device twin of :meth:`forward_layer_pre` (decode path, ``T <= decode_bucket``):
-        ``hidden[T,H]`` CUDA → un-rotated ``(q, k, v)`` CUDA tensors."""
-        return tuple(self._pre_decode[layer].run_device([hidden]))
+        ``hidden[T,H]`` CUDA → un-rotated ``(q, k, v)`` CUDA tensors. Cast to the runner dtype
+        at the seam (same reason as the host path — a norm-ended pre graph widens to fp32)."""
+        import torch
+
+        dt = getattr(torch, str(self._np_dtype))
+        q, k, v = self._pre_decode[layer].run_device([hidden])
+        return q.to(dt), k.to(dt), v.to(dt)
 
     def forward_layer_post_device(self, layer, attn_out, residual):
         """Device twin of :meth:`forward_layer_post`: ``(attn_out, residual)`` CUDA → ``[T,H]`` CUDA."""

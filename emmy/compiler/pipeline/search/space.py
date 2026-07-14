@@ -183,7 +183,7 @@ def map_tile_moves() -> list[str]:
 # (``fuse``) or memory (``cut``). Elements are named by the MOVE, not the shape:
 #
 #   PLACE@cone   producer-cone inlining (the fused producer → matmul edge). ``cut`` is realized
-#                by ``lowering/tile/020_cut_cone`` — a ``030_split``-style graph rewrite that
+#                by ``lowering/tile/020_cut_edge`` — a ``030_split_reduce``-style graph rewrite that
 #                splits the recognized cone kernel at the A seam (the producer materializes the
 #                cone value to a workspace; the matmul re-lowers with a plain gmem A) — and both
 #                halves re-enter recognition on the pass-scan restart, so each gets its own

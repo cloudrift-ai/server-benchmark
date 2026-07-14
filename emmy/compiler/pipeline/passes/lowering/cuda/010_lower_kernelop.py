@@ -25,7 +25,7 @@ PATTERN = [Pattern("root", KernelOp)]
 
 
 def _atomic_outputs(kernel: KernelOp) -> tuple[str, ...]:
-    """Output buffers an atomic reduce-write (``030_split``'s atomic finalize) accumulates
+    """Output buffers an atomic reduce-write (``030_split_reduce``'s atomic finalize) accumulates
     into — they must be zero-init'd before each launch (``CudaOp.zero_outputs``), since every
     contributing CTA ``atomicAdd``\\ s into the same cell. Dict-keyed for stable order."""
     seen: dict[str, None] = {}

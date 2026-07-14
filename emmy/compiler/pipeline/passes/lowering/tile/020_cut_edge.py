@@ -1,6 +1,6 @@
 """Realize ``PLACE@cone=cut`` — split the fused producer-cone kernel at the A seam.
 
-``030_split``'s sibling for the PLACE codec's cone element: loop fusion fuses greedily and the
+``030_split_reduce``'s sibling for the PLACE codec's cone element: loop fusion fuses greedily and the
 recognizer nodifies the MONOID-producer composition (the fused norm→linear edge) — this rule
 realizes the ``cut`` placement as a **graph rewrite** on the recognized kernel, never a fusion
 veto. Under the pin the recognizer's own gate already withholds the fused-form warp rows (the

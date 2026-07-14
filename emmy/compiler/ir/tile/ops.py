@@ -48,7 +48,7 @@ def reduce_plan(tile):
     ``Reduction`` (bare, or wrapped via ``Map.source``), else ``None`` (a pure pointwise / scalar
     per-cell ``Map`` has no partition). Every partitioned reduce — a plain / twisted monoid, flash,
     a coop-K / split-K contraction (:func:`nodify_reduce`) — carries its plan on the node; there is
-    **no** residual ``TileOp.reduce`` field. The single accessor the materializer / ``030_split`` read."""
+    **no** residual ``TileOp.reduce`` field. The single accessor the materializer / ``030_split_reduce`` read."""
     op = tile.op
     red = op.source if isinstance(op, Map) and isinstance(op.source, Reduction) else (op if isinstance(op, Reduction) else None)
     return red.reduce if red is not None else None
@@ -64,7 +64,7 @@ def nodify_reduce(op, plan: ReducePlan):
     the identical annotated loop, so the lowering is byte-identical; a projection tail (a fused
     epilogue) rides a wrapping ``Map`` over the node, a bare reduce becomes the root node.
 
-    Used by the scheduler (the coop / ILP-K contraction) and ``030_split`` (the split partial) so
+    Used by the scheduler (the coop / ILP-K contraction) and ``030_split_reduce`` (the split partial) so
     EVERY partitioned reduce reads its plan off a node uniformly — the ``lower(op)``-then-refind
     smell (and the ``TileOp.reduce`` residual) is gone. For the ``Map`` form the reduce ``Loop``
     must be a top-level stmt of ``op.body`` with no prologue ahead of it (true for a split partial /

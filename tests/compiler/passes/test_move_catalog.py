@@ -67,7 +67,7 @@ def test_schedule_leaf_set_equals_catalog():
     - every clean tiled tile rides the RESOLVED stage spellings (gmem-direct + the resolver-deduped
       cp.async / TMA ring depths) × (serial + the divisor-guarded split-K widths); a masked-N tile
       (tile_n overhangs N) declines staging and rides gmem-direct only — staging composes with
-      split-K (``_splitk_option`` re-resolves against the sliced inner node and ``030_split`` threads
+      split-K (``_splitk_option`` re-resolves against the sliced inner node and ``030_split_reduce`` threads
       the stage onto the partial).
     """
     from emmy.compiler.pipeline.search.space import coop_reduce_moves, raster_moves, splitk_moves

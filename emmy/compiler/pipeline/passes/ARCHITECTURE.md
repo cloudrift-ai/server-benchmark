@@ -90,6 +90,28 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   partition is chosen and stamps a `sync` `Stage` naming it (`smem`) on the `TileOp` — a derived schedule field, not a
   knob — so `_factor._tile_reduce_axis` only applies it, never re-detects.
 
+## The two divide rules: `cut` a dataflow edge vs `split` an iteration axis
+
+`lowering/tile` carries two one-kernel→graph-fragment rules whose names sound alike but divide along different
+dimensions, with OPPOSITE re-entry contracts — keep them apart:
+
+- **`020_cut_edge`** cuts the **dataflow** (the PLACE codec's memory edge, `PLACE@cone=cut` today): two different
+  computations that loop fusion welded together — the producer cone and its matmul — become separate kernels again,
+  the intermediate materialized to a workspace. Its pieces are emitted as plain **un-mapped `LoopOp`s** precisely so
+  the pass-scan restart hands them back to `010_recognize`: the fused kernel's schedule is meaningless for the
+  halves, and each must earn its own recognition, schedule and fork (the gmem-A matmul then reaches the staged
+  cp.async/TMA tiers a computed A can never ride). The statistic materializes as its OWN kernel — a nested
+  `for m: [stat…, for k: …]` producer only lifts `m` onto the grid, serializing the K sweep per thread.
+- **`030_split_reduce`** splits the **reduce axis** (the REDUCE codec's `g<w>` cross-CTA shard): the SAME
+  computation, its K partitioned across CTAs into a partial + finalize. It runs AFTER its decision — the `g` row was
+  chosen FOR the split form — so the partial carries the decided knob row verbatim and the finalize is deliberately
+  `_mapped`: both **opt out** of re-recognition, because re-entering would discard the very decision being realized.
+
+Same fragment idiom, inverted re-entry semantics, different decision altitude (placement: "should this be one
+kernel at all" vs schedule: "how does this kernel run"). The shared fixpoint is what lets them compose without
+knowing about each other: a cut consumer re-enters recognition, may pick a `g<w>k` row, and `030_split_reduce`
+then shards it — cut-then-split on what was originally one fused kernel.
+
 The atom spec is subtyped by kind (`ir/atom.py`: `AtomKind` is the fixed mma cell selected by name; `ScalarAtom`
 is the plain scalar fma cell). The contraction binder (`bind_contraction`) is loop-addressable so warp-flash can later
 reuse it on flash's nested QK^T / PV; flash's inner score IS now a structural `Contraction` **node** (per-cell
@@ -152,6 +174,6 @@ Two catalog invariants hold: every recorded golden's `TILE`/`STAGE`/`REDUCE` sta
 grids (the permanence test in `tests/compiler/test_golden_configs.py` — a space edit can never silently orphan a
 golden into unreachability again, the sixth sweep's `.s512` regression class; the scalar reg grid carries the
 golden-informed deep-FM points `f2x6..f2x14`, `f4x6..f4x26` for exactly this reason), and a cross-CTA split deploy
-(`030_split`) stamps the decided knob row onto its **partial** kernel — the engine merges knobs forward on 1:1
+(`030_split_reduce`) stamps the decided knob row onto its **partial** kernel — the engine merges knobs forward on 1:1
 rebinds only, so without the explicit stamp the graph splice dropped them and the deployed split recorded no
 schedule identity (the A/B table then couldn't say what greedy deployed).

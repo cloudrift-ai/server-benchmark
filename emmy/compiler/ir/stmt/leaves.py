@@ -734,7 +734,7 @@ class Write(Stmt):
     index: tuple[Expr, ...]
     values: tuple[str, ...]
     value_dtype: DataType | None
-    # An ``atomicAdd`` reduce-write (cross-CTA split-reduce, ``030_split``'s atomic finalize):
+    # An ``atomicAdd`` reduce-write (cross-CTA split-reduce, ``030_split_reduce``'s atomic finalize):
     # every contributing CTA adds its partial into the SAME output cell, so the store is an
     # atomic accumulate (the output is zero-init'd per launch — ``CudaOp.zero_outputs``).
     # Scalar only; never vectorized (each lane needs its own ``atomicAdd``).

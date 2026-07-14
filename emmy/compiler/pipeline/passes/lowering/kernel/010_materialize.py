@@ -35,9 +35,9 @@ PATTERN = [Pattern("root", TileOp)]
 
 def rewrite(match: Match, root: Node) -> KernelOp | None:
     tile: TileOp = root.op
-    # By the kernel pass, ``030_split`` has consumed every cross-CTA ``GRID`` stage (the
+    # By the kernel pass, ``030_split_reduce`` has consumed every cross-CTA ``GRID`` stage (the
     # partial's plan is stripped, the finalize is a fresh ``ReducePlan``). A surviving split
     # request is a bug — the materializer only lowers single-launch kernels.
     rplan = reduce_plan(tile) if tile.op is not None else None
-    assert rplan is None or not rplan.needs_split, "materialize: a GRID split stage survived 030_split"
+    assert rplan is None or not rplan.needs_split, "materialize: a GRID split stage survived 030_split_reduce"
     return KernelOp(body=Body((factorize(tile, root),)), name=tile.name)

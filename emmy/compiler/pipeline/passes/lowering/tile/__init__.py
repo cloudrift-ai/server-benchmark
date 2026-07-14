@@ -12,7 +12,7 @@
    scheduled when it re-enters the rule — the rule matches ``LoopOp`` AND an unmapped ``TileOp``.)
    The ``_flash`` / ``_softmax`` helpers hold the pattern matchers; ``_schedule`` holds the
    geometry + reduce-partition logic and the ``REDUCE`` / ``TILE`` / ``STAGE`` / ``WSPEC`` knobs.
-2. **Split** (``030_split``) — consume a cross-CTA ``GRID`` stage (``ReducePlan.needs_split``)
+2. **Split** (``030_split_reduce``) — consume a cross-CTA ``GRID`` stage (``ReducePlan.needs_split``)
    as a **graph rewrite**: a partial kernel reduces each CTA's slice of the reduce axis and
    either ``atomicAdd``\\ s its (additive) state into the output (one kernel) or writes it to a
    ``__partial`` workspace folded by a sibling finalize kernel (the carrier's

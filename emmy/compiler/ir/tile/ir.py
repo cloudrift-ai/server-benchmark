@@ -105,7 +105,7 @@ class Reduction:
 
     The **scheduling param** is the ``reduce`` partition (:class:`ReducePlan` — GRID split / BLOCK coop
     / REG ILP), stamped onto the node by ``_schedule`` (inside ``010_recognize``) (its decided value lives **here** on the node
-    — read via ``ops.reduce_plan``). ``lower`` ignores it (it's metadata the materializer / ``030_split``
+    — read via ``ops.reduce_plan``). ``lower`` ignores it (it's metadata the materializer / ``030_split_reduce``
     read), so it leaves ``op_cache_key`` byte-identical."""
 
     carrier: Carrier  # the loop-carried ⊕ algebra (degenerate id / twisted exp)
@@ -476,7 +476,7 @@ class Map:
     softmax / RMSNorm is a ``Map`` whose ``body`` is the post-fold sweep over a ``Reduction`` source.
     Every recognized contraction — per-cell scalar included — is a :class:`Contraction` node
     (``_nodify_contraction`` in ``010_recognize``); the only annotated reduce ``Loop``\\ s still riding
-    a flat ``Map`` body are ``030_split``'s sliced partials. ``out`` is the bound output name (the
+    a flat ``Map`` body are ``030_split_reduce``'s sliced partials. ``out`` is the bound output name (the
     body's last def, or the source's carried state for an empty-body wrap). It HAS a Body, not IS
     one."""
 

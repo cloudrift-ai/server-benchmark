@@ -167,6 +167,17 @@ prefetch clamp re-pinned onto the last needed chunk. CTA-uniform (the in-loop ba
 (skipped steps fold the carrier's exact identity: `α = 1`, `P = expf(−1e30 − m_i) = 0`); it halves the streamed
 keys/mma work on average, paying wall-clock wherever the grid oversubscribes the SMs.
 
+**The alternating single-slab pipeline** (`STAGE=d1/tma/alt`, `_stage.alternating_kloop`) is the wide-block form of the
+same stream — the FA-2 choreography: one K slab and one V slab, each on its OWN mbarrier, with the refills interleaved
+into the phases that no longer read them (`wait K | Q·K | sync | fill K_{i+1} | softmax | wait V | P·V | sync | fill
+V_{i+1}` — K's copy runs under softmax + P·V, V's under the next step's Q·K), so a 64-key streaming block overlaps its
+copies within HALF the paired ring's smem. Q stages through smem too: a padded row-major tile (`head_dim + 8` element
+rows) cp.async-filled once before the stream, its A fragments ldmatrix'd per atom-K chunk INSIDE the step — the freed
+resident Q registers are what make the wide block's register file fit (the hd256 nt8 form went from 255 regs + 848 B
+spill loads to 240 regs / zero spills, 55.5 → 32.2 µs — past the nt4-d2 frontier). TMA + static block-divisible kv
+only; composes with the causal tile-skip (`k_end`) and the split-KV window; flash stream only (the matmul resolvers
+decline `alt`).
+
 **A split-KV partial windows the same stream** (`030_split_reduce._split_twisted_warp`, the flash `REDUCE=g<n>k` arm): the
 `Reduction` arrives with its axis shrunk to the slice length and the slice's absolute base on `Reduction.offset` —
 the fold walks its local `[0, B)` window and `_twist` re-bases every absolute-key consumer (the score-column mask

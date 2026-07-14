@@ -939,6 +939,38 @@ def test_warp_flash_causal_tile_skip(monkeypatch):
 
 @requires_cuda
 @pytest.mark.parametrize("variant", ["plain", "causal"])
+def test_warp_flash_alt_staging_matches_torch(monkeypatch, variant):
+    """The ALTERNATING single-slab staging (``STAGE=d1/tma/alt``): one K slab + one V slab on
+    separate mbarriers, refilled in the phase that no longer reads them (K under softmax + P·V,
+    V under the next step's Q·K), and Q staged through a padded smem tile (its A fragments
+    ldmatrix'd per atom-K chunk). Structure pinned via the emitted source (the per-operand
+    mbarriers + the Q slab), values vs torch — the fills are verbatim copies, so alt stays
+    bit-identical to gmem-direct."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_STAGE", "d1/tma/alt")
+    torch.manual_seed(11)
+    module = _Causal() if variant == "causal" else _Sdpa()
+    q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
+    backend, compiled, graph, kernels = _trace(module, (q, k, v))
+    assert len(kernels) == 1
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "_kbar" in src and "_vbar" in src, "alt staging must run the per-operand mbarrier pair"
+    assert "_q_smem" in src, "alt staging must stage Q through smem"
+
+    def ref():
+        with torch.no_grad():
+            out = torch.nn.functional.scaled_dot_product_attention(q.cuda(), k.cuda(), v.cuda(), is_causal=variant == "causal")
+            return out.cpu().flatten().float().numpy()
+
+    data = {n: t for n, t in zip(graph.inputs, (q.numpy(), k.numpy(), v.numpy()), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=ref)
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    max_diff = float(np.max(np.abs(got - eager)))
+    assert max_diff < 5e-3, f"alt-staged flash ({variant}) max_diff={max_diff:.2e}"
+
+
+@requires_cuda
+@pytest.mark.parametrize("variant", ["plain", "causal"])
 def test_warp_flash_split_kv_matches_torch(monkeypatch, variant):
     """Flash split-KV (``REDUCE=g<n>k`` on the warp tier): the kv stream splits across CTAs, each
     partial keeping fragment residence and storing its raw ``(m, l, O)`` state to the f32

@@ -22,7 +22,7 @@ per operand): TMA permutes the 16 B chunks in hardware during the box copy, a cp
 the identical XOR in software on its destination index, and each staged ``LdmatrixLoad`` reads back
 through the matching address XOR — which is what keeps the ldmatrix drain free of smem bank
 conflicts (the unswizzled cp path was 4-way conflicted on 64 B rows / 8-way on 128 B ones — the
-sm_89 gap to cuBLAS). The sync compute-fill applies the same XOR on its slab ``Write``\ s (one
+sm_89 gap to cuBLAS). The sync compute-fill applies the same XOR on its slab ``Write`` stores (one
 vector store per 16 B run), and its per-cell producer-cone replication is planned by
 :meth:`SyncTransport._run_plans` — run-invariant stmts hoist once, a stride-1 k-indexed gmem
 ``Load`` merges into one vector ``Load`` per run. Scalar-``Load``-drained slabs stay plain
@@ -505,12 +505,7 @@ class SyncTransport:
             # binding every cell's suffixed name (one 16 B ld like the cp.async fill, instead of V
             # scalar loads — the compute fill issued 3.6x cuBLAS's LSU instructions). Everything
             # else replicates per cell as before.
-            local = {
-                nm
-                for p, st in enumerate(cell_stmts[0])
-                if plans[p] != "hoist"
-                for nm in st.defines()
-            }
+            local = {nm for p, st in enumerate(cell_stmts[0]) if plans[p] != "hoist" for nm in st.defines()}
             for p in range(len(cell_stmts[0])):
                 if plans[p] == "hoist":
                     body.append(cell_stmts[0][p])
@@ -521,7 +516,7 @@ class SyncTransport:
                     continue
                 for j in range(v):
                     sfx = f"__c{j}"
-                    ren = lambda nm, sfx=sfx: f"{nm}{sfx}" if nm in local else nm  # noqa: E731
+                    ren = lambda nm, sfx=sfx, local=local: f"{nm}{sfx}" if nm in local else nm  # noqa: E731
                     body.append(cell_stmts[j][p].rewrite(ren))
             # ONE vector Write per run (the run is ``V`` contiguous 16-byte-aligned cells, so the
             # store is a single st.128 like the cp.async fill's chunk deposit) — V scalar 2 B

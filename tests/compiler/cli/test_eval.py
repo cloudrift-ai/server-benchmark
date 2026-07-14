@@ -509,3 +509,40 @@ def test_bare_families_canonicalizes_axis_suffixed_knobs():
     assert got == {"TILE": "n16x8/f2x4", "STAGE": "d3/tma/ring", "REDUCE": "g2a", "WSPEC": ""}
     # bare keys pass through; first key wins a family collision (single-node picks in practice)
     assert _bare_families({"TILE": "a", "TILE@x": "b"}) == {"TILE": "a"}
+
+
+def test_offline_eval_scores_each_golden_under_its_own_card(monkeypatch):
+    """``eval offline`` must featurize a golden under the golden's OWN card
+    (``Context.from_target(cap, gpu_name=...)``), never the live host's. With the
+    ``gpu_name`` dropped, the SM count fell back to the host device (or the GPU-less
+    default), so the occupancy features priced tiles for a card that doesn't exist —
+    the eval said rank 0 on gemma goldens the real 4090 misdeployed 12-29x. The fitter
+    (``golden_knob_heuristics``) already passed it; this pins the eval side to match."""
+    import emmy.commands.eval as eval_cmd
+    from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig
+
+    golden = MatmulGoldenConfig(
+        name="gemma4_12b.q_proj",
+        M=512,
+        N=4096,
+        K=3840,
+        dtype="fp16",
+        knobs={"TILE": "a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2"},
+        gpu_name="NVIDIA GeForce RTX 4090",
+        compute_cap=(8, 9),
+    )
+    seen: list = []
+
+    def fake_evaluate_golden(M, N, K, dtype, gold, ctx, *, dynamic=False):
+        seen.append(ctx)
+        return dict(gold), 0, 1
+
+    monkeypatch.setattr(eval_cmd, "_golden_configs", lambda _f: [golden])
+    monkeypatch.setattr("emmy.compiler.pipeline.search.golden_eval.evaluate_golden", fake_evaluate_golden)
+    eval_cmd._emit_offline_eval(None)
+
+    assert len(seen) == 1
+    ctx = seen[0]
+    assert ctx.gpu_name == "NVIDIA GeForce RTX 4090"
+    assert ctx.sm_count == 128  # the 4090's registered SM count, regardless of the host GPU
+    assert ctx.compute_capability == (8, 9)

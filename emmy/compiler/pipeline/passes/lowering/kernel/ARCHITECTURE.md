@@ -167,7 +167,7 @@ prefetch clamp re-pinned onto the last needed chunk. CTA-uniform (the in-loop ba
 (skipped steps fold the carrier's exact identity: `α = 1`, `P = expf(−1e30 − m_i) = 0`); it halves the streamed
 keys/mma work on average, paying wall-clock wherever the grid oversubscribes the SMs.
 
-**A split-KV partial windows the same stream** (`030_split._split_twisted_warp`, the flash `REDUCE=g<n>k` arm): the
+**A split-KV partial windows the same stream** (`030_split_reduce._split_twisted_warp`, the flash `REDUCE=g<n>k` arm): the
 `Reduction` arrives with its axis shrunk to the slice length and the slice's absolute base on `Reduction.offset` —
 the fold walks its local `[0, B)` window and `_twist` re-bases every absolute-key consumer (the score-column mask
 bases, the gmem/TMA operand coords, and the causal bound above, which goes slice-local so an above-the-diagonal

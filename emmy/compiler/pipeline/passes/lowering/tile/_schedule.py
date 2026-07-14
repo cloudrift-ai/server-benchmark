@@ -1364,7 +1364,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
     # non-empty ``REDUCE`` pin stays the scalar escape (it asks for a reduce partition only the
     # scalar tiers honor), a warp ``TILE`` pin keeps the mma rows alone.
     # A cross-CTA ``g<n>k`` REDUCE pin on the flash tree selects the SPLIT-KV warp rows (the
-    # partial keeps fragment residence; ``030_split`` realizes partial + LSE-combine finalize) —
+    # partial keeps fragment residence; ``030_split_reduce`` realizes partial + LSE-combine finalize) —
     # pin-driven, like the demoted warp tier. Any other non-empty REDUCE pin keeps its scalar
     # escape below (it asks for a reduce partition only the scalar tiers honor), as does a split
     # pin no warp row can legally carry (symbolic / non-divisible kv, atomic finalize).
@@ -1471,7 +1471,7 @@ def _narrow_flash_forms(forms: list[TileOp], head: Contraction, pv: Contraction,
 
 def _stamp_twisted_split(rows: list[TileOp], kv_name: str, plan: ReducePlan) -> list[TileOp]:
     """The flash split-KV rows: each warp row with the pinned cross-CTA partition stamped on its
-    :class:`Reduction` node (``030_split`` consumes it) and spelled on ``REDUCE@<kv>``. Per-row
+    :class:`Reduction` node (``030_split_reduce`` consumes it) and spelled on ``REDUCE@<kv>``. Per-row
     legality: a static kv extent divisible by ``cta``, and a slice divisible by the row's own
     streaming key block (the staged chunking + fragment masks assume block-whole slices); an
     illegal row is dropped, not degraded."""

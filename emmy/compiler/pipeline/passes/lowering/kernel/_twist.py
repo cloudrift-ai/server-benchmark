@@ -376,11 +376,11 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     symbolic_q = not qk.m_axis.extent.is_static
     seq = _ext(kv_axis)
     # A cross-CTA slice partial (flash split-KV): the fold walks its LOCAL ``[0, B)`` window
-    # (``seq`` is the slice length after ``030_split`` shrank the axis) and ``red.offset`` is the
+    # (``seq`` is the slice length after ``030_split_reduce`` shrank the axis) and ``red.offset`` is the
     # slice's absolute base — added wherever the absolute key coordinate matters: the score-column
     # masks (``col_bases``), the gmem/TMA operand bases, and the causal bound below.
     kv_off = red.offset
-    assert kv_off is None or not symbolic_k, "a cross-CTA kv slice is static (030_split refuses symbolic)"
+    assert kv_off is None or not symbolic_k, "a cross-CTA kv slice is static (030_split_reduce refuses symbolic)"
 
     def _abs_kv(e: Expr) -> Expr:
         return BinaryExpr("+", e, kv_off) if kv_off is not None else e
@@ -667,7 +667,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # fall back to the bare ``(batch…, row, n)`` grid store (the head-major identity).
     m_name, n_name = qk.m_axis.name, pv.n_axis.name
 
-    # A cross-CTA slice partial stores the RAW carrier state instead of projecting (``030_split``
+    # A cross-CTA slice partial stores the RAW carrier state instead of projecting (``030_split_reduce``
     # replaced the projection with one ``Write`` per state component into the ``__partial``
     # workspace): the expect component (O) is fragment-resident and rides the normal fragment
     # store; the d-invariant row stats (m, l) are written once per query row at their template's

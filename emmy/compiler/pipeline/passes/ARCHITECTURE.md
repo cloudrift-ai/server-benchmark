@@ -152,7 +152,7 @@ P@V mma `TilePlan`s are derived per point, `_schedule._twisted_warp_options`), t
 register-vector CHAIN (the FA-2 shared-score form), then the cooperative / per-cell reduce-partition escapes — every
 leaf row spelling the same `TILE@<qk_k>` / `TILE@<pv_k>` / `REDUCE@<kv>` key set (decided-empty where a form doesn't
 tile). A cross-CTA `REDUCE=g<n>k` pin selects the **flash split-KV** warp rows instead (pin-driven): the plan stamps
-onto each row's `Reduction` node and `030_split` realizes it as a fragment-resident partial (the kv stream windowed to
+onto each row's `Reduction` node and `030_split_reduce` realizes it as a fragment-resident partial (the kv stream windowed to
 the CTA's slice, its absolute base on `Reduction.offset`; raw `(m, l, O)` state to an f32 `__partial` workspace) plus
 an LSE-combine finalize — kernel finalize only (the twisted `e^{Δm}` rescale can't be an atomic), static
 block-divisible kv only, and it pays where the un-split grid starves the SMs (few heads / short query axis: the

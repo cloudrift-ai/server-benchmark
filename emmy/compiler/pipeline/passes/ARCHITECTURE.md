@@ -117,7 +117,9 @@ codec's atom token and priced by the `MMA_acc_bits` feature; f16 only (mma.sync 
 `wspec_moves()` is the fourth level (bare `WSPEC`, option-0 `""` = uniform SIMT) — offered only on a warp row over a
 resolved **TMA** stage without a cross-CTA split, and resolved/thread-budget-gated at materialization
 (`_wspec_workers`; an ineligible spec degrades to uniform). A computed-A (fused-cone) contraction enumerates its own
-warp-only rows (`_schedule._computed_a_rows` — the mandatory resolved `sync` compute-fill stage, no scalar /
+warp-only rows (`_schedule._computed_a_rows` — the mandatory resolved `sync` compute-fill stage crossed with the
+shared `RASTER` launch-order candidates (its B stripes re-stream per M-tile row, exactly the grouped order's L2
+reuse — `gn8` measured −8% on the gemma gate_up fused edge, 5090), no scalar /
 gmem-direct / split-K / WSPEC rows; the compute-producer role for the fused edge is the anticipated `RoleKind`
 extension). The **flash-form fork**: a `TWISTED` streaming contraction pair (the flash tree) offers its
 structurally-different schedules as ONE prior-ranked fork — the warp (fragment-resident) rows over

@@ -915,6 +915,12 @@ def _computed_a_rows(kernel, place, probe: Contraction, kaxis: str, budget: int 
         ]
     want_depth = Stage.parse(_stage_spec(kernel)).depth if _stage_spec(kernel) else 1
     rows: list[dict] = []
+    # The launch-order codec rides these rows exactly like the plain contraction's
+    # (:func:`_raster_candidates` — a computed-A kernel's output is the same static 2-D block-tile
+    # grid, and the grouped decode is kernel-scoped launch metadata the transport never sees; a
+    # symbolic-M fused edge decides the flat ``""`` through the same gate). The fused edge is the
+    # codec's best customer: its B stripes re-stream per M-tile row (64.6% DRAM on the gemma
+    # gate_up shape), which is precisely the L2 reuse a grouped order buys.
     for spec in tiles:
         stage = _resolve_sync_stage(replace(probe, tile=TilePlan.parse(spec)), budget, want_depth)
         if stage is None:
@@ -922,7 +928,8 @@ def _computed_a_rows(kernel, place, probe: Contraction, kaxis: str, budget: int 
                 raise ValueError(f"warp TILE pin {spec!r} on a fused-cone contraction: the sync slabs exceed the {budget} B smem budget.")
             continue
         for red in _reduce_candidates(kernel, place, TilePlan.parse(spec), probe):
-            rows.append({_at(TILE, kaxis): spec, _at(STAGE, kaxis): stage.spell(), _at(REDUCE, kaxis): red})
+            for raster in _raster_candidates(place):
+                rows.append({_at(TILE, kaxis): spec, _at(STAGE, kaxis): stage.spell(), _at(REDUCE, kaxis): red, RASTER.name: raster})
     return rows
 
 

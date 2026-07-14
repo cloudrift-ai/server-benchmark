@@ -655,6 +655,14 @@ score ties by emission order, a tie is a loss, not a win. The former strictly-gr
 row inside a tie plateau, which let a saturated prior score "top-1" on goldens that real cold deploys missed by
 12–29× (the same convention the fork-regret metric already used: predicted-score ties price pessimistically).
 
+**Golden evals featurize under the golden's own card.** `eval offline` / `eval online` rebuild each golden's compile
+context as `Context.from_target(compute_cap, gpu_name=…)` — the card recorded in the golden file, with its memorized
+SM count / smem specs — never the live host's. The host-context version silently made golden ranks
+machine-dependent (a 4090 golden scored on a 5090 host featurized as "sm_89 with 170 SMs"; on a GPU-less host, with
+the default SM count) — the occupancy features then priced tiles for a card that doesn't exist, reporting rank 0 on
+shapes the real card misdeployed 12–29×. The fitter (`golden_knob_heuristics`) always did this correctly; the eval
+gate now matches it.
+
 **Fork-sibling regret** (`eval online --dataset nodes`, via `iter_nodes` → `diagnostics.node_report`): **per card**, it
 groups nodes by `parent_key` and prices what following the prior's per-fork pick costs —
 `value_us(predicted-best child) / value_us(true best)` (1.00x = the prior steers into the best-reachable subtree;

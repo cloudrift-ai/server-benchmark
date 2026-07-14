@@ -237,7 +237,47 @@ configs:
     knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32', WSPEC: ''}
     emmy_us: 35.5
     cublas_us: 30.7
-  # The PRIMARY post-tile-skip: the nt=4 streaming block (32 keys/step, 32 KB slabs) — 32.9, 7% past
+  # The std-lane PRIMARY (2026-07-14, alternating staging): the 64-key streaming block (nt=8) on
+  # d1/cp/alt — one K slab + one V slab, refills interleaved with the phases that no longer read
+  # them (cp.async commit-group queue, uniform wait_group(1)), Q staged through smem. The cp
+  # transport BEATS the tma sibling here (31.7 vs 32.2 — the lane/transport flip again); 0.97x vs
+  # torch SDPA, 3x reproduced. The paired-ring nt=8 form was spill-bound at 55.5. FAST_EXP
+  # neutral; alt+g2k 33.3 (the finalize costs more than the split recovers at this grid).
+  - kernel: attention
+    name: gemma4_12b.attention.hd256
+    n_heads: 16
+    seq: 512
+    head_dim: 256
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k4', WSPEC: ''}
+    emmy_us: 31.7
+    cublas_us: 30.7
+  # The tma-alt sibling (0.95x) — kept beside the cp primary (both directions 3x reproduced).
+  - kernel: attention
+    name: gemma4_12b.attention.hd256
+    n_heads: 16
+    seq: 512
+    head_dim: 256
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', STAGE: 'd1/tma/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k4', WSPEC: ''}
+    emmy_us: 32.2
+    cublas_us: 30.7
+  # The FM PRIMARY — and the first emmy-past-torch-SDPA hd256 entry on the 5090: the f16-accumulate
+  # PV sibling on d1/cp/alt runs 29.7 = 1.03x vs SDPA 30.7 (3x reproduced zero-spread; on tma-alt
+  # the fm promote outweighed at 33.8 — cp's issue pattern absorbs it, the fm-prefers-cp lane rule).
+  - kernel: attention
+    name: gemma4_12b.attention.hd256
+    n_heads: 16
+    seq: 512
+    head_dim: 256
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x32/k4', WSPEC: ''}
+    emmy_us: 29.7
+    cublas_us: 30.7
+  # The paired-ring runner-up: the nt=4 streaming block (32 keys/step, 32 KB slabs) — 32.9, 7% past
   # the nt=2 entry (pre-skip they were parity alternates). The knob frontier ends here — nt=8 fattens
   # to 55 µs, w2x1 forms reach 35.1 (parity with nt=2, no longer the 97 µs hazard), w1x1 38.6,
   # d3 34.0, WSPEC bands nvcc-fail on this kernel. The 0.93x residual vs torch SDPA is per-step

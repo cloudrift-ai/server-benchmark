@@ -733,6 +733,9 @@ def _resolve_warp_stage(c: Contraction, stage: Stage, budget: int = STATIC_SMEM_
     (``bk_elems`` is codec-spelled here, not derived), and a resolved-but-unfittable stage would
     sail through the fork only to be rejected at materialize (the issue-#327 unlowered-``TileOp``
     bench fails)."""
+    if stage.alt:
+        return None  # the alternating single-slab pipeline is the warp-flash stream's (K/V phase split + staged Q)
+
     atom = c.atom
     a_nbytes = atom.operand_dtype("a").nbytes
     bk = c.tile.bk
@@ -775,6 +778,9 @@ def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = ST
     contributing only the slab drain; when no K-chunk fits at the requested depth, the depth steps
     down (a smaller ring beats gmem-direct), single-buffer last. ``reg_depth`` stays 1 (the
     smem→register double-buffer is an ``ldmatrix`` transform, no scalar counterpart)."""
+    if stage.alt:
+        return None  # the alternating single-slab pipeline is the warp-flash stream's (K/V phase split + staged Q)
+
     if not c.k_axis.extent.is_static or stage.transport not in ("tma", "cp.async"):
         return None
     # A masked-N (overhanging inner dim) or transposed-B B-slab fill would clamp a chunk-start column
@@ -1628,7 +1634,9 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     return TileOp(op=node, name=name, place=place, tier=wt, stage=stage, knobs=stamped)
 
 
-def _resolve_twisted_stage(stage: Stage, kv_extent, bn: int, head_dim: int, d_v: int, elem_bytes: int, budget: int) -> Stage | None:
+def _resolve_twisted_stage(
+    stage: Stage, kv_extent, bn: int, head_dim: int, d_v: int, elem_bytes: int, budget: int, m_rows: int = 0
+) -> Stage | None:
     """Resolve an operand ``Stage`` against a warp-flash streaming pair — the K/V slabs of one
     ``bn``-key streaming step (K ``bn × head_dim`` in its native N-major layout, V ``bn × d_v``
     K-major; both verbatim row copies, so staging stays bit-identical to gmem-direct). Two
@@ -1646,6 +1654,29 @@ def _resolve_twisted_stage(stage: Stage, kv_extent, bn: int, head_dim: int, d_v:
     ``bk_elems`` records the streamed keys per step."""
     if stage.transport not in ("cp.async", "tma"):
         return None
+    if stage.alt:
+        # The ALTERNATING single-slab pipeline (``d1/tma/alt``): one K slab + one V slab, each on
+        # its own mbarrier, refilled in the phase that no longer reads it (K under softmax + P·V,
+        # V under the next step's Q·K) — the FA-2 choreography that overlaps a WIDE (64-key)
+        # streaming block's copies in HALF the paired ring's smem. The Q (query) tile stages
+        # through smem too — a padded row-major slab filled once, its A fragments ldmatrix'd per
+        # atom-K chunk — which frees the resident Q registers that made the wide block spill.
+        # Static block-divisible kv only (the symbolic tail story is not built for the split
+        # phases). Both async transports ride the same seam: TMA arms per-operand mbarriers
+        # (``d1/tma/alt``); cp.async commits each fill into its own group and a uniform
+        # ``wait_group(1)`` completes the older sibling (``d1/cp/alt`` — the sm_89 form).
+        if not kv_extent.is_static or kv_extent.as_static() % bn != 0 or m_rows <= 0:
+            return None
+        if stage.transport == "tma":
+            if bn > 256 or head_dim > 256 or d_v > 256 or (head_dim * elem_bytes) % 16 or (d_v * elem_bytes) % 16:
+                return None
+            kv_pad = 0  # dense hardware-swizzled slabs
+        else:
+            kv_pad = 16  # the two K/V slabs' padded rows (2 x _twist._PAD elems)
+        q_bytes = m_rows * (head_dim + 8) * elem_bytes  # +8 elem row pad (the flash cp-path bank break)
+        if q_bytes + bn * (head_dim + d_v + kv_pad) * elem_bytes > budget:
+            return None
+        return replace(stage, reg_depth=1, bk_elems=bn)
     if stage.transport == "cp.async":
         # A symbolic kv stages: the fill clamp-reads the overhanging tail rows to the last valid
         # key (cp.async has no OOB zero-fill) and the drain's tail masks zero their P columns, so
@@ -1678,7 +1709,7 @@ def _resolve_twisted_stage(stage: Stage, kv_extent, bn: int, head_dim: int, d_v:
 
 
 def _twisted_stage_candidates(
-    kv_extent, bn: int, head_dim: int, d_v: int, elem_bytes: int, budget: int, tma_ok: bool = True
+    kv_extent, bn: int, head_dim: int, d_v: int, elem_bytes: int, budget: int, tma_ok: bool = True, m_rows: int = 0
 ) -> list[Stage | None]:
     """The K/V operand-stage candidates for one warp-flash geometry row — gmem-direct ``None``
     first (the conservative option-0), then every ``stage_moves`` entry that RESOLVES against the
@@ -1693,7 +1724,7 @@ def _twisted_stage_candidates(
         st = Stage.parse(spec)
         if st.transport == "tma" and not tma_ok:
             return None  # TMA is Hopper+ (sm_90); nvcc has no sm_89a — decline below it
-        return _resolve_twisted_stage(st, kv_extent, bn, head_dim, d_v, elem_bytes, budget)
+        return _resolve_twisted_stage(st, kv_extent, bn, head_dim, d_v, elem_bytes, budget, m_rows)
 
     if STAGE.raw() is not None:
         pinned = STAGE.narrow([""])[0]
@@ -1713,7 +1744,10 @@ def _twisted_stage_candidates(
         return [None]
     out: list[Stage | None] = [None]
     spelled: set[str] = set()
-    for move in stage_moves(warp=True):
+    # ``d1/tma/alt`` (the alternating single-slab pipeline) rides the flash candidate list only —
+    # it is not a ``stage_moves`` entry (the matmul resolvers decline it), and it resolves only
+    # where the wide-block Q+K+V slabs fit (:func:`_resolve_twisted_stage`).
+    for move in [*stage_moves(warp=True), "d1/tma/alt", "d1/cp/alt"]:
         if not move:
             continue
         r = resolve(move)
@@ -1868,8 +1902,10 @@ def _twisted_warp_options(
         # ``_wspec_workers`` gates the thread budgets — the aux band must not exceed the
         # ``32·um`` compute band); a degraded candidate is skipped rather than duplicating the
         # uniform row.
-        for stage in _twisted_stage_candidates(kv_ext, bn, head_dim.as_static(), d_v.as_static(), elem_bytes, budget, tma_ok):
-            wspecs = list(WSPEC.narrow(wspec_moves())) if (stage is not None and stage.transport == "tma") else [""]
+        for stage in _twisted_stage_candidates(
+            kv_ext, bn, head_dim.as_static(), d_v.as_static(), elem_bytes, budget, tma_ok, m_rows=um * fm * atom_m
+        ):
+            wspecs = list(WSPEC.narrow(wspec_moves())) if (stage is not None and stage.transport == "tma" and not stage.alt) else [""]
             for wspec_cand in wspecs:
                 workers, wspec_spec = _wspec_workers(wspec_cand, stage, 32 * um)
                 if wspec_cand and workers is None:

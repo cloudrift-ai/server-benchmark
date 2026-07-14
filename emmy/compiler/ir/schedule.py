@@ -737,9 +737,10 @@ _STAGE_SCHEMA = Schema(
         Field("d", FieldKind.TUPLE, emit=Emit.ALWAYS),
         Field("transport", FieldKind.CHOICE, choices=tuple(_TRANSPORT_CODEC.items()), default="sync", emit=Emit.ALWAYS),
         Field("ring", FieldKind.FLAG, emit=Emit.TRUE),
+        Field("alt", FieldKind.FLAG, emit=Emit.TRUE),
         Field("p", FieldKind.TUPLE),
     ),
-    expect="expect d<depth> / sync|cp|tma / ring / p<reg_depth>",
+    expect="expect d<depth> / sync|cp|tma / ring / alt / p<reg_depth>",
 )
 
 
@@ -752,7 +753,7 @@ class Stage:
 
     A constructed ``Stage`` means staging is **on** (the reused gmem operands ride a shared-
     memory slab); ``schedule.stage is None`` is the register / gmem-direct baseline (no
-    slab). Spelled by the ``STAGE`` codec ``d<depth>/sync|cp|tma[/ring][/p<reg_depth>]``
+    slab). Spelled by the ``STAGE`` codec ``d<depth>/sync|cp|tma[/ring][/alt][/p<reg_depth>]``
     (decided in ``_schedule`` (inside ``010_recognize``)). A stage stamped on a ``TileOp`` is **RESOLVED**, not the raw
     pin: the scheduler runs eligibility + sizing against the node ONCE
     (``_schedule._resolve_warp_stage`` / ``_resolve_scalar_stage`` for a contraction's operand
@@ -779,6 +780,14 @@ class Stage:
     ring: bool = False  # ring buffer vs static double-buffer
     reg_depth: int = 1  # smem→register double-buffer depth (1 = no inner ldmatrix prefetch)
     bk_elems: int = 0  # contraction slab K-chunk, elements (derived at resolution; not in the codec)
+    # The ALTERNATING single-slab pipeline (the warp-flash stream's FA-2 choreography): each operand
+    # keeps ONE slab and its own mbarrier, and the refills interleave with the phases that no longer
+    # read them — K refills under softmax + P·V, V under the next step's Q·K — so a wide (64-key)
+    # streaming block overlaps its copies within HALF the paired ring's smem. Implies the A (query)
+    # operand stages through smem too (the freed resident fragments are what make the wide block's
+    # registers fit). ``d1/tma/alt`` / ``d1/cp/alt``; flash stream only — the matmul resolvers
+    # decline it.
+    alt: bool = False
 
     def __post_init__(self) -> None:
         if self.transport not in _TRANSPORT_SPELL:
@@ -789,6 +798,8 @@ class Stage:
             raise ValueError("a ring buffer needs depth ≥ 2 (nothing to cycle at depth 1)")
         if self.reg_depth < 1:
             raise ValueError(f"Stage reg_depth must be ≥ 1, got {self.reg_depth}")
+        if self.alt and (self.depth != 1 or self.ring):
+            raise ValueError("the alternating pipeline is single-slab (d1, no ring) — its overlap comes from the phase split")
 
     @classmethod
     def parse(cls, spec: str | None) -> Stage:
@@ -800,7 +811,7 @@ class Stage:
         non-empty spec). ``smem`` is filled in later by the scheduler. Ser/de routes through
         :func:`decode`; ``cls(...)`` then runs :meth:`__post_init__` (the depth / ring semantics)."""
         v = decode(_STAGE_SCHEMA, spec)
-        return cls(depth=v["d"], transport=v["transport"], ring=v["ring"], reg_depth=v["p"])
+        return cls(depth=v["d"], transport=v["transport"], ring=v["ring"], alt=v["alt"], reg_depth=v["p"])
 
     def spell(self) -> str:
         """The ``STAGE`` codec string for this stage (inverse of :meth:`parse`). ``smem`` is
@@ -808,7 +819,7 @@ class Stage:
         default is omitted, so an unstaged-register config round-trips byte-identical)."""
         return encode(
             _STAGE_SCHEMA,
-            {"d": self.depth, "transport": self.transport, "ring": self.ring, "p": self.reg_depth},
+            {"d": self.depth, "transport": self.transport, "ring": self.ring, "alt": self.alt, "p": self.reg_depth},
         )
 
     @property

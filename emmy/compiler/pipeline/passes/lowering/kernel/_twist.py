@@ -74,7 +74,12 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CtaTile,
     Operand,
     TmaTransport,
+    alternating_kloop,
+    cp_async_commit,
+    cp_async_fill,
+    cp_async_wait,
     pick_swizzle_atom,
+    slab_smem,
     staged_kloop,
 )
 
@@ -440,46 +445,79 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             )
         )
 
-    state: list[Stmt] = []
-    for qt in qtiles:
-        for c in _COMPS:
-            state.append(Init(name=f"{qt.pivot}{c}", identity=-1e30, dtype=F32))
-            state.append(Init(name=f"{qt.denom}{c}", identity=0.0, dtype=F32))
-        for f in qt.ofrags:
-            state.append(RegFragment(name=f, role="c", shape=shape, dtype=F32))
+    # Per-transport staging facts, visible to the stream builder's drains: cp.async slabs take the
+    # +16 B row pad (the bank-conflict break), TMA slabs stay dense and take the hardware swizzle
+    # (``pick_swizzle_atom`` per operand) with the drain's address XOR undoing it. The ALTERNATING
+    # pipeline (``stage.alt``) additionally stages Q: a padded row-major smem tile filled once,
+    # its A fragments ldmatrix'd per atom-K chunk INSIDE the stream — the freed resident registers
+    # are what make the wide (64-key) block fit.
+    stage = ctx.stage
+    alt = stage is not None and stage.alt
+    is_tma = stage is not None and stage.transport == "tma"
+    elem_bytes = atom.operand_dtype("b").nbytes
+    kv_pad = 0 if is_tma else _PAD
+    k_swz = pick_swizzle_atom(qk.k_axis.extent.as_static(), elem_bytes)[1] if is_tma else "NONE"
+    v_swz = pick_swizzle_atom(d_v, elem_bytes)[1] if is_tma else "NONE"
+    head_dim_s = qk.k_axis.extent.as_static()
+    q_ldm = head_dim_s + _PAD  # the staged-Q slab row stride (padded, like the cp.async K/V rows)
+
+    def _q_frag_stmts(qt, i: int) -> list[Stmt]:
+        """The query tile's ``bk`` A-fragment declarations + loads. Resident form (default): gmem
+        loads hoisted ahead of the stream. Alternating form (``stage.alt``): per-block ldmatrix
+        from the staged Q slab (slab-local rows — the tile's offset within the CTA's query block),
+        block-scoped so the registers die each step. Same values either way: bit-identical."""
+        stmts: list[Stmt] = []
+        if alt:
+            rel = Literal(i * shape[0], "int")
+            if um > 1:
+                rel = BinaryExpr("+", BinaryExpr("*", Var(FLASH_WARP_AXIS), Literal(fm * shape[0], "int")), rel)
+            for s, qaf in enumerate(qt.qa):
+                stmts.append(RegFragment(name=qaf, role="a", shape=shape, dtype=atom.operand_dtype("a")))
+                stmts.append(
+                    LdmatrixLoad(
+                        frag=qaf, src_buffer="_q_smem", src_index=(rel, Literal(s * atom.atom_k, "int")), role="a", ldm=q_ldm, staged=True
+                    )
+                )
+            return stmts
         # The Q A-fragments are loop-INVARIANT (Q's index carries the query/head-dim axes, never
         # the stream axis — structural: the contraction binder puts the m-carrying load on A), so
         # they load ONCE ahead of the stream — ``bk`` resident fragments per tile instead of
         # ``bk`` gmem fills per KV block. Same loads, same values: bit-identical to the in-loop form.
         q_guard = (qt.row_base, _ext(qk.m_axis)) if symbolic_q else None
         for s, qaf in enumerate(qt.qa):
-            state.append(RegFragment(name=qaf, role="a", shape=shape, dtype=atom.operand_dtype("a")))
-            state.append(
+            stmts.append(RegFragment(name=qaf, role="a", shape=shape, dtype=atom.operand_dtype("a")))
+            stmts.append(
                 LdmatrixLoad(
                     frag=qaf,
                     src_buffer=qk.a_operand.input,
                     src_index=_idx(qk.a_operand, {qk.m_axis.name: qt.row_base, qk.k_axis.name: Literal(s * atom.atom_k, "int")}),
                     role="a",
-                    ldm=qk.k_axis.extent.as_static(),
+                    ldm=head_dim_s,
                     staged=False,
                     gmem_guard=q_guard,
                 )
             )
+        return stmts
 
-    # Per-transport staging facts, visible to the stream builder's drains: cp.async slabs take the
-    # +16 B row pad (the bank-conflict break), TMA slabs stay dense and take the hardware swizzle
-    # (``pick_swizzle_atom`` per operand) with the drain's address XOR undoing it.
-    stage = ctx.stage
-    is_tma = stage is not None and stage.transport == "tma"
-    elem_bytes = atom.operand_dtype("b").nbytes
-    kv_pad = 0 if is_tma else _PAD
-    k_swz = pick_swizzle_atom(qk.k_axis.extent.as_static(), elem_bytes)[1] if is_tma else "NONE"
-    v_swz = pick_swizzle_atom(d_v, elem_bytes)[1] if is_tma else "NONE"
+    state: list[Stmt] = []
+    for i, qt in enumerate(qtiles):
+        for c in _COMPS:
+            state.append(Init(name=f"{qt.pivot}{c}", identity=-1e30, dtype=F32))
+            state.append(Init(name=f"{qt.denom}{c}", identity=0.0, dtype=F32))
+        for f in qt.ofrags:
+            state.append(RegFragment(name=f, role="c", shape=shape, dtype=F32))
+        if not alt:
+            state.extend(_q_frag_stmts(qt, i))
 
-    # ---- the streaming step (a builder — the staged path re-parents it under the ring drain) --- #
-    def _stream_step(k_slot: Expr | None = None, v_slot: Expr | None = None, staged: bool = False) -> list[Stmt]:
+    # ---- the streaming step (a builder — the staged path re-parents it under the ring drain; the
+    # alternating path takes the three segments separately, its K/V refills between them) -------- #
+    def _stream_segments(
+        k_slot: Expr | None = None, v_slot: Expr | None = None, staged: bool = False
+    ) -> tuple[list[Stmt], list[Stmt], list[Stmt]]:
         stream: list[Stmt] = []
-        for qt in qtiles:
+        for i, qt in enumerate(qtiles):
+            if alt:
+                stream.extend(_q_frag_stmts(qt, i))  # per-block A fragments off the staged Q slab
             for f in qt.sfrags:
                 stream.append(RegFragment(name=f, role="c", shape=shape, dtype=F32))
             for f in qt.ohfrags:
@@ -504,6 +542,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             b_swizzle=k_swz if staged else "NONE",
             reg_depth=stage.reg_depth if staged else 1,
         )
+        qk_seg, stream = stream, []
 
         for qi, qt in enumerate(qtiles):
             hoisted, pro = _realize_prologue(partial[1:], qk, qt.sfrags, col_bases, qt.row_base, set(names))
@@ -548,6 +587,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             for si, paf in enumerate(qt.pa):
                 stream.append(RegFragment(name=paf, role="a", shape=shape, dtype=atom.operand_dtype("a")))
                 stream.append(FragmentRepack(frag=paf, srcs=(qt.pfrags[2 * si], qt.pfrags[2 * si + 1]), ab_dtype=atom.ab_dtype))
+        mid_seg, stream = stream, []
         pv_mask = {kv_axis.name: (kv0_var, seq)} if symbolic_k else {}
         stream += _frag_contraction(
             _pv_streamed(pv, kv_axis),
@@ -570,7 +610,11 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
                 stream += [FragmentPromote(dst=of, src=oh) for of, oh in zip(qt.ofrags, qt.ohfrags, strict=True)]
         for qt in qtiles:
             stream += _rebind(qt.pivot, f"_mn{qt.sfx}")  # advance the running pivot: m = mn
-        return stream
+        return qk_seg, mid_seg, stream
+
+    def _stream_step(k_slot: Expr | None = None, v_slot: Expr | None = None, staged: bool = False) -> list[Stmt]:
+        qk_seg, mid_seg, pv_seg = _stream_segments(k_slot, v_slot, staged)
+        return [*qk_seg, *mid_seg, *pv_seg]
 
     if stage is not None:
         # The staged K/V stream: the resolved ``Stage`` (``_schedule._resolve_twisted_stage`` —
@@ -635,25 +679,73 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         ltid: Expr = (
             BinaryExpr("%", Builtin("thread_idx.x"), Literal(block_threads, "int")) if ctx.workers is not None else Builtin("thread_idx.x")
         )
-        transport = transport_cls(
-            operands=(k_op, v_op),
-            slab_dtype=_cuda(atom.operand_dtype("b")),
-            elem_bytes=elem_bytes,
-            cta=CtaTile(linear_tid=ltid, n_threads=block_threads),
-        )
-        decls, fold = staged_kloop(
-            transport=transport,
-            drain=lambda slot: _stream_step(k_op.slot_row(slot), v_op.slot_row(slot), staged=True),
-            depth=stage.depth,
-            bk_elems=bn,
-            n_chunks=n_chunks,
-            k_extent=kv_ext,
-            k0=kv0.name,
-            workers=ctx.workers,
-            block_threads=block_threads,
-            k_end=kv_end,
-        )
-        state = decls + state
+        cta = CtaTile(linear_tid=ltid, n_threads=block_threads)
+        if alt:
+            # The ALTERNATING single-slab pipeline (``d1/tma/alt``): one slab + one mbarrier per
+            # operand, the refills interleaved with the phases that no longer read them (K under
+            # softmax + P·V, V under the next step's Q·K — the FA-2 choreography). Q stages
+            # through smem: a padded row-major slab cooperatively cp.async-filled ONCE before the
+            # stream (verbatim copy — bit-identical values), its A fragments ldmatrix'd per
+            # atom-K chunk inside the step (``_q_frag_stmts``), freeing the resident Q registers.
+            q_rows = um * fm * shape[0]
+            cta_row0 = BinaryExpr("*", Var(grid[-1].name), Literal(q_rows, "int"))
+            state.append(slab_smem("_q_smem", q_rows, q_ldm, _cuda(atom.operand_dtype("a")), align=16))
+            state += cp_async_fill(
+                slab="_q_smem",
+                shape=(q_rows, head_dim_s),
+                src=qk.a_operand.input,
+                gmem_index=lambda row, col: _idx(qk.a_operand, {qk.m_axis.name: BinaryExpr("+", cta_row0, row), qk.k_axis.name: col}),
+                cta=cta,
+                elem_bytes=elem_bytes,
+                name="q",
+            )
+            state += cp_async_commit()
+            state += cp_async_wait(0)
+            if is_tma:
+                k_transport = TmaTransport(
+                    operands=(k_op,), slab_dtype=_cuda(atom.operand_dtype("b")), elem_bytes=elem_bytes, cta=cta, mbar="_kbar"
+                )
+                v_transport = TmaTransport(
+                    operands=(v_op,), slab_dtype=_cuda(atom.operand_dtype("b")), elem_bytes=elem_bytes, cta=cta, mbar="_vbar"
+                )
+            else:
+                # cp.async: per-operand commit groups — the K,V,K,V commits queue per thread, and
+                # the skeleton's uniform ``wait_group(1)`` completes exactly the older sibling.
+                k_transport = CpAsyncTransport(operands=(k_op,), slab_dtype=_cuda(atom.operand_dtype("b")), elem_bytes=elem_bytes, cta=cta)
+                v_transport = CpAsyncTransport(operands=(v_op,), slab_dtype=_cuda(atom.operand_dtype("b")), elem_bytes=elem_bytes, cta=cta)
+            qk_seg, mid_seg, pv_seg = _stream_segments(k_op.slot_row(Literal(0, "int")), v_op.slot_row(Literal(0, "int")), staged=True)
+            decls, fold = alternating_kloop(
+                k_transport=k_transport,
+                v_transport=v_transport,
+                qk_drain=lambda _slot: qk_seg,
+                mid=mid_seg,
+                pv_drain=lambda _slot: pv_seg,
+                bk_elems=bn,
+                k_extent=kv_ext,
+                k0=kv0.name,
+                k_end=kv_end,
+            )
+            state = decls + state
+        else:
+            transport = transport_cls(
+                operands=(k_op, v_op),
+                slab_dtype=_cuda(atom.operand_dtype("b")),
+                elem_bytes=elem_bytes,
+                cta=cta,
+            )
+            decls, fold = staged_kloop(
+                transport=transport,
+                drain=lambda slot: _stream_step(k_op.slot_row(slot), v_op.slot_row(slot), staged=True),
+                depth=stage.depth,
+                bk_elems=bn,
+                n_chunks=n_chunks,
+                k_extent=kv_ext,
+                k0=kv0.name,
+                workers=ctx.workers,
+                block_threads=block_threads,
+                k_end=kv_end,
+            )
+            state = decls + state
     else:
         static_small = unroll_ok(kv_axis.extent, 128) and kv_end is None
         body = Body(tuple(_stream_step()))

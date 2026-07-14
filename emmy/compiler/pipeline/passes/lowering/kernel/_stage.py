@@ -22,7 +22,10 @@ per operand): TMA permutes the 16 B chunks in hardware during the box copy, a cp
 the identical XOR in software on its destination index, and each staged ``LdmatrixLoad`` reads back
 through the matching address XOR — which is what keeps the ldmatrix drain free of smem bank
 conflicts (the unswizzled cp path was 4-way conflicted on 64 B rows / 8-way on 128 B ones — the
-sm_89 gap to cuBLAS). Sync compute-fill slabs and scalar-``Load``-drained slabs stay plain
+sm_89 gap to cuBLAS). The sync compute-fill applies the same XOR on its slab ``Write``\ s (one
+vector store per 16 B run), and its per-cell producer-cone replication is planned by
+:meth:`SyncTransport._run_plans` — run-invariant stmts hoist once, a stride-1 k-indexed gmem
+``Load`` merges into one vector ``Load`` per run. Scalar-``Load``-drained slabs stay plain
 row-major (NONE-swizzle, linear writes and reads).
 ``_atom._staged`` — the one atom-agnostic driver — builds the transport, asks the atom strategy
 for the drain leaf, and calls :func:`staged_kloop`.
@@ -38,7 +41,7 @@ from dataclasses import dataclass
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, Literal, SimplifyCtx, TernaryExpr, Var, affine_form
 from emmy.compiler.ir.kernel.ir import (
     CpAsyncCommit,
     CpAsyncCopy,
@@ -404,6 +407,63 @@ class SyncTransport:
     def prologue(self, ring: int) -> list[Stmt]:  # noqa: ARG002
         return list(self.prologue_stmts)
 
+    @staticmethod
+    def _affine_step(a: Expr, b: Expr, ctx: SimplifyCtx) -> int | None:
+        """The literal difference ``b - a`` when both are affine over the same free vars with
+        equal coefficients (``affine_form`` — the vectorizer's decomposition; a plain
+        ``simplify`` cannot fold ``(k0 + 1) - k0``), else ``None``."""
+        free = a.free_vars() | b.free_vars()
+        fa, fb = affine_form(a, free), affine_form(b, free)
+        if fa is None or fb is None or fa[1] != fb[1]:
+            return None
+        d = BinaryExpr("-", fb[0], fa[0]).simplify(ctx)
+        return d.value if isinstance(d, Literal) and isinstance(d.value, int) else None
+
+    @staticmethod
+    def _run_plans(op: SyncOperand, v: int) -> list[str]:
+        """Per-position emission plan for one operand's ``V``-cell fill run — ``"hoist"`` /
+        ``"vector"`` / ``"cell"``. Classified by PROBING the value closure at synthetic coords
+        (col 0 vs col 1; the probe stmts are planning-only, never emitted):
+
+        - identical at both cols ⇒ run-INVARIANT (the stat-row loads, whose index is the run's
+          row alone) — emit once, unsuffixed, but only while its SSA deps stay outside the
+          per-cell defs (a dep on a replicated name demotes it back to per-cell);
+        - a scalar ``Load`` whose last-dim index advances by exactly +1 per cell, leading dims
+          col-free, and whose ``col=0, k0=0`` anchor simplifies to a ``V``-aligned literal (the
+          cone's k-indexed operand read; K-divisibility eligibility makes the buffer's k extent
+          ``V``-aligned) ⇒ the run's V scalar loads merge into ONE vector ``Load``;
+        - anything else replicates per cell (the transposed-B copy's strided gather stays
+          per-cell — its last-dim step is the gmem row stride, not 1)."""
+        probe_row, probe_k0, zero = Var("__srow"), Var("__sk0"), Literal(0, "int")
+        s0, _ = op.value(probe_k0, probe_row, zero)
+        s1, _ = op.value(probe_k0, probe_row, Literal(1, "int"))
+        sz, _ = op.value(zero, probe_row, zero)
+        ctx = SimplifyCtx.empty()
+        plans: list[str] = []
+        cell_defs: set[str] = set()
+        for p, (a, b) in enumerate(zip(s0, s1, strict=True)):
+            if "\n".join(a.pretty()) == "\n".join(b.pretty()) and not (set(a.deps()) & cell_defs):
+                plans.append("hoist")
+                continue
+            step = SyncTransport._affine_step(a.index[-1], b.index[-1], ctx) if isinstance(a, Load) and isinstance(b, Load) else None
+            anchor = sz[p].index[-1].simplify(ctx) if isinstance(sz[p], Load) else None
+            if (
+                isinstance(a, Load)
+                and a.is_scalar
+                and b.is_scalar
+                and a.input == b.input
+                and len(a.index) == len(b.index)
+                and all(x.pretty() == y.pretty() for x, y in zip(a.index[:-1], b.index[:-1], strict=True))
+                and step == 1
+                and isinstance(anchor, Literal)
+                and anchor.value % v == 0
+            ):
+                plans.append("vector")
+            else:
+                plans.append("cell")
+            cell_defs |= set(a.defines())
+        return plans
+
     def fill(self, *, k0: Expr, slot: Expr) -> list[Stmt]:
         out: list[Stmt] = []
         # Issue the async copies FIRST — they are in flight while the compute fill below runs.
@@ -428,18 +488,41 @@ class SyncTransport:
             col = BinaryExpr("%", base, _lit(cols))
             off = op.slot_row(slot)
             smem_row = _add(off, row) if off is not None else row
+            plans = self._run_plans(op, v)
             body: list[Stmt] = []
             vals: list[str] = []
+            cell_stmts: list[list[Stmt]] = []
             for j in range(v):
                 cell_col = _add(col, _lit(j)) if j else col
                 stmts, val = op.value(k0, row, cell_col)
-                # Suffix only the run-LOCAL defs (each cell replica binds fresh SSA); references to
-                # externally-defined names — grid vars, the loop axis, ``k0`` — pass through.
-                local = {nm for st in stmts for nm in st.defines()}
-                sfx = f"__c{j}"
-                ren = lambda nm, local=local, sfx=sfx: f"{nm}{sfx}" if nm in local else nm  # noqa: E731
-                body += [st.rewrite(ren) for st in stmts]
-                vals.append(f"{val}{sfx}")
+                cell_stmts.append(stmts)
+                vals.append(f"{val}__c{j}")
+            # Per-cell SSA defs — the names each replica suffixes. HOISTED positions (run-invariant
+            # stmts: the stat-row loads, whose value is identical across the run's cells) emit once,
+            # unsuffixed, and per-cell references pass through to them; VECTOR positions (a scalar
+            # gmem ``Load`` whose last-dim index advances by exactly +1 per cell — the cone's
+            # k-indexed operand read) merge the run's V scalar 2 B loads into ONE vector ``Load``
+            # binding every cell's suffixed name (one 16 B ld like the cp.async fill, instead of V
+            # scalar loads — the compute fill issued 3.6x cuBLAS's LSU instructions). Everything
+            # else replicates per cell as before.
+            local = {
+                nm
+                for p, st in enumerate(cell_stmts[0])
+                if plans[p] != "hoist"
+                for nm in st.defines()
+            }
+            for p in range(len(cell_stmts[0])):
+                if plans[p] == "hoist":
+                    body.append(cell_stmts[0][p])
+                    continue
+                if plans[p] == "vector":
+                    ld = cell_stmts[0][p]
+                    body.append(Load(names=tuple(f"{ld.names[0]}__c{j}" for j in range(v)), input=ld.input, index=ld.index, dtype=ld.dtype))
+                    continue
+                for j in range(v):
+                    sfx = f"__c{j}"
+                    ren = lambda nm, sfx=sfx: f"{nm}{sfx}" if nm in local else nm  # noqa: E731
+                    body.append(cell_stmts[j][p].rewrite(ren))
             # ONE vector Write per run (the run is ``V`` contiguous 16-byte-aligned cells, so the
             # store is a single st.128 like the cp.async fill's chunk deposit) — V scalar 2 B
             # stores at 16 B thread stride were 8-way bank-conflicted, and the downstream

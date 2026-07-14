@@ -1363,6 +1363,26 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
     # doesn't tile) — the evidence pick's prefix-consistency. Pins keep their contracts: a
     # non-empty ``REDUCE`` pin stays the scalar escape (it asks for a reduce partition only the
     # scalar tiers honor), a warp ``TILE`` pin keeps the mma rows alone.
+    # A cross-CTA ``g<n>k`` REDUCE pin on the flash tree selects the SPLIT-KV warp rows (the
+    # partial keeps fragment residence; ``030_split`` realizes partial + LSE-combine finalize) —
+    # pin-driven, like the demoted warp tier. Any other non-empty REDUCE pin keeps its scalar
+    # escape below (it asks for a reduce partition only the scalar tiers honor), as does a split
+    # pin no warp row can legally carry (symbolic / non-divisible kv, atomic finalize).
+    reduce_pin = REDUCE.raw()
+    if reduce_pin:
+        try:
+            rplan = ReducePlan.parse(reduce_pin)
+        except Exception:  # noqa: BLE001 — an unparseable pin keeps the historical scalar escape
+            rplan = None
+        if rplan is not None and rplan.needs_split and rplan.finalize == "kernel":
+            pair = _twisted_pair(tile.op)
+            if pair is not None:
+                red, head, pv = pair
+                warps = _twisted_warp_options(tile, name, knobs, _smem_budget(ctx), _tma_allowed(ctx), _f16acc_allowed(ctx))
+                rows = _stamp_twisted_split(warps, red.axis.name, rplan)
+                if rows:
+                    rows = _narrow_flash_forms(rows, head, pv, keyed_only=True)
+                    return rows if len(rows) > 1 else rows[0]
     if not REDUCE.narrow([""])[0]:
         pair = _twisted_pair(tile.op)
         if pair is not None:
@@ -1447,6 +1467,25 @@ def _narrow_flash_forms(forms: list[TileOp], head: Contraction, pv: Contraction,
         logger.warning("TILE pin(s) %s match no flash form (warp / chain / per-cell); keeping the full fork", live)
         return forms
     return kept
+
+
+def _stamp_twisted_split(rows: list[TileOp], kv_name: str, plan: ReducePlan) -> list[TileOp]:
+    """The flash split-KV rows: each warp row with the pinned cross-CTA partition stamped on its
+    :class:`Reduction` node (``030_split`` consumes it) and spelled on ``REDUCE@<kv>``. Per-row
+    legality: a static kv extent divisible by ``cta``, and a slice divisible by the row's own
+    streaming key block (the staged chunking + fragment masks assume block-whole slices); an
+    illegal row is dropped, not degraded."""
+    out: list[TileOp] = []
+    for r in rows:
+        red = r.op.source if isinstance(r.op, Map) else r.op
+        head = red.partial[0]
+        bn = head.tile.regs[1] * head.tile.atom.shape[1]
+        ext = red.axis.extent
+        if not ext.is_static or ext.as_static() % plan.cta != 0 or (ext.as_static() // plan.cta) % bn != 0:
+            continue
+        op2 = _with_reduce(r.op, plan)
+        out.append(replace(r, op=op2, knobs={**r.knobs, _at(REDUCE, kv_name): plan.spell()}))
+    return out
 
 
 def _twisted_pair(op) -> tuple[Reduction, Contraction, Contraction] | None:

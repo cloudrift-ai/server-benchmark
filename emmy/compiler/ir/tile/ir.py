@@ -122,6 +122,11 @@ class Reduction:
     # a bare reduce (``sum`` / ``max`` / softmax's PLANAR row reduce), whose ``partial`` is plain
     # loop-IR stmts. :attr:`loop` splices the source's lowered loop nest ahead of the ``partial``.
     source: Reduction | Contraction | None = None
+    # The stream's ABSOLUTE base for a cross-CTA slice partial (flash split-KV: ``030_split`` shrinks
+    # ``axis`` to the slice length B and sets ``offset = _ksplit · B``). The fold walks its local
+    # ``[0, B)`` window; a consumer needing the absolute reduce-axis coordinate (gmem/TMA operand
+    # bases, the causal mask's key columns) adds this. ``None`` = the un-split stream (base 0).
+    offset: Expr | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.partial, Body):

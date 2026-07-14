@@ -151,7 +151,13 @@ each warp streams `fm` independent `(m, l, O)` chains against shared K/V fragmen
 P@V mma `TilePlan`s are derived per point, `_schedule._twisted_warp_options`), the scalar
 register-vector CHAIN (the FA-2 shared-score form), then the cooperative / per-cell reduce-partition escapes — every
 leaf row spelling the same `TILE@<qk_k>` / `TILE@<pv_k>` / `REDUCE@<kv>` key set (decided-empty where a form doesn't
-tile). A non-empty `REDUCE` pin remains the scalar escape; a **warp** `TILE` pin keeps the mma rows alone (loud on a
+tile). A cross-CTA `REDUCE=g<n>k` pin selects the **flash split-KV** warp rows instead (pin-driven): the plan stamps
+onto each row's `Reduction` node and `030_split` realizes it as a fragment-resident partial (the kv stream windowed to
+the CTA's slice, its absolute base on `Reduction.offset`; raw `(m, l, O)` state to an f32 `__partial` workspace) plus
+an LSE-combine finalize — kernel finalize only (the twisted `e^{Δm}` rescale can't be an atomic), static
+block-divisible kv only, and it pays where the un-split grid starves the SMs (few heads / short query axis: the
+2-head hd256 seq-512 shape runs 33.6 → 11.3 µs under `g8k`, parity with torch SDPA's internally-split flash). Any
+other non-empty `REDUCE` pin remains the scalar escape; a **warp** `TILE` pin keeps the mma rows alone (loud on a
 divisibility violation, declining with a log line when the pin doesn't fit the flash form — a bare warp pin may target
 another kernel), while a non-warp `TILE` pin narrows the flash rows by their stamped per-node spellings
 (`_schedule._narrow_flash_forms`, codec-canonicalized so `a:scalar` ≡ `""` and `f64x1` ≡ `f64`): `TILE=a:scalar` keeps

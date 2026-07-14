@@ -66,7 +66,7 @@ from emmy.compiler.ir.kernel.ir import (
 )
 from emmy.compiler.ir.schedule import Fold, Level, ReduceStage
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Select, Stmt, StridedLoop, Write
+from emmy.compiler.ir.stmt import Assign, Body, Cond, Init, Load, Select, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile.ir import Contraction, Map, Reduction
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _clamp_last, _f16acc, unroll_ok
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
@@ -375,18 +375,31 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     symbolic_k = not kv_axis.extent.is_static
     symbolic_q = not qk.m_axis.extent.is_static
     seq = _ext(kv_axis)
-    col_bases = tuple(BinaryExpr("+", kv0_var, Literal(t * atom_n, "int")) for t in range(nt))
+    # A cross-CTA slice partial (flash split-KV): the fold walks its LOCAL ``[0, B)`` window
+    # (``seq`` is the slice length after ``030_split`` shrank the axis) and ``red.offset`` is the
+    # slice's absolute base — added wherever the absolute key coordinate matters: the score-column
+    # masks (``col_bases``), the gmem/TMA operand bases, and the causal bound below.
+    kv_off = red.offset
+    assert kv_off is None or not symbolic_k, "a cross-CTA kv slice is static (030_split refuses symbolic)"
+
+    def _abs_kv(e: Expr) -> Expr:
+        return BinaryExpr("+", e, kv_off) if kv_off is not None else e
+
+    col_bases = tuple(_abs_kv(BinaryExpr("+", kv0_var, Literal(t * atom_n, "int"))) for t in range(nt))
 
     # Causal tile-skip: a triangular score prologue (keep ``kv ≤ m``) bounds the stream at the
     # CTA's last query row — ``kv_end = min(seq, (grid_m + 1) · um·fm·atom_m)``. Every skipped step
     # is the carrier's exact identity (all-masked scores: ``α = 1``, ``P = expf(−1e30 − m_i) = 0``),
     # so the early stop is bit-identical to the full stream. The bound is CTA-uniform (max over the
     # block's warps/query tiles, the raw grid var — NOT the per-warp ``m_blk``), which keeps the
-    # staged path's in-loop barriers legal.
+    # staged path's in-loop barriers legal. On a slice partial the bound is slice-local (the base
+    # subtracted; an above-the-diagonal slice goes negative and the loop runs zero steps).
     kv_end: Expr | None = None
     if _causal_stream(partial[1:], qk):
         cta_rows = Literal(um * fm * shape[0], "int")
         causal_rows = BinaryExpr("*", BinaryExpr("+", Var(grid[-1].name), Literal(1, "int")), cta_rows)
+        if kv_off is not None:
+            causal_rows = BinaryExpr("-", causal_rows, kv_off)
         kv_end = TernaryExpr(cond=BinaryExpr("<", causal_rows, seq), if_true=causal_rows, if_false=seq)
 
     # The channel spec (pivot first, one carried name per channel) — the merge is REGENERATED from
@@ -540,8 +553,9 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             _pv_streamed(pv, kv_axis),
             [((qt.ohfrags if pv_f16acc else qt.ofrags), qt.pa) for qt in qtiles],
             n_sub=lambda j: Literal(j * atom_n, "int"),
-            # Staged: the V slab is slot-local too (K rows are this block's keys).
-            k_sub=Literal(0, "int") if staged else kv0_var,
+            # Staged: the V slab is slot-local too (K rows are this block's keys). Gmem-direct
+            # reads V at the absolute key (the slice base added on a split partial).
+            k_sub=Literal(0, "int") if staged else _abs_kv(kv0_var),
             mask=pv_mask,
             b_slab="_v_smem" if staged else None,
             b_slot=v_slot,
@@ -581,8 +595,8 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             # cp.async has no OOB zero-fill — clamp a symbolic tail's key rows to the last valid
             # key. The drain's tail masks zero the overhanging P columns, so the duplicated rows
             # contribute exactly 0 (the cp.async counterpart of TMA's box zero-fill, which needs
-            # no clamp).
-            key = BinaryExpr("+", k0, row)
+            # no clamp). A slice partial reads at the absolute key (``_abs_kv`` — k0 is window-local).
+            key = _abs_kv(BinaryExpr("+", k0, row))
             return _clamp_last(key, seq) if symbolic_k and not is_tma else key
 
         def _k_index(k0: Expr):
@@ -597,7 +611,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             buf=k_load.input,
             shape=(bn, head_dim),
             index=_k_index,
-            coords=lambda k0: (*k_batch, k0, Literal(0, "int")),
+            coords=lambda k0: (*k_batch, _abs_kv(k0), Literal(0, "int")),
             pad_cols=kv_pad,
             swizzle=k_swz,
             box=(1,) * len(k_batch) + (bn, head_dim) if is_tma else None,
@@ -607,7 +621,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             buf=v_load.input,
             shape=(bn, d_v),
             index=_v_index,
-            coords=lambda k0: (*v_batch, k0, Literal(0, "int")),
+            coords=lambda k0: (*v_batch, _abs_kv(k0), Literal(0, "int")),
             pad_cols=kv_pad,
             swizzle=v_swz,
             box=(1,) * len(v_batch) + (bn, d_v) if is_tma else None,
@@ -651,9 +665,38 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # broadcast dims). Split it off the projection stmts; each fragment store reuses the template with
     # the row (m) axis → the query-tile base and the column (n) axis → the atom-n literal. Absent it,
     # fall back to the bare ``(batch…, row, n)`` grid store (the head-major identity).
+    m_name, n_name = qk.m_axis.name, pv.n_axis.name
+
+    # A cross-CTA slice partial stores the RAW carrier state instead of projecting (``030_split``
+    # replaced the projection with one ``Write`` per state component into the ``__partial``
+    # workspace): the expect component (O) is fragment-resident and rides the normal fragment
+    # store; the d-invariant row stats (m, l) are written once per query row at their template's
+    # pinned last slot, by the ``_t == 0`` lane of each row (the m16n8 C layout: lane ``g·4``
+    # holds rows ``g`` / ``g+8``).
+    if tail and all(isinstance(s, Write) for s in tail) and {s.value for s in tail} == set(names):
+        by_state = {s.value: s for s in tail}
+        lane = BinaryExpr("%", Builtin("thread_idx.x"), Literal(32, "int"))
+        g_expr = BinaryExpr("/", lane, Literal(4, "int"))
+        t_zero = BinaryExpr("==", BinaryExpr("%", lane, Literal(4, "int")), Literal(0, "int"))
+        close = []
+        for qt in qtiles:
+            o_tmpl = by_state[expect_name]
+            for j, f in enumerate(qt.ofrags):
+                sub = {m_name: qt.row_base, n_name: Literal(j * atom_n, "int")}
+                dst_index = tuple(sub.get(e.name, e) if isinstance(e, Var) else e for e in o_tmpl.index)
+                close.append(RegStore(dst_buffer=ctx.output, dst_index=dst_index, frag=f, shape=shape, ldm=d_v))
+            row_writes: list[Stmt] = []
+            for comp in (pivot_name, denom_name):
+                tmpl = by_state[comp]
+                for c, row_off in zip(_COMPS, (g_expr, BinaryExpr("+", g_expr, Literal(8, "int"))), strict=True):
+                    row_expr = BinaryExpr("+", qt.row_base, row_off)
+                    idx = tuple(row_expr if (isinstance(e, Var) and e.name == m_name) else e for e in tmpl.index)
+                    row_writes.append(Write(output=ctx.output, index=idx, value=f"{comp}{qt.sfx}{c}"))
+            close.append(Cond(cond=t_zero, body=tuple(row_writes)))
+        return state, fold, close
+
     store_tmpl = tail[-1] if tail and isinstance(tail[-1], Write) else None
     proj_tail = tail[:-1] if store_tmpl is not None else tail
-    m_name, n_name = qk.m_axis.name, pv.n_axis.name
     close: list[Stmt] = []
     batch_idx = tuple(qk.a_operand.index[:-2])  # (batch…, head) — passthrough grid vars (fallback)
     for qt in qtiles:

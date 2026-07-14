@@ -119,7 +119,14 @@ then `--ab` the candidates (this also mirrors what the golden replay would measu
 reproduced 3× each). The other 11 names replay clean through the golden plumbing (values within noise of the
 recorded `emmy_us`, no integrity flags).
 
-## Finding 5 — false-positive integrity flag on the dynM rms_norm replay
+## Finding 5 — false-positive integrity flag on the dynM rms_norm replay (FIXED on the PR #354 branch)
+
+> **FIXED 2026-07-13**: the floor reconstructed FLOPs from the ShapeKey with a hint multiplier that
+> assumed the symbolic axis was excluded from ``free_prod`` (true for ``from_matmul``, false for the
+> reduce-tier/attention golden keys — a 512× overcount). ``GoldenConfig.flops()`` (per-kind,
+> never-overestimated, hint-free) now feeds the gate via ``Sample.flops``; all eight affected ``.dynM``
+> shapes replay clean and a unit test pins both directions (clean on correct values, still fires on
+> impossible ones).
 
 `run --bench --golden gemma4_12b.rms_norm.k3840.dynM` flags the (correct, 6.5 µs) row
 `impossible: implies 310 TFLOP/s > 105 device peak`. The static twin at the same latency doesn't flag — the

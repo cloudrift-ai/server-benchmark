@@ -426,18 +426,16 @@ def _intensity_floor_flag(sample, total_us: float) -> str | None:
     bench (skipped finalize, silent failure), not a fast kernel (the 8.2 µs "2 PFLOP/s"
     2048³ golden row of the sixth sweep). Returns a flag string, or ``None`` when clean /
     ungateable (no shape, no FLOPs, unknown device peak)."""
-    shape = getattr(sample, "shape", None)
-    if shape is None or total_us <= 0:
+    # The CONFIG-side FLOP count (``GoldenConfig.flops()`` via ``Sample.from_golden`` — never an
+    # overestimate, dynamic axes already sized at their benched hint). Never reconstructed from
+    # the ShapeKey: the join key excludes symbolic axes on the matmul side but includes them on
+    # the reduce-tier/attention side, so the old hint-multiplier formula overcounted reduce-tier
+    # ``.dynM`` replays 512× and flagged every one "impossible" at its correct recorded value.
+    flops = getattr(sample, "flops", None)
+    if flops is None or flops <= 0 or total_us <= 0:
         return None
     from emmy import gpu  # noqa: PLC0415
-    from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415
 
-    # 2·M·N·K for a matmul; a symbolic-M shape excludes M from ``free_prod`` and benches
-    # at the hint. Reduce/pointwise shapes imply far fewer FLOPs than any peak, so the
-    # same formula is a safe (never-firing) ceiling for them.
-    flops = 2.0 * shape.free_prod * shape.reduce_max * (DEFAULT_SEQ_HINT if shape.is_dyn else 1)
-    if flops <= 0:
-        return None
     spec = gpu.by_name(gpu.live_name() or "")
     peak = spec.peak_tflops(getattr(sample, "dtype", None) or "fp32") if spec else None
     if peak is None:

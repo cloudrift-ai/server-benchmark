@@ -259,25 +259,28 @@ def test_bench_golden_variants_retraces_with_dynamic_spec(monkeypatch):
 
 
 def test_intensity_floor_flags_impossible_row(monkeypatch):
-    """The finding-4 gate: a benched row whose shape-implied FLOP/s exceeds the device's
+    """The finding-4 gate: a benched row whose CONFIG-implied FLOP/s exceeds the device's
     recorded peak is flagged (the sixth sweep's 8.2 µs "2 PFLOP/s" 2048³ golden row); a
-    plausible latency passes, and an unregistered device degrades to no gate."""
+    plausible latency passes, and an unregistered device degrades to no gate. The gate reads
+    ``Sample.flops`` (``GoldenConfig.flops()`` — never overestimated, hint-free) rather than
+    reconstructing from the ShapeKey: the join key excludes symbolic axes on the matmul side
+    but includes them on the reduce-tier side, so the old hint-multiplier reconstruction
+    flagged every reduce-tier ``.dynM`` replay 512× over (the golden-audit false positive)."""
     from types import SimpleNamespace
 
     from emmy import gpu
     from emmy.commands.run import _intensity_floor_flag
-    from emmy.compiler.pipeline.search.data.shape import ShapeKey
 
     monkeypatch.setattr(gpu, "live_name", lambda: "NVIDIA GeForce RTX 5090")
-    s = SimpleNamespace(shape=ShapeKey.from_matmul(2048, 2048, 2048, "fp32"), dtype="fp32")
+    s = SimpleNamespace(flops=2.0 * 2048**3, dtype="fp32")
     assert "impossible" in _intensity_floor_flag(s, 8.2)  # 2 PFLOP/s on a 104.8 TFLOP/s card
     assert _intensity_floor_flag(s, 300.0) is None  # ~57 TFLOP/s — plausible
-    # A dynamic shape benches at the hint: FLOPs include the hint-sized M.
-    d = SimpleNamespace(shape=ShapeKey.from_matmul(512, 512, 512, "fp32", dynamic=True), dtype="fp32")
+    # A dynamic golden's flops() already sizes the symbolic axis at its benched hint.
+    d = SimpleNamespace(flops=2.0 * 512**3, dtype="fp32")
     assert "impossible" in _intensity_floor_flag(d, 0.5)
     assert _intensity_floor_flag(d, 9.0) is None
-    # Shapeless (--ab) rows and unknown devices are ungateable.
-    assert _intensity_floor_flag(SimpleNamespace(shape=None, dtype="fp32"), 1.0) is None
+    # Flopless (--ab) rows and unknown devices are ungateable.
+    assert _intensity_floor_flag(SimpleNamespace(flops=None, dtype="fp32"), 1.0) is None
     monkeypatch.setattr(gpu, "live_name", lambda: "Some Unknown GPU")
     assert _intensity_floor_flag(s, 8.2) is None
 

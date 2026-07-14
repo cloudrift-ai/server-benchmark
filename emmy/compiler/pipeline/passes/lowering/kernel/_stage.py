@@ -12,10 +12,13 @@ The fill is written against a small :class:`CtaTile` thread-striping seam (a lin
 thread id + the thread count), NOT a materializer's internal warp/register geometry — so one fill
 helper drives any tier that stages; the per-operand gmem tile-base rides the :class:`Operand`. The
 A/B operands themselves ride as an ``(a, b)`` :class:`Operand` pair, so a transport loops over the
-pair instead of spelling A then B. The staged K-loop itself is ONE
-skeleton, :func:`staged_kloop` (``fill → commit → wait → drain → Sync``, ``depth`` the sole
-buffering knob), driven by a :class:`Transport` strategy (:class:`CpAsyncTransport` /
-:class:`TmaTransport`) — the two producers put behind one ``fill``/``commit``/``wait`` seam. The
+pair instead of spelling A then B. The staged K-loop itself is ONE liveness-scheduled
+skeleton, :func:`pipelined_kloop` — per operand-group a ``(transport, depth)`` pair, the fill /
+wait / barrier placement DERIVED from which tagged body segments read each group's slabs (the
+whole-body single-group entry is :func:`staged_kloop`; the warp-flash alternating form is the same
+walk over its three tagged segments) — driven by a :class:`Transport` strategy
+(:class:`CpAsyncTransport` / :class:`TmaTransport`) — the two producers put behind one
+``fill``/``commit``/``wait`` seam. The
 slab feeds the same staged ``LdmatrixLoad`` / scalar ``Load`` drain regardless of which producer
 (cp.async / TMA) filled it. A slab feeding an mma drain is **swizzled** (:func:`pick_swizzle_atom`
 per operand): TMA permutes the 16 B chunks in hardware during the box copy, a cp.async fill applies
@@ -790,66 +793,180 @@ def _wspec_kloop(
     return decls, [*pre, role]
 
 
-def alternating_kloop(
+def _staged_slabs(transport) -> frozenset[str]:
+    """The smem slab names ``transport`` fills — the liveness key a scheduled operand-group's live
+    range is derived against (segments tag the slab names they READ; the group's range is the
+    ``[first, last]`` interval of segments whose tags intersect these names)."""
+    ops = (*getattr(transport, "operands", ()), *getattr(transport, "async_operands", ()))
+    return frozenset(op.slab for op in ops)
+
+
+@dataclass(eq=False)
+class _Group:
+    """One operand-group being placed by :func:`pipelined_kloop` (internal working state — identity
+    semantics, the counting pass indexes groups by object). ``kind`` is the DERIVED fill placement:
+    ``"ring"`` (depth ≥ 2 — prefetch chunk ``i+ring-1`` at the top of the body), ``"current"``
+    (depth 1, live across the whole body — fill chunk ``i`` at the top, wait immediately) or
+    ``"kill"`` (depth 1, live in a proper sub-interval — refill chunk ``i+1`` at the kill point,
+    right after the barrier past the last reader). ``lag`` is the iteration distance between a
+    chunk's fill and its wait (``ring-1`` / ``0`` / ``1`` respectively) — also the number of
+    chunks the prologue primes."""
+
+    transport: object
+    ring: int
+    read_slot: Expr
+    read_phase: Expr
+    first: int = 0
+    last: int = 0
+    kind: str = "current"
+    lag: int = 0
+    n_flight: int = 0  # cp.async wait_group count (the static counting pass below)
+
+
+def pipelined_kloop(
     *,
-    k_transport,
-    v_transport,
-    qk_drain: Callable[[Expr], list[Stmt]],
-    mid: list[Stmt],
-    pv_drain: Callable[[Expr], list[Stmt]],
+    operands: tuple[tuple[object, int], ...],
+    build_segments: Callable[[tuple[Expr, ...]], list[tuple[list[Stmt], frozenset[str]]]],
     bk_elems: int,
-    k_extent: int,
-    k0: str,
+    n_chunks: int | Dim,
+    k_extent: int | Dim,
+    k0: str = "_ks",
     k_end: Expr | None = None,
 ) -> tuple[list[Stmt], list[Stmt]]:
-    """The ALTERNATING single-slab K-loop — the warp-flash stream's FA-2 choreography (the
-    ``d1/tma/alt`` stage). Each operand keeps ONE slab on its OWN mbarrier, and the refill lands
-    in the phase that no longer reads it, so both copies overlap compute without a second slot::
+    """The **one** liveness-scheduled staged K-loop skeleton — every staged form (the matmul tier's
+    paired prefetch ring, the warp-flash stream's alternating single-slab pipeline, the degenerate
+    single buffer) is this scheduler run over the loop body's dataflow, none is its own skeleton.
 
-        prologue: fill K_0, fill V_0
-        step i:   wait K_i | qk_drain | Sync | fill K_{i+1} | mid (softmax) |
-                  wait V_i | pv_drain | Sync | fill V_{i+1}
+    ``operands`` is the ``(transport, depth)`` pair per scheduled operand-group; ``build_segments``
+    is called ONCE with each group's read-slot expr (positional) and returns the body as ordered
+    ``(stmts, reads)`` segments, ``reads`` naming the smem slabs the segment drains. Two structural
+    facts drive every placement decision:
 
-    K_{i+1}'s copy runs under ``mid`` + the P·V mmas; V_{i+1}'s under step ``i+1``'s Q·K.
-    Both async transports ride the same seam: TMA parity-waits the operand's own mbarrier (the
-    single slot's parity alternates per generation, ``phase = i % 2``); cp.async commits each
-    fill into its own group — the K,V,K,V commits form a per-thread QUEUE, so a uniform
-    ``wait_group(1)`` at either wait point completes exactly the OLDER (this phase's) group while
-    the newer sibling stays in flight. The tail refills clamp onto the last needed chunk
-    (re-fetching it — harmless, never waited). ``k_end`` is the causal early stop (the hoisted
-    ``<k0>_end`` for-init bound, as :func:`staged_kloop`). Static block-divisible extents only
-    (the resolver's gate)."""
-    decls = k_transport.slab_decls(1) + v_transport.slab_decls(1)
-    pre = [*k_transport.prologue(1), *v_transport.prologue(1)]
-    pre += k_transport.fill(k0=_lit(0), slot=_lit(0))
-    pre += k_transport.commit()
-    pre += v_transport.fill(k0=_lit(0), slot=_lit(0))
-    pre += v_transport.commit()
+    - **live range**: the ``[first, last]`` segment interval whose ``reads`` intersect the group's
+      slab names (:func:`_staged_slabs`) — wait before ``first``, and a CTA barrier after ``last``
+      (all readers past the slab) before any refill may overwrite it;
+    - **depth**: ``ring = min(depth, n_chunks)`` slots. ``ring >= 2`` prefetches chunk ``i+ring-1``
+      at the top of the body (today's paired ring). ``ring == 1`` live across the WHOLE body fills
+      chunk ``i`` at the top and waits immediately (no overlap to be had — the single-buffer
+      degenerate). ``ring == 1`` live in a PROPER sub-interval refills chunk ``i+1`` at its kill
+      point — the refill overlaps every segment outside the live range (the flash alternating
+      form: K refills under softmax + P·V, V under the next step's Q·K — not because attention
+      alternates, but because that is where their live ranges end). The prologue primes exactly
+      ``lag`` chunks — the fills the ``lag`` virtual iterations before step 0 would have issued.
 
-    i_expr = BinaryExpr("/", Var(k0), _lit(bk_elems))
-    phase = BinaryExpr("%", i_expr, _lit(2))
-    k0_next = BinaryExpr("+", Var(k0), _lit(bk_elems))
-    if k_end is not None:
-        end_var = Var(f"{k0}_end")  # the loop's hoisted for-init bound (StridedLoop.end)
-        last_k0 = BinaryExpr("*", BinaryExpr("/", BinaryExpr("-", end_var, _lit(1)), _lit(bk_elems)), _lit(bk_elems))
-        k0_pref = TernaryExpr(cond=BinaryExpr("<", k0_next, end_var), if_true=k0_next, if_false=last_k0)
-    else:
-        k0_pref = TernaryExpr(cond=BinaryExpr("<", k0_next, _lit(k_extent)), if_true=k0_next, if_false=_lit(k_extent - bk_elems))
+    A loop-INVARIANT staged operand (value delta 0 per iteration — the alternating form's staged Q)
+    never enters the schedule: with nothing advancing there is no wait and no refill, so its whole
+    derivation is a prologue-only fill the caller emits ahead of the loop.
+
+    Synchronization is derived, not hand-counted: TMA groups parity-wait their own mbarrier
+    (``phase = (i / ring) % 2``); cp.async groups get ``wait_group(N)`` with ``N`` = the count of
+    younger commits issued between this group's fill and its wait point — a static counting pass
+    over the placed schedule (the alternating K,V,K,V queue's uniform ``wait_group(1)`` is this
+    count; the ring's ``ring-1`` likewise). Tail refills clamp onto the last needed chunk
+    (re-fetched, never waited — keeps the fills unguarded and every barrier CTA-uniform).
+
+    ``k_end`` (CTA-uniform, ``≤ k_extent``) stops the chunk loop early — the causal flash stream's
+    triangular kv bound; the clamp re-pins onto the last NEEDED chunk via the loop's hoisted
+    ``<k0>_end`` for-init bound. A symbolic ``k_extent`` (a ``Dim``) allocates the full ``depth``
+    ring and clamps against the runtime chunk count (kill-point groups are static-only — the alt
+    resolver's gate). Returns ``(slab_decls, [prologue…, outer_loop])``."""
+    symbolic = isinstance(k_extent, Dim)
+    i_expr = BinaryExpr("/", Var(k0), _lit(bk_elems))  # chunk index of the current step
+
+    groups: list[_Group] = []
+    for transport, depth in operands:
+        ring = depth if symbolic else (min(depth, n_chunks) if n_chunks >= 2 else 1)
+        if ring == 1:
+            read_slot, read_phase = _lit(0), BinaryExpr("%", i_expr, _lit(2))
+        else:
+            read_slot = BinaryExpr("%", i_expr, _lit(ring))
+            read_phase = BinaryExpr("%", BinaryExpr("/", i_expr, _lit(ring)), _lit(2))
+        groups.append(_Group(transport=transport, ring=ring, read_slot=read_slot, read_phase=read_phase))
+
+    segments = build_segments(tuple(g.read_slot for g in groups))
+
+    for g in groups:
+        slabs = _staged_slabs(g.transport)
+        readers = [s for s, (_stmts, reads) in enumerate(segments) if reads & slabs]
+        assert readers, f"pipelined_kloop: no segment reads the staged slabs {sorted(slabs)}"
+        g.first, g.last = readers[0], readers[-1]
+        if g.ring >= 2:
+            g.kind, g.lag = "ring", g.ring - 1
+        elif g.first == 0 and g.last == len(segments) - 1:
+            g.kind, g.lag = "current", 0
+        else:
+            assert not symbolic, "a kill-point refill needs a static extent (the alt resolver's gate)"
+            g.kind, g.lag = "kill", 1
+
+    def _fill_k0(lag: int) -> Expr:
+        """The refill's chunk base — ``k0 + lag·bk``, clamped onto the last needed chunk (the
+        ``k_end`` early stop reads the loop's hoisted ``<k0>_end`` for-init bound — inlining the
+        raw expr per iteration measurably spills; a symbolic extent clamps at runtime)."""
+        k0_next = BinaryExpr("+", Var(k0), _lit(lag * bk_elems))
+        if k_end is not None:
+            end_var = Var(f"{k0}_end")
+            last_k0 = BinaryExpr("*", BinaryExpr("/", BinaryExpr("-", end_var, _lit(1)), _lit(bk_elems)), _lit(bk_elems))
+            bound: Expr = end_var
+        elif symbolic:
+            last_k0 = BinaryExpr("*", BinaryExpr("-", n_chunks.expr, _lit(1)), _lit(bk_elems))
+            bound = k_extent.expr
+        else:
+            last_k0 = _lit((n_chunks - 1) * bk_elems)
+            bound = _lit(k_extent)
+        return TernaryExpr(cond=BinaryExpr("<", k0_next, bound), if_true=k0_next, if_false=last_k0)
+
+    decls: list[Stmt] = []
+    pre: list[Stmt] = []
+    for g in groups:
+        decls += g.transport.slab_decls(g.ring)
+    for g in groups:
+        pre += g.transport.prologue(g.ring)
+    for g in groups:  # prime exactly ``lag`` chunks per group — what iterations -lag..-1 would have filled
+        for c in range(g.lag):
+            pre += g.transport.fill(k0=_lit(c * bk_elems), slot=_lit(c))
+            pre += g.transport.commit()
+
+    # The wait-group counting pass: lay the committing fills out in body order (top fills first,
+    # then the kill-point refills by segment), and for each group count the commits issued between
+    # its chunk's fill (``lag`` iterations back, position ``f_idx``) and its wait point (before
+    # segment ``first`` — after the top fills and any earlier kill fills). Uniform-code assumption:
+    # ALL threads issue fills in the same body order, so the per-thread commit queues agree — holds
+    # by construction (fills are cooperative loops, never warp-divergent). Non-committing groups
+    # (TMA / bare sync) get the value for signature parity only; their waits ignore it.
+    committing = [g for g in groups if g.transport.commit()]
+    events = [g for g in committing if g.kind in ("ring", "current")]
+    events += sorted((g for g in committing if g.kind == "kill"), key=lambda g: g.last)
+    m = len(events)
+    for g in groups:
+        if g not in events:
+            g.n_flight = g.ring - 1 if g.kind == "ring" else g.lag
+            continue
+        f_idx = events.index(g)
+        w_cnt = sum(1 for e in events if e.kind in ("ring", "current") or e.last < g.first)
+        g.n_flight = (w_cnt - f_idx - 1) if g.lag == 0 else (m - 1 - f_idx) + (g.lag - 1) * m + w_cnt
+        assert g.n_flight >= 0, "wait-group counting derived a negative in-flight count"
 
     body: list[Stmt] = []
-    # ``in_flight=1``: cp.async keeps the newer sibling group outstanding (TMA ignores it — the
-    # per-operand mbarrier parity is the gate there).
-    body += k_transport.wait(in_flight=1, slot=_lit(0), phase=phase)
-    body += qk_drain(_lit(0))
-    body.append(Sync())  # every warp done reading the K slab before its refill
-    body += k_transport.fill(k0=k0_pref, slot=_lit(0))
-    body += k_transport.commit()
-    body += mid
-    body += v_transport.wait(in_flight=1, slot=_lit(0), phase=phase)
-    body += pv_drain(_lit(0))
-    body.append(Sync())  # every warp done reading the V slab before its refill
-    body += v_transport.fill(k0=k0_pref, slot=_lit(0))
-    body += v_transport.commit()
+    for g in groups:  # top fills: the ring prefetch / the single-buffer current-chunk fill
+        if g.kind == "ring":
+            fill_slot = BinaryExpr("%", BinaryExpr("+", i_expr, _lit(g.lag)), _lit(g.ring))
+            body += g.transport.fill(k0=_fill_k0(g.lag), slot=fill_slot, k0_cur=Var(k0))
+            body += g.transport.commit()
+        elif g.kind == "current":
+            body += g.transport.fill(k0=Var(k0), slot=_lit(0), k0_cur=Var(k0))
+            body += g.transport.commit()
+    for s, (stmts, _reads) in enumerate(segments):
+        for g in groups:
+            if g.first == s:
+                body += g.transport.wait(in_flight=g.n_flight, slot=g.read_slot, phase=g.read_phase)
+        body += stmts
+        enders = [g for g in groups if g.last == s]
+        if enders:
+            body.append(Sync())  # every reader past the slab(s) before a refill / later prefetch overwrites them
+            for g in enders:
+                if g.kind == "kill":
+                    body += g.transport.fill(k0=_fill_k0(1), slot=_lit(0))
+                    body += g.transport.commit()
 
     outer = StridedLoop(
         axis=Axis(name=k0, extent=k_extent), start=_lit(0), step=_lit(bk_elems), body=Body(tuple(body)), unroll=False, end=k_end
@@ -870,17 +987,14 @@ def staged_kloop(
     k0: str = "_ks",
     k_end: Expr | None = None,
 ) -> tuple[list[Stmt], list[Stmt]]:
-    """The **one** staged K-loop skeleton — ``fill → commit → wait → drain → Sync`` over the K-chunks,
-    with ``depth`` the sole buffering knob and ``transport`` the sole producer seam. Returns
-    ``(slab_decls, [prologue…, outer_loop])``.
-
-    ``ring = min(depth, n_chunks)`` slots (``<2`` chunks ⇒ nothing to prefetch, ``ring == 1``):
-
-    - ``ring == 1`` (single buffer): fill chunk ``i`` into slot 0, wait everything, ``drain`` slot 0.
-    - ``ring >= 2`` (gmem→smem prefetch ring): a prologue primes chunks ``0..ring-2`` into slots
-      ``0..ring-2``; each loop step prefetches chunk ``i+ring-1`` (clamped to the last chunk so the
-      commit/wait stays uniform across all CTA threads — the barrier-under-mask invariant) into slot
-      ``(i+ring-1) % ring``, then waits ``ring-1`` chunks in flight and ``drain``\\ s slot ``i % ring``.
+    """The whole-body staged K-loop — ONE operand-group live across the entire ``drain``, run through
+    :func:`pipelined_kloop` (the segment list is the single ``(drain(slot), slabs)`` entry, so the
+    scheduler derives exactly the classic phases): ``ring = min(depth, n_chunks)`` slots (``<2``
+    chunks ⇒ nothing to prefetch, ``ring == 1``); ``ring == 1`` fills chunk ``i`` into slot 0 and
+    waits everything; ``ring >= 2`` primes chunks ``0..ring-2`` in the prologue, prefetches chunk
+    ``i+ring-1`` (clamped to the last chunk so the commit/wait stays uniform across all CTA threads
+    — the barrier-under-mask invariant) into slot ``(i+ring-1) % ring``, waits ``ring-1`` chunks in
+    flight and ``drain``\\ s slot ``i % ring``. Returns ``(slab_decls, [prologue…, outer_loop])``.
 
     ``transport`` supplies fill/commit/wait + the slab layout; ``drain(slot)`` is the atom leaf reading
     ring ``slot`` (``ldmatrix`` fragments / scalar slab ``Load``\\ s). For TMA the wait phase toggles per
@@ -902,16 +1016,15 @@ def staged_kloop(
     # the transport absorb any over-primed tail chunk (TMA zero-fills its box; cp.async clamp-reads
     # the last valid key rows) — the drain masks those keys to the fold identity, so it stays
     # bit-identical to gmem-direct. Static callers pass plain ``int``s.
-    symbolic = isinstance(k_extent, Dim)
-    ring = depth if symbolic else (min(depth, n_chunks) if n_chunks >= 2 else 1)
     if workers is not None:
+        symbolic = isinstance(k_extent, Dim)
         assert not symbolic, "warp-spec + symbolic-kv staging is not built (WSPEC drives static-kv TMA only)"
         assert isinstance(transport, TmaTransport), "warp specialization drives the TMA transport only (scheduler legality)"
         assert block_threads is not None, "warp specialization needs the compute-band thread count"
         return _wspec_kloop(
             transport=transport,
             drain=drain,
-            ring=ring,
+            ring=min(depth, n_chunks) if n_chunks >= 2 else 1,
             bk_elems=bk_elems,
             n_chunks=n_chunks,
             k_extent=k_extent,
@@ -919,51 +1032,13 @@ def staged_kloop(
             block_threads=block_threads,
             k_end=k_end,
         )
-    K = k_extent
-    decls = transport.slab_decls(ring)
-    pre = transport.prologue(ring)
-    for s in range(ring - 1):  # prime chunks 0..ring-2 into slots 0..ring-2 (phase 0)
-        pre += transport.fill(k0=_lit(s * bk_elems), slot=_lit(s))
-        pre += transport.commit()
-
-    i_expr = BinaryExpr("/", Var(k0), _lit(bk_elems))  # chunk index of the current step
-    body: list[Stmt] = []
-    if ring == 1:
-        phase = BinaryExpr("%", i_expr, _lit(2))
-        body += transport.fill(k0=Var(k0), slot=_lit(0), k0_cur=Var(k0))
-        body += transport.commit()
-        body += transport.wait(in_flight=0, slot=_lit(0), phase=phase)
-        body += drain(_lit(0))
-        body.append(Sync())
-    else:
-        pref_chunk = BinaryExpr("+", i_expr, _lit(ring - 1))  # logical index of the prefetched chunk
-        pref_slot = BinaryExpr("%", pref_chunk, _lit(ring))
-        read_slot = BinaryExpr("%", i_expr, _lit(ring))
-        read_phase = BinaryExpr("%", BinaryExpr("/", i_expr, _lit(ring)), _lit(2))
-        # The last chunk's base and the loop bound are runtime Exprs when kv is symbolic (``Dim``),
-        # else folded literals — the clamp pins an overhanging prefetch back onto the last chunk.
-        # A ``k_end`` early stop moves both onto the last chunk this CTA actually drains; the clamp
-        # reads the loop's hoisted ``<k0>_end`` (the ``StridedLoop.end`` for-init decl), not the
-        # raw expr — inlining it per iteration measurably spills.
-        if k_end is not None:
-            end_var = Var(f"{k0}_end")
-            last_k0 = BinaryExpr("*", BinaryExpr("/", BinaryExpr("-", end_var, _lit(1)), _lit(bk_elems)), _lit(bk_elems))
-            k_bound: Expr = end_var
-        else:
-            last_k0 = (
-                BinaryExpr("*", BinaryExpr("-", n_chunks.expr, _lit(1)), _lit(bk_elems)) if symbolic else _lit((n_chunks - 1) * bk_elems)
-            )
-            k_bound = k_extent.expr if symbolic else _lit(k_extent)
-        k0_next = BinaryExpr("+", Var(k0), _lit((ring - 1) * bk_elems))
-        k0_pref = TernaryExpr(cond=BinaryExpr("<", k0_next, k_bound), if_true=k0_next, if_false=last_k0)
-        # ``k0_cur`` (the un-clamped loop base) is the sync transport's current-chunk handle —
-        # its single-buffer compute fills target chunk ``i`` while the async prefetch targets
-        # ``i+ring-1``; the copy transports ignore it.
-        body += transport.fill(k0=k0_pref, slot=pref_slot, k0_cur=Var(k0))
-        body += transport.commit()
-        body += transport.wait(in_flight=ring - 1, slot=read_slot, phase=read_phase)
-        body += drain(read_slot)
-        body.append(Sync())  # done reading this slot before a later chunk prefetches into it
-
-    outer = StridedLoop(axis=Axis(name=k0, extent=K), start=_lit(0), step=_lit(bk_elems), body=Body(tuple(body)), unroll=False, end=k_end)
-    return decls, [*pre, outer]
+    slabs = _staged_slabs(transport)
+    return pipelined_kloop(
+        operands=((transport, depth),),
+        build_segments=lambda slots: [(drain(slots[0]), slabs)],
+        bk_elems=bk_elems,
+        n_chunks=n_chunks,
+        k_extent=k_extent,
+        k0=k0,
+        k_end=k_end,
+    )

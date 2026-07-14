@@ -755,9 +755,10 @@ of the `TILE` knob): `d<depth>` the gmem→smem ring depth, `sync`/`cp.async`/TM
 smem→register double-buffer. `stage=None` (unset / unparseable) = gmem-direct. Also rides the warp-flash TWISTED
 stream (`STAGE@<kv>` — the K/V slabs of one streaming block; `reg_depth` clamps to 1), where `d1/tma/alt` /
 `d1/cp/alt` is the **alternating single-slab pipeline**: one slab per operand (TMA: its own mbarrier; cp.async: its
-own commit group, a uniform `wait_group(1)` completing the older sibling), refills interleaved with the phases that
-no longer read them, Q staged through smem — the wide (64-key) streaming block's staging (flash stream only; the
-matmul resolvers decline it). See `lowering/kernel/ARCHITECTURE.md`.
+own commit group, a uniform `wait_group(1)` completing the older sibling), each refill placed at its operand's kill
+point by the liveness-scheduled skeleton (derived from the segment live ranges, not hand-assembled), Q staged through
+smem — the wide (64-key) streaming block's staging (flash stream only; the matmul resolvers decline it). See
+`lowering/kernel/ARCHITECTURE.md`.
 
 **`WSPEC`** (STR codec, `010_recognize` / `_schedule` → `lowering/kernel/010_materialize`) — the warp-specialization
 codec `p<np>`: a producer warp band split over the fixed pipeline (bare/root-global; the fourth schedule-fork level).

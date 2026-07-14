@@ -721,7 +721,8 @@ class Placement:
 # The operand-transport + warp-split descriptors. ``Stage`` (sync / cp.async / TMA) is the operand
 # pipeline; ``WarpSpec`` (the WSPEC worker split) partitions the CTA's warps into producer /
 # compute bands over that fixed pipeline — both resolved scheduler-side and applied verbatim by
-# the materializer (``lowering/kernel/_stage.staged_kloop``).
+# the materializer (the liveness-scheduled ``lowering/kernel/_stage.pipelined_kloop``, via its
+# whole-body ``staged_kloop`` entry).
 # --------------------------------------------------------------------------- #
 
 

@@ -72,7 +72,7 @@ and GQA (``q_heads == group · kv_heads``; the K/V head axis read at ``head //
 group`` directly, no materialized broadcast). Fusion is the ``PLACE@fold`` placement
 (default ``fuse``; ``cut`` is the multi-kernel attention escape — gated in
 ``010_recognize``, before :func:`try_flash` is even tried); the two-level ``OptionFork``
-offer + ``AnalyticPrior`` cold-start are a follow-up.
+offer + ``OfflinePrior`` cold-start are a follow-up.
 """
 
 from __future__ import annotations
@@ -127,7 +127,7 @@ def _struct_features(batch: list[int], s_q: Dim, s_k: Dim, head_dim: int, d_v: i
     because the fused fragment is BUILT as a ``TileOp`` (it never passes the loop-dialect stamp).
     Free = the grid ``(batch…, m, d)``, reduce = the streamed ``kv`` + the score ``dd``; a symbolic
     seq axis is excluded from the products and counted in ``S_ext_n_symbolic_axis`` (the flag the
-    ``AnalyticPrior`` selects its masked-tier weight set on). Riding the ``TileOp`` knob base, they
+    ``OfflinePrior`` selects its masked-tier weight set on). Riding the ``TileOp`` knob base, they
     reach every flash fork leaf row, so the prior's occupancy terms fire when ranking the forms."""
     free = [*batch, d_v]
     reduce_ = [head_dim]

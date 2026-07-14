@@ -45,7 +45,7 @@ _S, _H, _I = 32, 1024, 3072
 def _isolated_prior(monkeypatch, tmp_path):
     """Untrained prior so descents are deterministic regardless of the host's
     checkpoint; target reset after each test."""
-    monkeypatch.setenv("EMMY_PRIOR_FILE", str(tmp_path / "prior.json"))
+    monkeypatch.setenv("EMMY_ONLINE_FILE", str(tmp_path / "prior.json"))
     yield
     target_mod.set_target(None)
 

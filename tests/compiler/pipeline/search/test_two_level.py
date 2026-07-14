@@ -44,10 +44,10 @@ _PATIENCE = 8
 def _force_target(monkeypatch, tmp_path):
     from emmy.compiler import target as target_mod
 
-    # Isolate the learned-prior checkpoint: ``run_two_level_tune`` trains and
+    # Isolate the online-prior checkpoint: ``run_two_level_tune`` trains and
     # checkpoints the global prior, and these fake-backend rows must never
-    # pollute the host's real ``~/.cache/emmy/prior.json``.
-    monkeypatch.setenv("EMMY_PRIOR_FILE", str(tmp_path / "prior.json"))
+    # pollute the host's real ``~/.cache/emmy/online.json``.
+    monkeypatch.setenv("EMMY_ONLINE_FILE", str(tmp_path / "prior.json"))
     target_mod.set_target((8, 0))
     yield
     target_mod.set_target(None)
@@ -277,7 +277,7 @@ def test_inner_reward_rerun_is_replay_dominated() -> None:
     ties), never worsens.
 
     Two things changed vs the old idempotence invariant. Ranking moved from the
-    priority-sorted enumeration to the ``Prior`` (``AnalyticPrior`` cold), so the
+    priority-sorted enumeration to the ``Prior`` (``OfflinePrior`` cold), so the
     cold search walks a real prior-ranked frontier instead of finding the best at
     option-0; that frontier interacts with the cache's cross-op kernel sharing, so
     a warm rerun wanders into a handful of new frontier variants while replaying
@@ -349,7 +349,7 @@ def test_inner_reward_parallel_matches_serial(monkeypatch) -> None:
     reward as the one-slot serial path. Each op's search is seeded by ``op_idx``
     (execution-order-independent) and the fake backend's latency keys off
     ``op_cache_key`` (slot-independent), so completion order can't change the
-    result. ``prior=None`` keeps this off the learned-prior (catboost) path.
+    result. ``prior=None`` keeps this off the online-prior (catboost) path.
 
     The tile is pinned to per-cell (``EMMY_TILE=""``) so the matmul enumerates a
     single candidate: the tile move catalog (``search/space.py``) now offers ~20

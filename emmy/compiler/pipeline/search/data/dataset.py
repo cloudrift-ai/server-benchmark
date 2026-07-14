@@ -1,5 +1,5 @@
 """``Dataset`` — a queryable read-view over a bag of :class:`Sample`s, with one
-adapter per measurement-data source (golden / tune-DB / learned-prior reservoir)
+adapter per measurement-data source (golden / tune-DB / online-prior reservoir)
 and the two grouping axes the consumers need.
 
 The two groupings are deliberately distinct and do **not** collapse:
@@ -47,7 +47,7 @@ class Dataset:
     ) -> Dataset:
         """Every golden config (matmul / reduce / pointwise), optionally narrowed by
         exact ``name``, name substring ``kernel``, or ``dtype``. ``compile_s_feats``
-        derives the full ``S_*`` histogram per config (needed only for learned-prior
+        derives the full ``S_*`` histogram per config (needed only for online-prior
         featurization). ``live_gpu`` scopes to the live card's goldens
         (:func:`goldens_for_live_gpu`) — so a multi-GPU goldens dir doesn't return
         another card's config under the same name (cards with no recorded golden fall
@@ -89,8 +89,8 @@ class Dataset:
 
     @classmethod
     def from_prior(cls, prior) -> Dataset:
-        """The learned prior's bounded reservoir as samples. Works through
-        ``FallbackPrior`` (it delegates ``_dataset`` to the learned half)."""
+        """The online prior's bounded reservoir as samples. Works through
+        ``FallbackPrior`` (it delegates ``_dataset`` to the online half)."""
         return cls([Sample.from_prior_row(k, v) for k, v in prior._dataset])
 
     @classmethod

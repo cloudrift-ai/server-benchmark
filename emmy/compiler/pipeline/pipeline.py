@@ -536,7 +536,7 @@ class Pipeline:
             for nid, ident in new.items():
                 blocked.setdefault(nid, set()).add(ident)
         # The prior-ranked tiles all overflowed ``validate(ctx)`` within the
-        # retry budget — a *learned* prior can extrapolate a large tile onto a
+        # retry budget — an *online* prior can extrapolate a large tile onto a
         # small shape (e.g. one trained on big square matmuls picking an
         # over-smem-cap tile for a tiny projection), and the blocklist retry
         # exhausts before reaching an in-budget leaf. Before giving up, take the
@@ -691,7 +691,7 @@ class Run:
       ``None`` for a deterministic resolution (:meth:`resolve`), which
       has no frontier to rank.
     * ``db`` — the autotune store ``_bench_terminal`` persists into (the
-      training data for the learned prior).
+      training data for the online prior).
     * ``backend`` — optional measurement backend (``None`` = stub bench,
       no persistence).
     * ``dump`` — optional artifact collector: :meth:`Candidate._log_apply`
@@ -838,7 +838,7 @@ class Run:
         structural)`` and spawns one ``LazyCandidate`` per option, in
         rule-emission order. Selection is the search's job (tuning
         explores every fork and ranks the unvisited frontier with its
-        learned prior). Siblings share ``cand`` as ``inner`` so they
+        online prior). Siblings share ``cand`` as ``inner`` so they
         don't duplicate the snapshot; ``from_option`` lifts concrete
         ``Op``/``Graph`` options into leaf Forks so every LazyCandidate's
         pending carries a uniform Fork shape. Cursor advance for the rule

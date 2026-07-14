@@ -22,7 +22,7 @@ Three groups:
   the ``_schedule`` helper inside ``lowering/tile/010_recognize`` and materialized in
   ``lowering/kernel/010_materialize``. Each is the **ephemeral** codec spelling: it resolves into a
   schedule slice (``ReducePlan`` / ``TilePlan`` / ``Stage`` / ``WarpSpec``) and rides on ``TileOp.knobs``
-  so the learned prior featurizes / tunes the decision. ``off=""`` (the conservative serial / per-cell /
+  so the online prior featurizes / tunes the decision. ``off=""`` (the conservative serial / per-cell /
   gmem-direct / uniform default) is auto-stamped on kernels the pass doesn't schedule.
 - **The structural placement pin** (``PLACE``) — pin-only: where an intermediate edge lives, registers
   (``fuse``) or memory (``cut``), per edge-class element (``PLACE@<element>`` via ``EMMY_KNOBS``).
@@ -57,7 +57,7 @@ REDUCE = Knob(
 # never both. The value self-discriminates: an ``a:<atom>`` token selects the warp fragment (see
 # ``schedule.is_warp_codec``); otherwise the scalar fragment. Only a ``CONTRACTION`` tiles its output
 # today; ``off=""`` auto-stamps everything else. The codec is the sole on-dict spelling — the
-# learned-prior featurizer (``features.mma_atom`` / ``is_warp`` / ``_free_slots`` / ``tile_signature``)
+# online-prior featurizer (``features.mma_atom`` / ``is_warp`` / ``_free_slots`` / ``tile_signature``)
 # parses it directly (no legacy ``WM``/``WN``/``MMA`` keys).
 TILE = Knob(
     "TILE",
@@ -90,7 +90,7 @@ STAGE = Knob(
 
 
 def _wspec_features(val) -> dict[str, float]:
-    """The ``WSPEC`` sub-features for the learned prior — the dedicated (non-COMPUTE) warp count
+    """The ``WSPEC`` sub-features for the online prior — the dedicated (non-COMPUTE) warp count
     (``0.0`` = uniform SIMT). The producer ``q`` window is reserved (inert) and not featurized."""
     if not val:
         return {"D_wspec_warps": 0.0}

@@ -70,7 +70,7 @@ def test_tiled_rows_do_not_take_the_reduce_block():
 def test_tileless_rows_keep_the_scalar_on_warp_guard():
     """A per-cell contraction leaf (TILE decided-OFF, coop REDUCE) on a warp-ELIGIBLE kernel is a
     scalar row competing against tensor cores — it must carry ``D_scalar_on_warp_eligible`` so the
-    analytic guard weight can bury it. Granting such rows the thread/occupancy bonuses WITHOUT the
+    offline guard weight can bury it. Granting such rows the thread/occupancy bonuses WITHOUT the
     guard deployed a 1157 µs per-cell kernel over the 3.5 µs mma golden (square.512.fp16, the
     2026-07-07 5090 first-gate A/B)."""
     eligible = knob_features({**_CTX, "S_warp_eligible": 1.0, "REDUCE@a1": "b256"})

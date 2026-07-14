@@ -351,16 +351,16 @@ def test_fast_math_golden_ranks_in_gated_enumeration(monkeypatch):
     import os
 
     from emmy.compiler.context import Context
-    from emmy.compiler.pipeline.search import analytic
+    from emmy.compiler.pipeline.search import golden_eval
 
     for var in ("EMMY_FAST_MATH", "EMMY_F16_MMA_F32_ACC"):
         monkeypatch.delenv(var, raising=False)
     ctx = Context.from_target((12, 0))
     fm = {"TILE": "a:mma_m16n8k16_f16_f16/w2x2/f2x2/k2", "STAGE": "", "REDUCE": ""}
-    _, rank, pool = analytic.evaluate_golden(128, 128, 128, "fp16", fm, ctx)
+    _, rank, pool = golden_eval.evaluate_golden(128, 128, 128, "fp16", fm, ctx)
     assert rank is not None and pool > 0, "fast-math golden must rank inside the self-gated enumeration"
     assert os.environ.get("EMMY_F16_MMA_F32_ACC") is None, "the scoped pin must restore"
     std = {"TILE": "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2", "STAGE": "", "REDUCE": ""}
-    _, rank_std, pool_std = analytic.evaluate_golden(128, 128, 128, "fp16", std, ctx)
+    _, rank_std, pool_std = golden_eval.evaluate_golden(128, 128, 128, "fp16", std, ctx)
     assert rank_std is not None
     assert pool_std < pool, "the standard enumeration must not silently grow fast-math rows"

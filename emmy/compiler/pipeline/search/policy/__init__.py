@@ -1,7 +1,7 @@
 """Search policies.
 
 - :mod:`.base` — ``Search`` protocol.
-- :mod:`.mcts` — :class:`TuningSearch`: PUCT over the learned prior — the only
+- :mod:`.mcts` — :class:`TuningSearch`: PUCT over the online prior — the only
   *exploration* policy (``tune``).
 - :mod:`.greedy` — :func:`greedy_decide`: the deterministic greedy pick for
   ``Pipeline.run`` / the structural pricing probes. Not a ``Search``: it is a

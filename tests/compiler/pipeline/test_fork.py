@@ -116,7 +116,7 @@ def test_two_params_distinct_branch_key_emits_branches():
 
 def test_siblings_unranked_in_grouping_order():
     """The builder does NOT sort siblings — ranking is search policy (the
-    learned prior). Siblings come out in grouping (= first-occurrence) order
+    online prior). Siblings come out in grouping (= first-occurrence) order
     regardless of any heuristic."""
     params = [_row(1, 0, 0), _row(3, 0, 0), _row(2, 0, 0)]
     tree = build_fork_tree(params=params, levels=_LEVELS, materialize=_stub_materialize)

@@ -21,8 +21,8 @@ full-row reductions like online-softmax & RMSNorm, contractions, symbolic axes) 
 
 The selection here is **conservative module constants** standing in for the eventual
 ``REDUCE`` knob + prior-driven choice. ``# TODO``: replace the constants with
-``knob.py::_reduce_decomp`` (BR→coop, BK→serial, FK→reg, SPLITK→cta) + the learned /
-analytic prior. The cross-CTA ``g<n>`` split (``030_split``) and the ``r<n>`` (ILP) reg
+``knob.py::_reduce_decomp`` (BR→coop, BK→serial, FK→reg, SPLITK→cta) + the online /
+offline prior. The cross-CTA ``g<n>`` split (``030_split``) and the ``r<n>`` (ILP) reg
 fold are built and honored for an additive carrier via an explicit ``REDUCE`` pin (the
 split emits the partial + finalize kernels / atomicAdd; the reg fold emits the ILP
 accumulators). Strided-cooperative rows (a small whole free axis packed alongside the coop
@@ -1099,7 +1099,7 @@ def _warp_option(
     form of the ``TILE`` spec resolved into the warp-atom :class:`TilePlan`, plus an optional operand
     ``STAGE`` resolved into a :class:`Stage`. The tiled :class:`Contraction` leaf is built here (``op``),
     so materialize only ``factorize``\\ s. The packed ``TILE`` codec is the sole on-dict spelling — the
-    learned-prior featurizer parses it directly (one codec, not a per-knob ``WM``/``WN``/``MMA`` explosion)."""
+    online-prior featurizer parses it directly (one codec, not a per-knob ``WM``/``WN``/``MMA`` explosion)."""
     wt = TilePlan.parse(spec)
     _check_warp_static_k(tile, wt)
     # Build the tiled Contraction node here — it resolves the operand→role facts internally, so an
@@ -1313,7 +1313,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
             # them for branch identity, but the MATERIALIZED op is what ``realized_knobs`` reads —
             # dropping them here left leaf/evidence rows unstamped while fork rows (deploy
             # candidates) were stamped, fracturing the ``S_*`` evidence signature: deploy-time
-            # ``evidence_pick`` never joined the measured -O3 rows, and greedy shipped the learned
+            # ``evidence_pick`` never joined the measured -O3 rows, and greedy shipped the online
             # model's unbenched per-cell extrapolation (the 2026-07-07 5090 gate's 330x fp16 miss).
             op_knobs = {**knobs, **{k: v for k, v in row.items() if k.startswith("S_")}}
             # The rasterization codec rides op-level knobs (kernel-scoped launch-order metadata,

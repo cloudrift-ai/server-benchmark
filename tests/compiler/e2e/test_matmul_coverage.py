@@ -366,7 +366,7 @@ def test_scalar_ring_matches_gmem_direct_bit_for_bit(monkeypatch, stage):
     def _go(st: str | None) -> tuple[np.ndarray, str]:
         monkeypatch.setenv("EMMY_TILE", "n16x16/f2x2")
         monkeypatch.setenv("EMMY_REDUCE", "")
-        # Pin STAGE="" for the baseline — unpinned, the analytic prior may legitimately stage.
+        # Pin STAGE="" for the baseline — unpinned, the offline prior may legitimately stage.
         monkeypatch.setenv("EMMY_STAGE", st if st else "")
         be = CudaBackend()
         compiled = be.compile(_scalar_stage_graph(M, N, K))
@@ -805,7 +805,7 @@ def test_f16acc_enumeration_gate(monkeypatch):
     offers them on the consumer dies (sm_120) but NOT the datacenter parts (sm_90, full-rate
     f32-accumulate); the precise ``F16_MMA_F32_ACC`` pin is authoritative both ways."""
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.analytic import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
 
     def offers(cc, **env) -> bool:
         for var in ("EMMY_FAST_MATH", "EMMY_F16_MMA_F32_ACC"):
@@ -1141,7 +1141,7 @@ def test_staged_matches_gmem_direct_bit_for_bit(monkeypatch, M):
     def _go(stage: str | None) -> tuple[np.ndarray, str]:
         monkeypatch.setenv("EMMY_TILE", _WARP_CODEC)
         monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the baseline must not reroute through the restored split-K fork
-        # Pin STAGE="" for the baseline — unpinned, the analytic prior may legitimately stage.
+        # Pin STAGE="" for the baseline — unpinned, the offline prior may legitimately stage.
         monkeypatch.setenv("EMMY_STAGE", stage if stage else "")
         be = CudaBackend()
         compiled = be.compile(_parity_mma_graph("static", M=M))
@@ -1210,7 +1210,7 @@ def test_cp_async_deep_ring_matches_gmem_direct_bit_for_bit(monkeypatch, depth, 
     def _go(stage: str | None) -> tuple[np.ndarray, str]:
         monkeypatch.setenv("EMMY_TILE", _WARP_CODEC)
         monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the baseline must not reroute through the restored split-K fork
-        # Pin STAGE="" for the baseline — unpinned, the analytic prior may legitimately stage.
+        # Pin STAGE="" for the baseline — unpinned, the offline prior may legitimately stage.
         monkeypatch.setenv("EMMY_STAGE", stage if stage else "")
         be = CudaBackend()
         compiled = be.compile(_parity_mma_graph("static", M=M))
@@ -1247,7 +1247,7 @@ def test_tma_deep_ring_matches_gmem_direct_bit_for_bit(monkeypatch, depth, M):
     def _go(stage: str | None) -> tuple[np.ndarray, str]:
         monkeypatch.setenv("EMMY_TILE", _WARP_CODEC)
         monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the baseline must not reroute through the restored split-K fork
-        # Pin STAGE="" for the baseline — unpinned, the analytic prior may legitimately stage.
+        # Pin STAGE="" for the baseline — unpinned, the offline prior may legitimately stage.
         monkeypatch.setenv("EMMY_STAGE", stage if stage else "")
         be = CudaBackend()
         compiled = be.compile(_parity_mma_graph("static", M=M))
@@ -1410,7 +1410,7 @@ def test_staged_splitk_matches_gmem_direct_bit_for_bit(monkeypatch, transport):
     def _go(stage: str | None) -> tuple[np.ndarray, str]:
         monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x2/f2x2/k2")
         monkeypatch.setenv("EMMY_REDUCE", "g2k")
-        # The baseline pins STAGE="" (gmem-direct) explicitly — unpinned, the analytic prior may
+        # The baseline pins STAGE="" (gmem-direct) explicitly — unpinned, the offline prior may
         # legitimately pick a staged row (D_stage_* terms), which is not the baseline this test wants.
         monkeypatch.setenv("EMMY_STAGE", stage if stage else "")
         be = CudaBackend()
@@ -1809,7 +1809,7 @@ def test_raster_fork_offers_both_orders(monkeypatch):
     """The enumeration carries the ``RASTER`` family on every contraction row — the flat ``""``
     and the ``gm8`` sibling — so the search can price them per shape (live-fork capture, no
     GPU). Non-contraction kernels never spell the key."""
-    from emmy.compiler.pipeline.search.analytic import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
 
     g = _mma_matmul_graph("static", 1280, 2048, 1024, "f16", False)
     rows = enumerate_graph(g, Context.from_target((12, 0)))
@@ -1856,7 +1856,7 @@ def test_raster_symbolic_grid_stays_flat(monkeypatch):
     """A symbolic-M (masked-tile) grid renders through the dynamic decode path, which does not
     carry the swizzle — the enumeration must decide the flat ``""`` only there (offering ``gm8``
     would stamp a launch order the kernel doesn't realize: the silent-degrade family)."""
-    from emmy.compiler.pipeline.search.analytic import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
 
     g = _mma_matmul_graph("dynamic", 1280, 2048, 1024, "f16", False)
     rows = enumerate_graph(g, Context.from_target((12, 0)))

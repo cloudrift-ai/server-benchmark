@@ -27,21 +27,21 @@ os.environ.setdefault("EMMY_GPU_LOCK", "/tmp/emmy-gpu.lock")
 
 @pytest.fixture(autouse=True)
 def _isolate_prior_file(tmp_path, monkeypatch):
-    """Point the learned-prior checkpoint at a per-test temp path so the
+    """Point the online-prior checkpoint at a per-test temp path so the
     greedy compile driver (which loads the global prior) never picks up a
-    dev machine's ``~/.cache/emmy/prior.json`` — tests stay deterministic
+    dev machine's ``~/.cache/emmy/online.json`` — tests stay deterministic
     (empty prior → option-0), and a test that tunes writes only its own file."""
-    monkeypatch.setenv("EMMY_PRIOR_FILE", str(tmp_path / "prior.json"))
+    monkeypatch.setenv("EMMY_ONLINE_FILE", str(tmp_path / "prior.json"))
 
 
 @pytest.fixture(autouse=True)
-def _isolate_analytic_file(monkeypatch):
-    """Drop any dev-machine ``EMMY_ANALYTIC_FILE`` override so tests always score
-    through the repo-checked ``analytic_weights.json``. Unlike the prior file, the
-    default here must NOT be a tmp path — a missing analytic artifact is a hard
+def _isolate_offline_file(monkeypatch):
+    """Drop any dev-machine ``EMMY_OFFLINE_FILE`` override so tests always score
+    through the repo-checked ``offline_weights.json``. Unlike the prior file, the
+    default here must NOT be a tmp path — a missing offline artifact is a hard
     error by design (no silent fallback), and the shipped one is what tests
     exercise."""
-    monkeypatch.delenv("EMMY_ANALYTIC_FILE", raising=False)
+    monkeypatch.delenv("EMMY_OFFLINE_FILE", raising=False)
 
 
 @pytest.fixture(autouse=True)

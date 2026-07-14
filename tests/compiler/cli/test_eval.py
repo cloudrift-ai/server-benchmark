@@ -4,7 +4,7 @@ Each test builds a synthetic tune-DB inline (just the two tables the
 commands read: ``cuda_op`` and ``perf``), so the suite stays hermetic
 and does not depend on a real autotune cache or GPU. The ``variants``
 CLI tests pin ``--prior`` to a nonexistent file so the pick comes from
-the cold ``AnalyticPrior`` regardless of any prior checkpoint on the host.
+the cold ``OfflinePrior`` regardless of any prior checkpoint on the host.
 """
 
 from __future__ import annotations
@@ -190,7 +190,7 @@ def _add_perf_row(path: Path, op_key: str, kernel_name: str, knobs: dict, us: fl
 
 def test_variants_missing_db(run_cli, tmp_path):
     """A non-existent DB path exits cleanly with a pointer, no traceback."""
-    rc, stdout, stderr = run_cli("eval", "variants", "--db", str(tmp_path / "does_not_exist.db"), "--prior", str(tmp_path / "p.json"))
+    rc, stdout, stderr = run_cli("eval", "variants", "--db", str(tmp_path / "does_not_exist.db"), "--online-file", str(tmp_path / "p.json"))
     combined = (stdout + stderr).lower()
     assert rc == 0, f"stderr: {stderr}"
     assert "no tune db" in combined
@@ -206,7 +206,7 @@ def test_variants_golden_dataset_rejected(run_cli, tmp_path):
 
 def test_variants_leaderboard_sorted_with_ranked_pick(run_cli, tmp_path):
     """The leaderboard sorts by latency (fastest first), marks exactly one pick
-    row, and prints its rank summary. No prior checkpoint → cold AnalyticPrior,
+    row, and prints its rank summary. No prior checkpoint → cold OfflinePrior,
     no reservoir → no ``-O3 us`` column."""
     db = tmp_path / "v.db"
     _make_tune_db(
@@ -217,7 +217,7 @@ def test_variants_leaderboard_sorted_with_ranked_pick(run_cli, tmp_path):
             ("c", "k_matmul", {"BM": 64, "BN": 16}, 20.0),
         ],
     )
-    rc, stdout, stderr = run_cli("eval", "variants", "--db", str(db), "--prior", str(tmp_path / "missing.json"))
+    rc, stdout, stderr = run_cli("eval", "variants", "--db", str(db), "--online-file", str(tmp_path / "missing.json"))
     assert rc == 0, f"stderr: {stderr}"
     assert "k_matmul — 3 measured configs" in stdout
     assert stdout.index("10.0") < stdout.index("20.0") < stdout.index("30.0")  # fastest first
@@ -231,7 +231,7 @@ def test_variants_top_truncation_keeps_pick_row(run_cli, tmp_path):
     reports how many rows were hidden."""
     db = tmp_path / "t.db"
     _make_tune_db(db, [(f"v{i}", "k_matmul", {"BM": 2**i, "BN": 16}, 10.0 + i) for i in range(6)])
-    rc, stdout, stderr = run_cli("eval", "variants", "--db", str(db), "--top", "2", "--prior", str(tmp_path / "missing.json"))
+    rc, stdout, stderr = run_cli("eval", "variants", "--db", str(db), "--top", "2", "--online-file", str(tmp_path / "missing.json"))
     assert rc == 0, f"stderr: {stderr}"
     assert "--top 0 shows all" in stdout  # truncation note printed
     assert stdout.count("◄") == 1  # pick row survives the cut
@@ -242,7 +242,7 @@ def test_variants_counts_bench_fail_rows(run_cli, tmp_path):
     db = tmp_path / "f.db"
     _make_tune_db(db, [("a", "k_matmul", {"BM": 8}, 10.0), ("b", "k_matmul", {"BM": 16}, 20.0)])
     _add_perf_row(db, "x", "k_matmul", {"BM": 64, "TMA": True}, 2_000_000.0, status="bench_fail")
-    rc, stdout, stderr = run_cli("eval", "variants", "--db", str(db), "--prior", str(tmp_path / "missing.json"))
+    rc, stdout, stderr = run_cli("eval", "variants", "--db", str(db), "--online-file", str(tmp_path / "missing.json"))
     assert rc == 0, f"stderr: {stderr}"
     assert "k_matmul — 2 measured configs, 1 bench_fail" in stdout
 
@@ -294,11 +294,11 @@ def test_failures_old_db_without_error_column(run_cli, tmp_path):
     assert "(no error recorded)" in stdout
 
 
-# --- eval prior --dataset db --------------------------------------------------
+# --- eval online --dataset db --------------------------------------------------
 
 
 def test_prior_db_reachability_smoke(run_cli, tmp_path):
-    """``eval prior --dataset db`` on a 2-row DB renders the aggregate reachability
+    """``eval online --dataset db`` on a 2-row DB renders the aggregate reachability
     view — the groups must reach ``diagnostics.reachability`` as ``Sample``s, not
     ``(knobs, latency)`` tuples (the shape mismatch that crashed it)."""
     db = tmp_path / "r.db"
@@ -313,19 +313,36 @@ def test_prior_db_reachability_smoke(run_cli, tmp_path):
             ("b", "k_matmul", {"BM": 16, **mm}, 10.0),
         ],
     )
-    rc, stdout, stderr = run_cli("eval", "prior", "--dataset", "db", "--db", str(db), "--prior", str(tmp_path / "missing.json"))
+    rc, stdout, stderr = run_cli("eval", "online", "--dataset", "db", "--db", str(db), "--online-file", str(tmp_path / "missing.json"))
     assert rc == 0, f"stderr: {stderr}"
     assert "pick reachability over DB variants" in stdout
     assert "matmul" in stdout  # the op-label row rendered
     assert "traceback" not in (stdout + stderr).lower()
 
 
+def test_pre_rename_cli_aliases(run_cli, tmp_path):
+    """The pre-rename spellings — the ``eval prior`` subcommand and the ``--prior``
+    flag — keep working as aliases for the renamed ``eval online`` / ``--online-file``."""
+    db = tmp_path / "r.db"
+    mm = {"S_ext_free_prod": 1024.0, "S_reduce_add": 1.0, "S_pw_multiply": 1.0, "S_n_distinct_input": 2.0}
+    _make_tune_db(
+        db,
+        [
+            ("a", "k_matmul", {"BM": 8, **mm}, 30.0),
+            ("b", "k_matmul", {"BM": 16, **mm}, 10.0),
+        ],
+    )
+    rc, stdout, stderr = run_cli("eval", "prior", "--dataset", "db", "--db", str(db), "--prior", str(tmp_path / "missing.json"))
+    assert rc == 0, f"stderr: {stderr}"
+    assert "pick reachability over DB variants" in stdout
+
+
 def test_prior_nodes_smoke(run_cli, tmp_path):
-    """``eval prior --dataset nodes`` renders the fork sibling-ranking AND the leaf
+    """``eval online --dataset nodes`` renders the fork sibling-ranking AND the leaf
     reachability over the search-tree node store (one fork, two leaf children) —
     ONCE PER PRIOR HALF, explicitly labeled, so a regret number is never ambiguous
-    about which ranker (analytic vs learned) produced it. With no fitted checkpoint
-    the analytic block carries the metrics and the learned block says it's unfitted."""
+    about which ranker (offline vs online) produced it. With no fitted checkpoint
+    the offline block carries the metrics and the online block says it's unfitted."""
     from emmy.compiler.pipeline.search.db import NodeRow, SearchDB
 
     db_path = tmp_path / "n.db"
@@ -339,19 +356,21 @@ def test_prior_nodes_smoke(run_cli, tmp_path):
         ]
     )
     db.close()
-    rc, stdout, stderr = run_cli("eval", "prior", "--dataset", "nodes", "--db", str(db_path), "--prior", str(tmp_path / "missing.json"))
+    rc, stdout, stderr = run_cli(
+        "eval", "online", "--dataset", "nodes", "--db", str(db_path), "--online-file", str(tmp_path / "missing.json")
+    )
     assert rc == 0, f"stderr: {stderr}"
-    assert "=== analytic prior" in stdout
-    assert "=== learned prior" in stdout
-    assert "node store: 3 nodes" in stdout  # the analytic block's metrics
+    assert "=== offline prior" in stdout
+    assert "=== online prior" in stdout
+    assert "node store: 3 nodes" in stdout  # the offline block's metrics
     assert "fork sibling regret" in stdout
     assert "leaf reachability" in stdout
-    assert "not fitted" in stdout  # the learned block, with no checkpoint, says so instead of silently answering analytic
+    assert "not fitted" in stdout  # the online block, with no checkpoint, says so instead of silently answering offline
     assert "traceback" not in (stdout + stderr).lower()
 
 
 def test_prior_nodes_kernel_filter(run_cli, tmp_path):
-    """``eval prior --dataset nodes --kernel`` scopes the node store by op label."""
+    """``eval online --dataset nodes --kernel`` scopes the node store by op label."""
     from emmy.compiler.pipeline.search.db import NodeRow, SearchDB
 
     db_path = tmp_path / "n.db"
@@ -365,10 +384,10 @@ def test_prior_nodes_kernel_filter(run_cli, tmp_path):
     )
     db.close()
     prior = str(tmp_path / "missing.json")
-    rc, stdout, stderr = run_cli("eval", "prior", "--dataset", "nodes", "--db", str(db_path), "--kernel", "matmul", "--prior", prior)
+    rc, stdout, stderr = run_cli("eval", "online", "--dataset", "nodes", "--db", str(db_path), "--kernel", "matmul", "--online-file", prior)
     assert rc == 0, f"stderr: {stderr}"
     assert "matching --kernel 'matmul'" in stdout
-    rc2, stdout2, _ = run_cli("eval", "prior", "--dataset", "nodes", "--db", str(db_path), "--kernel", "reduce", "--prior", prior)
+    rc2, stdout2, _ = run_cli("eval", "online", "--dataset", "nodes", "--db", str(db_path), "--kernel", "reduce", "--online-file", prior)
     assert rc2 == 0
     assert "no nodes match --kernel 'reduce'" in stdout2
 

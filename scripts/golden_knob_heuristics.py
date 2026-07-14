@@ -1,11 +1,11 @@
 #!/usr/bin/env python
-"""Offline fit of the :class:`AnalyticPrior` weights artifact over ``knob_features``.
+"""Offline fit of the :class:`OfflinePrior` weights artifact over ``knob_features``.
 
 Motivation
 ----------
 The two-level autotuner explores the post-fusion kernel's knob space with an inner
 MCTS that stops on **patience** (N consecutive measured terminals with no new
-best). Cold (no learned data) that search is ranked by the :class:`AnalyticPrior` —
+best). Cold (no online data) that search is ranked by the :class:`OfflinePrior` —
 a fixed linear model over the engineered ``D_*`` geometry / occupancy features
 :func:`features.knob_features` produces. If the golden config sits at rank 800 of 2400,
 patience never reaches it. This script fits the linear weights so the golden lands
@@ -17,13 +17,13 @@ regime**: fp32-scalar + fp16/bf16-warp matmul, cooperative reduce, and pointwise
 
   1. For every golden (matmul thread / warp / dyn, reduce, pointwise), reconstruct
      the planner's exact candidate enumeration for that mode and locate the golden
-     row. Matmul goldens reuse ``analytic._enumerate`` — the SAME gate-narrowed pool
-     ``eval analytic`` and the greedy deploy rank over (fp32 → thread tier, fp16/bf16
+     row. Matmul goldens reuse ``golden_eval._enumerate`` — the SAME gate-narrowed pool
+     ``eval offline`` and the greedy deploy rank over (fp32 → thread tier, fp16/bf16
      → the warp tier alone; the block-DAG rework moved the scalar↔warp choice to a
      structural fork, so a warp golden ranks within the warp tier, not against
      scalar rows). Reduce / pointwise trace the snippet and capture the restored
      schedule fork's rows through the same live-fork capture
-     (``analytic.enumerate_graph``).
+     (``golden_eval.enumerate_graph``).
   2. Featurize every candidate via ``features.knob_features`` (the ``D_*`` engineered
      features plus ``MMA_tier``, the warp/scalar tier discriminator — the ``S_*`` /
      ``H_*`` shape/regime features are constant within a shape, so they drop out of
@@ -34,8 +34,8 @@ regime**: fp32-scalar + fp16/bf16-warp matmul, cooperative reduce, and pointwise
      across all goldens (both tiers jointly — the ``D_*`` features are tier-aware,
      so one weight vector serves both).
   5. Write the winning weights (both sets + the carried-over scoring params +
-     provenance) to the ``AnalyticPrior`` weights artifact (``--out``, default the
-     repo-checked ``search/prior/analytic_weights.json``), and print them.
+     provenance) to the ``OfflinePrior`` weights artifact (``--out``, default the
+     repo-checked ``search/prior/offline_weights.json``), and print them.
 
 Run:  ./venv/bin/python scripts/golden_knob_heuristics.py
       ./venv/bin/python scripts/golden_knob_heuristics.py --samples 40000 --out /tmp/candidate.json
@@ -53,13 +53,13 @@ import numpy as np
 from emmy import config, storage
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import features
-from emmy.compiler.pipeline.search.analytic import _enumerate, enumerate_graph
 from emmy.compiler.pipeline.search.golden import (
     GOLDEN_CONFIGS,
     MatmulGoldenConfig,
     PointwiseGoldenConfig,
     ReduceGoldenConfig,
 )
+from emmy.compiler.pipeline.search.golden_eval import _enumerate, enumerate_graph
 
 
 def _base(ctx: Context, M: int, N: int, K: int, *, dynamic: bool = False) -> dict:
@@ -68,7 +68,7 @@ def _base(ctx: Context, M: int, N: int, K: int, *, dynamic: bool = False) -> dic
     (``#CTAs``, waves) and tier-aware BK targets fire. A dynamic (symbolic-M)
     golden mirrors the 992 stamp: the symbolic axis is EXCLUDED from the free-dim
     product and counted in ``S_ext_n_symbolic_axis`` — the same features the
-    deployed featurization computes, and the flag the ``AnalyticPrior`` selects
+    deployed featurization computes, and the flag the ``OfflinePrior`` selects
     its dynamic weight set on."""
     free = float(N) if dynamic else float(M * N)
     base = {**ctx.features(), "S_ext_free_prod": free, "S_ext_reduce_prod": float(K), "S_ext_reduce_max": float(K)}
@@ -81,7 +81,7 @@ def _snippet_rows(snippet: str, ctx: Context) -> list[dict]:
     """A non-matmul golden's candidate rows — trace the golden's torch snippet
     (``torch.sum`` / ``torch.relu`` have no dedicated frontend op, so the graph comes from the real
     trace) and capture the RESTORED schedule fork's leaf rows via the same live-fork capture the
-    matmul path uses (``analytic.enumerate_graph``). A reduce offers its ``REDUCE@<axis>``
+    matmul path uses (``golden_eval.enumerate_graph``). A reduce offers its ``REDUCE@<axis>``
     partitions; a pointwise kernel forks nothing today, so its pool is empty and the golden is
     reported un-enumerable (an honest read of the live space, not a reconstruction of the
     demolished one)."""
@@ -97,8 +97,8 @@ def build_cases() -> list[tuple[str, str, int, list[dict[str, float]]]]:
     is ``"thread"`` / ``"warp"`` / ``"dyn"`` / ``"reduce"`` / ``"pointwise"`` and
     ``feats`` is the per-row ``D_*`` (+ ``MMA_tier``) feature dict.
 
-    Matmul goldens enumerate via ``analytic._enumerate`` — the SAME gate-narrowed
-    pool ``eval analytic`` and the greedy deploy rank over (fp32 → thread tier,
+    Matmul goldens enumerate via ``golden_eval._enumerate`` — the SAME gate-narrowed
+    pool ``eval offline`` and the greedy deploy rank over (fp32 → thread tier,
     fp16/bf16 → warp tier; the block-DAG rework moved the scalar↔warp choice to a
     structural fork, so a real fp16 matmul ranks within the warp tier alone, no
     scalar rows in the pool). A dynamic (``.dynM``) golden enumerates its hint-sized
@@ -130,7 +130,7 @@ def build_cases() -> list[tuple[str, str, int, list[dict[str, float]]]]:
             dyn = bool(g.dynamic)
             base = _base(ctx, g.M, g.N, g.K, dynamic=dyn)
             # A fast-math golden's row only exists in the gate-on enumeration (the same
-            # self-gating seam as ``analytic.evaluate_golden``) — pin the gate for the
+            # self-gating seam as ``golden_eval.evaluate_golden``) — pin the gate for the
             # reconstruction so the f16-accumulate rows are present and the fit anchors
             # their ``MMA_acc_bits`` discriminator.
             if g.fast_math:
@@ -259,7 +259,7 @@ def _print_weights(var: str, raw_w: dict[str, float]) -> None:
 
 
 def main() -> None:
-    from emmy.compiler.pipeline.search.prior.analytic import _DEFAULT_FILE  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.prior.offline import _DEFAULT_FILE  # noqa: PLC0415
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--samples", type=int, default=20000, help="random weight vectors to try")
@@ -267,7 +267,7 @@ def main() -> None:
     ap.add_argument(
         "--out",
         default=str(_DEFAULT_FILE),
-        help="Weights artifact to write (default: the repo-checked analytic_weights.json).",
+        help="Weights artifact to write (default: the repo-checked offline_weights.json).",
     )
     args = ap.parse_args()
 
@@ -287,9 +287,9 @@ def main() -> None:
     # gate: a refit after a featurizer change is exactly when versions mismatch, and
     # a stale key simply seeds 0.0. The scoring params carry through unchanged —
     # this script fits only the linear weights.
-    incumbent = storage.read_json(config.analytic_path() or _DEFAULT_FILE)
+    incumbent = storage.read_json(config.offline_path() or _DEFAULT_FILE)
     if not isinstance(incumbent, dict) or "params" not in incumbent:
-        raise SystemExit(f"no incumbent weights artifact to seed from at {config.analytic_path() or _DEFAULT_FILE}")
+        raise SystemExit(f"no incumbent weights artifact to seed from at {config.offline_path() or _DEFAULT_FILE}")
     seed_weights = incumbent.get("weights", {})
     seed_raw = np.array([seed_weights.get(n, 0.0) for n in names])
 

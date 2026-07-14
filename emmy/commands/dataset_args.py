@@ -1,8 +1,8 @@
 """Shared ``--dataset`` CLI vocabulary for the commands that consume measurement
 data (``eval`` for analysis; ``tune --dataset golden`` to tune every golden shape):
 one place registers the source flags (``--dataset`` / ``--db`` / ``--kernel`` /
-``--min-variants``), one helper publishes ``--prior``, and one guard fails loud on a
-degenerate source. Handlers then build the actual
+``--min-variants``), one helper publishes ``--online-file``, and one guard fails loud
+on a degenerate source. Handlers then build the actual
 :class:`~emmy.compiler.pipeline.search.data.Dataset` via its ``from_golden`` /
 ``from_db`` adapters — so every command selects a golden / DB dataset (and a subset)
 through the same vocabulary instead of reimplementing golden filtering or opening
@@ -34,7 +34,7 @@ def add_dataset_args(parser, *, default: str, with_min_variants: bool = False) -
         choices=["golden", "db", "nodes"],
         default=default,
         help="Measurement-data source: 'golden' (recorded golden configs), 'db' (tune DB perf rows), or 'nodes' "
-        f"(tune DB search-tree node store, for `eval prior`). Default: {default}.",
+        f"(tune DB search-tree node store, for `eval online`). Default: {default}.",
     )
     parser.add_argument("--db", help="Tune DB path for --dataset db/nodes. Default: EMMY_TUNE_DB or ~/.cache/emmy/autotune.db.")
     parser.add_argument(
@@ -56,19 +56,19 @@ def require_source(args, allowed: set[str], msg: str) -> None:
         sys.exit(2)
 
 
-def resolve_prior_arg(args) -> None:
-    """Publish ``--prior`` into the env (``EMMY_PRIOR_FILE``) so the prior loads
-    from it — the single owner of the formerly-duplicated env poke."""
-    if getattr(args, "prior", None):
+def resolve_online_arg(args) -> None:
+    """Publish ``--online-file`` into the env (``EMMY_ONLINE_FILE``) so the prior
+    loads from it — the single owner of the formerly-duplicated env poke."""
+    if getattr(args, "online_file", None):
         from emmy import config  # noqa: PLC0415
 
-        os.environ[config.PRIOR_FILE] = str(Path(args.prior).expanduser())
+        os.environ[config.ONLINE_FILE] = str(Path(args.online_file).expanduser())
 
 
-def resolve_analytic_arg(args) -> None:
-    """Publish ``--analytic-file`` into the env (``EMMY_ANALYTIC_FILE``) so the
-    analytic prior scores through that weights artifact — the eval-side A/B hook."""
-    if getattr(args, "analytic_file", None):
+def resolve_offline_arg(args) -> None:
+    """Publish ``--offline-file`` into the env (``EMMY_OFFLINE_FILE``) so the
+    offline prior scores through that weights artifact — the eval-side A/B hook."""
+    if getattr(args, "offline_file", None):
         from emmy import config  # noqa: PLC0415
 
-        os.environ[config.ANALYTIC_FILE] = str(Path(args.analytic_file).expanduser())
+        os.environ[config.OFFLINE_FILE] = str(Path(args.offline_file).expanduser())

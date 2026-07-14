@@ -3,7 +3,7 @@
 
 The load-bearing acceptance gates are the two round-trips: a DB row and a golden
 config must produce the *same* feature vector through ``Sample`` as the inline
-code each consumer used before — otherwise the learned prior's ranking degrades
+code each consumer used before — otherwise the online prior's ranking degrades
 silently.
 """
 

@@ -14,6 +14,7 @@ scratch. Launch order is ``graph.topological_order()``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import math
 import os as _os
@@ -1379,6 +1380,16 @@ def _samples_to_result(
 # ---------------------------------------------------------------------------
 
 
+class BenchWorkerJobError(RuntimeError):
+    """A worker job that ran and failed (``ok: False`` response — the child is alive).
+    ``cache_miss`` marks the one retryable kind: a job referenced a ``run_inputs_key``
+    a freshly-respawned child no longer holds."""
+
+    def __init__(self, message: str, *, cache_miss: bool = False) -> None:
+        super().__init__(message)
+        self.cache_miss = cache_miss
+
+
 class _AsyncBenchWorker:
     """The parent-side transport for the SIGKILL-able ``_bench_worker`` subprocess —
     the **single** isolated-bench transport (the old sync ``_BenchWorker`` is gone).
@@ -1411,10 +1422,20 @@ class _AsyncBenchWorker:
     SIGKILLed and respawned on the next bench."""
 
     _WORKER_MODULE = "emmy.compiler.backend.cuda._bench_worker"
+    _STDERR_TAIL_CHARS = 4000
 
     def __init__(self, *, device_id: int | None = None) -> None:
         self._proc: asyncio.subprocess.Process | None = None
         self._device_id = device_id
+        # Bounded tail of the CURRENT child's stderr, fed by a background drain task. A
+        # chatty child (HF shard-download progress, nvcc warnings) would otherwise fill
+        # the ~64 KB stderr pipe and block mid-job — which the parent misreads as a
+        # wall-timeout hang — and the tail is the diagnostic every failure path wants.
+        self._stderr_tail = ""
+        self._stderr_task: asyncio.Task | None = None
+        # ``run_inputs_key``s this child has cached (see ``benchmark_pinned_isolated_async``).
+        # Cleared on every (re)spawn — a fresh child holds no cache.
+        self.cached_input_keys: set[str] = set()
 
     def _child_env(self) -> dict:
         env = dict(_os.environ)
@@ -1439,7 +1460,25 @@ class _AsyncBenchWorker:
             stderr=asyncio.subprocess.PIPE,
             env=self._child_env(),
         )
+        self._stderr_tail = ""
+        self._stderr_task = asyncio.ensure_future(self._drain_stderr(self._proc))
+        self.cached_input_keys.clear()
         logger.info("[bench-worker] spawned (async) pid=%s device=%s", self._proc.pid, self._device_id)
+
+    async def _drain_stderr(self, proc: asyncio.subprocess.Process) -> None:
+        """Continuously drain the child's stderr into the bounded tail. Runs for the
+        child's whole life (exits on EOF, i.e. child exit / SIGKILL) so the pipe can never
+        fill and block the child mid-job."""
+        try:
+            while True:
+                chunk = await proc.stderr.read(4096)
+                if not chunk:
+                    return
+                self._stderr_tail = (self._stderr_tail + chunk.decode(errors="replace"))[-self._STDERR_TAIL_CHARS :]
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — the drain is best-effort diagnostics
+            return
 
     def _kill(self) -> None:
         proc = self._proc
@@ -1462,20 +1501,26 @@ class _AsyncBenchWorker:
         subprocess transport survives the loop)."""
         proc = self._proc
         self._proc = None
-        if proc is None or proc.returncode is not None:
-            return
-        try:
-            proc.kill()
-            await proc.wait()
-        except ProcessLookupError:
-            pass
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except ProcessLookupError:
+                pass
+        if self._stderr_task is not None:
+            # The drain ends on the killed child's stderr EOF; reap it so no pending
+            # task survives the caller's event loop.
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await asyncio.wait_for(self._stderr_task, timeout=2.0)
+            self._stderr_task = None
 
-    async def _read_stderr_tail(self, proc: asyncio.subprocess.Process) -> str:
-        try:
-            data = await asyncio.wait_for(proc.stderr.read(), timeout=2.0)
-        except (TimeoutError, Exception):  # noqa: BLE001 — stderr drain is best-effort
-            return ""
-        return data.decode(errors="replace")[-500:]
+    async def _stderr_snapshot(self) -> str:
+        """The drained stderr tail, letting the drain task flush briefly first (after a
+        kill it ends at EOF almost immediately)."""
+        if self._stderr_task is not None and not self._stderr_task.done():
+            with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(self._stderr_task), timeout=0.5)
+        return self._stderr_tail
 
     async def run_job(self, request_obj: dict, *, wall_timeout_s: float) -> dict:
         """Send one request, read the response within ``wall_timeout_s`` (else SIGKILL
@@ -1500,11 +1545,12 @@ class _AsyncBenchWorker:
                 await self.aclose()
                 raise RuntimeError(
                     f"bench worker did not accept the request within {wall_timeout_s:.1f}s wall budget — SIGKILL'd, stream cleaned"
+                    f"{self._tail_suffix()}"
                 ) from exc
             except (BrokenPipeError, ConnectionResetError) as exc:
                 await self.aclose()
                 if attempt == 1:
-                    raise RuntimeError(f"bench worker died during request send: {exc}") from exc
+                    raise RuntimeError(f"bench worker died during request send: {exc}{self._tail_suffix()}") from exc
                 logger.info("[bench-worker] stale async worker on send (%s) — respawning", exc)
                 continue
 
@@ -1520,17 +1566,27 @@ class _AsyncBenchWorker:
                 body = await asyncio.wait_for(proc.stdout.readexactly(n), timeout=remaining)
             except TimeoutError as exc:
                 await self.aclose()
-                raise RuntimeError(f"bench worker exceeded {wall_timeout_s:.1f}s wall budget — SIGKILL'd, stream cleaned") from exc
+                raise RuntimeError(
+                    f"bench worker exceeded {wall_timeout_s:.1f}s wall budget — SIGKILL'd, stream cleaned{self._tail_suffix()}"
+                ) from exc
             except asyncio.IncompleteReadError as exc:
-                stderr_tail = await self._read_stderr_tail(proc)
+                stderr_tail = await self._stderr_snapshot()
                 await self.aclose()
                 raise RuntimeError(f"bench worker EOF before response; stderr tail: {stderr_tail}") from exc
 
             resp = pickle.loads(body)
             if not resp.get("ok"):
-                raise RuntimeError(f"bench worker error: {resp.get('error', '?')}")
+                # The in-child traceback (and the stderr tail, where CLI-style helpers log
+                # their cause before exiting) would otherwise be silently discarded.
+                if resp.get("traceback"):
+                    logger.error("[bench-worker] job failed in the child; traceback:\n%s%s", resp["traceback"], self._tail_suffix())
+                raise BenchWorkerJobError(f"bench worker error: {resp.get('error', '?')}", cache_miss=bool(resp.get("cache_miss")))
             return resp
         raise RuntimeError("bench worker unreachable")  # both attempts exhausted (defensive)
+
+    def _tail_suffix(self) -> str:
+        """The drained stderr tail as an error-message suffix ('' when the child was quiet)."""
+        return f"; child stderr tail:\n{self._stderr_tail}" if self._stderr_tail.strip() else ""
 
 
 async def benchmark_program_isolated_async(
@@ -1567,6 +1623,100 @@ async def benchmark_program_isolated_async(
         wall_timeout_s=wall_timeout_s,
     )
     return resp["result"]
+
+
+async def benchmark_pinned_isolated_async(
+    graph: Graph,
+    *,
+    worker: _AsyncBenchWorker,
+    wall_timeout_s: float,
+    run_inputs: dict | None = None,
+    run_inputs_key: str | None = None,
+    warmup: int = 5,
+    num_iters: int | str = 20,
+    compile_timeout_s: float | None = None,
+    run_timeout_s: float | None = None,
+) -> tuple[BenchmarkResult, dict | None]:
+    """One ``run --bench`` pinned-row job through the persistent ``worker``: an optional
+    single execution on ``run_inputs`` (the greedy run's inputs — the wrong-answer gate's
+    measurement side, outputs returned for the parent to compare) followed by the emmy-only
+    bench. One job per row over one persistent worker per run session; a hung kernel dies
+    with the SIGKILL'd child and the next row's job respawns a clean context.
+
+    ``run_inputs_key`` (a session-unique token) lets the reference inputs cross the pipe
+    ONCE per child instead of per row — hundreds of MB on the big ``--code`` shapes. The
+    child caches them under the key; later rows send the key alone. The worker tracks which
+    keys the CURRENT child holds (``cached_input_keys``, cleared on respawn), and a
+    cache-miss response — a respawn raced the tracking — retries once with the inputs
+    included."""
+
+    def _request(with_inputs: bool) -> dict:
+        return {
+            "graph": graph,
+            "torch_spec": None,
+            "run_inputs": run_inputs if with_inputs else None,
+            "run_inputs_key": run_inputs_key,
+            "kwargs": {
+                "warmup": warmup,
+                "num_iters": num_iters,
+                "compile_timeout_s": compile_timeout_s,
+                "run_timeout_s": run_timeout_s,
+            },
+        }
+
+    send_inputs = run_inputs is not None and (run_inputs_key is None or run_inputs_key not in worker.cached_input_keys)
+    try:
+        resp = await worker.run_job(_request(send_inputs), wall_timeout_s=wall_timeout_s)
+    except BenchWorkerJobError as exc:
+        if not (exc.cache_miss and run_inputs is not None):
+            raise
+        resp = await worker.run_job(_request(True), wall_timeout_s=wall_timeout_s)
+    if run_inputs_key is not None and run_inputs is not None:
+        worker.cached_input_keys.add(run_inputs_key)
+    return resp["result"], resp.get("run_outputs")
+
+
+async def benchmark_compare_worker_async(
+    *,
+    worker: _AsyncBenchWorker,
+    lowered: Graph,
+    torch_spec: tuple,
+    bench_backends: str,
+    wall_timeout_s: float,
+    warmup: int,
+    iters: int,
+    seed: int,
+    accuracy: bool = False,
+    want_ref: bool = False,
+) -> dict:
+    """``run --bench``'s greedy-row transport: the same comparison job as
+    :func:`benchmark_compare_isolated_async` but over a caller-supplied persistent
+    ``worker`` (shared with the pinned-row jobs — one worker per run session) and with the
+    run path's extras: ``accuracy`` (the in-child real-input emmy-vs-eager verdict) and
+    ``want_ref`` (that run's ``(inputs, outputs)`` for the pinned rows' wrong-answer gate).
+    Returns the normalized response dict — keys ``results`` / ``result`` /
+    ``torch_available`` / ``captured`` / ``accuracy_error`` / ``run_io``."""
+    resp = await worker.run_job(
+        {
+            "graph": lowered,
+            "torch_spec": torch_spec,
+            "bench_backends": bench_backends,
+            "warmup": warmup,
+            "iters": iters,
+            "seed": seed,
+            "accuracy": accuracy,
+            "want_ref": want_ref,
+        },
+        wall_timeout_s=wall_timeout_s,
+    )
+    return {
+        "results": resp["results"],
+        "result": resp["result"],
+        "torch_available": resp["torch_available"],
+        "captured": resp.get("captured", False),
+        "accuracy_error": resp.get("accuracy_error"),
+        "run_io": resp.get("run_io"),
+    }
 
 
 async def _run_job_oneshot(request_obj: dict, *, wall_timeout_s: float) -> dict:

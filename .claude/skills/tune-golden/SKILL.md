@@ -73,6 +73,19 @@ The kernel table shows the **greedy pick** row (what `run`/`compile` deploy) and
 config, **all benched live this run** — a real A/B. Knob columns are in the header; rows carry positional values.
 Compare the greedy `us` against the *best* (min) golden row's `us`.
 
+Two failure semantics to know (both survive, nothing aborts the run — every row, greedy and pinned alike, benches
+in its own SIGKILL-able worker job, so a hung kernel never wedges the run or poisons the parent process). One
+measurement caveat: the greedy row benches interleaved with the live torch reference while pinned rows bench
+emmy-only, so greedy-vs-pinned µs for the same config differ (~7% observed on split-K pairs) — compare pinned rows
+against each other and record from `--ab`/golden rows only, never from the greedy row's number:
+
+- **A greedy pick that hangs or blows the bench budget no longer aborts the A/B** — the greedy row reports
+  `bench_fail` (with the reason as a `!` line / in `--json`) and the golden rows still bench. No
+  `EMMY_KNOBS`-pinned-deploy workaround needed anymore; the run exits non-zero when any row failed.
+- **A pin that matches no offered row FAILS its row without benching** (`pin_unmatched` in `--json`,
+  `unreproducible pin … NOT benched` in the table) — fix the pin spelling; the number you would have gotten was the
+  planner's own pick under the pin's name.
+
 The same `run --bench` also prints a `Backend … vs Eager` latency table above the kernel table: the **`Eager
 PyTorch`** row is the live cuBLAS reference (SGEMM for fp32 — `allow_tf32=False`, HGEMM for `*.fp16`), and `vs Eager`
 is `eager_us / emmy_us` (>1 = emmy faster than PyTorch, <1 = slower). Note that eager number — it is the
@@ -145,10 +158,11 @@ When recording a config:
 - **`cublas_us`** — reuse the shape's existing value. cuBLAS is the config-independent torch reference (true-fp32 SGEMM
   for fp32 shapes, HGEMM for `*.fp16`), so it doesn't change when our knobs change. The derived `ratio` / `golden` flag
   recompute from the two latencies.
-- **`knobs`** — record only the **search knobs** the table shows (BM, BN, BK, BR, FM, FN, FK, WM, WN, SPLITK, RING,
-  STAGE, MMA, WARPSPEC, OVERHANG). Drop the transport/codegen control flags the planner re-derives (GROUP_M, TMA,
-  PIPELINE_STAGES, ASYNC_COPY, PAD_SMEM, HOIST_COMPUTE, NOATOMIC, VECTORIZE_LOADS, PERMUTE_LANES, INTERLEAVE_LOADS) and
-  the `S_*` / `H_*` feature columns.
+- **`knobs`** — copy the winning kernel's **`record_knobs`** map from the `--json` record verbatim: the realized
+  tuning knobs with EVERY schedule family (TILE / REDUCE / STAGE / WSPEC / RASTER) explicitly stamped, OFF spelling
+  (`''`) included. Do NOT record just the knobs you pinned or the non-empty table cells — an entry that omits a
+  family leaves it to the planner's replay-time fill, which drifts as the planner evolves (the recurring
+  unpinned-`REDUCE` phantom-regression class: a recorded un-split config replaying with a surprise `g2k` fill).
 - A shape with the **same knobs** as an existing entry but a faster `us` is a codegen win — just lower that entry's
   `emmy_us`, don't add a duplicate.
 

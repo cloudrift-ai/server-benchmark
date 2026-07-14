@@ -166,26 +166,35 @@ e2e scalar can't — so for its multi-launch slices (split-K fixups) the e2e fie
 (~1 ms/iter); pricing those variants by slice-e2e instead is a possible future tune-semantics change.
 
 **One worker, two jobs.** `_bench_worker.py`'s `_run_job` dispatches on `torch_spec`: `None` is the
-emmy-only autotune bench (`benchmark_program`); otherwise it's the deployable eager /
-torch.compile / emmy comparison — `("trace_args", {code/input/layer/seq_len/dynamic})` →
+emmy-only bench (`benchmark_program` — the autotune sweep and `run --bench`'s pinned golden / `--ab`
+rows; an optional `run_inputs` ndarray dict adds one pre-bench execution on those inputs with the
+outputs shipped back — the pinned-row wrong-answer gate's measurement side); otherwise it's the
+deployable eager / torch.compile / emmy comparison — `("trace_args", {code/input/layer/seq_len/dynamic})` →
 `load_or_trace` rebuilds the real module (HF id or `--code` expr) → `bench_full_model_real` (for a
 symbolic graph the torch closures run on hint-**tiled** example inputs — `commands/run._hint_sized_inputs`
 grows every symbolic input axis to its `Dim` hint by repeating the trace values, the same size the
 emmy side resolves to when benching without inputs, so the full-model table compares one shape; the
 printed table carries a `benched at seq_len=… (symbolic hint)` note);
-`("frontend_graph", Graph|None)` → `bench_lowered_vs_torch`. Rebuilding the torch side **in the
+`("frontend_graph", Graph|None)` → `bench_lowered_vs_torch`. A `trace_args` job honors two run-path
+flags: `accuracy` (bind the rebuilt module's real inputs, run the emmy program on them, compare vs
+eager — the verdict rides back as `accuracy_error` and a numeric failure skips the bench) and
+`want_ref` (return that run's `(inputs, outputs)` as `run_io`). Rebuilding the torch side **in the
 child** (not pickling a live module) is what lets the interleaved comparison — which couldn't cross a
 subprocess boundary before — run isolated. So `tune --bench` (`commands/tune.py` `_run_bench` /
-`_bench_per_kernel`) and any deployable bench go through `benchmark_compare_isolated_async`: a hung kernel
-hangs the child, the parent SIGKILLs it at `wall_timeout_s`, the device is freed, and the per-kernel
-sweep **continues** to the next reproducer (no device-poisoning wedge, no skip). The whole bench surface
-is **async-only** — the parent transport is the single **`_AsyncBenchWorker.run_job`** (the old sync
-`_BenchWorker` and the sync `benchmark_program_isolated` / `benchmark_compare_isolated` bridges are gone).
-`benchmark_compare_isolated_async` awaits a one-shot instance (`_run_job_oneshot`); the autotune sweep
-awaits a persistent per-GPU instance directly via `benchmark_program_isolated_async`. Synchronous CLI
+`_bench_per_kernel`) and every `run --bench` row go through the worker: a hung kernel
+hangs the child, the parent SIGKILLs it at `wall_timeout_s`, the device is freed, and the sweep / A/B
+**continues** to the next reproducer or row (no device-poisoning wedge, no skip). The worker starts by
+dropping `EMMY_DUMP_DIR` from its own env — a child-built `CudaBackend()` defaults its dump from that
+var and `CompilerDump.__post_init__` rmtrees the dir, which would wipe the parent's reproducers. The
+whole bench surface is **async-only** — the parent transport is the single **`_AsyncBenchWorker.run_job`**
+(the old sync `_BenchWorker` and the sync `benchmark_program_isolated` / `benchmark_compare_isolated`
+bridges are gone). `benchmark_compare_isolated_async` awaits a one-shot instance (`_run_job_oneshot`);
+the autotune sweep awaits a persistent per-GPU instance directly via `benchmark_program_isolated_async`;
+`run --bench` awaits its backend's persistent instance via `CudaBackend.benchmark_compare_async` (greedy
+row) / `CudaBackend.bench_pinned_async` (pinned rows) inside one `asyncio.run` session. Synchronous CLI
 entry points (`handle_run`, `_handle_run_ir`, `_run_bench`) bridge with `asyncio.run`. See
-`tests/compiler/backend/test_bench_worker_compare.py` (compare-in-worker + SIGKILL recovery),
-`test_hung_kernel_watchdog.py` (watchdog raises promptly), and
+`tests/compiler/backend/test_bench_worker_compare.py` (compare-in-worker + SIGKILL recovery + the
+run-path job flags), `test_hung_kernel_watchdog.py` (watchdog raises promptly), and
 `tests/compiler/cli/test_tune_bench_hung_kernel.py` (the `_run_bench` control flow).
 
 **One async transport — `_AsyncBenchWorker`.** It drives the `_bench_worker.py` subprocess protocol (`<8-byte LE
@@ -195,14 +204,18 @@ concurrently (`tune --gpus`, see `pipeline/ARCHITECTURE.md` → *Per-kernel GPU 
 - **Autotune sweep** awaits `benchmark_program_isolated_async(graph, worker=…)`. `CudaBackend(device_id=i)` lazily owns
   one **persistent** worker (reused across configs — pay the ~0.2 s Python spawn once) and exposes `benchmark_async`,
   the single benchmarking entry point: the isolated-worker path when `bench_wall_timeout_s` is set and no `on_iter`,
-  else the in-process `benchmark_program` path (interactive `run --bench` interleaving). The device pin is a **per-worker spawn-env overlay** —
+  else the in-process `benchmark_program` path (the interleave `bench_lowered_vs_torch` / `bench_full_model_real`
+  drive — which itself now runs inside a worker child for every `--bench`). The device pin is a **per-worker spawn-env overlay** —
   `CUDA_VISIBLE_DEVICES=<id>` (so the child's logical device 0 *is* that GPU; every argumentless `cp.cuda.Device()`
   resolves correctly) plus, when a base `EMMY_GPU_LOCK` is set, a per-device `…-<id>` lock path so workers on
   different GPUs take distinct `FileLock`s instead of serialising. The overlay rides the child only — the parent's
   `os.environ` is never mutated (all slots share one event-loop thread).
-- **Deployable `--bench`** awaits `benchmark_compare_isolated_async`, which uses `_run_job_oneshot` (spawn → run →
-  `aclose`). The worker's streams bind to the loop, so it can't persist across `asyncio.run` calls — a per-call spawn,
-  negligible against a minutes-long deployable bench. Sync callers (`_run_bench` / `_bench_per_kernel`) `asyncio.run` it.
+- **Deployable `--bench`**: `tune --bench` awaits `benchmark_compare_isolated_async`, which uses `_run_job_oneshot`
+  (spawn → run → `aclose`; the worker's streams bind to the loop, so it can't persist across `asyncio.run` calls — a
+  per-call spawn, negligible against a minutes-long deployable bench). `run --bench` instead runs its whole session
+  (greedy comparison + every pinned row) in ONE `asyncio.run` over the backend's persistent worker
+  (`benchmark_compare_worker_async` / `benchmark_pinned_isolated_async`), closed via `aclose_async_worker` before the
+  loop exits.
 
 The wall-clock cap is `asyncio.wait_for`; on overrun the child is SIGKILLed and the next bench respawns it on a clean
 device. Because the persistent worker is reused across configs, an illegal / misaligned access is a hazard: that error
@@ -213,8 +226,18 @@ context on the next request (the dead-proc check before `await self._spawn()`). 
 cleaned-up OOM) leave the context healthy and keep the worker alive, so they pay no respawn cost. A stale-worker race
 on the send (a `BrokenPipeError`/`ConnectionResetError` from `stdin.drain` after the worker's dirty-context exit)
 triggers one respawn + resend before surfacing as `bench worker died during request send`. Error paths `await aclose()`
-(SIGKILL + reap) so the subprocess transport is cleaned before the loop closes. See
-`tests/compiler/backend/test_bench_worker_recovery.py` and `test_async_bench_worker.py`.
+(SIGKILL + reap) so the subprocess transport is cleaned before the loop closes.
+
+Three transport behaviors worth knowing: (1) the child's **stderr is drained continuously** by a background task into
+a bounded tail — a chatty child (HF shard-download progress, nvcc warnings) would otherwise fill the ~64 KB pipe and
+block mid-job, misread as a wall-timeout — and every failure message (timeout, EOF, in-child error) carries that tail;
+(2) an in-child failure's **traceback is logged** by `run_job` (never discarded), the raise is the typed
+`BenchWorkerJobError`, and a bare in-child `sys.exit` is reported as such with a pointer at the traceback/stderr
+rather than an opaque `SystemExit(1)`; (3) pinned-row **reference inputs are cached in the child** under a
+session-unique `run_inputs_key` (hundreds of MB on the big `--code` shapes — shipped once per child, not per row),
+with a typed cache-miss + one retry-with-inputs covering a respawn racing the parent's key tracking. See
+`tests/compiler/backend/test_bench_worker_recovery.py`, `test_async_bench_worker.py`, and
+`test_bench_worker_compare.py`.
 
 `iter_once` (the per-iter sample loop) rejects a `cp.cuda.get_elapsed_time`
 reading of `<= 0.0` as `bench_fail` instead of accepting it as a 0µs sample.

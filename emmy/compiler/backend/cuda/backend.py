@@ -235,3 +235,65 @@ class CudaBackend(Backend):
             e2e_ms=result.e2e_ms,
             e2e_min_ms=result.e2e_min_ms,
         )
+
+    async def bench_pinned_async(
+        self,
+        compiled: Graph,
+        *,
+        run_inputs: dict | None = None,
+        run_inputs_key: str | None = None,
+        warmup: int = 5,
+        num_iters: int | str = 20,
+    ) -> tuple[BenchmarkResult, dict | None]:
+        """One ``run --bench`` pinned-row (golden / ``--ab``) bench through this backend's
+        persistent SIGKILL-able worker — the same isolation the autotune sweep uses, so a
+        pinned config that hangs dies with the child and never dirties this process's CUDA
+        stream. ``run_inputs`` adds one pre-bench execution on those inputs, returning the
+        outputs (the wrong-answer gate's measurement side); ``run_inputs_key`` (session-unique)
+        makes the inputs cross the pipe once per child instead of per row. The wall cap covers
+        the in-child compile + run budgets plus spawn / transport headroom."""
+        from emmy.compiler.backend.cuda.program import benchmark_pinned_isolated_async  # noqa: PLC0415
+
+        return await benchmark_pinned_isolated_async(
+            compiled,
+            worker=self._async_worker(),
+            wall_timeout_s=self.bench_compile_timeout_s + self.bench_run_timeout_s + 60.0,
+            run_inputs=run_inputs,
+            run_inputs_key=run_inputs_key,
+            warmup=warmup,
+            num_iters=num_iters,
+            compile_timeout_s=self.bench_compile_timeout_s,
+            run_timeout_s=self.bench_run_timeout_s,
+        )
+
+    async def benchmark_compare_async(
+        self,
+        compiled: Graph,
+        *,
+        torch_spec: tuple,
+        bench_backends: str | None,
+        wall_timeout_s: float,
+        warmup: int,
+        iters: int,
+        seed: int = 0,
+        accuracy: bool = False,
+        want_ref: bool = False,
+    ) -> dict:
+        """``run --bench``'s greedy-row comparison (eager / torch.compile / emmy, plus the
+        optional in-child accuracy verdict and wrong-answer reference) through this
+        backend's persistent worker — see
+        :func:`~emmy.compiler.backend.cuda.program.benchmark_compare_worker_async`."""
+        from emmy.compiler.backend.cuda.program import benchmark_compare_worker_async  # noqa: PLC0415
+
+        return await benchmark_compare_worker_async(
+            worker=self._async_worker(),
+            lowered=compiled,
+            torch_spec=torch_spec,
+            bench_backends=bench_backends,
+            wall_timeout_s=wall_timeout_s,
+            warmup=warmup,
+            iters=iters,
+            seed=seed,
+            accuracy=accuracy,
+            want_ref=want_ref,
+        )

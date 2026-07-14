@@ -853,3 +853,37 @@ def test_launch_order_cuda_nodes_pairs_by_topo_not_dict_order():
 
     names = [n.op.kernel_name for n in _launch_order_cuda_nodes(g)]
     assert names == ["k_producer", "k_consumer"]
+
+
+def test_accuracy_check_fails_scrambled_output_passes_outliers(capsys):
+    """The accuracy verdict's three clauses each do their one job (the PR #354 sync-fill
+    incident: a swizzle fill/drain mismatch SCRAMBLED the A slab and the old fp16 form —
+    ``max ≤ peak OR mean ≤ peak`` — passed the permuted output at mean_diff 15% of peak):
+
+    - a PERMUTED fp16 output must FAIL (systematic corruption — the tight mean gate), even
+      though its max error can sit near the loose fp16 outlier ceiling;
+    - a correct fp16 output with small noise plus a few atomic-reorder-style OUTLIERS must
+      PASS (the near-zero mean vouches for them — the split-K escape hatch);
+    - a correct low-noise output must PASS the plain path."""
+    import numpy as np
+    import torch
+
+    from emmy.commands.run import _check_accuracy
+
+    rng = np.random.default_rng(0)
+    eager = torch.from_numpy((rng.standard_normal(1 << 16) * 20).astype(np.float32))
+
+    def verdicts(arr):
+        capsys.readouterr()
+        _check_accuracy({"o": arr}, eager, fatal=False)
+        return "FAIL" in capsys.readouterr().out
+
+    base = eager.numpy()
+    # Scrambled (permutation of the correct values): must FAIL.
+    assert verdicts(rng.permutation(base).astype(np.float16)), "a permuted output must fail the mean gate"
+    # Correct + tiny noise + a few big outliers (the split-K atomic-reorder class): must PASS.
+    noisy = base + rng.standard_normal(base.shape) * 0.01
+    noisy[:4] += np.abs(base).max() * 0.5  # outliers past the fp32 max ceiling, near the fp16 one
+    assert not verdicts(noisy.astype(np.float16)), "outliers with a near-zero mean must pass (escape hatch)"
+    # Correct low-noise: must PASS.
+    assert not verdicts((base + rng.standard_normal(base.shape) * 0.001).astype(np.float16))

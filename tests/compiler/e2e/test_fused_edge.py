@@ -220,6 +220,37 @@ def test_fused_sync_fill_slab_swizzle(tile, monkeypatch):
 
 
 @requires_cuda
+def test_place_cone_cut_splits_the_kernels(monkeypatch):
+    """``PLACE@cone=cut`` (here via the bare ``EMMY_PLACE`` env pin) keeps the norm producer OUT
+    of the matmul kernel — the ``xn`` intermediate stays a MEMORY edge and the program lowers to
+    MULTIPLE kernels (the fusion-pass guard; the tile recognizer's gate alone could only demote
+    an already-fused kernel to its coop form, never split it — the pin used to be a silent
+    no-op). The matmul side then owns a plain gmem A, so the staged cp.async/TMA tiers apply —
+    measured 496-503 µs vs the exhaustively-optimized fused kernel's ~660 on the gemma gate_up
+    shape (5090). Numerics must match the same numpy reference as the fused form."""
+    monkeypatch.setenv("EMMY_PLACE", "cut")
+    S, H, inter = 32, 1024, 3072
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (1, S, H), F16), node_id="x")
+    g.add_node(InputOp(), [], Tensor("nw", (H,), F16), node_id="nw")
+    g.add_node(InputOp(), [], Tensor("wg", (inter, H), F16), node_id="wg")
+    g.add_node(RmsNormOp(eps=1e-6), ["x", "nw"], Tensor("xn", (1, S, H), F16), node_id="xn")
+    g.add_node(LinearOp(), ["xn", "wg"], Tensor("o", (1, S, inter), F16), node_id="o")
+    g.inputs, g.outputs = ["x", "nw", "wg"], ["o"]
+    rng = np.random.default_rng(0)
+    ins = {
+        "x": (rng.standard_normal((1, S, H)) * 0.3).astype(np.float16),
+        "nw": (rng.standard_normal((H,)) * 0.3).astype(np.float16),
+        "wg": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
+    }
+    got, srcs = _compile_run(g, ins)
+    assert len(srcs) >= 2, f"PLACE@cone=cut must split the norm from the matmul, got {len(srcs)} kernel(s)"
+    x, nw, wg = (ins[k].astype(np.float32) for k in ("x", "nw", "wg"))
+    rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
+    np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), rms @ wg.T, atol=0.5, rtol=0.1)
+
+
+@requires_cuda
 @requires_sm90
 @pytest.mark.parametrize("runtime_s", [31, 130])
 def test_fused_rmsnorm_linear_symbolic_m(runtime_s, monkeypatch):

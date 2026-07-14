@@ -44,6 +44,7 @@ from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import build_merged_op as _build_merged_op
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import is_pure_indexmap as _is_pure_indexmap
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import wrap_merge_fragment as _wrap_merge_fragment
+from emmy.compiler.pipeline.search.space import place_decision
 
 _BLOWUP_FACTOR = 8
 
@@ -143,6 +144,29 @@ def _pending_contraction_half(graph: Graph, consumer: Node) -> bool:
     reads_product = any(ld.input == consumer.id for ld in partner.op.body.loads)
     sums = any(isinstance(s, Accum) and s.op.reduce_canon == "add" for s in partner.op.body.iter())
     return reads_product and sums
+
+
+def _contraction_shaped(op) -> bool:
+    """The op carries a contraction's structural signature — a ``multiply`` of two DISTINCT
+    values under a reduce axis, plus an add-``Accum``. The two-distinct-deps test keeps a norm's
+    own ``x·x`` square (one value, squared) from reading as a contraction, so ``PLACE@cone=cut``
+    below never blocks the norm's internal assembly — only producer edges INTO a matmul."""
+    if not isinstance(op, LoopOp):
+        return False
+    if not any(isinstance(s, Accum) and s.op.reduce_canon == "add" for s in op.body.iter()):
+        return False
+    reduce_names = op.reduce_axis_names
+
+    def mul_under_reduce(stmts, under: bool) -> bool:
+        for s in stmts:
+            if isinstance(s, Loop):
+                if mul_under_reduce(s.body, under or s.axis.name in reduce_names):
+                    return True
+            elif under and isinstance(s, Assign) and s.op.name == "multiply" and len(set(s.deps())) == 2:
+                return True
+        return False
+
+    return mul_under_reduce(op.body, False)
 
 
 def _is_softmax_shaped(op) -> bool:
@@ -302,6 +326,16 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
         and _feeds_softmax(graph, consumer)
     ):
         raise RuleSkipped("consumer feeds a softmax (attention score producer) — Q/K cones stay materialized")
+
+    # The producer-cone placement pin: ``PLACE@cone=cut`` keeps every compute-bearing producer
+    # OUT of a contraction-bearing consumer — the intermediate stays a MEMORY edge and the two
+    # sides remain separate kernels (the matmul side then schedules with a plain gmem A, so the
+    # cp.async / TMA staged tiers apply instead of the sync compute-fill). This is the fusion
+    # half of the pin; the tile recognizer's ``bind_prologue_contraction`` gate is the register
+    # half (it alone could only demote an already-fused kernel to its coop form, never split
+    # it). Indexmap plumbing still fuses — it is scaffolding, not a cone.
+    if place_decision("cone") == "cut" and not _is_pure_indexmap(producer.op) and _contraction_shaped(consumer.op):
+        raise RuleSkipped("PLACE@cone=cut — the producer cone stays a memory edge (no fusion into a contraction)")
 
     # ``build_merged_op`` hands a two-node subgraph to ``splice_graph`` and
     # returns None on any unsupported pattern: σ-solve failure (writer/reader

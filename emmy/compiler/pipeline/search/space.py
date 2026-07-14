@@ -182,7 +182,10 @@ def map_tile_moves() -> list[str]:
 # ONE pin-only family controlling structural emission: where an intermediate edge lives — registers
 # (``fuse``) or memory (``cut``). Elements are named by the MOVE, not the shape:
 #
-#   PLACE@cone   producer-cone inlining (the fused producer → matmul edge)
+#   PLACE@cone   producer-cone inlining (the fused producer → matmul edge; ``cut`` keeps the
+#                producer a separate kernel — consulted by BOTH the loop-fusion boundary
+#                (``loop/fusion/010_merge_loop_ops``, the half that actually splits kernels)
+#                and the tile recognizer's nodification gate)
 #   PLACE@fold   downstream-fold absorption (flash vs separate softmax + P@V kernels)
 #   PLACE@tuple  sibling-fold tupling (online softmax vs two-pass stats)
 #

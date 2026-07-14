@@ -64,6 +64,15 @@ def test_bench_cmd_targets_embeddings():
     assert "--random-output-len" not in cmd
 
 
+def test_bench_cmd_generate_targets_completions():
+    cmd = build_bench_cmd(
+        MODEL, port="8123", max_concurrency=8, num_prompts=32, random_input_len=64, seed=7, generate=True, random_output_len=96
+    )
+    assert cmd[cmd.index("--backend") + 1] == "openai"
+    assert cmd[cmd.index("--endpoint") + 1] == "/v1/completions"
+    assert cmd[cmd.index("--random-output-len") + 1] == "96"
+
+
 def test_own_flags_after_model_are_extracted(capsys):
     # The argparse-REMAINDER footgun: everything after MODEL lands in
     # vllm_args, INCLUDING emmy's own flags. They must still be honored
@@ -130,7 +139,11 @@ def test_serve_cmd_generate_honors_explicit_batched_tokens():
     assert cmd[cmd.index("--max-num-batched-tokens") + 1] == "2048"
 
 
-def test_serve_generate_bench_is_rejected():
+def test_serve_generate_bench_targets_completions(capsys):
     args = _parse(["serve", MODEL, "--generate", "--bench", "--dry-run"])
-    with pytest.raises(SystemExit):
-        handle_serve(args)
+    handle_serve(args)
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 2  # serve + bench
+    assert "--runner generate" in out[0]
+    assert "--backend openai" in out[1] and "/v1/completions" in out[1]
+    assert "--random-output-len" in out[1]  # generative bench needs a generation length

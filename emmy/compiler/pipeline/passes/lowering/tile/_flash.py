@@ -66,13 +66,14 @@ redundant, form::
 Scope: static OR dynamic (symbolic ``seq_len`` on Q/K/V dim -2 — one cached kernel
 carrying ``int seq_len`` serves every runtime size, the symbol landing on BOTH the
 masked-row M and the symbolic reduce), causal or non-causal (causal masks the
-score per element, ``kv ≤ m`` else −inf — tile-skip is a tensor-core-tier
-follow-up), an optional broadcast additive mask (the HF ``(1,1,S,S)`` float bias),
+score per element, ``kv ≤ m`` else −inf; the warp tier additionally tile-skips —
+``_twist`` bounds the stream at the CTA's last query row off that ``Select``'s
+shape), an optional broadcast additive mask (the HF ``(1,1,S,S)`` float bias),
 and GQA (``q_heads == group · kv_heads``; the K/V head axis read at ``head //
 group`` directly, no materialized broadcast). Fusion is the ``PLACE@fold`` placement
 (default ``fuse``; ``cut`` is the multi-kernel attention escape — gated in
 ``010_recognize``, before :func:`try_flash` is even tried); the two-level ``OptionFork``
-offer + ``AnalyticPrior`` cold-start are a follow-up.
+offer + ``OfflinePrior`` cold-start are a follow-up.
 """
 
 from __future__ import annotations
@@ -127,7 +128,7 @@ def _struct_features(batch: list[int], s_q: Dim, s_k: Dim, head_dim: int, d_v: i
     because the fused fragment is BUILT as a ``TileOp`` (it never passes the loop-dialect stamp).
     Free = the grid ``(batch…, m, d)``, reduce = the streamed ``kv`` + the score ``dd``; a symbolic
     seq axis is excluded from the products and counted in ``S_ext_n_symbolic_axis`` (the flag the
-    ``AnalyticPrior`` selects its masked-tier weight set on). Riding the ``TileOp`` knob base, they
+    ``OfflinePrior`` selects its masked-tier weight set on). Riding the ``TileOp`` knob base, they
     reach every flash fork leaf row, so the prior's occupancy terms fire when ranking the forms."""
     free = [*batch, d_v]
     reduce_ = [head_dim]

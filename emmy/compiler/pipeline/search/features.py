@@ -1,4 +1,4 @@
-"""The learned-prior featurizers — every knob-dict → feature-vector encoding, in one file.
+"""The online-prior featurizers — every knob-dict → feature-vector encoding, in one file.
 
 :func:`knob_features` is the single featurizer over a whole knob dict (the ``D_*`` engineered
 geometry / occupancy family, the ``MMA_*`` atom expansion, the ``S_*`` / ``H_*`` pass-throughs);
@@ -244,7 +244,7 @@ def _schedule_node_features(node_knobs: dict) -> dict[str, float]:
 
 
 def knob_features(knobs: dict) -> dict[str, float]:
-    """Convert a knob dict into a flat numeric feature vector for the learned planner prior — the single
+    """Convert a knob dict into a flat numeric feature vector for the planner priors — the single
     featurizer over the whole dict.
 
     - ``STRUCT_PREFIX`` (``S_``) structural-feature knobs and ``CTX_PREFIX``
@@ -354,7 +354,7 @@ def _reduce_decomp(knobs: dict) -> _Decomp:
     plan = ReducePlan.parse(family_value(knobs, "REDUCE"))
     # ``finalize`` must be forwarded: dropping it left ``_Decomp``'s "atomic" default in place, so
     # ``D_finalize_kernel`` was dead (0.0) on EVERY row — including tiled g<n>k splits — and the
-    # analytic prior's atomic-free split interaction never fired (found by the 2026-07-07
+    # offline prior's atomic-free split interaction never fired (found by the 2026-07-07
     # reduce-featurization tests).
     return _Decomp(fold=plan.reg, cta=plan.cta, coop=plan.coop, finalize=plan.finalize)
 
@@ -365,7 +365,7 @@ def tile_signature(knobs: dict) -> tuple:
     knobs (``TILE`` / ``REDUCE`` / ``STAGE``, bare or ``@<axis>``-suffixed alike). Two configs
     with equal signatures are the same kernel variant whichever key form spelled them, so this
     is the bridge for matching a recorded golden YAML row against the native enumeration's
-    candidate rows (``scripts/golden_knob_heuristics.py`` / ``search/analytic.evaluate_golden``).
+    candidate rows (``scripts/golden_knob_heuristics.py`` / ``search/golden_eval.evaluate_golden``).
     Operand staging (the ``STAGE`` codec) is part of the identity — a staged and a gmem-direct
     config are different variants — but defaults to ``None`` when absent, so a golden recorded
     without a ``STAGE`` still matches a native unstaged candidate (both ``None``)."""
@@ -408,8 +408,8 @@ def _geom_feats(
     single featurization the priors rank on. It folds in everything the old
     hand-coded matmul heuristic scored (occupancy waves, tile-area / thread /
     aspect targets, the geometry "bands", K-chunk depth), so a fixed linear model
-    over these features (:class:`~emmy.compiler.pipeline.search.prior.AnalyticPrior`)
-    reproduces that heuristic and the learned ``CatBoostPrior`` sees the same
+    over these features (:class:`~emmy.compiler.pipeline.search.prior.OfflinePrior`)
+    reproduces that heuristic and the ``OnlinePrior`` sees the same
     derived signal a tree can't cheaply reconstruct from raw knobs + the *coarse*
     ``S_ext_*`` extents.
 
@@ -447,7 +447,7 @@ def _geom_feats(
         "D_log2_area": l2(area),
         "D_reuse": reuse,
         "D_aspect": aspect,
-        # analytic (ex-heuristic) terms — tier-aware targets
+        # offline (ex-heuristic) terms — tier-aware targets
         "D_l2_threads": l2(threads),
         "D_near_threads": -abs(l2(threads) - thr_target),
         "D_pow2_threads": 1.0 if threads > 0 and (threads & (threads - 1)) == 0 else 0.0,
@@ -480,7 +480,7 @@ def _geom_feats(
         "D_splitk_le2": 1.0 if splitk <= 2 else 0.0,
         # Cross-CTA finalize fold (the REDUCE codec ``c`` field's letter): 1.0 = deferred
         # KERNEL combine (``c<cta>k``), 0.0 = in-place ATOMIC (``c<cta>a`` / bare). The
-        # analytic prior's split-K gate reads it.
+        # offline prior's split-K gate reads it.
         "D_finalize_kernel": 1.0 if (splitk > 1 and finalize == "kernel") else 0.0,
         "D_tilen_clean": 1.0 if tile_n in (32, 64, 128) else 0.0,
         "D_near_tilen": -abs(l2(tile_n) - 6.0),
@@ -503,9 +503,9 @@ def _geom_feats(
         # fold ``splitk`` straight into ``ctas``, so they CANNOT tell "≈2 waves via a
         # small tile" (golden, free) from "≈2 waves via heavy split-K on a big tile"
         # (atomic-bound) — both score the same waves / ctas≥sm. This credits split-K
-        # up to the need and penalizes the excess, the engineered signal the learned
+        # up to the need and penalizes the excess, the engineered signal the online
         # prior needs to separate the SPLITK=1/2 goldens from the SPLITK=8/16 tiles
-        # the -O1 sweep over-ranks (the analytic prior already gets it via D_splitk_le2).
+        # the -O1 sweep over-ranks (the offline prior already gets it via D_splitk_le2).
         free_ctas = float(free_prod) / area
         # Split-K is justified to (a) lift occupancy toward ~2 waves AND (b) hide the K-streaming
         # latency of a K-HEAVY GEMM — a long reduction per output tile parallelizes across the split

@@ -373,7 +373,7 @@ def role_for(token: str) -> RoleKind:
 class Level(enum.Enum):
     """One hardware level the reduce axis can be partitioned across, coarse→fine."""
 
-    GRID = "grid"  # across CTAs (split-K) — emitted by 030_split, never the in-kernel walk
+    GRID = "grid"  # across CTAs (split-K) — emitted by 030_split_reduce, never the in-kernel walk
     BLOCK = "block"  # cooperative threads within a CTA (warp shuffle / smem tree)
     REG = "reg"  # ILP register-fold accumulators
     SERIAL = "serial"  # the per-thread serial remainder (never spelled — derived)
@@ -385,14 +385,14 @@ class Fold(enum.Enum):
     :meth:`ReduceStage.combine` is the ONE selector; every fold emitter consumes its output —
     ``_factor.emit_combine`` (SHFL butterfly / SMEM tree at scalar residence), ``_twist``'s
     streaming merge (the same SHFL move realized as a ``FragmentRowReduce`` at fragment
-    residence), and ``030_split`` (the cross-CTA ATOMIC / KERNEL finalize as a graph rewrite)."""
+    residence), and ``030_split_reduce`` (the cross-CTA ATOMIC / KERNEL finalize as a graph rewrite)."""
 
     SERIAL = "serial"  # no cross-unit combine (the serial / reg remainder)
     REG = "reg"  # register tree (ILP) — TODO(reg)
     SHFL = "shfl"  # lane-level ``__shfl_xor_sync`` butterfly (within-warp)
     SMEM = "smem"  # cross-warp / block-wide smem tree-halve (within-block)
-    ATOMIC = "atomic"  # cross-CTA ``atomicAdd`` finalize (030_split's one-kernel arm)
-    KERNEL = "kernel"  # cross-CTA workspace + deferred sibling combine kernel (030_split)
+    ATOMIC = "atomic"  # cross-CTA ``atomicAdd`` finalize (030_split_reduce's one-kernel arm)
+    KERNEL = "kernel"  # cross-CTA workspace + deferred sibling combine kernel (030_split_reduce)
 
 
 @dataclass(frozen=True)
@@ -403,7 +403,7 @@ class ReduceStage:
     implies the fold, and a BLOCK width derives warp-shuffle vs hierarchical-smem from the
     warp size. ``width`` is power-of-two for BLOCK (the butterfly / tree reorder).
 
-    ``finalize`` is meaningful only at ``GRID``: how ``030_split`` realizes the cross-CTA
+    ``finalize`` is meaningful only at ``GRID``: how ``030_split_reduce`` realizes the cross-CTA
     combine — ``"atomic"`` (the partial kernel ``atomicAdd``\\ s into the output, one kernel,
     additive carriers only) or ``"kernel"`` (a deferred sibling combine kernel over a
     workspace, the only legal arm for a twisted carrier). The ``g<n>[a|k]`` codec letter."""
@@ -418,7 +418,7 @@ class ReduceStage:
 
         - ``SERIAL`` / ``REG`` → ``()`` (no cross-unit combine; REG-fold is TODO(reg)).
         - ``GRID`` → ``(ATOMIC,)`` or ``(KERNEL,)`` per the ``finalize`` letter (the split-K
-          cross-CTA move — consumed by ``030_split``; the carrier / projection legality raises
+          cross-CTA move — consumed by ``030_split_reduce``; the carrier / projection legality raises
           stay with the graph rewrite, which alone holds the context).
         - ``BLOCK`` → the intra-CTA hierarchy: a lone ``SHFL`` when ``segmented`` (the
           per-row segmented butterfly for strided-cooperative rows) or ``width ≤ warp``
@@ -506,7 +506,7 @@ class ReducePlan:
 
     @property
     def needs_split(self) -> bool:
-        """True iff any stage is a cross-CTA GRID split (``030_split`` territory)."""
+        """True iff any stage is a cross-CTA GRID split (``030_split_reduce`` territory)."""
         return any(s.level is Level.GRID for s in self.stages)
 
     def _width(self, level: Level) -> int:

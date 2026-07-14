@@ -105,7 +105,7 @@ class Reduction:
 
     The **scheduling param** is the ``reduce`` partition (:class:`ReducePlan` — GRID split / BLOCK coop
     / REG ILP), stamped onto the node by ``_schedule`` (inside ``010_recognize``) (its decided value lives **here** on the node
-    — read via ``ops.reduce_plan``). ``lower`` ignores it (it's metadata the materializer / ``030_split``
+    — read via ``ops.reduce_plan``). ``lower`` ignores it (it's metadata the materializer / ``030_split_reduce``
     read), so it leaves ``op_cache_key`` byte-identical."""
 
     carrier: Carrier  # the loop-carried ⊕ algebra (degenerate id / twisted exp)
@@ -122,6 +122,11 @@ class Reduction:
     # a bare reduce (``sum`` / ``max`` / softmax's PLANAR row reduce), whose ``partial`` is plain
     # loop-IR stmts. :attr:`loop` splices the source's lowered loop nest ahead of the ``partial``.
     source: Reduction | Contraction | None = None
+    # The stream's ABSOLUTE base for a cross-CTA slice partial (flash split-KV: ``030_split_reduce`` shrinks
+    # ``axis`` to the slice length B and sets ``offset = _ksplit · B``). The fold walks its local
+    # ``[0, B)`` window; a consumer needing the absolute reduce-axis coordinate (gmem/TMA operand
+    # bases, the causal mask's key columns) adds this. ``None`` = the un-split stream (base 0).
+    offset: Expr | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.partial, Body):
@@ -476,7 +481,7 @@ class Map:
     softmax / RMSNorm is a ``Map`` whose ``body`` is the post-fold sweep over a ``Reduction`` source.
     Every recognized contraction — per-cell scalar included — is a :class:`Contraction` node
     (``_nodify_contraction`` in ``010_recognize``); the only annotated reduce ``Loop``\\ s still riding
-    a flat ``Map`` body are ``030_split``'s sliced partials. ``out`` is the bound output name (the
+    a flat ``Map`` body are ``030_split_reduce``'s sliced partials. ``out`` is the bound output name (the
     body's last def, or the source's carried state for an empty-body wrap). It HAS a Body, not IS
     one."""
 

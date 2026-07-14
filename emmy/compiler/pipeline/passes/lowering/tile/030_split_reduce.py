@@ -26,8 +26,13 @@ the finalize is a fresh ``ReducePlan``); ``lowering/kernel`` only ever sees sing
 kernels (``assert not needs_split``).
 
 This cut handles **additive** carriers — a degenerate ``PLANAR`` reduce (``sum``) and a
-``CONTRACTION`` contraction (split-K matmul), one carrier-state component each. A twisted
-multi-component carrier (flash split-KV) is the remaining step.
+``CONTRACTION`` contraction (split-K matmul), one carrier-state component each — and the twisted
+multi-component carrier: **flash split-KV** (:func:`_split_twisted_warp`), where a WARP-tiled
+``TWISTED`` streaming tree keeps its fragment residence in the partial (the ``Reduction`` axis
+shrinks to the slice and its absolute base rides ``Reduction.offset``), stores the raw
+``(m, l, O)`` state to an f32 workspace, and the finalize folds the partitions through the
+exp-family LSE combine before projecting. Pays where the un-split grid starves the SMs (few
+heads / short query axis); pin ``REDUCE=g<n>k``.
 
 **Two shapes of contraction split-K.** A structural ``Reduction(axis=ksplit,
 source=Contraction(k_axis=kslice))`` (built by ``_schedule._splitk_option``) has its K axis already
@@ -218,6 +223,78 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, contraction: Cont
     return frag
 
 
+def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Map, plan: ReducePlan, split: Axis):
+    """Realize flash split-KV: a **warp-tiled** ``TWISTED`` streaming tree whose GRID stage slices
+    the kv stream across ``cta`` CTAs. The partial keeps the WHOLE fragment-resident tree — the
+    ``Reduction`` gets its axis shrunk to the slice length ``B`` and its absolute base on
+    ``offset`` (``_ksplit · B``; the realizer walks the local ``[0, B)`` window and re-bases the
+    gmem/TMA coords + causal mask, composing with the causal tile-skip) — and stores the RAW
+    ``(m, l, O)`` state: O per output cell, the d-invariant row stats once per row at the last
+    slot's origin, into an **f32** workspace (the pre-projection state must not round-trip
+    through the output dtype). The finalize folds the workspace over the split axis via the
+    carrier's ``as_state_merge`` (the LSE cross-partition combine) and runs the ORIGINAL
+    projection (``O/l`` + the layout-aware store) per output element. Deferred-kernel finalize
+    only — the twisted ``e^{Δm}`` rescale can't be an atomic."""
+    red: Reduction = op.source
+    head: Contraction = red.partial[0]
+    pv: Contraction = next(s for s in list(red.partial)[1:] if isinstance(s, Contraction))
+    carrier = red.carrier
+    cta = plan.cta
+    extent = red.axis.extent.as_static()
+    b = extent // cta
+    atom_n = head.tile.atom.shape[1]
+    bn = head.tile.regs[1] * atom_n
+    if b % bn != 0:
+        raise NotImplementedError(f"flash split-KV slice ({b}) must be divisible by the streaming key block ({bn})")
+    (cross_move,) = next(st for st in plan.stages if st.level is Level.GRID).combine(warp_size=32)
+    if cross_move is Fold.ATOMIC:
+        raise NotImplementedError("the twisted (m, l, O) state can't finalize atomically; pin the deferred kernel (REDUCE=g<n>k)")
+
+    out = root.output
+    grid = tile.place.grid  # (batch…, m_blocks) — the warp placement's shrunk query axis, d folded away
+    names = carrier.state.names
+    channels = carrier.twist.channels
+    expect = next(n for n, ch in zip(names, channels, strict=True) if ch.lift is not None)
+    n_comp = len(names)
+    m_axis, d_axis = head.m_axis, pv.n_axis
+    batch = tuple(a for a in grid[:-1])
+
+    # The workspace is OURS (bare ``(batch…, m, d)`` order — the fused output layout only matters
+    # at the finalize's store); f32 so the pre-projection state keeps the stream's precision.
+    ws_name = f"{out.name}__partial"
+    ws_shape = (Dim(n_comp), Dim(cta), *(a.extent for a in batch), m_axis.extent, d_axis.extent)
+
+    def ws_index(i: int, name: str) -> tuple:
+        cell = (Var(m_axis.name), Var(d_axis.name) if name == expect else Literal(0, "int"))
+        return (Literal(i, "int"), Var(split.name), *(Var(a.name) for a in batch), *cell)
+
+    off = BinaryExpr("*", Var(split.name), Literal(b, "int"))
+    sliced = replace(red, axis=replace(red.axis, extent=Dim(b)), reduce=_strip_grid(plan), offset=off)
+    ws_writes = tuple(Write(output=ws_name, index=ws_index(i, names[i]), value=names[i]) for i in range(n_comp))
+    partial_map = Map(body=Body(ws_writes), source=sliced)
+    partial_tile = _mapped(partial_map, (split, *grid), name=f"{tile.name}__partial", stage=tile.stage, knobs=tile.knobs)
+
+    # Finalize: per output element, seed the state, fold the partitions (the exp-family LSE
+    # combine), then the original projection + layout-aware store (``op.body`` verbatim).
+    other = tuple(f"{nm}__p" for nm in names)
+    combine = carrier.as_state_merge(other)
+    ids = _carrier_identities(carrier)
+    seeds = tuple(Init(name=nm, identity=ids[nm], dtype=F32) for nm in names)
+    loads = tuple(Load(name=other[i], input=ws_name, index=ws_index(i, names[i])) for i in range(n_comp))
+    fin_loop = Loop(axis=split, body=Body((*loads, combine)))
+    fin_op = Map(body=Body((*seeds, fin_loop, *op.body)))
+    fin_tile = _mapped(fin_op, (*batch, m_axis, d_axis), name=tile.name)
+
+    frag = Graph()
+    for inp in root.inputs:
+        n = match.graph.nodes[inp]
+        frag.add_node(op=InputOp(), inputs=[], output=n.output, node_id=inp)
+    frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
+    frag.add_node(op=fin_tile, inputs=[ws_name], output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
+    frag.outputs = [out.name]
+    return frag
+
+
 def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     tile: TileOp = root.op
     # The reduce partition lives on the Reduction node (off the schedule) — ``reduce_plan`` reads
@@ -237,6 +314,16 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     # is the **bare Contraction** (→ ``factorize`` → mma / scalar), no ``_slice_loop``.
     if isinstance(op, Reduction) and isinstance(op.source, Contraction):
         return _split_contraction(match, root, tile, op.source, carrier, plan, rax)
+    # Flash split-KV: a warp-tiled TWISTED streaming tree keeps its fragment residence in the
+    # partial (the scalar residual path below would drop it to the per-cell tier).
+    if isinstance(op, Map) and isinstance(op.source, Reduction) and op.source.role is AxisRole.TWISTED:
+        head = op.source.partial[0] if len(op.source.partial) else None
+        if isinstance(head, Contraction) and head.tile.is_warp:
+            if not rax.extent.is_static:
+                raise NotImplementedError("flash split-KV needs a static kv extent (the dynM stream is not split)")
+            if rax.extent.as_static() % cta != 0:
+                raise NotImplementedError(f"flash split-KV needs a divisible kv extent ({rax.extent.as_static()} % cta {cta})")
+            return _split_twisted_warp(match, root, tile, op, plan, Axis(name=_SPLIT, extent=Dim(cta)))
     if not rax.extent.is_static:
         raise NotImplementedError("cross-CTA split of a symbolic reduce axis is not built yet")
     extent = rax.extent.as_static()

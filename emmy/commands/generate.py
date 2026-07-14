@@ -167,7 +167,7 @@ class _CompiledLM:
             # Full-logits wrapper: lm_head over all S positions, with the last row sliced
             # on the HOST in ``logits()``. The in-graph slice (``slice_last_logits=True``)
             # makes lm_head an M=1 *demoted* matmul that does NOT lower to CUDA on the cold
-            # path (no learned prior) — leftover LoopOp 'linear_7'. The oracle is O(S^2)
+            # path (no online prior) — leftover LoopOp 'linear_7'. The oracle is O(S^2)
             # regardless, so full logits + a host slice is the correct, cold-compilable cut.
             wrapper = build_full_model_wrapper(model, seq_len, dtype, dynamic=True)
             specs = parse_position_specs(

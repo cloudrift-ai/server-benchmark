@@ -1,4 +1,4 @@
-"""Analytic prior — a stateless, fit-offline linear :class:`Prior` over
+"""Offline prior — a stateless, fit-offline linear :class:`Prior` over
 ``features.knob_features``.
 
 This is the *untrained* prior: the cold-start ranking the search uses before any
@@ -6,15 +6,15 @@ tuning data exists. It replaces the old hand-coded matmul heuristic
 (``score_matmul_thread`` + the ``_priority_matmul_*`` enumeration sort) — same
 features, now expressed as a fixed linear model over the one shared feature dict
 ``features.knob_features`` produces, so there is a SINGLE ranking path: a config is
-scored by a ``Prior`` (this one cold, ``CatBoostPrior`` once trained), composed
+scored by a ``Prior`` (this one cold, ``OnlinePrior`` once trained), composed
 behind :class:`~emmy.compiler.pipeline.search.prior.fallback.FallbackPrior`.
 
 ``score`` returns a positive latency *proxy* (``exp(-scale · wᵀfeatures)``),
-**lower is better** — matching ``CatBoostPrior``'s polarity. The proxy is not
+**lower is better** — matching ``OnlinePrior``'s polarity. The proxy is not
 calibrated µs; only its ordering (greedy argmin / PUCT relative ``P``) matters.
 
-The weights live in the repo-checked artifact ``analytic_weights.json`` next to
-this module (override with ``EMMY_ANALYTIC_FILE`` / ``emmy eval … --analytic-file``
+The weights live in the repo-checked artifact ``offline_weights.json`` next to
+this module (override with ``EMMY_OFFLINE_FILE`` / ``emmy eval … --offline-file``
 to A/B a candidate fit), written by ``scripts/golden_knob_heuristics.py`` jointly
 over EVERY kernel regime — fp32-scalar / fp16-warp matmul, cooperative reduce, and
 pointwise goldens — so one un-gated linear model over the shared ``D_*`` features
@@ -42,10 +42,10 @@ from emmy import config, storage
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, knob_features
 from emmy.compiler.pipeline.search.prior.base import Prior
 
-_DEFAULT_FILE = Path(__file__).parent / "analytic_weights.json"
+_DEFAULT_FILE = Path(__file__).parent / "offline_weights.json"
 
 # The artifact's five scalar scoring params, in the spelling shared by the JSON
-# ``params`` block and ``AnalyticPrior.__init__`` kwargs.
+# ``params`` block and ``OfflinePrior.__init__`` kwargs.
 _PARAM_KEYS = (
     "scale",
     "atomic_free_split_threshold",
@@ -63,32 +63,32 @@ def _load_artifact(path_str: str) -> dict:
     obj = storage.read_json(Path(path_str))
     if not isinstance(obj, dict):
         raise RuntimeError(
-            f"analytic prior weights artifact missing or unreadable: {path_str} "
-            f"(set EMMY_ANALYTIC_FILE to a fitted artifact or regenerate the default "
+            f"offline prior weights artifact missing or unreadable: {path_str} "
+            f"(set EMMY_OFFLINE_FILE to a fitted artifact or regenerate the default "
             f"with scripts/golden_knob_heuristics.py)"
         )
     found = obj.get("feat_ver")
     if not isinstance(found, int) or found != FEATURIZER_VERSION:
         raise RuntimeError(
-            f"analytic prior weights artifact {path_str} has feat_ver={found!r}, "
+            f"offline prior weights artifact {path_str} has feat_ver={found!r}, "
             f"expected {FEATURIZER_VERSION} — its weight keys are spelled in a different "
             f"featurizer vocabulary. Refit it: scripts/golden_knob_heuristics.py"
         )
     missing = [k for k in ("weights", "weights_dynamic", "params") if k not in obj]
     missing += [f"params.{k}" for k in _PARAM_KEYS if k not in obj.get("params", {})]
     if missing:
-        raise RuntimeError(f"analytic prior weights artifact {path_str} lacks {missing}")
+        raise RuntimeError(f"offline prior weights artifact {path_str} lacks {missing}")
     return obj
 
 
-class AnalyticPrior(Prior):
+class OfflinePrior(Prior):
     """Fixed linear ranker over ``knob_features`` — the cold-start prior.
 
     Stateless: ``fitted`` is always ``True`` (it has nothing to learn), and the
     training surface (``fit`` / ``add_rows`` / ``maybe_refit`` / ``to_json``) are
     no-ops so it composes cleanly under :class:`FallbackPrior`. Weights and the
     scalar scoring params resolve from the weights artifact
-    (``config.analytic_path()`` override → the repo-checked default) unless passed
+    (``config.offline_path()`` override → the repo-checked default) unless passed
     explicitly; explicit kwargs win per field."""
 
     def __init__(
@@ -112,7 +112,7 @@ class AnalyticPrior(Prior):
             scalar_on_warp_weight,
             splitk_roundtrip_weight,
         )
-        art = None if all(v is not None for v in given) else _load_artifact(str(config.analytic_path() or _DEFAULT_FILE))
+        art = None if all(v is not None for v in given) else _load_artifact(str(config.offline_path() or _DEFAULT_FILE))
         params = art["params"] if art is not None else {}
         self._w = weights if weights is not None else art["weights"]
         self._w_dyn = weights_dynamic if weights_dynamic is not None else art["weights_dynamic"]
@@ -121,8 +121,8 @@ class AnalyticPrior(Prior):
         self._scale = scale if scale is not None else params["scale"]
         # Atomic-free split-K preference.
         # A gate, NOT a linear weight (a plain linear weight can't express the
-        # "good when split wide, bad when split narrow" interaction). The learned
-        # CatBoostPrior takes over once real atomic-vs-free ``H_opt=3`` rows exist.
+        # "good when split wide, bad when split narrow" interaction). The online
+        # OnlinePrior takes over once real atomic-vs-free ``H_opt=3`` rows exist.
         # The shipped weight is 0.0 (term OFF): activating it when ``D_finalize_kernel``
         # came alive (2026-07-07) regressed golden top-50 coverage 13→10 (the 5090's
         # ``g2k`` split-2 golden contradicts the narrow-split penalty's sign). Re-enable

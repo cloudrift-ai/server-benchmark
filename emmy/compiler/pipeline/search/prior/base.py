@@ -1,4 +1,4 @@
-"""Base class for the learned tuning prior + shared dataset / diagnostics.
+"""Base class for the online tuning prior + shared dataset / diagnostics.
 
 A :class:`Prior` is **one global model** consulted by the MCTS to rank candidates
 via PUCT (``tune``) and by the greedy driver to pick knobs (``compile`` / ``run``).
@@ -53,7 +53,7 @@ _O3_OPT = 3.0
 
 # The calibration gate: minimum median per-op Spearman (predicted vs measured latency over the
 # model's own reservoir, :meth:`Prior._reservoir_calibration`) below which :attr:`Prior.trustworthy`
-# is False and ``FallbackPrior`` keeps deploys / PUCT on the analytic prior. In-sample Spearman is a
+# is False and ``FallbackPrior`` keeps deploys / PUCT on the offline prior. In-sample Spearman is a
 # deliberately lenient tripwire: a genuinely trained model scores ~+0.85, while the failure class it
 # guards (model and rows not speaking the same feature vocabulary — e.g. a checkpoint that crossed a
 # ``FEATURIZER_VERSION`` bump, RTX 5090 sweep-6 finding 2) collapses to ~0. A model that can't rank
@@ -89,7 +89,7 @@ class Prior(ABC):
         # Median per-op in-sample Spearman, refreshed by :meth:`maybe_refit` after
         # each fit and persisted in the checkpoint — the :attr:`trustworthy` gate's
         # input. ``None`` = not yet measured (ungated, so direct-``fit()`` callers
-        # and the analytic prior keep working).
+        # and the offline prior keep working).
         self.calibration: float | None = None
         # Checkpoint binding — set by ``load``; lets :meth:`checkpoint` persist
         # without the caller threading a path.
@@ -129,8 +129,8 @@ class Prior(ABC):
     def mean_scores(self, knobs_list: list[dict]) -> list[float]:
         """Batched :meth:`mean_score` — the greedy driver flattens a kernel's whole
         candidate set into one scoring pass, so a model with a vectorized predict
-        (``CatBoostPrior``) overrides this to score the lot in a single call. The
-        default maps element-wise (fine for the cheap analytic prior)."""
+        (``OnlinePrior``) overrides this to score the lot in a single call. The
+        default maps element-wise (fine for the cheap offline prior)."""
         return [self.mean_score(k) for k in knobs_list]
 
     # --- features seam (attribution / ablation / offline fitting) ----------
@@ -142,7 +142,7 @@ class Prior(ABC):
         which have no knob-level spelling — before scoring. Contract:
         ``mean_score_features(knob_features(knobs)) == mean_score(knobs)``, and a
         DELETED key carries each model's own absent-feature semantics (``0.0`` term
-        for the linear analytic prior, ``NaN`` routing for CatBoost)."""
+        for the linear offline prior, ``NaN`` routing for CatBoost)."""
         raise NotImplementedError
 
     def mean_scores_features(self, feats_list: list[dict]) -> list[float]:
@@ -153,7 +153,7 @@ class Prior(ABC):
         """Signed per-term decomposition of this model's opinion on a featurized row,
         in the model's own ranking-quality units (HIGHER = predicted faster) — the
         blame view diffs two rows' terms to attribute a misranking to features.
-        ``None`` when the model has no decomposition (the default; the analytic
+        ``None`` when the model has no decomposition (the default; the offline
         prior returns an exact one, a tree model may return SHAP values). Exactness
         contract, when implemented: the terms sum to the model's full quality score
         for the row, so ``Σ (term(a) − term(b))`` IS the model's preference gap."""
@@ -300,8 +300,8 @@ class Prior(ABC):
         # visible rather than silently demoted.
         self.calibration = self._reservoir_calibration()
         if self.calibration is not None:
-            verdict = "owns deploys" if self.trustworthy else f"QUARANTINED (< {CALIBRATION_MIN}) — deploys stay analytic"
-            logger.info("[prior] reservoir calibration %+.2f → learned model %s", self.calibration, verdict)
+            verdict = "owns deploys" if self.trustworthy else f"QUARANTINED (< {CALIBRATION_MIN}) — deploys stay offline"
+            logger.info("[prior] reservoir calibration %+.2f → online model %s", self.calibration, verdict)
         return True
 
     def _reservoir_calibration(self) -> float | None:
@@ -353,7 +353,7 @@ class Prior(ABC):
 
     def to_json(self) -> dict | None:
         """Serialize the model + dataset for persistence (``None`` when there's
-        nothing yet). Override in subclasses; see :meth:`CatBoostPrior.to_json`."""
+        nothing yet). Override in subclasses; see :meth:`OnlinePrior.to_json`."""
         return None
 
     def _note_fit(self) -> None:

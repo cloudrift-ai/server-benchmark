@@ -259,25 +259,28 @@ def test_bench_golden_variants_retraces_with_dynamic_spec(monkeypatch):
 
 
 def test_intensity_floor_flags_impossible_row(monkeypatch):
-    """The finding-4 gate: a benched row whose shape-implied FLOP/s exceeds the device's
+    """The finding-4 gate: a benched row whose CONFIG-implied FLOP/s exceeds the device's
     recorded peak is flagged (the sixth sweep's 8.2 µs "2 PFLOP/s" 2048³ golden row); a
-    plausible latency passes, and an unregistered device degrades to no gate."""
+    plausible latency passes, and an unregistered device degrades to no gate. The gate reads
+    ``Sample.flops`` (``GoldenConfig.flops()`` — never overestimated, hint-free) rather than
+    reconstructing from the ShapeKey: the join key excludes symbolic axes on the matmul side
+    but includes them on the reduce-tier side, so the old hint-multiplier reconstruction
+    flagged every reduce-tier ``.dynM`` replay 512× over (the golden-audit false positive)."""
     from types import SimpleNamespace
 
     from emmy import gpu
     from emmy.commands.run import _intensity_floor_flag
-    from emmy.compiler.pipeline.search.data.shape import ShapeKey
 
     monkeypatch.setattr(gpu, "live_name", lambda: "NVIDIA GeForce RTX 5090")
-    s = SimpleNamespace(shape=ShapeKey.from_matmul(2048, 2048, 2048, "fp32"), dtype="fp32")
+    s = SimpleNamespace(flops=2.0 * 2048**3, dtype="fp32")
     assert "impossible" in _intensity_floor_flag(s, 8.2)  # 2 PFLOP/s on a 104.8 TFLOP/s card
     assert _intensity_floor_flag(s, 300.0) is None  # ~57 TFLOP/s — plausible
-    # A dynamic shape benches at the hint: FLOPs include the hint-sized M.
-    d = SimpleNamespace(shape=ShapeKey.from_matmul(512, 512, 512, "fp32", dynamic=True), dtype="fp32")
+    # A dynamic golden's flops() already sizes the symbolic axis at its benched hint.
+    d = SimpleNamespace(flops=2.0 * 512**3, dtype="fp32")
     assert "impossible" in _intensity_floor_flag(d, 0.5)
     assert _intensity_floor_flag(d, 9.0) is None
-    # Shapeless (--ab) rows and unknown devices are ungateable.
-    assert _intensity_floor_flag(SimpleNamespace(shape=None, dtype="fp32"), 1.0) is None
+    # Flopless (--ab) rows and unknown devices are ungateable.
+    assert _intensity_floor_flag(SimpleNamespace(flops=None, dtype="fp32"), 1.0) is None
     monkeypatch.setattr(gpu, "live_name", lambda: "Some Unknown GPU")
     assert _intensity_floor_flag(s, 8.2) is None
 
@@ -850,3 +853,37 @@ def test_launch_order_cuda_nodes_pairs_by_topo_not_dict_order():
 
     names = [n.op.kernel_name for n in _launch_order_cuda_nodes(g)]
     assert names == ["k_producer", "k_consumer"]
+
+
+def test_accuracy_check_fails_scrambled_output_passes_outliers(capsys):
+    """The accuracy verdict's three clauses each do their one job (the PR #354 sync-fill
+    incident: a swizzle fill/drain mismatch SCRAMBLED the A slab and the old fp16 form —
+    ``max ≤ peak OR mean ≤ peak`` — passed the permuted output at mean_diff 15% of peak):
+
+    - a PERMUTED fp16 output must FAIL (systematic corruption — the tight mean gate), even
+      though its max error can sit near the loose fp16 outlier ceiling;
+    - a correct fp16 output with small noise plus a few atomic-reorder-style OUTLIERS must
+      PASS (the near-zero mean vouches for them — the split-K escape hatch);
+    - a correct low-noise output must PASS the plain path."""
+    import numpy as np
+    import torch
+
+    from emmy.commands.run import _check_accuracy
+
+    rng = np.random.default_rng(0)
+    eager = torch.from_numpy((rng.standard_normal(1 << 16) * 20).astype(np.float32))
+
+    def verdicts(arr):
+        capsys.readouterr()
+        _check_accuracy({"o": arr}, eager, fatal=False)
+        return "FAIL" in capsys.readouterr().out
+
+    base = eager.numpy()
+    # Scrambled (permutation of the correct values): must FAIL.
+    assert verdicts(rng.permutation(base).astype(np.float16)), "a permuted output must fail the mean gate"
+    # Correct + tiny noise + a few big outliers (the split-K atomic-reorder class): must PASS.
+    noisy = base + rng.standard_normal(base.shape) * 0.01
+    noisy[:4] += np.abs(base).max() * 0.5  # outliers past the fp32 max ceiling, near the fp16 one
+    assert not verdicts(noisy.astype(np.float16)), "outliers with a near-zero mean must pass (escape hatch)"
+    # Correct low-noise: must PASS.
+    assert not verdicts((base + rng.standard_normal(base.shape) * 0.001).astype(np.float16))

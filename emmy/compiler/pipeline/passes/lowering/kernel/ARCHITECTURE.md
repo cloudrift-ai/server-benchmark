@@ -160,6 +160,21 @@ transport's elected fill thread rides the WRAPPED linear tid (`threadIdx.x % blo
 a compute thread and the producer band would never fill). Static block-divisible kv only (the symbolic stream keeps
 its masked gmem-direct loads), and bit-identity to the gmem-direct sibling holds — same values, same mma order.
 
+**A causal stream tile-skips** (staged and gmem-direct alike): when the score prologue carries the triangular
+`Select` (`kv ≤ m`, detected off the predicate shape in `_twist`), the stream stops at the CTA's last query row —
+`staged_kloop`'s `k_end` / the `StridedLoop.end` for-init override, `min(seq, (grid_m + 1) · um·fm·atom_m)`, with the
+prefetch clamp re-pinned onto the last needed chunk. CTA-uniform (the in-loop barriers stay legal) and bit-identical
+(skipped steps fold the carrier's exact identity: `α = 1`, `P = expf(−1e30 − m_i) = 0`); it halves the streamed
+keys/mma work on average, paying wall-clock wherever the grid oversubscribes the SMs.
+
+**A split-KV partial windows the same stream** (`030_split_reduce._split_twisted_warp`, the flash `REDUCE=g<n>k` arm): the
+`Reduction` arrives with its axis shrunk to the slice length and the slice's absolute base on `Reduction.offset` —
+the fold walks its local `[0, B)` window and `_twist` re-bases every absolute-key consumer (the score-column mask
+bases, the gmem/TMA operand coords, and the causal bound above, which goes slice-local so an above-the-diagonal
+slice runs zero steps). The close swaps the projection for RAW state stores when the tail is one `Write` per carrier
+state component: O rides the normal fragment store into the f32 `__partial` workspace; the d-invariant row stats
+(m, l) are written once per query row (the `_t == 0` lanes) at their template's pinned last slot.
+
 **The fused edge — the mma tier's `sync` transport.** A demoted-cone matmul (`f(x, …) @ w`) takes the warp tier
 under a warp `TILE` pin: `_schedule._demoted_warp_option` nodifies the PLANAR ⊗-fold to a computed-A `Contraction`
 (the same `a_operand = Body` flash P@V rides) and stamps a `sync` `Stage`; `_staged` then builds a `SyncTransport`
@@ -211,7 +226,7 @@ masked **N** or a transposed **B** declines staging (gmem-direct) — the B-slab
 Unstaged is byte-identical gmem-direct.
 
 **Split-K composes with staging.** `_splitk_option` resolves a `STAGE` spec against the SLICED inner `Contraction`
-(the `kslice` extent + the `ksplit`-offset operand indices) and `030_split` threads the resolved `Stage` onto its
+(the `kslice` extent + the `ksplit`-offset operand indices) and `030_split_reduce` threads the resolved `Stage` onto its
 partial `TileOp`s, so the partial kernel's K-loop stages its slice through the same pipeline (the TMA box origin is
 the operand's own index evaluated at the tile base — an offset operand lands the box at absolute coordinates).
 
@@ -230,7 +245,7 @@ is the placement-keyed fold's **fragment row**: where the scalar tier folds in-t
 fold is a `FragmentRowReduce` `__shfl` butterfly over the C-fragment lanes. The fold MOVE itself is never re-decided
 per site: `ReduceStage.combine` (`ir/schedule.py`) is the ONE placement-keyed selector — within-warp → `SHFL`,
 within-block → `SHFL`+`SMEM` tree, cross-CTA → `ATOMIC`/`KERNEL` — and every emitter consumes its output
-(`emit_combine` at scalar residence, this realizer at fragment residence, `030_split` as the graph rewrite); only the
+(`emit_combine` at scalar residence, this realizer at fragment residence, `030_split_reduce` as the graph rewrite); only the
 residence-specific realization differs. Everything realizes from structure — the
 head contraction's `ldmatrix`/`mma.sync` off its node geometry (`_frag_contraction`); the score prologue stmt-by-stmt
 (`Assign` → `FragmentApply`, a coordinate `Select` → `FragmentMask` with the keep-predicate negated, loop-invariant

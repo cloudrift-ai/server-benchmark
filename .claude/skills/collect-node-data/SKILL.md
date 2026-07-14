@@ -32,7 +32,7 @@ node rows in the one canonical
 per-GPU DB files.
 
 **Scope: nodes table only.** This skill copies back the `node` table and nothing else (not `perf`, `cuda_op`,
-`lowering`, or the learned `prior.json`). Those are needed only for `--dataset db` / greedy replay, out of scope here.
+`lowering`, or the online prior checkpoint). Those are needed only for `--dataset db` / greedy replay, out of scope here.
 
 The golden tune is ~30–45 min (every recorded golden shape; the matmul/reduce/pointwise snippets are pure `torch.randn`,
 hardware-independent, so they yield valid node rows for whatever card is rented). It needs **no `HF_TOKEN` and downloads

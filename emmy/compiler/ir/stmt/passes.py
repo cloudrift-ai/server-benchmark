@@ -209,6 +209,7 @@ def _(s: Write, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
         values=tuple(rename(n) for n in s.values),
         value_dtype=s.value_dtype,
         atomic=s.atomic,
+        swizzle=s.swizzle,
     )
 
 
@@ -223,7 +224,7 @@ def _(s: Select, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
 @rewrite.register
 def _(s: Loop, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     # Preserve the reduce annotation (``role`` / ``carrier``): a σ-offset / axis-rename of an
-    # annotated reduce loop (030_split's slice) leaves the carried-state algebra unchanged — only
+    # annotated reduce loop (030_split_reduce's slice) leaves the carried-state algebra unchanged — only
     # the loop's operand load indices move — so the carrier rides through verbatim.
     return Loop(
         axis=axis_fn(s.axis),
@@ -245,6 +246,7 @@ def _(s: StridedLoop, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
         unroll=s.unroll,
         role=s.role,
         carrier=s.carrier,
+        end=sigma.apply(s.end) if s.end is not None else None,
     )
 
 
@@ -281,6 +283,7 @@ def _(s: Write, ctx: SimplifyCtx) -> Stmt:
         values=s.values,
         value_dtype=s.value_dtype,
         atomic=s.atomic,
+        swizzle=s.swizzle,
     )
 
 
@@ -307,6 +310,7 @@ def _(s: StridedLoop, ctx: SimplifyCtx) -> Stmt:
         unroll=s.unroll,
         role=s.role,
         carrier=s.carrier,
+        end=s.end.simplify(ctx) if s.end is not None else None,
     )
 
 

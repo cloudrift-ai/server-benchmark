@@ -734,11 +734,18 @@ class Write(Stmt):
     index: tuple[Expr, ...]
     values: tuple[str, ...]
     value_dtype: DataType | None
-    # An ``atomicAdd`` reduce-write (cross-CTA split-reduce, ``030_split``'s atomic finalize):
+    # An ``atomicAdd`` reduce-write (cross-CTA split-reduce, ``030_split_reduce``'s atomic finalize):
     # every contributing CTA adds its partial into the SAME output cell, so the store is an
     # atomic accumulate (the output is zero-init'd per launch — ``CudaOp.zero_outputs``).
     # Scalar only; never vectorized (each lane needs its own ``atomicAdd``).
     atomic: bool
+    # Software smem slab swizzle mode ("NONE"/"B32"/"B64"/"B128") — the sync compute-fill's
+    # producer-side XOR: the flattened destination element index passes through
+    # ``emmy_swizzle_<mode>`` exactly like a :class:`~emmy.compiler.ir.kernel.ir.CpAsyncCopy`
+    # fill, so the ``LdmatrixLoad`` drain reads the slab back through the identical
+    # permutation. Intra-chunk bits (0..2) pass through the XOR, so a ≤8-element vectorized
+    # Write stays inside its relocated 16-byte chunk. "NONE" (every non-slab Write) is inert.
+    swizzle: str
 
     def __init__(
         self,
@@ -749,6 +756,7 @@ class Write(Stmt):
         values: tuple[str, ...] | None = None,
         value_dtype: DataType | None = None,
         atomic: bool = False,
+        swizzle: str = "NONE",
     ) -> None:
         if values is None:
             if value is None:
@@ -769,6 +777,7 @@ class Write(Stmt):
         object.__setattr__(self, "values", tuple(values))
         object.__setattr__(self, "value_dtype", value_dtype)
         object.__setattr__(self, "atomic", atomic)
+        object.__setattr__(self, "swizzle", swizzle)
 
     @property
     def value(self) -> str:
@@ -801,13 +810,20 @@ class Write(Stmt):
     def has_side_effects(self) -> bool:
         return True
 
+    def _swizzled(self, flat: str) -> str:
+        """The flattened store index, XOR-permuted through the slab's swizzle helper when this
+        Write targets a swizzled smem slab (the sync compute-fill's producer side) — inert at
+        the default ``"NONE"``."""
+        return flat if self.swizzle == "NONE" else f"emmy_swizzle_{self.swizzle.lower()}({flat})"
+
     def pretty(self, indent: str = "") -> list[str]:
         idx = ", ".join(e.pretty() for e in self.index)
+        swz = f" swz={self.swizzle}" if self.swizzle != "NONE" else ""
         if self.is_vector:
-            return [f"{indent}{self.output}[{idx}] = ({', '.join(self.values)})"]
+            return [f"{indent}{self.output}[{idx}]{swz} = ({', '.join(self.values)})"]
         if self.atomic:
             return [f"{indent}{self.output}[{idx}] += {self.values[0]}  (atomic)"]
-        return [f"{indent}{self.output}[{idx}] = {self.values[0]}"]
+        return [f"{indent}{self.output}[{idx}]{swz} = {self.values[0]}"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         pad = _pad(ctx.indent)
@@ -819,7 +835,7 @@ class Write(Stmt):
             # Scalar path. Convert at the store boundary only when the
             # value's SSA dtype disagrees with the destination buffer's
             # dtype — native chains write through with no conversion.
-            flat = render_index(self.output, self.index, ctx)
+            flat = self._swizzled(render_index(self.output, self.index, ctx))
             value_dt = stamped_value_dt or ctx.ssa_dtypes.get(self.value, "f32")
             rhs = ctx.target.convert(_resolve_value(self.value, ctx), value_dt, out_dt)
             if self.atomic:
@@ -843,11 +859,11 @@ class Write(Stmt):
             lines: list[str] = []
             for k in range(n):
                 idx_k = tuple(self.index[:-1]) + (BinaryExpr("+", self.index[-1], Literal(k, "int")),)
-                flat = render_index(self.output, idx_k, ctx)
+                flat = self._swizzled(render_index(self.output, idx_k, ctx))
                 lines.append(f"{pad}{self.output}[{flat}] = {converted[k]};")
             return lines
         vec_type, _elem_type = vec_pair
-        flat = render_index(self.output, self.index, ctx)
+        flat = self._swizzled(render_index(self.output, self.index, ctx))
         # Native-width vectors (``float2`` / ``float4`` / ``__half2``) take
         # a positional constructor — ``make_float2(a, b)`` for fp32 paths,
         # ``__halves2half2(a, b)`` for the fp16 pair. Wider packed vectors

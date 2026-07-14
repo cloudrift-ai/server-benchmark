@@ -334,7 +334,7 @@ def test_flash_chain_pin_selects_chain_on_warp_eligible_shape(monkeypatch):
 # ``Contraction``\ s and ``_bind``'s reduce arm realizes the TWISTED carrier at fragment residence
 # (``_twist``). No private emitter exists; a bespoke path would be the mandate violation the
 # demolition removed. Unpinned, the warp rows are fork SIBLINGS of the chain / reduce-partition
-# forms (the flash-form fork) — the cold ``AnalyticPrior`` pick stays warp-when-eligible, which is
+# forms (the flash-form fork) — the cold ``OfflinePrior`` pick stays warp-when-eligible, which is
 # what these cold-compile cases pin.
 
 
@@ -373,7 +373,7 @@ def test_flash_form_fork_offers_geometry_grid():
     prefix-consistency); f32 (no mma atom) offers chain + serial."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.schedule import is_warp_codec  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.analytic import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import twisted_warp_moves  # noqa: PLC0415
     from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
 
@@ -438,7 +438,7 @@ def test_flash_form_fork_offers_f16acc_pv(monkeypatch):
     target (sm_90 — full-rate f32-accumulate) and the unset gate offer none."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.schedule import is_warp_codec  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.analytic import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
     from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
 
     q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
@@ -470,7 +470,7 @@ def test_bare_sibling_pin_selects_the_f16acc_pv_plan(monkeypatch, dynamic):
     win. hd64 geometry (um=2, nt=4, fm=1): QK = ``w2x1/f1x4/k4``, PV = ``w2x1/f1x8/k2``
     (``regs[1] = d_v/atom_n``, ``bk = nt·atom_n/atom_k`` — the streamed key block)."""
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.analytic import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
     from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
 
     monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f16/w2x1/f1x8/k2")
@@ -913,6 +913,60 @@ def test_generated_tensorcore_flash_causal_matches_torch(monkeypatch, B, H, S, D
     got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
     max_diff = float(np.max(np.abs(got - eager)))
     assert max_diff < 5e-3, f"generated causal TC flash {(B, H, S, D)} max_diff={max_diff:.2e}"
+
+
+@requires_cuda
+def test_warp_flash_causal_tile_skip(monkeypatch):
+    """The causal tile-skip: a triangular score prologue (``kv ≤ m``) bounds the warp-tier stream at
+    the CTA's last query row — the ``StridedLoop`` gets a hoisted ``kv0_end`` for-init bound instead
+    of the full extent (accuracy is pinned by the causal cases above; skipped steps fold the exact
+    carrier identity). A non-causal stream must NOT carry the bound — it is derived from the causal
+    ``Select``'s predicate shape, not from any kernel identity."""
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
+    _backend, compiled, _graph, kernels = _compile_tc(q, k, v, module=_Causal())
+    assert len(kernels) == 1
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "emmy_c_to_a" in src, "must be the fused warp-chain"
+    assert "kv0_end" in src, "causal warp flash must bound the stream at the CTA's last query row"
+
+    _backend, compiled, _graph, kernels = _compile_tc(q, k, v)
+    assert len(kernels) == 1
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "emmy_c_to_a" in src, "must be the fused warp-chain"
+    assert "kv0_end" not in src, "a non-causal stream must run the full extent"
+
+
+@requires_cuda
+@pytest.mark.parametrize("variant", ["plain", "causal"])
+def test_warp_flash_split_kv_matches_torch(monkeypatch, variant):
+    """Flash split-KV (``REDUCE=g<n>k`` on the warp tier): the kv stream splits across CTAs, each
+    partial keeping fragment residence and storing its raw ``(m, l, O)`` state to the f32
+    ``__partial`` workspace; a sibling finalize folds the partitions via the exp-family LSE
+    combine and projects. Two kernels, and the result matches torch — causal composes (each
+    slice's triangular tile-skip is slice-local; an above-the-diagonal slice contributes the
+    exact carrier identity)."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    torch.manual_seed(7)
+    module = _Causal() if variant == "causal" else _Sdpa()
+    q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
+    backend, compiled, graph, kernels = _trace(module, (q, k, v))
+    assert len(kernels) == 2, f"split-KV flash should be partial + finalize, got {len(kernels)}"
+    partial = next(n for n in kernels if n.endswith("__partial"))
+    src = compiled.nodes[partial].op.kernel_source
+    assert "emmy_c_to_a" in src, "the split partial must keep the fused warp-chain"
+
+    def ref():
+        with torch.no_grad():
+            out = torch.nn.functional.scaled_dot_product_attention(q.cuda(), k.cuda(), v.cuda(), is_causal=variant == "causal")
+            return out.cpu().flatten().float().numpy()
+
+    data = {n: t for n, t in zip(graph.inputs, (q.numpy(), k.numpy(), v.numpy()), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=ref)
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    max_diff = float(np.max(np.abs(got - eager)))
+    assert max_diff < 5e-3, f"split-KV flash ({variant}) max_diff={max_diff:.2e}"
 
 
 @requires_cuda

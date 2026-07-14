@@ -12,7 +12,7 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
 - **Serving** (vLLM out-of-tree embedding plugin — emmy-compiled kernels behind vLLM's `/v1/embeddings`; `serving` extra) → [`emmy/serving/ARCHITECTURE.md`](emmy/serving/ARCHITECTURE.md)
 - **Recipe format** (matrices/cross/zip combinators, variant filtering, deep merge, named fields, extra_args validation, command recipes, aggregate, docker_options, driver/cuda pinning, SGLang) → [`emmy/recipe/ARCHITECTURE.md`](emmy/recipe/ARCHITECTURE.md)
 - **Compiler** (Graph IR dialects, passes, backends) → [`emmy/compiler/ARCHITECTURE.md`](emmy/compiler/ARCHITECTURE.md) and child docs
-- **Pipeline / autotune** (pass framework, knob/fork system, learned-prior search, two-level tune) →
+- **Pipeline / autotune** (pass framework, knob/fork system, online/offline-prior search, two-level tune) →
   [`emmy/compiler/pipeline/ARCHITECTURE.md`](emmy/compiler/pipeline/ARCHITECTURE.md)
 - **Tile lowering** (LoopOp → TileOp; **purely algebraic moveset — no shape specializations**. The stored tile IR is
   a tree of **structural nodes** (all in `ir/tile/ir.py`): a `PLANAR`/`TWISTED` reduce lifts to a typed `Reduction`
@@ -25,7 +25,7 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   softmax/RMSNorm is a `Map(body=sweep, source=Reduction)`; the fused norm→linear / gate-up composition is a
   `Map(body=combine, source=Contraction)` whose computed A cone carries the statistic prologue (a fork sibling of
   its coop-reduce form — option-0 stays coop; the warp mma rows ride the sync compute-fill); a pure pointwise cell
-  is a `Map(source=None)`; the only annotated `Loop`s still riding a flat `Map.body` are `030_split`'s sliced
+  is a `Map(source=None)`; the only annotated `Loop`s still riding a flat `Map.body` are `030_split_reduce`'s sliced
   partials.
   Dispatch reads the role/carrier off the node (`ops.axis_role`/`reduce_loop` recurse through `Map.source`), and
   `ops.lower` flattens any node back to the same loop nest — there is no stored `Monoid`/`Semiring` node kind (those
@@ -45,8 +45,10 @@ answering — they hold the detail that is no longer in this file or the README.
 - `EMMY_DUMP_DIR` environment variable (optional) — when set, all compiler stages dump intermediate artifacts (graphs, CUDA kernels, execution plans) to this directory for debugging. Per kernel, the dump also writes a `<kname>.torch.json` reproducer — the original PyTorch ops that kernel implements (sliced by op provenance), with an `i/N` coverage header (full vs partial) — runnable via `emmy run --ir <kname>.torch.json --bench` to reproduce accuracy / latency vs torch for that op. Kernels are named after the ops they realize (`k_rms_norm`, `k_sdpa_reduce`)
 - `EMMY_TUNE_DB` environment variable (optional) — overrides the default tuning SQLite cache path
   (`~/.cache/emmy/autotune.db`). `emmy tune` reads from / writes to this path. NOTE: greedy `compile` / `run`
-  pick forks from the global learned `Prior`, **not** the DB (the old `_best_fork` DB→fork replay was removed). The prior
-  is a separate JSON checkpoint (`EMMY_PRIOR_FILE` → `~/.cache/emmy/prior.json`) that `tune` writes and
+  pick forks from the global `Prior` (the online prior with its offline cold-start fallback), **not** the DB (the old
+  `_best_fork` DB→fork replay was removed). The online prior
+  is a separate JSON checkpoint (`EMMY_ONLINE_FILE` → `~/.cache/emmy/online.json`; legacy `EMMY_PRIOR_FILE` still
+  accepted) that `tune` writes and
   `compile` / `run` read. See [`emmy/compiler/pipeline/ARCHITECTURE.md`](emmy/compiler/pipeline/ARCHITECTURE.md)
   for the prior / two-level autotune story.
 
@@ -98,8 +100,8 @@ it before answering any CLI-flag question. Quickstart for the common paths:
 | `emmy serve <model> [--generate] [--bench] [vllm flags…]` | serve an embedding (or `--generate` chat) model via vLLM with the emmy plugin |
 | `emmy compile <model_or_ir> [--layer N] [--ir STAGE] [--dynamic …] [--target sm_NN]` | trace + run the compiler; print or save any IR stage |
 | `emmy run <model_or_ir_or_--code> [--bench]` | compile + execute on the CUDA backend, check accuracy, optionally bench vs eager / `torch.compile` |
-| `emmy tune <target> [--bench] [--gpus N]` | two-level autotune; writes the learned prior + tune DB |
-| `emmy eval {knobs,analytic,prior,golden,variants,failures} [--dataset {golden,db,nodes}]` | inspect the prior / tune DB |
+| `emmy tune <target> [--bench] [--gpus N]` | two-level autotune; writes the online prior + tune DB |
+| `emmy eval {knobs,online,offline,golden,variants,failures} [--dataset {golden,db,nodes}]` | inspect the priors / tune DB |
 | `emmy {pull,trace,generate,inspect,compare} …` | model download, IR tracing, the naive generation oracle, IR inspection, dump diffing |
 
 Quick test models / scripts (for local iteration):

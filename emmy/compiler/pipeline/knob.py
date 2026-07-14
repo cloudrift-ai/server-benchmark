@@ -87,7 +87,7 @@ class Knob:
     type: KnobType
     hints: tuple = ()
     help: str = ""
-    # Optional custom featurizer for the learned-prior feature vector: maps this
+    # Optional custom featurizer for the online-prior feature vector: maps this
     # knob's value to a ``dict[str, float]`` of sub-features. Declared at the
     # knob (e.g. ``MMA`` expands an atom kind into physical cell/dtype props) so
     # ``knob_features`` needs no per-knob special-casing. ``None`` → encode by
@@ -97,11 +97,11 @@ class Knob:
     # (a tier-foreign knob like ``WM`` on a scalar kernel) or its owning pass
     # declines / is skipped, :func:`apply_off_defaults` stamps this value so the
     # realized variant carries an *explicit* decision rather than an absent key —
-    # letting the learned prior tell "decided: unused" (an OFF value) from
+    # letting the online prior tell "decided: unused" (an OFF value) from
     # "not-yet-decided" (still absent → NaN-filled). ``_UNSET`` (the default)
     # means the knob is always stamped by its pass and is never auto-filled.
     off: Any = _UNSET
-    # An **unfeatured** knob: it must never enter the learned-prior feature vector
+    # An **unfeatured** knob: it must never enter the online-prior feature vector
     # (``knob_features`` skips it). Two families qualify: a *cosmetic* policy that changes only how
     # the emitted source is spelled, never the compiled kernel (SASS-identical — e.g. ``LOOPIFY``'s
     # ``--ir`` re-rolling; batch-enabled via ``EMMY_READABLE`` rather than tuned), and a *meta /

@@ -2,7 +2,7 @@
 
 ``ReducePlan.parse`` / ``.spell`` are the schedule's single reduce-partition codec. The
 ``g<n>[a|k]`` finalize letter (atomic vs deferred-kernel cross-CTA split) must survive the
-round-trip so ``030_split`` can read ``ReducePlan.finalize`` — it was historically parsed
+round-trip so ``030_split_reduce`` can read ``ReducePlan.finalize`` — it was historically parsed
 then dropped (``spell`` never re-emitted it), making ``g2a`` and ``g2k`` indistinguishable.
 """
 

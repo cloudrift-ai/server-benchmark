@@ -26,6 +26,7 @@ the parse primitives here but keeps its own descriptor logic.
 from __future__ import annotations
 
 import os
+import warnings
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -33,8 +34,8 @@ from pathlib import Path
 
 PREFIX = "EMMY_"
 TUNE_DB = "EMMY_TUNE_DB"
-PRIOR_FILE = "EMMY_PRIOR_FILE"
-ANALYTIC_FILE = "EMMY_ANALYTIC_FILE"
+ONLINE_FILE = "EMMY_ONLINE_FILE"
+OFFLINE_FILE = "EMMY_OFFLINE_FILE"
 NVCC_FLAGS = "EMMY_NVCC_FLAGS"
 DEBUG = "EMMY_DEBUG"
 DUMP_DIR = "EMMY_DUMP_DIR"
@@ -42,7 +43,7 @@ KNOBS = "EMMY_KNOBS"
 TUNE_PATIENCE = "EMMY_TUNE_PATIENCE"
 TUNE_EPS = "EMMY_TUNE_EPS"
 O3_TOL = "EMMY_O3_TOL"
-ANALYTIC_TILT = "EMMY_ANALYTIC_TILT"
+OFFLINE_TILT = "EMMY_OFFLINE_TILT"
 BENCH_BACKENDS = "EMMY_BENCH_BACKENDS"
 CUBIN_CACHE = "EMMY_CUBIN_CACHE"
 NO_NVCC = "EMMY_NO_NVCC"
@@ -52,6 +53,28 @@ SERVING_STATIC = "EMMY_SERVING_STATIC"
 READABLE = "EMMY_READABLE"
 
 _CACHE_ROOT = Path.home() / ".cache" / "emmy"
+
+# The 2026-07 prior rename (analytic → offline, learned → online) respelled three
+# env vars. The old spellings keep working with a one-time DeprecationWarning —
+# they live in shell profiles and remote-run scripts, unlike the Python names.
+_LEGACY_VARS = {
+    ONLINE_FILE: "EMMY_PRIOR_FILE",
+    OFFLINE_FILE: "EMMY_ANALYTIC_FILE",
+    OFFLINE_TILT: "EMMY_ANALYTIC_TILT",
+}
+
+
+def _env_aliased(name: str) -> str | None:
+    """Live ``os.environ`` read that also honors the var's pre-rename legacy
+    spelling (the new name wins when both are set; a legacy hit warns)."""
+    raw = os.environ.get(name)
+    if raw is not None:
+        return raw
+    legacy = _LEGACY_VARS.get(name)
+    raw = os.environ.get(legacy) if legacy else None
+    if raw is not None:
+        warnings.warn(f"{legacy} is deprecated — use {name}", DeprecationWarning, stacklevel=3)
+    return raw
 
 
 def knob_var(name: str) -> str:
@@ -145,23 +168,30 @@ def tune_db_path() -> Path:
     return Path(override) if override else _CACHE_ROOT / "autotune.db"
 
 
-def prior_path() -> Path:
-    """Learned-prior checkpoint file: ``EMMY_PRIOR_FILE`` →
-    ``~/.cache/emmy/prior.json``. A single JSON file (not the tune DB)
-    holding the one global prior; ``tune`` writes it, ``compile`` / ``run`` read it."""
-    override = os.environ.get(PRIOR_FILE)
-    return Path(override) if override else _CACHE_ROOT / "prior.json"
+def online_path() -> Path:
+    """Online-prior checkpoint file: ``EMMY_ONLINE_FILE`` (legacy
+    ``EMMY_PRIOR_FILE``) → ``~/.cache/emmy/online.json``. A single JSON file (not
+    the tune DB) holding the one global prior; ``tune`` writes it, ``compile`` /
+    ``run`` read it. A pre-rename ``prior.json`` already in the cache keeps being
+    used (and written) so existing checkpoints survive the rename."""
+    override = _env_aliased(ONLINE_FILE)
+    if override:
+        return Path(override)
+    path = _CACHE_ROOT / "online.json"
+    legacy = _CACHE_ROOT / "prior.json"
+    return legacy if legacy.exists() and not path.exists() else path
 
 
-def analytic_path() -> Path | None:
-    """Analytic-prior weights artifact override: ``EMMY_ANALYTIC_FILE`` → ``None``.
+def offline_path() -> Path | None:
+    """Offline-prior weights artifact override: ``EMMY_OFFLINE_FILE`` (legacy
+    ``EMMY_ANALYTIC_FILE``) → ``None``.
 
-    ``None`` means the repo-checked default (``analytic_weights.json`` next to
-    ``search/prior/analytic.py`` — package-relative, so it resolves there, not
+    ``None`` means the repo-checked default (``offline_weights.json`` next to
+    ``search/prior/offline.py`` — package-relative, so it resolves there, not
     here). Swap in a candidate fit for an A/B by pointing this at another
     artifact; a version-mismatched or missing file is a hard error, never a
     silent fallback."""
-    override = os.environ.get(ANALYTIC_FILE)
+    override = _env_aliased(OFFLINE_FILE)
     return Path(override) if override else None
 
 
@@ -245,13 +275,20 @@ def o3_tol(default: float = 0.15) -> float:
     return float_env(O3_TOL, default)
 
 
-def analytic_tilt(default: float = 0.3) -> float:
-    """``EMMY_ANALYTIC_TILT`` — exponent ``W`` of the cold ``AnalyticPrior``
-    multiplier in :meth:`FallbackPrior.score` (selection only): the learned µs are
-    tilted by ``analytic**W`` so the heuristic's ranking nudges PUCT exploration
-    toward configs it favors without overriding the learned scale (``W=0`` =
-    pure learned, large ``W`` = analytic dominates). See the method docstring."""
-    return float_env(ANALYTIC_TILT, default)
+def offline_tilt(default: float = 0.3) -> float:
+    """``EMMY_OFFLINE_TILT`` (legacy ``EMMY_ANALYTIC_TILT``) — exponent ``W`` of
+    the cold ``OfflinePrior`` multiplier in :meth:`FallbackPrior.score` (selection
+    only): the online µs are tilted by ``offline**W`` so the heuristic's ranking
+    nudges PUCT exploration toward configs it favors without overriding the online
+    scale (``W=0`` = pure online, large ``W`` = offline dominates). See the method
+    docstring."""
+    raw = _env_aliased(OFFLINE_TILT)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 
 def serving_static(default: bool = False) -> bool:

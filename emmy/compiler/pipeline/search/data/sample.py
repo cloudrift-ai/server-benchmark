@@ -1,7 +1,7 @@
 """``Sample`` — one measured-or-recorded ``(config, latency, identity)`` row,
 the common currency over all three measurement-data sources.
 
-A golden config, a tune-DB ``perf`` row, and a learned-prior reservoir row are all
+A golden config, a tune-DB ``perf`` row, and a online-prior reservoir row are all
 the same thing once normalized: a tunable-knob dict, a measured latency, a
 structural identity, and (for golden) a reference latency. ``Sample`` is that
 normal form. The split into ``knobs`` (tunable) / ``context`` (``H_*``) /
@@ -10,13 +10,13 @@ re-merges them to the exact original dict, and :meth:`features` runs the single
 featurizer (:func:`features.knob_features`) on that merge, so a ``Sample`` reproduces
 the feature vector each source built inline today.
 
-Featurization fidelity (the load-bearing invariant): a trained ``CatBoostPrior``
+Featurization fidelity (the load-bearing invariant): a trained ``OnlinePrior``
 regresses on the full ``S_*`` histogram stamped by ``992_stamp_structural_features``.
 DB / prior rows carry that histogram inline already; golden rows only know
 ``(M,N,K)``, so the full histogram is derived by compiling the snippet
 (:func:`compiled_s_features`, cached) and passed as ``compile_s_feats=True`` —
-*only* when a learned prior is the consumer. The cheap arithmetic
-:meth:`ShapeKey.s_features_arith` suffices for the cold ``AnalyticPrior`` (it reads
+*only* when a online prior is the consumer. The cheap arithmetic
+:meth:`ShapeKey.s_features_arith` suffices for the cold ``OfflinePrior`` (it reads
 only ``D_*`` derived from the extents) and for grouping.
 """
 
@@ -56,7 +56,7 @@ def compiled_s_features(
     """The full ``S_*`` structural histogram for a matmul shape — by compiling its
     snippet to the loop dialect (where ``992_stamp_structural_features`` runs) and
     scraping the stamped ``S_*`` knobs off the nodes. This is what a trained
-    ``CatBoostPrior`` was fit on for that shape; the cheap arithmetic extents are a
+    ``OnlinePrior`` was fit on for that shape; the cheap arithmetic extents are a
     subset of it. ``dynamic`` carries a dynamic golden's ``--dynamic`` specs so the
     trace goes symbolic and the histogram comes from the masked-tile graph (symbolic
     axis excluded from the extent products, ``S_ext_n_symbolic_axis`` set) — the
@@ -101,6 +101,11 @@ class Sample:
     s_full: dict | None = None  # full compiled S_* histogram when known (db/prior rows, or golden compile_s_feats)
     error: str | None = None  # bench_fail failure text (db rows only; None on ok rows)
     dynamic: tuple[str, ...] | None = None  # --dynamic NAME@INPUT:AXIS specs (dynamic goldens only; None = static)
+    # The config-side FLOP count (``GoldenConfig.flops()`` — never an overestimate; golden samples
+    # only). The intensity-floor gate reads THIS, not a ShapeKey reconstruction: the join key
+    # excludes symbolic axes on the matmul side but includes them on the reduce-tier side, so no
+    # one hint-multiplier formula over it can be right for both.
+    flops: float | None = None
 
     def s_features(self) -> dict[str, float]:
         """The ``S_*`` features this sample featurizes on: the full stamped histogram
@@ -127,8 +132,8 @@ class Sample:
         """A golden config (matmul / reduce / pointwise — every kind carries
         ``shape_key()`` / ``snippet()`` / ``dtype`` / ``dynamic_specs()``) as a
         ``Sample``. ``compile_s_feats`` derives the full ``S_*`` histogram (for the
-        learned-prior featurization; matmul-only — the arithmetic key suffices for
-        the other kinds); leave it off for the cold-analytic / grouping / bench paths."""
+        online-prior featurization; matmul-only — the arithmetic key suffices for
+        the other kinds); leave it off for the cold-offline / grouping / bench paths."""
         from emmy.compiler.context import Context  # noqa: PLC0415
         from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig  # noqa: PLC0415
 
@@ -146,6 +151,7 @@ class Sample:
             name=cfg.name,
             dtype=cfg.dtype,
             ref_us=cfg.cublas_us,
+            flops=cfg.flops(),
             # gpu_name pins the device-physical features (H_sm_count / smem / …) to
             # the golden's OWN card's memorized specs, not the live device's — so a
             # PRO 6000 golden ranked on a 5090 (both cc 12.0) gets 188 SMs, not 170.
@@ -176,7 +182,7 @@ class Sample:
 
     @classmethod
     def from_prior_row(cls, knobs: dict, latency_us: float) -> Sample:
-        """A learned-prior reservoir row ``(stamped_knobs, latency)`` as a ``Sample``.
+        """A online-prior reservoir row ``(stamped_knobs, latency)`` as a ``Sample``.
         The reservoir dicts already carry ``S_*`` / ``H_*`` inline (stamped by the
         live pipeline), so the split + re-merge is lossless for grouping / scoring."""
         tunable, ctx, s = _split_by_prefix(knobs)

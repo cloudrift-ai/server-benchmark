@@ -1,5 +1,5 @@
 """Single-player MCTS for ``emmy tune`` with max-reward propagation and
-**PUCT** selection — the learned
+**PUCT** selection — the online
 :class:`~emmy.compiler.pipeline.search.prior.Prior` is the *only* selection
 signal (greedy and the ``+∞``-unvisited UCB rule are gone).
 
@@ -116,7 +116,7 @@ class SearchTree:
 
 
 class TuningSearch(Search):
-    """SP-MCTS with PUCT selection — the learned prior is the sole signal."""
+    """SP-MCTS with PUCT selection — the online prior is the sole signal."""
 
     DEFAULT_UCB_C = math.sqrt(2)
 
@@ -150,7 +150,7 @@ class TuningSearch(Search):
         self._rng = random.Random(seed)
         self._patience = patience
         self._max_visits = max_visits
-        # Learned prior driving PUCT selection — a fixed global model for the run
+        # Online prior driving PUCT selection — a fixed global model for the run
         # (it refits in batches between ops, not within one). ``None`` for a
         # single-shot compile (no benching) → uniform PUCT → emission-order pick.
         self.prior_model = prior_model
@@ -328,8 +328,8 @@ class TuningSearch(Search):
         and normalizes by the same ``global_best`` as ``Q`` — no softmax. A
         confidently-bad sibling gets a small ``P`` → tiny exploration term → it is
         deprioritized rather than force-visited. The prior is always consulted —
-        the ``FallbackPrior`` returns the learned model's prediction once trained
-        and the ``AnalyticPrior`` heuristic cold, so even a fresh ``tune`` is
+        the ``FallbackPrior`` returns the online model's prediction once trained
+        and the ``OfflinePrior`` heuristic cold, so even a fresh ``tune`` is
         prior-guided, not uniform. Only when there is NO usable prediction (no
         prior attached, or a non-positive score) does ``P`` fall to a uniform
         ``1`` so the exploration term still drives breadth. ``c_ucb`` is

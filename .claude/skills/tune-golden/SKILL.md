@@ -1,6 +1,6 @@
 ---
 name: tune-golden
-description: Use this skill when the user asks to "tune the goldens", "update the golden configs", "re-tune the goldens", "run the golden sweep", "refresh golden matmul configs", "evaluate goldens and update", "tune/seed the dynamic goldens", or otherwise wants to re-tune the GOLDEN_CONFIGS matmul shapes (static and dynamic/.dynM symbolic-axis entries alike), A/B the greedy pick against the recorded golden, and record genuine improvements into the per-GPU golden YAML. Tunes the whole golden dataset, benches greedy-vs-golden per shape with `emmy tune` / `run --bench`, categorizes (better → replace, same → add, worse → leave), edits the goldens YAML by hand, and writes a findings report to plans/ — unlike tune-model, the target config is known here, so the report analyzes the analytic/learned prior's expectation against it (rank, per-knob misses, recommendations) plus workflow notes.
+description: Use this skill when the user asks to "tune the goldens", "update the golden configs", "re-tune the goldens", "run the golden sweep", "refresh golden matmul configs", "evaluate goldens and update", "tune/seed the dynamic goldens", or otherwise wants to re-tune the GOLDEN_CONFIGS matmul shapes (static and dynamic/.dynM symbolic-axis entries alike), A/B the greedy pick against the recorded golden, and record genuine improvements into the per-GPU golden YAML. Tunes the whole golden dataset, benches greedy-vs-golden per shape with `emmy tune` / `run --bench`, categorizes (better → replace, same → add, worse → leave), edits the goldens YAML by hand, and writes a findings report to plans/ — unlike tune-model, the target config is known here, so the report analyzes the offline/online prior's expectation against it (rank, per-knob misses, recommendations) plus workflow notes.
 version: 0.4.0
 ---
 
@@ -13,7 +13,7 @@ wins, and writes a findings report to `plans/` — which shapes the search/prior
 it, and how this workflow itself could improve.
 
 What sets this apart from the `tune-model` skill: here the **target config is known** (the recorded golden), so the
-analysis can evaluate the *expectation* directly — where the golden ranks under the analytic and learned priors, which
+analysis can evaluate the *expectation* directly — where the golden ranks under the offline and online priors, which
 knobs the greedy pick misses, and whether the search ever measured it. Use the `emmy` CLI for all of it (`tune`,
 `run --bench --golden/--ab`, the `eval` views) — no ad-hoc bench scripts or hand-written SQL.
 
@@ -38,7 +38,7 @@ single-shape tune, differing only in the dataset it builds), sharing one tune DB
 the prior; it does not update goldens.
 
 **Cold is the point — never reuse pre-sweep tuning data.** This skill runs when the existing tuning data is no
-longer valid (the compiler / kernels changed), so `--clean` is mandatory and seeding `EMMY_PRIOR_FILE` from an
+longer valid (the compiler / kernels changed), so `--clean` is mandatory and seeding `EMMY_ONLINE_FILE` from an
 earlier checkpoint is forbidden: stale measurements don't just fail to help, they actively mislead — the 2026-07-07
 4090 A/B (`local_data/golden-ab-4090/ab-findings.md` on the dev box) showed a stale-context seed steering the fp16
 warp-`TILE` search into the wrong region (fp16 squares 1.6–2.6× slower than cold, even with more benches on some
@@ -195,15 +195,15 @@ Everything in steps 1–7 applies unchanged — the spec is **part of the config
   `--clean`), then `emmy run --bench -c "<snippet>" --dynamic seq_len@x0:0`; record the greedy kernel's -O3
   `us` as `emmy_us`, the same run's eager row as `cublas_us`, and the table's search knobs. `x0` is the
   snippet's lhs `(M,K)`; only the M axis may be symbolic (symbolic K is future work and the schema rejects it).
-- `eval prior --dataset golden` prints a per-shape `SKIPPED: no tuned rows` line for any golden (dynamic or static)
+- `eval online --dataset golden` prints a per-shape `SKIPPED: no tuned rows` line for any golden (dynamic or static)
   whose shape has no tuned data — a `.dynM` entry skipping there means the symbolic shape was never tuned, not that
   the join failed.
-- The cold `AnalyticPrior` ranks `.dynM` shapes under a dedicated masked-tier weight set (`weights_dynamic`,
+- The cold `OfflinePrior` ranks `.dynM` shapes under a dedicated masked-tier weight set (`weights_dynamic`,
   selected on the stamped `S_ext_n_symbolic_axis`), fit by `scripts/golden_knob_heuristics.py` over the recorded
   dynamic goldens (2026-06-12 evening refit: five of eight dynM rows rank ≤1, median ~6). Re-run the script after
   recording new `.dynM` goldens — it writes both weight sets into the repo-checked
-  `search/prior/analytic_weights.json` artifact (use `--out` for a candidate file and A/B it via
-  `emmy eval analytic --analytic-file <file>` before overwriting the default).
+  `search/prior/offline_weights.json` artifact (use `--out` for a candidate file and A/B it via
+  `emmy eval offline --offline-file <file>` before overwriting the default).
 
 ## Step 6 — Validate
 
@@ -227,14 +227,14 @@ density of the `tune-model` reports (`plans/*-tune-findings.md`; executed ones a
 
 - **Header**: date, GPU, the exact sweep command, wall time, and the category tally (N replaced / N added / N
   unchanged / N worse).
-- **A `## Fork sibling regret` section** (`emmy eval prior --dataset nodes`, this card's `-O1` block). The command
-  prints every metric TWICE, labeled `=== analytic prior ===` / `=== learned prior ===` — the two halves diagnose
+- **A `## Fork sibling regret` section** (`emmy eval online --dataset nodes`, this card's `-O1` block). The command
+  prints every metric TWICE, labeled `=== offline prior ===` / `=== online prior ===` — the two halves diagnose
   different failures, so the section must keep them apart. Structure it as: (1) a 2–3 sentence intro naming the
-  columns (analytic = the cold-start ranking that decides what a cold sweep measures at all; learned = the CatBoost
+  columns (offline = the cold-start ranking that decides what a cold sweep measures at all; online = the CatBoost
   this sweep trained); (2) ONE comparison table, one metric per row, one column per half:
 
   ```
-  | metric (-O1, N forks)                     | analytic prior | learned prior (CatBoost) |
+  | metric (-O1, N forks)                     | offline prior | online prior (CatBoost) |
   | --- | --- | --- |
   | TILE fork regret (median)                 | …× | …× |
   | <one row per other family: REDUCE / STAGE / WSPEC / structural medians> | | |
@@ -245,9 +245,9 @@ density of the `tune-model` reports (`plans/*-tune-findings.md`; executed ones a
 
   Mark any entry whose "best" baseline is physically impossible (FLOP-roofline sanity check on the shape) with
   `(*)` and one footnote line under the table — worst-case entries sit on those baselines, medians are robust;
-  (3) a closing diagnosis paragraph that names WHICH half misprices: analytic regret ⇒ the cold-start
-  weights/features are wrong (fix via `scripts/golden_knob_heuristics.py`); learned regret with a cleaner analytic
-  ⇒ training-data / calibration / featurization problem (the learned half also inherits the analytic's censoring —
+  (3) a closing diagnosis paragraph that names WHICH half misprices: offline regret ⇒ the cold-start
+  weights/features are wrong (fix via `scripts/golden_knob_heuristics.py`); online regret with a cleaner offline
+  ⇒ training-data / calibration / featurization problem (the online half also inherits the offline prior's censoring —
   it never sees regions the cold ranking steered away from). Never paste raw eval output as the section body and
   never quote an unlabeled "prior" number. A family ≫1.00x is a steering gap even if every golden A/B passed.
 - **Per-shape outcome table**: shape name, greedy µs, best-golden µs, ratio (greedy/best-golden), category, **and a
@@ -263,31 +263,31 @@ density of the `tune-model` reports (`plans/*-tune-findings.md`; executed ones a
   shown. For each, gather the evidence:
   - `emmy eval golden --kernel <SUBSTR>` — the per-knob `found/golden` diff: *which* knobs the greedy pick got
     wrong.
-  - `emmy eval analytic --kernel <SUBSTR>` — the golden's rank under the cold `AnalyticPrior` over the full
-    enumeration. A deep rank here is the "poor analytic heuristic on this config" signal: the hand-coded weights
+  - `emmy eval offline --kernel <SUBSTR>` — the golden's rank under the cold `OfflinePrior` over the full
+    enumeration. A deep rank here is the "poor offline heuristic on this config" signal: the hand-coded weights
     misprice this shape, and patience can't reach it cold.
-  - `emmy eval prior --dataset nodes --blame [--ablate] --kernel <SUBSTR>` — WHICH features caused the mispricing:
+  - `emmy eval online --dataset nodes --blame [--ablate] --kernel <SUBSTR>` — WHICH features caused the mispricing:
     the per-feature blame table (regret-weighted term diff between the prior's pick and the measured-best sibling,
     per fork family; a BLIND fork means no feature separates the siblings — a featurizer gap, not a weight problem)
     and the ablation Δ (median regret with one feature masked; `< 0` = actively misleading). The command prints one
-    attribution per prior half — cite the `=== analytic prior ===` blame when recommending a weight refit, the
-    `=== learned prior ===` blame when the trained model is the suspect; never quote a blame row without its label.
+    attribution per prior half — cite the `=== offline prior ===` blame when recommending a weight refit, the
+    `=== online prior ===` blame when the trained model is the suspect; never quote a blame row without its label.
     Cite the blame row in the finding instead of hand-deriving per-knob misses from the weight table.
-  - `emmy eval prior --dataset golden --kernel <SUBSTR>` — the rank under the *learned* prior + the `vs gold`
-    -O3 perf column. Deep analytic rank but shallow learned rank → the heuristic is the problem, not the search.
+  - `emmy eval online --dataset golden --kernel <SUBSTR>` — the rank under the *online* prior + the `vs gold`
+    -O3 perf column. Deep offline rank but shallow online rank → the heuristic is the problem, not the search.
   - `emmy eval variants --kernel <SUBSTR>` — was the golden config ever *measured* this sweep (reachability),
     and where the deployed pick ranks among measured variants.
-  - `emmy eval prior --dataset nodes --kernel <SUBSTR>` — the per-family **fork sibling regret** for this op:
+  - `emmy eval online --dataset nodes --kernel <SUBSTR>` — the per-family **fork sibling regret** for this op:
     WHICH decision family (TILE / REDUCE / STAGE / …) the search was steered wrong at (regret ≫1.00x), and which
     families to exonerate (1.00x). Locates the miss at a fork, where `eval golden`'s per-knob diff only names the
     end-state knobs. Read the two labeled blocks separately: high ANALYTIC regret on a family ⇒ the cold-start
-    ranking steered the sweep away (it also censors what the learned model ever sees — fix weights/features);
-    high LEARNED regret with low analytic ⇒ the trained model unlearned a correct heuristic (training-data /
+    ranking steered the sweep away (it also censors what the online model ever sees — fix weights/features);
+    high ONLINE regret with low offline ⇒ the trained model unlearned a correct heuristic (training-data /
     calibration problem). The diagnosis differs, so a finding must name which half its regret came from.
   - **Before calling a knob mismatch a search shortfall**, check the `-O3 us` column in `eval variants` or run one
     `run --bench --ab "<golden knobs>"` A/B: -O1 ranking flags often invert at -O3, so an apparent pick miss can be
     the -O1/-O3 gap, not the prior.
-- **Each finding ends with a recommendation**, with priority: refit the analytic weights
+- **Each finding ends with a recommendation**, with priority: refit the offline weights
   (`scripts/golden_knob_heuristics.py`) when a shape family is systematically mispriced, a missing `D_*` engineered
   feature when the prior can't see what distinguishes the golden, a patience bump when the golden ranks shallow but
   the search stops early, or an enumeration/eligibility gate (cite `file:line`) when the golden's config was never

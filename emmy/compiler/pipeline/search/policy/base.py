@@ -12,7 +12,7 @@ the engine interleaves pops, pushes, and observes.
 - ``push`` enqueues spawned candidates (unranked fork siblings) under
   ``parent`` — the token of the pop that produced them, or ``None`` for
   the seed candidate that starts a run; the policy ranks the frontier with
-  the learned prior (Forks carry no score);
+  the online prior (Forks carry no score);
 - ``observe`` is called by :meth:`Pipeline.tune` once per yielded
   terminal, with the terminal's token and the aggregated ``reward``
   (``1/total_us``) + ``status`` from the bench. Default is a no-op;
@@ -39,7 +39,7 @@ class Search(ABC):
         ``parent`` is the token of the :meth:`pop` whose candidate
         spawned these siblings, or ``None`` for the seed candidate that
         starts a run. Selection is the policy's job: :class:`TuningSearch`
-        ranks the frontier by PUCT over its learned prior. (Single-shot
+        ranks the frontier by PUCT over its online prior. (Single-shot
         compiles never come through a ``Search`` — ``Pipeline.run`` is a
         deterministic resolution, ``Run.resolve``.)
 

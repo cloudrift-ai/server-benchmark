@@ -9,8 +9,8 @@
 # un-split w2x2/f4x4/k2 on d2/cp/ring/p2 (the ldmatrix reg double-buffer); kv_proj and mlp_gate_up std
 # sit BELOW parity (0.86x / 0.91x — the known sm_89 latency-bound residual; nothing in the knob space
 # closes it, matching the h4096 twins). The fm lane is the post-swizzle f16acc atom-swap family
-# (w2x2/f4x8/k2, w4x1/f4x8/k2 on gate_up) — 1.02-1.35x past cuBLAS everywhere, and the attention fm
-# sibling BEATS torch SDPA (40.1 vs 41.0).
+# (w2x2/f4x8/k2, w4x1/f4x8/k2 on gate_up) — 1.02-1.35x past cuBLAS everywhere. Post causal tile-skip
+# (2026-07-13) every attention lane beats torch SDPA: std nt4 38.3, fm nt2 37.6 vs SDPA 41.0.
 gpu_name: NVIDIA GeForce RTX 4090
 compute_cap:
   - 8
@@ -215,10 +215,11 @@ configs:
     emmy_us: 293.0
     cublas_us: 393.0
   # ---- attention (flash, hd256, STATIC — the .dynM golden lives in rtx4090_sm89.yaml) ----------------
-  # Same w4x1 geometry + pin-spelling contract as the 5090 file (TILE@pj is the PV plan w4x1/f1x32; a
-  # dd-spelled pj matches nothing). On sm_89 the w2x1 form does NOT realize (flagged unreproducible —
-  # the mirror image of the 5090, where w2x1 was the greedy pick) and the nt=4 dd spelling
-  # (w4x1/f1x4/k16) realizes back to nt=2. d3 / p2 within noise; no TMA tier on this cap.
+  # Values re-measured 2026-07-13 after the causal tile-skip (3x reproduced, ≤0.3 µs spread). Same
+  # w4x1 geometry + pin-spelling contract as the 5090 file (TILE@pj is the PV plan w4x1/f1x32; a
+  # dd-spelled pj matches nothing). The pre-skip "nt=4 realizes back to nt=2 on sm_89" note is
+  # OBSOLETE — post-skip the nt=4 row realizes and stamps cleanly (the std primary below); w2x1
+  # reaches 43.6. Every lane is now PAST torch SDPA (41.0). d3 / p2 within noise; no TMA on this cap.
   - kernel: attention
     name: gemma4_12b.attention.hd256
     n_heads: 16
@@ -227,10 +228,23 @@ configs:
     dtype: 'fp16'
     causal: true
     knobs: {PLACE: 'fuse', STAGE: 'd2/cp/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32', WSPEC: ''}
-    emmy_us: 44.3
+    emmy_us: 41.1
     cublas_us: 41.0
-  # Fast-math sibling (FAST_MATH lane): P·V on the f16-accumulate atom, QK^T stays f32-acc. BEATS torch
-  # SDPA (1.02x) — the first emmy-past-SDPA hd256 entry on sm_89.
+  # The std-lane PRIMARY post-tile-skip: the nt=4 streaming block (mirrors the 5090's primary) — 1.07x
+  # past torch SDPA.
+  - kernel: attention
+    name: gemma4_12b.attention.hd256
+    n_heads: 16
+    seq: 512
+    head_dim: 256
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', STAGE: 'd2/cp/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x4/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k2', WSPEC: ''}
+    emmy_us: 38.3
+    cublas_us: 41.0
+  # Fast-math sibling (FAST_MATH lane): P·V on the f16-accumulate atom, QK^T stays f32-acc. The overall
+  # sm_89 frontier at 1.09x past torch SDPA — and the fm lane keeps nt=2 here (fm nt=4 is 41.8, the
+  # nt-preference mirror of the 5090 where fm follows std onto nt=4).
   - kernel: attention
     name: gemma4_12b.attention.hd256
     n_heads: 16
@@ -239,5 +253,5 @@ configs:
     dtype: 'fp16'
     causal: true
     knobs: {PLACE: 'fuse', STAGE: 'd2/cp/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x32', WSPEC: ''}
-    emmy_us: 40.1
+    emmy_us: 37.6
     cublas_us: 41.0

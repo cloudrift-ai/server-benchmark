@@ -351,16 +351,47 @@ def test_fast_math_golden_ranks_in_gated_enumeration(monkeypatch):
     import os
 
     from emmy.compiler.context import Context
-    from emmy.compiler.pipeline.search import analytic
+    from emmy.compiler.pipeline.search import golden_eval
 
     for var in ("EMMY_FAST_MATH", "EMMY_F16_MMA_F32_ACC"):
         monkeypatch.delenv(var, raising=False)
     ctx = Context.from_target((12, 0))
     fm = {"TILE": "a:mma_m16n8k16_f16_f16/w2x2/f2x2/k2", "STAGE": "", "REDUCE": ""}
-    _, rank, pool = analytic.evaluate_golden(128, 128, 128, "fp16", fm, ctx)
+    _, rank, pool = golden_eval.evaluate_golden(128, 128, 128, "fp16", fm, ctx)
     assert rank is not None and pool > 0, "fast-math golden must rank inside the self-gated enumeration"
     assert os.environ.get("EMMY_F16_MMA_F32_ACC") is None, "the scoped pin must restore"
     std = {"TILE": "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2", "STAGE": "", "REDUCE": ""}
-    _, rank_std, pool_std = analytic.evaluate_golden(128, 128, 128, "fp16", std, ctx)
+    _, rank_std, pool_std = golden_eval.evaluate_golden(128, 128, 128, "fp16", std, ctx)
     assert rank_std is not None
     assert pool_std < pool, "the standard enumeration must not silently grow fast-math rows"
+
+
+def test_golden_flops_never_overestimates_and_gates_dyn_reduce(monkeypatch):
+    """Every golden kind's ``flops()`` is positive and hint-free (a dynamic golden's symbolic
+    axis is already sized at the benched hint, so dyn == static counts), and the intensity-floor
+    gate reads it instead of reconstructing from the ShapeKey — the reconstruction multiplied
+    the hint onto reduce-tier dyn keys whose ``free_prod`` already includes the symbolic axis,
+    flagging every reduce-tier ``.dynM`` replay "impossible" at its correct recorded value."""
+    import importlib
+
+    from emmy import gpu
+    from emmy.compiler.pipeline.search.data.sample import Sample
+
+    run_mod = importlib.import_module("emmy.commands.run")
+    for cfg in GOLDEN_CONFIGS:
+        f = cfg.flops()
+        assert f is None or f > 0, cfg.name
+    m = next(c for c in GOLDEN_CONFIGS if isinstance(c, MatmulGoldenConfig))
+    assert m.flops() == 2.0 * m.M * m.N * m.K
+    dyn_reduce = next(c for c in GOLDEN_CONFIGS if c.dynamic and type(c).__name__ == "RmsNormGoldenConfig")
+    static_twin = next(c for c in GOLDEN_CONFIGS if not c.dynamic and type(c).__name__ == "RmsNormGoldenConfig" and c.K == dyn_reduce.K)
+    assert dyn_reduce.flops() == static_twin.flops(), "dyn flops must not carry a hint multiplier"
+    # The floor itself: a correct-value dynM reduce replay is CLEAN; a 100x-too-fast bench flags.
+    # Build the Sample against the real GPU registry FIRST (``from_golden`` pins the recording
+    # card's device features off it), then patch the live-device probe for the floor call only.
+    s = Sample.from_golden(dyn_reduce)
+    spec = type("S", (), {"peak_tflops": staticmethod(lambda dtype: 100.0)})()
+    monkeypatch.setattr(gpu, "by_name", lambda name: spec)
+    monkeypatch.setattr(gpu, "live_name", lambda: "test-gpu")
+    assert run_mod._intensity_floor_flag(s, dyn_reduce.emmy_us) is None, "correct dynM replay must not flag"
+    assert run_mod._intensity_floor_flag(s, dyn_reduce.emmy_us / 1e5) is not None, "an impossible bench must still flag"

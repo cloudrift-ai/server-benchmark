@@ -2,13 +2,13 @@
 
 A kernel's full structural signature is the ``S_*`` histogram the
 ``992_stamp_structural_features`` pass stamps (op counts, dtypes, loop depths,
-extents). For grouping, the cold-start ``AnalyticPrior`` ranking, and matching a
+extents). For grouping, the cold-start ``OfflinePrior`` ranking, and matching a
 golden config to a kernel, only the *extents* matter — and those are derivable
 arithmetically from a matmul's ``(M, N, K)`` with no compile. ``ShapeKey`` is that
 arithmetic handle: ``(free_prod, reduce_max, is_warp)``, the same triple the prior
 diagnostics and the per-kernel golden A/B already match on.
 
-It deliberately carries only the extent keys. A *trained* ``CatBoostPrior`` regresses
+It deliberately carries only the extent keys. A *trained* ``OnlinePrior`` regresses
 on the full ``S_*`` histogram, so the full set is derived (by compiling the snippet)
 and cached on the :class:`~emmy.compiler.pipeline.search.data.sample.Sample`,
 not here — see that module's ``compile_s_feats`` path.
@@ -72,7 +72,7 @@ class ShapeKey:
 
     def s_features_arith(self) -> dict[str, float]:
         """The extent ``S_*`` features derivable without compiling — the exact set
-        the cold ``AnalyticPrior`` reads (``analytic._analytic_scorer`` builds the
+        the cold ``OfflinePrior`` reads (``golden_eval._offline_scorer`` builds the
         same dict). For a matmul the reduce axis is a single contraction, so
         ``S_ext_reduce_prod == S_ext_reduce_max == K``. A dynamic key adds the
         ``S_ext_n_symbolic_axis`` flag (and its ``free_prod`` already excludes the

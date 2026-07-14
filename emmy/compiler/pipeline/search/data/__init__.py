@@ -1,5 +1,5 @@
 """Harmonized read-view over the three measurement-data sources (golden configs,
-the tune DB, the learned-prior reservoir): one :class:`Sample` row type, one
+the tune DB, the online-prior reservoir): one :class:`Sample` row type, one
 :class:`Dataset` query surface, and the cheap :class:`ShapeKey` structural identity.
 See ``sample.py`` for the featurization-fidelity contract."""
 

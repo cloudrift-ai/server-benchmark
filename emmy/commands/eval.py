@@ -1,13 +1,13 @@
-"""``emmy eval <knobs|prior|analytic|golden|variants|failures>`` — evaluate the tuning machinery.
+"""``emmy eval <knobs|offline|online|golden|variants|failures>`` — evaluate the tuning machinery.
 
 Six subcommands:
 
 - ``eval knobs``     — print the registered knob schema, then (with a tune DB)
   per-knob **regret** + a knob-interaction matrix (the analysis below).
-- ``eval analytic``  — evaluate the cold-start ``AnalyticPrior`` (``search/analytic``
+- ``eval offline``  — evaluate the cold-start ``OfflinePrior`` (``search/golden_eval``
   is the golden-eval glue around it) on the golden configs: the golden's **rank**
   under the prior over the enumeration (the position the tuner's patience must reach).
-- ``eval prior``     — evaluate the learned ``CatBoostPrior`` on the golden
+- ``eval online``     — evaluate the online ``OnlinePrior`` on the golden
   configs: the greedy pipeline pick vs golden (per-knob ``found/golden``), the
   golden's rank under the prior, and (``--features``) the regressor input vector.
 - ``eval golden``    — the greedy pipeline pick vs recorded golden per config (the
@@ -53,7 +53,7 @@ from pathlib import Path
 from statistics import median
 
 from emmy.commands.compile import resolve_tune_db
-from emmy.commands.dataset_args import add_dataset_args, require_source, resolve_analytic_arg, resolve_prior_arg
+from emmy.commands.dataset_args import add_dataset_args, require_source, resolve_offline_arg, resolve_online_arg
 from emmy.commands.table import GREEN as _GREEN
 from emmy.commands.table import RED as _RED
 from emmy.commands.table import YELLOW as _YELLOW
@@ -64,11 +64,11 @@ logger = logging.getLogger(__name__)
 
 
 def register_eval_command(subparsers) -> None:
-    """``emmy eval <knobs|prior|analytic>`` — evaluate the tuning knobs, the
-    learned prior, or the cold-start AnalyticPrior against the golden configs."""
+    """``emmy eval <knobs|online|offline>`` — evaluate the tuning knobs, the
+    online prior, or the cold-start OfflinePrior against the golden configs."""
     parser = subparsers.add_parser(
         "eval",
-        help="Evaluate tuning knobs / the learned prior / the analytic prior against golden configs",
+        help="Evaluate tuning knobs / the online prior / the offline prior against golden configs",
     )
     sub = parser.add_subparsers(dest="eval_target", required=True)
 
@@ -77,30 +77,38 @@ def register_eval_command(subparsers) -> None:
     pk.set_defaults(func=handle_eval_knobs)
 
     ph = sub.add_parser(
-        "analytic",
-        help="Evaluate the cold-start AnalyticPrior on the golden configs (golden's rank under the prior over the enumeration)",
+        "offline",
+        aliases=["analytic"],  # pre-rename spelling
+        help="Evaluate the cold-start OfflinePrior on the golden configs (golden's rank under the prior over the enumeration)",
     )
     ph.add_argument(
-        "--analytic-file",
-        help="Analytic weights artifact (JSON) to score with, for A/Bing candidate fits. "
-        "Default: EMMY_ANALYTIC_FILE or the repo-checked analytic_weights.json.",
+        "--offline-file",
+        "--analytic-file",  # pre-rename spelling
+        dest="offline_file",
+        help="Offline weights artifact (JSON) to score with, for A/Bing candidate fits. "
+        "Default: EMMY_OFFLINE_FILE or the repo-checked offline_weights.json.",
     )
     add_dataset_args(ph, default="golden")
-    ph.set_defaults(func=handle_eval_analytic)
+    ph.set_defaults(func=handle_eval_offline)
 
     pp = sub.add_parser(
-        "prior",
-        help="Evaluate the learned prior on the golden configs (greedy pick vs golden + golden's rank under the prior)",
+        "online",
+        aliases=["prior"],  # pre-rename spelling
+        help="Evaluate the online prior on the golden configs (greedy pick vs golden + golden's rank under the prior)",
     )
     pp.add_argument(
-        "--prior",
-        help="Path to the learned-prior JSON to load. Default: EMMY_PRIOR_FILE or ~/.cache/emmy/prior.json. "
+        "--online-file",
+        "--prior",  # pre-rename spelling
+        dest="online_file",
+        help="Path to the online-prior JSON to load. Default: EMMY_ONLINE_FILE or ~/.cache/emmy/online.json. "
         "(`emmy tune` writes this file; it is NOT the tune DB.)",
     )
     pp.add_argument(
-        "--analytic-file",
-        help="Analytic weights artifact (JSON) for the analytic blocks of this eval. "
-        "Default: EMMY_ANALYTIC_FILE or the repo-checked analytic_weights.json.",
+        "--offline-file",
+        "--analytic-file",  # pre-rename spelling
+        dest="offline_file",
+        help="Offline weights artifact (JSON) for the offline blocks of this eval. "
+        "Default: EMMY_OFFLINE_FILE or the repo-checked offline_weights.json.",
     )
     add_dataset_args(pp, default="golden")
     pp.add_argument(
@@ -120,13 +128,18 @@ def register_eval_command(subparsers) -> None:
         help="With --dataset nodes: ablation Δ table — each family's median regret change with one feature masked "
         "(<0 = actively misleading), with per-feature fork support.",
     )
-    pp.set_defaults(func=handle_eval_prior)
+    pp.set_defaults(func=handle_eval_online)
 
     pg = sub.add_parser(
         "golden",
         help="Greedy pipeline pick vs recorded golden, per golden config (the reproduction check; no heuristic/rank diagnostics)",
     )
-    pg.add_argument("--prior", help="Learned-prior JSON to load (default: EMMY_PRIOR_FILE or ~/.cache/emmy/prior.json).")
+    pg.add_argument(
+        "--online-file",
+        "--prior",  # pre-rename spelling
+        dest="online_file",
+        help="Online-prior JSON to load (default: EMMY_ONLINE_FILE or ~/.cache/emmy/online.json).",
+    )
     add_dataset_args(pg, default="golden")
     pg.add_argument("--features", action="store_true", help="Also print the prior's regressor feature vector per golden config.")
     pg.set_defaults(func=handle_eval_golden)
@@ -135,7 +148,12 @@ def register_eval_command(subparsers) -> None:
         "variants",
         help="Per-kernel leaderboard of the tune DB's measured variants, with the prior's deployed pick marked and ranked",
     )
-    pv.add_argument("--prior", help="Learned-prior JSON to load (default: EMMY_PRIOR_FILE or ~/.cache/emmy/prior.json).")
+    pv.add_argument(
+        "--online-file",
+        "--prior",  # pre-rename spelling
+        dest="online_file",
+        help="Online-prior JSON to load (default: EMMY_ONLINE_FILE or ~/.cache/emmy/online.json).",
+    )
     add_dataset_args(pv, default="db")
     pv.add_argument(
         "--top",
@@ -190,55 +208,55 @@ def handle_eval_knobs(args) -> None:
     _emit_interaction_matrix([r.knob for r in rows], interactions)
 
 
-def _check_analytic_artifact() -> None:
-    """Fail the command up front on an unloadable analytic weights artifact
+def _check_offline_artifact() -> None:
+    """Fail the command up front on an unloadable offline weights artifact
     (missing / feat_ver-mismatched override) — the per-shape eval harness catches
     exceptions into ERR rows, which would let a broken A/B exit 0."""
-    from emmy.compiler.pipeline.search.prior import AnalyticPrior  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.prior import OfflinePrior  # noqa: PLC0415
 
-    AnalyticPrior()
-
-
-def handle_eval_analytic(args) -> None:
-    """``eval analytic`` — the cold-start AnalyticPrior's rank of each golden."""
-    require_source(args, {"golden"}, "eval analytic ranks recorded golden configs — --dataset db has no golden to rank.")
-    resolve_analytic_arg(args)
-    _check_analytic_artifact()
-    _emit_analytic_eval(args.kernel)
+    OfflinePrior()
 
 
-def handle_eval_prior(args) -> None:
-    """``eval prior`` — the learned prior on the golden configs: the greedy pick vs
+def handle_eval_offline(args) -> None:
+    """``eval offline`` — the cold-start OfflinePrior's rank of each golden."""
+    require_source(args, {"golden"}, "eval offline ranks recorded golden configs — --dataset db has no golden to rank.")
+    resolve_offline_arg(args)
+    _check_offline_artifact()
+    _emit_offline_eval(args.kernel)
+
+
+def handle_eval_online(args) -> None:
+    """``eval online`` — the online prior on the golden configs: the greedy pick vs
     golden, the golden's rank under the prior, and (with ``--features``) the
     regressor input vector. With ``--dataset db`` instead reports the prior's pick
     reachability over the tune DB's *measured* variants (the orthogonal view); with
     ``--dataset nodes`` reports fork sibling regret + leaf reachability over the tune
     DB's search-tree node store (the search-faithful, partial-config view)."""
-    resolve_prior_arg(args)
-    resolve_analytic_arg(args)
-    _check_analytic_artifact()
+    resolve_online_arg(args)
+    resolve_offline_arg(args)
+    _check_offline_artifact()
     if (args.blame or args.ablate) and args.dataset != "nodes":
         logger.error("--blame/--ablate attribute fork records — they need --dataset nodes.")
         sys.exit(2)
     if args.dataset == "db":
-        _emit_prior_db_reachability(args)
+        _emit_online_db_reachability(args)
         return
     if args.dataset == "nodes":
-        _emit_prior_nodes(args)
+        _emit_online_nodes(args)
         return
     if args.features:
         _emit_golden_features(args.kernel)
-    _emit_prior_eval(args.kernel)
+    _emit_online_eval(args.kernel)
 
 
 def handle_eval_golden(args) -> None:
     """``eval golden`` — the greedy pipeline pick vs recorded golden per config (the
     actionable "did the pipeline reproduce the golden knobs?" view). Watch it while
     iteratively tuning golden shapes one at a time (``emmy tune --golden
-    <name>``). Use ``eval analytic`` / ``eval prior`` for the analytic-prior rank and
-    the learned rank-under-prior diagnostics."""
+    <name>``). Use ``eval offline`` / ``eval online`` for the offline-prior rank and
+    the online rank-under-prior diagnostics."""
     require_source(args, {"golden"}, "eval golden compares against recorded golden knobs — --dataset db has no golden to compare to.")
-    resolve_prior_arg(args)
+    resolve_online_arg(args)
     if args.features:
         _emit_golden_features(args.kernel)
     configs = _golden_configs(args.kernel)
@@ -253,7 +271,7 @@ def handle_eval_variants(args) -> None:
     search/prior reach the best measured config, and which knobs distinguish
     it?" drill-down view."""
     require_source(args, {"db"}, "eval variants lists measured tune-DB rows — --dataset golden has no per-variant measurements.")
-    resolve_prior_arg(args)
+    resolve_online_arg(args)
     from emmy import config  # noqa: PLC0415
     from emmy.compiler.pipeline.search.prior import load_prior  # noqa: PLC0415
 
@@ -266,10 +284,10 @@ def handle_eval_variants(args) -> None:
         logger.info("No measured variants%s in %s.", f" matching --kernel '{args.kernel}'" if args.kernel else "", db_path)
         return
     fails = Counter(s.name for s in Dataset.from_db(db_path, kernel=args.kernel, status="bench_fail") if s.name)
-    # FallbackPrior: the learned CatBoost when fitted, else the cold AnalyticPrior — the same ranking compile/run use.
+    # FallbackPrior: the online CatBoost when fitted, else the cold OfflinePrior — the same ranking compile/run use.
     prior = load_prior()
     if not prior.fitted:
-        logger.info("No fitted prior at %s — the pick is the cold AnalyticPrior's (the ranking compile/run use).", config.prior_path())
+        logger.info("No fitted prior at %s — the pick is the cold OfflinePrior's (the ranking compile/run use).", config.online_path())
     o3 = _o3_reservoir_index(prior)
     for name in sorted(groups):
         _emit_variant_table(name, groups[name], prior, n_fail=fails.get(name, 0), o3=o3, top=args.top)
@@ -455,8 +473,8 @@ def _emit_golden_table(lead_cols: list[Col], entries: list[tuple], caption: str)
 
 
 def _emit_golden_features(kernel_filter: str | None) -> None:
-    """Print, per golden config, the exact feature vector the learned
-    :class:`CatBoostPrior` regresses on — ``features.knob_features(merged)`` where
+    """Print, per golden config, the exact feature vector the online
+    :class:`OnlinePrior` regresses on — ``features.knob_features(merged)`` where
     ``merged`` is the ``H_*`` host/regime features + the ``S_*`` structural/shape
     features (obtained by compiling the shape to the loop dialect, where
     ``992_stamp_structural_features`` runs) + the golden tuning knobs. This is
@@ -474,7 +492,7 @@ def _emit_golden_features(kernel_filter: str | None) -> None:
         configs = [g for g in configs if kernel_filter in g.name]
 
     logger.info("")
-    logger.info("Learned-prior feature vector (features.knob_features) — the CatBoost regressor's input per golden config:")
+    logger.info("Online-prior feature vector (features.knob_features) — the CatBoost regressor's input per golden config:")
     quiet = [_logging.getLogger(n) for n in ("emmy.compiler", "emmy.commands.trace")]
     prev = [lg.level for lg in quiet]
     for lg in quiet:
@@ -515,9 +533,9 @@ def _golden_configs(kernel_filter: str | None):
     return configs
 
 
-def _emit_analytic_eval(kernel_filter: str | None) -> None:
-    """``eval analytic`` body: the cold-start ``AnalyticPrior`` (``search/analytic``
-    is the golden-eval glue around it) — no learned data, no GPU, no measurements.
+def _emit_offline_eval(kernel_filter: str | None) -> None:
+    """``eval offline`` body: the cold-start ``OfflinePrior`` (``search/golden_eval``
+    is the golden-eval glue around it) — no online data, no GPU, no measurements.
     One streamed line per golden config with the golden's **rank** under the prior
     over the enumeration (the position the tuner's patience must reach) + per-knob
     ``found/golden`` (mismatches red), summarized as median + top-k coverage."""
@@ -525,7 +543,7 @@ def _emit_analytic_eval(kernel_filter: str | None) -> None:
 
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.analytic import evaluate_golden  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden_eval import evaluate_golden  # noqa: PLC0415
 
     configs = _golden_configs(kernel_filter)
     ranks: list[int] = []
@@ -549,23 +567,23 @@ def _emit_analytic_eval(kernel_filter: str | None) -> None:
         n = len(ranks)
         cov = "  ".join(f"top{k}={sum(r < k for r in ranks)}/{n}" for k in (1, 10, 25, 50, 100))
         logger.info("")
-        logger.info("  analytic golden rank — median=%d  %s", int(median(ranks)), cov)
+        logger.info("  offline golden rank — median=%d  %s", int(median(ranks)), cov)
 
 
-def _emit_prior_eval(kernel_filter: str | None) -> None:
-    """``eval prior`` body: the learned ``CatBoostPrior`` on the golden configs —
+def _emit_online_eval(kernel_filter: str | None) -> None:
+    """``eval online`` body: the online ``OnlinePrior`` on the golden configs —
     the golden's rank under the prior over the full enumeration (offline) followed
     by the greedy tile-pipeline pick vs golden (the real selection). Reads the
-    prior JSON (``EMMY_PRIOR_FILE`` / ``--prior``; option-0 when none loaded)."""
+    prior JSON (``EMMY_ONLINE_FILE`` / ``--prior``; option-0 when none loaded)."""
     from emmy import config  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.prior import CatBoostPrior, diagnostics  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.prior import OnlinePrior, diagnostics  # noqa: PLC0415
 
-    prior = CatBoostPrior.load()
+    prior = OnlinePrior.load()
     logger.info("")
     if prior.fitted:
         logger.info(diagnostics.golden_prior_eval(prior, kernel_filter))
     else:
-        logger.info("No fitted prior at %s — greedy falls to option-0 (run `emmy tune`).", config.prior_path())
+        logger.info("No fitted prior at %s — greedy falls to option-0 (run `emmy tune`).", config.online_path())
 
     configs = _golden_configs(kernel_filter)
     # Deployable (-O3) perf of the prior's pick vs golden, read from the reservoir (no
@@ -574,9 +592,9 @@ def _emit_prior_eval(kernel_filter: str | None) -> None:
     _emit_prior_golden_check(configs, perf=perf)
 
 
-def _emit_prior_db_reachability(args) -> None:
-    """``eval prior --dataset db`` body: the prior's pick **reachability** over the
-    tune DB's *measured* variants — per op structure, does the learned prior's
+def _emit_online_db_reachability(args) -> None:
+    """``eval online --dataset db`` body: the prior's pick **reachability** over the
+    tune DB's *measured* variants — per op structure, does the online prior's
     predicted-fastest config recover the measured-best leaf? The orthogonal counter
     to the golden views: it scores the same prior over the DB rows instead of the
     curated goldens. Reuses the diagnostics machinery (the prior's ``_dataset`` is
@@ -588,14 +606,14 @@ def _emit_prior_db_reachability(args) -> None:
     if not db_path.exists():
         logger.error("no tune DB at %s — pass --db or run `emmy tune` first.", db_path)
         return
-    # FallbackPrior: the learned CatBoost when fitted, else the cold AnalyticPrior — the same ranking compile/run use.
+    # FallbackPrior: the online CatBoost when fitted, else the cold OfflinePrior — the same ranking compile/run use.
     prior = load_prior()
     # Group DB variants by their full S_* signature — the (sig → Samples) mapping
     # diagnostics.reachability scores.
     groups = Dataset.from_db(db_path, kernel=args.kernel).group_by_op()
     logger.info("")
     if not prior.fitted:
-        logger.info("No fitted prior at %s — run `emmy tune`; the cold AnalyticPrior ranks by D_* geometry only.", config.prior_path())
+        logger.info("No fitted prior at %s — run `emmy tune`; the cold OfflinePrior ranks by D_* geometry only.", config.online_path())
     rr = diagnostics.reachability(prior, groups)
     if not rr:
         logger.info("No op structure has ≥2 measured leaf configs in the DB — nothing to score.")
@@ -608,8 +626,8 @@ def _emit_prior_db_reachability(args) -> None:
         logger.info("    %-26s  best %8.2fus  pick %8.2fus  (%.2fx, %d configs)%s", label, best_us, pick_us, ratio, n, flag)
 
 
-def _emit_prior_nodes(args) -> None:
-    """``eval prior --dataset nodes`` body: fork sibling regret (what following the
+def _emit_online_nodes(args) -> None:
+    """``eval online --dataset nodes`` body: fork sibling regret (what following the
     prior's per-fork pick costs vs each fork's best-reachable latency, bucketed by
     the knob family the fork decides) plus leaf reachability / calibration over the
     tune DB's search-tree ``node`` store. The search-faithful counterpart to
@@ -617,13 +635,13 @@ def _emit_prior_nodes(args) -> None:
 
     Reported ONCE PER PRIOR HALF, explicitly labeled — the composite ``FallbackPrior``
     would answer with whichever half is active, mixing two distinct failure modes: the
-    cold ``AnalyticPrior`` decides what a cold sweep measures at all (its regret ⇒ fix
-    the analytic weights / features), while the learned ``CatBoostPrior`` owns deploys
+    cold ``OfflinePrior`` decides what a cold sweep measures at all (its regret ⇒ fix
+    the offline weights / features), while the online ``OnlinePrior`` owns deploys
     once trustworthy (its regret ⇒ a training-data / featurization problem). Splitting
     the blocks makes the diagnostic say WHERE the problem is."""
     from emmy import config  # noqa: PLC0415
     from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.prior import AnalyticPrior, CatBoostPrior, diagnostics  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.prior import OfflinePrior, OnlinePrior, diagnostics  # noqa: PLC0415
 
     db_path = Path(args.db) if args.db else resolve_tune_db()
     if not db_path.exists():
@@ -634,17 +652,17 @@ def _emit_prior_nodes(args) -> None:
         nodes = list(db.iter_nodes())
     finally:
         db.close()
-    learned = CatBoostPrior.load()
-    calib = f"calibration={learned.calibration:+.2f}" if learned.calibration is not None else "calibration=n/a"
+    online = OnlinePrior.load()
+    calib = f"calibration={online.calibration:+.2f}" if online.calibration is not None else "calibration=n/a"
     halves: list[tuple[str, object]] = [
-        ("=== analytic prior (cold-start ranking — decides what a cold sweep measures) ===", AnalyticPrior()),
-        (f"=== learned prior (CatBoost, {calib} — owns deploys once trustworthy) ===", learned),
+        ("=== offline prior (cold-start ranking — decides what a cold sweep measures) ===", OfflinePrior()),
+        (f"=== online prior (CatBoost, {calib} — owns deploys once trustworthy) ===", online),
     ]
     for header, prior in halves:
         logger.info("")
         logger.info("%s", header)
         if not prior.fitted:
-            logger.info("  not fitted (no checkpoint at %s) — run `emmy tune` to train it.", config.prior_path())
+            logger.info("  not fitted (no checkpoint at %s) — run `emmy tune` to train it.", config.online_path())
             continue
         logger.info("%s", diagnostics.node_report(prior, nodes, kernel_filter=args.kernel))
         if args.blame or args.ablate:
@@ -698,7 +716,7 @@ def _bare_families(knobs: dict) -> dict:
 
 def _emit_prior_golden_check(configs: list, *, title: bool = True, perf: dict | None = None) -> None:
     """Greedy fork pick through the tile pipeline vs recorded golden. The pick reads
-    the learned-prior JSON (``config.prior_path()``: ``EMMY_PRIOR_FILE`` /
+    the online-prior JSON (``config.online_path()``: ``EMMY_ONLINE_FILE`` /
     ``--prior``); option-0 with no fitted prior. Stops at the tile dialect (every
     knob fork resolves there: no codegen / nvcc). One row per shape (configs sharing a
     name share a snippet → one greedy pick): the pick is scored against the shape's
@@ -706,7 +724,7 @@ def _emit_prior_golden_check(configs: list, *, title: bool = True, perf: dict | 
     don't duplicate rows. A trailing ``TOTAL`` row carries per-knob match counts over the
     deduped rows + the exactly-reproduced row count. Rows print with column-aligned
     ``found/golden`` knobs (canonical order). ``title`` prints the
-    ``Golden reproduction — … prior: <path>`` banner (``eval prior``); ``eval golden``
+    ``Golden reproduction — … prior: <path>`` banner (``eval online``); ``eval golden``
     passes ``title=False`` for just the table."""
     import logging as _logging  # noqa: PLC0415
 
@@ -733,12 +751,12 @@ def _emit_prior_golden_check(configs: list, *, title: bool = True, perf: dict | 
         return _bare_families(tunable(knobs))
 
     if title:
-        prior_path = config.prior_path()
+        online_path = config.online_path()
         logger.info("")
         logger.info(
             "Golden reproduction — greedy pipeline pick vs recorded golden; prior: %s (%s):",
-            prior_path,
-            "loaded" if prior_path.exists() else "MISSING → option-0",
+            online_path,
+            "loaded" if online_path.exists() else "MISSING → option-0",
         )
     # Silence the trace/compile chatter (different logger subtrees) so this
     # function's own ``logger`` can stream one clean result line per config.

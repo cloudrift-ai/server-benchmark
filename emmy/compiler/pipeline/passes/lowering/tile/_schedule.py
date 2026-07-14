@@ -21,8 +21,8 @@ full-row reductions like online-softmax & RMSNorm, contractions, symbolic axes) 
 
 The selection here is **conservative module constants** standing in for the eventual
 ``REDUCE`` knob + prior-driven choice. ``# TODO``: replace the constants with
-``knob.py::_reduce_decomp`` (BR→coop, BK→serial, FK→reg, SPLITK→cta) + the learned /
-analytic prior. The cross-CTA ``g<n>`` split (``030_split``) and the ``r<n>`` (ILP) reg
+``knob.py::_reduce_decomp`` (BR→coop, BK→serial, FK→reg, SPLITK→cta) + the online /
+offline prior. The cross-CTA ``g<n>`` split (``030_split_reduce``) and the ``r<n>`` (ILP) reg
 fold are built and honored for an additive carrier via an explicit ``REDUCE`` pin (the
 split emits the partial + finalize kernels / atomicAdd; the reg fold emits the ILP
 accumulators). Strided-cooperative rows (a small whole free axis packed alongside the coop
@@ -472,10 +472,10 @@ def _reduce_candidates(kernel, place, plan: TilePlan, probe: Contraction | None 
     divisor- and occupancy-guarded split-K moves (deferred-only on the warp tier). An **atomic**
     split (``g<w>a``) is offered only when the kernel's projection epilogue distributes over the
     add (``projection_distributes`` off the ``probe`` node) — a non-distributive fused projection
-    would raise at ``030_split`` and waste a search slot; the deferred ``g<w>k`` finalize stays
+    would raise at ``030_split_reduce`` and waste a search slot; the deferred ``g<w>k`` finalize stays
     legal for any epilogue. A pinned ``REDUCE`` is authoritative and keeps the pin contract: a
     ``g`` split rides every tile (an invalid warp slice / atomic-on-non-distributive raises in
-    :func:`_splitk_option` / ``030_split``, as a pin should), a ``b``/``r`` partition applies to
+    :func:`_splitk_option` / ``030_split_reduce``, as a pin should), a ``b``/``r`` partition applies to
     the per-cell tier only (a tiled candidate has no row under it)."""
     ext = reduce_loop(kernel.op).axis.extent
     if REDUCE.raw() is not None:
@@ -502,7 +502,7 @@ def _reduce_candidates(kernel, place, plan: TilePlan, probe: Contraction | None 
         for move in splitk_moves(warp=plan.is_warp):
             sp = ReducePlan.parse(move)
             if sp.finalize == "atomic" and not atomic_ok:
-                continue  # non-distributive fused projection — 030_split would raise; don't offer
+                continue  # non-distributive fused projection — 030_split_reduce would raise; don't offer
             if k % sp.cta == 0 and (k // sp.cta) % step == 0:
                 out.append(move)
     return out
@@ -528,7 +528,7 @@ def _wspec_candidates(plan: TilePlan, stage_spelling: str, red: str) -> list[str
     alone unless the row can drive a producer band: a warp tile over a resolved **TMA** stage
     (:func:`_wspec_workers`'s legality, pre-filtered here so the fork doesn't spawn rows that
     materialize identically) and no cross-CTA split (the split partial re-resolves its own
-    pipeline; wiring WSPEC through ``030_split`` is a follow-up). The env pin narrows as usual —
+    pipeline; wiring WSPEC through ``030_split_reduce`` is a follow-up). The env pin narrows as usual —
     and only eligible rows offer it, so a pinned split on an ineligible row degrades to uniform
     at materialization rather than multiplying dead rows here."""
     try:
@@ -600,7 +600,7 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], str]:
             for red in _reduce_candidates(kernel, place, plan, probe):
                 # A staged split row is legal: ``_splitk_option`` re-resolves the stage against the
                 # SLICED inner node (the warp slice divisibility already held in
-                # ``_reduce_candidates``) and ``030_split`` threads it onto the partial kernel.
+                # ``_reduce_candidates``) and ``030_split_reduce`` threads it onto the partial kernel.
                 # Every family key is explicit — ``""`` is a DECIDED empty (per-cell / serial /
                 # gmem-direct), distinguishable from an absent (never-offered) family. The
                 # evidence pick's prefix-consistency depends on it: an absent key reads as
@@ -624,7 +624,7 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], str]:
 def _splitk_pin() -> str:
     """The pinned ``g<w>[a|k]`` split-K spec (or ``""``) — the cross-CTA K partition a
     ``CONTRACTION`` honors through the structural ``Reduction ⊃ Contraction`` fork
-    (:func:`_splitk_option`), consumed by ``030_split``. Reads the ``REDUCE`` pin and returns it
+    (:func:`_splitk_option`), consumed by ``030_split_reduce``. Reads the ``REDUCE`` pin and returns it
     only when it parses to a **GRID split** (``needs_split``); a non-split ``b`` / ``r`` pin or
     another codec is not a split-K request — ignore it rather than fail."""
     pinned = REDUCE.narrow([""])[0]
@@ -851,25 +851,32 @@ def _resolve_sync_stage(c: Contraction, budget: int = STATIC_SMEM_CAP, want_dept
     sibling and a ``STAGE`` pin degrades to this resolved row. ``None`` when the slabs don't fit
     the 48 KiB smem budget: the A/B operand slabs plus one fp32 row per bridged statistic
     (``sync_stat_fill``'s decls — the same ``Contraction.stat_prologue`` seam the materializer
-    fills through). ``want_depth >= 2`` (a ``STAGE`` ``d<n>/sync`` pin — pin / tune-explorable,
-    never the unpinned default: the ring costs occupancy and measured slower on the reference
-    shapes) rings the slabs when a canonical B has cp.async copies to overlap and the ring fits
-    the budget; a transposed-B (all-sync) pipeline has nothing async to overlap and stays
-    single-buffer. ``budget`` is the device's per-block dynamic-smem opt-in cap
-    (``ctx.max_dynamic_smem`` — the backend declares an ``extern __shared__`` pool and sets the
-    func attribute past the 48 KiB static cap), falling back to the static cap when no context
-    reaches the schedule."""
+    fills through). ``want_depth >= 2`` (a ``STAGE`` ``d<n>/sync`` pin — pin / tune-explorable)
+    is the **asymmetric B-only prefetch ring**: only the canonical-B cp.async slabs ring (their
+    copies for chunk ``i+d-1`` fly under chunk ``i``'s compute fill AND drain), while the
+    compute-filled A slab and the stat rows stay single-buffer — ringing a compute fill buys no
+    overlap (it runs on the drain's own threads). Measured on the gemma gate_up fused edge
+    (5090): the B-only ring STILL loses (897 vs 665 µs at d2) — the extra B slot alone crosses
+    the smem occupancy quantization (3 → 2 CTAs/SM), the same cliff that killed the historical
+    full-slab ring; the depth stays pin-only and option-0 ``d1`` is the deployable form. A
+    transposed-B
+    (all-sync) pipeline has nothing async to overlap and stays single-buffer. ``budget`` is the
+    device's per-block dynamic-smem opt-in cap (``ctx.max_dynamic_smem`` — the backend declares
+    an ``extern __shared__`` pool and sets the func attribute past the 48 KiB static cap),
+    falling back to the static cap when no context reaches the schedule."""
     atom = c.atom
     bk_elems = c.tile.bk * atom.atom_k
     a_nbytes = atom.operand_dtype("a").nbytes
     _, _, stats = c.stat_prologue()
     # One A slab + one B slab per fold channel (the multi-channel gate/up node fills a B slab per
-    # projection) + one fp32 stat row per bridged statistic.
-    slot_bytes = (c.m.tile + len(c.folds) * c.n.tile) * bk_elems * a_nbytes
+    # projection) + one fp32 stat row per bridged statistic. Only the B slabs multiply by the
+    # ring depth (the asymmetric ring above).
+    a_bytes = c.m.tile * bk_elems * a_nbytes
+    b_bytes = len(c.folds) * c.n.tile * bk_elems * a_nbytes
     stat_bytes = len(stats) * c.m.tile * 4
-    if slot_bytes + stat_bytes > budget:
+    if a_bytes + b_bytes + stat_bytes > budget:
         return None
-    depth = want_depth if want_depth >= 2 and not c.b_trans and want_depth * slot_bytes + stat_bytes <= budget else 1
+    depth = want_depth if want_depth >= 2 and not c.b_trans and a_bytes + stat_bytes + want_depth * b_bytes <= budget else 1
     return Stage(depth=depth, transport="sync", smem=(c.a_name,), bk_elems=bk_elems)
 
 
@@ -915,6 +922,12 @@ def _computed_a_rows(kernel, place, probe: Contraction, kaxis: str, budget: int 
         ]
     want_depth = Stage.parse(_stage_spec(kernel)).depth if _stage_spec(kernel) else 1
     rows: list[dict] = []
+    # The launch-order codec rides these rows exactly like the plain contraction's
+    # (:func:`_raster_candidates` — a computed-A kernel's output is the same static 2-D block-tile
+    # grid, and the grouped decode is kernel-scoped launch metadata the transport never sees; a
+    # symbolic-M fused edge decides the flat ``""`` through the same gate). The fused edge is the
+    # codec's best customer: its B stripes re-stream per M-tile row (64.6% DRAM on the gemma
+    # gate_up shape), which is precisely the L2 reuse a grouped order buys.
     for spec in tiles:
         stage = _resolve_sync_stage(replace(probe, tile=TilePlan.parse(spec)), budget, want_depth)
         if stage is None:
@@ -922,7 +935,8 @@ def _computed_a_rows(kernel, place, probe: Contraction, kaxis: str, budget: int 
                 raise ValueError(f"warp TILE pin {spec!r} on a fused-cone contraction: the sync slabs exceed the {budget} B smem budget.")
             continue
         for red in _reduce_candidates(kernel, place, TilePlan.parse(spec), probe):
-            rows.append({_at(TILE, kaxis): spec, _at(STAGE, kaxis): stage.spell(), _at(REDUCE, kaxis): red})
+            for raster in _raster_candidates(place):
+                rows.append({_at(TILE, kaxis): spec, _at(STAGE, kaxis): stage.spell(), _at(REDUCE, kaxis): red, RASTER.name: raster})
     return rows
 
 
@@ -1032,16 +1046,16 @@ def _splitk_option(
     non-split matmul builds (:func:`_contraction_node`, so it factorizes through ``_factor`` to mma or
     scalar per the ``tile_spec`` atom) but over ``kslice`` with operands reindexed to
     ``ksplit·(K/w) + kslice``; the outer additive :class:`Reduction` carries the ``g<w>[a|k]`` GRID
-    partition (:class:`ReducePlan`) that ``030_split`` consumes into the cross-CTA partial + finalize.
+    partition (:class:`ReducePlan`) that ``030_split_reduce`` consumes into the cross-CTA partial + finalize.
 
     The additive carrier is built exactly as ``contraction_loop`` / a plain-sum reduce does — an
-    ``Accum(op="add").as_carrier()`` (identity ``0.0``, 1 component) — so ``030_split``'s finalize
+    ``Accum(op="add").as_carrier()`` (identity ``0.0``, 1 component) — so ``030_split_reduce``'s finalize
     (which reads the carrier's identity + ``as_state_merge``) needs no change. The output tile
     (``tier``) rides the inner ``Contraction``; the ``Reduction`` holds only the K partition.
 
     An operand ``stage_spec`` is RESOLVED against the **sliced** inner node (its ``kslice`` extent +
     offset operand indices), so eligibility is judged on the pipeline the partial kernel actually
-    runs; ``030_split`` threads the resolved ``Stage`` onto its partial ``TileOp``. The honest-
+    runs; ``030_split_reduce`` threads the resolved ``Stage`` onto its partial ``TileOp``. The honest-
     stamping rule applies (the resolved spelling, or the decided-empty ``""`` on decline).
 
     Knob keying: ``TILE`` / ``REDUCE`` / ``STAGE`` are stamped on the **original** k-axis name (not
@@ -1099,7 +1113,7 @@ def _warp_option(
     form of the ``TILE`` spec resolved into the warp-atom :class:`TilePlan`, plus an optional operand
     ``STAGE`` resolved into a :class:`Stage`. The tiled :class:`Contraction` leaf is built here (``op``),
     so materialize only ``factorize``\\ s. The packed ``TILE`` codec is the sole on-dict spelling — the
-    learned-prior featurizer parses it directly (one codec, not a per-knob ``WM``/``WN``/``MMA`` explosion)."""
+    online-prior featurizer parses it directly (one codec, not a per-knob ``WM``/``WN``/``MMA`` explosion)."""
     wt = TilePlan.parse(spec)
     _check_warp_static_k(tile, wt)
     # Build the tiled Contraction node here — it resolves the operand→role facts internally, so an
@@ -1286,7 +1300,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
     # partition (``REDUCE``). Each offers its candidate(s): one applies directly, multiple fork.
     # A contraction ALSO honors a cross-CTA split-K (``g``) / cooperative (``b``/``r``) ``REDUCE``
     # pin — orthogonal to the output tile (``reduce`` = the K partition; ``g`` is consumed by
-    # ``030_split``, ``b``/``r`` by ``_factor._tile_reduce_axis`` on the non-tiled scalar tier).
+    # ``030_split_reduce``, ``b``/``r`` by ``_factor._tile_reduce_axis`` on the non-tiled scalar tier).
     # ``TILE`` is the unified output-fragment knob: a candidate whose codec names an atom
     # (``a:<atom>`` — :func:`is_warp_codec`) builds the tensor-core warp option, otherwise the
     # scalar register-tile option (the either-ness — a kernel is one fragment or the other).
@@ -1296,7 +1310,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         # the rows for one prior-scoring pass; MCTS pays one level per pop. Env pins narrow each
         # family (a fully-pinned space collapses to the single materialized option, no fork). A
         # split ``g`` row routes through the structural ``Reduction ⊃ Contraction`` fork
-        # (:func:`_splitk_option`, consumed by ``030_split``); a warp row through
+        # (:func:`_splitk_option`, consumed by ``030_split_reduce``); a warp row through
         # :func:`_warp_option`; the rest through :func:`_tile_option`.
         rows, kaxis = _tile_rows(tile, place, ctx)
         if not rows:
@@ -1313,7 +1327,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
             # them for branch identity, but the MATERIALIZED op is what ``realized_knobs`` reads —
             # dropping them here left leaf/evidence rows unstamped while fork rows (deploy
             # candidates) were stamped, fracturing the ``S_*`` evidence signature: deploy-time
-            # ``evidence_pick`` never joined the measured -O3 rows, and greedy shipped the learned
+            # ``evidence_pick`` never joined the measured -O3 rows, and greedy shipped the online
             # model's unbenched per-cell extrapolation (the 2026-07-07 5090 gate's 330x fp16 miss).
             op_knobs = {**knobs, **{k: v for k, v in row.items() if k.startswith("S_")}}
             # The rasterization codec rides op-level knobs (kernel-scoped launch-order metadata,
@@ -1349,6 +1363,26 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
     # doesn't tile) — the evidence pick's prefix-consistency. Pins keep their contracts: a
     # non-empty ``REDUCE`` pin stays the scalar escape (it asks for a reduce partition only the
     # scalar tiers honor), a warp ``TILE`` pin keeps the mma rows alone.
+    # A cross-CTA ``g<n>k`` REDUCE pin on the flash tree selects the SPLIT-KV warp rows (the
+    # partial keeps fragment residence; ``030_split_reduce`` realizes partial + LSE-combine finalize) —
+    # pin-driven, like the demoted warp tier. Any other non-empty REDUCE pin keeps its scalar
+    # escape below (it asks for a reduce partition only the scalar tiers honor), as does a split
+    # pin no warp row can legally carry (symbolic / non-divisible kv, atomic finalize).
+    reduce_pin = REDUCE.raw()
+    if reduce_pin:
+        try:
+            rplan = ReducePlan.parse(reduce_pin)
+        except Exception:  # noqa: BLE001 — an unparseable pin keeps the historical scalar escape
+            rplan = None
+        if rplan is not None and rplan.needs_split and rplan.finalize == "kernel":
+            pair = _twisted_pair(tile.op)
+            if pair is not None:
+                red, head, pv = pair
+                warps = _twisted_warp_options(tile, name, knobs, _smem_budget(ctx), _tma_allowed(ctx), _f16acc_allowed(ctx))
+                rows = _stamp_twisted_split(warps, red.axis.name, rplan)
+                if rows:
+                    rows = _narrow_flash_forms(rows, head, pv, keyed_only=True)
+                    return rows if len(rows) > 1 else rows[0]
     if not REDUCE.narrow([""])[0]:
         pair = _twisted_pair(tile.op)
         if pair is not None:
@@ -1433,6 +1467,25 @@ def _narrow_flash_forms(forms: list[TileOp], head: Contraction, pv: Contraction,
         logger.warning("TILE pin(s) %s match no flash form (warp / chain / per-cell); keeping the full fork", live)
         return forms
     return kept
+
+
+def _stamp_twisted_split(rows: list[TileOp], kv_name: str, plan: ReducePlan) -> list[TileOp]:
+    """The flash split-KV rows: each warp row with the pinned cross-CTA partition stamped on its
+    :class:`Reduction` node (``030_split_reduce`` consumes it) and spelled on ``REDUCE@<kv>``. Per-row
+    legality: a static kv extent divisible by ``cta``, and a slice divisible by the row's own
+    streaming key block (the staged chunking + fragment masks assume block-whole slices); an
+    illegal row is dropped, not degraded."""
+    out: list[TileOp] = []
+    for r in rows:
+        red = r.op.source if isinstance(r.op, Map) else r.op
+        head = red.partial[0]
+        bn = head.tile.regs[1] * head.tile.atom.shape[1]
+        ext = red.axis.extent
+        if not ext.is_static or ext.as_static() % plan.cta != 0 or (ext.as_static() // plan.cta) % bn != 0:
+            continue
+        op2 = _with_reduce(r.op, plan)
+        out.append(replace(r, op=op2, knobs={**r.knobs, _at(REDUCE, kv_name): plan.spell()}))
+    return out
 
 
 def _twisted_pair(op) -> tuple[Reduction, Contraction, Contraction] | None:

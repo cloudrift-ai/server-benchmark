@@ -1,6 +1,6 @@
 """The greedy compile pick — :func:`greedy_decide`, a ``Run.resolve`` decide
 factory picking each fork point's globally-best **complete** leaf via the
-global learned prior when one is trained, else option-0.
+global online prior when one is trained, else option-0.
 
 This is the deterministic pick for ``compile`` / ``run``, the structural
 pricing probes, and the assembled-graph lowering. It is NOT a search and not
@@ -95,8 +95,8 @@ _LOAD_PRIOR = object()
 
 
 def _load_prior_safe():
-    """Load the one global prior (learned ``CatBoostPrior`` behind the
-    ``AnalyticPrior`` cold-start fallback). Best-effort: any load failure →
+    """Load the one global prior (``OnlinePrior`` behind the
+    ``OfflinePrior`` cold-start fallback). Best-effort: any load failure →
     ``None`` → emission order — a bad/missing prior must never break compile."""
     try:
         from emmy.compiler.pipeline.search.prior import load_prior  # noqa: PLC0415
@@ -216,9 +216,9 @@ def _pick_structural(
     extrapolation alone — a Σ-of-predictions comparison across two different
     kernel families is exposed to the model's absolute-µs error, which doesn't
     cancel across sides the way it does among siblings of one fork. Gated on
-    the *trusted* ``CatBoostPrior`` (``prior.trustworthy``
+    the *trusted* ``OnlinePrior`` (``prior.trustworthy``
     — trained AND passing the reservoir calibration gate): Σ-comparisons
-    through the analytic cold-start model are unvalidated, and neither a cold
+    through the offline cold-start model are unvalidated, and neither a cold
     compile nor a mis-calibrated model may change kernel sets."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
@@ -345,7 +345,7 @@ def greedy_decide(
     """The greedy compile pick as a :meth:`Run.resolve` ``decide`` callback:
     flatten the fork point to its complete leaves (:func:`flatten_leaves`),
     skip ``blocked`` tile identities, and take the prior's ``mean_scores``
-    argmin — the learned ``CatBoostPrior`` once trained, the ``AnalyticPrior``
+    argmin — the ``OnlinePrior`` once trained, the ``OfflinePrior``
     cold-start heuristic otherwise (both behind ``load_prior``'s
     ``FallbackPrior``). Falls to emission order (option-0, first leaf) only if
     the prior fails to load entirely. Stamps the pick's predicted µs on
@@ -403,7 +403,7 @@ def greedy_decide(
         # multi-kernel Graph option is meaningless. With the *trained* prior
         # loaded, :func:`_pick_structural` prices the option properly — Σ of
         # nested per-kernel predicted-bests vs the keep-fused side — and
-        # returns the split when it predicts faster. Cold (analytic / no
+        # returns the split when it predicts faster. Cold (offline / no
         # prior), or when an option can't be priced, the structural leaf is
         # filtered so a cold compile never changes kernel sets. ``tune``
         # explores them regardless (MCTS walks every sibling); an env pin

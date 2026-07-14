@@ -14,12 +14,12 @@ a single distinct value across the group (rows with an empty key skip the
 level). Below the last level every row becomes one :class:`_Leaf` carrying
 its COMPLETE row as ``knobs`` — the row IS the variant identity (the
 ``S_*`` structural-feature knobs ride the merged dict), so the perf DB and
-the learned prior key leaves and branches by knobs alone, no structural
+the online prior key leaves and branches by knobs alone, no structural
 probing. ``expand()`` yields ``materialize(row)`` once the search engine
 resolves a leaf.
 Everything is lazy: no Fork below the root exists until the search expands
 it. Siblings are emitted in grouping order — RANKING IS SEARCH POLICY: the
-policies rank the frontier with the learned prior (Forks carry no score).
+policies rank the frontier with the online prior (Forks carry no score).
 
 The engine in ``pipeline.py`` consumes ``fork.knobs`` flat (it doesn't walk
 ancestors): branch Forks pin their level's slice of the row, leaves carry
@@ -57,12 +57,12 @@ class Fork(ABC):
     ``Fork.is_leaf`` to decide expand-vs-resolve.
 
     ``knobs`` is the knob-delta this Fork pins (the variant identity the
-    perf DB and the learned prior key on, read without expanding). Ranking
+    perf DB and the online prior key on, read without expanding). Ranking
     is SEARCH policy: the engine hands unranked siblings to ``Search.push``
-    and the policy ranks them with the learned
+    and the policy ranks them with the
     :class:`~emmy.compiler.pipeline.search.prior.Prior` (greedy
     ``mean_score`` argmin; MCTS PUCT). Forks carry no score of their own —
-    the analytic per-fork scorer was removed when the learned prior replaced
+    the hand-coded per-fork scorer was removed when the online prior replaced
     it; siblings are emitted in grouping order and the cold/no-prior fallback
     is that emission order."""
 
@@ -222,7 +222,7 @@ def build_fork_tree(
     on demand, so greedy descent instantiates O(path) Forks instead of
     one per row (~42k for a matmul-class kernel) and MCTS pays one level
     per pop. Siblings are emitted in grouping order; ranking is the
-    search policy's job (the learned prior), not the tree's.
+    search policy's job (the online prior), not the tree's.
     """
     if not params:
         raise ValueError("build_fork_tree: params must be non-empty")

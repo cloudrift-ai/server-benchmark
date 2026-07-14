@@ -184,6 +184,41 @@ verified-best configs (tuned + A/B'd with integrity gates), committed per-GPU.
     physically-impossible baselines). The dyn set's divergence is exactly the predicted axis: `D_tma_grid_m/n`
     +4.75 vs static +2.49, `D_tma_l2_splitk` +3.15 vs −0.68 (the 5090's split-K-under-TMA wins). NEXT: re-run the
     golden sweep on a rented 4090/5090 to confirm the cold search now reaches the goldens (tune-golden skill).
+12. **Naming: the two priors are named by role/clock, not model class — `OfflinePrior` / `OnlinePrior` (settled
+    2026-07-11).** Once both priors are CatBoost-backed, implementation names stop differentiating them (and
+    "analytic" becomes factually wrong — the shipped prior is machine-fit). `AnalyticPrior` → `OfflinePrior`
+    (offline-fit release artifact, repo clock); learned `CatBoostPrior` → `OnlinePrior` (online-updated local
+    model). The tier chain (CatBoost → additive table → option-0) hides behind the ONE public `OfflinePrior`
+    class — its loader picks the best valid artifact via the existing `kind` field, so `FallbackPrior` stays a
+    two-way composition (`online µs × offline**W`). Rename surface: `prior/analytic.py` → `prior/offline.py`,
+    `prior/catboost.py` → `prior/online.py`, `search/analytic.py` (golden-eval glue — shares the doomed name),
+    config vars (`EMMY_ANALYTIC_FILE` / `analytic_tilt` / `EMMY_PRIOR_FILE` → offline/online spellings; old env
+    names stay as accepted aliases with a deprecation warning — they live in shell profiles), `eval analytic`,
+    artifact filenames, docs/skills. Unchanged: the `Prior` ABC, `FallbackPrior`, DB schema, checkpoint keys.
+    Lands as its OWN mechanical PR BEFORE the Phase-4 extraction so the fitter and its artifacts are born with
+    the new vocabulary. (Prose elsewhere in this plan predates the rename and says "analytic" / "learned".)
+13. **Phase-4 fitter: one pipeline, two orthogonal switches — model class × training data (settled 2026-07-11).**
+    "Current vs new training" differs on two independent axes, so the fitter exposes both:
+    `--trainer {linear,catboost}` × `--data {golden,freeze:<path>}` (trainers declare which data kinds they
+    support; catboost is freeze-only). Three cells get run and compared: linear×golden (the incumbent process,
+    preserved), linear×freeze (isolates the data/objective effect), catboost×freeze (the target) — and for
+    cell 3 vs cell 2 to isolate the model class, the linear freeze trainer optimizes the SAME grouped pairwise
+    loss CatBoost does (the coordinate-descent optimizer with its objective parameterized), with everything else
+    held fixed: one featurization, same eval folds, same seed policy. Preservation is verified, not promised:
+    `golden_knob_heuristics.py` becomes a thin wrapper over the extracted fit module (`search/prior/fit/`),
+    pinned by two regression tests — same seed + same incumbent → byte-identical artifact, and the incumbent
+    artifact through the new eval path reproduces today's `eval analytic` numbers exactly. Entry point: an
+    `emmy fit` subcommand (the command layer owns the snippet-tracing golden-case builder — `pipeline/` never
+    imports `commands/`). Every fit run writes a per-run METRICS FILE (JSON, in a `_tune/fits/…` run dir, not
+    repo-checked): a header (trainer, data kind + digest, feat_ver, seed, fold spec, repo commit, augmentation
+    params — two runs are comparable iff their headers differ only in the axis under test), per-fold blocks keyed
+    by held-out group with both gate metrics per card (never pooled), golden rank reported both ways (full-train
+    vs leave-that-op-out — the memorization split), and per-card aggregates. Keys are stable identifiers (golden
+    name, family, card), so comparison = joining two files; a side-by-side renderer can come later. Deterministic:
+    same header inputs → identical metrics content, so an A/B diff contains only real differences. Fold-trained
+    models plug into the eval as stub priors via the Phase-2 features seam, so the eval suite has zero
+    per-trainer branches. Masking augmentation is trainer-owned, not a shared prepare stage (tier-1 needs it,
+    linear would only gain noise).
 
 ## Constraints and requirements
 
@@ -221,7 +256,7 @@ verified-best configs (tuned + A/B'd with integrity gates), committed per-GPU.
 ## Phases
 
 Each phase is independently verifiable; 1–4 need no GPU; hardware spend concentrates in 7. Dependencies: 1 → {2, 3};
-3 → 4 → {5, 6} → 7 → 8; 9 floats. Phase 3 shrank in the 2026-07-09 rescope to a thin freeze step — effectively step 0
+3 → 4 → {5, 6} → 7 → 8; 9 floats; the decision-12 rename PR precedes 4's extraction. Phase 3 shrank in the 2026-07-09 rescope to a thin freeze step — effectively step 0
 of Phase 4. Phase 2 is diagnostic tooling — parallel with 3, consumed by 4's fitter loop and 8's gate.
 
 1. **Evaluation harness + incumbent baseline.** Exactly the two gate metrics (decision 9): flattened golden rank
@@ -290,6 +325,16 @@ of Phase 4. Phase 2 is diagnostic tooling — parallel with 3, consumed by 4's f
    `Dataset.fold_node_rows`), candidate CatBoost rankers with monotone constraints; every fold reported through the
    Phase-1 suite. Deliverable: the fitter (successor to `golden_knob_heuristics.py`) + CV report vs the linear
    baseline on identical folds. **This is where old-vs-new comparison lives.** Offline only.
+   Settled design in decision 13 (trainer × data switches, extract-and-wrap, per-run metrics files, `emmy fit`).
+   Build order: (0) the decision-12 rename PR; (1) extraction + wrapper + the two preservation tests (pure
+   refactor, no behavior change); (2) the Phase-3 freeze command + loader; (3) metrics file + fold harness → run
+   linear×golden — the first held-out numbers the current process has ever had (golden-case folds:
+   leave-one-op-family-out and leave-one-card-out; small-n, so the card axis is the meaningful one; node folds
+   need no per-fold retraining for this cell — the incumbent trains on goldens, so any node fold is
+   out-of-sample); (4) prefix synthesis + ranking groups → linear×freeze; (5) catboost×freeze — the open Phase-4
+   questions below (loss, masking p/K, monotone list, depth budget) get decided empirically here, each candidate
+   config just another metrics file. `--folds both` = the union of the two fold axes (two report sections), not
+   nested op×gpu — nesting starves training at this dataset size.
    Arch generalization is a first-class output (decision 11): the leave-one-card-out fold directly tests the
    2026-07-09 cross-card failure (analytic TILE regret 3.62× sm_89 → 11.49× sm_120), so report both gate metrics
    **per card, never pooled**; verify tier 1 actually learned an `H_* × knob` interaction (interaction
@@ -364,7 +409,8 @@ Open questions (each owned by its phase's detail discussion):
 - Phase 3 (settled by the 2026-07-09 rescope): format is trivial and regenerable, no size caps / per-regime budgets
   (keep everything), no staleness policy v1 (the DB keeps newest-per-leaf, re-freezing IS the refresh; codegen drift
   stays on the data-event clock).
-- Phase 4: exact ranking loss (YetiRank vs QueryRMSE vs PairLogit), depth-weighting scheme, masking rate p and replica
+- Phase 4: exact ranking loss (YetiRank vs QueryRMSE vs PairLogit — whichever wins, the linear freeze trainer mirrors
+  the same pairwise formulation, decision 13), depth-weighting scheme, masking rate p and replica
   count K, monotone-constraint list (features + directions), tier-1 depth/regularization budget. Also golden-shape
   leakage: `collect-node-data` tunes the golden dataset, so the freeze's pools ARE the golden shapes' pools (the
   golden config itself may sit there as an ordinary leaf) and the gate's golden rank partly measures memorization —

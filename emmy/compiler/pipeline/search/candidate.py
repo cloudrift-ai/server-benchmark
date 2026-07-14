@@ -357,7 +357,7 @@ class LazyCandidate:
     def fork(self) -> Fork | None:
         """The pending :class:`Fork`, or ``None`` for a no-pending wrapper.
         Ranking is search policy — the policies score ``cand.fork.knobs`` with
-        the learned prior (Forks carry no score); this accessor is just the
+        the online prior (Forks carry no score); this accessor is just the
         unwrap."""
         return self.pending[1] if self.pending is not None else None
 

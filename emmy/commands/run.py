@@ -426,18 +426,16 @@ def _intensity_floor_flag(sample, total_us: float) -> str | None:
     bench (skipped finalize, silent failure), not a fast kernel (the 8.2 µs "2 PFLOP/s"
     2048³ golden row of the sixth sweep). Returns a flag string, or ``None`` when clean /
     ungateable (no shape, no FLOPs, unknown device peak)."""
-    shape = getattr(sample, "shape", None)
-    if shape is None or total_us <= 0:
+    # The CONFIG-side FLOP count (``GoldenConfig.flops()`` via ``Sample.from_golden`` — never an
+    # overestimate, dynamic axes already sized at their benched hint). Never reconstructed from
+    # the ShapeKey: the join key excludes symbolic axes on the matmul side but includes them on
+    # the reduce-tier/attention side, so the old hint-multiplier formula overcounted reduce-tier
+    # ``.dynM`` replays 512× and flagged every one "impossible" at its correct recorded value.
+    flops = getattr(sample, "flops", None)
+    if flops is None or flops <= 0 or total_us <= 0:
         return None
     from emmy import gpu  # noqa: PLC0415
-    from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415
 
-    # 2·M·N·K for a matmul; a symbolic-M shape excludes M from ``free_prod`` and benches
-    # at the hint. Reduce/pointwise shapes imply far fewer FLOPs than any peak, so the
-    # same formula is a safe (never-firing) ceiling for them.
-    flops = 2.0 * shape.free_prod * shape.reduce_max * (DEFAULT_SEQ_HINT if shape.is_dyn else 1)
-    if flops <= 0:
-        return None
     spec = gpu.by_name(gpu.live_name() or "")
     peak = spec.peak_tflops(getattr(sample, "dtype", None) or "fp32") if spec else None
     if peak is None:
@@ -1741,16 +1739,34 @@ def _check_accuracy(outputs, eager_out, *, fatal=True):
             # actually corrupt outputs still fail (whole-row mismatch /
             # NaN / order-of-magnitude wrong).
             is_fp16 = arr.dtype == np.float16
-            # fp16 atomic-reduce accumulation can produce per-cell drift
-            # up to ``peak`` in pathological cancellation cases (random-
-            # signed partials). Real bugs (NaN, whole-row corruption,
-            # outputs orders of magnitude off) still fail.
+            # Three-part verdict — each clause with ONE job:
+            #
+            #   PASS iff (max_diff ≤ tol AND mean_diff ≤ mean_tol) OR mean_diff ≤ escape_tol
+            #
+            # - ``tol`` (the MAX clause) is the loose per-cell OUTLIER ceiling: fp16
+            #   atomic-reduce accumulation can drift a cell up to ``peak`` in pathological
+            #   cancellation cases (random-signed partials), fp32 stays at 8% of peak.
+            # - ``mean_tol`` is the SYSTEMATIC-CORRUPTION gate and must stay tight: a
+            #   permuted/scrambled output lands at mean_diff ≈ E|a−e| of independent
+            #   same-distribution draws (≈ 15% of peak on a gaussian matmul output), while a
+            #   correct kernel — including the half-atomic fp16 split-K path — measures
+            #   ≤ ~0.1% of peak. The historical fp16 form (``max ≤ peak OR mean ≤ peak``)
+            #   PASSED a matmul whose A slab was scrambled by a fill/drain swizzle mismatch
+            #   (mean_diff 52 under tol 340, values of scale ~60 — the PR #354 sync-fill
+            #   incident); 3% of peak keeps ~300× headroom over measured correct runs and
+            #   fails any permutation-class bug REGARDLESS of its max (the old OR let any
+            #   output with max_diff ≤ peak pass without ever consulting the mean).
+            # - ``escape_tol`` (0.5% of peak) preserves the split-K outlier escape hatch: a
+            #   handful of atomic-reorder outliers may exceed the max ceiling on randn×randn
+            #   at K=1024/2048 while the bulk stays accurate to 4+ decimals — a near-zero
+            #   mean vouches for them.
             rel_tol = 1.0 if is_fp16 else 0.08
             abs_tol = 1e-1 if is_fp16 else 1e-3
             peak = max((abs(e) for e in eager_flat), default=0.0)
             tol = max(abs_tol, rel_tol * peak)
-            mean_tol = max(abs_tol, (1.0 if is_fp16 else 0.005) * peak)
-            verdict = "PASS" if max_diff <= tol or mean_diff <= mean_tol else "FAIL"
+            mean_tol = max(abs_tol, 0.03 * peak)
+            escape_tol = max(abs_tol, 0.005 * peak)
+            verdict = "PASS" if (max_diff <= tol and mean_diff <= mean_tol) or mean_diff <= escape_tol else "FAIL"
             if verdict == "FAIL":
                 print(f"Accuracy vs eager: max_diff={max_diff:.6f} mean_diff={mean_diff:.6f} tol={tol:.6f} FAIL")
                 failed = True

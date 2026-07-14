@@ -98,7 +98,7 @@ def compute_capability() -> tuple[int, int]:
 @functools.cache
 def live_device_features() -> dict[str, float]:
     """Physical properties of the live CUDA device — SM count, shared memory per
-    SM / per block, register file, warp size — for the learned prior's
+    SM / per block, register file, warp size — for the online prior's
     hardware-regime features (see :meth:`Context.features`). These are SKU facts
     CUDA reports but compute-capability alone doesn't fix (an sm_120 laptop and an
     sm_120 RTX 5090 differ in SM count). Delegates to

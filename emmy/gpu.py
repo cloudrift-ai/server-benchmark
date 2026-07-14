@@ -50,7 +50,7 @@ MAX_DYNAMIC_SMEM_BY_CC: dict[tuple[int, int], int] = {
 
 # Tensor-core generation by compute capability —
 # Volta(1)/Turing(2)/Ampere+Ada(3)/Hopper(4)/Blackwell(5). A coarse arch-capability
-# axis for the learned prior's regime features; unknown ccs fall back to the major.
+# axis for the online prior's regime features; unknown ccs fall back to the major.
 TENSOR_CORE_GEN: dict[tuple[int, int], int] = {
     (7, 0): 1,
     (7, 5): 2,

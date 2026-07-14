@@ -2,12 +2,12 @@
 and ranks it with a ``Prior``.
 
 Ranking itself now lives in :mod:`emmy.compiler.pipeline.search.prior`: the
-hand-coded :class:`AnalyticPrior` (the cold-start linear model over
-``features.knob_features``) and the learned ``CatBoostPrior`` are the ONE ranking
+hand-coded :class:`OfflinePrior` (the cold-start linear model over
+``features.knob_features``) and the ``OnlinePrior`` are the ONE ranking
 path. This module is just the offline *evaluation* glue — given a recorded golden
 it enumerates the shape's candidate rows and reports the golden's rank under a
-scorer (the ``AnalyticPrior`` by default; ``eval prior`` passes the learned one).
-Used by ``emmy eval analytic`` / ``eval prior`` and the prior diagnostics.
+scorer (the ``OfflinePrior`` by default; ``eval online`` passes the online one).
+Used by ``emmy eval offline`` / ``eval online`` and the prior diagnostics.
 """
 
 from __future__ import annotations
@@ -75,8 +75,8 @@ def _enumerate(M: int, N: int, K: int, dtype: str, ctx: Context) -> tuple[list[d
     return enumerate_graph(_matmul_graph(M, N, K, dtype), ctx, family="TILE"), ()
 
 
-def _analytic_scorer(M: int, N: int, K: int, ctx: Context, *, dynamic: bool = False) -> Callable[[dict], float]:
-    """Default ranker for :func:`evaluate_golden` — the :class:`AnalyticPrior`
+def _offline_scorer(M: int, N: int, K: int, ctx: Context, *, dynamic: bool = False) -> Callable[[dict], float]:
+    """Default ranker for :func:`evaluate_golden` — the :class:`OfflinePrior`
     folded into the higher-is-better convention ``evaluate_golden`` ranks on
     (``-latency``). Merges the shape / regime features the prior featurizes
     (``S_ext_*`` from ``M``/``N``/``K`` + ``H_*`` from the context) into each row,
@@ -84,9 +84,9 @@ def _analytic_scorer(M: int, N: int, K: int, ctx: Context, *, dynamic: bool = Fa
     the 992 stamp for a symbolic-M shape: M drops out of the free-dim product and
     ``S_ext_n_symbolic_axis`` is set — the flag the prior selects its masked-tier
     weight set on."""
-    from emmy.compiler.pipeline.search.prior import AnalyticPrior  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.prior import OfflinePrior  # noqa: PLC0415
 
-    ap = AnalyticPrior()
+    ap = OfflinePrior()
     free = float(N) if dynamic else float(M * N)
     base = {**ctx.features(), "S_ext_free_prod": free, "S_ext_reduce_prod": float(K), "S_ext_reduce_max": float(K)}
     if dynamic:
@@ -110,7 +110,7 @@ def evaluate_golden(
     mismatch), and the enumeration size. The rank — not whether the #1 pick equals
     the golden — is the metric that matters: it's where the tuner's patience budget
     has to reach. ``scorer`` (``row → float``, higher better) defaults to the
-    :class:`AnalyticPrior` (negated latency); the learned-prior diagnostics pass
+    :class:`OfflinePrior` (negated latency); the online-prior diagnostics pass
     ``-prior.mean_score`` instead. Returns ``({}, None, 0)`` if nothing
     enumerates.
 
@@ -130,7 +130,7 @@ def evaluate_golden(
     if not rows:
         return {}, None, 0
     if scorer is None:
-        scorer = _analytic_scorer(M, N, K, ctx, dynamic=dynamic)
+        scorer = _offline_scorer(M, N, K, ctx, dynamic=dynamic)
     # Match the recorded golden against the native candidate rows by schema-agnostic
     # structural signature (free slots + reduce decomp + atom + stage) — robust to bare vs
     # axis-named key spelling.
@@ -143,7 +143,7 @@ def evaluate_golden(
 
 
 def pick_matmul(M: int, N: int, K: int, dtype: str, ctx: Context) -> dict:
-    """Best knob row for an ``(M, K) @ (K, N)`` matmul under the analytic prior —
-    no learned data, no measurements. Thin wrapper over :func:`evaluate_golden`
+    """Best knob row for an ``(M, K) @ (K, N)`` matmul under the offline prior —
+    no online data, no measurements. Thin wrapper over :func:`evaluate_golden`
     (no golden to match). Returns ``{}`` if nothing enumerates."""
     return evaluate_golden(M, N, K, dtype, {}, ctx)[0]

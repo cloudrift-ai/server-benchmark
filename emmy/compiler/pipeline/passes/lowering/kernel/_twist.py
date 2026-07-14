@@ -25,7 +25,7 @@ residence — the fragment row of the placement-keyed fold (a within-warp ``Frag
 - the projection tail (``O / l``) realizes as an in-place ``FragmentApply`` + the ``RegStore``
   output close;
 - a resolved K/V ``Stage`` on the ``TileOp`` (``ctx.stage`` — ``_schedule._resolve_twisted_stage``,
-  cp.async or TMA over a static block-divisible kv) re-parents the streaming step under the same
+  cp.async or TMA over a block-divisible-or-symbolic kv) re-parents the streaming step under the same
   ``staged_kloop`` skeleton the matmul tier runs: the K/V slabs fill per KV block (each in its
   operand's own layout — verbatim row copies, so staged stays bit-identical to gmem-direct) and
   the step's B fragments drain them via the staged ldmatrix variants (plain ``x2`` for the
@@ -625,7 +625,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
 
     if stage is not None:
         # The staged K/V stream: the resolved ``Stage`` (``_schedule._resolve_twisted_stage`` —
-        # static, block-divisible kv only) rides the SAME ``staged_kloop`` skeleton the matmul tier
+        # block-divisible or symbolic kv) rides the SAME ``staged_kloop`` skeleton the matmul tier
         # runs, the streaming step as its drain. The K slab keeps K's own N-major layout (``bn`` key
         # rows × head_dim) and the V slab V's K-major one (``bn`` key rows × d_v) — the fills are
         # verbatim row copies, so the staged kernel stays bit-identical to its gmem-direct sibling.
@@ -700,12 +700,20 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             # resident Q registers.
             q_rows = um * fm * shape[0]
             cta_row0 = BinaryExpr("*", Var(grid[-1].name), Literal(q_rows, "int"))
+
+            def _q_row(row) -> Expr:
+                # A symbolic M clamp-reads the tail CTA's overhanging query rows to the last valid
+                # row (cp.async has no OOB zero-fill) — their outputs are store-guarded (the
+                # ``RegStore`` m_guard), so the duplicates are never written back.
+                r = BinaryExpr("+", cta_row0, row)
+                return _clamp_last(r, _ext(qk.m_axis)) if symbolic_q else r
+
             state.append(slab_smem("_q_smem", q_rows, q_ldm, _cuda(atom.operand_dtype("a")), align=16))
             state += cp_async_fill(
                 slab="_q_smem",
                 shape=(q_rows, head_dim_s),
                 src=qk.a_operand.input,
-                gmem_index=lambda row, col: _idx(qk.a_operand, {qk.m_axis.name: BinaryExpr("+", cta_row0, row), qk.k_axis.name: col}),
+                gmem_index=lambda row, col: _idx(qk.a_operand, {qk.m_axis.name: _q_row(row), qk.k_axis.name: col}),
                 cta=cta,
                 elem_bytes=elem_bytes,
                 name="q",

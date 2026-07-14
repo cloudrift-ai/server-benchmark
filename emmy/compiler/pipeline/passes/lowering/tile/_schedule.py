@@ -1661,11 +1661,16 @@ def _resolve_twisted_stage(
         # streaming block's copies in HALF the paired ring's smem. The Q (query) tile stages
         # through smem too — a padded row-major slab filled once, its A fragments ldmatrix'd per
         # atom-K chunk — which frees the resident Q registers that made the wide block spill.
-        # Static block-divisible kv only (the symbolic tail story is not built for the split
-        # phases). Both async transports ride the same seam: TMA arms per-operand mbarriers
+        # A SYMBOLIC kv rides the ring's tail story unchanged (TMA zero-fills the box overhang,
+        # cp.async clamp-reads the tail's key rows, the drain masks zero the overhanging P
+        # columns — bit-identical either way); the kill-point refill clamps onto the runtime
+        # last chunk exactly as the ring prefetch does, and a symbolic M clamp-reads the
+        # staged-Q fill's overhanging query rows (their outputs are store-guarded). A static
+        # non-block-divisible kv has no tail mask, so it stays gmem-direct (the ring's gate).
+        # Both async transports ride the same seam: TMA arms per-operand mbarriers
         # (``d1/tma/alt``); cp.async commits each fill into its own group and a uniform
         # ``wait_group(1)`` completes the older sibling (``d1/cp/alt`` — the sm_89 form).
-        if not kv_extent.is_static or kv_extent.as_static() % bn != 0 or m_rows <= 0:
+        if m_rows <= 0 or (kv_extent.is_static and kv_extent.as_static() % bn != 0):
             return None
         if stage.transport == "tma":
             if bn > 256 or head_dim > 256 or d_v > 256 or (head_dim * elem_bytes) % 16 or (d_v * elem_bytes) % 16:

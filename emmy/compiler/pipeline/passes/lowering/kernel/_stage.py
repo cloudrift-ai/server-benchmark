@@ -868,8 +868,8 @@ def pipelined_kloop(
     ``k_end`` (CTA-uniform, ``≤ k_extent``) stops the chunk loop early — the causal flash stream's
     triangular kv bound; the clamp re-pins onto the last NEEDED chunk via the loop's hoisted
     ``<k0>_end`` for-init bound. A symbolic ``k_extent`` (a ``Dim``) allocates the full ``depth``
-    ring and clamps against the runtime chunk count (kill-point groups are static-only — the alt
-    resolver's gate). Returns ``(slab_decls, [prologue…, outer_loop])``."""
+    ring and clamps every fill — ring prefetch and kill-point refill alike — against the runtime
+    chunk count. Returns ``(slab_decls, [prologue…, outer_loop])``."""
     symbolic = isinstance(k_extent, Dim)
     i_expr = BinaryExpr("/", Var(k0), _lit(bk_elems))  # chunk index of the current step
 
@@ -895,8 +895,7 @@ def pipelined_kloop(
         elif g.first == 0 and g.last == len(segments) - 1:
             g.kind, g.lag = "current", 0
         else:
-            assert not symbolic, "a kill-point refill needs a static extent (the alt resolver's gate)"
-            g.kind, g.lag = "kill", 1
+            g.kind, g.lag = "kill", 1  # a symbolic extent rides the same runtime clamp as the ring prefetch
 
     def _fill_k0(lag: int) -> Expr:
         """The refill's chunk base — ``k0 + lag·bk``, clamped onto the last needed chunk (the

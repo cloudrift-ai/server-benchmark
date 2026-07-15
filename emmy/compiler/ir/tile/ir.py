@@ -224,6 +224,38 @@ def _refs_axis(s: Stmt, name: str) -> bool:
     return any(_refs_axis(child, name) for b in s.nested() for child in b)
 
 
+def gmem_row_stride(load: Load, axis_name: str, inputs) -> int | None:
+    """The flattened gmem stride between successive ``axis_name`` rows of ``load``'s buffer — the
+    fragment loaders' row step (``ldm``). The axis var must appear in exactly ONE index component,
+    affinely; the stride is its coefficient times the product of the buffer extents AFTER that
+    component. ``head_dim`` for the canonical ``(batch…, row, dd)`` layout; ``H·D`` for an
+    un-transposed ``(B, S, H, D)`` trace, where assuming the trailing extent read the WRONG rows
+    (the gemma layer-0 NaN: resident-Q fragments at ``ldm=head_dim`` on a 4096-stride layout).
+    ``None`` when underivable — axis absent or split across components, a non-affine use, an
+    unknown buffer, or a symbolic trailing extent — the schedule gate's decline signal."""
+    from emmy.compiler.ir.expr import affine_form  # noqa: PLC0415 — avoid a module-import cycle
+
+    t = inputs.get(load.input) if inputs else None
+    if t is None:
+        return None
+    positions = [i for i, e in enumerate(load.index) if axis_name in e.free_vars()]
+    if len(positions) != 1:
+        return None
+    pos = positions[0]
+    form = affine_form(load.index[pos], {axis_name})
+    if form is None:
+        return None
+    coef = form[1].get(axis_name, 0)
+    if coef <= 0:
+        return None
+    stride = coef
+    for d in tuple(t.shape)[pos + 1 :]:
+        if not d.is_static:
+            return None
+        stride *= d.as_static()
+    return stride
+
+
 @dataclass(frozen=True)
 class Contraction(Stmt):
     """A contraction **before** atom factorization — built **recognize-side** at fork-emit

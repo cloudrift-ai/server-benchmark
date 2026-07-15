@@ -1150,6 +1150,62 @@ class FragmentMask(Stmt):
         return lines
 
 
+@dataclass(frozen=True)
+class FragmentBiasAdd(Stmt):
+    """Per-element **additive gmem bias** over an mma C-fragment — the fragment-tier realization of
+    the explicit additive score mask (SDPA's ``attn_mask`` float bias: the HF precomputed causal /
+    sliding-window band). For every element, load ``buf`` at the element's ABSOLUTE ``(row, col)``
+    coordinates and add it into the fragment: the render adds the tile origin (``row_base`` /
+    ``col_base``) to the layout's per-element offset and substitutes the result for the reserved
+    :data:`FRAG_ROW` / :data:`FRAG_COL` vars in ``index`` — the load-index TEMPLATE the realizer
+    built from the bias ``Load``'s own index (leading broadcast dims pre-folded to literals; a
+    symbolic seq pre-clamps the coordinate exprs, and the clamped duplicates land on cells the
+    boundary :class:`FragmentMask` / store guard discards). The buffer element converts to f32 on
+    the add (the fragment algebra is f32); lanes ``_t = 0..3`` of a column group read 8 contiguous
+    columns, so the warp's bias reads coalesce like the epilogue leaf loads."""
+
+    frag: str
+    buf: str
+    index: tuple[Expr, ...]  # load-index template over FRAG_ROW / FRAG_COL
+    col_base: Expr
+    row_base: Expr
+    layout: FragLayout = M16N8
+
+    def deps(self) -> tuple[str, ...]:
+        return (self.frag,)
+
+    def defines(self) -> tuple[str, ...]:
+        return (self.frag,)
+
+    def external_reads(self) -> tuple[str, ...]:
+        return (self.buf,)
+
+    def exprs(self) -> tuple[Expr, ...]:
+        return (*self.index, self.col_base, self.row_base)
+
+    def pretty(self, indent: str = "") -> list[str]:
+        idx = ", ".join(e.pretty() for e in self.index)
+        return [f"{indent}FragmentBiasAdd({self.frag} += {self.buf}[{idx}])"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        from emmy.compiler.ir.stmt import render_index  # noqa: PLC0415
+
+        pad = _pad(ctx.indent)
+        lay = self.layout
+        conv = {"f16": "__half2float({})", "bf16": "__bfloat162float({})"}
+        dt = ctx.buffer_dtypes.get(self.buf, "f32")
+        lines = _lane_preamble(ctx, pad, lay.lane_decl)
+        for i in range(lay.n_elems):
+            sub: dict[str, Expr] = {
+                FRAG_COL: BinaryExpr("+", self.col_base, lay.col_off[i]),
+                FRAG_ROW: BinaryExpr("+", self.row_base, lay.row_off[lay.elem_row[i]]),
+            }
+            idx = tuple(e.substitute(sub) for e in self.index)
+            flat = render_index(self.buf, idx, ctx)
+            lines.append(f"{pad}{self.frag}[{i}] += {conv.get(dt, '{}').format(f'{self.buf}[{flat}]')};")
+        return lines
+
+
 # ---------------------------------------------------------------------------
 # Warp-level MMA: ``mma.sync.aligned`` + ``ldmatrix`` (the ``s16816`` path
 # cuBLAS / CUTLASS use) — the sole tensor-core Stmt family. Operands are
@@ -1345,6 +1401,13 @@ class LdmatrixLoad(Stmt):
             # Operand not staged in smem — ldmatrix can't reach gmem, so read the
             # fragment straight from gmem (each lane adds its own (row,col) inside
             # the helper). No swizzle: that's a TMA-smem-layout concern only.
+            # A source buffer traced at a dtype other than the fragment's (the gemma layer's
+            # f32 V intermediate) converts per element: the helper's fragment element type F
+            # is passed explicitly, so the pack writes true 16-bit halves instead of raw f32
+            # bit patterns (matched dtypes keep the bare call — byte-identical output).
+            src_dt = ctx.buffer_dtypes.get(self.src_buffer, "f16")
+            frag_dt = ctx.ssa_dtypes.get(self.frag) or src_dt
+            targs = "" if src_dt == frag_dt else f"<{ctx.type_name(src_dt)}, {ctx.type_name(frag_dt)}>"
             if self.k_zero is not None:
                 # Masked-K (symbolic reduce): zero-fill (not clamp) the K halves
                 # past the runtime extent so the mma reduction stays correct — K is
@@ -1360,12 +1423,12 @@ class LdmatrixLoad(Stmt):
                         helper = "emmy_mma_load_a_gmem_mclamp_kzero"
                     else:
                         helper = "emmy_mma_load_b_gmem_trans_nclamp_kzero" if self.b_trans else "emmy_mma_load_b_gmem_nclamp_kzero"
-                    return [f"{_pad(ctx.indent)}{helper}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {mn_left}, {k_left});"]
+                    return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {mn_left}, {k_left});"]
                 if self.role == "a":
                     helper = "emmy_mma_load_a_gmem_kzero"
                 else:
                     helper = "emmy_mma_load_b_gmem_trans_kzero" if self.b_trans else "emmy_mma_load_b_gmem_kzero"
-                return [f"{_pad(ctx.indent)}{helper}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {k_left});"]
+                return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {k_left});"]
             if self.gmem_guard is not None:
                 # Masked axis: clamp the lane coordinate to the in-range
                 # elements left from the tile base (>= 1 — the boundary Cond
@@ -1375,12 +1438,12 @@ class LdmatrixLoad(Stmt):
                     helper = "emmy_mma_load_a_gmem_mclamp"
                 else:
                     helper = "emmy_mma_load_b_gmem_trans_nclamp" if self.b_trans else "emmy_mma_load_b_gmem_nclamp"
-                return [f"{_pad(ctx.indent)}{helper}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, ({bound}) - ({base}));"]
+                return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, ({bound}) - ({base}));"]
             if self.role == "a":
                 helper = "emmy_mma_load_a_gmem"
             else:
                 helper = "emmy_mma_load_b_gmem_trans" if self.b_trans else "emmy_mma_load_b_gmem"
-            return [f"{_pad(ctx.indent)}{helper}({self.frag}, &{self.src_buffer}[{flat}], {ldm});"]
+            return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm});"]
         lane = "(threadIdx.x & 31)"
         if self.pair_frag is not None:
             # Paired x4 — two slab-adjacent B fragments in one ldmatrix (096_pair_ldmatrix_loads).
@@ -2278,6 +2341,10 @@ def _(s: RegStore, rename, sigma, axis_fn):
             # real partition vars), so they're cell-invariant — pass through; the
             # per-cell M/N offset reaches them via ``dst_index`` at render.
             selects=epilogue.selects,
+            # The extra channel accumulators rename with the store's own fragment (they are
+            # per-cell C-fragment names too) — dropping them here left the multi-channel combine
+            # (the gemma GeGLU ``acc2``) unbound at render.
+            extra_accs=tuple((a, rename(fr)) for a, fr in epilogue.extra_accs),
         )
 
     # Guard base/bound Exprs σ-substitute like ``dst_index`` (the per-cell

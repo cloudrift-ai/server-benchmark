@@ -235,7 +235,7 @@ static __device__ __forceinline__ void emmy_c_to_a_bf16(unsigned* a, const float
 // emits these for an unstaged operand. ``ldm`` is the operand's gmem row stride
 // (K for the row-major A[M,K]; N for the row-major B[K,N]); ``g`` points at the
 // atom cell's base element, each lane adds its own (row,col) within the tile.
-template <typename T>
+template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma_load_a_gmem(unsigned* r, const T* g, int ldm) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
@@ -244,13 +244,13 @@ static __device__ __forceinline__ void emmy_mma_load_a_gmem(unsigned* r, const T
         int col = (tig << 1) + ((i & 2) ? 8 : 0);   // K: 2*threadID_in_group, +8 for the k16 half
         const T* p = g + row * ldm + col;
         unsigned packed;
-        ((T*)&packed)[0] = p[0];                     // .f16x2: low half = col, high half = col+1
-        ((T*)&packed)[1] = p[1];
+        ((F*)&packed)[0] = F(p[0]);                     // .f16x2: low half = col, high half = col+1
+        ((F*)&packed)[1] = F(p[1]);
         r[i] = packed;
     }
 }
 
-template <typename T>
+template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma_load_b_gmem(unsigned* r, const T* g, int ldm) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
@@ -258,8 +258,8 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem(unsigned* r, const T
         int n = grp;                                 // N: groupID (0..7)
         int k = (tig << 1) + (i ? 8 : 0);            // K: 2*threadID_in_group, +8 for the k16 half
         unsigned packed;
-        ((T*)&packed)[0] = g[k * ldm + n];           // .f16x2: low half = k, high half = k+1
-        ((T*)&packed)[1] = g[(k + 1) * ldm + n];
+        ((F*)&packed)[0] = F(g[k * ldm + n]);           // .f16x2: low half = k, high half = k+1
+        ((F*)&packed)[1] = F(g[(k + 1) * ldm + n]);
         r[i] = packed;
     }
 }
@@ -271,7 +271,7 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem(unsigned* r, const T
 // the boundary Cond admitted the tile). Clamped lanes read a duplicate
 // in-bounds value — harmless, their stores are masked by the RegStore guard.
 // Same contract as the staged path's slab-fill clamp (_clamp_source_index).
-template <typename T>
+template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma_load_a_gmem_mclamp(unsigned* r, const T* g, int ldm, int rows_left) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
@@ -281,13 +281,13 @@ static __device__ __forceinline__ void emmy_mma_load_a_gmem_mclamp(unsigned* r, 
         int col = (tig << 1) + ((i & 2) ? 8 : 0);
         const T* p = g + row * ldm + col;
         unsigned packed;
-        ((T*)&packed)[0] = p[0];
-        ((T*)&packed)[1] = p[1];
+        ((F*)&packed)[0] = F(p[0]);
+        ((F*)&packed)[1] = F(p[1]);
         r[i] = packed;
     }
 }
 
-template <typename T>
+template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma_load_b_gmem_nclamp(unsigned* r, const T* g, int ldm, int cols_left) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
@@ -296,8 +296,8 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_nclamp(unsigned* r, 
         if (n >= cols_left) n = cols_left - 1;       // N: clamp to the runtime extent
         int k = (tig << 1) + (i ? 8 : 0);
         unsigned packed;
-        ((T*)&packed)[0] = g[k * ldm + n];
-        ((T*)&packed)[1] = g[(k + 1) * ldm + n];
+        ((F*)&packed)[0] = F(g[k * ldm + n]);
+        ((F*)&packed)[1] = F(g[(k + 1) * ldm + n]);
         r[i] = packed;
     }
 }
@@ -308,7 +308,7 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_nclamp(unsigned* r, 
 // but each lane now reads a contiguous (k, k+1) pair from row ``n`` of B. ``ldm``
 // is B's gmem row stride (the K extent). Mirrors ``emmy_mma_load_b_gmem`` with the
 // (k, n) index roles swapped to (n, k).
-template <typename T>
+template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans(unsigned* r, const T* g, int ldm) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
@@ -316,8 +316,8 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans(unsigned* r, c
         int n = grp;                                 // N: groupID (0..7)
         int k = (tig << 1) + (i ? 8 : 0);            // K: 2*threadID_in_group, +8 for the k16 half
         unsigned packed;
-        ((T*)&packed)[0] = g[n * ldm + k];           // .f16x2: contiguous (k, k+1) in row n
-        ((T*)&packed)[1] = g[n * ldm + k + 1];
+        ((F*)&packed)[0] = F(g[n * ldm + k]);           // .f16x2: contiguous (k, k+1) in row n
+        ((F*)&packed)[1] = F(g[n * ldm + k + 1]);
         r[i] = packed;
     }
 }
@@ -326,7 +326,7 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans(unsigned* r, c
 // row (``n``) here, so clamp ``n`` to the runtime extent (cf. _b_gmem_nclamp,
 // which clamps N as the column). Clamped lanes read a duplicate in-bounds row;
 // their stores are masked by the RegStore guard.
-template <typename T>
+template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_nclamp(unsigned* r, const T* g, int ldm, int cols_left) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
@@ -335,8 +335,8 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_nclamp(unsigne
         if (n >= cols_left) n = cols_left - 1;       // N: clamp to the runtime extent
         int k = (tig << 1) + (i ? 8 : 0);
         unsigned packed;
-        ((T*)&packed)[0] = g[n * ldm + k];
-        ((T*)&packed)[1] = g[n * ldm + k + 1];
+        ((F*)&packed)[0] = F(g[n * ldm + k]);
+        ((F*)&packed)[1] = F(g[n * ldm + k + 1]);
         r[i] = packed;
     }
 }
@@ -348,7 +348,7 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_nclamp(unsigne
 // by the mma, so a duplicate corrupts the reduction. ``k_left`` = in-range K
 // elements from the tile base; a half past it reads as +0.0 and is never
 // dereferenced. Mirrors the staged path's slab zero-fill (``_stage_expand``).
-template <typename T>
+template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma_load_a_gmem_kzero(unsigned* r, const T* g, int ldm, int k_left) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
@@ -357,14 +357,14 @@ static __device__ __forceinline__ void emmy_mma_load_a_gmem_kzero(unsigned* r, c
         int col = (tig << 1) + ((i & 2) ? 8 : 0);
         const T* p = g + row * ldm + col;
         unsigned packed = 0;
-        if (col < k_left) ((T*)&packed)[0] = p[0];
-        if (col + 1 < k_left) ((T*)&packed)[1] = p[1];
+        if (col < k_left) ((F*)&packed)[0] = F(p[0]);
+        if (col + 1 < k_left) ((F*)&packed)[1] = F(p[1]);
         r[i] = packed;
     }
 }
 
 // A: masked-M (clamp rows) AND masked-K (zero-fill cols).
-template <typename T>
+template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma_load_a_gmem_mclamp_kzero(unsigned* r, const T* g, int ldm, int rows_left, int k_left) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
@@ -374,14 +374,14 @@ static __device__ __forceinline__ void emmy_mma_load_a_gmem_mclamp_kzero(unsigne
         int col = (tig << 1) + ((i & 2) ? 8 : 0);
         const T* p = g + row * ldm + col;
         unsigned packed = 0;
-        if (col < k_left) ((T*)&packed)[0] = p[0];
-        if (col + 1 < k_left) ((T*)&packed)[1] = p[1];
+        if (col < k_left) ((F*)&packed)[0] = F(p[0]);
+        if (col + 1 < k_left) ((F*)&packed)[1] = F(p[1]);
         r[i] = packed;
     }
 }
 
 // B (row-major K×N, NOT transposed): K is the row, zero-fill past the extent.
-template <typename T>
+template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma_load_b_gmem_kzero(unsigned* r, const T* g, int ldm, int k_left) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
@@ -389,14 +389,14 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_kzero(unsigned* r, c
         int n = grp;
         int k = (tig << 1) + (i ? 8 : 0);
         unsigned packed = 0;
-        if (k < k_left) ((T*)&packed)[0] = g[k * ldm + n];
-        if (k + 1 < k_left) ((T*)&packed)[1] = g[(k + 1) * ldm + n];
+        if (k < k_left) ((F*)&packed)[0] = F(g[k * ldm + n]);
+        if (k + 1 < k_left) ((F*)&packed)[1] = F(g[(k + 1) * ldm + n]);
         r[i] = packed;
     }
 }
 
 // B: masked-N (clamp col) AND masked-K (zero-fill row).
-template <typename T>
+template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma_load_b_gmem_nclamp_kzero(unsigned* r, const T* g, int ldm, int cols_left, int k_left) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
@@ -405,8 +405,8 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_nclamp_kzero(unsigne
         if (n >= cols_left) n = cols_left - 1;
         int k = (tig << 1) + (i ? 8 : 0);
         unsigned packed = 0;
-        if (k < k_left) ((T*)&packed)[0] = g[k * ldm + n];
-        if (k + 1 < k_left) ((T*)&packed)[1] = g[(k + 1) * ldm + n];
+        if (k < k_left) ((F*)&packed)[0] = F(g[k * ldm + n]);
+        if (k + 1 < k_left) ((F*)&packed)[1] = F(g[(k + 1) * ldm + n]);
         r[i] = packed;
     }
 }
@@ -415,7 +415,7 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_nclamp_kzero(unsigne
 // halves past the runtime extent. K is summed by the mma, so a past-extent element
 // must read as +0.0 (never a duplicate). Mirrors ``emmy_mma_load_b_gmem_kzero`` with
 // the (k, n) index roles swapped to (n, k) — cf. ``emmy_mma_load_b_gmem_trans``.
-template <typename T>
+template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_kzero(unsigned* r, const T* g, int ldm, int k_left) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
@@ -423,14 +423,14 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_kzero(unsigned
         int n = grp;                                 // N: groupID (0..7)
         int k = (tig << 1) + (i ? 8 : 0);            // K: 2*threadID_in_group, +8 for the k16 half
         unsigned packed = 0;
-        if (k < k_left) ((T*)&packed)[0] = g[n * ldm + k];       // .f16x2: contiguous (k, k+1) in row n
-        if (k + 1 < k_left) ((T*)&packed)[1] = g[n * ldm + k + 1];
+        if (k < k_left) ((F*)&packed)[0] = F(g[n * ldm + k]);       // .f16x2: contiguous (k, k+1) in row n
+        if (k + 1 < k_left) ((F*)&packed)[1] = F(g[n * ldm + k + 1]);
         r[i] = packed;
     }
 }
 
 // Transposed-B: masked-N (clamp the ``n`` row) AND masked-K (zero-fill the contiguous k).
-template <typename T>
+template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_nclamp_kzero(
     unsigned* r, const T* g, int ldm, int cols_left, int k_left) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
@@ -440,8 +440,8 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_nclamp_kzero(
         if (n >= cols_left) n = cols_left - 1;       // N: clamp to the runtime extent
         int k = (tig << 1) + (i ? 8 : 0);
         unsigned packed = 0;
-        if (k < k_left) ((T*)&packed)[0] = g[n * ldm + k];
-        if (k + 1 < k_left) ((T*)&packed)[1] = g[n * ldm + k + 1];
+        if (k < k_left) ((F*)&packed)[0] = F(g[n * ldm + k]);
+        if (k + 1 < k_left) ((F*)&packed)[1] = F(g[n * ldm + k + 1]);
         r[i] = packed;
     }
 }

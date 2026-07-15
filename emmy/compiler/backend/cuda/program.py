@@ -1525,8 +1525,9 @@ class _AsyncBenchWorker:
     async def run_job(self, request_obj: dict, *, wall_timeout_s: float) -> dict:
         """Send one request, read the response within ``wall_timeout_s`` (else SIGKILL
         + raise ``RuntimeError``), and return the unpickled response. A stale-worker
-        race on send respawns and retries once; a response-side timeout / EOF is a
-        hard error."""
+        race on send respawns and retries once; a response-side timeout is a hard
+        error. A response-side EOF (the child self-destructed mid-job) respawns and
+        retries ONCE after a short drain grace — see the handler for why."""
         request = pickle.dumps(request_obj, protocol=pickle.HIGHEST_PROTOCOL)
         frame = len(request).to_bytes(8, "little") + request
         deadline = _time_module.perf_counter() + wall_timeout_s
@@ -1572,7 +1573,20 @@ class _AsyncBenchWorker:
             except asyncio.IncompleteReadError as exc:
                 stderr_tail = await self._stderr_snapshot()
                 await self.aclose()
-                raise RuntimeError(f"bench worker EOF before response; stderr tail: {stderr_tail}") from exc
+                if attempt == 1:
+                    raise RuntimeError(f"bench worker EOF before response; stderr tail: {stderr_tail}") from exc
+                # The child self-destructs (``os._exit``) on a hung kernel to dodge the cupy
+                # atexit deadlock, so a mid-job EOF usually means THIS config hangs — the retry
+                # will EOF again and fail loudly, costing one extra watchdog interval. But right
+                # after a SIGKILL'd predecessor (a greedy-hang wall kill), the dead child's
+                # zombie context can still hold the GPU while the driver tears it down, hanging
+                # an INNOCENT first launch on the fresh child — a transient the golden refresh
+                # sweeps kept hitting on the row right after a hang. One respawn + retry after a
+                # short drain grace tells the two apart (the same row replays clean once the
+                # zombie context is gone).
+                logger.info("[bench-worker] child EOF'd mid-job — draining the device and retrying once%s", self._tail_suffix())
+                await asyncio.sleep(min(2.0, max(0.0, deadline - _time_module.perf_counter() - 1.0)))
+                continue
 
             resp = pickle.loads(body)
             if not resp.get("ok"):

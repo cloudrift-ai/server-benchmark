@@ -114,6 +114,19 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
     emmy_us: 85.8
     cublas_us: 115.0
+  # Parity add (2026-07-15 cold golden sweep, rented 4090): the un-split w1x4/f4x4 tile through the
+  # gm8 raster codec — the sweep's greedy pick, 109.0 pinned-vs-pinned vs 110.0-110.3 for the p2
+  # incumbent above (0.99x, 2 --ab reps). Different structural family at parity; recorded per the
+  # add gate.
+  - kernel: matmul
+    name: gemma4_12b.o_proj
+    M: 512
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x4/f4x4', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 109.0
+    cublas_us: 115.0
   - kernel: matmul
     name: gemma4_12b.o_proj.dynM
     M: 512
@@ -137,14 +150,18 @@ configs:
   # ---- MLP -------------------------------------------------------------------------------------------
   # mlp_gate_up (fused gate+up, N 30720): std 0.91x — better than the h4096 twin's 0.78x but still the
   # sm_89 gate_up gap (w4x1/f4x4/k2, w2x4/f4x4, w1x4/f4x8, w2x2 and p2 all worse). fm at 1.11x.
+  # 2026-07-15 cold golden sweep (rented 4090): the narrow-N w2x2/f2x8/k2 tile + gm8 raster codec
+  # replaces w4x1/f4x8/k2 (877.6 recorded, 872-876 live) — 810.0 pinned-vs-pinned (0.93x, 2 --ab
+  # reps), greedy-row 754-758 across 3 reps. Mirrors the h4096 gate_up flip; std lane now 1.01x vs
+  # cuBLAS (from 1.10x).
   - kernel: matmul
     name: gemma4_12b.mlp_gate_up
     M: 512
     N: 30720
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
-    emmy_us: 877.6
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f2x8/k2', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 810.0
     cublas_us: 801.0
   - kernel: matmul
     name: gemma4_12b.mlp_gate_up

@@ -4,7 +4,8 @@
 
 A released Docker image, based on the existing `vllm-emmy` serving image, that **serves `gemma-4-12B`** through
 `emmy serve --generate` with the transformer trunk on emmy-compiled CUDA kernels, and ships those kernels **prebuilt**
-for the **RTX 5090** (`sm_120`/`sm_120a`) so server cold-start pays **zero `nvcc` compile cost**.
+for the **RTX 5090** (`sm_120`/`sm_120a`) so server cold-start pays **zero `nvcc` compile cost** — and ships the
+**model weights baked in**, so cold-start also pays **zero HF download** (no `HF_TOKEN` needed at runtime).
 
 - **Phase A — make `gemma-4-12B` servable** via `EmmyGenModel`. Compiler + plugin work.
 - **Phase B — prebuilt-kernel image**: warm the serving cubin cache on a real 5090 and bake it into the image.
@@ -14,7 +15,9 @@ Success criteria:
 1. `emmy serve --generate gemma-4-12B` starts on a 5090 and produces logits/text matching an HF reference. **NOT MET —
    the pipeline runs end-to-end but the trunk forward produces NaN logits (kernel numerics); see Status.**
 2. The served model's **first request issues zero new `nvcc` compiles** (100% cubin cache hit) on the 5090.
-3. Reproducible: `make` targets build the image end to end from the wheel + a warm step.
+3. Cold-start performs **zero HF downloads**: the gemma-4-12B snapshot (weights + tokenizer + config) is baked into
+   the image — the container starts and serves with `HF_HUB_OFFLINE=1` and no `HF_TOKEN`.
+4. Reproducible: `make` targets build the image end to end from the wheel + a warm step.
 
 ## Status
 
@@ -128,13 +131,28 @@ A prebuilt cubin is reused iff all five of `sha1(source, name, arch, toolkit_tag
 both ends; the `OnlinePrior` falls back to it when absent/untrusted (`FallbackPrior`). One global, GPU-agnostic prior; no
 per-GPU file. A real-5090 tune is a later perf upgrade, not a blocker.
 
-### Warm + bake
+### Warm + bake (cubins AND model)
 
 Start the server once on a real 5090 (inside a container from the image → `toolkit_tag` = image nvcc, `-O3`), let it
-compile, snapshot `EMMY_CUBIN_CACHE`, and bake it in (`COPY --from=warm`). Base
-**`vllm/vllm-openai`** (`docker/vllm-emmy/Dockerfile` — vLLM + plugin already wired); new `make gemma4-serve-image` /
-`-push` mirroring the `vllm-emmy-image` targets. **Verify:** snapshot the cubin dir, start + issue one request, diff the
-file set — empty diff = 100% hit.
+download the model and compile, then snapshot **both** caches from the warm container — `EMMY_CUBIN_CACHE` and the HF
+snapshot (the warm step downloads gemma-4-12B anyway; the bake reuses it, so the model costs no extra step) — and bake
+them in (`COPY --from=warm`). Base **`vllm/vllm-openai`** (`docker/vllm-emmy/Dockerfile` — vLLM + plugin already
+wired); new `make gemma4-serve-image` / `-push` mirroring the `vllm-emmy-image` targets. **Verify:** run the baked
+image with `HF_HUB_OFFLINE=1` and no `HF_TOKEN`, snapshot the cubin dir, start + issue one request, diff the file
+set — empty diff = 100% cubin hit, and offline mode proves zero downloads.
+
+Model-bake gotchas:
+
+- **Mount shadowing.** Compose/recipes mount the host HF cache over `/root/.cache/huggingface` — a bind mount would
+  HIDE baked-in content under that path. Bake the snapshot (and the cubin cache) to a dedicated image path (e.g.
+  `/opt/emmy/hf`) and point `HF_HOME` + `EMMY_CUBIN_CACHE` there in the image env. (The cubin cache's current home
+  under the HF mount exists to survive container restarts; baked in, it no longer needs the volume.)
+- **Image size.** ~24 GB of weights on the ~10 GB vLLM base ⇒ a ~35 GB image. Fine for Docker Hub, but pulls are
+  slow — this image trades pull time for deterministic, tokenless cold-start. Keep the plain (weightless)
+  `vllm-emmy` image for everything else.
+- **License / gating.** gemma weights are gated on HF; baking them into a **public** Docker Hub tag redistributes
+  them outside the gate. The Gemma license permits redistribution with notice + use-policy passthrough, but decide
+  public-vs-private for the tag (and include the license text in the image) before the first push.
 
 ## Risks / open questions
 
@@ -154,6 +172,9 @@ file set — empty diff = 100% hit.
 - **Serving dtype / max-model-len / decode bucket** (open) — sets which kernels get warmed. `decode_bucket` is now a
   released knob and part of the cache key, so pin it for the release.
 - Image: single 5090 tag for v1 (arch-keyed cache; a 4090 set can be added later without collision).
+- **Model baked into the image** (weights + tokenizer + config at a dedicated non-mounted path): zero-download,
+  tokenless cold-start; ~35 GB image accepted for this tag. **Open:** public vs private distribution of the
+  weights-bearing tag (HF gating / Gemma license passthrough).
 
 ## Notes
 

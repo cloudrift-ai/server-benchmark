@@ -203,9 +203,36 @@ SdpaOp in `trace/huggingface.py` (the wrapper knows `config.sliding_window` + `l
 `pipelined_kloop` a non-zero stream start. Payoff: 40 of 48 gemma-4 layers stop paying O(seq²) at
 seq ≫ 1024. Deferred to its own branch — this one already carries the goldens + split-KV.
 
-### Layer re-baseline (post-#354 megakernel + seeded goldens)
+### Layer re-baseline (post-#354 megakernel + seeded goldens) — the e2e gap collapsed 2.13× → 1.26×
 
-(pending — the 4090 layer-0 tune is running; numbers land here when it completes)
+Fresh clean layer-0 tune on the local 5090 (`--dynamic seq_len@x:1 --clean --bench`, isolated caches):
+
+| Backend | µs | vs eager |
+| --- | --: | --: |
+| Eager PyTorch | 1 401 | 1.00× |
+| torch.compile | 1 221 | 1.15× |
+| **Emmy** | **1 769** (launch-order re-run 1 615–1 630, the usual ~7% swing) | **0.79×** |
+
+Down from **2.13× behind** on this card (2026-07-09) and 2.7× on the 4090 (post-#347). The in-layer
+launch-order table (ground truth) decomposes what remains:
+
+- **The fused RMSNorm→gate⊗up→GeGLU megakernel is still HALF the layer (801.3 µs, 49.9%) and still
+  `d1/sync`** (`w2x4/f2x2`, 6.2 KB smem) — the per-operand cp.async lockout (the computed-A cone refuses
+  async transport for the plain-gmem WEIGHT operand) survived #354, which cut the kernel's cost but not
+  its transport. The plain gate_up matmul pair's std golden alone is 561.7 (fm 362.4) — the megakernel
+  pays ~1.4× its matmul-only lower bound. **This remains fix priority 1, unchanged in kind.**
+- **down_proj reached the smem-tiled tier** (`w2x2/f4x4/k4 g4k d1/cp`, 24 KB — the old smem-less
+  lockout is gone): 307.8 µs vs its std golden 286.2 (0.93×; the golden rides `d2/tma/ring`). Mostly
+  resolved; the residual is a transport/pick nuance, not a tier lockout.
+- **The rest of the gap is pure prior rank misses on shapes whose goldens EXIST** — the strongest
+  argument yet for the prior-refit item: attention deploys `w1x1/f1x8/k16` gmem-direct at **105.6 µs
+  where the recorded dynM golden is 32.0–34.4** (3× miss), and q/k/v deploy `d1/sync` un-staged rows at
+  118.4/70.0/69.8 vs golden `g8k d2/tma/ring` 84.8/45.8 ×2. Those ~150 µs alone bring the layer to
+  ~eager parity in the std lane; the fm-lane goldens put it past eager. o_proj deploys at par (87.7 vs
+  golden 82).
+
+(The 4090 twin tune is running on the box — its numbers land in a follow-up; the lockout findings are
+architectural and card-independent.)
 
 ## Remaining follow-ups
 

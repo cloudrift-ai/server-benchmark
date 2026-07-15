@@ -131,6 +131,16 @@ A prebuilt cubin is reused iff all five of `sha1(source, name, arch, toolkit_tag
 both ends; the `OnlinePrior` falls back to it when absent/untrusted (`FallbackPrior`). One global, GPU-agnostic prior; no
 per-GPU file. A real-5090 tune is a later perf upgrade, not a blocker.
 
+### Local prep (no 5090 needed)
+
+- **sm_120 compile preflight (before the rental):** cross-compile the gemma-4 serving kernels at `-O3` for
+  `sm_120`/`sm_120a` with the **image's** CUDA 13.0.2 nvcc (inside the vllm-emmy container) — nvcc needs no live
+  card, and the compiler's memorized default card is already the 5090 (`Context.from_target`). Catches toolchain
+  rejections (the `sm_89a`-rejected-by-nvcc class of failure) before the session. This does **not** produce the
+  shipped cache — source parity needs the live-probed card (see Risks) — it only proves everything compiles.
+- The warm/bake Dockerfile stages, `make gemma4-serve-image` / `-push` targets, and the offline zero-recompile
+  verification script are all writable and dry-runnable locally; the 5090 session should be execute-only.
+
 ### Warm + bake (cubins AND model)
 
 Start the server once on a real 5090 (inside a container from the image → `toolkit_tag` = image nvcc, `-O3`), let it

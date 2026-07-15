@@ -231,8 +231,13 @@ launch-order table (ground truth) decomposes what remains:
   ~eager parity in the std lane; the fm-lane goldens put it past eager. o_proj deploys at par (87.7 vs
   golden 82).
 
-(The 4090 twin tune is running on the box — its numbers land in a follow-up; the lockout findings are
-architectural and card-independent.)
+**The 4090 twin** (same clean tune, on the box): eager 1 819 / torch.compile 1 581 / **emmy 4 031 =
+0.45× (2.2× behind)** — better than post-#347's 2.7× (4 782) but nowhere near the 5090's collapse. The
+reproducer table (with its known re-lower caveats) says why the cards diverge: the megakernel re-benches
+at 1 679 (−26% from pre-#354's 2 283 — the swizzle's share), but the projections misdeploy far worse
+here (`k_linear_reduce` 1 079 vs eager 380 = 0.35×, `k_linear_sdpa_reduce` 400 vs 154) — the sm_89
+greedy picks miss their goldens by more than the sm_120 ones do. Same conclusion, stronger: the
+golden→prior refit is the cheap next step, and the megakernel per-operand staging is the durable one.
 
 ## Remaining follow-ups
 

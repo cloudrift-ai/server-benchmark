@@ -53,6 +53,29 @@ bench golden shapes only through the golden snippet form).
 3. The emitter crash under the forced warp pin (`KeyError: 'acc2'`) deserves a guard regardless: an ineligible
    mask form should decline at schedule time, never die in codegen.
 
+## The seq-2048 golden tier (2026-07-14, recorded)
+
+Both cards seeded with `.s2048` rows (all winners 2-4× reproduced; refs = live torch same-session):
+
+| shape | 5090 std | 5090 fm | 5090 ref | 4090 std | 4090 fm | 4090 ref |
+| --- | --: | --: | --: | --: | --: | --: |
+| q_proj | g2k 313 | serial **223.7** (1.42×) | 318.4 | serial 430 | serial **277.8** (1.43×) | 398.6 |
+| kv_proj | g2k 168.4 | serial **136.9** (1.24×) | 170.3 | serial 225 | serial **171.0** (1.22×) | 209.3 |
+| o_proj | serial 294 | g2k **205.0** (1.39×) | 285.4 | serial 456 | serial **325.3** (1.37×) | 446.8 |
+| mlp_gate_up | ring 2413 | ring **1413** (1.56×) | 2210.7 | ring 4348 | ring **2316** (1.27×) | 2945.0 |
+| mlp_down | g2k 1112 | g2k **697** (1.68×) | 1171.1 | g2k 1580 | serial **1042** (1.43×) | 1493.7 |
+| attention hd256 | cp-alt nt8 262.7 | cp-alt nt8 **246.0** (~1.00×) | 237.6-257.2 | (see 4090 rows) | | 314.6 |
+
+- The split-K story at M=2048 is K- AND card-dependent: the 5090 keeps a shallow `g2k` on the std
+  q/kv lanes and on deep-K mlp_down (both lanes); the 4090 drops the split almost everywhere
+  (only std mlp_down keeps g2k). fm serial is the winner on all three 4090 projections.
+- The 512 attention alt family transfers to 2048 with nt8 (the static-512 geometry), NOT the nt4
+  the symbolic dynM prefers — geometry preference is per-(shape, seq) as usual.
+- Bench-driver gotcha recorded: an `EMMY_TILE` ENV pin narrows the flash fork before `--ab`
+  axis-keyed pins are matched, silently blocking geometries the env pin excludes (the nt8 rows
+  read as "match no flash form"); bench attention A/Bs with NO env tile pin and tolerate the
+  greedy bench_fail row.
+
 ## Post-implementation corrections (mask realization landed)
 
 The explicit-mask warp form is implemented (`FragmentBiasAdd` — see the PR), and chasing the layer-0 repro

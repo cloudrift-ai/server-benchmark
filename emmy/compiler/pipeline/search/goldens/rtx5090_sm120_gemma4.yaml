@@ -395,3 +395,123 @@ configs:
     knobs: {REDUCE: 'b64'}
     emmy_us: 3.6
     cublas_us: 4.1
+  # ---- seq-2048 tier (2026-07-14) ----------------------------------------------------------------
+  # The 512-tuned picks are provably wrong at M=2048 (the grid no longer starves): q_proj std g8k
+  # collapses to 0.82x, and cold greedy on the unseeded 2048 attention shape picks a scalar kernel
+  # that HANGS the watchdog. Every row below is 2-4x reproduced at <1% spread; cublas_us = live
+  # torch (cuBLAS HGEMM / SDPA FA-2) measured the same session. Split-K rows record main+finalize.
+  # Split-K inversion is K-dependent at this M: shallow-K (q/kv) keeps only a shallow g2k or drops
+  # the split entirely; o_proj fm keeps g2k; deep-K mlp_down keeps g2k on the fm lane.
+  - kernel: matmul
+    name: gemma4_12b.q_proj.s2048
+    M: 2048
+    N: 4096
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 313.0
+    cublas_us: 318.4
+  - kernel: matmul
+    name: gemma4_12b.q_proj.s2048
+    M: 2048
+    N: 4096
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 223.7
+    cublas_us: 318.4
+  - kernel: matmul
+    name: gemma4_12b.kv_proj.s2048
+    M: 2048
+    N: 2048
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 168.4
+    cublas_us: 170.3
+  - kernel: matmul
+    name: gemma4_12b.kv_proj.s2048
+    M: 2048
+    N: 2048
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x4/f2x4/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 136.9
+    cublas_us: 170.3
+  - kernel: matmul
+    name: gemma4_12b.o_proj.s2048
+    M: 2048
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 294.0
+    cublas_us: 285.4
+  - kernel: matmul
+    name: gemma4_12b.o_proj.s2048
+    M: 2048
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 205.0
+    cublas_us: 285.4
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up.s2048
+    M: 2048
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 2413.0
+    cublas_us: 2210.7
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up.s2048
+    M: 2048
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 1413.0
+    cublas_us: 2210.7
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.s2048
+    M: 2048
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 1112.0
+    cublas_us: 1171.1
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.s2048
+    M: 2048
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 697.0
+    cublas_us: 1171.1
+  # Attention at seq 2048: the 512 alt family transfers (fm d1/cp/alt nt8 wins, same ordering);
+  # torch SDPA measured 237.6-257.2 across the session (median recorded). Cold greedy on this
+  # unseeded shape picks a scalar b256 kernel that hangs — the row exists to pin that down.
+  - kernel: attention
+    name: gemma4_12b.attention.hd256.s2048
+    n_heads: 16
+    seq: 2048
+    head_dim: 256
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k4', WSPEC: ''}
+    emmy_us: 262.7
+    cublas_us: 247.0
+  - kernel: attention
+    name: gemma4_12b.attention.hd256.s2048
+    n_heads: 16
+    seq: 2048
+    head_dim: 256
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x32/k4', WSPEC: ''}
+    emmy_us: 246.0
+    cublas_us: 247.0

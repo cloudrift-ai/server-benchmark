@@ -65,11 +65,21 @@ def _wait_health(port: str, proc: subprocess.Popen, timeout_s: int) -> None:
     raise TimeoutError(f"server not healthy within {timeout_s}s")
 
 
-def _completion(port: str, model: str, prompt: str, max_tokens: int) -> str:
-    body = json.dumps({"model": model, "prompt": prompt, "max_tokens": max_tokens, "temperature": 0}).encode()
+def _completion(port: str, model: str, prompt: str, max_tokens: int) -> tuple[str, str]:
+    """Returns (text, diag) — diag carries finish_reason / token count / first top-logprobs,
+    so an empty or wrong completion is diagnosable from the transcript alone."""
+    body = json.dumps({"model": model, "prompt": prompt, "max_tokens": max_tokens, "temperature": 0, "logprobs": 3}).encode()
     req = urllib.request.Request(f"http://localhost:{port}/v1/completions", data=body, headers={"content-type": "application/json"})
-    with urllib.request.urlopen(req, timeout=180) as r:
-        return json.load(r)["choices"][0]["text"]
+    with urllib.request.urlopen(req, timeout=300) as r:
+        resp = json.load(r)
+    choice = resp["choices"][0]
+    lp = choice.get("logprobs") or {}
+    first_top = (lp.get("top_logprobs") or [{}])[0]
+    diag = (
+        f"finish={choice.get('finish_reason')} completion_tokens={resp.get('usage', {}).get('completion_tokens')} "
+        f"first_tokens={lp.get('tokens', [])[:3]!r} first_top={ {k: round(v, 2) for k, v in list(first_top.items())[:3]} }"
+    )
+    return choice["text"], diag
 
 
 def _first_token(s: str) -> str:
@@ -127,12 +137,13 @@ def main() -> int:
         print("[3/3] querying emmy /v1/completions and comparing to HF...\n", flush=True)
         matches = 0
         for r in refs:
-            got = _completion(args.port, args.model, r["prompt"], args.max_tokens)
+            got, diag = _completion(args.port, args.model, r["prompt"], args.max_tokens)
             ok = _first_token(got) == _first_token(r["text"])
             matches += ok
             print(f"  {'PASS' if ok else 'FAIL'} | {r['prompt']!r}")
             print(f"       hf  : {r['text']!r}")
             print(f"       emmy: {got!r}")
+            print(f"       diag: {diag}")
         n = len(refs)
         print(f"\n{matches}/{n} first-token matches vs HF fp16. Eyeball the continuations above for coherence.")
         return 0 if matches == n else 1

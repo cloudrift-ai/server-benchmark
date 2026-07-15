@@ -179,6 +179,9 @@ class EmmyGenModel(nn.Module):
             k = torch.from_numpy(np.ascontiguousarray(k_np)).to(device)
             v = torch.from_numpy(np.ascontiguousarray(v_np)).to(device)
             q, k = self.rotary_emb[layer](positions, q, k)  # A2: per-layer RoPE (Gemma local/global theta)
+            # Some rotary impls (e.g. 0.22's proportional Gemma4 rope) promote to fp32; flash-attn
+            # rejects anything but fp16/bf16, so restore the trunk dtype (no-op when already right).
+            q, k = q.to(self.dtype), k.to(self.dtype)
             attn_out = self.attn[layer](q, k, v)  # vLLM paged attention (pulls attn_metadata from forward context)
             hidden_np = self.runner.forward_layer_post(layer, attn_out.detach().cpu().numpy(), residual_np)
         hidden_np = self.runner.final_norm(hidden_np)
@@ -192,6 +195,7 @@ class EmmyGenModel(nn.Module):
             residual = hidden
             q, k, v = self.runner.forward_layer_pre_device(layer, hidden)
             q, k = self.rotary_emb[layer](positions, q, k)  # A2: per-layer RoPE (Gemma local/global theta)
+            q, k = q.to(self.dtype), k.to(self.dtype)  # rotary may promote to fp32; flash-attn needs fp16/bf16
             attn_out = self.attn[layer](q, k, v)  # vLLM paged attention
             hidden = self.runner.forward_layer_post_device(layer, attn_out, residual)
         return self.runner.final_norm_device(hidden)

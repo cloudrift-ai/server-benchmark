@@ -25,13 +25,25 @@ layers use `global_head_dim=512` vs sliding 256, plus `attention_k_eq_v`), and `
 **On `feature/gemma4-unified-serving`:** multimodal "unified" checkpoint support + the `EMMY_GEN_DECODE_BUCKET` knob
 (see Phase A below).
 
-**Validated on a real RTX 5090 (rented, then torn down):**
+**Validated on real RTX 5090s (two rentals, both torn down):**
 
 - ✅ **Compiler path on real `sm_120`** — the gemma-4 carve compiles and matches HF on actual Blackwell (6 serving GPU
-  tests pass, incl. the heterogeneous `global_head_dim` + `attention_k_eq_v` stitch). This is the core validation and it
-  is **done**.
-- ✅ The full **48-layer serve compile completes** on the 5090 (with the unified fixes + decode twin disabled).
-- ❌ **End-to-end serve does not run** — it OOMs. See the memory blocker.
+  tests pass, incl. the heterogeneous `global_head_dim` + `attention_k_eq_v` stitch).
+- ✅ **The full serving pipeline runs end-to-end**: 48-layer compile, vLLM profiling, KV init, `/health`, and
+  4 × 20-token greedy generations through all 48 emmy layers **including the 512-dim global attention** — with
+  `EMMY_GEN_DECODE_BUCKET=0`, `--max-model-len 256 --max-num-batched-tokens 256 --gpu-memory-utilization 0.97`, and
+  **vLLM ≥ 0.23** (0.22.1's FlashInfer dispatch cannot run head-size 512; 0.23 supports `[64,128,256,512]` and has
+  native gemma-4 — pin the serving extra accordingly).
+- ✅ The "silent death" of the first rental was diagnosed: FlashInfer's sampler JIT needs `ninja` **on PATH**
+  (`venv/bin` isn't, when the CLI is exec'd by path) — plus the old harness losing the traceback to SSH SIGHUP.
+- ❌ **THE remaining Phase-A blocker: NaN logits.** The emmy trunk forward produces NaN on the real 12B weights
+  (greedy argmax → token 0 `<pad>` → empty completions; confirmed via `logprobs` returning NaN). HF fp16 eager on the
+  same card produces clean text, so this is an emmy kernel-numerics issue at gemma-4 shapes in fp16 — consistent with
+  the pre-existing gemma-4-E2B layer-0 NaN note from the 4080 bench. **Next: local layer-by-layer NaN probe on the
+  4080 with real 12B weights** (one layer at a time fits 16 GB; no rental needed until the final re-validation).
+- Serving-session fix landed on the branch: rotary may promote q/k to fp32 (0.22 proportional rope) → cast back to the
+  trunk dtype after RoPE in both forward paths; `validate_gemma4_serve.py` now prints `finish_reason` / token counts /
+  top logprobs per prompt, and takes `--gpu-mem-util` / `--max-model-len` / `--max-num-batched-tokens`.
 
 ## Phase A — gemma-4-12B generative serving support
 

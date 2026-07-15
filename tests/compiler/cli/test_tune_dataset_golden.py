@@ -91,10 +91,15 @@ def _dyn_golden(name="square.512.dynM"):
 def test_golden_dataset_target_carries_dynamic_spec(monkeypatch):
     """A dynamic golden expands to a target carrying its own ``--dynamic`` spec; a
     static golden's target carries ``None``."""
+    import torch
+
     from emmy.compiler.pipeline.search import golden as gmod
 
     static = gmod.MatmulGoldenConfig(name="square.512", M=512, N=512, K=512, knobs={"TILE": "n16x8/f2x2"}, emmy_us=9.0, cublas_us=14.0)
     monkeypatch.setattr(gmod, "GOLDEN_CONFIGS", [static, _dyn_golden()])
+    # Pin off-GPU: the fake goldens carry no card, so a live card would filter them to
+    # the empty set and trip the uncovered-card guard.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     targets = tune._tune_targets(_args(dataset="golden"))
     by_name = {name: dyn for name, _code, _inp, dyn in targets}
     assert by_name == {"square.512": None, "square.512.dynM": ["seq_len@x0:0"]}
@@ -304,6 +309,8 @@ def test_loop_sets_dynamic_per_target(monkeypatch):
     """The loop threads each target's dynamic spec onto ``args.dynamic`` before
     ``_tune_one`` (which traces via ``load_or_trace``), so a dynamic golden in the
     sweep traces symbolically and its static neighbors don't inherit the spec."""
+    import torch
+
     from emmy.compiler.pipeline.search import golden as gmod
 
     _stub_runtime(monkeypatch)
@@ -316,6 +323,9 @@ def test_loop_sets_dynamic_per_target(monkeypatch):
     monkeypatch.setattr(tune, "_tune_one", capture)
     static = gmod.MatmulGoldenConfig(name="square.512", M=512, N=512, K=512, knobs={"TILE": "n16x8/f2x2"}, emmy_us=9.0, cublas_us=14.0)
     monkeypatch.setattr(gmod, "GOLDEN_CONFIGS", [static, _dyn_golden()])
+    # Pin off-GPU: the fake goldens carry no card, so a live card would filter them to
+    # the empty set and trip the uncovered-card guard.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     with pytest.raises(SystemExit) as exc:
         tune.handle_tune(_args(dataset="golden"))
     assert exc.value.code == 0

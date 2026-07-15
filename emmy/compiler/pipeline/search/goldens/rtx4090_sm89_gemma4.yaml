@@ -571,9 +571,22 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
     emmy_us: 168.1
     cublas_us: 226.2
-  # attention.hd512 dynM (bare TILE, dd spelling; symbolic split-KV is not built, so the plain alt
-  # pipeline is the only staged form). Jitters 9% run-to-run (the 4090 alt jitter; median recorded).
-  # Cold greedy deploys a 803.8 µs form (0.14x) — no hang, just 6x off.
+  # attention.hd512 dynM (bare TILE, dd spelling). SYMBOLIC split-KV (this branch) transfers the
+  # static winner's alt+g2k here too: 123.7 (3x, 0.1% spread — rock-stable where the plain alt
+  # jitters 9%) vs 139.6, an 11.4% win. Cold greedy deploys a 803.8 µs form (0.14x) — no hang,
+  # just 6x off.
+  - kernel: attention
+    name: gemma4_12b.attention.hd512.dynM
+    n_heads: 16
+    seq: 512
+    head_dim: 512
+    dtype: 'fp16'
+    causal: true
+    dynamic: true
+    knobs: {PLACE: 'fuse', REDUCE: 'g2k', STAGE: 'd1/cp/alt', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', WSPEC: ''}
+    emmy_us: 123.7
+    cublas_us: 110.6
+  # The un-split alt sibling, kept for the transfer record (the 9%-jitter row).
   - kernel: attention
     name: gemma4_12b.attention.hd512.dynM
     n_heads: 16

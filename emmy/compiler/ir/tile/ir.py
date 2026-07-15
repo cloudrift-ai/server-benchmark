@@ -127,6 +127,13 @@ class Reduction:
     # ``[0, B)`` window; a consumer needing the absolute reduce-axis coordinate (gmem/TMA operand
     # bases, the causal mask's key columns) adds this. ``None`` = the un-split stream (base 0).
     offset: Expr | None = None
+    # The stream's ABSOLUTE end for a cross-CTA slice partial over a SYMBOLIC axis:
+    # ``min((_ksplit + 1) · B, S)`` where ``S`` is the runtime extent (``axis`` then carries the
+    # bn-aligned slice width ``B = ceil(S / (cta·bn)) · bn`` as a composite Dim). The realizer stops
+    # the stream at ``bound − offset`` local steps and masks/clamps against it — a mid-tensor slice
+    # end reads VALID keys belonging to the next slice, which the extent-only tail machinery would
+    # not exclude. ``None`` = static slice (extent alone bounds it) or the un-split stream.
+    bound: Expr | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.partial, Body):
@@ -222,6 +229,38 @@ def _refs_axis(s: Stmt, name: str) -> bool:
     if idx and any(name in e.free_vars() for e in idx):
         return True
     return any(_refs_axis(child, name) for b in s.nested() for child in b)
+
+
+def gmem_row_stride(load: Load, axis_name: str, inputs) -> int | None:
+    """The flattened gmem stride between successive ``axis_name`` rows of ``load``'s buffer — the
+    fragment loaders' row step (``ldm``). The axis var must appear in exactly ONE index component,
+    affinely; the stride is its coefficient times the product of the buffer extents AFTER that
+    component. ``head_dim`` for the canonical ``(batch…, row, dd)`` layout; ``H·D`` for an
+    un-transposed ``(B, S, H, D)`` trace, where assuming the trailing extent read the WRONG rows
+    (the gemma layer-0 NaN: resident-Q fragments at ``ldm=head_dim`` on a 4096-stride layout).
+    ``None`` when underivable — axis absent or split across components, a non-affine use, an
+    unknown buffer, or a symbolic trailing extent — the schedule gate's decline signal."""
+    from emmy.compiler.ir.expr import affine_form  # noqa: PLC0415 — avoid a module-import cycle
+
+    t = inputs.get(load.input) if inputs else None
+    if t is None:
+        return None
+    positions = [i for i, e in enumerate(load.index) if axis_name in e.free_vars()]
+    if len(positions) != 1:
+        return None
+    pos = positions[0]
+    form = affine_form(load.index[pos], {axis_name})
+    if form is None:
+        return None
+    coef = form[1].get(axis_name, 0)
+    if coef <= 0:
+        return None
+    stride = coef
+    for d in tuple(t.shape)[pos + 1 :]:
+        if not d.is_static:
+            return None
+        stride *= d.as_static()
+    return stride
 
 
 @dataclass(frozen=True)

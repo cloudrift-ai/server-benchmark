@@ -34,6 +34,28 @@ def _qwen3_block():
     return config, transformers.Qwen3ForCausalLM(config).eval().model.layers[0]
 
 
+def _gemma3_block():
+    """Tiny Gemma-3/4 decoder layer, layer 0 forced global (``sliding_window_pattern=1``) — the
+    4-norm carve target (extra pre/post-feedforward norms). head_dim explicit so attn_width is unambiguous."""
+    import torch
+    import transformers
+
+    config = transformers.Gemma3TextConfig(
+        vocab_size=64,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        max_position_embeddings=64,
+        sliding_window=16,
+        sliding_window_pattern=1,
+    )
+    torch.manual_seed(0)
+    return config, transformers.Gemma3ForCausalLM(config).eval().model.layers[0]
+
+
 def _compile_wrapper(wrapper, example_args, argnames):
     """Trace ``wrapper`` with axis 0 of every arg bound to a shared ``num_tokens`` Dim,
     compile on the CUDA backend, bind fp32 constants. Returns (program, input_names, output_names)."""
@@ -113,6 +135,32 @@ def test_post_wrapper_compiles_with_shared_dim():
     attn_width = config.num_attention_heads * (config.head_dim or h // config.num_attention_heads)
 
     # post(attn_out[T, Hq*D], residual[T, H]) — BOTH axis-0 share the num_tokens Dim.
+    program, in_names, out_names = _compile_wrapper(post, [torch.randn(8, attn_width), torch.randn(8, h)], ["attn_out", "residual"])
+    for t in (4, 7):
+        attn_out, residual = torch.randn(t, attn_width), torch.randn(t, h)
+        (got,) = _run(program, in_names, out_names, [attn_out, residual])
+        with torch.no_grad():
+            want = post(attn_out, residual)
+        np.testing.assert_allclose(got, want.numpy(), rtol=1e-3, atol=1e-3)
+
+
+def test_gemma_post_wrapper_compiles_and_runs_dynamic():
+    """Gemma-3/4's 4-norm ``post`` (extra pre/post-feedforward norms) lowers + runs through the
+    CUDA backend — the compiler side of the Gemma serving carve. ``pre`` is the shared q/k-norm
+    path already covered by ``test_pre_wrapper_compiles_and_runs_dynamic``."""
+    pytest.importorskip("cupy")
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from emmy.compiler.trace.huggingface import build_attention_split_wrapper
+
+    config, block = _gemma3_block()
+    _, post = build_attention_split_wrapper(block)
+    h = config.hidden_size
+    attn_width = config.num_attention_heads * config.head_dim
+
     program, in_names, out_names = _compile_wrapper(post, [torch.randn(8, attn_width), torch.randn(8, h)], ["attn_out", "residual"])
     for t in (4, 7):
         attn_out, residual = torch.randn(t, attn_width), torch.randn(t, h)

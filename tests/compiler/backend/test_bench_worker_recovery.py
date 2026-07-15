@@ -204,6 +204,85 @@ def test_bench_retries_after_broken_pipe_on_first_write(monkeypatch) -> None:
     assert resp["result"].time_ms == 42.0
 
 
+def test_bench_retries_after_mid_job_eof(monkeypatch) -> None:
+    """A response-side EOF (the child ``os._exit``'d mid-job) must respawn and retry ONCE:
+    right after a SIGKILL'd predecessor, the dead child's zombie context can still hold the
+    GPU while the driver tears it down, hanging an innocent first launch on the fresh child
+    (the golden-refresh flake — the same row replays clean once the zombie is gone). A second
+    EOF is the config's own hang and stays a hard error (the test below)."""
+    import asyncio
+
+    from emmy.compiler.backend import BenchmarkResult
+    from emmy.compiler.backend.cuda import program as P
+
+    response_body = pickle.dumps(
+        {"ok": True, "result": BenchmarkResult(time_ms=17.0, num_launches=0)},
+        protocol=pickle.HIGHEST_PROTOCOL,
+    )
+    response_wire = len(response_body).to_bytes(8, "little") + response_body
+
+    class _FakeStdin:
+        def write(self, _data: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            pass
+
+    class _FakeStdout:
+        def __init__(self, wire: bytes) -> None:
+            self._buf = bytearray(wire)
+
+        async def readexactly(self, n: int) -> bytes:
+            if len(self._buf) < n:
+                raise asyncio.IncompleteReadError(bytes(self._buf), n)
+            chunk = bytes(self._buf[:n])
+            del self._buf[:n]
+            return chunk
+
+    class _FakeStderr:
+        async def read(self) -> bytes:
+            return b""
+
+    class _FakeProc:
+        def __init__(self, *, wire: bytes) -> None:
+            self.pid = 2000
+            self.returncode = None
+            self.stdin = _FakeStdin()
+            self.stdout = _FakeStdout(wire)
+            self.stderr = _FakeStderr()
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            return -9
+
+    def _run(wires: list[bytes]):
+        procs = [_FakeProc(wire=w_) for w_ in wires]
+        spawned = 0
+
+        async def fake_spawn(self: P._AsyncBenchWorker) -> None:
+            nonlocal spawned
+            self._proc = procs[spawned]
+            spawned += 1
+
+        monkeypatch.setattr(P._AsyncBenchWorker, "_spawn", fake_spawn)
+        w = P._AsyncBenchWorker()
+        resp = asyncio.run(w.run_job({"graph": None, "torch_spec": None, "kwargs": {}}, wall_timeout_s=5.0))
+        return spawned, resp
+
+    # First child EOFs mid-response (empty stdout), second answers: one retry, success.
+    spawned, resp = _run([b"", response_wire])
+    assert spawned == 2, "a mid-job EOF must trigger exactly one respawn + retry"
+    assert resp["result"].time_ms == 17.0
+
+    # Both children EOF: the config's own hang — a hard error after the single retry.
+    import pytest
+
+    with pytest.raises(RuntimeError, match="EOF before response"):
+        _run([b"", b""])
+
+
 def test_worker_survives_benign_error() -> None:
     # A failure that never touches CUDA (e.g. an NVRTC compile error) leaves the
     # context healthy — the worker must stay alive and keep serving so the

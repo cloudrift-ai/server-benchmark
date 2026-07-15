@@ -52,7 +52,7 @@ from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.atom import AtomKind
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.schedule import Fold, Level
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Init, Load, Loop, Write
@@ -240,12 +240,27 @@ def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Map, plan: R
     pv: Contraction = next(s for s in list(red.partial)[1:] if isinstance(s, Contraction))
     carrier = red.carrier
     cta = plan.cta
-    extent = red.axis.extent.as_static()
-    b = extent // cta
     atom_n = head.tile.atom.shape[1]
     bn = head.tile.regs[1] * atom_n
-    if b % bn != 0:
-        raise NotImplementedError(f"flash split-KV slice ({b}) must be divisible by the streaming key block ({bn})")
+    ext = red.axis.extent
+    if ext.is_static:
+        b_dim = Dim(ext.as_static() // cta)
+        if ext.as_static() % cta != 0:
+            raise NotImplementedError(f"flash split-KV needs a divisible kv extent ({ext.as_static()} % cta {cta})")
+        if b_dim.as_static() % bn != 0:
+            raise NotImplementedError(f"flash split-KV slice ({b_dim.as_static()}) must be divisible by the streaming key block ({bn})")
+        bound = None  # the shrunk static extent alone bounds the slice
+    else:
+        # Symbolic kv: the slice width is the bn-ALIGNED ceil split ``B = ceil(S / (cta·bn)) · bn``
+        # (a composite Dim — every slice base lands block-aligned, so only each slice's own tail
+        # chunk is partial), and ``bound = min((s+1)·B, S)`` is the slice's absolute end — the
+        # realizer stops the stream at ``bound − offset`` and masks/clamps against it (a mid-tensor
+        # slice end reads VALID next-slice keys the extent-only tail masks would keep). A slice
+        # wholly past ``S`` runs zero steps and contributes the carrier identities, which the
+        # finalize's LSE combine folds as exact no-ops.
+        b_dim = ext.ceil_div(cta * bn) * bn
+        nxt = BinaryExpr("*", BinaryExpr("+", Var(_SPLIT), Literal(1, "int")), b_dim.expr)
+        bound = TernaryExpr(cond=BinaryExpr("<", nxt, ext.expr), if_true=nxt, if_false=ext.expr)
     (cross_move,) = next(st for st in plan.stages if st.level is Level.GRID).combine(warp_size=32)
     if cross_move is Fold.ATOMIC:
         raise NotImplementedError("the twisted (m, l, O) state can't finalize atomically; pin the deferred kernel (REDUCE=g<n>k)")
@@ -268,8 +283,8 @@ def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Map, plan: R
         cell = (Var(m_axis.name), Var(d_axis.name) if name == expect else Literal(0, "int"))
         return (Literal(i, "int"), Var(split.name), *(Var(a.name) for a in batch), *cell)
 
-    off = BinaryExpr("*", Var(split.name), Literal(b, "int"))
-    sliced = replace(red, axis=replace(red.axis, extent=Dim(b)), reduce=_strip_grid(plan), offset=off)
+    off = BinaryExpr("*", Var(split.name), b_dim.expr)
+    sliced = replace(red, axis=replace(red.axis, extent=b_dim), reduce=_strip_grid(plan), offset=off, bound=bound)
     ws_writes = tuple(Write(output=ws_name, index=ws_index(i, names[i]), value=names[i]) for i in range(n_comp))
     partial_map = Map(body=Body(ws_writes), source=sliced)
     partial_tile = _mapped(partial_map, (split, *grid), name=f"{tile.name}__partial", stage=tile.stage, knobs=tile.knobs)
@@ -319,13 +334,13 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     if isinstance(op, Map) and isinstance(op.source, Reduction) and op.source.role is AxisRole.TWISTED:
         head = op.source.partial[0] if len(op.source.partial) else None
         if isinstance(head, Contraction) and head.tile.is_warp:
-            if not rax.extent.is_static:
-                raise NotImplementedError("flash split-KV needs a static kv extent (the dynM stream is not split)")
-            if rax.extent.as_static() % cta != 0:
-                raise NotImplementedError(f"flash split-KV needs a divisible kv extent ({rax.extent.as_static()} % cta {cta})")
+            # A symbolic kv splits too: ``_split_twisted_warp`` builds the bn-aligned runtime slice
+            # width and the absolute ``bound`` the realizer stops/masks against.
             return _split_twisted_warp(match, root, tile, op, plan, Axis(name=_SPLIT, extent=Dim(cta)))
     if not rax.extent.is_static:
-        raise NotImplementedError("cross-CTA split of a symbolic reduce axis is not built yet")
+        raise NotImplementedError(
+            "cross-CTA split of a symbolic reduce axis is not built yet (warp flash split-KV above is the one built symbolic arm)"
+        )
     extent = rax.extent.as_static()
     if extent % cta != 0:
         raise NotImplementedError(f"cross-CTA split needs a divisible reduce axis (extent {extent} % cta {cta})")

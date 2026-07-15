@@ -238,8 +238,8 @@ Both `deploy local` and `deploy ssh` auto-detect the target GPU by scanning PCI 
 
 ### `emmy serve`
 
-Serves an embedding model through vLLM with the emmy plugin flags baked in (`serving/` plugin; needs the
-`serving` extra). Unrecognized flags forward to `vllm serve`; tokens after a literal `--` forward verbatim (emmy's
+Serves an embedding model (or a generative chat model via `EmmyGenModel` with `--generate` — `--runner generate` +
+fp16) through vLLM with the emmy plugin flags baked in (`serving/` plugin; needs the `serving` extra). Unrecognized flags forward to `vllm serve`; tokens after a literal `--` forward verbatim (emmy's
 own flags are otherwise extracted wherever they appear — argparse REMAINDER swallows everything after MODEL, so the
 handler re-parses it; see `commands/serve.py::_split_own_flags`). `--max-model-len 4096` (the dynamic-dim cap) is
 applied for both engines unless overridden, so `--stock` is an apples-to-apples baseline.
@@ -252,8 +252,9 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --stock                # raw-vLLM b
 
 Without `--bench` the process execs `vllm serve` (signals flow to vLLM directly). With `--bench` the server runs as a
 subprocess (logs to a temp file), `/health` is polled (up to 30 min — first boot compiles the model), then
-`vllm bench serve --backend openai-embeddings --endpoint /v1/embeddings` runs against it
-(`--max-concurrency` / `--num-prompts` / `--random-input-len` / `--bench-seed`) and the server is torn down.
+`vllm bench serve` runs against it (`--max-concurrency` / `--num-prompts` / `--random-input-len` / `--bench-seed`) and
+the server is torn down. The bench backend follows the model: embeddings hit `--backend openai-embeddings --endpoint
+/v1/embeddings`; **`--generate`** hits `--backend openai --endpoint /v1/completions` with `--random-output-len`.
 
 ### `emmy bench`
 

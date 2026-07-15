@@ -176,6 +176,19 @@ def _warp_epilogue(
             write = s
     if write is None or (not ops and not selects):
         return None
+    # Every chain-op arg must be BOUND in the render env (the accumulator(s), a leaf load, a
+    # select, or an earlier op) — an unbound name means the variant's projection tail reads a
+    # value this node does not compute (a mis-sliced multi-channel combine: the gemma GeGLU
+    # tail on a single-fold row referenced the sibling channel's ``acc2`` and died with a
+    # ``KeyError`` in the RegStore render). Decline the variant cleanly instead.
+    from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle
+
+    bound = {acc, *(a for a, _ in extra_accs), *(ld.name for ld in loads), *(nm for nm, _ in selects)}
+    for name, _op, args in ops:
+        unbound = [a for a in args if a not in bound]
+        if unbound:
+            raise RuleSkipped(f"projection epilogue reads {unbound} this node does not compute (mis-sliced multi-channel tail)")
+        bound.add(name)
     return RegEpilogue(acc=acc, loads=tuple(loads), ops=tuple(ops), result=write.value, selects=tuple(selects), extra_accs=extra_accs)
 
 

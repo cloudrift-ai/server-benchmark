@@ -1,4 +1,4 @@
-# Plan: serve gemma-4-12B on emmy kernels, released as a vLLM image with prebuilt cubins (RTX 5090; 4090 deferred)
+# Plan: serve gemma-4-12B on emmy kernels, released as a vLLM image with prebuilt cubins (RTX 5090)
 
 ## Goal
 
@@ -6,190 +6,151 @@ A released Docker image, based on the existing `vllm-emmy` serving image, that *
 `emmy serve --generate` with the transformer trunk on emmy-compiled CUDA kernels, and ships those kernels **prebuilt**
 for the **RTX 5090** (`sm_120`/`sm_120a`) so server cold-start pays **zero `nvcc` compile cost**.
 
-**Scope decision (locked): `gemma-4-12B`, served on the 5090, for v1.** 12B fp16 weights (~24 GB) leave no room for KV
-cache on a 24 GB 4090, so the 4090 serving set is **deferred** — it returns with a VRAM-fitting variant (`gemma-4-E2B`,
-which additionally needs the PLE carve). Because we serve and validate on a real 5090, the GPU-less cross-compile
-machinery from the earlier draft is **off the critical path** (kept only as the future-4090 note).
-
-Two phases, in order — the second is worthless until the first lands:
-
-- **Phase A — make `gemma-4-12B` servable** via `EmmyGenModel` (today it raises `NotImplementedError`). Compiler +
-  plugin work; the bulk of the effort.
+- **Phase A — make `gemma-4-12B` servable** via `EmmyGenModel`. Compiler + plugin work.
 - **Phase B — prebuilt-kernel image**: warm the serving cubin cache on a real 5090 and bake it into the image.
 
 Success criteria:
 
-1. `emmy serve --generate gemma-4-12B` starts on a 5090 and produces logits/text matching an HF (or stock-vLLM)
-   reference within tolerance.
+1. `emmy serve --generate gemma-4-12B` starts on a 5090 and produces logits/text matching an HF reference. **NOT MET —
+   the pipeline runs end-to-end but the trunk forward produces NaN logits (kernel numerics); see Status.**
 2. The served model's **first request issues zero new `nvcc` compiles** (100% cubin cache hit) on the 5090.
 3. Reproducible: `make` targets build the image end to end from the wheel + a warm step.
 
-## Status (Phase A in progress — branch `feature/gemma4-generative-serving`)
+## Status
 
-**Key correction: the target is `gemma-4`, not `gemma-3`.** `google/gemma-4-12B` is `Gemma4UnifiedTextConfig`
-(`modeling_gemma4`), architecturally distinct. For the **12B specifically** the hard extras are OFF — PLE
-(`hidden_size_per_layer_input=0`), MoE (`enable_moe_block=False`), shared-KV (`num_kv_shared_layers=0`),
-`layer_scalar=1.0`, `attn.scaling=1.0` (folded into q_norm) — so it reduces to the 4-norm layer. But gemma-4 adds
-pieces gemma-3 lacks: **per-head V-norm**, **partial/proportional RoPE** on global layers, and
-**`final_logit_softcapping=30.0`**. (E2B/E4B additionally have PLE + shared-KV — much more work, still deferred.)
+**Landed in `main` (PR #359):** the gemma-4 carve (4-norm layout + per-head q/k/**v**-norm), per-layer sliding window,
+per-layer-type RoPE, embed-scale, final-logit softcap, per-layer attention metadata (`layer_meta` — gemma-4's global
+layers use `global_head_dim=512` vs sliding 256, plus `attention_k_eq_v`), and `emmy serve --generate --bench`.
 
-Done + validated on this box (RTX 4080 / CPU):
+**On `feature/gemma4-unified-serving`:** multimodal "unified" checkpoint support + the `EMMY_GEN_DECODE_BUCKET` knob
+(see Phase A below).
 
-- **Carve (#1)** — extended to Gemma's 4-norm layout **and** V-norm; reproduces a real gemma-4-12B-shaped layer
-  **exactly** (max abs diff 0.0). CPU parity test (`gemma4` case) + GPU compile test (gemma post lowers/runs) green.
-- **#2 per-layer sliding window** — each vLLM `Attention` built with `per_layer_sliding_window` (vLLM 0.23 supports it).
-- **#3 per-layer-type RoPE** — `_build_rotaries` builds local/global per `layer_types`; vLLM has a native
-  `Gemma4RotaryEmbedding` for the proportional type (both types construct cleanly).
-- **#5 embedding normalizer** — `embed_scale` (√hidden) folded into the runner's gather table.
-- **#6 final logit softcapping** — wired into the `LogitsProcessor` (`soft_cap=final_logit_softcapping`), as stock vLLM.
-- Guard relaxed to allow per-layer sliding (Gemma); uniform-sliding + dual-chunk still rejected.
+**Validated on real RTX 5090s (two rentals, both torn down):**
 
-**#7** (`--generate --bench` wiring) — done: generative bench drives `/v1/completions` + `--random-output-len`.
-
-**Gap #9 — heterogeneous per-layer attention — FOUND then RESOLVED via the on-hand 4080 validation.** An
-`EmmyGenRunner` forward on a tiny dense gemma-4 (no ≥24 GB card) surfaced that **gemma-4's global (`full_attention`)
-layers use a larger `head_dim` than sliding layers** (real 12B: sliding 256, `global_head_dim=512`; 8 global / 40
-sliding of 48) and set **`attention_k_eq_v=True`** (no `v_proj` → V reuses K). The runner / model assumed homogeneous
-layers (layer-0 metadata), feeding a sliding-width `attn_out` into a global `o_proj` (`[s,256·H] × [512·H,…]` mismatch).
-**Fixed:** the runner stores **per-layer** `(head_dim, num_heads, num_kv, scaling)` (`layer_meta`) and compiles each
-layer's `pre`/`post` at its own width; `EmmyGenModel` builds each vLLM `Attention` + RoPE at the layer's `head_dim`; the
-carve handles `v_proj=None`. **Validated end-to-end on the 4080**: the full tiny-gemma-4 trunk (heterogeneous
-`global_head_dim` + `attention_k_eq_v`) matches HF eager at ~1e-6 rel — committed as
-`test_gen_runner_gemma4_heterogeneous_stitch` (harness: `scratchpad/validate_gemma4_gen_runner.py`).
-
-The **emmy compute path for gemma-4 is now validated end-to-end on-hand.** What still needs a ≥24 GB card is the
-real-checkpoint **vLLM serve** run (`emmy serve --generate google/gemma-4-12B`): served logits/text vs HF, the per-layer
-sliding-window + hybrid KV cache under vLLM, and served-RoPE (`Gemma4RotaryEmbedding`) numeric parity.
+- ✅ **Compiler path on real `sm_120`** — the gemma-4 carve compiles and matches HF on actual Blackwell (6 serving GPU
+  tests pass, incl. the heterogeneous `global_head_dim` + `attention_k_eq_v` stitch).
+- ✅ **The full serving pipeline runs end-to-end**: 48-layer compile, vLLM profiling, KV init, `/health`, and
+  4 × 20-token greedy generations through all 48 emmy layers **including the 512-dim global attention** — with
+  `EMMY_GEN_DECODE_BUCKET=0`, `--max-model-len 256 --max-num-batched-tokens 256 --gpu-memory-utilization 0.97`, and
+  **vLLM ≥ 0.23** (0.22.1's FlashInfer dispatch cannot run head-size 512; 0.23 supports `[64,128,256,512]` and has
+  native gemma-4 — pin the serving extra accordingly).
+- ✅ The "silent death" of the first rental was diagnosed: FlashInfer's sampler JIT needs `ninja` **on PATH**
+  (`venv/bin` isn't, when the CLI is exec'd by path) — plus the old harness losing the traceback to SSH SIGHUP.
+- ✅ **The NaN blocker — root-caused and FIXED (gap #10: dropped `layer_scalar`).** The local layer-by-layer probe
+  (teacher-forced, real 12B weights, 4080) first proved emmy ≡ torch-fp16 (Δ ≤ 0.25 wherever fp16 survived — kernels
+  exonerated), then that the shared trajectory was ~8× inflated vs HF's true hidden states: the carve dropped the
+  decoder layer's final `hidden_states *= layer_scalar` (a buffer; **real 12B values 0.005–0.92, mean 0.62** — fresh
+  models hold 1.0, so every tiny-model parity test was blind to it, the third real-checkpoint-only bug). With the
+  multiply restored the full 48-layer probe is **NaN-free**, the trajectory matches HF exactly (e.g. layer-7 out max
+  56.6 on both), and emmy tracks the fp32 reference within Δ ≤ 0.12 — **fp16 serving is viable; no bf16 work needed**.
+  Both gemma-4 tests now pin per-layer scalars off 1.0 so this cannot silently regress.
+- Serving-session fix landed on the branch: rotary may promote q/k to fp32 (0.22 proportional rope) → cast back to the
+  trunk dtype after RoPE in both forward paths; `validate_gemma4_serve.py` now prints `finish_reason` / token counts /
+  top logprobs per prompt, and takes `--gpu-mem-util` / `--max-model-len` / `--max-num-batched-tokens`.
 
 ## Phase A — gemma-4-12B generative serving support
 
-### Why it's blocked today
+### What the real checkpoint forced (only visible with the 12B, not the tiny text-only tests)
 
-`EmmyGenModel` builds one plain-causal vLLM `Attention` per layer and one shared RoPE, then brackets each with the
-runner's `pre`/`post` carve ([vllm_model_gen.py:96-152](emmy/serving/vllm_model_gen.py#L96)). The carve
-`build_attention_split_wrapper` ([huggingface.py:258](emmy/compiler/trace/huggingface.py#L258)) is hand-reconstructed
-to the **Llama/Qwen 2-norm** decoder-layer shape:
+`google/gemma-4-12B` loads as **`Gemma4UnifiedForConditionalGeneration`** — a *multimodal* wrapper. The tiny
+`Gemma4TextConfig` tests use the text-only class and cannot surface any of this:
 
-```text
-pre :  input_layernorm → q/k/v proj → (q_norm/k_norm if present) → un-rotated q,k,v
-post:  residual + o_proj(attn) ; h + mlp(post_attention_layernorm(h))
-```
+- decoder stack + embed/norm are nested at **`model.language_model.*`** (not `model.model.layers`);
+- **every** text attribute (`layer_types`, `rope_parameters`, `sliding_window`, vocab/hidden size,
+  `final_logit_softcapping`) lives on **`config.text_config`** — reading them off the top-level config silently returns
+  `None`, which would no-op the per-layer window/RoPE/softcap logic;
+- the tied `lm_head` embedding is at **`model.language_model.embed_tokens.weight`**, so the old
+  `model.embed_tokens.weight` alias never matched → uninitialized `lm_head` → garbage logits.
 
-Gemma-3/4's decoder layer is a **4-norm** shape the carve does not model:
+All three are fixed on `feature/gemma4-unified-serving`.
 
-```text
-h = residual + post_attention_layernorm( o_proj(attn) )          # norm BEFORE the residual add
-h = residual + post_feedforward_layernorm( mlp( pre_feedforward_layernorm(h) ) )
-```
+### Corrections to earlier assumptions in this plan (measured on the real config)
 
-Plus per-layer **sliding vs global** attention and per-layer-type RoPE theta. Hence the guard at
-[vllm_model_gen.py:70-76](emmy/serving/vllm_model_gen.py#L70) — the carve would silently miscompute, so it rejects.
+- **Attention scaling:** gemma-4 has **no `query_pre_attn_scalar`**; `attn.scaling == 1.0` (the scale is folded into
+  `q_norm`, which the carve reuses — so an external SDPA/vLLM `Attention` at `scale=1.0` is correct).
+- **Softcapping:** gemma-4-12B **does** set `final_logit_softcapping=30.0` (earlier note said Gemma-3/4 dropped it).
+  Wired into the `LogitsProcessor`. `attn_logit_softcapping` is absent.
+- For the **12B** the hard extras are OFF: PLE (`hidden_size_per_layer_input=0`), MoE (`enable_moe_block=False`),
+  shared-KV (`num_kv_shared_layers=0`), `layer_scalar=1.0`. (E2B/E4B have PLE + 20 shared-KV layers — still deferred.)
 
-### The gaps to close (grounded in the code)
+### Memory: emmy needs ~2–3× what stock vLLM does (worked around by config; real fixes pending)
 
-1. **Gemma-aware `pre`/`post` carve.** Extend `build_attention_split_wrapper` to detect the Gemma layout
-   (`pre_feedforward_layernorm` / `post_feedforward_layernorm` present) and reconstruct the 4-norm block with correct
-   norm placement (post-attn and post-ffn norms apply **before** their residual add). QK-norm is already picked up
-   generically (`getattr(attn, "q_norm", …)`), so Gemma's per-head norms come for free.
-2. **Per-layer sliding window** on the vLLM `Attention`. Read `config.layer_types` / `sliding_window` and construct each
-   `Attention` with the layer's window (global → `None`). vLLM's paged attention does the windowing once configured;
-   confirm the pinned vLLM version's `Attention(per_layer_sliding_window=…)` signature.
-3. **Per-layer-type RoPE.** Build a **local** (sliding, θ≈10k) and **global** (θ≈1M) rotary and apply the right one
-   per layer between `pre` and `self.attn` — replaces the single shared `self.rotary_emb`
-   ([vllm_model_gen.py:111](emmy/serving/vllm_model_gen.py#L111)).
-4. **Attention scaling** — already handled: the runner reads `attn0.scaling`
-   ([gen_runner.py:174](emmy/serving/gen_runner.py#L174)), which HF sets to `query_pre_attn_scalar**-0.5` for Gemma.
-   Confirm, don't rebuild.
-5. **Embedding normalizer** (`inputs_embeds * sqrt(hidden)`). Gemma applies it in the model forward, not in
-   `embed_tokens`. Verify the runner's `embed`/`embed_device` includes it (the full-model trunk path does; the
-   gen_runner carve may not) and add if missing.
-6. **Softcapping** — Gemma-3/4 dropped attn/final logit softcapping (uses QK-norm). Confirm the 12B checkpoint's config
-   has none; if present, pass `logits_soft_cap` to `Attention` and softcap in `compute_logits`.
-7. **`--generate` + `--bench` wiring** — the bench client only targets `/v1/embeddings`
-   ([serve.py:198](emmy/commands/serve.py#L198)). Add a generative bench path (`vllm bench serve` completions/chat) so
-   the image can self-bench. Separable, smaller.
-8. **Per-layer embeddings (PLE)** — **out of scope for v1** (`gemma-4-12B` is dense, no PLE). Only resurfaces with the
-   deferred `gemma-4-E2B/E4B` 4090 target: each nano layer computes `hidden * per_layer_input`
-   ([huggingface.py:223](emmy/compiler/trace/huggingface.py#L223)) and the current carve threads no `per_layer_input`.
+Stock vLLM serves gemma-4-12B on a 32 GB 5090. emmy does not. **Both causes are emmy artifacts, not inherent costs** —
+`EmmyGenModel` holds no trunk parameters (vLLM keeps only `lm_head`), so the trunk should live exactly once:
 
-### Phase-A validation → verify: carve parity, then served logits match reference
+1. **Duplicate weights.** Each `_compile_split` does its own `bind_constants` → `CompiledProgram.build`, so the static
+   decode-bucket twin binds a **second copy** of every layer's weights → ~2× (~44 GB vs ~22 GB).
+   *Stopgap:* `EMMY_GEN_DECODE_BUCKET=0` drops the twin (costs decode speed).
+   *Real fix:* **share the constant buffers** between the symbolic and decode programs — same weights, different launch
+   geometry.
+2. **Per-layer activation buffers (the big one).** Every layer's `CompiledProgram` retains **its own capacity-sized**
+   activation buffers — ~350 MB/layer at `max_num_batched_tokens=4096` ⇒ **~17 GB held across 48 layers**. Stock vLLM
+   runs layers sequentially and the allocator **reuses one transient buffer**.
+   *Real fix:* **pool/share activation buffers** across the per-layer programs. Until then emmy's footprint scales with
+   `num_layers`, which is why the 12B doesn't fit where stock vLLM does.
 
-- **Carve unit test (CPU, cheap):** one Gemma-4 layer, random weights — assert the `pre`/`post` split reproduces the HF
-  block forward within tolerance. Arch- and VRAM-independent, so it runs anywhere and gates the 4-norm logic.
-- **End-to-end (5090):** `emmy serve --generate gemma-4-12B` up + `/health`; compare next-token logits / a short greedy
-  continuation against HF eager (and `--stock` vLLM). 12B fp16 doesn't fit a 24 GB 4090, so the full-model check runs on
-  the 5090.
+Observed on the 5090: OOM at 32.4 GB (twin on) → 29.0 GB (twin off), the latter **inside vLLM's profiling `forward`**
+materializing a `4096 × 3840` fp16 buffer (31.4 MB) — i.e. the compile finished; the buffers killed it. With the twin
+off + `ctx 256` + `util 0.97` the 12B fits and serves on the 32 GB card (the working config in Status).
+
+### Remaining Phase-A work (in priority order)
+
+1. ~~THE BLOCKER — NaN logits~~ **DONE**: gap #10, the carve dropped gemma-4's `layer_scalar` — fixed + regression-
+   pinned in tests; full 48-layer real-weight probe NaN-free with the trajectory matching HF exactly.
+2. **Re-run the end-to-end serve A/B on a 5090** (`validate_gemma4_serve.py`; fully scripted — detached harness,
+   sampler, diag) — expected to pass now; this is the Phase-A exit criterion.
+3. **Pin vLLM ≥ 0.23 for the serving extra** — 0.22.1 cannot dispatch gemma-4's 512-dim global attention.
+4. **Share constants** between the symbolic and decode-bucket programs (kills the 2× weights, keeps decode speed).
+5. **Pool activation buffers** across per-layer programs (removes the `num_layers` scaling).
+6. **PLE** — still out of scope for v1 (12B is dense); only for the deferred `gemma-4-E2B/E4B`.
 
 ## Phase B — prebuilt-kernel image
 
-### What "prebuilt" means for serving
-
-The generative path compiles, per layer, **two dynamic-`num_tokens` programs** (`pre` + `post`) plus **static
-decode-bucket twins** ([gen_runner.py](emmy/serving/gen_runner.py) — up to ~4 capacity programs/layer). Those are the
-kernels to warm. The cubin cache is content-addressed on `sha1(source, name, arch, toolkit_tag, flags)`
-([nvcc.py:105](emmy/compiler/backend/cuda/nvcc.py#L105)); a prebuilt cubin is reused iff all five match what the server
-regenerates at start.
+**Gated on Phase A succeeding end-to-end** — there is nothing to warm until the server runs.
 
 ### Cache-key parity contract
 
+A prebuilt cubin is reused iff all five of `sha1(source, name, arch, toolkit_tag, flags)`
+([nvcc.py](emmy/compiler/backend/cuda/nvcc.py)) match what the server regenerates:
+
 - `source` — same emmy wheel + same GPU featurization (a real 5090) + offline prior (pinned in wheel) + same serving
-  specs (dtype / max-model-len / decode bucket).
+  specs (dtype / max-model-len / decode bucket — note `EMMY_GEN_DECODE_BUCKET` now changes which programs exist).
 - `name` — `op.kernel_name` verbatim.
-- `arch` — target cap + `uses_tma`: `sm_120` / `sm_120a` (5090).
-- `toolkit_tag` — warm with the **image's** `nvcc` (CUDA 13.0), not the host's 13.3.
+- `arch` — target cap + `uses_tma`: `sm_120` / `sm_120a`.
+- `toolkit_tag` — warm with the **image's** `nvcc`, not the host's.
 - `flags` — `-O3`: leave `EMMY_NVCC_FLAGS` empty; never warm with tune's `-Xcicc -O1`.
 
-`prior.json`: **offline-prior-only for v1** — the repo-pinned `OfflinePrior` (renamed from `AnalyticPrior`) ships in the
-wheel and is deterministic at both ends; the learned `OnlinePrior` falls back to it when absent/untrusted
-(`FallbackPrior`). One global, GPU-agnostic prior;
-no per-GPU file. A real-5090 tune is a later perf upgrade, not a blocker.
+`prior.json`: **offline-prior-only for v1** — the repo-pinned `OfflinePrior` ships in the wheel and is deterministic at
+both ends; the `OnlinePrior` falls back to it when absent/untrusted (`FallbackPrior`). One global, GPU-agnostic prior; no
+per-GPU file. A real-5090 tune is a later perf upgrade, not a blocker.
 
-### Warming the serving cubins
+### Warm + bake
 
-The serving programs are built at engine start on the GPU, so the reliable warm is to **start the server once on the
-5090** (inside a container from the image → `toolkit_tag` = image nvcc, `-O3`) and let it compile the pre/post +
-decode-bucket kernels, then snapshot `EMMY_CUBIN_CACHE`.
-
-- **5090 set (the only v1 set)** — this is the *same* card session as Phase-A end-to-end validation, so it's one 5090
-  rental, not two: validate correctness, then snapshot the warmed cache.
-- **4090 set — deferred** (12B doesn't fit; it returns with `gemma-4-E2B`, which also needs PLE). The GPU-less
-  `--target sm_120` + `DEFAULT_GPU`=5090 cross-compile technique from the earlier draft only matters if that 4090
-  target comes back — it is not needed now.
-
-Bake the 5090 cubin set into one image layer (`COPY --from=warm`), producing the released tag.
-
-### Image + make targets
-
-- Base **`vllm/vllm-openai:v0.22.1`** (the existing `docker/vllm-emmy/Dockerfile` — vLLM + `emmy` plugin already
-  wired). Add the warmed cache; keep `EMMY_CUBIN_CACHE` under the HF cache mount.
-- New `make gemma4-serve-image` / `-push` mirroring `Makefile:69-74` (`vllm-emmy-image`/`-push`); tag
-  `cloudriftai/vllm-emmy-gemma4-12b:<ver>-<sha>`.
-
-### Phase-B validation → verify: 0 new compiles on the 5090
-
-Snapshot the cubin dir file set, start the server + issue one request, diff the file set — **empty diff = 100% hit** —
-on the 5090.
+Start the server once on a real 5090 (inside a container from the image → `toolkit_tag` = image nvcc, `-O3`), let it
+compile, snapshot `EMMY_CUBIN_CACHE`, and bake it in (`COPY --from=warm`). Base
+**`vllm/vllm-openai`** (`docker/vllm-emmy/Dockerfile` — vLLM + plugin already wired); new `make gemma4-serve-image` /
+`-push` mirroring the `vllm-emmy-image` targets. **Verify:** snapshot the cubin dir, start + issue one request, diff the
+file set — empty diff = 100% hit.
 
 ## Risks / open questions
 
-- **Phase A is the bulk of the effort and can slip the timeline.** The 4-norm carve + per-layer window/RoPE is a real
-  feature; scope it before committing to Phase B dates.
-- **Serving needs a real 5090 to validate.** Correctness + the hit-rate check both run on the actual card (rent for
-  minutes); there is no offline substitute for the serving path. (The CPU carve unit test de-risks Phase A cheaply
-  before the rental.)
-- **`total_mem` featurization drift** (second-order): the memorized 5090 VRAM vs a live 5090's probed bytes differ
-  slightly; if the offline prior is sensitive for any serving kernel, that kernel misses once and recompiles (correct,
-  not free). The real-5090 hit-rate check catches it; fix by pinning the 5090 spec or wiring
-  `probe_live_features(fallback_name=…)`.
+- **The blocker is numerics, not hardware.** The NaN reproduces wherever the kernels run; it is debuggable locally on
+  the 4080 with real weights, so no rental is needed until the final re-validation. (The memory artifacts are worked
+  around by config; the real fixes — shared constants, pooled buffers — still matter for a deployable footprint, since
+  emmy's currently scales with `num_layers`.)
+- **`total_mem` featurization drift** (second-order): memorized 5090 VRAM vs a live 5090's probed bytes differ slightly;
+  if the offline prior is sensitive for any serving kernel, that kernel misses once and recompiles (correct, not free).
+  The real-5090 hit-rate check catches it; fix by pinning the 5090 spec or wiring `probe_live_features(fallback_name=…)`.
+- **Tiny-model tests can't catch checkpoint-shape bugs.** Every unified-wrapper bug above was invisible to the
+  synthetic `Gemma4TextConfig` tests. Consider a cheap config-shape assertion against the real `text_config`.
 
 ### Decisions
 
-- **Gemma-4 variant — DECIDED: `gemma-4-12B`, served on the 5090 for v1.** No PLE (gap #8 out of scope); 4090 deferred.
-- **Serving dtype / max-model-len / decode bucket** (open) — set which kernels get warmed; default to the `emmy serve`
-  defaults (fp16, the runner's dynamic `num_tokens` specs + decode bucket 16). Confirm max-model-len for the release.
+- **Gemma-4 variant — `gemma-4-12B`, 5090, v1.** No PLE; E2B/E4B (PLE + shared-KV) deferred.
+- **Serving dtype / max-model-len / decode bucket** (open) — sets which kernels get warmed. `decode_bucket` is now a
+  released knob and part of the cache key, so pin it for the release.
 - Image: single 5090 tag for v1 (arch-keyed cache; a 4090 set can be added later without collision).
-- `prior.json`: **offline-prior-only for v1**; optional real-5090 `OnlinePrior` tune later purely for perf.
 
 ## Notes
 
-- `plans/` is at the 10-file cap; adding this makes 11. Prune one executed/obsolete plan at commit time to stay ≤10.
+- `plans/` is at 11 (cap 10). Prune one executed/obsolete plan at commit time.

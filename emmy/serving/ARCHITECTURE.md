@@ -78,8 +78,24 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   also compiles a **static M=`decode_bucket` (default 16)** `pre`/`post` twin per layer and uses it when
   `num_tokens ≤ bucket` (pad → run → slice the real rows) — the symbolic hint-512 M-tile is ~66× too slow at decode
   M=1; falls back to symbolic above the bucket or if a static compile fails. So
-  up to 4 capacity programs/layer — a real memory-budget risk.
+  up to 4 capacity programs/layer — a real memory-budget risk, and **`EMMY_GEN_DECODE_BUCKET=0`**
+  (`config.gen_decode_bucket`) disables the twin, ~halving the on-GPU weight footprint at the cost of decode speed.
+  **Multimodal wrappers:** the trunk is resolved through `language_model` (gemma-4 "unified" nests the decoder stack +
+  embed/norm there) and the text dims come from `config.text_config`.
+
+  > **Memory budget (measured, gemma-4-12B / 32 GB RTX 5090).** Serving the 12B does **not** fit today, for two reasons
+  > that are emmy artifacts rather than inherent costs — stock vLLM serves the same model on the same card:
+  > 1. the decode twin binds a **second copy** of every layer's weights (each `_compile_split` does its own
+  >    `bind_constants` → `CompiledProgram.build`), so weights land at ~2× (~44 GB) — `EMMY_GEN_DECODE_BUCKET=0` is the
+  >    stopgap; **sharing the constants** between the symbolic and decode programs is the real fix;
+  > 2. **every layer's program retains its own capacity-sized activation buffers** (~350 MB/layer at
+  >    `max_num_batched_tokens=4096` ⇒ ~17 GB across 48 layers), where stock vLLM reuses one transient buffer across
+  >    layers. Pooling/sharing those buffers is the fix; until then emmy's footprint scales with `num_layers`.
 - `vllm_model_gen.py` — `EmmyGenModel` (Phase 3; the generative vLLM model class; Qwen3 / Llama / **Gemma-3/4**).
+  Resolves `mc.hf_config` through **`text_config`** first (gemma-4's multimodal "unified" checkpoint nests every text
+  attribute — `layer_types` / `rope_parameters` / `sliding_window` / vocab+hidden size / `final_logit_softcapping` —
+  under it), and accepts an `*embed_tokens.weight` alias for the tied `lm_head` (that checkpoint nests the embedding at
+  `model.language_model.embed_tokens.weight`).
   **NOT** `IsAttentionFree`: it builds real vLLM `Attention` layers (one per decoder layer, unique `prefix` → vLLM
   allocates a KV-cache spec and runs paged attention; each is built at its **per-layer** dims (`runner.layer_meta` —
   Gemma-4 global layers use a larger head_dim) and gets `per_layer_sliding_window` so Gemma's sliding/global layers

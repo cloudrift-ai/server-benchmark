@@ -32,6 +32,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
+from emmy import config as emmy_config  # aliased: `config` is the HF config in this module
 from emmy.serving.gen_runner import EmmyGenRunner
 from emmy.serving.vllm_model import _trunk_dtype_str
 
@@ -81,7 +82,9 @@ class EmmyGenModel(nn.Module):
     def __init__(self, *, vllm_config, prefix: str = ""):
         super().__init__()
         mc = vllm_config.model_config
-        config = mc.hf_config
+        # Multimodal wrappers (gemma-4 "unified") nest the text attributes (layer_types,
+        # rope_parameters, sliding_window, vocab/hidden size, final softcap) under ``text_config``.
+        config = getattr(mc.hf_config, "text_config", mc.hf_config)
         self.config = config
         self.dtype = mc.dtype
 
@@ -106,7 +109,9 @@ class EmmyGenModel(nn.Module):
                 f"serve with --max-num-batched-tokens {DYNAMIC_DIM_MAX} or lower"
             )
 
-        self.runner = EmmyGenRunner.create(model_id=mc.model, dtype_str=_trunk_dtype_str(mc.dtype))
+        self.runner = EmmyGenRunner.create(
+            model_id=mc.model, dtype_str=_trunk_dtype_str(mc.dtype), decode_bucket=emmy_config.gen_decode_bucket()
+        )
         n_layers = self.runner.num_layers
 
         sliding_window = getattr(config, "sliding_window", None)
@@ -174,6 +179,9 @@ class EmmyGenModel(nn.Module):
             k = torch.from_numpy(np.ascontiguousarray(k_np)).to(device)
             v = torch.from_numpy(np.ascontiguousarray(v_np)).to(device)
             q, k = self.rotary_emb[layer](positions, q, k)  # A2: per-layer RoPE (Gemma local/global theta)
+            # Some rotary impls (e.g. 0.22's proportional Gemma4 rope) promote to fp32; flash-attn
+            # rejects anything but fp16/bf16, so restore the trunk dtype (no-op when already right).
+            q, k = q.to(self.dtype), k.to(self.dtype)
             attn_out = self.attn[layer](q, k, v)  # vLLM paged attention (pulls attn_metadata from forward context)
             hidden_np = self.runner.forward_layer_post(layer, attn_out.detach().cpu().numpy(), residual_np)
         hidden_np = self.runner.final_norm(hidden_np)
@@ -187,6 +195,7 @@ class EmmyGenModel(nn.Module):
             residual = hidden
             q, k, v = self.runner.forward_layer_pre_device(layer, hidden)
             q, k = self.rotary_emb[layer](positions, q, k)  # A2: per-layer RoPE (Gemma local/global theta)
+            q, k = q.to(self.dtype), k.to(self.dtype)  # rotary may promote to fp32; flash-attn needs fp16/bf16
             attn_out = self.attn[layer](q, k, v)  # vLLM paged attention
             hidden = self.runner.forward_layer_post_device(layer, attn_out, residual)
         return self.runner.final_norm_device(hidden)
@@ -201,7 +210,8 @@ class EmmyGenModel(nn.Module):
     def load_weights(self, weights):
         """vLLM owns ONLY ``lm_head`` (the runner already loaded embed + trunk). Load
         ``lm_head.weight`` from the checkpoint; when ``tie_word_embeddings`` the checkpoint
-        may carry only ``embed_tokens.weight``, so accept that alias for the head."""
+        may carry only the embedding, so accept an ``*embed_tokens.weight`` alias for the head
+        (the multimodal 'unified' checkpoint nests it at ``model.language_model.embed_tokens.weight``)."""
         param = self.lm_head.weight
         loader = getattr(param, "weight_loader", default_weight_loader)
         tied = getattr(self.config, "tie_word_embeddings", False)
@@ -210,7 +220,7 @@ class EmmyGenModel(nn.Module):
             if name == "lm_head.weight":
                 loader(param, w)
                 loaded.add("lm_head.weight")
-            elif tied and name in ("model.embed_tokens.weight", "embed_tokens.weight") and "lm_head.weight" not in loaded:
+            elif tied and name.endswith("embed_tokens.weight") and "lm_head.weight" not in loaded:
                 loader(param, w)
                 loaded.add("lm_head.weight")
         return loaded

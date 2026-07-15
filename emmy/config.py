@@ -50,6 +50,7 @@ NO_NVCC = "EMMY_NO_NVCC"
 GPU_LOCK = "EMMY_GPU_LOCK"
 NCU_CHILD = "EMMY_NCU_CHILD"
 SERVING_STATIC = "EMMY_SERVING_STATIC"
+GEN_DECODE_BUCKET = "EMMY_GEN_DECODE_BUCKET"
 READABLE = "EMMY_READABLE"
 
 _CACHE_ROOT = Path.home() / ".cache" / "emmy"
@@ -301,6 +302,15 @@ def serving_static(default: bool = False) -> bool:
     dynamic-seq kernels miscompute batch>1, so it is a deliberate opt-in, not a
     default. See `serving/ARCHITECTURE.md`."""
     return _bool(SERVING_STATIC, default)
+
+
+def gen_decode_bucket(default: int = 16) -> int:
+    """``EMMY_GEN_DECODE_BUCKET`` — the generative runner's static decode-bucket M
+    (default 16). Set to **0 to disable** the per-layer decode-bucket programs, which
+    roughly halves the runner's on-GPU weight footprint (no static `pre`/`post` twin) at
+    the cost of slower decode — needed to fit a large model (e.g. gemma-4-12B) on a
+    smaller card. See `serving/gen_runner.py`."""
+    return int_env(GEN_DECODE_BUCKET, default)
 
 
 def bench_backends_raw(cli_value: str | None) -> str:

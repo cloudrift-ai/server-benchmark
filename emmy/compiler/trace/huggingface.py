@@ -321,11 +321,18 @@ def build_attention_split_wrapper(block):
             # MLP, each applied BEFORE its residual add. Their presence selects the layout below.
             self.pre_feedforward_layernorm = getattr(block, "pre_feedforward_layernorm", None)
             self.post_feedforward_layernorm = getattr(block, "post_feedforward_layernorm", None)
+            # Gemma-4 scales the whole layer output by a learned per-layer scalar. Checkpoints carry
+            # values far from 1 (the 12B ranges 0.005–0.92), so dropping it inflates the residual
+            # stream ~8× by mid-network and overflows fp16. Fresh (random-init) models hold 1.0,
+            # which is why parity tests must set it explicitly to stay sensitive. register_buffer
+            # (it is a buffer on the block) so the compile's constant binding picks it up.
+            self.register_buffer("layer_scalar", getattr(block, "layer_scalar", None))
 
         def forward(self, attn_out, residual):
             if self.pre_feedforward_layernorm is not None:  # Gemma 4-norm
                 h = residual + self.post_attention_layernorm(self.o_proj(attn_out))
-                return h + self.post_feedforward_layernorm(self.mlp(self.pre_feedforward_layernorm(h)))
+                h = h + self.post_feedforward_layernorm(self.mlp(self.pre_feedforward_layernorm(h)))
+                return h if self.layer_scalar is None else h * self.layer_scalar
             h = residual + self.o_proj(attn_out)  # Llama/Qwen: residual1 + o_proj(SDPA)
             return h + self.mlp(self.post_attention_layernorm(h))  # residual2 + MLP
 

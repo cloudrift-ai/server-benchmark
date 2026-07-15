@@ -48,6 +48,7 @@ from emmy.compiler.ir.schedule import Raster, Stage, WarpSpec, has_scalar_atom_a
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.tile import Contraction, Map, Placement, ReducePlan, Reduction, TileOp, TilePlan
+from emmy.compiler.ir.tile.ir import gmem_row_stride
 from emmy.compiler.ir.tile.ops import axis_role, nodify_reduce, reduce_loop
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import map_cone, semiring_binding
@@ -1478,16 +1479,17 @@ def _narrow_flash_forms(forms: list[TileOp], head: Contraction, pv: Contraction,
 def _stamp_twisted_split(rows: list[TileOp], kv_name: str, plan: ReducePlan) -> list[TileOp]:
     """The flash split-KV rows: each warp row with the pinned cross-CTA partition stamped on its
     :class:`Reduction` node (``030_split_reduce`` consumes it) and spelled on ``REDUCE@<kv>``. Per-row
-    legality: a static kv extent divisible by ``cta``, and a slice divisible by the row's own
+    legality for a STATIC kv: an extent divisible by ``cta`` and a slice divisible by the row's own
     streaming key block (the staged chunking + fragment masks assume block-whole slices); an
-    illegal row is dropped, not degraded."""
+    illegal row is dropped, not degraded. A SYMBOLIC kv always stamps — ``030_split_reduce`` builds
+    the bn-aligned runtime slice width and the absolute ``bound`` the realizer stops/masks against."""
     out: list[TileOp] = []
     for r in rows:
         red = r.op.source if isinstance(r.op, Map) else r.op
         head = red.partial[0]
         bn = head.tile.regs[1] * head.tile.atom.shape[1]
         ext = red.axis.extent
-        if not ext.is_static or ext.as_static() % plan.cta != 0 or (ext.as_static() // plan.cta) % bn != 0:
+        if ext.is_static and (ext.as_static() % plan.cta != 0 or (ext.as_static() // plan.cta) % bn != 0):
             continue
         op2 = _with_reduce(r.op, plan)
         out.append(replace(r, op=op2, knobs={**r.knobs, _at(REDUCE, kv_name): plan.spell()}))
@@ -1741,9 +1743,13 @@ def _twisted_stage_candidates(
             if r is not None:
                 return [r]
             logger.warning(
-                "STAGE pin %r does not resolve against the warp-flash stream (cp.async over a static, "
-                "%d-key-block-divisible kv); the flash kernel stays gmem-direct",
+                "STAGE pin %r does not resolve against the warp-flash stream at this geometry "
+                "(%d-key block x head_dim %d: needs an async transport, a %d-key-block-divisible static kv, "
+                "TMA box dims <= 256, and K/V(+staged-Q for alt) slabs within the smem budget); "
+                "the flash kernel stays gmem-direct",
                 pinned,
+                bn,
+                head_dim,
                 bn,
             )
         return [None]
@@ -1779,7 +1785,8 @@ def _twisted_warp_options(
     per CTA, each owning ``atom_m`` query rows; the value axis leaves the grid. Each geometry row
     crosses with its K/V operand-stage candidates (:func:`_twisted_stage_candidates` — gmem-direct
     option-0, then the resolver-gated cp.async ring depths, keyed ``STAGE@<kv>``). An additive
-    ``(m, kv)`` score bias is not realizable at the fragment tier → ``[]``. A warp ``TILE`` pin
+    ``(m, kv)`` score bias (the explicit SDPA ``attn_mask``) realizes as a per-element fragment
+    bias load (``FragmentBiasAdd``); a bias indexed beyond ``(m, kv)`` declines. A warp ``TILE`` pin
     narrows the grid to the pinned geometry (loud on a divisibility violation — the pin contract);
     a pin that doesn't fit the flash form (wrong atom / a column split / a foreign ``bk``) declines
     the tier with a log line — the standard pin-validity degrade, since a bare warp pin may target
@@ -1810,8 +1817,38 @@ def _twisted_warp_options(
     kv_ext, m_ext = red.axis.extent, head.m_axis.extent
     m_name, kv_name = head.m_axis.name, red.axis.name
     for s in list(red.partial)[1:]:
-        if isinstance(s, Load) and s.index and {m_name, kv_name} <= {v for e in s.index for v in e.free_vars()}:
-            return []  # an additive (m, kv) score bias — fragment-unrealizable, stay scalar
+        if isinstance(s, Load) and s.index and not {v for e in s.index for v in e.free_vars()} <= {m_name, kv_name}:
+            return []  # a score bias indexed beyond (m, kv) — no fragment realization for it
+        # An additive (m, kv) score bias (the explicit SDPA attn_mask) IS realizable: the fragment
+        # realizer loads the bias tile per element at its absolute coordinates (FragmentBiasAdd).
+
+    # TMA staging derives its box-origin coords POSITIONALLY (batch dims = the load index's leading
+    # components, the kv row at [-2], the contiguous head_dim last) — a K/V trace whose kv axis sits
+    # elsewhere (the un-transposed (B, S, H, D) layout: kv at position 1) would leak the raw axis
+    # var into the emitted coords (an undefined identifier in the kernel). cp.async is unaffected —
+    # its fill substitutes by axis NAME. Decline the tma moves for such layouts.
+    def _kv_penultimate(load) -> bool:
+        idx = load.index
+        return (
+            len(idx) >= 2
+            and isinstance(idx[-2], Var)
+            and idx[-2].name == kv_name
+            and not any(kv_name in e.free_vars() for e in (*idx[:-2], idx[-1]))
+        )
+
+    tma_ok = tma_ok and _kv_penultimate(head.b_load) and _kv_penultimate(pv.b_load)
+    # The fragment loaders step gmem rows at the buffer's REAL row stride, derived from the load
+    # index + buffer shape (``gmem_row_stride`` — H·D on an un-transposed (B, S, H, D) trace,
+    # where the old trailing-extent assumption read the wrong rows: the gemma layer-0 NaN).
+    # Underivable strides (an axis split across index components, a non-affine use, a symbolic
+    # trailing extent) have no fragment realization — decline the tier.
+    strides = (
+        gmem_row_stride(head.a_operand, m_name, tile.inputs),
+        gmem_row_stride(head.b_load, head.n_axis.name if head.b_trans else head.k_axis.name, tile.inputs),
+        gmem_row_stride(pv.b_load, pv.n_axis.name if pv.b_trans else kv_name, tile.inputs),
+    )
+    if any(s is None for s in strides):
+        return []
     bk = head_dim.as_static() // atom_k
     # The f16-accumulate PV sibling (``f16acc_ok`` — the F16_MMA_F32_ACC / FAST_MATH gate): each
     # geometry row doubles with a variant whose **PV plan** rides the ``_f16acc`` atom (the O
@@ -1899,6 +1936,7 @@ def _twisted_warp_options(
             if ax.name != pv.n_axis.name
         )
         place = Placement(free=tile.place.free, grid=grid)
+
         # Both contractions' plans are stamped (each keyed on its node's k axis), the reduce
         # partition decided-empty, and the K/V operand stage on the STREAM axis (the resolved
         # spelling, or the explicit OFF ``""`` — the honest-stamping rule), so every flash leaf
@@ -1907,9 +1945,28 @@ def _twisted_warp_options(
         # ``_wspec_workers`` gates the thread budgets — the aux band must not exceed the
         # ``32·um`` compute band); a degraded candidate is skipped rather than duplicating the
         # uniform row.
-        for stage in _twisted_stage_candidates(
-            kv_ext, bn, head_dim.as_static(), d_v.as_static(), elem_bytes, budget, tma_ok, m_rows=um * fm * atom_m
-        ):
+        # Staging byte-copies the operands into slabs typed at the ATOM's operand width — an
+        # operand traced at a different dtype (the gemma layer's f32 V intermediate) would deposit
+        # wrong-sized elements and drain garbage (the gemma layer-0 NaN's second head). Gmem-direct
+        # fragment loads convert per element, so a dtype-mismatched operand keeps the warp tier but
+        # declines its stage rows; ``alt`` additionally stages Q, so it also needs a matching A.
+        def _buf_dtype_name(load) -> str | None:
+            t = tile.inputs.get(load.input) if tile.inputs else None
+            return getattr(getattr(t, "dtype", None), "name", None)
+
+        b_dt = atom.operand_dtype("b").name
+        kv_stage_ok = _buf_dtype_name(head.b_load) == b_dt and _buf_dtype_name(pv.b_load) == b_dt
+        q_stage_ok = _buf_dtype_name(head.a_operand) == atom.operand_dtype("a").name
+        stage_cands = (
+            [None]
+            if not kv_stage_ok
+            else _twisted_stage_candidates(
+                kv_ext, bn, head_dim.as_static(), d_v.as_static(), elem_bytes, budget, tma_ok, m_rows=um * fm * atom_m
+            )
+        )
+        for stage in stage_cands:
+            if stage is not None and stage.alt and not q_stage_ok:
+                continue  # alt stages Q through smem too — a dtype-mismatched Q cannot byte-copy
             wspecs = list(WSPEC.narrow(wspec_moves())) if (stage is not None and stage.transport == "tma" and not stage.alt) else [""]
             for wspec_cand in wspecs:
                 workers, wspec_spec = _wspec_workers(wspec_cand, stage, 32 * um)

@@ -154,9 +154,15 @@ leaf row spelling the same `TILE@<qk_k>` / `TILE@<pv_k>` / `REDUCE@<kv>` key set
 tile). A cross-CTA `REDUCE=g<n>k` pin selects the **flash split-KV** warp rows instead (pin-driven): the plan stamps
 onto each row's `Reduction` node and `030_split_reduce` realizes it as a fragment-resident partial (the kv stream windowed to
 the CTA's slice, its absolute base on `Reduction.offset`; raw `(m, l, O)` state to an f32 `__partial` workspace) plus
-an LSE-combine finalize — kernel finalize only (the twisted `e^{Δm}` rescale can't be an atomic), static
-block-divisible kv only, and it pays where the un-split grid starves the SMs (few heads / short query axis: the
-2-head hd256 seq-512 shape runs 33.6 → 11.3 µs under `g8k`, parity with torch SDPA's internally-split flash). Any
+an LSE-combine finalize — kernel finalize only (the twisted `e^{Δm}` rescale can't be an atomic). A static kv must be
+block-divisible; a **symbolic kv splits too**: the slice width is the bn-aligned runtime `ceil(S/(cta·bn))·bn` (a
+composite `Dim`) and each slice stops/masks at its absolute end `min((s+1)·B, S)` (`Reduction.bound` — a mid-tensor
+slice end reads VALID next-slice keys the extent-only tail masks would keep), an empty last slice contributing the
+exact carrier identities; the split partial guards every state write with the symbolic-M `m_guard` (the tail CTA's
+clamp-read overhanging query rows would otherwise write into the next head's workspace rows). It pays where the
+un-split grid starves the SMs (few heads / short query axis: the 2-head hd256 seq-512 shape runs 33.6 → 11.3 µs
+under `g8k`, parity with torch SDPA's internally-split flash; the symbolic hd512 dynM stream 135.2 → 116.7 µs
+under `g2k` on the 5090). Any
 other non-empty `REDUCE` pin remains the scalar escape; a **warp** `TILE` pin keeps the mma rows alone (loud on a
 divisibility violation, declining with a log line when the pin doesn't fit the flash form — a bare warp pin may target
 another kernel), while a non-warp `TILE` pin narrows the flash rows by their stamped per-node spellings

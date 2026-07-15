@@ -280,8 +280,11 @@ within-block → `SHFL`+`SMEM` tree, cross-CTA → `ATOMIC`/`KERNEL` — and eve
 (`emit_combine` at scalar residence, this realizer at fragment residence, `030_split_reduce` as the graph rewrite); only the
 residence-specific realization differs. Everything realizes from structure — the
 head contraction's `ldmatrix`/`mma.sync` off its node geometry (`_frag_contraction`); the score prologue stmt-by-stmt
-(`Assign` → `FragmentApply`, a coordinate `Select` → `FragmentMask` with the keep-predicate negated, loop-invariant
-constant `Load`s hoisted); the streaming merge REGENERATED from the carrier's channel spec (pivot → rowmax + running
+(`Assign` → `FragmentApply`, a coordinate `Select` → `FragmentMask` with the keep-predicate negated, an
+`(m, kv)`-indexed additive bias `Load` + `add` — SDPA's explicit `attn_mask`, the HF precomputed causal /
+sliding-window band — → a per-fragment `FragmentBiasAdd` reading the mask at each element's absolute coordinates
+(previously the whole kernel demoted to the scalar tier — every real-model gemma attention layer at seq > window),
+loop-invariant constant `Load`s hoisted); the streaming merge REGENERATED from the carrier's channel spec (pivot → rowmax + running
 stats + α-rescale; denom → rowsum; the expect channel's ⊗ `lift` IS the P@V node, the register-resident P converted
 straight into its A-operand fragments by the **C→A register repack** (`FragmentRepack` — the `AtomKind.c_to_a_repack`
 lane-map compatibility: the m16n8 C fragment is elementwise lane-aligned with the m16k16 A fragment's k-halves, so

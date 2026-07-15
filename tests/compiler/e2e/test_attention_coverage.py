@@ -1044,6 +1044,51 @@ def test_warp_flash_split_kv_matches_torch(monkeypatch, variant):
 
 
 @requires_cuda
+@pytest.mark.parametrize(
+    ("variant", "reduce", "seq"),
+    [
+        ("causal", "g2k", 300),  # non-block-multiple slice tail (B=160, slice 1 walks 140 keys)
+        ("causal", "g4k", 40),  # empty last slice (B=16: slice 3 starts past S, contributes identities)
+        ("plain", "g2k", 40),  # un-causal slice stop (kv_end from the slice bound alone)
+        ("causal", "g2k", 512),  # block-whole slices at the hint size
+    ],
+)
+def test_warp_flash_split_kv_symbolic_matches_torch(monkeypatch, variant, reduce, seq):
+    """SYMBOLIC flash split-KV: the slice width is the bn-aligned runtime ``B = ceil(S/(cta·bn))·bn``
+    and each slice stops/masks at its absolute ``bound = min((s+1)·B, S)`` (``Reduction.bound``) —
+    a mid-tensor slice end reads VALID next-slice keys the extent-only tail masks would keep, and
+    the tail CTA's overhanging query rows must NOT write their state into the next head's ws rows
+    (the split partial's ``m_guard``, the regression this test pins). One cached kernel pair serves
+    every runtime size, including an empty last slice (pure carrier identities)."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_REDUCE", reduce)
+    B, H, D = 1, 4, 64
+    module = _Causal() if variant == "causal" else _Sdpa()
+    sd = torch.export.Dim("seq_len", min=4, max=4096)
+    seed = tuple(torch.randn(B, H, 16, D, dtype=torch.float16) for _ in range(3))
+    backend, compiled, graph, kernels = _trace(module, seed, dynamic_shapes={"q": {2: sd}, "k": {2: sd}, "v": {2: sd}})
+    assert len(kernels) == 2, f"symbolic split-KV flash should be partial + finalize, got {len(kernels)}"
+    partial = next(n for n in kernels if n.endswith("__partial"))
+    src = compiled.nodes[partial].op.kernel_source
+    assert "emmy_c_to_a" in src, "the symbolic split partial must keep the fused warp-chain"
+    assert "int seq_len" in src, "the symbolic split partial must carry the runtime seq_len arg"
+
+    torch.manual_seed(seq)
+    q, k, v = (torch.randn(B, H, seq, D, dtype=torch.float16) for _ in range(3))
+
+    def ref():
+        with torch.no_grad():
+            out = F.scaled_dot_product_attention(q.cuda(), k.cuda(), v.cuda(), is_causal=variant == "causal")
+            return out.cpu().flatten().float().numpy()
+
+    data = {n: t for n, t in zip(graph.inputs, (q.numpy(), k.numpy(), v.numpy()), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=ref)
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    max_diff = float(np.max(np.abs(got - eager)))
+    assert max_diff < 5e-3, f"symbolic split-KV flash ({variant}/{reduce}, seq={seq}) max_diff={max_diff:.2e}"
+
+
+@requires_cuda
 @pytest.mark.parametrize("seq", [8, 16, 37, 64])
 def test_warp_chain_dynamic_matches_torch(monkeypatch, seq):
     """Symbolic ``seq_len`` warp-chain flash. ONE cached fused-TC kernel carrying ``int seq_len``
@@ -1500,6 +1545,94 @@ def test_sdpa_explicit_additive_mask(_chain_tile_pins, n_heads: int, seq_len: in
     mask = mask[None, None]
     dpd, eager = _run_module_with_eager(m, (q, k, v, mask), {"q": q.numpy(), "k": k.numpy(), "v": v.numpy(), "mask": mask.numpy()})
     _assert_close(dpd, eager)
+
+
+@requires_cuda
+def test_warp_flash_f32_value_operand_converts(monkeypatch):
+    """A V operand traced at f32 (gemma-4's V-norm: ``v_f16 * f32 row stat`` promotes, and the
+    ``.half()`` cast folds into the flash op's load) must CONVERT at the fragment load, not
+    reinterpret: the gmem-direct loaders take the fragment element type explicitly
+    (``<float, __half>``) and round each element — the raw-bit-pattern regression NaN'd every
+    even output column and scribbled past the 4-byte register. The staged rows decline (a
+    cp.async byte-copy cannot convert), so the kernel stays warp-tier gmem-direct."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w2x1/f1x4/k4")
+    monkeypatch.setenv("EMMY_STAGE", "d2/cp/ring")  # must DECLINE: the f32 V cannot byte-copy
+    monkeypatch.setenv("EMMY_WSPEC", "")
+    torch.manual_seed(5)
+    S, D = 128, 64
+
+    class VNormSdpa(torch.nn.Module):
+        def forward(self, q, k, v, s):
+            v32 = v.float() * s  # per-(token, head) f32 stat — promotes V to f32 in the trace
+            return F.scaled_dot_product_attention(q, k, v32.half())
+
+    q, k, v = (torch.randn(1, 4, S, D, dtype=torch.float16) for _ in range(3))
+    s = (torch.rand(1, 4, S, 1) + 0.5).float()
+    backend, compiled, graph, kernels = _trace(VNormSdpa(), (q, k, v, s))
+    srcs = "\n".join(compiled.nodes[n].op.kernel_source for n in kernels)
+    assert "mma.sync" in srcs, "the f32-V flash must stay on the warp (mma) tier"
+    assert "<float, __half>" in srcs, "the f32 operand must convert through the explicit fragment type"
+    assert "_v_smem" not in srcs, "staging must decline for a dtype-mismatched operand (byte-copy cannot convert)"
+
+    def ref():
+        with torch.no_grad():
+            v32 = (v.cuda().float() * s.cuda()).half()
+            return torch.nn.functional.scaled_dot_product_attention(q.cuda(), k.cuda(), v32).cpu().flatten().float().numpy()
+
+    data = {n: t.numpy() for n, t in zip(graph.inputs, (q, k, v, s), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=ref)
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    assert not np.any(np.isnan(got)), "f32-V warp flash produced NaN (the reinterpret regression)"
+    max_diff = float(np.max(np.abs(got - eager)))
+    assert max_diff < 5e-3, f"f32-V warp flash max_diff={max_diff:.2e}"
+
+
+def _band_mask(seq: int, window: int) -> torch.Tensor:
+    """A sliding-window additive float mask — causal AND within ``window`` keys of the query (the
+    HF gemma sliding-attention band): 0 where ``m - window < kv <= m``, ``-inf`` elsewhere."""
+    kv = torch.arange(seq)[None, :]
+    m = torch.arange(seq)[:, None]
+    keep = (kv <= m) & (kv > m - window)
+    return torch.where(keep, 0.0, float("-inf"))[None, None].half()
+
+
+@requires_cuda
+@pytest.mark.parametrize("stage", ["", "d2/tma/ring", "d1/cp/alt"])
+def test_warp_flash_explicit_additive_mask_matches_torch(monkeypatch, stage):
+    """An explicit additive ``attn_mask`` (the HF precomputed causal / sliding-window band)
+    realizes at the WARP tier: the score prologue's ``(m, kv)``-indexed bias ``Load`` + ``add``
+    becomes a per-element ``FragmentBiasAdd`` — each fragment element reads the mask at its
+    absolute coordinates and adds it before the softmax merge — instead of demoting the whole
+    kernel to the scalar tier (the gemma-4 seq>window regression: every layer's attention went
+    scalar and hung). Banded (sliding-window) mask; composes with the K/V staging forms."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w2x1/f1x4/k4")
+    monkeypatch.setenv("EMMY_WSPEC", "")
+    if stage:
+        monkeypatch.setenv("EMMY_STAGE", stage)
+    torch.manual_seed(3)
+    S, D = 128, 64
+    q, k, v = (torch.randn(1, 4, S, D, dtype=torch.float16) for _ in range(3))
+    mask = _band_mask(S, window=64)
+    backend, compiled, graph, kernels = _trace(_SdpaExplicitMask(), (q, k, v, mask))
+    assert len(kernels) == 1, f"masked warp flash should be one kernel, got {len(kernels)}"
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "mma.sync" in src, "the explicit-mask flash must stay on the warp (mma) tier"
+    assert "+= __half2float(mask[" in src, "the mask must realize as per-element fragment bias adds"
+    if stage == "d1/cp/alt":
+        assert "_q_smem" in src, "alt staging must compose with the mask bias"
+
+    def ref():
+        with torch.no_grad():
+            out = torch.nn.functional.scaled_dot_product_attention(q.cuda(), k.cuda(), v.cuda(), attn_mask=mask.cuda())
+            return out.cpu().flatten().float().numpy()
+
+    data = {n: t.numpy() for n, t in zip(graph.inputs, (q, k, v, mask), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=ref)
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    max_diff = float(np.max(np.abs(got - eager)))
+    assert max_diff < 5e-3, f"masked warp flash (stage={stage!r}) max_diff={max_diff:.2e}"
 
 
 def _run_self_attn_tinyllama(seq_len: int, threshold: float = 1e-4) -> None:

@@ -29,7 +29,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from ..conftest import from_pretrained_or_skip, requires_cuda
+from ..conftest import from_pretrained_or_skip, requires_cuda, requires_sm90
 
 
 class _Sdpa(torch.nn.Module):
@@ -603,7 +603,16 @@ def _run_flash(backend, compiled, graph, tensors) -> np.ndarray:
 
 
 @requires_cuda
-@pytest.mark.parametrize("stage", ["d1/cp", "d2/cp/ring", "d3/cp/ring", "d1/tma", "d2/tma/ring"])
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "d1/cp",
+        "d2/cp/ring",
+        "d3/cp/ring",
+        pytest.param("d1/tma", marks=requires_sm90),
+        pytest.param("d2/tma/ring", marks=requires_sm90),
+    ],
+)
 def test_staged_warp_flash_matches_torch(monkeypatch, stage):
     """A pinned K/V operand ``STAGE`` on the warp-flash stream: the kernel fills per-block K/V smem
     slabs (cooperative cp.async into padded rows, or rank-N TMA box copies into dense
@@ -652,7 +661,7 @@ def test_staged_warp_flash_bit_identical_to_gmem_direct(monkeypatch, stage):
 
 
 @requires_cuda
-@pytest.mark.parametrize("stage", ["d2/cp/ring", "d2/tma/ring"])
+@pytest.mark.parametrize("stage", ["d2/cp/ring", pytest.param("d2/tma/ring", marks=requires_sm90)])
 def test_staged_warp_flash_causal_and_gqa_match_torch(monkeypatch, stage):
     """The staged stream composes with the fragment causal mask and the GQA ``head // group`` K/V
     indexing — both ride the slab fill's operand index verbatim (the σ passes batch/head terms
@@ -758,6 +767,7 @@ def test_staged_flash_symbolic_cp_bit_identical_to_gmem_direct(monkeypatch, s):
 
 
 @requires_cuda
+@requires_sm90
 def test_staged_flash_stage_pin_keeps_warp_not_scalar(monkeypatch):
     """A ``STAGE`` pin keeps the flash fork on the WARP (mma) tier — only the warp tier stages, so
     the pin must not fall through to the chain / scalar reduce-partition siblings and let the prior
@@ -775,6 +785,7 @@ def test_staged_flash_stage_pin_keeps_warp_not_scalar(monkeypatch):
 
 
 @requires_cuda
+@requires_sm90
 def test_staged_flash_symbolic_tma_stages_and_matches_torch(monkeypatch):
     """A **TMA** ``STAGE`` pin on a SYMBOLIC ``seq_len`` flash STAGES the K/V stream: the
     descriptor rides the runtime globalDim and zero-fills the box overhang past the last key, so
@@ -806,6 +817,7 @@ def test_staged_flash_symbolic_tma_stages_and_matches_torch(monkeypatch):
 
 
 @requires_cuda
+@requires_sm90
 @pytest.mark.parametrize("s", [64, 100])
 def test_staged_flash_symbolic_tma_bit_identical_to_gmem_direct(monkeypatch, s):
     """The symbolic TMA-staged stream is a pure perf transform: verbatim K/V row copies, and the
@@ -938,7 +950,7 @@ def test_warp_flash_causal_tile_skip(monkeypatch):
 
 
 @requires_cuda
-@pytest.mark.parametrize("stage", ["d1/tma/alt", "d1/cp/alt"])
+@pytest.mark.parametrize("stage", [pytest.param("d1/tma/alt", marks=requires_sm90), "d1/cp/alt"])
 @pytest.mark.parametrize("variant", ["plain", "causal"])
 def test_warp_flash_alt_staging_matches_torch(monkeypatch, variant, stage):
     """The ALTERNATING single-slab staging (``STAGE=d1/tma/alt``): one K slab + one V slab on
@@ -974,7 +986,10 @@ def test_warp_flash_alt_staging_matches_torch(monkeypatch, variant, stage):
 
 
 @requires_cuda
-@pytest.mark.parametrize(("variant", "stage"), [("plain", "d1/cp/alt"), ("plain", "d1/tma/alt"), ("causal", "d1/cp/alt")])
+@pytest.mark.parametrize(
+    ("variant", "stage"),
+    [("plain", "d1/cp/alt"), pytest.param("plain", "d1/tma/alt", marks=requires_sm90), ("causal", "d1/cp/alt")],
+)
 def test_warp_flash_alt_staging_symbolic_bit_identical(monkeypatch, variant, stage):
     """The alternating staging over a SYMBOLIC ``seq_len`` — the resolver accepts it and the
     liveness scheduler's kill-point refills ride the same runtime clamp as the ring prefetch:

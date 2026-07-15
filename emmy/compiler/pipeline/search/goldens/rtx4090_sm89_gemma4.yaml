@@ -305,3 +305,366 @@ configs:
     knobs: {REDUCE: 'b64'}
     emmy_us: 3.6
     cublas_us: 4.8
+  # ---- seq-2048 tier (2026-07-14) ----------------------------------------------------------------
+  # M=2048 drops the split-K almost everywhere on this card (the grid fills; only deep-K mlp_down
+  # keeps g2k) — fm serial wins all three projections. Winners 2-3x reproduced (o_proj fm had one
+  # outlier run at 325, settled 297.6/298.0); cublas_us = live torch same-session. cp.async only
+  # (sm_89). Attention: the fm lane keeps the RING here (nt2 288.8 = 1.09x vs SDPA 314.6; fm-alt
+  # jitters 311-341 and loses) while the std lane takes alt (346.8 vs ring 360) — the alt/ring and
+  # lane preferences flip per (card, seq) as usual. Cold greedy on the unseeded 2048 attention
+  # shape deploys a w1x1 kernel at ~1080 (3.4x off) — the rows pin that.
+  - kernel: matmul
+    name: gemma4_12b.q_proj.s2048
+    M: 2048
+    N: 4096
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 430.1
+    cublas_us: 398.6
+  - kernel: matmul
+    name: gemma4_12b.q_proj.s2048
+    M: 2048
+    N: 4096
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 277.7
+    cublas_us: 398.6
+  - kernel: matmul
+    name: gemma4_12b.kv_proj.s2048
+    M: 2048
+    N: 2048
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 225.0
+    cublas_us: 209.3
+  - kernel: matmul
+    name: gemma4_12b.kv_proj.s2048
+    M: 2048
+    N: 2048
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x4/f2x4/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 171.2
+    cublas_us: 209.3
+  - kernel: matmul
+    name: gemma4_12b.o_proj.s2048
+    M: 2048
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 455.7
+    cublas_us: 446.8
+  # o_proj fm is BIMODAL on this card (297.6/298.0 vs 325.3/325.6 across four runs — a stable
+  # fast and slow mode, cause unidentified); the slow mode is recorded so replays never read as
+  # drift. Still 1.37x vs cuBLAS in the slow mode, 1.50x in the fast one.
+  - kernel: matmul
+    name: gemma4_12b.o_proj.s2048
+    M: 2048
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 325.6
+    cublas_us: 446.8
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up.s2048
+    M: 2048
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 4347.0
+    cublas_us: 2945.0
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up.s2048
+    M: 2048
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 2316.0
+    cublas_us: 2945.0
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.s2048
+    M: 2048
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 1580.0
+    cublas_us: 1493.7
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.s2048
+    M: 2048
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 1100.0
+    cublas_us: 1493.7
+  - kernel: attention
+    name: gemma4_12b.attention.hd256.s2048
+    n_heads: 16
+    seq: 2048
+    head_dim: 256
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k4', WSPEC: ''}
+    emmy_us: 346.8
+    cublas_us: 314.6
+  - kernel: attention
+    name: gemma4_12b.attention.hd256.s2048
+    n_heads: 16
+    seq: 2048
+    head_dim: 256
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', STAGE: 'd2/cp/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x32', WSPEC: ''}
+    emmy_us: 288.8
+    cublas_us: 314.6
+  # ---- global (full_attention) layers (2026-07-14) -----------------------------------------------
+  # The 8 global layers' shapes (global_head_dim=512, ONE KV head, attention_k_eq_v — see the
+  # rtx5090 twin file's section comment). Seeded on the same rented box as the rest of this file;
+  # winners 3x reproduced (spreads <=1.1% except where noted). Same structure as the 5090:
+  # q_proj_global fm wants SERIAL, o_proj_global takes g2k, and the 5090's k_proj_global fm winner
+  # spelling (w2x4/f2x4/k2 g8k) transfers verbatim — but the tiny-N k_proj sits BELOW parity on
+  # both lanes here (fm 0.93x, std 0.85x — the sm_89 kv_proj residual, worse at N=512).
+  - kernel: matmul
+    name: gemma4_12b.q_proj_global
+    M: 512
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 220.8
+    cublas_us: 211.7
+  - kernel: matmul
+    name: gemma4_12b.q_proj_global
+    M: 512
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 144.2
+    cublas_us: 211.7
+  - kernel: matmul
+    name: gemma4_12b.k_proj_global
+    M: 512
+    N: 512
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 19.6
+    cublas_us: 16.6
+  - kernel: matmul
+    name: gemma4_12b.k_proj_global
+    M: 512
+    N: 512
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x4/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 17.9
+    cublas_us: 16.6
+  - kernel: matmul
+    name: gemma4_12b.o_proj_global
+    M: 512
+    N: 3840
+    K: 8192
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 223.5
+    cublas_us: 227.6
+  - kernel: matmul
+    name: gemma4_12b.o_proj_global
+    M: 512
+    N: 3840
+    K: 8192
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 162.1
+    cublas_us: 227.6
+  # attention hd512: the alt pipeline + split-KV wins on sm_89 too (ring+g2k LOSES at 172.6 — the
+  # transports flip roles vs hd256); plain alt jitters 8.9% run-to-run (the 4090 alt jitter again),
+  # the g2k row is 0.1%-stable. Greedy reaches the warp flash but at 163.3 = 0.59x — the rank miss
+  # this row pins. Same codegen ceiling as the 5090 (255 regs, nt2-only staging, fm PV loses).
+  - kernel: attention
+    name: gemma4_12b.attention.hd512
+    n_heads: 16
+    seq: 512
+    head_dim: 512
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', REDUCE: 'g2k', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x64', WSPEC: ''}
+    emmy_us: 116.1
+    cublas_us: 95.6
+  # Q-norm over the global head_dim (8192 x 512): b128, and greedy picks it too (1.05x) — the one
+  # global-layer shape where cold greedy is already right.
+  - kernel: rms_norm
+    name: gemma4_12b.qknorm.k512
+    M: 8192
+    K: 512
+    knobs: {REDUCE: 'b128'}
+    emmy_us: 9.9
+    cublas_us: 10.4
+  # dynM twins — dynM == static parity on the matmuls here too.
+  - kernel: matmul
+    name: gemma4_12b.q_proj_global.dynM
+    M: 512
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 222.9
+    cublas_us: 195.4
+  - kernel: matmul
+    name: gemma4_12b.q_proj_global.dynM
+    M: 512
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 144.5
+    cublas_us: 195.4
+  - kernel: matmul
+    name: gemma4_12b.k_proj_global.dynM
+    M: 512
+    N: 512
+    K: 3840
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 19.7
+    cublas_us: 16.6
+  - kernel: matmul
+    name: gemma4_12b.k_proj_global.dynM
+    M: 512
+    N: 512
+    K: 3840
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x4/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 18.3
+    cublas_us: 16.6
+  - kernel: matmul
+    name: gemma4_12b.o_proj_global.dynM
+    M: 512
+    N: 3840
+    K: 8192
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 233.7
+    cublas_us: 226.2
+  - kernel: matmul
+    name: gemma4_12b.o_proj_global.dynM
+    M: 512
+    N: 3840
+    K: 8192
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 168.1
+    cublas_us: 226.2
+  # attention.hd512 dynM (bare TILE, dd spelling). SYMBOLIC split-KV (this branch) transfers the
+  # static winner's alt+g2k here too: 123.7 (3x, 0.1% spread — rock-stable where the plain alt
+  # jitters 9%) vs 139.6, an 11.4% win. Cold greedy deploys a 803.8 µs form (0.14x) — no hang,
+  # just 6x off.
+  - kernel: attention
+    name: gemma4_12b.attention.hd512.dynM
+    n_heads: 16
+    seq: 512
+    head_dim: 512
+    dtype: 'fp16'
+    causal: true
+    dynamic: true
+    knobs: {PLACE: 'fuse', REDUCE: 'g2k', STAGE: 'd1/cp/alt', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', WSPEC: ''}
+    emmy_us: 123.7
+    cublas_us: 110.6
+  # The un-split alt sibling, kept for the transfer record (the 9%-jitter row).
+  - kernel: attention
+    name: gemma4_12b.attention.hd512.dynM
+    n_heads: 16
+    seq: 512
+    head_dim: 512
+    dtype: 'fp16'
+    causal: true
+    dynamic: true
+    knobs: {PLACE: 'fuse', STAGE: 'd1/cp/alt', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', WSPEC: ''}
+    emmy_us: 139.6
+    cublas_us: 109.6
+  # s2048 tier. fm drops the k_proj split to g2k and o_proj to SERIAL at M=2048 (q stays serial);
+  # the std q_proj serial row is bimodal (8.4% spread; the stable g2k twin benches 918 — recorded
+  # the faster median per the o_proj-fm precedent).
+  - kernel: matmul
+    name: gemma4_12b.q_proj_global.s2048
+    M: 2048
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 801.8
+    cublas_us: 751.2
+  - kernel: matmul
+    name: gemma4_12b.q_proj_global.s2048
+    M: 2048
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 583.2
+    cublas_us: 751.2
+  - kernel: matmul
+    name: gemma4_12b.k_proj_global.s2048
+    M: 2048
+    N: 512
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 66.2
+    cublas_us: 48.7
+  - kernel: matmul
+    name: gemma4_12b.k_proj_global.s2048
+    M: 2048
+    N: 512
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x4/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 51.3
+    cublas_us: 48.7
+  - kernel: matmul
+    name: gemma4_12b.o_proj_global.s2048
+    M: 2048
+    N: 3840
+    K: 8192
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 831.5
+    cublas_us: 790.3
+  - kernel: matmul
+    name: gemma4_12b.o_proj_global.s2048
+    M: 2048
+    N: 3840
+    K: 8192
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 589.3
+    cublas_us: 790.3
+  # attention.hd512 at seq 2048: split-KV does NOT invert here (unlike the 5090) — alt+g2k 1069.0
+  # (0.1% stable) beats plain alt 1391.6 (8% jitter) and ring 1541.1. Cold greedy deploys a
+  # 5 419 µs form (0.17x) — slow but under the watchdog on this card.
+  - kernel: attention
+    name: gemma4_12b.attention.hd512.s2048
+    n_heads: 16
+    seq: 2048
+    head_dim: 512
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', REDUCE: 'g2k', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x64', WSPEC: ''}
+    emmy_us: 1069.0
+    cublas_us: 926.5

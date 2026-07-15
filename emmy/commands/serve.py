@@ -72,6 +72,9 @@ def _add_own_flags(parser, *, suppress_defaults: bool) -> None:
     parser.add_argument("--num-prompts", type=int, default=d(256), help="Bench request count (with --bench).")
     parser.add_argument("--random-input-len", type=int, default=d(512), help="Bench tokens per request (with --bench).")
     parser.add_argument(
+        "--random-output-len", type=int, default=d(128), help="Bench tokens generated per request (with --bench --generate)."
+    )
+    parser.add_argument(
         "--bench-seed", type=int, default=d(0), help="Bench prompt-sampling seed (with --bench; `--seed` itself forwards to vllm serve)."
     )
     parser.add_argument("--dry-run", action="store_true", default=d(False), help="Print the vllm command(s) without running.")
@@ -155,17 +158,30 @@ def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: 
     return cmd + vllm_args
 
 
-def build_bench_cmd(model: str, *, port: str, max_concurrency: int, num_prompts: int, random_input_len: int, seed: int) -> list[str]:
-    return [
+def build_bench_cmd(
+    model: str,
+    *,
+    port: str,
+    max_concurrency: int,
+    num_prompts: int,
+    random_input_len: int,
+    seed: int,
+    generate: bool = False,
+    random_output_len: int = 128,
+) -> list[str]:
+    # Generative bench drives /v1/completions (token throughput, needs an output length);
+    # embedding bench drives /v1/embeddings (no generation).
+    backend, endpoint = ("openai", "/v1/completions") if generate else ("openai-embeddings", "/v1/embeddings")
+    cmd = [
         "vllm",
         "bench",
         "serve",
         "--model",
         model,
         "--backend",
-        "openai-embeddings",
+        backend,
         "--endpoint",
-        "/v1/embeddings",
+        endpoint,
         "--base-url",
         f"http://localhost:{port}",
         "--max-concurrency",
@@ -177,6 +193,9 @@ def build_bench_cmd(model: str, *, port: str, max_concurrency: int, num_prompts:
         "--seed",
         str(seed),
     ]
+    if generate:
+        cmd += ["--random-output-len", str(random_output_len)]
+    return cmd
 
 
 def _vllm_bin() -> str:
@@ -195,9 +214,6 @@ def _vllm_bin() -> str:
 
 def handle_serve(args):
     vllm_args = _split_own_flags(args)  # re-parses own flags placed after MODEL into args
-    if args.generate and args.bench:
-        logger.error("--bench is not supported with --generate yet (the bench client targets /v1/embeddings).")
-        sys.exit(1)
     serve_cmd = build_serve_cmd(args.model, stock=args.stock, vllm_args=vllm_args, generate=args.generate)
     port = _flag_value(vllm_args, "--port", "8000")
     bench_cmd = build_bench_cmd(
@@ -207,6 +223,8 @@ def handle_serve(args):
         num_prompts=args.num_prompts,
         random_input_len=args.random_input_len,
         seed=args.bench_seed,
+        generate=args.generate,
+        random_output_len=args.random_output_len,
     )
 
     if args.dry_run:

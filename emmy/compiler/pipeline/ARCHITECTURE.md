@@ -214,8 +214,21 @@ cp.async-era ones, and the warp-grid features (`D_w_grid_*`) separate same-tile 
 previously byte-identical (the 2026-07-09 4090/5090 golden-sweep TILE findings).
 
 Who consumes the ranking: `TuningSearch` (`tune`) ranks the PUCT frontier; `greedy_decide` (`compile` / `run`, via
-`Run.resolve`) picks via `Prior.pick` — measured -O3 reservoir evidence first (`evidence_pick`: the candidate
-prefix-consistent with the fastest `H_opt=3` row of the same op), the `mean_score` argmin otherwise.
+`Run.resolve`) picks through the deploy evidence hierarchy, top first: (1) the card's recorded **goldens** — the
+verified evidence tier below — then (2) measured -O3 reservoir evidence (`evidence_pick`: the candidate
+prefix-consistent with the fastest `H_opt=3` row of the same op), (3) the tune DB's measured rows, and (4) the
+`mean_score` argmin only when no candidate has evidence.
+
+**Goldens are the first evidence tier of a greedy compile.** The per-GPU golden files are the only *measured* data
+that ships with a clone — the reservoir and tune DB are machine-local caches written by local tunes, so a fresh
+machine (every rented box) previously deployed on pure model extrapolation (the gemma 12–29× cold misdeploys). At a
+fork, `greedy_decide` joins the op against the deploy card's recorded matmul goldens by `ShapeKey` (static and
+dynamic twins never cross) and picks the offered candidate prefix-consistent with the fastest recorded entry — keys
+and values compare through the A/B pin gate's canonical matching, so a bare golden spelling matches its axis-stamped
+realization and a fast-math entry self-excludes when its atom isn't offered (gate off). Goldens are **consulted,
+never trained on**: they enter no reservoir, no checkpoint, no dataset (they are the held-out acceptance set). Golden
+µs is deployable-regime truth and never arbitrates a non--O3 compile. A shape match none of whose entries realizes
+against the offer logs a loud enumeration-drift warning and falls through to the tiers below.
 
 ### `FallbackPrior` and the calibration gate
 

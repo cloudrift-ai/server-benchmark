@@ -127,6 +127,13 @@ class Reduction:
     # ``[0, B)`` window; a consumer needing the absolute reduce-axis coordinate (gmem/TMA operand
     # bases, the causal mask's key columns) adds this. ``None`` = the un-split stream (base 0).
     offset: Expr | None = None
+    # The stream's ABSOLUTE end for a cross-CTA slice partial over a SYMBOLIC axis:
+    # ``min((_ksplit + 1) · B, S)`` where ``S`` is the runtime extent (``axis`` then carries the
+    # bn-aligned slice width ``B = ceil(S / (cta·bn)) · bn`` as a composite Dim). The realizer stops
+    # the stream at ``bound − offset`` local steps and masks/clamps against it — a mid-tensor slice
+    # end reads VALID keys belonging to the next slice, which the extent-only tail machinery would
+    # not exclude. ``None`` = static slice (extent alone bounds it) or the un-split stream.
+    bound: Expr | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.partial, Body):

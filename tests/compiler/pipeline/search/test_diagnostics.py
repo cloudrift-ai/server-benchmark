@@ -466,3 +466,152 @@ def test_node_report_kernel_filter_selects_ops_by_label():
     assert "fork sibling regret" in out
     miss = diagnostics.node_report(_BMPrior(), nodes, kernel_filter="zzz")
     assert "no nodes match --kernel 'zzz'" in miss
+
+
+# ---------------------------------------------------------------------------
+# golden-anchored descent
+# ---------------------------------------------------------------------------
+
+
+def _anchor_golden(**over):
+    """A synthetic fp16 512^3 matmul golden on TESTGPU. Knob families (BM/BK) are
+    unregistered, so ``values_equal`` reduces to string equality — the canonical-parse
+    path is exercised by the real-knob integration the pin gate already tests."""
+    from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig  # noqa: PLC0415
+
+    kw = dict(
+        name="test.anchor",
+        M=512,
+        N=512,
+        K=512,
+        dtype="fp16",
+        knobs={"BM": "8", "BK": "2"},
+        gpu_name="TESTGPU",
+        compute_cap=(8, 9),
+        emmy_us=5.0,
+    )
+    kw.update(over)
+    return MatmulGoldenConfig(**kw)
+
+
+def _anchor_feats(**knobs):
+    """A stamped fp16 512^3 matmul histogram (ShapeKey (262144, 512, warp)) + knobs."""
+    return {
+        "S_ext_free_prod": 262144.0,
+        "S_ext_free_max": 512.0,
+        "S_ext_reduce_max": 512.0,
+        "S_reduce_add": 1.0,
+        "S_pw_multiply": 1.0,
+        "S_n_distinct_input": 2.0,
+        "S_dtype_f16": 2.0,
+        **knobs,
+    }
+
+
+def _anchor_tree():
+    """Root fork {BM=8, BM=32}, then under BM=8 a BK fork {2, 4} of measured leaves.
+    The golden's path is BM=8 -> BK=2; BK does not vary the _BMPrior's score, so the
+    BK fork is a predicted TIE resolved pessimistically to the worse-valued BK=4."""
+    from emmy.compiler.pipeline.search.db import NodeRow  # noqa: PLC0415
+
+    return [
+        NodeRow("A", None, "ctx", "mm", _anchor_feats(BM=8), 1.0, 1, gpu="TESTGPU"),
+        NodeRow("B", None, "ctx", "mm", _anchor_feats(BM=32), 3.0, 1, gpu="TESTGPU"),
+        NodeRow("A1", "A", "ctx", "mm", _anchor_feats(BM=8, BK=2), 1.0, 2, gpu="TESTGPU", is_leaf=True),
+        NodeRow("A2", "A", "ctx", "mm", _anchor_feats(BM=8, BK=4), 2.0, 2, gpu="TESTGPU", is_leaf=True),
+    ]
+
+
+def test_anchor_full_match_with_tie_pessimistic_descent():
+    """The walk follows BM=8 -> BK=2 to a measured leaf (matched 2); the BM fork is
+    kept (the prior genuinely prefers BM=8), the BK fork is a tie -> pessimistically
+    lost, with the measured gap 2.00x vs the golden's branch."""
+    lines = diagnostics._golden_anchor_block(_BMPrior(), "TESTGPU", _anchor_tree(), None, goldens=[_anchor_golden()])
+    row = next(line for line in lines if "test.anchor" in line)
+    assert "followed 2/2 fork levels to a measured leaf" in row
+    assert "descent kept 1/2" in row and "lost @BK 2.00x vs golden branch" in row
+    assert "summary: 0/1" in lines[-1]
+
+
+def test_anchor_partial_match_reports_unbuilt_branch():
+    """A BK fork exploring only {4, 8} never built the golden's BK=2 branch: matched
+    stops at 1 with the loud 'never built' reason (vs silence before)."""
+    from emmy.compiler.pipeline.search.db import NodeRow  # noqa: PLC0415
+
+    nodes = [
+        NodeRow("A", None, "ctx", "mm", _anchor_feats(BM=8), 1.0, 1, gpu="TESTGPU"),
+        NodeRow("B", None, "ctx", "mm", _anchor_feats(BM=32), 3.0, 1, gpu="TESTGPU"),
+        NodeRow("A4", "A", "ctx", "mm", _anchor_feats(BM=8, BK=4), 1.0, 2, gpu="TESTGPU", is_leaf=True),
+        NodeRow("A8", "A", "ctx", "mm", _anchor_feats(BM=8, BK=8), 2.0, 2, gpu="TESTGPU", is_leaf=True),
+    ]
+    lines = diagnostics._golden_anchor_block(_BMPrior(), "TESTGPU", nodes, None, goldens=[_anchor_golden()])
+    row = next(line for line in lines if "test.anchor" in line)
+    assert "followed 1 of ~2 fork levels" in row and "never built below @BK (2 sibling(s) explored)" in row
+
+
+def test_anchor_absence_is_loud():
+    """A golden whose shape has zero node rows gets its own NO TREE DATA row and the
+    summary headline counts it — absence must never render as health."""
+    lines = diagnostics._golden_anchor_block(_BMPrior(), "TESTGPU", [], None, goldens=[_anchor_golden()])
+    row = next(line for line in lines if "test.anchor" in line)
+    assert "NO TREE DATA" in row
+    assert "summary: 1/1" in lines[-1]
+
+
+def test_anchor_o3_endpoint_and_regime_discipline():
+    """The golden's recorded us enters ONLY the -O3 endpoint (pick 5.4 / golden 5.0 =
+    1.08x over the H_opt=3 regime rows); the -O1 walk's descent gap stays the measured
+    sibling ratio (2.00x) and never involves the golden's us."""
+    from emmy.compiler.pipeline.search.db import NodeRow  # noqa: PLC0415
+
+    nodes = _anchor_tree() + [
+        NodeRow("o3a", None, "ctx-o3", "mm", _anchor_feats(BM=8, H_opt=3.0), 5.4, 1, gpu="TESTGPU", is_leaf=True),
+        NodeRow("o3b", None, "ctx-o3", "mm", _anchor_feats(BM=32, H_opt=3.0), 9.0, 1, gpu="TESTGPU", is_leaf=True),
+    ]
+    lines = diagnostics._golden_anchor_block(_BMPrior(), "TESTGPU", nodes, None, goldens=[_anchor_golden()])
+    row = next(line for line in lines if "test.anchor" in line)
+    assert "-O3 pick/golden 1.08x" in row  # 5.4 us pick over the 5.0 us golden, same regime
+    assert "lost @BK 2.00x" in row  # the -O1 gap is 2.0/1.0 from sibling values, NOT 5.0-derived
+    assert "followed 2/2 fork levels" in row  # the parentless -O3 rows never join the tree walk
+
+
+def test_anchor_renders_inside_node_report(monkeypatch):
+    """node_report appends the anchored block per card and the goldens-without-rows
+    summary line for cards absent from the store."""
+    from emmy.compiler.pipeline.search import golden as golden_mod  # noqa: PLC0415
+
+    other = _anchor_golden(name="test.other", gpu_name="OTHERGPU")
+    monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", [_anchor_golden(), other])
+    out = diagnostics.node_report(_BMPrior(), _anchor_tree())
+    assert "golden-anchored descent" in out and "test.anchor" in out
+    assert "NO node rows" in out and "OTHERGPU (1 golden(s))" in out
+
+
+def test_anchor_prefix_matching_is_registry_canonical():
+    """Real-knob matching goes through the pin gate's helpers: a bare atom-ALIAS
+    golden TILE matches its canonically-stamped axis-keyed realization; a different
+    geometry does not; a family the golden doesn't record is no constraint."""
+    gold = {"TILE": "a:mma_m16n8k16_f16/w2x2/f4x4/k2"}
+    stamped = {"S_ext_free_prod": 1.0, "TILE@a2": "a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2", "STAGE@a2": "d2/cp/ring"}
+    assert diagnostics._golden_prefix_consistent(stamped, gold)
+    assert not diagnostics._golden_prefix_consistent({**stamped, "TILE@a2": "a:mma_m16n8k16_f16_f32/w1x1/f1x1"}, gold)
+
+
+def test_anchor_level_zero_unbuilt_branch_and_o3_only_ops():
+    """Two sentinel edges: a root group with no golden-consistent child reports
+    'never built' at matched 0 (not the empty-tree text), and an op with ONLY -O3
+    regime rows reports 'no explored forks' while the -O3 endpoint still renders."""
+    from emmy.compiler.pipeline.search.db import NodeRow  # noqa: PLC0415
+
+    roots_only = [
+        NodeRow("X", None, "ctx", "mm", _anchor_feats(BM=16), 1.0, 1, gpu="TESTGPU"),
+        NodeRow("Y", None, "ctx", "mm", _anchor_feats(BM=32), 2.0, 1, gpu="TESTGPU"),
+    ]
+    lines = diagnostics._golden_anchor_block(_BMPrior(), "TESTGPU", roots_only, None, goldens=[_anchor_golden()])
+    row = next(line for line in lines if "test.anchor" in line)
+    assert "followed 0 of ~1 fork levels" in row and "never built below @BM (2 sibling(s) explored)" in row
+
+    o3_only = [NodeRow("o3", None, "ctx-o3", "mm", _anchor_feats(BM=8, H_opt=3.0), 5.4, 1, gpu="TESTGPU", is_leaf=True)]
+    lines = diagnostics._golden_anchor_block(_BMPrior(), "TESTGPU", o3_only, None, goldens=[_anchor_golden()])
+    row = next(line for line in lines if "test.anchor" in line)
+    assert "no explored forks" in row and "-O3 pick/golden 1.08x" in row

@@ -214,8 +214,28 @@ cp.async-era ones, and the warp-grid features (`D_w_grid_*`) separate same-tile 
 previously byte-identical (the 2026-07-09 4090/5090 golden-sweep TILE findings).
 
 Who consumes the ranking: `TuningSearch` (`tune`) ranks the PUCT frontier; `greedy_decide` (`compile` / `run`, via
-`Run.resolve`) picks via `Prior.pick` — measured -O3 reservoir evidence first (`evidence_pick`: the candidate
-prefix-consistent with the fastest `H_opt=3` row of the same op), the `mean_score` argmin otherwise.
+`Run.resolve`) picks through the deploy evidence hierarchy, top first: (1) the card's recorded **goldens** — the
+verified evidence tier below — then (2) measured -O3 reservoir evidence (`evidence_pick`: the candidate
+prefix-consistent with the fastest `H_opt=3` row of the same op), (3) the tune DB's measured rows, and (4) the
+`mean_score` argmin only when no candidate has evidence.
+
+**Goldens are the first evidence tier of a greedy compile.** The per-GPU golden files are the only *measured* data
+that ships with a clone — the reservoir and tune DB are machine-local caches written by local tunes, so a fresh
+machine (every rented box) previously deployed on pure model extrapolation (the gemma 12–29× cold misdeploys). At a
+fork, `greedy_decide` joins the op against the deploy card's recorded goldens — every kind: matmul, attention
+(flash), rms_norm, softmax, reduce, pointwise — by `ShapeKey` (static and dynamic twins never cross; the key's
+`kind` discriminator, classified off the stamped histogram via the sweep identity
+`S_loop_depth < n_free + n_reduce + n_symbolic`, keeps a flash/norm op apart from an extent-coincident contraction;
+at the DEPLOY fork the flash op is recognized from its offer's `TILE@dd` + `TILE@pj` pair instead — the tile pass's
+restructured twisted op carries re-derived extents only, no histogram, so the stamp classifier cannot fire there)
+and picks the offered candidate prefix-consistent with the fastest recorded entry — keys and values compare through
+the A/B pin gate's canonical matching. An axis-keyed golden key (a static attention golden's `TILE@dd` + `TILE@pj`)
+is all-or-nothing; a bare golden key on a multi-axis family carries the pin-resolution semantics — one plan,
+satisfied by ANY same-family realization (how a dynamic attention golden's single bare `TILE` matches the masked
+fork's axis-keyed leaves) — and a fast-math entry self-excludes when its atom isn't offered (gate off). Goldens are
+**consulted, never trained on**: they enter no reservoir, no checkpoint, no dataset (they are the held-out
+acceptance set). Golden µs is deployable-regime truth and never arbitrates a non--O3 compile. A shape match none of
+whose entries realizes against the offer logs a loud enumeration-drift warning and falls through to the tiers below.
 
 ### `FallbackPrior` and the calibration gate
 
@@ -678,6 +698,23 @@ latencies, so mixing them would corrupt both metrics — the `gpu` key keeps the
 The regret/reachability block renders once per prior **half** (offline vs online, labeled) — the composite would
 answer with whichever half is active, and the two halves' regrets point at different fixes (cold-start weights vs
 training data), so an unlabeled "prior" number destroys the diagnostic.
+
+**Golden-anchored descent** closes the regret view's structural blind spot: regret conditions on forks the search
+measured, so a golden in a subtree the search never built — or a shape with zero node data — was silence that read
+as health (how the 2026-07 prior-saturation bug hid from regret while the then-broken golden rank said top-1).
+Each card block ends with one row per golden recorded FOR that card (goldens never anchor against another card's
+rows): the coverage of the golden's path through the explored tree (branch matching is family-aware and
+registry-canonical, the A/B pin gate's rule), whether the prior's tie-pessimistic pick keeps the golden's subtree
+at each fork (with the measured same-regime gap when lost), and the loud absences — `NO TREE DATA` per unanchorable
+golden, a per-card count, and a closing line for cards with recorded goldens but no node rows at all. Coverage
+always renders with a denominator: a fully-followed path is exact (`followed 6/6 fork levels to a measured leaf`),
+while a partial match's total is an ESTIMATE marked `~` (`followed 2 of ~7 fork levels`) taken from the deepest
+sibling chain below the divergence fork — the golden's own branch topology was never materialized, so the
+siblings' depth is the only witness of how much tree remains. Regime
+discipline is hard: the golden's recorded µs is a deployable (-O3) number and never enters the -O1 walk or its
+gaps (the regimes systematically invert); it appears only in the `-O3 pick/golden` endpoint, computed over the
+op's `H_opt=3` regime rows with the fast-math regime matched (the `golden_deploy_perf` convention). Diagnostic,
+not a gate: a lost fork with a near-equal measured sibling is fine — the gap column is what says so.
 
 Both halves accept a candidate artifact for A/Bs: `--online-file` (legacy `--prior`) swaps the online checkpoint
 (`EMMY_ONLINE_FILE`), and

@@ -9,13 +9,16 @@ configs:
     knobs: {TILE: 'n16x8/f4x8', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 10.1
     cublas_us: 10.8
+  # 2026-07-15 cold golden sweep (rented 4090): the deeper f4x10 register tile replaces n32x8/f2x8 —
+  # pinned-vs-pinned 58.5 vs the old config's live 61.6-63.2 (2x --ab reps + 3x greedy reps, ab row
+  # stable at 58.4-58.5; the old entry's recorded 57.9 no longer replays). ~5-8% win, above the 3% gate.
   - kernel: matmul
     name: matmul.square.1024
     M: 1024
     N: 1024
     K: 1024
-    knobs: {TILE: 'n32x8/f2x8', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 57.9
+    knobs: {TILE: 'n32x8/f4x10', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 58.5
     cublas_us: 45.4
   - kernel: matmul
     name: matmul.square.2048
@@ -215,16 +218,18 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 88.4
     cublas_us: 119.0
+  # 2026-07-15 cold golden sweep (rented 4090): the narrow-N w2x2/f2x8/k2 tile through the gm8 raster
+  # codec (grouped-M stripes, L2 B-reuse) replaces the wide-N w4x1/f4x8/k2 (919.5 recorded / 917.5
+  # live) — 803.8 pinned-vs-pinned, 0.876x, identical across 2 --ab reps + 3 greedy reps (751-794
+  # greedy-row). Second shape where rasterization wins on this card (after qkv fm gm8).
   - kernel: matmul
     name: matmul.mlp_gate_up.h4096
     M: 512
     N: 28672
     K: 4096
     dtype: fp16
-    # 2026-07-12 manual sweep: REDUCE stamped '' (fill-free); pre-swizzle live wobbled 902-980.
-    # Post-swizzle refresh (same day, PR #351): 964.6 -> 919.5 (5 tight passes 917.5-919.6).
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 919.5
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f2x8/k2', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 803.8
     cublas_us: 721.0
   # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): the atom-swap of the standard golden —
   # the f16 accumulator's 2x HMMA rate on this mma-bound wide-N shape. Accuracy vs torch passes.
@@ -348,6 +353,9 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 665.6
     cublas_us: 742.0
+  # 2026-07-15 cold golden sweep (rented 4090): converges to the static twin's family — w2x2/f4x8 g2k
+  # replaces the long-wobbly w2x4/f4x4 (recorded 425.2, live 427.3): 375.6/377.1 pinned-vs-pinned
+  # (0.88x), 3 greedy reps 380-399. No masked-tile penalty vs the static twin (371.0).
   - kernel: matmul
     name: matmul.mlp_down.h4096.dynM
     M: 512
@@ -355,12 +363,8 @@ configs:
     K: 14336
     dtype: fp16
     dynamic: true
-    # 2026-07-12 manual sweep: emmy_us refreshed 412.9 -> 387.3. Post-swizzle refresh (same day,
-    # PR #351): 387.3 -> 425.2 (3 consistent passes 424.6-425.2) — the ONE entry that replays
-    # SLOWER post-swizzle; this value has wobbled 387-425 across sessions and the shape's fm twin
-    # dominates it regardless. Flagged in the refresh findings.
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f4x4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
-    emmy_us: 425.2
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 376.4
     cublas_us: 388.0
   # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): mirrors the static twin. 2026-07-12
   # manual sweep. Post-swizzle refresh (same day, PR #351): 332.8 -> 275.5 total (270.6 + 4.8

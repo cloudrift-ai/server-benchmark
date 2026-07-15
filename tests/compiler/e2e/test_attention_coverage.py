@@ -1044,6 +1044,51 @@ def test_warp_flash_split_kv_matches_torch(monkeypatch, variant):
 
 
 @requires_cuda
+@pytest.mark.parametrize(
+    ("variant", "reduce", "seq"),
+    [
+        ("causal", "g2k", 300),  # non-block-multiple slice tail (B=160, slice 1 walks 140 keys)
+        ("causal", "g4k", 40),  # empty last slice (B=16: slice 3 starts past S, contributes identities)
+        ("plain", "g2k", 40),  # un-causal slice stop (kv_end from the slice bound alone)
+        ("causal", "g2k", 512),  # block-whole slices at the hint size
+    ],
+)
+def test_warp_flash_split_kv_symbolic_matches_torch(monkeypatch, variant, reduce, seq):
+    """SYMBOLIC flash split-KV: the slice width is the bn-aligned runtime ``B = ceil(S/(cta·bn))·bn``
+    and each slice stops/masks at its absolute ``bound = min((s+1)·B, S)`` (``Reduction.bound``) —
+    a mid-tensor slice end reads VALID next-slice keys the extent-only tail masks would keep, and
+    the tail CTA's overhanging query rows must NOT write their state into the next head's ws rows
+    (the split partial's ``m_guard``, the regression this test pins). One cached kernel pair serves
+    every runtime size, including an empty last slice (pure carrier identities)."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_REDUCE", reduce)
+    B, H, D = 1, 4, 64
+    module = _Causal() if variant == "causal" else _Sdpa()
+    sd = torch.export.Dim("seq_len", min=4, max=4096)
+    seed = tuple(torch.randn(B, H, 16, D, dtype=torch.float16) for _ in range(3))
+    backend, compiled, graph, kernels = _trace(module, seed, dynamic_shapes={"q": {2: sd}, "k": {2: sd}, "v": {2: sd}})
+    assert len(kernels) == 2, f"symbolic split-KV flash should be partial + finalize, got {len(kernels)}"
+    partial = next(n for n in kernels if n.endswith("__partial"))
+    src = compiled.nodes[partial].op.kernel_source
+    assert "emmy_c_to_a" in src, "the symbolic split partial must keep the fused warp-chain"
+    assert "int seq_len" in src, "the symbolic split partial must carry the runtime seq_len arg"
+
+    torch.manual_seed(seq)
+    q, k, v = (torch.randn(B, H, seq, D, dtype=torch.float16) for _ in range(3))
+
+    def ref():
+        with torch.no_grad():
+            out = F.scaled_dot_product_attention(q.cuda(), k.cuda(), v.cuda(), is_causal=variant == "causal")
+            return out.cpu().flatten().float().numpy()
+
+    data = {n: t for n, t in zip(graph.inputs, (q.numpy(), k.numpy(), v.numpy()), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=ref)
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    max_diff = float(np.max(np.abs(got - eager)))
+    assert max_diff < 5e-3, f"symbolic split-KV flash ({variant}/{reduce}, seq={seq}) max_diff={max_diff:.2e}"
+
+
+@requires_cuda
 @pytest.mark.parametrize("seq", [8, 16, 37, 64])
 def test_warp_chain_dynamic_matches_torch(monkeypatch, seq):
     """Symbolic ``seq_len`` warp-chain flash. ONE cached fused-TC kernel carrying ``int seq_len``

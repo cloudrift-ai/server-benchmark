@@ -590,7 +590,10 @@ note. `load_freeze` hard-errors on a foreign file, `feat_ver` mismatch, or diges
 (the offline-artifact loading semantics); `load_node_rows` sniffs a path (sqlite magic vs freeze header) and yields
 `NodeRow`s from either, which is what lets every nodes consumer (`eval online --dataset nodes --db`,
 `Dataset.from_node_rows` / `fold_node_rows`) take a freeze interchangeably with the live DB. Loaded freeze rows are
-parentless, so the fork diagnostics skip them and a freeze evaluates through the leaf-level metrics only.
+parentless with `depth=0` — the marker the diagnostics read as "no tree schema": the fork-regret view skips them and
+the golden-anchored descent renders its loud "no fork-tree data" absence row, so a freeze evaluates through the
+leaf-level metrics without inventing fork groups. Handing a freeze to a perf-table consumer (`--dataset db` paths)
+fails at `open_readonly` with a message naming the freeze/nodes distinction.
 
 **How node rows get written.** Alongside the reservoir feed, the same finished tree is walked once by
 `_collect_node_records` and persisted via `record_nodes` — the keyed, deduplicated, parent-linked counterpart to the

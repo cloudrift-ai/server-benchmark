@@ -16,45 +16,13 @@ import pytest
 
 from emmy.compiler.pipeline.search.data import Dataset
 from emmy.compiler.pipeline.search.data.freeze import FREEZE_KIND, FREEZE_VER, freeze_reason, load_freeze, load_node_rows, write_freeze
-from emmy.compiler.pipeline.search.db import NodeRow, SearchDB
+from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
+from tests.compiler.pipeline.search.conftest import GPU_5090 as _GPU
+from tests.compiler.pipeline.search.conftest import impossible_staged_feats
+from tests.compiler.pipeline.search.conftest import node_row as _row
 
-_GPU = "NVIDIA GeForce RTX 5090"  # registry records fp32/fp16 peaks -> the plausibility gate is active
 _GPU2 = "NVIDIA GeForce RTX 4090"
-
-# The dynM f16 matmul spelling from test_node_gate.py: stamps certify free x red work,
-# so 9.17 us implies ~6500 TFLOP/s (implausible) while 500 us is honest.
-_F16_FEATS = {
-    "S_ext_free_prod": 4096.0,
-    "S_ext_reduce_max": 14336.0,
-    "S_ext_n_free_axis": 1.0,
-    "S_ext_n_reduce_axis": 1.0,
-    "S_loop_depth": 3.0,
-    "S_ext_n_symbolic_axis": 1.0,
-    "S_dtype_f16": 2.0,
-    "TILE@a2": "a:mma_m16n8k16_f16/w1x8/f2x8/k8",
-    "REDUCE@a2": "g2k",
-}
-
-
-def _row(key: str, *, value_us: float, features: dict | None = None, gpu: str = _GPU, **over) -> NodeRow:
-    kw = dict(
-        node_key=key,
-        parent_key=None,
-        context_key="ctx",
-        op_sig="op",
-        features=dict(_F16_FEATS if features is None else features),
-        value_us=value_us,
-        depth=5,
-        gpu=gpu,
-        visits=1,
-        is_leaf=True,
-        status="ok",
-        run_id="run",
-        measured_at="2026-07-09T00:00:00+00:00",
-    )
-    kw.update(over)
-    return NodeRow(**kw)
 
 
 # ---------------------------------------------------------------------------
@@ -89,13 +57,7 @@ def test_reason_drops_implausible_value() -> None:
 
 def test_reason_drops_impossible_kernel() -> None:
     # The square.512 residue: over-cap cp.async slab -> legal-looking latency, invalid kernel.
-    small = {
-        **{k: v for k, v in _F16_FEATS.items() if not k.startswith(("S_ext_free", "S_ext_reduce"))},
-        "S_ext_free_prod": 512.0,
-        "S_ext_reduce_max": 512.0,
-        "STAGE@a2": "d1/cp",
-    }
-    assert "impossible kernel" in freeze_reason(_row("k", value_us=2.02, features=small))
+    assert "impossible kernel" in freeze_reason(_row("k", value_us=2.02, features=impossible_staged_feats()))
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +183,51 @@ def test_write_freeze_nothing_survives_hard_error(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 # load_node_rows — the DB/freeze interchange seam
 # ---------------------------------------------------------------------------
+
+
+def test_load_node_rows_zero_byte_file_is_empty_db(tmp_path) -> None:
+    # sqlite creates the DB file empty before the first write (an aborted tune), and a
+    # 0-byte file IS a valid empty sqlite DB — it must yield no rows, not a freeze error.
+    empty = tmp_path / "autotune.db"
+    empty.touch()
+    assert load_node_rows(empty) == []
+
+
+def test_open_readonly_rejects_freeze_with_pointer(tmp_path) -> None:
+    # A freeze handed to a perf-table consumer (eval variants/knobs/failures --db) must
+    # fail at open with a named reason, not a bare sqlite DatabaseError inside a PRAGMA.
+    out = _frozen(tmp_path)
+    with pytest.raises(RuntimeError, match="nodes-dataset"):
+        SearchDB.open_readonly(out)
+    garbage = tmp_path / "notes.txt"
+    garbage.write_text("hello\n")
+    with pytest.raises(RuntimeError, match="not a sqlite database"):
+        SearchDB.open_readonly(garbage)
+
+
+def test_anchor_walk_treats_freeze_rows_as_treeless(tmp_path) -> None:
+    # Freeze rows (parentless, the loader's depth=0 stamp) carry no fork structure: the
+    # golden-anchored descent must render its loud no-tree absence, never fabricate a
+    # root mega-fork from the op's whole leaf set. Live parentless TOP-fork rows
+    # (depth >= 1) keep walking.
+    from emmy.compiler.pipeline.search.prior import diagnostics
+
+    class _Flat:
+        fitted = True
+
+        def mean_scores_features(self, fvecs):
+            return [0.0] * len(fvecs)
+
+    db_path = tmp_path / "autotune.db"
+    _seed_db(db_path, _SEED)
+    write_freeze(db_path, tmp_path / "freeze.jsonl")
+    _header, rows = load_freeze(tmp_path / "freeze.jsonl")
+    matched, steps, descriptor = diagnostics._anchor_walk(_Flat(), rows, {})
+    assert (matched, steps) == (0, [])
+    assert "no fork-tree data" in descriptor
+    live_top_fork = [_row("c1", value_us=500.0, depth=1), _row("c2", value_us=600.0, depth=1)]
+    matched_live, _steps, descriptor_live = diagnostics._anchor_walk(_Flat(), live_top_fork, {})
+    assert matched_live == 1 and "followed" in descriptor_live
 
 
 def test_load_node_rows_sniffs_db_and_freeze(tmp_path) -> None:

@@ -29,8 +29,10 @@ artifact-loading semantics). :func:`load_node_rows` is the interchange seam: it 
 path and yields ``NodeRow``s from either a live sqlite DB or a freeze, so the nodes-dataset
 consumers (``eval online --dataset nodes``, ``Dataset.from_node_rows`` /
 ``fold_node_rows``) accept both. Loaded freeze rows carry ``parent_key=None`` /
-``depth=0`` / ``visits=0``: the fork diagnostics skip parentless rows, so a freeze
-degrades to the leaf-level metrics instead of inventing fork groups.
+``depth=0`` / ``visits=0``: the fork-regret diagnostics skip parentless rows and the
+golden-anchored descent treats ``depth=0`` rows as tree-less (its absence rule renders
+"no fork-tree data"), so a freeze degrades to the leaf-level metrics instead of
+inventing fork groups.
 
 Produced by ``scripts/freeze_node_store.py``.
 """
@@ -80,10 +82,12 @@ def freeze_reason(row: NodeRow) -> str | None:
     return None
 
 
-def _row_line(row: NodeRow) -> str:
-    """One freeze row as its canonical JSONL line — sorted keys, fixed separators, no
-    NaN tokens (``allow_nan=False`` hard-errors instead of emitting nonstandard JSON):
-    this exact spelling is what makes freeze-twice determinism hold."""
+def _row_line(row: NodeRow) -> bytes:
+    """One freeze row as its canonical JSONL line (bytes) — sorted keys, fixed
+    separators, no NaN tokens (``allow_nan=False`` hard-errors instead of emitting
+    nonstandard JSON): this exact spelling is what makes freeze-twice determinism
+    hold. Bytes end-to-end so the digested bytes ARE the written bytes — no platform
+    newline translation or locale encoding can slip between them."""
     d = {
         "node_key": row.node_key,
         "context_key": row.context_key,
@@ -97,7 +101,7 @@ def _row_line(row: NodeRow) -> str:
         "run_id": row.run_id,
         "measured_at": row.measured_at,
     }
-    return json.dumps(d, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+    return (json.dumps(d, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode()
 
 
 def _repo_commit() -> str:
@@ -109,8 +113,9 @@ def _repo_commit() -> str:
         if sha.returncode != 0:
             return "unknown"
         dirty = subprocess.run(["git", "status", "--porcelain"], cwd=here, capture_output=True, text=True, timeout=10)
-        suffix = "-dirty" if dirty.returncode == 0 and dirty.stdout.strip() else ""
-        return sha.stdout.strip() + suffix
+        if dirty.returncode != 0:
+            return "unknown"  # dirtiness undeterminable — never stamp a clean-tree claim we can't back
+        return sha.stdout.strip() + ("-dirty" if dirty.stdout.strip() else "")
     except (OSError, subprocess.SubprocessError):
         return "unknown"
 
@@ -120,14 +125,9 @@ def write_freeze(db_path: Path | str, out_path: Path | str, *, note: str = "") -
     and atomically write the freeze to ``out_path``. Returns the header dict (so a caller
     reports counts + digest without re-reading the file). Hard-errors when nothing
     survives the filter — a zero-row freeze means the wrong DB, not an empty dataset."""
-    from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
     from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION  # noqa: PLC0415
 
-    db = SearchDB.open_readonly(db_path)
-    try:
-        rows = list(db.iter_nodes())
-    finally:
-        db.close()
+    rows = load_node_rows(db_path)  # the one node-reading seam — also lets an existing freeze re-freeze
     kept = []
     dropped: Counter[str] = Counter()
     for row in rows:
@@ -144,7 +144,10 @@ def write_freeze(db_path: Path | str, out_path: Path | str, *, note: str = "") -
             f"(re-collect with the collect-node-data flow)"
         )
     kept.sort(key=lambda r: (r.gpu, r.op_sig, r.node_key))
-    payload = "".join(_row_line(r) for r in kept)
+    lines = [_row_line(r) for r in kept]
+    digest = hashlib.sha256()
+    for line in lines:
+        digest.update(line)
     per_gpu = Counter(r.gpu for r in kept)
     header = {
         "kind": FREEZE_KIND,
@@ -163,12 +166,16 @@ def write_freeze(db_path: Path | str, out_path: Path | str, *, note: str = "") -
             "per_gpu": {g: per_gpu[g] for g in sorted(per_gpu)},
         },
         "created_at": datetime.now(UTC).isoformat(),
-        "sha256": hashlib.sha256(payload.encode()).hexdigest(),
+        "sha256": digest.hexdigest(),
     }
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_suffix(out.suffix + ".tmp")
-    tmp.write_text(json.dumps(header, sort_keys=True) + "\n" + payload)
+    # Bytes end-to-end: the digested bytes are exactly the written bytes — no platform
+    # newline translation or locale encoding between the hash and the file.
+    with tmp.open("wb") as fh:
+        fh.write((json.dumps(header, sort_keys=True) + "\n").encode())
+        fh.writelines(lines)
     tmp.replace(out)
     return header
 
@@ -238,7 +245,9 @@ def load_node_rows(path: Path | str) -> list[NodeRow]:
     p = Path(path)
     with p.open("rb") as fh:
         magic = fh.read(len(_SQLITE_MAGIC))
-    if magic == _SQLITE_MAGIC:
+    # An empty file IS a valid (empty) sqlite DB — sqlite creates the file empty before
+    # the first write (an aborted tune) — so it takes the DB branch and yields no rows.
+    if magic == _SQLITE_MAGIC or not magic:
         from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
 
         db = SearchDB.open_readonly(p)

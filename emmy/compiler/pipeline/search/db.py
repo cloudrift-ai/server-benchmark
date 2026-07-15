@@ -511,9 +511,25 @@ class SearchDB:
         writer or mutates the file. The read methods (``iter_perf`` /
         ``iter_perf_samples`` / ``lookup_*``) work; any write raises (the
         connection is ``?mode=ro``). Raises ``sqlite3.OperationalError`` if the
-        file is absent."""
+        file is absent. A non-sqlite file fails HERE with a named reason (sqlite
+        itself defers header validation to the first query, which would surface
+        as a bare ``DatabaseError`` deep inside a PRAGMA) — the foreseeable case
+        being a measurement freeze handed to a perf-table consumer: freezes are
+        accepted only by the nodes-dataset readers (``data/freeze.py``)."""
+        p = Path(path)
+        if p.is_file():
+            with p.open("rb") as fh:
+                magic = fh.read(16)
+            if magic and magic != b"SQLite format 3\x00":  # empty file = valid empty DB
+                hint = (
+                    " — this looks like a measurement freeze (.jsonl); freezes are accepted only by the "
+                    "nodes-dataset consumers, e.g. `eval online --dataset nodes --db`"
+                    if magic.startswith(b"{")
+                    else ""
+                )
+                raise RuntimeError(f"{p} is not a sqlite database{hint}")
         self = cls.__new__(cls)
-        self._conn = sqlite3.connect(f"file:{Path(path)}?mode=ro", uri=True, check_same_thread=False)
+        self._conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True, check_same_thread=False)
         return self
 
     # ------------------------------------------------------------------

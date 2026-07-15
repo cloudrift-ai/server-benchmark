@@ -131,12 +131,38 @@ reference everywhere except one row.
 - The one fm loss: 5090 attention.hd256.dynM fm 0.86× — the static fm-alt win does not transfer to the
   symbolic form (std stays the dynM primary, as the yaml records).
 
+## Part 2 — RTX 4090 twin (same day, riftuser@176.124.69.202, the box from the original Part-2 sweep)
+
+Same workflow (branch rsynced, sweeps under nohup, JSONs pulled back, replays validated on-box within
+noise). **16 entries added to `rtx4090_sm89_gemma4.yaml`** — the same name set as the 5090. Winners
+(3× reproduced; static/dynM/s2048; ref = live eager):
+
+| shape | std (f32-acc) | fm (f16-acc) |
+| --- | --- | --- |
+| q_proj_global | `w2x2/f4x4/k2 g2k` 220.8 (0.96×) — s2048 drops the split (serial, bimodal 8%) | `w2x2/f4x8/k2 SERIAL` 144.2 (**1.47×**); s2048 583.2 (1.29×) |
+| k_proj_global | `w2x2/f2x4/k2 g8k` 19.6 (0.85×) | `w2x4/f2x4/k2 g8k` 17.9 (0.93×) — the 5090 winner spelling transfers; s2048 shallows to g2k |
+| o_proj_global | `w2x2/f4x4/k2 g2k` 223.5 (1.02×) | `w2x2/f4x8/k2 g2k` 162.1 (**1.40×**); s2048 goes SERIAL 589.3 (1.34×) |
+| attention.hd512 | alt+g2k 116.1 (0.82×); dynM alt 139.6 (0.79×, 9% jitter); **s2048 alt+g2k 1069.0 (0.87×)** | PV lose (not recorded) |
+| qknorm.k512 | `b128` 9.9 (1.05×) — greedy already picks it | — |
+
+4090-specific findings:
+
+- **k_proj_global is below parity on BOTH lanes** (fm 0.93×, std 0.85×; at s2048 fm g2k 0.95×, std 0.74×)
+  — the sm_89 kv_proj latency residual, worse at N=512. Nothing in the knob space closes it.
+- **Split-KV does NOT invert at s2048 on this card** (unlike the 5090): alt+g2k 1069.0 (0.1% stable)
+  beats plain alt 1391.6 (8% jitter) and ring 1541.1. And split-KV PAYS at seq 512 on the alt pipeline
+  where ring+g2k loses (172.6) — the transport/split interaction is lane- AND card-specific.
+- **Greedy on the unseeded hd512 shapes misdeploys but never hangs here**: static 163.3 (0.59×), dynM
+  803.8 (0.14×), s2048 5 419 µs (0.17× — under the watchdog that the 5090's scalar pick blows).
+- The 4090 alt jitter (8–9% run-to-run on plain-alt rows) recurs from the hd256 sweep; the g2k rows are
+  0.1%-stable throughout — worth preferring stable rows when ratios tie.
+
 ## Follow-ups
 
-1. **4090 twin seeding** — the global-layer shapes need the same rows in `rtx4090_sm89_gemma4.yaml` (rented
-   box; same workflow as the Part-2 sweep). Note 12B doesn't fit a 24 GB card for serving, but the golden
-   dataset is per-shape and the E2B-class target shares the geometry.
-2. **hd512 d_v fold / TMA box split** (items 1 and 3 above) — the only routes past 0.87×.
+1. **hd512 d_v fold / TMA box split** — the only routes past 0.87× at short seq (5090; the 4090 residual
+   is the same ceiling).
+2. **Symbolic split-KV** ("cross-CTA split of a symbolic reduce axis is not built yet") — it is the static
+   winner on BOTH cards' hd512 (and the 4090's s2048), so the dynM lane leaves 8–16% on the table.
 3. The whole-model seq>1024 explicit-mask attention form (PR #365) has no golden coverage for the hd512
    global layers either — the mask+hd512 combination is untested end to end.
 

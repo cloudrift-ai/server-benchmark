@@ -79,6 +79,25 @@ Both cards seeded with `.s2048` rows (all winners 2-4× reproduced; refs = live 
   read as "match no flash form"); bench attention A/Bs with NO env tile pin and tolerate the
   greedy bench_fail row.
 
+## Golden-value refresh check (2026-07-14) — RETRACTION: no values were stale
+
+The audit initially reported split-K matmul goldens reading 25-30% FASTER live than recorded,
+attributed to the #361 bare-child bench environment. **That finding was false** — an audit-parser
+artifact: the ad-hoc parser aligned recorded rows against a flat walk of json rows, pairing a
+split row's finalize kernel (or the other lane's main) with the wrong recorded value. The json
+already groups each pinned row's kernels under `/pinned[i]/kernels` (main + finalize together);
+paired correctly and re-measured 2× per name across ALL rows on BOTH cards:
+
+- **Every stable row is within 3% of its recorded value.** The residual deviations are ±3-6%
+  single-row jitter in BOTH directions (session noise), plus the known-jittery rows (the 4090
+  o_proj fm s2048 bimodality, hd128.dynM, q/o_proj.dynM at 8-9% run-to-run spread).
+- No yaml values changed; refreshing would churn numbers within the noise floor.
+- Audit methodology fixed for next time: read `/pinned[i]/kernels` sums, never a flat row walk.
+- One harness flake surfaced: after a greedy-hang kill, the respawned bench worker sometimes EOFs
+  the FIRST pinned row (`bench worker EOF before response`; the row records bench_fail, later
+  rows bench fine; the same row replays clean with the greedy env-pinned). Row-level, transient,
+  correlated with greedy-hang names (mlp_down.s2048 / mlp_gate_up.dynM std rows).
+
 ## Post-implementation corrections (mask realization landed)
 
 The explicit-mask warp form is implemented (`FragmentBiasAdd` — see the PR), and chasing the layer-0 repro

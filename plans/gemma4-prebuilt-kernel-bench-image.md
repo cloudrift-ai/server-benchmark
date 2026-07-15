@@ -12,7 +12,7 @@ for the **RTX 5090** (`sm_120`/`sm_120a`) so server cold-start pays **zero `nvcc
 Success criteria:
 
 1. `emmy serve --generate gemma-4-12B` starts on a 5090 and produces logits/text matching an HF reference. **NOT MET —
-   blocked on memory, see below.**
+   the pipeline runs end-to-end but the trunk forward produces NaN logits (kernel numerics); see Status.**
 2. The served model's **first request issues zero new `nvcc` compiles** (100% cubin cache hit) on the 5090.
 3. Reproducible: `make` targets build the image end to end from the wheel + a warm step.
 
@@ -70,7 +70,7 @@ All three are fixed on `feature/gemma4-unified-serving`.
 - For the **12B** the hard extras are OFF: PLE (`hidden_size_per_layer_input=0`), MoE (`enable_moe_block=False`),
   shared-KV (`num_kv_shared_layers=0`), `layer_scalar=1.0`. (E2B/E4B have PLE + 20 shared-KV layers — still deferred.)
 
-### 🚧 THE BLOCKER — memory: emmy needs ~2–3× what stock vLLM does
+### Memory: emmy needs ~2–3× what stock vLLM does (worked around by config; real fixes pending)
 
 Stock vLLM serves gemma-4-12B on a 32 GB 5090. emmy does not. **Both causes are emmy artifacts, not inherent costs** —
 `EmmyGenModel` holds no trunk parameters (vLLM keeps only `lm_head`), so the trunk should live exactly once:
@@ -87,18 +87,21 @@ Stock vLLM serves gemma-4-12B on a 32 GB 5090. emmy does not. **Both causes are 
    `num_layers`, which is why the 12B doesn't fit where stock vLLM does.
 
 Observed on the 5090: OOM at 32.4 GB (twin on) → 29.0 GB (twin off), the latter **inside vLLM's profiling `forward`**
-materializing a `4096 × 3840` fp16 buffer (31.4 MB) — i.e. the compile finished; the buffers killed it.
+materializing a `4096 × 3840` fp16 buffer (31.4 MB) — i.e. the compile finished; the buffers killed it. With the twin
+off + `ctx 256` + `util 0.97` the 12B fits and serves on the 32 GB card (the working config in Status).
 
-**Also unresolved:** with `--max-model-len 512 --max-num-batched-tokens 512` the run died **silently** (no traceback, no
-kernel OOM-kill, process gone). Reproduce on a small model locally before spending on another card.
+### Remaining Phase-A work (in priority order)
 
-### Remaining Phase-A work
-
-1. **Share constants** between the symbolic and decode-bucket programs (kills the 2× weights, keeps decode speed).
-2. **Pool activation buffers** across per-layer programs (removes the `num_layers` scaling).
-3. Diagnose the silent death at small `max_num_batched_tokens`.
-4. Then re-run the end-to-end serve A/B (`scripts/validate_gemma4_serve.py`) on a 5090.
-5. **PLE** — still out of scope for v1 (12B is dense); only for the deferred `gemma-4-E2B/E4B`.
+1. **🚧 THE BLOCKER — root-cause and fix the NaN logits.** Local layer-by-layer probe on the 4080 with real 12B
+   weights: teacher-force each layer with HF-computed reference inputs, run emmy `pre`/reference-SDPA/`post`, and find
+   the first layer/op where NaN erupts (plus the max-|activation| trajectory — fp16 overflow is the leading theory;
+   HF fp16 survives by computing norms in fp32). One layer at a time fits 16 GB.
+2. **Pin vLLM ≥ 0.23 for the serving extra** — 0.22.1 cannot dispatch gemma-4's 512-dim global attention.
+3. **Share constants** between the symbolic and decode-bucket programs (kills the 2× weights, keeps decode speed).
+4. **Pool activation buffers** across per-layer programs (removes the `num_layers` scaling).
+5. Re-run the end-to-end serve A/B (`scripts/validate_gemma4_serve.py`) on a 5090 — the run is now fully scripted
+   (detached harness + sampler + diag) and every infra obstacle is cleared.
+6. **PLE** — still out of scope for v1 (12B is dense); only for the deferred `gemma-4-E2B/E4B`.
 
 ## Phase B — prebuilt-kernel image
 
@@ -130,8 +133,10 @@ file set — empty diff = 100% hit.
 
 ## Risks / open questions
 
-- **The blocker is architectural, not hardware.** A bigger card would mask the memory issue, not fix it — and emmy's
-  footprint would still scale with `num_layers`. Fix the buffers first; more GPU time buys nothing until then.
+- **The blocker is numerics, not hardware.** The NaN reproduces wherever the kernels run; it is debuggable locally on
+  the 4080 with real weights, so no rental is needed until the final re-validation. (The memory artifacts are worked
+  around by config; the real fixes — shared constants, pooled buffers — still matter for a deployable footprint, since
+  emmy's currently scales with `num_layers`.)
 - **`total_mem` featurization drift** (second-order): memorized 5090 VRAM vs a live 5090's probed bytes differ slightly;
   if the offline prior is sensitive for any serving kernel, that kernel misses once and recompiles (correct, not free).
   The real-5090 hit-rate check catches it; fix by pinning the 5090 spec or wiring `probe_live_features(fallback_name=…)`.

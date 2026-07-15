@@ -222,13 +222,20 @@ prefix-consistent with the fastest `H_opt=3` row of the same op), (3) the tune D
 **Goldens are the first evidence tier of a greedy compile.** The per-GPU golden files are the only *measured* data
 that ships with a clone — the reservoir and tune DB are machine-local caches written by local tunes, so a fresh
 machine (every rented box) previously deployed on pure model extrapolation (the gemma 12–29× cold misdeploys). At a
-fork, `greedy_decide` joins the op against the deploy card's recorded matmul goldens by `ShapeKey` (static and
-dynamic twins never cross) and picks the offered candidate prefix-consistent with the fastest recorded entry — keys
-and values compare through the A/B pin gate's canonical matching, so a bare golden spelling matches its axis-stamped
-realization and a fast-math entry self-excludes when its atom isn't offered (gate off). Goldens are **consulted,
-never trained on**: they enter no reservoir, no checkpoint, no dataset (they are the held-out acceptance set). Golden
-µs is deployable-regime truth and never arbitrates a non--O3 compile. A shape match none of whose entries realizes
-against the offer logs a loud enumeration-drift warning and falls through to the tiers below.
+fork, `greedy_decide` joins the op against the deploy card's recorded goldens — every kind: matmul, attention
+(flash), rms_norm, softmax, reduce, pointwise — by `ShapeKey` (static and dynamic twins never cross; the key's
+`kind` discriminator, classified off the stamped histogram via the sweep identity
+`S_loop_depth < n_free + n_reduce + n_symbolic`, keeps a flash/norm op apart from an extent-coincident contraction;
+at the DEPLOY fork the flash op is recognized from its offer's `TILE@dd` + `TILE@pj` pair instead — the tile pass's
+restructured twisted op carries re-derived extents only, no histogram, so the stamp classifier cannot fire there)
+and picks the offered candidate prefix-consistent with the fastest recorded entry — keys and values compare through
+the A/B pin gate's canonical matching. An axis-keyed golden key (a static attention golden's `TILE@dd` + `TILE@pj`)
+is all-or-nothing; a bare golden key on a multi-axis family carries the pin-resolution semantics — one plan,
+satisfied by ANY same-family realization (how a dynamic attention golden's single bare `TILE` matches the masked
+fork's axis-keyed leaves) — and a fast-math entry self-excludes when its atom isn't offered (gate off). Goldens are
+**consulted, never trained on**: they enter no reservoir, no checkpoint, no dataset (they are the held-out
+acceptance set). Golden µs is deployable-regime truth and never arbitrates a non--O3 compile. A shape match none of
+whose entries realizes against the offer logs a loud enumeration-drift warning and falls through to the tiers below.
 
 ### `FallbackPrior` and the calibration gate
 

@@ -226,3 +226,147 @@ def test_tune_path_never_routes_through_the_deploy_pick():
 
     src = inspect.getsource(two_level) + inspect.getsource(mcts)
     assert "greedy_decide" not in src and "_golden_pick" not in src
+
+
+# --- attention / norm kinds (the ShapeKey ``kind`` extension) -----------------------------------
+# Stamp bases measured off the real traced ops (see test_shape_key_kinds): the flash op is a sweep
+# (S_loop_depth < n_free + n_reduce + n_sym) with exp + 3 free loops -> kind="flash"; RMSNorm sweeps
+# with rsqrt -> kind="rms_norm". Fork leaves captured off the live flash enumeration key
+# TILE@dd + TILE@pj (+ PLACE@fold / REDUCE@kv / STAGE@kv) for BOTH the static and masked forms.
+
+from emmy.compiler.pipeline.search.golden import AttentionGoldenConfig, RmsNormGoldenConfig  # noqa: E402
+
+_FLASH_SIG = {
+    "S_ext_free_prod": 2097152.0,
+    "S_ext_reduce_max": 512.0,
+    "S_ext_n_free_axis": 3.0,
+    "S_ext_n_reduce_axis": 3.0,
+    "S_ext_n_symbolic_axis": 0.0,
+    "S_loop_depth": 4.0,
+    "S_pw_exp": 2.0,
+    "S_n_free_loop": 3.0,
+    "H_opt": 3.0,
+}
+_FLASH_DYN_SIG = {
+    "S_ext_free_prod": 4096.0,
+    "S_ext_reduce_max": 0.0,
+    "S_ext_n_free_axis": 2.0,
+    "S_ext_n_reduce_axis": 0.0,
+    "S_ext_n_symbolic_axis": 4.0,
+    "S_loop_depth": 4.0,
+    "S_pw_exp": 2.0,
+    "S_n_free_loop": 3.0,
+    "H_opt": 3.0,
+}
+_RMS_SIG = {
+    "S_ext_free_prod": 1966080.0,
+    "S_ext_reduce_max": 3840.0,
+    "S_ext_n_free_axis": 2.0,
+    "S_ext_n_reduce_axis": 1.0,
+    "S_ext_n_symbolic_axis": 0.0,
+    "S_loop_depth": 2.0,
+    "S_pw_rsqrt": 1.0,
+    "S_dtype_f32": 5.0,
+    "H_opt": 3.0,
+}
+
+# Real recorded spellings (rtx4090 golden files): the known-hang w2x1 form vs the golden w4x1 form.
+_DD_W4X1 = "a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16"
+_PJ_W4X1 = "a:mma_m16n8k16_f16_f32/w4x1/f1x32"
+_DD_W2X1 = "a:mma_m16n8k16_f16_f32/w2x1/f1x8/k16"
+_PJ_W2X1 = "a:mma_m16n8k16_f16_f32/w2x1/f1x32"
+_PJ_FM = "a:mma_m16n8k16_f16_f16/w4x1/f1x32"
+
+
+def _flash_row(dd, pj, stage="d2/cp/ring", base=None):
+    return {**(base or _FLASH_SIG), "PLACE@fold": "fuse", "TILE@dd": dd, "TILE@pj": pj, "REDUCE@kv": "", "STAGE@kv": stage}
+
+
+def _attention(name="gemma4_12b.attention.hd256", knobs=None, us=44.3, *, dynamic=False):
+    return AttentionGoldenConfig(
+        name=name,
+        n_heads=16,
+        seq=512,
+        head_dim=256,
+        dtype="fp16",
+        dynamic=dynamic,
+        knobs=knobs or {"TILE@dd": _DD_W4X1, "TILE@pj": _PJ_W4X1, "STAGE": "d2/cp/ring"},
+        emmy_us=us,
+        gpu_name=CARD,
+        compute_cap=CAP,
+    )
+
+
+def test_attention_static_golden_decides_and_pins_are_all_or_nothing(monkeypatch):
+    """The hang-class scenario: the fork offers the known-bad w2x1 form and the golden's
+    w4x1 form — the golden must decide. And the static dd+pj contract is all-or-nothing:
+    a row matching dd but not pj is a DIFFERENT form and must not be picked."""
+    index = _index(monkeypatch, [_attention()])
+    rows = [
+        _flash_row(_DD_W2X1, _PJ_W2X1),  # the cold-greedy hang pick from the gemma seeding report
+        _flash_row(_DD_W4X1, _PJ_W2X1),  # dd matches, pj does not -> not the golden's form
+        _flash_row(_DD_W4X1, _PJ_W4X1),
+    ]
+    assert _golden_pick(index, rows, "n0") == (2, 44.3)
+
+
+def test_attention_dynM_bare_plan_golden_matches_axis_keyed_leaves(monkeypatch):
+    """A dynamic attention golden is schema-required to record ONE bare TILE (the pin
+    contract), but the masked-flash fork's leaves are axis-keyed dd+pj like the static
+    form — the bare plan must be satisfied by ANY same-family realization (the
+    pin-resolution semantics), here the dd plan, spelled with the atom ALIAS the YAML
+    records (canonical value comparison)."""
+    gold = _attention(
+        name="attention.hd256.dynM",
+        dynamic=True,
+        us=40.4,
+        knobs={"PLACE": "fuse", "TILE": "a:mma_m16n8k16_f16/w4x1/f1x2/k16", "STAGE": "d2/cp/ring"},
+    )
+    index = _index(monkeypatch, [gold])
+    rows = [
+        _flash_row(_DD_W2X1, _PJ_W2X1, base=_FLASH_DYN_SIG),
+        _flash_row(_DD_W4X1, _PJ_W4X1, base=_FLASH_DYN_SIG),
+    ]
+    assert _golden_pick(index, rows, "n0") == (1, 40.4)
+    # The static twin's index never decides the masked op and vice versa.
+    assert _golden_pick(_index(monkeypatch, [_attention()]), rows, "n0") is None
+
+
+def test_attention_fm_pv_plan_golden_self_excludes_gate_off(monkeypatch):
+    """A fast-math dynM golden records the sibling PV plan as its bare TILE; with the fm
+    gate off no leaf realizes the f16-accumulate pj, so it self-excludes and the std
+    entry decides — gate on (fm pj offered), the faster fm entry wins via ANY-axis."""
+    std = _attention(
+        name="attention.hd256.dynM", dynamic=True, us=44.3, knobs={"TILE": "a:mma_m16n8k16_f16/w4x1/f1x2/k16", "STAGE": "d2/cp/ring"}
+    )
+    fm = _attention(name="attention.hd256.dynM", dynamic=True, us=36.1, knobs={"TILE": _PJ_FM, "STAGE": "d2/cp/ring"})
+    index = _index(monkeypatch, [std, fm])
+    gate_off = [_flash_row(_DD_W4X1, _PJ_W4X1, base=_FLASH_DYN_SIG)]
+    assert _golden_pick(index, gate_off, "n0") == (0, 44.3)
+    gate_on = gate_off + [_flash_row(_DD_W4X1, _PJ_FM, base=_FLASH_DYN_SIG)]
+    assert _golden_pick(index, gate_on, "n0") == (1, 36.1)
+
+
+def test_rms_norm_golden_decides_its_op(monkeypatch):
+    gold = RmsNormGoldenConfig(name="rms_norm.k3840", M=512, K=3840, knobs={"REDUCE": "b256"}, emmy_us=6.3, gpu_name=CARD, compute_cap=CAP)
+    index = _index(monkeypatch, [gold])
+    rows = [{**_RMS_SIG, "REDUCE@r0": "b32"}, {**_RMS_SIG, "REDUCE@r0": "b256"}]
+    assert _golden_pick(index, rows, "n0") == (1, 6.3)
+
+
+def test_cross_kind_isolation_via_the_kind_discriminator(monkeypatch):
+    """An attention golden and a matmul golden with NUMERICALLY IDENTICAL extents never
+    cross: the flash op's sweep stamps classify kind="flash", the contraction's stamps
+    kind="" — each key joins only its own kind."""
+    # Matmul golden whose extents collide with the flash op's (free 2097152, K 512, warp).
+    collide = _golden(name="matmul.sq512ish", knobs={"TILE": _STD_TILE, "STAGE": "d2/cp/ring"})
+    object.__setattr__(collide, "K", 512)  # frozen dataclass; forge the colliding reduce extent
+    index = _index(monkeypatch, [collide])
+    flash_rows = [_flash_row(_DD_W4X1, _PJ_W4X1)]
+    assert _golden_pick(index, flash_rows, "n0") is None  # matmul golden never decides a flash op
+    # And the attention golden never decides a matmul op of the same extents.
+    a_index = _index(monkeypatch, [_attention()])
+    mm_rows = _rows(
+        _ROW_GOLD, base={**_BASE, "S_ext_reduce_max": 512.0, "S_ext_n_free_axis": 2.0, "S_ext_n_reduce_axis": 1.0, "S_loop_depth": 3.0}
+    )
+    assert _golden_pick(a_index, mm_rows, "n0") is None

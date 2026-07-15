@@ -1565,14 +1565,16 @@ def test_sdpa_explicit_additive_mask(_chain_tile_pins, n_heads: int, seq_len: in
 @requires_cuda
 def test_warp_flash_f32_value_operand_converts(monkeypatch):
     """A V operand traced at f32 (gemma-4's V-norm: ``v_f16 * f32 row stat`` promotes, and the
-    ``.half()`` cast folds into the flash op's load) must CONVERT at the fragment load, not
-    reinterpret: the gmem-direct loaders take the fragment element type explicitly
-    (``<float, __half>``) and round each element — the raw-bit-pattern regression NaN'd every
-    even output column and scribbled past the 4-byte register. The staged rows decline (a
-    cp.async byte-copy cannot convert), so the kernel stays warp-tier gmem-direct."""
+    traced ``.half()`` cast rides a view) must reach the flash stream as an f16 BUFFER: the
+    cast splits out of the view (``005_split_cast_from_indexmap``), fusion keeps it
+    materialized at flash offer sites (``_is_castfree_indexmap`` — a dtype-changing copy is
+    not plumbing) and fuses the f32 ``mul`` producer INTO it, so the stream sees an
+    atom-dtype operand and the pinned cp.async ring RESOLVES (the pre-split behavior fused
+    the cast into the flash load, and the f32 buffer declined every staged row —
+    gmem-direct forever, the gemma layer-0 lockout)."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w2x1/f1x4/k4")
-    monkeypatch.setenv("EMMY_STAGE", "d2/cp/ring")  # must DECLINE: the f32 V cannot byte-copy
+    monkeypatch.setenv("EMMY_STAGE", "d2/cp/ring")  # resolves: the split-out cast feeds f16 V
     monkeypatch.setenv("EMMY_WSPEC", "")
     torch.manual_seed(5)
     S, D = 128, 64
@@ -1586,9 +1588,11 @@ def test_warp_flash_f32_value_operand_converts(monkeypatch):
     s = (torch.rand(1, 4, S, 1) + 0.5).float()
     backend, compiled, graph, kernels = _trace(VNormSdpa(), (q, k, v, s))
     srcs = "\n".join(compiled.nodes[n].op.kernel_source for n in kernels)
-    assert "mma.sync" in srcs, "the f32-V flash must stay on the warp (mma) tier"
-    assert "<float, __half>" in srcs, "the f32 operand must convert through the explicit fragment type"
-    assert "_v_smem" not in srcs, "staging must decline for a dtype-mismatched operand (byte-copy cannot convert)"
+    flash = [compiled.nodes[n].op.kernel_source for n in kernels if "mma.sync" in compiled.nodes[n].op.kernel_source]
+    assert flash, "the f32-V flash must stay on the warp (mma) tier"
+    sig = next(line for line in flash[0].splitlines() if "__launch_bounds__" in line)
+    assert sig.count("const float*") <= 1, f"only the flash scale may be f32 — V must be the materialized f16 cast: {sig}"
+    assert "_v_smem" in srcs, "the pinned cp.async ring must resolve against the f16 cast buffer"
 
     def ref():
         with torch.no_grad():

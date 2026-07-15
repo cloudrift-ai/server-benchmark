@@ -473,7 +473,12 @@ def node_report(prior, nodes, *, kernel_filter: str | None = None) -> str:
     another ``FEATURIZER_VERSION`` are excluded too, with a printed count: their
     ``features`` are spelled in a knob vocabulary the prior can't read, so scoring them
     yields constant predictions and a worse-than-random report about a healthy model
-    (the 2026-07 tile-IR-rebuild failure class)."""
+    (the 2026-07 tile-IR-rebuild failure class). Each card block ends with the
+    **golden-anchored descent** section (:func:`_golden_anchor_block`): the regret view
+    conditions on forks the search measured, so a golden in a subtree the search never
+    built — or a shape with no node data at all — was previously silence that read as
+    health (how the 2026-07 prior-saturation bug hid); the anchored rows make that
+    absence loud, per golden."""
     from collections import defaultdict  # noqa: PLC0415
 
     from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION  # noqa: PLC0415
@@ -502,12 +507,213 @@ def node_report(prior, nodes, *, kernel_filter: str | None = None) -> str:
         regimes = sorted({n.features.get("H_opt") for n in gnodes}, key=lambda v: (v is None, v))
         if len(regimes) <= 1:  # single regime → the header stays the bare card name
             lines.extend(_node_gpu_block(prior, gpu, gnodes))
-            continue
-        for opt in regimes:
-            sub = [n for n in gnodes if n.features.get("H_opt") == opt]
-            label = f"{gpu} @ -O{int(opt)}" if opt is not None else f"{gpu} @ -O?"
-            lines.extend(_node_gpu_block(prior, label, sub))
+        else:
+            for opt in regimes:
+                sub = [n for n in gnodes if n.features.get("H_opt") == opt]
+                label = f"{gpu} @ -O{int(opt)}" if opt is not None else f"{gpu} @ -O?"
+                lines.extend(_node_gpu_block(prior, label, sub))
+        lines.extend(_golden_anchor_block(prior, gpu, gnodes, kernel_filter))
+    unanchored = _golden_cards_without_rows(set(by_gpu), kernel_filter)
+    if unanchored:
+        lines.append("  golden-anchored: card(s) with recorded goldens but NO node rows: " + ", ".join(unanchored))
     return "\n".join(lines)
+
+
+def _golden_cards_without_rows(cards_in_store: set[str], kernel_filter: str | None) -> list[str]:
+    """Cards that have recorded matmul goldens but zero rows in the node store — the
+    loudest form of the anchored view's absence rule (a whole card's goldens are
+    unanchorable, e.g. goldens seeded on a box whose node data was never collected)."""
+    from collections import Counter  # noqa: PLC0415
+
+    from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS, MatmulGoldenConfig  # noqa: PLC0415
+
+    counts = Counter(
+        g.gpu_name
+        for g in GOLDEN_CONFIGS
+        if isinstance(g, MatmulGoldenConfig) and g.gpu_name not in cards_in_store and (not kernel_filter or kernel_filter in g.name)
+    )
+    return [f"{gpu} ({n} golden(s))" for gpu, n in sorted(counts.items())]
+
+
+# ---------------------------------------------------------------------------
+# golden-anchored descent: tie the regret view to the goldens the search may
+# never have reached (diagnostic — absence must be loud, never a gate)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _AnchorStep:
+    """One fork group along a golden's matched path: the knob family it decides,
+    whether the prior's (tie-pessimistic) pick keeps the golden's subtree alive, and —
+    when lost and both sides are measured — the same-regime value ratio
+    ``picked child / best golden-consistent child`` (>1 = the pick steers measurably
+    worse than the golden's own branch; <1 = a near-equal-or-better sibling, fine)."""
+
+    family: str
+    n_sibs: int
+    kept: bool
+    gap: float | None
+
+
+def _golden_prefix_consistent(feats: dict, gold: dict) -> bool:
+    """Whether a node's decided tunables agree with the golden's recorded knobs —
+    the branch-matching rule of the anchored walk. Family-aware and registry-canonical
+    exactly like the A/B pin gate: a bare golden ``TILE`` matches an axis-stamped
+    ``TILE@a2`` key (``knob.pin_key_matches``) and values compare through the
+    registered knob's canonical parse (``knob.values_equal`` — alias spellings never
+    false-mismatch). A family the golden doesn't record, or an axis-keyed golden pin
+    that matches no node key, is no constraint (prefix semantics: only *decided,
+    comparable* knobs can disagree)."""
+    from emmy.compiler.pipeline.knob import family_of, pin_key_matches, values_equal  # noqa: PLC0415
+
+    for k, v in feats.items():
+        if k.startswith(("S_", "H_")):
+            continue
+        fam = family_of(k)
+        for gk, gv in gold.items():
+            if family_of(gk) == fam and pin_key_matches(gk, k):
+                if not values_equal(gk, gv, v):
+                    return False
+                break
+    return True
+
+
+def _anchor_walk(prior, tree_nodes: list, gold: dict) -> tuple[int, list[_AnchorStep], str]:
+    """Walk one op's parent-linked fork groups along the golden's prefix path:
+    ``(matched_levels, steps, descriptor)`` for the deepest golden-consistent chain,
+    the descriptor a rendered coverage phrase ("followed d/D fork levels …"). A full
+    match's denominator is exact (the leaf ends the path); a partial match's is an
+    ESTIMATE from the deepest sibling chain below the stop (rendered ``~D``) — the
+    golden's own branch topology was never materialized, so the siblings' depth is
+    the only witness of how much tree remains. ``tree_nodes`` must be one card's
+    -O1-lane rows for the op (the -O3 regime rows are parentless re-measurements,
+    not tree members). Each group with ≥2 children gets a descent check
+    (:class:`_AnchorStep`); groups are walked per ``context_key`` (trees never span
+    compile regimes) and the deepest result wins."""
+    from collections import defaultdict  # noqa: PLC0415
+
+    from emmy.compiler.pipeline.search.features import knob_features  # noqa: PLC0415
+
+    # Sentinel depth -1 so the first real walk result always replaces it — a level-0
+    # "branch never built" must not lose to the sentinel text at equal depth 0.
+    best: tuple[int, list[_AnchorStep], str] = (-1, [], "no explored forks")
+
+    def consider(depth: int, steps: list, stop: str) -> None:
+        nonlocal best
+        if depth > best[0]:
+            best = (depth, steps, stop)
+
+    by_ctx: dict = defaultdict(list)
+    for n in tree_nodes:
+        by_ctx[n.context_key].append(n)
+    for op_nodes in by_ctx.values():
+        by_key = {n.node_key: n for n in op_nodes}
+        children: dict = defaultdict(list)
+        for n in op_nodes:
+            children[n.parent_key if n.parent_key in by_key else None].append(n)
+        depth_memo: dict = {}
+
+        def subtree_depth(key, children=children, depth_memo=depth_memo) -> int:
+            """Deepest chain length strictly below ``key`` (0 = no children)."""
+            if key in depth_memo:
+                return depth_memo[key]
+            depth_memo[key] = 0  # cycle guard; parent links form a tree in practice
+            kids = children.get(key, [])
+            depth_memo[key] = 1 + max(subtree_depth(c.node_key) for c in kids) if kids else 0
+            return depth_memo[key]
+
+        def descend(key, node, depth: int, steps: list, children=children, by_key=by_key) -> None:
+            group = children.get(key, [])
+            if not group:
+                if node is not None and bool(node.is_leaf):
+                    consider(depth, steps, f"followed {depth}/{depth} fork levels to a measured leaf")
+                    return
+                # Exploration just stopped here — estimate what remains from the stop
+                # node's own siblings' subtrees (the golden's branch may go deeper).
+                sib_group = children.get(node.parent_key if node.parent_key in by_key else None, []) if node is not None else []
+                est = depth + max((subtree_depth(s.node_key) for s in sib_group if s is not node), default=0)
+                cov = f"followed {depth} of ~{est} fork levels" if est > depth else f"followed {depth}/≥{depth} fork levels"
+                consider(depth, steps, f"{cov} — subtree unexplored past the match")
+                return
+            matching = [c for c in group if _golden_prefix_consistent(c.features, gold)]
+            if not matching:
+                # The divergence group's children sit at depth+1; their deepest chain
+                # estimates the levels the golden's unbuilt branch would still have.
+                est = depth + 1 + max(subtree_depth(c.node_key) for c in group)
+                fam = _fork_family(node, group)
+                consider(
+                    depth,
+                    steps,
+                    f"followed {depth} of ~{est} fork levels — golden's branch never built below @{fam} ({len(group)} sibling(s) explored)",
+                )
+                return
+            step = None
+            if len(group) >= 2:
+                scores = prior.mean_scores_features([knob_features(s.features) for s in group])
+                picked = group[_pessimistic_pick(scores, group)]
+                kept = any(picked is m for m in matching)
+                gap = None
+                if not kept:
+                    branch_best = min(c.value_us for c in matching)
+                    gap = picked.value_us / branch_best if branch_best > 0 else None
+                step = _AnchorStep(_fork_family(node, group), len(group), kept, gap)
+            for m in matching:
+                descend(m.node_key, m, depth + 1, steps + ([step] if step else []), children, by_key)
+
+        descend(None, None, 0, [])
+    return best if best[0] >= 0 else (0, [], "no explored forks")  # op had only -O3 regime rows → nothing to walk
+
+
+def _golden_anchor_block(prior, gpu: str, gnodes: list, kernel_filter: str | None, goldens=None) -> list[str]:
+    """The per-card golden-anchored section: one row per recorded golden of THIS card,
+    anchored against the card's node rows only. Absence is loud — a golden whose shape
+    has no tree data gets a row saying so, and the block headline counts them. The
+    golden's recorded µs never touches the -O1 walk or its gaps (the regimes invert);
+    it enters only the -O3 endpoint: the prior's pick over the op's ``H_opt=3`` regime
+    rows vs ``emmy_us``, same-regime by construction (and skipped on a fast-math
+    regime mismatch, the ``golden_deploy_perf`` convention)."""
+    from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS, MatmulGoldenConfig, fast_math_knobs  # noqa: PLC0415
+
+    if goldens is None:
+        goldens = [g for g in GOLDEN_CONFIGS if isinstance(g, MatmulGoldenConfig) and g.gpu_name == gpu]
+    if kernel_filter:
+        goldens = [g for g in goldens if kernel_filter in g.name]
+    if not goldens:
+        return []
+
+    def is_o3(n) -> bool:
+        return int(n.features.get("H_opt", 0)) == 3
+
+    lines = ["    golden-anchored descent (does the explored tree contain each golden's branch, and does the prior follow it?):"]
+    no_data = 0
+    w = max(30, *(len(g.name) + 5 for g in goldens))
+    for g in goldens:
+        name = g.name + (" [fm]" if g.fast_math else "")
+        op_nodes = [n for n in gnodes if _matmul_sig(n.features) and ShapeKey.from_s_features(n.features) == g.shape_key()]
+        if not op_nodes:
+            no_data += 1
+            lines.append(f"      {name:{w}}  NO TREE DATA for this shape on this card")
+            continue
+        gold = dict(g.knobs)
+        _matched, steps, descriptor = _anchor_walk(prior, [n for n in op_nodes if not is_o3(n)], gold)
+        kept = sum(1 for s in steps if s.kept)
+        parts = [descriptor]
+        if steps:
+            detail = "".join(
+                f", lost @{s.family}" + (f" {s.gap:.2f}x vs golden branch" if s.gap is not None else "") for s in steps if not s.kept
+            )
+            parts.append(f"descent kept {kept}/{len(steps)}{detail}")
+        o3 = [n for n in op_nodes if is_o3(n) and n.value_us > 0]
+        if o3 and g.emmy_us:
+            rows = [n.features for n in o3]
+            picker = getattr(prior, "pick", None)
+            best_i = picker(rows)[0] if picker is not None else min(range(len(o3)), key=lambda i: prior.mean_score(rows[i]))
+            tunables = {k: v for k, v in rows[best_i].items() if not k.startswith(("S_", "H_"))}
+            if fast_math_knobs(tunables) == g.fast_math:
+                parts.append(f"-O3 pick/golden {o3[best_i].value_us / g.emmy_us:.2f}x")
+        lines.append(f"      {name:{w}}  " + "; ".join(parts))
+    lines.append(f"      summary: {no_data}/{len(goldens)} golden(s) have no tree data on this card")
+    return lines
 
 
 # ---------------------------------------------------------------------------

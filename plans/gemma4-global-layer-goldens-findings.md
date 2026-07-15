@@ -157,14 +157,64 @@ noise). **16 entries added to `rtx4090_sm89_gemma4.yaml`** — the same name set
 - The 4090 alt jitter (8–9% run-to-run on plain-alt rows) recurs from the hd256 sweep; the g2k rows are
   0.1%-stable throughout — worth preferring stable rows when ratios tie.
 
-## Follow-ups
+## Part 3 — the four follow-up items, addressed on this branch (2026-07-14, same day)
 
-1. **hd512 d_v fold / TMA box split** — the only routes past 0.87× at short seq (5090; the 4090 residual
-   is the same ceiling).
-2. **Symbolic split-KV** ("cross-CTA split of a symbolic reduce axis is not built yet") — it is the static
-   winner on BOTH cards' hd512 (and the 4090's s2048), so the dynM lane leaves 8–16% on the table.
+### Symbolic flash split-KV — LANDED (+13.7% on the dynM hd512 primary)
+
+The "cross-CTA split of a symbolic reduce axis is not built yet" gap is closed for the warp flash:
+
+- **Schedule**: `_stamp_twisted_split` no longer drops symbolic rows (the static divisibility gates stay
+  static-only).
+- **`030_split_reduce`**: a symbolic kv slices at the bn-ALIGNED runtime width `B = ceil(S/(cta·bn))·bn`
+  (a composite `Dim`), `offset = s·B`, and a new `Reduction.bound = min((s+1)·B, S)` — the slice's
+  absolute end. An empty last slice (S ≤ s·B) runs zero steps and contributes exact carrier identities.
+- **Realizer** (`kernel/_twist.py`): the stream stops at `bound − offset` (composed with the causal
+  bound), the gmem guards / fragment masks bound against the ABSOLUTE slice end (a mid-tensor slice end
+  reads VALID next-slice keys the extent-only tail masks would keep), and — the bug the first cut hit —
+  **the split partial's state stores now carry the symbolic-M `m_guard`**: the tail CTA's clamp-read
+  overhanging query rows were writing their `(m, l, O)` into the NEXT head's workspace rows (at S=40,
+  rows 40–63 corrupted the next head's rows 0–23 — exactly the observed wrong-row window).
+- **Validation**: 12/12 accuracy matrix green (unstaged / d2-cp-ring / d1-cp-alt × g2k/g4k × seq
+  300/40/512 — non-block tails, an empty slice, causal and plain);
+  `test_warp_flash_split_kv_symbolic_matches_torch` pins all four regimes; the full attention suite
+  (103 tests) passes.
+- **Measured**: dynM hd512 alt+g2k **116.6 µs (3×, 0.3% spread) vs the plain-alt 135.2** — 0.77× → 0.89×
+  vs SDPA-at-hint, closing most of the dynM-vs-static gap (static 113.0). Golden row updated. At hd256
+  dynM the split LOSES (37.9 vs 32.2 — the finalize cost at a non-starved grid, matching its static
+  behavior), so that row stands.
+
+### hd512 d-split warp geometry — lockout confirmed, the d_v-fold shape is concrete
+
+Pinning `w2x2` (2 warps on m × 2 on d — halving the 256-reg O accumulator per thread) realizes back to
+`w2x1`: the twisted moveset only enumerates `w<um>x1`. The d_v fold therefore means teaching
+`_twisted_warp_options` + the realizer a warp-column d-split (per-column V fragments + either duplicated
+QK^T scores or smem P sharing) — its own feature branch. The TMA two-box encode (head_dim 512 > the 256
+box-dim cap) remains the other route; measured transport data says cp wins at hd512 anyway (alt rides
+cp), so the reg ceiling is the one that matters.
+
+### Sliding-window banded tile-skip — scoped, deferred (metadata gap)
+
+The two-sided skip needs the WINDOW statically, and it does not survive tracing: HF materializes the
+additive mask tensor and `SdpaOp` carries only `is_causal` — the flash sees an opaque `(m, kv)` bias
+operand (the #365 `FragmentBiasAdd`). Design: (1) stamp `sliding_window` per layer onto the traced
+SdpaOp in `trace/huggingface.py` (the wrapper knows `config.sliding_window` + `layer_types`);
+(2) derive `kv_start = floor(max(0, cta_first_row − window + 1) / bn)·bn` next to the causal `kv_end`
+(the same derived-bound machinery, applied at the other end); (3) teach `staged_kloop` /
+`pipelined_kloop` a non-zero stream start. Payoff: 40 of 48 gemma-4 layers stop paying O(seq²) at
+seq ≫ 1024. Deferred to its own branch — this one already carries the goldens + split-KV.
+
+### Layer re-baseline (post-#354 megakernel + seeded goldens)
+
+(pending — the 4090 layer-0 tune is running; numbers land here when it completes)
+
+## Remaining follow-ups
+
+1. hd512 d_v fold (the `w<um>x<un>` twisted geometry) — the one route past 0.87× at short seq.
+2. The banded tile-skip per the design above.
 3. The whole-model seq>1024 explicit-mask attention form (PR #365) has no golden coverage for the hd512
-   global layers either — the mask+hd512 combination is untested end to end.
+   global layers — the mask+hd512 combination is untested end to end.
+4. The 4090 dynM hd512 golden row should pick up the symbolic split-KV win too (re-bench once the
+   re-baseline tune frees the box).
 
 ## Repro / artifacts
 

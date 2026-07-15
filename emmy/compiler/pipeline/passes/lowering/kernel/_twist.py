@@ -421,7 +421,16 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # slice's absolute base — added wherever the absolute key coordinate matters: the score-column
     # masks (``col_bases``), the gmem/TMA operand bases, and the causal bound below.
     kv_off = red.offset
-    assert kv_off is None or not symbolic_k, "a cross-CTA kv slice is static (030_split_reduce refuses symbolic)"
+    # A SYMBOLIC slice partial additionally carries ``red.bound`` — the slice's absolute end
+    # ``min((s+1)·B, S)``. The extent (``seq``) is then the uniform bn-aligned width ``B``, so the
+    # extent-only tail machinery would keep a mid-tensor slice's overrun keys (VALID data belonging
+    # to the next slice): every kv mask/clamp below bounds against the slice end instead —
+    # ``abs_kv_end`` for absolute coordinates, ``local_kv_end`` (= bound − offset) for window-local
+    # ones, and the stream stops at ``local_kv_end`` (composed with the causal bound).
+    kv_bound = red.bound
+    assert kv_bound is None or kv_off is not None, "Reduction.bound rides only a slice partial (offset set)"
+    abs_kv_end: Expr = kv_bound if kv_bound is not None else seq
+    local_kv_end: Expr | None = BinaryExpr("-", kv_bound, kv_off) if kv_bound is not None else None
 
     def _abs_kv(e: Expr) -> Expr:
         return BinaryExpr("+", e, kv_off) if kv_off is not None else e
@@ -435,13 +444,14 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # block's warps/query tiles, the raw grid var — NOT the per-warp ``m_blk``), which keeps the
     # staged path's in-loop barriers legal. On a slice partial the bound is slice-local (the base
     # subtracted; an above-the-diagonal slice goes negative and the loop runs zero steps).
-    kv_end: Expr | None = None
+    kv_end: Expr | None = local_kv_end  # a symbolic slice stops at its own end even un-causal
     if _causal_stream(partial[1:], qk):
         cta_rows = Literal(um * fm * shape[0], "int")
         causal_rows = BinaryExpr("*", BinaryExpr("+", Var(grid[-1].name), Literal(1, "int")), cta_rows)
         if kv_off is not None:
             causal_rows = BinaryExpr("-", causal_rows, kv_off)
-        kv_end = TernaryExpr(cond=BinaryExpr("<", causal_rows, seq), if_true=causal_rows, if_false=seq)
+        cap = local_kv_end if local_kv_end is not None else seq
+        kv_end = TernaryExpr(cond=BinaryExpr("<", causal_rows, cap), if_true=causal_rows, if_false=cap)
 
     # The channel spec (pivot first, one carried name per channel) — the merge is REGENERATED from
     # it at fragment residence. The expect channel's ⊗ is the pv node; the denom folds the weights.
@@ -572,7 +582,10 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
                 stream.append(RegFragment(name=f, role="c", shape=shape, dtype=pv.tile.atom.operand_dtype("c")))
         qk_mask: dict[str, tuple] = {}
         if symbolic_k:
-            qk_mask[qk.n_axis.name] = (kv0_var, seq)
+            # The guard bound is ABSOLUTE — ``_frag_contraction``'s gmem guards compare the
+            # operand's own (absolute) coordinates (``col_bases`` / ``_abs_kv(kv0)``), so a slice
+            # partial bounds at its absolute end, not the window-local one.
+            qk_mask[qk.n_axis.name] = (kv0_var, abs_kv_end)
         stream += _frag_contraction(
             qk,
             [(qt.sfrags, qt.qa) for qt in qtiles],
@@ -599,8 +612,9 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             if symbolic_k:
                 # The blocked stream may overrun a symbolic extent — clamp the overhanging keys to
                 # the pivot's fold identity so they contribute nothing (the gmem reads were clamped).
+                # ``col_bases`` are absolute, so a slice partial masks against its absolute end.
                 for t, f in enumerate(qt.sfrags):
-                    stream.append(FragmentMask(frag=f, mask_when=BinaryExpr(">=", Var(FRAG_COL), seq), col_base=col_bases[t]))
+                    stream.append(FragmentMask(frag=f, mask_when=BinaryExpr(">=", Var(FRAG_COL), abs_kv_end), col_base=col_bases[t]))
 
         # ---- the merge, regenerated from the channel spec at fragment residence, per tile ------ #
         # The per-block fold move derives from the ONE placement-keyed selector: the streamed block
@@ -635,7 +649,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
                 stream.append(RegFragment(name=paf, role="a", shape=shape, dtype=atom.operand_dtype("a")))
                 stream.append(FragmentRepack(frag=paf, srcs=(qt.pfrags[2 * si], qt.pfrags[2 * si + 1]), ab_dtype=atom.ab_dtype))
         mid_seg, stream = stream, []
-        pv_mask = {kv_axis.name: (kv0_var, seq)} if symbolic_k else {}
+        pv_mask = {kv_axis.name: (kv0_var, abs_kv_end)} if symbolic_k else {}  # absolute bound (k_sub is _abs_kv)
         stream += _frag_contraction(
             _pv_streamed(pv, kv_axis),
             [((qt.ohfrags if pv_f16acc else qt.ofrags), qt.pa) for qt in qtiles],
@@ -695,7 +709,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             # contribute exactly 0 (the cp.async counterpart of TMA's box zero-fill, which needs
             # no clamp). A slice partial reads at the absolute key (``_abs_kv`` — k0 is window-local).
             key = _abs_kv(BinaryExpr("+", k0, row))
-            return _clamp_last(key, seq) if symbolic_k and not is_tma else key
+            return _clamp_last(key, abs_kv_end) if symbolic_k and not is_tma else key
 
         def _k_index(k0: Expr):
             return lambda row, col: _idx(k_load, {kn: _key_row(k0, row), kk: col})
@@ -835,19 +849,25 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         t_zero = BinaryExpr("==", BinaryExpr("%", lane, Literal(4, "int")), Literal(0, "int"))
         close = []
         for qt in qtiles:
+            # A SYMBOLIC M guards every state write: the tail CTA's clamp-read overhanging query
+            # rows would otherwise write their (m, l, O) into the ws rows of the NEXT batch/head
+            # plane (the ws m extent is the runtime seq, not the CTA-padded one) — the split
+            # partial's counterpart of the projection store's ``m_guard``.
+            m_guard = (qt.row_base, _ext(qk.m_axis)) if symbolic_q else None
             o_tmpl = by_state[expect_name]
             for j, f in enumerate(qt.ofrags):
                 sub = {m_name: qt.row_base, n_name: Literal(j * atom_n, "int")}
                 dst_index = tuple(sub.get(e.name, e) if isinstance(e, Var) else e for e in o_tmpl.index)
-                close.append(RegStore(dst_buffer=ctx.output, dst_index=dst_index, frag=f, shape=shape, ldm=d_v))
-            row_writes: list[Stmt] = []
-            for comp in (pivot_name, denom_name):
-                tmpl = by_state[comp]
-                for c, row_off in zip(_COMPS, (g_expr, BinaryExpr("+", g_expr, Literal(8, "int"))), strict=True):
-                    row_expr = BinaryExpr("+", qt.row_base, row_off)
+                close.append(RegStore(dst_buffer=ctx.output, dst_index=dst_index, frag=f, shape=shape, ldm=d_v, m_guard=m_guard))
+            for c, row_off in zip(_COMPS, (g_expr, BinaryExpr("+", g_expr, Literal(8, "int"))), strict=True):
+                row_expr = BinaryExpr("+", qt.row_base, row_off)
+                row_writes: list[Stmt] = []
+                for comp in (pivot_name, denom_name):
+                    tmpl = by_state[comp]
                     idx = tuple(row_expr if (isinstance(e, Var) and e.name == m_name) else e for e in tmpl.index)
                     row_writes.append(Write(output=ctx.output, index=idx, value=f"{comp}{qt.sfx}{c}"))
-            close.append(Cond(cond=t_zero, body=tuple(row_writes)))
+                cond = t_zero if m_guard is None else BinaryExpr("&&", t_zero, BinaryExpr("<", row_expr, _ext(qk.m_axis)))
+                close.append(Cond(cond=cond, body=tuple(row_writes)))
         return state, fold, close
 
     store_tmpl = tail[-1] if tail and isinstance(tail[-1], Write) else None

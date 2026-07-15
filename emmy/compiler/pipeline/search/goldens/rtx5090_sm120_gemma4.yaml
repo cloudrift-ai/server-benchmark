@@ -671,11 +671,24 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
     emmy_us: 117.1
     cublas_us: 158.1
-  # attention.hd512 dynM (bare TILE, dd spelling — the masked-flash pin contract). The static
-  # winner's split-KV does NOT exist here: a symbolic reduce axis can't cross-CTA split ("not
-  # built yet"), so the dynM primary is the plain alt pipeline at 0.77x. Cold greedy on this
+  # attention.hd512 dynM (bare TILE, dd spelling — the masked-flash pin contract). SYMBOLIC
+  # split-KV landed on this branch (the bn-aligned runtime slice + Reduction.bound), so the
+  # static winner's alt+g2k now transfers: 116.6 (3x, 0.3% spread) vs the plain alt 135.2 —
+  # a 13.7% win closing most of the dynM-vs-static gap (static 113.0). Cold greedy on this
   # unseeded symbolic shape deploys a scalar kernel at ~289 ms (~2800x off) — it does not hang,
   # it is just enormous; this row exists to pin that down.
+  - kernel: attention
+    name: gemma4_12b.attention.hd512.dynM
+    n_heads: 16
+    seq: 512
+    head_dim: 512
+    dtype: 'fp16'
+    causal: true
+    dynamic: true
+    knobs: {PLACE: 'fuse', REDUCE: 'g2k', STAGE: 'd1/cp/alt', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', WSPEC: ''}
+    emmy_us: 116.6
+    cublas_us: 104.0
+  # The un-split alt sibling, kept for the transfer record.
   - kernel: attention
     name: gemma4_12b.attention.hd512.dynM
     n_heads: 16

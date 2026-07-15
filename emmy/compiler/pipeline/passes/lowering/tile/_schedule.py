@@ -1479,16 +1479,17 @@ def _narrow_flash_forms(forms: list[TileOp], head: Contraction, pv: Contraction,
 def _stamp_twisted_split(rows: list[TileOp], kv_name: str, plan: ReducePlan) -> list[TileOp]:
     """The flash split-KV rows: each warp row with the pinned cross-CTA partition stamped on its
     :class:`Reduction` node (``030_split_reduce`` consumes it) and spelled on ``REDUCE@<kv>``. Per-row
-    legality: a static kv extent divisible by ``cta``, and a slice divisible by the row's own
+    legality for a STATIC kv: an extent divisible by ``cta`` and a slice divisible by the row's own
     streaming key block (the staged chunking + fragment masks assume block-whole slices); an
-    illegal row is dropped, not degraded."""
+    illegal row is dropped, not degraded. A SYMBOLIC kv always stamps — ``030_split_reduce`` builds
+    the bn-aligned runtime slice width and the absolute ``bound`` the realizer stops/masks against."""
     out: list[TileOp] = []
     for r in rows:
         red = r.op.source if isinstance(r.op, Map) else r.op
         head = red.partial[0]
         bn = head.tile.regs[1] * head.tile.atom.shape[1]
         ext = red.axis.extent
-        if not ext.is_static or ext.as_static() % plan.cta != 0 or (ext.as_static() // plan.cta) % bn != 0:
+        if ext.is_static and (ext.as_static() % plan.cta != 0 or (ext.as_static() // plan.cta) % bn != 0):
             continue
         op2 = _with_reduce(r.op, plan)
         out.append(replace(r, op=op2, knobs={**r.knobs, _at(REDUCE, kv_name): plan.spell()}))

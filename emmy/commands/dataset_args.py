@@ -36,7 +36,11 @@ def add_dataset_args(parser, *, default: str, with_min_variants: bool = False) -
         help="Measurement-data source: 'golden' (recorded golden configs), 'db' (tune DB perf rows), or 'nodes' "
         f"(tune DB search-tree node store, for `eval online`). Default: {default}.",
     )
-    parser.add_argument("--db", help="Tune DB path for --dataset db/nodes. Default: EMMY_TUNE_DB or ~/.cache/emmy/autotune.db.")
+    parser.add_argument(
+        "--db",
+        help="Tune DB path for --dataset db/nodes — or, for --dataset nodes, a measurement-freeze .jsonl "
+        "(scripts/freeze_node_store.py). Default: EMMY_TUNE_DB or ~/.cache/emmy/autotune.db.",
+    )
     parser.add_argument(
         "--kernel",
         help="Filter by substring: golden name (the SAME identifier `compile/run/tune --golden` selects a single "

@@ -36,11 +36,14 @@ layers use `global_head_dim=512` vs sliding 256, plus `attention_k_eq_v`), and `
   native gemma-4 — pin the serving extra accordingly).
 - ✅ The "silent death" of the first rental was diagnosed: FlashInfer's sampler JIT needs `ninja` **on PATH**
   (`venv/bin` isn't, when the CLI is exec'd by path) — plus the old harness losing the traceback to SSH SIGHUP.
-- ❌ **THE remaining Phase-A blocker: NaN logits.** The emmy trunk forward produces NaN on the real 12B weights
-  (greedy argmax → token 0 `<pad>` → empty completions; confirmed via `logprobs` returning NaN). HF fp16 eager on the
-  same card produces clean text, so this is an emmy kernel-numerics issue at gemma-4 shapes in fp16 — consistent with
-  the pre-existing gemma-4-E2B layer-0 NaN note from the 4080 bench. **Next: local layer-by-layer NaN probe on the
-  4080 with real 12B weights** (one layer at a time fits 16 GB; no rental needed until the final re-validation).
+- ✅ **The NaN blocker — root-caused and FIXED (gap #10: dropped `layer_scalar`).** The local layer-by-layer probe
+  (teacher-forced, real 12B weights, 4080) first proved emmy ≡ torch-fp16 (Δ ≤ 0.25 wherever fp16 survived — kernels
+  exonerated), then that the shared trajectory was ~8× inflated vs HF's true hidden states: the carve dropped the
+  decoder layer's final `hidden_states *= layer_scalar` (a buffer; **real 12B values 0.005–0.92, mean 0.62** — fresh
+  models hold 1.0, so every tiny-model parity test was blind to it, the third real-checkpoint-only bug). With the
+  multiply restored the full 48-layer probe is **NaN-free**, the trajectory matches HF exactly (e.g. layer-7 out max
+  56.6 on both), and emmy tracks the fp32 reference within Δ ≤ 0.12 — **fp16 serving is viable; no bf16 work needed**.
+  Both gemma-4 tests now pin per-layer scalars off 1.0 so this cannot silently regress.
 - Serving-session fix landed on the branch: rotary may promote q/k to fp32 (0.22 proportional rope) → cast back to the
   trunk dtype after RoPE in both forward paths; `validate_gemma4_serve.py` now prints `finish_reason` / token counts /
   top logprobs per prompt, and takes `--gpu-mem-util` / `--max-model-len` / `--max-num-batched-tokens`.
@@ -92,15 +95,13 @@ off + `ctx 256` + `util 0.97` the 12B fits and serves on the 32 GB card (the wor
 
 ### Remaining Phase-A work (in priority order)
 
-1. **🚧 THE BLOCKER — root-cause and fix the NaN logits.** Local layer-by-layer probe on the 4080 with real 12B
-   weights: teacher-force each layer with HF-computed reference inputs, run emmy `pre`/reference-SDPA/`post`, and find
-   the first layer/op where NaN erupts (plus the max-|activation| trajectory — fp16 overflow is the leading theory;
-   HF fp16 survives by computing norms in fp32). One layer at a time fits 16 GB.
-2. **Pin vLLM ≥ 0.23 for the serving extra** — 0.22.1 cannot dispatch gemma-4's 512-dim global attention.
-3. **Share constants** between the symbolic and decode-bucket programs (kills the 2× weights, keeps decode speed).
-4. **Pool activation buffers** across per-layer programs (removes the `num_layers` scaling).
-5. Re-run the end-to-end serve A/B (`scripts/validate_gemma4_serve.py`) on a 5090 — the run is now fully scripted
-   (detached harness + sampler + diag) and every infra obstacle is cleared.
+1. ~~THE BLOCKER — NaN logits~~ **DONE**: gap #10, the carve dropped gemma-4's `layer_scalar` — fixed + regression-
+   pinned in tests; full 48-layer real-weight probe NaN-free with the trajectory matching HF exactly.
+2. **Re-run the end-to-end serve A/B on a 5090** (`validate_gemma4_serve.py`; fully scripted — detached harness,
+   sampler, diag) — expected to pass now; this is the Phase-A exit criterion.
+3. **Pin vLLM ≥ 0.23 for the serving extra** — 0.22.1 cannot dispatch gemma-4's 512-dim global attention.
+4. **Share constants** between the symbolic and decode-bucket programs (kills the 2× weights, keeps decode speed).
+5. **Pool activation buffers** across per-layer programs (removes the `num_layers` scaling).
 6. **PLE** — still out of scope for v1 (12B is dense); only for the deferred `gemma-4-E2B/E4B`.
 
 ## Phase B — prebuilt-kernel image

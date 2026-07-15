@@ -64,13 +64,16 @@ Both cards seeded with `.s2048` rows (all winners 2-4× reproduced; refs = live 
 | o_proj | serial 294 | g2k **205.0** (1.39×) | 285.4 | serial 456 | serial **325.3** (1.37×) | 446.8 |
 | mlp_gate_up | ring 2413 | ring **1413** (1.56×) | 2210.7 | ring 4348 | ring **2316** (1.27×) | 2945.0 |
 | mlp_down | g2k 1112 | g2k **697** (1.68×) | 1171.1 | g2k 1580 | serial **1042** (1.43×) | 1493.7 |
-| attention hd256 | cp-alt nt8 262.7 | cp-alt nt8 **246.0** (~1.00×) | 237.6-257.2 | (see 4090 rows) | | 314.6 |
+| attention hd256 | cp-alt nt8 262.7 | cp-alt nt8 **246.0** (~1.00×) | 237.6-257.2 | cp-alt nt8 346.8 | cp-ring nt2 **288.8** (1.09×) | 314.6 |
 
 - The split-K story at M=2048 is K- AND card-dependent: the 5090 keeps a shallow `g2k` on the std
-  q/kv lanes and on deep-K mlp_down (both lanes); the 4090 drops the split almost everywhere
-  (only std mlp_down keeps g2k). fm serial is the winner on all three 4090 projections.
-- The 512 attention alt family transfers to 2048 with nt8 (the static-512 geometry), NOT the nt4
-  the symbolic dynM prefers — geometry preference is per-(shape, seq) as usual.
+  q/kv lanes and on deep-K mlp_down (both lanes); the 4090 drops the split on every projection
+  (only mlp_down keeps g2k, both lanes). fm serial is the winner on all three 4090 projections
+  (the o_proj fm pair needed a third rep — one 325.3 outlier vs the settled 297.6/298.0).
+- Attention at 2048 flips per card: the 5090 keeps the alt family (nt8, both lanes); the 4090's
+  fm lane RETURNS TO THE RING (nt2 288.8; fm-alt jitters 311-341 and loses) while its std lane
+  takes alt (346.8 vs ring 360). The 512-vs-2048 geometry also differs from the symbolic dynM
+  picks (nt8 static vs nt4 symbolic on the 5090) — every (card, seq, lane) cell is its own fork.
 - Bench-driver gotcha recorded: an `EMMY_TILE` ENV pin narrows the flash fork before `--ab`
   axis-keyed pins are matched, silently blocking geometries the env pin excludes (the nt8 rows
   read as "match no flash form"); bench attention A/Bs with NO env tile pin and tolerate the

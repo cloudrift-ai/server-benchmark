@@ -305,3 +305,124 @@ configs:
     knobs: {REDUCE: 'b64'}
     emmy_us: 3.6
     cublas_us: 4.8
+  # ---- seq-2048 tier (2026-07-14) ----------------------------------------------------------------
+  # M=2048 drops the split-K almost everywhere on this card (the grid fills; only deep-K mlp_down
+  # keeps g2k) — fm serial wins all three projections. Winners 2-3x reproduced (o_proj fm had one
+  # outlier run at 325, settled 297.6/298.0); cublas_us = live torch same-session. cp.async only
+  # (sm_89). Attention: the fm lane keeps the RING here (nt2 288.8 = 1.09x vs SDPA 314.6; fm-alt
+  # jitters 311-341 and loses) while the std lane takes alt (346.8 vs ring 360) — the alt/ring and
+  # lane preferences flip per (card, seq) as usual. Cold greedy on the unseeded 2048 attention
+  # shape deploys a w1x1 kernel at ~1080 (3.4x off) — the rows pin that.
+  - kernel: matmul
+    name: gemma4_12b.q_proj.s2048
+    M: 2048
+    N: 4096
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 430.1
+    cublas_us: 398.6
+  - kernel: matmul
+    name: gemma4_12b.q_proj.s2048
+    M: 2048
+    N: 4096
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 277.7
+    cublas_us: 398.6
+  - kernel: matmul
+    name: gemma4_12b.kv_proj.s2048
+    M: 2048
+    N: 2048
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 225.0
+    cublas_us: 209.3
+  - kernel: matmul
+    name: gemma4_12b.kv_proj.s2048
+    M: 2048
+    N: 2048
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x4/f2x4/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 171.2
+    cublas_us: 209.3
+  - kernel: matmul
+    name: gemma4_12b.o_proj.s2048
+    M: 2048
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 455.7
+    cublas_us: 446.8
+  # o_proj fm is BIMODAL on this card (297.6/298.0 vs 325.3/325.6 across four runs — a stable
+  # fast and slow mode, cause unidentified); the slow mode is recorded so replays never read as
+  # drift. Still 1.37x vs cuBLAS in the slow mode, 1.50x in the fast one.
+  - kernel: matmul
+    name: gemma4_12b.o_proj.s2048
+    M: 2048
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 325.6
+    cublas_us: 446.8
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up.s2048
+    M: 2048
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 4347.0
+    cublas_us: 2945.0
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up.s2048
+    M: 2048
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 2316.0
+    cublas_us: 2945.0
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.s2048
+    M: 2048
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 1580.0
+    cublas_us: 1493.7
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.s2048
+    M: 2048
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 1100.0
+    cublas_us: 1493.7
+  - kernel: attention
+    name: gemma4_12b.attention.hd256.s2048
+    n_heads: 16
+    seq: 2048
+    head_dim: 256
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k4', WSPEC: ''}
+    emmy_us: 346.8
+    cublas_us: 314.6
+  - kernel: attention
+    name: gemma4_12b.attention.hd256.s2048
+    n_heads: 16
+    seq: 2048
+    head_dim: 256
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', STAGE: 'd2/cp/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x32', WSPEC: ''}
+    emmy_us: 288.8
+    cublas_us: 314.6

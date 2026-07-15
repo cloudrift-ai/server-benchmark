@@ -71,7 +71,7 @@ from emmy.compiler.ir.kernel.ir import (
 from emmy.compiler.ir.schedule import Fold, Level, ReduceStage
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Cond, Init, Load, Select, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile.ir import Contraction, Map, Reduction
+from emmy.compiler.ir.tile.ir import Contraction, Map, Reduction, gmem_row_stride
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _clamp_last, _f16acc, unroll_ok
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
@@ -169,6 +169,7 @@ def _frag_contraction(
     b_slab: str | None = None,
     b_slot: Expr | None = None,
     b_ldm: int = 0,
+    b_gmem_ldm: int | None = None,
     b_swizzle: str = "NONE",
     reg_depth: int = 1,
 ) -> list[Stmt]:
@@ -194,7 +195,16 @@ def _frag_contraction(
     nt = c.tile.regs[1]  # output n-atoms per step (warp order (FM, FN))
     n_name, k_name = c.n_axis.name, c.k_axis.name
     b_trans = c.b_trans
-    ldm_b = b_ldm if b_slab is not None else (c.k_axis.extent.as_static() if b_trans else c.n_axis.extent.as_static())
+    if b_slab is not None:
+        ldm_b = b_ldm
+    else:
+        # Gmem-direct B fragments step the operand's ROW axis (transposed-B: its N/key coords;
+        # canonical-B: its K coords) at the buffer's REAL row stride — derived by the caller from
+        # the load index + buffer shape (``gmem_row_stride``), NOT the trailing-axis extent: an
+        # un-transposed ``(B, S, H, D)`` trace strides rows by ``H·D``, and assuming ``head_dim``
+        # read the wrong rows (the gemma layer-0 NaN).
+        assert b_gmem_ldm is not None, "_frag_contraction: gmem-direct B needs the derived row stride"
+        ldm_b = b_gmem_ldm
 
     bk = c.tile.bk
     # ``reg_depth == 2`` (the ``STAGE`` codec's ``p2``, staged drains with ≥ 2 atom-K steps): the
@@ -486,6 +496,15 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     v_swz = pick_swizzle_atom(d_v, elem_bytes)[1] if is_tma else "NONE"
     head_dim_s = qk.k_axis.extent.as_static()
     q_ldm = head_dim_s + _PAD  # the staged-Q slab row stride (padded, like the cp.async K/V rows)
+    # Gmem-direct fragment ROW strides, derived from each operand's load index + buffer shape
+    # (``gmem_row_stride``) — NOT the trailing-axis extent: an un-transposed ``(B, S, H, D)``
+    # trace strides its rows by ``H·D``, and the old ``head_dim`` assumption read the wrong rows
+    # (the gemma layer-0 NaN). Canonical ``(batch…, row, dd)`` layouts derive the same values as
+    # before (bit-identical). The schedule gate guarantees derivability.
+    q_gmem_ldm = gmem_row_stride(qk.a_operand, qk.m_axis.name, ctx.inputs)
+    k_gmem_ldm = gmem_row_stride(qk.b_load, qk.n_axis.name if qk.b_trans else qk.k_axis.name, ctx.inputs)
+    v_gmem_ldm = gmem_row_stride(pv.b_load, pv.n_axis.name if pv.b_trans else kv_axis.name, ctx.inputs)
+    assert q_gmem_ldm and k_gmem_ldm and v_gmem_ldm, "warp twist: underivable gmem row stride (schedule-gate breach)"
 
     def _q_frag_stmts(qt, i: int) -> list[Stmt]:
         """The query tile's ``bk`` A-fragment declarations + loads. Resident form (default): gmem
@@ -518,7 +537,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
                     src_buffer=qk.a_operand.input,
                     src_index=_idx(qk.a_operand, {qk.m_axis.name: qt.row_base, qk.k_axis.name: Literal(s * atom.atom_k, "int")}),
                     role="a",
-                    ldm=head_dim_s,
+                    ldm=q_gmem_ldm,
                     staged=False,
                     gmem_guard=q_guard,
                 )
@@ -566,6 +585,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             b_slab="_k_smem" if staged else None,
             b_slot=k_slot,
             b_ldm=qk.k_axis.extent.as_static() + kv_pad if staged else 0,
+            b_gmem_ldm=k_gmem_ldm,
             b_swizzle=k_swz if staged else "NONE",
             reg_depth=stage.reg_depth if staged else 1,
         )
@@ -627,6 +647,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             b_slab="_v_smem" if staged else None,
             b_slot=v_slot,
             b_ldm=d_v + kv_pad if staged else 0,
+            b_gmem_ldm=v_gmem_ldm,
             b_swizzle=v_swz if staged else "NONE",
             reg_depth=stage.reg_depth if staged else 1,
         )

@@ -1401,6 +1401,13 @@ class LdmatrixLoad(Stmt):
             # Operand not staged in smem — ldmatrix can't reach gmem, so read the
             # fragment straight from gmem (each lane adds its own (row,col) inside
             # the helper). No swizzle: that's a TMA-smem-layout concern only.
+            # A source buffer traced at a dtype other than the fragment's (the gemma layer's
+            # f32 V intermediate) converts per element: the helper's fragment element type F
+            # is passed explicitly, so the pack writes true 16-bit halves instead of raw f32
+            # bit patterns (matched dtypes keep the bare call — byte-identical output).
+            src_dt = ctx.buffer_dtypes.get(self.src_buffer, "f16")
+            frag_dt = ctx.ssa_dtypes.get(self.frag) or src_dt
+            targs = "" if src_dt == frag_dt else f"<{ctx.type_name(src_dt)}, {ctx.type_name(frag_dt)}>"
             if self.k_zero is not None:
                 # Masked-K (symbolic reduce): zero-fill (not clamp) the K halves
                 # past the runtime extent so the mma reduction stays correct — K is
@@ -1416,12 +1423,12 @@ class LdmatrixLoad(Stmt):
                         helper = "emmy_mma_load_a_gmem_mclamp_kzero"
                     else:
                         helper = "emmy_mma_load_b_gmem_trans_nclamp_kzero" if self.b_trans else "emmy_mma_load_b_gmem_nclamp_kzero"
-                    return [f"{_pad(ctx.indent)}{helper}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {mn_left}, {k_left});"]
+                    return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {mn_left}, {k_left});"]
                 if self.role == "a":
                     helper = "emmy_mma_load_a_gmem_kzero"
                 else:
                     helper = "emmy_mma_load_b_gmem_trans_kzero" if self.b_trans else "emmy_mma_load_b_gmem_kzero"
-                return [f"{_pad(ctx.indent)}{helper}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {k_left});"]
+                return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {k_left});"]
             if self.gmem_guard is not None:
                 # Masked axis: clamp the lane coordinate to the in-range
                 # elements left from the tile base (>= 1 — the boundary Cond
@@ -1431,12 +1438,12 @@ class LdmatrixLoad(Stmt):
                     helper = "emmy_mma_load_a_gmem_mclamp"
                 else:
                     helper = "emmy_mma_load_b_gmem_trans_nclamp" if self.b_trans else "emmy_mma_load_b_gmem_nclamp"
-                return [f"{_pad(ctx.indent)}{helper}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, ({bound}) - ({base}));"]
+                return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, ({bound}) - ({base}));"]
             if self.role == "a":
                 helper = "emmy_mma_load_a_gmem"
             else:
                 helper = "emmy_mma_load_b_gmem_trans" if self.b_trans else "emmy_mma_load_b_gmem"
-            return [f"{_pad(ctx.indent)}{helper}({self.frag}, &{self.src_buffer}[{flat}], {ldm});"]
+            return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm});"]
         lane = "(threadIdx.x & 31)"
         if self.pair_frag is not None:
             # Paired x4 — two slab-adjacent B fragments in one ldmatrix (096_pair_ldmatrix_loads).

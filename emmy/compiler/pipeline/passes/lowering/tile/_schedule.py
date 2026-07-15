@@ -48,6 +48,7 @@ from emmy.compiler.ir.schedule import Raster, Stage, WarpSpec, has_scalar_atom_a
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.tile import Contraction, Map, Placement, ReducePlan, Reduction, TileOp, TilePlan
+from emmy.compiler.ir.tile.ir import gmem_row_stride
 from emmy.compiler.ir.tile.ops import axis_role, nodify_reduce, reduce_loop
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import map_cone, semiring_binding
@@ -1831,6 +1832,18 @@ def _twisted_warp_options(
         )
 
     tma_ok = tma_ok and _kv_penultimate(head.b_load) and _kv_penultimate(pv.b_load)
+    # The fragment loaders step gmem rows at the buffer's REAL row stride, derived from the load
+    # index + buffer shape (``gmem_row_stride`` — H·D on an un-transposed (B, S, H, D) trace,
+    # where the old trailing-extent assumption read the wrong rows: the gemma layer-0 NaN).
+    # Underivable strides (an axis split across index components, a non-affine use, a symbolic
+    # trailing extent) have no fragment realization — decline the tier.
+    strides = (
+        gmem_row_stride(head.a_operand, m_name, tile.inputs),
+        gmem_row_stride(head.b_load, head.n_axis.name if head.b_trans else head.k_axis.name, tile.inputs),
+        gmem_row_stride(pv.b_load, pv.n_axis.name if pv.b_trans else kv_name, tile.inputs),
+    )
+    if any(s is None for s in strides):
+        return []
     bk = head_dim.as_static() // atom_k
     # The f16-accumulate PV sibling (``f16acc_ok`` — the F16_MMA_F32_ACC / FAST_MATH gate): each
     # geometry row doubles with a variant whose **PV plan** rides the ``_f16acc`` atom (the O
@@ -1918,6 +1931,7 @@ def _twisted_warp_options(
             if ax.name != pv.n_axis.name
         )
         place = Placement(free=tile.place.free, grid=grid)
+
         # Both contractions' plans are stamped (each keyed on its node's k axis), the reduce
         # partition decided-empty, and the K/V operand stage on the STREAM axis (the resolved
         # spelling, or the explicit OFF ``""`` — the honest-stamping rule), so every flash leaf
@@ -1926,9 +1940,28 @@ def _twisted_warp_options(
         # ``_wspec_workers`` gates the thread budgets — the aux band must not exceed the
         # ``32·um`` compute band); a degraded candidate is skipped rather than duplicating the
         # uniform row.
-        for stage in _twisted_stage_candidates(
-            kv_ext, bn, head_dim.as_static(), d_v.as_static(), elem_bytes, budget, tma_ok, m_rows=um * fm * atom_m
-        ):
+        # Staging byte-copies the operands into slabs typed at the ATOM's operand width — an
+        # operand traced at a different dtype (the gemma layer's f32 V intermediate) would deposit
+        # wrong-sized elements and drain garbage (the gemma layer-0 NaN's second head). Gmem-direct
+        # fragment loads convert per element, so a dtype-mismatched operand keeps the warp tier but
+        # declines its stage rows; ``alt`` additionally stages Q, so it also needs a matching A.
+        def _buf_dtype_name(load) -> str | None:
+            t = tile.inputs.get(load.input) if tile.inputs else None
+            return getattr(getattr(t, "dtype", None), "name", None)
+
+        b_dt = atom.operand_dtype("b").name
+        kv_stage_ok = _buf_dtype_name(head.b_load) == b_dt and _buf_dtype_name(pv.b_load) == b_dt
+        q_stage_ok = _buf_dtype_name(head.a_operand) == atom.operand_dtype("a").name
+        stage_cands = (
+            [None]
+            if not kv_stage_ok
+            else _twisted_stage_candidates(
+                kv_ext, bn, head_dim.as_static(), d_v.as_static(), elem_bytes, budget, tma_ok, m_rows=um * fm * atom_m
+            )
+        )
+        for stage in stage_cands:
+            if stage is not None and stage.alt and not q_stage_ok:
+                continue  # alt stages Q through smem too — a dtype-mismatched Q cannot byte-copy
             wspecs = list(WSPEC.narrow(wspec_moves())) if (stage is not None and stage.transport == "tma" and not stage.alt) else [""]
             for wspec_cand in wspecs:
                 workers, wspec_spec = _wspec_workers(wspec_cand, stage, 32 * um)

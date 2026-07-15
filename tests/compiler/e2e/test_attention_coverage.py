@@ -1502,6 +1502,47 @@ def test_sdpa_explicit_additive_mask(_chain_tile_pins, n_heads: int, seq_len: in
     _assert_close(dpd, eager)
 
 
+@requires_cuda
+def test_warp_flash_f32_value_operand_converts(monkeypatch):
+    """A V operand traced at f32 (gemma-4's V-norm: ``v_f16 * f32 row stat`` promotes, and the
+    ``.half()`` cast folds into the flash op's load) must CONVERT at the fragment load, not
+    reinterpret: the gmem-direct loaders take the fragment element type explicitly
+    (``<float, __half>``) and round each element — the raw-bit-pattern regression NaN'd every
+    even output column and scribbled past the 4-byte register. The staged rows decline (a
+    cp.async byte-copy cannot convert), so the kernel stays warp-tier gmem-direct."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w2x1/f1x4/k4")
+    monkeypatch.setenv("EMMY_STAGE", "d2/cp/ring")  # must DECLINE: the f32 V cannot byte-copy
+    monkeypatch.setenv("EMMY_WSPEC", "")
+    torch.manual_seed(5)
+    S, D = 128, 64
+
+    class VNormSdpa(torch.nn.Module):
+        def forward(self, q, k, v, s):
+            v32 = v.float() * s  # per-(token, head) f32 stat — promotes V to f32 in the trace
+            return F.scaled_dot_product_attention(q, k, v32.half())
+
+    q, k, v = (torch.randn(1, 4, S, D, dtype=torch.float16) for _ in range(3))
+    s = (torch.rand(1, 4, S, 1) + 0.5).float()
+    backend, compiled, graph, kernels = _trace(VNormSdpa(), (q, k, v, s))
+    srcs = "\n".join(compiled.nodes[n].op.kernel_source for n in kernels)
+    assert "mma.sync" in srcs, "the f32-V flash must stay on the warp (mma) tier"
+    assert "<float, __half>" in srcs, "the f32 operand must convert through the explicit fragment type"
+    assert "_v_smem" not in srcs, "staging must decline for a dtype-mismatched operand (byte-copy cannot convert)"
+
+    def ref():
+        with torch.no_grad():
+            v32 = (v.cuda().float() * s.cuda()).half()
+            return torch.nn.functional.scaled_dot_product_attention(q.cuda(), k.cuda(), v32).cpu().flatten().float().numpy()
+
+    data = {n: t.numpy() for n, t in zip(graph.inputs, (q, k, v, s), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=ref)
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    assert not np.any(np.isnan(got)), "f32-V warp flash produced NaN (the reinterpret regression)"
+    max_diff = float(np.max(np.abs(got - eager)))
+    assert max_diff < 5e-3, f"f32-V warp flash max_diff={max_diff:.2e}"
+
+
 def _band_mask(seq: int, window: int) -> torch.Tensor:
     """A sliding-window additive float mask — causal AND within ``window`` keys of the query (the
     HF gemma sliding-attention band): 0 where ``m - window < kv <= m``, ``-inf`` elsewhere."""

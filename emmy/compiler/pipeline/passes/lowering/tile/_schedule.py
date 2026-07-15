@@ -1779,7 +1779,8 @@ def _twisted_warp_options(
     per CTA, each owning ``atom_m`` query rows; the value axis leaves the grid. Each geometry row
     crosses with its K/V operand-stage candidates (:func:`_twisted_stage_candidates` — gmem-direct
     option-0, then the resolver-gated cp.async ring depths, keyed ``STAGE@<kv>``). An additive
-    ``(m, kv)`` score bias is not realizable at the fragment tier → ``[]``. A warp ``TILE`` pin
+    ``(m, kv)`` score bias (the explicit SDPA ``attn_mask``) realizes as a per-element fragment
+    bias load (``FragmentBiasAdd``); a bias indexed beyond ``(m, kv)`` declines. A warp ``TILE`` pin
     narrows the grid to the pinned geometry (loud on a divisibility violation — the pin contract);
     a pin that doesn't fit the flash form (wrong atom / a column split / a foreign ``bk``) declines
     the tier with a log line — the standard pin-validity degrade, since a bare warp pin may target
@@ -1810,8 +1811,26 @@ def _twisted_warp_options(
     kv_ext, m_ext = red.axis.extent, head.m_axis.extent
     m_name, kv_name = head.m_axis.name, red.axis.name
     for s in list(red.partial)[1:]:
-        if isinstance(s, Load) and s.index and {m_name, kv_name} <= {v for e in s.index for v in e.free_vars()}:
-            return []  # an additive (m, kv) score bias — fragment-unrealizable, stay scalar
+        if isinstance(s, Load) and s.index and not {v for e in s.index for v in e.free_vars()} <= {m_name, kv_name}:
+            return []  # a score bias indexed beyond (m, kv) — no fragment realization for it
+        # An additive (m, kv) score bias (the explicit SDPA attn_mask) IS realizable: the fragment
+        # realizer loads the bias tile per element at its absolute coordinates (FragmentBiasAdd).
+
+    # TMA staging derives its box-origin coords POSITIONALLY (batch dims = the load index's leading
+    # components, the kv row at [-2], the contiguous head_dim last) — a K/V trace whose kv axis sits
+    # elsewhere (the un-transposed (B, S, H, D) layout: kv at position 1) would leak the raw axis
+    # var into the emitted coords (an undefined identifier in the kernel). cp.async is unaffected —
+    # its fill substitutes by axis NAME. Decline the tma moves for such layouts.
+    def _kv_penultimate(load) -> bool:
+        idx = load.index
+        return (
+            len(idx) >= 2
+            and isinstance(idx[-2], Var)
+            and idx[-2].name == kv_name
+            and not any(kv_name in e.free_vars() for e in (*idx[:-2], idx[-1]))
+        )
+
+    tma_ok = tma_ok and _kv_penultimate(head.b_load) and _kv_penultimate(pv.b_load)
     bk = head_dim.as_static() // atom_k
     # The f16-accumulate PV sibling (``f16acc_ok`` — the F16_MMA_F32_ACC / FAST_MATH gate): each
     # geometry row doubles with a variant whose **PV plan** rides the ``_f16acc`` atom (the O

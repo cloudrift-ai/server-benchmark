@@ -52,3 +52,27 @@ bench golden shapes only through the golden snippet form).
    cold greedy at 2048 both misdeploys and hangs.
 3. The emitter crash under the forced warp pin (`KeyError: 'acc2'`) deserves a guard regardless: an ineligible
    mask form should decline at schedule time, never die in codegen.
+
+## Post-implementation corrections (mask realization landed)
+
+The explicit-mask warp form is implemented (`FragmentBiasAdd` — see the PR), and chasing the layer-0 repro
+decomposed the original "seq > 1024" failure into FOUR distinct causes, two of them corrected findings:
+
+- **The `--layer` trace never carries the mask at all**: `trace/huggingface.py`'s `LayerWrapper` calls the block
+  with no `attention_mask`, so HF takes the `is_causal` path — the traced layer is pure causal at EVERY seq, and
+  the sliding window is silently dropped from the trace (a harness limitation, so `--layer` accuracy checks are
+  self-consistently causal and cannot see the band). The `mul_10` operand read as "the mask" in the first pass is
+  actually V (the `(B, S, H, D)` un-transposed layout). Whole-MODEL traces DO feed an explicit mask buffer — that
+  path (and real serving) is what the new warp mask realization unlocks.
+- **The scalar deploy + hang at 2048 was the cold-greedy pick on the unseeded shape** (the dataset-tier item 2
+  above), not mask-recognition — with pins the warp form now compiles at 2048.
+- **`KeyError: 'acc2'` was a σ-rewrite field drop**: the per-cell `RegStore` rewrite rebuilt `RegEpilogue`
+  WITHOUT `extra_accs`, unbinding the GeGLU combine's second channel accumulator. Fixed (renamed like the store's
+  own fragment) + a `RuleSkipped` guard in `_warp_epilogue` so a variant whose projection tail reads a value the
+  node doesn't compute declines instead of dying in render.
+- **TMA staging emitted an undefined `kv` on the `(B, S, H, D)` layout** (box coords are positional, kv assumed
+  at index[-2]) — now declines TMA for such layouts (cp.async substitutes by name and is unaffected).
+- **Still open (pre-existing on origin/main, reproduced there)**: the bare `TILE` pin
+  `a:mma_m16n8k16_f16_f32/w4x1/f1x4/k16` on the gemma layer makes the fused GeGLU megakernel produce NaN at any
+  seq — a mis-lowered variant in the pinned bare-TILE-on-multi-channel path. Blocks pinned whole-layer benches;
+  needs its own investigation.

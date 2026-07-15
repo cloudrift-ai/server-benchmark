@@ -1502,6 +1502,53 @@ def test_sdpa_explicit_additive_mask(_chain_tile_pins, n_heads: int, seq_len: in
     _assert_close(dpd, eager)
 
 
+def _band_mask(seq: int, window: int) -> torch.Tensor:
+    """A sliding-window additive float mask — causal AND within ``window`` keys of the query (the
+    HF gemma sliding-attention band): 0 where ``m - window < kv <= m``, ``-inf`` elsewhere."""
+    kv = torch.arange(seq)[None, :]
+    m = torch.arange(seq)[:, None]
+    keep = (kv <= m) & (kv > m - window)
+    return torch.where(keep, 0.0, float("-inf"))[None, None].half()
+
+
+@requires_cuda
+@pytest.mark.parametrize("stage", ["", "d2/tma/ring", "d1/cp/alt"])
+def test_warp_flash_explicit_additive_mask_matches_torch(monkeypatch, stage):
+    """An explicit additive ``attn_mask`` (the HF precomputed causal / sliding-window band)
+    realizes at the WARP tier: the score prologue's ``(m, kv)``-indexed bias ``Load`` + ``add``
+    becomes a per-element ``FragmentBiasAdd`` — each fragment element reads the mask at its
+    absolute coordinates and adds it before the softmax merge — instead of demoting the whole
+    kernel to the scalar tier (the gemma-4 seq>window regression: every layer's attention went
+    scalar and hung). Banded (sliding-window) mask; composes with the K/V staging forms."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w2x1/f1x4/k4")
+    monkeypatch.setenv("EMMY_WSPEC", "")
+    if stage:
+        monkeypatch.setenv("EMMY_STAGE", stage)
+    torch.manual_seed(3)
+    S, D = 128, 64
+    q, k, v = (torch.randn(1, 4, S, D, dtype=torch.float16) for _ in range(3))
+    mask = _band_mask(S, window=64)
+    backend, compiled, graph, kernels = _trace(_SdpaExplicitMask(), (q, k, v, mask))
+    assert len(kernels) == 1, f"masked warp flash should be one kernel, got {len(kernels)}"
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "mma.sync" in src, "the explicit-mask flash must stay on the warp (mma) tier"
+    assert "+= __half2float(mask[" in src, "the mask must realize as per-element fragment bias adds"
+    if stage == "d1/cp/alt":
+        assert "_q_smem" in src, "alt staging must compose with the mask bias"
+
+    def ref():
+        with torch.no_grad():
+            out = torch.nn.functional.scaled_dot_product_attention(q.cuda(), k.cuda(), v.cuda(), attn_mask=mask.cuda())
+            return out.cpu().flatten().float().numpy()
+
+    data = {n: t.numpy() for n, t in zip(graph.inputs, (q, k, v, mask), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=ref)
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    max_diff = float(np.max(np.abs(got - eager)))
+    assert max_diff < 5e-3, f"masked warp flash (stage={stage!r}) max_diff={max_diff:.2e}"
+
+
 def _run_self_attn_tinyllama(seq_len: int, threshold: float = 1e-4) -> None:
     """Run TinyLlama's ``LlamaAttention`` sub-module at ``seq_len`` and verify emmy matches
     eager (forced MATH SDPA backend) within ``threshold``."""

@@ -10,10 +10,13 @@ residence — the fragment row of the placement-keyed fold (a within-warp ``Frag
 - the head contraction (Q@K) emits ``ldmatrix`` + ``mma.sync`` into score C-fragments off its node
   geometry (:func:`_frag_contraction` — operands / ``b_trans`` / guards from the node, the atom
   counts from its stamped ``TilePlan``);
-- the score prologue (the scale ``Assign``, the causal ``Select``) is realized stmt-by-stmt
-  (:func:`_realize_prologue`): a pointwise ``Assign`` → :class:`FragmentApply`, a
-  coordinate-predicated ``Select`` → :class:`FragmentMask` (the keep-predicate negated), a
-  loop-invariant scalar ``Load`` hoisted above the stream;
+- the score prologue (the scale ``Assign``, the causal ``Select``, the explicit additive mask) is
+  realized stmt-by-stmt (:func:`_realize_prologue`): a pointwise ``Assign`` → :class:`FragmentApply`,
+  a coordinate-predicated ``Select`` → :class:`FragmentMask` (the keep-predicate negated), an
+  ``(m, kv)``-indexed bias ``Load`` + its ``add`` (SDPA's ``attn_mask`` — the HF precomputed causal /
+  sliding-window band) → one :class:`FragmentBiasAdd` per score fragment (each element reads the mask
+  at its absolute coordinates; a symbolic extent clamp-reads, the duplicates landing on masked /
+  store-guarded cells), a loop-invariant scalar ``Load`` hoisted above the stream;
 - the twisted carrier's streaming merge is regenerated FROM ITS CHANNEL SPEC (``twist.family ==
   "exp"``, ``channels = (pivot, …)``): the pivot's per-block fold is a ``FragmentRowReduce`` of its
   ``fold`` op (rowmax) + the running-stat update / rescale; a ``denom`` channel (no lift)
@@ -54,6 +57,7 @@ from emmy.compiler.ir.kernel.ir import (
     ROW,
     UNIFORM,
     FragmentApply,
+    FragmentBiasAdd,
     FragmentMask,
     FragmentPromote,
     FragmentRepack,
@@ -288,6 +292,14 @@ def _realize_prologue(stmts, qk: Contraction, frags: tuple[str, ...], col_bases,
     stream: list[Stmt] = []
     score = qk.acc
     m_name, n_name = qk.m_axis.name, qk.n_axis.name
+    # An additive score bias (the explicit SDPA ``attn_mask``): a per-``(m, kv)`` tensor ``Load``
+    # awaiting its ``add`` — realized as a :class:`FragmentBiasAdd` per score fragment when the add
+    # consumes it. The load-index template substitutes the fragment coordinate vars for the axis
+    # vars; a SYMBOLIC extent clamps the coordinate to the last valid index (cp-style clamp-read —
+    # the duplicates land on cells the boundary FragmentMask / store guard discards).
+    pending: dict[str, Load] = {}
+    row_coord: Expr = Var(FRAG_ROW) if qk.m_axis.extent.is_static else _clamp_last(Var(FRAG_ROW), _ext(qk.m_axis))
+    col_coord: Expr = Var(FRAG_COL) if qk.n_axis.extent.is_static else _clamp_last(Var(FRAG_COL), _ext(qk.n_axis))
     for s in stmts:
         if isinstance(s, Contraction):
             continue  # the expect contraction — regenerated from its channel
@@ -296,8 +308,19 @@ def _realize_prologue(stmts, qk: Contraction, frags: tuple[str, ...], col_bases,
         if isinstance(s, Load) and len(s.index) == 0:
             hoisted.append(s)  # a scalar constant (the 1/√d scale, the −inf fill) — loop-invariant
             continue
+        if isinstance(s, Load) and {v for e in s.index for v in e.free_vars()} <= {m_name, n_name}:
+            pending[s.name] = s  # the additive-bias tile read — realized by its consuming add below
+            continue
         if isinstance(s, Assign) and score in s.args:
             others = tuple(a for a in s.args if a != score)
+            op_name = s.op.name if hasattr(s.op, "name") else s.op
+            if op_name == "add" and len(others) == 1 and others[0] in pending:
+                ld = pending.pop(others[0])
+                idx = tuple(e.substitute({m_name: row_coord, n_name: col_coord}) for e in ld.index)
+                for t, f in enumerate(frags):
+                    stream.append(FragmentBiasAdd(frag=f, buf=ld.input, index=idx, col_base=col_bases[t], row_base=row_base))
+                score = s.name
+                continue
             for f in frags:
                 stream.append(FragmentApply(out=f, op=s.op, args=(f, *others), kinds=(FRAG, *(UNIFORM,) * len(others)), in_place=True))
             score = s.name
@@ -311,6 +334,9 @@ def _realize_prologue(stmts, qk: Contraction, frags: tuple[str, ...], col_bases,
             score = s.name
             continue
         raise NotImplementedError(f"fragment realizer: unrealizable score-prologue stmt {type(s).__name__}")
+    # A classified bias load MUST be consumed by its add — an unconsumed one means the prologue
+    # shape changed and the mask would silently drop (worse than any failure).
+    assert not pending, f"fragment realizer: additive-bias load(s) {sorted(pending)} never consumed by an add"
     used = {a for st in stream for a in (st.deps() if hasattr(st, "deps") else ())}
     return [ld for ld in hoisted if set(ld.names) & used], stream
 

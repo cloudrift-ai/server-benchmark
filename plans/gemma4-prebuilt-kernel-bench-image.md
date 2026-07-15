@@ -99,7 +99,11 @@ off + `ctx 256` + `util 0.97` the 12B fits and serves on the 32 GB card (the wor
    pinned in tests; full 48-layer real-weight probe NaN-free with the trajectory matching HF exactly.
 2. **Re-run the end-to-end serve A/B on a 5090** (`validate_gemma4_serve.py`; fully scripted — detached harness,
    sampler, diag) — expected to pass now; this is the Phase-A exit criterion.
-3. **Pin vLLM ≥ 0.23 for the serving extra** — 0.22.1 cannot dispatch gemma-4's 512-dim global attention.
+3. ~~Pin vLLM ≥ 0.23 for the serving extra~~ **DONE**: `vllm>=0.23,<0.24` (+ Dockerfile/Makefile base
+   `v0.23.0`, still CUDA 13 → `cupy-cuda13x` unchanged). The `fastapi<0.137` workaround cap is dropped — vllm
+   0.23 pins it upstream, and prometheus-fastapi-instrumentator 8.0.1 fixed the `_IncludedRouter` crash anyway.
+   Recipe image tags (`cloudriftai/vllm-emmy:0.22.1-*`) still point at the published 0.22.1 image — refresh them
+   after the first 0.23 image is pushed.
 4. **Share constants** between the symbolic and decode-bucket programs (kills the 2× weights, keeps decode speed).
 5. **Pool activation buffers** across per-layer programs (removes the `num_layers` scaling).
 6. **PLE** — still out of scope for v1 (12B is dense); only for the deferred `gemma-4-E2B/E4B`.
@@ -153,4 +157,4 @@ file set — empty diff = 100% hit.
 
 ## Notes
 
-- `plans/` is at 11 (cap 10). Prune one executed/obsolete plan at commit time.
+- `plans/` is at the cap (10). Prune an executed/obsolete plan before adding a new one.

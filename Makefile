@@ -59,7 +59,7 @@ tune-kernels: setup
 	EMMY_TUNE=1 EMMY_TUNE_DB=~/.cache/emmy/tune-kernels.db ./venv/bin/pytest tests/perf/ -m perf -n 4 --dist=loadgroup -v -p no:randomly --no-header
 
 # --- vLLM + emmy serving image (emmy/serving, docker/vllm-emmy) ---
-VLLM_VERSION ?= v0.22.1
+VLLM_VERSION ?= v0.23.0
 VLLM_EMMY_TAG ?= cloudriftai/vllm-emmy:$(patsubst v%,%,$(VLLM_VERSION))-$(shell git rev-parse --short HEAD)
 
 wheel: setup

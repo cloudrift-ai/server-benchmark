@@ -150,9 +150,10 @@ Model-bake gotchas:
 - **Image size.** ~24 GB of weights on the ~10 GB vLLM base ⇒ a ~35 GB image. Fine for Docker Hub, but pulls are
   slow — this image trades pull time for deterministic, tokenless cold-start. Keep the plain (weightless)
   `vllm-emmy` image for everything else.
-- **License / gating.** gemma weights are gated on HF; baking them into a **public** Docker Hub tag redistributes
-  them outside the gate. The Gemma license permits redistribution with notice + use-policy passthrough, but decide
-  public-vs-private for the tag (and include the license text in the image) before the first push.
+- **License.** gemma-4 is **Apache 2.0** (unlike Gemma 1–3's custom Terms of Use) — public redistribution of the
+  weights in a Docker Hub tag is fine (unsloth / lmstudio-community already publicly redistribute gemma-4 on HF).
+  Obligations are attribution-only: ship the snapshot's LICENSE/NOTICE files verbatim (baking the unmodified HF
+  snapshot satisfies this automatically) and don't imply Google endorsement in the tag naming/description.
 
 ## Risks / open questions
 
@@ -173,8 +174,8 @@ Model-bake gotchas:
   released knob and part of the cache key, so pin it for the release.
 - Image: single 5090 tag for v1 (arch-keyed cache; a 4090 set can be added later without collision).
 - **Model baked into the image** (weights + tokenizer + config at a dedicated non-mounted path): zero-download,
-  tokenless cold-start; ~35 GB image accepted for this tag. **Open:** public vs private distribution of the
-  weights-bearing tag (HF gating / Gemma license passthrough).
+  tokenless cold-start; ~35 GB image accepted for this tag. **Public tag is fine** — gemma-4 is Apache 2.0; keep
+  the snapshot's LICENSE/NOTICE files in the image (see the license note above).
 
 ## Notes
 

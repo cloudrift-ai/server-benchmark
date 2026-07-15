@@ -174,8 +174,12 @@ class EmmyGenRunner:
         dtype = getattr(torch, dtype_str)
         np_dtype = np.dtype(dtype_str)
         trunk = getattr(model, "model", model)
+        # Multimodal wrappers (gemma-4 "unified") nest the decoder stack + embed/norm under
+        # ``language_model`` and carry the text dims on ``config.text_config``.
+        trunk = getattr(trunk, "language_model", trunk)
         layers = trunk.layers
-        hidden = model.config.hidden_size
+        text_config = getattr(model.config, "text_config", model.config)
+        hidden = text_config.hidden_size
 
         def _meta(attn):
             # Per-layer attention dims. Gemma-4's global layers use a larger head_dim

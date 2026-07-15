@@ -32,6 +32,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
+from emmy import config as emmy_config  # aliased: `config` is the HF config in this module
 from emmy.serving.gen_runner import EmmyGenRunner
 from emmy.serving.vllm_model import _trunk_dtype_str
 
@@ -81,7 +82,9 @@ class EmmyGenModel(nn.Module):
     def __init__(self, *, vllm_config, prefix: str = ""):
         super().__init__()
         mc = vllm_config.model_config
-        config = mc.hf_config
+        # Multimodal wrappers (gemma-4 "unified") nest the text attributes (layer_types,
+        # rope_parameters, sliding_window, vocab/hidden size, final softcap) under ``text_config``.
+        config = getattr(mc.hf_config, "text_config", mc.hf_config)
         self.config = config
         self.dtype = mc.dtype
 
@@ -106,7 +109,9 @@ class EmmyGenModel(nn.Module):
                 f"serve with --max-num-batched-tokens {DYNAMIC_DIM_MAX} or lower"
             )
 
-        self.runner = EmmyGenRunner.create(model_id=mc.model, dtype_str=_trunk_dtype_str(mc.dtype))
+        self.runner = EmmyGenRunner.create(
+            model_id=mc.model, dtype_str=_trunk_dtype_str(mc.dtype), decode_bucket=emmy_config.gen_decode_bucket()
+        )
         n_layers = self.runner.num_layers
 
         sliding_window = getattr(config, "sliding_window", None)
@@ -201,7 +206,8 @@ class EmmyGenModel(nn.Module):
     def load_weights(self, weights):
         """vLLM owns ONLY ``lm_head`` (the runner already loaded embed + trunk). Load
         ``lm_head.weight`` from the checkpoint; when ``tie_word_embeddings`` the checkpoint
-        may carry only ``embed_tokens.weight``, so accept that alias for the head."""
+        may carry only the embedding, so accept an ``*embed_tokens.weight`` alias for the head
+        (the multimodal 'unified' checkpoint nests it at ``model.language_model.embed_tokens.weight``)."""
         param = self.lm_head.weight
         loader = getattr(param, "weight_loader", default_weight_loader)
         tied = getattr(self.config, "tie_word_embeddings", False)
@@ -210,7 +216,7 @@ class EmmyGenModel(nn.Module):
             if name == "lm_head.weight":
                 loader(param, w)
                 loaded.add("lm_head.weight")
-            elif tied and name in ("model.embed_tokens.weight", "embed_tokens.weight") and "lm_head.weight" not in loaded:
+            elif tied and name.endswith("embed_tokens.weight") and "lm_head.weight" not in loaded:
                 loader(param, w)
                 loaded.add("lm_head.weight")
         return loaded

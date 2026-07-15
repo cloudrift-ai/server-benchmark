@@ -83,6 +83,16 @@ def main() -> int:
     ap.add_argument("--max-tokens", type=int, default=16, help="greedy tokens to generate per prompt.")
     ap.add_argument("--port", default="8000")
     ap.add_argument("--emmy", default="./venv/bin/emmy", help="path to the emmy CLI in the serving venv.")
+    ap.add_argument("--max-model-len", default="4096", help="vLLM --max-model-len (smaller ⇒ less KV cache).")
+    ap.add_argument(
+        "--max-num-batched-tokens",
+        default=None,
+        help="vLLM --max-num-batched-tokens. This sizes the runner's PER-LAYER activation buffers "
+        "(each layer's program retains its own), so lowering it cuts emmy's memory a lot.",
+    )
+    ap.add_argument(
+        "--gpu-mem-util", default="0.9", help="vLLM --gpu-memory-utilization (lower to leave room for the emmy runner's on-GPU weights)."
+    )
     ap.add_argument("--health-timeout", type=int, default=1800, help="seconds to wait for first-boot compile.")
     ap.add_argument("--hf-worker", action="store_true", help=argparse.SUPPRESS)  # internal: emit HF refs as JSON
     args = ap.parse_args()
@@ -97,7 +107,21 @@ def main() -> int:
     )
 
     print("[2/3] starting `emmy serve --generate` (first boot compiles every layer — minutes)...", flush=True)
-    serve = subprocess.Popen([args.emmy, "serve", "--generate", args.model, "--max-model-len", "4096", "--port", args.port])
+    serve_cmd = [
+        args.emmy,
+        "serve",
+        "--generate",
+        args.model,
+        "--max-model-len",
+        args.max_model_len,
+        "--port",
+        args.port,
+        "--gpu-memory-utilization",
+        args.gpu_mem_util,
+    ]
+    if args.max_num_batched_tokens:
+        serve_cmd += ["--max-num-batched-tokens", args.max_num_batched_tokens]
+    serve = subprocess.Popen(serve_cmd)
     try:
         _wait_health(args.port, serve, args.health_timeout)
         print("[3/3] querying emmy /v1/completions and comparing to HF...\n", flush=True)

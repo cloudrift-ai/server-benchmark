@@ -1742,9 +1742,13 @@ def _twisted_stage_candidates(
             if r is not None:
                 return [r]
             logger.warning(
-                "STAGE pin %r does not resolve against the warp-flash stream (cp.async over a static, "
-                "%d-key-block-divisible kv); the flash kernel stays gmem-direct",
+                "STAGE pin %r does not resolve against the warp-flash stream at this geometry "
+                "(%d-key block x head_dim %d: needs an async transport, a %d-key-block-divisible static kv, "
+                "TMA box dims <= 256, and K/V(+staged-Q for alt) slabs within the smem budget); "
+                "the flash kernel stays gmem-direct",
                 pinned,
+                bn,
+                head_dim,
                 bn,
             )
         return [None]

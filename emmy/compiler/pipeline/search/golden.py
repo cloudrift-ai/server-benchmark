@@ -326,11 +326,14 @@ class RmsNormGoldenConfig(GoldenConfig):
         return 2.0 * self.M * self.K  # square+accumulate per element (the scale sweep is extra — stays an underestimate)
 
     def shape_key(self):
-        """The RMSNorm's reduce geometry — free rows ``(M,)``, reduce extent ``K`` —
-        matching the mean-of-squares Reduction its ``k_rms_norm`` Map is built over."""
+        """Keys the stamped RMSNorm sweep op (``kind="rms_norm"``): the OUTPUT is ``(M, K)`` — the
+        sweep re-reads the row it normalizes, so K is a free axis of the output AND the reduce
+        extent (``free_prod = M*K``, measured off the stamped op; the old ``free_prod = M`` never
+        matched what the 992 stamp writes). The dynamic twin excludes the symbolic M."""
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
-        return ShapeKey(free_prod=self.M, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic)
+        free = self.K if self.dynamic else self.M * self.K
+        return ShapeKey(free_prod=free, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic, kind="rms_norm")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -358,9 +361,13 @@ class SoftmaxGoldenConfig(GoldenConfig):
         return 2.0 * self.M * self.K  # max+sum folds per element (exp/div extra — stays an underestimate)
 
     def shape_key(self):
+        """Keys the stamped softmax sweep op (``kind="softmax"``): like RMSNorm, the normalize
+        sweep makes K a free axis of the ``(M, K)`` output as well as the (max+sum) reduce extent —
+        ``free_prod = M*K`` per the stamped op, symbolic M excluded on the dynamic twin."""
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
-        return ShapeKey(free_prod=self.M, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic)
+        free = self.K if self.dynamic else self.M * self.K
+        return ShapeKey(free_prod=free, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic, kind="softmax")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -411,10 +418,22 @@ class AttentionGoldenConfig(GoldenConfig):
         return f"F.scaled_dot_product_attention({qkv}, {qkv}, {qkv}, is_causal={self.causal})"
 
     def shape_key(self):
-        # Flash: free = heads × query rows, reduce = kv seq; tensor-core (warp) tier for fp16.
+        """Keys the TWISTED flash op the stamp pass emits (``kind="flash"``): free = the output
+        extents (heads x query rows x head_dim), reduce = the streamed KV axis. The dynamic twin
+        mirrors the 992 stamp's symbolic-axis exclusion — q/k/v seq are ALL symbolic, so the free
+        product keeps heads x head_dim and the reduce extent drops out entirely (``reduce_max=0``,
+        measured off the stamped masked-flash op). The QKᵀ contraction the same trace emits keys as
+        a plain contraction (``kind=""``) and never joins an attention golden."""
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
-        return ShapeKey(free_prod=self.n_heads * self.seq, reduce_max=self.seq, is_warp=self.dtype != "fp32", is_dyn=self.dynamic)
+        free = self.n_heads * self.head_dim if self.dynamic else self.n_heads * self.seq * self.head_dim
+        return ShapeKey(
+            free_prod=free,
+            reduce_max=0 if self.dynamic else self.seq,
+            is_warp=self.dtype != "fp32",
+            is_dyn=self.dynamic,
+            kind="flash",
+        )
 
 
 _GOLDENS_DIR = Path(__file__).parent / "goldens"

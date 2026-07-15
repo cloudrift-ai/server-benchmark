@@ -45,8 +45,9 @@ answering — they hold the detail that is no longer in this file or the README.
 - `EMMY_DUMP_DIR` environment variable (optional) — when set, all compiler stages dump intermediate artifacts (graphs, CUDA kernels, execution plans) to this directory for debugging. Per kernel, the dump also writes a `<kname>.torch.json` reproducer — the original PyTorch ops that kernel implements (sliced by op provenance), with an `i/N` coverage header (full vs partial) — runnable via `emmy run --ir <kname>.torch.json --bench` to reproduce accuracy / latency vs torch for that op. Kernels are named after the ops they realize (`k_rms_norm`, `k_sdpa_reduce`)
 - `EMMY_TUNE_DB` environment variable (optional) — overrides the default tuning SQLite cache path
   (`~/.cache/emmy/autotune.db`). `emmy tune` reads from / writes to this path. NOTE: greedy `compile` / `run`
-  pick forks from the global `Prior` (the online prior with its offline cold-start fallback), **not** the DB (the old
-  `_best_fork` DB→fork replay was removed). The online prior
+  resolve forks through the deploy evidence hierarchy — the live card's recorded goldens first (the repo-shipped
+  verified tier; consulted, never trained on), then measured reservoir/DB evidence, then the global `Prior` (the
+  online prior with its offline cold-start fallback; the old `_best_fork` DB→fork replay was removed). The online prior
   is a separate JSON checkpoint (`EMMY_ONLINE_FILE` → `~/.cache/emmy/online.json`; legacy `EMMY_PRIOR_FILE` still
   accepted) that `tune` writes and
   `compile` / `run` read. See [`emmy/compiler/pipeline/ARCHITECTURE.md`](emmy/compiler/pipeline/ARCHITECTURE.md)

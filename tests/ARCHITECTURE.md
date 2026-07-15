@@ -210,4 +210,11 @@ masked-symbolic sweep (symbolic M/N/K at off-hint sizes), the static-vs-dynamic 
 `d2/tma` transports, and the operand-pipelining transforms — the gmem→smem ring (`d<depth>/cp`) and the smem→register
 double-buffer (`/p<n>`), each asserted **bit-identical** to the single-buffer / gmem-direct baseline (a pure perf
 transform) — gating its GPU cases on `requires_sm90` / `_supports_tma()` (≥ sm_90); its GPU-less render / structure cases
-run anywhere. The TMA accuracy path additionally exercises the host descriptor encoder (`backend/cuda/_tma.py`).
+run anywhere. The TMA accuracy path additionally exercises the host descriptor encoder (`backend/cuda/_tma.py`). The same
+gate applies to TMA-transport `STAGE` pins (`…/tma…`) anywhere: below sm_90 the pin declines and the kernel stays
+gmem-direct, so `test_attention_coverage.py`'s TMA-staged flash cases carry `requires_sm90` (their `cp` siblings run on
+sm_80+). Golden-scoped CLI tests are the other environment trap: `--golden` / `--dataset golden` resolve against the
+**live card's** recordings, so tests asserting specific golden names (or monkeypatching `GOLDEN_CONFIGS` with card-less
+fakes) must pin themselves off-GPU (`torch.cuda.is_available → False` in-process, `CUDA_VISIBLE_DEVICES=""` for
+`run_cli` subprocesses) to take the multi-card-union path — otherwise they pass or fail depending on which shapes the
+local card happens to have recorded.

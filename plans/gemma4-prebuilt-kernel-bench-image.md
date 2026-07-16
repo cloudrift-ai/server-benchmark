@@ -4,7 +4,8 @@
 
 A released Docker image, based on the existing `vllm-emmy` serving image, that **serves `gemma-4-12B`** through
 `emmy serve --generate` with the transformer trunk on emmy-compiled CUDA kernels, and ships those kernels **prebuilt**
-for the **RTX 5090** (`sm_120`/`sm_120a`) so server cold-start pays **zero `nvcc` compile cost**.
+for the **RTX 5090** (`sm_120`/`sm_120a`) so server cold-start pays **zero `nvcc` compile cost** — and ships the
+**model weights baked in**, so cold-start also pays **zero HF download** (no `HF_TOKEN` needed at runtime).
 
 - **Phase A — make `gemma-4-12B` servable** via `EmmyGenModel`. Compiler + plugin work.
 - **Phase B — prebuilt-kernel image**: warm the serving cubin cache on a real 5090 and bake it into the image.
@@ -14,7 +15,9 @@ Success criteria:
 1. `emmy serve --generate gemma-4-12B` starts on a 5090 and produces logits/text matching an HF reference. **NOT MET —
    the pipeline runs end-to-end but the trunk forward produces NaN logits (kernel numerics); see Status.**
 2. The served model's **first request issues zero new `nvcc` compiles** (100% cubin cache hit) on the 5090.
-3. Reproducible: `make` targets build the image end to end from the wheel + a warm step.
+3. Cold-start performs **zero HF downloads**: the gemma-4-12B snapshot (weights + tokenizer + config) is baked into
+   the image — the container starts and serves with `HF_HUB_OFFLINE=1` and no `HF_TOKEN`.
+4. Reproducible: `make` targets build the image end to end from the wheel + a warm step.
 
 ## Status
 
@@ -99,7 +102,11 @@ off + `ctx 256` + `util 0.97` the 12B fits and serves on the 32 GB card (the wor
    pinned in tests; full 48-layer real-weight probe NaN-free with the trajectory matching HF exactly.
 2. **Re-run the end-to-end serve A/B on a 5090** (`validate_gemma4_serve.py`; fully scripted — detached harness,
    sampler, diag) — expected to pass now; this is the Phase-A exit criterion.
-3. **Pin vLLM ≥ 0.23 for the serving extra** — 0.22.1 cannot dispatch gemma-4's 512-dim global attention.
+3. ~~Pin vLLM ≥ 0.23 for the serving extra~~ **DONE**: `vllm>=0.23,<0.24` (+ Dockerfile/Makefile base
+   `v0.23.0`, still CUDA 13 → `cupy-cuda13x` unchanged). The `fastapi<0.137` workaround cap is dropped — vllm
+   0.23 pins it upstream, and prometheus-fastapi-instrumentator 8.0.1 fixed the `_IncludedRouter` crash anyway.
+   Recipe image tags (`cloudriftai/vllm-emmy:0.22.1-*`) still point at the published 0.22.1 image — refresh them
+   after the first 0.23 image is pushed.
 4. **Share constants** between the symbolic and decode-bucket programs (kills the 2× weights, keeps decode speed).
 5. **Pool activation buffers** across per-layer programs (removes the `num_layers` scaling).
 6. **PLE** — still out of scope for v1 (12B is dense); only for the deferred `gemma-4-E2B/E4B`.
@@ -124,13 +131,39 @@ A prebuilt cubin is reused iff all five of `sha1(source, name, arch, toolkit_tag
 both ends; the `OnlinePrior` falls back to it when absent/untrusted (`FallbackPrior`). One global, GPU-agnostic prior; no
 per-GPU file. A real-5090 tune is a later perf upgrade, not a blocker.
 
-### Warm + bake
+### Local prep (no 5090 needed)
+
+- **sm_120 compile preflight (before the rental):** cross-compile the gemma-4 serving kernels at `-O3` for
+  `sm_120`/`sm_120a` with the **image's** CUDA 13.0.2 nvcc (inside the vllm-emmy container) — nvcc needs no live
+  card, and the compiler's memorized default card is already the 5090 (`Context.from_target`). Catches toolchain
+  rejections (the `sm_89a`-rejected-by-nvcc class of failure) before the session. This does **not** produce the
+  shipped cache — source parity needs the live-probed card (see Risks) — it only proves everything compiles.
+- The warm/bake Dockerfile stages, `make gemma4-serve-image` / `-push` targets, and the offline zero-recompile
+  verification script are all writable and dry-runnable locally; the 5090 session should be execute-only.
+
+### Warm + bake (cubins AND model)
 
 Start the server once on a real 5090 (inside a container from the image → `toolkit_tag` = image nvcc, `-O3`), let it
-compile, snapshot `EMMY_CUBIN_CACHE`, and bake it in (`COPY --from=warm`). Base
-**`vllm/vllm-openai`** (`docker/vllm-emmy/Dockerfile` — vLLM + plugin already wired); new `make gemma4-serve-image` /
-`-push` mirroring the `vllm-emmy-image` targets. **Verify:** snapshot the cubin dir, start + issue one request, diff the
-file set — empty diff = 100% hit.
+download the model and compile, then snapshot **both** caches from the warm container — `EMMY_CUBIN_CACHE` and the HF
+snapshot (the warm step downloads gemma-4-12B anyway; the bake reuses it, so the model costs no extra step) — and bake
+them in (`COPY --from=warm`). Base **`vllm/vllm-openai`** (`docker/vllm-emmy/Dockerfile` — vLLM + plugin already
+wired); new `make gemma4-serve-image` / `-push` mirroring the `vllm-emmy-image` targets. **Verify:** run the baked
+image with `HF_HUB_OFFLINE=1` and no `HF_TOKEN`, snapshot the cubin dir, start + issue one request, diff the file
+set — empty diff = 100% cubin hit, and offline mode proves zero downloads.
+
+Model-bake gotchas:
+
+- **Mount shadowing.** Compose/recipes mount the host HF cache over `/root/.cache/huggingface` — a bind mount would
+  HIDE baked-in content under that path. Bake the snapshot (and the cubin cache) to a dedicated image path (e.g.
+  `/opt/emmy/hf`) and point `HF_HOME` + `EMMY_CUBIN_CACHE` there in the image env. (The cubin cache's current home
+  under the HF mount exists to survive container restarts; baked in, it no longer needs the volume.)
+- **Image size.** ~24 GB of weights on the ~10 GB vLLM base ⇒ a ~35 GB image. Fine for Docker Hub, but pulls are
+  slow — this image trades pull time for deterministic, tokenless cold-start. Keep the plain (weightless)
+  `vllm-emmy` image for everything else.
+- **License.** gemma-4 is **Apache 2.0** (unlike Gemma 1–3's custom Terms of Use) — public redistribution of the
+  weights in a Docker Hub tag is fine (unsloth / lmstudio-community already publicly redistribute gemma-4 on HF).
+  Obligations are attribution-only: ship the snapshot's LICENSE/NOTICE files verbatim (baking the unmodified HF
+  snapshot satisfies this automatically) and don't imply Google endorsement in the tag naming/description.
 
 ## Risks / open questions
 
@@ -150,7 +183,10 @@ file set — empty diff = 100% hit.
 - **Serving dtype / max-model-len / decode bucket** (open) — sets which kernels get warmed. `decode_bucket` is now a
   released knob and part of the cache key, so pin it for the release.
 - Image: single 5090 tag for v1 (arch-keyed cache; a 4090 set can be added later without collision).
+- **Model baked into the image** (weights + tokenizer + config at a dedicated non-mounted path): zero-download,
+  tokenless cold-start; ~35 GB image accepted for this tag. **Public tag is fine** — gemma-4 is Apache 2.0; keep
+  the snapshot's LICENSE/NOTICE files in the image (see the license note above).
 
 ## Notes
 
-- `plans/` is at 11 (cap 10). Prune one executed/obsolete plan at commit time.
+- `plans/` is at the cap (10). Prune an executed/obsolete plan before adding a new one.

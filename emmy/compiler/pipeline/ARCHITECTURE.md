@@ -607,6 +607,19 @@ unkeyed/sampled reservoir. The walk fills the label-quality columns (`SearchNode
   twin), features stamped `H_opt=3.0` (the reservoir convention), parentless — a regime re-measurement, not part of
   the tree, never in a fork sibling group.
 
+**Bench-to-node recording** (`search/bench_record.py`) is the node table's second writer: a `run --bench` that
+benched pinned golden/`--ab` rows records each clean measurement — and the greedy pick, via its pinned-comparable
+`greedy (isolated)` re-bench — as parentless `depth=0` leaf rows, default-on behind a quality bar (the tuner's own
+pinned-bench standard; `--no-record-nodes` opts out). This is what keeps manual sweep measurements from evaporating
+(the fm-lane optima were found by hand and never reached the store). Pool fidelity comes from recovering each
+kernel's pre-descent offer site via `source_chain` (descent stamps further `S_*` deltas, so the terminal op's own
+stamps would mis-key the pool); a variant's kernels (split-K main + combine) group under one site and record ONE
+whole-variant leaf. Flagged rows (pin mismatch, wrong answer, intensity floor) and the `--ir` path never record.
+`record_nodes` guards the leaf upsert with **quality-aware replacement**: a newer measurement of unambiguously lower
+quality (fewer `n_samples` AND higher `variance`) never displaces a stored leaf, so a drive-by bench can't overwrite
+tune-grade data, while comparable or unknown quality keeps plain newest-wins (honest re-measurement still heals
+stale rows).
+
 Within one batch, a deterministic no-knob-delta step can give a child its parent's exact knob set (same `node_key`);
 duplicates collapse to one row (leaf's stats, max — not sum — of their visits) so `record_nodes`'s SUM accumulation
 never double-counts a run. The store is **group-holdout-fold ready** (`Dataset.fold_node_rows`, by `op_sig` / `gpu`):

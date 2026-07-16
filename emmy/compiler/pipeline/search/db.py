@@ -766,7 +766,12 @@ class SearchDB:
         noise floor (selectively, on the configs revisited most) — so a leaf row is
         **newest-measurement-wins**, ordered by ``measured_at`` (ISO-8601 UTC compares
         lexicographically; a stale measurement never resurrects, which also makes
-        ``merge_nodes`` direction-independent). Rows with unknown leaf-ness
+        ``merge_nodes`` direction-independent) — EXCEPT that a newer measurement of
+        unambiguously lower quality (fewer ``n_samples`` AND higher ``variance``, both
+        sides known) never replaces: with ``run --bench`` recording into the store by
+        default (``bench_record``), a drive-by bench must not displace a tune-grade
+        leaf, while comparable/unknown quality keeps plain newest-wins so honest
+        re-measurement still heals stale or fake rows. Rows with unknown leaf-ness
         (pre-enrichment, ``is_leaf`` NULL) keep the conservative branch behavior.
         Consequence: a cross-session tree is no longer value-monotone — an ancestor
         branch may hold a historical bound below its leaf's current measurement.
@@ -805,7 +810,8 @@ class SearchDB:
             is_leaf = None if r.is_leaf is None else int(r.is_leaf)
             measured = r.measured_at or now
             existing = self._conn.execute(
-                "SELECT value_us, n_updates, visits, status, measured_at FROM node WHERE node_key = ?", (r.node_key,)
+                "SELECT value_us, n_updates, visits, status, measured_at, variance, n_samples FROM node WHERE node_key = ?",
+                (r.node_key,),
             ).fetchone()
             if existing is None:
                 self._conn.execute(
@@ -835,7 +841,7 @@ class SearchDB:
                     ),
                 )
                 continue
-            cur_val, n_upd, cur_visits, cur_status, cur_measured = existing
+            cur_val, n_upd, cur_visits, cur_status, cur_measured, cur_var, cur_n = existing
             visits = (cur_visits or 0) + r.visits
             if cur_status == "ok" and r.status != "ok":
                 replace = False  # a failure never downgrades a good row
@@ -844,8 +850,24 @@ class SearchDB:
             elif r.is_leaf:
                 # Re-measurement of one config: strictly-newer wins (NULL = pre-
                 # timestamp row, always superseded); equal timestamps (same batch /
-                # re-merged snapshot) don't churn the row.
-                replace = cur_measured is None or measured > cur_measured
+                # re-merged snapshot) don't churn the row. Quality guard: a newer
+                # measurement of UNAMBIGUOUSLY lower quality — fewer samples AND
+                # higher variance, both sides known — never replaces (a drive-by
+                # ``run --bench`` must not displace a tune-grade leaf; comparable or
+                # incomparable quality keeps plain newest-wins, so re-measurements
+                # still heal stale/fake rows).
+                newer = cur_measured is None or measured > cur_measured
+                worse = (
+                    r.n_samples is not None
+                    and cur_n is not None
+                    and r.n_samples < cur_n
+                    and r.variance is not None
+                    and cur_var is not None
+                    and r.variance > cur_var
+                )
+                if newer and worse:
+                    logger.debug("[node-store] keeping higher-quality leaf %s (incoming n=%s)", r.node_key[:12], r.n_samples)
+                replace = newer and not worse
             else:
                 replace = r.value_us < cur_val  # branch: keep the coverage bound
             if replace:

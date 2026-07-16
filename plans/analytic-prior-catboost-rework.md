@@ -503,8 +503,11 @@ the training data feeding this plan is censored and stale in ways the plan didn'
    measurement (fewer `n_samples`, higher variance) never replaces a stored leaf; newest-wins among comparable
    quality (keep-min stays wrong for leaves: min over re-measurements noise-mines, and a fake-fast row would be
    unrepairable). With this, the neighborhood collector reduces to spec steps (1)–(3) driving
-   `run --bench --golden NAME --ab … --json`; step (4) is the default recorder. Lands as its own PR on top of
-   `feature/greedy-isolated-rebench`.
+   `run --bench --golden NAME --ab … --json`; step (4) is the default recorder. **LANDED 2026-07-15** (this
+   branch; the isolated re-bench merged as #376): `search/bench_record.py` (offer-site pool keying via
+   `source_chain` — validated byte-identical against the store's tune-written `op_sig`s; whole-variant leaf per
+   site), the `run --bench` default-on wiring (`--no-record-nodes` opts out), and `record_nodes`' quality-aware
+   leaf replacement.
 
 The golden A/B harness fixes decided alongside these (bench survives a greedy-row bench_fail; a pin matching no
 offered row fails loudly; recorder-side schedule-family stamping; the dynM FLOP-floor overcount) are NOT part of

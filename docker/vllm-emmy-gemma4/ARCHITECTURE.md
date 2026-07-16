@@ -56,13 +56,19 @@ literally the same script with the same env.
 
 ## Workflow
 
-Only the boxed steps need the physical 5090; the bake and push are GPU-free (but see the note below on where to run
-them):
+Only the highlighted steps need the physical 5090; the bake and push are GPU-free (but see the note below on where
+to run them):
 
-```
-make vllm-emmy-image   →   ┌ make gemma4-warm ┐   →   make gemma4-serve-image   →   ┌ make gemma4-serve-verify ┐   →   make gemma4-serve-push
-    (anywhere)             │    RTX 5090      │            (anywhere)               │        RTX 5090          │           (anywhere)
-                           └──────────────────┘                                     └──────────────────────────┘
+```mermaid
+flowchart LR
+    base["make vllm-emmy-image<br/><i>anywhere</i>"]
+    warm["make gemma4-warm<br/><b>RTX 5090</b>"]
+    bake["make gemma4-serve-image<br/><i>anywhere</i>"]
+    verify["make gemma4-serve-verify<br/><b>RTX 5090</b>"]
+    push["make gemma4-serve-push<br/><i>anywhere</i>"]
+    base --> warm -- "warm/ (hf + cubin)" --> bake --> verify -- PASS --> push
+    classDef gpu fill:#76b900,color:#fff,stroke:#4e7a00
+    class warm,verify gpu
 ```
 
 The full release session on a rented 5090 (each step from the repo checkout; host prereqs for steps 3–4:

@@ -246,14 +246,22 @@ def _nvrtc_options(*, uses_tma: bool) -> tuple[str, ...]:
 # ---------------------------------------------------------------------------
 
 
-def _materialize(buf: _Buffer, shape: tuple[int, ...], src: np.ndarray | None, constants: dict[str, float]) -> cp.ndarray:
+def _materialize(buf: _Buffer, shape: tuple[int, ...], src: np.ndarray | cp.ndarray | None, constants: dict[str, float]) -> cp.ndarray:
     """Build one device array for ``buf`` at ``shape`` — the single fill
-    policy shared by :func:`_allocate` and :meth:`CompiledProgram.rebind`."""
+    policy shared by :func:`_allocate` and :meth:`CompiledProgram.rebind`.
+
+    ``src`` may already be a **device** (cupy) array — a constant uploaded once and
+    shared across programs (the serving runner's symbolic + decode-bucket twins bind
+    the same weights). It is used as-is, no copy, unless the dtype disagrees."""
     import cupy as cp
 
     cp_dtype = cupy_dtype(buf.dtype)
     np_dtype = buf.dtype.np
     if src is not None:
+        if isinstance(src, cp.ndarray):
+            if src.dtype != np.dtype(np_dtype):
+                src = src.astype(np_dtype)
+            return src.reshape(shape) if tuple(src.shape) != tuple(shape) else src
         return cp.asarray(np.ascontiguousarray(src, dtype=np_dtype).reshape(shape))
     if buf.role == "constant" and buf.name in constants:
         v = float(constants[buf.name])
@@ -295,6 +303,34 @@ class _SlabPlan:
     slab: cp.ndarray | None = None
 
 
+class BufferArena:
+    """Cross-program device-buffer pool for programs that run **sequentially** (the
+    serving runner's per-layer splits). Named grow-only backings: every program built
+    with the same arena takes its scratch slab and its input/output buffers as views
+    into per-key backings, so N sequential programs hold ~one program's worth of
+    activation memory instead of N (the per-layer capacity-buffer artifact: ~350 MB ×
+    48 layers for gemma-4-12B). Growth allocates a fresh backing; programs built on an
+    older generation keep their (smaller) views alive, so captured graphs / TMA
+    descriptors never dangle. Safe iff programs sharing the arena never run
+    concurrently and each program's outputs are consumed before the next program runs
+    — the runner's contract. Constants are never pooled (persistent values; weight
+    sharing is ``gen_runner._bind_device_constants``)."""
+
+    def __init__(self) -> None:
+        self._backings: dict[str, cp.ndarray] = {}
+
+    def backing(self, key: str, nbytes: int) -> cp.ndarray:
+        """A zero-init ``uint8`` backing of at least ``nbytes`` for ``key`` — reused
+        while it still fits, reallocated (grow-only) when it doesn't."""
+        import cupy as cp  # noqa: PLC0415
+
+        cur = self._backings.get(key)
+        if cur is None or cur.nbytes < nbytes:
+            cur = cp.zeros(max(nbytes, 1), dtype=cp.uint8)
+            self._backings[key] = cur
+        return cur
+
+
 def _scratch_sizes(compiled: _Compiled, sym_values: dict[str, int]) -> tuple[dict[str, int], dict[str, int]]:
     """Byte size + alignment per ``scratch`` buffer at the resolved ``sym_values``."""
     sizes: dict[str, int] = {}
@@ -319,16 +355,21 @@ def _plan_slab(compiled: _Compiled, sym_values: dict[str, int]) -> _SlabPlan:
     return _SlabPlan(offsets=offsets, total_bytes=total, sym_values=dict(sym_values), naive_bytes=sum(sizes.values()))
 
 
-def _alloc_slab(compiled: _Compiled, sym_values: dict[str, int]) -> tuple[dict[str, cp.ndarray], _SlabPlan]:
+def _alloc_slab(
+    compiled: _Compiled, sym_values: dict[str, int], arena: BufferArena | None = None
+) -> tuple[dict[str, cp.ndarray], _SlabPlan]:
     """Plan + allocate the scratch slab and return each scratch buffer as a typed
-    view into it. One zero-init ``uint8`` allocation; each view's device pointer
-    (``slab.data + offset``) is stable for the program lifetime (the slab is pinned
-    on the returned plan), so captured graphs / TMA descriptors that bake the
-    pointer stay valid across replays."""
+    view into it. One zero-init ``uint8`` allocation (or a view into the shared
+    ``arena`` backing); each view's device pointer (``slab.data + offset``) is stable
+    for the program lifetime (the slab is pinned on the returned plan), so captured
+    graphs / TMA descriptors that bake the pointer stay valid across replays."""
     import cupy as cp  # noqa: PLC0415
 
     plan = _plan_slab(compiled, sym_values)
-    plan.slab = cp.zeros(plan.total_bytes or 1, dtype=cp.uint8)
+    if arena is not None:
+        plan.slab = arena.backing("scratch-slab", plan.total_bytes)
+    else:
+        plan.slab = cp.zeros(plan.total_bytes or 1, dtype=cp.uint8)
     views: dict[str, cp.ndarray] = {}
     for buf in compiled.bufs:
         if buf.role != "scratch":
@@ -338,10 +379,29 @@ def _alloc_slab(compiled: _Compiled, sym_values: dict[str, int]) -> tuple[dict[s
     return views, plan
 
 
-def _allocate(compiled: _Compiled, input_data: dict[str, np.ndarray] | None) -> tuple[dict[str, cp.ndarray], _SlabPlan]:
+def _arena_view(arena: BufferArena, buf: _Buffer, shape: tuple[int, ...], src, constants: dict[str, float]) -> cp.ndarray:
+    """An input/output buffer as a view into the arena's per-``(role, name)`` backing,
+    filled under the same policy as :func:`_materialize`. Keyed by role AND name so an
+    input and an output that happen to share a tensor name never alias within one
+    program (kernels read inputs while writing outputs); across programs the aliasing
+    is the point."""
+    import cupy as cp  # noqa: PLC0415
+
+    filled = _materialize(buf, shape, src, constants)
+    backing = arena.backing(f"{buf.role}:{buf.name}", filled.nbytes)
+    view = cp.ndarray(shape, dtype=filled.dtype, memptr=backing.data)
+    view[...] = filled
+    return view
+
+
+def _allocate(
+    compiled: _Compiled, input_data: dict[str, np.ndarray] | None, arena: BufferArena | None = None
+) -> tuple[dict[str, cp.ndarray], _SlabPlan]:
     """Materialize every buffer. ``scratch`` buffers become typed views into one
     liveness-planned persistent slab (dead intervals share memory);
-    input/constant/output buffers stay standalone (persistent across the call)."""
+    input/constant/output buffers stay standalone (persistent across the call) —
+    unless an ``arena`` is supplied, in which case input/output buffers (and the
+    slab) become views into its cross-program backings; constants stay standalone."""
     input_data = input_data or {}
     sym_values = _resolve_symbolic(compiled, input_data)
     constants = _resolved_constants(compiled, sym_values)
@@ -354,13 +414,17 @@ def _allocate(compiled: _Compiled, input_data: dict[str, np.ndarray] | None) -> 
             if buf.role == "scratch":
                 continue  # placed into the slab below
             shape = buf.resolve_shape(sym_values) or (1,)
-            arrays[buf.name] = _materialize(buf, shape, input_data.get(buf.name), constants)
+            if arena is not None and buf.role in ("input", "output"):
+                arrays[buf.name] = _arena_view(arena, buf, shape, input_data.get(buf.name), constants)
+            else:
+                arrays[buf.name] = _materialize(buf, shape, input_data.get(buf.name), constants)
     # ``scratch`` buffers become views into one zero-init slab. The build-time
     # zero preserves the contract scratch had under ``cp.zeros``; per-launch
     # ``zero_outputs`` re-zeros atomic-reduction outputs, and every other kernel
     # fully overwrites its output (lowering contract), so a reused slot's stale
-    # contents are never read.
-    scratch_views, plan = _alloc_slab(compiled, sym_values)
+    # contents are never read — which is also why a reused (stale) arena backing
+    # is as safe as a reused slab slot.
+    scratch_views, plan = _alloc_slab(compiled, sym_values, arena)
     arrays.update(scratch_views)
     return arrays, plan
 
@@ -642,6 +706,10 @@ class CompiledProgram:
     # ``slab_plan.slab``, pinned here for the program lifetime (``build`` always
     # populates it; the default is only for dataclass construction).
     slab_plan: _SlabPlan | None = None
+    # Cross-program :class:`BufferArena` the activation buffers + slab view into
+    # (``None`` → standalone allocation, the non-serving default). ``rebind`` re-takes
+    # its views from the same arena so sharing survives symbolic re-sizing.
+    arena: BufferArena | None = None
     # Per-launch timing events, lazily created on first ``iter_once``
     # and reused across every subsequent call so multi-iter bench loops
     # don't churn the cupy ``Event`` pool (the pre-unification
@@ -683,19 +751,22 @@ class CompiledProgram:
         input_data: dict[str, np.ndarray] | None = None,
         *,
         compile_timeout_s: float | None = None,
+        arena: BufferArena | None = None,
     ) -> CompiledProgram:
         """Compile ``graph``, allocate every buffer, pre-build TMA
         descriptors. ``compile_timeout_s`` bounds the setup phase at a
         C-call boundary: if NVRTC + alloc + descriptor work overruns,
         raise ``RuntimeError`` before the caller proceeds to launches
-        so no in-flight kernels are left queued.
+        so no in-flight kernels are left queued. ``arena`` pools the
+        activation buffers + scratch slab across sequentially-run
+        programs (see :class:`BufferArena`).
 
         Caller is expected to hold ``gpu_lock()`` around this call and
         every subsequent method on the returned program."""
         t0 = _time_module.monotonic()
         compiled = _compile(graph)
         sym_values = _resolve_symbolic(compiled, input_data or {})
-        arrays, slab_plan = _allocate(compiled, input_data)
+        arrays, slab_plan = _allocate(compiled, input_data, arena)
         descs = _prebuild_descriptors(compiled, arrays)
         elapsed = _time_module.monotonic() - t0
         if compile_timeout_s is not None and elapsed > compile_timeout_s:
@@ -714,7 +785,7 @@ class CompiledProgram:
                 slab_plan.naive_bytes / max(1, slab_plan.total_bytes),
                 len(slab_plan.offsets),
             )
-        return cls(compiled=compiled, arrays=arrays, descs=descs, sym_values=sym_values, slab_plan=slab_plan)
+        return cls(compiled=compiled, arrays=arrays, descs=descs, sym_values=sym_values, slab_plan=slab_plan, arena=arena)
 
     def rebind(self, input_data: dict[str, np.ndarray]) -> None:
         """Re-bind ``input_data`` on an already-built program, re-sizing
@@ -749,7 +820,10 @@ class CompiledProgram:
                 shape = buf.resolve_shape(new_sym) or (1,)
                 arr = self.arrays[buf.name]
                 if tuple(arr.shape) != shape:
-                    self.arrays[buf.name] = _materialize(buf, shape, src, self.compiled.constants)
+                    if self.arena is not None and buf.role in ("input", "output"):
+                        self.arrays[buf.name] = _arena_view(self.arena, buf, shape, src, self.compiled.constants)
+                    else:
+                        self.arrays[buf.name] = _materialize(buf, shape, src, self.compiled.constants)
                     realloc = True
                 elif src is not None:
                     arr.set(np.ascontiguousarray(src, dtype=buf.dtype.np).reshape(shape))
@@ -757,7 +831,7 @@ class CompiledProgram:
         # symbolic extent). The fresh slab has new pointers, so descs/graphs must
         # be rebuilt/dropped — handled by the shared ``if realloc:`` block below.
         if reuse and new_sym != self.slab_plan.sym_values:
-            scratch_views, self.slab_plan = _alloc_slab(self.compiled, new_sym)
+            scratch_views, self.slab_plan = _alloc_slab(self.compiled, new_sym, self.arena)
             self.arrays.update(scratch_views)
             realloc = True
         self.sym_values = new_sym

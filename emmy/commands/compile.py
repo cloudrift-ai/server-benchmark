@@ -484,7 +484,7 @@ def _trace_model(model_id: str, layer: int | None, seq_len: int, *, dynamic_shap
     model.eval()
 
     if layer is None:
-        from emmy.compiler.trace.huggingface import build_causal_mask, build_full_model_wrapper
+        from emmy.compiler.trace.huggingface import build_causal_mask, build_full_model_wrapper, stamp_sliding_windows
 
         logger.info("Tracing full model (seq_len=%d)...", seq_len)
         if dynamic_shapes:
@@ -497,11 +497,13 @@ def _trace_model(model_id: str, layer: int | None, seq_len: int, *, dynamic_shap
             position_ids = torch.arange(seq_len).unsqueeze(0)
             args_t = (input_ids, attention_mask, position_ids)
             graph = trace_module(wrapper, args_t, dynamic_shapes=dynamic_shapes)
+            stamp_sliding_windows(graph, _find_text_decoder(model).config)
             return graph, (wrapper, args_t, {})
 
         wrapper = build_full_model_wrapper(model, seq_len, dtype)
         input_ids = torch.zeros((1, seq_len), dtype=torch.long)
         graph = trace_module(wrapper, (input_ids,), dynamic_shapes=dynamic_shapes)
+        stamp_sliding_windows(graph, _find_text_decoder(model).config)
         return graph, (wrapper, (input_ids,), {})
 
     decoder = _find_text_decoder(model)
@@ -523,10 +525,11 @@ def _trace_model(model_id: str, layer: int | None, seq_len: int, *, dynamic_shap
         # Dynamic mode: concrete (cos, sin) kwargs would specialise rotary to
         # the trace seq_len, so wrap the block with in-graph sliced rotary
         # instead. The wrapper's input is ``x`` → spec ``--dynamic seq_len@x:1``.
-        from emmy.compiler.trace.huggingface import build_layer_wrapper
+        from emmy.compiler.trace.huggingface import build_layer_wrapper, stamp_sliding_windows
 
         wrapper = build_layer_wrapper(block, decoder.rotary_emb, hidden_size, dtype, layer_type=layer_type)
         graph = trace_module(wrapper, (x,), dynamic_shapes=dynamic_shapes)
+        stamp_sliding_windows(graph, decoder.config, layer_type=layer_type)
         return graph, (wrapper, (x,), {})
 
     position_ids = torch.arange(seq_len).unsqueeze(0)
@@ -535,7 +538,10 @@ def _trace_model(model_id: str, layer: int | None, seq_len: int, *, dynamic_shap
     except TypeError:
         cos, sin = decoder.rotary_emb(x, position_ids)
 
+    from emmy.compiler.trace.huggingface import stamp_sliding_windows
+
     graph = trace_module(block, (x,), kwargs={"position_embeddings": (cos, sin)}, dynamic_shapes=dynamic_shapes)
+    stamp_sliding_windows(graph, decoder.config, layer_type=layer_type)
     return graph, (block, (x,), {"position_embeddings": (cos, sin)})
 
 

@@ -241,9 +241,18 @@ class MatmulOp(Op):
 
 @dataclass
 class SdpaOp(Op):
-    """PyTorch scaled_dot_product_attention(Q, K, V, ...)."""
+    """PyTorch scaled_dot_product_attention(Q, K, V, ...).
+
+    ``sliding_window`` is a trace-time stamp (the HF wrapper knows the config's
+    per-layer attention type): the attention is banded — a query at row ``m``
+    attends keys ``kv ∈ [m − W + 1, m]``. Semantically it asserts the mask
+    (explicit operand or ``is_causal``) keeps at most that band, so the lowering
+    may skip key blocks wholly outside it; an explicit mask operand still
+    applies (it may mask more, e.g. padding), a stamped mask-less SDPA computes
+    the band itself."""
 
     is_causal: bool = False
+    sliding_window: int | None = None
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
         # SDPA output mirrors Q's batch+heads+seq dims, with V's last (head_dim).
@@ -271,6 +280,11 @@ class SdpaOp(Op):
             kv_len = scores.shape[-1]
             causal_mask = np.triu(np.ones((seq_len, kv_len), dtype=scores.dtype), k=1)
             scores = scores - causal_mask * 1e9
+        if self.sliding_window is not None:
+            seq_len = scores.shape[-2]
+            kv_len = scores.shape[-1]
+            band_mask = np.tril(np.ones((seq_len, kv_len), dtype=scores.dtype), k=-self.sliding_window)
+            scores = scores - band_mask * 1e9
         scores_max = np.max(scores, axis=-1, keepdims=True)
         exp_scores = np.exp(scores - scores_max)
         attn = exp_scores / np.sum(exp_scores, axis=-1, keepdims=True)

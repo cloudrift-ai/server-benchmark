@@ -24,6 +24,13 @@ from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import (
 
 PATTERN = [Pattern("root", SdpaOp)]
 
+_NEG = {"<=": ">", ">": "<=", "<": ">=", ">=": "<"}
+
+
+def _negate(e: BinaryExpr) -> BinaryExpr:
+    """The complement of a single comparison predicate (integer coordinates)."""
+    return BinaryExpr(_NEG[e.op], e.left, e.right)
+
 
 def _maybe_gqa(frag: Graph, src: Node | str, q_batch: tuple, src_batch: tuple, target_last_dims: tuple, *, name: str) -> Node | str:
     """Broadcast src's head axis to match q's head count via integer-divide indexing.
@@ -97,38 +104,55 @@ def rewrite(match: Match, root: Node, inp_q: Node, inp_k: Node, inp_v: Node, inp
             inputs=[scaled_id, mask_bc],
             output=Tensor(f"{name}_masked", scores_shape, dtype),
         )
-    # Causal mask: add -1e9 where key_pos > query_pos.
-    elif root.op.is_causal:
-        ndim_scores = len(scores_shape)
-        i_var = placeholder(ndim_scores - 2)
-        j_var = placeholder(ndim_scores - 1)
+
+    # Coordinate masks — each a single-predicate IndexMapOp Select (0 keep / -1e9 fill) added to the
+    # scores, one per structural condition. They ride the graph as STRUCTURE (the lowering derives
+    # its stream bounds from the predicates); a stamped SDPA carries them alongside an explicit
+    # bias (the bias may mask more, e.g. padding — the coordinate region is a superset).
+    def _coord_mask(keep_select, suffix: str):
+        nonlocal scaled_id
         zero_id = frag.add_node(
-            op=ConstantOp(name=f"{name}_mask_zero", value=0.0),
+            op=ConstantOp(name=f"{name}_mask_zero{suffix}", value=0.0),
             inputs=[],
-            output=Tensor(f"{name}_mask_zero", (1,), dtype),
+            output=Tensor(f"{name}_mask_zero{suffix}", (1,), dtype),
         )
         mask_fill_id = frag.add_node(
-            op=ConstantOp(name=f"{name}_mask_fill", value=-1e9),
+            op=ConstantOp(name=f"{name}_mask_fill{suffix}", value=-1e9),
             inputs=[],
-            output=Tensor(f"{name}_mask_fill", (1,), dtype),
+            output=Tensor(f"{name}_mask_fill{suffix}", (1,), dtype),
         )
-        causal_mask_op = IndexMapOp(
+        mask_op = IndexMapOp(
             out_shape=scores_shape,
             sources=(
-                IndexSource(input_idx=0, coord_map=(Literal(0, "int"),), select=BinaryExpr("<=", j_var, i_var)),
-                IndexSource(input_idx=1, coord_map=(Literal(0, "int"),), select=BinaryExpr(">", j_var, i_var)),
+                IndexSource(input_idx=0, coord_map=(Literal(0, "int"),), select=keep_select),
+                IndexSource(input_idx=1, coord_map=(Literal(0, "int"),), select=_negate(keep_select)),
             ),
         )
         mask_id = frag.add_node(
-            op=causal_mask_op,
+            op=mask_op,
             inputs=[zero_id, mask_fill_id],
-            output=Tensor(f"{name}_cmask", scores_shape, dtype),
+            output=Tensor(f"{name}{suffix}mask", scores_shape, dtype),
         )
         scaled_id = frag.add_node(
             op=ElementwiseOp(op="add"),
             inputs=[scaled_id, mask_id],
-            output=Tensor(f"{name}_masked", scores_shape, dtype),
+            output=Tensor(f"{name}_masked{suffix}", scores_shape, dtype),
         )
+
+    ndim_scores = len(scores_shape)
+    i_var = placeholder(ndim_scores - 2)
+    j_var = placeholder(ndim_scores - 1)
+    window = root.op.sliding_window
+    # Causal mask: add -1e9 where key_pos > query_pos. torch's API forbids is_causal alongside an
+    # explicit mask, so both appear only on a stamped SDPA — there the coord mask is bit-neutral
+    # (the bias already holds -inf above the diagonal) and drives the lowering's stream end.
+    if root.op.is_causal:
+        _coord_mask(BinaryExpr("<=", j_var, i_var), "_c")
+    # Sliding-window band: add -1e9 where key_pos ≤ query_pos − window (keep kv > m − W). The
+    # stamped band is synthesized even alongside an explicit bias — bit-neutral there (the bias
+    # already holds -inf on that region) and it is what the lowering skips key blocks off.
+    if window is not None:
+        _coord_mask(BinaryExpr(">", j_var, BinaryExpr("-", i_var, Literal(window, "int"))), "_b")
 
     softmax = softmax_decompose(frag, scaled_id, -1, name=f"{name}_softmax")
 

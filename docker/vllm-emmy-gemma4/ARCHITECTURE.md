@@ -51,15 +51,45 @@ make vllm-emmy-image   →   ┌ make gemma4-warm ┐   →   make gemma4-serve-
                            └──────────────────┘                                     └──────────────────────────┘
 ```
 
-The full release session on a rented 5090 (each step from the repo checkout):
+The full release session on a rented 5090 (each step from the repo checkout; host prereqs for steps 3–4:
+`make setup` + `pip install -e ".[serving]"` + cupy + `export HF_TOKEN=…`):
 
-1. `make vllm-emmy-image` (or pull the published base) — the warm compiles with the **image's** nvcc.
-2. Preflight the toolchain: `scripts/preflight_gemma4_sm120.sh` inside the container (exact image nvcc).
-3. **Re-measure memory headroom** and finalize `config.env` (max-model-len / batched-tokens / decode bucket) — the
-   config seals the cache key, so it cannot change after this point without re-warming.
-4. Correctness gate: `scripts/validate_gemma4_serve.py` at the pinned config (A/B vs HF eager).
-5. `HF_TOKEN=… make gemma4-warm` — fills `warm/`.
-6. `make gemma4-serve-image` → `make gemma4-serve-verify` → `make gemma4-serve-push`.
+1. Build the base image the warm will compile inside of:
+
+   ```bash
+   make wheel && make vllm-emmy-image        # or: docker pull cloudriftai/vllm-emmy:TAG
+   ```
+
+   A pulled tag must come from the SAME commit you release from (the wheel is part of the cubin `source`); when in
+   doubt, build on the rental. To pin a non-default tag for every later target: `make VLLM_EMMY_TAG=… <target>`.
+2. Preflight the toolchain with the **image's** nvcc — mount just the script; it needs no repo or GPU in-container
+   (the emmy wheel + nvcc are in the image; it hides CUDA and resolves goldens off-GPU):
+
+   ```bash
+   docker run --rm --entrypoint bash -v "$PWD/scripts/preflight_gemma4_sm120.sh":/preflight.sh \
+       cloudriftai/vllm-emmy:TAG /preflight.sh          # expect: 34 OK, 0 FAIL
+   ```
+
+3. **Re-measure memory headroom** and finalize `config.env` — the config seals the cache key, so it cannot change
+   after this point without re-warming. Step `--max-model-len` / `--max-num-batched-tokens` up from the old floor
+   (256) with the decode bucket ON, watching for OOM, e.g.:
+
+   ```bash
+   ./venv/bin/emmy serve --generate google/gemma-4-12B --bench \
+       --max-model-len 2048 --max-num-batched-tokens 2048 --gpu-memory-utilization 0.97
+   ```
+
+   Write the largest passing values into `config.env`.
+4. Correctness gate at the pinned config (A/B vs HF eager; the Phase-A exit check):
+
+   ```bash
+   ./venv/bin/python scripts/validate_gemma4_serve.py --model google/gemma-4-12B \
+       --max-model-len <pinned> --max-num-batched-tokens <pinned> --gpu-mem-util <pinned>
+   ```
+
+5. `HF_TOKEN=… make gemma4-warm` — fills `warm/` (first boot downloads the model + compiles all layers; minutes).
+6. `make gemma4-serve-image` → `make gemma4-serve-verify` (expect `PASS — served offline with zero new cubins`) →
+   `make gemma4-serve-push`.
 7. Point the gemma-4 recipes at the new tag; tear down the rental.
 
 **Where to run bake/push:** although `gemma4-serve-image` and `-push` are GPU-free, run them on the rental anyway —

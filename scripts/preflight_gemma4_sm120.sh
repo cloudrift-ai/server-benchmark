@@ -8,12 +8,20 @@
 # it inside the vllm-emmy container to preflight with the image's exact nvcc.
 #
 #   scripts/preflight_gemma4_sm120.sh [out_dir]   # default out: /tmp/emmy-preflight-sm120
+#
+# Runs from the repo venv when present, else from PATH (the vllm-emmy container has the
+# emmy wheel on system python and no venv — mount just this script and run it there).
 set -u
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." 2>/dev/null || true
+if [ -x ./venv/bin/emmy ]; then
+  PY=./venv/bin/python; EMMY=./venv/bin/emmy
+else
+  PY=python3; EMMY=emmy
+fi
 OUT="${1:-/tmp/emmy-preflight-sm120}"
 rm -rf "$OUT"; mkdir -p "$OUT"
 
-names=$(CUDA_VISIBLE_DEVICES= ./venv/bin/python -c "
+names=$(CUDA_VISIBLE_DEVICES= "$PY" -c "
 from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS
 print('\n'.join(sorted({g.name for g in GOLDEN_CONFIGS if g.name.startswith('gemma4_12b.')})))
 ")
@@ -22,7 +30,7 @@ pass=0; fail=0
 for name in $names; do
   listing="$OUT/$name.listing"
   log="$OUT/$name.log"
-  if ! CUDA_VISIBLE_DEVICES= EMMY_NVCC_FLAGS= ./venv/bin/emmy compile --golden "$name" --target sm_120 --no-readable -o "$listing" >"$log" 2>&1; then
+  if ! CUDA_VISIBLE_DEVICES= EMMY_NVCC_FLAGS= "$EMMY" compile --golden "$name" --target sm_120 --no-readable -o "$listing" >"$log" 2>&1; then
     echo "FAIL render  $name"; fail=$((fail+1)); continue
   fi
   # The rendered cuda stage is a listing with `=== N: kname ===` headers between

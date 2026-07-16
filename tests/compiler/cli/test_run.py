@@ -183,10 +183,13 @@ def test_build_torch_fns_resets_dynamo_before_compile(monkeypatch):
 @requires_cuda
 def test_run_golden_bench_shows_benched_golden_row(run_cli):
     """``run --golden NAME --bench`` compiles + benches the recorded golden (knobs
-    pinned) and prints it as a ``golden NAME``-labeled row in the kernel table."""
+    pinned) and prints it as a ``golden NAME``-labeled row in the kernel table, plus the
+    ``greedy (isolated)`` twin — the greedy graph re-benched through the pinned-row path,
+    the baseline the golden rows compare against."""
     rc, stdout, stderr = run_cli("run", "--golden", "matmul.square.512", "--bench")
     assert rc == 0, f"stderr: {stderr}"
     assert "golden matmul.square.512" in stdout, stdout
+    assert "greedy (isolated)" in stdout, stdout
 
 
 def test_run_ab_requires_bench(run_cli):
@@ -494,6 +497,36 @@ def test_bench_golden_variants_wrong_answer_gate_uses_worker_outputs(monkeypatch
     assert any("wrong-answer" in f for f in benches[1].flags)
 
 
+def test_bench_greedy_isolated_ok_and_bench_fail():
+    """The isolated greedy re-bench ships the ALREADY-compiled greedy graph through
+    ``bench_pinned_async`` — pinned-row timing semantics, no re-trace / recompile — so
+    pinned speedups get a comparable baseline (the interleaved greedy number is ~7% off
+    pinned-row semantics). A worker failure is kept as a ``bench_fail`` row and must not
+    raise (the pinned rows still bench after it)."""
+    from types import SimpleNamespace
+
+    from emmy.commands.run import _bench_greedy_isolated
+
+    compiled = object()
+    benched: list = []
+
+    async def ok_bench(g, *, warmup, num_iters):
+        benched.append(g)
+        return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]), None
+
+    gb = asyncio.run(_bench_greedy_isolated(SimpleNamespace(bench_pinned_async=ok_bench), compiled, warmup=1, iters=1))
+    assert benched == [compiled]  # the deployed graph itself rode the worker job
+    assert gb.status == "ok" and gb.bench is not None and gb.flags == []
+    assert gb.sample.name == "greedy (isolated)" and gb.sample.shape is None
+
+    async def hung_bench(g, *, warmup, num_iters):
+        raise RuntimeError("bench worker exceeded 100.0s wall budget — SIGKILL'd, stream cleaned")
+
+    gb = asyncio.run(_bench_greedy_isolated(SimpleNamespace(bench_pinned_async=hung_bench), compiled, warmup=1, iters=1))
+    assert gb.status == "bench_fail" and gb.bench is None
+    assert any("bench_fail" in f for f in gb.flags)
+
+
 @requires_cuda
 def test_run_golden_bench_json_record(run_cli, tmp_path):
     """``run --bench --golden NAME --json PATH`` writes the machine-readable A/B record:
@@ -507,6 +540,8 @@ def test_run_golden_bench_json_record(run_cli, tmp_path):
     rec = json.loads(out.read_text())
     assert rec["golden"] == "matmul.square.512"
     assert rec["greedy"]["kernels"] and rec["greedy"]["total_us"] > 0
+    # The pinned-comparable greedy baseline: the same graph re-benched emmy-only.
+    assert rec["greedy"]["isolated"]["status"] == "ok" and rec["greedy"]["isolated"]["total_us"] > 0
     assert rec["pinned"] and all(p["kind"] == "golden" for p in rec["pinned"])
     for p in rec["pinned"]:
         assert "flags" in p and p["total_us"] > 0 and p["pinned_knobs"]
@@ -1128,3 +1163,61 @@ def test_print_kernel_stats_greedy_bench_fail_row(capsys):
     outp = capsys.readouterr().out
     assert "bench_fail" in outp and "greedy bench failed: hung" in outp
     assert "k_greedy" in outp and "ab TILE=w4x2/f2x4" in outp
+
+
+def _iso_bench_fixtures():
+    """One-kernel greedy graph + interleaved bench (500 µs) + isolated re-bench (400 µs)
+    ``_GoldenBench`` — the ``greedy_iso`` display/json inputs."""
+    from types import SimpleNamespace
+
+    from emmy.commands.run import _GoldenBench
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.cuda.ir import CudaOp
+
+    greedy = Graph()
+    greedy.add_node(op=CudaOp(kernel_name="k_greedy", knobs={"TILE": "w2x1/f1x8"}), inputs=[], output=Tensor("o", (4,)), node_id="n0")
+    bench = SimpleNamespace(min_ms=0.5, time_ms=0.5, per_launch=[SimpleNamespace(idx=0, samples=[0.5], time_ms=0.5)], e2e_min_ms=None)
+    iso_bench = SimpleNamespace(min_ms=0.4, time_ms=0.4, per_launch=[SimpleNamespace(idx=0, samples=[0.4], time_ms=0.4)], e2e_min_ms=None)
+    iso_sample = SimpleNamespace(name="greedy (isolated)", knobs={}, shape=None, dynamic=None)
+    return greedy, bench, _GoldenBench(iso_sample, greedy, iso_bench, [])
+
+
+def test_print_kernel_stats_greedy_isolated_rows(capsys):
+    """With ``greedy_iso`` present, each greedy kernel row gets a ``greedy (isolated)``
+    twin with the emmy-only re-bench's per-launch timing (same graph — indexes align 1:1),
+    the pinned-comparable baseline. A failed iso re-bench prints as a ``!`` note only —
+    its rows would just duplicate the greedy geometry with ``--`` timings."""
+    from emmy.commands.run import _GoldenBench, _print_kernel_stats
+
+    greedy, bench, iso = _iso_bench_fixtures()
+    _print_kernel_stats(greedy, bench, golden_benches=[], greedy_iso=iso)
+    outp = capsys.readouterr().out
+    assert "greedy (isolated)" in outp and "400.0" in outp and "500.0" in outp
+
+    failed = _GoldenBench(iso.sample, greedy, None, ["bench_fail: hung"], "bench_fail")
+    _print_kernel_stats(greedy, bench, golden_benches=[], greedy_iso=failed)
+    outp = capsys.readouterr().out
+    assert "! greedy (isolated): bench_fail: hung" in outp
+    assert outp.count("greedy (isolated)") == 1  # the note, no `--` twin rows
+
+
+def test_write_ab_json_greedy_isolated_block(tmp_path):
+    """``greedy.isolated`` rides the ``--json`` record when pinned rows benched: the
+    emmy-only re-bench of the greedy graph, shaped like a pinned row (``status`` /
+    ``total_us`` / ``kernels`` / ``flags``) — the block pinned ``total_us`` compares
+    against, where the greedy block's own number is interleaved with torch (~7% apart)."""
+    import json
+    from types import SimpleNamespace
+
+    from emmy.commands.run import _write_ab_json
+
+    greedy, bench, iso = _iso_bench_fixtures()
+    args = SimpleNamespace(
+        json=str(tmp_path / "ab.json"), code="torch.matmul(a, b)", input=None, ir=None, golden=None, dynamic=None, warmup=1, iters=1
+    )
+    _write_ab_json(args, {}, greedy, bench, [], greedy_iso=iso)
+    rec = json.loads((tmp_path / "ab.json").read_text())
+    assert rec["greedy"]["total_us"] == 500.0
+    iso_rec = rec["greedy"]["isolated"]
+    assert iso_rec["status"] == "ok" and iso_rec["total_us"] == 400.0
+    assert iso_rec["kernels"][0]["us"] == 400.0 and iso_rec["flags"] == []

@@ -122,10 +122,11 @@ def register_run_command(subparsers):
         default=None,
         help=(
             "With --bench: also write the whole comparison as machine-readable JSON to PATH — the "
-            "backend table (eager / torch.compile / emmy), the per-kernel greedy rows, and every "
-            "--golden / --ab A/B row with its integrity flags (realized-vs-pinned knob check, "
-            "arithmetic-intensity floor, wrong-answer check). Retires ad-hoc table parsing in "
-            "the golden-sweep workflow."
+            "backend table (eager / torch.compile / emmy), the per-kernel greedy rows (plus, when "
+            "pinned rows benched, the ``greedy.isolated`` emmy-only re-bench — the pinned-comparable "
+            "greedy baseline), and every --golden / --ab A/B row with its integrity flags "
+            "(realized-vs-pinned knob check, arithmetic-intensity floor, wrong-answer check). "
+            "Retires ad-hoc table parsing in the golden-sweep workflow."
         ),
     )
     parser.add_argument("--dump-dir", default=None, help="Directory to dump intermediate compilation artifacts.")
@@ -275,7 +276,11 @@ def handle_run(args):
     # clean, the row records bench_fail, the next job respawns a fresh context), so no
     # ``os._exit`` and no per-row special-casing. The greedy job also carries the accuracy
     # check (in-child, on the rebuilt module's real inputs) and — when pinned rows exist —
-    # returns that run's (inputs, outputs) as their wrong-answer reference.
+    # returns that run's (inputs, outputs) as their wrong-answer reference. When pinned
+    # rows exist the greedy graph is ALSO re-benched emmy-only through the pinned-row path
+    # (``_bench_greedy_isolated``): the interleaved greedy number is torch-comparable but
+    # NOT pinned-comparable (the documented ~7% environment skew), so pinned speedups read
+    # against the isolated row.
     _resolve_backends(args.bench_backends)  # validate the spelling before spending a worker job
     pinned = list(getattr(args, "golden_configs", None) or []) + (_ab_samples(args.ab, dynamic=args.dynamic) if args.ab else [])
     trace_payload = {
@@ -287,7 +292,7 @@ def handle_run(args):
     }
 
     async def _bench_session():
-        greedy_fail = results = bench = accuracy_error = ab_ref = golden_benches = None
+        greedy_fail = results = bench = accuracy_error = ab_ref = golden_benches = greedy_iso = None
         captured = True
         try:
             try:
@@ -311,12 +316,13 @@ def handle_run(args):
             if pinned and accuracy_error is None:
                 if greedy_fail:
                     logger.error("%s — greedy row marked bench_fail; pinned rows still bench in the worker", greedy_fail)
+                greedy_iso = await _bench_greedy_isolated(backend, compiled, warmup=args.warmup, iters=args.iters)
                 golden_benches = await _bench_golden_variants(backend, args.code, pinned, warmup=args.warmup, iters=args.iters, ref=ab_ref)
         finally:
             await backend.aclose_async_worker()
-        return greedy_fail, results, bench, captured, accuracy_error, golden_benches
+        return greedy_fail, results, bench, captured, accuracy_error, golden_benches, greedy_iso
 
-    greedy_fail, results, bench, captured, accuracy_error, golden_benches = asyncio.run(_bench_session())
+    greedy_fail, results, bench, captured, accuracy_error, golden_benches, greedy_iso = asyncio.run(_bench_session())
 
     if accuracy_error is not None:
         # Correctness gate: the deployed program computes the wrong answer, so no latency
@@ -332,12 +338,16 @@ def handle_run(args):
         capture_note = None if captured else "(graph-capture fallback: timings include host launch overhead)"
         notes = [n for n in (_symbolic_bench_note(_collect_sym_env([compiled])), capture_note) if n]
         _print_table(results, note="\n".join(notes) if notes else None)
-    _print_kernel_stats(compiled, bench, golden_benches=golden_benches, greedy_fail=greedy_fail)
+    _print_kernel_stats(compiled, bench, golden_benches=golden_benches, greedy_fail=greedy_fail, greedy_iso=greedy_iso)
     if getattr(args, "json", None):
-        _write_ab_json(args, results or {}, compiled, bench, golden_benches, greedy_fail=greedy_fail)
+        _write_ab_json(args, results or {}, compiled, bench, golden_benches, greedy_fail=greedy_fail, greedy_iso=greedy_iso)
     if args.profile and greedy_fail is None:
         _run_ncu_profile(args, dump_dir=dump.dir if dump else None)
-    if greedy_fail is not None or any(gb.status != "ok" for gb in golden_benches or []):
+    if (
+        greedy_fail is not None
+        or (greedy_iso is not None and greedy_iso.status != "ok")
+        or any(gb.status != "ok" for gb in golden_benches or [])
+    ):
         sys.exit(1)  # every row is reported above; any failed row (greedy or pinned) exits non-zero
 
 
@@ -672,6 +682,29 @@ async def _bench_golden_variants(backend, code, golden_configs, *, warmup, iters
     return out
 
 
+async def _bench_greedy_isolated(backend, compiled, *, warmup, iters):
+    """Re-bench the greedy deploy's compiled graph emmy-only through the pinned-row worker
+    path (``bench_pinned_async``) — the pinned-comparable greedy baseline. The greedy
+    comparison row times emmy interleaved with the live torch closures (same warm clocks /
+    caches for the eager / torch.compile table — deliberate), which leaves torch allocator
+    state and cuBLAS L2 carveouts active while emmy is measured; a pinned row never runs
+    torch, so the same config reads ~7% apart between the two positions (worst on split-K
+    pairs, whose finalize re-reads the partials workspace). One number can't be both
+    torch-comparable and pinned-comparable, so the greedy config benches twice: this row is
+    the one pinned golden / ``--ab`` speedups read against. Reuses the already-compiled
+    greedy graph — one extra worker job, no recompile. Returns a ``_GoldenBench`` (status
+    ``ok`` / ``bench_fail``); a failure never blocks the pinned rows."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    sample = SimpleNamespace(name="greedy (isolated)", knobs={}, shape=None, dynamic=None)
+    try:
+        g_bench, _ = await backend.bench_pinned_async(compiled, warmup=warmup, num_iters=iters)
+    except Exception as exc:  # noqa: BLE001 — an iso-bench failure must not abort the pinned rows
+        logger.warning("greedy isolated re-bench failed (%s) — row kept as bench_fail; pinned rows still bench", exc)
+        return _GoldenBench(sample, compiled, None, [f"bench_fail: {exc}"], "bench_fail")
+    return _GoldenBench(sample, compiled, g_bench, [], "ok")
+
+
 def _launch_order_cuda_nodes(graph):
     """CudaOp nodes in the backend's launch order (``graph.topological_order()`` — the order
     ``bench.per_launch`` indexes). Graph dict order diverges from launch order after
@@ -682,7 +715,7 @@ def _launch_order_cuda_nodes(graph):
     return [graph.nodes[nid] for nid in graph.topological_order() if isinstance(graph.nodes[nid].op, CudaOp)]
 
 
-def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None):
+def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, greedy_iso=None):
     """Per-kernel breakdown. Pulls structural stats off each ``CudaOp``
     (block / grid / smem), per-launch timings from ``bench.per_launch``,
     and per-kernel hardware attributes from the compiled cupy RawKernels
@@ -698,6 +731,14 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None):
     cells are colored red where they differ from the greedy pick (like ``eval``).
     A pinned row that never benched (unmatched pin / bench_fail — ``gb.bench is None``)
     still prints its kernels with ``--`` timings so the failure is visible, never dropped.
+
+    ``greedy_iso`` (a ``_GoldenBench`` from :func:`_bench_greedy_isolated`, present when
+    pinned rows benched) is the greedy graph re-benched emmy-only through the pinned-row
+    path: each greedy kernel row gets a ``greedy (isolated)`` twin right beneath it (same
+    kernel, pinned-row timing semantics) — the number to compare golden / ``--ab`` rows
+    against; the greedy row's own µs is torch-comparable, not pinned-comparable (the
+    documented ~7% skew). A failed iso re-bench prints as a ``!`` note, its rows skipped
+    (they would duplicate the greedy geometry with ``--`` timings).
 
     ``bench=None`` + ``greedy_fail`` is the degraded mode: the greedy deploy itself failed
     (hung / blew the bench budget) in its worker child, so its rows print with ``--``
@@ -807,12 +848,21 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None):
                 (label, g_times.get(gidx) if gb.bench is None else g_times.get(gidx, 0.0), "--", _geom(gnode.op, g_attrs), gk, ref)
             )
 
+    # Per-launch times of the isolated greedy re-bench — same graph, so indexes align
+    # 1:1 with ``cuda_nodes`` and each greedy kernel row gets its iso twin beneath it.
+    iso_times = (
+        None
+        if greedy_iso is None or greedy_iso.bench is None
+        else {lt.idx: (min(lt.samples) if lt.samples else lt.time_ms) * 1000 for lt in (greedy_iso.bench.per_launch or [])}
+    )
     for idx, node in enumerate(cuda_nodes):
         op = node.op
         t_us = None if bench is None else times_by_idx.get(idx, 0.0)
         pct_cell = "--" if total_us is None else f"{((t_us / total_us * 100) if total_us > 0 else 0.0):.1f}%"
         gknobs = dict(tuning_knob_items(op.knobs or {}))
         records.append((op.kernel_name, t_us, pct_cell, _geom(op, attrs_by_kname), gknobs, None))
+        if iso_times is not None:
+            records.append(("greedy (isolated)", iso_times.get(idx, 0.0), "--", _geom(op, attrs_by_kname), gknobs, gknobs))
         for gb in _matching(op):
             _gb_rows(gb, gknobs)
     # Catch-all: pinned rows that matched no greedy kernel still print — the golden
@@ -854,12 +904,12 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None):
         print(line)
     if greedy_fail is not None:
         print(f"! greedy: bench_fail — {greedy_fail}")
-    for gb in golden_benches or []:
+    for gb in ([greedy_iso] if greedy_iso is not None else []) + list(golden_benches or []):
         for flag in gb.flags:
             print(f"! {gb.sample.name}: {flag}")
 
 
-def _write_ab_json(args, results: dict, graph, bench, golden_benches, greedy_fail=None) -> None:
+def _write_ab_json(args, results: dict, graph, bench, golden_benches, greedy_fail=None, greedy_iso=None) -> None:
     """``--json PATH``: the whole ``--bench`` comparison as one machine-readable record —
     the backend table (eager / torch.compile / emmy), the per-kernel greedy rows, and every
     ``--golden`` / ``--ab`` pinned row with its recorded reference latencies and integrity
@@ -874,7 +924,13 @@ def _write_ab_json(args, results: dict, graph, bench, golden_benches, greedy_fai
     unpinned-``REDUCE`` drift class). Failure states are fields, not absences: the greedy
     block carries ``status`` (``"bench_fail"`` + ``error`` when the deploy failed) and each
     pinned row its ``status`` (``ok`` / ``pin_unmatched`` / ``bench_fail``) with ``us`` /
-    ``total_us`` null where nothing was measured."""
+    ``total_us`` null where nothing was measured.
+
+    ``greedy_iso`` (present when pinned rows benched) lands as ``greedy.isolated`` —
+    the same graph re-benched emmy-only through the pinned-row path, shaped like a pinned
+    row (``status`` / ``total_us`` / ``kernels`` / ``flags``). Sweep tooling compares
+    pinned ``total_us`` against THIS block; the greedy block's own ``total_us`` is the
+    interleaved (torch-comparable) number, ~7% apart from pinned-row semantics."""
     import json as _json  # noqa: PLC0415
 
     from emmy import gpu  # noqa: PLC0415
@@ -922,6 +978,13 @@ def _write_ab_json(args, results: dict, graph, bench, golden_benches, greedy_fai
     greedy = {"status": "ok" if greedy_fail is None else "bench_fail", "total_us": _total_us(bench), "kernels": _kernel_rows(graph, bench)}
     if greedy_fail is not None:
         greedy["error"] = greedy_fail
+    if greedy_iso is not None:
+        greedy["isolated"] = {
+            "status": greedy_iso.status,
+            "total_us": _total_us(greedy_iso.bench),
+            "kernels": _kernel_rows(greedy_iso.graph, greedy_iso.bench),
+            "flags": list(greedy_iso.flags),
+        }
     payload = {
         "input": args.code or args.input or getattr(args, "ir", None),
         "golden": getattr(args, "golden", None),
@@ -1550,7 +1613,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         logger.warning("--ab ignored: %s IR is fully lowered (no forks left to pin)", stage)
 
     async def _bench_session():
-        greedy_fail = results = bench = accuracy_error = ab_benches = None
+        greedy_fail = results = bench = accuracy_error = ab_benches = greedy_iso = None
         torch_available = captured = False
         try:
             try:
@@ -1571,12 +1634,13 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
             if args.ab and tail:
                 if greedy_fail:
                     logger.error("%s — greedy row marked bench_fail; --ab rows still bench in the worker", greedy_fail)
+                greedy_iso = await _bench_greedy_isolated(backend, graph, warmup=args.warmup, iters=args.iters)
                 ab_benches = await _bench_ab_variants_ir(backend, path, tail, args.ab, warmup=args.warmup, iters=args.iters, db=db)
         finally:
             await backend.aclose_async_worker()
-        return greedy_fail, results, bench, torch_available, captured, accuracy_error, ab_benches
+        return greedy_fail, results, bench, torch_available, captured, accuracy_error, ab_benches, greedy_iso
 
-    greedy_fail, results, bench, torch_available, captured, accuracy_error, ab_benches = asyncio.run(_bench_session())
+    greedy_fail, results, bench, torch_available, captured, accuracy_error, ab_benches, greedy_iso = asyncio.run(_bench_session())
 
     if accuracy_error is not None:
         # Non-fatal here (random boundary inputs) — the child's own log is invisible, relay it.
@@ -1593,12 +1657,16 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         print()
         for line in render_table([Col("Backend"), Col("Latency (us)", "r")], [["Emmy", f"{bench.time_ms * 1000:.0f}"]], rule=True):
             print(line)
-    _print_kernel_stats(graph, bench, golden_benches=ab_benches, greedy_fail=greedy_fail)
+    _print_kernel_stats(graph, bench, golden_benches=ab_benches, greedy_fail=greedy_fail, greedy_iso=greedy_iso)
     if getattr(args, "json", None):
-        _write_ab_json(args, results or {}, graph, bench, ab_benches, greedy_fail=greedy_fail)
+        _write_ab_json(args, results or {}, graph, bench, ab_benches, greedy_fail=greedy_fail, greedy_iso=greedy_iso)
     if args.profile and greedy_fail is None:
         _run_ncu_profile(args, dump_dir=dump.dir if dump else None)
-    if greedy_fail is not None or any(gb.status != "ok" for gb in ab_benches or []):
+    if (
+        greedy_fail is not None
+        or (greedy_iso is not None and greedy_iso.status != "ok")
+        or any(gb.status != "ok" for gb in ab_benches or [])
+    ):
         sys.exit(1)  # every row is reported above; any failed row (greedy or --ab) exits non-zero
 
 

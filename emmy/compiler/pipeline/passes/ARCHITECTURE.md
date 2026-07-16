@@ -61,7 +61,11 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   budget is part of resolving: a tile whose single depth-1 slot already exceeds it declines to gmem-direct (the warp
   slab is codec-sized and cannot shrink; the scalar resolver steps `bk_elems` / depth down first), so every offered
   stage row materializes within budget — a resolved-but-unfittable row would only die at `validate(ctx)`, leaving an
-  un-lowered `TileOp` in the tune's terminal (issue #327). One staging fact
+  un-lowered `TileOp` in the tune's terminal (issue #327). TMA's box rank follows the flash convention on the matmul
+  tiers too: the box's data plane is the operand's trailing 2 gmem dims, and extra LEADING dims ride as extent-1 box
+  dims whose origin coordinates are the operand's own index exprs — eligible when those exprs don't move with the
+  tile or the K loop (`_tma_operand_rank_ok`), so a model's `[1, seq, K]` unit-batch view stages exactly like the
+  rank-2 snippet twin (the gemma in-model matmuls' TMA lockout). One staging fact
   is derived at materialization rather than resolved here because it is layout, not eligibility: a slab feeding an
   mma drain is **swizzled** (`_stage.pick_swizzle_atom` picks B32/B64/B128 per operand from the slab's inner row span;
   TMA permutes the 16 B chunks in hardware during the box copy, a cp.async fill applies the identical XOR in software
@@ -180,7 +184,16 @@ drain's tail masks (the same clamp the gmem-direct symbolic path makes) zero tho
 masked-flash `.dynM` kernel stages at bit-identity to gmem-direct on any sm (the `staged_kloop` ring allocates the
 full depth and the last-chunk clamp / loop bound ride the symbolic `Dim`; WSPEC over a symbolic kv is not built). A resolved TMA row additionally offers the `WSPEC` producer-band splits (the matmul tier's
 legality, `32·aux ≤ 32·um`; measured occupancy-negative at flash's CTA scale — offered, honest, not the default). The
-chain / coop / serial escapes stamp the decided-empty `STAGE@<kv>: ""`. **A causal stream tile-skips**: when the score
+chain / coop / serial escapes stamp the decided-empty `STAGE@<kv>: ""`. Staging additionally requires the K/V (and,
+for `alt`'s staged Q, the A) BUFFER dtypes to match the atom's operand dtypes — the slab fills byte-copy and cannot
+convert, so a wide traced intermediate feeding the stream would deposit garbage; gmem-direct fragment loads convert
+per element and keep the warp tier either way. To keep that gate from silently disabling staging on real models,
+traced dtype CASTS are first-class: a dtype-changing view splits into a source-shaped elementwise `copy` + a pure
+map at the frontend (`optimization/005_split_cast_from_indexmap`), and loop fusion's plumbing exemption admits only
+dtype-PRESERVING copies (`merge_loop_ops._is_castfree_indexmap`), so the cast stays a materialized buffer at flash
+offer sites (usually free — a fan-out-1 pointwise producer fuses into it and simply writes the narrow dtype) and the
+stream sees an atom-dtype operand it can stage (the gemma V-norm's f32 `mul` → f16 SDPA edge, the layer-0 findings'
+biggest lockout). **A causal stream tile-skips**: when the score
 prologue carries the triangular `Select` (`kv ≤ m` — detected structurally off the predicate, never a kernel identity),
 the realizer bounds the stream at the CTA's last query row (`kv_end = min(seq, (grid_m + 1) · um·fm·atom_m)`, hoisted
 into the `StridedLoop`'s for-init `end` override; the staged prefetch clamp re-pins onto the last needed chunk). The

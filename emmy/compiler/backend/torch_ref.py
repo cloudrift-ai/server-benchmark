@@ -164,13 +164,24 @@ def _eval(node, ins: list, sym_env: dict[str, int] | None = None):
     if name == "SdpaOp":
         q, k, v = ins[0], ins[1], ins[2]
         gqa = q.dim() >= 3 and q.shape[-3] != k.shape[-3]
+        kwargs = {"is_causal": op.is_causal}
+        if op.sliding_window is not None:
+            # F.sdpa has no window arg — build the banded (∧ causal) additive mask;
+            # attn_mask and is_causal are mutually exclusive in torch.
+            s_q, s_k = q.shape[-2], k.shape[-2]
+            keep = torch.ones((s_q, s_k), dtype=torch.bool, device=q.device)
+            if op.is_causal:
+                keep = keep.tril_(0)
+            keep &= torch.ones((s_q, s_k), dtype=torch.bool, device=q.device).triu_(-(op.sliding_window - 1))
+            bias = torch.zeros((s_q, s_k), dtype=q.dtype, device=q.device).masked_fill_(~keep, float("-inf"))
+            kwargs = {"attn_mask": bias}
         try:
-            return F.scaled_dot_product_attention(q, k, v, is_causal=op.is_causal, enable_gqa=gqa)
+            return F.scaled_dot_product_attention(q, k, v, enable_gqa=gqa, **kwargs)
         except TypeError:  # older torch without enable_gqa
             if gqa:
                 rep = q.shape[-3] // k.shape[-3]
                 k, v = k.repeat_interleave(rep, dim=-3), v.repeat_interleave(rep, dim=-3)
-            return F.scaled_dot_product_attention(q, k, v, is_causal=op.is_causal)
+            return F.scaled_dot_product_attention(q, k, v, **kwargs)
     if name == "MeanOp":
         return ins[0].mean(dim=op.axis, keepdim=True)
     if name == "RmsNormOp":

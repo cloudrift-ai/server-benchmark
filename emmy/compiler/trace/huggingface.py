@@ -339,6 +339,39 @@ def build_attention_split_wrapper(block):
     return Pre(), Post()
 
 
+def stamp_sliding_windows(graph, config, *, layer_type: str | None = None) -> None:
+    """Stamp per-layer sliding windows onto the traced ``SdpaOp`` nodes of ``graph``.
+
+    The trace erases the window: a single-layer trace carries no mask at all (HF takes the
+    ``is_causal`` path), and a whole-model trace materializes the banded mask as an opaque
+    additive tensor. The wrapper builder KNOWS the semantics — ``config.sliding_window`` +
+    ``layer_types`` — so it re-asserts them here as op metadata: a stamped SDPA's mask keeps at
+    most the causal band ``kv ∈ [m − W + 1, m]`` (an explicit mask operand may keep less, e.g.
+    padding), which is what lets the lowering skip key blocks wholly outside it.
+
+    ``layer_type`` names a single-layer trace's attention type; ``None`` walks the whole model's
+    SDPA nodes in execution order against ``config.layer_types`` (one SDPA per decoder layer —
+    a count mismatch stamps nothing)."""
+    from emmy.compiler.ir.frontend.ir import SdpaOp
+
+    window = getattr(config, "sliding_window", None)
+    layer_types = getattr(config, "layer_types", None)
+    if not window:
+        return
+    sdpa_nodes = [n for n in graph.nodes.values() if isinstance(n.op, SdpaOp)]
+    if layer_type is not None:
+        types = [layer_type] * len(sdpa_nodes)
+    elif layer_types is not None and len(sdpa_nodes) == len(layer_types):
+        types = list(layer_types)
+    else:
+        return
+    for node, lt in zip(sdpa_nodes, types, strict=True):
+        if lt == "sliding_attention":
+            node.op.sliding_window = window
+            node.op.is_causal = True  # the wrapper's mask is causal; asserting it structurally
+            # lets the lowering derive the stream END alongside the band's stream START.
+
+
 def build_causal_mask(seq_len: int, dtype) -> torch.Tensor:  # noqa: F821
     """Return the ``(1, 1, seq_len, seq_len)`` causal mask the wrapper
     uses internally — exposed so callers in dynamic mode can construct a

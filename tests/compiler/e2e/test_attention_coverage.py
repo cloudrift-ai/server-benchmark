@@ -1103,6 +1103,169 @@ def test_warp_flash_split_kv_symbolic_matches_torch(monkeypatch, variant, reduce
     assert max_diff < 5e-3, f"symbolic split-KV flash ({variant}/{reduce}, seq={seq}) max_diff={max_diff:.2e}"
 
 
+# =========================================================================== #
+# Sliding-window banded flash (the trace-time SdpaOp.sliding_window stamp).
+# =========================================================================== #
+
+
+def _stamp_window(module, args, window, dynamic_shapes=None):
+    """Trace ``module``, stamp ``sliding_window`` on its SdpaOp (the HF-wrapper stamp path —
+    ``F.scaled_dot_product_attention`` has no window arg to trace it from), then compile."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
+    from emmy.compiler.ir.frontend.ir import SdpaOp  # noqa: PLC0415
+    from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
+
+    graph = trace_module(module.cpu(), args, dynamic_shapes=dynamic_shapes)
+    for n in graph.nodes.values():
+        if isinstance(n.op, SdpaOp):
+            n.op.sliding_window = window
+            n.op.is_causal = True
+    backend = CudaBackend()
+    compiled = backend.compile(graph)
+    kernels = [nid for nid in compiled.nodes if getattr(compiled.nodes[nid].op, "kernel_source", None)]
+    return backend, compiled, graph, kernels
+
+
+def _banded_ref(q, k, v, window, extra_bias=None):
+    """torch SDPA under the causal ∧ band(W) additive mask (F.sdpa has no window arg)."""
+    s_q, s_k = q.shape[-2], k.shape[-2]
+    keep = torch.ones(s_q, s_k, dtype=torch.bool).tril(0) & torch.ones(s_q, s_k, dtype=torch.bool).triu(-(window - 1))
+    bias = torch.zeros(s_q, s_k, dtype=q.dtype).masked_fill_(~keep, float("-inf"))
+    if extra_bias is not None:
+        bias = bias + extra_bias
+
+    def ref():
+        with torch.no_grad():
+            out = F.scaled_dot_product_attention(q.cuda(), k.cuda(), v.cuda(), attn_mask=bias.cuda())
+            return out.cpu().flatten().float().numpy()
+
+    return ref
+
+
+@requires_cuda
+@pytest.mark.parametrize("stage", [None, "d2/cp/ring", "d1/cp/alt"])
+@pytest.mark.parametrize(("S", "W"), [(256, 64), (256, 100)])
+def test_warp_flash_banded_matches_torch(monkeypatch, stage, S, W):
+    """The sliding-window banded warp flash: a stamped ``SdpaOp.sliding_window`` decomposes to a
+    second coordinate ``Select`` (keep ``kv > m − W``) beside the causal one; the fused kernel
+    carries BOTH FragmentMasks and both stream bounds (the causal end, the banded start). One
+    fused kernel, torch-banded-reference accuracy, on the unstaged and both staged pipelines —
+    a non-block-aligned W (100) exercises the boundary tiles' band mask."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    if stage is not None:
+        monkeypatch.setenv("EMMY_STAGE", stage)
+    torch.manual_seed(S + W)
+    q, k, v = (torch.randn(1, 4, S, 64, dtype=torch.float16) for _ in range(3))
+    backend, compiled, graph, kernels = _stamp_window(_Causal(), (q, k, v), W)
+    assert len(kernels) == 1, f"banded flash should stay one fused kernel, got {len(kernels)}"
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "emmy_c_to_a" in src, "must be the fused warp-chain"
+    assert "kv0_end" in src, "the causal stream end must survive the band stamp"
+    assert f"- {W - 1}" in src, "the banded stream start must derive from the stamp"
+
+    data = {n: t for n, t in zip(graph.inputs, (q.numpy(), k.numpy(), v.numpy()), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=_banded_ref(q, k, v, W))
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    max_diff = float(np.max(np.abs(got - eager)))
+    assert max_diff < 5e-3, f"banded flash (stage={stage}, S={S}, W={W}) max_diff={max_diff:.2e}"
+
+
+@requires_cuda
+def test_warp_flash_banded_tile_skip_structure(monkeypatch):
+    """The banded start is DERIVED from the band Select's predicate shape, never from a kernel
+    identity: the stamped kernel starts its stream at ``⌊max(0, first_row − W + 1)/bn⌋·bn`` and
+    keeps the causal ``kv0_end``; the un-stamped twin has neither band mask nor late start."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(1, 4, 256, 64, dtype=torch.float16) for _ in range(3))
+    _backend, compiled, _graph, kernels = _stamp_window(_Causal(), (q, k, v), 64)
+    assert len(kernels) == 1
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "kv0_end" in src and "- 63" in src, "stamped: causal end AND banded start"
+
+    _backend, compiled, _graph, kernels = _trace(_Causal(), (q, k, v))
+    assert len(kernels) == 1
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "kv0_end" in src and "- 63" not in src, "un-stamped: causal end only, full-stream start"
+
+
+@requires_cuda
+@pytest.mark.parametrize("seq", [40, 300, 512])
+def test_warp_flash_banded_symbolic_matches_torch(monkeypatch, seq):
+    """SYMBOLIC banded flash: the banded start is grid-derived (CTA row × W), independent of the
+    runtime seq_len, so one cached kernel serves every size; the band FragmentMask composes with
+    the symbolic tail clamp-masks."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    B, H, D, W = 1, 4, 64, 64
+    sd = torch.export.Dim("seq_len", min=4, max=4096)
+    seed = tuple(torch.randn(B, H, 16, D, dtype=torch.float16) for _ in range(3))
+    backend, compiled, graph, kernels = _stamp_window(_Causal(), seed, W, dynamic_shapes={"q": {2: sd}, "k": {2: sd}, "v": {2: sd}})
+    assert len(kernels) == 1, f"symbolic banded flash should stay one fused kernel, got {len(kernels)}"
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "emmy_c_to_a" in src and "int seq_len" in src
+
+    torch.manual_seed(seq)
+    q, k, v = (torch.randn(B, H, seq, D, dtype=torch.float16) for _ in range(3))
+    data = {n: t for n, t in zip(graph.inputs, (q.numpy(), k.numpy(), v.numpy()), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=_banded_ref(q, k, v, W))
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    max_diff = float(np.max(np.abs(got - eager)))
+    assert max_diff < 5e-3, f"symbolic banded flash (seq={seq}) max_diff={max_diff:.2e}"
+
+
+@requires_cuda
+def test_warp_flash_banded_split_kv_matches_torch(monkeypatch):
+    """Banded flash × split-KV (``REDUCE=g2k``): each slice's banded start is slice-local (the
+    base subtracted) — a slice wholly below the band runs zero steps and contributes the exact
+    carrier identity, mirroring the causal above-the-diagonal case."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    torch.manual_seed(7)
+    W = 64
+    q, k, v = (torch.randn(1, 4, 256, 64, dtype=torch.float16) for _ in range(3))
+    backend, compiled, graph, kernels = _stamp_window(_Causal(), (q, k, v), W)
+    assert len(kernels) == 2, f"split-KV banded flash should be partial + finalize, got {len(kernels)}"
+    partial = next(n for n in kernels if n.endswith("__partial"))
+    assert "emmy_c_to_a" in compiled.nodes[partial].op.kernel_source
+
+    data = {n: t for n, t in zip(graph.inputs, (q.numpy(), k.numpy(), v.numpy()), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=_banded_ref(q, k, v, W))
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    max_diff = float(np.max(np.abs(got - eager)))
+    assert max_diff < 5e-3, f"split-KV banded flash max_diff={max_diff:.2e}"
+
+
+@requires_cuda
+def test_warp_flash_banded_with_additive_bias_matches_torch(monkeypatch):
+    """The whole-model shape: an explicit additive mask operand PLUS the stamp. The bias stays
+    loaded (it may mask more than the band — padding), the coord Selects ride beside it and
+    drive both stream bounds; the fused kernel carries FragmentBiasAdd AND both FragmentMasks.
+    The bias here masks an extra key block the band alone would keep — the result must honor it."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    torch.manual_seed(3)
+    S, W = 256, 64
+    q, k, v = (torch.randn(1, 4, S, 64, dtype=torch.float16) for _ in range(3))
+    extra = torch.zeros(S, S, dtype=torch.float16)
+    extra[:, 7] = float("-inf")  # a "padding" column inside the band
+    keep = torch.ones(S, S, dtype=torch.bool).tril(0) & torch.ones(S, S, dtype=torch.bool).triu(-(W - 1))
+    mask = (torch.zeros(S, S, dtype=torch.float16).masked_fill_(~keep, float("-inf")) + extra)[None, None]
+    backend, compiled, graph, kernels = _stamp_window(_Masked(), (q, k, v, mask), W)
+    assert len(kernels) == 1, f"stamped biased flash should stay one fused kernel, got {len(kernels)}"
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "kv0_end" in src and f"- {W - 1}" in src, "the stamp must drive both bounds beside the bias"
+
+    def ref():
+        with torch.no_grad():
+            out = F.scaled_dot_product_attention(q.cuda(), k.cuda(), v.cuda(), attn_mask=mask.cuda())
+            return out.cpu().flatten().float().numpy()
+
+    feed = {n: t for n, t in zip(graph.inputs, (q.numpy(), k.numpy(), v.numpy(), mask.numpy()), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=feed, pre_run=ref)
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    max_diff = float(np.max(np.abs(got - eager)))
+    assert max_diff < 5e-3, f"stamped biased flash max_diff={max_diff:.2e}"
+
+
 @requires_cuda
 @pytest.mark.parametrize("seq", [8, 16, 37, 64])
 def test_warp_chain_dynamic_matches_torch(monkeypatch, seq):

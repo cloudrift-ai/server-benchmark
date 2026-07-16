@@ -213,6 +213,7 @@ def build_flash_frag(
     out: Tensor,
     *,
     causal: bool,
+    window: int | None = None,
     group: int = 1,
     mask: tuple[str, tuple] | None = None,
     layouts: tuple = (None, None, None),
@@ -267,6 +268,7 @@ def build_flash_frag(
         head_dim,
         d_v,
         causal=causal,
+        window=window,
         group=group,
         mask_buf=mask_buf,
         mask_shape=mask_shape,
@@ -299,8 +301,8 @@ def build_flash_frag(
     if mask_buf is not None:
         frag.add_node(op=InputOp(), inputs=[], output=Tensor(mask_buf, mask_shape, out.dtype), node_id=mask_buf)
         inputs.append(mask_buf)
-    if causal:
-        # -inf bias for masked (key-after-query) positions: exp(-inf)=0, so a
+    if causal or window is not None:
+        # -inf bias for masked (key-after-query / outside-the-band) positions: exp(-inf)=0, so a
         # masked score contributes nothing to the streaming softmax / output.
         frag.add_node(
             op=ConstantOp(name="_flash_ninf", value=-1e30), inputs=[], output=Tensor("_flash_ninf", (1,), out.dtype), node_id="_flash_ninf"
@@ -365,6 +367,7 @@ def _flash_op(
     d_v: int,
     *,
     causal: bool = False,
+    window: int | None = None,
     group: int = 1,
     mask_buf: str | None = None,
     mask_shape: tuple | None = None,
@@ -411,27 +414,41 @@ def _flash_op(
         Load(name="scale_c", input="_flash_scale", index=()),
         Assign(name="s", op="multiply", args=("sacc", "scale_c")),
     ]
-    if causal:
-        # Causal mask: keep the score where key ≤ query (kv ≤ m), else −inf.
-        score_post += [
-            Load(name="ninf_c", input="_flash_ninf", index=()),
-            Select(
-                name="s_masked",
-                branches=(
-                    SelectBranch(value="s", select=BinaryExpr("<=", Var("kv"), Var("m"))),
-                    SelectBranch(value="ninf_c", select=Literal(1, "int")),
-                ),
-            ),
-        ]
-        score_name = "s_masked"
-    elif mask_buf is not None:
+    score_name = "s"
+    if mask_buf is not None:
         # Additive bias: leading dims broadcast (indexed to 0), trailing two are the
         # query row m and the streaming key kv.
         mask_idx = (*(Literal(0, "int") for _ in mask_shape[:-2]), Var("m"), Var("kv"))
-        score_post += [Load(name="mask_e", input=mask_buf, index=mask_idx), Assign(name="s_masked", op="add", args=("s", "mask_e"))]
+        score_post += [Load(name="mask_e", input=mask_buf, index=mask_idx), Assign(name="s_masked", op="add", args=(score_name, "mask_e"))]
         score_name = "s_masked"
-    else:
-        score_name = "s"
+    if causal or window is not None:
+        score_post.append(Load(name="ninf_c", input="_flash_ninf", index=()))
+    if causal:
+        # Causal mask: keep the score where key ≤ query (kv ≤ m), else −inf. Coexists with an
+        # explicit bias on a stamped SDPA (bit-neutral there — the bias already masks the region).
+        score_post.append(
+            Select(
+                name="s_causal",
+                branches=(
+                    SelectBranch(value=score_name, select=BinaryExpr("<=", Var("kv"), Var("m"))),
+                    SelectBranch(value="ninf_c", select=Literal(1, "int")),
+                ),
+            )
+        )
+        score_name = "s_causal"
+    if window is not None:
+        # Sliding-window band: keep the score where kv > m − W, else −inf. The stream start
+        # derives from this predicate (the band analogue of the causal stream end).
+        score_post.append(
+            Select(
+                name="s_banded",
+                branches=(
+                    SelectBranch(value=score_name, select=BinaryExpr(">", Var("kv"), BinaryExpr("-", Var("m"), Literal(window, "int")))),
+                    SelectBranch(value="ninf_c", select=Literal(1, "int")),
+                ),
+            )
+        )
+        score_name = "s_banded"
     # The (m,l,O) streaming fold over kv, as a ``TWISTED`` :class:`Reduction` node: its per-step
     # ``partial`` is the scale / mask binding ``score_name``, then the carrier's dissolved streaming
     # ``merge`` with the **PV split out as a real contraction**. ``flash_combine`` supplies the state +
@@ -616,33 +633,72 @@ def _is_loopop(graph: Graph, buf: str) -> bool:
     return node is not None and isinstance(node.op, LoopOp)
 
 
-def _classify_rowmax(graph: Graph, lp: Loop) -> tuple[str, str, str | None] | None:
-    """For the rowmax reduce loop, return ``(score_buf, mask_kind, mask_buf)`` where
-    ``mask_kind`` is ``"none"`` / ``"causal"`` / ``"additive"``; else None. The value
-    folded by the ``maximum`` Accum is the bare score Load (no mask) or
-    ``add(score, mask)`` — the mask a coord ``Select`` (causal) or a buffer ``Load``."""
-    max_accs = [s for s in lp.body if isinstance(s, Accum) and _is_rowmax(s)]
-    if len(max_accs) != 1:
+def _coord_select_kind(mdef: Select, kv: str) -> tuple[bool, int | None] | None:
+    """Classify a mask-value ``Select`` (keep-branch first, as the decomposition emits) by its
+    keep predicate over the streaming key var ``kv``: ``kv ≤ m`` → causal ``(True, None)``;
+    ``kv > m − W`` → sliding-window band ``(False, W)``. ``None`` for any other predicate —
+    an unrecognized Select declines the fuse rather than silently classifying causal."""
+    keep = mdef.branches[0].select
+    if not (isinstance(keep, BinaryExpr) and isinstance(keep.left, Var) and keep.left.name == kv):
         return None
-    feed = _def(lp.body, max_accs[0].value)
-    if isinstance(feed, Load):
-        return feed.input, "none", None
-    if isinstance(feed, Assign) and feed.op.name == "add":
-        a, b = feed.args
-        for sc, mk in ((a, b), (b, a)):
-            sdef, mdef = _def(lp.body, sc), _def(lp.body, mk)
-            if isinstance(sdef, Load) and _is_loopop(graph, sdef.input):
-                if isinstance(mdef, Select):
-                    return sdef.input, "causal", None
-                if isinstance(mdef, Load):
-                    return sdef.input, "additive", mdef.input
+    if keep.op == "<=" and isinstance(keep.right, Var):
+        return (True, None)
+    if (
+        keep.op == ">"
+        and isinstance(keep.right, BinaryExpr)
+        and keep.right.op == "-"
+        and isinstance(keep.right.left, Var)
+        and isinstance(keep.right.right, Literal)
+    ):
+        return (False, int(keep.right.right.value))
     return None
 
 
-def _recognize(graph: Graph, node: Node) -> tuple[str, str, str, str | None] | None:
-    """If ``node`` is a softmax-then-P@V kernel, return ``(x_buf, v_buf, mask_kind,
+def _classify_rowmax(graph: Graph, lp: Loop) -> tuple[str, bool, int | None, str | None] | None:
+    """For the rowmax reduce loop, return ``(score_buf, causal, window, mask_buf)``; else None.
+    The value folded by the ``maximum`` Accum is the bare score Load or a CHAIN of ``add``\\ s on
+    it — each add's other operand a mask: a coord ``Select`` (the causal keep ``kv ≤ m`` or the
+    sliding-window band keep ``kv > m − W``) or a buffer ``Load`` (the explicit additive bias).
+    A stamped SDPA carries coord masks alongside the bias; more than one bias declines."""
+    max_accs = [s for s in lp.body if isinstance(s, Accum) and _is_rowmax(s)]
+    if len(max_accs) != 1:
+        return None
+    causal, window, mask_buf = False, None, None
+    cur = _def(lp.body, max_accs[0].value)
+    while isinstance(cur, Assign) and cur.op.name == "add" and len(cur.args) == 2:
+        a, b = cur.args
+        adef, bdef = _def(lp.body, a), _def(lp.body, b)
+        # The mask side is the Select / non-score Load; the other side continues the chain.
+        nxt = None
+        for sdef, mdef in ((adef, bdef), (bdef, adef)):
+            if isinstance(mdef, Select):
+                kind = _coord_select_kind(mdef, lp.axis.name)
+                if kind is None:
+                    return None
+                if kind[0]:
+                    causal = True
+                else:
+                    window = kind[1]
+                nxt = sdef
+                break
+            if isinstance(mdef, Load) and not _is_loopop(graph, mdef.input):
+                if mask_buf is not None:
+                    return None
+                mask_buf = mdef.input
+                nxt = sdef
+                break
+        if nxt is None:
+            return None
+        cur = nxt
+    if isinstance(cur, Load) and _is_loopop(graph, cur.input):
+        return cur.input, causal, window, mask_buf
+    return None
+
+
+def _recognize(graph: Graph, node: Node) -> tuple[str, str, bool, int | None, str | None] | None:
+    """If ``node`` is a softmax-then-P@V kernel, return ``(x_buf, v_buf, causal, window,
     mask_buf)`` — the score buffer the rowmax reduces, the P@V's V operand, and the
-    softmax-side mask (if any). Q/K recovery is left to the caller."""
+    softmax-side masks (if any). Q/K recovery is left to the caller."""
     op = node.op
     if not isinstance(op, LoopOp):
         return None
@@ -654,12 +710,12 @@ def _recognize(graph: Graph, node: Node) -> tuple[str, str, str, str | None] | N
         return None
     out_write = writes[0]
     x_buf: str | None = None
-    mask_kind = "none"
+    causal, window = False, None
     mask_buf: str | None = None
     for lp in _accum_loops(op):
         cls = _classify_rowmax(graph, lp)
         if cls is not None:
-            x_buf, mask_kind, mask_buf = cls
+            x_buf, causal, window, mask_buf = cls
             break
     if x_buf is None:
         return None
@@ -672,7 +728,7 @@ def _recognize(graph: Graph, node: Node) -> tuple[str, str, str, str | None] | N
             v_buf = next(iter(others))
     if v_buf is None:
         return None
-    return x_buf, v_buf, mask_kind, mask_buf
+    return x_buf, v_buf, causal, window, mask_buf
 
 
 def is_fold_offer_site(graph: Graph, root: Node) -> bool:
@@ -724,7 +780,7 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
     found = _recognize(graph, root)
     if found is None:
         return None
-    x_buf, v_id, mask_kind, mask_buf = found
+    x_buf, v_id, causal, window, mask_buf = found
     operands = (x_buf, v_id, *((mask_buf,) if mask_buf is not None else ()))
     if any(nid not in graph.nodes for nid in operands):
         return None
@@ -735,6 +791,13 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
     qk = _extract_qk(graph.nodes[x_buf])
     if qk is None:
         _fuse_degraded(root, "score producer's Q/K are not plain loads (e.g. RoPE'd QK)")
+        return None
+    # A mask stranded on the score producer (a coord Select / an additive bias add) would be
+    # silently DROPPED by the canonical re-synthesis below — the fused kernel would attend
+    # outside the mask. The fusion boundary keeps masks on the consumer (010_merge_loop_ops);
+    # if one lands here anyway, decline the fuse rather than mis-attend.
+    if any(isinstance(s, Select) or (isinstance(s, Assign) and s.op.name == "add") for s in graph.nodes[x_buf].op.body.iter()):
+        _fuse_degraded(root, "score producer carries mask stmts the flash re-synthesis cannot keep")
         return None
     (q_id, q_layout), (k_id, k_layout), _head_dim = qk
     if q_id not in graph.nodes or k_id not in graph.nodes:
@@ -757,7 +820,7 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
     if not flash_shape_eligible(q_shape, k_shape, v_shape, group=group, mask_shape=mask_shape):
         _fuse_degraded(root, "shape not flash-eligible")
         return None
-    mask = (mask_buf, mask_shape) if mask_kind == "additive" else None
+    mask = (mask_buf, mask_shape) if mask_buf is not None else None
     # The root's own output ``Write`` index — the store's target layout (buffer rank, a fused output
     # transpose, size-1 broadcast dims). The fragment reproduces it (``_out_store_index``) instead of
     # a bare grid-order write, which would mis-stride a transposed / higher-rank output → NaN.
@@ -771,7 +834,8 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
         k_shape,
         v_shape,
         root.output,
-        causal=(mask_kind == "causal"),
+        causal=causal,
+        window=window,
         group=group,
         mask=mask,
         layouts=(q_layout, k_layout, v_layout),

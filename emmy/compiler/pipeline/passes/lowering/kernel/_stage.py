@@ -832,6 +832,7 @@ def pipelined_kloop(
     k_extent: int | Dim,
     k0: str = "_ks",
     k_end: Expr | None = None,
+    k_first: Expr | None = None,
 ) -> tuple[list[Stmt], list[Stmt]]:
     """The **one** liveness-scheduled staged K-loop skeleton — every staged form (the matmul tier's
     paired prefetch ring, the warp-flash stream's alternating single-slab pipeline, the degenerate
@@ -867,11 +868,16 @@ def pipelined_kloop(
 
     ``k_end`` (CTA-uniform, ``≤ k_extent``) stops the chunk loop early — the causal flash stream's
     triangular kv bound; the clamp re-pins onto the last NEEDED chunk via the loop's hoisted
-    ``<k0>_end`` for-init bound. A symbolic ``k_extent`` (a ``Dim``) allocates the full ``depth``
-    ring and clamps every fill — ring prefetch and kill-point refill alike — against the runtime
-    chunk count. Returns ``(slab_decls, [prologue…, outer_loop])``."""
+    ``<k0>_end`` for-init bound. ``k_first`` (CTA-uniform, ``bk_elems``-aligned) STARTS it late —
+    the banded flash stream's sliding-window bound: the loop var stays absolute (drains index gmem
+    by it), the slot / phase arithmetic rebases onto ``k0 − k_first``, and the prologue primes from
+    ``k_first`` (each prime clamped onto the last needed chunk — a narrow band near the stream end
+    could otherwise prime past a static extent). A symbolic ``k_extent`` (a ``Dim``) allocates the
+    full ``depth`` ring and clamps every fill — ring prefetch and kill-point refill alike — against
+    the runtime chunk count. Returns ``(slab_decls, [prologue…, outer_loop])``."""
     symbolic = isinstance(k_extent, Dim)
-    i_expr = BinaryExpr("/", Var(k0), _lit(bk_elems))  # chunk index of the current step
+    k_pos: Expr = BinaryExpr("-", Var(k0), k_first) if k_first is not None else Var(k0)
+    i_expr = BinaryExpr("/", k_pos, _lit(bk_elems))  # chunk index of the current step (stream-relative)
 
     groups: list[_Group] = []
     for transport, depth in operands:
@@ -914,6 +920,19 @@ def pipelined_kloop(
             bound = _lit(k_extent)
         return TernaryExpr(cond=BinaryExpr("<", k0_next, bound), if_true=k0_next, if_false=last_k0)
 
+    def _prime_k0(c: int) -> Expr:
+        """The prologue prime's chunk base — ``k_first + c·bk`` (plain ``c·bk`` for a zero-start
+        stream, today's unclamped shape). A late-starting stream clamps each prime onto the last
+        needed chunk with the RAW bound exprs (the loop's hoisted ``<k0>_end`` is not in scope in
+        the prologue): a band narrower than ``lag`` chunks would otherwise prime past a static
+        extent's gmem."""
+        if k_first is None:
+            return _lit(c * bk_elems)
+        base = BinaryExpr("+", k_first, _lit(c * bk_elems))
+        end: Expr = k_end if k_end is not None else (k_extent.expr if symbolic else _lit(k_extent))
+        last_k0 = BinaryExpr("*", BinaryExpr("/", BinaryExpr("-", end, _lit(1)), _lit(bk_elems)), _lit(bk_elems))
+        return TernaryExpr(cond=BinaryExpr("<", base, end), if_true=base, if_false=last_k0)
+
     decls: list[Stmt] = []
     pre: list[Stmt] = []
     for g in groups:
@@ -922,7 +941,7 @@ def pipelined_kloop(
         pre += g.transport.prologue(g.ring)
     for g in groups:  # prime exactly ``lag`` chunks per group — what iterations -lag..-1 would have filled
         for c in range(g.lag):
-            pre += g.transport.fill(k0=_lit(c * bk_elems), slot=_lit(c))
+            pre += g.transport.fill(k0=_prime_k0(c), slot=_lit(c))
             pre += g.transport.commit()
 
     # The wait-group counting pass: lay the committing fills out in body order (top fills first,
@@ -968,7 +987,12 @@ def pipelined_kloop(
                     body += g.transport.commit()
 
     outer = StridedLoop(
-        axis=Axis(name=k0, extent=k_extent), start=_lit(0), step=_lit(bk_elems), body=Body(tuple(body)), unroll=False, end=k_end
+        axis=Axis(name=k0, extent=k_extent),
+        start=k_first if k_first is not None else _lit(0),
+        step=_lit(bk_elems),
+        body=Body(tuple(body)),
+        unroll=False,
+        end=k_end,
     )
     return decls, [*pre, outer]
 
@@ -985,6 +1009,7 @@ def staged_kloop(
     block_threads: int | None = None,
     k0: str = "_ks",
     k_end: Expr | None = None,
+    k_first: Expr | None = None,
 ) -> tuple[list[Stmt], list[Stmt]]:
     """The whole-body staged K-loop — ONE operand-group live across the entire ``drain``, run through
     :func:`pipelined_kloop` (the segment list is the single ``(drain(slot), slabs)`` entry, so the
@@ -1009,7 +1034,9 @@ def staged_kloop(
     ``k_end`` (an ``Expr`` over in-scope grid vars, CTA-uniform, ``≤ k_extent``) stops the chunk
     loop early — the causal flash stream's triangular kv bound. Chunks past it fold the carrier
     identity exactly, so skipping them is bit-identical; the prefetch clamp re-pins onto the last
-    NEEDED chunk (``((k_end − 1) / bk) · bk``). CTA-uniformity keeps the in-loop barriers legal."""
+    NEEDED chunk (``((k_end − 1) / bk) · bk``). CTA-uniformity keeps the in-loop barriers legal.
+    ``k_first`` starts it late (the banded stream's sliding-window bound) — same contract, applied
+    at the other end; under ``workers`` the start is dropped (full stream — exact, un-skipped)."""
     # A symbolic ``k_extent`` (warp-flash over a runtime seq_len) is a ``Dim``: the chunk count is a
     # runtime value, so allocate the full ``depth`` ring (the tuned hint has ≥ depth chunks) and let
     # the transport absorb any over-primed tail chunk (TMA zero-fills its box; cp.async clamp-reads
@@ -1020,6 +1047,9 @@ def staged_kloop(
         assert not symbolic, "warp-spec + symbolic-kv staging is not built (WSPEC drives static-kv TMA only)"
         assert isinstance(transport, TmaTransport), "warp specialization drives the TMA transport only (scheduler legality)"
         assert block_threads is not None, "warp specialization needs the compute-band thread count"
+        # A banded stream start is not built for the producer/compute band split — stream the full
+        # extent (the band FragmentMask keeps every skipped-candidate step at the fold identity, so
+        # dropping the OPTIMIZATION is exact; only the tile-skip is lost under WSPEC).
         return _wspec_kloop(
             transport=transport,
             drain=drain,
@@ -1040,4 +1070,5 @@ def staged_kloop(
         k_extent=k_extent,
         k0=k0,
         k_end=k_end,
+        k_first=k_first,
     )

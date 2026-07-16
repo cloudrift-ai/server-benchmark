@@ -202,10 +202,12 @@ without it the markers land too late and CUDA tests silently scatter across work
 LPT-bucketed across the remaining workers using the cached duration table.
 
 The `perf` marker gates **suite-wide**, not just `tests/perf/`: collecting `tests/` loads `tests/perf/conftest.py`,
-whose hook skips every perf-marked item unless `-m perf` was passed. Reserve `perf` for perf-comparison tests that
-`make bench-kernels` runs — a perf mark on a correctness test silently drops it from `make test` even on GPU
-machines (this hid `tests/serving/test_gen_runner_gpu.py` for a while). GPU correctness tests guard themselves with
-`requires_cuda` / `importorskip` instead.
+whose hook skips every perf-marked item unless `-m perf` was passed. Reserve `perf` for two things — the
+perf-comparison tests `make bench-kernels` runs, and tests that genuinely cannot ride the parallel suite (today the
+two in-process vLLM engine tests, `test_vllm_plugin_gpu.py` / `test_vllm_plugin_gen_gpu.py`: the engine demands a
+large fraction of the card FREE at startup, plus checkpoint downloads and minutes of whole-model compile). A perf
+mark on anything else silently drops it from `make test` even on GPU machines (this hid the serving runner's GPU
+correctness pins for a while). GPU correctness tests guard themselves with `requires_cuda` / `importorskip` instead.
 
 `tests/compiler/conftest.py` also exposes `device_compute_capability()` and the `requires_sm90` skip marker. The
 mma.sync warp tier (swizzled `ldmatrix` + `mma.sync`, TMA transport) auto-enumerates and is validated on **sm_90+**;

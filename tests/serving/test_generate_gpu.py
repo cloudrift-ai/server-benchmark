@@ -1,6 +1,6 @@
 """GPU spike for the Phase-0 generation oracle.
 
-``perf``-marked (deselected by default): needs CUDA + cupy. Builds a TINY random-weight
+Needs CUDA + cupy (skips itself otherwise). Builds a TINY random-weight
 Llama CausalLM (no network), compiles the whole-model fp16 dynamic path through
 ``_CompiledLM`` (full logits, last row sliced on the host), and checks the compiled
 next-token logits against an eager fp16 reference across a few growing prefixes — the
@@ -12,7 +12,8 @@ tracks the cold-path M=1 lm_head lowering gap that spike surfaced.
 import numpy as np
 import pytest
 
-pytestmark = [pytest.mark.perf, pytest.mark.xdist_group("cuda")]
+# NOT perf-marked (correctness pin, must run under ``make test``; see tests/ARCHITECTURE.md).
+pytestmark = [pytest.mark.xdist_group("cuda")]
 
 
 def _tiny_llama():

@@ -1,6 +1,6 @@
 """GPU dynamic-compile test for the Phase-1 attention-split wrappers (the compiler enabler).
 
-``perf``-marked: needs CUDA + cupy. Traces the ``pre`` and ``post`` wrappers over the
+Needs CUDA + cupy (skips itself otherwise). Traces the ``pre`` and ``post`` wrappers over the
 flattened ``[num_tokens, H]`` layout with ``num_tokens`` **symbolic**, compiles each, and
 runs at two different token counts — matching the eager wrapper output. This proves the
 carved subgraphs actually lower + run dynamically (the core of Phase 2's gen_runner), and
@@ -12,7 +12,8 @@ the fp16 path is covered by the Phase-0 oracle).
 import numpy as np
 import pytest
 
-pytestmark = [pytest.mark.perf, pytest.mark.xdist_group("cuda")]
+# NOT perf-marked (correctness pin, must run under ``make test``; see tests/ARCHITECTURE.md).
+pytestmark = [pytest.mark.xdist_group("cuda")]
 
 
 def _qwen3_block():

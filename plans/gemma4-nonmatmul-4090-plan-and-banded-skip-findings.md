@@ -39,16 +39,16 @@ global-layer findings, plus the fusion-boundary work it turned out to require:
   symbolic seq, split-KV composition, additive-bias-plus-stamp with an in-band padding column, structural
   skip-derivation pins). Full suite 2346 passed / lint clean.
 
-### Measured on the 4080 (greedy deploys, layer 0, fp16; flash kernel row)
+### Measured on the 4080 (greedy deploys, layer 0, fp16; flash kernel row — identical config/grid both sides)
 
-| seq | main (causal-only, band DROPPED — wrong semantics) | branch (true banded + skip) |
-| --- | --- | --- |
-| 2048 | FILL_MAIN_2048 µs | 397.1 µs |
-| 4096 | FILL_MAIN_4096 µs | FILL_BAND_4096 µs |
+| seq | main (causal-only, band DROPPED — wrong semantics) | branch (true banded + skip) | speedup |
+| --- | --- | --- | --- |
+| 2048 | 498.0 µs | 397.1 µs | **1.25×** |
+| 4096 | 1716.2 µs | 834.2 µs | **2.06×** |
 
-The branch number computes STRICTLY MORE masking (the true sliding semantics main's layer trace silently loses)
-in less time — the skip's tile count is `O(seq·W)` vs `O(seq²)`; the ratio grows with seq (~2.3× fewer tiles at
-4096, ~4× at 8192, W=1024).
+Near-linear scaling on the branch (397 → 834 at 2× seq) vs quadratic on main (498 → 1716, 3.4×), while computing
+STRICTLY MORE masking (the true sliding semantics main's layer trace silently loses). The ratio keeps growing —
+~4× at 8192 (W=1024). Both rows are the greedy `d1/cp` pick; the tuned `alt`/`ring` families stack on top.
 
 ## What still needs a rented 4090 (pure measurement; rent when available)
 
@@ -76,10 +76,9 @@ Golden seeding + A/B replays, in priority order. Workflow per `tune-golden` / th
    O-accumulator ceiling needs a warp-column d-split (`w<um>x<un>` twisted geometry — per-column V fragments +
    smem P sharing or duplicated scores). Its own feature branch; the 2026-07-14 findings hold the full gate map.
    The banded skip does NOT help these layers (full attention).
-2. **Banded skip × the explicit-mask s2048+ hd512 form** — global layers at seq > 1024 carry the opaque bias with
-   no stamp (full attention has no window); their causal end-skip DOES now apply via the stamp's `is_causal`
-   assertion if we extend stamping to full layers (safe: the wrapper's mask is causal) — small follow-up, halves
-   their stream on average.
+2. ~~Banded skip × the explicit-mask hd512 form~~ — DONE on this branch: the stamp asserts `is_causal` on FULL
+   layers too, so the 8 global layers' causal end-skip applies through the whole-model trace's opaque bias
+   (halves their stream on average at seq > 1024).
 3. RMSNorm k3840 / qknorm k256/k512, rotary, unsqueeze copies: at parity on both cards; nothing to do.
 
 ## Repro

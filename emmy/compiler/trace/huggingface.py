@@ -351,7 +351,8 @@ def stamp_sliding_windows(graph, config, *, layer_type: str | None = None) -> No
 
     ``layer_type`` names a single-layer trace's attention type; ``None`` walks the whole model's
     SDPA nodes in execution order against ``config.layer_types`` (one SDPA per decoder layer —
-    a count mismatch stamps nothing)."""
+    a count mismatch stamps nothing). Full-attention layers get the ``is_causal`` assertion
+    alone — their stream end still derives through the whole-model trace's opaque bias operand."""
     from emmy.compiler.ir.frontend.ir import SdpaOp
 
     window = getattr(config, "sliding_window", None)
@@ -368,8 +369,10 @@ def stamp_sliding_windows(graph, config, *, layer_type: str | None = None) -> No
     for node, lt in zip(sdpa_nodes, types, strict=True):
         if lt == "sliding_attention":
             node.op.sliding_window = window
-            node.op.is_causal = True  # the wrapper's mask is causal; asserting it structurally
-            # lets the lowering derive the stream END alongside the band's stream START.
+        # Sliding AND full layers: the wrapper's mask is causal — asserting it structurally lets
+        # the lowering derive the stream END (and, banded, the stream START) through the opaque
+        # bias operand a whole-model trace carries.
+        node.op.is_causal = True
 
 
 def build_causal_mask(seq_len: int, dtype) -> torch.Tensor:  # noqa: F821

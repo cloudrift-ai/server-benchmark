@@ -1109,8 +1109,10 @@ def test_warp_flash_split_kv_symbolic_matches_torch(monkeypatch, variant, reduce
 
 
 def _stamp_window(module, args, window, dynamic_shapes=None):
-    """Trace ``module``, stamp ``sliding_window`` on its SdpaOp (the HF-wrapper stamp path —
-    ``F.scaled_dot_product_attention`` has no window arg to trace it from), then compile."""
+    """Trace ``module``, stamp ``sliding_window`` (+ the ``is_causal`` assertion) on its SdpaOp —
+    the HF-wrapper stamp path; ``F.scaled_dot_product_attention`` has no window arg to trace it
+    from. ``window=None`` stamps ``is_causal`` alone (the full-attention layer's shape: the
+    causal end-skip through an opaque bias operand)."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
     from emmy.compiler.ir.frontend.ir import SdpaOp  # noqa: PLC0415
     from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
@@ -1264,6 +1266,33 @@ def test_warp_flash_banded_with_additive_bias_matches_torch(monkeypatch):
     got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
     max_diff = float(np.max(np.abs(got - eager)))
     assert max_diff < 5e-3, f"stamped biased flash max_diff={max_diff:.2e}"
+
+
+@requires_cuda
+def test_warp_flash_causal_stamp_with_bias_matches_torch(monkeypatch):
+    """The full-attention layer's whole-model shape: an explicit causal bias operand plus the
+    ``is_causal`` stamp alone (no window). The stamp's coord Select rides beside the bias and
+    derives the causal stream END through the otherwise-opaque operand."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    torch.manual_seed(5)
+    S = 256
+    q, k, v = (torch.randn(1, 4, S, 64, dtype=torch.float16) for _ in range(3))
+    mask = torch.zeros(S, S, dtype=torch.float16).masked_fill_(torch.ones(S, S, dtype=torch.bool).triu(1), float("-inf"))[None, None]
+    backend, compiled, graph, kernels = _stamp_window(_Masked(), (q, k, v, mask), None)
+    assert len(kernels) == 1, f"stamped causal biased flash should stay one fused kernel, got {len(kernels)}"
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "kv0_end" in src, "the is_causal stamp must derive the stream end through the bias"
+
+    def ref():
+        with torch.no_grad():
+            out = F.scaled_dot_product_attention(q.cuda(), k.cuda(), v.cuda(), attn_mask=mask.cuda())
+            return out.cpu().flatten().float().numpy()
+
+    feed = {n: t for n, t in zip(graph.inputs, (q.numpy(), k.numpy(), v.numpy(), mask.numpy()), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=feed, pre_run=ref)
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    max_diff = float(np.max(np.abs(got - eager)))
+    assert max_diff < 5e-3, f"stamped causal biased flash max_diff={max_diff:.2e}"
 
 
 @requires_cuda

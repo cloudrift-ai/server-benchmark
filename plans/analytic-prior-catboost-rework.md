@@ -488,6 +488,23 @@ the training data feeding this plan is censored and stale in ways the plan didn'
    -O3 labels dodge the item-1 lane inversion by construction). Zero-code alternative for a first campaign:
    per-family pinned-subspace tunes (`EMMY_KNOBS="<all but F pinned>" emmy tune --golden NAME --explore-eps 0.25`
    with `EMMY_NVCC_FLAGS=""`), at higher GPU cost. ~1k benches ≈ a day on one rented card for the full golden set.
+   **SETTLED 2026-07-15 — the recorder is `run --bench` itself, DEFAULT-ON behind a quality bar.** Whenever a
+   bench meets the tuner's measurement standard (warmup/iters at the tune bench level; an opt-out flag covers the
+   rest), `run --bench` records into the canonical node store: every clean pinned golden/`--ab` row as an `ok`
+   leaf; a realized config's compile/launch failure as a `bench_fail` negative; and the greedy pick itself via its
+   `greedy (isolated)` re-bench (branch `feature/greedy-isolated-rebench` — re-benches the greedy graph emmy-only
+   through the same pinned-row worker, so the number is pinned-comparable; the documented ~7% skew was measurement
+   position, not config), which makes every benched pool self-anchoring: the prior's argmax gets a measured value
+   (the bench-the-argmax anchor for unconditional regret). Never recorded: `pin_unmatched` rows (the claimed
+   config never ran; "not offered" is not "doesn't launch"), wrong-answer- or intensity-floor-flagged rows, and
+   the whole `--ir` path (serialization drops `op.knobs` — no honest feature dict). Rows are parentless deployable
+   -O3 leaves keyed with the tune's own recipes (same pools), `run_id` `bench-<UTC ts>`. Write protection beyond
+   the plausibility gate: `record_nodes` gains quality-aware leaf replacement — a materially lower-quality
+   measurement (fewer `n_samples`, higher variance) never replaces a stored leaf; newest-wins among comparable
+   quality (keep-min stays wrong for leaves: min over re-measurements noise-mines, and a fake-fast row would be
+   unrepairable). With this, the neighborhood collector reduces to spec steps (1)–(3) driving
+   `run --bench --golden NAME --ab … --json`; step (4) is the default recorder. Lands as its own PR on top of
+   `feature/greedy-isolated-rebench`.
 
 The golden A/B harness fixes decided alongside these (bench survives a greedy-row bench_fail; a pin matching no
 offered row fails loudly; recorder-side schedule-family stamping; the dynM FLOP-floor overcount) are NOT part of

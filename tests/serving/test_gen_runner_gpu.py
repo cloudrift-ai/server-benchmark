@@ -226,3 +226,53 @@ def test_gen_runner_device_path_matches_host():
     np.testing.assert_allclose(fn_np, fn_t.cpu().numpy(), rtol=1e-4, atol=1e-4)
     # the host final_norm must still work AFTER the device path moved nothing in place (deepcopy):
     np.testing.assert_array_equal(fn_np, runner.final_norm(h_np))
+
+
+def test_decode_twin_shares_weight_buffers():
+    """The static decode-bucket twin must NOT hold a second on-GPU copy of the layer's
+    weights: every non-trivial constant buffer in a decode program shares its device
+    allocation with the symbolic sibling (one upload per weight — the plan's
+    duplicate-weights memory artifact, ~2× the trunk when regressed)."""
+    pytest.importorskip("cupy")
+    import torch
+    import transformers
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    config = transformers.Qwen3Config(
+        vocab_size=64,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        max_position_embeddings=64,
+        use_sliding_window=False,
+    )
+    torch.manual_seed(0)
+    model = transformers.Qwen3ForCausalLM(config).eval()
+    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16)
+    if not runner.has_device_decode:
+        pytest.skip("decode-bucket programs unavailable for this shape")
+
+    def const_ptrs(prog):
+        """{base device pointer: nbytes} of every constant buffer in a built program."""
+        p = prog.program
+        return {p.arrays[b.name].data.ptr: p.arrays[b.name].nbytes for b in p.compiled.bufs if b.role == "constant"}
+
+    for sym, dec in ((runner._pre[0], runner._pre_decode[0]), (runner._post[0], runner._post_decode[0])):
+        sym_ptrs = const_ptrs(sym)
+        shared = unshared = 0
+        for ptr, nbytes in const_ptrs(dec).items():
+            if nbytes < 1024:  # scalars / tiny synthetics may legitimately differ per build
+                continue
+            if ptr in sym_ptrs:
+                shared += nbytes
+            else:
+                unshared += nbytes
+        assert shared > 0, "expected the decode twin to share weight buffers with the symbolic program"
+        assert unshared == 0, f"decode twin holds {unshared} bytes of duplicated weight buffers"

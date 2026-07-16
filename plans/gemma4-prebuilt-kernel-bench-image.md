@@ -100,7 +100,9 @@ off + `ctx 256` + `util 0.97` the 12B fits and serves on the 32 GB card (the wor
 2. **Re-run the end-to-end serve A/B on a 5090** (`validate_gemma4_serve.py`; fully scripted — detached harness,
    sampler, diag) — expected to pass now; this is the Phase-A exit criterion.
 3. **Pin vLLM ≥ 0.23 for the serving extra** — 0.22.1 cannot dispatch gemma-4's 512-dim global attention.
-4. **Share constants** between the symbolic and decode-bucket programs (kills the 2× weights, keeps decode speed).
+4. ~~Share constants~~ **DONE**: `_compile_split` binds through a per-wrapper device-constant cache
+   (`_bind_device_constants`), so the decode twin reuses the symbolic program's weight buffers — the 2× weight
+   copy is gone with decode speed kept; identity-pinned by `test_decode_twin_shares_weight_buffers`.
 5. **Pool activation buffers** across per-layer programs (removes the `num_layers` scaling).
 6. **PLE** — still out of scope for v1 (12B is dense); only for the deferred `gemma-4-E2B/E4B`.
 

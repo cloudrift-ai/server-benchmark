@@ -246,14 +246,22 @@ def _nvrtc_options(*, uses_tma: bool) -> tuple[str, ...]:
 # ---------------------------------------------------------------------------
 
 
-def _materialize(buf: _Buffer, shape: tuple[int, ...], src: np.ndarray | None, constants: dict[str, float]) -> cp.ndarray:
+def _materialize(buf: _Buffer, shape: tuple[int, ...], src: np.ndarray | cp.ndarray | None, constants: dict[str, float]) -> cp.ndarray:
     """Build one device array for ``buf`` at ``shape`` — the single fill
-    policy shared by :func:`_allocate` and :meth:`CompiledProgram.rebind`."""
+    policy shared by :func:`_allocate` and :meth:`CompiledProgram.rebind`.
+
+    ``src`` may already be a **device** (cupy) array — a constant uploaded once and
+    shared across programs (the serving runner's symbolic + decode-bucket twins bind
+    the same weights). It is used as-is, no copy, unless the dtype disagrees."""
     import cupy as cp
 
     cp_dtype = cupy_dtype(buf.dtype)
     np_dtype = buf.dtype.np
     if src is not None:
+        if isinstance(src, cp.ndarray):
+            if src.dtype != np.dtype(np_dtype):
+                src = src.astype(np_dtype)
+            return src.reshape(shape) if tuple(src.shape) != tuple(shape) else src
         return cp.asarray(np.ascontiguousarray(src, dtype=np_dtype).reshape(shape))
     if buf.role == "constant" and buf.name in constants:
         v = float(constants[buf.name])

@@ -53,6 +53,9 @@ markers = [
 [tool.ruff]
 line-length = 140
 target-version = "py312"
+# A local serving-A/B venv (`venv-serving`, holding the newer vLLM) doesn't match ruff's default
+# venv excludes and would drown `make lint` in third-party findings.
+extend-exclude = ["venv-serving"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]

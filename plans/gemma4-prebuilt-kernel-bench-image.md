@@ -136,25 +136,35 @@ A prebuilt cubin is reused iff all five of `sha1(source, name, arch, toolkit_tag
 both ends; the `OnlinePrior` falls back to it when absent/untrusted (`FallbackPrior`). One global, GPU-agnostic prior; no
 per-GPU file. A real-5090 tune is a later perf upgrade, not a blocker.
 
-### Local prep (no 5090 needed)
+### Local prep (no 5090 needed) — DONE
 
-- **sm_120 compile preflight (before the rental):** cross-compile the gemma-4 serving kernels at `-O3` for
-  `sm_120`/`sm_120a` with the **image's** CUDA 13.0.2 nvcc (inside the vllm-emmy container) — nvcc needs no live
-  card, and the compiler's memorized default card is already the 5090 (`Context.from_target`). Catches toolchain
-  rejections (the `sm_89a`-rejected-by-nvcc class of failure) before the session. This does **not** produce the
-  shipped cache — source parity needs the live-probed card (see Risks) — it only proves everything compiles.
-- The warm/bake Dockerfile stages, `make gemma4-serve-image` / `-push` targets, and the offline zero-recompile
-  verification script are all writable and dry-runnable locally; the 5090 session should be execute-only.
+- ✅ **sm_120 compile preflight** (`scripts/preflight_gemma4_sm120.sh`): all 34 gemma-4 golden shapes render +
+  `nvcc --cubin` clean for Blackwell — 49 kernels, host CUDA 13.3, incl. 30 warp-tier `mma.sync` kernels. Caveats: no
+  shape picked a TMA schedule, so `sm_120a` went unexercised, and the image's nvcc is 13.0.2 vs the host's 13.3 — re-run
+  the script inside the vllm-emmy container at the start of the session for the exact-toolchain check.
+- ✅ **Warm/bake/verify machinery built** (`docker/vllm-emmy-gemma4/`): `config.env` (the pinned serving config —
+  single source, every value is cache-key-relevant), `serve.sh` (the frozen serve invocation; the warm run mounts it
+  into the plain vllm-emmy image and the baked image ships it, so warm and release run the SAME args), `warm.sh`,
+  `Dockerfile` (bakes `warm/hf` + `warm/cubin` at `/opt/emmy`, `HF_HUB_OFFLINE=1` baked), `verify.sh`. Make targets:
+  `gemma4-warm` / `gemma4-serve-image` / `gemma4-serve-verify` / `gemma4-serve-push`. Bake mechanics dry-run
+  locally (dummy warm content); the GPU-touching steps are runbook-only until the rental.
 
 ### Warm + bake (cubins AND model)
 
-Start the server once on a real 5090 (inside a container from the image → `toolkit_tag` = image nvcc, `-O3`), let it
-download the model and compile, then snapshot **both** caches from the warm container — `EMMY_CUBIN_CACHE` and the HF
-snapshot (the warm step downloads gemma-4-12B anyway; the bake reuses it, so the model costs no extra step) — and bake
-them in (`COPY --from=warm`). Base **`vllm/vllm-openai`** (`docker/vllm-emmy/Dockerfile` — vLLM + plugin already
-wired); new `make gemma4-serve-image` / `-push` mirroring the `vllm-emmy-image` targets. **Verify:** run the baked
-image with `HF_HUB_OFFLINE=1` and no `HF_TOKEN`, snapshot the cubin dir, start + issue one request, diff the file
-set — empty diff = 100% cubin hit, and offline mode proves zero downloads.
+The 5090 session is execute-only — the runbook:
+
+1. Rent a 5090; `make vllm-emmy-image` (or pull the published base) — the warm must run the **image's** nvcc
+   (`toolkit_tag`) at `-O3` (no `EMMY_NVCC_FLAGS`).
+2. In-container preflight: `scripts/preflight_gemma4_sm120.sh` inside the vllm-emmy container (exact 13.0.2 nvcc).
+3. **Re-measure memory headroom** (weights no longer 2×, activations no longer ×48): step `--max-model-len` /
+   `--max-num-batched-tokens` up from the old `ctx 256` floor with the decode twin ON; finalize
+   `docker/vllm-emmy-gemma4/config.env` — the config is part of the cache key, so it must be final BEFORE the warm.
+4. `scripts/validate_gemma4_serve.py` at the pinned config — the Phase-A exit A/B vs HF.
+5. `HF_TOKEN=… make gemma4-warm` — serves once from the plain image with `./warm` mounted at `/opt/emmy`; the model
+   snapshot lands in `warm/hf` (the gated download happens here, once) and every kernel in `warm/cubin`.
+6. `make gemma4-serve-image` → `make gemma4-serve-verify` (cold-start offline, no token; one request; asserts the
+   cubin set did not grow — empty diff = 100% hit + zero downloads) → `make gemma4-serve-push`.
+7. Refresh the recipe image tags off `0.22.1-*`, tear down the rental.
 
 Model-bake gotchas:
 

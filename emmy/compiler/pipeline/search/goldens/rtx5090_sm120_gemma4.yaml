@@ -1,6 +1,9 @@
 # Gemma-4-12B kernel shapes (hidden 3840, intermediate 15360, 16 Q / 8 KV heads, head_dim 256) on the
 # RTX 5090 — seeded 2026-07-13 by a manual pinned --ab sweep (no tuner), each entry 3x reproduced at <1%
 # spread. cublas_us is the median live `Eager PyTorch` row across the shape's runs (cuBLAS HGEMM for the
+# 2026-07-15 refresh (same method, 3x at <0.5% spread): kv_proj.s2048 [fm] moved to the big-tile w4x2/f4x8/k4
+# (136.9 -> 109.6), k_proj_global.s2048 std w2x2 -> w4x2 (47.5 -> 45.4) and [fm] k2 -> k4 (37.8 -> 36.4) — the
+# gate-fix branch's greedy found all three; see plans/gemma4-12b-layer0-fastmath-ab-tune-findings.md.
 # fp16 matmuls, torch RMSNorm / torch SDPA for the norm / attention kinds).
 #
 # Why these exist: cold greedy on the unseeded projection shapes deploys a scalar b256 tile at ~37 ms
@@ -435,8 +438,8 @@ configs:
     N: 2048
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x4/f2x4/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 136.9
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 109.6
     cublas_us: 170.3
   - kernel: matmul
     name: gemma4_12b.o_proj.s2048
@@ -729,8 +732,8 @@ configs:
     N: 512
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 47.5
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 45.4
     cublas_us: 47.1
   - kernel: matmul
     name: gemma4_12b.k_proj_global.s2048
@@ -738,8 +741,8 @@ configs:
     N: 512
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x4/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 37.8
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x4/f2x4/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 36.4
     cublas_us: 47.1
   - kernel: matmul
     name: gemma4_12b.o_proj_global.s2048

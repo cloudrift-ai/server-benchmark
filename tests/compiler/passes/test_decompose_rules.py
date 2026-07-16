@@ -9,9 +9,10 @@ from pathlib import Path
 import numpy as np
 
 from emmy.compiler.backend.numpy import NumpyBackend
+from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expr import Literal
+from emmy.compiler.ir.expr import Literal, placeholder
 from emmy.compiler.ir.frontend.ir import (
     CatOp,
     LayerNormOp,
@@ -26,7 +27,7 @@ from emmy.compiler.ir.frontend.ir import (
     TransposeOp,
     UnsqueezeOp,
 )
-from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, ReduceOp
 from emmy.compiler.pipeline import Pipeline
 
 _DECOMP_PASS = "frontend/decomposition"
@@ -693,6 +694,40 @@ def test_slice_to_indexmap_correctness():
     before = _run(g, {"x": x})
     after = _run(_apply(g, "140_slice.py"), {"x": x})
     _assert_close(before, after)
+
+
+def test_slice_negative_start_normalizes_static():
+    """``x[:, -3:]`` (field-form SliceOp, static extent): the Python-negative start must
+    normalize against the input extent — a raw ``-3`` baked into the coord_map reaches
+    codegen as a negative offset (out-of-bounds read)."""
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4, 8)), node_id="x")
+    g.add_node(op=SliceOp(shape=(4, 3), dim=1, start=-3), inputs=["x"], output=Tensor("out", (4, 3)), node_id="out")
+    g.inputs, g.outputs = ["x"], ["out"]
+
+    x = rng.standard_normal((4, 8)).astype(np.float32)
+    rewritten = _apply(g, "140_slice.py")
+    after = _run(rewritten, {"x": x})
+    np.testing.assert_allclose(next(iter(after.values())), x[:, -3:])
+    # The baked offset is the folded ``8 - 3``, not the raw ``-3``.
+    (imap,) = [n.op for n in rewritten.nodes.values() if isinstance(n.op, IndexMapOp)]
+    assert imap.sources[0].coord_map[1] == placeholder(1) + Literal(5, "int")
+
+
+def test_slice_negative_start_normalizes_symbolic():
+    """``x[:, -1:, :]`` on a symbolic middle extent (the last-token slice before lm_head):
+    the coord offset must be ``s - 1`` referencing the symbolic dim, never a literal ``-1``
+    (the M=1 demoted lm_head OOB-read bug)."""
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (1, Dim("s"), 64)), node_id="x")
+    g.add_node(op=SliceOp(shape=(1, 1, 64), dim=1, start=-1), inputs=["x"], output=Tensor("out", (1, 1, 64)), node_id="out")
+    g.inputs, g.outputs = ["x"], ["out"]
+
+    rewritten = _apply(g, "140_slice.py")
+    (imap,) = [n.op for n in rewritten.nodes.values() if isinstance(n.op, IndexMapOp)]
+    offset_expr = imap.sources[0].coord_map[1]
+    assert "s" in offset_expr.free_vars(), f"symbolic extent must appear in the offset: {offset_expr!r}"
+    assert offset_expr == placeholder(1) + (Dim("s") + (-1)).expr
 
 
 # ===================================================================

@@ -40,11 +40,18 @@ def rewrite(match: Match, root: Node, inp_x: Node, inp_dim: Node | None, inp_sta
         dim = int(inp_dim.op.value)
         start = int(inp_start.op.value)
     norm_dim = dim if dim >= 0 else ndim + dim
+    # Python-style negative start counts back from the INPUT extent along the sliced
+    # dim — normalize before baking into the coord_map (a raw ``-1`` would reach
+    # codegen as a negative row offset: an out-of-bounds read). ``Dim.__add__``
+    # eager-folds a static extent to a plain Literal; a symbolic one (``x[:, -1:, :]``
+    # on a dynamic seq_len) yields ``seq_len - 1``, which the kernel receives as a
+    # runtime ``int`` arg (see ``_symbolic_runtime_args``).
+    offset = (in_shape[norm_dim] + start).expr if start < 0 else Literal(start, "int")
 
     coord_map = []
     for i in range(ndim):
         if i == norm_dim and start != 0:
-            coord_map.append(placeholder(i) + Literal(start, "int"))
+            coord_map.append(placeholder(i) + offset)
         else:
             coord_map.append(placeholder(i))
 

@@ -200,7 +200,17 @@ into the `StridedLoop`'s for-init `end` override; the staged prefetch clamp re-p
 bound is CTA-uniform (barriers stay legal) and every skipped step is the carrier's exact identity (`α = 1`,
 `P = expf(−1e30 − m_i) = 0`), so the early stop is bit-identical — it halves the streamed keys/mma work on average,
 paying wall-clock wherever the grid oversubscribes the SMs (1.67× on hd256 seq-2048) and re-opening the small-CTA flash
-forms that previously paid double K/V re-streaming.
+forms that previously paid double K/V re-streaming. **A banded stream additionally starts late**: a trace-time
+`SdpaOp.sliding_window` stamp (the HF wrapper knows `config.sliding_window` + `layer_types`; the trace itself erases
+the window) decomposes to a second coordinate `Select` (`kv > m − W`) beside the causal one — flash classification
+reads the whole mask CHAIN off the rowmax feed (coord Selects and the explicit additive bias compose; the bias stays
+loaded, it may mask more, e.g. padding), re-synthesizes each canonically, and the realizer derives the stream START
+off the band predicate exactly as it derives the causal end (`kv_start = ⌊max(0, first_row − W + 1)/bn⌋·bn`, the
+kloops' `k_first`). Fusion keeps every mask add ON the softmax consumer (mask epilogues are exempt from the
+score-producer deferral, the QK contraction is barred from chasing them, and `_reduce_heavy` discounts mask adds in
+rowmax-bearing bodies so a multi-mask softmax still assembles onto its P@V offer site); a mask that lands on the
+score producer anyway declines the fuse rather than being silently dropped. At seq ≫ W the sliding layers' stream is
+O(seq·W), not O(seq²) — 40 of gemma-4's 48 layers at real context lengths.
 Two catalog invariants hold: every recorded golden's `TILE`/`STAGE`/`REDUCE` stays a **member** of the enumerated
 grids (the permanence test in `tests/compiler/test_golden_configs.py` — a space edit can never silently orphan a
 golden into unreachability again, the sixth sweep's `.s512` regression class; the scalar reg grid carries the

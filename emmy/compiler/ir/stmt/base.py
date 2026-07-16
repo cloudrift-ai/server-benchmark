@@ -184,6 +184,20 @@ _BINARY_OP: dict[str, str] = {
     "multiply": "*",
     "divide": "/",
     "mod": "%",
+    # Comparisons + bool combines — the whole-model explicit-mask subgraph.
+    # Operands reach ``op_to_expr`` promoted to f32; C's implicit nonzero→bool
+    # conversion makes the comparison/logical spellings valid on them. The
+    # ``bitwise_*`` names carry bool-mask semantics in traced graphs (no op
+    # computes on integer tensors today), so they spell as logical ops — a
+    # float ``|`` would not compile.
+    "equal": "==",
+    "not_equal": "!=",
+    "greater": ">",
+    "less": "<",
+    "greater_equal": ">=",
+    "less_equal": "<=",
+    "bitwise_or": "||",
+    "bitwise_and": "&&",
 }
 
 
@@ -220,6 +234,10 @@ def op_to_expr(fn: str, inputs: list[Expr]) -> Expr:
         return FuncCallExpr(fn, tuple(inputs))
     if fn == "abs":
         return FuncCallExpr("fabs", tuple(inputs))
+    if fn == "where":
+        # np.where(cond, a, b) — the mask-apply tail of the explicit-mask
+        # subgraph. The f32-promoted cond is C-truthy (nonzero) in ``?:``.
+        return TernaryExpr(inputs[0], inputs[1], inputs[2])
     raise NotImplementedError(f"render: elementwise fn={fn!r} not supported")
 
 

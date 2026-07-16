@@ -1,6 +1,7 @@
-# Python virtual environment
+# Python virtual environments (venv-serving = the local serving-A/B venv with the newer vLLM)
 venv/
 venv
+venv-serving/
 
 # Python cache
 __pycache__/

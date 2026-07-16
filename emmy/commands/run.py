@@ -129,6 +129,16 @@ def register_run_command(subparsers):
             "Retires ad-hoc table parsing in the golden-sweep workflow."
         ),
     )
+    parser.add_argument(
+        "--no-record-nodes",
+        action="store_true",
+        help=(
+            "Skip the default bench-to-node recording. When pinned rows bench (--golden / --ab) at tune-standard "
+            "quality (warmup >= 5, iters >= 20), each clean row AND the greedy pick's isolated re-bench are recorded "
+            "as leaf rows in the tune DB's node store — the training-data feed for the offline prior. Flagged rows "
+            "(pin mismatch, wrong answer, intensity floor) and the --ir path never record."
+        ),
+    )
     parser.add_argument("--dump-dir", default=None, help="Directory to dump intermediate compilation artifacts.")
     parser.add_argument("--debug", action="store_true", help="Per-launch tensor dumps in the emmy backend.")
     parser.add_argument(
@@ -341,6 +351,7 @@ def handle_run(args):
     _print_kernel_stats(compiled, bench, golden_benches=golden_benches, greedy_fail=greedy_fail, greedy_iso=greedy_iso)
     if getattr(args, "json", None):
         _write_ab_json(args, results or {}, compiled, bench, golden_benches, greedy_fail=greedy_fail, greedy_iso=greedy_iso)
+    _record_bench_nodes(args, golden_benches, greedy_iso)
     if args.profile and greedy_fail is None:
         _run_ncu_profile(args, dump_dir=dump.dir if dump else None)
     if (
@@ -349,6 +360,56 @@ def handle_run(args):
         or any(gb.status != "ok" for gb in golden_benches or [])
     ):
         sys.exit(1)  # every row is reported above; any failed row (greedy or pinned) exits non-zero
+
+
+def _recordable_bench_leaves(golden_benches, greedy_iso) -> list:
+    """The benched rows honest enough to record into the node store: every ``ok`` row
+    with NO integrity flag (a flagged ok row measured something untrue — wrong answer,
+    intensity floor), plus ``bench_fail`` rows whose config actually realized (a
+    genuine "doesn't bench here" negative). ``pin_unmatched`` rows and compile
+    failures (``graph is None``) never record — the claimed config never ran, and
+    "not offered" is not "doesn't launch". Pure over the ``_GoldenBench`` duck type,
+    so tests drive it with stubs."""
+    from emmy.compiler.pipeline.search.bench_record import bench_leaves  # noqa: PLC0415
+
+    leaves = []
+    for gb in ([greedy_iso] if greedy_iso is not None else []) + list(golden_benches or []):
+        if gb.graph is None or gb.status == "pin_unmatched":
+            continue
+        if gb.status == "ok" and not gb.flags:
+            leaves += bench_leaves(gb.graph, gb.bench)
+        elif gb.status == "bench_fail":
+            leaves += bench_leaves(gb.graph, None, status="bench_fail")
+    return leaves
+
+
+def _record_bench_nodes(args, golden_benches, greedy_iso) -> None:
+    """Default-on bench-to-node recording (``--no-record-nodes`` opts out): the pinned
+    A/B rows and the greedy isolated re-bench become node-store leaves — the training
+    data the tune-only write path let every manual sweep evaporate from. Records only
+    at tune-standard measurement quality; ``record_nodes``' plausibility gate and
+    quality-aware leaf replacement still judge every row."""
+    if getattr(args, "no_record_nodes", False) or (greedy_iso is None and not golden_benches):
+        return
+    from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.bench_record import meets_quality_bar, record_bench_leaves  # noqa: PLC0415
+
+    # print, not logger.info: `emmy run` gates the root logger to WARNING at default
+    # verbosity, and a default-on WRITE to the user's tune DB must announce itself
+    # (the bench table around it prints too — same CLI-output surface).
+    if not meets_quality_bar(args.warmup, args.iters):
+        print(
+            f"[record-nodes] --warmup {args.warmup} / --iters {args.iters} below the tune bench standard — "
+            f"measurements NOT recorded into the node store (raise them or pass --no-record-nodes to silence)"
+        )
+        return
+    leaves = _recordable_bench_leaves(golden_benches, greedy_iso)
+    if not leaves:
+        return
+    db_path = resolve_tune_db()
+    n = record_bench_leaves(db_path, Context.probe(), leaves)
+    print(f"[record-nodes] {n} bench row(s) recorded into the node store ({db_path}) — opt out with --no-record-nodes")
 
 
 def _reset_persisting_l2_cache() -> None:
@@ -1920,6 +1981,8 @@ def _check_accuracy(outputs, eager_out) -> str | None:
     treats it as informational (a sliced reproducer is fed random *boundary* inputs
     that can be out-of-domain for the op, e.g. a kernel expecting a mean-of-squares
     gets random signed data → NaN from a downstream rsqrt)."""
+    import random  # noqa: PLC0415
+
     import numpy as np  # noqa: PLC0415
 
     eager_flat = eager_out.detach().cpu().flatten().tolist()
@@ -1931,8 +1994,9 @@ def _check_accuracy(outputs, eager_out) -> str | None:
         if any(v != v for v in values):
             return f"CORRECTNESS FAIL: output {buf_name} contains NaN"
         if len(values) == len(eager_flat):
-            max_diff = max(abs(a - e) for a, e in zip(values, eager_flat, strict=True))
-            mean_diff = sum(abs(a - e) for a, e in zip(values, eager_flat, strict=True)) / len(values)
+            diffs = [abs(a - e) for a, e in zip(values, eager_flat, strict=True)]
+            max_diff = max(diffs)
+            mean_diff = sum(diffs) / len(diffs)
             # Scale tolerance by max|eager| and by output dtype.
             #
             # fp32: matmul reduction-order drift grows with both K and
@@ -1963,7 +2027,10 @@ def _check_accuracy(outputs, eager_out) -> str | None:
             is_fp16 = arr.dtype == np.float16
             # Three-part verdict — each clause with ONE job:
             #
-            #   PASS iff (max_diff ≤ tol AND mean_diff ≤ mean_tol) OR mean_diff ≤ escape_tol
+            #   PASS iff (max_ok AND mean_diff ≤ mean_tol) OR escape_ok
+            #   max_ok    = max_diff ≤ tol                                  (fp32)
+            #             = max_diff ≤ 4·tol AND count(diff > tol) ≤ budget (fp16)
+            #   escape_ok = mean_diff ≤ escape_tol [fp16: AND max_diff ≤ 4·tol]
             #
             # - ``tol`` (the MAX clause) is the loose per-cell OUTLIER ceiling: fp16
             #   atomic-reduce accumulation can drift a cell up to ``peak`` in pathological
@@ -1978,21 +2045,71 @@ def _check_accuracy(outputs, eager_out) -> str | None:
             #   incident); 3% of peak keeps ~300× headroom over measured correct runs and
             #   fails any permutation-class bug REGARDLESS of its max (the old OR let any
             #   output with max_diff ≤ peak pass without ever consulting the mean).
+            #   On HEAVY-TAILED outputs 3% of peak over-scales (a gemma-4 layer output:
+            #   peak ≈ 24·RMS — a permutation scores mean_diff ≈ 1.04× that gate, a coin
+            #   flip), so the gate is additionally floored by the output's own
+            #   PERMUTATION SCORE: ``floor = mean|e_i − e_perm(i)|`` over a fixed shuffle
+            #   of the eager values — what a scramble of THIS draw would measure. The
+            #   ``min(3%·peak, 0.7·floor)`` keeps gaussian outputs on the 3%-of-peak gate
+            #   (floor ≈ 1.13·σ ≫ it) and gives heavy-tailed ones ≥ 1.4× margin on BOTH
+            #   sides (measured gemma layer-0: correct 0.52×, scramble 1.43× the gate).
             # - ``escape_tol`` (0.5% of peak) preserves the split-K outlier escape hatch: a
             #   handful of atomic-reorder outliers may exceed the max ceiling on randn×randn
             #   at K=1024/2048 while the bulk stays accurate to 4+ decimals — a near-zero
             #   mean vouches for them.
+            #
+            # fp16 MAX clause = outlier BUDGET + hard garbage ceiling, not a single-cell
+            # max. HEAVY-TAILED fp16 outputs (a gemma-4 layer output: peak ≈ 24·RMS, the
+            # layer_scalar / outlier-channel dynamic range) put single-cell diffs at
+            # O(peak) IN-DISTRIBUTION on the current legitimate fp16 path (residual-
+            # cancellation cells + the half-atomic split-K partials): measured correct
+            # layer-0 runs show max_diff 0.7–0.9× peak with a tail draw occasionally
+            # crossing 1.0× — a binary ``max ≤ peak`` intermittently aborts the bench on
+            # a rerun-passes coin flip. The budget separates "a handful of tail cells"
+            # (≤ ~0.0015% of cells over ``tol``, each under the 4× garbage ceiling) from
+            # the real bug classes: a garbage/saturated cell (uninitialized read, Inf
+            # math) blows the HARD ceiling regardless of count; a corrupt tile / row /
+            # tail-guard window (the historical incidents: thousands of cells) blows the
+            # BUDGET; a permutation blows the mean gate. NOTE the mean gate's scramble
+            # margin THINS on heavy-tailed outputs (a permuted gemma layer output scores
+            # ≈ 1.04× mean_tol — 4% clear, vs ~5× on gaussian matmuls): that margin is
+            # bounded by the current fp16 path's honest noise (mean_diff ≈ 0.4× mean_tol
+            # on correct gemma runs), and widens only when split-K gets its f32 scratch.
             rel_tol = 1.0 if is_fp16 else 0.08
             abs_tol = 1e-1 if is_fp16 else 1e-3
             peak = max((abs(e) for e in eager_flat), default=0.0)
             tol = max(abs_tol, rel_tol * peak)
-            mean_tol = max(abs_tol, 0.03 * peak)
+            perm = list(eager_flat)
+            random.Random(0).shuffle(perm)
+            perm_floor = sum(abs(a - e) for a, e in zip(perm, eager_flat, strict=True)) / max(1, len(perm))
+            mean_tol = max(abs_tol, min(0.03 * peak, 0.7 * perm_floor))
             escape_tol = max(abs_tol, 0.005 * peak)
-            verdict = "PASS" if (max_diff <= tol and mean_diff <= mean_tol) or mean_diff <= escape_tol else "FAIL"
-            if verdict == "FAIL":
-                failures.append(f"output {buf_name}: max_diff={max_diff:.6f} mean_diff={mean_diff:.6f} tol={tol:.6f}")
+            outliers = sum(1 for d in diffs if d > tol)
+            budget = max(4, len(diffs) // 65536)
+            if is_fp16:
+                # The hard 4·tol garbage ceiling bounds BOTH pass paths: the escape hatch
+                # vouches for reorder outliers (peak-bounded by construction), never for a
+                # garbage/saturated cell a near-zero mean would otherwise hide.
+                max_ok = max_diff <= 4 * tol and outliers <= budget
+                escape_ok = mean_diff <= escape_tol and max_diff <= 4 * tol
             else:
-                logger.info("Accuracy vs eager: max_diff=%.6f mean_diff=%.6f tol=%.6f PASS", max_diff, mean_diff, tol)
+                max_ok = max_diff <= tol
+                escape_ok = mean_diff <= escape_tol
+            verdict = "PASS" if (max_ok and mean_diff <= mean_tol) or escape_ok else "FAIL"
+            if verdict == "FAIL":
+                failures.append(
+                    f"output {buf_name}: max_diff={max_diff:.6f} mean_diff={mean_diff:.6f} tol={tol:.6f}"
+                    + (f" outliers={outliers}/budget {budget}" if is_fp16 else "")
+                )
+            else:
+                logger.info(
+                    "Accuracy vs eager: max_diff=%.6f mean_diff=%.6f tol=%.6f outliers=%d/%d PASS",
+                    max_diff,
+                    mean_diff,
+                    tol,
+                    outliers,
+                    budget,
+                )
         else:
             logger.warning("Output size %d does not match eager %d; skipping accuracy", len(values), len(eager_flat))
     return f"accuracy check failed vs eager: {'; '.join(failures)}" if failures else None

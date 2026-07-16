@@ -40,14 +40,15 @@ dynM + s2048) was re-benched pinned via `run --golden NAME --bench --json`, in b
 | --- | --: | --: | --- |
 | q_proj.s2048 (std) | 402.3 | 313.0 | drift warning: split-K goldens don't realize unpinned at M=2048 — `free/tile_area > _SPLITK_MAX_CTAS=512` (`lowering/tile/_schedule.py:344,500`); the pin path bypasses the guard, so the recording is reachable only pinned |
 | mlp_down.s2048 (std) | 1204.5 | 1112.0 | same CTA-cap drift class as q_proj.s2048 |
-| attention.hd512 (std+fm) | 158.0 | 113.0 | drift warning: the recorded `STAGE: d1/cp/alt` NEVER resolves at this geometry (the pin bench logs it and runs gmem-direct — the recorded 113 µs is a gmem-direct kernel). Recording artifact: the YAML holds the pinned, not the realized, knobs. Fix: re-record from the bench JSON's `record_knobs` |
+| attention.hd512 (std+fm) | 158.0 | 113.0 | drift warning — CORRECTED verdict (07-15, post-fix analysis): the recorded config (`g2k` split-KV + `d1/cp/alt`) DOES realize pinned — the pin bench's kernel is staged (97.5 KB smem, `record_knobs` carry the stage, no integrity flag). The enumeration resolves flash stage candidates on the PRE-split geometry, where the hd512 slabs don't fit — so the (split + staged) combination is never OFFERED and the join can't reach it. Enumeration follow-up (resolve stages post-split), not a recording artifact |
 | attention.hd512.dynM (both) | 134.2 | 116.6 | silent slower-sibling deploy: the faster entry adds `REDUCE: g2k` (split-KV), which realizes pinned but is never OFFERED on the dynamic flash fork, so the join falls to the shape's un-split second entry — no warning fires because *a* golden matched |
 | k_proj_global.s2048 (both) | 36.1–45.6 | 37.2–47.2 | greedy silently BEATS the golden in both regimes (std `w4x2` vs recorded `w2x2`; fm `…/k4` vs recorded `…/k2`) — stale-golden update candidate |
 | kv_proj.s2048 (fm) | 109.5 | 136.9 | greedy `f16_f16/w4x2/f4x8/k4` un-split big tile beats the recorded fm golden by 1.25× — strong update candidate |
 
 Update candidates for a follow-up golden edit (per the manual-sweep convention: reproduce 3× before recording):
 `kv_proj.s2048 [fm] w4x2/f4x8/k4 d2/tma/ring ≈ 109.5`, `k_proj_global.s2048 [fm] w2x4/f2x4/k4 g2k ≈ 36.1`,
-`k_proj_global.s2048 [std] w4x2/f2x4/k2 g8k ≈ 45.6`, and re-record `attention.hd512` from `record_knobs`.
+`k_proj_global.s2048 [std] w4x2/f2x4/k2 g8k ≈ 45.6`. **RECORDED 2026-07-15** (3× reproduced at <0.5% spread,
+verified deploying via `run --golden`); `attention.hd512` needs NO re-record — see the corrected verdict above.
 
 ## Bench results — layer-0 e2e and per-kernel (both -O3)
 
@@ -230,8 +231,11 @@ Same-day follow-up: three of the gates above are fixed and verified against this
   mean error than baseline (0.277 vs 0.292 mean_diff; the one unseeded FAIL observed during verification was the
   fp16 outlier ceiling at 1.07× on an unlucky draw — baseline runs the same mean band). Post-fix focused golden
   sweep: 25/25 pinned rows ≤1.03× of recorded, zero regressions.
-- **Still open** (documented, out of scope here): `attention.hd512`'s recorded STAGE never resolves (re-record from
-  `record_knobs`); `attention.hd512.dynM`'s faster split-KV entry is not in the dynamic flash offer; in-model
+- **Golden YAML refreshed** (same day): the three update candidates above are recorded and verified deploying.
+- **Still open** (documented, out of scope here): the flash fork resolves stage candidates on the PRE-split
+  geometry, so `attention.hd512`'s recorded (split-KV + `d1/cp/alt`) config — which realizes pinned — is never
+  offered at deploy (same family: `attention.hd512.dynM`'s faster split-KV entry is not in the dynamic flash
+  offer); in-model
   `o_proj.dynM` drift remains (its A is the flash output through a K-splitting reshape — TMA correctly declines;
   greedy now deploys a faster `g2k d2/cp/ring` form, 118 µs was 129); the cold-prior misdeploys on split-partial
   forks (no goldens there) dominate the untuned layer total — a search/prior story, not an enumeration gate.

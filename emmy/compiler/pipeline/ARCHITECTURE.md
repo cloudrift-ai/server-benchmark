@@ -613,8 +613,11 @@ benched pinned golden/`--ab` rows records each clean measurement — and the gre
 pinned-bench standard; `--no-record-nodes` opts out). This is what keeps manual sweep measurements from evaporating
 (the fm-lane optima were found by hand and never reached the store). Pool fidelity comes from recovering each
 kernel's pre-descent offer site via `source_chain` (descent stamps further `S_*` deltas, so the terminal op's own
-stamps would mis-key the pool); a variant's kernels (split-K main + combine) group under one site and record ONE
-whole-variant leaf. Flagged rows (pin mismatch, wrong answer, intensity floor) and the `--ir` path never record.
+stamps would mis-key the pool): the deepest loop-dialect `S_*`-carrying ancestor, falling back to the deepest
+tile-dialect one — the mma tile-lowering preserves no `LoopOp` in `.source`, and without the fallback every
+tensor-core kernel was silently unrecordable (both paths digest to the same tune-written `op_sig`, verified on an
+RTX 4090). A variant's kernels (split-K main + combine) group under one site and record ONE whole-variant leaf; a
+graph whose every kernel loses its site warns loudly instead of recording nothing in silence. Flagged rows (pin mismatch, wrong answer, intensity floor) and the `--ir` path never record.
 `record_nodes` guards the leaf upsert with **quality-aware replacement**: a newer measurement of unambiguously lower
 quality (fewer `n_samples` AND higher `variance`) never displaces a stored leaf, so a drive-by bench can't overwrite
 tune-grade data, while comparable or unknown quality keeps plain newest-wins (honest re-measurement still heals

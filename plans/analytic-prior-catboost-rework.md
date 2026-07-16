@@ -507,7 +507,14 @@ the training data feeding this plan is censored and stale in ways the plan didn'
    branch; the isolated re-bench merged as #376): `search/bench_record.py` (offer-site pool keying via
    `source_chain` — validated byte-identical against the store's tune-written `op_sig`s; whole-variant leaf per
    site), the `run --bench` default-on wiring (`--no-record-nodes` opts out), and `record_nodes`' quality-aware
-   leaf replacement.
+   leaf replacement. **GPU-verified 2026-07-16 on a rented CloudRift 4090**, which caught one real bug (fixed +
+   regression-tested): the mma tile-lowering preserves no `LoopOp` in `.source`, so the loop-only offer-site
+   predicate silently dropped every tensor-core kernel — a golden sweep recorded zero rows; the tile-dialect
+   fallback digests to the identical tune `op_sig`. Quality guard, opt-out/quality-bar, freeze pickup, and the
+   leaf-only eval degrade all passed on-device. Known deviation: bench rows key under the probe context, which is
+   a DIFFERENT `context_key` than the tune's -O3 re-bench context (flag-spelling difference; same `H_opt=3.0`) —
+   grouping per `(pool, H_opt)` is unaffected, but a bench row never dedups against its tune -O3 twin; fix would
+   be compile-flag canonicalization in `Context.structural_key`, deferred.
 
 The golden A/B harness fixes decided alongside these (bench survives a greedy-row bench_fail; a pin matching no
 offered row fails loudly; recorder-side schedule-family stamping; the dynM FLOP-floor overcount) are NOT part of

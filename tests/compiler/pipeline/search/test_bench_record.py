@@ -99,6 +99,34 @@ def test_bench_leaves_fail_sentinel(compiled_matmul) -> None:
     assert leaves[0].n_samples is None and leaves[0].variance is None
 
 
+def _compile_pinned(monkeypatch, pins: dict) -> object:
+    from emmy import config
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+
+    for knob, value in pins.items():
+        monkeypatch.setenv(config.knob_var(knob), value)
+    graph, _, _ = graph_from_code("torch.matmul(torch.randn(512,512), torch.randn(512,512))")
+    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
+    return Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx)
+
+
+def test_mma_path_records_and_joins_the_scalar_pool(monkeypatch) -> None:
+    """The 2026-07-16 4090 regression: the tensor-core (mma) tile-lowering preserves no
+    LoopOp in ``.source``, so the loop-only offer-site predicate silently dropped every
+    mma-path kernel — a golden sweep recorded ZERO rows, exactly the fast variants the
+    feature exists to capture. The tile-dialect fallback must (a) recover a site, (b)
+    group the split-K main+combine pair into ONE whole-variant leaf, and (c) produce
+    the same ``op_sig`` as the scalar/loop path for the same shape (one pool)."""
+    mma = _compile_pinned(monkeypatch, {"TILE": "n16x8/f4x8", "REDUCE": "g2k", "STAGE": "d2/cp/ring", "RASTER": "", "WSPEC": ""})
+    mma_leaves = bench_leaves(mma, _fake_bench(_n_cuda_kernels(mma)))
+    assert len(mma_leaves) == 1, "mma-path kernels must be recordable (split-K pair -> one leaf)"
+    scalar = _compile_pinned(monkeypatch, {"TILE": "n16x8/f2x4", "REDUCE": "", "STAGE": "d2/cp/ring", "RASTER": "", "WSPEC": ""})
+    scalar_leaves = bench_leaves(scalar, _fake_bench(_n_cuda_kernels(scalar)))
+    assert len(scalar_leaves) == 1
+    assert mma_leaves[0].op_sig == scalar_leaves[0].op_sig  # same shape, same pool, either lowering path
+
+
 # ---------------------------------------------------------------------------
 # record_bench_leaves — tune-recipe keying, freeze pickup
 # ---------------------------------------------------------------------------

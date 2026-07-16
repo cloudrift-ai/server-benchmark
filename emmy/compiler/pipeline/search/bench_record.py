@@ -85,16 +85,28 @@ def mint_bench_run_id() -> str:
 
 
 def _offer_site(op) -> object | None:
-    """The pre-descent offer op a compiled kernel lowered from — the deepest
-    loop-dialect ancestor carrying ``S_*`` stamps (the ``two_level``
-    decomposition-row idiom). ``None`` when the chain has no such ancestor."""
+    """The pre-descent offer op a compiled kernel lowered from. Preferred: the deepest
+    loop-dialect ancestor carrying ``S_*`` stamps (the ``two_level`` decomposition-row
+    idiom). The tensor-core (mma) tile-lowering does NOT preserve a ``LoopOp`` in the
+    ``.source`` chain — it bottoms at a ``TileOp`` — so with no loop ancestor the
+    deepest tile-dialect ``S_*``-carrying ancestor stands in: it holds the
+    recognize-time ``S_*`` set unchanged (descent's extra ``S_*`` stamps land on
+    kernel/cuda-dialect ops), so its digest equals the tune-written ``op_sig``
+    (verified against real tune rows on an RTX 4090 — without the fallback, every
+    mma-path kernel was silently unrecordable, i.e. exactly the fast tensor-core
+    variants this module exists to capture). ``None`` when neither exists."""
     from emmy.compiler.pipeline.search.keys import dialect_of, source_chain  # noqa: PLC0415
 
-    site = None
+    site = fallback = None
     for anc in source_chain(op):
-        if dialect_of(anc) == "loop" and any(k.startswith("S_") for k in getattr(anc, "knobs", {}) or {}):
+        if not any(k.startswith("S_") for k in getattr(anc, "knobs", {}) or {}):
+            continue
+        dialect = dialect_of(anc)
+        if dialect == "loop":
             site = anc
-    return site
+        elif dialect == "tile":
+            fallback = anc
+    return site or fallback
 
 
 def bench_leaves(compiled, bench, *, status: str = "ok") -> list[BenchLeaf]:
@@ -116,9 +128,11 @@ def bench_leaves(compiled, bench, *, status: str = "ok") -> list[BenchLeaf]:
     ops = [compiled.nodes[nid].op for nid in compiled.topological_order() if isinstance(compiled.nodes[nid].op, CudaOp)]
     per_launch = list(getattr(bench, "per_launch", None) or []) if bench is not None else []
     groups: dict[str, dict] = {}
+    skipped = 0
     for idx, op in enumerate(ops):
         site = _offer_site(op)
         if site is None:
+            skipped += 1
             logger.debug("[record-nodes] kernel %d has no recoverable offer site — skipped", idx)
             continue
         sig = digest(*sorted((k, v) for k, v in site.knobs.items() if k.startswith("S_")))
@@ -126,6 +140,14 @@ def bench_leaves(compiled, bench, *, status: str = "ok") -> list[BenchLeaf]:
         g = groups.setdefault(sig, {"ops": [], "launches": []})
         g["ops"].append(op)
         g["launches"].append(launch)
+    if skipped and not groups:
+        # Silence must never read as success: a graph whose EVERY kernel lost its offer
+        # site means a provenance gap in some lowering path, not "nothing to record".
+        logger.warning(
+            "[record-nodes] none of the %d kernel(s) has a recoverable offer site — nothing recorded "
+            "(a lowering path is not preserving op provenance; please report)",
+            skipped,
+        )
     leaves = []
     for sig, g in groups.items():
         # The main kernel carries the variant's descent stamps; auxiliaries (a split-K

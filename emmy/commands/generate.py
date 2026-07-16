@@ -166,9 +166,12 @@ class _CompiledLM:
         with torch.device("cpu"):
             # Full-logits wrapper: lm_head over all S positions, with the last row sliced
             # on the HOST in ``logits()``. The in-graph slice (``slice_last_logits=True``)
-            # makes lm_head an M=1 *demoted* matmul that does NOT lower to CUDA on the cold
-            # path (no online prior) — leftover LoopOp 'linear_7'. The oracle is O(S^2)
-            # regardless, so full logits + a host slice is the correct, cold-compilable cut.
+            # makes lm_head an M=1 *demoted* matmul that must NOT ship yet: the cold build
+            # accepts it nowadays, but lowers the ``[:, -1:, :]`` slice as a raw ``-1`` row
+            # offset in the kernel (reads before the buffer → silent zeros/garbage at every
+            # seq_len; would be ~3x faster per step if fixed) — pinned by
+            # ``test_slice_last_logits_lowers_cold``. Full logits + a host slice stays the
+            # correct cut until that lowering is fixed.
             wrapper = build_full_model_wrapper(model, seq_len, dtype, dynamic=True)
             specs = parse_position_specs(
                 ["seq_len@input_ids:1", "seq_len@attention_mask:2", "seq_len@attention_mask:3", "seq_len@position_ids:1"]

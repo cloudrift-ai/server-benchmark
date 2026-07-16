@@ -71,6 +71,9 @@ flowchart LR
     class warm,verify gpu
 ```
 
+The `release-gemma4-image` skill (`.claude/skills/release-gemma4-image/`) automates this whole session — rental or
+local mode, abort gates per step, a human approval pause before the push, guaranteed teardown. The manual steps:
+
 The full release session on a rented 5090 (each step from the repo checkout; host prereqs for steps 3–4:
 `make setup` + `pip install -e ".[serving]"` + cupy + `export HF_TOKEN=…`):
 

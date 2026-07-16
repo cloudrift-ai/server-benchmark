@@ -103,7 +103,10 @@ off + `ctx 256` + `util 0.97` the 12B fits and serves on the 32 GB card (the wor
 4. ~~Share constants~~ **DONE**: `_compile_split` binds through a per-wrapper device-constant cache
    (`_bind_device_constants`), so the decode twin reuses the symbolic program's weight buffers — the 2× weight
    copy is gone with decode speed kept; identity-pinned by `test_decode_twin_shares_weight_buffers`.
-5. **Pool activation buffers** across per-layer programs (removes the `num_layers` scaling).
+5. ~~Pool activation buffers~~ **DONE**: one `BufferArena` per runner — every program's input/output buffers and
+   scratch slab are views into shared per-key backings (`CompiledProgram.build(..., arena=…)`), so the activation
+   footprint is ~one layer's worth instead of ×48; identity-pinned by `test_layers_share_activation_arena`.
+   The 12B-on-32GB re-validation rides the Phase-A exit run on the 5090.
 6. **PLE** — still out of scope for v1 (12B is dense); only for the deferred `gemma-4-E2B/E4B`.
 
 ## Phase B — prebuilt-kernel image

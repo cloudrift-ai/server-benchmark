@@ -276,3 +276,52 @@ def test_decode_twin_shares_weight_buffers():
                 unshared += nbytes
         assert shared > 0, "expected the decode twin to share weight buffers with the symbolic program"
         assert unshared == 0, f"decode twin holds {unshared} bytes of duplicated weight buffers"
+
+
+def test_layers_share_activation_arena():
+    """Per-layer programs must NOT each hold their own capacity-sized activation
+    buffers: with the runner's shared :class:`BufferArena`, same-kind programs of
+    different layers view the SAME device memory for every input/output buffer and
+    the scratch slab (layers run sequentially — the ~350 MB × num_layers artifact).
+    Layer 0's builds grow the arena to its stable sizes, so the identity is asserted
+    between layers 1 and 2. Numerics under pooling are covered by the multi-layer
+    stitch test above, which runs all layers through the shared buffers."""
+    pytest.importorskip("cupy")
+    import torch
+    import transformers
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    config = transformers.Qwen3Config(
+        vocab_size=64,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=3,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        max_position_embeddings=64,
+        use_sliding_window=False,
+    )
+    torch.manual_seed(0)
+    model = transformers.Qwen3ForCausalLM(config).eval()
+    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16)
+
+    def io_ptrs(prog):
+        """{(role, name): base device pointer} for the input/output buffers."""
+        p = prog.program
+        return {(b.role, b.name): p.arrays[b.name].data.ptr for b in p.compiled.bufs if b.role in ("input", "output")}
+
+    for kind in ("_pre", "_post", "_pre_decode", "_post_decode"):
+        programs = getattr(runner, kind)
+        if programs is None:
+            continue
+        a, b = programs[1], programs[2]
+        assert a.program.slab_plan.slab.data.ptr == b.program.slab_plan.slab.data.ptr, f"{kind}: scratch slabs not shared"
+        pa, pb = io_ptrs(a), io_ptrs(b)
+        assert pa.keys() == pb.keys(), f"{kind}: layer programs disagree on buffer names"
+        for key in pa:
+            assert pa[key] == pb[key], f"{kind}: activation buffer {key} not shared across layers"

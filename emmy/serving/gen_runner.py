@@ -14,10 +14,10 @@ symbolic, and exposes the per-token, everything-but-attention compute:
 The caller stitches attention between ``pre`` and ``post`` (a reference torch SDPA in the
 Phase-2 host stitch; vLLM's paged ``Attention`` in Phase 3). I/O is host numpy (the
 serving ``rebind`` path) — correctness-first; the device zero-copy + captured-replay path
-is the Phase-3/4 optimization. NOTE: the capacity-sized ``CompiledProgram``s per layer are
-the memory budget the plan flags (Phase 2 "Memory budget" / Top risk #9) — their WEIGHTS are
-shared (one device buffer per constant, ``_bind_device_constants``); the remaining cost is
-each program's activation buffers.
+is the Phase-3/4 optimization. NOTE: the per-layer ``CompiledProgram``s share BOTH their
+weights (one device buffer per constant, ``_bind_device_constants``) and their activation
+buffers + scratch slabs (one ``BufferArena`` per runner) — the footprint no longer scales
+with ``num_layers`` (the memory budget the plan flagged, Phase 2 / Top risk #9).
 """
 
 from __future__ import annotations
@@ -108,13 +108,15 @@ def _bind_device_constants(graph, sources, cache):
     return out
 
 
-def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None):
+def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None, arena=None):
     """Trace ``wrapper`` and build a :class:`_Program`. ``argnames`` (a list) ties each named
     arg's axis-0 to a shared symbolic ``num_tokens`` Dim — the **prefill** program (one program,
     any width). ``argnames=None`` traces a **fully static** graph at the example shapes — the
     **decode-bucket** program (efficient at small M; the symbolic program's hint-sized M-tile is
     pathological at decode). ``dev_consts`` (a per-wrapper dict) shares each weight's device
-    buffer across the builds that pass the same dict — see :func:`_bind_device_constants`."""
+    buffer across the builds that pass the same dict — see :func:`_bind_device_constants`.
+    ``arena`` (one per runner) pools the activation buffers + scratch slab across every
+    program built with it — layers run sequentially, so N layers hold ~one layer's worth."""
     import torch
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -143,7 +145,7 @@ def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None):
             const_feed = bind_constants(compiled, sources)
         else:
             const_feed = _bind_device_constants(compiled, sources, dev_consts)
-        program = CompiledProgram.build(compiled, {**const_feed, **feed})
+        program = CompiledProgram.build(compiled, {**const_feed, **feed}, arena=arena)
     return _Program(program, list(compiled.inputs), list(compiled.outputs))
 
 
@@ -217,9 +219,15 @@ class EmmyGenRunner:
             return hd, attn.q_proj.out_features // hd, attn.k_proj.out_features // hd, attn.scaling
 
         attn_meta = []  # per-layer (head_dim, num_heads, num_kv, scaling)
+        from emmy.compiler.backend.cuda.program import BufferArena
+
         pre_programs, post_programs = [], []
         pre_decode, post_decode = [], []
         decode_ok = decode_bucket and decode_bucket > 0
+        # One arena for every program this runner builds: layers run sequentially, so
+        # all layers' activation buffers + scratch slabs share one layer's worth of
+        # device memory instead of scaling with num_layers.
+        arena = BufferArena()
         for i, block in enumerate(layers):
             meta = _meta(block.self_attn)
             attn_meta.append(meta)
@@ -232,7 +240,7 @@ class EmmyGenRunner:
             post_consts: dict = {}
             with torch.device("cpu"):
                 pre_programs.append(
-                    _compile_split(pre_w, [torch.zeros(8, hidden, dtype=dtype)], ["hidden"], np_dtype, dev_consts=pre_consts)
+                    _compile_split(pre_w, [torch.zeros(8, hidden, dtype=dtype)], ["hidden"], np_dtype, dev_consts=pre_consts, arena=arena)
                 )
                 post_programs.append(
                     _compile_split(
@@ -241,6 +249,7 @@ class EmmyGenRunner:
                         ["attn_out", "residual"],
                         np_dtype,
                         dev_consts=post_consts,
+                        arena=arena,
                     )
                 )
                 # Static M=decode_bucket twins — fast at decode (small M). If a layer's static
@@ -249,7 +258,9 @@ class EmmyGenRunner:
                 if decode_ok:
                     try:
                         pre_decode.append(
-                            _compile_split(pre_w, [torch.zeros(decode_bucket, hidden, dtype=dtype)], None, np_dtype, dev_consts=pre_consts)
+                            _compile_split(
+                                pre_w, [torch.zeros(decode_bucket, hidden, dtype=dtype)], None, np_dtype, dev_consts=pre_consts, arena=arena
+                            )
                         )
                         post_decode.append(
                             _compile_split(
@@ -258,6 +269,7 @@ class EmmyGenRunner:
                                 None,
                                 np_dtype,
                                 dev_consts=post_consts,
+                                arena=arena,
                             )
                         )
                     except Exception as ex:  # noqa: BLE001 — any lowering/compile failure → disable the bucket

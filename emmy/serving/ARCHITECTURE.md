@@ -86,14 +86,17 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   **Multimodal wrappers:** the trunk is resolved through `language_model` (gemma-4 "unified" nests the decoder stack +
   embed/norm there) and the text dims come from `config.text_config`.
 
-  > **Memory budget (measured, gemma-4-12B / 32 GB RTX 5090).** Serving the 12B does **not** fit today, for two reasons
-  > that are emmy artifacts rather than inherent costs — stock vLLM serves the same model on the same card:
+  > **Memory budget (measured, gemma-4-12B / 32 GB RTX 5090).** The two artifacts that made the 12B need ~2–3× stock
+  > vLLM's memory (it only fit at `ctx 256` with the decode twin off) are both fixed:
   > 1. ~~the decode twin binds a second copy of every layer's weights~~ **fixed** — the symbolic and decode programs
-  >    now share one device buffer per weight via the per-wrapper constant cache (see decode bucket above), so the
-  >    twin costs activation buffers only;
-  > 2. **every layer's program retains its own capacity-sized activation buffers** (~350 MB/layer at
-  >    `max_num_batched_tokens=4096` ⇒ ~17 GB across 48 layers), where stock vLLM reuses one transient buffer across
-  >    layers. Pooling/sharing those buffers is the fix; until then emmy's footprint scales with `num_layers`.
+  >    share one device buffer per weight via the per-wrapper constant cache (see decode bucket above);
+  > 2. ~~every layer's program retains its own capacity-sized activation buffers~~ (~350 MB/layer ⇒ ~17 GB across
+  >    48 layers at `max_num_batched_tokens=4096`) **fixed** — every program the runner builds shares one
+  >    `BufferArena` (`backend/cuda/program.py`): input/output buffers and the scratch slab are views into per-key
+  >    grow-only backings, so all layers hold ~one layer's worth. Safe because layers run sequentially and each
+  >    program's outputs are host-copied/cloned before the next program runs; a backing that grows (e.g. gemma-4's
+  >    wider global layers, or a bigger prefill `T`) leaves earlier generations alive so captured graphs / TMA
+  >    descriptors never dangle. The re-validation of the 12B footprint on a real 5090 is pending (Phase-A exit run).
 - `vllm_model_gen.py` — `EmmyGenModel` (Phase 3; the generative vLLM model class; Qwen3 / Llama / **Gemma-3/4**).
   Resolves `mc.hf_config` through **`text_config`** first (gemma-4's multimodal "unified" checkpoint nests every text
   attribute — `layer_types` / `rope_parameters` / `sliding_window` / vocab+hidden size / `final_logit_softcapping` —

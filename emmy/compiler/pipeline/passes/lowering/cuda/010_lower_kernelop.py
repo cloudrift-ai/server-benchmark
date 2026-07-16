@@ -47,15 +47,28 @@ def _tma_descriptors(kernel: KernelOp) -> tuple[TmaDescMeta, ...]:
 
 
 def _symbolic_runtime_args(kernel: KernelOp) -> tuple[str, ...]:
-    """Every symbolic ``Dim`` name referenced by an axis anywhere in the body, in first-seen
-    order (a dynamic reduce / output-sweep ``seq_len`` — the kernel takes one ``int`` arg per
-    name, the launch resolves it from the input shapes). Dict-keyed for stable ordering."""
+    """Every symbolic ``Dim`` name the body references, in first-seen order — via an axis
+    extent (a dynamic reduce / output-sweep ``seq_len``) or inside a stmt ``Expr`` (a
+    ``Load``/``Write`` index carrying a normalized negative-slice offset like
+    ``seq_len - 1``, which needs the arg even when every axis is static). The kernel takes
+    one ``int`` arg per name, the launch resolves it from the input shapes. Stmt-expr free
+    vars are filtered to names carried by the kernel's tensor shapes so loop / SSA vars
+    never match. Dict-keyed for stable ordering."""
+    shape_syms: set[str] = set()
+    for t in (*kernel.inputs.values(), *kernel.outputs.values()):
+        for d in t.shape:
+            if not d.is_static:
+                shape_syms |= d.expr.free_vars()
     seen: dict[str, None] = {}
     for s in kernel.body.iter():
         axes = s.axes if isinstance(s, Tile) else ((s.axis,) if hasattr(s, "axis") else ())
         for ax in axes:
             if isinstance(ax, Axis) and not ax.extent.is_static:
                 for nm in ax.extent.expr.free_vars():
+                    seen.setdefault(nm, None)
+        for e in s.exprs():
+            for nm in e.free_vars():
+                if nm in shape_syms:
                     seen.setdefault(nm, None)
     return tuple(seen)
 

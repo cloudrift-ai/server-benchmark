@@ -8,14 +8,14 @@
 #   docker run --gpus all -p 8000:8000 cloudriftai/vllm-emmy:TAG \
 #     --model Qwen/Qwen3-Embedding-0.6B --runner pooling --enforce-eager \
 #     --max-model-len 4096 --hf-overrides '{"architectures":["EmmyEmbedModel"]}'
-ARG VLLM_VERSION=v0.22.1
+ARG VLLM_VERSION=v0.23.0
 FROM vllm/vllm-openai:${VLLM_VERSION}
 
 # The emmy wheel installs --no-deps so the image's pinned torch /
 # transformers / numpy (vLLM's own dependency set) are never touched; the
 # runtime deps the serving path actually uses are added explicitly. cppyy is
 # deliberately absent — the CUDA serving path compiles via nvcc/NVRTC only.
-# The cupy wheel must match the image's CUDA major (vllm-openai:v0.22.1
+# The cupy wheel must match the image's CUDA major (vllm-openai:v0.23.0
 # ships CUDA 13.0 + nvcc; transformers 5.10.2 satisfies the compile pin).
 ARG CUPY_PACKAGE=cupy-cuda13x
 COPY dist/emmy_llm-*.whl /tmp/wheels/

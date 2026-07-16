@@ -44,11 +44,11 @@ def build_full_model_wrapper(model, seq_len: int, dtype, *, dynamic: bool = Fals
     slice the **final** position (``hidden[:, -1:, :]``), and apply ``lm_head`` to that
     one row → ``[1, 1, vocab]``. The generate loop only needs the next-token logits, so
     this avoids the O(S·vocab) lm_head over every prefix position and the full-buffer host
-    copy each step. NOTE: the ``hidden[:, -1:, :]`` slice makes lm_head an **M=1 demoted
-    matmul** that the *cold* lowering path (no online prior) does not turn into a CUDA
-    kernel — it lowers only once a prior/golden covers that shape. So the standalone
-    generation oracle currently traces full logits and slices the last row on the host;
-    this flag is the (correct, prior-dependent) optimized form. Keeping HF's in-graph
+    copy each step. The ``hidden[:, -1:, :]`` slice makes lm_head an **M=1 demoted
+    matmul**: it lowers cold (the unbindable Contraction demotes to PLANAR) and
+    ``140_slice`` normalizes the negative row index against the symbolic extent
+    (``seq_len - 1``, a runtime kernel arg) — pinned by
+    ``test_slice_last_logits_lowers_cold``. ``_CompiledLM`` uses this form. Keeping HF's in-graph
     rotary instead silently breaks: its ``inv_freq`` buffer is
     ``persistent=False`` and doesn't survive ``torch.export`` with its
     real value, so the traced cos/sin constant-fold to ``cos=1, sin=0``

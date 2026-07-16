@@ -123,6 +123,8 @@ class SliceOp(Op):
         tensor = inputs[0]
         if self.dim is not None:
             dim, start = self.dim, self.start or 0
+            if start < 0:
+                start += tensor.shape[dim]  # Python-negative start counts back from the end
             extent = self.shape[dim]
             end = start + int(extent) if isinstance(extent, int) else tensor.shape[dim]
         else:

@@ -1,6 +1,9 @@
 """In-process vLLM engine test of the emmy **generative** plugin (Phase 3).
 
-``perf``-marked (deselected by default): needs CUDA + cupy + vllm. Saves a TINY random
+DELIBERATELY ``perf``-marked (deselected by default; the in-process engine demands 40%
+of the card FREE at startup — incompatible with the parallel suite's live CUDA contexts,
+so it stays out of ``make test`` unlike the serving correctness pins): needs CUDA + cupy
++ vllm. Saves a TINY random
 Llama (vocab matches a cached Llama tokenizer, 2 layers — no network), serves it through
 ``EmmyGenModel`` in an in-process vLLM engine (real paged ``Attention`` + KV cache +
 ``lm_head`` + ``get_rope``), and greedily generates — checking it runs end-to-end and that

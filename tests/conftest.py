@@ -123,16 +123,24 @@ def _num_workers(config) -> int | None:
 def _is_cuda_item(item) -> bool:
     """True iff this test item issues CUDA work.
 
-    Detected via either (a) a ``skipif`` marker whose reason starts with
+    Detected via (a) a ``skipif`` marker whose reason starts with
     ``"CUDA not available"`` (the ``requires_cuda`` decorator used across
-    ``tests/compiler/``), or (b) a ``[cuda...]`` callspec id (the
+    ``tests/compiler/``), (b) a ``[cuda...]`` callspec id (the
     ``run_graph`` fixture's third variant + every ``test_e2e_accuracy``
-    parametrization). One of those signals is true for every test that
-    actually touches the device today; new CUDA-using tests inherit
-    routing for free as long as they reuse the conventions."""
+    parametrization), or (c) an explicit ``xdist_group("cuda")`` marker
+    (the ``tests/serving/*_gpu.py`` pytestmark convention). The explicit
+    marker MUST be honored here: otherwise the LPT bucketing below adds a
+    function-level ``w<N>`` group that shadows the module-level ``cuda``
+    mark (``get_closest_marker`` prefers function-level), scattering the
+    test off the serialized CUDA worker. One of those signals is true for
+    every test that actually touches the device today; new CUDA-using
+    tests inherit routing for free as long as they reuse the conventions."""
     for mark in item.iter_markers(name="skipif"):
         reason = mark.kwargs.get("reason", "")
         if isinstance(reason, str) and reason.startswith("CUDA not available"):
+            return True
+    for mark in item.iter_markers(name="xdist_group"):
+        if mark.args and mark.args[0] == _CUDA_GROUP:
             return True
     nid = item.nodeid
     return "[cuda" in nid or "-cuda-" in nid or nid.endswith("-cuda]")

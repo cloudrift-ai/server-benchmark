@@ -1,9 +1,11 @@
 """In-process vLLM engine test of the emmy embedding plugin.
 
-``perf``-marked (deselected by default — run with ``pytest -m perf``): needs
-CUDA, vllm, and the Qwen3-Embedding-0.6B checkpoint, and spends ~2 min
-compiling the whole model at startup. The fast everywhere-tests for this
-package live in ``test_packed.py``.
+DELIBERATELY ``perf``-marked (deselected by default — run with ``pytest -m perf``):
+needs CUDA, vllm, and the Qwen3-Embedding-0.6B checkpoint download, spends ~2 min
+compiling the whole model at startup, and the in-process engine demands half the
+card FREE at startup — incompatible with the parallel suite's live CUDA contexts,
+so this stays out of ``make test`` unlike the serving correctness pins. The fast
+everywhere-tests for this package live in ``test_packed.py``.
 """
 
 import numpy as np

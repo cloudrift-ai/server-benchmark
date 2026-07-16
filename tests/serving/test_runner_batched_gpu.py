@@ -1,7 +1,7 @@
 """Static batched serving path (``EMMY_SERVING_STATIC=1``).
 
-``perf``-marked (deselected by default — run with ``pytest -m perf``): needs CUDA
-+ cupy + the Qwen3-Embedding config. Builds a 1-layer static ``(batch, S)`` trunk,
+Needs CUDA + cupy + the Qwen3-Embedding config (skips itself off-GPU; the config comes
+from the HF cache like the compiler e2e tests'). Builds a 1-layer static ``(batch, S)`` trunk,
 wraps a ``EmmyForwardRunner`` around it, and checks that
 ``forward_hidden_states_batched`` runs several different-length sequences in ONE
 padded batched forward and matches eager per row — the causal-independence claim
@@ -12,7 +12,8 @@ are ignored). The whole-model accuracy gate lives in ``test_vllm_plugin_gpu.py``
 import numpy as np
 import pytest
 
-pytestmark = [pytest.mark.perf, pytest.mark.xdist_group("cuda")]
+# NOT perf-marked (correctness pin, must run under ``make test``; see tests/ARCHITECTURE.md).
+pytestmark = [pytest.mark.xdist_group("cuda")]
 
 MODEL = "Qwen/Qwen3-Embedding-0.6B"
 

@@ -666,8 +666,11 @@ clean, the row is reported `bench_fail` (with the reason), and the next row's jo
 escalation modes, no `os._exit`. NOTE: process placement is unified, the measurement *environment* is not — the
 greedy row benches interleaved with the live torch closures (torch allocator state, cuBLAS L2 carveouts resident),
 while a pinned row benches emmy-only in a job that never touches torch, so a greedy-row µs and a pinned-row µs for
-the same config are NOT directly comparable (the field-observed gap is ~7% on split-K pairs). Compare pinned rows
-against each other and record goldens from `--ab`/golden rows only, never from the greedy row's number. The greedy
+the same config are NOT directly comparable (the field-observed gap is ~7% on split-K pairs). One number can't be
+both torch-comparable and pinned-comparable, so when pinned rows bench, the greedy graph is ALSO re-benched
+emmy-only through the same pinned path (one extra worker job, no recompile): the `greedy (isolated)` twin row
+beneath each greedy kernel in the table, the `greedy.isolated` block in `--json` — the baseline pinned-row
+speedups read against. Record goldens from `--ab`/golden rows only, never from the greedy row's number. The greedy
 pick hanging or blowing the bench budget is a *finding* — the exact hazard a golden exists to pin — so pinned rows
 still bench after it; failed pinned rows (compile / bench) are kept as `bench_fail` rows, never dropped, and the run
 exits non-zero when any row failed. The greedy job also carries the accuracy check (the emmy program runs on the

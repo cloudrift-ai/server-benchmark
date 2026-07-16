@@ -183,19 +183,25 @@ def test_compile_dynamic_bad_spec_rejected(run_cli):
     assert "NAME@INPUT:AXIS" in stdout + stderr
 
 
-def test_compile_golden_substring_resolves_dynamic(run_cli):
+def test_compile_golden_substring_resolves_dynamic(run_cli, monkeypatch):
     """``compile --golden`` accepts the same name **substring** ``eval --kernel``
     filters on, and a dynamic golden carries its recorded symbolic spec through — so
     the rendered kernel gains an ``int seq_len`` arg (the masked-tile path), proving
     the golden was resolved via compile, not just run."""
+    # Hide CUDA from the subprocess: --golden scopes to the live card's recordings,
+    # so the name only resolves everywhere via the off-GPU multi-card union.
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
     rc, stdout, stderr = run_cli("compile", "--golden", "o_proj.h4096.dynM", "--ir", "cuda")
     assert rc == 0, f"stderr: {stderr}"
     assert "int seq_len" in stdout, f"expected masked-tile ``int seq_len`` from the dynamic golden, got:\n{stdout[:500]}"
 
 
-def test_compile_golden_ambiguous_substring_lists_shapes(run_cli):
+def test_compile_golden_ambiguous_substring_lists_shapes(run_cli, monkeypatch):
     """A ``--golden`` substring spanning several shapes can't select one graph — it
     exits 2 listing the matched shapes so the user can narrow it."""
+    # Hide CUDA from the subprocess: the asserted shape pair only co-exists in the
+    # off-GPU multi-card union, not necessarily in one card's own recordings.
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
     rc, stdout, stderr = run_cli("compile", "--golden", "mlp_down", "--ir", "tile")
     assert rc == 2, f"expected exit 2, got {rc}: {stdout}{stderr}"
     out = stdout + stderr

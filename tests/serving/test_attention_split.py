@@ -146,6 +146,9 @@ def test_split_matches_eager_gemma4():
     torch.manual_seed(0)
     trunk = transformers.Gemma4ForCausalLM(config).eval().model
     block = trunk.layers[0]
+    # Real checkpoints carry layer_scalar far from 1 (12B: 0.005–0.92); fresh models hold 1.0,
+    # which silently masks a carve that drops the multiply — pin it off 1 to stay sensitive.
+    block.layer_scalar.fill_(0.7)
     attn = block.self_attn
 
     t = 6

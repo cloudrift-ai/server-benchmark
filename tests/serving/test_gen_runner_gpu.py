@@ -134,6 +134,10 @@ def test_gen_runner_gemma4_heterogeneous_stitch():
     # The heterogeneity must actually be present, else the test proves nothing.
     assert trunk.layers[0].self_attn.head_dim != trunk.layers[-1].self_attn.head_dim
     assert trunk.layers[-1].self_attn.v_proj is None  # global attention_k_eq_v
+    # Pin layer_scalar off 1 per layer (fresh models hold 1.0, masking a dropped multiply — the
+    # 12B checkpoint ranges 0.005–0.92 and dropping it overflows fp16 by mid-network).
+    for i, blk in enumerate(trunk.layers):
+        blk.layer_scalar.fill_(0.6 + 0.1 * i)
 
     runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16)
     assert runner.num_layers == config.num_hidden_layers

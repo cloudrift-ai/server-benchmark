@@ -151,20 +151,14 @@ per-GPU file. A real-5090 tune is a later perf upgrade, not a blocker.
 
 ### Warm + bake (cubins AND model)
 
-The 5090 session is execute-only — the runbook:
+The process is documented durably in [`docker/vllm-emmy-gemma4/ARCHITECTURE.md`](docker/vllm-emmy-gemma4/ARCHITECTURE.md)
+— the cache-key parity contract, per-file roles, the 7-step release-session workflow (which steps need the physical
+5090), and the licensing note. The 5090 session executes that workflow verbatim; the only plan-specific additions:
 
-1. Rent a 5090; `make vllm-emmy-image` (or pull the published base) — the warm must run the **image's** nvcc
-   (`toolkit_tag`) at `-O3` (no `EMMY_NVCC_FLAGS`).
-2. In-container preflight: `scripts/preflight_gemma4_sm120.sh` inside the vllm-emmy container (exact 13.0.2 nvcc).
-3. **Re-measure memory headroom** (weights no longer 2×, activations no longer ×48): step `--max-model-len` /
-   `--max-num-batched-tokens` up from the old `ctx 256` floor with the decode twin ON; finalize
-   `docker/vllm-emmy-gemma4/config.env` — the config is part of the cache key, so it must be final BEFORE the warm.
-4. `scripts/validate_gemma4_serve.py` at the pinned config — the Phase-A exit A/B vs HF.
-5. `HF_TOKEN=… make gemma4-warm` — serves once from the plain image with `./warm` mounted at `/opt/emmy`; the model
-   snapshot lands in `warm/hf` (the gated download happens here, once) and every kernel in `warm/cubin`.
-6. `make gemma4-serve-image` → `make gemma4-serve-verify` (cold-start offline, no token; one request; asserts the
-   cubin set did not grow — empty diff = 100% hit + zero downloads) → `make gemma4-serve-push`.
-7. Refresh the recipe image tags off `0.22.1-*`, tear down the rental.
+- Step 3's headroom re-measure is also the **Phase-A memory re-validation** (weights no longer 2×, activations no
+  longer ×48 — expect the decode twin ON and a real context length, not the old `ctx 256` floor).
+- Step 4 (`validate_gemma4_serve.py`) is the **Phase-A exit criterion** — success criterion 1.
+- Afterwards: refresh the recipe image tags off `0.22.1-*` and delete this plan.
 
 Model-bake gotchas:
 

@@ -154,6 +154,32 @@ def test_trace_binary_ops():
     assert "divide" in fns
 
 
+def test_trace_bool_mask_ops():
+    """Bool-output mask ops trace: the whole-model explicit-mask construction
+    (comparisons feeding torch.where) carries dtype 'bool' on its outputs, and
+    the scalar literal a comparison consumes stays f32 — it compares in the
+    operand's domain, not bool (the gemma-4 whole-model trace failure)."""
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.dtype import BOOL, F32
+    from emmy.compiler.ir.base import ConstantOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class MaskedFill(nn.Module):
+        def forward(self, x):
+            mask = x > 0.5
+            return torch.where(mask, x, torch.zeros_like(x))
+
+    m = MaskedFill()
+    x = torch.randn(4, 4)
+    g = trace_module(m, (x,))
+
+    assert BOOL in {n.output.dtype for n in g.nodes.values()}
+    consts = [n for n in g.nodes.values() if isinstance(n.op, ConstantOp) and n.op.value == 0.5]
+    assert consts and all(n.output.dtype is F32 for n in consts)
+
+
 # ---------------------------------------------------------------------------
 # Module tracing: reductions
 # ---------------------------------------------------------------------------

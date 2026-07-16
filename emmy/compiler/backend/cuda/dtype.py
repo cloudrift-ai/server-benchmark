@@ -24,6 +24,7 @@ _CUDA_NAME: dict[DataType, str] = {
     _dtype.F16x2: "__half2",
     _dtype.I32: "int",
     _dtype.I64: "long long",
+    _dtype.BOOL: "bool",
 }
 
 # Inverse of _CUDA_NAME for the kernel-internal C-name -> canonical

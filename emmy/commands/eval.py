@@ -395,9 +395,19 @@ def _emit_variant_table(name: str, samples: list, prior, *, n_fail: int, o3: dic
     if hidden > 0:
         logger.info("  … %d more (--top 0 shows all)", hidden)
     if len(leaves) >= 2:
-        ratio = pick.latency_us / leaves[0].latency_us
+        # Judge the pick in the DEPLOY regime when -O3 re-benches cover it: the
+        # -O1 ranking lane inverts against -O3 by up to 8× on the fm big-tile
+        # family, so an -O1 ratio flags a near-best deployable pick as "misses
+        # best". Falls back to the -O1 lane when the reservoir has no -O3 row
+        # for the pick or no second row to compare against.
+        pick_o3 = o3.get(_variant_key(pick)) if o3 else None
+        o3_measured = [us for s in leaves if (us := o3.get(_variant_key(s))) is not None] if o3 else []
+        if pick_o3 is not None and len(o3_measured) >= 2:
+            ratio, lane = pick_o3 / min(o3_measured), "-O3 deploy latency"
+        else:
+            ratio, lane = pick.latency_us / leaves[0].latency_us, "tune-ranking latency"
         flag = "  <-- misses best" if ratio > 1.2 else ""
-        logger.info("  pick: rank %d/%d, %.2fx of best (tune-ranking latency)%s", rank, len(leaves), ratio, flag)
+        logger.info("  pick: rank %d/%d, %.2fx of best (%s)%s", rank, len(leaves), ratio, lane, flag)
 
 
 def _emit_registry() -> None:

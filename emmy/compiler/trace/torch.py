@@ -336,11 +336,15 @@ def _resolve_inputs(fx_node: Any, node_map: dict[str, str], g: Graph | None = No
             const_name = f"{fx_node.name}_c{len(result)}"
             # Inherit dtype from the consuming op's output — scalar literals
             # in mixed-dtype graphs (fp16 * 0.5, etc.) must stay in the
-            # consumer's dtype to avoid widening every elementwise step.
+            # consumer's dtype to avoid widening every elementwise step. A
+            # bool-output consumer (a mask-construction comparison like
+            # ``x > 0.5``) compares in the operand's domain, not bool — the
+            # literal falls back to f32 there.
+            dtype = _get_dtype(fx_node)
             const_id = g.add_node(
                 op=ConstantOp(name=const_name, value=float(a)),
                 inputs=[],
-                output=Tensor(const_name, (1,), _get_dtype(fx_node)),
+                output=Tensor(const_name, (1,), "f32" if dtype == "bool" else dtype),
                 node_id=const_name,
             )
             node_map[const_name] = const_id
@@ -488,6 +492,17 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, str], *, s
         "add_": "add",
         "sub_": "subtract",
         "div_": "divide",
+        # Comparisons and bool combines — the bool-output mask construction in
+        # whole-model traces (the explicit attention-mask subgraph). aten spells
+        # the operator combines as dunders (``mask | other`` → ``aten.__or__``).
+        "gt": "greater",
+        "lt": "less",
+        "ge": "greater_equal",
+        "le": "less_equal",
+        "eq": "equal",
+        "ne": "not_equal",
+        "__or__": "bitwise_or",
+        "__and__": "bitwise_and",
     }
     _ELEMENTWISE_SOURCES = frozenset(_ATEN_TO_NUMPY) | {
         "add",

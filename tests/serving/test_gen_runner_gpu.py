@@ -1,6 +1,6 @@
 """Phase-2 multi-layer host-stitch test for ``EmmyGenRunner`` (no vLLM).
 
-``perf``-marked: needs CUDA + cupy. Builds a tiny multi-layer Qwen3, then runs a whole-model
+Needs CUDA + cupy (skips itself otherwise). Builds a tiny multi-layer Qwen3, then runs a whole-model
 Python stitch — ``embed`` → per layer (emmy ``pre`` kernels → reconstruct RoPE →
 reference causal GQA torch SDPA → emmy ``post`` kernels) → ``final_norm`` → lm_head —
 and checks the stitched logits against eager. This is the dress rehearsal for the vLLM
@@ -11,7 +11,11 @@ fp32 (carve correctness is dtype-independent; the fp16 path is covered by the Ph
 import numpy as np
 import pytest
 
-pytestmark = [pytest.mark.perf, pytest.mark.xdist_group("cuda")]
+# NOT perf-marked: these are correctness pins (the only regression guards for the serving
+# runner's GPU paths), and the ``perf`` gating in ``tests/perf/conftest.py`` skips every
+# perf-marked item suite-wide under plain ``pytest tests/`` — a perf mark here would silently
+# drop these from ``make test`` on GPU machines.
+pytestmark = [pytest.mark.xdist_group("cuda")]
 
 
 def _repeat_kv(x, n_rep):

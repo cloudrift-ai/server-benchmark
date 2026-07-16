@@ -193,10 +193,19 @@ pytest tests/perf/ -m perf -v          # GPU perf suite (see tests/perf/ARCHITEC
 Under `make test` (`-n auto --dist=loadgroup`) the root `conftest.py` routes every CUDA-touching test onto two
 serial chains via dynamic `xdist_group` markers — `cuda` for in-process device work (one shared context, keeps
 the attention-chain accuracy thresholds deterministic) and `cuda-cli` for `run_cli` subprocess tests (each owns a
-fresh CUDA context; bounding their concurrency prevents GPU OOM from ~30 simultaneous subprocesses). The hook is
+fresh CUDA context; bounding their concurrency prevents GPU OOM from ~30 simultaneous subprocesses). CUDA items
+are detected via the `requires_cuda` skipif reason, a `[cuda...]` callspec id, or an explicit
+`xdist_group("cuda")` pytestmark (the `tests/serving/*_gpu.py` convention — honoring it matters because the LPT
+bucketing would otherwise add a function-level group that shadows the module-level mark). The hook is
 `tryfirst` because xdist's worker-side hook bakes group names into nodeids before plain conftest hooks run —
 without it the markers land too late and CUDA tests silently scatter across workers. Non-CUDA tests are
 LPT-bucketed across the remaining workers using the cached duration table.
+
+The `perf` marker gates **suite-wide**, not just `tests/perf/`: collecting `tests/` loads `tests/perf/conftest.py`,
+whose hook skips every perf-marked item unless `-m perf` was passed. Reserve `perf` for perf-comparison tests that
+`make bench-kernels` runs — a perf mark on a correctness test silently drops it from `make test` even on GPU
+machines (this hid `tests/serving/test_gen_runner_gpu.py` for a while). GPU correctness tests guard themselves with
+`requires_cuda` / `importorskip` instead.
 
 `tests/compiler/conftest.py` also exposes `device_compute_capability()` and the `requires_sm90` skip marker. The
 mma.sync warp tier (swizzled `ldmatrix` + `mma.sync`, TMA transport) auto-enumerates and is validated on **sm_90+**;

@@ -168,7 +168,16 @@ total and effectively the entire gap to eager.
   consts of bool-output consumers fall back to f32 (a comparison compares in the operand's domain), and the
   mask subgraph's aten spellings (`gt`/`lt`/`ge`/`le`/`eq`/`ne`, `__or__`/`__and__`) now translate to their
   numpy names instead of dying in `ElementwiseImpl`. The repro above completes through `--ir torch` AND
-  `--ir tensor` (decomposition); a full whole-model tune (lowering + GPU) has not been re-attempted.
+  `--ir tensor` (decomposition). A second wall then fell in the same session: the CUDA renderer had no
+  spellings for the mask ops (`op_to_expr` raised on `equal`) — comparisons/`bitwise_*` (spelled logical on the
+  f32-promoted operands) and a `where` ternary were added, verified exact-match vs eager on a mask snippet.
+- **Whole-model tune RAN (2026-07-16, same work dir `_tune/tune-model-gemma4-12b-wholemodel/`)**: the search
+  completed — 1475 ok / 19 bench_fail rows (all failures the finding-5 hung `k_linear_mean_reduce_*` corner),
+  fused terminal of 33 unique kernels / 906 positions, online prior written, reservoir calibration +0.93.
+  The final whole-model `--bench` (eager/torch.compile/emmy) destabilized the box twice (host OOM-killed at
+  39 GB RSS once with `make test` running beside it, then took the machine down solo on reboot day) and was
+  SKIPPED by decision — layer-scope benches + the serving A/B remain the e2e evidence on this 60 GB desktop;
+  run the whole-model bench on a bigger/rented box if the table is ever needed.
 
 ## Finding 5 — hung-variant bench failures cluster on the two computed-A kernels
 

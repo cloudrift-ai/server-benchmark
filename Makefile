@@ -66,7 +66,7 @@ VLLM_EMMY_TAG ?= cloudriftai/vllm-emmy:$(patsubst v%,%,$(VLLM_VERSION))-$(shell 
 
 wheel: setup
 	./venv/bin/pip install --quiet build
-	rm -rf dist && ./venv/bin/python -m build --wheel -o dist/ .
+	rm -rf dist build && ./venv/bin/python -m build --wheel -o dist/ .
 
 vllm-emmy-image: wheel
 	docker build -f docker/vllm-emmy/Dockerfile --build-arg VLLM_VERSION=$(VLLM_VERSION) \

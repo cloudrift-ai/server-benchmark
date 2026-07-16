@@ -3,16 +3,17 @@
 # baked in; no HF_TOKEN passed) — proving zero downloads — then issue one completion and
 # assert the cubin set did not grow: an empty diff = 100% cache hit (zero nvcc compiles).
 #
-#   IMAGE=cloudriftai/vllm-emmy-gemma4:TAG ./verify.sh
+#   IMAGE=cloudriftai/vllm-emmy-gemma4:TAG [GPU_DEVICE=1] ./verify.sh
 set -euo pipefail
 cd "$(dirname "$0")"
 source ./config.env
 : "${IMAGE:?set IMAGE to the baked gemma4 image to verify}"
 PORT="${PORT:-8000}"
+GPUS="all"; [ -n "${GPU_DEVICE:-}" ] && GPUS="device=$GPU_DEVICE"
 NAME=gemma4-verify
 
 docker rm -f "$NAME" >/dev/null 2>&1 || true
-docker run -d --name "$NAME" --gpus all --ipc=host -p "$PORT":8000 "$IMAGE"
+docker run -d --name "$NAME" --gpus "$GPUS" --ipc=host -p "$PORT":8000 "$IMAGE"
 
 before=$(docker exec "$NAME" sh -c "find /opt/emmy/cubin -name '*.cubin' | sort")
 

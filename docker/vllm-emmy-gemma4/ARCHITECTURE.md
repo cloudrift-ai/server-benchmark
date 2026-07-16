@@ -97,6 +97,30 @@ moving `warm/` off-datacenter means a ~24 GB download plus a ~35 GB Docker Hub u
 verify step needs the card between bake and push regardless. Never "top up" the cache on a non-5090: any kernel
 compiled elsewhere is a dead cache entry the real card never hits.
 
+### Running it locally (a 5090 in the box)
+
+The steps are identical — the machinery doesn't care where the card lives; steps 1–7 run as written, minus the
+rental/teardown. The local-only deltas:
+
+- **Pin the GPU on a multi-GPU box.** `warm.sh` / `verify.sh` default to `--gpus all` and vLLM takes device 0 — on
+  a box that also holds another card, set `GPU_DEVICE=<index>` (both scripts, and `make` passes env through:
+  `GPU_DEVICE=1 make gemma4-warm`). Warming on the wrong card produces a dead cache: wrong arch, wrong
+  featurization, zero hits on a 5090.
+- **Skip the 24 GB download by pre-seeding the snapshot.** If the model is already in the local HF cache, copy it
+  into the warm dir before warming — the hub client finds it and downloads nothing, and `HF_TOKEN` becomes
+  unnecessary (`warm.sh` only requires the token when the snapshot is absent):
+
+  ```bash
+  mkdir -p docker/vllm-emmy-gemma4/warm/hf/hub
+  cp -r ~/.cache/huggingface/hub/models--google--gemma-4-12B docker/vllm-emmy-gemma4/warm/hf/hub/
+  ```
+
+- **Disk budget: ~60 GB free.** The base image (~10.6 GB) + `warm/` (~24 GB of weights) + the baked image's weight
+  layer (another ~24 GB in Docker's storage — base layers are shared, the snapshot layer is not). Check `df` before
+  starting; move Docker's data-root or `warm/` to a bigger volume if needed.
+- **The push is the slow part.** `gemma4-serve-push` uploads ~35 GB over your uplink — hours on a residential
+  connection vs minutes from a datacenter. It's the main reason the rental flow exists; locally, just let it run.
+
 ## Licensing
 
 gemma-4 is **Apache 2.0** — public redistribution of the weights in a Docker Hub tag is permitted. The bake copies

@@ -3,23 +3,28 @@
 # vllm-emmy image with ./warm mounted at /opt/emmy, so the model snapshot lands in
 # warm/hf and every compiled kernel in warm/cubin — with the image's nvcc (toolkit_tag)
 # at -O3 and the pinned config (cache-key parity with the baked image, which runs the
-# same serve.sh). Requires HF_TOKEN in the env (the gated download happens here, once).
+# same serve.sh). Requires HF_TOKEN in the env UNLESS warm/hf is pre-seeded with the
+# model snapshot (the gated download happens here, once). On a multi-GPU box set
+# GPU_DEVICE=<index> to pin the 5090 — warming on the wrong card produces a dead cache.
 #
-#   BASE_IMAGE=cloudriftai/vllm-emmy:TAG ./warm.sh
+#   BASE_IMAGE=cloudriftai/vllm-emmy:TAG [GPU_DEVICE=1] ./warm.sh
 set -euo pipefail
 cd "$(dirname "$0")"
 set -a  # export the GEMMA4_* config so the -e pass-throughs below carry values
 source ./config.env
 set +a
 : "${BASE_IMAGE:?set BASE_IMAGE to the plain vllm-emmy image to warm from}"
-: "${HF_TOKEN:?the gated gemma-4 download needs HF_TOKEN}"
+if [ ! -d "warm/hf/hub/models--${GEMMA4_MODEL//\//--}" ]; then
+    : "${HF_TOKEN:?the gated gemma-4 download needs HF_TOKEN (or pre-seed warm/hf — see ARCHITECTURE.md)}"
+fi
 PORT="${PORT:-8000}"
+GPUS="all"; [ -n "${GPU_DEVICE:-}" ] && GPUS="device=$GPU_DEVICE"
 NAME=gemma4-warm
 
 mkdir -p warm/hf warm/cubin
 docker rm -f "$NAME" >/dev/null 2>&1 || true
-docker run -d --name "$NAME" --gpus all --ipc=host -p "$PORT":8000 \
-    -e HF_TOKEN \
+docker run -d --name "$NAME" --gpus "$GPUS" --ipc=host -p "$PORT":8000 \
+    -e HF_TOKEN="${HF_TOKEN:-}" \
     -e HF_HOME=/opt/emmy/hf \
     -e EMMY_CUBIN_CACHE=/opt/emmy/cubin \
     -e EMMY_GEN_DECODE_BUCKET="$GEMMA4_DECODE_BUCKET" \

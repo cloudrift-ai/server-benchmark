@@ -9,15 +9,29 @@ downloads — `docker run --gpus all --ipc=host -p 8000:8000 cloudriftai/vllm-em
 
 ## Why a "warm" step exists: the cache-key parity contract
 
-A prebuilt cubin is reused iff all five of `sha1(source, name, arch, toolkit_tag, flags)` (see
-`emmy/compiler/backend/cuda/nvcc.py`) match what the server would regenerate. That forces how the cache is produced:
+**Why not just cross-compile?** `nvcc` targets `sm_120` from any machine (that's exactly what the preflight script
+does), but the cache is **content-addressed, not searched**: at boot the server generates each kernel's source,
+computes `sha1(source, name, arch, toolkit_tag, flags)` (see `emmy/compiler/backend/cuda/nvcc.py`), and looks up
+that exact file. A cubin built from source that differs by one character has a different hash and is simply never
+found — locally-produced cubins aren't "slightly worse", they're invisible. So the image doesn't need "kernels that
+run on a 5090"; it needs **the exact kernels the released server will ask for**, and two of the hash inputs can't be
+reproduced off the card:
 
-- `source` embeds the **live-probed GPU featurization** — the warm must run on a real 5090, not a cross-compile
-  (a locally-produced cache would silently miss on the real card and recompile).
+- the kernel **source** — the compiler picks each kernel's schedule partly from the **live-probed** GPU features; a
+  memorized-spec cross-compile can drift on any feature that steers a pick, changing the source text and the hash;
+- the kernel **set** — the programs are enumerated by an actual `emmy serve --generate` boot (48 layers × symbolic +
+  decode twins at the pinned config), which must load the ~24 GB model — a serving run, not a compile.
+
+Hence the warm: one real serving run on the target card, inside the image. The full contract it satisfies:
+
+- `source` — live-probed 5090 featurization + the real program enumeration (above).
 - `toolkit_tag` is the compiling nvcc — the warm must run **inside the image**, not on the host toolchain.
 - `flags` — production `-O3`: never warm with `EMMY_NVCC_FLAGS` set (tune's `-Xcicc -O1` would poison the key).
 - The serving config (model / dtype / max-model-len / max-num-batched-tokens / decode bucket) changes **which
   programs exist and their shapes** — warm and release must use identical values.
+
+The preflight script is the flip side: the *toolchain acceptance* question ("does this nvcc compile every gemma-4
+kernel family for `sm_120`?") IS answerable by cross-compilation, so that part runs anywhere, before the rental.
 
 The machinery enforces the last two points structurally: **`config.env` is the single source** of the serving config
 (make passes it to both the warm run and the bake), and **`serve.sh` is the single serve invocation** — the warm run

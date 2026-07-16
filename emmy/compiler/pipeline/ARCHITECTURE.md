@@ -575,6 +575,26 @@ CUDA) folds into one canonical DB without cross-card collision. Driven by `scrip
 `collect-node-data` skill, whose sweeps run ε-greedy (`remote_node_tune.py` launches the remote tune with
 `--explore-eps 0.25` by default) so the collected labels and fork coverage de-correlate from the incumbent prior.
 
+**Measurement freeze** (`data/freeze.py`, driven by `scripts/freeze_node_store.py`). The node DB is a live store —
+tunes and merges keep writing into it — so a model fit read directly from it is not reproducible. A *freeze* snapshots
+it into one local JSONL file (line 1 a provenance header, then one JSON object per row) whose sha256 digest pins
+exactly which measurements a fit saw. Only **leaves** freeze, filtered by `freeze_reason`: current `feat_ver`, the two
+plausibility predicates above, `bench_fail` leaves kept as negatives ("doesn't build/launch here" is durable); branch
+rows never freeze — a branch's value-of-position bound is one search's coverage artifact over the *historical* tree
+topology, while leaves are complete points in knob space, so prefix rows are re-synthesized at fit time under the
+current fork structure and the freeze stores no tree schema (no `parent_key`/`depth`/`visits`). Freezing the same DB
+twice yields the same digest (rows sorted by `(gpu, op_sig, node_key)`, canonical JSON; the digest covers only the row
+bytes, so the header's `created_at` never perturbs it), and the header reserves both featurizer version axes
+(`knob_ver`/`encoding_ver`, equal today) plus repo commit, source DB, run ids, counts, and a freeform collection-policy
+note. `load_freeze` hard-errors on a foreign file, `feat_ver` mismatch, or digest mismatch — never a silent fallback
+(the offline-artifact loading semantics); `load_node_rows` sniffs a path (sqlite magic vs freeze header) and yields
+`NodeRow`s from either, which is what lets every nodes consumer (`eval online --dataset nodes --db`,
+`Dataset.from_node_rows` / `fold_node_rows`) take a freeze interchangeably with the live DB. Loaded freeze rows are
+parentless with `depth=0` — the marker the diagnostics read as "no tree schema": the fork-regret view skips them and
+the golden-anchored descent renders its loud "no fork-tree data" absence row, so a freeze evaluates through the
+leaf-level metrics without inventing fork groups. Handing a freeze to a perf-table consumer (`--dataset db` paths)
+fails at `open_readonly` with a message naming the freeze/nodes distinction.
+
 **How node rows get written.** Alongside the reservoir feed, the same finished tree is walked once by
 `_collect_node_records` and persisted via `record_nodes` — the keyed, deduplicated, parent-linked counterpart to the
 unkeyed/sampled reservoir. The walk fills the label-quality columns (`SearchNode.visits`, the leaf's `bench_stats` /
@@ -586,6 +606,22 @@ unkeyed/sampled reservoir. The walk fills the label-quality columns (`SearchNode
   `SearchNode.o3_us`): keyed under the tune context with `O3_NVCC_FLAGS` substituted (never colliding with the -O1
   twin), features stamped `H_opt=3.0` (the reservoir convention), parentless — a regime re-measurement, not part of
   the tree, never in a fork sibling group.
+
+**Bench-to-node recording** (`search/bench_record.py`) is the node table's second writer: a `run --bench` that
+benched pinned golden/`--ab` rows records each clean measurement — and the greedy pick, via its pinned-comparable
+`greedy (isolated)` re-bench — as parentless `depth=0` leaf rows, default-on behind a quality bar (the tuner's own
+pinned-bench standard; `--no-record-nodes` opts out). This is what keeps manual sweep measurements from evaporating
+(the fm-lane optima were found by hand and never reached the store). Pool fidelity comes from recovering each
+kernel's pre-descent offer site via `source_chain` (descent stamps further `S_*` deltas, so the terminal op's own
+stamps would mis-key the pool): the deepest loop-dialect `S_*`-carrying ancestor, falling back to the deepest
+tile-dialect one — the mma tile-lowering preserves no `LoopOp` in `.source`, and without the fallback every
+tensor-core kernel was silently unrecordable (both paths digest to the same tune-written `op_sig`, verified on an
+RTX 4090). A variant's kernels (split-K main + combine) group under one site and record ONE whole-variant leaf; a
+graph whose every kernel loses its site warns loudly instead of recording nothing in silence. Flagged rows (pin mismatch, wrong answer, intensity floor) and the `--ir` path never record.
+`record_nodes` guards the leaf upsert with **quality-aware replacement**: a newer measurement of unambiguously lower
+quality (fewer `n_samples` AND higher `variance`) never displaces a stored leaf, so a drive-by bench can't overwrite
+tune-grade data, while comparable or unknown quality keeps plain newest-wins (honest re-measurement still heals
+stale rows).
 
 Within one batch, a deterministic no-knob-delta step can give a child its parent's exact knob set (same `node_key`);
 duplicates collapse to one row (leaf's stats, max — not sum — of their visits) so `record_nodes`'s SUM accumulation
@@ -696,7 +732,9 @@ and renumbers as passes change) — rendered as a per-kernel × per-family regre
 `node_report` drops `bench_fail` rows up front (their `value_us` is the watchdog sentinel, not a measurement) and
 splits a card's block per `H_opt` regime so -O1 and -O3 latencies never pool in leaf reachability. The per-card
 grouping matters for a cross-hardware dataset: same-die SKUs (H100/H200) share an `S_*` op signature but not their
-latencies, so mixing them would corrupt both metrics — the `gpu` key keeps their rows distinct.
+latencies, so mixing them would corrupt both metrics — the `gpu` key keeps their rows distinct. `--db` also accepts a
+measurement freeze (Part 6) in place of the live DB; its rows are leaf-only and parentless, so the report degrades to
+the leaf metrics.
 
 The regret/reachability block renders once per prior **half** (offline vs online, labeled) — the composite would
 answer with whichever half is active, and the two halves' regrets point at different fixes (cold-start weights vs

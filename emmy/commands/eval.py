@@ -641,18 +641,15 @@ def _emit_online_nodes(args) -> None:
     once trustworthy (its regret ⇒ a training-data / featurization problem). Splitting
     the blocks makes the diagnostic say WHERE the problem is."""
     from emmy import config  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.data.freeze import load_node_rows  # noqa: PLC0415
     from emmy.compiler.pipeline.search.prior import OfflinePrior, OnlinePrior, diagnostics  # noqa: PLC0415
 
     db_path = Path(args.db) if args.db else resolve_tune_db()
     if not db_path.exists():
         logger.error("no tune DB at %s — pass --db or run `emmy tune` first.", db_path)
         return
-    db = SearchDB.open_readonly(db_path)
-    try:
-        nodes = list(db.iter_nodes())
-    finally:
-        db.close()
+    # ``--db`` takes the live sqlite DB or a measurement freeze — load_node_rows sniffs.
+    nodes = load_node_rows(db_path)
     online = OnlinePrior.load()
     calib = f"calibration={online.calibration:+.2f}" if online.calibration is not None else "calibration=n/a"
     halves: list[tuple[str, object]] = [

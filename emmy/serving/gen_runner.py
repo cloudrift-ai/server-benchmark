@@ -14,8 +14,10 @@ symbolic, and exposes the per-token, everything-but-attention compute:
 The caller stitches attention between ``pre`` and ``post`` (a reference torch SDPA in the
 Phase-2 host stitch; vLLM's paged ``Attention`` in Phase 3). I/O is host numpy (the
 serving ``rebind`` path) — correctness-first; the device zero-copy + captured-replay path
-is the Phase-3/4 optimization. NOTE: two capacity-sized ``CompiledProgram``s per layer is
-the memory budget the plan flags (Phase 2 "Memory budget" / Top risk #9).
+is the Phase-3/4 optimization. NOTE: the per-layer ``CompiledProgram``s share BOTH their
+weights (one device buffer per constant, ``_bind_device_constants``) and their activation
+buffers + scratch slabs (one ``BufferArena`` per runner) — the footprint no longer scales
+with ``num_layers`` (the memory budget the plan flagged, Phase 2 / Top risk #9).
 """
 
 from __future__ import annotations
@@ -83,12 +85,38 @@ def _pad_rows(arr, bucket):
     return out
 
 
-def _compile_split(wrapper, example_args, argnames, np_dtype):
+def _bind_device_constants(graph, sources, cache):
+    """Upload each distinct ``(source_path, load_ops)`` constant ONCE and share the cupy
+    array across program builds. The symbolic and decode-bucket twins bind the same
+    weights; per-build numpy feeds would upload a second full on-GPU copy of the trunk
+    (~2× the weight footprint). ``cache`` must be scoped to one wrapper — param paths
+    are wrapper-relative, so a cross-wrapper cache would collide."""
+    import cupy as cp
+
+    from emmy.compiler.loader.binder import apply_load_ops
+
+    out = {}
+    for nid, op in graph.loadable_constants():
+        if op.source_path not in sources:
+            continue
+        key = (op.source_path, repr(op.load_ops))
+        arr = cache.get(key)
+        if arr is None:
+            arr = cp.asarray(apply_load_ops(sources[op.source_path], op.load_ops))
+            cache[key] = arr
+        out[nid] = arr
+    return out
+
+
+def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None, arena=None):
     """Trace ``wrapper`` and build a :class:`_Program`. ``argnames`` (a list) ties each named
     arg's axis-0 to a shared symbolic ``num_tokens`` Dim — the **prefill** program (one program,
     any width). ``argnames=None`` traces a **fully static** graph at the example shapes — the
     **decode-bucket** program (efficient at small M; the symbolic program's hint-sized M-tile is
-    pathological at decode)."""
+    pathological at decode). ``dev_consts`` (a per-wrapper dict) shares each weight's device
+    buffer across the builds that pass the same dict — see :func:`_bind_device_constants`.
+    ``arena`` (one per runner) pools the activation buffers + scratch slab across every
+    program built with it — layers run sequentially, so N layers hold ~one layer's worth."""
     import torch
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -110,11 +138,14 @@ def _compile_split(wrapper, example_args, argnames, np_dtype):
         sources[path] = t.detach().cpu().to(torch.float32).numpy().astype(np_dtype, copy=False)
     for path, t in wrapper.named_buffers(remove_duplicate=False):
         sources[path] = t.detach().cpu().to(torch.float32).numpy().astype(np_dtype, copy=False)
-    const_feed = bind_constants(compiled, sources)
 
     feed = {n: a.detach().cpu().to(torch.float32).numpy().astype(np_dtype) for n, a in zip(compiled.inputs, example_args, strict=True)}
     with gpu_lock():
-        program = CompiledProgram.build(compiled, {**const_feed, **feed})
+        if dev_consts is None:
+            const_feed = bind_constants(compiled, sources)
+        else:
+            const_feed = _bind_device_constants(compiled, sources, dev_consts)
+        program = CompiledProgram.build(compiled, {**const_feed, **feed}, arena=arena)
     return _Program(program, list(compiled.inputs), list(compiled.outputs))
 
 
@@ -188,23 +219,37 @@ class EmmyGenRunner:
             return hd, attn.q_proj.out_features // hd, attn.k_proj.out_features // hd, attn.scaling
 
         attn_meta = []  # per-layer (head_dim, num_heads, num_kv, scaling)
+        from emmy.compiler.backend.cuda.program import BufferArena
+
         pre_programs, post_programs = [], []
         pre_decode, post_decode = [], []
         decode_ok = decode_bucket and decode_bucket > 0
+        # One arena for every program this runner builds: layers run sequentially, so
+        # all layers' activation buffers + scratch slabs share one layer's worth of
+        # device memory instead of scaling with num_layers.
+        arena = BufferArena()
         for i, block in enumerate(layers):
             meta = _meta(block.self_attn)
             attn_meta.append(meta)
             attn_width = meta[1] * meta[0]  # this layer's num_heads * head_dim (gemma-4: global ≠ sliding)
             logger.info("[gen_runner] compiling layer %d/%d (pre + post%s)...", i + 1, len(layers), " + decode" if decode_ok else "")
             pre_w, post_w = build_attention_split_wrapper(block)
+            # Per-wrapper device-constant caches: the symbolic program and its static
+            # decode-bucket twin bind the SAME weights — share one upload, not two.
+            pre_consts: dict = {}
+            post_consts: dict = {}
             with torch.device("cpu"):
-                pre_programs.append(_compile_split(pre_w, [torch.zeros(8, hidden, dtype=dtype)], ["hidden"], np_dtype))
+                pre_programs.append(
+                    _compile_split(pre_w, [torch.zeros(8, hidden, dtype=dtype)], ["hidden"], np_dtype, dev_consts=pre_consts, arena=arena)
+                )
                 post_programs.append(
                     _compile_split(
                         post_w,
                         [torch.zeros(8, attn_width, dtype=dtype), torch.zeros(8, hidden, dtype=dtype)],
                         ["attn_out", "residual"],
                         np_dtype,
+                        dev_consts=post_consts,
+                        arena=arena,
                     )
                 )
                 # Static M=decode_bucket twins — fast at decode (small M). If a layer's static
@@ -212,13 +257,19 @@ class EmmyGenRunner:
                 # decode path entirely and fall back to the symbolic programs (slow but correct).
                 if decode_ok:
                     try:
-                        pre_decode.append(_compile_split(pre_w, [torch.zeros(decode_bucket, hidden, dtype=dtype)], None, np_dtype))
+                        pre_decode.append(
+                            _compile_split(
+                                pre_w, [torch.zeros(decode_bucket, hidden, dtype=dtype)], None, np_dtype, dev_consts=pre_consts, arena=arena
+                            )
+                        )
                         post_decode.append(
                             _compile_split(
                                 post_w,
                                 [torch.zeros(decode_bucket, attn_width, dtype=dtype), torch.zeros(decode_bucket, hidden, dtype=dtype)],
                                 None,
                                 np_dtype,
+                                dev_consts=post_consts,
+                                arena=arena,
                             )
                         )
                     except Exception as ex:  # noqa: BLE001 — any lowering/compile failure → disable the bucket

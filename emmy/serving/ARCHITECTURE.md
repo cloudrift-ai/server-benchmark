@@ -78,19 +78,25 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   also compiles a **static M=`decode_bucket` (default 16)** `pre`/`post` twin per layer and uses it when
   `num_tokens ≤ bucket` (pad → run → slice the real rows) — the symbolic hint-512 M-tile is ~66× too slow at decode
   M=1; falls back to symbolic above the bucket or if a static compile fails. So
-  up to 4 capacity programs/layer — a real memory-budget risk, and **`EMMY_GEN_DECODE_BUCKET=0`**
-  (`config.gen_decode_bucket`) disables the twin, ~halving the on-GPU weight footprint at the cost of decode speed.
+  up to 4 capacity programs/layer — a real memory-budget risk for the activation buffers, though the twin's
+  **weights are shared**: `_compile_split` binds constants through a per-wrapper device cache
+  (`_bind_device_constants` — one upload per `(source_path, load_ops)`, the same cupy array fed to both builds), so
+  the decode twin adds no weight copy. **`EMMY_GEN_DECODE_BUCKET=0`** (`config.gen_decode_bucket`) still disables the
+  twin entirely at the cost of decode speed.
   **Multimodal wrappers:** the trunk is resolved through `language_model` (gemma-4 "unified" nests the decoder stack +
   embed/norm there) and the text dims come from `config.text_config`.
 
-  > **Memory budget (measured, gemma-4-12B / 32 GB RTX 5090).** Serving the 12B does **not** fit today, for two reasons
-  > that are emmy artifacts rather than inherent costs — stock vLLM serves the same model on the same card:
-  > 1. the decode twin binds a **second copy** of every layer's weights (each `_compile_split` does its own
-  >    `bind_constants` → `CompiledProgram.build`), so weights land at ~2× (~44 GB) — `EMMY_GEN_DECODE_BUCKET=0` is the
-  >    stopgap; **sharing the constants** between the symbolic and decode programs is the real fix;
-  > 2. **every layer's program retains its own capacity-sized activation buffers** (~350 MB/layer at
-  >    `max_num_batched_tokens=4096` ⇒ ~17 GB across 48 layers), where stock vLLM reuses one transient buffer across
-  >    layers. Pooling/sharing those buffers is the fix; until then emmy's footprint scales with `num_layers`.
+  > **Memory budget (measured, gemma-4-12B / 32 GB RTX 5090).** The two artifacts that made the 12B need ~2–3× stock
+  > vLLM's memory (it only fit at `ctx 256` with the decode twin off) are both fixed:
+  > 1. ~~the decode twin binds a second copy of every layer's weights~~ **fixed** — the symbolic and decode programs
+  >    share one device buffer per weight via the per-wrapper constant cache (see decode bucket above);
+  > 2. ~~every layer's program retains its own capacity-sized activation buffers~~ (~350 MB/layer ⇒ ~17 GB across
+  >    48 layers at `max_num_batched_tokens=4096`) **fixed** — every program the runner builds shares one
+  >    `BufferArena` (`backend/cuda/program.py`): input/output buffers and the scratch slab are views into per-key
+  >    grow-only backings, so all layers hold ~one layer's worth. Safe because layers run sequentially and each
+  >    program's outputs are host-copied/cloned before the next program runs; a backing that grows (e.g. gemma-4's
+  >    wider global layers, or a bigger prefill `T`) leaves earlier generations alive so captured graphs / TMA
+  >    descriptors never dangle. The re-validation of the 12B footprint on a real 5090 is pending (Phase-A exit run).
 - `vllm_model_gen.py` — `EmmyGenModel` (Phase 3; the generative vLLM model class; Qwen3 / Llama / **Gemma-3/4**).
   Resolves `mc.hf_config` through **`text_config`** first (gemma-4's multimodal "unified" checkpoint nests every text
   attribute — `layer_types` / `rope_parameters` / `sliding_window` / vocab+hidden size / `final_logit_softcapping` —

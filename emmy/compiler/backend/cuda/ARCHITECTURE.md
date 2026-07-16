@@ -92,6 +92,17 @@ nuance is `run_program_debug`'s per-launch snapshots — a buffer read *after it
 (each kernel's own output is still valid at its launch, the usual debug read). Planner unit tests:
 `tests/compiler/backend/test_planner.py`.
 
+**Cross-program pooling (`BufferArena`).** The slab kills scratch duplication *within* a program; `BufferArena` kills
+it *across* programs that run sequentially (the serving runner builds 2–4 programs × `num_layers`, and without pooling
+each holds its own capacity-sized activation set — ~350 MB × 48 layers for gemma-4-12B). `CompiledProgram.build(...,
+arena=…)` takes every input/output buffer (keyed `role:name` so an input never aliases an output *within* one program)
+and the scratch slab (one shared `"scratch-slab"` key) as views into the arena's grow-only per-key backings; constants
+are never pooled. Growth allocates a fresh backing and leaves older generations alive under the programs that view
+them, so captured graphs / TMA descriptors never dangle. Safety is the caller's contract: programs sharing an arena
+must never run concurrently, and each program's outputs must be consumed before the next program runs (the runner
+host-copies / clones them immediately). Stale backing contents are as safe as a reused slab slot — same lowering
+contract. No arena (the default) keeps standalone allocation for tune / bench / one-off runs.
+
 **Repeated execution (`CompiledProgram.rebind` / `run_once`).** One built program can serve request after request —
 the serving path (the vLLM plugin runs one compiled dynamic-seq_len program per sequence). `rebind(input_data)`
 re-binds fresh inputs on the existing program: supplied buffers re-upload (in place when the resolved shape is

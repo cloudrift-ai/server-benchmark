@@ -145,6 +145,26 @@ def _pending_contraction_half(graph: Graph, consumer: Node) -> bool:
     return reads_product and sums
 
 
+def _is_castfree_indexmap(graph: Graph, producer: Node) -> bool:
+    """A pure indexmap that also PRESERVES dtype end-to-end — the only kind the
+    materialization guards below may exempt as plumbing. A dtype-changing copy (a traced
+    cast — ``005_split_cast_from_indexmap`` materializes them as source-shaped copy nodes)
+    lifts to the same Assign-free load→write body as a re-index, but splicing it into a
+    contraction / flash offer site erases the dtype boundary the operand-staging gates key
+    on (``kv_stage_ok`` reads the operand BUFFER dtype — the gemma V-norm's f32→f16 cast
+    fused into P@V left the flash V reading the f32 buffer, gmem-direct forever). So a
+    dtype-changing copy takes the guards like any compute-bearing producer and stays
+    materialized at the traced cast boundary."""
+    if not _is_pure_indexmap(producer.op):
+        return False
+    out_dt = producer.output.dtype.name
+    for i in producer.inputs:
+        src = graph.nodes.get(i)
+        if src is not None and src.output.dtype.name != out_dt:
+            return False
+    return True
+
+
 def _is_softmax_shaped(op) -> bool:
     """The op carries softmax's structural signature — an ``exp`` Assign AND a ``maximum``
     Accum (the rowmax). Distinguishes a softmax half from other exp-bearing kernels (a
@@ -269,7 +289,16 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
     # broadcast scaffolding) may fuse into a bare matmul product before its sum-reduce partner
     # does — see :func:`_pending_contraction_half`. The blocked producer isn't lost: once the
     # halves merge, it retries against the full contraction kernel on a later fixpoint sweep.
-    if not _is_pure_indexmap(producer.op) and _pending_contraction_half(graph, consumer):
+    # A dtype-changing copy (a traced cast, split source-shaped by ``005_split_cast_from_indexmap``)
+    # never merges INTO pure-indexmap plumbing: the combined kernel would carry the cast on the
+    # plumbing's output — an unsqueeze/broadcast-shaped buffer — instead of the source-shaped
+    # boundary. The plumbing stays lazy and folds into the downstream real consumer, which then
+    # reads the cast's materialized (narrow-dtype) buffer through the composed index. The reverse
+    # direction (castfree plumbing merging into the cast) keeps the cast's own shape and stays legal.
+    if _is_pure_indexmap(producer.op) and not _is_castfree_indexmap(graph, producer) and _is_pure_indexmap(consumer.op):
+        raise RuleSkipped("cast copy feeding indexmap plumbing — the cast stays at the traced dtype boundary")
+
+    if not _is_castfree_indexmap(graph, producer) and _pending_contraction_half(graph, consumer):
         raise RuleSkipped("consumer is an unfused contraction half — the product merges with its reduce first")
 
     # Flash-consumer protection: a softmax-then-P@V kernel (the flash recognizer's offer site) is
@@ -283,7 +312,7 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
     # softmax half hasn't fused in yet — the offer site only forms afterwards, too late to
     # protect. The score producer's mirror-image deferral lives in tile recognition
     # (``is_flash_score_producer``).
-    if not _is_pure_indexmap(producer.op) and (
+    if not _is_castfree_indexmap(graph, producer) and (
         _is_flash_offer_shaped(consumer.op) or _sum_contracts_exp_producer(graph, consumer, producer)
     ):
         raise RuleSkipped("consumer is a (future) flash softmax-then-P@V offer site — its operands stay materialized")
@@ -296,7 +325,7 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
     # dataflow assembling itself (the QK contraction fusing into its scale/mask epilogue) and
     # pass through, as does the bare-product half merging with its reduce partner.
     if (
-        not _is_pure_indexmap(producer.op)
+        not _is_castfree_indexmap(graph, producer)
         and not any(isinstance(s, Accum) for s in producer.op.body.iter())
         and not _is_reduce_partner_merge(producer, consumer)
         and _feeds_softmax(graph, consumer)

@@ -111,10 +111,6 @@ def test_schedule_leaf_set_equals_catalog():
             assert stages == {""}, f"{tile_spec}: masked-N must decline staging: {stages}"
         else:
             assert {"", "d1/cp"} <= stages, f"{tile_spec}: missing the base resolved stages: {stages}"
-        # This matmul is BATCHED (a leading literal batch dim in A's gmem index): TMA's 2-D
-        # descriptor box cannot encode the extra dim, so every tma move resolver-declines —
-        # cp.async (whose fill closure carries the dim verbatim) is the only transport offered.
-        assert not any("tma" in s for s in stages), f"{tile_spec}: batched operands must decline TMA: {stages}"
         splits = {str(family_value(r, "REDUCE")) for r in tiled if family_value(r, "REDUCE")}
         assert splits == set(splitk_moves(warp=False)), f"{tile_spec}: {splits}"
         split_stages = {str(family_value(r, "STAGE")) for r in tiled if family_value(r, "REDUCE")}
@@ -124,6 +120,13 @@ def test_schedule_leaf_set_equals_catalog():
         # product; the fifth factor of the catalog.
         assert {r.get("RASTER") for r in tiled} == set(raster_moves()), f"{tile_spec}: RASTER family incomplete"
         assert len(tiled) == len(stages) * n_reduces * len(raster_moves()), f"{tile_spec}: {len(tiled)} rows"
+    # This matmul is BATCHED (a leading literal batch dim in A's gmem index). The leading dim is
+    # tile/K-invariant, so TMA boxes it as an extent-1 dim with the operand's own origin expr
+    # (``_tma_operand_rank_ok`` — the flash K/V convention extended to the matmul tiers; the gemma
+    # ``[1, seq, K]`` unit-batch views were the motivating decline) and resolves wherever the box
+    # fits the 1..256 hardware range — an oversized register tile still declines per-tile.
+    all_stages = {str(family_value(r, "STAGE")) for r in rows}
+    assert any("tma" in s for s in all_stages), f"batched tile/K-invariant operands must offer TMA somewhere: {all_stages}"
 
 
 def test_schedule_leaves_key_tile_by_contraction_axis():

@@ -124,10 +124,10 @@ def _step_feed(ids_name, mask_name, pos_name, np_dtype, token_ids):
 class _CompiledLM:
     """Compiled fp16 whole-model program exposing ``logits(ids) -> np.ndarray[vocab]``.
 
-    Traces ``AutoModelForCausalLM`` through the dynamic whole-model wrapper (full logits
-    ``[1, S, vocab]``), compiles on the CUDA backend, binds fp16 constants, and re-runs the
-    whole prefix each call via the serving ``rebind`` path (one compiled dynamic-seq_len
-    program, request after request); ``logits()`` slices the final position on the host.
+    Traces ``AutoModelForCausalLM`` through the dynamic whole-model wrapper with the
+    in-graph last-token slice (``slice_last_logits=True`` → ``[1, 1, vocab]``), compiles on
+    the CUDA backend, binds fp16 constants, and re-runs the whole prefix each call via the
+    serving ``rebind`` path (one compiled dynamic-seq_len program, request after request).
     Mirrors ``EmmyForwardRunner.create``."""
 
     def __init__(self, program, input_names, output_name):
@@ -164,15 +164,14 @@ class _CompiledLM:
         dtype = torch.float16
         np_dtype = np.dtype("float16")
         with torch.device("cpu"):
-            # Full-logits wrapper: lm_head over all S positions, with the last row sliced
-            # on the HOST in ``logits()``. The in-graph slice (``slice_last_logits=True``)
-            # makes lm_head an M=1 *demoted* matmul that must NOT ship yet: the cold build
-            # accepts it nowadays, but lowers the ``[:, -1:, :]`` slice as a raw ``-1`` row
-            # offset in the kernel (reads before the buffer → silent zeros/garbage at every
-            # seq_len; would be ~3x faster per step if fixed) — pinned by
-            # ``test_slice_last_logits_lowers_cold``. Full logits + a host slice stays the
-            # correct cut until that lowering is fixed.
-            wrapper = build_full_model_wrapper(model, seq_len, dtype, dynamic=True)
+            # In-graph last-token slice: lm_head runs over ONE row ([1, 1, vocab]), not all
+            # S positions — the generate loop only needs next-token logits, and the sliced
+            # form also skips the [1, S, vocab] host copy each step (~3x faster per step at
+            # T=64 on a 2k-hidden/32k-vocab model). The M=1 *demoted* lm_head this creates
+            # lowers cold — ``140_slice`` normalizes the negative row index against the
+            # symbolic extent (``seq_len - 1``) — pinned by
+            # ``test_slice_last_logits_lowers_cold``.
+            wrapper = build_full_model_wrapper(model, seq_len, dtype, dynamic=True, slice_last_logits=True)
             specs = parse_position_specs(
                 ["seq_len@input_ids:1", "seq_len@attention_mask:2", "seq_len@attention_mask:3", "seq_len@position_ids:1"]
             )
@@ -220,5 +219,5 @@ class _CompiledLM:
         with gpu_lock():
             self._program.rebind(feed)  # resolves seq_len from the input shapes
             self._program.run_once()
-            out = self._program.outputs({"seq_len": s})[self._output_name]  # [1, S, vocab]
+            out = self._program.outputs({"seq_len": s})[self._output_name]  # [1, 1, vocab]
         return out[0, -1, :].astype(np.float32)  # next-token logits [vocab]

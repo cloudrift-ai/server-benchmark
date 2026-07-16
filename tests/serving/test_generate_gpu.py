@@ -5,8 +5,8 @@ Llama CausalLM (no network), compiles the whole-model fp16 dynamic path through
 ``_CompiledLM`` (full logits, last row sliced on the host), and checks the compiled
 next-token logits against an eager fp16 reference across a few growing prefixes — the
 plan's "compile-and-run spike" that de-risks whole-model lowering (int64 embedding-gather,
-lm_head matmul) before the generate loop is trusted. The ``slice_last_logits`` xfail below
-pins the wrong M=1 lm_head lowering (raw ``-1`` slice index) that blocks the in-graph slice.
+lm_head matmul) before the generate loop is trusted. ``test_slice_last_logits_lowers_cold``
+pins the cold build + numerics of the in-graph last-token slice ``_CompiledLM`` uses.
 """
 
 import numpy as np
@@ -63,19 +63,14 @@ def test_generate_oracle_matches_eager_fp16():
         assert int(np.argmax(dep)) == int(np.argmax(eager))  # greedy token agrees
 
 
-@pytest.mark.xfail(
-    reason="M=1 demoted lm_head (slice_last_logits) lowers WRONG: the [:, -1:, :] row index is emitted raw as -1 (OOB read); tracked",
-    strict=False,
-)
 def test_slice_last_logits_lowers_cold():
-    """Tripwire for the in-graph last-token slice optimization. The cold build (``tune_db=None``,
-    empty prior) now ACCEPTS the M=1 demoted lm_head (it once stayed an unlowered ``LoopOp``;
-    the tile-IR rebuild demotes the unbindable Contraction to PLANAR) — but the lowered kernel
-    is WRONG: the ``hidden[:, -1:, :]`` slice's negative row index reaches codegen as a raw
-    ``-1`` (``mul[-H + a1]``, reads before the buffer → silent zeros at every seq_len). This
-    runs the sliced graph and checks the logits against eager; when the slice lowering is fixed
-    this xfail flips to xpass — re-enable ``slice_last_logits`` in ``_CompiledLM`` (measured
-    ~3x faster per generate step at T=64)."""
+    """The in-graph last-token slice must build AND compute correctly COLD (``tune_db=None``,
+    empty prior) — it is ``_CompiledLM``'s production graph. Two historical failure modes are
+    pinned here: the M=1 demoted lm_head once stayed an unlowered ``LoopOp`` (fixed by the
+    tile-IR rebuild: the unbindable Contraction demotes to PLANAR), and the
+    ``hidden[:, -1:, :]`` slice's negative row index once reached codegen as a raw ``-1``
+    (``mul[-H + a1]``, an OOB read → silent zeros; fixed in ``140_slice`` by normalizing to
+    ``seq_len - 1``). Runs the sliced graph at two lengths and checks logits against eager."""
     pytest.importorskip("cupy")
     import torch
 

@@ -339,9 +339,12 @@ def _option(tile, place, spec: str, name: str, knobs: dict) -> TileOp:
 _ATOMS_BY_DTYPE = {"f16": ("mma_m16n8k16_f16_f32",), "bf16": ("mma_m16n8k16_bf16_f32",)}
 
 # Emit unpinned split-K candidates only when the output grid alone leaves the GPU under-occupied —
-# split-K beyond the ~2-wave occupancy need is pure combine/workspace waste (the prior's
+# split-K far past the occupancy need is pure combine/workspace waste (the prior's
 # ``D_splitk_excess`` prices the remainder; this gate keeps the obviously-pointless rows out).
-_SPLITK_MAX_CTAS = 512
+# 1024, not 512: the gemma s2048 goldens (q_proj.s2048 ``g2k`` at a 1024-CTA grid, 313 vs 402 µs
+# un-split on the 5090) sit right past the old cap — a recorded golden must stay a member of the
+# unpinned enumeration, and the measured win refutes "~2 waves is enough" at that boundary.
+_SPLITK_MAX_CTAS = 1024
 
 
 def _fragment_epilogue_ok(epilogue: Body) -> bool:
@@ -703,6 +706,18 @@ def _can_stage_warp(stage, k_axis: Axis, tile_m: int, tile_n: int, bk: int, atom
     return (bk_elems % 2 == 0) and (tile_n % 2 == 0)
 
 
+def _tma_operand_rank_ok(index: tuple, tile_name: str, k_name: str) -> bool:
+    """Whether TMA's box can encode this operand's gmem index. The box's data plane is the
+    TRAILING 2 dims (A ``(m, k)`` / B ``(k, n)``); any extra LEADING dims ride as extent-1 box
+    dims whose origin coordinate is the operand's own index expr, evaluated once per fill (the
+    flash K/V ``(B, H, S, D)`` convention) — so those exprs must not move with the tile or the
+    K loop, or the rank-2 plane the box copies would be the wrong one. Rank caps at 4 so the
+    swizzle-split box (+1 dim) stays within TMA's 5-dim hardware limit."""
+    if not 2 <= len(index) <= 4:
+        return False
+    return all(not ({tile_name, k_name} & e.free_vars()) for e in index[:-2])
+
+
 def _can_stage_warp_tma(
     stage, k_axis: Axis, n_axis: Axis, tile_n: int, bk: int, atom_k: int, elem_bytes: int, mask_n: bool, b_trans: bool
 ) -> bool:
@@ -741,11 +756,16 @@ def _resolve_warp_stage(c: Contraction, stage: Stage, budget: int = STATIC_SMEM_
     a_nbytes = atom.operand_dtype("a").nbytes
     bk = c.tile.bk
     m, n = c.m, c.n
-    # The TMA descriptor's box is 2-D over the operand's own array — a batched (or
-    # leading-literal-indexed) operand has more gmem dims than the box and cannot encode. cp.async
-    # has no descriptor (its fill closure carries the extra index dims verbatim), so it stays
-    # eligible for those.
-    tma_rank_ok = isinstance(c.a_operand, Load) and len(c.a_operand.index) == 2 and len(c.b_load.index) == 2
+    # The TMA box's data plane is the operand's TRAILING 2 gmem dims; extra leading (batch)
+    # dims ride as extent-1 box dims with the operand's own origin exprs — eligible when those
+    # exprs don't move with the tile or the K loop (:func:`_tma_operand_rank_ok`; the model's
+    # ``[1, seq, K]`` unit-batch views were the motivating decline). cp.async has no descriptor
+    # (its fill closure carries the extra index dims verbatim), so it never gated on rank.
+    tma_rank_ok = (
+        isinstance(c.a_operand, Load)
+        and _tma_operand_rank_ok(c.a_operand.index, m.axis.name, c.k_axis.name)
+        and _tma_operand_rank_ok(c.b_load.index, n.axis.name, c.k_axis.name)
+    )
     # TMA hardware: every box dim must be 1..256 — the slot shapes are A (tile_m, bk) / B (bk,
     # tile_n), so an oversized warp register tile (e.g. tile_m = 512 at w4/f8) must decline TMA
     # (the scalar resolver gates the same; cp.async has no box).
@@ -791,9 +811,12 @@ def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = ST
         return None
     if not inputs or c.a_operand.input not in inputs:
         return None
-    # TMA's 2-D descriptor box cannot encode a batched / leading-literal-indexed operand (extra
-    # gmem dims); cp.async's fill closure carries them verbatim, so only TMA is gated on rank.
-    if stage.transport == "tma" and (len(c.a_operand.index) != 2 or len(c.b_load.index) != 2):
+    # TMA's box encodes extra leading (batch) dims as extent-1 dims when they are tile/K-invariant
+    # (:func:`_tma_operand_rank_ok`); cp.async's fill closure carries them verbatim, no rank gate.
+    if stage.transport == "tma" and not (
+        _tma_operand_rank_ok(c.a_operand.index, c.m.axis.name, c.k_axis.name)
+        and _tma_operand_rank_ok(c.b_load.index, c.n.axis.name, c.k_axis.name)
+    ):
         return None
     # Staging needs the CTA to BE one (tile_m × tile_n) output tile (the cooperative fill / drain
     # contract). A register-only tile (units 1×1, ``block_threads`` None) launches the scalar

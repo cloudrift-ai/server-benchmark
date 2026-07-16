@@ -403,11 +403,17 @@ def _slab_operands(
         tile, tile_base = mn[i], base[i]
         shape = (tile.tile, bk_elems) if is_row else (bk_elems, tile.tile)
         elem = elems[i]
+        # A >2-D operand (batched / unit-batch view) boxes as rank-N with leading extent-1 dims;
+        # ``_box_origin`` already yields the full-rank origin (the leading index exprs ride
+        # through σ untouched — the stage resolvers gated them tile/K-invariant). The flash K/V
+        # ``(1, 1, bn, head_dim)`` convention, extended to the matmul tiers.
+        box = (1,) * (len(index_srcs[i]) - 2) + shape if len(index_srcs[i]) > 2 else None
         ops.append(
             Operand(
                 tag=tag,
                 buf=bufs[i],
                 shape=shape,
+                box=box,
                 coords=_box_origin(index_srcs[i], tile=tile, tile_base=tile_base, k_axis=k_axis),
                 index=_slab_index(index_srcs[i], tile=tile, tile_base=tile_base, k_axis=k_axis, tile_is_row=is_row),
                 swizzle=swizzles[i],

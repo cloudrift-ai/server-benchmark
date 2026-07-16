@@ -692,7 +692,7 @@ def _fuse_degraded(root: Node, reason: str) -> None:
     from emmy.compiler.pipeline.search.space import PLACE  # noqa: PLC0415
 
     if PLACE.narrow_at("fold") == "fuse":
-        logger.warning("PLACE@fold=fuse: flash fuse of %r not certifiable (%s); degrading to cut", root.name, reason)
+        logger.warning("PLACE@fold=fuse: flash fuse of %r not certifiable (%s); degrading to cut", root.id, reason)
 
 
 def _extract_v_layout(root: Node, v_buf: str) -> tuple[int, int] | None:

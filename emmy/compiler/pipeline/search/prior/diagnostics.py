@@ -594,6 +594,16 @@ def _anchor_walk(prior, tree_nodes: list, gold: dict) -> tuple[int, list[_Anchor
 
     from emmy.compiler.pipeline.search.features import knob_features  # noqa: PLC0415
 
+    # Rows stripped of tree schema (a measurement freeze: parentless with the loader's
+    # ``depth=0`` stamp — live rows are always depth >= 1) carry no fork structure;
+    # walking them would fabricate one root mega-fork over the op's whole leaf set.
+    # Excluded up front, and their absence stays loud via the no-tree descriptor (an
+    # empty input keeps the "no explored forks" spelling — the O3-only-op case).
+    treeful = [n for n in tree_nodes if n.depth > 0 or n.parent_key is not None]
+    if tree_nodes and not treeful:
+        return (0, [], "no fork-tree data (leaf-only rows — a measurement freeze?)")
+    tree_nodes = treeful
+
     # Sentinel depth -1 so the first real walk result always replaces it — a level-0
     # "branch never built" must not lose to the sentinel text at equal depth 0.
     best: tuple[int, list[_AnchorStep], str] = (-1, [], "no explored forks")

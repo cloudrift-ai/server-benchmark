@@ -13,45 +13,9 @@ import json
 
 from emmy.compiler.pipeline.search.db import NodeRow, SearchDB, implausible_value_reason, impossible_kernel_reason
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
-
-_GPU = "NVIDIA GeForce RTX 5090"  # registry records fp32/fp16 peaks -> the gate is active
-
-# The poisoned class's shape: symbolic-M mlp_down (free excludes the symbolic axis,
-# benched at the dynamic hint), fp16 operands. 2*4096*14336*512 FLOPs. The stamps
-# certify every loop multiplies the iteration space (depth 3 = 1 free + 1 reduce +
-# 1 symbolic — the dynM matmul spelling), which is what licenses the free x red work
-# formula.
-_F16_FEATS = {
-    "S_ext_free_prod": 4096.0,
-    "S_ext_reduce_max": 14336.0,
-    "S_ext_n_free_axis": 1.0,
-    "S_ext_n_reduce_axis": 1.0,
-    "S_loop_depth": 3.0,
-    "S_ext_n_symbolic_axis": 1.0,
-    "S_dtype_f16": 2.0,
-    "TILE@a2": "a:mma_m16n8k16_f16/w1x8/f2x8/k8",
-    "REDUCE@a2": "g2k",
-}
-
-
-def _row(key: str, *, value_us: float, features: dict | None = None, gpu: str = _GPU, **over) -> NodeRow:
-    kw = dict(
-        node_key=key,
-        parent_key=None,
-        context_key="ctx",
-        op_sig="op",
-        features=dict(_F16_FEATS if features is None else features),
-        value_us=value_us,
-        depth=5,
-        gpu=gpu,
-        visits=1,
-        is_leaf=True,
-        status="ok",
-        run_id="run",
-        measured_at="2026-07-09T00:00:00+00:00",
-    )
-    kw.update(over)
-    return NodeRow(**kw)
+from tests.compiler.pipeline.search.conftest import F16_MATMUL_FEATS as _F16_FEATS
+from tests.compiler.pipeline.search.conftest import impossible_staged_feats
+from tests.compiler.pipeline.search.conftest import node_row as _row
 
 
 def _insert_raw(db: SearchDB, row: NodeRow) -> None:
@@ -152,16 +116,9 @@ def test_overlapping_reduce_kinds_stay_ungated() -> None:
 
 
 def test_over_budget_staged_kernel_is_flagged_at_any_shape() -> None:
-    # The square.512.dynM residue: a cp.async-staged warp tile whose slab (139 KB for
-    # w1x8/f2x8/k8) exceeds the ~99 KB dynamic-smem cap could never launch — but the
-    # combine-only 2 µs it left behind implies a LEGAL 133 TFLOP/s on that small shape,
-    # so only the validity check catches it. The same config unstaged is a real kernel.
-    small = {
-        **{k: v for k, v in _F16_FEATS.items() if not k.startswith(("S_ext_free", "S_ext_reduce"))},
-        "S_ext_free_prod": 512.0,
-        "S_ext_reduce_max": 512.0,
-        "STAGE@a2": "d1/cp",
-    }
+    # The square.512.dynM residue (see the shared fixture's docstring): only the
+    # validity check catches it. The same config unstaged is a real kernel.
+    small = impossible_staged_feats()
     assert impossible_kernel_reason(_row("k", value_us=2.02, features=small)) is not None
     assert implausible_value_reason(_row("k", value_us=2.02, features=small)) is None  # latency floor is blind here
     unstaged = {**small, "STAGE@a2": ""}

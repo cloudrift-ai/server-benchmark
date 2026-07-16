@@ -129,6 +129,16 @@ def register_run_command(subparsers):
             "Retires ad-hoc table parsing in the golden-sweep workflow."
         ),
     )
+    parser.add_argument(
+        "--no-record-nodes",
+        action="store_true",
+        help=(
+            "Skip the default bench-to-node recording. When pinned rows bench (--golden / --ab) at tune-standard "
+            "quality (warmup >= 5, iters >= 20), each clean row AND the greedy pick's isolated re-bench are recorded "
+            "as leaf rows in the tune DB's node store — the training-data feed for the offline prior. Flagged rows "
+            "(pin mismatch, wrong answer, intensity floor) and the --ir path never record."
+        ),
+    )
     parser.add_argument("--dump-dir", default=None, help="Directory to dump intermediate compilation artifacts.")
     parser.add_argument("--debug", action="store_true", help="Per-launch tensor dumps in the emmy backend.")
     parser.add_argument(
@@ -341,6 +351,7 @@ def handle_run(args):
     _print_kernel_stats(compiled, bench, golden_benches=golden_benches, greedy_fail=greedy_fail, greedy_iso=greedy_iso)
     if getattr(args, "json", None):
         _write_ab_json(args, results or {}, compiled, bench, golden_benches, greedy_fail=greedy_fail, greedy_iso=greedy_iso)
+    _record_bench_nodes(args, golden_benches, greedy_iso)
     if args.profile and greedy_fail is None:
         _run_ncu_profile(args, dump_dir=dump.dir if dump else None)
     if (
@@ -349,6 +360,56 @@ def handle_run(args):
         or any(gb.status != "ok" for gb in golden_benches or [])
     ):
         sys.exit(1)  # every row is reported above; any failed row (greedy or pinned) exits non-zero
+
+
+def _recordable_bench_leaves(golden_benches, greedy_iso) -> list:
+    """The benched rows honest enough to record into the node store: every ``ok`` row
+    with NO integrity flag (a flagged ok row measured something untrue — wrong answer,
+    intensity floor), plus ``bench_fail`` rows whose config actually realized (a
+    genuine "doesn't bench here" negative). ``pin_unmatched`` rows and compile
+    failures (``graph is None``) never record — the claimed config never ran, and
+    "not offered" is not "doesn't launch". Pure over the ``_GoldenBench`` duck type,
+    so tests drive it with stubs."""
+    from emmy.compiler.pipeline.search.bench_record import bench_leaves  # noqa: PLC0415
+
+    leaves = []
+    for gb in ([greedy_iso] if greedy_iso is not None else []) + list(golden_benches or []):
+        if gb.graph is None or gb.status == "pin_unmatched":
+            continue
+        if gb.status == "ok" and not gb.flags:
+            leaves += bench_leaves(gb.graph, gb.bench)
+        elif gb.status == "bench_fail":
+            leaves += bench_leaves(gb.graph, None, status="bench_fail")
+    return leaves
+
+
+def _record_bench_nodes(args, golden_benches, greedy_iso) -> None:
+    """Default-on bench-to-node recording (``--no-record-nodes`` opts out): the pinned
+    A/B rows and the greedy isolated re-bench become node-store leaves — the training
+    data the tune-only write path let every manual sweep evaporate from. Records only
+    at tune-standard measurement quality; ``record_nodes``' plausibility gate and
+    quality-aware leaf replacement still judge every row."""
+    if getattr(args, "no_record_nodes", False) or (greedy_iso is None and not golden_benches):
+        return
+    from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.bench_record import meets_quality_bar, record_bench_leaves  # noqa: PLC0415
+
+    # print, not logger.info: `emmy run` gates the root logger to WARNING at default
+    # verbosity, and a default-on WRITE to the user's tune DB must announce itself
+    # (the bench table around it prints too — same CLI-output surface).
+    if not meets_quality_bar(args.warmup, args.iters):
+        print(
+            f"[record-nodes] --warmup {args.warmup} / --iters {args.iters} below the tune bench standard — "
+            f"measurements NOT recorded into the node store (raise them or pass --no-record-nodes to silence)"
+        )
+        return
+    leaves = _recordable_bench_leaves(golden_benches, greedy_iso)
+    if not leaves:
+        return
+    db_path = resolve_tune_db()
+    n = record_bench_leaves(db_path, Context.probe(), leaves)
+    print(f"[record-nodes] {n} bench row(s) recorded into the node store ({db_path}) — opt out with --no-record-nodes")
 
 
 def _reset_persisting_l2_cache() -> None:

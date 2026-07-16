@@ -109,8 +109,17 @@ verified-best configs (tuned + A/B'd with integrity gates), committed per-GPU.
      re-measured leaves, and **path-structure-fragile** (its identity is a prefix in the *historical* fork-tree topology;
      level reorders / knob moves orphan it, and no spelling migration fixes that). Leaves are complete points in knob
      space — valid under any tree organization.
-   - Why goldens never train: they are the only *verified-optimum* labels (tune-golden A/B + integrity gates). Training
-     on them makes the promotion gate measure memorization. Their value is spent as the eval set.
+   - ~~Why goldens never train: they are the only *verified-optimum* labels (tune-golden A/B + integrity gates).
+     Training on them makes the promotion gate measure memorization. Their value is spent as the eval set.~~
+     **REVERSED 2026-07-15: goldens DO train, as a fit-time union.** The search data is censored exactly where the
+     verified optimum sits (the -O1 lane inversion, the post-swizzle fm optima found only by manual sweeps): a golden
+     the search never reached has NO nearby training rows in the freeze at all, so excluding goldens starves the fit
+     in the one region we know the answer. The fitter unions `Dataset.from_golden()` (source-marked, card-faithful
+     context, deployable-regime latency — must group with `H_opt=3` pools per decision 7, never the -O1 lane) with the
+     freeze rows at data-assembly time; the freeze file itself stays a pure DB extract (goldens are repo-checked, so
+     the fit's `(repo commit, freeze digest)` pin already covers them — baking copies in would only go stale). Gate
+     integrity moves to where the 07-15 update already put it: the leave-that-op-out fold (golden rank reported
+     full-train vs held-out, decision 13) and the next newly-onboarded model's goldens as the unseen acceptance set.
    - Freeze contents: ok leaves + **fail leaves** (negative examples — "doesn't build/launch here" is durable) + all
      regime rows (-O1 and -O3 both; no size budget — keep EVERY leaf passing the sanity filter). Raw knob dicts +
      shape/context/gpu + bench stats + provenance (measured_at, run_id; the freeze header stamps the repo commit and a
@@ -235,7 +244,9 @@ verified-best configs (tuned + A/B'd with integrity gates), committed per-GPU.
   kept as negatives).
 - Train/inference representation identity: synthesized partial rows NaN out undecided knobs exactly as the live
   descent featurization does.
-- Code-event refits must need no GPU. Goldens must never enter training.
+- Code-event refits must need no GPU. ~~Goldens must never enter training.~~ (Reversed 2026-07-15 — decision 5:
+  goldens join training via the fit-time union; held-out integrity comes from the fold splits + the next new
+  model's goldens.)
 - Repo conventions: knobs declared only in `search/space.py`; `pipeline/` never imports `backend/`; markdown wrapped
   ~120 chars; plans are ephemeral (this file gets deleted when the work lands — durable content goes to ARCHITECTURE.md).
 
@@ -320,6 +331,13 @@ of Phase 4. Phase 2 is diagnostic tooling — parallel with 3, consumed by 4's f
    files, row budgets, coverage-quota curation, in-repo manifest, CI data loading, the format doc. Deferred until a
    second consumer exists: HF dataset / GCS / git LFS distribution. Verify: freeze-twice determinism (same DB → same
    digest); round-trip vs `iter_nodes`; evals accept a freeze path interchangeably with the live DB.
+   **STATUS (2026-07-15): LANDED** (branch `feature/measurement-freeze`): `search/data/freeze.py`
+   (`freeze_reason` / `write_freeze` / `load_freeze` / the sniffing `load_node_rows`) + `scripts/freeze_node_store.py`;
+   JSONL, header line with both version axes reserved (`knob_ver`/`encoding_ver`), digest over sorted row payload
+   only; `eval online --dataset nodes --db` takes a freeze via the sniff seam. Verified on the real store: 5,990
+   leaves frozen (5,963 ok + 27 bench_fail; 10,787 branch rows excluded), freeze-twice digest identical, eval
+   degrades to leaf metrics as designed. `load_node_rows` is the seam the Phase-4 `emmy fit --data freeze:<path>`
+   consumes.
 4. **Training pipeline.** Prefix-row synthesis under the current fork structure, sibling-group ranking datasets,
    pool-level masking augmentation, group-holdout k-fold (leave-one-op-out AND leave-one-card-out via
    `Dataset.fold_node_rows`), candidate CatBoost rankers with monotone constraints; every fold reported through the
@@ -334,7 +352,10 @@ of Phase 4. Phase 2 is diagnostic tooling — parallel with 3, consumed by 4's f
    out-of-sample); (4) prefix synthesis + ranking groups → linear×freeze; (5) catboost×freeze — the open Phase-4
    questions below (loss, masking p/K, monotone list, depth budget) get decided empirically here, each candidate
    config just another metrics file. `--folds both` = the union of the two fold axes (two report sections), not
-   nested op×gpu — nesting starves training at this dataset size.
+   nested op×gpu — nesting starves training at this dataset size. Data assembly unions the freeze with
+   `Dataset.from_golden()` rows (decision 5 as reversed 2026-07-15): source-marked so folds can exclude them for the
+   memorization split, joined into pools by shape (`ShapeKey`/`tile_signature`), grouped with the deployable-regime
+   (`H_opt=3`) lane — never the -O1 ranking lane.
    Arch generalization is a first-class output (decision 11): the leave-one-card-out fold directly tests the
    2026-07-09 cross-card failure (analytic TILE regret 3.62× sm_89 → 11.49× sm_120), so report both gate metrics
    **per card, never pooled**; verify tier 1 actually learned an `H_* × knob` interaction (interaction
@@ -360,6 +381,150 @@ of Phase 4. Phase 2 is diagnostic tooling — parallel with 3, consumed by 4's f
    encoding-only changes stop quarantining node rows / freezes (most changes are encoding-only; raw knob dicts stay
    readable and a refit fully recovers). Touches `features.py`, the DB `feat_ver` stamp, checkpoint + freeze formats.
    The freeze header should reserve both axes from day one (currently equal) so this split needs no format migration.
+
+## Update 2026-07-15 — what the saturation arc changed (status of the 07-13 items below, and new inputs to Phase 4+)
+
+A week of landed work (#361 harness, #363 card-faithful eval contexts, #364 de-saturation + tie-pessimistic golden
+rank + a linear refit, #368 golden evidence tier at deploy, #369 golden-anchored descent diagnostics + a full 4090
+golden sweep) changes this plan's context materially:
+
+- **The historical eval numbers adjudicating refits were wrong twice over.** The offline prior's exp-squash clipped
+  quality at ±80, collapsing the whole good-tile region into a tie at `exp(-8)`: greedy fell through to emission
+  order (the 12–29x gemma cold misdeploys) while the strictly-greater rank metric reported 0 for every tied row
+  ("27/28 top-1" was a plateau artifact). Separately, `eval offline`/`eval online` built golden contexts from the
+  host GPU, not the golden's card. Both fixed (#364, #363); every pre-07-14 golden-rank number in this plan's
+  history is unreliable. The honest baseline: OLD weights median rank 461/top-100 30 of 122; the #364 refit 79/68.
+- **The refit's honest profile, measured on fresh sweep data** (`plans/offline-prior-old-vs-new-on-sweep-data.md`):
+  decisive on gemma (median 1422→90) and "everything else" (476→37); the fp16-square regression is real, exactly
+  the promotion-time size, and confined — those rows stay this plan's tier-1 acceptance cases. Critically,
+  **fork-level steering was a wash** (TILE regret 1.88x vs 1.95x): the linear refit reshaped the flattened-pool
+  ranking greedy uses, not the within-fork ordering PUCT uses. Phase 4's grouped per-fork ranking loss is therefore
+  not redundant with the refit — it targets the axis the refit provably did not move.
+- **The offline prior's deployment surface narrowed (#368).** Recorded goldens now decide cold deploys directly
+  (all golden kinds, verified on a 4090 incl. the attention hang-class shapes at 37–44 µs vs 143–158 prior picks),
+  and warm deploys are owned by measured evidence. The offline prior's remaining live surface is cold UNSEEDED
+  shapes and PUCT steering — which weights Phase 4's fold-based generalization gate even more heavily, and golden
+  rank on seeded shapes less.
+- **The gemma goldens are SPENT as the held-out unseen-shape set** — the #364 refit trained on them (item 3 below,
+  as amended). The Phase-4 gate needs a replacement: the next newly-onboarded model's goldens (record them BEFORE
+  any refit sees them), plus the leave-one-op-family-out fold as the standing proxy. Report memorization vs
+  generalization splits both ways, as decision 13 already requires.
+- **New diagnostics exist for the gate** (#369): the golden-anchored descent section makes reachability explicit
+  (matched fork levels per golden, loud NO TREE DATA absence, per-family divergence, -O3 endpoints) — the
+  store-conditioned blind spot that hid the saturation bug is now a rendered metric. Phase 1's metric set should
+  treat divergence between the store-conditioned view and the enumeration-wide view as itself reportable.
+- **Data status**: one fresh 4090 golden-tune store exists locally (16.7k current-vocabulary rows + online
+  checkpoint at `_tune/golden-tune-4090-2026-07-14/`, NOT yet merged into the canonical DB) — but it was a plain
+  tune, not ε-greedy, so its coverage correlates with the incumbent priors; the ε-greedy collection sweeps (item 2)
+  and the -O3 re-bench family floor (item 1) remain open prerequisites for training data. The 5090 side has no
+  post-swizzle data at all and its poisoned checkpoint still needs retiring. Sweep-observed search behavior
+  reinforces item 1: matmul bests were found at bench #112–159 of 233–255 — exploration is paying for ranking the
+  -O1 lane censors.
+
+## Added 2026-07-13 — data prerequisites from the golden/gemma sweeps, and the -O1→-O3 offset model
+
+Motivated by the 07-12/07-13 sweep findings (the manual 5090/4090 golden sweeps, the post-swizzle 4090 refresh, the
+gemma-4 golden seeding): the immediate goal is making the tune-golden skill trustworthy again, and the sweeps showed
+the training data feeding this plan is censored and stale in ways the plan didn't yet account for. Ordered items:
+
+1. **-O3 re-bench floor per tile family in the tuner (prerequisite for every retraining step in this plan).** The
+   `-Xcicc -O1` ranking lane systematically inverts the big-register-tile f16-accumulate family ~5× (measured
+   directly on the 5090: 2008 vs 392 µs at -O1 for configs ~32% *faster* at -O3), so those configs never land in
+   the `EMMY_O3_TOL` band, the node store holds zero measurements in the winning region, and every fit inherits the
+   censoring — the fm-lane optima were only found by manual sweeps. Change: grant the deployable -O3 re-bench to
+   the top-K per (atom, tile-size family) bucket, not only the global -O1 top band; raise the tuner's per-kernel
+   compile budget for the -O3 lane (the big tiles already trip the 12 s cap at -O1). Cost with coarse buckets
+   (accumulator type × tile-area band) and K=1–2 is roughly +10–30% collection wall time — acceptable on rented
+   collection boxes; before implementing, size K and the bucket definition by replaying the rule against the
+   existing autotune DB's -O1 rows (read-only, no GPU) to count the extra re-benches it would have triggered.
+2. **Fresh post-swizzle collection sweeps; retire the poisoned checkpoints.** *(STATUS 2026-07-15: partial — one
+   plain-tune 4090 store exists locally (see the Update section); the ε-greedy sweeps and the 5090 side remain.)*
+   The node store has NO post-swizzle
+   measurements and the cp.async slab swizzle moved the fm optima (07-12 4090 refresh: "a region no prior trained
+   on old data would revisit"); the 5090 sweep checkpoint (`_tune/golden-sweep-5090/prior.json`) is trained on the
+   pre-purge fake rewards and must not be reused (already flagged in the assumptions above). After item 1 lands:
+   one ε-greedy `collect-node-data` sweep per card (4090 + 5090 at minimum), then discard or predicate-filter the
+   poisoned checkpoint. These sweeps produce both the Phase-3 freeze contents and the -O1/-O3 measurement pairs
+   item 4 trains on.
+3. **Phase-4 gate addition: the gemma-4 goldens are the held-out unseen-shape acceptance set.** *(SUPERSEDED
+   2026-07-15: the #364 refit trained on them — spent; the next new model's goldens replace them, see the Update
+   section.)* They were recorded
+   manually (07-13, 5090 + 4090 files), never trained on, and are the first goldens off the h4096 shape family —
+   "rank the gemma entries well from a fit that never saw gemma shapes" is exactly the generalization test whose
+   absence let the incumbent process score 27/28 top-1 while cold greedy misdeployed every unseeded gemma shape
+   (kv_proj ~770× off, two shapes picking hangs). Do NOT re-run the incumbent `golden_knob_heuristics` refit as a
+   stopgap — it was attempted and rejected on 07-12 (top-1 27→20, one shape to rank 3449); the Phase-4 fitter with
+   held-out folds is the only sanctioned refit path.
+4. **New artifact: the -O1→-O3 offset model.** *(STATUS 2026-07-15: untouched; the 4090 sweep store adds fresh
+   -O1/-O3 pairs for the retrodiction test, still band-censored until item 1 lands.)* A small model (same
+   featurization, same freeze/fit pipeline — one
+   more cell in the Phase-4 fitter matrix) trained on same-config measurement pairs, label = log(-O3/-O1) latency
+   ratio. The ratio is dimensionless, so it transfers across shapes and cards, and most absolute-latency variance
+   cancels out of it. Go/no-go before any integration work: retrodiction — trained on pre-07-12 pairs only, it
+   must place the big-tile f16-accumulate family into the re-bench band; if it fails, run one more item-2 sweep
+   and refit before proceeding. Integration points, in payoff order:
+   - **The -O3 re-bench gate**: rank candidates for the deployable re-bench by offset-corrected -O1 (measured -O1 ×
+     predicted ratio), not raw -O1 — this is where the inversion actually gets fixed. Item 1's unconditional
+     per-family floor stays regardless, so the offset never gates its own training data.
+   - **PUCT selection**: a multiplicative term on the prior score via the `FallbackPrior` dimensionless-multiplier
+     convention (neutral 1.0) — steering only, so a wrong offset costs wasted benches, never wrong data.
+   - **Training-label translation**: convert the -O1-rich node labels into estimated deploy-regime labels for
+     offline-prior ranking groups, weighted down as model-corrected rather than measured.
+   Hard rules: never fold the offset into observed rewards / Q-values — measurements stay ground truth; and the
+   offset is the SOLE owner of cross-regime translation (keep the priors regime-conditional via per-`(pool, H_opt)`
+   grouping, decision 7) so the learned `H_opt` feature and the offset never double-correct.
+
+5. **Golden-neighborhood sweep collector (added 2026-07-15).** The 07-12 manual `--ab` sweeps found the fm-lane
+   optima, but NONE of those ~120 pinned benches reached the node store: the tune engine (`two_level.py` →
+   `record_nodes`) is the table's only writer — `run --bench --ab/--golden` results go to the printed table and
+   `--json` only. So the region around each golden stays censored in the training data even after the goldens
+   themselves join training (decision 5 as reversed) — one verified point, no neighborhood. Fix: a repeatable
+   collector that benches each golden's knob neighborhood and records it. Preferred mechanism (investigated
+   2026-07-15): a script that (1) enumerates the shape's offer space via `golden_eval.enumerate_graph` (gate pinned
+   for fm goldens), (2) filters to rows differing from the golden's `stamp_schedule_families` spelling in ≤ k
+   families (k≥2 — the fm headline was a joint atom × geometry move a k=1 star misses), (3) benches pinned at -O3
+   via the `_bench_golden_variants` harness (pin-match + intensity-floor + wrong-answer flags for free), and
+   (4) writes leaf `NodeRow`s through `record_nodes` with a dedicated `run_id` (freeze picks them up unchanged;
+   -O3 labels dodge the item-1 lane inversion by construction). Zero-code alternative for a first campaign:
+   per-family pinned-subspace tunes (`EMMY_KNOBS="<all but F pinned>" emmy tune --golden NAME --explore-eps 0.25`
+   with `EMMY_NVCC_FLAGS=""`), at higher GPU cost. ~1k benches ≈ a day on one rented card for the full golden set.
+   **SETTLED 2026-07-15 — the recorder is `run --bench` itself, DEFAULT-ON behind a quality bar.** Whenever a
+   bench meets the tuner's measurement standard (warmup/iters at the tune bench level; an opt-out flag covers the
+   rest), `run --bench` records into the canonical node store: every clean pinned golden/`--ab` row as an `ok`
+   leaf; a realized config's compile/launch failure as a `bench_fail` negative; and the greedy pick itself via its
+   `greedy (isolated)` re-bench (branch `feature/greedy-isolated-rebench` — re-benches the greedy graph emmy-only
+   through the same pinned-row worker, so the number is pinned-comparable; the documented ~7% skew was measurement
+   position, not config), which makes every benched pool self-anchoring: the prior's argmax gets a measured value
+   (the bench-the-argmax anchor for unconditional regret). Never recorded: `pin_unmatched` rows (the claimed
+   config never ran; "not offered" is not "doesn't launch"), wrong-answer- or intensity-floor-flagged rows, and
+   the whole `--ir` path (serialization drops `op.knobs` — no honest feature dict). Rows are parentless deployable
+   -O3 leaves keyed with the tune's own recipes (same pools), `run_id` `bench-<UTC ts>`. Write protection beyond
+   the plausibility gate: `record_nodes` gains quality-aware leaf replacement — a materially lower-quality
+   measurement (fewer `n_samples`, higher variance) never replaces a stored leaf; newest-wins among comparable
+   quality (keep-min stays wrong for leaves: min over re-measurements noise-mines, and a fake-fast row would be
+   unrepairable). With this, the neighborhood collector reduces to spec steps (1)–(3) driving
+   `run --bench --golden NAME --ab … --json`; step (4) is the default recorder. **LANDED 2026-07-15** (this
+   branch; the isolated re-bench merged as #376): `search/bench_record.py` (offer-site pool keying via
+   `source_chain` — validated byte-identical against the store's tune-written `op_sig`s; whole-variant leaf per
+   site), the `run --bench` default-on wiring (`--no-record-nodes` opts out), and `record_nodes`' quality-aware
+   leaf replacement. **GPU-verified 2026-07-16 on a rented CloudRift 4090**, which caught one real bug (fixed +
+   regression-tested): the mma tile-lowering preserves no `LoopOp` in `.source`, so the loop-only offer-site
+   predicate silently dropped every tensor-core kernel — a golden sweep recorded zero rows; the tile-dialect
+   fallback digests to the identical tune `op_sig`. Quality guard, opt-out/quality-bar, freeze pickup, and the
+   leaf-only eval degrade all passed on-device. A second on-device pass caught and fixed two more: (a) the split-K
+   COMBINE kernel carries no `S_*` provenance anywhere in its chain, so it was silently dropped and the leaf held
+   a partial-only value (~14% fast-biased vs the tune's whole-slice leaves in the same pool) — orphan kernels now
+   attribute to their nearest sited producer through the graph edges, verified on the 4090 (leaf 8.71 → 10.18 µs
+   = the kernel table's sum); (b) the record confirmation was `logger.info`, invisible at `emmy run`'s default
+   WARNING verbosity — a default-on DB write must announce itself, so the record-nodes notices print like the
+   rest of the bench output. Known deviation: bench rows key under the probe context, which is a DIFFERENT
+   `context_key` than the tune's -O3 re-bench context (flag-spelling difference; same `H_opt=3.0`) — grouping per
+   `(pool, H_opt)` is unaffected, but a bench row never dedups against its tune -O3 twin; fix would be
+   compile-flag canonicalization in `Context.structural_key`, deferred.
+
+The golden A/B harness fixes decided alongside these (bench survives a greedy-row bench_fail; a pin matching no
+offered row fails loudly; recorder-side schedule-family stamping; the dynM FLOP-floor overcount) are NOT part of
+this plan — they land independently on `feature/golden-ab-harness-fixes`.
 
 ## Open questions and assumptions
 

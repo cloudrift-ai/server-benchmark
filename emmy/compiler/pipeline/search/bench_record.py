@@ -26,9 +26,11 @@ Pool fidelity: the tune keys a pool by ``op_sig`` — a digest over the **pre-de
 offer op's ``S_*`` stamps, NOT the terminal kernel's (descent stamps further ``S_*``
 deltas, so the two differ for most ops). :func:`bench_leaves` recovers the offer site
 from each compiled kernel via ``source_chain`` (the ``two_level`` decomposition idiom:
-deepest loop-dialect ancestor carrying ``S_*`` knobs) and groups a variant's kernels
-(e.g. a split-K main + combine pair) under one site — one leaf per (variant, op), valued
-at the group's summed per-launch time, exactly the tune's whole-variant leaf semantics.
+deepest loop-dialect ancestor carrying ``S_*`` knobs, tile-dialect fallback for the mma
+path) and groups a variant's kernels (e.g. a split-K main + combine pair) under one
+site — an auxiliary kernel with no provenance at all attributes to its nearest sited
+producer through the graph edges — one leaf per (variant, op), valued at the group's
+summed per-launch time, exactly the tune's whole-variant leaf semantics.
 Rows are keyed with the tune's own recipes (same ``node_key`` / ``op_sig`` /
 ``context_key``), parentless with ``depth=0`` — the no-tree-schema marker the fork
 diagnostics skip — and stamped with a ``bench-…`` ``run_id`` so freeze headers show the
@@ -125,18 +127,46 @@ def bench_leaves(compiled, bench, *, status: str = "ok") -> list[BenchLeaf]:
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
     from emmy.compiler.structural import digest  # noqa: PLC0415
 
-    ops = [compiled.nodes[nid].op for nid in compiled.topological_order() if isinstance(compiled.nodes[nid].op, CudaOp)]
+    nids = [nid for nid in compiled.topological_order() if isinstance(compiled.nodes[nid].op, CudaOp)]
     per_launch = list(getattr(bench, "per_launch", None) or []) if bench is not None else []
+    entries = []  # (nid, op, launch, sig-or-None) in launch order
+    sig_by_nid: dict[str, str] = {}
+    for idx, nid in enumerate(nids):
+        op = compiled.nodes[nid].op
+        site = _offer_site(op)
+        sig = digest(*sorted((k, v) for k, v in site.knobs.items() if k.startswith("S_"))) if site is not None else None
+        if sig is not None:
+            sig_by_nid[nid] = sig
+        entries.append((nid, op, per_launch[idx] if idx < len(per_launch) else None, sig))
+
+    def attributed(nid: str, hops: int = 4) -> str | None:
+        """The site group of an orphan kernel's nearest sited PRODUCER. An auxiliary
+        kernel synthesized at materialize (a split-K combine) carries no ``S_*``
+        provenance anywhere in its chain, but it consumes its main kernel's output —
+        the graph edge is the attribution the source chain lost. Without this the
+        combine was silently dropped and a split-K variant recorded a partial-only
+        value: systematically fast-biased against the tune's whole-slice leaves in
+        the same pool (found by the 2026-07-16 4090 verification)."""
+        frontier = [nid]
+        for _ in range(hops):
+            nxt: list[str] = []
+            for cur in frontier:
+                node = compiled.nodes.get(cur)
+                for pid in getattr(node, "inputs", None) or []:
+                    if pid in sig_by_nid:
+                        return sig_by_nid[pid]
+                    nxt.append(pid)
+            frontier = nxt
+        return None
+
     groups: dict[str, dict] = {}
     skipped = 0
-    for idx, op in enumerate(ops):
-        site = _offer_site(op)
-        if site is None:
+    for nid, op, launch, sig in entries:
+        sig = sig or attributed(nid)
+        if sig is None:
             skipped += 1
-            logger.debug("[record-nodes] kernel %d has no recoverable offer site — skipped", idx)
+            logger.debug("[record-nodes] kernel %s has no recoverable offer site and no sited producer — skipped", nid)
             continue
-        sig = digest(*sorted((k, v) for k, v in site.knobs.items() if k.startswith("S_")))
-        launch = per_launch[idx] if idx < len(per_launch) else None
         g = groups.setdefault(sig, {"ops": [], "launches": []})
         g["ops"].append(op)
         g["launches"].append(launch)

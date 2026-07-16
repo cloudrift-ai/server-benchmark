@@ -119,8 +119,15 @@ def test_mma_path_records_and_joins_the_scalar_pool(monkeypatch) -> None:
     group the split-K main+combine pair into ONE whole-variant leaf, and (c) produce
     the same ``op_sig`` as the scalar/loop path for the same shape (one pool)."""
     mma = _compile_pinned(monkeypatch, {"TILE": "n16x8/f4x8", "REDUCE": "g2k", "STAGE": "d2/cp/ring", "RASTER": "", "WSPEC": ""})
-    mma_leaves = bench_leaves(mma, _fake_bench(_n_cuda_kernels(mma)))
+    n_mma_kernels = _n_cuda_kernels(mma)
+    assert n_mma_kernels == 2, "the pinned split-K config must compile to a main + combine pair"
+    mma_leaves = bench_leaves(mma, _fake_bench(n_mma_kernels, time_ms=0.5))
     assert len(mma_leaves) == 1, "mma-path kernels must be recordable (split-K pair -> one leaf)"
+    # The combine kernel has NO S_* provenance anywhere in its chain — it must attribute
+    # to its producer through the graph edge, so the leaf is the WHOLE-variant value
+    # (partial-only values are fast-biased against the tune's whole-slice leaves).
+    assert mma_leaves[0].value_us == pytest.approx(1000.0)
+    assert mma_leaves[0].n_samples is None and mma_leaves[0].variance is None  # multi-kernel group
     scalar = _compile_pinned(monkeypatch, {"TILE": "n16x8/f2x4", "REDUCE": "", "STAGE": "d2/cp/ring", "RASTER": "", "WSPEC": ""})
     scalar_leaves = bench_leaves(scalar, _fake_bench(_n_cuda_kernels(scalar)))
     assert len(scalar_leaves) == 1

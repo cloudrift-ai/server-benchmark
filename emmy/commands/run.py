@@ -395,12 +395,13 @@ def _record_bench_nodes(args, golden_benches, greedy_iso) -> None:
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.search.bench_record import meets_quality_bar, record_bench_leaves  # noqa: PLC0415
 
+    # print, not logger.info: `emmy run` gates the root logger to WARNING at default
+    # verbosity, and a default-on WRITE to the user's tune DB must announce itself
+    # (the bench table around it prints too — same CLI-output surface).
     if not meets_quality_bar(args.warmup, args.iters):
-        logger.info(
-            "[record-nodes] --warmup %d / --iters %d below the tune bench standard — measurements NOT recorded "
-            "into the node store (raise them or pass --no-record-nodes to silence)",
-            args.warmup,
-            args.iters,
+        print(
+            f"[record-nodes] --warmup {args.warmup} / --iters {args.iters} below the tune bench standard — "
+            f"measurements NOT recorded into the node store (raise them or pass --no-record-nodes to silence)"
         )
         return
     leaves = _recordable_bench_leaves(golden_benches, greedy_iso)
@@ -408,7 +409,7 @@ def _record_bench_nodes(args, golden_benches, greedy_iso) -> None:
         return
     db_path = resolve_tune_db()
     n = record_bench_leaves(db_path, Context.probe(), leaves)
-    logger.info("[record-nodes] %d bench row(s) recorded into the node store (%s) — opt out with --no-record-nodes", n, db_path)
+    print(f"[record-nodes] {n} bench row(s) recorded into the node store ({db_path}) — opt out with --no-record-nodes")
 
 
 def _reset_persisting_l2_cache() -> None:

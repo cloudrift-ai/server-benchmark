@@ -511,10 +511,16 @@ the training data feeding this plan is censored and stale in ways the plan didn'
    regression-tested): the mma tile-lowering preserves no `LoopOp` in `.source`, so the loop-only offer-site
    predicate silently dropped every tensor-core kernel — a golden sweep recorded zero rows; the tile-dialect
    fallback digests to the identical tune `op_sig`. Quality guard, opt-out/quality-bar, freeze pickup, and the
-   leaf-only eval degrade all passed on-device. Known deviation: bench rows key under the probe context, which is
-   a DIFFERENT `context_key` than the tune's -O3 re-bench context (flag-spelling difference; same `H_opt=3.0`) —
-   grouping per `(pool, H_opt)` is unaffected, but a bench row never dedups against its tune -O3 twin; fix would
-   be compile-flag canonicalization in `Context.structural_key`, deferred.
+   leaf-only eval degrade all passed on-device. A second on-device pass caught and fixed two more: (a) the split-K
+   COMBINE kernel carries no `S_*` provenance anywhere in its chain, so it was silently dropped and the leaf held
+   a partial-only value (~14% fast-biased vs the tune's whole-slice leaves in the same pool) — orphan kernels now
+   attribute to their nearest sited producer through the graph edges, verified on the 4090 (leaf 8.71 → 10.18 µs
+   = the kernel table's sum); (b) the record confirmation was `logger.info`, invisible at `emmy run`'s default
+   WARNING verbosity — a default-on DB write must announce itself, so the record-nodes notices print like the
+   rest of the bench output. Known deviation: bench rows key under the probe context, which is a DIFFERENT
+   `context_key` than the tune's -O3 re-bench context (flag-spelling difference; same `H_opt=3.0`) — grouping per
+   `(pool, H_opt)` is unaffected, but a bench row never dedups against its tune -O3 twin; fix would be
+   compile-flag canonicalization in `Context.structural_key`, deferred.
 
 The golden A/B harness fixes decided alongside these (bench survives a greedy-row bench_fail; a pin matching no
 offered row fails loudly; recorder-side schedule-family stamping; the dynM FLOP-floor overcount) are NOT part of

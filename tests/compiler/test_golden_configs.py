@@ -15,6 +15,7 @@ from emmy.compiler.pipeline.search.golden import (
     _KERNEL_CLASSES,
     GOLDEN_CONFIGS,
     AttentionGoldenConfig,
+    EmbeddingGoldenConfig,
     GoldenConfig,
     MatmulGoldenConfig,
     MlpGeGluGoldenConfig,
@@ -22,6 +23,7 @@ from emmy.compiler.pipeline.search.golden import (
     PointwiseGoldenConfig,
     ReduceGoldenConfig,
     RmsNormGoldenConfig,
+    RopeGoldenConfig,
     SoftmaxGoldenConfig,
     _load_goldens,
     matmul_snippet,
@@ -67,11 +69,17 @@ def test_golden_configs_set_is_well_formed():
                 RmsNormGoldenConfig,
                 NormLinearGoldenConfig,
                 MlpGeGluGoldenConfig,
+                RopeGoldenConfig,
+                EmbeddingGoldenConfig,
                 SoftmaxGoldenConfig,
                 PointwiseGoldenConfig,
                 AttentionGoldenConfig,
             ),
         ), c.name
+        # The memory-bound anchors (rope / embedding) FORK NOTHING — one coalesced elementwise / gather
+        # config, so they record empty knobs and serve as ``eval golden`` regression anchors, not deploy
+        # warmers. Every other kind carries a scheduling knob set.
+        fork_nothing = isinstance(c, (RopeGoldenConfig, EmbeddingGoldenConfig))
         if isinstance(c, MatmulGoldenConfig):
             assert c.M > 0 and c.N > 0 and c.K > 0, c.name
         elif isinstance(c, NormLinearGoldenConfig):
@@ -81,6 +89,10 @@ def test_golden_configs_set_is_well_formed():
         elif isinstance(c, MlpGeGluGoldenConfig):
             # The fused RMSNorm→gate⊗up→GeGLU multi-channel computed-A megakernel (M,H)→(M,inter).
             assert c.M > 0 and c.H > 0 and c.inter > 0, c.name
+        elif isinstance(c, RopeGoldenConfig):
+            assert c.n_heads > 0 and c.seq > 0 and c.head_dim > 0, c.name
+        elif isinstance(c, EmbeddingGoldenConfig):
+            assert c.vocab > 0 and c.seq > 0 and c.hidden > 0, c.name
         elif isinstance(c, (ReduceGoldenConfig, RmsNormGoldenConfig, SoftmaxGoldenConfig)):
             from emmy.compiler.ir.schedule import ReducePlan
 
@@ -96,7 +108,7 @@ def test_golden_configs_set_is_well_formed():
         assert c.emmy_us > 0 and c.cublas_us > 0, c.name
         assert c.ratio >= 0.0, c.name
         assert c.golden == (c.ratio >= 0.95), c.name
-        assert c.knobs, f"{c.name} has no recorded knobs"
+        assert fork_nothing or c.knobs, f"{c.name} has no recorded knobs"
         assert c.snippet(), c.name
 
 

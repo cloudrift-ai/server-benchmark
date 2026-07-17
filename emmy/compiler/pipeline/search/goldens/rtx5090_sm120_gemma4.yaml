@@ -1007,3 +1007,28 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: 'p1'}
     emmy_us: 1199.1
     cublas_us: 1208.2
+  # ---- memory-bound kernels (regression anchors) ------------------------------------------------
+  # These kernels FORK NOTHING — one coalesced elementwise / gather config, no tuning choice — so a
+  # golden cannot warm a cold deploy (there is no misdeploy to fix). They are REGRESSION ANCHORS for
+  # `emmy eval golden`: the recorded latency vs torch eager catches a future codegen slowdown. Seeded
+  # 2026-07-18. rope: q*cos + rotate_half(q)*sin over (1, 16, 512, 256) — emmy's fused apply beats
+  # eager 4.6x. embedding: the F.embedding gather over the 262144x3840 table — at eager parity (both
+  # DRAM-bound on the gathered rows). Knobs are empty (no schedule fork); the reference is torch eager.
+  - kernel: rope
+    name: gemma4_12b.rope.s512
+    n_heads: 16
+    seq: 512
+    head_dim: 256
+    dtype: 'fp16'
+    knobs: {}
+    emmy_us: 4.5
+    cublas_us: 20.5
+  - kernel: embedding
+    name: gemma4_12b.embedding.s512
+    vocab: 262144
+    seq: 512
+    hidden: 3840
+    dtype: 'fp16'
+    knobs: {}
+    emmy_us: 4.3
+    cublas_us: 4.1

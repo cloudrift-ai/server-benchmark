@@ -12,12 +12,14 @@ import pytest
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.pipeline.search.golden import (
     AttentionGoldenConfig,
+    EmbeddingGoldenConfig,
     MatmulGoldenConfig,
     MlpGeGluGoldenConfig,
     NormLinearGoldenConfig,
     PointwiseGoldenConfig,
     ReduceGoldenConfig,
     RmsNormGoldenConfig,
+    RopeGoldenConfig,
     SoftmaxGoldenConfig,
 )
 
@@ -35,6 +37,8 @@ _CASES = [
     ReduceGoldenConfig(name="red", M=512, K=4096, knobs={}),
     SoftmaxGoldenConfig(name="s", M=512, K=4096, knobs={}),
     PointwiseGoldenConfig(name="p", M=512, N=4096, knobs={}),
+    RopeGoldenConfig(name="rope", n_heads=16, seq=512, head_dim=256, knobs={}),
+    EmbeddingGoldenConfig(name="emb", vocab=262144, seq=512, hidden=3840, knobs={}),
 ]
 
 

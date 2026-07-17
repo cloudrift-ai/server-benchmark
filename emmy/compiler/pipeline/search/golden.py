@@ -25,7 +25,8 @@ under ``goldens/`` (e.g. ``goldens/rtx5090_sm120.yaml``): a ``gpu_name`` /
 ``compute_cap`` header plus a ``configs`` list, each tagged with a ``kernel``
 discriminator (``matmul`` / ``reduce`` / ``pointwise`` / ``rms_norm`` / ``softmax`` /
 ``attention`` / ``norm_linear`` — the fused RMSNorm→linear computed-A megakernel — / ``mlp_geglu`` —
-its multi-channel gate⊗up→GeGLU sibling). A GPU may carry more than
+its multi-channel gate⊗up→GeGLU sibling — / ``rope`` / ``embedding`` — the fork-nothing memory-bound
+regression anchors). A GPU may carry more than
 one file (a themed set such as ``rtx5090_sm120_gemma4.yaml`` beside the card's main
 file — same header, merged by the live-GPU ``(gpu_name, compute_cap)`` scoping).
 :func:`_load_goldens` concatenates every file into :data:`GOLDEN_CONFIGS`. The set is hand-maintained via
@@ -547,6 +548,86 @@ class AttentionGoldenConfig(GoldenConfig):
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class RopeGoldenConfig(GoldenConfig):
+    """Rotary position embedding apply — ``q*cos + rotate_half(q)*sin`` over ``(1, n_heads, seq,
+    head_dim)`` (the ``k_cat_slice_unsqueeze_pointwise`` kernel; ``rotate_half`` is ``cat(-q[…d/2:],
+    q[…:d/2])``). A pure **memory-bound pointwise map** (no reduce, no contraction) applied to q and k
+    every layer. It FORKS NOTHING — one coalesced elementwise config, so a golden cannot warm a cold
+    deploy (there is no misdeploy to fix); it is a REGRESSION ANCHOR for ``emmy eval golden`` (the
+    recorded latency vs torch eager catches a codegen slowdown). The reference is torch eager."""
+
+    n_heads: int
+    seq: int
+    head_dim: int
+    dtype: str = "fp16"
+
+    def __post_init__(self):
+        self._require_dynamic_hint(self.seq)
+
+    def dynamic_specs(self) -> list[str]:
+        return ["seq_len@q:2", "seq_len@cos:2", "seq_len@sin:2"] if self.dynamic else []
+
+    def snippet(self) -> str:
+        tdt = {"fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16", "fp32": ""}[self.dtype]
+        h = self.head_dim // 2
+        return (
+            f"cos = torch.randn(1,1,{self.seq},{self.head_dim}{tdt})\n"
+            f"sin = torch.randn(1,1,{self.seq},{self.head_dim}{tdt})\n"
+            f"q = torch.randn(1,{self.n_heads},{self.seq},{self.head_dim}{tdt})\n"
+            f"q*cos + torch.cat((-q[...,{h}:], q[...,:{h}]),dim=-1)*sin"
+        )
+
+    def flops(self) -> float:
+        return float(self.n_heads * self.seq * self.head_dim)  # one fused-multiply-add per element
+
+    def shape_key(self):
+        """Keys the stamped pointwise map (``kind=""``, ``reduce_max=0``): free = the output extents
+        (heads x seq x head_dim). The dynamic twin excludes the symbolic seq (``free_prod`` keeps
+        heads x head_dim, ``free_max`` normalizes to 0 like every non-plain / dynamic key)."""
+        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
+
+        free = self.n_heads * self.head_dim if self.dynamic else self.n_heads * self.seq * self.head_dim
+        fm = 0 if self.dynamic else max(self.n_heads, self.seq, self.head_dim)
+        return ShapeKey(free_prod=free, reduce_max=0, is_warp=self.dtype != "fp32", is_dyn=self.dynamic, free_max=fm)
+
+
+@dataclass(frozen=True, kw_only=True)
+class EmbeddingGoldenConfig(GoldenConfig):
+    """Token embedding gather — ``embed_tokens[ids]`` over a ``(vocab, hidden)`` table (the
+    ``k_embedding`` kernel; ``F.embedding``). A pure **memory-bound gather** (one hidden-wide row copy
+    per token, no compute). Like :class:`RopeGoldenConfig` it FORKS NOTHING — a REGRESSION ANCHOR for
+    ``emmy eval golden``, not a deploy warmer. The reference is torch eager (``F.embedding``)."""
+
+    vocab: int
+    seq: int
+    hidden: int
+    dtype: str = "fp16"
+
+    def __post_init__(self):
+        self._require_dynamic_hint(self.seq)
+
+    def dynamic_specs(self) -> list[str]:
+        return ["seq_len@ids:1"] if self.dynamic else []
+
+    def snippet(self) -> str:
+        tdt = {"fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16", "fp32": ""}[self.dtype]
+        return f"ids = torch.randint(0,{self.vocab},(1,{self.seq}))\nw = torch.randn({self.vocab},{self.hidden}{tdt})\nF.embedding(ids, w)"
+
+    def flops(self) -> float:
+        return float(self.seq * self.hidden)  # one copy per gathered element (no arithmetic)
+
+    def shape_key(self):
+        """Keys the stamped gather (``kind=""``, ``reduce_max=0``): the output is ``(seq, hidden)`` so
+        ``free_prod = seq*hidden`` (the vocab is the indexed axis, not a free extent); the dynamic twin
+        excludes the symbolic seq."""
+        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
+
+        free = self.hidden if self.dynamic else self.seq * self.hidden
+        fm = 0 if self.dynamic else max(self.seq, self.hidden)
+        return ShapeKey(free_prod=free, reduce_max=0, is_warp=self.dtype != "fp32", is_dyn=self.dynamic, free_max=fm)
+
+
 _GOLDENS_DIR = Path(__file__).parent / "goldens"
 _KERNEL_CLASSES = {
     "matmul": MatmulGoldenConfig,
@@ -555,6 +636,8 @@ _KERNEL_CLASSES = {
     "rms_norm": RmsNormGoldenConfig,
     "norm_linear": NormLinearGoldenConfig,
     "mlp_geglu": MlpGeGluGoldenConfig,
+    "rope": RopeGoldenConfig,
+    "embedding": EmbeddingGoldenConfig,
     "softmax": SoftmaxGoldenConfig,
     "attention": AttentionGoldenConfig,
 }
@@ -566,7 +649,8 @@ def _load_goldens() -> list[GoldenConfig]:
     One file per GPU: a ``gpu_name`` / ``compute_cap`` header (stamped onto every
     config so it isn't repeated per entry) plus a ``configs`` list, each tagged with
     a ``kernel`` discriminator (``matmul`` / ``attention`` / ``softmax`` / ``reduce`` / ``rms_norm`` / ``norm_linear`` /
-    ``mlp_geglu`` / ``pointwise``) selecting the dataclass. All files are concatenated — a ``name`` may recur across GPUs.
+    ``mlp_geglu`` / ``rope`` / ``embedding`` / ``pointwise``) selecting the dataclass. All files are concatenated — a
+    ``name`` may recur across GPUs.
 
     NOTE: ``compute_cap`` does **not** uniquely identify a GPU — two different cards
     can share a capability (e.g. ``rtx5090_sm120.yaml`` and

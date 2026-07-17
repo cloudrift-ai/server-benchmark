@@ -648,7 +648,9 @@ lowering edges + the `perf` row per kernel, and returns the aggregate `PerfStats
 ## Part 7: Golden configs and the A/B integrity gates
 
 `golden.py` holds `GoldenConfig` and its matmul / attention / softmax / reduce / rms_norm / norm_linear / mlp_geglu /
-pointwise subclasses — the `OfflinePrior`'s ground truth. Every kind carries `shape_key()` / `snippet()` / `dtype`, so
+rope / embedding / pointwise subclasses — the `OfflinePrior`'s ground truth. The `rope` / `embedding` kinds are
+fork-nothing memory-bound anchors: they record empty knobs and can only serve as `eval golden` regression checks (no
+fork means nothing to warm at deploy). Every kind carries `shape_key()` / `snippet()` / `dtype`, so
 `tune --dataset golden` and the `run --bench --golden` A/B cover the reduce / pointwise entries too, not just matmul.
 `NormLinearGoldenConfig` (the fused `rms_norm(x)·nw @ W` computed-A megakernel) and `MlpGeGluGoldenConfig` (its
 multi-channel gate⊗up→GeGLU sibling) are the snippet-reproducible computed-A kinds — both trace to the single fused

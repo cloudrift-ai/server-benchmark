@@ -371,6 +371,28 @@ def _causal_stream(stmts, qk: Contraction) -> bool:
     return False
 
 
+def _banded_stream(stmts, qk: Contraction) -> int | None:
+    """The sliding-window width W when the score prologue carries the band coordinate ``Select``
+    — keep ``kv > m − W`` over the contraction's own axis vars. Structural, like
+    :func:`_causal_stream`: the banded kv stream START below derives from the predicate's shape."""
+    for s in stmts:
+        if isinstance(s, Select):
+            keep = s.branches[0].select
+            if (
+                isinstance(keep, BinaryExpr)
+                and keep.op == ">"
+                and isinstance(keep.left, Var)
+                and keep.left.name == qk.n_axis.name
+                and isinstance(keep.right, BinaryExpr)
+                and keep.right.op == "-"
+                and isinstance(keep.right.left, Var)
+                and keep.right.left.name == qk.m_axis.name
+                and isinstance(keep.right.right, Literal)
+            ):
+                return int(keep.right.right.value)
+    return None
+
+
 def _pv_streamed(pv: Contraction, kv_axis: Axis) -> Contraction:
     """The expect contraction with its singleton intra-block axis swapped for the STREAM axis — the
     scalar tree contracts one key per step (``k_axis = pj``, extent 1); the fragment tier contracts
@@ -445,13 +467,29 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # staged path's in-loop barriers legal. On a slice partial the bound is slice-local (the base
     # subtracted; an above-the-diagonal slice goes negative and the loop runs zero steps).
     kv_end: Expr | None = local_kv_end  # a symbolic slice stops at its own end even un-causal
+    cta_rows = Literal(um * fm * shape[0], "int")
     if _causal_stream(partial[1:], qk):
-        cta_rows = Literal(um * fm * shape[0], "int")
         causal_rows = BinaryExpr("*", BinaryExpr("+", Var(grid[-1].name), Literal(1, "int")), cta_rows)
         if kv_off is not None:
             causal_rows = BinaryExpr("-", causal_rows, kv_off)
         cap = local_kv_end if local_kv_end is not None else seq
         kv_end = TernaryExpr(cond=BinaryExpr("<", causal_rows, cap), if_true=causal_rows, if_false=cap)
+
+    # Sliding-window tile-skip: the band score prologue (keep ``kv > m − W``) STARTS the stream at
+    # the first key block the CTA's first query row can see — ``kv_start = ⌊max(0, first_row − W +
+    # 1) / bn⌋ · bn``. Every skipped leading step is all-masked (the band ``FragmentMask`` would
+    # zero it: exact carrier identity), so the late start is bit-identical, mirroring the causal
+    # early stop. CTA-uniform (min over the block's rows = the first row); on a slice partial the
+    # start is slice-local (base subtracted; a below-the-band slice floors past its own end and the
+    # loop runs zero steps). Truncating '/' on a negative pre-max value is dodged by the ternary.
+    kv_start: Expr | None = None
+    window = _banded_stream(partial[1:], qk)
+    if window is not None:
+        start_rows: Expr = BinaryExpr("-", BinaryExpr("*", Var(grid[-1].name), cta_rows), Literal(window - 1, "int"))
+        if kv_off is not None:
+            start_rows = BinaryExpr("-", start_rows, kv_off)
+        aligned = BinaryExpr("*", BinaryExpr("/", start_rows, Literal(bn, "int")), Literal(bn, "int"))
+        kv_start = TernaryExpr(cond=BinaryExpr(">", start_rows, Literal(0, "int")), if_true=aligned, if_false=Literal(0, "int"))
 
     # The channel spec (pivot first, one carried name per channel) — the merge is REGENERATED from
     # it at fragment residence. The expect channel's ⊗ is the pv node; the denom folds the weights.
@@ -801,6 +839,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
                 k_extent=kv_ext,
                 k0=kv0.name,
                 k_end=kv_end,
+                k_first=kv_start,
             )
             state = decls + state
         else:
@@ -821,12 +860,22 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
                 workers=ctx.workers,
                 block_threads=block_threads,
                 k_end=kv_end,
+                k_first=kv_start,
             )
             state = decls + state
     else:
-        static_small = unroll_ok(kv_axis.extent, 128) and kv_end is None
+        static_small = unroll_ok(kv_axis.extent, 128) and kv_end is None and kv_start is None
         body = Body(tuple(_stream_step()))
-        fold = [StridedLoop(axis=kv0, start=Literal(0, "int"), step=Literal(bn, "int"), body=body, unroll=static_small, end=kv_end)]
+        fold = [
+            StridedLoop(
+                axis=kv0,
+                start=kv_start if kv_start is not None else Literal(0, "int"),
+                step=Literal(bn, "int"),
+                body=body,
+                unroll=static_small,
+                end=kv_end,
+            )
+        ]
 
     # ---- close: the projection tail realized on the output fragments + the store, per tile ---- #
     # A layout-aware output ``Write`` the node carries (flash's ``_out_store_index``) is the store

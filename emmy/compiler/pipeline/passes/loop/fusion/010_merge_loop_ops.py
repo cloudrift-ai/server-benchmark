@@ -39,7 +39,7 @@ from __future__ import annotations
 
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.loop import Accum, Assign, Load, Loop, LoopOp
-from emmy.compiler.ir.stmt import Body
+from emmy.compiler.ir.stmt import Body, Select
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import build_merged_op as _build_merged_op
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import is_pure_indexmap as _is_pure_indexmap
@@ -105,7 +105,15 @@ _REDUCE_HEAVY_WORK_PER_OUTPUT = 4
 
 
 def _reduce_heavy(op: LoopOp) -> bool:
-    return _total_work(op) > _REDUCE_HEAVY_WORK_PER_OUTPUT * _output_numel(op)
+    # A softmax assembly (rowmax-bearing body) discounts its ``add`` Assigns: they are the score's
+    # mask applications (causal / banded coord Selects, the explicit additive bias) — one
+    # predicate-add per mask, not real duplicated compute. Without the discount a multi-mask
+    # score (a stamped sliding-window SDPA carries up to three) pushes the cheap (max + exp)
+    # reducer past the threshold and the softmax cone never assembles onto its P@V offer site.
+    work = _total_work(op)
+    if _has_rowmax(op):
+        work -= sum(cost for stmt, cost in _walk_leaf_costs(op) if isinstance(stmt, Assign) and stmt.op.name == "add")
+    return work > _REDUCE_HEAVY_WORK_PER_OUTPUT * _output_numel(op)
 
 
 def _output_numel(loop_op: LoopOp) -> int:
@@ -239,6 +247,23 @@ def _has_rowmax(op) -> bool:
     return isinstance(op, LoopOp) and any(isinstance(s, Accum) and s.op.reduce_canon == "maximum" for s in op.body.iter())
 
 
+def _mask_epilogue(op) -> bool:
+    """A pure score-mask application: accum-free, every compute ``Assign`` an ``add``, and any
+    ``Select`` a COORDINATE mask (both branch values scalar-constant Loads — the causal / banded
+    keep-vs-``-inf`` pick; the additive-bias add has no Select at all). This is the piece of the
+    attention score that belongs WITH the softmax consumer — flash classification reads the mask
+    chain off the rowmax feed, and re-synthesis drops anything left behind on the score producer.
+    RoPE / norm cones never match: their Selects read tensor data, their Assigns carry mul/trig."""
+    if not isinstance(op, LoopOp) or any(isinstance(s, Accum) for s in op.body.iter()):
+        return False
+    stmts = list(op.body.iter())
+    assigns = [s for s in stmts if isinstance(s, Assign)]
+    if not assigns or not all(s.op.name == "add" for s in assigns):
+        return False
+    scalar_names = {nm for s in stmts if isinstance(s, Load) and not any(e.free_vars() for e in s.index) for nm in s.names}
+    return all(all(br.value in scalar_names for br in s.branches) for s in stmts if isinstance(s, Select))
+
+
 def _feeds_softmax(graph: Graph, consumer: Node) -> bool:
     """``consumer``'s output reaches a softmax rowmax within two user hops — the attention
     SCORE producer (QK^T, possibly through the additive-mask elementwise between it and the
@@ -322,15 +347,31 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
     # q-k-norm cone de-certifies the flash unit ("score producer's Q/K are not plain loads").
     # Only accum-free elementwise producers defer (the operand-cone shape: RoPE's mul/trig
     # chain, the norm's final scale-mul) — reduce-bearing producers are the score's own
-    # dataflow assembling itself (the QK contraction fusing into its scale/mask epilogue) and
-    # pass through, as does the bare-product half merging with its reduce partner.
+    # dataflow assembling itself (the QK contraction fusing into its scale epilogue) and
+    # pass through, as does the bare-product half merging with its reduce partner. A MASK
+    # epilogue (the causal / banded / additive-bias adds) is exempt: it belongs WITH the
+    # softmax consumer — flash classification reads the mask chain off the rowmax feed, so a
+    # chain of mask adds must stay free to assemble onto the softmax past one another.
     if (
         not _is_castfree_indexmap(graph, producer)
         and not any(isinstance(s, Accum) for s in producer.op.body.iter())
         and not _is_reduce_partner_merge(producer, consumer)
+        and not _mask_epilogue(producer.op)
         and _feeds_softmax(graph, consumer)
     ):
         raise RuleSkipped("consumer feeds a softmax (attention score producer) — Q/K cones stay materialized")
+
+    # …and the contraction must not chase the masks the other way: the QK reduce fusing INTO a
+    # mask epilogue strands the mask on the score-producer side of the flash boundary, where
+    # re-synthesis silently DROPS it (the fused kernel then attends outside the mask). Pair
+    # ordering decided this before the banded mask added a second mask node; now it is explicit.
+    if (
+        not _is_castfree_indexmap(graph, producer)
+        and any(isinstance(s, Accum) for s in producer.op.body.iter())
+        and _mask_epilogue(consumer.op)
+        and _feeds_softmax(graph, consumer)
+    ):
+        raise RuleSkipped("score contraction stays clear of softmax mask epilogues — the masks ride the softmax consumer")
 
     # ``build_merged_op`` hands a two-node subgraph to ``splice_graph`` and
     # returns None on any unsupported pattern: σ-solve failure (writer/reader

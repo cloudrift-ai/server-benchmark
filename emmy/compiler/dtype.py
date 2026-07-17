@@ -81,8 +81,14 @@ F16x2 = StructuredType("f16x2", np.dtype(np.float16), 4)
 I32 = DataType("i32", np.dtype(np.int32), 4)
 I64 = DataType("i64", np.dtype(np.int64), 8)
 
+# Bool — appears on the explicit-mask construction ops in HF whole-model
+# traces (comparisons / logical masks feeding the attention bias). Like the
+# integer types it exists so the trace can carry the right Tensor.dtype;
+# no kernel computes on it today.
+BOOL = DataType("bool", np.dtype(np.bool_), 1)
 
-_BY_NAME: dict[str, DataType] = {dt.name: dt for dt in (F32, F16, BF16, F16x2, I32, I64)}
+
+_BY_NAME: dict[str, DataType] = {dt.name: dt for dt in (F32, F16, BF16, F16x2, I32, I64, BOOL)}
 
 # Aliases let callers feed PyTorch/numpy-style names without re-canonicalizing
 # at every callsite. The canonical name (``F32.name == "f32"``) is what lands

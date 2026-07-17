@@ -1086,6 +1086,50 @@ def test_accuracy_check_fails_scrambled_output_passes_outliers():
     assert not verdicts((base + rng.standard_normal(base.shape) * 0.001).astype(np.float16))
 
 
+def test_accuracy_check_heavy_tailed_fp16_outputs():
+    """The HEAVY-TAILED fp16 regime (a gemma-4 layer output: peak ≈ 24·RMS from outlier
+    channels + layer_scalar): the current legitimate fp16 path measures per-cell diffs up
+    to ~peak with mean_diff ≈ 1% of peak, so a binary ``max ≤ peak`` ceiling was a rerun-
+    passes coin flip (the layer-0 bench abort flake). The fp16 max clause is an outlier
+    BUDGET (≤ ~0.0015% of cells over ``tol``) under a HARD 4×tol garbage ceiling, and the
+    mean gate is floored by the output's own permutation score (3%-of-peak over-scales by
+    ~25× here — a scramble was a coin flip against it). Shapes mirror measured layer-0
+    captures (2026-07-16, RTX 4080): correct mean ≈ 0.65× the gate, scramble ≈ 1.4×."""
+    import numpy as np
+    import torch
+
+    from emmy.commands.run import _check_accuracy
+
+    rng = np.random.default_rng(7)
+    n = 1 << 20
+    # Gaussian bulk (σ=1) + 0.5% outlier channels at ~12-26σ — peak/RMS ≈ 20+.
+    base = rng.standard_normal(n)
+    hot = rng.choice(n, n // 200, replace=False)
+    base[hot] *= rng.uniform(12.0, 26.0, hot.size)
+    eager = torch.from_numpy(base.astype(np.float32))
+    peak = float(np.abs(base).max())
+
+    def fails(arr):
+        return _check_accuracy({"o": arr.astype(np.float16)}, eager) is not None
+
+    # The measured correct-run shape: ~1.5% relative noise on every cell plus a heavy
+    # diff tail — a few cells drifting past peak (the flake draw). Must PASS.
+    correct = base * (1 + rng.standard_normal(n) * 0.015)
+    correct[:3] = base[:3] + 1.3 * peak
+    assert not fails(correct), "a heavy-tailed correct run with a few over-peak tail cells must pass"
+    # One garbage cell (uninitialized read / Inf math class): must FAIL the hard ceiling.
+    garbage = correct.copy()
+    garbage[7] = 8 * peak
+    assert fails(garbage), "a single cell past the 4x garbage ceiling must fail"
+    # A corrupt tile (a CTA's worth of cells shifted past peak): must FAIL the budget.
+    tile = base.copy()
+    tile[1000:5096] += 1.5 * peak
+    assert fails(tile), "thousands of over-tol cells must blow the outlier budget"
+    # A permutation: must FAIL the permutation-floored mean gate (3%-of-peak alone is a
+    # coin flip on this distribution — the floor is what catches it deterministically).
+    assert fails(rng.permutation(base)), "a permuted heavy-tailed output must fail the mean gate"
+
+
 def test_write_ab_json_greedy_bench_fail_and_record_knobs(tmp_path):
     """The ``--json`` record survives a failed greedy row: the greedy block carries
     ``status: bench_fail`` + ``error`` with null timings, pinned rows carry their own

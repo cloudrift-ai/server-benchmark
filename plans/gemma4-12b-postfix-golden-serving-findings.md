@@ -101,6 +101,15 @@ total and effectively the entire gap to eager.
 - **Fix suggestion (P1, ~400 µs/layer fm at stake on this kernel alone)**: stage the RAW B slab async while A
   rides the compute-fill — B is a plain gmem operand even when A is computed. Alternative mitigation: record
   in-model-form goldens for the fused shapes so the join stops deploying cold.
+- **STATUS (2026-07-16 follow-up): the literal lever is already in-tree and its ring variant is refuted.** The
+  root-cause phrasing above is imprecise: the canonical-B slab fill IS a vectorized cp.async flying under the
+  compute fill even at d1 (`_sync_operands`, since PR #354), so B never lost its async *transport* — what the
+  form lacks is the multi-buffer *pipeline* (the golden's `d2/tma/ring`). The asymmetric B-only prefetch ring
+  exists as the pin-only `STAGE=d<n>/sync` and was measured SLOWER on exactly this kernel (897 vs 665 µs at d2,
+  5090): the extra B slot crosses the smem occupancy quantization 3 → 2 CTAs/SM (`_resolve_sync_stage`
+  docstring). Remaining levers are new work, not enumeration flips: a TMA B fill (frees the copy warps'
+  registers, same slot budget) or shrinking the A/stat footprint to fit a ring under the occupancy cliff — or
+  the golden mitigation above (the practical one; pairs with the M=16/32 decode-shape seeding session).
 - **Repro**: `emmy run --ir <dump-l0>/08_lowering_cuda.kernels/k_linear_mean_reduce_241f7a.torch.json --bench
   --ab "TILE=a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4,STAGE=d2/tma/ring"` (expect the stage pin to degrade to sync).
 
@@ -123,6 +132,11 @@ total and effectively the entire gap to eager.
   gap it names is the thing to fix.
 - **Fix (P1, ~70 µs/layer)**: same two levers as finding 1 (async B-slab staging on computed-A forms; or record
   an in-model-form golden for the fused SDPA→o-proj shape).
+- **STATUS (2026-07-16 follow-up): see finding 1's status** — the async-B transport already exists at d1 and
+  the B-ring is occupancy-refuted, so the practical lever here is the in-model-form golden. The split-K half
+  of the golden (`g2k`/`g4k`) is additionally locked by the `probe.a_computed` guard: a redundant-statistic
+  split (each partial CTA recomputes the full-row stat, slices only the contraction) would be a new
+  enumeration family, not a guard flip.
 - **Repro**: `emmy run --ir <dump-l0>/08_lowering_cuda.kernels/k_linear_sdpa_reduce_fb39d3.torch.json --bench
   --ab "TILE=a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4,REDUCE=g2k,STAGE=d2/tma/ring"`.
 
@@ -149,7 +163,21 @@ total and effectively the entire gap to eager.
 - **Fix (P2)**: add a `bool`/`i8` dtype (or make the scalar-const dtype inheritance fall back to the literal's
   own dtype when the consumer's output dtype is non-numeric). Compile-only repro, no GPU:
   `emmy compile google/gemma-4-12B --dynamic seq_len@input_ids:1 --dynamic seq_len@attention_mask:2 --dynamic
-  seq_len@attention_mask:3 --dynamic seq_len@position_ids:1 --ir input`.
+  seq_len@attention_mask:3 --dynamic seq_len@position_ids:1 --ir torch` (`--ir input` is not a stage name).
+- **STATUS (2026-07-16 follow-up): FIXED** — `bool` DataType added (graph-level + CUDA C spelling), scalar
+  consts of bool-output consumers fall back to f32 (a comparison compares in the operand's domain), and the
+  mask subgraph's aten spellings (`gt`/`lt`/`ge`/`le`/`eq`/`ne`, `__or__`/`__and__`) now translate to their
+  numpy names instead of dying in `ElementwiseImpl`. The repro above completes through `--ir torch` AND
+  `--ir tensor` (decomposition). A second wall then fell in the same session: the CUDA renderer had no
+  spellings for the mask ops (`op_to_expr` raised on `equal`) — comparisons/`bitwise_*` (spelled logical on the
+  f32-promoted operands) and a `where` ternary were added, verified exact-match vs eager on a mask snippet.
+- **Whole-model tune RAN (2026-07-16, same work dir `_tune/tune-model-gemma4-12b-wholemodel/`)**: the search
+  completed — 1475 ok / 19 bench_fail rows (all failures the finding-5 hung `k_linear_mean_reduce_*` corner),
+  fused terminal of 33 unique kernels / 906 positions, online prior written, reservoir calibration +0.93.
+  The final whole-model `--bench` (eager/torch.compile/emmy) destabilized the box twice (host OOM-killed at
+  39 GB RSS once with `make test` running beside it, then took the machine down solo on reboot day) and was
+  SKIPPED by decision — layer-scope benches + the serving A/B remain the e2e evidence on this 60 GB desktop;
+  run the whole-model bench on a bigger/rented box if the table is ever needed.
 
 ## Finding 5 — hung-variant bench failures cluster on the two computed-A kernels
 
@@ -274,7 +302,9 @@ symbolic activation buffers) is the working point. cupy also had to be installed
 - **`eval variants` rank lines are misleading on fm big-tile kernels** (finding 6): the -O1 lane inverts against
   -O3 by up to 8× on this family, so "pick: rank 37/113 — misses best" reads as a search failure when the pick
   is near-best deployable. The -O3 column rescues it, but the verdict line itself should be computed from the
-  -O3 column when present.
+  -O3 column when present. **FIXED (2026-07-16)**: the verdict ratio now uses the -O3 reservoir latencies when
+  the pick and ≥1 other row carry one (the line says which lane it used); on this run's fm gate⊗up leaderboard
+  it reads `1.00x of best (-O3 deploy latency)` instead of the false miss.
 - **Background tune resumability worked well**: the std tune was killed mid-run (session clear) and re-running
   the same command without `--clean` resumed from the DB/cubin caches — the completing portion cost 2165 s
   instead of a full re-search. Worth documenting as the blessed interrupt-recovery path.

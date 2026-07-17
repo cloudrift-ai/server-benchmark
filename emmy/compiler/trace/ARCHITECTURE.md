@@ -62,6 +62,16 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   `per_layer_input` buffer sliced in-graph the same way — kernel shapes and latencies are the deployed model's,
   numerics are synthetic; non-PLE architectures take the unchanged path (`tests/compiler/trace/test_huggingface.py`).
 
+- `stamp_sliding_windows(graph, config, layer_type=None)` re-asserts the per-layer sliding window the trace ERASES:
+  a single-layer trace carries no mask at all (HF takes the `is_causal` path — the traced layer is pure causal at
+  every seq), and a whole-model trace materializes the banded mask as an opaque additive tensor. The stamp sets
+  `SdpaOp.sliding_window` (+ `is_causal`) from `config.sliding_window` × `layer_types` — single-layer via the
+  `layer_type` kwarg, whole-model by walking the graph's SDPA nodes in execution order (a count mismatch stamps
+  nothing). Semantics: the stamped SDPA's mask keeps AT MOST the causal band `kv ∈ [m − W + 1, m]` (an explicit mask
+  operand may keep less, e.g. padding — it stays applied), which is what lets the lowering skip key blocks wholly
+  outside the band and both reference backends (`SdpaOp.forward`, `backend/torch_ref.py`) compute the band.
+  `commands/compile.py` calls it after every model/layer `trace_module`.
+
 `SliceOp` nodes record `dim`/`start` as **op fields** at trace time (`torch.py`'s slice handler reads the raw FX
 args): the legacy constant-input convention can't represent a `None` start (`x[:, :s]`) or a SymInt end —
 `_resolve_inputs` drops both, leaving the surviving constants positionally ambiguous. Pre-field IR dumps still

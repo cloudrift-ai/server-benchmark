@@ -177,6 +177,16 @@ prefetch clamp re-pinned onto the last needed chunk. CTA-uniform (the in-loop ba
 (skipped steps fold the carrier's exact identity: `α = 1`, `P = expf(−1e30 − m_i) = 0`); it halves the streamed
 keys/mma work on average, paying wall-clock wherever the grid oversubscribes the SMs.
 
+**A banded stream also STARTS late** — the sliding-window mirror of the causal stop, derived the same way: when the
+prologue additionally carries the band `Select` (`kv > m − W`, the trace-time `SdpaOp.sliding_window` stamp's
+structural form), the stream begins at `kv_start = ⌊max(0, grid_m · cta_rows − W + 1) / bn⌋ · bn` — the kloops take a
+`k_first` beside `k_end` (loop var stays absolute, the slot/phase arithmetic rebases onto `k0 − k_first`, the
+prologue primes from `k_first` with each prime clamped onto the last needed chunk), and the unstaged `StridedLoop`
+starts there directly. Same contract as the stop: CTA-uniform, bit-identical (leading skipped steps are all-masked),
+slice-local on a split-KV partial (a slice wholly below the band runs zero steps), dropped (full stream, still
+exact) under WSPEC. At seq ≫ W this turns the sliding layers' O(seq²) stream into O(seq·W) — 40 of gemma-4's 48
+layers at real context lengths.
+
 **The alternating single-slab pipeline** (`STAGE=d1/tma/alt`) is the wide-block form of the same stream — not its own
 skeleton but `pipelined_kloop` run over the stream's three tagged segments (`_twist._stream_segments`: Q·K reads the
 K slab, the softmax merge reads none, P·V reads the V slab) with K and V as separate depth-1 groups: each live range

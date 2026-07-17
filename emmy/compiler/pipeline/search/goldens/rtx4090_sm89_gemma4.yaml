@@ -642,8 +642,8 @@ configs:
     N: 512
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
-    emmy_us: 66.2
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 57.9
     cublas_us: 48.7
   - kernel: matmul
     name: gemma4_12b.k_proj_global.s2048
@@ -651,8 +651,8 @@ configs:
     N: 512
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x4/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
-    emmy_us: 51.3
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 47.9
     cublas_us: 48.7
   - kernel: matmul
     name: gemma4_12b.o_proj_global.s2048

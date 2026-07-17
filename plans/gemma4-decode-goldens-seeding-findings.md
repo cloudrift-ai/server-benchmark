@@ -160,3 +160,22 @@ program-caching items on the roadmap.
   contents, which entry matched which row.
 - The fm-superset sweep (`EMMY_FAST_MATH=1` tune + per-regime A/B) cost nothing extra and proved std ≡ fm on this
   family — keep it as the default seeding recipe on consumer dies.
+
+## TTFT/prefill wall (2026-07-16, late night) — device-resident symbolic prefill (PR #387) + symbolic twin tune
+
+Prefill ran the per-layer HOST numpy path (~96 `.cpu()` hops/step). PR #387 runs the symbolic programs
+device-resident at every width (`run_device_sym`: grids per step via `set_sym_values`, capacity-built buffers =
+vLLM's mnbt, no per-T capture), and the four symbolic twin graphs were tuned into the serving DB (~70 min).
+Measured (matched config, capture default, bucket 32):
+
+| workload | metric | host prefill | device prefill | matched stock |
+| --- | --- | --: | --: | --: |
+| in-8/out-64 | TTFT / TPOT | 4 119 / 21.33 ms | **125 / 21.50 ms** | — |
+| in-256/out-64 | TTFT / TPOT / req/s | 113 777 / 2 939 / 0.10¹ | **1 579 / 29.3 / 7.06** | 1 310 / 23.6 / 10.33 |
+
+¹ the pre-#386 original A/B numbers at this workload class.
+
+**e2e standing: 0.68× matched stock req/s (from 0.01×); pure decode stays AHEAD of stock.** The residual gap is
+prefill-step COMPUTE (TTFT 1.2×, mixed-step TPOT 1.24×): the symbolic-path kernels at T≈256 chunks — the
+computed-A forms at prefill M and packed-varlen attention — plus mixed steps running uncaptured by design.
+Integration overhead is no longer the story anywhere in serving.

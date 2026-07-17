@@ -87,8 +87,36 @@
   capturing stream). The whole decode step (embed + 48× pre/RoPE/paged-attention/post + final norm) then records
   into ONE vLLM graph; the ~96 per-token host launches and per-call Python/dlpack overhead vanish at replay.
 - **Verified**: `tests/serving/test_gen_capture_gpu.py` — a `run_device` call captured inside an outer
-  `torch.cuda.graph` replays LIVE (new input values flow through on replay). A full serving A/B (12B or
-  TinyLlama, capture vs eager) is the remaining validation — needs a serving-capable box/session.
+  `torch.cuda.graph` replays LIVE (new input values flow through on replay).
+
+## Capture-vs-eager serving A/B on the 12B (same session) — capture WORKS; decode is GPU-bound on the fused twins
+
+Matched config both arms (vLLM 0.23, `EMMY_GEN_DECODE_BUCKET=32`, fp16, mml 512 / mnbt 256 / util 0.90,
+concurrency 32, 32 prompts, out 64, seed 0; logs `_tune/decode-goldens-5090/serve-ab-*.log`):
+
+| workload | eager TPOT (ms) | capture TPOT (ms) | eager TTFT (s) | capture TTFT (s) |
+| --- | --: | --: | --: | --: |
+| in 256 / out 64 | 2 938.8 | 2 795.6 | 113.8 | 157.6 |
+| in 8 / out 64 (decode-dominated) | 1 925.1 | 1 924.0 | 10.4 | 7.9 |
+
+- **The capture mechanism is fully validated**: vLLM captured all 6 decode sizes straight through the 96 emmy
+  programs + paged attention ("Capturing CUDA graphs (decode, FULL): 6/6", 12 s, +0.04 GiB), and every request
+  in every run completed correctly — the whole-step graphs replay LIVE end-to-end.
+- **But TPOT is identical (1925.1 vs 1924.0 at in-8)**: the decode step is GPU-BOUND at ~1.92 s — there is no
+  host-launch overhead left for capture to erase at this kernel speed (eager's async queuing already hides the
+  ~96 dispatches behind the slow kernels, exactly as `serving/ARCHITECTURE.md` predicted for the embedding
+  runner). Capture becomes the payoff lever only after the kernels drop ~2 orders — and it is now in place for
+  that.
+- **Why ~1.92 s when the golden floor is ~12 ms/token**: a compile-only probe of layer-0's M=32 twins shows the
+  split picture — the POST twin's bare matmul mains DID cross-match the new goldens (o_proj / down-proj deploy
+  `w1x8/f2x2/k2 g8k d2/tma/ring` exactly), but the PRE twin's projections are **computed-A fused forms**
+  (input-norm→q/kv cones) deploying tiny `w1x1/f1x4 d1/sync` compute-fill tiles, and the gate⊗up megakernel
+  rides `w2x2/f2x4 d1/sync` — the SAME computed-A in-model class as the prefill findings 1–2, now at decode M.
+  The bare-matmul goldens did help (pre-golden bucket-32 TPOT was 3 639 ms → 1 924 now, 1.9×), but the fused
+  forms are the remaining ~160×.
+- **Next lever (sharpened): in-model-form decode goldens** — seed the fused shapes (the norm→projection cones
+  and gate⊗up at M=16/32, from the twins' own dumps) the way the s2048 family was seeded, or land the
+  computed-A enumeration work. Only then does the whole-step graph turn kernel wins into TPOT.
 
 ## Repro / artifacts
 

@@ -71,10 +71,14 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   Attention dims are **per layer** (`layer_meta(L)` → head_dim / num_heads / num_kv / scaling) — Gemma-4's global layers
   use a larger `global_head_dim` than its sliding ones, so each layer's `pre`/`post` compiles at its own width. The caller stitches between
   `pre` and `post` (a reference torch SDPA in the Phase-2 host stitch; vLLM paged `Attention` in Phase 3). **I/O:**
-  prefill / `num_tokens > bucket` use the host numpy `rebind` path; the **decode hot path** (`num_tokens ≤ bucket`)
-  is **device-resident** (Phase A — `run_device` / `embed_device` / `forward_layer_*_device` / `final_norm_device`:
-  captured-replay over the static program with torch↔cupy DLPack zero-copy, no host hop; reuses the embedding
-  runner's pattern). This removed the ~40% host/dispatch overhead and ~2×'d served decode. **Decode bucket:** it
+  the plugin runs **device-resident at every width**: the **decode hot path** (`num_tokens ≤ bucket`) rides the
+  captured static twins (`run_device` — captured-replay, torch↔cupy DLPack zero-copy), and **prefill /
+  chunked-prefill steps** (`bucket < num_tokens ≤ prefill_capacity`, capacity = vLLM's `max_num_batched_tokens`,
+  passed as `max_tokens` at runner build) ride the SYMBOLIC programs' `run_device_sym` — grids sized per step via
+  `set_sym_values` over capacity-built buffers, launches issued on torch's stream, no per-T graph capture
+  (chunked-prefill T varies per step; the dispatch hides behind prefill-width GPU work). The per-layer host numpy
+  `rebind` path survives only for the standalone `emmy generate` oracle and as the over-capacity fallback — its
+  ~2-per-layer `.cpu()` hops per prefill step were the TTFT wall. **Decode bucket:** it
   also compiles a **static M=`decode_bucket` (default 16)** `pre`/`post` twin per layer and uses it when
   `num_tokens ≤ bucket` (pad → run → slice the real rows) — the symbolic hint-512 M-tile is ~66× too slow at decode
   M=1; falls back to symbolic above the bucket or if a static compile fails. So

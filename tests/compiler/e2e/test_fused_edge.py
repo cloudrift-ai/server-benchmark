@@ -118,6 +118,10 @@ def test_fused_rmsnorm_linear(tier, monkeypatch):
     A cone, run once per tile row by the sync stat fill)."""
     if tier == "warp":
         monkeypatch.setenv("EMMY_TILE", _WARP_TILE)
+        # Pin the serial fold: the computed-A form now offers redundant-statistic split-K
+        # siblings on this decode-M shape, and this test pins the ONE-kernel fused form
+        # (the split form has its own test: test_fused_cone_splitk_matches_reference).
+        monkeypatch.setenv("EMMY_REDUCE", "")
     S, H, inter = 32, 1024, 3072
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (1, S, H), F16), node_id="x")
@@ -158,7 +162,7 @@ def _rmsnorm_linear_graph(S, H: int, inter: int) -> Graph:
     return g
 
 
-def _rmsnorm_linear_check(g: Graph, S: int, H: int, inter: int, *, want_mma: bool) -> None:
+def _rmsnorm_linear_check(g: Graph, S: int, H: int, inter: int, *, want_mma: bool, kernels: tuple = (1,)) -> None:
     rng = np.random.default_rng(0)
     ins = {
         "x": (rng.standard_normal((1, S, H)) * 0.3).astype(np.float16),
@@ -166,9 +170,9 @@ def _rmsnorm_linear_check(g: Graph, S: int, H: int, inter: int, *, want_mma: boo
         "wg": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
     }
     got, srcs = _compile_run(g, ins)
-    assert len(srcs) == 1, f"the fused norm→linear must be ONE kernel, got {len(srcs)}"
+    assert len(srcs) in kernels, f"the fused norm→linear must be {kernels} kernel(s), got {len(srcs)}"
     if want_mma:
-        assert "emmy_mma" in srcs[0], "the pinned mma tier must engage on the fused matmul"
+        assert any("emmy_mma" in s for s in srcs), "the pinned mma tier must engage on the fused matmul"
     x, nw, wg = (ins[k].astype(np.float32) for k in ("x", "nw", "wg"))
     rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
     np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), rms @ wg.T, atol=0.5, rtol=0.1)
@@ -193,6 +197,7 @@ def test_fused_sync_fill_slab_swizzle(tile, monkeypatch):
     the same static 2-D block-tile grid, and the grouped launch order is its B-re-streaming
     fix): the ``_rsub`` grouped decode must be emitted, not silently degraded to flat."""
     monkeypatch.setenv("EMMY_TILE", tile)
+    monkeypatch.setenv("EMMY_REDUCE", "")  # serial fold — the swizzle inspection needs the ONE fused kernel
     if tile.endswith("k4"):
         monkeypatch.setenv("EMMY_RASTER", "gn8")
     S, H, inter = 64, 1024, 3072
@@ -259,6 +264,7 @@ def test_fused_rmsnorm_linear_symbolic_m(runtime_s, monkeypatch):
     the sync compute-fill / stat-prologue σ clamp the overhanging rows and the ``RegStore`` guard
     discards their store."""
     monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2")  # tile 64×32 — every runtime S is masked
+    monkeypatch.setenv("EMMY_REDUCE", "")  # serial fold — the ONE-masked-kernel contract is what's under test
     H, inter = 256, 512
     g = _rmsnorm_linear_graph(Dim("seq_len", hint=64), H, inter)
     _rmsnorm_linear_check(g, runtime_s, H, inter, want_mma=True)
@@ -268,9 +274,11 @@ def test_fused_rmsnorm_linear_symbolic_m(runtime_s, monkeypatch):
 def test_fused_rmsnorm_linear_unpinned():
     """UNPINNED greedy on the fused norm→linear: the merged fork (coop ``Map`` rows + the
     computed-A Contraction's warp rows) lowers and matches numpy whichever row the prior picks —
-    the fork-integrity e2e (runs on any CUDA device; option-0 stays the coop row)."""
+    the fork-integrity e2e (runs on any CUDA device; option-0 stays the coop row). The pick may
+    be the 1-kernel fused row or a 2-kernel redundant-statistic split row; both are legal fork
+    members on this decode-M shape."""
     S, H, inter = 32, 256, 512
-    _rmsnorm_linear_check(_rmsnorm_linear_graph(S, H, inter), S, H, inter, want_mma=False)
+    _rmsnorm_linear_check(_rmsnorm_linear_graph(S, H, inter), S, H, inter, want_mma=False, kernels=(1, 2))
 
 
 @requires_cuda
@@ -384,3 +392,43 @@ def test_sdpa_consumer_projection_reaches_mma(monkeypatch):
     att = p @ v[0]  # (H, S, D)
     ref = np.transpose(att, (1, 0, 2)).reshape(S, H * D) @ wo.T
     np.testing.assert_allclose(got.reshape(S, NO).astype(np.float32), ref, atol=0.5, rtol=0.1)
+
+
+@requires_cuda
+@pytest.mark.parametrize("stage", ["d1/sync", "d2/sync"])
+def test_fused_cone_splitk_matches_reference(stage, monkeypatch):
+    """Redundant-statistic split-K on a computed-A (norm→linear) cone: the contraction K is
+    sliced across CTAs (``REDUCE=g4k``) while the k-invariant stat prologue stays FULL-ROW in
+    every partition (each recomputes it), and the deferred finalize sums the partials before
+    the projection — the output must match the fp32 reference. Parametrized over both sync
+    depths (``d1`` + the asymmetric B-only prefetch ring ``d2``). The decode-M shape class
+    (M=32) is where this split pays: the un-split cone grid starves the SMs."""
+    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w1x4/f2x2/k2")
+    monkeypatch.setenv("EMMY_REDUCE", "g4k")
+    monkeypatch.setenv("EMMY_STAGE", stage)
+    S, H, inter = 32, 1024, 3072
+    # CANONICAL-B matmul (w shaped (H, inter)) rather than the transposed-B linear: a
+    # transposed B clamps the sync ring back to d1 (nothing async to overlap), so the d2
+    # cell would silently re-test d1. The real decode twins bake weights as constants
+    # (the transpose folds), so canonical-B is the shape class the ring actually serves.
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (1, S, H), _dt.F16), node_id="x")
+    g.add_node(InputOp(), [], Tensor("nw", (H,), _dt.F16), node_id="nw")
+    g.add_node(InputOp(), [], Tensor("wg", (H, inter), _dt.F16), node_id="wg")
+    g.add_node(RmsNormOp(eps=1e-6), ["x", "nw"], Tensor("xn", (1, S, H), _dt.F16), node_id="xn")
+    g.add_node(MatmulOp(), ["xn", "wg"], Tensor("o", (1, S, inter), _dt.F16), node_id="o")
+    g.inputs, g.outputs = ["x", "nw", "wg"], ["o"]
+    rng = np.random.default_rng(0)
+    ins = {
+        "x": (rng.standard_normal((1, S, H)) * 0.3).astype(np.float16),
+        "nw": (rng.standard_normal((H,)) * 0.3).astype(np.float16),
+        "wg": (rng.standard_normal((H, inter)) * 0.1).astype(np.float16),
+    }
+    got, srcs = _compile_run(g, ins)
+    assert len(srcs) == 2, f"split-K must produce partial + finalize, got {len(srcs)} kernel(s)"
+    assert any("emmy_mma" in s for s in srcs), "the mma tier must engage on the split partial"
+    if stage == "d2/sync":
+        assert any("cp.async" in s for s in srcs), "the d2 B-only prefetch ring must issue cp.async on the canonical-B slab"
+    x, nw, wg = (ins[k].astype(np.float32) for k in ("x", "nw", "wg"))
+    rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
+    np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), rms @ wg, atol=0.5, rtol=0.1)

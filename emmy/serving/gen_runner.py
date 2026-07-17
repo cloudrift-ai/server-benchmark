@@ -12,9 +12,12 @@ symbolic, and exposes the per-token, everything-but-attention compute:
 - ``final_norm(hidden) -> hidden``.
 
 The caller stitches attention between ``pre`` and ``post`` (a reference torch SDPA in the
-Phase-2 host stitch; vLLM's paged ``Attention`` in Phase 3). I/O is host numpy (the
-serving ``rebind`` path) — correctness-first; the device zero-copy + captured-replay path
-is the Phase-3/4 optimization. NOTE: the per-layer ``CompiledProgram``s share BOTH their
+Phase-2 host stitch; vLLM's paged ``Attention`` in Phase 3). I/O: the vLLM plugin runs
+device-resident at EVERY width — decode (``T <= bucket``) through the captured static twins,
+prefill / chunked-prefill (``bucket < T <= prefill_capacity``) through the symbolic programs'
+``run_device_sym`` (grids sized per step, capacity buffers, no per-layer host hop); the host
+numpy ``rebind`` path survives for the standalone oracle and as the over-capacity fallback.
+NOTE: the per-layer ``CompiledProgram``s share BOTH their
 weights (one device buffer per constant, ``_bind_device_constants``) and their activation
 buffers + scratch slabs (one ``BufferArena`` per runner) — the footprint no longer scales
 with ``num_layers`` (the memory budget the plan flagged, Phase 2 / Top risk #9).
@@ -55,7 +58,14 @@ class _Program:
         captures-or-replays the whole-program graph, and returns the outputs as torch CUDA tensors
         sliced to ``T`` — no host round-trip. Stale prefix padding rows are safe (pre/post are
         per-token-independent; only ``[:T]`` is read out). All cupy work runs on torch's current
-        stream so the upload, replay and output read stay ordered."""
+        stream so the upload, replay and output read stay ordered.
+
+        Under an OUTER capture (vLLM's whole-step decode cudagraph — torch's current stream is
+        capturing) the program's own graph machinery is illegal (nested stream capture aborts, and
+        a graph launch cannot be recorded), so the raw launch sequence is issued instead
+        (``run_once`` — the exact work ``capture_program_graph`` records: prebuilt buffers, no
+        allocation, no sync). The outer graph absorbs the launches and the per-call Python
+        overhead vanishes at replay."""
         import cupy as cp
         import torch
 
@@ -65,10 +75,38 @@ class _Program:
         with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
             feed = {n: cp.from_dlpack(a.detach().contiguous()) for n, a in zip(self.input_names, arrays, strict=True)}
             self.program.upload_prefix_device(feed)
-            self.program.capture_program_graph()  # static graph → one cached entry (empty sym_values)
-            self.program.replay_program_graph()
+            if torch.cuda.is_current_stream_capturing():
+                self.program.run_once()
+            else:
+                self.program.capture_program_graph()  # static graph → one cached entry (empty sym_values)
+                self.program.replay_program_graph()
             outs = self.program.output_prefix_device()
             return [torch.from_dlpack(outs[n])[:t].clone() for n in self.output_names]
+
+    def run_device_sym(self, arrays):
+        """Device-resident twin of :meth:`run` for the SYMBOLIC (prefill) programs at any width
+        ``T`` up to the build capacity: size the launch grids to ``T`` (``set_sym_values`` — no
+        re-allocation, the buffers stay at capacity), upload the ``T`` real rows into the buffer
+        prefix device-to-device, issue the launch sequence on torch's current stream, and return
+        the outputs as torch CUDA tensors at their resolved ``T`` shapes — no per-layer host numpy
+        round-trip (the pre-device prefill path's ~2×48 ``.cpu()`` hops per step were the TTFT
+        wall). No per-T graph capture: at prefill widths the dispatch hides behind the GPU work,
+        and chunked-prefill ``T`` varies step to step — a per-T graph cache would re-capture
+        constantly. Requires the program to have been built with a ``capacity`` feed
+        (:func:`_compile_split`); ``set_sym_values`` raises past it."""
+        import cupy as cp
+        import torch
+
+        from emmy.compiler.backend.gpu_lock import gpu_lock
+
+        t = arrays[0].shape[0]
+        with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+            feed = {n: cp.from_dlpack(a.detach().contiguous()) for n, a in zip(self.input_names, arrays, strict=True)}
+            self.program.set_sym_values({"num_tokens": t})
+            self.program.upload_prefix_device(feed)
+            self.program.run_once()
+            outs = self.program.output_prefix_device({"num_tokens": t})
+            return [torch.from_dlpack(outs[n]).clone() for n in self.output_names]
 
 
 def _pad_rows(arr, bucket):
@@ -108,7 +146,7 @@ def _bind_device_constants(graph, sources, cache):
     return out
 
 
-def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None, arena=None):
+def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None, arena=None, capacity=None):
     """Trace ``wrapper`` and build a :class:`_Program`. ``argnames`` (a list) ties each named
     arg's axis-0 to a shared symbolic ``num_tokens`` Dim — the **prefill** program (one program,
     any width). ``argnames=None`` traces a **fully static** graph at the example shapes — the
@@ -116,7 +154,11 @@ def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None, a
     pathological at decode). ``dev_consts`` (a per-wrapper dict) shares each weight's device
     buffer across the builds that pass the same dict — see :func:`_bind_device_constants`.
     ``arena`` (one per runner) pools the activation buffers + scratch slab across every
-    program built with it — layers run sequentially, so N layers hold ~one layer's worth."""
+    program built with it — layers run sequentially, so N layers hold ~one layer's worth.
+    ``capacity`` (symbolic programs only) sizes the BUILD feed's token axis so the device
+    buffers hold any step up to it — the :meth:`_Program.run_device_sym` prefill path needs
+    fixed capacity buffers (``set_sym_values`` never re-allocates); without it the build feed
+    is the example (the host ``rebind`` path re-sizes per call)."""
     import torch
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -139,7 +181,10 @@ def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None, a
     for path, t in wrapper.named_buffers(remove_duplicate=False):
         sources[path] = t.detach().cpu().to(torch.float32).numpy().astype(np_dtype, copy=False)
 
-    feed = {n: a.detach().cpu().to(torch.float32).numpy().astype(np_dtype) for n, a in zip(compiled.inputs, example_args, strict=True)}
+    build_args = example_args
+    if capacity is not None and argnames:
+        build_args = [torch.zeros((capacity, *a.shape[1:]), dtype=a.dtype) for a in example_args]
+    feed = {n: a.detach().cpu().to(torch.float32).numpy().astype(np_dtype) for n, a in zip(compiled.inputs, build_args, strict=True)}
     with gpu_lock():
         if dev_consts is None:
             const_feed = bind_constants(compiled, sources)
@@ -150,7 +195,20 @@ def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None, a
 
 
 class EmmyGenRunner:
-    def __init__(self, *, embed_weight, norm, pre, post, attn_meta, np_dtype, pre_decode=None, post_decode=None, decode_bucket=16):
+    def __init__(
+        self,
+        *,
+        embed_weight,
+        norm,
+        pre,
+        post,
+        attn_meta,
+        np_dtype,
+        pre_decode=None,
+        post_decode=None,
+        decode_bucket=16,
+        prefill_capacity=None,
+    ):
         self._embed_weight = embed_weight  # numpy [vocab, H]
         self._norm = norm  # torch module
         self._pre = pre  # list[_Program] — symbolic (prefill / any width)
@@ -158,6 +216,7 @@ class EmmyGenRunner:
         self._pre_decode = pre_decode  # list[_Program] — static M=decode_bucket (or None → no bucket)
         self._post_decode = post_decode
         self._decode_bucket = decode_bucket
+        self._prefill_capacity = prefill_capacity  # symbolic programs' device-buffer token capacity (None -> host rebind only)
         self._attn_meta = attn_meta  # per-layer list of (head_dim, num_heads, num_kv, scaling)
         # Layer-0 convenience scalars — correct for homogeneous models (Qwen3 / Llama). Gemma-4's
         # global layers differ, so the vLLM model reads per-layer dims via ``layer_meta``.
@@ -183,18 +242,25 @@ class EmmyGenRunner:
         (``embed_device`` / ``forward_layer_*_device`` / ``final_norm_device``) is available."""
         return self._pre_decode is not None
 
+    @property
+    def prefill_capacity(self) -> int:
+        """The symbolic programs' device-buffer token capacity — the widest step
+        ``forward_layer_*_device`` serves without a host fallback (0 = built without
+        capacity, host ``rebind`` only)."""
+        return self._prefill_capacity or 0
+
     @classmethod
-    def create(cls, model_id, *, dtype_str="float16", decode_bucket=16):
+    def create(cls, model_id, *, dtype_str="float16", decode_bucket=16, max_tokens=None):
         import torch
         from transformers import AutoModelForCausalLM
 
         logger.info("[gen_runner] loading %s (%s, CPU trace)...", model_id, dtype_str)
         with torch.device("cpu"):
             model = AutoModelForCausalLM.from_pretrained(model_id, dtype=getattr(torch, dtype_str)).eval()
-            return cls.from_model(model, dtype_str=dtype_str, decode_bucket=decode_bucket)
+            return cls.from_model(model, dtype_str=dtype_str, decode_bucket=decode_bucket, max_tokens=max_tokens)
 
     @classmethod
-    def from_model(cls, model, *, dtype_str="float16", decode_bucket=16):
+    def from_model(cls, model, *, dtype_str="float16", decode_bucket=16, max_tokens=None):
         """Build from an already-loaded CausalLM module (the network-free path). ``model``
         must be on CPU for the trace."""
         import numpy as np
@@ -240,7 +306,15 @@ class EmmyGenRunner:
             post_consts: dict = {}
             with torch.device("cpu"):
                 pre_programs.append(
-                    _compile_split(pre_w, [torch.zeros(8, hidden, dtype=dtype)], ["hidden"], np_dtype, dev_consts=pre_consts, arena=arena)
+                    _compile_split(
+                        pre_w,
+                        [torch.zeros(8, hidden, dtype=dtype)],
+                        ["hidden"],
+                        np_dtype,
+                        dev_consts=pre_consts,
+                        arena=arena,
+                        capacity=max_tokens,
+                    )
                 )
                 post_programs.append(
                     _compile_split(
@@ -250,6 +324,7 @@ class EmmyGenRunner:
                         np_dtype,
                         dev_consts=post_consts,
                         arena=arena,
+                        capacity=max_tokens,
                     )
                 )
                 # Static M=decode_bucket twins — fast at decode (small M). If a layer's static
@@ -294,6 +369,7 @@ class EmmyGenRunner:
             pre_decode=pre_decode if use_decode else None,
             post_decode=post_decode if use_decode else None,
             decode_bucket=decode_bucket,
+            prefill_capacity=max_tokens,
         )
 
     def embed(self, input_ids):
@@ -358,13 +434,23 @@ class EmmyGenRunner:
         return self._embed_weight_dev[input_ids.long()]
 
     def forward_layer_pre_device(self, layer, hidden):
-        """Device twin of :meth:`forward_layer_pre` (decode path, ``T <= decode_bucket``):
-        ``hidden[T,H]`` CUDA → un-rotated ``(q, k, v)`` CUDA tensors."""
-        return tuple(self._pre_decode[layer].run_device([hidden]))
+        """Device twin of :meth:`forward_layer_pre`: ``hidden[T,H]`` CUDA → un-rotated
+        ``(q, k, v)`` CUDA tensors. ``T <= decode_bucket`` rides the static decode twin
+        (captured-replay); wider ``T`` (prefill / mixed chunked-prefill steps) rides the
+        SYMBOLIC program device-resident (``run_device_sym``) when it was built with
+        capacity — no per-layer host numpy hop either way."""
+        t = hidden.shape[0]
+        if self._pre_decode is not None and t <= self._decode_bucket:
+            return tuple(self._pre_decode[layer].run_device([hidden]))
+        return tuple(self._pre[layer].run_device_sym([hidden]))
 
     def forward_layer_post_device(self, layer, attn_out, residual):
-        """Device twin of :meth:`forward_layer_post`: ``(attn_out, residual)`` CUDA → ``[T,H]`` CUDA."""
-        return self._post_decode[layer].run_device([attn_out, residual])[0]
+        """Device twin of :meth:`forward_layer_post`: ``(attn_out, residual)`` CUDA → ``[T,H]``
+        CUDA. Decode-bucketed / symbolic-routed like :meth:`forward_layer_pre_device`."""
+        t = attn_out.shape[0]
+        if self._post_decode is not None and t <= self._decode_bucket:
+            return self._post_decode[layer].run_device([attn_out, residual])[0]
+        return self._post[layer].run_device_sym([attn_out, residual])[0]
 
     def final_norm_device(self, hidden):
         """Apply the final norm on CUDA to a ``hidden[T,H]`` CUDA tensor."""

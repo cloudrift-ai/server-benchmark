@@ -291,6 +291,7 @@ def test_fused_gate_up_swiglu_symbolic_m(runtime_s, monkeypatch):
     fragment epilogue; the seq axis is symbolic with a masked M tail (31 under / 130 over the
     64-row tile)."""
     monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2")
+    monkeypatch.setenv("EMMY_REDUCE", "")  # serial fold — ONE masked kernel is the contract; the split form has its own test
     S, H, inter = runtime_s, 256, 512
     Sd = Dim("seq_len", hint=64)
     g = Graph()
@@ -432,3 +433,42 @@ def test_fused_cone_splitk_matches_reference(stage, monkeypatch):
     x, nw, wg = (ins[k].astype(np.float32) for k in ("x", "nw", "wg"))
     rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
     np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), rms @ wg, atol=0.5, rtol=0.1)
+
+
+@requires_cuda
+def test_fused_gate_up_splitk_matches_reference(monkeypatch):
+    """Redundant-statistic split-K on the MULTI-CHANNEL (gate/up) fused cone: both channels'
+    additive states slice over K across CTAs (the stat prologue full-row per partition), the
+    deferred finalize folds the 2-component carrier and applies the SwiGLU ⊗-combine ONCE after
+    the cross-partition sums — the output must match the fp32 reference. The decode-M shape
+    class (M=32) is where the multi-channel split pays (the gemma gate⊗up twin)."""
+    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w1x4/f2x2/k2")
+    monkeypatch.setenv("EMMY_REDUCE", "g4k")
+    S, H, inter = 32, 256, 512
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (1, S, H), F16), node_id="x")
+    g.add_node(InputOp(), [], Tensor("nw", (H,), F16), node_id="nw")
+    g.add_node(InputOp(), [], Tensor("wg", (inter, H), F16), node_id="wg")
+    g.add_node(InputOp(), [], Tensor("wu", (inter, H), F16), node_id="wu")
+    g.add_node(RmsNormOp(eps=1e-6), ["x", "nw"], Tensor("xn", (1, S, H), F16), node_id="xn")
+    g.add_node(LinearOp(), ["xn", "wg"], Tensor("gate", (1, S, inter), F16), node_id="gate")
+    g.add_node(LinearOp(), ["xn", "wu"], Tensor("up", (1, S, inter), F16), node_id="up")
+    g.add_node(ElementwiseOp("silu"), ["gate"], Tensor("sg", (1, S, inter), F16), node_id="sg")
+    g.add_node(ElementwiseOp("multiply"), ["sg", "up"], Tensor("o", (1, S, inter), F16), node_id="o")
+    g.inputs, g.outputs = ["x", "nw", "wg", "wu"], ["o"]
+
+    rng = np.random.default_rng(0)
+    ins = {
+        "x": (rng.standard_normal((1, S, H)) * 0.3).astype(np.float16),
+        "nw": (rng.standard_normal((H,)) * 0.3).astype(np.float16),
+        "wg": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
+        "wu": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
+    }
+    got, srcs = _compile_run(g, ins)
+    assert len(srcs) == 2, f"split-K must produce partial + finalize, got {len(srcs)} kernel(s)"
+    assert any("emmy_mma" in s for s in srcs), "the mma tier must engage on the split partial"
+    x, nw, wg, wu = (ins[k].astype(np.float32) for k in ("x", "nw", "wg", "wu"))
+    rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
+    gate, up = rms @ wg.T, rms @ wu.T
+    ref = gate / (1.0 + np.exp(-gate)) * up
+    np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), ref, atol=0.5, rtol=0.1)

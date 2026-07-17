@@ -157,8 +157,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, contraction: Cont
     grid = tile.place.grid
     cell = tuple(Var(a.name) for a in grid)
     states = carrier.state.names
-    if len(states) != 1:
-        raise NotImplementedError("split-K contraction carrier must be additive (1-component)")
+    n_comp = len(states)  # 1 = plain matmul; N = the multi-channel (gate/up) node's per-channel accs
     acc = states[0]
     lead = (split, *contraction.lead_axes)
     epilogue = list(contraction.epilogue)  # the fused projection (empty for a bare matmul)
@@ -168,6 +167,8 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, contraction: Cont
     # below stay here (they need the graph context the selector doesn't hold).
     (cross_move,) = next(st for st in plan.stages if st.level is Level.GRID).combine(warp_size=32)
     if cross_move is Fold.ATOMIC:
+        if n_comp != 1:
+            raise NotImplementedError("atomic finalize needs an additive (1-component) carrier; pin the deferred g<w>k finalize")
         if isinstance(contraction.atom, AtomKind):
             raise NotImplementedError(
                 "atomic finalize can't accumulate an mma C-fragment (RegStore has no atomicAdd); "
@@ -186,25 +187,34 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, contraction: Cont
         part = replace(contraction, lead_axes=lead, epilogue=Body(atomic_epi))
         return _mapped(part, (split, *grid), name=tile.name, stage=tile.stage, knobs=tile.knobs)
 
-    # --- deferred kernel finalize: partial writes raw ``acc`` to ``ws[ksplit, *cell]`` -----------
-    # The workspace shape MUST match the rank of the index the writes/loads use — ``(ksplit,
-    # *grid vars)`` — or ``render_index``'s rank-mismatch fallback silently flattens without
-    # strides (colliding partials; the misaligned-vector-store crash). ``cell`` is the GRID vars
-    # (the structural partial has no original Write to copy), so size the workspace by the grid
-    # extents, not ``out.shape`` (whose extent-1 batch dims the grid never carries).
+    # --- deferred kernel finalize: partial writes each raw state to ``ws[(comp,) ksplit, *cell]``.
+    # The workspace shape MUST match the rank of the index the writes/loads use — or
+    # ``render_index``'s rank-mismatch fallback silently flattens without strides (colliding
+    # partials; the misaligned-vector-store crash). ``cell`` is the GRID vars (the structural
+    # partial has no original Write to copy), so size the workspace by the grid extents, not
+    # ``out.shape`` (whose extent-1 batch dims the grid never carries). A multi-channel node
+    # packs its per-channel accs into a leading ``comp`` axis (the residual path's convention);
+    # the single-component workspace stays ``ws[ksplit, *cell]``.
     ws_name = f"{out.name}__partial"
-    ws_shape = (Dim(plan.cta), *(a.extent for a in grid))
-    ws_write = Write(output=ws_name, index=(Var(split.name), *cell), value=acc)
-    part = replace(contraction, lead_axes=lead, epilogue=Body((ws_write,)))
+    ws_shape = (Dim(plan.cta), *(a.extent for a in grid)) if n_comp == 1 else (Dim(n_comp), Dim(plan.cta), *(a.extent for a in grid))
+
+    def ws_index(i: int) -> tuple:
+        lead_ix = (Var(split.name),) if n_comp == 1 else (Literal(i, "int"), Var(split.name))
+        return (*lead_ix, *cell)
+
+    ws_writes = tuple(Write(output=ws_name, index=ws_index(i), value=states[i]) for i in range(n_comp))
+    part = replace(contraction, lead_axes=lead, epilogue=Body(ws_writes))
     partial_tile = _mapped(part, (split, *grid), name=f"{tile.name}__partial", stage=tile.stage, knobs=tile.knobs)
 
-    # --- finalize kernel: seed ``acc``, fold ``ws`` over ``ksplit`` (``as_state_merge``), then the
-    # original projection epilogue (or a bare store) — the same additive finalize the residual path uses.
-    other = (f"{acc}__p",)
+    # --- finalize kernel: seed each state, fold ``ws`` over ``ksplit`` (``as_state_merge`` — the
+    # 1-component additive fold, or the N-component per-channel sums), then the original
+    # projection epilogue (the multi-channel ⊗-combine applies HERE, once, after the sums) or a
+    # bare store — the same finalize shape the residual path uses.
+    other = tuple(f"{nm}__p" for nm in states)
     combine = carrier.as_state_merge(other)
     ids = _carrier_identities(carrier)
-    seeds = (Init(name=acc, identity=ids[acc], dtype=F32),)
-    loads = (Load(name=other[0], input=ws_name, index=(Var(split.name), *cell)),)
+    seeds = tuple(Init(name=nm, identity=ids[nm], dtype=F32) for nm in states)
+    loads = tuple(Load(name=other[i], input=ws_name, index=ws_index(i)) for i in range(n_comp))
     fin_loop = Loop(axis=split, body=Body((*loads, combine)))
     fin_proj = list(epilogue)
     if not any(isinstance(s, Write) for s in fin_proj):

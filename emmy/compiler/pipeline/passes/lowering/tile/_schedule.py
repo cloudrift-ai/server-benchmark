@@ -39,10 +39,8 @@ from types import SimpleNamespace
 
 from emmy.compiler.context import STATIC_SMEM_CAP
 from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim
-from emmy.compiler.dtype import F32
 from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.axis import Axis, AxisRole
-from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.schedule import Raster, Stage, WarpSpec, has_scalar_atom_alias, is_warp_codec
 from emmy.compiler.ir.sigma import Sigma
@@ -502,10 +500,10 @@ def _reduce_candidates(kernel, place, plan: TilePlan, probe: Contraction | None 
     # k-invariant stat prologue spans the whole row and stays full-row in every partition (each
     # recomputes it — cheap exactly where split-K pays, the small-free decode shapes this offer
     # is gated to), while only the per-cell cone is σ-reindexed (``_splitk_option``). Multi-channel
-    # nodes (the gate/up fused edge) stay excluded — their carrier is not the 1-component additive
-    # state ``030_split_reduce``'s finalize folds.
-    splittable = probe is None or not probe.a_computed or len(probe.folds) == 1
-    if k is not None and free // _tile_area(plan) <= _SPLITK_MAX_CTAS and splittable:
+    # nodes (the gate/up fused edge) split too: each channel's fold is an independent additive
+    # state, so the deferred finalize folds the N-component carrier exactly like flash's (m,l,O)
+    # and applies the ⊗-combine projection once after the cross-partition sums.
+    if k is not None and free // _tile_area(plan) <= _SPLITK_MAX_CTAS:
         step = plan.atom.atom_k * plan.bk if plan.is_warp else 1
         atomic_ok = probe is not None and (len(probe.epilogue) == 0 or projection_distributes(probe.epilogue, (probe.acc,)))
         for move in splitk_moves(warp=plan.is_warp):
@@ -1121,11 +1119,6 @@ def _splitk_option(
             f"{MAX_BLOCK_THREADS}-thread/CTA limit; shrink n/m or move work to the f register sub-tile."
         )
     inner = _contraction_node(tile.op, place, wt)
-    if inner.a_computed and len(inner.folds) != 1:
-        raise ValueError(
-            "split-K REDUCE pin on a multi-channel fused-cone contraction: the product-monoid "
-            "carrier is not the 1-component additive state the split finalize folds; drop the g<w> pin."
-        )
     w = ReducePlan.parse(split_spec).cta
     # A warp (mma) slice must keep the inner K-step dividing K/w — the warp K-loop has no static-K
     # tail masking (same guard as ``_check_warp_static_k``, but on the post-split slice).
@@ -1180,7 +1173,10 @@ def _splitk_option(
     elif stage_spec:
         st = Stage.parse(stage_spec)
         stage = _resolve_warp_stage(inner, st, budget) if wt.is_warp else _resolve_scalar_stage(inner, st, tile.inputs, budget)
-    carrier = Accum(name=inner.acc, value=f"{inner.acc}__v", op=ElementwiseImpl("add"), dtype=F32).as_carrier()
+    # The carrier comes from the node's own synthesized fold loop — the 1-component additive
+    # ``Accum`` for a plain matmul, the N-component product-monoid state for a multi-channel
+    # (gate/up) node — so the split finalize folds exactly the state the kernel accumulates.
+    carrier = reduce_loop(inner).carrier
     op = Reduction(carrier=carrier, axis=ksplit, role=AxisRole.CONTRACTION, source=inner, reduce=ReducePlan.parse(split_spec))
     kaxis = reduce_loop(tile.op).axis.name  # the ORIGINAL k-axis name — single-eligible-axis keying
     stamped = {**knobs, _at(TILE, kaxis): tile_spec, _at(REDUCE, kaxis): split_spec}

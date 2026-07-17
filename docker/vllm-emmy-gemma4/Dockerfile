@@ -24,7 +24,13 @@ ENV HF_HOME=/opt/emmy/hf \
 
 # Weights + tokenizer + config (the unmodified HF snapshot, LICENSE/NOTICE included —
 # the Apache 2.0 attribution ships with it), then the warmed sm_120/sm_120a cubins.
-COPY warm/hf /opt/emmy/hf
+# The snapshot ships as four layers that merge into /opt/emmy/hf: Docker Hub 503s the
+# monolithic ~24 GB blob at upload initiation, so split_hf.sh (run by the Makefile
+# before this build) balances it into sub-10 GB parts.
+COPY warm/hf_parts/p0 /opt/emmy/hf
+COPY warm/hf_parts/p1 /opt/emmy/hf
+COPY warm/hf_parts/p2 /opt/emmy/hf
+COPY warm/hf_parts/p3 /opt/emmy/hf
 COPY warm/cubin /opt/emmy/cubin
 
 # The pinned serving config — passed by make from config.env (the single source; these

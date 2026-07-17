@@ -86,6 +86,7 @@ gemma4-warm:
 gemma4-serve-image:
 	@test -d docker/vllm-emmy-gemma4/warm/hf -a -d docker/vllm-emmy-gemma4/warm/cubin || \
 		(echo "docker/vllm-emmy-gemma4/warm/ is empty — run 'make gemma4-warm' on the target GPU first"; exit 1)
+	docker/vllm-emmy-gemma4/split_hf.sh
 	docker build -f docker/vllm-emmy-gemma4/Dockerfile \
 		--build-arg BASE_IMAGE=$(VLLM_EMMY_TAG) \
 		--build-arg MODEL=$(GEMMA4_MODEL) \

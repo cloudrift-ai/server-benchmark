@@ -144,6 +144,10 @@ rental/teardown. The local-only deltas:
   the warm needs it.
 - **The push is the slow part.** `gemma4-serve-push` uploads ~35 GB over your uplink — hours on a residential
   connection vs minutes from a datacenter. It's the main reason the rental flow exists; locally, just let it run.
+- **The snapshot ships as four image layers, not one.** Docker Hub rejects the monolithic ~24 GB snapshot blob
+  (upload initiation 503s forever), so `split_hf.sh` — run by `make gemma4-serve-image` before the build — balances
+  `warm/hf` into four hardlinked sub-10 GB parts that the Dockerfile COPYs back into `/opt/emmy/hf`. Layer
+  boundaries don't touch file contents, so cache-key parity with the warm is unaffected.
 
 ## Licensing
 
@@ -151,14 +155,3 @@ gemma-4 is **Apache 2.0** — public redistribution of the weights in a Docker H
 the unmodified HF snapshot, which carries its LICENSE/NOTICE files — keep them (that is the attribution obligation),
 and don't imply Google endorsement in the tag name or description.
 
-## Known blocker (2026-07-17 release session)
-
-The full pipeline was exercised end to end on a rented 5090 (vast.ai): preflight 34/34, config pinned at
-4096/4096/util 0.90 (decode twin on), HF-parity validation 4/4 — but the **zero-recompile verify FAILS**:
-~270 of ~580 serving kernels regenerate with *different source text on every process launch* (boot 2: 265 new
-cache keys; boot 3, with the union baked: 273 new). Per-boot codegen nondeterminism defeats the content-addressed
-cache across restarts, so success criterion 2 is structurally unattainable until it is fixed (suspect: an unordered
-set/dict iteration leaking into source text, amplified by hash randomization across processes — local no-GPU repro:
-render the same golden twice in separate processes and diff). The image otherwise works: offline boot, zero
-downloads, correct completions, zero request-time compiles. Do not push a tag until the determinism fix lands and a
-re-warm verifies clean.

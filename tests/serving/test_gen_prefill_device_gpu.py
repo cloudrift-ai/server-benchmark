@@ -48,8 +48,10 @@ def test_run_device_sym_matches_host_path():
     # slice); the host reference runs the SYMBOLIC program, a different kernel, so fp16
     # accumulation order may differ by rounding (allclose). T=48: prefill_bucket < T <=
     # capacity — the SYMBOLIC device regime, same program as the host path (bit-exact).
-    for T, check in ((24, lambda dev, host: np.testing.assert_allclose(dev, host, rtol=2e-2, atol=2e-3)),
-                     (48, np.testing.assert_array_equal)):
+    for T, check in (
+        (24, lambda dev, host: np.testing.assert_allclose(dev, host, rtol=2e-2, atol=2e-3)),
+        (48, np.testing.assert_array_equal),
+    ):
         hidden = (rng.standard_normal((T, H)) * 0.3).astype(np.float16)
         q_np, k_np, v_np = runner.forward_layer_pre(0, hidden)  # host rebind path
         q, k, v = runner.forward_layer_pre_device(0, torch.from_numpy(hidden).cuda())

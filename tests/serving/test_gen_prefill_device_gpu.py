@@ -38,20 +38,26 @@ def test_run_device_sym_matches_host_path():
     )
     torch.manual_seed(0)
     model = LlamaForCausalLM(config).eval().to(torch.float16)
-    runner = EmmyGenRunner.from_model(model, dtype_str="float16", decode_bucket=16, max_tokens=64)
+    runner = EmmyGenRunner.from_model(model, dtype_str="float16", decode_bucket=16, max_tokens=64, prefill_bucket=32)
     assert runner.prefill_capacity == 64
+    assert runner.prefill_bucket == 32
 
     rng = np.random.default_rng(0)
-    T, H = 48, config.hidden_size  # bucket < T <= capacity — the symbolic device regime
-    hidden = (rng.standard_normal((T, H)) * 0.3).astype(np.float16)
+    H = config.hidden_size
+    # T=24: decode_bucket < T <= prefill_bucket — the static CHUNK-TWIN regime (pad → run →
+    # slice); the host reference runs the SYMBOLIC program, a different kernel, so fp16
+    # accumulation order may differ by rounding (allclose). T=48: prefill_bucket < T <=
+    # capacity — the SYMBOLIC device regime, same program as the host path (bit-exact).
+    for T, check in ((24, lambda dev, host: np.testing.assert_allclose(dev, host, rtol=2e-2, atol=2e-3)),
+                     (48, np.testing.assert_array_equal)):
+        hidden = (rng.standard_normal((T, H)) * 0.3).astype(np.float16)
+        q_np, k_np, v_np = runner.forward_layer_pre(0, hidden)  # host rebind path
+        q, k, v = runner.forward_layer_pre_device(0, torch.from_numpy(hidden).cuda())
+        for host, dev in ((q_np, q), (k_np, k), (v_np, v)):
+            assert dev.shape[0] == T
+            check(dev.cpu().numpy().astype(np.float32), host.astype(np.float32))
 
-    q_np, k_np, v_np = runner.forward_layer_pre(0, hidden)  # host rebind path
-    q, k, v = runner.forward_layer_pre_device(0, torch.from_numpy(hidden).cuda())
-    for host, dev in ((q_np, q), (k_np, k), (v_np, v)):
-        assert dev.shape[0] == T
-        np.testing.assert_array_equal(dev.cpu().numpy(), host)
-
-    attn = (rng.standard_normal((T, config.num_attention_heads * 16)) * 0.3).astype(np.float16)
-    out_np = runner.forward_layer_post(0, attn, hidden)
-    out = runner.forward_layer_post_device(0, torch.from_numpy(attn).cuda(), torch.from_numpy(hidden).cuda())
-    np.testing.assert_array_equal(out.cpu().numpy(), out_np)
+        attn = (rng.standard_normal((T, config.num_attention_heads * 16)) * 0.3).astype(np.float16)
+        out_np = runner.forward_layer_post(0, attn, hidden)
+        out = runner.forward_layer_post_device(0, torch.from_numpy(attn).cuda(), torch.from_numpy(hidden).cuda())
+        check(out.cpu().numpy().astype(np.float32), out_np.astype(np.float32))

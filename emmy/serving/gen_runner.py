@@ -208,6 +208,9 @@ class EmmyGenRunner:
         post_decode=None,
         decode_bucket=16,
         prefill_capacity=None,
+        pre_prefill=None,
+        post_prefill=None,
+        prefill_bucket=0,
     ):
         self._embed_weight = embed_weight  # numpy [vocab, H]
         self._norm = norm  # torch module
@@ -217,6 +220,9 @@ class EmmyGenRunner:
         self._post_decode = post_decode
         self._decode_bucket = decode_bucket
         self._prefill_capacity = prefill_capacity  # symbolic programs' device-buffer token capacity (None -> host rebind only)
+        self._pre_prefill = pre_prefill  # list[_Program] — static M=prefill_bucket chunk twins (or None → symbolic prefill)
+        self._post_prefill = post_prefill
+        self._prefill_bucket = prefill_bucket
         self._attn_meta = attn_meta  # per-layer list of (head_dim, num_heads, num_kv, scaling)
         # Layer-0 convenience scalars — correct for homogeneous models (Qwen3 / Llama). Gemma-4's
         # global layers differ, so the vLLM model reads per-layer dims via ``layer_meta``.
@@ -249,18 +255,28 @@ class EmmyGenRunner:
         capacity, host ``rebind`` only)."""
         return self._prefill_capacity or 0
 
+    @property
+    def prefill_bucket(self) -> int:
+        """The static prefill-chunk twins' M (0 = twins not built — prefill rides the
+        symbolic programs). Chunked prefill fills steps to ``max_num_batched_tokens``
+        whenever the queue is deep, so a twin at that width runs exact static grids
+        (and captured-replay) on the hot chunk shape."""
+        return self._prefill_bucket if self._pre_prefill is not None else 0
+
     @classmethod
-    def create(cls, model_id, *, dtype_str="float16", decode_bucket=16, max_tokens=None):
+    def create(cls, model_id, *, dtype_str="float16", decode_bucket=16, max_tokens=None, prefill_bucket=0):
         import torch
         from transformers import AutoModelForCausalLM
 
         logger.info("[gen_runner] loading %s (%s, CPU trace)...", model_id, dtype_str)
         with torch.device("cpu"):
             model = AutoModelForCausalLM.from_pretrained(model_id, dtype=getattr(torch, dtype_str)).eval()
-            return cls.from_model(model, dtype_str=dtype_str, decode_bucket=decode_bucket, max_tokens=max_tokens)
+            return cls.from_model(
+                model, dtype_str=dtype_str, decode_bucket=decode_bucket, max_tokens=max_tokens, prefill_bucket=prefill_bucket
+            )
 
     @classmethod
-    def from_model(cls, model, *, dtype_str="float16", decode_bucket=16, max_tokens=None):
+    def from_model(cls, model, *, dtype_str="float16", decode_bucket=16, max_tokens=None, prefill_bucket=0):
         """Build from an already-loaded CausalLM module (the network-free path). ``model``
         must be on CPU for the trace."""
         import numpy as np
@@ -289,7 +305,11 @@ class EmmyGenRunner:
 
         pre_programs, post_programs = [], []
         pre_decode, post_decode = [], []
+        pre_prefill, post_prefill = [], []
         decode_ok = decode_bucket and decode_bucket > 0
+        # The prefill-chunk twin only pays ABOVE the decode bucket (an equal-or-smaller
+        # bucket is fully shadowed by the decode twins' routing).
+        prefill_ok = prefill_bucket and prefill_bucket > max(decode_bucket or 0, 0)
         # One arena for every program this runner builds: layers run sequentially, so
         # all layers' activation buffers + scratch slabs share one layer's worth of
         # device memory instead of scaling with num_layers.
@@ -350,6 +370,34 @@ class EmmyGenRunner:
                     except Exception as ex:  # noqa: BLE001 — any lowering/compile failure → disable the bucket
                         logger.warning("[gen_runner] decode-bucket compile failed at layer %d (%s); decode falls back to symbolic", i, ex)
                         decode_ok = False
+                # Static M=prefill_bucket chunk twins — exact grids on the hot chunked-prefill
+                # width (the symbolic masked-tile programs at off-hint T are the residual
+                # prefill cost). Same failure contract as the decode twins.
+                if prefill_ok:
+                    try:
+                        pre_prefill.append(
+                            _compile_split(
+                                pre_w,
+                                [torch.zeros(prefill_bucket, hidden, dtype=dtype)],
+                                None,
+                                np_dtype,
+                                dev_consts=pre_consts,
+                                arena=arena,
+                            )
+                        )
+                        post_prefill.append(
+                            _compile_split(
+                                post_w,
+                                [torch.zeros(prefill_bucket, attn_width, dtype=dtype), torch.zeros(prefill_bucket, hidden, dtype=dtype)],
+                                None,
+                                np_dtype,
+                                dev_consts=post_consts,
+                                arena=arena,
+                            )
+                        )
+                    except Exception as ex:  # noqa: BLE001 — any lowering/compile failure → disable the twin
+                        logger.warning("[gen_runner] prefill-bucket compile failed at layer %d (%s); prefill falls back to symbolic", i, ex)
+                        prefill_ok = False
 
         embed_weight = trunk.embed_tokens.weight.detach().cpu().to(torch.float32).numpy().astype(np_dtype, copy=False)
         # Gemma scales embeddings by sqrt(hidden) (a ``Gemma3TextScaledWordEmbedding`` carries it as
@@ -359,6 +407,7 @@ class EmmyGenRunner:
         if embed_scale != 1.0:
             embed_weight = embed_weight * np_dtype.type(embed_scale)
         use_decode = decode_ok and len(pre_decode) == len(layers)
+        use_prefill = prefill_ok and len(pre_prefill) == len(layers)
         runner = cls(
             embed_weight=embed_weight,
             norm=trunk.norm,
@@ -370,6 +419,9 @@ class EmmyGenRunner:
             post_decode=post_decode if use_decode else None,
             decode_bucket=decode_bucket,
             prefill_capacity=max_tokens,
+            pre_prefill=pre_prefill if use_prefill else None,
+            post_prefill=post_prefill if use_prefill else None,
+            prefill_bucket=prefill_bucket,
         )
         if runner.has_device_decode:
             # EAGER, not lazy: vLLM sizes its KV cache from a profiling pass that runs
@@ -454,6 +506,10 @@ class EmmyGenRunner:
         t = hidden.shape[0]
         if self._pre_decode is not None and t <= self._decode_bucket:
             return tuple(self._pre_decode[layer].run_device([hidden]))
+        if self._pre_prefill is not None and t <= self._prefill_bucket:
+            # The static chunk twin: T real rows into the prefix, the bucket's exact grids
+            # compute (stale padding rows sliced away by ``run_device``'s ``[:t]``).
+            return tuple(self._pre_prefill[layer].run_device([hidden]))
         return tuple(self._pre[layer].run_device_sym([hidden]))
 
     def forward_layer_post_device(self, layer, attn_out, residual):
@@ -462,6 +518,8 @@ class EmmyGenRunner:
         t = attn_out.shape[0]
         if self._post_decode is not None and t <= self._decode_bucket:
             return self._post_decode[layer].run_device([attn_out, residual])[0]
+        if self._post_prefill is not None and t <= self._prefill_bucket:
+            return self._post_prefill[layer].run_device([attn_out, residual])[0]
         return self._post[layer].run_device_sym([attn_out, residual])[0]
 
     def final_norm_device(self, hidden):

@@ -384,13 +384,22 @@ class Contraction(Stmt):
         if len(self.folds) == 1:
             return base
         # Each extra fold channel splices its ``b_load → lift → accum`` triple after the primary's,
-        # reusing the shared A value (the carrier stays the primary channel's — a multi-channel node
-        # never rides the coop / split tiers, so the carrier only serves role/axis reads).
+        # reusing the shared A value. The carrier is the N-COMPONENT identity-family state (one
+        # additive component per channel) — the true product-monoid state, so the cross-CTA split
+        # tier folds every channel's partials (the redundant-statistic split of the gate/up edge);
+        # ``carrier.out`` stays the primary component, and the coop tier remains contraction-blind.
+        from emmy.compiler.ir.stmt.algebra import Carrier, State, Twist  # noqa: PLC0415 — algebra imports leaves
+        from emmy.compiler.ir.stmt.carrier import Channel  # noqa: PLC0415
+
         extra: list[Stmt] = []
         for bl, acc in self.folds[1:]:
             lift = Assign(name=f"{acc}__v", op=ElementwiseImpl("multiply"), args=(self.a_name, bl.names[0]))
             extra += [bl, lift, Accum(name=acc, value=lift.name, op=ElementwiseImpl("add"), axes=(self.k_axis.name,))]
-        return Loop(axis=base.axis, body=Body((*base.body, *extra)), unroll=base.unroll, role=base.role, carrier=base.carrier)
+        add = ElementwiseImpl("add")
+        names = (self.acc, *(acc for _, acc in self.folds[1:]))
+        channels = tuple(Channel(fold=add, term=f"{nm}__v", dtype=base.carrier.twist.channels[0].dtype) for nm in names)
+        carrier = Carrier(state=State(names=names), twist=Twist(family="id", channels=channels))
+        return Loop(axis=base.axis, body=Body((*base.body, *extra)), unroll=base.unroll, role=base.role, carrier=carrier)
 
     def lower(self) -> list[Stmt]:
         """Flatten to the loop-IR body — the synthesized reduce ``Loop`` followed by the projection

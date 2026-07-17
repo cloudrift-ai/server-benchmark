@@ -920,8 +920,28 @@ class _MmaOps(_AtomOps):
         m, n = mn
         mcell, ncell = offset[0].base(i), offset[1].base(j)
         tail = list(c.epilogue)
-        write = next(s for s in tail if isinstance(s, Write))
         sigma = Sigma({m.axis.name: mcell, n.axis.name: ncell})
+        accs = (c.acc, *(acc for _, acc in c.folds[1:]))
+        frags = (f"_c{i}_{j}", *(_fold_frag(f"_c{i}_{j}", f) for f in range(1, len(c.folds))))
+        writes = [s for s in tail if isinstance(s, Write)]
+        if len(c.folds) > 1 and len(tail) == len(writes) == len(c.folds) and {w.value for w in writes} == set(accs):
+            # RAW per-channel stores — the split-K partial's epilogue is one workspace ``Write``
+            # per accumulator, NO ⊗-combine (the finalize applies the projection once after the
+            # cross-partition sums): each channel's C fragment stores to its own ws slice.
+            by_acc = {w.value: w for w in writes}
+            return [
+                RegStore(
+                    dst_buffer=by_acc[acc].output,
+                    dst_index=tuple(sigma.apply(e) for e in by_acc[acc].index),
+                    frag=frag,
+                    shape=atom.shape,
+                    epilogue=None,
+                    m_guard=_guard(m, mcell),
+                    n_guard=_guard(n, ncell),
+                )
+                for acc, frag in zip(accs, frags, strict=True)
+            ]
+        write = next(s for s in writes)
         extra = tuple((acc, _fold_frag(f"_c{i}_{j}", f)) for f, (_, acc) in enumerate(c.folds[1:], 1))
         epi = _warp_epilogue(tail, c.acc, m.axis.name, n.axis.name, sigma, extra_accs=extra)
         assert len(c.folds) == 1 or epi is not None, "a multi-fold contraction's projection must combine the accumulators"

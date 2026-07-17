@@ -4,8 +4,12 @@ Serve a decoder-only chat model (Qwen3 / Llama / Gemma-3/4) through emmy-compile
 kernels with vLLM owning the API / sampler / scheduler / paged KV-cache. Gemma's per-layer
 sliding/global attention rides vLLM's `per_layer_sliding_window` + a per-layer-type RoPE:
 
-    vllm serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 --runner generate --enforce-eager \\
-      --dtype float16 --hf-overrides '{"architectures":["EmmyGenModel"]}'
+    vllm serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 --runner generate \\
+      --dtype float16 --hf-overrides '{"architectures":["EmmyGenModel"]}' \\
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2, 4, 8, 16]}'
+
+(the whole-step decode-capture default `emmy serve --generate` assembles; add `--enforce-eager`
+instead to serve eager — the runner's `run_device` is capture-aware either way).
 
 NOT ``IsAttentionFree``: it constructs real vLLM ``Attention`` layers (one per decoder
 layer, unique ``prefix``) so vLLM allocates a KV-cache spec and runs paged attention. All

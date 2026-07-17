@@ -242,7 +242,10 @@ Serves an embedding model (or a generative chat model via `EmmyGenModel` with `-
 fp16) through vLLM with the emmy plugin flags baked in (`serving/` plugin; needs the `serving` extra). Unrecognized flags forward to `vllm serve`; tokens after a literal `--` forward verbatim (emmy's
 own flags are otherwise extracted wherever they appear — argparse REMAINDER swallows everything after MODEL, so the
 handler re-parses it; see `commands/serve.py::_split_own_flags`). `--max-model-len 4096` (the dynamic-dim cap) is
-applied for both engines unless overridden, so `--stock` is an apples-to-apples baseline.
+applied for both engines unless overridden, so `--stock` is an apples-to-apples baseline. Generative serving
+defaults to **whole-step decode CUDA graphs** (a `--compilation-config` with `FULL_DECODE_ONLY` + capture sizes
+clamped to the decode bucket — see `serving/ARCHITECTURE.md`); pass vLLM's own `--enforce-eager` to opt out
+(forced automatically when `EMMY_GEN_DECODE_BUCKET=0`).
 
 ```bash
 emmy serve Qwen/Qwen3-Embedding-0.6B --gpu-memory-utilization 0.8   # plugin server (Ctrl-C to stop)

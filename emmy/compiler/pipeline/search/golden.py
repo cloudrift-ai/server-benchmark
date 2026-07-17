@@ -264,7 +264,7 @@ class ReduceGoldenConfig(GoldenConfig):
         matching what ``992_stamp_structural_features`` stamps on the reduce kernel."""
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
-        return ShapeKey(free_prod=self.M, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic)
+        return ShapeKey(free_prod=self.M, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic, free_max=self.M)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -295,7 +295,7 @@ class PointwiseGoldenConfig(GoldenConfig):
         axis (``reduce_max=0``, the ``from_s_features`` default for an unstamped extent)."""
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
-        return ShapeKey(free_prod=self.M * self.N, reduce_max=0, is_warp=False, is_dyn=self.dynamic)
+        return ShapeKey(free_prod=self.M * self.N, reduce_max=0, is_warp=False, is_dyn=self.dynamic, free_max=max(self.M, self.N))
 
 
 @dataclass(frozen=True, kw_only=True)

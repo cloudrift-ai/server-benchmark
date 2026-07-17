@@ -20,7 +20,7 @@ CARD = "NVIDIA GeForce RTX 4090"
 CAP = (8, 9)
 
 # q_proj-shaped fp16 matmul: M512 x N4096, K3840 — static stamps (S_dtype_f32 absent -> warp tier).
-_SIG = {"S_ext_free_prod": 2097152.0, "S_ext_reduce_max": 3840.0, "S_ext_reduce_prod": 3840.0}
+_SIG = {"S_ext_free_prod": 2097152.0, "S_ext_free_max": 4096.0, "S_ext_reduce_max": 3840.0, "S_ext_reduce_prod": 3840.0}
 _BASE = {**_SIG, "H_opt": 3.0}
 
 _STD_TILE = "a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2"

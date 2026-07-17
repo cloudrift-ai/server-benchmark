@@ -71,10 +71,14 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   Attention dims are **per layer** (`layer_meta(L)` → head_dim / num_heads / num_kv / scaling) — Gemma-4's global layers
   use a larger `global_head_dim` than its sliding ones, so each layer's `pre`/`post` compiles at its own width. The caller stitches between
   `pre` and `post` (a reference torch SDPA in the Phase-2 host stitch; vLLM paged `Attention` in Phase 3). **I/O:**
-  prefill / `num_tokens > bucket` use the host numpy `rebind` path; the **decode hot path** (`num_tokens ≤ bucket`)
-  is **device-resident** (Phase A — `run_device` / `embed_device` / `forward_layer_*_device` / `final_norm_device`:
-  captured-replay over the static program with torch↔cupy DLPack zero-copy, no host hop; reuses the embedding
-  runner's pattern). This removed the ~40% host/dispatch overhead and ~2×'d served decode. **Decode bucket:** it
+  the plugin runs **device-resident at every width**: the **decode hot path** (`num_tokens ≤ bucket`) rides the
+  captured static twins (`run_device` — captured-replay, torch↔cupy DLPack zero-copy), and **prefill /
+  chunked-prefill steps** (`bucket < num_tokens ≤ prefill_capacity`, capacity = vLLM's `max_num_batched_tokens`,
+  passed as `max_tokens` at runner build) ride the SYMBOLIC programs' `run_device_sym` — grids sized per step via
+  `set_sym_values` over capacity-built buffers, launches issued on torch's stream, no per-T graph capture
+  (chunked-prefill T varies per step; the dispatch hides behind prefill-width GPU work). The per-layer host numpy
+  `rebind` path survives only for the standalone `emmy generate` oracle and as the over-capacity fallback — its
+  ~2-per-layer `.cpu()` hops per prefill step were the TTFT wall. **Decode bucket:** it
   also compiles a **static M=`decode_bucket` (default 16)** `pre`/`post` twin per layer and uses it when
   `num_tokens ≤ bucket` (pad → run → slice the real rows) — the symbolic hint-512 M-tile is ~66× too slow at decode
   M=1; falls back to symbolic above the bucket or if a static compile fails. So
@@ -114,8 +118,18 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   path (`≤ bucket`) runs `_forward_device` (q/k/v + attn_out stay CUDA tensors through RoPE + attention, no host
   hop); prefill keeps the numpy path. Select via `--runner generate` +
   `--hf-overrides '{"architectures":["EmmyGenModel"]}'` + `--dtype float16` (the `serve --generate` branch forces
-  this for seam coherence). Registered in `__init__.py`. Whole-step CUDA-graph capture (drop `--enforce-eager`) is
-  future work.
+  this for seam coherence). Registered in `__init__.py`. **Whole-step decode CUDA graphs are the `emmy serve
+  --generate` DEFAULT**: no `--enforce-eager`; instead a `--compilation-config` with `cudagraph_mode:
+  FULL_DECODE_ONLY` (full cudagraphs need no torch.compile — vLLM wraps the model in its `CUDAGraphWrapper`) and
+  `cudagraph_capture_sizes` clamped to the decode bucket (a size above the bucket would capture the symbolic
+  fallback path, whose per-layer host numpy hops abort a stream capture). Under the outer capture,
+  `_Program.run_device` detects `torch.cuda.is_current_stream_capturing()` and issues the raw launch sequence
+  (`run_once`) instead of its own graph machinery — nested stream capture and graph launch are both illegal in a
+  capturing stream — so the whole decode step (embed + 48× pre/RoPE/paged-attention/post + final norm) records
+  into ONE vLLM graph and the ~2-per-layer host launches vanish at replay. Opt out with vLLM's own
+  `--enforce-eager` (forwards untouched; also forced automatically when `EMMY_GEN_DECODE_BUCKET=0` — nothing is
+  capturable then); a caller-supplied `--compilation-config` wins over the default. Prefill and
+  over-bucket decode batches stay eager under FULL_DECODE_ONLY by construction.
 
 ## Static mode (`EMMY_SERVING_STATIC=1`) — static extents for both batch and seq
 
@@ -179,8 +193,10 @@ Recorded follow-ups, in impact order:
 - `--max-model-len` ≤ `DYNAMIC_DIM_MAX` (4096, `compiler/trace/dynamic.py`) — the runner raises at startup otherwise.
   Qwen3-Embedding natively supports 32k; raising the cap means re-examining the `torch.export.Dim` bounds and the
   rotary buffer (`_SlicedRotary` precomputes `DYNAMIC_DIM_MAX + 1` positions).
-- `--enforce-eager`: vLLM never torch.compiles/cudagraph-captures an undecorated OOT class, but enforce-eager makes
-  the whole engine eager so the runner's own kernel launches can't race a capture.
+- `--enforce-eager`: the **embedding** plugin still serves eager — vLLM never torch.compiles an undecorated OOT
+  class, and enforce-eager keeps the engine from capturing around the runner's own kernel launches. The
+  **generative** path no longer needs it: `run_device` is capture-aware and `serve --generate` defaults to
+  whole-step decode graphs (see `gen_runner.py` above).
 - Startup compiles the whole model (~1–2 min for 0.6B warm-cubin-cache; first boot pays nvcc). `EMMY_CUBIN_CACHE`
   persistence across container restarts is what keeps reboots fast.
 - The shared buffer set is allocated at `max_seq_len` (`--max-model-len`); every accepted request (S ≤ `max_seq_len`)

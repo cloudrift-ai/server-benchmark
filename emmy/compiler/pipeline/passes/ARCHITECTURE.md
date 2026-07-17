@@ -143,11 +143,17 @@ codec's atom token and priced by the `MMA_acc_bits` feature; f16 only (mma.sync 
 `wspec_moves()` is the fourth level (bare `WSPEC`, option-0 `""` = uniform SIMT) — offered only on a warp row over a
 resolved **TMA** stage without a cross-CTA split, and resolved/thread-budget-gated at materialization
 (`_wspec_workers`; an ineligible spec degrades to uniform). A computed-A (fused-cone) contraction enumerates its own
-warp-only rows (`_schedule._computed_a_rows` — the mandatory resolved `sync` compute-fill stage crossed with the
-shared `RASTER` launch-order candidates (its B stripes re-stream per M-tile row, exactly the grouped order's L2
-reuse — `gn8` measured −8% on the gemma gate_up fused edge, 5090), no scalar /
-gmem-direct / split-K / WSPEC rows; the compute-producer role for the fused edge is the anticipated `RoleKind`
-extension). The **flash-form fork**: a `TWISTED` streaming contraction pair (the flash tree) offers its
+warp-only rows (`_schedule._computed_a_rows` — the mandatory resolved `sync` compute-fill stage at BOTH depths
+(`d1` + the asymmetric B-only prefetch ring `d2` as fork siblings — the M=512 occupancy loss inverts at decode M,
+so the depth is measured per shape), crossed with the shared `RASTER` launch-order candidates (its B stripes
+re-stream per M-tile row, exactly the grouped order's L2 reuse — `gn8` measured −8% on the gemma gate_up fused
+edge, 5090) and — single-channel nodes only — the **redundant-statistic split-K** rows: the contraction K slices
+across CTAs while the k-invariant stat prologue stays full-row in every partition (each recomputes it, cheap
+exactly on the small-free decode shapes the `_SPLITK_MAX_CTAS` gate admits), the per-cell cone σ-reindexed to
+absolute k and the `Map`-wrapper projection folded into the deferred finalize (`_splitk_option`'s computed-A arm
+→ `030_split_reduce`'s structural path). Still no scalar / gmem-direct / WSPEC rows, and no split on
+multi-channel (gate/up) nodes — their product-monoid carrier is not the 1-component additive state the split
+finalize folds; the compute-producer role for the fused edge is the anticipated `RoleKind` extension. The **flash-form fork**: a `TWISTED` streaming contraction pair (the flash tree) offers its
 structurally-different schedules as ONE prior-ranked fork — the warp (fragment-resident) rows over
 `twisted_warp_moves()`'s `(warps-per-CTA × key-atoms-per-block × query-tiles-per-warp)` geometry grid (option-0 = the
 conservative one-warp / `2·atom_n` block / one tile; the third dimension is the `TILE` codec's `f<FM>x<FN>` reg_m —

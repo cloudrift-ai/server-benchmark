@@ -498,9 +498,14 @@ def _reduce_candidates(kernel, place, plan: TilePlan, probe: Contraction | None 
             if p.coop <= k and p.reg <= k:
                 out.append(move)
     free = prod(_hint_extent(a) for a in place.free) if place.free else 1
-    # A computed-A (fused-cone) contraction offers no split-K: the split σ-reindexes the operand
-    # Loads, and a producer-cone A cannot be sliced over K (its statistic prologue spans the row).
-    if k is not None and free // _tile_area(plan) <= _SPLITK_MAX_CTAS and (probe is None or not probe.a_computed):
+    # A computed-A (fused-cone) contraction splits over K via the REDUNDANT-STATISTIC form: the
+    # k-invariant stat prologue spans the whole row and stays full-row in every partition (each
+    # recomputes it — cheap exactly where split-K pays, the small-free decode shapes this offer
+    # is gated to), while only the per-cell cone is σ-reindexed (``_splitk_option``). Multi-channel
+    # nodes (the gate/up fused edge) stay excluded — their carrier is not the 1-component additive
+    # state ``030_split_reduce``'s finalize folds.
+    splittable = probe is None or not probe.a_computed or len(probe.folds) == 1
+    if k is not None and free // _tile_area(plan) <= _SPLITK_MAX_CTAS and splittable:
         step = plan.atom.atom_k * plan.bk if plan.is_warp else 1
         atomic_ok = probe is not None and (len(probe.epilogue) == 0 or projection_distributes(probe.epilogue, (probe.acc,)))
         for move in splitk_moves(warp=plan.is_warp):
@@ -881,15 +886,16 @@ def _resolve_sync_stage(c: Contraction, budget: int = STATIC_SMEM_CAP, want_dept
     sibling and a ``STAGE`` pin degrades to this resolved row. ``None`` when the slabs don't fit
     the 48 KiB smem budget: the A/B operand slabs plus one fp32 row per bridged statistic
     (``sync_stat_fill``'s decls — the same ``Contraction.stat_prologue`` seam the materializer
-    fills through). ``want_depth >= 2`` (a ``STAGE`` ``d<n>/sync`` pin — pin / tune-explorable)
-    is the **asymmetric B-only prefetch ring**: only the canonical-B cp.async slabs ring (their
-    copies for chunk ``i+d-1`` fly under chunk ``i``'s compute fill AND drain), while the
-    compute-filled A slab and the stat rows stay single-buffer — ringing a compute fill buys no
-    overlap (it runs on the drain's own threads). Measured on the gemma gate_up fused edge
-    (5090): the B-only ring STILL loses (897 vs 665 µs at d2) — the extra B slot alone crosses
-    the smem occupancy quantization (3 → 2 CTAs/SM), the same cliff that killed the historical
-    full-slab ring; the depth stays pin-only and option-0 ``d1`` is the deployable form. A
-    transposed-B
+    fills through). ``want_depth >= 2`` is the **asymmetric B-only prefetch ring**: only the
+    canonical-B cp.async slabs ring (their copies for chunk ``i+d-1`` fly under chunk ``i``'s
+    compute fill AND drain), while the compute-filled A slab and the stat rows stay
+    single-buffer — ringing a compute fill buys no overlap (it runs on the drain's own
+    threads). Measured on the gemma gate_up fused edge at M=512 (5090) the B-only ring loses
+    (897 vs 665 µs at d2) — the extra B slot alone crosses the smem occupancy quantization
+    (3 → 2 CTAs/SM), the same cliff that killed the historical full-slab ring — but at decode
+    M (tile_m ≤ 32) the A slab + stat rows are tiny and the tradeoff inverts, so
+    :func:`_computed_a_rows` enumerates ``d1`` and ``d2`` as fork siblings (measured per
+    shape) and a ``STAGE`` pin's depth stays authoritative. A transposed-B
     (all-sync) pipeline has nothing async to overlap and stays single-buffer. ``budget`` is the
     device's per-block dynamic-smem opt-in cap (``ctx.max_dynamic_smem`` — the backend declares
     an ``extern __shared__`` pool and sets the func attribute past the 48 KiB static cap),
@@ -950,7 +956,14 @@ def _computed_a_rows(kernel, place, probe: Contraction, kaxis: str, budget: int 
             for s in warp_tile_moves(atoms)
             if _warp_move_ok(kernel, s) and probe.k_axis.extent.is_static and not replace(probe, tile=TilePlan.parse(s)).n.mask
         ]
-    want_depth = Stage.parse(_stage_spec(kernel)).depth if _stage_spec(kernel) else 1
+    # Depths: a STAGE pin is authoritative; unpinned rows enumerate the d1 compute-fill AND the
+    # asymmetric B-only prefetch ring at d2 as fork siblings. The ring was measured a LOSS on the
+    # M=512 gate⊗up edge (the extra B slot crosses the smem occupancy quantization — the
+    # :func:`_resolve_sync_stage` note), but the tradeoff INVERTS at decode M (tile_m ≤ 32: the
+    # compute-filled A slab and stat rows are tiny, so the d2 slot rarely moves occupancy while the
+    # B prefetch hides the dominant weight stream) — so the depth is measured per shape, not
+    # hardwired. A d2 that clamps back to d1 (budget) spells identically and dedupes below.
+    depths = [Stage.parse(_stage_spec(kernel)).depth] if _stage_spec(kernel) else [1, 2]
     rows: list[dict] = []
     # The launch-order codec rides these rows exactly like the plain contraction's
     # (:func:`_raster_candidates` — a computed-A kernel's output is the same static 2-D block-tile
@@ -959,14 +972,21 @@ def _computed_a_rows(kernel, place, probe: Contraction, kaxis: str, budget: int 
     # codec's best customer: its B stripes re-stream per M-tile row (64.6% DRAM on the gemma
     # gate_up shape), which is precisely the L2 reuse a grouped order buys.
     for spec in tiles:
-        stage = _resolve_sync_stage(replace(probe, tile=TilePlan.parse(spec)), budget, want_depth)
-        if stage is None:
-            if TILE.raw() is not None:
-                raise ValueError(f"warp TILE pin {spec!r} on a fused-cone contraction: the sync slabs exceed the {budget} B smem budget.")
-            continue
-        for red in _reduce_candidates(kernel, place, TilePlan.parse(spec), probe):
-            for raster in _raster_candidates(place):
-                rows.append({_at(TILE, kaxis): spec, _at(STAGE, kaxis): stage.spell(), _at(REDUCE, kaxis): red, RASTER.name: raster})
+        spellings: list[str] = []
+        for want_depth in depths:
+            stage = _resolve_sync_stage(replace(probe, tile=TilePlan.parse(spec)), budget, want_depth)
+            if stage is None:
+                if TILE.raw() is not None:
+                    raise ValueError(
+                        f"warp TILE pin {spec!r} on a fused-cone contraction: the sync slabs exceed the {budget} B smem budget."
+                    )
+                continue
+            if stage.spell() in spellings:
+                continue  # d2 clamped to d1 — same resolved pipeline, one row
+            spellings.append(stage.spell())
+            for red in _reduce_candidates(kernel, place, TilePlan.parse(spec), probe):
+                for raster in _raster_candidates(place):
+                    rows.append({_at(TILE, kaxis): spec, _at(STAGE, kaxis): stage.spell(), _at(REDUCE, kaxis): red, RASTER.name: raster})
     return rows
 
 
@@ -1101,10 +1121,10 @@ def _splitk_option(
             f"{MAX_BLOCK_THREADS}-thread/CTA limit; shrink n/m or move work to the f register sub-tile."
         )
     inner = _contraction_node(tile.op, place, wt)
-    if inner.a_computed:
+    if inner.a_computed and len(inner.folds) != 1:
         raise ValueError(
-            "split-K REDUCE pin on a fused-cone (computed-A) contraction: the producer cone cannot be "
-            "sliced over K (its per-row statistic prologue spans the whole row); drop the g<w> pin."
+            "split-K REDUCE pin on a multi-channel fused-cone contraction: the product-monoid "
+            "carrier is not the 1-component additive state the split finalize folds; drop the g<w> pin."
         )
     w = ReducePlan.parse(split_spec).cta
     # A warp (mma) slice must keep the inner K-step dividing K/w — the warp K-loop has no static-K
@@ -1118,14 +1138,46 @@ def _splitk_option(
                 f"(atom_k={wt.atom.atom_k}·bk={wt.bk}); pick a split width whose slice is divisible."
             )
     ksplit, kslice, sigma = _factor_k(inner.k_axis, w)
-    inner = replace(
-        inner,
-        k_axis=kslice,
-        a_operand=replace(inner.a_operand, index=tuple(sigma.apply(e) for e in inner.a_operand.index)),
-        folds=tuple((replace(bl, index=tuple(sigma.apply(e) for e in bl.index)), acc) for bl, acc in inner.folds),
-    )
+    if inner.a_computed:
+        # REDUNDANT-STATISTIC split: the leading k-invariant run of the cone (the per-row stat
+        # prologue — the same seam ``Contraction.stat_prologue`` reads) stays FULL-ROW in every
+        # partition, recomputed redundantly; only the k-indexed per-cell remainder is σ-reindexed
+        # to absolute k. The sync fill's own σ (``k := k0 + col``) then composes to
+        # ``ksplit·(K/w) + k0 + col``. The projection riding the recognizer's ``Map`` wrapper is
+        # folded into the node epilogue so ``030_split_reduce``'s deferred finalize re-applies it
+        # after the cross-partition sum (the partial's epilogue becomes the workspace write).
+        from emmy.compiler.ir.tile.ir import _refs_axis  # noqa: PLC0415
+
+        body = list(inner.a_operand)
+        pro: list = []
+        while body and not _refs_axis(body[0], kslice.name):
+            pro.append(body.pop(0))
+        cell = [s.rewrite(lambda nm: nm, sigma) for s in body]
+        epi = inner.epilogue
+        if isinstance(tile.op, Map) and isinstance(tile.op.source, Contraction):
+            epi = Body((*epi, *tile.op.body))
+        inner = replace(
+            inner,
+            k_axis=kslice,
+            a_operand=Body((*pro, *cell)),
+            folds=tuple((replace(bl, index=tuple(sigma.apply(e) for e in bl.index)), acc) for bl, acc in inner.folds),
+            epilogue=epi,
+        )
+    else:
+        inner = replace(
+            inner,
+            k_axis=kslice,
+            a_operand=replace(inner.a_operand, index=tuple(sigma.apply(e) for e in inner.a_operand.index)),
+            folds=tuple((replace(bl, index=tuple(sigma.apply(e) for e in bl.index)), acc) for bl, acc in inner.folds),
+        )
     stage = None
-    if stage_spec:
+    if inner.a_computed:
+        # The sync compute-fill is MANDATORY for a computed-A partial (same contract as
+        # ``_warp_option``); resolve it against the SLICED node at the row's spelled depth.
+        stage = _resolve_sync_stage(inner, budget, Stage.parse(stage_spec).depth if stage_spec else 1)
+        if stage is None:
+            raise ValueError(f"split-K on a fused-cone contraction: the sync slabs exceed the {budget} B smem budget at TILE {tile_spec!r}")
+    elif stage_spec:
         st = Stage.parse(stage_spec)
         stage = _resolve_warp_stage(inner, st, budget) if wt.is_warp else _resolve_scalar_stage(inner, st, tile.inputs, budget)
     carrier = Accum(name=inner.acc, value=f"{inner.acc}__v", op=ElementwiseImpl("add"), dtype=F32).as_carrier()

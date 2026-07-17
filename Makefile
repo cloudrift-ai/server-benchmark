@@ -13,6 +13,8 @@ help:
 	@echo "  wheel          - Build the emmy wheel into dist/"
 	@echo "  vllm-emmy-image - Build the vLLM + emmy serving image (docker/vllm-emmy)"
 	@echo "  vllm-emmy-push  - Push the serving image to Docker Hub (cloudriftai/)"
+	@echo "  gemma4-warm / gemma4-serve-image / gemma4-serve-verify / gemma4-serve-push"
+	@echo "                  - Warm (on a 5090), bake, verify, push the prebuilt gemma-4 image"
 	@echo "  clean          - Remove virtual environment and generated files"
 	@echo "  test-compose   - Test docker-compose generation with sample config"
 
@@ -64,7 +66,7 @@ VLLM_EMMY_TAG ?= cloudriftai/vllm-emmy:$(patsubst v%,%,$(VLLM_VERSION))-$(shell 
 
 wheel: setup
 	./venv/bin/pip install --quiet build
-	rm -rf dist && ./venv/bin/python -m build --wheel -o dist/ .
+	rm -rf dist build && ./venv/bin/python -m build --wheel -o dist/ .
 
 vllm-emmy-image: wheel
 	docker build -f docker/vllm-emmy/Dockerfile --build-arg VLLM_VERSION=$(VLLM_VERSION) \
@@ -72,6 +74,32 @@ vllm-emmy-image: wheel
 
 vllm-emmy-push: vllm-emmy-image
 	docker push $(VLLM_EMMY_TAG)
+
+# --- gemma-4 prebuilt-kernel image (docker/vllm-emmy-gemma4): warm on a real 5090,
+# --- bake cubins + model snapshot, verify zero-compile/zero-download cold start ---
+include docker/vllm-emmy-gemma4/config.env
+GEMMA4_TAG ?= cloudriftai/vllm-emmy-gemma4:$(patsubst v%,%,$(VLLM_VERSION))-$(shell git rev-parse --short HEAD)
+
+gemma4-warm:
+	BASE_IMAGE=$(VLLM_EMMY_TAG) docker/vllm-emmy-gemma4/warm.sh
+
+gemma4-serve-image:
+	@test -d docker/vllm-emmy-gemma4/warm/hf -a -d docker/vllm-emmy-gemma4/warm/cubin || \
+		(echo "docker/vllm-emmy-gemma4/warm/ is empty — run 'make gemma4-warm' on the target GPU first"; exit 1)
+	docker build -f docker/vllm-emmy-gemma4/Dockerfile \
+		--build-arg BASE_IMAGE=$(VLLM_EMMY_TAG) \
+		--build-arg MODEL=$(GEMMA4_MODEL) \
+		--build-arg MAX_MODEL_LEN=$(GEMMA4_MAX_MODEL_LEN) \
+		--build-arg MAX_NUM_BATCHED_TOKENS=$(GEMMA4_MAX_NUM_BATCHED_TOKENS) \
+		--build-arg GPU_MEM_UTIL=$(GEMMA4_GPU_MEM_UTIL) \
+		--build-arg DECODE_BUCKET=$(GEMMA4_DECODE_BUCKET) \
+		-t $(GEMMA4_TAG) docker/vllm-emmy-gemma4
+
+gemma4-serve-verify:
+	IMAGE=$(GEMMA4_TAG) docker/vllm-emmy-gemma4/verify.sh
+
+gemma4-serve-push:
+	docker push $(GEMMA4_TAG)
 
 bench: setup
 	@echo "Running benchmarks..."

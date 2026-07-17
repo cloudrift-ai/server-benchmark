@@ -43,6 +43,19 @@ class ShapeKey:
     # extents coincide with a recorded matmul shape would join the matmul golden (and
     # vice versa) even though the knob grammars don't transfer across kinds.
     kind: str = ""
+    # The largest single static free extent (``S_ext_free_max`` / ``max(M, N)``) — the
+    # ASPECT discriminator ``free_prod`` alone lacks: 32×8192 and 512×512 share the
+    # product (the decode-twin vs square collision that let ``k_proj_global.s512``
+    # silently shadow ``q_proj_global.m32``'s golden), but not the max. Participates
+    # only for STATIC plain-nest keys (``kind == "" and not is_dyn``) — every other
+    # key class normalizes it to 0 in ``__post_init__`` so the sweep-kind and
+    # symbolic-axis joins (whose builders don't all see the same extent list the
+    # stamp saw) stay bit-identical to the pre-``free_max`` behavior.
+    free_max: int = 0
+
+    def __post_init__(self) -> None:
+        if (self.kind or self.is_dyn) and self.free_max:
+            object.__setattr__(self, "free_max", 0)
 
     @classmethod
     def from_matmul(cls, M: int, N: int, K: int, dtype: str, *, dynamic: bool = False) -> ShapeKey:
@@ -54,7 +67,13 @@ class ShapeKey:
         hint-sized ``M*N``) and flagged via ``S_ext_n_symbolic_axis`` — because
         the stamped histogram is the only identity the op side has (it doesn't
         know the hint), so a hint-sized golden key would never join it."""
-        return cls(free_prod=N if dynamic else M * N, reduce_max=K, is_warp=dtype != "fp32", is_dyn=dynamic)
+        return cls(
+            free_prod=N if dynamic else M * N,
+            reduce_max=K,
+            is_warp=dtype != "fp32",
+            is_dyn=dynamic,
+            free_max=0 if dynamic else max(M, N),
+        )
 
     @classmethod
     def from_s_features(cls, s: dict) -> ShapeKey:
@@ -94,6 +113,7 @@ class ShapeKey:
             is_warp=not s.get("S_dtype_f32", 0),
             is_dyn=s.get("S_ext_n_symbolic_axis", 0) > 0,
             kind=kind,
+            free_max=int(s.get("S_ext_free_max", 0)),
         )
 
     def s_features_arith(self) -> dict[str, float]:
@@ -109,6 +129,8 @@ class ShapeKey:
             "S_ext_reduce_prod": float(self.reduce_max),
             "S_ext_reduce_max": float(self.reduce_max),
         }
+        if self.free_max:
+            out["S_ext_free_max"] = float(self.free_max)
         if self.is_dyn:
             out["S_ext_n_symbolic_axis"] = 1.0
         return out

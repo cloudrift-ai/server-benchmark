@@ -57,12 +57,25 @@ def test_golden_key_round_trips_through_the_stamped_op(cfg):
     assert keys.count(cfg.shape_key()) == 1, f"{cfg.name}: golden key {cfg.shape_key()} not uniquely stamped in {keys}"
 
 
-def test_matmul_keys_are_byte_compatible_with_the_pre_kind_constructor():
-    """Every matmul key — golden side and op side — carries ``kind=""``, so joins built
-    before the discriminator existed keep matching (the whole point of the default)."""
+def test_matmul_keys_carry_kind_and_aspect():
+    """Every matmul key — golden side and op side — carries ``kind=""`` plus the
+    ``free_max`` aspect discriminator (``max(M, N)``); the round-trip tests above pin
+    that the stamped side fills the same value, so the joins keep matching."""
     got = MatmulGoldenConfig(name="m", M=512, N=4096, K=3840, dtype="fp16", knobs={}).shape_key()
-    assert got == ShapeKey(free_prod=512 * 4096, reduce_max=3840, is_warp=True)
+    assert got == ShapeKey(free_prod=512 * 4096, reduce_max=3840, is_warp=True, free_max=4096)
     assert got.kind == ""
+
+
+def test_free_max_splits_the_aspect_collision():
+    """32×8192 and 512×512 share ``free_prod`` (the decode-twin vs square collision that
+    let ``k_proj_global.s512`` silently shadow ``q_proj_global.m32``'s golden) — the
+    ``free_max`` discriminator keys them apart. Dynamic and sweep-kind keys normalize
+    ``free_max`` to 0, keeping those join classes untouched."""
+    thin = ShapeKey.from_matmul(32, 8192, 3840, "fp16")
+    square = ShapeKey.from_matmul(512, 512, 3840, "fp16")
+    assert thin.free_prod == square.free_prod and thin != square
+    assert ShapeKey.from_matmul(512, 4096, 3840, "fp16", dynamic=True).free_max == 0
+    assert ShapeKey(free_prod=1, reduce_max=1, is_warp=True, kind="flash", free_max=7).free_max == 0
 
 
 def test_attention_qk_contraction_never_joins_the_flash_golden():

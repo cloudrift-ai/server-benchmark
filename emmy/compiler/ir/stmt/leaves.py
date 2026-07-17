@@ -870,11 +870,18 @@ class Write(Stmt):
         # (``uint2`` / ``uint4``) re-interpret arrays of elements — we
         # stage the elements into a local array, then store the array's
         # uint{2,4} view in one transaction.
-        # ``id(self)`` disambiguates the temp name across sibling Writes
+        # A content digest disambiguates the temp name across sibling Writes
         # that read from the same SSA — e.g. broadcasting a shared
         # literal-constant value (where every Write's ``values[0]`` is the
-        # same SSA name) used to collide on ``_vs_<name>``.
-        temp = f"_vs_{self.values[0]}_{id(self) & 0xFFFF:04x}"
+        # same SSA name) used to collide on ``_vs_<name>``. Siblings differ in
+        # destination and/or operands, so (output, index, values) separates
+        # them — and unlike the old ``id(self)`` suffix it is deterministic
+        # across processes, which the content-addressed cubin cache requires
+        # (an address-derived name re-keys the kernel on every boot).
+        import hashlib  # noqa: PLC0415 — render-path-only dependency
+
+        sig = f"{self.output}|{flat}|{','.join(converted)}"
+        temp = f"_vs_{self.values[0]}_{hashlib.sha1(sig.encode()).hexdigest()[:4]}"
         if vec_type == "__half2":
             return [
                 f"{pad}{vec_type} {temp} = __halves2half2({converted[0]}, {converted[1]});",

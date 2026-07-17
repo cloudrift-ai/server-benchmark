@@ -120,7 +120,31 @@ def test_serve_cmd_generate_branch():
     assert '{"architectures": ["EmmyGenModel"]}' in cmd
     assert cmd[cmd.index("--dtype") + 1] == "float16"  # forced for seam coherence
     assert cmd[cmd.index("--max-num-batched-tokens") + 1] == "4096"  # capped at the dynamic-dim limit
+    # Whole-step decode capture is the DEFAULT: FULL_DECODE_ONLY graphs, capture sizes
+    # clamped to the decode bucket (default 16); no --enforce-eager.
+    assert "--enforce-eager" not in cmd
+    cfg = cmd[cmd.index("--compilation-config") + 1]
+    assert '"cudagraph_mode": "FULL_DECODE_ONLY"' in cfg
+    assert '"cudagraph_capture_sizes": [1, 2, 4, 8, 16]' in cfg
+
+
+def test_serve_cmd_generate_enforce_eager_opts_out_of_capture():
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=["--enforce-eager"], generate=True)
+    assert "--compilation-config" not in cmd
+    assert cmd.count("--enforce-eager") == 1  # the user's own flag forwards, nothing added
+
+
+def test_serve_cmd_generate_user_compilation_config_wins():
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=["--compilation-config", "{}"], generate=True)
+    assert cmd.count("--compilation-config") == 1
+    assert "--enforce-eager" not in cmd
+
+
+def test_serve_cmd_generate_bucket_off_forces_eager(monkeypatch):
+    monkeypatch.setenv("EMMY_GEN_DECODE_BUCKET", "0")
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
     assert "--enforce-eager" in cmd
+    assert "--compilation-config" not in cmd
 
 
 def test_serve_cmd_generate_rejects_incompatible_dtype():

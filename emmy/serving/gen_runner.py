@@ -55,7 +55,14 @@ class _Program:
         captures-or-replays the whole-program graph, and returns the outputs as torch CUDA tensors
         sliced to ``T`` — no host round-trip. Stale prefix padding rows are safe (pre/post are
         per-token-independent; only ``[:T]`` is read out). All cupy work runs on torch's current
-        stream so the upload, replay and output read stay ordered."""
+        stream so the upload, replay and output read stay ordered.
+
+        Under an OUTER capture (vLLM's whole-step decode cudagraph — torch's current stream is
+        capturing) the program's own graph machinery is illegal (nested stream capture aborts, and
+        a graph launch cannot be recorded), so the raw launch sequence is issued instead
+        (``run_once`` — the exact work ``capture_program_graph`` records: prebuilt buffers, no
+        allocation, no sync). The outer graph absorbs the launches and the per-call Python
+        overhead vanishes at replay."""
         import cupy as cp
         import torch
 
@@ -65,8 +72,11 @@ class _Program:
         with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
             feed = {n: cp.from_dlpack(a.detach().contiguous()) for n, a in zip(self.input_names, arrays, strict=True)}
             self.program.upload_prefix_device(feed)
-            self.program.capture_program_graph()  # static graph → one cached entry (empty sym_values)
-            self.program.replay_program_graph()
+            if torch.cuda.is_current_stream_capturing():
+                self.program.run_once()
+            else:
+                self.program.capture_program_graph()  # static graph → one cached entry (empty sym_values)
+                self.program.replay_program_graph()
             outs = self.program.output_prefix_device()
             return [torch.from_dlpack(outs[n])[:t].clone() for n in self.output_names]
 

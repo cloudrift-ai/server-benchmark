@@ -128,10 +128,33 @@ def _flag_value(vllm_args: list[str], flag: str, default: str) -> str:
     return default
 
 
+def _gen_graph_args(vllm_args: list[str]) -> list[str]:
+    """The eager/capture flags for emmy generative serving. DEFAULT is whole-step decode
+    capture: a compilation-config asking for FULL_DECODE_ONLY graphs (full cudagraphs need no
+    torch.compile — vLLM wraps the model in its ``CUDAGraphWrapper``) with capture sizes
+    clamped to the decode bucket — sizes above the bucket would capture the model's symbolic
+    fallback path, whose per-layer host numpy hops abort a stream capture. Opt out with
+    vLLM's own ``--enforce-eager`` (forwards as-is); a caller-supplied ``--compilation-config``
+    also wins over ours. With the decode bucket off (``EMMY_GEN_DECODE_BUCKET=0``) nothing is
+    capturable, so eager is forced."""
+    from emmy import config as emmy_config  # noqa: PLC0415
+
+    if _has_flag(vllm_args, "--enforce-eager") or _has_flag(vllm_args, "--compilation-config"):
+        return []  # the caller decided; forward theirs untouched
+    bucket = emmy_config.gen_decode_bucket()
+    if bucket <= 0:
+        logger.warning("decode bucket is off (EMMY_GEN_DECODE_BUCKET=0) — the symbolic decode path is not capturable; serving eager")
+        return ["--enforce-eager"]
+    sizes = [s for s in (1, 2, 4, 8, 16, 32, 64) if s < bucket] + [bucket]
+    cfg = f'{{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": {sizes}}}'
+    return ["--compilation-config", cfg]
+
+
 def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: bool = False) -> list[str]:
     cmd = ["vllm", "serve", model, "--runner", "generate" if generate else "pooling"]
     if not stock and generate:
-        cmd += ["--enforce-eager", "--hf-overrides", '{"architectures": ["EmmyGenModel"]}']
+        cmd += _gen_graph_args(vllm_args)
+        cmd += ["--hf-overrides", '{"architectures": ["EmmyGenModel"]}']
         # Force fp16 across the emmy↔vLLM seam: vLLM defaults --dtype auto → bf16 for a
         # bf16 checkpoint, but the emmy trunk emits fp16. Reject an incompatible override.
         if _has_flag(vllm_args, "--dtype"):

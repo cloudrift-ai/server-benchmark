@@ -73,8 +73,11 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `pre` and `post` (a reference torch SDPA in the Phase-2 host stitch; vLLM paged `Attention` in Phase 3). **I/O:**
   the plugin runs **device-resident at every width**: the **decode hot path** (`num_tokens ≤ bucket`) rides the
   captured static twins (`run_device` — captured-replay, torch↔cupy DLPack zero-copy), and **prefill /
-  chunked-prefill steps** (`bucket < num_tokens ≤ prefill_capacity`, capacity = vLLM's `max_num_batched_tokens`,
-  passed as `max_tokens` at runner build) ride the SYMBOLIC programs' `run_device_sym` — grids sized per step via
+  chunked-prefill steps** ride the static **prefill-chunk twin** (`decode_bucket < num_tokens ≤ prefill_bucket`
+  — default = mnbt, `EMMY_GEN_PREFILL_BUCKET` overrides / `0` disables; exact grids on the hot chunk width, pad →
+  run → slice like the decode twin) or, past the bucket, the SYMBOLIC programs' `run_device_sym`
+  (`num_tokens ≤ prefill_capacity`, capacity = vLLM's `max_num_batched_tokens`, passed as `max_tokens` at runner
+  build) — grids sized per step via
   `set_sym_values` over capacity-built buffers, launches issued on torch's stream, no per-T graph capture
   (chunked-prefill T varies per step; the dispatch hides behind prefill-width GPU work). The per-layer host numpy
   `rebind` path survives only for the standalone `emmy generate` oracle and as the over-capacity fallback — its

@@ -51,6 +51,7 @@ GPU_LOCK = "EMMY_GPU_LOCK"
 NCU_CHILD = "EMMY_NCU_CHILD"
 SERVING_STATIC = "EMMY_SERVING_STATIC"
 GEN_DECODE_BUCKET = "EMMY_GEN_DECODE_BUCKET"
+GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
 READABLE = "EMMY_READABLE"
 
 _CACHE_ROOT = Path.home() / ".cache" / "emmy"
@@ -302,6 +303,15 @@ def serving_static(default: bool = False) -> bool:
     dynamic-seq kernels miscompute batch>1, so it is a deliberate opt-in, not a
     default. See `serving/ARCHITECTURE.md`."""
     return _bool(SERVING_STATIC, default)
+
+
+def gen_prefill_bucket(default: int = -1) -> int:
+    """``EMMY_GEN_PREFILL_BUCKET`` — the generative runner's static prefill-chunk M.
+    The default ``-1`` means "vLLM's ``max_num_batched_tokens``" (chunked prefill fills
+    steps to it whenever the queue is deep, so the static twin runs exact grids on the
+    hot chunk width); **0 disables** the twin (prefill stays on the symbolic masked-tile
+    programs). See `serving/gen_runner.py`."""
+    return int_env(GEN_PREFILL_BUCKET, default)
 
 
 def gen_decode_bucket(default: int = 16) -> int:

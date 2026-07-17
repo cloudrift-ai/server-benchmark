@@ -116,11 +116,18 @@ class EmmyGenModel(nn.Module):
         # ``max_tokens`` sizes the symbolic programs' device buffers at the widest step vLLM
         # can schedule — the device-resident PREFILL path (``run_device_sym``) needs fixed
         # capacity buffers; without it prefill falls back to the per-layer host numpy hops.
+        # The prefill-chunk twin defaults to the mnbt width (chunked prefill fills steps to
+        # it whenever the queue is deep); EMMY_GEN_PREFILL_BUCKET=0 disables, an explicit
+        # value overrides.
+        prefill_bucket = emmy_config.gen_prefill_bucket()
+        if prefill_bucket < 0:
+            prefill_bucket = max_batched or 0
         self.runner = EmmyGenRunner.create(
             model_id=mc.model,
             dtype_str=_trunk_dtype_str(mc.dtype),
             decode_bucket=emmy_config.gen_decode_bucket(),
             max_tokens=max_batched or None,
+            prefill_bucket=prefill_bucket,
         )
         n_layers = self.runner.num_layers
 

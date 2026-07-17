@@ -118,10 +118,12 @@ def test_fused_rmsnorm_linear(tier, monkeypatch):
     A cone, run once per tile row by the sync stat fill)."""
     if tier == "warp":
         monkeypatch.setenv("EMMY_TILE", _WARP_TILE)
-        # Pin the serial fold: the computed-A form now offers redundant-statistic split-K
-        # siblings on this decode-M shape, and this test pins the ONE-kernel fused form
-        # (the split form has its own test: test_fused_cone_splitk_matches_reference).
-        monkeypatch.setenv("EMMY_REDUCE", "")
+    # Pin the serial fold in BOTH cells: the computed-A form offers redundant-statistic split-K
+    # siblings on this decode-M shape, and this test pins the ONE-kernel fused form. The scalar
+    # cell is an unpinned greedy compile, so without the pin the device's evidence may steer it
+    # to a (legal) 2-kernel split row (seen on sm_89). The split form has its own test
+    # (test_fused_cone_splitk_matches_reference); the free pick, test_fused_rmsnorm_linear_unpinned.
+    monkeypatch.setenv("EMMY_REDUCE", "")
     S, H, inter = 32, 1024, 3072
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (1, S, H), F16), node_id="x")

@@ -21,7 +21,8 @@ def _sig(free_prod, reduce_max, *, fp32=True, matmul=True):
     reduce-shaped one. ``S_n_mma`` is stamped 0.0, as on every real row."""
     d = {
         "S_ext_free_prod": float(free_prod),
-        "S_ext_free_max": float(free_prod),
+        # matmul fixtures here are SQUARE (free_max = sqrt); a reduce has one free dim (= free_prod)
+        "S_ext_free_max": float(round(free_prod**0.5)) if matmul else float(free_prod),
         "S_ext_reduce_max": float(reduce_max),
         "S_n_mma": 0.0,
         "S_reduce_add": 1.0,

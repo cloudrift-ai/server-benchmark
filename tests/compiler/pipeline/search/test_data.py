@@ -35,7 +35,8 @@ def _seed(db: SearchDB, key: str, pretty: str, knobs: dict, us: float) -> None:
 def test_shapekey_from_matmul_arith() -> None:
     sk = ShapeKey.from_matmul(512, 256, 64, "fp32")
     assert (sk.free_prod, sk.reduce_max, sk.is_warp) == (512 * 256, 64, False)
-    assert sk.s_features_arith() == {"S_ext_free_prod": 131072.0, "S_ext_reduce_prod": 64.0, "S_ext_reduce_max": 64.0}
+    want = {"S_ext_free_prod": 131072.0, "S_ext_reduce_prod": 64.0, "S_ext_reduce_max": 64.0, "S_ext_free_max": 512.0}
+    assert sk.s_features_arith() == want
     assert ShapeKey.from_matmul(64, 64, 64, "fp16").is_warp is True
 
 
@@ -45,8 +46,8 @@ def test_shapekey_from_s_features_joins_with_from_matmul() -> None:
     and the fp32/fp16 twins must never merge. The dtype flag comes from the
     ``S_dtype_f32`` load multiset — ``S_n_mma`` is 0.0 on every stamped row (the
     stamp runs before the tile tier emits ``Mma``) and must not enter the key."""
-    fp32 = {"S_ext_free_prod": 131072.0, "S_ext_reduce_max": 64.0, "S_dtype_f32": 2.0, "S_n_mma": 0.0}
-    fp16 = {"S_ext_free_prod": 131072.0, "S_ext_reduce_max": 64.0, "S_dtype_f16": 2.0, "S_n_mma": 0.0}
+    fp32 = {"S_ext_free_prod": 131072.0, "S_ext_free_max": 512.0, "S_ext_reduce_max": 64.0, "S_dtype_f32": 2.0, "S_n_mma": 0.0}
+    fp16 = {"S_ext_free_prod": 131072.0, "S_ext_free_max": 512.0, "S_ext_reduce_max": 64.0, "S_dtype_f16": 2.0, "S_n_mma": 0.0}
     assert ShapeKey.from_s_features(fp32) == ShapeKey.from_matmul(512, 256, 64, "fp32")
     assert ShapeKey.from_s_features(fp16) == ShapeKey.from_matmul(512, 256, 64, "fp16")
     assert ShapeKey.from_s_features(fp32) != ShapeKey.from_s_features(fp16)  # twins split on dtype

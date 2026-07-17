@@ -359,7 +359,7 @@ class EmmyGenRunner:
         if embed_scale != 1.0:
             embed_weight = embed_weight * np_dtype.type(embed_scale)
         use_decode = decode_ok and len(pre_decode) == len(layers)
-        return cls(
+        runner = cls(
             embed_weight=embed_weight,
             norm=trunk.norm,
             pre=pre_programs,
@@ -371,6 +371,15 @@ class EmmyGenRunner:
             decode_bucket=decode_bucket,
             prefill_capacity=max_tokens,
         )
+        if runner.has_device_decode:
+            # EAGER, not lazy: vLLM sizes its KV cache from a profiling pass that runs
+            # after model construction — anything allocated later (the embed table is
+            # ~1.9 GiB for gemma-4-12B) lands on memory the KV cache already claimed
+            # and OOMs at high --gpu-memory-utilization, only at the first
+            # small-batch decode (T <= bucket). Allocating here puts the device
+            # residents inside the profiled footprint.
+            runner._ensure_device()
+        return runner
 
     def embed(self, input_ids):
         """``input_ids``: list/1-D of ints → ``[T, H]`` numpy in the runner dtype."""
@@ -415,9 +424,12 @@ class EmmyGenRunner:
     # above stay for prefill / the standalone ``emmy generate`` oracle.
 
     def _ensure_device(self):
-        """Lazily build CUDA copies of the embed table + final norm (once) for the device path.
-        A **deep copy** of the norm — `.to()` is in-place, and the host `final_norm` (oracle /
-        prefill) still feeds it CPU tensors, so the shared module must stay on CPU."""
+        """Build CUDA copies of the embed table + final norm (idempotent). Called EAGERLY by
+        ``from_model`` when the device-decode path exists — vLLM's KV-cache sizing profiles the
+        model right after construction, so these residents must be allocated before it, never
+        at the first decode (see ``from_model``). A **deep copy** of the norm — `.to()` is
+        in-place, and the host `final_norm` (oracle / prefill) still feeds it CPU tensors, so
+        the shared module must stay on CPU."""
         if getattr(self, "_dev_ready", False):
             return
         import copy

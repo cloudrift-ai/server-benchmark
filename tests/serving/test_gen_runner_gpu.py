@@ -282,6 +282,44 @@ def test_decode_twin_shares_weight_buffers():
         assert unshared == 0, f"decode twin holds {unshared} bytes of duplicated weight buffers"
 
 
+def test_device_residents_allocated_eagerly():
+    """Every device-resident buffer must exist right after ``from_model`` — vLLM sizes its
+    KV cache from a profiling pass that runs after model construction, so a lazy allocation
+    at the first small-batch decode (the ~1.9 GiB gemma-4-12B embed table) lands on memory
+    the KV cache already claimed and OOMs at high --gpu-memory-utilization. Found on a real
+    RTX 5090; a concurrent bench masks it (batched decode rides the symbolic path) until
+    concurrency drains."""
+    pytest.importorskip("cupy")
+    import torch
+    import transformers
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    config = transformers.Qwen3Config(
+        vocab_size=64,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        max_position_embeddings=64,
+        use_sliding_window=False,
+    )
+    torch.manual_seed(0)
+    model = transformers.Qwen3ForCausalLM(config).eval()
+    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16)
+    if not runner.has_device_decode:
+        pytest.skip("decode-bucket programs unavailable for this shape")
+
+    assert getattr(runner, "_dev_ready", False), "device residents must be allocated at construction, not first decode"
+    assert runner._embed_weight_dev.is_cuda
+    assert next(runner._norm_dev.parameters()).is_cuda
+
+
 def test_layers_share_activation_arena():
     """Per-layer programs must NOT each hold their own capacity-sized activation
     buffers: with the runner's shared :class:`BufferArena`, same-kind programs of

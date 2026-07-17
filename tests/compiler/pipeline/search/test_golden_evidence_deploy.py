@@ -370,3 +370,70 @@ def test_cross_kind_isolation_via_the_kind_discriminator(monkeypatch):
         _ROW_GOLD, base={**_BASE, "S_ext_reduce_max": 512.0, "S_ext_n_free_axis": 2.0, "S_ext_n_reduce_axis": 1.0, "S_loop_depth": 3.0}
     )
     assert _golden_pick(a_index, mm_rows, "n0") is None
+
+
+# --- fused computed-A (norm_linear) kind ---------------------------------------------------------
+# Stamp base captured off the real deploy fork of ``F.rms_norm(x,(H,),nw) @ w`` (M32 x N4096, K3840):
+# a sweep (S_loop_depth 3 < n_free 2 + n_reduce 2) with rsqrt AND a SECOND reduce axis (the
+# contraction) -> kind="fused". S_dtype_f32 present (the real 12B model's f32 statistic constants):
+# is_warp is FORCED True for the kind (a computed-A contraction is a warp mma). The fork leaves are
+# axis-keyed TILE@a3 + STAGE@a3 + REDUCE@a3 over the ``sync`` compute-fill (d1/d2/sync, not tma/ring).
+
+from emmy.compiler.pipeline.search.golden import NormLinearGoldenConfig  # noqa: E402
+
+_FUSED_SIG = {
+    "S_ext_free_prod": 131072.0,
+    "S_ext_free_max": 4096.0,
+    "S_ext_reduce_max": 3840.0,
+    "S_ext_reduce_prod": 14745600.0,
+    "S_ext_n_free_axis": 2.0,
+    "S_ext_n_reduce_axis": 2.0,
+    "S_ext_n_symbolic_axis": 0.0,
+    "S_loop_depth": 3.0,
+    "S_pw_rsqrt": 1.0,
+    "S_dtype_f16": 6.0,
+    "S_dtype_f32": 2.0,
+    "H_opt": 3.0,
+}
+_FUSED_TILE = "a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2"
+
+
+def _fused_row(tile, stage="d2/sync", reduce="g4k"):
+    return {**_FUSED_SIG, "TILE@a3": tile, "STAGE@a3": stage, "REDUCE@a3": reduce, "RASTER": ""}
+
+
+def _norm_linear(name="gemma4_12b.q_proj_fused", knobs=None, us=34.8):
+    return NormLinearGoldenConfig(
+        name=name,
+        M=32,
+        H=3840,
+        N=4096,
+        dtype="fp16",
+        knobs=knobs or {"TILE": _FUSED_TILE, "STAGE": "d2/sync", "REDUCE": "g4k", "RASTER": "", "WSPEC": ""},
+        emmy_us=us,
+        gpu_name=CARD,
+        compute_cap=CAP,
+    )
+
+
+def test_fused_golden_decides_its_op_over_a_warp_sibling(monkeypatch):
+    """The fused norm→linear golden decides its computed-A op: the recorded bare knobs match the
+    axis-keyed warp leaf (``TILE@a3`` etc.) over an offered sibling on a different tile."""
+    index = _index(monkeypatch, [_norm_linear()])
+    rows = [_fused_row("a:mma_m16n8k16_f16_f32/w1x1/f1x1", stage="d1/sync", reduce=""), _fused_row(_FUSED_TILE)]
+    assert _golden_pick(index, rows, "n0") == (1, 34.8)
+
+
+def test_fused_golden_never_crosses_rms_norm_or_matmul(monkeypatch):
+    """The fused key (``kind="fused"``) never joins a bare RMSNorm sweep nor a plain matmul, even at
+    coincident extents — the ``S_ext_n_reduce_axis>=2`` discriminator keeps the families apart."""
+    # A fused golden must not decide a bare rms_norm op (one reduce axis, kind="rms_norm").
+    index = _index(monkeypatch, [_norm_linear()])
+    rms_rows = [{**_RMS_SIG, "REDUCE@r0": "b256"}]
+    assert _golden_pick(index, rms_rows, "n0") is None
+    # A fused golden must not decide a plain matmul op (no rsqrt, kind="").
+    mm_rows = _rows(_ROW_GOLD)
+    assert _golden_pick(index, mm_rows, "n0") is None
+    # And a bare rms_norm golden must not decide the fused op.
+    rms_gold = RmsNormGoldenConfig(name="rms.k3840", M=512, K=3840, knobs={"REDUCE": "b256"}, emmy_us=6.3, gpu_name=CARD, compute_cap=CAP)
+    assert _golden_pick(_index(monkeypatch, [rms_gold]), [_fused_row(_FUSED_TILE)], "n0") is None

@@ -336,8 +336,9 @@ def _warn_disjoint_evidence(index: dict[frozenset, list[tuple[dict, float, bool]
 
 
 def _golden_evidence_index(ctx: Context) -> dict:
-    """The deploy card's recorded goldens — every kind: matmul, attention (flash),
-    rms_norm, softmax, reduce, pointwise — grouped by
+    """The deploy card's recorded goldens — every kind: matmul, attention (flash), rms_norm, softmax,
+    reduce, pointwise, norm_linear / mlp_geglu (the fused RMSNorm→linear / gate⊗up computed-A), and the
+    fork-nothing rope / embedding regression anchors (which never bind here — no fork) — grouped by
     :class:`~emmy.compiler.pipeline.search.data.shape.ShapeKey` (whose ``kind``
     discriminator keeps the sweep kinds apart from extent-coincident contractions)
     and sorted fastest-first — the verified-evidence tier a greedy compile consults

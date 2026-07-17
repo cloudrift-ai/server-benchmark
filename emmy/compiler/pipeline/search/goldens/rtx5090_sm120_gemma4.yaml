@@ -936,3 +936,99 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
     emmy_us: 74.1
     cublas_us: 77.1
+  # ---- fused RMSNorm→linear (computed-A / norm_linear kind) --------------------------------------
+  # The single-channel computed-A megakernel rms_norm(x)·nw @ Wq (kind="fused"): the per-row RMSNorm
+  # statistic rides the A cone as a sync compute-fill prologue and the warp mma contracts the scaled A
+  # against Wq (the k_rms_norm_matmul_reduce kernel; split-K partial + 1 µs finalize). Seeded 2026-07-17
+  # by manual pinned --ab (3x, <1% spread). This is a COLD-START ANCHOR, not a win: cold greedy on this
+  # unseeded shape mis-RANKS a w2x1/f2x2 d1/sync tile at 158.6 µs (0.10x eager) — the golden pins the
+  # tuned winner (w1x16/f2x2/k2 d2/sync g8k, 24.1) for a 6.6x cold-start rescue. It reads 0.68x vs torch's
+  # UNFUSED decomposition (rms_norm 6 + matmul 10, eager 16.4): the computed-A pipeline loses to the split
+  # at decode M here (why the TUNED gemma-4 decode splits norm→qkv into bare projections), and this entry
+  # anchors that loss so a future win is measurable. The wide-N decode winner is the un=16 tile added to
+  # _WARP_UNITS (thin-M / wide-N: 16 warps down the columns; +5% over un=8 on both q-proj and gate/up
+  # fused edges at M=32). fp16, torch eager (F.rms_norm + @) reference.
+  - kernel: norm_linear
+    name: gemma4_12b.norm_q_proj.m32
+    M: 32
+    H: 3840
+    N: 4096
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
+    emmy_us: 24.1
+    cublas_us: 16.4
+  # norm→k/v projection (input_layernorm → k_proj/v_proj, N=2048): the other single-channel norm→linear
+  # prologue in the block (q/k/v all fuse the input norm; q is above). Narrower N than q_proj, so the
+  # un=8 tile wins (w1x16 over-splits the 2048 columns): w1x8/f2x2/k2 d2/sync g8k, 20.8 = 0.60x. Same
+  # cold-start-anchor rationale as norm_q_proj (the tuned decode splits it). fp16, torch eager reference.
+  # (o_proj / down_proj carry a norm EPILOGUE, not a prologue — a different fused structure the
+  # norm_linear kind does not model; gate/up is the MULTI-channel megakernel — see the coverage note.)
+  - kernel: norm_linear
+    name: gemma4_12b.norm_kv_proj.m32
+    M: 32
+    H: 3840
+    N: 2048
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
+    emmy_us: 20.8
+    cublas_us: 12.5
+  # ---- fused RMSNorm→gate⊗up→GeGLU megakernel (computed-A / mlp_geglu kind) ----------------------
+  # The MLP hot kernel gemma-4 ACTUALLY deploys (k_linear_mean_reduce, the mul_4 twin): gate + up matmuls
+  # share ONE compute-filled A slab (product-monoid ⊗-fold channels), the pre-FF RMSNorm statistic rides
+  # the A cone as a sync prologue, and the GeGLU (tanh-approx gelu) ⊗-combine rides the store epilogue —
+  # output (M, inter). Seeded 2026-07-18 by manual --ab (decode M=32). Cold greedy misdeploys a
+  # w2x1/f2x8 d1/sync tile at 274 µs (0.58x eager); the golden pins w1x8/f2x2/k4 d1/sync g4k at 171.9 =
+  # 0.92x vs torch's UNFUSED decomposition (norm→2 matmuls→gelu→multiply, eager 158.2). Unlike the
+  # bare mlp_gate_up matmul golden (which round-trips the norm through gmem), this is the ONE fused
+  # kernel. fp16, torch eager reference. (The residual 0.08x is the large-M computed-A pipeline — the
+  # research-class async-B-staging lever, out of scope for coverage.)
+  - kernel: mlp_geglu
+    name: gemma4_12b.mlp_geglu.m32
+    M: 32
+    H: 3840
+    inter: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 171.9
+    cublas_us: 158.2
+  # ---- lm_head (the vocab logits projection) ----------------------------------------------------
+  # hidden 3840 → vocab 262144: the single LARGEST matmul in the model (2 GB fp16 weight, DRAM-bound),
+  # run per decode step. Seeded 2026-07-18 (manual --ab, decode M=32). Cold greedy MISDEPLOYS a scalar
+  # b256 tile at 299 ms (0.004x — a 248x disaster over an 8.4M-block grid); the golden pins the serial
+  # w1x8/f2x2/k4 d2/tma/ring form (WSPEC p1 auto-resolves on the TMA stage) at 1199 µs = 1.01x cuBLAS
+  # HGEMM (one kernel, no split-K finalize — the finalize over N=262144 costs more than the split
+  # recovers). torch.matmul fp16 (cuBLAS HGEMM) reference.
+  - kernel: matmul
+    name: gemma4_12b.lm_head.m32
+    M: 32
+    N: 262144
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: 'p1'}
+    emmy_us: 1199.1
+    cublas_us: 1208.2
+  # ---- memory-bound kernels (regression anchors) ------------------------------------------------
+  # These kernels FORK NOTHING — one coalesced elementwise / gather config, no tuning choice — so a
+  # golden cannot warm a cold deploy (there is no misdeploy to fix). They are REGRESSION ANCHORS for
+  # `emmy eval golden`: the recorded latency vs torch eager catches a future codegen slowdown. Seeded
+  # 2026-07-18. rope: q*cos + rotate_half(q)*sin over (1, 16, 512, 256) — emmy's fused apply beats
+  # eager 4.6x. embedding: the F.embedding gather over the 262144x3840 table — at eager parity (both
+  # DRAM-bound on the gathered rows). Knobs are empty (no schedule fork); the reference is torch eager.
+  - kernel: rope
+    name: gemma4_12b.rope.s512
+    n_heads: 16
+    seq: 512
+    head_dim: 256
+    dtype: 'fp16'
+    knobs: {}
+    emmy_us: 4.5
+    cublas_us: 20.5
+  - kernel: embedding
+    name: gemma4_12b.embedding.s512
+    vocab: 262144
+    seq: 512
+    hidden: 3840
+    dtype: 'fp16'
+    knobs: {}
+    emmy_us: 4.3
+    cublas_us: 4.1

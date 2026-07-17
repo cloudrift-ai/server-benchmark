@@ -23,7 +23,10 @@ This module is import-light (no torch / cupy at module top) so passes and tests
 can read :data:`GOLDEN_CONFIGS` cheaply. The data lives as **per-GPU YAML files**
 under ``goldens/`` (e.g. ``goldens/rtx5090_sm120.yaml``): a ``gpu_name`` /
 ``compute_cap`` header plus a ``configs`` list, each tagged with a ``kernel``
-discriminator (``matmul`` / ``reduce`` / ``pointwise``). A GPU may carry more than
+discriminator (``matmul`` / ``reduce`` / ``pointwise`` / ``rms_norm`` / ``softmax`` /
+``attention`` / ``norm_linear`` — the fused RMSNorm→linear computed-A megakernel — / ``mlp_geglu`` —
+its multi-channel gate⊗up→GeGLU sibling — / ``rope`` / ``embedding`` — the fork-nothing memory-bound
+regression anchors). A GPU may carry more than
 one file (a themed set such as ``rtx5090_sm120_gemma4.yaml`` beside the card's main
 file — same header, merged by the live-GPU ``(gpu_name, compute_cap)`` scoping).
 :func:`_load_goldens` concatenates every file into :data:`GOLDEN_CONFIGS`. The set is hand-maintained via
@@ -337,6 +340,115 @@ class RmsNormGoldenConfig(GoldenConfig):
 
 
 @dataclass(frozen=True, kw_only=True)
+class NormLinearGoldenConfig(GoldenConfig):
+    """A golden config for the fused RMSNorm→linear **computed-A** megakernel:
+    ``rms_norm(x, (H,))·nw @ W`` in ONE mma kernel (``(M, H) → (M, N)``).
+
+    This is the single-channel computed-A ``Contraction`` (``010_recognize``'s
+    ``bind_prologue_contraction`` merge): the per-row RMSNorm statistic rides the A cone as a
+    ``sync`` compute-fill prologue and the warp mma rows contract the scaled A against ``W`` — a
+    different kernel family than the bare ``mlp_gate_up`` matmul (which round-trips ``xn`` through
+    gmem) or a bare ``rms_norm`` sweep. It stamps LIKE an RMSNorm sweep (rsqrt, a sweep loop nest)
+    but with a SECOND reduce axis — the contraction — beside the statistic reduce, so its
+    :class:`ShapeKey` carries ``kind="fused"`` (``S_ext_n_reduce_axis >= 2``), keeping it off both
+    the ``rms_norm`` and the ``mlp_gate_up`` matmul goldens. The reference is torch's UNFUSED
+    decomposition (``F.rms_norm`` eager + ``@``), so the ratio compares emmy's one fused mma against
+    PyTorch's norm-then-matmul. Its ONLY realizable configs are the sync compute-fill tiles
+    (``d1/d2/sync``, no ``d2/tma/ring``) — record the tuned twin's ``record_knobs`` verbatim.
+
+    The multi-channel gate⊗up (SwiGLU/GeGLU) megakernel shares ``kind="fused"`` but is a distinct
+    snippet — see :class:`MlpGeGluGoldenConfig` (both matmuls must share ONE RMSNorm output, which a
+    lambda binding — ``(lambda r: f(r@Wg)*(r@Wu))(rms_norm(x))`` — expresses; a preamble ``xn = ...``
+    would precompute it to a constant and inlining ``rms(x)`` twice traces two un-shared norms)."""
+
+    M: int
+    H: int
+    N: int
+    dtype: str = "fp16"  # a computed-A contraction is a warp mma (fp16/bf16); fp32 has no fused form
+
+    def __post_init__(self):
+        self._require_dynamic_hint(self.M)
+
+    def dynamic_specs(self) -> list[str]:
+        return ["seq_len@x:0"] if self.dynamic else []
+
+    def snippet(self) -> str:
+        tdt = {"fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16", "fp32": ""}[self.dtype]
+        return (
+            f"nw = torch.randn({self.H}{tdt})\n"
+            f"w = torch.randn({self.H},{self.N}{tdt})\n"
+            f"x = torch.randn({self.M},{self.H}{tdt})\n"
+            f"F.rms_norm(x,({self.H},),nw) @ w"
+        )
+
+    def flops(self) -> float:
+        return 2.0 * self.M * self.N * self.H  # the contraction; the norm/rsqrt prologue is extra (stays an underestimate)
+
+    def shape_key(self):
+        """Keys the stamped computed-A fused op (``kind="fused"``): the output is ``(M, N)`` so
+        ``free_prod = M*N``, the reduce is the contraction extent ``H`` (the statistic reduce shares
+        ``H``); the dynamic twin excludes the symbolic M. ``is_warp`` is always True — a computed-A
+        contraction is a warp mma even though its f32 statistic constants would flip the stamp's
+        dtype signal (:meth:`ShapeKey.from_s_features` forces it for the kind)."""
+        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
+
+        free = self.N if self.dynamic else self.M * self.N
+        return ShapeKey(free_prod=free, reduce_max=self.H, is_warp=True, is_dyn=self.dynamic, kind="fused")
+
+
+@dataclass(frozen=True, kw_only=True)
+class MlpGeGluGoldenConfig(GoldenConfig):
+    """The fused RMSNorm→gate⊗up→GeGLU **multi-channel computed-A** megakernel:
+    ``gelu(rms_norm(x)·nw @ Wg) * (rms_norm(x)·nw @ Wu)`` in ONE mma kernel (``(M, H) → (M, inter)``).
+
+    The MLP hot kernel gemma-4 actually deploys (``k_linear_mean_reduce``): the gate and up matmuls
+    are ⊗-fold CHANNELS sharing ONE compute-filled A slab (one ldmatrix'd A fragment feeding per-fold
+    B slabs / C fragments), the per-row RMSNorm statistic rides the A cone as a ``sync`` compute-fill
+    prologue, and the GeGLU ⊗-combine rides the store's fragment epilogue. It shares
+    :class:`NormLinearGoldenConfig`'s ``kind="fused"`` (rsqrt + a second reduce axis) but keys on the
+    ``(M, inter)`` OUTPUT (``free_prod = M*inter``, reduce ``H``) — the geglu collapses the two channels
+    to one inter-wide output. The snippet binds the shared ``rms_norm`` via a lambda (a torch expression
+    cannot otherwise share it — a preamble precomputes, inlining duplicates). gemma-4 uses GeGLU
+    (tanh-approx gelu), not SwiGLU. The reference is torch's UNFUSED decomposition, so the ratio compares
+    emmy's one fused mma against PyTorch's norm→2 matmuls→gelu→multiply. Only the sync compute-fill tiles
+    realize (``d1/d2/sync``); record the tuned twin's ``record_knobs`` verbatim."""
+
+    M: int
+    H: int
+    inter: int
+    dtype: str = "fp16"  # a computed-A contraction is a warp mma (fp16/bf16)
+
+    def __post_init__(self):
+        self._require_dynamic_hint(self.M)
+
+    def dynamic_specs(self) -> list[str]:
+        return ["seq_len@x:0"] if self.dynamic else []
+
+    def snippet(self) -> str:
+        tdt = {"fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16", "fp32": ""}[self.dtype]
+        return (
+            f"wg = torch.randn({self.H},{self.inter}{tdt})\n"
+            f"wu = torch.randn({self.H},{self.inter}{tdt})\n"
+            f"nw = torch.randn({self.H}{tdt})\n"
+            f"x = torch.randn({self.M},{self.H}{tdt})\n"
+            f"(lambda r: F.gelu(r @ wg, approximate='tanh') * (r @ wu))(F.rms_norm(x,({self.H},),nw))"
+        )
+
+    def flops(self) -> float:
+        return 4.0 * self.M * self.inter * self.H  # two K-contractions (gate + up) of the shared A; norm/gelu extra
+
+    def shape_key(self):
+        """Keys the stamped multi-channel computed-A fused op (``kind="fused"``): the GeGLU output is
+        ``(M, inter)`` so ``free_prod = M*inter``, the reduce is the shared contraction extent ``H``;
+        the dynamic twin excludes the symbolic M. ``is_warp`` is always True (a computed-A contraction
+        is a warp mma — :meth:`ShapeKey.from_s_features` forces it for the kind)."""
+        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
+
+        free = self.inter if self.dynamic else self.M * self.inter
+        return ShapeKey(free_prod=free, reduce_max=self.H, is_warp=True, is_dyn=self.dynamic, kind="fused")
+
+
+@dataclass(frozen=True, kw_only=True)
 class SoftmaxGoldenConfig(GoldenConfig):
     """Row-softmax ``(M, K) → (M, K)`` over the last axis (``torch.softmax(dim=-1)``).
 
@@ -436,12 +548,96 @@ class AttentionGoldenConfig(GoldenConfig):
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class RopeGoldenConfig(GoldenConfig):
+    """Rotary position embedding apply — ``q*cos + rotate_half(q)*sin`` over ``(1, n_heads, seq,
+    head_dim)`` (the ``k_cat_slice_unsqueeze_pointwise`` kernel; ``rotate_half`` is ``cat(-q[…d/2:],
+    q[…:d/2])``). A pure **memory-bound pointwise map** (no reduce, no contraction) applied to q and k
+    every layer. It FORKS NOTHING — one coalesced elementwise config, so a golden cannot warm a cold
+    deploy (there is no misdeploy to fix); it is a REGRESSION ANCHOR for ``emmy eval golden`` (the
+    recorded latency vs torch eager catches a codegen slowdown). The reference is torch eager."""
+
+    n_heads: int
+    seq: int
+    head_dim: int
+    dtype: str = "fp16"
+
+    def __post_init__(self):
+        self._require_dynamic_hint(self.seq)
+
+    def dynamic_specs(self) -> list[str]:
+        return ["seq_len@q:2", "seq_len@cos:2", "seq_len@sin:2"] if self.dynamic else []
+
+    def snippet(self) -> str:
+        tdt = {"fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16", "fp32": ""}[self.dtype]
+        h = self.head_dim // 2
+        return (
+            f"cos = torch.randn(1,1,{self.seq},{self.head_dim}{tdt})\n"
+            f"sin = torch.randn(1,1,{self.seq},{self.head_dim}{tdt})\n"
+            f"q = torch.randn(1,{self.n_heads},{self.seq},{self.head_dim}{tdt})\n"
+            f"q*cos + torch.cat((-q[...,{h}:], q[...,:{h}]),dim=-1)*sin"
+        )
+
+    def flops(self) -> float:
+        return float(self.n_heads * self.seq * self.head_dim)  # one fused-multiply-add per element
+
+    def shape_key(self):
+        """Keys the stamped pointwise map (``kind=""``, ``reduce_max=0``): free = the output extents
+        (heads x seq x head_dim). The dynamic twin excludes the symbolic seq (``free_prod`` keeps
+        heads x head_dim, ``free_max`` normalizes to 0 like every non-plain / dynamic key)."""
+        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
+
+        free = self.n_heads * self.head_dim if self.dynamic else self.n_heads * self.seq * self.head_dim
+        fm = 0 if self.dynamic else max(self.n_heads, self.seq, self.head_dim)
+        return ShapeKey(free_prod=free, reduce_max=0, is_warp=self.dtype != "fp32", is_dyn=self.dynamic, free_max=fm)
+
+
+@dataclass(frozen=True, kw_only=True)
+class EmbeddingGoldenConfig(GoldenConfig):
+    """Token embedding gather — ``embed_tokens[ids]`` over a ``(vocab, hidden)`` table (the
+    ``k_embedding`` kernel; ``F.embedding``). A pure **memory-bound gather** (one hidden-wide row copy
+    per token, no compute). Like :class:`RopeGoldenConfig` it FORKS NOTHING — a REGRESSION ANCHOR for
+    ``emmy eval golden``, not a deploy warmer. The reference is torch eager (``F.embedding``)."""
+
+    vocab: int
+    seq: int
+    hidden: int
+    dtype: str = "fp16"
+
+    def __post_init__(self):
+        self._require_dynamic_hint(self.seq)
+
+    def dynamic_specs(self) -> list[str]:
+        return ["seq_len@ids:1"] if self.dynamic else []
+
+    def snippet(self) -> str:
+        tdt = {"fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16", "fp32": ""}[self.dtype]
+        return f"ids = torch.randint(0,{self.vocab},(1,{self.seq}))\nw = torch.randn({self.vocab},{self.hidden}{tdt})\nF.embedding(ids, w)"
+
+    def flops(self) -> float:
+        return float(self.seq * self.hidden)  # one copy per gathered element (no arithmetic)
+
+    def shape_key(self):
+        """Keys the stamped gather (``kind=""``, ``reduce_max=0``): the output is ``(seq, hidden)`` so
+        ``free_prod = seq*hidden`` (the vocab is the indexed axis, not a free extent); the dynamic twin
+        excludes the symbolic seq."""
+        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
+
+        free = self.hidden if self.dynamic else self.seq * self.hidden
+        fm = 0 if self.dynamic else max(self.seq, self.hidden)
+        return ShapeKey(free_prod=free, reduce_max=0, is_warp=self.dtype != "fp32", is_dyn=self.dynamic, free_max=fm)
+
+
 _GOLDENS_DIR = Path(__file__).parent / "goldens"
 _KERNEL_CLASSES = {
     "matmul": MatmulGoldenConfig,
     "reduce": ReduceGoldenConfig,
     "pointwise": PointwiseGoldenConfig,
     "rms_norm": RmsNormGoldenConfig,
+    "norm_linear": NormLinearGoldenConfig,
+    "mlp_geglu": MlpGeGluGoldenConfig,
+    "rope": RopeGoldenConfig,
+    "embedding": EmbeddingGoldenConfig,
     "softmax": SoftmaxGoldenConfig,
     "attention": AttentionGoldenConfig,
 }
@@ -452,8 +648,9 @@ def _load_goldens() -> list[GoldenConfig]:
 
     One file per GPU: a ``gpu_name`` / ``compute_cap`` header (stamped onto every
     config so it isn't repeated per entry) plus a ``configs`` list, each tagged with
-    a ``kernel`` discriminator (``matmul`` / ``attention`` / ``softmax`` / ``reduce`` / ``rms_norm`` / ``pointwise``) selecting the
-    dataclass. All files are concatenated — a ``name`` may recur across GPUs.
+    a ``kernel`` discriminator (``matmul`` / ``attention`` / ``softmax`` / ``reduce`` / ``rms_norm`` / ``norm_linear`` /
+    ``mlp_geglu`` / ``rope`` / ``embedding`` / ``pointwise``) selecting the dataclass. All files are concatenated — a
+    ``name`` may recur across GPUs.
 
     NOTE: ``compute_cap`` does **not** uniquely identify a GPU — two different cards
     can share a capability (e.g. ``rtx5090_sm120.yaml`` and

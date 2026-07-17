@@ -15,11 +15,15 @@ from emmy.compiler.pipeline.search.golden import (
     _KERNEL_CLASSES,
     GOLDEN_CONFIGS,
     AttentionGoldenConfig,
+    EmbeddingGoldenConfig,
     GoldenConfig,
     MatmulGoldenConfig,
+    MlpGeGluGoldenConfig,
+    NormLinearGoldenConfig,
     PointwiseGoldenConfig,
     ReduceGoldenConfig,
     RmsNormGoldenConfig,
+    RopeGoldenConfig,
     SoftmaxGoldenConfig,
     _load_goldens,
     matmul_snippet,
@@ -63,13 +67,32 @@ def test_golden_configs_set_is_well_formed():
                 MatmulGoldenConfig,
                 ReduceGoldenConfig,
                 RmsNormGoldenConfig,
+                NormLinearGoldenConfig,
+                MlpGeGluGoldenConfig,
+                RopeGoldenConfig,
+                EmbeddingGoldenConfig,
                 SoftmaxGoldenConfig,
                 PointwiseGoldenConfig,
                 AttentionGoldenConfig,
             ),
         ), c.name
+        # The memory-bound anchors (rope / embedding) FORK NOTHING — one coalesced elementwise / gather
+        # config, so they record empty knobs and serve as ``eval golden`` regression anchors, not deploy
+        # warmers. Every other kind carries a scheduling knob set.
+        fork_nothing = isinstance(c, (RopeGoldenConfig, EmbeddingGoldenConfig))
         if isinstance(c, MatmulGoldenConfig):
             assert c.M > 0 and c.N > 0 and c.K > 0, c.name
+        elif isinstance(c, NormLinearGoldenConfig):
+            # The fused RMSNorm→linear computed-A megakernel: a warp contraction (M,H)@(H,N), not the
+            # reduce family — its REDUCE knob is a split-K (g4k), not a coop, so no coop>1 requirement.
+            assert c.M > 0 and c.H > 0 and c.N > 0, c.name
+        elif isinstance(c, MlpGeGluGoldenConfig):
+            # The fused RMSNorm→gate⊗up→GeGLU multi-channel computed-A megakernel (M,H)→(M,inter).
+            assert c.M > 0 and c.H > 0 and c.inter > 0, c.name
+        elif isinstance(c, RopeGoldenConfig):
+            assert c.n_heads > 0 and c.seq > 0 and c.head_dim > 0, c.name
+        elif isinstance(c, EmbeddingGoldenConfig):
+            assert c.vocab > 0 and c.seq > 0 and c.hidden > 0, c.name
         elif isinstance(c, (ReduceGoldenConfig, RmsNormGoldenConfig, SoftmaxGoldenConfig)):
             from emmy.compiler.ir.schedule import ReducePlan
 
@@ -85,7 +108,7 @@ def test_golden_configs_set_is_well_formed():
         assert c.emmy_us > 0 and c.cublas_us > 0, c.name
         assert c.ratio >= 0.0, c.name
         assert c.golden == (c.ratio >= 0.95), c.name
-        assert c.knobs, f"{c.name} has no recorded knobs"
+        assert fork_nothing or c.knobs, f"{c.name} has no recorded knobs"
         assert c.snippet(), c.name
 
 
@@ -215,6 +238,7 @@ def test_dynamic_supported_for_all_kinds():
         RmsNormGoldenConfig(name="rms_norm.k2048.dynM", M=512, K=2048, dynamic=True),
         SoftmaxGoldenConfig(name="softmax.k2048.dynM", M=512, K=2048, dynamic=True),
         PointwiseGoldenConfig(name="pointwise.n4096.dynM", M=512, N=4096, dynamic=True),
+        NormLinearGoldenConfig(name="norm_linear.n4096.dynM", M=512, H=3840, N=4096, dynamic=True),
     ]
     assert all(c.dynamic_specs() == ["seq_len@x:0"] for c in one_input)
     att = AttentionGoldenConfig(name="attention.hd128.dynM", n_heads=8, seq=512, head_dim=128, dynamic=True)
@@ -314,6 +338,42 @@ def test_resolve_golden_arg_applies_dynamic_spec(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         cmod.resolve_golden_arg(clash)
     assert exc.value.code == 2
+
+
+def test_norm_linear_golden_snippet_shape_key_and_flops():
+    """The fused RMSNorm→linear computed-A golden: its snippet is the ``F.rms_norm(x)·nw @ w`` form
+    that traces to the megakernel, its shape_key carries ``kind="fused"`` with ``is_warp=True`` (a
+    computed-A contraction is a warp mma), and the dynamic twin excludes the symbolic M."""
+    c = NormLinearGoldenConfig(name="nl", M=32, H=3840, N=4096, knobs={"TILE": "a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2"})
+    snip = c.snippet()
+    assert "F.rms_norm(x,(3840,),nw)" in snip and snip.strip().endswith("@ w")
+    assert "dtype=torch.float16" in snip  # fp16 default → warp mma
+    sk = c.shape_key()
+    assert (sk.free_prod, sk.reduce_max, sk.is_warp, sk.is_dyn, sk.kind) == (32 * 4096, 3840, True, False, "fused")
+    assert c.flops() == 2.0 * 32 * 4096 * 3840
+    dyn = NormLinearGoldenConfig(name="nl.dynM", M=512, H=3840, N=4096, dynamic=True, knobs={})
+    dsk = dyn.shape_key()
+    assert (dsk.free_prod, dsk.is_dyn, dsk.kind) == (4096, True, "fused")  # symbolic M excluded
+    assert dyn.dynamic_specs() == ["seq_len@x:0"]
+    # A dynamic golden's traced M must equal DEFAULT_SEQ_HINT (the axis is benched at the hint).
+    from emmy.compiler.dim import DEFAULT_SEQ_HINT
+
+    with pytest.raises(ValueError, match="DEFAULT_SEQ_HINT"):
+        NormLinearGoldenConfig(name="nl.bad", M=DEFAULT_SEQ_HINT + 1, H=3840, N=4096, dynamic=True)
+
+
+def test_mlp_geglu_golden_snippet_shape_key_and_flops():
+    """The fused RMSNorm→gate⊗up→GeGLU multi-channel golden: the lambda-bound shared-``r`` snippet,
+    ``kind="fused"`` keyed on the ``(M, inter)`` GeGLU output, and the dynamic twin excludes M."""
+    c = MlpGeGluGoldenConfig(name="ggu", M=32, H=3840, inter=15360, knobs={"TILE": "a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4"})
+    snip = c.snippet()
+    assert "lambda r:" in snip and "F.rms_norm(x,(3840,),nw)" in snip and "approximate='tanh'" in snip
+    sk = c.shape_key()
+    assert (sk.free_prod, sk.reduce_max, sk.is_warp, sk.is_dyn, sk.kind) == (32 * 15360, 3840, True, False, "fused")
+    assert c.flops() == 4.0 * 32 * 15360 * 3840  # two shared-A contractions
+    dyn = MlpGeGluGoldenConfig(name="ggu.dynM", M=512, H=3840, inter=15360, dynamic=True, knobs={})
+    assert (dyn.shape_key().free_prod, dyn.shape_key().is_dyn) == (15360, True)  # symbolic M excluded
+    assert dyn.dynamic_specs() == ["seq_len@x:0"]
 
 
 def test_fast_math_regime_derived_from_knobs():

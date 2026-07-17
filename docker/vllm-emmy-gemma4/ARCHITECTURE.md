@@ -138,9 +138,10 @@ rental/teardown. The local-only deltas:
   cp -r ~/.cache/huggingface/hub/models--google--gemma-4-12B docker/vllm-emmy-gemma4/warm/hf/hub/
   ```
 
-- **Disk budget: ~60 GB free.** The base image (~10.6 GB) + `warm/` (~24 GB of weights) + the baked image's weight
-  layer (another ~24 GB in Docker's storage — base layers are shared, the snapshot layer is not). Check `df` before
-  starting; move Docker's data-root or `warm/` to a bigger volume if needed.
+- **Disk budget: ~100 GB free** (measured, not the earlier ~60 GB estimate): base images (~21 GB unpacked) +
+  `warm/` (~24 GB) + the baked weight layer (~24 GB) + BuildKit's transient context copy of `warm/` during the bake
+  (another ~24 GB) + the host venv/HF cache if present. Freeing the venv before the bake is safe — nothing after
+  the warm needs it.
 - **The push is the slow part.** `gemma4-serve-push` uploads ~35 GB over your uplink — hours on a residential
   connection vs minutes from a datacenter. It's the main reason the rental flow exists; locally, just let it run.
 
@@ -149,3 +150,15 @@ rental/teardown. The local-only deltas:
 gemma-4 is **Apache 2.0** — public redistribution of the weights in a Docker Hub tag is permitted. The bake copies
 the unmodified HF snapshot, which carries its LICENSE/NOTICE files — keep them (that is the attribution obligation),
 and don't imply Google endorsement in the tag name or description.
+
+## Known blocker (2026-07-17 release session)
+
+The full pipeline was exercised end to end on a rented 5090 (vast.ai): preflight 34/34, config pinned at
+4096/4096/util 0.90 (decode twin on), HF-parity validation 4/4 — but the **zero-recompile verify FAILS**:
+~270 of ~580 serving kernels regenerate with *different source text on every process launch* (boot 2: 265 new
+cache keys; boot 3, with the union baked: 273 new). Per-boot codegen nondeterminism defeats the content-addressed
+cache across restarts, so success criterion 2 is structurally unattainable until it is fixed (suspect: an unordered
+set/dict iteration leaking into source text, amplified by hash randomization across processes — local no-GPU repro:
+render the same golden twice in separate processes and diff). The image otherwise works: offline boot, zero
+downloads, correct completions, zero request-time compiles. Do not push a tag until the determinism fix lands and a
+re-warm verifies clean.

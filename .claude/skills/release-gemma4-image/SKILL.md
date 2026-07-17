@@ -37,6 +37,11 @@ Delegate to the `start-remote-server` skill: `emmy vm create gpu --gpu "NVIDIA G
 on CloudRift images — verify with `docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi` or the
 vllm-emmy image itself). Rsync the working tree at the **release commit** and `make setup` +
 `./venv/bin/pip install -e ".[serving]"` + cupy (the venv steps back the headroom sweep and the validate script).
+Host toolchain: **CUDA >= 12.9** (FlashInfer refuses sm_120 below it — the misleading error is "requires sm75 or
+higher"); on non-CloudRift hosts verify the NVIDIA container toolkit actually works (`docker run --gpus all ...
+nvidia-smi`) — a registered runtime with missing binaries fails with `could not select device driver`. Budget
+**~100 GB disk** (base images + venv + HF cache + BuildKit's transient context copy of warm/), or `rm -rf venv`
+before the bake — nothing after the warm needs it.
 
 **Run every long step detached** (`nohup … > step.log 2>&1 &` or `emmy`'s detached patterns) and poll the log — an
 SSH SIGHUP mid-compile must not kill the step or eat its traceback.
@@ -58,8 +63,9 @@ session.
 Policy (decode bucket stays at 16): try `--max-model-len`/`--max-num-batched-tokens` at 256 → 512 → 1024 → 2048 →
 4096 (stop at 4096 — the dynamic-dim cap), `--gpu-memory-utilization 0.97`, each via a detached
 `./venv/bin/emmy serve --generate google/gemma-4-12B --bench --max-model-len N --max-num-batched-tokens N`. A config
-**passes** when the server reaches `/health` and the bench completes; it **fails** on CUDA OOM or death before
-health. Keep the largest passing N. If even 256 fails with the decode bucket on, retry 256 with
+**passes** when the server reaches `/health`, the bench completes, AND the serve log has no
+`EngineCore encountered a fatal error` (the exit code alone hides tail crashes — a drained bench can die after its
+metrics print; grep the log). It **fails** on CUDA OOM, death before health, or a logged engine fatal. Keep the largest passing N. If even 256 fails with the decode bucket on, retry 256 with
 `EMMY_GEN_DECODE_BUCKET=0` and report that the memory fixes regressed (that is a finding, not a config).
 
 Write the winner into `docker/vllm-emmy-gemma4/config.env`. **The config is sealed from here on** — any later change

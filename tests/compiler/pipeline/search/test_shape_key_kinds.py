@@ -13,6 +13,7 @@ from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.pipeline.search.golden import (
     AttentionGoldenConfig,
     MatmulGoldenConfig,
+    MlpGeGluGoldenConfig,
     NormLinearGoldenConfig,
     PointwiseGoldenConfig,
     ReduceGoldenConfig,
@@ -29,6 +30,8 @@ _CASES = [
     RmsNormGoldenConfig(name="r.dyn", M=512, K=3840, knobs={}, dynamic=True),
     NormLinearGoldenConfig(name="nl", M=512, H=3840, N=4096, knobs={}),
     NormLinearGoldenConfig(name="nl.dyn", M=512, H=3840, N=4096, knobs={}, dynamic=True),
+    MlpGeGluGoldenConfig(name="ggu", M=512, H=3840, inter=15360, knobs={}),
+    MlpGeGluGoldenConfig(name="ggu.dyn", M=512, H=3840, inter=15360, knobs={}, dynamic=True),
     ReduceGoldenConfig(name="red", M=512, K=4096, knobs={}),
     SoftmaxGoldenConfig(name="s", M=512, K=4096, knobs={}),
     PointwiseGoldenConfig(name="p", M=512, N=4096, knobs={}),

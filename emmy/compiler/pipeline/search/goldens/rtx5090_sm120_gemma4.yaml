@@ -957,3 +957,53 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
     emmy_us: 24.1
     cublas_us: 16.4
+  # norm→k/v projection (input_layernorm → k_proj/v_proj, N=2048): the other single-channel norm→linear
+  # prologue in the block (q/k/v all fuse the input norm; q is above). Narrower N than q_proj, so the
+  # un=8 tile wins (w1x16 over-splits the 2048 columns): w1x8/f2x2/k2 d2/sync g8k, 20.8 = 0.60x. Same
+  # cold-start-anchor rationale as norm_q_proj (the tuned decode splits it). fp16, torch eager reference.
+  # (o_proj / down_proj carry a norm EPILOGUE, not a prologue — a different fused structure the
+  # norm_linear kind does not model; gate/up is the MULTI-channel megakernel — see the coverage note.)
+  - kernel: norm_linear
+    name: gemma4_12b.norm_kv_proj.m32
+    M: 32
+    H: 3840
+    N: 2048
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
+    emmy_us: 20.8
+    cublas_us: 12.5
+  # ---- fused RMSNorm→gate⊗up→GeGLU megakernel (computed-A / mlp_geglu kind) ----------------------
+  # The MLP hot kernel gemma-4 ACTUALLY deploys (k_linear_mean_reduce, the mul_4 twin): gate + up matmuls
+  # share ONE compute-filled A slab (product-monoid ⊗-fold channels), the pre-FF RMSNorm statistic rides
+  # the A cone as a sync prologue, and the GeGLU (tanh-approx gelu) ⊗-combine rides the store epilogue —
+  # output (M, inter). Seeded 2026-07-18 by manual --ab (decode M=32). Cold greedy misdeploys a
+  # w2x1/f2x8 d1/sync tile at 274 µs (0.58x eager); the golden pins w1x8/f2x2/k4 d1/sync g4k at 171.9 =
+  # 0.92x vs torch's UNFUSED decomposition (norm→2 matmuls→gelu→multiply, eager 158.2). Unlike the
+  # bare mlp_gate_up matmul golden (which round-trips the norm through gmem), this is the ONE fused
+  # kernel. fp16, torch eager reference. (The residual 0.08x is the large-M computed-A pipeline — the
+  # research-class async-B-staging lever, out of scope for coverage.)
+  - kernel: mlp_geglu
+    name: gemma4_12b.mlp_geglu.m32
+    M: 32
+    H: 3840
+    inter: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 171.9
+    cublas_us: 158.2
+  # ---- lm_head (the vocab logits projection) ----------------------------------------------------
+  # hidden 3840 → vocab 262144: the single LARGEST matmul in the model (2 GB fp16 weight, DRAM-bound),
+  # run per decode step. Seeded 2026-07-18 (manual --ab, decode M=32). Cold greedy MISDEPLOYS a scalar
+  # b256 tile at 299 ms (0.004x — a 248x disaster over an 8.4M-block grid); the golden pins the serial
+  # w1x8/f2x2/k4 d2/tma/ring form (WSPEC p1 auto-resolves on the TMA stage) at 1199 µs = 1.01x cuBLAS
+  # HGEMM (one kernel, no split-K finalize — the finalize over N=262144 costs more than the split
+  # recovers). torch.matmul fp16 (cuBLAS HGEMM) reference.
+  - kernel: matmul
+    name: gemma4_12b.lm_head.m32
+    M: 32
+    N: 262144
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: 'p1'}
+    emmy_us: 1199.1
+    cublas_us: 1208.2

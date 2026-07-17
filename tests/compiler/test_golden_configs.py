@@ -17,6 +17,7 @@ from emmy.compiler.pipeline.search.golden import (
     AttentionGoldenConfig,
     GoldenConfig,
     MatmulGoldenConfig,
+    MlpGeGluGoldenConfig,
     NormLinearGoldenConfig,
     PointwiseGoldenConfig,
     ReduceGoldenConfig,
@@ -65,6 +66,7 @@ def test_golden_configs_set_is_well_formed():
                 ReduceGoldenConfig,
                 RmsNormGoldenConfig,
                 NormLinearGoldenConfig,
+                MlpGeGluGoldenConfig,
                 SoftmaxGoldenConfig,
                 PointwiseGoldenConfig,
                 AttentionGoldenConfig,
@@ -76,6 +78,9 @@ def test_golden_configs_set_is_well_formed():
             # The fused RMSNorm→linear computed-A megakernel: a warp contraction (M,H)@(H,N), not the
             # reduce family — its REDUCE knob is a split-K (g4k), not a coop, so no coop>1 requirement.
             assert c.M > 0 and c.H > 0 and c.N > 0, c.name
+        elif isinstance(c, MlpGeGluGoldenConfig):
+            # The fused RMSNorm→gate⊗up→GeGLU multi-channel computed-A megakernel (M,H)→(M,inter).
+            assert c.M > 0 and c.H > 0 and c.inter > 0, c.name
         elif isinstance(c, (ReduceGoldenConfig, RmsNormGoldenConfig, SoftmaxGoldenConfig)):
             from emmy.compiler.ir.schedule import ReducePlan
 
@@ -343,6 +348,20 @@ def test_norm_linear_golden_snippet_shape_key_and_flops():
 
     with pytest.raises(ValueError, match="DEFAULT_SEQ_HINT"):
         NormLinearGoldenConfig(name="nl.bad", M=DEFAULT_SEQ_HINT + 1, H=3840, N=4096, dynamic=True)
+
+
+def test_mlp_geglu_golden_snippet_shape_key_and_flops():
+    """The fused RMSNorm→gate⊗up→GeGLU multi-channel golden: the lambda-bound shared-``r`` snippet,
+    ``kind="fused"`` keyed on the ``(M, inter)`` GeGLU output, and the dynamic twin excludes M."""
+    c = MlpGeGluGoldenConfig(name="ggu", M=32, H=3840, inter=15360, knobs={"TILE": "a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4"})
+    snip = c.snippet()
+    assert "lambda r:" in snip and "F.rms_norm(x,(3840,),nw)" in snip and "approximate='tanh'" in snip
+    sk = c.shape_key()
+    assert (sk.free_prod, sk.reduce_max, sk.is_warp, sk.is_dyn, sk.kind) == (32 * 15360, 3840, True, False, "fused")
+    assert c.flops() == 4.0 * 32 * 15360 * 3840  # two shared-A contractions
+    dyn = MlpGeGluGoldenConfig(name="ggu.dynM", M=512, H=3840, inter=15360, dynamic=True, knobs={})
+    assert (dyn.shape_key().free_prod, dyn.shape_key().is_dyn) == (15360, True)  # symbolic M excluded
+    assert dyn.dynamic_specs() == ["seq_len@x:0"]
 
 
 def test_fast_math_regime_derived_from_knobs():

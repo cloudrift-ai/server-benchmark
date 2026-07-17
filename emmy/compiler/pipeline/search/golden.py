@@ -24,7 +24,8 @@ can read :data:`GOLDEN_CONFIGS` cheaply. The data lives as **per-GPU YAML files*
 under ``goldens/`` (e.g. ``goldens/rtx5090_sm120.yaml``): a ``gpu_name`` /
 ``compute_cap`` header plus a ``configs`` list, each tagged with a ``kernel``
 discriminator (``matmul`` / ``reduce`` / ``pointwise`` / ``rms_norm`` / ``softmax`` /
-``attention`` / ``norm_linear`` — the fused RMSNorm→linear computed-A megakernel). A GPU may carry more than
+``attention`` / ``norm_linear`` — the fused RMSNorm→linear computed-A megakernel — / ``mlp_geglu`` —
+its multi-channel gate⊗up→GeGLU sibling). A GPU may carry more than
 one file (a themed set such as ``rtx5090_sm120_gemma4.yaml`` beside the card's main
 file — same header, merged by the live-GPU ``(gpu_name, compute_cap)`` scoping).
 :func:`_load_goldens` concatenates every file into :data:`GOLDEN_CONFIGS`. The set is hand-maintained via
@@ -354,11 +355,10 @@ class NormLinearGoldenConfig(GoldenConfig):
     PyTorch's norm-then-matmul. Its ONLY realizable configs are the sync compute-fill tiles
     (``d1/d2/sync``, no ``d2/tma/ring``) — record the tuned twin's ``record_knobs`` verbatim.
 
-    The multi-channel gate⊗up (SwiGLU/GeGLU) megakernel shares this kind but is not reproducible
-    from a torch snippet (its two matmuls must share one RMSNorm output, which a torch expression
-    cannot express — a preamble ``xn = ...`` precomputes it to a constant, and inlining ``rms(x)``
-    twice traces two un-shared norms that never fork the computed-A). It is a separate deliverable
-    gated on a graph-builder snippet vehicle; this single-channel kind is what a torch snippet reaches."""
+    The multi-channel gate⊗up (SwiGLU/GeGLU) megakernel shares ``kind="fused"`` but is a distinct
+    snippet — see :class:`MlpGeGluGoldenConfig` (both matmuls must share ONE RMSNorm output, which a
+    lambda binding — ``(lambda r: f(r@Wg)*(r@Wu))(rms_norm(x))`` — expresses; a preamble ``xn = ...``
+    would precompute it to a constant and inlining ``rms(x)`` twice traces two un-shared norms)."""
 
     M: int
     H: int
@@ -392,6 +392,58 @@ class NormLinearGoldenConfig(GoldenConfig):
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
         free = self.N if self.dynamic else self.M * self.N
+        return ShapeKey(free_prod=free, reduce_max=self.H, is_warp=True, is_dyn=self.dynamic, kind="fused")
+
+
+@dataclass(frozen=True, kw_only=True)
+class MlpGeGluGoldenConfig(GoldenConfig):
+    """The fused RMSNorm→gate⊗up→GeGLU **multi-channel computed-A** megakernel:
+    ``gelu(rms_norm(x)·nw @ Wg) * (rms_norm(x)·nw @ Wu)`` in ONE mma kernel (``(M, H) → (M, inter)``).
+
+    The MLP hot kernel gemma-4 actually deploys (``k_linear_mean_reduce``): the gate and up matmuls
+    are ⊗-fold CHANNELS sharing ONE compute-filled A slab (one ldmatrix'd A fragment feeding per-fold
+    B slabs / C fragments), the per-row RMSNorm statistic rides the A cone as a ``sync`` compute-fill
+    prologue, and the GeGLU ⊗-combine rides the store's fragment epilogue. It shares
+    :class:`NormLinearGoldenConfig`'s ``kind="fused"`` (rsqrt + a second reduce axis) but keys on the
+    ``(M, inter)`` OUTPUT (``free_prod = M*inter``, reduce ``H``) — the geglu collapses the two channels
+    to one inter-wide output. The snippet binds the shared ``rms_norm`` via a lambda (a torch expression
+    cannot otherwise share it — a preamble precomputes, inlining duplicates). gemma-4 uses GeGLU
+    (tanh-approx gelu), not SwiGLU. The reference is torch's UNFUSED decomposition, so the ratio compares
+    emmy's one fused mma against PyTorch's norm→2 matmuls→gelu→multiply. Only the sync compute-fill tiles
+    realize (``d1/d2/sync``); record the tuned twin's ``record_knobs`` verbatim."""
+
+    M: int
+    H: int
+    inter: int
+    dtype: str = "fp16"  # a computed-A contraction is a warp mma (fp16/bf16)
+
+    def __post_init__(self):
+        self._require_dynamic_hint(self.M)
+
+    def dynamic_specs(self) -> list[str]:
+        return ["seq_len@x:0"] if self.dynamic else []
+
+    def snippet(self) -> str:
+        tdt = {"fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16", "fp32": ""}[self.dtype]
+        return (
+            f"wg = torch.randn({self.H},{self.inter}{tdt})\n"
+            f"wu = torch.randn({self.H},{self.inter}{tdt})\n"
+            f"nw = torch.randn({self.H}{tdt})\n"
+            f"x = torch.randn({self.M},{self.H}{tdt})\n"
+            f"(lambda r: F.gelu(r @ wg, approximate='tanh') * (r @ wu))(F.rms_norm(x,({self.H},),nw))"
+        )
+
+    def flops(self) -> float:
+        return 4.0 * self.M * self.inter * self.H  # two K-contractions (gate + up) of the shared A; norm/gelu extra
+
+    def shape_key(self):
+        """Keys the stamped multi-channel computed-A fused op (``kind="fused"``): the GeGLU output is
+        ``(M, inter)`` so ``free_prod = M*inter``, the reduce is the shared contraction extent ``H``;
+        the dynamic twin excludes the symbolic M. ``is_warp`` is always True (a computed-A contraction
+        is a warp mma — :meth:`ShapeKey.from_s_features` forces it for the kind)."""
+        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
+
+        free = self.inter if self.dynamic else self.M * self.inter
         return ShapeKey(free_prod=free, reduce_max=self.H, is_warp=True, is_dyn=self.dynamic, kind="fused")
 
 
@@ -502,6 +554,7 @@ _KERNEL_CLASSES = {
     "pointwise": PointwiseGoldenConfig,
     "rms_norm": RmsNormGoldenConfig,
     "norm_linear": NormLinearGoldenConfig,
+    "mlp_geglu": MlpGeGluGoldenConfig,
     "softmax": SoftmaxGoldenConfig,
     "attention": AttentionGoldenConfig,
 }
@@ -513,7 +566,7 @@ def _load_goldens() -> list[GoldenConfig]:
     One file per GPU: a ``gpu_name`` / ``compute_cap`` header (stamped onto every
     config so it isn't repeated per entry) plus a ``configs`` list, each tagged with
     a ``kernel`` discriminator (``matmul`` / ``attention`` / ``softmax`` / ``reduce`` / ``rms_norm`` / ``norm_linear`` /
-    ``pointwise``) selecting the dataclass. All files are concatenated — a ``name`` may recur across GPUs.
+    ``mlp_geglu`` / ``pointwise``) selecting the dataclass. All files are concatenated — a ``name`` may recur across GPUs.
 
     NOTE: ``compute_cap`` does **not** uniquely identify a GPU — two different cards
     can share a capability (e.g. ``rtx5090_sm120.yaml`` and

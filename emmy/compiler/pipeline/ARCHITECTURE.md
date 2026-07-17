@@ -647,12 +647,13 @@ lowering edges + the `perf` row per kernel, and returns the aggregate `PerfStats
 
 ## Part 7: Golden configs and the A/B integrity gates
 
-`golden.py` holds `GoldenConfig` and its matmul / attention / softmax / reduce / rms_norm / norm_linear / pointwise
-subclasses — the `OfflinePrior`'s ground truth. Every kind carries `shape_key()` / `snippet()` / `dtype`, so `tune
---dataset golden` and the `run --bench --golden` A/B cover the reduce / pointwise entries too, not just matmul.
-`NormLinearGoldenConfig` (the fused `rms_norm(x)·nw @ W` computed-A megakernel) is the one snippet-reproducible
-computed-A kind — its `F.rms_norm(x,(H,),nw) @ w` snippet traces to the single mma kernel; the multi-channel gate⊗up
-(SwiGLU/GeGLU) megakernel shares `kind="fused"` but a torch snippet cannot express its shared-`xn` two-matmul form.
+`golden.py` holds `GoldenConfig` and its matmul / attention / softmax / reduce / rms_norm / norm_linear / mlp_geglu /
+pointwise subclasses — the `OfflinePrior`'s ground truth. Every kind carries `shape_key()` / `snippet()` / `dtype`, so
+`tune --dataset golden` and the `run --bench --golden` A/B cover the reduce / pointwise entries too, not just matmul.
+`NormLinearGoldenConfig` (the fused `rms_norm(x)·nw @ W` computed-A megakernel) and `MlpGeGluGoldenConfig` (its
+multi-channel gate⊗up→GeGLU sibling) are the snippet-reproducible computed-A kinds — both trace to the single fused
+mma kernel and share `kind="fused"`; the gate⊗up snippet binds its shared RMSNorm output via a lambda
+(`(lambda r: gelu(r@Wg)*(r@Wu))(rms_norm(x))`) since a torch expression cannot otherwise share it.
 
 **Live-GPU scoping.** `tune --dataset golden` (and `--golden NAME` resolution) scopes to the **live** card's goldens
 (`goldens_for_live_gpu`) — names repeat across per-GPU golden files with diverging shapes/dtypes, so a flat union

@@ -310,7 +310,8 @@ make format    # auto-fix
   - [benchmark/](emmy/benchmark/) — Benchmark tracking, config, task enumeration, execution
   - [planner/](emmy/planner/) — Groups benchmark tasks into execution groups for VM allocation
 - [recipes/](recipes/) — Model deploy recipes (YAML configs per model)
-- [docker/](docker/) — Custom image builds ([vllm-emmy](docker/vllm-emmy/) — vLLM + the emmy plugin)
+- [docker/](docker/) — Custom image builds ([vllm-emmy](docker/vllm-emmy/) — vLLM + the emmy plugin;
+  [vllm-emmy-gemma4](docker/vllm-emmy-gemma4/) — the prebuilt gemma-4-12B image: warmed cubins + baked model snapshot)
 - [experiments/](experiments/) — Experiment parameter sweeps (self-contained recipe + results)
 - [kernels/](kernels/) — Standalone CUDA kernel sources
 - [docs/](docs/) — Docusaurus user-docs site (getting started, benchmarking, custom configurations, deployment)

@@ -383,10 +383,26 @@ def scalar_tile_moves() -> list[str]:
 # register fragments × ``bk`` K-chunks, spelled ``a:<atom>/w..x../f..x../k..``. Bounded to shapes the
 # golden sweeps have deployed (``FM·FN ≤ 32`` C-fragment cells, shallow pipelined bk; ``(8, 2)`` and
 # ``(2, 8)`` are recorded golden winners on the RTX 4090 / PRO 6000 — the permanence test keeps them).
-# Per-node legality — the atom's operand dtype and the ``_check_warp_static_k`` K-divisibility —
-# is the scheduler's (``_schedule``), not the grid's.
+# ``(1, 16)`` is the thin-M / wide-N decode geometry (16 warps down the N axis, 1 down M — the same
+# 16-warp CTA as ``(8, 2)``): a decode-M computed-A (fused norm→linear) contraction wants its warps
+# spread across the wide output columns, and it beat the ``(1, 8)`` sibling ~5% on both the q-proj
+# (N=4096) and gate/up (N=15360) fused edges at M=32 (5090). Per-node legality — the atom's operand
+# dtype and the ``_check_warp_static_k`` K-divisibility — is the scheduler's (``_schedule``), not the grid's.
 # (WM, WN) / (FM, FN)
-_WARP_UNITS: tuple[tuple[int, int], ...] = ((1, 1), (2, 1), (1, 2), (2, 2), (4, 1), (1, 4), (2, 4), (4, 2), (4, 4), (1, 8), (8, 2))
+_WARP_UNITS: tuple[tuple[int, int], ...] = (
+    (1, 1),
+    (2, 1),
+    (1, 2),
+    (2, 2),
+    (4, 1),
+    (1, 4),
+    (2, 4),
+    (4, 2),
+    (4, 4),
+    (1, 8),
+    (8, 2),
+    (1, 16),
+)
 _WARP_REGS: tuple[tuple[int, int], ...] = ((1, 1), (2, 2), (1, 4), (4, 1), (2, 4), (4, 2), (4, 4), (4, 8), (2, 8))
 _WARP_BK: tuple[int, ...] = (1, 2, 4, 8)
 

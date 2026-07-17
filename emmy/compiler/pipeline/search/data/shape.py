@@ -37,11 +37,16 @@ class ShapeKey:
     is_dyn: bool = False
     # The op-kind discriminator for the SWEEP kinds — ``""`` for a plain loop nest
     # (matmul / bare reduce / pointwise: ``S_loop_depth`` equals the axis count), else
-    # ``"flash"`` / ``"softmax"`` / ``"rms_norm"``, where a projection sweep rides the
-    # reduction (``S_loop_depth < n_free + n_reduce + n_symbolic`` — the same stamp
-    # identity the node-store plausibility gate uses). Without it, a flash op whose
-    # extents coincide with a recorded matmul shape would join the matmul golden (and
-    # vice versa) even though the knob grammars don't transfer across kinds.
+    # ``"flash"`` / ``"softmax"`` / ``"rms_norm"`` / ``"fused"``, where a projection sweep
+    # rides the reduction (``S_loop_depth < n_free + n_reduce + n_symbolic`` — the same
+    # stamp identity the node-store plausibility gate uses). ``"fused"`` is the computed-A
+    # contraction (the RMSNorm→linear / gate⊗up megakernel): a warp mma whose A cone carries
+    # a statistic (rsqrt) prologue, so it stamps LIKE an ``rms_norm`` sweep but with a SECOND
+    # reduce axis — the contraction — beside the statistic reduce (``S_ext_n_reduce_axis >= 2``).
+    # Without the discriminator the fused op would join a real ``rms_norm`` (or bare ``mlp_gate_up``
+    # matmul) golden even though it is a different kernel family; and its stamp's ``is_warp`` is
+    # unreliable (the f32 statistic constants flip ``S_dtype_f32`` on), so ``from_s_features``
+    # forces ``is_warp=True`` for the kind — a computed-A contraction is always a warp mma.
     kind: str = ""
     # The largest single static free extent (``S_ext_free_max`` / ``max(M, N)``) — the
     # ASPECT discriminator ``free_prod`` alone lacks: 32×8192 and 512×512 share the
@@ -96,21 +101,26 @@ class ShapeKey:
         ``S_loop_depth < n_free + n_reduce + n_symbolic`` (the projection sweep shares
         the reduce axis, so the loop nest is shallower than the axis count — matmul,
         bare reduce and pointwise are exactly equal); among sweeps, ``S_pw_rsqrt``
-        marks RMSNorm, ``S_pw_exp`` the softmax family, and ``S_n_free_loop >= 3``
+        marks the RMSNorm family, ``S_pw_exp`` the softmax family, and ``S_n_free_loop >= 3``
         (heads x rows x head_dim — histogram counts, so symbolic axes still count)
-        separates flash attention from row softmax. An unrecognized sweep keeps
+        separates flash attention from row softmax. Within the rsqrt family a SECOND reduce
+        axis (``S_ext_n_reduce_axis >= 2``) means the statistic reduce rides a CONTRACTION —
+        the computed-A ``"fused"`` megakernel (RMSNorm→linear / gate⊗up) — where a bare
+        RMSNorm has just the one statistic reduce. The fused op's ``is_warp`` is forced True:
+        it is a warp mma contraction, but its f32 statistic constants set ``S_dtype_f32``, so
+        the dtype-multiset signal would wrongly read scalar. An unrecognized sweep keeps
         ``""`` — conservative: it can only stop a cross-kind join, never invent one."""
         n_axes = s.get("S_ext_n_free_axis", 0) + s.get("S_ext_n_reduce_axis", 0) + s.get("S_ext_n_symbolic_axis", 0)
         kind = ""
         if 0 < s.get("S_loop_depth", 0) < n_axes:
             if s.get("S_pw_rsqrt", 0):
-                kind = "rms_norm"
+                kind = "fused" if s.get("S_ext_n_reduce_axis", 0) >= 2 else "rms_norm"
             elif s.get("S_pw_exp", 0):
                 kind = "flash" if s.get("S_n_free_loop", 0) >= 3 else "softmax"
         return cls(
             free_prod=int(s.get("S_ext_free_prod", 0)),
             reduce_max=int(s.get("S_ext_reduce_max", 0)),
-            is_warp=not s.get("S_dtype_f32", 0),
+            is_warp=kind == "fused" or not s.get("S_dtype_f32", 0),
             is_dyn=s.get("S_ext_n_symbolic_axis", 0) > 0,
             kind=kind,
             free_max=int(s.get("S_ext_free_max", 0)),

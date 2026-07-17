@@ -936,3 +936,24 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
     emmy_us: 74.1
     cublas_us: 77.1
+  # ---- fused RMSNorm→linear (computed-A / norm_linear kind) --------------------------------------
+  # The single-channel computed-A megakernel rms_norm(x)·nw @ Wq (kind="fused"): the per-row RMSNorm
+  # statistic rides the A cone as a sync compute-fill prologue and the warp mma contracts the scaled A
+  # against Wq (the k_rms_norm_matmul_reduce kernel; split-K partial + 1 µs finalize). Seeded 2026-07-17
+  # by manual pinned --ab (3x, <1% spread). This is a COLD-START ANCHOR, not a win: cold greedy on this
+  # unseeded shape mis-RANKS a w2x1/f2x2 d1/sync tile at 158.6 µs (0.10x eager) — the golden pins the
+  # tuned winner (w1x16/f2x2/k2 d2/sync g8k, 24.1) for a 6.6x cold-start rescue. It reads 0.68x vs torch's
+  # UNFUSED decomposition (rms_norm 6 + matmul 10, eager 16.4): the computed-A pipeline loses to the split
+  # at decode M here (why the TUNED gemma-4 decode splits norm→qkv into bare projections), and this entry
+  # anchors that loss so a future win is measurable. The wide-N decode winner is the un=16 tile added to
+  # _WARP_UNITS (thin-M / wide-N: 16 warps down the columns; +5% over un=8 on both q-proj and gate/up
+  # fused edges at M=32). fp16, torch eager (F.rms_norm + @) reference.
+  - kernel: norm_linear
+    name: gemma4_12b.norm_q_proj.m32
+    M: 32
+    H: 3840
+    N: 4096
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
+    emmy_us: 24.1
+    cublas_us: 16.4

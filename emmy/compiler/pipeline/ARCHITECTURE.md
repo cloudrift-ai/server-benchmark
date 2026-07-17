@@ -223,9 +223,12 @@ prefix-consistent with the fastest `H_opt=3` row of the same op), (3) the tune D
 that ships with a clone — the reservoir and tune DB are machine-local caches written by local tunes, so a fresh
 machine (every rented box) previously deployed on pure model extrapolation (the gemma 12–29× cold misdeploys). At a
 fork, `greedy_decide` joins the op against the deploy card's recorded goldens — every kind: matmul, attention
-(flash), rms_norm, softmax, reduce, pointwise — by `ShapeKey` (static and dynamic twins never cross; the key's
-`kind` discriminator, classified off the stamped histogram via the sweep identity
-`S_loop_depth < n_free + n_reduce + n_symbolic`, keeps a flash/norm op apart from an extent-coincident contraction;
+(flash), rms_norm, softmax, reduce, pointwise, norm_linear (the fused RMSNorm→linear computed-A megakernel) — by
+`ShapeKey` (static and dynamic twins never cross; the key's `kind` discriminator, classified off the stamped
+histogram via the sweep identity `S_loop_depth < n_free + n_reduce + n_symbolic`, keeps a flash/norm op apart from
+an extent-coincident contraction — and within the rsqrt family a SECOND reduce axis (`S_ext_n_reduce_axis >= 2`,
+the contraction beside the statistic reduce) marks the `"fused"` computed-A form, `is_warp` forced True since a
+computed-A contraction is a warp mma whose f32 statistic constants would otherwise read scalar;
 at the DEPLOY fork the flash op is recognized from its offer's `TILE@dd` + `TILE@pj` pair instead — the tile pass's
 restructured twisted op carries re-derived extents only, no histogram, so the stamp classifier cannot fire there)
 and picks the offered candidate prefix-consistent with the fastest recorded entry — keys and values compare through
@@ -644,9 +647,12 @@ lowering edges + the `perf` row per kernel, and returns the aggregate `PerfStats
 
 ## Part 7: Golden configs and the A/B integrity gates
 
-`golden.py` holds `GoldenConfig` and its matmul / attention / softmax / reduce / rms_norm / pointwise subclasses — the
-`OfflinePrior`'s ground truth. Every kind carries `shape_key()` / `snippet()` / `dtype`, so `tune --dataset golden`
-and the `run --bench --golden` A/B cover the reduce / pointwise entries too, not just matmul.
+`golden.py` holds `GoldenConfig` and its matmul / attention / softmax / reduce / rms_norm / norm_linear / pointwise
+subclasses — the `OfflinePrior`'s ground truth. Every kind carries `shape_key()` / `snippet()` / `dtype`, so `tune
+--dataset golden` and the `run --bench --golden` A/B cover the reduce / pointwise entries too, not just matmul.
+`NormLinearGoldenConfig` (the fused `rms_norm(x)·nw @ W` computed-A megakernel) is the one snippet-reproducible
+computed-A kind — its `F.rms_norm(x,(H,),nw) @ w` snippet traces to the single mma kernel; the multi-channel gate⊗up
+(SwiGLU/GeGLU) megakernel shares `kind="fused"` but a torch snippet cannot express its shared-`xn` two-matmul form.
 
 **Live-GPU scoping.** `tune --dataset golden` (and `--golden NAME` resolution) scopes to the **live** card's goldens
 (`goldens_for_live_gpu`) — names repeat across per-GPU golden files with diverging shapes/dtypes, so a flat union

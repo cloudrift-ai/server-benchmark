@@ -23,7 +23,8 @@ This module is import-light (no torch / cupy at module top) so passes and tests
 can read :data:`GOLDEN_CONFIGS` cheaply. The data lives as **per-GPU YAML files**
 under ``goldens/`` (e.g. ``goldens/rtx5090_sm120.yaml``): a ``gpu_name`` /
 ``compute_cap`` header plus a ``configs`` list, each tagged with a ``kernel``
-discriminator (``matmul`` / ``reduce`` / ``pointwise``). A GPU may carry more than
+discriminator (``matmul`` / ``reduce`` / ``pointwise`` / ``rms_norm`` / ``softmax`` /
+``attention`` / ``norm_linear`` — the fused RMSNorm→linear computed-A megakernel). A GPU may carry more than
 one file (a themed set such as ``rtx5090_sm120_gemma4.yaml`` beside the card's main
 file — same header, merged by the live-GPU ``(gpu_name, compute_cap)`` scoping).
 :func:`_load_goldens` concatenates every file into :data:`GOLDEN_CONFIGS`. The set is hand-maintained via
@@ -337,6 +338,64 @@ class RmsNormGoldenConfig(GoldenConfig):
 
 
 @dataclass(frozen=True, kw_only=True)
+class NormLinearGoldenConfig(GoldenConfig):
+    """A golden config for the fused RMSNorm→linear **computed-A** megakernel:
+    ``rms_norm(x, (H,))·nw @ W`` in ONE mma kernel (``(M, H) → (M, N)``).
+
+    This is the single-channel computed-A ``Contraction`` (``010_recognize``'s
+    ``bind_prologue_contraction`` merge): the per-row RMSNorm statistic rides the A cone as a
+    ``sync`` compute-fill prologue and the warp mma rows contract the scaled A against ``W`` — a
+    different kernel family than the bare ``mlp_gate_up`` matmul (which round-trips ``xn`` through
+    gmem) or a bare ``rms_norm`` sweep. It stamps LIKE an RMSNorm sweep (rsqrt, a sweep loop nest)
+    but with a SECOND reduce axis — the contraction — beside the statistic reduce, so its
+    :class:`ShapeKey` carries ``kind="fused"`` (``S_ext_n_reduce_axis >= 2``), keeping it off both
+    the ``rms_norm`` and the ``mlp_gate_up`` matmul goldens. The reference is torch's UNFUSED
+    decomposition (``F.rms_norm`` eager + ``@``), so the ratio compares emmy's one fused mma against
+    PyTorch's norm-then-matmul. Its ONLY realizable configs are the sync compute-fill tiles
+    (``d1/d2/sync``, no ``d2/tma/ring``) — record the tuned twin's ``record_knobs`` verbatim.
+
+    The multi-channel gate⊗up (SwiGLU/GeGLU) megakernel shares this kind but is not reproducible
+    from a torch snippet (its two matmuls must share one RMSNorm output, which a torch expression
+    cannot express — a preamble ``xn = ...`` precomputes it to a constant, and inlining ``rms(x)``
+    twice traces two un-shared norms that never fork the computed-A). It is a separate deliverable
+    gated on a graph-builder snippet vehicle; this single-channel kind is what a torch snippet reaches."""
+
+    M: int
+    H: int
+    N: int
+    dtype: str = "fp16"  # a computed-A contraction is a warp mma (fp16/bf16); fp32 has no fused form
+
+    def __post_init__(self):
+        self._require_dynamic_hint(self.M)
+
+    def dynamic_specs(self) -> list[str]:
+        return ["seq_len@x:0"] if self.dynamic else []
+
+    def snippet(self) -> str:
+        tdt = {"fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16", "fp32": ""}[self.dtype]
+        return (
+            f"nw = torch.randn({self.H}{tdt})\n"
+            f"w = torch.randn({self.H},{self.N}{tdt})\n"
+            f"x = torch.randn({self.M},{self.H}{tdt})\n"
+            f"F.rms_norm(x,({self.H},),nw) @ w"
+        )
+
+    def flops(self) -> float:
+        return 2.0 * self.M * self.N * self.H  # the contraction; the norm/rsqrt prologue is extra (stays an underestimate)
+
+    def shape_key(self):
+        """Keys the stamped computed-A fused op (``kind="fused"``): the output is ``(M, N)`` so
+        ``free_prod = M*N``, the reduce is the contraction extent ``H`` (the statistic reduce shares
+        ``H``); the dynamic twin excludes the symbolic M. ``is_warp`` is always True — a computed-A
+        contraction is a warp mma even though its f32 statistic constants would flip the stamp's
+        dtype signal (:meth:`ShapeKey.from_s_features` forces it for the kind)."""
+        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
+
+        free = self.N if self.dynamic else self.M * self.N
+        return ShapeKey(free_prod=free, reduce_max=self.H, is_warp=True, is_dyn=self.dynamic, kind="fused")
+
+
+@dataclass(frozen=True, kw_only=True)
 class SoftmaxGoldenConfig(GoldenConfig):
     """Row-softmax ``(M, K) → (M, K)`` over the last axis (``torch.softmax(dim=-1)``).
 
@@ -442,6 +501,7 @@ _KERNEL_CLASSES = {
     "reduce": ReduceGoldenConfig,
     "pointwise": PointwiseGoldenConfig,
     "rms_norm": RmsNormGoldenConfig,
+    "norm_linear": NormLinearGoldenConfig,
     "softmax": SoftmaxGoldenConfig,
     "attention": AttentionGoldenConfig,
 }
@@ -452,8 +512,8 @@ def _load_goldens() -> list[GoldenConfig]:
 
     One file per GPU: a ``gpu_name`` / ``compute_cap`` header (stamped onto every
     config so it isn't repeated per entry) plus a ``configs`` list, each tagged with
-    a ``kernel`` discriminator (``matmul`` / ``attention`` / ``softmax`` / ``reduce`` / ``rms_norm`` / ``pointwise``) selecting the
-    dataclass. All files are concatenated — a ``name`` may recur across GPUs.
+    a ``kernel`` discriminator (``matmul`` / ``attention`` / ``softmax`` / ``reduce`` / ``rms_norm`` / ``norm_linear`` /
+    ``pointwise``) selecting the dataclass. All files are concatenated — a ``name`` may recur across GPUs.
 
     NOTE: ``compute_cap`` does **not** uniquely identify a GPU — two different cards
     can share a capability (e.g. ``rtx5090_sm120.yaml`` and

@@ -13,6 +13,7 @@ from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.pipeline.search.golden import (
     AttentionGoldenConfig,
     MatmulGoldenConfig,
+    NormLinearGoldenConfig,
     PointwiseGoldenConfig,
     ReduceGoldenConfig,
     RmsNormGoldenConfig,
@@ -26,6 +27,8 @@ _CASES = [
     AttentionGoldenConfig(name="a.dyn", n_heads=16, seq=512, head_dim=256, knobs={}, dynamic=True),
     RmsNormGoldenConfig(name="r", M=512, K=3840, knobs={}),
     RmsNormGoldenConfig(name="r.dyn", M=512, K=3840, knobs={}, dynamic=True),
+    NormLinearGoldenConfig(name="nl", M=512, H=3840, N=4096, knobs={}),
+    NormLinearGoldenConfig(name="nl.dyn", M=512, H=3840, N=4096, knobs={}, dynamic=True),
     ReduceGoldenConfig(name="red", M=512, K=4096, knobs={}),
     SoftmaxGoldenConfig(name="s", M=512, K=4096, knobs={}),
     PointwiseGoldenConfig(name="p", M=512, N=4096, knobs={}),
@@ -78,6 +81,20 @@ def test_free_max_splits_the_aspect_collision():
     assert ShapeKey(free_prod=1, reduce_max=1, is_warp=True, kind="flash", free_max=7).free_max == 0
 
 
+def test_fused_key_never_collides_with_rms_norm_or_matmul():
+    """The fused computed-A key (``kind="fused"``) must not equal a bare RMSNorm sweep nor a plain
+    ``mlp_gate_up`` matmul that happens to share extents — the ``kind`` discriminator keeps the
+    three kernel families apart at the golden↔op join."""
+    fused = NormLinearGoldenConfig(name="nl", M=512, H=3840, N=4096, knobs={}).shape_key()
+    assert fused.kind == "fused"
+    # A bare RMSNorm whose free product coincides (M*K == M*N) keys rms_norm, never fused.
+    rms = RmsNormGoldenConfig(name="r", M=512, K=4096, knobs={}).shape_key()
+    assert rms.kind == "rms_norm" and rms != fused
+    # A plain matmul of the same output/contraction extents keys "" (warp contraction), never fused.
+    mm = MatmulGoldenConfig(name="m", M=512, N=4096, K=3840, dtype="fp16", knobs={}).shape_key()
+    assert mm.kind == "" and mm != fused
+
+
 def test_attention_qk_contraction_never_joins_the_flash_golden():
     """The attention trace's OTHER stamped op — the QKᵀ contraction — keys as a plain
     contraction and must not equal the attention golden's flash key."""
@@ -113,6 +130,22 @@ def test_sweep_classifier_from_measured_stamps():
         "S_dtype_f32": 5.0,
     }
     assert ShapeKey.from_s_features(rms).kind == "rms_norm"
+    # The fused computed-A megakernel stamps LIKE rms_norm (rsqrt sweep) but with a SECOND reduce
+    # axis (the contraction). ``is_warp`` is forced True even though its f32 statistic constants set
+    # S_dtype_f32 (the dtype-multiset signal would wrongly read scalar for a warp mma).
+    fused = {
+        "S_ext_free_prod": 131072.0,
+        "S_ext_reduce_max": 3840.0,
+        "S_ext_n_free_axis": 2.0,
+        "S_ext_n_reduce_axis": 2.0,
+        "S_ext_n_symbolic_axis": 0.0,
+        "S_loop_depth": 3.0,
+        "S_pw_rsqrt": 1.0,
+        "S_dtype_f32": 2.0,
+        "S_dtype_f16": 6.0,
+    }
+    got = ShapeKey.from_s_features(fused)
+    assert got.kind == "fused" and got.is_warp is True
     softmax = {
         "S_ext_free_prod": 2097152.0,
         "S_ext_reduce_max": 4096.0,

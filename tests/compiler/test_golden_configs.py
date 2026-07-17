@@ -17,6 +17,7 @@ from emmy.compiler.pipeline.search.golden import (
     AttentionGoldenConfig,
     GoldenConfig,
     MatmulGoldenConfig,
+    NormLinearGoldenConfig,
     PointwiseGoldenConfig,
     ReduceGoldenConfig,
     RmsNormGoldenConfig,
@@ -63,6 +64,7 @@ def test_golden_configs_set_is_well_formed():
                 MatmulGoldenConfig,
                 ReduceGoldenConfig,
                 RmsNormGoldenConfig,
+                NormLinearGoldenConfig,
                 SoftmaxGoldenConfig,
                 PointwiseGoldenConfig,
                 AttentionGoldenConfig,
@@ -70,6 +72,10 @@ def test_golden_configs_set_is_well_formed():
         ), c.name
         if isinstance(c, MatmulGoldenConfig):
             assert c.M > 0 and c.N > 0 and c.K > 0, c.name
+        elif isinstance(c, NormLinearGoldenConfig):
+            # The fused RMSNorm→linear computed-A megakernel: a warp contraction (M,H)@(H,N), not the
+            # reduce family — its REDUCE knob is a split-K (g4k), not a coop, so no coop>1 requirement.
+            assert c.M > 0 and c.H > 0 and c.N > 0, c.name
         elif isinstance(c, (ReduceGoldenConfig, RmsNormGoldenConfig, SoftmaxGoldenConfig)):
             from emmy.compiler.ir.schedule import ReducePlan
 
@@ -215,6 +221,7 @@ def test_dynamic_supported_for_all_kinds():
         RmsNormGoldenConfig(name="rms_norm.k2048.dynM", M=512, K=2048, dynamic=True),
         SoftmaxGoldenConfig(name="softmax.k2048.dynM", M=512, K=2048, dynamic=True),
         PointwiseGoldenConfig(name="pointwise.n4096.dynM", M=512, N=4096, dynamic=True),
+        NormLinearGoldenConfig(name="norm_linear.n4096.dynM", M=512, H=3840, N=4096, dynamic=True),
     ]
     assert all(c.dynamic_specs() == ["seq_len@x:0"] for c in one_input)
     att = AttentionGoldenConfig(name="attention.hd128.dynM", n_heads=8, seq=512, head_dim=128, dynamic=True)
@@ -314,6 +321,28 @@ def test_resolve_golden_arg_applies_dynamic_spec(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         cmod.resolve_golden_arg(clash)
     assert exc.value.code == 2
+
+
+def test_norm_linear_golden_snippet_shape_key_and_flops():
+    """The fused RMSNorm→linear computed-A golden: its snippet is the ``F.rms_norm(x)·nw @ w`` form
+    that traces to the megakernel, its shape_key carries ``kind="fused"`` with ``is_warp=True`` (a
+    computed-A contraction is a warp mma), and the dynamic twin excludes the symbolic M."""
+    c = NormLinearGoldenConfig(name="nl", M=32, H=3840, N=4096, knobs={"TILE": "a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2"})
+    snip = c.snippet()
+    assert "F.rms_norm(x,(3840,),nw)" in snip and snip.strip().endswith("@ w")
+    assert "dtype=torch.float16" in snip  # fp16 default → warp mma
+    sk = c.shape_key()
+    assert (sk.free_prod, sk.reduce_max, sk.is_warp, sk.is_dyn, sk.kind) == (32 * 4096, 3840, True, False, "fused")
+    assert c.flops() == 2.0 * 32 * 4096 * 3840
+    dyn = NormLinearGoldenConfig(name="nl.dynM", M=512, H=3840, N=4096, dynamic=True, knobs={})
+    dsk = dyn.shape_key()
+    assert (dsk.free_prod, dsk.is_dyn, dsk.kind) == (4096, True, "fused")  # symbolic M excluded
+    assert dyn.dynamic_specs() == ["seq_len@x:0"]
+    # A dynamic golden's traced M must equal DEFAULT_SEQ_HINT (the axis is benched at the hint).
+    from emmy.compiler.dim import DEFAULT_SEQ_HINT
+
+    with pytest.raises(ValueError, match="DEFAULT_SEQ_HINT"):
+        NormLinearGoldenConfig(name="nl.bad", M=DEFAULT_SEQ_HINT + 1, H=3840, N=4096, dynamic=True)
 
 
 def test_fast_math_regime_derived_from_knobs():

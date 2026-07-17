@@ -100,19 +100,33 @@ def _is_warp_row(row: dict) -> bool:
 
 def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
     """The merged fork: the ``Map``-form reduce rows lead (option-0 = the conservative coop pick,
-    lowerable everywhere), then the computed-A Contraction form's warp rows, each riding the
-    mandatory resolved ``sync`` compute-fill stage with the contraction K partition decided-empty."""
+    lowerable everywhere), then the computed-A Contraction form's warp rows — every one riding a
+    resolved ``sync`` compute-fill stage, at BOTH depths (``d1`` + the asymmetric B-ring ``d2``
+    as fork siblings), with the K partition either decided-empty or a redundant-statistic
+    deferred split (``g<w>k`` — the single-channel computed-A split-K family)."""
     rows, _ = _resolve(_norm_linear_graph())
     assert rows, "no fork was offered for the fused norm→linear"
     assert not _is_warp_row(rows[0]), "option-0 must be the Map-form coop row, not a warp row"
     assert any(v.startswith("b") for v in rows[0].values() if isinstance(v, str)), "option-0 must cooperate on the stat reduce"
     warp = [r for r in rows if _is_warp_row(r)]
     assert warp, "the Contraction form contributed no warp rows"
+    stages_seen = set()
+    reds_seen = set()
     for r in warp:
         stage = [v for k, v in r.items() if k.startswith("STAGE@")]
         red = [v for k, v in r.items() if k.startswith("REDUCE@")]
-        assert stage == ["d1/sync"], f"warp rows must ride the resolved sync compute-fill: {r}"
-        assert all(v == "" for v in red), f"the computed-A form has no reduce partition: {r}"
+        assert stage and all(v in ("d1/sync", "d2/sync") for v in stage), f"warp rows must ride the resolved sync compute-fill: {r}"
+        assert all(v == "" or (v.startswith("g") and v.endswith("k")) for v in red), (
+            f"the computed-A form allows only the empty or deferred-split (g<w>k) K partition: {r}"
+        )
+        stages_seen.update(stage)
+        reds_seen.update(red)
+    # This fixture's weight is a graph INPUT, so the linear's B is transposed and the d2
+    # B-only ring clamps back to d1 (nothing async to overlap) — d1 alone is correct here.
+    # The canonical-B (constant-weight) shape class exercises d2 in
+    # test_fused_cone_splitk_matches_reference.
+    assert "d1/sync" in stages_seen, f"the resolved sync compute-fill must be offered: {stages_seen}"
+    assert "" in reds_seen and any(v for v in reds_seen), f"both the serial and split K partitions must be offered: {reds_seen}"
 
 
 def test_norm_linear_warp_pick_is_computed_a_contraction():

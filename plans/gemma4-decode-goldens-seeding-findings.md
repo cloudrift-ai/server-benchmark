@@ -118,6 +118,27 @@ concurrency 32, 32 prompts, out 64, seed 0; logs `_tune/decode-goldens-5090/serv
   and gate⊗up at M=16/32, from the twins' own dumps) the way the s2048 family was seeded, or land the
   computed-A enumeration work. Only then does the whole-step graph turn kernel wins into TPOT.
 
+## RE-A/B after the computed-A readiness branch (2026-07-16 night) — emmy decode TPOT BEATS stock vLLM
+
+The readiness branch (`feature/computed-a-decode-readiness`, PR #386: ShapeKey `free_max`, unpinned `d2/sync`,
+redundant-statistic split-K on computed-A cones) + a tune of the four M=32 twin graphs (sliding + global
+pre/post, `_tune/decode-twin-readiness/twins.db`, ~65 min) closed the fused-form gap:
+
+| twin (M=32) | cold pre-branch | tuned post-branch |
+| --- | --: | --: |
+| pre (sliding cones) | 357 µs | **102 µs** |
+| post (gate⊗up + mains) | 339 µs | **244 µs** (gate⊗up at its weight-bound floor) |
+| pre-global | — | 84 µs |
+| post-global | — | 252 µs |
+
+Serving re-A/B (same matched config, in-8/out-64 decode-dominated, `EMMY_TUNE_DB`/`EMMY_ONLINE_FILE` → the twins
+DB): **TPOT 21.33 ms captured / 21.44 ms eager** — down from 1 924 ms (90×), and **UNDER stock vLLM's 24.9 ms**
+(the first emmy-beats-stock serving metric). 374.7 tok/s output throughput at concurrency 32, all requests
+correct. Capture ≈ eager at batch 32 (the ~96-launch host stream still hides behind ~21 ms of GPU step time);
+its payoff moves to small decode batches and to whatever the next kernel wins shave — it stays the default.
+Remaining wall: TTFT ~4.1–4.8 s (the symbolic prefill path + boot compile) — the packed-varlen prefill and
+program-caching items on the roadmap.
+
 ## Repro / artifacts
 
 - Work dir: `_tune/decode-goldens-5090/` — `sweep.sh` + `sweep.log`, `tune.db` / `online.json`,

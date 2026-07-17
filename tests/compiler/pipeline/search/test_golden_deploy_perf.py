@@ -49,6 +49,7 @@ def _row(free_prod, reduce_max, *, fp32, h_opt, latency):
     knobs = {
         "H_opt": float(h_opt),
         "S_ext_free_prod": float(free_prod),
+        "S_ext_free_max": float(round(free_prod**0.5)),  # fixtures are square matmuls
         "S_ext_reduce_max": float(reduce_max),
         ("S_dtype_f32" if fp32 else "S_dtype_f16"): 2.0,
         # The matmul histogram markers (_matmul_sig): product → reduce-add, 2 inputs.

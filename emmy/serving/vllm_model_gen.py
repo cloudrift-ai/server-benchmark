@@ -113,8 +113,14 @@ class EmmyGenModel(nn.Module):
                 f"serve with --max-num-batched-tokens {DYNAMIC_DIM_MAX} or lower"
             )
 
+        # ``max_tokens`` sizes the symbolic programs' device buffers at the widest step vLLM
+        # can schedule — the device-resident PREFILL path (``run_device_sym``) needs fixed
+        # capacity buffers; without it prefill falls back to the per-layer host numpy hops.
         self.runner = EmmyGenRunner.create(
-            model_id=mc.model, dtype_str=_trunk_dtype_str(mc.dtype), decode_bucket=emmy_config.gen_decode_bucket()
+            model_id=mc.model,
+            dtype_str=_trunk_dtype_str(mc.dtype),
+            decode_bucket=emmy_config.gen_decode_bucket(),
+            max_tokens=max_batched or None,
         )
         n_layers = self.runner.num_layers
 
@@ -170,9 +176,14 @@ class EmmyGenModel(nn.Module):
         # clamp guards vLLM's _dummy_run garbage-id profiling batches (out-of-vocab → IndexError).
         ids = input_ids.clamp(0, self.config.vocab_size - 1)
         t = int(ids.shape[0])
-        # Decode hot path (T <= bucket): device-resident, no host numpy round-trip (Phase A).
-        # Prefill / larger T keeps the host path.
-        if self.runner.has_device_decode and 0 < t <= self.runner.decode_bucket:
+        # Device-resident forward for EVERY width the compiled programs cover: decode
+        # (T <= bucket, the captured static twins) AND prefill / mixed chunked-prefill steps
+        # (bucket < T <= prefill_capacity, the symbolic programs via ``run_device_sym``) — no
+        # per-layer host numpy round-trip. The numpy path below survives only as the fallback
+        # for a runner built without capacity (the standalone oracle) or an over-capacity T.
+        decode_ok = self.runner.has_device_decode and 0 < t <= self.runner.decode_bucket
+        prefill_ok = 0 < t <= self.runner.prefill_capacity
+        if decode_ok or prefill_ok:
             return self._forward_device(ids, positions)
         ids_np = ids.cpu().numpy()
         hidden_np = self.runner.embed(ids_np)  # [T, H] numpy

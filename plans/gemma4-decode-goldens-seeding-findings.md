@@ -179,3 +179,14 @@ Measured (matched config, capture default, bucket 32):
 prefill-step COMPUTE (TTFT 1.2×, mixed-step TPOT 1.24×): the symbolic-path kernels at T≈256 chunks — the
 computed-A forms at prefill M and packed-varlen attention — plus mixed steps running uncaptured by design.
 Integration overhead is no longer the story anywhere in serving.
+
+## Leftover-perf round (2026-07-17): prefill-chunk twin (+) and multi-channel split (null) — measured
+
+PR #388 (static M=mnbt prefill-chunk twin) + PR #389 (multi-channel computed-A split-K), tuned and A/B'd
+jointly: req/s 7.06 → **7.26 (0.70× matched stock)**, median TTFT 1 094 → **974 ms (UNDER stock's 1 303)**;
+decode held (TPOT 21.54, TTFT-in8 120.6 ms). Attribution: the chunk twin is a real-but-modest win (the tuned
+symbolic device path had already absorbed most masked-tile overhead); the multi-channel split is CORRECT
+(SwiGLU-reference-verified) but a null result on gate⊗up.m32 — that kernel was never grid-starved (240 CTAs),
+its 240-vs-145 µs residual is the fused compute-fill overhead, i.e. the LARGE-M computed-A pipeline class.
+Everything left is research-class: the large-M computed-A pipeline (mixed-step TPOT 1.24× + the gate⊗up
+residual), packed/mixed-step capture, and portability of the twin evidence beyond this box.

@@ -30,7 +30,11 @@ arg_order).
   from `graph.inputs` / `ConstantOp` membership / `graph.outputs`.
 - Compiles each unique `kernel_name` via `nvcc.load_function` (`nvcc.py`):
   offline `nvcc --cubin` into a content-addressed disk cache, then a cupy
-  `RawModule` load. This avoids the driver PTX→SASS JIT cupy's NVRTC path
+  `RawModule` load. Content addressing makes **cross-process source determinism a hard
+  contract**: any address- or seed-derived token in rendered source re-keys the kernel
+  every boot and silently defeats the cache (a server restart recompiles everything it
+  touches) — pinned by `tests/compiler/backend/test_source_determinism.py`, which
+  compiles in two subprocesses and asserts identical sources. This avoids the driver PTX→SASS JIT cupy's NVRTC path
   pays on a cold compile — ~3× faster on the complex tile-search kernels that
   dominate autotune, and the compile step is GPU-free so the cubin cache can be
   warmed by a parallel pool (planned). Falls back to `cupy.RawKernel` (NVRTC)

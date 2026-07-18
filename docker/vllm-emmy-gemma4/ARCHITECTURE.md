@@ -153,10 +153,13 @@ rental/teardown. The local-only deltas:
   the warm needs it.
 - **The push is the slow part.** `gemma4-serve-push` uploads ~35 GB over your uplink — hours on a residential
   connection vs minutes from a datacenter. It's the main reason the rental flow exists; locally, just let it run.
-- **The snapshot ships as four image layers, not one.** Docker Hub rejects the monolithic ~24 GB snapshot blob
-  (upload initiation 503s forever), so `split_hf.sh` — run by `make gemma4-serve-image` before the build — balances
-  `warm/hf` into four hardlinked sub-10 GB parts that the Dockerfile COPYs back into `/opt/emmy/hf`. Layer
-  boundaries don't touch file contents, so cache-key parity with the warm is unaffected.
+- **The snapshot ships re-sharded, as four image layers.** Docker Hub rejects blobs past ~10 GB (upload initiation
+  503s forever), and gemma-4-12B ships ONE consolidated 23 GB `model.safetensors` — a single file cannot be split
+  across layers by COPY. `make gemma4-serve-image` therefore first runs `reshard_snapshot.py` (inside the base
+  image), rewriting the consolidated file as standard HF shards + `model.safetensors.index.json` — per-tensor
+  bytes identical, loader-transparent — then `split_hf.sh` balances the tree into four hardlinked sub-10 GB parts
+  that the Dockerfile COPYs back into `/opt/emmy/hf`. Kernel cache-key parity is unaffected (weights are runtime
+  constants, not source); the verify gate re-arbitrates the resharded snapshot.
 
 ## Licensing
 

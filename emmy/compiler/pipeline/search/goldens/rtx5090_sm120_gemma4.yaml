@@ -991,6 +991,32 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
     emmy_us: 171.9
     cublas_us: 158.2
+  # The PREFILL-chunk (M=256) mlp_geglu, in BOTH regimes. Seeded 2026-07-17 (manual --ab, 60x). Cold greedy
+  # MISDEPLOYS a w2x2/f4x8 register tile at 885 µs (0.34x eager); these anchors pin the tuned thin-M/wide-N tile
+  # (no split-K — at prefill M the grid already fills the SMs, so the decode golden's g4k split-K only adds a 4x
+  # redundant statistic + a partial round-trip). Regular f32 = 458 (0.66x), FAST_MATH f16acc = 413 (0.73x) —
+  # both a ~1.9x cold-start rescue. NOTE: the fused computed-A form is memory-pipeline-stall bound at M=256 and
+  # provably cannot beat cuBLAS here (its compute floor ≈ eager, and a 2-fold node can't ride d2/tma/ring); the
+  # form that BEATS cuBLAS is the CUT (PLACE@cone=cut) into two single-channel matmuls + a GeGLU combine, each
+  # matmul on d2/tma/ring — see 020_cut_edge multi-fold split. These entries anchor the DEFAULT (fused) deploy.
+  - kernel: mlp_geglu
+    name: gemma4_12b.mlp_geglu.m256
+    M: 256
+    H: 3840
+    inter: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x2/k2', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 458.2
+    cublas_us: 302.0
+  - kernel: mlp_geglu
+    name: gemma4_12b.mlp_geglu.m256
+    M: 256
+    H: 3840
+    inter: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k2', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 412.8
+    cublas_us: 302.0
   # ---- lm_head (the vocab logits projection) ----------------------------------------------------
   # hidden 3840 → vocab 262144: the single LARGEST matmul in the model (2 GB fp16 weight, DRAM-bound),
   # run per decode step. Seeded 2026-07-18 (manual --ab, decode M=32). Cold greedy MISDEPLOYS a scalar

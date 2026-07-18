@@ -53,6 +53,7 @@ from emmy.compiler.ir.stmt import Body, Load, Write
 from emmy.compiler.ir.tile import Contraction, Map, TileOp
 from emmy.compiler.ir.tile.ops import lower as tile_lower
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
+from emmy.compiler.pipeline.passes.loop.stamp._stamp import restamp_structural_features
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
 from emmy.compiler.pipeline.search.space import place_decision
 
@@ -161,7 +162,12 @@ def rewrite(match: Match, root: Node) -> Graph | None:
         node_id=ws,
     )
     for cons_op, cons_out in consumer_nodes:
-        node_out = out if (combine is None and cons_out == out.name) else Tensor(cons_out, (m_ax.extent, n_axis.extent), out.dtype)
+        # A split channel writes its accumulator to an F32 workspace (NOT out.dtype): the downstream
+        # combine reads it back and runs the ⊗-combine tail (e.g. GeGLU's ``gelu(gate)`` cubes the
+        # value — ``gate³`` overflows f16 for |gate| ≳ 40), so the channel value must keep the f32
+        # accumulator precision the fused form's register epilogue had. Single-fold (no combine)
+        # writes the real output directly at its own dtype.
+        node_out = out if combine is None else Tensor(cons_out, (m_ax.extent, n_axis.extent), F32)
         frag.add_node(op=cons_op, inputs=[*(i for i in root.inputs if i in cons_op.inputs), ws], node_id=cons_out, output=node_out)
     if combine is not None:
         frag.add_node(
@@ -170,5 +176,12 @@ def rewrite(match: Match, root: Node) -> Graph | None:
             output=out,
             node_id=out.name,
         )
+    # Re-stamp structural features: ``020_stamp_structural_features`` ran at fusion end and never
+    # revisits these spliced fragments, so without this the split kernels carry the FUSED op's
+    # features (or none) — they'd never match their own golden / prior rows (the cut consumer is a
+    # plain matmul that should join the ``mlp_gate_up`` matmul evidence, not the ``fused`` kind).
+    for node in frag.nodes.values():
+        if isinstance(node.op, LoopOp):
+            restamp_structural_features(node.op, frag)
     frag.outputs = [out.name]
     return frag

@@ -38,6 +38,15 @@ The machinery enforces the last two points structurally: **`config.env` is the s
 bind-mounts it into the plain image and the baked image ships it, so the warmed and released servers execute
 literally the same script with the same env.
 
+**The warm runs to a fixpoint under the release environment.** One online boot is not enough: the shipped image
+serves offline (`HF_HUB_OFFLINE=1`, the model resolved to its snapshot path), and a handful of kernels only
+materialize on an offline boot; independently, a fork pick can flip between boots, selecting between two stable
+kernel variants (2026-07 5090 session: 6 offline-only kernels + 2 bimodal ones on gemma-4-12B — each variant's
+source is byte-stable, so the union converges). After the online pass, `warm.sh` re-boots offline against the
+accumulated cache until a boot compiles nothing new (max 5 passes). The boot-to-boot pick flip is a real
+compiler bug (fork resolution should be deterministic across processes); the fixpoint warm contains it but does
+not excuse it.
+
 ## Files
 
 - `config.env` — the pinned serving config. Every value is cache-key-relevant; it must be **final before warming**

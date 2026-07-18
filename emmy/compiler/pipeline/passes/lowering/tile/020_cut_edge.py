@@ -23,12 +23,23 @@ producer lands on the reduce tier (coop statistic), the consumer on the plain-ma
 the gemma gate_up fused-edge shape (5090): cut + the golden-family config = 496–503 µs e2e vs
 the exhaustively-optimized fused kernel's ~660 and the unfused eager pair's ~570.
 
+**Multi-fold (gate/up) split.** A multi-fold cone (``swiglu(x̂@Wg, x̂@Wu)``) cannot cut into ONE
+consumer — a multi-fold *plain* matmul has no mma tier (the gmem-direct / cp / TMA transports are
+single-fold; the sync compute-fill is keyed on a *computed* A) — so it splits into **N
+single-fold channel matmuls**, each reading the shared workspace A and writing an ``out__ch<i>``
+workspace, plus a downstream pointwise **combine** kernel carrying the ⊗-combine tail
+(``pro_map.body`` — the GeGLU), which reloads the channel accumulators and writes ``out``. Each
+channel matmul is single-fold, so it rides ``d2/tma/ring`` and BEATS cuBLAS (5090, M=256:
+~113 µs/channel f16acc); the whole cut is ~270 µs e2e = 1.17× the unfused eager pair (~317), the
+form that the fused computed-A megakernel provably cannot reach (its compute floor ≈ eager). This
+is why the cut is the perf answer for the mlp edge at prefill M — the fused ``mlp_geglu.m256``
+golden anchors only the DEFAULT (fused) deploy.
+
 Termination is structural: the consumer's A is a ``Load`` (``bind_prologue_contraction`` finds
 no cone), and the producer's column sweep carries no ⊗-fold ``Accum`` (not the composition) —
-neither half re-matches. Restrictions (each a ``RuleSkipped``, the kernel stays fused): a
-single-fold cone only — a multi-fold (gate/up) consumer would LOSE its mma tier post-cut (the
-gmem-direct and cp/TMA arms are single-fold; the sync compute-fill is keyed on a computed A) —
-and no lead (batch) axes / exactly one free axis (the ``m`` rows) this cut."""
+neither half re-matches. Restrictions (each a ``RuleSkipped``, the kernel stays fused): no lead
+(batch) axes / exactly one free axis (the ``m`` rows) this cut, and at most one bridged
+statistic."""
 
 from __future__ import annotations
 
@@ -39,9 +50,10 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import Loop, LoopOp
 from emmy.compiler.ir.stmt import Body, Load, Write
-from emmy.compiler.ir.tile import Contraction, TileOp
+from emmy.compiler.ir.tile import Contraction, Map, TileOp
 from emmy.compiler.ir.tile.ops import lower as tile_lower
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
+from emmy.compiler.pipeline.passes.loop.stamp._stamp import restamp_structural_features
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
 from emmy.compiler.pipeline.search.space import place_decision
 
@@ -59,8 +71,6 @@ def rewrite(match: Match, root: Node) -> Graph | None:
         raise RuleSkipped("not the MONOID producer-cone composition — nothing to cut")
     pro_map, _n_ax = bound
     c: Contraction = pro_map.source
-    if len(c.folds) != 1:
-        raise RuleSkipped("multi-fold cone (gate/up) — a cut would lose the mma tier (single-fold transports); stays fused")
     if c.lead_axes or len(tile.place.free) != 1:
         raise RuleSkipped("lead/batch axes on the cone — the 2-D workspace cut doesn't cover them yet")
     pro, cell, stats = c.stat_prologue()
@@ -98,14 +108,41 @@ def rewrite(match: Match, root: Node) -> Graph | None:
     k_loop = Loop(axis=k_ax, body=Body((*cell_body, Write(output=ws, index=(Var(m_ax.name), Var(k_ax.name)), value=c.a_name))))
     producer = LoopOp(body=Body((Loop(axis=m_ax, body=Body((k_loop,))),)))
 
-    # Consumer: the projection Map with A re-pointed at the workspace, flattened back to the
-    # canonical loop nest (``ops.lower``) and wrapped in its free (m) and column (n) loops —
-    # ``lower`` emits the per-cell reduce nest + projection (incl. the Write); the column loop
-    # is the Contraction's own n axis.
+    # Consumer(s): each ⊗-fold channel becomes its OWN plain single-fold matmul reading the shared
+    # workspace A (``a_load``) — a single-fold node rides the plain-matmul mma tiers (gmem-direct /
+    # cp.async / TMA / d2/tma/ring, the schedules a computed A can never ride), which is the whole
+    # point of the cut. A single-fold cone (norm→linear) keeps the original projection ``Map`` (its
+    # combine, if any, IS the projection and writes ``out`` directly). A multi-fold cone (gate/up)
+    # can't keep one node — a multi-fold plain matmul has no mma tier (the transports are single-fold,
+    # the sync fill needs a computed A) — so it splits into N channel matmuls, each writing a
+    # per-channel ``out__ch<i>`` workspace, plus a downstream pointwise COMBINE kernel carrying the
+    # ⊗-combine tail (``pro_map.body`` — the geglu), which loads the channel accumulators back and
+    # writes ``out``. Each channel matmul beats cuBLAS on ``d2/tma/ring``; the combine is a cheap
+    # elementwise pass.
     a_load = Load(name=c.a_name, input=ws, index=(Var(m_ax.name), Var(k_ax.name)))
-    cut_map = replace(pro_map, source=replace(c, a_operand=a_load))
     n_axis = c.n_axis
-    consumer = LoopOp(body=Body((Loop(axis=m_ax, body=Body((Loop(axis=n_axis, body=Body(tuple(tile_lower(cut_map)))),))),)))
+
+    def _consumer(proj_map) -> LoopOp:
+        return LoopOp(body=Body((Loop(axis=m_ax, body=Body((Loop(axis=n_axis, body=Body(tuple(tile_lower(proj_map)))),))),)))
+
+    consumer_nodes: list[tuple[LoopOp, str]] = []  # (op, workspace/out name)
+    if len(c.folds) == 1:
+        consumer_nodes.append((_consumer(replace(pro_map, source=replace(c, a_operand=a_load))), out.name))
+        combine = None
+    else:
+        chan_accs: list[tuple[str, str]] = []  # (workspace name, accumulator SSA name)
+        for i, fold in enumerate(c.folds):
+            ch_ws = f"{out.name}__ch{i}"
+            proj = Map(
+                body=Body((Write(output=ch_ws, index=(Var(m_ax.name), Var(n_axis.name)), value=fold[1]),)),
+                source=replace(c, folds=(fold,), a_operand=a_load),
+            )
+            consumer_nodes.append((_consumer(proj), ch_ws))
+            chan_accs.append((ch_ws, fold[1]))
+        # The combine kernel: reload each channel accumulator from its workspace, then run the
+        # original ⊗-combine tail (``pro_map.body`` writes ``out``). Pure pointwise over (m, n).
+        acc_loads = tuple(Load(name=acc, input=cws, index=(Var(m_ax.name), Var(n_axis.name))) for cws, acc in chan_accs)
+        combine = LoopOp(body=Body((Loop(axis=m_ax, body=Body((Loop(axis=n_axis, body=Body((*acc_loads, *pro_map.body))),))),)))
 
     frag = Graph()
     for inp in root.inputs:
@@ -124,6 +161,27 @@ def rewrite(match: Match, root: Node) -> Graph | None:
         output=Tensor(ws, (m_ax.extent, k_ax.extent), ws_dtype),
         node_id=ws,
     )
-    frag.add_node(op=consumer, inputs=[*(i for i in root.inputs if i in consumer.inputs), ws], output=out, node_id=out.name)
+    for cons_op, cons_out in consumer_nodes:
+        # A split channel writes its accumulator to an F32 workspace (NOT out.dtype): the downstream
+        # combine reads it back and runs the ⊗-combine tail (e.g. GeGLU's ``gelu(gate)`` cubes the
+        # value — ``gate³`` overflows f16 for |gate| ≳ 40), so the channel value must keep the f32
+        # accumulator precision the fused form's register epilogue had. Single-fold (no combine)
+        # writes the real output directly at its own dtype.
+        node_out = out if combine is None else Tensor(cons_out, (m_ax.extent, n_axis.extent), F32)
+        frag.add_node(op=cons_op, inputs=[*(i for i in root.inputs if i in cons_op.inputs), ws], node_id=cons_out, output=node_out)
+    if combine is not None:
+        frag.add_node(
+            op=combine,
+            inputs=[*(i for i in root.inputs if i in combine.inputs), *(nm for _, nm in consumer_nodes)],
+            output=out,
+            node_id=out.name,
+        )
+    # Re-stamp structural features: ``020_stamp_structural_features`` ran at fusion end and never
+    # revisits these spliced fragments, so without this the split kernels carry the FUSED op's
+    # features (or none) — they'd never match their own golden / prior rows (the cut consumer is a
+    # plain matmul that should join the ``mlp_gate_up`` matmul evidence, not the ``fused`` kind).
+    for node in frag.nodes.values():
+        if isinstance(node.op, LoopOp):
+            restamp_structural_features(node.op, frag)
     frag.outputs = [out.name]
     return frag

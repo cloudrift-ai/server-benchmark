@@ -258,6 +258,44 @@ def test_place_cone_cut_splits_the_kernels(monkeypatch):
 
 
 @requires_cuda
+def test_place_cone_cut_splits_multi_fold(monkeypatch):
+    """``PLACE@cone=cut`` on the MULTI-FOLD gate/up edge — ``swiglu(x̂@Wg, x̂@Wu)`` — splits the ONE
+    fused megakernel into the norm producer (stat + cone materialize) PLUS one plain single-channel
+    matmul PER ⊗-fold (each reads the shared workspace A, so it rides the staged cp.async/TMA tiers a
+    computed A can never ride — the whole point) PLUS a downstream pointwise combine carrying the
+    SwiGLU ⊗-combine tail. That's ≥4 kernels vs the fused form's 1; each channel matmul beats cuBLAS
+    on ``d2/tma/ring`` at prefill M (the fused computed-A form provably cannot). Numerics match the
+    same numpy reference as the fused multi-fold edge."""
+    monkeypatch.setenv("EMMY_PLACE", "cut")
+    S, H, inter = 64, 256, 512
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (1, S, H), F16), node_id="x")
+    g.add_node(InputOp(), [], Tensor("nw", (H,), F16), node_id="nw")
+    g.add_node(InputOp(), [], Tensor("wg", (inter, H), F16), node_id="wg")
+    g.add_node(InputOp(), [], Tensor("wu", (inter, H), F16), node_id="wu")
+    g.add_node(RmsNormOp(eps=1e-6), ["x", "nw"], Tensor("xn", (1, S, H), F16), node_id="xn")
+    g.add_node(LinearOp(), ["xn", "wg"], Tensor("gate", (1, S, inter), F16), node_id="gate")
+    g.add_node(LinearOp(), ["xn", "wu"], Tensor("up", (1, S, inter), F16), node_id="up")
+    g.add_node(ElementwiseOp("silu"), ["gate"], Tensor("sg", (1, S, inter), F16), node_id="sg")
+    g.add_node(ElementwiseOp("multiply"), ["sg", "up"], Tensor("o", (1, S, inter), F16), node_id="o")
+    g.inputs, g.outputs = ["x", "nw", "wg", "wu"], ["o"]
+    rng = np.random.default_rng(0)
+    ins = {
+        "x": (rng.standard_normal((1, S, H)) * 0.3).astype(np.float16),
+        "nw": (rng.standard_normal((H,)) * 0.3).astype(np.float16),
+        "wg": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
+        "wu": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
+    }
+    got, srcs = _compile_run(g, ins)
+    assert len(srcs) >= 4, f"PLACE@cone=cut on gate/up must split into per-channel matmuls + combine, got {len(srcs)} kernel(s)"
+    x, nw, wg, wu = (ins[k].astype(np.float32) for k in ("x", "nw", "wg", "wu"))
+    rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
+    gate, up = rms @ wg.T, rms @ wu.T
+    ref = gate * _sigmoid(gate) * up
+    np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), ref, atol=0.5, rtol=0.1)
+
+
+@requires_cuda
 @requires_sm90
 @pytest.mark.parametrize("runtime_s", [31, 130])
 def test_fused_rmsnorm_linear_symbolic_m(runtime_s, monkeypatch):

@@ -105,7 +105,11 @@ dimensions, with OPPOSITE re-entry contracts — keep them apart:
   the pass-scan restart hands them back to `010_recognize`: the fused kernel's schedule is meaningless for the
   halves, and each must earn its own recognition, schedule and fork (the gmem-A matmul then reaches the staged
   cp.async/TMA tiers a computed A can never ride). The statistic materializes as its OWN kernel — a nested
-  `for m: [stat…, for k: …]` producer only lifts `m` onto the grid, serializing the K sweep per thread.
+  `for m: [stat…, for k: …]` producer only lifts `m` onto the grid, serializing the K sweep per thread. A
+  **multi-fold** cone (the gate/up ⊗-folds — `swiglu(x̂@Wg, x̂@Wu)`) can't cut into one consumer (a multi-fold plain
+  matmul has no mma tier), so it splits into **N single-channel matmuls** (each rides `d2/tma/ring` and beats cuBLAS)
+  writing per-channel workspaces + a downstream pointwise **combine** kernel carrying the ⊗-combine (GeGLU) tail — the
+  form that beats cuBLAS at prefill M (~270 vs ~317 µs eager on the 5090), which the fused computed-A megakernel can't.
 - **`030_split_reduce`** splits the **reduce axis** (the REDUCE codec's `g<w>` cross-CTA shard): the SAME
   computation, its K partitioned across CTAs into a partial + finalize. It runs AFTER its decision — the `g` row was
   chosen FOR the split form — so the partial carries the decided knob row verbatim and the finalize is deliberately

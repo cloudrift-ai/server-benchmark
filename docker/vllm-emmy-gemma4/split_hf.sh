@@ -13,11 +13,13 @@ DST=warm/hf_parts
 rm -rf "$DST"
 mkdir -p "$DST"/p0 "$DST"/p1 "$DST"/p2 "$DST"/p3
 
-# p0 = the full tree minus the blob payloads (configs, tokenizer, refs, symlinks)
+# p0 = the full tree minus the large payloads (configs, tokenizer, refs, symlinks).
+# Split by SIZE, not by path: depending on how the snapshot was produced, the weight
+# shards can sit under blobs/ or as regular files under snapshots/.
 cp -al "$SRC"/. "$DST"/p0/
-find "$DST"/p0 -path "*/blobs/*" -type f -delete
+find "$DST"/p0 -type f -size +256M -delete
 
-# balance the blob payloads across p0..p3, largest first into the emptiest part
+# balance the large payloads across p0..p3, largest first into the emptiest part
 declare -a used=(0 0 0 0)
 while read -r sz f; do
     rel=${f#"$SRC"/}
@@ -26,6 +28,6 @@ while read -r sz f; do
     mkdir -p "$DST/p$best/$(dirname "$rel")"
     ln "$f" "$DST/p$best/$rel"
     used[$best]=$((used[$best] + sz))
-done < <(find "$SRC" -path "*/blobs/*" -type f -printf "%s %p\n" | sort -rn)
+done < <(find "$SRC" -type f -size +256M -printf "%s %p\n" | sort -rn)
 
 echo "[split] $(du -sh "$DST"/p0 "$DST"/p1 "$DST"/p2 "$DST"/p3 | tr '\n' ' ')"

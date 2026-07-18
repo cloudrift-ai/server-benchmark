@@ -936,6 +936,82 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
     emmy_us: 74.1
     cublas_us: 77.1
+  # ---- serving Linear layout (trans_b) twins: o_proj / mlp_down at decode m16 + dynM -------------
+  # The serving-traced decode/symbolic twins contract a TRANSPOSED B (F.linear; the weight transpose
+  # survives the trace), and that fork offers gmem-direct rows ONLY — the canonical entries above pin
+  # d2/tma/ring staging, which never realizes there, so every serve boot logged the enumeration-drift
+  # warning and the forks fell to the cold offline model (whose 8-way score ties were the 2026-07 boot
+  # flap; see the deploy-pick canonical tiebreak). These trans_b entries are the SERVING truth for the
+  # same ShapeKeys: tuned on the F.linear snippet (emmy tune -c, fresh DB/prior) and A/B'd 3x at -O3
+  # on a vast.ai RTX 5090 (2026-07-18, <1% spread), matching the serving offer exactly — the golden
+  # tier now decides these forks deterministically. COLD-START ANCHORS, not wins: the transposed-B
+  # gmem-direct form loses to cuBLAS (0.36-0.77x eager; the canonical staged twins read 0.9-1.0x),
+  # and the K=15360 mlp_down decode row pays the most (233.8 vs 85 eager). Recording the loss makes
+  # the staged-transposed-B (or layout-canonicalizing) follow-up measurable. q/kv/gate-up decode forms
+  # ride the fused computed-A kinds (norm_linear / mlp_geglu) — no bare-matmul twin needed there.
+  - kernel: matmul
+    name: gemma4_12b.o_proj.m16.lin
+    M: 16
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x1/f4x2/k4', REDUCE: 'g2k', RASTER: '', STAGE: '', WSPEC: ''}
+    emmy_us: 21.4
+    cublas_us: 14.0
+  - kernel: matmul
+    name: gemma4_12b.o_proj_global.m16.lin
+    M: 16
+    N: 3840
+    K: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x1/f4x8/k8', REDUCE: 'g8k', RASTER: '', STAGE: '', WSPEC: ''}
+    emmy_us: 37.6
+    cublas_us: 29.0
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.m16.lin
+    M: 16
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x1/f4x8', REDUCE: 'g8k', RASTER: '', STAGE: '', WSPEC: ''}
+    emmy_us: 233.8
+    cublas_us: 85.0
+  - kernel: matmul
+    name: gemma4_12b.o_proj.dynM.lin
+    M: 512
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    dynamic: true
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f4x8', REDUCE: '', RASTER: '', STAGE: '', WSPEC: ''}
+    emmy_us: 198.5
+    cublas_us: 97.0
+  - kernel: matmul
+    name: gemma4_12b.o_proj_global.dynM.lin
+    M: 512
+    N: 3840
+    K: 8192
+    dtype: 'fp16'
+    dynamic: true
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x1/f4x8/k4', REDUCE: 'g8k', RASTER: '', STAGE: '', WSPEC: ''}
+    emmy_us: 306.1
+    cublas_us: 159.0
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.dynM.lin
+    M: 512
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    dynamic: true
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8/k2', REDUCE: 'g8k', RASTER: '', STAGE: '', WSPEC: ''}
+    emmy_us: 596.9
+    cublas_us: 295.0
   # ---- fused RMSNorm→linear (computed-A / norm_linear kind) --------------------------------------
   # The single-channel computed-A megakernel rms_norm(x)·nw @ Wq (kind="fused"): the per-row RMSNorm
   # statistic rides the A cone as a sync compute-fill prologue and the warp mma contracts the scaled A

@@ -667,6 +667,15 @@ multi-channel gate⊗up→GeGLU sibling) are the snippet-reproducible computed-A
 mma kernel and share `kind="fused"`; the gate⊗up snippet binds its shared RMSNorm output via a lambda
 (`(lambda r: gelu(r@Wg)*(r@Wu))(rms_norm(x))`) since a torch expression cannot otherwise share it.
 
+**A matmul golden's layout must match the fork it is meant to decide.** `MatmulGoldenConfig.trans_b` spells the
+serving Linear layout — B given `(N, K)`, contracted as `x @ w.T` via an `F.linear` snippet. The traced contraction
+carries `b_trans`, and its enumeration offers **gmem-direct rows only** (staged transports decline transposed B), so
+a golden tuned on the canonical `(M,K) @ (K,N)` form can pin a staged config that never realizes against a served
+model's linear forks — every boot then logs the enumeration-drift warning and the fork falls to the cold model (the
+gemma-4 m16/dynM o_proj + mlp_down class behind the 5090 boot-flap ties). The two layouts share one ShapeKey on
+purpose: at a fork, an entry whose config the offer can't realize simply never matches, so a canonical entry (the
+harness/eval truth) and a `trans_b` entry (the serving truth) coexist under one shape, fastest-realizable-first.
+
 **Live-GPU scoping.** `tune --dataset golden` (and `--golden NAME` resolution) scopes to the **live** card's goldens
 (`goldens_for_live_gpu`) — names repeat across per-GPU golden files with diverging shapes/dtypes, so a flat union
 would tune another card's config under the live card's name. For `tune` the scoping is strict: a live card with no

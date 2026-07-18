@@ -244,7 +244,9 @@ The commands and options used from a terminal, such as `emmy compile`.
 A human-readable configuration format. Emmy recipes are written in YAML.
 
 **Recipe**
-A file describing what model or command to run, which hardware it needs, and which benchmark settings to use.
+A version-controlled plan describing what model or command to run, how to deploy it, which hardware and benchmark
+settings to use, which variants to compare, and how to aggregate results. Commands such as `emmy deploy` and
+`emmy bench` consume recipes; a recipe does not execute by itself.
 
 **Variant**
 One concrete combination of recipe settings. A matrix can expand one recipe into many variants.

@@ -234,13 +234,99 @@ provisioning libraries rather than in the command module itself.
 You can explain why `emmy/emmy.py` imports many command modules but still contains almost no domain logic, and why
 `emmy/config.py` owns `EMMY_*` environment reads instead of each command reading `os.environ` independently.
 
-## Lesson 2 — Turn recipe YAML into typed variants
+## Lesson 2 — Describe repeatable work with recipes
 
 ### Learn
 
-A recipe is a YAML configuration file that describes what to run and how to run it. YAML is a human-readable format
-for nested lists and key/value settings. A recipe can also describe several experiments at once through its `matrices`
-section. Each final combination is a **variant**.
+A recipe is Emmy's reusable plan for a deployment or benchmark. It answers questions that would otherwise be spread
+across a long terminal command, a shell script, and a person's memory:
+
+- Which Hugging Face model—or which arbitrary command—should run?
+- Which serving engine and settings should be used?
+- What GPU resources does the work require?
+- What workload should the benchmark send?
+- Which combinations should be compared?
+- Which output files or aggregate report should be kept?
+
+Recipes exist for **repeatability**. A reviewed YAML file can be committed to Git, run again by another person, and
+used to compare results without reconstructing dozens of flags. It is also one shared contract between Emmy's recipe,
+planning, provisioning, deployment, benchmarking, and result-reporting code.
+
+A recipe describes desired work; it does not perform the work by itself. Different commands consume it:
+
+```bash
+# Preview the variants and planned benchmark work without creating machines.
+./venv/bin/emmy bench recipes/Qwen3-Embedding-0.6B --dry-run
+
+# Use one recipe to start a local deployment.
+./venv/bin/emmy deploy local --recipe recipes/Qwen3-Embedding-0.6B
+
+# Preview a cloud deployment without creating resources.
+./venv/bin/emmy deploy cloud \
+  --recipe recipes/Qwen3-Embedding-0.6B \
+  --gpu "NVIDIA GeForce RTX 5090" \
+  --gpu-count 1 \
+  --dry-run
+```
+
+The same input therefore supports a quick deployment and a controlled multi-variant experiment. The command determines
+which part of the workflow runs.
+
+```mermaid
+flowchart LR
+    Goal[Human goal] --> File[recipe.yaml]
+    File --> Load[Load and validate]
+    Load --> Deploy{How is it used?}
+    Deploy -->|deploy| Concrete[Resolve one hardware configuration]
+    Concrete --> Compose[Generate engine flags and Docker Compose]
+    Compose --> Service[Start the model service]
+    Deploy -->|bench| Variants[Expand experiment variants]
+    Variants --> Tasks[Create and group benchmark tasks]
+    Tasks --> Run[Provision, deploy, and measure]
+    Run --> Results[Save results and aggregate reports]
+```
+
+### What a recipe contains
+
+YAML is a human-readable format for nested lists and key/value settings. Emmy's recipe sections have distinct jobs:
+
+| Section | Question it answers | Used by |
+|---|---|---|
+| `model` | Which model and task should run? | deployment and serving |
+| `engine` | Which server and runtime settings should be used? | engine argument and container generation |
+| `benchmark` | What requests should be sent and how many? | benchmark workload generation |
+| `deploy` | Which GPU resources are required? | planning and provisioning |
+| `command` | Which arbitrary command should run instead of model inference? | command-workload execution |
+| `matrices` | Which setting combinations should become separate runs? | variant expansion and planning |
+| `aggregate` | How should results from all runs be summarized? | post-benchmark reporting |
+
+A recipe represents either model inference (`model` plus `engine`) or an arbitrary `command`; those are different
+workload types and cannot be mixed in one recipe. It contains references and settings, not model weights or CUDA code.
+
+### How one benchmark uses a recipe
+
+For `emmy bench`, the recipe moves through several layers:
+
+```text
+recipe path
+  -> load YAML and validate fields
+  -> expand matrices into concrete variants
+  -> turn each variant into a BenchmarkTask
+  -> group compatible tasks so they can reuse a machine and model download
+  -> provision or reuse a host
+  -> translate shared engine settings into vLLM or SGLang flags
+  -> generate Docker Compose and start the service
+  -> run a smoke test and benchmark workload
+  -> save each result and run the optional aggregate command
+```
+
+The next three lessons examine task planning, execution, provisioning, and deployment separately. For now, remember
+that the recipe is the version-controlled input connecting those steps.
+
+### How matrices create comparisons
+
+A recipe can describe several experiments at once through its `matrices` section. Each final combination is a
+**variant**. Shared fields stay in the main recipe; only values that should change between runs belong in the matrix.
 
 `cross` produces every combination, like choosing every shirt with every pair of trousers. `zip` pairs values by their
 position, like pairing the first model setting with the first benchmark setting. Emmy expands those combinations before
@@ -331,6 +417,9 @@ decide how the answer changes if it is placed inside the existing `zip` block. D
 
 You can explain:
 
+- Why Emmy uses a version-controlled recipe instead of asking users to reconstruct a long command for every run.
+- How `emmy deploy` and `emmy bench` consume the same recipe for different workflows.
+- Which recipe sections describe the model or command, engine, hardware, workload, comparisons, and aggregation.
 - Why matrix expansion returns flat dot-path dictionaries before `build_override` nests them.
 - Why `deep_merge` is necessary instead of a shallow dictionary update.
 - How one `LLMConfig` becomes different vLLM and SGLang command-line flags.

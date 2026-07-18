@@ -318,6 +318,16 @@ one batched `predict`, invariant to the tree's level order. Cold, the `OfflinePr
 `MMA_tier` warp preference); option-0 (first leaf, emission order) only if `load_prior` returns nothing entirely.
 Greedy benches nothing, so it can only *use* a prior, never train one.
 
+**Every deploy pick breaks ties by candidate content, never enumeration order.** The model can score many
+same-featurized siblings identically (the offline `D_*` geometry doesn't separate an `f2x4` from an `f4x2` fragment or
+the `bk` variants — 8 exact ties at the gemma-4 m16 mlp_down/o_proj forks), and one measured row / one golden prefix
+can match several offered candidates. Every tier therefore resolves its ties through `knob.canonical_row_key` (the
+sorted tuning-knob rendering): the model argmin (`Prior.pick` and the greedy fallback), the reservoir and DB
+measured-evidence argmins, and the golden realization pick. An order-broken tie is a per-boot coin flip — leaf order
+can shift across processes — and shipped the 2026-07 RTX 5090 gemma-4 image with a bimodal boot-time cubin set.
+Pinned by `tests/compiler/pipeline/search/test_deploy_pick_determinism.py` (tier-level permutation invariance plus a
+cross-subprocess selected-kernel-set pin, the resolution twin of `test_source_determinism.py`).
+
 **Structural options are priced, never raw-scored.** With the trained prior loaded, `greedy_decide`'s
 `_pick_structural` prices each side of a structural fork: a nested `resolve` per kernel over a `lowering/tile`-only
 pipeline, the price being the `score` of the slice-resolve's partition-fork `Decision`, memoized per `op_cache_key`.

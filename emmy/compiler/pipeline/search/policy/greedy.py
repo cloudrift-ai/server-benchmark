@@ -262,7 +262,9 @@ def _db_measured_index(db, ctx) -> dict[frozenset, list[tuple[dict, float, bool]
     try:
         o1_key = replace(ctx, compile_flags=_TUNE_RANKING_FLAGS).structural_key()
         keys = {ctx.structural_key(), o1_key, replace(ctx, compile_flags=O3_NVCC_FLAGS).structural_key()}
-        for ck in keys:
+        # Sorted — set iteration order is per-process (hash-seeded), and the index's
+        # per-signature row order must not vary across boots (ties resolve through it).
+        for ck in sorted(keys):
             for row in db.iter_perf(ck, backend="cuda"):
                 if row.status != "ok" or row.stats.median <= 0:
                     continue
@@ -295,6 +297,13 @@ def _db_measured_pick(index: dict[frozenset, list[tuple[dict, float, bool]]], ro
     tune *measured* fastest from losing the deploy to an unmeasured model
     extrapolation (eighth golden sweep, finding 2). -O3 reservoir evidence,
     where present, still takes precedence at the call site."""
+    from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+
+    def better(us: float, i: int, cur: tuple[int, float] | None) -> bool:
+        # Tie on µs (one measured row matching several candidates) breaks by the
+        # candidates' canonical content, never their enumeration order.
+        return cur is None or us < cur[1] or (us == cur[1] and canonical_row_key(rows[i]) < canonical_row_key(rows[cur[0]]))
+
     best: tuple[int, float] | None = None  # deployable lane
     best_rank: tuple[int, float] | None = None  # -O1 ranking-lane fallback
     for i, cand in enumerate(rows):
@@ -305,9 +314,9 @@ def _db_measured_pick(index: dict[frozenset, list[tuple[dict, float, bool]]], ro
                 if any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items()):
                     continue
                 if deployable:
-                    if best is None or us < best[1]:
+                    if better(us, i, best):
                         best = (i, us)
-                elif best_rank is None or us < best_rank[1]:
+                elif better(us, i, best_rank):
                     best_rank = (i, us)
     return best if best is not None else best_rank
 
@@ -445,7 +454,7 @@ def _golden_pick(index: dict, rows: list[dict], node_id: str) -> tuple[int, floa
     match with NO realizable golden logs a loud drift warning (the enumeration no
     longer offers what the golden recorded) and falls through to the normal
     hierarchy. Returns ``(candidate_index, recorded_µs)`` or ``None``."""
-    from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import canonical_row_key, tuning_knob_items  # noqa: PLC0415
     from emmy.compiler.pipeline.search.prior.base import _O3_OPT  # noqa: PLC0415
 
     if not rows or float(rows[0].get("H_opt", _O3_OPT)) != _O3_OPT:
@@ -455,9 +464,12 @@ def _golden_pick(index: dict, rows: list[dict], node_id: str) -> tuple[int, floa
         return None
     for g in goldens:  # fastest recorded entry first
         gold = dict(tuning_knob_items(g.knobs))
-        for i, row in enumerate(rows):
-            if _golden_matches_row(gold, row):
-                return i, float(g.emmy_us or 0.0)
+        # Several rows can realize one golden (a golden pins a knob PREFIX); the
+        # canonically-smallest realization wins, never the first-enumerated.
+        matches = [i for i, row in enumerate(rows) if _golden_matches_row(gold, row)]
+        if matches:
+            best = min(matches, key=lambda i: canonical_row_key(rows[i]))
+            return best, float(g.emmy_us or 0.0)
     logger.warning(
         "deploy: node %r matches golden shape %s (%d recorded entr%s), but no offered candidate realizes any of "
         "them — the golden(s) no longer realize under the current enumeration; falling through to the normal "
@@ -595,8 +607,10 @@ def greedy_decide(
         elif got is not None:  # golden decides even for bare-mean_scores priors
             best_i, price = got
         else:  # bare-mean_scores prior object (tests / custom callers)
+            from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+
             scores = the_prior.mean_scores(rows)
-            best_i = min(range(len(live)), key=scores.__getitem__)
+            best_i = min(range(len(live)), key=lambda i: (scores[i], canonical_row_key(rows[i])))
             price = scores[best_i]
         fp.score = price  # measured µs when evidence decided, predicted µs otherwise
         return live[best_i][0]

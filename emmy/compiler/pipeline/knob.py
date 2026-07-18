@@ -578,6 +578,19 @@ def tuning_knob_items(knobs: dict) -> list[tuple[str, str]]:
     return sorted(rendered, key=lambda kv: knob_sort_key(kv[0]))
 
 
+def canonical_row_key(knobs: dict) -> tuple[tuple[str, str], ...]:
+    """Content-based ORDER over candidate knob rows — the :func:`tuning_knob_items`
+    view as a comparable tuple. Every deploy pick (model argmin, measured-evidence
+    argmin, golden realization) breaks score / µs ties with this key, so the selected
+    variant is a function of the candidates' CONTENT, never of their enumeration
+    order. Without it, a tie falls to whichever leaf a fork emitted first — an order
+    that can shift across processes — and the deployed kernel flips boot to boot (the
+    2026-07 gemma-4 5090 image's bimodal cubin set: the offline prior scored 8
+    same-featurized tiles identically at the drifted m16 forks, and emission order
+    chose among them)."""
+    return tuple(tuning_knob_items(knobs))
+
+
 def stamp_schedule_families(knobs: dict) -> dict[str, str]:
     """The ready-to-record knob map for one realized kernel: its tuning knobs
     (:func:`tuning_knob_items`) plus an explicit OFF value for every :data:`SCHEDULE_FAMILIES`

@@ -222,6 +222,8 @@ class Prior(ABC):
         index = self._o3_evidence()
         if not index:
             return None
+        from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+
         best: tuple[int, float] | None = None
         for i, cand in enumerate(rows):
             sig = frozenset((k, v) for k, v in cand.items() if k.startswith("S_"))
@@ -230,20 +232,27 @@ class Prior(ABC):
                 for row_tun, us in measured:
                     if any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items()):
                         continue
-                    if best is None or us < best[1]:
+                    # Tie on µs (one measured row matching several candidates) breaks by
+                    # the candidates' canonical content, never their enumeration order.
+                    if best is None or us < best[1] or (us == best[1] and canonical_row_key(cand) < canonical_row_key(rows[best[0]])):
                         best = (i, us)
         return best
 
     def pick(self, rows: list[dict]) -> tuple[int, float]:
         """The deploy argmin: measured -O3 evidence first (:meth:`evidence_pick`),
         the model's :meth:`mean_scores` argmin when no candidate has evidence.
+        Score ties break by :func:`~emmy.compiler.pipeline.knob.canonical_row_key`
+        (candidate content, never enumeration order — same-featurized siblings score
+        identically, and an order-broken tie flips the deployed kernel per boot).
         Returns ``(index, µs)`` — measured when evidence decided, predicted
         otherwise."""
         ev = self.evidence_pick(rows)
         if ev is not None:
             return ev
+        from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+
         scores = self.mean_scores(rows)
-        best_i = min(range(len(scores)), key=scores.__getitem__)
+        best_i = min(range(len(scores)), key=lambda i: (scores[i], canonical_row_key(rows[i])))
         return best_i, scores[best_i]
 
     # --- dataset + batched refit ------------------------------------------

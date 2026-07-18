@@ -128,6 +128,20 @@ The dependency groups communicate intended deployment boundaries:
 - `visualize` adds Playwright.
 - `dev` combines development and test tooling.
 
+### Small example — locate one command
+
+Think of the project boundary as a path from something the user types to installed Python code:
+
+```text
+terminal: emmy compile ...
+    -> pyproject.toml maps "emmy" to emmy.emmy:main
+    -> emmy/emmy.py selects the compile command
+    -> emmy/compiler performs reusable compiler work
+```
+
+The first two steps connect the application. The last step contains the feature itself. This distinction helps you avoid
+putting reusable compiler behavior inside a command handler.
+
 ### Read
 
 1. `pyproject.toml`: `[project]`, `[project.optional-dependencies]`, `[project.scripts]`, and the vLLM entry point.
@@ -170,6 +184,21 @@ commands, without blocking all other work.
 
 Do not begin by reading every flag. First identify a command's registration function, its `handle_*` function, and the
 library entry point it calls. This separates interface mechanics from business behavior.
+
+### Small example — dispatch one command
+
+This pseudocode removes most `argparse` details and shows the important control flow:
+
+```python
+parser = create_parser()
+compile_command.register(parser)
+
+arguments = parser.parse_args(["compile", "--ir", "cuda"])
+arguments.func(arguments)  # Calls handle_compile(arguments)
+```
+
+The real handler then converts text options such as `"cuda"` into library objects and calls the compiler pipeline. The
+handler coordinates work; it does not implement graph rewriting itself.
 
 ### Read
 
@@ -236,6 +265,29 @@ engines such as vLLM and SGLang. `emmy/recipe/engines.py` maps shared settings t
 `extra_args` remains an escape hatch, but validation rejects flags that would duplicate a named field. This preserves
 one source of truth for GPU counts, context length, concurrency, and engine arguments.
 
+### Small example — expand a matrix by hand
+
+Suppose a recipe contains:
+
+```yaml
+matrices:
+  cross:
+    gpu: [A100, H100]
+    benchmark.batch_size: [1, 8]
+```
+
+`cross` produces four flat overrides:
+
+```text
+gpu=A100, benchmark.batch_size=1
+gpu=A100, benchmark.batch_size=8
+gpu=H100, benchmark.batch_size=1
+gpu=H100, benchmark.batch_size=8
+```
+
+Each override is merged with the recipe's shared settings and validated as a complete `Recipe`. If those two lists were
+inside one `zip`, the output would contain only `(A100, 1)` and `(H100, 8)`.
+
 ### Read
 
 1. `recipes/Qwen3-Embedding-0.6B/recipe.yaml`: a real inference recipe with `cross`, nested `zip`, and aggregation.
@@ -300,6 +352,25 @@ recipes group by GPU because they have no model weights to reuse.
 more than once and cost more. `max_workers` is different: it limits how many already-planned groups may run at the same
 time.
 
+### Small example — group tasks for reuse
+
+Imagine three benchmark tasks:
+
+```text
+task A: model=Qwen, GPU=H100, gpu_count=1
+task B: model=Qwen, GPU=H100, gpu_count=2
+task C: model=Llama, GPU=H100, gpu_count=1
+```
+
+The default planner creates two groups:
+
+```text
+group 1: tasks A and B -> one Qwen VM sized for 2 GPUs
+group 2: task C       -> one Llama VM sized for 1 GPU
+```
+
+Tasks A and B can reuse Qwen's downloaded weights. Task C cannot, even though it requests the same GPU model.
+
 ### Read
 
 1. `emmy/benchmark/tasks.py`: `enumerate_tasks`.
@@ -362,6 +433,26 @@ The same `PhaseTimer` travels through this path. Provisioning time is incurred o
 result, making a task's result reflect the cost of obtaining its host. Model-load subphases are parsed from engine logs
 but excluded from the top-level total to avoid double counting.
 
+### Small example — make cleanup unavoidable
+
+The central control flow is similar to this pseudocode:
+
+```python
+host = provision_or_reuse_host(group)
+try:
+    prepare(host)
+    for task in group.tasks:
+        deploy(task, host)
+        smoke_test(task, host)
+        save(benchmark(task, host))
+        teardown_service(task, host)
+finally:
+    release_host_if_owned(host)
+```
+
+The `finally` block expresses the key guarantee: an error during a smoke test or benchmark must not skip machine
+cleanup. The real implementation has more detailed failure handling and timing, but follows this shape.
+
 ### Read
 
 1. `emmy/benchmark/execution.py`: `run_execution_group`; read one branch at a time.
@@ -414,6 +505,19 @@ Deployment converts a typed recipe into engine arguments and Docker Compose. **D
 packages called containers; **Docker Compose** describes how several containers should run together. Deployment pulls
 images, obtains model data, starts services, waits for health, runs a task-aware smoke test, and exposes teardown through the same transport
 abstraction. Multi-instance configurations add nginx and use a scale-out strategy.
+
+### Small example — separate the two responsibilities
+
+```python
+# Provisioning answers: "Where can the workload run?"
+connection = provision_cloud_vm(gpu="H100")
+
+# Deployment answers: "What should run on that machine?"
+run_deploy(connection, recipe)
+```
+
+The same deployment function can instead receive a local or fixed SSH connection. It should not need to know whether
+the machine was just created, has existed for months, or is the developer's laptop.
 
 ### Read
 
@@ -486,6 +590,23 @@ Important invariants:
 - `Graph.structural_key` ignores cosmetic names but includes codegen-relevant structure and dataflow.
 - `Hints` carry metadata such as provenance without changing semantic identity.
 
+### Small example — represent data flow
+
+For the expression `z = (x + y) * 2`, imagine this simplified graph:
+
+```python
+nodes = {
+    "x": Node(op="input", inputs=[]),
+    "y": Node(op="input", inputs=[]),
+    "sum": Node(op="add", inputs=["x", "y"]),
+    "z": Node(op="multiply_by_2", inputs=["sum"]),
+}
+outputs = ["z"]
+```
+
+The edges are stored as input IDs. Renaming `"sum"` to `"temporary_1"` should not change structural identity because
+the computation and connections are unchanged.
+
 ### Read
 
 1. `emmy/compiler/graph.py`: `Hints`, `Node`, `Graph.add_node`, `Graph.splice`, `Graph.topological_order`.
@@ -543,6 +664,26 @@ and scans cover less regular ways of reading, writing, or repeatedly combining d
 HuggingFace tracing needs a wrapper because model code builds masks and rotary embeddings dynamically. The wrapper
 precomputes or slices those values in a trace-friendly way, and `stamp_sliding_windows` restores architecture metadata
 that tracing would otherwise erase.
+
+### Small example — preserve meaning, then simplify
+
+Tracing first keeps a recognizable operation:
+
+```python
+output = rms_norm(x, weight, epsilon=1e-6)
+```
+
+Decomposition later expresses the same result with simpler primitives:
+
+```python
+squared = x * x
+mean_square = sum(squared, axis=-1) / row_length
+scale = reciprocal_sqrt(mean_square + epsilon)
+output = x * broadcast(scale) * broadcast(weight)
+```
+
+This is explanatory pseudocode, not a replacement for the actual decomposition rule. Its purpose is to show that
+tracing identifies *what* the model requested, while decomposition begins deciding *how* to express it.
 
 ### Read
 
@@ -607,6 +748,27 @@ numpy differs from loop -> decomposition or fusion problem
 loop differs from CUDA  -> scheduling, lowering, codegen, or dispatch problem
 ```
 
+### Small example — fuse away a temporary tensor
+
+Before fusion, two operations can require an intermediate value:
+
+```python
+for i in range(size):
+    temporary[i] = x[i] * 2
+
+for i in range(size):
+    output[i] = temporary[i] + 1
+```
+
+After fusion, one loop performs both calculations:
+
+```python
+for i in range(size):
+    output[i] = (x[i] * 2) + 1
+```
+
+On a GPU, this can become one kernel launch and avoids storing `temporary` in global memory.
+
 ### Read
 
 1. `emmy/compiler/ir/loop/ir.py`: `LoopOp` and exported statement types.
@@ -655,6 +817,22 @@ deterministically for normal compilation. `Run.drive` explores paths for tuning.
 **Provenance** is metadata that links generated kernels back to original frontend operations. Decomposition creates pieces;
 fusion aggregates them; lowering keeps the metadata attached. It drives stable kernel names and per-kernel PyTorch
 reproducers without entering cache keys.
+
+### Small example — one rewrite rule
+
+This pseudocode shows the shape of a functional rewrite:
+
+```python
+pattern = Pattern(RmsNormOp)
+
+def rewrite(graph, match):
+    old_node = match.output
+    replacement = build_rms_norm_from_primitives(old_node.inputs)
+    return replacement  # The pipeline splices this fragment into the graph
+```
+
+Once replaced, the fragment contains primitive operations rather than another `RmsNormOp`. That is what makes the rule
+idempotent: revisiting it does not repeatedly decompose its own output.
 
 ### Read
 
@@ -721,6 +899,29 @@ Canonical pass lists in `emmy/compiler/pipeline/__init__.py` define the stages:
 TENSOR_PASSES -> LOOP_PASSES -> TILE_PASSES -> KERNEL_PASSES -> CUDA_PASSES
 ```
 
+### Small example — map rows to GPU workers
+
+Suppose each row of a tensor must be summed. The mathematical loop is:
+
+```python
+for row in rows:
+    total = 0
+    for column in columns:
+        total += x[row, column]
+    output[row] = total
+```
+
+A simple GPU schedule might assign one thread block to each row and split columns among threads:
+
+```text
+block 0 -> row 0 -> threads cooperate on columns 0..N
+block 1 -> row 1 -> threads cooperate on columns 0..N
+block 2 -> row 2 -> threads cooperate on columns 0..N
+```
+
+The mathematics has not changed. The schedule adds placement, partial sums, synchronization, and a way to combine the
+threads' results.
+
 ### Read
 
 1. `emmy/compiler/ir/ARCHITECTURE.md`: Dialects at a glance and stage invariants.
@@ -783,6 +984,27 @@ Buffer management is part of the architecture, not a minor optimization:
 Benchmarking runs in an isolated worker when requested so a hung kernel can be killed without permanently wedging the
 parent process. Per-kernel timings and whole-program timings have different semantics; multi-launch comparisons prefer
 the captured whole-program window.
+
+### Small example — safely reuse scratch memory
+
+Consider three kernels executed in order:
+
+```text
+kernel 1: input -> scratch_A
+kernel 2: scratch_A -> scratch_B
+kernel 3: scratch_B -> output
+```
+
+`scratch_A` is no longer needed after kernel 2 reads it. Its memory can therefore be reused later, but it cannot overlap
+`scratch_B` during kernel 2:
+
+```text
+time          kernel 1      kernel 2      kernel 3
+scratch_A     [ produce -------- read ]
+scratch_B                   [ produce -------- read ]
+```
+
+This is why the planner calculates live intervals instead of assigning every temporary tensor a permanent allocation.
 
 ### Read
 
@@ -847,6 +1069,20 @@ rank candidates; deployable `-O3` evidence remains a distinct lane.
 
 The dedicated [How Emmy Chooses Fast GPU Schedules](./prior_and_goldens) chapter traces this hierarchy from a compiler fork through
 feature construction, MCTS labels, persistence, live-card matching, and safe golden recording.
+
+### Small example — choose among valid schedules
+
+Assume tuning has measured three correct schedules:
+
+| Candidate | Tile choice | Staging choice | Measured latency |
+|---|---|---|---:|
+| A | small | off | 18 µs |
+| B | medium | shared memory | 11 µs |
+| C | large | shared memory | 14 µs |
+
+For the same GPU and compiler context, candidate B is the strongest direct evidence because lower latency is better.
+If only A had been measured, the prior could rank B and C, while MCTS decides whether exploring them is worthwhile.
+Normal `emmy compile` selects from existing evidence; it does not run this experiment itself.
 
 ### Read
 
@@ -922,6 +1158,22 @@ graphs. Torch and cupy exchange device arrays through DLPack. Positions still to
 The experimental generation path uses a related model and runner but leaves vLLM in charge of scheduler, sampler,
 paged KV cache, and language-model head while Emmy executes embedding and transformer-layer work.
 
+### Small example — one embedding request
+
+After starting the server, a client can send an ordinary OpenAI-compatible request:
+
+```bash
+curl http://localhost:8000/v1/embeddings \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen3-Embedding-0.6B",
+    "input": ["GPU compilers are interesting", "Emmy compiles PyTorch"]
+  }'
+```
+
+vLLM tokenizes and batches the two strings. Emmy runs the compiled transformer work. vLLM then pools the results and
+returns two embedding vectors. The client does not need to know which internal component performed each step.
+
 ### Read
 
 1. `emmy/serving/ARCHITECTURE.md`: module map, execution model, constraints, and testing.
@@ -972,6 +1224,24 @@ The test tree mirrors the source tree and deliberately separates several confide
 The compiler suite favors parameterized coverage matrices over one file per feature. A new capability normally extends
 the nearest algebra or execution-regime matrix. This keeps interactions—static versus dynamic shapes, scalar versus
 tensor-core tiers, staging transports, and reduction strategies—visible.
+
+### Small example — choose the narrowest test
+
+```text
+change: reject an invalid recipe field
+first test: tests/recipe/test_recipe.py
+
+change: alter loop fusion
+first test: tests/compiler/passes/test_fusion_rules.py
+
+change: alter CUDA buffer reuse
+first test: tests/compiler/backend/test_planner.py
+
+change: alter end-to-end GPU execution
+first test: the nearest focused CUDA correctness test
+```
+
+A narrow test gives fast, specific feedback. After it passes, expand outward to the subsystem and full-suite checks.
 
 ### Read
 

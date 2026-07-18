@@ -101,6 +101,36 @@ CUDA_PASSES = [*KERNEL_PASSES, "lowering/cuda"]
 You do not need to memorize these lists. Use them as a map: when one representation is correct and the next is wrong,
 the pass between them is the first place to investigate.
 
+### Small example — watch detail appear
+
+For a simple expression, each stage answers a different question:
+
+```python
+# PyTorch: what result does the user want?
+output = torch.relu(x + bias)
+```
+
+```text
+Tensor IR: which primitive tensor operations are needed?
+    biased = add(x, broadcast(bias))
+    output = maximum(biased, 0)
+
+Loop IR: which elements are read and written?
+    for row, column:
+        output[row, column] = max(x[row, column] + bias[column], 0)
+
+Kernel IR: which GPU workers and memory operations implement the loop?
+    assign output elements to threads
+    load x and bias
+    calculate add and maximum
+    store output
+
+CUDA: what source and launch configuration will the GPU runtime receive?
+```
+
+This example is intentionally schematic. The real printed IR uses Emmy's operation and statement classes, but the
+questions remain the same when the operation is much larger.
+
 ## 2. One graph container survives every stage
 
 The permanent program container is `compiler.graph.Graph`. A graph is a network of operations connected by the values

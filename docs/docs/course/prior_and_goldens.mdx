@@ -117,6 +117,22 @@ compilation is useful for ranking exploration, but it is not deployable `-O3` tr
 Emission order is an emergency fallback only when the prior system itself cannot load. A normal cold start still has the
 `OfflinePrior`, so it is not intended to be an option-zero policy.
 
+### Small example — evidence beats a prediction
+
+Suppose the compiler offers three valid candidates:
+
+| Candidate | Measured on this GPU at `-O3` | Online prediction |
+|---|---:|---:|
+| A | 15 µs | 10 µs |
+| B | 12 µs | 14 µs |
+| C | not measured | 9 µs |
+
+The prediction says C may be fastest, but B is the fastest candidate already measured in the deployable context. Emmy
+therefore selects B. This prevents a model estimate from overruling stronger compatible evidence.
+
+If none of the candidates had compatible measurements or goldens, Emmy would use a trustworthy online prediction and
+select C. If the online model were unavailable or quarantined, the offline prior would supply the order instead.
+
 ## 3. Identities that keep evidence honest
 
 **Latency** is the time required to finish an operation; lower is faster. A latency only means something in the context

@@ -1,0 +1,8 @@
+{
+  "label": "Learn Emmy",
+  "position": 2,
+  "link": {
+    "type": "generated-index",
+    "description": "A beginner-friendly, code-first course about how Emmy compiles, benchmarks, and serves machine-learning models."
+  }
+}

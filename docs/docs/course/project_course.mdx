@@ -1,0 +1,1085 @@
+---
+sidebar_position: 1
+title: "Learn Emmy: A Code-First Course"
+description: A beginner-friendly, code-first course on Emmy's compiler, deployment, benchmarking, provisioning, and serving architecture.
+keywords: [Emmy, architecture, compiler, CUDA, vLLM, deployment, benchmarking, course]
+---
+
+# Learn Emmy from the code
+
+Emmy turns familiar PyTorch code into fast programs for NVIDIA graphics processors. It can also start model servers,
+run repeatable speed tests, and compare different ways of executing a model. This course explains how those pieces fit
+together without assuming that you already know how large language models (LLMs) or GPU compilers work.
+
+We will follow data through the project instead of reading every source file. By the end, you should be able to explain:
+
+- how a PyTorch operation becomes a CUDA program that runs on a GPU;
+- how a small YAML recipe becomes one or more benchmark runs;
+- how Emmy obtains a machine, starts a model server, and records results; and
+- how Emmy connects its compiled model code to vLLM's web-serving system.
+
+An **LLM**, or *large language model*, is a program trained on text to predict and generate language. You do not need to
+know how to train one for this course. We mainly treat a model as a chain of mathematical operations that Emmy needs to
+run correctly and quickly.
+
+:::tip New to the terminology?
+Technical terms are defined when they first become important. The [Course glossary](./glossary) is also available as a
+quick reference. When a term is shown in `code font`, it is usually a name that appears literally in the source code.
+:::
+
+The course describes the current `emmy/` Python package—the main application code in the `emmy/` directory.
+`pyproject.toml` tells Python which package to install and connects the terminal command `emmy` to the function
+`emmy.emmy:main`. Folders such as `recipes/`, `experiments/`, `results/`, and `scripts/` contain inputs, examples,
+outputs, and helper tools around the application.
+
+## How to use this course
+
+Work through the lessons in order on the first pass. Each lesson has four recurring parts:
+
+1. **Learn** gives the mental model.
+2. **Read** gives an ordered path through the code. Read symbols in that order rather than reading whole directories.
+3. **Lab** turns the idea into something observable.
+4. **Checkpoint** tells you what you should be able to explain before moving on.
+
+Most lessons work without a GPU. A **GPU** (graphics processing unit) is hardware that can perform many calculations in
+parallel. Labs marked **GPU** generate or execute **CUDA**, NVIDIA's programming platform for its GPUs, and can be
+skipped on a laptop without a supported NVIDIA GPU. Cloud and deployment commands use `--dry-run`, which shows what a
+command would do without creating paid infrastructure. Do not remove it until you have reviewed credentials, expected
+cost, and cleanup behavior.
+
+Suggested pace: fourteen sessions of 60–90 minutes. Lessons 6–11 form the compiler track; lessons 2–5 form the
+deployment and benchmarking track. If your immediate goal is operations rather than compiler development, complete
+lessons 0–5, 12, and 13 first.
+
+The main course is the beginner path. For a more implementation-focused treatment of lessons 6–12, use the
+[From PyTorch to CUDA: Compiler Deep Dive](./compiler_deep_dive). It follows one operation through every IR, then explains rewrite mechanics,
+algebra recognition, scheduling, CUDA dispatch, dynamic shapes, autotuning, and how to extend the compiler.
+
+For the implementation of tuning decisions, evidence precedence, offline and CatBoost priors, golden matching, A/B
+integrity gates, and diagnostics, continue with [How Emmy Chooses Fast GPU Schedules](./prior_and_goldens).
+
+## The system in one picture
+
+The **CLI** (command-line interface) is the `emmy` command you type in a terminal. It leads to three related paths:
+
+```mermaid
+flowchart TB
+    User[You run the emmy command] --> CLI[Emmy CLI]
+
+    CLI --> Bench[Benchmark and deployment path]
+    Bench --> Recipe[Read a YAML recipe]
+    Recipe --> Variants[Create test variants]
+    Variants --> Host[Choose or create a machine]
+    Host --> Server[Start a model server]
+    Server --> Results[Run tests and save results]
+
+    CLI --> Compiler[Compiler path]
+    Compiler --> Torch[Read PyTorch operations]
+    Torch --> Simple[Break them into simpler math]
+    Simple --> Schedule[Plan work for GPU threads]
+    Schedule --> CUDA[Generate CUDA code]
+
+    CLI --> Serving[Serving path]
+    CUDA --> Serving
+    Serving --> VLLM[vLLM handles web requests and batching]
+    VLLM --> Response[Return model output]
+```
+
+**PyTorch** is the Python library in which the model is originally expressed. **vLLM** is a separate system that
+handles web requests, groups requests into efficient batches, and manages model-serving details. Emmy focuses on
+compiling the model's mathematical work.
+
+There are three architectural ideas to keep in mind throughout the course:
+
+- The CLI is a thin coordination layer: it reads options and calls reusable code. Reusable behavior lives in `emmy/recipe`, `emmy/benchmark`, `emmy/deploy`,
+  `emmy/provisioning`, `emmy/compiler`, and `emmy/serving`.
+- The compiler keeps one editable `Graph`, a data structure that represents operations and the values flowing between
+  them. A sequence of **passes** gradually replaces high-level operations with lower-level ones.
+- Actions outside the Python process—starting machines, running Docker containers, compiling CUDA, or calling
+  vLLM—are kept behind explicit interfaces. That makes the core logic easier and safer to test.
+
+### What you need before starting
+
+You should be comfortable reading basic Python and running commands in a terminal. Familiarity with dictionaries,
+functions, classes, and tests is enough. The course explains the required machine-learning, compiler, cloud, and GPU
+concepts as they appear.
+
+Use this quick test when a section feels too dense: ask yourself **what data comes in, what changes, and what comes
+out?** That question is more useful than memorizing class names.
+
+## Lesson 0 — Establish the project boundary
+
+### Learn
+
+Before learning how the internals work, identify which files are the application and which files support it. A
+**package** is a directory of Python code that can be installed and imported. `pyproject.toml` is the project's main
+Python configuration: it declares the supported Python version, installable packages, optional dependencies, terminal
+commands, and the vLLM plugin connection. `Makefile` gives short names to common development commands.
+
+`README.md` is the product overview. Files named `ARCHITECTURE.md` explain the design rules, or **invariants**, of a
+subsystem. An invariant is a condition the code expects to remain true—for example, “a failed cloud provider must
+clean up any machine it partly created.”
+
+The dependency groups communicate intended deployment boundaries:
+
+- Base dependencies support recipes, orchestration, and result handling.
+- `compile` adds PyTorch, Transformers, safetensors, and the loop runner's `cppyy` dependency.
+- `serving` adds the compatible vLLM line.
+- `visualize` adds Playwright.
+- `dev` combines development and test tooling.
+
+### Read
+
+1. `pyproject.toml`: `[project]`, `[project.optional-dependencies]`, `[project.scripts]`, and the vLLM entry point.
+2. `Makefile`: `setup`, `test`, `lint`, `bench`, `bench-kernels`, and image-building targets.
+3. `README.md`: Compile, Benchmark, Deploy, Serve, Generate, and Recipe examples.
+4. `CLAUDE.md`: documentation conventions, test lanes, and contribution rules.
+5. `STYLE.md`: code conventions before changing implementation files.
+
+### Lab — local orientation
+
+```bash
+make setup
+./venv/bin/emmy --help
+./venv/bin/python -c "import emmy; print(emmy.__file__)"
+./venv/bin/pytest tests/test_config.py tests/test_hardware.py -q
+```
+
+Use `rg --files emmy | sort` to compare the installed package with the top-level repository contents. Notice that
+`recipes/`, `experiments/`, `results/`, and `scripts/` are consumers or artifacts around the package.
+
+### Checkpoint
+
+You can answer:
+
+- Which Python function receives the `emmy` shell command?
+- Which dependency group is needed for compiler work? Which one is needed for vLLM integration?
+- Where should a reusable function live, and why should it not live in `emmy/commands`?
+
+## Lesson 1 — Follow CLI dispatch without getting lost in argparse
+
+### Learn
+
+When you type `emmy compile`, the shell needs a Python function to receive that command. `emmy/emmy.py` is the
+**composition root**: the small place where the application's larger parts are connected. It creates a command-line
+parser, asks each command module to register its commands, configures log messages, and calls the selected handler.
+
+The parser comes from Python's `argparse` library. A **handler** is simply the function called for a command. Some
+handlers use `asyncio.run()` to call **asynchronous** code—code that can wait for slow operations, such as remote
+commands, without blocking all other work.
+
+Do not begin by reading every flag. First identify a command's registration function, its `handle_*` function, and the
+library entry point it calls. This separates interface mechanics from business behavior.
+
+### Read
+
+1. `emmy/emmy.py`: `main` and the command registration calls.
+2. `emmy/commands/ARCHITECTURE.md`: Layered Design and Layers.
+3. `emmy/commands/compile.py`: `register_compile_command`, `handle_compile`, `load_or_trace`, and `resolve_passes`.
+4. `emmy/commands/deploy/local.py`: registration, argument handling, hardware resolution, and delegation.
+5. `emmy/commands/bench/__init__.py`: `handle_bench` only; defer its collaborators until lessons 3–5.
+6. `emmy/config.py` and `emmy/redact.py`: configuration ownership and secret-handling boundaries.
+
+### Lab — build a command map
+
+Run these and compare the displayed subcommands with `main()`:
+
+```bash
+./venv/bin/emmy --help
+./venv/bin/emmy deploy --help
+./venv/bin/emmy compile --help
+./venv/bin/emmy bench --help
+```
+
+Then choose one command and write this four-line trace in your notes:
+
+```text
+register function -> argparse func -> handle function -> reusable library entry point
+```
+
+For `compile`, the trace ends in `Pipeline.build(...).run(...)`. For deployment commands, it ends in the deploy and
+provisioning libraries rather than in the command module itself.
+
+### Checkpoint
+
+You can explain why `emmy/emmy.py` imports many command modules but still contains almost no domain logic, and why
+`emmy/config.py` owns `EMMY_*` environment reads instead of each command reading `os.environ` independently.
+
+## Lesson 2 — Turn recipe YAML into typed variants
+
+### Learn
+
+A recipe is a YAML configuration file that describes what to run and how to run it. YAML is a human-readable format
+for nested lists and key/value settings. A recipe can also describe several experiments at once through its `matrices`
+section. Each final combination is a **variant**.
+
+`cross` produces every combination, like choosing every shirt with every pair of trousers. `zip` pairs values by their
+position, like pairing the first model setting with the first benchmark setting. Emmy expands those combinations before
+converting the raw data into validated Python objects:
+
+```mermaid
+flowchart LR
+    YAML[YAML recipe] --> Dict[Python dictionaries]
+    Dict --> Matrix[Expand cross and zip]
+    Matrix --> Override[Build nested overrides]
+    Override --> Merge[Merge with base settings]
+    Merge --> Validate[Validate values]
+    Validate --> Recipe[Typed Recipe object]
+```
+
+This order is important. It lets a matrix override a deeply nested field without duplicating the rest of the recipe,
+while ensuring every final variant receives the same validation.
+
+Named `LLMConfig` fields are **engine-independent**: the recipe expresses the desired behavior without using one
+server's exact command-line spelling. An **engine** is the program that actually runs model inference. Emmy supports
+engines such as vLLM and SGLang. `emmy/recipe/engines.py` maps shared settings to the flags understood by each engine.
+`extra_args` remains an escape hatch, but validation rejects flags that would duplicate a named field. This preserves
+one source of truth for GPU counts, context length, concurrency, and engine arguments.
+
+### Read
+
+1. `recipes/Qwen3-Embedding-0.6B/recipe.yaml`: a real inference recipe with `cross`, nested `zip`, and aggregation.
+2. `experiments/test_command/recipe.yaml`: a generic command workload.
+3. `emmy/recipe/types.py`: `Recipe`, `LLMConfig`, `ModelConfig`, `CommandConfig`, and `DeployConfig`.
+4. `emmy/recipe/matrix.py`: `expand_matrix`, `_expand_cross`, `_expand_zip`, `build_override`.
+5. `emmy/recipe/recipe.py`: `deep_merge`, `_validate_and_build`, `load_recipe`, `resolve_for_hardware`.
+6. `emmy/recipe/engines.py`: flag maps and `build_engine_args`.
+7. `emmy/recipe/ARCHITECTURE.md`: use it to resolve edge cases after reading the implementation path.
+
+### Lab — inspect expansion directly
+
+```bash
+./venv/bin/python - <<'PY'
+import yaml
+from emmy.recipe.matrix import expand_matrix
+
+with open("recipes/Qwen3-Embedding-0.6B/recipe.yaml") as f:
+    raw = yaml.safe_load(f)
+
+combinations = expand_matrix(raw["matrices"])
+print("variant count:", len(combinations))
+for item in combinations[:4]:
+    print(item)
+PY
+```
+
+Predict the count before running it: two GPUs × two input lengths × two zipped engine configurations equals eight.
+Then run the tests that pin the combinator semantics:
+
+```bash
+./venv/bin/pytest tests/recipe/test_matrix.py tests/recipe/test_engines.py -q
+```
+
+### Implementation exercise
+
+On paper, add `benchmark.max_concurrency: [8, 32]` as an independent cross axis. Determine the new variant count. Then
+decide how the answer changes if it is placed inside the existing `zip` block. Do not edit the real recipe yet.
+
+### Checkpoint
+
+You can explain:
+
+- Why matrix expansion returns flat dot-path dictionaries before `build_override` nests them.
+- Why `deep_merge` is necessary instead of a shallow dictionary update.
+- How one `LLMConfig` becomes different vLLM and SGLang command-line flags.
+- Why inference and command recipes are mutually exclusive.
+
+## Lesson 3 — Turn variants into scheduled benchmark work
+
+### Learn
+
+After recipe expansion, Emmy must decide which tests can share a machine. A `BenchmarkTask` is one recipe variant that
+can be run. An `ExecutionGroup` is a set of tasks placed on the same VM, or virtual machine. A VM is a software-created
+computer, often rented from a cloud provider.
+
+The **planner** is the code that groups tasks. It groups inference tasks by model and GPU so the same downloaded model
+weights can be reused. It chooses a VM large enough for the most demanding task and runs larger tasks first. Command
+recipes group by GPU because they have no model weights to reuse.
+
+`gpu_concurrency` splits a logical group across several VMs. This can finish sooner, but it may download the same model
+more than once and cost more. `max_workers` is different: it limits how many already-planned groups may run at the same
+time.
+
+### Read
+
+1. `emmy/benchmark/tasks.py`: `enumerate_tasks`.
+2. `emmy/planner/__init__.py`: `BenchmarkTask`, `ExecutionGroup`, and `BenchmarkPlanner`.
+3. `emmy/planner/variant.py`: labels and stable variant identity.
+4. `emmy/planner/group_by_model_and_gpu.py`: grouping, sorting, and splitting.
+5. `emmy/commands/bench/__init__.py`: from task enumeration through group planning.
+6. `tests/planner/test_planner.py`: executable examples of every grouping rule.
+
+### Lab — enumerate and plan without provisioning
+
+```bash
+./venv/bin/python - <<'PY'
+from emmy.benchmark.tasks import enumerate_tasks
+from emmy.planner.group_by_model_and_gpu import GroupByModelAndGpuPlanner
+
+tasks = enumerate_tasks(["recipes/Qwen3-Embedding-0.6B"])
+groups = GroupByModelAndGpuPlanner().plan(tasks)
+print("tasks:", len(tasks), "groups:", len(groups))
+for group in groups:
+    print(group.label, len(group.tasks), group.tasks[0].model_name)
+PY
+```
+
+Run the planner tests, then repeat the snippet with `GroupByModelAndGpuPlanner(gpu_concurrency=2)`:
+
+```bash
+./venv/bin/pytest tests/planner/test_planner.py -q
+```
+
+### Checkpoint
+
+Given a list of variants, you can predict how many tasks and groups will be created, which tasks share a VM, how the
+group's GPU count is chosen, and what changes when `gpu_concurrency` increases.
+
+## Lesson 4 — Follow one benchmark execution group end to end
+
+### Learn
+
+The **control plane** coordinates benchmark work; it does not perform the model's mathematics. Its central function,
+`run_execution_group`, receives an existing machine or provisions a cloud VM, prepares that machine, and runs every
+task in the group. **Provisioning** means obtaining and preparing a machine. **Deployment** means starting the workload
+on a machine that is already available.
+
+```mermaid
+flowchart LR
+    Allocate[Get a machine] --> Prepare[Prepare software]
+    Prepare --> Deploy[Start model server]
+    Deploy --> Smoke[Run a quick smoke test]
+    Smoke --> Benchmark[Measure the workload]
+    Benchmark --> Save[Save structured results]
+    Save --> Cleanup[Stop services and release resources]
+```
+
+A **smoke test** is a small request that catches obvious startup failures before a longer benchmark. **Teardown** is
+the cleanup step that stops services and, when appropriate, releases the machine. Command tasks instead upload needed
+files, run their command template, and retrieve the declared result files.
+
+The same `PhaseTimer` travels through this path. Provisioning time is incurred once per group but copied into each task
+result, making a task's result reflect the cost of obtaining its host. Model-load subphases are parsed from engine logs
+but excluded from the top-level total to avoid double counting.
+
+### Read
+
+1. `emmy/benchmark/execution.py`: `run_execution_group`; read one branch at a time.
+2. `emmy/benchmark/workload.py`: inference benchmark command construction.
+3. `emmy/benchmark/command_workload.py`: template variables, staging, and result retrieval.
+4. `emmy/benchmark/results.py`: parsing and result composition.
+5. `emmy/timing.py`: `PhaseTimer` and phase constants.
+6. `emmy/commands/ARCHITECTURE.md`: Data Flow and Timing metrics.
+
+### Lab — use tests as a side-effect-free execution trace
+
+```bash
+./venv/bin/pytest \
+  tests/benchmark/test_command_workload.py \
+  tests/benchmark/test_results.py \
+  tests/deploy/test_log_phases.py -q
+```
+
+Open one result manifest and compare its persisted identity with `BenchmarkTask.to_dict`:
+
+```bash
+sed -n '1,200p' results/qwen3_coder_awq_sglang_vs_vllm/manifest.json
+```
+
+### Trace exercise
+
+Draw the failure boundary around each of these phases: VM provisioning, remote bootstrap, image pull, model download,
+model warmup, smoke test, benchmark, and teardown. For each boundary, locate the function that records or propagates
+failure. This is more useful than reading `execution.py` linearly because it reveals what the orchestrator guarantees.
+
+### Checkpoint
+
+You can narrate an `ExecutionGroup` from allocation to cleanup and distinguish benchmark duration measured by the
+server from wall-clock phase timing measured by the orchestrator.
+
+## Lesson 5 — Separate deployment from provisioning
+
+### Learn
+
+Provisioning obtains and prepares a machine. Deployment places a model-serving workload on a machine that already has
+an address. Keeping them separate lets a laptop, an existing SSH server, and a newly created cloud VM use the same
+deployment code. **SSH** is a secure protocol for running commands on another computer.
+
+The provisioning orchestrator enumerates provider candidates from `emmy/hardware.py`, retries transient failures,
+advances on capacity exhaustion, and stops on terminal errors. Provider adapters must uphold the orphan-cleanup
+invariant: returning a `VMConnectionInfo` transfers ownership to the caller; raising means the provider has already
+cleaned up any partially created instance.
+
+Deployment converts a typed recipe into engine arguments and Docker Compose. **Docker** runs applications in isolated
+packages called containers; **Docker Compose** describes how several containers should run together. Deployment pulls
+images, obtains model data, starts services, waits for health, runs a task-aware smoke test, and exposes teardown through the same transport
+abstraction. Multi-instance configurations add nginx and use a scale-out strategy.
+
+### Read
+
+1. `emmy/provisioning/ARCHITECTURE.md`: allocation model, error contract, and orphan cleanup.
+2. `emmy/hardware.py`: GPU names, provider instance choices, and zones.
+3. `emmy/provisioning/candidates.py`: candidate ordering.
+4. `emmy/provisioning/cloud.py`: `provision_cloud_vm` and `_provision_candidate`.
+5. `emmy/provisioning/host.py` and `remote.py`: existing-host command execution and bootstrap.
+6. `emmy/deploy/params.py`: the data passed into deployment.
+7. `emmy/deploy/compose.py`: `generate_compose` and `generate_nginx_conf`.
+8. `emmy/deploy/orchestrate.py`: `run_deploy`, smoke checks, `deploy`, and `teardown`.
+9. `emmy/deploy/scale_out.py`: data-parallel and replica-parallel transformation.
+
+### Lab — inspect generated infrastructure without starting it
+
+```bash
+./venv/bin/pytest \
+  tests/provisioning/test_candidates.py \
+  tests/provisioning/test_provision_fallback.py \
+  tests/deploy/test_compose.py \
+  tests/deploy/test_scale_out.py -q
+```
+
+Then generate Compose in memory and inspect the first service:
+
+```bash
+./venv/bin/python - <<'PY'
+import yaml
+from emmy.deploy.compose import generate_compose
+from emmy.recipe.recipe import resolve_for_hardware
+
+recipe = resolve_for_hardware(
+    "recipes/Qwen3-Embedding-0.6B",
+    "NVIDIA GeForce RTX 5090",
+)
+text = generate_compose(recipe, "/hf_models", "example-token")
+doc = yaml.safe_load(text)
+name, service = next(iter(doc["services"].items()))
+print(name)
+print(service["image"])
+print(service["command"])
+PY
+```
+
+Use only a fake token in this inspection. Secret redaction protects logs, but a real credential is unnecessary here.
+
+### Checkpoint
+
+You can explain where provider fallback ends, who owns VM deletion after a successful create, why local deployment
+cannot install drivers with sudo, and how a `Recipe` becomes a Docker Compose service.
+
+## Lesson 6 — Understand the compiler's permanent data model
+
+### Learn
+
+A compiler translates a program from one form into another. Emmy translates PyTorch operations into CUDA. During this
+translation it uses an **intermediate representation (IR)**—an internal description that is easier for compiler code
+to analyze than the original Python.
+
+Emmy keeps one `Graph` throughout the compiler. A graph contains **nodes** (operations) connected by data-flow edges
+(values moving between operations). A **pass** is one compiler phase, and a **dialect** is the vocabulary allowed at a
+particular IR stage. Passes replace or splice node operations as the dialect becomes more hardware-specific. This lets
+graph structure, symbolic shapes, identity, and debugging metadata stay consistent across the compiler.
+
+Important invariants:
+
+- Shape belongs to `node.output`, not to the operation.
+- Every shape extent is a `Dim`, backed by a static or symbolic expression.
+- `Graph.splice` is the functional rewrite primitive; direct op replacement is the in-place lowering primitive.
+- `Graph.structural_key` ignores cosmetic names but includes codegen-relevant structure and dataflow.
+- `Hints` carry metadata such as provenance without changing semantic identity.
+
+### Read
+
+1. `emmy/compiler/graph.py`: `Hints`, `Node`, `Graph.add_node`, `Graph.splice`, `Graph.topological_order`.
+2. Continue in `graph.py`: symbolic bindings, `structural_key`, serialization, and pretty printing.
+3. `emmy/compiler/tensor.py`: tensor metadata.
+4. `emmy/compiler/dim.py`: `Dim`, arithmetic, hints, and static/symbolic accessors.
+5. `emmy/compiler/ir/expr.py`: the expression language used by dimensions, indices, and conditions.
+6. `emmy/compiler/structural.py`: the structural hashing protocol.
+7. `tests/compiler/ir/test_graph.py`, `test_graph_splice.py`, and `test_shape_inference.py`.
+
+### Lab — observe graph structure before lowering
+
+```bash
+./venv/bin/emmy trace \
+  --code "nn.RMSNorm(16)(torch.randn(2, 8, 16))" \
+  --output /tmp/emmy-rmsnorm-torch.json
+./venv/bin/emmy inspect /tmp/emmy-rmsnorm-torch.json
+sed -n '1,100p' /tmp/emmy-rmsnorm-torch.json
+```
+
+Run the graph-focused tests:
+
+```bash
+./venv/bin/pytest \
+  tests/compiler/ir/test_graph.py \
+  tests/compiler/ir/test_graph_splice.py \
+  tests/compiler/ir/test_graph_structural_key.py \
+  tests/test_dim_arithmetic.py -q
+```
+
+### Implementation exercise
+
+Trace the fields that would change if an input dimension changed from `Dim(32)` to `Dim("seq_len")`. Follow the
+symbol from tensor shape, through `Graph.symbolic_bindings`, to runtime evaluation in the CUDA program. This prepares
+you for dynamic serving in lesson 12.
+
+### Checkpoint
+
+You can explain why mutable graphs require an uncached structural key, why names are excluded from it, and how a
+symbolic dimension remains an expression until launch time.
+
+## Lesson 7 — Trace PyTorch and decompose compound operations
+
+### Learn
+
+**Tracing** observes a PyTorch program with example inputs and captures the operations it performs. PyTorch represents
+the result as an FX graph. **ATen** is the lower-level operation library underneath much of PyTorch. Emmy maps supported
+ATen operations into recognizable frontend operations.
+
+Frontend operations preserve concepts such as linear layers, RMSNorm, softmax, and attention. **Decomposition** breaks
+those compound operations into simpler primitives: elementwise work applies the same calculation to each value; a
+reduction combines values, such as a sum; and an index map changes how coordinates refer to data. Gathers, scatters,
+and scans cover less regular ways of reading, writing, or repeatedly combining data.
+
+HuggingFace tracing needs a wrapper because model code builds masks and rotary embeddings dynamically. The wrapper
+precomputes or slices those values in a trace-friendly way, and `stamp_sliding_windows` restores architecture metadata
+that tracing would otherwise erase.
+
+### Read
+
+1. `emmy/compiler/trace/ARCHITECTURE.md` from top to bottom.
+2. `emmy/compiler/trace/torch.py`: `trace_module`, FX walking, and a few handlers for familiar ATen ops.
+3. `emmy/compiler/trace/huggingface.py`: full-model and layer wrappers.
+4. `emmy/compiler/ir/frontend/ir.py`: recognizable frontend operations.
+5. `emmy/compiler/ir/tensor/ir.py`: the primitive tensor dialect.
+6. `emmy/compiler/pipeline/passes/frontend/decomposition/080_rms_norm.py`.
+7. `emmy/compiler/pipeline/passes/frontend/decomposition/010_sdpa.py`.
+8. `emmy/compiler/pipeline/passes/frontend/decomposition/_broadcast.py`.
+
+### Lab — compare two IR stages
+
+```bash
+./venv/bin/emmy compile \
+  -c "nn.RMSNorm(16)(torch.randn(2, 8, 16))" \
+  --ir torch --output /tmp/emmy-rmsnorm-frontend.txt
+./venv/bin/emmy compile \
+  -c "nn.RMSNorm(16)(torch.randn(2, 8, 16))" \
+  --ir tensor --output /tmp/emmy-rmsnorm-tensor.txt
+sed -n '1,120p' /tmp/emmy-rmsnorm-frontend.txt
+sed -n '1,160p' /tmp/emmy-rmsnorm-tensor.txt
+```
+
+Use a verbose diff to see rules rather than only final graphs:
+
+```bash
+./venv/bin/emmy compile \
+  -c "F.silu(torch.randn(2, 8))" \
+  --ir tensor -vv --color never
+```
+
+Then run:
+
+```bash
+./venv/bin/pytest \
+  tests/compiler/trace/test_torch.py \
+  tests/compiler/passes/test_decompose_rules.py \
+  tests/compiler/passes/test_optimization_rules.py -q
+```
+
+### Checkpoint
+
+You can distinguish capture from decomposition, explain why broadcasting is made explicit with `IndexMapOp`, and
+describe why a causal mask or correct rotary constants matter even when a uniform-input accuracy test seems to pass.
+
+## Lesson 8 — Lift tensor primitives into loops and fuse kernels
+
+### Learn
+
+**Loop lifting** translates whole-tensor operations into explicit loops, reads, calculations, and writes. **Fusion**
+then combines compatible operations so they can run as one GPU function instead of writing and rereading temporary
+results. That GPU function is called a **kernel**. After fusion, one `LoopOp` represents one future kernel.
+
+Loop statements are frozen dataclasses and `Body` is an immutable tuple. Rewrites create replacement statements rather
+than mutating nested control flow. `LoopOp.forward` renders the body to C++ and runs it through cppyy, providing a CPU
+reference for fused semantics. This creates a powerful fault-isolation triangle:
+
+```text
+numpy differs from loop -> decomposition or fusion problem
+loop differs from CUDA  -> scheduling, lowering, codegen, or dispatch problem
+```
+
+### Read
+
+1. `emmy/compiler/ir/loop/ir.py`: `LoopOp` and exported statement types.
+2. `emmy/compiler/ir/stmt/`: `Body`, `Loop`, `Load`, `Assign`, `Accum`, `Write`, and normalization helpers.
+3. `emmy/compiler/pipeline/passes/loop/lifting/010_lift_elementwise.py`.
+4. `emmy/compiler/pipeline/passes/loop/lifting/020_lift_reduce.py`.
+5. `emmy/compiler/pipeline/passes/loop/fusion/010_merge_loop_ops.py`.
+6. `emmy/compiler/ir/loop/runner.py`: CPU execution of fused bodies.
+7. `emmy/compiler/backend/loop/backend.py`: how the loop backend composes passes and the shared interpreter.
+
+### Lab — inspect and execute loop semantics
+
+```bash
+./venv/bin/emmy compile \
+  -c "(torch.randn(4, 8) + torch.randn(4, 8)).sum(-1)" \
+  --ir loop
+./venv/bin/pytest \
+  tests/compiler/ir/test_loop_op.py \
+  tests/compiler/passes/test_fusion_rules.py \
+  tests/compiler/passes/test_pipeline_semantics.py -q
+```
+
+In the printed loop IR, identify the free axes, reduction axis, loads, accumulator identity, and final write. Count the
+`LoopOp` nodes before and after fusion to verify the one-kernel intent.
+
+### Checkpoint
+
+You can translate a simple reduction into loop statements, explain why statement immutability helps structural
+comparison, and use the numpy/loop/CUDA triangle to narrow a correctness bug.
+
+## Lesson 9 — Understand rewrite rules, forks, and provenance
+
+### Learn
+
+The compiler **pipeline** is the ordered sequence of passes. A rewrite rule recognizes a known pattern and replaces it
+with an equivalent representation. A `Pattern` matches an operation chain, a `Match` gives
+the rewrite access to graph nodes, and a rule returns one of three shapes:
+
+- A graph fragment for functional splicing.
+- An operation for an in-place rebind.
+- A list or lazy fork of valid alternatives for tuning.
+
+Rules must be idempotent because the engine can revisit the pipeline from its beginning. `Run.resolve` chooses one path
+deterministically for normal compilation. `Run.drive` explores paths for tuning.
+
+**Provenance** is metadata that links generated kernels back to original frontend operations. Decomposition creates pieces;
+fusion aggregates them; lowering keeps the metadata attached. It drives stable kernel names and per-kernel PyTorch
+reproducers without entering cache keys.
+
+### Read
+
+1. `emmy/compiler/pipeline/ARCHITECTURE.md`: Parts 1, 2, and 4.
+2. `emmy/compiler/pipeline/pipeline.py`: `Pattern`, `Rule`, `Pass.load`, `Pipeline.build`, `Run._step`, `Run.resolve`.
+3. `emmy/compiler/pipeline/fork.py`: `OptionFork`, `ThunkFork`, and lazy fork trees.
+4. `emmy/compiler/pipeline/knob.py`: knob descriptors and environment pinning.
+5. `emmy/compiler/provenance.py`: propagation, coverage, and naming.
+6. `emmy/compiler/pipeline/dump.py`: post-pass artifacts and PyTorch reproducers.
+7. `tests/compiler/passes/test_matcher.py` and `tests/compiler/ir/test_provenance.py`.
+
+### Lab — watch the rewrite engine
+
+```bash
+./venv/bin/emmy compile \
+  -c "torch.matmul(torch.randn(8, 16), torch.randn(16, 4))" \
+  --ir loop -vv --color never --diff-context 1
+```
+
+Choose one `>>>`/`<<<` rule block and answer:
+
+1. What pattern matched?
+2. Did it splice a graph or replace an operation in place?
+3. What makes the rule inapplicable to its own output?
+4. Which original operation name should survive into the final kernel?
+
+Run the focused tests:
+
+```bash
+./venv/bin/pytest \
+  tests/compiler/passes/test_matcher.py \
+  tests/compiler/ir/test_provenance.py \
+  tests/compiler/passes/test_loop_naming.py -q
+```
+
+### Checkpoint
+
+You can describe the three rewrite return forms, explain the idempotence requirement, and trace a kernel name back to
+the frontend operations it implements.
+
+## Lesson 10 — Lower algebra into GPU schedules and CUDA
+
+### Learn
+
+**Lowering** means translating into a more detailed, machine-oriented form while preserving the answer. Tile lowering
+recognizes the algebra in a loop body and attaches a **schedule**: the plan that assigns calculations and data movement
+to GPU hardware. A **tile** is a small piece of a larger tensor calculation that can fit in faster memory.
+
+The key classification comes from how a reduction combines partial results (its **carrier**) and what job each loop
+axis performs, rather than from tensor dimension names:
+
+- A map is pointwise work.
+- A planar monoid is an ordinary reduction, such as sum or maximum, whose partial results combine directly.
+- A twisted carrier keeps several related values so numerically stable softmax or attention results can be combined.
+- A contraction repeatedly multiplies values and adds the products, as in matrix multiplication.
+
+The Tile IR records structural work and scheduling choices. Kernel lowering binds that schedule to threads, blocks,
+shared memory, cooperative reductions, tensor-core atoms, and synchronization. CUDA lowering renders the resulting
+kernel statement tree to source.
+
+Canonical pass lists in `emmy/compiler/pipeline/__init__.py` define the stages:
+
+```text
+TENSOR_PASSES -> LOOP_PASSES -> TILE_PASSES -> KERNEL_PASSES -> CUDA_PASSES
+```
+
+### Read
+
+1. `emmy/compiler/ir/ARCHITECTURE.md`: Dialects at a glance and stage invariants.
+2. `emmy/compiler/pipeline/__init__.py`: canonical pass lists.
+3. `emmy/compiler/pipeline/passes/ARCHITECTURE.md`: no shape-specific pattern matching and cut versus split.
+4. `emmy/compiler/ir/tile/ir.py` and `tile/ops.py`: structural nodes, schedules, and lowering.
+5. `emmy/compiler/pipeline/passes/lowering/tile/010_recognize.py` and `_schedule.py`.
+6. `emmy/compiler/pipeline/passes/lowering/kernel/ARCHITECTURE.md`: materialization, factorization, and staging.
+7. `emmy/compiler/ir/kernel/ir.py` and `render.py`.
+8. `emmy/compiler/pipeline/passes/lowering/cuda/010_lower_kernelop.py`.
+
+### Lab — compare the final four stages
+
+```bash
+for stage in loop tile kernel cuda; do
+  ./venv/bin/emmy compile \
+    -c "torch.matmul(torch.randn(8, 16), torch.randn(16, 4))" \
+    --ir "$stage" --target sm_80 --output "/tmp/emmy-matmul-$stage.txt"
+  sed -n '1,100p' "/tmp/emmy-matmul-$stage.txt"
+done
+```
+
+The `--target sm_80` argument makes hardware-feature decisions explicit without requiring the command to probe a live
+card. The command renders CUDA but does not execute it.
+
+Run GPU-independent structure tests:
+
+```bash
+./venv/bin/pytest \
+  tests/compiler/ir/tile/test_structural_reduction.py \
+  tests/compiler/ir/tile/test_codec_roundtrip.py \
+  tests/compiler/passes/test_recognize_boundary_rules.py -q
+```
+
+### Checkpoint
+
+You can identify which stage decides algebraic structure, which stage chooses scheduling, which stage materializes
+hardware operations, and which stage merely renders CUDA. You can also explain why rules should dispatch on algebra
+rather than recognizing one hard-coded model shape.
+
+## Lesson 11 — Compile, allocate, launch, and benchmark CUDA programs
+
+### Learn
+
+The CUDA **backend** is the part of Emmy that turns the final compiler representation into an executable GPU program.
+`CudaBackend.compile` runs the complete lowering pipeline. At runtime, Emmy compiles unique kernels with `nvcc` when
+possible and falls back to NVRTC when necessary. Both are NVIDIA CUDA compilers. A **cache** keeps compiled results so
+unchanged kernels do not need to be compiled again.
+The runtime constructs a static launch plan from kernel arguments and launch geometry.
+
+Buffer management is part of the architecture, not a minor optimization:
+
+- Inputs, constants, and outputs remain independently persistent.
+- Scratch tensors receive live intervals and share one slab when their lifetimes do not overlap.
+- `BufferArena` lets sequential programs share capacity across model layers.
+- `CompiledProgram.rebind` changes request inputs while retaining weights.
+- Symbolic serving builds capacity-sized buffers, sets real dimension values, uploads prefixes, and caches a captured
+  CUDA graph per sequence length.
+
+Benchmarking runs in an isolated worker when requested so a hung kernel can be killed without permanently wedging the
+parent process. Per-kernel timings and whole-program timings have different semantics; multi-launch comparisons prefer
+the captured whole-program window.
+
+### Read
+
+1. `emmy/compiler/backend/ARCHITECTURE.md`: shared backend contract and correctness triangle.
+2. `emmy/compiler/backend/cuda/ARCHITECTURE.md`: Compile and Dispatch.
+3. `emmy/compiler/backend/cuda/backend.py`: `CudaBackend.compile`, `run`, and `benchmark_async`.
+4. `emmy/compiler/backend/cuda/nvcc.py`: cubin keys, compiler flags, and fallback.
+5. `emmy/compiler/backend/cuda/_planner.py`: scratch live intervals and offsets.
+6. `emmy/compiler/backend/cuda/program.py`: `_compile`, allocation, `CompiledProgram`, capture, and benchmark paths.
+7. `emmy/compiler/backend/cuda/_bench_worker.py`: isolated job boundary.
+
+### Lab — runtime structure
+
+CPU-safe tests:
+
+```bash
+./venv/bin/pytest \
+  tests/compiler/backend/test_planner.py \
+  tests/compiler/backend/test_dtype_numpy.py \
+  tests/compiler/backend/test_torch_ref.py -q
+```
+
+**GPU:** compile, execute, check accuracy, and benchmark a small operation:
+
+```bash
+./venv/bin/emmy run \
+  -c "nn.RMSNorm(256)(torch.randn(4, 256, device='cuda', dtype=torch.float16))" \
+  --bench --warmup 5 --iters 20
+```
+
+If this fails, use the fault-isolation order: inspect final CUDA, compare loop versus numpy, then inspect CUDA dispatch
+and emitted launch geometry. Do not begin by changing tile heuristics.
+
+### Checkpoint
+
+You can explain why scratch buffers may safely alias, what invalidates captured graphs, why exact sequence lengths have
+separate captured graphs, and why a sum of isolated kernel timings is not the same as a whole-program measurement.
+
+## Lesson 12 — Understand tuning as search plus persistent evidence
+
+### Learn
+
+Some compiler choices have many correct answers but different speeds. **Autotuning** tries alternatives and measures
+them. A **fork** is a decision point, and a **knob** is one named choice such as tile size or memory strategy.
+
+`emmy tune` explores the resulting fork tree with MCTS, benchmarks
+terminal kernels, writes measurements to SQLite, and trains an online latency prior. Normal `compile` and `run` do not
+benchmark; they resolve forks greedily using available evidence and the prior.
+
+MCTS, or **Monte Carlo tree search**, balances promising known choices with less-tested alternatives. A **prior** in
+Emmy is a ranker that estimates which schedule will be faster before that exact candidate is measured. SQLite is a
+small database stored in one local file.
+
+The identity model has two layers:
+
+- Structural identities deduplicate equivalent graphs and operations.
+- Context and feature keys separate measurements whose GPU, compiler flags, shapes, or scheduling context differ.
+
+Golden configurations are verified reference points and A/B integrity gates. They are consulted as deployment
+evidence but are not training rows for the online prior. `-O1` tune measurements accelerate compiler iteration and
+rank candidates; deployable `-O3` evidence remains a distinct lane.
+
+The dedicated [How Emmy Chooses Fast GPU Schedules](./prior_and_goldens) chapter traces this hierarchy from a compiler fork through
+feature construction, MCTS labels, persistence, live-card matching, and safe golden recording.
+
+### Read
+
+1. `emmy/compiler/pipeline/ARCHITECTURE.md`: Parts 3–7 and Tunable knobs.
+2. `emmy/compiler/pipeline/search/space.py`: the single declaration site for concrete knobs and value grids.
+3. `emmy/compiler/pipeline/search/policy/mcts.py`: exploration policy.
+4. `emmy/compiler/pipeline/search/policy/greedy.py`: deployment-time resolution.
+5. `emmy/compiler/pipeline/search/db.py`: persistent measurements.
+6. `emmy/compiler/pipeline/search/prior/`: offline, online, and fallback ranking.
+7. `emmy/compiler/pipeline/search/two_level.py`: structural outer search and per-operation inner tuning.
+8. `emmy/commands/tune.py` and `emmy/commands/eval.py`: user-facing drivers.
+
+### Lab — inspect the search system without tuning a GPU
+
+```bash
+./venv/bin/emmy eval knobs
+./venv/bin/pytest \
+  tests/compiler/pipeline/test_knob.py \
+  tests/compiler/pipeline/search/test_db.py \
+  tests/compiler/pipeline/search/test_online_prior.py \
+  tests/compiler/pipeline/search/test_two_level.py -q
+```
+
+**GPU:** use a tiny target and a separate database while learning:
+
+```bash
+EMMY_TUNE_DB=/tmp/emmy-course-tune.db \
+  ./venv/bin/emmy tune \
+  -c "nn.RMSNorm(256)(torch.randn(4, 256, device='cuda', dtype=torch.float16))" \
+  --patience 8
+```
+
+Afterward, use `emmy eval` subcommands to inspect what was recorded. Keep the temporary DB separate from a production
+tuning cache until you understand the evidence and compiler-flag keys.
+
+### Checkpoint
+
+You can distinguish a rule fork from a knob, exploration from greedy resolution, offline from online priors, and
+ranking measurements from deployable measurements.
+
+## Lesson 13 — Bridge compiled programs into vLLM serving
+
+### Learn
+
+The serving package is a vLLM **plugin**, an extension loaded by another application. vLLM continues to own the
+OpenAI-compatible web API, **tokenization** (turning text into integer pieces), request scheduling, and pooling or
+generation shell. Emmy replaces the transformer trunk—the repeated main body of the model—with compiled programs.
+
+An **embedding** is a list of numbers representing an input's features or meaning. The embedding path is:
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant vLLM
+    participant Emmy
+    participant GPU
+    Client->>vLLM: Send text to the embeddings API
+    vLLM->>vLLM: Convert text to tokens and batch requests
+    vLLM->>Emmy: Pass packed token IDs and positions
+    Emmy->>Emmy: Separate sequences and choose a compiled program
+    Emmy->>GPU: Replay the exact-length CUDA graph
+    GPU-->>Emmy: Return hidden-state tensors
+    Emmy-->>vLLM: Share GPU data through DLPack
+    vLLM-->>Client: Pool values and return embeddings
+```
+
+**DLPack** is a standard that lets libraries share tensor memory without copying it through the CPU. **Pooling** reduces
+the model's per-token values into one embedding for each input.
+
+The runner compiles dynamic-sequence programs, binds model weights, owns capacity buffers, and reuses captured CUDA
+graphs. Torch and cupy exchange device arrays through DLPack. Positions still touch the host to identify packed spans.
+
+The experimental generation path uses a related model and runner but leaves vLLM in charge of scheduler, sampler,
+paged KV cache, and language-model head while Emmy executes embedding and transformer-layer work.
+
+### Read
+
+1. `emmy/serving/ARCHITECTURE.md`: module map, execution model, constraints, and testing.
+2. `pyproject.toml`: the `vllm.general_plugins` entry point.
+3. `emmy/serving/__init__.py`: plugin registration.
+4. `emmy/serving/packed.py`: packed sequence boundaries.
+5. `emmy/serving/vllm_model.py`: `EmmyEmbedModel` and vLLM's model interface.
+6. `emmy/serving/runner.py`: `EmmyForwardRunner.create` and forward paths.
+7. `emmy/serving/vllm_model_gen.py` and `gen_runner.py`: experimental generation integration.
+8. `emmy/commands/serve.py`: process mode, stock baseline, health polling, and one-shot benchmark mode.
+
+### Lab — learn the boundary before loading a model
+
+```bash
+./venv/bin/pytest tests/serving/test_packed.py tests/serving/test_serve_command.py -q
+```
+
+Inspect the exact flags Emmy adds:
+
+```bash
+./venv/bin/emmy serve --help
+```
+
+**GPU + vLLM:** the integration tests are intentionally excluded from the default suite because they download models,
+compile whole trunks, and require substantial free GPU memory:
+
+```bash
+./venv/bin/pytest tests/serving/test_vllm_plugin_gpu.py -m perf -v
+```
+
+### Checkpoint
+
+You can draw the ownership line between vLLM and Emmy, explain why `--enforce-eager` is required, and describe how a
+packed batch becomes one or more exact-length compiled-program replays.
+
+## Lesson 14 — Read the tests as the architecture's executable specification
+
+### Learn
+
+The test tree mirrors the source tree and deliberately separates several confidence levels:
+
+- Pure unit tests cover recipes, planners, graph operations, passes, providers, and rendering.
+- CLI dry-run tests cover argument parsing and orchestration without external side effects.
+- Compiler semantic tests compare numpy, loop, and CUDA layers.
+- GPU correctness tests skip when CUDA is unavailable.
+- `perf` tests are opt-in because they need stable, exclusive GPU resources or expensive model startup.
+
+The compiler suite favors parameterized coverage matrices over one file per feature. A new capability normally extends
+the nearest algebra or execution-regime matrix. This keeps interactions—static versus dynamic shapes, scalar versus
+tensor-core tiers, staging transports, and reduction strategies—visible.
+
+### Read
+
+1. `tests/ARCHITECTURE.md`: overview, test layers, fixtures, conventions, and CUDA scheduling.
+2. `tests/conftest.py`: root fixtures and xdist grouping.
+3. `tests/compiler/conftest.py`: backend fixtures and hardware gates.
+4. `tests/compiler/e2e/test_matmul_coverage.py`.
+5. `tests/compiler/e2e/test_reduce_coverage.py`.
+6. `tests/compiler/e2e/test_attention_coverage.py`.
+7. One test file matching the subsystem you expect to change first.
+
+### Lab — run confidence in layers
+
+```bash
+# Fast, CPU-oriented architecture checks
+./venv/bin/pytest \
+  tests/architecture/test_layering.py \
+  tests/recipe \
+  tests/planner \
+  tests/provisioning/test_candidates.py -q
+
+# Full correctness lane; can compile CUDA and may take much longer
+make test
+
+# Formatting and static checks
+make lint
+```
+
+Before changing code, identify the narrowest existing test that describes the behavior. Add or adjust that test first,
+then run its directory, then the full required checks.
+
+### Checkpoint
+
+You can choose the right test layer for a recipe rule, provider failure, graph rewrite, CUDA lowering change, or vLLM
+integration and can explain why a performance-marked test should not silently carry ordinary correctness coverage.
+
+## Capstone A — explain one deployment on a whiteboard
+
+Choose `recipes/Qwen3-Embedding-0.6B` and produce a ten-minute explanation with no code open. Your explanation must
+include:
+
+1. Base recipe validation and eight-variant matrix expansion.
+2. Task creation, variant naming, and model/GPU grouping.
+3. Candidate allocation or fixed-host selection.
+4. Remote provisioning and ownership of cleanup.
+5. Engine-argument and Compose generation.
+6. Health and embedding smoke checks.
+7. The embedding benchmark command and result parsing.
+8. Phase timing, aggregation, and teardown.
+
+Then reopen the code and verify every arrow against one symbol. If an arrow requires a command-layer function to own
+business logic, revisit the layer boundary.
+
+## Capstone B — explain one operation from PyTorch to GPU
+
+Use this operation:
+
+```python
+nn.RMSNorm(256)(torch.randn(4, 256))
+```
+
+Produce artifacts for every stage:
+
+```bash
+for stage in torch tensor loop tile kernel cuda; do
+  ./venv/bin/emmy compile \
+    -c "nn.RMSNorm(256)(torch.randn(4, 256))" \
+    --ir "$stage" --target sm_80 --output "/tmp/emmy-rmsnorm-$stage.txt"
+done
+```
+
+For each transition, name the responsible pass, the main operation or statement types before and after it, and the
+invariant gained at that boundary. Finish by explaining how `CudaBackend` would compile, allocate, launch, and time the
+result.
+
+## Capstone C — make one safe change
+
+Pick one bounded change, such as a recipe validation case, a matrix edge case, a new result-parser label, or a pure IR
+pretty-print improvement. Use this sequence:
+
+1. Locate the nearest architecture document and existing test matrix.
+2. State the expected observable behavior.
+3. Add or update the narrow test.
+4. Make the smallest library-layer change.
+5. Run the narrow test and its containing subsystem.
+6. Read `STYLE.md`, `README.md`, `CLAUDE.md`, and the relevant architecture document to determine whether any became
+   inaccurate.
+7. Run `make test` and `make lint` before committing.
+
+Avoid using the capstone for a new CUDA scheduling strategy. That is a good later project, but it is too broad for a
+first contribution because it crosses algebra recognition, schedule search, kernel materialization, correctness, and
+performance evidence.
+
+## Final mental model
+
+When debugging or extending Emmy, first decide which dataflow you are in:
+
+| Question | Start here | Follow next |
+|---|---|---|
+| Why did this YAML produce these runs? | `recipe/matrix.py` | `benchmark/tasks.py`, planner |
+| Why did this host or provider get selected? | `provisioning/candidates.py` | `provisioning/cloud.py` |
+| Why did Docker start with these flags? | `recipe/engines.py` | `deploy/compose.py`, `deploy/orchestrate.py` |
+| Why is a result missing or mislabeled? | `benchmark/execution.py` | workload, results, planner variant |
+| Why did tracing produce this operation? | `compiler/trace` | frontend IR |
+| Why did an operation split or fuse? | pipeline rule diff | decomposition or fusion pass |
+| Why was this GPU schedule selected? | tile recognition and schedule | fork, knob, prior evidence |
+| Why is emitted CUDA wrong? | kernel IR and renderer | CUDA launch geometry and buffers |
+| Why does serving differ from a standalone run? | `serving/vllm_model.py` | runner, packed spans, captured programs |
+
+The shortest reliable route through the project is always the same: identify the entry point, follow typed data across
+one layer boundary at a time, and use the nearest tests to confirm each transition.

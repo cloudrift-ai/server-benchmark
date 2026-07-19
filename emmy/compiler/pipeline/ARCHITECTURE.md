@@ -230,7 +230,11 @@ an extent-coincident contraction — and within the rsqrt family a SECOND reduce
 the contraction beside the statistic reduce) marks the `"fused"` computed-A form, `is_warp` forced True since a
 computed-A contraction is a warp mma whose f32 statistic constants would otherwise read scalar;
 at the DEPLOY fork the flash op is recognized from its offer's `TILE@dd` + `TILE@pj` pair instead — the tile pass's
-restructured twisted op carries re-derived extents only, no histogram, so the stamp classifier cannot fire there)
+restructured twisted op carries re-derived extents only, no histogram, so the stamp classifier cannot fire there; and
+the computed-A norm→linear cone is recognized at the deploy fork from its mixed-dtype signature (f16/bf16 operands +
+the f32 statistic constant over an add-reduce) — its PRE-SPLIT fork carries only one reduce axis with the rsqrt still
+buried in the A sub-body, so the histogram misreads it as a plain scalar matmul, and it is rebuilt to the fused key
+so the norm→qkv cones join their goldens at cold deploy)
 and picks the offered candidate prefix-consistent with the fastest recorded entry — keys and values compare through
 the A/B pin gate's canonical matching. An axis-keyed golden key (a static attention golden's `TILE@dd` + `TILE@pj`)
 is all-or-nothing; a bare golden key on a multi-axis family carries the pin-resolution semantics — one plan,

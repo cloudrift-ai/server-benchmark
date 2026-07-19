@@ -110,6 +110,20 @@ dimensions, with OPPOSITE re-entry contracts — keep them apart:
   matmul has no mma tier), so it splits into **N single-channel matmuls** (each rides `d2/tma/ring` and beats cuBLAS)
   writing per-channel workspaces + a downstream pointwise **combine** kernel carrying the ⊗-combine (GeGLU) tail — the
   form that beats cuBLAS at prefill M (~270 vs ~317 µs eager on the 5090), which the fused computed-A megakernel can't.
+
+  Like `030_split_reduce`, this rule **decides nothing** — it realizes a decision already in the schedule.
+  `PLACE@cone` is a knob `010_recognize` enumerates as a fork sibling (a `cut`-stamped row beside the fused warp-mma
+  and coop-reduce rows) and stamps on the chosen op; `020_cut_edge` reads that stamp, exactly as `030_split_reduce`
+  reads the `GRID` reduce stage. That is what makes the placement selectable by the ordinary **evidence pick**: a
+  golden records `PLACE@cone: cut` against the cut's measured TOTAL (stat + cone + channels + combine), the same
+  whole-cost convention a split-K golden uses for partial+finalize, and `_golden_pick` compares it to the fused rows
+  like any other knob. No Σ-of-predictions structural pricing is involved.
+
+  **The cut row is evidence-only.** `greedy_decide` withholds it from the model fallback, so it can win only where it
+  was actually measured. This is a safety property, not a preference: the cut is catastrophic where its consumers have
+  no golden — the gemma-4 gate/up edge measures 35,558 / 71,160 / 142,702 µs at M=32/64/128 (the channel matmuls fall
+  to a scalar tile) against 368.7 µs at the seeded M=256. An unseeded shape simply never matches and stays fused, so
+  the choice is never made geometrically.
 - **`030_split_reduce`** splits the **reduce axis** (the REDUCE codec's `g<w>` cross-CTA shard): the SAME
   computation, its K partitioned across CTAs into a partial + finalize. It runs AFTER its decision — the `g` row was
   chosen FOR the split form — so the partial carries the decided knob row verbatim and the finalize is deliberately

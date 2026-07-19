@@ -58,6 +58,8 @@ the intent is to grow it toward ONE algorithmic algebra recognizer.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.expr import Var
@@ -76,7 +78,7 @@ from emmy.compiler.pipeline.passes.lowering.tile._flash import is_flash_score_pr
 from emmy.compiler.pipeline.passes.lowering.tile._schedule import prologue_knob_bases, schedule, warp_tile_pinned
 from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse
 from emmy.compiler.pipeline.pipeline import LoweringError
-from emmy.compiler.pipeline.search.space import place_decision
+from emmy.compiler.pipeline.search.space import PLACE, place_decision
 
 PATTERN = [Pattern("root", (LoopOp, TileOp))]
 
@@ -374,5 +376,20 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     if con and warp_tile_pinned():
         return con if len(con) > 1 else con[0]
     maps = _as_list(schedule(map_tile, loop.name, {**knob_base, **map_base}, ctx))
-    merged = [*maps, *con]
+    # The CUT sibling — the third form of this edge, beside the fused warp mma (``con``) and the
+    # fused coop reduce (``maps``): materialize the cone to a workspace and let the projection run
+    # as a plain gmem-A matmul. It is offered as a stamped ``PLACE@cone: cut`` ROW, not a Graph:
+    # the decision belongs in the schedule and ``020_cut_edge`` realizes it into the producer +
+    # consumer kernels — the same division of labour as ``REDUCE=g<n>k`` / ``030_split_reduce``.
+    # That keeps selection on the ordinary evidence pick (a golden records ``PLACE@cone: cut``
+    # against the cut's measured TOTAL, exactly as a split-K golden records partial+finalize), so
+    # no Σ-of-predictions structural pricing is involved and an unseeded shape simply never
+    # matches a cut golden — the cut can only win where it was actually measured to.
+    # ONE representative row suffices: the rewrite emits UN-mapped LoopOps that ``010`` re-enters
+    # per half, so this row's own schedule is discarded. Only offered unpinned — an explicit
+    # ``PLACE@cone`` pin is authoritative and never competes with a fork sibling.
+    cuts = []
+    if maps and PLACE.narrow_at("cone") not in ("fuse", "cut"):
+        cuts = [replace(maps[0], knobs={**maps[0].knobs, "PLACE@cone": "cut"})]
+    merged = [*maps, *con, *cuts]
     return merged if len(merged) > 1 else merged[0]

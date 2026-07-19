@@ -873,7 +873,10 @@ def prologue_knob_bases(k2: str, stat_axis: str) -> tuple[dict, dict]:
     the same key set (the evidence pick's prefix-consistency: an absent key reads as "free"). Lives
     here (not the rule module) for the same ``Knob``-import reason as :func:`warp_tile_pinned`."""
     con = {"PLACE@cone": "fuse", _at(REDUCE, stat_axis): ""}
-    map_ = {_at(TILE, k2): "", _at(STAGE, k2): "", _at(REDUCE, k2): ""}
+    # The map form spells ``PLACE@cone`` too, so the cone placement is a decided key on EVERY row
+    # of the merged fork — that is what makes it selectable by the ordinary evidence pick (an
+    # absent key reads as "free" and would let a ``cut`` golden match a fused row).
+    map_ = {"PLACE@cone": "fuse", _at(TILE, k2): "", _at(STAGE, k2): "", _at(REDUCE, k2): ""}
     return con, map_
 
 
@@ -1391,6 +1394,14 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         # (:func:`_splitk_option`, consumed by ``030_split_reduce``); a warp row through
         # :func:`_warp_option`; the rest through :func:`_tile_option`.
         rows, kaxis = _tile_rows(tile, place, ctx)
+        # Thread the cone placement onto every FORK ROW, not just the materialized op. The deploy
+        # pick builds its candidate rows from the fork tree's LEAF knobs, and an absent key reads as
+        # "free" in the evidence join — so leaving it off the contraction rows would let a golden
+        # recording ``PLACE@cone: cut`` match a fused row (deploying the fused kernel while
+        # reporting the cut's µs, the silent-wrong-deploy class). Constant across the rows, so it
+        # adds no branching to the tree.
+        if "PLACE@cone" in knobs:
+            rows = [{**r, "PLACE@cone": knobs["PLACE@cone"]} for r in rows]
         if not rows:
             # A computed-A (fused-cone) contraction with no legal warp row (fp32, no atoms, bad
             # geometry, over-budget slabs) contributes nothing — the recognizer's ``Map``-form

@@ -1282,6 +1282,28 @@ configs:
   # node can't ride d2/tma/ring), so a fused mlp_geglu.m256 golden would only ever record a losing config and muddy
   # the seeding. The perf form is the CUT (PLACE@cone=cut) into two single-channel matmuls + a GeGLU combine — its
   # consumers are anchored below as plain mlp_gate_up_split.m256 matmuls. (Decode M=32 DOES fuse — see mlp_geglu.m32.)
+  # It IS anchored as the CUT, below: `PLACE@cone` is a schedule knob (enumerated by 010_recognize, realized by
+  # 020_cut_edge — the same decide-in-the-schedule / realize-in-the-graph split as REDUCE=g<n>k / 030_split_reduce),
+  # so the placement is an ordinary knob the evidence pick selects. Recording it here is what makes greedy CHOOSE
+  # the cut at prefill M — previously only an EMMY_PLACE pin could. Seeded 2026-07-19 (3x, 0.5% spread): the cut
+  # runs 368.7 µs vs the fused form's ~899 at the same shape (2.4x), and 0.88x torch's unfused eager (326).
+  # The entry records ONLY the placement: 020_cut_edge re-emits both halves as UN-mapped LoopOps that 010 then
+  # recognizes and schedules independently, so the pre-cut row's own TILE/STAGE/REDUCE are discarded — pinning them
+  # here would over-constrain a schedule that no longer exists. emmy_us is the whole cut (stat + cone + 2 channel
+  # matmuls + combine), the same total-cost convention a split-K golden uses for partial+finalize.
+  # SAFETY: this golden is what makes the cut reachable, and ONLY at this shape. The cut is catastrophic where its
+  # consumers have no golden — the same edge at M=32/64/128 measures 35,558 / 71,160 / 142,702 µs, because the
+  # channel matmuls fall to a scalar tile. That is why the cut row is withheld from the model fallback in
+  # greedy_decide and can be selected by measured evidence alone: an unseeded M simply never matches and stays fused.
+  - kernel: mlp_geglu
+    name: gemma4_12b.mlp_geglu.m256.cut
+    M: 256
+    H: 3840
+    inter: 15360
+    dtype: 'fp16'
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 368.7
+    cublas_us: 326.0
   # The CUT (PLACE@cone=cut) consumer: ONE single-channel matmul (M=256, N=15360, K=3840) — the gate OR up half
   # after 020_cut_edge splits the multi-fold cone. A single-fold matmul reads a clean gmem A, so it rides
   # d2/tma/ring and BEATS cuBLAS in the FAST_MATH regime (f16acc 125.6 = 1.20x cuBLAS 151);

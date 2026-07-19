@@ -168,6 +168,24 @@ def test_decide_golden_overrides_model_argmin(monkeypatch):
     assert "pick" not in calls and "evidence_pick" not in calls
 
 
+def test_cut_row_is_evidence_only_never_a_model_pick(monkeypatch):
+    """``PLACE@cone=cut`` changes the KERNEL SET (020_cut_edge splits the cone into producer +
+    N consumers), so it must be selectable by measured evidence ALONE. The cut row is
+    knob-identical to its fused twin apart from the placement, so it ties on any model score and
+    would otherwise win on the content tie-break for no reason — and cold that is dangerous: a cut
+    whose consumers have no golden deploys them on a scalar tile (35 ms at the gemma-4 M=32 mlp
+    edge). With no golden the model must keep the fused row."""
+    fused = SimpleNamespace(knobs={**_ROW_GOLD, "PLACE@cone": "fuse"})
+    cut = SimpleNamespace(knobs={**_ROW_GOLD, "PLACE@cone": "cut"})
+
+    class TiePrior:  # every row scores identically — the tie-break is what decides
+        def mean_scores(self, rows):
+            return [1.0] * len(rows)
+
+    picked, _ = _decide_once(TiePrior(), monkeypatch, [], [fused, cut])
+    assert picked is fused, "the model fallback must never select a kernel-set-changing cut row"
+
+
 def test_decide_golden_beats_reservoir_evidence(monkeypatch):
     """Precedence: a golden outranks a reservoir -O3 evidence row for the same op —
     it is a verified, reproduced measurement; the reservoir row is one tune sample."""

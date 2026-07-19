@@ -713,6 +713,21 @@ def greedy_decide(
         if golden_state[0] is None:
             golden_state[0] = _golden_evidence_index(fp.ctx)
         got = _golden_pick(golden_state[0], rows, fp.node_id) if golden_state[0] else None
+        # A row that changes the KERNEL SET (``PLACE@cone=cut`` — realized by
+        # ``020_cut_edge`` into producer + N consumers) is offered to the EVIDENCE tiers above
+        # but withheld from the model fallback below: the per-op prior scores one kernel's knob
+        # row, so its number for a row that becomes several kernels is meaningless, and the cut
+        # row is knob-identical to its fused twin — it ties on score and can win the content
+        # tie-break on nothing. Cold that is actively dangerous: a cut whose consumers have no
+        # golden deploys them on a scalar tile (36 ms on the gemma-4 M=256 q cone). So the cut
+        # can only ever win where it was actually MEASURED to, which is the same principle the
+        # structural-pricing gate encodes, applied at row level.
+        model_rows = [i for i, r in enumerate(rows) if r.get("PLACE@cone") != "cut"] or list(range(len(rows)))
+
+        def _model_pick(rank) -> tuple[int, float]:
+            j, p = rank([rows[i] for i in model_rows])
+            return model_rows[j], p
+
         picker = getattr(the_prior, "pick", None)
         if picker is not None:
             ev = getattr(the_prior, "evidence_pick", None)
@@ -722,15 +737,18 @@ def greedy_decide(
                 got = _db_measured_pick(db_index(), rows)
                 if got is None:
                     _warn_disjoint_evidence(db_index(), rows, fp.node_id)
-            best_i, price = got if got is not None else picker(rows)
+            best_i, price = got if got is not None else _model_pick(picker)
         elif got is not None:  # golden decides even for bare-mean_scores priors
             best_i, price = got
         else:  # bare-mean_scores prior object (tests / custom callers)
             from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
 
-            scores = the_prior.mean_scores(rows)
-            best_i = min(range(len(live)), key=lambda i: (scores[i], canonical_row_key(rows[i])))
-            price = scores[best_i]
+            def _mean_rank(sub: list[dict]) -> tuple[int, float]:
+                s = the_prior.mean_scores(sub)
+                j = min(range(len(sub)), key=lambda i: (s[i], canonical_row_key(sub[i])))
+                return j, s[j]
+
+            best_i, price = _model_pick(_mean_rank)
         fp.score = price  # measured µs when evidence decided, predicted µs otherwise
         return live[best_i][0]
 

@@ -61,9 +61,18 @@ PATTERN = [Pattern("root", TileOp)]
 
 
 def rewrite(match: Match, root: Node) -> Graph | None:
-    if place_decision("cone") != "cut":
-        raise RuleSkipped("PLACE@cone is fuse — the cone stays register-resident")
+    # A pure REALIZER, like ``030_split_reduce``: the decision lives in the SCHEDULE (the
+    # ``PLACE@cone`` knob the recognizer stamps on the chosen row), the graph carries the kernel
+    # count. Reading the stamp — not the global pin — is what lets the cone cut be *selected* per
+    # op by the ordinary evidence pick (a golden recording ``PLACE@cone: cut`` with the cut's
+    # measured total cost), exactly as ``REDUCE: g8k`` selects the split-K cut. Falls back to the
+    # global pin for rows that carry no stamp (the pinned path, where the recognizer emits the
+    # unfused map form outright).
     tile: TileOp = root.op
+    stamped = tile.knobs.get("PLACE@cone")
+    decision = stamped if stamped in ("fuse", "cut") else place_decision("cone")
+    if decision != "cut":
+        raise RuleSkipped("PLACE@cone is fuse — the cone stays register-resident")
     if tile.op is None:
         raise RuleSkipped("kernel-less TileOp — nothing to cut")
     bound = bind_prologue_contraction(tile.op, tile.place.free)

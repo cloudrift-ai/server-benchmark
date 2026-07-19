@@ -415,16 +415,34 @@ def _golden_matches_row(golden_knobs: dict, row: dict) -> bool:
 
 def _fork_shape_key(rows: list[dict]):
     """The deploy-time :class:`ShapeKey` of a fork's candidate rows. The base case is
-    ``from_s_features`` over the shared ``S_*`` stamps — but the FLASH fork's root op is
-    the tile pass's RESTRUCTURED twisted op, whose knobs carry re-derived extents ONLY
-    (no ``S_loop_depth``, no op histogram — measured off a live greedy resolve), so the
-    histogram classifier can never mark it ``kind="flash"`` there. The flash fork is
-    instead unmistakable from its OFFER: only the twisted lowering forks the two
-    contractions as ``TILE@dd`` + ``TILE@pj``. When the rows carry that pair, the key is
-    rebuilt flash-kinded, with the masked twin's reduce extent normalized to the stamped
-    final-op convention (the fork-time masked op still shows head_dim as a visible
-    reduce; the golden keys — and the diagnostics/A-B joins over final stamped ops —
-    have every reduce axis symbolic-excluded, ``reduce_max=0``)."""
+    ``from_s_features`` over the shared ``S_*`` stamps — but two restructured-op forks stamp a
+    histogram the classifier can't kind, so each is rebuilt from an OFFER / dtype signature the
+    stamped final op would carry.
+
+    FLASH: the tile pass's RESTRUCTURED twisted op carries re-derived extents ONLY (no
+    ``S_loop_depth``, no op histogram — measured off a live greedy resolve), so the classifier can
+    never mark it ``kind="flash"`` there. It is instead unmistakable from its OFFER: only the twisted
+    lowering forks the two contractions as ``TILE@dd`` + ``TILE@pj``. When the rows carry that pair,
+    the key is rebuilt flash-kinded, with the masked twin's reduce extent normalized to the stamped
+    final-op convention (the fork-time masked op still shows head_dim as a visible reduce; the golden
+    keys — and the diagnostics/A-B joins over final stamped ops — have every reduce axis
+    symbolic-excluded, ``reduce_max=0``).
+
+    COMPUTED-A CONE (norm→linear / gate⊗up): the fork op is the fused megakernel evaluated on its
+    PRE-SPLIT geometry — the RMSNorm statistic reduce has not yet lifted to a second axis
+    (``S_ext_n_reduce_axis == 1``) and the rsqrt lives in the nested A-cone sub-body, so the
+    histogram can't fire ``kind="fused"`` (which needs ``>= 2`` and a top-level ``S_pw_rsqrt``). It
+    is instead recognizable from the mixed-dtype signature the cone carries: the f16/bf16 operands
+    (``S_dtype_f16`` / ``S_dtype_bf16``) beside the f32 statistic constant (``S_dtype_f32``) over an
+    add-reduce contraction (``S_reduce_add``). That signature makes ``from_s_features`` misread it as
+    a plain scalar matmul (``is_warp=False`` — the f32 constant flips the dtype-multiset signal — and
+    ``free_max`` non-zero), so its three fields disagree with the fused golden's key. Rebuild to the
+    fused convention: ``is_warp=True`` (a computed-A contraction is a warp mma) and ``kind="fused"``
+    (which normalizes ``free_max`` to 0 in ``__post_init__``, matching ``NormLinearGoldenConfig`` /
+    ``MlpGeGluGoldenConfig``). ``reduce_max`` stays the contraction extent (the fused goldens key on
+    it even when dynamic — unlike the flash reduce). Over-firing on a hypothetical plain matmul + f32
+    bias is bounded: the fused golden's ``d1/d2 sync`` config can't realize on a gmem-A matmul, so it
+    DRIFTS and falls through — never a wrong deploy."""
     from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
     key = ShapeKey.from_s_features(rows[0])
@@ -437,6 +455,13 @@ def _fork_shape_key(rows: list[dict]):
             is_dyn=key.is_dyn,
             kind="flash",
         )
+    elif (
+        key.kind == ""
+        and rows[0].get("S_reduce_add", 0)
+        and rows[0].get("S_dtype_f32", 0)
+        and (rows[0].get("S_dtype_f16", 0) or rows[0].get("S_dtype_bf16", 0))
+    ):
+        key = ShapeKey(free_prod=key.free_prod, reduce_max=key.reduce_max, is_warp=True, is_dyn=key.is_dyn, kind="fused")
     return key
 
 

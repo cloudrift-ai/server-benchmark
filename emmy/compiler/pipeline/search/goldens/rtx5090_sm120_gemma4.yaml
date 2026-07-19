@@ -398,6 +398,67 @@ configs:
     knobs: {REDUCE: 'b64'}
     emmy_us: 3.6
     cublas_us: 4.1
+  # The rest of the per-head q/k-norm row counts, seeded 2026-07-19 (3x, 0% spread). The entry above covers only
+  # ONE of the eight (rows, head_dim) combinations the model actually runs: rows = tokens x heads, so each of
+  # {decode m32, prefill m256} x {q, kv} x {local hd256, global hd512} is a DIFFERENT shape. The mapping:
+  #   k256 (local):  m32 kv -> 32x8  =  256 | m32 q -> 32x16  =  512 | m256 kv -> 256x8  = 2048 | m256 q -> 4096 (above)
+  #   k512 (global): m32 kv -> 32x1  =   32 | m256 kv -> 256x1 = 256 | m32 q  -> 32x16   =  512 | m256 q -> 4096
+  # These are the single highest cold-rescue entries in the file. Unlike the BLOCK norms (rms_norm.k3840, where
+  # cold greedy already lands at 6.0 vs a 5.8 pin — deliberately left unseeded, there is nothing to win), cold
+  # greedy on the per-head norms picks a pathological reduce and collapses: 112 / 131 / 226 / 263 µs on the four
+  # small-row shapes, i.e. 75-125x slower than the pin AND ~30-90x slower than torch. The pins also BEAT torch
+  # eager (1.4-2.4 vs 2-4). Swept b64/b128/b256/b512 on every shape: the optimum tracks ROW COUNT, not just the
+  # reduce extent — few rows want a wide block (b256/b512 at 32-512 rows), many rows want a narrow one (b128 at
+  # 2048-4096), which is why the one recorded 4096-row entry's b64 does not transfer down.
+  - kernel: rms_norm
+    name: gemma4_12b.qknorm.k256.m256
+    M: 256
+    K: 256
+    knobs: {REDUCE: 'b256'}
+    emmy_us: 1.5
+    cublas_us: 3.0
+  - kernel: rms_norm
+    name: gemma4_12b.qknorm.k256.m512
+    M: 512
+    K: 256
+    knobs: {REDUCE: 'b256'}
+    emmy_us: 1.6
+    cublas_us: 4.0
+  - kernel: rms_norm
+    name: gemma4_12b.qknorm.k256.m2048
+    M: 2048
+    K: 256
+    knobs: {REDUCE: 'b128'}
+    emmy_us: 2.4
+    cublas_us: 4.0
+  - kernel: rms_norm
+    name: gemma4_12b.qknorm.k512.m32
+    M: 32
+    K: 512
+    knobs: {REDUCE: 'b512'}
+    emmy_us: 1.4
+    cublas_us: 2.0
+  - kernel: rms_norm
+    name: gemma4_12b.qknorm.k512.m256
+    M: 256
+    K: 512
+    knobs: {REDUCE: 'b256'}
+    emmy_us: 1.9
+    cublas_us: 3.0
+  - kernel: rms_norm
+    name: gemma4_12b.qknorm.k512.m512
+    M: 512
+    K: 512
+    knobs: {REDUCE: 'b256'}
+    emmy_us: 2.1
+    cublas_us: 4.0
+  - kernel: rms_norm
+    name: gemma4_12b.qknorm.k512.m4096
+    M: 4096
+    K: 512
+    knobs: {REDUCE: 'b128'}
+    emmy_us: 5.2
+    cublas_us: 6.0
   # ---- seq-2048 tier (2026-07-14) ----------------------------------------------------------------
   # The 512-tuned picks are provably wrong at M=2048 (the grid no longer starves): q_proj std g8k
   # collapses to 0.82x, and cold greedy on the unseeded 2048 attention shape picks a scalar kernel

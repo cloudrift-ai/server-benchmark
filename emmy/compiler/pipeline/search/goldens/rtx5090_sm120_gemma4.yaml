@@ -1048,6 +1048,36 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
     emmy_us: 20.8
     cublas_us: 12.5
+  # The GLOBAL-layer (full_attention, hd512) twins of the two entries above — gemma-4 12B alternates 8 global
+  # layers among the local ones, and their q/kv projections are a different WIDTH (q N=8192, kv N=512) at the same
+  # M=32/H=3840. Seeded 2026-07-19 by manual pinned --ab (3x; q spread <0.6%, kv 0%). These were the LAST fused
+  # forks with no golden at any shape: a cold twin audit showed `pre32-global` matching ZERO goldens, so all 8
+  # global layers misdeployed their prologues at decode. Both are COLD-START ANCHORS in the same sense as the local
+  # twins (the tuned decode still splits norm→qkv), but the rescue is far larger here — cold greedy mis-ranks
+  # q at 181.8 µs (0.17x eager) and kv at 209.2 µs (0.05x eager, a grid=2 tile using two thread blocks), so the
+  # pins are a 5.0x and 10.4x cold rescue respectively. The N-width tile rule from the local twins transfers
+  # exactly: wide N takes un=16 (w1x16 at N=8192, as at N=4096), narrow N takes un=8 (w1x8 at N=512, as at
+  # N=2048 — w1x16 over-splits it, 22.2 vs 20.1). Explored f2x4 / f4x2 / k1 / g4k / d1-sync around each winner;
+  # all lost (q 38.7–49.1, kv 22.2–30.8). k4 is unrepresentable at this K: split-K slice 480 is not a multiple of
+  # the mma K-step 64. fp16, torch eager (F.rms_norm + @) reference.
+  - kernel: norm_linear
+    name: gemma4_12b.norm_q_proj_global.m32
+    M: 32
+    H: 3840
+    N: 8192
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
+    emmy_us: 36.1
+    cublas_us: 32.0
+  - kernel: norm_linear
+    name: gemma4_12b.norm_kv_proj_global.m32
+    M: 32
+    H: 3840
+    N: 512
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
+    emmy_us: 20.1
+    cublas_us: 10.0
   # ---- fused RMSNorm→gate⊗up→GeGLU megakernel (computed-A / mlp_geglu kind) ----------------------
   # The MLP hot kernel gemma-4 ACTUALLY deploys (k_linear_mean_reduce, the mul_4 twin): gate + up matmuls
   # share ONE compute-filled A slab (product-monoid ⊗-fold channels), the pre-FF RMSNorm statistic rides

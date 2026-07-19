@@ -548,7 +548,14 @@ def _fork_shape_key(rows: list[dict]):
         and rows[0].get("S_dtype_f32", 0)
         and (rows[0].get("S_dtype_f16", 0) or rows[0].get("S_dtype_bf16", 0))
     ):
-        key = ShapeKey(free_prod=key.free_prod, reduce_max=key.reduce_max, is_warp=True, is_dyn=key.is_dyn, kind="fused")
+        # ``free_max`` carries through: the pre-split key was built ``kind=""``, which
+        # preserves the stamped aspect, and the fused kind keeps it (a computed-A cone is a
+        # plain two-free-axis ``(M, H) @ (H, N)``). Dropping it here collapsed the M=256
+        # global norm→kv cone onto the M=32 local norm→q golden — equal free_prod (131072)
+        # and reduce (3840) — deploying the wrong config at a fabricated µs.
+        key = ShapeKey(
+            free_prod=key.free_prod, reduce_max=key.reduce_max, is_warp=True, is_dyn=key.is_dyn, kind="fused", free_max=key.free_max
+        )
     return key
 
 

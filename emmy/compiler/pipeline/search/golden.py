@@ -412,7 +412,17 @@ class NormLinearGoldenConfig(GoldenConfig):
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
         free = self.N if self.dynamic else self.M * self.N
-        return ShapeKey(free_prod=free, reduce_max=self.H, is_warp=True, is_dyn=self.dynamic, kind="fused")
+        return ShapeKey(
+            free_prod=free,
+            reduce_max=self.H,
+            is_warp=True,
+            is_dyn=self.dynamic,
+            kind="fused",
+            # The aspect, so 32x4096 (local norm->q) and 256x512 (global norm->kv) — equal
+            # in free_prod AND reduce — stay distinct keys. Matches the op's stamped
+            # ``S_ext_free_max``; dynamic keys normalize it away in ``__post_init__``.
+            free_max=0 if self.dynamic else max(self.M, self.N),
+        )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -464,7 +474,14 @@ class MlpGeGluGoldenConfig(GoldenConfig):
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
         free = self.inter if self.dynamic else self.M * self.inter
-        return ShapeKey(free_prod=free, reduce_max=self.H, is_warp=True, is_dyn=self.dynamic, kind="fused")
+        return ShapeKey(
+            free_prod=free,
+            reduce_max=self.H,
+            is_warp=True,
+            is_dyn=self.dynamic,
+            kind="fused",
+            free_max=0 if self.dynamic else max(self.M, self.inter),  # aspect — see NormLinearGoldenConfig
+        )
 
 
 @dataclass(frozen=True, kw_only=True)

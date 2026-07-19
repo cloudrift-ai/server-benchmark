@@ -376,8 +376,10 @@ _CONE_SIG = {
 
 def test_computed_a_cone_fork_rebuilds_to_the_fused_key():
     """The pre-split norm→linear cone stamps like a plain scalar matmul, so its raw key disagrees with
-    the fused golden on three fields (is_warp, kind, free_max). ``_fork_shape_key`` must rebuild it to
-    the fused convention (flash-analogous) so the norm→qkv cones join their goldens at cold deploy.
+    the fused golden on is_warp and kind. ``_fork_shape_key`` must rebuild it to the fused convention
+    (flash-analogous) so the norm→qkv cones join their goldens at cold deploy, CARRYING the stamped
+    ``free_max`` through — a fused op is a plain two-free-axis contraction, so both builders agree on
+    the aspect and the key must keep it (see the collision test below).
     (``_norm_linear`` / ``_FUSED_SIG`` below are the POST-split fused op the classifier already kinds;
     this is the PRE-split fork the classifier misses.)"""
     from emmy.compiler.pipeline.search.golden import NormLinearGoldenConfig
@@ -385,10 +387,36 @@ def test_computed_a_cone_fork_rebuilds_to_the_fused_key():
     fused_key = NormLinearGoldenConfig(name="nl", M=32, H=3840, N=4096, knobs={}).shape_key()
     key = _fork_shape_key([_CONE_SIG])
     assert key == fused_key
-    assert key.kind == "fused" and key.is_warp and key.free_max == 0
+    assert key.kind == "fused" and key.is_warp and key.free_max == 4096
     # A plain fp16 matmul (no f32 statistic) is untouched — the cone case must not over-fire.
     plain = _fork_shape_key([{k: v for k, v in _CONE_SIG.items() if k != "S_dtype_f32"}])
     assert plain.kind == "" and plain.is_warp and plain.free_max == 4096
+
+
+def test_fused_key_separates_aspect_equal_free_prod_cones():
+    """Two gemma-4 computed-A cones collide on every other key field: the M=32 LOCAL norm→q
+    (32x4096) and the M=256 GLOBAL norm→kv (256x512) share free_prod=131072 AND reduce_max=3840.
+    Without the aspect the global prefill cone silently deployed the local decode cone's golden and
+    reported its 24.1 us. ``free_max`` must keep them apart on BOTH builders."""
+    from emmy.compiler.pipeline.search.golden import NormLinearGoldenConfig
+
+    local_q = NormLinearGoldenConfig(name="q", M=32, H=3840, N=4096, knobs={}).shape_key()
+    global_kv = NormLinearGoldenConfig(name="kv", M=256, H=3840, N=512, knobs={}).shape_key()
+    assert local_q.free_prod == global_kv.free_prod == 131072
+    assert local_q.reduce_max == global_kv.reduce_max == 3840
+    assert local_q != global_kv and (local_q.free_max, global_kv.free_max) == (4096, 512)
+
+    # The fork side must agree with the golden side, or the join breaks instead of separating.
+    assert _fork_shape_key([{**_CONE_SIG, "S_ext_free_prod": 131072.0, "S_ext_free_max": 512.0}]) == global_kv
+
+
+def test_dynamic_fused_key_normalizes_the_aspect_away():
+    """A symbolic-M cone has no static aspect — ``free_max`` must normalize to 0 so the dynamic twin
+    keeps joining its golden (the static/dynamic split stays the only discriminator)."""
+    from emmy.compiler.pipeline.search.golden import NormLinearGoldenConfig
+
+    dyn = NormLinearGoldenConfig(name="q", M=512, H=3840, N=4096, knobs={}, dynamic=True).shape_key()  # M = DEFAULT_SEQ_HINT
+    assert dyn.is_dyn and dyn.free_max == 0
     # bf16 operands trigger the same rebuild (a computed-A contraction is dtype-blind at the key).
     bf16 = _fork_shape_key([{**{k: v for k, v in _CONE_SIG.items() if k != "S_dtype_f16"}, "S_dtype_bf16": 1.0}])
     assert bf16.kind == "fused" and bf16.is_warp

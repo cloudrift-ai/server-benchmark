@@ -936,6 +936,75 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
     emmy_us: 74.1
     cublas_us: 77.1
+  # ---- prefill-chunk twins (M=256, the serving prefill static shapes) ----------------------------
+  # The post-attention edge at PREFILL chunk M=256 — the `post256` twin. Seeded 2026-07-19 by manual pinned --ab
+  # (3x; spreads <1%). These were the largest cold-deploy hole in the whole set: a cold twin audit showed the
+  # `post256` / `post256-global` programs matching ZERO goldens, and unseeded cold greedy does not merely mispick
+  # here, it falls off the warp tier entirely onto a SCALAR tile (no mma atom, grid=983040, REDUCE=b256) —
+  # o_proj 36,367 µs, o_proj_global 72,528 µs, mlp_down 137,551 µs, i.e. ~750-820x slower than eager, with the
+  # mlp_down greedy row exceeding the 10 s bench budget outright. The pins restore the warp tier AND beat cuBLAS
+  # in both lanes.
+  # M-dependence of the tile: the M=512 prefill winners do NOT transfer wholesale. The std tile does
+  # (w4x2/f2x4/k2 g4k d2/tma/ring, as at M=512/2048), but the FAST-MATH tile does not — M=512's w4x2/f4x8/k4
+  # over-splits the halved M here (o_proj 66.3 at 17% occupancy vs 39.6), so the fm lane takes w2x2/f4x8/k4 g2k.
+  # Split-K width matters for the deep-K shapes: g4k beats g2k on std (o_proj_global 87.4 vs 118.1, mlp_down
+  # 171.4 vs 233.0) while the fm lane prefers g2k. Explored k2/k4, w2x4/w4x2, and g2k/g4k around each winner; all
+  # lost. fp16, torch eager (HGEMM) reference. `emmy_us` is the TOTAL row (split-K partial + finalize), the
+  # convention the existing matmul entries use (verified by replaying o_proj.m32: recorded 11.1 == live TOTAL 11.1).
+  - kernel: matmul
+    name: gemma4_12b.o_proj.m256
+    M: 256
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 48.4
+    cublas_us: 50.0
+  - kernel: matmul
+    name: gemma4_12b.o_proj.m256
+    M: 256
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 42.0
+    cublas_us: 50.0
+  - kernel: matmul
+    name: gemma4_12b.o_proj_global.m256
+    M: 256
+    N: 3840
+    K: 8192
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 89.8
+    cublas_us: 99.0
+  - kernel: matmul
+    name: gemma4_12b.o_proj_global.m256
+    M: 256
+    N: 3840
+    K: 8192
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 76.7
+    cublas_us: 99.0
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.m256
+    M: 256
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 167.7
+    cublas_us: 185.0
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.m256
+    M: 256
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 140.0
+    cublas_us: 184.0
   # ---- serving Linear layout (trans_b) twins: o_proj / mlp_down at decode m16 + dynM -------------
   # The serving-traced decode/symbolic twins contract a TRANSPOSED B (F.linear; the weight transpose
   # survives the trace), and that fork offers gmem-direct rows ONLY — the canonical entries above pin

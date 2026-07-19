@@ -318,6 +318,16 @@ one batched `predict`, invariant to the tree's level order. Cold, the `OfflinePr
 `MMA_tier` warp preference); option-0 (first leaf, emission order) only if `load_prior` returns nothing entirely.
 Greedy benches nothing, so it can only *use* a prior, never train one.
 
+**Every deploy pick breaks ties by candidate content, never enumeration order.** The model can score many
+same-featurized siblings identically (the offline `D_*` geometry doesn't separate an `f2x4` from an `f4x2` fragment or
+the `bk` variants — 8 exact ties at the gemma-4 m16 mlp_down/o_proj forks), and one measured row / one golden prefix
+can match several offered candidates. Every tier therefore resolves its ties through `knob.canonical_row_key` (the
+sorted tuning-knob rendering): the model argmin (`Prior.pick` and the greedy fallback), the reservoir and DB
+measured-evidence argmins, and the golden realization pick. An order-broken tie is a per-boot coin flip — leaf order
+can shift across processes — and shipped the 2026-07 RTX 5090 gemma-4 image with a bimodal boot-time cubin set.
+Pinned by `tests/compiler/pipeline/search/test_deploy_pick_determinism.py` (tier-level permutation invariance plus a
+cross-subprocess selected-kernel-set pin, the resolution twin of `test_source_determinism.py`).
+
 **Structural options are priced, never raw-scored.** With the trained prior loaded, `greedy_decide`'s
 `_pick_structural` prices each side of a structural fork: a nested `resolve` per kernel over a `lowering/tile`-only
 pipeline, the price being the `score` of the slice-resolve's partition-fork `Decision`, memoized per `op_cache_key`.
@@ -656,6 +666,15 @@ fork means nothing to warm at deploy). Every kind carries `shape_key()` / `snipp
 multi-channel gate⊗up→GeGLU sibling) are the snippet-reproducible computed-A kinds — both trace to the single fused
 mma kernel and share `kind="fused"`; the gate⊗up snippet binds its shared RMSNorm output via a lambda
 (`(lambda r: gelu(r@Wg)*(r@Wu))(rms_norm(x))`) since a torch expression cannot otherwise share it.
+
+**A matmul golden's layout must match the fork it is meant to decide.** `MatmulGoldenConfig.trans_b` spells the
+serving Linear layout — B given `(N, K)`, contracted as `x @ w.T` via an `F.linear` snippet. The traced contraction
+carries `b_trans`, and its enumeration offers **gmem-direct rows only** (staged transports decline transposed B), so
+a golden tuned on the canonical `(M,K) @ (K,N)` form can pin a staged config that never realizes against a served
+model's linear forks — every boot then logs the enumeration-drift warning and the fork falls to the cold model (the
+gemma-4 m16/dynM o_proj + mlp_down class behind the 5090 boot-flap ties). The two layouts share one ShapeKey on
+purpose: at a fork, an entry whose config the offer can't realize simply never matches, so a canonical entry (the
+harness/eval truth) and a `trans_b` entry (the serving truth) coexist under one shape, fastest-realizable-first.
 
 **Live-GPU scoping.** `tune --dataset golden` (and `--golden NAME` resolution) scopes to the **live** card's goldens
 (`goldens_for_live_gpu`) — names repeat across per-GPU golden files with diverging shapes/dtypes, so a flat union

@@ -64,7 +64,7 @@ QWEN3_06B_Q_DIM = 2048  # fused Q-projection output (16 heads * 128)
 QWEN3_06B_KV_DIM = 1024  # fused K/V-projection output (8 heads * 128)
 
 
-def matmul_snippet(M: int, N: int, K: int, dtype: str = "fp32") -> str:
+def matmul_snippet(M: int, N: int, K: int, dtype: str = "fp32", trans_b: bool = False) -> str:
     """The torch expression a matmul golden config tunes / benches / reproduces.
 
     Single source of truth: the autotune / repro paths feed this to
@@ -72,10 +72,22 @@ def matmul_snippet(M: int, N: int, K: int, dtype: str = "fp32") -> str:
     config reproduces from the same call. fp32 is ``torch.randn``'s default, so
     no dtype kwarg is emitted for fp32 — matching the canonical example
     ``torch.matmul(torch.randn(2048,2048), torch.randn(2048,2048))``.
-    """
+
+    ``trans_b`` spells the **serving Linear layout** — B given ``(N, K)``,
+    contracted as ``x @ w.T`` via ``F.linear``. The traced contraction carries
+    ``b_trans``, whose enumeration offers NO staged (``d*/tma*`` / ``d*/cp*``)
+    rows (the B-slab fill would issue row-crossing copies — the schedule
+    declines), so a golden tuned on the canonical ``(M,K) @ (K,N)`` form can
+    pin a staged config that NEVER realizes against a served model's linear
+    forks (the gemma-4 m16/dynM o_proj + mlp_down drift-warning class). A
+    golden meant to decide a serving fork must be tuned on this layout."""
     if dtype == "fp32":
+        if trans_b:
+            return f"torch.nn.functional.linear(torch.randn({M},{K}), torch.randn({N},{K}))"
         return f"torch.matmul(torch.randn({M},{K}), torch.randn({K},{N}))"
     tdt = {"fp16": "torch.float16", "bf16": "torch.bfloat16"}[dtype]
+    if trans_b:
+        return f"torch.nn.functional.linear(torch.randn({M},{K},dtype={tdt}), torch.randn({N},{K},dtype={tdt}))"
     return f"torch.matmul(torch.randn({M},{K},dtype={tdt}), torch.randn({K},{N},dtype={tdt}))"
 
 
@@ -207,13 +219,20 @@ class MatmulGoldenConfig(GoldenConfig):
     N: int
     K: int
     dtype: str = "fp32"
+    # The serving Linear layout: B given (N, K), contracted as ``x @ w.T`` (``F.linear``).
+    # Its fork offers gmem-direct rows ONLY (staged transports decline transposed B), so a
+    # golden meant to decide a served model's linear fork must be tuned with this on — a
+    # canonical-B tuning records staged configs that never realize there (see
+    # ``matmul_snippet``). Same ShapeKey either way: at the fork, an unrealizable entry
+    # simply never matches, so layout twins coexist under one shape.
+    trans_b: bool = False
 
     def __post_init__(self):
         self._require_dynamic_hint(self.M)
 
     def snippet(self) -> str:
         """The torch expression this config tunes / benches / reproduces."""
-        return matmul_snippet(self.M, self.N, self.K, self.dtype)
+        return matmul_snippet(self.M, self.N, self.K, self.dtype, self.trans_b)
 
     def shape_key(self):
         """This config's :class:`~emmy.compiler.pipeline.search.data.ShapeKey` —

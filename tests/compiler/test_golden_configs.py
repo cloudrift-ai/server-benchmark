@@ -40,6 +40,28 @@ def test_matmul_snippet_typed():
     assert "dtype=torch.float16" in matmul_snippet(128, 128, 128, "fp16")
 
 
+def test_matmul_snippet_trans_b_spells_linear_layout():
+    # The serving Linear layout: B given (N, K), contracted as x @ w.T via F.linear —
+    # its traced fork offers gmem-direct rows only (staged transports decline
+    # transposed B), so a golden meant to decide a serving linear fork must be tuned
+    # on this spelling, not the canonical (M,K) @ (K,N).
+    assert matmul_snippet(16, 3840, 15360, "fp16", trans_b=True) == (
+        "torch.nn.functional.linear(torch.randn(16,15360,dtype=torch.float16), torch.randn(3840,15360,dtype=torch.float16))"
+    )
+    assert matmul_snippet(32, 64, 128, trans_b=True) == "torch.nn.functional.linear(torch.randn(32,128), torch.randn(64,128))"
+
+
+def test_trans_b_golden_snippet_and_shape_key():
+    # A trans_b config reproduces through its own snippet and shares the layout-blind
+    # ShapeKey with its canonical twin — at a fork, an entry whose config the offer
+    # can't realize simply never matches, so layout twins coexist under one shape.
+    c = MatmulGoldenConfig(name="mlp_down.m16.lin", M=16, N=3840, K=15360, dtype="fp16", trans_b=True)
+    assert "functional.linear" in c.snippet()
+    assert c.snippet() in c.repro_command()
+    twin = MatmulGoldenConfig(name="mlp_down.m16", M=16, N=3840, K=15360, dtype="fp16")
+    assert c.shape_key() == twin.shape_key()
+
+
 @pytest.mark.parametrize(
     ("emmy_us", "cublas_us", "ratio", "golden"),
     [(100.0, 99.0, 0.99, True), (100.0, 95.0, 0.95, True), (100.0, 80.0, 0.80, False), (0.0, 99.0, 0.0, False)],

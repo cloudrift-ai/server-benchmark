@@ -14,7 +14,7 @@ import pytest
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import golden as golden_mod
 from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig
-from emmy.compiler.pipeline.search.policy.greedy import _golden_evidence_index, _golden_pick, greedy_decide
+from emmy.compiler.pipeline.search.policy.greedy import _fork_shape_key, _golden_evidence_index, _golden_pick, greedy_decide
 
 CARD = "NVIDIA GeForce RTX 4090"
 CAP = (8, 9)
@@ -352,6 +352,58 @@ def test_rms_norm_golden_decides_its_op(monkeypatch):
     index = _index(monkeypatch, [gold])
     rows = [{**_RMS_SIG, "REDUCE@r0": "b32"}, {**_RMS_SIG, "REDUCE@r0": "b256"}]
     assert _golden_pick(index, rows, "n0") == (1, 6.3)
+
+
+# The computed-A norm→linear cone stamped on its PRE-SPLIT geometry (real stamps off pre32.json's
+# in-model norm→q fork, M32 x N4096, K3840): mixed f16 operands + the f32 statistic constant over an
+# add-reduce, the statistic reduce NOT yet lifted (n_reduce_axis == 1) and the rsqrt buried in the A
+# sub-body, so the histogram classifier reads a plain scalar matmul (kind="", is_warp=False from the
+# f32 signal, nonzero free_max).
+_CONE_SIG = {
+    "S_ext_free_prod": 131072.0,
+    "S_ext_free_max": 4096.0,
+    "S_ext_reduce_max": 3840.0,
+    "S_ext_reduce_prod": 3840.0,
+    "S_ext_n_free_axis": 2.0,
+    "S_ext_n_reduce_axis": 1.0,
+    "S_loop_depth": 3.0,
+    "S_reduce_add": 1.0,
+    "S_dtype_f16": 1.0,
+    "S_dtype_f32": 1.0,
+    "H_opt": 3.0,
+}
+
+
+def test_computed_a_cone_fork_rebuilds_to_the_fused_key():
+    """The pre-split norm→linear cone stamps like a plain scalar matmul, so its raw key disagrees with
+    the fused golden on three fields (is_warp, kind, free_max). ``_fork_shape_key`` must rebuild it to
+    the fused convention (flash-analogous) so the norm→qkv cones join their goldens at cold deploy.
+    (``_norm_linear`` / ``_FUSED_SIG`` below are the POST-split fused op the classifier already kinds;
+    this is the PRE-split fork the classifier misses.)"""
+    from emmy.compiler.pipeline.search.golden import NormLinearGoldenConfig
+
+    fused_key = NormLinearGoldenConfig(name="nl", M=32, H=3840, N=4096, knobs={}).shape_key()
+    key = _fork_shape_key([_CONE_SIG])
+    assert key == fused_key
+    assert key.kind == "fused" and key.is_warp and key.free_max == 0
+    # A plain fp16 matmul (no f32 statistic) is untouched — the cone case must not over-fire.
+    plain = _fork_shape_key([{k: v for k, v in _CONE_SIG.items() if k != "S_dtype_f32"}])
+    assert plain.kind == "" and plain.is_warp and plain.free_max == 4096
+    # bf16 operands trigger the same rebuild (a computed-A contraction is dtype-blind at the key).
+    bf16 = _fork_shape_key([{**{k: v for k, v in _CONE_SIG.items() if k != "S_dtype_f16"}, "S_dtype_bf16": 1.0}])
+    assert bf16.kind == "fused" and bf16.is_warp
+    # The dynamic cone keeps is_dyn and its contraction reduce_max (unlike the flash reduce, which zeroes).
+    dyn = _fork_shape_key([{**_CONE_SIG, "S_ext_free_prod": 4096.0, "S_ext_n_symbolic_axis": 1.0}])
+    assert dyn.kind == "fused" and dyn.is_dyn and dyn.reduce_max == 3840
+
+
+def test_computed_a_cone_fork_deploys_the_fused_golden(monkeypatch):
+    """End-to-end on the PRE-split fork: with the fused norm→linear golden in the index, cone rows
+    (``n_reduce_axis == 1``, no top-level rsqrt) resolve it via the ``_fork_shape_key`` rebuild — a
+    MATCH, not a DRIFT — where ``from_s_features`` alone would key them as a plain matmul and miss."""
+    index = _index(monkeypatch, [_norm_linear()])  # records _FUSED_TILE / d2/sync / g4k
+    row = {**_CONE_SIG, "TILE@a": _FUSED_TILE, "STAGE@a": "d2/sync", "REDUCE@a": "g4k"}
+    assert _golden_pick(index, [row], "n0") == (0, 34.8)
 
 
 def test_cross_kind_isolation_via_the_kind_discriminator(monkeypatch):

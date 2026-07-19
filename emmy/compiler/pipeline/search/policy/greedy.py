@@ -365,17 +365,38 @@ def _db_measured_pick(index: dict[frozenset, list[tuple[dict, float, bool]]], ro
     where present, still takes precedence at the call site."""
     from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
 
+    row_key: dict[int, tuple] = {}  # i → canonical_row_key(rows[i]), computed at most once
+
+    def key_of(i: int) -> tuple:
+        if i not in row_key:
+            row_key[i] = canonical_row_key(rows[i])
+        return row_key[i]
+
     def better(us: float, i: int, cur: tuple[int, float] | None) -> bool:
         # Tie on µs (one measured row matching several candidates) breaks by the
         # candidates' canonical content, never their enumeration order.
-        return cur is None or us < cur[1] or (us == cur[1] and canonical_row_key(rows[i]) < canonical_row_key(rows[cur[0]]))
+        return cur is None or us < cur[1] or (us == cur[1] and key_of(i) < key_of(cur[0]))
+
+    # Every candidate at one fork shares the offer op's ``S_*`` base (``rows`` is
+    # ``{**base, **leaf_knobs}``), so one signature covers the whole candidate set —
+    # measured: exactly one distinct sig per call, over sets up to ~41.5k rows.
+    # On an exact index hit ``_sig_groups`` is already O(1), so this memo buys
+    # little (~2%) in the common case. It matters on the DRIFT path: when the
+    # candidate's sig is NOT a key (the #311 ``S_warp_eligible`` vocabulary drift
+    # this tier's shared-key matching exists to absorb), every call rescans EVERY
+    # index signature building a dict per entry — 41.5k candidates x 61 signatures
+    # for a single fork. The memo bounds that at one scan per distinct sig.
+    # Per-call scope, so a rebuilt index is never served stale.
+    groups_memo: dict[frozenset, list[list[tuple[dict, float, bool]]]] = {}
 
     best: tuple[int, float] | None = None  # deployable lane
     best_rank: tuple[int, float] | None = None  # -O1 ranking-lane fallback
     for i, cand in enumerate(rows):
         sig = frozenset((k, str(v)) for k, v in cand.items() if k.startswith("S_"))
         cand_tun = {k: str(v) for k, v in cand.items() if not k.startswith(("S_", "H_"))}
-        for measured in _sig_groups(index, sig):
+        if sig not in groups_memo:  # not ``.get`` — an empty group list is a valid, falsy hit
+            groups_memo[sig] = _sig_groups(index, sig)
+        for measured in groups_memo[sig]:
             for row_tun, us, deployable in measured:
                 if any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items()):
                     continue

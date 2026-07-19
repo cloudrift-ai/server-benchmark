@@ -80,6 +80,26 @@ def test_in_memory_db_bypasses_index_cache(tmp_path, monkeypatch):
     assert not greedy._DB_INDEX_CACHE
 
 
+def test_db_pick_scans_signatures_once_per_distinct_sig(monkeypatch):
+    """Every candidate at a fork shares the offer op's ``S_*`` base, so one signature
+    covers the whole set — the drift-path rescan of every index signature must happen
+    once, not once per candidate (a real fork offers up to ~41.5k). The candidate sig
+    here carries a key no index row has (#311-style vocabulary drift), so it misses the
+    exact-hit fast path and takes the scanning branch."""
+    index = {frozenset({("S_ext_free_prod", str(2048 + s)), ("S_dtype_f32", "1.0")}): [({"TILE": "t"}, 40.0 + s, True)] for s in range(8)}
+    base = {"S_ext_free_prod": "2048", "S_dtype_f32": "1.0", "S_warp_eligible": "1.0"}
+    rows = [{**base, "TILE": "t", "REDUCE": f"r{i}"} for i in range(50)]
+    assert frozenset((k, str(v)) for k, v in rows[0].items() if k.startswith("S_")) not in index
+
+    scans = []
+    orig = greedy._sig_groups
+    monkeypatch.setattr(greedy, "_sig_groups", lambda ix, sg: (scans.append(1), orig(ix, sg))[1])
+
+    got = greedy._db_measured_pick(index, rows)
+    assert len(scans) == 1  # one scan for the one distinct sig, not 50
+    assert got is not None and got[1] == 40.0  # drift match still resolves to the cheapest row
+
+
 def test_online_prior_parsed_once_per_mtime(tmp_path, monkeypatch):
     greedy._load_prior_cached.cache_clear()
     p = tmp_path / "online.json"

@@ -30,7 +30,7 @@ for snap in hf_root.glob("hub/models--*/snapshots/*"):
         if not (consolidated.is_symlink() and consolidated.resolve().stat().st_size > MAX_SHARD):
             continue
     blob = consolidated.resolve()
-    print(f"[reshard] {blob} ({blob.stat().st_size/1e9:.1f} GB)")
+    print(f"[reshard] {blob} ({blob.stat().st_size / 1e9:.1f} GB)")
 
     shards, current, current_size = [], {}, 0
     with safe_open(blob, framework="pt") as f:
@@ -54,7 +54,7 @@ for snap in hf_root.glob("hub/models--*/snapshots/*"):
         for name, t in shard.items():
             weight_map[name] = fname
             total += t.numel() * t.element_size()
-        print(f"[reshard] wrote {fname} ({sum(t.numel()*t.element_size() for t in shard.values())/1e9:.1f} GB)")
+        print(f"[reshard] wrote {fname} ({sum(t.numel() * t.element_size() for t in shard.values()) / 1e9:.1f} GB)")
         shard.clear()
 
     index = {"metadata": {"total_size": total}, "weight_map": weight_map}

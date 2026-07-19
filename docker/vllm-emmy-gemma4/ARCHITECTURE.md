@@ -38,6 +38,15 @@ The machinery enforces the last two points structurally: **`config.env` is the s
 bind-mounts it into the plain image and the baked image ships it, so the warmed and released servers execute
 literally the same script with the same env.
 
+**The warm runs to a fixpoint under the release environment.** One online boot is not enough: the shipped image
+serves offline (`HF_HUB_OFFLINE=1`, the model resolved to its snapshot path), and a handful of kernels only
+materialize on an offline boot; independently, a fork pick can flip between boots, selecting between two stable
+kernel variants (2026-07 5090 session: 6 offline-only kernels + 2 bimodal ones on gemma-4-12B — each variant's
+source is byte-stable, so the union converges). After the online pass, `warm.sh` re-boots offline against the
+accumulated cache until a boot compiles nothing new (max 5 passes). The boot-to-boot pick flip is a real
+compiler bug (fork resolution should be deterministic across processes); the fixpoint warm contains it but does
+not excuse it.
+
 ## Files
 
 - `config.env` — the pinned serving config. Every value is cache-key-relevant; it must be **final before warming**
@@ -144,6 +153,13 @@ rental/teardown. The local-only deltas:
   the warm needs it.
 - **The push is the slow part.** `gemma4-serve-push` uploads ~35 GB over your uplink — hours on a residential
   connection vs minutes from a datacenter. It's the main reason the rental flow exists; locally, just let it run.
+- **The snapshot ships re-sharded, as four image layers.** Docker Hub rejects blobs past ~10 GB (upload initiation
+  503s forever), and gemma-4-12B ships ONE consolidated 23 GB `model.safetensors` — a single file cannot be split
+  across layers by COPY. `make gemma4-serve-image` therefore first runs `reshard_snapshot.py` (inside the base
+  image), rewriting the consolidated file as standard HF shards + `model.safetensors.index.json` — per-tensor
+  bytes identical, loader-transparent — then `split_hf.sh` balances the tree into four hardlinked sub-10 GB parts
+  that the Dockerfile COPYs back into `/opt/emmy/hf`. Kernel cache-key parity is unaffected (weights are runtime
+  constants, not source); the verify gate re-arbitrates the resharded snapshot.
 
 ## Licensing
 
@@ -151,14 +167,3 @@ gemma-4 is **Apache 2.0** — public redistribution of the weights in a Docker H
 the unmodified HF snapshot, which carries its LICENSE/NOTICE files — keep them (that is the attribution obligation),
 and don't imply Google endorsement in the tag name or description.
 
-## Known blocker (2026-07-17 release session)
-
-The full pipeline was exercised end to end on a rented 5090 (vast.ai): preflight 34/34, config pinned at
-4096/4096/util 0.90 (decode twin on), HF-parity validation 4/4 — but the **zero-recompile verify FAILS**:
-~270 of ~580 serving kernels regenerate with *different source text on every process launch* (boot 2: 265 new
-cache keys; boot 3, with the union baked: 273 new). Per-boot codegen nondeterminism defeats the content-addressed
-cache across restarts, so success criterion 2 is structurally unattainable until it is fixed (suspect: an unordered
-set/dict iteration leaking into source text, amplified by hash randomization across processes — local no-GPU repro:
-render the same golden twice in separate processes and diff). The image otherwise works: offline boot, zero
-downloads, correct completions, zero request-time compiles. Do not push a tag until the determinism fix lands and a
-re-warm verifies clean.

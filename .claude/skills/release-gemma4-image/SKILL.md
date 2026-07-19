@@ -39,7 +39,13 @@ vllm-emmy image itself). Rsync the working tree at the **release commit** and `m
 `./venv/bin/pip install -e ".[serving]"` + cupy (the venv steps back the headroom sweep and the validate script).
 Host toolchain: **CUDA >= 12.9** (FlashInfer refuses sm_120 below it — the misleading error is "requires sm75 or
 higher"); on non-CloudRift hosts verify the NVIDIA container toolkit actually works (`docker run --gpus all ...
-nvidia-smi`) — a registered runtime with missing binaries fails with `could not select device driver`. Budget
+nvidia-smi`) — a registered runtime with missing binaries fails with `could not select device driver`. The
+venv-based steps (headroom sweep, validate) additionally need `CUDA_HOME`/nvcc exported in the step's own
+environment (emmy refuses to serve without nvcc) and a **system-wide** `ninja` (`apt install ninja-build` —
+FlashInfer's JIT subprocess won't see a venv-local one). For the model download use `hf download` with a retry
+loop and `HF_HUB_DISABLE_XET=1` — `huggingface-cli` is a deprecated no-op stub now, and the Xet transfer path
+flakes; note `warm.sh` resolves `warm/` relative to its own directory (`docker/vllm-emmy-gemma4/warm/`), so
+pre-seed the snapshot there, not at the repo root. Budget
 **~100 GB disk** (base images + venv + HF cache + BuildKit's transient context copy of warm/), or `rm -rf venv`
 before the bake — nothing after the warm needs it.
 
@@ -54,7 +60,8 @@ pushed from the same commit (the wheel is part of the cubin cache key) — when 
 ## Step 2 — Toolchain preflight (GATE)
 
 Run the preflight inside the freshly built image (exact command in ARCHITECTURE.md step 2).
-**Gate: the output must end `== preflight done: 34 OK, 0 FAIL`.** Anything else → capture the failing `*.log`s from
+**Gate: the output must end `== preflight done: <N> OK, 0 FAIL`.** `<N>` is the golden count and grows as goldens
+land — the gate is **0 FAIL**, not a specific N. Anything else → capture the failing `*.log`s from
 the preflight out dir, abort, teardown, report. Do not attempt to fix compiler/toolchain bugs inside the release
 session.
 

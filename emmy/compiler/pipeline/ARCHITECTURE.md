@@ -219,6 +219,13 @@ verified evidence tier below — then (2) measured -O3 reservoir evidence (`evid
 prefix-consistent with the fastest `H_opt=3` row of the same op), (3) the tune DB's measured rows, and (4) the
 `mean_score` argmin only when no candidate has evidence.
 
+The two file-backed inputs to that pick — the parsed online prior and the DB perf index — are built **once per
+process**, memoized on the source file's `(path, mtime)` (the online file; the DB file plus its `-wal` sidecar). A
+generative serve boot compiles ~96 programs, and `structural_key` folds only cc + nvcc flags (never the op shape), so
+both inputs are identical across every program: without the memo each compile re-`json.loads`'d the 56 MB
+`online.json` and re-scanned the whole perf table. The mtime key invalidates on any on-disk change, so a rewritten
+checkpoint or a fresh perf commit is still picked up.
+
 **Goldens are the first evidence tier of a greedy compile.** The per-GPU golden files are the only *measured* data
 that ships with a clone — the reservoir and tune DB are machine-local caches written by local tunes, so a fresh
 machine (every rented box) previously deployed on pure model extrapolation (the gemma 12–29× cold misdeploys). At a

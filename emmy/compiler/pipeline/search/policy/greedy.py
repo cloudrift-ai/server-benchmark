@@ -94,14 +94,35 @@ def _tile_blocked(fork_knobs: dict, blocked: set[frozenset]) -> bool:
 _LOAD_PRIOR = object()
 
 
+@lru_cache(maxsize=1)
+def _load_prior_cached(path_str: str, mtime: int):  # noqa: ARG001 — args are the cache key
+    """The rehydrated global prior for one ``(online-file path, mtime)`` — the
+    process-wide memo behind :func:`_load_prior_safe`. ``maxsize=1`` evicts on any
+    key change, so a rewritten checkpoint (new mtime) reloads and a stale one is
+    dropped. The deploy path only *reads* this prior (``mean_scores`` / ``pick`` /
+    ``evidence_pick``), never trains it, so one shared instance is safe across the
+    ~96 program compiles of a serve boot."""
+    from emmy.compiler.pipeline.search.prior import load_prior  # noqa: PLC0415
+
+    return load_prior()
+
+
 def _load_prior_safe():
     """Load the one global prior (``OnlinePrior`` behind the
-    ``OfflinePrior`` cold-start fallback). Best-effort: any load failure →
-    ``None`` → emission order — a bad/missing prior must never break compile."""
+    ``OfflinePrior`` cold-start fallback), memoized per process on the online
+    file's ``(path, mtime)`` — a serve boot compiles ~96 programs and each would
+    otherwise ``json.loads`` the 56 MB checkpoint again (the dominant boot-time
+    resolution cost). Best-effort: any load failure → ``None`` → emission order —
+    a bad/missing prior must never break compile."""
     try:
-        from emmy.compiler.pipeline.search.prior import load_prior  # noqa: PLC0415
+        from emmy import config  # noqa: PLC0415
 
-        return load_prior()
+        path = config.online_path()
+        try:
+            mtime = path.stat().st_mtime_ns
+        except OSError:
+            mtime = -1  # missing file → stable key; a fresh prior is loaded once
+        return _load_prior_cached(str(path), mtime)
     except Exception:  # noqa: BLE001
         return None
 
@@ -244,7 +265,52 @@ def _pick_structural(
 _TUNE_RANKING_FLAGS = "-Xcicc -O1"
 
 
+# Process-wide memo for the built DB index, keyed on (db path, mtime, the three
+# context keys). The index depends only on the DB file and cc+nvcc-flags (NOT the
+# op shape — ``structural_key`` folds neither), so for a serve boot it is identical
+# across all ~96 program compiles; without this the 527 MB perf scan reran each time.
+# Bounded to the current key (cleared on miss), like ``_load_prior_cached``.
+_DB_INDEX_CACHE: dict = {}
+
+
 def _db_measured_index(db, ctx) -> dict[frozenset, list[tuple[dict, float, bool]]]:
+    """Caching wrapper over :func:`_db_measured_index_build` — memoizes the built
+    index per process on ``(db path, mtime, context keys)``, invalidated when the
+    DB file's mtime changes. An in-memory DB (no ``_path``) or an unstatable file
+    bypasses the cache and rebuilds. Best-effort throughout: a failed key
+    computation just rebuilds."""
+    path = getattr(db, "_path", None)
+    if path is None:
+        return _db_measured_index_build(db, ctx)
+    try:
+        from emmy.compiler.pipeline.search.policy.mcts import O3_NVCC_FLAGS  # noqa: PLC0415
+
+        # Stat the main file AND its ``-wal`` sidecar: in WAL mode a ``record_perf``
+        # commit can land in the WAL without bumping the main file's mtime, so a
+        # main-mtime-only key could serve a stale index to a same-process
+        # write-then-read (the tune lane). ``os.stat`` on a missing WAL → skip it.
+        wal = path.with_name(path.name + "-wal")
+        mtime = (path.stat().st_mtime_ns, wal.stat().st_mtime_ns if wal.exists() else 0)
+        ctx_keys = frozenset(
+            {
+                ctx.structural_key(),
+                replace(ctx, compile_flags=_TUNE_RANKING_FLAGS).structural_key(),
+                replace(ctx, compile_flags=O3_NVCC_FLAGS).structural_key(),
+            }
+        )
+        key = (str(path), mtime, ctx_keys)
+    except Exception:  # noqa: BLE001 — any key-build failure → just rebuild uncached
+        return _db_measured_index_build(db, ctx)
+    hit = _DB_INDEX_CACHE.get(key)
+    if hit is not None:
+        return hit
+    index = _db_measured_index_build(db, ctx)
+    _DB_INDEX_CACHE.clear()  # keep only the current (path, mtime, keys)
+    _DB_INDEX_CACHE[key] = index
+    return index
+
+
+def _db_measured_index_build(db, ctx) -> dict[frozenset, list[tuple[dict, float, bool]]]:
     """The tune DB's measured ``ok`` cuda perf rows, indexed by their ``S_*``
     structural signature (stringified values — perf knobs round-trip JSON) —
     the deploy-side analogue of ``Prior._o3_evidence``. Queries three context

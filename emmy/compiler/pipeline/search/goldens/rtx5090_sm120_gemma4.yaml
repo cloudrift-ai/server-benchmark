@@ -1005,6 +1005,56 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
     emmy_us: 140.0
     cublas_us: 184.0
+  # The norm→qkv CUT consumers at prefill M=256. Like the MLP edge, the norm→q/kv PROLOGUE is NOT anchored as a
+  # fused computed-A golden at M=256 — measured 2026-07-19, the fused form LOSES badly to the split here:
+  #   norm→q  (N=4096): best fused 119.4 µs vs emmy's split 63.2 (rms_norm 6.0 + matmul 57.2) = 1.9x worse
+  #   norm→kv (N=2048): best fused  64.7 µs vs torch's unfused split 31 = 2.1x worse
+  # (Both fused numbers are the best of a w1x16 / w1x8 / w4x2 / w2x2 x g8k/g4k/g2k sweep.) So the computed-A
+  # prologue is a DECODE-only win here, exactly as for gate⊗up: it is anchored at m32 (see the norm_linear block)
+  # and deliberately left unanchored at M=256, where the perf form is the cut. These two entries are that cut's
+  # consumers — the bare q / kv projections (K=3840) the split produces. They matter because a cut whose consumer
+  # has no golden is WORSE than no cut at all: pinning PLACE@cone=cut at M=256 today deploys the matmul fragment on
+  # a SCALAR tile (grid=1048576, REDUCE=b256) at 36,268 µs. Note the lane split — std loses to cuBLAS here
+  # (0.91x / 0.81x) while fast-math beats it (1.17x / 1.16x) — and that the narrow-N kv shape flips to g4k in the
+  # fm lane where q takes g2k. Manual pinned --ab, 3x, spreads <1%. fp16, torch eager (HGEMM) reference.
+  # (As with mlp_gate_up_split, these fire only under the PLACE@cone=cut pin today; making greedy CHOOSE the cut
+  # at prefill M is the open follow-up.)
+  - kernel: matmul
+    name: gemma4_12b.q_proj.m256
+    M: 256
+    N: 4096
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 51.5
+    cublas_us: 47.0
+  - kernel: matmul
+    name: gemma4_12b.q_proj.m256
+    M: 256
+    N: 4096
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 40.1
+    cublas_us: 47.0
+  - kernel: matmul
+    name: gemma4_12b.kv_proj.m256
+    M: 256
+    N: 2048
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 31.5
+    cublas_us: 25.5
+  - kernel: matmul
+    name: gemma4_12b.kv_proj.m256
+    M: 256
+    N: 2048
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 22.5
+    cublas_us: 26.0
   # ---- serving Linear layout (trans_b) twins: o_proj / mlp_down at decode m16 + dynM -------------
   # The serving-traced decode/symbolic twins contract a TRANSPOSED B (F.linear; the weight transpose
   # survives the trace), and that fork offers gmem-direct rows ONLY — the canonical entries above pin

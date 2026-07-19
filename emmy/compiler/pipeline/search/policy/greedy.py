@@ -547,6 +547,13 @@ def _fork_shape_key(rows: list[dict]):
         and rows[0].get("S_reduce_add", 0)
         and rows[0].get("S_dtype_f32", 0)
         and (rows[0].get("S_dtype_f16", 0) or rows[0].get("S_dtype_bf16", 0))
+        # A computed-A cone CONTRACTS: its output is 2-D ``(M, N)``. The mixed-dtype-over-an-
+        # add-reduce signature above is necessary but not sufficient — a standalone RMSNorm
+        # STATISTIC kernel carries exactly the same signature (f16 input, f32 accumulator, add
+        # reduce, rsqrt) while producing ONE value per row. Without this the cut's own
+        # ``__stat`` producer was rebuilt to ``kind="fused"``, which both locked it out of the
+        # plain reduce goldens and left it able to shadow a real cone of equal extents.
+        and rows[0].get("S_ext_n_free_axis", 0) >= 2
     ):
         # ``free_max`` carries through: the pre-split key was built ``kind=""``, which
         # preserves the stamped aspect, and the fused kind keeps it (a computed-A cone is a

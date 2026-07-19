@@ -1372,3 +1372,35 @@ configs:
     knobs: {}
     emmy_us: 4.3
     cublas_us: 4.1
+  # ---- the CUT's producer halves (PLACE@cone=cut, M=256) ----------------------------------------
+  # When the gate/up cone deploys as the CUT (see mlp_geglu.m256.cut), 020_cut_edge emits the cone
+  # value through TWO extra kernels that exist in no other form, so nothing else in this file covers
+  # them: a per-row STATISTIC reduce (rsqrt(mean(x²)) over K=3840, one value per row) and a POINTWISE
+  # scale sweeping (256, 3840) into the workspace the channel matmuls read as their gmem A. Seeded
+  # 2026-07-19, 3x at 0% spread. Together they are 3.8 µs — 1.0% of the 365 µs cut edge — and both run
+  # at 100% occupancy against their memory floor, so these are REGRESSION ANCHORS (like rope /
+  # embedding above), not cold-deploy rescues: greedy already picks these configs. They exist so a
+  # future codegen or enumeration change that slows the cut's producers is caught by `emmy eval golden`
+  # rather than silently widening the prefill edge.
+  # READ THE RATIOS WITH CARE. Each cublas_us is a real torch eager measurement of that half's exact
+  # output — statistic: `torch.rsqrt(x.pow(2).mean(-1) + eps)` = 10.0 µs; scale: the normalized tensor
+  # `F.rms_norm` returns = 6.0 µs — but torch has no reason to compute either half alone, so both
+  # references are UNFUSED and flatter emmy (the statistic one especially: torch materializes
+  # `x.pow(2)`). The only honest end-to-end comparison is the PAIR (3.8 µs) against one
+  # `F.rms_norm` (6.0 µs) = 1.58x. Do not read the per-entry 5.3x / 3.2x as real wins.
+  - kernel: reduce
+    name: gemma4_12b.cut_cone_stat.m256
+    M: 256
+    K: 3840
+    dtype: 'fp16'
+    knobs: {REDUCE: 'b128'}
+    emmy_us: 1.9
+    cublas_us: 10.0
+  - kernel: pointwise
+    name: gemma4_12b.cut_cone_scale.m256
+    M: 256
+    N: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'f4'}
+    emmy_us: 1.9
+    cublas_us: 6.0

@@ -84,7 +84,7 @@ gemma4-warm:
 	BASE_IMAGE=$(VLLM_EMMY_TAG) docker/vllm-emmy-gemma4/warm.sh
 
 gemma4-serve-image:
-	@test -d docker/vllm-emmy-gemma4/warm/hf -a -d docker/vllm-emmy-gemma4/warm/cubin || \
+	@test -n "$$(ls -A docker/vllm-emmy-gemma4/warm/hf 2>/dev/null)" -a -n "$$(ls -A docker/vllm-emmy-gemma4/warm/cubin 2>/dev/null)" || \
 		(echo "docker/vllm-emmy-gemma4/warm/ is empty — run 'make gemma4-warm' on the target GPU first"; exit 1)
 	docker run --rm -v $(PWD)/docker/vllm-emmy-gemma4/warm/hf:/hf \
 		-v $(PWD)/docker/vllm-emmy-gemma4/reshard_snapshot.py:/reshard.py \

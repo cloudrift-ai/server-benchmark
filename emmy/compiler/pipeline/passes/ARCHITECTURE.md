@@ -47,10 +47,15 @@ and feeds it into the `Contraction` structural node (`_schedule._contraction_nod
 bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is rejected at fork construction, alongside
 `_check_warp_static_k`, instead of failing several passes later:
 
-- a `CONTRACTION` contraction → the `(a_load, b_load, acc, epilogue)` operand→role facts
-  (`_atomize.bind_contraction`): the A/B operands bound to roles by which output grid axis each operand's OWN leaf `Load`
-  index carries (structural — read off the annotated loop, not a flattened-loop scan), plus the fold accumulator and the
-  projection epilogue. The binding now happens ONCE at **recognize time** (`010_recognize._nodify_contraction` — every
+- a `CONTRACTION` contraction → the `(a_operand, b_load, acc, epilogue)` operand→role facts
+  (`_atomize.bind_contraction`): the operands are named by the ⊗ **lift** (the `Assign` the fold accumulates) — B is its
+  (n, k)-indexed `Load`, A is the lift's other argument, either a plain `Load` (clean gmem-direct) or, when loop fusion
+  has inlined an operand cone, the cone itself as a `Body` (a STAT-FREE computed A, which rides the `sync` compute-fill
+  like the norm→linear cone but carries no statistic prologue) — plus the fold accumulator and the projection epilogue.
+  Binding off the lift rather than off "the first (m, k)-indexed `Load`" is load-bearing: a cone-INTERNAL load is
+  (m, k)-indexed too, so the positional rule bound gemma's GeGLU combine as `gate @ W` and silently dropped the gelu and
+  the up projection. Refusing to bind a stat-free cone at all is equally wrong — it demotes the cell to a PLANAR
+  scalar fold, which cost the gemma-4 M=256 post twin 144 ms against 4.3 ms bound. The binding now happens ONCE at **recognize time** (`010_recognize._nodify_contraction` — every
   recognized contraction, per-cell scalar included, is a `Contraction` node with a deferred `TilePlan()`; an unbindable
   one — a 1-D matvec-shaped output — demotes to `PLANAR` and folds as an ordinary `Reduction`); the schedule fork only
   swaps the node's `tile` field (`_schedule._contraction_node`), and `_factor.factorize` reads the facts off the node
@@ -110,6 +115,20 @@ dimensions, with OPPOSITE re-entry contracts — keep them apart:
   matmul has no mma tier), so it splits into **N single-channel matmuls** (each rides `d2/tma/ring` and beats cuBLAS)
   writing per-channel workspaces + a downstream pointwise **combine** kernel carrying the ⊗-combine (GeGLU) tail — the
   form that beats cuBLAS at prefill M (~270 vs ~317 µs eager on the 5090), which the fused computed-A megakernel can't.
+
+  Like `030_split_reduce`, this rule **decides nothing** — it realizes a decision already in the schedule.
+  `PLACE@cone` is a knob `010_recognize` enumerates as a fork sibling (a `cut`-stamped row beside the fused warp-mma
+  and coop-reduce rows) and stamps on the chosen op; `020_cut_edge` reads that stamp, exactly as `030_split_reduce`
+  reads the `GRID` reduce stage. That is what makes the placement selectable by the ordinary **evidence pick**: a
+  golden records `PLACE@cone: cut` against the cut's measured TOTAL (stat + cone + channels + combine), the same
+  whole-cost convention a split-K golden uses for partial+finalize, and `_golden_pick` compares it to the fused rows
+  like any other knob. No Σ-of-predictions structural pricing is involved.
+
+  **The cut row is evidence-only.** `greedy_decide` withholds it from the model fallback, so it can win only where it
+  was actually measured. This is a safety property, not a preference: the cut is catastrophic where its consumers have
+  no golden — the gemma-4 gate/up edge measures 35,558 / 71,160 / 142,702 µs at M=32/64/128 (the channel matmuls fall
+  to a scalar tile) against 368.7 µs at the seeded M=256. An unseeded shape simply never matches and stays fused, so
+  the choice is never made geometrically.
 - **`030_split_reduce`** splits the **reduce axis** (the REDUCE codec's `g<w>` cross-CTA shard): the SAME
   computation, its K partitioned across CTAs into a partial + finalize. It runs AFTER its decision — the `g` row was
   chosen FOR the split form — so the partial carries the decided knob row verbatim and the finalize is deliberately
@@ -204,9 +223,17 @@ per element and keep the warp tier either way. To keep that gate from silently d
 traced dtype CASTS are first-class: a dtype-changing view splits into a source-shaped elementwise `copy` + a pure
 map at the frontend (`optimization/005_split_cast_from_indexmap`), and loop fusion's plumbing exemption admits only
 dtype-PRESERVING copies (`merge_loop_ops._is_castfree_indexmap`), so the cast stays a materialized buffer at flash
-offer sites (usually free — a fan-out-1 pointwise producer fuses into it and simply writes the narrow dtype) and the
-stream sees an atom-dtype operand it can stage (the gemma V-norm's f32 `mul` → f16 SDPA edge, the layer-0 findings'
-biggest lockout). **A causal stream tile-skips**: when the score
+offer sites and the stream sees an atom-dtype operand it can stage (the gemma V-norm's f32 `mul` → f16 SDPA edge, the
+layer-0 findings' biggest lockout). That the cast is *usually free* — a fan-out-1 pointwise producer absorbing it and
+simply writing the narrow dtype — is not something loop fusion can be relied on to arrange: fusion may merge either
+way, and on gemma-4 it consistently spliced the cheap cast into its CONSUMERS instead, leaving the wide producer
+buffer alive. `optimization/007_sink_narrowing_cast` makes it deterministic, retyping the producer's OUTPUT and
+dropping the copy whenever the producer's SOLE consumer is the cast. It is a retype, not a numeric change (an
+elementwise op computes in its inputs' promoted precision and rounds on store), and it is what keeps a norm→matmul
+edge on the plain mma tier: a mixed-dtype A has no copy transport, so without it `_demote_mixed_a` diverts the
+projection onto the `sync` compute-fill, which has no weight-prefetch ring — measured on gemma-4's gate/up as
+1.12 TB/s against the 1.61 TB/s a clean-f16-A `d2/tma/ring` sibling reached on the same 118 MB
+weight. **A causal stream tile-skips**: when the score
 prologue carries the triangular `Select` (`kv ≤ m` — detected structurally off the predicate, never a kernel identity),
 the realizer bounds the stream at the CTA's last query row (`kv_end = min(seq, (grid_m + 1) · um·fm·atom_m)`, hoisted
 into the `StridedLoop`'s for-init `end` override; the staged prefetch clamp re-pins onto the last needed chunk). The

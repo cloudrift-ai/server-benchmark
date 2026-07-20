@@ -22,8 +22,9 @@ ENV HF_HOME=/opt/emmy/hf \
     EMMY_CUBIN_CACHE=/opt/emmy/cubin \
     HF_HUB_OFFLINE=1
 
-# Weights + tokenizer + config (the unmodified HF snapshot, LICENSE/NOTICE included —
-# the Apache 2.0 attribution ships with it), then the warmed sm_120/sm_120a cubins.
+# Weights + tokenizer + config (the HF snapshot — per-tensor identical, but resharded by
+# reshard_snapshot.py when it shipped a >10 GB consolidated file; LICENSE/NOTICE included,
+# so the Apache 2.0 attribution ships with it), then the warmed sm_120/sm_120a cubins.
 # The snapshot ships as four layers that merge into /opt/emmy/hf: Docker Hub 503s the
 # monolithic ~24 GB blob at upload initiation, so split_hf.sh (run by the Makefile
 # before this build) balances it into sub-10 GB parts.

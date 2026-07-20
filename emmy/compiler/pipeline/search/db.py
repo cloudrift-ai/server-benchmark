@@ -429,6 +429,9 @@ class SearchDB:
     ]
 
     def __init__(self, path: Path | str | None = None) -> None:
+        # The backing file (``None`` for an in-memory DB) — read by the deploy-side
+        # ``_db_measured_index`` cache to key its process-wide memo on (path, mtime).
+        self._path = Path(path) if path is not None else None
         if path is None:
             self._conn = sqlite3.connect(":memory:", isolation_level=None, check_same_thread=False)
         else:

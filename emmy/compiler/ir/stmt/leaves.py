@@ -881,7 +881,9 @@ class Write(Stmt):
         import hashlib  # noqa: PLC0415 — render-path-only dependency
 
         sig = f"{self.output}|{flat}|{','.join(converted)}"
-        temp = f"_vs_{self.values[0]}_{hashlib.sha1(sig.encode()).hexdigest()[:4]}"
+        # 8 hex chars (32 bits): at [:4] two DIFFERENT sibling Writes sharing ``values[0]`` collide
+        # on the temp name within one C scope at ~n²/2¹⁷ — a duplicate-declaration nvcc error.
+        temp = f"_vs_{self.values[0]}_{hashlib.sha1(sig.encode()).hexdigest()[:8]}"
         if vec_type == "__half2":
             return [
                 f"{pad}{vec_type} {temp} = __halves2half2({converted[0]}, {converted[1]});",

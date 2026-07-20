@@ -69,9 +69,13 @@ For each shape, run the deployable comparison:
 emmy run --bench --golden NAME
 ```
 
-The kernel table shows the **greedy pick** row (what `run`/`compile` deploy) and one `golden NAME` row per recorded
-config, **all benched live this run** — a real A/B. Knob columns are in the header; rows carry positional values.
-Compare the greedy `us` against the *best* (min) golden row's `us`.
+The kernel table shows the **greedy pick** row (what `run`/`compile` deploy) and one `golden NAME [fm|std]` row per
+recorded config, **all benched live this run** — a real A/B. Knob columns are in the header; rows carry positional
+values. Compare the greedy `us` against the *best* (min) golden row **of the greedy's own lane** — a shape often
+carries both a `std` and an `[fm]` golden under one name, and `min()`-ing across both compares a pinned `[fm]`
+latency against a `std` greedy, manufacturing a phantom regression (a false win that has nearly shipped). Each row's
+lane is explicit in the `--json` (`greedy.lane` and each `pinned[].lane`, both `"fm"`/`"std"`) and tagged
+`[fm]`/`[std]` in the table label: filter `pinned` to `p["lane"] == greedy["lane"]` before taking the min.
 
 Two failure semantics to know (both survive, nothing aborts the run — every row, greedy and pinned alike, benches
 in its own SIGKILL-able worker job, so a hung kernel never wedges the run or poisons the parent process). One

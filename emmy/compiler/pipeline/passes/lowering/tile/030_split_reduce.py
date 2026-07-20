@@ -194,7 +194,11 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, contraction: Cont
     # partial has no original Write to copy), so size the workspace by the grid extents, not
     # ``out.shape`` (whose extent-1 batch dims the grid never carries). A multi-channel node
     # packs its per-channel accs into a leading ``comp`` axis (the residual path's convention);
-    # the single-component workspace stays ``ws[ksplit, *cell]``.
+    # the single-component workspace stays ``ws[ksplit, *cell]``. The workspace is **f32**: it
+    # holds raw pre-projection accumulator states (summed + ⊗-combined by the finalize), and the
+    # pre-projection state must not round-trip through the output dtype (the flash split-KV /
+    # 020 channel-workspace rule — an fp16 round-trip saturates outlier partials to ±inf before
+    # the combine and costs the mantissa of every partition sum).
     ws_name = f"{out.name}__partial"
     ws_shape = (Dim(plan.cta), *(a.extent for a in grid)) if n_comp == 1 else (Dim(n_comp), Dim(plan.cta), *(a.extent for a in grid))
 
@@ -227,7 +231,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, contraction: Cont
     for inp in root.inputs:
         n = match.graph.nodes[inp]
         frag.add_node(op=InputOp(), inputs=[], output=n.output, node_id=inp)
-    frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, out.dtype), node_id=ws_name)
+    frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
     frag.add_node(op=fin_tile, inputs=[ws_name], output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
     frag.outputs = [out.name]
     return frag

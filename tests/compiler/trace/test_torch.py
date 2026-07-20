@@ -448,3 +448,42 @@ def test_dropout_traces_as_copy_passthrough():
     ew_names = [n.op.op.name for n in g.nodes.values() if type(n.op).__name__ == "ElementwiseOp"]
     assert "dropout" not in ew_names
     assert "copy" in ew_names
+
+
+def test_dtype_changing_cast_is_a_real_node_not_an_alias():
+    """``to`` / ``type_as`` alias their input ONLY when the dtype is unchanged. A cast that
+    actually narrows must survive tracing, or the wider dtype propagates forward: Gemma's
+    RMSNorm computes the statistic in f32 (``x.float()``) and closes with ``.type_as(x)``, so
+    dropping that cast left the norm OUTPUT f32 and every downstream projection a mixed
+    f32xf16 contraction — which is not offered the staged transports. The f32 statistic itself
+    must be preserved (squaring gemma activations in f16 overflows above |x|=256)."""
+    import torch
+    from torch import nn
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class Norm(nn.Module):
+        def forward(self, x):
+            stat = torch.pow(x.float().pow(2).mean(-1, keepdim=True) + 1e-6, -0.5)
+            return (x.float() * stat).type_as(x)
+
+    g = trace_module(Norm().eval(), (torch.randn(4, 16, dtype=torch.float16),))
+    out = g.nodes[g.outputs[0]]
+    assert out.output.dtype.name == "f16", "the closing type_as must narrow the traced output"
+    # ...and the statistic really was computed wide — a node upstream still carries f32.
+    assert any(n.output.dtype.name == "f32" for n in g.nodes.values()), "the f32 statistic chain must survive"
+
+
+def test_same_dtype_cast_stays_an_alias():
+    """A ``to`` that does not change dtype is still a pure alias — no redundant copy node."""
+    import torch
+    from torch import nn
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class Same(nn.Module):
+        def forward(self, x):
+            return (x * 2).to(torch.float16)
+
+    g = trace_module(Same().eval(), (torch.randn(4, 16, dtype=torch.float16),))
+    assert all(n.output.dtype.name == "f16" for n in g.nodes.values())

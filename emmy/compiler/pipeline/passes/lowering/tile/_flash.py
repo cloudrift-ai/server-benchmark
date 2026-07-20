@@ -633,21 +633,26 @@ def _is_loopop(graph: Graph, buf: str) -> bool:
     return node is not None and isinstance(node.op, LoopOp)
 
 
-def _coord_select_kind(mdef: Select, kv: str) -> tuple[bool, int | None] | None:
+def _coord_select_kind(mdef: Select, kv: str, m: str) -> tuple[bool, int | None] | None:
     """Classify a mask-value ``Select`` (keep-branch first, as the decomposition emits) by its
-    keep predicate over the streaming key var ``kv``: ``kv ≤ m`` → causal ``(True, None)``;
-    ``kv > m − W`` → sliding-window band ``(False, W)``. ``None`` for any other predicate —
-    an unrecognized Select declines the fuse rather than silently classifying causal."""
+    keep predicate over the streaming key var ``kv`` AGAINST the score's query-row var ``m``:
+    ``kv ≤ m`` → causal ``(True, None)``; ``kv > m − W`` → sliding-window band ``(False, W)``.
+    ``None`` for any other predicate — an unrecognized Select declines the fuse rather than
+    silently classifying causal, and a coordinate compare against any var other than the row
+    var (a head / batch var in hand-written IR) is exactly such an unrecognized predicate:
+    ``_flash_op`` re-synthesizes the canonical ``kv ≤ m`` Selects, so classifying it would
+    silently rewrite the mask's semantics."""
     keep = mdef.branches[0].select
     if not (isinstance(keep, BinaryExpr) and isinstance(keep.left, Var) and keep.left.name == kv):
         return None
-    if keep.op == "<=" and isinstance(keep.right, Var):
+    if keep.op == "<=" and isinstance(keep.right, Var) and keep.right.name == m:
         return (True, None)
     if (
         keep.op == ">"
         and isinstance(keep.right, BinaryExpr)
         and keep.right.op == "-"
         and isinstance(keep.right.left, Var)
+        and keep.right.left.name == m
         and isinstance(keep.right.right, Literal)
     ):
         return (False, int(keep.right.right.value))
@@ -664,21 +669,18 @@ def _classify_rowmax(graph: Graph, lp: Loop) -> tuple[str, bool, int | None, str
     if len(max_accs) != 1:
         return None
     causal, window, mask_buf = False, None, None
+    coord_selects: list[Select] = []
     cur = _def(lp.body, max_accs[0].value)
     while isinstance(cur, Assign) and cur.op.name == "add" and len(cur.args) == 2:
         a, b = cur.args
         adef, bdef = _def(lp.body, a), _def(lp.body, b)
         # The mask side is the Select / non-score Load; the other side continues the chain.
+        # Coord Selects are only COLLECTED here — classification needs the score's row var,
+        # known once the chain bottoms out at the score Load below.
         nxt = None
         for sdef, mdef in ((adef, bdef), (bdef, adef)):
             if isinstance(mdef, Select):
-                kind = _coord_select_kind(mdef, lp.axis.name)
-                if kind is None:
-                    return None
-                if kind[0]:
-                    causal = True
-                else:
-                    window = kind[1]
+                coord_selects.append(mdef)
                 nxt = sdef
                 break
             if isinstance(mdef, Load) and not _is_loopop(graph, mdef.input):
@@ -691,6 +693,19 @@ def _classify_rowmax(graph: Graph, lp: Loop) -> tuple[str, bool, int | None, str
             return None
         cur = nxt
     if isinstance(cur, Load) and _is_loopop(graph, cur.input):
+        # Classify each coord Select against the score's own vars (``score[..., m, kv]`` — the
+        # module's score-layout convention, as in ``_extract_qk``); any mismatch declines.
+        m_var = _var_at(cur.index, -2)
+        if coord_selects and (m_var is None or _var_at(cur.index, -1) != lp.axis.name):
+            return None
+        for mdef in coord_selects:
+            kind = _coord_select_kind(mdef, lp.axis.name, m_var)
+            if kind is None:
+                return None
+            if kind[0]:
+                causal = True
+            else:
+                window = kind[1]
         return cur.input, causal, window, mask_buf
     return None
 

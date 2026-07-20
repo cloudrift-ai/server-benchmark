@@ -628,6 +628,18 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], str]:
     return rows, kaxis
 
 
+def _is_splitk_spec(spec: str) -> bool:
+    """True when a ``REDUCE`` spelling is a cross-CTA GRID split (``g<w>[a|k]``) — the partition
+    ``_splitk_option`` realizes into a partial/finalize pair. An unparseable or non-split spelling
+    (``""`` / ``b`` / ``r``) is not a split."""
+    if not spec:
+        return False
+    try:
+        return ReducePlan.parse(spec).needs_split
+    except ValueError:
+        return False
+
+
 def _splitk_pin() -> str:
     """The pinned ``g<w>[a|k]`` split-K spec (or ``""``) — the cross-CTA K partition a
     ``CONTRACTION`` honors through the structural ``Reduction ⊃ Contraction`` fork
@@ -873,7 +885,10 @@ def prologue_knob_bases(k2: str, stat_axis: str) -> tuple[dict, dict]:
     the same key set (the evidence pick's prefix-consistency: an absent key reads as "free"). Lives
     here (not the rule module) for the same ``Knob``-import reason as :func:`warp_tile_pinned`."""
     con = {"PLACE@cone": "fuse", _at(REDUCE, stat_axis): ""}
-    map_ = {_at(TILE, k2): "", _at(STAGE, k2): "", _at(REDUCE, k2): ""}
+    # The map form spells ``PLACE@cone`` too, so the cone placement is a decided key on EVERY row
+    # of the merged fork — that is what makes it selectable by the ordinary evidence pick (an
+    # absent key reads as "free" and would let a ``cut`` golden match a fused row).
+    map_ = {"PLACE@cone": "fuse", _at(TILE, k2): "", _at(STAGE, k2): "", _at(REDUCE, k2): ""}
     return con, map_
 
 
@@ -1079,6 +1094,12 @@ def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
     (``k`` vs ``<k>_ks``) are what avoid a double-reduce ``for k:[for k:]`` — every original ``k`` is
     visited once (``kslice`` folded into a partial, ``ksplit`` summed across partials)."""
     big_k = k_axis.extent.as_static()
+    # Only a dividing width factorizes losslessly — the enumeration path filters ``k % cta``
+    # upstream, so a non-divisor can only arrive via an EMMY_REDUCE pin, and truncating here
+    # would silently drop the ``K − w·⌊K/w⌋`` remainder columns of the contraction (the scalar
+    # tier has no step check to catch it). Refuse loudly, as a pin should.
+    if big_k % w:
+        raise ValueError(f"split-K width {w} does not divide K={big_k}; pick a dividing split width.")
     b = big_k // w
     ksplit = Axis(name=f"{k_axis.name}_ks", extent=Dim(w))
     kslice = replace(k_axis, extent=Dim(b))
@@ -1391,6 +1412,26 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         # (:func:`_splitk_option`, consumed by ``030_split_reduce``); a warp row through
         # :func:`_warp_option`; the rest through :func:`_tile_option`.
         rows, kaxis = _tile_rows(tile, place, ctx)
+        # Thread the cone placement onto every FORK ROW, not just the materialized op. The deploy
+        # pick builds its candidate rows from the fork tree's LEAF knobs, and an absent key reads as
+        # "free" in the evidence join — so leaving it off the contraction rows would let a golden
+        # recording ``PLACE@cone: cut`` match a fused row (deploying the fused kernel while
+        # reporting the cut's µs, the silent-wrong-deploy class). Constant across the rows, so it
+        # adds no branching to the tree.
+        if "PLACE@cone" in knobs:
+            rows = [{**r, "PLACE@cone": knobs["PLACE@cone"]} for r in rows]
+            if knobs["PLACE@cone"] == "cut":
+                # A cut row's own schedule is DISCARDED — ``020_cut_edge`` emits un-mapped LoopOps
+                # and each half re-enters ``010`` for its own fork, its own tile and its own golden.
+                # A split-K spelling on such a row is therefore not merely wasted enumeration:
+                # ``_splitk_option`` realizes the partial/finalize pair at RECOGNIZE time, so the
+                # cut rule later meets a Contraction carrying a split lead axis over a SLICED K,
+                # which its 2-D (m, k) cone workspace cannot express — and the cut silently never
+                # fires. Measured on the gemma-4 M=256 post twin: the down_proj cone arrived as
+                # ``lead=['a2_ks']`` and every cut attempt skipped, leaving the fused 2,515.8 µs
+                # kernel in place. Keep the serial spelling; the CONSUMER half picks its own
+                # split-K from its own golden (``mlp_down.m256`` records ``g4k``).
+                rows = [r for r in rows if not _is_splitk_spec(r.get(_at(REDUCE, kaxis), ""))]
         if not rows:
             # A computed-A (fused-cone) contraction with no legal warp row (fp32, no atoms, bad
             # geometry, over-budget slabs) contributes nothing — the recognizer's ``Map``-form

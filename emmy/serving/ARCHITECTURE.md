@@ -92,6 +92,17 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   twin entirely at the cost of decode speed.
   **Multimodal wrappers:** the trunk is resolved through `language_model` (gemma-4 "unified" nests the decoder stack +
   embed/norm there) and the text dims come from `config.text_config`.
+  **Tuning what serving actually runs.** The deploy pick reads the golden tier, then box-local `perf`/reservoir
+  evidence — and only evidence recorded against the *serving graph* carries serving. An isolated golden snippet does
+  not: fusion inside a real block produces a different graph (`F.rms_norm(x) @ w` binds a cone the in-model op does
+  not). So the evidence path is the **twins** — the `pre`/`post` graphs at each width, captured by
+  `scripts/capture_gen_twins.py` (which calls `gen_runner.trace_split`, the same trace `_compile_split` makes, so the
+  captured JSON is byte-for-byte what serving compiles) and then fed to `emmy tune` with `EMMY_TUNE_DB` /
+  `EMMY_ONLINE_FILE` pointed at a twin-local DB. Capture a **global** (`full_attention`) layer alongside the sliding
+  one for any model whose layers are not homogeneous — gemma-4's global layers carry a larger `head_dim`, so their
+  projections are different shapes with different optimal configs. Re-capture whenever a tracer/recognizer change
+  alters the graphs: the DB's evidence is keyed to structural signatures, and stale evidence applied to new graphs
+  serves worse than either coherent state.
 
   > **Memory budget (measured, gemma-4-12B / 32 GB RTX 5090).** The two artifacts that made the 12B need ~2–3× stock
   > vLLM's memory (it only fit at `ctx 256` with the decode twin off) are both fixed:

@@ -223,9 +223,17 @@ per element and keep the warp tier either way. To keep that gate from silently d
 traced dtype CASTS are first-class: a dtype-changing view splits into a source-shaped elementwise `copy` + a pure
 map at the frontend (`optimization/005_split_cast_from_indexmap`), and loop fusion's plumbing exemption admits only
 dtype-PRESERVING copies (`merge_loop_ops._is_castfree_indexmap`), so the cast stays a materialized buffer at flash
-offer sites (usually free — a fan-out-1 pointwise producer fuses into it and simply writes the narrow dtype) and the
-stream sees an atom-dtype operand it can stage (the gemma V-norm's f32 `mul` → f16 SDPA edge, the layer-0 findings'
-biggest lockout). **A causal stream tile-skips**: when the score
+offer sites and the stream sees an atom-dtype operand it can stage (the gemma V-norm's f32 `mul` → f16 SDPA edge, the
+layer-0 findings' biggest lockout). That the cast is *usually free* — a fan-out-1 pointwise producer absorbing it and
+simply writing the narrow dtype — is not something loop fusion can be relied on to arrange: fusion may merge either
+way, and on gemma-4 it consistently spliced the cheap cast into its CONSUMERS instead, leaving the wide producer
+buffer alive. `optimization/007_sink_narrowing_cast` makes it deterministic, retyping the producer's OUTPUT and
+dropping the copy whenever the producer's SOLE consumer is the cast. It is a retype, not a numeric change (an
+elementwise op computes in its inputs' promoted precision and rounds on store), and it is what keeps a norm→matmul
+edge on the plain mma tier: a mixed-dtype A has no copy transport, so without it `_demote_mixed_a` diverts the
+projection onto the `sync` compute-fill, which has no weight-prefetch ring — measured on gemma-4's gate/up as
+1.12 TB/s against the 1.61 TB/s a clean-f16-A `d2/tma/ring` sibling reached on the same 118 MB
+weight. **A causal stream tile-skips**: when the score
 prologue carries the triangular `Select` (`kv ≤ m` — detected structurally off the predicate, never a kernel identity),
 the realizer bounds the stream at the CTA's last query row (`kv_end = min(seq, (grid_m + 1) · um·fm·atom_m)`, hoisted
 into the `StridedLoop`'s for-init `end` override; the staged prefetch clamp re-pins onto the last needed chunk). The

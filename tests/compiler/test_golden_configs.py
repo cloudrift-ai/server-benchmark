@@ -170,7 +170,13 @@ def test_goldens_speak_native_codecs_and_featurize():
         ReducePlan.parse(g.knobs.get("REDUCE"))
         if g.knobs.get("STAGE"):
             Stage.parse(g.knobs["STAGE"])
-        if isinstance(g, MatmulGoldenConfig):
+        # A ``PLACE@cone: cut`` golden records a PLACEMENT and the cut's TOTAL cost, not a tile: the
+        # cut row's own schedule is discarded (``020_cut_edge`` emits un-mapped LoopOps and each half
+        # re-enters ``010`` to get its own fork and its own golden), so there is no geometry to
+        # featurize. Spelling one is worse than omitting it — the consumer's transport (``d2/tma/ring``)
+        # cannot appear on a cut row, which is computed-A, so a tile-bearing cut golden stops matching.
+        # The ``mlp_geglu.*.cut`` goldens are exempt for the same reason, via their kind.
+        if isinstance(g, MatmulGoldenConfig) and g.knobs.get("PLACE@cone") != "cut":
             feats = features.knob_features(g.knobs)
             assert feats.get("D_threads", 0) > 0 and "D_tile_m" in feats, f"{g.name} featurized to empty tile geometry"
 

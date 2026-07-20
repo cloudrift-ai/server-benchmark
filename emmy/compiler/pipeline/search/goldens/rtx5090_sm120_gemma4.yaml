@@ -997,6 +997,30 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
     emmy_us: 74.1
     cublas_us: 77.1
+  # The CUT (PLACE@cone=cut) of the SAME edge. In the serving graph the GeGLU combine is NOT
+  # materialized -- loop fusion inlines it into down_proj's K loop, so this fork's A is a computed
+  # stat-free cone and the plain-matmul entry above cannot realize (a computed A never rides
+  # d2/tma/ring). Fused, that cell measures 892.4 us. Cutting it -- 020_cut_edge materializes the
+  # cone to a workspace and the projection runs as a plain gmem-A matmul -- costs 75.6 us total:
+  # cone producer 1.1 + matmul 73.5 + split-K finalize 1.0, the same total-cost convention the
+  # split-K and mlp_geglu.m256.cut goldens use. 11.8x, measured 2026-07-19 (manual --ab, 3x,
+  # <0.5% spread). NO TILE is recorded, deliberately: the cut row's schedule is discarded (each
+  # half re-enters 010 and picks up its own golden), and spelling the consumer's d2/tma/ring here
+  # would stop this entry matching -- a cut row is a computed-A row and never offers that transport.
+  # The consumer half then lands on the entry ABOVE, measured at 73.5 vs its recorded 74.1.
+  # SAFETY: a cut is only sound where its CONSUMER carries a golden, and here it does -- the
+  # consumer IS this shape. m256 is deliberately NOT seeded: the cut row is offered there but
+  # 020_cut_edge does not fire (that edge's cone is the multi-fold fused form), so the pinned A/B
+  # measures no change (4283.6 vs 4301.2) and there is nothing to record yet.
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.m32.cut
+    M: 32
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 75.6
+    cublas_us: 77.1
   # ---- prefill-chunk twins (M=256, the serving prefill static shapes) ----------------------------
   # The post-attention edge at PREFILL chunk M=256 — the `post256` twin. Seeded 2026-07-19 by manual pinned --ab
   # (3x; spreads <1%). These were the largest cold-deploy hole in the whole set: a cold twin audit showed the

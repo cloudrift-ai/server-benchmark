@@ -14,7 +14,13 @@ import pytest
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import golden as golden_mod
 from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig
-from emmy.compiler.pipeline.search.policy.greedy import _fork_shape_key, _golden_evidence_index, _golden_pick, greedy_decide
+from emmy.compiler.pipeline.search.policy.greedy import (
+    _fork_shape_key,
+    _golden_evidence_index,
+    _golden_matches_row,
+    _golden_pick,
+    greedy_decide,
+)
 
 CARD = "NVIDIA GeForce RTX 4090"
 CAP = (8, 9)
@@ -166,6 +172,22 @@ def test_decide_golden_overrides_model_argmin(monkeypatch):
     # evidence tier nor the model was needed (test 8: no contamination).
     assert "add_rows" not in calls
     assert "pick" not in calls and "evidence_pick" not in calls
+
+
+def test_place_golden_does_not_match_a_fork_that_never_offered_it():
+    """A STRUCTURAL placement is the one family where "undecided" cannot read as free. Every other
+    family is a schedule knob a later pass fills, so an absent key means "any realization will do";
+    ``PLACE`` instead names which KERNELS exist, and a fork that never offered the decision can
+    never realize it. The gemma-4 norm→qkv cones fork PRE-split (no ``PLACE@cone`` on any row) yet
+    ``_fork_shape_key`` rebuilds their key to ``kind="fused"``, so they share a ShapeKey with real
+    post-split cones — matching there deployed the bare map form at 1244 µs while reporting the
+    cut's 54.4 µs. Refusing the match makes it a loud drift warning instead."""
+    gold = {"PLACE@cone": "cut"}
+    assert not _golden_matches_row(gold, {**_BASE, **_ROW_GOLD})  # no PLACE key at all → refuse
+    assert not _golden_matches_row(gold, {**_BASE, **_ROW_GOLD, "PLACE@cone": "fuse"})  # decided the other way
+    assert _golden_matches_row(gold, {**_BASE, **_ROW_GOLD, "PLACE@cone": "cut"})
+    # Non-PLACE families keep the value-of-position convention: an undecided family is free.
+    assert _golden_matches_row({"STAGE": "d2/cp/ring/p2"}, {**_BASE, "TILE@a2": _STD_TILE})
 
 
 def test_cut_row_is_evidence_only_never_a_model_pick(monkeypatch):

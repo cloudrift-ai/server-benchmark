@@ -490,6 +490,19 @@ def _golden_matches_row(golden_knobs: dict, row: dict) -> bool:
         fam = family_of(gk)
         hits = [(rk, rv) for rk, rv in row.items() if not rk.startswith(("S_", "H_")) and family_of(rk) == fam and pin_key_matches(gk, rk)]
         if not hits:
+            # A STRUCTURAL placement is the one family where "undecided" cannot mean free. Every
+            # other family is a schedule knob a later pass fills in, so an absent key legitimately
+            # reads as "any realization will do". ``PLACE`` instead names which KERNELS exist, and a
+            # fork that never offered the decision can never realize it — the golden's structure
+            # simply is not on the table there. Treating it as free is a silent WRONG deploy: the
+            # gemma-4 norm→qkv cones fork PRE-split (no ``PLACE@cone`` on any of their 13k rows) yet
+            # ``_fork_shape_key`` rebuilds their key to ``kind="fused"``, so they share a ShapeKey
+            # with genuine post-split cones — a ``PLACE@cone: cut`` golden matched them as free and
+            # deployed the bare map form at 1244 µs while reporting the cut's 54.4 µs (5.3x
+            # regression on the prefill half). Refusing the match turns that into a loud drift
+            # warning and a fall-through to the normal hierarchy.
+            if fam == "PLACE":
+                return False
             continue  # family not decided at this fork — free
         matched = [values_equal(rk, gv, rv) for rk, rv in hits]
         if "@" in gk:  # axis-keyed: names exactly one realization — all-or-nothing

@@ -90,6 +90,14 @@ def rewrite(match: Match, root: Node) -> Graph | None:
         if not isinstance(node, Contraction) or not node.a_computed or len(node.folds) != 1:
             raise RuleSkipped("not a producer-cone composition — nothing to cut")
         pro_map, c = (tile.op if isinstance(tile.op, Map) else None), node
+        # A bare Contraction must carry its own output ``Write`` in the epilogue to be cuttable.
+        # A split-K PARTIAL does not — its store is synthesized by ``030_split_reduce`` — so the
+        # re-lowered consumer would have no Write and ``LoopOp`` rejects it. Reachable only under a
+        # global ``EMMY_PLACE=cut`` pin, which drives this rule over nodes that never OFFERED the
+        # cut (the pin-vs-offer distinction commit 8731f3ff drew for goldens); unpinned, such a node
+        # carries no ``PLACE@cone`` stamp and never gets here.
+        if pro_map is None and not any(isinstance(st, Write) for st in c.epilogue):
+            raise RuleSkipped("bare contraction with no output Write (a split-K partial) — nothing to cut")
         free_ok, stat_free = {a.name for a in tile.place.free} <= {c.m_axis.name, c.n_axis.name}, True
     if c.lead_axes or not free_ok:
         raise RuleSkipped("lead/batch axes on the cone — the 2-D workspace cut doesn't cover them yet")

@@ -1,0 +1,117 @@
+{
+ "gemma4_12b.rms_norm.k3840": {
+  "Eager PyTorch": 7.0,
+  "torch.compile": 6.0,
+  "Emmy": 7.0
+ },
+ "gemma4_12b.qknorm.k256": {
+  "Eager PyTorch": 5.0,
+  "torch.compile": 4.0,
+  "Emmy": 4.0
+ },
+ "gemma4_12b.qknorm.k512": {
+  "Eager PyTorch": 11.0,
+  "torch.compile": 16.0,
+  "Emmy": 10.0
+ },
+ "gemma4_12b.q_proj": {
+  "Eager PyTorch": 117.0,
+  "torch.compile": 116.0,
+  "Emmy": 118.0
+ },
+ "gemma4_12b.q_proj.s2048": {
+  "Eager PyTorch": 420.0,
+  "torch.compile": 417.0,
+  "Emmy": 492.0
+ },
+ "gemma4_12b.q_proj_global": {
+  "Eager PyTorch": 220.0,
+  "torch.compile": 220.0,
+  "Emmy": 250.0
+ },
+ "gemma4_12b.q_proj_global.s2048": {
+  "Eager PyTorch": 854.0,
+  "torch.compile": 848.0,
+  "Emmy": 913.0
+ },
+ "gemma4_12b.kv_proj": {
+  "Eager PyTorch": 51.0,
+  "torch.compile": 51.0,
+  "Emmy": 60.0
+ },
+ "gemma4_12b.kv_proj.s2048": {
+  "Eager PyTorch": 221.0,
+  "torch.compile": 220.0,
+  "Emmy": 258.0
+ },
+ "gemma4_12b.k_proj_global": {
+  "Eager PyTorch": 19.0,
+  "torch.compile": 19.0,
+  "Emmy": 23.0
+ },
+ "gemma4_12b.k_proj_global.s2048": {
+  "Eager PyTorch": 56.0,
+  "torch.compile": 56.0,
+  "Emmy": 66.0
+ },
+ "gemma4_12b.attention.hd256": {
+  "Eager PyTorch": 42.0,
+  "torch.compile": 42.0,
+  "Emmy": 39.0
+ },
+ "gemma4_12b.attention.hd256.s2048": {
+  "Eager PyTorch": 356.0,
+  "torch.compile": 348.0,
+  "Emmy": 403.0
+ },
+ "gemma4_12b.attention.hd512": {
+  "Eager PyTorch": 103.0,
+  "torch.compile": 99.0,
+  "Emmy": 315.0
+ },
+ "gemma4_12b.attention.hd512.s2048": {
+  "Eager PyTorch": 1054.0,
+  "torch.compile": 1048.0,
+  "Emmy": 3502.0
+ },
+ "gemma4_12b.o_proj": {
+  "Eager PyTorch": 118.0,
+  "torch.compile": 117.0,
+  "Emmy": 112.0
+ },
+ "gemma4_12b.o_proj.s2048": {
+  "Eager PyTorch": 472.0,
+  "torch.compile": 468.0,
+  "Emmy": 522.0
+ },
+ "gemma4_12b.o_proj_global": {
+  "Eager PyTorch": 248.0,
+  "torch.compile": 248.0,
+  "Emmy": 254.0
+ },
+ "gemma4_12b.o_proj_global.s2048": {
+  "Eager PyTorch": 848.0,
+  "torch.compile": 848.0,
+  "Emmy": 938.0
+ },
+ "gemma4_12b.mlp_gate_up": {
+  "Eager PyTorch": 879.0,
+  "torch.compile": 873.0,
+  "Emmy": 846.0
+ },
+ "gemma4_12b.mlp_gate_up.s2048": {
+  "Eager PyTorch": 3169.0,
+  "torch.compile": 3164.0,
+  "Emmy": 4382.0
+ },
+ "gemma4_12b.mlp_down": {
+  "Eager PyTorch": 415.0,
+  "torch.compile": 415.0,
+  "Emmy": 454.0
+ },
+ "gemma4_12b.mlp_down.s2048": {
+  "Eager PyTorch": 1655.0,
+  "torch.compile": 1654.0,
+  "Emmy": 1848.0
+ }
+}

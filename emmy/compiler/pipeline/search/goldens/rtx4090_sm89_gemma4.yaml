@@ -519,6 +519,20 @@ configs:
     knobs: {PLACE: 'fuse', REDUCE: 'g2k', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x64', WSPEC: ''}
     emmy_us: 116.1
     cublas_us: 95.6
+  # fm lane (2026-07-20 cold sweep, vast.ai 4090): the un-split f16-accumulate pj twin — dropping the
+  # g2k split and swapping TILE@pj to the f16acc atom lands 104.1 (3x reproduced, -11% vs the std row;
+  # the dynM twin already carried this family). The gap left to torch SDPA (fm-lane eager 93.5) is the
+  # hd512 d_v fold's 255-reg O-accumulator ceiling — codegen, not search.
+  - kernel: attention
+    name: gemma4_12b.attention.hd512
+    n_heads: 16
+    seq: 512
+    head_dim: 512
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', REDUCE: '', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x64', WSPEC: '', LOOPIFY: '0', RASTER: ''}
+    emmy_us: 104.1
+    cublas_us: 95.6
   # Q-norm over the global head_dim (8192 x 512): b128, and greedy picks it too (1.05x) — the one
   # global-layer shape where cold greedy is already right.
   - kernel: rms_norm

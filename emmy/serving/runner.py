@@ -140,7 +140,7 @@ class EmmyForwardRunner:
                 if w.load_ops is not None and w.source_path in sources
             }
         else:
-            plan, const_feed = cls._trace_and_compile(model, wrapper, sources, max_seq_len, dtype, batch)
+            plan, const_feed = cls._trace_and_compile(wrapper, sources, max_seq_len, dtype, batch)
             if pack_at is not None:
                 cls._save_pack(pack_at, plan, pack_key, model_id)
 
@@ -188,7 +188,7 @@ class EmmyForwardRunner:
         )
 
     @classmethod
-    def _trace_and_compile(cls, model, wrapper, sources: dict[str, np.ndarray], max_seq_len: int, dtype, batch: int):
+    def _trace_and_compile(cls, wrapper, sources: dict[str, np.ndarray], max_seq_len: int, dtype, batch: int):
         """The full frontend: torch.export trace + CUDA pass pipeline, projected to an
         execution plan, plus the weight feed bound from the live wrapper."""
         import torch

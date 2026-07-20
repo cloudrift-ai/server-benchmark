@@ -94,6 +94,8 @@ tests/
 │   │   ├── test_emit.py                        # CUDA source-level assertions + GPU runs
 │   │   ├── test_loader.py / test_nvcc_compile.py
 │   │   ├── test_program.py                     # cupy dispatch of Graph[CudaOp]
+│   │   ├── test_execution_plan.py              # plan projection + JSON round-trip (CPU)
+│   │   ├── test_pack_gpu.py                    # pack save/load + recompile fallback (CUDA)
 │   │   ├── test_torch_ref.py                   # eager-reference evaluator
 │   │   └── test_bench_worker_recovery.py       # sticky-CUDA-error sub-process recovery
 │   ├── trace/

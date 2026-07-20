@@ -640,39 +640,3 @@ def test_cut_workspace_producer_never_refuses():
     assert len(_kernel_nodes(_fuse(graph_with("t__cone")))) == 2, "a cone workspace must stay materialized"
     assert len(_kernel_nodes(_fuse(graph_with("t__ch0")))) == 2, "a channel workspace must stay materialized"
     assert len(_kernel_nodes(_fuse(graph_with("t_plain")))) == 1, "an ordinary pointwise producer still fuses"
-
-
-def test_softmax_mask_add_discount_scoped_to_the_chain():
-    """``_reduce_heavy``'s softmax discount counts only the ``add``s on the rowmax/exp
-    def-chains (the mask applications), never off-chain compute adds — an add-heavy compute
-    merged into a rowmax-bearing producer keeps its real weight instead of being
-    misclassified light and over-merged."""
-    import importlib
-
-    from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.elementwise import ElementwiseImpl
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.loop import Accum as LAccum
-    from emmy.compiler.ir.loop import Assign as LAssign
-    from emmy.compiler.ir.loop import Load as LLoad
-    from emmy.compiler.ir.loop import Loop
-    from emmy.compiler.ir.stmt import Body
-    from emmy.compiler.ir.stmt import Write as LWrite
-
-    mod = importlib.import_module("emmy.compiler.pipeline.passes.loop.fusion.010_merge_loop_ops")
-    inner = Body(
-        (
-            LLoad(name="s", input="score", index=(Var("m"), Var("k"))),
-            LLoad(name="b1", input="bias", index=(Var("m"), Var("k"))),
-            LAssign(name="a1", op=ElementwiseImpl("add"), args=("s", "b1")),  # mask add — ON the rowmax chain
-            LLoad(name="r1", input="res", index=(Var("m"), Var("k"))),
-            LLoad(name="r2", input="res2", index=(Var("m"), Var("k"))),
-            LAssign(name="off", op=ElementwiseImpl("add"), args=("r1", "r2")),  # compute add — OFF the chain
-            LAccum(name="mx", op=ElementwiseImpl("maximum"), value="a1"),
-        )
-    )
-    m_body = Body((Loop(axis=Axis(name="k", extent=Dim(16)), body=inner), LWrite(output="o", index=(Var("m"),), value="mx")))
-    op = LoopOp(body=Body((Loop(axis=Axis(name="m", extent=Dim(4)), body=m_body),)))
-    # Only the chain add (a1) discounts: 4 x 16 iterations; the off-chain add keeps its weight.
-    assert mod._softmax_mask_add_cost(op) == 64

@@ -22,7 +22,9 @@ Ask only for what the user hasn't already given:
 
 1. **Mode** — rental (default) or local. Local requires a 5090 in `nvidia-smi` on this machine; if the box is
    multi-GPU, resolve the 5090's index and export `GPU_DEVICE=<index>` for every warm/verify invocation. Check
-   ≥60 GB free disk (base image + `warm/` + baked weight layer) before starting local mode.
+   ≥100 GB free disk (base image + `warm/` + baked weight layer + BuildKit's transient ~24 GB context copy of
+   `warm/` — the measured figure; the earlier ~60 GB estimate predates it and hits ENOSPC mid-bake) before
+   starting local mode.
 2. **`HF_TOKEN`** — needed for the gated gemma-4 download during headroom/validate/warm. Local mode with the model
    already in `~/.cache/huggingface` can skip it by pre-seeding (ARCHITECTURE.md "Running it locally").
 3. **Docker Hub credentials for the push** — ask the user for a **short-lived access token** (not their password;
@@ -60,8 +62,9 @@ pushed from the same commit (the wheel is part of the cubin cache key) — when 
 ## Step 2 — Toolchain preflight (GATE)
 
 Run the preflight inside the freshly built image (exact command in ARCHITECTURE.md step 2).
-**Gate: the output must end `== preflight done: <N> OK, 0 FAIL`.** `<N>` is the golden count and grows as goldens
-land — the gate is **0 FAIL**, not a specific N. Anything else → capture the failing `*.log`s from
+**Gate: the output must end `== preflight done: <N> OK, 0 FAIL` with `<N>` nonzero.** `<N>` is the golden count and
+grows as goldens land — the gate is **0 FAIL and at least one OK**, not a specific N (the script itself hard-fails
+an empty golden enumeration, so `0 OK, 0 FAIL` can no longer exit 0). Anything else → capture the failing `*.log`s from
 the preflight out dir, abort, teardown, report. Do not attempt to fix compiler/toolchain bugs inside the release
 session.
 

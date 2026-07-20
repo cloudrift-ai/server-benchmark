@@ -43,9 +43,10 @@ serves offline (`HF_HUB_OFFLINE=1`, the model resolved to its snapshot path), an
 materialize on an offline boot; independently, a fork pick can flip between boots, selecting between two stable
 kernel variants (2026-07 5090 session: 6 offline-only kernels + 2 bimodal ones on gemma-4-12B — each variant's
 source is byte-stable, so the union converges). After the online pass, `warm.sh` re-boots offline against the
-accumulated cache until a boot compiles nothing new (max 5 passes). The boot-to-boot pick flip is a real
-compiler bug (fork resolution should be deterministic across processes); the fixpoint warm contains it but does
-not excuse it.
+accumulated cache until a boot compiles nothing new (max 5 passes); **non-convergence after 5 passes is a hard
+failure** (`warm.sh` exits 1 — with the cubin set still growing, verify's single boot passing is a coin flip and
+customer boots would recompile at runtime). The boot-to-boot pick flip is a real compiler bug (fork resolution
+should be deterministic across processes); the fixpoint warm contains it but does not excuse it.
 
 ## Files
 
@@ -158,12 +159,15 @@ rental/teardown. The local-only deltas:
   across layers by COPY. `make gemma4-serve-image` therefore first runs `reshard_snapshot.py` (inside the base
   image), rewriting the consolidated file as standard HF shards + `model.safetensors.index.json` — per-tensor
   bytes identical, loader-transparent — then `split_hf.sh` balances the tree into four hardlinked sub-10 GB parts
-  that the Dockerfile COPYs back into `/opt/emmy/hf`. Kernel cache-key parity is unaffected (weights are runtime
-  constants, not source); the verify gate re-arbitrates the resharded snapshot.
+  that the Dockerfile COPYs back into `/opt/emmy/hf` (the split asserts completeness — every source file lands in
+  exactly one part — and that each part stays under the ~10 GB blob cap). Kernel cache-key parity is unaffected
+  (weights are runtime constants, not source). The reshard verifies every tensor byte-identical against the
+  consolidated source BEFORE deleting it — the post-bake verify gate only proves the shards load and the cubin set
+  is closed, not that the weights survived.
 
 ## Licensing
 
 gemma-4 is **Apache 2.0** — public redistribution of the weights in a Docker Hub tag is permitted. The bake copies
-the unmodified HF snapshot, which carries its LICENSE/NOTICE files — keep them (that is the attribution obligation),
-and don't imply Google endorsement in the tag name or description.
+the HF snapshot (resharded, per-tensor identical — see above), which carries its LICENSE/NOTICE files — keep them
+(that is the attribution obligation), and don't imply Google endorsement in the tag name or description.
 

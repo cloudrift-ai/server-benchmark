@@ -628,6 +628,18 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], str]:
     return rows, kaxis
 
 
+def _is_splitk_spec(spec: str) -> bool:
+    """True when a ``REDUCE`` spelling is a cross-CTA GRID split (``g<w>[a|k]``) — the partition
+    ``_splitk_option`` realizes into a partial/finalize pair. An unparseable or non-split spelling
+    (``""`` / ``b`` / ``r``) is not a split."""
+    if not spec:
+        return False
+    try:
+        return ReducePlan.parse(spec).needs_split
+    except ValueError:
+        return False
+
+
 def _splitk_pin() -> str:
     """The pinned ``g<w>[a|k]`` split-K spec (or ``""``) — the cross-CTA K partition a
     ``CONTRACTION`` honors through the structural ``Reduction ⊃ Contraction`` fork
@@ -1402,6 +1414,18 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         # adds no branching to the tree.
         if "PLACE@cone" in knobs:
             rows = [{**r, "PLACE@cone": knobs["PLACE@cone"]} for r in rows]
+            if knobs["PLACE@cone"] == "cut":
+                # A cut row's own schedule is DISCARDED — ``020_cut_edge`` emits un-mapped LoopOps
+                # and each half re-enters ``010`` for its own fork, its own tile and its own golden.
+                # A split-K spelling on such a row is therefore not merely wasted enumeration:
+                # ``_splitk_option`` realizes the partial/finalize pair at RECOGNIZE time, so the
+                # cut rule later meets a Contraction carrying a split lead axis over a SLICED K,
+                # which its 2-D (m, k) cone workspace cannot express — and the cut silently never
+                # fires. Measured on the gemma-4 M=256 post twin: the down_proj cone arrived as
+                # ``lead=['a2_ks']`` and every cut attempt skipped, leaving the fused 2,515.8 µs
+                # kernel in place. Keep the serial spelling; the CONSUMER half picks its own
+                # split-K from its own golden (``mlp_down.m256`` records ``g4k``).
+                rows = [r for r in rows if not _is_splitk_spec(r.get(_at(REDUCE, kaxis), ""))]
         if not rows:
             # A computed-A (fused-cone) contraction with no legal warp row (fp32, no atoms, bad
             # geometry, over-budget slabs) contributes nothing — the recognizer's ``Map``-form

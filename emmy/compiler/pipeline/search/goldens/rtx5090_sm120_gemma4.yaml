@@ -997,43 +997,6 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
     emmy_us: 74.1
     cublas_us: 77.1
-  # The CUT (PLACE@cone=cut) of the SAME edge. In the serving graph the GeGLU combine is NOT
-  # materialized -- loop fusion inlines it into down_proj's K loop, so this fork's A is a computed
-  # stat-free cone and the plain-matmul entry above cannot realize (a computed A never rides
-  # d2/tma/ring). Fused, that cell measures 892.4 us. Cutting it -- 020_cut_edge materializes the
-  # cone to a workspace and the projection runs as a plain gmem-A matmul -- costs 75.6 us total:
-  # cone producer 1.1 + matmul 73.5 + split-K finalize 1.0, the same total-cost convention the
-  # split-K and mlp_geglu.m256.cut goldens use. 11.8x, measured 2026-07-19 (manual --ab, 3x,
-  # <0.5% spread). NO TILE is recorded, deliberately: the cut row's schedule is discarded (each
-  # half re-enters 010 and picks up its own golden), and spelling the consumer's d2/tma/ring here
-  # would stop this entry matching -- a cut row is a computed-A row and never offers that transport.
-  # The consumer half then lands on the entry ABOVE, measured at 73.5 vs its recorded 74.1.
-  # SAFETY: a cut is only sound where its CONSUMER carries a golden, and here it does -- the
-  # consumer IS this shape.
-  - kernel: matmul
-    name: gemma4_12b.mlp_down.m32.cut
-    M: 32
-    N: 3840
-    K: 15360
-    dtype: 'fp16'
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 75.6
-    cublas_us: 77.1
-  # The same CUT at PREFILL chunk M=256. Identical story, larger stakes: fused, the down_proj cone
-  # is 2,515.8 us and 58.7% of the whole post256 twin; cut it and the edge is 150.4 -- cone producer
-  # 4.0 + matmul 143.7 + split-K finalize 2.7 = 16.7x, taking the twin 4,284.2 -> 1,918.8 (2.2x).
-  # The consumer half lands at 143.7 against the mlp_down.m256 entry's recorded 167.7 (it picks its
-  # own g4k there), so the cut is BETTER than the plain golden's own number at this shape.
-  # Measured 2026-07-19 (manual --ab, 3x, <0.5% spread).
-  - kernel: matmul
-    name: gemma4_12b.mlp_down.m256.cut
-    M: 256
-    N: 3840
-    K: 15360
-    dtype: 'fp16'
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 150.4
-    cublas_us: 185.0
   # ---- prefill-chunk twins (M=256, the serving prefill static shapes) ----------------------------
   # The post-attention edge at PREFILL chunk M=256 — the `post256` twin. Seeded 2026-07-19 by manual pinned --ab
   # (3x; spreads <1%). These were the largest cold-deploy hole in the whole set: a cold twin audit showed the
@@ -1265,37 +1228,6 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
     emmy_us: 20.8
     cublas_us: 12.5
-  # The same two prologues at PREFILL chunk M=256 -- the `pre256` twin, which is 95.8% these three
-  # cones (q, k, v). Seeded 2026-07-19 after measuring that at this M the fused form WINS and the cut
-  # does not: pinned PLACE@cone=cut materializes the cone three times (once per projection) and the
-  # twin goes 474.0 -> 476.4, no better. An earlier note in plans/ claimed the cut was worth 2.19x
-  # here; that number came from a STANDALONE SNIPPET (`F.rms_norm(x) @ w`), which fuses differently
-  # from the in-model op -- the twin is the only form that settles it.
-  # Cold, these forks matched NO golden and greedy picked a 255-register w1x1/f4x8 at 17% occupancy
-  # for q (136.9 us, spilling) and w2x2/f2x4 for k/v (137.6 / 179.3). On the seeded config the twin
-  # runs 292.2 us (1.62x): q 121.0 (d1/sync), k and v 73.5 each (72.0 partial + 1.5 finalize, g2k).
-  # Manual pinned --ab over w4x2/w2x2/w4x4/w8x1/w1x8 x f2x4/f2x2/f4x8 x k2/k4 plus the f16acc atom,
-  # 3x. Runners-up, twin-total: w4x2/f2x4/k2 308.6, f16acc w4x2/f2x4/k2 318.9, w2x2/f2x4/k4 330.6,
-  # w2x2/f2x4/k2 362.7, w1x8/f2x2/k2 403.5, w8x1/f2x4/k2 408.3, w4x4/f2x4/k2 417.4, w4x2/f2x2/k2
-  # 475.9, w4x2/f4x8/k2 846.6.
-  - kernel: norm_linear
-    name: gemma4_12b.norm_q_proj.m256
-    M: 256
-    H: 3840
-    N: 4096
-    dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
-    emmy_us: 121.0
-    cublas_us: 131.0
-  - kernel: norm_linear
-    name: gemma4_12b.norm_kv_proj.m256
-    M: 256
-    H: 3840
-    N: 2048
-    dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k4', REDUCE: 'g2k'}
-    emmy_us: 73.5
-    cublas_us: 65.5
   # The GLOBAL-layer (full_attention, hd512) twins of the two entries above — gemma-4 12B alternates 8 global
   # layers among the local ones, and their q/kv projections are a different WIDTH (q N=8192, kv N=512) at the same
   # M=32/H=3840. Seeded 2026-07-19 by manual pinned --ab (3x; q spread <0.6%, kv 0%). These were the LAST fused
@@ -1370,34 +1302,7 @@ configs:
     inter: 15360
     dtype: 'fp16'
     knobs: {PLACE@cone: 'cut'}
-    emmy_us: 368.7
-    cublas_us: 326.0
-  # The FUSED (non-cut) form at M=256 -- seeded 2026-07-19 after measuring that the cut is NOT
-  # reachable in the real serving graph at this shape. The YAML previously declined to seed this on
-  # the ground that "a fused mlp_geglu.m256 golden would only ever record a losing config"; that was
-  # true of the 885 us 2-channel megakernel it was written about, and is NOT true of what the
-  # serving graph actually produces here.
-  # What it produces: loop fusion folds the closing `type_as` cast into each projection's A load, so
-  # gate and up arrive as SINGLE-channel matmuls reading the f32 `mul_3` against f16 weights. A
-  # mixed-dtype A has no plain mma tier (the copy transports move raw bytes and cannot convert), so
-  # `_demote_mixed_a` re-expresses it as a computed-A cone riding the sync compute-fill, which
-  # demotes A on the slab store. The cut cannot help: there is no cone to materialize, the A is
-  # already a plain Load.
-  # Unseeded, this fork keys `fused` and matched only the .cut entry above -- which cannot realize
-  # (no PLACE family is offered on a pre-split fork), so it DRIFTed and greedy fell to a non-mma
-  # n32x16/f4x12 tile at 851 us per channel, 88.8% of the whole post256 twin. On its measured config
-  # each channel is 226.5 us (3.8x), taking the twin 1,920.1 -> 668.9.
-  # Measured 2026-07-19 (manual pinned --ab over w4x2/w2x2/w4x4/w1x8 x f2x4/f4x8 x k2/k4, 3x).
-  # Runners-up for the record: w2x2/f2x4/k2 686.7 twin-total, w1x8/f2x2/k2 717.2, w4x2/f2x4/k4
-  # 729.4, f16acc w4x2/f4x8/k4 865.9, w4x4/f2x4/k2 1156.5, w4x2/f4x8/k2 1432.8.
-  - kernel: mlp_geglu
-    name: gemma4_12b.mlp_geglu.m256
-    M: 256
-    H: 3840
-    inter: 15360
-    dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
-    emmy_us: 226.5
+    emmy_us: 350.2
     cublas_us: 326.0
   # The CUT (PLACE@cone=cut) consumer: ONE single-channel matmul (M=256, N=15360, K=3840) — the gate OR up half
   # after 020_cut_edge splits the multi-fold cone. A single-fold matmul reads a clean gmem A, so it rides

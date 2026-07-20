@@ -12,6 +12,7 @@
 # (w2x2/f4x8/k2, w4x1/f4x8/k2 on gate_up) — 1.02-1.35x past cuBLAS everywhere. Post causal tile-skip
 # (2026-07-13) every attention lane beats torch SDPA: std nt4 38.3, fm nt2 37.6 vs SDPA 41.0.
 gpu_name: NVIDIA GeForce RTX 4090
+model: google/gemma-4-12B
 compute_cap:
   - 8
   - 9

@@ -140,6 +140,11 @@ class GoldenConfig:
     emmy_us: float = 0.0
     cublas_us: float = 0.0
     dynamic: bool = False  # symbolic seq/row axis → masked-tile kernel (``.dynM`` name convention)
+    # HF model id whose serving graph this shape came from (e.g. ``google/gemma-4-12B``) —
+    # provenance, never part of any join key. Optional: a hand-picked benchmark shape has no
+    # model. Model-tagged entries are what ``eval golden --in-model`` audits (it re-traces the
+    # model's serving twins and checks each recorded golden still realizes in them).
+    model: str | None = None
 
     @property
     def ratio(self) -> float:
@@ -716,7 +721,9 @@ def _load_goldens() -> list[GoldenConfig]:
     """Load every per-GPU golden YAML under :data:`_GOLDENS_DIR` into one flat list.
 
     One file per GPU: a ``gpu_name`` / ``compute_cap`` header (stamped onto every
-    config so it isn't repeated per entry) plus a ``configs`` list, each tagged with
+    config so it isn't repeated per entry), an optional ``model:`` provenance header
+    (the HF model id the shapes came from — see :attr:`GoldenConfig.model`; overridable
+    per entry), plus a ``configs`` list, each tagged with
     a ``kernel`` discriminator (``matmul`` / ``attention`` / ``softmax`` / ``reduce`` / ``rms_norm`` / ``norm_linear`` /
     ``mlp_geglu`` / ``rope`` / ``embedding`` / ``pointwise``) selecting the dataclass. All files are concatenated — a
     ``name`` may recur across GPUs.
@@ -733,8 +740,9 @@ def _load_goldens() -> list[GoldenConfig]:
     for path in sorted(_GOLDENS_DIR.glob("*.yaml")):
         doc = yaml.safe_load(path.read_text())
         gpu_name, cap = doc["gpu_name"], tuple(doc["compute_cap"])
+        file_model = doc.get("model")  # optional provenance header; a per-entry ``model:`` overrides it
         for c in doc["configs"]:
-            out.append(_KERNEL_CLASSES[c.pop("kernel")](gpu_name=gpu_name, compute_cap=cap, **c))
+            out.append(_KERNEL_CLASSES[c.pop("kernel")](gpu_name=gpu_name, compute_cap=cap, model=c.pop("model", file_model), **c))
     return out
 
 

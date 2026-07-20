@@ -13,6 +13,10 @@ Compiles each graph with the GOLDEN TIER AS THE ONLY EVIDENCE (`tune_db=None`, a
 Use it to check that the golden YAMLs are still relevant after any tracer / recognizer /
 enumeration change: DRIFT means a recorded config went stale, GAP means an uncovered shape.
 
+For the self-capturing form — no graph files needed, the serving twins are re-traced
+weight-free from each golden file's ``model:`` tag — use ``emmy eval golden --in-model``
+(same verdicts, machine-independent, non-zero exit on DRIFT; also the CI gate's path).
+
 Usage:
     python scripts/diagnostics/audit_golden_match.py _tune/twins-refresh/*.json
     python scripts/diagnostics/audit_golden_match.py --json out.json _tune/twins-refresh/pre32.json
@@ -35,42 +39,18 @@ logger = logging.getLogger(__name__)
 
 
 def audit_graph(path: Path) -> list[dict]:
-    """Compile one graph JSON against the golden tier alone; return a per-fork verdict list."""
-    from emmy.compiler.backend.cuda.backend import CudaBackend
+    """Compile one graph JSON against the golden tier alone; return a per-fork verdict list.
+
+    Rides the supported ``search/audit.audit_graph`` seam (the library the
+    ``emmy eval golden --in-model`` audit and the CI gate share) with the live device's
+    context — this script's job is auditing explicit graph JSONs on a real box."""
     from emmy.compiler.graph import Graph
-    from emmy.compiler.pipeline.search.policy import greedy
+    from emmy.compiler.pipeline.search.audit import audit_graph as _audit_graph
 
     graph = Graph.from_dict(json.loads(path.read_text()))
-    records: list[dict] = []
-
-    real_pick = greedy._golden_pick
-    real_key = greedy._fork_shape_key
-
-    def spy_pick(index, rows, node_id=None):
-        try:
-            key = real_key(rows)
-        except Exception:  # noqa: BLE001 — an unkeyable fork is reported, not fatal
-            key = None
-        goldens = index.get(key) if key is not None else None
-        out = real_pick(index, rows, node_id)
-        # `_golden_pick` returns None both when no golden is keyed to the fork (GAP) and
-        # when one is but nothing realizes it (DRIFT) — the presence of `goldens` splits them.
-        if out is not None:
-            verdict, name, us = "MATCH", None, out[1]
-            if goldens:
-                name = next((g.name for g in goldens if (g.emmy_us or 0.0) == us), goldens[0].name)
-        elif goldens:
-            verdict, name, us = "DRIFT", ", ".join(g.name for g in goldens), None
-        else:
-            verdict, name, us = "GAP", None, None
-        records.append({"node": node_id, "key": str(key), "verdict": verdict, "golden": name, "us": us, "n_rows": len(rows)})
-        return out
-
-    greedy._golden_pick = spy_pick
-    try:
-        CudaBackend(tune_db=None).compile(graph)
-    finally:
-        greedy._golden_pick = real_pick
+    records = _audit_graph(graph)
+    for r in records:
+        r["key"] = str(r["key"])  # ShapeKey → str for the --json dump
     return records
 
 

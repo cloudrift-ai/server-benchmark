@@ -63,6 +63,11 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `apply_chat_template` (delegates to the HF tokenizer). Used by the standalone **generation oracle**
   (`commands/generate.py`) — `emmy generate`'s host loop re-runs the whole fp16 prefix each step on the CUDA
   backend and samples with this. The generative *vLLM plugin* (`EmmyGenModel`) builds on this oracle.
+- `twins.py` — **weight-free serving-twin capture**. Builds a trimmed random-init skeleton from a model's
+  `config.json` alone (no checkpoint download — a trace never reads a weight value; `layer_types` collapses to one
+  local + one `full_attention` layer, the vocab shrinks to a stub) and traces the `pre`/`post` twins through the same
+  `build_attention_split_wrapper` / `trace_split` path serving uses. Backs `emmy eval golden --in-model` and the
+  golden drift CI gate; `scripts/capture_gen_twins.py` remains the full-checkpoint capture for tuning.
 - `gen_runner.py` — `EmmyGenRunner` (Phase 2; sibling to `EmmyForwardRunner`). Carves SDPA out of every
   decoder layer (`build_attention_split_wrapper`), compiles **two dynamic-`num_tokens` programs per layer** (`pre` +
   `post`) over the flattened `[num_tokens, H]` layout, and exposes `embed` (Gemma's √hidden embed-scale folded into the
@@ -104,7 +109,9 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   one for any model whose layers are not homogeneous — gemma-4's global layers carry a larger `head_dim`, so their
   projections are different shapes with different optimal configs. Re-capture whenever a tracer/recognizer change
   alters the graphs: the DB's evidence is keyed to structural signatures, and stale evidence applied to new graphs
-  serves worse than either coherent state.
+  serves worse than either coherent state. Whether the *recorded goldens* still deploy against the current twins is
+  checked continuously: `emmy eval golden --in-model` re-traces them weight-free (`twins.py`) and audits per fork
+  (MATCH / DRIFT / GAP), and `tests/compiler/test_golden_drift_gate.py` runs the same audit in CI.
 
   > **Memory budget (measured, gemma-4-12B / 32 GB RTX 5090).** The two artifacts that made the 12B need ~2–3× stock
   > vLLM's memory (it only fit at `ctx 256` with the decode twin off) are both fixed:

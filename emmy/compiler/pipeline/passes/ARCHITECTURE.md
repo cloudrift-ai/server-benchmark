@@ -242,7 +242,11 @@ bound is CTA-uniform (barriers stay legal) and every skipped step is the carrier
 paying wall-clock wherever the grid oversubscribes the SMs (1.67× on hd256 seq-2048) and re-opening the small-CTA flash
 forms that previously paid double K/V re-streaming. **A banded stream additionally starts late**: a trace-time
 `SdpaOp.sliding_window` stamp (the HF wrapper knows `config.sliding_window` + `layer_types`; the trace itself erases
-the window) decomposes to a second coordinate `Select` (`kv > m − W`) beside the causal one — flash classification
+the window) decomposes to a second coordinate `Select` (`kv > m − W`) beside the causal one — unless the band is
+STATICALLY VACUOUS (static seq, `W ≥ S`), which the decomposition drops instead of emitting: a vacuous Select's
+predicate constant-folds, the +0 mask term hoists out of the reduce loops, and the mask-chain walk below can no
+longer resolve it — the fuse then silently degraded to cut and the softmax·P@V fell to the unstructured sequential
+lowering (the gemma-4 layer-0 `seq 512 < window 1024` trace deployed a grid-1 kernel). Flash classification
 reads the whole mask CHAIN off the rowmax feed (coord Selects and the explicit additive bias compose; the bias stays
 loaded, it may mask more, e.g. padding), re-synthesizes each canonically, and the realizer derives the stream START
 off the band predicate exactly as it derives the causal end (`kv_start = ⌊max(0, first_row − W + 1)/bn⌋·bn`, the

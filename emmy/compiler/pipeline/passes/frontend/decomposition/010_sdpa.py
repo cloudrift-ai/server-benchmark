@@ -151,7 +151,13 @@ def rewrite(match: Match, root: Node, inp_q: Node, inp_k: Node, inp_v: Node, inp
     # Sliding-window band: add -1e9 where key_pos ≤ query_pos − window (keep kv > m − W). The
     # stamped band is synthesized even alongside an explicit bias — bit-neutral there (the bias
     # already holds -inf on that region) and it is what the lowering skips key blocks off.
-    if window is not None:
+    # A STATICALLY VACUOUS band (static seq, W ≥ S: every m − W < 0, so the keep predicate holds
+    # everywhere) is dropped instead of emitted: its Select's predicate constant-folds and the
+    # +0 mask term hoists out of the reduce loops, where the flash recognizer's mask-chain walk
+    # (``_flash._classify_rowmax``) can no longer resolve it — the fuse then silently degrades to
+    # cut and the softmax·P@V falls to the unstructured sequential lowering (the layer-0
+    # ``seq 512 < window 1024`` gemma trace deployed a grid-1 kernel that "hangs").
+    if window is not None and not (seq_len.is_static and window >= seq_len.as_static()):
         _coord_mask(BinaryExpr(">", j_var, BinaryExpr("-", i_var, Literal(window, "int"))), "_b")
 
     softmax = softmax_decompose(frag, scaled_id, -1, name=f"{name}_softmax")

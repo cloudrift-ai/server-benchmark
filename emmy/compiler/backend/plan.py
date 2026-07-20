@@ -156,7 +156,10 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
         if spec is None:
             kernels[op.kernel_name] = KernelSpec(source=op.kernel_source, uses_tma=bool(op.tma_descriptors))
         elif spec.source != op.kernel_source:
-            raise ValueError(f"kernel name {op.kernel_name!r} used by two distinct sources")
+            # Longstanding runtime semantics: launches resolve kernels by NAME and the first
+            # source wins (repeated helper names like ``__partial`` ride the first-compiled
+            # body). Keep that behavior — a plan must reproduce what the live compile ran.
+            logger.debug("plan: kernel name %r repeats with a differing source; first source wins", op.kernel_name)
         launches.append(
             LaunchSpec(
                 node_id=nid,

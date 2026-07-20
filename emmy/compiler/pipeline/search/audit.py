@@ -95,13 +95,22 @@ def summarize(records_by_graph: dict[str, list[dict]]) -> Counter:
     return Counter(r["verdict"] for records in records_by_graph.values() for r in records)
 
 
+def gap_keys(records_by_graph: dict[str, list[dict]]) -> set:
+    """Every distinct GAP shape across an :func:`audit_card` result — the full coverage
+    view the CI gate ratchets on (goldens must cover ALL kernel forks in the model:
+    contractions, reductions/norms, pointwise alike). :func:`major_gap_keys` is the
+    highest-stakes subset, kept for report emphasis."""
+    return {
+        r["key"] for records in records_by_graph.values() for r in records if r["verdict"] == "GAP" and r["key"] is not None
+    }
+
+
 def major_gap_keys(records_by_graph: dict[str, list[dict]]) -> set:
     """The GAP shapes that are contraction-tier hazards: warp forks with a real reduce
     extent (plain matmul, fused computed-A, flash). This is the misdeploy/hang class the
     goldens exist to pin (an unseeded gemma projection deployed a scalar tile ~770x off
-    cuBLAS; two dynamic forks hung outright), so an uncovered one is a coverage defect —
-    unlike a pointwise or scalar-norm fork, whose tiny fork space bounds the miss. The CI
-    gate pins this set as a may-shrink-never-grow baseline."""
+    cuBLAS; two dynamic forks hung outright). The CI gate ratchets on the full
+    :func:`gap_keys` set; this subset is the report-emphasis view (close these first)."""
     return {
         r["key"]
         for records in records_by_graph.values()

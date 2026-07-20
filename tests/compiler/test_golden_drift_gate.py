@@ -13,11 +13,14 @@ block produces a different graph than any snippet. This gate closes that hole in
 - Each card's audit (``search/audit.audit_card``) compiles with the golden tier as the only
   evidence, targeting the golden file's own card — identical verdicts on a GPU-less box.
 
-Gate policy: DRIFT and COMPILE_FAIL are always failures. GAP is coverage, gated as a ratchet:
-the **major** gaps (uncovered warp-contraction forks — the misdeploy/hang hazard class) must
-equal the checked-in baseline exactly. A NEW major gap fails (an uncovered contraction kernel
-appeared — record a golden for it or deliberately extend the baseline in review); a CLOSED one
-also fails, asking for the baseline line to be deleted so the ratchet only tightens.
+Gate policy: DRIFT and COMPILE_FAIL are always failures. Coverage is gated as a ratchet over
+**every** GAP key — contractions, reductions/norms, and pointwise forks alike must be covered
+by a golden once a card's baseline empties (goldens cover ALL kernel forks in the model; the
+only kernels outside the gate are fork-free deterministic lowerings — rope/embedding gathers —
+which never consult the golden tier). The per-card baseline must match exactly: a NEW gap
+fails (an uncovered kernel appeared — record a golden or deliberately extend the baseline in
+review); a CLOSED one also fails, asking for its line to be deleted so the ratchet only
+tightens. Warp-contraction gaps (the misdeploy/hang hazard class) are the ones to close first.
 
 Interactive twin: ``emmy eval golden --in-model``.
 """
@@ -31,40 +34,81 @@ import pytest
 pytest.importorskip("torch")
 pytest.importorskip("transformers")
 
-from emmy.compiler.pipeline.search.audit import COMPILE_FAIL, audit_card, major_gap_keys, summarize
+from emmy.compiler.pipeline.search.audit import COMPILE_FAIL, audit_card, gap_keys, summarize
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "gemma4_12b"
 
-# Known-uncovered warp-contraction forks per card (see `major_gap_keys`). This list may only
-# change deliberately: remove a line when its golden gets recorded (the test fails until you
-# do); add one only when review accepts a new uncovered contraction kernel.
-EXPECTED_MAJOR_GAPS = {
+# Known-uncovered kernel forks per card — ALL kinds (contractions, rms_norm/reduce sweeps,
+# pointwise), not just the warp-contraction hazards. This list may only change deliberately:
+# remove a line when its golden gets recorded (the test fails until you do); add one only
+# when review accepts a new uncovered kernel. Empty set = full model coverage, enforced.
+EXPECTED_GAPS = {
+    # The 5090 holes need a 5090 box to close: the global-layer prefill-256 projections
+    # (goldens exist only at s2048), the dynamic fused gate⊗up cone, plus the rms_norm and
+    # pointwise shapes below them.
     "NVIDIA GeForce RTX 5090": {
-        # The global-layer prefill-256 projections (goldens exist only at s2048) and the
-        # dynamic fused gate⊗up cone — the coverage holes this gate first surfaced.
+        ShapeKey(free_prod=1048576, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=4096),
+        ShapeKey(free_prod=122880, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=131072, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=4096),
         ShapeKey(free_prod=131072, reduce_max=3840, is_warp=True, is_dyn=False, kind="", free_max=512),
         ShapeKey(free_prod=15360, reduce_max=3840, is_warp=True, is_dyn=True, kind="fused", free_max=0),
+        ShapeKey(free_prod=2048, reduce_max=0, is_warp=True, is_dyn=True, kind="", free_max=0),
+        ShapeKey(free_prod=2048, reduce_max=256, is_warp=False, is_dyn=True, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=2097152, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
         ShapeKey(free_prod=2097152, reduce_max=3840, is_warp=True, is_dyn=False, kind="", free_max=8192),
+        ShapeKey(free_prod=262144, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
+        ShapeKey(free_prod=3932160, reduce_max=0, is_warp=False, is_dyn=False, kind="", free_max=15360),
+        ShapeKey(free_prod=4096, reduce_max=0, is_warp=True, is_dyn=True, kind="", free_max=0),
+        ShapeKey(free_prod=4096, reduce_max=256, is_warp=False, is_dyn=True, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=512, reduce_max=512, is_warp=False, is_dyn=True, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=524288, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=2048),
+        ShapeKey(free_prod=65536, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=2048),
+        ShapeKey(free_prod=8192, reduce_max=0, is_warp=True, is_dyn=True, kind="", free_max=0),
+        ShapeKey(free_prod=8192, reduce_max=512, is_warp=False, is_dyn=True, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=983040, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
     },
-    # The 4090 gemma file is much sparser (7 in-model matches) — most static projection /
-    # fused shapes were never recorded for it.
+    # The 4090 set is being closed by the in-progress heal session on the rented box
+    # (drifted dynM .lin re-records + static/reduction/pointwise coverage); regenerate this
+    # baseline from the audit once those entries land.
     "NVIDIA GeForce RTX 4090": {
+        ShapeKey(free_prod=1048576, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=4096),
         ShapeKey(free_prod=1048576, reduce_max=3840, is_warp=True, is_dyn=False, kind="", free_max=4096),
         ShapeKey(free_prod=122880, reduce_max=15360, is_warp=True, is_dyn=False, kind="", free_max=3840),
+        ShapeKey(free_prod=122880, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=122880, reduce_max=4096, is_warp=True, is_dyn=False, kind="", free_max=3840),
         ShapeKey(free_prod=122880, reduce_max=8192, is_warp=True, is_dyn=False, kind="", free_max=3840),
+        ShapeKey(free_prod=131072, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=4096),
+        ShapeKey(free_prod=131072, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=131072, reduce_max=3840, is_warp=True, is_dyn=False, kind="", free_max=4096),
         ShapeKey(free_prod=131072, reduce_max=3840, is_warp=True, is_dyn=False, kind="", free_max=512),
+        ShapeKey(free_prod=131072, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=15360, reduce_max=3840, is_warp=True, is_dyn=True, kind="fused", free_max=0),
         ShapeKey(free_prod=16384, reduce_max=3840, is_warp=True, is_dyn=False, kind="", free_max=512),
+        ShapeKey(free_prod=16384, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=2048, reduce_max=0, is_warp=True, is_dyn=True, kind="", free_max=0),
+        ShapeKey(free_prod=2048, reduce_max=256, is_warp=False, is_dyn=True, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=2097152, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
         ShapeKey(free_prod=2097152, reduce_max=3840, is_warp=True, is_dyn=False, kind="", free_max=8192),
+        ShapeKey(free_prod=2097152, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=262144, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
         ShapeKey(free_prod=262144, reduce_max=3840, is_warp=True, is_dyn=False, kind="", free_max=8192),
+        ShapeKey(free_prod=262144, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=3932160, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=15360),
+        ShapeKey(free_prod=4096, reduce_max=0, is_warp=True, is_dyn=True, kind="", free_max=0),
+        ShapeKey(free_prod=4096, reduce_max=256, is_warp=False, is_dyn=True, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=491520, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=15360),
+        ShapeKey(free_prod=512, reduce_max=512, is_warp=False, is_dyn=True, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=524288, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=2048),
+        ShapeKey(free_prod=524288, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=524288, reduce_max=3840, is_warp=True, is_dyn=False, kind="", free_max=2048),
+        ShapeKey(free_prod=65536, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=2048),
+        ShapeKey(free_prod=65536, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=65536, reduce_max=3840, is_warp=True, is_dyn=False, kind="", free_max=2048),
+        ShapeKey(free_prod=8192, reduce_max=0, is_warp=True, is_dyn=True, kind="", free_max=0),
+        ShapeKey(free_prod=8192, reduce_max=512, is_warp=False, is_dyn=True, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=983040, reduce_max=15360, is_warp=True, is_dyn=False, kind="", free_max=3840),
+        ShapeKey(free_prod=983040, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=983040, reduce_max=4096, is_warp=True, is_dyn=False, kind="", free_max=3840),
         ShapeKey(free_prod=983040, reduce_max=8192, is_warp=True, is_dyn=False, kind="", free_max=3840),
     },
@@ -122,16 +166,16 @@ def test_gemma4_goldens_deploy_in_serving_twins(twins, gpu_name, cap):
         "as serving does."
     )
 
-    majors = major_gap_keys(res)
-    new = majors - EXPECTED_MAJOR_GAPS[gpu_name]
+    gaps = gap_keys(res)
+    new = gaps - EXPECTED_GAPS[gpu_name]
     assert not new, (
-        f"NEW uncovered warp-contraction fork(s) on {gpu_name}: {sorted(new, key=str)}\n"
-        "Record a golden for each (tune on the card, `run --bench --ab`), or deliberately extend "
-        "EXPECTED_MAJOR_GAPS in review."
+        f"NEW uncovered kernel fork(s) on {gpu_name}: {sorted(new, key=str)}\n"
+        "Every kernel fork in the model must be golden-covered. Record a golden for each (manual "
+        "pinned sweep on the card, `run --bench --ab`), or deliberately extend EXPECTED_GAPS in review."
     )
-    closed = EXPECTED_MAJOR_GAPS[gpu_name] - majors
+    closed = EXPECTED_GAPS[gpu_name] - gaps
     assert not closed, (
-        f"major gap(s) on {gpu_name} are now covered — delete their EXPECTED_MAJOR_GAPS lines so the "
+        f"gap(s) on {gpu_name} are now covered — delete their EXPECTED_GAPS lines so the "
         f"ratchet tightens: {sorted(closed, key=str)}"
     )
 

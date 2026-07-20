@@ -310,7 +310,7 @@ class PointwiseGoldenConfig(GoldenConfig):
 
     M: int
     N: int
-    dtype: str = "fp32"  # the snippet is fp32-only; recorded so Sample.from_golden is kind-agnostic
+    dtype: str = "fp32"  # fp16/bf16 join the model's half-precision pointwise forks (is_warp=True keys)
 
     def __post_init__(self):
         self._require_dynamic_hint(self.M)
@@ -319,17 +319,22 @@ class PointwiseGoldenConfig(GoldenConfig):
         return ["seq_len@x:0"] if self.dynamic else []
 
     def snippet(self) -> str:
-        return f"torch.relu(torch.randn({self.M},{self.N}))"
+        tdt = {"fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16", "fp32": ""}[self.dtype]
+        return f"torch.relu(torch.randn({self.M},{self.N}{tdt}))"
 
     def flops(self) -> float:
         return float(self.M * self.N)  # one op per element
 
     def shape_key(self):
         """The pointwise map's arithmetic join key — free product ``M·N``, no reduce
-        axis (``reduce_max=0``, the ``from_s_features`` default for an unstamped extent)."""
+        axis (``reduce_max=0``, the ``from_s_features`` default for an unstamped extent);
+        the dynamic twin excludes the symbolic M (and drops the aspect, the ``kind=""``
+        dynamic-key convention)."""
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
-        return ShapeKey(free_prod=self.M * self.N, reduce_max=0, is_warp=False, is_dyn=self.dynamic, free_max=max(self.M, self.N))
+        free = self.N if self.dynamic else self.M * self.N
+        fm = 0 if self.dynamic else max(self.M, self.N)
+        return ShapeKey(free_prod=free, reduce_max=0, is_warp=self.dtype != "fp32", is_dyn=self.dynamic, free_max=fm)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -346,6 +351,12 @@ class RmsNormGoldenConfig(GoldenConfig):
     M: int
     K: int
     dtype: str = "fp32"  # snippet is fp32; recorded so Sample.from_golden is kind-agnostic
+    # Per-head norms (a model's q/k-norm over head_dim) keep the head axis as a STATIC free
+    # dim beside the symbolic token axis: the op is ``(M, heads, K) → (M, heads, K)`` with
+    # only M symbolic, so the dynamic key's free product is ``heads*K`` — a 2-D snippet can
+    # never join it (its dynamic free is just ``K``). ``heads=1`` is the plain row norm.
+    # Static per-head twins may fold heads into M (same key) or spell it — both join.
+    heads: int = 1
 
     def __post_init__(self):
         self._require_dynamic_hint(self.M)
@@ -354,19 +365,21 @@ class RmsNormGoldenConfig(GoldenConfig):
         return ["seq_len@x:0"] if self.dynamic else []
 
     def snippet(self) -> str:
-        return f"torch.nn.RMSNorm({self.K})(torch.randn({self.M},{self.K}))"
+        dims = f"{self.M},{self.heads},{self.K}" if self.heads > 1 else f"{self.M},{self.K}"
+        return f"torch.nn.RMSNorm({self.K})(torch.randn({dims}))"
 
     def flops(self) -> float:
-        return 2.0 * self.M * self.K  # square+accumulate per element (the scale sweep is extra — stays an underestimate)
+        return 2.0 * self.M * self.heads * self.K  # square+accumulate per element (the scale sweep is extra — stays an underestimate)
 
     def shape_key(self):
-        """Keys the stamped RMSNorm sweep op (``kind="rms_norm"``): the OUTPUT is ``(M, K)`` — the
-        sweep re-reads the row it normalizes, so K is a free axis of the output AND the reduce
-        extent (``free_prod = M*K``, measured off the stamped op; the old ``free_prod = M`` never
-        matched what the 992 stamp writes). The dynamic twin excludes the symbolic M."""
+        """Keys the stamped RMSNorm sweep op (``kind="rms_norm"``): the OUTPUT is ``(M[, heads], K)`` —
+        the sweep re-reads the row it normalizes, so K is a free axis of the output AND the reduce
+        extent (``free_prod = M*heads*K``, measured off the stamped op; the old ``free_prod = M`` never
+        matched what the 992 stamp writes). The dynamic twin excludes the symbolic M (keeping the
+        static ``heads`` axis — the per-head q/k-norm join)."""
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
-        free = self.K if self.dynamic else self.M * self.K
+        free = self.heads * self.K if self.dynamic else self.M * self.heads * self.K
         return ShapeKey(free_prod=free, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic, kind="rms_norm")
 
 

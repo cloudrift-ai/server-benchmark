@@ -706,11 +706,13 @@ forced — under `-Xcicc -O1` the `H_opt` guard would silently skip golden consu
 golden realized), DRIFT (shape keyed but nothing realizes — always a defect: the recording claims a µs the deploy can
 no longer produce), or GAP (no golden for the shape). This is the in-model half of the reproduction check: the
 isolated snippet A/B reproduced 68/68 while the in-model deploys drifted (the cast-splice class), which is exactly the
-blind spot the audit closes. Coverage is gated as a **ratchet**, not GAP=0: `major_gap_keys` flags uncovered
-warp-contraction forks (the misdeploy/hang hazard class), and the CI gate
-(`tests/compiler/test_golden_drift_gate.py`, offline via a checked-in `config.json` fixture) pins that set per card —
-a new major gap fails until a golden is recorded or the baseline is deliberately extended, a closed one fails until
-its baseline line is deleted. The twins track the installed `transformers` modeling code by design: a transformers
+blind spot the audit closes. Coverage is gated as a **ratchet over every GAP key** — contractions, rms_norm/reduce
+sweeps, and pointwise forks alike; `major_gap_keys` (uncovered warp-contraction forks, the misdeploy/hang hazard
+class) is the close-these-first emphasis view. The CI gate (`tests/compiler/test_golden_drift_gate.py`, offline via
+a checked-in `config.json` fixture) pins the per-card gap set exactly — a new gap fails until a golden is recorded
+or the baseline is deliberately extended, a closed one fails until its baseline line is deleted, and an emptied
+baseline means full model coverage is thereafter enforced (only fork-free deterministic lowerings — rope/embedding
+gathers — sit outside the gate, having no fork for the golden tier to decide). The twins track the installed `transformers` modeling code by design: a transformers
 bump that changes the forward changes the twins exactly as it changes serving, and the gate goes loudly red.
 `scripts/diagnostics/audit_golden_match.py` is the same audit over explicit graph JSONs on a live box.
 

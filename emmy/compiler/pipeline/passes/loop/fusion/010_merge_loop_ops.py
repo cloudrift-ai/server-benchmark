@@ -109,15 +109,44 @@ def _total_reads(loop_op: LoopOp) -> int:
 _REDUCE_HEAVY_WORK_PER_OUTPUT = 4
 
 
+def _softmax_mask_add_cost(op: LoopOp) -> int:
+    """The summed cost of the ``add`` Assigns on the rowmax / exp DEF-CHAINS — the score's mask
+    applications (causal / banded coord Selects, the explicit additive bias), one predicate-add
+    per mask per consuming loop. Scoped to the chains, not "every add in the body": a genuinely
+    add-heavy compute merged into a rowmax-bearing producer keeps its real weight (the unscoped
+    discount misclassified it as light and over-merged), while the mask adds — which by
+    construction feed the ``maximum`` Accum / the ``exp`` — are still fully discounted."""
+    costs: dict[int, int] = {}
+    defs: dict[str, Assign] = {}
+    seeds: list[str] = []
+    for stmt, cost in _walk_leaf_costs(op):
+        costs[id(stmt)] = cost
+        if isinstance(stmt, Assign):
+            defs[stmt.name] = stmt
+            if stmt.op.name == "exp":
+                seeds.extend(stmt.args)
+        elif isinstance(stmt, Accum) and stmt.op.reduce_canon == "maximum":
+            seeds.append(stmt.value)
+    total, seen = 0, set()
+    while seeds:
+        d = defs.get(seeds.pop())
+        if d is None or id(d) in seen:
+            continue
+        seen.add(id(d))
+        if d.op.name == "add":
+            total += costs.get(id(d), 0)
+            seeds.extend(d.args)
+    return total
+
+
 def _reduce_heavy(op: LoopOp) -> bool:
-    # A softmax assembly (rowmax-bearing body) discounts its ``add`` Assigns: they are the score's
-    # mask applications (causal / banded coord Selects, the explicit additive bias) — one
+    # A softmax assembly (rowmax-bearing body) discounts its mask-application ``add``s: one
     # predicate-add per mask, not real duplicated compute. Without the discount a multi-mask
     # score (a stamped sliding-window SDPA carries up to three) pushes the cheap (max + exp)
     # reducer past the threshold and the softmax cone never assembles onto its P@V offer site.
     work = _total_work(op)
     if _has_rowmax(op):
-        work -= sum(cost for stmt, cost in _walk_leaf_costs(op) if isinstance(stmt, Assign) and stmt.op.name == "add")
+        work -= _softmax_mask_add_cost(op)
     return work > _REDUCE_HEAVY_WORK_PER_OUTPUT * _output_numel(op)
 
 

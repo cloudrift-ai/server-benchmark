@@ -52,6 +52,12 @@ def rewrite(match: Match, producer: Node, cast: Node) -> Graph | None:
         raise RuleSkipped("producer is not a pointwise compute node")
     if cast.output.dtype.name == producer.output.dtype.name:
         raise RuleSkipped("copy preserves dtype — nothing to sink")
+    # NARROWING only — the bit-identity argument above is one-directional. Sinking a WIDENING
+    # copy (f16 → f32) removes the producer's round-on-store to f16, so the sunk kernel emits
+    # wide values eager's narrow store never produced. Same-width dtype swaps (f16 ↔ bf16)
+    # change the rounding grid too — decline those as well.
+    if cast.output.dtype.nbytes >= producer.output.dtype.nbytes:
+        raise RuleSkipped("cast widens (or re-grids) — sinking would skip the producer's round-on-store")
     if tuple(cast.output.shape) != tuple(producer.output.shape):
         raise RuleSkipped("cast reshapes — not a pure dtype boundary")
     # The wide value must be needed by NOTHING else: retyping the producer narrows it for every

@@ -1078,8 +1078,8 @@ configs:
   # a SCALAR tile (grid=1048576, REDUCE=b256) at 36,268 µs. Note the lane split — std loses to cuBLAS here
   # (0.91x / 0.81x) while fast-math beats it (1.17x / 1.16x) — and that the narrow-N kv shape flips to g4k in the
   # fm lane where q takes g2k. Manual pinned --ab, 3x, spreads <1%. fp16, torch eager (HGEMM) reference.
-  # (As with mlp_gate_up_split, these fire only under the PLACE@cone=cut pin today; making greedy CHOOSE the cut
-  # at prefill M is the open follow-up.)
+  # (As with mlp_gate_up_split, these deploy when the cut is selected — via the mlp_geglu.m256.cut golden or a
+  # pin; the cut stays withheld from the model fallback, evidence-only by design.)
   - kernel: matmul
     name: gemma4_12b.q_proj.m256
     M: 256
@@ -1312,7 +1312,8 @@ configs:
   # w2x2/f2x2 at ~700 µs); the cut fragments are re-stamped with structural features in 020_cut_edge so they match
   # here. Whole-edge CUT e2e: f16acc 299 µs = 1.09x eager 325 (vs the fused 413) — the mlp perf win. The channel
   # matmuls write F32 workspaces (the GeGLU combine cubes gate, which overflows f16), matching the fused numerics.
-  # (The cut fires only under the PLACE@cone=cut pin today; making greedy CHOOSE it at prefill M is the open follow-up.)
+  # (The cut is chosen by the EVIDENCE tiers: the mlp_geglu.m256.cut entry above records PLACE@cone=cut, so the
+  # golden tier deploys it at M=256; it stays withheld from the model fallback — evidence-only by design.)
   - kernel: matmul
     name: gemma4_12b.mlp_gate_up_split.m256
     M: 256

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -39,8 +40,27 @@ def rank_of_golden(scores: np.ndarray, gidx: int) -> int:
     (``>=``): greedy deploy breaks score ties by enumeration order, and option-0 is the
     per-cell / gmem-direct row — a tie IS a miss at deploy time. (The old ``>`` tie-optimism
     let a fit with zero ``D_stage_*`` weights report top-1 golden ranks while the deploy pick
-    landed on the per-cell row — the 2026-07-02 sweep's 5-15x regressions.)"""
+    landed on the per-cell row — the 2026-07-02 sweep's 5-15x regressions.)
+
+    This is the FIT OBJECTIVE's rank (all ties count, emission order ignored) — the
+    reported metric rank is :func:`dual_rank`, whose pessimistic flavor mirrors the
+    deploy tiebreak exactly (only ties *earlier* in emission order count)."""
     return int((scores >= scores[gidx]).sum()) - 1
+
+
+def dual_rank(scores, gidx: int) -> tuple[int, int]:
+    """The golden's 0-based rank by descending score, both tie semantics, from one pass:
+    ``(rank, rank_optimistic)``. ``rank`` is tie-PESSIMISTIC — strictly-greater rows plus
+    score-ties earlier in emission order, i.e. exactly the rows a greedy argmin deploys
+    ahead of the golden. ``rank_optimistic`` counts strictly-greater rows only — fair when
+    tied rows are genuine equivalents. The difference is the tie-plateau width at the
+    golden's score: a large gap flags a saturated/undecided scorer (the 2026-07 exp-squash
+    bug scored "top-1" on the optimistic count while cold deploys shipped emission-order
+    picks 12-29x off)."""
+    s = np.asarray(scores, dtype=float)
+    g = s[gidx]
+    optimistic = int((s > g).sum())
+    return optimistic + int((s[:gidx] == g).sum()), optimistic
 
 
 def topk_table(ranks: list[int], ks=(1, 5, 10, 25, 50, 100)) -> str:
@@ -116,6 +136,41 @@ def raw_weights(names, best_w, sd) -> dict[str, float]:
     # Fold the z-score into the weights so they apply to RAW features directly:
     # score = ((raw-mu)/sd)·w = raw·(w/sd) - const; the const drops out of ranking.
     return {name: float(best_w[i] / sd[i]) for i, name in enumerate(names) if abs(best_w[i] / sd[i]) > 1e-4}
+
+
+@dataclass
+class TwoStageFit:
+    """One trainer invocation's fitted weight sets, in raw-feature space
+    (:func:`raw_weights` — the artifact spelling). ``dyn_raw`` / ``dyn_ranks`` are
+    ``None`` when the input had no dynamic cases: the CALLER decides the fallback
+    (the script carries the incumbent's dynamic set forward; a CV fold treats the
+    set as unfittable rather than silently substituting a stale vector)."""
+
+    static_raw: dict[str, float]
+    static_ranks: list[int]
+    dyn_raw: dict[str, float] | None
+    dyn_ranks: list[int] | None
+
+
+def fit_two_stage(cases, names, *, seed_weights: dict[str, float], rng, samples: int) -> TwoStageFit:
+    """The incumbent trainer's full chaining as one call: a static fit over the
+    non-``dyn`` cases seeded from the ``seed_weights`` raw dict (zeros where a name is
+    absent — an empty dict seeds from zero), then the dynamic fit over the ``dyn``
+    cases seeded from the static result in its z-space (``sd_ref`` chaining). ``rng``
+    is consumed sequentially by both stages, matching the script's draw order. The
+    static case list must be non-empty (the dynamic stage seeds from it) — callers
+    guard, this function does not."""
+    static_cases = [c for c in cases if c[1] != "dyn"]
+    dyn_cases = [c for c in cases if c[1] == "dyn"]
+    seed_raw = np.array([seed_weights.get(n, 0.0) for n in names])
+    logger.info("== static fit (%d cases) ==", len(static_cases))
+    static_w, static_ranks, _, static_sd = fit_weights(static_cases, names, np.ones(len(names)), seed_w=seed_raw, rng=rng, samples=samples)
+    static_raw = raw_weights(names, static_w, static_sd)
+    if not dyn_cases:
+        return TwoStageFit(static_raw, static_ranks, None, None)
+    logger.info("== dynamic fit (%d cases) ==", len(dyn_cases))
+    dyn_w, dyn_ranks, _, dyn_sd = fit_weights(dyn_cases, names, static_sd, seed_w=static_w, rng=rng, samples=samples)
+    return TwoStageFit(static_raw, static_ranks, raw_weights(names, dyn_w, dyn_sd), dyn_ranks)
 
 
 def build_artifact(*, weights: dict[str, float], weights_dynamic: dict[str, float], params: dict, provenance: dict) -> dict:

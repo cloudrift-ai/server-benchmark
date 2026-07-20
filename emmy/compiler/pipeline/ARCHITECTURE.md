@@ -51,7 +51,7 @@ Terms used throughout:
 | `search/policy/mcts.py` | The in-memory MCTS (`SearchTree`) colocated with its only reader, `TuningSearch`. |
 | `search/policy/greedy.py` | `greedy_decide` — the no-tree fork resolver used by `compile` / `run`. |
 | `search/two_level.py` | The two-level tuner: outer structural MCTS, inner per-op reward. |
-| `search/prior/` | The ONE ranking path: a `Prior` ABC with the cold `OfflinePrior` and the `OnlinePrior` composed behind `FallbackPrior` (`load_prior`). `diagnostics.py` here backs the `eval` reachability / calibration reports; `fit/` is the offline fitter core behind `scripts/golden_knob_heuristics.py`. |
+| `search/prior/` | The ONE ranking path: a `Prior` ABC with the cold `OfflinePrior` and the `OnlinePrior` composed behind `FallbackPrior` (`load_prior`). `diagnostics.py` here backs the `eval` reachability / calibration reports; `fit/` is the offline fitter core (`linear.py`) plus the `emmy fit` cross-validation harness (`cv.py` — fold axes, pooled holdout/train tables, the metrics dict). |
 | `search/data/` | The harmonized read-view over the three data sources (golden configs / DB `perf` rows / prior reservoir): `Sample`, `Dataset`, and `ShapeKey` (the single golden↔measured join key). |
 | `search/golden.py` | `GoldenConfig` and its subclasses (see Part 7, "Golden configs and the A/B integrity gates"). |
 | `keys.py` | `op_cache_key` / `dialect_of` / `source_chain`. |
@@ -191,9 +191,11 @@ The two halves of the one path:
 - **`OfflinePrior`** (cold) — a fit-offline linear *score* over the engineered `D_*` geometry / occupancy features,
   not emission order. The complete scoring function (both weight sets + the scalar params, `feat_ver`-stamped, with a
   `provenance` block) lives in the repo-checked artifact `search/prior/offline_weights.json`, written by the offline
-  fitter — the fit / rank-eval / artifact-assembly core is library code in `search/prior/fit/`, and
-  `scripts/golden_knob_heuristics.py` is its CLI wrapper owning only the golden case building (reconstructing each
-  golden's candidate pool needs the command layer's snippet tracer, which `pipeline/` never imports);
+  fitter — the fit / rank-eval / artifact-assembly core is library code in `search/prior/fit/` (`linear.py` plus the
+  `cv.py` cross-validation harness), driven by `emmy fit` (which also writes the per-run metrics file) or by the
+  legacy wrapper `scripts/golden_knob_heuristics.py`; the golden case building lives in `emmy/commands/fit.py`
+  (reconstructing each golden's candidate pool needs the command layer's snippet tracer, which `pipeline/` never
+  imports);
   `EMMY_OFFLINE_FILE` (or `emmy eval … --offline-file`) swaps in a candidate
   fit for an A/B. Loading is strict: a missing or `feat_ver`-mismatched artifact is a hard error (refit it), never a
   silent fallback — a retired weight key inside a current-version artifact is merely a dead term. A separate
@@ -747,7 +749,10 @@ partial+finalize pair) still prints and lands in the record.
 rank counts every row scoring strictly better PLUS every tied row emitted earlier — because greedy's argmin breaks
 score ties by emission order, a tie is a loss, not a win. The former strictly-greater count reported rank 0 for every
 row inside a tie plateau, which let a saturated prior score "top-1" on goldens that real cold deploys missed by
-12–29× (the same convention the fork-regret metric already used: predicted-score ties price pessimistically).
+12–29× (the same convention the fork-regret metric already used: predicted-score ties price pessimistically). Both
+flavors come from ONE computation (`prior/fit/linear.dual_rank`): the pessimistic rank gates, and the strictly-greater
+**optimistic** rank is reported beside it in `emmy fit`'s metrics file — their gap is the tie-plateau width at the
+golden's score, the score-saturation canary that would have flagged the clipped-squash bug at a glance.
 
 **Golden evals featurize under the golden's own card.** `eval offline` / `eval online` rebuild each golden's compile
 context as `Context.from_target(compute_cap, gpu_name=…)` — the card recorded in the golden file, with its memorized

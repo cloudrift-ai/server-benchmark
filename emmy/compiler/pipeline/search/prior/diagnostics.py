@@ -155,7 +155,7 @@ def golden_prior_eval(prior, kernel_filter: str | None = None) -> str:
         gold = dict(tuning_knob_items(g.knobs))  # native codec knobs (TILE/REDUCE/STAGE), tier-agnostic
         # ``evaluate_golden`` ranks by descending score; the prior predicts latency
         # (lower = better), so negate to rank the predicted-fastest config first.
-        _, rank, pool = golden_eval.evaluate_golden(
+        _, rank, pool, _ = golden_eval.evaluate_golden(
             g.M, g.N, g.K, g.dtype, gold, ctx, scorer=lambda r, b=base: -prior.mean_score({**b, **r})
         )
         if rank is None:

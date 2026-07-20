@@ -363,7 +363,7 @@ def _db_measured_pick(index: dict[frozenset, list[tuple[dict, float, bool]]], ro
     tune *measured* fastest from losing the deploy to an unmeasured model
     extrapolation (eighth golden sweep, finding 2). -O3 reservoir evidence,
     where present, still takes precedence at the call site."""
-    from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import canonical_row_key, evidence_row_vouches  # noqa: PLC0415
 
     row_key: dict[int, tuple] = {}  # i → canonical_row_key(rows[i]), computed at most once
 
@@ -398,7 +398,10 @@ def _db_measured_pick(index: dict[frozenset, list[tuple[dict, float, bool]]], ro
             groups_memo[sig] = _sig_groups(index, sig)
         for measured in groups_memo[sig]:
             for row_tun, us, deployable in measured:
-                if any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items()):
+                # Value-of-position join, except the cut placement: a pre-cut row (no
+                # ``PLACE@cone`` key) measured the fused twin and must not vouch for the
+                # knob-identical cut candidate (``evidence_row_vouches``).
+                if not evidence_row_vouches(cand_tun, row_tun):
                     continue
                 if deployable:
                     if better(us, i, best):

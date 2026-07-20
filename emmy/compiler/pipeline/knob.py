@@ -591,6 +591,21 @@ def canonical_row_key(knobs: dict) -> tuple[tuple[str, str], ...]:
     return tuple(tuning_knob_items(knobs))
 
 
+def evidence_row_vouches(cand_tun: dict, row_tun: dict) -> bool:
+    """Whether a measured evidence row can vouch for a candidate under value-of-position
+    semantics: every tunable knob the candidate specifies must match the row, a key absent
+    from the ROW reading as free — EXCEPT a kernel-set-changing placement. A row recorded
+    before ``PLACE@cone`` existed (any pre-cut tune DB / reservoir) measured the FUSED twin,
+    which is knob-identical to the cut row apart from the placement — letting the absent key
+    wildcard-match a ``cut`` candidate deploys the catastrophic cold cut at the fused row's
+    µs (and the content tie-break then PREFERS it: ``('PLACE@cone','cut') <
+    ('PLACE@cone','fuse')``). The cut may only win where it was actually measured, so a
+    ``cut`` candidate requires the row to record the placement explicitly."""
+    if any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items()):
+        return False
+    return not (str(cand_tun.get("PLACE@cone")) == "cut" and "PLACE@cone" not in row_tun)
+
+
 def stamp_schedule_families(knobs: dict) -> dict[str, str]:
     """The ready-to-record knob map for one realized kernel: its tuning knobs
     (:func:`tuning_knob_items`) plus an explicit OFF value for every :data:`SCHEDULE_FAMILIES`

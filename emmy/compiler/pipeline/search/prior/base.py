@@ -222,7 +222,7 @@ class Prior(ABC):
         index = self._o3_evidence()
         if not index:
             return None
-        from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+        from emmy.compiler.pipeline.knob import canonical_row_key, evidence_row_vouches  # noqa: PLC0415
 
         best: tuple[int, float] | None = None
         for i, cand in enumerate(rows):
@@ -230,7 +230,10 @@ class Prior(ABC):
             cand_tun = {k: v for k, v in cand.items() if not k.startswith(("S_", "H_"))}
             for measured in self.sig_groups(index, sig):
                 for row_tun, us in measured:
-                    if any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items()):
+                    # Value-of-position join, except the cut placement: a pre-cut reservoir
+                    # row (no ``PLACE@cone`` key) measured the fused twin and must not vouch
+                    # for the knob-identical cut candidate (``evidence_row_vouches``).
+                    if not evidence_row_vouches(cand_tun, row_tun):
                         continue
                     # Tie on µs (one measured row matching several candidates) breaks by
                     # the candidates' canonical content, never their enumeration order.

@@ -238,3 +238,33 @@ def test_normed_gqa_sdpa_certifies_flash():
     assert flash, "no TWISTED flash kernel certified for the normed GQA sdpa"
     src = flash[0].op.source
     assert isinstance(src.partial[0], Contraction), "flash did not absorb the score contraction (fold stayed cut)"
+
+
+def test_bind_contraction_declined_cone_raises_not_positional():
+    """When the ⊗ lift names a COMPUTED A whose cone declines the bind (here: an n-indexed
+    load riding the cone), ``bind_contraction`` must raise ``LoweringError`` — the recognizer
+    then demotes the cell to PLANAR, which computes the full body. Falling through to the
+    positional first-(m,k)-load rule instead binds a cone-INTERNAL load as A and silently
+    drops the rest of the cone (the gemma GeGLU wrong-kernel class the lift binding fixed)."""
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.elementwise import ElementwiseImpl
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.stmt import Accum, Assign, Body, Load
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction
+    from emmy.compiler.pipeline.pipeline import LoweringError
+
+    m, n, k = Var("m"), Var("n"), Var("k")
+    body = Body(
+        (
+            Load(name="bv", input="B", index=(n, k)),
+            Load(name="av", input="A", index=(m, k)),
+            Assign(name="cv", op=ElementwiseImpl("exp"), args=("av",)),
+            Load(name="nv", input="Z", index=(n, k)),
+            Assign(name="cw", op=ElementwiseImpl("multiply"), args=("cv", "nv")),
+            Assign(name="pv", op=ElementwiseImpl("multiply"), args=("cw", "bv")),
+            Accum(name="acc", op=ElementwiseImpl("add"), value="pv"),
+        )
+    )
+    loop = Loop(axis=Axis(name="k", extent=Dim(64)), body=body, role=AxisRole.CONTRACTION)
+    with pytest.raises(LoweringError, match="computed cone"):
+        bind_contraction(loop, "m", "n", Body(()))

@@ -125,6 +125,12 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
         cone = map_cone(body, a_arg)
         if cone and not any(isinstance(st, Load) and n_name in _idx_vars(st.index) for st in cone):
             return Body(tuple(cone)), b_leaf, acc, epilogue
+        # The lift names a COMPUTED A whose cone declined (an Accum / Select inside it, or an
+        # n-indexed load riding it) — falling through to the positional (m, k) rule below would
+        # bind a cone-INTERNAL load as A and silently drop the rest of the cone: exactly the
+        # wrong-kernel class the lift binding exists to prevent. Raise instead — the recognizer
+        # catches LoweringError and demotes the cell to PLANAR, which computes the full body.
+        raise LoweringError("warp tier: the ⊗ lift's A operand is a computed cone that does not bind")
     if a_leaf is None or b_leaf is None:
         raise LoweringError("warp tier: could not bind A/B operands by grid (m, n) axis")
     return a_leaf, b_leaf, acc, epilogue

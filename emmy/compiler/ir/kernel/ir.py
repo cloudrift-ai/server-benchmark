@@ -60,6 +60,10 @@ from emmy.compiler.ir.stmt import (
 from emmy.compiler.ir.stmt.base import render_merge_program
 from emmy.compiler.ir.stmt.ir import BodyOp
 
+# The widest iteration space a 32-bit flat thread id can address — past this the
+# ``Tile`` decode must widen to 64-bit (see ``Tile.render``).
+_INT32_MAX = 2**31 - 1
+
 # ---------------------------------------------------------------------------
 # Hardware primitives
 # ---------------------------------------------------------------------------
@@ -345,13 +349,22 @@ class Tile(Stmt):
             strides[i] = acc
             acc *= extents[i]
         n = self.n_elements
+        # A flat id past INT32_MAX wraps negative in 32-bit arithmetic and every decoded index
+        # goes wild (a per-cell coop-reduce grid reaches it: M·N·coop = 4096·3840·256 ≈ 4.0e9 on
+        # the gemma-4 down-proj demote → cudaErrorIllegalAddress). Widen the id to 64-bit exactly
+        # when the static iteration space needs it — ``(long long)blockIdx.x`` lowers to one
+        # mul.wide, and the (slower) 64-bit axis divisions only land on kernels that would
+        # otherwise fault. The symbolic branch above keeps the 32-bit id: its runtime extent is
+        # unboundable at render time, and widening it would re-key every symbolic kernel's cubin.
+        wide = n > _INT32_MAX
+        bidx = "(long long)blockIdx.x" if wide else "blockIdx.x"
         # A warp-specialized producer band (``aux_threads``) launches PAST the cooperative cells:
         # decode off ``blockIdx·block_threads + threadIdx % block_threads`` so an aux thread wraps
         # onto this CTA's cells (correct block coords; its unit/lane aliases are never read).
         gid = (
-            f"blockIdx.x * {self.block_threads} + threadIdx.x % {self.block_threads}"
+            f"{bidx} * {self.block_threads} + threadIdx.x % {self.block_threads}"
             if self.aux_threads
-            else "blockIdx.x * blockDim.x + threadIdx.x"
+            else f"{bidx} * blockDim.x + threadIdx.x"
         )
         # ``gridDim = ceil(n / cells)`` CTAs cover the cells. When ``cells`` divides ``n`` exactly and
         # there is no warp-specialized aux band, every launched thread maps to a real cell — the tail
@@ -359,7 +372,7 @@ class Tile(Stmt):
         # emit the decode + body flat. Otherwise the partial last block (or the aux threads that launch
         # past the cells) needs masking.
         guard = self.aux_threads != 0 or n % self.cells != 0
-        out = [f"{pad}int _gid = {gid};"]
+        out = [f"{pad}{'long long' if wide else 'int'} _gid = {gid};"]
         inner = ctx.child() if guard else ctx
         ipad = _pad(inner.indent)
         if guard:

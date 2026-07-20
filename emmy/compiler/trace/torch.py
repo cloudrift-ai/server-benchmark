@@ -706,12 +706,37 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, str], *, s
         return
 
     # --- Pass-through ---
-    # ``type_as`` is a dtype cast to another tensor's dtype (e.g. Gemma's
-    # ``self._norm(x.float()).type_as(x)``) — like ``to``/``clone`` it's an
-    # identity in the dtype-unified numeric pipeline (the traced dtype carries
-    # through), so map it to its first input.
+    # ``contiguous`` / ``clone`` / ``detach`` / ``alias`` are pure aliases. ``to`` and
+    # ``type_as`` are aliases ONLY when they do not actually change dtype — when they do,
+    # aliasing silently drops a real narrowing and the wider dtype propagates forward.
+    #
+    # That is not hypothetical: Gemma's RMSNorm is
+    # ``self._norm(x.float()) * w.float()`` then ``.type_as(x)``. The f32 the statistic is
+    # computed in reaches the graph anyway (the traced scalar constants are f32, so
+    # ``f16 ** f32 -> f32`` promotes the whole chain), but dropping the closing ``type_as``
+    # left the norm OUTPUT f32 too. Every consumer then became a mixed f32xf16 contraction,
+    # which is not offered the staged (``d2/tma/ring``) transports — the gemma-4 prefill
+    # norm->qkv projections deployed at 147-174 us each on a spilling ``w1x1`` tile instead
+    # of the ~31-51 us their pure-f16 goldens record.
+    #
+    # Emit the narrowing as an identity ``IndexMapOp`` (read each element, write it) whose
+    # output Tensor carries the target dtype — the same mechanism broadcast already uses,
+    # and the conversion falls out of the typed store. Keeping the statistic itself in f32
+    # is deliberate and must not change: squaring gemma activations in f16 overflows above
+    # |x| = 256 (measured: max|err| 60.7 at peak 300 vs HF), so only the OUTPUT narrows.
     if op_name in ("to", "contiguous", "_assert_tensor_metadata", "clone", "detach", "alias", "type_as"):
         if input_ids:
+            src = g.nodes.get(input_ids[0])
+            if op_name in ("to", "type_as") and src is not None and dtype != src.output.dtype:
+                coord_map = tuple(placeholder(d) for d in range(len(shape)))
+                nid = g.add_node(
+                    op=IndexMapOp(out_shape=tuple(shape), sources=(IndexSource(input_idx=0, coord_map=coord_map),)),
+                    inputs=input_ids[:1],
+                    output=Tensor(name, shape, dtype),
+                    node_id=name,
+                )
+                node_map[name] = nid
+                return
             node_map[name] = input_ids[0]
         return
 

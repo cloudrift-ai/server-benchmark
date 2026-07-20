@@ -224,6 +224,13 @@ verified evidence tier below — then (2) measured -O3 reservoir evidence (`evid
 prefix-consistent with the fastest `H_opt=3` row of the same op), (3) the tune DB's measured rows, and (4) the
 `mean_score` argmin only when no candidate has evidence.
 
+The two file-backed inputs to that pick — the parsed online prior and the DB perf index — are built **once per
+process**, memoized on the source file's `(path, mtime)` (the online file; the DB file plus its `-wal` sidecar). A
+generative serve boot compiles ~96 programs, and `structural_key` folds only cc + nvcc flags (never the op shape), so
+both inputs are identical across every program: without the memo each compile re-`json.loads`'d the 56 MB
+`online.json` and re-scanned the whole perf table. The mtime key invalidates on any on-disk change, so a rewritten
+checkpoint or a fresh perf commit is still picked up.
+
 **Goldens are the first evidence tier of a greedy compile.** The per-GPU golden files are the only *measured* data
 that ships with a clone — the reservoir and tune DB are machine-local caches written by local tunes, so a fresh
 machine (every rented box) previously deployed on pure model extrapolation (the gemma 12–29× cold misdeploys). At a
@@ -236,10 +243,12 @@ the contraction beside the statistic reduce) marks the `"fused"` computed-A form
 computed-A contraction is a warp mma whose f32 statistic constants would otherwise read scalar;
 at the DEPLOY fork the flash op is recognized from its offer's `TILE@dd` + `TILE@pj` pair instead — the tile pass's
 restructured twisted op carries re-derived extents only, no histogram, so the stamp classifier cannot fire there; and
-the computed-A norm→linear cone is recognized at the deploy fork from its mixed-dtype signature (f16/bf16 operands +
-the f32 statistic constant over an add-reduce) — its PRE-SPLIT fork carries only one reduce axis with the rsqrt still
-buried in the A sub-body, so the histogram misreads it as a plain scalar matmul, and it is rebuilt to the fused key
-so the norm→qkv cones join their goldens at cold deploy)
+the computed-A norm→linear cone is likewise recognized at the deploy fork from its OFFER — a `d*/sync` STAGE row,
+the mandatory compute-fill only a computed-A contraction enumerates (the catalog spells only gmem-direct/cp/tma) —
+since its PRE-SPLIT fork carries only one reduce axis with the rsqrt still buried in the A sub-body, so the histogram
+misreads it as a plain scalar matmul; it is rebuilt to the fused key so the norm→qkv cones join their goldens at cold
+deploy, and a fused golden is schema-required to record a `d*/sync` STAGE or `PLACE@cone: cut` so its config can
+never realize on a plain gmem-A matmul fork of coincident extents)
 and picks the offered candidate prefix-consistent with the fastest recorded entry — keys and values compare through
 the A/B pin gate's canonical matching. An axis-keyed golden key (a static attention golden's `TILE@dd` + `TILE@pj`)
 is all-or-nothing; a bare golden key on a multi-axis family carries the pin-resolution semantics — one plan,

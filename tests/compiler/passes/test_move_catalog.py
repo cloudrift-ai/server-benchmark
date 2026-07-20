@@ -225,3 +225,17 @@ def test_bare_reduce_forks_the_coop_catalog():
     reduces = [str(family_value(r, "REDUCE")) for r in rows]
     assert reduces[0] == ""  # 2048 free cells > _FREE_CAP: the conservative heuristic pick leads
     assert set(reduces) == {"", *coop_reduce_moves()}, f"catalog rows missing: {reduces}"
+
+
+def test_factor_k_refuses_non_dividing_pin_width():
+    """A pinned split width that does not divide K must raise, not silently truncate: the
+    enumeration path filters ``k % cta`` upstream, so a non-divisor only arrives via an
+    ``EMMY_REDUCE`` pin, and ``_factor_k``'s ``K // w`` kslice would drop the remainder
+    columns of the contraction (the scalar tier has no mma-step check to catch it)."""
+    import pytest
+
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.pipeline.passes.lowering.tile._schedule import _factor_k
+
+    with pytest.raises(ValueError, match="does not divide"):
+        _factor_k(Axis(name="k", extent=Dim(1024)), 3)

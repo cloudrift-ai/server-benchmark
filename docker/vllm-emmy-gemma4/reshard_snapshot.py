@@ -16,11 +16,17 @@ import json
 import sys
 from pathlib import Path
 
-import torch  # noqa: F401  — safetensors framework="pt" needs it
+import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
 MAX_SHARD = 4_500_000_000
+# safetensors dtype token → bytes/element, for planning shard boundaries off metadata alone
+# (``get_slice`` reads shape + dtype without materializing the tensor).
+_DTYPE_BYTES = {
+    "F64": 8, "I64": 8, "U64": 8, "F32": 4, "I32": 4, "U32": 4,
+    "F16": 2, "BF16": 2, "I16": 2, "U16": 2, "I8": 1, "U8": 1, "BOOL": 1,
+}  # fmt: skip
 
 hf_root = Path(sys.argv[1])
 for snap in hf_root.glob("hub/models--*/snapshots/*"):
@@ -32,30 +38,52 @@ for snap in hf_root.glob("hub/models--*/snapshots/*"):
     blob = consolidated.resolve()
     print(f"[reshard] {blob} ({blob.stat().st_size / 1e9:.1f} GB)")
 
-    shards, current, current_size = [], {}, 0
     with safe_open(blob, framework="pt") as f:
-        names = list(f.keys())
-        for name in names:
-            t = f.get_tensor(name)
-            nbytes = t.numel() * t.element_size()
+        # Plan the shard boundaries from METADATA only, then load one shard at a time —
+        # accumulating every tensor before the first write peaked RSS at the full model size
+        # (23 GB in the container); per-shard loading caps it at ~MAX_SHARD.
+        plan: list[list[str]] = []
+        current, current_size = [], 0
+        for name in f.keys():  # noqa: SIM118 — safe_open is not a dict
+            sl = f.get_slice(name)
+            nbytes = _DTYPE_BYTES[sl.get_dtype()]
+            for d in sl.get_shape():
+                nbytes *= d
             if current and current_size + nbytes > MAX_SHARD:
-                shards.append(current)
-                current, current_size = {}, 0
-            current[name] = t
+                plan.append(current)
+                current, current_size = [], 0
+            current.append(name)
             current_size += nbytes
-    if current:
-        shards.append(current)
+        if current:
+            plan.append(current)
 
-    n = len(shards)
-    weight_map, total = {}, 0
-    for i, shard in enumerate(shards, 1):
-        fname = f"model-{i:05d}-of-{n:05d}.safetensors"
-        save_file(shard, str(snap / fname), metadata={"format": "pt"})
-        for name, t in shard.items():
-            weight_map[name] = fname
-            total += t.numel() * t.element_size()
-        print(f"[reshard] wrote {fname} ({sum(t.numel() * t.element_size() for t in shard.values()) / 1e9:.1f} GB)")
-        shard.clear()
+        n = len(plan)
+        weight_map, total = {}, 0
+        for i, group in enumerate(plan, 1):
+            fname = f"model-{i:05d}-of-{n:05d}.safetensors"
+            shard = {name: f.get_tensor(name) for name in group}
+            save_file(shard, str(snap / fname), metadata={"format": "pt"})
+            for name, t in shard.items():
+                weight_map[name] = fname
+                total += t.numel() * t.element_size()
+            print(f"[reshard] wrote {fname} ({sum(t.numel() * t.element_size() for t in shard.values()) / 1e9:.1f} GB)")
+            shard.clear()
+
+    # Verify BEFORE destroying the consolidated file: reload every shard and compare each
+    # tensor byte-for-byte against the source. The post-bake verify only proves the shards
+    # LOAD — a tensor silently saved from a corrupted state would ship; this is the one
+    # point where the source still exists to compare against, and the reshard runs once per
+    # release, so the extra read-through is cheap insurance.
+    with safe_open(blob, framework="pt") as src:
+        if set(weight_map) != set(src.keys()):
+            raise SystemExit("[reshard] FAIL: shard tensor set differs from the source")
+        for i, group in enumerate(plan, 1):
+            fname = f"model-{i:05d}-of-{n:05d}.safetensors"
+            with safe_open(str(snap / fname), framework="pt") as sh:
+                for name in group:
+                    if not torch.equal(sh.get_tensor(name), src.get_tensor(name)):
+                        raise SystemExit(f"[reshard] FAIL: tensor {name!r} differs after reshard")
+    print(f"[reshard] verified: {len(weight_map)} tensors byte-identical across {n} shards")
 
     index = {"metadata": {"total_size": total}, "weight_map": weight_map}
     (snap / "model.safetensors.index.json").write_text(json.dumps(index, indent=2, sort_keys=True))

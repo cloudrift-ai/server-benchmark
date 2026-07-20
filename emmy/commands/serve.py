@@ -132,11 +132,13 @@ def _gen_graph_args(vllm_args: list[str]) -> list[str]:
     """The eager/capture flags for emmy generative serving. DEFAULT is whole-step decode
     capture: a compilation-config asking for FULL_DECODE_ONLY graphs (full cudagraphs need no
     torch.compile — vLLM wraps the model in its ``CUDAGraphWrapper``) with capture sizes
-    clamped to the decode bucket — sizes above the bucket would capture the model's symbolic
-    fallback path, whose per-layer host numpy hops abort a stream capture. Opt out with
-    vLLM's own ``--enforce-eager`` (forwards as-is); a caller-supplied ``--compilation-config``
-    also wins over ours. With the decode bucket off (``EMMY_GEN_DECODE_BUCKET=0``) nothing is
-    capturable, so eager is forced."""
+    clamped to the decode bucket — the static decode twin is the one path VALIDATED under
+    stream capture (``test_gen_capture_gpu``); a size above the bucket would capture the
+    device-resident symbolic programs (``run_device_sym``), which are not capture-validated
+    yet, so widening the sizes past the bucket is a measured follow-up, not a flip of this
+    list. Opt out with vLLM's own ``--enforce-eager`` (forwards as-is); a caller-supplied
+    ``--compilation-config`` also wins over ours. With the decode bucket off
+    (``EMMY_GEN_DECODE_BUCKET=0``) nothing is capturable, so eager is forced."""
     from emmy import config as emmy_config  # noqa: PLC0415
 
     if _has_flag(vllm_args, "--enforce-eager") or _has_flag(vllm_args, "--compilation-config"):
@@ -235,6 +237,21 @@ def _vllm_bin() -> str:
     sys.exit(1)
 
 
+def _child_env() -> dict:
+    """Environment for the vLLM child with this interpreter's bin dir prepended to ``PATH``.
+    Invoking ``./venv/bin/emmy`` by absolute path does NOT put the venv's bin on ``PATH``, so
+    the generative server's inductor-compile subprocess dies with ``FileNotFoundError: ninja``
+    (ninja is pip-installed into that same bin). Prepending it — what venv activation would do —
+    makes the venv's ``ninja`` / console scripts resolvable to the child. Idempotent: a bin dir
+    already at the front of ``PATH`` is not duplicated."""
+    env = dict(os.environ)
+    bin_dir = str(Path(sys.executable).parent)
+    parts = env.get("PATH", "").split(os.pathsep)
+    if parts[:1] != [bin_dir]:
+        env["PATH"] = os.pathsep.join([bin_dir, *parts]) if parts != [""] else bin_dir
+    return env
+
+
 def handle_serve(args):
     vllm_args = _split_own_flags(args)  # re-parses own flags placed after MODEL into args
     serve_cmd = build_serve_cmd(args.model, stock=args.stock, vllm_args=vllm_args, generate=args.generate)
@@ -260,24 +277,25 @@ def handle_serve(args):
 
     vllm = _vllm_bin()
     serve_cmd[0] = vllm
+    env = _child_env()
     if not args.bench:
         # Plain serving: replace this process so signals/Ctrl-C reach vLLM directly.
-        os.execv(vllm, serve_cmd)
+        os.execve(vllm, serve_cmd, env)
 
     bench_cmd[0] = vllm
-    _serve_and_bench(serve_cmd, bench_cmd, port)
+    _serve_and_bench(serve_cmd, bench_cmd, port, env=env)
 
 
-def _serve_and_bench(serve_cmd: list[str], bench_cmd: list[str], port: str) -> None:
+def _serve_and_bench(serve_cmd: list[str], bench_cmd: list[str], port: str, *, env: dict | None = None) -> None:
     log_file = tempfile.NamedTemporaryFile(mode="wb", prefix="emmy-serve-", suffix=".log", delete=False)
     logger.info("Starting server (logs: %s)...", log_file.name)
     logger.info("  %s", shlex.join(serve_cmd))
-    server = subprocess.Popen(serve_cmd, stdout=log_file, stderr=subprocess.STDOUT)
+    server = subprocess.Popen(serve_cmd, stdout=log_file, stderr=subprocess.STDOUT, env=env)
     try:
         _wait_for_health(server, port, log_file.name)
         logger.info("Server healthy — running benchmark...")
         logger.info("  %s", shlex.join(bench_cmd))
-        rc = subprocess.run(bench_cmd).returncode
+        rc = subprocess.run(bench_cmd, env=env).returncode
     finally:
         logger.info("Shutting down server...")
         server.terminate()

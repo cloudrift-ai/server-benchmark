@@ -99,9 +99,18 @@ def test_fused_map_matmul(tier, producer, monkeypatch):
     rng = np.random.default_rng(0)
     ins = {nid: (rng.standard_normal(tuple(d.as_static() for d in g.nodes[nid].output.shape)) * 0.3).astype(np.float16) for nid in g.inputs}
     got, srcs = _compile_run(g, ins)
-    assert len(srcs) == 1, f"{producer}/{tier}: the fused edge must be ONE kernel, got {len(srcs)}"
+    # The invariant is that the producer cone is FUSED — no kernel signature carries a
+    # materialized intermediate: neither the graph's own ``xn`` buffer nor a cut workspace
+    # (``020_cut_edge``'s ``<out>__cone`` / ``<out>__stat`` — a cut realization materializes the
+    # cone under those names, so a name-anchored ``xn`` check alone would miss it). Kernel COUNT
+    # is not the invariant: a stat-free cone binds as a computed-A ``Contraction``, which
+    # legitimately offers split-K REDUCE rows, and a chosen one emits a ``__partial`` + finalize
+    # pair that still carries the cone inline.
+    sigs = [s.split("{")[0] for s in srcs]
+    leaked = [m for m in ("xn", "__cone", "__stat") if any(m in sig for sig in sigs)]
+    assert not leaked, f"{producer}/{tier}: the cone round-tripped through gmem ({leaked}): {sigs}"
     if tier == "warp":
-        assert "emmy_mma" in srcs[0], f"{producer}/warp: the pinned warp tier must engage on the fused matmul"
+        assert any("emmy_mma" in s for s in srcs), f"{producer}/warp: the pinned warp tier must engage on the fused matmul"
     f32 = {k: v.astype(np.float32) for k, v in ins.items()}
     ref = _PRODUCER_REFS[producer](f32) @ f32["w"]
     np.testing.assert_allclose(got.reshape(_M, _N).astype(np.float32), ref, atol=0.1, rtol=2e-2)

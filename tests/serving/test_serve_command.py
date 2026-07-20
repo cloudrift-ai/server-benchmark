@@ -114,6 +114,34 @@ def test_bench_seed_is_distinct_from_vllm_seed(capsys):
     assert "--seed 9" in out[1]  # the bench client gets --bench-seed
 
 
+def test_child_env_prepends_interpreter_bin_to_path(monkeypatch):
+    """The vLLM child gets this interpreter's bin dir at the FRONT of PATH — so the venv's
+    ninja (needed by the generative server's inductor compile) resolves even when emmy was
+    invoked by absolute path, which does not activate the venv."""
+    import sys
+    from pathlib import Path
+
+    from emmy.commands.serve import _child_env
+
+    bin_dir = str(Path(sys.executable).parent)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    env = _child_env()
+    assert env["PATH"].split(":")[0] == bin_dir
+    assert "/usr/bin" in env["PATH"].split(":")  # the original entries are preserved
+
+
+def test_child_env_is_idempotent_when_bin_already_leads(monkeypatch):
+    """A bin dir already at the front of PATH is not duplicated (re-exec / nested invocation)."""
+    import sys
+    from pathlib import Path
+
+    from emmy.commands.serve import _child_env
+
+    bin_dir = str(Path(sys.executable).parent)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin")
+    assert _child_env()["PATH"] == f"{bin_dir}:/usr/bin"
+
+
 def test_serve_cmd_generate_branch():
     cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
     assert cmd[cmd.index("--runner") + 1] == "generate"

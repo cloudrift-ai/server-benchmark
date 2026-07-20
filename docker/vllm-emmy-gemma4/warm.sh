@@ -88,6 +88,10 @@ for pass in 1 2 3 4 5; do
     echo "[warm] offline pass $pass added $new cubin(s)"
     [ "$new" -eq 0 ] && break
 done
-[ "$new" -eq 0 ] || echo "[warm] WARNING: no fixpoint after 5 offline passes — expect verify to flag the stragglers"
+# A non-converged warm is a FAILURE, not a warning: fork picks are bimodal across boots, so
+# verify's single boot can happen to hit only cached variants and PASS while customer boots
+# recompile at runtime — exactly the failure class the fixpoint exists to contain, gated by a
+# coin flip if this exits 0.
+[ "$new" -eq 0 ] || { echo "[warm] FAIL: no fixpoint after 5 offline passes — the cubin set is still growing" >&2; exit 1; }
 
 echo "[warm] done: $(find warm/cubin -name '*.cubin' | wc -l) cubin(s), snapshot at warm/hf"

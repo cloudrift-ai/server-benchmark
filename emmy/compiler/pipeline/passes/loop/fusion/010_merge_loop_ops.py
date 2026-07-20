@@ -37,6 +37,8 @@ through.
 
 from __future__ import annotations
 
+import re
+
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.loop import Accum, Assign, Load, Loop, LoopOp
 from emmy.compiler.ir.stmt import Body, Select
@@ -46,6 +48,9 @@ from emmy.compiler.pipeline.passes.loop.fusion._helpers import is_pure_indexmap 
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import wrap_merge_fragment as _wrap_merge_fragment
 
 _BLOWUP_FACTOR = 8
+# ``020_cut_edge``'s workspace node ids — the cone / bridged-statistic / per-channel halves of a
+# realized ``PLACE@cone=cut``. Minted only by that rule; see the cut-workspace brake in `rewrite`.
+_CUT_WS_RE = re.compile(r"__(cone|stat|ch\d+)$")
 
 
 def _walk_leaf_costs(loop_op: LoopOp):
@@ -296,6 +301,18 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
         raise RuleSkipped("producer or consumer is no longer a LoopOp")
     if producer.id not in consumer.inputs:
         raise RuleSkipped(f"producer {producer.id!r} is not an input of consumer {consumer.id!r}")
+
+    # Cut-workspace brake: ``020_cut_edge`` realizes a DECIDED ``PLACE@cone=cut`` by
+    # materializing the cone into ``<out>__cone`` / ``<out>__stat`` / ``<out>__ch<i>``
+    # workspace kernels, and the restarted scan re-enters this pass while those halves are
+    # still LoopOps. The stat-BEARING producer is braked incidentally (reduce-heavy), but a
+    # STAT-FREE cone producer is pure pointwise with one consumer — this rule's core move —
+    # and re-inlining it recreates the fused kernel, silently reverting the decided placement
+    # (observed on the gemma-4 pre256 norm→kv cone: the re-cut then collided on the existing
+    # workspace node). The workspace names are 020's minting contract; a decided cut is never
+    # fusion's to undo.
+    if _CUT_WS_RE.search(producer.id):
+        raise RuleSkipped(f"{producer.id!r} is a decided cone-cut workspace — the cut placement is not fusion's to undo")
 
     # Multi-load-of-reduce-heavy-producer guard: if the consumer references
     # the producer's output via more than one Load stmt AND the producer does

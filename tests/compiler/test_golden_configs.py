@@ -170,7 +170,13 @@ def test_goldens_speak_native_codecs_and_featurize():
         ReducePlan.parse(g.knobs.get("REDUCE"))
         if g.knobs.get("STAGE"):
             Stage.parse(g.knobs["STAGE"])
-        if isinstance(g, MatmulGoldenConfig):
+        # A ``PLACE@cone: cut`` golden records a PLACEMENT and the cut's TOTAL cost, not a tile: the
+        # cut row's own schedule is discarded (``020_cut_edge`` emits un-mapped LoopOps and each half
+        # re-enters ``010`` to get its own fork and its own golden), so there is no geometry to
+        # featurize. Spelling one is worse than omitting it — the consumer's transport (``d2/tma/ring``)
+        # cannot appear on a cut row, which is computed-A, so a tile-bearing cut golden stops matching.
+        # The ``mlp_geglu.*.cut`` goldens are exempt for the same reason, via their kind.
+        if isinstance(g, MatmulGoldenConfig) and g.knobs.get("PLACE@cone") != "cut":
             feats = features.knob_features(g.knobs)
             assert feats.get("D_threads", 0) > 0 and "D_tile_m" in feats, f"{g.name} featurized to empty tile geometry"
 
@@ -366,7 +372,7 @@ def test_norm_linear_golden_snippet_shape_key_and_flops():
     """The fused RMSNorm→linear computed-A golden: its snippet is the ``F.rms_norm(x)·nw @ w`` form
     that traces to the megakernel, its shape_key carries ``kind="fused"`` with ``is_warp=True`` (a
     computed-A contraction is a warp mma), and the dynamic twin excludes the symbolic M."""
-    c = NormLinearGoldenConfig(name="nl", M=32, H=3840, N=4096, knobs={"TILE": "a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2"})
+    c = NormLinearGoldenConfig(name="nl", M=32, H=3840, N=4096, knobs={"TILE": "a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2", "STAGE": "d2/sync"})
     snip = c.snippet()
     assert "F.rms_norm(x,(3840,),nw)" in snip and snip.strip().endswith("@ w")
     assert "dtype=torch.float16" in snip  # fp16 default → warp mma
@@ -387,7 +393,8 @@ def test_norm_linear_golden_snippet_shape_key_and_flops():
 def test_mlp_geglu_golden_snippet_shape_key_and_flops():
     """The fused RMSNorm→gate⊗up→GeGLU multi-channel golden: the lambda-bound shared-``r`` snippet,
     ``kind="fused"`` keyed on the ``(M, inter)`` GeGLU output, and the dynamic twin excludes M."""
-    c = MlpGeGluGoldenConfig(name="ggu", M=32, H=3840, inter=15360, knobs={"TILE": "a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4"})
+    knobs = {"TILE": "a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4", "STAGE": "d1/sync"}
+    c = MlpGeGluGoldenConfig(name="ggu", M=32, H=3840, inter=15360, knobs=knobs)
     snip = c.snippet()
     assert "lambda r:" in snip and "F.rms_norm(x,(3840,),nw)" in snip and "approximate='tanh'" in snip
     sk = c.shape_key()
@@ -477,3 +484,22 @@ def test_golden_flops_never_overestimates_and_gates_dyn_reduce(monkeypatch):
     monkeypatch.setattr(gpu, "live_name", lambda: "test-gpu")
     assert run_mod._intensity_floor_flag(s, dyn_reduce.emmy_us) is None, "correct dynM replay must not flag"
     assert run_mod._intensity_floor_flag(s, dyn_reduce.emmy_us / 1e5) is not None, "an impossible bench must still flag"
+
+
+def test_fused_golden_requires_a_cone_anchor():
+    """A RECORDED fused computed-A entry must anchor itself to the cone fork — a ``d*/sync``
+    STAGE or ``PLACE@cone: cut``. The deploy join's over-fire safety rests on "a fused golden's
+    config can't realize on a plain gmem-A matmul": a gmem-direct STAGE + plain warp tile WOULD
+    realize there, deploying a cross-family config. Key-only instances (empty knobs) are exempt."""
+    common = dict(M=32, H=3840, N=4096, gpu_name="X", compute_cap=(12, 0))
+    NormLinearGoldenConfig(name="ok.sync", knobs={"TILE": "a:mma_m16n8k16_f16_f32/w1x16/f2x2/k2", "STAGE": "d2/sync"}, **common)
+    NormLinearGoldenConfig(name="ok.axis", knobs={"STAGE@a3": "d1/sync"}, **common)
+    NormLinearGoldenConfig(name="ok.cut", knobs={"PLACE@cone": "cut"}, **common)
+    NormLinearGoldenConfig(name="ok.keyonly", knobs={}, **common)
+    with pytest.raises(ValueError, match="cone"):
+        NormLinearGoldenConfig(name="bad.gmem", knobs={"TILE": "w1x16/f2x2", "STAGE": "d2/tma/ring"}, **common)
+    with pytest.raises(ValueError, match="cone"):
+        # ``cp.async`` contains "sync" as a substring — the segment match must not accept it.
+        MlpGeGluGoldenConfig(
+            name="bad.cp", M=32, H=3840, inter=15360, knobs={"STAGE": "d2/cp.async/ring"}, gpu_name="X", compute_cap=(12, 0)
+        )

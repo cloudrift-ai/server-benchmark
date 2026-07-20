@@ -86,23 +86,53 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
     reduce ``loop`` (the lowered ``Accum``-in-``Loop`` form) whose output is indexed by grid axes
     ``m_name`` / ``n_name``, with projection ``epilogue``.
 
-    Reads the facts straight off the loop body — no op-tree node: the contraction operands are the
-    ``Load``\\ s in the loop indexed over the reduce (K) axis; A/B are bound by which output axis
-    each one's index carries; the fold accumulator is the loop body's ``Accum`` target. A clean
-    gmem-direct contraction has plain-``Load`` operands (a computed-cone matmul binds elsewhere:
-    the MONOID-producer composition via :func:`bind_prologue_contraction`, flash's PV at fusion; the
-    stat-free demoted cone stays a flat reduce), so an unbindable body (no m/n-bearing K-load)
-    raises, matching the warp gmem-direct guard. ``b_trans`` is not returned — the ``Contraction``
-    node re-derives it off its fold's ``b_load``."""
+    Reads the facts straight off the loop body — no op-tree node: the operands are named by the ⊗
+    **lift** (the ``Assign`` the fold accumulates), B is its (n, k)-indexed ``Load``, and A is the
+    lift's other argument — a plain ``Load`` (the clean gmem-direct contraction) or, when loop
+    fusion has inlined an operand cone, the cone itself as a ``Body`` (the computed-A form, which
+    rides the ``sync`` compute-fill). The fold accumulator is the loop body's ``Accum`` target.
+
+    Binding A off the LIFT and not off "the first (m, k)-indexed load" is load-bearing: a
+    cone-INTERNAL load is (m, k)-indexed too, so the positional rule bound gemma's GeGLU combine as
+    ``linear_1_reduce @ W`` — cp.async-ing the gate projection into the A slab with the gelu and the
+    up projection silently dropped. A stat-bearing cone still binds through
+    :func:`bind_prologue_contraction` (it carries a statistic prologue and a column loop this shape
+    has no notion of); flash's PV binds at fusion. An unbindable body raises, matching the warp
+    gmem-direct guard. ``b_trans`` is not returned — the ``Contraction`` node re-derives it off its
+    fold's ``b_load``."""
     k_name = loop.axis.name
-    loads = [s for s in loop.body if isinstance(s, Load) and k_name in _idx_vars(s.index)]
+    body = list(loop.body)
+    loads = [s for s in body if isinstance(s, Load) and k_name in _idx_vars(s.index)]
     a_leaf = next((ld for ld in loads if m_name in _idx_vars(ld.index)), None)
     b_leaf = next((ld for ld in loads if n_name in _idx_vars(ld.index)), None)
+    fold = next((s for s in body if isinstance(s, Accum)), None)
+    if fold is None:
+        raise LoweringError("warp tier: contraction loop has no fold accumulator")
+    acc = fold.name
+    # Bind A off the ⊗ LIFT, never off "the first (m, k)-indexed load". Once loop fusion has
+    # inlined an operand cone, a cone-INTERNAL load is (m, k)-indexed too, and taking it as A
+    # silently drops the rest of the cone: gemma's GeGLU combine ahead of down_proj bound
+    # ``linear_1_reduce`` as A and emitted ``linear_1_reduce @ W`` — a wrong kernel, cp.async-ing
+    # the gate projection into the A slab with the gelu and the up projection gone. The lift names
+    # the true operands: B is its (n, k)-indexed load, A is the other argument — a plain ``Load``
+    # (the clean gmem-direct contraction) or a computed cone (which rides the sync compute-fill,
+    # exactly like the norm→linear cone, just with no statistic prologue).
+    lift = next((s for s in body if isinstance(s, Assign) and s.name == fold.value), None)
+    if lift is not None and lift.op.name == "multiply" and len(lift.args) == 2 and b_leaf is not None and b_leaf.names[0] in lift.args:
+        a_arg = next(a for a in lift.args if a != b_leaf.names[0])
+        if a_leaf is not None and a_arg == a_leaf.names[0]:
+            return a_leaf, b_leaf, acc, epilogue
+        cone = map_cone(body, a_arg)
+        if cone and not any(isinstance(st, Load) and n_name in _idx_vars(st.index) for st in cone):
+            return Body(tuple(cone)), b_leaf, acc, epilogue
+        # The lift names a COMPUTED A whose cone declined (an Accum / Select inside it, or an
+        # n-indexed load riding it) — falling through to the positional (m, k) rule below would
+        # bind a cone-INTERNAL load as A and silently drop the rest of the cone: exactly the
+        # wrong-kernel class the lift binding exists to prevent. Raise instead — the recognizer
+        # catches LoweringError and demotes the cell to PLANAR, which computes the full body.
+        raise LoweringError("warp tier: the ⊗ lift's A operand is a computed cone that does not bind")
     if a_leaf is None or b_leaf is None:
         raise LoweringError("warp tier: could not bind A/B operands by grid (m, n) axis")
-    acc = next((s.name for s in loop.body if isinstance(s, Accum)), None)
-    if acc is None:
-        raise LoweringError("warp tier: contraction loop has no fold accumulator")
     return a_leaf, b_leaf, acc, epilogue
 
 

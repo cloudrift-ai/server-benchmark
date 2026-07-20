@@ -61,19 +61,58 @@ PATTERN = [Pattern("root", TileOp)]
 
 
 def rewrite(match: Match, root: Node) -> Graph | None:
-    if place_decision("cone") != "cut":
-        raise RuleSkipped("PLACE@cone is fuse — the cone stays register-resident")
+    # A pure REALIZER, like ``030_split_reduce``: the decision lives in the SCHEDULE (the
+    # ``PLACE@cone`` knob the recognizer stamps on the chosen row), the graph carries the kernel
+    # count. Reading the stamp — not the global pin — is what lets the cone cut be *selected* per
+    # op by the ordinary evidence pick (a golden recording ``PLACE@cone: cut`` with the cut's
+    # measured total cost), exactly as ``REDUCE: g8k`` selects the split-K cut. Falls back to the
+    # global pin for rows that carry no stamp (the pinned path, where the recognizer emits the
+    # unfused map form outright).
     tile: TileOp = root.op
+    stamped = tile.knobs.get("PLACE@cone")
+    decision = stamped if stamped in ("fuse", "cut") else place_decision("cone")
+    if decision != "cut":
+        raise RuleSkipped("PLACE@cone is fuse — the cone stays register-resident")
     if tile.op is None:
         raise RuleSkipped("kernel-less TileOp — nothing to cut")
     bound = bind_prologue_contraction(tile.op, tile.place.free)
-    if bound is None:
-        raise RuleSkipped("not the MONOID producer-cone composition — nothing to cut")
-    pro_map, _n_ax = bound
-    c: Contraction = pro_map.source
-    if c.lead_axes or len(tile.place.free) != 1:
+    if bound is not None:
+        # The MONOID composition: the column loop lives INSIDE the map body, so the only free
+        # (grid) axis here is ``m``, and the cone carries a per-row statistic prologue.
+        pro_map, _n_ax = bound
+        c: Contraction = pro_map.source
+        free_ok, stat_free = len(tile.place.free) == 1, False
+    else:
+        # A STAT-FREE cone — the node is ALREADY the computed-A ``Contraction`` (loop fusion
+        # inlined a pointwise operand cone: gemma's GeGLU combine ahead of down_proj). Same cut,
+        # minus the statistic. Here BOTH ``m`` and ``n`` are peeled free axes, not just ``m``.
+        node = tile.op.source if isinstance(tile.op, Map) and isinstance(tile.op.source, Contraction) else tile.op
+        if not isinstance(node, Contraction) or not node.a_computed or len(node.folds) != 1:
+            raise RuleSkipped("not a producer-cone composition — nothing to cut")
+        pro_map, c = (tile.op if isinstance(tile.op, Map) else None), node
+        # A bare Contraction must carry its own output ``Write`` in the epilogue to be cuttable.
+        # A split-K PARTIAL does not — its store is synthesized by ``030_split_reduce`` — so the
+        # re-lowered consumer would have no Write and ``LoopOp`` rejects it. Reachable only under a
+        # global ``EMMY_PLACE=cut`` pin, which drives this rule over nodes that never OFFERED the
+        # cut (the pin-vs-offer distinction commit 8731f3ff drew for goldens); unpinned, such a node
+        # carries no ``PLACE@cone`` stamp and never gets here.
+        if pro_map is None and not any(isinstance(st, Write) for st in c.epilogue):
+            raise RuleSkipped("bare contraction with no output Write (a split-K partial) — nothing to cut")
+        free_ok, stat_free = {a.name for a in tile.place.free} <= {c.m_axis.name, c.n_axis.name}, True
+    if c.lead_axes or not free_ok:
         raise RuleSkipped("lead/batch axes on the cone — the 2-D workspace cut doesn't cover them yet")
     pro, cell, stats = c.stat_prologue()
+    # A loop-invariant SCALAR load is not a per-row statistic — the seam splits at the first
+    # K-indexed stmt, so a stat-free cone's scalar constants (the GeGLU's 0.044715 / 0.797885 /
+    # 0.5) land in the prologue and read as four "statistics". They need no bridging kernel and no
+    # smem row: the cell just re-loads them. Only an m-indexed prologue def is a real statistic.
+    scalars = [s for s in pro if isinstance(s, Load) and not any(e.free_vars() for e in s.index)] if stat_free else []
+    if scalars:
+        scalar_ids = {id(s) for s in scalars}
+        scalar_names = {nm for s in scalars for nm in s.defines()}
+        pro = tuple(s for s in pro if id(s) not in scalar_ids)
+        cell = (*scalars, *cell)
+        stats = tuple(nm for nm in stats if nm not in scalar_names)
     if len(stats) > 1:
         raise RuleSkipped("multi-statistic cone — the per-statistic workspace cut covers one bridged stat this cut")
     m_ax, k_ax = c.m_axis, c.k_axis
@@ -89,6 +128,16 @@ def rewrite(match: Match, root: Node) -> Graph | None:
                 ws_dtype = t.dtype
             break
     ws = f"{out.name}__cone"
+    # Idempotence. The stat-BEARING cut terminates structurally (its producer carries the
+    # statistic reduce — ``010_merge_loop_ops``'s reduce-heavy guard); a STAT-FREE producer is
+    # pure pointwise, so that pass carries an explicit cut-workspace brake (its ``_CUT_WS_RE``
+    # skip on the ``__cone`` / ``__stat`` / ``__ch<i>`` node ids this rule mints) — without it,
+    # fusion re-inlined the producer on the restarted scan, the consumer went computed-A again,
+    # and the rule re-fired on a node it had already cut (observed on the gemma-4 pre256
+    # norm→kv cone: ``Node id 'linear_2_reduce__cone' already exists``). The guard below stays
+    # as the backstop: applying the cut twice is never the intent.
+    if ws in match.graph.nodes:
+        raise RuleSkipped(f"cone already cut — {ws} exists")
 
     # Producer(s): the cone value materializes through the same two kernels the UNFUSED graph
     # had — a per-row STATISTIC kernel (``for m: [stat reduce…, Write(stat[m])]``, m on the
@@ -127,7 +176,10 @@ def rewrite(match: Match, root: Node) -> Graph | None:
 
     consumer_nodes: list[tuple[LoopOp, str]] = []  # (op, workspace/out name)
     if len(c.folds) == 1:
-        consumer_nodes.append((_consumer(replace(pro_map, source=replace(c, a_operand=a_load))), out.name))
+        # A stat-free cone has no ``Map`` wrapper — its projection rides the node's own epilogue,
+        # so the re-bound Contraction IS the consumer.
+        cut_c = replace(c, a_operand=a_load)
+        consumer_nodes.append((_consumer(cut_c if pro_map is None else replace(pro_map, source=cut_c)), out.name))
         combine = None
     else:
         chan_accs: list[tuple[str, str]] = []  # (workspace name, accumulator SSA name)

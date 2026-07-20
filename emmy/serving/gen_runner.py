@@ -146,6 +146,22 @@ def _bind_device_constants(graph, sources, cache):
     return out
 
 
+def trace_split(wrapper, example_args, argnames):
+    """Trace ``wrapper`` into the Graph :func:`_compile_split` compiles — the trace half,
+    split out so a capture harness (``scripts/capture_gen_twins.py``) records the graphs
+    serving actually runs rather than a hand-rolled approximation of them. ``argnames``
+    ties each named arg's axis-0 to a shared symbolic ``num_tokens`` Dim; ``None`` traces
+    fully static at the example shapes."""
+    from emmy.compiler.trace.torch import trace_module
+
+    dynamic_shapes = None
+    if argnames:
+        from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs
+
+        dynamic_shapes = build_torch_dynamic_shapes(parse_position_specs([f"num_tokens@{n}:0" for n in argnames]))
+    return trace_module(wrapper, tuple(example_args), dynamic_shapes=dynamic_shapes)
+
+
 def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None, arena=None, capacity=None):
     """Trace ``wrapper`` and build a :class:`_Program`. ``argnames`` (a list) ties each named
     arg's axis-0 to a shared symbolic ``num_tokens`` Dim — the **prefill** program (one program,
@@ -165,14 +181,8 @@ def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None, a
     from emmy.compiler.backend.cuda.program import CompiledProgram
     from emmy.compiler.backend.gpu_lock import gpu_lock
     from emmy.compiler.loader.binder import bind_constants
-    from emmy.compiler.trace.torch import trace_module
 
-    dynamic_shapes = None
-    if argnames:
-        from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs
-
-        dynamic_shapes = build_torch_dynamic_shapes(parse_position_specs([f"num_tokens@{n}:0" for n in argnames]))
-    graph = trace_module(wrapper, tuple(example_args), dynamic_shapes=dynamic_shapes)
+    graph = trace_split(wrapper, example_args, argnames)
     compiled = CudaBackend(tune_db="auto").compile(graph)
 
     sources = {}
@@ -500,25 +510,30 @@ class EmmyGenRunner:
     def forward_layer_pre_device(self, layer, hidden):
         """Device twin of :meth:`forward_layer_pre`: ``hidden[T,H]`` CUDA → un-rotated
         ``(q, k, v)`` CUDA tensors. ``T <= decode_bucket`` rides the static decode twin
-        (captured-replay); wider ``T`` (prefill / mixed chunked-prefill steps) rides the
-        SYMBOLIC program device-resident (``run_device_sym``) when it was built with
-        capacity — no per-layer host numpy hop either way."""
+        (captured-replay); ``T == prefill_bucket`` — the FULL chunked-prefill step, the
+        width the twin was built for — rides the static chunk twin's exact grids; every
+        other width (an over-bucket decode batch, a partial tail chunk) rides the SYMBOLIC
+        program device-resident (``run_device_sym``) — no per-layer host numpy hop any way.
+        The twin boundary is EXACT equality, not ``<=``: the twin always computes
+        ``prefill_bucket`` rows (pad → run → slice), so routing a T≈32 over-bucket decode
+        step or a T≈450 tail chunk through it pays the full-bucket grids for a sliver of
+        real rows — up to ~bucket/T× the useful work per layer, in the default-config
+        steady state (mnbt-default bucket 4096, ``--max-concurrency 32`` decode)."""
         t = hidden.shape[0]
         if self._pre_decode is not None and t <= self._decode_bucket:
             return tuple(self._pre_decode[layer].run_device([hidden]))
-        if self._pre_prefill is not None and t <= self._prefill_bucket:
-            # The static chunk twin: T real rows into the prefix, the bucket's exact grids
-            # compute (stale padding rows sliced away by ``run_device``'s ``[:t]``).
+        if self._pre_prefill is not None and t == self._prefill_bucket:
             return tuple(self._pre_prefill[layer].run_device([hidden]))
         return tuple(self._pre[layer].run_device_sym([hidden]))
 
     def forward_layer_post_device(self, layer, attn_out, residual):
         """Device twin of :meth:`forward_layer_post`: ``(attn_out, residual)`` CUDA → ``[T,H]``
-        CUDA. Decode-bucketed / symbolic-routed like :meth:`forward_layer_pre_device`."""
+        CUDA. Decode-bucketed / exact-chunk / symbolic-routed like
+        :meth:`forward_layer_pre_device`."""
         t = attn_out.shape[0]
         if self._post_decode is not None and t <= self._decode_bucket:
             return self._post_decode[layer].run_device([attn_out, residual])[0]
-        if self._post_prefill is not None and t <= self._prefill_bucket:
+        if self._post_prefill is not None and t == self._prefill_bucket:
             return self._post_prefill[layer].run_device([attn_out, residual])[0]
         return self._post[layer].run_device_sym([attn_out, residual])[0]
 

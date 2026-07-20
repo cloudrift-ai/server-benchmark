@@ -527,6 +527,53 @@ def test_bench_greedy_isolated_ok_and_bench_fail():
     assert any("bench_fail" in f for f in gb.flags)
 
 
+def test_lane_discriminates_fast_math_from_std():
+    """``_lane`` reads the precision regime off the realized knobs (never a stored flag):
+    an f16-accumulate mma atom or ``FAST_EXP`` is ``"fm"``, everything else ``"std"``."""
+    from emmy.commands.run import _lane
+
+    assert _lane({"TILE": "a:mma_m16n8k16_f16_f16/w1x2/f2x2/k4"}) == "fm"
+    assert _lane({"FAST_EXP": "1"}) == "fm"
+    assert _lane({"TILE": "n32x8/f2x8"}) == "std"
+    assert _lane({}) == "std"
+
+
+def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
+    """The A/B ``--json`` carries a ``lane`` on the greedy block and on every pinned row so a
+    sweep can filter to the greedy's lane — never comparing a pinned ``[fm]`` latency against a
+    ``std`` greedy (the phantom-regression trap). CUDA-free: the kernel-node walk is stubbed."""
+    import json
+    from collections import namedtuple
+    from types import SimpleNamespace
+
+    from emmy.commands import run as run_mod
+    from emmy.compiler.pipeline.search.data import Sample
+
+    _FakeNode = namedtuple("_FakeNode", "op")
+
+    def _node(knobs):
+        return _FakeNode(SimpleNamespace(kernel_name="k_matmul", smem_bytes=0, knobs=knobs))
+
+    # Greedy deployed a std kernel; the stub stands in for every kernel-node walk.
+    monkeypatch.setattr(run_mod, "_launch_order_cuda_nodes", lambda g: [_node({"TILE": "n32x8/f2x8"})])
+
+    fm = Sample(knobs={"TILE": "a:mma_m16n8k16_f16_f16/w1x2/f2x2/k4"}, latency_us=100.0, name="mlp_gate_up", shape=object())
+    std = Sample(knobs={"TILE": "n32x8/f2x8"}, latency_us=140.0, name="mlp_gate_up", shape=object())
+    golden_benches = [run_mod._GoldenBench(s, object(), None, (), "ok") for s in (fm, std)]
+
+    out = tmp_path / "ab.json"
+    args = SimpleNamespace(code="x", input=None, ir=None, golden="mlp_gate_up", dynamic=None, warmup=2, iters=5, json=str(out))
+    run_mod._write_ab_json(args, {}, object(), None, golden_benches, greedy_fail=None, greedy_iso=None)
+
+    rec = json.loads(out.read_text())
+    assert rec["greedy"]["lane"] == "std"
+    lanes = {p["name"] + p["lane"]: p["lane"] for p in rec["pinned"]}  # both rows share the name
+    assert sorted(lanes.values()) == ["fm", "std"]
+    # The filter a sweep applies: only same-lane rows are comparable to the greedy.
+    same_lane = [p for p in rec["pinned"] if p["lane"] == rec["greedy"]["lane"]]
+    assert len(same_lane) == 1 and same_lane[0]["lane"] == "std"
+
+
 @requires_cuda
 def test_run_golden_bench_json_record(run_cli, tmp_path):
     """``run --bench --golden NAME --json PATH`` writes the machine-readable A/B record:
@@ -543,8 +590,10 @@ def test_run_golden_bench_json_record(run_cli, tmp_path):
     # The pinned-comparable greedy baseline: the same graph re-benched emmy-only.
     assert rec["greedy"]["isolated"]["status"] == "ok" and rec["greedy"]["isolated"]["total_us"] > 0
     assert rec["pinned"] and all(p["kind"] == "golden" for p in rec["pinned"])
+    assert rec["greedy"]["lane"] in ("fm", "std")
     for p in rec["pinned"]:
         assert "flags" in p and p["total_us"] > 0 and p["pinned_knobs"]
+        assert p["lane"] in ("fm", "std")
         assert p["recorded_emmy_us"] > 0 and p["recorded_ref_us"] > 0
     # Eager + emmy backend rows made it into the record.
     assert any("Eager" in k for k in rec["backends"])

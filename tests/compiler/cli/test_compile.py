@@ -213,3 +213,15 @@ def test_compile_golden_unknown_lists_available(run_cli):
     rc, stdout, stderr = run_cli("compile", "--golden", "no_such_shape", "--ir", "tile")
     assert rc == 2, f"expected exit 2, got {rc}"
     assert "unknown golden config" in stdout + stderr
+
+
+def test_compile_code_fp32_stat_free_cone_demotes(run_cli):
+    """An fp32 pointwise cone fused into a matmul A operand (the stat-free computed-A shape)
+    has NO legal contraction row — no fp32 mma atoms — and unlike the MONOID composition no
+    Map-form fork sibling: the recognizer must demote the node back to its PLANAR reduce and
+    compile, not IndexError on the empty enumeration (the branch regression: this snippet
+    compiled at the fork point via pre-nodification demotion)."""
+    snippet = "(torch.nn.functional.silu(torch.randn(64, 256)) * torch.randn(64, 256)) @ torch.randn(256, 128)"
+    rc, stdout, stderr = run_cli("compile", "--code", snippet, "--ir", "cuda")
+    assert rc == 0, f"stderr: {stderr}"
+    assert "__global__" in stdout, f"expected a rendered kernel, got:\n{stdout[:500]}"

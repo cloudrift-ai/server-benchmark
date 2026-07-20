@@ -277,6 +277,20 @@ def _nodify_contraction(node, free: tuple):
     return Map(body=projection, source=red) if len(projection) else red
 
 
+def _demote_planar(node):
+    """The PLANAR-demoted sibling of a computed-A :class:`Contraction` whose contraction form
+    yielded no legal schedule row (fp32 / no atoms / bad geometry — the scheduler's
+    never-a-raising-row guardrail returns ``[]``): flatten the node back through its synthesized
+    fold ``Loop`` and re-annotate it ``PLANAR`` — the same demotion :func:`_nodify_contraction`
+    applies to an unbindable cell, applied post-nodification."""
+    src = node.source if isinstance(node, Map) else node
+    rloop = src.loop
+    demoted = Loop(axis=rloop.axis, body=rloop.body, unroll=rloop.unroll, role=AxisRole.PLANAR, carrier=rloop.carrier)
+    red = Reduction.from_loop(demoted)
+    projection = Body((*src.epilogue, *(node.body if isinstance(node, Map) else ())))
+    return Map(body=projection, source=red) if len(projection) else red
+
+
 def _cuttable_cone(node) -> bool:
     """A single-fold STAT-FREE computed-A :class:`Contraction` — the shape ``020_cut_edge`` can
     split into (materialize the cone) + (plain gmem-A matmul). The MONOID composition binds through
@@ -394,6 +408,14 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
         # rows from the model fallback, so they are selectable by measured evidence alone.
         if pin not in ("fuse", "cut"):
             rows += _as_list(schedule(map_tile, loop.name, {**knob_base, "PLACE@cone": "cut"}, ctx))
+        if not rows:
+            # fp32 / no atoms / bad geometry: the computed-A contraction form has no legal row
+            # (both the fused and cut schedules come back empty), and unlike the MONOID
+            # composition below there is no Map-form fork sibling to stand alone — demote the
+            # node back to its PLANAR reduce so the kernel still compiles (the pre-nodification
+            # fallback: a working serial/coop fold, no cut offer).
+            fallback = TileOp(op=_demote_planar(node), place=Placement(free=free), inputs=dict(loop.inputs))
+            return schedule(fallback, loop.name, knob_base, ctx)
         return rows if len(rows) > 1 else rows[0]
     # (4) The MONOID-producer composition — the fused norm→linear edge (``rmsnorm(x)·nw @ w``, and
     # its N-channel form, the gate/up MLP edge): the tail fold(s) ALSO nodify to

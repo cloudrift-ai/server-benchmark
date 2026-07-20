@@ -15,6 +15,11 @@ It treats the problem as offline learning-to-rank, over the SINGLE featurization
 (``features.knob_features`` — no parallel feature set), covering **every kernel
 regime**: fp32-scalar + fp16/bf16-warp matmul, cooperative reduce, and pointwise.
 
+The fit / rank-eval / artifact-assembly core lives in the library
+(``emmy/compiler/pipeline/search/prior/fit/``) — this script owns only the golden
+**case building** (step 1 below needs the command layer's snippet tracer, which
+``pipeline/`` must not import) and the CLI:
+
   1. For every golden (matmul thread / warp / dyn, reduce, pointwise), reconstruct
      the planner's exact candidate enumeration for that mode and locate the golden
      row. Matmul goldens reuse ``golden_eval._enumerate`` — the SAME gate-narrowed pool
@@ -45,7 +50,6 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import math
 from pathlib import Path
 
 import numpy as np
@@ -60,6 +64,8 @@ from emmy.compiler.pipeline.search.golden import (
     ReduceGoldenConfig,
 )
 from emmy.compiler.pipeline.search.golden_eval import _enumerate, enumerate_graph
+from emmy.compiler.pipeline.search.prior.fit import build_artifact, fit_weights, raw_weights, topk_table
+from emmy.logging_setup import setup_cli_logging
 
 
 def _base(ctx: Context, M: int, N: int, K: int, *, dynamic: bool = False) -> dict:
@@ -164,94 +170,6 @@ def build_cases() -> list[tuple[str, str, int, list[dict[str, float]]]]:
     return cases
 
 
-def _matrix(feats: list[dict[str, float]], names: list[str]) -> np.ndarray:
-    return np.array([[f.get(n, 0.0) for n in names] for f in feats], dtype=float)
-
-
-def rank_of_golden(scores: np.ndarray, gidx: int) -> int:
-    """0-based rank of the golden by descending score. Ties count AGAINST the golden
-    (``>=``): greedy deploy breaks score ties by enumeration order, and option-0 is the
-    per-cell / gmem-direct row — a tie IS a miss at deploy time. (The old ``>`` tie-optimism
-    let a fit with zero ``D_stage_*`` weights report top-1 golden ranks while the deploy pick
-    landed on the per-cell row — the 2026-07-02 sweep's 5-15x regressions.)"""
-    return int((scores >= scores[gidx]).sum()) - 1
-
-
-def topk_table(ranks: list[int], ks=(1, 5, 10, 25, 50, 100)) -> str:
-    n = len(ranks)
-    parts = [f"top{k}={sum(r < k for r in ranks)}/{n}" for k in ks]
-    med = sorted(ranks)[n // 2]
-    return "  ".join(parts) + f"   median={med}  mean_log2={np.mean([math.log2(r + 1) for r in ranks]):.2f}"
-
-
-def eval_weights(mats: list[np.ndarray], gidx: list[int], w: np.ndarray) -> list[int]:
-    return [rank_of_golden(m @ w, gi) for m, gi in zip(mats, gidx, strict=True)]
-
-
-def objective(ranks: list[int], weights: list[float]) -> float:
-    # Weighted mean log2(rank+1): rewards pushing every golden up, dominated by the
-    # worst offenders. Per-case ``weights`` balance the tiers (fp16 warp is only
-    # ~7/32 cases, so it'd be drowned out unweighted). Lower is better.
-    vals = [w * math.log2(r + 1) for r, w in zip(ranks, weights, strict=True)]
-    return float(sum(vals) / sum(weights))
-
-
-def _fit(cases, names, sd_ref, *, seed_w, rng, samples):
-    """Random-search + coordinate-descent one weight vector over ``cases``.
-    Each fit z-scores over its own candidate pool; ``seed_w`` arrives scaled by
-    ``sd_ref`` (``ones`` for a raw-weight seed, the previous fit's ``sd`` to
-    chain fits) and is re-scaled into this pool's z-space. Returns
-    ``(best_w, best_ranks, mu, sd)`` in this pool's z-space."""
-    mats = [_matrix(feats, names) for _, _, _, feats in cases]
-    gidx = [gi for _, _, gi, _ in cases]
-    tier_n = {t: sum(1 for _, ct, _, _ in cases if ct == t) for _, t, _, _ in cases}
-    cw = [1.0 / tier_n[t] for _, t, _, _ in cases]
-
-    # Z-score over this fit's candidate pool so weights are comparable across features.
-    allf = np.concatenate(mats, axis=0)
-    mu, sd = allf.mean(0), allf.std(0)
-    sd[sd == 0] = 1.0
-    matsz = [(m - mu) / sd for m in mats]
-
-    best_w = seed_w * sd / sd_ref  # re-scale the seed into this pool's z-space
-    best_ranks = eval_weights(matsz, gidx, best_w)
-    best_obj = objective(best_ranks, cw)
-    print("  seed: " + topk_table(best_ranks))
-
-    for _ in range(samples):
-        w = rng.standard_normal(len(names))
-        ranks = eval_weights(matsz, gidx, w)
-        ob = objective(ranks, cw)
-        if ob < best_obj:
-            best_obj, best_w, best_ranks = ob, w, ranks
-
-    # Coordinate-descent refine around the best.
-    step = 1.0
-    for _ in range(8):
-        improved = False
-        for j in range(len(names)):
-            for delta in (step, -step):
-                w = best_w.copy()
-                w[j] += delta
-                ranks = eval_weights(matsz, gidx, w)
-                ob = objective(ranks, cw)
-                if ob < best_obj:
-                    best_obj, best_w, best_ranks, improved = ob, w, ranks, True
-        if not improved:
-            step /= 2
-
-    print("  best: " + topk_table(best_ranks))
-    for (name, tier, _, _), r in sorted(zip(cases, best_ranks, strict=True), key=lambda t: -t[1]):
-        print(f"    {name:32s} [{tier:6s}] rank={r:5d}")
-    return best_w, best_ranks, mu, sd
-
-
-def _raw_weights(names, best_w, sd) -> dict[str, float]:
-    # Fold the z-score into the weights so they apply to RAW features directly:
-    # score = ((raw-mu)/sd)·w = raw·(w/sd) - const; the const drops out of ranking.
-    return {name: float(best_w[i] / sd[i]) for i, name in enumerate(names) if abs(best_w[i] / sd[i]) > 1e-4}
-
-
 def _print_weights(var: str, raw_w: dict[str, float]) -> None:
     print(f"\n== {var} ==")
     for name, wv in sorted(raw_w.items(), key=lambda t: -abs(t[1])):
@@ -271,6 +189,7 @@ def main() -> None:
     )
     args = ap.parse_args()
 
+    setup_cli_logging()  # the fit core logs its progress; render it print()-identical
     rng = np.random.default_rng(args.seed)
 
     print("Building golden dataset (each golden under its own card's context) ...")
@@ -294,32 +213,32 @@ def main() -> None:
     seed_raw = np.array([seed_weights.get(n, 0.0) for n in names])
 
     print("\n== static fit (thread / warp / reduce / pointwise tiers) ==")
-    static_w, static_ranks, _, static_sd = _fit(static_cases, names, np.ones(len(names)), seed_w=seed_raw, rng=rng, samples=args.samples)
-    static_raw = _raw_weights(names, static_w, static_sd)
+    static_w, static_ranks, _, static_sd = fit_weights(
+        static_cases, names, np.ones(len(names)), seed_w=seed_raw, rng=rng, samples=args.samples
+    )
+    static_raw = raw_weights(names, static_w, static_sd)
     _print_weights("weights (static)", static_raw)
 
     dyn_raw, dyn_note = incumbent.get("weights_dynamic", static_raw), "carried from incumbent (no dynamic cases)"
     if dyn_cases:
         print("\n== dynamic fit (symbolic-axis masked-tile goldens) ==")
-        dyn_w, dyn_ranks, _, dyn_sd = _fit(dyn_cases, names, static_sd, seed_w=static_w, rng=rng, samples=args.samples)
-        dyn_raw = _raw_weights(names, dyn_w, dyn_sd)
+        dyn_w, dyn_ranks, _, dyn_sd = fit_weights(dyn_cases, names, static_sd, seed_w=static_w, rng=rng, samples=args.samples)
+        dyn_raw = raw_weights(names, dyn_w, dyn_sd)
         dyn_note = f"dynamic {topk_table(dyn_ranks)}"
         _print_weights("weights_dynamic", dyn_raw)
 
-    artifact = {
-        "feat_ver": features.FEATURIZER_VERSION,
-        "kind": "linear",
-        "weights": static_raw,
-        "weights_dynamic": dyn_raw,
-        "params": incumbent["params"],
-        "provenance": {
+    artifact = build_artifact(
+        weights=static_raw,
+        weights_dynamic=dyn_raw,
+        params=incumbent["params"],
+        provenance={
             "fitted": datetime.date.today().isoformat(),
             "script": "scripts/golden_knob_heuristics.py",
             "args": {"samples": args.samples, "seed": args.seed},
             "cases": {"static": len(static_cases), "dynamic": len(dyn_cases)},
             "notes": f"static {topk_table(static_ranks)}; {dyn_note}",
         },
-    }
+    )
     storage.write_json(Path(args.out), artifact, indent=2)
     print(f"\nwrote {args.out}")
 

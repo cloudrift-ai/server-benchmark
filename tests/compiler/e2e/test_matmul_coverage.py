@@ -711,6 +711,10 @@ def test_matmul_mma_coverage(M, N, K, out, trans, mode, monkeypatch):
     operands, f16 AND f32 output, over a STATIC M (tile divisor) and a SYMBOLIC M run at a
     straddling length (the dynamic-grid tier + the masked-tile store)."""
     monkeypatch.setenv("EMMY_TILE", _WARP_PIN)
+    # Pin the REDUCE codec serial: the split-K f32 workspace legalized ``g<w>k`` for f16 output,
+    # and an unpinned greedy pick can split this shape (partials + tail kernel), moving the
+    # ``__floats2half2_rn`` downconvert out of the fused epilogue these source assertions check.
+    monkeypatch.setenv("EMMY_REDUCE", "")
     run_m = M if mode == "static" else M + 2
     rng = np.random.default_rng(0)
     a = (rng.standard_normal((run_m, K)) * 0.1).astype(np.float16)

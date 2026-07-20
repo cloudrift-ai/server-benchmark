@@ -72,10 +72,12 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   use a larger `global_head_dim` than its sliding ones, so each layer's `pre`/`post` compiles at its own width. The caller stitches between
   `pre` and `post` (a reference torch SDPA in the Phase-2 host stitch; vLLM paged `Attention` in Phase 3). **I/O:**
   the plugin runs **device-resident at every width**: the **decode hot path** (`num_tokens ≤ bucket`) rides the
-  captured static twins (`run_device` — captured-replay, torch↔cupy DLPack zero-copy), and **prefill /
-  chunked-prefill steps** ride the static **prefill-chunk twin** (`decode_bucket < num_tokens ≤ prefill_bucket`
-  — default = mnbt, `EMMY_GEN_PREFILL_BUCKET` overrides / `0` disables; exact grids on the hot chunk width, pad →
-  run → slice like the decode twin) or, past the bucket, the SYMBOLIC programs' `run_device_sym`
+  captured static twins (`run_device` — captured-replay, torch↔cupy DLPack zero-copy), a **FULL chunked-prefill
+  step** rides the static **prefill-chunk twin** (`num_tokens == prefill_bucket` EXACTLY — default = mnbt,
+  `EMMY_GEN_PREFILL_BUCKET` overrides / `0` disables; exact grids on the hot chunk width. The boundary is equality,
+  not a range: the twin always computes `prefill_bucket` rows, so an over-bucket decode batch or a partial tail
+  chunk routed through it would pay the full-bucket grids for a sliver of real rows), and every other width rides
+  the SYMBOLIC programs' `run_device_sym`
   (`num_tokens ≤ prefill_capacity`, capacity = vLLM's `max_num_batched_tokens`, passed as `max_tokens` at runner
   build) — grids sized per step via
   `set_sym_values` over capacity-built buffers, launches issued on torch's stream, no per-T graph capture
@@ -135,8 +137,10 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   this for seam coherence). Registered in `__init__.py`. **Whole-step decode CUDA graphs are the `emmy serve
   --generate` DEFAULT**: no `--enforce-eager`; instead a `--compilation-config` with `cudagraph_mode:
   FULL_DECODE_ONLY` (full cudagraphs need no torch.compile — vLLM wraps the model in its `CUDAGraphWrapper`) and
-  `cudagraph_capture_sizes` clamped to the decode bucket (a size above the bucket would capture the symbolic
-  fallback path, whose per-layer host numpy hops abort a stream capture). Under the outer capture,
+  `cudagraph_capture_sizes` clamped to the decode bucket (the static decode twin is the one path validated under
+  stream capture — `test_gen_capture_gpu`; a size above the bucket would capture the device-resident symbolic
+  programs, which are not capture-validated yet, so widening past the bucket is a measured follow-up). Under the
+  outer capture,
   `_Program.run_device` detects `torch.cuda.is_current_stream_capturing()` and issues the raw launch sequence
   (`run_once`) instead of its own graph machinery — nested stream capture and graph launch are both illegal in a
   capturing stream — so the whole decode step (embed + 48× pre/RoPE/paged-attention/post + final norm) records

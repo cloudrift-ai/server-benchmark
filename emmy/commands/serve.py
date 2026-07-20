@@ -132,11 +132,13 @@ def _gen_graph_args(vllm_args: list[str]) -> list[str]:
     """The eager/capture flags for emmy generative serving. DEFAULT is whole-step decode
     capture: a compilation-config asking for FULL_DECODE_ONLY graphs (full cudagraphs need no
     torch.compile — vLLM wraps the model in its ``CUDAGraphWrapper``) with capture sizes
-    clamped to the decode bucket — sizes above the bucket would capture the model's symbolic
-    fallback path, whose per-layer host numpy hops abort a stream capture. Opt out with
-    vLLM's own ``--enforce-eager`` (forwards as-is); a caller-supplied ``--compilation-config``
-    also wins over ours. With the decode bucket off (``EMMY_GEN_DECODE_BUCKET=0``) nothing is
-    capturable, so eager is forced."""
+    clamped to the decode bucket — the static decode twin is the one path VALIDATED under
+    stream capture (``test_gen_capture_gpu``); a size above the bucket would capture the
+    device-resident symbolic programs (``run_device_sym``), which are not capture-validated
+    yet, so widening the sizes past the bucket is a measured follow-up, not a flip of this
+    list. Opt out with vLLM's own ``--enforce-eager`` (forwards as-is); a caller-supplied
+    ``--compilation-config`` also wins over ours. With the decode bucket off
+    (``EMMY_GEN_DECODE_BUCKET=0``) nothing is capturable, so eager is forced."""
     from emmy import config as emmy_config  # noqa: PLC0415
 
     if _has_flag(vllm_args, "--enforce-eager") or _has_flag(vllm_args, "--compilation-config"):

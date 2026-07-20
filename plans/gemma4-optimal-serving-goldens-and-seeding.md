@@ -77,7 +77,21 @@ cones entirely -- q/k/v became plain f16 matmuls matching goldens recorded long 
 5. `PLACE@cone` stamped on the TileOp instead of the fork ROWS, so no golden could ever select the cut.
 6. `make test` (2535) caught NONE of these. No test asserts an edge stays on the mma tier.
 
-### Remaining, in order
+### Workflow-note follow-ups landed after the RESULT block (branch tail)
+
+The three biggest serve-boot / A/B-hygiene items from `plans/golden-sweep-gemma4-rtx5090-findings.md`'s
+workflow notes are now closed on this branch (each with tests, `make lint` clean):
+
+1. **Serve-boot online-prior / DB-index re-parse** -- the single biggest boot lever, ~37 s over a 96-program
+   generative boot. Memoized per process on `(path, mtime)` (`3400b50c`, `db1f369b`). No selection change.
+2. **A/B lane-crossing false win** -- `run --bench --golden` now labels every pinned row AND the greedy block with
+   its precision `lane` (fm/std) in `--json` and the human table; the tune-golden skill filters `pinned` to the
+   greedy's lane before `min()` (`a5bb3d74`). Prevents the phantom `[fm]`-vs-`std` regression that nearly shipped.
+3. **`serve` child PATH** -- the venv bin dir is prepended to the child's `PATH` so the generative inductor compile
+   finds `ninja` when emmy is invoked by absolute path (`77a827e1`). Stock-MM `--language-model-only` documented as a
+   user-supplied passthrough (auto-adding a flag that errors on text models is the wrong default).
+
+### Remaining, in order (research-class — none is a golden or a boot-mechanics item)
 
 1. **Per-step runner overhead** (~6.3 ms of a 20.80 ms TPOT) -- the only remaining decode lever, and it is a serving
    runtime question, not a compiler one.

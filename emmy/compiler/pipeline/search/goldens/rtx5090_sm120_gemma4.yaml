@@ -1265,6 +1265,37 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
     emmy_us: 20.8
     cublas_us: 12.5
+  # The same two prologues at PREFILL chunk M=256 -- the `pre256` twin, which is 95.8% these three
+  # cones (q, k, v). Seeded 2026-07-19 after measuring that at this M the fused form WINS and the cut
+  # does not: pinned PLACE@cone=cut materializes the cone three times (once per projection) and the
+  # twin goes 474.0 -> 476.4, no better. An earlier note in plans/ claimed the cut was worth 2.19x
+  # here; that number came from a STANDALONE SNIPPET (`F.rms_norm(x) @ w`), which fuses differently
+  # from the in-model op -- the twin is the only form that settles it.
+  # Cold, these forks matched NO golden and greedy picked a 255-register w1x1/f4x8 at 17% occupancy
+  # for q (136.9 us, spilling) and w2x2/f2x4 for k/v (137.6 / 179.3). On the seeded config the twin
+  # runs 292.2 us (1.62x): q 121.0 (d1/sync), k and v 73.5 each (72.0 partial + 1.5 finalize, g2k).
+  # Manual pinned --ab over w4x2/w2x2/w4x4/w8x1/w1x8 x f2x4/f2x2/f4x8 x k2/k4 plus the f16acc atom,
+  # 3x. Runners-up, twin-total: w4x2/f2x4/k2 308.6, f16acc w4x2/f2x4/k2 318.9, w2x2/f2x4/k4 330.6,
+  # w2x2/f2x4/k2 362.7, w1x8/f2x2/k2 403.5, w8x1/f2x4/k2 408.3, w4x4/f2x4/k2 417.4, w4x2/f2x2/k2
+  # 475.9, w4x2/f4x8/k2 846.6.
+  - kernel: norm_linear
+    name: gemma4_12b.norm_q_proj.m256
+    M: 256
+    H: 3840
+    N: 4096
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 121.0
+    cublas_us: 131.0
+  - kernel: norm_linear
+    name: gemma4_12b.norm_kv_proj.m256
+    M: 256
+    H: 3840
+    N: 2048
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k4', REDUCE: 'g2k'}
+    emmy_us: 73.5
+    cublas_us: 65.5
   # The GLOBAL-layer (full_attention, hd512) twins of the two entries above — gemma-4 12B alternates 8 global
   # layers among the local ones, and their q/kv projections are a different WIDTH (q N=8192, kv N=512) at the same
   # M=32/H=3840. Seeded 2026-07-19 by manual pinned --ab (3x; q spread <0.6%, kv 0%). These were the LAST fused

@@ -1094,6 +1094,12 @@ def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
     (``k`` vs ``<k>_ks``) are what avoid a double-reduce ``for k:[for k:]`` — every original ``k`` is
     visited once (``kslice`` folded into a partial, ``ksplit`` summed across partials)."""
     big_k = k_axis.extent.as_static()
+    # Only a dividing width factorizes losslessly — the enumeration path filters ``k % cta``
+    # upstream, so a non-divisor can only arrive via an EMMY_REDUCE pin, and truncating here
+    # would silently drop the ``K − w·⌊K/w⌋`` remainder columns of the contraction (the scalar
+    # tier has no step check to catch it). Refuse loudly, as a pin should.
+    if big_k % w:
+        raise ValueError(f"split-K width {w} does not divide K={big_k}; pick a dividing split width.")
     b = big_k // w
     ksplit = Axis(name=f"{k_axis.name}_ks", extent=Dim(w))
     kslice = replace(k_axis, extent=Dim(b))

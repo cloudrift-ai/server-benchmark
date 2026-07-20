@@ -63,8 +63,14 @@ pack/
   plan/<program>.json    # serialized plan per program (embed, L00.pre.sym, L00.pre.decode, …)
 ```
 
-Cubins stay in the shared `EMMY_CUBIN_CACHE` (content-addressed); the docker bake already ships that cache.
-Weights stay external (the HF checkpoint), bound by `source_path` at load.
+Cubins stay in the shared `EMMY_CUBIN_CACHE` (content-addressed); weights stay external (the HF checkpoint),
+bound by `source_path` at load.
+
+**Docker image = model + cubins + pack.** The `docker/vllm-emmy-gemma4` build already bakes the HF model
+snapshot (`warm/hf`) and the cubin cache (`warm/cubin`) into the image; the pack joins them as a third baked
+artifact (`warm/pack`), so a container cold-start ships everything: weights (no download), cubins (no nvcc), and
+the pack (no trace/pipeline/resolution/codegen). `warm.sh` emits the pack during its serving run; the Dockerfile
+`COPY`s it next to the cubin cache; `verify.sh`'s zero-recompile check tightens to zero-frontend.
 
 ### Plan JSON schema (per program)
 

@@ -538,6 +538,22 @@ def test_lane_discriminates_fast_math_from_std():
     assert _lane({}) == "std"
 
 
+def test_graph_lane_is_any_kernel_not_a_dict_union(monkeypatch):
+    """``_graph_lane`` judges each kernel's knobs separately: an fm kernel followed by a std
+    kernel realizing the same ``TILE`` key must report ``fm`` in either launch order — a dict
+    union keeps only the last kernel's value, making the reported lane launch-order-dependent
+    (the phantom-regression trap the lane exists to prevent)."""
+    import emmy.commands.run as run_mod
+
+    fm = {"TILE": "a:mma_m16n8k16_f16_f16/w1x2/f2x2/k4"}
+    std = {"TILE": "n32x8/f2x8"}
+    for order in ([fm, std], [std, fm]):
+        monkeypatch.setattr(run_mod, "_cuda_knob_dicts", lambda graph, order=order: order)
+        assert run_mod._graph_lane(object()) == "fm", f"order {order} must still report fm"
+    monkeypatch.setattr(run_mod, "_cuda_knob_dicts", lambda graph: [std, dict(std)])
+    assert run_mod._graph_lane(object()) == "std"
+
+
 def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
     """The A/B ``--json`` carries a ``lane`` on the greedy block and on every pinned row so a
     sweep can filter to the greedy's lane — never comparing a pinned ``[fm]`` latency against a

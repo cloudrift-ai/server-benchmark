@@ -524,12 +524,12 @@ def _lane(knobs: dict) -> str:
 
 
 def _graph_lane(graph) -> str:
-    """The lane the greedy graph deployed in — the union of every realized CUDA kernel's knobs run
-    through :func:`_lane` (any kernel on an f16acc atom ⇒ the run was under the fast-math gate)."""
-    merged: dict = {}
-    for d in _cuda_knob_dicts(graph):
-        merged.update(d)
-    return _lane(merged)
+    """The lane the greedy graph deployed in — ``"fm"`` when ANY realized CUDA kernel's knobs are
+    fast-math (any kernel on an f16acc atom ⇒ the run was under the fast-math gate). Judged
+    per-kernel, never on a dict union: two kernels both realizing ``TILE`` collide on the key,
+    the union keeps only the last kernel's value, and the reported lane becomes
+    launch-order-dependent — the phantom-regression trap this feature exists to prevent."""
+    return "fm" if any(_lane(d) == "fm" for d in _cuda_knob_dicts(graph)) else "std"
 
 
 def _intensity_floor_flag(sample, total_us: float) -> str | None:

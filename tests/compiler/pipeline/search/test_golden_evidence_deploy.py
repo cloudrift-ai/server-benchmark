@@ -412,6 +412,10 @@ _CONE_SIG = {
     "S_dtype_f32": 1.0,
     "H_opt": 3.0,
 }
+# The fork ROW additionally carries the cone's unmistakable OFFER: a ``d*/sync`` STAGE candidate —
+# the mandatory compute-fill only a computed-A contraction enumerates (``stage_moves`` spells only
+# gmem-direct / cp / tma). ``_fork_shape_key`` keys the rebuild on this, not on the dtype stamps.
+_CONE_ROW = {**_CONE_SIG, "STAGE@a2": "d1/sync"}
 
 
 def test_computed_a_cone_fork_rebuilds_to_the_fused_key():
@@ -425,12 +429,18 @@ def test_computed_a_cone_fork_rebuilds_to_the_fused_key():
     from emmy.compiler.pipeline.search.golden import NormLinearGoldenConfig
 
     fused_key = NormLinearGoldenConfig(name="nl", M=32, H=3840, N=4096, knobs={}).shape_key()
-    key = _fork_shape_key([_CONE_SIG])
+    key = _fork_shape_key([_CONE_ROW])
     assert key == fused_key
     assert key.kind == "fused" and key.is_warp and key.free_max == 4096
-    # A plain fp16 matmul (no f32 statistic) is untouched — the cone case must not over-fire.
-    plain = _fork_shape_key([{k: v for k, v in _CONE_SIG.items() if k != "S_dtype_f32"}])
-    assert plain.kind == "" and plain.is_warp and plain.free_max == 4096
+    # A MIXED-DTYPE PLAIN MATMUL — the same stamp combination (f16 operands + an f32 bias/residual
+    # load over an add-reduce) but no ``d*/sync`` STAGE among its offers — is untouched: the offer
+    # signal cannot over-fire on dtype coincidences, so the kernel keeps joining its ``kind=""``
+    # goldens (the earlier dtype sniff silently re-keyed it out of them).
+    plain = _fork_shape_key([{**_CONE_SIG, "STAGE@a2": "d2/cp/ring"}])
+    assert plain.kind == "" and plain.free_max == 4096
+    # And ``cp.async``'s substring never false-positives the segment match.
+    plain_cp = _fork_shape_key([{**_CONE_SIG, "STAGE@a2": "d2/cp.async/ring"}])
+    assert plain_cp.kind == ""
 
 
 def test_fused_key_separates_aspect_equal_free_prod_cones():
@@ -447,7 +457,7 @@ def test_fused_key_separates_aspect_equal_free_prod_cones():
     assert local_q != global_kv and (local_q.free_max, global_kv.free_max) == (4096, 512)
 
     # The fork side must agree with the golden side, or the join breaks instead of separating.
-    assert _fork_shape_key([{**_CONE_SIG, "S_ext_free_prod": 131072.0, "S_ext_free_max": 512.0}]) == global_kv
+    assert _fork_shape_key([{**_CONE_ROW, "S_ext_free_prod": 131072.0, "S_ext_free_max": 512.0}]) == global_kv
 
 
 def test_dynamic_fused_key_normalizes_the_aspect_away():
@@ -457,11 +467,11 @@ def test_dynamic_fused_key_normalizes_the_aspect_away():
 
     dyn = NormLinearGoldenConfig(name="q", M=512, H=3840, N=4096, knobs={}, dynamic=True).shape_key()  # M = DEFAULT_SEQ_HINT
     assert dyn.is_dyn and dyn.free_max == 0
-    # bf16 operands trigger the same rebuild (a computed-A contraction is dtype-blind at the key).
-    bf16 = _fork_shape_key([{**{k: v for k, v in _CONE_SIG.items() if k != "S_dtype_f16"}, "S_dtype_bf16": 1.0}])
+    # bf16 operands rebuild identically — the offer-keyed rebuild is dtype-blind.
+    bf16 = _fork_shape_key([{**{k: v for k, v in _CONE_ROW.items() if k != "S_dtype_f16"}, "S_dtype_bf16": 1.0}])
     assert bf16.kind == "fused" and bf16.is_warp
     # The dynamic cone keeps is_dyn and its contraction reduce_max (unlike the flash reduce, which zeroes).
-    dyn = _fork_shape_key([{**_CONE_SIG, "S_ext_free_prod": 4096.0, "S_ext_n_symbolic_axis": 1.0}])
+    dyn = _fork_shape_key([{**_CONE_ROW, "S_ext_free_prod": 4096.0, "S_ext_n_symbolic_axis": 1.0}])
     assert dyn.kind == "fused" and dyn.is_dyn and dyn.reduce_max == 3840
 
 

@@ -225,6 +225,13 @@ class MatmulGoldenConfig(GoldenConfig):
     # canonical-B tuning records staged configs that never realize there (see
     # ``matmul_snippet``). Same ShapeKey either way: at the fork, an unrealizable entry
     # simply never matches, so layout twins coexist under one shape.
+    # CAVEAT (asymmetric, ordering-protected): the decline is one-way. A ``trans_b`` entry's
+    # gmem-direct config DOES realize on a canonical fork — the shared bucket sorts by µs and
+    # today every canonical twin is present and faster, so the .lin entry never decides one.
+    # A .lin retune that beats a stale canonical twin (or a removed twin) would deploy its
+    # cross-layout config with its foreign µs; the real fix is a layout signal in the stamped
+    # ``S_*`` features + this key, which does not exist yet. Until then, keep the canonical
+    # twin recorded and current whenever its .lin sibling is.
     trans_b: bool = False
 
     def __post_init__(self):
@@ -358,6 +365,30 @@ class RmsNormGoldenConfig(GoldenConfig):
         return ShapeKey(free_prod=free, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic, kind="rms_norm")
 
 
+def _require_cone_anchor(cfg) -> None:
+    """Schema guard for the fused computed-A kinds (``NormLinearGoldenConfig`` /
+    ``MlpGeGluGoldenConfig``): a RECORDED entry (non-empty knobs) must anchor itself to the cone
+    fork — a ``d*/sync`` STAGE (the compute-fill only a computed-A contraction offers) or the
+    explicit ``PLACE@cone: cut`` placement (guarded by ``_golden_matches_row``'s PLACE rule).
+    The deploy join's over-fire safety rests on "a fused golden's config can't realize on a
+    plain gmem-A matmul"; an entry recorded with a gmem-direct STAGE plus plain warp tiles WOULD
+    realize there, deploying a cross-family config with its foreign µs — enforce the data
+    convention at load, like the flash pin-form guard. Key-only instances (empty knobs — key
+    computations and fixtures) are exempt."""
+    if not cfg.knobs:
+        return
+    knobs = {str(k): str(v) for k, v in cfg.knobs.items()}
+    if knobs.get("PLACE@cone") == "cut":
+        return
+    if any(k.split("@", 1)[0] == "STAGE" and "sync" in v.split("/") for k, v in knobs.items()):
+        return
+    raise ValueError(
+        f"golden {cfg.name!r}: a fused computed-A entry must record a d*/sync STAGE or PLACE@cone: cut — "
+        f"its config would otherwise realize on a plain gmem-A matmul fork of coincident extents "
+        f"(cross-family deploy); got knobs {cfg.knobs!r}"
+    )
+
+
 @dataclass(frozen=True, kw_only=True)
 class NormLinearGoldenConfig(GoldenConfig):
     """A golden config for the fused RMSNorm→linear **computed-A** megakernel:
@@ -387,6 +418,7 @@ class NormLinearGoldenConfig(GoldenConfig):
 
     def __post_init__(self):
         self._require_dynamic_hint(self.M)
+        _require_cone_anchor(self)
 
     def dynamic_specs(self) -> list[str]:
         return ["seq_len@x:0"] if self.dynamic else []
@@ -449,6 +481,7 @@ class MlpGeGluGoldenConfig(GoldenConfig):
 
     def __post_init__(self):
         self._require_dynamic_hint(self.M)
+        _require_cone_anchor(self)
 
     def dynamic_specs(self) -> list[str]:
         return ["seq_len@x:0"] if self.dynamic else []

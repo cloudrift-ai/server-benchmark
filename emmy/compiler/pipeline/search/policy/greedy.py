@@ -534,18 +534,19 @@ def _fork_shape_key(rows: list[dict]):
     COMPUTED-A CONE (norm→linear / gate⊗up): the fork op is the fused megakernel evaluated on its
     PRE-SPLIT geometry — the RMSNorm statistic reduce has not yet lifted to a second axis
     (``S_ext_n_reduce_axis == 1``) and the rsqrt lives in the nested A-cone sub-body, so the
-    histogram can't fire ``kind="fused"`` (which needs ``>= 2`` and a top-level ``S_pw_rsqrt``). It
-    is instead recognizable from the mixed-dtype signature the cone carries: the f16/bf16 operands
-    (``S_dtype_f16`` / ``S_dtype_bf16``) beside the f32 statistic constant (``S_dtype_f32``) over an
-    add-reduce contraction (``S_reduce_add``). That signature makes ``from_s_features`` misread it as
-    a plain scalar matmul (``is_warp=False`` — the f32 constant flips the dtype-multiset signal — and
-    ``free_max`` non-zero), so its three fields disagree with the fused golden's key. Rebuild to the
-    fused convention: ``is_warp=True`` (a computed-A contraction is a warp mma) and ``kind="fused"``
-    (which normalizes ``free_max`` to 0 in ``__post_init__``, matching ``NormLinearGoldenConfig`` /
-    ``MlpGeGluGoldenConfig``). ``reduce_max`` stays the contraction extent (the fused goldens key on
-    it even when dynamic — unlike the flash reduce). Over-firing on a hypothetical plain matmul + f32
-    bias is bounded: the fused golden's ``d1/d2 sync`` config can't realize on a gmem-A matmul, so it
-    DRIFTS and falls through — never a wrong deploy."""
+    histogram can't fire ``kind="fused"`` (which needs ``>= 2`` and a top-level ``S_pw_rsqrt``).
+    Like flash, it is unmistakable from its OFFER: only a computed-A contraction enumerates the
+    mandatory ``sync`` compute-fill (``d*/sync`` STAGE rows — ``space.stage_moves`` spells only
+    gmem-direct / ``cp`` / ``tma``, and the ``sync`` transport is born in the computed-A resolvers
+    alone), so a fork whose rows carry a sync-STAGE candidate IS the cone form. (The earlier
+    mixed-dtype sniff — f16/bf16 operands + an f32 statistic constant over an add-reduce — fired on
+    ANY plain-nest kernel with that stamp combination, e.g. a genuine mixed-dtype plain matmul,
+    silently re-keying it out of its ``kind=""`` goldens; the offer signal cannot, and it also
+    covers the all-f16 stat-free cone the dtype sniff missed.) Rebuild to the fused convention:
+    ``is_warp=True`` (a computed-A contraction is a warp mma) and ``kind="fused"``; ``free_max``
+    carries the stamped aspect (both key builders keep it for the fused kind — see the aspect note
+    below); ``reduce_max`` stays the contraction extent (the fused goldens key on it even when
+    dynamic — unlike the flash reduce)."""
     from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
     key = ShapeKey.from_s_features(rows[0])
@@ -560,16 +561,15 @@ def _fork_shape_key(rows: list[dict]):
         )
     elif (
         key.kind == ""
-        and rows[0].get("S_reduce_add", 0)
-        and rows[0].get("S_dtype_f32", 0)
-        and (rows[0].get("S_dtype_f16", 0) or rows[0].get("S_dtype_bf16", 0))
-        # A computed-A cone CONTRACTS: its output is 2-D ``(M, N)``. The mixed-dtype-over-an-
-        # add-reduce signature above is necessary but not sufficient — a standalone RMSNorm
-        # STATISTIC kernel carries exactly the same signature (f16 input, f32 accumulator, add
-        # reduce, rsqrt) while producing ONE value per row. Without this the cut's own
-        # ``__stat`` producer was rebuilt to ``kind="fused"``, which both locked it out of the
-        # plain reduce goldens and left it able to shadow a real cone of equal extents.
+        # A computed-A cone CONTRACTS: its output is 2-D ``(M, N)``. A standalone RMSNorm
+        # STATISTIC kernel produces ONE value per row — without this the cut's own ``__stat``
+        # producer was rebuilt to ``kind="fused"``, which both locked it out of the plain
+        # reduce goldens and left it able to shadow a real cone of equal extents.
         and rows[0].get("S_ext_n_free_axis", 0) >= 2
+        # The OFFER signal (exact, like flash's TILE@dd+TILE@pj): a ``d*/sync`` STAGE row
+        # exists only on a computed-A contraction fork. Segment-match so ``cp.async``'s
+        # substring can never false-positive.
+        and any("sync" in str(v).split("/") for row in rows for k, v in row.items() if k.startswith("STAGE"))
     ):
         # ``free_max`` carries through: the pre-split key was built ``kind=""``, which
         # preserves the stamped aspect, and the fused kind keeps it (a computed-A cone is a

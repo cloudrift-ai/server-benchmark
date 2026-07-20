@@ -1192,6 +1192,34 @@ def test_warp_flash_banded_tile_skip_structure(monkeypatch):
 
 
 @requires_cuda
+@pytest.mark.parametrize("W", [256, 1024])
+def test_warp_flash_vacuous_band_still_fuses(monkeypatch, W):
+    """A stamped ``sliding_window`` ≥ the static seq is VACUOUS (every ``m − W < 0``): the band
+    term must be dropped at decomposition, not emitted — an emitted vacuous Select's predicate
+    constant-folds, the +0 mask term hoists out of the reduce loops, and the flash recognizer's
+    mask-chain walk can't resolve it, silently degrading the fuse to cut (the gemma-4 layer-0
+    ``seq 512 < window 1024`` trace deployed a sequential grid-1 softmax·P@V that ran for
+    minutes). Expect: ONE fused flash kernel, causal stream end only (no banded start), plain
+    causal numerics."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    torch.manual_seed(W)
+    S = 256
+    q, k, v = (torch.randn(1, 4, S, 64, dtype=torch.float16) for _ in range(3))
+    backend, compiled, graph, kernels = _stamp_window(_Causal(), (q, k, v), W)
+    assert len(kernels) == 1, f"vacuous-band flash should stay one fused kernel, got {len(kernels)}"
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "emmy_c_to_a" in src, "must be the fused warp-chain"
+    assert "kv0_end" in src, "the causal stream end must survive"
+    assert f"- {W - 1}" not in src, "a vacuous band must not stamp a banded stream start"
+
+    data = {n: t for n, t in zip(graph.inputs, (q.numpy(), k.numpy(), v.numpy()), strict=True)}
+    run_result, eager = backend.run(compiled, input_data=data, pre_run=_banded_ref(q, k, v, W))
+    got = list(run_result.outputs.values())[0].flatten().astype(np.float32)
+    max_diff = float(np.max(np.abs(got - eager)))
+    assert max_diff < 5e-3, f"vacuous-band flash (W={W}) max_diff={max_diff:.2e}"
+
+
+@requires_cuda
 @pytest.mark.parametrize("seq", [40, 300, 512])
 def test_warp_flash_banded_symbolic_matches_torch(monkeypatch, seq):
     """SYMBOLIC banded flash: the banded start is grid-derived (CTA row × W), independent of the

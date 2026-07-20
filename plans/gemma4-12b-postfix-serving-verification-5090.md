@@ -38,16 +38,23 @@ both runs.
   not a throughput lever, and the numbers confirm nothing regressed while the routing fix removed the worst
   mid-width over-compute.
 
-## Blocker found: M=4096 prefill-chunk twin dies with cudaErrorIllegalAddress (pre-existing)
+## Blocker RESOLVED: M=4096 prefill-chunk twin cudaErrorIllegalAddress (int32 flat-id overflow)
 
-With the prefill twin ON at its default width (mnbt = 4096), the server dies in vLLM's profiling pass — the
-twin's first captured-graph launch hits an illegal memory access (both pre and post twins, layer 0). Reproduced
-standalone with a minimal runner driver at current main content AND at the pre-session branch tip `a18a8b5c`,
-so it predates the review-fix batch; the branch's own serving benches all ran mnbt 512 and never exercised this
-width on this box. Notable: the release-image validation passed at this exact config inside the docker
-toolchain, so the fault may be toolchain/env-sensitive (bare venv: torch 2.13.0+cu130, CUDA 13.0). Workaround:
-`EMMY_GEN_PREFILL_BUCKET=0`. Needs a dedicated debug session: dump the M=4096 twin program (`EMMY_DUMP_DIR`),
-bound-check its kernels, compute-sanitizer the first replay.
+With the prefill twin ON at its default width (mnbt = 4096), the server died in vLLM's profiling pass — the
+twin's first captured-graph launch hit an illegal memory access. Root-caused and fixed in the follow-up debug
+session (2026-07-20, this branch): the post twin's down-proj deploys as a per-cell coop-reduce kernel whose
+iteration space is M·N·coop = 4096·3840·256 ≈ 4.03e9 threads, and the emitted
+`int _gid = blockIdx.x * blockDim.x + threadIdx.x` wraps negative past 2³¹ (blockIdx.x ≥ 2²³) — every decoded
+index goes wild. Fix: `Tile.render` widens `_gid` to 64-bit exactly when the static iteration space exceeds
+INT32_MAX (below it, codegen is byte-identical — no cubin re-keys); render regression test pins both forms.
+Onset is analytic — any static grid with M·N·coop > 2³¹, here M > 2184 — which is why mnbt 512 never hit it.
+
+The docker-vs-bare-venv discrepancy was deploy-pick state, not toolchain: the fault needs the per-cell demote
+pick at M=4096 (evidence-dependent — the image's baked warm caches yield a tiled pick, the bare venv's evidence
+resolved to the demote) AND the int32 decode (deterministic given that pick). The codegen fix removes the
+latter for any pick, so no release-gate change is needed. The compute-sanitizer route was a dead end — memcheck
+reports only API-level error 700 on graph launches here, no kernel attribution; the per-launch eager replay
+(`run_once` with a sync per kernel) is what named the kernel.
 
 ## Workflow notes
 

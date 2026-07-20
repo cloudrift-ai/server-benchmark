@@ -46,6 +46,7 @@ O3_TOL = "EMMY_O3_TOL"
 OFFLINE_TILT = "EMMY_OFFLINE_TILT"
 BENCH_BACKENDS = "EMMY_BENCH_BACKENDS"
 CUBIN_CACHE = "EMMY_CUBIN_CACHE"
+PACK_DIR = "EMMY_PACK_DIR"
 NO_NVCC = "EMMY_NO_NVCC"
 GPU_LOCK = "EMMY_GPU_LOCK"
 NCU_CHILD = "EMMY_NCU_CHILD"
@@ -356,6 +357,14 @@ def cubin_cache_dir() -> Path:
     """Content-addressed cubin cache dir: ``EMMY_CUBIN_CACHE`` → ``~/.cache/emmy/cubin``."""
     override = os.environ.get(CUBIN_CACHE)
     return Path(override) if override else _CACHE_ROOT / "cubin"
+
+
+def pack_dir() -> Path | None:
+    """``EMMY_PACK_DIR`` — root directory for execution-plan packs (``backend/pack.py``).
+    When set, the serving runner loads a matching pack (skipping trace / pipeline / fork
+    resolution / codegen) and writes one after a full compile. ``None`` (unset) disables."""
+    override = os.environ.get(PACK_DIR)
+    return Path(override) if override else None
 
 
 def nvcc_disabled() -> bool:

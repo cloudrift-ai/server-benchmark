@@ -1135,6 +1135,45 @@ def test_accuracy_check_fails_scrambled_output_passes_outliers():
     assert not verdicts((base + rng.standard_normal(base.shape) * 0.001).astype(np.float16))
 
 
+def test_accuracy_check_gaussian_fp16_budget_not_free():
+    """A GAUSSIAN fp16 output earns no outlier budget (``peak ≈ 5·RMS`` — the heavy-tail
+    signature ``peak > 8·RMS`` doesn't fire), and the escape hatch consults the budget:
+
+    - a mass corruption whose amplitude keeps the mean near zero (a tail-guard window
+      clobbering thousands of cells at ~1×peak on a 2^20 output: mean ≈ 0.3% of peak,
+      under ``escape_tol``) must FAIL — before the escape hatch was budgeted, a near-zero
+      mean vouched for it;
+    - a handful of over-peak cells riding ELEVATED broad noise (mean between ``escape_tol``
+      and ``mean_tol``) must FAIL — on a gaussian output cells past ``tol`` = peak are
+      corruption, and without the near-zero mean the escape hatch won't vouch;
+    - the same handful on an otherwise-clean output still PASSES (the legit split-K
+      reorder class — the accepted blind spot the escape hatch exists for)."""
+    import numpy as np
+    import torch
+
+    from emmy.commands.run import _check_accuracy
+
+    rng = np.random.default_rng(3)
+    n = 1 << 20
+    base = rng.standard_normal(n) * 20
+    eager = torch.from_numpy(base.astype(np.float32))
+    peak = float(np.abs(base).max())
+
+    def fails(arr):
+        return _check_accuracy({"o": arr.astype(np.float16)}, eager) is not None
+
+    window = base.copy()
+    window[10_000:13_000] += 1.1 * peak
+    assert fails(window), "thousands of over-tol cells must fail even with a near-zero mean"
+    # 5.5% relative noise → mean_diff ≈ 0.8% of peak: over escape_tol (0.5%), under mean_tol (3%).
+    dirty = base * (1 + rng.standard_normal(n) * 0.055)
+    dirty[:5] = base[:5] + 2.5 * peak
+    assert fails(dirty), "over-peak cells on a gaussian output must not ride the max-path budget"
+    clean = base.copy()
+    clean[:5] = base[:5] + 2.5 * peak
+    assert not fails(clean), "a handful of reorder-class outliers with a near-zero mean still passes"
+
+
 def test_accuracy_check_heavy_tailed_fp16_outputs():
     """The HEAVY-TAILED fp16 regime (a gemma-4 layer output: peak ≈ 24·RMS from outlier
     channels + layer_scalar): the current legitimate fp16 path measures per-cell diffs up

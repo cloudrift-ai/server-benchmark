@@ -2066,8 +2066,9 @@ def _check_accuracy(outputs, eager_out) -> str | None:
             #
             #   PASS iff (max_ok AND mean_diff ≤ mean_tol) OR escape_ok
             #   max_ok    = max_diff ≤ tol                                  (fp32)
-            #             = max_diff ≤ 4·tol AND count(diff > tol) ≤ budget (fp16)
-            #   escape_ok = mean_diff ≤ escape_tol [fp16: AND max_diff ≤ 4·tol]
+            #             = max_diff ≤ 4·tol AND count(diff > tol) ≤ budget (fp16; budget
+            #               EARNED by a heavy-tailed output — 0 on a gaussian one)
+            #   escape_ok = mean_diff ≤ escape_tol [fp16: AND max_diff ≤ 4·tol AND count ≤ budget]
             #
             # - ``tol`` (the MAX clause) is the loose per-cell OUTLIER ceiling: fp16
             #   atomic-reduce accumulation can drift a cell up to ``peak`` in pathological
@@ -2107,7 +2108,16 @@ def _check_accuracy(outputs, eager_out) -> str | None:
             # the real bug classes: a garbage/saturated cell (uninitialized read, Inf
             # math) blows the HARD ceiling regardless of count; a corrupt tile / row /
             # tail-guard window (the historical incidents: thousands of cells) blows the
-            # BUDGET; a permutation blows the mean gate. NOTE the mean gate's scramble
+            # BUDGET on either pass path (the escape hatch consults it too — a near-zero
+            # mean must not vouch for a low-amplitude mass corruption); a permutation
+            # blows the mean gate. The budget itself is EARNED by the output's tail shape
+            # (``peak > 8·RMS`` — gemma layers sit at ~24×, a gaussian at ~5×): only there
+            # do in-distribution cells legitimately land past ``tol``. A gaussian output
+            # keeps the strict pre-budget max clause, and its handful of split-K reorder
+            # outliers pass only through the escape hatch (near-zero mean AND ≤ budget).
+            # Residual blind spot, accepted: ≤ budget cells at ≤ 4·tol with a near-zero
+            # mean is statistically indistinguishable from the legit reorder class.
+            # NOTE the mean gate's scramble
             # margin THINS on heavy-tailed outputs (a permuted gemma layer output scores
             # ≈ 1.04× mean_tol — 4% clear, vs ~5× on gaussian matmuls): that margin is
             # bounded by the current fp16 path's honest noise (mean_diff ≈ 0.4× mean_tol
@@ -2123,12 +2133,14 @@ def _check_accuracy(outputs, eager_out) -> str | None:
             escape_tol = max(abs_tol, 0.005 * peak)
             outliers = sum(1 for d in diffs if d > tol)
             budget = max(4, len(diffs) // 65536)
+            rms = (sum(e * e for e in eager_flat) / max(1, len(eager_flat))) ** 0.5
+            heavy_tailed = peak > 8.0 * rms
             if is_fp16:
                 # The hard 4·tol garbage ceiling bounds BOTH pass paths: the escape hatch
                 # vouches for reorder outliers (peak-bounded by construction), never for a
                 # garbage/saturated cell a near-zero mean would otherwise hide.
-                max_ok = max_diff <= 4 * tol and outliers <= budget
-                escape_ok = mean_diff <= escape_tol and max_diff <= 4 * tol
+                max_ok = max_diff <= 4 * tol and outliers <= (budget if heavy_tailed else 0)
+                escape_ok = mean_diff <= escape_tol and max_diff <= 4 * tol and outliers <= budget
             else:
                 max_ok = max_diff <= tol
                 escape_ok = mean_diff <= escape_tol

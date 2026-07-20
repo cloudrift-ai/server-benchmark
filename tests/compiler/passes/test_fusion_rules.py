@@ -619,3 +619,24 @@ def test_shared_broadcast_chain_correctness():
     mq = rng.standard_normal((1, 3, 4, 8)).astype(np.float32)
     mk = rng.standard_normal((1, 2, 4, 8)).astype(np.float32)
     _assert_correctness(_make_shared_broadcast_chain, {"mq": mq, "mk": mk})
+
+
+def test_cut_workspace_producer_never_refuses():
+    """A ``020_cut_edge`` workspace producer (node id ``*__cone`` / ``*__stat`` / ``*__ch<i>``)
+    stays materialized through fusion: the cut realizes a DECIDED ``PLACE@cone=cut``, and
+    re-inlining the pure-pointwise cone producer into its consumer recreates the fused kernel —
+    silently reverting the decision (and colliding on the workspace node at the re-cut, the
+    gemma-4 pre256 norm→kv crash). An ordinary single-consumer pointwise producer of the same
+    shape still fuses."""
+
+    def graph_with(pid):
+        g = Graph()
+        g.add_node(InputOp(), [], Tensor("x", (4, 8)), node_id="x")
+        g.add_node(ElementwiseOp("relu"), ["x"], Tensor(pid, (4, 8)), node_id=pid)
+        g.add_node(ElementwiseOp("exp"), [pid], Tensor("o", (4, 8)), node_id="o")
+        g.inputs, g.outputs = ["x"], ["o"]
+        return g
+
+    assert len(_kernel_nodes(_fuse(graph_with("t__cone")))) == 2, "a cone workspace must stay materialized"
+    assert len(_kernel_nodes(_fuse(graph_with("t__ch0")))) == 2, "a channel workspace must stay materialized"
+    assert len(_kernel_nodes(_fuse(graph_with("t_plain")))) == 1, "an ordinary pointwise producer still fuses"

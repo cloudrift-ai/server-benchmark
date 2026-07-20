@@ -128,13 +128,14 @@ def rewrite(match: Match, root: Node) -> Graph | None:
                 ws_dtype = t.dtype
             break
     ws = f"{out.name}__cone"
-    # Idempotence. The stat-BEARING cut terminates structurally: its producer carries the statistic
-    # reduce, so ``010_merge_loop_ops``'s reduce-heavy guard will not fuse it back into the
-    # consumer. A STAT-FREE producer is pure pointwise and carries no such brake — fusion re-inlines
-    # it into the consumer's K loop on the next sweep, the consumer is computed-A again, and the
-    # rule re-fires on a node it has already cut (observed on the gemma-4 pre256 norm→kv cone:
-    # ``Node id 'linear_2_reduce__cone' already exists``). Refuse when this node's workspace is
-    # already in the graph: the cut has been applied, and applying it twice is never the intent.
+    # Idempotence. The stat-BEARING cut terminates structurally (its producer carries the
+    # statistic reduce — ``010_merge_loop_ops``'s reduce-heavy guard); a STAT-FREE producer is
+    # pure pointwise, so that pass carries an explicit cut-workspace brake (its ``_CUT_WS_RE``
+    # skip on the ``__cone`` / ``__stat`` / ``__ch<i>`` node ids this rule mints) — without it,
+    # fusion re-inlined the producer on the restarted scan, the consumer went computed-A again,
+    # and the rule re-fired on a node it had already cut (observed on the gemma-4 pre256
+    # norm→kv cone: ``Node id 'linear_2_reduce__cone' already exists``). The guard below stays
+    # as the backstop: applying the cut twice is never the intent.
     if ws in match.graph.nodes:
         raise RuleSkipped(f"cone already cut — {ws} exists")
 

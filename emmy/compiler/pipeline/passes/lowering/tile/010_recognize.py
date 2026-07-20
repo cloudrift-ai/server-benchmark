@@ -386,8 +386,14 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
             return schedule(map_tile, loop.name, knob_base, ctx)
         pin = PLACE.narrow_at("cone")
         rows = _as_list(schedule(map_tile, loop.name, {**knob_base, "PLACE@cone": pin if pin in ("fuse", "cut") else "fuse"}, ctx))
-        if rows and pin not in ("fuse", "cut"):
-            rows = [*rows, replace(rows[0], knobs={**rows[0].knobs, "PLACE@cone": "cut"})]
+        # The cut SIBLING has to come from its own ``schedule`` call, not a ``replace`` on the fused
+        # result: the ``PLACE@cone`` stamp is threaded onto every fork ROW inside ``schedule``
+        # (rows are what the deploy pick joins against), so overriding the TileOp-level knobs leaves
+        # all 12k leaves still spelling ``fuse`` and the cut is unreachable by any golden.
+        # Enumerating a second full row set is safe: ``greedy_decide`` withholds ``PLACE@cone=cut``
+        # rows from the model fallback, so they are selectable by measured evidence alone.
+        if pin not in ("fuse", "cut"):
+            rows += _as_list(schedule(map_tile, loop.name, {**knob_base, "PLACE@cone": "cut"}, ctx))
         return rows if len(rows) > 1 else rows[0]
     # (4) The MONOID-producer composition — the fused norm→linear edge (``rmsnorm(x)·nw @ w``, and
     # its N-channel form, the gate/up MLP edge): the tail fold(s) ALSO nodify to

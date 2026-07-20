@@ -259,6 +259,13 @@ subprocess (logs to a temp file), `/health` is polled (up to 30 min — first bo
 the server is torn down. The bench backend follows the model: embeddings hit `--backend openai-embeddings --endpoint
 /v1/embeddings`; **`--generate`** hits `--backend openai --endpoint /v1/completions` with `--random-output-len`.
 
+The vLLM child inherits an environment with this interpreter's bin dir prepended to `PATH` (`serve.py::_child_env`):
+invoking `./venv/bin/emmy` by absolute path does not activate the venv, so the generative server's inductor-compile
+subprocess would otherwise die with `FileNotFoundError: ninja` (ninja is pip-installed into that same bin). A
+**multimodal `--stock` baseline** (e.g. gemma-4-12B) still needs `--language-model-only` passed through — stock vLLM
+loads the full multimodal checkpoint and the vision encoder's budget check rejects the small `--max-num-batched-tokens`
+the emmy arm runs at; the flag is a plain vLLM passthrough, only meaningful for the raw-vLLM arm.
+
 ### `emmy bench`
 
 Loads each recipe, provisions cloud VMs, deploys the model, runs `vllm bench serve`, captures results, and tears down. Recipes sharing the same model and GPU type are grouped onto the same VM (see `GroupByModelAndGpuPlanner`).

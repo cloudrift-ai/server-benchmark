@@ -1341,6 +1341,33 @@ configs:
     knobs: {PLACE@cone: 'cut'}
     emmy_us: 368.7
     cublas_us: 326.0
+  # The FUSED (non-cut) form at M=256 -- seeded 2026-07-19 after measuring that the cut is NOT
+  # reachable in the real serving graph at this shape. The YAML previously declined to seed this on
+  # the ground that "a fused mlp_geglu.m256 golden would only ever record a losing config"; that was
+  # true of the 885 us 2-channel megakernel it was written about, and is NOT true of what the
+  # serving graph actually produces here.
+  # What it produces: loop fusion folds the closing `type_as` cast into each projection's A load, so
+  # gate and up arrive as SINGLE-channel matmuls reading the f32 `mul_3` against f16 weights. A
+  # mixed-dtype A has no plain mma tier (the copy transports move raw bytes and cannot convert), so
+  # `_demote_mixed_a` re-expresses it as a computed-A cone riding the sync compute-fill, which
+  # demotes A on the slab store. The cut cannot help: there is no cone to materialize, the A is
+  # already a plain Load.
+  # Unseeded, this fork keys `fused` and matched only the .cut entry above -- which cannot realize
+  # (no PLACE family is offered on a pre-split fork), so it DRIFTed and greedy fell to a non-mma
+  # n32x16/f4x12 tile at 851 us per channel, 88.8% of the whole post256 twin. On its measured config
+  # each channel is 226.5 us (3.8x), taking the twin 1,920.1 -> 668.9.
+  # Measured 2026-07-19 (manual pinned --ab over w4x2/w2x2/w4x4/w1x8 x f2x4/f4x8 x k2/k4, 3x).
+  # Runners-up for the record: w2x2/f2x4/k2 686.7 twin-total, w1x8/f2x2/k2 717.2, w4x2/f2x4/k4
+  # 729.4, f16acc w4x2/f4x8/k4 865.9, w4x4/f2x4/k2 1156.5, w4x2/f4x8/k2 1432.8.
+  - kernel: mlp_geglu
+    name: gemma4_12b.mlp_geglu.m256
+    M: 256
+    H: 3840
+    inter: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 226.5
+    cublas_us: 326.0
   # The CUT (PLACE@cone=cut) consumer: ONE single-channel matmul (M=256, N=15360, K=3840) — the gate OR up half
   # after 020_cut_edge splits the multi-fold cone. A single-fold matmul reads a clean gmem A, so it rides
   # d2/tma/ring and BEATS cuBLAS in the FAST_MATH regime (f16acc 125.6 = 1.20x cuBLAS 151);

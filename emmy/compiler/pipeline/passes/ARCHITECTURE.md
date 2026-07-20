@@ -47,10 +47,15 @@ and feeds it into the `Contraction` structural node (`_schedule._contraction_nod
 bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is rejected at fork construction, alongside
 `_check_warp_static_k`, instead of failing several passes later:
 
-- a `CONTRACTION` contraction → the `(a_load, b_load, acc, epilogue)` operand→role facts
-  (`_atomize.bind_contraction`): the A/B operands bound to roles by which output grid axis each operand's OWN leaf `Load`
-  index carries (structural — read off the annotated loop, not a flattened-loop scan), plus the fold accumulator and the
-  projection epilogue. The binding now happens ONCE at **recognize time** (`010_recognize._nodify_contraction` — every
+- a `CONTRACTION` contraction → the `(a_operand, b_load, acc, epilogue)` operand→role facts
+  (`_atomize.bind_contraction`): the operands are named by the ⊗ **lift** (the `Assign` the fold accumulates) — B is its
+  (n, k)-indexed `Load`, A is the lift's other argument, either a plain `Load` (clean gmem-direct) or, when loop fusion
+  has inlined an operand cone, the cone itself as a `Body` (a STAT-FREE computed A, which rides the `sync` compute-fill
+  like the norm→linear cone but carries no statistic prologue) — plus the fold accumulator and the projection epilogue.
+  Binding off the lift rather than off "the first (m, k)-indexed `Load`" is load-bearing: a cone-INTERNAL load is
+  (m, k)-indexed too, so the positional rule bound gemma's GeGLU combine as `gate @ W` and silently dropped the gelu and
+  the up projection. Refusing to bind a stat-free cone at all is equally wrong — it demotes the cell to a PLANAR
+  scalar fold, which cost the gemma-4 M=256 post twin 144 ms against 4.3 ms bound. The binding now happens ONCE at **recognize time** (`010_recognize._nodify_contraction` — every
   recognized contraction, per-cell scalar included, is a `Contraction` node with a deferred `TilePlan()`; an unbindable
   one — a 1-D matvec-shaped output — demotes to `PLANAR` and folds as an ordinary `Reduction`); the schedule fork only
   swaps the node's `tile` field (`_schedule._contraction_node`), and `_factor.factorize` reads the facts off the node

@@ -73,7 +73,7 @@ from emmy.compiler.pipeline.fork import Fork
 # NOTE: no ``Knob`` objects (``TILE`` / ``REDUCE`` / ``STAGE``) may be imported here — ``Pass.load``
 # scans rule modules for ``Knob`` attrs and OFF-fills any it finds bare onto every variant of the
 # pass. Pin reads / knob-key spelling ride the ``_schedule`` helpers instead.
-from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction, bind_prologue_contraction
+from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction, bind_prologue_contraction, map_cone
 from emmy.compiler.pipeline.passes.lowering.tile._flash import is_flash_score_producer, is_fold_offer_site, try_flash
 from emmy.compiler.pipeline.passes.lowering.tile._schedule import prologue_knob_bases, schedule, warp_tile_pinned
 from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse
@@ -152,7 +152,19 @@ def _is_clean_contraction(body: list[Stmt], k_name: str) -> bool:
     if len({ld.input for ld in k_loads}) < 2:
         return False
     all_loads = [s for s in body if isinstance(s, Load)]
-    return len(body) == len(all_loads) + 2 and len(all_loads) == len(k_loads) and set(lift.args) == {ld.names[0] for ld in k_loads}
+    if len(body) == len(all_loads) + 2 and len(all_loads) == len(k_loads) and set(lift.args) == {ld.names[0] for ld in k_loads}:
+        return True
+    # COMPUTED-A contraction: the lift multiplies ONE K-indexed operand load by a value this loop
+    # computes (a fused operand cone). Still a contraction — the cone is the A tile — so mark it and
+    # let ``bind_contraction`` bind the cone; the alternative is a PLANAR scalar fold, which is what
+    # took gemma-4's GeGLU->down_proj edge off the mma tier entirely (66x).
+    if len(lift.args) != 2:
+        return False
+    operand = next((ld for ld in k_loads if ld.names[0] in lift.args), None)
+    if operand is None:
+        return False
+    cone = map_cone(list(body), next(a for a in lift.args if a != operand.names[0]))
+    return bool(cone) and any(isinstance(st, Load) and k_name in {v for e in st.index for v in e.free_vars()} for st in cone)
 
 
 def _annotate_reduce(rloop: Loop, pre_reduce: tuple[Stmt, ...]) -> Loop | None:
@@ -265,6 +277,15 @@ def _nodify_contraction(node, free: tuple):
     return Map(body=projection, source=red) if len(projection) else red
 
 
+def _cuttable_cone(node) -> bool:
+    """A single-fold STAT-FREE computed-A :class:`Contraction` — the shape ``020_cut_edge`` can
+    split into (materialize the cone) + (plain gmem-A matmul). The MONOID composition binds through
+    :func:`bind_prologue_contraction` instead; a multi-fold stat-free cone has no combine tail to
+    carry, so it is left fused."""
+    src = node.source if isinstance(node, Map) and isinstance(node.source, Contraction) else node
+    return isinstance(src, Contraction) and src.a_computed and len(src.folds) == 1 and not src.lead_axes
+
+
 def _lift(stmts: list[Stmt], output: str) -> tuple[Map | Reduction | Contraction, tuple]:
     """Peel the free axes and lift the per-cell compute, returning ``(root node, free
     axes)``. The free axes are the schedule's (carried on the ``TileOp``, not the node);
@@ -354,7 +375,20 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     map_tile = TileOp(op=node, place=Placement(free=free), inputs=dict(loop.inputs))
     pro = bind_prologue_contraction(node, free) if place_decision("cone") == "fuse" else None
     if pro is None:
-        return schedule(map_tile, loop.name, knob_base, ctx)
+        # A STAT-FREE computed-A cone (loop fusion inlined a pointwise operand cone — gemma's GeGLU
+        # combine ahead of down_proj) gets the same fuse-vs-cut offer the MONOID composition below
+        # does. The fused form is a real option (it rides the sync compute-fill), but so is
+        # materializing the cone and running the projection as a plain gmem-A matmul on the
+        # ``d2/tma/ring`` transports a computed A can never ride — which is where the recorded
+        # plain-matmul goldens (``mlp_down.*``) live. Offering it as a stamped row keeps the choice
+        # on the ordinary evidence pick; ``020_cut_edge`` realizes it.
+        if not _cuttable_cone(node):
+            return schedule(map_tile, loop.name, knob_base, ctx)
+        pin = PLACE.narrow_at("cone")
+        rows = _as_list(schedule(map_tile, loop.name, {**knob_base, "PLACE@cone": pin if pin in ("fuse", "cut") else "fuse"}, ctx))
+        if rows and pin not in ("fuse", "cut"):
+            rows = [*rows, replace(rows[0], knobs={**rows[0].knobs, "PLACE@cone": "cut"})]
+        return rows if len(rows) > 1 else rows[0]
     # (4) The MONOID-producer composition — the fused norm→linear edge (``rmsnorm(x)·nw @ w``, and
     # its N-channel form, the gate/up MLP edge): the tail fold(s) ALSO nodify to
     # ``Map(body=projection, source=Contraction)`` — a computed-A :class:`Contraction` whose A cone

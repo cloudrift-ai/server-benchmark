@@ -69,14 +69,20 @@ Key structure findings:
 m64 decode twins unregressed (46.2 / 261.0); `eval golden --in-model`: **MATCH 101 / DRIFT 0 / GAP 0
 both cards** with the m4096 block in.
 
-⚠ **In-twin o_proj_global bk>1 TMA-ring hang (both lanes)**: the o_proj_global.m4096 golden tiles
-(std `w4x2/f2x4/k2`, fm `w4x2/f4x8/k4` — both 3x-clean STANDALONE, and the same family works in-twin
-on post4096's K=4096 o_proj and K=15360 down) HANG >1 s when they realize on the post4096-global
-twin's o_proj (K=8192, the attn_width-8192 input form). Cold's bk1 `w4x2/f4x8` ran 1267 µs on the same
-form. Not reproducible standalone (bare linear, or linear+residual). Worked around by re-seeding the
-o_proj_global.m4096(.lin) rows at bk1 configs (benched standalone 3x); the bk>1-in-this-form hang is
-a codegen bug left open for a dedicated session — the misdeploy class the "matched-but-unrealizable
-golden" memory warns about, now with a twin-level reproducer (`_tune/prefill-4k/post4096-global.json`).
+⚠ **post4096-global captured-bench deadlock when the geglu CUT deploys (both lanes)**: with the cut
+rows in the tier, the global post twin's `--bench` (captured-graph + per-kernel-event replay) hangs on
+its FIRST kernel (o_proj_global) at EVERY o_proj config tried — bk1/bk2/bk4, tma AND cp ring, std and
+fm — while the IDENTICAL kernel/cubin runs clean when `PLACE@cone=fuse` is pinned (o_proj 1442.9 in
+the same harness), and the same cut deploys + benches clean on the non-global post4096 twin. The
+plain (non-captured) path is unaffected: `emmy run` without `--bench` exits rc=0 on all 4 twins, both
+lanes — and the serving prefill twins ride `run_device` raw launches (no capture), so serving is out
+of the blast radius (decode capture only touches m32 twins, where the geglu golden is the fused form).
+Bug class: cut-program × graph-capture × this twin's shape set; reproducer
+`_tune/prefill-4k/post4096-global.json` + `--bench`; left open for a dedicated session. Fallout
+handled in the tier: o_proj_global.m4096 re-seeded at bk1 `w4x2/f4x8 d2/tma/ring` (std 1442/1445,
+fm 1232/1247 — the fm k4's 826/855 stays unreachable until the bug lands), and mlp_down.m4096 std
+gained a SERIAL f4x8/k4 sibling (2444/2464) because the g2k row cannot realize on the twin's
+epilogue-fused down (no split-K offer → loud fall-through).
 
 ## WS3 — symbolic mid-width path
 

@@ -254,7 +254,11 @@ and picks the offered candidate prefix-consistent with the fastest recorded entr
 the A/B pin gate's canonical matching. An axis-keyed golden key (a static attention golden's `TILE@dd` + `TILE@pj`)
 is all-or-nothing; a bare golden key on a multi-axis family carries the pin-resolution semantics — one plan,
 satisfied by ANY same-family realization (how a dynamic attention golden's single bare `TILE` matches the masked
-fork's axis-keyed leaves) — and a fast-math entry self-excludes when its atom isn't offered (gate off). Goldens are
+fork's axis-keyed leaves) — and a fast-math entry self-excludes when its atom isn't offered (gate off). The
+fastest-first pick also grounds the **fm-never-loses invariant** (statically gated in `test_golden_configs.py`):
+within one card's rows of a name, a fast-math entry recording ABOVE the best standard sibling can never realize
+(the std row matches first in either lane), so such rows are dropped — an absent fm row just means the fm lane
+deploys the std config there. Goldens are
 **consulted, never trained on**: they enter no reservoir, no checkpoint, no dataset (they are the held-out
 acceptance set). Golden µs is deployable-regime truth and never arbitrates a non--O3 compile. A shape match none of
 whose entries realizes against the offer logs a loud enumeration-drift warning and falls through to the tiers below.

@@ -234,7 +234,7 @@ class BufferArena:
     descriptors never dangle. Safe iff programs sharing the arena never run
     concurrently and each program's outputs are consumed before the next program runs
     — the runner's contract. Constants are never pooled (persistent values; weight
-    sharing is ``gen_runner._bind_device_constants``)."""
+    sharing is ``gen_runner._bind_plan_constants``)."""
 
     def __init__(self) -> None:
         self._backings: dict[str, cp.ndarray] = {}

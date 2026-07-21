@@ -123,24 +123,29 @@ def _pad_rows(arr, bucket):
     return out
 
 
-def _bind_device_constants(graph, sources, cache):
-    """Upload each distinct ``(source_path, load_ops)`` constant ONCE and share the cupy
-    array across program builds. The symbolic and decode-bucket twins bind the same
-    weights; per-build numpy feeds would upload a second full on-GPU copy of the trunk
-    (~2× the weight footprint). ``cache`` must be scoped to one wrapper — param paths
-    are wrapper-relative, so a cross-wrapper cache would collide."""
-    import cupy as cp
-
-    from emmy.compiler.loader.binder import apply_load_ops
+def _bind_plan_constants(plan, sources, cache):
+    """Build the constant feed from the plan's weight specs (works identically whether the
+    plan came from a fresh compile or a pack). With a ``cache`` (per-wrapper), each distinct
+    ``(source_path, load_ops)`` weight uploads ONCE and the cupy array is shared across
+    program builds — the symbolic and decode/prefill-bucket twins bind the same weights;
+    per-build numpy feeds would upload a second full on-GPU copy of the trunk (~2× the
+    weight footprint). ``cache`` must be scoped to one wrapper — param paths are
+    wrapper-relative, so a cross-wrapper cache would collide."""
+    from emmy.compiler.backend.plan import apply_weight_loads
 
     out = {}
-    for nid, op in graph.loadable_constants():
-        if op.source_path not in sources:
+    for nid, w in plan.weights.items():
+        if w.source_path not in sources or w.load_ops is None:
             continue
-        key = (op.source_path, repr(op.load_ops))
+        if cache is None:
+            out[nid] = apply_weight_loads(sources[w.source_path], w.load_ops)
+            continue
+        import cupy as cp
+
+        key = (w.source_path, w.load_ops)
         arr = cache.get(key)
         if arr is None:
-            arr = cp.asarray(apply_load_ops(sources[op.source_path], op.load_ops))
+            arr = cp.asarray(apply_weight_loads(sources[w.source_path], w.load_ops))
             cache[key] = arr
         out[nid] = arr
     return out
@@ -162,28 +167,33 @@ def trace_split(wrapper, example_args, argnames):
     return trace_module(wrapper, tuple(example_args), dynamic_shapes=dynamic_shapes)
 
 
-def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None, arena=None, capacity=None):
-    """Trace ``wrapper`` and build a :class:`_Program`. ``argnames`` (a list) ties each named
-    arg's axis-0 to a shared symbolic ``num_tokens`` Dim — the **prefill** program (one program,
-    any width). ``argnames=None`` traces a **fully static** graph at the example shapes — the
-    **decode-bucket** program (efficient at small M; the symbolic program's hint-sized M-tile is
-    pathological at decode). ``dev_consts`` (a per-wrapper dict) shares each weight's device
-    buffer across the builds that pass the same dict — see :func:`_bind_device_constants`.
-    ``arena`` (one per runner) pools the activation buffers + scratch slab across every
-    program built with it — layers run sequentially, so N layers hold ~one layer's worth.
-    ``capacity`` (symbolic programs only) sizes the BUILD feed's token axis so the device
-    buffers hold any step up to it — the :meth:`_Program.run_device_sym` prefill path needs
-    fixed capacity buffers (``set_sym_values`` never re-allocates); without it the build feed
-    is the example (the host ``rebind`` path re-sizes per call)."""
+def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None, arena=None, capacity=None, plan=None):
+    """Trace ``wrapper`` and build a :class:`_Program`; returns ``(program, plan)``. ``argnames``
+    (a list) ties each named arg's axis-0 to a shared symbolic ``num_tokens`` Dim — the
+    **prefill** program (one program, any width). ``argnames=None`` traces a **fully static**
+    graph at the example shapes — the **decode-bucket** program (efficient at small M; the
+    symbolic program's hint-sized M-tile is pathological at decode). ``dev_consts`` (a
+    per-wrapper dict) shares each weight's device buffer across the builds that pass the same
+    dict — see :func:`_bind_plan_constants`. ``arena`` (one per runner) pools the activation
+    buffers + scratch slab across every program built with it — layers run sequentially, so N
+    layers hold ~one layer's worth. ``capacity`` (symbolic programs only) sizes the BUILD
+    feed's token axis so the device buffers hold any step up to it — the
+    :meth:`_Program.run_device_sym` prefill path needs fixed capacity buffers
+    (``set_sym_values`` never re-allocates); without it the build feed is the example (the
+    host ``rebind`` path re-sizes per call). ``plan`` (a pack-loaded ``ExecutionPlan``) skips
+    the trace + compile entirely and builds from the stored plan — kernels load by cubin key,
+    weights rebind from the live wrapper through the same shared-upload cache."""
     import torch
 
-    from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.cuda.program import CompiledProgram
     from emmy.compiler.backend.gpu_lock import gpu_lock
-    from emmy.compiler.loader.binder import bind_constants
 
-    graph = trace_split(wrapper, example_args, argnames)
-    compiled = CudaBackend(tune_db="auto").compile(graph)
+    if plan is None:
+        from emmy.compiler.backend.cuda.backend import CudaBackend
+        from emmy.compiler.backend.plan import plan_from_graph
+
+        graph = trace_split(wrapper, example_args, argnames)
+        plan = plan_from_graph(CudaBackend(tune_db="auto").compile(graph))
 
     sources = {}
     for path, t in wrapper.named_parameters(remove_duplicate=False):
@@ -194,14 +204,11 @@ def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None, a
     build_args = example_args
     if capacity is not None and argnames:
         build_args = [torch.zeros((capacity, *a.shape[1:]), dtype=a.dtype) for a in example_args]
-    feed = {n: a.detach().cpu().to(torch.float32).numpy().astype(np_dtype) for n, a in zip(compiled.inputs, build_args, strict=True)}
+    feed = {n: a.detach().cpu().to(torch.float32).numpy().astype(np_dtype) for n, a in zip(plan.inputs, build_args, strict=True)}
     with gpu_lock():
-        if dev_consts is None:
-            const_feed = bind_constants(compiled, sources)
-        else:
-            const_feed = _bind_device_constants(compiled, sources, dev_consts)
-        program = CompiledProgram.build(compiled, {**const_feed, **feed}, arena=arena)
-    return _Program(program, list(compiled.inputs), list(compiled.outputs))
+        const_feed = _bind_plan_constants(plan, sources, dev_consts)
+        program = CompiledProgram.build_from_plan(plan, {**const_feed, **feed}, arena=arena)
+    return _Program(program, list(plan.inputs), list(plan.outputs)), plan
 
 
 class EmmyGenRunner:
@@ -320,6 +327,44 @@ class EmmyGenRunner:
         # The prefill-chunk twin only pays ABOVE the decode bucket (an equal-or-smaller
         # bucket is fully shadowed by the decode twins' routing).
         prefill_ok = prefill_bucket and prefill_bucket > max(decode_bucket or 0, 0)
+
+        # Pack lookup (EMMY_PACK_DIR): one pack for the whole per-layer program set. The
+        # validity key is the model's config hash + the serving shape — deliberately NO model
+        # id/path: the baked image resolves the model to a snapshot *path* offline while the
+        # warm boot uses the hub id, and the config hash already pins identity.
+        import hashlib
+
+        from emmy import config as emmy_config
+        from emmy.compiler.backend.pack import load_pack, pack_path
+
+        pack_key = {
+            "kind": "gen-split",
+            "model": str(getattr(text_config, "model_type", "gen")),  # label + key; config-derived, path-stable
+            "config_sha": hashlib.sha1(model.config.to_json_string().encode()).hexdigest()[:16],
+            "dtype": dtype_str,
+            "decode_bucket": int(decode_bucket or 0),
+            "max_tokens": int(max_tokens or 0),
+            "prefill_bucket": int(prefill_bucket or 0),
+        }
+        pack_at = pack_path(emmy_config.pack_dir(), pack_key) if emmy_config.pack_dir() is not None else None
+        loaded = load_pack(pack_at, key=pack_key) if pack_at is not None else None
+        if loaded is not None:
+            logger.info("[gen_runner] pack hit at %s — skipping trace + compile for %d program(s)", pack_at, len(loaded))
+            # The pack records which twin sets survived their compiles — honor that instead
+            # of re-attempting a twin the save-time boot already saw fail.
+            decode_ok = decode_ok and "L00.pre.decode" in loaded
+            prefill_ok = prefill_ok and "L00.pre.prefill" in loaded
+
+        def stored(name):
+            return loaded.get(name) if loaded is not None else None
+
+        plans: dict = {}
+
+        def build(name, *args, **kw):
+            prog, built_plan = _compile_split(*args, plan=stored(name), **kw)
+            plans[name] = built_plan
+            return prog
+
         # One arena for every program this runner builds: layers run sequentially, so
         # all layers' activation buffers + scratch slabs share one layer's worth of
         # device memory instead of scaling with num_layers.
@@ -336,7 +381,8 @@ class EmmyGenRunner:
             post_consts: dict = {}
             with torch.device("cpu"):
                 pre_programs.append(
-                    _compile_split(
+                    build(
+                        f"L{i:02d}.pre.sym",
                         pre_w,
                         [torch.zeros(8, hidden, dtype=dtype)],
                         ["hidden"],
@@ -347,7 +393,8 @@ class EmmyGenRunner:
                     )
                 )
                 post_programs.append(
-                    _compile_split(
+                    build(
+                        f"L{i:02d}.post.sym",
                         post_w,
                         [torch.zeros(8, attn_width, dtype=dtype), torch.zeros(8, hidden, dtype=dtype)],
                         ["attn_out", "residual"],
@@ -363,12 +410,19 @@ class EmmyGenRunner:
                 if decode_ok:
                     try:
                         pre_decode.append(
-                            _compile_split(
-                                pre_w, [torch.zeros(decode_bucket, hidden, dtype=dtype)], None, np_dtype, dev_consts=pre_consts, arena=arena
+                            build(
+                                f"L{i:02d}.pre.decode",
+                                pre_w,
+                                [torch.zeros(decode_bucket, hidden, dtype=dtype)],
+                                None,
+                                np_dtype,
+                                dev_consts=pre_consts,
+                                arena=arena,
                             )
                         )
                         post_decode.append(
-                            _compile_split(
+                            build(
+                                f"L{i:02d}.post.decode",
                                 post_w,
                                 [torch.zeros(decode_bucket, attn_width, dtype=dtype), torch.zeros(decode_bucket, hidden, dtype=dtype)],
                                 None,
@@ -386,7 +440,8 @@ class EmmyGenRunner:
                 if prefill_ok:
                     try:
                         pre_prefill.append(
-                            _compile_split(
+                            build(
+                                f"L{i:02d}.pre.prefill",
                                 pre_w,
                                 [torch.zeros(prefill_bucket, hidden, dtype=dtype)],
                                 None,
@@ -396,7 +451,8 @@ class EmmyGenRunner:
                             )
                         )
                         post_prefill.append(
-                            _compile_split(
+                            build(
+                                f"L{i:02d}.post.prefill",
                                 post_w,
                                 [torch.zeros(prefill_bucket, attn_width, dtype=dtype), torch.zeros(prefill_bucket, hidden, dtype=dtype)],
                                 None,
@@ -418,6 +474,21 @@ class EmmyGenRunner:
             embed_weight = embed_weight * np_dtype.type(embed_scale)
         use_decode = decode_ok and len(pre_decode) == len(layers)
         use_prefill = prefill_ok and len(pre_prefill) == len(layers)
+        if pack_at is not None and loaded is None:
+            # Best-effort save after a full compile: only the program sets that survived
+            # (a mid-run twin failure leaves partial lists — those must not be recorded).
+            keep = {
+                name: p for name, p in plans.items() if (".decode" not in name or use_decode) and (".prefill" not in name or use_prefill)
+            }
+            if any(w.load_ops is None for p in keep.values() for w in p.weights.values()):
+                logger.warning("[gen_runner] not writing pack: a weight load-op chain is outside the pack vocabulary")
+            else:
+                try:
+                    from emmy.compiler.backend.pack import save_pack
+
+                    save_pack(pack_at, keep, key=pack_key)
+                except Exception:  # noqa: BLE001 — the pack is an optimization, never a boot blocker
+                    logger.warning("[gen_runner] pack write failed at %s", pack_at, exc_info=True)
         runner = cls(
             embed_weight=embed_weight,
             norm=trunk.norm,

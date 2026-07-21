@@ -18,7 +18,7 @@ prefill / chunked-prefill (``bucket < T <= prefill_capacity``) through the symbo
 ``run_device_sym`` (grids sized per step, capacity buffers, no per-layer host hop); the host
 numpy ``rebind`` path survives for the standalone oracle and as the over-capacity fallback.
 NOTE: the per-layer ``CompiledProgram``s share BOTH their
-weights (one device buffer per constant, ``_bind_device_constants``) and their activation
+weights (one device buffer per constant, ``_bind_plan_constants``) and their activation
 buffers + scratch slabs (one ``BufferArena`` per runner) — the footprint no longer scales
 with ``num_layers`` (the memory budget the plan flagged, Phase 2 / Top risk #9).
 """

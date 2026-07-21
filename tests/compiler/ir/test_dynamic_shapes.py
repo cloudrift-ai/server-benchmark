@@ -394,6 +394,95 @@ def test_qwen_whole_model_dynamic_compiles_and_matches_eager():
             np.testing.assert_allclose(out, ref, rtol=1e-3, atol=1e-3)
 
 
+def _batched_dynamic_case(batch: int, run_seqs: tuple[int, ...]):
+    """Shared body for the batched symbolic-seq matrix below: 1-layer random-weight
+    Qwen3 trunk traced at ``(batch, hint)`` with ``seq_len`` symbolic, run at several
+    seq_lens, every batch row compared against eager independently."""
+    pytest = __import__("pytest")
+    pytest.importorskip("cupy")
+    import torch
+    from transformers import AutoConfig, AutoModel
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.cuda.program import CompiledProgram
+    from emmy.compiler.backend.gpu_lock import gpu_lock
+    from emmy.compiler.loader.binder import bind_constants
+    from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs
+    from emmy.compiler.trace.huggingface import build_causal_mask, build_full_model_wrapper
+    from emmy.compiler.trace.torch import trace_module
+
+    torch.manual_seed(0)
+    config = from_pretrained_or_skip(AutoConfig.from_pretrained, "Qwen/Qwen3-Embedding-0.6B")
+    config.num_hidden_layers = 1
+    model = AutoModel.from_config(config).float().eval()
+
+    hint, dtype = 32, torch.float32
+    wrapper = build_full_model_wrapper(model, hint, dtype, dynamic=True)
+    specs = parse_position_specs(
+        ["seq_len@input_ids:1", "seq_len@attention_mask:2", "seq_len@attention_mask:3", "seq_len@position_ids:1"]
+    )
+    example = (
+        torch.zeros((batch, hint), dtype=torch.long),
+        build_causal_mask(hint, dtype),
+        torch.arange(hint).unsqueeze(0).expand(batch, hint).contiguous(),
+    )
+    graph = trace_module(wrapper, example, dynamic_shapes=build_torch_dynamic_shapes(specs))
+    compiled = CudaBackend().compile(graph)
+
+    sources: dict[str, np.ndarray] = {}
+    for path, t in wrapper.named_parameters(remove_duplicate=False):
+        sources[path] = t.detach().cpu().numpy().astype(np.float32, copy=False)
+    for path, t in wrapper.named_buffers(remove_duplicate=False):
+        sources[path] = t.detach().cpu().numpy().astype(np.float32, copy=False)
+    const_feed = bind_constants(compiled, sources)
+    ids_name, mask_name, pos_name = compiled.inputs
+    out_name = compiled.outputs[0]
+
+    def feed(s: int) -> dict[str, np.ndarray]:
+        # distinct NON-ZERO ids per row — a batch-stride bug that reads another
+        # row's tokens must change the output (zero ids would mask it).
+        ids = np.stack([((np.arange(s, dtype=np.int64) * 97) + 13 * b) % config.vocab_size for b in range(batch)])
+        return {
+            ids_name: ids,
+            mask_name: build_causal_mask(s, dtype).numpy(),
+            pos_name: np.tile(np.arange(s, dtype=np.int64), (batch, 1)),
+        }
+
+    with gpu_lock():
+        prog = None
+        for s in run_seqs:
+            fd = feed(s)
+            if prog is None:
+                prog = CompiledProgram.build(compiled, {**const_feed, **fd})
+            else:
+                prog.rebind(fd)
+            prog.run_once()
+            out = prog.outputs()[out_name]
+            with torch.no_grad():
+                ref = wrapper(torch.from_numpy(fd[ids_name]), build_causal_mask(s, dtype), torch.from_numpy(fd[pos_name])).numpy()
+            assert out.shape == ref.shape
+            for b in range(batch):
+                np.testing.assert_allclose(out[b], ref[b], rtol=1e-3, atol=1e-3, err_msg=f"batch row {b} at seq_len {s}")
+
+
+def test_qwen_batched_dynamic_matches_eager_b2():
+    """Batched symbolic-seq accuracy matrix (WS1.1 exit): the masked-tile kernels
+    must be batch-correct — batch {2, 4, 32} × seq {17, 32, 512} on the dynamic-seq
+    trace (the serving symbolic path at ``batch_cap > 1``). The static-batch side of
+    the matrix lives in ``tests/serving/test_runner_batched_gpu.py``. Historically
+    the symbolic-seq kernels miscomputed batch>1 (every row wrong — the reason the
+    serving runner was hard-wired to batch 1); these pin the fixed behavior."""
+    _batched_dynamic_case(2, (32, 17, 512))
+
+
+def test_qwen_batched_dynamic_matches_eager_b4():
+    _batched_dynamic_case(4, (32, 512))
+
+
+def test_qwen_batched_dynamic_matches_eager_b32():
+    _batched_dynamic_case(32, (32, 512))
+
+
 def test_qwen_layer_dynamic_compiles_and_matches_eager():
     """Single decoder layer (random-weight Qwen3 trunk) traced through
     ``build_layer_wrapper`` with dynamic seq_len — the per-layer

@@ -1,5 +1,5 @@
 ---
-sidebar_position: 3
+sidebar_position: 4
 title: How Emmy Chooses Fast GPU Schedules
 description: Learn how Emmy ranks compiler forks, learns from measurements, deploys goldens, and diagnoses regressions.
 keywords: [Emmy, compiler, prior, goldens, CatBoost, MCTS, autotuning, CUDA]
@@ -13,6 +13,9 @@ through GPU memory. Two schedules can return the same answer while one is much f
 
 This is the most advanced course chapter. Read [From PyTorch to CUDA: Compiler Deep Dive](./compiler_deep_dive) first, and use the
 [Course glossary](./glossary) whenever a compiler, GPU, or tuning term is unfamiliar.
+
+If benchmark baselines, warmup, per-kernel timing, or A/B measurements are unfamiliar, read
+[Benchmarking and Comparing Emmy](./benchmarking_emmy) before reproducing a golden.
 
 :::info The central idea
 Emmy prefers compatible measurements over predictions. It predicts only when it has not already measured a candidate

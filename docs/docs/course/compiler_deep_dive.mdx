@@ -1100,6 +1100,10 @@ remove inter-kernel relationships.
 Autotuning often executes benchmarks in a subprocess worker. A kernel that hangs or poisons its CUDA context can then
 be terminated without wedging the parent compiler or preventing the sweep from continuing.
 
+For executable examples that compare eager PyTorch, `torch.compile`, and Emmy; save JSON evidence; invoke Nsight
+Compute; and distinguish this compiler workflow from recipe-based server load tests, see
+[Benchmarking and Comparing Emmy](./benchmarking_emmy).
+
 ## 15. How normal compilation chooses a schedule
 
 `Pipeline.run` performs deterministic **greedy resolution**: it chooses the currently best-looking candidate without

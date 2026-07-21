@@ -1,5 +1,5 @@
 ---
-sidebar_position: 4
+sidebar_position: 5
 title: Emmy Course Glossary
 description: Plain-language definitions of the machine-learning, compiler, GPU, deployment, and tuning terms used in the Emmy course.
 keywords: [Emmy, glossary, LLM, compiler, CUDA, GPU, vLLM]
@@ -296,11 +296,40 @@ position.
 **Benchmark**
 A controlled measurement of speed, latency, throughput, or resource use.
 
+**Profiling**
+Collecting detailed evidence about where time or hardware resources are used. A benchmark says how long something
+takes; a profile helps explain why.
+
+**Eager PyTorch**
+Normal PyTorch execution in which operations are dispatched as the program reaches them. On a GPU, those operations
+often call optimized kernels from ATen, cuBLAS, or cuDNN. It is a performance baseline and is unrelated to
+`model.eval()`.
+
+**Warmup iteration**
+An untimed execution performed before benchmark measurements so initialization, compilation, caches, and GPU clock
+behavior can settle.
+
 **Latency**
 The time needed to complete one operation or request. Lower latency is faster.
 
 **Throughput**
 The amount of work completed per unit of time, such as requests per second. Higher throughput is better.
+
+**Time to first token (TTFT)**
+The delay between sending a text-generation request and receiving its first generated token.
+
+**Time per output token (TPOT)**
+The average time required for each generated token after generation starts.
+
+**Inter-token latency (ITL)**
+The time gap between successive streamed output tokens.
+
+**End-to-end latency (E2EL)**
+The total time from sending a request until the complete response arrives.
+
+**Percentile**
+A position in a sorted set of measurements. A p99 latency means 99 percent of observed requests were no slower than
+that value; it helps reveal slow tail requests that an average can hide.
 
 **VM (virtual machine)**
 A computer created by software, often rented from a cloud provider. A GPU VM includes one or more GPUs.

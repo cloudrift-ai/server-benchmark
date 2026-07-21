@@ -55,6 +55,10 @@ The main course is the beginner path. For a more implementation-focused treatmen
 [From PyTorch to CUDA: Compiler Deep Dive](./compiler_deep_dive). It follows one operation through every IR, then explains rewrite mechanics,
 algebra recognition, scheduling, CUDA dispatch, dynamic shapes, autotuning, and how to extend the compiler.
 
+For hands-on performance work, [Benchmarking and Comparing Emmy](./benchmarking_emmy) separates local compiler
+benchmarks from deployed service benchmarks and explains PyTorch baselines, metrics, profiling, fair experiments, and
+result files.
+
 For the implementation of tuning decisions, evidence precedence, offline and CatBoost priors, golden matching, A/B
 integrity gates, and diagnostics, continue with [How Emmy Chooses Fast GPU Schedules](./prior_and_goldens).
 
@@ -552,6 +556,9 @@ cleanup. The real implementation has more detailed failure handling and timing, 
 6. `emmy/commands/ARCHITECTURE.md`: Data Flow and Timing metrics.
 
 ### Lab — use tests as a side-effect-free execution trace
+
+For a complete command walkthrough and definitions of TTFT, TPOT, ITL, latency, and throughput, use
+[Benchmarking and Comparing Emmy](./benchmarking_emmy#part-2--benchmark-a-deployed-model-service).
 
 ```bash
 ./venv/bin/pytest \
@@ -1363,6 +1370,9 @@ CPU-safe tests:
   -c "nn.RMSNorm(256)(torch.randn(4, 256, device='cuda', dtype=torch.float16))" \
   --bench --warmup 5 --iters 20
 ```
+
+This is a quick development measurement. Before reporting a comparison, follow the warmup, backend, JSON, profiling,
+and fairness guidance in [Benchmarking and Comparing Emmy](./benchmarking_emmy#part-1--compare-generated-tensor-programs).
 
 If this fails, use the fault-isolation order: inspect final CUDA, compare loop versus numpy, then inspect CUDA dispatch
 and emitted launch geometry. Do not begin by changing tile heuristics.

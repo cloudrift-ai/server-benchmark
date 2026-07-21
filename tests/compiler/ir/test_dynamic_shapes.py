@@ -418,9 +418,7 @@ def _batched_dynamic_case(batch: int, run_seqs: tuple[int, ...]):
 
     hint, dtype = 32, torch.float32
     wrapper = build_full_model_wrapper(model, hint, dtype, dynamic=True)
-    specs = parse_position_specs(
-        ["seq_len@input_ids:1", "seq_len@attention_mask:2", "seq_len@attention_mask:3", "seq_len@position_ids:1"]
-    )
+    specs = parse_position_specs(["seq_len@input_ids:1", "seq_len@attention_mask:2", "seq_len@attention_mask:3", "seq_len@position_ids:1"])
     example = (
         torch.zeros((batch, hint), dtype=torch.long),
         build_causal_mask(hint, dtype),

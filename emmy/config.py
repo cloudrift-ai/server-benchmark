@@ -51,6 +51,7 @@ NO_NVCC = "EMMY_NO_NVCC"
 GPU_LOCK = "EMMY_GPU_LOCK"
 NCU_CHILD = "EMMY_NCU_CHILD"
 SERVING_STATIC = "EMMY_SERVING_STATIC"
+SERVING_BATCHED = "EMMY_SERVING_BATCHED"
 GEN_DECODE_BUCKET = "EMMY_GEN_DECODE_BUCKET"
 GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
 READABLE = "EMMY_READABLE"
@@ -319,13 +320,26 @@ def offline_tilt(default: float = 0.3) -> float:
 def serving_static(default: bool = False) -> bool:
     """``EMMY_SERVING_STATIC`` — opt into the serving plugin's fully-static
     program: **static extents for both batch and seq_len**. Off (default) keeps the
-    symbolic-seq, batch-1 path; on builds ONE static ``(max_num_seqs, max_seq_len)``
+    symbolic-seq path; on builds ONE static ``(max_num_seqs, max_seq_len)``
     program (batch from vLLM's ``--max-num-seqs``, seq from ``--max-model-len``) and
-    runs each scheduler step as a padded batched forward. Only correct/efficient for
-    fixed-length workloads — it pads every sequence to ``max_seq_len`` and the
-    dynamic-seq kernels miscompute batch>1, so it is a deliberate opt-in, not a
-    default. See `serving/ARCHITECTURE.md`."""
+    runs each scheduler step as a padded batched forward. Only efficient for
+    fixed-length workloads — it pads every sequence to ``max_seq_len``; prefer
+    ``EMMY_SERVING_BATCHED`` (pads only to the step's longest sequence). A deliberate
+    opt-in, not a default. See `serving/ARCHITECTURE.md`."""
     return _bool(SERVING_STATIC, default)
+
+
+def serving_batched(default: bool = False) -> bool:
+    """``EMMY_SERVING_BATCHED`` — opt into the serving plugin's **batched
+    symbolic-seq** program: batch extent static at vLLM's ``--max-num-seqs``, seq_len
+    symbolic. Each scheduler step runs as ONE batched forward padded to the step's
+    longest sequence (not to ``max_seq_len`` — the static mode's waste). Off (default)
+    keeps the one-sequence-per-forward path. An opt-in because the shared buffer set is
+    allocated at ``(max_num_seqs, max_seq_len)`` capacity — pair it with a sane
+    ``--max-num-seqs`` (vLLM's default is 256) and workload-sized ``--max-model-len``.
+    ``EMMY_SERVING_STATIC`` takes precedence when both are set.
+    See `serving/ARCHITECTURE.md`."""
+    return _bool(SERVING_BATCHED, default)
 
 
 def gen_prefill_bucket(default: int = -1) -> int:

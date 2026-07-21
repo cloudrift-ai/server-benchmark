@@ -5,6 +5,7 @@ from dataclasses import asdict
 
 import yaml
 
+from emmy.benchmark.gpu_sampler import GpuSamplingSummary, gpu_sampling
 from emmy.deploy.compose import calculate_num_instances
 from emmy.planner import BenchmarkTask
 from emmy.recipe.types import Recipe, VllmConfig
@@ -108,8 +109,12 @@ def compose_result(
 async def run_benchmark_workload(run_cmd, recipe: Recipe, dry_run=False):
     """Run vllm bench serve on the remote server and return output.
 
+    GPU power/memory is sampled on the server for the duration of the client runs
+    (skipped in dry-run); a failed sampler never fails the benchmark.
+
     Returns:
-        (success: bool, output: str, stderr: str, bench_command: str)
+        (success: bool, output: str, stderr: str, bench_command: str,
+         gpu_summary: GpuSamplingSummary | None)
     """
     bench = recipe.benchmark
 
@@ -140,9 +145,15 @@ async def run_benchmark_workload(run_cmd, recipe: Recipe, dry_run=False):
     # results parser aggregates into mean/stddev. A failed repeat fails the task.
     bench_command_str = build_bench_command(recipe)
     outputs = []
-    for _ in range(max(1, bench.repeats)):
+    gpu_summary: GpuSamplingSummary | None = None
+    if dry_run:
         rc, output, stderr = await run_cmd(bench_cmd, stream=False, timeout=10800)
-        if rc != 0:
-            return False, output, stderr, bench_command_str
-        outputs.append(extract_benchmark_results(output))
-    return True, "\n\n".join(outputs), stderr, bench_command_str
+        return rc == 0, output, stderr, bench_command_str, None
+    async with gpu_sampling(run_cmd) as sampler:
+        for _ in range(max(1, bench.repeats)):
+            rc, output, stderr = await run_cmd(bench_cmd, stream=False, timeout=10800)
+            if rc != 0:
+                return False, output, stderr, bench_command_str, None
+            outputs.append(extract_benchmark_results(output))
+    gpu_summary = sampler.summary()
+    return True, "\n\n".join(outputs), stderr, bench_command_str, gpu_summary

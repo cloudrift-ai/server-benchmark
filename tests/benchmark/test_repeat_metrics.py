@@ -85,25 +85,43 @@ def test_multi_repeat_json_result_aggregates():
     assert len(data["metrics_repeats"]) == 3
 
 
+def test_json_result_carries_gpu_summary():
+    task = _task(_recipe())
+    gpu = {
+        "gpus": [{"index": 0, "avg_power_w": 450.0, "peak_memory_mib": 31000.0, "samples": 2}],
+        "total_avg_power_w": 450.0,
+        "peak_memory_mib": 31000.0,
+    }
+    data = compose_json_result(task, _stanza(100.0, 50.0), "compose", "cmd", "", gpu=gpu)
+    assert data["gpu"]["total_avg_power_w"] == 450.0
+    assert "gpu" not in compose_json_result(task, _stanza(100.0, 50.0), "compose", "cmd", "")
+
+
 def test_run_benchmark_workload_repeats_client_runs():
-    calls: list[str] = []
+    bench_calls: list[str] = []
 
     async def fake_run_cmd(command, stream=True, timeout=600):
-        calls.append(command)
-        return 0, f"client noise\n{_stanza(100.0 + len(calls), 50.0)}", ""
+        if "nvidia-smi" in command:
+            return 0, "12345", ""
+        if command.startswith("kill "):
+            return 0, "0, 450.0, 30000\n0, 460.0, 31000\n", ""
+        bench_calls.append(command)
+        return 0, f"client noise\n{_stanza(100.0 + len(bench_calls), 50.0)}", ""
 
-    success, output, _, _ = asyncio.run(run_benchmark_workload(fake_run_cmd, _recipe(3)))
+    success, output, _, _, gpu = asyncio.run(run_benchmark_workload(fake_run_cmd, _recipe(3)))
     assert success
-    assert len(calls) == 3
+    assert len(bench_calls) == 3
     assert len(parse_repeat_metrics(output)) == 3
     assert "client noise" not in output  # per-repeat outputs are trimmed to the stanza
+    assert gpu is not None and gpu.total_avg_power_w == 455.0 and gpu.peak_memory_mib == 31000
 
 
 def test_run_benchmark_workload_fails_on_failed_repeat():
     async def fake_run_cmd(command, stream=True, timeout=600):
         return 1, "boom", "err"
 
-    success, output, stderr, _ = asyncio.run(run_benchmark_workload(fake_run_cmd, _recipe(3)))
+    success, output, stderr, _, gpu = asyncio.run(run_benchmark_workload(fake_run_cmd, _recipe(3)))
     assert not success
     assert output == "boom"
     assert stderr == "err"
+    assert gpu is None

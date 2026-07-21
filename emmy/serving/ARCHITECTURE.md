@@ -53,9 +53,10 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   → repeated execution + captured replay. Trunk compute dtype follows vLLM's `--dtype` (`mc.dtype`, mapped in
   `vllm_model._trunk_dtype_str`): `float32`→fp32, `float16`→fp16, anything else (e.g. `bfloat16`/`auto`) downcasts to
   fp16 with a warn — the runner's numpy weight carrier can't represent bf16, and only fp16/fp32 trunks are supported.
-  When `EMMY_SERVING_STATIC=1` (`config.serving_static`), `create` instead traces a **fully-static**
-  `(max_num_seqs, max_seq_len)` graph (no dynamic_shapes — static extents for both batch and seq) and
-  `forward_hidden_states_batched` runs each step as one padded batched forward — see "Static mode" below.
+  With `EMMY_SERVING_BATCHED=1` (`config.serving_batched`) the symbolic-seq trace bakes the batch extent at
+  `max_num_seqs` and `forward_hidden_states_batched` runs each step as one batched forward padded to the step's
+  longest sequence; `EMMY_SERVING_STATIC=1` (`config.serving_static`) instead traces a **fully-static**
+  `(max_num_seqs, max_seq_len)` graph (no dynamic_shapes) — see "Batched modes" below.
 - `packed.py` — `split_spans(positions, max_seq_len)`: vLLM V1 hands pooling models one packed `(num_tokens,)` tensor
   with per-request 0-based positions; spans split at `positions == 0`. Hardened for `_dummy_run`'s garbage profiling
   batches (index 0 always opens a span; overlong spans are chopped).
@@ -156,32 +157,32 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   capturable then); a caller-supplied `--compilation-config` wins over the default. Prefill and
   over-bucket decode batches stay eager under FULL_DECODE_ONLY by construction.
 
-## Static mode (`EMMY_SERVING_STATIC=1`) — static extents for both batch and seq
+## Batched modes — `EMMY_SERVING_BATCHED=1` (symbolic seq) and `EMMY_SERVING_STATIC=1` (static extents)
 
-The default path is symbolic-seq, **one sequence per forward** (`batch_cap = 1`). Setting `EMMY_SERVING_STATIC=1`
-switches the runner to a **fully-static `(N, max_seq_len)` program** (static extents for both batch and seq) so a whole
-scheduler step runs as one batched forward. The batch `N` is **vLLM's own `max_num_seqs`**
-(`vllm_config.scheduler_config.max_num_seqs`), read at init — so the batch is sized by the standard `--max-num-seqs`
-flag, not a separate emmy knob (the toggle is boolean; the size comes from what vLLM hands us). Mind the default
-`max_num_seqs=256`: pair the opt-in with a sane `--max-num-seqs` or the static `(256, max_seq_len)` program will be huge.
+The default path is symbolic-seq, **one sequence per forward** (`batch_cap = 1`). Two opt-ins run a whole scheduler
+step as ONE padded batched forward instead (`runner.forward_hidden_states_batched`). In both, the batch cap is
+**vLLM's own `max_num_seqs`** (`vllm_config.scheduler_config.max_num_seqs`), read at init — the batch is sized by the
+standard `--max-num-seqs` flag, not a separate emmy knob (the toggle is boolean; the size comes from what vLLM hands
+us). Mind the default `max_num_seqs=256`: the buffer set allocates at `(max_num_seqs, max_seq_len)` capacity, so pair
+either opt-in with a sane `--max-num-seqs` and a workload-sized `--max-model-len`.
 
-**Measured (RTX 5090, Qwen3-Embedding-0.6B, uniform 512 tokens, concurrency 32):** this is currently a throughput
-**regression**, not a win — the static `(32, 512)` forward takes ~1.1 s (26.6 req/s) vs the batch-1 path's 64 req/s and
-stock vLLM's ~232 req/s. Making the extents static is *not* the lever: the batched program does B× the existing,
-non-flash, O(B·H·S²)-materialized attention,
-and the static-shape kernels are cold greedy picks (untuned, unlike the batch-1 symbolic kernels which carried prior
-tuning). The throughput win needs efficient attention (flash/varlen, follow-up #1) and/or an autotune of the static
-batched shape — batching alone, over today's kernels, loses. Why static, not symbolic: the dynamic-seq
-(masked-tile) kernels **miscompute batch>1** (the batch axis isn't threaded through the masked attention/reduction
-codegen — empirically every batch row is wrong), whereas a fully-static trace bakes correct batch strides. So the
-batched program fixes both axes: every step is **padded to `(N, max_seq_len)`** — short sequences pad on the right,
-short batches pad with dummy rows (`runner.forward_hidden_states_batched`). Causal masking makes this safe: a token
-attends only to earlier positions, so a row's real prefix is independent of its right-padding, and dummy rows are never
-read out. The mask + position_ids are request-independent (full causal at `max_seq_len`, arange positions) so they are
-fed once at build and never updated — only ids change per step. **Limitation:** correct only for the static shape, so
-it pads every sequence to `max_seq_len` (zero waste when all requests are that length — the benchmark case — but
-wasteful for mixed/short lengths); set `--max-model-len` to the actual workload length. Not a general production path;
-the general fix is follow-up #1.
+- **`EMMY_SERVING_BATCHED=1` — the preferred batched mode.** The trace keeps `seq_len` symbolic with the batch extent
+  baked at the cap; each step pads only to the **step's longest sequence** (not `max_seq_len`), sizes the grids to it
+  (`set_sym_values`), and replays the captured graph for that seq_len (one capture per distinct S, the same LRU cache
+  as the per-sequence path). Uniform-length steps pad nothing; mixed steps waste only the intra-step length spread —
+  the remaining padding waste is what the cu_seqlens varlen work (follow-up #1) removes.
+- **`EMMY_SERVING_STATIC=1`** builds ONE fully-static `(N, max_seq_len)` program (static extents on both axes) and
+  pads every step to `(N, max_seq_len)`. Zero waste only when all requests are exactly `max_seq_len`; kept as the
+  fixed-shape stand-in (static traces need no masked tiles at all). Takes precedence if both vars are set.
+
+Padding is safe in both: causal masking makes a row's real prefix independent of its right-padding (a token attends
+only to earlier positions), and dummy rows below the cap are never read out. Historically the symbolic-seq kernels
+miscomputed batch>1, which is why only the static mode existed; the root cause was the serving capacity-buffer path's
+**TMA descriptors baking allocation-shaped strides** (a batch axis above the symbolic seq axis has a `seq_len`-dependent
+global stride, so batch row 0 was right and every higher row read shifted garbage — invisible at `batch_cap = 1`).
+Fixed in `backend/cuda/program.py`: symbolic-src descriptors re-encode at the RESOLVED shape per sym key, cached
+beside the per-S graph cache (`_descs_now`); `tests/serving/test_runner_batched_gpu.py` pins both modes per row
+against eager, and the batch {2, 4, 32} × seq matrix in `tests/compiler/ir/test_dynamic_shapes.py` pins the kernels.
 
 ## Execution model (v2: captured graphs) and its known costs
 
@@ -200,9 +201,10 @@ Recorded follow-ups, in impact order:
 
 1. **Packed-varlen attention** (cu_seqlens-aware SDPA tiles) — run vLLM's whole packed batch in one launch at *mixed*
    lengths; the general form of the throughput fix. At concurrency 1 (no batching) emmy is ~1.5× stock; the rest of
-   the concurrency-32 gap is batching. The static batched mode above is the fixed-length stand-in; the remaining work is
-   (a) making the masked-tile kernels batch-correct so a symbolic-seq batched program works, then (b) cu_seqlens varlen
-   so one launch handles mixed lengths without padding to `max_seq_len`.
+   the concurrency-32 gap is batching. Step (a) — batch-correct masked tiles + the symbolic-seq batched program — is
+   **done** (`EMMY_SERVING_BATCHED`, see the batched-modes section above); remaining is (b) cu_seqlens varlen tiles so
+   one launch handles mixed lengths with no padding at all (its own session — the ragged row→sequence mapping in the
+   flash schedule + the mask derivation from `cu_seqlens`).
 2. **dlpack zero-copy I/O** — **done**: `forward_hidden_states` takes/returns torch CUDA tensors, bridged to the cupy
    buffers via `cp.from_dlpack` / `torch.from_dlpack` on torch's stream — no GPU↔host round-trip (`upload_prefix_device`
    / `output_prefix_device`). The only residual host touch is `positions.cpu()` for span boundaries.
@@ -234,7 +236,11 @@ Recorded follow-ups, in impact order:
   `--max-model-len` for bigger models / smaller cards.
 - vLLM's memory profiler only sees torch allocations; the runner's cupy-held weights/activations are invisible to it.
   Leave `--gpu-memory-utilization` headroom accordingly (the attention-free model needs no KV cache, so vLLM's own
-  budget is tiny).
+  budget is tiny). The GENERATIVE arm has the opposite problem — it needs a real KV cache, and vLLM budgets
+  `util × total − currently-used`, so the default 0.90 line can fall below the emmy residents and fail the
+  min-KV fit at long `--max-model-len` (gemma-4-12B at mml 8448: 1.37 GiB left of the 1.7 needed). `emmy serve
+  --generate` therefore defaults the emmy arm to `--gpu-memory-utilization 0.97` (stock keeps 0.90; an explicit
+  flag wins).
 
 ## Testing
 

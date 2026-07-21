@@ -452,7 +452,12 @@ def _collapse_inert_dims(arr_shape: tuple[int, ...], box_extents: tuple[int, ...
     return tuple(reversed(kept))
 
 
-def _prebuild_descriptors(compiled: _Compiled, arrays: dict[str, cp.ndarray]) -> dict[int, dict[str, cp.ndarray]]:
+def _prebuild_descriptors(
+    compiled: _Compiled,
+    arrays: dict[str, cp.ndarray],
+    sym_values: dict[str, int] | None = None,
+    only_symbolic: bool = False,
+) -> dict[int, dict[str, cp.ndarray]]:
     """Encode every TMA ``CUtensorMap`` for ``compiled`` up-front.
 
     The kernel signature takes ``const CUtensorMap*`` (not a by-value
@@ -470,7 +475,17 @@ def _prebuild_descriptors(compiled: _Compiled, arrays: dict[str, cp.ndarray]) ->
     cp.async.bulk.tensor is still reading, corrupting the descriptor
     and deadlocking the wait. Pre-building once after ``_allocate``
     removes the race entirely; the returned dict is held alive for the
-    whole program lifetime, so cupy never reclaims the slab."""
+    whole program lifetime, so cupy never reclaims the slab.
+
+    ``sym_values``: encode each SYMBOLIC-shaped source buffer at its RESOLVED
+    shape instead of the array's allocated (capacity) shape. On the serving
+    capacity-buffer path the live data is prefix-packed at the resolved shape's
+    row-major strides, so a descriptor's global strides must follow the resolved
+    extents — a capacity-baked stride reads the right rows only for the leading
+    index 0, which is why batch>1 miscomputed through every TMA-staged kernel
+    while batch-1 serving never noticed. ``only_symbolic=True`` returns just the
+    per-sym overlay entries (static-src descriptors are excluded — the prebuilt
+    ones stay valid)."""
     import cupy as cp
 
     out: dict[int, dict[str, cp.ndarray]] = {}
@@ -480,7 +495,14 @@ def _prebuild_descriptors(compiled: _Compiled, arrays: dict[str, cp.ndarray]) ->
         per_launch: dict[str, cp.ndarray] = {}
         for desc in launch.tma_descriptors:
             arr = arrays[desc.src_buf]
-            src_shape = _collapse_inert_dims(tuple(int(d) for d in arr.shape), desc.box_extents)
+            buf = compiled.buf_by_name[desc.src_buf]
+            if only_symbolic and not buf.is_symbolic:
+                continue
+            if sym_values and buf.is_symbolic:
+                base_shape = tuple(int(d) for d in (buf.resolve_shape(sym_values) or (1,)))
+            else:
+                base_shape = tuple(int(d) for d in arr.shape)
+            src_shape = _collapse_inert_dims(base_shape, desc.box_extents)
             desc_bytes = _tma.encode_tiled(
                 global_address=int(arr.data.ptr),
                 src_shape=src_shape,
@@ -489,7 +511,8 @@ def _prebuild_descriptors(compiled: _Compiled, arrays: dict[str, cp.ndarray]) ->
                 swizzle=desc.swizzle,
             )
             per_launch[desc.name] = cp.asarray(np.frombuffer(desc_bytes, dtype=np.uint64))
-        out[li] = per_launch
+        if per_launch:
+            out[li] = per_launch
     if out:
         cp.cuda.runtime.deviceSynchronize()
     return out
@@ -663,6 +686,12 @@ class CompiledProgram:
     # ``()`` key, so it's unaffected.
     _graph_cache: dict = field(default_factory=dict, repr=False)
     _graph_cache_max: int = 64
+    # Per-sym-key TMA descriptor overlays (symbolic-src descriptors re-encoded at
+    # the RESOLVED shape — the capacity-buffer prefix layout's true strides; see
+    # :func:`_prebuild_descriptors`). Keyed like ``_graph_cache``; an entry must
+    # outlive any captured graph replaying at its key (the graph bakes the desc
+    # device pointers), so eviction only drops keys absent from ``_graph_cache``.
+    _sym_descs: dict = field(default_factory=dict, repr=False)
 
     @classmethod
     def build(
@@ -775,6 +804,7 @@ class CompiledProgram:
             self._graph_batch_sizes = None
             self._e2e_graph = None
             self._graph_cache.clear()
+            self._sym_descs.clear()
 
     def set_sym_values(self, values: dict[str, int]) -> None:
         """Set the host symbolic values that resolve launch grids + by-value
@@ -799,8 +829,32 @@ class CompiledProgram:
         record/sync/watchdog — the serving hot path (timing semantics live in
         :meth:`iter_once`). The default stream orders the launches; the
         caller's subsequent ``outputs()`` ``.get()`` synchronizes."""
+        descs = self._descs_now()
         for i, launch in enumerate(self.compiled.launches):
-            _launch(launch, self.compiled, self.arrays, self.descs.get(i), self.sym_values)
+            _launch(launch, self.compiled, self.arrays, descs.get(i), self.sym_values)
+
+    def _descs_now(self) -> dict[int, dict[str, cp.ndarray]]:
+        """The per-launch TMA descriptors matching the CURRENT ``self.sym_values``:
+        the prebuilt (allocation-shaped) entries overlaid with per-sym re-encodes of
+        every symbolic-src descriptor. On the capacity-buffer serving path the live
+        data is prefix-packed at the resolved shape, so symbolic-src descriptors must
+        re-encode per seq_len (cached per sym key). A fully-static program (empty
+        key) returns the prebuilt dict unchanged."""
+        key = self._sym_key()
+        if not key:
+            return self.descs
+        overlay = self._sym_descs.get(key)
+        if overlay is None:
+            overlay = _prebuild_descriptors(self.compiled, self.arrays, sym_values=self.sym_values, only_symbolic=True)
+            # Bound the cache without ever dropping a key whose captured graph is
+            # still alive (its replay dereferences these device buffers).
+            evictable = [k for k in self._sym_descs if k not in self._graph_cache]
+            while evictable and len(self._sym_descs) >= max(self._graph_cache_max, len(self._graph_cache) + 1):
+                self._sym_descs.pop(evictable.pop(0))
+            self._sym_descs[key] = overlay
+        if not overlay:
+            return self.descs
+        return {li: {**self.descs.get(li, {}), **overlay.get(li, {})} for li in self.descs.keys() | overlay.keys()}
 
     def capture_launch_graphs(self, batch_sizes: list[int]) -> None:
         """Capture each launch position's batch into one CUDA graph.
@@ -823,6 +877,7 @@ class CompiledProgram:
         if self._graphs is not None and self._graph_batch_sizes == list(batch_sizes):
             return
         self._graphs = None
+        descs = self._descs_now()
         side = cp.cuda.Stream(non_blocking=True)
         graphs = []
         for i, launch in enumerate(self.compiled.launches):
@@ -830,7 +885,7 @@ class CompiledProgram:
                 with side:
                     side.begin_capture()
                     for _ in range(batch_sizes[i]):
-                        _launch(launch, self.compiled, self.arrays, self.descs.get(i), self.sym_values)
+                        _launch(launch, self.compiled, self.arrays, descs.get(i), self.sym_values)
                     graphs.append(side.end_capture())
             except Exception as exc:
                 if side.is_capturing():
@@ -876,12 +931,13 @@ class CompiledProgram:
             self._graph_cache[key] = self._graph_cache.pop(key)  # LRU bump
             self._e2e_graph = cached
             return
+        descs = self._descs_now()
         side = cp.cuda.Stream(non_blocking=True)
         try:
             with side:
                 side.begin_capture()
                 for i, launch in enumerate(self.compiled.launches):
-                    _launch(launch, self.compiled, self.arrays, self.descs.get(i), self.sym_values)
+                    _launch(launch, self.compiled, self.arrays, descs.get(i), self.sym_values)
                 graph = side.end_capture()
         except Exception as exc:
             if side.is_capturing():
@@ -896,7 +952,9 @@ class CompiledProgram:
         cp.cuda.runtime.deviceSynchronize()
         self._graph_cache[key] = graph
         while len(self._graph_cache) > self._graph_cache_max:
-            self._graph_cache.pop(next(iter(self._graph_cache)))  # evict LRU
+            evicted = next(iter(self._graph_cache))
+            self._graph_cache.pop(evicted)  # evict LRU
+            self._sym_descs.pop(evicted, None)  # its desc overlay is no longer pinned
         self._e2e_graph = graph
 
     def _sym_key(self) -> tuple:
@@ -1009,6 +1067,7 @@ class CompiledProgram:
             self._starts = [cp.cuda.Event() for _ in range(n)]
             self._stops = [cp.cuda.Event() for _ in range(n)]
         starts, stops = self._starts, self._stops
+        descs = self._descs_now()
         dts = [0.0] * n
         for i, launch in enumerate(self.compiled.launches):
             b = batch_sizes[i]
@@ -1021,7 +1080,7 @@ class CompiledProgram:
                 self._graphs[i].launch()
             else:
                 for _ in range(b):
-                    _launch(launch, self.compiled, self.arrays, self.descs.get(i), self.sym_values)
+                    _launch(launch, self.compiled, self.arrays, descs.get(i), self.sym_values)
             stops[i].record()
             _wait_for_event(stops[i], _KERNEL_TIMEOUT_MS * b, launch.kernel_name)
             elapsed_ms = cp.cuda.get_elapsed_time(starts[i], stops[i])

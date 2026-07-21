@@ -244,8 +244,12 @@ own flags are otherwise extracted wherever they appear — argparse REMAINDER sw
 handler re-parses it; see `commands/serve.py::_split_own_flags`). `--max-model-len 4096` (the dynamic-dim cap) is
 applied for both engines unless overridden, so `--stock` is an apples-to-apples baseline. Generative serving
 defaults to **whole-step decode CUDA graphs** (a `--compilation-config` with `FULL_DECODE_ONLY` + capture sizes
-clamped to the decode bucket — see `serving/ARCHITECTURE.md`); pass vLLM's own `--enforce-eager` to opt out
-(forced automatically when `EMMY_GEN_DECODE_BUCKET=0`).
+laddered up to `--max-num-seqs` — sizes above the decode bucket capture the device-resident symbolic programs; see
+`serving/ARCHITECTURE.md`); pass vLLM's own `--enforce-eager` to opt out (forced automatically when
+`EMMY_GEN_DECODE_BUCKET=0`). The emmy generative arm also defaults `--gpu-memory-utilization` to **0.97** (its
+cupy residents are invisible to vLLM's torch-only profiler, so the 0.90 line can fail the min-KV fit at long
+model lens; stock keeps 0.90), and `EMMY_SERVING_BATCHED=1` embedding serving defaults `--max-num-batched-tokens`
+to `max_num_seqs × max_model_len` so scheduler steps can fill the batch.
 
 ```bash
 emmy serve Qwen/Qwen3-Embedding-0.6B --gpu-memory-utilization 0.8   # plugin server (Ctrl-C to stop)

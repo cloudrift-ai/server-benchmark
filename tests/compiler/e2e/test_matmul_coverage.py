@@ -296,10 +296,12 @@ def test_scalar_matmul_stages_through_pipeline(monkeypatch) -> None:
 
 
 def test_scalar_masked_n_stage_declines(monkeypatch) -> None:
-    """A masked-N (overhanging inner dim) or transposed-B contraction must DECLINE cp.async / TMA
+    """A masked-N (overhanging inner dim) SCALAR-tier contraction must DECLINE cp.async / TMA
     staging: the B-slab fill would clamp a chunk-start column into a row-crossing gmem address and
-    hang the kernel on the misaligned 16 B copy (the warp tier refuses the same via
-    ``_can_stage_warp``). The pin resolves to gmem-direct — ``stage=None``, OFF-stamped."""
+    hang the kernel on the misaligned 16 B copy (the warp tier refuses masked-N the same way via
+    ``_can_stage_warp``; a transposed B also stays gmem-direct on the scalar tier — its N-major
+    slab staging is warp-only, ``test_matmul_mma_trans_b_staged``). The pin resolves to
+    gmem-direct — ``stage=None``, OFF-stamped."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
 
     monkeypatch.setenv("EMMY_TILE", "n16x16/f2x2")  # tile_n=32 overhangs N=48 ⇒ masked-N
@@ -734,6 +736,76 @@ def test_matmul_mma_coverage(M, N, K, out, trans, mode, monkeypatch):
         assert "emmy_mma_load_b_gmem_trans" in src, "transposed-B must use the gmem-direct trans helper"
     if mode == "dynamic":
         assert "int seq_len" in src, "the symbolic-M grid must carry the runtime extent arg"
+
+
+# =========================================================================== #
+# staged transposed-B (the serving F.linear layout) — the N-major B slab.
+# =========================================================================== #
+
+_TRANS_STAGES = {"cp": "d2/cp/ring", "tma": "d2/tma/ring"}
+
+
+@pytest.mark.parametrize("transport", ["cp", "tma"])
+@pytest.mark.parametrize("mode", _SHAPES)
+@requires_sm90
+@requires_cuda
+def test_matmul_mma_trans_b_staged(transport, mode, monkeypatch):
+    """A transposed-B (the serving ``F.linear`` layout) warp matmul STAGES under cp.async and TMA:
+    the B slab keeps the operand's own N-MAJOR orientation (``tile_n`` rows × ``bk`` K cols — K
+    stride-1 in gmem and smem alike, so the fill's chunks stay contiguous) and drains via the
+    plain (no ``.trans``) ldmatrix — no gmem-direct trans helper in the kernel. Bit-identical to
+    the gmem-direct sibling (same mma order — staging perturbs nothing), and correct at a
+    symbolic/masked M (the A-fill clamp; the B slab has no M dimension). This is the serving
+    ``.lin`` fork's transport — the gap class the gmem-direct-only enumeration left 1.3–2.75×
+    behind cuBLAS."""
+    M = N = K = 128
+    monkeypatch.setenv("EMMY_TILE", _WARP_PIN)
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    run_m = M if mode == "static" else M + 2
+    rng = np.random.default_rng(2)
+    a = (rng.standard_normal((run_m, K)) * 0.1).astype(np.float16)
+    b = (rng.standard_normal((N, K)) * 0.1).astype(np.float16)
+
+    monkeypatch.setenv("EMMY_STAGE", "")
+    gmem, gmem_src = _compile_run_mma(_mma_matmul_graph(mode, M, N, K, _F16, True), {"a": a, "b": b})
+    monkeypatch.setenv("EMMY_STAGE", _TRANS_STAGES[transport])
+    staged, src = _compile_run_mma(_mma_matmul_graph(mode, M, N, K, _F16, True), {"a": a, "b": b})
+
+    # Call-site patterns (`helper(_b…`) — the preamble defines every helper unconditionally,
+    # so bare-name membership can't tell a call from a definition.
+    assert "_b_smem" in src, "the transposed B must stage into an smem slab"
+    assert "emmy_mma_load_b_gmem(_b" not in src and "emmy_mma_load_b_gmem_trans(_b" not in src, (
+        "a staged B must not fall back to the gmem-direct helpers"
+    )
+    assert "emmy_ldmatrix_x2_trans(_b" not in src, "the N-major slab drains via the PLAIN x2 (no .trans)"
+    assert "emmy_ldmatrix_x2(_b" in src or "emmy_ldmatrix_x4_pair(_b" in src, "the b_trans staged drain must ldmatrix the slab"
+    assert "emmy_mma_load_b_gmem_trans(_b" in gmem_src, "the gmem-direct sibling still uses the trans helper"
+    np.testing.assert_array_equal(staged, gmem)  # bit-identical: staging perturbs nothing
+    ref = a.astype(np.float32) @ b.T.astype(np.float32)
+    diff = float(np.abs(staged.reshape(run_m, N).astype(np.float32) - ref).max())
+    assert diff < 5e-2, f"staged trans-B ({transport}/{mode}): mismatch vs f32 reference (max abs err {diff})"
+
+
+def test_trans_b_offers_staged_rows(monkeypatch):
+    """The transposed-B fork OFFERS the staged transports unpinned (no GPU — enumeration only).
+    The serving ``F.linear`` forks used to enumerate gmem-direct rows ONLY (the ``.lin`` golden
+    drift-warning class); the N-major B slab lifts that: d*/cp* and d*/tma* spellings ride the
+    fork at sm_90+, cp.async alone below the TMA floor (sm_89)."""
+    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
+
+    for var in ("EMMY_TILE", "EMMY_STAGE", "EMMY_REDUCE", "EMMY_WSPEC"):
+        monkeypatch.delenv(var, raising=False)
+
+    def stages(cc) -> set[str]:
+        rows = enumerate_graph(_mma_matmul_graph("static", 128, 128, 128, _F16, True), Context.from_target(cc))
+        return {str(v) for r in rows for kk, v in r.items() if kk.startswith("STAGE")}
+
+    offered = stages((12, 0))
+    assert any("/cp" in s for s in offered), offered
+    assert any("/tma" in s for s in offered), offered
+    offered_ada = stages((8, 9))
+    assert any("/cp" in s for s in offered_ada), offered_ada
+    assert not any("/tma" in s for s in offered_ada), offered_ada  # TMA stays sm_90-gated
 
 
 # =========================================================================== #

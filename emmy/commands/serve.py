@@ -39,6 +39,8 @@ logger = logging.getLogger(__name__)
 # A/B compares both engines at the same max-model-len.
 _DEFAULT_MAX_MODEL_LEN = "4096"
 _DEFAULT_GPU_MEMORY_UTILIZATION = "0.9"
+# The emmy generative arm only — see the util default in ``build_serve_cmd``.
+_GENERATE_GPU_MEMORY_UTILIZATION = "0.97"
 
 _PLUGIN_ARGS = ["--enforce-eager", "--hf-overrides", '{"architectures": ["EmmyEmbedModel"]}']
 
@@ -197,7 +199,14 @@ def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: 
     if not _has_flag(vllm_args, "--max-model-len"):
         cmd += ["--max-model-len", _DEFAULT_MAX_MODEL_LEN]
     if not _has_flag(vllm_args, "--gpu-memory-utilization"):
-        cmd += [f"--gpu-memory-utilization={_DEFAULT_GPU_MEMORY_UTILIZATION}"]
+        # The emmy generative arm's weights/activations live in cupy, INVISIBLE to vLLM's
+        # torch-only memory profiler — vLLM budgets `util × total − currently-used`, so the
+        # default 0.90 line can land below what the emmy residents already consume and the
+        # boot dies on the min-KV fit check (measured: gemma-4-12B at mml 8448 left 1.37 GiB
+        # of the needed 1.7). 0.97 extends the budget line above the residents while keeping
+        # slack for capture; stock keeps 0.90 (its own sampler warmup OOMs at 0.97).
+        util = _GENERATE_GPU_MEMORY_UTILIZATION if generate and not stock else _DEFAULT_GPU_MEMORY_UTILIZATION
+        cmd += [f"--gpu-memory-utilization={util}"]
     return cmd + vllm_args
 
 

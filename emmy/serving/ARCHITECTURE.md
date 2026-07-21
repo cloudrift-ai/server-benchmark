@@ -236,7 +236,11 @@ Recorded follow-ups, in impact order:
   `--max-model-len` for bigger models / smaller cards.
 - vLLM's memory profiler only sees torch allocations; the runner's cupy-held weights/activations are invisible to it.
   Leave `--gpu-memory-utilization` headroom accordingly (the attention-free model needs no KV cache, so vLLM's own
-  budget is tiny).
+  budget is tiny). The GENERATIVE arm has the opposite problem — it needs a real KV cache, and vLLM budgets
+  `util × total − currently-used`, so the default 0.90 line can fall below the emmy residents and fail the
+  min-KV fit at long `--max-model-len` (gemma-4-12B at mml 8448: 1.37 GiB left of the 1.7 needed). `emmy serve
+  --generate` therefore defaults the emmy arm to `--gpu-memory-utilization 0.97` (stock keeps 0.90; an explicit
+  flag wins).
 
 ## Testing
 

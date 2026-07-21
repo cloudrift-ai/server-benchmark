@@ -154,6 +154,12 @@ def test_serve_cmd_generate_branch():
     cfg = cmd[cmd.index("--compilation-config") + 1]
     assert '"cudagraph_mode": "FULL_DECODE_ONLY"' in cfg
     assert '"cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 64, 128, 256]' in cfg
+    # The emmy generative arm defaults util to 0.97 — its cupy residents are invisible to
+    # vLLM's torch-only profiler, so the 0.90 line can fall below them and fail the min-KV
+    # fit at long model lens. Stock (and the embedding plugin) keep 0.90.
+    assert "--gpu-memory-utilization=0.97" in cmd
+    stock_cmd = build_serve_cmd(MODEL, stock=True, vllm_args=[], generate=True)
+    assert "--gpu-memory-utilization=0.9" in stock_cmd
 
 
 def test_serve_cmd_generate_capture_sizes_follow_max_num_seqs():

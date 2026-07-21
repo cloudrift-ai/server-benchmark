@@ -1316,6 +1316,95 @@ configs:
     emmy_us: 330.4
     cublas_us: 279.5
     # lane: std, pinned: {'PLACE@cone': 'fuse', 'RASTER': '', 'REDUCE': '', 'STAGE': 'd1/sync', 'TILE': 'a:mma_m16n8k16_f16_f32/w2x2/f2x4', 'WSPEC': ''}
+  # ---- fused .lin twins (serving F.linear layout, trans_b) ---------------------------------------
+  # The fused edges a SERVED model deploys (norm→q/kv projections + the GeGLU megakernel with B given
+  # (N, K), F.linear) — enabled by the 2026-07-20 computed-A async-B staging (the sync compute-fill's
+  # transposed-B channels used to fill per-cell; they now ride N-major cp.async slabs). Seeded
+  # 2026-07-20 by manual pinned --ab (3x, spread <=0.5%), torch eager (F.rms_norm + F.linear)
+  # reference. Cold greedy on these unseeded forks mis-ranked w1x1 tiles at 0.08-0.28x eager — the
+  # largest misdeploy-rescue class this file has recorded. The 5090's tile rules transfer: wide N
+  # takes w1x16 (q_global [fm] 1.25x BEATS the unfused torch pair), narrow N w1x16/f1x1, q_proj keeps
+  # the w1x8 un=8 tile; [fm] recorded only where it wins/ties (q_proj and geglu fm lose on sm_89).
+  - kernel: norm_linear
+    name: gemma4_12b.norm_q_proj.m32.lin
+    M: 32
+    H: 3840
+    N: 4096
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
+    emmy_us: 26.4
+    cublas_us: 22.3
+  - kernel: norm_linear
+    name: gemma4_12b.norm_kv_proj.m32.lin
+    M: 32
+    H: 3840
+    N: 2048
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f1x1/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
+    emmy_us: 18.2
+    cublas_us: 16.4
+  - kernel: norm_linear
+    name: gemma4_12b.norm_kv_proj.m32.lin
+    M: 32
+    H: 3840
+    N: 2048
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x16/f1x1/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
+    emmy_us: 17.2
+    cublas_us: 16.4
+  - kernel: norm_linear
+    name: gemma4_12b.norm_q_proj_global.m32.lin
+    M: 32
+    H: 3840
+    N: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 40.7
+    cublas_us: 45.3
+  - kernel: norm_linear
+    name: gemma4_12b.norm_q_proj_global.m32.lin
+    M: 32
+    H: 3840
+    N: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x16/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 36.3
+    cublas_us: 45.3
+  - kernel: norm_linear
+    name: gemma4_12b.norm_kv_proj_global.m32.lin
+    M: 32
+    H: 3840
+    N: 512
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f1x1/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
+    emmy_us: 12.7
+    cublas_us: 9.0
+  - kernel: norm_linear
+    name: gemma4_12b.norm_kv_proj_global.m32.lin
+    M: 32
+    H: 3840
+    N: 512
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x16/f1x1/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
+    emmy_us: 12.6
+    cublas_us: 9.0
+  - kernel: mlp_geglu
+    name: gemma4_12b.mlp_geglu.m32.lin
+    M: 32
+    H: 3840
+    inter: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 285.0
+    cublas_us: 281.6
   # The GeGLU edge at prefill/symbolic M: the FUSED computed-A form loses on sm_89 (m256: 819 fused
   # vs 416 cut vs 513 eager; dynM: 1843 vs 1098) — only decode M=32 keeps the fused kernel (329.7,
   # d1/sync above). The cut anchors below force the split; their emmy_us is the greedy (isolated)
@@ -1338,8 +1427,8 @@ configs:
     dtype: 'fp16'
     dynamic: true
     knobs: {PLACE@cone: 'cut'}
-    emmy_us: 1098.3
-    cublas_us: 914.6
+    emmy_us: 890.8
+    cublas_us: 910.2
   # GeGLU cut fragments (the .cut anchors split the megakernel into per-channel matmuls, the
   # __stat reduce, and fp32 scale/combine maps — each needs its own golden to deploy sanely):
   - kernel: matmul

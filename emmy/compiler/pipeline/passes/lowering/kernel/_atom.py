@@ -271,8 +271,7 @@ def _staged_inner_atom_loop(
     — ``tile_n`` rows × ``bk_elems`` K cols, the serving ``F.linear`` layout staged in its own
     gmem orientation): the B read takes A's row/col convention (tile coord the ROW, K the col,
     ``ldm = bk_elems``) and drains via the plain (no ``.trans``) ldmatrix — the
-    ``LdmatrixLoad(b_trans=True)`` staged path. Always ``False`` for A and for sync-filled
-    slabs (a ``SyncOperand``'s transposed-B slab stays K-major)."""
+    ``LdmatrixLoad(b_trans=True)`` staged path. Always ``False`` for A."""
     (a_slab, *b_slabs), (m, n) = slabs, mn
     offs = offs if offs is not None else (None,) * len(slabs)
     swizzles = swizzles if swizzles is not None else ("NONE",) * len(slabs)
@@ -474,9 +473,12 @@ def _sync_operands(
     ``(drain-ordered operands, compute-filled, cp.async-filled, prologue)``: A is **compute-filled**
     from the node's producer cone (``a_operand`` is a ``Body`` — each thread evaluates the cone at
     the slab cell's absolute ``(m, k)`` coords and writes the result); each fold channel's B is a
-    plain weight copy, so a canonical (non-transposed) B rides a vectorized ``cp.async``
-    :class:`Operand` that flies UNDER the compute fill (a transposed B keeps the per-thread copy
-    fill — its slab cells aren't gmem-contiguous). A cone with a k-invariant prefix (the fused
+    plain weight copy riding a vectorized ``cp.async`` :class:`Operand` that flies UNDER the
+    compute fill — a canonical B as the K-major ``(bk × tile_n)`` slab, a transposed B
+    (the serving ``F.linear`` layout, K gmem-contiguous) as the N-MAJOR ``(tile_n × bk)`` slab in
+    its own gmem orientation (A's geometry; the ``Operand.trans`` stamp routes the drain to the
+    plain no-``.trans`` ldmatrix — the same slab the copy transports stage). A cone with a
+    k-invariant prefix (the fused
     norm→linear per-row statistic — its reduce ``Loop`` + scalar epilogue) is split at the K seam
     (``Contraction.stat_prologue`` — the node-owned seam the scheduler also sizes the stat rows
     off): the prefix runs ONCE per tile row (:func:`sync_stat_fill`, returned as the transport
@@ -485,7 +487,7 @@ def _sync_operands(
     clamp-reads the overhanging rows in-bounds (the A fill σ and the stat prologue σ — a duplicate
     of the last valid row is computed and its store discarded by the ``RegStore`` guard, the same
     contract the copy transports follow)."""
-    m_name, n_name, k_name = c.m_axis.name, c.n_axis.name, c.k_axis.name
+    m_name, k_name = c.m_axis.name, c.k_axis.name
     row_base, col_base = _tile_base(mn)
     pro, cell, stats = c.stat_prologue()
 
@@ -499,14 +501,6 @@ def _sync_operands(
         stmts += [s.rewrite(lambda nm: nm, sigma) for s in cell]
         return stmts, c.a_name
 
-    def b_value_of(bl: Load):
-        def b_value(k0, row, col):
-            sigma = Sigma({k_name: BinaryExpr("+", k0, row), n_name: BinaryExpr("+", col_base, col)})
-            name = f"{bl.names[0]}__f"
-            return [Load(name=name, input=bl.input, index=tuple(sigma.apply(e) for e in bl.index))], name
-
-        return b_value
-
     prologue: list[Stmt] = []
     if stats:
         row_axis = Axis(name="_sr", extent=mn[0].tile)
@@ -516,8 +510,8 @@ def _sync_operands(
     # One B slab per fold channel (the multi-B node fills each projection's weights alongside the
     # one compute-filled A slab); drain order is (A, B0, B1, …) regardless of which fill each rides.
     # ``swizzles`` are the per-operand slab modes (the mma tier's ``slab_swizzles``; NONE elsewhere):
-    # every fill kind applies the same flattened-index XOR — the compute fill / transposed-B copy
-    # through the ``Write``'s ``swizzle``, the canonical-B cp.async through its ``Operand`` — and
+    # every fill kind applies the same flattened-index XOR — the compute fill through the
+    # ``Write``'s ``swizzle``, the B cp.async fills through their ``Operand`` — and
     # the ldmatrix drain reads each slab back through its own mode. Unswizzled these slabs drain
     # 4-way (64 B A rows) / 8-way (128 B B rows) bank-conflicted — the measured megakernel residual
     # (294.9 M ld conflicts / 82.5 M LSU inst on the gemma-shape fused edge, 5090).
@@ -527,19 +521,20 @@ def _sync_operands(
     async_ops: list[Operand] = []
     for f, (bl, _) in enumerate(c.folds):
         tag = "b" if f == 0 else f"b_x{f}"
-        if c.b_trans:
-            op = SyncOperand(tag=tag, shape=(bk_elems, mn[1].tile), value=b_value_of(bl), swizzle=swizzles[1])
-            sync_ops.append(op)
-        else:
-            op = Operand(
-                tag=tag,
-                buf=bl.input,
-                shape=(bk_elems, mn[1].tile),
-                coords=_box_origin(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.k_axis),
-                index=_slab_index(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.k_axis, tile_is_row=False),
-                swizzle=swizzles[1],
-            )
-            async_ops.append(op)
+        # A transposed B stages N-major (``tile_n × bk`` — its own gmem orientation, K stride-1 in
+        # gmem and smem alike), so its cp.async chunks are contiguous exactly like the canonical
+        # K-major slab's (row-base alignment holds: B's row stride K is a multiple of ``bk_elems``).
+        shape = (mn[1].tile, bk_elems) if c.b_trans else (bk_elems, mn[1].tile)
+        op = Operand(
+            tag=tag,
+            buf=bl.input,
+            shape=shape,
+            coords=_box_origin(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.k_axis),
+            index=_slab_index(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.k_axis, tile_is_row=c.b_trans),
+            swizzle=swizzles[1],
+            trans=c.b_trans,
+        )
+        async_ops.append(op)
         drain.append(op)
     return tuple(drain), tuple(sync_ops), tuple(async_ops), prologue
 
@@ -562,8 +557,9 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     elem = ops.slab_elem()
     cta = _cta(mn, c.atom.lanes, c.block_threads)
     if stage.transport == "sync":
-        # The fused-edge compute-fill: the A tile is COMPUTED into its slab (the producer cone), a
-        # canonical B rides a vectorized cp.async that flies UNDER the compute fill — the mma
+        # The fused-edge compute-fill: the A tile is COMPUTED into its slab (the producer cone);
+        # every B (canonical K-major, or transposed staged N-major) rides a vectorized cp.async
+        # that flies UNDER the compute fill — the mma
         # tier's ``sync`` transport; single-buffer, one wait + CTA barrier. A k-invariant cone
         # prefix (the fused norm→linear per-row statistic) rides the transport prologue, run once
         # ahead of the K-loop.
@@ -823,10 +819,9 @@ class _MmaOps(_AtomOps):
         golden's shared-mem wavefronts, the measured residual to cuBLAS). Modes are
         DERIVED, not tuned — the widest atom that divides the span (matching the pre-rebuild
         behavior: A → B64 on a 32-elem fp16 chunk, B → B128 on a 64-elem row). A transposed B
-        staged through an async transport keeps its N-major slab, whose inner row span is the
-        K chunk (``bk_elems``) like A's; the sync transport's transposed-B slab stays K-major
-        (``tile_n`` inner)."""
-        b_inner = self.stage.bk_elems if self.c.b_trans and self.stage.transport != "sync" else mn[1].tile
+        stages N-major on EVERY transport (cp.async / TMA / the sync transport's async B fills),
+        so its inner row span is the K chunk (``bk_elems``) like A's."""
+        b_inner = self.stage.bk_elems if self.c.b_trans else mn[1].tile
         return (
             pick_swizzle_atom(self.stage.bk_elems, elem_bytes)[1],
             pick_swizzle_atom(b_inner, elem_bytes)[1],

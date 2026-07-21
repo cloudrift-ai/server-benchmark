@@ -319,8 +319,7 @@ class Operand:
     # operand's own gmem orientation, K stride-1 in both) instead of the canonical K-major
     # ``bk × tile_n``. The mma drain reads it with the plain (no ``.trans``) ldmatrix — the
     # ``LdmatrixLoad(b_trans=True)`` staged path flash's K slab already drains through. Role
-    # "b" only; a ``SyncOperand`` has no counterpart (its transposed-B slab stays K-major,
-    # filled per-cell).
+    # "b" only, on every staged transport (cp.async / TMA / the sync transport's async B fills).
     trans: bool = False
     # Extra smem columns padding each slab row (cp.async transport only — a TMA box deposit is
     # dense). The pad breaks the same-bank stride of a power-of-two row — the flash K/V slabs'
@@ -360,11 +359,12 @@ class Operand:
 
 @dataclass(frozen=True)
 class SyncOperand:
-    """One ``sync``-transport slab operand — filled by plain per-thread COMPUTE / COPY, not an
+    """One ``sync``-transport slab operand — filled by plain per-thread COMPUTE, not an
     async copy. ``value(k0, row, col)`` returns the stmts producing the cell's value at slab
-    coords ``(row, col)`` of the K-chunk at ``k0`` + the SSA name holding it: a gmem ``Load`` for
-    a copy fill, the fused producer CONE for a compute fill (the fused-edge A operand — the
-    computed tile materializes straight into the slab the ``ldmatrix`` drain reads)."""
+    coords ``(row, col)`` of the K-chunk at ``k0`` + the SSA name holding it: the fused producer
+    CONE (the fused-edge A operand — the computed tile materializes straight into the slab the
+    ``ldmatrix`` drain reads). B weights never ride this: every B fill — canonical or
+    transposed — is a vectorized ``cp.async`` :class:`Operand` on ``async_operands``."""
 
     tag: str  # "a" / "b" — the smem-slab suffix
     shape: tuple[int, int]  # (rows, cols) of one ring slot
@@ -454,8 +454,8 @@ class SyncTransport:
           col-free, and whose ``col=0, k0=0`` anchor simplifies to a ``V``-aligned literal (the
           cone's k-indexed operand read; K-divisibility eligibility makes the buffer's k extent
           ``V``-aligned) ⇒ the run's V scalar loads merge into ONE vector ``Load``;
-        - anything else replicates per cell (the transposed-B copy's strided gather stays
-          per-cell — its last-dim step is the gmem row stride, not 1)."""
+        - anything else replicates per cell (a cone stmt whose read doesn't advance +1 with
+          the slab col — e.g. a col-strided gather)."""
         probe_row, probe_k0, zero = Var("__srow"), Var("__sk0"), Literal(0, "int")
         s0, _ = op.value(probe_k0, probe_row, zero)
         s1, _ = op.value(probe_k0, probe_row, Literal(1, "int"))

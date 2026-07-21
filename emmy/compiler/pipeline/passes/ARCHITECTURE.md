@@ -78,8 +78,11 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   then the K chunk, so the eligibility alignment gates on K alone (`_can_stage_warp` / `_can_stage_warp_tma`) and
   the B swizzle mode derives from `bk_elems` like A's. Historically the transports declined transposed B and the
   serving `.lin` forks ran gmem-direct only — the 1.3–2.75× gap class to cuBLAS on the 5090 goldens. The scalar
-  tier still declines it (its plain-`Load` drain has no transposed variant; pin-only tier), and the sync
-  compute-fill's transposed-B slab stays K-major (per-cell copy fill). One staging fact
+  tier still declines it (its plain-`Load` drain has no transposed variant; pin-only tier). The **sync compute-fill**
+  (the fused computed-A edge) stages its transposed B the same way: every B fold channel — canonical K-major or
+  transposed N-major — rides a vectorized `cp.async` `Operand` that flies UNDER the compute fill (the per-cell
+  strided copy fill it replaced was the serving fused edges' weight-stream deficit), and the asymmetric B-only `d2`
+  prefetch ring is enumerable on transposed-B fused edges too. One staging fact
   is derived at materialization rather than resolved here because it is layout, not eligibility: a slab feeding an
   mma drain is **swizzled** (`_stage.pick_swizzle_atom` picks B32/B64/B128 per operand from the slab's inner row span;
   TMA permutes the 16 B chunks in hardware during the box copy, a cp.async fill applies the identical XOR in software

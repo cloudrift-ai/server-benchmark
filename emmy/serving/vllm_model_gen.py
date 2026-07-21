@@ -254,4 +254,16 @@ class EmmyGenModel(nn.Module):
             elif tied and name.endswith("embed_tokens.weight") and "lm_head.weight" not in loaded:
                 loader(param, w)
                 loaded.add("lm_head.weight")
+        # Tied checkpoints: the loaded head IS the raw embed table — hand it to the runner and drop
+        # the runner's own ~2 GiB folded device copy (uploaded eagerly at construction for the
+        # profiling-order contract). empty_cache + the cupy pool trim actually RELEASE the freed
+        # blocks to the driver, so vLLM's KV-cache profiling (which runs after load) sees them —
+        # this is where the reclaimed memory becomes KV blocks. The runner re-applies the gemma
+        # embed_scale at gather; the shared table stays raw (the head must read it unscaled).
+        if tied and "lm_head.weight" in loaded and param.data.is_cuda:
+            self.runner.adopt_embed_table(param.data, scale=getattr(self.runner, "_embed_scale", 1.0))
+            import cupy as cp
+
+            torch.cuda.empty_cache()
+            cp.get_default_memory_pool().free_all_blocks()
         return loaded

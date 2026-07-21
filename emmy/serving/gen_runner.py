@@ -504,6 +504,7 @@ class EmmyGenRunner:
             post_prefill=post_prefill if use_prefill else None,
             prefill_bucket=prefill_bucket,
         )
+        runner._embed_scale = embed_scale  # raw-table scale for adopt_embed_table (host table keeps it folded)
         if runner.has_device_decode:
             # EAGER, not lazy: vLLM sizes its KV cache from a profiling pass that runs
             # after model construction — anything allocated later (the embed table is
@@ -569,14 +570,31 @@ class EmmyGenRunner:
 
         import torch
 
-        self._embed_weight_dev = torch.from_numpy(self._embed_weight).cuda()
+        if getattr(self, "_embed_weight_dev", None) is None:
+            self._embed_weight_dev = torch.from_numpy(self._embed_weight).cuda()
         self._norm_dev = copy.deepcopy(self._norm).to("cuda")
         self._dev_ready = True
 
+    def adopt_embed_table(self, weight, *, scale=1.0):
+        """Share an already-resident device copy of the RAW (unscaled) embed table — gemma ties
+        ``lm_head.weight`` to ``embed_tokens.weight``, so a server that holds the head can hand
+        it here and the runner skips its own ~2 GiB upload (the KV-cache budget gets it back).
+        ``weight``: torch CUDA ``[vocab, H]`` in the trunk dtype; ``scale``: the model's
+        ``embed_scale`` (sqrt(H) for gemma), applied at gather time since the SHARED table must
+        stay raw — the head reads it unscaled (a folded scale would retemper every logit)."""
+        self._embed_weight_dev = weight
+        self._embed_dev_scale = float(scale)
+
     def embed_device(self, input_ids):
-        """``input_ids``: 1-D int torch CUDA tensor → ``[T, H]`` CUDA tensor (on-device gather)."""
+        """``input_ids``: 1-D int torch CUDA tensor → ``[T, H]`` CUDA tensor (on-device gather).
+        An adopted (raw, shared) table applies the embed scale here — in fp32, matching the
+        host table's fold-at-fp32-then-cast numerics."""
         self._ensure_device()
-        return self._embed_weight_dev[input_ids.long()]
+        rows = self._embed_weight_dev[input_ids.long()]
+        scale = getattr(self, "_embed_dev_scale", 1.0)
+        if scale != 1.0:
+            rows = (rows.float() * scale).to(rows.dtype)
+        return rows
 
     def forward_layer_pre_device(self, layer, hidden):
         """Device twin of :meth:`forward_layer_pre`: ``hidden[T,H]`` CUDA → un-rotated

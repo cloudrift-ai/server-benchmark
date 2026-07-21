@@ -115,6 +115,14 @@ round-trip — the pack never serializes the Graph.)
 
 Steps 1–3 are pure refactor + serialization, testable without a GPU. Step 4–5 need a CUDA box for the A/B.
 
+## Status (2026-07-20)
+
+Steps 1–6 landed on `feature/execution-plan-pack` (PR #405), including the gen-runner pack boot and the
+docker bake wiring (image = model + cubins + pack; `verify.sh` asserts the pack-hit boot). Measured on the
+RTX 5090: 0.6B embed warm boot 737 s → **9.5 s** pack hit, outputs bit-exact; gen-runner round-trip pinned by
+`tests/serving/test_gen_pack_gpu.py`. Remaining: exercise the pack-enabled `release-gemma4-image` pipeline end
+to end on a rental (needs base image + HF_TOKEN) and measure the shipped image's cold start.
+
 ## Remaining per-boot costs after the pack (accepted)
 
 `cuModuleLoad` (~25 ms × unique kernels), weight load + upload, buffer/arena allocation, TMA descriptor rebuild

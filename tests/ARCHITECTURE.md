@@ -23,6 +23,7 @@ tests/
 │   └── test_command_workload.py # build_substitution_map(), render_command()
 ├── serving/                   # mirrors emmy/serving/ (vLLM embedding plugin)
 │   ├── test_packed.py       # split_spans packed-batch span splitting (pure, no GPU)
+│   ├── test_gen_pack_gpu.py # gen-runner EMMY_PACK_DIR round-trip: 2nd boot hits, outputs bit-equal (CUDA)
 │   └── test_vllm_plugin_gpu.py # in-process vLLM engine + plugin vs HF eager (perf-marked, CUDA + vllm)
 ├── recipe/
 │   ├── test_types.py        # Recipe.from_dict(), LLMConfig properties, dataclass defaults

@@ -132,13 +132,14 @@ def _gen_graph_args(vllm_args: list[str]) -> list[str]:
     """The eager/capture flags for emmy generative serving. DEFAULT is whole-step decode
     capture: a compilation-config asking for FULL_DECODE_ONLY graphs (full cudagraphs need no
     torch.compile — vLLM wraps the model in its ``CUDAGraphWrapper``) with capture sizes
-    clamped to the decode bucket — the static decode twin is the one path VALIDATED under
-    stream capture (``test_gen_capture_gpu``); a size above the bucket would capture the
-    device-resident symbolic programs (``run_device_sym``), which are not capture-validated
-    yet, so widening the sizes past the bucket is a measured follow-up, not a flip of this
-    list. Opt out with vLLM's own ``--enforce-eager`` (forwards as-is); a caller-supplied
-    ``--compilation-config`` also wins over ours. With the decode bucket off
-    (``EMMY_GEN_DECODE_BUCKET=0``) nothing is capturable, so eager is forced."""
+    following ``--max-num-seqs``. Sizes up to the decode bucket capture the static decode
+    twin; sizes ABOVE it capture the device-resident symbolic programs (``run_device_sym``)
+    — both paths are validated under stream capture (``test_gen_capture_gpu``; the symbolic
+    path's per-size warmup precedes each capture, which is what keeps TMA descriptor
+    encoding out of the capture window). Opt out with vLLM's own ``--enforce-eager``
+    (forwards as-is); a caller-supplied ``--compilation-config`` also wins over ours. With
+    the decode bucket off (``EMMY_GEN_DECODE_BUCKET=0``) nothing static is capturable, so
+    eager is forced."""
     from emmy import config as emmy_config  # noqa: PLC0415
 
     if _has_flag(vllm_args, "--enforce-eager") or _has_flag(vllm_args, "--compilation-config"):
@@ -147,7 +148,13 @@ def _gen_graph_args(vllm_args: list[str]) -> list[str]:
     if bucket <= 0:
         logger.warning("decode bucket is off (EMMY_GEN_DECODE_BUCKET=0) — the symbolic decode path is not capturable; serving eager")
         return ["--enforce-eager"]
-    sizes = [s for s in (1, 2, 4, 8, 16, 32, 64) if s < bucket] + [bucket]
+    # Cover decode batches up to max_num_seqs (vLLM's default 256 when unset): the bucket
+    # rides the list so the static twin captures at its exact width, and the power-of-two
+    # ladder above it captures the symbolic programs at their exact grids.
+    max_seqs_raw = _flag_value(vllm_args, "--max-num-seqs", "256")
+    max_seqs = int(max_seqs_raw) if max_seqs_raw.isdigit() else 256
+    top = max(bucket, max_seqs)
+    sizes = sorted({s for s in (1, 2, 4, 8, 16, 32, 64, 128, 256, 512) if s < top} | {bucket, top})
     cfg = f'{{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": {sizes}}}'
     return ["--compilation-config", cfg]
 

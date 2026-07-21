@@ -54,6 +54,80 @@ edge), mirroring `MatmulGoldenConfig.trans_b`; same layout-blind ShapeKey, twins
 **Cold greedy on the unseeded fused `.lin` shapes misdeploys catastrophically** (4090: `w1x1/f2x4` tiles at
 0.08–0.28×; 5090 picks reasonable forms) — seeding these is a rescue class, not a polish.
 
-(sweep results and recorded entries below)
+Manual pinned `--ab`, 3 waves + a 3-rep confirmation per card. Learnings: the wide-N `w1x16` warp unit
+transfers from the canonical fused winners onto the `.lin` twins; the **f16acc `[fm]` lane realizes on the fused
+forms** (first time recorded) and wins or ties most shapes; `d1` vs `d2` sync is shape-dependent (kept as
+measured); `k4 g8k` / `g16k` are unrepresentable at K=3840 (split-K slice not a multiple of the mma K-step).
 
-## TODO(session): fill in sweep results, tail results, rms_norm, 4090, serving A/B
+**RTX 5090 recorded** (std / [fm], x = same-run torch-unfused eager ÷ emmy):
+
+| shape | std µs (x) | fm µs (x) | vs canonical twin's recorded x |
+|---|---|---|---|
+| norm_q_proj.m32.lin | 26.5 (0.77) | 24.2 (0.84) | 0.68 |
+| norm_kv_proj.m32.lin | 18.4 (0.78) | 18.2 (0.79) | 0.60 |
+| norm_q_proj_global.m32.lin | 36.5 (0.85) | 30.6 (**1.01**) | 0.89 |
+| norm_kv_proj_global.m32.lin | 13.3 (0.77) | 12.7 (0.81) | 0.50 |
+| mlp_geglu.m32.lin | 178.6 (0.93) | 172.5 (**0.97**) | 0.92 |
+
+**RTX 4090 recorded**: norm_q_proj.m32.lin std 26.4 (0.84; fm loses), norm_kv_proj.m32.lin 18.2/17.2
+(0.90/**0.95**), norm_q_proj_global.m32.lin 40.7/36.3 (1.11/**1.25** — beats the torch unfused pair),
+norm_kv_proj_global.m32.lin 12.7/12.6 (0.70/0.71), mlp_geglu.m32.lin std 285.0 (**0.99**; fm loses).
+
+The 5090's canonical fused entries were re-recorded at the same-regime triage medians so the layout-blind
+shared buckets compare like with like (stale cool-card µs let the canonical config shadow the fresh `.lin`
+twin). Deploy verified on both cards: greedy resolves the recorded `.lin` configs from the tier.
+
+Note the plan's step-1 exit (norm_* ≥0.9×) is met only on q_proj_global; the decode norm→q/kv fused forms
+still lose 15–25% to torch's unfused pair on the 5090 (they lose the same on the canonical layout — a
+structural computed-A decode residual, not a layout residue). What the goldens now anchor is the *serving*
+fused-vs-cut decision with honest fused evidence — and the misdeploy guard (sm_89 cold greedy picked `w1x1`
+tiles at 0.08–0.28× on these forks).
+
+## Cut goldens re-recorded (`mlp_geglu.*.cut`)
+
+Beyond the recognize-side pin fix, the pinned-row integrity gate needed a rule: a realized cut leaves NO
+`PLACE@cone` stamp on its component kernels (the halves re-enter `010` fresh), so the pin read "realized
+(off)" and refused the row. Every non-cut sibling of a cone fork stamps `PLACE@cone=fuse`, so off-only
+evidence now passes the `cut` pin (a dropped pin that fell back to any fused/coop form still flags).
+Re-records: 4090 `dynM.cut` 1098.3 → **890.8** (eager 910.2, 0.83 → 1.02×); 4090 `m256.cut` unchanged
+(415 live ≈ 416.3 recorded); 5090 re-records below.
+
+## Step 3 — canonical std tail (manual `--ab` neighborhoods, 3 reps, 5090)
+
+Recorded (>3% std-lane wins; fm entries untouched — every one re-confirmed at 1.14–1.49× live):
+
+- `k_proj_global.m256.lin` std: `w2x4/f2x4/k2 g8k d2/tma/ring` — 12.4 → **10.7 µs (1.15×**, was 0.99 live) —
+  the doubled N-warp split (`w2x4`, the fm winner's geometry) transfers to the std atom.
+- `mlp_ch.dynM` std: transport flip `d2/cp/ring → d2/tma/ring` on the same `w4x1/f4x8/k2` tile — 367.0 →
+  **333.5 µs (0.95×**, was 0.86 live). The cp preference was tuned pre-#406-era; TMA now wins this shape too.
+- `mlp_gate_up_split.m256` std: `w2x2/f4x8/k2 g4k` (halved bk, doubled split) — 191.5 → **178.8 µs (0.85×**,
+  was 0.79 live). Still the worst std tail shape; the rest of its neighborhood loses.
+
+No change (live golden already best-in-neighborhood): `q_proj.m256` (1.00× live), `o_proj.s2048` (1.00),
+`o_proj_global.s2048` (0.96), `mlp_gate_up.s2048` (0.93; the w4x2/f2x4 neighbor is +2%, below threshold),
+`kv_proj.m256` (0.89–0.90 ceiling), `k_proj_global[.dynM]` (0.90 ceiling), `mlp_down.dynM.lin` (0.92),
+`o_proj_global.dynM.lin` (0.91). The std residual on these is the ordinary std-vs-fm atom gap — every shape's
+fm sibling is at 1.14× or better, so the deployable lane is already ahead of cuBLAS.
+
+## Step 2 — hd512 flash (timeboxed audit, no code)
+
+Triage confirms the standing picture: the pinned hd512 goldens run 0.86–0.92 live, but cold greedy misdeploys
+the static shape at 0.50× (the cold-unreachable enumeration gap; `eval golden --kernel attention.hd512` shows
+zero matchable rows). The fix (porting the hd256 tile-skip/split-KV/alternating-staging levers + symbolic
+split-KV for dynM) is new lowering, deferred to its own session per the original plan.
+
+## Step 4 — rms_norm probes (5090)
+
+The plan's cheap probe hit: `rms_norm.k3840.m32` REDUCE **b256 → b512 = 5.6 → 3.6 µs (0.73 → 1.13×)** — the
+class-4 "launch-overhead outlier" was actually under-threaded (32 rows × 512 threads covers K=3840 with fewer
+serial folds per thread). b128/b64 lose badly; `w32` is not a REDUCE token (vocab is g<n>/b<n>/r<n>). The
+M=512 twins (`k3840`, `k3840.dynM`) stay b256 (b512 ties at 6.8–6.9 vs 6.7 — no change); their 0.91 live is
+the bandwidth floor. Deploy verified (greedy resolves b512 from the tier).
+
+## 5090 cut re-records (with the pin fixes)
+
+- `mlp_geglu.dynM.cut`: 1177.6/597.3 (**0.51×**, the known crude stale pin) → **690.4/626.8 (0.91×)**.
+- `mlp_geglu.m256.cut`: 350.2/326.0 (0.93×) → 372.7/329.6 (0.88× — same-regime refresh; pinned total matches
+  greedy exactly, the cut is the deployed form).
+
+## TODO(session): serving A/B, 4090 wrap

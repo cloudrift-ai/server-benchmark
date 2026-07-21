@@ -639,6 +639,13 @@ def _unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | No
             continue
         if not others and not saw_off and get(fam) is not None:
             continue  # registered family, no stamp anywhere — ungateable (see docstring)
+        if fam == "PLACE" and str(want) == "cut" and not others:
+            # A realized CUT leaves no ``PLACE@cone`` stamp: ``020_cut_edge`` rewrites the picked
+            # row into producer + consumer halves that ``010`` re-enters fresh (their kernels spell
+            # only the ordinary off-valued ``PLACE`` fill). Every NON-cut sibling of a cone fork
+            # stamps ``PLACE@cone=fuse`` on its rows, so a dropped pin that fell back to any fused /
+            # coop form surfaces in ``others`` and still flags; off-only evidence means the cut ran.
+            continue
         ran = "/".join(others) if others else ("(off)" if saw_off else "(unset)")
         misses.append(f"{name}={want} realized {ran}")
     return f"unreproducible pin: {'; '.join(misses)}" if misses else None

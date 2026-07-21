@@ -1480,8 +1480,8 @@ configs:
     inter: 15360
     dtype: 'fp16'
     knobs: {PLACE@cone: 'cut'}
-    emmy_us: 350.2
-    cublas_us: 326.0
+    emmy_us: 372.7
+    cublas_us: 329.6
   # The CUT (PLACE@cone=cut) consumer: ONE single-channel matmul (M=256, N=15360, K=3840) — the gate OR up half
   # after 020_cut_edge splits the multi-fold cone. A single-fold matmul reads a clean gmem A, so it rides
   # d2/tma/ring and BEATS cuBLAS in the FAST_MATH regime (f16acc 125.6 = 1.20x cuBLAS 151);
@@ -1498,9 +1498,9 @@ configs:
     N: 15360
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 187.3
-    cublas_us: 151.0
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 178.8
+    cublas_us: 152.8
   - kernel: matmul
     name: gemma4_12b.mlp_gate_up_split.m256
     M: 256
@@ -1598,9 +1598,9 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f2x4/k2', REDUCE: 'g4k', STAGE: 'd2/tma/ring', WSPEC: '', RASTER: ''}
-    emmy_us: 12.4
-    cublas_us: 11.8
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x4/k2', REDUCE: 'g8k', STAGE: 'd2/tma/ring', WSPEC: '', RASTER: ''}
+    emmy_us: 10.7
+    cublas_us: 12.3
   - kernel: matmul
     name: gemma4_12b.q_proj_global.m256.lin
     M: 256
@@ -1625,8 +1625,8 @@ configs:
     name: gemma4_12b.rms_norm.k3840.m32
     M: 32
     K: 3840
-    knobs: {TILE: '', REDUCE: 'b256', STAGE: '', WSPEC: '', RASTER: ''}
-    emmy_us: 5.6
+    knobs: {TILE: '', REDUCE: 'b512', STAGE: '', WSPEC: '', RASTER: ''}
+    emmy_us: 3.6
     cublas_us: 4.1
     # lane: std, pinned: {'RASTER': '', 'REDUCE': 'b256', 'STAGE': '', 'TILE': '', 'WSPEC': ''}
   - kernel: rms_norm
@@ -1783,8 +1783,8 @@ configs:
     dtype: 'fp16'
     dynamic: true
     knobs: {PLACE@cone: 'cut'}
-    emmy_us: 1177.6
-    cublas_us: 597.3
+    emmy_us: 690.4
+    cublas_us: 626.8
   # GeGLU dyn-cut fragments (see the 4090 file's fragment note):
   - kernel: matmul
     name: gemma4_12b.mlp_ch.dynM
@@ -1793,9 +1793,9 @@ configs:
     K: 3840
     dtype: 'fp16'
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f4x8/k2', REDUCE: '', STAGE: 'd2/cp/ring', WSPEC: '', RASTER: ''}
-    emmy_us: 357.7
-    cublas_us: 289.5
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f4x8/k2', REDUCE: '', STAGE: 'd2/tma/ring', WSPEC: '', RASTER: ''}
+    emmy_us: 333.5
+    cublas_us: 315.6
     # lane: std, pinned: {'TILE': 'a:mma_m16n8k16_f16_f32/w4x1/f4x8/k2', 'STAGE': 'd2/cp/ring', 'REDUCE': ''}
   - kernel: matmul
     name: gemma4_12b.mlp_ch.dynM

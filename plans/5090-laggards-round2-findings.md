@@ -130,4 +130,32 @@ the bandwidth floor. Deploy verified (greedy resolves b512 from the tier).
 - `mlp_geglu.m256.cut`: 350.2/326.0 (0.93×) → 372.7/329.6 (0.88× — same-regime refresh; pinned total matches
   greedy exactly, the cut is the deployed form).
 
-## TODO(session): serving A/B, 4090 wrap
+## E2e serving A/B — gemma-4-12B, emmy vs stock vLLM (local 5090, 2026-07-20)
+
+The 2026-07-18 protocol verbatim: vLLM 0.23.0, fp16, `--max-model-len 512 --max-num-batched-tokens 256
+--gpu-memory-utilization 0.90`, concurrency 32, 64 prompts, seed 0. emmy arm: repo goldens (this branch) +
+`_tune/decode-twin-readiness/twins.db`, EMPTY online prior, `EMMY_GEN_DECODE_BUCKET=32` (FULL_DECODE_ONLY,
+capture sizes to 32). stock arm: `--stock --language-model-only`.
+
+⚠ Workflow note: the FIRST emmy run silently used the **default decode bucket 16** (config.py default) — at
+concurrency 32 decode ran over-bucket/uncaptured and read 12.8 req/s / TPOT 37.7. The whole m32 golden set
+assumes bucket 32; always set `EMMY_GEN_DECODE_BUCKET=32` for this protocol.
+
+| workload | arm | req/s | out tok/s | TTFT mean/med (ms) | TPOT mean/med (ms) |
+| --- | --- | --: | --: | --: | --: |
+| in-8 / out-64 (decode) | stock | **25.70** | **1645** | 103 / 95 | **18.1 / 18.1** |
+| in-8 / out-64 (decode) | emmy | 22.69 | 1452 | 102 / **93** | 20.7 / 20.8 |
+| in-256 / out-64 (mixed) | stock | **14.27** | **913** | **461 / 219** | **25.9 / 28.0** |
+| in-256 / out-64 (mixed) | emmy | 8.33 | 533 | 1257 / 906 | 29.0 / 29.3 |
+
+Vs the 2026-07-18 A/B (stock reproduces exactly — 25.70/18.1 and 14.27/28.0 — so the deltas are the emmy arm):
+
+- **Decode**: emmy TPOT 22.7 → **20.7 ms** (−9%), req/s 20.86 → **22.69** (+9%); the TPOT ratio to stock
+  narrows 1.26× → **1.14×**. TTFT median 93 vs 95 — tied. This is the async-B staging + the m32 `.lin` fused
+  goldens deploying in the decode twins.
+- **Mixed/prefill**: emmy req/s 7.11 → **8.33** (+17%), median TTFT 2332 → **906 ms** (−61%), TPOT 32.0 →
+  29.3 — and this arm ran the SAME empty-online config that read 2332 ms before, so the improvement is the
+  golden tier (staged `.lin` prefill forms + tail retune), not prior tuning.
+- **Honest verdict**: stock still leads both workloads (decode 0.88×, mixed 0.58× req/s). The residual is the
+  known research-class pair — the large-M computed-A prefill pipeline and the native-decode gap — plus hd512
+  cold-unreachability, all documented above; none of it is `.lin`-layout residue anymore.

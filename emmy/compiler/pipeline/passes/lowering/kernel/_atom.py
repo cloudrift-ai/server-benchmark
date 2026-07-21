@@ -487,7 +487,7 @@ def _sync_operands(
     clamp-reads the overhanging rows in-bounds (the A fill σ and the stat prologue σ — a duplicate
     of the last valid row is computed and its store discarded by the ``RegStore`` guard, the same
     contract the copy transports follow)."""
-    m_name, n_name, k_name = c.m_axis.name, c.n_axis.name, c.k_axis.name
+    m_name, k_name = c.m_axis.name, c.k_axis.name
     row_base, col_base = _tile_base(mn)
     pro, cell, stats = c.stat_prologue()
 

@@ -30,11 +30,10 @@ from emmy.compiler.backend import BenchmarkResult, LaunchTime, RunResult
 from emmy.compiler.backend.cuda import _tma, nvcc
 from emmy.compiler.backend.cuda._planner import compute_live_intervals, plan_offsets
 from emmy.compiler.backend.cuda.dtype import cupy_dtype
-from emmy.compiler.dim import Dim
-from emmy.compiler.dtype import DataType
-from emmy.compiler.graph import Graph, Node
-from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.cuda import CudaOp, TmaDescMeta
+from emmy.compiler.backend.plan import BufferSpec as _Buffer
+from emmy.compiler.backend.plan import ExecutionPlan, KernelSpec, plan_from_graph
+from emmy.compiler.backend.plan import LaunchSpec as _Launch
+from emmy.compiler.graph import Graph
 
 if TYPE_CHECKING:
     import cupy as cp
@@ -65,43 +64,6 @@ def _ensure_dynamic_smem_attr(kernel: cp.RawKernel, smem_bytes: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class _Buffer:
-    name: str
-    # ``Dim``-valued shape. Static dims carry a ``Literal`` expr, atomic
-    # symbolic carry a ``Var``, composite (e.g. ``S * 2`` from a reshape
-    # or cat) carry a ``BinaryExpr``. ``resolve_shape`` calls ``expr.eval``
-    # to turn any of those into a runtime int.
-    shape: tuple[Dim, ...]
-    dtype: DataType
-    role: str  # "input" | "constant" | "output" | "scratch"
-
-    @property
-    def is_symbolic(self) -> bool:
-        return any(not d.is_static for d in self.shape)
-
-    def resolve_shape(self, sym_values: dict[str, int]) -> tuple[int, ...]:
-        return tuple(int(d.expr.eval(sym_values)) for d in self.shape)
-
-
-def _buffers(graph: Graph) -> list[_Buffer]:
-    return [
-        _Buffer(name=nid, shape=tuple(node.output.shape), dtype=node.output.dtype, role=graph.node_role(nid))
-        for nid, node in graph.nodes.items()
-    ]
-
-
-def _constant_values(graph: Graph) -> dict[str, float]:
-    return {nid: op.value for nid, op in graph.constant_ops() if op.value is not None}
-
-
-def _runtime_constants(graph: Graph):
-    """``{nid: Expr}`` for each ``ConstantOp`` bound to a runtime ``context_value`` (a value
-    set by the symbolic context — e.g. a dynamic mean's divisor = the runtime reduce-axis
-    size). Resolved to a concrete float per run from ``sym_values``."""
-    return {nid: op.context_value for nid, op in graph.constant_ops() if op.context_value is not None}
-
-
 def _resolved_constants(compiled: _Compiled, sym_values: dict[str, int]) -> dict[str, float]:
     """The constant-value map for this run: the static constants plus each runtime
     ``context_value`` constant evaluated at ``sym_values`` (``float(seq_len)``)."""
@@ -110,38 +72,9 @@ def _resolved_constants(compiled: _Compiled, sym_values: dict[str, int]) -> dict
     return {**compiled.constants, **{nid: float(expr.eval(sym_values)) for nid, expr in compiled.runtime_constants.items()}}
 
 
-def _launches(graph: Graph) -> list[Node]:
-    nodes: list[Node] = []
-    for nid in graph.topological_order():
-        node = graph.nodes[nid]
-        if isinstance(node.op, (InputOp, ConstantOp)):
-            continue
-        if not isinstance(node.op, CudaOp):
-            raise TypeError(f"CudaBackend: node {nid!r} has non-CudaOp {type(node.op).__name__!r}; lowering must produce Graph[CudaOp].")
-        nodes.append(node)
-    return nodes
-
-
 # ---------------------------------------------------------------------------
 # Compiled program: RawKernels + buffer plan + launch list
 # ---------------------------------------------------------------------------
-
-
-@dataclass
-class _Launch:
-    node_id: str
-    kernel_name: str
-    arg_names: tuple[str, ...]
-    # ``grid`` / ``block`` are per-dim ``GridDimSpec`` tuples whose factors may
-    # include symbolic axis names — resolved at launch time via the
-    # parent ``_Compiled.symbolic_bindings`` env. Static kernels collapse
-    # to single-int factors (``((128,), (1,), (1,))``).
-    grid: tuple
-    block: tuple
-    smem_bytes: int
-    zero_outputs: tuple[str, ...]
-    tma_descriptors: tuple[TmaDescMeta, ...] = ()
-    runtime_args: tuple[str, ...] = ()
 
 
 @dataclass
@@ -175,55 +108,42 @@ class _Compiled:
     runtime_constants: dict = field(default_factory=dict)
 
 
-def _compile(graph: Graph) -> _Compiled:
-    bufs = _buffers(graph)
-    buf_by_name = {b.name: b for b in bufs}
-    constants = _constant_values(graph)
-    launches_nodes = _launches(graph)
-    symbolic_bindings = graph.symbolic_bindings()
-    symbolic_hints = graph.symbolic_hints()
-    runtime_constants = _runtime_constants(graph)
-
-    # ``nvcc.load_function`` returns a cupy ``Function`` (or a ``RawKernel`` on
-    # NVRTC fallback) — both launch-callable and smem-attr settable.
-    kernels: dict[str, object] = {}
-    seen_source: dict[str, str] = {}
-    launches: list[_Launch] = []
-    for node in launches_nodes:
-        op: CudaOp = node.op
-        kname = op.kernel_name
-        if kname not in kernels:
-            prev_src = seen_source.get(kname)
-            if prev_src is not None and prev_src != op.kernel_source:
-                raise ValueError(f"kernel name {kname!r} used by two distinct sources")
-            seen_source[kname] = op.kernel_source
-            uses_tma = bool(op.tma_descriptors)
-            options = _nvrtc_options(uses_tma=uses_tma)
-            # Compile via offline nvcc (faster, cache-warmable) with an NVRTC
-            # fallback; returns a Function usable exactly like a RawKernel.
-            kernels[kname] = nvcc.load_function(op.kernel_source, kname, options, uses_tma=uses_tma)
-        launches.append(
-            _Launch(
-                node_id=node.id,
-                kernel_name=kname,
-                arg_names=tuple(op.arg_order),
-                grid=op.grid,
-                block=op.block,
-                smem_bytes=op.smem_bytes,
-                zero_outputs=tuple(op.zero_outputs),
-                tma_descriptors=tuple(op.tma_descriptors),
-                runtime_args=tuple(getattr(op, "runtime_args", ())),
+def _load_kernel(name: str, spec: KernelSpec):
+    """Obtain one launchable kernel from its :class:`KernelSpec`. A ``binary_key`` (the pack
+    path) loads the content-addressed cubin straight from the cache; otherwise the ``source``
+    compiles through the same cache (``nvcc.load_function``). A key whose cubin has been
+    evicted falls back to the source when present, and errors otherwise — the pack loader
+    pre-checks cubin existence, so hitting this means the cache was cleared mid-boot."""
+    if spec.binary_key is not None:
+        path = nvcc.cubin_cache_dir() / f"{spec.binary_key}.cubin"
+        if path.exists():
+            return nvcc.load_cubin_function(path, name)
+        if spec.source is None:
+            raise RuntimeError(
+                f"kernel {name!r}: cubin {spec.binary_key} is gone from the cache and the plan carries no source — "
+                "regenerate the pack or boot without it (full compile)"
             )
-        )
+    if spec.source is None:
+        raise RuntimeError(f"kernel {name!r}: plan carries neither a source nor a cached cubin")
+    # ``nvcc.load_function`` returns a cupy ``Function`` — launch-callable and
+    # smem-attr settable, compiled via offline nvcc into the content-addressed cache.
+    return nvcc.load_function(spec.source, name, _nvrtc_options(uses_tma=spec.uses_tma), uses_tma=spec.uses_tma)
+
+
+def _load_plan(plan: ExecutionPlan) -> _Compiled:
+    """Materialize the runtime object from a plan: load every kernel (cubin-by-key or
+    source-via-cache), and adopt the plan's pure-data fields as-is."""
+    kernels: dict[str, object] = {name: _load_kernel(name, spec) for name, spec in plan.kernels.items()}
     return _Compiled(
-        bufs=bufs,
-        buf_by_name=buf_by_name,
-        constants=constants,
+        bufs=list(plan.buffers),
+        buf_by_name={b.name: b for b in plan.buffers},
+        constants=dict(plan.constants),
         kernels=kernels,
-        launches=launches,
-        symbolic_bindings=symbolic_bindings,
-        symbolic_hints=symbolic_hints,
-        runtime_constants=runtime_constants,
+        launches=list(plan.launches),
+        symbolic_bindings=dict(plan.symbolic_bindings),
+        symbolic_hints=dict(plan.symbolic_hints),
+        symbolic_caps=dict(plan.symbolic_caps),
+        runtime_constants=dict(plan.runtime_constants),
     )
 
 
@@ -314,7 +234,7 @@ class BufferArena:
     descriptors never dangle. Safe iff programs sharing the arena never run
     concurrently and each program's outputs are consumed before the next program runs
     — the runner's contract. Constants are never pooled (persistent values; weight
-    sharing is ``gen_runner._bind_device_constants``)."""
+    sharing is ``gen_runner._bind_plan_constants``)."""
 
     def __init__(self) -> None:
         self._backings: dict[str, cp.ndarray] = {}
@@ -753,10 +673,24 @@ class CompiledProgram:
         compile_timeout_s: float | None = None,
         arena: BufferArena | None = None,
     ) -> CompiledProgram:
-        """Compile ``graph``, allocate every buffer, pre-build TMA
-        descriptors. ``compile_timeout_s`` bounds the setup phase at a
-        C-call boundary: if NVRTC + alloc + descriptor work overruns,
-        raise ``RuntimeError`` before the caller proceeds to launches
+        """Compile ``graph`` and build — ``plan_from_graph`` + :meth:`build_from_plan`; the
+        graph is never consulted after the projection (one runtime path whether the plan came
+        from a fresh compile or from a stored pack)."""
+        return cls.build_from_plan(plan_from_graph(graph), input_data, compile_timeout_s=compile_timeout_s, arena=arena)
+
+    @classmethod
+    def build_from_plan(
+        cls,
+        plan: ExecutionPlan,
+        input_data: dict[str, np.ndarray] | None = None,
+        *,
+        compile_timeout_s: float | None = None,
+        arena: BufferArena | None = None,
+    ) -> CompiledProgram:
+        """Load every kernel (cubin-by-key or source-via-cache), allocate every
+        buffer, pre-build TMA descriptors. ``compile_timeout_s`` bounds the
+        setup phase at a C-call boundary: if compile + alloc + descriptor work
+        overruns, raise ``RuntimeError`` before the caller proceeds to launches
         so no in-flight kernels are left queued. ``arena`` pools the
         activation buffers + scratch slab across sequentially-run
         programs (see :class:`BufferArena`).
@@ -764,7 +698,7 @@ class CompiledProgram:
         Caller is expected to hold ``gpu_lock()`` around this call and
         every subsequent method on the returned program."""
         t0 = _time_module.monotonic()
-        compiled = _compile(graph)
+        compiled = _load_plan(plan)
         sym_values = _resolve_symbolic(compiled, input_data or {})
         arrays, slab_plan = _allocate(compiled, input_data, arena)
         descs = _prebuild_descriptors(compiled, arrays)

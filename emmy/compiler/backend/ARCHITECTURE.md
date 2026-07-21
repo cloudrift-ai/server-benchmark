@@ -91,6 +91,28 @@ implicates fusion; loop vs CUDA disagreement implicates codegen.**
 See `cuda/ARCHITECTURE.md`. Runs the full lowering chain and dispatches
 kernels via cupy `RawKernel` (NVRTC-compiled).
 
+## Execution plan + pack (`plan.py`, `pack.py`)
+
+`plan.py` defines the **execution plan** — the serializable runtime projection of a lowered `Graph[CudaOp]`:
+buffer specs, scalar/runtime constants, the launch list, symbolic-axis plumbing, kernel refs (source and/or a
+content-addressed cubin-cache key), and per-weight checkpoint bindings (`source_path` + a pack-own load-op
+vocabulary applied with pure numpy). `plan_from_graph` is the seam the whole runtime builds from: after it runs,
+nothing reads the graph again — `CompiledProgram.build(graph)` is exactly `build_from_plan(plan_from_graph(g))`,
+so a plan loaded from disk and a freshly compiled one share one launch path. The JSON form (`plan_to_dict` /
+`plan_from_dict`) carries symbolic shapes and ceil-div grid factors through a tiny self-contained expression
+grammar (`int` literal, `"name"` var, `[op, lhs, rhs]`), deliberately not the compiler's `Expr` classes — the
+on-disk format survives compiler changes; only runtime-contract changes bump `PLAN_FORMAT_VERSION`.
+CUDA-specific launch fields (TMA descriptors) nest under a `"cuda"` key so another backend can add its own
+namespace and its own `build_from_plan` equivalent.
+
+`pack.py` bundles plans on disk: one directory per model × GPU × serving shape holding `manifest.json` (validity
+key + environment tags + provenance + program index) and `plan/<program>.json`. Cubins are **not** copied — plans
+reference the shared `EMMY_CUBIN_CACHE` by content-addressed key, so packs dedupe kernels against each other and
+the docker bake ships pack + cubin cache + model snapshot together. `load_pack` returns `None` on *any*
+disqualifier (format/environment/key mismatch, unparsable plan, evicted cubin) and the caller falls back to the
+full compile — a stale pack costs a recompile, never a wrong result. The serving boot integration
+(`EMMY_PACK_DIR`) lives in `emmy/serving/runner.py`; see `emmy/serving/ARCHITECTURE.md`.
+
 ## Invariants
 
 - The default `Backend.run` must work on any graph where every op has

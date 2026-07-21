@@ -1,9 +1,12 @@
 # vllm-emmy-gemma4 — the prebuilt gemma-4-12B serving image
 
 A release image for one model on one GPU: **gemma-4-12B served by `EmmyGenModel` on an RTX 5090**, with the compiled
-CUDA kernels (**cubins**) and the **HF model snapshot** baked in. Cold-start pays zero `nvcc` compiles and zero HF
-downloads — `docker run --gpus all --ipc=host -p 8000:8000 cloudriftai/vllm-emmy-gemma4:TAG` serves with no
-`HF_TOKEN` and no network dependency on HuggingFace (`HF_HUB_OFFLINE=1` is baked). The plain
+CUDA kernels (**cubins**), the **HF model snapshot**, and the **execution-plan pack**
+(`emmy/compiler/backend/pack.py`) baked in. Cold-start pays zero `nvcc` compiles, zero HF downloads, and — on a
+pack hit — none of the compiler frontend either (no trace / pass pipeline / fork resolution / codegen; boot
+collapses from ~25 min to ~weight-load time) — `docker run --gpus all --ipc=host -p 8000:8000
+cloudriftai/vllm-emmy-gemma4:TAG` serves with no `HF_TOKEN` and no network dependency on HuggingFace
+(`HF_HUB_OFFLINE=1` is baked). The plain
 [`vllm-emmy`](../vllm-emmy/) image stays the general-purpose base (any model, compile-on-boot); this image trades a
 ~35 GB pull (~24 GB of weights on the ~10 GB base) for a deterministic, tokenless boot.
 
@@ -48,6 +51,13 @@ failure** (`warm.sh` exits 1 — with the cubin set still growing, verify's sing
 customer boots would recompile at runtime). The boot-to-boot pick flip is a real compiler bug (fork resolution
 should be deterministic across processes); the fixpoint warm contains it but does not excuse it.
 
+**The pack changes the fixpoint's role.** The online pass also writes the execution-plan pack (`warm/pack`, keyed
+on the model **config hash** + serving shape — not the id/path, precisely so the offline boots share it), and every
+subsequent boot — the offline fixpoint passes, verify, customer boots — loads it: fork picks are frozen in the
+artifact, so the bimodal-pick class vanishes and the fixpoint converges immediately whenever the pack takes. The
+loop stays as a safety net for the case where the pack write was skipped (a weight outside the pack vocabulary) or
+the load falls back — then the old cubin-union behavior is exactly what runs.
+
 ## Files
 
 - `config.env` — the pinned serving config. Every value is cache-key-relevant; it must be **final before warming**
@@ -56,12 +66,16 @@ should be deterministic across processes); the fixpoint warm contains it but doe
   generate --enforce-eager --dtype float16 --hf-overrides EmmyGenModel` + the `GEMMA4_*` config).
 - `warm.sh` — runs the **plain** `vllm-emmy` image on the target GPU with `./warm` mounted at `/opt/emmy`, waits for
   `/health`, issues one completion (covers prefill + decode kernels), stops. Result: `warm/hf` (the model snapshot —
-  the gated download happens here, once, via `HF_TOKEN`) and `warm/cubin` (every compiled kernel).
-- `Dockerfile` — `FROM` the plain image, `COPY warm/hf` + `COPY warm/cubin` to `/opt/emmy`, bakes the config env and
-  `HF_HUB_OFFLINE=1`, entrypoint `serve.sh`. The caches live at **`/opt/emmy`** on purpose: compose/recipes
-  bind-mount the host HF cache over `/root/.cache/huggingface`, which would shadow anything baked there.
+  the gated download happens here, once, via `HF_TOKEN`), `warm/cubin` (every compiled kernel), and `warm/pack`
+  (the execution-plan pack the first boot writes).
+- `Dockerfile` — `FROM` the plain image, `COPY warm/hf` + `COPY warm/cubin` + `COPY warm/pack` to `/opt/emmy`, bakes
+  the config env, `EMMY_PACK_DIR` and `HF_HUB_OFFLINE=1`, entrypoint `serve.sh`. The caches live at **`/opt/emmy`**
+  on purpose: compose/recipes bind-mount the host HF cache over `/root/.cache/huggingface`, which would shadow
+  anything baked there.
 - `verify.sh` — cold-starts the **baked** image with no token, issues one completion, and diffs the cubin file set
   before/after: an empty diff proves 100% cache hit (zero compiles), and the offline boot proves zero downloads.
+  When a pack is baked, it also asserts the boot **hit** it (a silent fallback to the full compile would still pass
+  the cubin check while re-paying the frontend on every customer boot).
 - `warm/` — gitignored; the warm output that the bake copies in.
 
 ## Workflow

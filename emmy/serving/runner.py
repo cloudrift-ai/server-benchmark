@@ -73,16 +73,18 @@ class EmmyForwardRunner:
 
     @classmethod
     def create(cls, model_id: str, max_seq_len: int, dtype_str: str = "float16", batch: int = 1) -> EmmyForwardRunner:
+        import hashlib
+
         import torch
         from transformers import AutoModel
 
-        from emmy.compiler.backend.cuda.backend import CudaBackend
+        from emmy import config
         from emmy.compiler.backend.cuda.program import CompiledProgram
         from emmy.compiler.backend.gpu_lock import gpu_lock
-        from emmy.compiler.loader.binder import bind_constants
-        from emmy.compiler.trace.dynamic import DYNAMIC_DIM_MAX, build_torch_dynamic_shapes, parse_position_specs
-        from emmy.compiler.trace.huggingface import build_causal_mask, build_full_model_wrapper
-        from emmy.compiler.trace.torch import trace_module
+        from emmy.compiler.backend.pack import load_pack, pack_path
+        from emmy.compiler.backend.plan import apply_weight_loads
+        from emmy.compiler.trace.dynamic import DYNAMIC_DIM_MAX
+        from emmy.compiler.trace.huggingface import build_full_model_wrapper
 
         if max_seq_len > DYNAMIC_DIM_MAX:
             raise ValueError(
@@ -101,37 +103,24 @@ class EmmyForwardRunner:
         with torch.device("cpu"):
             model = AutoModel.from_pretrained(model_id, dtype=dtype)
             model.eval()
-            if batch > 1:
-                # Static batched path: ONE fully-static (batch, max_seq_len)
-                # program (the symbolic-seq kernels miscompute batch>1; a static
-                # trace bakes correct batch strides). Each step pads to this shape.
-                logger.info("[serving] tracing STATIC batched (batch=%d, S=%d)...", batch, max_seq_len)
-                wrapper = build_full_model_wrapper(model, max_seq_len, dtype, dynamic=True)
-                example = (
-                    torch.zeros((batch, max_seq_len), dtype=torch.long),
-                    build_causal_mask(max_seq_len, dtype),
-                    torch.arange(max_seq_len).unsqueeze(0).expand(batch, max_seq_len).contiguous(),
-                )
-                graph = trace_module(wrapper, example)  # no dynamic_shapes → fully static
-            else:
-                logger.info("[serving] tracing (dynamic seq_len, example S=%d)...", _TRACE_SEQ)
-                specs = parse_position_specs(
-                    ["seq_len@input_ids:1", "seq_len@attention_mask:2", "seq_len@attention_mask:3", "seq_len@position_ids:1"]
-                )
-                wrapper = build_full_model_wrapper(model, _TRACE_SEQ, dtype, dynamic=True)
-                example = (
-                    torch.zeros((1, _TRACE_SEQ), dtype=torch.long),
-                    build_causal_mask(_TRACE_SEQ, dtype),
-                    torch.arange(_TRACE_SEQ).unsqueeze(0),
-                )
-                graph = trace_module(wrapper, example, dynamic_shapes=build_torch_dynamic_shapes(specs))
+            wrapper = build_full_model_wrapper(model, max_seq_len if batch > 1 else _TRACE_SEQ, dtype, dynamic=True)
 
-        logger.info("[serving] compiling...")
-        compiled = CudaBackend(tune_db="auto").compile(graph)
-        if len(compiled.inputs) != 3:
-            raise RuntimeError(f"expected 3 graph inputs (input_ids, attention_mask, position_ids), got {compiled.inputs}")
-        if len(compiled.outputs) != 1:
-            raise RuntimeError(f"expected 1 graph output (hidden states), got {compiled.outputs}")
+        # Pack lookup: model identity (id + config hash, so a same-config fine-tune shares the
+        # pack) × the serving shape. A hit skips trace + pipeline + fork resolution + codegen;
+        # any mismatch / missing cubin falls back to the full compile below.
+        pack_key = {
+            "kind": "embed-trunk",
+            "model": model_id,
+            "config_sha": hashlib.sha1(model.config.to_json_string().encode()).hexdigest()[:16],
+            "max_seq_len": max_seq_len,
+            "dtype": dtype_str,
+            "batch": batch,
+        }
+        pack_at = pack_path(config.pack_dir(), pack_key) if config.pack_dir() is not None else None
+        plan = None
+        if pack_at is not None:
+            plans = load_pack(pack_at, key=pack_key)
+            plan = plans.get("trunk") if plans is not None else None
 
         # Weight sources in the traced dtype: named_buffers (NOT state_dict)
         # so non-persistent buffers — the wrapper's precomputed rotary
@@ -142,9 +131,25 @@ class EmmyForwardRunner:
             sources[path] = t.detach().cpu().to(torch.float32).numpy().astype(np_dtype, copy=False)
         for path, t in wrapper.named_buffers(remove_duplicate=False):
             sources[path] = t.detach().cpu().to(torch.float32).numpy().astype(np_dtype, copy=False)
-        const_feed = bind_constants(compiled, sources)
 
-        ids_name, mask_name, pos_name = compiled.inputs
+        if plan is not None:
+            logger.info("[serving] pack hit at %s — skipping trace + compile", pack_at)
+            const_feed = {
+                nid: apply_weight_loads(sources[w.source_path], w.load_ops)
+                for nid, w in plan.weights.items()
+                if w.load_ops is not None and w.source_path in sources
+            }
+        else:
+            plan, const_feed = cls._trace_and_compile(wrapper, sources, max_seq_len, dtype, batch)
+            if pack_at is not None:
+                cls._save_pack(pack_at, plan, pack_key, model_id)
+
+        if len(plan.inputs) != 3:
+            raise RuntimeError(f"expected 3 graph inputs (input_ids, attention_mask, position_ids), got {plan.inputs}")
+        if len(plan.outputs) != 1:
+            raise RuntimeError(f"expected 1 graph output (hidden states), got {plan.outputs}")
+
+        ids_name, mask_name, pos_name = plan.inputs
         if batch > 1:
             # Static (batch, max_seq_len) buffers. The causal mask + position_ids
             # are request-independent (full causal at max_seq_len, arange positions),
@@ -164,7 +169,8 @@ class EmmyForwardRunner:
                 pos_name: np.arange(max_seq_len, dtype=np.int64).reshape(1, max_seq_len),
             }
         with gpu_lock():
-            program = CompiledProgram.build(compiled, {**const_feed, **feed})
+            program = CompiledProgram.build_from_plan(plan, {**const_feed, **feed})
+        output_name = plan.outputs[0]
         del model, wrapper, sources, const_feed
         logger.info(
             "[serving] ready: %d launches, max_seq_len=%d, batch_cap=%d",
@@ -175,11 +181,67 @@ class EmmyForwardRunner:
         return cls(
             program=program,
             input_names=(ids_name, mask_name, pos_name),
-            output_name=compiled.outputs[0],
+            output_name=output_name,
             np_dtype=np_dtype,
             max_seq_len=max_seq_len,
             batch_cap=batch,
         )
+
+    @classmethod
+    def _trace_and_compile(cls, wrapper, sources: dict[str, np.ndarray], max_seq_len: int, dtype, batch: int):
+        """The full frontend: torch.export trace + CUDA pass pipeline, projected to an
+        execution plan, plus the weight feed bound from the live wrapper."""
+        import torch
+
+        from emmy.compiler.backend.cuda.backend import CudaBackend
+        from emmy.compiler.backend.plan import plan_from_graph
+        from emmy.compiler.loader.binder import bind_constants
+        from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs
+        from emmy.compiler.trace.huggingface import build_causal_mask
+        from emmy.compiler.trace.torch import trace_module
+
+        with torch.device("cpu"):
+            if batch > 1:
+                # Static batched path: ONE fully-static (batch, max_seq_len)
+                # program (the symbolic-seq kernels miscompute batch>1; a static
+                # trace bakes correct batch strides). Each step pads to this shape.
+                logger.info("[serving] tracing STATIC batched (batch=%d, S=%d)...", batch, max_seq_len)
+                example = (
+                    torch.zeros((batch, max_seq_len), dtype=torch.long),
+                    build_causal_mask(max_seq_len, dtype),
+                    torch.arange(max_seq_len).unsqueeze(0).expand(batch, max_seq_len).contiguous(),
+                )
+                graph = trace_module(wrapper, example)  # no dynamic_shapes → fully static
+            else:
+                logger.info("[serving] tracing (dynamic seq_len, example S=%d)...", _TRACE_SEQ)
+                specs = parse_position_specs(
+                    ["seq_len@input_ids:1", "seq_len@attention_mask:2", "seq_len@attention_mask:3", "seq_len@position_ids:1"]
+                )
+                example = (
+                    torch.zeros((1, _TRACE_SEQ), dtype=torch.long),
+                    build_causal_mask(_TRACE_SEQ, dtype),
+                    torch.arange(_TRACE_SEQ).unsqueeze(0),
+                )
+                graph = trace_module(wrapper, example, dynamic_shapes=build_torch_dynamic_shapes(specs))
+
+        logger.info("[serving] compiling...")
+        compiled = CudaBackend(tune_db="auto").compile(graph)
+        return plan_from_graph(compiled), bind_constants(compiled, sources)
+
+    @staticmethod
+    def _save_pack(pack_at, plan, pack_key: dict, model_id: str) -> None:
+        """Best-effort pack write after a full compile — a failure costs nothing but the log
+        line (the next boot recompiles). Skipped when any weight can't be expressed in the
+        pack vocabulary (a pack-hit boot could then not rebind it)."""
+        from emmy.compiler.backend.pack import save_pack
+
+        if any(w.load_ops is None for w in plan.weights.values()):
+            logger.warning("[serving] not writing pack: a weight load-op chain is outside the pack vocabulary")
+            return
+        try:
+            save_pack(pack_at, {"trunk": plan}, key=pack_key, provenance={"model": model_id})
+        except Exception:  # noqa: BLE001 — the pack is an optimization, never a boot blocker
+            logger.warning("[serving] pack write failed at %s", pack_at, exc_info=True)
 
     @property
     def hidden_size(self) -> int:

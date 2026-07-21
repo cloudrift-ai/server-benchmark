@@ -27,7 +27,7 @@ def test_run_device_inside_outer_capture_replays_live():
 
     torch.manual_seed(0)
     wrapper = torch.nn.Linear(16, 16, bias=False).to(torch.float16).eval()
-    prog = _compile_split(wrapper, [torch.zeros(4, 16, dtype=torch.float16)], None, np.dtype("float16"))
+    prog, _ = _compile_split(wrapper, [torch.zeros(4, 16, dtype=torch.float16)], None, np.dtype("float16"))
 
     x = torch.randn(4, 16, dtype=torch.float16, device="cuda")
     ref0 = prog.run_device([x])[0].clone()  # uncaptured baseline (also warms the program)

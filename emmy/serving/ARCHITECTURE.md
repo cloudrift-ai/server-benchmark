@@ -223,7 +223,12 @@ Recorded follow-ups, in impact order:
   **generative** path no longer needs it: `run_device` is capture-aware and `serve --generate` defaults to
   whole-step decode graphs (see `gen_runner.py` above).
 - Startup compiles the whole model (~1–2 min for 0.6B warm-cubin-cache; first boot pays nvcc). `EMMY_CUBIN_CACHE`
-  persistence across container restarts is what keeps reboots fast.
+  persistence across container restarts is what keeps reboots fast. **`EMMY_PACK_DIR`** cuts the rest of the warm
+  boot: `EmmyForwardRunner.create` keys an execution-plan pack (`compiler/backend/pack.py`) on model id + config
+  hash + serving shape — a hit loads binary-keyed plans (`CompiledProgram.build_from_plan`) and skips trace, pass
+  pipeline, fork resolution, and codegen entirely (weights still bind from the checkpoint via the plan's
+  `source_path` refs); a miss compiles in full and writes the pack for the next boot. Any mismatch — retune under
+  a different config, nvcc/toolkit change, evicted cubin — silently falls back to the full compile.
 - The shared buffer set is allocated at `max_seq_len` (`--max-model-len`); every accepted request (S ≤ `max_seq_len`)
   uses the captured-graph path. The S²-attention scratch dominates that allocation (0.6B at 4096 ≈ 15 GB), so lower
   `--max-model-len` for bigger models / smaller cards.

@@ -20,6 +20,7 @@ FROM ${BASE_IMAGE}
 
 ENV HF_HOME=/opt/emmy/hf \
     EMMY_CUBIN_CACHE=/opt/emmy/cubin \
+    EMMY_PACK_DIR=/opt/emmy/pack \
     HF_HUB_OFFLINE=1
 
 # Weights + tokenizer + config (the HF snapshot — per-tensor identical, but resharded by
@@ -33,6 +34,11 @@ COPY warm/hf_parts/p1 /opt/emmy/hf
 COPY warm/hf_parts/p2 /opt/emmy/hf
 COPY warm/hf_parts/p3 /opt/emmy/hf
 COPY warm/cubin /opt/emmy/cubin
+# The execution-plan pack (compiler/backend/pack.py) — written by the warm run's first
+# boot. A pack-hit boot skips the whole compiler frontend (trace / pipeline / fork
+# resolution / codegen), collapsing the ~25 min gemma-4 cold start to ~weight-load time;
+# on any mismatch the runner silently falls back to the full (cubin-cached) compile.
+COPY warm/pack /opt/emmy/pack
 
 # The pinned serving config — passed by make from config.env (the single source; these
 # values are part of the cubin cache key, so they must match the warm run exactly).

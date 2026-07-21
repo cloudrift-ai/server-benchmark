@@ -24,7 +24,12 @@ arg_order).
 
 ## Dispatch (`program.py`)
 
-`_compile(graph) → _Compiled` walks the lowered graph:
+The graph is first projected to an **execution plan** (`plan_from_graph`, `../plan.py` — buffer specs, constants,
+launch list, symbolic plumbing, kernel + weight refs; see `../ARCHITECTURE.md`), and `_load_plan(plan) → _Compiled`
+materializes the runtime object from it. `CompiledProgram.build(graph)` is exactly
+`build_from_plan(plan_from_graph(graph))` — the pack path (`../pack.py`) enters at `build_from_plan` with a plan
+read from disk whose kernels reference cubins by content-addressed cache key (`nvcc.load_cubin_function` — no
+codegen, no nvcc), and both paths share every line downstream. The projection:
 
 - Classifies each node as `input` / `constant` / `output` / `scratch`
   from `graph.inputs` / `ConstantOp` membership / `graph.outputs`.

@@ -912,7 +912,7 @@ def _resolve_sync_stage(c: Contraction, budget: int = STATIC_SMEM_CAP, want_dept
     the 48 KiB smem budget: the A/B operand slabs plus one fp32 row per bridged statistic
     (``sync_stat_fill``'s decls — the same ``Contraction.stat_prologue`` seam the materializer
     fills through). ``want_depth >= 2`` is the **asymmetric B-only prefetch ring**: only the
-    canonical-B cp.async slabs ring (their copies for chunk ``i+d-1`` fly under chunk ``i``'s
+    B cp.async slabs ring (their copies for chunk ``i+d-1`` fly under chunk ``i``'s
     compute fill AND drain), while the compute-filled A slab and the stat rows stay
     single-buffer — ringing a compute fill buys no overlap (it runs on the drain's own
     threads). Measured on the gemma gate_up fused edge at M=512 (5090) the B-only ring loses
@@ -920,8 +920,9 @@ def _resolve_sync_stage(c: Contraction, budget: int = STATIC_SMEM_CAP, want_dept
     (3 → 2 CTAs/SM), the same cliff that killed the historical full-slab ring — but at decode
     M (tile_m ≤ 32) the A slab + stat rows are tiny and the tradeoff inverts, so
     :func:`_computed_a_rows` enumerates ``d1`` and ``d2`` as fork siblings (measured per
-    shape) and a ``STAGE`` pin's depth stays authoritative. A transposed-B
-    (all-sync) pipeline has nothing async to overlap and stays single-buffer. ``budget`` is the
+    shape) and a ``STAGE`` pin's depth stays authoritative. A transposed B rides the same
+    async B fills through its N-major slab (``_sync_operands`` — its own gmem orientation, K
+    stride-1), so the ring is enumerable on the serving ``F.linear`` fused edges too. ``budget`` is the
     device's per-block dynamic-smem opt-in cap (``ctx.max_dynamic_smem`` — the backend declares
     an ``extern __shared__`` pool and sets the func attribute past the 48 KiB static cap),
     falling back to the static cap when no context reaches the schedule."""
@@ -937,7 +938,7 @@ def _resolve_sync_stage(c: Contraction, budget: int = STATIC_SMEM_CAP, want_dept
     stat_bytes = len(stats) * c.m.tile * 4
     if a_bytes + b_bytes + stat_bytes > budget:
         return None
-    depth = want_depth if want_depth >= 2 and not c.b_trans and a_bytes + stat_bytes + want_depth * b_bytes <= budget else 1
+    depth = want_depth if want_depth >= 2 and a_bytes + stat_bytes + want_depth * b_bytes <= budget else 1
     return Stage(depth=depth, transport="sync", smem=(c.a_name,), bk_elems=bk_elems)
 
 

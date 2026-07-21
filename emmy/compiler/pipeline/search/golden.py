@@ -437,6 +437,11 @@ class NormLinearGoldenConfig(GoldenConfig):
     H: int
     N: int
     dtype: str = "fp16"  # a computed-A contraction is a warp mma (fp16/bf16); fp32 has no fused form
+    # The serving Linear layout: W given ``(N, H)``, contracted via ``F.linear`` — the fused edge a
+    # SERVED model actually deploys (its ``b_trans`` channels stage N-major under the sync
+    # transport's async fills). Same layout-blind ShapeKey as the canonical twin
+    # (:class:`MatmulGoldenConfig.trans_b`'s caveat applies): keep BOTH layout twins recorded.
+    trans_b: bool = False
 
     def __post_init__(self):
         self._require_dynamic_hint(self.M)
@@ -447,12 +452,9 @@ class NormLinearGoldenConfig(GoldenConfig):
 
     def snippet(self) -> str:
         tdt = {"fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16", "fp32": ""}[self.dtype]
-        return (
-            f"nw = torch.randn({self.H}{tdt})\n"
-            f"w = torch.randn({self.H},{self.N}{tdt})\n"
-            f"x = torch.randn({self.M},{self.H}{tdt})\n"
-            f"F.rms_norm(x,({self.H},),nw) @ w"
-        )
+        w_decl = f"w = torch.randn({self.N},{self.H}{tdt})\n" if self.trans_b else f"w = torch.randn({self.H},{self.N}{tdt})\n"
+        contract = f"F.linear(F.rms_norm(x,({self.H},),nw), w)" if self.trans_b else f"F.rms_norm(x,({self.H},),nw) @ w"
+        return f"nw = torch.randn({self.H}{tdt})\n{w_decl}x = torch.randn({self.M},{self.H}{tdt})\n{contract}"
 
     def flops(self) -> float:
         return 2.0 * self.M * self.N * self.H  # the contraction; the norm/rsqrt prologue is extra (stays an underestimate)
@@ -500,6 +502,9 @@ class MlpGeGluGoldenConfig(GoldenConfig):
     H: int
     inter: int
     dtype: str = "fp16"  # a computed-A contraction is a warp mma (fp16/bf16)
+    # The serving Linear layout (gate/up given ``(inter, H)``, contracted via ``F.linear``) — see
+    # :class:`NormLinearGoldenConfig.trans_b`; keep BOTH layout twins recorded.
+    trans_b: bool = False
 
     def __post_init__(self):
         self._require_dynamic_hint(self.M)
@@ -510,12 +515,18 @@ class MlpGeGluGoldenConfig(GoldenConfig):
 
     def snippet(self) -> str:
         tdt = {"fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16", "fp32": ""}[self.dtype]
+        shape = f"{self.inter},{self.H}" if self.trans_b else f"{self.H},{self.inter}"
+        combine = (
+            "(lambda r: F.gelu(F.linear(r, wg), approximate='tanh') * F.linear(r, wu))"
+            if self.trans_b
+            else "(lambda r: F.gelu(r @ wg, approximate='tanh') * (r @ wu))"
+        )
         return (
-            f"wg = torch.randn({self.H},{self.inter}{tdt})\n"
-            f"wu = torch.randn({self.H},{self.inter}{tdt})\n"
+            f"wg = torch.randn({shape}{tdt})\n"
+            f"wu = torch.randn({shape}{tdt})\n"
             f"nw = torch.randn({self.H}{tdt})\n"
             f"x = torch.randn({self.M},{self.H}{tdt})\n"
-            f"(lambda r: F.gelu(r @ wg, approximate='tanh') * (r @ wu))(F.rms_norm(x,({self.H},),nw))"
+            f"{combine}(F.rms_norm(x,({self.H},),nw))"
         )
 
     def flops(self) -> float:

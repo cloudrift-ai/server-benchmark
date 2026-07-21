@@ -696,7 +696,10 @@ and gmem walk), which is why a golden meant to decide a served model's linear fo
 `F.linear` snippet. The two layouts share one ShapeKey on purpose: at a fork the shared bucket sorts by µs, so a
 canonical entry (the harness/eval truth) and a `trans_b` entry (the serving truth) coexist under one shape — keep
 BOTH current, since with staging realizable on either layout a stale twin's config now deploys cross-layout with its
-foreign µs (the layout signal in the stamped `S_*` features / ShapeKey still does not exist).
+foreign µs (the layout signal in the stamped `S_*` features / ShapeKey still does not exist). The fused computed-A
+kinds (`NormLinearGoldenConfig` / `MlpGeGluGoldenConfig`) carry the same `trans_b` field — their `F.linear` snippets
+are the fused edges a SERVED model deploys (`.lin` fused twins; the sync compute-fill stages every B fold channel
+via cp.async on either layout, so the same `d*/sync` spellings realize on both).
 
 **Provenance and the in-model drift audit.** A golden file (or entry) may carry an optional `model:` header — the HF
 model id whose serving graph the shapes came from (`GoldenConfig.model`; pure provenance, never part of any join key).

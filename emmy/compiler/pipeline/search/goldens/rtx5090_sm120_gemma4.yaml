@@ -1277,8 +1277,8 @@ configs:
     N: 4096
     dtype: 'fp16'
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
-    emmy_us: 24.1
-    cublas_us: 16.4
+    emmy_us: 26.7
+    cublas_us: 19.8
   # norm→k/v projection (input_layernorm → k_proj/v_proj, N=2048): the other single-channel norm→linear
   # prologue in the block (q/k/v all fuse the input norm; q is above). Narrower N than q_proj, so the
   # un=8 tile wins (w1x16 over-splits the 2048 columns): w1x8/f2x2/k2 d2/sync g8k, 20.8 = 0.60x. Same
@@ -1292,8 +1292,8 @@ configs:
     N: 2048
     dtype: 'fp16'
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
-    emmy_us: 20.8
-    cublas_us: 12.5
+    emmy_us: 23.1
+    cublas_us: 14.3
   # The GLOBAL-layer (full_attention, hd512) twins of the two entries above — gemma-4 12B alternates 8 global
   # layers among the local ones, and their q/kv projections are a different WIDTH (q N=8192, kv N=512) at the same
   # M=32/H=3840. Seeded 2026-07-19 by manual pinned --ab (3x; q spread <0.6%, kv 0%). These were the LAST fused
@@ -1313,8 +1313,8 @@ configs:
     N: 8192
     dtype: 'fp16'
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
-    emmy_us: 36.1
-    cublas_us: 32.0
+    emmy_us: 38.1
+    cublas_us: 31.5
   - kernel: norm_linear
     name: gemma4_12b.norm_kv_proj_global.m32
     M: 32
@@ -1322,8 +1322,8 @@ configs:
     N: 512
     dtype: 'fp16'
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
-    emmy_us: 20.1
-    cublas_us: 10.0
+    emmy_us: 21.1
+    cublas_us: 10.2
   # ---- fused RMSNorm→gate⊗up→GeGLU megakernel (computed-A / mlp_geglu kind) ----------------------
   # The MLP hot kernel gemma-4 ACTUALLY deploys (k_linear_mean_reduce, the mul_4 twin): gate + up matmuls
   # share ONE compute-filled A slab (product-monoid ⊗-fold channels), the pre-FF RMSNorm statistic rides
@@ -1341,8 +1341,120 @@ configs:
     inter: 15360
     dtype: 'fp16'
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
-    emmy_us: 171.9
-    cublas_us: 158.2
+    emmy_us: 179.3
+    cublas_us: 159.7
+  # ---- fused .lin twins (serving F.linear layout, trans_b) ---------------------------------------
+  # The fused edges a SERVED model actually deploys: same computed-A megakernels as the canonical entries
+  # above, but B given (N, K) and contracted via F.linear — the sync compute-fill stages every B fold
+  # channel as an N-major cp.async slab (the 2026-07-20 computed-A async-B staging; the per-cell copy fill
+  # it replaced is why no .lin fused twins could be recorded before). Seeded 2026-07-20 by manual pinned
+  # --ab (3x, spread <=1.1%), torch eager (F.rms_norm + F.linear) reference. The serving twins land FAR
+  # above the canonical entries' ratios (kv_global 0.81x vs 0.50x, geglu [fm] 0.97x, q_global [fm] 1.01x) —
+  # the N-major B stream + the wide-N w1x16 units transfer; the f16acc [fm] lane realizes on the fused
+  # forms and wins/ties every shape. Cold greedy on these unseeded forks mis-ranked badly on sm_89
+  # (w1x1 tiles at 0.08x); on the 5090 it picks reasonable tiles but still leaves 10-20% — these entries
+  # are both the serving evidence and the misdeploy guard. k4 g8k / g16k are unrepresentable at K=3840
+  # (split-K slice not a multiple of the mma K-step).
+  - kernel: norm_linear
+    name: gemma4_12b.norm_q_proj.m32.lin
+    M: 32
+    H: 3840
+    N: 4096
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
+    emmy_us: 26.5
+    cublas_us: 20.5
+  - kernel: norm_linear
+    name: gemma4_12b.norm_q_proj.m32.lin
+    M: 32
+    H: 3840
+    N: 4096
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
+    emmy_us: 24.2
+    cublas_us: 20.5
+  - kernel: norm_linear
+    name: gemma4_12b.norm_kv_proj.m32.lin
+    M: 32
+    H: 3840
+    N: 2048
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f1x1/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 18.4
+    cublas_us: 14.3
+  - kernel: norm_linear
+    name: gemma4_12b.norm_kv_proj.m32.lin
+    M: 32
+    H: 3840
+    N: 2048
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x16/f1x1/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 18.2
+    cublas_us: 14.3
+  - kernel: norm_linear
+    name: gemma4_12b.norm_q_proj_global.m32.lin
+    M: 32
+    H: 3840
+    N: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 36.5
+    cublas_us: 30.9
+  - kernel: norm_linear
+    name: gemma4_12b.norm_q_proj_global.m32.lin
+    M: 32
+    H: 3840
+    N: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x16/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 30.6
+    cublas_us: 30.9
+  - kernel: norm_linear
+    name: gemma4_12b.norm_kv_proj_global.m32.lin
+    M: 32
+    H: 3840
+    N: 512
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f1x1/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
+    emmy_us: 13.3
+    cublas_us: 10.2
+  - kernel: norm_linear
+    name: gemma4_12b.norm_kv_proj_global.m32.lin
+    M: 32
+    H: 3840
+    N: 512
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x16/f1x1/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 12.7
+    cublas_us: 10.2
+  - kernel: mlp_geglu
+    name: gemma4_12b.mlp_geglu.m32.lin
+    M: 32
+    H: 3840
+    inter: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 178.6
+    cublas_us: 166.6
+  - kernel: mlp_geglu
+    name: gemma4_12b.mlp_geglu.m32.lin
+    M: 32
+    H: 3840
+    inter: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x16/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 172.5
+    cublas_us: 166.6
   # The PREFILL-chunk (M=256) mlp edge is NOT anchored as a FUSED computed-A golden: the fused form is
   # memory-pipeline-stall bound at M=256 and provably cannot beat cuBLAS (its compute floor ≈ eager, and a 2-fold
   # node can't ride d2/tma/ring), so a fused mlp_geglu.m256 golden would only ever record a losing config and muddy

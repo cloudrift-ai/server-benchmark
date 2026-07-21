@@ -139,3 +139,31 @@ mispriced, not late-found (patience was the default 50).
   image. Budget ~30 min of provisioning slack.
 - The `run --json` schema (`greedy.isolated` + per-pin `record_knobs`) made the A/B analysis fully scriptable —
   no log scraping. Good addition since the last sweep.
+
+## Addendum (same day) — hd512 optimization attempt: the d_v fold is falsified on sm_89
+
+Follow-up to Finding 2, on the local RTX 4080 (same sm_89; eager torch SDPA 136 µs causal, emmy best 155.7 µs
+std-g2k / 161.6 µs fm = 0.84–0.87×, both 255 regs / 8% occupancy / 97.5K smem). The July notes carried "the hd512
+d_v fold" as the remaining codegen item; this session tested it empirically and structurally:
+
+- **Empirical**: a half-d_v chunk kernel (`d_v=256`, full hd512 QK — exactly one pass of a 2-way d_v split)
+  benches 88.3 µs best (g2k + f1x32 pj, 200 regs, 89.5K smem) — but **occupancy stays 8%** (smem still caps one
+  block/SM), so two chunks cost 176.6 µs > 155.7 µs single-pass, and the two chunk blocks cannot co-reside
+  (2×89.5K > 100K smem). The register relief never converts to occupancy; **the d_v split loses on sm_89**.
+- **Structural**: the PV tile hard-folds the full d_v into the register fragment
+  (`_schedule.py` `_twisted_warp_options`: `regs=(fm, d_v // atom_n)`, d_v stripped from the grid: "the value
+  axis folds into the fragment tile and leaves the grid"), no existing split mechanism applies to output columns
+  (split-K cuts the reduce axis; the cone cut splits fold channels), and the fragment C→A repack requires
+  contiguous O columns — implementing the fold would be a new mechanism, and the empirical result says it would
+  not pay on this generation anyway.
+- **Knob space beyond the sweep**: 5 hand-picked pins around the golden (g4k, no-alt d1/cp, d2/cp/ring, dd k16,
+  pj k2) all lose (208–300 µs) or don't realize. The causal tile-skip IS active on hd512 (non-causal benches
+  270 µs ≈ causal / 0.58). Roofline: emmy sustains ~32 TFLOPS on this kernel vs torch SDPA's ~45 non-causal —
+  the gap is pipeline efficiency at 1 block/SM, not extra work.
+
+Directions that could still close the remaining ~13–16% (future work, by leverage): (a) shrink smem staging at
+reduce=512 (e.g. K-only staging / smaller V tiles) so ≥2 blocks/SM fit — the only path that changes the occupancy
+picture; (b) an f16-accumulate PV with a better layout (the current fm row wins 11% on the 4090, loses on the
+4080); (c) a warp-specialized producer/consumer pipeline — the likely shape of torch's 45 TFLOPS. The other
+sub-parity family, `k_proj_global` at M=512/dynM (0.91–0.93×), is a ~1.5 µs absolute latency-bound loss on a
+tall-thin GEMM — not worth codegen effort.

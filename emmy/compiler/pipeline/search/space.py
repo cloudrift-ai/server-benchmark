@@ -386,7 +386,9 @@ def scalar_tile_moves() -> list[str]:
 # ``(1, 16)`` is the thin-M / wide-N decode geometry (16 warps down the N axis, 1 down M — the same
 # 16-warp CTA as ``(8, 2)``): a decode-M computed-A (fused norm→linear) contraction wants its warps
 # spread across the wide output columns, and it beat the ``(1, 8)`` sibling ~5% on both the q-proj
-# (N=4096) and gate/up (N=15360) fused edges at M=32 (5090). Per-node legality — the atom's operand
+# (N=4096) and gate/up (N=15360) fused edges at M=32 (5090). ``(2, 8)`` is its M=64 sibling (a second
+# M warp-unit once the decode bucket doubles): the lm_head.m64 golden winner — w1x8 leaves 2x on the
+# table there (2392 vs 1215 µs, 5090) — and the best fused-geglu tile at the same M. Per-node legality — the atom's operand
 # dtype and the ``_check_warp_static_k`` K-divisibility — is the scheduler's (``_schedule``), not the grid's.
 # (WM, WN) / (FM, FN)
 _WARP_UNITS: tuple[tuple[int, int], ...] = (
@@ -400,6 +402,7 @@ _WARP_UNITS: tuple[tuple[int, int], ...] = (
     (4, 2),
     (4, 4),
     (1, 8),
+    (2, 8),
     (8, 2),
     (1, 16),
 )

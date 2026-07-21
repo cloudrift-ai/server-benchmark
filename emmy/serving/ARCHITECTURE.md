@@ -145,9 +145,11 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   this for seam coherence). Registered in `__init__.py`. **Whole-step decode CUDA graphs are the `emmy serve
   --generate` DEFAULT**: no `--enforce-eager`; instead a `--compilation-config` with `cudagraph_mode:
   FULL_DECODE_ONLY` (full cudagraphs need no torch.compile — vLLM wraps the model in its `CUDAGraphWrapper`) and
-  `cudagraph_capture_sizes` clamped to the decode bucket (the static decode twin is the one path validated under
-  stream capture — `test_gen_capture_gpu`; a size above the bucket would capture the device-resident symbolic
-  programs, which are not capture-validated yet, so widening past the bucket is a measured follow-up). Under the
+  `cudagraph_capture_sizes` laddered up to `--max-num-seqs` (sizes at or below the decode bucket run the static
+  decode twin; sizes above it capture the device-resident symbolic programs — both paths are capture-validated,
+  `test_gen_capture_gpu` / the two-size live-replay test; over-bucket capture was worth +10.6% req/s at c=64,
+  and a decode bucket matched to the concurrency beats riding the symbolic captures — the bucket-64 golden set
+  took c=64 TPOT 35.4 → 22.5 ms). Under the
   outer capture,
   `_Program.run_device` detects `torch.cuda.is_current_stream_capturing()` and issues the raw launch sequence
   (`run_once`) instead of its own graph machinery — nested stream capture and graph launch are both illegal in a

@@ -10,6 +10,7 @@ from emmy.commands.deploy.cloud import register_cloud_target
 from emmy.commands.deploy.local import register_local_target
 from emmy.commands.deploy.ssh import register_ssh_target
 from emmy.commands.eval import register_eval_command
+from emmy.commands.fit import register_fit_command
 from emmy.commands.generate import register_generate_command
 from emmy.commands.inspect_graph import register_inspect_command
 from emmy.commands.pull import register_pull_command
@@ -49,6 +50,7 @@ def main():
     register_generate_command(subparsers)
     register_inspect_command(subparsers)
     register_eval_command(subparsers)
+    register_fit_command(subparsers)
     register_compare_command(subparsers)
 
     args = parser.parse_args()

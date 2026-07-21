@@ -358,6 +358,25 @@ Capacity-class signals recognized today: CloudRift HTTP 503/429 on rent, CloudRi
 
 GCP project is inferred from `gcloud` config. CloudRift reads `CLOUDRIFT_API_KEY` and `CLOUDRIFT_API_URL` from the environment by default. **H200 on CloudRift** is only available on on-prem clusters — set `CLOUDRIFT_API_URL` to the on-prem endpoint (the public `api.cloudrift.ai` does not offer H200).
 
+### `emmy fit`
+
+Fit an offline-prior weights artifact and cross-validate it, GPU-free. Two orthogonal switches — `--trainer
+{linear,catboost}` × `--data {golden,freeze:<path>}` — of which only `linear` × `golden` (the incumbent trainer on the
+golden dataset) exists today; other combinations exit with "not yet supported". `--samples N` (default 0:
+coordinate-descent-from-seed, the incumbent practice), `--seed`, `--folds {op_family,gpu,both,none}` (default `both`),
+`--out DIR` (default `_tune/fits/<timestamp>-<trainer>-<data>/`). Writes `metrics.json` — the deterministic per-run
+record two fits are diffed by: `full_train` (the shippable artifact's per-golden dual ranks + per-card aggregates) and
+one `cv.<axis>` block per fold axis (pooled holdout / train tables, per-card gap, per-fold detail) — and
+`weights.json`, the full-train artifact in the shipped format. `emmy/commands/fit.py` also owns the snippet-tracing
+golden case builder (`build_cases`, shared with `scripts/golden_knob_heuristics.py` — `pipeline/` must not import the
+tracer); the fold/metrics machinery is library code, documented on
+`emmy/compiler/pipeline/search/prior/fit/cv.py` and in the pipeline ARCHITECTURE's prior sections.
+
+```bash
+emmy fit                                  # linear x golden, both fold axes, metrics under _tune/fits/
+emmy fit --folds gpu --out _tune/fits/ab  # leave-one-card-out only, fixed run dir for an A/B
+```
+
 ## Experiments
 
 Experiments are self-contained parameter sweeps in `experiments/{model}/{name}/`. Each directory contains a `recipe.yaml` and stores its results alongside it:

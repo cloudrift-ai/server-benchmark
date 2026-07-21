@@ -567,7 +567,7 @@ def test_offline_eval_scores_each_golden_under_its_own_card(monkeypatch):
 
     def fake_evaluate_golden(M, N, K, dtype, gold, ctx, *, dynamic=False):
         seen.append(ctx)
-        return dict(gold), 0, 1
+        return dict(gold), 0, 1, 0
 
     monkeypatch.setattr(eval_cmd, "_golden_configs", lambda _f: [golden])
     monkeypatch.setattr("emmy.compiler.pipeline.search.golden_eval.evaluate_golden", fake_evaluate_golden)

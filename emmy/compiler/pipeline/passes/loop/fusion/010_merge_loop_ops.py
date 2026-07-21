@@ -301,6 +301,12 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
         raise RuleSkipped("producer or consumer is no longer a LoopOp")
     if producer.id not in consumer.inputs:
         raise RuleSkipped(f"producer {producer.id!r} is not an input of consumer {consumer.id!r}")
+    # A producer that is itself a GRAPH OUTPUT must stay materialized: the splice consumes the
+    # node wholesale, so fusing it silently DROPS that output from the compiled graph (the
+    # escaping-residual ``(rms_norm(x + r), x + r)`` shape returned only the norm). Same guard
+    # ``005_split_shared_indexmap`` applies.
+    if producer.id in graph.outputs:
+        raise RuleSkipped(f"producer {producer.id!r} is a graph output — it must stay materialized")
 
     # Cut-workspace brake: ``020_cut_edge`` realizes a DECIDED ``PLACE@cone=cut`` by
     # materializing the cone into ``<out>__cone`` / ``<out>__stat`` / ``<out>__ch<i>``

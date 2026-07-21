@@ -88,6 +88,10 @@ Here, a **driver** is code that coordinates other components. `handle_compile` i
 `Pipeline.build(CUDA_PASSES).run(...)`. The distinction is what happens afterward: `compile` formats an IR for a human,
 while the backend passes the lowered graph to the CUDA runtime.
 
+In other words, `emmy trace` stops after PyTorch capture and FX-to-Emmy conversion. `emmy compile` traces when necessary,
+then applies lowering passes and prints the selected IR. Despite its name, the `compile` CLI does not invoke `nvcc` or
+execute the program; `emmy run` and the CUDA runtime do that.
+
 The canonical pass lists live in `emmy/compiler/pipeline/__init__.py`:
 
 ```python
@@ -130,6 +134,304 @@ CUDA: what source and launch configuration will the GPU runtime receive?
 
 This example is intentionally schematic. The real printed IR uses Emmy's operation and statement classes, but the
 questions remain the same when the operation is much larger.
+
+## Guided example — one PyTorch operation through every IR
+
+The sections later in this chapter explain each representation independently. This vertical slice puts them next to
+one another so you can see exactly what each compiler boundary adds or removes.
+
+We will compile:
+
+```python
+nn.RMSNorm(16)(torch.randn(2, 8, 16))
+```
+
+`RMSNorm(16)` normalizes the last dimension, which contains 16 values. The input has `2 × 8 = 16` independent rows.
+For every row, the operation computes approximately:
+
+```python
+mean_square = sum(x * x) / 16
+scale = reciprocal_sqrt(mean_square + 1e-6)
+output = x * scale * weight
+```
+
+This operation is useful for learning because it contains elementwise arithmetic, a reduction, broadcasting, and a
+learned weight, but still produces short IR listings.
+
+### Generate the complete artifacts
+
+Run this from the repository root. `--target sm_80` makes GPU scheduling decisions reproducible without requiring the
+inspection commands to probe a live GPU:
+
+```bash
+for stage in torch tensor loop tile kernel cuda; do
+  ./venv/bin/emmy compile \
+    --code "nn.RMSNorm(16)(torch.randn(2, 8, 16))" \
+    --ir "$stage" \
+    --target sm_80 \
+    --output "/tmp/emmy-rmsnorm-$stage.txt"
+done
+```
+
+The filenames now form a timeline:
+
+```text
+/tmp/emmy-rmsnorm-torch.txt
+/tmp/emmy-rmsnorm-tensor.txt
+/tmp/emmy-rmsnorm-loop.txt
+/tmp/emmy-rmsnorm-tile.txt
+/tmp/emmy-rmsnorm-kernel.txt
+/tmp/emmy-rmsnorm-cuda.txt
+```
+
+The excerpts below are generated from the current compiler. Cosmetic node names and kernel hash suffixes may change as
+the implementation evolves; generate the files locally when exact output matters.
+
+### Stage 1 — frontend Graph IR preserves RMSNorm
+
+```bash
+sed -n '1,120p' /tmp/emmy-rmsnorm-torch.txt
+```
+
+```text
+# Graph: 3 nodes, 1 inputs, 1 outputs
+
+inputs:
+  x: (2, 8, 16) f32
+
+constants:
+  p_weight: (16,) f32
+
+rms_norm = rmsnorm(x, p_weight, eps=1e-06) -> (2, 8, 16) f32
+
+outputs:
+  rms_norm: (2, 8, 16) f32
+```
+
+At this boundary, `torch.export` and Emmy's FX walker have captured the program, but decomposition has not run. The
+single `RmsNormOp` is valuable: diagnostics can still name the model operation, and one rewrite rule can reason about
+the whole normalization.
+
+### Stage 2 — Tensor IR decomposes RMSNorm
+
+```bash
+sed -n '1,160p' /tmp/emmy-rmsnorm-tensor.txt
+```
+
+```text
+constants:
+  p_weight: (16,) f32
+  rms_norm_eps: (1,) f32 = 1e-06
+  rms_norm_mean_count: (1,) f32 = 16.0
+
+p_weight_bc             = p_weight[k]                                       -> (2, 8, 16)
+rms_norm_sq             = multiply(x, x)                                    -> (2, 8, 16)
+rms_norm_mean_sum       = sum(rms_norm_sq, axis=-1)                         -> (2, 8, 1)
+rms_norm_mean           = divide(rms_norm_mean_sum, rms_norm_mean_count_bc) -> (2, 8, 1)
+rms_norm_add_eps        = add(rms_norm_mean, rms_norm_eps_bc)               -> (2, 8, 1)
+rms_norm_rsq            = rsqrt(rms_norm_add_eps)                           -> (2, 8, 1)
+rms_norm_rsq_bc         = rms_norm_rsq[i, j, na]                            -> (2, 8, 16)
+rms_norm_norm           = multiply(x, rms_norm_rsq_bc)                      -> (2, 8, 16)
+rms_norm                = multiply(rms_norm_norm, p_weight_bc)              -> (2, 8, 16)
+```
+
+The compound `RmsNormOp` has disappeared. In its place are tensor primitives:
+
+- `multiply` and `add` perform elementwise arithmetic;
+- `sum(..., axis=-1)` reduces the last dimension;
+- `divide` forms the mean;
+- `rsqrt` computes reciprocal square root; and
+- the `[k]` and `[i, j, na]` expressions explicitly broadcast smaller tensors.
+
+The graph temporarily has more nodes because the mathematics is now explicit. These nodes describe *what* each whole
+tensor operation computes; they do not yet say which loops or GPU threads perform it.
+
+### Stage 3 — Loop IR makes iteration explicit and fuses operations
+
+```bash
+sed -n '1,160p' /tmp/emmy-rmsnorm-loop.txt
+```
+
+```text
+=== 0: k_rms_norm_<hash> ===
+    v0 = reciprocal(16)
+    for a0 in 0..2
+        for a1 in 0..8
+            for a2 in 0..16
+                in2 = load x[a0, a1, a2]
+                v1 = multiply(in2, in2)
+                acc0 <- add(acc0, v1)
+            v2 = multiply(acc0, v0)
+            v3 = add(1e-06, v2)
+            v4 = rsqrt(v3)
+            for a3 in 0..16
+                in3 = load x[a0, a1, a3]
+                v5 = multiply(in3, v4)
+                in4 = load p_weight[a3]
+                v6 = multiply(in4, v5)
+                rms_norm[a0, a1, a3] = v6
+```
+
+Loop lifting first gives tensor operations explicit statement bodies. Fusion then combines compatible `LoopOp` graph
+nodes into the one body shown here. Notice what disappeared: there are no global temporary tensors for the square,
+mean, or scale. Their values stay inside the fused computation.
+
+The axes have distinct roles:
+
+- `a0` and `a1` choose one of the 16 independent rows;
+- `a2` visits the 16 values being reduced; and
+- `a3` revisits the row to apply the computed scale and weight.
+
+This representation is still hardware-independent. It says which iteration and arithmetic must happen, not how CUDA
+blocks and threads should cooperate.
+
+### Stage 4 — Tile IR recognizes algebra and attaches a schedule
+
+```bash
+sed -n '1,160p' /tmp/emmy-rmsnorm-tile.txt
+```
+
+```text
+=== 0: k_rms_norm_<hash> ===
+    Reduction[a2] planar
+        for a2 in 0..16
+            in2 = load x[a0, a1, a2]
+            v1 = multiply(in2, in2)
+            acc0 <- add(acc0, v1)
+    v0 = reciprocal(16)
+    v2 = multiply(acc0, v0)
+    v3 = add(1e-06, v2)
+    v4 = rsqrt(v3)
+    for a3 in 0..16
+        in3 = load x[a0, a1, a3]
+        in4 = load p_weight[a3]
+        rms_norm[a0, a1, a3] = multiply(in4, multiply(in3, v4))
+```
+
+The important new fact is `Reduction[a2] planar`. Recognition has recovered the algebraic role of the `a2` loop: it
+is an ordinary reduction whose partial sums may be combined. Tile IR keeps that mathematical structure separate from
+the chosen realization so alternative valid schedules can be compared.
+
+### Stage 5 — Kernel IR materializes GPU mechanisms
+
+```bash
+sed -n '1,160p' /tmp/emmy-rmsnorm-kernel.txt
+```
+
+```text
+=== 0: k_rms_norm_<hash> ===
+    Tile[a0, a1, a2_co] (N=256)
+        for a2 in a2_co..16:16
+            in2 = load x[a0, a1, a2]
+            f32 v1 = multiply(in2, in2)
+            f32 acc0 <- add(acc0, v1)
+        WarpShuffle(acc0, length=16)
+        f32 v2 = multiply(acc0, reciprocal(16))
+        f32 v3 = add(1e-06, v2)
+        f32 v4 = rsqrt(v3)
+        for a3 in a2_co..16:16
+            in3 = load x[a0, a1, a3]
+            in4 = load p_weight[a3]
+            f32 v6 = multiply(in4, multiply(in3, v4))
+            rms_norm[a0, a1, a3] = v6
+```
+
+Kernel IR commits to hardware-oriented details:
+
+- `a2_co` is the cooperative worker coordinate;
+- the strided loops divide row elements among workers;
+- `WarpShuffle` combines their partial sums without a global temporary; and
+- `f32` makes scalar temporary types explicit.
+
+At this point the schedule has become concrete. CUDA lowering should mostly render these decisions rather than invent a
+new algorithm.
+
+### Stage 6 — CUDA IR renders source and launch metadata
+
+```bash
+sed -n '1,220p' /tmp/emmy-rmsnorm-cuda.txt
+```
+
+The generated source is short enough to recognize the Kernel IR structure:
+
+```c
+extern "C" __global__
+__launch_bounds__(16) void k_rms_norm_<hash>(
+    const float* x,
+    const float* mean_count,
+    const float* eps,
+    const float* weight,
+    float* output) {
+    int lane = threadIdx.x & 31;
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    int row0 = gid / 128;
+    int row1 = (gid / 16) % 8;
+    int worker = gid % 16;
+
+    float acc = 0.0f;
+    for (int k = worker; k < 16; k += 16) {
+        float value = x[row0 * 128 + row1 * 16 + k];
+        acc += value * value;
+    }
+
+    acc += __shfl_xor_sync(__activemask(), acc, 8);
+    acc += __shfl_xor_sync(__activemask(), acc, 4);
+    acc += __shfl_xor_sync(__activemask(), acc, 2);
+    acc += __shfl_xor_sync(__activemask(), acc, 1);
+
+    float scale = rsqrtf(eps[0] + acc * (1.0f / mean_count[0]));
+    for (int k = worker; k < 16; k += 16) {
+        int index = row0 * 128 + row1 * 16 + k;
+        output[index] = weight[k] * (x[index] * scale);
+    }
+}
+```
+
+This listing is lightly renamed and formatted for teaching; `/tmp/emmy-rmsnorm-cuda.txt` contains the exact emitted
+source. The internal `CudaOp` also carries argument order, grid and block expressions, dynamic shared-memory size,
+zeroing requirements, and symbolic runtime arguments needed to launch the function.
+
+### What changed at each boundary?
+
+| Boundary | Information removed | Information added |
+|---|---|---|
+| PyTorch → frontend | Python control structure and module syntax | Stable graph data flow, ATen-derived operation, shape, and dtype |
+| Frontend → Tensor | Compound name `RMSNorm` | Explicit primitive mathematics and broadcasts |
+| Tensor → Loop | Whole-tensor operation notation and most intermediates | Loads, scalar values, iteration, accumulation, and writes |
+| Loop → Tile | Unclassified loop nest | Algebraic reduction structure and schedule choices |
+| Tile → Kernel | Abstract schedule | Cooperative workers, typed temporaries, and warp reduction |
+| Kernel → CUDA | Hardware-neutral statements | CUDA syntax, pointer arithmetic, built-ins, and launch metadata |
+
+Each stage should compute the same tensor. The compiler is changing representation and implementation detail, not the
+meaning of RMSNorm.
+
+### `compile` inspects; `run` executes
+
+All commands above use `emmy compile`. They trace and lower the graph, then print the requested representation. Even at
+`--ir cuda`, the CLI does not invoke `nvcc` or launch the generated kernel.
+
+On a supported NVIDIA GPU, use `emmy run` to continue through runtime compilation, allocation, execution, accuracy
+comparison, and timing:
+
+```bash
+./venv/bin/emmy run \
+  --code "nn.RMSNorm(16)(torch.randn(2, 8, 16, device='cuda'))" \
+  --bench --warmup 5 --iters 20
+```
+
+This tiny shape is useful for correctness and learning, not serious performance conclusions: launch overhead is large
+relative to its arithmetic. Lesson 11 explains runtime compilation and benchmarking; larger golden shapes are used for
+meaningful performance work.
+
+### Exercises for this vertical slice
+
+1. In Tensor IR, underline the nodes whose output shape is `(2, 8, 1)`. Explain why the reduction result must be
+   broadcast before it can multiply the `(2, 8, 16)` input.
+2. In Loop IR, identify where the `a2` accumulator becomes available to the later `a3` loop.
+3. In Kernel IR, match `WarpShuffle` to the four `__shfl_xor_sync` calls in CUDA.
+4. Change `RMSNorm(16)` and the input's last dimension to `32`. Regenerate every stage and find which constants, loop
+   bounds, schedule choices, and CUDA instructions change.
+5. Add `-vv --color never` to one compile command and locate the exact rewrite that removes `RmsNormOp`.
 
 ## 2. One graph container survives every stage
 
@@ -223,9 +525,12 @@ the resulting environment.
 
 ## 4. Tracing: PyTorch to frontend Graph IR
 
-**Tracing** observes a program with example inputs and records the operations it performs. It happens before
-**decomposition**, which breaks compound operations into simpler math. The tracer's job is to preserve the operation PyTorch expressed, not to
-decide how to implement it.
+**Tracing** here is the complete capture boundary. PyTorch's `torch.export.export` discovers the operations and produces
+an FX graph. Emmy's `trace_module` wrapper calls that API and converts the FX nodes into an Emmy `Graph`; the `emmy
+trace` CLI is the user-facing command around the same path. This is not `torch.jit.trace`.
+
+Tracing happens before **decomposition**, which breaks compound operations into simpler math. The capture boundary's
+job is to preserve the operation PyTorch expressed, not to decide how to implement it.
 
 `trace_module` in `compiler/trace/torch.py`:
 
@@ -333,6 +638,10 @@ adjacent index maps or separating casts from remaps. It is still hardware-indepe
 **Lifting** here means translating whole-tensor primitives into explicit iteration. It converts tensor operations into
 statement bodies. **SSA** (static single assignment), mentioned below, means that each temporary value is assigned once.
 The main statement forms are:
+
+The outer container remains the same `Graph`. Each Tensor IR graph node is replaced by a node whose operation is a
+`LoopOp`. The `Loop`, `Load`, `Assign`, `Accum`, and `Write` objects nested in `LoopOp.body` are statement-tree objects,
+not additional Graph nodes. Fusion later merges compatible `LoopOp` graph nodes and combines their statement bodies.
 
 - `Load`: read a graph buffer at an index.
 - `Assign`: bind an SSA value using an elementwise implementation.

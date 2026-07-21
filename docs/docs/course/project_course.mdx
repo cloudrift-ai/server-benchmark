@@ -671,6 +671,63 @@ Emmy keeps one `Graph` throughout the compiler. A graph contains **nodes** (oper
 particular IR stage. Passes replace or splice node operations as the dialect becomes more hardware-specific. This lets
 graph structure, symbolic shapes, identity, and debugging metadata stay consistent across the compiler.
 
+### Where the first Graph comes from
+
+Emmy does **not** contain a handwritten parser that tries to understand arbitrary PyTorch source code. It delegates the
+hard capture step to PyTorch's existing `torch.export` library:
+
+```mermaid
+flowchart LR
+    Code[Inline code string] --> AST[Python ast module<br/>CLI preparation only]
+    AST --> Module[nn.Module plus example tensors]
+    Existing[Existing PyTorch or Hugging Face module] --> Module
+    Module --> Export[torch.export.export]
+    Export --> FX[PyTorch FX graph<br/>ATen operations and metadata]
+    FX --> Walker[Emmy FX-to-IR walker]
+    Walker --> Graph[Emmy Graph]
+```
+
+There are therefore two different jobs:
+
+1. **PyTorch captures the computation.** `torch.export.export` runs PyTorch's tracing and export machinery and returns
+   an `ExportedProgram` containing an FX graph. FX is PyTorch's graph representation; its compute nodes normally refer
+   to ATen, PyTorch's lower-level operation library. PyTorch also supplies inferred tensor shapes and data types as node
+   metadata.
+2. **Emmy converts the captured graph.** `trace_module_with_constants` walks the FX nodes in order. Placeholders become
+   `InputOp` or `ConstantOp` nodes, recognized ATen calls become Emmy operations such as `MatmulOp` or `RmsNormOp`, and
+   the FX output marks Emmy's graph outputs. A `node_map` connects each FX node name to the corresponding Emmy node ID.
+
+The conversion loop is custom Emmy code, but it consumes a graph already produced by PyTorch. In simplified
+pseudocode, it looks like this:
+
+```python
+exported = torch.export.export(module, example_inputs)
+graph = Graph()
+node_map = {}
+
+for fx_node in exported.graph_module.graph.nodes:
+    if fx_node.op == "placeholder":
+        add_emmy_input_or_constant(graph, fx_node, node_map)
+    elif fx_node.op == "call_function":
+        add_matching_emmy_operation(graph, fx_node, node_map)
+    elif fx_node.op == "output":
+        record_emmy_outputs(graph, fx_node, node_map)
+```
+
+For the CLI expression below, Python's standard `ast` module only helps turn the text into a callable module and lift
+the random tensor into an example input. It does not translate RMSNorm mathematics:
+
+```text
+nn.RMSNorm(16)(torch.randn(2, 8, 16))
+        │
+        ├─ CLI adapter creates nn.RMSNorm(16) and one example tensor
+        ├─ torch.export captures placeholders plus aten.rms_norm
+        └─ Emmy maps them to InputOp, ConstantOp, and RmsNormOp nodes
+```
+
+For a model that is already an `nn.Module`, Emmy skips the inline-code preparation and passes the module and example
+inputs directly to `torch.export`. Lesson 7 examines tracing and ATen-to-Emmy operation mapping in more detail.
+
 Important invariants:
 
 - Shape belongs to `node.output`, not to the operation.
@@ -698,13 +755,15 @@ the computation and connections are unchanged.
 
 ### Read
 
-1. `emmy/compiler/graph.py`: `Hints`, `Node`, `Graph.add_node`, `Graph.splice`, `Graph.topological_order`.
-2. Continue in `graph.py`: symbolic bindings, `structural_key`, serialization, and pretty printing.
-3. `emmy/compiler/tensor.py`: tensor metadata.
-4. `emmy/compiler/dim.py`: `Dim`, arithmetic, hints, and static/symbolic accessors.
-5. `emmy/compiler/ir/expr.py`: the expression language used by dimensions, indices, and conditions.
-6. `emmy/compiler/structural.py`: the structural hashing protocol.
-7. `tests/compiler/ir/test_graph.py`, `test_graph_splice.py`, and `test_shape_inference.py`.
+1. `emmy/commands/trace.py`: `graph_from_code` and `trace_inline_code`, which prepare inline CLI expressions.
+2. `emmy/compiler/trace/torch.py`: `trace_module_with_constants`, the FX walk, and the three node handlers.
+3. `emmy/compiler/graph.py`: `Hints`, `Node`, `Graph.add_node`, `Graph.splice`, `Graph.topological_order`.
+4. Continue in `graph.py`: symbolic bindings, `structural_key`, serialization, and pretty printing.
+5. `emmy/compiler/tensor.py`: tensor metadata.
+6. `emmy/compiler/dim.py`: `Dim`, arithmetic, hints, and static/symbolic accessors.
+7. `emmy/compiler/ir/expr.py`: the expression language used by dimensions, indices, and conditions.
+8. `emmy/compiler/structural.py`: the structural hashing protocol.
+9. `tests/compiler/ir/test_graph.py`, `test_graph_splice.py`, and `test_shape_inference.py`.
 
 ### Lab — observe graph structure before lowering
 
@@ -734,16 +793,89 @@ you for dynamic serving in lesson 12.
 
 ### Checkpoint
 
-You can explain why mutable graphs require an uncached structural key, why names are excluded from it, and how a
-symbolic dimension remains an expression until launch time.
+You can explain why PyTorch—not a handwritten Emmy source parser—captures the initial computation, what Emmy's custom
+FX walker adds, why mutable graphs require an uncached structural key, why names are excluded from it, and how a symbolic
+dimension remains an expression until launch time.
 
-## Lesson 7 — Trace PyTorch and decompose compound operations
+## Lesson 7 — Capture PyTorch operations and decompose them
 
 ### Learn
 
-**Tracing** observes a PyTorch program with example inputs and captures the operations it performs. PyTorch represents
-the result as an FX graph. **ATen** is the lower-level operation library underneath much of PyTorch. Emmy maps supported
-ATen operations into recognizable frontend operations.
+In this lesson, **tracing** names the whole capture boundary, not one function owned entirely by PyTorch or Emmy. PyTorch
+provides the mechanism that discovers tensor operations; Emmy provides the wrapper, conversion, and command around it.
+
+| Name | Owner | Job |
+|---|---|---|
+| tracing or capture | general concept | Observe a program with representative inputs and record its tensor operations and data flow. |
+| `torch.export.export` | PyTorch | Capture an `nn.Module` as an `ExportedProgram` containing an FX graph. |
+| `trace_module` / `trace_module_with_constants` | Emmy | Call `torch.export`, then convert the returned FX graph into an Emmy `Graph`. |
+| `emmy trace` | Emmy CLI | Prepare inline code or a Hugging Face model, call Emmy's tracing wrapper, and save the resulting Graph IR as JSON. |
+
+This path does **not** call the older `torch.jit.trace` API. When the course says “PyTorch tracing,” it means capture
+through `torch.export.export` unless it explicitly says otherwise.
+
+```text
+emmy trace command
+    -> graph_from_code or Hugging Face wrapper          # Emmy
+    -> trace_module_with_constants                     # Emmy
+    -> torch.export.export                             # PyTorch
+    -> ExportedProgram containing an FX graph          # PyTorch
+    -> walk FX placeholders, ATen calls, and outputs   # Emmy
+    -> Emmy Graph                                      # Emmy
+```
+
+### Trace versus compile
+
+`trace` captures the original computation. `compile` transforms that captured computation toward a selected lower-level
+representation:
+
+| Command | Starts with | Main work | Stops with |
+|---|---|---|---|
+| `emmy trace` | Inline PyTorch code or a Hugging Face model | Run `torch.export` and convert FX into an Emmy `Graph` | Serialized frontend Graph IR in JSON |
+| `emmy compile` | Inline code, a model, or previously traced JSON | Trace when needed, then run compiler passes through the requested `--ir` stage | Human-readable Tensor, Loop, Tile, Kernel, or CUDA IR |
+| `emmy run` | Inline code, a model, or Graph IR | Lower, runtime-compile CUDA, allocate buffers, and launch the program | Actual output values and optional timings |
+
+So `compile` usually includes tracing as its first step:
+
+```mermaid
+flowchart LR
+    PyTorch[PyTorch module] --> Trace[Capture with torch.export]
+    Trace --> Frontend[Emmy frontend Graph]
+    Frontend --> Decompose[Decompose and optimize]
+    Decompose --> Loop[Loop IR]
+    Loop --> Tile[Tile and schedule]
+    Tile --> Kernel[Kernel IR]
+    Kernel --> CUDA[CUDA source and launch metadata]
+    CUDA --> Runtime[nvcc or NVRTC and GPU execution]
+
+    TraceCmd[emmy trace] -. stops here .-> Frontend
+    CompileCmd[emmy compile] -. stops at selected IR .-> CUDA
+    RunCmd[emmy run] -. continues through execution .-> Runtime
+```
+
+You can also separate the steps manually:
+
+```bash
+# Capture only and save a reusable Graph.
+./venv/bin/emmy trace \
+  --code "nn.RMSNorm(16)(torch.randn(2, 8, 16))" \
+  --output /tmp/rmsnorm.json
+
+# Load that captured Graph and lower it to CUDA IR.
+./venv/bin/emmy compile /tmp/rmsnorm.json --ir cuda
+
+# Or capture and lower in one command.
+./venv/bin/emmy compile \
+  --code "nn.RMSNorm(16)(torch.randn(2, 8, 16))" \
+  --ir cuda
+```
+
+One subtle point: the `emmy compile` CLI is an inspection and lowering command. At the CUDA stage it emits CUDA source
+and launch metadata, but it does not invoke `nvcc`, launch a kernel, or return computed tensor values. `emmy run` and
+the CUDA runtime perform those later steps.
+
+**ATen** is the lower-level operation library underneath much of PyTorch. FX compute nodes normally refer to ATen
+operations. Emmy maps supported ATen targets into recognizable frontend operations.
 
 Frontend operations preserve concepts such as linear layers, RMSNorm, softmax, and attention. **Decomposition** breaks
 those compound operations into simpler primitives: elementwise work applies the same calculation to each value; a
@@ -771,8 +903,9 @@ scale = reciprocal_sqrt(mean_square + epsilon)
 output = x * broadcast(scale) * broadcast(weight)
 ```
 
-This is explanatory pseudocode, not a replacement for the actual decomposition rule. Its purpose is to show that
-tracing identifies *what* the model requested, while decomposition begins deciding *how* to express it.
+This is explanatory pseudocode, not a replacement for the actual decomposition rule. Its purpose is to show that the
+PyTorch capture plus Emmy FX conversion preserve *what* the model requested, while decomposition begins deciding *how*
+to express it.
 
 ### Read
 
@@ -817,8 +950,10 @@ Then run:
 
 ### Checkpoint
 
-You can distinguish capture from decomposition, explain why broadcasting is made explicit with `IndexMapOp`, and
-describe why a causal mask or correct rotary constants matter even when a uniform-input accuracy test seems to pass.
+You can distinguish the general tracing concept, PyTorch's `torch.export` function, Emmy's `trace_module` wrapper, and
+the `emmy trace` command. You can also distinguish capture from decomposition, explain why broadcasting is made explicit
+with `IndexMapOp`, and describe why a causal mask or correct rotary constants matter even when a uniform-input accuracy
+test seems to pass.
 
 ## Lesson 8 — Lift tensor primitives into loops and fuse kernels
 
@@ -827,6 +962,108 @@ describe why a causal mask or correct rotary constants matter even when a unifor
 **Loop lifting** translates whole-tensor operations into explicit loops, reads, calculations, and writes. **Fusion**
 then combines compatible operations so they can run as one GPU function instead of writing and rereading temporary
 results. That GPU function is called a **kernel**. After fusion, one `LoopOp` represents one future kernel.
+
+### How Tensor IR and loops fit inside Graph
+
+Tensor IR is generated by the compiler. `emmy compile --ir tensor` first captures the frontend graph, then runs
+the decomposition and frontend-optimization passes. The result is still an Emmy `Graph`, but its compute nodes now use
+a small tensor-operation vocabulary such as `ElementwiseOp`, `ReduceOp`, and `IndexMapOp`.
+
+Loop lifting does not put every individual loop iteration into the graph. It changes the representation at two levels:
+
+```text
+Graph                                      # program-wide data flow
+└── Node                                   # one graph operation
+    ├── inputs: IDs of producer Nodes      # graph edges
+    ├── output: Tensor metadata
+    └── op: LoopOp                         # one kernel-sized operation
+        └── body:                          # an internal statement tree
+            Loop
+            ├── Load
+            ├── Assign or Accum
+            └── Write
+```
+
+The distinction is:
+
+| Object | Is it a Graph node? | What it represents |
+|---|---|---|
+| `ElementwiseOp`, `ReduceOp`, `IndexMapOp` | Stored as `Node.op` during Tensor IR | One whole-tensor calculation or coordinate mapping |
+| `LoopOp` | Stored as `Node.op` during Loop IR | One kernel-sized region of explicit computation |
+| `Loop`, `Load`, `Assign`, `Accum`, `Write` | No | Statements nested inside a `LoopOp.body` |
+
+For `(x + y).sum(-1)`, the stages look like this:
+
+```text
+Tensor IR Graph:
+    [ElementwiseOp: add] -> [ReduceOp: sum]
+
+After lifting, before fusion:
+    [LoopOp: load x/y, add, write temporary]
+        -> [LoopOp: load temporary, accumulate sum, write output]
+
+After fusion:
+    [LoopOp: load x/y, add, accumulate sum, write output]
+```
+
+Lifting rules build a small graph fragment containing a `LoopOp` and splice it over the matched tensor-operation node.
+Fusion then splices compatible producer and consumer `LoopOp` nodes together. Consequently, the outer graph usually has
+fewer compute nodes after fusion, while each remaining node has a richer statement body.
+
+:::note One useful naming distinction
+`LoopOp` is the operation attached to a Graph node. `Loop` is one nested statement inside that operation. A `LoopOp`
+can contain several sibling or nested `Loop` statements.
+:::
+
+### PyTorch prerequisite — what `sum(-1)` means
+
+PyTorch calls each position in a tensor's shape a **dimension**, or **axis**. Dimensions are numbered from the left
+starting at `0`; negative numbers count backward from the right:
+
+```text
+shape (2, 3, 4)
+       0  1  2     positive dimension indexes
+      -3 -2 -1     equivalent negative indexes
+```
+
+Therefore, `tensor.sum(-1)` combines values along the last dimension. It does not mean “sum until minus one” or
+“subtract one.” For a two-dimensional tensor, it sums each row:
+
+```python
+x = torch.tensor([
+    [1, 2, 3],
+    [4, 5, 6],
+])
+
+x.sum(-1)  # tensor([6, 15]) — sum each row; shape changes from (2, 3) to (2,)
+x.sum(0)   # tensor([5, 7, 9]) — sum down the rows; shape changes to (3,)
+```
+
+The first result has one value for each original row:
+
+```text
+first row:   1 + 2 + 3 = 6
+second row:  4 + 5 + 6 = 15
+result:                    [6, 15]
+```
+
+The last dimension has length `3`, so that dimension disappears after its values are combined. The other dimension has
+length `2`, so the result contains two sums.
+
+By default, PyTorch removes the reduced dimension. `keepdim=True` retains it with size `1`:
+
+```python
+x.sum(-1, keepdim=True)
+# tensor([
+#     [ 6],
+#     [15],
+# ])
+# shape: (2, 1)
+```
+
+In the Lesson 8 expression, the addition produces shape `(4, 8)`. Calling `.sum(-1)` adds the eight values in each
+row and produces four output values with shape `(4,)`. Emmy internally represents reductions in a rank-preserving form
+and adds an explicit coordinate mapping when the PyTorch result drops the dimension.
 
 Loop statements are frozen dataclasses and `Body` is an immutable tuple. Rewrites create replacement statements rather
 than mutating nested control flow. `LoopOp.forward` renders the body to C++ and runs it through cppyy, providing a CPU
@@ -881,12 +1118,15 @@ On a GPU, this can become one kernel launch and avoids storing `temporary` in gl
 ```
 
 In the printed loop IR, identify the free axes, reduction axis, loads, accumulator identity, and final write. Count the
-`LoopOp` nodes before and after fusion to verify the one-kernel intent.
+tensor-operation nodes before lifting and the `LoopOp` nodes after fusion to see how several graph operations become
+one kernel-sized body. Add `-vv --color never` to the compile command if you want to inspect individual lifting and
+fusion rewrites.
 
 ### Checkpoint
 
-You can translate a simple reduction into loop statements, explain why statement immutability helps structural
-comparison, and use the numpy/loop/CUDA triangle to narrow a correctness bug.
+You can explain that Tensor IR and Loop IR use the same outer `Graph`, distinguish a Graph node containing `LoopOp` from
+the nested `Loop` statements in its body, translate a simple reduction into loop statements, explain why statement
+immutability helps structural comparison, and use the numpy/loop/CUDA triangle to narrow a correctness bug.
 
 ## Lesson 9 — Understand rewrite rules, forks, and provenance
 
@@ -1152,9 +1392,144 @@ The identity model has two layers:
 - Structural identities deduplicate equivalent graphs and operations.
 - Context and feature keys separate measurements whose GPU, compiler flags, shapes, or scheduling context differ.
 
-Golden configurations are verified reference points and A/B integrity gates. They are consulted as deployment
-evidence but are not training rows for the online prior. `-O1` tune measurements accelerate compiler iteration and
-rank candidates; deployable `-O3` evidence remains a distinct lane.
+### What is a golden?
+
+A **golden configuration** is a reviewed, version-controlled record of a known schedule for one canonical operation
+shape on one specific GPU model. Think of it as an approved benchmark card:
+
+```text
+For this operation and shape,
+on this exact GPU,
+these schedule choices were realized,
+the result was checked for correctness,
+and these latencies were reproduced.
+```
+
+It is not a model weight, expected tensor output, CUDA binary, or rule that bypasses the compiler. It is also not a
+claim that the schedule will remain the fastest possible forever. It is a trusted reference point that can be replayed,
+compared, and improved.
+
+A checked-in golden contains information such as:
+
+| Field | Meaning |
+|---|---|
+| `kernel` and `name` | The operation family and human-readable canonical case |
+| shape and `dtype` | The exact tensor dimensions and number format |
+| `gpu_name` and `compute_cap` | The GPU model and NVIDIA hardware capability on which it was recorded |
+| `knobs` | Every realized schedule choice, including choices that are explicitly off |
+| `emmy_us` | Emmy's reproduced latency in microseconds |
+| `cublas_us` | The reference latency; the historical field name is also used when the reference is PyTorch rather than literally cuBLAS |
+| `dynamic` | Whether this is a symbolic-shape program rather than a static-shape program |
+
+For example, a simplified record looks like:
+
+```yaml
+gpu_name: NVIDIA GeForce RTX 5090
+compute_cap: [12, 0]
+configs:
+  - kernel: rms_norm
+    name: rms_norm.k2048
+    M: 512
+    K: 2048
+    knobs:
+      REDUCE: b512
+      VECTORIZE_LOADS: true
+      FAST_EXP: false
+    emmy_us: 3.8
+    cublas_us: 4.1
+```
+
+The real files live under `emmy/compiler/pipeline/search/goldens/`. They are split by GPU because a schedule that is
+excellent on one card can be slower or invalid on another.
+
+### How a golden is created
+
+A normal tuning measurement does not automatically become a golden. Creating one is a deliberate review workflow:
+
+```mermaid
+flowchart LR
+    Shape[Choose a canonical operation and shape] --> Tune[Autotune alternatives on the intended GPU]
+    Tune --> O3[Recompile promising candidates at deployable O3]
+    O3 --> Pin[Pin the exact knobs and run an A/B benchmark]
+    Pin --> Gates{Integrity checks pass?}
+    Gates -->|no| Reject[Reject the candidate]
+    Gates -->|yes| Repeat[Repeat to confirm the measurement]
+    Repeat --> Copy[Copy record_knobs and pinned latency]
+    Copy --> YAML[Add to the GPU-specific golden YAML]
+    YAML --> Review[Review and regression checks]
+```
+
+The important steps are:
+
+1. Choose a representative operation, shape, dtype, static/dynamic regime, and target GPU.
+2. Run `emmy tune` to explore valid schedules. Tune-time `-O1` measurements are useful for ranking candidates quickly,
+   but they are not final deployment measurements.
+3. Recompile and benchmark promising candidates at deployable `-O3`.
+4. Pin a candidate's exact knobs and compare it through the A/B path.
+5. Require three integrity checks: the requested knobs were actually realized, the output matches the reference, and
+   the reported speed is physically plausible for the GPU.
+6. Repeat the measurement. Use the pinned row's `record_knobs` and latency, not a partial knob diff or an incomparable
+   timing from another benchmark path.
+7. Add the record manually to the correct GPU YAML and review it like source code.
+
+A new candidate workflow has this general shape; the actual knob string comes from tuning output:
+
+```bash
+# 1. Search and re-benchmark the winner at deployable optimization settings.
+./venv/bin/emmy tune \
+  --code "nn.RMSNorm(2048)(torch.randn(512, 2048, device='cuda'))" \
+  --bench
+
+# 2. Re-run a promising exact configuration through integrity-checked A/B measurement.
+./venv/bin/emmy run \
+  --code "nn.RMSNorm(2048)(torch.randn(512, 2048, device='cuda'))" \
+  --bench --warmup 5 --iters 20 \
+  --ab "REDUCE=b512,VECTORIZE_LOADS=true,FAST_EXP=false" \
+  --json /tmp/rmsnorm-golden-candidate.json
+```
+
+Do not copy the illustrative knob string blindly: valid knobs depend on current enumeration, shape, dtype, and GPU.
+Inspect the JSON status and integrity flags, confirm the run again, and copy the emitted `record_knobs` only after all
+checks pass.
+
+### How a golden is used
+
+Goldens have three main consumers:
+
+1. **Deployment-time schedule selection.** During an ordinary `compile` or `run`, greedy selection first checks for a
+   golden recorded for the live `(gpu_name, compute_cap)` and matching operation `ShapeKey`. If the current compiler
+   still offers a candidate compatible with the recorded knobs, that candidate is stronger evidence than ordinary tune
+   measurements or model predictions.
+2. **Reproduction and regression checks.** `compile`, `run`, and `tune` accept `--golden NAME`. The name resolves to the
+   golden's canonical PyTorch snippet and recorded configuration, making it easy to reproduce the case. `emmy eval
+   golden` checks how current compiler choices compare with checked-in records.
+3. **Evaluation of ranking systems.** Goldens test whether offline and online rankers place trusted schedules well.
+   They remain held out from online-prior training so evaluation does not become circular.
+
+```bash
+# Reproduce a checked-in golden on its recorded GPU.
+./venv/bin/emmy run \
+  --golden rms_norm.k2048 \
+  --bench --warmup 5 --iters 20 \
+  --json /tmp/rmsnorm-golden-reproduction.json
+
+# Compare current compiler choices with checked-in golden records.
+./venv/bin/emmy eval golden --kernel matmul.square.512
+```
+
+A golden never forces an impossible or stale schedule. Emmy matches it against candidates the current compiler actually
+offers. If no candidate realizes the recorded configuration, Emmy warns about enumeration drift and falls through to
+weaker compatible evidence or a prior instead of blindly replaying old settings. Goldens only arbitrate the deployable
+`-O3` lane.
+
+This gives the evidence order a useful shape:
+
+```text
+matching, realizable golden for this GPU
+    -> compatible deployable measurements
+    -> trustworthy online prediction
+    -> fixed offline prior
+```
 
 The dedicated [How Emmy Chooses Fast GPU Schedules](./prior_and_goldens) chapter traces this hierarchy from a compiler fork through
 feature construction, MCTS labels, persistence, live-card matching, and safe golden recording.
@@ -1183,11 +1558,15 @@ Normal `emmy compile` selects from existing evidence; it does not run this exper
 6. `emmy/compiler/pipeline/search/prior/`: offline, online, and fallback ranking.
 7. `emmy/compiler/pipeline/search/two_level.py`: structural outer search and per-operation inner tuning.
 8. `emmy/commands/tune.py` and `emmy/commands/eval.py`: user-facing drivers.
+9. `emmy/compiler/pipeline/search/golden.py`: golden schemas, YAML loading, GPU scoping, and canonical snippets.
+10. `emmy/compiler/pipeline/search/policy/greedy.py`: `_golden_pick` and the evidence hierarchy.
+11. `emmy/commands/run.py`: pinned A/B checks, `record_knobs`, and machine-readable JSON output.
 
 ### Lab — inspect the search system without tuning a GPU
 
 ```bash
 ./venv/bin/emmy eval knobs
+./venv/bin/emmy eval golden
 ./venv/bin/pytest \
   tests/compiler/pipeline/test_knob.py \
   tests/compiler/pipeline/search/test_db.py \
@@ -1210,7 +1589,9 @@ tuning cache until you understand the evidence and compiler-flag keys.
 ### Checkpoint
 
 You can distinguish a rule fork from a knob, exploration from greedy resolution, offline from online priors, and
-ranking measurements from deployable measurements.
+ranking measurements from deployable measurements. You can also explain what a golden stores, why creating one requires
+pinned and repeated integrity-checked measurement, how it participates in deployment selection, and why it is not an
+online-prior training row.
 
 ## Lesson 13 — Bridge compiled programs into vLLM serving
 

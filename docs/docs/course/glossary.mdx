@@ -32,6 +32,11 @@ two-dimensional, and higher-dimensional tensors can represent batches, tokens, o
 The size of every tensor dimension. A tensor with shape `(2, 8, 16)` has 2 groups, 8 rows per group, and 16 values per
 row. The meaning of each dimension depends on the operation.
 
+**Dimension / axis**
+One position in a tensor's shape. PyTorch numbers dimensions from the left starting with `0`, while negative indexes
+count from the right: `-1` is the last dimension and `-2` is the second-to-last. `tensor.sum(-1)` therefore sums along
+the final dimension.
+
 **Dtype (data type)**
 The format used to store each tensor value, such as 32-bit floating point (`float32`) or 16-bit floating point
 (`float16`). Smaller formats use less memory and can be faster but may lose precision.
@@ -69,6 +74,11 @@ through Hugging Face libraries.
 **Compiler**
 A program that translates code from one form into another. Emmy translates PyTorch model operations into CUDA code.
 
+**Trace versus compile**
+Tracing captures PyTorch operations and converts them into Emmy's frontend `Graph`. Compilation starts from that graph
+and runs transformation passes toward Tensor, Loop, Tile, Kernel, or CUDA IR. The `emmy compile` CLI emits the selected
+IR for inspection; `emmy run` continues into CUDA runtime compilation and GPU execution.
+
 **Operation (op)**
 One unit of computation, such as add, matrix multiplication, softmax, or RMSNorm.
 
@@ -87,6 +97,19 @@ stages explicitly describe loops, GPU threads, memory, and CUDA source.
 **Dialect**
 The vocabulary allowed in one IR stage. For example, Tensor IR uses tensor primitives, while Kernel IR uses
 hardware-oriented statements.
+
+**Tensor IR**
+The compiler-generated Emmy `Graph` after frontend decomposition and optimization. Its compute nodes carry primitives
+such as `ElementwiseOp`, `ReduceOp`, and `IndexMapOp`.
+
+**Loop IR**
+The same outer Emmy `Graph` after tensor operations have been lifted into explicit loop bodies and compatible bodies
+have been fused. Its compute nodes carry `LoopOp` operations.
+
+**`LoopOp` versus `Loop`**
+A `LoopOp` is an operation stored in a Graph node and describes one kernel-sized region of computation. A `Loop` is a
+statement nested inside `LoopOp.body`; it is not a separate Graph node. One `LoopOp` may contain several `Loop`, `Load`,
+`Assign`, `Accum`, and `Write` statements.
 
 **Frontend / backend**
 The frontend reads and represents the source program, such as PyTorch operations. The backend turns a lower-level
@@ -124,7 +147,22 @@ A description of how output coordinates correspond to input coordinates. Emmy us
 transposing, slicing, and reshaping.
 
 **Tracing**
-Observing a PyTorch program with example inputs to capture the operations and data flow that it performs.
+The general act of observing a program with representative inputs to capture its operations and data flow. In Emmy,
+this is a multi-part boundary: PyTorch's `torch.export.export` produces an FX graph, then Emmy's `trace_module` wrapper
+converts it into an Emmy `Graph`. The `emmy trace` CLI command prepares inputs and saves that result. This is not the
+older `torch.jit.trace` API.
+
+**`torch.export`**
+PyTorch's library for capturing an `nn.Module` and representative inputs as an `ExportedProgram`. Emmy uses its FX
+graph instead of parsing the model's Python source itself.
+
+**FX graph**
+PyTorch's graph representation. Its nodes describe inputs, function calls, and outputs and carry metadata such as
+inferred tensor shapes and data types.
+
+**ATen**
+The lower-level operation library beneath much of PyTorch. After `torch.export`, FX compute nodes commonly refer to
+ATen operations such as addition, matrix multiplication, or RMSNorm; Emmy maps those targets into its own operations.
 
 **Lowering**
 Moving from a high-level representation to a more detailed, machine-oriented one while preserving the program's
@@ -312,8 +350,10 @@ In Emmy, a ranker that estimates which schedule will be fast before the current 
 prior is fixed; the online prior learns from collected measurements.
 
 **Golden configuration**
-A reviewed, GPU-specific schedule and latency for a standard problem shape. It is trusted deployment evidence and a
-regression reference.
+A reviewed, version-controlled, GPU-specific record containing a canonical operation shape, exact realized schedule
+knobs, and reproduced Emmy/reference latencies. It is trusted deployment evidence and a regression reference—not model
+weights, expected output values, a CUDA binary, or automatically promoted tuning data. A candidate becomes a golden only
+after pinned A/B measurement, correctness and plausibility checks, reproduction, and review into GPU-specific YAML.
 
 **Evidence**
 A compatible recorded measurement used to select between schedule candidates.

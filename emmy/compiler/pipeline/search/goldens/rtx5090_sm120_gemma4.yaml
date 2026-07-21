@@ -1773,20 +1773,19 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
     emmy_us: 71.9
     cublas_us: 105.7
-  # o_proj_global rides bk1 (w4x2/f4x8, no /k): EVERY bk>=2 config — tma AND cp ring, std AND fm
-  # (f2x4/k2 1288/1404, f4x8/k4 826/921, all 3x-clean STANDALONE) — HANGS >1 s when it realizes on
-  # the post4096-global TWIN's o_proj (the K=8192 attn-width form; the same tiles deploy fine in-twin
-  # at K=4096, K=3840 and K=15360). bk1 costs the fm lane ~45% vs the hanging k4 (1232 vs 855) but
-  # deploys clean; the open K=8192-multichunk codegen bug has a twin-level reproducer in the
-  # 2026-07-21 findings plan.
+  # (2026-07-21) The post4096-global twin's --bench initially hung on this kernel at EVERY o_proj
+  # tile once the geglu CUT deployed — bisected to the bench harness's per-kernel-event EAGER warmup
+  # framing on that 9-kernel program (warmup 0 / captured-graph benches run clean, memcheck clean,
+  # the plain path and 3 serving runs run clean; the tile choice was never the trigger). Bench this
+  # twin with --warmup 0; the harness interaction is filed in the 2026-07-21 findings plan.
   - kernel: matmul
     name: gemma4_12b.o_proj_global.m4096
     M: 4096
     N: 3840
     K: 8192
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f4x8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 1442.3
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 1288.2
     cublas_us: 1306.4
   - kernel: matmul
     name: gemma4_12b.o_proj_global.m4096
@@ -1794,8 +1793,8 @@ configs:
     N: 3840
     K: 8192
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 1246.8
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 826.0
     cublas_us: 1306.4
   - kernel: matmul
     name: gemma4_12b.o_proj_global.m4096.lin
@@ -1804,8 +1803,8 @@ configs:
     K: 8192
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f4x8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 1445.4
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 1301.9
     cublas_us: 1297.7
   - kernel: matmul
     name: gemma4_12b.o_proj_global.m4096.lin
@@ -1814,8 +1813,8 @@ configs:
     K: 8192
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 1232.1
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 855.3
     cublas_us: 1297.7
   # M=4096 norms: rms follows the many-rows b128 rule; the qknorm rows are the 4096-chunk row counts
   # (k256 q -> 4096x16 = 65536 rows takes b64 — the first b64 winner in the family; k512 kv-global ->

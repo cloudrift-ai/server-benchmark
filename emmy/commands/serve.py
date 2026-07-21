@@ -183,6 +183,17 @@ def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: 
             cmd += ["--max-num-batched-tokens", _DEFAULT_MAX_MODEL_LEN]
     elif not stock:
         cmd += _PLUGIN_ARGS
+        # Batched symbolic-seq mode pays the FULL batch-cap cost per step (dummy rows pad
+        # the group), so a step must be allowed to FILL the batch: without this, vLLM's
+        # default max_num_batched_tokens (2048) schedules ~4 sequences per step into a
+        # 32-row program — 28 rows of pure waste (measured 0.63 req/s vs 2.33 per-seq).
+        from emmy import config as emmy_config  # noqa: PLC0415
+
+        if emmy_config.serving_batched() and not _has_flag(vllm_args, "--max-num-batched-tokens"):
+            seqs_raw = _flag_value(vllm_args, "--max-num-seqs", "256")
+            len_raw = _flag_value(vllm_args, "--max-model-len", _DEFAULT_MAX_MODEL_LEN)
+            if seqs_raw.isdigit() and len_raw.isdigit():
+                cmd += ["--max-num-batched-tokens", str(int(seqs_raw) * int(len_raw))]
     if not _has_flag(vllm_args, "--max-model-len"):
         cmd += ["--max-model-len", _DEFAULT_MAX_MODEL_LEN]
     if not _has_flag(vllm_args, "--gpu-memory-utilization"):

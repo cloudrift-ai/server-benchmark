@@ -31,7 +31,8 @@ def extract_benchmark_results(output: str) -> str:
 def _bench_args(recipe: Recipe) -> list[str]:
     """The vllm bench serve argument list shared by the display string and the
     docker invocation. Embedding recipes target /v1/embeddings via the
-    openai-embeddings backend and have no output length (nothing is generated)."""
+    openai-embeddings backend and have no output length (nothing is generated),
+    so the generation-only sampling knobs (temperature, ignore_eos) don't apply."""
     bench = recipe.benchmark
     num_instances = calculate_num_instances(recipe)
     port = 8080 if num_instances > 1 else 8000
@@ -46,8 +47,14 @@ def _bench_args(recipe: Recipe) -> list[str]:
         f"--num-prompts {bench.num_prompts}",
         f"--random-input-len {bench.random_input_len}",
     ]
+    if bench.seed is not None:
+        args.append(f"--seed {bench.seed}")
     if not recipe.is_embedding:
         args.append(f"--random-output-len {bench.random_output_len}")
+        if bench.temperature is not None:
+            args.append(f"--temperature {bench.temperature}")
+        if bench.ignore_eos:
+            args.append("--ignore-eos")
     args.append(f"--base-url http://localhost:{port}")
     return args
 

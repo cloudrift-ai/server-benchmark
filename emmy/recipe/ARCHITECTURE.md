@@ -132,6 +132,15 @@ This design provides:
 3. **Computed properties** — `LLMConfig.gpus_per_instance` derives from `tensor_parallel_size * pipeline_parallel_size * data_parallel_size` without parsing strings.
 4. **Deep merge support** — named fields participate in matrix merging naturally. An `extra_args` string cannot be partially overridden.
 
+### Controlled Workload Flags (`benchmark.seed` / `temperature` / `ignore_eos`)
+
+`BenchmarkConfig` carries three optional knobs that pin the bench-client workload for controlled cross-engine
+comparisons: `seed` reproduces the same random prompt set across runs and engines, `temperature: 0` forces greedy
+decoding, and `ignore_eos: true` makes every request generate exactly `random_output_len` tokens so all engines do
+identical work. Each unset field emits no client flag (prior behavior); note that no `temperature` means the server's
+default sampling, not greedy. `temperature` / `ignore_eos` are generation-only and are skipped for embedding recipes
+(`benchmark/workload.py`).
+
 ### Extra Args Ban Enforcement
 
 Users must not duplicate named fields in `extra_args`. The `validate_extra_args()` function enforces this by:

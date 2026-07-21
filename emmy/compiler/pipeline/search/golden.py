@@ -75,12 +75,13 @@ def matmul_snippet(M: int, N: int, K: int, dtype: str = "fp32", trans_b: bool = 
 
     ``trans_b`` spells the **serving Linear layout** — B given ``(N, K)``,
     contracted as ``x @ w.T`` via ``F.linear``. The traced contraction carries
-    ``b_trans``, whose enumeration offers NO staged (``d*/tma*`` / ``d*/cp*``)
-    rows (the B-slab fill would issue row-crossing copies — the schedule
-    declines), so a golden tuned on the canonical ``(M,K) @ (K,N)`` form can
-    pin a staged config that NEVER realizes against a served model's linear
-    forks (the gemma-4 m16/dynM o_proj + mlp_down drift-warning class). A
-    golden meant to decide a serving fork must be tuned on this layout."""
+    ``b_trans``; the warp tier stages it like any canonical matmul (the
+    N-major B slab — cp.async / TMA fill it in the operand's own orientation,
+    the plain no-``.trans`` ldmatrix drains it), so the same ``STAGE``
+    spellings realize on both layouts. The measured µs still differ per layout
+    (different slab geometry and gmem walk), so a golden meant to decide a
+    serving fork must still be TUNED on this layout — a canonical-form entry
+    would deploy its config with a foreign µs."""
     if dtype == "fp32":
         if trans_b:
             return f"torch.nn.functional.linear(torch.randn({M},{K}), torch.randn({N},{K}))"
@@ -225,18 +226,15 @@ class MatmulGoldenConfig(GoldenConfig):
     K: int
     dtype: str = "fp32"
     # The serving Linear layout: B given (N, K), contracted as ``x @ w.T`` (``F.linear``).
-    # Its fork offers gmem-direct rows ONLY (staged transports decline transposed B), so a
-    # golden meant to decide a served model's linear fork must be tuned with this on — a
-    # canonical-B tuning records staged configs that never realize there (see
-    # ``matmul_snippet``). Same ShapeKey either way: at the fork, an unrealizable entry
-    # simply never matches, so layout twins coexist under one shape.
-    # CAVEAT (asymmetric, ordering-protected): the decline is one-way. A ``trans_b`` entry's
-    # gmem-direct config DOES realize on a canonical fork — the shared bucket sorts by µs and
-    # today every canonical twin is present and faster, so the .lin entry never decides one.
-    # A .lin retune that beats a stale canonical twin (or a removed twin) would deploy its
-    # cross-layout config with its foreign µs; the real fix is a layout signal in the stamped
-    # ``S_*`` features + this key, which does not exist yet. Until then, keep the canonical
-    # twin recorded and current whenever its .lin sibling is.
+    # The warp tier stages this layout too (the N-major B slab; see ``matmul_snippet``), so
+    # the same STAGE spellings realize on both layouts — but the measured µs differ per
+    # layout, so a golden meant to decide a served model's linear fork must still be tuned
+    # with this on. Same ShapeKey either way: layout twins coexist under one shape and the
+    # shared bucket sorts by µs.
+    # CAVEAT (ordering-protected): with staging realizable on EITHER layout, a stale or
+    # missing twin lets the other layout's entry deploy its config with a foreign µs; the
+    # real fix is a layout signal in the stamped ``S_*`` features + this key, which does not
+    # exist yet. Until then, keep BOTH layout twins recorded and current together.
     trans_b: bool = False
 
     def __post_init__(self):

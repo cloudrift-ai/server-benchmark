@@ -241,7 +241,7 @@ def _f16acc_promotes(m_reg: int, n_reg: int, n_folds: int) -> list[Stmt]:
 
 
 def _staged_inner_atom_loop(
-    *, slabs: tuple[str, ...], mn: tuple[Side, Side], atom, bk_elems, ki, reg_depth: int = 1, offs=None, swizzles=None
+    *, slabs: tuple[str, ...], mn: tuple[Side, Side], atom, bk_elems, ki, reg_depth: int = 1, offs=None, swizzles=None, trans=None
 ) -> list[Stmt]:
     """The inner atom-K drain shared by the cp.async and TMA staged paths: read the A/B ``slabs`` via
     ``LdmatrixLoad(staged=True)`` + ``MmaSyncPtx``. ``slabs`` is ``(A, B…)`` — one B slab per fold
@@ -265,19 +265,29 @@ def _staged_inner_atom_loop(
     ``swizzles`` (per-slab, aligned with ``slabs``): the smem swizzle mode each slab was written
     with (TMA in-copy, or the cp.async fill's software XOR) — threaded onto each ``LdmatrixLoad``
     so its address XOR undoes the fill's chunk permutation (``"NONE"`` reads the plain row-major
-    slab)."""
+    slab).
+
+    ``trans`` (per-slab, aligned with ``slabs``): a transposed-B N-MAJOR slab (``Operand.trans``
+    — ``tile_n`` rows × ``bk_elems`` K cols, the serving ``F.linear`` layout staged in its own
+    gmem orientation): the B read takes A's row/col convention (tile coord the ROW, K the col,
+    ``ldm = bk_elems``) and drains via the plain (no ``.trans``) ldmatrix — the
+    ``LdmatrixLoad(b_trans=True)`` staged path. Always ``False`` for A and for sync-filled
+    slabs (a ``SyncOperand``'s transposed-B slab stays K-major)."""
     (a_slab, *b_slabs), (m, n) = slabs, mn
     offs = offs if offs is not None else (None,) * len(slabs)
     swizzles = swizzles if swizzles is not None else ("NONE",) * len(slabs)
+    trans = trans if trans is not None else (False,) * len(slabs)
     atom_m, atom_n, atom_k = atom.shape
     n_steps = bk_elems // atom_k
     # Per-operand drain spec: (frag base fn, slab, ldm, tile-is-slab-row, reg count, warp-unit var,
     # atom dim, slot row off, swizzle). A stacks the tile axis on the slab row (K the col); B swaps
-    # (K the row, tile the col); the slot offset always lands on the ROW. All share ONE emission loop.
+    # (K the row, tile the col) — unless its slab is transposed (N-major: tile the row, K the col,
+    # like A); the slot offset always lands on the ROW. All share ONE emission loop.
     specs = [(lambda x: f"_a{x}", "a", a_slab, bk_elems, True, m.reg, m.unit, atom_m, offs[0], swizzles[0])]
     for f, bs in enumerate(b_slabs):
         frag_of = (lambda ff: lambda x: _fold_frag(f"_b{x}", ff))(f)
-        specs.append((frag_of, "b", bs, n.tile, False, n.reg, n.unit, atom_n, offs[1 + f], swizzles[1 + f]))
+        tr = trans[1 + f]
+        specs.append((frag_of, "b", bs, bk_elems if tr else n.tile, tr, n.reg, n.unit, atom_n, offs[1 + f], swizzles[1 + f]))
 
     def ldms(kexpr, suffix):  # every operand's ldmatrix reads at K position `kexpr`, into fragment slot `suffix`
         reads: list[Stmt] = []
@@ -288,7 +298,18 @@ def _staged_inner_atom_loop(
                 if off is not None:
                     row = BinaryExpr("+", off, row)
                 frag = f"{frag_of(x)}{suffix}"
-                reads.append(LdmatrixLoad(frag=frag, src_buffer=slab, src_index=(row, col), role=role, staged=True, ldm=ldm, swizzle=swz))
+                reads.append(
+                    LdmatrixLoad(
+                        frag=frag,
+                        src_buffer=slab,
+                        src_index=(row, col),
+                        role=role,
+                        staged=True,
+                        ldm=ldm,
+                        swizzle=swz,
+                        b_trans=role == "b" and is_row,
+                    )
+                )
         return reads
 
     def mmas(suffix):  # every fold channel × (i, j) cell's mma.sync over the `suffix`-slotted operand fragments
@@ -389,17 +410,22 @@ def _slab_operands(
     base: tuple[Expr, Expr],
     swizzles: tuple[str, str] = ("NONE", "NONE"),
     elems: tuple = (None, None),
+    b_trans: bool = False,
 ):
     """The staged ``(A, B)`` :class:`Operand` pair — the one operand-geometry factory both tiers build,
     looped over the two operands. A is ``(tile_m × bk)`` indexed by the M tile axis (the slab ROW); B is
     ``(bk × tile_n)`` by the N tile axis (the slab COL) — ``is_row`` flips the slot shape + the TMA box
-    origin. ``base`` is the ``(row_base, col_base)`` CTA tile origin; ``index_srcs`` are the operands'
-    gmem index expressions (``load.index``); ``swizzles`` the per-operand smem swizzle modes (the
-    mma tier's :meth:`_MmaOps.slab_swizzles` — ``("NONE", "NONE")`` everywhere else). ``elems`` are the
-    per-operand element dtypes (``DataType`` or ``None`` = the transport-level dtype) — a mixed-dtype
-    scalar contraction (fp32 A × fp16 B) must size each slab and fill by its OWN element width."""
+    origin. A transposed B (``b_trans``, the serving ``F.linear`` layout — K gmem-contiguous) takes
+    A's geometry instead: an N-MAJOR ``(tile_n × bk)`` slab whose inner dim maps stride-1 to gmem K,
+    so the fill's chunks stay contiguous; the ``Operand.trans`` stamp routes the drain to the plain
+    (no ``.trans``) ldmatrix. ``base`` is the ``(row_base, col_base)`` CTA tile origin; ``index_srcs``
+    are the operands' gmem index expressions (``load.index``); ``swizzles`` the per-operand smem
+    swizzle modes (the mma tier's :meth:`_MmaOps.slab_swizzles` — ``("NONE", "NONE")`` everywhere
+    else). ``elems`` are the per-operand element dtypes (``DataType`` or ``None`` = the
+    transport-level dtype) — a mixed-dtype scalar contraction (fp32 A × fp16 B) must size each slab
+    and fill by its OWN element width."""
     ops: list[Operand] = []
-    for i, (tag, is_row) in enumerate((("a", True), ("b", False))):
+    for i, (tag, is_row) in enumerate((("a", True), ("b", b_trans))):
         tile, tile_base = mn[i], base[i]
         shape = (tile.tile, bk_elems) if is_row else (bk_elems, tile.tile)
         elem = elems[i]
@@ -419,6 +445,7 @@ def _slab_operands(
                 swizzle=swizzles[i],
                 dtype=cuda_name(elem) if elem is not None else None,
                 elem_bytes=elem.nbytes if elem is not None else None,
+                trans=i == 1 and b_trans,
             )
         )
     return tuple(ops)
@@ -560,6 +587,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             base=_tile_base(mn),
             swizzles=ops.slab_swizzles(mn, elem.nbytes),
             elems=ops.slab_elems(),
+            b_trans=c.b_trans,
         )
         common = dict(
             operands=operands,
@@ -777,6 +805,7 @@ class _MmaOps(_AtomOps):
             ki="_ki",
             reg_depth=self.stage.reg_depth,
             swizzles=tuple(getattr(op, "swizzle", "NONE") for op in operands),
+            trans=tuple(getattr(op, "trans", False) for op in operands),
         )
         if _f16acc(self.c.atom):
             stmts = [*stmts, *_f16acc_promotes(mn[0].reg, mn[1].reg, len(self.c.folds))]
@@ -793,10 +822,14 @@ class _MmaOps(_AtomOps):
         (4-way on 64 B rows / 8-way on 128 B; conflict replays were 81% of the sm_89 gate_up fm
         golden's shared-mem wavefronts, the measured residual to cuBLAS). Modes are
         DERIVED, not tuned — the widest atom that divides the span (matching the pre-rebuild
-        behavior: A → B64 on a 32-elem fp16 chunk, B → B128 on a 64-elem row)."""
+        behavior: A → B64 on a 32-elem fp16 chunk, B → B128 on a 64-elem row). A transposed B
+        staged through an async transport keeps its N-major slab, whose inner row span is the
+        K chunk (``bk_elems``) like A's; the sync transport's transposed-B slab stays K-major
+        (``tile_n`` inner)."""
+        b_inner = self.stage.bk_elems if self.c.b_trans and self.stage.transport != "sync" else mn[1].tile
         return (
             pick_swizzle_atom(self.stage.bk_elems, elem_bytes)[1],
-            pick_swizzle_atom(mn[1].tile, elem_bytes)[1],
+            pick_swizzle_atom(b_inner, elem_bytes)[1],
         )
 
     def state(self, cells):

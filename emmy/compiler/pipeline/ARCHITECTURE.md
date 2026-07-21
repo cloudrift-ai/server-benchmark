@@ -688,12 +688,15 @@ mma kernel and share `kind="fused"`; the gate⊗up snippet binds its shared RMSN
 
 **A matmul golden's layout must match the fork it is meant to decide.** `MatmulGoldenConfig.trans_b` spells the
 serving Linear layout — B given `(N, K)`, contracted as `x @ w.T` via an `F.linear` snippet. The traced contraction
-carries `b_trans`, and its enumeration offers **gmem-direct rows only** (staged transports decline transposed B), so
-a golden tuned on the canonical `(M,K) @ (K,N)` form can pin a staged config that never realizes against a served
-model's linear forks — every boot then logs the enumeration-drift warning and the fork falls to the cold model (the
-gemma-4 m16/dynM o_proj + mlp_down class behind the 5090 boot-flap ties). The two layouts share one ShapeKey on
-purpose: at a fork, an entry whose config the offer can't realize simply never matches, so a canonical entry (the
-harness/eval truth) and a `trans_b` entry (the serving truth) coexist under one shape, fastest-realizable-first.
+carries `b_trans`. The warp tier stages it like any canonical matmul (cp.async and TMA fill an N-MAJOR B slab —
+`tile_n × bk`, K stride-1 in gmem and smem alike — drained by the plain no-`.trans` ldmatrix; historically the
+transports declined transposed B and the `.lin` forks ran gmem-direct only, the 1.3–2.75× serving gap class), so the
+same STAGE spellings realize on both layouts — but the measured µs still differ per layout (different slab geometry
+and gmem walk), which is why a golden meant to decide a served model's linear fork must still be TUNED on the
+`F.linear` snippet. The two layouts share one ShapeKey on purpose: at a fork the shared bucket sorts by µs, so a
+canonical entry (the harness/eval truth) and a `trans_b` entry (the serving truth) coexist under one shape — keep
+BOTH current, since with staging realizable on either layout a stale twin's config now deploys cross-layout with its
+foreign µs (the layout signal in the stamped `S_*` features / ShapeKey still does not exist).
 
 **Provenance and the in-model drift audit.** A golden file (or entry) may carry an optional `model:` header — the HF
 model id whose serving graph the shapes came from (`GoldenConfig.model`; pure provenance, never part of any join key).

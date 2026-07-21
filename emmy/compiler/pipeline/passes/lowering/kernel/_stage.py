@@ -315,6 +315,13 @@ class Operand:
     # (:func:`cp_async_fill` ``swizzle``). Either way the ldmatrix drain applies the matching XOR;
     # a scalar plain-`Load` drain and the sync write path stay NONE.
     swizzle: str = "NONE"
+    # A transposed-B (``F.linear`` serving-layout) slab: stored N-MAJOR (``tile_n × bk``, the
+    # operand's own gmem orientation, K stride-1 in both) instead of the canonical K-major
+    # ``bk × tile_n``. The mma drain reads it with the plain (no ``.trans``) ldmatrix — the
+    # ``LdmatrixLoad(b_trans=True)`` staged path flash's K slab already drains through. Role
+    # "b" only; a ``SyncOperand`` has no counterpart (its transposed-B slab stays K-major,
+    # filled per-cell).
+    trans: bool = False
     # Extra smem columns padding each slab row (cp.async transport only — a TMA box deposit is
     # dense). The pad breaks the same-bank stride of a power-of-two row — the flash K/V slabs'
     # bank-conflict fix (`_twist._PAD`), whose drains are not plain ldmatrix rows; the mma matmul

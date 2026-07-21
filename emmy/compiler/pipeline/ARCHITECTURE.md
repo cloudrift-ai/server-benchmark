@@ -54,6 +54,7 @@ Terms used throughout:
 | `search/prior/` | The ONE ranking path: a `Prior` ABC with the cold `OfflinePrior` and the `OnlinePrior` composed behind `FallbackPrior` (`load_prior`). `diagnostics.py` here backs the `eval` reachability / calibration reports; `fit/` is the offline fitter core (`linear.py`) plus the `emmy fit` cross-validation harness (`cv.py` — fold axes, pooled holdout/train tables, the metrics dict). |
 | `search/data/` | The harmonized read-view over the three data sources (golden configs / DB `perf` rows / prior reservoir): `Sample`, `Dataset`, and `ShapeKey` (the single golden↔measured join key). |
 | `search/golden.py` | `GoldenConfig` and its subclasses (see Part 7, "Golden configs and the A/B integrity gates"). |
+| `search/audit.py` | The golden drift audit: compile graphs with the golden tier as the only evidence, one MATCH / DRIFT / GAP verdict per consulted fork (via `greedy.golden_audit`, the supported sink). Backs `emmy eval golden --in-model` and the CI gate (see Part 7). |
 | `keys.py` | `op_cache_key` / `dialect_of` / `source_chain`. |
 | `slice.py` | Isolates one finalized kernel into a standalone graph (used by the inner tune and structural pricing). |
 | `dump.py`, `rule_diff.py` | The dump and `-vv` presentation layers (see the end of this file). |
@@ -693,6 +694,27 @@ model's linear forks — every boot then logs the enumeration-drift warning and 
 gemma-4 m16/dynM o_proj + mlp_down class behind the 5090 boot-flap ties). The two layouts share one ShapeKey on
 purpose: at a fork, an entry whose config the offer can't realize simply never matches, so a canonical entry (the
 harness/eval truth) and a `trans_b` entry (the serving truth) coexist under one shape, fastest-realizable-first.
+
+**Provenance and the in-model drift audit.** A golden file (or entry) may carry an optional `model:` header — the HF
+model id whose serving graph the shapes came from (`GoldenConfig.model`; pure provenance, never part of any join key).
+Model-tagged goldens opt into the **in-model drift audit** (`emmy eval golden --in-model`, library `search/audit.py`):
+the model's serving twins are re-traced **weight-free** (`emmy/serving/twins.py` builds a trimmed random-init skeleton
+from `config.json` alone — a trace never reads a weight value) and each tagged card's twins are compiled with the
+golden tier as the only evidence (no tune DB, online file pointed at a nonexistent path, deployable nvcc regime
+forced — under `-Xcicc -O1` the `H_opt` guard would silently skip golden consultation — and the card targeted via
+`Context.from_target`, so verdicts are machine-independent). Each golden-tier consultation yields MATCH (a recorded
+golden realized), DRIFT (shape keyed but nothing realizes — always a defect: the recording claims a µs the deploy can
+no longer produce), or GAP (no golden for the shape). This is the in-model half of the reproduction check: the
+isolated snippet A/B reproduced 68/68 while the in-model deploys drifted (the cast-splice class), which is exactly the
+blind spot the audit closes. Coverage is gated as a **ratchet over every GAP key** — contractions, rms_norm/reduce
+sweeps, and pointwise forks alike; `major_gap_keys` (uncovered warp-contraction forks, the misdeploy/hang hazard
+class) is the close-these-first emphasis view. The CI gate (`tests/compiler/test_golden_drift_gate.py`, offline via
+a checked-in `config.json` fixture) pins the per-card gap set exactly — a new gap fails until a golden is recorded
+or the baseline is deliberately extended, a closed one fails until its baseline line is deleted, and an emptied
+baseline means full model coverage is thereafter enforced (only fork-free deterministic lowerings — rope/embedding
+gathers — sit outside the gate, having no fork for the golden tier to decide). The twins track the installed `transformers` modeling code by design: a transformers
+bump that changes the forward changes the twins exactly as it changes serving, and the gate goes loudly red.
+`scripts/diagnostics/audit_golden_match.py` is the same audit over explicit graph JSONs on a live box.
 
 **Live-GPU scoping.** `tune --dataset golden` (and `--golden NAME` resolution) scopes to the **live** card's goldens
 (`goldens_for_live_gpu`) — names repeat across per-GPU golden files with diverging shapes/dtypes, so a flat union

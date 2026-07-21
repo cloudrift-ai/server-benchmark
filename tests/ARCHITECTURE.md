@@ -51,7 +51,11 @@ tests/
 ├── compiler/                       # mirrors emmy/compiler/
 │   ├── conftest.py                     # requires_cuda / requires_sm90 markers, run_graph fixture,
 │   │                                   # device_compute_capability(), matmul_graph(m,k,n) shared builder
-│   ├── fixtures/                       # pre-computed traces (tinyllama_layer0.json)
+│   ├── fixtures/                       # pre-computed traces (tinyllama_layer0.json) + model configs
+│   │                                   # (gemma4_12b/config.json — the drift gate's offline HF config)
+│   ├── test_golden_drift_gate.py       # golden drift CI gate: weight-free gemma-4 serving twins re-traced
+│   │                                   # from the fixture config, audited per card (DRIFT=0 + major-gap
+│   │                                   # ratchet; offline, CPU-only; ~80 s — the heaviest non-perf test)
 │   ├── ir/                             # IR datatypes (mirrors emmy/compiler/ir/)
 │   │   ├── test_graph.py                       # Graph / Node / Tensor primitives
 │   │   ├── test_graph_splice.py                # Graph.splice rewrite primitive

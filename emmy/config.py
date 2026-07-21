@@ -184,6 +184,28 @@ def online_path() -> Path:
     return legacy if legacy.exists() and not path.exists() else path
 
 
+@contextmanager
+def online_file_override(path: str | Path | None):
+    """Temporarily point ``EMMY_ONLINE_FILE`` at ``path`` (``None`` is a no-op).
+
+    The golden drift audit uses this with a nonexistent path so a compile's
+    evidence hierarchy sees NO machine-local online prior / reservoir — the
+    golden tier plus the repo-shipped offline prior are the only inputs, making
+    MATCH/DRIFT verdicts machine-independent."""
+    if path is None:
+        yield
+        return
+    prev = os.environ.get(ONLINE_FILE)
+    os.environ[ONLINE_FILE] = str(path)
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop(ONLINE_FILE, None)
+        else:
+            os.environ[ONLINE_FILE] = prev
+
+
 def offline_path() -> Path | None:
     """Offline-prior weights artifact override: ``EMMY_OFFLINE_FILE`` (legacy
     ``EMMY_ANALYTIC_FILE``) → ``None``.

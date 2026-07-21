@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import replace
 from functools import lru_cache
 from typing import TYPE_CHECKING
@@ -582,6 +583,36 @@ def _fork_shape_key(rows: list[dict]):
     return key
 
 
+# Optional per-consultation verdict sink for the golden-tier audit (``search/audit.py``).
+# ``None`` (the default) is zero-cost; ``golden_audit`` installs a list that
+# ``_golden_pick`` appends one record per consulted fork to — the supported seam the
+# drift audit reads, replacing the old monkey-patch spy in ``scripts/diagnostics``.
+_AUDIT_SINK: list[dict] | None = None
+
+
+@contextmanager
+def golden_audit(records: list[dict]):
+    """Collect one ``{node, key, verdict, golden, us, n_rows}`` record per golden-tier
+    consultation into ``records`` for the duration of the block. Verdicts: ``MATCH``
+    (a recorded golden realized on an offered candidate), ``DRIFT`` (goldens keyed to
+    the fork's shape but none realizes — a graph/enumeration change invalidated them),
+    ``GAP`` (no golden recorded for the shape)."""
+    global _AUDIT_SINK
+    prev = _AUDIT_SINK
+    _AUDIT_SINK = records
+    try:
+        yield records
+    finally:
+        _AUDIT_SINK = prev
+
+
+def _audit_record(node_id: str, key, verdict: str, golden: str | None, us: float | None, n_rows: int) -> None:
+    if _AUDIT_SINK is not None:
+        # ``key`` stays the ShapeKey object — coverage policy (major-gap classification)
+        # reads its fields; presentation layers stringify at print/JSON time.
+        _AUDIT_SINK.append({"node": node_id, "key": key, "verdict": verdict, "golden": golden, "us": us, "n_rows": n_rows})
+
+
 def _golden_pick(index: dict, rows: list[dict], node_id: str) -> tuple[int, float] | None:
     """Verified-golden pick over candidate knob rows: the first candidate
     prefix-consistent with the fastest recorded golden of the op's shape
@@ -601,8 +632,10 @@ def _golden_pick(index: dict, rows: list[dict], node_id: str) -> tuple[int, floa
 
     if not rows or float(rows[0].get("H_opt", _O3_OPT)) != _O3_OPT:
         return None  # deploying a non--O3 regime — golden µs is deployable-regime truth
-    goldens = index.get(_fork_shape_key(rows))
+    key = _fork_shape_key(rows)
+    goldens = index.get(key)
     if not goldens:
+        _audit_record(node_id, key, "GAP", None, None, len(rows))
         return None
     for g in goldens:  # fastest recorded entry first
         gold = dict(tuning_knob_items(g.knobs))
@@ -611,7 +644,9 @@ def _golden_pick(index: dict, rows: list[dict], node_id: str) -> tuple[int, floa
         matches = [i for i, row in enumerate(rows) if _golden_matches_row(gold, row)]
         if matches:
             best = min(matches, key=lambda i: canonical_row_key(rows[i]))
+            _audit_record(node_id, key, "MATCH", g.name, float(g.emmy_us or 0.0), len(rows))
             return best, float(g.emmy_us or 0.0)
+    _audit_record(node_id, key, "DRIFT", ", ".join(g.name for g in goldens), None, len(rows))
     logger.warning(
         "deploy: node %r matches golden shape %s (%d recorded entr%s), but no offered candidate realizes any of "
         "them — the golden(s) no longer realize under the current enumeration; falling through to the normal "

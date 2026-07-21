@@ -140,6 +140,11 @@ class GoldenConfig:
     emmy_us: float = 0.0
     cublas_us: float = 0.0
     dynamic: bool = False  # symbolic seq/row axis → masked-tile kernel (``.dynM`` name convention)
+    # HF model id whose serving graph this shape came from (e.g. ``google/gemma-4-12B``) —
+    # provenance, never part of any join key. Optional: a hand-picked benchmark shape has no
+    # model. Model-tagged entries are what ``eval golden --in-model`` audits (it re-traces the
+    # model's serving twins and checks each recorded golden still realizes in them).
+    model: str | None = None
 
     @property
     def ratio(self) -> float:
@@ -290,10 +295,16 @@ class ReduceGoldenConfig(GoldenConfig):
 
     def shape_key(self):
         """The reduce's arithmetic join key — free dims ``(M,)``, reduce extent ``K``,
-        matching what ``992_stamp_structural_features`` stamps on the reduce kernel."""
+        matching what ``992_stamp_structural_features`` stamps on the reduce kernel.
+        The dynamic twin excludes the symbolic M (the ``(M,) → ()`` free product collapses
+        to 1) and drops the aspect — the stamped-op convention every dynamic key follows;
+        the pre-fix ``free_prod=M`` dynamic key could never join a stamped symbolic reduce
+        (observed on the GeGLU cut's ``__stat`` fragment)."""
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
-        return ShapeKey(free_prod=self.M, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic, free_max=self.M)
+        free = 1 if self.dynamic else self.M
+        fm = 0 if self.dynamic else self.M
+        return ShapeKey(free_prod=free, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic, free_max=fm)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -305,7 +316,7 @@ class PointwiseGoldenConfig(GoldenConfig):
 
     M: int
     N: int
-    dtype: str = "fp32"  # the snippet is fp32-only; recorded so Sample.from_golden is kind-agnostic
+    dtype: str = "fp32"  # fp16/bf16 join the model's half-precision pointwise forks (is_warp=True keys)
 
     def __post_init__(self):
         self._require_dynamic_hint(self.M)
@@ -314,17 +325,22 @@ class PointwiseGoldenConfig(GoldenConfig):
         return ["seq_len@x:0"] if self.dynamic else []
 
     def snippet(self) -> str:
-        return f"torch.relu(torch.randn({self.M},{self.N}))"
+        tdt = {"fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16", "fp32": ""}[self.dtype]
+        return f"torch.relu(torch.randn({self.M},{self.N}{tdt}))"
 
     def flops(self) -> float:
         return float(self.M * self.N)  # one op per element
 
     def shape_key(self):
         """The pointwise map's arithmetic join key — free product ``M·N``, no reduce
-        axis (``reduce_max=0``, the ``from_s_features`` default for an unstamped extent)."""
+        axis (``reduce_max=0``, the ``from_s_features`` default for an unstamped extent);
+        the dynamic twin excludes the symbolic M (and drops the aspect, the ``kind=""``
+        dynamic-key convention)."""
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
-        return ShapeKey(free_prod=self.M * self.N, reduce_max=0, is_warp=False, is_dyn=self.dynamic, free_max=max(self.M, self.N))
+        free = self.N if self.dynamic else self.M * self.N
+        fm = 0 if self.dynamic else max(self.M, self.N)
+        return ShapeKey(free_prod=free, reduce_max=0, is_warp=self.dtype != "fp32", is_dyn=self.dynamic, free_max=fm)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -341,6 +357,12 @@ class RmsNormGoldenConfig(GoldenConfig):
     M: int
     K: int
     dtype: str = "fp32"  # snippet is fp32; recorded so Sample.from_golden is kind-agnostic
+    # Per-head norms (a model's q/k-norm over head_dim) keep the head axis as a STATIC free
+    # dim beside the symbolic token axis: the op is ``(M, heads, K) → (M, heads, K)`` with
+    # only M symbolic, so the dynamic key's free product is ``heads*K`` — a 2-D snippet can
+    # never join it (its dynamic free is just ``K``). ``heads=1`` is the plain row norm.
+    # Static per-head twins may fold heads into M (same key) or spell it — both join.
+    heads: int = 1
 
     def __post_init__(self):
         self._require_dynamic_hint(self.M)
@@ -349,19 +371,21 @@ class RmsNormGoldenConfig(GoldenConfig):
         return ["seq_len@x:0"] if self.dynamic else []
 
     def snippet(self) -> str:
-        return f"torch.nn.RMSNorm({self.K})(torch.randn({self.M},{self.K}))"
+        dims = f"{self.M},{self.heads},{self.K}" if self.heads > 1 else f"{self.M},{self.K}"
+        return f"torch.nn.RMSNorm({self.K})(torch.randn({dims}))"
 
     def flops(self) -> float:
-        return 2.0 * self.M * self.K  # square+accumulate per element (the scale sweep is extra — stays an underestimate)
+        return 2.0 * self.M * self.heads * self.K  # square+accumulate per element (the scale sweep is extra — stays an underestimate)
 
     def shape_key(self):
-        """Keys the stamped RMSNorm sweep op (``kind="rms_norm"``): the OUTPUT is ``(M, K)`` — the
-        sweep re-reads the row it normalizes, so K is a free axis of the output AND the reduce
-        extent (``free_prod = M*K``, measured off the stamped op; the old ``free_prod = M`` never
-        matched what the 992 stamp writes). The dynamic twin excludes the symbolic M."""
+        """Keys the stamped RMSNorm sweep op (``kind="rms_norm"``): the OUTPUT is ``(M[, heads], K)`` —
+        the sweep re-reads the row it normalizes, so K is a free axis of the output AND the reduce
+        extent (``free_prod = M*heads*K``, measured off the stamped op; the old ``free_prod = M`` never
+        matched what the 992 stamp writes). The dynamic twin excludes the symbolic M (keeping the
+        static ``heads`` axis — the per-head q/k-norm join)."""
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
-        free = self.K if self.dynamic else self.M * self.K
+        free = self.heads * self.K if self.dynamic else self.M * self.heads * self.K
         return ShapeKey(free_prod=free, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic, kind="rms_norm")
 
 
@@ -716,7 +740,9 @@ def _load_goldens() -> list[GoldenConfig]:
     """Load every per-GPU golden YAML under :data:`_GOLDENS_DIR` into one flat list.
 
     One file per GPU: a ``gpu_name`` / ``compute_cap`` header (stamped onto every
-    config so it isn't repeated per entry) plus a ``configs`` list, each tagged with
+    config so it isn't repeated per entry), an optional ``model:`` provenance header
+    (the HF model id the shapes came from — see :attr:`GoldenConfig.model`; overridable
+    per entry), plus a ``configs`` list, each tagged with
     a ``kernel`` discriminator (``matmul`` / ``attention`` / ``softmax`` / ``reduce`` / ``rms_norm`` / ``norm_linear`` /
     ``mlp_geglu`` / ``rope`` / ``embedding`` / ``pointwise``) selecting the dataclass. All files are concatenated — a
     ``name`` may recur across GPUs.
@@ -733,8 +759,9 @@ def _load_goldens() -> list[GoldenConfig]:
     for path in sorted(_GOLDENS_DIR.glob("*.yaml")):
         doc = yaml.safe_load(path.read_text())
         gpu_name, cap = doc["gpu_name"], tuple(doc["compute_cap"])
+        file_model = doc.get("model")  # optional provenance header; a per-entry ``model:`` overrides it
         for c in doc["configs"]:
-            out.append(_KERNEL_CLASSES[c.pop("kernel")](gpu_name=gpu_name, compute_cap=cap, **c))
+            out.append(_KERNEL_CLASSES[c.pop("kernel")](gpu_name=gpu_name, compute_cap=cap, model=c.pop("model", file_model), **c))
     return out
 
 

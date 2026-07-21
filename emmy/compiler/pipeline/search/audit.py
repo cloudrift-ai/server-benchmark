@@ -100,9 +100,7 @@ def gap_keys(records_by_graph: dict[str, list[dict]]) -> set:
     view the CI gate ratchets on (goldens must cover ALL kernel forks in the model:
     contractions, reductions/norms, pointwise alike). :func:`major_gap_keys` is the
     highest-stakes subset, kept for report emphasis."""
-    return {
-        r["key"] for records in records_by_graph.values() for r in records if r["verdict"] == "GAP" and r["key"] is not None
-    }
+    return {r["key"] for records in records_by_graph.values() for r in records if r["verdict"] == "GAP" and r["key"] is not None}
 
 
 def major_gap_keys(records_by_graph: dict[str, list[dict]]) -> set:

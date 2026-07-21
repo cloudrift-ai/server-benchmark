@@ -295,10 +295,16 @@ class ReduceGoldenConfig(GoldenConfig):
 
     def shape_key(self):
         """The reduce's arithmetic join key — free dims ``(M,)``, reduce extent ``K``,
-        matching what ``992_stamp_structural_features`` stamps on the reduce kernel."""
+        matching what ``992_stamp_structural_features`` stamps on the reduce kernel.
+        The dynamic twin excludes the symbolic M (the ``(M,) → ()`` free product collapses
+        to 1) and drops the aspect — the stamped-op convention every dynamic key follows;
+        the pre-fix ``free_prod=M`` dynamic key could never join a stamped symbolic reduce
+        (observed on the GeGLU cut's ``__stat`` fragment)."""
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
-        return ShapeKey(free_prod=self.M, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic, free_max=self.M)
+        free = 1 if self.dynamic else self.M
+        fm = 0 if self.dynamic else self.M
+        return ShapeKey(free_prod=free, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic, free_max=fm)
 
 
 @dataclass(frozen=True, kw_only=True)

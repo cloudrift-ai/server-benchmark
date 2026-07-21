@@ -35,102 +35,30 @@ pytest.importorskip("torch")
 pytest.importorskip("transformers")
 
 from emmy.compiler.pipeline.search.audit import COMPILE_FAIL, audit_card, gap_keys, summarize
-from emmy.compiler.pipeline.search.data.shape import ShapeKey
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "gemma4_12b"
 
 # Known-uncovered kernel forks per card — ALL kinds (contractions, rms_norm/reduce sweeps,
 # pointwise), not just the warp-contraction hazards. This list may only change deliberately:
 # remove a line when its golden gets recorded (the test fails until you do); add one only
-# when review accepts a new uncovered kernel. Empty set = full model coverage, enforced.
+# when review accepts a new uncovered kernel. BOTH CARDS ARE EMPTY as of the 2026-07-20 heal
+# session (see plans/golden-heal-gemma4-4090-5090-findings.md while it exists, or that
+# session's commit message): full model coverage is now ENFORCED — any new uncovered fork
+# (a model change, a recognizer re-keying, a golden prune) fails this gate until a golden
+# is recorded for it or its key is deliberately baselined here in review.
 EXPECTED_GAPS = {
-    # The 5090 holes need a 5090 box to close: the global-layer prefill-256 projections
-    # (goldens exist only at s2048), the dynamic fused gate⊗up cone, plus the rms_norm and
-    # pointwise shapes below them.
-    "NVIDIA GeForce RTX 5090": {
-        ShapeKey(free_prod=1048576, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=4096),
-        ShapeKey(free_prod=122880, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=131072, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=4096),
-        ShapeKey(free_prod=131072, reduce_max=3840, is_warp=True, is_dyn=False, kind="", free_max=512),
-        ShapeKey(free_prod=15360, reduce_max=3840, is_warp=True, is_dyn=True, kind="fused", free_max=0),
-        ShapeKey(free_prod=2048, reduce_max=0, is_warp=True, is_dyn=True, kind="", free_max=0),
-        ShapeKey(free_prod=2048, reduce_max=256, is_warp=False, is_dyn=True, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=2097152, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
-        ShapeKey(free_prod=2097152, reduce_max=3840, is_warp=True, is_dyn=False, kind="", free_max=8192),
-        ShapeKey(free_prod=262144, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
-        ShapeKey(free_prod=3932160, reduce_max=0, is_warp=False, is_dyn=False, kind="", free_max=15360),
-        ShapeKey(free_prod=4096, reduce_max=0, is_warp=True, is_dyn=True, kind="", free_max=0),
-        ShapeKey(free_prod=4096, reduce_max=256, is_warp=False, is_dyn=True, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=512, reduce_max=512, is_warp=False, is_dyn=True, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=524288, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=2048),
-        ShapeKey(free_prod=65536, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=2048),
-        ShapeKey(free_prod=8192, reduce_max=0, is_warp=True, is_dyn=True, kind="", free_max=0),
-        ShapeKey(free_prod=8192, reduce_max=512, is_warp=False, is_dyn=True, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=983040, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-    },
-    # The 4090 set is being closed by the in-progress heal session on the rented box
-    # (drifted dynM .lin re-records + static/reduction/pointwise coverage); regenerate this
-    # baseline from the audit once those entries land.
-    "NVIDIA GeForce RTX 4090": {
-        ShapeKey(free_prod=1048576, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=4096),
-        ShapeKey(free_prod=1048576, reduce_max=3840, is_warp=True, is_dyn=False, kind="", free_max=4096),
-        ShapeKey(free_prod=122880, reduce_max=15360, is_warp=True, is_dyn=False, kind="", free_max=3840),
-        ShapeKey(free_prod=122880, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=122880, reduce_max=4096, is_warp=True, is_dyn=False, kind="", free_max=3840),
-        ShapeKey(free_prod=122880, reduce_max=8192, is_warp=True, is_dyn=False, kind="", free_max=3840),
-        ShapeKey(free_prod=131072, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=4096),
-        ShapeKey(free_prod=131072, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=131072, reduce_max=3840, is_warp=True, is_dyn=False, kind="", free_max=4096),
-        ShapeKey(free_prod=131072, reduce_max=3840, is_warp=True, is_dyn=False, kind="", free_max=512),
-        ShapeKey(free_prod=131072, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=15360, reduce_max=3840, is_warp=True, is_dyn=True, kind="fused", free_max=0),
-        ShapeKey(free_prod=16384, reduce_max=3840, is_warp=True, is_dyn=False, kind="", free_max=512),
-        ShapeKey(free_prod=16384, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=2048, reduce_max=0, is_warp=True, is_dyn=True, kind="", free_max=0),
-        ShapeKey(free_prod=2048, reduce_max=256, is_warp=False, is_dyn=True, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=2097152, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
-        ShapeKey(free_prod=2097152, reduce_max=3840, is_warp=True, is_dyn=False, kind="", free_max=8192),
-        ShapeKey(free_prod=2097152, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=262144, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
-        ShapeKey(free_prod=262144, reduce_max=3840, is_warp=True, is_dyn=False, kind="", free_max=8192),
-        ShapeKey(free_prod=262144, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=3932160, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=15360),
-        ShapeKey(free_prod=4096, reduce_max=0, is_warp=True, is_dyn=True, kind="", free_max=0),
-        ShapeKey(free_prod=4096, reduce_max=256, is_warp=False, is_dyn=True, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=491520, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=15360),
-        ShapeKey(free_prod=512, reduce_max=512, is_warp=False, is_dyn=True, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=524288, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=2048),
-        ShapeKey(free_prod=524288, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=524288, reduce_max=3840, is_warp=True, is_dyn=False, kind="", free_max=2048),
-        ShapeKey(free_prod=65536, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=2048),
-        ShapeKey(free_prod=65536, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=65536, reduce_max=3840, is_warp=True, is_dyn=False, kind="", free_max=2048),
-        ShapeKey(free_prod=8192, reduce_max=0, is_warp=True, is_dyn=True, kind="", free_max=0),
-        ShapeKey(free_prod=8192, reduce_max=512, is_warp=False, is_dyn=True, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=983040, reduce_max=15360, is_warp=True, is_dyn=False, kind="", free_max=3840),
-        ShapeKey(free_prod=983040, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=983040, reduce_max=4096, is_warp=True, is_dyn=False, kind="", free_max=3840),
-        ShapeKey(free_prod=983040, reduce_max=8192, is_warp=True, is_dyn=False, kind="", free_max=3840),
-    },
+    "NVIDIA GeForce RTX 5090": set(),
+    "NVIDIA GeForce RTX 4090": set(),
 }
 
 # A wholesale re-key of the twins (tracer/classifier change) turns MATCHes into GAPs without
 # a single DRIFT — the floor catches that failure mode; it is NOT a coverage target (the
 # exact count churns benignly whenever a golden YAML gains or loses entries).
-MIN_MATCH = {"NVIDIA GeForce RTX 5090": 50, "NVIDIA GeForce RTX 4090": 5}
+MIN_MATCH = {"NVIDIA GeForce RTX 5090": 90, "NVIDIA GeForce RTX 4090": 90}  # both audit at 101 post-heal
 
 CARDS = [
     pytest.param("NVIDIA GeForce RTX 5090", (12, 0), id="rtx5090"),
-    pytest.param(
-        "NVIDIA GeForce RTX 4090",
-        (8, 9),
-        id="rtx4090",
-        marks=pytest.mark.xfail(
-            reason="9 pre-existing DRIFTs: every dynM projection golden (q/kv/o/mlp_down + global twins) records a "
-            "staged d2/cp config the symbolic-M enumeration no longer offers on sm_89 — needs a 4090 re-record or "
-            "prune session; drop this mark once the file is healed"
-        ),
-    ),
+    pytest.param("NVIDIA GeForce RTX 4090", (8, 9), id="rtx4090"),
 ]
 
 
@@ -175,8 +103,7 @@ def test_gemma4_goldens_deploy_in_serving_twins(twins, gpu_name, cap):
     )
     closed = EXPECTED_GAPS[gpu_name] - gaps
     assert not closed, (
-        f"gap(s) on {gpu_name} are now covered — delete their EXPECTED_GAPS lines so the "
-        f"ratchet tightens: {sorted(closed, key=str)}"
+        f"gap(s) on {gpu_name} are now covered — delete their EXPECTED_GAPS lines so the ratchet tightens: {sorted(closed, key=str)}"
     )
 
     assert counts["MATCH"] >= MIN_MATCH[gpu_name], (

@@ -112,7 +112,11 @@ class BenchmarkConfig:
     comparisons: a fixed seed reproduces the same random prompt set, ``temperature: 0`` forces
     greedy decoding, and ``ignore_eos: true`` makes every request generate exactly
     ``random_output_len`` tokens. Unset fields emit no flag, keeping the client's defaults
-    (note: an unset temperature is the server's default sampling, not greedy)."""
+    (note: an unset temperature is the server's default sampling, not greedy).
+
+    ``repeats`` reruns the identical bench-client workload N times against the one deployed
+    server; the JSON result then reports per-field mean and stddev across the runs, so the
+    spread is run-to-run noise, not workload variation."""
 
     max_concurrency: int = 128
     num_prompts: int = 256
@@ -121,6 +125,7 @@ class BenchmarkConfig:
     seed: int | None = None
     temperature: float | None = None
     ignore_eos: bool = False
+    repeats: int = 1
 
 
 @dataclass
@@ -224,6 +229,7 @@ class Recipe:
             seed=bench_dict.get("seed"),
             temperature=bench_dict.get("temperature"),
             ignore_eos=bench_dict.get("ignore_eos", False),
+            repeats=bench_dict.get("repeats", 1),
         )
 
         deploy_dict = d.get("deploy", {})

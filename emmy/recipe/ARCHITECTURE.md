@@ -141,6 +141,12 @@ identical work. Each unset field emits no client flag (prior behavior); note tha
 default sampling, not greedy. `temperature` / `ignore_eos` are generation-only and are skipped for embedding recipes
 (`benchmark/workload.py`).
 
+`benchmark.repeats` (default 1) reruns the identical bench-client workload N times against the one deployed server —
+the model is deployed once, only the client run repeats. The text result then holds one stanza per repeat, and the
+JSON result's `metrics` becomes the per-field mean, with `metrics_stddev` (sample stddev) and `metrics_repeats` (the
+raw per-repeat metrics) added alongside (`benchmark/results.py`). Because the seed and prompts are identical across
+repeats, the spread measures run-to-run noise, not workload variation.
+
 ### Extra Args Ban Enforcement
 
 Users must not duplicate named fields in `extra_args`. The `validate_extra_args()` function enforces this by:

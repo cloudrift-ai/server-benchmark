@@ -232,6 +232,178 @@ training keys. A missing feature becomes `NaN`, not zero:
 CatBoost routes missing values separately. Filling both states with zero would make an undecided branch
 indistinguishable from a fully realized OFF configuration.
 
+### The complete learning loop
+
+CatBoost does not inspect PyTorch code, generate schedules, compile CUDA, or run benchmarks. Emmy performs all of
+those jobs. CatBoost receives ordinary table rows after Emmy has converted compiler structure and schedule decisions
+into numbers.
+
+Conceptually, one tuning run works like this. This is explanatory pseudocode rather than a copy of one source function:
+
+```python
+# One OnlinePrior is shared across all operations in the tuning run.
+online_prior = load_saved_prior()
+
+for operation in operations_to_tune:
+    search_tree = start_mcts(operation, prior=online_prior)
+
+    for complete_schedule in search_tree:
+        cuda_program = lower_to_cuda(operation, complete_schedule)
+        median_us = benchmark(cuda_program)
+
+        # MCTS uses inverse latency as reward: faster schedules have larger reward.
+        search_tree.record(complete_schedule, reward=1 / median_us)
+
+    # A leaf row uses its measured latency. A partial decision uses the latency
+    # of the fastest measured schedule reachable below that decision.
+    training_rows = value_of_position_rows(search_tree)
+    online_prior.add_rows(training_rows)
+
+    # Refit only at the configured row-count cadence, between operations.
+    if online_prior.maybe_refit():
+        online_prior.save_checkpoint()
+```
+
+The search still explores while the model is unchanged. Waiting until an operation finishes before refitting prevents
+the model from changing its opinion after every individual measurement, which would make one search trajectory harder
+to understand and reproduce.
+
+For example, suppose tuning measures these leaves:
+
+| Partial decision | Complete decision | Measured latency |
+|---|---|---:|
+| `TILE=A` | `STAGE=1` | 18 µs |
+| `TILE=A` | `STAGE=2` | 12 µs |
+| `TILE=B` | `STAGE=1` | 15 µs |
+
+Emmy produces both complete and partial training examples:
+
+```text
+TILE=A, STAGE=1  -> 18 µs   measured leaf
+TILE=A, STAGE=2  -> 12 µs   measured leaf
+TILE=B, STAGE=1  -> 15 µs   measured leaf
+TILE=A           -> 12 µs   best descendant of this partial choice
+TILE=B           -> 15 µs   best descendant of this partial choice
+```
+
+This is why the model can rank siblings before every knob has been decided. It learns the value of arriving at a
+position in the decision tree, not only the value of a finished schedule.
+
+### How Emmy builds the CatBoost table
+
+Each training row begins as a dictionary containing three kinds of information:
+
+```python
+raw_row = {
+    # H_*: hardware and compiler regime
+    "H_cc_major": 12.0,
+    "H_opt": 3.0,
+
+    # S_*: structure of the operation
+    "S_ext_free_prod": 262144.0,
+    "S_ext_reduce_max": 512.0,
+
+    # Named schedule decisions
+    "TILE": "n16x8/f4x8",
+    "REDUCE": "g2k",
+    "STAGE": "d3/tma/ring",
+}
+```
+
+`knob_features` expands compact strings such as `TILE` and `STAGE` into numeric properties. CatBoost therefore does
+not receive raw CUDA source or raw schedule strings. It receives a numeric feature matrix resembling a spreadsheet:
+
+```text
+                    H_cc_major  H_opt  S_ext_reduce_max  D_tile_area  D_stage_depth  ...  target
+candidate 1              12       3          512            128             3       ...  log(12)
+candidate 2              12       3          512            256             2       ...  log(15)
+partial TILE choice      12       3          512            128           NaN       ...  log(12)
+```
+
+The real fitting path is approximately:
+
+```python
+rows = online_prior.reservoir
+
+# Convert every compiler row to numeric features.
+feature_dicts = [knob_features(knobs) for knobs, latency_us in rows]
+
+# One global column order must work for rows from different operations and GPUs.
+columns = sorted(union_of_keys(feature_dicts))
+
+X = [
+    [features.get(column, NaN) for column in columns]
+    for features in feature_dicts
+]
+
+# Predict log latency so very slow schedules do not dominate the loss.
+y = [log(latency_us) for knobs, latency_us in rows]
+
+model = CatBoostRegressor(
+    iterations=400,
+    depth=6,
+    learning_rate=0.05,
+    loss_function="RMSE",
+    nan_mode="Min",
+)
+model.fit(X, y)
+```
+
+The model is refitted on the complete bounded reservoir, not only the rows added since the previous fit. A
+**reservoir** is the retained sample of historical training rows described below.
+
+CatBoost is a **gradient-boosted decision-tree** model. A decision tree repeatedly asks threshold questions about
+features—for example, “is the reduction at least this large?” Boosting builds many such trees in sequence, with each
+new tree correcting errors left by the earlier trees:
+
+```text
+predicted log latency
+    = initial estimate
+    + learning_rate × tree_1(features)
+    + learning_rate × tree_2(features)
+    + ...
+```
+
+This lets the model learn interactions that a single linear equation cannot express, such as “this tile shape is fast
+for a large reduction on this GPU only when a particular staging strategy is enabled.” CatBoost was selected after an
+offline comparison with linear, random-forest, histogram-gradient-boosting, XGBoost, and LightGBM alternatives. Emmy
+uses numeric features here; CatBoost's categorical-feature support is not the reason schedule strings can be passed
+directly—they are featurized first.
+
+### How a trained prediction becomes a compiler decision
+
+For inference, Emmy creates the same columns used during fitting, asks CatBoost for predicted log latency, and converts
+the answer back to microseconds:
+
+```python
+def predicted_latency_us(candidate):
+    features = knob_features(candidate)
+    x = [features.get(column, NaN) for column in trained_columns]
+    predicted_log_us = catboost.predict(x)
+    return exp(predicted_log_us)
+```
+
+The prediction participates only after stronger evidence has failed to decide:
+
+```python
+def choose_schedule(candidates):
+    if matching_golden_exists(candidates):
+        return matching_golden(candidates)
+
+    if compatible_o3_measurements_exist(candidates):
+        return fastest_measured(candidates)
+
+    if online_prior.is_trustworthy():
+        return min(candidates, key=predicted_latency_us)
+
+    return min(candidates, key=offline_prior_latency_proxy)
+```
+
+Normal `compile` and `run` load the saved model and use this decision path, but they do not train CatBoost or benchmark
+all candidates. `tune` is the command that explores, measures, adds rows, refits, and checkpoints the online prior.
+Correctness remains the responsibility of Emmy's benchmark and integrity paths; a CatBoost prediction is only a
+ranking estimate.
+
 ### Bounded, long-lived training data
 
 The base `Prior` retains at most 100,000 rows. Once full, **reservoir sampling** keeps a statistically uniform sample of
@@ -246,24 +418,6 @@ rows ever seen rather than only the newest. Refit cadence is:
 
 The default fit minimum is 50 rows. Refits occur between operations, not after every benchmark within one operation.
 PUCT supplies exploration while the model remains fixed and the trajectory stays interpretable.
-
-### Value-of-position labels
-
-Only terminal schedules can be benchmarked, but the prior ranks partial siblings. Emmy propagates the best descendant
-latency upward:
-
-```text
-root
-  +-- TILE=A ---------------- best descendant = 12 us
-  |     +-- STAGE=1 --------- measured leaf = 18 us
-  |     +-- STAGE=2 --------- measured leaf = 12 us
-  |
-  +-- TILE=B ---------------- best descendant = 15 us
-        +-- STAGE=1 --------- measured leaf = 15 us
-```
-
-The label for `TILE=A` is 12 µs, not an average. It asks: after reaching this prefix, what is the best result reachable
-below it? That matches MCTS max-reward propagation, where reward is inverse latency.
 
 ### Promotion and quarantine
 

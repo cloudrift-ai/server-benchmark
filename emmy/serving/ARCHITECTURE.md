@@ -135,7 +135,10 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   Gemma-4 global layers use a larger head_dim) and gets `per_layer_sliding_window` so Gemma's sliding/global layers
   window correctly) + one RoPE module **per layer** (`_build_rotaries`: homogeneous models share one; Gemma-3/4
   keys theta AND head_dim on layer type — local vs global — a bare `Attention` does no RoPE) + `ParallelLMHead` + `LogitsProcessor`
-  (`soft_cap=final_logit_softcapping`, so Gemma-4's final-logit softcap applies). The trunk compute (embed + per-layer
+  (`soft_cap=final_logit_softcapping`, so Gemma-4's final-logit softcap applies; `compute_logits` also -infs the
+  generation config's `suppress_tokens` — gemma-4 lists the mm delimiter tokens `<image|>`/`<audio|>` there, HF
+  generate and stock vLLM honor the list, and a degenerate text prompt can genuinely rank one top-1, which would
+  decode to empty output). The trunk compute (embed + per-layer
   pre/post + final norm) is the `EmmyGenRunner`; vLLM owns only `lm_head` (`load_weights` claims `lm_head.weight`, or the
   tied embed alias). `forward` brackets each `self.attn[L](q,k,v)` with two emmy replays (pre/post), applying that
   layer's RoPE in between (A2). Uniform sliding-window (Qwen2-style `use_sliding_window`) and dual-chunk are rejected. `forward` branches on `num_tokens`: the decode hot

@@ -106,6 +106,36 @@ site even on atomic forms. Big lift: new sync primitive, workspace lifetime chan
 interactions. Only start if WS1-3 leave the exit gate unmet and the twin evidence prices the remaining
 finalize launches ≥ ~0.5 ms/step.
 
+## WS1+WS2 serving A/B (2026-07-22, 5090, STD lane, bucket 32, seed 0, `_tune/ab-ws1/`)
+
+emmy = merged kernels + delegated zero-inits + seeded merged-key goldens; stock = raw vLLM
+(`--language-model-only`). Both arms mml 4096 (256 configs) / 8448 (4K configs).
+
+| config | arm | req/s | median TTFT ms | mean TPOT ms | out tok/s |
+| --- | --- | --- | --- | --- | --- |
+| 256/256 c=1 | emmy | 0.20 | 88.4 | **19.33** | 51.0 |
+| 256/256 c=1 | stock | 0.23 | 56.0 | 16.34 | 59.1 |
+| 256/256 c=64 | emmy | 3.16 | **2988** | 51.72 | 809 |
+| 256/256 c=64 | stock | 4.30 | 7415 | 28.74 | 1100 |
+| 4K/4K c=1 | emmy | 0.01 | **898** | 20.17 | 49.1 |
+| 4K/4K c=1 | stock | 0.01 | 1048 | 17.40 | 56.7 |
+| 4K/4K c=8 | emmy | **0.08** | 3385 | 22.95 | **334** |
+| 4K/4K c=8 | stock | 0.06 | 2186 | 20.31 | 265 |
+
+Verdict vs the exit gate (decode TPOT ≤ 18.5): **NOT met** — 4K c=1 TPOT 20.17 ≈ the pre-WS1 20.06 despite the
+launch count halving (19-20 → 7-8/layer). Where emmy leads: 4K c=1 TTFT (898 vs 1048), 4K c=8 req/s (+33%) and
+output tok/s (+26%), c=64 median TTFT (2.5x). Where it trails: TPOT everywhere (esp. 256 c=64: 51.7 vs 28.7)
+and 256-class throughput. Two structural caveats before reading this as WS1/WS2 failing to move TPOT:
+
+1. **This is the STD lane.** The historical wins (TPOT 21.3-vs-24.9, c=64 leads +17-21%) were fm-lane results,
+   and the merged edges have NO fm goldens yet — the fm reseed on the merged keys is the single biggest open
+   lever, and fm-never-loses means it can only help.
+2. **The down-proj fused cone regressed the per-layer floor**: m32 fused 95.9 µs vs the pre-merge plain
+   74.1 + sink — ~20 µs × 48 layers ≈ 1 ms/step given back. The cut sibling is unreachable until the
+   merged-shape PLAIN matmul keys get goldens (cut consumer deploys cold at 43.8 ms today). Seeding those +
+   cut-vs-fused twin A/B is the second lever. c=64's 51.7 TPOT also ran bucket 32 with no merged m64 rows —
+   the m64 merged-key seeding is the third.
+
 ## Ordering, verification, risks
 
 1. WS2 first if staffing is tight (smallest blast radius), else WS1 → WS2 → WS3 A/B → gate check → WS4.

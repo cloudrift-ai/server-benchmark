@@ -120,9 +120,23 @@ barrier count and the N=15360 grid stands on its own occupancy. CONFIRMED and se
   447.5 (session start) → **431.7 µs** (−15.8/layer ≈ −0.63 ms/step at c=1); down g4a and the cut
   all deploy from tier. Audit after the round: **MATCH 103 / DRIFT 0 / GAP 0 on BOTH cards.**
 
-## Serving A/B (in progress)
+## Serving A/B — single-batch (DONE; the session's e2e proof)
 
-Protocol: twins.db + empty online + FRESH packs (`_tune/tpot/packs-fm`), seed 0, 4K/4K workloads.
+Protocol: twins.db + empty online + FRESH packs (`_tune/tpot/packs-fm`), seed 0, 4K-in/4K-out, c=1,
+3 prompts. (Boot gotcha reconfirmed twice: a fresh-pack fm boot exceeds the 1800 s bench health cap —
+the successful run needed the nvcc cache warmed by two prior attempts; kill zombie `VLLM::EngineCore`
+after any timeout, it holds ~20 GB.)
+
+| arm (c=1, 4K/4K) | out tok/s | TTFT mean/med (ms) | TPOT mean/med (ms) |
+| --- | --: | --: | --: |
+| stock (re-run, NO drift) | 56.97 | 563 / 548 | 17.42 / 17.41 |
+| emmy fm pre-session | 48.93 | 458 / 450 | 20.33 / 20.32 |
+| emmy fm post-session | **50.17** | 451 / 447 | **19.83 / 19.71** |
+
+The twin-level work carried through end-to-end: TPOT −0.50 ms mean (−2.5%), throughput +2.5%,
+TTFT unchanged (still ~20% ahead of stock). The decode gap to stock narrowed 2.91 → 2.41 ms
+(~17% of it closed); the WS1 serving exit gate (≤19.5) is 0.2 ms short — exactly the stat-sink
+family's territory (~0.5 ms/step bound, designed above, not yet built) plus WS2.
 
 ## 4090 port (DONE — remote manual `--ab`, riftvm)
 

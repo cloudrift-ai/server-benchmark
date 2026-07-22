@@ -61,7 +61,7 @@ candidate fallback, capacity handling, the binding `--provider` rule). The comma
 
 ```bash
 [ -f .env ] && set -a && . ./.env && set +a && \
-emmy vm create gpu --gpu "<full GPU name>" --gpu-count 1 [--provider cloudrift|gcp] [--billing-exempt]
+emmy vm create gpu --gpu "<full GPU name>" --gpu-count 1 [--provider cloudrift|gcp]
 ```
 
 Capture from the final `VM ready at <user@host[:port]>` line:

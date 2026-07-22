@@ -15,6 +15,15 @@ gemma-4-12B RTX 4090 table in the part-3 blog follow-up.
 Only names recorded for the live GPU are benched (``--golden`` resolution is card-scoped);
 a filter that matches no card-local name lists which cards do carry it. Rows sort
 losers-first by the eager ratio.
+
+Vs ``bench_model_kernels.py``: that script benches the ``.torch.json`` reproducers of a model
+dump, so its numbers depend on re-tracing each torch slice and re-resolving every fork from the
+local DB/prior — the right tool for auditing what a *dump's* kernels deploy as, but on a fresh
+box the whole-model trace is fp32 (no fp16 mma tier) and a cold prior can bury the real picks.
+This script benches the *golden dataset* instead: each case is a curated, card-scoped shape with
+a recorded ground-truth config benched live beside the greedy pick, so the table is stable while
+the prior/deploy path is in flux. Use it when the question is "how do this model's kernels
+compare against torch on this card", not "what did this dump compile to".
 """
 
 from __future__ import annotations

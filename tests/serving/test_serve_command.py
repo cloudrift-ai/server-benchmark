@@ -149,11 +149,24 @@ def test_serve_cmd_generate_branch():
     assert cmd[cmd.index("--dtype") + 1] == "float16"  # forced for seam coherence
     assert cmd[cmd.index("--max-num-batched-tokens") + 1] == "4096"  # capped at the dynamic-dim limit
     # Whole-step decode capture is the DEFAULT: FULL_DECODE_ONLY graphs, capture sizes
-    # clamped to the decode bucket (default 16); no --enforce-eager.
+    # following --max-num-seqs (vLLM default 256 when unset); no --enforce-eager.
     assert "--enforce-eager" not in cmd
     cfg = cmd[cmd.index("--compilation-config") + 1]
     assert '"cudagraph_mode": "FULL_DECODE_ONLY"' in cfg
-    assert '"cudagraph_capture_sizes": [1, 2, 4, 8, 16]' in cfg
+    assert '"cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 64, 128, 256]' in cfg
+    # The emmy generative arm defaults util to 0.97 — its cupy residents are invisible to
+    # vLLM's torch-only profiler, so the 0.90 line can fall below them and fail the min-KV
+    # fit at long model lens. Stock (and the embedding plugin) keep 0.90.
+    assert "--gpu-memory-utilization=0.97" in cmd
+    stock_cmd = build_serve_cmd(MODEL, stock=True, vllm_args=[], generate=True)
+    assert "--gpu-memory-utilization=0.9" in stock_cmd
+
+
+def test_serve_cmd_generate_capture_sizes_follow_max_num_seqs():
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=["--max-num-seqs", "48"], generate=True)
+    cfg = cmd[cmd.index("--compilation-config") + 1]
+    # The decode bucket (16) and the cap itself always ride the list; the ladder fills between.
+    assert '"cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 48]' in cfg
 
 
 def test_serve_cmd_generate_enforce_eager_opts_out_of_capture():

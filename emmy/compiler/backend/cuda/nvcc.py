@@ -160,8 +160,6 @@ def load_function(source: str, name: str, options, *, uses_tma: bool):  # noqa: 
     was dropped (faster compiles, GPU-free, cubin-cacheable; see the module
     docstring), so ``nvcc`` is now a hard dependency.
     """
-    import cupy as cp  # noqa: PLC0415
-
     if nvcc_path() is None:
         raise RuntimeError(
             "nvcc unavailable — emmy requires the CUDA toolkit's "
@@ -174,4 +172,13 @@ def load_function(source: str, name: str, options, *, uses_tma: bool):  # noqa: 
         detail = exc.stderr.decode(errors="replace") if exc.stderr else "(no stderr)"
         logger.error("nvcc compile failed for kernel %r:\n%s", name, detail)
         raise RuntimeError(f"nvcc compile failed for kernel {name!r}: {detail[-400:]}") from exc
-    return cp.RawModule(path=str(cubin)).get_function(name)
+    return load_cubin_function(cubin, name)
+
+
+def load_cubin_function(path: Path | str, name: str):
+    """``RawModule``-load an existing cubin and return kernel ``name`` — the load half of
+    :func:`load_function`, used directly by the execution-plan path when a plan references the
+    cubin by its content-addressed cache key (no source, no compile)."""
+    import cupy as cp  # noqa: PLC0415
+
+    return cp.RawModule(path=str(path)).get_function(name)

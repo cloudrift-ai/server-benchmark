@@ -487,3 +487,49 @@ def test_same_dtype_cast_stays_an_alias():
 
     g = trace_module(Same().eval(), (torch.randn(4, 16, dtype=torch.float16),))
     assert all(n.output.dtype.name == "f16" for n in g.nodes.values())
+
+
+def test_sdpa_scale_kwarg_captured():
+    """An explicit ``scale=`` on F.scaled_dot_product_attention (Gemma-nano passes 1.0)
+    must land on ``SdpaOp.scale``; without it the op keeps ``None`` (torch's 1/sqrt(d)
+    default). Dropping the kwarg silently re-scaled the logits by 1/sqrt(d) — the
+    gemma-4-E2B layer-0 accuracy failure."""
+    import torch
+    import torch.nn.functional as F
+    from torch import nn
+
+    from emmy.compiler.ir.frontend.ir import SdpaOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Scaled(nn.Module):
+        def forward(self, q, k, v):
+            return F.scaled_dot_product_attention(q, k, v, scale=1.0)
+
+    class Default(nn.Module):
+        def forward(self, q, k, v):
+            return F.scaled_dot_product_attention(q, k, v)
+
+    qkv = tuple(torch.randn(1, 2, 8, 4) for _ in range(3))
+    g = trace_module(Scaled().eval(), qkv)
+    (sdpa,) = [n.op for n in g.nodes.values() if isinstance(n.op, SdpaOp)]
+    assert sdpa.scale == 1.0
+    g = trace_module(Default().eval(), qkv)
+    (sdpa,) = [n.op for n in g.nodes.values() if isinstance(n.op, SdpaOp)]
+    assert sdpa.scale is None
+
+
+def test_sdpa_forward_honors_scale():
+    """``SdpaOp.forward`` (the numpy reference) applies ``scale`` when set and the
+    1/sqrt(d) default when not — checked against torch's own SDPA."""
+    import numpy as np
+    import torch
+    import torch.nn.functional as F
+
+    from emmy.compiler.ir.frontend.ir import SdpaOp
+
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(1, 2, 8, 4, dtype=torch.float64) for _ in range(3))
+    for scale in (None, 1.0, 0.5):
+        got = SdpaOp(scale=scale).forward(q.numpy(), k.numpy(), v.numpy())
+        want = F.scaled_dot_product_attention(q, k, v, scale=scale).numpy()
+        np.testing.assert_allclose(got, want, atol=1e-12)

@@ -24,6 +24,7 @@ tests/
 │   └── test_command_workload.py # build_substitution_map(), render_command()
 ├── serving/                   # mirrors emmy/serving/ (vLLM embedding plugin)
 │   ├── test_packed.py       # split_spans packed-batch span splitting (pure, no GPU)
+│   ├── test_gen_pack_gpu.py # gen-runner EMMY_PACK_DIR round-trip: 2nd boot hits, outputs bit-equal (CUDA)
 │   └── test_vllm_plugin_gpu.py # in-process vLLM engine + plugin vs HF eager (perf-marked, CUDA + vllm)
 ├── recipe/
 │   ├── test_types.py        # Recipe.from_dict(), LLMConfig properties, dataclass defaults
@@ -52,7 +53,11 @@ tests/
 ├── compiler/                       # mirrors emmy/compiler/
 │   ├── conftest.py                     # requires_cuda / requires_sm90 markers, run_graph fixture,
 │   │                                   # device_compute_capability(), matmul_graph(m,k,n) shared builder
-│   ├── fixtures/                       # pre-computed traces (tinyllama_layer0.json)
+│   ├── fixtures/                       # pre-computed traces (tinyllama_layer0.json) + model configs
+│   │                                   # (gemma4_12b/config.json — the drift gate's offline HF config)
+│   ├── test_golden_drift_gate.py       # golden drift CI gate: weight-free gemma-4 serving twins re-traced
+│   │                                   # from the fixture config, audited per card (DRIFT=0 + major-gap
+│   │                                   # ratchet; offline, CPU-only; ~80 s — the heaviest non-perf test)
 │   ├── ir/                             # IR datatypes (mirrors emmy/compiler/ir/)
 │   │   ├── test_graph.py                       # Graph / Node / Tensor primitives
 │   │   ├── test_graph_splice.py                # Graph.splice rewrite primitive
@@ -91,6 +96,8 @@ tests/
 │   │   ├── test_emit.py                        # CUDA source-level assertions + GPU runs
 │   │   ├── test_loader.py / test_nvcc_compile.py
 │   │   ├── test_program.py                     # cupy dispatch of Graph[CudaOp]
+│   │   ├── test_execution_plan.py              # plan projection + JSON round-trip (CPU)
+│   │   ├── test_pack_gpu.py                    # pack save/load + recompile fallback (CUDA)
 │   │   ├── test_torch_ref.py                   # eager-reference evaluator
 │   │   └── test_bench_worker_recovery.py       # sticky-CUDA-error sub-process recovery
 │   ├── trace/

@@ -388,6 +388,16 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     # it from the graph again when a later pass matches the scheduled op.
     map_tile = TileOp(op=node, place=Placement(free=free), inputs=dict(loop.inputs))
     pro = bind_prologue_contraction(node, free) if place_decision("cone") == "fuse" else None
+    if pro is None and place_decision("cone") == "cut" and bind_prologue_contraction(node, free) is not None:
+        # An explicit ``PLACE@cone=cut`` pin on the MONOID composition (the fused norm→linear /
+        # gate⊗up edge): the fused Contraction form is pinned away, but the cut must still REALIZE
+        # — schedule the Map form with the cut stamped on every row (the same threading as the
+        # stat-free pin below; ``020_cut_edge`` rewrites the picked row into producer + consumer
+        # halves and its own schedule is discarded). Without this the pin fell through to the
+        # stat-free path, failed ``_cuttable_cone`` (multi-fold / stats), and silently benched the
+        # fused coop form under the cut's name — the unreproducible-pin failure on the recorded
+        # ``mlp_geglu.*.cut`` goldens.
+        return schedule(map_tile, loop.name, {**knob_base, "PLACE@cone": "cut"}, ctx)
     if pro is None:
         # A STAT-FREE computed-A cone (loop fusion inlined a pointwise operand cone — gemma's GeGLU
         # combine ahead of down_proj) gets the same fuse-vs-cut offer the MONOID composition below

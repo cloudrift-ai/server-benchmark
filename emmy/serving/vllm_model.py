@@ -56,15 +56,19 @@ class EmmyEmbedModel(nn.Module, IsAttentionFree):
         self.out_dtype = mc.dtype
         self.vocab_size = mc.get_vocab_size()
         self.pooler = DispatchPooler.for_embedding(mc.pooler_config)
-        # Static mode (opt-in): static extents for both batch and seq_len. Batch cap
-        # = vLLM's own max_num_seqs, so it's sized by --max-num-seqs (seq by
-        # --max-model-len), not a emmy-specific knob.
-        batch = vllm_config.scheduler_config.max_num_seqs if config.serving_static() else 1
+        # Batched modes (opt-in): batch cap = vLLM's own max_num_seqs, so it's sized
+        # by --max-num-seqs (seq by --max-model-len), not an emmy-specific knob.
+        # EMMY_SERVING_BATCHED keeps seq_len symbolic (steps pad to the step's longest
+        # sequence); EMMY_SERVING_STATIC bakes both extents (steps pad to max_seq_len)
+        # and takes precedence when both are set.
+        static = config.serving_static()
+        batch = vllm_config.scheduler_config.max_num_seqs if (static or config.serving_batched()) else 1
         self.runner = EmmyForwardRunner.create(
             model_id=mc.model,
             max_seq_len=mc.max_model_len,
             dtype_str=_trunk_dtype_str(mc.dtype),
             batch=batch,
+            static=static,
         )
 
     def forward(self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None, **kwargs):

@@ -118,13 +118,13 @@ def main():
 
     logger.info("Compiling post (symbolic + static M=%d)...", bucket)
     with torch.device("cpu"):
-        post_sym = _compile_split(
+        post_sym, _ = _compile_split(
             post_w,
             [torch.zeros(8, attn_width, dtype=dtype), torch.zeros(8, hidden, dtype=dtype)],
             ["attn_out", "residual"],
             np_dtype,
         )
-        post_bucket = _compile_split(
+        post_bucket, _ = _compile_split(
             post_w,
             [torch.zeros(bucket, attn_width, dtype=dtype), torch.zeros(bucket, hidden, dtype=dtype)],
             None,

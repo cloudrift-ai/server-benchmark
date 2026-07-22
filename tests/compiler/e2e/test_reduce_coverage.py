@@ -504,3 +504,76 @@ def test_symbolic_ilp_softmax_masked_tail(monkeypatch, seq):
     assert diff < 1e-5, f"seq={seq}: masked ILP twisted softmax mismatch (max abs err {diff})"
     assert "__r3" in src, "the r4 pin must replicate register accumulator chains"
     assert "seq_len__r" not in src, "the symbolic dim must never be suffixed by the ILP rename"
+
+
+# --------------------------------------------------------------------------- #
+# Fused residual-add → rms_norm producer (the serving decode residual chain).
+# --------------------------------------------------------------------------- #
+
+
+def _add_norm_module():
+    import torch.nn as nn
+
+    class AddNorm(nn.Module):
+        def __init__(self, escape: bool) -> None:
+            super().__init__()
+            self.w = nn.Parameter(torch.randn(256))
+            self.escape = escape
+
+        def forward(self, x, r):
+            h = x + r
+            n = torch.nn.functional.rms_norm(h, (256,), self.w, eps=1e-6)
+            return (n, h) if self.escape else n
+
+    torch.manual_seed(0)
+    return AddNorm
+
+
+def _compile_add_norm(escape: bool):
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.ir.cuda import CudaOp
+    from emmy.compiler.loader.binder import bind_constants
+    from emmy.compiler.trace.torch import trace_module
+
+    m = _add_norm_module()(escape).eval()
+    x, r = torch.randn(8, 256), torch.randn(8, 256)
+    graph = trace_module(m, (x, r))
+    be = CudaBackend()
+    compiled = be.compile(graph)
+    kernel_ids = [nid for nid, n in compiled.nodes.items() if isinstance(n.op, CudaOp)]
+    const_feed = bind_constants(compiled, {"w": m.w.detach().numpy()})
+    in_names = list(graph.inputs)
+    feed = {**const_feed, in_names[0]: x.numpy(), in_names[1]: r.numpy()}
+    outs = be.run(compiled, input_data=feed)[0].outputs
+    return m, x, r, graph, kernel_ids, outs
+
+
+@requires_cuda
+def test_fused_add_rms_norm_consumes_the_add():
+    """A residual add feeding an rms_norm (no other consumer) fuses into the norm's
+    sweep — the ``fused_add_rms_norm`` analog the serving decode twins already show:
+    no standalone pointwise add kernel survives. Kernel COUNT is not pinned (a
+    ``REDUCE=g<w>`` pick legitimately splits into partial + finalize)."""
+    m, x, r, graph, kernel_ids, outs = _compile_add_norm(escape=False)
+    assert kernel_ids and all(nid.startswith("rms_norm") for nid in kernel_ids), (
+        f"the residual add must fuse into the rms_norm kernel(s), got {kernel_ids}"
+    )
+    with torch.no_grad():
+        want = m(x, r)
+    np.testing.assert_allclose(np.asarray(outs[graph.outputs[0]]), want.numpy(), rtol=1e-4, atol=1e-4)
+
+
+@requires_cuda
+def test_add_rms_norm_escaping_residual_keeps_both_outputs():
+    """When the add's result ALSO escapes as a graph output (the decode
+    residual-stream shape: the updated residual is both the norm input and the
+    carry), fusion must NOT consume it — the splice would silently DROP the second
+    output from the compiled graph (the pre-fix behavior: ``compiled.outputs`` lost
+    ``add`` and callers got only the normed value). Pins the guard: both outputs
+    present and correct; the add stays materialized."""
+    m, x, r, graph, kernel_ids, outs = _compile_add_norm(escape=True)
+    with torch.no_grad():
+        want_n, want_h = m(x, r)
+    assert set(graph.outputs) <= set(outs), f"graph outputs {graph.outputs} missing from compiled outputs {list(outs)}"
+    np.testing.assert_allclose(np.asarray(outs[graph.outputs[0]]), want_n.numpy(), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(outs[graph.outputs[1]]), want_h.numpy(), rtol=1e-4, atol=1e-4)

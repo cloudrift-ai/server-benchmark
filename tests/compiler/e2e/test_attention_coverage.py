@@ -56,6 +56,16 @@ class _Masked(torch.nn.Module):
         return torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask)
 
 
+class _Scaled(torch.nn.Module):
+    """Explicit non-default ``scale=`` (Gemma-nano E2B/E4B passes 1.0 — q_norm absorbs the
+    scaling). The trace must capture the kwarg and the flash re-synthesis must apply it;
+    the historical hardcoded ``1/sqrt(d)`` redistributed the whole softmax (the
+    gemma-4-E2B layer-0 accuracy failure)."""
+
+    def forward(self, q, k, v):
+        return torch.nn.functional.scaled_dot_product_attention(q, k, v, scale=1.0)
+
+
 def _trace(module, args, dynamic_shapes=None):
     """Trace + compile ``module``; return ``(backend, compiled, graph, kernel_node_ids)``."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
@@ -88,6 +98,7 @@ _FLASH_VARIANTS = {
     "causal": (_Causal, {"is_causal": True}, [(1, 2, 16, 8)]),
     "gqa": (_Gqa, {"is_causal": True, "enable_gqa": True}, [(4, 2, 16, 8), (16, 8, 32, 16)]),
     "mask": (_Masked, {}, [(1, 2, 16, 8)]),
+    "scaled": (_Scaled, {"scale": 1.0}, [(1, 2, 16, 8)]),
 }
 
 

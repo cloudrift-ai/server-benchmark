@@ -26,6 +26,10 @@ causal mask this way (an additive `0` / `-inf` bias) rather than via the
 broadcasts that mask to the scores shape and adds it before the softmax.
 Dropping it silently turns masked attention into full bidirectional
 attention — invisible to uniform input but wrong on any varying sequence.
+The `scale=` kwarg is captured onto `SdpaOp.scale` (`None` = torch's `1/sqrt(head_dim)` default) and honored
+by both reference backends, the decomposition's scale constant, and the flash re-synthesis (which reads the
+value back off the score producer's constant). Gemma-nano (E2B/E4B) passes `scale=1.0` — its q_norm absorbs
+the scaling — so dropping the kwarg re-scaled every logit by `1/sqrt(d)` and redistributed the whole softmax.
 
 ### `huggingface.py` — trace-friendly wrapper
 
@@ -59,8 +63,13 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   avoid. Forward arg is named `x`, so the CLI spec is `--dynamic seq_len@x:1`
   (`tests/compiler/ir/test_dynamic_shapes.py::test_qwen_layer_dynamic_compiles_and_matches_eager`).
   Gemma-nano PLE blocks (those exposing `hidden_size_per_layer_input`) additionally get a seeded synthetic
-  `per_layer_input` buffer sliced in-graph the same way — kernel shapes and latencies are the deployed model's,
-  numerics are synthetic; non-PLE architectures take the unchanged path (`tests/compiler/trace/test_huggingface.py`).
+  `per_layer_input` (`build_synthetic_ple`) — the dynamic wrapper registers it as a buffer sliced in-graph like
+  cos/sin, and the static single-layer trace (`commands/compile.py`) passes the same buffer as a concrete kwarg
+  (without it the trace dies on `FakeTensor * None` inside modeling_gemma4). Kernel shapes and latencies are the
+  deployed model's, numerics are synthetic; non-PLE architectures take the unchanged path. The attention-split
+  carve (`build_attention_split_wrapper`, serving) instead REJECTS PLE blocks with `NotImplementedError` — it has
+  no seam for the `hidden * per_layer_input` multiply and would silently drop it
+  (`tests/compiler/trace/test_huggingface.py`).
 
 - `stamp_sliding_windows(graph, config, layer_type=None)` re-asserts the per-layer sliding window the trace ERASES:
   a single-layer trace carries no mask at all (HF takes the `is_causal` path — the traced layer is pure causal at

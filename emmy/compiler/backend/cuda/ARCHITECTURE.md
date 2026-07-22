@@ -24,7 +24,12 @@ arg_order).
 
 ## Dispatch (`program.py`)
 
-`_compile(graph) → _Compiled` walks the lowered graph:
+The graph is first projected to an **execution plan** (`plan_from_graph`, `../plan.py` — buffer specs, constants,
+launch list, symbolic plumbing, kernel + weight refs; see `../ARCHITECTURE.md`), and `_load_plan(plan) → _Compiled`
+materializes the runtime object from it. `CompiledProgram.build(graph)` is exactly
+`build_from_plan(plan_from_graph(graph))` — the pack path (`../pack.py`) enters at `build_from_plan` with a plan
+read from disk whose kernels reference cubins by content-addressed cache key (`nvcc.load_cubin_function` — no
+codegen, no nvcc), and both paths share every line downstream. The projection:
 
 - Classifies each node as `input` / `constant` / `output` / `scratch`
   from `graph.inputs` / `ConstantOp` membership / `graph.outputs`.
@@ -126,7 +131,12 @@ re-allocating (errors if S exceeds capacity), (2) `upload_prefix(input_data)` H2
 prefix of its capacity buffer (a logically `(1, S, …)` tensor occupies the first `S·…` elements), (3)
 `capture_program_graph()` captures the whole program at the current S into ONE CUDA graph — **cached per seq_len**
 (bounded LRU `_graph_cache`), so a repeated length replays with no re-capture — and (4) `replay_program_graph()` is one
-host launch; `outputs({"seq_len": S})` slices each capacity buffer to its real-S prefix. Each graph is captured at its
+host launch; `outputs({"seq_len": S})` slices each capacity buffer to its real-S prefix. TMA descriptors follow the
+same per-S discipline (`_descs_now`): a symbolic-src descriptor's global strides depend on the RESOLVED shape (the
+prefix-packed data layout), not the capacity allocation — a capacity-baked stride reads correctly only at leading
+index 0, which is how batch>1 miscomputed through every TMA-staged kernel while batch-1 serving never noticed. Each
+sym key re-encodes its symbolic-src descriptors once (cached beside the graph cache; an overlay entry outlives any
+captured graph replaying at its key, since the graph bakes the descriptor device pointers). Each graph is captured at its
 EXACT S, so every kernel runs at its exact grid: no oversized-grid masking is needed (and a single capacity-baked graph
 for ALL S is not viable — several symbolic-M kernels read OOB at an oversized grid: the CTA-swizzle decode reconstructs
 `num_m` from the runtime seq_len, and ceil-div staged loads over-read). `rebind` clears `_graph_cache` on re-allocation. Validate multi-S

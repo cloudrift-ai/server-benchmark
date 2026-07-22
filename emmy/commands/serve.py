@@ -39,6 +39,8 @@ logger = logging.getLogger(__name__)
 # A/B compares both engines at the same max-model-len.
 _DEFAULT_MAX_MODEL_LEN = "4096"
 _DEFAULT_GPU_MEMORY_UTILIZATION = "0.9"
+# The emmy generative arm only — see the util default in ``build_serve_cmd``.
+_GENERATE_GPU_MEMORY_UTILIZATION = "0.97"
 
 _PLUGIN_ARGS = ["--enforce-eager", "--hf-overrides", '{"architectures": ["EmmyEmbedModel"]}']
 
@@ -132,13 +134,14 @@ def _gen_graph_args(vllm_args: list[str]) -> list[str]:
     """The eager/capture flags for emmy generative serving. DEFAULT is whole-step decode
     capture: a compilation-config asking for FULL_DECODE_ONLY graphs (full cudagraphs need no
     torch.compile — vLLM wraps the model in its ``CUDAGraphWrapper``) with capture sizes
-    clamped to the decode bucket — the static decode twin is the one path VALIDATED under
-    stream capture (``test_gen_capture_gpu``); a size above the bucket would capture the
-    device-resident symbolic programs (``run_device_sym``), which are not capture-validated
-    yet, so widening the sizes past the bucket is a measured follow-up, not a flip of this
-    list. Opt out with vLLM's own ``--enforce-eager`` (forwards as-is); a caller-supplied
-    ``--compilation-config`` also wins over ours. With the decode bucket off
-    (``EMMY_GEN_DECODE_BUCKET=0``) nothing is capturable, so eager is forced."""
+    following ``--max-num-seqs``. Sizes up to the decode bucket capture the static decode
+    twin; sizes ABOVE it capture the device-resident symbolic programs (``run_device_sym``)
+    — both paths are validated under stream capture (``test_gen_capture_gpu``; the symbolic
+    path's per-size warmup precedes each capture, which is what keeps TMA descriptor
+    encoding out of the capture window). Opt out with vLLM's own ``--enforce-eager``
+    (forwards as-is); a caller-supplied ``--compilation-config`` also wins over ours. With
+    the decode bucket off (``EMMY_GEN_DECODE_BUCKET=0``) nothing static is capturable, so
+    eager is forced."""
     from emmy import config as emmy_config  # noqa: PLC0415
 
     if _has_flag(vllm_args, "--enforce-eager") or _has_flag(vllm_args, "--compilation-config"):
@@ -147,7 +150,13 @@ def _gen_graph_args(vllm_args: list[str]) -> list[str]:
     if bucket <= 0:
         logger.warning("decode bucket is off (EMMY_GEN_DECODE_BUCKET=0) — the symbolic decode path is not capturable; serving eager")
         return ["--enforce-eager"]
-    sizes = [s for s in (1, 2, 4, 8, 16, 32, 64) if s < bucket] + [bucket]
+    # Cover decode batches up to max_num_seqs (vLLM's default 256 when unset): the bucket
+    # rides the list so the static twin captures at its exact width, and the power-of-two
+    # ladder above it captures the symbolic programs at their exact grids.
+    max_seqs_raw = _flag_value(vllm_args, "--max-num-seqs", "256")
+    max_seqs = int(max_seqs_raw) if max_seqs_raw.isdigit() else 256
+    top = max(bucket, max_seqs)
+    sizes = sorted({s for s in (1, 2, 4, 8, 16, 32, 64, 128, 256, 512) if s < top} | {bucket, top})
     cfg = f'{{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": {sizes}}}'
     return ["--compilation-config", cfg]
 
@@ -176,10 +185,28 @@ def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: 
             cmd += ["--max-num-batched-tokens", _DEFAULT_MAX_MODEL_LEN]
     elif not stock:
         cmd += _PLUGIN_ARGS
+        # Batched symbolic-seq mode pays the FULL batch-cap cost per step (dummy rows pad
+        # the group), so a step must be allowed to FILL the batch: without this, vLLM's
+        # default max_num_batched_tokens (2048) schedules ~4 sequences per step into a
+        # 32-row program — 28 rows of pure waste (measured 0.63 req/s vs 2.33 per-seq).
+        from emmy import config as emmy_config  # noqa: PLC0415
+
+        if emmy_config.serving_batched() and not _has_flag(vllm_args, "--max-num-batched-tokens"):
+            seqs_raw = _flag_value(vllm_args, "--max-num-seqs", "256")
+            len_raw = _flag_value(vllm_args, "--max-model-len", _DEFAULT_MAX_MODEL_LEN)
+            if seqs_raw.isdigit() and len_raw.isdigit():
+                cmd += ["--max-num-batched-tokens", str(int(seqs_raw) * int(len_raw))]
     if not _has_flag(vllm_args, "--max-model-len"):
         cmd += ["--max-model-len", _DEFAULT_MAX_MODEL_LEN]
     if not _has_flag(vllm_args, "--gpu-memory-utilization"):
-        cmd += [f"--gpu-memory-utilization={_DEFAULT_GPU_MEMORY_UTILIZATION}"]
+        # The emmy generative arm's weights/activations live in cupy, INVISIBLE to vLLM's
+        # torch-only memory profiler — vLLM budgets `util × total − currently-used`, so the
+        # default 0.90 line can land below what the emmy residents already consume and the
+        # boot dies on the min-KV fit check (measured: gemma-4-12B at mml 8448 left 1.37 GiB
+        # of the needed 1.7). 0.97 extends the budget line above the residents while keeping
+        # slack for capture; stock keeps 0.90 (its own sampler warmup OOMs at 0.97).
+        util = _GENERATE_GPU_MEMORY_UTILIZATION if generate and not stock else _DEFAULT_GPU_MEMORY_UTILIZATION
+        cmd += [f"--gpu-memory-utilization={util}"]
     return cmd + vllm_args
 
 

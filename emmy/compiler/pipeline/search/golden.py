@@ -75,12 +75,13 @@ def matmul_snippet(M: int, N: int, K: int, dtype: str = "fp32", trans_b: bool = 
 
     ``trans_b`` spells the **serving Linear layout** — B given ``(N, K)``,
     contracted as ``x @ w.T`` via ``F.linear``. The traced contraction carries
-    ``b_trans``, whose enumeration offers NO staged (``d*/tma*`` / ``d*/cp*``)
-    rows (the B-slab fill would issue row-crossing copies — the schedule
-    declines), so a golden tuned on the canonical ``(M,K) @ (K,N)`` form can
-    pin a staged config that NEVER realizes against a served model's linear
-    forks (the gemma-4 m16/dynM o_proj + mlp_down drift-warning class). A
-    golden meant to decide a serving fork must be tuned on this layout."""
+    ``b_trans``; the warp tier stages it like any canonical matmul (the
+    N-major B slab — cp.async / TMA fill it in the operand's own orientation,
+    the plain no-``.trans`` ldmatrix drains it), so the same ``STAGE``
+    spellings realize on both layouts. The measured µs still differ per layout
+    (different slab geometry and gmem walk), so a golden meant to decide a
+    serving fork must still be TUNED on this layout — a canonical-form entry
+    would deploy its config with a foreign µs."""
     if dtype == "fp32":
         if trans_b:
             return f"torch.nn.functional.linear(torch.randn({M},{K}), torch.randn({N},{K}))"
@@ -140,6 +141,11 @@ class GoldenConfig:
     emmy_us: float = 0.0
     cublas_us: float = 0.0
     dynamic: bool = False  # symbolic seq/row axis → masked-tile kernel (``.dynM`` name convention)
+    # HF model id whose serving graph this shape came from (e.g. ``google/gemma-4-12B``) —
+    # provenance, never part of any join key. Optional: a hand-picked benchmark shape has no
+    # model. Model-tagged entries are what ``eval golden --in-model`` audits (it re-traces the
+    # model's serving twins and checks each recorded golden still realizes in them).
+    model: str | None = None
 
     @property
     def ratio(self) -> float:
@@ -220,18 +226,15 @@ class MatmulGoldenConfig(GoldenConfig):
     K: int
     dtype: str = "fp32"
     # The serving Linear layout: B given (N, K), contracted as ``x @ w.T`` (``F.linear``).
-    # Its fork offers gmem-direct rows ONLY (staged transports decline transposed B), so a
-    # golden meant to decide a served model's linear fork must be tuned with this on — a
-    # canonical-B tuning records staged configs that never realize there (see
-    # ``matmul_snippet``). Same ShapeKey either way: at the fork, an unrealizable entry
-    # simply never matches, so layout twins coexist under one shape.
-    # CAVEAT (asymmetric, ordering-protected): the decline is one-way. A ``trans_b`` entry's
-    # gmem-direct config DOES realize on a canonical fork — the shared bucket sorts by µs and
-    # today every canonical twin is present and faster, so the .lin entry never decides one.
-    # A .lin retune that beats a stale canonical twin (or a removed twin) would deploy its
-    # cross-layout config with its foreign µs; the real fix is a layout signal in the stamped
-    # ``S_*`` features + this key, which does not exist yet. Until then, keep the canonical
-    # twin recorded and current whenever its .lin sibling is.
+    # The warp tier stages this layout too (the N-major B slab; see ``matmul_snippet``), so
+    # the same STAGE spellings realize on both layouts — but the measured µs differ per
+    # layout, so a golden meant to decide a served model's linear fork must still be tuned
+    # with this on. Same ShapeKey either way: layout twins coexist under one shape and the
+    # shared bucket sorts by µs.
+    # CAVEAT (ordering-protected): with staging realizable on EITHER layout, a stale or
+    # missing twin lets the other layout's entry deploy its config with a foreign µs; the
+    # real fix is a layout signal in the stamped ``S_*`` features + this key, which does not
+    # exist yet. Until then, keep BOTH layout twins recorded and current together.
     trans_b: bool = False
 
     def __post_init__(self):
@@ -290,10 +293,16 @@ class ReduceGoldenConfig(GoldenConfig):
 
     def shape_key(self):
         """The reduce's arithmetic join key — free dims ``(M,)``, reduce extent ``K``,
-        matching what ``992_stamp_structural_features`` stamps on the reduce kernel."""
+        matching what ``992_stamp_structural_features`` stamps on the reduce kernel.
+        The dynamic twin excludes the symbolic M (the ``(M,) → ()`` free product collapses
+        to 1) and drops the aspect — the stamped-op convention every dynamic key follows;
+        the pre-fix ``free_prod=M`` dynamic key could never join a stamped symbolic reduce
+        (observed on the GeGLU cut's ``__stat`` fragment)."""
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
-        return ShapeKey(free_prod=self.M, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic, free_max=self.M)
+        free = 1 if self.dynamic else self.M
+        fm = 0 if self.dynamic else self.M
+        return ShapeKey(free_prod=free, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic, free_max=fm)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -305,7 +314,7 @@ class PointwiseGoldenConfig(GoldenConfig):
 
     M: int
     N: int
-    dtype: str = "fp32"  # the snippet is fp32-only; recorded so Sample.from_golden is kind-agnostic
+    dtype: str = "fp32"  # fp16/bf16 join the model's half-precision pointwise forks (is_warp=True keys)
 
     def __post_init__(self):
         self._require_dynamic_hint(self.M)
@@ -314,17 +323,22 @@ class PointwiseGoldenConfig(GoldenConfig):
         return ["seq_len@x:0"] if self.dynamic else []
 
     def snippet(self) -> str:
-        return f"torch.relu(torch.randn({self.M},{self.N}))"
+        tdt = {"fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16", "fp32": ""}[self.dtype]
+        return f"torch.relu(torch.randn({self.M},{self.N}{tdt}))"
 
     def flops(self) -> float:
         return float(self.M * self.N)  # one op per element
 
     def shape_key(self):
         """The pointwise map's arithmetic join key — free product ``M·N``, no reduce
-        axis (``reduce_max=0``, the ``from_s_features`` default for an unstamped extent)."""
+        axis (``reduce_max=0``, the ``from_s_features`` default for an unstamped extent);
+        the dynamic twin excludes the symbolic M (and drops the aspect, the ``kind=""``
+        dynamic-key convention)."""
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
-        return ShapeKey(free_prod=self.M * self.N, reduce_max=0, is_warp=False, is_dyn=self.dynamic, free_max=max(self.M, self.N))
+        free = self.N if self.dynamic else self.M * self.N
+        fm = 0 if self.dynamic else max(self.M, self.N)
+        return ShapeKey(free_prod=free, reduce_max=0, is_warp=self.dtype != "fp32", is_dyn=self.dynamic, free_max=fm)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -341,6 +355,12 @@ class RmsNormGoldenConfig(GoldenConfig):
     M: int
     K: int
     dtype: str = "fp32"  # snippet is fp32; recorded so Sample.from_golden is kind-agnostic
+    # Per-head norms (a model's q/k-norm over head_dim) keep the head axis as a STATIC free
+    # dim beside the symbolic token axis: the op is ``(M, heads, K) → (M, heads, K)`` with
+    # only M symbolic, so the dynamic key's free product is ``heads*K`` — a 2-D snippet can
+    # never join it (its dynamic free is just ``K``). ``heads=1`` is the plain row norm.
+    # Static per-head twins may fold heads into M (same key) or spell it — both join.
+    heads: int = 1
 
     def __post_init__(self):
         self._require_dynamic_hint(self.M)
@@ -349,19 +369,21 @@ class RmsNormGoldenConfig(GoldenConfig):
         return ["seq_len@x:0"] if self.dynamic else []
 
     def snippet(self) -> str:
-        return f"torch.nn.RMSNorm({self.K})(torch.randn({self.M},{self.K}))"
+        dims = f"{self.M},{self.heads},{self.K}" if self.heads > 1 else f"{self.M},{self.K}"
+        return f"torch.nn.RMSNorm({self.K})(torch.randn({dims}))"
 
     def flops(self) -> float:
-        return 2.0 * self.M * self.K  # square+accumulate per element (the scale sweep is extra — stays an underestimate)
+        return 2.0 * self.M * self.heads * self.K  # square+accumulate per element (the scale sweep is extra — stays an underestimate)
 
     def shape_key(self):
-        """Keys the stamped RMSNorm sweep op (``kind="rms_norm"``): the OUTPUT is ``(M, K)`` — the
-        sweep re-reads the row it normalizes, so K is a free axis of the output AND the reduce
-        extent (``free_prod = M*K``, measured off the stamped op; the old ``free_prod = M`` never
-        matched what the 992 stamp writes). The dynamic twin excludes the symbolic M."""
+        """Keys the stamped RMSNorm sweep op (``kind="rms_norm"``): the OUTPUT is ``(M[, heads], K)`` —
+        the sweep re-reads the row it normalizes, so K is a free axis of the output AND the reduce
+        extent (``free_prod = M*heads*K``, measured off the stamped op; the old ``free_prod = M`` never
+        matched what the 992 stamp writes). The dynamic twin excludes the symbolic M (keeping the
+        static ``heads`` axis — the per-head q/k-norm join)."""
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
-        free = self.K if self.dynamic else self.M * self.K
+        free = self.heads * self.K if self.dynamic else self.M * self.heads * self.K
         return ShapeKey(free_prod=free, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic, kind="rms_norm")
 
 
@@ -415,6 +437,11 @@ class NormLinearGoldenConfig(GoldenConfig):
     H: int
     N: int
     dtype: str = "fp16"  # a computed-A contraction is a warp mma (fp16/bf16); fp32 has no fused form
+    # The serving Linear layout: W given ``(N, H)``, contracted via ``F.linear`` — the fused edge a
+    # SERVED model actually deploys (its ``b_trans`` channels stage N-major under the sync
+    # transport's async fills). Same layout-blind ShapeKey as the canonical twin
+    # (:class:`MatmulGoldenConfig.trans_b`'s caveat applies): keep BOTH layout twins recorded.
+    trans_b: bool = False
 
     def __post_init__(self):
         self._require_dynamic_hint(self.M)
@@ -425,12 +452,9 @@ class NormLinearGoldenConfig(GoldenConfig):
 
     def snippet(self) -> str:
         tdt = {"fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16", "fp32": ""}[self.dtype]
-        return (
-            f"nw = torch.randn({self.H}{tdt})\n"
-            f"w = torch.randn({self.H},{self.N}{tdt})\n"
-            f"x = torch.randn({self.M},{self.H}{tdt})\n"
-            f"F.rms_norm(x,({self.H},),nw) @ w"
-        )
+        w_decl = f"w = torch.randn({self.N},{self.H}{tdt})\n" if self.trans_b else f"w = torch.randn({self.H},{self.N}{tdt})\n"
+        contract = f"F.linear(F.rms_norm(x,({self.H},),nw), w)" if self.trans_b else f"F.rms_norm(x,({self.H},),nw) @ w"
+        return f"nw = torch.randn({self.H}{tdt})\n{w_decl}x = torch.randn({self.M},{self.H}{tdt})\n{contract}"
 
     def flops(self) -> float:
         return 2.0 * self.M * self.N * self.H  # the contraction; the norm/rsqrt prologue is extra (stays an underestimate)
@@ -478,6 +502,9 @@ class MlpGeGluGoldenConfig(GoldenConfig):
     H: int
     inter: int
     dtype: str = "fp16"  # a computed-A contraction is a warp mma (fp16/bf16)
+    # The serving Linear layout (gate/up given ``(inter, H)``, contracted via ``F.linear``) — see
+    # :class:`NormLinearGoldenConfig.trans_b`; keep BOTH layout twins recorded.
+    trans_b: bool = False
 
     def __post_init__(self):
         self._require_dynamic_hint(self.M)
@@ -488,12 +515,18 @@ class MlpGeGluGoldenConfig(GoldenConfig):
 
     def snippet(self) -> str:
         tdt = {"fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16", "fp32": ""}[self.dtype]
+        shape = f"{self.inter},{self.H}" if self.trans_b else f"{self.H},{self.inter}"
+        combine = (
+            "(lambda r: F.gelu(F.linear(r, wg), approximate='tanh') * F.linear(r, wu))"
+            if self.trans_b
+            else "(lambda r: F.gelu(r @ wg, approximate='tanh') * (r @ wu))"
+        )
         return (
-            f"wg = torch.randn({self.H},{self.inter}{tdt})\n"
-            f"wu = torch.randn({self.H},{self.inter}{tdt})\n"
+            f"wg = torch.randn({shape}{tdt})\n"
+            f"wu = torch.randn({shape}{tdt})\n"
             f"nw = torch.randn({self.H}{tdt})\n"
             f"x = torch.randn({self.M},{self.H}{tdt})\n"
-            f"(lambda r: F.gelu(r @ wg, approximate='tanh') * (r @ wu))(F.rms_norm(x,({self.H},),nw))"
+            f"{combine}(F.rms_norm(x,({self.H},),nw))"
         )
 
     def flops(self) -> float:
@@ -716,7 +749,9 @@ def _load_goldens() -> list[GoldenConfig]:
     """Load every per-GPU golden YAML under :data:`_GOLDENS_DIR` into one flat list.
 
     One file per GPU: a ``gpu_name`` / ``compute_cap`` header (stamped onto every
-    config so it isn't repeated per entry) plus a ``configs`` list, each tagged with
+    config so it isn't repeated per entry), an optional ``model:`` provenance header
+    (the HF model id the shapes came from — see :attr:`GoldenConfig.model`; overridable
+    per entry), plus a ``configs`` list, each tagged with
     a ``kernel`` discriminator (``matmul`` / ``attention`` / ``softmax`` / ``reduce`` / ``rms_norm`` / ``norm_linear`` /
     ``mlp_geglu`` / ``rope`` / ``embedding`` / ``pointwise``) selecting the dataclass. All files are concatenated — a
     ``name`` may recur across GPUs.
@@ -733,8 +768,9 @@ def _load_goldens() -> list[GoldenConfig]:
     for path in sorted(_GOLDENS_DIR.glob("*.yaml")):
         doc = yaml.safe_load(path.read_text())
         gpu_name, cap = doc["gpu_name"], tuple(doc["compute_cap"])
+        file_model = doc.get("model")  # optional provenance header; a per-entry ``model:`` overrides it
         for c in doc["configs"]:
-            out.append(_KERNEL_CLASSES[c.pop("kernel")](gpu_name=gpu_name, compute_cap=cap, **c))
+            out.append(_KERNEL_CLASSES[c.pop("kernel")](gpu_name=gpu_name, compute_cap=cap, model=c.pop("model", file_model), **c))
     return out
 
 

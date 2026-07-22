@@ -249,10 +249,17 @@ class SdpaOp(Op):
     (explicit operand or ``is_causal``) keeps at most that band, so the lowering
     may skip key blocks wholly outside it; an explicit mask operand still
     applies (it may mask more, e.g. padding), a stamped mask-less SDPA computes
-    the band itself."""
+    the band itself.
+
+    ``scale`` is torch's ``scale=`` kwarg: the score multiplier. ``None`` means
+    the torch default ``1/sqrt(head_dim)``. Gemma-nano (E2B/E4B) passes an
+    explicit ``scale=1.0`` (its q_norm absorbs the scaling) — dropping the kwarg
+    silently re-scales the logits by ``1/sqrt(d)`` and redistributes the whole
+    softmax."""
 
     is_causal: bool = False
     sliding_window: int | None = None
+    scale: float | None = None
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
         # SDPA output mirrors Q's batch+heads+seq dims, with V's last (head_dim).
@@ -274,7 +281,8 @@ class SdpaOp(Op):
             k = np.repeat(k, group, axis=-3)
             v = np.repeat(v, group, axis=-3)
         d_k = q.shape[-1]
-        scores = q @ np.swapaxes(k, -2, -1) / np.sqrt(d_k)
+        scale = self.scale if self.scale is not None else 1.0 / np.sqrt(d_k)
+        scores = q @ np.swapaxes(k, -2, -1) * scale
         if self.is_causal:
             seq_len = scores.shape[-2]
             kv_len = scores.shape[-1]

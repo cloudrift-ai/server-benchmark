@@ -46,10 +46,12 @@ O3_TOL = "EMMY_O3_TOL"
 OFFLINE_TILT = "EMMY_OFFLINE_TILT"
 BENCH_BACKENDS = "EMMY_BENCH_BACKENDS"
 CUBIN_CACHE = "EMMY_CUBIN_CACHE"
+PACK_DIR = "EMMY_PACK_DIR"
 NO_NVCC = "EMMY_NO_NVCC"
 GPU_LOCK = "EMMY_GPU_LOCK"
 NCU_CHILD = "EMMY_NCU_CHILD"
 SERVING_STATIC = "EMMY_SERVING_STATIC"
+SERVING_BATCHED = "EMMY_SERVING_BATCHED"
 GEN_DECODE_BUCKET = "EMMY_GEN_DECODE_BUCKET"
 GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
 READABLE = "EMMY_READABLE"
@@ -184,6 +186,28 @@ def online_path() -> Path:
     return legacy if legacy.exists() and not path.exists() else path
 
 
+@contextmanager
+def online_file_override(path: str | Path | None):
+    """Temporarily point ``EMMY_ONLINE_FILE`` at ``path`` (``None`` is a no-op).
+
+    The golden drift audit uses this with a nonexistent path so a compile's
+    evidence hierarchy sees NO machine-local online prior / reservoir — the
+    golden tier plus the repo-shipped offline prior are the only inputs, making
+    MATCH/DRIFT verdicts machine-independent."""
+    if path is None:
+        yield
+        return
+    prev = os.environ.get(ONLINE_FILE)
+    os.environ[ONLINE_FILE] = str(path)
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop(ONLINE_FILE, None)
+        else:
+            os.environ[ONLINE_FILE] = prev
+
+
 def offline_path() -> Path | None:
     """Offline-prior weights artifact override: ``EMMY_OFFLINE_FILE`` (legacy
     ``EMMY_ANALYTIC_FILE``) → ``None``.
@@ -296,13 +320,26 @@ def offline_tilt(default: float = 0.3) -> float:
 def serving_static(default: bool = False) -> bool:
     """``EMMY_SERVING_STATIC`` — opt into the serving plugin's fully-static
     program: **static extents for both batch and seq_len**. Off (default) keeps the
-    symbolic-seq, batch-1 path; on builds ONE static ``(max_num_seqs, max_seq_len)``
+    symbolic-seq path; on builds ONE static ``(max_num_seqs, max_seq_len)``
     program (batch from vLLM's ``--max-num-seqs``, seq from ``--max-model-len``) and
-    runs each scheduler step as a padded batched forward. Only correct/efficient for
-    fixed-length workloads — it pads every sequence to ``max_seq_len`` and the
-    dynamic-seq kernels miscompute batch>1, so it is a deliberate opt-in, not a
-    default. See `serving/ARCHITECTURE.md`."""
+    runs each scheduler step as a padded batched forward. Only efficient for
+    fixed-length workloads — it pads every sequence to ``max_seq_len``; prefer
+    ``EMMY_SERVING_BATCHED`` (pads only to the step's longest sequence). A deliberate
+    opt-in, not a default. See `serving/ARCHITECTURE.md`."""
     return _bool(SERVING_STATIC, default)
+
+
+def serving_batched(default: bool = False) -> bool:
+    """``EMMY_SERVING_BATCHED`` — opt into the serving plugin's **batched
+    symbolic-seq** program: batch extent static at vLLM's ``--max-num-seqs``, seq_len
+    symbolic. Each scheduler step runs as ONE batched forward padded to the step's
+    longest sequence (not to ``max_seq_len`` — the static mode's waste). Off (default)
+    keeps the one-sequence-per-forward path. An opt-in because the shared buffer set is
+    allocated at ``(max_num_seqs, max_seq_len)`` capacity — pair it with a sane
+    ``--max-num-seqs`` (vLLM's default is 256) and workload-sized ``--max-model-len``.
+    ``EMMY_SERVING_STATIC`` takes precedence when both are set.
+    See `serving/ARCHITECTURE.md`."""
+    return _bool(SERVING_BATCHED, default)
 
 
 def gen_prefill_bucket(default: int = -1) -> int:
@@ -334,6 +371,14 @@ def cubin_cache_dir() -> Path:
     """Content-addressed cubin cache dir: ``EMMY_CUBIN_CACHE`` → ``~/.cache/emmy/cubin``."""
     override = os.environ.get(CUBIN_CACHE)
     return Path(override) if override else _CACHE_ROOT / "cubin"
+
+
+def pack_dir() -> Path | None:
+    """``EMMY_PACK_DIR`` — root directory for execution-plan packs (``backend/pack.py``).
+    When set, the serving runner loads a matching pack (skipping trace / pipeline / fork
+    resolution / codegen) and writes one after a full compile. ``None`` (unset) disables."""
+    override = os.environ.get(PACK_DIR)
+    return Path(override) if override else None
 
 
 def nvcc_disabled() -> bool:

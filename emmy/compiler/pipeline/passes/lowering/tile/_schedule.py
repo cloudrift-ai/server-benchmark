@@ -704,12 +704,16 @@ def _stage_spec(kernel) -> str:
 
 def _can_stage_warp(stage, k_axis: Axis, tile_m: int, tile_n: int, bk: int, atom_k: int, mask_m: bool, mask_n: bool, b_trans: bool) -> bool:
     """cp.async staging eligibility: a ``cp.async`` stage over a contraction with a STATIC,
-    tile-divisible K axis and a canonical (non-transposed) B operand. A masked / symbolic **M**
-    (output rows) is fine — the A-slab fill clamp-reads the overhanging rows in-bounds and the
-    ``RegStore`` guards their store. A masked **N** (the B-slab inner dim) and a symbolic /
-    non-divisible **K** stay gmem-direct (K zero-fill is a follow-up). Staging only ever *adds* a
-    faster lowering, so an ineligible kernel silently falls back to gmem-direct."""
-    if stage is None or stage.transport != "cp.async" or b_trans or mask_n:
+    tile-divisible K axis. A masked / symbolic **M** (output rows) is fine — the A-slab fill
+    clamp-reads the overhanging rows in-bounds and the ``RegStore`` guards their store. A masked
+    **N** and a symbolic / non-divisible **K** stay gmem-direct (K zero-fill is a follow-up).
+    A transposed B (the serving ``F.linear`` layout, K gmem-contiguous) stages into an N-MAJOR
+    slab (``tile_n × bk``) whose inner dim maps stride-1 to gmem K exactly like A's — the fill's
+    chunk contiguity and row-base alignment hold automatically (B's row stride K is a multiple
+    of ``bk_elems``, which the chunk width divides), so only the K-chunk evenness gates it.
+    Staging only ever *adds* a faster lowering, so an ineligible kernel silently falls back to
+    gmem-direct."""
+    if stage is None or stage.transport != "cp.async" or mask_n:
         return False
     if not k_axis.extent.is_static:
         return False
@@ -717,8 +721,9 @@ def _can_stage_warp(stage, k_axis: Axis, tile_m: int, tile_n: int, bk: int, atom
     if k_axis.extent.as_static() % bk_elems != 0:
         return False
     # cp.async needs a ≥4-byte contiguous chunk; the 16-bit mma operands give 2 B/elem, so the
-    # inner slab dim must be even (A's BK, B's tile_n). Odd ⇒ fall back.
-    return (bk_elems % 2 == 0) and (tile_n % 2 == 0)
+    # inner slab dim must be even (A's BK, and B's tile_n — or BK again on a transposed B, whose
+    # N-major slab keeps K inner). Odd ⇒ fall back.
+    return (bk_elems % 2 == 0) and (b_trans or tile_n % 2 == 0)
 
 
 def _tma_operand_rank_ok(index: tuple, tile_name: str, k_name: str) -> bool:
@@ -737,12 +742,14 @@ def _can_stage_warp_tma(
     stage, k_axis: Axis, n_axis: Axis, tile_n: int, bk: int, atom_k: int, elem_bytes: int, mask_n: bool, b_trans: bool
 ) -> bool:
     """TMA (``cp.async.bulk.tensor``) staging eligibility: a ``tma`` stage over a contraction with a
-    STATIC, tile-divisible K and a canonical B. A masked / symbolic **M** is fine — the descriptor's
-    globalDim is the runtime M and TMA zero-fills the box overhang past it (no fill clamp needed). A
-    masked **N** and a symbolic / non-divisible **K** stay gmem-direct. The box's inner dim (A's BK,
-    B's tile_n) and the source's inner global stride (A's K, B's N) must be 16 B-aligned (the
-    NONE-swizzle TMA box-copy rule)."""
-    if stage is None or stage.transport != "tma" or b_trans or mask_n:
+    STATIC, tile-divisible K. A masked / symbolic **M** is fine — the descriptor's globalDim is the
+    runtime M and TMA zero-fills the box overhang past it (no fill clamp needed). A masked **N**
+    and a symbolic / non-divisible **K** stay gmem-direct. The box's inner dim and the source's
+    inner global stride must be 16 B-aligned (the NONE-swizzle TMA box-copy rule): canonical B
+    boxes ``(bk, tile_n)`` over strides (A's K, B's N); a transposed B (the serving ``F.linear``
+    layout) boxes N-major ``(tile_n, bk)`` — both operands' inner dim is then the K chunk and both
+    inner strides are K, so N drops out of the alignment gate."""
+    if stage is None or stage.transport != "tma" or mask_n:
         return False
     if not (k_axis.extent.is_static and n_axis.extent.is_static):
         return False
@@ -750,7 +757,8 @@ def _can_stage_warp_tma(
     k, n = k_axis.extent.as_static(), n_axis.extent.as_static()
     if k % bk_elems != 0:
         return False
-    return all((x * elem_bytes) % 16 == 0 for x in (bk_elems, tile_n, k, n))
+    inner = (bk_elems, k) if b_trans else (bk_elems, tile_n, k, n)
+    return all((x * elem_bytes) % 16 == 0 for x in inner)
 
 
 def _resolve_warp_stage(c: Contraction, stage: Stage, budget: int = STATIC_SMEM_CAP) -> Stage | None:
@@ -805,9 +813,10 @@ def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = ST
     is ``tma`` / ``cp.async`` and K is static (a computed-A contraction never reaches here — it keeps
     the ``Map`` form). A masked (overhanging) **M** is fine — the drain reads the slab by LOCAL tile
     coords and the overhanging store is guarded. A masked **N** or a transposed **B** stays gmem-direct:
-    the B-slab fill would clamp a chunk-start column into a row-crossing gmem address and hang the kernel
-    on the misaligned cp.async / TMA copy — the same refusal the warp tier makes (:func:`_can_stage_warp`
-    / :func:`_can_stage_warp_tma`). The slab K-chunk ``bk_elems`` is **derived** to fit ``depth``
+    the masked-N B-slab fill would clamp a chunk-start column into a row-crossing gmem address and hang
+    the kernel on the misaligned cp.async / TMA copy (the warp tier refuses the same), and the scalar
+    drain has no transposed-slab variant (the warp tier DOES stage a transposed B, via its N-major
+    slab). The slab K-chunk ``bk_elems`` is **derived** to fit ``depth``
     ``tile_m×bk + bk×tile_n`` operand slots in the smem ``budget`` (largest power-of-two dividing K; ``inputs``
     supplies the element dtype) — not spelled by a codec, so no schema change. ``depth >= 2`` is the
     scalar gmem→smem prefetch ring — the same ``staged_kloop`` phases the warp tier runs, the atom
@@ -819,9 +828,12 @@ def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = ST
 
     if not c.k_axis.extent.is_static or stage.transport not in ("tma", "cp.async"):
         return None
-    # A masked-N (overhanging inner dim) or transposed-B B-slab fill would clamp a chunk-start column
-    # into a row-crossing gmem address and hang on the misaligned 16 B copy — the warp tier refuses the
-    # same (:func:`_can_stage_warp` / :func:`_can_stage_warp_tma`).
+    # A masked-N (overhanging inner dim) B-slab fill would clamp a chunk-start column into a
+    # row-crossing gmem address and hang on the misaligned 16 B copy — the warp tier refuses the
+    # same (:func:`_can_stage_warp` / :func:`_can_stage_warp_tma`). A transposed B stays
+    # gmem-direct on THIS tier only: the warp tier stages it into an N-major slab, but the scalar
+    # drain reads the slab by ``(k, n)`` coords and has no transposed variant (pin-only tier, no
+    # serving fork rides it).
     if c.n.mask or c.b_trans:
         return None
     if not inputs or c.a_operand.input not in inputs:
@@ -900,7 +912,7 @@ def _resolve_sync_stage(c: Contraction, budget: int = STATIC_SMEM_CAP, want_dept
     the 48 KiB smem budget: the A/B operand slabs plus one fp32 row per bridged statistic
     (``sync_stat_fill``'s decls — the same ``Contraction.stat_prologue`` seam the materializer
     fills through). ``want_depth >= 2`` is the **asymmetric B-only prefetch ring**: only the
-    canonical-B cp.async slabs ring (their copies for chunk ``i+d-1`` fly under chunk ``i``'s
+    B cp.async slabs ring (their copies for chunk ``i+d-1`` fly under chunk ``i``'s
     compute fill AND drain), while the compute-filled A slab and the stat rows stay
     single-buffer — ringing a compute fill buys no overlap (it runs on the drain's own
     threads). Measured on the gemma gate_up fused edge at M=512 (5090) the B-only ring loses
@@ -908,8 +920,9 @@ def _resolve_sync_stage(c: Contraction, budget: int = STATIC_SMEM_CAP, want_dept
     (3 → 2 CTAs/SM), the same cliff that killed the historical full-slab ring — but at decode
     M (tile_m ≤ 32) the A slab + stat rows are tiny and the tradeoff inverts, so
     :func:`_computed_a_rows` enumerates ``d1`` and ``d2`` as fork siblings (measured per
-    shape) and a ``STAGE`` pin's depth stays authoritative. A transposed-B
-    (all-sync) pipeline has nothing async to overlap and stays single-buffer. ``budget`` is the
+    shape) and a ``STAGE`` pin's depth stays authoritative. A transposed B rides the same
+    async B fills through its N-major slab (``_sync_operands`` — its own gmem orientation, K
+    stride-1), so the ring is enumerable on the serving ``F.linear`` fused edges too. ``budget`` is the
     device's per-block dynamic-smem opt-in cap (``ctx.max_dynamic_smem`` — the backend declares
     an ``extern __shared__`` pool and sets the func attribute past the 48 KiB static cap),
     falling back to the static cap when no context reaches the schedule."""
@@ -925,7 +938,7 @@ def _resolve_sync_stage(c: Contraction, budget: int = STATIC_SMEM_CAP, want_dept
     stat_bytes = len(stats) * c.m.tile * 4
     if a_bytes + b_bytes + stat_bytes > budget:
         return None
-    depth = want_depth if want_depth >= 2 and not c.b_trans and a_bytes + stat_bytes + want_depth * b_bytes <= budget else 1
+    depth = want_depth if want_depth >= 2 and a_bytes + stat_bytes + want_depth * b_bytes <= budget else 1
     return Stage(depth=depth, transport="sync", smem=(c.a_name,), bk_elems=bk_elems)
 
 

@@ -177,6 +177,12 @@ class EmmyGenModel(nn.Module):
             scale=getattr(config, "logit_scale", 1.0),
             soft_cap=getattr(config, "final_logit_softcapping", None),
         )
+        # The checkpoint's generation config may list tokens to suppress outright (gemma-4 lists
+        # the mm delimiters '<image|>'/'<audio|>'; a degenerate text prompt can genuinely rank
+        # one top-1, and an emitted mm token decodes to empty text). HF generate honors the
+        # list; stock vLLM's gemma4 models -inf those ids in compute_logits — mirror that.
+        gen_cfg = vllm_config.model_config.try_get_generation_config()
+        self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
 
     def forward(self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None, **kwargs):
         device = positions.device
@@ -223,7 +229,10 @@ class EmmyGenModel(nn.Module):
         return self.runner.final_norm_device(hidden)
 
     def compute_logits(self, hidden_states, *args):
-        return self.logits_processor(self.lm_head, hidden_states)
+        logits = self.logits_processor(self.lm_head, hidden_states)
+        if logits is not None and self._suppress_token_ids:
+            logits[:, self._suppress_token_ids] = -float("inf")
+        return logits
 
     def embed_input_ids(self, input_ids):
         # vLLM embedding hook → the runner owns embedding; on-device gather (no host hop).

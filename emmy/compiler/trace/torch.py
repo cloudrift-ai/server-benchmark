@@ -572,7 +572,7 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, str], *, s
 
     # --- SDPA ---
     if op_name == "scaled_dot_product_attention":
-        # args: (Q, K, V, attn_mask, dropout_p, is_causal). ``attn_mask`` is an
+        # args: (Q, K, V, attn_mask, dropout_p, is_causal, scale). ``attn_mask`` is an
         # additive float bias added to the QK^T scores — HF passes its causal
         # mask this way (a precomputed (1,1,S,S) tensor) rather than via the
         # ``is_causal`` flag. Thread it through as a 4th SdpaOp input so the
@@ -584,12 +584,19 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, str], *, s
             if isinstance(a, bool):
                 is_causal = a
                 break
+        # ``scale``: positional slot 6 (after dropout_p at 4 — never captured, so a
+        # bare float at 4 is dropout, at 6 is scale) or the kwarg. ``None`` = torch's
+        # ``1/sqrt(head_dim)`` default. Dropping an explicit scale (Gemma-nano passes
+        # ``scale=1.0``) silently re-scales the attention logits.
+        scale = (fx_node.kwargs or {}).get("scale")
+        if scale is None and len(fx_node.args) > 6 and isinstance(fx_node.args[6], (int, float)) and not isinstance(fx_node.args[6], bool):
+            scale = fx_node.args[6]
         sdpa_inputs = list(input_ids[:3])
         mask_arg = fx_node.args[3] if len(fx_node.args) > 3 else (fx_node.kwargs or {}).get("attn_mask")
         if mask_arg is not None and hasattr(mask_arg, "name") and mask_arg.name in node_map:
             sdpa_inputs.append(node_map[mask_arg.name])
         nid = g.add_node(
-            op=SdpaOp(is_causal=is_causal),
+            op=SdpaOp(is_causal=is_causal, scale=None if scale is None else float(scale)),
             inputs=sdpa_inputs,
             output=Tensor(name, shape, dtype),
             node_id=name,

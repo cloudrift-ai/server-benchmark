@@ -50,6 +50,11 @@ def compute_live_intervals(scratch_names: list[str], launches: list) -> dict[str
     for i, ln in enumerate(launches):
         if ln.node_id in scratch:
             first_write[ln.node_id] = i
+        # An AUX output (a second buffer this launch writes — the stat-sink's ``__sq``) has no
+        # launch of its own; its per-launch memset (``zero_outputs``) IS its first write.
+        for z in ln.zero_outputs:
+            if z in scratch:
+                first_write.setdefault(z, i)
         reads = set(ln.arg_names)
         reads.update(d.src_buf for d in ln.tma_descriptors)
         for name in reads:

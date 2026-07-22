@@ -76,6 +76,7 @@ from emmy.compiler.pipeline.fork import Fork
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction, bind_prologue_contraction, map_cone
 from emmy.compiler.pipeline.passes.lowering.tile._flash import is_flash_score_producer, is_fold_offer_site, try_flash
 from emmy.compiler.pipeline.passes.lowering.tile._schedule import prologue_knob_bases, schedule, warp_tile_pinned
+from emmy.compiler.pipeline.passes.lowering.tile._sink import bind_sinkable_stat
 from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse
 from emmy.compiler.pipeline.pipeline import LoweringError
 from emmy.compiler.pipeline.search.space import PLACE, place_decision
@@ -407,6 +408,30 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
         # plain-matmul goldens (``mlp_down.*``) live. Offering it as a stamped row keeps the choice
         # on the ordinary evidence pick; ``020_cut_edge`` realizes it.
         if not _cuttable_cone(node):
+            # The ROW-STAT SINK offer (``PLACE@stat`` — the fused norm form, ``Map(body=[π…,
+            # sweep], source=Reduction(PLANAR))`` re-reading an in-graph producer's output):
+            # option-0 stays the local (coop) statistic; ONE representative ``sink`` sibling is
+            # appended (its own schedule is discarded — ``025_sink_row_reduce`` re-emits the
+            # producer epilogue + a fresh un-mapped sweep the restarted scan re-recognizes,
+            # the same division of labour as the cone cut). Evidence-only like the cut row:
+            # ``greedy_decide`` withholds it from the model fallback, so an unseeded shape
+            # never sinks cold. Only offered unpinned — a ``PLACE@stat`` pin is authoritative
+            # and threads onto every row instead.
+            sink = bind_sinkable_stat(node, free, loop.inputs)
+            offer_sink = sink is not None and sink.src in graph.nodes and sink.src not in graph.inputs
+            if offer_sink:
+                pin = PLACE.narrow_at("stat")
+                base_val = pin if pin in ("fuse", "sink") else "fuse"
+                rows = _as_list(schedule(map_tile, loop.name, {**knob_base, "PLACE@stat": base_val}, ctx))
+                if rows and pin not in ("fuse", "sink"):
+                    # The sink siblings mirror EVERY fuse row (not one representative): when the
+                    # realizer must refuse (an atomic producer), the picked sink row deploys its
+                    # own underlying schedule — so a golden spelling {PLACE@stat: sink, REDUCE:
+                    # b512} degrades to exactly the b512 coop kernel the plain anchor would have
+                    # picked, instead of stranding the norm on option-0's slower fallback.
+                    rows = [*rows, *(replace(r, knobs={**r.knobs, "PLACE@stat": "sink"}) for r in rows)]
+                if rows:
+                    return rows if len(rows) > 1 else rows[0]
             return schedule(map_tile, loop.name, knob_base, ctx)
         pin = PLACE.narrow_at("cone")
         rows = _as_list(schedule(map_tile, loop.name, {**knob_base, "PLACE@cone": pin if pin in ("fuse", "cut") else "fuse"}, ctx))

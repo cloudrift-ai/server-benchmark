@@ -205,29 +205,34 @@ PLACE = Knob(
     KnobType.STR,
     help="Structural placement of an intermediate edge — auto|fuse|cut, per element via "
     "PLACE@cone (producer-cone inlining) / PLACE@fold (flash vs multi-kernel attention) / "
-    "PLACE@tuple (online softmax vs two-pass stats); bare PLACE pins every eligible edge. "
-    "Pin-only (never enumerated); read in lowering/tile/010_recognize.",
+    "PLACE@tuple (online softmax vs two-pass stats) / PLACE@stat (auto|fuse|sink — a norm's "
+    "row statistic staying local vs sunk into its producer's epilogue); bare PLACE pins every "
+    "eligible edge. Pin-only (never enumerated); read in lowering/tile/010_recognize.",
     off="",
 )
 
 # The built-in ``auto`` defaults per element — today's emission behavior (fuse everywhere: flash,
-# online softmax, and producer-cone inlining are all on when recognizable). Flipping a default is a
-# behavior change gated on the validation suite, not a spelling change.
-_PLACE_DEFAULTS = {"cone": "fuse", "fold": "fuse", "tuple": "fuse"}
+# online softmax, and producer-cone inlining are all on when recognizable; a row statistic stays
+# LOCAL to its kernel). Flipping a default is a behavior change gated on the validation suite, not
+# a spelling change. ``stat``'s alternative is ``sink`` (not ``cut``): the statistic reduce
+# migrates into the producer kernel's epilogue (``025_sink_row_reduce``) instead of splitting out.
+_PLACE_DEFAULTS = {"cone": "fuse", "fold": "fuse", "tuple": "fuse", "stat": "fuse"}
+_PLACE_VALUES = {"cone": ("fuse", "cut"), "fold": ("fuse", "cut"), "tuple": ("fuse", "cut"), "stat": ("fuse", "sink")}
 
 
 def place_decision(element: str) -> str:
-    """The resolved ``PLACE`` decision (``"fuse"`` / ``"cut"``) for ``element`` — the pin
-    (``PLACE@<element>`` > bare ``PLACE``, via ``Knob.narrow_at``) with the explicit ``auto`` token
-    (and no pin at all) resolving to the built-in per-element default. An unknown pin value degrades
-    to the default with a log line — the standard pin-validity rule."""
+    """The resolved ``PLACE`` decision (``"fuse"`` / ``"cut"`` — ``"sink"`` for ``stat``) for
+    ``element`` — the pin (``PLACE@<element>`` > bare ``PLACE``, via ``Knob.narrow_at``) with the
+    explicit ``auto`` token (and no pin at all) resolving to the built-in per-element default. An
+    unknown pin value degrades to the default with a log line — the standard pin-validity rule."""
     default = _PLACE_DEFAULTS[element]
+    allowed = _PLACE_VALUES[element]
     pin = PLACE.narrow_at(element)
     if pin is None or pin in ("", "auto"):
         return default
-    if pin in ("fuse", "cut"):
+    if pin in allowed:
         return pin
-    logger.warning("PLACE@%s pin %r is not auto|fuse|cut; using the built-in %r", element, pin, default)
+    logger.warning("PLACE@%s pin %r is not auto|%s; using the built-in %r", element, pin, "|".join(allowed), default)
     return default
 
 

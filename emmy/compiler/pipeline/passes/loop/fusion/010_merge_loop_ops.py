@@ -44,6 +44,7 @@ from emmy.compiler.ir.loop import Accum, Assign, Load, Loop, LoopOp
 from emmy.compiler.ir.stmt import Body, Select
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import build_merged_op as _build_merged_op
+from emmy.compiler.pipeline.passes.loop.fusion._helpers import is_castfree_indexmap as _is_castfree_indexmap_shared
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import is_pure_indexmap as _is_pure_indexmap
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import wrap_merge_fragment as _wrap_merge_fragment
 
@@ -169,15 +170,9 @@ def _is_castfree_indexmap(graph: Graph, producer: Node) -> bool:
     on (``kv_stage_ok`` reads the operand BUFFER dtype — the gemma V-norm's f32→f16 cast
     fused into P@V left the flash V reading the f32 buffer, gmem-direct forever). So a
     dtype-changing copy takes the guards like any compute-bearing producer and stays
-    materialized at the traced cast boundary."""
-    if not _is_pure_indexmap(producer.op):
-        return False
-    out_dt = producer.output.dtype.name
-    for i in producer.inputs:
-        src = graph.nodes.get(i)
-        if src is not None and src.output.dtype.name != out_dt:
-            return False
-    return True
+    materialized at the traced cast boundary. Shared logic in ``_helpers`` — the fan-out
+    splitter needs the same gate."""
+    return _is_castfree_indexmap_shared(graph, producer)
 
 
 def _is_softmax_shaped(op) -> bool:

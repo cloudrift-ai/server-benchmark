@@ -325,19 +325,26 @@ class Tile(Stmt):
             from emmy.compiler.ir.stmt.blocks import _render_grid_axis_decode, _stride_c  # noqa: PLC0415
 
             inner = ctx.child()
-            n = _stride_c(list(self.axes), inner)
+            # A symbolic grid's total is unboundable at render time, so the flat id and every
+            # stride divisor are ALWAYS 64-bit — a batched coop-reduce grid overflows int32 at
+            # runtime-legal extents (batch·seq·N·coop = 4·512·6144·256 ≈ 3.2e9 on the demoted
+            # fused gate/up kernel → cudaErrorIllegalAddress; the static branch below reaches
+            # the same overflow class and widens exactly when its known total needs it). The
+            # ``(long long)blockIdx.x`` lowers to one mul.wide; the decoded axis vars stay
+            # ``int`` (each bounded by its extent).
+            n = _stride_c(list(self.axes), inner, wide=True)
             # Same aux-band decode as the static path below: blockDim includes the producer band,
             # so the cell id must be derived from ``block_threads``, not ``blockDim``.
             sgid = (
-                f"blockIdx.x * {self.block_threads} + threadIdx.x % {self.block_threads}"
+                f"(long long)blockIdx.x * {self.block_threads} + threadIdx.x % {self.block_threads}"
                 if self.aux_threads
-                else "blockIdx.x * blockDim.x + threadIdx.x"
+                else "(long long)blockIdx.x * blockDim.x + threadIdx.x"
             )
             out = [
-                f"{pad}int _gid = {sgid};",
+                f"{pad}long long _gid = {sgid};",
                 f"{pad}if (_gid < {n}) {{",
             ]
-            out.extend(_render_grid_axis_decode(self.axes, "_gid", inner))
+            out.extend(_render_grid_axis_decode(self.axes, "_gid", inner, wide=True))
             out.extend(render_body(self.body, inner))
             out.append(f"{pad}}}")
             return out
@@ -354,8 +361,9 @@ class Tile(Stmt):
         # the gemma-4 down-proj demote → cudaErrorIllegalAddress). Widen the id to 64-bit exactly
         # when the static iteration space needs it — ``(long long)blockIdx.x`` lowers to one
         # mul.wide, and the (slower) 64-bit axis divisions only land on kernels that would
-        # otherwise fault. The symbolic branch above keeps the 32-bit id: its runtime extent is
-        # unboundable at render time, and widening it would re-key every symbolic kernel's cubin.
+        # otherwise fault. The symbolic branch above widens ALWAYS: its runtime extent is
+        # unboundable at render time (batch·seq·N·coop crossed int32 at seq 512 on the merged
+        # gate/up demote).
         wide = n > _INT32_MAX
         bidx = "(long long)blockIdx.x" if wide else "blockIdx.x"
         # A warp-specialized producer band (``aux_threads``) launches PAST the cooperative cells:

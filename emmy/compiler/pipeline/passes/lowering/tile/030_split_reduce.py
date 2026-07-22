@@ -49,7 +49,6 @@ from dataclasses import replace
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
-from emmy.compiler.ir.atom import AtomKind
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
@@ -150,7 +149,9 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, contraction: Cont
     atom, scalar otherwise. No ``_slice_loop`` (unlike the residual plain-sum path).
 
     Finalize matches the additive-carrier finalize: ``atomic`` (``g<w>a``) atomicAdds the partition's
-    ``acc`` into the zero-init'd output (**scalar only** — an mma C-fragment can't ``atomicAdd``);
+    ``acc`` into the zero-init'd output — ONE kernel, both tiers (an mma partial's C fragment rides
+    ``RegStore.atomic``: the packed f16x2/bf16x2 ``atomicAdd`` pair, per-element for f32) — at the
+    cost of one output-dtype rounding per partition (the deferred arm's f32 workspace rounds once);
     ``kernel`` (``g<w>k``) writes each partition's ``acc`` to a ``ws[ksplit, *cell]`` workspace and a
     sibling finalize kernel sums it + runs the projection epilogue."""
     out = root.output
@@ -169,11 +170,6 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, contraction: Cont
     if cross_move is Fold.ATOMIC:
         if n_comp != 1:
             raise NotImplementedError("atomic finalize needs an additive (1-component) carrier; pin the deferred g<w>k finalize")
-        if isinstance(contraction.atom, AtomKind):
-            raise NotImplementedError(
-                "atomic finalize can't accumulate an mma C-fragment (RegStore has no atomicAdd); "
-                "pin the deferred-kernel finalize (REDUCE=g<w>k)"
-            )
         if epilogue:
             # Apply the projection per-partition before the atomicAdd — legal only if it distributes.
             if not _projection_distributes(epilogue, states):

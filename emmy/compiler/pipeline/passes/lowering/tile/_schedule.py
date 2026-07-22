@@ -471,14 +471,15 @@ def _stage_candidates(kernel, probe, plan: TilePlan, budget: int = STATIC_SMEM_C
 def _reduce_candidates(kernel, place, plan: TilePlan, probe: Contraction | None = None) -> list[str]:
     """The ``REDUCE`` codec candidates for one tile candidate — serial ``""`` first (option-0),
     then the legal coop / ILP moves (per-cell tier only — the non-output-tiled contract) and the
-    divisor- and occupancy-guarded split-K moves (deferred-only on the warp tier). An **atomic**
-    split (``g<w>a``) is offered only when the kernel's projection epilogue distributes over the
-    add (``projection_distributes`` off the ``probe`` node) — a non-distributive fused projection
-    would raise at ``030_split_reduce`` and waste a search slot; the deferred ``g<w>k`` finalize stays
-    legal for any epilogue. A pinned ``REDUCE`` is authoritative and keeps the pin contract: a
-    ``g`` split rides every tile (an invalid warp slice / atomic-on-non-distributive raises in
-    :func:`_splitk_option` / ``030_split_reduce``, as a pin should), a ``b``/``r`` partition applies to
-    the per-cell tier only (a tiled candidate has no row under it)."""
+    divisor- and occupancy-guarded split-K moves (both finalizes, both tiers). An **atomic**
+    split (``g<w>a``) is offered only on a single-fold node whose FULL projection tail (the node
+    epilogue + a computed-A ``Map`` wrapper's body, exactly what ``_splitk_option`` folds into
+    the partial) distributes over the add — a non-distributive projection or a multi-channel
+    ⊗-combine would raise at ``030_split_reduce`` and waste a search slot; the deferred ``g<w>k``
+    finalize stays legal for any epilogue. A pinned ``REDUCE`` is authoritative and keeps the pin
+    contract: a ``g`` split rides every tile (an invalid warp slice / atomic-on-non-distributive
+    raises in :func:`_splitk_option` / ``030_split_reduce``, as a pin should), a ``b``/``r``
+    partition applies to the per-cell tier only (a tiled candidate has no row under it)."""
     ext = reduce_loop(kernel.op).axis.extent
     if REDUCE.raw() is not None:
         split = _splitk_pin()
@@ -505,7 +506,12 @@ def _reduce_candidates(kernel, place, plan: TilePlan, probe: Contraction | None 
     # and applies the ⊗-combine projection once after the cross-partition sums.
     if k is not None and free // _tile_area(plan) <= _SPLITK_MAX_CTAS:
         step = plan.atom.atom_k * plan.bk if plan.is_warp else 1
-        atomic_ok = probe is not None and (len(probe.epilogue) == 0 or projection_distributes(probe.epilogue, (probe.acc,)))
+        # The atomic gate judges the FULL projection the split partial will carry: a computed-A
+        # node's ``Map``-wrapper body is folded into the inner epilogue at ``_splitk_option``, so
+        # it must distribute too. Multi-fold (gate/up) nodes never offer ``a`` — the per-channel
+        # ⊗-combine needs the deferred finalize kernel.
+        tail = () if probe is None else (*probe.epilogue, *(kernel.op.body if isinstance(kernel.op, Map) else ()))
+        atomic_ok = probe is not None and len(probe.folds) == 1 and (len(tail) == 0 or projection_distributes(tail, (probe.acc,)))
         for move in splitk_moves(warp=plan.is_warp):
             sp = ReducePlan.parse(move)
             if sp.finalize == "atomic" and not atomic_ok:

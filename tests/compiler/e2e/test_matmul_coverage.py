@@ -1418,13 +1418,14 @@ def test_bf16_operands_stage_via_cp_async(monkeypatch):
     assert diff < 1e-1, f"bf16 staged mma mismatch (max abs err {diff})"
 
 
-# --- atomic-free split-K on the warp tier -----------------------------------
+# --- split-K finalizes on the warp tier --------------------------------------
 # MMA split-K rides the structural ``Reduction(axis=ksplit, source=Contraction(k_axis=kslice))`` fork
 # (``_schedule._splitk_option``): the inner ``Contraction`` factorizes to mma exactly like a non-split
-# matmul, and ``030_split_reduce`` retargets each partition's C-fragment into a ``ws[ksplit, M, N]`` workspace
-# summed by a sibling additive finalize kernel (deferred ``g2k``) — NO codegen ``atomicAdd``. The atomic
-# finalize (``g2a``) can't accumulate an mma C-fragment (``RegStore`` has no atomicAdd), so it is
-# refused; scalar-tier atomic split-K is covered by ``test_reduce_coverage``'s cross-CTA matrix.
+# matmul. Deferred (``g2k``): ``030_split_reduce`` retargets each partition's C-fragment into a
+# ``ws[ksplit, M, N]`` workspace summed by a sibling additive finalize kernel — NO codegen
+# ``atomicAdd``. Atomic (``g2a``): ONE kernel — each partition's C-fragment ``atomicAdd``\\ s into the
+# per-launch zero-init'd output (``RegStore.atomic`` → the packed ``__half2`` red, ``zero_outputs``);
+# scalar-tier atomic split-K is covered by ``test_reduce_coverage``'s cross-CTA matrix.
 def _splitk_mma_graph(m: int, k: int, n: int) -> Graph:
     g = Graph()
     g.add_node(op=InputOp(), inputs=[], output=Tensor("a", (m, k), dtype=F16), node_id="a")
@@ -1440,27 +1441,30 @@ def _splitk_mma_graph(m: int, k: int, n: int) -> Graph:
 def test_mma_splitk_finalize(monkeypatch, finalize):
     """fp16 MMA split-K through the structural fork (warp ``TILE`` atom + ``REDUCE=g2k``/``g2a``).
     Deferred (``g2k``) sums each partition's C-fragment through a workspace + additive finalize kernel
-    on the tensor-core tier — mma present, NO ``atomicAdd`` — and is accurate. Atomic (``g2a``) is
-    refused: an mma C-fragment can't ``atomicAdd`` (``RegStore`` has none), so the deferred kernel is
-    the mma split-K path."""
+    on the tensor-core tier — mma present, NO ``atomicAdd``. Atomic (``g2a``) is ONE kernel: each
+    partition's C-fragment ``atomicAdd``\\ s into the zero-init'd output via ``RegStore.atomic`` (the
+    packed ``__half2`` red — no ``__partial`` workspace, no finalize node). Both are accurate (the
+    atomic arm adds one f16 rounding per partition — inside the shared 2e-2 tolerance)."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
 
     monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x2/f2x2/k2")
     monkeypatch.setenv("EMMY_REDUCE", "g2k" if finalize == "deferred" else "g2a")
     m, k, n = 128, 512, 128
     be = CudaBackend()
-    if finalize == "atomic":
-        with pytest.raises(NotImplementedError, match="atomicAdd"):
-            be.compile(_splitk_mma_graph(m, k, n))
-        return
     rng = np.random.default_rng(4)
     a = (rng.standard_normal((m, k)) * 0.1).astype(np.float16)
     b = (rng.standard_normal((k, n)) * 0.1).astype(np.float16)
     compiled = be.compile(_splitk_mma_graph(m, k, n))
     src = "\n".join(node.op.kernel_source for node in compiled.nodes.values() if getattr(node.op, "kernel_source", None))
     assert "mma.sync.aligned.m16n8k16" in src, "must be on the tensor-core tier"
-    assert "atomicAdd" not in src, "atomic-free split-K must not emit atomicAdd"
-    assert "__partial" in src, "the deferred finalize writes partials to a workspace"
+    if finalize == "deferred":
+        assert "atomicAdd" not in src, "atomic-free split-K must not emit atomicAdd"
+        assert "__partial" in src, "the deferred finalize writes partials to a workspace"
+    else:
+        assert "atomicAdd(reinterpret_cast<__half2*>" in src, "the atomic finalize rides the packed-pair red"
+        assert "__partial" not in src, "the atomic finalize is single-kernel (no workspace)"
+        zeroed = [n.op.zero_outputs for n in compiled.nodes.values() if getattr(n.op, "zero_outputs", ())]
+        assert zeroed == [("o",)], f"the atomic output must be zero-init'd per launch, got {zeroed}"
     out = np.asarray(be.run(compiled, input_data={"a": a, "b": b})[0].outputs["o"]).reshape(m, n)
     ref = a.astype(np.float32) @ b.astype(np.float32)
     np.testing.assert_allclose(out.astype(np.float32), ref, rtol=2e-2, atol=2e-2)

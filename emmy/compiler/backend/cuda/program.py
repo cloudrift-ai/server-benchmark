@@ -386,7 +386,11 @@ def _launch(
     from emmy.compiler.ir.cuda.ir import resolve_dim  # noqa: PLC0415
 
     for zname in launch.zero_outputs:
-        arrays[zname].fill(0)
+        # memset, not ``.fill(0)``: fill launches a cupy elementwise kernel (~the cost of the
+        # finalize kernel the atomic split saves), while memset_async records as a cheap MEMSET
+        # node under CUDA-graph capture. All-zero bytes are 0.0 in every buffer dtype.
+        buf = arrays[zname]
+        buf.data.memset_async(0, buf.nbytes)
     kernel = compiled.kernels[launch.kernel_name]
     desc_args = desc_args or {}
     sym_values = sym_values or {}

@@ -944,10 +944,11 @@ stored knob (mirrors `PLACE`'s `auto`).
 **`REDUCE`** (STR codec, `010_recognize` / `_schedule`) — the reduce-axis partition codec `g<n>[a|k]/b<n>/r<n>`: `g`
 cross-CTA split-K (+ finalize letter), `b` cooperative-thread fold, `r` ILP register fold. Empty = serial (the
 per-thread remainder is derived, never spelled). The cross-CTA split is the `g<n>` field (GRID stage), and the
-**finalize** is that field's trailing letter — `g<n>a` = in-place `atomicAdd` (one kernel, additive carriers only),
-`g<n>k` = deferred `__partial` workspace + a sibling combine kernel (any carrier; the only legal arm for the twisted
-flash `(m, l, O)` split-KV). Pin via `EMMY_REDUCE=g2k` (one flat knob — no per-axis `EMMY_REDUCE_<axis>`, no
-`EMMY_FINALIZE`). The split is consumed by `lowering/tile/030_split_reduce` as a graph rewrite (partial + finalize); the
+**finalize** is that field's trailing letter — `g<n>a` = in-place `atomicAdd` (one kernel, additive single-fold
+carriers only; both tiers — an mma partial's C fragment rides `RegStore.atomic`, the packed f16x2/bf16x2 red, at the
+cost of one output-dtype rounding per partition), `g<n>k` = deferred `__partial` workspace + a sibling combine kernel
+(any carrier; the only legal arm for the twisted flash `(m, l, O)` split-KV and for a multi-channel ⊗-combine). Pin
+via `EMMY_REDUCE=g2k` (one flat knob — no per-axis `EMMY_REDUCE_<axis>`, no `EMMY_FINALIZE`). The split is consumed by `lowering/tile/030_split_reduce` as a graph rewrite (partial + finalize); the
 letter round-trips through `ReducePlan.parse`/`spell` and reads back as `ReducePlan.finalize`. The atomic finalize
 applies the kernel's projection epilogue **per partition** before the `atomicAdd`, so it is only correct when that
 projection *distributes* over the add (`Σ φ(xₛ) = φ(Σ xₛ)`): a constant scale like `mean`'s `×1/N` distributes and

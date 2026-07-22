@@ -977,6 +977,28 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
     emmy_us: 74.1
     cublas_us: 77.1
+  # [fm] single-kernel atomic split (2026-07-21): k4/g4a beats the std k2/g8k partial+finalize by
+  # ~1.9 (can) / ~0.9 (lin) — the deferred finalize kernel + f32 workspace round-trip removed
+  # (RegStore.atomic packed-pair red). Seeded in BOTH layouts; the .lin row is the serving twin's.
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.m32
+    M: 32
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 73.5
+    cublas_us: 76.9
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.m32.lin
+    M: 32
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 74.7
+    cublas_us: 81.9
   # ---- decode-bucket M=64 twins (EMMY_GEN_DECODE_BUCKET=64 — the c>32 serving decode shapes) ------
   # Seeded 2026-07-21 by manual pinned --ab (3x, spread <=0.8%), torch eager reference, BOTH layouts
   # (canonical + .lin serving twins — the staged transposed-B tier realizes the same configs on both).
@@ -1089,30 +1111,32 @@ configs:
     N: 3840
     K: 15360
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 77.7
-    cublas_us: 79.3
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 76.9
+    cublas_us: 78.2
   - kernel: matmul
     name: gemma4_12b.mlp_down.m64
     M: 64
     N: 3840
     K: 15360
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 76.4
-    cublas_us: 79.3
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 75.8
+    cublas_us: 78.2
   # M=32 split halves (2026-07-21): seeded for the mlp_geglu.m32 CUT flip — the m64/m256/m4096 cut
   # pattern reaches decode M=32 once the halves are golden-tiled (each half rides the weight-stream
-  # floor ~76-78 µs; the fused megakernel's 181 loses ~11% to stat+2 halves+combine ≈ 161). Same
-  # w1x8/f2x2/k4 g4k family as m64; emmy_us records main+finalize.
+  # floor ~74-78 µs; the fused megakernel's 181 loses ~11% to stat+2 halves+combine ≈ 161). Same
+  # w1x8/f2x2/k4 family as m64, flipped to the single-kernel atomic split g4a (2026-07-21 round 2:
+  # the deferred finalize kernel + workspace round-trip removed — ≈2-3 µs/half; in the twin the cut
+  # channels atomicAdd their f32 ch workspaces directly). emmy_us records the single atomic kernel.
   - kernel: matmul
     name: gemma4_12b.mlp_gate_up_split.m32
     M: 32
     N: 15360
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 77.0
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 74.6
     cublas_us: 76.0
   - kernel: matmul
     name: gemma4_12b.mlp_gate_up_split.m32
@@ -1120,8 +1144,8 @@ configs:
     N: 15360
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 76.1
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 74.2
     cublas_us: 76.0
   - kernel: matmul
     name: gemma4_12b.mlp_gate_up_split.m32.lin
@@ -1130,8 +1154,8 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 78.1
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 74.9
     cublas_us: 78.0
   - kernel: matmul
     name: gemma4_12b.mlp_gate_up_split.m32.lin
@@ -1140,8 +1164,8 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 77.5
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 74.7
     cublas_us: 78.0
   - kernel: matmul
     name: gemma4_12b.mlp_gate_up_split.m64
@@ -1149,8 +1173,8 @@ configs:
     N: 15360
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 79.6
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 70.0
     cublas_us: 78.0
   - kernel: matmul
     name: gemma4_12b.mlp_gate_up_split.m64
@@ -1158,8 +1182,8 @@ configs:
     N: 15360
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 78.5
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 67.5
     cublas_us: 78.0
   - kernel: matmul
     name: gemma4_12b.lm_head.m64
@@ -1278,9 +1302,9 @@ configs:
     K: 15360
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 81.0
-    cublas_us: 84.1
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 79.4
+    cublas_us: 83.0
   - kernel: matmul
     name: gemma4_12b.mlp_down.m64.lin
     M: 64
@@ -1288,9 +1312,9 @@ configs:
     K: 15360
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 78.1
-    cublas_us: 84.1
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 76.6
+    cublas_us: 83.0
   - kernel: matmul
     name: gemma4_12b.mlp_gate_up_split.m64.lin
     M: 64
@@ -1298,9 +1322,9 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 80.4
-    cublas_us: 80.5
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 71.4
+    cublas_us: 79.4
   - kernel: matmul
     name: gemma4_12b.mlp_gate_up_split.m64.lin
     M: 64
@@ -1308,9 +1332,9 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 79.2
-    cublas_us: 80.5
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 69.1
+    cublas_us: 79.4
   # The M=64 gate⊗up route: PLACE@cone=cut (both layouts — the serving twin contracts .lin). Same
   # total-cost / evidence-only conventions as mlp_geglu.m256.cut: emmy_us is the whole cut (stat +
   # cone + 2 golden-tiled channel matmuls + finalizes + combine), the halves deploy via the

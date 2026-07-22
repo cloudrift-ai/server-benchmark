@@ -142,6 +142,33 @@ The c=8 LONG workload (16 prompts, mml 8448, mnbt 4096): out tok/s 345.55 → **
 stock's 371.65, was 0.930×), TPOT 22.66/22.72 → **22.09/22.23**, TTFT 1985/1789 → 1968/1769 —
 emmy still beats stock TTFT (2449/2081) on the long workload too.
 
+## WS2 — VERDICT: the weight-streaming mains are AT the memory ceiling; warp-spec is NOT worth it
+
+The prototype was built and measured (harness at the session scratchpad `ws2/`, driver-API cubin
+loader + `cuTensorMapEncodeTiled` mirroring `_tma.py`; baseline = the production
+`mlp_down.m32.lin` fm g4a kernel, reproduced in-harness at 75.8 µs / 1.57 TB/s with a passing
+CPU-reference check):
+
+| variant | µs | TB/s |
+| --- | --: | --: |
+| production kernel (d2/tma/ring, per-chunk syncthreads) | 75.8 | 1.57 |
+| warp-spec: 9th producer warp, DEPTH-4 ring, per-slot full/empty mbarriers, NO syncthreads | 75.6 | 1.58 |
+| warp-spec + 8-way split (240 CTAs) | 75.8 | 1.57 |
+| pure-read probe (same boxes, no compute) | 73.7 | 1.62 |
+| pure-read, 256 B rows (BK=128, unswizzled) | 73.4 | 1.62 |
+| plain LDG grid-stride over the same 118.5 MB, 240 CTAs | 74.1 | 1.60 |
+| plain LDG, 2720 CTAs (full occupancy) | 71.7 | **1.66** |
+
+Every structural lever lands on the same wall: barrier cadence (warp-spec −0.3%), ring depth
+(d3/d4 flat both cards), DRAM stream count (g8 flat), burst width (256 B rows flat; a B128-swizzled
+TMA box hardware-caps its inner row at 128 B anyway). The plan's "1.75 TB/s floor ≈ 67 µs" was
+optimistic — this card streams a 118 MB working set at ~1.66 max (92% of the 1.79 spec), and only
+at full occupancy the matmul grid can't reach. The production kernel sits at **97% of its own
+access-pattern ceiling** (75.8 vs 73.7); the recoverable headroom is ~2%, far under the ~10%
+generalization bar. CLOSED. Corollary: the remaining serving TPOT gap vs stock does NOT live in
+the big streams (per-kernel parity is real) — it is the kernel-count tail (the stat-sink family)
+plus attention/graph overhead, which re-ranks the stat-sink as the next session's primary lever.
+
 ## ⚠ Correctness bug found + fixed during WS2 prep: `RegStore.atomic` dropped on stmt rewrite
 
 Dumping the down.m32.lin g4a kernel for the warp-spec prototype exposed racing PLAIN stores in the

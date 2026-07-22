@@ -140,9 +140,12 @@ async def gpu_sampling(run_cmd, interval_ms: int = SAMPLE_INTERVAL_MS) -> AsyncI
     """
     sampler = GpuSampler()
     remote_file = f"/tmp/emmy_gpu_samples_{uuid.uuid4().hex}.csv"
+    # </dev/null detaches the sampler from the session's stdin: over SSH, a backgrounded
+    # child holding the session's stdio keeps the remote shell (and run_cmd) from
+    # returning until the command times out.
     start_cmd = (
         f"nohup nvidia-smi --query-gpu=index,power.draw,memory.used "
-        f"--format=csv,noheader,nounits -lms {interval_ms} > {remote_file} 2>&1 & echo $!"
+        f"--format=csv,noheader,nounits -lms {interval_ms} > {remote_file} 2>&1 < /dev/null & echo $!"
     )
     rc, stdout, _ = await run_cmd(start_cmd, stream=False, timeout=60)
     pid = _parse_pid(stdout) if rc == 0 else None

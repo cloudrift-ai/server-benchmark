@@ -84,18 +84,72 @@ post32, TOTAL 246.3 µs (mains 232.6 = o_proj 9.4 + gate 74.9 + up 74.3 + down 7
 Remaining tail ≈ 26.5 µs/layer ≈ **1.27 ms/step** (was ~1.7 pre-session). The dominant item is now the
 `k_mean`/qknorm family (~0.78 ms/step), all one mechanism:
 
-**The stat-sink design (next bounded workstream).** One general rewrite: a PLANAR row-reduce kernel
-whose input tensor's producer writes each cell exactly once (elementwise / finalize / sweep, NOT an
-atomic partial) migrates its reduce into that producer as a per-cell contribution + segmented
-block-reduce + `atomicAdd` into a `__sq[m]` accumulator (`zero_outputs` per launch); the reduce
-kernel keeps only its projection sweep (re-entering recognition as a wide pointwise, the π chain
-rsqrt inlined per element — hoisted per-thread by the serial n-sweep). Two integration costs found
-this session: (1) the producer gains a SECOND output (`T` + `__sq`) — the graph is single-output-
-per-node, so this needs either a real multi-output node or the 030-style fragment idiom extended;
-(2) the pick must be evidence-selectable (wins at decode M, murky at prefill M where the per-element
-rsqrt and atomic traffic scale up) — a `REDUCE`-adjacent knob row realized like `PLACE@cone=cut`,
-with a `linear_norm` golden kind (matmul + trailing rms) anchoring the pair's total. ~0.5 ms/step
-bound if it lands for k_mean + qknorm both.
+**The stat-sink: implementation sketch (next session's primary lever, ~0.5 ms/step bound).**
+
+*The move.* One general rewrite, applied per matched pair, never per named shape: a kernel B whose
+op is `Map(body=sweep, source=Reduction(PLANAR over axis n))` reading tensor `T[m, n]` — the fused
+rms/norm form (`k_mean_dcd9ba`, `k_mean_90bae6`, the three qknorm sweeps) — migrates its reduce into
+T's producer kernel A as an epilogue contribution, when A writes each T cell exactly once (a split
+FINALIZE, a pointwise sweep, an UNSPLIT matmul store — NOT an atomic partial, whose per-partition
+values are incomplete). B keeps only its projection sweep. Grid-32 latency-bound stat+sweep kernels
+(3.7–3.8 µs) become wide pointwise sweeps (~1.5 µs) and the stat rides for ~0.2–0.4 µs of epilogue.
+
+*Producer-side codegen — one new leaf stmt.* `RowAccum(dst, row_index, value)`: "accumulate `value`
+into `dst[row]` from every thread holding a cell of that row." Injected right after A's `Write(T)`
+site together with the contribution chain (the reduce CELL of B — e.g. `v*v` — re-evaluated on the
+just-stored value, substituting B's `Load(T)` with the local SSA name; the ×1/N of `mean` moves to
+the consumer, so contributions are raw Σv²). Render by placement, resolved at materialize:
+- CTA-covers-row (A's grid axis IS the row — the `k_mean` sweeps): thread-local partial over the
+  serial n-sweep (`Init` before the loop, `Accum` inside), block tree, ONE plain `Write` — no atomics.
+- flat cell grid (the finalize kernels, one cell/thread): warp-uniform-row check (`base/N ==
+  (base+31)/N`) → shfl butterfly + one `atomicAdd` per warp; per-lane `atomicAdd` on the rare
+  boundary warps. ~480 atomics per o_proj-finalize launch — noise. The per-head qknorm case is the
+  same code path: the "row" is `(m, head)` and the finalize CTAs' 256-cell spans align with the
+  256-wide heads, so warps stay uniform.
+- mma RegStore epilogue (unsplit matmul A): per-fragment-element contributions + the same warp fold
+  — reuses the `RegEpilogue` leaf machinery; defer to v2, the decode sites are all covered by the
+  two arms above.
+`__sq` zero-init rides the existing `zero_outputs`/memset machinery (detect `RowAccum` in
+`_atomic_outputs`, exactly as `RegStore.atomic` is detected today).
+
+*Consumer-side rewrite.* B re-emits as an UN-mapped `LoopOp` (the 020-cut re-entry idiom, so
+`010_recognize` gives the sweep its own wide 2-D schedule): `for m: for n: [Load __sq[m], π
+(reciprocal·+eps·rsqrt — B's post-reduce prefix with `acc := Load __sq[m]`), sweep cell, Write]`.
+The π chain is per-element but hoists per-thread over the serial n-run (f4-vectorized threads own
+4+ same-row cells; at decode M the rsqrt count is trivial either way). A bare-stat B (`k_mul_4__stat`,
+projection = `Write(stat[m])` only) is v2: killing it requires splicing π into ITS consumers.
+
+*The multi-output problem (the one real plumbing cost).* A now produces `T` AND `__sq`, but
+`graph.Node` is single-output. Decision needed up front, two candidates:
+1. **Aux-workspace node (recommended):** keep A's node output = `T`; `__sq` becomes a graph node of
+   its own whose producer is A — extend `Graph.add_node`/splice with an `aux_outputs` list that the
+   backend allocates like any buffer and the CudaOp declares as an extra write arg. Bounded: buffer
+   planning already handles multi-buffer kernels (`external_writes` is plural); only the NODE/edge
+   bookkeeping (topo order, liveness for the slab planner, serialization) learns aux edges.
+2. True multi-output nodes — cleaner long-term, touches far more (every pass that assumes
+   `node.output`); not worth it for one feature.
+
+*Selection/evidence (never geometric).* The sink is a fork the RECOGNIZER offers on B's rows —
+spelled as a `PLACE@stat: sink` sibling (the `PLACE` codec's second element, realized by a
+`040_sink_row_reduce` pass reading the stamp exactly as `020_cut_edge` reads `PLACE@cone`), and
+**evidence-only** like the cut row (withheld from cold greedy: at prefill M the per-element π and
+atomic traffic scale up and the win is unproven). Whole-cost convention: a new `linear_norm` golden
+kind — snippet `F.linear(x, w)` + trailing `F.rms_norm` (+ residual for the post_attn form) —
+records the PAIR's total (A+epilogue+B'), the same convention `PLACE@cone: cut` uses. Seed at
+decode M=32/64 on both cards; the enumeration gate additionally requires the producer be
+non-atomic (which re-opens the down-site question: down g4k+sink ≈ down g4a+unsunk −1.4 µs — an
+A/B at seeding time, or the last-CTA fused finalize later).
+
+*Expected per-step savings (5090 fm, from the measured table above):* post_attn site −2.3
+(k_mean 3.8→sweep 1.5), post_ff site −1.4 net (needs down back on g4k), qknorm ×3 ≈ −2.0 (sweeps
+already write flat outputs; stats fold into the q/kv finalizes), pre_ff stat −1.7 (v2, via the
+now-pointwise `k_mean_dcd9ba` sweep's block reduce) → ≈ −7 µs/layer ≈ **−0.35 ms/step v1, −0.5 with
+v2** → serving TPOT ~19.3–19.5.
+
+*Verification:* per-site snippet A/B (3×) → golden seeding → twin re-bench (fresh captures) →
+`eval golden --in-model` MATCH/DRIFT/GAP → serving A/B with fresh packs. Numerics: the stat is the
+SAME f32 sum reordered (warp/block tree vs serial) — not bit-identical to the old kernel, same
+class as the coop-reduce forms; accuracy gates judge.
 
 ## Pre-WS2 probe: ring depth is NOT the bandwidth lever (both cards)
 

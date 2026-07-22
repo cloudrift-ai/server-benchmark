@@ -1418,13 +1418,14 @@ def test_bf16_operands_stage_via_cp_async(monkeypatch):
     assert diff < 1e-1, f"bf16 staged mma mismatch (max abs err {diff})"
 
 
-# --- atomic-free split-K on the warp tier -----------------------------------
+# --- split-K finalizes on the warp tier --------------------------------------
 # MMA split-K rides the structural ``Reduction(axis=ksplit, source=Contraction(k_axis=kslice))`` fork
 # (``_schedule._splitk_option``): the inner ``Contraction`` factorizes to mma exactly like a non-split
-# matmul, and ``030_split_reduce`` retargets each partition's C-fragment into a ``ws[ksplit, M, N]`` workspace
-# summed by a sibling additive finalize kernel (deferred ``g2k``) — NO codegen ``atomicAdd``. The atomic
-# finalize (``g2a``) can't accumulate an mma C-fragment (``RegStore`` has no atomicAdd), so it is
-# refused; scalar-tier atomic split-K is covered by ``test_reduce_coverage``'s cross-CTA matrix.
+# matmul. Deferred (``g2k``): ``030_split_reduce`` retargets each partition's C-fragment into a
+# ``ws[ksplit, M, N]`` workspace summed by a sibling additive finalize kernel — NO codegen
+# ``atomicAdd``. Atomic (``g2a``): ONE kernel — each partition's C-fragment ``atomicAdd``\\ s into the
+# per-launch zero-init'd output (``RegStore.atomic`` → the packed ``__half2`` red, ``zero_outputs``);
+# scalar-tier atomic split-K is covered by ``test_reduce_coverage``'s cross-CTA matrix.
 def _splitk_mma_graph(m: int, k: int, n: int) -> Graph:
     g = Graph()
     g.add_node(op=InputOp(), inputs=[], output=Tensor("a", (m, k), dtype=F16), node_id="a")
@@ -1440,27 +1441,30 @@ def _splitk_mma_graph(m: int, k: int, n: int) -> Graph:
 def test_mma_splitk_finalize(monkeypatch, finalize):
     """fp16 MMA split-K through the structural fork (warp ``TILE`` atom + ``REDUCE=g2k``/``g2a``).
     Deferred (``g2k``) sums each partition's C-fragment through a workspace + additive finalize kernel
-    on the tensor-core tier — mma present, NO ``atomicAdd`` — and is accurate. Atomic (``g2a``) is
-    refused: an mma C-fragment can't ``atomicAdd`` (``RegStore`` has none), so the deferred kernel is
-    the mma split-K path."""
+    on the tensor-core tier — mma present, NO ``atomicAdd``. Atomic (``g2a``) is ONE kernel: each
+    partition's C-fragment ``atomicAdd``\\ s into the zero-init'd output via ``RegStore.atomic`` (the
+    packed ``__half2`` red — no ``__partial`` workspace, no finalize node). Both are accurate (the
+    atomic arm adds one f16 rounding per partition — inside the shared 2e-2 tolerance)."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
 
     monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x2/f2x2/k2")
     monkeypatch.setenv("EMMY_REDUCE", "g2k" if finalize == "deferred" else "g2a")
     m, k, n = 128, 512, 128
     be = CudaBackend()
-    if finalize == "atomic":
-        with pytest.raises(NotImplementedError, match="atomicAdd"):
-            be.compile(_splitk_mma_graph(m, k, n))
-        return
     rng = np.random.default_rng(4)
     a = (rng.standard_normal((m, k)) * 0.1).astype(np.float16)
     b = (rng.standard_normal((k, n)) * 0.1).astype(np.float16)
     compiled = be.compile(_splitk_mma_graph(m, k, n))
     src = "\n".join(node.op.kernel_source for node in compiled.nodes.values() if getattr(node.op, "kernel_source", None))
     assert "mma.sync.aligned.m16n8k16" in src, "must be on the tensor-core tier"
-    assert "atomicAdd" not in src, "atomic-free split-K must not emit atomicAdd"
-    assert "__partial" in src, "the deferred finalize writes partials to a workspace"
+    if finalize == "deferred":
+        assert "atomicAdd" not in src, "atomic-free split-K must not emit atomicAdd"
+        assert "__partial" in src, "the deferred finalize writes partials to a workspace"
+    else:
+        assert "atomicAdd(reinterpret_cast<__half2*>" in src, "the atomic finalize rides the packed-pair red"
+        assert "__partial" not in src, "the atomic finalize is single-kernel (no workspace)"
+        zeroed = [n.op.zero_outputs for n in compiled.nodes.values() if getattr(n.op, "zero_outputs", ())]
+        assert zeroed == [("o",)], f"the atomic output must be zero-init'd per launch, got {zeroed}"
     out = np.asarray(be.run(compiled, input_data={"a": a, "b": b})[0].outputs["o"]).reshape(m, n)
     ref = a.astype(np.float32) @ b.astype(np.float32)
     np.testing.assert_allclose(out.astype(np.float32), ref, rtol=2e-2, atol=2e-2)
@@ -1938,3 +1942,42 @@ def test_raster_symbolic_grid_stays_flat(monkeypatch):
     rows = enumerate_graph(g, Context.from_target((12, 0)))
     vals = {r.get("RASTER") for r in rows if any(k.split("@")[0] == "TILE" for k in r)}
     assert vals == {""}, f"symbolic grids must stay flat: {vals}"
+
+
+def test_regstore_rewrite_preserves_atomic():
+    """``RegStore``'s registered ``_rewrite`` reconstructs the stmt field-by-field — dropping
+    ``atomic`` there silently degraded a rewritten (f16acc array-fragment rolled) atomic split-K
+    store to racing plain assigns: the partitions clobber instead of accumulate, numerically wrong
+    with no loud failure (found on the gemma-4 mlp_down.m32.lin g4a pinned compile)."""
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.kernel.ir import RegStore
+    from emmy.compiler.ir.sigma import Sigma
+
+    s = RegStore(dst_buffer="o", dst_index=(Var("m"), Var("n")), frag="_c0_0", shape=(16, 8, 16), atomic=True)
+    out = s.rewrite(lambda n: n, Sigma({}))
+    assert isinstance(out, RegStore) and out.atomic, "atomic must survive the σ-rewrite reconstruction"
+
+
+@requires_sm90
+@requires_cuda
+def test_mma_splitk_atomic_f16acc_staged_rolled(monkeypatch):
+    """The f16acc atom's array-fragment (rolled-store) form threads ``RegStore.atomic`` through the
+    stmt rewrite: the staged ``d2/tma/ring`` + ``g2a`` pin on a deep-K matmul must emit ``atomicAdd``
+    (the pre-fix render emitted racing plain stores here — the accuracy assert below fails ~4x-low
+    values loudly if the flag is ever dropped again)."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
+
+    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4")
+    monkeypatch.setenv("EMMY_REDUCE", "g2a")
+    monkeypatch.setenv("EMMY_STAGE", "d2/tma/ring")
+    m, k, n = 32, 1024, 256
+    be = CudaBackend()
+    rng = np.random.default_rng(7)
+    a = (rng.standard_normal((m, k)) * 0.1).astype(np.float16)
+    b = (rng.standard_normal((k, n)) * 0.1).astype(np.float16)
+    compiled = be.compile(_splitk_mma_graph(m, k, n))
+    src = "\n".join(node.op.kernel_source for node in compiled.nodes.values() if getattr(node.op, "kernel_source", None))
+    assert "atomicAdd" in src, "the rolled f16acc atomic split-K must emit atomicAdd stores"
+    out = np.asarray(be.run(compiled, input_data={"a": a, "b": b})[0].outputs["o"]).reshape(m, n)
+    ref = a.astype(np.float32) @ b.astype(np.float32)
+    np.testing.assert_allclose(out.astype(np.float32), ref, rtol=3e-2, atol=3e-2)

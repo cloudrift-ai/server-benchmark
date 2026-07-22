@@ -966,6 +966,7 @@ class _MmaOps(_AtomOps):
                     epilogue=None,
                     m_guard=_guard(m, mcell),
                     n_guard=_guard(n, ncell),
+                    atomic=by_acc[acc].atomic,
                 )
                 for acc, frag in zip(accs, frags, strict=True)
             ]
@@ -982,6 +983,7 @@ class _MmaOps(_AtomOps):
                 epilogue=epi,
                 m_guard=_guard(m, mcell),
                 n_guard=_guard(n, ncell),
+                atomic=write.atomic,
             )
         ]
 

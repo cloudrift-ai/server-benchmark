@@ -134,6 +134,31 @@ def test_golden_configs_set_is_well_formed():
         assert c.snippet(), c.name
 
 
+def test_fast_math_rows_never_record_slower_than_std_siblings():
+    """The fm-never-loses invariant, statically assertable at the recorded anchor: within one
+    card's rows of the same ``name``, no fast-math row may record a HIGHER ``emmy_us`` than the
+    best standard row. The deploy picker takes min(emmy_us) over lane-realizable rows, so a
+    slower fm row can never realize (the std row matches first under the fm lane too) — it is
+    dead weight that misreads as fm evidence. Off-anchor fm losses are a coverage matter the
+    static set cannot assert."""
+    import collections
+
+    by_bucket = collections.defaultdict(list)
+    for c in GOLDEN_CONFIGS:
+        by_bucket[(c.gpu_name, c.compute_cap, c.name)].append(c)
+    for (gpu, _cc, name), rows in by_bucket.items():
+        std = [r.emmy_us for r in rows if not r.fast_math]
+        fm = [r for r in rows if r.fast_math]
+        if not std or not fm:
+            continue
+        best_std = min(std)
+        for r in fm:
+            assert r.emmy_us <= best_std, (
+                f"{gpu}: fm row {name} records {r.emmy_us} µs > best std sibling {best_std} µs — "
+                "an unrealizable fm row; re-tune it below the std time or drop it"
+            )
+
+
 def test_goldens_load_from_yaml():
     """The per-GPU YAML files are the source of truth: at least one file exists,
     every config carries a known ``kernel`` discriminator, and the loaded set is

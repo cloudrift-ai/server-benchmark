@@ -283,19 +283,10 @@ configs:
     knobs: {PLACE: 'fuse', STAGE: 'd2/cp/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x4/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k2', WSPEC: ''}
     emmy_us: 38.3
     cublas_us: 41.0
-  # Fast-math sibling (FAST_MATH lane): P·V on the f16-accumulate atom, QK^T stays f32-acc. The overall
-  # sm_89 frontier at 1.09x past torch SDPA — and the fm lane keeps nt=2 here (fm nt=4 is 41.8, the
-  # nt-preference mirror of the 5090 where fm follows std onto nt=4).
-  - kernel: attention
-    name: gemma4_12b.attention.hd256
-    n_heads: 16
-    seq: 512
-    head_dim: 256
-    dtype: 'fp16'
-    causal: true
-    knobs: {PLACE: 'fuse', STAGE: 'd2/cp/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x32', WSPEC: ''}
-    emmy_us: 37.6
-    cublas_us: 41.0
+  # (A second fm sibling — the nt=2 d2/cp/ring PV-f16acc form at 37.6 — was dropped 2026-07-21 by the
+  # fm-never-loses invariant: it recorded above both the std best (37.1) and the fm cp-alt row (33.8),
+  # so the fastest-first picker could never realize it in either lane. The fm nt-preference note it
+  # carried: the sm_89 fm lane keeps nt=2 on this transport, fm nt=4 was 41.8.)
   # The norm rows (2026-07-14, 3x reproduced) — filled the coverage gap vs the 5090 file. b256 wins
   # the block-split fork on both forms (b128 7.7 / b512 7.6); the greedy pick lands b128 (7.6) on
   # the static shape, so the row matters. Note: a missing per-GPU row also blocks `run --golden`
@@ -700,6 +691,393 @@ configs:
     knobs: {PLACE: 'fuse', REDUCE: 'g2k', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x64', WSPEC: ''}
     emmy_us: 1069.0
     cublas_us: 926.5
+  # ---- prefill-chunk twins (M=4096, EMMY_GEN_PREFILL_BUCKET=mnbt — the 4K serving prefill shapes) --
+  # 4090 port of the 2026-07-21 5090 m4096 session, seeded the same day by the same manual pinned
+  # --ab method run remotely (3x inline, spread <=1.0% except std down-can 5.2%/2.4%): the fm f16acc
+  # w4x2/f4x8/k4 SERIAL family transfers to sm_89 on d2/cp/ring at 1.3-1.5x over eager-cuBLAS on
+  # every shape; k_proj_global takes the narrow-N w4x1 exactly as on the 5090; RASTER=gm8 pays MORE
+  # here (gate half .lin 2297 -> 2103, 9%) so the fm halves record it. The std lane at this M runs
+  # BELOW eager on sm_89 (0.83-0.94x, best-of-family recorded — misdeploy guards, fm rows are the
+  # perf). Norms diverge from the 5090: rms m4096 takes b256 (b128 28.1 vs 24.4), qknorm k256 takes
+  # b64 (34.9 vs b128 43.9), and k512 r65536 lands at eager parity (145.8 vs 146.6) unlike the
+  # 5090's 0.78x. The mlp_geglu m4096 cut rows follow in the round-2 block below (the cut needs
+  # these split halves seeded before its total is measurable).
+  - kernel: matmul
+    name: gemma4_12b.q_proj.m4096
+    M: 4096
+    N: 4096
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 912.4
+    cublas_us: 811.0
+  - kernel: matmul
+    name: gemma4_12b.q_proj.m4096
+    M: 4096
+    N: 4096
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 591.9
+    cublas_us: 811.0
+  - kernel: matmul
+    name: gemma4_12b.q_proj.m4096.lin
+    M: 4096
+    N: 4096
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 912.4
+    cublas_us: 813.1
+  - kernel: matmul
+    name: gemma4_12b.q_proj.m4096.lin
+    M: 4096
+    N: 4096
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 580.1
+    cublas_us: 813.1
+  - kernel: matmul
+    name: gemma4_12b.kv_proj.m4096
+    M: 4096
+    N: 2048
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 467.5
+    cublas_us: 414.2
+  - kernel: matmul
+    name: gemma4_12b.kv_proj.m4096
+    M: 4096
+    N: 2048
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 300.4
+    cublas_us: 414.2
+  - kernel: matmul
+    name: gemma4_12b.kv_proj.m4096.lin
+    M: 4096
+    N: 2048
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 466.9
+    cublas_us: 413.2
+  - kernel: matmul
+    name: gemma4_12b.kv_proj.m4096.lin
+    M: 4096
+    N: 2048
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 294.6
+    cublas_us: 413.2
+  - kernel: matmul
+    name: gemma4_12b.o_proj.m4096
+    M: 4096
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 915.5
+    cublas_us: 824.3
+  - kernel: matmul
+    name: gemma4_12b.o_proj.m4096
+    M: 4096
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 638.0
+    cublas_us: 824.3
+  - kernel: matmul
+    name: gemma4_12b.o_proj.m4096.lin
+    M: 4096
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 912.4
+    cublas_us: 815.1
+  - kernel: matmul
+    name: gemma4_12b.o_proj.m4096.lin
+    M: 4096
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 622.1
+    cublas_us: 815.1
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up_split.m4096
+    M: 4096
+    N: 15360
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 4230.1
+    cublas_us: 3006.5
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up_split.m4096
+    M: 4096
+    N: 15360
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 2183.2
+    cublas_us: 3006.5
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up_split.m4096.lin
+    M: 4096
+    N: 15360
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 4910.1
+    cublas_us: 2888.7
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up_split.m4096.lin
+    M: 4096
+    N: 15360
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 2103.3
+    cublas_us: 2888.7
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.m4096
+    M: 4096
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 3324.9
+    cublas_us: 2915.3
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.m4096
+    M: 4096
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 2221.1
+    cublas_us: 2915.3
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.m4096.lin
+    M: 4096
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 3553.5
+    cublas_us: 2922.5
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.m4096.lin
+    M: 4096
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 2154.5
+    cublas_us: 2922.5
+  - kernel: matmul
+    name: gemma4_12b.q_proj_global.m4096
+    M: 4096
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 1795.1
+    cublas_us: 1609.8
+  - kernel: matmul
+    name: gemma4_12b.q_proj_global.m4096
+    M: 4096
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 1166.3
+    cublas_us: 1609.8
+  - kernel: matmul
+    name: gemma4_12b.q_proj_global.m4096.lin
+    M: 4096
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 1798.1
+    cublas_us: 1610.8
+  - kernel: matmul
+    name: gemma4_12b.q_proj_global.m4096.lin
+    M: 4096
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 1142.8
+    cublas_us: 1610.8
+  - kernel: matmul
+    name: gemma4_12b.k_proj_global.m4096
+    M: 4096
+    N: 512
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 133.0
+    cublas_us: 110.0
+  - kernel: matmul
+    name: gemma4_12b.k_proj_global.m4096
+    M: 4096
+    N: 512
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 91.0
+    cublas_us: 110.0
+  - kernel: matmul
+    name: gemma4_12b.k_proj_global.m4096.lin
+    M: 4096
+    N: 512
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 132.2
+    cublas_us: 110.9
+  - kernel: matmul
+    name: gemma4_12b.k_proj_global.m4096.lin
+    M: 4096
+    N: 512
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 86.7
+    cublas_us: 110.9
+  - kernel: matmul
+    name: gemma4_12b.o_proj_global.m4096
+    M: 4096
+    N: 3840
+    K: 8192
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 1801.2
+    cublas_us: 1613.8
+  - kernel: matmul
+    name: gemma4_12b.o_proj_global.m4096
+    M: 4096
+    N: 3840
+    K: 8192
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 1225.7
+    cublas_us: 1613.8
+  - kernel: matmul
+    name: gemma4_12b.o_proj_global.m4096.lin
+    M: 4096
+    N: 3840
+    K: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 1792.0
+    cublas_us: 1604.6
+  - kernel: matmul
+    name: gemma4_12b.o_proj_global.m4096.lin
+    M: 4096
+    N: 3840
+    K: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 1191.9
+    cublas_us: 1604.6
+  - kernel: rms_norm
+    name: gemma4_12b.rms_norm.k3840.m4096
+    M: 4096
+    K: 3840
+    knobs: {TILE: '', REDUCE: 'b256', STAGE: '', WSPEC: '', RASTER: ''}
+    emmy_us: 24.4
+    cublas_us: 23.4
+  - kernel: rms_norm
+    name: gemma4_12b.qknorm.k256.m65536
+    M: 65536
+    K: 256
+    knobs: {TILE: '', REDUCE: 'b64', STAGE: '', WSPEC: '', RASTER: ''}
+    emmy_us: 34.9
+    cublas_us: 41.8
+  - kernel: rms_norm
+    name: gemma4_12b.qknorm.k512.m4096
+    M: 4096
+    K: 512
+    knobs: {TILE: '', REDUCE: 'b128', STAGE: '', WSPEC: '', RASTER: ''}
+    emmy_us: 5.1
+    cublas_us: 4.8
+  - kernel: rms_norm
+    name: gemma4_12b.qknorm.k512.m65536
+    M: 65536
+    K: 512
+    knobs: {TILE: '', REDUCE: 'b128', STAGE: '', WSPEC: '', RASTER: ''}
+    emmy_us: 145.8
+    cublas_us: 146.6
+  # The M=4096 gate⊗up route on sm_89 (round 2, after the split halves above landed): PLACE@cone=cut
+  # both layouts. The recorded us is the STD-lane total (lane-agnostic knobs, the 5090 convention) —
+  # the sm_89 STD cut runs well below eager (the std halves are 0.6-0.7x here) but still 1.5x ahead
+  # of the least-bad fused tile behind it; the FM lane deploys the same rows with its gm8 halves at
+  # ~2x2103 + combine 676 ≈ 4.9 ms vs eager 6.5 — the perf route. (.lin cut is a 1x measurement, can
+  # 2x at 0.4% — the eager-bench flake that intermittently drops runs also lives on this box.)
+  - kernel: mlp_geglu
+    name: gemma4_12b.mlp_geglu.m4096.cut
+    M: 4096
+    H: 3840
+    inter: 15360
+    dtype: 'fp16'
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 8727.1
+    cublas_us: 6422.5
+  - kernel: mlp_geglu
+    name: gemma4_12b.mlp_geglu.m4096.cut.lin
+    M: 4096
+    H: 3840
+    inter: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 10936.8
+    cublas_us: 6503.4
+  - kernel: mlp_geglu
+    name: gemma4_12b.mlp_geglu.m4096
+    M: 4096
+    H: 3840
+    inter: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 12131.3
+    cublas_us: 6424.6
+  - kernel: mlp_geglu
+    name: gemma4_12b.mlp_geglu.m4096.lin
+    M: 4096
+    H: 3840
+    inter: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 16152.6
+    cublas_us: 6486.0
   # ---- serving-layout (.lin) entries — re-tuned 2026-07-20 with staged transposed-B ---------------
   # cp.async now STAGES a transposed B on sm_89 (the N-major B slab + software swizzle; TMA stays
   # sm_90-gated), so the serving F.linear forks get the same d2/cp/ring prefetch ring as their
@@ -987,9 +1365,15 @@ configs:
     K: 15360
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k4', REDUCE: 'g4k', STAGE: 'd2/cp/ring', WSPEC: '', RASTER: ''}
-    emmy_us: 139.8
-    cublas_us: 146.4
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k4', REDUCE: 'g4a', STAGE: 'd2/cp/ring', WSPEC: '', RASTER: ''}
+    emmy_us: 137.9
+    cublas_us: 141.7
+  # [fm] + the M=32/M=64 gate/up split halves (2026-07-22, single-kernel atomic split g4a — the
+  # deferred finalize + workspace round-trip removed; RegStore.atomic red under the cp.async ring).
+  # m32 gate halves ride k8-SERIAL (no split; wider chunks halve the barrier count): 130.0 fm /
+  # 130.2 f32, beating eager 133.9 — the split only pays at m64 (g4a 140.9 vs serial 248.8). m64
+  # 160.3->141.0 (beats eager 144.9), down 140.0->137.5. The split-half rows are NEW on this card
+  # (the m32/m64 cut-channel producers previously deployed from db/prior only).
   - kernel: matmul
     name: gemma4_12b.mlp_down.m32.lin
     M: 32
@@ -997,9 +1381,42 @@ configs:
     K: 15360
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k2', REDUCE: 'g8k', STAGE: 'd2/cp/ring', WSPEC: '', RASTER: ''}
-    emmy_us: 251.1
-    cublas_us: 146.4
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f4x1/k4', REDUCE: 'g4a', STAGE: 'd2/cp/ring', WSPEC: '', RASTER: ''}
+    emmy_us: 137.5
+    cublas_us: 141.7
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up_split.m32.lin
+    M: 32
+    N: 15360
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k8', REDUCE: '', STAGE: 'd2/cp/ring', WSPEC: '', RASTER: ''}
+    emmy_us: 130.2
+    cublas_us: 133.9
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up_split.m32.lin
+    M: 32
+    N: 15360
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k8', REDUCE: '', STAGE: 'd2/cp/ring', WSPEC: '', RASTER: ''}
+    emmy_us: 130.0
+    cublas_us: 133.9
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up_split.m64.lin
+    M: 64
+    N: 15360
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', STAGE: 'd2/cp/ring', WSPEC: '', RASTER: ''}
+    emmy_us: 141.0
+    cublas_us: 144.9
+  # (The fm sibling — f16acc w1x8/f2x2/k2 g8k at 251.1 — was dropped 2026-07-21 by the fm-never-loses
+  # invariant: 1.8x above the std row, unrealizable under the fastest-first picker; the fm lane now
+  # deploys the std config here.)
   - kernel: matmul
     name: gemma4_12b.mlp_down.m256.lin
     M: 256
@@ -1419,6 +1836,49 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
     emmy_us: 285.0
     cublas_us: 281.6
+  # The m32 CUT reaches sm_89 (2026-07-22): with the k8-serial split halves seeded, the cut
+  # (stat 1.8 + cone 1.0 + 2x~132 + combine 1.8 = 268.8) beats the fused megakernel's 288 by ~7%
+  # — it was a WASH with the g4a halves (289.3), the k8-serial flip is what tipped it. Whole-cost
+  # row, evidence-only (the 5090 convention).
+  - kernel: mlp_geglu
+    name: gemma4_12b.mlp_geglu.m32.cut.lin
+    M: 32
+    H: 3840
+    inter: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 268.8
+    cublas_us: 281.6
+  # The cut's three non-matmul producers (the 5090 anchor convention): without them the twin's
+  # bridged STAT kernel cold-misdeployed to a grid-1 scalar (81.5 µs vs 1.7 at b128 — the 48x
+  # rescue that motivated these rows). dtype records fp32 on the cone/combine pair: the
+  # cut-emitted scalar forks stamp is_warp=False and the pointwise golden key derives is_warp
+  # from dtype (the 5090 file's note); the kernels themselves run fp16 at the f4 memory floor.
+  - kernel: reduce
+    name: gemma4_12b.cut_cone_stat.m32
+    M: 32
+    K: 3840
+    dtype: 'fp16'
+    knobs: {REDUCE: 'b128'}
+    emmy_us: 1.7
+    cublas_us: 8.7
+  - kernel: pointwise
+    name: gemma4_12b.cut_cone_scale.m32
+    M: 32
+    N: 3840
+    dtype: 'fp32'
+    knobs: {TILE: 'f4'}
+    emmy_us: 1.0
+    cublas_us: 4.4
+  - kernel: pointwise
+    name: gemma4_12b.cut_combine.m32
+    M: 32
+    N: 15360
+    dtype: 'fp32'
+    knobs: {TILE: 'f4'}
+    emmy_us: 1.6
+    cublas_us: 4.6
   # The GeGLU edge at prefill/symbolic M: the FUSED computed-A form loses on sm_89 (m256: 819 fused
   # vs 416 cut vs 513 eager; dynM: 1843 vs 1098) — only decode M=32 keeps the fused kernel (329.7,
   # d1/sync above). The cut anchors below force the split; their emmy_us is the greedy (isolated)

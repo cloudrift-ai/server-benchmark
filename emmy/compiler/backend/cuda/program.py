@@ -386,7 +386,11 @@ def _launch(
     from emmy.compiler.ir.cuda.ir import resolve_dim  # noqa: PLC0415
 
     for zname in launch.zero_outputs:
-        arrays[zname].fill(0)
+        # memset, not ``.fill(0)``: fill launches a cupy elementwise kernel (~the cost of the
+        # finalize kernel the atomic split saves), while memset_async records as a cheap MEMSET
+        # node under CUDA-graph capture. All-zero bytes are 0.0 in every buffer dtype.
+        buf = arrays[zname]
+        buf.data.memset_async(0, buf.nbytes)
     kernel = compiled.kernels[launch.kernel_name]
     desc_args = desc_args or {}
     sym_values = sym_values or {}
@@ -527,7 +531,22 @@ def _prebuild_descriptors(
 # considered "broken" — too many threads, infinite loop, hung GPU — and
 # we bail out via ``HungKernelError`` so the autotune sweep doesn't stall
 # on one bad variant.
-_KERNEL_TIMEOUT_MS = 1000.0
+# 2000, not 1000 (2026-07-22): the long-standing gemma-4 post4096-global "bench hang" was a
+# WATCHDOG artifact, not a kernel deadlock — under a 1 s deadline the bench_fails 5/5 at the first
+# iteration after the warmup-extension re-calibration (its wait exceeds 1 s), while at ANY deadline
+# >= 2 s the same program benches clean 9/9 with no event wait ever reaching even the 0.2 s warning
+# threshold (measured at 2/4/15/600 s). The deadline-correlation below the driver line is
+# unexplained (suspected interaction between the 1 ms cudaEventQuery poll loop's abort path and
+# in-flight graph-exec work on this 9-kernel / 96 KB-smem program); empirically 2 s is past the
+# cliff, and a real hung kernel is still evicted in 2 s. ``EMMY_KERNEL_TIMEOUT_MS`` overrides.
+_KERNEL_TIMEOUT_MS = float(_os.environ.get("EMMY_KERNEL_TIMEOUT_MS", "2000"))
+
+# First-launch grace multiplier: a program's FIRST uncaptured iteration may stall well past the
+# steady-state watchdog without any kernel being hung — lazy module loading (CUDA_MODULE_LOADING=
+# LAZY uploads each kernel's SASS on first launch), the smem-carveout reconfig for a 96 KB dynamic-
+# smem kernel, and allocator first-touch all land there. A genuinely hung kernel is still caught on
+# iter 0, just ``_FIRST_ITER_GRACE`` x later.
+_FIRST_ITER_GRACE = 30.0
 
 
 class HungKernelError(RuntimeError):
@@ -662,6 +681,9 @@ class CompiledProgram:
     # caused ``test_tuned_variant_matches_reference`` to flake ~30%).
     _starts: list = field(default_factory=list, repr=False)
     _stops: list = field(default_factory=list, repr=False)
+    # Number of completed ``iter_once`` calls — iter 0 gets the ``_FIRST_ITER_GRACE`` watchdog
+    # multiplier (first-launch lazy-load / carveout stalls are not hangs; see the constant's note).
+    _iters_done: int = field(default=0, repr=False)
     # Per-launch CUDA graphs (one per launch position, each containing that
     # launch's whole batch) captured by :meth:`capture_launch_graphs`. When
     # set, ``iter_once`` replays ``_graphs[i]`` with one host call instead of
@@ -1082,7 +1104,8 @@ class CompiledProgram:
                 for _ in range(b):
                     _launch(launch, self.compiled, self.arrays, descs.get(i), self.sym_values)
             stops[i].record()
-            _wait_for_event(stops[i], _KERNEL_TIMEOUT_MS * b, launch.kernel_name)
+            grace = _FIRST_ITER_GRACE if self._iters_done == 0 else 1.0
+            _wait_for_event(stops[i], _KERNEL_TIMEOUT_MS * b * grace, f"{launch.kernel_name} (iter {self._iters_done})")
             elapsed_ms = cp.cuda.get_elapsed_time(starts[i], stops[i])
             # CUDA event timing has sub-µs resolution and a real launch must
             # consume at least one device cycle — a 0.0 reading means the
@@ -1100,6 +1123,7 @@ class CompiledProgram:
             dts[i] = elapsed_ms / b
             if per_launch_hook is not None:
                 per_launch_hook(i, launch)
+        self._iters_done += 1
         return dts
 
     def outputs(self, sym_values: dict[str, int] | None = None) -> dict[str, np.ndarray]:

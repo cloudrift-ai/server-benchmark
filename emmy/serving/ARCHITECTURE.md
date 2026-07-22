@@ -141,7 +141,12 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   generate and stock vLLM honor the list, and a degenerate text prompt can genuinely rank one top-1, which would
   decode to empty output). The trunk compute (embed + per-layer
   pre/post + final norm) is the `EmmyGenRunner`; vLLM owns only `lm_head` (`load_weights` claims `lm_head.weight`, or the
-  tied embed alias). `forward` brackets each `self.attn[L](q,k,v)` with two emmy replays (pre/post), applying that
+  tied embed alias). On a tied checkpoint `load_weights` then hands the loaded head to the runner
+  (`adopt_embed_table`) so the runner drops its own ~2 GiB folded device copy and gathers from the SHARED raw table
+  (the gemma embed-scale re-applies at gather in fp32 — the head must read the table unscaled), and releases the freed
+  torch/cupy blocks to the driver **before vLLM's KV-cache profiling** — the reclaimed memory becomes KV blocks
+  (gemma-4-12B on a 5090: 17.7k → 27.5k KV tokens, the difference between admission-queueing and beating stock TTFT
+  on the 4K/4K c=8 workload). `forward` brackets each `self.attn[L](q,k,v)` with two emmy replays (pre/post), applying that
   layer's RoPE in between (A2). Uniform sliding-window (Qwen2-style `use_sliding_window`) and dual-chunk are rejected. `forward` branches on `num_tokens`: the decode hot
   path (`≤ bucket`) runs `_forward_device` (q/k/v + attn_out stay CUDA tensors through RoPE + attention, no host
   hop); prefill keeps the numpy path. Select via `--runner generate` +

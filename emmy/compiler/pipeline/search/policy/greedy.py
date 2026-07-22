@@ -113,8 +113,8 @@ def _load_prior_safe():
     ``OfflinePrior`` cold-start fallback), memoized per process on the online
     file's ``(path, mtime)`` — a serve boot compiles ~96 programs and each would
     otherwise ``json.loads`` the 56 MB checkpoint again (the dominant boot-time
-    resolution cost). Best-effort: any load failure → ``None`` → emission order —
-    a bad/missing prior must never break compile."""
+    resolution cost). Best-effort: any load failure → ``None`` → the golden floor
+    plus emission order — a bad/missing prior must never break compile."""
     try:
         from emmy import config  # noqa: PLC0415
 
@@ -551,8 +551,10 @@ def _fork_shape_key(rows: list[dict]):
     from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
     key = ShapeKey.from_s_features(rows[0])
-    fams = {k.split("@", 1)[-1] for k in rows[0] if k.startswith("TILE@")}
-    if {"dd", "pj"} <= fams:
+    # ANY row carrying the pair marks the fork (like the cone's sync-STAGE scan below):
+    # the pair may be spelled only on the warp leaves, and row 0 — whichever leaf the
+    # planner emitted first — need not be one of them.
+    if any({"dd", "pj"} <= {k.split("@", 1)[-1] for k in row if k.startswith("TILE@")} for row in rows):
         key = ShapeKey(
             free_prod=key.free_prod,
             reduce_max=0 if key.is_dyn else key.reduce_max,
@@ -672,8 +674,11 @@ def greedy_decide(
     skip ``blocked`` tile identities, and take the prior's ``mean_scores``
     argmin — the ``OnlinePrior`` once trained, the ``OfflinePrior``
     cold-start heuristic otherwise (both behind ``load_prior``'s
-    ``FallbackPrior``). Falls to emission order (option-0, first leaf) only if
-    the prior fails to load entirely. Stamps the pick's predicted µs on
+    ``FallbackPrior``). With no prior at all (a failed load, or the explicit
+    ``prior=None`` emission-order resolve) the card's recorded goldens still
+    floor the pick — the golden tier is prior-independent evidence — and only
+    a fork without a realizable golden falls to emission order (option-0,
+    first leaf). Stamps the pick's predicted µs on
     ``fp.score``, so the resolve trace carries the per-fork price (the
     structural pricing probe reads a kernel's cost off the partition fork's
     trace entry).
@@ -718,7 +723,36 @@ def greedy_decide(
             loaded = True
             the_prior = _load_prior_safe()
         if the_prior is None:
-            return _first_leaf(fp.options[0])  # prior failed to load → emission order
+            # No prior on this resolve — a failed ``load_prior`` (corrupt/unreadable
+            # checkpoint) or ``Pipeline.run``'s explicit emission-order fallback
+            # (``prior=None``). The card's recorded goldens are tier (1) of the
+            # evidence hierarchy and depend on no prior, so they still FLOOR the
+            # pick: a fork whose golden realizes on an offered candidate deploys the
+            # golden, and only the rest falls to emission order. (A blocklisted
+            # tile — one that failed ``validate(ctx)`` earlier — stays excluded, so
+            # the floor can never re-pick a tile the retry loop already rejected.)
+            if golden_state[0] is None:
+                golden_state[0] = _golden_evidence_index(fp.ctx)
+            if golden_state[0]:
+                leaves = [o for o in flatten_leaves(fp.options) if not _is_structural_option(o)]
+                live = [(o, _leaf_knobs(o)) for o in leaves]
+                node_blocked = blocked.get(fp.node_id) if blocked else None
+                if node_blocked is not None:
+                    live = [(o, k) for o, k in live if not _tile_blocked(k, node_blocked)]
+                base = {**fp.ctx.features(), **dict(fp.root_op.knobs)}
+                rows = [{**base, **k} for _, k in live]
+                got = _golden_pick(golden_state[0], rows, fp.node_id) if rows else None
+                if got is not None:
+                    best_i, price = got
+                    logger.warning(
+                        "deploy: node %r resolved WITHOUT a prior (load failure or emission-order fallback), but the "
+                        "golden floor holds — deploying the recorded golden realization (%.1f us) over option-0.",
+                        fp.node_id,
+                        price,
+                    )
+                    fp.score = price
+                    return live[best_i][0]
+            return _first_leaf(fp.options[0])  # no realizable golden → emission order
         # Flatten: greedy benches nothing, so it must pick the globally best
         # COMPLETE tile, not a partial branch — see ``flatten_leaves`` (the
         # prior is blind at a partial ``BM/BN`` branch: ``knob_features``

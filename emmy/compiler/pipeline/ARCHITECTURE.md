@@ -262,6 +262,10 @@ deploys the std config there. Goldens are
 **consulted, never trained on**: they enter no reservoir, no checkpoint, no dataset (they are the held-out
 acceptance set). Golden µs is deployable-regime truth and never arbitrates a non--O3 compile. A shape match none of
 whose entries realizes against the offer logs a loud enumeration-drift warning and falls through to the tiers below.
+The tier depends on **no prior**: a resolve with no prior at all — a failed `load_prior` (corrupt/unreadable online
+checkpoint) or `Pipeline.run`'s last-resort emission-order resolve — still consults the goldens and deploys a
+realizable one (the **golden floor**, logged loudly when it overrides option-0), so a broken checkpoint can never
+silently cost a fork its verified golden.
 
 ### `FallbackPrior` and the calibration gate
 
@@ -338,7 +342,8 @@ pinned, so the prior would be blind at the `BM/BN` choice. Instead `greedy_decid
 complete leaves (`fork.flatten_leaves` expands branches depth-first; only knob dicts — materialization stays deferred
 to the chosen leaf) and picks the lowest `Prior.mean_scores` over the full `{H_*, S_*, complete-knob-row}` vector in
 one batched `predict`, invariant to the tree's level order. Cold, the `OfflinePrior` ranks (including a positive
-`MMA_tier` warp preference); option-0 (first leaf, emission order) only if `load_prior` returns nothing entirely.
+`MMA_tier` warp preference); if `load_prior` returns nothing entirely the recorded goldens still floor the pick and
+only the golden-less forks fall to option-0 (first leaf, emission order).
 Greedy benches nothing, so it can only *use* a prior, never train one.
 
 **Every deploy pick breaks ties by candidate content, never enumeration order.** The model can score many
@@ -380,8 +385,10 @@ leaves a node un-lowered, `Pipeline.run` blocklists that tile's `tile_identity` 
 `greedy_decide(blocked=…)` drops the matching leaf and picks the next-best. This is bounded by `_MAX_GREEDY_RETRIES`.
 When the retry budget exhausts with the node still un-lowered (an *online* prior can rank many over-budget tiles above
 the first in-budget one), `Pipeline.run` takes one last **option-0 (emission-order) resolve**
-(`greedy_decide(prior=None)`): the planner emits a budget-safe tile first, so it lowers whenever any in-budget tile
-exists. Only when even option-0 overflows does `_raise_on_unlowered` fire the loud `LoweringError`.
+(`greedy_decide(blocked=…, prior=None)`): the planner emits a budget-safe tile first, so it lowers whenever any
+in-budget tile exists. The goldens still floor this resolve — one over-budget node must not cost every *other* kernel
+its verified golden — and the blocklist rides along so the floor can never re-pick a tile that already failed
+`validate(ctx)`. Only when even option-0 overflows does `_raise_on_unlowered` fire the loud `LoweringError`.
 
 ### `Pipeline.tune_async` — the autotune sweep
 

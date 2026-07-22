@@ -149,10 +149,27 @@ overhead eats the margin the 5090's halves keep. Per-card divergence, correctly 
 evidence tiers (no cut row → stays fused). Ring depths: d2/cp optimal on sm_89 (down d3 138.4 /
 d4 142.3 vs d2 137.7; gate d3 −1% ≈ noise) — prefetch depth is NOT the sm_89 bandwidth lever.
 
-## WS4 notes (pre-probe reading)
+## WS4 — the bench-harness "hang": RESOLVED as a watchdog artifact (kernels healthy)
 
-The eager framing (`iter_once`) and the plain run (`run_once`) share `_descs_now()` — descs are NOT
-the differentiator. Deltas that remain: per-launch CUDA events + `_wait_for_event` polling, repeated
-iterations, and the `on_iter` torch-peer interleave (plain run has none of the three). Probe when the
-GPU frees: reproduce under `--iters 3` (expect the 1 s watchdog), then re-run with an extended
-watchdog and attach `cuda-gdb` for warp PCs on the stuck kernel.
+Measured facts (post4096-global, fm, geglu cut deployed, `--iters 3`, default warmup):
+
+- Under the 1 s per-launch watchdog: bench_fail **5/5**, always the SAME site — `HungKernelError` on
+  kernel 0 (o_proj_global, 242 regs / 96 KB smem) at **iter 10**, the first iteration after the
+  warmup-extension re-calibration (+re-capture) fires the `iters_run == warmup` equality a second
+  time. Batch 1, grace 1 (the first-iter grace passed — iter 0 was FAST).
+- Under ANY deadline ≥ 2 s (tested 2 / 4 / 15 / 600 s + 3× at the new default): **clean 9/9**,
+  TOTAL 4.97 ms with o_proj at its steady 1.25 ms — and, decisively, **no event wait ever reached
+  even the 0.2 s warning threshold**. So when the deadline is ≥2 s, the >1 s stall does not merely
+  fit under the cap — it does not occur at all.
+- Refuted along the way: kernel deadlock (memcheck was already clean; the full bench completes with
+  identical numbers), a TMA-desc delta between framings (`run_once`/`iter_once` share `_descs_now`),
+  the prior session's warmup-0-is-the-variable bisect (a default-warmup run completed clean), and
+  the "earlier probe abort poisons the queue" model (nothing fails before iter 10 in the full log).
+
+The deadline-correlation below the driver line remains UNEXPLAINED (suspect: the 1 ms
+`cudaEventQuery` poll loop's abort path interacting with in-flight graph-exec state on this
+9-kernel / 96 KB-smem program). Shipped mitigations: default `_KERNEL_TIMEOUT_MS` 1000 → **2000**
+(past the empirical cliff; real hangs still evicted in 2 s), a 30× `_FIRST_ITER_GRACE` on iter 0
+(cold-start lazy SASS load / carveout / first-touch stalls are not hangs), the
+`EMMY_KERNEL_TIMEOUT_MS` env override, and iteration-tagged watchdog labels. The golden YAML's
+`--warmup 0` caveat is removed; verified 3/3 clean at pure defaults.

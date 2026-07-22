@@ -1839,11 +1839,13 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
     emmy_us: 71.9
     cublas_us: 105.7
-  # (2026-07-21) The post4096-global twin's --bench initially hung on this kernel at EVERY o_proj
-  # tile once the geglu CUT deployed — bisected to the bench harness's per-kernel-event EAGER warmup
-  # framing on that 9-kernel program (warmup 0 / captured-graph benches run clean, memcheck clean,
-  # the plain path and 3 serving runs run clean; the tile choice was never the trigger). Bench this
-  # twin with --warmup 0; the harness interaction is filed in the 2026-07-21 findings plan.
+  # (2026-07-21, RESOLVED 2026-07-22) The post4096-global twin's --bench "hang" at every o_proj tile
+  # was never a kernel hang: it is a per-launch WATCHDOG artifact — under the old 1 s deadline the
+  # bench failed 5/5 at the first iteration after the warmup-extension recalibration, while at any
+  # deadline >= 2 s the same program benches clean 9/9 (4.97 ms total, o_proj 1.25 ms) with no event
+  # wait ever reaching the 0.2 s warning threshold. Fixed by raising the default watchdog to 2 s +
+  # a 30x first-iteration grace (program.py; EMMY_KERNEL_TIMEOUT_MS overrides); the deadline
+  # correlation below the driver line is documented in the decode-TPOT findings. --warmup 0 caveat gone.
   - kernel: matmul
     name: gemma4_12b.o_proj_global.m4096
     M: 4096

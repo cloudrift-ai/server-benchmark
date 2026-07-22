@@ -219,6 +219,7 @@ def build_flash_frag(
     layouts: tuple = (None, None, None),
     raw_shapes: tuple | None = None,
     out_index: tuple | None = None,
+    scale: float | None = None,
 ) -> Graph | None:
     """Build the fragment graph holding the fused flash ``TileOp`` (+ its scale /
     -inf constants), or ``None`` when the root's output layout can't be reproduced on the grid
@@ -236,11 +237,14 @@ def build_flash_frag(
     an optional ``(buffer_id, shape)`` additive bias loaded per ``(m, kv)``. ``q/k/v_shape``
     are CANONICAL ``(batch…, seq, last)``; ``layouts`` are the per-operand ``(seq_pos,
     last_pos)`` slot orders the loads permute back into (``None`` = head-major identity),
-    and ``raw_shapes`` the operands' traced shapes for the fragment's input decls."""
+    and ``raw_shapes`` the operands' traced shapes for the fragment's input decls.
+    ``scale`` is the score producer's actual scale (an SDPA's captured ``scale=`` kwarg
+    survives decomposition as the producer's scale constant); ``None`` = ``1/sqrt(head_dim)``."""
     batch = [_static(d) for d in q_shape[:-2]]
     head_dim, d_v = _static(q_shape[-1]), _static(v_shape[-1])
     s_q_dim, s_k_dim = q_shape[-2], k_shape[-2]  # Dim instances — static int or symbolic seq_len
-    scale = 1.0 / math.sqrt(head_dim)
+    if scale is None:
+        scale = 1.0 / math.sqrt(head_dim)
     mask_buf, mask_shape = mask if mask is not None else (None, None)
 
     batch_axes = tuple(Axis(name=f"b{i}", extent=Dim(b)) for i, b in enumerate(batch))
@@ -618,6 +622,32 @@ def _extract_qk(xnode: Node) -> tuple[tuple[str, tuple[int, int]], tuple[str, tu
     return None
 
 
+def _extract_scale(graph: Graph, xnode: Node) -> tuple[float | None] | None:
+    """The score producer's scale value, from its multiply by a scalar-constant Load
+    (the SDPA decomposition's ``{name}_scale`` constant — ``qk·scale`` is the only
+    multiply-by-constant a clean producer carries). Returns ``(value,)``, ``(None,)``
+    when the producer has no such multiply (hand-built IR — the builder's
+    ``1/sqrt(d)`` default applies), or ``None`` when ambiguous (two distinct
+    constant multiplies — decline the fuse rather than guess which is the scale)."""
+    const_loads: dict[str, float] = {}
+    for s in xnode.op.body.iter():
+        if isinstance(s, Load):
+            src = graph.nodes.get(s.input)
+            if src is not None and isinstance(src.op, ConstantOp) and src.op.value is not None:
+                for nm in s.names:
+                    const_loads[nm] = float(src.op.value)
+    values = {
+        const_loads[a]
+        for s in xnode.op.body.iter()
+        if isinstance(s, Assign) and s.op.name == "multiply"
+        for a in s.args
+        if a in const_loads
+    }
+    if len(values) > 1:
+        return None
+    return (values.pop(),) if values else (None,)
+
+
 def _def(stmts: tuple[Stmt, ...], name: str) -> Stmt | None:
     """The statement in ``stmts`` (one loop body, flat) that defines SSA ``name``."""
     for s in stmts:
@@ -817,6 +847,12 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
     (q_id, q_layout), (k_id, k_layout), _head_dim = qk
     if q_id not in graph.nodes or k_id not in graph.nodes:
         return None
+    # The producer's actual scale — the flash re-synthesis re-applies it; assuming
+    # 1/sqrt(d) here mis-scaled every explicit-``scale=`` SDPA (Gemma-nano's scale=1.0).
+    scale = _extract_scale(graph, graph.nodes[x_buf])
+    if scale is None:
+        _fuse_degraded(root, "score producer's scale constant is ambiguous")
+        return None
     v_layout = _extract_v_layout(root, v_id)
     if v_layout is None:
         _fuse_degraded(root, "P@V's V load is not plainly indexed")
@@ -860,6 +896,7 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
             tuple(graph.nodes[v_id].output.shape),
         ),
         out_index=out_index,
+        scale=scale[0],
     )
     if frag is None:
         _fuse_degraded(root, "output layout not reproducible on the flash grid")

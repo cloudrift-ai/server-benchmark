@@ -26,6 +26,10 @@ causal mask this way (an additive `0` / `-inf` bias) rather than via the
 broadcasts that mask to the scores shape and adds it before the softmax.
 Dropping it silently turns masked attention into full bidirectional
 attention — invisible to uniform input but wrong on any varying sequence.
+The `scale=` kwarg is captured onto `SdpaOp.scale` (`None` = torch's `1/sqrt(head_dim)` default) and honored
+by both reference backends, the decomposition's scale constant, and the flash re-synthesis (which reads the
+value back off the score producer's constant). Gemma-nano (E2B/E4B) passes `scale=1.0` — its q_norm absorbs
+the scaling — so dropping the kwarg re-scaled every logit by `1/sqrt(d)` and redistributed the whole softmax.
 
 ### `huggingface.py` — trace-friendly wrapper
 

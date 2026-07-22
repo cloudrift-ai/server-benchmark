@@ -1370,7 +1370,8 @@ configs:
     cublas_us: 141.7
   # [fm] + the M=32/M=64 gate/up split halves (2026-07-22, single-kernel atomic split g4a — the
   # deferred finalize + workspace round-trip removed; RegStore.atomic red under the cp.async ring).
-  # g4a is the transfer of the 5090 flip: gate half m32 146.8->137.5 (eager parity), m64
+  # m32 gate halves ride k8-SERIAL (no split; wider chunks halve the barrier count): 130.0 fm /
+  # 130.2 f32, beating eager 133.9 — the split only pays at m64 (g4a 140.9 vs serial 248.8). m64
   # 160.3->141.0 (beats eager 144.9), down 140.0->137.5. The split-half rows are NEW on this card
   # (the m32/m64 cut-channel producers previously deployed from db/prior only).
   - kernel: matmul
@@ -1390,9 +1391,9 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4a', STAGE: 'd2/cp/ring', WSPEC: '', RASTER: ''}
-    emmy_us: 137.9
-    cublas_us: 136.2
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k8', REDUCE: '', STAGE: 'd2/cp/ring', WSPEC: '', RASTER: ''}
+    emmy_us: 130.2
+    cublas_us: 133.9
   - kernel: matmul
     name: gemma4_12b.mlp_gate_up_split.m32.lin
     M: 32
@@ -1400,9 +1401,9 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', STAGE: 'd2/cp/ring', WSPEC: '', RASTER: ''}
-    emmy_us: 137.5
-    cublas_us: 136.2
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k8', REDUCE: '', STAGE: 'd2/cp/ring', WSPEC: '', RASTER: ''}
+    emmy_us: 130.0
+    cublas_us: 133.9
   - kernel: matmul
     name: gemma4_12b.mlp_gate_up_split.m64.lin
     M: 64
@@ -1835,6 +1836,49 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
     emmy_us: 285.0
     cublas_us: 281.6
+  # The m32 CUT reaches sm_89 (2026-07-22): with the k8-serial split halves seeded, the cut
+  # (stat 1.8 + cone 1.0 + 2x~132 + combine 1.8 = 268.8) beats the fused megakernel's 288 by ~7%
+  # — it was a WASH with the g4a halves (289.3), the k8-serial flip is what tipped it. Whole-cost
+  # row, evidence-only (the 5090 convention).
+  - kernel: mlp_geglu
+    name: gemma4_12b.mlp_geglu.m32.cut.lin
+    M: 32
+    H: 3840
+    inter: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 268.8
+    cublas_us: 281.6
+  # The cut's three non-matmul producers (the 5090 anchor convention): without them the twin's
+  # bridged STAT kernel cold-misdeployed to a grid-1 scalar (81.5 µs vs 1.7 at b128 — the 48x
+  # rescue that motivated these rows). dtype records fp32 on the cone/combine pair: the
+  # cut-emitted scalar forks stamp is_warp=False and the pointwise golden key derives is_warp
+  # from dtype (the 5090 file's note); the kernels themselves run fp16 at the f4 memory floor.
+  - kernel: reduce
+    name: gemma4_12b.cut_cone_stat.m32
+    M: 32
+    K: 3840
+    dtype: 'fp16'
+    knobs: {REDUCE: 'b128'}
+    emmy_us: 1.7
+    cublas_us: 8.7
+  - kernel: pointwise
+    name: gemma4_12b.cut_cone_scale.m32
+    M: 32
+    N: 3840
+    dtype: 'fp32'
+    knobs: {TILE: 'f4'}
+    emmy_us: 1.0
+    cublas_us: 4.4
+  - kernel: pointwise
+    name: gemma4_12b.cut_combine.m32
+    M: 32
+    N: 15360
+    dtype: 'fp32'
+    knobs: {TILE: 'f4'}
+    emmy_us: 1.6
+    cublas_us: 4.6
   # The GeGLU edge at prefill/symbolic M: the FUSED computed-A form loses on sm_89 (m256: 819 fused
   # vs 416 cut vs 513 eager; dynM: 1843 vs 1098) — only decode M=32 keeps the fused kernel (329.7,
   # d1/sync above). The cut anchors below force the split; their emmy_us is the greedy (isolated)

@@ -1135,8 +1135,8 @@ configs:
     N: 15360
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 74.6
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 73.8
     cublas_us: 76.0
   - kernel: matmul
     name: gemma4_12b.mlp_gate_up_split.m32
@@ -1144,8 +1144,8 @@ configs:
     N: 15360
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 74.2
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 73.4
     cublas_us: 76.0
   - kernel: matmul
     name: gemma4_12b.mlp_gate_up_split.m32.lin
@@ -1154,8 +1154,8 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 74.9
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 73.9
     cublas_us: 78.0
   - kernel: matmul
     name: gemma4_12b.mlp_gate_up_split.m32.lin
@@ -1164,8 +1164,8 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 74.7
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 73.5
     cublas_us: 78.0
   - kernel: matmul
     name: gemma4_12b.mlp_gate_up_split.m64
@@ -2199,7 +2199,7 @@ configs:
     inter: 15360
     dtype: 'fp16'
     knobs: {PLACE@cone: 'cut'}
-    emmy_us: 158.0
+    emmy_us: 152.5
     cublas_us: 159.7
   # ---- fused .lin twins (serving F.linear layout, trans_b) ---------------------------------------
   # The fused edges a SERVED model actually deploys: same computed-A megakernels as the canonical entries
@@ -2322,7 +2322,7 @@ configs:
     dtype: 'fp16'
     trans_b: true
     knobs: {PLACE@cone: 'cut'}
-    emmy_us: 162.8
+    emmy_us: 152.3
     cublas_us: 166.6
   # The PREFILL-chunk (M=256) mlp edge is NOT anchored as a FUSED computed-A golden: the fused form is
   # memory-pipeline-stall bound at M=256 and provably cannot beat cuBLAS (its compute floor ≈ eager, and a 2-fold

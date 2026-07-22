@@ -97,6 +97,29 @@ rsqrt and atomic traffic scale up) — a `REDUCE`-adjacent knob row realized lik
 with a `linear_norm` golden kind (matmul + trailing rms) anchoring the pair's total. ~0.5 ms/step
 bound if it lands for k_mean + qknorm both.
 
+## Pre-WS2 probe: ring depth is NOT the bandwidth lever (both cards)
+
+The mains run ~1.58 TB/s vs the ~1.75 floor; the cheap hypothesis was prefetch distance. Refuted:
+5090 `d3/d4/tma/ring` are flat-to-worse on down (74.7/74.3/74.8) and the gate half (74.7/74.6/75.7),
+o_proj regresses (11.5→12.0/12.1); 4090 `d3/d4/cp` likewise (down 137.7/138.4/142.3). The d2 ring
+already keeps the next chunk in flight — the residual is the per-chunk mbarrier/syncthreads cadence
+and the single-thread TMA issue, i.e. the WS2 warp-spec structure, not depth. One real find fell
+out: the gate/up half at **k8 with NO split** (serial, `d2/tma/ring`) — wider chunks halve the
+barrier count and the N=15360 grid stands on its own occupancy. CONFIRMED and seeded, both cards:
+
+- **5090 m32**: k8-serial 73.4/73.5 (±0.1 over 3×) vs g4a 74.7, both lanes, both layouts — the 4
+  m32 gate rows flipped (atomics-free, and a serial form is epilogue-capable — relevant to the
+  future combine-fusion fork). m64 stays g4a (69.1 ≪ serial 77.9 — the split still pays there).
+  Twin verify: post32 246.3 → **244.6**, post32-global → 252.3.
+- **4090 m32**: k8-serial **130.0** vs g4a 137.2 (−5.3%), beating eager 133.9 — and this flip
+  TIPPED the fused-vs-cut verdict: the m32 GeGLU cut (stat 1.8 + cone 1.0 + 2×~132 + combine 1.8
+  = 268.8) now beats the fused megakernel's 288.1 by ~7%, where it was a wash with g4a halves. The
+  `mlp_geglu.m32.cut.lin` whole-cost row is seeded on sm_89 + the three glue anchors
+  (`cut_cone_stat/scale/combine.m32` — without the stat anchor the twin's bridged statistic
+  cold-misdeployed to a grid-1 scalar at 81.5 µs, a 48× rescue). 4090 post32 twin:
+  447.5 (session start) → **431.7 µs** (−15.8/layer ≈ −0.63 ms/step at c=1); down g4a and the cut
+  all deploy from tier. Audit after the round: **MATCH 103 / DRIFT 0 / GAP 0 on BOTH cards.**
+
 ## Serving A/B (in progress)
 
 Protocol: twins.db + empty online + FRESH packs (`_tune/tpot/packs-fm`), seed 0, 4K/4K workloads.

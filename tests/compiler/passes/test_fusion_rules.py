@@ -640,3 +640,100 @@ def test_cut_workspace_producer_never_refuses():
     assert len(_kernel_nodes(_fuse(graph_with("t__cone")))) == 2, "a cone workspace must stay materialized"
     assert len(_kernel_nodes(_fuse(graph_with("t__ch0")))) == 2, "a channel workspace must stay materialized"
     assert len(_kernel_nodes(_fuse(graph_with("t_plain")))) == 1, "an ordinary pointwise producer still fuses"
+
+
+def test_output_reshape_folds_into_reduce_producer():
+    """``030_fold_output_reshape``: a graph-output memcpy-identity flatten of a reduce-bearing
+    producer folds by retargeting the producer's ``Write`` to the output buffer at the same flat
+    address (clean affine per-dim index — no div/mod), dropping the copy kernel. The normal merge
+    rule can't take this pair (inlining the producer at the consumer's load would re-run the
+    reduce per element; the flatten's div/mod reader σ defeats the splicer anyway) — the gemma-4
+    decode pre twin's q/k/v head-layout flattens after the per-head qk norms."""
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+    from emmy.compiler.ir.loop import Load, Loop
+    from emmy.compiler.ir.stmt import Body
+
+    H, D = 3, 8
+
+    def make_graph():
+        # Producer: per-head scale-by-row-sum (a reduce + sweep per (row, head) — reduce-heavy).
+        a0, a1 = Var("a0"), Var("a1")
+        red = Loop(
+            axis=Axis(name="a2", extent=Dim(D)),
+            body=Body(
+                (
+                    Load(name="in0", input="x", index=(a0, a1, Var("a2"))),
+                    Accum(name="acc", value="in0", op="add", axes=("a2",)),
+                )
+            ),
+        )
+        sweep = Loop(
+            axis=Axis(name="a3", extent=Dim(D)),
+            body=Body(
+                (
+                    Load(name="in1", input="x", index=(a0, a1, Var("a3"))),
+                    Assign(name="v0", op="multiply", args=("in1", "acc")),
+                    Write(output="y", index=(a0, a1, Var("a3")), value="v0"),
+                )
+            ),
+        )
+        producer = LoopOp(
+            body=Body(
+                (
+                    Loop(
+                        axis=Axis(name="a0", extent=Dim(4)),
+                        body=Body((Loop(axis=Axis(name="a1", extent=Dim(H)), body=Body((red, sweep))),)),
+                    ),
+                )
+            )
+        )
+        # Consumer: the traced flatten (4, H, D) -> (4, H*D) — a flat-memory identity copy.
+        b0, b1 = Var("b0"), Var("b1")
+        copy = LoopOp(
+            body=Body(
+                (
+                    Loop(
+                        axis=Axis(name="b0", extent=Dim(4)),
+                        body=Body(
+                            (
+                                Loop(
+                                    axis=Axis(name="b1", extent=Dim(H * D)),
+                                    body=Body(
+                                        (
+                                            Load(
+                                                name="c0",
+                                                input="y",
+                                                index=(b0, BinaryExpr("/", b1, Literal(D, "int")), BinaryExpr("%", b1, Literal(D, "int"))),
+                                            ),
+                                            Write(output="out", index=(b0, b1), value="c0"),
+                                        )
+                                    ),
+                                ),
+                            )
+                        ),
+                    ),
+                )
+            )
+        )
+        g = Graph()
+        g.add_node(InputOp(), [], Tensor("x", (4, H, D)), node_id="x")
+        g.add_node(producer, ["x"], Tensor("y", (4, H, D)), node_id="y")
+        g.add_node(copy, ["y"], Tensor("out", (4, H * D)), node_id="out")
+        g.inputs, g.outputs = ["x"], ["out"]
+        return g
+
+    fused = Pipeline.build(["loop/fusion"]).run(make_graph())
+    kernels = _kernel_nodes(fused)
+    assert len(kernels) == 1, f"the flatten copy must fold into its producer: {[n.id for n in kernels]}"
+    writes = [s for s in kernels[0].op.body.iter() if isinstance(s, Write)]
+    assert len(writes) == 1 and writes[0].output == "out"
+    idx = writes[0].index
+    assert len(idx) == 2, "the retargeted Write indexes the flat output shape"
+    assert "/" not in idx[1].pretty() and "%" not in idx[1].pretty(), f"clean affine index expected: {idx[1].pretty()}"
+
+    x = rng.standard_normal((4, H, D)).astype(np.float32)
+    before = _run(make_graph(), {"x": x})
+    after = _run(fused, {"x": x})
+    _assert_close(before, after)

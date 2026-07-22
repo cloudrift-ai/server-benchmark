@@ -605,6 +605,12 @@ snapshot never resurrects; `visits` SUMs on a shared key), so a card's node data
 CUDA) folds into one canonical DB without cross-card collision. Driven by `scripts/merge_node_db.py` / the
 `collect-node-data` skill, whose sweeps run ε-greedy (`remote_node_tune.py` launches the remote tune with
 `--explore-eps 0.25` by default) so the collected labels and fork coverage de-correlate from the incumbent prior.
+`remote_node_tune.py --mode neighbors` instead drives `scripts/golden_neighbor_bench.py` on the box: paired
+-O1/-O3 pinned benches (`run --bench --ab`) of the candidate rows within a small knob-component distance of every
+recorded golden, sampled in a randomized order that stays proportional to the remaining pool (a time-truncated run
+is a near-uniform sample of it) and resumed across runs via a ledger the orchestrator pushes/fetches — this is
+what grows the dataset's opt-level-paired slice around the goldens, which the tune's narrow -O3 re-bench band
+cannot provide.
 
 **Measurement freeze** (`data/freeze.py`, driven by `scripts/freeze_node_store.py`). The node DB is a live store —
 tunes and merges keep writing into it — so a model fit read directly from it is not reproducible. A *freeze* snapshots

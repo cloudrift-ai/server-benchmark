@@ -1,32 +1,42 @@
 #!/usr/bin/env python
-"""Drive the setup + golden tune on a remote GPU host, then wait for it — the
+"""Drive a node-data collection run on a remote GPU host, then wait for it — the
 token-heavy middle of the ``collect-node-data`` skill, extracted so the agent makes
 ONE backgrounded tool call instead of ~20 verbose ssh polls.
 
 Given an SSH target it: ensures the Python 3.12 venv/dev packages + ``nvcc``, rsyncs
 the local working tree, runs ``make setup`` (output to a remote logfile — only a tail
-comes back on failure), launches ``emmy tune --dataset golden`` detached, then
-**polls the remote log internally** until the tune finishes. All the per-poll ssh
+comes back on failure), launches the collection detached, then **polls the remote log
+internally** until it finishes, and merges the node rows home. All the per-poll ssh
 chatter happens inside this process, so it never reaches the agent's context.
 
-The tune runs with ``--explore-eps 0.25`` by default (``--explore-eps`` here
-overrides): node-data collection is where the search-tree dataset is grown, and
-deterministic PUCT (eps 0) only ever benches the branches the incumbent prior
-already likes — the labels and sibling coverage then just confirm it (the
-censoring feedback loop). ε-greedy collection visits the other siblings too, so
-the fork-ranking dataset covers the alternatives a *better* prior would need to
-rank. Plain ``emmy tune`` keeps its deterministic default; off-policy exploration
-is a property of this collection workflow, not of tuning in general.
+Two collection modes (``--mode``):
 
-Run it from the agent in the BACKGROUND (Bash ``run_in_background: true``) — the tune
-takes ~30–45 min, well past a foreground tool timeout; the harness re-invokes the
+- ``tune`` (default) — ``emmy tune --dataset golden`` with ``--explore-eps 0.25``
+  (``--explore-eps`` here overrides): node-data collection is where the search-tree
+  dataset is grown, and deterministic PUCT (eps 0) only ever benches the branches the
+  incumbent prior already likes — the labels and sibling coverage then just confirm it
+  (the censoring feedback loop). ε-greedy collection visits the other siblings too, so
+  the fork-ranking dataset covers the alternatives a *better* prior would need to rank.
+  Plain ``emmy tune`` keeps its deterministic default; off-policy exploration is a
+  property of this collection workflow, not of tuning in general.
+- ``neighbors`` — ``scripts/golden_neighbor_bench.py``: paired -O1/-O3 pinned benches
+  of the knob neighborhood around every recorded golden, sampled in a randomized,
+  distribution-preserving order under a wall-time budget (default: ``--timeout`` minus
+  a 15-min margin). Resume state lives in a ledger JSON: the local copy (``--ledger``)
+  is pushed to the box before the run and fetched back after, so successive runs — on
+  this box or a freshly rented one of the same card — keep covering new points until
+  the pool is exhausted.
+
+Run it from the agent in the BACKGROUND (Bash ``run_in_background: true``) — a run
+takes ~30 min to hours, well past a foreground tool timeout; the harness re-invokes the
 agent with just the final summary when this exits.
 
     ./venv/bin/python scripts/remote_node_tune.py --remote user@host \
-        [--ssh-key ~/.ssh/id_ed25519] [--port 57006] [--repo /path/to/emmy] \
-        [--poll 60] [--timeout 7200]
+        [--mode tune|neighbors] [--ssh-key ~/.ssh/id_ed25519] [--port 57006] \
+        [--repo /path/to/emmy] [--poll 60] [--timeout 7200] [--budget-s N] [--filter SUB]
 
-Then (separately) merge the node rows home with ``scripts/merge_node_db.py --remote``.
+Then (separately, if ``--no-merge``) merge the node rows home with
+``scripts/merge_node_db.py --remote``.
 
 Robustness baked in (the four traps the first run hit): all ssh goes through argv
 lists (no shell word-splitting / zsh quirks); liveness uses the ``[e]mmy tune``
@@ -66,7 +76,13 @@ _BASE = f"{REMOTE_DEPLOY_DIR}/node-tune"
 _REMOTE_DIR = f"{_BASE}/repo"  # rsync target — the emmy checkout we tune from
 _SETUP_LOG = f"{_BASE}/setup.log"
 _TUNE_LOG = f"{_BASE}/tune.log"
+_NEIGHBOR_LOG = f"{_BASE}/neighbors.log"
+_REMOTE_LEDGER = f"{_BASE}/neighbor_ledger.json"
+_REMOTE_RECEIPTS = f"{_BASE}/receipts"
 _DONE_RE = re.compile(r"done: (\d+)/(\d+) shape")
+# The driver's final summary line: ``neighbor-bench done: <done>/<total> points (<new> new this run)``.
+# The poll's ``grep -oE`` extracts only the prefix up to ``points`` — match that.
+_NEIGHBOR_DONE_RE = re.compile(r"neighbor-bench done: (\d+)/(\d+) points")
 
 
 def _opts(ssh_key: str | None, port: int | None) -> list[str]:
@@ -114,12 +130,32 @@ def main() -> int:
     ap.add_argument("--repo", help="Local repo root to rsync (default: git toplevel)")
     ap.add_argument("--poll", type=int, default=60, help="Seconds between completion polls (default 60)")
     ap.add_argument("--timeout", type=int, default=7200, help="Max seconds to wait for the tune (default 7200)")
-    ap.add_argument("--no-merge", action="store_true", help="Skip the folded-in node-row merge after a successful tune")
+    ap.add_argument("--no-merge", action="store_true", help="Skip the folded-in node-row merge after a successful run")
     ap.add_argument(
         "--explore-eps",
         type=float,
         default=0.25,
         help="ε-greedy exploration for the remote tune (default 0.25 — off-policy node collection; see module docstring)",
+    )
+    ap.add_argument(
+        "--mode",
+        choices=("tune", "neighbors"),
+        default="tune",
+        help="Collection flow: 'tune' = emmy tune --dataset golden (default); 'neighbors' = scripts/golden_neighbor_bench.py",
+    )
+    ap.add_argument(
+        "--budget-s",
+        type=float,
+        default=None,
+        help="neighbors mode: driver wall-time budget in seconds (default: --timeout minus a 900 s launch/merge margin)",
+    )
+    ap.add_argument("--max-dist", type=int, default=2, help="neighbors mode: max knob-component distance from a golden anchor (default 2)")
+    ap.add_argument("--batch", type=int, default=6, help="neighbors mode: pinned rows per emmy run invocation (default 6)")
+    ap.add_argument("--filter", help="neighbors mode: only shapes with a golden name containing this substring")
+    ap.add_argument(
+        "--ledger",
+        default=str(Path.home() / ".cache/emmy/neighbor_bench/ledger.json"),
+        help="neighbors mode: LOCAL resume-ledger path — pushed to the box before the run, fetched back after",
     )
     args = ap.parse_args()
 
@@ -192,55 +228,93 @@ def main() -> int:
         if "SETUP_OK" not in out:
             return _fail(remote, key, port, "make setup", _SETUP_LOG)
 
-    # 4. launch the tune detached. Redirect ALL three std streams away from the ssh
-    #    channel (`< /dev/null` + `> <tune log> 2>&1`) and use ssh -n (detach=True),
-    #    else ssh holds the channel open past the `&` and this call times out *after*
-    #    a successful launch.
-    tune_cmd = f"emmy tune --dataset golden --explore-eps {args.explore_eps}"
-    _log(f"launching `{tune_cmd}` (detached -> {_TUNE_LOG}) ...")
-    launch = f"cd {_REMOTE_DIR} && {_CUDA_EXPORT} && nohup ./venv/bin/{tune_cmd} > {_TUNE_LOG} 2>&1 < /dev/null & echo tune_launched"
+    # 4. build the mode's launch command + its liveness/done markers, then launch it
+    #    detached. Redirect ALL three std streams away from the ssh channel
+    #    (`< /dev/null` + `> <log> 2>&1`) and use ssh -n (detach=True), else ssh holds
+    #    the channel open past the `&` and this call times out *after* a successful
+    #    launch. The bracket-pgrep patterns stop the liveness check from matching the
+    #    poll command's own argv.
+    if args.mode == "neighbors":
+        # Push the local resume ledger (if any) so the run continues prior coverage.
+        local_ledger = Path(args.ledger).expanduser()
+        if local_ledger.exists():
+            _log(f"pushing resume ledger {local_ledger} -> {remote}:{_REMOTE_LEDGER} ...")
+            e = "ssh " + " ".join(_opts(key, port))
+            lp = subprocess.run(["rsync", "-az", "-e", e, str(local_ledger), f"{remote}:{_REMOTE_LEDGER}"], capture_output=True, text=True)
+            if lp.returncode != 0:
+                _log(f"ledger push failed ({(lp.stderr or lp.stdout).strip()}) — starting without resume state")
+        budget = args.budget_s if args.budget_s is not None else max(600, args.timeout - 900)
+        cmd = (
+            f"./venv/bin/python scripts/golden_neighbor_bench.py --ledger {_REMOTE_LEDGER} "
+            f"--receipts {_REMOTE_RECEIPTS} --budget-s {budget:.0f} --max-dist {args.max_dist} --batch {args.batch}"
+        ) + (f" --filter {args.filter}" if args.filter else "")
+        log_file, proc_pat = _NEIGHBOR_LOG, "[g]olden_neighbor_bench"
+        done_grep, done_re = "neighbor-bench done: [0-9]+/[0-9]+ points", _NEIGHBOR_DONE_RE
+    else:
+        cmd = f"./venv/bin/emmy tune --dataset golden --explore-eps {args.explore_eps}"
+        log_file, proc_pat = _TUNE_LOG, "[e]mmy tune"
+        done_grep, done_re = "done: [0-9]+/[0-9]+ shape", _DONE_RE
+    _log(f"launching `{cmd}` (detached -> {log_file}) ...")
+    launch = f"cd {_REMOTE_DIR} && {_CUDA_EXPORT} && nohup {cmd} > {log_file} 2>&1 < /dev/null & echo run_launched"
     rc, out = _run(remote, key, port, launch, timeout=60, detach=True)
-    if "tune_launched" not in out:
-        # Belt-and-suspenders: if the launch ssh still didn't confirm, the tune may
+    if "run_launched" not in out:
+        # Belt-and-suspenders: if the launch ssh still didn't confirm, the run may
         # have started anyway — verify the process before declaring failure.
         time.sleep(5)
-        _, chk = _run(remote, key, port, "pgrep -f '[e]mmy tune' >/dev/null 2>&1 && echo ALIVE || echo DEAD")
+        _, chk = _run(remote, key, port, f"pgrep -f '{proc_pat}' >/dev/null 2>&1 && echo ALIVE || echo DEAD")
         if "ALIVE" not in chk:
-            return _fail(remote, key, port, f"launch (rc={rc})", _TUNE_LOG)
-        _log("launch ssh did not confirm but the tune process is alive — continuing")
+            return _fail(remote, key, port, f"launch (rc={rc})", log_file)
+        _log("launch ssh did not confirm but the process is alive — continuing")
 
-    # 5. poll the remote log internally until done / dead / timeout. The `[e]mmy tune`
-    #    bracket pattern is what stops pgrep from matching this very poll command's own argv.
+    # 5. poll the remote log internally until done / dead / timeout.
     poll = (
-        f"echo \"DONE_MARK=$(grep -aoE 'done: [0-9]+/[0-9]+ shape' {_TUNE_LOG} 2>/dev/null | tail -1)\"; "
-        "pgrep -f '[e]mmy tune' >/dev/null 2>&1 && echo PROC=ALIVE || echo PROC=DEAD"
+        f"echo \"DONE_MARK=$(grep -aoE '{done_grep}' {log_file} 2>/dev/null | tail -1)\"; "
+        f"pgrep -f '{proc_pat}' >/dev/null 2>&1 && echo PROC=ALIVE || echo PROC=DEAD"
     )
     start = time.monotonic()
     dead_streak = 0
     while True:
         if time.monotonic() - start > args.timeout:
-            return _fail(remote, key, port, f"timeout after {args.timeout}s", _TUNE_LOG)
+            return _fail(remote, key, port, f"timeout after {args.timeout}s", log_file)
         time.sleep(args.poll)
         rc, out = _run(remote, key, port, poll)
         # The poll always echoes a ``PROC=`` marker when it actually ran on the remote;
         # its absence means the ssh itself failed (timeout / connection reset), which is
-        # NOT evidence the tune died — only a confirmed ``PROC=DEAD`` is.
+        # NOT evidence the run died — only a confirmed ``PROC=DEAD`` is.
         reachable = "PROC=" in out
         done_mark = next((ln[len("DONE_MARK=") :] for ln in out.splitlines() if ln.startswith("DONE_MARK=")), "")
         alive = "PROC=ALIVE" in out
-        m = _DONE_RE.search(done_mark)
+        m = done_re.search(done_mark)
         if m:
-            shapes = f"{m.group(1)}/{m.group(2)}"
+            covered = f"{m.group(1)}/{m.group(2)}"
             elapsed = int(time.monotonic() - start)
-            _, bf = _run(remote, key, port, f"grep -aEc 'bench_fail|bench worker exceeded' {_TUNE_LOG} 2>/dev/null || echo 0")
+            _, bf = _run(remote, key, port, f"grep -aEc 'bench_fail|bench worker exceeded' {log_file} 2>/dev/null || echo 0")
             bench_fails = (bf.strip().splitlines() or ["0"])[0]
             print("\n=== remote_node_tune summary ===", flush=True)
             print("status: ok", flush=True)
-            print(f"shapes: {shapes}", flush=True)
-            print(f"explore_eps: {args.explore_eps}", flush=True)
+            print(f"mode: {args.mode}", flush=True)
+            if args.mode == "neighbors":
+                _, done_line = _run(remote, key, port, f"grep -a 'neighbor-bench done:' {log_file} 2>/dev/null | tail -1")
+                print(f"points: {done_line.strip() or covered}", flush=True)
+                # Fetch the resume ledger home so the next run (any box, same card)
+                # continues the coverage instead of redoing it. Best-effort: a lost
+                # ledger only costs re-benched points (the node store upsert dedups).
+                local_ledger = Path(args.ledger).expanduser()
+                local_ledger.parent.mkdir(parents=True, exist_ok=True)
+                e = "ssh " + " ".join(_opts(key, port))
+                fp = subprocess.run(
+                    ["rsync", "-az", "-e", e, f"{remote}:{_REMOTE_LEDGER}", str(local_ledger)], capture_output=True, text=True
+                )
+                if fp.returncode == 0:
+                    print(f"ledger: fetched -> {local_ledger}", flush=True)
+                else:
+                    print(f"ledger: fetch FAILED ({(fp.stderr or fp.stdout).strip()}) — next run redoes this run's points", flush=True)
+            else:
+                print(f"shapes: {covered}", flush=True)
+                print(f"explore_eps: {args.explore_eps}", flush=True)
             print(f"bench_fails: {bench_fails}", flush=True)
             print(f"elapsed (wait only): {elapsed}s", flush=True)
-            print(f"remote log: {remote}:{_TUNE_LOG}", flush=True)
+            print(f"remote log: {remote}:{log_file}", flush=True)
             manual = (
                 f"./venv/bin/python scripts/merge_node_db.py --remote {remote}"
                 + (f" --ssh-key {key}" if key else "")
@@ -259,33 +333,33 @@ def main() -> int:
 
                 merged = merge_node_db.fetch_and_merge(remote, ssh_key=key, port=port)
             except Exception as exc:  # noqa: BLE001 — report any merge failure, don't crash the run
-                print(f"merge FAILED: {exc!r}; tune data is safe on {remote} — re-run `{manual}`", flush=True)
+                print(f"merge FAILED: {exc!r}; the collected data is safe on {remote} — re-run `{manual}`", flush=True)
                 return 1
             if merged == 0:
-                # The tune finished but nothing came home — the remote wrote its node store
+                # The run finished but nothing came home — the remote wrote its node store
                 # somewhere other than the snapshot's default path (e.g. a remote
                 # EMMY_TUNE_DB), so don't claim success.
                 print(
                     f"merge brought back 0 node rows — the remote node store wasn't at the expected "
-                    f"path; tune data is on {remote}. Check the remote EMMY_TUNE_DB and re-run "
+                    f"path; the collected data is on {remote}. Check the remote EMMY_TUNE_DB and re-run "
                     f"`{manual} --remote-db <path>`.",
                     flush=True,
                 )
                 return 1
-            print("\nstatus: COMPLETE (tune + merge done)", flush=True)
+            print(f"\nstatus: COMPLETE ({args.mode} + merge done)", flush=True)
             return 0
         if not reachable:
             # Transient ssh/network failure this cycle — keep waiting (still bounded by
-            # --timeout); don't mistake an unreachable host for a crashed tune.
+            # --timeout); don't mistake an unreachable host for a crashed run.
             _log(f"poll ssh failed (rc={rc}) — host unreachable this cycle, retrying")
             continue
         if not alive:
             dead_streak += 1
             if dead_streak >= 2:  # two consecutive confirmed DEADs without a done marker ⇒ it crashed
-                return _fail(remote, key, port, "tune process died without a done marker", _TUNE_LOG)
+                return _fail(remote, key, port, f"{args.mode} process died without a done marker", log_file)
         else:
             dead_streak = 0
-            _log(f"tuning... ({int(time.monotonic() - start)}s elapsed)")
+            _log(f"collecting ({args.mode})... ({int(time.monotonic() - start)}s elapsed)")
 
 
 if __name__ == "__main__":

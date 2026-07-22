@@ -16,9 +16,7 @@ from emmy.compiler.backend.cuda._planner import compute_live_intervals, plan_off
 class _Launch:
     """Duck-typed stand-in for ``program._Launch`` (node_id, arg_names, tma, zero_outputs)."""
 
-    def __init__(
-        self, node_id: str, arg_names: list[str], tma_src: list[str] | None = None, zero_outputs: list[str] | None = None
-    ) -> None:
+    def __init__(self, node_id: str, arg_names: list[str], tma_src: list[str] | None = None, zero_outputs: list[str] | None = None) -> None:
         self.node_id = node_id
         self.arg_names = tuple(arg_names)
         self.tma_descriptors = tuple(_Tma(s) for s in (tma_src or []))

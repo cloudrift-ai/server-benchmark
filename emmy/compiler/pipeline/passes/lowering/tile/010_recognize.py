@@ -424,7 +424,12 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
                 base_val = pin if pin in ("fuse", "sink") else "fuse"
                 rows = _as_list(schedule(map_tile, loop.name, {**knob_base, "PLACE@stat": base_val}, ctx))
                 if rows and pin not in ("fuse", "sink"):
-                    rows = [*rows, replace(rows[0], knobs={**rows[0].knobs, "PLACE@stat": "sink"})]
+                    # The sink siblings mirror EVERY fuse row (not one representative): when the
+                    # realizer must refuse (an atomic producer), the picked sink row deploys its
+                    # own underlying schedule — so a golden spelling {PLACE@stat: sink, REDUCE:
+                    # b512} degrades to exactly the b512 coop kernel the plain anchor would have
+                    # picked, instead of stranding the norm on option-0's slower fallback.
+                    rows = [*rows, *(replace(r, knobs={**r.knobs, "PLACE@stat": "sink"}) for r in rows)]
                 if rows:
                     return rows if len(rows) > 1 else rows[0]
             return schedule(map_tile, loop.name, knob_base, ctx)

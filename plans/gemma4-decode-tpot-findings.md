@@ -117,6 +117,15 @@ Seeded: the existing `mlp_down.m32.lin` row flipped `g4k→g4a` + fm sibling, an
 gate/up split-half rows seeded fresh (NEW on this card — the cut channels previously deployed from
 db/prior only). The gate half now sits at eager parity (m32) / beats eager (m64) on sm_89.
 
+Twin verify (twins-refresh env, fm): down deploys the single-kernel g4a from tier (138.4+1.3 →
+137.2). The 4090 post twin's geglu edge deploys the FUSED megakernel (285-288 µs) — the m32 cut
+never had a golden row on this card, and the measured A/B says that is CORRECT for sm_89: cut
+(stat+cone+2×g4a ch+combine) = 289.3 ≈ fused 287.7. The cut channels realize at 142 µs in-graph
+(f32 ch-workspace scalar atomics) vs 137.5 standalone (packed f16 out) — sm_89's scalar-f32 red
+overhead eats the margin the 5090's halves keep. Per-card divergence, correctly held by the
+evidence tiers (no cut row → stays fused). Ring depths: d2/cp optimal on sm_89 (down d3 138.4 /
+d4 142.3 vs d2 137.7; gate d3 −1% ≈ noise) — prefetch depth is NOT the sm_89 bandwidth lever.
+
 ## WS4 notes (pre-probe reading)
 
 The eager framing (`iter_once`) and the plain run (`run_once`) share `_descs_now()` — descs are NOT

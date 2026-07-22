@@ -18,7 +18,9 @@ Two collection modes (``--mode``):
   (the censoring feedback loop). ε-greedy collection visits the other siblings too, so
   the fork-ranking dataset covers the alternatives a *better* prior would need to rank.
   Plain ``emmy tune`` keeps its deterministic default; off-policy exploration is a
-  property of this collection workflow, not of tuning in general.
+  property of this collection workflow, not of tuning in general. ``--patience``
+  forwards to the tune: ε-greedy collection tolerates a lower value than the tune
+  default (50), since exploration keeps resetting the no-new-best streak.
 - ``neighbors`` — ``scripts/golden_neighbor_bench.py``: paired -O1/-O3 pinned benches
   of the knob neighborhood around every recorded golden, sampled in a randomized,
   distribution-preserving order under a wall-time budget (default: ``--timeout`` minus
@@ -138,6 +140,16 @@ def main() -> int:
         help="ε-greedy exploration for the remote tune (default 0.25 — off-policy node collection; see module docstring)",
     )
     ap.add_argument(
+        "--patience",
+        type=int,
+        default=None,
+        help=(
+            "tune mode: forwarded to emmy tune --patience (default: emmy's own default, 50). "
+            "ε-greedy collection tolerates a lower value — exploration keeps resetting the no-new-best "
+            "streak, so the default patience overspends benches per op relative to the coverage gained"
+        ),
+    )
+    ap.add_argument(
         "--mode",
         choices=("tune", "neighbors"),
         default="tune",
@@ -252,6 +264,8 @@ def main() -> int:
         done_grep, done_re = "neighbor-bench done: [0-9]+/[0-9]+ points", _NEIGHBOR_DONE_RE
     else:
         cmd = f"./venv/bin/emmy tune --dataset golden --explore-eps {args.explore_eps}"
+        if args.patience is not None:
+            cmd += f" --patience {args.patience}"
         log_file, proc_pat = _TUNE_LOG, "[e]mmy tune"
         done_grep, done_re = "done: [0-9]+/[0-9]+ shape", _DONE_RE
     _log(f"launching `{cmd}` (detached -> {log_file}) ...")

@@ -21,8 +21,7 @@ emmy vm create gpu \
   [--provider cloudrift|gcp] \
   [--name <prefix>] \
   [--ssh-key ~/.ssh/id_ed25519] \
-  [--config config.yaml] \
-  [--billing-exempt]    # CloudRift admin-only, see below
+  [--config config.yaml]
 ```
 
 What this command does that the provider-specific commands do **not**:
@@ -48,7 +47,7 @@ Before running anything, confirm these with the user (ask only the ones not alre
    - **If the user explicitly named a provider, it is binding.** Pass `--provider` and never silently fall back to another provider. If the GPU isn't available on that provider, report the mismatch — let the user decide whether to switch GPU, switch provider, or abort.
 4. **Server name** — optional `--name <prefix>`. Embedded into the VM hostname; only matters for GCP labelling. Skip unless the user has a preference.
 5. **SSH private key path** — default `~/.ssh/id_ed25519`. Confirm the `.pub` counterpart exists (the orchestrator reads it for upload).
-6. **Billing-exempt rental?** (CloudRift only) — explicitly ask the user whether to add `--billing-exempt`. This flag skips CloudRift billing and is admin-only; it is not a default. Only pass it if the user confirms they have an admin/no-cost agreement. Do not infer from "free", "test", or "cheap" — require an explicit yes. The flag is silently dropped when GCP candidates are chosen.
+6. **Never pass `--billing-exempt`.** All rentals bill normally. The flag is an admin-only CloudRift switch and is not used by any skill flow — do not add it, and do not infer it from "free", "test", or "cheap".
 
 ## Sourcing Provider Credentials
 
@@ -99,7 +98,6 @@ The orchestrator handles capacity fallback automatically: it advances to the nex
 You should **not** wrap the command in a manual retry loop. If it exits non-zero, read the final log line — it lists what was tried and the last error. Concrete next steps to offer the user:
 
 - Wait and retry later (capacity often returns within minutes).
-- Drop `--billing-exempt` (CloudRift) in case the rejection is account-side, not capacity.
 - Switch GPU model or provider.
 
 Terminal errors (auth 401/403, malformed 400, "Unknown GPU" `ValueError`, missing instance type 404) are surfaced immediately as `TerminalProvisionError` and won't be retried — don't suggest waiting; fix the input or credentials.
@@ -113,8 +111,7 @@ Use the provider-specific commands **only** when the user explicitly asks for a 
 ```bash
 emmy vm create cloudrift \
   --instance-type <base>.<gpu_count> \
-  --ssh-key ~/.ssh/id_ed25519.pub \
-  [--billing-exempt]
+  --ssh-key ~/.ssh/id_ed25519.pub
 ```
 
 This command requires the **public** key path (`.pub`), unlike `vm create gpu`. It does not retry across bases/zones — one attempt, then exit.
@@ -156,7 +153,7 @@ Before reporting success, verify:
 - [ ] The create command exited 0 (not just printed something).
 - [ ] An SSH connection target was reported (CloudRift / `vm create gpu`) or `--wait-ssh` confirmed reachability (GCP manual).
 - [ ] If the user named a provider, the chosen provider matches it exactly (no fallback substitution).
-- [ ] If `--billing-exempt` was passed, the user explicitly confirmed it.
+- [ ] `--billing-exempt` was not passed (all rentals bill normally).
 
 If any check fails, report the failure and the raw output instead of claiming success.
 

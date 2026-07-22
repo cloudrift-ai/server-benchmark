@@ -403,13 +403,13 @@ def test_softmax_trace_to_tensor_ir_primitives_only():
 # ===================================================================
 
 
-def _make_sdpa_graph(seq_len=4, head_dim=8, num_heads=1, is_causal=False):
+def _make_sdpa_graph(seq_len=4, head_dim=8, num_heads=1, is_causal=False, scale=None):
     g = Graph()
     s = (num_heads, seq_len, head_dim)
     g.add_node(op=InputOp(), inputs=[], output=Tensor("Q", s), node_id="Q")
     g.add_node(op=InputOp(), inputs=[], output=Tensor("K", s), node_id="K")
     g.add_node(op=InputOp(), inputs=[], output=Tensor("V", s), node_id="V")
-    g.add_node(op=SdpaOp(is_causal=is_causal), inputs=["Q", "K", "V"], output=Tensor("out", s), node_id="sdpa_out")
+    g.add_node(op=SdpaOp(is_causal=is_causal, scale=scale), inputs=["Q", "K", "V"], output=Tensor("out", s), node_id="sdpa_out")
     g.inputs, g.outputs = ["Q", "K", "V"], ["sdpa_out"]
     return g
 
@@ -446,6 +446,17 @@ def test_sdpa_produces_scale_constant():
     result = _apply(_make_sdpa_graph(), "010_sdpa.py")
     scale_constants = [n for n in result.nodes.values() if isinstance(n.op, ConstantOp) and "scale" in n.op.name]
     assert len(scale_constants) >= 1
+    # Default (scale=None): torch's 1/sqrt(head_dim).
+    assert abs(scale_constants[0].op.value - 1.0 / 8**0.5) < 1e-12
+
+
+def test_sdpa_explicit_scale_survives_decomposition():
+    """An SDPA's captured ``scale=`` kwarg (Gemma-nano passes 1.0) must become the score
+    scale constant — not be overwritten by the 1/sqrt(head_dim) default."""
+    result = _apply(_make_sdpa_graph(scale=1.0), "010_sdpa.py")
+    scale_constants = [n for n in result.nodes.values() if isinstance(n.op, ConstantOp) and "scale" in n.op.name]
+    assert len(scale_constants) == 1
+    assert scale_constants[0].op.value == 1.0
 
 
 def test_sdpa_preserves_io_count():

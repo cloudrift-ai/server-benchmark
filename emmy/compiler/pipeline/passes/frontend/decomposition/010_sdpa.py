@@ -85,8 +85,12 @@ def rewrite(match: Match, root: Node, inp_q: Node, inp_k: Node, inp_v: Node, inp
     # QK^T matmul.
     qk = matmul_decompose(frag, inp_q, kt, name=f"{name}_qk")
 
-    # Scale by 1/sqrt(head_dim).
-    scale_value = 1.0 / math.sqrt(head_dim.as_static()) if head_dim.is_static else None
+    # Scale: the op's captured ``scale=`` kwarg, else torch's 1/sqrt(head_dim) default.
+    op_scale = getattr(root.op, "scale", None)  # pre-scale-field IR dumps lack the attr
+    if op_scale is not None:
+        scale_value = op_scale
+    else:
+        scale_value = 1.0 / math.sqrt(head_dim.as_static()) if head_dim.is_static else None
     scale_bc = const_bc(frag, name=f"{name}_scale", value=scale_value, target_shape=scores_shape, dtype=dtype)
     scaled_id = frag.add_node(
         op=ElementwiseOp(op="multiply"),

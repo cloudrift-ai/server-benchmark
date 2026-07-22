@@ -35,26 +35,55 @@ pytest.importorskip("torch")
 pytest.importorskip("transformers")
 
 from emmy.compiler.pipeline.search.audit import COMPILE_FAIL, audit_card, gap_keys, summarize
+from emmy.compiler.pipeline.search.data.shape import ShapeKey
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "gemma4_12b"
+
+
+def _k(free_prod, reduce_max, kind, free_max=0, dyn=False):
+    return ShapeKey(free_prod=free_prod, reduce_max=reduce_max, is_warp=True, is_dyn=dyn, kind=kind, free_max=free_max)
+
 
 # Known-uncovered kernel forks per card — ALL kinds (contractions, rms_norm/reduce sweeps,
 # pointwise), not just the warp-contraction hazards. This list may only change deliberately:
 # remove a line when its golden gets recorded (the test fails until you do); add one only
-# when review accepts a new uncovered kernel. BOTH CARDS ARE EMPTY as of the 2026-07-20 heal
-# session (see plans/golden-heal-gemma4-4090-5090-findings.md while it exists, or that
-# session's commit message): full model coverage is now ENFORCED — any new uncovered fork
-# (a model change, a recognizer re-keying, a golden prune) fails this gate until a golden
-# is recorded for it or its key is deliberately baselined here in review.
+# when review accepts a new uncovered kernel.
+#
+# 2026-07-22 (merged sibling-linear WS1): the concat re-keyed every merged edge — fused
+# norm→q||k(||v) (N=8192 sliding / 8704 global), fused norm→gate_up (N=30720), the down-proj
+# GeGLU-combine cone, and the global pre twin's merged-projection copy. The 5090 keys were
+# seeded that session (manual pinned --ab, `goldens/rtx5090_sm120_gemma4.yaml`) and its set is
+# EMPTY again; the 4090's await a 4090 measurement session and are baselined below (the same
+# key list the 5090 seeding covered, plus the sym down fork whose unrealizable dynM rows were
+# deleted). Re-seed on a rented 4090 and empty this set.
+_MERGED_EDGE_KEYS_4090 = {
+    _k(983040, 3840, "fused", 30720),  # gate_up m32 (post32/post32-global)
+    _k(7864320, 3840, "fused", 30720),  # gate_up m256
+    _k(30720, 3840, "fused", dyn=True),  # gate_up dynM
+    _k(2097152, 3840, "fused", 8192),  # qkv sliding m256
+    _k(8192, 3840, "fused", dyn=True),  # qkv sliding dynM
+    _k(278528, 3840, "fused", 8704),  # qk global m32
+    _k(2228224, 3840, "fused", 8704),  # qk global m256
+    _k(8704, 3840, "fused", dyn=True),  # qk global dynM
+    _k(122880, 15360, "fused", 3840),  # down cone m32
+    _k(983040, 15360, "fused", 3840),  # down cone m256
+    _k(3840, 15360, "", dyn=True),  # down cone dynM (kind="" at sym; stale rows deleted)
+    _k(278528, 0, "", 8704),  # dup__view m32 (global pre)
+    _k(2228224, 0, "", 8704),  # dup__view m256
+    _k(8704, 0, "", dyn=True),  # dup__view dynM
+}
 EXPECTED_GAPS = {
     "NVIDIA GeForce RTX 5090": set(),
-    "NVIDIA GeForce RTX 4090": set(),
+    "NVIDIA GeForce RTX 4090": set(_MERGED_EDGE_KEYS_4090),
 }
 
 # A wholesale re-key of the twins (tracer/classifier change) turns MATCHes into GAPs without
 # a single DRIFT — the floor catches that failure mode; it is NOT a coverage target (the
 # exact count churns benignly whenever a golden YAML gains or loses entries).
-MIN_MATCH = {"NVIDIA GeForce RTX 5090": 90, "NVIDIA GeForce RTX 4090": 90}  # both audit at 101 post-heal
+# Rebased 2026-07-22: the sibling-linear concat REMOVED half the per-projection fork sites
+# from the twins (that is WS1's point), so the pre-merge 101-match count is unreachable —
+# the 5090 audits at 74 post-seed, the 4090 at 52 with its merged keys still un-seeded.
+MIN_MATCH = {"NVIDIA GeForce RTX 5090": 70, "NVIDIA GeForce RTX 4090": 45}
 
 CARDS = [
     pytest.param("NVIDIA GeForce RTX 5090", (12, 0), id="rtx5090"),

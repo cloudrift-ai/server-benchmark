@@ -25,6 +25,17 @@ e2e −1.5 ms/step combined; audits MATCH / DRIFT 0 / GAP 0 on both cards; fm-ne
 
 ## WS1 — sibling-matmul concat (QKV one launch, gate/up one launch) [biggest, first]
 
+**STATUS 2026-07-22: compiler side LANDED on this branch** — `decomposition/035_merge_sibling_linears` (N-way,
+insertion-order concat = ABI), `ConstantOp.source_parts` through every loader/plan/serving bind path, plus two
+exposed-bug fixes: the recognize stat-free-cone empty-row fallback (PLANAR demote) and 64-bit symbolic-grid
+`_gid`/strides (int32 overflow at batch·seq·N·coop ≥ 2³¹). 5090 goldens for the merged keys SEEDED same day
+(manual `--ab`; audit MATCH 74 / DRIFT 0 / GAP 0 — see plans/golden-seed-merged-sibling-5090-findings.md); 4090
+keys baselined in the drift gate pending a 4090 session. Remaining WS1 work: 4090 seeding, fm-lane twins, qknorm
+sink-anchor re-check, twin e2e + serving A/B. Watch: on the fp32 SYMBOLIC path
+(Qwen embedding trunk) the merge lets the input norm fuse into the merged matmul (fan-out drops to 1) and the fused
+computed-A form demotes to the scalar coop tier — correct but slow; the f16 gemma path has the mma tier. Decide by
+serving A/B per protocol.
+
 Stock concatenates q/k/v (and gate/up) weights at load and runs ONE gemm each. Emmy traces the HF module
 structure and deploys q (N=4096) and kv (N=2048) separately — with split-K that is 2 partials + 2
 finalizes where stock has one launch; the m32 GeGLU cut likewise runs its two N=15360 channel matmuls as

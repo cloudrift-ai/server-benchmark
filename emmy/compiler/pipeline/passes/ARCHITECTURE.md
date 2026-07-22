@@ -111,10 +111,10 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   partition is chosen and stamps a `sync` `Stage` naming it (`smem`) on the `TileOp` — a derived schedule field, not a
   knob — so `_factor._tile_reduce_axis` only applies it, never re-detects.
 
-## The two divide rules: `cut` a dataflow edge vs `split` an iteration axis
+## The divide rules: `cut` a dataflow edge, `sink` a row statistic, `split` an iteration axis
 
-`lowering/tile` carries two one-kernel→graph-fragment rules whose names sound alike but divide along different
-dimensions, with OPPOSITE re-entry contracts — keep them apart:
+`lowering/tile` carries three one-kernel→graph-fragment rules whose names sound alike but divide along different
+dimensions, with their own re-entry contracts — keep them apart:
 
 - **`020_cut_edge`** cuts the **dataflow** (the PLACE codec's memory edge, `PLACE@cone=cut` today): two different
   computations that loop fusion welded together — the producer cone and its matmul — become separate kernels again,
@@ -141,6 +141,24 @@ dimensions, with OPPOSITE re-entry contracts — keep them apart:
   no golden — the gemma-4 gate/up edge measures 35,558 / 71,160 / 142,702 µs at M=32/64/128 (the channel matmuls fall
   to a scalar tile) against 368.7 µs at the seeded M=256. An unseeded shape simply never matches and stays fused, so
   the choice is never made geometrically.
+- **`025_sink_row_reduce`** migrates a **row statistic** across the dataflow edge in the OPPOSITE direction from the
+  cut (the PLACE codec's `stat` element, `PLACE@stat=sink`): a fused norm kernel B —
+  `Map(body=[π…, sweep Loop], source=Reduction(PLANAR))` whose reduce folds a pure per-cell term (`Σ x²`) of ONE
+  tensor its in-graph producer A just computed — drops its `Reduction` to a `Load` of a fresh f32 `T__sq[row]` aux
+  buffer, and A's complete-value store site (a split-K FINALIZE or pointwise sweep — never an atomic partial, whose
+  per-partition values are incomplete) gains the term re-evaluated on each just-stored value plus a `RowAccum`
+  (a hierarchical warp-shfl + smem block fold + one `atomicAdd` per block, zero-init'd per launch through the
+  ordinary `zero_outputs` memset machinery). `T__sq` is an `AuxOutputOp` graph node (no launch of its own — the
+  producer's launch writes it); B re-emits as an un-mapped `LoopOp` so `010_recognize` peels BOTH the row and sweep
+  axes free — the whole point: the grid-per-row latency-bound stat kernel becomes a wide 2-D pointwise sweep. The
+  structural probe (`_sink.bind_sinkable_stat`) gates in the negative: the reduce's flat address in T must be affine
+  with reduce coefficient 1 and mixed-radix row coefficients (so `row = flat / N` is a bijection — the per-head
+  qknorm case falls out for free), the projection must be `[pure prefix…, one sweep Loop]`. Like the cut it is a
+  pure realizer of a recognizer-offered stamp, its rows are **evidence-only** (withheld from the model fallback),
+  and its sink siblings mirror EVERY local row so an unrealizable site (atomic producer — the pass waits via
+  `RuleSkipped` for `010`/`030` to settle the producer, then refuses permanently) degrades to the picked row's own
+  local-stat schedule. It runs BEFORE `030` so a sink-stamped row is realized before any grid split of the norm
+  could be.
 - **`030_split_reduce`** splits the **reduce axis** (the REDUCE codec's `g<w>` cross-CTA shard): the SAME
   computation, its K partitioned across CTAs into a partial + finalize. It runs AFTER its decision — the `g` row was
   chosen FOR the split form — so the partial carries the decided knob row verbatim and the finalize is deliberately

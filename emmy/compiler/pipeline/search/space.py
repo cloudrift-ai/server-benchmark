@@ -215,7 +215,7 @@ PLACE = Knob(
 # online softmax, and producer-cone inlining are all on when recognizable; a row statistic stays
 # LOCAL to its kernel). Flipping a default is a behavior change gated on the validation suite, not
 # a spelling change. ``stat``'s alternative is ``sink`` (not ``cut``): the statistic reduce
-# migrates into the producer kernel's epilogue (``040_sink_row_reduce``) instead of splitting out.
+# migrates into the producer kernel's epilogue (``025_sink_row_reduce``) instead of splitting out.
 _PLACE_DEFAULTS = {"cone": "fuse", "fold": "fuse", "tuple": "fuse", "stat": "fuse"}
 _PLACE_VALUES = {"cone": ("fuse", "cut"), "fold": ("fuse", "cut"), "tuple": ("fuse", "cut"), "stat": ("fuse", "sink")}
 

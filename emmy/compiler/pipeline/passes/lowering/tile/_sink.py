@@ -1,7 +1,7 @@
-"""Structural binding for the ``PLACE@stat`` row-statistic sink (``040_sink_row_reduce``).
+"""Structural binding for the ``PLACE@stat`` row-statistic sink (``025_sink_row_reduce``).
 
 One probe shared by the offer site (``010_recognize`` — is this kernel's statistic *sinkable*?)
-and the realizer (``040_sink_row_reduce`` — re-bind and rewrite), exactly as
+and the realizer (``025_sink_row_reduce`` — re-bind and rewrite), exactly as
 ``bind_prologue_contraction`` serves the cone cut. The matched shape is the fused norm form: a
 ``Map(body=[π…, sweep Loop], source=Reduction(PLANAR over n))`` whose reduce folds a pure
 per-cell term of ONE tensor ``T`` (``Σ x²`` — a single scalar ``Load`` of ``T``, a pure

@@ -956,7 +956,7 @@ class Select(Stmt):
 @dataclass(frozen=True)
 class RowAccum(Stmt):
     """Accumulate ``value`` into ``dst[flat / n]`` — the row-statistic sink epilogue
-    (``040_sink_row_reduce``).
+    (``025_sink_row_reduce``).
 
     A producer kernel that writes each cell of a tensor exactly once contributes that cell's
     statistic term (e.g. ``v·v`` for a downstream Σx² norm stat) into a per-row f32 aux buffer:

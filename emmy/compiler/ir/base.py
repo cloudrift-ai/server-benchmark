@@ -110,7 +110,7 @@ class InputOp(Op):
 class AuxOutputOp(Op):
     """Sentinel for an AUXILIARY output buffer of its (sole) input node — a second buffer that
     node's kernel writes beside its primary output (the row-statistic ``__sq`` workspace the
-    stat-sink epilogue accumulates, ``040_sink_row_reduce``). No computation and no launch of
+    stat-sink epilogue accumulates, ``025_sink_row_reduce``). No computation and no launch of
     its own: the producing launch is the input node's, which lists this buffer among its
     ``outputs`` / ``arg_order`` (and ``zero_outputs`` — a ``RowAccum``-accumulated buffer is
     memset per launch, which is also what marks its first write for the slab planner). The

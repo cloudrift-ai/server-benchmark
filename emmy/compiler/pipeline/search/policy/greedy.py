@@ -780,7 +780,7 @@ def greedy_decide(
         # golden deploys them on a scalar tile (36 ms on the gemma-4 M=256 q cone). So the cut
         # can only ever win where it was actually MEASURED to, which is the same principle the
         # structural-pricing gate encodes, applied at row level. ``PLACE@stat=sink``
-        # (``040_sink_row_reduce`` — the producer gains an epilogue, the norm re-emits as a
+        # (``025_sink_row_reduce`` — the producer gains an epilogue, the norm re-emits as a
         # sweep) changes the kernel set the same way and is withheld identically.
         model_rows = [i for i, r in enumerate(rows) if r.get("PLACE@cone") != "cut" and r.get("PLACE@stat") != "sink"] or list(
             range(len(rows))

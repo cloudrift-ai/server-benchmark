@@ -17,6 +17,7 @@ from emmy.compiler.pipeline.search.golden import (
     AttentionGoldenConfig,
     EmbeddingGoldenConfig,
     GoldenConfig,
+    LinearNormGoldenConfig,
     MatmulGoldenConfig,
     MlpGeGluGoldenConfig,
     NormLinearGoldenConfig,
@@ -89,6 +90,7 @@ def test_golden_configs_set_is_well_formed():
                 MatmulGoldenConfig,
                 ReduceGoldenConfig,
                 RmsNormGoldenConfig,
+                LinearNormGoldenConfig,
                 NormLinearGoldenConfig,
                 MlpGeGluGoldenConfig,
                 RopeGoldenConfig,
@@ -104,6 +106,10 @@ def test_golden_configs_set_is_well_formed():
         fork_nothing = isinstance(c, (RopeGoldenConfig, EmbeddingGoldenConfig))
         if isinstance(c, MatmulGoldenConfig):
             assert c.M > 0 and c.N > 0 and c.K > 0, c.name
+        elif isinstance(c, LinearNormGoldenConfig):
+            # The linear→norm PAIR (the PLACE@stat row-stat sink): keyed at the NORM's fork with the
+            # placement stamp alone — no coop requirement (the realizer re-emits the sweep).
+            assert c.M > 0 and c.K > 0 and c.H > 0, c.name
         elif isinstance(c, NormLinearGoldenConfig):
             # The fused RMSNorm→linear computed-A megakernel: a warp contraction (M,H)@(H,N), not the
             # reduce family — its REDUCE knob is a split-K (g4k), not a coop, so no coop>1 requirement.
@@ -292,6 +298,7 @@ def test_dynamic_supported_for_all_kinds():
         SoftmaxGoldenConfig(name="softmax.k2048.dynM", M=512, K=2048, dynamic=True),
         PointwiseGoldenConfig(name="pointwise.n4096.dynM", M=512, N=4096, dynamic=True),
         NormLinearGoldenConfig(name="norm_linear.n4096.dynM", M=512, H=3840, N=4096, dynamic=True),
+        LinearNormGoldenConfig(name="linear_norm.k3840.dynM", M=512, H=4096, K=3840, dynamic=True),
     ]
     assert all(c.dynamic_specs() == ["seq_len@x:0"] for c in one_input)
     att = AttentionGoldenConfig(name="attention.hd128.dynM", n_heads=8, seq=512, head_dim=128, dynamic=True)

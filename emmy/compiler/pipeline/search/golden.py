@@ -387,6 +387,67 @@ class RmsNormGoldenConfig(GoldenConfig):
         return ShapeKey(free_prod=free, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic, kind="rms_norm")
 
 
+@dataclass(frozen=True, kw_only=True)
+class LinearNormGoldenConfig(GoldenConfig):
+    """A whole-pair golden for the ROW-STAT SINK decision (``PLACE@stat`` —
+    ``025_sink_row_reduce``): ``F.linear(x, w)`` + a trailing ``F.rms_norm`` (+ residual add for
+    the post-attn form), the producer→norm pair whose statistic can migrate into the producer's
+    epilogue. The snippet builds the PAIR so a seeding A/B measures the sink's true e2e effect
+    (producer epilogue + memset + the norm dropping to a wide pointwise sweep).
+
+    The recorded row lives at the NORM's fork (``shape_key`` mirrors
+    :class:`RmsNormGoldenConfig` — ``kind="rms_norm"``, free ``M·K``, reduce ``K``) and records
+    ``knobs: {PLACE@stat: 'sink'}`` alone (the cut convention: the realizer re-emits the sweep,
+    so the representative row's own schedule is discarded). Two ordering facts make per-site
+    selection work with no re-anchoring: ``_golden_matches_row`` REFUSES a ``PLACE``-bearing
+    golden at a fork whose rows never offered the element (an input-norm fork falls through to
+    the plain ``rms_norm`` coop anchor at the same key), and ``emmy_us`` records the fork's OWN
+    realized kernel (the ~1 µs post-sink sweep, NOT the pair total) so the sink row sorts ahead
+    of that coop anchor and is tried first exactly where the offer exists. ``cublas_us`` records
+    the LOCAL-stat baseline (the coop kernel the sink replaces), so ``ratio`` reads as the
+    per-kernel rescue. The pair-level e2e verdict that justifies seeding lives in the seeding
+    session's findings, not in the row."""
+
+    M: int
+    K: int  # the norm width (= the linear's output N)
+    H: int  # the linear's contraction extent
+    dtype: str = "fp16"
+    trans_b: bool = False  # serving F.linear layout for the producer matmul
+    residual: bool = False  # the post-attn form: norm(linear(x)) + r
+
+    def __post_init__(self):
+        self._require_dynamic_hint(self.M)
+        if self.knobs and "PLACE@stat" not in self.knobs:
+            raise ValueError(
+                f"linear_norm golden {self.name!r} must record the PLACE@stat placement — a stampless row would "
+                f"shadow the plain rms_norm anchors at the same ShapeKey"
+            )
+
+    def dynamic_specs(self) -> list[str]:
+        return ["seq_len@x:0"] if self.dynamic else []
+
+    def snippet(self) -> str:
+        tdt = {"fp16": ",dtype=torch.float16", "bf16": ",dtype=torch.bfloat16", "fp32": ""}[self.dtype]
+        w_decl = f"w = torch.randn({self.K},{self.H}{tdt})\n" if self.trans_b else f"w = torch.randn({self.H},{self.K}{tdt})\n"
+        lin = "F.linear(x, w)" if self.trans_b else "x @ w"
+        r_decl = f"r = torch.randn({self.M},{self.K}{tdt})\n" if self.residual else ""
+        tail = " + r" if self.residual else ""
+        x_decl = f"x = torch.randn({self.M},{self.H}{tdt})\n"
+        return f"nw = torch.randn({self.K}{tdt})\n{w_decl}{r_decl}{x_decl}F.rms_norm({lin}, ({self.K},), nw){tail}"
+
+    def flops(self) -> float:
+        return 2.0 * self.M * self.K * self.H  # the producer contraction dominates; the norm sweep is extra
+
+    def shape_key(self):
+        """Keys the NORM kernel's fork — identical to the plain row norm's key
+        (:class:`RmsNormGoldenConfig` with ``heads=1``): the sweep's output is ``(M, K)`` so
+        ``free_prod = M*K``, reduce ``K``, ``is_warp=False``, ``kind="rms_norm"``."""
+        from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
+
+        free = self.K if self.dynamic else self.M * self.K
+        return ShapeKey(free_prod=free, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic, kind="rms_norm")
+
+
 def _require_cone_anchor(cfg) -> None:
     """Schema guard for the fused computed-A kinds (``NormLinearGoldenConfig`` /
     ``MlpGeGluGoldenConfig``): a RECORDED entry (non-empty knobs) must anchor itself to the cone
@@ -736,6 +797,7 @@ _KERNEL_CLASSES = {
     "reduce": ReduceGoldenConfig,
     "pointwise": PointwiseGoldenConfig,
     "rms_norm": RmsNormGoldenConfig,
+    "linear_norm": LinearNormGoldenConfig,
     "norm_linear": NormLinearGoldenConfig,
     "mlp_geglu": MlpGeGluGoldenConfig,
     "rope": RopeGoldenConfig,

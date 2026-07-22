@@ -55,21 +55,59 @@ from emmy.compiler.pipeline.search.space import place_decision
 PATTERN = [Pattern("root", TileOp)]
 
 
-def _producer_write(pop: TileOp, buf: str) -> Write | None:
-    """The producer's single eligible store of ``buf`` — a plain scalar top-level ``Write`` in a
-    flat ``Map`` body that is the buffer's ONLY store (gated in the negative: an atomic write, a
-    nested/loop store, an mma epilogue, or a multi-store body all return ``None``)."""
+def _producer_writes(pop: TileOp, buf: str) -> list[Write] | None:
+    """The producer's eligible stores of ``buf`` — plain scalar TOP-LEVEL ``Write``\\ s in a flat
+    ``Map`` body covering every store of the buffer (gated in the negative: an atomic write, a
+    nested/loop store, or an mma epilogue all return ``None``). One write is the per-cell
+    finalize; several are a register-tiled sweep's per-cell stores (e.g. the ``f4`` pointwise
+    tile — four writes per thread), grouped by :func:`_same_row_base`."""
     pmap = pop.op
     if not isinstance(pmap, Map) or pmap.source is not None:
         return None
     all_writes = [s for s in pmap.body.iter() if isinstance(s, Write) and s.output == buf]
     top_writes = [s for s in pmap.body if isinstance(s, Write) and s.output == buf]
-    if len(all_writes) != 1 or len(top_writes) != 1:
+    if not top_writes or len(all_writes) != len(top_writes):
         return None
-    w = top_writes[0]
-    if w.atomic or not w.is_scalar:
+    if any(w.atomic or not w.is_scalar for w in top_writes):
         return None
-    return w
+    return top_writes
+
+
+def _same_row_base(flats: list, n: int):
+    """Prove a write group lands in ONE row of the ``n``-wide reduce and return the base flat
+    address, or ``None``. The proof: the flat addresses share affine coefficients and their
+    anchors form the dense run ``base .. base+W-1`` with ``base ≡ 0 (mod W)`` (every coefficient
+    and the base anchor divisible by ``W``) and ``W | n`` — then ``base % n ≤ n − W`` (a multiple
+    of W below n), so ``base+k`` stays in ``base``'s row for every ``k < W``."""
+    from emmy.compiler.ir.expr import SimplifyCtx, affine_form  # noqa: PLC0415
+
+    if len(flats) == 1:
+        return flats[0]
+    w = len(flats)
+    if n % w != 0:
+        return None
+    forms = []
+    for f in flats:
+        vars_ = set(f.free_vars())
+        form = affine_form(f, vars_)
+        if form is None:
+            return None
+        anchor = form[0].simplify(SimplifyCtx.empty())
+        from emmy.compiler.ir.expr import Literal  # noqa: PLC0415
+
+        if not isinstance(anchor, Literal):
+            return None
+        forms.append((int(anchor.value), form[1]))
+    coeffs0 = forms[0][1]
+    if any(c != coeffs0 for _, c in forms[1:]):
+        return None
+    anchors = sorted(a for a, _ in forms)
+    base_anchor = anchors[0]
+    if anchors != list(range(base_anchor, base_anchor + w)):
+        return None
+    if base_anchor % w != 0 or any(c % w != 0 for c in coeffs0.values()):
+        return None
+    return flats[[a for a, _ in forms].index(base_anchor)]
 
 
 def rewrite(match: Match, root: Node) -> Graph | None:
@@ -99,27 +137,41 @@ def rewrite(match: Match, root: Node) -> Graph | None:
     pplan = reduce_plan(pop)
     if pplan is not None and pplan.needs_split:
         raise RuleSkipped("producer's cross-CTA split pending — waiting for 030")
-    write = _producer_write(pop, src)
-    if write is None:
-        raise RuleSkipped("producer has no single plain complete-value store of the reduced tensor (atomic partial / mma epilogue)")
+    writes = _producer_writes(pop, src)
+    if writes is None:
+        raise RuleSkipped("producer has no plain complete-value stores of the reduced tensor (atomic partial / mma epilogue)")
     t = tile.inputs.get(src)
-    if t is None or len(write.index) != len(t.shape) or not all(d.is_static for d in t.shape):
+    if t is None or any(len(w.index) != len(t.shape) for w in writes) or not all(d.is_static for d in t.shape):
         raise RuleSkipped("producer store rank/shape doesn't cover the reduced tensor statically")
+    flats = [flat_index_expr(w.index, t.shape) for w in writes]
+    base_flat = _same_row_base(flats, binding.n)
+    if base_flat is None:
+        raise RuleSkipped("producer's write group isn't provably one row — per-write RowAccums not emitted (v2)")
 
-    # --- producer side: B's reduce cell re-evaluated on the just-stored value + the RowAccum.
-    # The chain's defs are suffixed so they can't collide with producer SSA names; the cell's
-    # Load of T is substituted with the Write's (pre-round f32) value.
-    sub = {binding.load.name: write.value}
+    # --- producer side: B's reduce cell re-evaluated on each just-stored value, the per-write
+    # terms summed per thread, then ONE RowAccum. The chains' defs are suffixed so they can't
+    # collide with producer SSA names; the cell's Load of T is substituted with each Write's
+    # (pre-round f32) value.
+    from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
+
     contrib: list[Assign] = []
-    for a in binding.chain:
-        renamed = Assign(name=f"{a.name}__snk", op=a.op, args=tuple(sub.get(x, x) for x in a.args), dtype=a.dtype)
-        sub[a.name] = renamed.name
-        contrib.append(renamed)
-    value = sub.get(binding.value, binding.value)
-    accum = RowAccum(dst=sq, flat=flat_index_expr(write.index, t.shape), n=binding.n, value=value)
+    terms: list[str] = []
+    for i, w in enumerate(writes):
+        sub = {binding.load.name: w.value}
+        for a in binding.chain:
+            renamed = Assign(name=f"{a.name}__snk{i}", op=a.op, args=tuple(sub.get(x, x) for x in a.args), dtype=a.dtype)
+            sub[a.name] = renamed.name
+            contrib.append(renamed)
+        terms.append(sub.get(binding.value, binding.value))
+    value = terms[0]
+    for i, term in enumerate(terms[1:]):
+        summed = Assign(name=f"{binding.value}__snks{i}", op=ElementwiseImpl("add"), args=(value, term))
+        contrib.append(summed)
+        value = summed.name
+    accum = RowAccum(dst=sq, flat=base_flat, n=binding.n, value=value)
     pmap: Map = pop.op
     body = list(pmap.body)
-    at = body.index(write) + 1
+    at = max(body.index(w) for w in writes) + 1
     new_pop = replace(pop, op=replace(pmap, body=Body((*body[:at], *contrib, accum, *body[at:]))))
 
     # --- consumer side: the Reduction drops to a Load of the row stat; the projection rides

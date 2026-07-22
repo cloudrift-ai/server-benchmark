@@ -411,7 +411,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
             # The ROW-STAT SINK offer (``PLACE@stat`` — the fused norm form, ``Map(body=[π…,
             # sweep], source=Reduction(PLANAR))`` re-reading an in-graph producer's output):
             # option-0 stays the local (coop) statistic; ONE representative ``sink`` sibling is
-            # appended (its own schedule is discarded — ``040_sink_row_reduce`` re-emits the
+            # appended (its own schedule is discarded — ``025_sink_row_reduce`` re-emits the
             # producer epilogue + a fresh un-mapped sweep the restarted scan re-recognizes,
             # the same division of labour as the cone cut). Evidence-only like the cut row:
             # ``greedy_decide`` withholds it from the model fallback, so an unseeded shape

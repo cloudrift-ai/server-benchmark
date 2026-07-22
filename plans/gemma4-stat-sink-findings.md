@@ -72,9 +72,26 @@ sliding + −2.5 × 8 global ≈ **−0.08 ms/step (5090)**, ≈ −5.1/−6.2 �
 - `make test` green (×3 through the session); new unit tests: RowAccum rewrite preservation, binding
   gates, pinned e2e (gelu producer, f4 write group), input-norm refusal.
 
-## Serving A/B (4K-in/4K-out, c=1, 3 prompts, seed 0, fm, fresh packs)
+## Serving A/B (4K-in/4K-out, c=1, 3 prompts, seed 0, fm, fresh packs, 5090)
 
-<!-- filled at session end -->
+Protocol: goldens tier + empty online (`{}`) + fresh `EMMY_PACK_DIR`, `EMMY_GEN_DECODE_BUCKET=32`,
+mml 8448, mnbt 4096. The fresh-pack fm boot again exceeded the 1800 s bench health cap — the
+documented no-bench warm boot (plain `emmy serve`, wait `/health`, kill) wrote the pack, and the
+benched boot then rode it. The sink is IN the deployed pack: `__sq` appears in all 48 layers'
+`post.decode` plans (192 refs).
+
+| arm | out tok/s | TTFT mean/med (ms) | TPOT mean/med (ms) |
+| --- | --: | --: | --: |
+| stock vLLM | 57.01 | 561 / 547 | 17.41 / 17.42 |
+| emmy fm (stat-sink seeded) | 49.57 | **478 / 465** | 20.06 / 20.07 |
+
+The stock baseline reproduces the predecessor session's numbers exactly (56.97 / 563-548 / 17.42-17.41
+— no drift), so the arms are comparable across sessions. Emmy keeps its TTFT lead (~15% under stock);
+the decode TPOT residual is 20.06 vs the predecessor's post-session 19.83 — the m32 sink's expected
+−0.08 ms/step is BELOW the boot-to-boot noise floor for this config (this boot also ran without the
+predecessor's twins.db evidence tier), so the serving A/B neither confirms nor refutes the twin-level
+win at c=1 on the 5090; the twins and the 4090 numbers (−0.25 ms/step class) are the evidence of
+record. The remaining single-batch gap stays the computed-A / attention decode class, as before.
 
 ## Not done / follow-ups
 

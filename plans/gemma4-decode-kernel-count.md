@@ -61,6 +61,12 @@ re-decomposes offset reads; the WS1.x fold precedent). Weight concat itself is a
 
 ## WS2 — kill the memset nodes (zero from the preceding kernel) [small, cheap, second]
 
+**STATUS 2026-07-22: LANDED** — `lowering/cuda/005_delegate_zero_init` + `ZeroPrologue` stmt +
+`CudaOp.zero_prologues` planner plumbing. Decode twins audit (mocked 5090): pre32 8 launches / post32 7 /
+pre32-global 6 / post32-global 7, with post twins delegating 2 zero-inits each and ZERO remaining MEMSET nodes.
+First-launch and symbolic-accumulator memsets are kept by design. The sink-site re-A/B this WS re-opens
+(qknorm/m64 margins) is still pending — fold into the next golden pass.
+
 Every atomic/aux buffer (`g4a` outputs, cut channel workspaces on sm_89, the sink's `__sq`) pays a
 per-launch MEMSET node (~1.3 µs isolated, partially overlapped in-stream). The zero can ride the
 PRECEDING launch in the same stream instead — for split forms, the partial launches strictly before the

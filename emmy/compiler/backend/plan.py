@@ -75,6 +75,7 @@ class LaunchSpec:
     block: tuple
     smem_bytes: int
     zero_outputs: tuple[str, ...]
+    zero_prologues: tuple[str, ...] = ()
     tma_descriptors: tuple[TmaDescMeta, ...] = ()
     runtime_args: tuple[str, ...] = ()
 
@@ -176,6 +177,7 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
                 block=tuple(_normalize_spec(s) for s in op.block),
                 smem_bytes=op.smem_bytes,
                 zero_outputs=tuple(op.zero_outputs),
+                zero_prologues=tuple(getattr(op, "zero_prologues", ())),
                 tma_descriptors=tuple(op.tma_descriptors),
                 runtime_args=tuple(getattr(op, "runtime_args", ())),
             )
@@ -351,6 +353,7 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
                 "block": [[_factor_to_json(f) for f in spec] for spec in lc.block],
                 "smem": lc.smem_bytes,
                 "zero_outputs": list(lc.zero_outputs),
+                **({"zero_prologues": list(lc.zero_prologues)} if lc.zero_prologues else {}),
                 "runtime_args": list(lc.runtime_args),
                 "cuda": {
                     "tma": [
@@ -414,6 +417,7 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
                 block=tuple(tuple(_factor_from_json(f) for f in spec) for spec in lc["block"]),
                 smem_bytes=int(lc["smem"]),
                 zero_outputs=tuple(lc.get("zero_outputs", ())),
+                zero_prologues=tuple(lc.get("zero_prologues", ())),
                 tma_descriptors=tuple(
                     TmaDescMeta(name=t["name"], src_buf=t["src_buf"], box_extents=tuple(t["box_extents"]), swizzle=t["swizzle"])
                     for t in lc.get("cuda", {}).get("tma", ())

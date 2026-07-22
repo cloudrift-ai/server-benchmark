@@ -1048,3 +1048,45 @@ class RowAccum(Stmt):
             f"{p1}}}",
             f"{pad}}}",
         ]
+
+
+@dataclass(frozen=True)
+class ZeroPrologue(Stmt):
+    """Zero another launch's atomic accumulator from THIS kernel — the delegated zero-init
+    (``lowering/cuda/005_delegate_zero_init``).
+
+    An atomic accumulator (atomic ``Write`` / ``RegStore`` output, a ``RowAccum`` aux buffer)
+    must be zero before its kernel launches; the runtime's per-launch ``zero_outputs`` memset
+    costs a CUDA-graph MEMSET node per site. This stmt rides a kernel that launches strictly
+    BEFORE the accumulator's kernel in the same stream (a dataflow predecessor — topological
+    launch order guarantees it), so stream serialization makes the zero happen-before the
+    atomics and the MEMSET node disappears. CTA 0 alone writes; the zero is over raw 32-bit
+    words (``words = nbytes / 4`` — all-zero bytes are 0.0 in every buffer dtype, the same
+    argument the runtime memset makes), so the render never needs the buffer's dtype.
+
+    ``dst`` names the target buffer — it joins the carrying kernel's ``outputs`` (and thus its
+    signature / ``arg_names``) WITHOUT a graph edge: an edge would be a cycle (the target is
+    the downstream kernel's own output). The slab planner learns the earlier first-write
+    through ``CudaOp.zero_prologues`` instead."""
+
+    dst: str  # the delegated buffer (the downstream kernel's atomic accumulator)
+    words: int  # 32-bit word count (nbytes / 4; the delegating rule guarantees divisibility)
+
+    def external_writes(self) -> tuple[str, ...]:
+        return (self.dst,)
+
+    def has_side_effects(self) -> bool:
+        return True
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}zero {self.dst}[0:{self.words}w]  (delegated zero-init, CTA 0)"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        pad = _pad(ctx.indent)
+        p1 = _pad(ctx.indent + 1)
+        return [
+            f"{pad}if (blockIdx.x == 0) {{",
+            f"{p1}int* _zp_{self.dst} = (int*){self.dst};",
+            f"{p1}for (int _zi = threadIdx.x; _zi < {self.words}; _zi += blockDim.x) _zp_{self.dst}[_zi] = 0;",
+            f"{pad}}}",
+        ]

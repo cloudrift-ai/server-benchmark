@@ -2068,7 +2068,14 @@ class KernelOp(BodyOp):
     ``CpAsyncCopy.src`` and ``TmaDescriptor.src_buf`` also name kernel
     input parameters (the descriptor parameter itself is host-built and
     appended by the CUDA backend's argument pipeline, not a graph
-    buffer)."""
+    buffer).
+
+    ``zero_delegated`` lists atomic-accumulator buffers whose per-launch zero-init a
+    dataflow-PREDECESSOR kernel carries as a ``ZeroPrologue`` stmt
+    (``lowering/cuda/005_delegate_zero_init``) — ``010_lower_kernelop`` drops them from the
+    ``CudaOp.zero_outputs`` memset list."""
+
+    zero_delegated: tuple[str, ...] = ()
 
     @cached_property
     def smem_buffers(self) -> dict[str, Smem]:

@@ -18,7 +18,7 @@ from emmy.compiler.ir.cuda import CudaOp, TmaDescMeta
 from emmy.compiler.ir.kernel import KernelOp, Tile
 from emmy.compiler.ir.kernel.ir import RegStore, TmaDescriptor
 from emmy.compiler.ir.kernel.render import _BLOCK_SIZE, render_kernelop
-from emmy.compiler.ir.stmt import Write
+from emmy.compiler.ir.stmt import RowAccum, Write
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 
 PATTERN = [Pattern("root", KernelOp)]
@@ -28,7 +28,8 @@ def _atomic_outputs(kernel: KernelOp) -> tuple[str, ...]:
     """Output buffers an atomic reduce-write (``030_split_reduce``'s atomic finalize) accumulates
     into — they must be zero-init'd before each launch (``CudaOp.zero_outputs``), since every
     contributing CTA ``atomicAdd``\\ s into the same cell. The scalar tier's atomic ``Write``
-    survives materialization verbatim; the mma tier's became a ``RegStore(atomic=True)``.
+    survives materialization verbatim; the mma tier's became a ``RegStore(atomic=True)``; a
+    ``RowAccum`` (the stat-sink epilogue) accumulates its aux row-stat buffer the same way.
     Dict-keyed for stable order."""
     seen: dict[str, None] = {}
     for s in kernel.body.iter():
@@ -36,6 +37,8 @@ def _atomic_outputs(kernel: KernelOp) -> tuple[str, ...]:
             seen.setdefault(s.output, None)
         elif isinstance(s, RegStore) and s.atomic:
             seen.setdefault(s.dst_buffer, None)
+        elif isinstance(s, RowAccum):
+            seen.setdefault(s.dst, None)
     return tuple(seen)
 
 

@@ -600,10 +600,13 @@ def evidence_row_vouches(cand_tun: dict, row_tun: dict) -> bool:
     wildcard-match a ``cut`` candidate deploys the catastrophic cold cut at the fused row's
     µs (and the content tie-break then PREFERS it: ``('PLACE@cone','cut') <
     ('PLACE@cone','fuse')``). The cut may only win where it was actually measured, so a
-    ``cut`` candidate requires the row to record the placement explicitly."""
+    ``cut`` candidate requires the row to record the placement explicitly. ``PLACE@stat=sink``
+    (the row-stat sink, an identical kernel-set change) takes the same clause."""
     if any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items()):
         return False
-    return not (str(cand_tun.get("PLACE@cone")) == "cut" and "PLACE@cone" not in row_tun)
+    if str(cand_tun.get("PLACE@cone")) == "cut" and "PLACE@cone" not in row_tun:
+        return False
+    return not (str(cand_tun.get("PLACE@stat")) == "sink" and "PLACE@stat" not in row_tun)
 
 
 def stamp_schedule_families(knobs: dict) -> dict[str, str]:

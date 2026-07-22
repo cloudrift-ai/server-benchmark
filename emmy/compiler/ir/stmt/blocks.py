@@ -9,7 +9,7 @@ tile flavors of the (now demolished) tile IR.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from emmy.compiler.dtype import F32 as _F32
 from emmy.compiler.ir.axis import Axis, AxisRole
@@ -436,6 +436,10 @@ class Cond(Stmt):
         pad = _pad(ctx.indent)
         cond = self.cond.render(ctx)
         inner = ctx.child()
+        if inner.full_block:
+            # A conditional scope is divergent — a block-fold ``RowAccum`` (which barriers)
+            # inside it would hang the masked-off threads.
+            inner = replace(inner, full_block=False)
         body = render_body(self.body, inner)
         out = [f"{pad}if ({cond}) {{", *body, f"{pad}}}"]
         if self.else_body:

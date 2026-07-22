@@ -1034,6 +1034,50 @@ configs:
     knobs: {TILE: '', REDUCE: 'b128', STAGE: '', WSPEC: '', RASTER: ''}
     emmy_us: 145.8
     cublas_us: 146.6
+  # The M=4096 gate⊗up route on sm_89 (round 2, after the split halves above landed): PLACE@cone=cut
+  # both layouts. The recorded us is the STD-lane total (lane-agnostic knobs, the 5090 convention) —
+  # the sm_89 STD cut runs well below eager (the std halves are 0.6-0.7x here) but still 1.5x ahead
+  # of the least-bad fused tile behind it; the FM lane deploys the same rows with its gm8 halves at
+  # ~2x2103 + combine 676 ≈ 4.9 ms vs eager 6.5 — the perf route. (.lin cut is a 1x measurement, can
+  # 2x at 0.4% — the eager-bench flake that intermittently drops runs also lives on this box.)
+  - kernel: mlp_geglu
+    name: gemma4_12b.mlp_geglu.m4096.cut
+    M: 4096
+    H: 3840
+    inter: 15360
+    dtype: 'fp16'
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 8727.1
+    cublas_us: 6422.5
+  - kernel: mlp_geglu
+    name: gemma4_12b.mlp_geglu.m4096.cut.lin
+    M: 4096
+    H: 3840
+    inter: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 10936.8
+    cublas_us: 6503.4
+  - kernel: mlp_geglu
+    name: gemma4_12b.mlp_geglu.m4096
+    M: 4096
+    H: 3840
+    inter: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 12131.3
+    cublas_us: 6424.6
+  - kernel: mlp_geglu
+    name: gemma4_12b.mlp_geglu.m4096.lin
+    M: 4096
+    H: 3840
+    inter: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 16152.6
+    cublas_us: 6486.0
   # ---- serving-layout (.lin) entries — re-tuned 2026-07-20 with staged transposed-B ---------------
   # cp.async now STAGES a transposed B on sm_89 (the N-major B slab + software swizzle; TMA stays
   # sm_90-gated), so the serving F.linear forks get the same d2/cp/ring prefetch ring as their

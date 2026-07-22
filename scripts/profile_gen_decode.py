@@ -51,13 +51,15 @@ def main():
     print(f"layers={nL} hidden={H} attn_width={attn_width} decode_path={path}")
 
     ids = [5]
-    attn0 = np.zeros((1, attn_width), dtype=npd)  # vLLM attention faked (timing is value-independent)
+    # Per-layer attention width — gemma-4's global layers are wider (head_dim 512) than its
+    # sliding ones, so a single attn buffer misfeeds the global post programs.
+    attn0 = [np.zeros((1, m[0] * m[1]), dtype=npd) for m in (runner.layer_meta(i) for i in range(nL))]
 
     def decode_step():
         h = runner.embed(ids)
         for layer in range(nL):
             runner.forward_layer_pre(layer, h)  # q,k,v discarded (attention is vLLM's)
-            h = runner.forward_layer_post(layer, attn0, h)
+            h = runner.forward_layer_post(layer, attn0[layer], h)
         return runner.final_norm(h)
 
     for _ in range(args.warmup):
@@ -84,8 +86,9 @@ def main():
     G = 0.0
     if use_decode:
         hpad = np.zeros((args.bucket, H), dtype=npd)
-        apad = np.zeros((args.bucket, attn_width), dtype=npd)
         for layer in range(nL):
+            m = runner.layer_meta(layer)
+            apad = np.zeros((args.bucket, m[0] * m[1]), dtype=npd)
             G += gpu_ms(runner._pre_decode[layer], [hpad])
             G += gpu_ms(runner._post_decode[layer], [apad, hpad])
 

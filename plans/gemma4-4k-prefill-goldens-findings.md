@@ -168,3 +168,20 @@ KV 17,727 → **27,532 tokens** (now ABOVE stock's 22,810). Re-run:
 
 fm ≥ std restored on the long workload; emmy fm TTFT BEATS stock (1985/1789 vs 2449/2081); residual
 throughput 345.6 vs 371.7 = 0.93x is entirely the decode TPOT class (22.7 vs 21.0 = 1.08x).
+
+## Decode-step decomposition (the residual, measured — where the next session starts)
+
+Runner-level profile (bucket 32, fm, `scripts/profile_gen_decode.py` — now fixed for gemma-4's
+per-layer attention widths): pure twin kernel time **14.85 ms/step** (captured windows, all 48
+layers). Serving TPOT 20.1 = twins 14.85 + lm_head ~1.2 + vLLM attention + sampler/graph overhead.
+Within the twins: the weight-streaming mains sit AT cuBLAS bandwidth parity per kernel (down 76 µs
+vs eager 79; gate/up halves 76-78 vs 76-78) — ~13.4 ms is irreducible weight streaming at the
+achieved bandwidth — and ~1.4 ms/step is the small-kernel tail (input/post norms 3.7-3.8 µs each,
+qknorms 1.2-1.6, split-K finalizes 1.1-1.9, reshapes 0.8, cut glue ~3.9). Stock reaches 17.4 by
+fusing that tail into matmul/attention epilogues and streaming slightly more efficiently. Both
+remaining TPOT levers are research-class: (a) epilogue-fuse the norm/finalize/reshape tail into the
+neighboring matmuls (~1.4 ms bound), (b) the warp-specialized computed-A pipeline (the bandwidth
+gap). Dataset levers are exhausted — per-kernel floors are hit. (Caveat re-learned: bench
+fresh-captured twins, not the stale `decode-twin-readiness` files — the stale pre32 realizes
+unstaged picks that misread as a coverage gap; the serving boot's fresh captures deploy the staged
+goldens at ~30 µs.)

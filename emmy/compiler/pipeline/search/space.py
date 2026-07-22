@@ -467,13 +467,14 @@ SPLITK_WIDTHS: tuple[int, ...] = (2, 4, 8)
 
 
 def splitk_moves(*, warp: bool) -> list[str]:
-    """The cross-CTA split-K ``REDUCE`` codec candidates: deferred-kernel finalize (``g<w>k``) for
-    both tiers, in-place atomic (``g<w>a``) for the scalar tier only (an mma C-fragment cannot
-    ``atomicAdd`` — ``RegStore`` has no atomic form). These EXTEND the serial ``""`` option-0."""
-    moves = [f"g{w}k" for w in SPLITK_WIDTHS]
-    if not warp:
-        moves += [f"g{w}a" for w in SPLITK_WIDTHS]
-    return moves
+    """The cross-CTA split-K ``REDUCE`` codec candidates, both tiers each: the deferred-kernel
+    finalize (``g<w>k``, an f32 workspace + sibling combine kernel) and the in-place atomic
+    (``g<w>a``, one kernel — the partial ``atomicAdd``\\ s into the zero-init'd output; the mma
+    tier rides ``RegStore.atomic``'s packed-pair red). The scheduler's ``atomic_ok`` gate
+    (``_reduce_candidates``) keeps ``a`` rows off multi-fold / non-distributive-projection nodes.
+    These EXTEND the serial ``""`` option-0."""
+    del warp  # both tiers share the catalog; per-node legality lives in the scheduler's gates
+    return [f"g{w}{f}" for w in SPLITK_WIDTHS for f in ("k", "a")]
 
 
 def coop_reduce_moves() -> list[str]:

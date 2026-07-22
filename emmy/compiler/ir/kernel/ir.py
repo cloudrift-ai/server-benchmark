@@ -1676,7 +1676,14 @@ class RegStore(Stmt):
     (+1) < bound`` per col. ``None`` (the default) renders the unguarded
     fast path unchanged. ``m_guard`` alone keeps the vectorized row-pair
     stores (a pair shares a row); an ``n_guard`` forces per-element scalar
-    stores (the pair straddles the column bound)."""
+    stores (the pair straddles the column bound).
+
+    ``atomic`` renders each store as an ``atomicAdd`` accumulate instead of a
+    plain assign — ``030_split_reduce``'s atomic finalize on the mma tier: every
+    split partition's C fragment adds into the (per-launch zero-init'd) output.
+    f16 / bf16 keep the vectorized row pair (native packed-pair ``atomicAdd``);
+    an f32 destination has no packed atomic below sm_90, so it drops to
+    per-element scalar ``atomicAdd``\\ s."""
 
     dst_buffer: str
     dst_index: tuple
@@ -1686,6 +1693,7 @@ class RegStore(Stmt):
     epilogue: RegEpilogue | None = None
     m_guard: tuple[Expr, Expr] | None = None
     n_guard: tuple[Expr, Expr] | None = None
+    atomic: bool = False
 
     def deps(self) -> tuple[str, ...]:
         extra = () if self.epilogue is None else tuple(fr for _, fr in self.epilogue.extra_accs)
@@ -1720,7 +1728,25 @@ class RegStore(Stmt):
             guards += f" m<{self.m_guard[1].pretty()}"
         if self.n_guard is not None:
             guards += f" n<{self.n_guard[1].pretty()}"
-        return [f"{indent}RegStore {self.dst_buffer}[{idx}] <- {self.frag}{epi}{guards} (ldm={self.ldm or 'auto'})"]
+        acc = " (atomic)" if self.atomic else ""
+        return [f"{indent}RegStore {self.dst_buffer}[{idx}] <- {self.frag}{epi}{guards}{acc} (ldm={self.ldm or 'auto'})"]
+
+    def _pair_store(self, addr: str, v0: str, v1: str, vec2: str, packer: str) -> str:
+        """One vectorized row-pair store line — a plain assign, or (``atomic``) the packed-pair
+        ``atomicAdd`` (native f16x2 / bf16x2 red; the caller keeps f32 off this path pre-sm90)."""
+        tgt = f"reinterpret_cast<{vec2}*>(&{self.dst_buffer}[{addr}])"
+        if self.atomic:
+            return f"atomicAdd({tgt}, {packer}({v0}, {v1}));"
+        return f"*{tgt} = {packer}({v0}, {v1});"
+
+    def _elem_store(self, addr: str, val: str, dst_dt: str) -> str:
+        """One per-element store line — plain assign (the implicit f32→dst conversion), or
+        (``atomic``) a scalar ``atomicAdd`` with the conversion made explicit (no float overload
+        on a ``__half*`` / ``__nv_bfloat16*`` destination)."""
+        if self.atomic:
+            conv = {"f16": "__float2half({})", "bf16": "__float2bfloat16({})"}.get(dst_dt, "{}")
+            return f"atomicAdd(&{self.dst_buffer}[{addr}], {conv.format(val)});"
+        return f"{self.dst_buffer}[{addr}] = {val};"
 
     def _element_values(self, ctx: RenderCtx) -> tuple[list[list[str]], list[str]]:
         """``(per_element_preamble, values)``: the four per-lane store values,
@@ -1830,20 +1856,20 @@ class RegStore(Stmt):
             head, base, close = [f"{pad}{{ {lane_stmt}"], f"{pad}  ", " }"
         body = [f"{base}{ln}" for group in pre for ln in group]
         vec2 = {"f16": "__half2", "bf16": "__nv_bfloat162", "f32": "float2"}.get(dst_dt)
-        if vec2 is not None:
+        if vec2 is not None and not (self.atomic and dst_dt == "f32"):  # no packed f32 atomicAdd pre-sm90
             packer = {"f16": "__floats2half2_rn", "bf16": "__floats2bfloat162_rn", "f32": "make_float2"}[dst_dt]
             lo = f"{flat} + _g * {ldm} + _t * 2"
             hi = f"{flat} + (_g + 8) * {ldm} + _t * 2"
             body += [
-                f"{base}*reinterpret_cast<{vec2}*>(&{self.dst_buffer}[{lo}]) = {packer}({vals[0]}, {vals[1]});",
-                f"{base}*reinterpret_cast<{vec2}*>(&{self.dst_buffer}[{hi}]) = {packer}({vals[2]}, {vals[3]});",
+                f"{base}{self._pair_store(lo, vals[0], vals[1], vec2, packer)}",
+                f"{base}{self._pair_store(hi, vals[2], vals[3], vec2, packer)}",
             ]
-        else:  # per-element scalar stores (dtypes without a 2-vector packer)
+        else:  # per-element scalar stores (dtypes without a 2-vector packer; atomic f32)
             body += [
-                f"{base}{self.dst_buffer}[{flat} + _g * {ldm} + _t * 2 + 0] = {vals[0]};",
-                f"{base}{self.dst_buffer}[{flat} + _g * {ldm} + _t * 2 + 1] = {vals[1]};",
-                f"{base}{self.dst_buffer}[{flat} + (_g + 8) * {ldm} + _t * 2 + 0] = {vals[2]};",
-                f"{base}{self.dst_buffer}[{flat} + (_g + 8) * {ldm} + _t * 2 + 1] = {vals[3]};",
+                f"{base}{self._elem_store(f'{flat} + _g * {ldm} + _t * 2 + 0', vals[0], dst_dt)}",
+                f"{base}{self._elem_store(f'{flat} + _g * {ldm} + _t * 2 + 1', vals[1], dst_dt)}",
+                f"{base}{self._elem_store(f'{flat} + (_g + 8) * {ldm} + _t * 2 + 0', vals[2], dst_dt)}",
+                f"{base}{self._elem_store(f'{flat} + (_g + 8) * {ldm} + _t * 2 + 1', vals[3], dst_dt)}",
             ]
         if close:
             body[-1] += close
@@ -1873,7 +1899,7 @@ class RegStore(Stmt):
             ]
         lines = [f"{pad}{{ const int _g = {lane} >> 2; const int _t = {lane} & 3;"]
         vec2 = {"f16": "__half2", "bf16": "__nv_bfloat162", "f32": "float2"}.get(dst_dt)
-        if self.n_guard is None and vec2 is not None:
+        if self.n_guard is None and vec2 is not None and not (self.atomic and dst_dt == "f32"):
             # Row-guarded vectorized pairs: elements {0,1} share row _g,
             # {2,3} share row _g+8; each pair's preamble + store sit inside
             # the pair's row check.
@@ -1882,7 +1908,7 @@ class RegStore(Stmt):
                 addr = f"{flat} + {addr_row} * {ldm} + _t * 2"
                 lines.append(f"{pad}  if ({m_pred[pair]}) {{")
                 lines += [f"{pad}    {ln}" for ln in (*pre[pair], *pre[pair + 1])]
-                lines.append(f"{pad}    *reinterpret_cast<{vec2}*>(&{self.dst_buffer}[{addr}]) = {packer}({vals[pair]}, {vals[pair + 1]});")
+                lines.append(f"{pad}    {self._pair_store(addr, vals[pair], vals[pair + 1], vec2, packer)}")
                 lines.append(f"{pad}  }}")
             lines.append(f"{pad}}}")
             return lines
@@ -1893,7 +1919,7 @@ class RegStore(Stmt):
             addr = f"{flat} + {row} * {ldm} + _t * 2 + {i & 1}"
             lines.append(f"{pad}  if ({preds}) {{")
             lines += [f"{pad}    {ln}" for ln in pre[i]]
-            lines.append(f"{pad}    {self.dst_buffer}[{addr}] = {vals[i]};")
+            lines.append(f"{pad}    {self._elem_store(addr, vals[i], dst_dt)}")
             lines.append(f"{pad}  }}")
         lines.append(f"{pad}}}")
         return lines
@@ -2375,6 +2401,10 @@ def _(s: RegStore, rename, sigma, axis_fn):
         epilogue=epilogue,
         m_guard=_sub_guard(s.m_guard),
         n_guard=_sub_guard(s.n_guard),
+        # ``atomic`` MUST thread through: dropping it here silently degraded a rewritten (e.g.
+        # loopify-rolled) atomic split-K store to racing plain assigns — the partitions then
+        # clobber instead of accumulate, a numerically-wrong kernel with no loud failure.
+        atomic=s.atomic,
     )
 
 

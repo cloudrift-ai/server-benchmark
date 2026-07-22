@@ -254,7 +254,11 @@ and picks the offered candidate prefix-consistent with the fastest recorded entr
 the A/B pin gate's canonical matching. An axis-keyed golden key (a static attention golden's `TILE@dd` + `TILE@pj`)
 is all-or-nothing; a bare golden key on a multi-axis family carries the pin-resolution semantics — one plan,
 satisfied by ANY same-family realization (how a dynamic attention golden's single bare `TILE` matches the masked
-fork's axis-keyed leaves) — and a fast-math entry self-excludes when its atom isn't offered (gate off). Goldens are
+fork's axis-keyed leaves) — and a fast-math entry self-excludes when its atom isn't offered (gate off). The
+fastest-first pick also grounds the **fm-never-loses invariant** (statically gated in `test_golden_configs.py`):
+within one card's rows of a name, a fast-math entry recording ABOVE the best standard sibling can never realize
+(the std row matches first in either lane), so such rows are dropped — an absent fm row just means the fm lane
+deploys the std config there. Goldens are
 **consulted, never trained on**: they enter no reservoir, no checkpoint, no dataset (they are the held-out
 acceptance set). Golden µs is deployable-regime truth and never arbitrates a non--O3 compile. A shape match none of
 whose entries realizes against the offer logs a loud enumeration-drift warning and falls through to the tiers below.
@@ -946,10 +950,11 @@ stored knob (mirrors `PLACE`'s `auto`).
 **`REDUCE`** (STR codec, `010_recognize` / `_schedule`) — the reduce-axis partition codec `g<n>[a|k]/b<n>/r<n>`: `g`
 cross-CTA split-K (+ finalize letter), `b` cooperative-thread fold, `r` ILP register fold. Empty = serial (the
 per-thread remainder is derived, never spelled). The cross-CTA split is the `g<n>` field (GRID stage), and the
-**finalize** is that field's trailing letter — `g<n>a` = in-place `atomicAdd` (one kernel, additive carriers only),
-`g<n>k` = deferred `__partial` workspace + a sibling combine kernel (any carrier; the only legal arm for the twisted
-flash `(m, l, O)` split-KV). Pin via `EMMY_REDUCE=g2k` (one flat knob — no per-axis `EMMY_REDUCE_<axis>`, no
-`EMMY_FINALIZE`). The split is consumed by `lowering/tile/030_split_reduce` as a graph rewrite (partial + finalize); the
+**finalize** is that field's trailing letter — `g<n>a` = in-place `atomicAdd` (one kernel, additive single-fold
+carriers only; both tiers — an mma partial's C fragment rides `RegStore.atomic`, the packed f16x2/bf16x2 red, at the
+cost of one output-dtype rounding per partition), `g<n>k` = deferred `__partial` workspace + a sibling combine kernel
+(any carrier; the only legal arm for the twisted flash `(m, l, O)` split-KV and for a multi-channel ⊗-combine). Pin
+via `EMMY_REDUCE=g2k` (one flat knob — no per-axis `EMMY_REDUCE_<axis>`, no `EMMY_FINALIZE`). The split is consumed by `lowering/tile/030_split_reduce` as a graph rewrite (partial + finalize); the
 letter round-trips through `ReducePlan.parse`/`spell` and reads back as `ReducePlan.finalize`. The atomic finalize
 applies the kernel's projection epilogue **per partition** before the `atomicAdd`, so it is only correct when that
 projection *distributes* over the add (`Σ φ(xₛ) = φ(Σ xₛ)`): a constant scale like `mean`'s `×1/N` distributes and
@@ -1041,7 +1046,7 @@ moveset are also documented there.
 | `frontend/decomposition/` | Rewrite frontend ops (`LinearOp`, `MatmulOp`, `SdpaOp`, layout ops, fused `rms_norm` / `layer_norm` / `softmax`) into tensor-IR primitives + layout-only `IndexMapOp`s, broadcast-explicit via `_broadcast.broadcast_to`. |
 | `frontend/optimization/`  | `compose_indexmaps`: collapse chains of single-source / single-consumer `IndexMapOp` into one coord_map, so trivial layout kernels don't block fusion. |
 | `loop/lifting/`           | `lift_*` rules wrap each surviving tensor primitive in a trivial one-op `LoopOp`.            |
-| `loop/fusion/`            | `split_shared_indexmap` (first) fuses a fan-out pure-indexmap `LoopOp` into all its consumers in one rewrite; `merge_loop_ops` then splices adjacent single-consumer `LoopOp` pairs; `dedup_loads` drops identical `(input, index)` Loads. Folding scalar-constant broadcasts into consumers cuts Qwen3-Embedding-0.6B from 394 → 337 kernels. |
+| `loop/fusion/`            | `split_shared_indexmap` (first) fuses a fan-out pure-indexmap `LoopOp` into all its consumers in one rewrite; `merge_loop_ops` then splices adjacent single-consumer `LoopOp` pairs; `dedup_loads` drops identical `(input, index)` Loads; `fold_output_reshape` retargets a producer's `Write` through a graph-output memcpy-identity flatten (verified exactly over the finite domain; clean affine re-decomposition onto the output strides) — the copy kernel the splicer can't take (reduce-bearing producer × div/mod reader σ). Folding scalar-constant broadcasts into consumers cuts Qwen3-Embedding-0.6B from 394 → 337 kernels. |
 | `loop/recognize/`         | Empty (retired) — flash / online-softmax recognition moved into `lowering/tile/010_recognize` (the `_flash` / `_softmax` helpers), so the loop dialect carries no pattern recognizers. |
 | `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) + `stamp_structural_features` (the `S_*` dict). Runs last in the loop dialect — after fusion and recognition — so every kernel is named / stamped against its final body. |
 | `lowering/tile/`          | `LoopOp → TileOp` over the block-DAG Tile IR: `010_recognize` (recognition + inline scheduling via the `_schedule` helper — maps the grid, picks the reduce/output fragment, and **atomizes** — resolves the algebra→atom binding onto the schedule via `_atomize.py` when each option is built, rejecting an unbindable atom at fork construction) → `030_split_reduce`. Dispatch is on the carrier algebra (`MAP` / `SEMIRING` / `MONOID`), never a named shape. |

@@ -132,20 +132,22 @@ def _bind_plan_constants(plan, sources, cache):
     weight footprint). ``cache`` must be scoped to one wrapper — param paths are
     wrapper-relative, so a cross-wrapper cache would collide."""
     from emmy.compiler.backend.plan import apply_weight_loads
+    from emmy.compiler.loader.binder import assemble_source
 
     out = {}
     for nid, w in plan.weights.items():
-        if w.source_path not in sources or w.load_ops is None:
+        src = assemble_source(w, sources)
+        if src is None or w.load_ops is None:
             continue
         if cache is None:
-            out[nid] = apply_weight_loads(sources[w.source_path], w.load_ops)
+            out[nid] = apply_weight_loads(src, w.load_ops)
             continue
         import cupy as cp
 
-        key = (w.source_path, w.load_ops)
+        key = (w.source_path, w.source_parts, w.load_ops)
         arr = cache.get(key)
         if arr is None:
-            arr = cp.asarray(apply_weight_loads(sources[w.source_path], w.load_ops))
+            arr = cp.asarray(apply_weight_loads(src, w.load_ops))
             cache[key] = arr
         out[nid] = arr
     return out

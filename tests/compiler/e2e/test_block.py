@@ -85,7 +85,7 @@ def _compile_and_run_block(model_id: str, seq_len: int = 32, backend_kind: str =
     compiled = backend.compile(graph)
 
     from emmy.compiler.ir.base import ConstantOp
-    from emmy.compiler.loader.binder import apply_load_ops
+    from emmy.compiler.loader.binder import apply_load_ops, assemble_source
 
     input_set = set(compiled.inputs)
 
@@ -113,6 +113,12 @@ def _compile_and_run_block(model_id: str, seq_len: int = 32, backend_kind: str =
                     arr = param.detach().cpu().numpy()
                     input_data[nid] = apply_load_ops(arr, node.op.load_ops)
                     break
+            if nid not in input_data and node.op.source_parts:
+                # A merged sibling-linear weight: assemble the axis-0 concat from the part paths.
+                sources = {key: param.detach().cpu().numpy() for key, param in block.named_parameters()}
+                src = assemble_source(node.op, sources)
+                if src is not None:
+                    input_data[nid] = apply_load_ops(src, node.op.load_ops)
             if nid not in input_data and node.op.value is not None:
                 input_data[nid] = np.array([node.op.value], dtype=np.float32)
 

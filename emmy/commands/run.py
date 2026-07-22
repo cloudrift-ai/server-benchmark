@@ -1539,9 +1539,17 @@ async def bench_lowered_vs_torch(frontend, lowered, backend, *, seed, do_bench, 
     for gph in ([frontend] if frontend is not None else []) + [lowered]:
         for node in gph.nodes.values():
             op = node.op
-            if isinstance(op, ConstantOp) and op.value is None and op.source_path and op.source_path not in sources:
+            if not (isinstance(op, ConstantOp) and op.value is None):
+                continue
+            if op.source_path and op.source_path not in sources:
                 shp = _static(op.source_shape or node.output.shape)
                 sources[op.source_path] = rng.standard_normal(shp, dtype=np.float32) * 0.02
+            # A merged (source_parts) constant draws one random source PER PART, keyed by the
+            # part path — the same tensors the pre-merge frontend reference binds its separate
+            # weights from, so emmy's concat and the torch ref stay numerically aligned.
+            for path, shp in op.source_parts:
+                if path not in sources:
+                    sources[path] = rng.standard_normal(_static(shp), dtype=np.float32) * 0.02
 
     input_data: dict[str, object] = {}
     input_tensors: dict[str, object] = {}

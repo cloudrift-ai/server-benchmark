@@ -230,3 +230,13 @@ The deadline-correlation below the driver line remains UNEXPLAINED (suspect: the
 (cold-start lazy SASS load / carveout / first-touch stalls are not hangs), the
 `EMMY_KERNEL_TIMEOUT_MS` env override, and iteration-tagged watchdog labels. The golden YAML's
 `--warmup 0` caveat is removed; verified 3/3 clean at pure defaults.
+
+## Not reached this session
+
+WS3 (sdpa→o_proj staging — materialize the flash-output transpose or extend the A-fill closure to
+strided cp.async) was not started: it affects the whole-model `emmy run` path only, not serving
+TPOT, and the session's time went to the two unplanned wins (k8-serial + the 4090 cut flip), the
+RegStore.atomic correctness fix, and closing WS2 with proof. It carries over unchanged from the
+research plan (whose WS1/WS2/WS4 are now executed — plan pruned per the plans/ policy). The
+stat-sink design (WS1 items 2-3's real form, ~0.5 ms/step bound) is this file's "next bounded
+workstream" section and is now the top-ranked decode lever, per the WS2 corollary.

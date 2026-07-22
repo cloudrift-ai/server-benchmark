@@ -1365,9 +1365,54 @@ configs:
     K: 15360
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k4', REDUCE: 'g4k', STAGE: 'd2/cp/ring', WSPEC: '', RASTER: ''}
-    emmy_us: 139.8
-    cublas_us: 146.4
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k4', REDUCE: 'g4a', STAGE: 'd2/cp/ring', WSPEC: '', RASTER: ''}
+    emmy_us: 137.9
+    cublas_us: 141.7
+  # [fm] + the M=32/M=64 gate/up split halves (2026-07-22, single-kernel atomic split g4a — the
+  # deferred finalize + workspace round-trip removed; RegStore.atomic red under the cp.async ring).
+  # g4a is the transfer of the 5090 flip: gate half m32 146.8->137.5 (eager parity), m64
+  # 160.3->141.0 (beats eager 144.9), down 140.0->137.5. The split-half rows are NEW on this card
+  # (the m32/m64 cut-channel producers previously deployed from db/prior only).
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.m32.lin
+    M: 32
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f4x1/k4', REDUCE: 'g4a', STAGE: 'd2/cp/ring', WSPEC: '', RASTER: ''}
+    emmy_us: 137.5
+    cublas_us: 141.7
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up_split.m32.lin
+    M: 32
+    N: 15360
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4a', STAGE: 'd2/cp/ring', WSPEC: '', RASTER: ''}
+    emmy_us: 137.9
+    cublas_us: 136.2
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up_split.m32.lin
+    M: 32
+    N: 15360
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', STAGE: 'd2/cp/ring', WSPEC: '', RASTER: ''}
+    emmy_us: 137.5
+    cublas_us: 136.2
+  - kernel: matmul
+    name: gemma4_12b.mlp_gate_up_split.m64.lin
+    M: 64
+    N: 15360
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', STAGE: 'd2/cp/ring', WSPEC: '', RASTER: ''}
+    emmy_us: 141.0
+    cublas_us: 144.9
   # (The fm sibling — f16acc w1x8/f2x2/k2 g8k at 251.1 — was dropped 2026-07-21 by the fm-never-loses
   # invariant: 1.8x above the std row, unrealizable under the fastest-first picker; the fm lane now
   # deploys the std config here.)

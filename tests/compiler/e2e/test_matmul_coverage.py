@@ -1942,3 +1942,42 @@ def test_raster_symbolic_grid_stays_flat(monkeypatch):
     rows = enumerate_graph(g, Context.from_target((12, 0)))
     vals = {r.get("RASTER") for r in rows if any(k.split("@")[0] == "TILE" for k in r)}
     assert vals == {""}, f"symbolic grids must stay flat: {vals}"
+
+
+def test_regstore_rewrite_preserves_atomic():
+    """``RegStore``'s registered ``_rewrite`` reconstructs the stmt field-by-field — dropping
+    ``atomic`` there silently degraded a rewritten (f16acc array-fragment rolled) atomic split-K
+    store to racing plain assigns: the partitions clobber instead of accumulate, numerically wrong
+    with no loud failure (found on the gemma-4 mlp_down.m32.lin g4a pinned compile)."""
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.kernel.ir import RegStore
+    from emmy.compiler.ir.sigma import Sigma
+
+    s = RegStore(dst_buffer="o", dst_index=(Var("m"), Var("n")), frag="_c0_0", shape=(16, 8, 16), atomic=True)
+    out = s.rewrite(lambda n: n, Sigma({}))
+    assert isinstance(out, RegStore) and out.atomic, "atomic must survive the σ-rewrite reconstruction"
+
+
+@requires_sm90
+@requires_cuda
+def test_mma_splitk_atomic_f16acc_staged_rolled(monkeypatch):
+    """The f16acc atom's array-fragment (rolled-store) form threads ``RegStore.atomic`` through the
+    stmt rewrite: the staged ``d2/tma/ring`` + ``g2a`` pin on a deep-K matmul must emit ``atomicAdd``
+    (the pre-fix render emitted racing plain stores here — the accuracy assert below fails ~4x-low
+    values loudly if the flag is ever dropped again)."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
+
+    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4")
+    monkeypatch.setenv("EMMY_REDUCE", "g2a")
+    monkeypatch.setenv("EMMY_STAGE", "d2/tma/ring")
+    m, k, n = 32, 1024, 256
+    be = CudaBackend()
+    rng = np.random.default_rng(7)
+    a = (rng.standard_normal((m, k)) * 0.1).astype(np.float16)
+    b = (rng.standard_normal((k, n)) * 0.1).astype(np.float16)
+    compiled = be.compile(_splitk_mma_graph(m, k, n))
+    src = "\n".join(node.op.kernel_source for node in compiled.nodes.values() if getattr(node.op, "kernel_source", None))
+    assert "atomicAdd" in src, "the rolled f16acc atomic split-K must emit atomicAdd stores"
+    out = np.asarray(be.run(compiled, input_data={"a": a, "b": b})[0].outputs["o"]).reshape(m, n)
+    ref = a.astype(np.float32) @ b.astype(np.float32)
+    np.testing.assert_allclose(out.astype(np.float32), ref, rtol=3e-2, atol=3e-2)

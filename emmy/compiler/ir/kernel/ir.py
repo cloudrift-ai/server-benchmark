@@ -2401,6 +2401,10 @@ def _(s: RegStore, rename, sigma, axis_fn):
         epilogue=epilogue,
         m_guard=_sub_guard(s.m_guard),
         n_guard=_sub_guard(s.n_guard),
+        # ``atomic`` MUST thread through: dropping it here silently degraded a rewritten (e.g.
+        # loopify-rolled) atomic split-K store to racing plain assigns — the partitions then
+        # clobber instead of accumulate, a numerically-wrong kernel with no loud failure.
+        atomic=s.atomic,
     )
 
 

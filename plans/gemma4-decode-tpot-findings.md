@@ -138,6 +138,22 @@ TTFT unchanged (still ~20% ahead of stock). The decode gap to stock narrowed 2.9
 (~17% of it closed); the WS1 serving exit gate (≤19.5) is 0.2 ms short — exactly the stat-sink
 family's territory (~0.5 ms/step bound, designed above, not yet built) plus WS2.
 
+The c=8 LONG workload (16 prompts, mml 8448, mnbt 4096): out tok/s 345.55 → **354.34** (0.953×
+stock's 371.65, was 0.930×), TPOT 22.66/22.72 → **22.09/22.23**, TTFT 1985/1789 → 1968/1769 —
+emmy still beats stock TTFT (2449/2081) on the long workload too.
+
+## ⚠ Correctness bug found + fixed during WS2 prep: `RegStore.atomic` dropped on stmt rewrite
+
+Dumping the down.m32.lin g4a kernel for the warp-spec prototype exposed racing PLAIN stores in the
+f16acc array-fragment (rolled-store) form: `RegStore`'s registered `_rewrite` reconstructs the stmt
+field-by-field and omitted the new `atomic` flag — any σ-rewritten atomic store silently degraded
+to partition-clobbering assigns (numerically wrong, no loud failure). Exposure audit: the
+golden/twin/serving deploys all realize the UNROLLED form (every accuracy gate passed all session,
+twin max_diff 3.1e-5), and the true-atomic timing is identical to the seeded values (74.7 µs on the
+repro shape) — so no seeded number or flip decision changes. Fixed (one line + comment); regression
+tests: a hardware-free `rewrite`-preserves-`atomic` unit test and an e2e f16acc/staged/rolled `g2a`
+accuracy test that fails loudly (~4×-low values) if the flag is ever dropped again.
+
 ## 4090 port (DONE — remote manual `--ab`, riftvm)
 
 The atomic split transfers to sm_89 (cp.async ring lane) at least as strongly as on the 5090:

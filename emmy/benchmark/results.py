@@ -228,7 +228,6 @@ def compose_json_result(
     bench_command: str,
     system_info_raw: str,
     timing: dict[str, float] | None = None,
-    gpu: dict | None = None,
 ) -> dict:
     """Assemble the structured JSON result dict from all benchmark data.
 
@@ -261,6 +260,4 @@ def compose_json_result(
         result["metrics_repeats"] = [asdict(r) for r in repeats]
     if timing is not None:
         result["timing"] = timing
-    if gpu is not None:
-        result["gpu"] = gpu
     return result

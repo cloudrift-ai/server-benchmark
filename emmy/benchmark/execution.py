@@ -278,7 +278,7 @@ async def run_execution_group(
             task_logger.info("Running benchmark...")
             run_cmd = make_run_cmd(conn.address, ssh_key, conn.ssh_port, dry_run=dry_run)
             async with task_timer.ameasure(PHASE_BENCHMARK):
-                bench_success, output, stderr, bench_command, gpu_summary = await run_benchmark_workload(
+                bench_success, output, stderr, bench_command = await run_benchmark_workload(
                     run_cmd,
                     recipe,
                     dry_run=dry_run,
@@ -298,15 +298,7 @@ async def run_execution_group(
                     compose_content = generate_compose(recipe, model_dir, hf_token, gpu_device_ids=gpu_device_ids)
                     full_result = compose_result(task, benchmark_output, compose_content, bench_command, system_info, timing=timing)
                     result_path.write_text(full_result)
-                    json_data = compose_json_result(
-                        task,
-                        benchmark_output,
-                        compose_content,
-                        bench_command,
-                        system_info,
-                        timing=timing,
-                        gpu=gpu_summary.to_dict() if gpu_summary is not None else None,
-                    )
+                    json_data = compose_json_result(task, benchmark_output, compose_content, bench_command, system_info, timing=timing)
                     task.json_result_path().write_text(json.dumps(json_data, indent=2) + "\n")
                     task_logger.info(f"Results saved to: {result_path}")
                 else:

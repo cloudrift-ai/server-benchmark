@@ -186,6 +186,28 @@ def build_full_model_wrapper(model, seq_len: int, dtype, *, dynamic: bool = Fals
     return FullModelWrapper()
 
 
+def build_synthetic_ple(block, n_pos: int, dtype):
+    """Synthetic ``per_layer_input`` for a single-decoder-layer trace, or ``None``
+    for non-PLE architectures.
+
+    Gemma-nano (E2B/E4B) Per-Layer Embeddings: each decoder layer computes
+    ``hidden * per_layer_input`` (modeling_gemma4). The real tensor is a per-layer
+    token embedding the whole-model path supplies; a single-layer trace has no
+    tokens, so stand in a deterministic synthetic one sized ``[1, n_pos, ple_dim]``.
+    Perf-representative — the PLE gate/mul/projection/norm kernels depend on shape,
+    not values, and the accuracy check stays valid (emmy and torch see the same
+    buffer). Non-uniform (randn, fixed seed) so the elementwise mul isn't
+    algebraically folded to identity."""
+    import torch
+
+    ple_dim = int(getattr(block, "hidden_size_per_layer_input", 0) or 0)
+    if not ple_dim:
+        return None
+    with torch.no_grad():
+        g = torch.Generator().manual_seed(0)
+        return torch.randn((1, n_pos, ple_dim), generator=g, dtype=torch.float32).to(dtype)
+
+
 def build_layer_wrapper(block, rotary_emb, hidden_size: int, dtype, *, layer_type=None) -> nn.Module:
     """Trace-friendly single-decoder-layer wrapper for dynamic mode:
     ``forward(x)`` slices rotary cos/sin to the runtime seq_len and calls
@@ -220,21 +242,10 @@ def build_layer_wrapper(block, rotary_emb, hidden_size: int, dtype, *, layer_typ
         except TypeError:
             cos, sin = rotary_emb(sample, full_pos)
 
-    # Gemma-nano (E2B/E4B) Per-Layer Embeddings: each decoder layer computes
-    # ``hidden * per_layer_input`` (modeling_gemma4). The real tensor is a per-layer
-    # token embedding the whole-model path supplies; the single-layer wrapper has no
-    # tokens, so stand in a deterministic synthetic one sized ``[1, S, ple_dim]`` and
-    # slice it in-graph like cos/sin. Perf-representative — the PLE gate/mul/projection/
-    # norm kernels depend on shape, not values, and the accuracy check stays valid
-    # (emmy and torch see the same buffer). Non-uniform (randn) so the elementwise mul
-    # isn't algebraically folded to identity. ``0`` for non-PLE architectures — they
-    # take the unchanged path below.
-    ple_dim = int(getattr(block, "hidden_size_per_layer_input", 0) or 0)
-    ple = None
-    if ple_dim:
-        with torch.no_grad():
-            g = torch.Generator().manual_seed(0)
-            ple = torch.randn((1, n_pos, ple_dim), generator=g, dtype=torch.float32).to(dtype)
+    # Sliced in-graph like cos/sin; ``None`` for non-PLE architectures — they take
+    # the unchanged path below.
+    ple = build_synthetic_ple(block, n_pos, dtype)
+    ple_dim = 0 if ple is None else ple.shape[-1]
 
     class LayerWrapper(nn.Module):
         def __init__(self) -> None:
@@ -277,8 +288,19 @@ def build_attention_split_wrapper(block):
     ``.view(B,S,-1,D).transpose(1,2)`` assumes a ``[batch, seq, hidden]`` input; on the
     flattened ``[T, H]`` layout the reshape is ``.view(T, n_heads, D)`` with **no transpose**.
     Qwen3 / Gemma-3/4 (q/k norm) and Llama (no q/k norm) all share the ``pre``; the ``post``
-    is the Llama/Qwen 2-norm form or the Gemma 4-norm form above."""
+    is the Llama/Qwen 2-norm form or the Gemma 4-norm form above.
+
+    Rejects Gemma-nano PLE blocks (``hidden_size_per_layer_input``): the carve has no seam for
+    the ``hidden * per_layer_input`` multiply and would silently drop it, corrupting outputs."""
     import torch.nn as nn
+
+    ple_dim = int(getattr(block, "hidden_size_per_layer_input", 0) or 0)
+    if ple_dim:
+        raise NotImplementedError(
+            f"build_attention_split_wrapper: block carries Per-Layer Embeddings "
+            f"(hidden_size_per_layer_input={ple_dim}, Gemma-nano E2B/E4B) — the attention-split carve "
+            f"would silently drop the per_layer_input multiply; this model is not servable via the split path"
+        )
 
     attn = block.self_attn
     head_dim = attn.head_dim

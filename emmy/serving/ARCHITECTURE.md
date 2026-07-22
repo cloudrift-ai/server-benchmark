@@ -70,7 +70,8 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `build_attention_split_wrapper` / `trace_split` path serving uses. Backs `emmy eval golden --in-model` and the
   golden drift CI gate; `scripts/capture_gen_twins.py` remains the full-checkpoint capture for tuning.
 - `gen_runner.py` — `EmmyGenRunner` (Phase 2; sibling to `EmmyForwardRunner`). Carves SDPA out of every
-  decoder layer (`build_attention_split_wrapper`), compiles **two dynamic-`num_tokens` programs per layer** (`pre` +
+  decoder layer (`build_attention_split_wrapper`; Gemma-nano PLE blocks — `hidden_size_per_layer_input` — are
+  rejected loudly there: the carve has no seam for the `per_layer_input` multiply), compiles **two dynamic-`num_tokens` programs per layer** (`pre` +
   `post`) over the flattened `[num_tokens, H]` layout, and exposes `embed` (Gemma's √hidden embed-scale folded into the
   gather table) / `forward_layer_pre(L,…)→(q,k,v)` (un-rotated 2-D seam; carves q/k/**v**-norm, and Gemma-4's global
   `attention_k_eq_v` where V reuses K's projection) / `forward_layer_post(L, attn_out, residual)→hidden` / `final_norm`.

@@ -184,6 +184,8 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
     if p_env is None:
         raise RuleSkipped("symbolic producer loop — cannot range-check the re-decomposed index")
     old = producer.output.name
+    if any(isinstance(s, Load) and s.input == old for s in producer.op.body.iter()):
+        raise RuleSkipped("producer re-reads its own output — retargeting only the Writes would tear it")
 
     def retarget(body: Body) -> Body | None:
         stmts: list = []

@@ -1,0 +1,82 @@
+# llama.cpp lane for the gemma-4-12B-it end-to-end A/B (RTX 5090) — the fourth engine in the
+# blog article's serving tables, docker-free: build llama.cpp from source with CUDA (sm_120),
+# convert the HF checkpoint to F16 GGUF (same weights, text model only), serve with
+# llama-server, and drive the SAME five workload points with the same `vllm bench serve`
+# client and hygiene flags as the vLLM lanes (experiments/gemma-4-12B/serving_rtx5090).
+#
+# Per-point server configs follow the article: single-stream points on one 8448-ctx slot;
+# 4k/4k batched points on 8 slots x 8448; the 256/256 c=64 point needs 64x640 slots, which
+# OOMs beside 23 GB of FP16 weights (llama.cpp allocates the full KV up front — no paged
+# allocator, no sliding-window exploitation), so that cell is expected to FAIL and the
+# failure is the article's footnote, not a harness bug.
+#
+# Requires HF_TOKEN for the checkpoint download on a fresh box.
+#
+# Repro on a pre-allocated card (no cloud provisioning):
+#   emmy bench experiments/gemma-4-12B/serving_llamacpp_rtx5090 --local
+command:
+  stage:
+    - emmy
+    - scripts
+    - pyproject.toml
+    - requirements.txt
+    - Makefile
+  run: |
+    set -e
+    export PATH=/usr/local/cuda/bin:$$PATH
+    cd $repo_dir
+    [ -d venv ] || make setup
+    ./venv/bin/pip install -q vllm gguf sentencepiece 2>/dev/null || true
+    MODEL=google/gemma-4-12B-it
+    SRC=$task_dir/llama.cpp
+    GGUF=$task_dir/gemma-4-12B-it-f16.gguf
+
+    # Build llama.cpp from source (CUDA, native arch)
+    if [ ! -x "$$SRC/build/bin/llama-server" ]; then
+      git clone --depth 1 https://github.com/ggml-org/llama.cpp $$SRC
+      arch=$$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d '.')
+      cmake -S $$SRC -B $$SRC/build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=$$arch -DLLAMA_CURL=ON > $task_dir/cmake.log 2>&1
+      cmake --build $$SRC/build --target llama-server -j $$(nproc) >> $task_dir/cmake.log 2>&1
+    fi
+    $$SRC/build/bin/llama-server --version 2>&1 | head -1 | tee $task_dir/build.txt
+
+    # Convert the checkpoint to F16 GGUF (text model)
+    if [ ! -f "$$GGUF" ]; then
+      ./venv/bin/python -c "from huggingface_hub import snapshot_download; print(snapshot_download('$$MODEL'))" > $task_dir/snap.txt
+      ./venv/bin/python $$SRC/convert_hf_to_gguf.py $$(cat $task_dir/snap.txt) --outtype f16 --outfile $$GGUF > $task_dir/convert.log 2>&1
+    fi
+    ls -sh $$GGUF
+
+    serve() { # parallel total_ctx
+      pkill -f "[l]lama-server" 2>/dev/null || true; sleep 3
+      $$SRC/build/bin/llama-server -m $$GGUF --alias $$MODEL -ngl 99 -fa on --no-webui \
+        --parallel $$1 -c $$2 --host 0.0.0.0 --port 8010 > $task_dir/serve_p$$1.log 2>&1 &
+      for i in $$(seq 1 120); do curl -sf localhost:8010/health >/dev/null && return 0; sleep 5; done
+      echo "llama-server failed (parallel=$$1)"; tail -20 $task_dir/serve_p$$1.log; return 1
+    }
+    bench() { # name in out conc np
+      echo "=== point $$1 (in=$$2 out=$$3 c=$$4 np=$$5)"
+      ./venv/bin/vllm bench serve --model $$MODEL --tokenizer $$MODEL --dataset-name random \
+        --random-input-len $$2 --random-output-len $$3 --max-concurrency $$4 --num-prompts $$5 \
+        --ignore-eos --temperature 0 --seed 0 --percentile-metrics ttft,tpot,itl,e2el \
+        --base-url http://localhost:8010 > $task_dir/$$1.txt 2>&1
+      grep -E "Output token throughput|Median TTFT|Median TPOT|Successful" $task_dir/$$1.txt
+    }
+
+    serve 1 8448
+    bench small_c1  256  256  1 16
+    bench head_c1  4096 4096  1  8
+    serve 8 67584
+    bench head_c4  4096 4096  4 32
+    bench head_c8  4096 4096  8 64
+    serve 64 40960 && bench small_c64 256 256 64 256 || echo "c=64 point OOM (expected; the article's footnote)"
+    pkill -f "[l]lama-server" 2>/dev/null || true
+    echo LLAMACPP_LANE_DONE
+  result_files:
+    - "*.txt"
+    - "*.log"
+  timeout: 21600
+
+matrices:
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1

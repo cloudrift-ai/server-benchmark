@@ -1,0 +1,33 @@
+# Accumulation-error sweep: FP32 vs pure-FP16 vs hybrid (chunk-64 promote) matmul
+# accumulation, relative L2 vs an FP64 reference over the identical FP16-rounded operands.
+#
+# Backs the numerics table in the "Optimizing Gemma4 12B for RTX GPUs" blog article's
+# hybrid-accumulation section: FP32 drifts slowly with K, pure FP16 grows an order of
+# magnitude worse, hybrid stays flat (~FP16 representational noise) because the FP16 error
+# can never accumulate past one 64-element chunk. K values are the gemma-4-12B contraction
+# depths (3840 = qkv/gate K, 4096 = o_proj K, 15360 = down_proj K) plus a small and a large
+# anchor. Pure numerics — any CUDA card reproduces it; the matrix pins the 5090 the article
+# benches on.
+#
+# Repro on a pre-allocated card (no cloud provisioning):
+#   emmy bench experiments/gemma-4-12B/accum_error --local
+command:
+  stage:
+    - emmy
+    - scripts
+    - pyproject.toml
+    - requirements.txt
+    - Makefile
+  run: |
+    export PATH=/usr/local/cuda/bin:$$PATH
+    cd $repo_dir
+    [ -d venv ] || make setup
+    ./venv/bin/python scripts/bench_accum_error.py --out-dir $task_dir
+  result_files:
+    - "accum_error.md"
+    - "accum_error.json"
+  timeout: 1800
+
+matrices:
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1

@@ -1,0 +1,38 @@
+# Per-kernel benchmark of the gemma-4-12B golden set on the RTX 5090 — emmy's greedy deploy
+# pick vs eager PyTorch and torch.compile, in both precision lanes (standard and
+# EMMY_FAST_MATH=1, the hybrid FP16/FP32-accumulation fork).
+#
+# Backs the per-kernel tables in the "Optimizing Gemma4 12B for RTX GPUs" blog article: each
+# golden case is a curated, card-scoped kernel shape (projections, fused norm->MLP megakernel,
+# attention, norms) benched live at -O3. The fused norm_linear / mlp_geglu kinds ARE the
+# megakernel rows, so the "Emmy megakernel vs torch.compile" table falls out of the same run.
+#
+# Repro on a pre-allocated card (no cloud provisioning):
+#   emmy bench experiments/gemma-4-12B/kernels_rtx5090 --local
+command:
+  stage:
+    - emmy
+    - scripts
+    - pyproject.toml
+    - requirements.txt
+    - Makefile
+  run: |
+    export PATH=/usr/local/cuda/bin:$$PATH
+    cd $repo_dir
+    [ -d venv ] || make setup
+    # Standard lane: the deployable default (FP32-accumulate mma).
+    ./venv/bin/python scripts/bench_golden_set.py --filter gemma4_12b \
+      --backends eager,tcompile,emmy --out-dir $task_dir/std
+    # Fast-math lane: EMMY_FAST_MATH=1 (f16-accumulate atoms + FAST_EXP), the article's
+    # hybrid-accumulation numbers. torch numerics contract: torch-default fp16.
+    EMMY_FAST_MATH=1 ./venv/bin/python scripts/bench_golden_set.py --filter gemma4_12b \
+      --backends eager,tcompile,emmy --out-dir $task_dir/fm
+  result_files:
+    - "std/*"
+    - "fm/*"
+  # ~70 golden cases x 2 lanes at -O3; a cold cubin cache pays every nvcc compile.
+  timeout: 21600
+
+matrices:
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1

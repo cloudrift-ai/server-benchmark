@@ -1,4 +1,4 @@
-.PHONY: help setup clean bench bench-force bench-kernels bench-kernels-tune test-compose lint format
+.PHONY: help setup clean bench bench-force bench-kernels bench-kernels-tune test-compose lint format git-sha-guard
 
 help:
 	@echo "Server Benchmark Makefile"
@@ -68,7 +68,14 @@ wheel: setup
 	./venv/bin/pip install --quiet build
 	rm -rf dist build && ./venv/bin/python -m build --wheel -o dist/ .
 
-vllm-emmy-image: wheel
+# Image tags embed the short sha; an empty rev-parse (e.g. root over a synced tree without
+# git safe.directory) would silently tag "...:0.23.0-" — fail loudly instead.
+git-sha-guard:
+	@test -n "$(shell git rev-parse --short HEAD)" || \
+		(echo "ERROR: git rev-parse returned empty — image tag would be malformed."; \
+		 echo "  likely fix: git config --global --add safe.directory $(CURDIR)"; exit 1)
+
+vllm-emmy-image: wheel git-sha-guard
 	docker build -f docker/vllm-emmy/Dockerfile --build-arg VLLM_VERSION=$(VLLM_VERSION) \
 		-t $(VLLM_EMMY_TAG) .
 
@@ -83,7 +90,7 @@ GEMMA4_TAG ?= cloudriftai/vllm-emmy-gemma4:$(patsubst v%,%,$(VLLM_VERSION))-$(sh
 gemma4-warm:
 	BASE_IMAGE=$(VLLM_EMMY_TAG) docker/vllm-emmy-gemma4/warm.sh
 
-gemma4-serve-image:
+gemma4-serve-image: git-sha-guard
 	@test -n "$$(ls -A docker/vllm-emmy-gemma4/warm/hf 2>/dev/null)" -a -n "$$(ls -A docker/vllm-emmy-gemma4/warm/cubin 2>/dev/null)" || \
 		(echo "docker/vllm-emmy-gemma4/warm/ is empty — run 'make gemma4-warm' on the target GPU first"; exit 1)
 	@mkdir -p docker/vllm-emmy-gemma4/warm/pack  # pack is optional (COPY needs the dir); empty → boot falls back to full compile

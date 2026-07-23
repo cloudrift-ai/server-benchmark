@@ -22,9 +22,12 @@ The pool is split into three SLICES, sampled by configurable budget shares (60/2
 - ``tail`` — a capped, deterministic (hash-ordered, seed-independent) subsample of the rest
   of the enumeration: landscape support so the prior also sees the bad tail.
 
-Within a slice, each batch picks a shape with probability proportional to its REMAINING
-point count, then samples uniformly inside it — a time-truncated run yields an
-approximately uniform sample of each slice's remaining pool, and repeated runs converge on
+Within a slice, each batch first picks a kernel KIND uniformly among the kinds that still
+have points there (stratification: every kind collects data from the start of every run —
+matmul's huge candidate neighborhoods can't crowd out softmax/reduce/attention; an
+exhausted kind's share flows back), then a shape within that kind with probability
+proportional to its REMAINING point count, then samples uniformly inside it. A truncated
+run is uniform-ish per (slice, kind); repeated runs converge on
 full coverage. Progress persists in a JSON ledger (``--ledger``) keyed by (gpu, shape, knob
 signature): a rerun — same box or a freshly rented one of the same card — skips terminal
 points and continues. ``--budget-s`` bounds a run's wall time (it stops starting new work
@@ -145,6 +148,15 @@ def pick_slice(rng: random.Random, shares: dict[str, float], remaining: dict[str
     return rng.choices(slices, weights=weights, k=1)[0]
 
 
+def pick_kind(rng: random.Random, remaining: dict[str, dict[str, list]]) -> str:
+    """Draw a kernel kind UNIFORMLY among the kinds that still have points in the chosen
+    slice — the stratification guarantee: every kind present in a slice gets an equal share
+    of that slice's budget, so matmul's huge candidate neighborhoods can't crowd the small
+    kinds (softmax, reduce, …) out of a budgeted run. An exhausted kind drops out and its
+    share flows to the rest. ``remaining`` maps kind → group id → point list."""
+    return rng.choice(sorted(k for k, m in remaining.items() if m))
+
+
 def tail_sample(specs: list[str], cap: int) -> list[str]:
     """The tail slice's capped subsample: specs ranked by their own sha1 — deterministic
     AND seed/enumeration-order independent, so the selected tail set is stable across
@@ -206,6 +218,7 @@ class ShapeGroup:
     enumeration pool, and the points selected from that pool, each tagged with its slice."""
 
     group_id: str  # e.g. "M2048xN512xK3840_fp16" (+ _dyn / _tb markers) / "reduce_M4096_K4096_dtypefp32"
+    kind: str  # golden registry kind ("matmul", "attention", …) — the stratification key
     snippet: str
     dynamic_specs: list[str]
     fast_math: bool  # any anchor entry is fast-math → pin the fm enumeration gate
@@ -309,6 +322,7 @@ def build_groups(max_dist: int, name_filter: str | None, tail_cap: int) -> tuple
         groups.append(
             ShapeGroup(
                 group_id=gid,
+                kind=kind,
                 snippet=rep.snippet(),
                 dynamic_specs=rep.dynamic_specs(),
                 fast_math=fast_math,
@@ -401,12 +415,12 @@ def main() -> int:
     total_pairs = sum(len(g.points) for g in groups)
     totals = {s: sum(1 for g in groups for _, _, sl in g.points if sl == s) for s in SLICES}
 
-    def remaining_map() -> dict[str, dict[str, list]]:
-        out: dict[str, dict[str, list]] = {s: {} for s in SLICES}
+    def remaining_map() -> dict[str, dict[str, dict[str, list]]]:
+        out: dict[str, dict[str, dict[str, list]]] = {s: {} for s in SLICES}
         for g in groups:
             for key, spec, sl in g.points:
                 if any(needs_run(ledger, key, opt, args.max_attempts) for opt in OPT_FLAGS):
-                    out[sl].setdefault(g.group_id, []).append((key, spec))
+                    out[sl].setdefault(g.kind, {}).setdefault(g.group_id, []).append((key, spec))
         return {s: m for s, m in out.items() if m}
 
     def done_pairs() -> int:
@@ -415,11 +429,18 @@ def main() -> int:
         )
 
     remaining = remaining_map()
-    left = {s: sum(len(v) for v in remaining.get(s, {}).values()) for s in SLICES}
+    left = {s: sum(len(pts) for kinds in remaining.get(s, {}).values() for pts in kinds.values()) for s in SLICES}
     print(
         f"[neighbor-bench] card {gpu}: {len(groups)} shapes, {total_pairs} points "
         f"(own {totals['own']} / cross {totals['cross']} / tail {totals['tail']}), "
         f"{sum(left.values())} with work left (own {left['own']} / cross {left['cross']} / tail {left['tail']})",
+        flush=True,
+    )
+    by_kind: dict[str, int] = {}
+    for g in groups:
+        by_kind[g.kind] = by_kind.get(g.kind, 0) + len(g.points)
+    print(
+        "[neighbor-bench] kinds: " + ", ".join(f"{k} {n}" for k, n in sorted(by_kind.items(), key=lambda kv: -kv[1])),
         flush=True,
     )
     if args.dry_run or not remaining:
@@ -435,7 +456,8 @@ def main() -> int:
             print(f"[neighbor-bench] budget of {args.budget_s:.0f}s exhausted — stopping", flush=True)
             break
         sl = pick_slice(rng, shares, remaining)
-        gid, pts = pick_batch(rng, remaining[sl], args.batch)
+        kind = pick_kind(rng, remaining[sl])
+        gid, pts = pick_batch(rng, remaining[sl][kind], args.batch)
         group = by_id[gid]
         batch_i += 1
         for opt in OPT_FLAGS:
@@ -450,7 +472,7 @@ def main() -> int:
             save_ledger(ledger_path, ledger)
             ok = sum(1 for s in statuses.values() if s == "ok")
             print(
-                f"[batch {batch_i}] {sl} {gid} {opt}: {ok}/{len(todo)} ok ({time.monotonic() - t0:.0f}s) "
+                f"[batch {batch_i}] {sl} {kind} {gid} {opt}: {ok}/{len(todo)} ok ({time.monotonic() - t0:.0f}s) "
                 f"statuses={sorted(statuses.values())}",
                 flush=True,
             )

@@ -12,7 +12,8 @@ All the per-poll ssh chatter happens inside this process, so it never reaches th
 agent's context.
 
 The collection is ``scripts/golden_neighbor_bench.py`` — the budgeted three-slice sweep
-(own-golden neighborhood / cross-card golden exchange / uniform tail) of every golden
+(own-golden neighborhood / cross-card golden exchange / uniform tail, kind-stratified
+within each slice) of every golden
 kind's candidate pool, paired -O1/-O3, under a wall-time budget (``--budget-s``; the
 wait ``--timeout`` derives from it, see the margin note on ``_WAIT_MARGIN``). It
 replaced the ε-greedy ``emmy tune --dataset golden`` mode:

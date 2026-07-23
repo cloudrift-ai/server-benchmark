@@ -175,6 +175,30 @@ class TestPickSlice:
         assert 0.5 < cross_share < 0.75  # 0.25 / (0.25 + 0.15) = 0.625, own's share redistributed
 
 
+class TestPickKind:
+    def test_deterministic_under_a_seed(self):
+        remaining = {"matmul": {"g1": [("k", "s")]}, "softmax": {"g2": [("k", "s")]}, "reduce": {"g3": [("k", "s")]}}
+        picks_a = [gnb.pick_kind(random.Random(7), remaining) for _ in range(5)]
+        picks_b = [gnb.pick_kind(random.Random(7), remaining) for _ in range(5)]
+        assert picks_a == picks_b
+
+    def test_uniform_regardless_of_pool_size(self):
+        # The stratification guarantee: 900 matmul points vs 10 softmax points → ~50/50 draws.
+        remaining = {
+            "matmul": {f"g{i}": [("k", "s")] * 90 for i in range(10)},
+            "softmax": {"s0": [("k", "s")] * 10},
+        }
+        rng = random.Random(0)
+        picks = [gnb.pick_kind(rng, remaining) for _ in range(1000)]
+        softmax_share = picks.count("softmax") / len(picks)
+        assert 0.4 < softmax_share < 0.6
+
+    def test_exhausted_kind_is_never_picked(self):
+        remaining = {"matmul": {}, "softmax": {"s0": [("k", "s")]}}
+        rng = random.Random(0)
+        assert all(gnb.pick_kind(rng, remaining) == "softmax" for _ in range(50))
+
+
 class TestTailSample:
     def test_cap_respected_and_deterministic(self):
         specs = [f"A={i}" for i in range(50)]

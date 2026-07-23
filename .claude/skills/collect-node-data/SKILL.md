@@ -1,6 +1,6 @@
 ---
 name: collect-node-data
-description: Use this skill when the user wants to populate or refresh the autotune DB's node table (the cross-hardware search-tree node store) with data measured on a SPECIFIC GPU — e.g. "collect node data for an H200", "run the node sweep on a rented <GPU> and merge the nodes back", "gather cross-hardware node-store data", "populate / update the node table from <hardware>". Rents a fresh single-GPU server (via start-remote-server), rsyncs + sets up emmy there, runs the budgeted three-slice golden sweep (`remote_node_collect.py` → `golden_neighbor_bench.py`: every golden kind's candidate pool, sliced own-neighborhood / cross-card exchange / uniform tail at 60/25/15 budget shares, paired -O1/-O3 pinned benches, ledger-resumed), merges the remote node rows into the local `~/.cache/emmy/autotune.db` (nodes table only, GPU-keyed so cards never collide), backs the DB up locally, and tears the server down.
+description: Use this skill when the user wants to populate or refresh the autotune DB's node table (the cross-hardware search-tree node store) with data measured on a SPECIFIC GPU — e.g. "collect node data for an H200", "run the node sweep on a rented <GPU> and merge the nodes back", "gather cross-hardware node-store data", "populate / update the node table from <hardware>". Rents a fresh single-GPU server (via start-remote-server), rsyncs + sets up emmy there, runs the budgeted three-slice golden sweep (`remote_node_collect.py` → `golden_neighbor_bench.py`: every golden kind's candidate pool, sliced own-neighborhood / cross-card exchange / uniform tail at 60/25/15 budget shares, kind-stratified within each slice, paired -O1/-O3 pinned benches, ledger-resumed), merges the remote node rows into the local `~/.cache/emmy/autotune.db` (nodes table only, GPU-keyed so cards never collide), backs the DB up locally, and tears the server down.
 version: 0.3.0
 ---
 
@@ -36,6 +36,13 @@ across the slices at configurable shares (default 60/25/15):
   skipped, which is itself the realizability filter.
 - **tail** — a capped, hash-ordered (seed-independent, so stable across sessions) subsample of the rest of the
   enumeration: landscape support so the prior also learns what bad looks like.
+
+**Kind-stratified within each slice.** After the slice draw, each batch picks a golden KIND uniformly among the kinds
+that still have points in that slice, and only then a shape within the kind (proportional to its remaining pool).
+Without this, matmul — ~87% of the selectable points on a 4090 — soaked up nearly the whole budget and small kinds
+(softmax, attention, linear_norm) could end a 4 h run with zero benches. Small kinds exhaust their pools early and
+their share flows back to the big ones, so a run guarantees every kind data first and spends the rest where the pool
+actually is.
 
 **Why paired -O1/-O3.** The offline prior trains on deployable (-O3) records, and the historical tune data is mostly
 -O1 — the dataset holds few points measured at BOTH opt levels. The sweep benches every point at both `-Xcicc -O1`

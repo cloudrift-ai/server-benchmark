@@ -8,7 +8,7 @@ greedily, and compare. Prints a per-prompt side-by-side + a PASS/FAIL on the fir
 (the strong correctness signal; fp16 numerics between two runtimes can drift a few tokens in, so a
 full-text match is not required — eyeball the continuations for coherence).
 
-    ./venv/bin/python scripts/validate_gemma4_serve.py --model google/gemma-4-12B
+    ./venv/bin/python scripts/validate_gemma4_serve.py --model google/gemma-4-12B-it
 
 Prereqs: the `serving` extra + cupy installed, CUDA 12.8+/nvcc for sm_120 (5090), and HF access to the
 gated checkpoint (`export HF_TOKEN=...`). First `emmy serve` boot compiles all layers — minutes.
@@ -89,7 +89,7 @@ def _first_token(s: str) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--model", default="google/gemma-4-12B", help="HF checkpoint to serve + reference.")
+    ap.add_argument("--model", default="google/gemma-4-12B-it", help="HF checkpoint to serve + reference.")
     ap.add_argument("--max-tokens", type=int, default=16, help="greedy tokens to generate per prompt.")
     ap.add_argument("--port", default="8000")
     ap.add_argument("--emmy", default="./venv/bin/emmy", help="path to the emmy CLI in the serving venv.")

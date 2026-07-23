@@ -26,6 +26,9 @@ compile = ["torch", "transformers>=5.10", "cppyy==3.5.0", "safetensors"]
 # upstream, and prometheus-fastapi-instrumentator 8.0.1 fixed the underlying
 # `_IncludedRouter` crash anyway.
 serving = ["vllm>=0.23,<0.24"]
+# lm-eval harness for the output-correctness gate (scripts/run_lmeval_gate.py);
+# [api] carries the local-completions client deps (aiohttp, tenacity, tiktoken).
+eval = ["lm-eval[api]>=0.4.9"]
 visualize = ["playwright>=1.40"]
 # flash-attn requires torch at build time, install separately:
 #   pip install flash-attn --no-build-isolation

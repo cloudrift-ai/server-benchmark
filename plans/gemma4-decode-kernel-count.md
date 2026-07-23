@@ -135,13 +135,36 @@ failure.
 
 **Load-bearing negative result**: launches halved, memsets zeroed, kernels at their isolated bests — and TPOT
 did not move. The plan's premise (the 2.65 ms/step gap ≈ per-node dispatch overhead) is CONTRADICTED at this
-launch count: the residual gap lives elsewhere — candidates, in order: the per-layer program STITCH boundaries
-(host-side glue between per-layer captures — exactly the seam WS4's fused finalize does not address either), the
-vLLM-side per-step scheduling, or the attention kernel's share. Next diagnostic is a whole-step nsys/timeline of
-one decode step under serving (not the twins in isolation), attributing the 2.6 ms between capture-internal idle
-and capture-external host time. Remaining golden levers (smaller): the down-proj cut needs merged-shape PLAIN
-matmul goldens (cut consumer deploys cold at 43.8 ms); merged m64 rows for c=64; the m4096 merged keys are
-uncovered by the audit twins (the 4K prefill tier) — worth an m4096 twin + audit extension.
+launch count.
+
+## nsys decode-step attribution (2026-07-22 night, `--cuda-graph-trace=node`, 4K-ctx c=1, 400-token window)
+
+Per-step medians (node tracing inflates emmy's period ~1.7 ms over the untraced 20.8; stock barely moves):
+
+| arm | period | kernel busy | in-stream gaps | host tail |
+| --- | --- | --- | --- | --- |
+| emmy (fm) | 22.5 ms | **19.85 ms** | 2.64 ms | ~0 |
+| stock | 17.9 ms | 16.85 ms | 1.04 ms | ~0 |
+
+**The step is KERNEL-BOUND, not overhead-bound — the gap is Δbusy ≈ 3.0 ms**, and the trace names it:
+
+- **Fused computed-A transport loss on the merged edges** (~1.5–2 ms): the gate_up megakernel is 7.50 ms/step
+  (48 × 156 µs vs the ~142 µs weight-stream floor), the down cone 4.25 ms (88 vs 74 µs pre-merge plain), qkv
+  similar. Stock streams the SAME merged weights as plain cuBLAS **gemvs (M=1)** at ~full bandwidth —
+  ~15.0 ms/step of gemv covering ALL its matmuls incl. lm_head.
+- **emmy-side glue** (~0.9 ms): 352 torch elementwise launches + 192 `CatArrayBatchedCopy` (the KV append runs
+  torch-cat per layer — 4× stock's one `reshape_and_cache` kernel/layer at ~1 µs) + bucket pad/slice copies.
+- **In-stream gaps** +1.6 ms (part node-tracing artifact on graph replays).
+- lm_head is a 1.26 ms cuBLAS gemv on BOTH arms (emmy runs it outside the twins) — cancels.
+
+The A/B flatness decodes cleanly: WS1's launch savings ≈ the fused forms' transport losses, canceling. The
+levers, now quantified and ordered:
+
+1. **Merged-shape PLAIN matmul goldens + the cut** (the fused edges back on `d2/tma/ring` — or gemv-class M=1
+   forms like stock's): ~1.5–2 ms/step, would put emmy at ~18–18.5 ≈ the exit gate.
+2. **KV-append + glue path** (torch-cat → a reshape_and_cache-style kernel; bucket copies): ~0.9 ms/step.
+3. Remaining golden coverage: merged m64 rows for c=64; the m4096 merged keys are uncovered by the audit twins
+   (the 4K prefill tier) — worth an m4096 twin + audit extension.
 
 ## Ordering, verification, risks
 

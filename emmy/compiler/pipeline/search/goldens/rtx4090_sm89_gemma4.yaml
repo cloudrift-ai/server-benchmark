@@ -2167,3 +2167,82 @@ configs:
     knobs: {TILE: 'f4', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
     emmy_us: 4.9
     cublas_us: 5.4
+
+  # ---- fm-lane twins of the merged sibling-linear edges (2026-07-22 evening) --------------------
+  # EMMY_FAST_MATH=1 seeding of the same keys as the std section above (f16-accumulate atoms on the
+  # sync compute-fill; manual pinned --ab). Recorded ONLY where the fm best beats the shape's std
+  # best >3% — a defaulting (gate-off) compile self-excludes these rows (the atom is not in its
+  # offer), so they never replace the std anchors. gateup m32 tied std on both cards (skipped).
+  - kernel: norm_linear
+    name: gemma4_12b.norm_gate_up.m256.lin
+    M: 256
+    H: 3840
+    N: 30720
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x8/f4x4/k4', REDUCE: '', STAGE: 'd1/sync', WSPEC: '', RASTER: ''}
+    emmy_us: 600.6
+    cublas_us: 436.2
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qkv.lin.dynM
+    M: 512
+    H: 3840
+    N: 8192
+    dtype: 'fp16'
+    dynamic: true
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x8/f4x4/k4', REDUCE: '', STAGE: 'd1/sync', WSPEC: '', RASTER: ''}
+    emmy_us: 220.1
+    cublas_us: 229.4
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qk_global.m32.lin
+    M: 32
+    H: 3840
+    N: 8704
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x16/f2x2/k4', REDUCE: '', STAGE: 'd1/sync', WSPEC: '', RASTER: ''}
+    emmy_us: 41.7
+    cublas_us: 41.8
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qk_global.m256.lin
+    M: 256
+    H: 3840
+    N: 8704
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x8/f4x4/k4', REDUCE: '', STAGE: 'd1/sync', WSPEC: '', RASTER: ''}
+    emmy_us: 194.4
+    cublas_us: 135.9
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qk_global.lin.dynM
+    M: 512
+    H: 3840
+    N: 8704
+    dtype: 'fp16'
+    dynamic: true
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x16/f2x2/k4', REDUCE: '', STAGE: 'd1/sync', WSPEC: '', RASTER: ''}
+    emmy_us: 350.2
+    cublas_us: 245.2
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m256.lin
+    M: 256
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4k', STAGE: 'd1/sync', WSPEC: '', RASTER: ''}
+    emmy_us: 333.9
+    cublas_us: 252.9
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.lin.dynM
+    M: 512
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    dynamic: true
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4k', WSPEC: '', RASTER: ''}
+    emmy_us: 614.7
+    cublas_us: 446.5

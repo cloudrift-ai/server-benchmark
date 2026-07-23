@@ -106,6 +106,31 @@ class Carrier:
         """The bound output name — the primary carried state component."""
         return self.state.names[0]
 
+    def rename(self, rename_ssa) -> Carrier:
+        """A copy with every SSA name mapped through ``rename_ssa`` — the carried state, the
+        channels' injected-term names, and (bound mode) the stored combine programs. The
+        ``Loop`` / ``StridedLoop`` rewrites call this so an annotated reduce's ALGEBRA tracks
+        its body through SSA renaming: a verbatim carrier after ``rename_ssa_sequential`` left
+        the cooperative combine reading a state name the renamed body no longer defines (the
+        M=1 cut-consumer's ``acc1``-undefined miscompile). σ / axis substitutions still never
+        touch the carrier — only names move here."""
+        from dataclasses import replace as _replace
+
+        state = State(names=tuple(rename_ssa(n) for n in self.state.names))
+        tw = self.twist
+        channels = tuple(_replace(c, term=rename_ssa(c.term) if isinstance(c.term, str) else c.term) for c in tw.channels)
+        if tw.family is not None:
+            twist = _replace(tw, channels=channels)
+        else:
+            twist = Twist(
+                family=None,
+                channels=channels,
+                merge=tuple(st.rewrite(rename_ssa) for st in tw.merge),
+                combine_states=tuple(st.rewrite(rename_ssa) for st in tw.combine_states),
+                state_b=tuple(rename_ssa(n) for n in tw.state_b),
+            )
+        return Carrier(state=state, twist=twist)
+
     @property
     def state_b(self) -> tuple[str, ...]:
         """The second-operand state names for the cross-partition combine — derived

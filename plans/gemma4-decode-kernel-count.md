@@ -282,3 +282,24 @@ post→pre chaining with shaped views, per-layer failure fallback — behind ``E
 the monoid-composition binding + schedule the degenerate free=() case (the column axis becomes the grid — a
 structural generalization, not a shape special-case), then seed the m1 keys (kind='fused', free_prod=N,
 free_max=N — verified snippet↔key match) with the b64/b128 rows and flip the gate.
+
+### Recognizer fix UNBLOCKED (2026-07-23): degenerate M=1 composition binds; m1 goldens seeded (5090)
+
+Three algebraic edits, no shape special-cases:
+
+1. ``bind_prologue_contraction`` synthesizes a unit ``_um`` free axis when the lift leaves ``free = ()`` —
+   the composition binds and the column axis grids exactly as at M>1.
+2. ``020_cut_edge`` accepts ``len(free) <= 1`` (was ``== 1``), so the cut anchor exists at M=1.
+3. **``Carrier.rename``** — the real bug the M=1 cut consumer exposed: ``Loop``/``StridedLoop`` rewrites
+   carried the ``Carrier`` VERBATIM through ``rename_ssa_sequential``, so the cooperative combine read a
+   state name (``acc1``) the renamed body no longer defined. Carrier state/term/bound-program names now map
+   through every SSA rename. Blast radius = every annotated-loop rewrite → full ``make test`` green (2638).
+
+Regression tests: ``test_place_cone_cut_degenerate_m1`` (S=1 cut e2e, the exact miscompile shape) +
+``test_reduce_loop_carrier_tracks_accum_rename`` (CPU unit). Goldens seeded (5090, ``# M=1 decode tier``
+section): cut rows for the three fused m1 keys (gate_up 142.8 µs vs eager 148.6; qkv 14.4; qkg 16.2) +
+plain b-reduce matvec rows for the cut consumers (b128 gate_up 140.2 = 1.68 TB/s; b64 qkv/qkg — L2-warm in
+isolation) + down m1 b256 lock (71.8). All three compositions verified deploying UNPINNED through the tier
+(gate_up 145 µs ≈ eager, was 44,533 grid-1). The featurize guard in ``test_golden_configs`` exempts
+gemv-class rows (M=1, ``TILE: ''``, ``bN`` reduce) — scalar by design, not an accident. Gate still default
+OFF pending the serving e2e (``_tune/ab_m1.sh``: fresh pack, tier on, 256/4K c=1 + c=8/c=64 sanity).

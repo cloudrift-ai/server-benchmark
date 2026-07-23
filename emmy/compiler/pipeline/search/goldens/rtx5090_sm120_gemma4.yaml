@@ -2986,3 +2986,84 @@ configs:
     emmy_us: 0.9
     cublas_us: 2.0
 
+  # ---- M=1 decode tier (EMMY_GEN_M1_TIER; true per-token decode, no bucket-32 padding) ----
+  # The norm->merged compositions at M=1 must CUT: the fused warp form has zero free axes and
+  # schedules grid-1 (13-83 ms/edge, ~300x off). Cut halves = tiny rms stat (1.8) + cone write
+  # (0.7) + a b-reduce matvec at memory-bound floor (gate_up 140 us = 1.68 TB/s on the 236 MB
+  # weight; qkv/qkg matvecs are L2-warm in isolation, e2e is the verdict). Keys are m1-only
+  # (free_max = N disambiguates from bucketed shapes), so c=8/c=64 deploys never see these rows.
+  - kernel: norm_linear
+    name: gemma4_12b.norm_gate_up.m1.lin
+    M: 1
+    H: 3840
+    N: 30720
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 142.8
+    cublas_us: 148.6
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qkv.m1.lin
+    M: 1
+    H: 3840
+    N: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 14.4
+    cublas_us: 46.5
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qk_global.m1.lin
+    M: 1
+    H: 3840
+    N: 8704
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 16.2
+    cublas_us: 47.1
+  # the cut consumers re-recognize as plain M=1 matvecs; block-reduce beats the cold b256 pick
+  # (gate_up 140 vs 180; b64/b128 tie on gate_up, b64 clear on the two smaller N)
+  - kernel: matmul
+    name: gemma4_12b.gate_up_cat.m1.lin
+    M: 1
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: '', REDUCE: 'b128', RASTER: '', STAGE: '', WSPEC: ''}
+    emmy_us: 140.2
+    cublas_us: 143.6
+  - kernel: matmul
+    name: gemma4_12b.qkv_cat.m1.lin
+    M: 1
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: '', REDUCE: 'b64', RASTER: '', STAGE: '', WSPEC: ''}
+    emmy_us: 12.7
+    cublas_us: 43.0
+  - kernel: matmul
+    name: gemma4_12b.qk_global_cat.m1.lin
+    M: 1
+    N: 8704
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: '', REDUCE: 'b64', RASTER: '', STAGE: '', WSPEC: ''}
+    emmy_us: 13.3
+    cublas_us: 45.0
+  # down-proj at M=1 recognizes plain (GeGLU combine stays a separate pointwise); greedy b256
+  # already optimal — row locks it against prior drift
+  - kernel: matmul
+    name: gemma4_12b.down_proj.m1.lin
+    M: 1
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: '', REDUCE: 'b256', RASTER: '', STAGE: '', WSPEC: ''}
+    emmy_us: 71.8
+    cublas_us: 77.1
+

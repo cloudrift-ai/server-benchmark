@@ -236,15 +236,17 @@ def _(s: RowAccum, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
 
 @rewrite.register
 def _(s: Loop, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
-    # Preserve the reduce annotation (``role`` / ``carrier``): a σ-offset / axis-rename of an
-    # annotated reduce loop (030_split_reduce's slice) leaves the carried-state algebra unchanged — only
-    # the loop's operand load indices move — so the carrier rides through verbatim.
+    # Preserve the reduce annotation (``role`` / ``carrier``) through σ-offsets / axis-renames —
+    # the carried-state ALGEBRA is untouched by index motion. SSA renames DO move through it
+    # (``Carrier.rename``): the state / channel-term / bound-program names must track the body's
+    # ``Accum`` renames, or the cooperative combine reads a name the renamed body no longer
+    # defines (the M=1 cut-consumer miscompile).
     return Loop(
         axis=axis_fn(s.axis),
         body=tuple(rewrite(c, rename, sigma, axis_fn) for c in s.body),
         unroll=s.unroll,
         role=s.role,
-        carrier=s.carrier,
+        carrier=s.carrier.rename(rename) if s.carrier is not None else None,
     )
 
 
@@ -258,7 +260,7 @@ def _(s: StridedLoop, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
         body=tuple(rewrite(c, rename, sigma, axis_fn) for c in s.body),
         unroll=s.unroll,
         role=s.role,
-        carrier=s.carrier,
+        carrier=s.carrier.rename(rename) if s.carrier is not None else None,
         end=sigma.apply(s.end) if s.end is not None else None,
     )
 

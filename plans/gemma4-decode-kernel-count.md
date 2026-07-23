@@ -218,6 +218,31 @@ Final state (5090, fused-rope + std merged goldens): 256 c=1 TPOT 18.46, c=64 �
 (+~30% tok/s) and 4K TTFT parity-or-better; the remaining c=1 decode gap is ~2.0 ms (in-stream gaps + stock's
 leaner M=1 step shape).
 
+## In-stream gaps workstream (2026-07-23): attributed, seam clones removed (−0.15 ms); the rest is priced
+
+Boundary attribution over the final-config node trace (analyzer now reports per-boundary gap medians + the
+MEMCPY table): the 1.95 ms of "gaps" decompose as
+
+- **~1.0 ms once per step**: two host-stall boundaries in the eager logits/sampler region around the ONE
+  DtoH/step (the sampled-token readback + Python between graph replay and the next launches). Stock pays the
+  same (~its entire 1.04 ms gap) — vLLM-core, not plugin-actionable.
+- **~450 µs/step at the emmy↔vLLM seams** (2.7–3.8 µs × ~130 boundaries; twin-INTERNAL boundaries run at
+  0.4 µs): the torch↔cupy prefix-copy traffic — 365 memcpys/step (349 DtoD, 256 µs busy) from the twins'
+  prefix uploads (~3/layer) and output clones (~4/layer).
+- The rest: small pairs (slot-mapping, split finalizes).
+
+**Landed**: `run_device` drops the output `.clone()`s under the outer capture (the graph's fixed order makes
+every consumer read before the next-replay overwrite; per-layer program instances own their buffers; in-place
+RoPE on the view is safe — capture-replay-matches-live tests green). 4K c=1 TPOT 19.40 → **19.25**; c=64 within
+its noise band (that config swings ±1 ms run-to-run with mixed scheduling — 50.1–52.3 observed across identical
+configs).
+
+**Remaining, priced**: the upload-side copies (~3/layer) need post→pre buffer CHAINING in the runner (point each
+post twin's output backing at the next pre twin's input slot — plan-level rewiring, est. −0.2–0.3 ms); the
+shared ~1.0 ms sampler stall would need vLLM-side async sampling work. After that the decode gap is essentially
+stock's leaner M=1 step shape (bucket-32 computes 32 rows for 1 at equal weight-stream cost — only matters if a
+gemv-class M=1 emmy tier ever exists).
+
 ## Ordering, verification, risks
 
 1. WS2 first if staffing is tight (smallest blast radius), else WS1 → WS2 → WS3 A/B → gate check → WS4.

@@ -77,9 +77,18 @@ class _Program:
             self.program.upload_prefix_device(feed)
             if torch.cuda.is_current_stream_capturing():
                 self.program.run_once()
-            else:
-                self.program.capture_program_graph()  # static graph → one cached entry (empty sym_values)
-                self.program.replay_program_graph()
+                # Under the outer whole-step capture the output CLONES are dead weight: the graph's
+                # fixed kernel order guarantees every consumer (RoPE — in-place on the view is fine,
+                # its target is rewritten fresh next replay — attention, the next twin's prefix
+                # upload) reads before this program's next-replay overwrite, and each layer runs its
+                # OWN program instance so no other layer touches these buffers. Dropping them removes
+                # ~4 D2D copy nodes per layer per step from the captured graph (the emmy↔vLLM seam
+                # traffic the decode-gap trace attributed). The uncaptured path keeps the clone —
+                # there the program graph may replay again before the caller consumes the view.
+                outs = self.program.output_prefix_device()
+                return [torch.from_dlpack(outs[n])[:t] for n in self.output_names]
+            self.program.capture_program_graph()  # static graph → one cached entry (empty sym_values)
+            self.program.replay_program_graph()
             outs = self.program.output_prefix_device()
             return [torch.from_dlpack(outs[n])[:t].clone() for n in self.output_names]
 

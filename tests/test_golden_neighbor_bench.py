@@ -9,6 +9,7 @@ attempt cap).
 
 import random
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -80,6 +81,52 @@ class TestPickBatch:
     def test_empty_groups_are_never_picked(self):
         remaining = {"empty": [], "full": [("k", "s")]}
         assert gnb.pick_batch(random.Random(0), remaining, batch=2)[0] == "full"
+
+
+@dataclass
+class _FakeBase:  # stands in for GoldenConfig (the shared non-shape fields)
+    name: str = "g"
+    dynamic: bool = False
+
+
+@dataclass
+class _FakeReduce(_FakeBase):
+    M: int = 4096
+    K: int = 512
+    dtype: str = "fp32"
+
+
+_BASE_FIELDS = frozenset({"name", "dynamic"})
+
+
+class TestGroupId:
+    def test_matmul_keeps_the_legacy_spelling(self):
+        @dataclass
+        class Matmul(_FakeBase):
+            M: int = 2048
+            N: int = 512
+            K: int = 3840
+            dtype: str = "fp16"
+            trans_b: bool = True
+
+        gid = gnb._group_id("matmul", Matmul(dynamic=True), _BASE_FIELDS)
+        assert gid == "M2048xN512xK3840_fp16_dyn_tb"
+
+    def test_generic_kind_derives_from_own_fields(self):
+        assert gnb._group_id("reduce", _FakeReduce(), _BASE_FIELDS) == "reduce_M4096_K512_dtypefp32"
+        assert gnb._group_id("reduce", _FakeReduce(dynamic=True), _BASE_FIELDS) == "reduce_M4096_K512_dtypefp32_dyn"
+
+    def test_unknown_new_kind_never_crashes(self):
+        # The resilience contract: a golden kind added after this script was written
+        # (new discriminator, new shape fields) still gets a stable, distinct id.
+        @dataclass
+        class Novel(_FakeBase):
+            rows: int = 7
+            fused: bool = True
+
+        gid = gnb._group_id("novel_kind", Novel(), _BASE_FIELDS)
+        assert gid == "novel_kind_rows7_fusedTrue"
+        assert gid != gnb._group_id("novel_kind", Novel(rows=8), _BASE_FIELDS)
 
 
 class TestAssignSlice:

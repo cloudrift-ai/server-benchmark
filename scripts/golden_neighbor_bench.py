@@ -61,7 +61,7 @@ import subprocess
 import sys
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 O1_FLAGS = "-Xcicc -O1"
@@ -205,7 +205,7 @@ class ShapeGroup:
     """One benchable shape: the golden entries recorded for it (across cards), its live
     enumeration pool, and the points selected from that pool, each tagged with its slice."""
 
-    group_id: str  # e.g. "M2048xN512xK3840_fp16" / "reduce_M4096xK4096_fp32" (+ _dyn / _tb markers)
+    group_id: str  # e.g. "M2048xN512xK3840_fp16" (+ _dyn / _tb markers) / "reduce_M4096_K4096_dtypefp32"
     snippet: str
     dynamic_specs: list[str]
     fast_math: bool  # any anchor entry is fast-math → pin the fm enumeration gate
@@ -213,31 +213,18 @@ class ShapeGroup:
     points: list[tuple[str, str, str]] = field(default_factory=list)  # (point_key, spec, slice)
 
 
-def _group_id(kind: str, g) -> str:
+def _group_id(kind: str, g, base_fields: frozenset[str]) -> str:
     """Ledger-stable shape id. Matmul keeps the exact legacy spelling (existing ledgers
-    resume on it); every other kind is prefixed with its ``kernel`` discriminator and
-    folds every field that changes its snippet."""
-    dyn = "_dyn" if g.dynamic else ""
-    tb = "_tb" if getattr(g, "trans_b", False) else ""
+    resume on it); every other kind derives generically from its OWN dataclass fields —
+    everything beyond the shared ``GoldenConfig`` base (``base_fields``) — so a newly
+    added golden kind, or a new shape field on an existing kind, joins the pool without
+    touching this script. ``_dyn`` suffixes the symbolic-axis twin, like matmul."""
     if kind == "matmul":
+        dyn = "_dyn" if g.dynamic else ""
+        tb = "_tb" if g.trans_b else ""
         return f"M{g.M}xN{g.N}xK{g.K}_{g.dtype}{dyn}{tb}"
-    if kind in ("reduce", "softmax"):
-        return f"{kind}_M{g.M}xK{g.K}_{g.dtype}{dyn}"
-    if kind == "pointwise":
-        return f"pointwise_M{g.M}xN{g.N}_{g.dtype}{dyn}"
-    if kind == "rms_norm":
-        heads = f"_h{g.heads}" if g.heads != 1 else ""
-        return f"rms_norm_M{g.M}xK{g.K}{heads}_{g.dtype}{dyn}"
-    if kind == "norm_linear":
-        return f"norm_linear_M{g.M}xH{g.H}xN{g.N}_{g.dtype}{dyn}{tb}"
-    if kind == "mlp_geglu":
-        return f"mlp_geglu_M{g.M}xH{g.H}xI{g.inter}_{g.dtype}{dyn}{tb}"
-    if kind in ("attention", "rope"):
-        nc = "_nc" if kind == "attention" and not g.causal else ""
-        return f"{kind}_h{g.n_heads}s{g.seq}d{g.head_dim}_{g.dtype}{nc}{dyn}"
-    if kind == "embedding":
-        return f"embedding_v{g.vocab}s{g.seq}h{g.hidden}_{g.dtype}{dyn}"
-    raise ValueError(f"unknown golden kind {kind!r}")
+    parts = "_".join(f"{f.name}{getattr(g, f.name)}" for f in fields(type(g)) if f.name not in base_fields)
+    return f"{kind}_{parts}" + ("_dyn" if g.dynamic else "")
 
 
 def build_groups(max_dist: int, name_filter: str | None, tail_cap: int) -> tuple[list[ShapeGroup], str]:
@@ -251,7 +238,7 @@ def build_groups(max_dist: int, name_filter: str | None, tail_cap: int) -> tuple
     from emmy.compiler.context import Context
     from emmy.compiler.pipeline.knob import tuning_knob_items
     from emmy.compiler.pipeline.search.features import tile_signature
-    from emmy.compiler.pipeline.search.golden import _KERNEL_CLASSES, GOLDEN_CONFIGS, _live_gpu_key
+    from emmy.compiler.pipeline.search.golden import _KERNEL_CLASSES, GOLDEN_CONFIGS, GoldenConfig, _live_gpu_key
     from emmy.compiler.pipeline.search.golden_eval import _enumerate, enumerate_graph
     from emmy.compiler.pipeline.search.space import FAST_MATH
 
@@ -261,10 +248,11 @@ def build_groups(max_dist: int, name_filter: str | None, tail_cap: int) -> tuple
     if own_key is None:
         print("[pool] no live CUDA device — every anchor labels cross, pools are not meaningful", flush=True)
     kind_of = {cls: kind for kind, cls in _KERNEL_CLASSES.items()}
+    base_fields = frozenset(f.name for f in fields(GoldenConfig))
 
     by_shape: dict[str, list] = {}
     for g in GOLDEN_CONFIGS:
-        by_shape.setdefault(_group_id(kind_of[type(g)], g), []).append(g)
+        by_shape.setdefault(_group_id(kind_of[type(g)], g, base_fields), []).append(g)
 
     groups: list[ShapeGroup] = []
     for gid, entries in sorted(by_shape.items()):

@@ -78,9 +78,10 @@ by the rewrite function to control which nodes the splicer removes and which nod
 Every file named `NNN_<name>.py` under a pass directory is a rule:
 
 ```python
-PATTERN = [Pattern("root", SomeOp), ...]   # required
-def rewrite(ctx: Context, graph: Graph, match: Match) -> Graph | Op | list[Graph | Op]:
-    ...
+PATTERN = [Pattern("root", SomeOp), ...]  # required
+
+
+def rewrite(ctx: Context, graph: Graph, match: Match) -> Graph | Op | list[Graph | Op]: ...
 ```
 
 - The dispatcher binds `rewrite`'s parameters **by name**. Reserved names: `graph`, `match`, `root`, `out`, `ctx`.

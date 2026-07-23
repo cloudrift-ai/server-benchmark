@@ -94,6 +94,7 @@ Each command module contains only argparse registration and `handle_*` functions
 def handle_foo(args):
     asyncio.run(_handle_foo(args))
 
+
 async def _handle_foo(args):
     await ...
 ```

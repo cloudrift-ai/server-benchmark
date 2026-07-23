@@ -540,3 +540,22 @@ def test_fused_golden_requires_a_cone_anchor():
         MlpGeGluGoldenConfig(
             name="bad.cp", M=32, H=3840, inter=15360, knobs={"STAGE": "d2/cp.async/ring"}, gpu_name="X", compute_cap=(12, 0)
         )
+
+
+def test_neighbor_bench_group_id_covers_every_recorded_kind():
+    """``golden_neighbor_bench.build_groups`` calls ``_group_id`` on every recorded golden — a
+    registry kind the function doesn't handle crashes the sweep at startup (the ``linear_norm``
+    regression). Every recorded config must map to a non-empty, kind-prefixed id."""
+    import sys
+    from dataclasses import fields
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+    import golden_neighbor_bench as gnb
+
+    kind_of = {cls: kind for kind, cls in _KERNEL_CLASSES.items()}
+    base_fields = frozenset(f.name for f in fields(GoldenConfig))
+    for g in GOLDEN_CONFIGS:
+        kind = kind_of[type(g)]
+        gid = gnb._group_id(kind, g, base_fields)
+        assert gid and (kind == "matmul" or gid.startswith(kind))

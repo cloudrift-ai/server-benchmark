@@ -125,16 +125,23 @@ emmy = merged kernels + delegated zero-inits + seeded merged-key goldens; stock 
 Verdict vs the exit gate (decode TPOT ≤ 18.5): **NOT met** — 4K c=1 TPOT 20.17 ≈ the pre-WS1 20.06 despite the
 launch count halving (19-20 → 7-8/layer). Where emmy leads: 4K c=1 TTFT (898 vs 1048), 4K c=8 req/s (+33%) and
 output tok/s (+26%), c=64 median TTFT (2.5x). Where it trails: TPOT everywhere (esp. 256 c=64: 51.7 vs 28.7)
-and 256-class throughput. Two structural caveats before reading this as WS1/WS2 failing to move TPOT:
+and 256-class throughput.
 
-1. **This is the STD lane.** The historical wins (TPOT 21.3-vs-24.9, c=64 leads +17-21%) were fm-lane results,
-   and the merged edges have NO fm goldens yet — the fm reseed on the merged keys is the single biggest open
-   lever, and fm-never-loses means it can only help.
-2. **The down-proj fused cone regressed the per-layer floor**: m32 fused 95.9 µs vs the pre-merge plain
-   74.1 + sink — ~20 µs × 48 layers ≈ 1 ms/step given back. The cut sibling is unreachable until the
-   merged-shape PLAIN matmul keys get goldens (cut consumer deploys cold at 43.8 ms today). Seeding those +
-   cut-vs-fused twin A/B is the second lever. c=64's 51.7 TPOT also ran bucket 32 with no merged m64 rows —
-   the m64 merged-key seeding is the third.
+**fm-lane arm (same evening, after the merged-key fm reseed — 10 rows 5090 / 7 rows 4090, isolated wins up to
+1.47x on the fused edges): e2e-IDENTICAL to std on every config** (256 c=1 TPOT 19.28 vs 19.33; c=64 3.16 req/s
+both; 4K c=1 892/20.30 vs 898/20.17; 4K c=8 0.08/335 both). A gate-on twin compile confirms the fm rows DO
+deploy (f16acc atoms on qk_global m32, the down cone, sym gate_up) — the flatness is real physics, not a deploy
+failure.
+
+**Load-bearing negative result**: launches halved, memsets zeroed, kernels at their isolated bests — and TPOT
+did not move. The plan's premise (the 2.65 ms/step gap ≈ per-node dispatch overhead) is CONTRADICTED at this
+launch count: the residual gap lives elsewhere — candidates, in order: the per-layer program STITCH boundaries
+(host-side glue between per-layer captures — exactly the seam WS4's fused finalize does not address either), the
+vLLM-side per-step scheduling, or the attention kernel's share. Next diagnostic is a whole-step nsys/timeline of
+one decode step under serving (not the twins in isolation), attributing the 2.6 ms between capture-internal idle
+and capture-external host time. Remaining golden levers (smaller): the down-proj cut needs merged-shape PLAIN
+matmul goldens (cut consumer deploys cold at 43.8 ms); merged m64 rows for c=64; the m4096 merged keys are
+uncovered by the audit twins (the 4K prefill tier) — worth an m4096 twin + audit extension.
 
 ## Ordering, verification, risks
 

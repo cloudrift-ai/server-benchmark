@@ -20,37 +20,38 @@ def _exp(project_root, name):
     return os.path.join(project_root, EXP, name)
 
 
-def test_serving_ab_expands_to_15_lane_points(project_root):
-    """5 stock + (4 + c64) emmy + (4 + c64) fastmath = 15 variants on the article grid."""
+def test_serving_ab_expands_to_18_lane_points(project_root):
+    """6 stock + (5 + c64) emmy + (5 + c64) fastmath = 18 variants on the article grid
+    (the 4K curve + the 8192/256 RAG point + the 256/256 API point + the c=1 diagnostic)."""
     tasks = enumerate_tasks([_exp(project_root, "serving_rtx5090")])
-    assert len(tasks) == 15
+    assert len(tasks) == 18
 
     for t in tasks:
         b = t.recipe.benchmark
         assert b.seed == 0 and b.temperature == 0 and b.ignore_eos is True
         assert t.recipe.engine.llm.context_length == 8448
 
-    # The article's five workload points, per lane.
+    # The article's six workload points, per lane.
     points = {(t.recipe.benchmark.random_input_len, t.recipe.benchmark.max_concurrency) for t in tasks}
-    assert points == {(256, 1), (256, 64), (4096, 1), (4096, 4), (4096, 8)}
+    assert points == {(256, 1), (256, 64), (4096, 1), (4096, 4), (4096, 8), (8192, 4)}
 
     # Single-stream points carry repeats=3 (mean/stddev); batched points run once.
     for t in tasks:
         want = 3 if t.recipe.benchmark.max_concurrency == 1 else 1
         assert t.recipe.benchmark.repeats == want
 
-    # Lane split: 5 stock variants, 10 emmy variants (5 + 5 fastmath); the emmy c=64
+    # Lane split: 6 stock variants, 12 emmy variants (6 + 6 fastmath); the emmy c=64
     # cells carry the documented decode-bucket knob.
     stock = [t for t in tasks if "vllm-openai" in t.recipe.engine.llm.vllm.image]
     emmy = [t for t in tasks if "vllm-emmy" in t.recipe.engine.llm.vllm.image]
-    assert len(stock) == 5 and len(emmy) == 10
+    assert len(stock) == 6 and len(emmy) == 12
     for t in emmy:
         env = t.recipe.engine.llm.vllm.extra_env or ""
         if t.recipe.benchmark.max_concurrency == 64:
             assert "EMMY_GEN_DECODE_BUCKET=64" in env
         assert t.recipe.engine.llm.gpu_memory_utilization == 0.97
     fm = [t for t in emmy if "EMMY_FAST_MATH=1" in (t.recipe.engine.llm.vllm.extra_env or "")]
-    assert len(fm) == 5
+    assert len(fm) == 6
 
 
 def test_command_experiments_load(project_root):

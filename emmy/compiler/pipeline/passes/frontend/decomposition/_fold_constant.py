@@ -43,6 +43,7 @@ def fold_into_constant(graph: Graph, root: Node, inp_x: Node, out: Tensor) -> Gr
         name=inp_x.op.name,
         load_ops=new_load_ops,
         source_path=inp_x.op.source_path,
+        source_parts=inp_x.op.source_parts,
         source_shape=inp_x.op.source_shape,
         source_dtype=inp_x.op.source_dtype,
     )

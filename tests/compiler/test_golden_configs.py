@@ -207,7 +207,12 @@ def test_goldens_speak_native_codecs_and_featurize():
         # featurize. Spelling one is worse than omitting it — the consumer's transport (``d2/tma/ring``)
         # cannot appear on a cut row, which is computed-A, so a tile-bearing cut golden stops matching.
         # The ``mlp_geglu.*.cut`` goldens are exempt for the same reason, via their kind.
+        # A gemv-class M=1 row (``TILE: ''`` + a ``bN`` block-reduce) is scalar BY DESIGN — a
+        # per-token decode matvec has one output row per CTA and no tile geometry at all, so the
+        # empty featurization is the correct one, not an accident. Exempt exactly that shape.
         if isinstance(g, MatmulGoldenConfig) and g.knobs.get("PLACE@cone") != "cut":
+            if g.M == 1 and not g.knobs.get("TILE") and g.knobs.get("REDUCE", "").startswith("b"):
+                continue
             feats = features.knob_features(g.knobs)
             assert feats.get("D_threads", 0) > 0 and "D_tile_m" in feats, f"{g.name} featurized to empty tile geometry"
 

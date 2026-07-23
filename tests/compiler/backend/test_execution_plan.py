@@ -134,3 +134,50 @@ def test_apply_weight_loads_matches_binder(load_ops):
 def test_unsupported_load_op_encodes_as_none():
     # A symbolic reshape can't ride the pack vocabulary — the weight must be marked unbindable.
     assert _encode_load_ops((ReshapeOp(shape=("seq_len", 64)),)) is None
+
+
+def test_weight_spec_source_parts_projection_and_round_trip():
+    """A ``source_parts`` (merged sibling weight) constant projects into the plan and survives
+    the JSON round-trip; ``assemble_source`` binds it as the axis-0 concat on both spec kinds."""
+    from emmy.compiler.loader.binder import assemble_source
+
+    g = Graph()
+    g.add_node(
+        op=ConstantOp(
+            name="w_cat",
+            source_parts=(("m.wq", (3, 4)), ("m.wk", (2, 4))),
+            source_shape=(5, 4),
+            load_ops=(TransposeOp(axes=(1, 0)),),
+        ),
+        inputs=[],
+        output=Tensor("w_cat", (4, 5)),
+        node_id="w_cat",
+    )
+    g.add_node(
+        op=CudaOp(
+            kernel_source="__global__ void k_t() {}",
+            kernel_name="k_t",
+            arg_order=("w_cat", "y"),
+            grid=((1,), (1,), (1,)),
+            block=((32,), (1,), (1,)),
+            smem_bytes=0,
+        ),
+        inputs=["w_cat"],
+        output=Tensor("y", (4, 5)),
+        node_id="y",
+    )
+    g.outputs = ["y"]
+
+    plan = plan_from_graph(g)
+    spec = plan.weights["w_cat"]
+    assert spec.source_path is None
+    assert spec.source_parts == (("m.wq", (3, 4)), ("m.wk", (2, 4)))
+    restored = plan_from_dict(json.loads(json.dumps(plan_to_dict(plan))))
+    assert restored == plan
+
+    wq = np.arange(12, dtype=np.float32).reshape(3, 4)
+    wk = np.arange(8, dtype=np.float32).reshape(2, 4) + 9.0
+    sources = {"m.wq": wq, "m.wk": wk}
+    expected = np.concatenate([wq, wk], axis=0)
+    np.testing.assert_array_equal(assemble_source(restored.weights["w_cat"], sources), expected)
+    np.testing.assert_array_equal(assemble_source(g.nodes["w_cat"].op, sources), expected)

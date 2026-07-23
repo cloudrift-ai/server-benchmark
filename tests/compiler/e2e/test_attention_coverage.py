@@ -1665,7 +1665,7 @@ def _run_module_with_eager(module: torch.nn.Module, args: tuple, inputs_by_name:
     one ``backend.run`` GPU-lock window via ``pre_run``. Returns ``(emmy_flat, eager_flat)``."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
     from emmy.compiler.ir.base import ConstantOp  # noqa: PLC0415
-    from emmy.compiler.loader.binder import apply_load_ops  # noqa: PLC0415
+    from emmy.compiler.loader.binder import apply_load_ops, assemble_source  # noqa: PLC0415
     from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
 
     graph = trace_module(module.cpu(), args)
@@ -1690,6 +1690,12 @@ def _run_module_with_eager(module: torch.nn.Module, args: tuple, inputs_by_name:
                     arr = p.detach().cpu().numpy()
                     feed[nid] = apply_load_ops(arr, node.op.load_ops)
                     break
+            if nid not in feed and node.op.source_parts:
+                # A merged sibling-linear weight: assemble the axis-0 concat from the part paths.
+                sources = {k: p.detach().cpu().numpy() for k, p in module.named_parameters()}
+                src = assemble_source(node.op, sources)
+                if src is not None:
+                    feed[nid] = apply_load_ops(src, node.op.load_ops)
             if nid not in feed and node.op.value is not None:
                 feed[nid] = np.array([node.op.value], dtype=np.float32)
 
@@ -1904,7 +1910,7 @@ def _run_self_attn_tinyllama(seq_len: int, threshold: float = 1e-4) -> None:
 
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
     from emmy.compiler.ir.base import ConstantOp  # noqa: PLC0415
-    from emmy.compiler.loader.binder import apply_load_ops  # noqa: PLC0415
+    from emmy.compiler.loader.binder import apply_load_ops, assemble_source  # noqa: PLC0415
     from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
 
     attn_cpu = attn.cpu()
@@ -1933,6 +1939,12 @@ def _run_self_attn_tinyllama(seq_len: int, threshold: float = 1e-4) -> None:
                     arr = p.detach().cpu().numpy()
                     feed[nid] = apply_load_ops(arr, node.op.load_ops)
                     break
+            if nid not in feed and node.op.source_parts:
+                # A merged sibling-linear weight: assemble the axis-0 concat from the part paths.
+                sources = {k: p.detach().cpu().numpy() for k, p in attn_cpu.named_parameters()}
+                src = assemble_source(node.op, sources)
+                if src is not None:
+                    feed[nid] = apply_load_ops(src, node.op.load_ops)
             if nid not in feed and node.op.value is not None:
                 feed[nid] = np.array([node.op.value], dtype=np.float32)
 

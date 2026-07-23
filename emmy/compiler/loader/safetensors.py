@@ -99,15 +99,20 @@ def load_constants_from_safetensors(graph: Graph, model_id_or_path: str) -> dict
     index = _build_index(model_dir)
 
     needed: dict[str, list[str]] = {}  # shard path → list of keys
-    resolved: dict[str, str] = {}  # node_id → safetensors key
+    resolved: dict[str, tuple[str, ...]] = {}  # node_id → safetensors key(s); >1 = source_parts concat
     for nid, op in graph.loadable_constants():
-        for cand in _candidate_keys(op.source_path):
-            if cand in index:
-                resolved[nid] = cand
-                needed.setdefault(str(index[cand]), []).append(cand)
-                break
-        else:
-            logger.warning("safetensors loader: no key matched for %s (source_path=%r)", nid, op.source_path)
+        paths = [p for p, _shape in op.source_parts] if op.source_parts else [op.source_path]
+        keys: list[str] = []
+        for path in paths:
+            for cand in _candidate_keys(path):
+                if cand in index:
+                    keys.append(cand)
+                    needed.setdefault(str(index[cand]), []).append(cand)
+                    break
+            else:
+                logger.warning("safetensors loader: no key matched for %s (source_path=%r)", nid, path)
+        if len(keys) == len(paths):  # all-or-nothing: a partial concat would bind garbage
+            resolved[nid] = tuple(keys)
 
     sources: dict[str, np.ndarray] = {}
     for shard_path, keys in needed.items():
@@ -117,8 +122,9 @@ def load_constants_from_safetensors(graph: Graph, model_id_or_path: str) -> dict
 
     out: dict[str, np.ndarray] = {}
     for nid, op in graph.loadable_constants():
-        key = resolved.get(nid)
-        if key is None:
+        keys = resolved.get(nid)
+        if keys is None:
             continue
-        out[nid] = apply_load_ops(sources[key], op.load_ops)
+        src = np.concatenate([sources[k] for k in keys], axis=0) if op.source_parts else sources[keys[0]]
+        out[nid] = apply_load_ops(src, op.load_ops)
     return out

@@ -15,7 +15,8 @@ commands/vm ────► provisioning (create/delete instances)
 - `emmy/recipe/` — recipe loading, dataclass types (`Recipe`, `LLMConfig`, etc.), engine flag mapping
 - `emmy/deploy/` — compose generation, deploy orchestration
 - `emmy/provisioning/` — VM types, SSH polling, shell helpers, cloud providers
-- `emmy/logging_setup.py` — CLI logging setup (`setup_cli_logging()`)
+- `emmy/logging_setup.py` — CLI logging setup (`setup_cli_logging()`), plus `ensure_plugin_logging()` — makes emmy
+  INFO logs visible when nothing configured logging (a bare vLLM entrypoint; called by `emmy.serving.register()`)
 - `emmy/config.py` — the single owner of `os.environ` for all `EMMY_*` config vars. Typed getters
   (`tune_db_path`, `nvcc_flags`, `debug_enabled`, `dump_dir`, `tune_patience`, `bench_backends_raw`, `cubin_cache_dir`,
   …) read the env live; `set_nvcc_flags(cli_value, default)` holds the `--nvcc-flags` > env > command-default precedence
@@ -93,6 +94,7 @@ Each command module contains only argparse registration and `handle_*` functions
 ```python
 def handle_foo(args):
     asyncio.run(_handle_foo(args))
+
 
 async def _handle_foo(args):
     await ...

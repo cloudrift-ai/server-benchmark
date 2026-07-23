@@ -50,23 +50,36 @@ def apply_load_ops(source: np.ndarray, load_ops: tuple) -> np.ndarray:
     return np.ascontiguousarray(result.outputs[cur])
 
 
+def assemble_source(op, sources: dict[str, np.ndarray]) -> np.ndarray | None:
+    """Assemble a constant's raw pre-chain source array from ``sources``: the single
+    ``source_path`` lookup, or the axis-0 concat of its ``source_parts`` (the
+    ``merge_sibling_linears`` weight concat). ``None`` when any source is missing.
+    Duck-typed over ``ConstantOp`` — anything with ``source_path`` / ``source_parts``."""
+    if op.source_parts:
+        parts = [sources.get(path) for path, _shape in op.source_parts]
+        if any(p is None for p in parts):
+            return None
+        return np.concatenate([np.ascontiguousarray(p) for p in parts], axis=0)
+    return sources.get(op.source_path)
+
+
 def bind_constants(graph: Graph, sources: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     """Build the per-node ``input_data`` dict for every ``ConstantOp``.
 
-    ``sources`` maps each ``ConstantOp.source_path`` to its raw source
-    ndarray (typically read from safetensors or pulled from a live
-    ``nn.Module``). For each constant, this runs ``load_ops`` over the
-    source and stores the result keyed by the constant's node id.
-    Scalar constants (``value is not None``) are skipped — the backend
-    materializes them on its own. Constants without a source_path are
-    skipped too (synthetic constants emitted by passes carry their
-    ``value`` directly).
+    ``sources`` maps each ``ConstantOp.source_path`` (or ``source_parts`` part path) to its
+    raw source ndarray (typically read from safetensors or pulled from a live
+    ``nn.Module``). For each constant, this assembles the pre-chain source
+    (:func:`assemble_source`), runs ``load_ops`` over it, and stores the result keyed by
+    the constant's node id. Scalar constants (``value is not None``) are skipped — the
+    backend materializes them on its own. Constants without a source are skipped too
+    (synthetic constants emitted by passes carry their ``value`` directly).
     """
     out: dict[str, np.ndarray] = {}
     for nid, op in graph.loadable_constants():
-        if op.source_path not in sources:
+        src = assemble_source(op, sources)
+        if src is None:
             continue
-        out[nid] = apply_load_ops(sources[op.source_path], op.load_ops)
+        out[nid] = apply_load_ops(src, op.load_ops)
     return out
 
 

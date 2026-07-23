@@ -49,10 +49,15 @@ def compute_live_intervals(scratch_names: list[str], launches: list) -> dict[str
     last_read: dict[str, int] = {}
     for i, ln in enumerate(launches):
         if ln.node_id in scratch:
-            first_write[ln.node_id] = i
+            # ``setdefault``: a delegated zero-init (``zero_prologues`` below) writes this
+            # buffer at an EARLIER launch — the interval must start there, or a slab-slot
+            # neighbor still live between the prologue and the producer would be zeroed over.
+            first_write.setdefault(ln.node_id, i)
         # An AUX output (a second buffer this launch writes — the stat-sink's ``__sq``) has no
-        # launch of its own; its per-launch memset (``zero_outputs``) IS its first write.
-        for z in ln.zero_outputs:
+        # launch of its own; its per-launch memset (``zero_outputs``) IS its first write — and a
+        # DELEGATED zero (``zero_prologues``) is this launch's in-kernel write of a downstream
+        # accumulator, the earliest touch of that buffer.
+        for z in (*ln.zero_outputs, *ln.zero_prologues):
             if z in scratch:
                 first_write.setdefault(z, i)
         reads = set(ln.arg_names)

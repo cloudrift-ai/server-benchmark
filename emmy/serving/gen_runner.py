@@ -77,9 +77,18 @@ class _Program:
             self.program.upload_prefix_device(feed)
             if torch.cuda.is_current_stream_capturing():
                 self.program.run_once()
-            else:
-                self.program.capture_program_graph()  # static graph → one cached entry (empty sym_values)
-                self.program.replay_program_graph()
+                # Under the outer whole-step capture the output CLONES are dead weight: the graph's
+                # fixed kernel order guarantees every consumer (RoPE — in-place on the view is fine,
+                # its target is rewritten fresh next replay — attention, the next twin's prefix
+                # upload) reads before this program's next-replay overwrite, and each layer runs its
+                # OWN program instance so no other layer touches these buffers. Dropping them removes
+                # ~4 D2D copy nodes per layer per step from the captured graph (the emmy↔vLLM seam
+                # traffic the decode-gap trace attributed). The uncaptured path keeps the clone —
+                # there the program graph may replay again before the caller consumes the view.
+                outs = self.program.output_prefix_device()
+                return [torch.from_dlpack(outs[n])[:t] for n in self.output_names]
+            self.program.capture_program_graph()  # static graph → one cached entry (empty sym_values)
+            self.program.replay_program_graph()
             outs = self.program.output_prefix_device()
             return [torch.from_dlpack(outs[n])[:t].clone() for n in self.output_names]
 
@@ -132,20 +141,22 @@ def _bind_plan_constants(plan, sources, cache):
     weight footprint). ``cache`` must be scoped to one wrapper — param paths are
     wrapper-relative, so a cross-wrapper cache would collide."""
     from emmy.compiler.backend.plan import apply_weight_loads
+    from emmy.compiler.loader.binder import assemble_source
 
     out = {}
     for nid, w in plan.weights.items():
-        if w.source_path not in sources or w.load_ops is None:
+        src = assemble_source(w, sources)
+        if src is None or w.load_ops is None:
             continue
         if cache is None:
-            out[nid] = apply_weight_loads(sources[w.source_path], w.load_ops)
+            out[nid] = apply_weight_loads(src, w.load_ops)
             continue
         import cupy as cp
 
-        key = (w.source_path, w.load_ops)
+        key = (w.source_path, w.source_parts, w.load_ops)
         arr = cache.get(key)
         if arr is None:
-            arr = cp.asarray(apply_weight_loads(sources[w.source_path], w.load_ops))
+            arr = cp.asarray(apply_weight_loads(src, w.load_ops))
             cache[key] = arr
         out[nid] = arr
     return out
@@ -223,6 +234,8 @@ class EmmyGenRunner:
         np_dtype,
         pre_decode=None,
         post_decode=None,
+        pre_m1=None,
+        post_m1=None,
         decode_bucket=16,
         prefill_capacity=None,
         pre_prefill=None,
@@ -235,6 +248,8 @@ class EmmyGenRunner:
         self._post = post
         self._pre_decode = pre_decode  # list[_Program] — static M=decode_bucket (or None → no bucket)
         self._post_decode = post_decode
+        self._pre_m1 = pre_m1  # list[_Program] — static M=1 gemv-class twins (or None → bucket twins take T=1)
+        self._post_m1 = post_m1
         self._decode_bucket = decode_bucket
         self._prefill_capacity = prefill_capacity  # symbolic programs' device-buffer token capacity (None -> host rebind only)
         self._pre_prefill = pre_prefill  # list[_Program] — static M=prefill_bucket chunk twins (or None → symbolic prefill)
@@ -322,8 +337,17 @@ class EmmyGenRunner:
 
         pre_programs, post_programs = [], []
         pre_decode, post_decode = [], []
+        pre_m1, post_m1 = [], []
         pre_prefill, post_prefill = [], []
         decode_ok = decode_bucket and decode_bucket > 0
+        from emmy import config as emmy_config
+
+        # The gemv-class T=1 tier is OFF by default (EMMY_GEN_M1_TIER=1 to enable): the M=1
+        # matvec forms are gemv-fast, but the fused norm→merged edges lift with ZERO free axes
+        # at M=1 and schedule as grid-1 kernels — recognition cannot bind the degenerate
+        # composition yet, so an enabled tier would deploy ms-class kernels. Infra is complete
+        # (build/routing/chaining/pack names); flip the gate once the recognizer gap closes.
+        m1_ok = bool(decode_ok and decode_bucket > 1 and emmy_config.gen_m1_tier())
         # The prefill-chunk twin only pays ABOVE the decode bucket (an equal-or-smaller
         # bucket is fully shadowed by the decode twins' routing).
         prefill_ok = prefill_bucket and prefill_bucket > max(decode_bucket or 0, 0)
@@ -349,6 +373,7 @@ class EmmyGenRunner:
         pack_at = pack_path(emmy_config.pack_dir(), pack_key) if emmy_config.pack_dir() is not None else None
         loaded = load_pack(pack_at, key=pack_key) if pack_at is not None else None
         if loaded is not None:
+            # "pack hit" is a contract: the gemma4 image's verify.sh greps docker logs for it.
             logger.info("[gen_runner] pack hit at %s — skipping trace + compile for %d program(s)", pack_at, len(loaded))
             # The pack records which twin sets survived their compiles — honor that instead
             # of re-attempting a twin the save-time boot already saw fail.
@@ -434,6 +459,38 @@ class EmmyGenRunner:
                     except Exception as ex:  # noqa: BLE001 — any lowering/compile failure → disable the bucket
                         logger.warning("[gen_runner] decode-bucket compile failed at layer %d (%s); decode falls back to symbolic", i, ex)
                         decode_ok = False
+                # Static M=1 twins — the gemv-class c=1 decode tier: at one row the contractions
+                # demote to the PLANAR coop-reduce forms, which at b64/b128 stream the weights at
+                # ~1.68 TB/s (>= cuBLAS gemv) where the bucket-32 twins' computed-A forms run
+                # ~1.5. Routed at T == 1 only; T in [2, bucket] keeps the bucket twins. Same
+                # failure contract: any layer's compile failure disables the tier.
+                if m1_ok:
+                    try:
+                        pre_m1.append(
+                            build(
+                                f"L{i:02d}.pre.m1",
+                                pre_w,
+                                [torch.zeros(1, hidden, dtype=dtype)],
+                                None,
+                                np_dtype,
+                                dev_consts=pre_consts,
+                                arena=arena,
+                            )
+                        )
+                        post_m1.append(
+                            build(
+                                f"L{i:02d}.post.m1",
+                                post_w,
+                                [torch.zeros(1, attn_width, dtype=dtype), torch.zeros(1, hidden, dtype=dtype)],
+                                None,
+                                np_dtype,
+                                dev_consts=post_consts,
+                                arena=arena,
+                            )
+                        )
+                    except Exception as ex:  # noqa: BLE001 — any lowering/compile failure → disable the tier
+                        logger.warning("[gen_runner] M=1 twin compile failed at layer %d (%s); T=1 decode rides the bucket twins", i, ex)
+                        m1_ok = False
                 # Static M=prefill_bucket chunk twins — exact grids on the hot chunked-prefill
                 # width (the symbolic masked-tile programs at off-hint T are the residual
                 # prefill cost). Same failure contract as the decode twins.
@@ -465,6 +522,37 @@ class EmmyGenRunner:
                         logger.warning("[gen_runner] prefill-bucket compile failed at layer %d (%s); prefill falls back to symbolic", i, ex)
                         prefill_ok = False
 
+        # post→pre buffer CHAINING (decode twins): rewire every post twin's OUTPUT array onto the
+        # pre twins' shared hidden-INPUT backing (one arena backing per role:name across layers).
+        # The next layer's pre "upload" then sees its own buffer as the source and self-copy-skips
+        # (``upload_prefix_device``) — one D2D seam copy per layer per step drops out of the
+        # captured decode graph. Safe because within a step post[l] writes the backing only AFTER
+        # its residual upload copied the previous hidden out of it (the residual copy is the
+        # protective copy and stays), and the decode/symbolic paths never interleave within one
+        # step (the runner routes on T). Rewiring happens before any run or capture, so both the
+        # per-program graphs and vLLM's outer whole-step capture bake the chained pointers.
+        if decode_ok and pre_decode and post_decode:
+            pre_in = pre_decode[0].input_names[0]
+            shared_in = pre_decode[0].program.arrays[pre_in]
+            for prog in post_decode:
+                out_name = prog.output_names[0]
+                if prog.program.arrays[out_name].nbytes == shared_in.nbytes:
+                    prog.program.arrays[out_name] = shared_in
+        if m1_ok and pre_m1 and post_m1:
+            import cupy as cp
+
+            # Same chaining for the M=1 twins. Their pre input is a [1, H] view into the SAME
+            # role:name arena backing the bucket twins use, so the post outputs rewire onto a
+            # [1, H] view over that backing's memory (nbytes differ from the bucket view; the
+            # pointer is what the upload self-copy skip keys on).
+            m1_in = pre_m1[0].input_names[0]
+            m1_shared = pre_m1[0].program.arrays[m1_in]
+            for prog in post_m1:
+                out_name = prog.output_names[0]
+                cur = prog.program.arrays[out_name]
+                if cur.shape == m1_shared.shape and cur.dtype == m1_shared.dtype:
+                    prog.program.arrays[out_name] = cp.ndarray(m1_shared.shape, dtype=m1_shared.dtype, memptr=m1_shared.data)
+
         embed_weight = trunk.embed_tokens.weight.detach().cpu().to(torch.float32).numpy().astype(np_dtype, copy=False)
         # Gemma scales embeddings by sqrt(hidden) (a ``Gemma3TextScaledWordEmbedding`` carries it as
         # an ``embed_scale`` buffer); a plain ``nn.Embedding`` has none (scale 1). Fold it into the
@@ -473,12 +561,15 @@ class EmmyGenRunner:
         if embed_scale != 1.0:
             embed_weight = embed_weight * np_dtype.type(embed_scale)
         use_decode = decode_ok and len(pre_decode) == len(layers)
+        use_m1 = m1_ok and len(pre_m1) == len(layers) and len(post_m1) == len(layers)
         use_prefill = prefill_ok and len(pre_prefill) == len(layers)
         if pack_at is not None and loaded is None:
             # Best-effort save after a full compile: only the program sets that survived
             # (a mid-run twin failure leaves partial lists — those must not be recorded).
             keep = {
-                name: p for name, p in plans.items() if (".decode" not in name or use_decode) and (".prefill" not in name or use_prefill)
+                name: p
+                for name, p in plans.items()
+                if (".decode" not in name or use_decode) and (".prefill" not in name or use_prefill) and (".m1" not in name or use_m1)
             }
             if any(w.load_ops is None for p in keep.values() for w in p.weights.values()):
                 logger.warning("[gen_runner] not writing pack: a weight load-op chain is outside the pack vocabulary")
@@ -498,6 +589,8 @@ class EmmyGenRunner:
             np_dtype=np_dtype,
             pre_decode=pre_decode if use_decode else None,
             post_decode=post_decode if use_decode else None,
+            pre_m1=pre_m1 if use_m1 else None,
+            post_m1=post_m1 if use_m1 else None,
             decode_bucket=decode_bucket,
             prefill_capacity=max_tokens,
             pre_prefill=pre_prefill if use_prefill else None,
@@ -609,6 +702,8 @@ class EmmyGenRunner:
         real rows — up to ~bucket/T× the useful work per layer, in the default-config
         steady state (mnbt-default bucket 4096, ``--max-concurrency 32`` decode)."""
         t = hidden.shape[0]
+        if t == 1 and self._pre_m1 is not None:
+            return tuple(self._pre_m1[layer].run_device([hidden]))
         if self._pre_decode is not None and t <= self._decode_bucket:
             return tuple(self._pre_decode[layer].run_device([hidden]))
         if self._pre_prefill is not None and t == self._prefill_bucket:
@@ -620,6 +715,8 @@ class EmmyGenRunner:
         CUDA. Decode-bucketed / exact-chunk / symbolic-routed like
         :meth:`forward_layer_pre_device`."""
         t = attn_out.shape[0]
+        if t == 1 and self._post_m1 is not None:
+            return self._post_m1[layer].run_device([attn_out, residual])[0]
         if self._post_decode is not None and t <= self._decode_bucket:
             return self._post_decode[layer].run_device([attn_out, residual])[0]
         if self._post_prefill is not None and t == self._prefill_bucket:

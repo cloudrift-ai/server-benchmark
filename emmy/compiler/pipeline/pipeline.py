@@ -542,14 +542,18 @@ class Pipeline:
         # exhausts before reaching an in-budget leaf. Before giving up, take the
         # conservative emission-order pick (``greedy_decide(prior=None)`` =
         # option-0): it ignores the prior, and the planner emits a budget-safe
-        # tile first, so it lowers whenever any in-budget tile exists. When even
+        # tile first, so it lowers whenever any in-budget tile exists. The card's
+        # recorded goldens still floor this resolve (they are prior-independent
+        # evidence — one over-budget node must not cost every OTHER kernel its
+        # verified golden), and ``blocked`` rides along so the floor can never
+        # re-pick a tile that already failed ``validate(ctx)``. When even
         # option-0 overflows (the over-budget rule genuinely has no in-budget
         # option — e.g. the single-option guardrail) the re-resolve stays
         # un-lowered and ``_raise_on_unlowered`` fires below, exactly as before.
         if _unlowered_tiles(terminal, rejections):
             rejections = []
             run = Run(pipeline=self, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
-            terminal, _ = run.resolve(graph.copy(), greedy_decide(prior=None, price_structural=False))
+            terminal, _ = run.resolve(graph.copy(), greedy_decide(blocked=blocked, prior=None, price_structural=False))
         _raise_on_unlowered(terminal, rejections, ctx)
         logger.info("compile: total %.2fs (deterministic resolve)", time.monotonic() - t_start)
         return terminal

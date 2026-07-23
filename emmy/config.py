@@ -53,6 +53,7 @@ NCU_CHILD = "EMMY_NCU_CHILD"
 SERVING_STATIC = "EMMY_SERVING_STATIC"
 SERVING_BATCHED = "EMMY_SERVING_BATCHED"
 GEN_DECODE_BUCKET = "EMMY_GEN_DECODE_BUCKET"
+GEN_M1_TIER = "EMMY_GEN_M1_TIER"
 GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
 READABLE = "EMMY_READABLE"
 
@@ -349,6 +350,16 @@ def gen_prefill_bucket(default: int = -1) -> int:
     hot chunk width); **0 disables** the twin (prefill stays on the symbolic masked-tile
     programs). See `serving/gen_runner.py`."""
     return int_env(GEN_PREFILL_BUCKET, default)
+
+
+def gen_m1_tier(default: int = 0) -> int:
+    """``EMMY_GEN_M1_TIER`` — build and route the static M=1 (gemv-class) decode twins for
+    T=1 steps (default 0 = OFF). The M=1 matvec forms reach cuBLAS-gemv bandwidth (b128
+    ~1.68 TB/s on the 5090), but the FUSED norm→merged edges currently lift with zero free
+    axes at M=1 and schedule as grid-1 kernels (recognition cannot bind the degenerate
+    composition, so neither the column-gridded Contraction form nor the cut is offered) —
+    keep this off until that recognizer gap is closed. See `serving/gen_runner.py`."""
+    return int_env(GEN_M1_TIER, default)
 
 
 def gen_decode_bucket(default: int = 16) -> int:

@@ -167,6 +167,14 @@ class TestPickSlice:
         own_share = picks.count("own") / len(picks)
         assert 0.5 < own_share < 0.7  # tracks the 60% share
 
+    def test_zero_share_slice_is_never_drawn(self):
+        # share 0 = "skip this slice": it must not be drawn even while it holds points,
+        # and its presence must not crash the draw once the funded slices exhaust.
+        shares = {"own": 1.0, "cross": 0.0, "tail": 0.0}
+        remaining = {"own": {"g": [("k", "s")]}, "cross": {"g": [("k", "s")]}}
+        rng = random.Random(0)
+        assert all(gnb.pick_slice(rng, shares, remaining) == "own" for _ in range(50))
+
     def test_exhausted_slice_share_flows_to_the_rest(self):
         remaining = {"cross": {"g": [("k", "s")]}, "tail": {"g": [("k", "s")]}}
         rng = random.Random(0)

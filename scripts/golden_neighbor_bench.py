@@ -142,8 +142,10 @@ def assign_slice(dist_own: int | None, dist_cross: int | None, max_dist: int) ->
 
 def pick_slice(rng: random.Random, shares: dict[str, float], remaining: dict[str, dict[str, list]]) -> str:
     """Draw a slice by its budget share, renormalized over the slices that still have
-    points — an exhausted slice's share flows to the others instead of stalling."""
-    slices = [s for s in SLICES if remaining.get(s)]
+    points — an exhausted slice's share flows to the others instead of stalling. A
+    zero-share slice is never drawn (share 0 means "skip this slice"), so callers must
+    not offer ``remaining`` holding only zero-share slices."""
+    slices = [s for s in SLICES if remaining.get(s) and shares.get(s)]
     weights = [shares[s] for s in slices]
     return rng.choices(slices, weights=weights, k=1)[0]
 
@@ -358,6 +360,10 @@ def run_batch(group: ShapeGroup, specs: list[str], opt: str, args, receipt: Path
     env = dict(os.environ)
     if group.fast_math:
         env["EMMY_FAST_MATH"] = "1"
+    # emmy run writes the receipt only at the very end — drop any leftover from a prior
+    # session first (batch_i restarts at 1, so paths recur), else a crash that never
+    # wrote its receipt would make us parse the STALE one and mark unbenched specs ok.
+    receipt.unlink(missing_ok=True)
     try:
         subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=args.run_timeout)
     except subprocess.TimeoutExpired:
@@ -404,6 +410,10 @@ def main() -> int:
     ap.add_argument("--emmy", default="./venv/bin/emmy", help="emmy executable (default ./venv/bin/emmy)")
     ap.add_argument("--dry-run", action="store_true", help="Build the pool, print per-shape and remaining stats, exit")
     args = ap.parse_args()
+    if args.warmup < 5 or args.iters < 20:
+        # bench_record's meets_quality_bar — below it every bench runs but emmy run
+        # records NO node rows, while the ledger would still mark the points terminal.
+        ap.error(f"--warmup {args.warmup} / --iters {args.iters} is below the node-record quality bar (>= 5 / >= 20)")
 
     start = time.monotonic()
     shares = normalize_shares(args.share_own, args.share_cross, args.share_tail)
@@ -416,10 +426,12 @@ def main() -> int:
     totals = {s: sum(1 for g in groups for _, _, sl in g.points if sl == s) for s in SLICES}
 
     def remaining_map() -> dict[str, dict[str, dict[str, list]]]:
+        # A zero-share slice's points are excluded entirely (share 0 = skip): keeping
+        # them would leave the main loop spinning on work pick_slice can never draw.
         out: dict[str, dict[str, dict[str, list]]] = {s: {} for s in SLICES}
         for g in groups:
             for key, spec, sl in g.points:
-                if any(needs_run(ledger, key, opt, args.max_attempts) for opt in OPT_FLAGS):
+                if shares[sl] and any(needs_run(ledger, key, opt, args.max_attempts) for opt in OPT_FLAGS):
                     out[sl].setdefault(g.kind, {}).setdefault(g.group_id, []).append((key, spec))
         return {s: m for s, m in out.items() if m}
 

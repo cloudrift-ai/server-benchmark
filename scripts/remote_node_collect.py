@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -117,12 +118,34 @@ def _log(msg: str) -> None:
     print(f"[remote_node_collect] {msg}", flush=True)
 
 
-def _fail(remote: str, ssh_key: str | None, port: int | None, why: str, logfile: str) -> int:
+def _fail(remote: str, ssh_key: str | None, port: int | None, why: str, logfile: str, *, harvest_ledger: str | None = None) -> int:
+    """Print the FAILED summary (+ remote log tail) and return 1. ``harvest_ledger``
+    (the local ledger path) is passed by post-launch failure paths: the sweep already
+    spent rented-GPU time, so its coverage is harvested best-effort even on failure —
+    the remote ledger is fetched (else the next run would push the stale local copy
+    over it, re-benching everything) and the node rows merged home."""
     _, tail = _run(remote, ssh_key, port, f"tail -n 40 {logfile} 2>/dev/null")
     print("\n=== remote_node_collect summary ===", flush=True)
     print(f"status: FAILED ({why})", flush=True)
     print(f"--- last 40 lines of {remote}:{logfile} ---", flush=True)
     print(tail.strip() or "(empty / not found)", flush=True)
+    if harvest_ledger:
+        local_ledger = Path(harvest_ledger).expanduser()
+        local_ledger.parent.mkdir(parents=True, exist_ok=True)
+        e = "ssh " + " ".join(_opts(ssh_key, port))
+        fp = subprocess.run(["rsync", "-az", "-e", e, f"{remote}:{_REMOTE_LEDGER}", str(local_ledger)], capture_output=True, text=True)
+        if fp.returncode == 0:
+            print(f"ledger: fetched -> {local_ledger} (despite the failure — coverage is preserved)", flush=True)
+        else:
+            print(f"ledger: fetch FAILED ({(fp.stderr or fp.stdout).strip()}) — next run redoes this run's points", flush=True)
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import merge_node_db  # noqa: PLC0415  (sibling script in scripts/)
+
+            merged = merge_node_db.fetch_and_merge(remote, ssh_key=ssh_key, port=port)
+            print(f"merge (best-effort): {merged} node rows brought home", flush=True)
+        except Exception as exc:  # noqa: BLE001 — the harvest must never mask the original failure
+            print(f"merge (best-effort) FAILED: {exc!r} — the collected data is still on {remote}", flush=True)
     return 1
 
 
@@ -319,7 +342,7 @@ def main() -> int:
         if val is not None:
             cmd += f" {flag} {val}"
     if args.filter:
-        cmd += f" --filter {args.filter}"
+        cmd += f" --filter {shlex.quote(args.filter)}"
     log_file, proc_pat = _NEIGHBOR_LOG, "[g]olden_neighbor_bench"
     done_grep, done_re = "neighbor-bench done: [0-9]+/[0-9]+ points", _NEIGHBOR_DONE_RE
     _log(f"launching `{cmd}` (detached -> {log_file}) ...")
@@ -349,7 +372,9 @@ def main() -> int:
             # be stranded behind a wait cap. Stop the sweep, then collect what it made.
             _log(f"--timeout {args.timeout}s reached — stopping the sweep, then harvesting the partial run")
             if not _stop_sweep(remote, key, port):
-                return _fail(remote, key, port, f"timeout after {args.timeout}s and the sweep would not stop", log_file)
+                return _fail(
+                    remote, key, port, f"timeout after {args.timeout}s and the sweep would not stop", log_file, harvest_ledger=args.ledger
+                )
             stopped = True
             break
         time.sleep(args.poll)
@@ -370,7 +395,7 @@ def main() -> int:
         if not alive:
             dead_streak += 1
             if dead_streak >= 2:  # two consecutive confirmed DEADs without a done marker ⇒ it crashed
-                return _fail(remote, key, port, "sweep process died without a done marker", log_file)
+                return _fail(remote, key, port, "sweep process died without a done marker", log_file, harvest_ledger=args.ledger)
         else:
             dead_streak = 0
             _log(f"collecting... ({int(time.monotonic() - start)}s elapsed)")

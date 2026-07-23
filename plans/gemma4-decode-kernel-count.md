@@ -303,3 +303,26 @@ isolation) + down m1 b256 lock (71.8). All three compositions verified deploying
 (gate_up 145 µs ≈ eager, was 44,533 grid-1). The featurize guard in ``test_golden_configs`` exempts
 gemv-class rows (M=1, ``TILE: ''``, ``bN`` reduce) — scalar by design, not an accident. Gate still default
 OFF pending the serving e2e (``_tune/ab_m1.sh``: fresh pack, tier on, 256/4K c=1 + c=8/c=64 sanity).
+
+### m1 serving e2e VERDICT (2026-07-23): tier stays OFF — the twins' matvecs read B TRANSPOSED
+
+The A/B (fresh pack, tier on): 256 c=1 TPOT **108.7** (baseline 18.18), 4K c=1 **110.4** (19.12) — a
+context-independent ~109 ms/step, GPU 95–100 % busy; bucket paths untouched (256 c=64 mean 50.2 ≈ baseline,
+4K c=8 21.55/355 tok/s ≈ 21.77/350). All 96 m1 pack plans deploy the cut + gemv-class matvecs correctly —
+the kernels are right, their RUNTIME is 8× off: nsys (``_tune/nsys/m1_decode.nsys-rep``) shows gate_up
+1.144 ms each (140 isolated), down 570 (72), qkv 282 (12–37), o_proj 149 (~35); summed ≈ the whole 109 ms.
+
+Root cause (SASS + snippet-confirmed): the serving twins' matvecs index B **k-major** (``IMAD ×0xf00`` —
+×N — in the down kernel; the staged-transposed-B class PR #406 fixed for the mma tiers, never built for the
+scalar b-reduce tier). Every b-reduce lane then strides N per k step — nothing coalesces, ~8–16× bandwidth
+loss. The transposed-B snippet reproduces it exactly: down b256 = **568.5 µs** vs the in-stream 570. The
+golden snippets benched the ``F.linear`` row-major-B orientation (ShapeKey is layout-blind — one key, two
+orientations, the aspect-blindness class again). Best reachable schedule on the transposed form: ``g8k``
+191 µs — still 2.6× off cuBLAS gemv's 80 (cuBLAS is column-major-native).
+
+**Disposition**: ``EMMY_GEN_M1_TIER`` stays default-OFF (nothing regresses; c=8/c=64 verified clean). The
+rows stay recorded with a YAML caveat as the snippet-form optima. **The unlock is compiler work**: a
+coalescing-aware reduce partition for k-major B (warp lanes along n, k serial/split per lane — the
+"transposed matvec" sibling), or fold the transpose at twin-capture/bind time. Priced: closing to the
+row-major floor recovers the projected ~1.5–2 ms/step; the g8k stopgap alone would land ~35 ms/step —
+far above the 21.7 baseline, not worth flipping the gate for.

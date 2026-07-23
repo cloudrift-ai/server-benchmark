@@ -2992,6 +2992,11 @@ configs:
   # (0.7) + a b-reduce matvec at memory-bound floor (gate_up 140 us = 1.68 TB/s on the 236 MB
   # weight; qkv/qkg matvecs are L2-warm in isolation, e2e is the verdict). Keys are m1-only
   # (free_max = N disambiguates from bucketed shapes), so c=8/c=64 deploys never see these rows.
+  # CAVEAT (2026-07-23 serving e2e): these rows record the F.linear ROW-major-B optimum, but the
+  # serving twins' matvecs read B through a TRANSPOSED (k-major) index map, where every b-reduce
+  # runs ~8x off the floor (down 568 vs 72 us; ShapeKey is layout-blind so one key covers both).
+  # EMMY_GEN_M1_TIER therefore stays default-OFF until a coalescing-aware reduce partition for
+  # k-major B exists; these rows stay as the honest snippet-form optima the keys were benched on.
   - kernel: norm_linear
     name: gemma4_12b.norm_gate_up.m1.lin
     M: 1

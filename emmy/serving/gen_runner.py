@@ -373,6 +373,7 @@ class EmmyGenRunner:
         pack_at = pack_path(emmy_config.pack_dir(), pack_key) if emmy_config.pack_dir() is not None else None
         loaded = load_pack(pack_at, key=pack_key) if pack_at is not None else None
         if loaded is not None:
+            # "pack hit" is a contract: the gemma4 image's verify.sh greps docker logs for it.
             logger.info("[gen_runner] pack hit at %s — skipping trace + compile for %d program(s)", pack_at, len(loaded))
             # The pack records which twin sets survived their compiles — honor that instead
             # of re-attempting a twin the save-time boot already saw fail.

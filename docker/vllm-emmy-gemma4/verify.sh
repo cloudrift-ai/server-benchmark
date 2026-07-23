@@ -13,6 +13,9 @@ GPUS="all"; [ -n "${GPU_DEVICE:-}" ] && GPUS="device=$GPU_DEVICE"
 NAME=gemma4-verify
 
 docker rm -f "$NAME" >/dev/null 2>&1 || true
+# Cleanup rides an EXIT trap: under `set -e` an inline `docker rm` after a failing
+# diagnostic pipeline never runs and leaks the container (seen 2026-07-23).
+trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
 docker run -d --name "$NAME" --gpus "$GPUS" --ipc=host -p "$PORT":8000 "$IMAGE"
 
 before=$(docker exec "$NAME" sh -c "find /opt/emmy/cubin -name '*.cubin' | sort")
@@ -41,14 +44,15 @@ after=$(docker exec "$NAME" sh -c "find /opt/emmy/cubin -name '*.cubin' | sort")
 # When the image ships a pack, the boot must have actually used it — a silent fallback to
 # the full compile (key/environment drift) still passes the cubin check but re-pays the
 # ~25 min frontend on every customer boot, which is exactly what the pack exists to kill.
+# The "pack hit" line is emmy's runner log; emmy.serving.register() attaches a log
+# handler under the bare vLLM entrypoint precisely so it reaches docker logs here.
 pack_baked=$(docker exec "$NAME" sh -c "find /opt/emmy/pack -name manifest.json 2>/dev/null | head -1")
-if [ -n "$pack_baked" ] && ! docker logs "$NAME" 2>&1 | grep -q "pack hit"; then
+# grep without -q: under pipefail, -q's early exit can SIGPIPE docker logs on a hit.
+if [ -n "$pack_baked" ] && ! docker logs "$NAME" 2>&1 | grep "pack hit" >/dev/null; then
     echo "[verify] FAIL — a pack is baked but the boot did not hit it (fell back to full compile):"
-    docker logs "$NAME" 2>&1 | grep -i "\[pack\]" | tail -5
-    docker rm -f "$NAME" >/dev/null
+    docker logs "$NAME" 2>&1 | grep -i "\[pack\]" | tail -5 || true
     exit 1
 fi
-docker rm -f "$NAME" >/dev/null
 
 if [ "$before" != "$after" ]; then
     echo "[verify] FAIL — new cubins compiled at runtime (cache miss):"

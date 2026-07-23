@@ -476,6 +476,23 @@ class EmmyGenRunner:
                         logger.warning("[gen_runner] prefill-bucket compile failed at layer %d (%s); prefill falls back to symbolic", i, ex)
                         prefill_ok = False
 
+        # post→pre buffer CHAINING (decode twins): rewire every post twin's OUTPUT array onto the
+        # pre twins' shared hidden-INPUT backing (one arena backing per role:name across layers).
+        # The next layer's pre "upload" then sees its own buffer as the source and self-copy-skips
+        # (``upload_prefix_device``) — one D2D seam copy per layer per step drops out of the
+        # captured decode graph. Safe because within a step post[l] writes the backing only AFTER
+        # its residual upload copied the previous hidden out of it (the residual copy is the
+        # protective copy and stays), and the decode/symbolic paths never interleave within one
+        # step (the runner routes on T). Rewiring happens before any run or capture, so both the
+        # per-program graphs and vLLM's outer whole-step capture bake the chained pointers.
+        if decode_ok and pre_decode and post_decode:
+            pre_in = pre_decode[0].input_names[0]
+            shared_in = pre_decode[0].program.arrays[pre_in]
+            for prog in post_decode:
+                out_name = prog.output_names[0]
+                if prog.program.arrays[out_name].nbytes == shared_in.nbytes:
+                    prog.program.arrays[out_name] = shared_in
+
         embed_weight = trunk.embed_tokens.weight.detach().cpu().to(torch.float32).numpy().astype(np_dtype, copy=False)
         # Gemma scales embeddings by sqrt(hidden) (a ``Gemma3TextScaledWordEmbedding`` carries it as
         # an ``embed_scale`` buffer); a plain ``nn.Embedding`` has none (scale 1). Fold it into the

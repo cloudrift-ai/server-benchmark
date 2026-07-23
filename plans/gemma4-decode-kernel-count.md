@@ -237,11 +237,18 @@ RoPE on the view is safe — capture-replay-matches-live tests green). 4K c=1 TP
 its noise band (that config swings ±1 ms run-to-run with mixed scheduling — 50.1–52.3 observed across identical
 configs).
 
-**Remaining, priced**: the upload-side copies (~3/layer) need post→pre buffer CHAINING in the runner (point each
-post twin's output backing at the next pre twin's input slot — plan-level rewiring, est. −0.2–0.3 ms); the
-shared ~1.0 ms sampler stall would need vLLM-side async sampling work. After that the decode gap is essentially
-stock's leaner M=1 step shape (bucket-32 computes 32 rows for 1 at equal weight-stream cost — only matters if a
-gemv-class M=1 emmy tier ever exists).
+**post→pre buffer chaining LANDED (same day)**: every decode post twin's OUTPUT array is rewired onto the pre
+twins' shared hidden-INPUT arena backing (one `role:name` backing across layers), and `upload_prefix_device`
+self-copy-skips when source and destination pointers match — the per-layer pre upload drops out of the captured
+graph. The residual upload stays (it is the protective copy: post writes the backing only after copying the
+previous hidden out). Serving suite 69/69 green (stitch-matches-eager included). e2e: 4K c=1 19.25 → **19.12**,
+256 c=1 18.46 → **18.18**.
+
+**Remaining, priced**: the attn_out + residual uploads (2/layer — attn_out would need aliasing vLLM's attention
+output tensor, fragile; the residual copy is load-bearing); the shared ~1.0 ms sampler stall (vLLM-side async
+sampling); stock's leaner M=1 step shape (bucket-32 computes 32 rows for 1 at equal weight-stream cost — only
+matters if a gemv-class M=1 emmy tier ever exists). Session total on 4K c=1 decode: 20.30 → 19.12 vs stock
+17.40.
 
 ## Ordering, verification, risks
 

@@ -608,7 +608,7 @@ mismatch.
 DB's `node` rows read-only and re-upserts them through the same per-kind path (direction-independent — a stale leaf
 snapshot never resurrects; `visits` SUMs on a shared key), so a card's node data measured on a rented GPU (no local
 CUDA) folds into one canonical DB without cross-card collision. Driven by `scripts/merge_node_db.py` / the
-`collect-node-data` skill: `remote_node_tune.py` drives `scripts/golden_neighbor_bench.py` on the box — a
+`collect-node-data` skill: `remote_node_collect.py` drives `scripts/golden_neighbor_bench.py` on the box — a
 wall-clock-budgeted sweep of every golden kind's candidate pool, paired -O1/-O3 pinned benches (`run --bench
 --ab`), the pool sliced by distance to the recorded golden anchors (the live card's own neighborhood / other
 cards' golden vicinities that realize here / a capped uniform tail) and sampled by configurable budget shares,

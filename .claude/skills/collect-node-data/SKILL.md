@@ -1,6 +1,6 @@
 ---
 name: collect-node-data
-description: Use this skill when the user wants to populate or refresh the autotune DB's node table (the cross-hardware search-tree node store) with data measured on a SPECIFIC GPU — e.g. "collect node data for an H200", "run the node sweep on a rented <GPU> and merge the nodes back", "gather cross-hardware node-store data", "populate / update the node table from <hardware>". Rents a fresh single-GPU server (via start-remote-server), rsyncs + sets up emmy there, runs the budgeted three-slice golden sweep (`remote_node_tune.py` → `golden_neighbor_bench.py`: every golden kind's candidate pool, sliced own-neighborhood / cross-card exchange / uniform tail at 60/25/15 budget shares, paired -O1/-O3 pinned benches, ledger-resumed), merges the remote node rows into the local `~/.cache/emmy/autotune.db` (nodes table only, GPU-keyed so cards never collide), backs the DB up locally, and tears the server down.
+description: Use this skill when the user wants to populate or refresh the autotune DB's node table (the cross-hardware search-tree node store) with data measured on a SPECIFIC GPU — e.g. "collect node data for an H200", "run the node sweep on a rented <GPU> and merge the nodes back", "gather cross-hardware node-store data", "populate / update the node table from <hardware>". Rents a fresh single-GPU server (via start-remote-server), rsyncs + sets up emmy there, runs the budgeted three-slice golden sweep (`remote_node_collect.py` → `golden_neighbor_bench.py`: every golden kind's candidate pool, sliced own-neighborhood / cross-card exchange / uniform tail at 60/25/15 budget shares, paired -O1/-O3 pinned benches, ledger-resumed), merges the remote node rows into the local `~/.cache/emmy/autotune.db` (nodes table only, GPU-keyed so cards never collide), backs the DB up locally, and tears the server down.
 version: 0.3.0
 ---
 
@@ -13,7 +13,7 @@ reachability) and feeds prior diagnostics. Because your dev box (and most of the
 data for any given card must be **measured on that card** and brought back.
 
 This skill does exactly that for one GPU, in a single budgeted run on the rented box: rent it → set up emmy →
-the golden sweep (`scripts/remote_node_tune.py`, driving `scripts/golden_neighbor_bench.py`) → merge the new card's
+the golden sweep (`scripts/remote_node_collect.py`, driving `scripts/golden_neighbor_bench.py`) → merge the new card's
 node rows into the local DB → back the DB up → tear the server down.
 
 **Why a budgeted sweep (and not a search-driven tune).** The old flow ran an ε-greedy `emmy tune --dataset golden`
@@ -97,8 +97,8 @@ Do not wrap the command in a retry loop — the orchestrator handles fallback it
 
 ## Step 2 — Set up, sweep, merge, and back up on the remote (one backgrounded run of one script)
 
-`scripts/remote_node_tune.py` does the whole core in **one process**: ensures the Python 3.12 venv/dev packages +
-`nvcc`, rsyncs your working tree (exact local code, incl. uncommitted changes) to `~/.local/share/emmy/node-tune/`
+`scripts/remote_node_collect.py` does the whole core in **one process**: ensures the Python 3.12 venv/dev packages +
+`nvcc`, rsyncs your working tree (exact local code, incl. uncommitted changes) to `~/.local/share/emmy/node-collect/`
 (the repo's `REMOTE_DEPLOY_DIR` layout), runs `make setup` (output to `setup.log` in that dir — only a tail returns
 on failure), pushes the resume ledger, launches the sweep detached, **polls the remote log internally** until it
 finishes, then **fetches the ledger and node rows back and merges them** into the local `~/.cache/emmy/autotune.db`
@@ -112,7 +112,7 @@ want only the final summary in context, not ~20 ssh polls. The harness re-invoke
 exits, so **do not poll manually** — wait for the completion notification.
 
 ```bash
-./venv/bin/python scripts/remote_node_tune.py --remote "<user@host>" --ssh-key ~/.ssh/id_ed25519 [--port <PORT>] \
+./venv/bin/python scripts/remote_node_collect.py --remote "<user@host>" --ssh-key ~/.ssh/id_ed25519 [--port <PORT>] \
     --budget-s 14400 --timeout 16200
 ```
 
@@ -151,7 +151,7 @@ upsert semantics.
 **Manual debugging** (only if the script fails and you need to poke the box): the harness shell is zsh, so pass ssh
 options as an **array** — `SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i
 "$HOME/.ssh/id_ed25519")` (a plain string var fails: zsh doesn't word-split it). Then `ssh "${SSH_OPTS[@]}" "$REMOTE"
-'tail -n 40 ~/.local/share/emmy/node-tune/neighbors.log'`; check liveness with `pgrep -f "[g]olden_neighbor_bench"`
+'tail -n 40 ~/.local/share/emmy/node-collect/neighbors.log'`; check liveness with `pgrep -f "[g]olden_neighbor_bench"`
 (bracket trick — a plain pattern self-matches the poll's own argv); never run a multi-minute loop inside one ssh
 session.
 
@@ -206,7 +206,7 @@ If any check fails, report the failure + raw output instead of claiming success.
 - **Don't rent more than 1 GPU** — node data is per-card; extra GPUs just burn money.
 - **Don't auto-delete the VM** — confirm teardown with the user first (and never modify a CloudRift server beyond the
   sweep we explicitly started).
-- **Don't hand-roll the remote setup/poll loop** — `scripts/remote_node_tune.py` (Step 2) already handles it correctly:
+- **Don't hand-roll the remote setup/poll loop** — `scripts/remote_node_collect.py` (Step 2) already handles it correctly:
   argv-list ssh (zsh doesn't word-split a string var), the `[g]olden_neighbor_bench` bracket-pgrep (a plain pattern
   self-matches the poll's own argv and reports the sweep alive forever), one short ssh per poll, and venv/dev install.
   Only drop to manual ssh for debugging — and then keep the same precautions (array ssh opts; never name a var

@@ -109,7 +109,7 @@ Quick test models / scripts (for local iteration):
 
 - Ungated Llama-arch smoke model: `TinyLlama/TinyLlama-1.1B-Chat-v1.0`; GPU embedding model (0.6B): `Qwen/Qwen3-Embedding-0.6B`
 - Benchmark/profiling helpers live under `scripts/` (`bench_block.py`, `bench_model_kernels.py`, `bench_gen_*.py`,
-  `profile_gen_decode.py`, `capture_gen_twins.py`, `new_models.py`, `merge_node_db.py`, `remote_node_tune.py`,
+  `profile_gen_decode.py`, `capture_gen_twins.py`, `new_models.py`, `merge_node_db.py`, `remote_node_collect.py`,
   `golden_neighbor_bench.py`) — run with `--help` for usage;
   the skills that drive them document the flows.
 

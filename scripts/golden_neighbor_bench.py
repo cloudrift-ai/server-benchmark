@@ -42,7 +42,7 @@ terminal in the ledger and never recorded as a clean measurement. Fast-math shap
 exist in the subprocess's enumeration, mirroring how the offline fit reconstructs those
 pools.
 
-Run it on the GPU box, from the repo root (``scripts/remote_node_tune.py`` drives it
+Run it on the GPU box, from the repo root (``scripts/remote_node_collect.py`` drives it
 remotely and merges the node rows home):
 
     ./venv/bin/python scripts/golden_neighbor_bench.py --dry-run          # pool stats only

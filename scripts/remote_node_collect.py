@@ -25,7 +25,7 @@ Run it from the agent in the BACKGROUND (Bash ``run_in_background: true``) — a
 takes hours, well past a foreground tool timeout; the harness re-invokes the agent
 with just the final summary when this exits.
 
-    ./venv/bin/python scripts/remote_node_tune.py --remote user@host \
+    ./venv/bin/python scripts/remote_node_collect.py --remote user@host \
         [--ssh-key ~/.ssh/id_ed25519] [--port 57006] [--repo /path/to/emmy] \
         [--poll 60] [--timeout 7200] [--budget-s N] [--filter SUB]
 
@@ -67,7 +67,7 @@ _SSH_OPTS = [
 _CUDA_EXPORT = "export PATH=/usr/local/cuda/bin:$PATH CUDA_HOME=/usr/local/cuda"
 # Nest under the repo's established remote layout (REMOTE_DEPLOY_DIR = ~/.local/share/emmy) —
 # the same base the deploy/bench paths use (they already clone a repo under it).
-_BASE = f"{REMOTE_DEPLOY_DIR}/node-tune"
+_BASE = f"{REMOTE_DEPLOY_DIR}/node-collect"
 _REMOTE_DIR = f"{_BASE}/repo"  # rsync target — the emmy checkout the sweep runs from
 _SETUP_LOG = f"{_BASE}/setup.log"
 _NEIGHBOR_LOG = f"{_BASE}/neighbors.log"
@@ -103,12 +103,12 @@ def _run(remote: str, ssh_key: str | None, port: int | None, command: str, *, ti
 
 
 def _log(msg: str) -> None:
-    print(f"[remote_node_tune] {msg}", flush=True)
+    print(f"[remote_node_collect] {msg}", flush=True)
 
 
 def _fail(remote: str, ssh_key: str | None, port: int | None, why: str, logfile: str) -> int:
     _, tail = _run(remote, ssh_key, port, f"tail -n 40 {logfile} 2>/dev/null")
-    print("\n=== remote_node_tune summary ===", flush=True)
+    print("\n=== remote_node_collect summary ===", flush=True)
     print(f"status: FAILED ({why})", flush=True)
     print(f"--- last 40 lines of {remote}:{logfile} ---", flush=True)
     print(tail.strip() or "(empty / not found)", flush=True)
@@ -307,7 +307,7 @@ def main() -> int:
             elapsed = int(time.monotonic() - start)
             _, bf = _run(remote, key, port, f"grep -aEc 'bench_fail|bench worker exceeded' {log_file} 2>/dev/null || echo 0")
             bench_fails = (bf.strip().splitlines() or ["0"])[0]
-            print("\n=== remote_node_tune summary ===", flush=True)
+            print("\n=== remote_node_collect summary ===", flush=True)
             print("status: ok", flush=True)
             _, done_line = _run(remote, key, port, f"grep -a 'neighbor-bench done:' {log_file} 2>/dev/null | tail -1")
             print(f"points: {done_line.strip() or covered}", flush=True)

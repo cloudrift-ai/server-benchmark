@@ -113,11 +113,13 @@ exits, so **do not poll manually** — wait for the completion notification.
 
 ```bash
 ./venv/bin/python scripts/remote_node_collect.py --remote "<user@host>" --ssh-key ~/.ssh/id_ed25519 [--port <PORT>] \
-    --budget-s 14400 --timeout 16200
+    --budget-s 14400
 ```
 
-(`--budget-s` caps the sweep's wall time at 4 h; `--timeout` = budget + the driver's per-invocation cap of 1800 s, so
-the wait never false-fails on an in-flight batch finishing past the budget. Slice shares default to 60/25/15
+(`--budget-s` caps the sweep's wall time at 4 h. Leave `--timeout` alone — it derives as budget + 3900 s, covering the
+two in-flight 1800 s invocations an O1+O3 batch can add past the budget. Reaching `--timeout` is NOT a failure: the
+driver stops the sweep and harvests everything measured so far (ledger + merge + backup still run); a thinner explicit
+`--timeout` just kills the in-flight batch, whose points retry next run. Slice shares default to 60/25/15
 (`--share-own/--share-cross/--share-tail`; `--tail-cap` bounds the per-shape tail at 200). The resume ledger defaults
 to `~/.cache/emmy/neighbor_bench/ledger.json` locally — pushed before the run, fetched back after, so a later session
 on the same card model continues instead of repeating.)
@@ -134,7 +136,8 @@ When the run exits you get one compact result:
   `ledger: fetched -> …` — **followed by the merge receipt** (the rented card appears as its own line in `node rows
   per card now: …`; cards already present are unchanged), a `backup: <path>` line, and `status: COMPLETE (sweep +
   merge done)`. Merge and backup are folded in, so there is **no separate step to launch** — the local DB is already
-  updated and snapshotted.
+  updated and snapshotted. A run stopped at `--timeout` reports the same way with `sweep stopped at --timeout`
+  markers — that is still success (partial harvest), not a failure to retry.
 - **failure** → `status: FAILED (<why>)` or `merge FAILED: …` plus the last 40 lines of the relevant remote log
   (`setup.log` / `neighbors.log` in that dir). Fix and re-run — the script is idempotent (rsync + `make setup` no-op
   when already done; the merge is safe to repeat — a re-merged snapshot's rows are equal-timestamped, so they never

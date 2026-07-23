@@ -263,3 +263,22 @@ matters if a gemv-class M=1 emmy tier ever exists). Session total on 4K c=1 deco
 4. Risks: WS1's consumer-retarget must not break the twin capture boundaries (q/k/v views feed vLLM's
    attention); the concat shapes invalidate existing per-projection goldens for the merged edges — keep
    the old rows (other models still trace unmerged) and seed the new keys alongside.
+
+## Gemv-class M=1 decode tier (2026-07-23): infra landed GATED OFF — blocked on degenerate-M recognition
+
+Evidence first: at M=1 the merged-shape MATVECS reach gemv-class bandwidth on the coop-reduce tier — b128/b64
+stream gate_up (236 MB, L2-cold) at 140.2 µs = 1.68 TB/s, ≥ cuBLAS gemv's 144 (b256, the cold-greedy pick, is
+thread-oversubscribed at 179). The tier could recover the ~1.5–2 ms/step the bucket-32 computed-A forms give up.
+
+**Blocker**: the twins' actual edges are the FUSED norm→merged forms, and at M=1 the lift produces a ``Map``
+with **zero free axes** (the unit row axis is elided) — ``bind_prologue_contraction`` refuses the degenerate
+composition, so neither the column-gridded Contraction form nor the cut anchor exists, and the fused kernel
+schedules at **grid 1** (13.7–83 ms per edge measured; ``PLACE@cone=cut`` pins silently degrade back to it).
+The down cone is fine at M=1 (stat-free, N stays free: 72 µs).
+
+**State**: the full tier infra is in — M=1 twin build (``L%02d.{pre,post}.m1`` pack names), T==1 routing,
+post→pre chaining with shaped views, per-layer failure fallback — behind ``EMMY_GEN_M1_TIER`` (default OFF,
+``emmy/config.py``) because enabling it today would deploy the grid-1 kernels. **Next step to unblock**: teach
+the monoid-composition binding + schedule the degenerate free=() case (the column axis becomes the grid — a
+structural generalization, not a shape special-case), then seed the m1 keys (kind='fused', free_prod=N,
+free_max=N — verified snippet↔key match) with the b64/b128 rows and flip the gate.

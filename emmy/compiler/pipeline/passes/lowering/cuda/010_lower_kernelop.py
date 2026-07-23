@@ -16,30 +16,13 @@ from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.cuda import CudaOp, TmaDescMeta
 from emmy.compiler.ir.kernel import KernelOp, Tile
-from emmy.compiler.ir.kernel.ir import RegStore, TmaDescriptor
+from emmy.compiler.ir.kernel.ir import TmaDescriptor
 from emmy.compiler.ir.kernel.render import _BLOCK_SIZE, render_kernelop
-from emmy.compiler.ir.stmt import RowAccum, Write
+from emmy.compiler.ir.stmt import ZeroPrologue
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
+from emmy.compiler.pipeline.passes.lowering.cuda._helpers import atomic_outputs as _atomic_outputs
 
 PATTERN = [Pattern("root", KernelOp)]
-
-
-def _atomic_outputs(kernel: KernelOp) -> tuple[str, ...]:
-    """Output buffers an atomic reduce-write (``030_split_reduce``'s atomic finalize) accumulates
-    into — they must be zero-init'd before each launch (``CudaOp.zero_outputs``), since every
-    contributing CTA ``atomicAdd``\\ s into the same cell. The scalar tier's atomic ``Write``
-    survives materialization verbatim; the mma tier's became a ``RegStore(atomic=True)``; a
-    ``RowAccum`` (the stat-sink epilogue) accumulates its aux row-stat buffer the same way.
-    Dict-keyed for stable order."""
-    seen: dict[str, None] = {}
-    for s in kernel.body.iter():
-        if isinstance(s, Write) and s.atomic:
-            seen.setdefault(s.output, None)
-        elif isinstance(s, RegStore) and s.atomic:
-            seen.setdefault(s.dst_buffer, None)
-        elif isinstance(s, RowAccum):
-            seen.setdefault(s.dst, None)
-    return tuple(seen)
 
 
 def _tma_descriptors(kernel: KernelOp) -> tuple[TmaDescMeta, ...]:
@@ -128,6 +111,10 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
         smem_bytes=kernel.smem_bytes(),
         comment=name,
         runtime_args=runtime_args,
-        zero_outputs=_atomic_outputs(kernel),
+        # Buffers whose zero-init a predecessor carries (``005_delegate_zero_init``) drop off
+        # the memset list; the prologue targets this kernel DOES carry are surfaced for the slab
+        # planner (their live interval starts at THIS launch, not their own producer's).
+        zero_outputs=tuple(b for b in _atomic_outputs(kernel) if b not in kernel.zero_delegated),
+        zero_prologues=tuple(dict.fromkeys(zp.dst for zp in kernel.body.iter_of_type(ZeroPrologue))),
         tma_descriptors=tma_descs,
     )

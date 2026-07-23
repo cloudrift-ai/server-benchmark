@@ -38,14 +38,13 @@ from emmy.compiler.pipeline.search.audit import COMPILE_FAIL, audit_card, gap_ke
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "gemma4_12b"
 
+
 # Known-uncovered kernel forks per card — ALL kinds (contractions, rms_norm/reduce sweeps,
 # pointwise), not just the warp-contraction hazards. This list may only change deliberately:
 # remove a line when its golden gets recorded (the test fails until you do); add one only
-# when review accepts a new uncovered kernel. BOTH CARDS ARE EMPTY as of the 2026-07-20 heal
-# session (see plans/golden-heal-gemma4-4090-5090-findings.md while it exists, or that
-# session's commit message): full model coverage is now ENFORCED — any new uncovered fork
-# (a model change, a recognizer re-keying, a golden prune) fails this gate until a golden
-# is recorded for it or its key is deliberately baselined here in review.
+# when review accepts a new uncovered kernel. BOTH CARDS ARE EMPTY as of the 2026-07-22
+# merged-sibling reseed (5090 seeded locally, 4090 on a rented card — see the WS1 sections in
+# both gemma4 golden YAMLs): full model coverage is ENFORCED again.
 EXPECTED_GAPS = {
     "NVIDIA GeForce RTX 5090": set(),
     "NVIDIA GeForce RTX 4090": set(),
@@ -54,7 +53,10 @@ EXPECTED_GAPS = {
 # A wholesale re-key of the twins (tracer/classifier change) turns MATCHes into GAPs without
 # a single DRIFT — the floor catches that failure mode; it is NOT a coverage target (the
 # exact count churns benignly whenever a golden YAML gains or loses entries).
-MIN_MATCH = {"NVIDIA GeForce RTX 5090": 90, "NVIDIA GeForce RTX 4090": 90}  # both audit at 101 post-heal
+# Rebased 2026-07-22: the sibling-linear concat REMOVED half the per-projection fork sites
+# from the twins (that is WS1's point), so the pre-merge 101-match count is unreachable —
+# both cards audit at 74 after the merged-key reseed.
+MIN_MATCH = {"NVIDIA GeForce RTX 5090": 70, "NVIDIA GeForce RTX 4090": 70}
 
 CARDS = [
     pytest.param("NVIDIA GeForce RTX 5090", (12, 0), id="rtx5090"),

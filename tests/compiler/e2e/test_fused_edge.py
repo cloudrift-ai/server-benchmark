@@ -267,6 +267,37 @@ def test_place_cone_cut_splits_the_kernels(monkeypatch):
 
 
 @requires_cuda
+def test_place_cone_cut_degenerate_m1(monkeypatch):
+    """``PLACE@cone=cut`` on the DEGENERATE M=1 composition — per-token decode's norm→matvec.
+    At S=1 the reshape-folded lift leaves the contraction with ZERO free axes; the recognizer
+    synthesizes a unit ``_um`` axis so the composition still binds (instead of a grid-1 fused
+    schedule ~300× off the memory floor) and the cut guard accepts ``free ≤ 1``. The cut's
+    consumer half then re-lowers through ``rename_ssa_sequential`` — the shape that miscompiled
+    (``acc1``-undefined) when ``Loop.rewrite`` carried its ``Carrier`` verbatim past the body's
+    Accum renumber. Compiling, splitting, and matching numpy is the whole regression."""
+    monkeypatch.setenv("EMMY_PLACE", "cut")
+    S, H, inter = 1, 1024, 3072
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (1, S, H), F16), node_id="x")
+    g.add_node(InputOp(), [], Tensor("nw", (H,), F16), node_id="nw")
+    g.add_node(InputOp(), [], Tensor("wg", (inter, H), F16), node_id="wg")
+    g.add_node(RmsNormOp(eps=1e-6), ["x", "nw"], Tensor("xn", (1, S, H), F16), node_id="xn")
+    g.add_node(LinearOp(), ["xn", "wg"], Tensor("o", (1, S, inter), F16), node_id="o")
+    g.inputs, g.outputs = ["x", "nw", "wg"], ["o"]
+    rng = np.random.default_rng(0)
+    ins = {
+        "x": (rng.standard_normal((1, S, H)) * 0.3).astype(np.float16),
+        "nw": (rng.standard_normal((H,)) * 0.3).astype(np.float16),
+        "wg": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
+    }
+    got, srcs = _compile_run(g, ins)
+    assert len(srcs) >= 2, f"PLACE@cone=cut must split the M=1 norm from the matvec, got {len(srcs)} kernel(s)"
+    x, nw, wg = (ins[k].astype(np.float32) for k in ("x", "nw", "wg"))
+    rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
+    np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), rms @ wg.T, atol=0.5, rtol=0.1)
+
+
+@requires_cuda
 def test_place_cone_cut_splits_multi_fold(monkeypatch):
     """``PLACE@cone=cut`` on the MULTI-FOLD gate/up edge — ``swiglu(x̂@Wg, x̂@Wu)`` — splits the ONE
     fused megakernel into the norm producer (stat + cone materialize) PLUS one plain single-channel

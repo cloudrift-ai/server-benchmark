@@ -39,7 +39,7 @@ from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop import Load, LoopOp, splice_loop_ops
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.passes.loop.fusion._helpers import is_pure_indexmap, rename_write_output
+from emmy.compiler.pipeline.passes.loop.fusion._helpers import is_castfree_indexmap, is_pure_indexmap, rename_write_output
 
 PATTERN = [Pattern("producer", LoopOp)]
 
@@ -59,6 +59,13 @@ def rewrite(match: Match, producer: Node) -> Graph | None:
     graph = match.graph
     if not (isinstance(producer.op, LoopOp) and is_pure_indexmap(producer.op)):
         raise RuleSkipped("producer is not a pure-indexmap LoopOp")
+    # A dtype-CHANGING copy is pure-indexmap-shaped but not plumbing: dissolving it into the
+    # consumers erases the traced cast boundary, and each consumer then reads the wide producer
+    # buffer through its own narrow declared dtype — fp32 bytes decoded as fp16 denormals (the
+    # fan-out cast on a merged sibling-linear projection). Same gate ``010_merge_loop_ops``
+    # applies to its single-consumer folds; the cast stays materialized at the traced boundary.
+    if not is_castfree_indexmap(graph, producer):
+        raise RuleSkipped("producer is a cast copy — the traced dtype boundary stays materialized")
     if producer.id in graph.outputs:
         raise RuleSkipped("producer is a graph output — must stay materialized")
     consumers = sorted(graph.consumers(producer.id))

@@ -1025,6 +1025,12 @@ class CompiledProgram:
         for name, src in input_data.items():
             buf = self.compiled.buf_by_name[name]
             arr = self.arrays[name]
+            # Self-copy skip: when the caller's source IS this buffer (the serving runner's
+            # post→pre chaining rewires a producer's output view onto this input's backing, so
+            # the "upload" would copy a buffer onto itself), there is nothing to move — and the
+            # skip is what deletes the seam copy from the captured decode graph.
+            if src.data.ptr == arr.data.ptr:
+                continue
             flat = cp.ascontiguousarray(src, dtype=buf.dtype.np).ravel()
             if flat.size > arr.size:
                 raise ValueError(f"upload_prefix_device: {name!r} has {flat.size} elems > capacity {arr.size}")

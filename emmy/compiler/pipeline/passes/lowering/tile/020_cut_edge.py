@@ -81,7 +81,9 @@ def rewrite(match: Match, root: Node) -> Graph | None:
         # (grid) axis here is ``m``, and the cone carries a per-row statistic prologue.
         pro_map, _n_ax = bound
         c: Contraction = pro_map.source
-        free_ok, stat_free = len(tile.place.free) == 1, False
+        # Zero free axes = the degenerate M=1 composition: the binding synthesized a unit row
+        # axis (``_atomize``), so the same 2-D workspace cut applies with a one-iteration m loop.
+        free_ok, stat_free = len(tile.place.free) <= 1, False
     else:
         # A STAT-FREE cone — the node is ALREADY the computed-A ``Contraction`` (loop fusion
         # inlined a pointwise operand cone: gemma's GeGLU combine ahead of down_proj). Same cut,

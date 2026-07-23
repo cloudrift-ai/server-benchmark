@@ -131,6 +131,7 @@ Use `asyncio.Semaphore` to limit concurrency. CLI entry points use
 def handle_foo(args):
     asyncio.run(_handle_foo(args))
 
+
 async def _handle_foo(args):
     await ...
 ```

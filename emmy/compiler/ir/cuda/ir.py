@@ -60,6 +60,11 @@ class CudaOp(Op):
     block: tuple[GridDimSpec, GridDimSpec, GridDimSpec] = ((1,), (1,), (1,))
     smem_bytes: int = 0
     zero_outputs: tuple[str, ...] = ()
+    # Buffers this kernel zero-writes as a DELEGATED prologue (``ZeroPrologue`` stmts injected
+    # by ``005_delegate_zero_init``): downstream kernels' atomic accumulators. Not read at
+    # launch (the kernel body does the zeroing) — the slab planner uses it to start those
+    # buffers' live intervals at THIS launch instead of their own producer's.
+    zero_prologues: tuple[str, ...] = ()
     comment: str = ""
     tma_descriptors: tuple[TmaDescMeta, ...] = field(default_factory=tuple)
     runtime_args: tuple[str, ...] = ()

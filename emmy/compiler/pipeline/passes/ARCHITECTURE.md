@@ -103,7 +103,12 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   — SwiGLU — is projection, riding the wrapping `Map.body`). `010_recognize` schedules it as a fork SIBLING of the
   cooperative reduce form (option-0 stays the coop row; the warp mma rows ride the mandatory `sync` compute-fill;
   dtype / geometry legality stays schedule-side in `_computed_a_rows`). This retired the pin-only
-  `_prologue_warp_option` rescue.
+  `_prologue_warp_option` rescue. The **degenerate M=1** composition (per-token decode: the unit row axis elided,
+  `free = ()`) binds too — a synthesized unit free axis keeps the column grid and the cut anchor
+  (`020_cut_edge` accepts `free ≤ 1`); without it the fused kernel schedules at grid 1, ~300× off the memory
+  floor. The M=1 cut consumer is also why annotated-loop rewrites map the `Carrier` through SSA renames
+  (`Carrier.rename` — a verbatim carrier left the cooperative combine reading a state name the renamed body no
+  longer defined).
 - a cooperative / ILP reduce (`PLANAR` / `TWISTED`, or a non-output-tiled `CONTRACTION`) needs **no** binding here — its
   accumulator dtype + the shuffle/tree fold mechanism are **derived** at materialize time (`emit_combine` off the carrier
   + `ReduceStage.combine`), never stored. Its one schedule-time staging decision follows the same

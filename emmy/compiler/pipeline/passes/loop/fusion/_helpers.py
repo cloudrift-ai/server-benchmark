@@ -34,6 +34,24 @@ def is_pure_indexmap(loop_op: LoopOp) -> bool:
     return True
 
 
+def is_castfree_indexmap(graph: Graph, producer) -> bool:
+    """A pure indexmap that also PRESERVES dtype end-to-end — the only kind fusion/splitting may
+    treat as free plumbing. A dtype-changing copy (a traced cast, materialized source-shaped by
+    ``005_split_cast_from_indexmap``) lifts to the same Assign-free load→write body as a re-index,
+    but dissolving it erases the dtype boundary the operand-staging gates key on — and a consumer
+    reading the wide buffer through the narrow declared dtype decodes garbage (the fan-out cast on
+    a merged sibling-linear projection: fp32 bytes read as fp16 denormals). Shared by
+    ``010_merge_loop_ops`` and ``005_split_shared_indexmap``."""
+    if not is_pure_indexmap(producer.op):
+        return False
+    out_dt = producer.output.dtype.name
+    for i in producer.inputs:
+        src = graph.nodes.get(i)
+        if src is not None and src.output.dtype.name != out_dt:
+            return False
+    return True
+
+
 def rename_write_output(op: LoopOp, *, old: str, new: str) -> LoopOp:
     """Return ``op`` with every ``Write`` whose ``output == old`` rewritten
     to ``output=new`` (recursively descends into nested Loops). Used by

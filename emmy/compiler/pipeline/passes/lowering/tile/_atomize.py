@@ -205,8 +205,17 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis] | None:
         return None  # the combine tail is a pure pointwise chain (Loads ride the stat-free prefix)
     k_ax = kloop.axis
     grid = list(free)
+    # DEGENERATE M=1: at one output row the trace carries no row loop at all, so the lift peels
+    # zero free axes — but the composition is otherwise identical (stat prologue, column sweep,
+    # ⊗-folds). Synthesize a unit row axis so the node still binds: the column axis joins the
+    # grid exactly as in the M>1 case, the cut realizer gets its ``for m in 0..1`` anchor, and
+    # nothing in the body references the synthetic var (one iteration, index 0). Without this the
+    # fused M=1 edge scheduled as a GRID-1 kernel (one block sweeping every column serially —
+    # 13.7–83 ms/edge measured on the gemma-4 merged shapes) with no cut escape.
     if not grid:
-        return None
+        from emmy.compiler.dim import Dim  # noqa: PLC0415
+
+        grid = [Axis(name="_um", extent=Dim(1))]
     m_ax = grid[-1]
     kbody = list(kloop.body)
     accums = [st for st in kbody if isinstance(st, Accum)]

@@ -432,7 +432,18 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
                     rows = [*rows, *(replace(r, knobs={**r.knobs, "PLACE@stat": "sink"}) for r in rows)]
                 if rows:
                     return rows if len(rows) > 1 else rows[0]
-            return schedule(map_tile, loop.name, knob_base, ctx)
+            plain = _as_list(schedule(map_tile, loop.name, knob_base, ctx))
+            if not plain:
+                # Same fp32 / no-atoms / bad-geometry hole as the cuttable branch below: a
+                # stat-free computed-A ``Contraction`` (a fused operand cone over a non-cuttable
+                # geometry — lead axes / several free axes) can have NO legal row on any tier.
+                # An empty option list is a SILENT no-op to the engine (no rejection recorded),
+                # so without this demote the node leaks as a ``LoopOp`` all the way to
+                # ``plan_from_graph`` — the merged-sibling gate/up edge on the fp32 symbolic
+                # Qwen path was the first shape to hit it.
+                fallback = TileOp(op=_demote_planar(node), place=Placement(free=free), inputs=dict(loop.inputs))
+                return schedule(fallback, loop.name, knob_base, ctx)
+            return plain if len(plain) > 1 else plain[0]
         pin = PLACE.narrow_at("cone")
         rows = _as_list(schedule(map_tile, loop.name, {**knob_base, "PLACE@cone": pin if pin in ("fuse", "cut") else "fuse"}, ctx))
         # The cut SIBLING has to come from its own ``schedule`` call, not a ``replace`` on the fused

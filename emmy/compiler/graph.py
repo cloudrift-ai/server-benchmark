@@ -674,12 +674,12 @@ class Graph:
 
     def loadable_constants(self) -> Iterator[tuple[str, ConstantOp]]:
         """Yield ``(node_id, op)`` for the constants an executor must *load* — non-static
-        (``value is None``) constants that name an external ``source_path``. Scalar,
-        ``context_value``, and synthetic (source-less) constants are skipped: the backend
-        materializes those itself. The single entry point shared by the safetensors and
-        live-module loaders."""
+        (``value is None``) constants that name an external ``source_path`` (or a
+        ``source_parts`` concat of several). Scalar, ``context_value``, and synthetic
+        (source-less) constants are skipped: the backend materializes those itself. The
+        single entry point shared by the safetensors and live-module loaders."""
         for nid, op in self.constant_ops():
-            if op.value is None and op.source_path is not None:
+            if op.value is None and (op.source_path is not None or op.source_parts):
                 yield nid, op
 
     def node_role(self, node_id: str) -> str:

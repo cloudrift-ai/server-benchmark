@@ -75,6 +75,7 @@ class LaunchSpec:
     block: tuple
     smem_bytes: int
     zero_outputs: tuple[str, ...]
+    zero_prologues: tuple[str, ...] = ()
     tma_descriptors: tuple[TmaDescMeta, ...] = ()
     runtime_args: tuple[str, ...] = ()
 
@@ -95,10 +96,15 @@ class WeightSpec:
     """Checkpoint binding for one constant buffer: the ``state_dict`` key it loads from and the
     encoded load-op chain (the plan's own vocabulary, applied with pure numpy — see
     ``apply_weight_loads``). ``load_ops`` is ``None`` when the graph carried a load op the
-    grammar can't express — such a plan still runs, but can't rebind weights from a pack."""
+    grammar can't express — such a plan still runs, but can't rebind weights from a pack.
+    ``source_parts`` mirrors ``ConstantOp.source_parts`` — ``(path, shape)`` pairs the binder
+    concatenates along axis 0 before the chain (``merge_sibling_linears``' weight concat);
+    exactly one of ``source_path`` / ``source_parts`` is set. Assemble the pre-chain source
+    via ``loader.binder.assemble_source`` (duck-typed over both specs)."""
 
-    source_path: str
+    source_path: str | None
     load_ops: tuple[tuple, ...] | None = ()
+    source_parts: tuple[tuple[str, tuple[int, ...]], ...] = ()
 
 
 @dataclass
@@ -171,6 +177,7 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
                 block=tuple(_normalize_spec(s) for s in op.block),
                 smem_bytes=op.smem_bytes,
                 zero_outputs=tuple(op.zero_outputs),
+                zero_prologues=tuple(getattr(op, "zero_prologues", ())),
                 tma_descriptors=tuple(op.tma_descriptors),
                 runtime_args=tuple(getattr(op, "runtime_args", ())),
             )
@@ -178,7 +185,11 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
 
     weights: dict[str, WeightSpec] = {}
     for nid, op in graph.loadable_constants():
-        weights[nid] = WeightSpec(source_path=op.source_path, load_ops=_encode_load_ops(op.load_ops))
+        weights[nid] = WeightSpec(
+            source_path=op.source_path,
+            load_ops=_encode_load_ops(op.load_ops),
+            source_parts=tuple((p, tuple(int(d) for d in s)) for p, s in op.source_parts),
+        )
 
     return ExecutionPlan(
         backend="cuda",
@@ -342,6 +353,7 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
                 "block": [[_factor_to_json(f) for f in spec] for spec in lc.block],
                 "smem": lc.smem_bytes,
                 "zero_outputs": list(lc.zero_outputs),
+                **({"zero_prologues": list(lc.zero_prologues)} if lc.zero_prologues else {}),
                 "runtime_args": list(lc.runtime_args),
                 "cuda": {
                     "tma": [
@@ -361,7 +373,11 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
             for name, spec in plan.kernels.items()
         },
         "weights": {
-            nid: {"path": w.source_path, **({"ops": [[k, list(a)] for k, a in w.load_ops]} if w.load_ops is not None else {})}
+            nid: {
+                **({"path": w.source_path} if w.source_path is not None else {}),
+                **({"parts": [[p, list(s)] for p, s in w.source_parts]} if w.source_parts else {}),
+                **({"ops": [[k, list(a)] for k, a in w.load_ops]} if w.load_ops is not None else {}),
+            }
             for nid, w in plan.weights.items()
         },
         "symbols": {
@@ -401,6 +417,7 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
                 block=tuple(tuple(_factor_from_json(f) for f in spec) for spec in lc["block"]),
                 smem_bytes=int(lc["smem"]),
                 zero_outputs=tuple(lc.get("zero_outputs", ())),
+                zero_prologues=tuple(lc.get("zero_prologues", ())),
                 tma_descriptors=tuple(
                     TmaDescMeta(name=t["name"], src_buf=t["src_buf"], box_extents=tuple(t["box_extents"]), swizzle=t["swizzle"])
                     for t in lc.get("cuda", {}).get("tma", ())
@@ -415,8 +432,9 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
         },
         weights={
             nid: WeightSpec(
-                source_path=w["path"],
+                source_path=w.get("path"),
                 load_ops=tuple((k, tuple(a)) for k, a in w["ops"]) if "ops" in w else None,
+                source_parts=tuple((p, tuple(int(d) for d in s)) for p, s in w.get("parts", ())),
             )
             for nid, w in d.get("weights", {}).items()
         },

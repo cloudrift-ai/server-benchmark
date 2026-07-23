@@ -198,6 +198,15 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
     emmy_us: 214.2
     cublas_us: 286.3
+  # (2026-07-22, merged-sibling re-record) The sibling-linear concat (WS1) fuses the GeGLU combine
+  # cone into the sym down matmul (the merged gate_up workspace read at two N-offsets), so the fork
+  # only offers d*/sync computed-A rows — the recorded d2/tma/ring rows (std AND [fm]) could no
+  # longer realize (DRIFT). Re-measured on the cone-bearing dyn snippet
+  # ((gelu(y[:,:15360]) * y[:,15360:]) @ w, seq_len@y:0): 524.9 + 5.6 finalize = 530.5 vs its own
+  # eager 397. cublas_us kept as the plain-matmul reference; the fm dynM anchor awaits the fm-lane
+  # reseed (serving A/B session). STAGE is deliberately UNRECORDED: the fork's only transports are
+  # the computed-A d*/sync fills, which the plain-matmul stage catalog cannot spell (the permanence
+  # test enumerates gmem/cp/tma only) — the TILE+REDUCE prefix is unambiguous on this fork.
   - kernel: matmul
     name: gemma4_12b.mlp_down.dynM
     M: 512
@@ -205,18 +214,8 @@ configs:
     K: 15360
     dtype: 'fp16'
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 286.2
-    cublas_us: 286.3
-  - kernel: matmul
-    name: gemma4_12b.mlp_down.dynM
-    M: 512
-    N: 3840
-    K: 15360
-    dtype: 'fp16'
-    dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 214.2
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', WSPEC: ''}
+    emmy_us: 530.5
     cublas_us: 286.3
   # ---- attention (flash, hd256) ----------------------------------------------------------------------
   # Values re-measured 2026-07-13 after the causal tile-skip landed (the triangular kv bound — each CTA
@@ -2083,6 +2082,7 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
     emmy_us: 136.8
     cublas_us: 159.0
+  # (2026-07-22) Same merged-sibling re-record as .dynM above — see that comment.
   - kernel: matmul
     name: gemma4_12b.mlp_down.dynM.lin
     M: 512
@@ -2091,19 +2091,8 @@ configs:
     dtype: 'fp16'
     dynamic: true
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 334.8
-    cublas_us: 295.0
-  - kernel: matmul
-    name: gemma4_12b.mlp_down.dynM.lin
-    M: 512
-    N: 3840
-    K: 15360
-    dtype: 'fp16'
-    dynamic: true
-    trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 249.0
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', WSPEC: ''}
+    emmy_us: 530.5
     cublas_us: 295.0
   # ---- fused RMSNorm→linear (computed-A / norm_linear kind) --------------------------------------
   # The single-channel computed-A megakernel rms_norm(x)·nw @ Wq (kind="fused"): the per-row RMSNorm
@@ -2773,3 +2762,313 @@ configs:
     emmy_us: 3.2
     cublas_us: 4.1
     # lane: std, pinned: {'RASTER': '', 'REDUCE': '', 'STAGE': '', 'TILE': 'f4', 'WSPEC': ''}
+
+  # ==== merged sibling-linear edges (WS1, 2026-07-22) =============================================
+  # The frontend concat (decomposition/035_merge_sibling_linears) folds q/k(/v) and gate/up into ONE
+  # linear each over a load-time N-concat weight; the input norm then fuses in (fan-out 1), so these
+  # edges deploy as single-fold computed-A megakernels (kind="fused"). Seeded via manual pinned --ab
+  # on the .lin (serving F.linear) layout — the layout the twins deploy; canonical twins pending.
+  # sliding layers: q(4096)+k(2048)+v(2048) -> N=8192; global layers (k_eq_v): q(8192)+k(512) -> N=8704;
+  # MLP gate+up -> N=30720 (the GeGLU combine is now a separate downstream kernel).
+  - kernel: norm_linear
+    name: gemma4_12b.norm_gate_up.m32.lin
+    M: 32
+    H: 3840
+    N: 30720
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 161.6
+    cublas_us: 154.1
+  - kernel: norm_linear
+    name: gemma4_12b.norm_gate_up.m256.lin
+    M: 256
+    H: 3840
+    N: 30720
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 559.4
+    cublas_us: 362.0
+  - kernel: norm_linear
+    name: gemma4_12b.norm_gate_up.dynM.lin
+    M: 512
+    H: 3840
+    N: 30720
+    dtype: 'fp16'
+    dynamic: true
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 1079.2
+    cublas_us: 664.0
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qkv.m256.lin
+    M: 256
+    H: 3840
+    N: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 174.5
+    cublas_us: 114.0
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qkv.dynM.lin
+    M: 512
+    H: 3840
+    N: 8192
+    dtype: 'fp16'
+    dynamic: true
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x8/f4x4/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 299.8
+    cublas_us: 224.0
+  # global m32: the g8k split total (38.1 + 2.0 finalize); at this shape the split beats every
+  # unsplit tile by >2x (68 CTAs of w1x16 under-fill 170 SMs).
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qk_global.m32.lin
+    M: 32
+    H: 3840
+    N: 8704
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 40.1
+    cublas_us: 37.0
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qk_global.m256.lin
+    M: 256
+    H: 3840
+    N: 8704
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 176.3
+    cublas_us: 117.0
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qk_global.dynM.lin
+    M: 512
+    H: 3840
+    N: 8704
+    dtype: 'fp16'
+    dynamic: true
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x8/f4x4/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 297.9
+    cublas_us: 222.0
+  # mlp_down_fused: the STATIC down-proj fork post-merge — the GeGLU combine cone (one merged
+  # workspace read at two N-offsets) fused into the down matmul, keyed like a computed-A cone
+  # (kind="fused", free_max=3840, reduce=15360). Recorded under norm_linear DIMS (H=15360, N=3840 —
+  # the ShapeKey-equivalent stand-in); the µs are measured on the TRUE geglu-cone snippet
+  # ((gelu(y[:,:15360]) * y[:,15360:]) @ w), split totals (94.5+1.4 / 289.7+3.3). A --golden replay
+  # traces the rms-cone stand-in, so replay µs approximate; re-A/B via the snippet in the findings.
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m32.lin
+    M: 32
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 95.9
+    cublas_us: 90.0
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m256.lin
+    M: 256
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 293.0
+    cublas_us: 231.0
+  # dup__view: the global pre-twin's materialized copy of the merged q||k projection (k_eq_v fans the
+  # k slice out to both k- and v-norm, so the shared view stays a copy kernel).
+  - kernel: pointwise
+    name: gemma4_12b.pw.n8704.m32
+    M: 32
+    N: 8704
+    dtype: 'fp16'
+    knobs: {TILE: 'f2', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    emmy_us: 0.8
+    cublas_us: 2.0
+  - kernel: pointwise
+    name: gemma4_12b.pw.n8704.m256
+    M: 256
+    N: 8704
+    dtype: 'fp16'
+    knobs: {TILE: 'f4', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    emmy_us: 2.2
+    cublas_us: 4.0
+  - kernel: pointwise
+    name: gemma4_12b.pw.n8704.dynM
+    M: 512
+    N: 8704
+    dtype: 'fp16'
+    dynamic: true
+    knobs: {TILE: 'f4', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    emmy_us: 3.5
+    cublas_us: 4.0
+
+  # ---- PLAIN merged-shape matmuls at decode M (2026-07-22 night, lever 1 of the nsys findings) --
+  # The cut's consumer halves for the merged edges: the fused computed-A forms lose the d2/tma/ring
+  # transports (~1.5-2 ms/step vs the weight-stream floor), so the cut needs these keys hot to be
+  # deployable. Isolated µs are L2-warm at these sizes (weights fit L2 across bench iters) — the
+  # serving e2e is the verdict, these anchor the deploy. fm g4a singles double as WS2 targets
+  # (delegated zero, no finalize launch).
+  - kernel: matmul
+    name: gemma4_12b.qkv_cat.m32.lin
+    M: 32
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 17.7
+    cublas_us: 29.0
+  - kernel: matmul
+    name: gemma4_12b.qkv_cat.m32.lin
+    M: 32
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 15.4
+    cublas_us: 29.0
+  - kernel: matmul
+    name: gemma4_12b.qk_global_cat.m32.lin
+    M: 32
+    N: 8704
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 18.9
+    cublas_us: 47.0
+  - kernel: matmul
+    name: gemma4_12b.qk_global_cat.m32.lin
+    M: 32
+    N: 8704
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 16.2
+    cublas_us: 47.0
+  - kernel: matmul
+    name: gemma4_12b.gate_up_cat.m32.lin
+    M: 32
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 144.6
+    cublas_us: 148.0
+  - kernel: matmul
+    name: gemma4_12b.gate_up_cat.m32.lin
+    M: 32
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 143.9
+    cublas_us: 148.0
+
+  # the down cut's materialized combine workspace (to_4_cast__cone, [32, 15360] pointwise)
+  - kernel: pointwise
+    name: gemma4_12b.pw.n15360.m32
+    M: 32
+    N: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'f4', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    emmy_us: 0.9
+    cublas_us: 2.0
+
+  # ---- M=1 decode tier (EMMY_GEN_M1_TIER; true per-token decode, no bucket-32 padding) ----
+  # The norm->merged compositions at M=1 must CUT: the fused warp form has zero free axes and
+  # schedules grid-1 (13-83 ms/edge, ~300x off). Cut halves = tiny rms stat (1.8) + cone write
+  # (0.7) + a b-reduce matvec at memory-bound floor (gate_up 140 us = 1.68 TB/s on the 236 MB
+  # weight; qkv/qkg matvecs are L2-warm in isolation, e2e is the verdict). Keys are m1-only
+  # (free_max = N disambiguates from bucketed shapes), so c=8/c=64 deploys never see these rows.
+  # CAVEAT (2026-07-23 serving e2e): these rows record the F.linear ROW-major-B optimum, but the
+  # serving twins' matvecs read B through a TRANSPOSED (k-major) index map, where every b-reduce
+  # runs ~8x off the floor (down 568 vs 72 us; ShapeKey is layout-blind so one key covers both).
+  # EMMY_GEN_M1_TIER therefore stays default-OFF until a coalescing-aware reduce partition for
+  # k-major B exists; these rows stay as the honest snippet-form optima the keys were benched on.
+  - kernel: norm_linear
+    name: gemma4_12b.norm_gate_up.m1.lin
+    M: 1
+    H: 3840
+    N: 30720
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 142.8
+    cublas_us: 148.6
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qkv.m1.lin
+    M: 1
+    H: 3840
+    N: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 14.4
+    cublas_us: 46.5
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qk_global.m1.lin
+    M: 1
+    H: 3840
+    N: 8704
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 16.2
+    cublas_us: 47.1
+  # the cut consumers re-recognize as plain M=1 matvecs; block-reduce beats the cold b256 pick
+  # (gate_up 140 vs 180; b64/b128 tie on gate_up, b64 clear on the two smaller N)
+  - kernel: matmul
+    name: gemma4_12b.gate_up_cat.m1.lin
+    M: 1
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: '', REDUCE: 'b128', RASTER: '', STAGE: '', WSPEC: ''}
+    emmy_us: 140.2
+    cublas_us: 143.6
+  - kernel: matmul
+    name: gemma4_12b.qkv_cat.m1.lin
+    M: 1
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: '', REDUCE: 'b64', RASTER: '', STAGE: '', WSPEC: ''}
+    emmy_us: 12.7
+    cublas_us: 43.0
+  - kernel: matmul
+    name: gemma4_12b.qk_global_cat.m1.lin
+    M: 1
+    N: 8704
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: '', REDUCE: 'b64', RASTER: '', STAGE: '', WSPEC: ''}
+    emmy_us: 13.3
+    cublas_us: 45.0
+  # down-proj at M=1 recognizes plain (GeGLU combine stays a separate pointwise); greedy b256
+  # already optimal — row locks it against prior drift
+  - kernel: matmul
+    name: gemma4_12b.down_proj.m1.lin
+    M: 1
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: '', REDUCE: 'b256', RASTER: '', STAGE: '', WSPEC: ''}
+    emmy_us: 71.8
+    cublas_us: 77.1
+

@@ -145,10 +145,12 @@ class EmmyForwardRunner:
         if plan is not None:
             # "pack hit" is a contract: the gemma4 image's verify.sh greps docker logs for it.
             logger.info("[serving] pack hit at %s — skipping trace + compile", pack_at)
+            from emmy.compiler.loader.binder import assemble_source
+
             const_feed = {
-                nid: apply_weight_loads(sources[w.source_path], w.load_ops)
+                nid: apply_weight_loads(src, w.load_ops)
                 for nid, w in plan.weights.items()
-                if w.load_ops is not None and w.source_path in sources
+                if w.load_ops is not None and (src := assemble_source(w, sources)) is not None
             }
         else:
             plan, const_feed = cls._trace_and_compile(wrapper, sources, max_seq_len, dtype, batch, static)

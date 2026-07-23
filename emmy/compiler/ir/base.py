@@ -141,6 +141,13 @@ class ConstantOp(Op):
     running ``load_ops``. Empty for scalar constants and for synthetic
     constants emitted by passes (which never reach the loader).
 
+    ``source_parts`` is the MULTI-source alternative to ``source_path``: an ordered tuple of
+    ``(path, pre-chain shape)`` pairs the loader reads individually and concatenates along
+    **axis 0** before running ``load_ops`` (``merge_sibling_linears``' N-concat of sibling
+    projection weights — axis 0 is the ``(N, K)`` out-features axis). Exactly one of
+    ``source_path`` / ``source_parts`` is set on a loadable constant; ``source_shape`` /
+    ``source_dtype`` describe the post-concat source.
+
     **Value binding** — a scalar constant binds its value EXACTLY ONE of three ways, never
     ambiguously (enforced in :meth:`__post_init__`):
 
@@ -162,12 +169,17 @@ class ConstantOp(Op):
     context_value: Expr | None = None  # a RUNTIME scalar bound from context (sym_values); see class doc
     load_ops: tuple[Op, ...] = ()
     source_path: str | None = None
+    source_parts: tuple[tuple[str, tuple[int, ...]], ...] = ()  # axis-0 concat of (path, shape) parts; see class doc
     source_shape: tuple[int, ...] | None = None
     source_dtype: str | None = None
 
     def __post_init__(self) -> None:
         if self.value is not None and self.context_value is not None:
             raise ValueError(f"ConstantOp {self.name!r} binds EITHER a static value OR a context_value, not both")
+        if self.source_path is not None and self.source_parts:
+            raise ValueError(f"ConstantOp {self.name!r} binds EITHER a source_path OR source_parts, not both")
+        if self.source_parts:  # normalize the JSON round-trip's nested lists back to hashable tuples
+            self.source_parts = tuple((p, tuple(int(d) for d in s)) for p, s in self.source_parts)
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
         raise NotImplementedError("ConstantOp has no inputs; use node.output.shape directly")

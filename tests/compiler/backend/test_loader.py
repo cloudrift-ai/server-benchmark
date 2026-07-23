@@ -213,3 +213,60 @@ def test_load_ops_serialize_roundtrip():
     assert op.load_ops[0].axes == (1, 0)
     assert isinstance(op.load_ops[1], ReshapeOp)
     assert op.load_ops[1].shape == (2, 6)
+
+
+def test_bind_constants_concats_source_parts():
+    """A ``source_parts`` constant binds as the axis-0 concat of its part sources, chain after."""
+    g = Graph()
+    g.add_node(
+        op=ConstantOp(
+            name="w_cat",
+            source_parts=(("m.wq", (3, 4)), ("m.wk", (2, 4))),
+            source_shape=(5, 4),
+            source_dtype="f32",
+            load_ops=(TransposeOp(axes=(1, 0)),),
+        ),
+        inputs=[],
+        output=Tensor("w_cat", (4, 5), "f32"),
+        node_id="w_cat",
+    )
+    wq = np.arange(12, dtype=np.float32).reshape(3, 4)
+    wk = np.arange(8, dtype=np.float32).reshape(2, 4) + 100.0
+    out = bind_constants(g, {"m.wq": wq, "m.wk": wk})
+    np.testing.assert_array_equal(out["w_cat"], np.concatenate([wq, wk], axis=0).T)
+
+
+def test_bind_constants_skips_partial_source_parts():
+    """All-or-nothing: a concat with any part missing must not bind garbage."""
+    g = Graph()
+    g.add_node(
+        op=ConstantOp(name="w_cat", source_parts=(("m.wq", (3, 4)), ("m.missing", (2, 4))), source_dtype="f32"),
+        inputs=[],
+        output=Tensor("w_cat", (5, 4), "f32"),
+        node_id="w_cat",
+    )
+    assert bind_constants(g, {"m.wq": np.zeros((3, 4), dtype=np.float32)}) == {}
+
+
+def test_safetensors_loader_concats_source_parts(tmp_path):
+    """The safetensors path resolves each part key (with prefix canonicalization) and concats."""
+    pytest.importorskip("safetensors")
+    from safetensors.numpy import save_file
+
+    wq = np.arange(6, dtype=np.float32).reshape(3, 2)
+    wk = np.arange(4, dtype=np.float32).reshape(2, 2) + 50.0
+    save_file({"layer.wq": wq, "layer.wk": wk}, str(tmp_path / "model.safetensors"))
+
+    g = Graph()
+    g.add_node(
+        # ``model.``-prefixed part paths exercise the per-part candidate-key canonicalization.
+        op=ConstantOp(name="w_cat", source_parts=(("model.layer.wq", (3, 2)), ("model.layer.wk", (2, 2))), source_dtype="f32"),
+        inputs=[],
+        output=Tensor("w_cat", (5, 2), "f32"),
+        node_id="w_cat",
+    )
+
+    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+
+    out = load_constants_from_safetensors(g, str(tmp_path))
+    np.testing.assert_array_equal(out["w_cat"], np.concatenate([wq, wk], axis=0))

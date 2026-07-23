@@ -143,6 +143,7 @@ class EmmyForwardRunner:
             sources[path] = t.detach().cpu().to(torch.float32).numpy().astype(np_dtype, copy=False)
 
         if plan is not None:
+            # "pack hit" is a contract: the gemma4 image's verify.sh greps docker logs for it.
             logger.info("[serving] pack hit at %s — skipping trace + compile", pack_at)
             const_feed = {
                 nid: apply_weight_loads(sources[w.source_path], w.load_ops)

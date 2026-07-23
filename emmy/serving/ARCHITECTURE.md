@@ -20,7 +20,11 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
 
 ## Module map
 
-- `__init__.py` — `register()`, the entry-point hook. Never imports vllm/torch at module level.
+- `__init__.py` — `register()`, the entry-point hook. Never imports vllm/torch at module level. Besides registering
+  the model classes it calls `ensure_plugin_logging()` (`emmy/logging_setup.py`): under a bare vLLM entrypoint
+  nothing handles emmy's INFO records, which would silence the runners' boot/pack lines in `docker logs` — the
+  gemma4 image's verify gate greps the "pack hit" line there (no-op when logging is already configured, e.g. the
+  `emmy` CLI).
 - `vllm_model.py` — `EmmyEmbedModel` (the only module importing vllm). An `nn.Module` with **no parameters**:
   `is_pooling_model = True`, `IsAttentionFree` (no vLLM `Attention` layers → V1 builds an empty KV-cache spec),
   `attn_type = "encoder_only"` (vLLM disables chunked prefill → every request reaches `forward` whole),

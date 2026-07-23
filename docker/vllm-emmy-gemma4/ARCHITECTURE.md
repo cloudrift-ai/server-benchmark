@@ -75,7 +75,10 @@ the load falls back — then the old cubin-union behavior is exactly what runs.
 - `verify.sh` — cold-starts the **baked** image with no token, issues one completion, and diffs the cubin file set
   before/after: an empty diff proves 100% cache hit (zero compiles), and the offline boot proves zero downloads.
   When a pack is baked, it also asserts the boot **hit** it (a silent fallback to the full compile would still pass
-  the cubin check while re-paying the frontend on every customer boot).
+  the cubin check while re-paying the frontend on every customer boot). The hit signal is the runner's "pack hit"
+  line grepped from `docker logs` — reachable because `emmy.serving.register()` self-attaches a log handler under
+  the bare vLLM entrypoint (2026-07-23: without it emmy INFO logs never surfaced and the gate false-FAILed a boot
+  that demonstrably hit the pack). The container is removed by an EXIT trap on every path, pass or fail.
 - `warm/` — gitignored; the warm output that the bake copies in.
 
 ## Workflow

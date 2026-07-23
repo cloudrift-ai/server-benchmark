@@ -3018,3 +3018,128 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4k', WSPEC: '', RASTER: ''}
     emmy_us: 511.8
     cublas_us: 349.4
+
+  # ---- PLAIN merged-shape matmuls at decode M (2026-07-22 night, lever 1 of the nsys findings) --
+  # The cut's consumer halves for the merged edges: the fused computed-A forms lose the d2/tma/ring
+  # transports (~1.5-2 ms/step vs the weight-stream floor), so the cut needs these keys hot to be
+  # deployable. Isolated µs are L2-warm at these sizes (weights fit L2 across bench iters) — the
+  # serving e2e is the verdict, these anchor the deploy. fm g4a singles double as WS2 targets
+  # (delegated zero, no finalize launch).
+  - kernel: matmul
+    name: gemma4_12b.qkv_cat.m32.lin
+    M: 32
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 17.7
+    cublas_us: 29.0
+  - kernel: matmul
+    name: gemma4_12b.qkv_cat.m32.lin
+    M: 32
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 15.4
+    cublas_us: 29.0
+  - kernel: matmul
+    name: gemma4_12b.qk_global_cat.m32.lin
+    M: 32
+    N: 8704
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 18.9
+    cublas_us: 47.0
+  - kernel: matmul
+    name: gemma4_12b.qk_global_cat.m32.lin
+    M: 32
+    N: 8704
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 16.2
+    cublas_us: 47.0
+  - kernel: matmul
+    name: gemma4_12b.gate_up_cat.m32.lin
+    M: 32
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 144.6
+    cublas_us: 148.0
+  - kernel: matmul
+    name: gemma4_12b.gate_up_cat.m32.lin
+    M: 32
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 143.9
+    cublas_us: 148.0
+
+  # ---- the cut flip on the merged fused edges (m32, .lin) ----------------------------------------
+  # PLACE@cone=cut rows: materialize the norm/combine cone and run the projection as a PLAIN merged
+  # matmul on the d2/tma/ring transports (the halves deploy from the *_cat.m32.lin / mlp_down.m32.lin
+  # goldens above). Measured totals (stat + cone write + matmul halves, --ab PLACE@cone=cut):
+  # gateup 3.3+0.9+144.0, qkv 3.3+7.3+15.2, qk_global 3.3+7.7+16.1, down 4.5+74.6 — each beats its
+  # fused sibling (158.2/~50/31.3/85.9). Evidence-only rows: greedy withholds cut from the model
+  # fallback, so they deploy exactly where measured.
+  - kernel: norm_linear
+    name: gemma4_12b.norm_gate_up.m32.cut.lin
+    M: 32
+    H: 3840
+    N: 30720
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 148.2
+    cublas_us: 154.1
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qkv.m32.cut.lin
+    M: 32
+    H: 3840
+    N: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 25.8
+    cublas_us: 40.0
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qk_global.m32.cut.lin
+    M: 32
+    H: 3840
+    N: 8704
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 27.1
+    cublas_us: 37.0
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m32.cut.lin
+    M: 32
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 79.1
+    cublas_us: 90.0
+  # the down cut's materialized combine workspace (to_4_cast__cone, [32, 15360] pointwise)
+  - kernel: pointwise
+    name: gemma4_12b.pw.n15360.m32
+    M: 32
+    N: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'f4', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    emmy_us: 0.9
+    cublas_us: 2.0
+

@@ -166,6 +166,28 @@ levers, now quantified and ordered:
 3. Remaining golden coverage: merged m64 rows for c=64; the m4096 merged keys are uncovered by the audit twins
    (the 4K prefill tier) — worth an m4096 twin + audit extension.
 
+## Lever 1 EXECUTED (2026-07-22 late night, 5090): the cut deploys — worth ~0.5 ms busy, not the gate-closer
+
+Seeded the plain merged-shape m32 `.lin` matmul goldens (`qkv_cat` 17.7 std / 15.4 fm-g4a, `qk_global_cat`
+18.9/16.2, `gate_up_cat` 144.6/143.9 — down's plain rows already existed), then `--ab PLACE@cone=cut` totals on
+the fused snippets, recorded as `.cut.lin` rows + a `pw.n15360.m32` row for the down cut's combine workspace.
+5090 audit: **MATCH 90 / 0 / 0** with the cut halves deployed. Serving needs a FRESH `EMMY_PACK_DIR` — a pack
+hit replays the pre-cut plan (goldens are not in the pack key).
+
+e2e (4K c=1, fm): **TPOT 20.30 → 20.11**. The nsys re-trace explains the shortfall vs the ~1.9 ms warm-bench
+projection: **isolated µs at these sizes are L2-WARM** (weights fit L2 across bench iters — warm plain qkv read
+15 µs where its cold weight-stream floor is 38), while serving streams every layer cold. Cold per-kernel:
+gate_up plain 148 µs vs fused 156 (both ≈ the 142 floor — the fused sync-fill is NOT badly off-floor cold);
+down 74 vs 88 (the real win); qkv 41 vs ~50. Cut consumers save ~1.5 ms/step but the materialized cone-writes
+(0.64 ms — the `__zp`-carrying x̂ writers) + norm stats (0.28) give ~0.9 back → net busy −0.55 ms (19.85 →
+19.30), e2e −0.2. Keep the cut (never loses, and its plain halves benefit from any future transport work);
+4090 cut/plain seeding is a follow-up round (its gate is green with fused rows meanwhile).
+
+**Residual decode gap vs stock (~2.7 ms), re-attributed cold**: emmy glue ~0.9 ms (352 torch elementwise + 192
+KV torch-cat launches/step — lever 2, now the LARGEST single item), in-stream gaps ~1.7 ms (emmy 1.7-2.6 vs
+stock 1.04 — launch/bubble structure inside the captures), small per-kernel deltas. Stock runs ~192 M=1 gemvs
+per step with only 1.04 ms of gaps — the leaner per-step shape to beat.
+
 ## Ordering, verification, risks
 
 1. WS2 first if staffing is tight (smallest blast radius), else WS1 → WS2 → WS3 A/B → gate check → WS4.

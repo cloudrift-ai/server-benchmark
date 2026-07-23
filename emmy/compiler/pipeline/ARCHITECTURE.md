@@ -992,12 +992,17 @@ shape-dependent (±2–4% measured), so the search/goldens arbitrate per shape.
 
 **`PLACE`** (STR, pin-only, `010_recognize`) — structural placement of an intermediate edge: `auto` | `fuse` | `cut`,
 per edge-class element — `PLACE@cone` (producer-cone inlining), `PLACE@fold` (flash vs separate softmax + P@V
-kernels), `PLACE@tuple` (online softmax vs two-pass stats). Precedence `PLACE@<element>` > bare `PLACE` > built-in
-`auto` (today: fuse everywhere). `auto` is pin vocabulary only — the stamped value is the *resolved* `fuse`/`cut`,
-stamped for `fold`/`cone` only (`tuple` is dominance — never stamped, never enumerated). A forced `fuse` on an
-uncertifiable kernel (RoPE'd QK) degrades to `cut` with a log line. Since `@` is not a valid shell var character,
-per-element pins ride `EMMY_KNOBS` (e.g. `EMMY_KNOBS="PLACE@fold=cut"`); bare `EMMY_PLACE` pins every eligible edge.
-Never enumerated — the `auto` seam is the future search hook for `fold`/`cone`.
+kernels), `PLACE@tuple` (online softmax vs two-pass stats), `PLACE@stat` (`fuse` | `sink` — a norm's row statistic
+staying local vs migrating into its producer kernel's epilogue as a `RowAccum` row fold over a `__sq` aux buffer;
+realized by `lowering/tile/025_sink_row_reduce`, which also re-emits the norm as an un-mapped wide sweep). Precedence
+`PLACE@<element>` > bare `PLACE` > built-in `auto` (today: fuse everywhere). `auto` is pin vocabulary only — the
+stamped value is the *resolved* `fuse`/`cut`/`sink`, stamped for `fold`/`cone`/`stat` only (`tuple` is dominance —
+never stamped, never enumerated). A forced `fuse` on an uncertifiable kernel (RoPE'd QK) degrades to `cut` with a log
+line; a `sink` whose producer turns out ineligible (an atomic split-K partial, an mma epilogue, a graph input)
+degrades to the picked row's own local-stat schedule. Since `@` is not a valid shell var character, per-element pins
+ride `EMMY_KNOBS` (e.g. `EMMY_KNOBS="PLACE@fold=cut"`); bare `EMMY_PLACE` pins every eligible edge. Never enumerated
+as a search dimension — but `stat`'s `sink` rows are offered as evidence-only fork SIBLINGS (mirroring every local
+row), selectable by a recorded golden exactly like `PLACE@cone: cut`.
 
 **`S_*`** (FLOAT, `loop/stamp/020_stamp_structural_features`) — the LoopOp's structural features (stmt/op histogram +
 loop extents + operand dtypes). Not tunable — identity facts that make a knob dict a complete variant identity (the

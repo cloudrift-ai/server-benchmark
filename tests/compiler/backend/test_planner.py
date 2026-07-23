@@ -14,12 +14,13 @@ from emmy.compiler.backend.cuda._planner import compute_live_intervals, plan_off
 
 
 class _Launch:
-    """Duck-typed stand-in for ``program._Launch`` (node_id, arg_names, tma)."""
+    """Duck-typed stand-in for ``program._Launch`` (node_id, arg_names, tma, zero_outputs)."""
 
-    def __init__(self, node_id: str, arg_names: list[str], tma_src: list[str] | None = None) -> None:
+    def __init__(self, node_id: str, arg_names: list[str], tma_src: list[str] | None = None, zero_outputs: list[str] | None = None) -> None:
         self.node_id = node_id
         self.arg_names = tuple(arg_names)
         self.tma_descriptors = tuple(_Tma(s) for s in (tma_src or []))
+        self.zero_outputs = tuple(zero_outputs or [])
 
 
 class _Tma:
@@ -46,6 +47,17 @@ def test_intervals_basic_chain():
     launches = [_Launch("a", ["in", "a"]), _Launch("b", ["a", "b"]), _Launch("c", ["b", "c"])]
     iv = compute_live_intervals(["a", "b"], launches)
     assert iv == {"a": (0, 2), "b": (1, 3)}
+
+
+def test_zero_output_counts_as_first_write():
+    # An AUX buffer (the stat-sink's ``__sq``) has no launch of its own — the producing launch
+    # memsets it (``zero_outputs``) and writes it as a second output arg; the consumer reads it.
+    launches = [
+        _Launch("a", ["in", "a", "a__sq"], zero_outputs=["a__sq"]),
+        _Launch("b", ["a", "a__sq", "b"]),
+    ]
+    iv = compute_live_intervals(["a", "a__sq"], launches)
+    assert iv["a__sq"] == (0, 2), "the zero_outputs memset is the aux buffer's first write"
 
 
 def test_tma_source_counts_as_read():

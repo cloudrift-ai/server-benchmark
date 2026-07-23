@@ -157,7 +157,14 @@ def _gen_graph_args(vllm_args: list[str]) -> list[str]:
     max_seqs = int(max_seqs_raw) if max_seqs_raw.isdigit() else 256
     top = max(bucket, max_seqs)
     sizes = sorted({s for s in (1, 2, 4, 8, 16, 32, 64, 128, 256, 512) if s < top} | {bucket, top})
-    cfg = f'{{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": {sizes}}}'
+    # ``custom_ops: +rotary_embedding``: the plugin runs the model EAGERLY inside the cudagraph
+    # (no inductor), but vLLM's CustomOp dispatch assumes compilation will fuse native ops and
+    # hands out ``forward_native`` — a per-layer torch-op soup (4 cats + 4 adds + an fp32
+    # promotion and two cast-backs per layer, ~0.9 ms/step on gemma-4-12B decode). Forcing the
+    # custom impl dispatches ``forward_cuda`` — vLLM's fused in-place rotary kernel (valid for
+    # every ``RotaryEmbedding`` subclass the plugin builds; gemma-4's proportional variant only
+    # overrides the cos/sin CACHE build, not the apply).
+    cfg = f'{{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": {sizes}, "custom_ops": ["+rotary_embedding"]}}'
     return ["--compilation-config", cfg]
 
 

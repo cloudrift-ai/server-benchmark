@@ -188,6 +188,36 @@ KV torch-cat launches/step — lever 2, now the LARGEST single item), in-stream 
 stock 1.04 — launch/bubble structure inside the captures), small per-kernel deltas. Stock runs ~192 M=1 gemvs
 per step with only 1.04 ms of gaps — the leaner per-step shape to beat.
 
+## Lever 2 EXECUTED (2026-07-23): the "glue" was uncompiled vLLM RoPE — fused via custom_ops (−0.8 to −1.2 ms)
+
+The 352 elementwise + 192 cat + 192 add launches/step decompose exactly as torch-native neox RoPE (rotate-half
+cats, cos/sin muls/adds, an fp32 promotion and two cast-backs, ×48 layers): vLLM's CustomOp dispatch hands out
+``forward_native`` because it assumes inductor will fuse it — but the plugin runs the model EAGERLY inside the
+cudagraph. Fix: ``custom_ops: ["+rotary_embedding"]`` in the serve command's compilation-config → the fused
+in-place ``forward_cuda`` kernel (valid for gemma-4's proportional variant — it only overrides the cache build).
+Coherence-checked. Wins across every config: 256 c=1 TPOT 19.28→18.46, 4K c=1 20.17→19.40 (final file),
+4K c=8 22.95→21.77 (+4.5% tok/s), c=64 51.7→50.06 (+3% req/s, on the std-plan pack).
+
+## The c=64 regression hunt: warm-recorded fm/cut rows mislead mixed-load deploys — REMOVED
+
+Chasing a c=64 regression (51.7→55.6) through a pack-plan diff exposed two things:
+
+1. **The fm serving arm never ran fm plans.** ``_tune/pack-ws2`` was built by the FIRST A/B and every later
+   boot pack-hit it — the "fm ≡ std e2e" measurement replayed std-era plans. (The pack key does not include the
+   golden file; ALWAYS use a fresh ``EMMY_PACK_DIR`` after golden edits.)
+2. **Fresh resolves under the fm-era file regress c=64 by ~3.3 ms TPOT** (bisect matrix over five fresh packs:
+   fm rows −3.3 ms, cut rows −2 ms more at mixed load, DB isolation no effect). The fm merged-edge rows and the
+   cut rows were recorded from L2-WARM isolated benches; at c=64's mixed chunked-prefill steps the deploy shifts
+   they cause (atomic down + delegated zero in the bucket-32 twin, +2-3 cut launches/layer) are net losses. Both
+   row sets are REMOVED from both cards' files (the plain ``*_cat`` and pw coverage rows stay — they only deploy
+   as cut halves and are harmless). The per-site verdict rule from the stat-sink session applies to golden
+   seeding at large: **isolated µs anchor deploys only after a twin/serving e2e verdict, at BOTH c=1 and c=64.**
+
+Final state (5090, fused-rope + std merged goldens): 256 c=1 TPOT 18.46, c=64 ≈50.1 / 3.26 req/s, 4K c=1 19.40
+/ TTFT ~1020, 4K c=8 21.77 / 350 tok/s — vs stock 16.34 / 4.30 / 17.40 / 20.31. emmy holds the 4K c=8 lead
+(+~30% tok/s) and 4K TTFT parity-or-better; the remaining c=1 decode gap is ~2.0 ms (in-stream gaps + stock's
+leaner M=1 step shape).
+
 ## Ordering, verification, risks
 
 1. WS2 first if staffing is tight (smallest blast radius), else WS1 → WS2 → WS3 A/B → gate check → WS4.

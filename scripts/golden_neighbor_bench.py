@@ -1,24 +1,34 @@
 #!/usr/bin/env python
-"""Bench the knob neighborhood of every recorded golden, paired -O1 / -O3, resumably.
+"""Budgeted node-data sweep over every golden kind: paired -O1 / -O3 pinned benches, resumably.
 
-The offline prior trains on golden (-O3) records and the tune sweeps measure mostly -O1
-rows with a thin -O3 re-bench band — so the dataset holds few points measured at BOTH
-opt levels. This driver grows that paired slice: around every recorded golden config it
-enumerates the close-by candidate rows (the live card's own enumeration, filtered to a
-knob-component distance from the golden's knobs), then benches each selected row twice —
+The ONE collection flow for the cross-hardware node store (it replaced the ε-greedy
+``emmy tune --dataset golden`` phase — search-driven collection over-samples the branches
+the incumbent prior already likes and its wall time grows with the golden set; a budgeted
+sample of the enumeration gives the future offline prior clean leaf rows at a fixed cost).
+Every shape with a recorded golden — matmul, reduce, rms_norm, attention, the fused kinds —
+enumerates its candidate pool on the LIVE card, and each selected row is benched twice —
 once at ``-Xcicc -O1`` and once at ``-Xcicc -O3`` — via ``emmy run --bench --ab``, whose
 default bench-to-node recording lands every clean row in the node store under its regime's
 ``context_key`` with ``H_opt`` stamped. The -O1/-O3 twins of a point share the knob set,
-so they join later on ``op_sig`` + tunables.
+so they join later on ``op_sig`` + tunables (the -O1→-O3 offset dataset).
 
-Point selection is randomized but distribution-preserving: each batch picks a shape with
-probability proportional to its REMAINING point count, then samples uniformly inside it —
-so any time-truncated run yields an approximately uniform sample of the whole remaining
-pool, and repeated runs converge on full coverage. Progress persists in a JSON ledger
-(``--ledger``) keyed by (gpu, shape, knob signature): a rerun — same box or a freshly
-rented one of the same card — skips terminal points and continues, so the pool is
-eventually exhausted across sessions. ``--budget-s`` bounds a run's wall time (it stops
-starting new work once elapsed; the in-flight invocation finishes).
+The pool is split into three SLICES, sampled by configurable budget shares (60/25/15):
+
+- ``own`` — rows within ``--max-dist`` of the live card's OWN golden anchors: dense label
+  support where this card's deploy decisions actually land.
+- ``cross`` — rows near OTHER cards' golden anchors (that realize here) and not already
+  ``own``: every point is verified-excellent somewhere, so it is either transfer signal or
+  the arch-disagreement rows the prior's ``H_* × knob`` interactions train on.
+- ``tail`` — a capped, deterministic (hash-ordered, seed-independent) subsample of the rest
+  of the enumeration: landscape support so the prior also sees the bad tail.
+
+Within a slice, each batch picks a shape with probability proportional to its REMAINING
+point count, then samples uniformly inside it — a time-truncated run yields an
+approximately uniform sample of each slice's remaining pool, and repeated runs converge on
+full coverage. Progress persists in a JSON ledger (``--ledger``) keyed by (gpu, shape, knob
+signature): a rerun — same box or a freshly rented one of the same card — skips terminal
+points and continues. ``--budget-s`` bounds a run's wall time (it stops starting new work
+once elapsed; the in-flight invocation finishes).
 
 Per batch the driver runs (one invocation per opt level, only the rows still missing it):
 
@@ -27,12 +37,13 @@ Per batch the driver runs (one invocation per opt level, only the rows still mis
 
 The run's integrity gates protect the dataset: a pinned row that doesn't realize
 (``pin_unmatched``), fails, or trips a flag (wrong answer, intensity floor) is marked
-terminal in the ledger and never recorded as a clean measurement. Fast-math golden
-anchors pin ``EMMY_F16_MMA_F32_ACC=1`` on their batches so the f16-accumulate rows exist
-in the subprocess's enumeration, mirroring how the offline fit reconstructs those pools.
+terminal in the ledger and never recorded as a clean measurement. Fast-math shapes pin
+``EMMY_FAST_MATH=1`` (the umbrella gate) on their batches so the precision-trading rows
+exist in the subprocess's enumeration, mirroring how the offline fit reconstructs those
+pools.
 
-Run it on the GPU box, from the repo root (``scripts/remote_node_tune.py --mode neighbors``
-drives it remotely and merges the node rows home):
+Run it on the GPU box, from the repo root (``scripts/remote_node_tune.py`` drives it
+remotely and merges the node rows home):
 
     ./venv/bin/python scripts/golden_neighbor_bench.py --dry-run          # pool stats only
     ./venv/bin/python scripts/golden_neighbor_bench.py --budget-s 14400
@@ -111,6 +122,46 @@ def pick_batch(rng: random.Random, remaining: dict[str, list], batch: int) -> tu
     return gid, rng.sample(pts, k=min(batch, len(pts)))
 
 
+SLICES = ("own", "cross", "tail")
+
+
+def assign_slice(dist_own: int | None, dist_cross: int | None, max_dist: int) -> str:
+    """Slice a pool row by its distance to the nearest own-card / cross-card golden
+    anchor (``None`` = no anchor of that class realized). ``own`` wins when both are
+    within ``max_dist`` — a row near this card's own golden is own-neighborhood data
+    even if another card's golden also sits nearby."""
+    if dist_own is not None and dist_own <= max_dist:
+        return "own"
+    if dist_cross is not None and dist_cross <= max_dist:
+        return "cross"
+    return "tail"
+
+
+def pick_slice(rng: random.Random, shares: dict[str, float], remaining: dict[str, dict[str, list]]) -> str:
+    """Draw a slice by its budget share, renormalized over the slices that still have
+    points — an exhausted slice's share flows to the others instead of stalling."""
+    slices = [s for s in SLICES if remaining.get(s)]
+    weights = [shares[s] for s in slices]
+    return rng.choices(slices, weights=weights, k=1)[0]
+
+
+def tail_sample(specs: list[str], cap: int) -> list[str]:
+    """The tail slice's capped subsample: specs ranked by their own sha1 — deterministic
+    AND seed/enumeration-order independent, so the selected tail set is stable across
+    sessions and the ledger never chases a moving subsample."""
+    ranked = sorted(specs, key=lambda s: hashlib.sha1(s.encode()).hexdigest())
+    return ranked[:cap]
+
+
+def normalize_shares(own: float, cross: float, tail: float) -> dict[str, float]:
+    """Validate and normalize the slice budget shares to fractions summing to 1."""
+    vals = {"own": own, "cross": cross, "tail": tail}
+    if any(v < 0 for v in vals.values()) or not any(vals.values()):
+        raise ValueError(f"slice shares must be non-negative and not all zero: {vals}")
+    total = sum(vals.values())
+    return {k: v / total for k, v in vals.items()}
+
+
 def load_ledger(path: Path) -> dict:
     if path.exists():
         obj = json.loads(path.read_text())
@@ -152,40 +203,68 @@ def mark(ledger: dict, key: str, opt: str, status: str, *, spec: str | None = No
 @dataclass
 class ShapeGroup:
     """One benchable shape: the golden entries recorded for it (across cards), its live
-    enumeration pool, and the neighbor points selected from that pool."""
+    enumeration pool, and the points selected from that pool, each tagged with its slice."""
 
-    group_id: str  # e.g. "M2048xN512xK3840_fp16" (+ _dyn / _tb markers)
+    group_id: str  # e.g. "M2048xN512xK3840_fp16" / "reduce_M4096xK4096_fp32" (+ _dyn / _tb markers)
     snippet: str
     dynamic_specs: list[str]
     fast_math: bool  # any anchor entry is fast-math → pin the fm enumeration gate
     names: list[str] = field(default_factory=list)  # golden entry names, for --filter / logs
-    points: list[tuple[str, str]] = field(default_factory=list)  # (point_key, spec)
+    points: list[tuple[str, str, str]] = field(default_factory=list)  # (point_key, spec, slice)
 
 
-def _group_id(g) -> str:
-    return f"M{g.M}xN{g.N}xK{g.K}_{g.dtype}" + ("_dyn" if g.dynamic else "") + ("_tb" if g.trans_b else "")
+def _group_id(kind: str, g) -> str:
+    """Ledger-stable shape id. Matmul keeps the exact legacy spelling (existing ledgers
+    resume on it); every other kind is prefixed with its ``kernel`` discriminator and
+    folds every field that changes its snippet."""
+    dyn = "_dyn" if g.dynamic else ""
+    tb = "_tb" if getattr(g, "trans_b", False) else ""
+    if kind == "matmul":
+        return f"M{g.M}xN{g.N}xK{g.K}_{g.dtype}{dyn}{tb}"
+    if kind in ("reduce", "softmax"):
+        return f"{kind}_M{g.M}xK{g.K}_{g.dtype}{dyn}"
+    if kind == "pointwise":
+        return f"pointwise_M{g.M}xN{g.N}_{g.dtype}{dyn}"
+    if kind == "rms_norm":
+        heads = f"_h{g.heads}" if g.heads != 1 else ""
+        return f"rms_norm_M{g.M}xK{g.K}{heads}_{g.dtype}{dyn}"
+    if kind == "norm_linear":
+        return f"norm_linear_M{g.M}xH{g.H}xN{g.N}_{g.dtype}{dyn}{tb}"
+    if kind == "mlp_geglu":
+        return f"mlp_geglu_M{g.M}xH{g.H}xI{g.inter}_{g.dtype}{dyn}{tb}"
+    if kind in ("attention", "rope"):
+        nc = "_nc" if kind == "attention" and not g.causal else ""
+        return f"{kind}_h{g.n_heads}s{g.seq}d{g.head_dim}_{g.dtype}{nc}{dyn}"
+    if kind == "embedding":
+        return f"embedding_v{g.vocab}s{g.seq}h{g.hidden}_{g.dtype}{dyn}"
+    raise ValueError(f"unknown golden kind {kind!r}")
 
 
-def build_groups(max_dist: int, name_filter: str | None) -> tuple[list[ShapeGroup], str]:
-    """Enumerate every matmul golden shape's pool on the LIVE card and keep the rows
-    within ``max_dist`` of any recorded golden's knobs (anchors included, distance 0).
-    Returns the groups plus the live card identity the ledger keys on. Non-matmul
-    goldens are out of scope — the vicinity moveset here is the matmul schedule
-    families, mirroring the manual golden-seeding runs."""
+def build_groups(max_dist: int, name_filter: str | None, tail_cap: int) -> tuple[list[ShapeGroup], str]:
+    """Enumerate every golden shape's candidate pool on the LIVE card and slice its rows:
+    ``own`` / ``cross`` by distance to this card's vs other cards' golden anchors
+    (anchors included, distance 0; an anchor that doesn't realize here is skipped — that
+    skip is the cross slice's realizability filter), plus a ``tail_cap``-bounded
+    hash-ordered subsample of the rest. Returns the groups plus the live card identity
+    the ledger keys on."""
+    from emmy.commands.trace import graph_from_code
     from emmy.compiler.context import Context
     from emmy.compiler.pipeline.knob import tuning_knob_items
     from emmy.compiler.pipeline.search.features import tile_signature
-    from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS, MatmulGoldenConfig
-    from emmy.compiler.pipeline.search.golden_eval import _enumerate
-    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC
+    from emmy.compiler.pipeline.search.golden import _KERNEL_CLASSES, GOLDEN_CONFIGS, _live_gpu_key
+    from emmy.compiler.pipeline.search.golden_eval import _enumerate, enumerate_graph
+    from emmy.compiler.pipeline.search.space import FAST_MATH
 
     ctx = Context.probe()
     gpu = ctx.hardware_id()
+    own_key = _live_gpu_key()
+    if own_key is None:
+        print("[pool] no live CUDA device — every anchor labels cross, pools are not meaningful", flush=True)
+    kind_of = {cls: kind for kind, cls in _KERNEL_CLASSES.items()}
 
-    by_shape: dict[str, list[MatmulGoldenConfig]] = {}
+    by_shape: dict[str, list] = {}
     for g in GOLDEN_CONFIGS:
-        if isinstance(g, MatmulGoldenConfig):
-            by_shape.setdefault(_group_id(g), []).append(g)
+        by_shape.setdefault(_group_id(kind_of[type(g)], g), []).append(g)
 
     groups: list[ShapeGroup] = []
     for gid, entries in sorted(by_shape.items()):
@@ -193,33 +272,52 @@ def build_groups(max_dist: int, name_filter: str | None) -> tuple[list[ShapeGrou
         if name_filter and not any(name_filter in n for n in names):
             continue
         rep = entries[0]
+        kind = kind_of[type(rep)]
+        if kind == "attention" and rep.dynamic:
+            # Masked-flash pins never resolve axis-keyed TILEs (AttentionGoldenConfig.__post_init__) —
+            # every --ab here would burn a flash compile into a guaranteed pin_unmatched.
+            print(f"[pool] {gid}: dynamic attention — --ab pins don't resolve on the masked flash, group skipped", flush=True)
+            continue
         fast_math = any(e.fast_math for e in entries)
         # Mirror the offline fit's reconstruction: fm anchors only exist gate-on.
-        gate = F16_MMA_F32_ACC.pinned("1") if fast_math else nullcontext()
+        gate = FAST_MATH.pinned("1") if fast_math else nullcontext()
         with gate:
-            rows, _ = _enumerate(rep.M, rep.N, rep.K, rep.dtype, ctx)
+            if kind == "matmul":
+                rows, _ = _enumerate(rep.M, rep.N, rep.K, rep.dtype, ctx)
+            else:
+                # A dynamic golden enumerates its hint-sized static twin's pool (the snippet
+                # is concrete-sized) — the accepted approximation the offline fit also uses.
+                rows = enumerate_graph(graph_from_code(rep.snippet())[0], ctx)
         canon = [{k: str(v) for k, v in tuning_knob_items(r)} for r in rows]
-        anchors = []
+        own_anchors: list[dict] = []
+        cross_anchors: list[dict] = []
         for e in entries:
             want = tile_signature(e.knobs)
             idx = next((i for i, r in enumerate(rows) if tile_signature(r) == want), None)
             if idx is None:
                 print(f"[pool] {gid}: golden {e.name} ({e.gpu_name}) not in the live enumeration — anchor skipped", flush=True)
-            else:
-                anchors.append(canon[idx])
-        if not anchors:
-            print(f"[pool] {gid}: no anchors on this card — group skipped", flush=True)
-            continue
-        seen: set[str] = set()
-        points: list[tuple[str, str]] = []
-        for row in canon:
-            if min(knob_distance(row, a) for a in anchors) > max_dist:
                 continue
+            is_own = own_key is not None and e.gpu_name == own_key[0] and tuple(e.compute_cap) == own_key[1]
+            (own_anchors if is_own else cross_anchors).append(canon[idx])
+        seen: set[str] = set()
+        points: list[tuple[str, str, str]] = []
+        tail_specs: list[str] = []
+        for row in canon:
             spec = knob_spec(row)
             if spec in seen:
                 continue
             seen.add(spec)
-            points.append((point_key(gpu, gid, spec), spec))
+            d_own = min((knob_distance(row, a) for a in own_anchors), default=None)
+            d_cross = min((knob_distance(row, a) for a in cross_anchors), default=None)
+            sl = assign_slice(d_own, d_cross, max_dist)
+            if sl == "tail":
+                tail_specs.append(spec)
+            else:
+                points.append((point_key(gpu, gid, spec), spec, sl))
+        points += [(point_key(gpu, gid, spec), spec, "tail") for spec in tail_sample(tail_specs, tail_cap)]
+        if not points:
+            print(f"[pool] {gid}: no candidate rows on this card (forks nothing?) — group dropped", flush=True)
+            continue
         groups.append(
             ShapeGroup(
                 group_id=gid,
@@ -230,7 +328,12 @@ def build_groups(max_dist: int, name_filter: str | None) -> tuple[list[ShapeGrou
                 points=points,
             )
         )
-        print(f"[pool] {gid}: {len(rows)} enumerated, {len(anchors)} anchor(s), {len(points)} points within dist {max_dist}", flush=True)
+        n = {s: sum(1 for _, _, sl in points if sl == s) for s in SLICES}
+        print(
+            f"[pool] {gid}: {len(rows)} enumerated, {len(own_anchors)} own / {len(cross_anchors)} cross anchor(s), "
+            f"own {n['own']} / cross {n['cross']} / tail {n['tail']} points (dist {max_dist}, tail cap {tail_cap})",
+            flush=True,
+        )
     return groups, gpu
 
 
@@ -252,7 +355,7 @@ def run_batch(group: ShapeGroup, specs: list[str], opt: str, args, receipt: Path
         cmd += ["--ab", s]
     env = dict(os.environ)
     if group.fast_math:
-        env["EMMY_F16_MMA_F32_ACC"] = "1"
+        env["EMMY_FAST_MATH"] = "1"
     try:
         subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=args.run_timeout)
     except subprocess.TimeoutExpired:
@@ -280,6 +383,10 @@ def main() -> int:
     )
     ap.add_argument("--max-dist", type=int, default=2, help="Max knob-component distance from a golden anchor (default 2)")
     ap.add_argument("--batch", type=int, default=6, help="Pinned rows per emmy run invocation (default 6)")
+    ap.add_argument("--share-own", type=float, default=60.0, help="Budget share for the own-golden-neighborhood slice (default 60)")
+    ap.add_argument("--share-cross", type=float, default=25.0, help="Budget share for the cross-card golden-exchange slice (default 25)")
+    ap.add_argument("--share-tail", type=float, default=15.0, help="Budget share for the uniform-tail slice (default 15)")
+    ap.add_argument("--tail-cap", type=int, default=200, help="Max tail points per shape, hash-ordered so the set is stable (default 200)")
     ap.add_argument("--seed", type=int, default=0, help="RNG seed for the sampling order (default 0)")
     ap.add_argument("--warmup", type=int, default=5, help="Bench warmup iters — keep >= 5, the node-record quality bar (default 5)")
     ap.add_argument("--iters", type=int, default=30, help="Bench measure iters — keep >= 20, the node-record quality bar (default 30)")
@@ -297,29 +404,36 @@ def main() -> int:
     args = ap.parse_args()
 
     start = time.monotonic()
-    groups, gpu = build_groups(args.max_dist, args.filter)
+    shares = normalize_shares(args.share_own, args.share_cross, args.share_tail)
+    groups, gpu = build_groups(args.max_dist, args.filter, args.tail_cap)
     ledger_path, receipts_dir = Path(args.ledger), Path(args.receipts)
     ledger = load_ledger(ledger_path)
 
     by_id = {g.group_id: g for g in groups}
     total_pairs = sum(len(g.points) for g in groups)
+    totals = {s: sum(1 for g in groups for _, _, sl in g.points if sl == s) for s in SLICES}
 
-    def remaining_map() -> dict[str, list]:
-        out: dict[str, list] = {}
+    def remaining_map() -> dict[str, dict[str, list]]:
+        out: dict[str, dict[str, list]] = {s: {} for s in SLICES}
         for g in groups:
-            pts = [(key, spec) for key, spec in g.points if any(needs_run(ledger, key, opt, args.max_attempts) for opt in OPT_FLAGS)]
-            if pts:
-                out[g.group_id] = pts
-        return out
+            for key, spec, sl in g.points:
+                if any(needs_run(ledger, key, opt, args.max_attempts) for opt in OPT_FLAGS):
+                    out[sl].setdefault(g.group_id, []).append((key, spec))
+        return {s: m for s, m in out.items() if m}
 
     def done_pairs() -> int:
         return sum(
-            1 for g in groups for key, _ in g.points if all(opt_state(ledger, key, opt).get("status") in TERMINAL for opt in OPT_FLAGS)
+            1 for g in groups for key, _, _ in g.points if all(opt_state(ledger, key, opt).get("status") in TERMINAL for opt in OPT_FLAGS)
         )
 
     remaining = remaining_map()
-    n_left = sum(len(v) for v in remaining.values())
-    print(f"[neighbor-bench] card {gpu}: {len(groups)} shapes, {total_pairs} points, {n_left} with work left", flush=True)
+    left = {s: sum(len(v) for v in remaining.get(s, {}).values()) for s in SLICES}
+    print(
+        f"[neighbor-bench] card {gpu}: {len(groups)} shapes, {total_pairs} points "
+        f"(own {totals['own']} / cross {totals['cross']} / tail {totals['tail']}), "
+        f"{sum(left.values())} with work left (own {left['own']} / cross {left['cross']} / tail {left['tail']})",
+        flush=True,
+    )
     if args.dry_run or not remaining:
         print(f"neighbor-bench done: {done_pairs()}/{total_pairs} points (0 new this run)", flush=True)
         return 0
@@ -332,7 +446,8 @@ def main() -> int:
         if args.budget_s and time.monotonic() - start > args.budget_s:
             print(f"[neighbor-bench] budget of {args.budget_s:.0f}s exhausted — stopping", flush=True)
             break
-        gid, pts = pick_batch(rng, remaining, args.batch)
+        sl = pick_slice(rng, shares, remaining)
+        gid, pts = pick_batch(rng, remaining[sl], args.batch)
         group = by_id[gid]
         batch_i += 1
         for opt in OPT_FLAGS:
@@ -347,7 +462,8 @@ def main() -> int:
             save_ledger(ledger_path, ledger)
             ok = sum(1 for s in statuses.values() if s == "ok")
             print(
-                f"[batch {batch_i}] {gid} {opt}: {ok}/{len(todo)} ok ({time.monotonic() - t0:.0f}s) statuses={sorted(statuses.values())}",
+                f"[batch {batch_i}] {sl} {gid} {opt}: {ok}/{len(todo)} ok ({time.monotonic() - t0:.0f}s) "
+                f"statuses={sorted(statuses.values())}",
                 flush=True,
             )
         new_done += sum(1 for key, _ in pts if all(opt_state(ledger, key, opt).get("status") in TERMINAL for opt in OPT_FLAGS))

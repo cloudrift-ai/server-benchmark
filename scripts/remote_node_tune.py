@@ -1,49 +1,42 @@
 #!/usr/bin/env python
-"""Drive a node-data collection run on a remote GPU host, then wait for it — the
+"""Drive a node-data collection sweep on a remote GPU host, then wait for it — the
 token-heavy middle of the ``collect-node-data`` skill, extracted so the agent makes
 ONE backgrounded tool call instead of ~20 verbose ssh polls.
 
 Given an SSH target it: ensures the Python 3.12 venv/dev packages + ``nvcc``, rsyncs
 the local working tree, runs ``make setup`` (output to a remote logfile — only a tail
 comes back on failure), launches the collection detached, then **polls the remote log
-internally** until it finishes, and merges the node rows home. All the per-poll ssh
-chatter happens inside this process, so it never reaches the agent's context.
+internally** until it finishes, merges the node rows home, and backs up the local DB.
+All the per-poll ssh chatter happens inside this process, so it never reaches the
+agent's context.
 
-Two collection modes (``--mode``):
-
-- ``tune`` (default) — ``emmy tune --dataset golden`` with ``--explore-eps 0.25``
-  (``--explore-eps`` here overrides): node-data collection is where the search-tree
-  dataset is grown, and deterministic PUCT (eps 0) only ever benches the branches the
-  incumbent prior already likes — the labels and sibling coverage then just confirm it
-  (the censoring feedback loop). ε-greedy collection visits the other siblings too, so
-  the fork-ranking dataset covers the alternatives a *better* prior would need to rank.
-  Plain ``emmy tune`` keeps its deterministic default; off-policy exploration is a
-  property of this collection workflow, not of tuning in general. ``--patience``
-  forwards to the tune: ε-greedy collection tolerates a lower value than the tune
-  default (50), since exploration keeps resetting the no-new-best streak.
-- ``neighbors`` — ``scripts/golden_neighbor_bench.py``: paired -O1/-O3 pinned benches
-  of the knob neighborhood around every recorded golden, sampled in a randomized,
-  distribution-preserving order under a wall-time budget (default: ``--timeout`` minus
-  a 15-min margin). Resume state lives in a ledger JSON: the local copy (``--ledger``)
-  is pushed to the box before the run and fetched back after, so successive runs — on
-  this box or a freshly rented one of the same card — keep covering new points until
-  the pool is exhausted.
+The collection is ``scripts/golden_neighbor_bench.py`` — the budgeted three-slice sweep
+(own-golden neighborhood / cross-card golden exchange / uniform tail) of every golden
+kind's candidate pool, paired -O1/-O3, under a wall-time budget (default: ``--timeout``
+minus a 15-min margin). It replaced the ε-greedy ``emmy tune --dataset golden`` mode:
+search-driven collection over-samples the branches the incumbent prior already likes
+and its wall time grows with the golden set, while the sweep samples the enumeration at
+a fixed budget (``emmy tune --explore-eps`` itself survives for interactive use).
+Resume state lives in a ledger JSON: the local copy (``--ledger``) is pushed to the box
+before the run and fetched back after, so successive runs — on this box or a freshly
+rented one of the same card — keep covering new points until the pool is exhausted.
 
 Run it from the agent in the BACKGROUND (Bash ``run_in_background: true``) — a run
-takes ~30 min to hours, well past a foreground tool timeout; the harness re-invokes the
-agent with just the final summary when this exits.
+takes hours, well past a foreground tool timeout; the harness re-invokes the agent
+with just the final summary when this exits.
 
     ./venv/bin/python scripts/remote_node_tune.py --remote user@host \
-        [--mode tune|neighbors] [--ssh-key ~/.ssh/id_ed25519] [--port 57006] \
-        [--repo /path/to/emmy] [--poll 60] [--timeout 7200] [--budget-s N] [--filter SUB]
+        [--ssh-key ~/.ssh/id_ed25519] [--port 57006] [--repo /path/to/emmy] \
+        [--poll 60] [--timeout 7200] [--budget-s N] [--filter SUB]
 
 Then (separately, if ``--no-merge``) merge the node rows home with
 ``scripts/merge_node_db.py --remote``.
 
 Robustness baked in (the four traps the first run hit): all ssh goes through argv
-lists (no shell word-splitting / zsh quirks); liveness uses the ``[e]mmy tune``
-bracket-pgrep so it never self-matches; each poll is its own short ssh (no long-held
-session that broken-pipes); and venv/dev are always installed before ``make setup``.
+lists (no shell word-splitting / zsh quirks); liveness uses the
+``[g]olden_neighbor_bench`` bracket-pgrep so it never self-matches; each poll is its
+own short ssh (no long-held session that broken-pipes); and venv/dev are always
+installed before ``make setup``.
 """
 
 from __future__ import annotations
@@ -75,13 +68,11 @@ _CUDA_EXPORT = "export PATH=/usr/local/cuda/bin:$PATH CUDA_HOME=/usr/local/cuda"
 # Nest under the repo's established remote layout (REMOTE_DEPLOY_DIR = ~/.local/share/emmy) —
 # the same base the deploy/bench paths use (they already clone a repo under it).
 _BASE = f"{REMOTE_DEPLOY_DIR}/node-tune"
-_REMOTE_DIR = f"{_BASE}/repo"  # rsync target — the emmy checkout we tune from
+_REMOTE_DIR = f"{_BASE}/repo"  # rsync target — the emmy checkout the sweep runs from
 _SETUP_LOG = f"{_BASE}/setup.log"
-_TUNE_LOG = f"{_BASE}/tune.log"
 _NEIGHBOR_LOG = f"{_BASE}/neighbors.log"
 _REMOTE_LEDGER = f"{_BASE}/neighbor_ledger.json"
 _REMOTE_RECEIPTS = f"{_BASE}/receipts"
-_DONE_RE = re.compile(r"done: (\d+)/(\d+) shape")
 # The driver's final summary line: ``neighbor-bench done: <done>/<total> points (<new> new this run)``.
 # The poll's ``grep -oE`` extracts only the prefix up to ``points`` — match that.
 _NEIGHBOR_DONE_RE = re.compile(r"neighbor-bench done: (\d+)/(\d+) points")
@@ -124,6 +115,34 @@ def _fail(remote: str, ssh_key: str | None, port: int | None, why: str, logfile:
     return 1
 
 
+def _backup_local_db(keep: int = 5) -> Path | None:
+    """Snapshot the local autotune DB (the SOLE copy of rented-GPU node data) to a
+    timestamped file under ``~/.cache/emmy/backups/``, pruning to the newest ``keep``.
+    ``VACUUM INTO`` is the WAL-safe copy (same pattern as the remote snapshot fetch).
+    Best-effort: a backup failure warns and returns None — the merge already landed."""
+    import sqlite3  # noqa: PLC0415
+    from datetime import datetime  # noqa: PLC0415
+
+    from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
+
+    try:
+        src = resolve_tune_db()
+        if not Path(src).exists():
+            _log(f"backup skipped: {src} does not exist")
+            return None
+        backups = Path.home() / ".cache/emmy/backups"
+        backups.mkdir(parents=True, exist_ok=True)
+        dst = backups / f"autotune-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db"
+        with sqlite3.connect(src) as conn:
+            conn.execute("VACUUM INTO ?", (str(dst),))
+        for old in sorted(backups.glob("autotune-*.db"))[:-keep]:
+            old.unlink()
+        return dst
+    except Exception as exc:  # noqa: BLE001 — never fail the run over a backup
+        _log(f"backup FAILED: {exc!r}")
+        return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--remote", required=True, help="SSH target, user@host")
@@ -131,43 +150,25 @@ def main() -> int:
     ap.add_argument("--port", type=int, help="SSH port (default 22)")
     ap.add_argument("--repo", help="Local repo root to rsync (default: git toplevel)")
     ap.add_argument("--poll", type=int, default=60, help="Seconds between completion polls (default 60)")
-    ap.add_argument("--timeout", type=int, default=7200, help="Max seconds to wait for the tune (default 7200)")
+    ap.add_argument("--timeout", type=int, default=7200, help="Max seconds to wait for the sweep (default 7200)")
     ap.add_argument("--no-merge", action="store_true", help="Skip the folded-in node-row merge after a successful run")
-    ap.add_argument(
-        "--explore-eps",
-        type=float,
-        default=0.25,
-        help="ε-greedy exploration for the remote tune (default 0.25 — off-policy node collection; see module docstring)",
-    )
-    ap.add_argument(
-        "--patience",
-        type=int,
-        default=None,
-        help=(
-            "tune mode: forwarded to emmy tune --patience (default: emmy's own default, 50). "
-            "ε-greedy collection tolerates a lower value — exploration keeps resetting the no-new-best "
-            "streak, so the default patience overspends benches per op relative to the coverage gained"
-        ),
-    )
-    ap.add_argument(
-        "--mode",
-        choices=("tune", "neighbors"),
-        default="tune",
-        help="Collection flow: 'tune' = emmy tune --dataset golden (default); 'neighbors' = scripts/golden_neighbor_bench.py",
-    )
     ap.add_argument(
         "--budget-s",
         type=float,
         default=None,
-        help="neighbors mode: driver wall-time budget in seconds (default: --timeout minus a 900 s launch/merge margin)",
+        help="Sweep wall-time budget in seconds (default: --timeout minus a 900 s launch/merge margin)",
     )
-    ap.add_argument("--max-dist", type=int, default=2, help="neighbors mode: max knob-component distance from a golden anchor (default 2)")
-    ap.add_argument("--batch", type=int, default=6, help="neighbors mode: pinned rows per emmy run invocation (default 6)")
-    ap.add_argument("--filter", help="neighbors mode: only shapes with a golden name containing this substring")
+    ap.add_argument("--max-dist", type=int, default=2, help="Max knob-component distance from a golden anchor (default 2)")
+    ap.add_argument("--batch", type=int, default=6, help="Pinned rows per emmy run invocation (default 6)")
+    ap.add_argument("--share-own", type=float, default=None, help="Budget share for the own-neighborhood slice (default: sweep's own, 60)")
+    ap.add_argument("--share-cross", type=float, default=None, help="Budget share for the cross-card slice (default: sweep's own, 25)")
+    ap.add_argument("--share-tail", type=float, default=None, help="Budget share for the uniform-tail slice (default: sweep's own, 15)")
+    ap.add_argument("--tail-cap", type=int, default=None, help="Max tail points per shape (default: sweep's own, 200)")
+    ap.add_argument("--filter", help="Only shapes with a golden name containing this substring")
     ap.add_argument(
         "--ledger",
         default=str(Path.home() / ".cache/emmy/neighbor_bench/ledger.json"),
-        help="neighbors mode: LOCAL resume-ledger path — pushed to the box before the run, fetched back after",
+        help="LOCAL resume-ledger path — pushed to the box before the run, fetched back after",
     )
     args = ap.parse_args()
 
@@ -240,34 +241,36 @@ def main() -> int:
         if "SETUP_OK" not in out:
             return _fail(remote, key, port, "make setup", _SETUP_LOG)
 
-    # 4. build the mode's launch command + its liveness/done markers, then launch it
-    #    detached. Redirect ALL three std streams away from the ssh channel
-    #    (`< /dev/null` + `> <log> 2>&1`) and use ssh -n (detach=True), else ssh holds
-    #    the channel open past the `&` and this call times out *after* a successful
-    #    launch. The bracket-pgrep patterns stop the liveness check from matching the
-    #    poll command's own argv.
-    if args.mode == "neighbors":
-        # Push the local resume ledger (if any) so the run continues prior coverage.
-        local_ledger = Path(args.ledger).expanduser()
-        if local_ledger.exists():
-            _log(f"pushing resume ledger {local_ledger} -> {remote}:{_REMOTE_LEDGER} ...")
-            e = "ssh " + " ".join(_opts(key, port))
-            lp = subprocess.run(["rsync", "-az", "-e", e, str(local_ledger), f"{remote}:{_REMOTE_LEDGER}"], capture_output=True, text=True)
-            if lp.returncode != 0:
-                _log(f"ledger push failed ({(lp.stderr or lp.stdout).strip()}) — starting without resume state")
-        budget = args.budget_s if args.budget_s is not None else max(600, args.timeout - 900)
-        cmd = (
-            f"./venv/bin/python scripts/golden_neighbor_bench.py --ledger {_REMOTE_LEDGER} "
-            f"--receipts {_REMOTE_RECEIPTS} --budget-s {budget:.0f} --max-dist {args.max_dist} --batch {args.batch}"
-        ) + (f" --filter {args.filter}" if args.filter else "")
-        log_file, proc_pat = _NEIGHBOR_LOG, "[g]olden_neighbor_bench"
-        done_grep, done_re = "neighbor-bench done: [0-9]+/[0-9]+ points", _NEIGHBOR_DONE_RE
-    else:
-        cmd = f"./venv/bin/emmy tune --dataset golden --explore-eps {args.explore_eps}"
-        if args.patience is not None:
-            cmd += f" --patience {args.patience}"
-        log_file, proc_pat = _TUNE_LOG, "[e]mmy tune"
-        done_grep, done_re = "done: [0-9]+/[0-9]+ shape", _DONE_RE
+    # 4. build the sweep's launch command, then launch it detached. Redirect ALL three
+    #    std streams away from the ssh channel (`< /dev/null` + `> <log> 2>&1`) and use
+    #    ssh -n (detach=True), else ssh holds the channel open past the `&` and this
+    #    call times out *after* a successful launch. The bracket-pgrep pattern stops
+    #    the liveness check from matching the poll command's own argv.
+    # Push the local resume ledger (if any) so the run continues prior coverage.
+    local_ledger = Path(args.ledger).expanduser()
+    if local_ledger.exists():
+        _log(f"pushing resume ledger {local_ledger} -> {remote}:{_REMOTE_LEDGER} ...")
+        e = "ssh " + " ".join(_opts(key, port))
+        lp = subprocess.run(["rsync", "-az", "-e", e, str(local_ledger), f"{remote}:{_REMOTE_LEDGER}"], capture_output=True, text=True)
+        if lp.returncode != 0:
+            _log(f"ledger push failed ({(lp.stderr or lp.stdout).strip()}) — starting without resume state")
+    budget = args.budget_s if args.budget_s is not None else max(600, args.timeout - 900)
+    cmd = (
+        f"./venv/bin/python scripts/golden_neighbor_bench.py --ledger {_REMOTE_LEDGER} "
+        f"--receipts {_REMOTE_RECEIPTS} --budget-s {budget:.0f} --max-dist {args.max_dist} --batch {args.batch}"
+    )
+    for flag, val in (
+        ("--share-own", args.share_own),
+        ("--share-cross", args.share_cross),
+        ("--share-tail", args.share_tail),
+        ("--tail-cap", args.tail_cap),
+    ):
+        if val is not None:
+            cmd += f" {flag} {val}"
+    if args.filter:
+        cmd += f" --filter {args.filter}"
+    log_file, proc_pat = _NEIGHBOR_LOG, "[g]olden_neighbor_bench"
+    done_grep, done_re = "neighbor-bench done: [0-9]+/[0-9]+ points", _NEIGHBOR_DONE_RE
     _log(f"launching `{cmd}` (detached -> {log_file}) ...")
     launch = f"cd {_REMOTE_DIR} && {_CUDA_EXPORT} && nohup {cmd} > {log_file} 2>&1 < /dev/null & echo run_launched"
     rc, out = _run(remote, key, port, launch, timeout=60, detach=True)
@@ -306,26 +309,19 @@ def main() -> int:
             bench_fails = (bf.strip().splitlines() or ["0"])[0]
             print("\n=== remote_node_tune summary ===", flush=True)
             print("status: ok", flush=True)
-            print(f"mode: {args.mode}", flush=True)
-            if args.mode == "neighbors":
-                _, done_line = _run(remote, key, port, f"grep -a 'neighbor-bench done:' {log_file} 2>/dev/null | tail -1")
-                print(f"points: {done_line.strip() or covered}", flush=True)
-                # Fetch the resume ledger home so the next run (any box, same card)
-                # continues the coverage instead of redoing it. Best-effort: a lost
-                # ledger only costs re-benched points (the node store upsert dedups).
-                local_ledger = Path(args.ledger).expanduser()
-                local_ledger.parent.mkdir(parents=True, exist_ok=True)
-                e = "ssh " + " ".join(_opts(key, port))
-                fp = subprocess.run(
-                    ["rsync", "-az", "-e", e, f"{remote}:{_REMOTE_LEDGER}", str(local_ledger)], capture_output=True, text=True
-                )
-                if fp.returncode == 0:
-                    print(f"ledger: fetched -> {local_ledger}", flush=True)
-                else:
-                    print(f"ledger: fetch FAILED ({(fp.stderr or fp.stdout).strip()}) — next run redoes this run's points", flush=True)
+            _, done_line = _run(remote, key, port, f"grep -a 'neighbor-bench done:' {log_file} 2>/dev/null | tail -1")
+            print(f"points: {done_line.strip() or covered}", flush=True)
+            # Fetch the resume ledger home so the next run (any box, same card)
+            # continues the coverage instead of redoing it. Best-effort: a lost
+            # ledger only costs re-benched points (the node store upsert dedups).
+            local_ledger = Path(args.ledger).expanduser()
+            local_ledger.parent.mkdir(parents=True, exist_ok=True)
+            e = "ssh " + " ".join(_opts(key, port))
+            fp = subprocess.run(["rsync", "-az", "-e", e, f"{remote}:{_REMOTE_LEDGER}", str(local_ledger)], capture_output=True, text=True)
+            if fp.returncode == 0:
+                print(f"ledger: fetched -> {local_ledger}", flush=True)
             else:
-                print(f"shapes: {covered}", flush=True)
-                print(f"explore_eps: {args.explore_eps}", flush=True)
+                print(f"ledger: fetch FAILED ({(fp.stderr or fp.stdout).strip()}) — next run redoes this run's points", flush=True)
             print(f"bench_fails: {bench_fails}", flush=True)
             print(f"elapsed (wait only): {elapsed}s", flush=True)
             print(f"remote log: {remote}:{log_file}", flush=True)
@@ -360,7 +356,12 @@ def main() -> int:
                     flush=True,
                 )
                 return 1
-            print(f"\nstatus: COMPLETE ({args.mode} + merge done)", flush=True)
+            # The local DB is now the sole copy of everything the rental paid for —
+            # snapshot it so a cache wipe can't erase the data.
+            backup = _backup_local_db()
+            if backup is not None:
+                print(f"backup: {backup}", flush=True)
+            print("\nstatus: COMPLETE (sweep + merge done)", flush=True)
             return 0
         if not reachable:
             # Transient ssh/network failure this cycle — keep waiting (still bounded by
@@ -370,10 +371,10 @@ def main() -> int:
         if not alive:
             dead_streak += 1
             if dead_streak >= 2:  # two consecutive confirmed DEADs without a done marker ⇒ it crashed
-                return _fail(remote, key, port, f"{args.mode} process died without a done marker", log_file)
+                return _fail(remote, key, port, "sweep process died without a done marker", log_file)
         else:
             dead_streak = 0
-            _log(f"collecting ({args.mode})... ({int(time.monotonic() - start)}s elapsed)")
+            _log(f"collecting... ({int(time.monotonic() - start)}s elapsed)")
 
 
 if __name__ == "__main__":

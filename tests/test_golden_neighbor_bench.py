@@ -1,8 +1,10 @@
 """scripts/golden_neighbor_bench.py — the pure selection/resume logic (no GPU, no emmy imports).
 
 Covers the component-aware knob distance, the order-stable point spec/key, the
-remaining-proportional randomized batch sampling, and the ledger's resume semantics
-(terminal statuses stick, non-terminal ones retry up to the attempt cap).
+remaining-proportional randomized batch sampling, the slice machinery (assignment,
+share-weighted slice draw, the stable tail subsample, share normalization), and the
+ledger's resume semantics (terminal statuses stick, non-terminal ones retry up to the
+attempt cap).
 """
 
 import random
@@ -78,6 +80,90 @@ class TestPickBatch:
     def test_empty_groups_are_never_picked(self):
         remaining = {"empty": [], "full": [("k", "s")]}
         assert gnb.pick_batch(random.Random(0), remaining, batch=2)[0] == "full"
+
+
+class TestAssignSlice:
+    def test_own_wins_even_when_cross_is_closer(self):
+        assert gnb.assign_slice(2, 0, max_dist=2) == "own"
+
+    def test_cross_when_only_cross_is_within_dist(self):
+        assert gnb.assign_slice(None, 1, max_dist=2) == "cross"
+        assert gnb.assign_slice(5, 2, max_dist=2) == "cross"
+
+    def test_tail_when_no_anchor_is_within_dist(self):
+        assert gnb.assign_slice(None, None, max_dist=2) == "tail"
+        assert gnb.assign_slice(3, 4, max_dist=2) == "tail"
+
+    def test_boundary_distance_is_inclusive(self):
+        assert gnb.assign_slice(2, None, max_dist=2) == "own"
+        assert gnb.assign_slice(None, 2, max_dist=2) == "cross"
+
+
+class TestPickSlice:
+    SHARES = {"own": 0.6, "cross": 0.25, "tail": 0.15}
+
+    def test_deterministic_under_a_seed(self):
+        remaining = {s: {"g": [("k", "s")]} for s in gnb.SLICES}
+        picks_a = [gnb.pick_slice(random.Random(7), self.SHARES, remaining) for _ in range(5)]
+        picks_b = [gnb.pick_slice(random.Random(7), self.SHARES, remaining) for _ in range(5)]
+        assert picks_a == picks_b
+
+    def test_empty_slice_is_never_picked(self):
+        remaining = {"own": {}, "cross": {"g": [("k", "s")]}}
+        rng = random.Random(0)
+        assert all(gnb.pick_slice(rng, self.SHARES, remaining) == "cross" for _ in range(50))
+
+    def test_draws_track_shares(self):
+        remaining = {s: {"g": [("k", "s")]} for s in gnb.SLICES}
+        rng = random.Random(0)
+        picks = [gnb.pick_slice(rng, self.SHARES, remaining) for _ in range(1000)]
+        own_share = picks.count("own") / len(picks)
+        assert 0.5 < own_share < 0.7  # tracks the 60% share
+
+    def test_exhausted_slice_share_flows_to_the_rest(self):
+        remaining = {"cross": {"g": [("k", "s")]}, "tail": {"g": [("k", "s")]}}
+        rng = random.Random(0)
+        picks = [gnb.pick_slice(rng, self.SHARES, remaining) for _ in range(1000)]
+        cross_share = picks.count("cross") / len(picks)
+        assert 0.5 < cross_share < 0.75  # 0.25 / (0.25 + 0.15) = 0.625, own's share redistributed
+
+
+class TestTailSample:
+    def test_cap_respected_and_deterministic(self):
+        specs = [f"A={i}" for i in range(50)]
+        out = gnb.tail_sample(specs, cap=10)
+        assert len(out) == 10
+        assert out == gnb.tail_sample(specs, cap=10)
+
+    def test_input_order_independent(self):
+        specs = [f"A={i}" for i in range(20)]
+        assert gnb.tail_sample(specs, cap=5) == gnb.tail_sample(list(reversed(specs)), cap=5)
+
+    def test_stable_subset_on_fixed_input(self):
+        # The hash ranking is a frozen contract: a changed selection would orphan
+        # ledger entries mid-coverage. Pin the exact subset for one fixed input.
+        specs = [f"A={i}" for i in range(10)]
+        assert gnb.tail_sample(specs, cap=3) == ["A=5", "A=9", "A=3"]
+
+    def test_cap_larger_than_pool_keeps_everything(self):
+        specs = ["A=1", "A=2"]
+        assert sorted(gnb.tail_sample(specs, cap=10)) == specs
+
+
+class TestNormalizeShares:
+    def test_normalizes_to_fractions(self):
+        shares = gnb.normalize_shares(60, 25, 15)
+        assert shares == {"own": 0.6, "cross": 0.25, "tail": 0.15}
+        assert sum(shares.values()) == 1.0
+
+    def test_zero_share_allowed_for_a_slice(self):
+        assert gnb.normalize_shares(1, 0, 0) == {"own": 1.0, "cross": 0.0, "tail": 0.0}
+
+    def test_rejects_negative_and_all_zero(self):
+        with pytest.raises(ValueError):
+            gnb.normalize_shares(-1, 2, 1)
+        with pytest.raises(ValueError):
+            gnb.normalize_shares(0, 0, 0)
 
 
 class TestLedger:

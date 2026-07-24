@@ -21,6 +21,11 @@ none). ``forward`` brackets each vLLM attention call with two emmy replays (``pr
 
 Numpy host I/O at the runner boundary (the per-layer host-sync interleave — Top risk #1);
 the device zero-copy path is the Phase-4 optimization.
+
+Speculative decoding (MTP drafter, e.g. gemma-4-assistant) works: vLLM's drafter reaches into
+``target.model.embed_tokens`` to share the target's raw embedding with the draft head, so this
+class exposes a thin ``.model`` shim over the tied embed/``lm_head`` weight the runner gathers from
+(built only when a draft is configured). See ``_SharedRawEmbedding``.
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ import logging
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -80,6 +86,67 @@ def _build_rotaries(config, runner, n_layers, max_position):
                 by_type[lt] = get_rope(hd, max_position=max_position, is_neox_style=True, rope_parameters=rope_params[lt])
         return [by_type[layer_types[i]] for i in range(n_layers)]
     return [_build_rotary(config, runner.layer_meta(0)[0], max_position)] * n_layers
+
+
+class _SharedRawEmbedding(nn.Module):
+    """The token embedding vLLM's speculative-decoding drafter shares off the target model.
+
+    vLLM's Gemma-4 MTP drafter reaches into ``target.model.embed_tokens``, adopts it as its OWN
+    embedding, and then applies a ``* sqrt(hidden)`` normalizer itself (``Gemma4MultiTokenPredictor``)
+    — the same ``embed_scale`` the emmy runner folds into its gather table — so this module must
+    return the **raw, unscaled** table rows, exactly as stock vLLM's ``VocabParallelEmbedding`` does.
+
+    It carries no weights of its own: gemma-4 ties the embedding to ``lm_head``, and on that tied path
+    the emmy runner already gathers from the same ``lm_head.weight`` tensor (``adopt_embed_table``), so
+    backing the drafter here shares ONE device table with the target rather than copying ~2 GiB. The
+    forward guards that identity: if the runner is not gathering from this same raw tensor (an untied
+    target, where ``lm_head`` is the distinct output head), it raises rather than silently feeding the
+    draft head an embedding the target never uses.
+    """
+
+    def __init__(self, model: EmmyGenModel):
+        super().__init__()
+        # Not a registered submodule (``object.__setattr__``): the owner already owns this module,
+        # so registering it back would make ``named_modules`` recurse through a cycle.
+        object.__setattr__(self, "_model", model)
+
+    @property
+    def weight(self) -> torch.Tensor:
+        return self._model.lm_head.weight
+
+    def forward(self, input_ids):
+        # Pure gather, no guards: vLLM torch.compiles the drafter's forward (this module included),
+        # and dynamo cannot trace ``data_ptr()`` — the tie check runs once, eagerly, in
+        # ``validate_tied`` at the end of ``EmmyGenModel.load_weights``.
+        return F.embedding(input_ids.long(), self.weight)
+
+    def validate_tied(self):
+        """One-time eager check that the shared head weight IS the table the runner gathers from.
+
+        Same storage, not object identity: ``Tensor.data`` yields a fresh view each access, and the
+        runner captured its own view of this tensor at ``adopt_embed_table`` time. Called from
+        ``load_weights`` (after the adopt hand-off), never from the compiled forward."""
+        w = self.weight
+        dev = getattr(self._model.runner, "_embed_weight_dev", None)
+        if dev is None or dev.data_ptr() != w.data_ptr():
+            raise RuntimeError(
+                "EmmyGenModel MTP shim: the target's lm_head weight is not the tied embedding table "
+                "the runner gathers from, so sharing it as the draft head's embedding would corrupt "
+                "draft tokens. Speculative decoding needs a tied-embedding target (e.g. gemma-4)."
+            )
+
+
+class _EmmyTargetInner(nn.Module):
+    """The ``.model`` attribute vLLM's spec-decode drafter expects on a target model.
+
+    Stock vLLM model classes nest their trunk under ``.model`` and the drafter reads
+    ``target.model.embed_tokens`` from it to share the embedding. EmmyGenModel keeps its trunk
+    (embedding included) inside the emmy runner, not a vLLM-style ``.model`` submodule, so this thin
+    container re-exposes just that one attribute — the shim's whole compatibility surface."""
+
+    def __init__(self, embed_tokens: nn.Module):
+        super().__init__()
+        self.embed_tokens = embed_tokens
 
 
 class EmmyGenModel(nn.Module):
@@ -184,6 +251,22 @@ class EmmyGenModel(nn.Module):
         gen_cfg = vllm_config.model_config.try_get_generation_config()
         self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
 
+        # Speculative-decoding shim: vLLM's MTP drafter (vllm#41745, gemma-4) reaches into
+        # ``target.model.embed_tokens`` to share the target's raw embedding with the draft head.
+        # The runner keeps the trunk (embedding included) outside a vLLM-style ``.model`` submodule,
+        # so expose that one attribute — backed by the tied embed/lm_head weight the runner gathers
+        # from, no copy. Only built when a draft is configured; plain serving is untouched. The
+        # drafter's ``* sqrt(hidden)`` normalizer only reproduces the target's embed scale when the
+        # embedding is tied to ``lm_head``, so reject an untied target early and clearly.
+        if getattr(vllm_config, "speculative_config", None) is not None:
+            if not getattr(config, "tie_word_embeddings", False):
+                raise NotImplementedError(
+                    "EmmyGenModel: speculative decoding requires a tied-embedding target so the draft "
+                    "head can share the raw embedding table (this checkpoint is untied). Serve without "
+                    "--speculative-config, or use a tied target such as gemma-4."
+                )
+            self.model = _EmmyTargetInner(_SharedRawEmbedding(self))
+
     def forward(self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None, **kwargs):
         device = positions.device
         # clamp guards vLLM's _dummy_run garbage-id profiling batches (out-of-vocab → IndexError).
@@ -266,4 +349,9 @@ class EmmyGenModel(nn.Module):
 
             torch.cuda.empty_cache()
             cp.get_default_memory_pool().free_all_blocks()
+        # The spec-decode shim shares this table with the drafter; verify the tie once, here,
+        # where the adopt hand-off just happened (the compiled forward carries no guards).
+        shim = getattr(self, "model", None)
+        if shim is not None:
+            shim.embed_tokens.validate_tied()
         return loaded

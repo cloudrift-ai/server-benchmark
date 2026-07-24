@@ -365,14 +365,16 @@ def gen_m1_tier(default: int = 1) -> int:
     return int_env(GEN_M1_TIER, default)
 
 
-def gen_alias_attn(default: int = 0) -> int:
+def gen_alias_attn(default: int = 1) -> int:
     """``EMMY_GEN_ALIAS_ATTN`` — write vLLM's paged-attention output DIRECTLY into the M=1 post
-    twin's ``attn_out`` input backing (default 0 = off). Kills the per-layer protective D2D
-    upload copy at T=1 decode: ``upload_prefix_device`` self-copy-skips on pointer equality.
-    The alias holds across steps by construction — the m1 program's input arrays are allocated
-    once, and the outer whole-step decode capture fixes the launch order (attention writes,
-    the post program reads, before the next replay overwrites). Revert-friendly: off restores
-    the copy path unchanged. See ``serving/vllm_model_gen.py``."""
+    twin's ``attn_out`` input backing (default 1 = ON since 2026-07-24). Kills the per-layer
+    protective D2D upload copy at T=1 decode: ``upload_prefix_device`` self-copy-skips on
+    pointer equality. The alias holds across steps by construction — the m1 program's input
+    arrays are allocated once, and the outer whole-step decode capture fixes the launch order
+    (attention writes, the post program reads, before the next replay overwrites). Flip
+    verdict: c=1 TPOT 17.89→17.83 (256) / 18.92→18.88 (4K) with c=64 / 4K c=8 unchanged and
+    greedy completions token-identical to the copy path. Set 0 to restore the copy path.
+    See ``serving/vllm_model_gen.py``."""
     return int_env(GEN_ALIAS_ATTN, default)
 
 

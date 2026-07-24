@@ -495,4 +495,27 @@ def coop_reduce_moves() -> list[str]:
     axis — the M=1 gemv tier's coalescing fix); ``_reduce_candidates`` gates it structurally
     (plain contraction, 32-divisible inner free axis) and MEASUREMENT decides the layout — a
     row-major-B shape simply benches it slower."""
-    return ["b4", "b8", "b16", "b32", "b64", "b128", "b256", "b512", "r2", "r4", "r2/b4", "b32t", "b64t", "b128t", "b256t"]
+    return [
+        "b4",
+        "b8",
+        "b16",
+        "b32",
+        "b64",
+        "b128",
+        "b256",
+        "b512",
+        "r2",
+        "r4",
+        "r2/b4",
+        # The transposed band + its grid-split composites: a bare b<n>t is latency-bound on
+        # long-K matvecs (120 CTAs of serial K), so the deployable winners pair it with a
+        # g<w>k split (down g32k/b256t 75.7 us = the row-major floor on the k-major layout).
+        "b32t",
+        "b64t",
+        "b128t",
+        "b256t",
+        "g8k/b128t",
+        "g8k/b256t",
+        "g16k/b256t",
+        "g32k/b256t",
+    ]

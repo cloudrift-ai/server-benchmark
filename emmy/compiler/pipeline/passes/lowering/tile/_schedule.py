@@ -501,7 +501,9 @@ def _reduce_candidates(kernel, place, plan: TilePlan, probe: Contraction | None 
                 # CONTRACTION per-cell tier (``probe`` built — the fused monoid rows ride
                 # shared-row staging the transposed layout can't), a static innermost free
                 # axis divisible by the 32-lane sweep, and a 32-multiple coop. Layout FIT
-                # (is B actually k-major?) is measurement's job, not a gate.
+                # (is B actually k-major?) is measurement's job, not a gate. A composite
+                # ``g<w>k/b<n>t`` (the deployable long-K form) additionally needs the split
+                # divisibility the plain split moves check.
                 inner = place.free[-1] if place.free else None
                 if not (
                     probe is not None
@@ -509,6 +511,7 @@ def _reduce_candidates(kernel, place, plan: TilePlan, probe: Contraction | None 
                     and inner is not None
                     and inner.extent.is_static
                     and inner.extent.as_static() % 32 == 0
+                    and (not p.needs_split or k % p.cta == 0)
                 ):
                     continue
             out.append(move)

@@ -89,4 +89,12 @@ for snap in hf_root.glob("hub/models--*/snapshots/*"):
     (snap / "model.safetensors.index.json").write_text(json.dumps(index, indent=2, sort_keys=True))
     consolidated.unlink()
     blob.unlink(missing_ok=True)
+    # A pre-seeded HF cache can carry MULTIPLE snapshot revisions sharing the removed blob
+    # (a fresh download has exactly one) — drop any sibling symlink now dangling at it, or
+    # the bake's size walk stats a ghost and dies (2026-07-23 bake failure).
+    for sibling in snap.parent.iterdir():
+        stale = sibling / consolidated.name
+        if stale.is_symlink() and not stale.exists():
+            stale.unlink()
+            print(f"[reshard] dropped dangling sibling-snapshot link {stale}")
     print(f"[reshard] done: {n} shards + index, consolidated file removed")

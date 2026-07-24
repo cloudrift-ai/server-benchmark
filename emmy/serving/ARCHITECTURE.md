@@ -147,7 +147,17 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   torch/cupy blocks to the driver **before vLLM's KV-cache profiling** — the reclaimed memory becomes KV blocks
   (gemma-4-12B on a 5090: 17.7k → 27.5k KV tokens, the difference between admission-queueing and beating stock TTFT
   on the 4K/4K c=8 workload). `forward` brackets each `self.attn[L](q,k,v)` with two emmy replays (pre/post), applying that
-  layer's RoPE in between (A2). Uniform sliding-window (Qwen2-style `use_sliding_window`) and dual-chunk are rejected. `forward` branches on `num_tokens`: the decode hot
+  layer's RoPE in between (A2). Uniform sliding-window (Qwen2-style `use_sliding_window`) and dual-chunk are rejected.
+  **Speculative decoding (MTP drafter, vllm#41745 — gemma-4-assistant).** vLLM's drafter shares the target's embedding
+  by reaching into `target.model.embed_tokens` (stock model classes nest their trunk under `.model`; the emmy trunk lives
+  in the runner instead). So — only when a draft is configured — the model exposes a thin `.model` shim
+  (`_EmmyTargetInner`) whose `embed_tokens` (`_SharedRawEmbedding`) gathers RAW rows from the SAME tied embed/`lm_head`
+  tensor the runner adopts (no copy); the gemma-4 drafter applies its own `sqrt(hidden)` normalizer, matching the
+  runner's folded embed-scale. The KV cache is genuinely shared through vLLM's own attention-layer registry — the
+  drafter's Q-only layers read K/V from the target's real `Attention` layers. Only tied-embedding targets are sound
+  (untied `lm_head` ≠ embedding), so an untied target is rejected at init; a one-time check at the end of `load_weights`
+  verifies the runner adopted that same tensor (not in the gather itself — vLLM compiles the drafter's forward, and
+  dynamo can't trace `data_ptr()`). `forward` branches on `num_tokens`: the decode hot
   path (`≤ bucket`) runs `_forward_device` (q/k/v + attn_out stay CUDA tensors through RoPE + attention, no host
   hop); prefill keeps the numpy path. Select via `--runner generate` +
   `--hf-overrides '{"architectures":["EmmyGenModel"]}'` + `--dtype float16` (the `serve --generate` branch forces
@@ -256,6 +266,9 @@ Recorded follow-ups, in impact order:
 ## Testing
 
 - `tests/serving/test_packed.py` — pure span-split logic, runs everywhere.
+- `tests/serving/test_gen_mtp_shim.py` — the spec-decode `.model.embed_tokens` shim (no GPU): pins the attribute
+  contract vLLM's MTP drafter shares off the target, that it gathers RAW rows from the shared tied weight, and that an
+  untied target raises. Imports vllm at module level, so it runs where vllm is installed (skips otherwise).
 - `tests/serving/test_vllm_plugin_gpu.py` — `perf`-marked (deselected by default), needs CUDA + vllm: in-process
   `vllm.LLM(runner="pooling", hf_overrides=...)` on Qwen3-Embedding-0.6B, `.embed()` cosine vs the HF eager reference.
   The three texts have different token counts, so it exercises the per-seq_len captured-graph cache end to end.

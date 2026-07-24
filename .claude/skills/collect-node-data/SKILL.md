@@ -1,7 +1,7 @@
 ---
 name: collect-node-data
-description: Use this skill when the user wants to populate or refresh the autotune DB's node table (the cross-hardware search-tree node store) with data measured on a SPECIFIC GPU — e.g. "collect node data for an H200", "run the node sweep on a rented <GPU> and merge the nodes back", "gather cross-hardware node-store data", "populate / update the node table from <hardware>". Rents a fresh single-GPU server (via start-remote-server), rsyncs + sets up emmy there, runs the budgeted three-slice golden sweep (`remote_node_collect.py` → `golden_neighbor_bench.py`: every golden kind's candidate pool, sliced own-neighborhood / cross-card exchange / uniform tail at 60/25/15 budget shares, kind-stratified within each slice, paired -O1/-O3 pinned benches, ledger-resumed), merges the remote node rows into the local `~/.cache/emmy/autotune.db` (nodes table only, GPU-keyed so cards never collide), backs the DB up locally, and tears the server down.
-version: 0.3.0
+description: Use this skill when the user wants to populate or refresh the autotune DB's node table (the cross-hardware search-tree node store) with data measured on a SPECIFIC GPU — e.g. "collect node data for an H200", "run the node sweep on a rented <GPU> and merge the nodes back", "collect node data on this server", "gather cross-hardware node-store data", "populate / update the node table from <hardware>". Uses an existing GPU server the user provides, or rents a fresh single-GPU one (via start-remote-server); rsyncs + sets up emmy there, runs the budgeted three-slice golden sweep (`remote_node_collect.py` → `golden_neighbor_bench.py`: every golden kind's candidate pool, sliced own-neighborhood / cross-card exchange / uniform tail at 60/25/15 budget shares, kind-stratified within each slice, paired -O1/-O3 pinned benches, ledger-resumed) — all remote processes inside tmux sessions — merges the remote node rows into the local `~/.cache/emmy/autotune.db` (nodes table only, GPU-keyed so cards never collide), backs the DB up locally, and tears the server down (only if it rented it).
+version: 0.4.0
 ---
 
 # Collect node-store data from specific hardware
@@ -12,9 +12,12 @@ dict the prior sees. It is read by `emmy eval prior --dataset nodes` (per-card f
 reachability) and feeds prior diagnostics. Because your dev box (and most of the fleet) has no local CUDA GPU, the
 data for any given card must be **measured on that card** and brought back.
 
-This skill does exactly that for one GPU, in a single budgeted run on the rented box: rent it → set up emmy →
-the golden sweep (`scripts/remote_node_collect.py`, driving `scripts/golden_neighbor_bench.py`) → merge the new card's
-node rows into the local DB → back the DB up → tear the server down.
+This skill does exactly that for one GPU, in a single budgeted run on the box: get a server (an existing one the
+user provides, or rent one) → set up emmy → the golden sweep (`scripts/remote_node_collect.py`, driving
+`scripts/golden_neighbor_bench.py`) → merge the new card's node rows into the local DB → back the DB up → tear the
+server down (only if this run rented it). Everything long-running on the remote — the apt/`make setup` phase and
+the sweep itself — runs inside named tmux sessions (`emmy-node-setup` / `emmy-node-sweep`), so a dropped ssh
+connection never kills the work and a human can attach to watch it.
 
 **Why a budgeted sweep (and not a search-driven tune).** The old flow ran an ε-greedy `emmy tune --dataset golden`
 first: its wall time grew with the golden set (patience-stopped search per shape, no budget knob), and even at
@@ -66,29 +69,38 @@ here.
 The sweep neither needs **`HF_TOKEN` nor downloads models** (golden snippets are pure `torch.randn`) — but it **does**
 need `nvcc` (it compiles CUDA kernels). Budget **~4.5–5.5 h total** for the default 4-hour sweep including env build;
 confirm with the user before starting if they expected a quick run. The budget samples the pool, it doesn't finish
-it — repeated rentals of the same card model resume from the fetched ledger and keep extending coverage.
+it — repeated runs on the same card model (rented or user-provided) resume from the fetched ledger and keep
+extending coverage.
 
 ## Inputs to confirm
 
 Ask only for what the user hasn't already given:
 
-1. **GPU model** — must map to a key in `emmy/hardware.py::GPU_INSTANCE_TYPES` (e.g. "H200" → `"NVIDIA H200
-   141GB"`). If it isn't in the table, stop and say so — don't guess. This card's identity is what the node rows are
-   keyed by.
-2. **Provider** — only ask if the GPU is offered by more than one (e.g. H200 is on CloudRift and GCP). A user-named
-   provider is **binding** (never silently substitute).
-3. **Env file** (CloudRift creds) — default `.env`; if the user named an overlay or wants a non-default cluster, follow
-   the `start-remote-server` sourcing rules (base first, overlay second, same Bash call). H200 on CloudRift often needs
-   a non-default cluster.
-4. **GPU count is fixed at 1.** Node data is per-card; one GPU is all the sweep needs. Don't rent more.
+1. **Server: existing or rented?** If the user provides an existing server (`user@host`, plus port/key if
+   non-default), **skip Step 1 entirely** and never tear it down — a box this run didn't rent is not ours to
+   delete (or otherwise modify beyond the sweep we were asked to run). Requirements for a provided server: ssh key
+   access, an NVIDIA GPU visible (`nvidia-smi`), Ubuntu-ish with `apt` + passwordless `sudo` (the script installs
+   tmux / Python 3.12 / the CUDA toolkit as needed). The card's identity is detected on-box
+   (`Context.hardware_id()`), so the node rows key correctly no matter how the server was obtained.
+2. **GPU model** — needed only when provisioning; must map to a key in
+   `emmy/hardware.py::GPU_INSTANCE_TYPES` (e.g. "H200" → `"NVIDIA H200 141GB"`). If it isn't in the table, stop and
+   say so — don't guess.
+3. **Provider** — provisioning only; ask only if the GPU is offered by more than one (e.g. H200 is on CloudRift and
+   GCP). A user-named provider is **binding** (never silently substitute).
+4. **Env file** (CloudRift creds) — provisioning only; default `.env`; if the user named an overlay or wants a
+   non-default cluster, follow the `start-remote-server` sourcing rules (base first, overlay second, same Bash
+   call). H200 on CloudRift often needs a non-default cluster.
+5. **GPU count is fixed at 1.** Node data is per-card; one GPU is all the sweep needs. Don't rent more. (A provided
+   multi-GPU box works — the sweep just uses one card — but never rent one.)
 
 Don't pass `--billing-exempt` for any rentals — all rentals bill normally (the flag is admin-only and not used by
 any skill flow).
 
-## Step 1 — Provision the server (delegate to `start-remote-server`)
+## Step 1 — Provision the server (skip when the user supplied one)
 
-Provision exactly one GPU using the orchestrator, following the full `start-remote-server` skill (credential sourcing,
-candidate fallback, capacity handling, the binding `--provider` rule). The command shape:
+**Only when the user did not provide an existing server.** Provision exactly one GPU using the orchestrator,
+following the full `start-remote-server` skill (credential sourcing, candidate fallback, capacity handling, the
+binding `--provider` rule). The command shape:
 
 ```bash
 [ -f .env ] && set -a && . ./.env && set +a && \
@@ -102,17 +114,24 @@ Capture from the final `VM ready at <user@host[:port]>` line:
 
 Do not wrap the command in a retry loop — the orchestrator handles fallback itself.
 
+With a user-provided server there is nothing to do here beyond a quick reachability check (`ssh … nvidia-smi -L`)
+— then go straight to Step 2 with the given `user@host` / port / key.
+
 ## Step 2 — Set up, sweep, merge, and back up on the remote (one backgrounded run of one script)
 
-`scripts/remote_node_collect.py` does the whole core in **one process**: ensures the Python 3.12 venv/dev packages +
-`nvcc`, rsyncs your working tree (exact local code, incl. uncommitted changes) to `~/.local/share/emmy/node-collect/`
-(the repo's `REMOTE_DEPLOY_DIR` layout), runs `make setup` (output to `setup.log` in that dir — only a tail returns
-on failure), pushes the resume ledger, launches the sweep detached, **polls the remote log internally** until it
-finishes, then **fetches the ledger and node rows back and merges them** into the local `~/.cache/emmy/autotune.db`
-(`node` table only, GPU-keyed so other cards are untouched), snapshots the DB to `~/.cache/emmy/backups/`, and prints
-the per-card receipt. The robustness traps are baked in: argv-list ssh (no zsh word-split), bracket-pgrep liveness
-(no self-match), one short ssh per poll (no broken-pipe), venv/dev always installed, and a non-tty-safe detached
-launch.
+`scripts/remote_node_collect.py` does the whole core in **one process**: bootstraps tmux, rsyncs your working tree
+(exact local code, incl. uncommitted changes) to `~/.local/share/emmy/node-collect/` (the repo's
+`REMOTE_DEPLOY_DIR` layout), ensures the Python 3.12 venv/dev packages + `nvcc` and runs `make setup` inside the
+`emmy-node-setup` tmux session (output to `setup.log` in that dir — only a tail returns on failure), pushes the
+resume ledger, launches the sweep inside the `emmy-node-sweep` tmux session, **polls the remote log internally**
+until it finishes, then **fetches the ledger and node rows back and merges them** into the local
+`~/.cache/emmy/autotune.db` (`node` table only, GPU-keyed so other cards are untouched), snapshots the DB to
+`~/.cache/emmy/backups/`, and prints the per-card receipt. Every long-running remote process lives in a named tmux
+session — a dropped ssh never kills the work, and `tmux attach -t emmy-node-sweep` on the box shows it live. The
+other robustness traps are baked in: argv-list ssh (no zsh word-split), `tmux has-session` liveness (no pgrep
+self-match), one short ssh per poll (no broken-pipe), and venv/dev always installed. On a box that already has a
+live `emmy-node-sweep` session (possible with a reused / user-provided server) the script **refuses to launch** —
+attach to inspect, or kill that session first.
 
 Run it in the **background** (Bash `run_in_background: true`) — ~4.5 h, past any foreground tool timeout, and you
 want only the final summary in context, not ~20 ssh polls. The harness re-invokes you with the summary when it
@@ -140,7 +159,7 @@ validates imports and the trace path — off-GPU every anchor labels cross and p
 When the run exits you get one compact result:
 
 - **success** → `status: ok`, a `points: neighbor-bench done: <done>/<total> points (<new> new this run)` line plus
-  `ledger: fetched -> …` — **followed by the merge receipt** (the rented card appears as its own line in `node rows
+  `ledger: fetched -> …` — **followed by the merge receipt** (the swept card appears as its own line in `node rows
   per card now: …`; cards already present are unchanged), a `backup: <path>` line, and `status: COMPLETE (sweep +
   merge done)`. Merge and backup are folded in, so there is **no separate step to launch** — the local DB is already
   updated and snapshotted. A run stopped at `--timeout` reports the same way with `sweep stopped at --timeout`
@@ -153,7 +172,7 @@ When the run exits you get one compact result:
   distribution-preserving sample of it and later runs keep going. Don't extend the run past the budget without
   asking the user.
 
-**Re-merge / manual fallback.** If the merge step failed (or you used `--no-merge`), merge the rented card's rows without
+**Re-merge / manual fallback.** If the merge step failed (or you used `--no-merge`), merge the swept card's rows without
 re-sweeping: `./venv/bin/python scripts/merge_node_db.py --remote "<user@host>" [--ssh-key … --port …]` (or `--src
 <snapshot.db>` for an already-fetched file; `--db <path>` to override the destination). Same `node`-only, per-kind
 upsert semantics.
@@ -161,9 +180,11 @@ upsert semantics.
 **Manual debugging** (only if the script fails and you need to poke the box): the harness shell is zsh, so pass ssh
 options as an **array** — `SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i
 "$HOME/.ssh/id_ed25519")` (a plain string var fails: zsh doesn't word-split it). Then `ssh "${SSH_OPTS[@]}" "$REMOTE"
-'tail -n 40 ~/.local/share/emmy/node-collect/neighbors.log'`; check liveness with `pgrep -f "[g]olden_neighbor_bench"`
-(bracket trick — a plain pattern self-matches the poll's own argv); never run a multi-minute loop inside one ssh
-session.
+'tail -n 40 ~/.local/share/emmy/node-collect/neighbors.log'`; check liveness with `tmux has-session -t
+emmy-node-sweep` (or `tmux capture-pane -pt emmy-node-sweep` for the live screen; the setup phase is
+`emmy-node-setup`). If you ever fall back to pgrep, bracket the pattern (`pgrep -f "[g]olden_neighbor_bench"`) so it
+doesn't self-match. Never run a multi-minute loop inside one ssh session — and if you must start any long-running
+process on the box by hand, start it inside a tmux session, never bare over ssh.
 
 ## Step 3 — Verify
 
@@ -171,13 +192,16 @@ session.
 ./venv/bin/emmy eval prior --dataset nodes
 ```
 
-`node_report` groups by card — confirm a block headed with the rented GPU's name appears (`[<gpu>] <n> nodes`, with fork
+`node_report` groups by card — confirm a block headed with the swept GPU's name appears (`[<gpu>] <n> nodes`, with fork
 sibling-ranking + leaf reachability for that card). `--kernel matmul` / `reduce` / `pointwise` narrows to one op family.
 
-## Step 4 — Tear down the server
+## Step 4 — Tear down the server (only if this run rented it)
 
-The VM bills until deleted, and this skill's job is done once the merge verifies. **Confirm with the user, then delete**
-(never delete a VM without an explicit go-ahead):
+**A user-provided server is never torn down** — it isn't ours. Just report that the sweep is finished, that no
+`emmy-node-sweep` tmux session is left running, and leave the box exactly as it was.
+
+For a server this run provisioned: the VM bills until deleted, and this skill's job is done once the merge
+verifies. **Confirm with the user, then delete** (never delete a VM without an explicit go-ahead):
 
 ```bash
 emmy vm delete cloudrift --instance-id <id>           # CloudRift
@@ -190,17 +214,19 @@ If the user wants to keep the box for more sweeping, leave it up and report the 
 
 Before reporting success:
 
-- [ ] `vm create gpu` exited 0 and an SSH target was captured.
+- [ ] An SSH target was in hand — either provided by the user (reachability checked), or `vm create gpu` exited 0
+      and the target + teardown handle were captured.
 - [ ] The run ended with `status: COMPLETE (sweep + merge done)`, a `neighbor-bench done: <done>/<total> points`
       line, and `ledger: fetched -> …` (a short `<done>` count is fine — the budget samples the pool, it doesn't
       finish it).
 - [ ] The startup log shows per-slice pool counts (`own <o> / cross <c> / tail <t>`) and per-kind `[pool]` lines
       without wholesale anchor-skip storms on a kind (a few `anchor skipped` lines are normal — cross-card configs
       that don't realize here).
-- [ ] The merge receipt shows the rented card as its own per-card line; counts for other cards are unchanged.
+- [ ] The merge receipt shows the swept card as its own per-card line; counts for other cards are unchanged.
 - [ ] A `backup: <path>` line appeared (or the log explains why the backup was skipped).
-- [ ] `eval prior --dataset nodes` shows a block for the rented GPU.
-- [ ] The VM was deleted (or the user explicitly chose to keep it, and has the teardown command).
+- [ ] `eval prior --dataset nodes` shows a block for the swept GPU.
+- [ ] Rented server: the VM was deleted (or the user explicitly chose to keep it, and has the teardown command).
+      User-provided server: left untouched, with no `emmy-node-sweep`/`emmy-node-setup` tmux session still running.
 
 If any check fails, report the failure + raw output instead of claiming success.
 
@@ -214,10 +240,15 @@ If any check fails, report the failure + raw output instead of claiming success.
   kernel compiles hard-fail (there is no NVRTC fallback).
 - **Don't set `HF_TOKEN` or expect model downloads** — the golden snippets are pure torch expressions.
 - **Don't rent more than 1 GPU** — node data is per-card; extra GPUs just burn money.
-- **Don't auto-delete the VM** — confirm teardown with the user first (and never modify a CloudRift server beyond the
-  sweep we explicitly started).
+- **Don't rent a server the user already offered one for** — an existing `user@host` from the user means skip
+  provisioning entirely; renting anyway burns money and splits the run across boxes.
+- **Don't auto-delete the VM** — confirm teardown with the user first; and **never tear down (or otherwise modify) a
+  user-provided server** beyond the sweep we explicitly started — it isn't ours.
+- **Don't run long-lived remote processes outside tmux** — the script already puts setup and the sweep in the
+  `emmy-node-setup` / `emmy-node-sweep` sessions; any manual long-running command you start on the box goes in a
+  tmux session too, never bare over ssh (a dropped connection kills it and strands rented-GPU time).
 - **Don't hand-roll the remote setup/poll loop** — `scripts/remote_node_collect.py` (Step 2) already handles it correctly:
-  argv-list ssh (zsh doesn't word-split a string var), the `[g]olden_neighbor_bench` bracket-pgrep (a plain pattern
-  self-matches the poll's own argv and reports the sweep alive forever), one short ssh per poll, and venv/dev install.
-  Only drop to manual ssh for debugging — and then keep the same precautions (array ssh opts; never name a var
-  `status`/`path`, which are read-only in zsh).
+  argv-list ssh (zsh doesn't word-split a string var), tmux-session launch + `has-session` liveness (no pgrep
+  self-match, no ssh channel held open across a detach), one short ssh per poll, and venv/dev install.
+  Only drop to manual ssh for debugging — and then keep the same precautions (array ssh opts; bracket any pgrep
+  pattern; never name a var `status`/`path`, which are read-only in zsh).

@@ -3,13 +3,18 @@
 token-heavy middle of the ``collect-node-data`` skill, extracted so the agent makes
 ONE backgrounded tool call instead of ~20 verbose ssh polls.
 
-Given an SSH target it: ensures the Python 3.12 venv/dev packages + ``nvcc``, rsyncs
-the local working tree, runs ``make setup`` (output to a remote logfile — only a tail
-comes back on failure), launches the collection detached, then **polls the remote log
-internally** until it finishes — a run that outlives ``--timeout`` is STOPPED and
-harvested, never abandoned — merges the node rows home, and backs up the local DB.
-All the per-poll ssh chatter happens inside this process, so it never reaches the
-agent's context.
+Given an SSH target (a freshly rented box or any existing server the user provides) it:
+rsyncs the local working tree, ensures the Python 3.12 venv/dev packages + ``nvcc`` and
+runs ``make setup`` (inside the ``emmy-node-setup`` tmux session; output to a remote
+logfile — only a tail comes back on failure), launches the collection inside the
+``emmy-node-sweep`` tmux session, then **polls the remote log internally** until it
+finishes — a run that outlives ``--timeout`` is STOPPED and harvested, never abandoned —
+merges the node rows home, and backs up the local DB. All the per-poll ssh chatter
+happens inside this process, so it never reaches the agent's context.
+
+Every long-running remote process lives in a named tmux session, so a dropped ssh
+connection never kills it and a human can watch or debug with
+``tmux attach -t emmy-node-sweep`` (or ``emmy-node-setup``) on the box.
 
 The collection is ``scripts/golden_neighbor_bench.py`` — the budgeted three-slice sweep
 (own-golden neighborhood / cross-card golden exchange / uniform tail, kind-stratified
@@ -35,11 +40,12 @@ with just the final summary when this exits.
 Then (separately, if ``--no-merge``) merge the node rows home with
 ``scripts/merge_node_db.py --remote``.
 
-Robustness baked in (the four traps the first run hit): all ssh goes through argv
-lists (no shell word-splitting / zsh quirks); liveness uses the
-``[g]olden_neighbor_bench`` bracket-pgrep so it never self-matches; each poll is its
-own short ssh (no long-held session that broken-pipes); and venv/dev are always
-installed before ``make setup``.
+Robustness baked in (the traps earlier runs hit): all ssh goes through argv lists (no
+shell word-splitting / zsh quirks); liveness reads ``tmux has-session`` (no pgrep
+self-match trap, no ssh channel held open across a ``nohup … &``); each poll is its own
+short ssh (no long-held session that broken-pipes); venv/dev are always installed
+before ``make setup``; and a launch refuses to start when a previous sweep session is
+still alive on the box (relevant for user-provided servers).
 """
 
 from __future__ import annotations
@@ -74,9 +80,14 @@ _CUDA_EXPORT = "export PATH=/usr/local/cuda/bin:$PATH CUDA_HOME=/usr/local/cuda"
 _BASE = f"{REMOTE_DEPLOY_DIR}/node-collect"
 _REMOTE_DIR = f"{_BASE}/repo"  # rsync target — the emmy checkout the sweep runs from
 _SETUP_LOG = f"{_BASE}/setup.log"
+_SETUP_STATUS = f"{_BASE}/setup.status"  # one status word (SETUP_OK / SETUP_FAIL / NVCC_MISSING) per setup attempt
 _NEIGHBOR_LOG = f"{_BASE}/neighbors.log"
 _REMOTE_LEDGER = f"{_BASE}/neighbor_ledger.json"
 _REMOTE_RECEIPTS = f"{_BASE}/receipts"
+# Every long-running remote process runs inside one of these named tmux sessions —
+# attachable for debugging, and immune to the launching ssh connection dropping.
+_SETUP_SESSION = "emmy-node-setup"
+_SWEEP_SESSION = "emmy-node-sweep"
 # The driver's final summary line: ``neighbor-bench done: <done>/<total> points (<new> new this run)``.
 # The poll's ``grep -oE`` extracts only the prefix up to ``points`` — match that.
 _NEIGHBOR_DONE_RE = re.compile(r"neighbor-bench done: (\d+)/(\d+) points")
@@ -99,14 +110,13 @@ def _opts(ssh_key: str | None, port: int | None) -> list[str]:
     return out
 
 
-def _run(remote: str, ssh_key: str | None, port: int | None, command: str, *, timeout: int = 600, detach: bool = False) -> tuple[int, str]:
+def _run(remote: str, ssh_key: str | None, port: int | None, command: str, *, timeout: int = 600) -> tuple[int, str]:
     """Run one remote command over a fresh ssh connection; return (rc, combined output).
 
-    ``detach=True`` adds ssh ``-n`` (stdin from /dev/null) — needed when launching a
-    remote background process: without it (plus a ``< /dev/null`` redirect on the
-    command itself) ssh holds the channel open past a ``nohup … &``, so this call
-    times out (rc 124) long *after* the process already started successfully."""
-    argv = ["ssh", *(["-n"] if detach else []), *_opts(ssh_key, port), remote, command]
+    Long-running work never goes through here directly — it is launched into a tmux
+    session (``_tmux_launch``), so no call holds an ssh channel open for the duration
+    of a build or sweep."""
+    argv = ["ssh", *_opts(ssh_key, port), remote, command]
     try:
         p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
         return p.returncode, (p.stdout + p.stderr)
@@ -116,6 +126,66 @@ def _run(remote: str, ssh_key: str | None, port: int | None, command: str, *, ti
 
 def _log(msg: str) -> None:
     print(f"[remote_node_collect] {msg}", flush=True)
+
+
+def _tmux_launch(remote: str, ssh_key: str | None, port: int | None, session: str, body: str, *, pre: str = "") -> bool:
+    """Start ``body`` inside a fresh detached tmux session named ``session`` (killing any
+    stale same-named session first). ``tmux new-session -d`` returns immediately, so the
+    launching ssh never holds a channel open — the old ``nohup``/``ssh -n`` detach dance
+    is gone. Returns True once the launch is confirmed (echo, or the session visible)."""
+    launch = f"{pre}tmux kill-session -t {session} 2>/dev/null; tmux new-session -d -s {session} {shlex.quote(body)} && echo tmux_launched"
+    _, out = _run(remote, ssh_key, port, launch, timeout=60)
+    if "tmux_launched" in out:
+        return True
+    # Belt-and-suspenders: the launch ssh may fail to report after the session started.
+    time.sleep(5)
+    _, chk = _run(remote, ssh_key, port, f"tmux has-session -t {session} 2>/dev/null && echo ALIVE || echo DEAD")
+    if "ALIVE" in chk:
+        _log("launch ssh did not confirm but the tmux session is alive — continuing")
+        return True
+    return False
+
+
+def _run_setup_session(remote: str, ssh_key: str | None, port: int | None, *, wipe_venv: bool) -> str:
+    """Run deps + ``make setup`` inside the ``emmy-node-setup`` tmux session and wait for
+    the status word the session writes to ``_SETUP_STATUS`` (``SETUP_OK`` / ``SETUP_FAIL``
+    / ``NVCC_MISSING``). Returns that word, or '' when the session died without writing
+    one (or the wait timed out). Always (re)installs the venv/dev packages; installs the
+    CUDA toolkit only if ``nvcc`` is genuinely absent. All noisy output → the setup log."""
+    nvcc_probe = "command -v nvcc >/dev/null 2>&1 || ls /usr/local/cuda*/bin/nvcc >/dev/null 2>&1"
+    body = (
+        f"sudo apt-get update -qq >> {_SETUP_LOG} 2>&1; "
+        f"sudo apt-get install -y -qq python3.12 python3.12-venv python3.12-dev >> {_SETUP_LOG} 2>&1; "
+        f"if ! ({nvcc_probe}); then sudo apt-get install -y -qq cuda-toolkit-12-9 >> {_SETUP_LOG} 2>&1; fi; "
+        f"if ! ({nvcc_probe}); then echo NVCC_MISSING > {_SETUP_STATUS}; exit 0; fi; "
+        f"cd {_REMOTE_DIR} && {_CUDA_EXPORT} && "
+        + ("rm -rf venv && " if wipe_venv else "")
+        + f"make setup >> {_SETUP_LOG} 2>&1 && echo SETUP_OK > {_SETUP_STATUS} || echo SETUP_FAIL > {_SETUP_STATUS}"
+    )
+    if not _tmux_launch(remote, ssh_key, port, _SETUP_SESSION, body, pre=f"rm -f {_SETUP_STATUS}; "):
+        return ""
+    deadline = time.monotonic() + 4500  # apt (incl. a possible CUDA toolkit install) + make setup
+    dead_streak = 0
+    while time.monotonic() < deadline:
+        time.sleep(20)
+        _, out = _run(
+            remote,
+            ssh_key,
+            port,
+            f"cat {_SETUP_STATUS} 2>/dev/null; tmux has-session -t {_SETUP_SESSION} 2>/dev/null && echo SESS=ALIVE || echo SESS=DEAD",
+        )
+        word = next((w for w in ("SETUP_OK", "SETUP_FAIL", "NVCC_MISSING") if w in out), "")
+        if word:
+            return word
+        if "SESS=" not in out:
+            continue  # ssh blip this cycle — not evidence the session died
+        if "SESS=DEAD" in out:
+            dead_streak += 1
+            if dead_streak >= 2:  # two confirmed DEADs without a status word ⇒ the session crashed
+                return ""
+        else:
+            dead_streak = 0
+    return ""
 
 
 def _fail(remote: str, ssh_key: str | None, port: int | None, why: str, logfile: str, *, harvest_ledger: str | None = None) -> int:
@@ -178,12 +248,15 @@ def _backup_local_db(keep: int = 5) -> Path | None:
 
 
 def _stop_sweep(remote: str, ssh_key: str | None, port: int | None) -> bool:
-    """Kill the detached sweep (and its in-flight ``emmy run`` bench child) so the harvest
-    reads a quiet node store. The killed batch's points stay non-terminal in the ledger and
-    simply retry next run. Returns True once nothing sweep-related remains."""
+    """Kill the sweep's tmux session (and its in-flight ``emmy run`` bench child) so the
+    harvest reads a quiet node store. The killed batch's points stay non-terminal in the
+    ledger and simply retry next run. Returns True once nothing sweep-related remains."""
     for attempt in range(6):
         sig = "-9 " if attempt >= 2 else ""
-        kill = f"pkill {sig}-f '[g]olden_neighbor_bench' 2>/dev/null; pkill {sig}-f '[e]mmy run --code' 2>/dev/null; true"
+        kill = (
+            f"tmux kill-session -t {_SWEEP_SESSION} 2>/dev/null; "
+            f"pkill {sig}-f '[g]olden_neighbor_bench' 2>/dev/null; pkill {sig}-f '[e]mmy run --code' 2>/dev/null; true"
+        )
         _run(remote, ssh_key, port, kill)
         time.sleep(5)
         _, out = _run(
@@ -255,26 +328,32 @@ def main() -> int:
             return 2
         repo = gp.stdout.strip()
 
-    # 1. make the remote base dir (so the logs + rsync target exist), then deps: always
-    #    install the venv/dev packages (the image ships 3.12 without them); install the CUDA
-    #    toolkit only if nvcc is genuinely absent. All noisy output → the setup log.
-    _log(f"ensuring deps on {remote} (apt; output to {_SETUP_LOG}) ...")
-    deps = (
+    # 1. bootstrap: the remote base dir (so the logs + rsync target exist) and tmux itself —
+    #    the one dependency that can't be installed from inside a tmux session. Everything
+    #    long-running after this point (apt deps, make setup, the sweep) runs inside tmux.
+    _log(f"ensuring tmux on {remote} ...")
+    boot = (
         f"mkdir -p {_BASE}; "
-        f"sudo apt-get update -qq >> {_SETUP_LOG} 2>&1; "
-        f"sudo apt-get install -y -qq python3.12 python3.12-venv python3.12-dev >> {_SETUP_LOG} 2>&1; "
-        "if ! command -v nvcc >/dev/null 2>&1 && ! ls /usr/local/cuda*/bin/nvcc >/dev/null 2>&1; then "
-        f"sudo apt-get install -y -qq cuda-toolkit-12-9 >> {_SETUP_LOG} 2>&1; fi; "
-        "if command -v nvcc >/dev/null 2>&1 || ls /usr/local/cuda*/bin/nvcc >/dev/null 2>&1; "
-        "then echo NVCC_OK; else echo NVCC_MISSING; fi"
+        "if ! command -v tmux >/dev/null 2>&1; then "
+        f"sudo apt-get update -qq >> {_SETUP_LOG} 2>&1; sudo apt-get install -y -qq tmux >> {_SETUP_LOG} 2>&1; fi; "
+        "command -v tmux >/dev/null 2>&1 && echo TMUX_OK || echo TMUX_MISSING"
     )
-    rc, out = _run(remote, key, port, deps, timeout=1800)
-    if rc != 0 or "NVCC_OK" not in out:
-        # rc==0 with NVCC_OK absent means the apt steps ran but nvcc is still missing
-        # (the chain ends in an echo, so rc reflects only that last command); rc!=0 means
-        # the ssh/apt command itself failed. The setup-log tail below carries the detail.
-        reason = "nvcc not found after toolkit install" if rc == 0 else f"ssh/apt rc={rc}"
-        return _fail(remote, key, port, f"deps/nvcc ({reason})", _SETUP_LOG)
+    rc, out = _run(remote, key, port, boot, timeout=900)
+    if "TMUX_OK" not in out:
+        return _fail(remote, key, port, f"tmux bootstrap (rc={rc})", _SETUP_LOG)
+    # Refuse to pile a second sweep onto a box that is still running one (an existing /
+    # user-provided server may have leftovers) — the ledger makes reruns cheap, collisions
+    # on the node store mid-sweep are not.
+    _, out = _run(remote, key, port, f"tmux has-session -t {_SWEEP_SESSION} 2>/dev/null && echo SWEEP=ALIVE || echo SWEEP=DEAD")
+    if "SWEEP=ALIVE" in out:
+        return _fail(
+            remote,
+            key,
+            port,
+            f"a sweep is already running in tmux session {_SWEEP_SESSION} on {remote} — "
+            f"attach with `tmux attach -t {_SWEEP_SESSION}` or kill it first",
+            _NEIGHBOR_LOG,
+        )
 
     # 2. rsync the working tree (exact local code, incl. uncommitted changes).
     _log(f"rsyncing {repo} -> {remote}:{_REMOTE_DIR} ...")
@@ -304,22 +383,20 @@ def main() -> int:
         _log(f"rsync failed: {(rp.stderr or rp.stdout).strip()}")
         return 1
 
-    # 3. make setup (output → the setup log); on failure rebuild a clean venv once.
-    _log(f"running make setup (output to {_SETUP_LOG}) ...")
-    setup = f"cd {_REMOTE_DIR} && {_CUDA_EXPORT} && make setup >> {_SETUP_LOG} 2>&1 && echo SETUP_OK || echo SETUP_FAIL"
-    rc, out = _run(remote, key, port, setup, timeout=2400)
-    if "SETUP_OK" not in out:
+    # 3. deps + make setup, inside the setup tmux session (a dropped ssh no longer kills a
+    #    long apt/CUDA-toolkit install or venv build); on SETUP_FAIL rebuild a clean venv once.
+    _log(f"running deps + make setup in tmux session {_SETUP_SESSION} (output to {_SETUP_LOG}) ...")
+    word = _run_setup_session(remote, key, port, wipe_venv=False)
+    if word != "SETUP_OK" and word != "NVCC_MISSING":
         _log("make setup failed; wiping venv and retrying once ...")
-        setup2 = f"cd {_REMOTE_DIR} && {_CUDA_EXPORT} && rm -rf venv && make setup >> {_SETUP_LOG} 2>&1 && echo SETUP_OK || echo SETUP_FAIL"
-        rc, out = _run(remote, key, port, setup2, timeout=2400)
-        if "SETUP_OK" not in out:
-            return _fail(remote, key, port, "make setup", _SETUP_LOG)
+        word = _run_setup_session(remote, key, port, wipe_venv=True)
+    if word == "NVCC_MISSING":
+        return _fail(remote, key, port, "deps/nvcc (nvcc not found after toolkit install)", _SETUP_LOG)
+    if word != "SETUP_OK":
+        return _fail(remote, key, port, "make setup", _SETUP_LOG)
 
-    # 4. build the sweep's launch command, then launch it detached. Redirect ALL three
-    #    std streams away from the ssh channel (`< /dev/null` + `> <log> 2>&1`) and use
-    #    ssh -n (detach=True), else ssh holds the channel open past the `&` and this
-    #    call times out *after* a successful launch. The bracket-pgrep pattern stops
-    #    the liveness check from matching the poll command's own argv.
+    # 4. build the sweep's launch command, then launch it inside the sweep tmux session
+    #    (stdout/stderr → the log; the session outlives any ssh drop and is attachable).
     # Push the local resume ledger (if any) so the run continues prior coverage.
     local_ledger = Path(args.ledger).expanduser()
     if local_ledger.exists():
@@ -343,25 +420,21 @@ def main() -> int:
             cmd += f" {flag} {val}"
     if args.filter:
         cmd += f" --filter {shlex.quote(args.filter)}"
-    log_file, proc_pat = _NEIGHBOR_LOG, "[g]olden_neighbor_bench"
+    log_file = _NEIGHBOR_LOG
     done_grep, done_re = "neighbor-bench done: [0-9]+/[0-9]+ points", _NEIGHBOR_DONE_RE
-    _log(f"launching `{cmd}` (detached -> {log_file}) ...")
-    launch = f"cd {_REMOTE_DIR} && {_CUDA_EXPORT} && nohup {cmd} > {log_file} 2>&1 < /dev/null & echo run_launched"
-    rc, out = _run(remote, key, port, launch, timeout=60, detach=True)
-    if "run_launched" not in out:
-        # Belt-and-suspenders: if the launch ssh still didn't confirm, the run may
-        # have started anyway — verify the process before declaring failure.
-        time.sleep(5)
-        _, chk = _run(remote, key, port, f"pgrep -f '{proc_pat}' >/dev/null 2>&1 && echo ALIVE || echo DEAD")
-        if "ALIVE" not in chk:
-            return _fail(remote, key, port, f"launch (rc={rc})", log_file)
-        _log("launch ssh did not confirm but the process is alive — continuing")
+    _log(f"launching `{cmd}` in tmux session {_SWEEP_SESSION} (log -> {log_file}) ...")
+    body = f"cd {_REMOTE_DIR} && {_CUDA_EXPORT} && {cmd} > {log_file} 2>&1"
+    # rm the old log at launch: on a reused box a stale ``neighbor-bench done:`` line
+    # would otherwise satisfy the poll's done-grep if the new session dies before
+    # truncating the file.
+    if not _tmux_launch(remote, key, port, _SWEEP_SESSION, body, pre=f"rm -f {log_file}; "):
+        return _fail(remote, key, port, "launch (tmux session did not start)", log_file)
 
     # 5. poll the remote log internally until done / dead / --timeout. Hitting --timeout
     #    is NOT a failure: it stops the sweep and falls through to the same harvest.
     poll = (
         f"echo \"DONE_MARK=$(grep -aoE '{done_grep}' {log_file} 2>/dev/null | tail -1)\"; "
-        f"pgrep -f '{proc_pat}' >/dev/null 2>&1 && echo PROC=ALIVE || echo PROC=DEAD"
+        f"tmux has-session -t {_SWEEP_SESSION} 2>/dev/null && echo PROC=ALIVE || echo PROC=DEAD"
     )
     start = time.monotonic()
     dead_streak = 0

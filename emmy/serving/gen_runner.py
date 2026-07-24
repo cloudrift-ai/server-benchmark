@@ -358,13 +358,26 @@ class EmmyGenRunner:
         # warm boot uses the hub id, and the config hash already pins identity.
         import hashlib
 
+        # The config hash must strip the VOLATILE fields or the path sneaks back in:
+        # ``_name_or_path`` records the load spelling (the hub id at warm time, the snapshot
+        # path on a baked offline boot), so hashing to_json_string() keyed the warm pack and
+        # the baked boot APART — the 2026-07-24 verify failure (66 runtime recompiles on an
+        # image whose warm had converged). ``transformers_version`` churns the same way.
+        import json as _json
+
         from emmy import config as emmy_config
         from emmy.compiler.backend.pack import load_pack, pack_path
 
+        cfg_dict = model.config.to_dict()
+        for volatile in ("_name_or_path", "transformers_version"):
+            cfg_dict.pop(volatile, None)
+            for sub in cfg_dict.values():
+                if isinstance(sub, dict):
+                    sub.pop(volatile, None)
         pack_key = {
             "kind": "gen-split",
             "model": str(getattr(text_config, "model_type", "gen")),  # label + key; config-derived, path-stable
-            "config_sha": hashlib.sha1(model.config.to_json_string().encode()).hexdigest()[:16],
+            "config_sha": hashlib.sha1(_json.dumps(cfg_dict, sort_keys=True, default=str).encode()).hexdigest()[:16],
             "dtype": dtype_str,
             "decode_bucket": int(decode_bucket or 0),
             "max_tokens": int(max_tokens or 0),
@@ -375,6 +388,13 @@ class EmmyGenRunner:
         if loaded is not None:
             # "pack hit" is a contract: the gemma4 image's verify.sh greps docker logs for it.
             logger.info("[gen_runner] pack hit at %s — skipping trace + compile for %d program(s)", pack_at, len(loaded))
+            # A logger-independent hit marker: the container logging config swallows this
+            # module's INFO lines, so the image verify (docker/vllm-emmy-gemma4/verify.sh)
+            # asserts the pack hit on this file instead of a log grep.
+            try:
+                (pack_at / ".pack_hit").touch()
+            except OSError:
+                pass
             # The pack records which twin sets survived their compiles — honor that instead
             # of re-attempting a twin the save-time boot already saw fail.
             decode_ok = decode_ok and "L00.pre.decode" in loaded

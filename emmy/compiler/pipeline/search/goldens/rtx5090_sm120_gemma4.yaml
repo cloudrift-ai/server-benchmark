@@ -3290,3 +3290,21 @@ configs:
     knobs: {TILE: '', REDUCE: 'g32k/b256t', RASTER: '', STAGE: '', WSPEC: ''}
     emmy_us: 75.7
     cublas_us: 80.0
+  - kernel: matmul
+    name: gemma4_12b.o_proj.m1.t
+    M: 1
+    N: 3840
+    K: 4096
+    dtype: 'fp16'
+    knobs: {TILE: '', REDUCE: 'g8k/b128t', RASTER: '', STAGE: '', WSPEC: ''}
+    emmy_us: 8.1
+    cublas_us: 32.0
+  - kernel: matmul
+    name: gemma4_12b.o_proj_global.m1.t
+    M: 1
+    N: 3840
+    K: 8192
+    dtype: 'fp16'
+    knobs: {TILE: '', REDUCE: 'g16k/b256t', RASTER: '', STAGE: '', WSPEC: ''}
+    emmy_us: 14.2
+    cublas_us: 45.0

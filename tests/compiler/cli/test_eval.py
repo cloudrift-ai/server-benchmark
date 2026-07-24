@@ -370,28 +370,38 @@ def test_prior_nodes_smoke(run_cli, tmp_path):
 
 
 def test_prior_nodes_accepts_freeze_path(run_cli, tmp_path):
-    """``eval online --dataset nodes --db`` takes a measurement freeze interchangeably
-    with the live DB (``load_node_rows`` sniffs which it got). Only the two leaves
-    survive the leaf-only freeze filter, and the loaded rows carry no tree schema —
-    the report degrades gracefully to the leaf metrics instead of inventing forks."""
+    """``eval online --dataset nodes --db`` takes a measurement freeze (a per-GPU YAML
+    directory) interchangeably with the live DB (``load_node_rows`` sniffs which it
+    got). Only the two identity-carrying leaves survive the freeze filter (the branch
+    row never freezes), and the loaded rows carry no tree schema — the report degrades
+    gracefully to the leaf metrics instead of inventing forks."""
     from emmy.compiler.pipeline.search.data.freeze import write_freeze
     from emmy.compiler.pipeline.search.db import NodeRow, SearchDB
 
     db_path = tmp_path / "n.db"
     db = SearchDB(db_path)
-    s = {"S_ext_free_prod": 1024.0, "S_reduce_add": 1.0, "S_pw_multiply": 1.0, "S_n_distinct_input": 2.0}
+    spec = {"kernel": "matmul", "M": 64, "N": 64, "K": 64, "dtype": "fp32", "trans_b": False, "dynamic": False}
+    s = {
+        "H_cc": 120.0,
+        "H_opt": 3.0,
+        "S_ext_free_prod": 1024.0,
+        "S_reduce_add": 1.0,
+        "S_pw_multiply": 1.0,
+        "S_n_distinct_input": 2.0,
+    }
+    gpu = "NVIDIA GeForce RTX 5090"
     db.record_nodes(
         [
-            NodeRow("P", None, "ctx", "mm", s, 1.0, 1, is_leaf=False),
-            NodeRow("c8", "P", "ctx", "mm", {**s, "BN": 32, "BM": 8}, 1.0, 2, is_leaf=True),
-            NodeRow("c64", "P", "ctx", "mm", {**s, "BN": 32, "BM": 64}, 3.0, 2, is_leaf=True),
+            NodeRow("P", None, "ctx", "mm", s, 1.0, 1, gpu=gpu, is_leaf=False),
+            NodeRow("c8", "P", "ctx", "mm", {**s, "BN": 32, "BM": 8}, 1.0, 2, gpu=gpu, is_leaf=True, shape_spec=spec),
+            NodeRow("c64", "P", "ctx", "mm", {**s, "BN": 32, "BM": 64}, 3.0, 2, gpu=gpu, is_leaf=True, shape_spec=spec),
         ]
     )
     db.close()
-    freeze_path = tmp_path / "freeze.jsonl"
-    write_freeze(db_path, freeze_path)
+    freeze_dir = tmp_path / "freeze"
+    write_freeze(db_path, freeze_dir)
     rc, stdout, stderr = run_cli(
-        "eval", "online", "--dataset", "nodes", "--db", str(freeze_path), "--online-file", str(tmp_path / "missing.json")
+        "eval", "online", "--dataset", "nodes", "--db", str(freeze_dir), "--online-file", str(tmp_path / "missing.json")
     )
     assert rc == 0, f"stderr: {stderr}"
     assert "=== offline prior" in stdout

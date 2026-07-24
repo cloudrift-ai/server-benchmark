@@ -177,3 +177,19 @@ def test_sweep_classifier_from_measured_stamps():
     assert ShapeKey.from_s_features(matmul).kind == ""
     # Bare rows without stamps (arithmetic bases, old reservoir rows) stay plain.
     assert ShapeKey.from_s_features({"S_ext_free_prod": 512.0, "S_ext_reduce_max": 4096.0}).kind == ""
+
+
+def test_joins_tolerates_sweep_dtype_flip_but_stays_strict_on_contractions():
+    """``ShapeKey.joins``: a sweep op's ``is_warp`` derives from the operand-dtype
+    multiset, which flips between an all-fp16 golden snippet (fp16-pure stamps) and the
+    same norm in a served graph (f32 statistic constants) — so for sweep kinds the join
+    ignores it. For ``kind == ""`` it stays exact: ``is_warp`` is the fp32/fp16
+    contraction-twin discriminator."""
+    golden_rms = ShapeKey(free_prod=4096, reduce_max=64, is_warp=False, kind="rms_norm")
+    op_rms_fp16 = ShapeKey(free_prod=4096, reduce_max=64, is_warp=True, kind="rms_norm")
+    assert op_rms_fp16.joins(golden_rms)
+    assert not ShapeKey(free_prod=4096, reduce_max=128, is_warp=True, kind="rms_norm").joins(golden_rms)  # extents still bind
+    assert not ShapeKey(free_prod=4096, reduce_max=64, is_warp=True, kind="softmax").joins(golden_rms)  # kind still binds
+    mm_fp16 = ShapeKey.from_matmul(512, 512, 512, "fp16")
+    mm_fp32 = ShapeKey.from_matmul(512, 512, 512, "fp32")
+    assert mm_fp16.joins(mm_fp16) and not mm_fp16.joins(mm_fp32)  # the real twin pair never merges

@@ -627,19 +627,29 @@ incumbent prior preferred and its wall time grew with the golden set, while the 
 of the incumbent and fixed-cost (`tune --explore-eps` survives for interactive tuning).
 
 **Measurement freeze** (`data/freeze.py`, driven by `scripts/freeze_node_store.py`). The node DB is a live store —
-tunes and merges keep writing into it — so a model fit read directly from it is not reproducible. A *freeze* snapshots
-it into one local JSONL file (line 1 a provenance header, then one JSON object per row) whose sha256 digest pins
-exactly which measurements a fit saw. Only **leaves** freeze, filtered by `freeze_reason`: current `feat_ver`, the two
-plausibility predicates above, `bench_fail` leaves kept as negatives ("doesn't build/launch here" is durable); branch
-rows never freeze — a branch's value-of-position bound is one search's coverage artifact over the *historical* tree
-topology, while leaves are complete points in knob space, so prefix rows are re-synthesized at fit time under the
-current fork structure and the freeze stores no tree schema (no `parent_key`/`depth`/`visits`). Freezing the same DB
-twice yields the same digest (rows sorted by `(gpu, op_sig, node_key)`, canonical JSON; the digest covers only the row
-bytes, so the header's `created_at` never perturbs it), and the header reserves both featurizer version axes
-(`knob_ver`/`encoding_ver`, equal today) plus repo commit, source DB, run ids, counts, and a freeform collection-policy
-note. `load_freeze` hard-errors on a foreign file, `feat_ver` mismatch, or digest mismatch — never a silent fallback
-(the offline-artifact loading semantics); `load_node_rows` sniffs a path (sqlite magic vs freeze header) and yields
-`NodeRow`s from either, which is what lets every nodes consumer (`eval online --dataset nodes --db`,
+tunes and merges keep writing into it — so a model fit read directly from it is not reproducible. A *freeze* (v2)
+snapshots it into a local DIRECTORY mirroring the `goldens/` layout: one per-`(gpu, compute_cap)` YAML file
+(`gpu_name`/`compute_cap` header + a `configs` list) beside a `manifest.json` carrying the provenance header and the
+content digests. Each row is **golden-spelled**: the declarative `shape_spec` captured at collection time (`kernel` +
+shape fields + `dynamic` — see the bench-to-node recorder below), the verbatim TUNABLE knobs, and the measurement
+extension block (`value_us`, `opt` — the nvcc cicc lane, `status`, `variance`/`n_samples`, `run_id`/`measured_at`).
+Nothing featurized persists: the loader re-derives `H_*` card-faithfully from the gpu registry
+(`Context.from_target`, `H_opt` overridden from the row's `opt`) and the full `S_*` histogram by re-tracing the
+kind's snippet once per distinct shape (`data/sample.py::traced_s_features`, the kind-generic sibling of
+`compiled_s_features` that selects the traced op keying to the golden's `ShapeKey`; arithmetic fallback with a
+warning) — so an encoding-only featurizer change never quarantines a freeze, and there is deliberately no load-time
+`feat_ver` gate (the stored `feat_ver`/`knob_ver`/`encoding_ver` are provenance). Only identity-carrying **leaves**
+freeze, filtered by `freeze_reason`: a `shape_spec` present (identity-less legacy tune rows stay in the DB but never
+freeze), current `feat_ver` at write time, the two plausibility predicates above, `bench_fail` leaves kept as
+negatives; branch rows never freeze and no tree schema is stored — prefix rows are re-synthesized at fit time under
+the current fork structure. Freezing the same DB twice yields the same digests: every row serializes to one canonical
+JSON line, rows sort by that line, the per-file sha256 covers exactly those lines (content-level — immune to YAML
+style), the manifest's top sha256 folds the sorted per-file digests, and `created_at` enters none of them. A loaded
+row's `op_sig` is the canonical JSON of its `shape_spec` (a stable declarative fold-by-op key — a shape's -O1/-O3
+twins share it). `load_freeze` hard-errors on a missing/foreign/corrupt manifest, `freeze_ver` mismatch, a listed
+file missing, a per-file digest mismatch, or an un-instantiable row — never a silent fallback; `load_node_rows`
+sniffs a path (directory = freeze, sqlite file = DB, a v1 JSONL freeze is refused with a re-freeze pointer) and
+yields `NodeRow`s from either, which is what lets every nodes consumer (`eval online --dataset nodes --db`,
 `Dataset.from_node_rows` / `fold_node_rows`) take a freeze interchangeably with the live DB. Loaded freeze rows are
 parentless with `depth=0` — the marker the diagnostics read as "no tree schema": the fork-regret view skips them and
 the golden-anchored descent renders its loud "no fork-tree data" absence row, so a freeze evaluates through the
@@ -669,6 +679,14 @@ tile-dialect one — the mma tile-lowering preserves no `LoopOp` in `.source`, a
 tensor-core kernel was silently unrecordable (both paths digest to the same tune-written `op_sig`, verified on an
 RTX 4090). A variant's kernels (split-K main + combine) group under one site and record ONE whole-variant leaf; a
 graph whose every kernel loses its site warns loudly instead of recording nothing in silence. Flagged rows (pin mismatch, wrong answer, intensity floor) and the `--ir` path never record.
+The caller may pass a **declarative identity** via `run --bench --record-shape '<json>'` (a golden YAML entry minus
+knobs/latencies — validated by instantiating its golden kind class; the collection sweep passes its group's spec):
+it lands as the node row's `shape_spec` on exactly the leaves whose stamped extents key to the spec's `ShapeKey`
+(`ShapeKey.joins` — tolerant of the sweep kinds' snippet-unstable dtype-derived `is_warp`, strict on contraction
+twins), so a multi-op snippet's secondary ops (a `linear_norm`'s producer matmul) stay identity-less; a spec
+matching zero leaves warns loudly. `shape_spec` is what makes a row freezable in the goldens-format measurement
+freeze, and it is identity-intrinsic in the store: `record_nodes` COALESCE-keeps it in both replacement directions,
+so a later identity-less re-measurement never erases freezability.
 `record_nodes` guards the leaf upsert with **quality-aware replacement**: a newer measurement of unambiguously lower
 quality (fewer `n_samples` AND higher `variance`) never displaces a stored leaf, so a drive-by bench can't overwrite
 tune-grade data, while comparable or unknown quality keeps plain newest-wins (honest re-measurement still heals

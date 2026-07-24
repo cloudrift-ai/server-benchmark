@@ -13,7 +13,7 @@ tests/
 ├── test_hardware.py         # emmy.hardware (top-level module)
 ├── test_redact.py           # emmy.redact (secret redaction)
 ├── test_new_models.py       # scripts/new_models.py (model discovery: base-key match, dedup, arena linking)
-├── test_golden_neighbor_bench.py # scripts/golden_neighbor_bench.py (knob distance, point keys, slice assignment/shares, sampling, resume ledger)
+├── test_golden_neighbor_bench.py # scripts/golden_neighbor_bench.py (knob distance, point keys, slice assignment/shares, sampling, resume ledger, shape specs)
 ├── benchmark/
 │   ├── test_bench_dryrun.py # bench CLI dry-run
 │   ├── test_code_hash.py    # BenchmarkTask.compute_code_hash()

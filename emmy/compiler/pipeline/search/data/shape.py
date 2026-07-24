@@ -140,6 +140,23 @@ class ShapeKey:
             free_max=int(s.get("S_ext_free_max", 0)),
         )
 
+    def joins(self, golden: ShapeKey) -> bool:
+        """Whether this OP-side key (``from_s_features``) names the same shape as a
+        GOLDEN-side key (``shape_key()``) — exact equality, except ``is_warp`` is
+        ignored for the sweep kinds. Rationale: a sweep op's ``is_warp`` derives from
+        the operand-dtype multiset, which is snippet-unstable — an all-fp16 golden
+        snippet stamps fp16-pure (no ``S_dtype_f32`` → ``is_warp=True``) while the
+        same norm in a served graph carries f32 statistic constants (→ ``False``), and
+        the norm-kind goldens all record ``is_warp=False``. Extents + ``kind`` are the
+        discriminating identity there; ``is_warp`` stays load-bearing exactly where it
+        disambiguates real twins — the ``kind == ""`` fp32/fp16 contraction pair — and
+        ``"fused"`` forces ``True`` on both sides already."""
+        if golden.kind not in ("", "fused") and self.kind == golden.kind:
+            from dataclasses import replace  # noqa: PLC0415
+
+            return replace(self, is_warp=golden.is_warp) == golden
+        return self == golden
+
     def s_features_arith(self) -> dict[str, float]:
         """The extent ``S_*`` features derivable without compiling — the exact set
         the cold ``OfflinePrior`` reads (``golden_eval._offline_scorer`` builds the

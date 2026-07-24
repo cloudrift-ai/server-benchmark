@@ -141,6 +141,18 @@ def register_run_command(subparsers):
             "(pin mismatch, wrong answer, intensity floor) and the --ir path never record."
         ),
     )
+    parser.add_argument(
+        "--record-shape",
+        default=None,
+        metavar="JSON",
+        help=(
+            "Declarative identity of the benched shape, spelled like a golden YAML entry minus knobs/latencies "
+            '(e.g. \'{"kernel": "matmul", "M": 512, "N": 512, "K": 512, "dtype": "fp16", "trans_b": false, '
+            '"dynamic": false}\'). Recorded rows whose stamped extents match carry it as their shape_spec — the '
+            "identity the goldens-format measurement freeze keeps. Passed by the golden-neighborhood collection "
+            "sweep; no effect with --no-record-nodes."
+        ),
+    )
     parser.add_argument("--dump-dir", default=None, help="Directory to dump intermediate compilation artifacts.")
     parser.add_argument("--debug", action="store_true", help="Per-launch tensor dumps in the emmy backend.")
     parser.add_argument(
@@ -209,6 +221,14 @@ def handle_run(args):
             _ab_samples(args.ab)  # fail fast on a malformed KNOBS spec
         except ValueError as exc:
             logger.error("--ab: %s", exc)
+            sys.exit(2)
+    if args.record_shape is not None:
+        from emmy.compiler.pipeline.search.bench_record import parse_record_shape  # noqa: PLC0415
+
+        try:
+            parse_record_shape(args.record_shape)  # fail fast, before any compile/bench spend
+        except ValueError as exc:
+            logger.error("%s", exc)
             sys.exit(2)
 
     if not torch.cuda.is_available():
@@ -395,7 +415,7 @@ def _record_bench_nodes(args, golden_benches, greedy_iso) -> None:
         return
     from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.bench_record import meets_quality_bar, record_bench_leaves  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.bench_record import meets_quality_bar, parse_record_shape, record_bench_leaves  # noqa: PLC0415
 
     # print, not logger.info: `emmy run` gates the root logger to WARNING at default
     # verbosity, and a default-on WRITE to the user's tune DB must announce itself
@@ -409,8 +429,11 @@ def _record_bench_nodes(args, golden_benches, greedy_iso) -> None:
     leaves = _recordable_bench_leaves(golden_benches, greedy_iso)
     if not leaves:
         return
+    # Re-parse (validated at arg-check time): the declarative identity the sweep passes,
+    # attached per matching leaf inside record_bench_leaves.
+    shape = parse_record_shape(args.record_shape) if getattr(args, "record_shape", None) else None
     db_path = resolve_tune_db()
-    n = record_bench_leaves(db_path, Context.probe(), leaves)
+    n = record_bench_leaves(db_path, Context.probe(), leaves, shape=shape)
     print(f"[record-nodes] {n} bench row(s) recorded into the node store ({db_path}) — opt out with --no-record-nodes")
 
 

@@ -696,11 +696,12 @@ class EmmyGenRunner:
         width the twin was built for — rides the static chunk twin's exact grids; every
         other width (an over-bucket decode batch, a partial tail chunk) rides the SYMBOLIC
         program device-resident (``run_device_sym``) — no per-layer host numpy hop any way.
-        The twin boundary is EXACT equality, not ``<=``: the twin always computes
-        ``prefill_bucket`` rows (pad → run → slice), so routing a T≈32 over-bucket decode
-        step or a T≈450 tail chunk through it pays the full-bucket grids for a sliver of
-        real rows — up to ~bucket/T× the useful work per layer, in the default-config
-        steady state (mnbt-default bucket 4096, ``--max-concurrency 32`` decode)."""
+        The static-chunk boundary is exact equality PLUS a pad-up band: a ragged chunk with
+        ``T > prefill_bucket/2`` pads to the twin (pad → run → slice; rows are per-token
+        independent so the real rows are exact) — the full-bucket grids at < 2x the rows
+        beat the hint-512 symbolic kernels by more. Below half-bucket the padding waste
+        wins and the symbolic path keeps the step (a T≈450 tail chunk or a T≈bucket+k
+        over-bucket decode batch still rides ``run_device_sym``)."""
         t = hidden.shape[0]
         if t == 1 and self._pre_m1 is not None:
             return tuple(self._pre_m1[layer].run_device([hidden]))
@@ -708,6 +709,18 @@ class EmmyGenRunner:
             return tuple(self._pre_decode[layer].run_device([hidden]))
         if self._pre_prefill is not None and t == self._prefill_bucket:
             return tuple(self._pre_prefill[layer].run_device([hidden]))
+        if self._pre_prefill is not None and self._prefill_bucket // 2 < t < self._prefill_bucket:
+            # A large RAGGED chunk (the tail of a prefill wave, or a chunk sharing its step
+            # with decode tokens): padding up to the static chunk twin wastes < 2x the rows
+            # but keeps the m4096-tuned grids — the hint-512 symbolic kernels it would
+            # otherwise ride run this width ~2-3x slower (the c=4 TTFT excess: one ragged
+            # chunk per wave inflated the median ~0.5 s). Rows are per-token independent
+            # through the twin, so pad -> run -> slice is exact on the real rows.
+            import torch  # noqa: PLC0415
+
+            pad = self._prefill_bucket - t
+            padded = torch.nn.functional.pad(hidden, (0, 0, 0, pad))
+            return tuple(o[:t] for o in self._pre_prefill[layer].run_device([padded]))
         return tuple(self._pre[layer].run_device_sym([hidden]))
 
     def forward_layer_post_device(self, layer, attn_out, residual):
@@ -721,6 +734,13 @@ class EmmyGenRunner:
             return self._post_decode[layer].run_device([attn_out, residual])[0]
         if self._post_prefill is not None and t == self._prefill_bucket:
             return self._post_prefill[layer].run_device([attn_out, residual])[0]
+        if self._post_prefill is not None and self._prefill_bucket // 2 < t < self._prefill_bucket:
+            import torch  # noqa: PLC0415
+
+            pad = self._prefill_bucket - t
+            a = torch.nn.functional.pad(attn_out, (0, 0, 0, pad))
+            r = torch.nn.functional.pad(residual, (0, 0, 0, pad))
+            return self._post_prefill[layer].run_device([a, r])[0][:t]
         return self._post[layer].run_device_sym([attn_out, residual])[0]
 
     def final_norm_device(self, hidden):

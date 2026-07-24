@@ -63,6 +63,20 @@ EXPECTED_GAPS = {
         ShapeKey(free_prod=64, reduce_max=3840, is_warp=False, is_dyn=False, kind="", free_max=64),
         ShapeKey(free_prod=8388608, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=983040, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=15360),
+        # 2026-07-24b: the m1 (gemv-tier) width joined the audit — its aux keys (m1
+        # pointwise/rope glue, per-head rms at M=1, the small o_proj/lm_head-side forms;
+        # on the 4090 also the fused m1 keys, never seeded there — no m1 serving on 24 GB).
+        ShapeKey(free_prod=1, reduce_max=3840, is_warp=False, is_dyn=False, kind="", free_max=0),
+        ShapeKey(free_prod=2048, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=3840, reduce_max=0, is_warp=False, is_dyn=False, kind="", free_max=3840),
+        ShapeKey(free_prod=3840, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=3840, reduce_max=4096, is_warp=True, is_dyn=False, kind="", free_max=3840),
+        ShapeKey(free_prod=3840, reduce_max=8192, is_warp=True, is_dyn=False, kind="", free_max=3840),
+        ShapeKey(free_prod=4096, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=512, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=8192, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
+        ShapeKey(free_prod=8192, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=8704, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
     },
     "NVIDIA GeForce RTX 4090": {
         ShapeKey(free_prod=15728640, reduce_max=0, is_warp=False, is_dyn=False, kind="", free_max=4096),
@@ -78,6 +92,21 @@ EXPECTED_GAPS = {
         ShapeKey(free_prod=62914560, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=15360),
         ShapeKey(free_prod=8388608, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=983040, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=15360),
+        # 2026-07-24b: the m1 (gemv-tier) width joined the audit — its aux keys (m1
+        # pointwise/rope glue, per-head rms at M=1, the small o_proj/lm_head-side forms;
+        # on the 4090 also the fused m1 keys, never seeded there — no m1 serving on 24 GB).
+        ShapeKey(free_prod=2048, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=30720, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
+        ShapeKey(free_prod=3840, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=3840, reduce_max=4096, is_warp=True, is_dyn=False, kind="", free_max=3840),
+        ShapeKey(free_prod=3840, reduce_max=8192, is_warp=True, is_dyn=False, kind="", free_max=3840),
+        ShapeKey(free_prod=4096, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=512, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=8192, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
+        ShapeKey(free_prod=8192, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
+        ShapeKey(free_prod=8192, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=8704, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
+        ShapeKey(free_prod=8704, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
     },
 }
 

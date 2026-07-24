@@ -226,15 +226,29 @@ def _reduce_specs(kernel, place) -> list[str]:
     tail = list(kernel.op.body) if isinstance(kernel.op, Map) else []
     coop = _pick_coop(extent, free, has_tail=_has_contraction_tail(tail))
     cands = [f"b{coop}" if coop > 1 else ""]  # conservative heuristic pick first (cold greedy → option-0)
+    # The transposed band (and its g-split composites) is the k-major MATVEC partition. The
+    # M=1 cut consumers land on THIS tier (a contraction at M=1 demotes to PLANAR — the
+    # recognizer's documented fallback), so the band is offered here under the structural
+    # conditions the transposed emitter assumes: no shared-row ``sync`` stage, a scalar
+    # projection tail (no distributed sweep ``Loop``), a STATIC reduce extent (the ``g``
+    # composite splits it), and a 32-divisible non-unit inner free axis. Softmax / rms rows
+    # fail the tail/row-stage conditions and never see the band.
+    tail_scalar = not any(isinstance(s, Loop) for s in tail)
+    inner = next((a for a in reversed(place.free) if not (a.extent.is_static and a.extent.as_static() == 1)), None) if place.free else None
+    k_static = carrier.axis.extent.as_static() if carrier.axis.extent.is_static else None
+    bt_ok = (
+        k_static is not None
+        and tail_scalar
+        and inner is not None
+        and inner.extent.is_static
+        and inner.extent.as_static() % 32 == 0
+        and _row_stage(kernel, place) is None
+    )
     for move in coop_reduce_moves():
         p = ReducePlan.parse(move)
-        # The transposed band (and its g-split composites) is the plain-contraction matvec
-        # partition — ``_reduce_candidates``' tier. The monoid tier's lanes are the reduce
-        # row itself (shared-row staging, distributed sweeps), which the transposed emitter
-        # does not support; and a ``g`` split here would offer a symbolic cross-CTA split
-        # ``030_split_reduce`` refuses.
         if p.coop_transposed or p.needs_split:
-            continue
+            if not (bt_ok and p.coop_transposed and p.coop % 32 == 0 and (not p.needs_split or k_static % p.cta == 0)):
+                continue
         if p.coop <= extent and p.reg <= extent and move not in cands:
             cands.append(move)
     if "" not in cands:

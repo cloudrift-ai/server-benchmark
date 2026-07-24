@@ -224,6 +224,7 @@ class ShapeGroup:
     snippet: str
     dynamic_specs: list[str]
     fast_math: bool  # any anchor entry is fast-math → pin the fm enumeration gate
+    shape_spec: dict  # declarative identity passed to emmy run --record-shape (see shape_spec_of)
     names: list[str] = field(default_factory=list)  # golden entry names, for --filter / logs
     points: list[tuple[str, str, str]] = field(default_factory=list)  # (point_key, spec, slice)
 
@@ -240,6 +241,16 @@ def _group_id(kind: str, g, base_fields: frozenset[str]) -> str:
         return f"M{g.M}xN{g.N}xK{g.K}_{g.dtype}{dyn}{tb}"
     parts = "_".join(f"{f.name}{getattr(g, f.name)}" for f in fields(type(g)) if f.name not in base_fields)
     return f"{kind}_{parts}" + ("_dyn" if g.dynamic else "")
+
+
+def shape_spec_of(kind: str, g, base_fields: frozenset[str]) -> dict:
+    """The group's declarative identity for ``emmy run --record-shape`` — the golden YAML
+    entry spelling minus knobs/latencies: ``kernel`` + every kind-own shape field (all
+    written explicitly) + ``dynamic``. Safe to build from any one golden in the group:
+    ``_group_id`` derives from exactly these fields, so a group's entries spell the
+    identical spec (they differ only in knobs/latencies/card)."""
+    own = {f.name: getattr(g, f.name) for f in fields(type(g)) if f.name not in base_fields}
+    return {"kernel": kind, **own, "dynamic": g.dynamic}
 
 
 def build_groups(max_dist: int, name_filter: str | None, tail_cap: int) -> tuple[list[ShapeGroup], str]:
@@ -328,6 +339,7 @@ def build_groups(max_dist: int, name_filter: str | None, tail_cap: int) -> tuple
                 snippet=rep.snippet(),
                 dynamic_specs=rep.dynamic_specs(),
                 fast_math=fast_math,
+                shape_spec=shape_spec_of(kind, rep, base_fields),
                 names=names,
                 points=points,
             )
@@ -353,6 +365,9 @@ def run_batch(group: ShapeGroup, specs: list[str], opt: str, args, receipt: Path
     cmd = [args.emmy, "run", "--code", group.snippet, "--bench", "--bench-backends", "emmy"]
     cmd += ["--warmup", str(args.warmup), "--iters", str(args.iters)]
     cmd += ["--nvcc-flags", OPT_FLAGS[opt], "--json", str(receipt)]
+    # Declarative identity: recorded rows matching this shape carry it as shape_spec —
+    # the goldens-format measurement freeze keeps only identity-carrying rows.
+    cmd += ["--record-shape", json.dumps(group.shape_spec, sort_keys=True)]
     for d in group.dynamic_specs:
         cmd += ["--dynamic", d]
     for s in specs:

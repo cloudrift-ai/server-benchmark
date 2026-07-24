@@ -559,3 +559,29 @@ def test_neighbor_bench_group_id_covers_every_recorded_kind():
         kind = kind_of[type(g)]
         gid = gnb._group_id(kind, g, base_fields)
         assert gid and (kind == "matmul" or gid.startswith(kind))
+
+
+def test_neighbor_bench_shape_spec_covers_every_recorded_kind():
+    """Every recorded golden's ``shape_spec_of`` output must survive the full identity
+    round trip the sweep relies on: JSON-serializable, accepted by ``parse_record_shape``
+    (i.e. it re-instantiates through ``_KERNEL_CLASSES``), and keying to the SAME
+    ``ShapeKey`` as the golden itself — that key equality is the per-leaf gate that
+    decides whether a benched row carries the identity at all."""
+    import json
+    import sys
+    from dataclasses import fields
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+    import golden_neighbor_bench as gnb
+
+    from emmy.compiler.pipeline.search.bench_record import parse_record_shape
+
+    kind_of = {cls: kind for kind, cls in _KERNEL_CLASSES.items()}
+    base_fields = frozenset(f.name for f in fields(GoldenConfig))
+    for g in GOLDEN_CONFIGS:
+        kind = kind_of[type(g)]
+        spec = gnb.shape_spec_of(kind, g, base_fields)
+        rs = parse_record_shape(json.dumps(spec, sort_keys=True))
+        assert rs.spec == spec
+        assert rs.key == g.shape_key(), f"{g.name}: spec keys to {rs.key}, golden keys to {g.shape_key()}"

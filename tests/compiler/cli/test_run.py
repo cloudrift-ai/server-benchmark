@@ -211,6 +211,13 @@ def test_run_ab_rejects_malformed_spec(run_cli):
     assert "missing '='" in (stdout + stderr)
 
 
+def test_run_record_shape_rejects_bad_spec(run_cli):
+    """``--record-shape`` fails fast (before any compile/bench spend) on an invalid spec."""
+    rc, stdout, stderr = run_cli("run", "--code", "torch.zeros(4)", "--record-shape", '{"kernel": "warp_drive"}')
+    assert rc == 2
+    assert "unknown kernel kind" in (stdout + stderr)
+
+
 def test_ab_samples_parse_label_and_shape():
     """``_ab_samples`` parses each spec with the ``EMMY_KNOBS`` grammar, labels
     the row with the raw spec, and marks it shapeless (the ``_print_kernel_stats``

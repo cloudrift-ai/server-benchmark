@@ -22,6 +22,15 @@ floor: the measurement is untrue), and anything from the ``--ir`` path (serializ
 drops ``op.knobs``, so there is no honest feature dict). The caller
 (``emmy/commands/run.py``) owns those exclusions; this module records what it is given.
 
+Declarative identity (``run --bench --record-shape``): the caller may pass a
+golden-spelled shape spec (:func:`parse_record_shape`) naming what the snippet benches.
+It is attached PER LEAF, not blanket: a leaf gets the spec only when its own stamped
+``S_*`` extents key to the spec's :class:`~.data.shape.ShapeKey` — the sanctioned
+golden↔measured join — so the secondary ops a multi-op snippet realizes (a
+``linear_norm`` snippet's producer matmul, an attention trace's plain QKᵀ contraction)
+stay identity-less like legacy rows. Identity-carrying rows are what the goldens-format
+measurement freeze (``data/freeze.py``) keeps.
+
 Pool fidelity: the tune keys a pool by ``op_sig`` — a digest over the **pre-descent**
 offer op's ``S_*`` stamps, NOT the terminal kernel's (descent stamps further ``S_*``
 deltas, so the two differ for most ops). :func:`bench_leaves` recovers the offer site
@@ -39,6 +48,7 @@ provenance.
 
 from __future__ import annotations
 
+import json
 import logging
 import statistics
 from dataclasses import dataclass
@@ -78,6 +88,43 @@ class BenchLeaf:
 def meets_quality_bar(warmup: int, iters: int) -> bool:
     """Whether a ``run --bench`` invocation measures well enough to record."""
     return warmup >= MIN_RECORD_WARMUP and iters >= MIN_RECORD_ITERS
+
+
+@dataclass(frozen=True)
+class RecordShape:
+    """A validated ``--record-shape`` spec: the golden-spelled identity dict verbatim
+    (what lands on ``NodeRow.shape_spec``) plus the :class:`~.data.shape.ShapeKey` the
+    spec's kind class derives — the golden-side half of the per-leaf identity join."""
+
+    spec: dict
+    key: object  # ShapeKey (kept untyped here to avoid a module-level data import)
+
+
+def parse_record_shape(text: str) -> RecordShape:
+    """Parse and validate a ``--record-shape`` JSON spec (the golden YAML entry spelling
+    minus knobs/latencies: ``{"kernel": ..., <shape fields>, "dynamic": ...}``).
+
+    Validation IS instantiation: the spec round-trips through the golden kind dataclass
+    (``_KERNEL_CLASSES``), so unknown kinds, missing/extra fields, and kind-specific
+    ``__post_init__`` invariants (e.g. the dynamic-hint check) all raise here, and the
+    returned ``key`` comes from the same ``shape_key()`` every golden consumer uses.
+    Raises ``ValueError`` with the underlying reason on any invalid spec."""
+    from emmy.compiler.pipeline.search.golden import _KERNEL_CLASSES  # noqa: PLC0415
+
+    try:
+        spec = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"--record-shape is not valid JSON: {e}") from e
+    if not isinstance(spec, dict) or "kernel" not in spec:
+        raise ValueError('--record-shape must be a JSON object with a "kernel" field')
+    cls = _KERNEL_CLASSES.get(spec["kernel"])
+    if cls is None:
+        raise ValueError(f"--record-shape: unknown kernel kind {spec['kernel']!r} (expected one of {sorted(_KERNEL_CLASSES)})")
+    try:
+        cfg = cls(name="record-shape", knobs={}, **{k: v for k, v in spec.items() if k != "kernel"})
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"--record-shape: invalid {spec['kernel']!r} spec: {e}") from e
+    return RecordShape(spec=spec, key=cfg.shape_key())
 
 
 def mint_bench_run_id() -> str:
@@ -200,13 +247,21 @@ def bench_leaves(compiled, bench, *, status: str = "ok") -> list[BenchLeaf]:
     return leaves
 
 
-def record_bench_leaves(db_path: Path | str, ctx: Context, leaves: list[BenchLeaf], *, run_id: str | None = None) -> int:
+def record_bench_leaves(
+    db_path: Path | str, ctx: Context, leaves: list[BenchLeaf], *, run_id: str | None = None, shape: RecordShape | None = None
+) -> int:
     """Key ``leaves`` with the tune's own recipes and upsert them into the node store
     at ``db_path`` — parentless ``depth=0`` leaf rows under the live context's regime
     (``run --bench`` compiles at the deployable flags, so these land in the -O3 lane
     the store is censored in). Returns the number of rows offered to
     :meth:`SearchDB.record_nodes` (its plausibility gate and quality-aware leaf
-    replacement still apply per row)."""
+    replacement still apply per row).
+
+    ``shape`` (from ``--record-shape``) stamps the declarative identity onto exactly
+    the leaves whose stamped ``S_*`` extents key to ``shape.key`` (see the module
+    docstring); a spec that matches NO leaf warns loudly — a systematic key mismatch
+    must not silently produce an identity-less sweep."""
+    from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
     from emmy.compiler.pipeline.search.db import NodeRow, SearchDB  # noqa: PLC0415
     from emmy.compiler.structural import digest  # noqa: PLC0415
 
@@ -215,9 +270,14 @@ def record_bench_leaves(db_path: Path | str, ctx: Context, leaves: list[BenchLea
     run_id = run_id or mint_bench_run_id()
     ctx_key, gpu, h_feats = ctx.structural_key(), ctx.hardware_id(), ctx.features()
     rows = []
+    n_tagged = 0
     for leaf in leaves:
         features = {**h_feats, **leaf.knobs}
         tun = tuple(sorted((k, str(v)) for k, v in features.items() if not k.startswith(("S_", "H_"))))
+        spec = None
+        if shape is not None and ShapeKey.from_s_features(leaf.knobs).joins(shape.key):
+            spec = shape.spec
+            n_tagged += 1
         rows.append(
             NodeRow(
                 node_key=digest(ctx_key, gpu, leaf.op_sig, tun),
@@ -234,7 +294,15 @@ def record_bench_leaves(db_path: Path | str, ctx: Context, leaves: list[BenchLea
                 n_samples=leaf.n_samples,
                 status=leaf.status,
                 run_id=run_id,
+                shape_spec=spec,
             )
+        )
+    if shape is not None and n_tagged == 0:
+        logger.warning(
+            "[record-nodes] --record-shape %s matched none of the %d benched leaf/leaves — rows record "
+            "identity-less and will not enter goldens-format freezes (shape-key mismatch; please report)",
+            shape.spec.get("kernel"),
+            len(rows),
         )
     db = SearchDB(Path(db_path))
     try:

@@ -53,6 +53,13 @@ and `-Xcicc -O3` (`emmy run --bench --ab`, node recording on): the twins share t
 `op_sig` + tunables — the dataset a future "how well does -O1 approximate -O3 on this shape" model fits on. Both
 legs of a pair are measured on the same box in the same session.
 
+**Declarative identity (what makes the rows freezable).** Each batch passes `--record-shape` — the group's
+golden-spelled shape spec — and the recorder stamps it as `shape_spec` on exactly the leaves whose extents key to
+that shape. Only identity-carrying rows enter the goldens-format measurement freeze
+(`scripts/freeze_node_store.py`), so the remote box MUST run this branch's emmy (the rsync step below already
+ensures that); rows collected by an older emmy record identity-less and never freeze. Watch the driver log for the
+`--record-shape ... matched none` warning — it means a shape-key mismatch is silently producing unfreezable rows.
+
 **Why merging into the single local DB is safe (read this once).** The node store is keyed by GPU:
 `node_key = digest(context_key, gpu, op_sig, tunable-knobs)` and the `node` table carries a `gpu` column
 (`Context.hardware_id()` — the canonicalized PCIe product name). Different cards therefore **never collide** — the

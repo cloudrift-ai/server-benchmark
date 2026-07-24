@@ -129,6 +129,30 @@ class TestGroupId:
         assert gid != gnb._group_id("novel_kind", Novel(rows=8), _BASE_FIELDS)
 
 
+class TestShapeSpecOf:
+    def test_matmul_spelling_with_dynamic_and_trans_b(self):
+        @dataclass
+        class Matmul(_FakeBase):
+            M: int = 2048
+            N: int = 512
+            K: int = 3840
+            dtype: str = "fp16"
+            trans_b: bool = True
+
+        spec = gnb.shape_spec_of("matmul", Matmul(dynamic=True), _BASE_FIELDS)
+        assert spec == {"kernel": "matmul", "M": 2048, "N": 512, "K": 3840, "dtype": "fp16", "trans_b": True, "dynamic": True}
+
+    def test_generic_kind_derives_from_own_fields(self):
+        spec = gnb.shape_spec_of("reduce", _FakeReduce(), _BASE_FIELDS)
+        assert spec == {"kernel": "reduce", "M": 4096, "K": 512, "dtype": "fp32", "dynamic": False}
+
+    def test_group_entries_spell_the_identical_spec(self):
+        # A group's entries share _group_id, which derives from exactly the spec fields —
+        # so any representative yields the same spec (they differ only in knobs/latencies).
+        a, b = _FakeReduce(name="a"), _FakeReduce(name="b")
+        assert gnb.shape_spec_of("reduce", a, _BASE_FIELDS) == gnb.shape_spec_of("reduce", b, _BASE_FIELDS)
+
+
 class TestAssignSlice:
     def test_own_wins_even_when_cross_is_closer(self):
         assert gnb.assign_slice(2, 0, max_dist=2) == "own"

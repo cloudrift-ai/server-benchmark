@@ -38,7 +38,7 @@ def add_dataset_args(parser, *, default: str, with_min_variants: bool = False) -
     )
     parser.add_argument(
         "--db",
-        help="Tune DB path for --dataset db/nodes — or, for --dataset nodes, a measurement-freeze .jsonl "
+        help="Tune DB path for --dataset db/nodes — or, for --dataset nodes, a measurement-freeze directory "
         "(scripts/freeze_node_store.py). Default: EMMY_TUNE_DB or ~/.cache/emmy/autotune.db.",
     )
     parser.add_argument(

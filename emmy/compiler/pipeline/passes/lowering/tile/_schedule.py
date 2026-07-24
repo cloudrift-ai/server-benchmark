@@ -228,6 +228,13 @@ def _reduce_specs(kernel, place) -> list[str]:
     cands = [f"b{coop}" if coop > 1 else ""]  # conservative heuristic pick first (cold greedy → option-0)
     for move in coop_reduce_moves():
         p = ReducePlan.parse(move)
+        # The transposed band (and its g-split composites) is the plain-contraction matvec
+        # partition — ``_reduce_candidates``' tier. The monoid tier's lanes are the reduce
+        # row itself (shared-row staging, distributed sweeps), which the transposed emitter
+        # does not support; and a ``g`` split here would offer a symbolic cross-CTA split
+        # ``030_split_reduce`` refuses.
+        if p.coop_transposed or p.needs_split:
+            continue
         if p.coop <= extent and p.reg <= extent and move not in cands:
             cands.append(move)
     if "" not in cands:

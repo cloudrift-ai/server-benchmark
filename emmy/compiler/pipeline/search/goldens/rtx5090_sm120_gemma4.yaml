@@ -3107,3 +3107,186 @@ configs:
     emmy_us: 71.8
     cublas_us: 77.1
 
+  # ---- MERGED keys at M=64 (the EMMY_GEN_DECODE_BUCKET=64 c=64 decode regime) and M=4096
+  # (the chunked-prefill static width every 4K+ prompt rides) — the two coverage gaps behind
+  # the 2026-07-23 lane regressions (c=64 TPOT 74 ms vs the 22-24 class; 4K TTFT +260 ms).
+  # Cut wins the qkv/qk_global fused forms at BOTH widths (the coop cold pick ran 190 µs-489 ms);
+  # the consumers carry std+fm rows, so each lane's cut re-entry deploys its own transport.
+  # m64 gate_up stays FUSED (cut consumer 229 loses to the fused 169). Values are same-day
+  # pinned --ab (seed session logs: _tune/m4096-merged/).
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qkv.m64.lin
+    M: 64
+    H: 3840
+    N: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 38.2
+    cublas_us: 38.3
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qk_global.m64.lin
+    M: 64
+    H: 3840
+    N: 8704
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 39.8
+    cublas_us: 39.8
+  - kernel: norm_linear
+    name: gemma4_12b.norm_gate_up.m64.lin
+    M: 64
+    H: 3840
+    N: 30720
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 169.4
+    cublas_us: 163.5
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m64.lin
+    M: 64
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 87.3
+    cublas_us: 91.7
+  - kernel: matmul
+    name: gemma4_12b.qkv_cat.m64.lin
+    M: 64
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 34.0
+    cublas_us: 29.6
+  - kernel: matmul
+    name: gemma4_12b.qk_global_cat.m64.lin
+    M: 64
+    N: 8704
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 35.5
+    cublas_us: 47.8
+  - kernel: matmul
+    name: gemma4_12b.gate_up_cat.m64.lin
+    M: 64
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 225.4
+    cublas_us: 153.4
+
+  # M=4096 merged (the mnbt-4096 prefill chunk). The fm consumer rows are what turn the cut
+  # into an eager win (qkv cut total 940 fm vs eager 1200); the std consumers sit at parity.
+  # gate_up at this width remains the research-class computed-A gap: fused-std 8267, best
+  # consumer fm 3292 — recorded honestly, both beaten by cuBLAS's composite ~4400.
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qkv.m4096.lin
+    M: 4096
+    H: 3840
+    N: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 1324.8
+    cublas_us: 1200.2
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qk_global.m4096.lin
+    M: 4096
+    H: 3840
+    N: 8704
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 1340.9
+    cublas_us: 1236.0
+  - kernel: norm_linear
+    name: gemma4_12b.norm_gate_up.m4096.lin
+    M: 4096
+    H: 3840
+    N: 30720
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 3318.0
+    cublas_us: 4416.8
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m4096.lin
+    M: 4096
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 2703.9
+    cublas_us: 2718.8
+  - kernel: matmul
+    name: gemma4_12b.qkv_cat.m4096.lin
+    M: 4096
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 1262.8
+    cublas_us: 1295.6
+  - kernel: matmul
+    name: gemma4_12b.qkv_cat.m4096.lin
+    M: 4096
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 913.9
+    cublas_us: 1295.6
+  - kernel: matmul
+    name: gemma4_12b.qk_global_cat.m4096.lin
+    M: 4096
+    N: 8704
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 1316.3
+    cublas_us: 1201.3
+  - kernel: matmul
+    name: gemma4_12b.qk_global_cat.m4096.lin
+    M: 4096
+    N: 8704
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 921.4
+    cublas_us: 1201.3
+  - kernel: matmul
+    name: gemma4_12b.gate_up_cat.m4096.lin
+    M: 4096
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 7352.0
+    cublas_us: 4416.8
+  - kernel: matmul
+    name: gemma4_12b.gate_up_cat.m4096.lin
+    M: 4096
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 3292.3
+    cublas_us: 4416.8
+

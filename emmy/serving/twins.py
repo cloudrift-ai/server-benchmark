@@ -68,9 +68,15 @@ def capture_twin_graphs(
         trunk = AutoModel.from_config(text).eval().to(td)
     hidden = text.hidden_size
 
-    buckets: list[tuple[str, int | None]] = [(str(decode_bucket), decode_bucket)]
-    if prefill_bucket:
-        buckets.append((str(prefill_bucket), prefill_bucket))
+    # Every static width a serving mode deploys gets a twin, so the in-model golden audit
+    # sees the SAME forms the packs compile: the decode bucket (32), the documented c=64
+    # decode-bucket knob (64), the legacy prefill bucket (256), and the chunked-prefill
+    # static width (4096 — the --max-num-batched-tokens chunk every 4K+ prompt rides).
+    # The 2026-07-23 lane regressions (m64 decode TPOT 74 ms, m4096 TTFT +260 ms) were
+    # merged-key coverage gaps INVISIBLE to the audit precisely because these widths were
+    # missing here — MATCH 74/0/0 while serving cold-resolved.
+    widths = [decode_bucket, 64, prefill_bucket, 4096]
+    buckets: list[tuple[str, int | None]] = [(str(m), m) for m in sorted({w for w in widths if w})]
     if symbolic:
         buckets.append(("-sym", None))
 

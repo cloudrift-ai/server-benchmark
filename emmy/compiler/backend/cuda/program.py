@@ -30,11 +30,10 @@ from emmy.compiler.backend import BenchmarkResult, LaunchTime, RunResult
 from emmy.compiler.backend.cuda import _tma, nvcc
 from emmy.compiler.backend.cuda._planner import compute_live_intervals, plan_offsets
 from emmy.compiler.backend.cuda.dtype import cupy_dtype
-from emmy.compiler.dim import Dim
-from emmy.compiler.dtype import DataType
-from emmy.compiler.graph import Graph, Node
-from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.cuda import CudaOp, TmaDescMeta
+from emmy.compiler.backend.plan import BufferSpec as _Buffer
+from emmy.compiler.backend.plan import ExecutionPlan, KernelSpec, plan_from_graph
+from emmy.compiler.backend.plan import LaunchSpec as _Launch
+from emmy.compiler.graph import Graph
 
 if TYPE_CHECKING:
     import cupy as cp
@@ -65,43 +64,6 @@ def _ensure_dynamic_smem_attr(kernel: cp.RawKernel, smem_bytes: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class _Buffer:
-    name: str
-    # ``Dim``-valued shape. Static dims carry a ``Literal`` expr, atomic
-    # symbolic carry a ``Var``, composite (e.g. ``S * 2`` from a reshape
-    # or cat) carry a ``BinaryExpr``. ``resolve_shape`` calls ``expr.eval``
-    # to turn any of those into a runtime int.
-    shape: tuple[Dim, ...]
-    dtype: DataType
-    role: str  # "input" | "constant" | "output" | "scratch"
-
-    @property
-    def is_symbolic(self) -> bool:
-        return any(not d.is_static for d in self.shape)
-
-    def resolve_shape(self, sym_values: dict[str, int]) -> tuple[int, ...]:
-        return tuple(int(d.expr.eval(sym_values)) for d in self.shape)
-
-
-def _buffers(graph: Graph) -> list[_Buffer]:
-    return [
-        _Buffer(name=nid, shape=tuple(node.output.shape), dtype=node.output.dtype, role=graph.node_role(nid))
-        for nid, node in graph.nodes.items()
-    ]
-
-
-def _constant_values(graph: Graph) -> dict[str, float]:
-    return {nid: op.value for nid, op in graph.constant_ops() if op.value is not None}
-
-
-def _runtime_constants(graph: Graph):
-    """``{nid: Expr}`` for each ``ConstantOp`` bound to a runtime ``context_value`` (a value
-    set by the symbolic context — e.g. a dynamic mean's divisor = the runtime reduce-axis
-    size). Resolved to a concrete float per run from ``sym_values``."""
-    return {nid: op.context_value for nid, op in graph.constant_ops() if op.context_value is not None}
-
-
 def _resolved_constants(compiled: _Compiled, sym_values: dict[str, int]) -> dict[str, float]:
     """The constant-value map for this run: the static constants plus each runtime
     ``context_value`` constant evaluated at ``sym_values`` (``float(seq_len)``)."""
@@ -110,38 +72,9 @@ def _resolved_constants(compiled: _Compiled, sym_values: dict[str, int]) -> dict
     return {**compiled.constants, **{nid: float(expr.eval(sym_values)) for nid, expr in compiled.runtime_constants.items()}}
 
 
-def _launches(graph: Graph) -> list[Node]:
-    nodes: list[Node] = []
-    for nid in graph.topological_order():
-        node = graph.nodes[nid]
-        if isinstance(node.op, (InputOp, ConstantOp)):
-            continue
-        if not isinstance(node.op, CudaOp):
-            raise TypeError(f"CudaBackend: node {nid!r} has non-CudaOp {type(node.op).__name__!r}; lowering must produce Graph[CudaOp].")
-        nodes.append(node)
-    return nodes
-
-
 # ---------------------------------------------------------------------------
 # Compiled program: RawKernels + buffer plan + launch list
 # ---------------------------------------------------------------------------
-
-
-@dataclass
-class _Launch:
-    node_id: str
-    kernel_name: str
-    arg_names: tuple[str, ...]
-    # ``grid`` / ``block`` are per-dim ``GridDimSpec`` tuples whose factors may
-    # include symbolic axis names — resolved at launch time via the
-    # parent ``_Compiled.symbolic_bindings`` env. Static kernels collapse
-    # to single-int factors (``((128,), (1,), (1,))``).
-    grid: tuple
-    block: tuple
-    smem_bytes: int
-    zero_outputs: tuple[str, ...]
-    tma_descriptors: tuple[TmaDescMeta, ...] = ()
-    runtime_args: tuple[str, ...] = ()
 
 
 @dataclass
@@ -175,55 +108,42 @@ class _Compiled:
     runtime_constants: dict = field(default_factory=dict)
 
 
-def _compile(graph: Graph) -> _Compiled:
-    bufs = _buffers(graph)
-    buf_by_name = {b.name: b for b in bufs}
-    constants = _constant_values(graph)
-    launches_nodes = _launches(graph)
-    symbolic_bindings = graph.symbolic_bindings()
-    symbolic_hints = graph.symbolic_hints()
-    runtime_constants = _runtime_constants(graph)
-
-    # ``nvcc.load_function`` returns a cupy ``Function`` (or a ``RawKernel`` on
-    # NVRTC fallback) — both launch-callable and smem-attr settable.
-    kernels: dict[str, object] = {}
-    seen_source: dict[str, str] = {}
-    launches: list[_Launch] = []
-    for node in launches_nodes:
-        op: CudaOp = node.op
-        kname = op.kernel_name
-        if kname not in kernels:
-            prev_src = seen_source.get(kname)
-            if prev_src is not None and prev_src != op.kernel_source:
-                raise ValueError(f"kernel name {kname!r} used by two distinct sources")
-            seen_source[kname] = op.kernel_source
-            uses_tma = bool(op.tma_descriptors)
-            options = _nvrtc_options(uses_tma=uses_tma)
-            # Compile via offline nvcc (faster, cache-warmable) with an NVRTC
-            # fallback; returns a Function usable exactly like a RawKernel.
-            kernels[kname] = nvcc.load_function(op.kernel_source, kname, options, uses_tma=uses_tma)
-        launches.append(
-            _Launch(
-                node_id=node.id,
-                kernel_name=kname,
-                arg_names=tuple(op.arg_order),
-                grid=op.grid,
-                block=op.block,
-                smem_bytes=op.smem_bytes,
-                zero_outputs=tuple(op.zero_outputs),
-                tma_descriptors=tuple(op.tma_descriptors),
-                runtime_args=tuple(getattr(op, "runtime_args", ())),
+def _load_kernel(name: str, spec: KernelSpec):
+    """Obtain one launchable kernel from its :class:`KernelSpec`. A ``binary_key`` (the pack
+    path) loads the content-addressed cubin straight from the cache; otherwise the ``source``
+    compiles through the same cache (``nvcc.load_function``). A key whose cubin has been
+    evicted falls back to the source when present, and errors otherwise — the pack loader
+    pre-checks cubin existence, so hitting this means the cache was cleared mid-boot."""
+    if spec.binary_key is not None:
+        path = nvcc.cubin_cache_dir() / f"{spec.binary_key}.cubin"
+        if path.exists():
+            return nvcc.load_cubin_function(path, name)
+        if spec.source is None:
+            raise RuntimeError(
+                f"kernel {name!r}: cubin {spec.binary_key} is gone from the cache and the plan carries no source — "
+                "regenerate the pack or boot without it (full compile)"
             )
-        )
+    if spec.source is None:
+        raise RuntimeError(f"kernel {name!r}: plan carries neither a source nor a cached cubin")
+    # ``nvcc.load_function`` returns a cupy ``Function`` — launch-callable and
+    # smem-attr settable, compiled via offline nvcc into the content-addressed cache.
+    return nvcc.load_function(spec.source, name, _nvrtc_options(uses_tma=spec.uses_tma), uses_tma=spec.uses_tma)
+
+
+def _load_plan(plan: ExecutionPlan) -> _Compiled:
+    """Materialize the runtime object from a plan: load every kernel (cubin-by-key or
+    source-via-cache), and adopt the plan's pure-data fields as-is."""
+    kernels: dict[str, object] = {name: _load_kernel(name, spec) for name, spec in plan.kernels.items()}
     return _Compiled(
-        bufs=bufs,
-        buf_by_name=buf_by_name,
-        constants=constants,
+        bufs=list(plan.buffers),
+        buf_by_name={b.name: b for b in plan.buffers},
+        constants=dict(plan.constants),
         kernels=kernels,
-        launches=launches,
-        symbolic_bindings=symbolic_bindings,
-        symbolic_hints=symbolic_hints,
-        runtime_constants=runtime_constants,
+        launches=list(plan.launches),
+        symbolic_bindings=dict(plan.symbolic_bindings),
+        symbolic_hints=dict(plan.symbolic_hints),
+        symbolic_caps=dict(plan.symbolic_caps),
+        runtime_constants=dict(plan.runtime_constants),
     )
 
 
@@ -314,7 +234,7 @@ class BufferArena:
     descriptors never dangle. Safe iff programs sharing the arena never run
     concurrently and each program's outputs are consumed before the next program runs
     — the runner's contract. Constants are never pooled (persistent values; weight
-    sharing is ``gen_runner._bind_device_constants``)."""
+    sharing is ``gen_runner._bind_plan_constants``)."""
 
     def __init__(self) -> None:
         self._backings: dict[str, cp.ndarray] = {}
@@ -466,7 +386,11 @@ def _launch(
     from emmy.compiler.ir.cuda.ir import resolve_dim  # noqa: PLC0415
 
     for zname in launch.zero_outputs:
-        arrays[zname].fill(0)
+        # memset, not ``.fill(0)``: fill launches a cupy elementwise kernel (~the cost of the
+        # finalize kernel the atomic split saves), while memset_async records as a cheap MEMSET
+        # node under CUDA-graph capture. All-zero bytes are 0.0 in every buffer dtype.
+        buf = arrays[zname]
+        buf.data.memset_async(0, buf.nbytes)
     kernel = compiled.kernels[launch.kernel_name]
     desc_args = desc_args or {}
     sym_values = sym_values or {}
@@ -532,7 +456,12 @@ def _collapse_inert_dims(arr_shape: tuple[int, ...], box_extents: tuple[int, ...
     return tuple(reversed(kept))
 
 
-def _prebuild_descriptors(compiled: _Compiled, arrays: dict[str, cp.ndarray]) -> dict[int, dict[str, cp.ndarray]]:
+def _prebuild_descriptors(
+    compiled: _Compiled,
+    arrays: dict[str, cp.ndarray],
+    sym_values: dict[str, int] | None = None,
+    only_symbolic: bool = False,
+) -> dict[int, dict[str, cp.ndarray]]:
     """Encode every TMA ``CUtensorMap`` for ``compiled`` up-front.
 
     The kernel signature takes ``const CUtensorMap*`` (not a by-value
@@ -550,7 +479,17 @@ def _prebuild_descriptors(compiled: _Compiled, arrays: dict[str, cp.ndarray]) ->
     cp.async.bulk.tensor is still reading, corrupting the descriptor
     and deadlocking the wait. Pre-building once after ``_allocate``
     removes the race entirely; the returned dict is held alive for the
-    whole program lifetime, so cupy never reclaims the slab."""
+    whole program lifetime, so cupy never reclaims the slab.
+
+    ``sym_values``: encode each SYMBOLIC-shaped source buffer at its RESOLVED
+    shape instead of the array's allocated (capacity) shape. On the serving
+    capacity-buffer path the live data is prefix-packed at the resolved shape's
+    row-major strides, so a descriptor's global strides must follow the resolved
+    extents — a capacity-baked stride reads the right rows only for the leading
+    index 0, which is why batch>1 miscomputed through every TMA-staged kernel
+    while batch-1 serving never noticed. ``only_symbolic=True`` returns just the
+    per-sym overlay entries (static-src descriptors are excluded — the prebuilt
+    ones stay valid)."""
     import cupy as cp
 
     out: dict[int, dict[str, cp.ndarray]] = {}
@@ -560,7 +499,14 @@ def _prebuild_descriptors(compiled: _Compiled, arrays: dict[str, cp.ndarray]) ->
         per_launch: dict[str, cp.ndarray] = {}
         for desc in launch.tma_descriptors:
             arr = arrays[desc.src_buf]
-            src_shape = _collapse_inert_dims(tuple(int(d) for d in arr.shape), desc.box_extents)
+            buf = compiled.buf_by_name[desc.src_buf]
+            if only_symbolic and not buf.is_symbolic:
+                continue
+            if sym_values and buf.is_symbolic:
+                base_shape = tuple(int(d) for d in (buf.resolve_shape(sym_values) or (1,)))
+            else:
+                base_shape = tuple(int(d) for d in arr.shape)
+            src_shape = _collapse_inert_dims(base_shape, desc.box_extents)
             desc_bytes = _tma.encode_tiled(
                 global_address=int(arr.data.ptr),
                 src_shape=src_shape,
@@ -569,7 +515,8 @@ def _prebuild_descriptors(compiled: _Compiled, arrays: dict[str, cp.ndarray]) ->
                 swizzle=desc.swizzle,
             )
             per_launch[desc.name] = cp.asarray(np.frombuffer(desc_bytes, dtype=np.uint64))
-        out[li] = per_launch
+        if per_launch:
+            out[li] = per_launch
     if out:
         cp.cuda.runtime.deviceSynchronize()
     return out
@@ -584,7 +531,22 @@ def _prebuild_descriptors(compiled: _Compiled, arrays: dict[str, cp.ndarray]) ->
 # considered "broken" — too many threads, infinite loop, hung GPU — and
 # we bail out via ``HungKernelError`` so the autotune sweep doesn't stall
 # on one bad variant.
-_KERNEL_TIMEOUT_MS = 1000.0
+# 2000, not 1000 (2026-07-22): the long-standing gemma-4 post4096-global "bench hang" was a
+# WATCHDOG artifact, not a kernel deadlock — under a 1 s deadline the bench_fails 5/5 at the first
+# iteration after the warmup-extension re-calibration (its wait exceeds 1 s), while at ANY deadline
+# >= 2 s the same program benches clean 9/9 with no event wait ever reaching even the 0.2 s warning
+# threshold (measured at 2/4/15/600 s). The deadline-correlation below the driver line is
+# unexplained (suspected interaction between the 1 ms cudaEventQuery poll loop's abort path and
+# in-flight graph-exec work on this 9-kernel / 96 KB-smem program); empirically 2 s is past the
+# cliff, and a real hung kernel is still evicted in 2 s. ``EMMY_KERNEL_TIMEOUT_MS`` overrides.
+_KERNEL_TIMEOUT_MS = float(_os.environ.get("EMMY_KERNEL_TIMEOUT_MS", "2000"))
+
+# First-launch grace multiplier: a program's FIRST uncaptured iteration may stall well past the
+# steady-state watchdog without any kernel being hung — lazy module loading (CUDA_MODULE_LOADING=
+# LAZY uploads each kernel's SASS on first launch), the smem-carveout reconfig for a 96 KB dynamic-
+# smem kernel, and allocator first-touch all land there. A genuinely hung kernel is still caught on
+# iter 0, just ``_FIRST_ITER_GRACE`` x later.
+_FIRST_ITER_GRACE = 30.0
 
 
 class HungKernelError(RuntimeError):
@@ -719,6 +681,9 @@ class CompiledProgram:
     # caused ``test_tuned_variant_matches_reference`` to flake ~30%).
     _starts: list = field(default_factory=list, repr=False)
     _stops: list = field(default_factory=list, repr=False)
+    # Number of completed ``iter_once`` calls — iter 0 gets the ``_FIRST_ITER_GRACE`` watchdog
+    # multiplier (first-launch lazy-load / carveout stalls are not hangs; see the constant's note).
+    _iters_done: int = field(default=0, repr=False)
     # Per-launch CUDA graphs (one per launch position, each containing that
     # launch's whole batch) captured by :meth:`capture_launch_graphs`. When
     # set, ``iter_once`` replays ``_graphs[i]`` with one host call instead of
@@ -743,6 +708,12 @@ class CompiledProgram:
     # ``()`` key, so it's unaffected.
     _graph_cache: dict = field(default_factory=dict, repr=False)
     _graph_cache_max: int = 64
+    # Per-sym-key TMA descriptor overlays (symbolic-src descriptors re-encoded at
+    # the RESOLVED shape — the capacity-buffer prefix layout's true strides; see
+    # :func:`_prebuild_descriptors`). Keyed like ``_graph_cache``; an entry must
+    # outlive any captured graph replaying at its key (the graph bakes the desc
+    # device pointers), so eviction only drops keys absent from ``_graph_cache``.
+    _sym_descs: dict = field(default_factory=dict, repr=False)
 
     @classmethod
     def build(
@@ -753,10 +724,24 @@ class CompiledProgram:
         compile_timeout_s: float | None = None,
         arena: BufferArena | None = None,
     ) -> CompiledProgram:
-        """Compile ``graph``, allocate every buffer, pre-build TMA
-        descriptors. ``compile_timeout_s`` bounds the setup phase at a
-        C-call boundary: if NVRTC + alloc + descriptor work overruns,
-        raise ``RuntimeError`` before the caller proceeds to launches
+        """Compile ``graph`` and build — ``plan_from_graph`` + :meth:`build_from_plan`; the
+        graph is never consulted after the projection (one runtime path whether the plan came
+        from a fresh compile or from a stored pack)."""
+        return cls.build_from_plan(plan_from_graph(graph), input_data, compile_timeout_s=compile_timeout_s, arena=arena)
+
+    @classmethod
+    def build_from_plan(
+        cls,
+        plan: ExecutionPlan,
+        input_data: dict[str, np.ndarray] | None = None,
+        *,
+        compile_timeout_s: float | None = None,
+        arena: BufferArena | None = None,
+    ) -> CompiledProgram:
+        """Load every kernel (cubin-by-key or source-via-cache), allocate every
+        buffer, pre-build TMA descriptors. ``compile_timeout_s`` bounds the
+        setup phase at a C-call boundary: if compile + alloc + descriptor work
+        overruns, raise ``RuntimeError`` before the caller proceeds to launches
         so no in-flight kernels are left queued. ``arena`` pools the
         activation buffers + scratch slab across sequentially-run
         programs (see :class:`BufferArena`).
@@ -764,7 +749,7 @@ class CompiledProgram:
         Caller is expected to hold ``gpu_lock()`` around this call and
         every subsequent method on the returned program."""
         t0 = _time_module.monotonic()
-        compiled = _compile(graph)
+        compiled = _load_plan(plan)
         sym_values = _resolve_symbolic(compiled, input_data or {})
         arrays, slab_plan = _allocate(compiled, input_data, arena)
         descs = _prebuild_descriptors(compiled, arrays)
@@ -841,6 +826,7 @@ class CompiledProgram:
             self._graph_batch_sizes = None
             self._e2e_graph = None
             self._graph_cache.clear()
+            self._sym_descs.clear()
 
     def set_sym_values(self, values: dict[str, int]) -> None:
         """Set the host symbolic values that resolve launch grids + by-value
@@ -865,8 +851,32 @@ class CompiledProgram:
         record/sync/watchdog — the serving hot path (timing semantics live in
         :meth:`iter_once`). The default stream orders the launches; the
         caller's subsequent ``outputs()`` ``.get()`` synchronizes."""
+        descs = self._descs_now()
         for i, launch in enumerate(self.compiled.launches):
-            _launch(launch, self.compiled, self.arrays, self.descs.get(i), self.sym_values)
+            _launch(launch, self.compiled, self.arrays, descs.get(i), self.sym_values)
+
+    def _descs_now(self) -> dict[int, dict[str, cp.ndarray]]:
+        """The per-launch TMA descriptors matching the CURRENT ``self.sym_values``:
+        the prebuilt (allocation-shaped) entries overlaid with per-sym re-encodes of
+        every symbolic-src descriptor. On the capacity-buffer serving path the live
+        data is prefix-packed at the resolved shape, so symbolic-src descriptors must
+        re-encode per seq_len (cached per sym key). A fully-static program (empty
+        key) returns the prebuilt dict unchanged."""
+        key = self._sym_key()
+        if not key:
+            return self.descs
+        overlay = self._sym_descs.get(key)
+        if overlay is None:
+            overlay = _prebuild_descriptors(self.compiled, self.arrays, sym_values=self.sym_values, only_symbolic=True)
+            # Bound the cache without ever dropping a key whose captured graph is
+            # still alive (its replay dereferences these device buffers).
+            evictable = [k for k in self._sym_descs if k not in self._graph_cache]
+            while evictable and len(self._sym_descs) >= max(self._graph_cache_max, len(self._graph_cache) + 1):
+                self._sym_descs.pop(evictable.pop(0))
+            self._sym_descs[key] = overlay
+        if not overlay:
+            return self.descs
+        return {li: {**self.descs.get(li, {}), **overlay.get(li, {})} for li in self.descs.keys() | overlay.keys()}
 
     def capture_launch_graphs(self, batch_sizes: list[int]) -> None:
         """Capture each launch position's batch into one CUDA graph.
@@ -889,6 +899,7 @@ class CompiledProgram:
         if self._graphs is not None and self._graph_batch_sizes == list(batch_sizes):
             return
         self._graphs = None
+        descs = self._descs_now()
         side = cp.cuda.Stream(non_blocking=True)
         graphs = []
         for i, launch in enumerate(self.compiled.launches):
@@ -896,7 +907,7 @@ class CompiledProgram:
                 with side:
                     side.begin_capture()
                     for _ in range(batch_sizes[i]):
-                        _launch(launch, self.compiled, self.arrays, self.descs.get(i), self.sym_values)
+                        _launch(launch, self.compiled, self.arrays, descs.get(i), self.sym_values)
                     graphs.append(side.end_capture())
             except Exception as exc:
                 if side.is_capturing():
@@ -942,12 +953,13 @@ class CompiledProgram:
             self._graph_cache[key] = self._graph_cache.pop(key)  # LRU bump
             self._e2e_graph = cached
             return
+        descs = self._descs_now()
         side = cp.cuda.Stream(non_blocking=True)
         try:
             with side:
                 side.begin_capture()
                 for i, launch in enumerate(self.compiled.launches):
-                    _launch(launch, self.compiled, self.arrays, self.descs.get(i), self.sym_values)
+                    _launch(launch, self.compiled, self.arrays, descs.get(i), self.sym_values)
                 graph = side.end_capture()
         except Exception as exc:
             if side.is_capturing():
@@ -962,7 +974,9 @@ class CompiledProgram:
         cp.cuda.runtime.deviceSynchronize()
         self._graph_cache[key] = graph
         while len(self._graph_cache) > self._graph_cache_max:
-            self._graph_cache.pop(next(iter(self._graph_cache)))  # evict LRU
+            evicted = next(iter(self._graph_cache))
+            self._graph_cache.pop(evicted)  # evict LRU
+            self._sym_descs.pop(evicted, None)  # its desc overlay is no longer pinned
         self._e2e_graph = graph
 
     def _sym_key(self) -> tuple:
@@ -1011,6 +1025,12 @@ class CompiledProgram:
         for name, src in input_data.items():
             buf = self.compiled.buf_by_name[name]
             arr = self.arrays[name]
+            # Self-copy skip: when the caller's source IS this buffer (the serving runner's
+            # post→pre chaining rewires a producer's output view onto this input's backing, so
+            # the "upload" would copy a buffer onto itself), there is nothing to move — and the
+            # skip is what deletes the seam copy from the captured decode graph.
+            if src.data.ptr == arr.data.ptr:
+                continue
             flat = cp.ascontiguousarray(src, dtype=buf.dtype.np).ravel()
             if flat.size > arr.size:
                 raise ValueError(f"upload_prefix_device: {name!r} has {flat.size} elems > capacity {arr.size}")
@@ -1075,6 +1095,7 @@ class CompiledProgram:
             self._starts = [cp.cuda.Event() for _ in range(n)]
             self._stops = [cp.cuda.Event() for _ in range(n)]
         starts, stops = self._starts, self._stops
+        descs = self._descs_now()
         dts = [0.0] * n
         for i, launch in enumerate(self.compiled.launches):
             b = batch_sizes[i]
@@ -1087,9 +1108,10 @@ class CompiledProgram:
                 self._graphs[i].launch()
             else:
                 for _ in range(b):
-                    _launch(launch, self.compiled, self.arrays, self.descs.get(i), self.sym_values)
+                    _launch(launch, self.compiled, self.arrays, descs.get(i), self.sym_values)
             stops[i].record()
-            _wait_for_event(stops[i], _KERNEL_TIMEOUT_MS * b, launch.kernel_name)
+            grace = _FIRST_ITER_GRACE if self._iters_done == 0 else 1.0
+            _wait_for_event(stops[i], _KERNEL_TIMEOUT_MS * b * grace, f"{launch.kernel_name} (iter {self._iters_done})")
             elapsed_ms = cp.cuda.get_elapsed_time(starts[i], stops[i])
             # CUDA event timing has sub-µs resolution and a real launch must
             # consume at least one device cycle — a 0.0 reading means the
@@ -1107,6 +1129,7 @@ class CompiledProgram:
             dts[i] = elapsed_ms / b
             if per_launch_hook is not None:
                 per_launch_hook(i, launch)
+        self._iters_done += 1
         return dts
 
     def outputs(self, sym_values: dict[str, int] | None = None) -> dict[str, np.ndarray]:

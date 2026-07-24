@@ -14,7 +14,13 @@ import pytest
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import golden as golden_mod
 from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig
-from emmy.compiler.pipeline.search.policy.greedy import _golden_evidence_index, _golden_pick, greedy_decide
+from emmy.compiler.pipeline.search.policy.greedy import (
+    _fork_shape_key,
+    _golden_evidence_index,
+    _golden_matches_row,
+    _golden_pick,
+    greedy_decide,
+)
 
 CARD = "NVIDIA GeForce RTX 4090"
 CAP = (8, 9)
@@ -166,6 +172,40 @@ def test_decide_golden_overrides_model_argmin(monkeypatch):
     # evidence tier nor the model was needed (test 8: no contamination).
     assert "add_rows" not in calls
     assert "pick" not in calls and "evidence_pick" not in calls
+
+
+def test_place_golden_does_not_match_a_fork_that_never_offered_it():
+    """A STRUCTURAL placement is the one family where "undecided" cannot read as free. Every other
+    family is a schedule knob a later pass fills, so an absent key means "any realization will do";
+    ``PLACE`` instead names which KERNELS exist, and a fork that never offered the decision can
+    never realize it. The gemma-4 norm→qkv cones fork PRE-split (no ``PLACE@cone`` on any row) yet
+    ``_fork_shape_key`` rebuilds their key to ``kind="fused"``, so they share a ShapeKey with real
+    post-split cones — matching there deployed the bare map form at 1244 µs while reporting the
+    cut's 54.4 µs. Refusing the match makes it a loud drift warning instead."""
+    gold = {"PLACE@cone": "cut"}
+    assert not _golden_matches_row(gold, {**_BASE, **_ROW_GOLD})  # no PLACE key at all → refuse
+    assert not _golden_matches_row(gold, {**_BASE, **_ROW_GOLD, "PLACE@cone": "fuse"})  # decided the other way
+    assert _golden_matches_row(gold, {**_BASE, **_ROW_GOLD, "PLACE@cone": "cut"})
+    # Non-PLACE families keep the value-of-position convention: an undecided family is free.
+    assert _golden_matches_row({"STAGE": "d2/cp/ring/p2"}, {**_BASE, "TILE@a2": _STD_TILE})
+
+
+def test_cut_row_is_evidence_only_never_a_model_pick(monkeypatch):
+    """``PLACE@cone=cut`` changes the KERNEL SET (020_cut_edge splits the cone into producer +
+    N consumers), so it must be selectable by measured evidence ALONE. The cut row is
+    knob-identical to its fused twin apart from the placement, so it ties on any model score and
+    would otherwise win on the content tie-break for no reason — and cold that is dangerous: a cut
+    whose consumers have no golden deploys them on a scalar tile (35 ms at the gemma-4 M=32 mlp
+    edge). With no golden the model must keep the fused row."""
+    fused = SimpleNamespace(knobs={**_ROW_GOLD, "PLACE@cone": "fuse"})
+    cut = SimpleNamespace(knobs={**_ROW_GOLD, "PLACE@cone": "cut"})
+
+    class TiePrior:  # every row scores identically — the tie-break is what decides
+        def mean_scores(self, rows):
+            return [1.0] * len(rows)
+
+    picked, _ = _decide_once(TiePrior(), monkeypatch, [], [fused, cut])
+    assert picked is fused, "the model fallback must never select a kernel-set-changing cut row"
 
 
 def test_decide_golden_beats_reservoir_evidence(monkeypatch):
@@ -352,6 +392,96 @@ def test_rms_norm_golden_decides_its_op(monkeypatch):
     index = _index(monkeypatch, [gold])
     rows = [{**_RMS_SIG, "REDUCE@r0": "b32"}, {**_RMS_SIG, "REDUCE@r0": "b256"}]
     assert _golden_pick(index, rows, "n0") == (1, 6.3)
+
+
+# The computed-A norm→linear cone stamped on its PRE-SPLIT geometry (real stamps off pre32.json's
+# in-model norm→q fork, M32 x N4096, K3840): mixed f16 operands + the f32 statistic constant over an
+# add-reduce, the statistic reduce NOT yet lifted (n_reduce_axis == 1) and the rsqrt buried in the A
+# sub-body, so the histogram classifier reads a plain scalar matmul (kind="", is_warp=False from the
+# f32 signal, nonzero free_max).
+_CONE_SIG = {
+    "S_ext_free_prod": 131072.0,
+    "S_ext_free_max": 4096.0,
+    "S_ext_reduce_max": 3840.0,
+    "S_ext_reduce_prod": 3840.0,
+    "S_ext_n_free_axis": 2.0,
+    "S_ext_n_reduce_axis": 1.0,
+    "S_loop_depth": 3.0,
+    "S_reduce_add": 1.0,
+    "S_dtype_f16": 1.0,
+    "S_dtype_f32": 1.0,
+    "H_opt": 3.0,
+}
+# The fork ROW additionally carries the cone's unmistakable OFFER: a ``d*/sync`` STAGE candidate —
+# the mandatory compute-fill only a computed-A contraction enumerates (``stage_moves`` spells only
+# gmem-direct / cp / tma). ``_fork_shape_key`` keys the rebuild on this, not on the dtype stamps.
+_CONE_ROW = {**_CONE_SIG, "STAGE@a2": "d1/sync"}
+
+
+def test_computed_a_cone_fork_rebuilds_to_the_fused_key():
+    """The pre-split norm→linear cone stamps like a plain scalar matmul, so its raw key disagrees with
+    the fused golden on is_warp and kind. ``_fork_shape_key`` must rebuild it to the fused convention
+    (flash-analogous) so the norm→qkv cones join their goldens at cold deploy, CARRYING the stamped
+    ``free_max`` through — a fused op is a plain two-free-axis contraction, so both builders agree on
+    the aspect and the key must keep it (see the collision test below).
+    (``_norm_linear`` / ``_FUSED_SIG`` below are the POST-split fused op the classifier already kinds;
+    this is the PRE-split fork the classifier misses.)"""
+    from emmy.compiler.pipeline.search.golden import NormLinearGoldenConfig
+
+    fused_key = NormLinearGoldenConfig(name="nl", M=32, H=3840, N=4096, knobs={}).shape_key()
+    key = _fork_shape_key([_CONE_ROW])
+    assert key == fused_key
+    assert key.kind == "fused" and key.is_warp and key.free_max == 4096
+    # A MIXED-DTYPE PLAIN MATMUL — the same stamp combination (f16 operands + an f32 bias/residual
+    # load over an add-reduce) but no ``d*/sync`` STAGE among its offers — is untouched: the offer
+    # signal cannot over-fire on dtype coincidences, so the kernel keeps joining its ``kind=""``
+    # goldens (the earlier dtype sniff silently re-keyed it out of them).
+    plain = _fork_shape_key([{**_CONE_SIG, "STAGE@a2": "d2/cp/ring"}])
+    assert plain.kind == "" and plain.free_max == 4096
+    # And ``cp.async``'s substring never false-positives the segment match.
+    plain_cp = _fork_shape_key([{**_CONE_SIG, "STAGE@a2": "d2/cp.async/ring"}])
+    assert plain_cp.kind == ""
+
+
+def test_fused_key_separates_aspect_equal_free_prod_cones():
+    """Two gemma-4 computed-A cones collide on every other key field: the M=32 LOCAL norm→q
+    (32x4096) and the M=256 GLOBAL norm→kv (256x512) share free_prod=131072 AND reduce_max=3840.
+    Without the aspect the global prefill cone silently deployed the local decode cone's golden and
+    reported its 24.1 us. ``free_max`` must keep them apart on BOTH builders."""
+    from emmy.compiler.pipeline.search.golden import NormLinearGoldenConfig
+
+    local_q = NormLinearGoldenConfig(name="q", M=32, H=3840, N=4096, knobs={}).shape_key()
+    global_kv = NormLinearGoldenConfig(name="kv", M=256, H=3840, N=512, knobs={}).shape_key()
+    assert local_q.free_prod == global_kv.free_prod == 131072
+    assert local_q.reduce_max == global_kv.reduce_max == 3840
+    assert local_q != global_kv and (local_q.free_max, global_kv.free_max) == (4096, 512)
+
+    # The fork side must agree with the golden side, or the join breaks instead of separating.
+    assert _fork_shape_key([{**_CONE_ROW, "S_ext_free_prod": 131072.0, "S_ext_free_max": 512.0}]) == global_kv
+
+
+def test_dynamic_fused_key_normalizes_the_aspect_away():
+    """A symbolic-M cone has no static aspect — ``free_max`` must normalize to 0 so the dynamic twin
+    keeps joining its golden (the static/dynamic split stays the only discriminator)."""
+    from emmy.compiler.pipeline.search.golden import NormLinearGoldenConfig
+
+    dyn = NormLinearGoldenConfig(name="q", M=512, H=3840, N=4096, knobs={}, dynamic=True).shape_key()  # M = DEFAULT_SEQ_HINT
+    assert dyn.is_dyn and dyn.free_max == 0
+    # bf16 operands rebuild identically — the offer-keyed rebuild is dtype-blind.
+    bf16 = _fork_shape_key([{**{k: v for k, v in _CONE_ROW.items() if k != "S_dtype_f16"}, "S_dtype_bf16": 1.0}])
+    assert bf16.kind == "fused" and bf16.is_warp
+    # The dynamic cone keeps is_dyn and its contraction reduce_max (unlike the flash reduce, which zeroes).
+    dyn = _fork_shape_key([{**_CONE_ROW, "S_ext_free_prod": 4096.0, "S_ext_n_symbolic_axis": 1.0}])
+    assert dyn.kind == "fused" and dyn.is_dyn and dyn.reduce_max == 3840
+
+
+def test_computed_a_cone_fork_deploys_the_fused_golden(monkeypatch):
+    """End-to-end on the PRE-split fork: with the fused norm→linear golden in the index, cone rows
+    (``n_reduce_axis == 1``, no top-level rsqrt) resolve it via the ``_fork_shape_key`` rebuild — a
+    MATCH, not a DRIFT — where ``from_s_features`` alone would key them as a plain matmul and miss."""
+    index = _index(monkeypatch, [_norm_linear()])  # records _FUSED_TILE / d2/sync / g4k
+    row = {**_CONE_SIG, "TILE@a": _FUSED_TILE, "STAGE@a": "d2/sync", "REDUCE@a": "g4k"}
+    assert _golden_pick(index, [row], "n0") == (0, 34.8)
 
 
 def test_cross_kind_isolation_via_the_kind_discriminator(monkeypatch):

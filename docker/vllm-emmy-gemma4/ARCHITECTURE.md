@@ -1,9 +1,12 @@
 # vllm-emmy-gemma4 — the prebuilt gemma-4-12B serving image
 
 A release image for one model on one GPU: **gemma-4-12B served by `EmmyGenModel` on an RTX 5090**, with the compiled
-CUDA kernels (**cubins**) and the **HF model snapshot** baked in. Cold-start pays zero `nvcc` compiles and zero HF
-downloads — `docker run --gpus all --ipc=host -p 8000:8000 cloudriftai/vllm-emmy-gemma4:TAG` serves with no
-`HF_TOKEN` and no network dependency on HuggingFace (`HF_HUB_OFFLINE=1` is baked). The plain
+CUDA kernels (**cubins**), the **HF model snapshot**, and the **execution-plan pack**
+(`emmy/compiler/backend/pack.py`) baked in. Cold-start pays zero `nvcc` compiles, zero HF downloads, and — on a
+pack hit — none of the compiler frontend either (no trace / pass pipeline / fork resolution / codegen; boot
+collapses from ~25 min to ~weight-load time) — `docker run --gpus all --ipc=host -p 8000:8000
+cloudriftai/vllm-emmy-gemma4:TAG` serves with no `HF_TOKEN` and no network dependency on HuggingFace
+(`HF_HUB_OFFLINE=1` is baked). The plain
 [`vllm-emmy`](../vllm-emmy/) image stays the general-purpose base (any model, compile-on-boot); this image trades a
 ~35 GB pull (~24 GB of weights on the ~10 GB base) for a deterministic, tokenless boot.
 
@@ -38,6 +41,23 @@ The machinery enforces the last two points structurally: **`config.env` is the s
 bind-mounts it into the plain image and the baked image ships it, so the warmed and released servers execute
 literally the same script with the same env.
 
+**The warm runs to a fixpoint under the release environment.** One online boot is not enough: the shipped image
+serves offline (`HF_HUB_OFFLINE=1`, the model resolved to its snapshot path), and a handful of kernels only
+materialize on an offline boot; independently, a fork pick can flip between boots, selecting between two stable
+kernel variants (2026-07 5090 session: 6 offline-only kernels + 2 bimodal ones on gemma-4-12B — each variant's
+source is byte-stable, so the union converges). After the online pass, `warm.sh` re-boots offline against the
+accumulated cache until a boot compiles nothing new (max 5 passes); **non-convergence after 5 passes is a hard
+failure** (`warm.sh` exits 1 — with the cubin set still growing, verify's single boot passing is a coin flip and
+customer boots would recompile at runtime). The boot-to-boot pick flip is a real compiler bug (fork resolution
+should be deterministic across processes); the fixpoint warm contains it but does not excuse it.
+
+**The pack changes the fixpoint's role.** The online pass also writes the execution-plan pack (`warm/pack`, keyed
+on the model **config hash** + serving shape — not the id/path, precisely so the offline boots share it), and every
+subsequent boot — the offline fixpoint passes, verify, customer boots — loads it: fork picks are frozen in the
+artifact, so the bimodal-pick class vanishes and the fixpoint converges immediately whenever the pack takes. The
+loop stays as a safety net for the case where the pack write was skipped (a weight outside the pack vocabulary) or
+the load falls back — then the old cubin-union behavior is exactly what runs.
+
 ## Files
 
 - `config.env` — the pinned serving config. Every value is cache-key-relevant; it must be **final before warming**
@@ -46,12 +66,19 @@ literally the same script with the same env.
   generate --enforce-eager --dtype float16 --hf-overrides EmmyGenModel` + the `GEMMA4_*` config).
 - `warm.sh` — runs the **plain** `vllm-emmy` image on the target GPU with `./warm` mounted at `/opt/emmy`, waits for
   `/health`, issues one completion (covers prefill + decode kernels), stops. Result: `warm/hf` (the model snapshot —
-  the gated download happens here, once, via `HF_TOKEN`) and `warm/cubin` (every compiled kernel).
-- `Dockerfile` — `FROM` the plain image, `COPY warm/hf` + `COPY warm/cubin` to `/opt/emmy`, bakes the config env and
-  `HF_HUB_OFFLINE=1`, entrypoint `serve.sh`. The caches live at **`/opt/emmy`** on purpose: compose/recipes
-  bind-mount the host HF cache over `/root/.cache/huggingface`, which would shadow anything baked there.
+  the gated download happens here, once, via `HF_TOKEN`), `warm/cubin` (every compiled kernel), and `warm/pack`
+  (the execution-plan pack the first boot writes).
+- `Dockerfile` — `FROM` the plain image, `COPY warm/hf` + `COPY warm/cubin` + `COPY warm/pack` to `/opt/emmy`, bakes
+  the config env, `EMMY_PACK_DIR` and `HF_HUB_OFFLINE=1`, entrypoint `serve.sh`. The caches live at **`/opt/emmy`**
+  on purpose: compose/recipes bind-mount the host HF cache over `/root/.cache/huggingface`, which would shadow
+  anything baked there.
 - `verify.sh` — cold-starts the **baked** image with no token, issues one completion, and diffs the cubin file set
   before/after: an empty diff proves 100% cache hit (zero compiles), and the offline boot proves zero downloads.
+  When a pack is baked, it also asserts the boot **hit** it (a silent fallback to the full compile would still pass
+  the cubin check while re-paying the frontend on every customer boot). The hit signal is the runner's "pack hit"
+  line grepped from `docker logs` — reachable because `emmy.serving.register()` self-attaches a log handler under
+  the bare vLLM entrypoint (2026-07-23: without it emmy INFO logs never surfaced and the gate false-FAILed a boot
+  that demonstrably hit the pack). The container is removed by an EXIT trap on every path, pass or fail.
 - `warm/` — gitignored; the warm output that the bake copies in.
 
 ## Workflow
@@ -144,21 +171,20 @@ rental/teardown. The local-only deltas:
   the warm needs it.
 - **The push is the slow part.** `gemma4-serve-push` uploads ~35 GB over your uplink — hours on a residential
   connection vs minutes from a datacenter. It's the main reason the rental flow exists; locally, just let it run.
+- **The snapshot ships re-sharded, as four image layers.** Docker Hub rejects blobs past ~10 GB (upload initiation
+  503s forever), and gemma-4-12B ships ONE consolidated 23 GB `model.safetensors` — a single file cannot be split
+  across layers by COPY. `make gemma4-serve-image` therefore first runs `reshard_snapshot.py` (inside the base
+  image), rewriting the consolidated file as standard HF shards + `model.safetensors.index.json` — per-tensor
+  bytes identical, loader-transparent — then `split_hf.sh` balances the tree into four hardlinked sub-10 GB parts
+  that the Dockerfile COPYs back into `/opt/emmy/hf` (the split asserts completeness — every source file lands in
+  exactly one part — and that each part stays under the ~10 GB blob cap). Kernel cache-key parity is unaffected
+  (weights are runtime constants, not source). The reshard verifies every tensor byte-identical against the
+  consolidated source BEFORE deleting it — the post-bake verify gate only proves the shards load and the cubin set
+  is closed, not that the weights survived.
 
 ## Licensing
 
 gemma-4 is **Apache 2.0** — public redistribution of the weights in a Docker Hub tag is permitted. The bake copies
-the unmodified HF snapshot, which carries its LICENSE/NOTICE files — keep them (that is the attribution obligation),
-and don't imply Google endorsement in the tag name or description.
+the HF snapshot (resharded, per-tensor identical — see above), which carries its LICENSE/NOTICE files — keep them
+(that is the attribution obligation), and don't imply Google endorsement in the tag name or description.
 
-## Known blocker (2026-07-17 release session)
-
-The full pipeline was exercised end to end on a rented 5090 (vast.ai): preflight 34/34, config pinned at
-4096/4096/util 0.90 (decode twin on), HF-parity validation 4/4 — but the **zero-recompile verify FAILS**:
-~270 of ~580 serving kernels regenerate with *different source text on every process launch* (boot 2: 265 new
-cache keys; boot 3, with the union baked: 273 new). Per-boot codegen nondeterminism defeats the content-addressed
-cache across restarts, so success criterion 2 is structurally unattainable until it is fixed (suspect: an unordered
-set/dict iteration leaking into source text, amplified by hash randomization across processes — local no-GPU repro:
-render the same golden twice in separate processes and diff). The image otherwise works: offline boot, zero
-downloads, correct completions, zero request-time compiles. Do not push a tag until the determinism fix lands and a
-re-warm verifies clean.

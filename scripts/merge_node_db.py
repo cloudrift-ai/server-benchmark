@@ -126,7 +126,7 @@ def fetch_and_merge(
     """Snapshot the remote autotune DB, scp it back, merge its node rows into
     ``dest`` (default: the local tune DB), and print the per-card receipt. Returns the
     rows merged. The reusable entry point shared by this CLI and the folded-in merge
-    step of ``remote_node_tune.py``."""
+    step of ``remote_node_collect.py``."""
     src = _fetch_remote_snapshot(remote, ssh_key=ssh_key, port=port, remote_db=remote_db)
     try:
         return _merge_and_report(src, dest)

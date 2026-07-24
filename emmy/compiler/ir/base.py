@@ -107,6 +107,24 @@ class InputOp(Op):
 
 
 @dataclass
+class AuxOutputOp(Op):
+    """Sentinel for an AUXILIARY output buffer of its (sole) input node — a second buffer that
+    node's kernel writes beside its primary output (the row-statistic ``__sq`` workspace the
+    stat-sink epilogue accumulates, ``025_sink_row_reduce``). No computation and no launch of
+    its own: the producing launch is the input node's, which lists this buffer among its
+    ``outputs`` / ``arg_order`` (and ``zero_outputs`` — a ``RowAccum``-accumulated buffer is
+    memset per launch, which is also what marks its first write for the slab planner). The
+    node exists so the buffer gets planned/allocated like any scratch node and so consumers
+    depend on the producer through ordinary graph edges."""
+
+    def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
+        raise NotImplementedError("AuxOutputOp's shape is fixed by the pass that mints it; use node.output.shape")
+
+    def forward(self, *inputs):
+        raise NotImplementedError("AuxOutputOp is a sentinel; its buffer is written by the producer node's kernel")
+
+
+@dataclass
 class ConstantOp(Op):
     """Fixed tensor: weights, RoPE tables, scalars. Not an activation.
 
@@ -122,6 +140,13 @@ class ConstantOp(Op):
     layout — what the loader needs to read from safetensors before
     running ``load_ops``. Empty for scalar constants and for synthetic
     constants emitted by passes (which never reach the loader).
+
+    ``source_parts`` is the MULTI-source alternative to ``source_path``: an ordered tuple of
+    ``(path, pre-chain shape)`` pairs the loader reads individually and concatenates along
+    **axis 0** before running ``load_ops`` (``merge_sibling_linears``' N-concat of sibling
+    projection weights — axis 0 is the ``(N, K)`` out-features axis). Exactly one of
+    ``source_path`` / ``source_parts`` is set on a loadable constant; ``source_shape`` /
+    ``source_dtype`` describe the post-concat source.
 
     **Value binding** — a scalar constant binds its value EXACTLY ONE of three ways, never
     ambiguously (enforced in :meth:`__post_init__`):
@@ -144,12 +169,17 @@ class ConstantOp(Op):
     context_value: Expr | None = None  # a RUNTIME scalar bound from context (sym_values); see class doc
     load_ops: tuple[Op, ...] = ()
     source_path: str | None = None
+    source_parts: tuple[tuple[str, tuple[int, ...]], ...] = ()  # axis-0 concat of (path, shape) parts; see class doc
     source_shape: tuple[int, ...] | None = None
     source_dtype: str | None = None
 
     def __post_init__(self) -> None:
         if self.value is not None and self.context_value is not None:
             raise ValueError(f"ConstantOp {self.name!r} binds EITHER a static value OR a context_value, not both")
+        if self.source_path is not None and self.source_parts:
+            raise ValueError(f"ConstantOp {self.name!r} binds EITHER a source_path OR source_parts, not both")
+        if self.source_parts:  # normalize the JSON round-trip's nested lists back to hashable tuples
+            self.source_parts = tuple((p, tuple(int(d) for d in s)) for p, s in self.source_parts)
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
         raise NotImplementedError("ConstantOp has no inputs; use node.output.shape directly")

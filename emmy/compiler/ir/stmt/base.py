@@ -98,6 +98,13 @@ class RenderCtx:
     # so they compose with non-default-dtype operands. Set transiently
     # by ``Assign.render`` around the native expression render.
     literal_default_dtype: str | None = None
+    # True iff EVERY thread of the block is executing the current scope — set by ``Tile.render``
+    # when the static grid covers the iteration space exactly (the ``_gid < N`` tail guard is
+    # elided), and CLEARED by any divergent scope (``Cond.render``). Consumed by
+    # ``RowAccum.render`` to pick the block-level fold (smem + ``__syncthreads`` + one
+    # ``atomicAdd`` per block) over the sync-free warp fold — a barrier is only legal when no
+    # thread of the block can be masked off the scope.
+    full_block: bool = False
     # C-scope-local declared locals (the mma lane vars ``_g`` / ``_t``, the
     # ``cp.async`` staging address ``_smem_addr``). A self-scoping stmt declares
     # these once per ``{ }`` scope and reuses / reassigns them afterward instead

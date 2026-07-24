@@ -20,7 +20,11 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
 
 ## Module map
 
-- `__init__.py` — `register()`, the entry-point hook. Never imports vllm/torch at module level.
+- `__init__.py` — `register()`, the entry-point hook. Never imports vllm/torch at module level. Besides registering
+  the model classes it calls `ensure_plugin_logging()` (`emmy/logging_setup.py`): under a bare vLLM entrypoint
+  nothing handles emmy's INFO records, which would silence the runners' boot/pack lines in `docker logs` — the
+  gemma4 image's verify gate greps the "pack hit" line there (no-op when logging is already configured, e.g. the
+  `emmy` CLI).
 - `vllm_model.py` — `EmmyEmbedModel` (the only module importing vllm). An `nn.Module` with **no parameters**:
   `is_pooling_model = True`, `IsAttentionFree` (no vLLM `Attention` layers → V1 builds an empty KV-cache spec),
   `attn_type = "encoder_only"` (vLLM disables chunked prefill → every request reaches `forward` whole),
@@ -53,9 +57,10 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   → repeated execution + captured replay. Trunk compute dtype follows vLLM's `--dtype` (`mc.dtype`, mapped in
   `vllm_model._trunk_dtype_str`): `float32`→fp32, `float16`→fp16, anything else (e.g. `bfloat16`/`auto`) downcasts to
   fp16 with a warn — the runner's numpy weight carrier can't represent bf16, and only fp16/fp32 trunks are supported.
-  When `EMMY_SERVING_STATIC=1` (`config.serving_static`), `create` instead traces a **fully-static**
-  `(max_num_seqs, max_seq_len)` graph (no dynamic_shapes — static extents for both batch and seq) and
-  `forward_hidden_states_batched` runs each step as one padded batched forward — see "Static mode" below.
+  With `EMMY_SERVING_BATCHED=1` (`config.serving_batched`) the symbolic-seq trace bakes the batch extent at
+  `max_num_seqs` and `forward_hidden_states_batched` runs each step as one batched forward padded to the step's
+  longest sequence; `EMMY_SERVING_STATIC=1` (`config.serving_static`) instead traces a **fully-static**
+  `(max_num_seqs, max_seq_len)` graph (no dynamic_shapes) — see "Batched modes" below.
 - `packed.py` — `split_spans(positions, max_seq_len)`: vLLM V1 hands pooling models one packed `(num_tokens,)` tensor
   with per-request 0-based positions; spans split at `positions == 0`. Hardened for `_dummy_run`'s garbage profiling
   batches (index 0 always opens a span; overlong spans are chopped).
@@ -63,8 +68,14 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `apply_chat_template` (delegates to the HF tokenizer). Used by the standalone **generation oracle**
   (`commands/generate.py`) — `emmy generate`'s host loop re-runs the whole fp16 prefix each step on the CUDA
   backend and samples with this. The generative *vLLM plugin* (`EmmyGenModel`) builds on this oracle.
+- `twins.py` — **weight-free serving-twin capture**. Builds a trimmed random-init skeleton from a model's
+  `config.json` alone (no checkpoint download — a trace never reads a weight value; `layer_types` collapses to one
+  local + one `full_attention` layer, the vocab shrinks to a stub) and traces the `pre`/`post` twins through the same
+  `build_attention_split_wrapper` / `trace_split` path serving uses. Backs `emmy eval golden --in-model` and the
+  golden drift CI gate; `scripts/capture_gen_twins.py` remains the full-checkpoint capture for tuning.
 - `gen_runner.py` — `EmmyGenRunner` (Phase 2; sibling to `EmmyForwardRunner`). Carves SDPA out of every
-  decoder layer (`build_attention_split_wrapper`), compiles **two dynamic-`num_tokens` programs per layer** (`pre` +
+  decoder layer (`build_attention_split_wrapper`; Gemma-nano PLE blocks — `hidden_size_per_layer_input` — are
+  rejected loudly there: the carve has no seam for the `per_layer_input` multiply), compiles **two dynamic-`num_tokens` programs per layer** (`pre` +
   `post`) over the flattened `[num_tokens, H]` layout, and exposes `embed` (Gemma's √hidden embed-scale folded into the
   gather table) / `forward_layer_pre(L,…)→(q,k,v)` (un-rotated 2-D seam; carves q/k/**v**-norm, and Gemma-4's global
   `attention_k_eq_v` where V reuses K's projection) / `forward_layer_post(L, attn_out, residual)→hidden` / `final_norm`.
@@ -72,10 +83,12 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   use a larger `global_head_dim` than its sliding ones, so each layer's `pre`/`post` compiles at its own width. The caller stitches between
   `pre` and `post` (a reference torch SDPA in the Phase-2 host stitch; vLLM paged `Attention` in Phase 3). **I/O:**
   the plugin runs **device-resident at every width**: the **decode hot path** (`num_tokens ≤ bucket`) rides the
-  captured static twins (`run_device` — captured-replay, torch↔cupy DLPack zero-copy), and **prefill /
-  chunked-prefill steps** ride the static **prefill-chunk twin** (`decode_bucket < num_tokens ≤ prefill_bucket`
-  — default = mnbt, `EMMY_GEN_PREFILL_BUCKET` overrides / `0` disables; exact grids on the hot chunk width, pad →
-  run → slice like the decode twin) or, past the bucket, the SYMBOLIC programs' `run_device_sym`
+  captured static twins (`run_device` — captured-replay, torch↔cupy DLPack zero-copy), a **FULL chunked-prefill
+  step** rides the static **prefill-chunk twin** (`num_tokens == prefill_bucket` EXACTLY — default = mnbt,
+  `EMMY_GEN_PREFILL_BUCKET` overrides / `0` disables; exact grids on the hot chunk width. The boundary is equality,
+  not a range: the twin always computes `prefill_bucket` rows, so an over-bucket decode batch or a partial tail
+  chunk routed through it would pay the full-bucket grids for a sliver of real rows), and every other width rides
+  the SYMBOLIC programs' `run_device_sym`
   (`num_tokens ≤ prefill_capacity`, capacity = vLLM's `max_num_batched_tokens`, passed as `max_tokens` at runner
   build) — grids sized per step via
   `set_sym_values` over capacity-built buffers, launches issued on torch's stream, no per-T graph capture
@@ -92,6 +105,19 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   twin entirely at the cost of decode speed.
   **Multimodal wrappers:** the trunk is resolved through `language_model` (gemma-4 "unified" nests the decoder stack +
   embed/norm there) and the text dims come from `config.text_config`.
+  **Tuning what serving actually runs.** The deploy pick reads the golden tier, then box-local `perf`/reservoir
+  evidence — and only evidence recorded against the *serving graph* carries serving. An isolated golden snippet does
+  not: fusion inside a real block produces a different graph (`F.rms_norm(x) @ w` binds a cone the in-model op does
+  not). So the evidence path is the **twins** — the `pre`/`post` graphs at each width, captured by
+  `scripts/capture_gen_twins.py` (which calls `gen_runner.trace_split`, the same trace `_compile_split` makes, so the
+  captured JSON is byte-for-byte what serving compiles) and then fed to `emmy tune` with `EMMY_TUNE_DB` /
+  `EMMY_ONLINE_FILE` pointed at a twin-local DB. Capture a **global** (`full_attention`) layer alongside the sliding
+  one for any model whose layers are not homogeneous — gemma-4's global layers carry a larger `head_dim`, so their
+  projections are different shapes with different optimal configs. Re-capture whenever a tracer/recognizer change
+  alters the graphs: the DB's evidence is keyed to structural signatures, and stale evidence applied to new graphs
+  serves worse than either coherent state. Whether the *recorded goldens* still deploy against the current twins is
+  checked continuously: `emmy eval golden --in-model` re-traces them weight-free (`twins.py`) and audits per fork
+  (MATCH / DRIFT / GAP), and `tests/compiler/test_golden_drift_gate.py` runs the same audit in CI.
 
   > **Memory budget (measured, gemma-4-12B / 32 GB RTX 5090).** The two artifacts that made the 12B need ~2–3× stock
   > vLLM's memory (it only fit at `ctx 256` with the decode twin off) are both fixed:
@@ -114,9 +140,17 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   Gemma-4 global layers use a larger head_dim) and gets `per_layer_sliding_window` so Gemma's sliding/global layers
   window correctly) + one RoPE module **per layer** (`_build_rotaries`: homogeneous models share one; Gemma-3/4
   keys theta AND head_dim on layer type — local vs global — a bare `Attention` does no RoPE) + `ParallelLMHead` + `LogitsProcessor`
-  (`soft_cap=final_logit_softcapping`, so Gemma-4's final-logit softcap applies). The trunk compute (embed + per-layer
+  (`soft_cap=final_logit_softcapping`, so Gemma-4's final-logit softcap applies; `compute_logits` also -infs the
+  generation config's `suppress_tokens` — gemma-4 lists the mm delimiter tokens `<image|>`/`<audio|>` there, HF
+  generate and stock vLLM honor the list, and a degenerate text prompt can genuinely rank one top-1, which would
+  decode to empty output). The trunk compute (embed + per-layer
   pre/post + final norm) is the `EmmyGenRunner`; vLLM owns only `lm_head` (`load_weights` claims `lm_head.weight`, or the
-  tied embed alias). `forward` brackets each `self.attn[L](q,k,v)` with two emmy replays (pre/post), applying that
+  tied embed alias). On a tied checkpoint `load_weights` then hands the loaded head to the runner
+  (`adopt_embed_table`) so the runner drops its own ~2 GiB folded device copy and gathers from the SHARED raw table
+  (the gemma embed-scale re-applies at gather in fp32 — the head must read the table unscaled), and releases the freed
+  torch/cupy blocks to the driver **before vLLM's KV-cache profiling** — the reclaimed memory becomes KV blocks
+  (gemma-4-12B on a 5090: 17.7k → 27.5k KV tokens, the difference between admission-queueing and beating stock TTFT
+  on the 4K/4K c=8 workload). `forward` brackets each `self.attn[L](q,k,v)` with two emmy replays (pre/post), applying that
   layer's RoPE in between (A2). Uniform sliding-window (Qwen2-style `use_sliding_window`) and dual-chunk are rejected. `forward` branches on `num_tokens`: the decode hot
   path (`≤ bucket`) runs `_forward_device` (q/k/v + attn_out stay CUDA tensors through RoPE + attention, no host
   hop); prefill keeps the numpy path. Select via `--runner generate` +
@@ -124,8 +158,12 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   this for seam coherence). Registered in `__init__.py`. **Whole-step decode CUDA graphs are the `emmy serve
   --generate` DEFAULT**: no `--enforce-eager`; instead a `--compilation-config` with `cudagraph_mode:
   FULL_DECODE_ONLY` (full cudagraphs need no torch.compile — vLLM wraps the model in its `CUDAGraphWrapper`) and
-  `cudagraph_capture_sizes` clamped to the decode bucket (a size above the bucket would capture the symbolic
-  fallback path, whose per-layer host numpy hops abort a stream capture). Under the outer capture,
+  `cudagraph_capture_sizes` laddered up to `--max-num-seqs` (sizes at or below the decode bucket run the static
+  decode twin; sizes above it capture the device-resident symbolic programs — both paths are capture-validated,
+  `test_gen_capture_gpu` / the two-size live-replay test; over-bucket capture was worth +10.6% req/s at c=64,
+  and a decode bucket matched to the concurrency beats riding the symbolic captures — the bucket-64 golden set
+  took c=64 TPOT 35.4 → 22.5 ms). Under the
+  outer capture,
   `_Program.run_device` detects `torch.cuda.is_current_stream_capturing()` and issues the raw launch sequence
   (`run_once`) instead of its own graph machinery — nested stream capture and graph launch are both illegal in a
   capturing stream — so the whole decode step (embed + 48× pre/RoPE/paged-attention/post + final norm) records
@@ -134,32 +172,32 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   capturable then); a caller-supplied `--compilation-config` wins over the default. Prefill and
   over-bucket decode batches stay eager under FULL_DECODE_ONLY by construction.
 
-## Static mode (`EMMY_SERVING_STATIC=1`) — static extents for both batch and seq
+## Batched modes — `EMMY_SERVING_BATCHED=1` (symbolic seq) and `EMMY_SERVING_STATIC=1` (static extents)
 
-The default path is symbolic-seq, **one sequence per forward** (`batch_cap = 1`). Setting `EMMY_SERVING_STATIC=1`
-switches the runner to a **fully-static `(N, max_seq_len)` program** (static extents for both batch and seq) so a whole
-scheduler step runs as one batched forward. The batch `N` is **vLLM's own `max_num_seqs`**
-(`vllm_config.scheduler_config.max_num_seqs`), read at init — so the batch is sized by the standard `--max-num-seqs`
-flag, not a separate emmy knob (the toggle is boolean; the size comes from what vLLM hands us). Mind the default
-`max_num_seqs=256`: pair the opt-in with a sane `--max-num-seqs` or the static `(256, max_seq_len)` program will be huge.
+The default path is symbolic-seq, **one sequence per forward** (`batch_cap = 1`). Two opt-ins run a whole scheduler
+step as ONE padded batched forward instead (`runner.forward_hidden_states_batched`). In both, the batch cap is
+**vLLM's own `max_num_seqs`** (`vllm_config.scheduler_config.max_num_seqs`), read at init — the batch is sized by the
+standard `--max-num-seqs` flag, not a separate emmy knob (the toggle is boolean; the size comes from what vLLM hands
+us). Mind the default `max_num_seqs=256`: the buffer set allocates at `(max_num_seqs, max_seq_len)` capacity, so pair
+either opt-in with a sane `--max-num-seqs` and a workload-sized `--max-model-len`.
 
-**Measured (RTX 5090, Qwen3-Embedding-0.6B, uniform 512 tokens, concurrency 32):** this is currently a throughput
-**regression**, not a win — the static `(32, 512)` forward takes ~1.1 s (26.6 req/s) vs the batch-1 path's 64 req/s and
-stock vLLM's ~232 req/s. Making the extents static is *not* the lever: the batched program does B× the existing,
-non-flash, O(B·H·S²)-materialized attention,
-and the static-shape kernels are cold greedy picks (untuned, unlike the batch-1 symbolic kernels which carried prior
-tuning). The throughput win needs efficient attention (flash/varlen, follow-up #1) and/or an autotune of the static
-batched shape — batching alone, over today's kernels, loses. Why static, not symbolic: the dynamic-seq
-(masked-tile) kernels **miscompute batch>1** (the batch axis isn't threaded through the masked attention/reduction
-codegen — empirically every batch row is wrong), whereas a fully-static trace bakes correct batch strides. So the
-batched program fixes both axes: every step is **padded to `(N, max_seq_len)`** — short sequences pad on the right,
-short batches pad with dummy rows (`runner.forward_hidden_states_batched`). Causal masking makes this safe: a token
-attends only to earlier positions, so a row's real prefix is independent of its right-padding, and dummy rows are never
-read out. The mask + position_ids are request-independent (full causal at `max_seq_len`, arange positions) so they are
-fed once at build and never updated — only ids change per step. **Limitation:** correct only for the static shape, so
-it pads every sequence to `max_seq_len` (zero waste when all requests are that length — the benchmark case — but
-wasteful for mixed/short lengths); set `--max-model-len` to the actual workload length. Not a general production path;
-the general fix is follow-up #1.
+- **`EMMY_SERVING_BATCHED=1` — the preferred batched mode.** The trace keeps `seq_len` symbolic with the batch extent
+  baked at the cap; each step pads only to the **step's longest sequence** (not `max_seq_len`), sizes the grids to it
+  (`set_sym_values`), and replays the captured graph for that seq_len (one capture per distinct S, the same LRU cache
+  as the per-sequence path). Uniform-length steps pad nothing; mixed steps waste only the intra-step length spread —
+  the remaining padding waste is what the cu_seqlens varlen work (follow-up #1) removes.
+- **`EMMY_SERVING_STATIC=1`** builds ONE fully-static `(N, max_seq_len)` program (static extents on both axes) and
+  pads every step to `(N, max_seq_len)`. Zero waste only when all requests are exactly `max_seq_len`; kept as the
+  fixed-shape stand-in (static traces need no masked tiles at all). Takes precedence if both vars are set.
+
+Padding is safe in both: causal masking makes a row's real prefix independent of its right-padding (a token attends
+only to earlier positions), and dummy rows below the cap are never read out. Historically the symbolic-seq kernels
+miscomputed batch>1, which is why only the static mode existed; the root cause was the serving capacity-buffer path's
+**TMA descriptors baking allocation-shaped strides** (a batch axis above the symbolic seq axis has a `seq_len`-dependent
+global stride, so batch row 0 was right and every higher row read shifted garbage — invisible at `batch_cap = 1`).
+Fixed in `backend/cuda/program.py`: symbolic-src descriptors re-encode at the RESOLVED shape per sym key, cached
+beside the per-S graph cache (`_descs_now`); `tests/serving/test_runner_batched_gpu.py` pins both modes per row
+against eager, and the batch {2, 4, 32} × seq matrix in `tests/compiler/ir/test_dynamic_shapes.py` pins the kernels.
 
 ## Execution model (v2: captured graphs) and its known costs
 
@@ -178,9 +216,10 @@ Recorded follow-ups, in impact order:
 
 1. **Packed-varlen attention** (cu_seqlens-aware SDPA tiles) — run vLLM's whole packed batch in one launch at *mixed*
    lengths; the general form of the throughput fix. At concurrency 1 (no batching) emmy is ~1.5× stock; the rest of
-   the concurrency-32 gap is batching. The static batched mode above is the fixed-length stand-in; the remaining work is
-   (a) making the masked-tile kernels batch-correct so a symbolic-seq batched program works, then (b) cu_seqlens varlen
-   so one launch handles mixed lengths without padding to `max_seq_len`.
+   the concurrency-32 gap is batching. Step (a) — batch-correct masked tiles + the symbolic-seq batched program — is
+   **done** (`EMMY_SERVING_BATCHED`, see the batched-modes section above); remaining is (b) cu_seqlens varlen tiles so
+   one launch handles mixed lengths with no padding at all (its own session — the ragged row→sequence mapping in the
+   flash schedule + the mask derivation from `cu_seqlens`).
 2. **dlpack zero-copy I/O** — **done**: `forward_hidden_states` takes/returns torch CUDA tensors, bridged to the cupy
    buffers via `cp.from_dlpack` / `torch.from_dlpack` on torch's stream — no GPU↔host round-trip (`upload_prefix_device`
    / `output_prefix_device`). The only residual host touch is `positions.cpu()` for span boundaries.
@@ -201,13 +240,22 @@ Recorded follow-ups, in impact order:
   **generative** path no longer needs it: `run_device` is capture-aware and `serve --generate` defaults to
   whole-step decode graphs (see `gen_runner.py` above).
 - Startup compiles the whole model (~1–2 min for 0.6B warm-cubin-cache; first boot pays nvcc). `EMMY_CUBIN_CACHE`
-  persistence across container restarts is what keeps reboots fast.
+  persistence across container restarts is what keeps reboots fast. **`EMMY_PACK_DIR`** cuts the rest of the warm
+  boot: `EmmyForwardRunner.create` keys an execution-plan pack (`compiler/backend/pack.py`) on model id + config
+  hash + serving shape — a hit loads binary-keyed plans (`CompiledProgram.build_from_plan`) and skips trace, pass
+  pipeline, fork resolution, and codegen entirely (weights still bind from the checkpoint via the plan's
+  `source_path` refs); a miss compiles in full and writes the pack for the next boot. Any mismatch — retune under
+  a different config, nvcc/toolkit change, evicted cubin — silently falls back to the full compile.
 - The shared buffer set is allocated at `max_seq_len` (`--max-model-len`); every accepted request (S ≤ `max_seq_len`)
   uses the captured-graph path. The S²-attention scratch dominates that allocation (0.6B at 4096 ≈ 15 GB), so lower
   `--max-model-len` for bigger models / smaller cards.
 - vLLM's memory profiler only sees torch allocations; the runner's cupy-held weights/activations are invisible to it.
   Leave `--gpu-memory-utilization` headroom accordingly (the attention-free model needs no KV cache, so vLLM's own
-  budget is tiny).
+  budget is tiny). The GENERATIVE arm has the opposite problem — it needs a real KV cache, and vLLM budgets
+  `util × total − currently-used`, so the default 0.90 line can fall below the emmy residents and fail the
+  min-KV fit at long `--max-model-len` (gemma-4-12B at mml 8448: 1.37 GiB left of the 1.7 needed). `emmy serve
+  --generate` therefore defaults the emmy arm to `--gpu-memory-utilization 0.97` (stock keeps 0.90; an explicit
+  flag wins).
 
 ## Testing
 

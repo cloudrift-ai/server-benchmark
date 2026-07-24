@@ -471,14 +471,15 @@ def _stage_candidates(kernel, probe, plan: TilePlan, budget: int = STATIC_SMEM_C
 def _reduce_candidates(kernel, place, plan: TilePlan, probe: Contraction | None = None) -> list[str]:
     """The ``REDUCE`` codec candidates for one tile candidate — serial ``""`` first (option-0),
     then the legal coop / ILP moves (per-cell tier only — the non-output-tiled contract) and the
-    divisor- and occupancy-guarded split-K moves (deferred-only on the warp tier). An **atomic**
-    split (``g<w>a``) is offered only when the kernel's projection epilogue distributes over the
-    add (``projection_distributes`` off the ``probe`` node) — a non-distributive fused projection
-    would raise at ``030_split_reduce`` and waste a search slot; the deferred ``g<w>k`` finalize stays
-    legal for any epilogue. A pinned ``REDUCE`` is authoritative and keeps the pin contract: a
-    ``g`` split rides every tile (an invalid warp slice / atomic-on-non-distributive raises in
-    :func:`_splitk_option` / ``030_split_reduce``, as a pin should), a ``b``/``r`` partition applies to
-    the per-cell tier only (a tiled candidate has no row under it)."""
+    divisor- and occupancy-guarded split-K moves (both finalizes, both tiers). An **atomic**
+    split (``g<w>a``) is offered only on a single-fold node whose FULL projection tail (the node
+    epilogue + a computed-A ``Map`` wrapper's body, exactly what ``_splitk_option`` folds into
+    the partial) distributes over the add — a non-distributive projection or a multi-channel
+    ⊗-combine would raise at ``030_split_reduce`` and waste a search slot; the deferred ``g<w>k``
+    finalize stays legal for any epilogue. A pinned ``REDUCE`` is authoritative and keeps the pin
+    contract: a ``g`` split rides every tile (an invalid warp slice / atomic-on-non-distributive
+    raises in :func:`_splitk_option` / ``030_split_reduce``, as a pin should), a ``b``/``r``
+    partition applies to the per-cell tier only (a tiled candidate has no row under it)."""
     ext = reduce_loop(kernel.op).axis.extent
     if REDUCE.raw() is not None:
         split = _splitk_pin()
@@ -505,7 +506,12 @@ def _reduce_candidates(kernel, place, plan: TilePlan, probe: Contraction | None 
     # and applies the ⊗-combine projection once after the cross-partition sums.
     if k is not None and free // _tile_area(plan) <= _SPLITK_MAX_CTAS:
         step = plan.atom.atom_k * plan.bk if plan.is_warp else 1
-        atomic_ok = probe is not None and (len(probe.epilogue) == 0 or projection_distributes(probe.epilogue, (probe.acc,)))
+        # The atomic gate judges the FULL projection the split partial will carry: a computed-A
+        # node's ``Map``-wrapper body is folded into the inner epilogue at ``_splitk_option``, so
+        # it must distribute too. Multi-fold (gate/up) nodes never offer ``a`` — the per-channel
+        # ⊗-combine needs the deferred finalize kernel.
+        tail = () if probe is None else (*probe.epilogue, *(kernel.op.body if isinstance(kernel.op, Map) else ()))
+        atomic_ok = probe is not None and len(probe.folds) == 1 and (len(tail) == 0 or projection_distributes(tail, (probe.acc,)))
         for move in splitk_moves(warp=plan.is_warp):
             sp = ReducePlan.parse(move)
             if sp.finalize == "atomic" and not atomic_ok:
@@ -628,6 +634,18 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], str]:
     return rows, kaxis
 
 
+def _is_splitk_spec(spec: str) -> bool:
+    """True when a ``REDUCE`` spelling is a cross-CTA GRID split (``g<w>[a|k]``) — the partition
+    ``_splitk_option`` realizes into a partial/finalize pair. An unparseable or non-split spelling
+    (``""`` / ``b`` / ``r``) is not a split."""
+    if not spec:
+        return False
+    try:
+        return ReducePlan.parse(spec).needs_split
+    except ValueError:
+        return False
+
+
 def _splitk_pin() -> str:
     """The pinned ``g<w>[a|k]`` split-K spec (or ``""``) — the cross-CTA K partition a
     ``CONTRACTION`` honors through the structural ``Reduction ⊃ Contraction`` fork
@@ -692,12 +710,16 @@ def _stage_spec(kernel) -> str:
 
 def _can_stage_warp(stage, k_axis: Axis, tile_m: int, tile_n: int, bk: int, atom_k: int, mask_m: bool, mask_n: bool, b_trans: bool) -> bool:
     """cp.async staging eligibility: a ``cp.async`` stage over a contraction with a STATIC,
-    tile-divisible K axis and a canonical (non-transposed) B operand. A masked / symbolic **M**
-    (output rows) is fine — the A-slab fill clamp-reads the overhanging rows in-bounds and the
-    ``RegStore`` guards their store. A masked **N** (the B-slab inner dim) and a symbolic /
-    non-divisible **K** stay gmem-direct (K zero-fill is a follow-up). Staging only ever *adds* a
-    faster lowering, so an ineligible kernel silently falls back to gmem-direct."""
-    if stage is None or stage.transport != "cp.async" or b_trans or mask_n:
+    tile-divisible K axis. A masked / symbolic **M** (output rows) is fine — the A-slab fill
+    clamp-reads the overhanging rows in-bounds and the ``RegStore`` guards their store. A masked
+    **N** and a symbolic / non-divisible **K** stay gmem-direct (K zero-fill is a follow-up).
+    A transposed B (the serving ``F.linear`` layout, K gmem-contiguous) stages into an N-MAJOR
+    slab (``tile_n × bk``) whose inner dim maps stride-1 to gmem K exactly like A's — the fill's
+    chunk contiguity and row-base alignment hold automatically (B's row stride K is a multiple
+    of ``bk_elems``, which the chunk width divides), so only the K-chunk evenness gates it.
+    Staging only ever *adds* a faster lowering, so an ineligible kernel silently falls back to
+    gmem-direct."""
+    if stage is None or stage.transport != "cp.async" or mask_n:
         return False
     if not k_axis.extent.is_static:
         return False
@@ -705,8 +727,9 @@ def _can_stage_warp(stage, k_axis: Axis, tile_m: int, tile_n: int, bk: int, atom
     if k_axis.extent.as_static() % bk_elems != 0:
         return False
     # cp.async needs a ≥4-byte contiguous chunk; the 16-bit mma operands give 2 B/elem, so the
-    # inner slab dim must be even (A's BK, B's tile_n). Odd ⇒ fall back.
-    return (bk_elems % 2 == 0) and (tile_n % 2 == 0)
+    # inner slab dim must be even (A's BK, and B's tile_n — or BK again on a transposed B, whose
+    # N-major slab keeps K inner). Odd ⇒ fall back.
+    return (bk_elems % 2 == 0) and (b_trans or tile_n % 2 == 0)
 
 
 def _tma_operand_rank_ok(index: tuple, tile_name: str, k_name: str) -> bool:
@@ -725,12 +748,14 @@ def _can_stage_warp_tma(
     stage, k_axis: Axis, n_axis: Axis, tile_n: int, bk: int, atom_k: int, elem_bytes: int, mask_n: bool, b_trans: bool
 ) -> bool:
     """TMA (``cp.async.bulk.tensor``) staging eligibility: a ``tma`` stage over a contraction with a
-    STATIC, tile-divisible K and a canonical B. A masked / symbolic **M** is fine — the descriptor's
-    globalDim is the runtime M and TMA zero-fills the box overhang past it (no fill clamp needed). A
-    masked **N** and a symbolic / non-divisible **K** stay gmem-direct. The box's inner dim (A's BK,
-    B's tile_n) and the source's inner global stride (A's K, B's N) must be 16 B-aligned (the
-    NONE-swizzle TMA box-copy rule)."""
-    if stage is None or stage.transport != "tma" or b_trans or mask_n:
+    STATIC, tile-divisible K. A masked / symbolic **M** is fine — the descriptor's globalDim is the
+    runtime M and TMA zero-fills the box overhang past it (no fill clamp needed). A masked **N**
+    and a symbolic / non-divisible **K** stay gmem-direct. The box's inner dim and the source's
+    inner global stride must be 16 B-aligned (the NONE-swizzle TMA box-copy rule): canonical B
+    boxes ``(bk, tile_n)`` over strides (A's K, B's N); a transposed B (the serving ``F.linear``
+    layout) boxes N-major ``(tile_n, bk)`` — both operands' inner dim is then the K chunk and both
+    inner strides are K, so N drops out of the alignment gate."""
+    if stage is None or stage.transport != "tma" or mask_n:
         return False
     if not (k_axis.extent.is_static and n_axis.extent.is_static):
         return False
@@ -738,7 +763,8 @@ def _can_stage_warp_tma(
     k, n = k_axis.extent.as_static(), n_axis.extent.as_static()
     if k % bk_elems != 0:
         return False
-    return all((x * elem_bytes) % 16 == 0 for x in (bk_elems, tile_n, k, n))
+    inner = (bk_elems, k) if b_trans else (bk_elems, tile_n, k, n)
+    return all((x * elem_bytes) % 16 == 0 for x in inner)
 
 
 def _resolve_warp_stage(c: Contraction, stage: Stage, budget: int = STATIC_SMEM_CAP) -> Stage | None:
@@ -793,9 +819,10 @@ def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = ST
     is ``tma`` / ``cp.async`` and K is static (a computed-A contraction never reaches here — it keeps
     the ``Map`` form). A masked (overhanging) **M** is fine — the drain reads the slab by LOCAL tile
     coords and the overhanging store is guarded. A masked **N** or a transposed **B** stays gmem-direct:
-    the B-slab fill would clamp a chunk-start column into a row-crossing gmem address and hang the kernel
-    on the misaligned cp.async / TMA copy — the same refusal the warp tier makes (:func:`_can_stage_warp`
-    / :func:`_can_stage_warp_tma`). The slab K-chunk ``bk_elems`` is **derived** to fit ``depth``
+    the masked-N B-slab fill would clamp a chunk-start column into a row-crossing gmem address and hang
+    the kernel on the misaligned cp.async / TMA copy (the warp tier refuses the same), and the scalar
+    drain has no transposed-slab variant (the warp tier DOES stage a transposed B, via its N-major
+    slab). The slab K-chunk ``bk_elems`` is **derived** to fit ``depth``
     ``tile_m×bk + bk×tile_n`` operand slots in the smem ``budget`` (largest power-of-two dividing K; ``inputs``
     supplies the element dtype) — not spelled by a codec, so no schema change. ``depth >= 2`` is the
     scalar gmem→smem prefetch ring — the same ``staged_kloop`` phases the warp tier runs, the atom
@@ -807,9 +834,12 @@ def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = ST
 
     if not c.k_axis.extent.is_static or stage.transport not in ("tma", "cp.async"):
         return None
-    # A masked-N (overhanging inner dim) or transposed-B B-slab fill would clamp a chunk-start column
-    # into a row-crossing gmem address and hang on the misaligned 16 B copy — the warp tier refuses the
-    # same (:func:`_can_stage_warp` / :func:`_can_stage_warp_tma`).
+    # A masked-N (overhanging inner dim) B-slab fill would clamp a chunk-start column into a
+    # row-crossing gmem address and hang on the misaligned 16 B copy — the warp tier refuses the
+    # same (:func:`_can_stage_warp` / :func:`_can_stage_warp_tma`). A transposed B stays
+    # gmem-direct on THIS tier only: the warp tier stages it into an N-major slab, but the scalar
+    # drain reads the slab by ``(k, n)`` coords and has no transposed variant (pin-only tier, no
+    # serving fork rides it).
     if c.n.mask or c.b_trans:
         return None
     if not inputs or c.a_operand.input not in inputs:
@@ -873,7 +903,10 @@ def prologue_knob_bases(k2: str, stat_axis: str) -> tuple[dict, dict]:
     the same key set (the evidence pick's prefix-consistency: an absent key reads as "free"). Lives
     here (not the rule module) for the same ``Knob``-import reason as :func:`warp_tile_pinned`."""
     con = {"PLACE@cone": "fuse", _at(REDUCE, stat_axis): ""}
-    map_ = {_at(TILE, k2): "", _at(STAGE, k2): "", _at(REDUCE, k2): ""}
+    # The map form spells ``PLACE@cone`` too, so the cone placement is a decided key on EVERY row
+    # of the merged fork — that is what makes it selectable by the ordinary evidence pick (an
+    # absent key reads as "free" and would let a ``cut`` golden match a fused row).
+    map_ = {"PLACE@cone": "fuse", _at(TILE, k2): "", _at(STAGE, k2): "", _at(REDUCE, k2): ""}
     return con, map_
 
 
@@ -885,7 +918,7 @@ def _resolve_sync_stage(c: Contraction, budget: int = STATIC_SMEM_CAP, want_dept
     the 48 KiB smem budget: the A/B operand slabs plus one fp32 row per bridged statistic
     (``sync_stat_fill``'s decls — the same ``Contraction.stat_prologue`` seam the materializer
     fills through). ``want_depth >= 2`` is the **asymmetric B-only prefetch ring**: only the
-    canonical-B cp.async slabs ring (their copies for chunk ``i+d-1`` fly under chunk ``i``'s
+    B cp.async slabs ring (their copies for chunk ``i+d-1`` fly under chunk ``i``'s
     compute fill AND drain), while the compute-filled A slab and the stat rows stay
     single-buffer — ringing a compute fill buys no overlap (it runs on the drain's own
     threads). Measured on the gemma gate_up fused edge at M=512 (5090) the B-only ring loses
@@ -893,8 +926,9 @@ def _resolve_sync_stage(c: Contraction, budget: int = STATIC_SMEM_CAP, want_dept
     (3 → 2 CTAs/SM), the same cliff that killed the historical full-slab ring — but at decode
     M (tile_m ≤ 32) the A slab + stat rows are tiny and the tradeoff inverts, so
     :func:`_computed_a_rows` enumerates ``d1`` and ``d2`` as fork siblings (measured per
-    shape) and a ``STAGE`` pin's depth stays authoritative. A transposed-B
-    (all-sync) pipeline has nothing async to overlap and stays single-buffer. ``budget`` is the
+    shape) and a ``STAGE`` pin's depth stays authoritative. A transposed B rides the same
+    async B fills through its N-major slab (``_sync_operands`` — its own gmem orientation, K
+    stride-1), so the ring is enumerable on the serving ``F.linear`` fused edges too. ``budget`` is the
     device's per-block dynamic-smem opt-in cap (``ctx.max_dynamic_smem`` — the backend declares
     an ``extern __shared__`` pool and sets the func attribute past the 48 KiB static cap),
     falling back to the static cap when no context reaches the schedule."""
@@ -910,7 +944,7 @@ def _resolve_sync_stage(c: Contraction, budget: int = STATIC_SMEM_CAP, want_dept
     stat_bytes = len(stats) * c.m.tile * 4
     if a_bytes + b_bytes + stat_bytes > budget:
         return None
-    depth = want_depth if want_depth >= 2 and not c.b_trans and a_bytes + stat_bytes + want_depth * b_bytes <= budget else 1
+    depth = want_depth if want_depth >= 2 and a_bytes + stat_bytes + want_depth * b_bytes <= budget else 1
     return Stage(depth=depth, transport="sync", smem=(c.a_name,), bk_elems=bk_elems)
 
 
@@ -1079,6 +1113,12 @@ def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
     (``k`` vs ``<k>_ks``) are what avoid a double-reduce ``for k:[for k:]`` — every original ``k`` is
     visited once (``kslice`` folded into a partial, ``ksplit`` summed across partials)."""
     big_k = k_axis.extent.as_static()
+    # Only a dividing width factorizes losslessly — the enumeration path filters ``k % cta``
+    # upstream, so a non-divisor can only arrive via an EMMY_REDUCE pin, and truncating here
+    # would silently drop the ``K − w·⌊K/w⌋`` remainder columns of the contraction (the scalar
+    # tier has no step check to catch it). Refuse loudly, as a pin should.
+    if big_k % w:
+        raise ValueError(f"split-K width {w} does not divide K={big_k}; pick a dividing split width.")
     b = big_k // w
     ksplit = Axis(name=f"{k_axis.name}_ks", extent=Dim(w))
     kslice = replace(k_axis, extent=Dim(b))
@@ -1391,6 +1431,26 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         # (:func:`_splitk_option`, consumed by ``030_split_reduce``); a warp row through
         # :func:`_warp_option`; the rest through :func:`_tile_option`.
         rows, kaxis = _tile_rows(tile, place, ctx)
+        # Thread the cone placement onto every FORK ROW, not just the materialized op. The deploy
+        # pick builds its candidate rows from the fork tree's LEAF knobs, and an absent key reads as
+        # "free" in the evidence join — so leaving it off the contraction rows would let a golden
+        # recording ``PLACE@cone: cut`` match a fused row (deploying the fused kernel while
+        # reporting the cut's µs, the silent-wrong-deploy class). Constant across the rows, so it
+        # adds no branching to the tree.
+        if "PLACE@cone" in knobs:
+            rows = [{**r, "PLACE@cone": knobs["PLACE@cone"]} for r in rows]
+            if knobs["PLACE@cone"] == "cut":
+                # A cut row's own schedule is DISCARDED — ``020_cut_edge`` emits un-mapped LoopOps
+                # and each half re-enters ``010`` for its own fork, its own tile and its own golden.
+                # A split-K spelling on such a row is therefore not merely wasted enumeration:
+                # ``_splitk_option`` realizes the partial/finalize pair at RECOGNIZE time, so the
+                # cut rule later meets a Contraction carrying a split lead axis over a SLICED K,
+                # which its 2-D (m, k) cone workspace cannot express — and the cut silently never
+                # fires. Measured on the gemma-4 M=256 post twin: the down_proj cone arrived as
+                # ``lead=['a2_ks']`` and every cut attempt skipped, leaving the fused 2,515.8 µs
+                # kernel in place. Keep the serial spelling; the CONSUMER half picks its own
+                # split-K from its own golden (``mlp_down.m256`` records ``g4k``).
+                rows = [r for r in rows if not _is_splitk_spec(r.get(_at(REDUCE, kaxis), ""))]
         if not rows:
             # A computed-A (fused-cone) contraction with no legal warp row (fp32, no atoms, bad
             # geometry, over-budget slabs) contributes nothing — the recognizer's ``Map``-form

@@ -140,8 +140,9 @@ gmem-direct), and `state` (which slots the operand fragments) and the shared `re
 verbatim. The `Stage` spells two buffering levels:
 `d<depth>` is the gmem→smem ring (cp.async commit group / TMA mbarrier-phased prefetch over the K-slab loop),
 `p<reg_depth>` is the smem→register double-buffer (the `ldmatrix` ping-pong over the inner atom-K steps). Staging is a
-**pure perf transform** — an ineligible kernel (transposed-B, masked N, symbolic / non-divisible K, or a computed-A
-flash operand) silently falls back to gmem-direct, and a staged kernel is
+**pure perf transform** — an ineligible kernel (masked N, symbolic / non-divisible K, or a computed-A
+flash operand; a transposed B stages N-major on every transport since the serving-layout work) silently falls back
+to gmem-direct, and a staged kernel is
 **bit-identical** to its gmem-direct baseline. The **TMA** transport additionally requires **sm_90+**
 (Hopper/Blackwell): below it (`_schedule._tma_allowed`, mirroring the frontend TMA-fold gate) the `d*/tma*` moves are
 never offered and a `tma` pin declines to cp.async / gmem-direct — Ada/Ampere have no `cp.async.bulk.tensor` and nvcc
@@ -223,9 +224,12 @@ under a warp `TILE` pin: `_schedule._demoted_warp_option` nodifies the PLANAR �
 whose A fill is the producer CONE evaluated per slab cell (compute-fill) — the same `fill`/`commit`/`wait` seam,
 feeding the unchanged `ldmatrix` drain. The compute fill assigns each thread a 16-byte run of CONTIGUOUS slab
 cells (the row/col derivation hoists out of the per-cell code; per-thread gmem reads and smem stores merge into
-wide accesses; the cone replicates per cell with a `__c<j>` SSA suffix). A canonical (non-transposed) **B** is a
-plain weight copy and rides a vectorized `cp.async` issued BEFORE the compute fill, so the hardware copies fly
-underneath it (a transposed B keeps the per-thread copy fill); when a two-slot ring also fits the smem budget the
+wide accesses; the cone replicates per cell with a `__c<j>` SSA suffix). Every **B** fold channel is a plain
+weight copy riding a vectorized `cp.async` issued BEFORE the compute fill, so the hardware copies fly underneath
+it — a canonical B as the K-major `(bk × tile_n)` slab, a transposed B (the serving `F.linear` layout) as the
+N-major `(tile_n × bk)` slab in its own gmem orientation (`Operand.trans`; K stride-1 in gmem and smem, swizzle
+from `bk_elems`, drained by the plain no-`.trans` ldmatrix — the per-thread per-cell copy fill it replaced was the
+served fused edges' weight-stream deficit); when a two-slot ring also fits the smem budget the
 stage resolves at `depth=2` and the prefetched chunk's B copies stay in flight across the current chunk's drain. A
 **reduce-bearing (MONOID) cone** — the fused norm→linear edge — is nodified at RECOGNIZE time
 (`_atomize.bind_prologue_contraction`; real fork rows, not a pin rescue): the A cone carries its k-invariant prefix

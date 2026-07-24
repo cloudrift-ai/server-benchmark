@@ -9,7 +9,7 @@ tile flavors of the (now demolished) tile IR.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from emmy.compiler.dtype import F32 as _F32
 from emmy.compiler.ir.axis import Axis, AxisRole
@@ -175,16 +175,25 @@ def _extent_c(ax: Axis, ctx: RenderCtx) -> str:
     return f"({ext.expr.render(ctx)})"
 
 
-def _stride_c(axes, ctx: RenderCtx) -> str:
+def _stride_c(axes, ctx: RenderCtx, *, wide: bool = False) -> str:
     """Build a C expression for the product of axis extents — used as the
-    stride divisor in the grid-axis decode. ``1`` if ``axes`` is empty."""
+    stride divisor in the grid-axis decode. ``1`` if ``axes`` is empty.
+    ``wide`` prefixes the FIRST factor with a ``(long long)`` cast so the
+    whole product evaluates in 64-bit — a symbolic-grid divisor like
+    ``seq_len * 6144 * 256`` overflows int32 while being *computed*, before
+    any promotion against a 64-bit dividend can help."""
     if not axes:
         return "1"
-    return " * ".join(_extent_c(a, ctx) for a in axes)
+    factors = [_extent_c(a, ctx) for a in axes]
+    if wide:
+        factors[0] = f"(long long){factors[0]}"
+    return " * ".join(factors)
 
 
-def _render_grid_axis_decode(axes: tuple[Axis, ...], idx_expr: str, ctx: RenderCtx) -> list[str]:
-    """Decode ``idx_expr`` (``blockIdx.x`` or ``threadIdx.x``) into per-axis ints."""
+def _render_grid_axis_decode(axes: tuple[Axis, ...], idx_expr: str, ctx: RenderCtx, *, wide: bool = False) -> list[str]:
+    """Decode ``idx_expr`` (``blockIdx.x`` or ``threadIdx.x``) into per-axis ints.
+    ``wide`` keeps every stride divisor in 64-bit (see :func:`_stride_c`); the decoded
+    axis vars stay ``int`` — each is bounded by its extent."""
     pad = _pad(ctx.indent)
     if not axes:
         return []
@@ -197,10 +206,10 @@ def _render_grid_axis_decode(axes: tuple[Axis, ...], idx_expr: str, ctx: RenderC
         if not stride_axes:
             decoded.append(f"int {ax.name} = {idx_expr} % {extent};")
         else:
-            decoded.append(f"int {ax.name} = ({idx_expr} / ({_stride_c(stride_axes, ctx)})) % {extent};")
+            decoded.append(f"int {ax.name} = ({idx_expr} / ({_stride_c(stride_axes, ctx, wide=wide)})) % {extent};")
         stride_axes.append(ax)
     outer = axes[0]
-    outer_stride = _stride_c(list(axes[1:]), ctx)
+    outer_stride = _stride_c(list(axes[1:]), ctx, wide=wide)
     decoded[-1] = f"int {outer.name} = {idx_expr} / ({outer_stride});"
     return [pad + line for line in reversed(decoded)]
 
@@ -436,6 +445,10 @@ class Cond(Stmt):
         pad = _pad(ctx.indent)
         cond = self.cond.render(ctx)
         inner = ctx.child()
+        if inner.full_block:
+            # A conditional scope is divergent — a block-fold ``RowAccum`` (which barriers)
+            # inside it would hang the masked-off threads.
+            inner = replace(inner, full_block=False)
         body = render_body(self.body, inner)
         out = [f"{pad}if ({cond}) {{", *body, f"{pad}}}"]
         if self.else_body:

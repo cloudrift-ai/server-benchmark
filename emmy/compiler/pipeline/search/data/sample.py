@@ -51,7 +51,7 @@ def _split_by_prefix(knobs: dict) -> tuple[dict, dict, dict]:
 
 @lru_cache(maxsize=256)
 def compiled_s_features(
-    M: int, N: int, K: int, dtype: str, compute_cap: tuple[int, int], dynamic: tuple[str, ...] = ()
+    M: int, N: int, K: int, dtype: str, compute_cap: tuple[int, int], dynamic: tuple[str, ...] = (), trans_b: bool = False
 ) -> tuple[tuple[str, float], ...]:
     """The full ``S_*`` structural histogram for a matmul shape — by compiling its
     snippet to the loop dialect (where ``992_stamp_structural_features`` runs) and
@@ -69,12 +69,39 @@ def compiled_s_features(
     from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs  # noqa: PLC0415
 
     dynamic_shapes = build_torch_dynamic_shapes(parse_position_specs(list(dynamic))) if dynamic else None
-    graph, _, _ = graph_from_code(matmul_snippet(M, N, K, dtype), dynamic_shapes=dynamic_shapes)
+    graph, _, _ = graph_from_code(matmul_snippet(M, N, K, dtype, trans_b), dynamic_shapes=dynamic_shapes)
     compiled = Pipeline.build(LOOP_PASSES).run(graph)  # loop dialect — S_* stamped, no codegen
     s_feats: dict[str, float] = {}
     for n in compiled.nodes.values():
         s_feats.update({k: v for k, v in (getattr(n.op, "knobs", {}) or {}).items() if k.startswith(STRUCT_PREFIX)})
     return tuple(sorted(s_feats.items()))
+
+
+@lru_cache(maxsize=256)
+def traced_s_features(snippet: str, dynamic: tuple[str, ...], key: ShapeKey) -> tuple[tuple[str, float], ...] | None:
+    """The full ``S_*`` histogram of the ONE traced op keying to ``key`` — the
+    kind-generic sibling of :func:`compiled_s_features` (which merges every node's
+    stamps: correct for a single-op matmul snippet, wrong for the multi-op graphs the
+    other golden kinds trace — a ``linear_norm`` snippet realizes a producer matmul
+    beside the norm op, an attention trace a plain QKᵀ beside the flash op). Per
+    stamped op the histogram keys through :meth:`ShapeKey.from_s_features` — the
+    sanctioned golden↔measured join — and the first match wins (same-key twins carry
+    the same histogram). ``None`` when no op matches: the caller degrades to
+    :meth:`ShapeKey.s_features_arith`. GPU-free (``LOOP_PASSES`` stop before codegen),
+    cached — the goldens-format measurement-freeze loader pays it once per distinct
+    shape. Heavy imports deferred so importing this module stays torch-free."""
+    from emmy.commands.trace import graph_from_code  # noqa: PLC0415
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs  # noqa: PLC0415
+
+    dynamic_shapes = build_torch_dynamic_shapes(parse_position_specs(list(dynamic))) if dynamic else None
+    graph, _, _ = graph_from_code(snippet, dynamic_shapes=dynamic_shapes)
+    compiled = Pipeline.build(LOOP_PASSES).run(graph)
+    for n in compiled.nodes.values():
+        s = {k: v for k, v in (getattr(n.op, "knobs", {}) or {}).items() if k.startswith(STRUCT_PREFIX)}
+        if s and ShapeKey.from_s_features(s).joins(key):
+            return tuple(sorted(s.items()))
+    return None
 
 
 @dataclass(frozen=True)
@@ -140,7 +167,7 @@ class Sample:
         tunable, _ctx, _s = _split_by_prefix(cfg.knobs)
         dyn_specs = tuple(cfg.dynamic_specs())
         s_full = (
-            dict(compiled_s_features(cfg.M, cfg.N, cfg.K, cfg.dtype, cfg.compute_cap, dyn_specs))
+            dict(compiled_s_features(cfg.M, cfg.N, cfg.K, cfg.dtype, cfg.compute_cap, dyn_specs, cfg.trans_b))
             if compile_s_feats and isinstance(cfg, MatmulGoldenConfig)
             else None
         )

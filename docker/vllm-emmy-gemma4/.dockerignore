@@ -1,0 +1,3 @@
+# The bake COPYs the split warm/hf_parts (see split_hf.sh), not warm/hf itself —
+# keeping the unsplit snapshot out of the build context halves the context upload.
+warm/hf

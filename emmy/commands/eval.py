@@ -11,7 +11,9 @@ Six subcommands:
   configs: the greedy pipeline pick vs golden (per-knob ``found/golden``), the
   golden's rank under the prior, and (``--features``) the regressor input vector.
 - ``eval golden``    — the greedy pipeline pick vs recorded golden per config (the
-  reproduction check, without the rank diagnostics).
+  reproduction check, without the rank diagnostics). ``--in-model`` flips it to the
+  in-model drift audit: weight-free serving twins of each model-tagged golden file,
+  MATCH/DRIFT/GAP per fork, non-zero exit on DRIFT (the CI gate's mode).
 - ``eval variants``  — per-kernel leaderboard of the tune DB's measured variants
   (fastest first), the config the prior deploys marked + ranked, and the -O3
   re-bench latency from the prior reservoir where one was recorded.
@@ -142,6 +144,17 @@ def register_eval_command(subparsers) -> None:
     )
     add_dataset_args(pg, default="golden")
     pg.add_argument("--features", action="store_true", help="Also print the prior's regressor feature vector per golden config.")
+    pg.add_argument(
+        "--in-model",
+        action="store_true",
+        help="In-model drift audit: re-trace each model-tagged golden file's serving twins weight-free (config-only, "
+        "no checkpoint download) and verify every recorded golden still deploys in them — MATCH/DRIFT/GAP per fork, "
+        "uncovered warp-contraction forks flagged as MAJOR GAP. Exits non-zero on any DRIFT or compile failure.",
+    )
+    pg.add_argument(
+        "--model",
+        help="With --in-model: audit only this HF model id (default: every model tagged in the golden files).",
+    )
     pg.set_defaults(func=handle_eval_golden)
 
     pv = sub.add_parser(
@@ -255,12 +268,71 @@ def handle_eval_golden(args) -> None:
     iteratively tuning golden shapes one at a time (``emmy tune --golden
     <name>``). Use ``eval offline`` / ``eval online`` for the offline-prior rank and
     the online rank-under-prior diagnostics."""
+    if args.in_model:
+        if args.features or args.kernel:
+            logger.error("--in-model audits whole serving twins — --features / --kernel apply only to the per-config check")
+            sys.exit(2)
+        _in_model_audit(args.model)
+        return
     require_source(args, {"golden"}, "eval golden compares against recorded golden knobs — --dataset db has no golden to compare to.")
     resolve_online_arg(args)
     if args.features:
         _emit_golden_features(args.kernel)
     configs = _golden_configs(args.kernel)
     _emit_prior_golden_check(configs, title=False)
+
+
+def _in_model_audit(model_filter: str | None) -> None:
+    """``eval golden --in-model`` — the in-model half of the golden reproduction check.
+
+    The isolated check above compiles each golden's own snippet; this one re-traces the
+    serving twin graphs of every model the golden files are tagged with (weight-free —
+    ``emmy.serving.twins`` builds the skeleton from ``config.json`` alone) and audits each
+    tagged card's goldens against them via ``search/audit``. The two views genuinely
+    disagree: the gemma-4 cast-splice regression reproduced 68/68 pinned while the
+    in-model deploys drifted, which is exactly what this mode exists to catch."""
+    from emmy.compiler.pipeline.search.audit import COMPILE_FAIL, audit_card, major_gap_keys, summarize  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS  # noqa: PLC0415
+    from emmy.serving.twins import capture_twin_graphs  # noqa: PLC0415
+
+    tagged = sorted({g.model for g in GOLDEN_CONFIGS if g.model})
+    if model_filter and model_filter not in tagged:
+        logger.error("no golden entries are tagged `model: %s` (tagged: %s)", model_filter, ", ".join(tagged) or "none")
+        sys.exit(2)
+    models = [model_filter] if model_filter else tagged
+    if not models:
+        logger.error("no golden file carries a `model:` header — nothing to audit (tagging opts a file's shapes in)")
+        sys.exit(2)
+
+    failed = False
+    for model in models:
+        print(f"=== {model}: tracing serving twins (weight-free) ===")
+        graphs = capture_twin_graphs(model)
+        for gpu_name, cap in sorted({(g.gpu_name, tuple(g.compute_cap)) for g in GOLDEN_CONFIGS if g.model == model}):
+            res = audit_card(graphs, gpu_name, cap)
+            counts = summarize(res)
+            print(
+                f"--- {gpu_name} (sm_{cap[0]}{cap[1]}): MATCH {counts['MATCH']}  DRIFT {counts['DRIFT']}  "
+                f"GAP {counts['GAP']}  compile_fail {counts[COMPILE_FAIL]}"
+            )
+            for name, recs in res.items():
+                for r in recs:
+                    if r["verdict"] == "DRIFT":
+                        print(f"  DRIFT        {name} {r['node']}: {r['golden']} no longer realize(s)  [{r['key']}]")
+                    elif r["verdict"] == COMPILE_FAIL:
+                        print(f"  COMPILE_FAIL {name}: {r['error']}")
+            for key in sorted(major_gap_keys(res), key=str):
+                print(f"  MAJOR GAP    uncovered warp-contraction fork: {key}")
+            if counts["DRIFT"] or counts[COMPILE_FAIL]:
+                failed = True
+    if failed:
+        logger.error(
+            "golden drift audit FAILED — a recorded golden no longer deploys in the serving graph (or a twin failed "
+            "to compile). Either a compiler graph/enumeration change re-keyed the fork (fix the drift or re-record "
+            "the golden), or a transformers bump changed the traced model — the twins track the installed modeling "
+            "code, exactly as serving does."
+        )
+        sys.exit(1)
 
 
 def handle_eval_variants(args) -> None:
@@ -563,7 +635,7 @@ def _emit_offline_eval(kernel_filter: str | None) -> None:
         try:
             dyn = bool(getattr(g, "dynamic", None))
             ctx = Context.from_target(g.compute_cap, gpu_name=g.gpu_name)  # the golden's own card, not the live host's
-            got, rank, pool = evaluate_golden(g.M, g.N, g.K, g.dtype, gold, ctx, dynamic=dyn)
+            got, rank, pool, _ = evaluate_golden(g.M, g.N, g.K, g.dtype, gold, ctx, dynamic=dyn)
         except Exception as e:  # noqa: BLE001 — one shape's error shouldn't abort the report
             entries.append(("err", g.name, " ".join(f"{type(e).__name__}: {e}".split())[:100]))
             continue

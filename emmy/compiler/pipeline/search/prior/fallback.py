@@ -124,8 +124,12 @@ class FallbackPrior(Prior):
         ev = self.online.evidence_pick(rows)
         if ev is not None:
             return ev
+        from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+
+        # Score ties break by candidate content (``canonical_row_key``), never by
+        # enumeration order — see ``Prior.pick``.
         scores = self.mean_scores(rows)
-        best_i = min(range(len(scores)), key=scores.__getitem__)
+        best_i = min(range(len(scores)), key=lambda i: (scores[i], canonical_row_key(rows[i])))
         return best_i, scores[best_i]
 
     # --- training + inspection: delegate to the online half ------------------

@@ -17,6 +17,7 @@ from emmy.compiler.pipeline.search.golden import (
     AttentionGoldenConfig,
     EmbeddingGoldenConfig,
     GoldenConfig,
+    LinearNormGoldenConfig,
     MatmulGoldenConfig,
     MlpGeGluGoldenConfig,
     NormLinearGoldenConfig,
@@ -38,6 +39,28 @@ def test_matmul_snippet_fp32_has_no_dtype_kwarg():
 
 def test_matmul_snippet_typed():
     assert "dtype=torch.float16" in matmul_snippet(128, 128, 128, "fp16")
+
+
+def test_matmul_snippet_trans_b_spells_linear_layout():
+    # The serving Linear layout: B given (N, K), contracted as x @ w.T via F.linear —
+    # its traced fork offers gmem-direct rows only (staged transports decline
+    # transposed B), so a golden meant to decide a serving linear fork must be tuned
+    # on this spelling, not the canonical (M,K) @ (K,N).
+    assert matmul_snippet(16, 3840, 15360, "fp16", trans_b=True) == (
+        "torch.nn.functional.linear(torch.randn(16,15360,dtype=torch.float16), torch.randn(3840,15360,dtype=torch.float16))"
+    )
+    assert matmul_snippet(32, 64, 128, trans_b=True) == "torch.nn.functional.linear(torch.randn(32,128), torch.randn(64,128))"
+
+
+def test_trans_b_golden_snippet_and_shape_key():
+    # A trans_b config reproduces through its own snippet and shares the layout-blind
+    # ShapeKey with its canonical twin — at a fork, an entry whose config the offer
+    # can't realize simply never matches, so layout twins coexist under one shape.
+    c = MatmulGoldenConfig(name="mlp_down.m16.lin", M=16, N=3840, K=15360, dtype="fp16", trans_b=True)
+    assert "functional.linear" in c.snippet()
+    assert c.snippet() in c.repro_command()
+    twin = MatmulGoldenConfig(name="mlp_down.m16", M=16, N=3840, K=15360, dtype="fp16")
+    assert c.shape_key() == twin.shape_key()
 
 
 @pytest.mark.parametrize(
@@ -67,6 +90,7 @@ def test_golden_configs_set_is_well_formed():
                 MatmulGoldenConfig,
                 ReduceGoldenConfig,
                 RmsNormGoldenConfig,
+                LinearNormGoldenConfig,
                 NormLinearGoldenConfig,
                 MlpGeGluGoldenConfig,
                 RopeGoldenConfig,
@@ -82,6 +106,10 @@ def test_golden_configs_set_is_well_formed():
         fork_nothing = isinstance(c, (RopeGoldenConfig, EmbeddingGoldenConfig))
         if isinstance(c, MatmulGoldenConfig):
             assert c.M > 0 and c.N > 0 and c.K > 0, c.name
+        elif isinstance(c, LinearNormGoldenConfig):
+            # The linear→norm PAIR (the PLACE@stat row-stat sink): keyed at the NORM's fork with the
+            # placement stamp alone — no coop requirement (the realizer re-emits the sweep).
+            assert c.M > 0 and c.K > 0 and c.H > 0, c.name
         elif isinstance(c, NormLinearGoldenConfig):
             # The fused RMSNorm→linear computed-A megakernel: a warp contraction (M,H)@(H,N), not the
             # reduce family — its REDUCE knob is a split-K (g4k), not a coop, so no coop>1 requirement.
@@ -110,6 +138,31 @@ def test_golden_configs_set_is_well_formed():
         assert c.golden == (c.ratio >= 0.95), c.name
         assert fork_nothing or c.knobs, f"{c.name} has no recorded knobs"
         assert c.snippet(), c.name
+
+
+def test_fast_math_rows_never_record_slower_than_std_siblings():
+    """The fm-never-loses invariant, statically assertable at the recorded anchor: within one
+    card's rows of the same ``name``, no fast-math row may record a HIGHER ``emmy_us`` than the
+    best standard row. The deploy picker takes min(emmy_us) over lane-realizable rows, so a
+    slower fm row can never realize (the std row matches first under the fm lane too) — it is
+    dead weight that misreads as fm evidence. Off-anchor fm losses are a coverage matter the
+    static set cannot assert."""
+    import collections
+
+    by_bucket = collections.defaultdict(list)
+    for c in GOLDEN_CONFIGS:
+        by_bucket[(c.gpu_name, c.compute_cap, c.name)].append(c)
+    for (gpu, _cc, name), rows in by_bucket.items():
+        std = [r.emmy_us for r in rows if not r.fast_math]
+        fm = [r for r in rows if r.fast_math]
+        if not std or not fm:
+            continue
+        best_std = min(std)
+        for r in fm:
+            assert r.emmy_us <= best_std, (
+                f"{gpu}: fm row {name} records {r.emmy_us} µs > best std sibling {best_std} µs — "
+                "an unrealizable fm row; re-tune it below the std time or drop it"
+            )
 
 
 def test_goldens_load_from_yaml():
@@ -148,7 +201,18 @@ def test_goldens_speak_native_codecs_and_featurize():
         ReducePlan.parse(g.knobs.get("REDUCE"))
         if g.knobs.get("STAGE"):
             Stage.parse(g.knobs["STAGE"])
-        if isinstance(g, MatmulGoldenConfig):
+        # A ``PLACE@cone: cut`` golden records a PLACEMENT and the cut's TOTAL cost, not a tile: the
+        # cut row's own schedule is discarded (``020_cut_edge`` emits un-mapped LoopOps and each half
+        # re-enters ``010`` to get its own fork and its own golden), so there is no geometry to
+        # featurize. Spelling one is worse than omitting it — the consumer's transport (``d2/tma/ring``)
+        # cannot appear on a cut row, which is computed-A, so a tile-bearing cut golden stops matching.
+        # The ``mlp_geglu.*.cut`` goldens are exempt for the same reason, via their kind.
+        # A gemv-class M=1 row (``TILE: ''`` + a ``bN`` block-reduce) is scalar BY DESIGN — a
+        # per-token decode matvec has one output row per CTA and no tile geometry at all, so the
+        # empty featurization is the correct one, not an accident. Exempt exactly that shape.
+        if isinstance(g, MatmulGoldenConfig) and g.knobs.get("PLACE@cone") != "cut":
+            if g.M == 1 and not g.knobs.get("TILE") and g.knobs.get("REDUCE", "").startswith("b"):
+                continue
             feats = features.knob_features(g.knobs)
             assert feats.get("D_threads", 0) > 0 and "D_tile_m" in feats, f"{g.name} featurized to empty tile geometry"
 
@@ -239,6 +303,7 @@ def test_dynamic_supported_for_all_kinds():
         SoftmaxGoldenConfig(name="softmax.k2048.dynM", M=512, K=2048, dynamic=True),
         PointwiseGoldenConfig(name="pointwise.n4096.dynM", M=512, N=4096, dynamic=True),
         NormLinearGoldenConfig(name="norm_linear.n4096.dynM", M=512, H=3840, N=4096, dynamic=True),
+        LinearNormGoldenConfig(name="linear_norm.k3840.dynM", M=512, H=4096, K=3840, dynamic=True),
     ]
     assert all(c.dynamic_specs() == ["seq_len@x:0"] for c in one_input)
     att = AttentionGoldenConfig(name="attention.hd128.dynM", n_heads=8, seq=512, head_dim=128, dynamic=True)
@@ -344,7 +409,7 @@ def test_norm_linear_golden_snippet_shape_key_and_flops():
     """The fused RMSNorm→linear computed-A golden: its snippet is the ``F.rms_norm(x)·nw @ w`` form
     that traces to the megakernel, its shape_key carries ``kind="fused"`` with ``is_warp=True`` (a
     computed-A contraction is a warp mma), and the dynamic twin excludes the symbolic M."""
-    c = NormLinearGoldenConfig(name="nl", M=32, H=3840, N=4096, knobs={"TILE": "a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2"})
+    c = NormLinearGoldenConfig(name="nl", M=32, H=3840, N=4096, knobs={"TILE": "a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2", "STAGE": "d2/sync"})
     snip = c.snippet()
     assert "F.rms_norm(x,(3840,),nw)" in snip and snip.strip().endswith("@ w")
     assert "dtype=torch.float16" in snip  # fp16 default → warp mma
@@ -365,7 +430,8 @@ def test_norm_linear_golden_snippet_shape_key_and_flops():
 def test_mlp_geglu_golden_snippet_shape_key_and_flops():
     """The fused RMSNorm→gate⊗up→GeGLU multi-channel golden: the lambda-bound shared-``r`` snippet,
     ``kind="fused"`` keyed on the ``(M, inter)`` GeGLU output, and the dynamic twin excludes M."""
-    c = MlpGeGluGoldenConfig(name="ggu", M=32, H=3840, inter=15360, knobs={"TILE": "a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4"})
+    knobs = {"TILE": "a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4", "STAGE": "d1/sync"}
+    c = MlpGeGluGoldenConfig(name="ggu", M=32, H=3840, inter=15360, knobs=knobs)
     snip = c.snippet()
     assert "lambda r:" in snip and "F.rms_norm(x,(3840,),nw)" in snip and "approximate='tanh'" in snip
     sk = c.shape_key()
@@ -417,11 +483,11 @@ def test_fast_math_golden_ranks_in_gated_enumeration(monkeypatch):
         monkeypatch.delenv(var, raising=False)
     ctx = Context.from_target((12, 0))
     fm = {"TILE": "a:mma_m16n8k16_f16_f16/w2x2/f2x2/k2", "STAGE": "", "REDUCE": ""}
-    _, rank, pool = golden_eval.evaluate_golden(128, 128, 128, "fp16", fm, ctx)
+    _, rank, pool, _ = golden_eval.evaluate_golden(128, 128, 128, "fp16", fm, ctx)
     assert rank is not None and pool > 0, "fast-math golden must rank inside the self-gated enumeration"
     assert os.environ.get("EMMY_F16_MMA_F32_ACC") is None, "the scoped pin must restore"
     std = {"TILE": "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2", "STAGE": "", "REDUCE": ""}
-    _, rank_std, pool_std = golden_eval.evaluate_golden(128, 128, 128, "fp16", std, ctx)
+    _, rank_std, pool_std, _ = golden_eval.evaluate_golden(128, 128, 128, "fp16", std, ctx)
     assert rank_std is not None
     assert pool_std < pool, "the standard enumeration must not silently grow fast-math rows"
 
@@ -455,3 +521,67 @@ def test_golden_flops_never_overestimates_and_gates_dyn_reduce(monkeypatch):
     monkeypatch.setattr(gpu, "live_name", lambda: "test-gpu")
     assert run_mod._intensity_floor_flag(s, dyn_reduce.emmy_us) is None, "correct dynM replay must not flag"
     assert run_mod._intensity_floor_flag(s, dyn_reduce.emmy_us / 1e5) is not None, "an impossible bench must still flag"
+
+
+def test_fused_golden_requires_a_cone_anchor():
+    """A RECORDED fused computed-A entry must anchor itself to the cone fork — a ``d*/sync``
+    STAGE or ``PLACE@cone: cut``. The deploy join's over-fire safety rests on "a fused golden's
+    config can't realize on a plain gmem-A matmul": a gmem-direct STAGE + plain warp tile WOULD
+    realize there, deploying a cross-family config. Key-only instances (empty knobs) are exempt."""
+    common = dict(M=32, H=3840, N=4096, gpu_name="X", compute_cap=(12, 0))
+    NormLinearGoldenConfig(name="ok.sync", knobs={"TILE": "a:mma_m16n8k16_f16_f32/w1x16/f2x2/k2", "STAGE": "d2/sync"}, **common)
+    NormLinearGoldenConfig(name="ok.axis", knobs={"STAGE@a3": "d1/sync"}, **common)
+    NormLinearGoldenConfig(name="ok.cut", knobs={"PLACE@cone": "cut"}, **common)
+    NormLinearGoldenConfig(name="ok.keyonly", knobs={}, **common)
+    with pytest.raises(ValueError, match="cone"):
+        NormLinearGoldenConfig(name="bad.gmem", knobs={"TILE": "w1x16/f2x2", "STAGE": "d2/tma/ring"}, **common)
+    with pytest.raises(ValueError, match="cone"):
+        # ``cp.async`` contains "sync" as a substring — the segment match must not accept it.
+        MlpGeGluGoldenConfig(
+            name="bad.cp", M=32, H=3840, inter=15360, knobs={"STAGE": "d2/cp.async/ring"}, gpu_name="X", compute_cap=(12, 0)
+        )
+
+
+def test_neighbor_bench_group_id_covers_every_recorded_kind():
+    """``golden_neighbor_bench.build_groups`` calls ``_group_id`` on every recorded golden — a
+    registry kind the function doesn't handle crashes the sweep at startup (the ``linear_norm``
+    regression). Every recorded config must map to a non-empty, kind-prefixed id."""
+    import sys
+    from dataclasses import fields
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+    import golden_neighbor_bench as gnb
+
+    kind_of = {cls: kind for kind, cls in _KERNEL_CLASSES.items()}
+    base_fields = frozenset(f.name for f in fields(GoldenConfig))
+    for g in GOLDEN_CONFIGS:
+        kind = kind_of[type(g)]
+        gid = gnb._group_id(kind, g, base_fields)
+        assert gid and (kind == "matmul" or gid.startswith(kind))
+
+
+def test_neighbor_bench_shape_spec_covers_every_recorded_kind():
+    """Every recorded golden's ``shape_spec_of`` output must survive the full identity
+    round trip the sweep relies on: JSON-serializable, accepted by ``parse_record_shape``
+    (i.e. it re-instantiates through ``_KERNEL_CLASSES``), and keying to the SAME
+    ``ShapeKey`` as the golden itself — that key equality is the per-leaf gate that
+    decides whether a benched row carries the identity at all."""
+    import json
+    import sys
+    from dataclasses import fields
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+    import golden_neighbor_bench as gnb
+
+    from emmy.compiler.pipeline.search.bench_record import parse_record_shape
+
+    kind_of = {cls: kind for kind, cls in _KERNEL_CLASSES.items()}
+    base_fields = frozenset(f.name for f in fields(GoldenConfig))
+    for g in GOLDEN_CONFIGS:
+        kind = kind_of[type(g)]
+        spec = gnb.shape_spec_of(kind, g, base_fields)
+        rs = parse_record_shape(json.dumps(spec, sort_keys=True))
+        assert rs.spec == spec
+        assert rs.key == g.shape_key(), f"{g.name}: spec keys to {rs.key}, golden keys to {g.shape_key()}"

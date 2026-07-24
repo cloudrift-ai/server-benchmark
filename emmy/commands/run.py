@@ -126,7 +126,9 @@ def register_run_command(subparsers):
             "pinned rows benched, the ``greedy.isolated`` emmy-only re-bench — the pinned-comparable "
             "greedy baseline), and every --golden / --ab A/B row with its integrity flags "
             "(realized-vs-pinned knob check, arithmetic-intensity floor, wrong-answer check). "
-            "Retires ad-hoc table parsing in the golden-sweep workflow."
+            "Each pinned row and the greedy block carry a ``lane`` (fm/std) so the sweep filters to "
+            "the greedy's lane — comparing a pinned [fm] latency against a std greedy is a phantom "
+            "regression. Retires ad-hoc table parsing in the golden-sweep workflow."
         ),
     )
     parser.add_argument(
@@ -137,6 +139,18 @@ def register_run_command(subparsers):
             "quality (warmup >= 5, iters >= 20), each clean row AND the greedy pick's isolated re-bench are recorded "
             "as leaf rows in the tune DB's node store — the training-data feed for the offline prior. Flagged rows "
             "(pin mismatch, wrong answer, intensity floor) and the --ir path never record."
+        ),
+    )
+    parser.add_argument(
+        "--record-shape",
+        default=None,
+        metavar="JSON",
+        help=(
+            "Declarative identity of the benched shape, spelled like a golden YAML entry minus knobs/latencies "
+            '(e.g. \'{"kernel": "matmul", "M": 512, "N": 512, "K": 512, "dtype": "fp16", "trans_b": false, '
+            '"dynamic": false}\'). Recorded rows whose stamped extents match carry it as their shape_spec — the '
+            "identity the goldens-format measurement freeze keeps. Passed by the golden-neighborhood collection "
+            "sweep; no effect with --no-record-nodes."
         ),
     )
     parser.add_argument("--dump-dir", default=None, help="Directory to dump intermediate compilation artifacts.")
@@ -207,6 +221,14 @@ def handle_run(args):
             _ab_samples(args.ab)  # fail fast on a malformed KNOBS spec
         except ValueError as exc:
             logger.error("--ab: %s", exc)
+            sys.exit(2)
+    if args.record_shape is not None:
+        from emmy.compiler.pipeline.search.bench_record import parse_record_shape  # noqa: PLC0415
+
+        try:
+            parse_record_shape(args.record_shape)  # fail fast, before any compile/bench spend
+        except ValueError as exc:
+            logger.error("%s", exc)
             sys.exit(2)
 
     if not torch.cuda.is_available():
@@ -393,7 +415,7 @@ def _record_bench_nodes(args, golden_benches, greedy_iso) -> None:
         return
     from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.bench_record import meets_quality_bar, record_bench_leaves  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.bench_record import meets_quality_bar, parse_record_shape, record_bench_leaves  # noqa: PLC0415
 
     # print, not logger.info: `emmy run` gates the root logger to WARNING at default
     # verbosity, and a default-on WRITE to the user's tune DB must announce itself
@@ -407,8 +429,11 @@ def _record_bench_nodes(args, golden_benches, greedy_iso) -> None:
     leaves = _recordable_bench_leaves(golden_benches, greedy_iso)
     if not leaves:
         return
+    # Re-parse (validated at arg-check time): the declarative identity the sweep passes,
+    # attached per matching leaf inside record_bench_leaves.
+    shape = parse_record_shape(args.record_shape) if getattr(args, "record_shape", None) else None
     db_path = resolve_tune_db()
-    n = record_bench_leaves(db_path, Context.probe(), leaves)
+    n = record_bench_leaves(db_path, Context.probe(), leaves, shape=shape)
     print(f"[record-nodes] {n} bench row(s) recorded into the node store ({db_path}) — opt out with --no-record-nodes")
 
 
@@ -507,6 +532,27 @@ def _compare_wall_s(graph, backend, *, base_s: float) -> float:
 # didn't realize, so benching would measure the planner's own pick under the pin's name) or
 # ``"bench_fail"`` (compile/bench of the pinned config failed); ``"ok"`` rows carry a bench.
 _GoldenBench = namedtuple("_GoldenBench", "sample graph bench flags status", defaults=("ok",))
+
+
+def _lane(knobs: dict) -> str:
+    """The precision REGIME a knob dict realizes: ``"fm"`` (an f16-accumulate mma atom or
+    ``FAST_EXP``, :func:`~emmy.compiler.pipeline.search.golden.fast_math_knobs`) else ``"std"``.
+    Derived from the knobs, never a stored flag, so it can't drift. A ``--golden NAME`` sweep
+    pins BOTH the std and the ``[fm]`` config recorded under one name; comparing a pinned ``[fm]``
+    latency against a ``"std"`` greedy manufactures a phantom regression, so every A/B row (and the
+    greedy it's compared to) carries its lane and the parser filters to matching lanes."""
+    from emmy.compiler.pipeline.search.golden import fast_math_knobs  # noqa: PLC0415
+
+    return "fm" if fast_math_knobs(knobs) else "std"
+
+
+def _graph_lane(graph) -> str:
+    """The lane the greedy graph deployed in — ``"fm"`` when ANY realized CUDA kernel's knobs are
+    fast-math (any kernel on an f16acc atom ⇒ the run was under the fast-math gate). Judged
+    per-kernel, never on a dict union: two kernels both realizing ``TILE`` collide on the key,
+    the union keeps only the last kernel's value, and the reported lane becomes
+    launch-order-dependent — the phantom-regression trap this feature exists to prevent."""
+    return "fm" if any(_lane(d) == "fm" for d in _cuda_knob_dicts(graph)) else "std"
 
 
 def _intensity_floor_flag(sample, total_us: float) -> str | None:
@@ -616,6 +662,13 @@ def _unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | No
             continue
         if not others and not saw_off and get(fam) is not None:
             continue  # registered family, no stamp anywhere — ungateable (see docstring)
+        if fam == "PLACE" and str(want) == "cut" and not others:
+            # A realized CUT leaves no ``PLACE@cone`` stamp: ``020_cut_edge`` rewrites the picked
+            # row into producer + consumer halves that ``010`` re-enters fresh (their kernels spell
+            # only the ordinary off-valued ``PLACE`` fill). Every NON-cut sibling of a cone fork
+            # stamps ``PLACE@cone=fuse`` on its rows, so a dropped pin that fell back to any fused /
+            # coop form surfaces in ``others`` and still flags; off-only evidence means the cut ran.
+            continue
         ran = "/".join(others) if others else ("(off)" if saw_off else "(unset)")
         misses.append(f"{name}={want} realized {ran}")
     return f"unreproducible pin: {'; '.join(misses)}" if misses else None
@@ -787,7 +840,8 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
     ``golden_benches`` (from ``run --golden NAME``, see :func:`_bench_golden_variants`)
     are each their own live compile+bench of a recorded golden config's pinned
     knobs; their kernels print beneath the greedy kernel of matching shape, labeled
-    ``golden NAME`` in the Kernel column — a real A/B, not the recorded number. Their
+    ``golden NAME [fm|std]`` in the Kernel column (the lane tag so an ``[fm]``-vs-``std``
+    row is never misread against a ``std`` greedy) — a real A/B, not the recorded number. Their
     ``%`` column is ``--`` (they're not part of the emmy TOTAL), and their knob
     cells are colored red where they differ from the greedy pick (like ``eval``).
     A pinned row that never benched (unmatched pin / bench_fail — ``gb.bench is None``)
@@ -891,6 +945,7 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
         kernels with ``--`` timings (a compile failure has no kernels — one bare
         label row keeps the failure visible)."""
         label = f"golden {gb.sample.name}" if gb.sample.shape is not None else gb.sample.name
+        label = f"{label} [{_lane(gb.sample.knobs)}]"  # so an [fm]-vs-std A/B can't be misread
         if gb.flags:
             label = f"! {label}"
         if gb.graph is None:
@@ -991,7 +1046,13 @@ def _write_ab_json(args, results: dict, graph, bench, golden_benches, greedy_fai
     the same graph re-benched emmy-only through the pinned-row path, shaped like a pinned
     row (``status`` / ``total_us`` / ``kernels`` / ``flags``). Sweep tooling compares
     pinned ``total_us`` against THIS block; the greedy block's own ``total_us`` is the
-    interleaved (torch-comparable) number, ~7% apart from pinned-row semantics."""
+    interleaved (torch-comparable) number, ~7% apart from pinned-row semantics.
+
+    Every pinned row and the greedy block carry a ``lane`` (``"fm"`` / ``"std"``, :func:`_lane`):
+    a ``--golden NAME`` sweep pins BOTH lanes recorded under one name, and comparing a pinned
+    ``[fm]`` latency against a ``"std"`` greedy is the phantom-regression trap the sweep must not
+    fall into — a parser filters ``pinned`` to the rows whose ``lane`` matches ``greedy.lane``
+    (which ``greedy.isolated`` shares, being the same graph)."""
     import json as _json  # noqa: PLC0415
 
     from emmy import gpu  # noqa: PLC0415
@@ -1027,6 +1088,7 @@ def _write_ab_json(args, results: dict, graph, bench, golden_benches, greedy_fai
             {
                 "name": sample.name,
                 "kind": "golden" if sample.shape is not None else "ab",
+                "lane": _lane(sample.knobs),
                 "status": gb.status,
                 "pinned_knobs": {k: str(v) for k, v in sample.knobs.items()},
                 "total_us": _total_us(gb.bench),
@@ -1036,7 +1098,12 @@ def _write_ab_json(args, results: dict, graph, bench, golden_benches, greedy_fai
                 "recorded_ref_us": getattr(sample, "ref_us", None),
             }
         )
-    greedy = {"status": "ok" if greedy_fail is None else "bench_fail", "total_us": _total_us(bench), "kernels": _kernel_rows(graph, bench)}
+    greedy = {
+        "status": "ok" if greedy_fail is None else "bench_fail",
+        "lane": _graph_lane(graph),
+        "total_us": _total_us(bench),
+        "kernels": _kernel_rows(graph, bench),
+    }
     if greedy_fail is not None:
         greedy["error"] = greedy_fail
     if greedy_iso is not None:
@@ -1495,9 +1562,17 @@ async def bench_lowered_vs_torch(frontend, lowered, backend, *, seed, do_bench, 
     for gph in ([frontend] if frontend is not None else []) + [lowered]:
         for node in gph.nodes.values():
             op = node.op
-            if isinstance(op, ConstantOp) and op.value is None and op.source_path and op.source_path not in sources:
+            if not (isinstance(op, ConstantOp) and op.value is None):
+                continue
+            if op.source_path and op.source_path not in sources:
                 shp = _static(op.source_shape or node.output.shape)
                 sources[op.source_path] = rng.standard_normal(shp, dtype=np.float32) * 0.02
+            # A merged (source_parts) constant draws one random source PER PART, keyed by the
+            # part path — the same tensors the pre-merge frontend reference binds its separate
+            # weights from, so emmy's concat and the torch ref stay numerically aligned.
+            for path, shp in op.source_parts:
+                if path not in sources:
+                    sources[path] = rng.standard_normal(_static(shp), dtype=np.float32) * 0.02
 
     input_data: dict[str, object] = {}
     input_tensors: dict[str, object] = {}
@@ -2029,8 +2104,9 @@ def _check_accuracy(outputs, eager_out) -> str | None:
             #
             #   PASS iff (max_ok AND mean_diff ≤ mean_tol) OR escape_ok
             #   max_ok    = max_diff ≤ tol                                  (fp32)
-            #             = max_diff ≤ 4·tol AND count(diff > tol) ≤ budget (fp16)
-            #   escape_ok = mean_diff ≤ escape_tol [fp16: AND max_diff ≤ 4·tol]
+            #             = max_diff ≤ 4·tol AND count(diff > tol) ≤ budget (fp16; budget
+            #               EARNED by a heavy-tailed output — 0 on a gaussian one)
+            #   escape_ok = mean_diff ≤ escape_tol [fp16: AND max_diff ≤ 4·tol AND count ≤ budget]
             #
             # - ``tol`` (the MAX clause) is the loose per-cell OUTLIER ceiling: fp16
             #   atomic-reduce accumulation can drift a cell up to ``peak`` in pathological
@@ -2070,7 +2146,16 @@ def _check_accuracy(outputs, eager_out) -> str | None:
             # the real bug classes: a garbage/saturated cell (uninitialized read, Inf
             # math) blows the HARD ceiling regardless of count; a corrupt tile / row /
             # tail-guard window (the historical incidents: thousands of cells) blows the
-            # BUDGET; a permutation blows the mean gate. NOTE the mean gate's scramble
+            # BUDGET on either pass path (the escape hatch consults it too — a near-zero
+            # mean must not vouch for a low-amplitude mass corruption); a permutation
+            # blows the mean gate. The budget itself is EARNED by the output's tail shape
+            # (``peak > 8·RMS`` — gemma layers sit at ~24×, a gaussian at ~5×): only there
+            # do in-distribution cells legitimately land past ``tol``. A gaussian output
+            # keeps the strict pre-budget max clause, and its handful of split-K reorder
+            # outliers pass only through the escape hatch (near-zero mean AND ≤ budget).
+            # Residual blind spot, accepted: ≤ budget cells at ≤ 4·tol with a near-zero
+            # mean is statistically indistinguishable from the legit reorder class.
+            # NOTE the mean gate's scramble
             # margin THINS on heavy-tailed outputs (a permuted gemma layer output scores
             # ≈ 1.04× mean_tol — 4% clear, vs ~5× on gaussian matmuls): that margin is
             # bounded by the current fp16 path's honest noise (mean_diff ≈ 0.4× mean_tol
@@ -2086,12 +2171,14 @@ def _check_accuracy(outputs, eager_out) -> str | None:
             escape_tol = max(abs_tol, 0.005 * peak)
             outliers = sum(1 for d in diffs if d > tol)
             budget = max(4, len(diffs) // 65536)
+            rms = (sum(e * e for e in eager_flat) / max(1, len(eager_flat))) ** 0.5
+            heavy_tailed = peak > 8.0 * rms
             if is_fp16:
                 # The hard 4·tol garbage ceiling bounds BOTH pass paths: the escape hatch
                 # vouches for reorder outliers (peak-bounded by construction), never for a
                 # garbage/saturated cell a near-zero mean would otherwise hide.
-                max_ok = max_diff <= 4 * tol and outliers <= budget
-                escape_ok = mean_diff <= escape_tol and max_diff <= 4 * tol
+                max_ok = max_diff <= 4 * tol and outliers <= (budget if heavy_tailed else 0)
+                escape_ok = mean_diff <= escape_tol and max_diff <= 4 * tol and outliers <= budget
             else:
                 max_ok = max_diff <= tol
                 escape_ok = mean_diff <= escape_tol

@@ -51,15 +51,29 @@ class ShapeKey:
     # The largest single static free extent (``S_ext_free_max`` / ``max(M, N)``) — the
     # ASPECT discriminator ``free_prod`` alone lacks: 32×8192 and 512×512 share the
     # product (the decode-twin vs square collision that let ``k_proj_global.s512``
-    # silently shadow ``q_proj_global.m32``'s golden), but not the max. Participates
-    # only for STATIC plain-nest keys (``kind == "" and not is_dyn``) — every other
-    # key class normalizes it to 0 in ``__post_init__`` so the sweep-kind and
-    # symbolic-axis joins (whose builders don't all see the same extent list the
-    # stamp saw) stay bit-identical to the pre-``free_max`` behavior.
+    # silently shadow ``q_proj_global.m32``'s golden), but not the max.
+    #
+    # Participates for STATIC plain-nest (``kind == ""``) and ``kind == "fused"`` keys.
+    # The other sweep kinds normalize it to 0 in ``__post_init__``: their ops are
+    # MULTI-axis, so the stamp's largest single free extent is not the ``max(M, N)`` a
+    # 2-D golden config can compute (a gemma-4 per-head qk-norm stamps
+    # ``free_prod=1048576`` with ``free_max=256``), and the two builders would disagree —
+    # the "builders don't all see the same extent list" hazard that scoped this field to
+    # plain nests when it landed. A ``fused`` op is a plain ``(M, H) @ (H, N)`` contraction
+    # with exactly two free axes, so both sides agree; measured across every gemma-4 fused
+    # twin fork, the stamped ``S_ext_free_max`` equals the golden's ``max(M, N)`` exactly.
+    # Including it there is required for correctness, not just precision: the M=256 global
+    # norm→kv cone (256×512) and the M=32 local norm→q cone (32×4096) share
+    # ``free_prod=131072`` AND ``reduce_max=3840``, so without the aspect the former
+    # silently deployed the latter's golden at a fabricated 24.1 µs.
+    # Dynamic keys always normalize to 0 — the symbolic axis has no static extent.
     free_max: int = 0
 
+    # Key classes that carry the aspect discriminator (see ``free_max``).
+    _FREE_MAX_KINDS = ("", "fused")
+
     def __post_init__(self) -> None:
-        if (self.kind or self.is_dyn) and self.free_max:
+        if (self.is_dyn or self.kind not in self._FREE_MAX_KINDS) and self.free_max:
             object.__setattr__(self, "free_max", 0)
 
     @classmethod
@@ -125,6 +139,23 @@ class ShapeKey:
             kind=kind,
             free_max=int(s.get("S_ext_free_max", 0)),
         )
+
+    def joins(self, golden: ShapeKey) -> bool:
+        """Whether this OP-side key (``from_s_features``) names the same shape as a
+        GOLDEN-side key (``shape_key()``) — exact equality, except ``is_warp`` is
+        ignored for the sweep kinds. Rationale: a sweep op's ``is_warp`` derives from
+        the operand-dtype multiset, which is snippet-unstable — an all-fp16 golden
+        snippet stamps fp16-pure (no ``S_dtype_f32`` → ``is_warp=True``) while the
+        same norm in a served graph carries f32 statistic constants (→ ``False``), and
+        the norm-kind goldens all record ``is_warp=False``. Extents + ``kind`` are the
+        discriminating identity there; ``is_warp`` stays load-bearing exactly where it
+        disambiguates real twins — the ``kind == ""`` fp32/fp16 contraction pair — and
+        ``"fused"`` forces ``True`` on both sides already."""
+        if golden.kind not in ("", "fused") and self.kind == golden.kind:
+            from dataclasses import replace  # noqa: PLC0415
+
+            return replace(self, is_warp=golden.is_warp) == golden
+        return self == golden
 
     def s_features_arith(self) -> dict[str, float]:
         """The extent ``S_*`` features derivable without compiling — the exact set

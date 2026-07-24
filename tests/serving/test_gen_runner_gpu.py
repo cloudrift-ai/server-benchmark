@@ -320,6 +320,46 @@ def test_device_residents_allocated_eagerly():
     assert next(runner._norm_dev.parameters()).is_cuda
 
 
+def test_adopted_raw_embed_table_matches_folded_gather():
+    """``adopt_embed_table`` (the tied lm_head↔embed sharing that returns ~2 GiB to the KV
+    budget on gemma) must gather identically to the runner's own folded upload: the shared
+    table is RAW and the embed scale re-applies at gather in fp32 — the same
+    fold-at-fp32-then-cast numerics as the host table."""
+    pytest.importorskip("cupy")
+    import torch
+    import transformers
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    config = transformers.Qwen3Config(
+        vocab_size=64,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        max_position_embeddings=64,
+        use_sliding_window=False,
+    )
+    torch.manual_seed(0)
+    model = transformers.Qwen3ForCausalLM(config).eval()
+    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16)
+    ids = torch.tensor([1, 3, 5], dtype=torch.long, device="cuda")
+    folded = runner.embed_device(ids)
+
+    scale = 4.0  # pretend embed_scale (Qwen has none — exercise the re-apply path explicitly)
+    raw = (model.model.embed_tokens.weight.detach().to(torch.float32) / 1.0).cuda()
+    runner._embed_weight = (runner._embed_weight * scale).astype(runner._embed_weight.dtype)  # refold host at the new scale
+    runner.adopt_embed_table(raw, scale=scale)
+    adopted = runner.embed_device(ids)
+    np.testing.assert_allclose(adopted.cpu().numpy(), folded.cpu().numpy() * scale, rtol=1e-6, atol=1e-6)
+    assert runner._embed_weight_dev.data_ptr() == raw.data_ptr(), "the adopted table must be shared, not copied"
+
+
 def test_layers_share_activation_arena():
     """Per-layer programs must NOT each hold their own capacity-sized activation
     buffers: with the runner's shared :class:`BufferArena`, same-kind programs of

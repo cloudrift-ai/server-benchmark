@@ -177,6 +177,12 @@ class EmmyGenModel(nn.Module):
             scale=getattr(config, "logit_scale", 1.0),
             soft_cap=getattr(config, "final_logit_softcapping", None),
         )
+        # The checkpoint's generation config may list tokens to suppress outright (gemma-4 lists
+        # the mm delimiters '<image|>'/'<audio|>'; a degenerate text prompt can genuinely rank
+        # one top-1, and an emitted mm token decodes to empty text). HF generate honors the
+        # list; stock vLLM's gemma4 models -inf those ids in compute_logits — mirror that.
+        gen_cfg = vllm_config.model_config.try_get_generation_config()
+        self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
 
     def forward(self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None, **kwargs):
         device = positions.device
@@ -223,7 +229,10 @@ class EmmyGenModel(nn.Module):
         return self.runner.final_norm_device(hidden)
 
     def compute_logits(self, hidden_states, *args):
-        return self.logits_processor(self.lm_head, hidden_states)
+        logits = self.logits_processor(self.lm_head, hidden_states)
+        if logits is not None and self._suppress_token_ids:
+            logits[:, self._suppress_token_ids] = -float("inf")
+        return logits
 
     def embed_input_ids(self, input_ids):
         # vLLM embedding hook → the runner owns embedding; on-device gather (no host hop).
@@ -245,4 +254,16 @@ class EmmyGenModel(nn.Module):
             elif tied and name.endswith("embed_tokens.weight") and "lm_head.weight" not in loaded:
                 loader(param, w)
                 loaded.add("lm_head.weight")
+        # Tied checkpoints: the loaded head IS the raw embed table — hand it to the runner and drop
+        # the runner's own ~2 GiB folded device copy (uploaded eagerly at construction for the
+        # profiling-order contract). empty_cache + the cupy pool trim actually RELEASE the freed
+        # blocks to the driver, so vLLM's KV-cache profiling (which runs after load) sees them —
+        # this is where the reclaimed memory becomes KV blocks. The runner re-applies the gemma
+        # embed_scale at gather; the shared table stays raw (the head must read it unscaled).
+        if tied and "lm_head.weight" in loaded and param.data.is_cuda:
+            self.runner.adopt_embed_table(param.data, scale=getattr(self.runner, "_embed_scale", 1.0))
+            import cupy as cp
+
+            torch.cuda.empty_cache()
+            cp.get_default_memory_pool().free_all_blocks()
         return loaded

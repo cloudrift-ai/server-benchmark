@@ -578,6 +578,37 @@ def tuning_knob_items(knobs: dict) -> list[tuple[str, str]]:
     return sorted(rendered, key=lambda kv: knob_sort_key(kv[0]))
 
 
+def canonical_row_key(knobs: dict) -> tuple[tuple[str, str], ...]:
+    """Content-based ORDER over candidate knob rows — the :func:`tuning_knob_items`
+    view as a comparable tuple. Every deploy pick (model argmin, measured-evidence
+    argmin, golden realization) breaks score / µs ties with this key, so the selected
+    variant is a function of the candidates' CONTENT, never of their enumeration
+    order. Without it, a tie falls to whichever leaf a fork emitted first — an order
+    that can shift across processes — and the deployed kernel flips boot to boot (the
+    2026-07 gemma-4 5090 image's bimodal cubin set: the offline prior scored 8
+    same-featurized tiles identically at the drifted m16 forks, and emission order
+    chose among them)."""
+    return tuple(tuning_knob_items(knobs))
+
+
+def evidence_row_vouches(cand_tun: dict, row_tun: dict) -> bool:
+    """Whether a measured evidence row can vouch for a candidate under value-of-position
+    semantics: every tunable knob the candidate specifies must match the row, a key absent
+    from the ROW reading as free — EXCEPT a kernel-set-changing placement. A row recorded
+    before ``PLACE@cone`` existed (any pre-cut tune DB / reservoir) measured the FUSED twin,
+    which is knob-identical to the cut row apart from the placement — letting the absent key
+    wildcard-match a ``cut`` candidate deploys the catastrophic cold cut at the fused row's
+    µs (and the content tie-break then PREFERS it: ``('PLACE@cone','cut') <
+    ('PLACE@cone','fuse')``). The cut may only win where it was actually measured, so a
+    ``cut`` candidate requires the row to record the placement explicitly. ``PLACE@stat=sink``
+    (the row-stat sink, an identical kernel-set change) takes the same clause."""
+    if any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items()):
+        return False
+    if str(cand_tun.get("PLACE@cone")) == "cut" and "PLACE@cone" not in row_tun:
+        return False
+    return not (str(cand_tun.get("PLACE@stat")) == "sink" and "PLACE@stat" not in row_tun)
+
+
 def stamp_schedule_families(knobs: dict) -> dict[str, str]:
     """The ready-to-record knob map for one realized kernel: its tuning knobs
     (:func:`tuning_knob_items`) plus an explicit OFF value for every :data:`SCHEDULE_FAMILIES`

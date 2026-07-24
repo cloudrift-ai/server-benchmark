@@ -137,3 +137,35 @@ def test_tracer_emits_broadcast_explicit_elementwise():
             assert inp_shape == out_shape, (
                 f"ElementwiseOp {n.id} input shape {inp_shape} != output {out_shape} — tracer must insert broadcast IndexMapOp"
             )
+
+
+def test_sink_cast_narrows_only_never_widens():
+    """``007_sink_narrowing_cast`` retypes the producer's OUTPUT — bit-identical only in the
+    NARROWING direction (compute wide, round on store). A WIDENING copy (f16 → f32) must
+    decline: sinking it removes the producer's round-on-store to f16, emitting wide values
+    eager's narrow store never produced."""
+    import importlib
+
+    import pytest
+
+    from emmy.compiler.dtype import F16, F32
+    from emmy.compiler.ir.elementwise import ElementwiseImpl
+    from emmy.compiler.pipeline.pipeline import Match, RuleSkipped
+
+    rule_mod = importlib.import_module("emmy.compiler.pipeline.passes.frontend.optimization.007_sink_narrowing_cast")
+
+    def graph_with(src_dt, dst_dt):
+        g = Graph()
+        g.add_node(InputOp(), [], Tensor("x", (4, 8), src_dt), node_id="x")
+        g.add_node(ElementwiseOp(op=ElementwiseImpl("tanh")), ["x"], Tensor("p", (4, 8), src_dt), node_id="p")
+        g.add_node(ElementwiseOp(op=ElementwiseImpl("copy")), ["p"], Tensor("c", (4, 8), dst_dt), node_id="c")
+        g.outputs = ["c"]
+        return g
+
+    g = graph_with(F32, F16)  # narrowing: sinks — the producer writes the narrow dtype
+    frag = rule_mod.rewrite(Match(graph=g, root_node_id="p", rule=None), g.nodes["p"], g.nodes["c"])
+    assert frag is not None and frag.nodes["c"].output.dtype.name == "f16"
+
+    g = graph_with(F16, F32)  # widening: must decline
+    with pytest.raises(RuleSkipped, match="widens"):
+        rule_mod.rewrite(Match(graph=g, root_node_id="p", rule=None), g.nodes["p"], g.nodes["c"])

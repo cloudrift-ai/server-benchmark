@@ -23,7 +23,7 @@ Tile IR and are materialized away before reaching this layer. A
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
 
 from emmy.compiler.dtype import F32, DataType
@@ -59,6 +59,10 @@ from emmy.compiler.ir.stmt import (
 )
 from emmy.compiler.ir.stmt.base import render_merge_program
 from emmy.compiler.ir.stmt.ir import BodyOp
+
+# The widest iteration space a 32-bit flat thread id can address — past this the
+# ``Tile`` decode must widen to 64-bit (see ``Tile.render``).
+_INT32_MAX = 2**31 - 1
 
 # ---------------------------------------------------------------------------
 # Hardware primitives
@@ -321,19 +325,26 @@ class Tile(Stmt):
             from emmy.compiler.ir.stmt.blocks import _render_grid_axis_decode, _stride_c  # noqa: PLC0415
 
             inner = ctx.child()
-            n = _stride_c(list(self.axes), inner)
+            # A symbolic grid's total is unboundable at render time, so the flat id and every
+            # stride divisor are ALWAYS 64-bit — a batched coop-reduce grid overflows int32 at
+            # runtime-legal extents (batch·seq·N·coop = 4·512·6144·256 ≈ 3.2e9 on the demoted
+            # fused gate/up kernel → cudaErrorIllegalAddress; the static branch below reaches
+            # the same overflow class and widens exactly when its known total needs it). The
+            # ``(long long)blockIdx.x`` lowers to one mul.wide; the decoded axis vars stay
+            # ``int`` (each bounded by its extent).
+            n = _stride_c(list(self.axes), inner, wide=True)
             # Same aux-band decode as the static path below: blockDim includes the producer band,
             # so the cell id must be derived from ``block_threads``, not ``blockDim``.
             sgid = (
-                f"blockIdx.x * {self.block_threads} + threadIdx.x % {self.block_threads}"
+                f"(long long)blockIdx.x * {self.block_threads} + threadIdx.x % {self.block_threads}"
                 if self.aux_threads
-                else "blockIdx.x * blockDim.x + threadIdx.x"
+                else "(long long)blockIdx.x * blockDim.x + threadIdx.x"
             )
             out = [
-                f"{pad}int _gid = {sgid};",
+                f"{pad}long long _gid = {sgid};",
                 f"{pad}if (_gid < {n}) {{",
             ]
-            out.extend(_render_grid_axis_decode(self.axes, "_gid", inner))
+            out.extend(_render_grid_axis_decode(self.axes, "_gid", inner, wide=True))
             out.extend(render_body(self.body, inner))
             out.append(f"{pad}}}")
             return out
@@ -345,13 +356,23 @@ class Tile(Stmt):
             strides[i] = acc
             acc *= extents[i]
         n = self.n_elements
+        # A flat id past INT32_MAX wraps negative in 32-bit arithmetic and every decoded index
+        # goes wild (a per-cell coop-reduce grid reaches it: M·N·coop = 4096·3840·256 ≈ 4.0e9 on
+        # the gemma-4 down-proj demote → cudaErrorIllegalAddress). Widen the id to 64-bit exactly
+        # when the static iteration space needs it — ``(long long)blockIdx.x`` lowers to one
+        # mul.wide, and the (slower) 64-bit axis divisions only land on kernels that would
+        # otherwise fault. The symbolic branch above widens ALWAYS: its runtime extent is
+        # unboundable at render time (batch·seq·N·coop crossed int32 at seq 512 on the merged
+        # gate/up demote).
+        wide = n > _INT32_MAX
+        bidx = "(long long)blockIdx.x" if wide else "blockIdx.x"
         # A warp-specialized producer band (``aux_threads``) launches PAST the cooperative cells:
         # decode off ``blockIdx·block_threads + threadIdx % block_threads`` so an aux thread wraps
         # onto this CTA's cells (correct block coords; its unit/lane aliases are never read).
         gid = (
-            f"blockIdx.x * {self.block_threads} + threadIdx.x % {self.block_threads}"
+            f"{bidx} * {self.block_threads} + threadIdx.x % {self.block_threads}"
             if self.aux_threads
-            else "blockIdx.x * blockDim.x + threadIdx.x"
+            else f"{bidx} * blockDim.x + threadIdx.x"
         )
         # ``gridDim = ceil(n / cells)`` CTAs cover the cells. When ``cells`` divides ``n`` exactly and
         # there is no warp-specialized aux band, every launched thread maps to a real cell — the tail
@@ -359,8 +380,11 @@ class Tile(Stmt):
         # emit the decode + body flat. Otherwise the partial last block (or the aux threads that launch
         # past the cells) needs masking.
         guard = self.aux_threads != 0 or n % self.cells != 0
-        out = [f"{pad}int _gid = {gid};"]
-        inner = ctx.child() if guard else ctx
+        out = [f"{pad}{'long long' if wide else 'int'} _gid = {gid};"]
+        # An elided guard means EVERY thread of every block executes the body — the block-fold
+        # arm of ``RowAccum`` (which barriers) is legal exactly here; ``Cond.render`` clears the
+        # flag again for divergent sub-scopes.
+        inner = ctx.child() if guard else replace(ctx, full_block=True)
         ipad = _pad(inner.indent)
         if guard:
             out.append(f"{pad}if (_gid < {n}) {{")
@@ -1663,7 +1687,14 @@ class RegStore(Stmt):
     (+1) < bound`` per col. ``None`` (the default) renders the unguarded
     fast path unchanged. ``m_guard`` alone keeps the vectorized row-pair
     stores (a pair shares a row); an ``n_guard`` forces per-element scalar
-    stores (the pair straddles the column bound)."""
+    stores (the pair straddles the column bound).
+
+    ``atomic`` renders each store as an ``atomicAdd`` accumulate instead of a
+    plain assign — ``030_split_reduce``'s atomic finalize on the mma tier: every
+    split partition's C fragment adds into the (per-launch zero-init'd) output.
+    f16 / bf16 keep the vectorized row pair (native packed-pair ``atomicAdd``);
+    an f32 destination has no packed atomic below sm_90, so it drops to
+    per-element scalar ``atomicAdd``\\ s."""
 
     dst_buffer: str
     dst_index: tuple
@@ -1673,6 +1704,7 @@ class RegStore(Stmt):
     epilogue: RegEpilogue | None = None
     m_guard: tuple[Expr, Expr] | None = None
     n_guard: tuple[Expr, Expr] | None = None
+    atomic: bool = False
 
     def deps(self) -> tuple[str, ...]:
         extra = () if self.epilogue is None else tuple(fr for _, fr in self.epilogue.extra_accs)
@@ -1707,7 +1739,25 @@ class RegStore(Stmt):
             guards += f" m<{self.m_guard[1].pretty()}"
         if self.n_guard is not None:
             guards += f" n<{self.n_guard[1].pretty()}"
-        return [f"{indent}RegStore {self.dst_buffer}[{idx}] <- {self.frag}{epi}{guards} (ldm={self.ldm or 'auto'})"]
+        acc = " (atomic)" if self.atomic else ""
+        return [f"{indent}RegStore {self.dst_buffer}[{idx}] <- {self.frag}{epi}{guards}{acc} (ldm={self.ldm or 'auto'})"]
+
+    def _pair_store(self, addr: str, v0: str, v1: str, vec2: str, packer: str) -> str:
+        """One vectorized row-pair store line — a plain assign, or (``atomic``) the packed-pair
+        ``atomicAdd`` (native f16x2 / bf16x2 red; the caller keeps f32 off this path pre-sm90)."""
+        tgt = f"reinterpret_cast<{vec2}*>(&{self.dst_buffer}[{addr}])"
+        if self.atomic:
+            return f"atomicAdd({tgt}, {packer}({v0}, {v1}));"
+        return f"*{tgt} = {packer}({v0}, {v1});"
+
+    def _elem_store(self, addr: str, val: str, dst_dt: str) -> str:
+        """One per-element store line — plain assign (the implicit f32→dst conversion), or
+        (``atomic``) a scalar ``atomicAdd`` with the conversion made explicit (no float overload
+        on a ``__half*`` / ``__nv_bfloat16*`` destination)."""
+        if self.atomic:
+            conv = {"f16": "__float2half({})", "bf16": "__float2bfloat16({})"}.get(dst_dt, "{}")
+            return f"atomicAdd(&{self.dst_buffer}[{addr}], {conv.format(val)});"
+        return f"{self.dst_buffer}[{addr}] = {val};"
 
     def _element_values(self, ctx: RenderCtx) -> tuple[list[list[str]], list[str]]:
         """``(per_element_preamble, values)``: the four per-lane store values,
@@ -1817,20 +1867,20 @@ class RegStore(Stmt):
             head, base, close = [f"{pad}{{ {lane_stmt}"], f"{pad}  ", " }"
         body = [f"{base}{ln}" for group in pre for ln in group]
         vec2 = {"f16": "__half2", "bf16": "__nv_bfloat162", "f32": "float2"}.get(dst_dt)
-        if vec2 is not None:
+        if vec2 is not None and not (self.atomic and dst_dt == "f32"):  # no packed f32 atomicAdd pre-sm90
             packer = {"f16": "__floats2half2_rn", "bf16": "__floats2bfloat162_rn", "f32": "make_float2"}[dst_dt]
             lo = f"{flat} + _g * {ldm} + _t * 2"
             hi = f"{flat} + (_g + 8) * {ldm} + _t * 2"
             body += [
-                f"{base}*reinterpret_cast<{vec2}*>(&{self.dst_buffer}[{lo}]) = {packer}({vals[0]}, {vals[1]});",
-                f"{base}*reinterpret_cast<{vec2}*>(&{self.dst_buffer}[{hi}]) = {packer}({vals[2]}, {vals[3]});",
+                f"{base}{self._pair_store(lo, vals[0], vals[1], vec2, packer)}",
+                f"{base}{self._pair_store(hi, vals[2], vals[3], vec2, packer)}",
             ]
-        else:  # per-element scalar stores (dtypes without a 2-vector packer)
+        else:  # per-element scalar stores (dtypes without a 2-vector packer; atomic f32)
             body += [
-                f"{base}{self.dst_buffer}[{flat} + _g * {ldm} + _t * 2 + 0] = {vals[0]};",
-                f"{base}{self.dst_buffer}[{flat} + _g * {ldm} + _t * 2 + 1] = {vals[1]};",
-                f"{base}{self.dst_buffer}[{flat} + (_g + 8) * {ldm} + _t * 2 + 0] = {vals[2]};",
-                f"{base}{self.dst_buffer}[{flat} + (_g + 8) * {ldm} + _t * 2 + 1] = {vals[3]};",
+                f"{base}{self._elem_store(f'{flat} + _g * {ldm} + _t * 2 + 0', vals[0], dst_dt)}",
+                f"{base}{self._elem_store(f'{flat} + _g * {ldm} + _t * 2 + 1', vals[1], dst_dt)}",
+                f"{base}{self._elem_store(f'{flat} + (_g + 8) * {ldm} + _t * 2 + 0', vals[2], dst_dt)}",
+                f"{base}{self._elem_store(f'{flat} + (_g + 8) * {ldm} + _t * 2 + 1', vals[3], dst_dt)}",
             ]
         if close:
             body[-1] += close
@@ -1860,7 +1910,7 @@ class RegStore(Stmt):
             ]
         lines = [f"{pad}{{ const int _g = {lane} >> 2; const int _t = {lane} & 3;"]
         vec2 = {"f16": "__half2", "bf16": "__nv_bfloat162", "f32": "float2"}.get(dst_dt)
-        if self.n_guard is None and vec2 is not None:
+        if self.n_guard is None and vec2 is not None and not (self.atomic and dst_dt == "f32"):
             # Row-guarded vectorized pairs: elements {0,1} share row _g,
             # {2,3} share row _g+8; each pair's preamble + store sit inside
             # the pair's row check.
@@ -1869,7 +1919,7 @@ class RegStore(Stmt):
                 addr = f"{flat} + {addr_row} * {ldm} + _t * 2"
                 lines.append(f"{pad}  if ({m_pred[pair]}) {{")
                 lines += [f"{pad}    {ln}" for ln in (*pre[pair], *pre[pair + 1])]
-                lines.append(f"{pad}    *reinterpret_cast<{vec2}*>(&{self.dst_buffer}[{addr}]) = {packer}({vals[pair]}, {vals[pair + 1]});")
+                lines.append(f"{pad}    {self._pair_store(addr, vals[pair], vals[pair + 1], vec2, packer)}")
                 lines.append(f"{pad}  }}")
             lines.append(f"{pad}}}")
             return lines
@@ -1880,7 +1930,7 @@ class RegStore(Stmt):
             addr = f"{flat} + {row} * {ldm} + _t * 2 + {i & 1}"
             lines.append(f"{pad}  if ({preds}) {{")
             lines += [f"{pad}    {ln}" for ln in pre[i]]
-            lines.append(f"{pad}    {self.dst_buffer}[{addr}] = {vals[i]};")
+            lines.append(f"{pad}    {self._elem_store(addr, vals[i], dst_dt)}")
             lines.append(f"{pad}  }}")
         lines.append(f"{pad}}}")
         return lines
@@ -2018,7 +2068,14 @@ class KernelOp(BodyOp):
     ``CpAsyncCopy.src`` and ``TmaDescriptor.src_buf`` also name kernel
     input parameters (the descriptor parameter itself is host-built and
     appended by the CUDA backend's argument pipeline, not a graph
-    buffer)."""
+    buffer).
+
+    ``zero_delegated`` lists atomic-accumulator buffers whose per-launch zero-init a
+    dataflow-PREDECESSOR kernel carries as a ``ZeroPrologue`` stmt
+    (``lowering/cuda/005_delegate_zero_init``) — ``010_lower_kernelop`` drops them from the
+    ``CudaOp.zero_outputs`` memset list."""
+
+    zero_delegated: tuple[str, ...] = ()
 
     @cached_property
     def smem_buffers(self) -> dict[str, Smem]:
@@ -2362,6 +2419,10 @@ def _(s: RegStore, rename, sigma, axis_fn):
         epilogue=epilogue,
         m_guard=_sub_guard(s.m_guard),
         n_guard=_sub_guard(s.n_guard),
+        # ``atomic`` MUST thread through: dropping it here silently degraded a rewritten (e.g.
+        # loopify-rolled) atomic split-K store to racing plain assigns — the partitions then
+        # clobber instead of accumulate, a numerically-wrong kernel with no loud failure.
+        atomic=s.atomic,
     )
 
 

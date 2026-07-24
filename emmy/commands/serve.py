@@ -39,6 +39,8 @@ logger = logging.getLogger(__name__)
 # A/B compares both engines at the same max-model-len.
 _DEFAULT_MAX_MODEL_LEN = "4096"
 _DEFAULT_GPU_MEMORY_UTILIZATION = "0.9"
+# The emmy generative arm only — see the util default in ``build_serve_cmd``.
+_GENERATE_GPU_MEMORY_UTILIZATION = "0.97"
 
 _PLUGIN_ARGS = ["--enforce-eager", "--hf-overrides", '{"architectures": ["EmmyEmbedModel"]}']
 
@@ -132,11 +134,14 @@ def _gen_graph_args(vllm_args: list[str]) -> list[str]:
     """The eager/capture flags for emmy generative serving. DEFAULT is whole-step decode
     capture: a compilation-config asking for FULL_DECODE_ONLY graphs (full cudagraphs need no
     torch.compile — vLLM wraps the model in its ``CUDAGraphWrapper``) with capture sizes
-    clamped to the decode bucket — sizes above the bucket would capture the model's symbolic
-    fallback path, whose per-layer host numpy hops abort a stream capture. Opt out with
-    vLLM's own ``--enforce-eager`` (forwards as-is); a caller-supplied ``--compilation-config``
-    also wins over ours. With the decode bucket off (``EMMY_GEN_DECODE_BUCKET=0``) nothing is
-    capturable, so eager is forced."""
+    following ``--max-num-seqs``. Sizes up to the decode bucket capture the static decode
+    twin; sizes ABOVE it capture the device-resident symbolic programs (``run_device_sym``)
+    — both paths are validated under stream capture (``test_gen_capture_gpu``; the symbolic
+    path's per-size warmup precedes each capture, which is what keeps TMA descriptor
+    encoding out of the capture window). Opt out with vLLM's own ``--enforce-eager``
+    (forwards as-is); a caller-supplied ``--compilation-config`` also wins over ours. With
+    the decode bucket off (``EMMY_GEN_DECODE_BUCKET=0``) nothing static is capturable, so
+    eager is forced."""
     from emmy import config as emmy_config  # noqa: PLC0415
 
     if _has_flag(vllm_args, "--enforce-eager") or _has_flag(vllm_args, "--compilation-config"):
@@ -145,8 +150,21 @@ def _gen_graph_args(vllm_args: list[str]) -> list[str]:
     if bucket <= 0:
         logger.warning("decode bucket is off (EMMY_GEN_DECODE_BUCKET=0) — the symbolic decode path is not capturable; serving eager")
         return ["--enforce-eager"]
-    sizes = [s for s in (1, 2, 4, 8, 16, 32, 64) if s < bucket] + [bucket]
-    cfg = f'{{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": {sizes}}}'
+    # Cover decode batches up to max_num_seqs (vLLM's default 256 when unset): the bucket
+    # rides the list so the static twin captures at its exact width, and the power-of-two
+    # ladder above it captures the symbolic programs at their exact grids.
+    max_seqs_raw = _flag_value(vllm_args, "--max-num-seqs", "256")
+    max_seqs = int(max_seqs_raw) if max_seqs_raw.isdigit() else 256
+    top = max(bucket, max_seqs)
+    sizes = sorted({s for s in (1, 2, 4, 8, 16, 32, 64, 128, 256, 512) if s < top} | {bucket, top})
+    # ``custom_ops: +rotary_embedding``: the plugin runs the model EAGERLY inside the cudagraph
+    # (no inductor), but vLLM's CustomOp dispatch assumes compilation will fuse native ops and
+    # hands out ``forward_native`` — a per-layer torch-op soup (4 cats + 4 adds + an fp32
+    # promotion and two cast-backs per layer, ~0.9 ms/step on gemma-4-12B decode). Forcing the
+    # custom impl dispatches ``forward_cuda`` — vLLM's fused in-place rotary kernel (valid for
+    # every ``RotaryEmbedding`` subclass the plugin builds; gemma-4's proportional variant only
+    # overrides the cos/sin CACHE build, not the apply).
+    cfg = f'{{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": {sizes}, "custom_ops": ["+rotary_embedding"]}}'
     return ["--compilation-config", cfg]
 
 
@@ -174,10 +192,28 @@ def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: 
             cmd += ["--max-num-batched-tokens", _DEFAULT_MAX_MODEL_LEN]
     elif not stock:
         cmd += _PLUGIN_ARGS
+        # Batched symbolic-seq mode pays the FULL batch-cap cost per step (dummy rows pad
+        # the group), so a step must be allowed to FILL the batch: without this, vLLM's
+        # default max_num_batched_tokens (2048) schedules ~4 sequences per step into a
+        # 32-row program — 28 rows of pure waste (measured 0.63 req/s vs 2.33 per-seq).
+        from emmy import config as emmy_config  # noqa: PLC0415
+
+        if emmy_config.serving_batched() and not _has_flag(vllm_args, "--max-num-batched-tokens"):
+            seqs_raw = _flag_value(vllm_args, "--max-num-seqs", "256")
+            len_raw = _flag_value(vllm_args, "--max-model-len", _DEFAULT_MAX_MODEL_LEN)
+            if seqs_raw.isdigit() and len_raw.isdigit():
+                cmd += ["--max-num-batched-tokens", str(int(seqs_raw) * int(len_raw))]
     if not _has_flag(vllm_args, "--max-model-len"):
         cmd += ["--max-model-len", _DEFAULT_MAX_MODEL_LEN]
     if not _has_flag(vllm_args, "--gpu-memory-utilization"):
-        cmd += [f"--gpu-memory-utilization={_DEFAULT_GPU_MEMORY_UTILIZATION}"]
+        # The emmy generative arm's weights/activations live in cupy, INVISIBLE to vLLM's
+        # torch-only memory profiler — vLLM budgets `util × total − currently-used`, so the
+        # default 0.90 line can land below what the emmy residents already consume and the
+        # boot dies on the min-KV fit check (measured: gemma-4-12B at mml 8448 left 1.37 GiB
+        # of the needed 1.7). 0.97 extends the budget line above the residents while keeping
+        # slack for capture; stock keeps 0.90 (its own sampler warmup OOMs at 0.97).
+        util = _GENERATE_GPU_MEMORY_UTILIZATION if generate and not stock else _DEFAULT_GPU_MEMORY_UTILIZATION
+        cmd += [f"--gpu-memory-utilization={util}"]
     return cmd + vllm_args
 
 
@@ -235,6 +271,21 @@ def _vllm_bin() -> str:
     sys.exit(1)
 
 
+def _child_env() -> dict:
+    """Environment for the vLLM child with this interpreter's bin dir prepended to ``PATH``.
+    Invoking ``./venv/bin/emmy`` by absolute path does NOT put the venv's bin on ``PATH``, so
+    the generative server's inductor-compile subprocess dies with ``FileNotFoundError: ninja``
+    (ninja is pip-installed into that same bin). Prepending it — what venv activation would do —
+    makes the venv's ``ninja`` / console scripts resolvable to the child. Idempotent: a bin dir
+    already at the front of ``PATH`` is not duplicated."""
+    env = dict(os.environ)
+    bin_dir = str(Path(sys.executable).parent)
+    parts = env.get("PATH", "").split(os.pathsep)
+    if parts[:1] != [bin_dir]:
+        env["PATH"] = os.pathsep.join([bin_dir, *parts]) if parts != [""] else bin_dir
+    return env
+
+
 def handle_serve(args):
     vllm_args = _split_own_flags(args)  # re-parses own flags placed after MODEL into args
     serve_cmd = build_serve_cmd(args.model, stock=args.stock, vllm_args=vllm_args, generate=args.generate)
@@ -260,24 +311,25 @@ def handle_serve(args):
 
     vllm = _vllm_bin()
     serve_cmd[0] = vllm
+    env = _child_env()
     if not args.bench:
         # Plain serving: replace this process so signals/Ctrl-C reach vLLM directly.
-        os.execv(vllm, serve_cmd)
+        os.execve(vllm, serve_cmd, env)
 
     bench_cmd[0] = vllm
-    _serve_and_bench(serve_cmd, bench_cmd, port)
+    _serve_and_bench(serve_cmd, bench_cmd, port, env=env)
 
 
-def _serve_and_bench(serve_cmd: list[str], bench_cmd: list[str], port: str) -> None:
+def _serve_and_bench(serve_cmd: list[str], bench_cmd: list[str], port: str, *, env: dict | None = None) -> None:
     log_file = tempfile.NamedTemporaryFile(mode="wb", prefix="emmy-serve-", suffix=".log", delete=False)
     logger.info("Starting server (logs: %s)...", log_file.name)
     logger.info("  %s", shlex.join(serve_cmd))
-    server = subprocess.Popen(serve_cmd, stdout=log_file, stderr=subprocess.STDOUT)
+    server = subprocess.Popen(serve_cmd, stdout=log_file, stderr=subprocess.STDOUT, env=env)
     try:
         _wait_for_health(server, port, log_file.name)
         logger.info("Server healthy — running benchmark...")
         logger.info("  %s", shlex.join(bench_cmd))
-        rc = subprocess.run(bench_cmd).returncode
+        rc = subprocess.run(bench_cmd, env=env).returncode
     finally:
         logger.info("Shutting down server...")
         server.terminate()

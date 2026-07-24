@@ -205,29 +205,34 @@ PLACE = Knob(
     KnobType.STR,
     help="Structural placement of an intermediate edge — auto|fuse|cut, per element via "
     "PLACE@cone (producer-cone inlining) / PLACE@fold (flash vs multi-kernel attention) / "
-    "PLACE@tuple (online softmax vs two-pass stats); bare PLACE pins every eligible edge. "
-    "Pin-only (never enumerated); read in lowering/tile/010_recognize.",
+    "PLACE@tuple (online softmax vs two-pass stats) / PLACE@stat (auto|fuse|sink — a norm's "
+    "row statistic staying local vs sunk into its producer's epilogue); bare PLACE pins every "
+    "eligible edge. Pin-only (never enumerated); read in lowering/tile/010_recognize.",
     off="",
 )
 
 # The built-in ``auto`` defaults per element — today's emission behavior (fuse everywhere: flash,
-# online softmax, and producer-cone inlining are all on when recognizable). Flipping a default is a
-# behavior change gated on the validation suite, not a spelling change.
-_PLACE_DEFAULTS = {"cone": "fuse", "fold": "fuse", "tuple": "fuse"}
+# online softmax, and producer-cone inlining are all on when recognizable; a row statistic stays
+# LOCAL to its kernel). Flipping a default is a behavior change gated on the validation suite, not
+# a spelling change. ``stat``'s alternative is ``sink`` (not ``cut``): the statistic reduce
+# migrates into the producer kernel's epilogue (``025_sink_row_reduce``) instead of splitting out.
+_PLACE_DEFAULTS = {"cone": "fuse", "fold": "fuse", "tuple": "fuse", "stat": "fuse"}
+_PLACE_VALUES = {"cone": ("fuse", "cut"), "fold": ("fuse", "cut"), "tuple": ("fuse", "cut"), "stat": ("fuse", "sink")}
 
 
 def place_decision(element: str) -> str:
-    """The resolved ``PLACE`` decision (``"fuse"`` / ``"cut"``) for ``element`` — the pin
-    (``PLACE@<element>`` > bare ``PLACE``, via ``Knob.narrow_at``) with the explicit ``auto`` token
-    (and no pin at all) resolving to the built-in per-element default. An unknown pin value degrades
-    to the default with a log line — the standard pin-validity rule."""
+    """The resolved ``PLACE`` decision (``"fuse"`` / ``"cut"`` — ``"sink"`` for ``stat``) for
+    ``element`` — the pin (``PLACE@<element>`` > bare ``PLACE``, via ``Knob.narrow_at``) with the
+    explicit ``auto`` token (and no pin at all) resolving to the built-in per-element default. An
+    unknown pin value degrades to the default with a log line — the standard pin-validity rule."""
     default = _PLACE_DEFAULTS[element]
+    allowed = _PLACE_VALUES[element]
     pin = PLACE.narrow_at(element)
     if pin is None or pin in ("", "auto"):
         return default
-    if pin in ("fuse", "cut"):
+    if pin in allowed:
         return pin
-    logger.warning("PLACE@%s pin %r is not auto|fuse|cut; using the built-in %r", element, pin, default)
+    logger.warning("PLACE@%s pin %r is not auto|%s; using the built-in %r", element, pin, "|".join(allowed), default)
     return default
 
 
@@ -386,7 +391,9 @@ def scalar_tile_moves() -> list[str]:
 # ``(1, 16)`` is the thin-M / wide-N decode geometry (16 warps down the N axis, 1 down M — the same
 # 16-warp CTA as ``(8, 2)``): a decode-M computed-A (fused norm→linear) contraction wants its warps
 # spread across the wide output columns, and it beat the ``(1, 8)`` sibling ~5% on both the q-proj
-# (N=4096) and gate/up (N=15360) fused edges at M=32 (5090). Per-node legality — the atom's operand
+# (N=4096) and gate/up (N=15360) fused edges at M=32 (5090). ``(2, 8)`` is its M=64 sibling (a second
+# M warp-unit once the decode bucket doubles): the lm_head.m64 golden winner — w1x8 leaves 2x on the
+# table there (2392 vs 1215 µs, 5090) — and the best fused-geglu tile at the same M. Per-node legality — the atom's operand
 # dtype and the ``_check_warp_static_k`` K-divisibility — is the scheduler's (``_schedule``), not the grid's.
 # (WM, WN) / (FM, FN)
 _WARP_UNITS: tuple[tuple[int, int], ...] = (
@@ -400,6 +407,7 @@ _WARP_UNITS: tuple[tuple[int, int], ...] = (
     (4, 2),
     (4, 4),
     (1, 8),
+    (2, 8),
     (8, 2),
     (1, 16),
 )
@@ -464,13 +472,14 @@ SPLITK_WIDTHS: tuple[int, ...] = (2, 4, 8)
 
 
 def splitk_moves(*, warp: bool) -> list[str]:
-    """The cross-CTA split-K ``REDUCE`` codec candidates: deferred-kernel finalize (``g<w>k``) for
-    both tiers, in-place atomic (``g<w>a``) for the scalar tier only (an mma C-fragment cannot
-    ``atomicAdd`` — ``RegStore`` has no atomic form). These EXTEND the serial ``""`` option-0."""
-    moves = [f"g{w}k" for w in SPLITK_WIDTHS]
-    if not warp:
-        moves += [f"g{w}a" for w in SPLITK_WIDTHS]
-    return moves
+    """The cross-CTA split-K ``REDUCE`` codec candidates, both tiers each: the deferred-kernel
+    finalize (``g<w>k``, an f32 workspace + sibling combine kernel) and the in-place atomic
+    (``g<w>a``, one kernel — the partial ``atomicAdd``\\ s into the zero-init'd output; the mma
+    tier rides ``RegStore.atomic``'s packed-pair red). The scheduler's ``atomic_ok`` gate
+    (``_reduce_candidates``) keeps ``a`` rows off multi-fold / non-distributive-projection nodes.
+    These EXTEND the serial ``""`` option-0."""
+    del warp  # both tiers share the catalog; per-node legality lives in the scheduler's gates
+    return [f"g{w}{f}" for w in SPLITK_WIDTHS for f in ("k", "a")]
 
 
 def coop_reduce_moves() -> list[str]:

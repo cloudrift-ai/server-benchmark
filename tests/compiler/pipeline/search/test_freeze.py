@@ -1,21 +1,32 @@
-"""The measurement freeze — leaf-only sanity filter, freeze-twice determinism, the
+"""The measurement freeze (v2) — the golden-spelled sanity filter, freeze-twice
+determinism over the per-GPU YAML directory, load-time feature re-derivation, the
 loader's hard-error contract, and the DB/freeze interchange seam (``load_node_rows``).
 
 The freeze is Phase 3 of the offline-prior rework: a fit must be a pure function of
 (repo, pinned data), so one command snapshots the live node DB into a digest-pinned
-JSONL file. These tests never touch a GPU — the plausibility physics itself is covered
-by ``test_node_gate.py``; here the fixtures only need one plausible and one implausible
-latency on a registry-known card."""
+directory of golden-spelled per-GPU YAML files. These tests never touch a GPU — the
+plausibility physics itself is covered by ``test_node_gate.py``; the specs here are
+small fp32 matmuls so the loader's snippet re-trace stays cheap (and lru-cached)."""
 
 from __future__ import annotations
 
-import dataclasses
+import hashlib
 import json
 
 import pytest
+import yaml
 
 from emmy.compiler.pipeline.search.data import Dataset
-from emmy.compiler.pipeline.search.data.freeze import FREEZE_KIND, FREEZE_VER, freeze_reason, load_freeze, load_node_rows, write_freeze
+from emmy.compiler.pipeline.search.data.freeze import (
+    FREEZE_KIND,
+    FREEZE_VER,
+    MANIFEST_NAME,
+    freeze_reason,
+    load_freeze,
+    load_node_rows,
+    write_freeze,
+)
+from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 from tests.compiler.pipeline.search.conftest import GPU_5090 as _GPU
@@ -24,40 +35,79 @@ from tests.compiler.pipeline.search.conftest import node_row as _row
 
 _GPU2 = "NVIDIA GeForce RTX 4090"
 
+# Small declarative identities — the loader re-traces each DISTINCT shape once (cached).
+_SPEC_A = {"kernel": "matmul", "M": 64, "N": 64, "K": 64, "dtype": "fp32", "trans_b": False, "dynamic": False}
+_SPEC_B = {"kernel": "matmul", "M": 64, "N": 64, "K": 128, "dtype": "fp32", "trans_b": False, "dynamic": False}
+
+
+def _feats(*, opt: float = 3.0, cc: float = 120.0, **knobs) -> dict:
+    """Write-time features consistent with ``_SPEC_A``-sized shapes: the regime stamps the
+    freeze needs (``H_cc`` / ``H_opt``), plausible extents, and the tunable knobs that
+    must survive the round trip verbatim."""
+    return {
+        "H_cc": cc,
+        "H_opt": opt,
+        "S_ext_free_prod": 4096.0,
+        "S_ext_reduce_max": 64.0,
+        "S_ext_n_free_axis": 2.0,
+        "S_ext_n_reduce_axis": 1.0,
+        "S_loop_depth": 3.0,
+        "S_dtype_f32": 3.0,
+        "TILE": "n16x16/f2x2",
+        **knobs,
+    }
+
 
 # ---------------------------------------------------------------------------
 # freeze_reason — the sanity filter
 # ---------------------------------------------------------------------------
 
 
-def test_reason_keeps_plausible_ok_leaf() -> None:
-    assert freeze_reason(_row("k", value_us=500.0)) is None
+def test_reason_keeps_identity_carrying_ok_leaf() -> None:
+    assert freeze_reason(_row("k", value_us=500.0, features=_feats(), shape_spec=_SPEC_A)) is None
 
 
 def test_reason_keeps_bench_fail_leaf_as_negative() -> None:
     # A fail's value_us is the watchdog sentinel — absurd as a latency, but the row is
     # a durable "doesn't build/launch here" negative and must freeze.
-    assert freeze_reason(_row("k", value_us=9.17, status="bench_fail")) is None
+    assert freeze_reason(_row("k", value_us=9.17, features=_feats(), shape_spec=_SPEC_A, status="bench_fail")) is None
+
+
+def test_reason_drops_identity_less_legacy_rows() -> None:
+    # THE legacy-exclusion mechanism: tune-written / pre-identity rows stay in the DB
+    # but can never spell a golden-format freeze row.
+    assert "no declarative identity" in freeze_reason(_row("k", value_us=500.0, features=_feats()))
+
+
+def test_reason_drops_rows_without_regime_stamps() -> None:
+    feats = {k: v for k, v in _feats().items() if k != "H_cc"}
+    assert "missing H_" in freeze_reason(_row("k", value_us=500.0, features=feats, shape_spec=_SPEC_A))
 
 
 def test_reason_drops_non_leaves() -> None:
-    assert freeze_reason(_row("k", value_us=500.0, is_leaf=False)) is not None
-    assert freeze_reason(_row("k", value_us=500.0, is_leaf=None)) is not None  # pre-enrichment unknown
+    assert freeze_reason(_row("k", value_us=500.0, features=_feats(), shape_spec=_SPEC_A, is_leaf=False)) is not None
+    assert freeze_reason(_row("k", value_us=500.0, features=_feats(), shape_spec=_SPEC_A, is_leaf=None)) is not None
 
 
 def test_reason_drops_stale_feat_ver() -> None:
-    assert freeze_reason(_row("k", value_us=500.0, feat_ver=FEATURIZER_VERSION - 1)) is not None
+    stale = FEATURIZER_VERSION - 1
+    assert freeze_reason(_row("k", value_us=500.0, features=_feats(), shape_spec=_SPEC_A, feat_ver=stale)) is not None
     # ... including fail rows: a negative spelled in a retired vocabulary is unreadable too.
-    assert freeze_reason(_row("k", value_us=9.17, status="bench_fail", feat_ver=FEATURIZER_VERSION - 1)) is not None
+    assert freeze_reason(_row("k", value_us=9.17, features=_feats(), shape_spec=_SPEC_A, status="bench_fail", feat_ver=stale)) is not None
 
 
 def test_reason_drops_implausible_value() -> None:
-    assert "implausible value" in freeze_reason(_row("k", value_us=9.17))  # ~6500 TFLOP/s
+    # The conftest f16 mlp_down extents at 9.17 µs imply ~6500 TFLOP/s.
+    from tests.compiler.pipeline.search.conftest import F16_MATMUL_FEATS
+
+    feats = {"H_cc": 120.0, "H_opt": 3.0, **F16_MATMUL_FEATS}
+    assert "implausible value" in freeze_reason(_row("k", value_us=9.17, features=feats, shape_spec=_SPEC_A))
 
 
 def test_reason_drops_impossible_kernel() -> None:
     # The square.512 residue: over-cap cp.async slab -> legal-looking latency, invalid kernel.
-    assert "impossible kernel" in freeze_reason(_row("k", value_us=2.02, features=impossible_staged_feats()))
+    feats = {"H_cc": 120.0, "H_opt": 3.0, **impossible_staged_feats()}
+    assert "impossible kernel" in freeze_reason(_row("k", value_us=2.02, features=feats, shape_spec=_SPEC_A))
 
 
 # ---------------------------------------------------------------------------
@@ -72,65 +122,93 @@ def _seed_db(path, rows) -> None:
 
 
 _SEED = [
-    _row("leaf-a", value_us=500.0, op_sig="mm1", run_id="run-a"),
-    _row("leaf-b", value_us=480.0, op_sig="mm1", gpu=_GPU2, run_id="run-b"),
-    _row("leaf-fail", value_us=60000.0, op_sig="mm2", status="bench_fail", run_id="run-a"),
-    _row("branch", value_us=480.0, op_sig="mm1", is_leaf=False),
-    _row("leaf-stale", value_us=500.0, op_sig="mm1", feat_ver=FEATURIZER_VERSION - 1),
+    # _SPEC_A's -O3/-O1 twins on the 5090 — same declarative op, two lanes.
+    _row("leaf-a3", value_us=500.0, op_sig="mm1", features=_feats(), shape_spec=_SPEC_A, run_id="run-a"),
+    _row("leaf-a1", value_us=900.0, op_sig="mm1", features=_feats(opt=1.0), shape_spec=_SPEC_A, run_id="run-a"),
+    _row("leaf-b", value_us=480.0, op_sig="mm2", gpu=_GPU2, features=_feats(cc=89.0), shape_spec=_SPEC_B, run_id="run-b"),
+    _row("leaf-fail", value_us=60000.0, op_sig="mm2", features=_feats(), shape_spec=_SPEC_B, status="bench_fail", run_id="run-a"),
+    _row("branch", value_us=480.0, op_sig="mm1", features=_feats(), shape_spec=_SPEC_A, is_leaf=False),
+    _row("leaf-stale", value_us=500.0, op_sig="mm1", features=_feats(), shape_spec=_SPEC_A, feat_ver=FEATURIZER_VERSION - 1),
+    _row("leaf-legacy", value_us=500.0, op_sig="mm1", features=_feats()),  # no identity — never freezes
 ]
-_KEPT_KEYS = {"leaf-a", "leaf-b", "leaf-fail"}
+_N_KEPT = 4
 
 
 def test_write_freeze_round_trip(tmp_path) -> None:
     db_path = tmp_path / "autotune.db"
     _seed_db(db_path, _SEED)
-    out = tmp_path / "freeze.jsonl"
-    header = write_freeze(db_path, out, note="unit-test policy")
+    out = tmp_path / "freeze"
+    manifest = write_freeze(db_path, out, note="unit-test policy")
 
-    assert header["kind"] == FREEZE_KIND
-    assert header["freeze_ver"] == FREEZE_VER
-    assert header["feat_ver"] == header["knob_ver"] == header["encoding_ver"] == FEATURIZER_VERSION
-    assert header["counts"] == {"rows": 3, "ok": 2, "bench_fail": 1, "per_gpu": {_GPU2: 1, _GPU: 2}}
-    assert header["run_ids"] == ["run-a", "run-b"]
-    assert header["policy_note"] == "unit-test policy"
-    assert header["source_db"] == str(db_path.resolve())
+    assert manifest["kind"] == FREEZE_KIND
+    assert manifest["freeze_ver"] == FREEZE_VER
+    assert manifest["feat_ver"] == manifest["knob_ver"] == manifest["encoding_ver"] == FEATURIZER_VERSION
+    assert manifest["counts"] == {"rows": _N_KEPT, "ok": 3, "bench_fail": 1, "per_gpu": {_GPU2: 1, _GPU: 3}}
+    assert manifest["run_ids"] == ["run-a", "run-b"]
+    assert manifest["policy_note"] == "unit-test policy"
+    assert manifest["source_db"] == str(db_path.resolve())
+    # One YAML per (gpu, cap), goldens-style header + configs; nothing featurized persists.
+    assert set(manifest["files"]) == {"nvidia_geforce_rtx_5090_sm120.yaml", "nvidia_geforce_rtx_4090_sm89.yaml"}
+    doc = yaml.safe_load((out / "nvidia_geforce_rtx_5090_sm120.yaml").read_text())
+    assert doc["gpu_name"] == _GPU and doc["compute_cap"] == [12, 0]
+    assert all(set(c) & {"H_cc", "H_opt"} == set() for c in doc["configs"])
+    assert all(not any(k.startswith(("S_", "H_")) for k in c["knobs"]) for c in doc["configs"])
 
-    loaded_header, rows = load_freeze(out)
-    assert loaded_header == header
-    assert {r.node_key for r in rows} == _KEPT_KEYS
-    # Field-for-field identical to the DB's filter-passing leaves, minus the tree schema.
-    db = SearchDB.open_readonly(db_path)
-    try:
-        db_rows = {r.node_key: r for r in db.iter_nodes() if freeze_reason(r) is None}
-    finally:
-        db.close()
-    for r in rows:
-        assert r.parent_key is None and r.depth == 0 and r.visits == 0 and r.is_leaf is True
-        expected = dataclasses.replace(db_rows[r.node_key], parent_key=None, depth=0, visits=0)
-        assert r == expected
+    loaded_manifest, rows = load_freeze(out)
+    assert loaded_manifest == manifest
+    assert len(rows) == _N_KEPT
+    by_run_value = {(r.run_id, r.value_us): r for r in rows}
+    a3 = by_run_value[("run-a", 500.0)]
+    a1 = by_run_value[("run-a", 900.0)]
+    fail = by_run_value[("run-a", 60000.0)]
+    # The measurement extension block survives verbatim; identity is the declarative spec.
+    assert a3.shape_spec == _SPEC_A and a3.status == "ok" and a3.measured_at == "2026-07-09T00:00:00+00:00"
+    assert fail.shape_spec == _SPEC_B and fail.status == "bench_fail"
+    # Features are RE-DERIVED: card-faithful H_* (H_cc from the file cap), the opt lane
+    # from the row's own field, full traced S_* keying to the spec, tunables verbatim.
+    assert a3.features["H_cc"] == 120.0 and a3.features["H_opt"] == 3.0
+    assert a1.features["H_opt"] == 1.0
+    assert a3.features["TILE"] == "n16x16/f2x2"
+    assert ShapeKey.from_s_features(a3.features).joins(ShapeKey.from_matmul(_SPEC_A["M"], _SPEC_A["N"], _SPEC_A["K"], _SPEC_A["dtype"]))
+    assert a3.feat_ver == FEATURIZER_VERSION
+    # Treeless contract + identity keys: op_sig is the canonical spec JSON — the -O1/-O3
+    # twins share it (one fold-by-op group), distinct shapes never do.
+    assert all(r.parent_key is None and r.depth == 0 and r.visits == 0 and r.is_leaf is True for r in rows)
+    assert a3.op_sig == a1.op_sig == json.dumps(_SPEC_A, sort_keys=True, separators=(",", ":"))
+    assert a3.op_sig != fail.op_sig and a3.node_key != a1.node_key
     # The existing consumers work unchanged on freeze rows.
-    assert len(Dataset.from_node_rows(rows)) == 3
-    folds = Dataset.fold_node_rows(rows, by="gpu")
-    assert {g: len(rs) for g, rs in folds.items()} == {_GPU: 2, _GPU2: 1}
+    assert len(Dataset.from_node_rows(rows)) == _N_KEPT
+    assert {g: len(rs) for g, rs in Dataset.fold_node_rows(rows, by="gpu").items()} == {_GPU: 3, _GPU2: 1}
+    assert {sig: len(rs) for sig, rs in Dataset.fold_node_rows(rows, by="op").items()} == {a3.op_sig: 2, fail.op_sig: 2}
 
 
 def test_freeze_twice_same_digest(tmp_path) -> None:
     db_path = tmp_path / "autotune.db"
     _seed_db(db_path, _SEED)
-    h1 = write_freeze(db_path, tmp_path / "f1.jsonl")
-    h2 = write_freeze(db_path, tmp_path / "f2.jsonl")
-    assert h1["sha256"] == h2["sha256"]
-    tail1 = (tmp_path / "f1.jsonl").read_bytes().partition(b"\n")[2]
-    tail2 = (tmp_path / "f2.jsonl").read_bytes().partition(b"\n")[2]
-    assert tail1 == tail2  # only the header (created_at) may differ
+    m1 = write_freeze(db_path, tmp_path / "f1")
+    m2 = write_freeze(db_path, tmp_path / "f2")
+    assert m1["sha256"] == m2["sha256"]
+    assert m1["files"] == m2["files"]
+    for name in m1["files"]:
+        assert (tmp_path / "f1" / name).read_bytes() == (tmp_path / "f2" / name).read_bytes()
 
 
 def test_freeze_digest_insertion_order_independent(tmp_path) -> None:
     _seed_db(tmp_path / "fwd.db", _SEED)
     _seed_db(tmp_path / "rev.db", list(reversed(_SEED)))
-    h_fwd = write_freeze(tmp_path / "fwd.db", tmp_path / "fwd.jsonl")
-    h_rev = write_freeze(tmp_path / "rev.db", tmp_path / "rev.jsonl")
-    assert h_fwd["sha256"] == h_rev["sha256"]
+    m_fwd = write_freeze(tmp_path / "fwd.db", tmp_path / "fwd")
+    m_rev = write_freeze(tmp_path / "rev.db", tmp_path / "rev")
+    assert m_fwd["sha256"] == m_rev["sha256"]
+
+
+def test_refreezing_a_freeze_is_stable(tmp_path) -> None:
+    # write_freeze reads through load_node_rows, so a freeze re-freezes: the loaded rows
+    # carry re-derived features + their shape_spec, and the digests must not drift.
+    db_path = tmp_path / "autotune.db"
+    _seed_db(db_path, _SEED)
+    m1 = write_freeze(db_path, tmp_path / "f1")
+    m2 = write_freeze(tmp_path / "f1", tmp_path / "f2")
+    assert m1["sha256"] == m2["sha256"]
 
 
 # ---------------------------------------------------------------------------
@@ -141,43 +219,79 @@ def test_freeze_digest_insertion_order_independent(tmp_path) -> None:
 def _frozen(tmp_path):
     db_path = tmp_path / "autotune.db"
     _seed_db(db_path, _SEED)
-    out = tmp_path / "freeze.jsonl"
+    out = tmp_path / "freeze"
     write_freeze(db_path, out)
     return out
 
 
 def test_load_freeze_digest_mismatch_hard_error(tmp_path) -> None:
     out = _frozen(tmp_path)
-    head, sep, tail = out.read_bytes().partition(b"\n")
-    out.write_bytes(head + sep + tail.replace(b'"status":"ok"', b'"status":"OK"', 1))
+    f = out / "nvidia_geforce_rtx_4090_sm89.yaml"
+    f.write_text(f.read_text().replace("value_us: 480.0", "value_us: 4.0"))
     with pytest.raises(RuntimeError, match="corrupt"):
         load_freeze(out)
 
 
-def test_load_freeze_feat_ver_mismatch_hard_error(tmp_path) -> None:
-    # Rewriting the header alone doesn't trip the digest (it covers only the rows) —
-    # the version gate must catch it on its own.
+def test_load_freeze_missing_listed_file_hard_error(tmp_path) -> None:
     out = _frozen(tmp_path)
-    head, sep, tail = out.read_bytes().partition(b"\n")
-    header = json.loads(head)
-    header["feat_ver"] = FEATURIZER_VERSION - 1
-    out.write_bytes(json.dumps(header, sort_keys=True).encode() + sep + tail)
-    with pytest.raises(RuntimeError, match="feat_ver"):
+    (out / "nvidia_geforce_rtx_4090_sm89.yaml").unlink()
+    with pytest.raises(RuntimeError, match="missing"):
         load_freeze(out)
 
 
-def test_load_freeze_foreign_file_hard_error(tmp_path) -> None:
-    garbage = tmp_path / "notes.txt"
-    garbage.write_text("hello\nworld\n")
+def test_load_freeze_ver_mismatch_hard_error(tmp_path) -> None:
+    out = _frozen(tmp_path)
+    manifest = json.loads((out / MANIFEST_NAME).read_text())
+    manifest["freeze_ver"] = FREEZE_VER + 1
+    (out / MANIFEST_NAME).write_text(json.dumps(manifest))
+    with pytest.raises(RuntimeError, match="freeze_ver"):
+        load_freeze(out)
+
+
+def test_load_freeze_foreign_dir_hard_error(tmp_path) -> None:
+    plain = tmp_path / "not-a-freeze"
+    plain.mkdir()
     with pytest.raises(RuntimeError, match="not a measurement freeze"):
-        load_freeze(garbage)
+        load_freeze(plain)
+
+
+def test_load_freeze_uninstantiable_row_hard_error(tmp_path) -> None:
+    out = _frozen(tmp_path)
+    name = "nvidia_geforce_rtx_5090_sm120.yaml"
+    doc = yaml.safe_load((out / name).read_text())
+    for c in doc["configs"]:
+        c["kernel"] = "warp_drive"
+    (out / name).write_text(yaml.safe_dump(doc, sort_keys=True, width=120))
+    manifest = json.loads((out / MANIFEST_NAME).read_text())
+    # Keep the digest honest so the kind check (not the digest) is what trips.
+    from emmy.compiler.pipeline.search.data.freeze import _row_line
+
+    digest = hashlib.sha256()
+    for c in doc["configs"]:
+        digest.update(_row_line(c))
+    manifest["files"][name]["sha256"] = digest.hexdigest()
+    (out / MANIFEST_NAME).write_text(json.dumps(manifest))
+    with pytest.raises(RuntimeError, match="unknown kernel kind"):
+        load_freeze(out)
 
 
 def test_write_freeze_nothing_survives_hard_error(tmp_path) -> None:
+    # An identity-less (legacy) store has leaves, but none can spell a v2 row.
     db_path = tmp_path / "autotune.db"
-    _seed_db(db_path, [_row("branch-only", value_us=480.0, is_leaf=False)])
+    _seed_db(db_path, [_row("legacy", value_us=500.0, features=_feats())])
     with pytest.raises(RuntimeError, match="no freezable leaf rows"):
-        write_freeze(db_path, tmp_path / "freeze.jsonl")
+        write_freeze(db_path, tmp_path / "freeze")
+
+
+def test_write_freeze_refuses_to_replace_non_freeze_dir(tmp_path) -> None:
+    db_path = tmp_path / "autotune.db"
+    _seed_db(db_path, _SEED)
+    target = tmp_path / "precious"
+    target.mkdir()
+    (target / "notes.txt").write_text("do not delete\n")
+    with pytest.raises(RuntimeError, match="refusing to replace"):
+        write_freeze(db_path, target)
+    assert (target / "notes.txt").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -193,12 +307,21 @@ def test_load_node_rows_zero_byte_file_is_empty_db(tmp_path) -> None:
     assert load_node_rows(empty) == []
 
 
-def test_open_readonly_rejects_freeze_with_pointer(tmp_path) -> None:
-    # A freeze handed to a perf-table consumer (eval variants/knobs/failures --db) must
-    # fail at open with a named reason, not a bare sqlite DatabaseError inside a PRAGMA.
-    out = _frozen(tmp_path)
+def test_load_node_rows_refuses_v1_jsonl_freeze(tmp_path) -> None:
+    v1 = tmp_path / "freeze.jsonl"
+    header = {"kind": FREEZE_KIND, "freeze_ver": 1, "sha256": "deadbeef"}
+    v1.write_text(json.dumps(header) + "\n" + '{"node_key": "k"}\n')
+    with pytest.raises(RuntimeError, match="superseded"):
+        load_node_rows(v1)
+
+
+def test_open_readonly_rejects_v1_freeze_with_pointer(tmp_path) -> None:
+    # A v1-style JSON file handed to a perf-table consumer (eval variants/knobs/failures
+    # --db) must fail at open with a named reason, not a bare sqlite DatabaseError.
+    v1 = tmp_path / "freeze.jsonl"
+    v1.write_text(json.dumps({"kind": FREEZE_KIND, "freeze_ver": 1}) + "\n")
     with pytest.raises(RuntimeError, match="nodes-dataset"):
-        SearchDB.open_readonly(out)
+        SearchDB.open_readonly(v1)
     garbage = tmp_path / "notes.txt"
     garbage.write_text("hello\n")
     with pytest.raises(RuntimeError, match="not a sqlite database"):
@@ -218,10 +341,8 @@ def test_anchor_walk_treats_freeze_rows_as_treeless(tmp_path) -> None:
         def mean_scores_features(self, fvecs):
             return [0.0] * len(fvecs)
 
-    db_path = tmp_path / "autotune.db"
-    _seed_db(db_path, _SEED)
-    write_freeze(db_path, tmp_path / "freeze.jsonl")
-    _header, rows = load_freeze(tmp_path / "freeze.jsonl")
+    out = _frozen(tmp_path)
+    _manifest, rows = load_freeze(out)
     matched, steps, descriptor = diagnostics._anchor_walk(_Flat(), rows, {})
     assert (matched, steps) == (0, [])
     assert "no fork-tree data" in descriptor
@@ -230,16 +351,16 @@ def test_anchor_walk_treats_freeze_rows_as_treeless(tmp_path) -> None:
     assert matched_live == 1 and "followed" in descriptor_live
 
 
-def test_load_node_rows_sniffs_db_and_freeze(tmp_path) -> None:
+def test_load_node_rows_sniffs_db_and_freeze_dir(tmp_path) -> None:
     db_path = tmp_path / "autotune.db"
     _seed_db(db_path, _SEED)
-    out = tmp_path / "freeze.jsonl"
+    out = tmp_path / "freeze"
     write_freeze(db_path, out)
     from_db = load_node_rows(db_path)
     from_freeze = load_node_rows(out)
-    assert {r.node_key for r in from_db} == _KEPT_KEYS | {"branch", "leaf-stale"}  # raw iter_nodes view
-    assert {r.node_key for r in from_freeze} == _KEPT_KEYS
-    with pytest.raises(RuntimeError, match="not a measurement freeze"):
-        garbage = tmp_path / "notes.txt"
-        garbage.write_text("hello\n")
+    assert len(from_db) == len(_SEED)  # raw iter_nodes view — everything
+    assert len(from_freeze) == _N_KEPT
+    garbage = tmp_path / "notes.txt"
+    garbage.write_text("hello\n")
+    with pytest.raises(RuntimeError, match="neither a sqlite node DB nor"):
         load_node_rows(garbage)

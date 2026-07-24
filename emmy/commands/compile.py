@@ -538,11 +538,17 @@ def _trace_model(model_id: str, layer: int | None, seq_len: int, *, dynamic_shap
     except TypeError:
         cos, sin = decoder.rotary_emb(x, position_ids)
 
-    from emmy.compiler.trace.huggingface import stamp_sliding_windows
+    from emmy.compiler.trace.huggingface import build_synthetic_ple, stamp_sliding_windows
 
-    graph = trace_module(block, (x,), kwargs={"position_embeddings": (cos, sin)}, dynamic_shapes=dynamic_shapes)
+    kwargs = {"position_embeddings": (cos, sin)}
+    # Gemma-nano PLE blocks multiply by ``per_layer_input``; without it the trace hits
+    # ``FakeTensor * None``. Same seeded synthetic buffer as the dynamic layer wrapper.
+    ple = build_synthetic_ple(block, seq_len, dtype)
+    if ple is not None:
+        kwargs["per_layer_input"] = ple
+    graph = trace_module(block, (x,), kwargs=kwargs, dynamic_shapes=dynamic_shapes)
     stamp_sliding_windows(graph, decoder.config, layer_type=layer_type)
-    return graph, (block, (x,), {"position_embeddings": (cos, sin)})
+    return graph, (block, (x,), kwargs)
 
 
 def _find_text_decoder(model):

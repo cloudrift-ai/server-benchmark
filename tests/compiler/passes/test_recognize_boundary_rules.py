@@ -103,7 +103,8 @@ def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
     lowerable everywhere), then the computed-A Contraction form's warp rows — every one riding a
     resolved ``sync`` compute-fill stage, at BOTH depths (``d1`` + the asymmetric B-ring ``d2``
     as fork siblings), with the K partition either decided-empty or a redundant-statistic
-    deferred split (``g<w>k`` — the single-channel computed-A split-K family)."""
+    split — deferred ``g<w>k`` or, this fixture's plain-store tail being distributive, the
+    single-kernel atomic ``g<w>a`` (the single-channel computed-A split-K family)."""
     rows, _ = _resolve(_norm_linear_graph())
     assert rows, "no fork was offered for the fused norm→linear"
     assert not _is_warp_row(rows[0]), "option-0 must be the Map-form coop row, not a warp row"
@@ -116,8 +117,8 @@ def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
         stage = [v for k, v in r.items() if k.startswith("STAGE@")]
         red = [v for k, v in r.items() if k.startswith("REDUCE@")]
         assert stage and all(v in ("d1/sync", "d2/sync") for v in stage), f"warp rows must ride the resolved sync compute-fill: {r}"
-        assert all(v == "" or (v.startswith("g") and v.endswith("k")) for v in red), (
-            f"the computed-A form allows only the empty or deferred-split (g<w>k) K partition: {r}"
+        assert all(v == "" or (v.startswith("g") and v.endswith(("k", "a"))) for v in red), (
+            f"the computed-A form allows only the empty or split (g<w>k / g<w>a) K partition: {r}"
         )
         stages_seen.update(stage)
         reds_seen.update(red)
@@ -238,3 +239,33 @@ def test_normed_gqa_sdpa_certifies_flash():
     assert flash, "no TWISTED flash kernel certified for the normed GQA sdpa"
     src = flash[0].op.source
     assert isinstance(src.partial[0], Contraction), "flash did not absorb the score contraction (fold stayed cut)"
+
+
+def test_bind_contraction_declined_cone_raises_not_positional():
+    """When the ⊗ lift names a COMPUTED A whose cone declines the bind (here: an n-indexed
+    load riding the cone), ``bind_contraction`` must raise ``LoweringError`` — the recognizer
+    then demotes the cell to PLANAR, which computes the full body. Falling through to the
+    positional first-(m,k)-load rule instead binds a cone-INTERNAL load as A and silently
+    drops the rest of the cone (the gemma GeGLU wrong-kernel class the lift binding fixed)."""
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.elementwise import ElementwiseImpl
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.stmt import Accum, Assign, Body, Load
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction
+    from emmy.compiler.pipeline.pipeline import LoweringError
+
+    m, n, k = Var("m"), Var("n"), Var("k")
+    body = Body(
+        (
+            Load(name="bv", input="B", index=(n, k)),
+            Load(name="av", input="A", index=(m, k)),
+            Assign(name="cv", op=ElementwiseImpl("exp"), args=("av",)),
+            Load(name="nv", input="Z", index=(n, k)),
+            Assign(name="cw", op=ElementwiseImpl("multiply"), args=("cv", "nv")),
+            Assign(name="pv", op=ElementwiseImpl("multiply"), args=("cw", "bv")),
+            Accum(name="acc", op=ElementwiseImpl("add"), value="pv"),
+        )
+    )
+    loop = Loop(axis=Axis(name="k", extent=Dim(64)), body=body, role=AxisRole.CONTRACTION)
+    with pytest.raises(LoweringError, match="computed cone"):
+        bind_contraction(loop, "m", "n", Body(()))

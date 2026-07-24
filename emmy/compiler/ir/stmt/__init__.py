@@ -63,10 +63,12 @@ from emmy.compiler.ir.stmt.leaves import (
     Load,
     Mma,
     Pack,
+    RowAccum,
     Select,
     SelectBranch,
     Unpack,
     Write,
+    ZeroPrologue,
 )
 from emmy.compiler.ir.stmt.normalize import (
     canonicalize_buffer_names,
@@ -96,6 +98,8 @@ __all__ = [
     "Mma",
     "Pack",
     "RenderCtx",
+    "RowAccum",
+    "ZeroPrologue",
     "Select",
     "SelectBranch",
     "State",

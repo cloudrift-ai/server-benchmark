@@ -1,0 +1,102 @@
+# gemma-4-12B-it end-to-end serving A/B on one RTX 5090 — the three vLLM lanes of the
+# "Optimizing Gemma4 12B for RTX GPUs" blog article in a single recipe: stock vLLM kernels,
+# vLLM + emmy plugin (EmmyGenModel), and the EMMY_FAST_MATH fork. The llama.cpp lane is the
+# sibling command recipe (serving_llamacpp_rtx5090). All lanes share the identical controlled
+# workload (seed 0, greedy, ignore_eos, prefix caching off) and the article's five points:
+#   256/256  c=1 and c=64;  4096/4096  c=1, c=4, c=8
+# Single-stream points run with repeats: 3 (mean/stddev) per the article's methodology; the
+# batched points' run-to-run spread was measured < 0.3 %, so they run once. The methodology's
+# single-machine rule applies: compare lanes only WITHIN one run on one box.
+#
+# The per-arm recipes with the wider input sweep live in recipes/gemma-4-12B-it*; this
+# experiment pins the article's exact grid. For a fast tokenless emmy boot at the pinned
+# 8448-context config, the prebuilt cloudriftai/vllm-emmy-gemma4 image bakes the model
+# snapshot + warmed sm_120 cubins + the execution-plan pack (docker/vllm-emmy-gemma4/) —
+# same kernels, a boot optimization.
+#
+# Lane knobs: the stock lane runs the gemma-4-capable stock image at the default memory
+# utilization; the emmy lanes need 0.97 (the plugin's cupy residents live INSIDE the budget —
+# see recipes/gemma-4-12B-it-emmy) and serve through the decode CUDA-graph path. The emmy
+# c=64 cells run EMMY_GEN_DECODE_BUCKET=64 — the documented per-lane knob for that
+# concurrency (the article's light-tuning rule) — so they are separate matrix entries.
+#
+# Repro on a pre-allocated card (no cloud provisioning):
+#   emmy bench experiments/gemma-4-12B/serving_rtx5090 --local
+model:
+  huggingface: "google/gemma-4-12B-it"
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    context_length: 8448
+    vllm:
+      extra_args: "--dtype float16 --no-enable-prefix-caching"
+
+benchmark:
+  seed: 0
+  temperature: 0
+  ignore_eos: true
+
+matrices:
+  # ---- stock vLLM: all five points ----
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    engine.llm.gpu_memory_utilization: 0.9
+    engine.llm.vllm.image: "vllm/vllm-openai:gemma4-0505-cu129"
+    zip:
+      benchmark.random_input_len: [256, 256, 4096, 4096, 4096]
+      benchmark.random_output_len: [256, 256, 4096, 4096, 4096]
+      benchmark.max_concurrency: [1, 64, 1, 4, 8]
+      benchmark.num_prompts: [16, 256, 8, 32, 64]
+      benchmark.repeats: [3, 1, 3, 1, 1]
+
+  # ---- vLLM + emmy: the four c<=8 points ----
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    engine.llm.gpu_memory_utilization: 0.97
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-ec45dd6f"
+    engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4096 --no-enable-prefix-caching"
+    zip:
+      benchmark.random_input_len: [256, 4096, 4096, 4096]
+      benchmark.random_output_len: [256, 4096, 4096, 4096]
+      benchmark.max_concurrency: [1, 1, 4, 8]
+      benchmark.num_prompts: [16, 8, 32, 64]
+      benchmark.repeats: [3, 3, 1, 1]
+
+  # ---- vLLM + emmy: the 256/256 c=64 point (decode bucket 64) ----
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    engine.llm.gpu_memory_utilization: 0.97
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-ec45dd6f"
+    engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4096 --no-enable-prefix-caching"
+    engine.llm.vllm.extra_env: "EMMY_GEN_DECODE_BUCKET=64"
+    benchmark.random_input_len: 256
+    benchmark.random_output_len: 256
+    benchmark.max_concurrency: 64
+    benchmark.num_prompts: 256
+
+  # ---- vLLM + emmy FAST_MATH: the four c<=8 points ----
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    engine.llm.gpu_memory_utilization: 0.97
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-ec45dd6f"
+    engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4096 --no-enable-prefix-caching"
+    engine.llm.vllm.extra_env: "EMMY_FAST_MATH=1"
+    zip:
+      benchmark.random_input_len: [256, 4096, 4096, 4096]
+      benchmark.random_output_len: [256, 4096, 4096, 4096]
+      benchmark.max_concurrency: [1, 1, 4, 8]
+      benchmark.num_prompts: [16, 8, 32, 64]
+      benchmark.repeats: [3, 3, 1, 1]
+
+  # ---- vLLM + emmy FAST_MATH: the 256/256 c=64 point (decode bucket 64) ----
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    engine.llm.gpu_memory_utilization: 0.97
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-ec45dd6f"
+    engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4096 --no-enable-prefix-caching"
+    engine.llm.vllm.extra_env: "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=64"
+    benchmark.random_input_len: 256
+    benchmark.random_output_len: 256
+    benchmark.max_concurrency: 64
+    benchmark.num_prompts: 256

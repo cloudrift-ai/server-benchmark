@@ -88,12 +88,15 @@ def test_evaluate_golden_rank_is_tie_pessimistic(monkeypatch):
     monkeypatch.setattr(golden_eval, "_enumerate", lambda M, N, K, dtype, ctx: (rows, ()))
     golden = {"TILE": "n32x16/f4x8"}
 
-    _, rank_tied, pool = golden_eval.evaluate_golden(1, 1, 1, "fp16", golden, ctx=None, scorer=lambda r: 1.0)
+    _, rank_tied, pool, rank_opt = golden_eval.evaluate_golden(1, 1, 1, "fp16", golden, ctx=None, scorer=lambda r: 1.0)
     assert pool == 4
     assert rank_tied == 2, "two earlier-emitted ties must count against the golden"
+    assert rank_opt == 0, "the optimistic count forgives the whole tie plateau"
+    assert rank_tied - rank_opt == 2, "the pessimistic-optimistic gap IS the earlier-tie plateau width"
 
     def favors_golden(r):
         return 2.0 if r is rows[2] else 1.0
 
-    _, rank_best, _ = golden_eval.evaluate_golden(1, 1, 1, "fp16", golden, ctx=None, scorer=favors_golden)
+    _, rank_best, _, rank_best_opt = golden_eval.evaluate_golden(1, 1, 1, "fp16", golden, ctx=None, scorer=favors_golden)
     assert rank_best == 0, "a strict winner still ranks 0"
+    assert rank_best_opt == 0, "no plateau, no gap"

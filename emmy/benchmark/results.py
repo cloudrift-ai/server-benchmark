@@ -1,9 +1,12 @@
 """Structured JSON benchmark results: dataclasses and parsers."""
 
 import re
-from dataclasses import asdict, dataclass
+import statistics
+from dataclasses import asdict, dataclass, fields
 
 from emmy.redact import redact_secrets
+
+RESULT_MARKER = "============ Serving Benchmark Result ============"
 
 
 @dataclass
@@ -93,6 +96,32 @@ def parse_benchmark_metrics(output: str) -> BenchmarkMetrics:
             except (ValueError, TypeError):
                 pass
     return BenchmarkMetrics(**parsed)
+
+
+def parse_repeat_metrics(output: str) -> list[BenchmarkMetrics]:
+    """Parse one BenchmarkMetrics per result stanza (``benchmark.repeats`` runs emit
+    several). Output with no stanza marker parses as a single repeat."""
+    starts = [m.start() for m in re.finditer(re.escape(RESULT_MARKER), output)]
+    if len(starts) <= 1:
+        return [parse_benchmark_metrics(output)]
+    chunks = [output[s:e] for s, e in zip(starts, starts[1:] + [len(output)], strict=True)]
+    return [parse_benchmark_metrics(c) for c in chunks]
+
+
+def aggregate_metrics(repeats: list[BenchmarkMetrics]) -> tuple[BenchmarkMetrics, dict[str, float]]:
+    """Per-field mean across repeats, plus sample stddev for fields present in every
+    repeat. Fields missing in any repeat stay None (mean) / absent (stddev); values
+    identical across repeats keep their original type (int fields stay int)."""
+    mean_fields: dict = {}
+    stddev: dict[str, float] = {}
+    for f in fields(BenchmarkMetrics):
+        values = [getattr(r, f.name) for r in repeats]
+        if any(v is None for v in values):
+            continue
+        mean_fields[f.name] = values[0] if len(set(values)) == 1 else round(statistics.fmean(values), 4)
+        if len(values) > 1:
+            stddev[f.name] = round(statistics.stdev(values), 4)
+    return BenchmarkMetrics(**mean_fields), stddev
 
 
 def _get_section(raw_text: str, section_name: str) -> str:
@@ -210,6 +239,8 @@ def compose_json_result(
     bench-client startup), distinct from ``metrics.benchmark_duration_s`` (the
     server-measured window).
     """
+    repeats = parse_repeat_metrics(benchmark_output)
+    mean_metrics, stddev = aggregate_metrics(repeats)
     result = {
         "task": {
             "recipe_dir": task.recipe_dir,
@@ -219,11 +250,14 @@ def compose_json_result(
             "gpu_count": task.gpu_count,
         },
         "recipe": asdict(task.recipe),
-        "metrics": asdict(parse_benchmark_metrics(benchmark_output)),
+        "metrics": asdict(mean_metrics),
         "system": asdict(parse_system_info(system_info_raw)),
         "compose": redact_secrets(compose_content),
         "bench_command": bench_command,
     }
+    if len(repeats) > 1:
+        result["metrics_stddev"] = stddev
+        result["metrics_repeats"] = [asdict(r) for r in repeats]
     if timing is not None:
         result["timing"] = timing
     return result

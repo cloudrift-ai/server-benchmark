@@ -15,7 +15,8 @@ commands/vm ────► provisioning (create/delete instances)
 - `emmy/recipe/` — recipe loading, dataclass types (`Recipe`, `LLMConfig`, etc.), engine flag mapping
 - `emmy/deploy/` — compose generation, deploy orchestration
 - `emmy/provisioning/` — VM types, SSH polling, shell helpers, cloud providers
-- `emmy/logging_setup.py` — CLI logging setup (`setup_cli_logging()`)
+- `emmy/logging_setup.py` — CLI logging setup (`setup_cli_logging()`), plus `ensure_plugin_logging()` — makes emmy
+  INFO logs visible when nothing configured logging (a bare vLLM entrypoint; called by `emmy.serving.register()`)
 - `emmy/config.py` — the single owner of `os.environ` for all `EMMY_*` config vars. Typed getters
   (`tune_db_path`, `nvcc_flags`, `debug_enabled`, `dump_dir`, `tune_patience`, `bench_backends_raw`, `cubin_cache_dir`,
   …) read the env live; `set_nvcc_flags(cli_value, default)` holds the `--nvcc-flags` > env > command-default precedence
@@ -93,6 +94,7 @@ Each command module contains only argparse registration and `handle_*` functions
 ```python
 def handle_foo(args):
     asyncio.run(_handle_foo(args))
+
 
 async def _handle_foo(args):
     await ...
@@ -244,8 +246,12 @@ own flags are otherwise extracted wherever they appear — argparse REMAINDER sw
 handler re-parses it; see `commands/serve.py::_split_own_flags`). `--max-model-len 4096` (the dynamic-dim cap) is
 applied for both engines unless overridden, so `--stock` is an apples-to-apples baseline. Generative serving
 defaults to **whole-step decode CUDA graphs** (a `--compilation-config` with `FULL_DECODE_ONLY` + capture sizes
-clamped to the decode bucket — see `serving/ARCHITECTURE.md`); pass vLLM's own `--enforce-eager` to opt out
-(forced automatically when `EMMY_GEN_DECODE_BUCKET=0`).
+laddered up to `--max-num-seqs` — sizes above the decode bucket capture the device-resident symbolic programs; see
+`serving/ARCHITECTURE.md`); pass vLLM's own `--enforce-eager` to opt out (forced automatically when
+`EMMY_GEN_DECODE_BUCKET=0`). The emmy generative arm also defaults `--gpu-memory-utilization` to **0.97** (its
+cupy residents are invisible to vLLM's torch-only profiler, so the 0.90 line can fail the min-KV fit at long
+model lens; stock keeps 0.90), and `EMMY_SERVING_BATCHED=1` embedding serving defaults `--max-num-batched-tokens`
+to `max_num_seqs × max_model_len` so scheduler steps can fill the batch.
 
 ```bash
 emmy serve Qwen/Qwen3-Embedding-0.6B --gpu-memory-utilization 0.8   # plugin server (Ctrl-C to stop)
@@ -258,6 +264,13 @@ subprocess (logs to a temp file), `/health` is polled (up to 30 min — first bo
 `vllm bench serve` runs against it (`--max-concurrency` / `--num-prompts` / `--random-input-len` / `--bench-seed`) and
 the server is torn down. The bench backend follows the model: embeddings hit `--backend openai-embeddings --endpoint
 /v1/embeddings`; **`--generate`** hits `--backend openai --endpoint /v1/completions` with `--random-output-len`.
+
+The vLLM child inherits an environment with this interpreter's bin dir prepended to `PATH` (`serve.py::_child_env`):
+invoking `./venv/bin/emmy` by absolute path does not activate the venv, so the generative server's inductor-compile
+subprocess would otherwise die with `FileNotFoundError: ninja` (ninja is pip-installed into that same bin). A
+**multimodal `--stock` baseline** (e.g. gemma-4-12B) still needs `--language-model-only` passed through — stock vLLM
+loads the full multimodal checkpoint and the vision encoder's budget check rejects the small `--max-num-batched-tokens`
+the emmy arm runs at; the flag is a plain vLLM passthrough, only meaningful for the raw-vLLM arm.
 
 ### `emmy bench`
 
@@ -350,6 +363,25 @@ All three commands go through `provision_cloud_vm()` in `emmy/provisioning/cloud
 Capacity-class signals recognized today: CloudRift HTTP 503/429 on rent, CloudRift `Inactive` terminal status / readiness timeout, GCP `ZONE_RESOURCE_POOL_EXHAUSTED` / `QUOTA_EXCEEDED` / `STOCKOUT` in `gcloud` stderr, and GCP `RUNNING`-status timeout. Both providers terminate VMs they created but couldn't bring to readiness, so orchestrator fallback does not leak orphan instances.
 
 GCP project is inferred from `gcloud` config. CloudRift reads `CLOUDRIFT_API_KEY` and `CLOUDRIFT_API_URL` from the environment by default. **H200 on CloudRift** is only available on on-prem clusters — set `CLOUDRIFT_API_URL` to the on-prem endpoint (the public `api.cloudrift.ai` does not offer H200).
+
+### `emmy fit`
+
+Fit an offline-prior weights artifact and cross-validate it, GPU-free. Two orthogonal switches — `--trainer
+{linear,catboost}` × `--data {golden,freeze:<path>}` — of which only `linear` × `golden` (the incumbent trainer on the
+golden dataset) exists today; other combinations exit with "not yet supported". `--samples N` (default 0:
+coordinate-descent-from-seed, the incumbent practice), `--seed`, `--folds {op_family,gpu,both,none}` (default `both`),
+`--out DIR` (default `_tune/fits/<timestamp>-<trainer>-<data>/`). Writes `metrics.json` — the deterministic per-run
+record two fits are diffed by: `full_train` (the shippable artifact's per-golden dual ranks + per-card aggregates) and
+one `cv.<axis>` block per fold axis (pooled holdout / train tables, per-card gap, per-fold detail) — and
+`weights.json`, the full-train artifact in the shipped format. `emmy/commands/fit.py` also owns the snippet-tracing
+golden case builder (`build_cases`, shared with `scripts/golden_knob_heuristics.py` — `pipeline/` must not import the
+tracer); the fold/metrics machinery is library code, documented on
+`emmy/compiler/pipeline/search/prior/fit/cv.py` and in the pipeline ARCHITECTURE's prior sections.
+
+```bash
+emmy fit                                  # linear x golden, both fold axes, metrics under _tune/fits/
+emmy fit --folds gpu --out _tune/fits/ab  # leave-one-card-out only, fixed run dir for an A/B
+```
 
 ## Experiments
 

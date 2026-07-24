@@ -99,9 +99,18 @@ def test_fused_map_matmul(tier, producer, monkeypatch):
     rng = np.random.default_rng(0)
     ins = {nid: (rng.standard_normal(tuple(d.as_static() for d in g.nodes[nid].output.shape)) * 0.3).astype(np.float16) for nid in g.inputs}
     got, srcs = _compile_run(g, ins)
-    assert len(srcs) == 1, f"{producer}/{tier}: the fused edge must be ONE kernel, got {len(srcs)}"
+    # The invariant is that the producer cone is FUSED — no kernel signature carries a
+    # materialized intermediate: neither the graph's own ``xn`` buffer nor a cut workspace
+    # (``020_cut_edge``'s ``<out>__cone`` / ``<out>__stat`` — a cut realization materializes the
+    # cone under those names, so a name-anchored ``xn`` check alone would miss it). Kernel COUNT
+    # is not the invariant: a stat-free cone binds as a computed-A ``Contraction``, which
+    # legitimately offers split-K REDUCE rows, and a chosen one emits a ``__partial`` + finalize
+    # pair that still carries the cone inline.
+    sigs = [s.split("{")[0] for s in srcs]
+    leaked = [m for m in ("xn", "__cone", "__stat") if any(m in sig for sig in sigs)]
+    assert not leaked, f"{producer}/{tier}: the cone round-tripped through gmem ({leaked}): {sigs}"
     if tier == "warp":
-        assert "emmy_mma" in srcs[0], f"{producer}/warp: the pinned warp tier must engage on the fused matmul"
+        assert any("emmy_mma" in s for s in srcs), f"{producer}/warp: the pinned warp tier must engage on the fused matmul"
     f32 = {k: v.astype(np.float32) for k, v in ins.items()}
     ref = _PRODUCER_REFS[producer](f32) @ f32["w"]
     np.testing.assert_allclose(got.reshape(_M, _N).astype(np.float32), ref, atol=0.1, rtol=2e-2)
@@ -255,6 +264,75 @@ def test_place_cone_cut_splits_the_kernels(monkeypatch):
     x, nw, wg = (ins[k].astype(np.float32) for k in ("x", "nw", "wg"))
     rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
     np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), rms @ wg.T, atol=0.5, rtol=0.1)
+
+
+@requires_cuda
+def test_place_cone_cut_degenerate_m1(monkeypatch):
+    """``PLACE@cone=cut`` on the DEGENERATE M=1 composition — per-token decode's norm→matvec.
+    At S=1 the reshape-folded lift leaves the contraction with ZERO free axes; the recognizer
+    synthesizes a unit ``_um`` axis so the composition still binds (instead of a grid-1 fused
+    schedule ~300× off the memory floor) and the cut guard accepts ``free ≤ 1``. The cut's
+    consumer half then re-lowers through ``rename_ssa_sequential`` — the shape that miscompiled
+    (``acc1``-undefined) when ``Loop.rewrite`` carried its ``Carrier`` verbatim past the body's
+    Accum renumber. Compiling, splitting, and matching numpy is the whole regression."""
+    monkeypatch.setenv("EMMY_PLACE", "cut")
+    S, H, inter = 1, 1024, 3072
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (1, S, H), F16), node_id="x")
+    g.add_node(InputOp(), [], Tensor("nw", (H,), F16), node_id="nw")
+    g.add_node(InputOp(), [], Tensor("wg", (inter, H), F16), node_id="wg")
+    g.add_node(RmsNormOp(eps=1e-6), ["x", "nw"], Tensor("xn", (1, S, H), F16), node_id="xn")
+    g.add_node(LinearOp(), ["xn", "wg"], Tensor("o", (1, S, inter), F16), node_id="o")
+    g.inputs, g.outputs = ["x", "nw", "wg"], ["o"]
+    rng = np.random.default_rng(0)
+    ins = {
+        "x": (rng.standard_normal((1, S, H)) * 0.3).astype(np.float16),
+        "nw": (rng.standard_normal((H,)) * 0.3).astype(np.float16),
+        "wg": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
+    }
+    got, srcs = _compile_run(g, ins)
+    assert len(srcs) >= 2, f"PLACE@cone=cut must split the M=1 norm from the matvec, got {len(srcs)} kernel(s)"
+    x, nw, wg = (ins[k].astype(np.float32) for k in ("x", "nw", "wg"))
+    rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
+    np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), rms @ wg.T, atol=0.5, rtol=0.1)
+
+
+@requires_cuda
+def test_place_cone_cut_splits_multi_fold(monkeypatch):
+    """``PLACE@cone=cut`` on the MULTI-FOLD gate/up edge — ``swiglu(x̂@Wg, x̂@Wu)`` — splits the ONE
+    fused megakernel into the norm producer (stat + cone materialize) PLUS one plain single-channel
+    matmul PER ⊗-fold (each reads the shared workspace A, so it rides the staged cp.async/TMA tiers a
+    computed A can never ride — the whole point) PLUS a downstream pointwise combine carrying the
+    SwiGLU ⊗-combine tail. That's ≥4 kernels vs the fused form's 1; each channel matmul beats cuBLAS
+    on ``d2/tma/ring`` at prefill M (the fused computed-A form provably cannot). Numerics match the
+    same numpy reference as the fused multi-fold edge."""
+    monkeypatch.setenv("EMMY_PLACE", "cut")
+    S, H, inter = 64, 256, 512
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (1, S, H), F16), node_id="x")
+    g.add_node(InputOp(), [], Tensor("nw", (H,), F16), node_id="nw")
+    g.add_node(InputOp(), [], Tensor("wg", (inter, H), F16), node_id="wg")
+    g.add_node(InputOp(), [], Tensor("wu", (inter, H), F16), node_id="wu")
+    g.add_node(RmsNormOp(eps=1e-6), ["x", "nw"], Tensor("xn", (1, S, H), F16), node_id="xn")
+    g.add_node(LinearOp(), ["xn", "wg"], Tensor("gate", (1, S, inter), F16), node_id="gate")
+    g.add_node(LinearOp(), ["xn", "wu"], Tensor("up", (1, S, inter), F16), node_id="up")
+    g.add_node(ElementwiseOp("silu"), ["gate"], Tensor("sg", (1, S, inter), F16), node_id="sg")
+    g.add_node(ElementwiseOp("multiply"), ["sg", "up"], Tensor("o", (1, S, inter), F16), node_id="o")
+    g.inputs, g.outputs = ["x", "nw", "wg", "wu"], ["o"]
+    rng = np.random.default_rng(0)
+    ins = {
+        "x": (rng.standard_normal((1, S, H)) * 0.3).astype(np.float16),
+        "nw": (rng.standard_normal((H,)) * 0.3).astype(np.float16),
+        "wg": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
+        "wu": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
+    }
+    got, srcs = _compile_run(g, ins)
+    assert len(srcs) >= 4, f"PLACE@cone=cut on gate/up must split into per-channel matmuls + combine, got {len(srcs)} kernel(s)"
+    x, nw, wg, wu = (ins[k].astype(np.float32) for k in ("x", "nw", "wg", "wu"))
+    rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
+    gate, up = rms @ wg.T, rms @ wu.T
+    ref = gate * _sigmoid(gate) * up
+    np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), ref, atol=0.5, rtol=0.1)
 
 
 @requires_cuda

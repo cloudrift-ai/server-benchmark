@@ -58,6 +58,8 @@ the intent is to grow it toward ONE algorithmic algebra recognizer.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.expr import Var
@@ -71,12 +73,13 @@ from emmy.compiler.pipeline.fork import Fork
 # NOTE: no ``Knob`` objects (``TILE`` / ``REDUCE`` / ``STAGE``) may be imported here — ``Pass.load``
 # scans rule modules for ``Knob`` attrs and OFF-fills any it finds bare onto every variant of the
 # pass. Pin reads / knob-key spelling ride the ``_schedule`` helpers instead.
-from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction, bind_prologue_contraction
+from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction, bind_prologue_contraction, map_cone
 from emmy.compiler.pipeline.passes.lowering.tile._flash import is_flash_score_producer, is_fold_offer_site, try_flash
 from emmy.compiler.pipeline.passes.lowering.tile._schedule import prologue_knob_bases, schedule, warp_tile_pinned
+from emmy.compiler.pipeline.passes.lowering.tile._sink import bind_sinkable_stat
 from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse
 from emmy.compiler.pipeline.pipeline import LoweringError
-from emmy.compiler.pipeline.search.space import place_decision
+from emmy.compiler.pipeline.search.space import PLACE, place_decision
 
 PATTERN = [Pattern("root", (LoopOp, TileOp))]
 
@@ -150,7 +153,19 @@ def _is_clean_contraction(body: list[Stmt], k_name: str) -> bool:
     if len({ld.input for ld in k_loads}) < 2:
         return False
     all_loads = [s for s in body if isinstance(s, Load)]
-    return len(body) == len(all_loads) + 2 and len(all_loads) == len(k_loads) and set(lift.args) == {ld.names[0] for ld in k_loads}
+    if len(body) == len(all_loads) + 2 and len(all_loads) == len(k_loads) and set(lift.args) == {ld.names[0] for ld in k_loads}:
+        return True
+    # COMPUTED-A contraction: the lift multiplies ONE K-indexed operand load by a value this loop
+    # computes (a fused operand cone). Still a contraction — the cone is the A tile — so mark it and
+    # let ``bind_contraction`` bind the cone; the alternative is a PLANAR scalar fold, which is what
+    # took gemma-4's GeGLU->down_proj edge off the mma tier entirely (66x).
+    if len(lift.args) != 2:
+        return False
+    operand = next((ld for ld in k_loads if ld.names[0] in lift.args), None)
+    if operand is None:
+        return False
+    cone = map_cone(list(body), next(a for a in lift.args if a != operand.names[0]))
+    return bool(cone) and any(isinstance(st, Load) and k_name in {v for e in st.index for v in e.free_vars()} for st in cone)
 
 
 def _annotate_reduce(rloop: Loop, pre_reduce: tuple[Stmt, ...]) -> Loop | None:
@@ -263,6 +278,29 @@ def _nodify_contraction(node, free: tuple):
     return Map(body=projection, source=red) if len(projection) else red
 
 
+def _demote_planar(node):
+    """The PLANAR-demoted sibling of a computed-A :class:`Contraction` whose contraction form
+    yielded no legal schedule row (fp32 / no atoms / bad geometry — the scheduler's
+    never-a-raising-row guardrail returns ``[]``): flatten the node back through its synthesized
+    fold ``Loop`` and re-annotate it ``PLANAR`` — the same demotion :func:`_nodify_contraction`
+    applies to an unbindable cell, applied post-nodification."""
+    src = node.source if isinstance(node, Map) else node
+    rloop = src.loop
+    demoted = Loop(axis=rloop.axis, body=rloop.body, unroll=rloop.unroll, role=AxisRole.PLANAR, carrier=rloop.carrier)
+    red = Reduction.from_loop(demoted)
+    projection = Body((*src.epilogue, *(node.body if isinstance(node, Map) else ())))
+    return Map(body=projection, source=red) if len(projection) else red
+
+
+def _cuttable_cone(node) -> bool:
+    """A single-fold STAT-FREE computed-A :class:`Contraction` — the shape ``020_cut_edge`` can
+    split into (materialize the cone) + (plain gmem-A matmul). The MONOID composition binds through
+    :func:`bind_prologue_contraction` instead; a multi-fold stat-free cone has no combine tail to
+    carry, so it is left fused."""
+    src = node.source if isinstance(node, Map) and isinstance(node.source, Contraction) else node
+    return isinstance(src, Contraction) and src.a_computed and len(src.folds) == 1 and not src.lead_axes
+
+
 def _lift(stmts: list[Stmt], output: str) -> tuple[Map | Reduction | Contraction, tuple]:
     """Peel the free axes and lift the per-cell compute, returning ``(root node, free
     axes)``. The free axes are the schedule's (carried on the ``TileOp``, not the node);
@@ -351,8 +389,80 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     # it from the graph again when a later pass matches the scheduled op.
     map_tile = TileOp(op=node, place=Placement(free=free), inputs=dict(loop.inputs))
     pro = bind_prologue_contraction(node, free) if place_decision("cone") == "fuse" else None
+    if pro is None and place_decision("cone") == "cut" and bind_prologue_contraction(node, free) is not None:
+        # An explicit ``PLACE@cone=cut`` pin on the MONOID composition (the fused norm→linear /
+        # gate⊗up edge): the fused Contraction form is pinned away, but the cut must still REALIZE
+        # — schedule the Map form with the cut stamped on every row (the same threading as the
+        # stat-free pin below; ``020_cut_edge`` rewrites the picked row into producer + consumer
+        # halves and its own schedule is discarded). Without this the pin fell through to the
+        # stat-free path, failed ``_cuttable_cone`` (multi-fold / stats), and silently benched the
+        # fused coop form under the cut's name — the unreproducible-pin failure on the recorded
+        # ``mlp_geglu.*.cut`` goldens.
+        return schedule(map_tile, loop.name, {**knob_base, "PLACE@cone": "cut"}, ctx)
     if pro is None:
-        return schedule(map_tile, loop.name, knob_base, ctx)
+        # A STAT-FREE computed-A cone (loop fusion inlined a pointwise operand cone — gemma's GeGLU
+        # combine ahead of down_proj) gets the same fuse-vs-cut offer the MONOID composition below
+        # does. The fused form is a real option (it rides the sync compute-fill), but so is
+        # materializing the cone and running the projection as a plain gmem-A matmul on the
+        # ``d2/tma/ring`` transports a computed A can never ride — which is where the recorded
+        # plain-matmul goldens (``mlp_down.*``) live. Offering it as a stamped row keeps the choice
+        # on the ordinary evidence pick; ``020_cut_edge`` realizes it.
+        if not _cuttable_cone(node):
+            # The ROW-STAT SINK offer (``PLACE@stat`` — the fused norm form, ``Map(body=[π…,
+            # sweep], source=Reduction(PLANAR))`` re-reading an in-graph producer's output):
+            # option-0 stays the local (coop) statistic; ONE representative ``sink`` sibling is
+            # appended (its own schedule is discarded — ``025_sink_row_reduce`` re-emits the
+            # producer epilogue + a fresh un-mapped sweep the restarted scan re-recognizes,
+            # the same division of labour as the cone cut). Evidence-only like the cut row:
+            # ``greedy_decide`` withholds it from the model fallback, so an unseeded shape
+            # never sinks cold. Only offered unpinned — a ``PLACE@stat`` pin is authoritative
+            # and threads onto every row instead.
+            sink = bind_sinkable_stat(node, free, loop.inputs)
+            offer_sink = sink is not None and sink.src in graph.nodes and sink.src not in graph.inputs
+            if offer_sink:
+                pin = PLACE.narrow_at("stat")
+                base_val = pin if pin in ("fuse", "sink") else "fuse"
+                rows = _as_list(schedule(map_tile, loop.name, {**knob_base, "PLACE@stat": base_val}, ctx))
+                if rows and pin not in ("fuse", "sink"):
+                    # The sink siblings mirror EVERY fuse row (not one representative): when the
+                    # realizer must refuse (an atomic producer), the picked sink row deploys its
+                    # own underlying schedule — so a golden spelling {PLACE@stat: sink, REDUCE:
+                    # b512} degrades to exactly the b512 coop kernel the plain anchor would have
+                    # picked, instead of stranding the norm on option-0's slower fallback.
+                    rows = [*rows, *(replace(r, knobs={**r.knobs, "PLACE@stat": "sink"}) for r in rows)]
+                if rows:
+                    return rows if len(rows) > 1 else rows[0]
+            plain = _as_list(schedule(map_tile, loop.name, knob_base, ctx))
+            if not plain:
+                # Same fp32 / no-atoms / bad-geometry hole as the cuttable branch below: a
+                # stat-free computed-A ``Contraction`` (a fused operand cone over a non-cuttable
+                # geometry — lead axes / several free axes) can have NO legal row on any tier.
+                # An empty option list is a SILENT no-op to the engine (no rejection recorded),
+                # so without this demote the node leaks as a ``LoopOp`` all the way to
+                # ``plan_from_graph`` — the merged-sibling gate/up edge on the fp32 symbolic
+                # Qwen path was the first shape to hit it.
+                fallback = TileOp(op=_demote_planar(node), place=Placement(free=free), inputs=dict(loop.inputs))
+                return schedule(fallback, loop.name, knob_base, ctx)
+            return plain if len(plain) > 1 else plain[0]
+        pin = PLACE.narrow_at("cone")
+        rows = _as_list(schedule(map_tile, loop.name, {**knob_base, "PLACE@cone": pin if pin in ("fuse", "cut") else "fuse"}, ctx))
+        # The cut SIBLING has to come from its own ``schedule`` call, not a ``replace`` on the fused
+        # result: the ``PLACE@cone`` stamp is threaded onto every fork ROW inside ``schedule``
+        # (rows are what the deploy pick joins against), so overriding the TileOp-level knobs leaves
+        # all 12k leaves still spelling ``fuse`` and the cut is unreachable by any golden.
+        # Enumerating a second full row set is safe: ``greedy_decide`` withholds ``PLACE@cone=cut``
+        # rows from the model fallback, so they are selectable by measured evidence alone.
+        if pin not in ("fuse", "cut"):
+            rows += _as_list(schedule(map_tile, loop.name, {**knob_base, "PLACE@cone": "cut"}, ctx))
+        if not rows:
+            # fp32 / no atoms / bad geometry: the computed-A contraction form has no legal row
+            # (both the fused and cut schedules come back empty), and unlike the MONOID
+            # composition below there is no Map-form fork sibling to stand alone — demote the
+            # node back to its PLANAR reduce so the kernel still compiles (the pre-nodification
+            # fallback: a working serial/coop fold, no cut offer).
+            fallback = TileOp(op=_demote_planar(node), place=Placement(free=free), inputs=dict(loop.inputs))
+            return schedule(fallback, loop.name, knob_base, ctx)
+        return rows if len(rows) > 1 else rows[0]
     # (4) The MONOID-producer composition — the fused norm→linear edge (``rmsnorm(x)·nw @ w``, and
     # its N-channel form, the gate/up MLP edge): the tail fold(s) ALSO nodify to
     # ``Map(body=projection, source=Contraction)`` — a computed-A :class:`Contraction` whose A cone
@@ -374,5 +484,20 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     if con and warp_tile_pinned():
         return con if len(con) > 1 else con[0]
     maps = _as_list(schedule(map_tile, loop.name, {**knob_base, **map_base}, ctx))
-    merged = [*maps, *con]
+    # The CUT sibling — the third form of this edge, beside the fused warp mma (``con``) and the
+    # fused coop reduce (``maps``): materialize the cone to a workspace and let the projection run
+    # as a plain gmem-A matmul. It is offered as a stamped ``PLACE@cone: cut`` ROW, not a Graph:
+    # the decision belongs in the schedule and ``020_cut_edge`` realizes it into the producer +
+    # consumer kernels — the same division of labour as ``REDUCE=g<n>k`` / ``030_split_reduce``.
+    # That keeps selection on the ordinary evidence pick (a golden records ``PLACE@cone: cut``
+    # against the cut's measured TOTAL, exactly as a split-K golden records partial+finalize), so
+    # no Σ-of-predictions structural pricing is involved and an unseeded shape simply never
+    # matches a cut golden — the cut can only win where it was actually measured to.
+    # ONE representative row suffices: the rewrite emits UN-mapped LoopOps that ``010`` re-enters
+    # per half, so this row's own schedule is discarded. Only offered unpinned — an explicit
+    # ``PLACE@cone`` pin is authoritative and never competes with a fork sibling.
+    cuts = []
+    if maps and PLACE.narrow_at("cone") not in ("fuse", "cut"):
+        cuts = [replace(maps[0], knobs={**maps[0].knobs, "PLACE@cone": "cut"})]
+    merged = [*maps, *con, *cuts]
     return merged if len(merged) > 1 else merged[0]

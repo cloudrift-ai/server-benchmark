@@ -37,15 +37,23 @@ through.
 
 from __future__ import annotations
 
+import re
+
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.loop import Accum, Assign, Load, Loop, LoopOp
 from emmy.compiler.ir.stmt import Body, Select
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import build_merged_op as _build_merged_op
+from emmy.compiler.pipeline.passes.loop.fusion._helpers import is_castfree_indexmap as _is_castfree_indexmap_shared
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import is_pure_indexmap as _is_pure_indexmap
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import wrap_merge_fragment as _wrap_merge_fragment
 
 _BLOWUP_FACTOR = 8
+# ``020_cut_edge``'s workspace node ids — the cone / bridged-statistic / per-channel halves of a
+# realized ``PLACE@cone=cut`` — plus ``025_sink_row_reduce``'s ``__sq`` row-stat aux buffer (a
+# realized ``PLACE@stat=sink``). Minted only by those rules; see the cut-workspace brake in
+# `rewrite`.
+_CUT_WS_RE = re.compile(r"__(cone|stat|ch\d+|sq)$")
 
 
 def _walk_leaf_costs(loop_op: LoopOp):
@@ -162,15 +170,9 @@ def _is_castfree_indexmap(graph: Graph, producer: Node) -> bool:
     on (``kv_stage_ok`` reads the operand BUFFER dtype — the gemma V-norm's f32→f16 cast
     fused into P@V left the flash V reading the f32 buffer, gmem-direct forever). So a
     dtype-changing copy takes the guards like any compute-bearing producer and stays
-    materialized at the traced cast boundary."""
-    if not _is_pure_indexmap(producer.op):
-        return False
-    out_dt = producer.output.dtype.name
-    for i in producer.inputs:
-        src = graph.nodes.get(i)
-        if src is not None and src.output.dtype.name != out_dt:
-            return False
-    return True
+    materialized at the traced cast boundary. Shared logic in ``_helpers`` — the fan-out
+    splitter needs the same gate."""
+    return _is_castfree_indexmap_shared(graph, producer)
 
 
 def _is_softmax_shaped(op) -> bool:
@@ -296,6 +298,24 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
         raise RuleSkipped("producer or consumer is no longer a LoopOp")
     if producer.id not in consumer.inputs:
         raise RuleSkipped(f"producer {producer.id!r} is not an input of consumer {consumer.id!r}")
+    # A producer that is itself a GRAPH OUTPUT must stay materialized: the splice consumes the
+    # node wholesale, so fusing it silently DROPS that output from the compiled graph (the
+    # escaping-residual ``(rms_norm(x + r), x + r)`` shape returned only the norm). Same guard
+    # ``005_split_shared_indexmap`` applies.
+    if producer.id in graph.outputs:
+        raise RuleSkipped(f"producer {producer.id!r} is a graph output — it must stay materialized")
+
+    # Cut-workspace brake: ``020_cut_edge`` realizes a DECIDED ``PLACE@cone=cut`` by
+    # materializing the cone into ``<out>__cone`` / ``<out>__stat`` / ``<out>__ch<i>``
+    # workspace kernels, and the restarted scan re-enters this pass while those halves are
+    # still LoopOps. The stat-BEARING producer is braked incidentally (reduce-heavy), but a
+    # STAT-FREE cone producer is pure pointwise with one consumer — this rule's core move —
+    # and re-inlining it recreates the fused kernel, silently reverting the decided placement
+    # (observed on the gemma-4 pre256 norm→kv cone: the re-cut then collided on the existing
+    # workspace node). The workspace names are 020's minting contract; a decided cut is never
+    # fusion's to undo.
+    if _CUT_WS_RE.search(producer.id):
+        raise RuleSkipped(f"{producer.id!r} is a decided cone-cut workspace — the cut placement is not fusion's to undo")
 
     # Multi-load-of-reduce-heavy-producer guard: if the consumer references
     # the producer's output via more than one Load stmt AND the producer does

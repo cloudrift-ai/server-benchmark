@@ -16,6 +16,7 @@ from collections.abc import Callable
 
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search.features import tile_signature
+from emmy.compiler.pipeline.search.prior.fit.linear import dual_rank
 
 # Golden dtype spelling → the graph Tensor dtype name.
 _DTYPES = {"fp32": "f32", "fp16": "f16", "bf16": "bf16"}
@@ -103,18 +104,22 @@ def evaluate_golden(
     ctx: Context,
     scorer: Callable[[dict], float] | None = None,
     dynamic: bool = False,
-) -> tuple[dict, int | None, int]:
-    """Score a matmul shape's full enumeration and return ``(pick, rank, pool)``:
-    the argmax pick (higher score = better), the recorded golden's 0-based rank in
-    the scored order (``None`` if the golden isn't in the enumeration — pin / dtype
-    mismatch), and the enumeration size. The rank — not whether the #1 pick equals
+) -> tuple[dict, int | None, int, int | None]:
+    """Score a matmul shape's full enumeration and return ``(pick, rank, pool,
+    rank_optimistic)``: the argmax pick (higher score = better), the recorded golden's
+    0-based rank in the scored order (``None`` if the golden isn't in the enumeration —
+    pin / dtype mismatch), the enumeration size, and the tie-OPTIMISTIC rank (strictly
+    greater rows only; ``None`` with ``rank``). The rank — not whether the #1 pick equals
     the golden — is the metric that matters: it's where the tuner's patience budget
-    has to reach. Ranking is tie-pessimistic: a row tied with the golden but earlier
+    has to reach. ``rank`` is tie-pessimistic: a row tied with the golden but earlier
     in emission order counts against it, because that is exactly the row a greedy
     argmin deploys instead — rank 0 therefore means "greedy finds the golden", not
-    "nothing scores strictly better". ``scorer`` (``row → float``, higher better) defaults to the
+    "nothing scores strictly better". The pessimistic-optimistic gap is the tie-plateau
+    width at the golden's score — the score-saturation canary (see
+    :func:`prior.fit.linear.dual_rank`, the one rank computation both flavors come
+    from). ``scorer`` (``row → float``, higher better) defaults to the
     :class:`OfflinePrior` (negated latency); the online-prior diagnostics pass
-    ``-prior.mean_score`` instead. Returns ``({}, None, 0)`` if nothing
+    ``-prior.mean_score`` instead. Returns ``({}, None, 0, None)`` if nothing
     enumerates.
 
     A **fast-math** golden (its knobs carry a precision-trading realization —
@@ -131,7 +136,7 @@ def evaluate_golden(
     with gate:
         rows, _ = _enumerate(M, N, K, dtype, ctx)
     if not rows:
-        return {}, None, 0
+        return {}, None, 0, None
     if scorer is None:
         scorer = _offline_scorer(M, N, K, ctx, dynamic=dynamic)
     # Match the recorded golden against the native candidate rows by schema-agnostic
@@ -141,18 +146,14 @@ def evaluate_golden(
     gidx = next((i for i, r in enumerate(rows) if tile_signature(r) == want), None) if want else None
     scores = [scorer(r) for r in rows]
     best = max(range(len(rows)), key=scores.__getitem__)
-    # Tie-PESSIMISTIC rank: greedy's argmin breaks score ties by emission order, so a
-    # golden tied with an earlier-emitted row loses the deploy — count those ties
-    # against it (mirroring the fork-regret metric's pessimistic tie pricing). The old
-    # strictly-greater count reported rank 0 for EVERY row inside a tie plateau, which
-    # is how a saturated prior scored "27/28 top-1" while real cold deploys shipped
-    # emission-order picks 12-29x off the golden.
-    if gidx is not None:
-        g = scores[gidx]
-        rank = sum(1 for i, s in enumerate(scores) if s > g or (s == g and i < gidx))
-    else:
-        rank = None
-    return rows[best], rank, len(rows)
+    # Both tie semantics from the one shared computation: pessimistic (greedy's argmin
+    # breaks score ties by emission order, so a golden tied with an earlier-emitted row
+    # loses the deploy — the #364 rule; the old strictly-greater count reported rank 0
+    # for EVERY row inside a tie plateau, which is how a saturated prior scored "27/28
+    # top-1" while real cold deploys shipped emission-order picks 12-29x off the
+    # golden) and optimistic (strictly-greater only), whose gap is the plateau width.
+    rank, rank_opt = dual_rank(scores, gidx) if gidx is not None else (None, None)
+    return rows[best], rank, len(rows), rank_opt
 
 
 def pick_matmul(M: int, N: int, K: int, dtype: str, ctx: Context) -> dict:

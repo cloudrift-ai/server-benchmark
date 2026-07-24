@@ -881,7 +881,9 @@ class Write(Stmt):
         import hashlib  # noqa: PLC0415 — render-path-only dependency
 
         sig = f"{self.output}|{flat}|{','.join(converted)}"
-        temp = f"_vs_{self.values[0]}_{hashlib.sha1(sig.encode()).hexdigest()[:4]}"
+        # 8 hex chars (32 bits): at [:4] two DIFFERENT sibling Writes sharing ``values[0]`` collide
+        # on the temp name within one C scope at ~n²/2¹⁷ — a duplicate-declaration nvcc error.
+        temp = f"_vs_{self.values[0]}_{hashlib.sha1(sig.encode()).hexdigest()[:8]}"
         if vec_type == "__half2":
             return [
                 f"{pad}{vec_type} {temp} = __halves2half2({converted[0]}, {converted[1]});",
@@ -949,3 +951,142 @@ class Select(Stmt):
     def render(self, ctx: RenderCtx) -> list[str]:
         expr = select_to_ternary(self)
         return [f"{_pad(ctx.indent)}float {self.name} = {expr.render(ctx)};"]
+
+
+@dataclass(frozen=True)
+class RowAccum(Stmt):
+    """Accumulate ``value`` into ``dst[flat / n]`` — the row-statistic sink epilogue
+    (``025_sink_row_reduce``).
+
+    A producer kernel that writes each cell of a tensor exactly once contributes that cell's
+    statistic term (e.g. ``v·v`` for a downstream Σx² norm stat) into a per-row f32 aux buffer:
+    ``flat`` is the just-stored cell's flat address in the produced tensor and ``n`` the row
+    width, so ``flat / n`` is the consuming reduce's row. ``dst`` is atomically accumulated
+    (zero-init'd per launch via ``CudaOp.zero_outputs``, exactly like an atomic ``Write``).
+
+    Rendering folds hierarchically. In a **full-block** scope (``RenderCtx.full_block`` — the
+    ``Tile`` decode elided its tail guard, so every thread of the block is here) each warp
+    shfl-butterflies its contributions, the warp partials cross a smem stage + ``__syncthreads``,
+    and thread 0 issues ONE ``atomicAdd`` per same-row run — ~1 atomic per block, which is what
+    keeps the epilogue at noise level (the per-warp fold alone measured +2.5 µs on the M=32
+    finalize: 128 same-row atomics serialize). A guarded / divergent scope falls back to the
+    barrier-free warp fold (full active warp + row-uniform → one atomic per warp), and boundary
+    warps to per-lane ``atomicAdd`` — always correct, just slower."""
+
+    dst: str  # the per-row f32 statistic buffer (flat rows)
+    flat: Expr  # the stored cell's flat address in the produced tensor
+    n: int  # row width: row = flat / n
+    value: str  # SSA name of the contribution term (accumulated in f32)
+
+    def deps(self) -> tuple[str, ...]:
+        return (self.value,)
+
+    def external_writes(self) -> tuple[str, ...]:
+        return (self.dst,)
+
+    def exprs(self) -> tuple[Expr, ...]:
+        return (self.flat,)
+
+    def has_side_effects(self) -> bool:
+        return True
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}{self.dst}[({self.flat.pretty()}) / {self.n}] += {self.value}  (row-accum)"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        pad = _pad(ctx.indent)
+        p1 = _pad(ctx.indent + 1)
+        p2 = _pad(ctx.indent + 2)
+        p3 = _pad(ctx.indent + 3)
+        t = f"_ra_{self.value}"
+        val = _resolve_value(self.value, ctx)
+        full = "0xffffffffu"
+        head = [
+            f"{pad}{{",
+            f"{p1}long {t}_f = (long)({self.flat.render(ctx)});",
+            f"{p1}int {t}_r = (int)({t}_f / {self.n});",
+            f"{p1}float {t}_v = (float)({val});",
+        ]
+        if ctx.full_block:  # full-block arm (barrier legal — see class docstring)
+            return [
+                *head,
+                f"{p1}__shared__ float {t}_sv[32]; __shared__ int {t}_sr[32];",
+                f"{p1}bool {t}_u = __all_sync({full}, {t}_r == __shfl_sync({full}, {t}_r, 0));",
+                f"{p1}float {t}_w = {t}_v;",
+                f"{p1}for (int {t}_o = 16; {t}_o > 0; {t}_o >>= 1) {t}_w += __shfl_down_sync({full}, {t}_w, {t}_o);",
+                # A row-mixed warp can't be represented by one (row, partial) slot — its lanes
+                # contribute directly and the slot is voided (row −1).
+                f"{p1}if (!{t}_u) atomicAdd(&{self.dst}[{t}_r], {t}_v);",
+                f"{p1}if ((threadIdx.x & 31) == 0) {{",
+                f"{p2}{t}_sv[threadIdx.x >> 5] = {t}_u ? {t}_w : 0.0f; {t}_sr[threadIdx.x >> 5] = {t}_u ? {t}_r : -1;",
+                f"{p1}}}",
+                f"{p1}__syncthreads();",
+                f"{p1}if (threadIdx.x == 0) {{",
+                f"{p2}int {t}_nw = (blockDim.x + 31) >> 5;",
+                f"{p2}for (int {t}_i = 0; {t}_i < {t}_nw; {t}_i++) {{",
+                f"{p3}if ({t}_sr[{t}_i] < 0) continue;",
+                f"{p3}float {t}_s = {t}_sv[{t}_i]; int {t}_rr = {t}_sr[{t}_i];",
+                f"{p3}for (int {t}_j = {t}_i + 1; {t}_j < {t}_nw && {t}_sr[{t}_j] == {t}_rr; {t}_j++) {{",
+                f"{p3}    {t}_s += {t}_sv[{t}_j]; {t}_sr[{t}_j] = -1;",
+                f"{p3}}}",
+                f"{p3}atomicAdd(&{self.dst}[{t}_rr], {t}_s);",
+                f"{p2}}}",
+                f"{p1}}}",
+                f"{p1}__syncthreads();",
+                f"{pad}}}",
+            ]
+        return [
+            *head,
+            # Warp fold only when ALL 32 lanes are here AND agree on the row — __activemask()
+            # is uniform across the active lanes, so the short-circuit keeps the sync
+            # intrinsics full-warp-only (partial masks would be UB under FULL-mask shfl).
+            f"{p1}if (__activemask() == {full} && __all_sync({full}, {t}_r == __shfl_sync({full}, {t}_r, 0))) {{",
+            f"{p2}for (int {t}_o = 16; {t}_o > 0; {t}_o >>= 1) {t}_v += __shfl_down_sync({full}, {t}_v, {t}_o);",
+            f"{p2}if ((threadIdx.x & 31) == 0) atomicAdd(&{self.dst}[{t}_r], {t}_v);",
+            f"{p1}}} else {{",
+            f"{p2}atomicAdd(&{self.dst}[{t}_r], {t}_v);",
+            f"{p1}}}",
+            f"{pad}}}",
+        ]
+
+
+@dataclass(frozen=True)
+class ZeroPrologue(Stmt):
+    """Zero another launch's atomic accumulator from THIS kernel — the delegated zero-init
+    (``lowering/cuda/005_delegate_zero_init``).
+
+    An atomic accumulator (atomic ``Write`` / ``RegStore`` output, a ``RowAccum`` aux buffer)
+    must be zero before its kernel launches; the runtime's per-launch ``zero_outputs`` memset
+    costs a CUDA-graph MEMSET node per site. This stmt rides a kernel that launches strictly
+    BEFORE the accumulator's kernel in the same stream (a dataflow predecessor — topological
+    launch order guarantees it), so stream serialization makes the zero happen-before the
+    atomics and the MEMSET node disappears. CTA 0 alone writes; the zero is over raw 32-bit
+    words (``words = nbytes / 4`` — all-zero bytes are 0.0 in every buffer dtype, the same
+    argument the runtime memset makes), so the render never needs the buffer's dtype.
+
+    ``dst`` names the target buffer — it joins the carrying kernel's ``outputs`` (and thus its
+    signature / ``arg_names``) WITHOUT a graph edge: an edge would be a cycle (the target is
+    the downstream kernel's own output). The slab planner learns the earlier first-write
+    through ``CudaOp.zero_prologues`` instead."""
+
+    dst: str  # the delegated buffer (the downstream kernel's atomic accumulator)
+    words: int  # 32-bit word count (nbytes / 4; the delegating rule guarantees divisibility)
+
+    def external_writes(self) -> tuple[str, ...]:
+        return (self.dst,)
+
+    def has_side_effects(self) -> bool:
+        return True
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}zero {self.dst}[0:{self.words}w]  (delegated zero-init, CTA 0)"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        pad = _pad(ctx.indent)
+        p1 = _pad(ctx.indent + 1)
+        return [
+            f"{pad}if (blockIdx.x == 0) {{",
+            f"{p1}int* _zp_{self.dst} = (int*){self.dst};",
+            f"{p1}for (int _zi = threadIdx.x; _zi < {self.words}; _zi += blockDim.x) _zp_{self.dst}[_zi] = 0;",
+            f"{pad}}}",
+        ]

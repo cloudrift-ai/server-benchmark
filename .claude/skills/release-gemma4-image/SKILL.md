@@ -22,29 +22,53 @@ Ask only for what the user hasn't already given:
 
 1. **Mode** — rental (default) or local. Local requires a 5090 in `nvidia-smi` on this machine; if the box is
    multi-GPU, resolve the 5090's index and export `GPU_DEVICE=<index>` for every warm/verify invocation. Check
-   ≥60 GB free disk (base image + `warm/` + baked weight layer) before starting local mode.
+   ≥100 GB free disk (base image + `warm/` + baked weight layer + BuildKit's transient ~24 GB context copy of
+   `warm/` — the measured figure; the earlier ~60 GB estimate predates it and hits ENOSPC mid-bake) before
+   starting local mode.
 2. **`HF_TOKEN`** — needed for the gated gemma-4 download during headroom/validate/warm. Local mode with the model
    already in `~/.cache/huggingface` can skip it by pre-seeding (ARCHITECTURE.md "Running it locally").
 3. **Docker Hub credentials for the push** — ask the user for a **short-lived access token** (not their password;
-   `docker login -u <user> --password-stdin`). Never echo it; `docker logout` in teardown regardless of outcome.
+   `docker login -u <user> --password-stdin`) **and, in the same question, the username the token belongs to**: a PAT
+   authenticates only its owning account, which is usually a personal user with push rights to the `cloudriftai` org,
+   not `cloudriftai` itself — the wrong username fails as "incorrect username or password". Never echo the token;
+   `docker logout` in teardown regardless of outcome.
 4. **Env file** (CloudRift creds, rental mode) — default `.env`, per the `start-remote-server` sourcing rules.
 
 ## Step 0 — Provision (rental mode; skip in local mode)
 
 Delegate to the `start-remote-server` skill: `emmy vm create gpu --gpu "NVIDIA GeForce RTX 5090" --gpu-count 1`
-(CloudRift). Capture `REMOTE` and the teardown handle. Then prepare the host (CloudRift image quirks: `apt update`,
-`python3.12-venv`/`python3.12-dev`, `nvcc` via `CUDA_HOME=/usr/local/cuda`; Docker + NVIDIA runtime are preinstalled
-on CloudRift images — verify with `docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi` or the
-vllm-emmy image itself). Rsync the working tree at the **release commit** and `make setup` +
+(CloudRift). On vast.ai instead: rent a **VM instance** template (e.g. "Ubuntu 22.04 VM", vastai/kvm,
+`vms_enabled=true` in search) — plain docker-container templates cannot run the host-level Docker builds; the account
+SSH key may not be injected, self-inject via `--onstart-cmd`. Capture `REMOTE` and the teardown handle. Then prepare
+the host (CloudRift image quirks: `apt update`, `python3.12-venv`/`python3.12-dev`, `nvcc` via
+`CUDA_HOME=/usr/local/cuda`; Docker + NVIDIA runtime are preinstalled on CloudRift images — verify with
+`docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi` or the vllm-emmy image itself). Also
+install `git-lfs` (the repo's hooks require it — a checkout without it dies mid-rebuild) and, when operating as root
+over a synced tree, `git config --global --add safe.directory <repo>` (without it `git rev-parse` returns empty and
+the image tag degrades; `make` now guards this).
+
+**Ship the source at the pinned release commit — never rsync the live working tree.** The working tree is shared
+mutable state: a branch switch in another session mid-release yields a hybrid tree whose wheel fails in confusing,
+distant ways. Pin `origin/main`'s sha up front, get the tree onto the host (fresh clone, or rsync of the
+`git ls-files` list plus `.git`), then `git checkout -f <sha>` there — and re-verify `git rev-parse HEAD` before any
+rebuild. Then `make setup` +
 `./venv/bin/pip install -e ".[serving]"` + cupy (the venv steps back the headroom sweep and the validate script).
 Host toolchain: **CUDA >= 12.9** (FlashInfer refuses sm_120 below it — the misleading error is "requires sm75 or
 higher"); on non-CloudRift hosts verify the NVIDIA container toolkit actually works (`docker run --gpus all ...
-nvidia-smi`) — a registered runtime with missing binaries fails with `could not select device driver`. Budget
+nvidia-smi`) — a registered runtime with missing binaries fails with `could not select device driver`. The
+venv-based steps (headroom sweep, validate) additionally need `CUDA_HOME`/nvcc exported in the step's own
+environment (emmy refuses to serve without nvcc) and a **system-wide** `ninja` (`apt install ninja-build` —
+FlashInfer's JIT subprocess won't see a venv-local one). For the model download use `hf download` with a retry
+loop and `HF_HUB_DISABLE_XET=1` — `huggingface-cli` is a deprecated no-op stub now, and the Xet transfer path
+flakes; note `warm.sh` resolves `warm/` relative to its own directory (`docker/vllm-emmy-gemma4/warm/`), so
+pre-seed the snapshot there, not at the repo root. Budget
 **~100 GB disk** (base images + venv + HF cache + BuildKit's transient context copy of warm/), or `rm -rf venv`
 before the bake — nothing after the warm needs it.
 
 **Run every long step detached** (`nohup … > step.log 2>&1 &` or `emmy`'s detached patterns) and poll the log — an
-SSH SIGHUP mid-compile must not kill the step or eat its traceback.
+SSH SIGHUP mid-compile must not kill the step or eat its traceback. Detached means no tty: pass `--batch --yes` to any
+`gpg` in installer snippets or it dies silently. And never `export TOKEN=$(cat …)` inside a `set -x` script — xtrace
+prints the expanded secret into the log; wrap secret reads in `set +x` … `set -x`.
 
 ## Step 1 — Base image
 
@@ -54,7 +78,9 @@ pushed from the same commit (the wheel is part of the cubin cache key) — when 
 ## Step 2 — Toolchain preflight (GATE)
 
 Run the preflight inside the freshly built image (exact command in ARCHITECTURE.md step 2).
-**Gate: the output must end `== preflight done: 34 OK, 0 FAIL`.** Anything else → capture the failing `*.log`s from
+**Gate: the output must end `== preflight done: <N> OK, 0 FAIL` with `<N>` nonzero.** `<N>` is the golden count and
+grows as goldens land — the gate is **0 FAIL and at least one OK**, not a specific N (the script itself hard-fails
+an empty golden enumeration, so `0 OK, 0 FAIL` can no longer exit 0). Anything else → capture the failing `*.log`s from
 the preflight out dir, abort, teardown, report. Do not attempt to fix compiler/toolchain bugs inside the release
 session.
 
@@ -67,6 +93,10 @@ Policy (decode bucket stays at 16): try `--max-model-len`/`--max-num-batched-tok
 `EngineCore encountered a fatal error` (the exit code alone hides tail crashes — a drained bench can die after its
 metrics print; grep the log). It **fails** on CUDA OOM, death before health, or a logged engine fatal. Keep the largest passing N. If even 256 fails with the decode bucket on, retry 256 with
 `EMMY_GEN_DECODE_BUCKET=0` and report that the memory fixes regressed (that is a finding, not a config).
+
+The sweep's first boot compiles every kernel and can exceed `emmy serve`'s 30-min health cap (`_HEALTH_TIMEOUT_S` in
+`emmy/commands/serve.py`) on a slow host — bumping it with a VM-local sed is fine; it does not affect the shipped
+artifacts.
 
 Write the winner into `docker/vllm-emmy-gemma4/config.env`. **The config is sealed from here on** — any later change
 invalidates the warm.

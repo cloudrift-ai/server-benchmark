@@ -572,7 +572,7 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, str], *, s
 
     # --- SDPA ---
     if op_name == "scaled_dot_product_attention":
-        # args: (Q, K, V, attn_mask, dropout_p, is_causal). ``attn_mask`` is an
+        # args: (Q, K, V, attn_mask, dropout_p, is_causal, scale). ``attn_mask`` is an
         # additive float bias added to the QK^T scores — HF passes its causal
         # mask this way (a precomputed (1,1,S,S) tensor) rather than via the
         # ``is_causal`` flag. Thread it through as a 4th SdpaOp input so the
@@ -584,12 +584,19 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, str], *, s
             if isinstance(a, bool):
                 is_causal = a
                 break
+        # ``scale``: positional slot 6 (after dropout_p at 4 — never captured, so a
+        # bare float at 4 is dropout, at 6 is scale) or the kwarg. ``None`` = torch's
+        # ``1/sqrt(head_dim)`` default. Dropping an explicit scale (Gemma-nano passes
+        # ``scale=1.0``) silently re-scales the attention logits.
+        scale = (fx_node.kwargs or {}).get("scale")
+        if scale is None and len(fx_node.args) > 6 and isinstance(fx_node.args[6], (int, float)) and not isinstance(fx_node.args[6], bool):
+            scale = fx_node.args[6]
         sdpa_inputs = list(input_ids[:3])
         mask_arg = fx_node.args[3] if len(fx_node.args) > 3 else (fx_node.kwargs or {}).get("attn_mask")
         if mask_arg is not None and hasattr(mask_arg, "name") and mask_arg.name in node_map:
             sdpa_inputs.append(node_map[mask_arg.name])
         nid = g.add_node(
-            op=SdpaOp(is_causal=is_causal),
+            op=SdpaOp(is_causal=is_causal, scale=None if scale is None else float(scale)),
             inputs=sdpa_inputs,
             output=Tensor(name, shape, dtype),
             node_id=name,
@@ -706,12 +713,37 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, str], *, s
         return
 
     # --- Pass-through ---
-    # ``type_as`` is a dtype cast to another tensor's dtype (e.g. Gemma's
-    # ``self._norm(x.float()).type_as(x)``) — like ``to``/``clone`` it's an
-    # identity in the dtype-unified numeric pipeline (the traced dtype carries
-    # through), so map it to its first input.
+    # ``contiguous`` / ``clone`` / ``detach`` / ``alias`` are pure aliases. ``to`` and
+    # ``type_as`` are aliases ONLY when they do not actually change dtype — when they do,
+    # aliasing silently drops a real narrowing and the wider dtype propagates forward.
+    #
+    # That is not hypothetical: Gemma's RMSNorm is
+    # ``self._norm(x.float()) * w.float()`` then ``.type_as(x)``. The f32 the statistic is
+    # computed in reaches the graph anyway (the traced scalar constants are f32, so
+    # ``f16 ** f32 -> f32`` promotes the whole chain), but dropping the closing ``type_as``
+    # left the norm OUTPUT f32 too. Every consumer then became a mixed f32xf16 contraction,
+    # which is not offered the staged (``d2/tma/ring``) transports — the gemma-4 prefill
+    # norm->qkv projections deployed at 147-174 us each on a spilling ``w1x1`` tile instead
+    # of the ~31-51 us their pure-f16 goldens record.
+    #
+    # Emit the narrowing as an identity ``IndexMapOp`` (read each element, write it) whose
+    # output Tensor carries the target dtype — the same mechanism broadcast already uses,
+    # and the conversion falls out of the typed store. Keeping the statistic itself in f32
+    # is deliberate and must not change: squaring gemma activations in f16 overflows above
+    # |x| = 256 (measured: max|err| 60.7 at peak 300 vs HF), so only the OUTPUT narrows.
     if op_name in ("to", "contiguous", "_assert_tensor_metadata", "clone", "detach", "alias", "type_as"):
         if input_ids:
+            src = g.nodes.get(input_ids[0])
+            if op_name in ("to", "type_as") and src is not None and dtype != src.output.dtype:
+                coord_map = tuple(placeholder(d) for d in range(len(shape)))
+                nid = g.add_node(
+                    op=IndexMapOp(out_shape=tuple(shape), sources=(IndexSource(input_idx=0, coord_map=coord_map),)),
+                    inputs=input_ids[:1],
+                    output=Tensor(name, shape, dtype),
+                    node_id=name,
+                )
+                node_map[name] = nid
+                return
             node_map[name] = input_ids[0]
         return
 

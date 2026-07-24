@@ -25,6 +25,9 @@ names=$(CUDA_VISIBLE_DEVICES= "$PY" -c "
 from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS
 print('\n'.join(sorted({g.name for g in GOLDEN_CONFIGS if g.name.startswith('gemma4_12b.')})))
 ")
+# An empty enumeration (import error above, or the golden name prefix drifting) must be a hard
+# FAIL — otherwise the loop below never runs and "0 OK, 0 FAIL" gates a rental on zero compiles.
+[ -n "$names" ] || { echo "FAIL: no gemma4_12b.* goldens enumerated (import error or renamed prefix?)"; exit 1; }
 
 pass=0; fail=0
 for name in $names; do

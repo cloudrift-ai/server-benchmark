@@ -745,6 +745,11 @@ class TreeHalve(Stmt):
     dtype: DataType = F32
     barrier_id: int = 0
     barrier_count: int | None = None
+    # Segment-indexed halving (the transposed b<n>t combine): each slab holds ``length``
+    # SEGMENTS of ``inner[1]`` slots, and the tree halves the segment index at a fixed inner
+    # slot — ``buf[t·scale + inner_var]`` vs ``buf[(t+s)·scale + inner_var]``, broadcast from
+    # ``buf[inner_var]``. ``None`` keeps the flat ``buf[t]`` layout.
+    inner: tuple[str, int] | None = None
 
     def deps(self) -> tuple[str, ...]:
         return tuple(self.state)
@@ -766,23 +771,29 @@ class TreeHalve(Stmt):
                 raise ValueError(f"TreeHalve(barrier_id={self.barrier_id}) requires barrier_count")
             sync_line = f'{in1}asm volatile("bar.sync {self.barrier_id}, {self.barrier_count};\\n" ::: "memory");'
         half = int(self.length) // 2
+        if self.inner is not None:
+            iv, scale = self.inner
+            slot, slot_s, root = f"{t} * {scale} + {iv}", f"({t} + s) * {scale} + {iv}", str(iv)
+        else:
+            slot, slot_s, root = t, f"{t} + s", "0"
         out: list[str] = [f"{pad}for (int s = {half}; s > 0; s >>= 1) {{", f"{in1}if ({t} < s) {{"]
         # Shadow temps named after the carried state so ``combine_states`` (which
         # reassigns ``state``) folds ``buf[t+s]`` into ``buf[t]`` per component.
         for buf, st, sb in zip(self.bufs, self.state, self.state_b, strict=True):
-            out.append(f"{in2}{ty} {st} = {buf}[{t}];")
-            out.append(f"{in2}{ty} {sb} = {buf}[{t} + s];")
+            out.append(f"{in2}{ty} {st} = {buf}[{slot}];")
+            out.append(f"{in2}{ty} {sb} = {buf}[{slot_s}];")
             ctx.ssa_dtypes[st] = self.dtype.name
             ctx.ssa_dtypes[sb] = self.dtype.name
         out.extend(render_merge_program(self.combine_states, self.state, ctx, pad=in2, dtype=self.dtype))
         for buf, st in zip(self.bufs, self.state, strict=True):
-            out.append(f"{in2}{buf}[{t}] = {st};")
+            out.append(f"{in2}{buf}[{slot}] = {st};")
         out.append(f"{in1}}}")
         out.append(sync_line)
         out.append(f"{pad}}}")
-        # Broadcast the reduced state back into the carried SSA names (in place).
+        # Broadcast the reduced state back into the carried SSA names (in place) — from the
+        # segment root (this lane's slot 0) when segment-indexed.
         for buf, st in zip(self.bufs, self.state, strict=True):
-            out.append(f"{pad}{st} = {buf}[0];")
+            out.append(f"{pad}{st} = {buf}[{root}];")
             ctx.ssa_dtypes[st] = self.dtype.name
         return out
 

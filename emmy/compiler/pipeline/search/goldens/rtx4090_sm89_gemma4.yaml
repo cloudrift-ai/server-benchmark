@@ -676,6 +676,55 @@ configs:
     knobs: {PLACE: 'fuse', REDUCE: 'g2k', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x64', WSPEC: ''}
     emmy_us: 1069.0
     cublas_us: 926.5
+  # ---- attention at seq 4096 (2026-07-23, vast.ai 4090, fm-superset tune + pinned --ab) -------------
+  # The s2048 families transfer: hd256 stays SERIAL on d1/cp/alt (g2k pins lose — std 1359.7,
+  # fm 1250.0) and its f16acc-PV sibling is the fm primary at SDPA parity (1077.2 vs 1068.8).
+  # hd512 keeps the split-KV g2k of its s2048 row: 3514.0 vs the serial greedy's 4587.5 (0.98x vs
+  # torch SDPA 3457.0); the fm greedy realizes the same all-f32 atoms, so no [fm] row exists.
+  # ⚠ OFFER GAP: at s4096 the split-KV offer is not enumerated (the 2048-block grid never
+  # "starves", so no REDUCE=g2k candidate exists un-pinned) — the g2k row benches only via pin and
+  # the golden floor falls through it loudly. The SERIAL sibling below is the deployable floor
+  # (same class as mlp_down.m4096's serial sibling); the 23% gap is the shape's open lever.
+  - kernel: attention
+    name: gemma4_12b.attention.hd256.s4096
+    n_heads: 16
+    seq: 4096
+    head_dim: 256
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', REDUCE: '', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k4', WSPEC: ''}
+    emmy_us: 1205.2
+    cublas_us: 1068.8
+  - kernel: attention
+    name: gemma4_12b.attention.hd256.s4096
+    n_heads: 16
+    seq: 4096
+    head_dim: 256
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', REDUCE: '', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x32/k4', WSPEC: ''}
+    emmy_us: 1077.2
+    cublas_us: 1068.8
+  - kernel: attention
+    name: gemma4_12b.attention.hd512.s4096
+    n_heads: 16
+    seq: 4096
+    head_dim: 512
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', REDUCE: 'g2k', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x64', WSPEC: ''}
+    emmy_us: 3514.0
+    cublas_us: 3457.0
+  - kernel: attention
+    name: gemma4_12b.attention.hd512.s4096
+    n_heads: 16
+    seq: 4096
+    head_dim: 512
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', REDUCE: '', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x64', WSPEC: ''}
+    emmy_us: 4587.5
+    cublas_us: 3457.0
   # ---- prefill-chunk twins (M=4096, EMMY_GEN_PREFILL_BUCKET=mnbt — the 4K serving prefill shapes) --
   # 4090 port of the 2026-07-21 5090 m4096 session, seeded the same day by the same manual pinned
   # --ab method run remotely (3x inline, spread <=1.0% except std down-can 5.2%/2.4%): the fm f16acc

@@ -3065,48 +3065,8 @@ configs:
     cublas_us: 47.1
   # the cut consumers re-recognize as plain M=1 matvecs; block-reduce beats the cold b256 pick
   # (gate_up 140 vs 180; b64/b128 tie on gate_up, b64 clear on the two smaller N)
-  - kernel: matmul
-    name: gemma4_12b.gate_up_cat.m1.lin
-    M: 1
-    N: 30720
-    K: 3840
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {TILE: '', REDUCE: 'b128', RASTER: '', STAGE: '', WSPEC: ''}
-    emmy_us: 140.2
-    cublas_us: 143.6
-  - kernel: matmul
-    name: gemma4_12b.qkv_cat.m1.lin
-    M: 1
-    N: 8192
-    K: 3840
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {TILE: '', REDUCE: 'b64', RASTER: '', STAGE: '', WSPEC: ''}
-    emmy_us: 12.7
-    cublas_us: 43.0
-  - kernel: matmul
-    name: gemma4_12b.qk_global_cat.m1.lin
-    M: 1
-    N: 8704
-    K: 3840
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {TILE: '', REDUCE: 'b64', RASTER: '', STAGE: '', WSPEC: ''}
-    emmy_us: 13.3
-    cublas_us: 45.0
   # down-proj at M=1 recognizes plain (GeGLU combine stays a separate pointwise); greedy b256
   # already optimal — row locks it against prior drift
-  - kernel: matmul
-    name: gemma4_12b.down_proj.m1.lin
-    M: 1
-    N: 3840
-    K: 15360
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {TILE: '', REDUCE: 'b256', RASTER: '', STAGE: '', WSPEC: ''}
-    emmy_us: 71.8
-    cublas_us: 77.1
 
   # ---- MERGED keys at M=64 (the EMMY_GEN_DECODE_BUCKET=64 c=64 decode regime) and M=4096
   # (the chunked-prefill static width every 4K+ prompt rides) — the two coverage gaps behind

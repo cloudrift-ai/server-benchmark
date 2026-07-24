@@ -224,11 +224,11 @@ def test_bare_reduce_forks_the_coop_catalog():
     assert rows, "no fork was offered for the bare reduce"
     reduces = [str(family_value(r, "REDUCE")) for r in rows]
     assert reduces[0] == ""  # 2048 free cells > _FREE_CAP: the conservative heuristic pick leads
-    # The monoid tier offers the catalog MINUS the transposed band and its g-split
-    # composites (the plain-contraction matvec tier's moves — _reduce_specs gates them:
-    # shared-row staging / distributed sweeps / symbolic g-splits don't compose there).
-    monoid_moves = {m for m in coop_reduce_moves() if not (ReducePlan.parse(m).coop_transposed or ReducePlan.parse(m).needs_split)}
-    assert set(reduces) == {"", *monoid_moves}, f"catalog rows missing: {reduces}"
+    # This bare reduce meets the transposed band's structural gate (scalar tail, no
+    # shared-row stage, static K, 32-divisible free grid), so the FULL catalog is offered —
+    # bt/g-composites included. Rows that fail the gate (softmax/rms shapes) drop the band;
+    # that arm is covered by the schedule tests, not this catalog assertion.
+    assert set(reduces) == {"", *coop_reduce_moves()}, f"catalog rows missing: {reduces}"
 
 
 def test_factor_k_refuses_non_dividing_pin_width():

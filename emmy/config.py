@@ -352,13 +352,15 @@ def gen_prefill_bucket(default: int = -1) -> int:
     return int_env(GEN_PREFILL_BUCKET, default)
 
 
-def gen_m1_tier(default: int = 0) -> int:
+def gen_m1_tier(default: int = 1) -> int:
     """``EMMY_GEN_M1_TIER`` — build and route the static M=1 (gemv-class) decode twins for
-    T=1 steps (default 0 = OFF). The M=1 matvec forms reach cuBLAS-gemv bandwidth (b128
-    ~1.68 TB/s on the 5090), but the FUSED norm→merged edges currently lift with zero free
-    axes at M=1 and schedule as grid-1 kernels (recognition cannot bind the degenerate
-    composition, so neither the column-gridded Contraction form nor the cut is offered) —
-    keep this off until that recognizer gap is closed. See `serving/gen_runner.py`."""
+    T=1 steps (default 1 = ON since 2026-07-24). The tier's matvecs run the transposed
+    ``g<w>k/b<n>t`` partition at the k-major serving layout's gemv floor (o_proj 8.1 µs,
+    qkv 14, down 76, gate_up 142 on the 5090), and the flip criterion held e2e: c=1 TPOT
+    17.92/18.98 beats the bucket-32 path's 18.0/19.1 with c=8/c=64 unchanged (m1 routes
+    only T==1). Set 0 to fall back to bucket-padded decode at T=1. The remaining ~1.6 ms
+    to stock is the split-chain / kernel-count / seam work of
+    plans/decode-parity-closers.md. See `serving/gen_runner.py`."""
     return int_env(GEN_M1_TIER, default)
 
 

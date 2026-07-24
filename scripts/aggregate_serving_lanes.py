@@ -28,13 +28,14 @@ FIELDS = {
     "num_prompts": r"--num-prompts (\d+)",
 }
 
-POINT_ORDER = ["small_c1", "small_c64", "head_c1", "head_c4", "head_c8"]
+POINT_ORDER = ["small_c1", "small_c64", "head_c1", "head_c4", "head_c8", "rag_c4"]
 POINT_LABEL = {
     "small_c1": "256 / 256 / c=1",
     "small_c64": "256 / 256 / c=64",
     "head_c1": "4096 / 4096 / c=1",
     "head_c4": "4096 / 4096 / c=4",
     "head_c8": "4096 / 4096 / c=8",
+    "rag_c4": "8192 / 256 / c=4",
 }
 
 

@@ -748,18 +748,31 @@ class EmmyGenRunner:
         rows), or ``None`` when the m1 tier is off / this layer fell back. vLLM's paged attention
         writes into this view under ``EMMY_GEN_ALIAS_ATTN`` so :meth:`_Program.run_device`'s
         prefix upload self-copy-skips — the seam copy drops out of the captured decode graph.
-        The backing is allocated once per program, so the pointer is stable across steps."""
+        The backing is allocated once per program, so the pointer is stable across steps.
+
+        The wrap is CACHED per layer: ``torch.from_dlpack`` on a cupy array negotiates a stream
+        sync, which INVALIDATES an in-flight CUDA-graph capture — the view must be minted on an
+        uncaptured (warmup) step and only re-served under capture. An uncached layer asked for
+        mid-capture returns ``None`` (the caller falls back to the ordinary copy path)."""
         if self._post_m1 is None:
             return None
         handle = self._post_m1[layer]
         if handle is None:
             return None
-        import torch  # noqa: PLC0415
+        views = getattr(self, "_post_m1_attn_views", None)
+        if views is None:
+            views = self._post_m1_attn_views = {}
+        view = views.get(layer)
+        if view is None:
+            import torch  # noqa: PLC0415
 
-        arr = handle.program.arrays.get("attn_out")
-        if arr is None:
-            return None
-        return torch.from_dlpack(arr)[:rows]
+            if torch.cuda.is_current_stream_capturing():
+                return None
+            arr = handle.program.arrays.get("attn_out")
+            if arr is None:
+                return None
+            view = views[layer] = torch.from_dlpack(arr)
+        return view[:rows]
 
     def final_norm_device(self, hidden):
         """Apply the final norm on CUDA to a ``hidden[T,H]`` CUDA tensor."""

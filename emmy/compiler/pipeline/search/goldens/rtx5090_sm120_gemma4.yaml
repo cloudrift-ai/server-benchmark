@@ -819,6 +819,41 @@ configs:
     knobs: {PLACE: 'fuse', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x64', WSPEC: ''}
     emmy_us: 1034.6
     cublas_us: 1040.4
+  # ---- attention at seq 4096 (2026-07-24, vast.ai 5090, fm-superset tune + greedy A/B) --------------
+  # hd512 s4096: the s2048 serial alt family transfers and now BEATS torch SDPA (3521.4 vs 3672.7,
+  # 1.04x); the fm greedy realizes the same all-f32 atoms — no [fm] row. hd256 s4096 std stays on
+  # the serial alt family (871.5 vs SDPA 792.8, 0.91x); the fm lane moves to a d2/cp/ring/p2
+  # f16acc-PV form and beats SDPA (736.5, 1.08x).
+  - kernel: attention
+    name: gemma4_12b.attention.hd256.s4096
+    n_heads: 16
+    seq: 4096
+    head_dim: 256
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', REDUCE: '', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k4', WSPEC: ''}
+    emmy_us: 871.5
+    cublas_us: 792.8
+  - kernel: attention
+    name: gemma4_12b.attention.hd256.s4096
+    n_heads: 16
+    seq: 4096
+    head_dim: 256
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', REDUCE: '', STAGE: 'd2/cp/ring/p2', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x32', WSPEC: ''}
+    emmy_us: 736.5
+    cublas_us: 792.8
+  - kernel: attention
+    name: gemma4_12b.attention.hd512.s4096
+    n_heads: 16
+    seq: 4096
+    head_dim: 512
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', REDUCE: '', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x64', WSPEC: ''}
+    emmy_us: 3521.4
+    cublas_us: 3672.7
   # ---- decode-bucket twins (M = EMMY_GEN_DECODE_BUCKET; the serving decode static shapes) -----------
   # Seeded 2026-07-16 (fm-superset sweep + per-shape A/B + manual family pins, _tune/decode-goldens-5090/):
   # emmy beats cuBLAS on EVERY decode shape (up to 5.7x on q_proj.m16; the MLP giants sit on the

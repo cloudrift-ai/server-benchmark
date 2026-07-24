@@ -743,6 +743,24 @@ class EmmyGenRunner:
             return self._post_prefill[layer].run_device([attn_out, residual])[0]
         return self._post[layer].run_device_sym([attn_out, residual])[0]
 
+    def post_attn_backing(self, layer: int, rows: int):
+        """A torch CUDA view of the M=1 post twin's ``attn_out`` INPUT backing (first ``rows``
+        rows), or ``None`` when the m1 tier is off / this layer fell back. vLLM's paged attention
+        writes into this view under ``EMMY_GEN_ALIAS_ATTN`` so :meth:`_Program.run_device`'s
+        prefix upload self-copy-skips — the seam copy drops out of the captured decode graph.
+        The backing is allocated once per program, so the pointer is stable across steps."""
+        if self._post_m1 is None:
+            return None
+        handle = self._post_m1[layer]
+        if handle is None:
+            return None
+        import torch  # noqa: PLC0415
+
+        arr = handle.program.arrays.get("attn_out")
+        if arr is None:
+            return None
+        return torch.from_dlpack(arr)[:rows]
+
     def final_norm_device(self, hidden):
         """Apply the final norm on CUDA to a ``hidden[T,H]`` CUDA tensor."""
         import torch

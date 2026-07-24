@@ -190,6 +190,15 @@ def map_tile_moves() -> list[str]:
 #                schedule / fork. The recognizer's nodification gate is the ``fuse`` half.
 #   PLACE@fold   downstream-fold absorption (flash vs separate softmax + P@V kernels)
 #   PLACE@tuple  sibling-fold tupling (online softmax vs two-pass stats)
+#   PLACE@fin    deferred split-reduce finalize placement — its own kernel (``cut``) vs inlined
+#                into every consumer's read sites (``fuse``, realized by
+#                ``lowering/tile/032_fuse_finalize``; kills the finalize launch + sync point)
+#   PLACE@cstat  the cone cut's bridged statistic placement — its own ``__stat`` kernel (``cut``,
+#                today's split; the statistic must leave the cone kernel to give the scale sweep
+#                its 2-D grid at prefill M) vs kept INSIDE the cone producer (``fuse``: the
+#                pre-split ``for m: [stat…, for k: …]`` LoopOp, whose re-recognition gives it the
+#                per-row coop-stat schedule — the M=1 case, where the separate stat kernel is
+#                pure launch overhead). Realized by ``020_cut_edge``.
 #
 # Vocabulary: ``auto`` (the built-in per-element default) / ``fuse`` / ``cut``. Precedence:
 # ``PLACE@<element>`` > bare ``PLACE`` > built-in ``auto`` (read via :func:`place_decision` /
@@ -206,8 +215,11 @@ PLACE = Knob(
     help="Structural placement of an intermediate edge — auto|fuse|cut, per element via "
     "PLACE@cone (producer-cone inlining) / PLACE@fold (flash vs multi-kernel attention) / "
     "PLACE@tuple (online softmax vs two-pass stats) / PLACE@stat (auto|fuse|sink — a norm's "
-    "row statistic staying local vs sunk into its producer's epilogue); bare PLACE pins every "
-    "eligible edge. Pin-only (never enumerated); read in lowering/tile/010_recognize.",
+    "row statistic staying local vs sunk into its producer's epilogue) / PLACE@fin (auto|cut|fuse "
+    "— a deferred split-reduce finalize as its own kernel vs inlined into its consumers) / "
+    "PLACE@cstat (auto|cut|fuse — the cone cut's bridged statistic as its own kernel vs kept in "
+    "the cone producer); bare PLACE pins every eligible edge. Pin-only (never enumerated); read "
+    "in lowering/tile/010_recognize.",
     off="",
 )
 
@@ -216,8 +228,15 @@ PLACE = Knob(
 # LOCAL to its kernel). Flipping a default is a behavior change gated on the validation suite, not
 # a spelling change. ``stat``'s alternative is ``sink`` (not ``cut``): the statistic reduce
 # migrates into the producer kernel's epilogue (``025_sink_row_reduce``) instead of splitting out.
-_PLACE_DEFAULTS = {"cone": "fuse", "fold": "fuse", "tuple": "fuse", "stat": "fuse"}
-_PLACE_VALUES = {"cone": ("fuse", "cut"), "fold": ("fuse", "cut"), "tuple": ("fuse", "cut"), "stat": ("fuse", "sink")}
+_PLACE_DEFAULTS = {"cone": "fuse", "fold": "fuse", "tuple": "fuse", "stat": "fuse", "fin": "cut", "cstat": "cut"}
+_PLACE_VALUES = {
+    "cone": ("fuse", "cut"),
+    "fold": ("fuse", "cut"),
+    "tuple": ("fuse", "cut"),
+    "stat": ("fuse", "sink"),
+    "fin": ("cut", "fuse"),
+    "cstat": ("cut", "fuse"),
+}
 
 
 def place_decision(element: str) -> str:

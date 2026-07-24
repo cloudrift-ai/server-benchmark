@@ -88,3 +88,43 @@ def test_run_device_sym_inside_outer_capture_replays_live():
         torch.cuda.synchronize()
         assert outs[t].shape[0] == t
         assert torch.allclose(outs[t], ref_mod(x2), rtol=1e-2, atol=1e-2), f"size {t} replay diverged"
+
+
+def test_run_device_aliased_input_backing_replays_live():
+    """The EMMY_GEN_ALIAS_ATTN path: the caller writes INTO the program's own input backing (a
+    ``torch.from_dlpack`` view), so ``upload_prefix_device`` self-copy-skips — and the captured
+    graph must still replay LIVE (new values written into the backing flow through)."""
+    pytest.importorskip("cupy")
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+
+    from emmy.serving.gen_runner import _compile_split
+
+    torch.manual_seed(0)
+    wrapper = torch.nn.Linear(16, 16, bias=False).to(torch.float16).eval()
+    prog, _ = _compile_split(wrapper, [torch.zeros(4, 16, dtype=torch.float16)], None, np.dtype("float16"))
+
+    # The alias: a torch view of the program's OWN input buffer (the post twin's attn_out class).
+    x = torch.from_dlpack(prog.program.arrays[prog.input_names[0]])
+    assert x.shape[0] == 4
+    x.copy_(torch.randn(4, 16, dtype=torch.float16, device="cuda"))
+    ref0 = prog.run_device([x])[0].clone()  # upload self-copy-skips (pointer equality)
+    assert torch.allclose(ref0, wrapper.cuda()(x), rtol=1e-2, atol=1e-2)
+
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        out = prog.run_device([x])[0]
+    g.replay()
+    torch.cuda.synchronize()
+    assert torch.allclose(out, ref0, rtol=1e-3, atol=1e-3)
+
+    # Replay must be LIVE through the aliased backing: writing new values into the SAME view
+    # (what vLLM's attention does each step) flows through the graph with no upload copy.
+    x2 = torch.randn(4, 16, dtype=torch.float16, device="cuda")
+    ref2 = wrapper.cuda()(x2)
+    x.copy_(x2)
+    g.replay()
+    torch.cuda.synchronize()
+    assert torch.allclose(out, ref2, rtol=1e-2, atol=1e-2)

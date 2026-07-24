@@ -514,6 +514,14 @@ def _golden_matches_row(golden_knobs: dict, row: dict) -> bool:
                 return False
         elif not any(matched):  # bare: one plan, satisfied by any same-family realization
             return False
+    # The symmetric PLACE clause: a golden that does NOT name a kernel-set-changing placement
+    # measured the un-restructured form, so it must not vouch for a row carrying the CHANGING
+    # value — the ``fuse``-mirror finalize row is knob-identical to its base and would win the
+    # content tie-break on a keyless golden, deploying a kernel set the golden never measured
+    # (the ``evidence_row_vouches`` principle applied to the golden tier).
+    for k, changing in (("PLACE@cone", "cut"), ("PLACE@stat", "sink"), ("PLACE@fin", "fuse"), ("PLACE@cstat", "fuse")):
+        if k not in golden_knobs and str(row.get(k)) == changing:
+            return False
     return True
 
 
@@ -816,9 +824,8 @@ def greedy_decide(
         # structural-pricing gate encodes, applied at row level. ``PLACE@stat=sink``
         # (``025_sink_row_reduce`` — the producer gains an epilogue, the norm re-emits as a
         # sweep) changes the kernel set the same way and is withheld identically.
-        model_rows = [i for i, r in enumerate(rows) if r.get("PLACE@cone") != "cut" and r.get("PLACE@stat") != "sink"] or list(
-            range(len(rows))
-        )
+        restructured = (("PLACE@cone", "cut"), ("PLACE@stat", "sink"), ("PLACE@fin", "fuse"), ("PLACE@cstat", "fuse"))
+        model_rows = [i for i, r in enumerate(rows) if all(r.get(k) != v for k, v in restructured)] or list(range(len(rows)))
 
         def _model_pick(rank) -> tuple[int, float]:
             j, p = rank([rows[i] for i in model_rows])

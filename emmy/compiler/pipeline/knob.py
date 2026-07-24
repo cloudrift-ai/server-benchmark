@@ -606,6 +606,10 @@ def evidence_row_vouches(cand_tun: dict, row_tun: dict) -> bool:
         return False
     if str(cand_tun.get("PLACE@cone")) == "cut" and "PLACE@cone" not in row_tun:
         return False
+    if str(cand_tun.get("PLACE@fin")) == "fuse" and "PLACE@fin" not in row_tun:
+        return False  # a pre-fin row measured the separate-finalize twin — same kernel-set clause
+    if str(cand_tun.get("PLACE@cstat")) == "fuse" and "PLACE@cstat" not in row_tun:
+        return False  # a pre-cstat row measured the split-stat twin — same kernel-set clause
     return not (str(cand_tun.get("PLACE@stat")) == "sink" and "PLACE@stat" not in row_tun)
 
 

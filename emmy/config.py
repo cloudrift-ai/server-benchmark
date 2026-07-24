@@ -54,6 +54,7 @@ SERVING_STATIC = "EMMY_SERVING_STATIC"
 SERVING_BATCHED = "EMMY_SERVING_BATCHED"
 GEN_DECODE_BUCKET = "EMMY_GEN_DECODE_BUCKET"
 GEN_M1_TIER = "EMMY_GEN_M1_TIER"
+GEN_ALIAS_ATTN = "EMMY_GEN_ALIAS_ATTN"
 GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
 READABLE = "EMMY_READABLE"
 
@@ -362,6 +363,17 @@ def gen_m1_tier(default: int = 1) -> int:
     to stock is the split-chain / kernel-count / seam work of
     plans/decode-parity-closers.md. See `serving/gen_runner.py`."""
     return int_env(GEN_M1_TIER, default)
+
+
+def gen_alias_attn(default: int = 0) -> int:
+    """``EMMY_GEN_ALIAS_ATTN`` — write vLLM's paged-attention output DIRECTLY into the M=1 post
+    twin's ``attn_out`` input backing (default 0 = off). Kills the per-layer protective D2D
+    upload copy at T=1 decode: ``upload_prefix_device`` self-copy-skips on pointer equality.
+    The alias holds across steps by construction — the m1 program's input arrays are allocated
+    once, and the outer whole-step decode capture fixes the launch order (attention writes,
+    the post program reads, before the next replay overwrites). Revert-friendly: off restores
+    the copy path unchanged. See ``serving/vllm_model_gen.py``."""
+    return int_env(GEN_ALIAS_ATTN, default)
 
 
 def gen_decode_bucket(default: int = 16) -> int:

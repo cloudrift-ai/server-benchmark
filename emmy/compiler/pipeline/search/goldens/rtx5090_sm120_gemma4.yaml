@@ -3254,15 +3254,21 @@ configs:
 
   # ---- M=1 transposed (serving-layout) consumer rows: the b<n>t band at the k-major
   # orientation the twins deploy (plain matmul, no trans_b — replay benches this layout).
+  # 2026-07-24 in-graph re-tune (decode-parity WS1.1): gate_up flips to the BARE b256t (one
+  # kernel, isolated tie with g16k at 142.6 vs 142.5 — the finalize launch is free to drop);
+  # down flips g32k->g16k (70.8 vs 72.7). e2e verdict: 256 c=1 TPOT 17.91->17.89, 4K 18.98->18.92.
+  # PLACE@fin=fuse stamps on the five split rows were A/B'd the same day and REFUTED e2e
+  # (256 c=1 +0.37 ms, 4K +0.41 — the inline folds cost more than the finalize launches on
+  # these latency-bound consumers); the mirrors stay enumerable for other sites/cards.
   - kernel: matmul
     name: gemma4_12b.gate_up_cat.m1.t
     M: 1
     N: 30720
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: '', REDUCE: 'g16k/b256t', RASTER: '', STAGE: '', WSPEC: ''}
-    emmy_us: 142.4
-    cublas_us: 146.1
+    knobs: {TILE: '', REDUCE: 'b256t', RASTER: '', STAGE: '', WSPEC: ''}
+    emmy_us: 142.6
+    cublas_us: 145.4
   - kernel: matmul
     name: gemma4_12b.qkv_cat.m1.t
     M: 1
@@ -3287,9 +3293,9 @@ configs:
     N: 3840
     K: 15360
     dtype: 'fp16'
-    knobs: {TILE: '', REDUCE: 'g32k/b256t', RASTER: '', STAGE: '', WSPEC: ''}
-    emmy_us: 75.7
-    cublas_us: 80.0
+    knobs: {TILE: '', REDUCE: 'g16k/b256t', RASTER: '', STAGE: '', WSPEC: ''}
+    emmy_us: 70.8
+    cublas_us: 76.1
   - kernel: matmul
     name: gemma4_12b.o_proj.m1.t
     M: 1

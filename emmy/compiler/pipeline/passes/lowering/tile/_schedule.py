@@ -55,6 +55,7 @@ from emmy.compiler.pipeline.pipeline import LoweringError
 from emmy.compiler.pipeline.search.space import (
     F16_MMA_F32_ACC,
     MAX_BLOCK_THREADS,
+    PLACE,
     RASTER,
     REDUCE,
     STAGE,
@@ -1482,6 +1483,8 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         # adds no branching to the tree.
         if "PLACE@cone" in knobs:
             rows = [{**r, "PLACE@cone": knobs["PLACE@cone"]} for r in rows]
+            if "PLACE@cstat" in knobs:  # the cut's bridged-statistic sibling — same threading rule
+                rows = [{**r, "PLACE@cstat": knobs["PLACE@cstat"]} for r in rows]
             if knobs["PLACE@cone"] == "cut":
                 # A cut row's own schedule is DISCARDED — ``020_cut_edge`` emits un-mapped LoopOps
                 # and each half re-enters ``010`` for its own fork, its own tile and its own golden.
@@ -1494,6 +1497,23 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
                 # kernel in place. Keep the serial spelling; the CONSUMER half picks its own
                 # split-K from its own golden (``mlp_down.m256`` records ``g4k``).
                 rows = [r for r in rows if not _is_splitk_spec(r.get(_at(REDUCE, kaxis), ""))]
+        # The deferred-finalize placement (``PLACE@fin``, realized by ``032_fuse_finalize``): an
+        # authoritative pin threads onto every row; otherwise every DEFERRED-KERNEL split row
+        # (``g<w>k`` — the partial + finalize pair) gains a ``fuse``-stamped mirror sibling — the
+        # sink-offer idiom: evidence-only (withheld from the model fallback), so an unseeded shape
+        # never fuses cold, and a golden spelling ``{REDUCE: g8k/b128t, PLACE@fin: fuse}`` has a
+        # row to match (``_golden_matches_row`` refuses a PLACE-bearing golden against rows that
+        # never offered the decision). Atomic splits (``g<w>a``) have no finalize kernel — no mirror.
+        fin_pin = PLACE.narrow_at("fin")
+        if fin_pin in ("cut", "fuse"):
+            rows = [{**r, "PLACE@fin": fin_pin} for r in rows]
+        else:
+
+            def _deferred_split(r: dict) -> bool:
+                spec = r.get(_at(REDUCE, kaxis), "")
+                return _is_splitk_spec(spec) and ReducePlan.parse(spec).finalize == "kernel"
+
+            rows = [*rows, *({**r, "PLACE@fin": "fuse"} for r in rows if _deferred_split(r))]
         if not rows:
             # A computed-A (fused-cone) contraction with no legal warp row (fp32, no atoms, bad
             # geometry, over-budget slabs) contributes nothing — the recognizer's ``Map``-form
@@ -1511,6 +1531,10 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
             # ``evidence_pick`` never joined the measured -O3 rows, and greedy shipped the online
             # model's unbenched per-cell extrapolation (the 2026-07-07 5090 gate's 330x fp16 miss).
             op_knobs = {**knobs, **{k: v for k, v in row.items() if k.startswith("S_")}}
+            if "PLACE@fin" in row:
+                # The finalize placement must reach the op: ``030_split_reduce`` threads it onto
+                # the finalize tile (``_fin_knobs``) where ``032_fuse_finalize`` reads the stamp.
+                op_knobs["PLACE@fin"] = row["PLACE@fin"]
             # The rasterization codec rides op-level knobs (kernel-scoped launch-order metadata,
             # not a per-node schedule structure) — the kernel materializer's ``grid_tile`` seal
             # reads it back off the TileOp and stamps the grouped decode on the ``Tile``.
@@ -1531,8 +1555,15 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
 
         # The worker split (``WSPEC``, bare/root-global) is the fourth level, under the pipeline it
         # splits — option-0 ``""`` is uniform SIMT. The launch-order codec (``RASTER``, also bare —
-        # one grid, one order) is the fifth — option-0 ``""`` is the flat N-fastest raster.
-        levels = [_level(_at(k, kaxis)) for k in (TILE, STAGE, REDUCE)] + [_level(WSPEC.name), _level(RASTER.name)]
+        # one grid, one order) is the fifth — option-0 ``""`` is the flat N-fastest raster. The
+        # finalize placement (``PLACE@fin``) is the sixth: a ``fuse``-stamped mirror row is
+        # schedule-identical to its base on every codec level, so without its own level the two
+        # collapse into one leaf and the mirror (and any golden spelling it) is unreachable.
+        levels = [_level(_at(k, kaxis)) for k in (TILE, STAGE, REDUCE)] + [
+            _level(WSPEC.name),
+            _level(RASTER.name),
+            _level("PLACE@fin"),
+        ]
         return build_fork_tree(params=rows, levels=levels, materialize=_materialize)
     # A TWISTED streaming reduce whose per-step partial is a contraction pair (the flash tree,
     # :func:`_twisted_pair`) offers its structurally-different schedules as ONE prior-ranked fork:
@@ -1606,7 +1637,20 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         # recognition nodifies it to a computed-A Contraction fork sibling, ``010_recognize``'s
         # ``bind_prologue_contraction`` merge, so it arrives at this dispatch as CONTRACTION.)
     specs = _reduce_specs(tile, place)
-    return [_option(tile, place, spec, name, knobs) for spec in specs]
+    # The deferred-finalize placement mirror on the monoid / demoted-PLANAR reduce tier — the
+    # same offer the contraction arm makes on its split rows (see the ``PLACE@fin`` block above):
+    # a pin threads onto every option; unpinned, each ``g<w>k`` deferred-kernel spec gains a
+    # ``fuse``-stamped sibling (evidence-only; the M=1 decode matvecs fork here).
+    fin_pin = PLACE.narrow_at("fin")
+    if fin_pin in ("cut", "fuse"):
+        return [_option(tile, place, spec, name, {**knobs, "PLACE@fin": fin_pin}) for spec in specs]
+    out = [_option(tile, place, spec, name, knobs) for spec in specs]
+    out += [
+        _option(tile, place, spec, name, {**knobs, "PLACE@fin": "fuse"})
+        for spec in specs
+        if _is_splitk_spec(spec) and ReducePlan.parse(spec).finalize == "kernel"
+    ]
+    return out
 
 
 _CHAIN_MAX_D = 64  # register-vector budget: the chain holds the whole output row per thread

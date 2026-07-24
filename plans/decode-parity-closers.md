@@ -1,5 +1,33 @@
 # Decode parity closers — the last ~1.6 ms to stock TPOT (planned 2026-07-24)
 
+## STATUS (2026-07-24 session, updated live)
+
+- **WS1.1 DONE**: isolated sweep (`_tune/ws1-m1/*.json`) → gate_up bare ``b256t`` ties the g16k split
+  with ONE kernel (142.6 vs 142.5 µs); down ``g16k`` 70.8 beats g32k 72.7; other edges keep splits.
+  candB serving A/B: 256 c=1 **17.89** (was 17.91), 4K c=1 **18.92** (was 18.98) — tie-to-better, rows
+  recorded. Lesson: −1 launch/layer sits AT the c=1 noise band; the visible win must come from WS1.2's
+  −3/layer.
+- **WS1.2 compiler LANDED** (this branch): ``PLACE@fin`` element + ``032_fuse_finalize`` realizer +
+  fork mirrors (contraction arm AND the monoid/demoted-PLANAR arm the m1 matvecs actually fork in) +
+  fork-tree ``PLACE@fin`` level + greedy withholding + vouching clause + 030 ``_fin_knobs`` threading +
+  a pre-existing 030 ``fin_proj[-1].defines()`` IndexError fix. m1 twins off-GPU: pre1 10→9, post1
+  9→7 launches; audit 5090 MATCH 129 / DRIFT 0. Five m1 ``.t`` rows stamped ``PLACE@fin: 'fuse'``.
+  candC serving A/B (the e2e verdict) in flight.
+- **WS1.2 e2e VERDICT: REFUTED at m1/5090.** candC (five ``PLACE@fin: fuse`` stamps): 256 c=1 TPOT
+  17.89→**18.26**, 4K 18.92→**19.33** — the inline folds (per-element ×w f32 reads in the dup views,
+  the w×3840 serial folds in the grid-1 norms) cost ~+0.4 ms against launch savings that candB
+  already showed are ≈0. Stamps reverted; the machinery stays (evidence-only, default ``cut``) for
+  other sites/cards.
+- **WS2 stat+cone (``PLACE@cstat``) LANDED as machinery, NOT stamped**: isolated pinned A/B on the
+  m1 norm_qkv cut — merged producer 4.1 µs vs split stat 1.8 + cone 0.7; +1.6 µs of work to save one
+  ~0.5 µs launch. Same anti-win class; recorded, not deployed. The launch-count theory of the m1
+  residual is now refuted three independent ways (candB, candC, cstat) — consistent with the
+  WS1+WS2 2026-07-22 "launches halved, TPOT flat" finding at m32. The credible remaining levers:
+  WS3 (attn_out seam copy — removes work, adds none) and per-edge in-graph width re-picks off a
+  cold nsys trace (isolated rows are L2-warm-biased).
+- **4090 box down**: driver RmInitAdapter 0x22:0x56 — needs a reboot (blocked this session); the 4090
+  mirror (sweep + stamps + audit) is deferred until the box is back.
+
 ## Where the m1 tier landed
 
 The transposed-matvec realizer took the M=1 gemv tier from catastrophic (110 ms) to bucket-parity-plus:

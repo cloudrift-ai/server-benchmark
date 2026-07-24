@@ -75,7 +75,7 @@ def capture_twin_graphs(
     # The 2026-07-23 lane regressions (m64 decode TPOT 74 ms, m4096 TTFT +260 ms) were
     # merged-key coverage gaps INVISIBLE to the audit precisely because these widths were
     # missing here — MATCH 74/0/0 while serving cold-resolved.
-    widths = [decode_bucket, 64, prefill_bucket, 4096]
+    widths = [1, decode_bucket, 64, prefill_bucket, 4096]  # 1 = the EMMY_GEN_M1_TIER gemv twins
     buckets: list[tuple[str, int | None]] = [(str(m), m) for m in sorted({w for w in widths if w})]
     if symbolic:
         buckets.append(("-sym", None))

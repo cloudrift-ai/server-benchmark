@@ -511,7 +511,10 @@ def _reduce_candidates(kernel, place, plan: TilePlan, probe: Contraction | None 
                 # (is B actually k-major?) is measurement's job, not a gate. A composite
                 # ``g<w>k/b<n>t`` (the deployable long-K form) additionally needs the split
                 # divisibility the plain split moves check.
-                inner = place.free[-1] if place.free else None
+                # The innermost NON-UNIT free axis — the m1 recognizer's synthesized
+                # ``_um`` unit axis can sit innermost (extent 1), and it is not the axis
+                # the transposed emitter sweeps.
+                inner = next((a for a in reversed(place.free) if not (a.extent.is_static and a.extent.as_static() == 1)), None)
                 if not (
                     probe is not None
                     and p.coop % 32 == 0

@@ -59,6 +59,21 @@ round-trips green). The emitter formulation that minimizes surgery in ``_factor.
 - **Store**: guard on ``k_co == 0``; each ``n_lane`` thread stores its own cell (the reconstructed
   ``a0`` embeds the lane).
 
+### OPEN (2026-07-24 03:50): the .t rows don't realize on the IN-MODEL m1 consumers
+
+Snippet-pinned bt kernels hit the floor on all four shapes and both cards (rows recorded), and the
+e2e A/B proved the deploy chain works EXCEPT row selection: the in-model cut consumers cold-resolve
+(c=1 TPOT back at ~110 ms). The widened audit (widths now include 1) shows ``DRIFT: <row> no longer
+realize(s)`` for the ``.t`` rows on the m1 twin forms. First fix attempt (select the innermost
+NON-UNIT free axis in the enumeration gate + emitter — the m1 recognizer's ``_um`` unit axis sits
+innermost in-model) did NOT clear the DRIFT. Next debug step: replicate the audit's enumeration on
+the in-model m1 consumer node and print the offered REDUCE rows — establish which gate condition
+declines (candidates: ``probe`` None on the re-entered consumer tier, ``plan.is_tiled`` for the
+scalar spec, ``place.free`` shape at M=1, or the needs_split branch ordering in
+``_reduce_candidates``). The interleaved m1 ``.lin`` rows were REMOVED (they poisoned the layout-
+blind pick), so until the ``.t`` realizability lands, the m1 tier cold-resolves — keep
+``EMMY_GEN_M1_TIER`` OFF.
+
 ### Work items
 
 1. `REDUCE` codec: parse/print `bt<N>`; enumeration offers it only when the B-stride condition holds

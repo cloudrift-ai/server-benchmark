@@ -427,9 +427,9 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
             # ``k_co`` between them), so B loads coalesce across lanes. The emitted body's
             # output-var references were σ-substituted to ``blk·32 + n_lane`` inside.
             state, fold, close, lanes_axes = _tile_reduce_axis_transposed(op, plan, ctx, tail, out_val)
-            out_ax = grid[-1]
+            out_ax = next(a for a in reversed(grid) if not (a.extent.is_static and a.extent.as_static() == 1))
             blk = Axis(name=f"{out_ax.name}_blk", extent=out_ax.extent.ceil_div(32), source_axis=out_ax)
-            lead = (*grid[:-1], blk)
+            lead = tuple(blk if a.name == out_ax.name else a for a in grid)
             t = replace(t, axes=lanes_axes)
             bt = plan.coop
         else:
@@ -801,7 +801,7 @@ def _tile_reduce_axis_transposed(
     k_ways = coop // lanes_n
     assert coop % lanes_n == 0 and k_ways >= 1, f"b{coop}t needs a multiple of {lanes_n}"
     assert not (ctx.stage is not None and ctx.stage.smem), "transposed coop cannot ride shared-row staging"
-    out_ax = grid[-1]
+    out_ax = next(a for a in reversed(grid) if not (a.extent.is_static and a.extent.as_static() == 1))
 
     (rloop,) = _emit(op, ctx).body
     carrier = rloop.carrier

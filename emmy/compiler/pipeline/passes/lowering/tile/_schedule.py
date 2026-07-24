@@ -494,8 +494,24 @@ def _reduce_candidates(kernel, place, plan: TilePlan, probe: Contraction | None 
     if k is not None and not plan.is_tiled:
         for move in coop_reduce_moves():
             p = ReducePlan.parse(move)
-            if p.coop <= k and p.reg <= k:
-                out.append(move)
+            if not (p.coop <= k and p.reg <= k):
+                continue
+            if p.coop_transposed:
+                # The ``b<n>t`` lane swap needs the structure its emitter assumes: a plain
+                # CONTRACTION per-cell tier (``probe`` built — the fused monoid rows ride
+                # shared-row staging the transposed layout can't), a static innermost free
+                # axis divisible by the 32-lane sweep, and a 32-multiple coop. Layout FIT
+                # (is B actually k-major?) is measurement's job, not a gate.
+                inner = place.free[-1] if place.free else None
+                if not (
+                    probe is not None
+                    and p.coop % 32 == 0
+                    and inner is not None
+                    and inner.extent.is_static
+                    and inner.extent.as_static() % 32 == 0
+                ):
+                    continue
+            out.append(move)
     free = prod(_hint_extent(a) for a in place.free) if place.free else 1
     # A computed-A (fused-cone) contraction splits over K via the REDUNDANT-STATISTIC form: the
     # k-invariant stat prologue spans the whole row and stays full-row in every partition (each

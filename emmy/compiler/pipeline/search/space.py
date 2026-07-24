@@ -490,5 +490,9 @@ def coop_reduce_moves() -> list[str]:
     the reduce goldens stay reachable. The wide ``b64``–``b512`` folds are the memory-bound
     normalizer band: a wide-K softmax / rms_norm saturates bandwidth only with a full-block coop
     row (``softmax.k2048`` wants ``b512`` — 2.6× over ``b32``). The scheduler's ``_coop_reduce_spec``
-    declines a ``b<n>`` wider than the row has work for, so enumerating them is safe on small K."""
-    return ["b4", "b8", "b16", "b32", "b64", "b128", "b256", "b512", "r2", "r4", "r2/b4"]
+    declines a ``b<n>`` wider than the row has work for, so enumerating them is safe on small K.
+    The ``b<n>t`` transposed band is the k-major-B matvec partition (warp lanes sweep the output
+    axis — the M=1 gemv tier's coalescing fix); ``_reduce_candidates`` gates it structurally
+    (plain contraction, 32-divisible inner free axis) and MEASUREMENT decides the layout — a
+    row-major-B shape simply benches it slower."""
+    return ["b4", "b8", "b16", "b32", "b64", "b128", "b256", "b512", "r2", "r4", "r2/b4", "b32t", "b64t", "b128t", "b256t"]

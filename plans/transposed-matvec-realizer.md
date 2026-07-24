@@ -66,11 +66,14 @@ e2e A/B proved the deploy chain works EXCEPT row selection: the in-model cut con
 (c=1 TPOT back at ~110 ms). The widened audit (widths now include 1) shows ``DRIFT: <row> no longer
 realize(s)`` for the ``.t`` rows on the m1 twin forms. First fix attempt (select the innermost
 NON-UNIT free axis in the enumeration gate + emitter — the m1 recognizer's ``_um`` unit axis sits
-innermost in-model) did NOT clear the DRIFT. Next debug step: replicate the audit's enumeration on
-the in-model m1 consumer node and print the offered REDUCE rows — establish which gate condition
-declines (candidates: ``probe`` None on the re-entered consumer tier, ``plan.is_tiled`` for the
-scalar spec, ``place.free`` shape at M=1, or the needs_split branch ordering in
-``_reduce_candidates``). The interleaved m1 ``.lin`` rows were REMOVED (they poisoned the layout-
+innermost in-model) did NOT clear the DRIFT. RESOLVED to the next layer by the fork probe
+(scratchpad/probe_bt_inmodel.py): the m1 consumer fork offers ONLY ``['', g2a..g8k]`` — no
+coop/bt rows. The shape is WARP-classified (its keys say ``is_warp=True``), so every candidate
+plan ``is_tiled`` and ``_reduce_candidates``' coop branch (where the bt band lives) never runs;
+the snippet benches only ever reached bt via authoritative pins. The fix: for a warp-eligible
+shape whose scalar tier is enumerated (M=1 has no real warp win — 1-row mma tiles), offer the
+bt band on the SCALAR rows (extend the tiles/plan pairing so the coop branch runs for the
+scalar spec on warp-eligible nodes), then re-audit → DRIFT must clear → rerun the parity A/B. The interleaved m1 ``.lin`` rows were REMOVED (they poisoned the layout-
 blind pick), so until the ``.t`` realizability lands, the m1 tier cold-resolves — keep
 ``EMMY_GEN_M1_TIER`` OFF.
 

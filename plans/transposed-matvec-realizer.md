@@ -41,6 +41,24 @@ Why not transpose-fold at bind/capture instead: the same weight serves the stage
 k-major layout PR #406 tuned for — a second row-major copy doubles 24 GB of resident weights, and an
 in-place layout flip regresses the m32/m4096 tiers. The realizer fixes the one tier that is wrong.
 
+### Emitter design (settled 2026-07-24, codec already landed)
+
+The ``b<n>t`` codec is in (`ReduceStage.transposed`, ``ReducePlan.coop_transposed``, suffix render fix;
+round-trips green). The emitter formulation that minimizes surgery in ``_factor.py``:
+
+- **Two lane axes instead of one**: ``n_lane`` (extent 32, innermost — the warp sweeping the OUTPUT
+  axis) and ``k_co`` (extent ``coop/32``, outer — the k partition). ``bt32`` degenerates to pure
+  n-parallel (no combine); require coop a multiple of 32.
+- **No body index rewrites**: the Tile axes tuple becomes ``(..., out_blk, k_co, n_lane)`` with the
+  output grid axis shrunk ×32, and ONE injected ``Assign`` reconstructs the original output var
+  (``a0 = out_blk·32 + n_lane``) — the emitted body keeps referencing ``a0`` unchanged.
+- **Fold loop**: strided by ``k_ways·reg`` from ``Var(k_co)`` (same ``_replicate`` machinery).
+- **Combine**: never SHFL (adjacent lanes hold DIFFERENT outputs) — a forced smem tree with a
+  segment-indexed slab: extent ``k_ways·32``, write at ``k_co·32 + n_lane``, ``TreeHalve`` halving
+  ``k_co`` at fixed ``n_lane`` (a small ``inner=(var, scale)`` extension to the ``TreeHalve`` stmt).
+- **Store**: guard on ``k_co == 0``; each ``n_lane`` thread stores its own cell (the reconstructed
+  ``a0`` embeds the lane).
+
 ### Work items
 
 1. `REDUCE` codec: parse/print `bt<N>`; enumeration offers it only when the B-stride condition holds

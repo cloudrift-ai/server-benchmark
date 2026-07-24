@@ -2451,3 +2451,41 @@ configs:
     knobs: {PLACE@cone: 'cut'}
     emmy_us: 3632.1
     cublas_us: 3595.0
+  # ---- M=1 transposed (k-major serving layout) consumer rows — the b<n>t band mirror
+  # (2026-07-24; the interleaved b256 ran 813 us on the transposed down vs bt's 129).
+  - kernel: matmul
+    name: gemma4_12b.gate_up_cat.m1.t
+    M: 1
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: '', REDUCE: 'g16k/b256t', RASTER: '', STAGE: '', WSPEC: ''}
+    emmy_us: 258.4
+    cublas_us: 264.2
+  - kernel: matmul
+    name: gemma4_12b.qkv_cat.m1.t
+    M: 1
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: '', REDUCE: 'g8k/b128t', RASTER: '', STAGE: '', WSPEC: ''}
+    emmy_us: 17.0
+    cublas_us: 74.2
+  - kernel: matmul
+    name: gemma4_12b.qk_global_cat.m1.t
+    M: 1
+    N: 8704
+    K: 3840
+    dtype: 'fp16'
+    knobs: {TILE: '', REDUCE: 'g8k/b128t', RASTER: '', STAGE: '', WSPEC: ''}
+    emmy_us: 17.3
+    cublas_us: 78.8
+  - kernel: matmul
+    name: gemma4_12b.down_proj.m1.t
+    M: 1
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    knobs: {TILE: '', REDUCE: 'g16k/b256t', RASTER: '', STAGE: '', WSPEC: ''}
+    emmy_us: 129.0
+    cublas_us: 138.2

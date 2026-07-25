@@ -79,6 +79,12 @@ After the workstreams settle, ONE full measurement pass and ONE article update:
 1. Re-bench every affected article cell on the settled rev, both emmy lanes, fresh packs — the
    six e2e points (small_c1 / head_c1 ×3, head_c4, head_c8, rag_c4, small_c64 on its bucket-64
    boot), including the fm c=4 cell the dynM round never measured.
+   **c=64 protocol change**: the TTFT half of the cell is re-measured as a SINGLE 64-request wave
+   (``--num-prompts 64 --max-concurrency 64``, all three lanes identically) — at np=256 the median
+   TTFT lands on wave-2/3 requests and measures completion dynamics (TPOT×256 + admission waves;
+   the per-engine mean/median inversions prove it), not prefill. np=256 stays for the tok/s and
+   TPOT halves (steady-state saturation). The footnote then reads "single 64-request wave" instead
+   of the queue-domination caveat.
 2. Re-run the per-kernel golden-set catalog (std + fm, `bench_golden_set.py`) and regenerate the
    article chart assets (`render_golden_bench_chart.py` → the per_kernel HTML/CSV under
    packages/blog/public/blog/optimizing-gemma-4-12b-rtx/) + the geomean table.

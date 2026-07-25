@@ -175,7 +175,8 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   decode twin; sizes above it capture the device-resident symbolic programs — both paths are capture-validated,
   `test_gen_capture_gpu` / the two-size live-replay test; over-bucket capture was worth +10.6% req/s at c=64,
   and a decode bucket matched to the concurrency beats riding the symbolic captures — the bucket-64 golden set
-  took c=64 TPOT 35.4 → 22.5 ms). Under the
+  took c=64 TPOT 35.4 → 22.5 ms, and the bucket-8 set (m8 goldens, 2026-07-25) took c=4 TPOT 19.6 → 18.9 and
+  c=8 21.4 → 20.6 on the same per-lane-knob rule). Under the
   outer capture,
   `_Program.run_device` detects `torch.cuda.is_current_stream_capturing()` and issues the raw launch sequence
   (`run_once`) instead of its own graph machinery — nested stream capture and graph launch are both illegal in a

@@ -74,8 +74,32 @@ EXPECTED_GAPS = {
         ShapeKey(free_prod=8192, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
         ShapeKey(free_prod=8192, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=8704, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
+        # 2026-07-25: the m8 (bucket-8 decode) width joined the audit — its per-head qk-norm rms
+        # aux keys (M=8 × heads × head_dim, the same greedy-near-optimal class as the m32/m64
+        # entries above; the m8 matmul/fused/glue forks are all golden-covered).
+        ShapeKey(free_prod=16384, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=32768, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=65536, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
     },
     "NVIDIA GeForce RTX 4090": {
+        # 2026-07-25: the m8 (bucket-8 decode) width joined the audit. The 5090 seeded its m8
+        # golden set the same day (WS2, serving-next); the 4090's is deferred with the mirror
+        # re-tune (box lost its GPU at the PCI level), so EVERY m8 fork is uncovered there —
+        # the merged matmul/fused forms and the per-head/aux rms sweeps below. Burn down by
+        # mirroring the m8 seeding recipe (_tune/decode-m8/) once a 4090 is back.
+        ShapeKey(free_prod=16384, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=245760, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
+        ShapeKey(free_prod=30720, reduce_max=15360, is_warp=True, is_dyn=False, kind="fused", free_max=3840),
+        ShapeKey(free_prod=30720, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=30720, reduce_max=4096, is_warp=True, is_dyn=False, kind="", free_max=3840),
+        ShapeKey(free_prod=30720, reduce_max=8192, is_warp=True, is_dyn=False, kind="", free_max=3840),
+        ShapeKey(free_prod=32768, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=4096, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=65536, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
+        ShapeKey(free_prod=65536, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
+        ShapeKey(free_prod=65536, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=69632, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
+        ShapeKey(free_prod=69632, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
         ShapeKey(free_prod=15728640, reduce_max=0, is_warp=False, is_dyn=False, kind="", free_max=4096),
         ShapeKey(free_prod=245760, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=262144, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
@@ -104,6 +128,26 @@ EXPECTED_GAPS = {
         ShapeKey(free_prod=8192, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=8704, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
         ShapeKey(free_prod=8704, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
+    },
+}
+
+# Known-DRIFT (golden, twin) pairs per card — the same exact-match ratchet discipline as
+# EXPECTED_GAPS: an entry may only be added deliberately in review, and the test fails until a
+# fixed one is deleted. Unlike a gap, an expected drift asserts the recorded golden and the
+# audit twin genuinely disagree for a KNOWN reason that is not a serving regression.
+EXPECTED_DRIFTS: dict[str, set[tuple[str, str]]] = {
+    "NVIDIA GeForce RTX 5090": set(),
+    "NVIDIA GeForce RTX 4090": {
+        # The WS5 layout gate stopped offering the transposed ``b<n>t`` band on a K-contiguous B
+        # (space.py::coop_reduce_moves), so the m1 gemv-tier down_proj golden no longer "matches"
+        # on the F.linear-layout arm the 4090's cold prior happens to walk in the standard-forward
+        # twins. That pre-gate MATCH was the cold-poison itself — ``g16k/b256t`` lane-sweeps
+        # uncoalesced on that arm (the 5090's prior walks the transposed arm, where the same
+        # golden still MATCHes). The row still describes the REAL m1 serving graph (the runner's
+        # materialized-transpose weights); burn this down with the deferred 4090 mirror re-tune —
+        # either greedy lands the transposed arm there too, or the row gets re-recorded.
+        ("gemma4_12b.down_proj.m1.t", "post1"),
+        ("gemma4_12b.down_proj.m1.t", "post1-global"),
     },
 }
 
@@ -145,12 +189,19 @@ def test_gemma4_goldens_deploy_in_serving_twins(twins, gpu_name, cap):
     assert not fails, f"serving twins failed to compile: {[(n, r['error']) for n, r in fails]}"
 
     drifts = [(name, r) for name, records in res.items() for r in records if r["verdict"] == "DRIFT"]
-    assert not drifts, (
-        f"{len(drifts)} golden(s) no longer deploy in the serving twins of {gpu_name}:\n  "
-        + "\n  ".join(f"{name} {r['node']}: {r['golden']}  [{r['key']}]" for name, r in drifts)
+    drift_pairs = {(r["golden"], name) for name, r in drifts}
+    new_drifts = drift_pairs - EXPECTED_DRIFTS[gpu_name]
+    assert not new_drifts, (
+        f"{len(new_drifts)} golden(s) no longer deploy in the serving twins of {gpu_name}:\n  "
+        + "\n  ".join(f"{name} {r['node']}: {r['golden']}  [{r['key']}]" for name, r in drifts if (r["golden"], name) in new_drifts)
         + "\nEither a compiler graph/enumeration change re-keyed the fork (fix the drift or re-record the golden), "
         "or a transformers bump changed the traced model — the twins track the installed modeling code, exactly "
         "as serving does."
+    )
+    fixed_drifts = EXPECTED_DRIFTS[gpu_name] - drift_pairs
+    assert not fixed_drifts, (
+        f"expected drift(s) on {gpu_name} no longer occur — delete their EXPECTED_DRIFTS lines so the "
+        f"ratchet tightens: {sorted(fixed_drifts)}"
     )
 
     gaps = gap_keys(res)

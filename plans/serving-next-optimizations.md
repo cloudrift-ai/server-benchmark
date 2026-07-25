@@ -41,6 +41,22 @@ cold path (m8 shapes had no goldens → TPOT 36); the honest experiment needs se
 3. Only if the bucket knob wins but T=1..3 tails still hurt: an m4-tier routed like the m1 tier
    (T ≤ 4 → static M=4 twins; the alias generalizes — `post_attn_backing` is width-agnostic).
 
+**STATUS (2026-07-25 14:25): seeded + std A/B WIN.** 25 m8 rows in `rtx5090_sm120_gemma4.yaml`
+(manual pinned --ab, n=3, fm superset enumeration; the m32/m64 w1x8/f2x2 family holds at M=8 —
+gate_up k8-serial 142.7, down g4a 73.2, lm_head k8/p1 1193; CUT wins all four fused forms, the
+m1/m64 verdict transfers: norm_qkv 20.6, norm_qk_global 21.0, norm_gate_up 144.7, down_fused 74.1).
+Twin deploys verified: pre8 94.6→28.4 µs, post8 548.6→254.0, globals 30.7/272.8 — greedy lands on
+every seeded row. Bucket-8 serving A/B (std lane, fresh pack, article protocol): head_c4 TPOT
+19.56→**18.94**, TTFT 1815→1803, tok/s 200.1→206.5; head_c8 TPOT 21.38→**20.75**, TTFT 2428→2421,
+tok/s 364.2→374.9 — both cells win, TTFT not worse. fm lane: head_c4 TPOT 19.6→**18.89**, TTFT
+1405→**1371**, tok/s 208.2; head_c8 TPOT 21.3→**20.59**, TTFT 1853→1829, tok/s 368.5→380.3 — both
+lanes, both cells. **Bucket-8 ADOPTED as the c=4/c=8 per-lane knob** (like c=64's bucket 64); width
+8 added to the audit twins (`capture_twin_graphs`). Step 3 (m4 tier) not needed — c=4 steady state
+is T=4, inside bucket 8. Method incident worth keeping: an INLINE `torch.randn` weight in a `--ab`
+snippet traces into the measured graph (67M-CTA scalar monster; its bench worker OOM'd the box and
+the OOM took the whole session scope down) — weights must be variable-bound; sweeps now run under
+`systemd-run --scope -p MemoryMax=45G`.
+
 ## WS3 — per-kernel bench-table losers (the catalog rerun ranks them)
 
 From the pre-rerun table (std 72 / fm 48 losers >5% vs torch.compile); the 2026-07-25 rounds already
@@ -93,6 +109,32 @@ per-shape golden rows; the structural fix candidates, in preference order:
    plan's featurizer item that never landed), so cross-orientation rows stop tying.
 Verify with the catalog: no case may cold-resolve >2x off its recorded row on either orientation.
 
+**LANDED (2026-07-25, option 1 as an ENUMERATION gate).** The bands are layout-gated at the single
+choke point every tier resolves through (goldens/evidence pick among OFFERED rows): `b<n>t` only on
+k-major B, plain `b<n>` only on K-contiguous B at the matvec tier — both arms (`_reduce_candidates`
+via `Contraction.b_trans`; `_reduce_specs` via a new `_matvec_b_kstride` helper that distinguishes
+the demoted matvec's vector+matrix operand pair from a plain rowwise reduce, so softmax/rms bands
+stay ungated). Env pins bypass (exploration). Verified: `gate_up_cat.m64.lin` cold greedy 16.9 ms →
+**234.4 µs** (deploys its recorded row); m1 `.t` snippet cold now picks plain `b128` at 14.0 µs
+(correct for the snippet's view layout — ties the recorded 14.1). Audit fallout, understood and
+gated: the 4090's `down_proj.m1.t` audit-MATCH was the poison itself (bt "matching" on the
+F.linear-layout arm its cold prior walks) — now an EXPECTED_DRIFTS entry in the drift gate with the
+mirror-re-tune burn-down note; 5090 DRIFT 0, drift-gate green both cards.
+
+## WS3 status (2026-07-25)
+
+- `gate_up_cat.m64.lin` 109x case: **fixed by WS5** (above).
+- `__zp` size threshold: **LANDED** — `_MAX_DELEGATED_WORDS = 16384` (64 KB; measured break-even
+  ≈ 90 KB from the 5090's ~70 B/ns one-CTA zero rate vs the ~1.3 µs MEMSET node) in
+  `005_delegate_zero_init`, docstring bullet + two-fixture unit tests (small chain delegates,
+  240 KB chain refuses). e2e verdict rides the FINAL consolidated pass (c=64 cell).
+- µs-class losers (norm_kv_proj*.m32, rms_norm.k3840.m256): in-graph share below the 0.1 ms/step
+  bar in the existing c=64/c=1 traces — skipped per plan.
+- `mlp_geglu.m64` fused-vs-cut and the m1 `.lin` catalog warts: catalog-only keys (serving rides
+  the merged/`.t` forms); re-ranked by the FINAL catalog rerun.
+- `attention.hd512` (fm 2.6x) and std m4096 f32-acc: research-class / structural — documented in
+  the article caption, not chased.
+
 ## WS6 — c=4 TTFT scheduling structure (beyond goldens; the last stock TTFT win)
 
 WS1's closure leaves fm c=4 TTFT (1405-class vs stock 1084) explained by step SHAPE, not kernels:
@@ -101,6 +143,18 @@ vLLM-side step-shape work (admission/chunk-boundary behavior seen from the plugi
 round — investigate only after WS2 lands (decode drag is a confounder in every c=4 TTFT
 measurement). Instruments: the classified trace per step-type + vLLM's scheduler counters.
 Explicitly out of scope for golden tuning; may conclude "documented residual".
+
+**CLOSED — DOCUMENTED RESIDUAL (2026-07-25, `_tune/nsys/c4_b8fm` trace, classified vs the b8
+pack).** Post-WS2 fm c=4 TTFT is 1371 vs stock's 1084 (gap 287 ms, was 321). The trace shows the
+structural shape: even the prefill-burst window is 57-62% decode-twin kernel time — a queued
+prompt's chunks wait behind decode-heavy mixed steps, and the plugin's mixed step runs the
+static-4096 prefill twin AND the bucket-8 decode twin as SEPARATE passes (two weight streams per
+step) where stock composes one fused varlen batch. Removing that means owning vLLM's batch
+composition (the fork-not-plugin boundary the article already documents at the attention seam).
+Bucket-8's TTFT gain (1405→1371) is the decode-drag share of exactly this structure — consistent
+with WS2's theory. Side finding: the once-per-step 1.19 ms `cutlass` kernel is vLLM's own
+`compute_logits` lm_head (262k vocab, 2.0 GB of weights = its stream floor; identical in the stock
+lane) — the emmy `lm_head.m8` golden is catalog-only for the gen path, and there is no lever here.
 
 ## Per-WS verification
 

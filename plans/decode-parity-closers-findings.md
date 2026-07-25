@@ -12,6 +12,24 @@ fm TTFT wins hold (475/1405/1853/1996), c=64 and c=8 throughput unchanged. The e
 is NOT reachable by launch-count work; the residual is stock's leaner M=1 step shape + the shared
 sampler stall. 4090 mirror blocked: the box lost its GPU at the PCI level (host passthrough fault).
 
+## POST-PR ROUNDS (2026-07-25): the trace-driven golden method
+
+Two further rounds, both found by per-kernel nsys of the REAL serving graph (isolated benches are
+L2-warm-biased for any weight under the 5090's 96 MB L2 — the method note of this whole plan):
+
+- **rms_norm M=1 → b512**: the m1 matvecs all run at their cold weight-stream floors in-graph; the
+  fat was the two per-layer residual+norm sweeps (13.2+12.6 µs cold-picked = 1.24 ms/step). One row
+  recovered 0.73 ms/step — 256 c=1 TPOT 17.10 / 4K 18.15 (stock 16.34/17.40).
+- **Merged dynM goldens**: the c=64 trace put 21% of wall on the SYMBOLIC twins (mixed
+  chunked-prefill steps); the fused dyn forks now CUT with staged consumers (fm consumer rows
+  1.3-1.5× over eager). c=64: std 1124.7 / fm 1199.6 tok/s — both lanes beat stock's 1094.2;
+  TPOT 31.7→30.2/29.2. c=4/c=8 flat (small-T symbolic exposure only).
+- Negatives: bucket-8 decode for c=4 (cold m8 shapes, TPOT 36); the c=4 TTFT excess is
+  scheduling-structure (the 2-chunk queue model), stock's only remaining TTFT win.
+- Watch: `per_kernel_classified.py` maps kernel-name → twin-class FIRST-WINS; the sym cut
+  consumers share the `linear_1__cat__linear_2_reduce` stem with the m1 bare kernel (a 5.2 ms
+  "m1 pathology" that was actually sym-at-T≈4096; true m1 = grid 960 @ 143 µs).
+
 ## STATUS (2026-07-24 session, updated live)
 
 - **WS1.1 DONE**: isolated sweep (`_tune/ws1-m1/*.json`) → gate_up bare ``b256t`` ties the g16k split

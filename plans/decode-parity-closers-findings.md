@@ -1,4 +1,16 @@
-# Decode parity closers — the last ~1.6 ms to stock TPOT (planned 2026-07-24)
+# Decode parity closers — findings (executed 2026-07-24; plan retained below for the record)
+
+## OUTCOME
+
+The session closed 4K c=1 decode TPOT 18.98 → **18.83** (256-ctx 17.91 → 17.77) vs stock's 17.4 — the
+~8% honest residual — via the WS1.1 golden re-picks and the WS3 attn_out alias. The plan's launch-count
+premise (WS1.2 finalize fusion, WS2 stat+cone merge) was REFUTED e2e three independent ways: in-graph
+launch cost at m1 is ~0.5 µs, not 2-3 — both mechanisms are landed as evidence-only machinery
+(``PLACE@fin`` / ``PLACE@cstat``, default cut) for sites/cards where the tradeoff differs. Article
+lanes re-measured (gemma-4-12B-it, six points, same box): every unchanged cell reproduced to <0.1%,
+fm TTFT wins hold (475/1405/1853/1996), c=64 and c=8 throughput unchanged. The exit gate (parity 17.4)
+is NOT reachable by launch-count work; the residual is stock's leaner M=1 step shape + the shared
+sampler stall. 4090 mirror blocked: the box lost its GPU at the PCI level (host passthrough fault).
 
 ## STATUS (2026-07-24 session, updated live)
 

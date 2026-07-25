@@ -3049,6 +3049,16 @@ configs:
     knobs: {TILE: 'f4', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
     emmy_us: 0.9
     cublas_us: 2.0
+  # the m256 down-cut's GeGLU combine workspace (fp16 sibling of pw.n15360.m256.fp32 — the fp32
+  # row keys is_warp=False and cannot cover the fp16 fork)
+  - kernel: pointwise
+    name: gemma4_12b.pw.n15360.m256
+    M: 256
+    N: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'f4', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    emmy_us: 3.2
+    cublas_us: 4.0
 
   # ---- M=1 decode tier (EMMY_GEN_M1_TIER; true per-token decode, no bucket-32 padding) ----
   # The norm->merged compositions at M=1 must CUT: the fused warp form has zero free axes and
@@ -3382,6 +3392,113 @@ configs:
     knobs: {PLACE@cone: 'cut'}
     emmy_us: 353.8
     cublas_us: 345.0
+
+  # ---- MERGED keys at M=256 (the legacy prefill bucket + the c=64 run's unmixed static chunks):
+  # the 2026-07-25 per-kernel table flagged the fused forms 1.7-2x behind torch.compile (the
+  # computed-A transport loss again). Cut + staged consumers close them: qkv 110.1 vs fused 176
+  # (eager 109), qk_global ~113 (101), gate_up 486 vs fused 542 (292; the fm consumer 287 makes
+  # the fm-lane total ~293), down-cone 187.1 vs fused 378 (201). Consumers carry std+fm rows so
+  # each lane's cut re-entry deploys its own transport (the m4096 convention).
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qkv.m256.lin
+    M: 256
+    H: 3840
+    N: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 110.1
+    cublas_us: 109.0
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qk_global.m256.lin
+    M: 256
+    H: 3840
+    N: 8704
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 113.1
+    cublas_us: 101.0
+  - kernel: norm_linear
+    name: gemma4_12b.norm_gate_up.m256.lin
+    M: 256
+    H: 3840
+    N: 30720
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 486.5
+    cublas_us: 292.0
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m256.lin
+    M: 256
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 187.1
+    cublas_us: 201.0
+  - kernel: matmul
+    name: gemma4_12b.qkv_cat.m256.lin
+    M: 256
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 99.9
+    cublas_us: 102.0
+  - kernel: matmul
+    name: gemma4_12b.qkv_cat.m256.lin
+    M: 256
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 74.3
+    cublas_us: 102.0
+  - kernel: matmul
+    name: gemma4_12b.qk_global_cat.m256.lin
+    M: 256
+    N: 8704
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 108.0
+    cublas_us: 101.0
+  - kernel: matmul
+    name: gemma4_12b.qk_global_cat.m256.lin
+    M: 256
+    N: 8704
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 75.9
+    cublas_us: 101.0
+  - kernel: matmul
+    name: gemma4_12b.gate_up_cat.m256.lin
+    M: 256
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 481.4
+    cublas_us: 292.0
+  - kernel: matmul
+    name: gemma4_12b.gate_up_cat.m256.lin
+    M: 256
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 287.1
+    cublas_us: 292.0
 
   # ---- M=1 transposed (serving-layout) consumer rows: the b<n>t band at the k-major
   # orientation the twins deploy (plain matmul, no trans_b — replay benches this layout).

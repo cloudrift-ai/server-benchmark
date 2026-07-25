@@ -18,6 +18,14 @@ the sym cut consumers share the `linear_1__cat__linear_2_reduce` stem with the m
 attributing the fm gap between (a) residual ragged-sym steps, (b) decode-step drag (T=4 on the
 bucket-32 twins), (c) scheduler idle. Fix what the trace names.
 
+**CLOSED (2026-07-25 12:15, _tune/nsys/c4b_head vs pack-dyn32):** the post-dynM std c=4 window is
+byte-identical to the pre-dynM one BECAUSE the 5.2 ms grid-15360 sym kernels ARE the new dyn cut
+consumers at the std lane's structural f32-acc ceiling (g2k 5248 µs ≈ static std 7352-class).
+Attribution: 45.8% bucket-32 decode (at goldens), 12.5% ragged-sym (std ceiling), 7.9% static
+m4096 (std ceiling), 14.8% vLLM external. std c=4 has NO remaining golden-fixable component — the
+levers are WS2 (decode drag) and the fm lane (its f4x8/k4 sym consumer runs ~10x faster at that T;
+the fm c=4 re-bench lands in the FINAL STEP).
+
 ## WS2 — small-T decode tier (the c=4/c=8 TPOT lever)
 
 T=2..31 decode rides the bucket-32 twins: +1.4 ms/step vs stock at c=4, and in mixed scheduling the

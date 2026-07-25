@@ -360,6 +360,19 @@ configs:
     knobs: {REDUCE: 'b256'}
     emmy_us: 6.3
     cublas_us: 6.1
+  # M=1 (the EMMY_GEN_M1_TIER decode twins' residual+norm sweeps — k_mean_3e2fba / k_mean_48fcdf,
+  # the post-attn and post-ff rows): traced IN-GRAPH at 12.6-13.2 µs each on the cold b128-class
+  # pick = 1.24 ms/step across 48 layers, the largest non-floor item in the m1 step. b512 wins the
+  # single-row latency reduce (isolated 3.0 vs greedy b256 4.0 / the deployed-class b128 6.4);
+  # e2e VERDICT (2026-07-24 candE): 256 c=1 TPOT 17.83->17.10, 4K 18.88->18.15 — the single row
+  # recovers ~0.73 ms/step; audits DRIFT 0, the key (free 3840) deploys only in the m1 twins.
+  - kernel: rms_norm
+    name: gemma4_12b.rms_norm.k3840.m1
+    M: 1
+    K: 3840
+    knobs: {REDUCE: 'b512'}
+    emmy_us: 3.0
+    cublas_us: 4.0
   - kernel: rms_norm
     name: gemma4_12b.rms_norm.k3840.dynM
     M: 512

@@ -69,7 +69,6 @@ EXPECTED_GAPS = {
         ShapeKey(free_prod=1, reduce_max=3840, is_warp=False, is_dyn=False, kind="", free_max=0),
         ShapeKey(free_prod=2048, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=3840, reduce_max=0, is_warp=False, is_dyn=False, kind="", free_max=3840),
-        ShapeKey(free_prod=3840, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=4096, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=512, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=8192, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),

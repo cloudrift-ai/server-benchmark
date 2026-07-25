@@ -8,14 +8,15 @@ concurrency. Method note that produced every win this cycle: **per-kernel nsys o
 graph, then golden rows, then a serving A/B verdict** — isolated benches are L2-warm-biased for any
 weight under the 5090's 96 MB L2.
 
-## WS1 — fm c=4 re-verdict + post-dynM trace (first, cheap)
+## WS1 — post-dynM c=4 attribution trace (first, cheap)
 
-The dynM round was never measured on the fm c=4 cell (std moved 1848→1815 only; rag moved hugely).
-Re-bench fm head_c4 on a fresh fm bucket-32 pack. If TTFT stays ~1400: take a POST-dynM c=4 trace
-(the classified per-twin instrument, `_tune/nsys/per_kernel_classified.py` — beware its
-name→class map is FIRST-WINS and the sym cut consumers share the `linear_1__cat__linear_2_reduce`
-stem with the m1 bare kernel) and attribute the fm gap between (a) residual ragged-sym steps,
-(b) decode-step drag (T=4 on the bucket-32 twins), (c) scheduler idle. Fix what the trace names.
+The dynM round was never measured on the fm c=4 cell (std moved 1848→1815 only; rag moved hugely);
+its re-bench happens ONCE, in the final rollout step below, together with every other affected
+cell. The diagnostic that can run standalone: a POST-dynM c=4 trace (the classified per-twin
+instrument, `_tune/nsys/per_kernel_classified.py` — beware its name→class map is FIRST-WINS and
+the sym cut consumers share the `linear_1__cat__linear_2_reduce` stem with the m1 bare kernel),
+attributing the fm gap between (a) residual ragged-sym steps, (b) decode-step drag (T=4 on the
+bucket-32 twins), (c) scheduler idle. Fix what the trace names.
 
 ## WS2 — small-T decode tier (the c=4/c=8 TPOT lever)
 
@@ -64,14 +65,27 @@ Verify each dyn consumer at T=4095 with pinned --ab; if the 512-hint schedule is
 m4096-class winner there, the honest fix is per-Dim-hint rows (a second dyn row keyed by hint —
 schema work: today one dyn key carries ONE deployable row set benched at DEFAULT_SEQ_HINT).
 
-## Rollout / verification (every WS)
+## Per-WS verification
 
 Unchanged from the golden method: manual pinned --ab on the row's own snippet, audits
-(`eval golden --in-model` DRIFT 0, ratchet tightens), `make test`, serving A/B on the affected
-article cells (fresh packs, empty online, util 0.96), article tables + per-kernel chart refresh
-(`render_golden_bench_chart.py` from the fresh CSVs), both repos committed and pushed. 4090 mirror
-of ALL 2026-07-24/25 golden rounds once the box's GPU passthrough is restored (currently absent
-from the PCI bus), then the gemma-4 image rebake at the settled rev.
+(`eval golden --in-model` DRIFT 0, ratchet tightens), `make test`, and a targeted serving A/B on
+the cell each WS claims to move (fresh packs, empty online, util 0.96) — the per-WS verdicts stay
+cheap and attributable. NO piecemeal article edits along the way.
+
+## FINAL STEP — one consolidated re-bench + article update
+
+After the workstreams settle, ONE full measurement pass and ONE article update:
+
+1. Re-bench every affected article cell on the settled rev, both emmy lanes, fresh packs — the
+   six e2e points (small_c1 / head_c1 ×3, head_c4, head_c8, rag_c4, small_c64 on its bucket-64
+   boot), including the fm c=4 cell the dynM round never measured.
+2. Re-run the per-kernel golden-set catalog (std + fm, `bench_golden_set.py`) and regenerate the
+   article chart assets (`render_golden_bench_chart.py` → the per_kernel HTML/CSV under
+   packages/blog/public/blog/optimizing-gemma-4-12b-rtx/) + the geomean table.
+3. Update ALL article tables and narrative in one commit (throughput + latency + per-kernel +
+   headline numbers), push cloudrift-landing; commit the emmy goldens/findings alongside.
+4. 4090 mirror of ALL 2026-07-24/25 golden rounds once the box's GPU passthrough is restored
+   (currently absent from the PCI bus), then the gemma-4 image rebake at the settled rev.
 
 ## Exit gates
 

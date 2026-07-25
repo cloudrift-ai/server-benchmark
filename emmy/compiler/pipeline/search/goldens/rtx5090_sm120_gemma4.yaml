@@ -3154,6 +3154,32 @@ configs:
     knobs: {PLACE@cone: 'cut'}
     emmy_us: 87.3
     cublas_us: 91.7
+  # gate_up_cat m64 .lin: the missing layout twin — the cold pick fell to the transposed b<n>t
+  # band on the .lin operand (16.9 ms, the 2026-07-25 per-kernel table's 109x case). Both lanes
+  # trail eager at this width (the fused norm_gate_up.m64 form owns serving at 169.4); the rows
+  # pin the isolated/cut-re-entry deploy to sanity. NOTE the m1 .lin twins are deliberately NOT
+  # recorded: their b64 optima (12.6 us, L2-warm) would out-rank the .t rows on the layout-blind
+  # key and poison the serving (.t) deploy — the interleaved-row removal lesson.
+  - kernel: matmul
+    name: gemma4_12b.gate_up_cat.m64.lin
+    M: 64
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 233.6
+    cublas_us: 156.0
+  - kernel: matmul
+    name: gemma4_12b.gate_up_cat.m64.lin
+    M: 64
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 203.9
+    cublas_us: 156.0
   - kernel: matmul
     name: gemma4_12b.qkv_cat.m64.lin
     M: 64

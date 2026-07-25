@@ -37,6 +37,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.attention import (
+    _encode_layer_name,
+    unified_attention_with_output,
+    unified_kv_cache_update,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -250,6 +255,9 @@ class EmmyGenModel(nn.Module):
         # list; stock vLLM's gemma4 models -inf those ids in compute_logits — mirror that.
         gen_cfg = vllm_config.model_config.try_get_generation_config()
         self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
+        # ``EMMY_GEN_ALIAS_ATTN`` — write attention output directly into the M=1 post twin's
+        # ``attn_out`` input backing (the seam-copy closer; see ``config.gen_alias_attn``).
+        self._alias_attn = bool(emmy_config.gen_alias_attn())
 
         # Speculative-decoding shim: vLLM's MTP drafter (vllm#41745, gemma-4) reaches into
         # ``target.model.embed_tokens`` to share the target's raw embedding with the draft head.
@@ -301,15 +309,47 @@ class EmmyGenModel(nn.Module):
     def _forward_device(self, ids, positions):
         """Device-resident decode forward (T <= decode_bucket): q/k/v and attn_out stay CUDA
         tensors through RoPE + vLLM attention — no per-layer numpy↔torch host hop."""
+        t = ids.shape[0]
         hidden = self.runner.embed_device(ids)  # [T, H] CUDA
         for layer in range(self.runner.num_layers):
             residual = hidden
             q, k, v = self.runner.forward_layer_pre_device(layer, hidden)
             q, k = self.rotary_emb[layer](positions, q, k)  # A2: per-layer RoPE (Gemma local/global theta)
             q, k = q.to(self.dtype), k.to(self.dtype)  # rotary may promote to fp32; flash-attn needs fp16/bf16
-            attn_out = self.attn[layer](q, k, v)  # vLLM paged attention
+            attn_out = self._attn_aliased(layer, q, k, v) if self._alias_attn and t == 1 else None
+            if attn_out is None:
+                attn_out = self.attn[layer](q, k, v)  # vLLM paged attention
             hidden = self.runner.forward_layer_post_device(layer, attn_out, residual)
         return self.runner.final_norm_device(hidden)
+
+    def _attn_aliased(self, layer, q, k, v):
+        """vLLM paged attention writing INTO the M=1 post twin's ``attn_out`` input backing —
+        ``Attention.forward`` minus its own output allocation, so ``run_device``'s prefix upload
+        self-copy-skips (the seam copy drops out of the captured decode graph). Returns ``None``
+        to fall back to the ordinary module call (m1 twin absent for this layer, or an attention
+        feature this tail doesn't replicate — kv scales / query quant)."""
+        attn = self.attn[layer]
+        if attn.calculate_kv_scales or getattr(attn, "query_quant", None) is not None:
+            return None
+        out = self.runner.post_attn_backing(layer, rows=q.shape[0])
+        if out is None or out.dtype != q.dtype:
+            return None
+        query = q.view(-1, attn.num_heads, attn.head_size)
+        key = k.view(-1, attn.num_kv_heads, attn.head_size)
+        value = v.view(-1, attn.num_kv_heads, attn.head_size_v)
+        output = out.view(-1, attn.num_heads, attn.head_size_v)
+        kv_dep = None
+        update_kv = not attn.attn_backend.forward_includes_kv_cache_update and attn.kv_sharing_target_layer_name is None
+        if attn.use_direct_call:
+            if update_kv:
+                kv_dep = unified_kv_cache_update(key, value, attn.layer_name)
+            unified_attention_with_output(query, key, value, output, attn.layer_name, kv_cache_dummy_dep=kv_dep)
+        else:
+            encoded = _encode_layer_name(attn.layer_name)
+            if update_kv:
+                kv_dep = torch.ops.vllm.unified_kv_cache_update(key, value, encoded)
+            torch.ops.vllm.unified_attention_with_output(query, key, value, output, encoded, kv_cache_dummy_dep=kv_dep)
+        return out
 
     def compute_logits(self, hidden_states, *args):
         logits = self.logits_processor(self.lm_head, hidden_states)

@@ -253,7 +253,10 @@ def _render_tuple(field: Field, value: Any) -> str:
     if field.suffix:
         width, tag = value
         canonical_to_codec = {canonical: codec for codec, canonical in field.suffix}
-        return f"{width}{canonical_to_codec[tag]}"
+        # A ``suffix_default`` canonical that has NO codec letter (e.g. the ``b`` field's
+        # "interleaved") renders bare — only the marked variants carry a letter. Fields
+        # listing every canonical (``g``: a/k) keep re-emitting theirs.
+        return f"{width}{canonical_to_codec.get(tag, '')}"
     if field.arity == 1:
         return str(value)
     nums = list(value)
@@ -411,6 +414,12 @@ class ReduceStage:
     level: Level
     width: int = 1
     finalize: str = "kernel"  # GRID only: "atomic" | "kernel" (the g<n> finalize letter)
+    # BLOCK only (the ``b<n>t`` codec letter): swap the cooperative thread mapping for a
+    # k-major B operand — warp lanes sweep the OUTPUT axis (contiguous B loads at every k
+    # step) and the k partition rides the upper thread bits; the combine becomes the
+    # lane-indexed smem tree across k-slices (no shuffle stage — each lane holds a
+    # different output). The interleaved default keeps lanes on the reduce axis.
+    transposed: bool = False
 
     def combine(self, *, warp_size: int, segmented: bool = False) -> tuple[Fold, ...]:
         """The derived per-level combine fold(s), fine→coarse within this stage — the ONE
@@ -446,10 +455,10 @@ _REDUCE_SCHEMA = Schema(
     "REDUCE",
     (
         Field("g", FieldKind.TUPLE, suffix=(("a", "atomic"), ("k", "kernel")), suffix_default="kernel"),
-        Field("b", FieldKind.TUPLE),
+        Field("b", FieldKind.TUPLE, suffix=(("t", "transposed"),), suffix_default="interleaved"),
         Field("r", FieldKind.TUPLE),
     ),
-    expect="expect g<n> / b<n> / r<n>",
+    expect="expect g<n> / b<n>[t] / r<n>",
 )
 
 
@@ -465,14 +474,15 @@ class ReducePlan:
     stages: tuple[ReduceStage, ...] = ()
 
     @classmethod
-    def of(cls, *, cta: int = 1, coop: int = 1, reg: int = 1, finalize: str = "kernel") -> ReducePlan:
+    def of(cls, *, cta: int = 1, coop: int = 1, reg: int = 1, finalize: str = "kernel", coop_transposed: bool = False) -> ReducePlan:
         """Build a plan from per-level widths (1 = absent). Order is coarse→fine:
-        GRID (cta) → BLOCK (coop) → REG (reg). ``finalize`` rides the GRID stage."""
+        GRID (cta) → BLOCK (coop) → REG (reg). ``finalize`` rides the GRID stage;
+        ``coop_transposed`` rides the BLOCK stage (the ``b<n>t`` k-major lane swap)."""
         stages: list[ReduceStage] = []
         if cta > 1:
             stages.append(ReduceStage(Level.GRID, cta, finalize=finalize))
         if coop > 1:
-            stages.append(ReduceStage(Level.BLOCK, coop))
+            stages.append(ReduceStage(Level.BLOCK, coop, transposed=coop_transposed))
         if reg > 1:
             stages.append(ReduceStage(Level.REG, reg))
         return cls(tuple(stages))
@@ -481,19 +491,22 @@ class ReducePlan:
     def parse(cls, spec: str | None) -> ReducePlan:
         """Decode the ``REDUCE`` knob codec (the schedule's single reduce-partition knob,
         decided in ``_schedule`` (inside ``010_recognize``)) into a plan: ``/``-separated level-named tokens,
-        coarse→fine — ``g<n>[a|k]`` (GRID cross-CTA split + finalize letter), ``b<n>``
-        (BLOCK cooperative threads), ``r<n>`` (REG ILP fold). Empty / ``None`` = the scalar
-        serial fold. (The ``serial`` remainder is never spelled — it's derived as
-        ``ceil(extent / parallel)``.) Ser/de routes through :func:`decode` (``_REDUCE_SCHEMA``)."""
+        coarse→fine — ``g<n>[a|k]`` (GRID cross-CTA split + finalize letter), ``b<n>[t]``
+        (BLOCK cooperative threads; ``t`` = the transposed k-major lane swap), ``r<n>``
+        (REG ILP fold). Empty / ``None`` = the scalar serial fold. (The ``serial`` remainder
+        is never spelled — it's derived as ``ceil(extent / parallel)``.) Ser/de routes
+        through :func:`decode` (``_REDUCE_SCHEMA``)."""
         v = decode(_REDUCE_SCHEMA, spec)
         width, finalize = v["g"]
-        return cls.of(cta=width, coop=v["b"], reg=v["r"], finalize=finalize)
+        coop, coop_mode = v["b"]
+        return cls.of(cta=width, coop=coop, reg=v["r"], finalize=finalize, coop_transposed=coop_mode == "transposed")
 
     def spell(self) -> str:
         """The ``REDUCE`` codec string for this plan (inverse of :meth:`parse`); ``""`` for
         the scalar serial fold. A GRID stage re-emits its finalize letter (``g<n>a`` /
-        ``g<n>k``)."""
-        return encode(_REDUCE_SCHEMA, {"g": (self.cta, self.finalize), "b": self.coop, "r": self.reg})
+        ``g<n>k``); a transposed BLOCK stage its ``t``."""
+        mode = "transposed" if self.coop_transposed else "interleaved"
+        return encode(_REDUCE_SCHEMA, {"g": (self.cta, self.finalize), "b": (self.coop, mode), "r": self.reg})
 
     @property
     def parallel(self) -> int:
@@ -519,6 +532,12 @@ class ReducePlan:
     def coop(self) -> int:
         """The BLOCK (cooperative-thread) width, or 1 if no BLOCK stage."""
         return self._width(Level.BLOCK)
+
+    @property
+    def coop_transposed(self) -> bool:
+        """True iff the BLOCK stage carries the ``b<n>t`` k-major lane swap."""
+        s = self.block_stage
+        return s is not None and s.transposed
 
     @property
     def cta(self) -> int:

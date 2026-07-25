@@ -102,7 +102,10 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   **weights are shared**: `_compile_split` binds constants through a per-wrapper device cache
   (`_bind_device_constants` — one upload per `(source_path, load_ops)`, the same cupy array fed to both builds), so
   the decode twin adds no weight copy. **`EMMY_GEN_DECODE_BUCKET=0`** (`config.gen_decode_bucket`) still disables the
-  twin entirely at the cost of decode speed.
+  twin entirely at the cost of decode speed. A further static **M=1** twin pair (`EMMY_GEN_M1_TIER`, default on)
+  routes true single-token decode onto gemv-class matvec programs, and `EMMY_GEN_ALIAS_ATTN` (default off) lets
+  vLLM's paged attention write directly into the M=1 post twin's `attn_out` input backing — the prefix upload
+  self-copy-skips on pointer equality, dropping the per-layer D2D seam copy from the captured decode graph.
   **Multimodal wrappers:** the trunk is resolved through `language_model` (gemma-4 "unified" nests the decoder stack +
   embed/norm there) and the text dims come from `config.text_config`.
   **Tuning what serving actually runs.** The deploy pick reads the golden tier, then box-local `perf`/reservoir

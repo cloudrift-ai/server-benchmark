@@ -211,8 +211,8 @@ def test_goldens_speak_native_codecs_and_featurize():
         # per-token decode matvec has one output row per CTA and no tile geometry at all, so the
         # empty featurization is the correct one, not an accident. Exempt exactly that shape.
         if isinstance(g, MatmulGoldenConfig) and g.knobs.get("PLACE@cone") != "cut":
-            if g.M == 1 and not g.knobs.get("TILE") and g.knobs.get("REDUCE", "").startswith("b"):
-                continue
+            if g.M == 1 and not g.knobs.get("TILE") and ReducePlan.parse(g.knobs.get("REDUCE")).coop > 1:
+                continue  # gemv-class row (b<n> / g<w>k/b<n>t): scalar by design, no tile geometry
             feats = features.knob_features(g.knobs)
             assert feats.get("D_threads", 0) > 0 and "D_tile_m" in feats, f"{g.name} featurized to empty tile geometry"
 

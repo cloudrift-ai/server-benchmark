@@ -369,6 +369,11 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     # distinguishable from a never-offered kernel (the fuse side stamps ``fuse`` on the fused
     # fragment in ``build_flash_frag``).
     knob_base: dict = {"PLACE@fold": "cut"} if is_fold_offer_site(graph, root) else {}
+    if root.op.knobs.get("PLACE@cstat") == "fuse":
+        # A cut producer whose bridged statistic stayed in-kernel (``020_cut_edge``'s
+        # ``PLACE@cstat=fuse`` arm) re-enters here — thread the placement identity onto its rows
+        # so the realized merged kernel reports it (reproducibility check / recording).
+        knob_base["PLACE@cstat"] = "fuse"
     loop: LoopOp = root.op
     # (3) Online softmax — the sibling-fold tupling (``PLACE@tuple``): fuse the adjacent
     # (rowmax, Σexp) reduce pair into one streaming pass; ``cut`` keeps the two-pass stats.
@@ -454,6 +459,12 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
         # rows from the model fallback, so they are selectable by measured evidence alone.
         if pin not in ("fuse", "cut"):
             rows += _as_list(schedule(map_tile, loop.name, {**knob_base, "PLACE@cone": "cut"}, ctx))
+            # The cut's bridged-statistic sibling (``PLACE@cstat=fuse`` — the statistic stays in
+            # the cone producer; ``020_cut_edge`` realizes it): a THIRD row set, evidence-only
+            # like the cut itself, so a golden spelling {PLACE@cone: cut, PLACE@cstat: fuse} has
+            # rows to match. A live ``cstat`` pin is authoritative inside ``020`` instead.
+            if PLACE.narrow_at("cstat") not in ("cut", "fuse"):
+                rows += _as_list(schedule(map_tile, loop.name, {**knob_base, "PLACE@cone": "cut", "PLACE@cstat": "fuse"}, ctx))
         if not rows:
             # fp32 / no atoms / bad geometry: the computed-A contraction form has no legal row
             # (both the fused and cut schedules come back empty), and unlike the MONOID

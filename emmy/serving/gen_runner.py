@@ -358,13 +358,26 @@ class EmmyGenRunner:
         # warm boot uses the hub id, and the config hash already pins identity.
         import hashlib
 
+        # The config hash must strip the VOLATILE fields or the path sneaks back in:
+        # ``_name_or_path`` records the load spelling (the hub id at warm time, the snapshot
+        # path on a baked offline boot), so hashing to_json_string() keyed the warm pack and
+        # the baked boot APART — the 2026-07-24 verify failure (66 runtime recompiles on an
+        # image whose warm had converged). ``transformers_version`` churns the same way.
+        import json as _json
+
         from emmy import config as emmy_config
         from emmy.compiler.backend.pack import load_pack, pack_path
 
+        cfg_dict = model.config.to_dict()
+        for volatile in ("_name_or_path", "transformers_version"):
+            cfg_dict.pop(volatile, None)
+            for sub in cfg_dict.values():
+                if isinstance(sub, dict):
+                    sub.pop(volatile, None)
         pack_key = {
             "kind": "gen-split",
             "model": str(getattr(text_config, "model_type", "gen")),  # label + key; config-derived, path-stable
-            "config_sha": hashlib.sha1(model.config.to_json_string().encode()).hexdigest()[:16],
+            "config_sha": hashlib.sha1(_json.dumps(cfg_dict, sort_keys=True, default=str).encode()).hexdigest()[:16],
             "dtype": dtype_str,
             "decode_bucket": int(decode_bucket or 0),
             "max_tokens": int(max_tokens or 0),
@@ -375,6 +388,13 @@ class EmmyGenRunner:
         if loaded is not None:
             # "pack hit" is a contract: the gemma4 image's verify.sh greps docker logs for it.
             logger.info("[gen_runner] pack hit at %s — skipping trace + compile for %d program(s)", pack_at, len(loaded))
+            # A logger-independent hit marker: the container logging config swallows this
+            # module's INFO lines, so the image verify (docker/vllm-emmy-gemma4/verify.sh)
+            # asserts the pack hit on this file instead of a log grep.
+            try:
+                (pack_at / ".pack_hit").touch()
+            except OSError:
+                pass
             # The pack records which twin sets survived their compiles — honor that instead
             # of re-attempting a twin the save-time boot already saw fail.
             decode_ok = decode_ok and "L00.pre.decode" in loaded
@@ -722,6 +742,37 @@ class EmmyGenRunner:
         if self._post_prefill is not None and t == self._prefill_bucket:
             return self._post_prefill[layer].run_device([attn_out, residual])[0]
         return self._post[layer].run_device_sym([attn_out, residual])[0]
+
+    def post_attn_backing(self, layer: int, rows: int):
+        """A torch CUDA view of the M=1 post twin's ``attn_out`` INPUT backing (first ``rows``
+        rows), or ``None`` when the m1 tier is off / this layer fell back. vLLM's paged attention
+        writes into this view under ``EMMY_GEN_ALIAS_ATTN`` so :meth:`_Program.run_device`'s
+        prefix upload self-copy-skips — the seam copy drops out of the captured decode graph.
+        The backing is allocated once per program, so the pointer is stable across steps.
+
+        The wrap is CACHED per layer: ``torch.from_dlpack`` on a cupy array negotiates a stream
+        sync, which INVALIDATES an in-flight CUDA-graph capture — the view must be minted on an
+        uncaptured (warmup) step and only re-served under capture. An uncached layer asked for
+        mid-capture returns ``None`` (the caller falls back to the ordinary copy path)."""
+        if self._post_m1 is None:
+            return None
+        handle = self._post_m1[layer]
+        if handle is None:
+            return None
+        views = getattr(self, "_post_m1_attn_views", None)
+        if views is None:
+            views = self._post_m1_attn_views = {}
+        view = views.get(layer)
+        if view is None:
+            import torch  # noqa: PLC0415
+
+            if torch.cuda.is_current_stream_capturing():
+                return None
+            arr = handle.program.arrays.get("attn_out")
+            if arr is None:
+                return None
+            view = views[layer] = torch.from_dlpack(arr)
+        return view[:rows]
 
     def final_norm_device(self, hidden):
         """Apply the final norm on CUDA to a ``hidden[T,H]`` CUDA tensor."""

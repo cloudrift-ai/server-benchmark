@@ -648,6 +648,14 @@ def _unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | No
             for key, got in raw.items():
                 if family_of(key) != fam:
                     continue
+                # The PLACE family carries several INDEPENDENT elements per kernel (``PLACE@cone``
+                # / ``PLACE@cstat`` / …): a sibling element's stamp is a different decision, not
+                # "what ran instead" of this pin — compare same-key only (``pin_key_matches``
+                # keeps the bare-pin ↔ element-keyed collapse). Schedule families keep the
+                # family-wide pool: their @-keys are one decision spelled per AXIS, and an axis
+                # the re-lowering renamed must still surface as the realized value, not (unset).
+                if fam == "PLACE" and not pin_key_matches(name, key):
+                    continue
                 if pin_key_matches(name, key) and values_equal(name, want, got):
                     hit = True
                 elif is_off_value(fam, got):

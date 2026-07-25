@@ -100,4 +100,9 @@ done
 # coin flip if this exits 0.
 [ "$new" -eq 0 ] || { echo "[warm] FAIL: no fixpoint after 5 offline passes — the cubin set is still growing" >&2; exit 1; }
 
+# The container wrote warm/ as root; the bake's split_hf.sh hardlinks these files as the
+# invoking user, which fs.protected_hardlinks forbids on root-owned files. Reclaim ownership
+# with a throwaway container (no sudo needed on the host).
+docker run --rm -v "$PWD/warm":/w alpine chown -R "$(id -u):$(id -g)" /w
+
 echo "[warm] done: $(find warm/cubin -name '*.cubin' | wc -l) cubin(s), $(find warm/pack -name '*.json' | wc -l) pack file(s), snapshot at warm/hf"

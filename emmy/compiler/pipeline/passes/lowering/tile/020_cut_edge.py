@@ -150,14 +150,28 @@ def rewrite(match: Match, root: Node) -> Graph | None:
     # scale sweep its 2-D grid. No-statistic cones (a plain MAP producer) skip the stat kernel.
     stat_nodes: list[tuple[LoopOp, str]] = []
     cell_body: tuple = tuple(cell)
-    if stats:
+    # ``PLACE@cstat`` — the bridged statistic's placement. ``cut`` (default) splits it into its
+    # own ``__stat`` kernel so the scale sweep keeps its 2-D grid (a single nested kernel
+    # measured 1.8 ms at prefill M — only m lifts to the grid). ``fuse`` keeps the statistic
+    # INSIDE the producer (the pre-split ``for m: [stat…, for k: …]`` shape): re-recognition
+    # hands it the per-row coop-stat schedule — one kernel, the M=1 win where the whole row is
+    # one CTA and the separate stat kernel is pure launch overhead. Stamp > pin, like the cone.
+    stamped_cs = tile.knobs.get("PLACE@cstat")
+    fuse_stat = bool(stats) and (stamped_cs if stamped_cs in ("cut", "fuse") else place_decision("cstat")) == "fuse"
+    if stats and not fuse_stat:
         (stat_name,) = stats
         stat_ws = f"{out.name}__stat"
         stat_op = LoopOp(body=Body((Loop(axis=m_ax, body=Body((*pro, Write(output=stat_ws, index=(Var(m_ax.name),), value=stat_name)))),)))
         stat_nodes.append((stat_op, stat_ws))
         cell_body = (Load(name=stat_name, input=stat_ws, index=(Var(m_ax.name),)), *cell)
     k_loop = Loop(axis=k_ax, body=Body((*cell_body, Write(output=ws, index=(Var(m_ax.name), Var(k_ax.name)), value=c.a_name))))
-    producer = LoopOp(body=Body((Loop(axis=m_ax, body=Body((k_loop,))),)))
+    row_prologue = tuple(pro) if fuse_stat else ()
+    producer = LoopOp(body=Body((Loop(axis=m_ax, body=Body((*row_prologue, k_loop))),)))
+    if fuse_stat:
+        # The re-entered producer starts from a fresh knob base (``010``'s re-recognition), so the
+        # realized merged kernel would carry no ``PLACE@cstat`` identity — the reproducibility
+        # check and any recording of the merged form need the stamp. ``010`` seeds it from here.
+        producer.knobs = {"PLACE@cstat": "fuse"}
 
     # Consumer(s): each ⊗-fold channel becomes its OWN plain single-fold matmul reading the shared
     # workspace A (``a_load``) — a single-fold node rides the plain-matmul mma tiers (gmem-direct /

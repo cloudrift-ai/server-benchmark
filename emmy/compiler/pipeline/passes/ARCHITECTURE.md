@@ -168,6 +168,17 @@ dimensions, with their own re-entry contracts — keep them apart:
   computation, its K partitioned across CTAs into a partial + finalize. It runs AFTER its decision — the `g` row was
   chosen FOR the split form — so the partial carries the decided knob row verbatim and the finalize is deliberately
   `_mapped`: both **opt out** of re-recognition, because re-entering would discard the very decision being realized.
+- **`032_fuse_finalize`** realizes `PLACE@fin=fuse` — the deferred `g<w>k` finalize inlines into its CONSUMERS'
+  read sites instead of launching (the M=1 decode twins' split-chain closer: each finalize is ~2-3 µs of serialized
+  launch + sync around a fold that is a handful of f32 adds per cell). Every consumer `Load` of the finalize output
+  is replaced by the finalize's own body σ-substituted to that load's index (per-site `__fin<n>` rename; redundant
+  per-read recompute, no barrier — each thread folds exactly the cells it reads). Anchored on the consumer; the
+  finalize node dissolves via the splice's orphan removal once its last reader is rewired, and the firing that
+  removes the last EDGE consumer also inlines the remaining body-level readers in place (a `030` finalize's sweep
+  operands are body refs without edges). Gates: not a graph output, every reader inlinable (flat `Map` / plain
+  `Reduction` shapes; a `Contraction` reader bails), single-component workspace (flash's `(m,l,O)` stays a kernel).
+  Default `cut` (evidence-only: golden rows / `PLACE@fin` pin opt sites in); `030` threads the stamp onto the
+  finalize tile via `_fin_knobs`.
 
 Same fragment idiom, inverted re-entry semantics, different decision altitude (placement: "should this be one
 kernel at all" vs schedule: "how does this kernel run"). The shared fixpoint is what lets them compose without

@@ -54,6 +54,7 @@ SERVING_STATIC = "EMMY_SERVING_STATIC"
 SERVING_BATCHED = "EMMY_SERVING_BATCHED"
 GEN_DECODE_BUCKET = "EMMY_GEN_DECODE_BUCKET"
 GEN_M1_TIER = "EMMY_GEN_M1_TIER"
+GEN_ALIAS_ATTN = "EMMY_GEN_ALIAS_ATTN"
 GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
 READABLE = "EMMY_READABLE"
 
@@ -352,14 +353,29 @@ def gen_prefill_bucket(default: int = -1) -> int:
     return int_env(GEN_PREFILL_BUCKET, default)
 
 
-def gen_m1_tier(default: int = 0) -> int:
+def gen_m1_tier(default: int = 1) -> int:
     """``EMMY_GEN_M1_TIER`` — build and route the static M=1 (gemv-class) decode twins for
-    T=1 steps (default 0 = OFF). The M=1 matvec forms reach cuBLAS-gemv bandwidth (b128
-    ~1.68 TB/s on the 5090), but the FUSED norm→merged edges currently lift with zero free
-    axes at M=1 and schedule as grid-1 kernels (recognition cannot bind the degenerate
-    composition, so neither the column-gridded Contraction form nor the cut is offered) —
-    keep this off until that recognizer gap is closed. See `serving/gen_runner.py`."""
+    T=1 steps (default 1 = ON since 2026-07-24). The tier's matvecs run the transposed
+    ``g<w>k/b<n>t`` partition at the k-major serving layout's gemv floor (o_proj 8.1 µs,
+    qkv 14, down 76, gate_up 142 on the 5090), and the flip criterion held e2e: c=1 TPOT
+    17.92/18.98 beats the bucket-32 path's 18.0/19.1 with c=8/c=64 unchanged (m1 routes
+    only T==1). Set 0 to fall back to bucket-padded decode at T=1. The remaining ~1.6 ms
+    to stock is the split-chain / kernel-count / seam work of
+    plans/decode-parity-closers.md. See `serving/gen_runner.py`."""
     return int_env(GEN_M1_TIER, default)
+
+
+def gen_alias_attn(default: int = 1) -> int:
+    """``EMMY_GEN_ALIAS_ATTN`` — write vLLM's paged-attention output DIRECTLY into the M=1 post
+    twin's ``attn_out`` input backing (default 1 = ON since 2026-07-24). Kills the per-layer
+    protective D2D upload copy at T=1 decode: ``upload_prefix_device`` self-copy-skips on
+    pointer equality. The alias holds across steps by construction — the m1 program's input
+    arrays are allocated once, and the outer whole-step decode capture fixes the launch order
+    (attention writes, the post program reads, before the next replay overwrites). Flip
+    verdict: c=1 TPOT 17.89→17.83 (256) / 18.92→18.88 (4K) with c=64 / 4K c=8 unchanged and
+    greedy completions token-identical to the copy path. Set 0 to restore the copy path.
+    See ``serving/vllm_model_gen.py``."""
+    return int_env(GEN_ALIAS_ATTN, default)
 
 
 def gen_decode_bucket(default: int = 16) -> int:

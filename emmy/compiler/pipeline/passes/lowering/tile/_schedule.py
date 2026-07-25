@@ -55,6 +55,7 @@ from emmy.compiler.pipeline.pipeline import LoweringError
 from emmy.compiler.pipeline.search.space import (
     F16_MMA_F32_ACC,
     MAX_BLOCK_THREADS,
+    PLACE,
     RASTER,
     REDUCE,
     STAGE,
@@ -226,8 +227,29 @@ def _reduce_specs(kernel, place) -> list[str]:
     tail = list(kernel.op.body) if isinstance(kernel.op, Map) else []
     coop = _pick_coop(extent, free, has_tail=_has_contraction_tail(tail))
     cands = [f"b{coop}" if coop > 1 else ""]  # conservative heuristic pick first (cold greedy → option-0)
+    # The transposed band (and its g-split composites) is the k-major MATVEC partition. The
+    # M=1 cut consumers land on THIS tier (a contraction at M=1 demotes to PLANAR — the
+    # recognizer's documented fallback), so the band is offered here under the structural
+    # conditions the transposed emitter assumes: no shared-row ``sync`` stage, a scalar
+    # projection tail (no distributed sweep ``Loop``), a STATIC reduce extent (the ``g``
+    # composite splits it), and a 32-divisible non-unit inner free axis. Softmax / rms rows
+    # fail the tail/row-stage conditions and never see the band.
+    tail_scalar = not any(isinstance(s, Loop) for s in tail)
+    inner = next((a for a in reversed(place.free) if not (a.extent.is_static and a.extent.as_static() == 1)), None) if place.free else None
+    k_static = carrier.axis.extent.as_static() if carrier.axis.extent.is_static else None
+    bt_ok = (
+        k_static is not None
+        and tail_scalar
+        and inner is not None
+        and inner.extent.is_static
+        and inner.extent.as_static() % 32 == 0
+        and _row_stage(kernel, place) is None
+    )
     for move in coop_reduce_moves():
         p = ReducePlan.parse(move)
+        if p.coop_transposed or p.needs_split:
+            if not (bt_ok and p.coop_transposed and p.coop % 32 == 0 and (not p.needs_split or k_static % p.cta == 0)):
+                continue
         if p.coop <= extent and p.reg <= extent and move not in cands:
             cands.append(move)
     if "" not in cands:
@@ -494,8 +516,30 @@ def _reduce_candidates(kernel, place, plan: TilePlan, probe: Contraction | None 
     if k is not None and not plan.is_tiled:
         for move in coop_reduce_moves():
             p = ReducePlan.parse(move)
-            if p.coop <= k and p.reg <= k:
-                out.append(move)
+            if not (p.coop <= k and p.reg <= k):
+                continue
+            if p.coop_transposed:
+                # The ``b<n>t`` lane swap needs the structure its emitter assumes: a plain
+                # CONTRACTION per-cell tier (``probe`` built — the fused monoid rows ride
+                # shared-row staging the transposed layout can't), a static innermost free
+                # axis divisible by the 32-lane sweep, and a 32-multiple coop. Layout FIT
+                # (is B actually k-major?) is measurement's job, not a gate. A composite
+                # ``g<w>k/b<n>t`` (the deployable long-K form) additionally needs the split
+                # divisibility the plain split moves check.
+                # The innermost NON-UNIT free axis — the m1 recognizer's synthesized
+                # ``_um`` unit axis can sit innermost (extent 1), and it is not the axis
+                # the transposed emitter sweeps.
+                inner = next((a for a in reversed(place.free) if not (a.extent.is_static and a.extent.as_static() == 1)), None)
+                if not (
+                    probe is not None
+                    and p.coop % 32 == 0
+                    and inner is not None
+                    and inner.extent.is_static
+                    and inner.extent.as_static() % 32 == 0
+                    and (not p.needs_split or k % p.cta == 0)
+                ):
+                    continue
+            out.append(move)
     free = prod(_hint_extent(a) for a in place.free) if place.free else 1
     # A computed-A (fused-cone) contraction splits over K via the REDUNDANT-STATISTIC form: the
     # k-invariant stat prologue spans the whole row and stays full-row in every partition (each
@@ -1439,6 +1483,8 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         # adds no branching to the tree.
         if "PLACE@cone" in knobs:
             rows = [{**r, "PLACE@cone": knobs["PLACE@cone"]} for r in rows]
+            if "PLACE@cstat" in knobs:  # the cut's bridged-statistic sibling — same threading rule
+                rows = [{**r, "PLACE@cstat": knobs["PLACE@cstat"]} for r in rows]
             if knobs["PLACE@cone"] == "cut":
                 # A cut row's own schedule is DISCARDED — ``020_cut_edge`` emits un-mapped LoopOps
                 # and each half re-enters ``010`` for its own fork, its own tile and its own golden.
@@ -1451,6 +1497,23 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
                 # kernel in place. Keep the serial spelling; the CONSUMER half picks its own
                 # split-K from its own golden (``mlp_down.m256`` records ``g4k``).
                 rows = [r for r in rows if not _is_splitk_spec(r.get(_at(REDUCE, kaxis), ""))]
+        # The deferred-finalize placement (``PLACE@fin``, realized by ``032_fuse_finalize``): an
+        # authoritative pin threads onto every row; otherwise every DEFERRED-KERNEL split row
+        # (``g<w>k`` — the partial + finalize pair) gains a ``fuse``-stamped mirror sibling — the
+        # sink-offer idiom: evidence-only (withheld from the model fallback), so an unseeded shape
+        # never fuses cold, and a golden spelling ``{REDUCE: g8k/b128t, PLACE@fin: fuse}`` has a
+        # row to match (``_golden_matches_row`` refuses a PLACE-bearing golden against rows that
+        # never offered the decision). Atomic splits (``g<w>a``) have no finalize kernel — no mirror.
+        fin_pin = PLACE.narrow_at("fin")
+        if fin_pin in ("cut", "fuse"):
+            rows = [{**r, "PLACE@fin": fin_pin} for r in rows]
+        else:
+
+            def _deferred_split(r: dict) -> bool:
+                spec = r.get(_at(REDUCE, kaxis), "")
+                return _is_splitk_spec(spec) and ReducePlan.parse(spec).finalize == "kernel"
+
+            rows = [*rows, *({**r, "PLACE@fin": "fuse"} for r in rows if _deferred_split(r))]
         if not rows:
             # A computed-A (fused-cone) contraction with no legal warp row (fp32, no atoms, bad
             # geometry, over-budget slabs) contributes nothing — the recognizer's ``Map``-form
@@ -1468,6 +1531,10 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
             # ``evidence_pick`` never joined the measured -O3 rows, and greedy shipped the online
             # model's unbenched per-cell extrapolation (the 2026-07-07 5090 gate's 330x fp16 miss).
             op_knobs = {**knobs, **{k: v for k, v in row.items() if k.startswith("S_")}}
+            if "PLACE@fin" in row:
+                # The finalize placement must reach the op: ``030_split_reduce`` threads it onto
+                # the finalize tile (``_fin_knobs``) where ``032_fuse_finalize`` reads the stamp.
+                op_knobs["PLACE@fin"] = row["PLACE@fin"]
             # The rasterization codec rides op-level knobs (kernel-scoped launch-order metadata,
             # not a per-node schedule structure) — the kernel materializer's ``grid_tile`` seal
             # reads it back off the TileOp and stamps the grouped decode on the ``Tile``.
@@ -1488,8 +1555,15 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
 
         # The worker split (``WSPEC``, bare/root-global) is the fourth level, under the pipeline it
         # splits — option-0 ``""`` is uniform SIMT. The launch-order codec (``RASTER``, also bare —
-        # one grid, one order) is the fifth — option-0 ``""`` is the flat N-fastest raster.
-        levels = [_level(_at(k, kaxis)) for k in (TILE, STAGE, REDUCE)] + [_level(WSPEC.name), _level(RASTER.name)]
+        # one grid, one order) is the fifth — option-0 ``""`` is the flat N-fastest raster. The
+        # finalize placement (``PLACE@fin``) is the sixth: a ``fuse``-stamped mirror row is
+        # schedule-identical to its base on every codec level, so without its own level the two
+        # collapse into one leaf and the mirror (and any golden spelling it) is unreachable.
+        levels = [_level(_at(k, kaxis)) for k in (TILE, STAGE, REDUCE)] + [
+            _level(WSPEC.name),
+            _level(RASTER.name),
+            _level("PLACE@fin"),
+        ]
         return build_fork_tree(params=rows, levels=levels, materialize=_materialize)
     # A TWISTED streaming reduce whose per-step partial is a contraction pair (the flash tree,
     # :func:`_twisted_pair`) offers its structurally-different schedules as ONE prior-ranked fork:
@@ -1563,7 +1637,20 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         # recognition nodifies it to a computed-A Contraction fork sibling, ``010_recognize``'s
         # ``bind_prologue_contraction`` merge, so it arrives at this dispatch as CONTRACTION.)
     specs = _reduce_specs(tile, place)
-    return [_option(tile, place, spec, name, knobs) for spec in specs]
+    # The deferred-finalize placement mirror on the monoid / demoted-PLANAR reduce tier — the
+    # same offer the contraction arm makes on its split rows (see the ``PLACE@fin`` block above):
+    # a pin threads onto every option; unpinned, each ``g<w>k`` deferred-kernel spec gains a
+    # ``fuse``-stamped sibling (evidence-only; the M=1 decode matvecs fork here).
+    fin_pin = PLACE.narrow_at("fin")
+    if fin_pin in ("cut", "fuse"):
+        return [_option(tile, place, spec, name, {**knobs, "PLACE@fin": fin_pin}) for spec in specs]
+    out = [_option(tile, place, spec, name, knobs) for spec in specs]
+    out += [
+        _option(tile, place, spec, name, {**knobs, "PLACE@fin": "fuse"})
+        for spec in specs
+        if _is_splitk_spec(spec) and ReducePlan.parse(spec).finalize == "kernel"
+    ]
+    return out
 
 
 _CHAIN_MAX_D = 64  # register-vector budget: the chain holds the whole output row per thread

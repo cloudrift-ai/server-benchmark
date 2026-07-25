@@ -76,6 +76,32 @@ the std lane's structural f32-accumulate ceiling (static std m4096 gate_up recor
 4416 — no better std schedule exists at that width). Per-Dim-hint rows would only matter if a
 future card/lane shows a schedule that flips between hints — not the case on the 5090 today.
 
+## WS5 — layout-blind ShapeKey cold-poison hardening (compiler)
+
+The recurring bug class of this cycle — THREE separate incidents in one day: qk_global_cat m256
+.lin cold-picked the transposed ``b<n>t`` band at 21.5 ms, gate_up m256 .lin timed out on
+``g16k/b256t``, and gate_up_cat.m64.lin hit 16.9 ms (the catalog's 109x case). Mechanism: ShapeKey
+is layout-blind, the ``b<n>t`` band realizes on BOTH orientations (it is only CORRECT-fast on
+k-major B), and a cold/tied pick can land it on the row-major operand (and symmetrically, plain
+``b<n>`` rows poison the k-major side — the m1 interleaved-row removal). Today's mitigation is
+per-shape golden rows; the structural fix candidates, in preference order:
+1. **Realization gate**: the transposed emitter refuses when B's reduce-axis stride IS the
+   fastest-varying one (mirror of the enumeration condition — enumeration offers bt only on
+   k-major B, but pins/goldens/evidence can still select it on the wrong operand); same gate,
+   inverted, for plain ``b<n>`` on k-major B at the matvec tier.
+2. A layout bit in the evidence join (featurize B's reduce-axis stride class — the transposed
+   plan's featurizer item that never landed), so cross-orientation rows stop tying.
+Verify with the catalog: no case may cold-resolve >2x off its recorded row on either orientation.
+
+## WS6 — c=4 TTFT scheduling structure (beyond goldens; the last stock TTFT win)
+
+WS1's closure leaves fm c=4 TTFT (1405-class vs stock 1084) explained by step SHAPE, not kernels:
+the 2-chunk queue model prices ~1256 ms and the excess is how mixed steps interleave. This is
+vLLM-side step-shape work (admission/chunk-boundary behavior seen from the plugin), NOT a golden
+round — investigate only after WS2 lands (decode drag is a confounder in every c=4 TTFT
+measurement). Instruments: the classified trace per step-type + vLLM's scheduler counters.
+Explicitly out of scope for golden tuning; may conclude "documented residual".
+
 ## Per-WS verification
 
 Unchanged from the golden method: manual pinned --ab on the row's own snippet, audits

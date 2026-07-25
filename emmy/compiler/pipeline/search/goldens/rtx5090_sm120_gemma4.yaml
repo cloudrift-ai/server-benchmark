@@ -207,16 +207,32 @@ configs:
   # reseed (serving A/B session). STAGE is deliberately UNRECORDED: the fork's only transports are
   # the computed-A d*/sync fills, which the plain-matmul stage catalog cannot spell (the permanence
   # test enumerates gmem/cp/tma only) — the TILE+REDUCE prefix is unambiguous on this fork.
+  # 2026-07-25 re-record: the cone-bearing w1x8/g4k row above-described is retired — the sym
+  # down fork now CUTS (mlp_down_fused.dynM below), and this key serves the cut's PLAIN consumer,
+  # which rides the staged transports again (the w1x8 row poisoned it to 1797 us cold). Benched on
+  # the plain .lin dyn snippet at the 512 hint (std g2k 334.9 vs eager 309; fm g2k 245.9 = 1.26x).
   - kernel: matmul
     name: gemma4_12b.mlp_down.dynM
     M: 512
     N: 3840
     K: 15360
     dtype: 'fp16'
+    trans_b: true
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', WSPEC: ''}
-    emmy_us: 530.5
-    cublas_us: 286.3
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 339.2
+    cublas_us: 309.0
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.dynM
+    M: 512
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    trans_b: true
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 245.9
+    cublas_us: 309.0
   # ---- attention (flash, hd256) ----------------------------------------------------------------------
   # Values re-measured 2026-07-13 after the causal tile-skip landed (the triangular kv bound — each CTA
   # streams only min(seq, (grid_m+1)·rows) keys; 3x reproduced, ≤0.3 µs spread): at THIS shape (grid 128
@@ -3264,6 +3280,108 @@ configs:
     emmy_us: 3292.3
     cublas_us: 4416.8
 
+  # ---- MERGED keys at dynM (the SYMBOLIC twins — every MIXED chunked-prefill step rides these:
+  # decode tokens + a prefill chunk in one step never equals the static widths). The 2026-07-25
+  # c=64 trace attributed 21% of wall to this tier: the deployed fused forms ran 1302 us (gate_up,
+  # T~319) vs their static-256 siblings' 621 — the cut + d2/tma/ring plain consumers close it
+  # (gate_up 1039->662, qkv 304->205, qk_global 303->~210, down-cone 530->462 at T=319; the exact-
+  # 4096 mixed steps ride the STATIC m4096 twin, so the symbolic tier only sees small-to-mid T).
+  # Consumer rows benched on their own plain .lin dyn snippets at the 512 hint; fm rows recorded where
+  # faster (fm-never-loses): the hybrid-accum tiles win prefill-class M, the article's 1.3-1.6x.
+  - kernel: matmul
+    name: gemma4_12b.qkv_cat.dynM
+    M: 512
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 204.3
+    cublas_us: 180.0
+  - kernel: matmul
+    name: gemma4_12b.qkv_cat.dynM
+    M: 512
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 124.3
+    cublas_us: 180.0
+  - kernel: matmul
+    name: gemma4_12b.qk_global_cat.dynM
+    M: 512
+    N: 8704
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 203.3
+    cublas_us: 205.0
+  - kernel: matmul
+    name: gemma4_12b.qk_global_cat.dynM
+    M: 512
+    N: 8704
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    dynamic: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 125.5
+    cublas_us: 205.0
+
+
+  # The fused dyn forks CUT (bare ``PLACE@cone=cut`` totals at the 512 hint, consumers deploying
+  # the .dynM goldens above/below): norm_qkv 210.8 (eager 215; deployed-fused-cold 304),
+  # norm_qk_global 211.9 (218), norm_gate_up 656.4 (645; deployed 1039), down-cone 353.8 (345;
+  # deployed 530). The fm lane's consumer rows push further (qkv 124, gate_up 362 class).
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qkv.dynM
+    M: 512
+    H: 3840
+    N: 8192
+    dtype: 'fp16'
+    trans_b: true
+    dynamic: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 210.8
+    cublas_us: 215.0
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qk_global.dynM
+    M: 512
+    H: 3840
+    N: 8704
+    dtype: 'fp16'
+    trans_b: true
+    dynamic: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 211.9
+    cublas_us: 218.0
+  - kernel: norm_linear
+    name: gemma4_12b.norm_gate_up.dynM
+    M: 512
+    H: 3840
+    N: 30720
+    dtype: 'fp16'
+    trans_b: true
+    dynamic: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 656.4
+    cublas_us: 645.0
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.dynM
+    M: 512
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    dynamic: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 353.8
+    cublas_us: 345.0
 
   # ---- M=1 transposed (serving-layout) consumer rows: the b<n>t band at the k-major
   # orientation the twins deploy (plain matmul, no trans_b — replay benches this layout).

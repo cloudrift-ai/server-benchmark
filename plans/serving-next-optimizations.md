@@ -57,13 +57,16 @@ the fresh `_tune/artbench-m1/kernels/{std,fm}/golden_bench.json`, then burn down
   (14 µs × 48/step ≈ 1.8% of the c=64 window). Add a word-count cap (a few KB per the design
   comment) above which delegation is refused and the MEMSET node stays. Unit test + c=64 A/B.
 
-## WS4 — dyn large-T coverage (the one-row-per-key limit)
+## WS4 — dyn large-T coverage — CLOSED BY ANALYSIS (2026-07-25)
 
-The new dynM consumer rows are tuned at the 512 hint; ragged steps near T≈4096 reuse them (the rag
-trace's grid-15360 5.2 ms class predates the fix, but the std g2k row is unverified at T≈4095).
-Verify each dyn consumer at T=4095 with pinned --ab; if the 512-hint schedule is >15% off the
-m4096-class winner there, the honest fix is per-Dim-hint rows (a second dyn row keyed by hint —
-schema work: today one dyn key carries ONE deployable row set benched at DEFAULT_SEQ_HINT).
+A pinned ``--dynamic`` bench always runs at DEFAULT_SEQ_HINT (the pipeline re-binds symbolic axes
+to the hint), so a direct T=4095 verify is impossible through ``emmy run --bench``. The static
+m4096 goldens close the question instead: the fm dyn consumer rows carry the SAME schedule family
+as the m4096 fm winners (``f16_f16/w4x2/f4x8/k4`` + ``d2/tma/ring``, the 3292 µs class on
+gate_up), so fm ragged large-T steps are already at their known optimum; the std dyn rows sit at
+the std lane's structural f32-accumulate ceiling (static std m4096 gate_up records 7352 vs cuBLAS
+4416 — no better std schedule exists at that width). Per-Dim-hint rows would only matter if a
+future card/lane shows a schedule that flips between hints — not the case on the 5090 today.
 
 ## Per-WS verification
 

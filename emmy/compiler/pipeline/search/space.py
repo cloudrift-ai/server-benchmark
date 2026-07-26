@@ -512,8 +512,11 @@ def coop_reduce_moves() -> list[str]:
     declines a ``b<n>`` wider than the row has work for, so enumerating them is safe on small K.
     The ``b<n>t`` transposed band is the k-major-B matvec partition (warp lanes sweep the output
     axis — the M=1 gemv tier's coalescing fix); ``_reduce_candidates`` gates it structurally
-    (plain contraction, 32-divisible inner free axis) and MEASUREMENT decides the layout — a
-    row-major-B shape simply benches it slower."""
+    (plain contraction, 32-divisible inner free axis) AND by layout: the band is offered only on
+    k-major B, and plain ``b<n>`` only on K-contiguous B at the matvec tier. Measurement used to
+    decide the layout, but ShapeKey is layout-blind — cross-orientation golden/evidence rows tie,
+    and a cold/tied pick landed the band on the wrong operand three times in one day (10-100×
+    regressions; the WS5 cold-poison hardening). An env pin bypasses the gate (exploration)."""
     return [
         "b4",
         "b8",

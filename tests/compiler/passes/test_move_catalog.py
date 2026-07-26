@@ -93,7 +93,12 @@ def test_schedule_leaf_set_equals_catalog():
     # The per-cell tier offers serial + every coop/ILP move whose fold fits the reduce extent
     # (``_reduce_specs``'s ``coop <= extent and reg <= extent`` gate) — so the wide ``b64``–``b512``
     # folds drop out on this K=64 matmul, exactly as they would on any reduce narrower than the fold.
-    legal_coop = {m for m in coop_reduce_moves() if (p := ReducePlan.parse(m)).coop <= 64 and p.reg <= 64}
+    # Layout gates the bands too (WS5): this fixture's B is canonical ``B[k, n]``, so the plain
+    # ``b<n>`` coop moves (lanes interleaved along K — uncoalesced on k-major B) are refused and
+    # only the transposed ``b<n>t`` band (lanes sweep N) plus the reg-only ILP moves survive.
+    legal_coop = {
+        m for m in coop_reduce_moves() if (p := ReducePlan.parse(m)).coop <= 64 and p.reg <= 64 and (p.coop_transposed or p.coop == 1)
+    }
     assert {str(family_value(r, "REDUCE")) for r in percell} == {"", *legal_coop}
     assert all(family_value(r, "STAGE") == "" for r in percell), "per-cell has no operand slab to stage (decided-empty)"
     # Every tiled tile is the full (resolved stages) × (serial + split widths) product, the split

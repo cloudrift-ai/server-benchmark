@@ -48,6 +48,7 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.tile import Contraction, Map, Placement, ReducePlan, Reduction, TileOp, TilePlan
 from emmy.compiler.ir.tile.ir import gmem_row_stride
 from emmy.compiler.ir.tile.ops import axis_role, nodify_reduce, reduce_loop
+from emmy.compiler.ir.tile.ops import lower as lower_op
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import map_cone, semiring_binding
 from emmy.compiler.pipeline.passes.lowering.tile._carrier import projection_distributes
@@ -201,6 +202,39 @@ def _coop_carrier(kernel):
     return rl
 
 
+def _matvec_b_kstride(kernel, carrier, place) -> int | None:
+    """B's gmem stride along the reduce axis at the per-cell MATVEC tier, or ``None`` when no
+    layout gate applies. A contraction demoted to PLANAR (the M=1 recognizer fallback) carries
+    BOTH a vector operand — a load along the reduce axis touching no non-unit free axis (A) —
+    and a matrix operand indexed by the reduce axis AND a non-unit free axis (B); only that
+    two-operand shape is gated. A plain rowwise monoid reduce (softmax / rms_norm / bare mean:
+    ONE input, indexed by row and reduce alike) has no vector operand and returns ``None``, as
+    do disagreeing multi-B strides and ``gmem_row_stride``'s underivable cases. ``1`` means the
+    reduce axis is B's fastest-varying dimension (the serving ``F.linear`` N×K layout); ``>1``
+    means k-major (canonical ``B[k, n]``)."""
+    nonunit = {a.name for a in place.free if not (a.extent.is_static and a.extent.as_static() == 1)}
+    k_name = carrier.axis.name
+
+    def loads(stmts):
+        for s in stmts:
+            if isinstance(s, Load):
+                yield s
+            for b in s.nested():
+                yield from loads(b)
+
+    a_seen = False
+    strides = set()
+    for ld in loads(lower_op(kernel.op)):
+        used = set().union(*(e.free_vars() for e in ld.index)) if ld.index else set()
+        if k_name not in used:
+            continue
+        if used & nonunit:
+            strides.add(gmem_row_stride(ld, k_name, kernel.inputs))
+        else:
+            a_seen = True
+    return strides.pop() if a_seen and len(strides) == 1 else None
+
+
 def _reduce_specs(kernel, place) -> list[str]:
     """The candidate ``REDUCE`` codec strings for ``kernel``, applying the decision
     hierarchy. A kernel the cooperative tier can't partition (pointwise, or a twisted /
@@ -226,6 +260,19 @@ def _reduce_specs(kernel, place) -> list[str]:
     free = prod(_hint_extent(a) for a in place.free) if place.free else 1
     tail = list(kernel.op.body) if isinstance(kernel.op, Map) else []
     coop = _pick_coop(extent, free, has_tail=_has_contraction_tail(tail))
+    # The layout gate (WS5, the cold-poison hardening): at the matvec tier the coop bands are only
+    # coalesced on ONE B orientation — plain ``b<n>`` interleaves lanes along K (fast only when K is
+    # B's fastest-varying stride, the serving ``F.linear`` layout), the transposed ``b<n>t`` sweeps
+    # lanes along the output axis (fast only on k-major B, the canonical ``.t`` form). The old
+    # "measurement decides" stance let a cold/tied pick land a band on the wrong operand (three
+    # 10-100× incidents in one day: qk_global_cat/gate_up m256 ``.lin`` on the ``b<n>t`` band, the
+    # gate_up_cat.m64.lin 16.9 ms catalog case) because ShapeKey is layout-blind — cross-orientation
+    # golden/evidence rows tie. Enumeration is the single choke point every tier resolves through
+    # (goldens and evidence pick among OFFERED rows), so the gate lives here; an env pin stays
+    # authoritative and un-gated (exploratory pinned benches on either layout keep working).
+    kstride = _matvec_b_kstride(kernel, carrier, place)
+    if coop > 1 and kstride is not None and kstride != 1:
+        coop = 1  # the heuristic option-0 is a plain band too — uncoalesced on a k-major B
     cands = [f"b{coop}" if coop > 1 else ""]  # conservative heuristic pick first (cold greedy → option-0)
     # The transposed band (and its g-split composites) is the k-major MATVEC partition. The
     # M=1 cut consumers land on THIS tier (a contraction at M=1 demotes to PLANAR — the
@@ -250,6 +297,10 @@ def _reduce_specs(kernel, place) -> list[str]:
         if p.coop_transposed or p.needs_split:
             if not (bt_ok and p.coop_transposed and p.coop % 32 == 0 and (not p.needs_split or k_static % p.cta == 0)):
                 continue
+            if kstride == 1:
+                continue  # WS5: ``b<n>t`` lane-sweeps the output axis — uncoalesced when K is B's fastest stride
+        elif p.coop > 1 and kstride is not None and kstride != 1:
+            continue  # WS5: plain ``b<n>`` interleaves lanes along K — uncoalesced on a k-major B
         if p.coop <= extent and p.reg <= extent and move not in cands:
             cands.append(move)
     if "" not in cands:
@@ -522,16 +573,19 @@ def _reduce_candidates(kernel, place, plan: TilePlan, probe: Contraction | None 
                 # The ``b<n>t`` lane swap needs the structure its emitter assumes: a plain
                 # CONTRACTION per-cell tier (``probe`` built — the fused monoid rows ride
                 # shared-row staging the transposed layout can't), a static innermost free
-                # axis divisible by the 32-lane sweep, and a 32-multiple coop. Layout FIT
-                # (is B actually k-major?) is measurement's job, not a gate. A composite
+                # axis divisible by the 32-lane sweep, and a 32-multiple coop. A composite
                 # ``g<w>k/b<n>t`` (the deployable long-K form) additionally needs the split
-                # divisibility the plain split moves check.
+                # divisibility the plain split moves check. Layout is a GATE too (WS5): the
+                # band lane-sweeps the output axis, so it is only coalesced on k-major B —
+                # offering it on an N-major (``F.linear``) operand let cold/tied picks land
+                # 10-100× rows (the layout-blind ShapeKey cold-poison incidents).
                 # The innermost NON-UNIT free axis — the m1 recognizer's synthesized
                 # ``_um`` unit axis can sit innermost (extent 1), and it is not the axis
                 # the transposed emitter sweeps.
                 inner = next((a for a in reversed(place.free) if not (a.extent.is_static and a.extent.as_static() == 1)), None)
                 if not (
                     probe is not None
+                    and not probe.b_trans
                     and p.coop % 32 == 0
                     and inner is not None
                     and inner.extent.is_static
@@ -539,6 +593,8 @@ def _reduce_candidates(kernel, place, plan: TilePlan, probe: Contraction | None 
                     and (not p.needs_split or k % p.cta == 0)
                 ):
                     continue
+            elif p.coop > 1 and probe is not None and not probe.b_trans:
+                continue  # WS5: plain ``b<n>`` interleaves lanes along K — uncoalesced on canonical ``B[k, n]``
             out.append(move)
     free = prod(_hint_extent(a) for a in place.free) if place.free else 1
     # A computed-A (fused-cone) contraction splits over K via the REDUNDANT-STATISTIC form: the

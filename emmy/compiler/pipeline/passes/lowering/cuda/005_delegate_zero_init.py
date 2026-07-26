@@ -25,6 +25,9 @@ Correctness:
   graph inputs / constants) is skipped — nothing precedes it in the capture.
 - **Static shapes only**: the word count bakes into the source; a symbolic-shaped accumulator
   keeps the runtime memset.
+- **Bounded size** (``_MAX_DELEGATED_WORDS``): CTA 0 zeroes serially, so past the MEMSET node's
+  break-even (~90 KB on the 5090) delegation costs more than it saves — a too-large accumulator
+  keeps the runtime memset.
 - **Name re-suffix**: kernel names were content-stamped BEFORE this rewrite, and launches
   resolve kernels by name (first source wins) — two same-named predecessors delegated
   different-sized buffers would run one body with the other's baked word count. The suffix
@@ -43,6 +46,13 @@ from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.cuda._helpers import atomic_outputs
 
 PATTERN = [Pattern("root", KernelOp)]
+
+# Delegation cap: CTA 0 zeroes the prologue SERIALLY (~70 B/ns measured on the 5090 — the m64
+# gate_up workspace's 983 KB burned 14 µs/launch, 1.8% of the c=64 decode window), while the
+# runtime MEMSET node it replaces costs ~1.3 µs regardless of size — break-even ≈ 90 KB. Past
+# the cap the buffer keeps its runtime memset; the tiny RowAccum/stat buffers and small-M
+# accumulator outputs the delegation was built for sit far under it.
+_MAX_DELEGATED_WORDS = 16384  # 64 KB
 
 
 def rewrite(match: Match, root: Node) -> KernelOp | None:
@@ -72,6 +82,8 @@ def rewrite(match: Match, root: Node) -> KernelOp | None:
             nbytes *= d.as_static()
         if nbytes % 4:
             continue  # raw-word zeroing needs 4-byte multiples; every real accumulator is one
+        if nbytes // 4 > _MAX_DELEGATED_WORDS:
+            continue  # one-CTA serial zeroing past the memset break-even — keep the MEMSET node
         prologues.append(ZeroPrologue(dst=b, words=nbytes // 4))
         delegated.append(b)
     if not prologues:

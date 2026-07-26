@@ -15,11 +15,10 @@ from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 
 
-@pytest.fixture(scope="module")
-def chained_atomic():
-    """``(x @ w1) @ w2`` fp16 with ``REDUCE=g4a`` pinned on every matmul: two atomic kernels,
-    the first with no kernel predecessor (keeps its memset), the second delegating to the
-    first."""
+def _compile_chain(n: int):
+    """``(x @ w1) @ w2`` fp16 with ``REDUCE=g4a`` pinned on every matmul — two atomic kernels
+    whose outputs are ``32×n`` (the delegation-cap lever: 512 → 32 KB per accumulator, well
+    under ``_MAX_DELEGATED_WORDS``; 3840 → 240 KB, past it)."""
     mp = pytest.MonkeyPatch()
     # Per-knob vars, NOT EMMY_KNOBS: the aggregate splat runs at knob-module IMPORT time, long
     # before this fixture — and calling apply_knobs_env here would write env keys monkeypatch
@@ -33,15 +32,22 @@ def chained_atomic():
 
         code = (
             "x = torch.randn(32,3840,dtype=torch.float16)\n"
-            "w1 = torch.randn(3840,3840,dtype=torch.float16)\n"
-            "w2 = torch.randn(3840,3840,dtype=torch.float16)\n"
+            f"w1 = torch.randn(3840,{n},dtype=torch.float16)\n"
+            f"w2 = torch.randn({n},{n},dtype=torch.float16)\n"
             "(x @ w1) @ w2"
         )
         graph, _slug, _bundle = graph_from_code(code)
         ctx = Context.from_target((12, 0), gpu_name="NVIDIA GeForce RTX 5090")
-        yield Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx)
+        return Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx)
     finally:
         mp.undo()
+
+
+@pytest.fixture(scope="module")
+def chained_atomic():
+    """The small chain: the first matmul has no kernel predecessor (keeps its memset), the
+    second delegates its 32 KB accumulator to the first."""
+    return _compile_chain(512)
 
 
 def _cuda_ops(g):
@@ -71,3 +77,14 @@ def test_first_atomic_keeps_its_memset(chained_atomic):
     delegator = first[0]
     assert delegator.kernel_name != ""
     assert any(op.zero_outputs for op in ops.values()), "the capture's first atomic kernel keeps its runtime memset"
+
+
+def test_oversized_accumulator_keeps_its_memset():
+    """A 240 KB accumulator (32×3840 fp16) sits past ``_MAX_DELEGATED_WORDS`` — one CTA zeroing
+    it serially costs ~10× the MEMSET node it would replace (the m64 gate_up workspace burned
+    14 µs/launch at 983 KB), so delegation is refused and every atomic output keeps its runtime
+    memset."""
+    ops = _cuda_ops(_compile_chain(3840))
+    assert not any(op.zero_prologues for op in ops.values()), "no kernel may carry a delegated zero past the cap"
+    atomics = [op for op in ops.values() if op.zero_outputs]
+    assert len(atomics) >= 2, "both atomic matmuls keep their runtime memsets"

@@ -80,8 +80,36 @@ EXPECTED_GAPS = {
         ShapeKey(free_prod=16384, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=32768, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=65536, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        # 2026-07-26: the m2048 (chunk-quantum) width joined the audit — its per-head qk-norm
+        # rms aux keys, same greedy-near-optimal class (measured: greedy b128 within ~6% of
+        # the b64 best, us-class); every m2048 matmul/fused/glue fork is golden-covered.
+        ShapeKey(free_prod=4194304, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=16777216, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=1048576, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        # ... and the m2048 analogs of the m4096 reduce-0 warp aux forks + the n3840 pointwise
+        # (the same deferred/aux fork class as the 33554432/35651584/62914560/15728640 m4096
+        # entries above).
+        ShapeKey(free_prod=16777216, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
+        ShapeKey(free_prod=17825792, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
+        ShapeKey(free_prod=31457280, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=15360),
+        ShapeKey(free_prod=7864320, reduce_max=0, is_warp=False, is_dyn=False, kind="", free_max=3840),
     },
     "NVIDIA GeForce RTX 4090": {
+        # 2026-07-26: the m2048 (chunk-quantum) width joined the audit (parity campaign round
+        # 3). The 5090 seeded its m2048 golden set the same day (_tune/m2048/ sweeps); the
+        # 4090's rides the same deferred mirror re-tune, so every m2048 fork is uncovered
+        # there — merged/canonical matmuls, fused norm->merged forms, and the rms/qknorm
+        # sweeps below. Burn down with the m8 mirror once a 4090 is back.
+        ShapeKey(free_prod=1048576, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=16777216, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
+        ShapeKey(free_prod=16777216, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
+        ShapeKey(free_prod=16777216, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=17825792, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
+        ShapeKey(free_prod=17825792, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
+        ShapeKey(free_prod=4194304, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=62914560, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
+        ShapeKey(free_prod=7864320, reduce_max=15360, is_warp=True, is_dyn=False, kind="fused", free_max=3840),
+        ShapeKey(free_prod=7864320, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         # 2026-07-25: the m8 (bucket-8 decode) width joined the audit. The 5090 seeded its m8
         # golden set the same day (WS2, serving-next); the 4090's is deferred with the mirror
         # re-tune (box lost its GPU at the PCI level), so EVERY m8 fork is uncovered there —

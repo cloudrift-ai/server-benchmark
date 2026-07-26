@@ -179,28 +179,47 @@ class EmmyGenModel(nn.Module):
         from emmy.compiler.trace.dynamic import DYNAMIC_DIM_MAX
 
         max_batched = vllm_config.scheduler_config.max_num_batched_tokens
-        if max_batched and max_batched > DYNAMIC_DIM_MAX:
+        decode_bucket = emmy_config.gen_decode_bucket()
+        # RIDER HEADROOM: mnbt may sit up to decode_bucket ABOVE the dynamic-dim cap — the
+        # chunk-twin + decode-twin row SPLIT covers T in (DYNAMIC_DIM_MAX, DYNAMIC_DIM_MAX
+        # + bucket] (``EmmyGenRunner.rider_width``), so a full chunk step keeps carrying
+        # its decode riders instead of freezing every decoding request for the chunk.
+        rider = max(decode_bucket, 0)
+        if max_batched and max_batched > DYNAMIC_DIM_MAX + rider:
             raise ValueError(
-                f"max_num_batched_tokens={max_batched} exceeds DYNAMIC_DIM_MAX ({DYNAMIC_DIM_MAX}); "
-                f"serve with --max-num-batched-tokens {DYNAMIC_DIM_MAX} or lower"
+                f"max_num_batched_tokens={max_batched} exceeds DYNAMIC_DIM_MAX + decode_bucket "
+                f"({DYNAMIC_DIM_MAX} + {rider}); serve with --max-num-batched-tokens {DYNAMIC_DIM_MAX + rider} or lower"
             )
 
-        # ``max_tokens`` sizes the symbolic programs' device buffers at the widest step vLLM
-        # can schedule — the device-resident PREFILL path (``run_device_sym``) needs fixed
-        # capacity buffers; without it prefill falls back to the per-layer host numpy hops.
-        # The prefill-chunk twin defaults to the mnbt width (chunked prefill fills steps to
-        # it whenever the queue is deep); EMMY_GEN_PREFILL_BUCKET=0 disables, an explicit
-        # value overrides.
+        # ``max_tokens`` sizes the symbolic programs' device buffers at the widest step they
+        # serve (the dynamic-dim cap; wider steps are the split's) — the device-resident
+        # PREFILL path (``run_device_sym``) needs fixed capacity buffers; without it prefill
+        # falls back to the per-layer host numpy hops. Capacity is pinned at the CAP, not at
+        # mnbt: the pack key carries `max_tokens`/`prefill_bucket`, so tying them to the
+        # scheduler knob would recompile the whole program set (and cold-build twins at
+        # unseeded golden widths) every time mnbt is tuned per lane. The prefill-chunk twin
+        # defaults to that same width (chunked prefill fills steps to mnbt whenever the
+        # queue is deep); EMMY_GEN_PREFILL_BUCKET=0 disables, an explicit value overrides.
+        capacity = DYNAMIC_DIM_MAX if max_batched else None
         prefill_bucket = emmy_config.gen_prefill_bucket()
         if prefill_bucket < 0:
-            prefill_bucket = max_batched or 0
+            prefill_bucket = capacity or 0
         self.runner = EmmyGenRunner.create(
             model_id=mc.model,
             dtype_str=_trunk_dtype_str(mc.dtype),
-            decode_bucket=emmy_config.gen_decode_bucket(),
-            max_tokens=max_batched or None,
+            decode_bucket=decode_bucket,
+            max_tokens=capacity,
             prefill_bucket=prefill_bucket,
         )
+        if max_batched and max_batched > max(self.runner.prefill_capacity, self.runner.prefill_bucket + self.runner.rider_width):
+            # The over-cap headroom was granted on the promise of the split; if the twin
+            # families it needs failed to build, an over-wide step would silently take the
+            # per-layer host numpy path — refuse the boot instead.
+            raise ValueError(
+                f"max_num_batched_tokens={max_batched} needs the chunk+decode twin split, which is "
+                f"unavailable (prefill_bucket={self.runner.prefill_bucket}, rider_width={self.runner.rider_width}); "
+                f"serve with --max-num-batched-tokens {self.runner.prefill_capacity} or lower"
+            )
         n_layers = self.runner.num_layers
 
         sliding_window = getattr(config, "sliding_window", None)
@@ -281,12 +300,14 @@ class EmmyGenModel(nn.Module):
         ids = input_ids.clamp(0, self.config.vocab_size - 1)
         t = int(ids.shape[0])
         # Device-resident forward for EVERY width the compiled programs cover: decode
-        # (T <= bucket, the captured static twins) AND prefill / mixed chunked-prefill steps
-        # (bucket < T <= prefill_capacity, the symbolic programs via ``run_device_sym``) — no
-        # per-layer host numpy round-trip. The numpy path below survives only as the fallback
-        # for a runner built without capacity (the standalone oracle) or an over-capacity T.
+        # (T <= bucket, the captured static twins), prefill / mixed chunked-prefill steps
+        # (bucket < T <= prefill_capacity, the symbolic programs via ``run_device_sym``),
+        # AND rider-carrying full-chunk steps (prefill_bucket < T <= prefill_bucket +
+        # rider_width, the chunk+decode twin row split) — no per-layer host numpy
+        # round-trip. The numpy path below survives only as the fallback for a runner built
+        # without capacity (the standalone oracle) or an over-coverage T.
         decode_ok = self.runner.has_device_decode and 0 < t <= self.runner.decode_bucket
-        prefill_ok = 0 < t <= self.runner.prefill_capacity
+        prefill_ok = 0 < t <= max(self.runner.prefill_capacity, self.runner.prefill_bucket + self.runner.rider_width)
         if decode_ok or prefill_ok:
             return self._forward_device(ids, positions)
         ids_np = ids.cpu().numpy()

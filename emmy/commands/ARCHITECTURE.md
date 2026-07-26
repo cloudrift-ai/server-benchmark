@@ -250,8 +250,11 @@ laddered up to `--max-num-seqs` — sizes above the decode bucket capture the de
 `serving/ARCHITECTURE.md`); pass vLLM's own `--enforce-eager` to opt out (forced automatically when
 `EMMY_GEN_DECODE_BUCKET=0`). The emmy generative arm also defaults `--gpu-memory-utilization` to **0.97** (its
 cupy residents are invisible to vLLM's torch-only profiler, so the 0.90 line can fail the min-KV fit at long
-model lens; stock keeps 0.90), and `EMMY_SERVING_BATCHED=1` embedding serving defaults `--max-num-batched-tokens`
-to `max_num_seqs × max_model_len` so scheduler steps can fill the batch.
+model lens; stock keeps 0.90) and `--max-num-batched-tokens` to **the dynamic-dim cap + the decode bucket** — the
+bucket-sized rider headroom is covered by the chunk+decode twin row split (`serving/ARCHITECTURE.md`), so full
+chunk steps keep carrying their decode riders; an explicit value past that cap is rejected. `EMMY_SERVING_BATCHED=1`
+embedding serving defaults `--max-num-batched-tokens` to `max_num_seqs × max_model_len` so scheduler steps can fill
+the batch.
 
 ```bash
 emmy serve Qwen/Qwen3-Embedding-0.6B --gpu-memory-utilization 0.8   # plugin server (Ctrl-C to stop)

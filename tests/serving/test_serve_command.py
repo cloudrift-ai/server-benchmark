@@ -147,7 +147,9 @@ def test_serve_cmd_generate_branch():
     assert cmd[cmd.index("--runner") + 1] == "generate"
     assert '{"architectures": ["EmmyGenModel"]}' in cmd
     assert cmd[cmd.index("--dtype") + 1] == "float16"  # forced for seam coherence
-    assert cmd[cmd.index("--max-num-batched-tokens") + 1] == "4096"  # capped at the dynamic-dim limit
+    # Default = dynamic-dim cap + decode bucket (16): the rider headroom the chunk+decode
+    # twin split covers, so full chunk steps keep carrying their decode riders.
+    assert cmd[cmd.index("--max-num-batched-tokens") + 1] == "4112"
     # Whole-step decode capture is the DEFAULT: FULL_DECODE_ONLY graphs, capture sizes
     # following --max-num-seqs (vLLM default 256 when unset); no --enforce-eager.
     assert "--enforce-eager" not in cmd
@@ -196,6 +198,19 @@ def test_serve_cmd_generate_rejects_incompatible_dtype():
 def test_serve_cmd_generate_rejects_oversized_batched_tokens():
     with pytest.raises(ValueError, match="dynamic-dim cap"):
         build_serve_cmd(MODEL, stock=False, vllm_args=["--max-num-batched-tokens", "8192"], generate=True)
+
+
+def test_serve_cmd_generate_batched_tokens_rider_headroom(monkeypatch):
+    # An explicit mnbt inside the rider headroom (cap + bucket) is accepted; one past it is not.
+    monkeypatch.setenv("EMMY_GEN_DECODE_BUCKET", "32")
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=["--max-num-batched-tokens", "4128"], generate=True)
+    assert cmd[cmd.index("--max-num-batched-tokens") + 1] == "4128"
+    with pytest.raises(ValueError, match="dynamic-dim cap"):
+        build_serve_cmd(MODEL, stock=False, vllm_args=["--max-num-batched-tokens", "4129"], generate=True)
+    # Bucket off -> no split coverage: the default falls back to the bare cap.
+    monkeypatch.setenv("EMMY_GEN_DECODE_BUCKET", "0")
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
+    assert cmd[cmd.index("--max-num-batched-tokens") + 1] == "4096"
 
 
 def test_serve_cmd_generate_honors_explicit_batched_tokens():

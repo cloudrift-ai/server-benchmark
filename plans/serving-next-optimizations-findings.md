@@ -1,4 +1,48 @@
-# Serving next optimizations — c=4/small-T decode, per-kernel losers, dyn large-T (planned 2026-07-25)
+# Serving next optimizations — FINDINGS (executed 2026-07-25/26; plan retained below for the record)
+
+## OUTCOME
+
+All six workstreams closed in one session (branch `feature/serving-next-optimizations`, commits
+`f24613f7` + the findings commit; article updated and pushed the same night). WS1/WS4 were closed
+by analysis at planning time; WS2 seeded the M=8 decode tier and the bucket-8 knob won c=4 AND c=8
+on both lanes; WS5 landed the coop-band layout gate (the cold-poison class is structurally dead);
+WS3 landed the `__zp` 64 KB cap; WS6 closed as a documented step-shape residual with trace
+evidence. Full detail in the STATUS/LANDED blocks inline below.
+
+## FINAL consolidated re-bench (fresh packs at `f24613f7`, util 0.96, empty online, -it, 5090)
+
+The re-bench surfaced a **baseline correction bigger than any single workstream**: the article's
+stock lane had been running `--gpu-memory-utilization 0.9` (vs the emmy lanes' 0.96), which capped
+stock's KV capacity enough to throttle admission at c≥8 — its c=64 cell read 1094 tok/s and its
+c=8 TTFT 2068 ms under that handicap, vs **1425 tok/s and 1100 ms at 0.96**. The article now runs
+every vLLM lane at 0.96 and its claims were rewritten to the equal-tuning picture:
+
+| cell (median TTFT / TPOT; tok/s) | stock @0.96 | emmy std | emmy fm | verdict |
+| --- | --- | --- | --- | --- |
+| small_c1 256/256 | 56 / 16.28; 60.8 | 71 / 17.04 | 65 / 17.04 | stock |
+| head_c1 4K/4K | 566 / 17.35; 57.2 | 629 / 18.10 | **475** / 18.10 | fm TTFT −16% |
+| head_c4 (bucket 8) | 1088 / 18.23; 216.4 | 1806 / 18.92; 206.7 | 1363 / 18.85; 208.7 | stock (step-shape) |
+| head_c8 (bucket 8) | 1100 / 20.56; 383.6 | 2428 / 20.75; 375.0 | 1828 / **20.56**; 381.0 | TPOT tie; stock TTFT |
+| rag_c4 8192/256 (bucket 8) | 2429 / 26.24; 112.0 | 2580 / 28.94; 102.6 | 2474 / **24.54**; **117.1** | fm tok/s +4.6% |
+| small_c64 np256 (bucket 64) | 1679 / 28.02; 1425.1 | 3239 / 29.48; 1145.0 | 2865 / 28.53; 1223.2 | stock |
+| c64 single-wave np64 TTFT | 1468 | 1770 | **1324** | fm −10% |
+
+- The old fm rag TTFT "record" (~1996) was an old-environment number, not a bucket effect: the
+  bucket-32 isolation rerun read 2393 vs bucket-8's 2474 — both in the ~2400 class stock also sits
+  in (2429). rag keeps the c=4 bucket-8 knob (TPOT/tok/s favor it; TTFT within noise of b32).
+- Per-kernel catalog (239 cases, `-O3`, 2026-07-25): std geomean **1.169** vs eager (gate ≥1.15 ✓,
+  was 1.11), fm **1.332** (gate ≥1.30 ✓, was 1.25); >1.5x-vs-tcompile losers: std 13 / fm 6, all in
+  the documented classes (std m4096 f32-acc ceiling, fm hd512, µs-class m32 norm fusions, the m8
+  rms tcompile-fusion microbench). The 109x/16.9ms cold-poison case benches at its recorded row.
+- Exit gates, honest scoring: TPOT c1-hold ✓ / c4 18.85 (gate 18.8, met within noise) / c8 20.56
+  (gate 20.5, ditto) / rag 24.5 ≤ 27.3 ✓✓ / c64 28.5 vs 27 ✗ (tok/s up +2% instead); geomeans ✓✓.
+  "fm TTFT beats stock on ALL five points" does NOT survive the corrected baseline — fm wins c1
+  and the c64 wave, stock wins the mixed-step c4/c8 cells (the WS6 documented residual) and rag
+  TTFT ties. The article states exactly this.
+- Deferred, unchanged: the 4090 mirror of every 07-24/25 round (m8 seeding, m1 re-tune for the
+  EXPECTED_DRIFTS burn-down) once the box's GPU passthrough returns, then the image rebake.
+
+# Original plan — c=4/small-T decode, per-kernel losers, dyn large-T (planned 2026-07-25)
 
 Follow-up to plans/decode-parity-closers-findings.md and the 2026-07-25 golden rounds (rms_norm M=1,
 merged dynM, merged m256). State at planning time (gemma-4-12B-it, 5090, article protocol): fm beats

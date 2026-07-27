@@ -33,6 +33,9 @@ command:
     - pyproject.toml
     - requirements.txt
     - Makefile
+    # The Makefile `include`s docker/vllm-emmy-gemma4/config.env, so the staged tree
+    # needs docker/ or `make setup` dies before creating the venv.
+    - docker
   run: |
     set -e
     export PATH=/usr/local/cuda/bin:$$PATH

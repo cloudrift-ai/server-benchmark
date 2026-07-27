@@ -1857,12 +1857,7 @@ def _rtx4080_dit_flash_deploy(forms: list[TileOp], red: Reduction, head: Contrac
         or not ctx.validate_pins
         or ctx.gpu_name != "NVIDIA GeForce RTX 4080"
         or any(k.raw() is not None for k in (TILE, STAGE, REDUCE))
-        or not (
-            red.axis.extent.is_static
-            and head.m_axis.extent.is_static
-            and head.k_axis.extent.is_static
-            and pv.n_axis.extent.is_static
-        )
+        or not (red.axis.extent.is_static and head.m_axis.extent.is_static and head.k_axis.extent.is_static and pv.n_axis.extent.is_static)
         or (
             red.axis.extent.as_static(),
             head.m_axis.extent.as_static(),

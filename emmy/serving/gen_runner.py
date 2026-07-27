@@ -295,6 +295,20 @@ class EmmyGenRunner:
         (and captured-replay) on the hot chunk shape."""
         return self._prefill_bucket if self._pre_prefill is not None else 0
 
+    @property
+    def rider_width(self) -> int:
+        """Static-tier coverage ABOVE the chunk twin: a step of ``T`` in
+        ``(prefill_bucket, prefill_bucket + rider_width]`` splits row-wise into the chunk
+        twin (first ``prefill_bucket`` rows) + the decode twin (the rider rows) — correct
+        because pre/post are per-token-independent, so the row split is request-agnostic.
+        This is what lets ``--max-num-batched-tokens`` sit ABOVE the chunk width: a full
+        chunk step keeps carrying its decode riders (and the previous prompt's tail
+        tokens) instead of freezing every decoding request for the whole chunk. 0 = no
+        split coverage (either twin family missing)."""
+        if self._pre_prefill is None or self._pre_decode is None:
+            return 0
+        return self._decode_bucket
+
     @classmethod
     def create(cls, model_id, *, dtype_str="float16", decode_bucket=16, max_tokens=None, prefill_bucket=0):
         import torch
@@ -713,9 +727,12 @@ class EmmyGenRunner:
         """Device twin of :meth:`forward_layer_pre`: ``hidden[T,H]`` CUDA → un-rotated
         ``(q, k, v)`` CUDA tensors. ``T <= decode_bucket`` rides the static decode twin
         (captured-replay); ``T == prefill_bucket`` — the FULL chunked-prefill step, the
-        width the twin was built for — rides the static chunk twin's exact grids; every
-        other width (an over-bucket decode batch, a partial tail chunk) rides the SYMBOLIC
-        program device-resident (``run_device_sym``) — no per-layer host numpy hop any way.
+        width the twin was built for — rides the static chunk twin's exact grids;
+        ``prefill_bucket < T <= prefill_bucket + rider_width`` — a full chunk step carrying
+        decode riders / a prompt tail — splits row-wise across the chunk twin + the decode
+        twin (see :attr:`rider_width`); every other width (an over-bucket decode batch, a
+        partial tail chunk) rides the SYMBOLIC program device-resident
+        (``run_device_sym``) — no per-layer host numpy hop any way.
         The twin boundary is EXACT equality, not ``<=``: the twin always computes
         ``prefill_bucket`` rows (pad → run → slice), so routing a T≈32 over-bucket decode
         step or a T≈450 tail chunk through it pays the full-bucket grids for a sliver of
@@ -728,6 +745,13 @@ class EmmyGenRunner:
             return tuple(self._pre_decode[layer].run_device([hidden]))
         if self._pre_prefill is not None and t == self._prefill_bucket:
             return tuple(self._pre_prefill[layer].run_device([hidden]))
+        if 0 < t - self._prefill_bucket <= self.rider_width:
+            import torch  # noqa: PLC0415
+
+            pb = self._prefill_bucket
+            head = self._pre_prefill[layer].run_device([hidden[:pb]])
+            tail = self._pre_decode[layer].run_device([hidden[pb:]])
+            return tuple(torch.cat(pair, dim=0) for pair in zip(head, tail, strict=True))
         return tuple(self._pre[layer].run_device_sym([hidden]))
 
     def forward_layer_post_device(self, layer, attn_out, residual):
@@ -741,6 +765,13 @@ class EmmyGenRunner:
             return self._post_decode[layer].run_device([attn_out, residual])[0]
         if self._post_prefill is not None and t == self._prefill_bucket:
             return self._post_prefill[layer].run_device([attn_out, residual])[0]
+        if 0 < t - self._prefill_bucket <= self.rider_width:
+            import torch  # noqa: PLC0415
+
+            pb = self._prefill_bucket
+            head = self._post_prefill[layer].run_device([attn_out[:pb], residual[:pb]])[0]
+            tail = self._post_decode[layer].run_device([attn_out[pb:], residual[pb:]])[0]
+            return torch.cat((head, tail), dim=0)
         return self._post[layer].run_device_sym([attn_out, residual])[0]
 
     def post_attn_backing(self, layer: int, rows: int):

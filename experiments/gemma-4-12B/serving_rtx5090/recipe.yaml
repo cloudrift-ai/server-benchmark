@@ -18,11 +18,15 @@
 # snapshot + warmed sm_120 cubins + the execution-plan pack (docker/vllm-emmy-gemma4/) —
 # same kernels, a boot optimization.
 #
-# Lane knobs: the stock lane runs the gemma-4-capable stock image at the default memory
-# utilization; the emmy lanes need 0.97 (the plugin's cupy residents live INSIDE the budget —
-# see recipes/gemma-4-12B-it-emmy) and serve through the decode CUDA-graph path. The emmy
-# c=64 cells run EMMY_GEN_DECODE_BUCKET=64 — the documented per-lane knob for that
-# concurrency (the article's light-tuning rule) — so they are separate matrix entries.
+# Lane knobs (the article's equal-tuning protocol): EVERY vLLM lane runs
+# --gpu-memory-utilization 0.96. The emmy lanes additionally set the two documented
+# per-workload knobs: the decode bucket (EMMY_GEN_DECODE_BUCKET = 32 at c=1, 8 at c=4/c=8,
+# 64 at c=64 — the static decode-twin width matched to the concurrency) and, on the mixed
+# prefill+decode cells (4K/4K c=4 and c=8), the CHUNK QUANTUM (EMMY_GEN_PREFILL_BUCKET=2048
+# + --max-num-batched-tokens 2056 — 2048-token static chunk steps with bucket-sized rider
+# headroom). Other cells pass the default mnbt (chunk width 4096 + bucket) explicitly so the
+# recipe is image-version-independent. NOTE: the quantum/rider knobs need an emmy image at or
+# after the 2026-07-26 parity rev (m2048 golden tier + rider split).
 #
 # Repro on a pre-allocated card (no cloud provisioning):
 #   emmy bench experiments/gemma-4-12B/serving_rtx5090 --local
@@ -42,10 +46,10 @@ benchmark:
   ignore_eos: true
 
 matrices:
-  # ---- stock vLLM: all five points ----
+  # ---- stock vLLM: all six points ----
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
-    engine.llm.gpu_memory_utilization: 0.9
+    engine.llm.gpu_memory_utilization: 0.96
     engine.llm.vllm.image: "vllm/vllm-openai:gemma4-0505-cu129"
     zip:
       benchmark.random_input_len: [256, 256, 4096, 4096, 4096, 8192]
@@ -54,52 +58,58 @@ matrices:
       benchmark.num_prompts: [16, 256, 8, 32, 64, 16]
       benchmark.repeats: [3, 1, 3, 1, 1, 1]
 
-  # ---- vLLM + emmy: the four c<=8 points ----
+  # ---- emmy lanes: c=1 points (decode bucket 32; default chunk width 4096 + rider headroom) ----
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
-    engine.llm.gpu_memory_utilization: 0.97
+    engine.llm.gpu_memory_utilization: 0.96
     engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-ec45dd6f"
-    engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4096 --no-enable-prefix-caching"
-    zip:
-      benchmark.random_input_len: [256, 4096, 4096, 4096, 8192]
-      benchmark.random_output_len: [256, 4096, 4096, 4096, 256]
-      benchmark.max_concurrency: [1, 1, 4, 8, 4]
-      benchmark.num_prompts: [16, 8, 32, 64, 16]
-      benchmark.repeats: [3, 3, 1, 1, 1]
+    engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4128 --no-enable-prefix-caching"
+    cross:
+      engine.llm.vllm.extra_env: ["EMMY_GEN_DECODE_BUCKET=32", "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=32"]
+      zip:
+        benchmark.random_input_len: [256, 4096]
+        benchmark.random_output_len: [256, 4096]
+        benchmark.max_concurrency: [1, 1]
+        benchmark.num_prompts: [16, 8]
+        benchmark.repeats: [3, 3]
 
-  # ---- vLLM + emmy: the 256/256 c=64 point (decode bucket 64) ----
+  # ---- emmy lanes: the mixed 4K/4K c=4 and c=8 points (bucket 8 + the 2048 chunk quantum) ----
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
-    engine.llm.gpu_memory_utilization: 0.97
+    engine.llm.gpu_memory_utilization: 0.96
     engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-ec45dd6f"
-    engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4096 --no-enable-prefix-caching"
-    engine.llm.vllm.extra_env: "EMMY_GEN_DECODE_BUCKET=64"
-    benchmark.random_input_len: 256
+    engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 2056 --no-enable-prefix-caching"
+    cross:
+      engine.llm.vllm.extra_env: ["EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048", "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"]
+      zip:
+        benchmark.random_input_len: [4096, 4096]
+        benchmark.random_output_len: [4096, 4096]
+        benchmark.max_concurrency: [4, 8]
+        benchmark.num_prompts: [32, 64]
+        benchmark.repeats: [1, 1]
+
+  # ---- emmy lanes: the RAG 8192/256 c=4 point (bucket 8; chunk width 4096 + rider headroom) ----
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    engine.llm.gpu_memory_utilization: 0.96
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-ec45dd6f"
+    engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4104 --no-enable-prefix-caching"
+    cross:
+      engine.llm.vllm.extra_env: ["EMMY_GEN_DECODE_BUCKET=8", "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=8"]
+    benchmark.random_input_len: 8192
     benchmark.random_output_len: 256
-    benchmark.max_concurrency: 64
-    benchmark.num_prompts: 256
+    benchmark.max_concurrency: 4
+    benchmark.num_prompts: 16
 
-  # ---- vLLM + emmy FAST_MATH: the four c<=8 points ----
+  # ---- emmy lanes: the 256/256 c=64 point (decode bucket 64; chunk width 4096, no rider headroom — the
+  # measured c=64 trade: rider headroom buys −34 ms wave TTFT but −1.2% saturated tok/s) ----
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
-    engine.llm.gpu_memory_utilization: 0.97
+    engine.llm.gpu_memory_utilization: 0.96
     engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-ec45dd6f"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4096 --no-enable-prefix-caching"
-    engine.llm.vllm.extra_env: "EMMY_FAST_MATH=1"
-    zip:
-      benchmark.random_input_len: [256, 4096, 4096, 4096, 8192]
-      benchmark.random_output_len: [256, 4096, 4096, 4096, 256]
-      benchmark.max_concurrency: [1, 1, 4, 8, 4]
-      benchmark.num_prompts: [16, 8, 32, 64, 16]
-      benchmark.repeats: [3, 3, 1, 1, 1]
-
-  # ---- vLLM + emmy FAST_MATH: the 256/256 c=64 point (decode bucket 64) ----
-  - deploy.gpu: "NVIDIA GeForce RTX 5090"
-    deploy.gpu_count: 1
-    engine.llm.gpu_memory_utilization: 0.97
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-ec45dd6f"
-    engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4096 --no-enable-prefix-caching"
-    engine.llm.vllm.extra_env: "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=64"
+    cross:
+      engine.llm.vllm.extra_env: ["EMMY_GEN_DECODE_BUCKET=64", "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=64"]
     benchmark.random_input_len: 256
     benchmark.random_output_len: 256
     benchmark.max_concurrency: 64

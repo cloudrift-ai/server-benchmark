@@ -831,6 +831,19 @@ class Graph:
             return "output"
         return "scratch"
 
+    def buffer_role(self, buf: str) -> str:
+        """Per-BUFFER planning role — :meth:`node_role` for primary outputs; a
+        non-primary buffer classifies by its own graph membership (a MIMO node
+        can produce one graph-output buffer and one scratch buffer)."""
+        nid, slot = self._producers[buf]
+        if slot == 0:
+            return self.node_role(nid)
+        if buf in self.inputs:
+            return "input"
+        if buf in self.outputs:
+            return "output"
+        return "scratch"
+
     def symbolic_env(self, input_data: dict[str, Any] | None) -> dict[str, int]:
         """Resolve each atomic symbolic input dim to its runtime size from the supplied
         input arrays. A symbolic name is recovered from an atomic ``Var`` axis
@@ -1047,9 +1060,7 @@ class Graph:
             # Dual-read: the historic single-``output`` dict and the plural
             # ``outputs`` list (slot order). Old dumps stay loadable.
             outs_data = ndata["outputs"] if "outputs" in ndata else [ndata["output"]]
-            tensors = tuple(
-                Tensor(name=out["name"], shape=tuple(out["shape"]), dtype=out.get("dtype", "f32")) for out in outs_data
-            )
+            tensors = tuple(Tensor(name=out["name"], shape=tuple(out["shape"]), dtype=out.get("dtype", "f32")) for out in outs_data)
             node_hints = Hints.from_dict(ndata.get("hints", {}))
             # Add directly to bypass input validation (nodes may reference later nodes).
             g.nodes[nid] = Node(id=nid, op=op, inputs=list(ndata["inputs"]), outputs=tensors, hints=node_hints)
@@ -1130,21 +1141,27 @@ class Graph:
                     f.name: _serialize_field(getattr(node.op, f.name)) for f in dc_fields(node.op) if f.name not in _SERIALIZE_SKIP_FIELDS
                 },
                 "inputs": node.inputs,
-                "output": {
-                    "name": node.output.name,
-                    # JSON dump preserves atomic Dims (int / Var name) so the
-                    # round-trip ``emmy run --ir <json>`` flow reconstructs
-                    # them via ``Dim(value)``. Composite Dims (BinaryExpr-backed,
-                    # e.g. a CatOp output or the demoted symbolic-N B operand's
-                    # ``round_up(seq_len, 64)`` TMA-padded inner extent) serialize
-                    # to their pretty expr string so a ``EMMY_DUMP_DIR`` dump
-                    # of a dynamic-attention graph doesn't crash; they don't
-                    # round-trip back through ``run --ir`` (the string isn't
-                    # re-parsed) — a debug-dump artifact only, matching the prior
-                    # composite-shape limitation.
-                    "shape": [_dim_to_json(d) for d in node.output.shape],
-                    "dtype": node.output.dtype.name,
-                },
+                # Serialized in the plural ``outputs`` form (slot order);
+                # ``from_dict`` dual-reads this and the historic single-
+                # ``output`` dict, so old dumps stay loadable.
+                "outputs": [
+                    {
+                        "name": t.name,
+                        # JSON dump preserves atomic Dims (int / Var name) so the
+                        # round-trip ``emmy run --ir <json>`` flow reconstructs
+                        # them via ``Dim(value)``. Composite Dims (BinaryExpr-backed,
+                        # e.g. a CatOp output or the demoted symbolic-N B operand's
+                        # ``round_up(seq_len, 64)`` TMA-padded inner extent) serialize
+                        # to their pretty expr string so a ``EMMY_DUMP_DIR`` dump
+                        # of a dynamic-attention graph doesn't crash; they don't
+                        # round-trip back through ``run --ir`` (the string isn't
+                        # re-parsed) — a debug-dump artifact only, matching the prior
+                        # composite-shape limitation.
+                        "shape": [_dim_to_json(d) for d in t.shape],
+                        "dtype": t.dtype.name,
+                    }
+                    for t in node.outputs
+                ],
             }
             if node.hints:
                 entry["hints"] = node.hints.to_dict()

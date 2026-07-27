@@ -181,3 +181,66 @@ def test_weight_spec_source_parts_projection_and_round_trip():
     expected = np.concatenate([wq, wk], axis=0)
     np.testing.assert_array_equal(assemble_source(restored.weights["w_cat"], sources), expected)
     np.testing.assert_array_equal(assemble_source(g.nodes["w_cat"].op, sources), expected)
+
+
+def test_plan_mimo_node_mints_per_buffer_specs_and_writes():
+    """A multi-output CudaOp node yields one BufferSpec per BUFFER (aux buffer
+    scratch-roled) and a launch whose ``writes`` lists every produced buffer."""
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (32, 64)), node_id="x")
+    g.add_node(
+        op=CudaOp(
+            kernel_source="__global__ void k_mo() {}",
+            kernel_name="k_mo",
+            arg_order=("x", "y", "y__sq"),
+            grid=((1,), (1,), (1,)),
+            block=((128,), (1,), (1,)),
+            zero_outputs=("y__sq",),
+        ),
+        inputs=["x"],
+        outputs=[Tensor("y", (32, 64)), Tensor("y__sq", (32,))],
+        node_id="y",
+    )
+    g.add_node(
+        op=CudaOp(
+            kernel_source="__global__ void k_c() {}",
+            kernel_name="k_c",
+            arg_order=("y", "y__sq", "z"),
+            grid=((1,), (1,), (1,)),
+            block=((128,), (1,), (1,)),
+        ),
+        inputs=["y", "y__sq"],
+        output=Tensor("z", (32, 64)),
+        node_id="z",
+    )
+    g.inputs, g.outputs = ["x"], ["z"]
+    plan = plan_from_graph(g)
+    roles = {b.name: b.role for b in plan.buffers}
+    assert roles == {"x": "input", "y": "scratch", "y__sq": "scratch", "z": "output"}
+    launch_mo = next(lc for lc in plan.launches if lc.kernel_name == "k_mo")
+    assert launch_mo.writes == ("y", "y__sq")
+    restored = plan_from_dict(json.loads(json.dumps(plan_to_dict(plan))))
+    assert restored == plan
+    assert next(lc for lc in restored.launches if lc.kernel_name == "k_mo").writes == ("y", "y__sq")
+
+
+def test_base_backend_runs_tuple_forward_per_buffer():
+    """The default Backend.run stores per-buffer values for a multi-output
+    node whose ``forward`` returns a tuple matched to ``node.outputs``."""
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.base import Op
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+
+    class _SquareAndRowsum(Op):
+        def forward(self, x):
+            return x * x, (x * x).sum(axis=1)
+
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4, 8)), node_id="x")
+    g.add_node(op=_SquareAndRowsum(), inputs=["x"], outputs=[Tensor("y", (4, 8)), Tensor("y__sq", (4,))], node_id="y")
+    g.add_node(op=ElementwiseOp(op="exp"), inputs=["y__sq"], output=Tensor("z", (4,)), node_id="z")
+    g.inputs, g.outputs = ["x"], ["z"]
+
+    x = np.random.default_rng(0).standard_normal((4, 8)).astype(np.float32)
+    result, _ = NumpyBackend().run(g, input_data={"x": x})
+    np.testing.assert_allclose(result.outputs["z"], np.exp((x * x).sum(axis=1)), rtol=1e-5)

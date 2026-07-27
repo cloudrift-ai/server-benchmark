@@ -78,6 +78,10 @@ class LaunchSpec:
     zero_prologues: tuple[str, ...] = ()
     tma_descriptors: tuple[TmaDescMeta, ...] = ()
     runtime_args: tuple[str, ...] = ()
+    # Buffer names this launch produces (the node's output buffers, slot order).
+    # Empty on plans stored before the field existed — readers fall back to
+    # ``(node_id,)``. ``node_id`` itself stays for naming / diagnostics.
+    writes: tuple[str, ...] = ()
 
 
 @dataclass
@@ -143,8 +147,9 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
     from emmy.compiler.ir.cuda import CudaOp  # noqa: PLC0415
 
     buffers = [
-        BufferSpec(name=nid, shape=tuple(node.output.shape), dtype=node.output.dtype, role=graph.node_role(nid))
-        for nid, node in graph.nodes.items()
+        BufferSpec(name=buf, shape=tuple(t.shape), dtype=t.dtype, role=graph.buffer_role(buf))
+        for node in graph.nodes.values()
+        for buf, t in zip(node.buffer_names(), node.outputs, strict=True)
     ]
     constants = {nid: float(op.value) for nid, op in graph.constant_ops() if op.value is not None}
     runtime_constants = {nid: op.context_value for nid, op in graph.constant_ops() if op.context_value is not None}
@@ -180,6 +185,7 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
                 zero_prologues=tuple(getattr(op, "zero_prologues", ())),
                 tma_descriptors=tuple(op.tma_descriptors),
                 runtime_args=tuple(getattr(op, "runtime_args", ())),
+                writes=node.buffer_names(),
             )
         )
 
@@ -354,6 +360,7 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
                 "smem": lc.smem_bytes,
                 "zero_outputs": list(lc.zero_outputs),
                 **({"zero_prologues": list(lc.zero_prologues)} if lc.zero_prologues else {}),
+                **({"writes": list(lc.writes)} if lc.writes else {}),
                 "runtime_args": list(lc.runtime_args),
                 "cuda": {
                     "tma": [
@@ -418,6 +425,7 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
                 smem_bytes=int(lc["smem"]),
                 zero_outputs=tuple(lc.get("zero_outputs", ())),
                 zero_prologues=tuple(lc.get("zero_prologues", ())),
+                writes=tuple(lc.get("writes", ())),
                 tma_descriptors=tuple(
                     TmaDescMeta(name=t["name"], src_buf=t["src_buf"], box_extents=tuple(t["box_extents"]), swizzle=t["swizzle"])
                     for t in lc.get("cuda", {}).get("tma", ())

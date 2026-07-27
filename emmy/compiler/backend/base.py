@@ -165,13 +165,13 @@ class Backend(ABC):
         # exprs — resolve via ``expr.eval(sym_env)``.
         sym_env = compiled.symbolic_env(input_data)
 
-        def _shape_of(node) -> tuple[int, ...]:  # noqa: ANN001
-            return tuple(d.as_static() if d.is_static else int(d.expr.eval(sym_env)) for d in node.output.shape)
+        def _shape_of(t) -> tuple[int, ...]:  # noqa: ANN001
+            return tuple(d.as_static() if d.is_static else int(d.expr.eval(sym_env)) for d in t.shape)
 
         t0 = time.perf_counter()
         for nid in compiled.topological_order():
             node = compiled.nodes[nid]
-            shape = _shape_of(node)
+            shape = _shape_of(node.output)
 
             dtype_np = node.output.dtype.np
 
@@ -195,10 +195,14 @@ class Backend(ABC):
 
             args = [values[inp] for inp in node.inputs]
             result = node.op.forward(*args)
-            arr = np.asarray(result, dtype=dtype_np)
-            if shape and arr.shape != shape:
-                arr = arr.reshape(shape)
-            values[nid] = arr
+            # A multi-output node's ``forward`` returns a tuple matched
+            # positionally to ``node.outputs``; values store per BUFFER.
+            results = result if isinstance(result, tuple) else (result,)
+            bufs = node.buffer_names()
+            if len(results) != len(bufs):
+                raise ValueError(f"node {nid!r}: forward returned {len(results)} values for {len(bufs)} outputs")
+            for buf, t, r in zip(bufs, node.outputs, results, strict=True):
+                values[buf] = _coerce(r, _shape_of(t), t.dtype.np)
 
         elapsed = (time.perf_counter() - t0) * 1000
         outputs = {name: values[name] for name in compiled.outputs}

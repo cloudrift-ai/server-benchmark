@@ -166,7 +166,7 @@ def test_to_dict_serializes_composite_shape_dim():
     g.inputs, g.outputs = ["xnb"], ["xnb"]
 
     d = g.to_dict()  # must not raise (pre-fix: Dim.value raised on the composite)
-    shape = d["nodes"]["xnb"]["output"]["shape"]
+    shape = d["nodes"]["xnb"]["outputs"][0]["shape"]
     assert shape[0] == 128, "static inner-rank dim keeps its int value"
     assert isinstance(shape[1], str) and "seq_len" in shape[1] and "64" in shape[1], (
         f"composite dim must serialize to its pretty expr string, got {shape[1]!r}"
@@ -301,9 +301,10 @@ def test_mimo_from_dict_dual_read():
 
     g = _make_matmul_graph()
     d = json.loads(json.dumps(g.to_dict()))
-    # rewrite one node to the plural form; loader must accept both in one dump
+    # rewrite one node to the historic single-output form; the loader must
+    # accept both forms in one dump (old EMMY_DUMP_DIR artifacts stay loadable)
     nd = d["nodes"]["ew"]
-    nd["outputs"] = [nd.pop("output")]
+    nd["output"] = nd.pop("outputs")[0]
     g2 = Graph.from_dict(d)
     g2.validate()
     assert g2.structural_key() == g.structural_key()

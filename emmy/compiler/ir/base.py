@@ -76,6 +76,12 @@ class Op:
         """Derive the output shape from input shapes. Override in subclasses."""
         raise NotImplementedError(f"{type(self).__name__}.infer_output_shape not implemented")
 
+    def infer_output_shapes(self, input_shapes: list[tuple]) -> tuple[tuple, ...]:
+        """Plural counterpart of :meth:`infer_output_shape` — one shape per
+        output slot. The default wraps the single-output hook so existing ops
+        need no change; a multi-output op overrides this one instead."""
+        return (self.infer_output_shape(input_shapes),)
+
     def forward(self, *inputs):
         """Compute the operation using numpy arrays. Override in subclasses."""
         raise NotImplementedError(f"{type(self).__name__}.forward not implemented")

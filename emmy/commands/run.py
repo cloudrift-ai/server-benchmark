@@ -892,7 +892,7 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
     # geometry reflects the hint-sized tile the kernel was tuned for.
     sym_env: dict[str, int] = {}
     for nid in graph.inputs:
-        for dim in graph.nodes[nid].output.shape:
+        for dim in graph.buffer(nid).shape:
             if isinstance(dim.expr, Var) and dim.hint is not None:
                 sym_env.setdefault(dim.expr.name, dim.hint)
 
@@ -1999,7 +1999,7 @@ def _hint_sized_inputs(lowered, example_args, example_kwargs):
         return example_args, example_kwargs, sym_env
     resized = []
     for nid, tensor in zip(input_ids, flat, strict=True):
-        for axis, d in enumerate(lowered.nodes[nid].output.shape):
+        for axis, d in enumerate(lowered.buffer(nid).shape):
             if isinstance(d, Dim) and not d.is_static:
                 tensor = _tile_to(tensor, axis, int(d.expr.eval(sym_env)))
         resized.append(tensor)

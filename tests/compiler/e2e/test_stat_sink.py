@@ -91,9 +91,11 @@ def test_stat_sink_pinned_e2e(monkeypatch):
     graph = graph_from_code(_SNIPPET)[0]
     be = CudaBackend()
     compiled = be.compile(graph)
-    ids = list(compiled.nodes)
-    sq = [nid for nid in ids if nid.endswith("__sq")]
-    assert sq, f"no __sq aux node — the sink did not realize (nodes: {ids})"
+    bufs = [buf for node in compiled.nodes.values() for buf in node.buffer_names()]
+    sq = [b for b in bufs if b.endswith("__sq")]
+    assert sq, f"no __sq aux buffer — the sink did not realize (buffers: {bufs})"
+    producer = compiled.producer(sq[0])
+    assert len(producer.outputs) == 2 and producer.buffer_names()[1] == sq[0], "the row stat must be output slot 1 of its producer"
     sources = {nid: node.op.kernel_source for nid, node in compiled.nodes.items() if getattr(node.op, "kernel_source", None)}
     producer_src = next((s for s in sources.values() if sq[0] in s), "")
     assert "atomicAdd" in producer_src, "the producer epilogue must accumulate the row stat atomically"
@@ -123,7 +125,8 @@ def test_stat_sink_refuses_input_norm(monkeypatch):
     graph = graph_from_code(code)[0]
     be = CudaBackend()
     compiled = be.compile(graph)
-    assert not [nid for nid in compiled.nodes if nid.endswith("__sq")], "input-norm must not sink"
+    all_bufs = [buf for node in compiled.nodes.values() for buf in node.buffer_names()]
+    assert not [b for b in all_bufs if b.endswith("__sq")], "input-norm must not sink"
     rng = np.random.default_rng(4)
     feed = {}
     for name in graph.inputs:

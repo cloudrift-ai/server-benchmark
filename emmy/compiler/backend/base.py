@@ -176,9 +176,12 @@ class Backend(ABC):
             dtype_np = node.output.dtype.np
 
             if nid in input_set:
-                if nid not in input_data:
-                    raise KeyError(f"Missing input for node {nid!r}")
-                values[nid] = _coerce(input_data[nid], shape, dtype_np)
+                # Every buffer of an input node binds from input_data by name
+                # (a synthetic MIMO boundary exposes its aux buffers as inputs).
+                for buf, t in zip(node.buffer_names(), node.outputs, strict=True):
+                    if buf not in input_data:
+                        raise KeyError(f"Missing input for node {nid!r}")
+                    values[buf] = _coerce(input_data[buf], _shape_of(t), t.dtype.np)
                 continue
 
             if isinstance(node.op, ConstantOp):

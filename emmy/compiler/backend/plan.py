@@ -143,7 +143,7 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
     again. Kernel specs carry the rendered source (the cubin-cache key input); grid/block specs
     are normalized to factor tuples (a legacy bare-int spec becomes a single-factor tuple) so a
     plan round-trips the JSON form exactly."""
-    from emmy.compiler.ir.base import AuxOutputOp, ConstantOp, InputOp  # noqa: PLC0415
+    from emmy.compiler.ir.base import ConstantOp, InputOp  # noqa: PLC0415
     from emmy.compiler.ir.cuda import CudaOp  # noqa: PLC0415
 
     buffers = [
@@ -159,9 +159,7 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
     for nid in graph.topological_order():
         node = graph.nodes[nid]
         op = node.op
-        if isinstance(op, (InputOp, ConstantOp, AuxOutputOp)):
-            # An AuxOutputOp has no launch of its own — its buffer is written by the producer
-            # node's launch (listed in that launch's arg_names / zero_outputs).
+        if isinstance(op, (InputOp, ConstantOp)):
             continue
         if not isinstance(op, CudaOp):
             raise TypeError(f"plan_from_graph: node {nid!r} has non-CudaOp {type(op).__name__!r}; lowering must produce Graph[CudaOp].")

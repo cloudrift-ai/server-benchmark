@@ -857,11 +857,11 @@ class Graph:
         input_data = input_data or {}
         env: dict[str, int] = {}
         for nid in self.inputs:
-            node = self.nodes.get(nid)
-            if node is None or nid not in input_data:
+            t = self.buffer(nid)
+            if t is None or nid not in input_data:
                 continue
             arr_shape = np.asarray(input_data[nid]).shape
-            for i, d in enumerate(node.output.shape):
+            for i, d in enumerate(t.shape):
                 if isinstance(d.expr, Var) and i < len(arr_shape):
                     env.setdefault(d.expr.name, int(arr_shape[i]))
         return env
@@ -884,7 +884,7 @@ class Graph:
         bindings: dict[str, tuple[str, int]] = {}
         composite_names: set[str] = set()
         for nid in self.inputs:
-            for d, dim in enumerate(self.nodes[nid].output.shape):
+            for d, dim in enumerate(self.buffer(nid).shape):
                 if dim.is_static:
                     continue
                 if isinstance(dim.expr, Var):
@@ -907,7 +907,7 @@ class Graph:
 
         hints: dict[str, int] = {}
         for nid in self.inputs:
-            for dim in self.nodes[nid].output.shape:
+            for dim in self.buffer(nid).shape:
                 if isinstance(dim.expr, Var) and dim.hint is not None:
                     hints.setdefault(dim.expr.name, dim.hint)
         return hints
@@ -1092,7 +1092,7 @@ class Graph:
         if self.inputs:
             lines.append("inputs:")
             for nid in self.inputs:
-                lines.append(f"  {_fmt_tensor(self.nodes[nid].output)}")
+                lines.append(f"  {_fmt_tensor(self.buffer(nid))}")
             lines.append("")
 
         const_ids = [nid for nid in order if isinstance(self.nodes[nid].op, ConstantOp)]
@@ -1119,7 +1119,7 @@ class Graph:
         if self.outputs:
             lines.append("outputs:")
             for nid in self.outputs:
-                lines.append(f"  {_fmt_tensor(self.nodes[nid].output)}")
+                lines.append(f"  {_fmt_tensor(self.buffer(nid))}")
 
         return "\n".join(lines)
 

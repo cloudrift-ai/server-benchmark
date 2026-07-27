@@ -108,9 +108,10 @@ def single_node_graph(graph: Graph, node_id: str, absorb: frozenset[str] = froze
         src = graph.nodes[kid]
         if kid in synthetic:
             # A synthetic boundary mirrors ALL of the producer's buffers so a
-            # consumer edge naming a non-primary buffer still resolves in-slice.
+            # consumer edge naming a non-primary buffer still resolves in-slice,
+            # and every buffer becomes a slice input (fed bench data by name).
             sub.add_node(InputOp(), [], outputs=src.outputs, node_id=src.id)
-            sub.inputs.append(kid)
+            sub.inputs.extend(src.buffer_names())
         else:
             sub.add_node(src.op, list(src.inputs), outputs=src.outputs, node_id=src.id)
             if isinstance(src.op, InputOp) and kid in graph.inputs:

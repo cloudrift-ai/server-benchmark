@@ -9,6 +9,7 @@ what the article's repro commands run.
 """
 
 import os
+import re
 
 from emmy.benchmark.tasks import enumerate_tasks
 from emmy.recipe.recipe import load_recipe
@@ -69,14 +70,56 @@ def test_serving_ab_expands_to_18_lane_points(project_root):
     assert len(fm) == 6
 
 
+def test_mtp_smoke_test_expands_to_32_lane_points(project_root):
+    """The article's MTP smoke-test table, self-contained: 5 plain stock + 5 plain emmy
+    baseline cells plus 11 stock-MTP + 11 emmy-MTP cells (depths 2/3/5 single-stream,
+    2/3 under batching, 2 at c=64). Every emmy row's decode bucket covers the
+    verification width (concurrency x (depth+1)); the knobs pin what the article's
+    table ran (util 0.9, default bucket 16 where it fits — see the recipe header)."""
+    tasks = enumerate_tasks([_exp(project_root, "serving_mtp_rtx5090")])
+    assert len(tasks) == 32
+
+    for t in tasks:
+        b = t.recipe.benchmark
+        assert b.seed == 0 and b.temperature == 0 and b.ignore_eos is True
+        assert t.recipe.engine.llm.context_length == 8448
+        assert t.recipe.engine.llm.gpu_memory_utilization == 0.9
+
+    stock = [t for t in tasks if "vllm-openai" in t.recipe.engine.llm.vllm.image]
+    emmy = [t for t in tasks if "vllm-emmy" in t.recipe.engine.llm.vllm.image]
+    assert len(stock) == 16 and len(emmy) == 16
+
+    def depth(t):
+        m = re.search(r"num_speculative_tokens\":(\d+)", t.recipe.engine.llm.vllm.extra_args or "")
+        return int(m.group(1)) if m else 0
+
+    assert sum(1 for t in stock if depth(t)) == 11 and sum(1 for t in stock if not depth(t)) == 5
+    assert sum(1 for t in emmy if depth(t)) == 11 and sum(1 for t in emmy if not depth(t)) == 5
+
+    for t in emmy:
+        bucket = int(re.search(r"EMMY_GEN_DECODE_BUCKET=(\d+)", t.recipe.engine.llm.vllm.extra_env).group(1))
+        conc = t.recipe.benchmark.max_concurrency
+        d = depth(t)
+        assert bucket >= conc * (d + 1)
+        if d:
+            # As measured: default 16 where the verification width fits, 32 at c=8, and
+            # the documented untuned 192 on the c=64 depth-2 cell.
+            assert bucket in {16, 32, 192}
+            assert (bucket == 192) == (conc == 64)
+        else:
+            # Plain baselines: default 16, tuned 64 at c=64 (rerun_c64 policy).
+            assert bucket == (64 if conc == 64 else 16)
+
+
 def test_command_experiments_load(project_root):
-    """The command experiments (llama.cpp lane, per-kernel runs, accum sweep) parse as
-    command recipes with one variant per target card."""
+    """The command experiments (llama.cpp lane, per-kernel runs, accum sweep, MTP GSM8K
+    check) parse as command recipes with one variant per target card."""
     for name, gpu in [
         ("serving_llamacpp_rtx5090", "NVIDIA GeForce RTX 5090"),
         ("kernels_rtx5090", "NVIDIA GeForce RTX 5090"),
         ("kernels_rtx4090", "NVIDIA GeForce RTX 4090"),
         ("accum_error", "NVIDIA GeForce RTX 5090"),
+        ("gsm8k_mtp_rtx5090", "NVIDIA GeForce RTX 5090"),
     ]:
         r = load_recipe(_exp(project_root, name))
         assert r.kind == "command", name

@@ -49,7 +49,7 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.9
-    engine.llm.vllm.image: "vllm/vllm-openai:gemma4-0505-cu129"
+    engine.llm.vllm.image: "vllm/vllm-openai:v0.23.0"
     engine.llm.vllm.extra_args: "--dtype float16 --no-enable-prefix-caching"
     zip:
       benchmark.random_input_len: [256, 4096, 4096, 4096, 256]
@@ -86,7 +86,7 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.9
-    engine.llm.vllm.image: "vllm/vllm-openai:gemma4-0505-cu129"
+    engine.llm.vllm.image: "vllm/vllm-openai:v0.23.0"
     engine.llm.vllm.extra_args: "--dtype float16 --no-enable-prefix-caching --speculative-config '{\"method\":\"mtp\",\"model\":\"google/gemma-4-12B-it-assistant\",\"num_speculative_tokens\":2}'"
     zip:
       benchmark.random_input_len: [256, 4096, 4096, 4096, 256]
@@ -98,7 +98,7 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.9
-    engine.llm.vllm.image: "vllm/vllm-openai:gemma4-0505-cu129"
+    engine.llm.vllm.image: "vllm/vllm-openai:v0.23.0"
     engine.llm.vllm.extra_args: "--dtype float16 --no-enable-prefix-caching --speculative-config '{\"method\":\"mtp\",\"model\":\"google/gemma-4-12B-it-assistant\",\"num_speculative_tokens\":3}'"
     zip:
       benchmark.random_input_len: [256, 4096, 4096, 4096]
@@ -110,7 +110,7 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.9
-    engine.llm.vllm.image: "vllm/vllm-openai:gemma4-0505-cu129"
+    engine.llm.vllm.image: "vllm/vllm-openai:v0.23.0"
     engine.llm.vllm.extra_args: "--dtype float16 --no-enable-prefix-caching --speculative-config '{\"method\":\"mtp\",\"model\":\"google/gemma-4-12B-it-assistant\",\"num_speculative_tokens\":5}'"
     zip:
       benchmark.random_input_len: [256, 4096]

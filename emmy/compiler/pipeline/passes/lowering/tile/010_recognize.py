@@ -139,9 +139,11 @@ def _is_clean_contraction(body: list[Stmt], k_name: str) -> bool:
     """True iff ``body`` (a reduce loop's body, possibly with a moved-in prologue) is a clean
     contraction whose lift multiplies the operand loads **directly** — body is exactly the
     K-indexed operand loads + the ``⊗`` lift ``Assign`` (distributing over the fold) + the
-    additive fold ``Accum``, contracting ≥ 2 distinct operand buffers, with NO loop-invariant
+    additive fold ``Accum``, contracting ≥ 2 operand loads, with NO loop-invariant
     load or per-operand preprocessing (a pre-scaled ``sum_k (x·s)·(y·s)`` is NOT clean — it
-    becomes a degenerate ``PLANAR`` reduce so the scale survives in the loop body)."""
+    becomes a degenerate ``PLANAR`` reduce so the scale survives in the loop body). The two
+    operands may be different affine views of one packed buffer (for example load-time-concatenated
+    QKV); operand identity is the load/index, not the backing allocation."""
     accs = [s for s in body if isinstance(s, Accum)]
     if len(accs) != 1:
         return False
@@ -150,7 +152,7 @@ def _is_clean_contraction(body: list[Stmt], k_name: str) -> bool:
     if lift is None or not lift.op.distributes_over(fold.op):
         return False
     k_loads = [ld for ld in body if isinstance(ld, Load) and k_name in {v for e in ld.index for v in e.free_vars()}]
-    if len({ld.input for ld in k_loads}) < 2:
+    if len(k_loads) < 2:
         return False
     all_loads = [s for s in body if isinstance(s, Load)]
     if len(body) == len(all_loads) + 2 and len(all_loads) == len(k_loads) and set(lift.args) == {ld.names[0] for ld in k_loads}:

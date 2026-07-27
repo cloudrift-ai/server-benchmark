@@ -119,8 +119,6 @@ EXPECTED_GAPS = {
         ShapeKey(free_prod=2048, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=30720, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
         ShapeKey(free_prod=3840, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
-        ShapeKey(free_prod=3840, reduce_max=4096, is_warp=True, is_dyn=False, kind="", free_max=3840),
-        ShapeKey(free_prod=3840, reduce_max=8192, is_warp=True, is_dyn=False, kind="", free_max=3840),
         ShapeKey(free_prod=4096, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=512, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         ShapeKey(free_prod=8192, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
@@ -137,18 +135,7 @@ EXPECTED_GAPS = {
 # audit twin genuinely disagree for a KNOWN reason that is not a serving regression.
 EXPECTED_DRIFTS: dict[str, set[tuple[str, str]]] = {
     "NVIDIA GeForce RTX 5090": set(),
-    "NVIDIA GeForce RTX 4090": {
-        # The WS5 layout gate stopped offering the transposed ``b<n>t`` band on a K-contiguous B
-        # (space.py::coop_reduce_moves), so the m1 gemv-tier down_proj golden no longer "matches"
-        # on the F.linear-layout arm the 4090's cold prior happens to walk in the standard-forward
-        # twins. That pre-gate MATCH was the cold-poison itself — ``g16k/b256t`` lane-sweeps
-        # uncoalesced on that arm (the 5090's prior walks the transposed arm, where the same
-        # golden still MATCHes). The row still describes the REAL m1 serving graph (the runner's
-        # materialized-transpose weights); burn this down with the deferred 4090 mirror re-tune —
-        # either greedy lands the transposed arm there too, or the row gets re-recorded.
-        ("gemma4_12b.down_proj.m1.t", "post1"),
-        ("gemma4_12b.down_proj.m1.t", "post1-global"),
-    },
+    "NVIDIA GeForce RTX 4090": set(),
 }
 
 # A wholesale re-key of the twins (tracer/classifier change) turns MATCHes into GAPs without

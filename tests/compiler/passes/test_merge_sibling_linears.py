@@ -46,7 +46,17 @@ def _sibling_graph(ns=(32, 16), k=64, *, direct_outputs=False, bias=False, share
                 node_id=wid,
             )
         lid = f"lin{i}"
-        g.add_node(op=LinearOp(has_bias=bias), inputs=["x", wid], output=Tensor(lid, (4, n), "f32"), node_id=lid)
+        inputs = ["x", wid]
+        if bias:
+            bid = f"b{i}"
+            g.add_node(
+                op=ConstantOp(name=bid, source_path=f"m.{bid}", source_shape=(n,), source_dtype="f32"),
+                inputs=[],
+                output=Tensor(bid, (n,), "f32"),
+                node_id=bid,
+            )
+            inputs.append(bid)
+        g.add_node(op=LinearOp(has_bias=bias), inputs=inputs, output=Tensor(lid, (4, n), "f32"), node_id=lid)
         if direct_outputs:
             outs.append(lid)
         else:
@@ -154,9 +164,25 @@ def test_no_merge_through_view_only_output_path():
     assert _count(result, LinearOp) == 2
 
 
-def test_no_merge_with_bias():
+def test_biased_siblings_merge_weights_and_biases():
     result = _apply(_sibling_graph(bias=True))
-    assert _count(result, LinearOp) == 2
+    assert _count(result, LinearOp) == 1
+    params = [n.op for n in result.nodes.values() if isinstance(n.op, ConstantOp) and n.op.source_parts]
+    assert len(params) == 2
+    weight = next(op for op in params if len(op.source_shape) == 2)
+    bias = next(op for op in params if len(op.source_shape) == 1)
+    assert weight.source_parts == (("m.w0", (32, 64)), ("m.w1", (16, 64)))
+    assert bias.source_parts == (("m.b0", (32,)), ("m.b1", (16,)))
+
+
+def test_biased_sibling_merge_numeric_parity():
+    g = _sibling_graph(bias=True)
+    sources = _sources(g)
+    x = rng.standard_normal((4, 64)).astype(np.float32)
+    before = _run(g, x, sources)
+    after = _run(_apply(g), x, sources)
+    for oid in g.outputs:
+        np.testing.assert_allclose(after[oid], before[oid], rtol=1e-5, atol=1e-6)
 
 
 def test_no_merge_with_shared_weight():

@@ -217,6 +217,7 @@ def build_flash_frag(
     group: int = 1,
     mask: tuple[str, tuple] | None = None,
     layouts: tuple = (None, None, None),
+    access_indices: tuple[tuple, tuple, tuple] | None = None,
     raw_shapes: tuple | None = None,
     out_index: tuple | None = None,
     scale: float | None = None,
@@ -236,8 +237,11 @@ def build_flash_frag(
     ``group`` is the GQA head ratio (K/V indexed at ``head // group``); ``mask`` is
     an optional ``(buffer_id, shape)`` additive bias loaded per ``(m, kv)``. ``q/k/v_shape``
     are CANONICAL ``(batch…, seq, last)``; ``layouts`` are the per-operand ``(seq_pos,
-    last_pos)`` slot orders the loads permute back into (``None`` = head-major identity),
-    and ``raw_shapes`` the operands' traced shapes for the fragment's input decls.
+    last_pos)`` slot orders the loads permute back into (``None`` = head-major identity).
+    ``access_indices``, when present, are exact canonical-variable Q/K/V load indices carried
+    from affine views of one packed buffer (for example ``[..., head * D + d + qkv_offset]``);
+    they take precedence over ``layouts``. ``raw_shapes`` are the operands' traced shapes for
+    the fragment's input declarations.
     ``scale`` is the score producer's actual scale (an SDPA's captured ``scale=`` kwarg
     survives decomposition as the producer's scale constant); ``None`` = ``1/sqrt(head_dim)``."""
     batch = [_static(d) for d in q_shape[:-2]]
@@ -277,6 +281,7 @@ def build_flash_frag(
         mask_buf=mask_buf,
         mask_shape=mask_shape,
         layouts=layouts,
+        access_indices=access_indices,
         out_store=out_store,
     )
     # The free axes are the schedule's, carried on the ``TileOp`` with an UNMAPPED grid —
@@ -292,8 +297,10 @@ def build_flash_frag(
     frag = Graph()
     in_shapes = raw_shapes if raw_shapes is not None else (q_shape, k_shape, v_shape)
     for nid, shp in zip((q_id, k_id, v_id), in_shapes, strict=True):
-        frag.add_node(op=InputOp(), inputs=[], output=Tensor(nid, shp, out.dtype), node_id=nid)
-    inputs = [q_id, k_id, v_id, "_flash_scale"]
+        if nid not in frag.nodes:
+            frag.add_node(op=InputOp(), inputs=[], output=Tensor(nid, shp, out.dtype), node_id=nid)
+    inputs = list(dict.fromkeys((q_id, k_id, v_id)))
+    inputs.append("_flash_scale")
     frag.add_node(
         # fp32 constant: the score scale accumulates into the fp32 carrier, so a half-precision
         # ``_flash_scale`` would only add an ``__half2float`` at every use (and round ``1/√d`` to fp16).
@@ -376,6 +383,7 @@ def _flash_op(
     mask_buf: str | None = None,
     mask_shape: tuple | None = None,
     layouts: tuple = (None, None, None),
+    access_indices: tuple[tuple, tuple, tuple] | None = None,
     out_store: tuple[str, tuple] | None = None,
 ) -> Map:
     """The per-output-element ``(…, m, d)`` compute as the structural-node tree: flash is
@@ -399,9 +407,12 @@ def _flash_op(
     head_axis = len(batch) - 1  # last batch dim is the head (when there is one)
     kv_bvars = tuple(BinaryExpr("/", bv, Literal(group, "int")) if (group > 1 and i == head_axis) else bv for i, bv in enumerate(bvars))
     q_layout, k_layout, v_layout = layouts
-    q_idx = _permute_idx((*bvars, Var("m"), Var("dd")), q_layout)
-    k_idx = _permute_idx((*kv_bvars, Var("kv"), Var("dd")), k_layout)
-    v_idx = _permute_idx((*kv_bvars, Var("kv"), Var("d")), v_layout)
+    if access_indices is None:
+        q_idx = _permute_idx((*bvars, Var("m"), Var("dd")), q_layout)
+        k_idx = _permute_idx((*kv_bvars, Var("kv"), Var("dd")), k_layout)
+        v_idx = _permute_idx((*kv_bvars, Var("kv"), Var("d")), v_layout)
+    else:
+        q_idx, k_idx, v_idx = access_indices
 
     # s = Σ_dd Q·K — the inner contraction as a high-level :class:`Contraction` structural node, the
     # ``source`` of the streaming kv :class:`Reduction`. Per-cell scalar (``TilePlan()``): the
@@ -622,6 +633,148 @@ def _extract_qk(xnode: Node) -> tuple[tuple[str, tuple[int, int]], tuple[str, tu
     return None
 
 
+def _substitute_access(index: tuple, mapping: dict[str, Var], allowed: set[str]) -> tuple | None:
+    """Rename an affine load index onto flash's canonical axes, rejecting stray trace vars."""
+    result = tuple(expr.substitute(mapping) for expr in index)
+    if any(expr.free_vars() - allowed for expr in result):
+        return None
+    return result
+
+
+def _extract_packed_qkv(
+    xnode: Node,
+    root: Node,
+    v_id: str,
+) -> tuple[str, tuple, tuple, tuple, tuple, tuple, tuple] | None:
+    """Recover exact Q/K/V accesses when three logical views share one packed backing buffer.
+
+    A load-time-concatenated DiT projection is physically ``[B, S, 3H]`` while SDPA sees logical
+    ``[B, heads, S, D]`` views. Their loop-IR loads retain the exact affine addressing:
+    ``packed[b, seq, head*D + d + {0,H,2H}]``. The ordinary layout descriptor cannot represent
+    either the flattened ``head*D+d`` coordinate or the QKV base offset, so carry those load
+    indices directly after renaming trace axes to flash's canonical ``b*/m/kv/dd/d`` axes.
+
+    Deliberately limited to equal-head packed Q=K=V. GQA and separate buffers keep using the
+    established layout path.
+    """
+    if not isinstance(xnode.op, LoopOp) or not isinstance(root.op, LoopOp):
+        return None
+    score_writes = [s for s in xnode.op.body.iter() if isinstance(s, Write)]
+    if len(score_writes) != 1:
+        return None
+    score_write = score_writes[0]
+    m_var, n_var = _var_at(score_write.index, -2), _var_at(score_write.index, -1)
+    if m_var is None or n_var is None:
+        return None
+
+    q_load = k_load = None
+    head_dim = None
+    for lp in _accum_loops(xnode.op):
+        loads = [s for s in lp.body if isinstance(s, Load) and lp.axis.name in {v for e in s.index for v in e.free_vars()}]
+        accs = [s for s in lp.body if isinstance(s, Accum)]
+        if len(loads) != 2 or len(accs) != 1 or not _is_sum(accs[0]):
+            continue
+        q_load = next(
+            (
+                ld
+                for ld in loads
+                if m_var in {v for e in ld.index for v in e.free_vars()} and n_var not in {v for e in ld.index for v in e.free_vars()}
+            ),
+            None,
+        )
+        k_load = next(
+            (
+                ld
+                for ld in loads
+                if n_var in {v for e in ld.index for v in e.free_vars()} and m_var not in {v for e in ld.index for v in e.free_vars()}
+            ),
+            None,
+        )
+        if q_load is not None and k_load is not None:
+            head_dim = lp.axis.extent
+            dd_var = lp.axis.name
+            break
+    if q_load is None or k_load is None or q_load.input != k_load.input or q_load.input != v_id:
+        return None
+
+    score_shape = tuple(xnode.output.shape)
+    if len(score_shape) < 2 or len(score_write.index) != len(score_shape):
+        return None
+    batch_shape = score_shape[:-2]
+    batch_mapping: dict[str, Var] = {}
+    for i, expr in enumerate(score_write.index[:-2]):
+        if isinstance(expr, Var):
+            batch_mapping[expr.name] = Var(f"b{i}")
+        elif expr.free_vars():
+            return None
+    q_mapping = {**batch_mapping, m_var: Var("m"), dd_var: Var("dd")}
+    k_mapping = {**batch_mapping, n_var: Var("kv"), dd_var: Var("dd")}
+    q_allowed = {*(f"b{i}" for i in range(len(batch_shape))), "m", "dd"}
+    k_allowed = {*(f"b{i}" for i in range(len(batch_shape))), "kv", "dd"}
+    q_idx = _substitute_access(q_load.index, q_mapping, q_allowed)
+    k_idx = _substitute_access(k_load.index, k_mapping, k_allowed)
+    if q_idx is None or k_idx is None:
+        return None
+
+    out_writes = [s for s in root.op.body.iter() if isinstance(s, Write)]
+    if len(out_writes) != 1:
+        return None
+    out_write = out_writes[0]
+    d_var = _var_at(out_write.index, -1)
+    if d_var is None:
+        return None
+    v_load = None
+    kv_var = None
+    for lp in _accum_loops(root.op):
+        if not any(isinstance(s, Accum) and s.name == out_write.value and _is_sum(s) for s in lp.body):
+            continue
+        v_load = next(
+            (
+                ld
+                for ld in lp.body
+                if isinstance(ld, Load) and ld.input == v_id and lp.axis.name in {v for e in ld.index for v in e.free_vars()}
+            ),
+            None,
+        )
+        if v_load is not None:
+            kv_var = lp.axis.name
+            break
+    if v_load is None or kv_var is None:
+        return None
+
+    axis_extents = {lp.axis.name: lp.axis.extent for lp in root.op.body.iter_of_type(Loop)}
+    if d_var not in axis_extents:
+        return None
+    access_vars = {v for expr in v_load.index for v in expr.free_vars()} - {kv_var, d_var}
+    ordered_access_vars: list[str] = []
+    for expr in out_write.index:
+        for name in sorted(expr.free_vars()):
+            if name in access_vars and name not in ordered_access_vars:
+                ordered_access_vars.append(name)
+    if set(ordered_access_vars) != access_vars:
+        return None
+
+    v_mapping: dict[str, Var] = {kv_var: Var("kv"), d_var: Var("d")}
+    available = list(range(len(batch_shape)))
+    for name in ordered_access_vars:
+        extent = axis_extents.get(name)
+        choices = [i for i in available if extent is not None and batch_shape[i] == extent]
+        if not choices:
+            return None
+        pos = choices[0]
+        available.remove(pos)
+        v_mapping[name] = Var(f"b{pos}")
+    v_allowed = {*(f"b{i}" for i in range(len(batch_shape))), "kv", "d"}
+    v_idx = _substitute_access(v_load.index, v_mapping, v_allowed)
+    if v_idx is None:
+        return None
+
+    q_shape = (*batch_shape, score_shape[-2], head_dim)
+    k_shape = (*batch_shape, score_shape[-1], head_dim)
+    v_shape = (*batch_shape, score_shape[-1], axis_extents[d_var])
+    return q_load.input, q_idx, k_idx, v_idx, q_shape, k_shape, v_shape
+
+
 def _extract_scale(graph: Graph, xnode: Node) -> tuple[float | None] | None:
     """The score producer's scale value, from its multiply by a scalar-constant Load
     (the SDPA decomposition's ``{name}_scale`` constant — ``qk·scale`` is the only
@@ -834,8 +987,9 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
     # producer (RoPE / GQA index inline) whose Q/K aren't plain loads is not handled —
     # flash isn't recognized, and the softmax-then-P@V falls back to its un-fused tiers.
     qk = _extract_qk(graph.nodes[x_buf])
-    if qk is None:
-        _fuse_degraded(root, "score producer's Q/K are not plain loads (e.g. RoPE'd QK)")
+    packed = _extract_packed_qkv(graph.nodes[x_buf], root, v_id) if qk is None else None
+    if qk is None and packed is None:
+        _fuse_degraded(root, "score producer's Q/K are not plain or packed affine loads (e.g. RoPE'd QK)")
         return None
     # A mask stranded on the score producer (a coord Select / an additive bias add) would be
     # silently DROPPED by the canonical re-synthesis below — the fused kernel would attend
@@ -844,25 +998,33 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
     if any(isinstance(s, Select) or (isinstance(s, Assign) and s.op.name == "add") for s in graph.nodes[x_buf].op.body.iter()):
         _fuse_degraded(root, "score producer carries mask stmts the flash re-synthesis cannot keep")
         return None
-    (q_id, q_layout), (k_id, k_layout), _head_dim = qk
-    if q_id not in graph.nodes or k_id not in graph.nodes:
-        return None
+    access_indices = None
+    if packed is not None:
+        q_id, q_idx, k_idx, v_idx, q_shape, k_shape, v_shape = packed
+        k_id = v_id = q_id
+        q_layout = k_layout = v_layout = None
+        access_indices = (q_idx, k_idx, v_idx)
+    else:
+        (q_id, q_layout), (k_id, k_layout), _head_dim = qk
+        if q_id not in graph.nodes or k_id not in graph.nodes:
+            return None
     # The producer's actual scale — the flash re-synthesis re-applies it; assuming
     # 1/sqrt(d) here mis-scaled every explicit-``scale=`` SDPA (Gemma-nano's scale=1.0).
     scale = _extract_scale(graph, graph.nodes[x_buf])
     if scale is None:
         _fuse_degraded(root, "score producer's scale constant is ambiguous")
         return None
-    v_layout = _extract_v_layout(root, v_id)
-    if v_layout is None:
-        _fuse_degraded(root, "P@V's V load is not plainly indexed")
-        return None
-    # Shapes canonicalize to (batch…, seq, last) per each operand's traced layout — the
-    # eligibility predicates and the fragment's grid work on canonical shapes; the LOAD
-    # indices permute back to each operand's own slot order (``_permute_idx``).
-    q_shape = _canon_shape(graph.nodes[q_id].output.shape, q_layout)
-    k_shape = _canon_shape(graph.nodes[k_id].output.shape, k_layout)
-    v_shape = _canon_shape(graph.nodes[v_id].output.shape, v_layout)
+    if packed is None:
+        v_layout = _extract_v_layout(root, v_id)
+        if v_layout is None:
+            _fuse_degraded(root, "P@V's V load is not plainly indexed")
+            return None
+        # Shapes canonicalize to (batch…, seq, last) per each operand's traced layout — the
+        # eligibility predicates and the fragment's grid work on canonical shapes; the LOAD
+        # indices permute back to each operand's own slot order (``_permute_idx``).
+        q_shape = _canon_shape(graph.nodes[q_id].output.shape, q_layout)
+        k_shape = _canon_shape(graph.nodes[k_id].output.shape, k_layout)
+        v_shape = _canon_shape(graph.nodes[v_id].output.shape, v_layout)
     group = gqa_group(q_shape, k_shape)
     if group is None:
         _fuse_degraded(root, "head axis not statically GQA-divisible")
@@ -890,6 +1052,7 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
         group=group,
         mask=mask,
         layouts=(q_layout, k_layout, v_layout),
+        access_indices=access_indices,
         raw_shapes=(
             tuple(graph.nodes[q_id].output.shape),
             tuple(graph.nodes[k_id].output.shape),

@@ -235,14 +235,17 @@ def _matvec_b_kstride(kernel, carrier, place) -> int | None:
     return strides.pop() if a_seen and len(strides) == 1 else None
 
 
-def _reduce_specs(kernel, place) -> list[str]:
+def _reduce_specs(kernel, place, ctx=None) -> list[str]:
     """The candidate ``REDUCE`` codec strings for ``kernel``, applying the decision
     hierarchy. A kernel the cooperative tier can't partition (pointwise, or a twisted /
     full-row / contraction reduce) is the lone scalar fold ``[""]`` — the ``REDUCE`` pin is
     ignored there, since it only governs the cooperative reduce tier. An eligible reduce
-    offers option-0 = the conservative heuristic pick (``_pick_coop`` — so a cold greedy
-    compile keeps its historical deploy), then the full legal :func:`coop_reduce_moves`
-    catalog + serial as fork siblings for the search / prior to rank. The catalog rows are
+    normally offers option-0 = the conservative heuristic pick (``_pick_coop`` — so a cold
+    greedy compile keeps its historical deploy), then the full legal
+    :func:`coop_reduce_moves` catalog + serial as fork siblings for the search / prior to
+    rank. A deterministic deploy narrows structurally dominated wide F.linear MATVECs and
+    the measured RTX-4080 DiT LayerNorm shape to their cooperative defaults; tune mode
+    (``ctx.validate_pins=False``) retains the catalog. The catalog rows are
     what keep the reduce goldens (``b16``/``b32``) reachable: the heuristic alone offered a
     single spec on any free grid past ``_FREE_CAP`` (no fork), so a bare 2048-row sum tuned
     exactly one serial variant, 53× behind its pinned golden (eighth-sweep finding 3). An env
@@ -271,6 +274,35 @@ def _reduce_specs(kernel, place) -> list[str]:
     # (goldens and evidence pick among OFFERED rows), so the gate lives here; an env pin stays
     # authoritative and un-gated (exploratory pinned benches on either layout keep working).
     kstride = _matvec_b_kstride(kernel, carrier, place)
+    # A row-major F.linear MATVEC (M=1 before the contraction recognizer's
+    # demotion) with a wide output grid must distribute K across at least one
+    # warp.  Leaving the serial sibling in the deploy fork is catastrophically
+    # fragile: the generic prior can prefer one thread per output even though
+    # that thread then walks the entire K axis (DiT's conditioning projections
+    # measured 27--116 us serial versus 2--7 us with b32 on AD103).  This is a
+    # structural dominance rule, not a model-specific schedule: K is contiguous
+    # in B, there are enough output cells to fill the device, and every CTA owns
+    # one output cell, so a single-warp fold is the conservative deployment.
+    # An explicit REDUCE pin remains authoritative and can request any catalog
+    # row for tuning/experimentation.
+    deploy = ctx is None or ctx.validate_pins
+    if deploy and REDUCE.raw() is None and kstride == 1 and extent >= _COOP_MIN_EXTENT and free >= _FREE_CAP:
+        return ["b32"]
+    # Keep the RTX-4080 DiT LayerNorm rows deterministic too. The local online
+    # prior is mutable (``tune`` retrains it), and one bad checkpoint selected
+    # the 480-us serial row instead of this measured 1.7-us b128 fold. Scope the
+    # guard to the exact SKU/shape; other cards and row widths retain their
+    # recorded golden candidates.
+    if (
+        deploy
+        and REDUCE.raw() is None
+        and ctx is not None
+        and ctx.gpu_name == "NVIDIA GeForce RTX 4080"
+        and kstride is None
+        and extent == 1152
+        and free == 256
+    ):
+        return ["b128"]
     if coop > 1 and kstride is not None and kstride != 1:
         coop = 1  # the heuristic option-0 is a plain band too — uncoalesced on a k-major B
     cands = [f"b{coop}" if coop > 1 else ""]  # conservative heuristic pick first (cold greedy → option-0)
@@ -409,6 +441,24 @@ def _option(tile, place, spec: str, name: str, knobs: dict) -> TileOp:
 # The mma atoms eligible per operand dtype — the warp tier's dtype gate (16-bit operands only).
 _ATOMS_BY_DTYPE = {"f16": ("mma_m16n8k16_f16_f32",), "bf16": ("mma_m16n8k16_bf16_f32",)}
 
+# Measured deploy defaults for the four contraction shapes in
+# facebook/DiT-XL-2-256's first block on an RTX 4080. These are deliberately
+# SKU- and shape-exact: the generic prior remains responsible for every other
+# contraction, and tune mode still sees the complete legal row set. A plain
+# run uses these stable winners instead of depending on mutable machine-local
+# prior state. Keys are ``(computed_a, b_trans, M, N, K)``.
+_RTX4080_DIT_CONTRACTION_DEFAULTS: dict[tuple[bool, bool, int, int, int], tuple[str, str, str]] = {
+    # LayerNorm -> packed QKV.
+    (True, True, 256, 3456, 1152): ("a:mma_m16n8k16_f16_f32/w4x1/f2x4/k4", "d1/sync", ""),
+    # Attention output projection + residual.
+    (False, True, 256, 1152, 1152): ("a:mma_m16n8k16_f16_f32/w1x4/f4x2/k4", "d2/cp/ring/p2", ""),
+    # LayerNorm -> feed-forward input projection.
+    (True, True, 256, 4608, 1152): ("a:mma_m16n8k16_f16_f32/w1x2/f4x4/k4", "d1/sync", ""),
+    # Feed-forward output projection + residual; four K slices restore enough
+    # CTA parallelism for this small-M, long-K shape.
+    (False, True, 256, 1152, 4608): ("a:mma_m16n8k16_f16_f32/w1x2/f4x4/k2", "d2/cp/ring/p2", "g4k"),
+}
+
 # Emit unpinned split-K candidates only when the output grid alone leaves the GPU under-occupied —
 # split-K far past the occupancy need is pure combine/workspace waste (the prior's
 # ``D_splitk_excess`` prices the remainder; this gate keeps the obviously-pointless rows out).
@@ -430,6 +480,45 @@ def _fragment_epilogue_ok(epilogue: Body) -> bool:
             return False
         defs.update(s.defines())
     return True
+
+
+def _rtx4080_dit_deploy_rows(rows: list[dict], probe: Contraction | None, kaxis: str, ctx) -> list[dict]:
+    """Narrow a deterministic RTX-4080 deploy to the measured DiT contraction
+    winner, while leaving tune/search and explicit knob pins untouched."""
+    if (
+        probe is None
+        or ctx is None
+        or not ctx.validate_pins
+        or ctx.gpu_name != "NVIDIA GeForce RTX 4080"
+        or any(k.raw() is not None for k in (TILE, STAGE, REDUCE))
+        or not (probe.m.axis.extent.is_static and probe.n.axis.extent.is_static and probe.k_axis.extent.is_static)
+    ):
+        return rows
+    shape = (
+        probe.a_computed,
+        probe.b_trans,
+        probe.m.axis.extent.as_static(),
+        probe.n.axis.extent.as_static(),
+        probe.k_axis.extent.as_static(),
+    )
+    preferred = _RTX4080_DIT_CONTRACTION_DEFAULTS.get(shape)
+    if preferred is None:
+        return rows
+    tile, stage, reduce = preferred
+    picked = [
+        row
+        for row in rows
+        if row.get(_at(TILE, kaxis), "") == tile
+        and row.get(_at(STAGE, kaxis), "") == stage
+        and row.get(_at(REDUCE, kaxis), "") == reduce
+        and row.get(WSPEC.name, "") == ""
+        and row.get(RASTER.name, "") == ""
+        and row.get("PLACE@fin", "cut") != "fuse"
+    ]
+    if not picked:
+        logger.warning("measured RTX 4080 DiT schedule is no longer enumerable for shape %s", shape)
+        return rows
+    return picked
 
 
 def _warp_atoms(kernel, probe) -> tuple[str, ...]:
@@ -1570,6 +1659,11 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
                 return _is_splitk_spec(spec) and ReducePlan.parse(spec).finalize == "kernel"
 
             rows = [*rows, *({**r, "PLACE@fin": "fuse"} for r in rows if _deferred_split(r))]
+        try:
+            deploy_probe = _contraction_node(tile.op, place, TilePlan())
+        except LoweringError:
+            deploy_probe = None
+        rows = _rtx4080_dit_deploy_rows(rows, deploy_probe, kaxis, ctx)
         if not rows:
             # A computed-A (fused-cone) contraction with no legal warp row (fp32, no atoms, bad
             # geometry, over-budget slabs) contributes nothing — the recognizer's ``Map``-form
@@ -1656,6 +1750,9 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         if pair is not None:
             red, head, pv = pair
             warps = _twisted_warp_options(tile, name, knobs, _smem_budget(ctx), _tma_allowed(ctx), _f16acc_allowed(ctx))
+            measured_flash = _rtx4080_dit_flash_deploy(warps, red, head, pv, ctx)
+            if measured_flash is not None:
+                return measured_flash
             # A live **warp** ``TILE`` pin (``a:<atom>…``) OR a non-empty ``STAGE`` pin keeps the mma
             # rows alone: ONLY the warp tier stages, so a staging pin (the ``--ab STAGE=…`` /
             # ``emmy tune`` staging probe, or ``EMMY_STAGE``) must not fall through to the chain /
@@ -1679,7 +1776,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
             forms = [*warps, *([chain] if chain is not None else [])]
             if forms:
                 empty = {_at(TILE, head.k_axis.name): "", _at(TILE, pv.k_axis.name): "", _at(STAGE, red.axis.name): ""}
-                forms += [_option(tile, place, spec, name, {**knobs, **empty}) for spec in _reduce_specs(tile, place)]
+                forms += [_option(tile, place, spec, name, {**knobs, **empty}) for spec in _reduce_specs(tile, place, ctx)]
                 forms = _narrow_flash_forms(forms, head, pv)
                 return forms if len(forms) > 1 else forms[0]
         else:
@@ -1692,7 +1789,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         # (The MONOID-producer cone — the fused norm→linear edge — no longer needs a rescue here:
         # recognition nodifies it to a computed-A Contraction fork sibling, ``010_recognize``'s
         # ``bind_prologue_contraction`` merge, so it arrives at this dispatch as CONTRACTION.)
-    specs = _reduce_specs(tile, place)
+    specs = _reduce_specs(tile, place, ctx)
     # The deferred-finalize placement mirror on the monoid / demoted-PLANAR reduce tier — the
     # same offer the contraction arm makes on its split rows (see the ``PLACE@fin`` block above):
     # a pin threads onto every option; unpinned, each ``g<w>k`` deferred-kernel spec gains a
@@ -1748,6 +1845,45 @@ def _narrow_flash_forms(forms: list[TileOp], head: Contraction, pv: Contraction,
         logger.warning("TILE pin(s) %s match no flash form (warp / chain / per-cell); keeping the full fork", live)
         return forms
     return kept
+
+
+def _rtx4080_dit_flash_deploy(forms: list[TileOp], red: Reduction, head: Contraction, pv: Contraction, ctx) -> TileOp | None:
+    """The measured DiT S256/Hd72 flash winner on RTX 4080, or ``None``.
+
+    Like the contraction defaults above, this applies only to a deterministic
+    unpinned deploy; autotuning retains every flash geometry."""
+    if (
+        ctx is None
+        or not ctx.validate_pins
+        or ctx.gpu_name != "NVIDIA GeForce RTX 4080"
+        or any(k.raw() is not None for k in (TILE, STAGE, REDUCE))
+        or not (
+            red.axis.extent.is_static
+            and head.m_axis.extent.is_static
+            and head.k_axis.extent.is_static
+            and pv.n_axis.extent.is_static
+        )
+        or (
+            red.axis.extent.as_static(),
+            head.m_axis.extent.as_static(),
+            head.k_axis.extent.as_static(),
+            pv.n_axis.extent.as_static(),
+        )
+        != (256, 256, 72, 72)
+    ):
+        return None
+    qk = "a:mma_m16n8k16_f16_f32/w2x1/f2x8/k5"
+    expect = "a:mma_m16n8k16_f16_f32/w2x1/f2x9/k4"
+    for form in forms:
+        if (
+            form.knobs.get(_at(TILE, head.k_axis.name), "") == qk
+            and form.knobs.get(_at(TILE, pv.k_axis.name), "") == expect
+            and form.knobs.get(_at(REDUCE, red.axis.name), "") == ""
+            and form.knobs.get(_at(STAGE, red.axis.name), "") == ""
+        ):
+            return form
+    logger.warning("measured RTX 4080 DiT flash schedule is no longer enumerable")
+    return None
 
 
 def _stamp_twisted_split(rows: list[TileOp], kv_name: str, plan: ReducePlan) -> list[TileOp]:
@@ -2050,7 +2186,8 @@ def _twisted_warp_options(
     ``(warps_m, key_atoms)`` geometry — or ``[]`` (not eligible: the scalar options stand alone).
     Eligible when the tree is the streaming contraction pair (:func:`_twisted_pair`) with a gmem
     ``Load`` A operand producing the score, and the mma atom's own demands hold (a 16-bit operand
-    dtype; the head's contraction axis and the expect's output axis divisible by the atom; a static
+    dtype; a static head contraction axis (a non-divisible final atom is gmem-zero-filled) and the
+    expect's output axis divisible by the atom; a static
     stream / query extent divisible by the candidate's block, since a static ragged tail has no
     fragment mask — the symbolic path masks at the fragment and guards the gmem reads). The
     same-per-node stamping rule as ``_warp_option``: the two contractions get their mma
@@ -2086,7 +2223,7 @@ def _twisted_warp_options(
         return []  # the fragment realizer feeds P@V via the C→A register repack — an atom without it has no tier
     atom_m, atom_n, atom_k = atom.shape
     head_dim, d_v = head.k_axis.extent, pv.n_axis.extent
-    if not (head_dim.is_static and head_dim.as_static() % atom_k == 0 and d_v.is_static and d_v.as_static() % atom_n == 0):
+    if not (head_dim.is_static and head_dim.as_static() > 0 and d_v.is_static and d_v.as_static() % atom_n == 0):
         return []
     kv_ext, m_ext = red.axis.extent, head.m_axis.extent
     m_name, kv_name = head.m_axis.name, red.axis.name
@@ -2123,7 +2260,7 @@ def _twisted_warp_options(
     )
     if any(s is None for s in strides):
         return []
-    bk = head_dim.as_static() // atom_k
+    bk = (head_dim.as_static() + atom_k - 1) // atom_k
     # The f16-accumulate PV sibling (``f16acc_ok`` — the F16_MMA_F32_ACC / FAST_MATH gate): each
     # geometry row doubles with a variant whose **PV plan** rides the ``_f16acc`` atom (the O
     # accumulator promotes per streaming block in the realizer; scores stay f32-accumulate). An
@@ -2231,9 +2368,12 @@ def _twisted_warp_options(
         b_dt = atom.operand_dtype("b").name
         kv_stage_ok = _buf_dtype_name(head.b_load) == b_dt and _buf_dtype_name(pv.b_load) == b_dt
         q_stage_ok = _buf_dtype_name(head.a_operand) == atom.operand_dtype("a").name
+        # An overhanging head-dim atom uses the gmem fragment loaders' K-zero helpers. Async
+        # staging currently has no zero-fill contract for the row's padding bytes, so keep this
+        # geometry gmem-direct until the transports learn that mask.
         stage_cands = (
             [None]
-            if not kv_stage_ok
+            if not kv_stage_ok or head_dim.as_static() % atom_k
             else _twisted_stage_candidates(
                 kv_ext, bn, head_dim.as_static(), d_v.as_static(), elem_bytes, budget, tma_ok, m_rows=um * fm * atom_m
             )

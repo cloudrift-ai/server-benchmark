@@ -84,13 +84,18 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `pre` and `post` (a reference torch SDPA in the Phase-2 host stitch; vLLM paged `Attention` in Phase 3). **I/O:**
   the plugin runs **device-resident at every width**: the **decode hot path** (`num_tokens ≤ bucket`) rides the
   captured static twins (`run_device` — captured-replay, torch↔cupy DLPack zero-copy), a **FULL chunked-prefill
-  step** rides the static **prefill-chunk twin** (`num_tokens == prefill_bucket` EXACTLY — default = mnbt,
-  `EMMY_GEN_PREFILL_BUCKET` overrides / `0` disables; exact grids on the hot chunk width. The boundary is equality,
-  not a range: the twin always computes `prefill_bucket` rows, so an over-bucket decode batch or a partial tail
-  chunk routed through it would pay the full-bucket grids for a sliver of real rows), and every other width rides
-  the SYMBOLIC programs' `run_device_sym`
-  (`num_tokens ≤ prefill_capacity`, capacity = vLLM's `max_num_batched_tokens`, passed as `max_tokens` at runner
-  build) — grids sized per step via
+  step** rides the static **prefill-chunk twin** (`num_tokens == prefill_bucket` EXACTLY — default = the dynamic-dim
+  cap, `EMMY_GEN_PREFILL_BUCKET` overrides / `0` disables; exact grids on the hot chunk width. The boundary is
+  equality, not a range: the twin always computes `prefill_bucket` rows, so an over-bucket decode batch or a partial
+  tail chunk routed through it would pay the full-bucket grids for a sliver of real rows), a **rider-carrying full
+  chunk step** (`prefill_bucket < num_tokens ≤ prefill_bucket + rider_width`, `rider_width` = the decode bucket when
+  both twin families exist) **splits row-wise** across the chunk twin + the decode twin — correct because pre/post are
+  per-token-independent — which is what lets `--max-num-batched-tokens` default to `DYNAMIC_DIM_MAX + bucket`: a full
+  chunk step keeps carrying its decode riders and the previous prompt's 1-token BOS tail instead of freezing every
+  decoding request for the whole chunk and deferring first-token sampling (the measured c=4/c=8 TTFT structure), and
+  every other width rides the SYMBOLIC programs' `run_device_sym`
+  (`num_tokens ≤ prefill_capacity`, capacity = `min(max_num_batched_tokens, DYNAMIC_DIM_MAX)`, passed as `max_tokens`
+  at runner build) — grids sized per step via
   `set_sym_values` over capacity-built buffers, launches issued on torch's stream, no per-T graph capture
   (chunked-prefill T varies per step; the dispatch hides behind prefill-width GPU work). The per-layer host numpy
   `rebind` path survives only for the standalone `emmy generate` oracle and as the over-capacity fallback — its
@@ -176,7 +181,12 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `test_gen_capture_gpu` / the two-size live-replay test; over-bucket capture was worth +10.6% req/s at c=64,
   and a decode bucket matched to the concurrency beats riding the symbolic captures — the bucket-64 golden set
   took c=64 TPOT 35.4 → 22.5 ms, and the bucket-8 set (m8 goldens, 2026-07-25) took c=4 TPOT 19.6 → 18.9 and
-  c=8 21.4 → 20.6 on the same per-lane-knob rule). Under the
+  c=8 21.4 → 20.6 on the same per-lane-knob rule). The mixed prefill+decode cells take a second per-workload
+  knob, the CHUNK QUANTUM: `EMMY_GEN_PREFILL_BUCKET=2048` + `--max-num-batched-tokens 2056` (chunk width +
+  bucket-sized rider headroom; m2048 goldens 2026-07-26) pipelines queued prompts in ~200 ms static-twin steps
+  instead of ~500 ms 4096-chunks — c=4 TTFT 1363 → 1063 and c=8 1828 → 1014 on the 5090, both below stock —
+  and as a side effect the smaller profiling dummy peak restores KV capacity to stock parity (38k vs 24k
+  tokens at util 0.96). Under the
   outer capture,
   `_Program.run_device` detects `torch.cuda.is_current_stream_capturing()` and issues the raw launch sequence
   (`run_once`) instead of its own graph machinery — nested stream capture and graph launch are both illegal in a

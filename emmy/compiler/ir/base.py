@@ -18,7 +18,7 @@ avoids a frontend→tensor dependency for a single function.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, final
 
 import numpy as np
 
@@ -95,6 +95,7 @@ class Op:
         return True
 
 
+@final
 @dataclass
 class InputOp(Op):
     """Sentinel for graph input tensors (no computation)."""
@@ -106,6 +107,7 @@ class InputOp(Op):
         raise NotImplementedError("InputOp is a sentinel; value is supplied by the executor")
 
 
+@final
 @dataclass
 class AuxOutputOp(Op):
     """Sentinel for an AUXILIARY output buffer of its (sole) input node — a second buffer that
@@ -124,6 +126,7 @@ class AuxOutputOp(Op):
         raise NotImplementedError("AuxOutputOp is a sentinel; its buffer is written by the producer node's kernel")
 
 
+@final
 @dataclass
 class ConstantOp(Op):
     """Fixed tensor: weights, RoPE tables, scalars. Not an activation.
@@ -188,6 +191,12 @@ class ConstantOp(Op):
         if self.value is not None:
             return np.array([self.value], dtype=np.float32)
         raise NotImplementedError("ConstantOp with value=None must be supplied by the executor")
+
+
+# The closed set of boundary sentinels. Annotate with this alias (not ``Op``)
+# when a value is known to be a sentinel — the union is closed (every variant
+# is ``@final``), so ``match`` over it can be checked for exhaustiveness.
+type BoundaryOp = InputOp | AuxOutputOp | ConstantOp
 
 
 def _keepdim_axis(shape: tuple, axis: int | str) -> tuple:

@@ -1,4 +1,4 @@
-.PHONY: help setup clean bench bench-force bench-kernels bench-kernels-tune test-compose lint format git-sha-guard
+.PHONY: help setup clean bench bench-force bench-kernels bench-kernels-tune test-compose lint typecheck format git-sha-guard
 
 help:
 	@echo "Server Benchmark Makefile"
@@ -6,6 +6,7 @@ help:
 	@echo "Available targets:"
 	@echo "  setup          - Install system dependencies, create venv, and install Python packages"
 	@echo "  lint           - Run linter and format checks"
+	@echo "  typecheck      - Run pyright over the typed modules (see [tool.pyright] in pyproject.toml)"
 	@echo "  format         - Auto-format code and fix lint violations"
 	@echo "  bench          - Run benchmarks in parallel"
 	@echo "  bench-force    - Run benchmarks in parallel (force re-run, skip cached results)"
@@ -34,6 +35,9 @@ setup-ci:
 lint: setup
 	./venv/bin/ruff check
 	./venv/bin/ruff format --check
+
+typecheck: setup
+	./venv/bin/pyright
 
 format: setup
 	./venv/bin/ruff format

@@ -175,6 +175,13 @@ def apply_binop(op: str, lv: object, rv: object) -> object:
     raise ValueError(f"Unknown BinOp: {op}")
 
 
+# What ``eval`` consumes and produces: scalars, or numpy arrays when the env
+# binds arrays (vectorized evaluation over whole index grids). numpy scalar
+# types (``np.int64`` …) enter via ``np.ndarray`` element reads and are
+# subsumed under the array/scalar union for typing purposes.
+type Value = int | float | bool | np.ndarray
+
+
 # ---------------------------------------------------------------------------
 # Expression types
 # ---------------------------------------------------------------------------
@@ -186,7 +193,7 @@ class Var(_ExprOps):
 
     name: str
 
-    def eval(self, env: dict[str, object]) -> object:
+    def eval(self, env: dict[str, Value]) -> Value:
         return env[self.name]
 
     def pretty(self) -> str:
@@ -228,7 +235,7 @@ class Literal(_ExprOps):
     value: int | float
     dtype: str = "float"
 
-    def eval(self, env: dict[str, object]) -> object:
+    def eval(self, env: dict[str, Value]) -> Value:
         return self.value
 
     def pretty(self) -> str:
@@ -283,7 +290,7 @@ class BinaryExpr(_ExprOps):
     left: Expr
     right: Expr
 
-    def eval(self, env: dict[str, object]) -> object:
+    def eval(self, env: dict[str, Value]) -> Value:
         # Single source of binary-op semantics: ``apply_binop`` (also used by
         # constant folding) — eval only supplies the evaluated operands.
         return apply_binop(self.op, self.left.eval(env), self.right.eval(env))
@@ -423,7 +430,7 @@ class Builtin(_ExprOps):
 
     name: str
 
-    def eval(self, env: dict[str, object]) -> object:
+    def eval(self, env: dict[str, Value]) -> Value:
         raise NotImplementedError(f"Builtin {self.name!r} is GPU-only; cannot eval in numpy")
 
     def pretty(self) -> str:
@@ -459,7 +466,7 @@ class FuncCallExpr(_ExprOps):
     name: str
     args: tuple[Expr, ...]
 
-    def eval(self, env: dict[str, object]) -> object:
+    def eval(self, env: dict[str, Value]) -> Value:
         from emmy.compiler.ir.elementwise import ElementwiseImpl
 
         try:
@@ -505,7 +512,7 @@ class TernaryExpr(_ExprOps):
     if_true: Expr
     if_false: Expr
 
-    def eval(self, env: dict[str, object]) -> object:
+    def eval(self, env: dict[str, Value]) -> Value:
         return self.if_true.eval(env) if self.cond.eval(env) else self.if_false.eval(env)
 
     def pretty(self) -> str:
@@ -545,7 +552,7 @@ class CastExpr(_ExprOps):
     dtype: str
     expr: Expr
 
-    def eval(self, env: dict[str, object]) -> object:
+    def eval(self, env: dict[str, Value]) -> Value:
         v = self.expr.eval(env)
         if self.dtype == "int":
             return np.asarray(v).astype(np.int64) if hasattr(v, "__array__") else int(v)

@@ -202,7 +202,7 @@ def _reduce_graph() -> Graph:
 
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (2048, 2048)), node_id="x")
-    g.add_node(MeanOp(), ["x"], Tensor("y", (2048, 1)), node_id="y")
+    g.add_node(MeanOp(axis=-1), ["x"], Tensor("y", (2048, 1)), node_id="y")
     g.inputs, g.outputs = ["x"], ["y"]
     return g
 

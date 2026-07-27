@@ -27,12 +27,14 @@ elementwise, reduce, scan, and accumulator use sites; read straight from
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import final
 
 import numpy as np
 
 from emmy.compiler.dim import Dim, to_dim
 from emmy.compiler.ir.base import Op, _keepdim_axis
 from emmy.compiler.ir.elementwise import _REDUCE_SPELLING, ElementwiseImpl
+from emmy.compiler.ir.expr import Expr
 
 # ---------------------------------------------------------------------------
 # Elementwise / reduce / scan
@@ -65,6 +67,7 @@ class _ElementwiseImplOp(Op):
         return self.op.name
 
 
+@final
 @dataclass
 class ElementwiseOp(_ElementwiseImplOp):
     """Apply a scalar function independently to each element.
@@ -107,12 +110,20 @@ class ElementwiseOp(_ElementwiseImplOp):
 
 
 @dataclass
-class ReduceLikeOp(_ElementwiseImplOp):
+class ReduceLikeOp[A: (int, str)](_ElementwiseImplOp):
     """Shared base for the axis-folding ops (``ReduceOp`` / ``ScanOp``): a ``sum``-default
-    ``ElementwiseImpl`` combine over one ``axis``, resolved to its numpy spelling."""
+    ``ElementwiseImpl`` combine over one ``axis``, resolved to its numpy spelling.
+
+    ``A`` is the axis type: ``int`` for a concrete axis, ``str`` for a symbolic
+    axis name. The numpy ``forward`` methods are declared with ``self`` at the
+    ``int`` specialization (e.g. ``self: ReduceOp[int]``), so type-checked code
+    cannot run a symbolic-axis op on numpy. ``axis`` is keyword-only and has no
+    default — a literal like ``0`` would not typecheck for ``A = str``, and the
+    keyword requirement holds on every axis-carrying op in this dialect.
+    """
 
     op: ElementwiseImpl = field(default_factory=lambda: ElementwiseImpl("sum"))
-    axis: int | str = 0
+    axis: A = field(kw_only=True)
 
     def _spelling(self):
         """The ``ReduceSpelling`` for this combine, or raise if it has none."""
@@ -122,8 +133,9 @@ class ReduceLikeOp(_ElementwiseImplOp):
         return spelling
 
 
+@final
 @dataclass
-class ReduceOp(ReduceLikeOp):
+class ReduceOp[A: (int, str)](ReduceLikeOp[A]):
     """Collapse one or more dimensions via an associative binary op.
 
     ``op`` is the combine (``sum`` / ``max`` / ``prod`` / …); ``axis`` is
@@ -137,18 +149,19 @@ class ReduceOp(ReduceLikeOp):
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
         return _keepdim_axis(input_shapes[0], self.axis)
 
-    def forward(self, *inputs):
+    def forward(self: ReduceOp[int], *inputs):
         return self._spelling().np_reduce(inputs[0], axis=self.axis, keepdims=True)
 
 
+@final
 @dataclass
-class ScanOp(ReduceLikeOp):
+class ScanOp[A: (int, str)](ReduceLikeOp[A]):
     """Cumulative application of an associative binary op along an axis."""
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
         return tuple(input_shapes[0])  # scan preserves shape
 
-    def forward(self, *inputs):
+    def forward(self: ScanOp[int], *inputs):
         spelling = self._spelling()
         if spelling.np_scan is None:
             raise NotImplementedError(f"ScanOp.forward: unknown fn {self.op.name!r}")
@@ -160,18 +173,22 @@ class ScanOp(ReduceLikeOp):
 # ---------------------------------------------------------------------------
 
 
+@final
 @dataclass
-class GatherOp(Op):
-    """Read elements from arbitrary positions along an axis."""
+class GatherOp[A: (int, str)](Op):
+    """Read elements from arbitrary positions along an axis.
 
-    axis: int | str = 0
+    ``A`` is the axis type — ``int`` (concrete) or ``str`` (symbolic name);
+    see :class:`ReduceLikeOp`."""
+
+    axis: A = field(kw_only=True)
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
         # Output shape = input shape with the gather axis sized by the index input.
         # Conservative fallback: keep input shape (callers should pre-size if needed).
         return tuple(input_shapes[0])
 
-    def forward(self, *inputs):
+    def forward(self: GatherOp[int], *inputs):
 
         data, indices = inputs[0], inputs[1].astype(np.intp)
         axis = self.axis if self.axis >= 0 else data.ndim + self.axis
@@ -187,17 +204,21 @@ class GatherOp(Op):
         return np.take(data, indices, axis=axis)
 
 
+@final
 @dataclass
-class ScatterOp(Op):
-    """Write (or reduce) values into arbitrary positions along an axis."""
+class ScatterOp[A: (int, str)](Op):
+    """Write (or reduce) values into arbitrary positions along an axis.
 
-    axis: int | str = 0
+    ``A`` is the axis type — ``int`` (concrete) or ``str`` (symbolic name);
+    see :class:`ReduceLikeOp`."""
+
+    axis: A = field(kw_only=True)
     reduce_fn: str | None = None  # None = overwrite, "sum" = scatter-add
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
         return tuple(input_shapes[0])  # scatter preserves the destination shape
 
-    def forward(self, *inputs):
+    def forward(self: ScatterOp[int], *inputs):
 
         dest, indices, values = inputs[0].copy(), inputs[1].astype(np.intp), inputs[2]
         if self.reduce_fn == "sum":
@@ -227,10 +248,11 @@ class IndexSource:
     """
 
     input_idx: int  # position in IndexMapOp's input list
-    coord_map: tuple  # tuple[Expr, ...] — kept untyped to avoid forward-reference clutter
-    select: object | None = None  # Expr | None
+    coord_map: tuple[Expr, ...]
+    select: Expr | None = None
 
 
+@final
 @dataclass
 class IndexMapOp(Op):
     """Compute output by reindexing inputs via affine coord arithmetic.
@@ -287,3 +309,11 @@ class IndexMapOp(Op):
             if not isinstance(c, Var) or c.name != f"{PLACEHOLDER_PREFIX}{i}":
                 return False
         return True
+
+
+# The closed set of tensor-dialect ops — everything a post-decomposition graph
+# may hold besides the ``ir.base`` sentinels. Annotate with this alias (not
+# ``Op``) when a value is known to be a tensor op; every variant is ``@final``,
+# so the union is closed and ``match`` over it can be checked for
+# exhaustiveness.
+type TensorOp = ElementwiseOp | ReduceOp | ScanOp | GatherOp | ScatterOp | IndexMapOp

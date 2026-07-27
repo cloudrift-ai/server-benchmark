@@ -33,7 +33,7 @@ def _erf(x):  # numpy lacks an erf ufunc; scipy ships one and is a torch dep.
     return erf(x)
 
 
-_NAME_TO_FN: dict[str, object] = {
+_NAME_TO_FN: dict[str, Callable[..., object]] = {
     "exp_fast": np.exp,  # the FAST_EXP-lowered exp — host semantics identical, CUDA renders __expf
     "rsqrt": lambda x: 1.0 / np.sqrt(x),
     "relu": lambda x: np.maximum(0.0, x),

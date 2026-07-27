@@ -23,6 +23,9 @@ jobs:
       - name: Ruff format check
         run: ./venv/bin/ruff format --check
 
+      - name: Typecheck
+        run: ./venv/bin/pyright
+
   test:
     runs-on: ubuntu-latest
     steps:

@@ -144,7 +144,7 @@ def _make_rms_norm_like():
     g.add_node(InputOp(), [], Tensor("x", (4, 8)), node_id="x")
     g.add_node(ConstantOp(name="w"), [], Tensor("w", (4, 8)), node_id="w")
     g.add_node(ElementwiseOp("multiply"), ["x", "x"], Tensor("sq", (4, 8)), node_id="sq")
-    g.add_node(ReduceOp("sum", -1), ["sq"], Tensor("red", (4, 1)), node_id="red")
+    g.add_node(ReduceOp("sum", axis=-1), ["sq"], Tensor("red", (4, 1)), node_id="red")
     g.add_node(ElementwiseOp("multiply"), ["red", "red"], Tensor("sqr", (4, 1)), node_id="sqr")
     g.inputs, g.outputs = ["x", "w"], ["sqr"]
     return g
@@ -182,7 +182,7 @@ def _make_contraction():
     g.add_node(InputOp(), [], Tensor("a", (4, 8)), node_id="a")
     g.add_node(InputOp(), [], Tensor("b", (4, 8)), node_id="b")
     g.add_node(ElementwiseOp("multiply"), ["a", "b"], Tensor("m", (4, 8)), node_id="m")
-    g.add_node(ReduceOp("sum", -1), ["m"], Tensor("y", (4, 1)), node_id="y")
+    g.add_node(ReduceOp("sum", axis=-1), ["m"], Tensor("y", (4, 1)), node_id="y")
     g.inputs, g.outputs = ["a", "b"], ["y"]
     return g
 
@@ -214,7 +214,7 @@ def _make_contraction_with_epilogue():
     g.add_node(InputOp(), [], Tensor("b", (4, 8)), node_id="b")
     g.add_node(InputOp(), [], Tensor("bias", (4, 1)), node_id="bias")
     g.add_node(ElementwiseOp("multiply"), ["a", "b"], Tensor("m", (4, 8)), node_id="m")
-    g.add_node(ReduceOp("sum", -1), ["m"], Tensor("s", (4, 1)), node_id="s")
+    g.add_node(ReduceOp("sum", axis=-1), ["m"], Tensor("s", (4, 1)), node_id="s")
     g.add_node(ElementwiseOp("add"), ["s", broadcast_to(g, "bias", (4, 1))], Tensor("y", (4, 1)), node_id="y")
     g.inputs, g.outputs = ["a", "b", "bias"], ["y"]
     return g
@@ -240,10 +240,10 @@ def test_contraction_epilogue_body_has_add():
 def _make_softmax():
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (4, 8)), node_id="x")
-    g.add_node(ReduceOp("maximum", -1), ["x"], Tensor("mx", (4, 1)), node_id="mx")
+    g.add_node(ReduceOp("maximum", axis=-1), ["x"], Tensor("mx", (4, 1)), node_id="mx")
     g.add_node(ElementwiseOp("subtract"), ["x", "mx"], Tensor("subtract", (4, 8)), node_id="subtract")
     g.add_node(ElementwiseOp("exp"), ["subtract"], Tensor("exp", (4, 8)), node_id="exp")
-    g.add_node(ReduceOp("sum", -1), ["exp"], Tensor("sm", (4, 1)), node_id="sm")
+    g.add_node(ReduceOp("sum", axis=-1), ["exp"], Tensor("sm", (4, 1)), node_id="sm")
     g.add_node(ElementwiseOp("divide"), ["exp", "sm"], Tensor("out", (4, 8)), node_id="out")
     g.inputs, g.outputs = ["x"], ["out"]
     return g
@@ -362,8 +362,8 @@ def _make_sibling_reductions():
     with two accumulators sharing one reduce axis."""
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (4, 8)), node_id="x")
-    g.add_node(ReduceOp("sum", -1), ["x"], Tensor("s", (4, 1)), node_id="s")
-    g.add_node(ReduceOp("maximum", -1), ["x"], Tensor("m", (4, 1)), node_id="m")
+    g.add_node(ReduceOp("sum", axis=-1), ["x"], Tensor("s", (4, 1)), node_id="s")
+    g.add_node(ReduceOp("maximum", axis=-1), ["x"], Tensor("m", (4, 1)), node_id="m")
     g.add_node(ElementwiseOp("add"), ["s", "m"], Tensor("out", (4, 1)), node_id="out")
     g.inputs, g.outputs = ["x"], ["out"]
     return g
@@ -563,7 +563,7 @@ def _make_gather_into_reduce():
     g.add_node(GatherOp(axis=0), ["w", "idx"], Tensor("emb", (1, S, H)), node_id="emb")
     # RMSNorm-like: variance reduce reads emb, normalize reads emb again.
     g.add_node(ElementwiseOp("multiply"), ["emb", "emb"], Tensor("sq", (1, S, H)), node_id="sq")
-    g.add_node(ReduceOp("sum", -1), ["sq"], Tensor("red", (1, S, 1)), node_id="red")
+    g.add_node(ReduceOp("sum", axis=-1), ["sq"], Tensor("red", (1, S, 1)), node_id="red")
     g.add_node(ElementwiseOp("multiply"), ["emb", broadcast_to(g, "red", (1, S, H))], Tensor("out", (1, S, H)), node_id="out")
     g.inputs, g.outputs = ["w", "idx"], ["out"]
     return g

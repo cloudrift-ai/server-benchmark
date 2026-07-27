@@ -110,6 +110,18 @@ Op subclasses don't have to be frozen (the engine mutates `op.source` / `op.knob
 construction). Just make sure no Op ends up as a *field value* of a Stmt — `Assign.op` / `Accum.op` / `Select.op` take
 an `ElementwiseImpl` (the lightweight value object, already hashable), never an `ElementwiseOp` wrapper.
 
+### Layer-1 op dialects are closed unions
+
+Each Layer-1 IR dialect module exports a closed union alias over its op classes — `FrontendOp`, `TensorOp`,
+`BoundaryOp` — and every variant class is `@final`. Adding an op means: mark it `@final`, add it to the module's
+union, and (for a frontend op) give it a decomposition rule; `tests/compiler/ir/test_dialect_unions.py` fails until
+membership is consistent. In annotations, use the union alias (not `Op`) wherever the dialect is known, and prefer
+`match` with all variants spelled out — the scoped pyright gate (`make typecheck`, config under `[tool.pyright]` in
+`pyproject.toml`) errors on non-exhaustive matches over these unions. Modules in the pyright include list must stay
+error-free; when you touch one, run `make typecheck` before committing. See "Closed Layer-1 unions" in
+`emmy/compiler/ir/ARCHITECTURE.md` for the axis type parameter (`[A: (int, str)]`) and self-specialization
+conventions.
+
 ### Dependency Injection for Testability
 
 Shared logic accepts callable parameters (`run_cmd`, `write_file`) so

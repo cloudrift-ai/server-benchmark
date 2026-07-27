@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff"]
+test = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff", "pyright"]
 compile = ["torch", "transformers>=5.10", "cppyy==3.5.0", "safetensors"]
 # vLLM out-of-tree embedding plugin (emmy/serving); vllm pins its own torch.
 # >=0.23: 0.22.1's FlashInfer dispatch cannot run gemma-4's 512-dim global attention
@@ -32,7 +32,7 @@ eval = ["lm-eval[api]>=0.4.9"]
 visualize = ["playwright>=1.40"]
 # flash-attn requires torch at build time, install separately:
 #   pip install flash-attn --no-build-isolation
-dev = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff", "matplotlib", "graphviz", "torch", "transformers>=5.10", "cupy-cuda12x; sys_platform == 'linux'", "cppyy==3.5.0", "safetensors", "playwright>=1.40"]
+dev = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff", "pyright", "matplotlib", "graphviz", "torch", "transformers>=5.10", "cupy-cuda12x; sys_platform == 'linux'", "cppyy==3.5.0", "safetensors", "playwright>=1.40"]
 
 [tool.setuptools.packages.find]
 include = ["emmy*"]
@@ -52,6 +52,34 @@ asyncio_mode = "auto"
 markers = [
     "perf: GPU performance comparison vs PyTorch (deselected by default; run with `pytest -m perf`)",
 ]
+
+[tool.pyright]
+# Typechecking is scoped to the modules that DEFINE the Layer-1 IR (the closed
+# op unions: FrontendOp / TensorOp / BoundaryOp and their support types) — the
+# first slice of gradual typing. Widening include beyond definition modules
+# means burning down that module's pre-existing errors first (see PR #329 for
+# what enabling emmy/compiler wholesale looks like). ir/expr.py is next in
+# line: its ~40 basic-mode errors (mixin self-typing, object arithmetic in
+# apply_binop) need real signature work, not annotation fills.
+include = [
+    "emmy/compiler/ir/base.py",
+    "emmy/compiler/ir/frontend/ir.py",
+    "emmy/compiler/ir/tensor/ir.py",
+    "emmy/compiler/ir/elementwise.py",
+    "emmy/compiler/tensor.py",
+    "emmy/compiler/dim.py",
+    "emmy/compiler/dtype.py",
+]
+venvPath = "."
+venv = "venv"                # resolve imports against ./venv (what `make setup` builds)
+pythonVersion = "3.12"
+# basic (not strict): types-focused correctness lane — None-safety, arg counts,
+# attribute/return mismatches — without strict's whole-program annotation
+# demands (strict's reportUnknown* family fights numpy's partial stubs).
+typeCheckingMode = "basic"
+# The exhaustiveness backstop for the closed op unions: a `match` over
+# FrontendOp / TensorOp / BoundaryOp that misses a variant is an error.
+reportMatchNotExhaustive = "error"
 
 [tool.ruff]
 line-length = 140

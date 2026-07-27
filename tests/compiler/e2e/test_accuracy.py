@@ -62,7 +62,7 @@ def test_e2e_pointwise_add(run_graph, dtype):
 def test_e2e_reduce_sum(run_graph, dtype):
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (4, 8), dtype), node_id="x")
-    g.add_node(ReduceOp("sum", -1), ["x"], Tensor("y", (4, 1), dtype), node_id="y")
+    g.add_node(ReduceOp("sum", axis=-1), ["x"], Tensor("y", (4, 1), dtype), node_id="y")
     g.inputs = ["x"]
     g.outputs = ["y"]
 
@@ -78,7 +78,7 @@ def test_e2e_reduce_sum_cooperative(run_graph, dtype):
     smem-cooperative strategy. Verifies the new path matches numpy."""
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (8, 512), dtype), node_id="x")
-    g.add_node(ReduceOp("sum", -1), ["x"], Tensor("y", (8, 1), dtype), node_id="y")
+    g.add_node(ReduceOp("sum", axis=-1), ["x"], Tensor("y", (8, 1), dtype), node_id="y")
     g.inputs = ["x"]
     g.outputs = ["y"]
 
@@ -94,7 +94,7 @@ def test_e2e_reduce_max_cooperative(run_graph, dtype):
     in ``TreeHalve``."""
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (8, 512), dtype), node_id="x")
-    g.add_node(ReduceOp("maximum", -1), ["x"], Tensor("y", (8, 1), dtype), node_id="y")
+    g.add_node(ReduceOp("maximum", axis=-1), ["x"], Tensor("y", (8, 1), dtype), node_id="y")
     g.inputs = ["x"]
     g.outputs = ["y"]
 
@@ -231,10 +231,10 @@ def test_e2e_softmax(run_graph, dtype):
     g.add_node(InputOp(), [], Tensor("x", (rows, cols), dtype), node_id="x")
     g.inputs = ["x"]
 
-    g.add_node(ReduceOp("maximum", -1), ["x"], Tensor("mx", (rows, 1), dtype), node_id="mx")
+    g.add_node(ReduceOp("maximum", axis=-1), ["x"], Tensor("mx", (rows, 1), dtype), node_id="mx")
     g.add_node(ElementwiseOp("subtract"), ["x", "mx"], Tensor("subtract", (rows, cols), dtype), node_id="subtract")
     g.add_node(ElementwiseOp("exp"), ["subtract"], Tensor("exp", (rows, cols), dtype), node_id="exp")
-    g.add_node(ReduceOp("sum", -1), ["exp"], Tensor("sm", (rows, 1), dtype), node_id="sm")
+    g.add_node(ReduceOp("sum", axis=-1), ["exp"], Tensor("sm", (rows, 1), dtype), node_id="sm")
     g.add_node(ElementwiseOp("divide"), ["exp", "sm"], Tensor("out", (rows, cols), dtype), node_id="out")
     g.outputs = ["out"]
 
@@ -258,10 +258,10 @@ def test_e2e_softmax_cooperative(run_graph, dtype):
     g.add_node(InputOp(), [], Tensor("x", (rows, cols), dtype), node_id="x")
     g.inputs = ["x"]
 
-    g.add_node(ReduceOp("maximum", -1), ["x"], Tensor("mx", (rows, 1), dtype), node_id="mx")
+    g.add_node(ReduceOp("maximum", axis=-1), ["x"], Tensor("mx", (rows, 1), dtype), node_id="mx")
     g.add_node(ElementwiseOp("subtract"), ["x", "mx"], Tensor("subtract", (rows, cols), dtype), node_id="subtract")
     g.add_node(ElementwiseOp("exp"), ["subtract"], Tensor("exp", (rows, cols), dtype), node_id="exp")
-    g.add_node(ReduceOp("sum", -1), ["exp"], Tensor("sm", (rows, 1), dtype), node_id="sm")
+    g.add_node(ReduceOp("sum", axis=-1), ["exp"], Tensor("sm", (rows, 1), dtype), node_id="sm")
     g.add_node(ElementwiseOp("divide"), ["exp", "sm"], Tensor("out", (rows, cols), dtype), node_id="out")
     g.outputs = ["out"]
 

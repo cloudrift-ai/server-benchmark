@@ -17,7 +17,8 @@ Two groups:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import final
 
 import numpy as np
 
@@ -29,6 +30,7 @@ from emmy.compiler.ir.base import Op, _keepdim_axis
 # ---------------------------------------------------------------------------
 
 
+@final
 @dataclass
 class TransposeOp(Op):
     """Permute dimensions.
@@ -61,6 +63,7 @@ class TransposeOp(Op):
         return np.transpose(a, self.axes)
 
 
+@final
 @dataclass
 class ReshapeOp(Op):
     """Reshape tensor without changing data."""
@@ -92,10 +95,12 @@ class ReshapeOp(Op):
         return tuple(inferred if d == -1 else d for d in self.shape)
 
     def forward(self, *inputs):
+        # int() also narrows for the checker: a symbolic (str) extent fails
+        # here just as it would inside numpy, only with a clearer error.
+        return np.reshape(inputs[0], tuple(int(d) for d in self.shape))
 
-        return np.reshape(inputs[0], self.shape)
 
-
+@final
 @dataclass
 class SliceOp(Op):
     """Extract a sub-tensor along a dimension.
@@ -136,6 +141,7 @@ class SliceOp(Op):
         return tensor[tuple(slices)]
 
 
+@final
 @dataclass
 class CatOp(Op):
     """Concatenate tensors along a dimension.
@@ -178,6 +184,7 @@ class CatOp(Op):
         return np.concatenate(arrays, axis=dim)
 
 
+@final
 @dataclass
 class UnsqueezeOp(Op):
     """PyTorch aten.unsqueeze: add a size-1 dimension."""
@@ -200,6 +207,7 @@ class UnsqueezeOp(Op):
 # ---------------------------------------------------------------------------
 
 
+@final
 @dataclass
 class LinearOp(Op):
     """PyTorch aten.linear: output = x @ weight.T [+ bias]."""
@@ -219,6 +227,7 @@ class LinearOp(Op):
         return result
 
 
+@final
 @dataclass
 class MatmulOp(Op):
     """PyTorch aten.mm/matmul/addmm: output = A @ B [+ bias]."""
@@ -239,6 +248,7 @@ class MatmulOp(Op):
         return result
 
 
+@final
 @dataclass
 class SdpaOp(Op):
     """PyTorch scaled_dot_product_attention(Q, K, V, ...).
@@ -299,23 +309,29 @@ class SdpaOp(Op):
         return attn @ v
 
 
+@final
 @dataclass
-class MeanOp(Op):
+class MeanOp[A: (int, str)](Op):
     """PyTorch aten.mean.dim: reduction that averages along an axis.
 
     Kept as its own op so the tracer does a faithful 1:1 capture; a
     decomposition rule rewrites it into sum + div.
+
+    ``A`` is the axis type — ``int`` (concrete) or ``str`` (symbolic name);
+    the numpy ``forward`` is declared on the ``int`` specialization only
+    (see ``ir.tensor.ir.ReduceLikeOp`` for the convention).
     """
 
-    axis: int | str = -1
+    axis: A = field(kw_only=True)
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
         return _keepdim_axis(input_shapes[0], self.axis)
 
-    def forward(self, *inputs):
+    def forward(self: MeanOp[int], *inputs):
         return np.mean(inputs[0], axis=self.axis)
 
 
+@final
 @dataclass
 class RmsNormOp(Op):
     """PyTorch aten.rms_norm: ``x * rsqrt(mean(x*x) + eps) * weight``.
@@ -336,6 +352,7 @@ class RmsNormOp(Op):
         return (x / rms) * weight
 
 
+@final
 @dataclass
 class LayerNormOp(Op):
     """PyTorch aten.layer_norm: ``(x - mean(x)) * rsqrt(var(x) + eps) * weight + bias``.
@@ -363,20 +380,37 @@ class LayerNormOp(Op):
         return out
 
 
+@final
 @dataclass
-class SoftmaxOp(Op):
+class SoftmaxOp[A: (int, str)](Op):
     """PyTorch aten.softmax.int: ``exp(x - max(x, dim)) / sum(exp(...), dim)``.
 
     Decomposed by ``passes/frontend/decomposition/100_softmax.py``.
+
+    ``A`` is the axis type — ``int`` (concrete) or ``str`` (symbolic name);
+    the numpy ``forward`` is declared on the ``int`` specialization only
+    (see ``ir.tensor.ir.ReduceLikeOp`` for the convention).
     """
 
-    axis: int | str = -1
+    axis: A = field(kw_only=True)
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
         return tuple(input_shapes[0])
 
-    def forward(self, *inputs):
+    def forward(self: SoftmaxOp[int], *inputs):
         x = inputs[0]
         m = np.max(x, axis=self.axis, keepdims=True)
         e = np.exp(x - m)
         return e / np.sum(e, axis=self.axis, keepdims=True)
+
+
+# The closed set of frontend ops — everything the tracer may put in the graph
+# besides the ``ir.base`` sentinels. Annotate with this alias (not ``Op``) when
+# a value is known to be a frontend op; every variant is ``@final``, so the
+# union is closed and ``match`` over it can be checked for exhaustiveness.
+# ``tests/compiler/ir/test_dialect_unions.py`` holds each variant to the
+# module contract: a decomposition rule exists for it under
+# ``pipeline/passes/frontend/decomposition/``.
+type FrontendOp = (
+    TransposeOp | ReshapeOp | SliceOp | CatOp | UnsqueezeOp | LinearOp | MatmulOp | SdpaOp | MeanOp | RmsNormOp | LayerNormOp | SoftmaxOp
+)

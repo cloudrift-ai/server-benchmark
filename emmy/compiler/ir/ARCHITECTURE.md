@@ -85,6 +85,28 @@ are NOT frozen — the engine mutates `op.source` / `op.knobs` / `op.inputs` /
 `Assign.op`) must be lightweight value objects (e.g. `ElementwiseImpl`,
 not `ElementwiseOp`) so the surrounding Stmt's hashability isn't poisoned.
 
+## Closed Layer-1 unions (typed dialect views)
+
+The Layer-1 dialects are typed as algebraic datatypes: each module exports a closed union alias over its op classes,
+and every variant is `@final` — `FrontendOp` (`frontend/ir.py`), `TensorOp` (`tensor/ir.py`), `BoundaryOp`
+(`base.py`: `InputOp` / `AuxOutputOp` / `ConstantOp`). Annotate with the alias, not `Op`, whenever a value is known
+to belong to one dialect: a `match` over an alias-typed value is exhaustiveness-checked (`reportMatchNotExhaustive`
+in the scoped pyright config in `pyproject.toml`; `make typecheck` runs it — the include list is the Layer-1
+definition modules only, the first slice of gradual typing). `Op` stays the open cross-dialect base that the
+`Graph` container and the rewrite engine use.
+
+The axis-carrying ops (`ReduceOp` / `ScanOp` / `GatherOp` / `ScatterOp`, and frontend `MeanOp` / `SoftmaxOp`) are
+generic over the axis type: `[A: (int, str)]`, a constrained type parameter, so every instance is either the
+concrete-axis (`int`) or the symbolic-axis (`str`) specialization. A checked caller holding an `int | str` axis
+must branch before constructing — the solver refuses the union, keeping "staticness unknown" unrepresentable. The
+numpy `forward` interpreters are declared with `self` at the `int` specialization (`self: ReduceOp[int]`), so
+checked code cannot run a symbolic-axis op on numpy. `axis` is keyword-only on all six (a typed default for `A`
+needs PEP 696, 3.13+). The parameter is erased at runtime; unchecked callers see no behavior change.
+
+`tests/compiler/ir/test_dialect_unions.py` enforces the runtime side: union membership equals the set of `@final`
+op classes in each module, the unions are disjoint, and every `FrontendOp` variant has a decomposition rule (the
+module contract — after decomposition, none of these ops remain).
+
 ## `base.py`
 
 Cross-cutting root. Imported by every dialect, imports nothing from

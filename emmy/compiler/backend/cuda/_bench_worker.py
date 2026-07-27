@@ -88,7 +88,7 @@ async def _run_job(req: dict) -> dict:
     no-op torch request:
 
     - ``None`` → the emmy-only autotune bench (``benchmark_program``), no torch comparison.
-    - ``("trace_args", {code/input/layer/seq_len/dynamic})`` → ``load_or_trace`` rebuilds the real
+    - ``("trace_args", {code/input/adapter/layer/seq_len/dynamic})`` → ``load_or_trace`` rebuilds the real
       module here (HF model id or ``--code`` expr) → ``bench_full_model_real``.
     - ``("frontend_graph", Graph | None)`` → ``bench_lowered_vs_torch`` (per-kernel reproducer).
 

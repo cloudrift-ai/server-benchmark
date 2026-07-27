@@ -1866,7 +1866,7 @@ async def benchmark_compare_isolated_async(
     ``torch_spec`` rebuilds the torch side **in the child** (no live module crosses the pipe), reusing
     the same core functions the in-process path uses:
 
-    - ``("trace_args", {code, input, layer, seq_len, dynamic})`` → ``load_or_trace`` rebuilds the real
+    - ``("trace_args", {code, input, adapter, layer, seq_len, dynamic})`` → ``load_or_trace`` rebuilds the real
       module (an HF model id or a ``--code`` expression), benched via ``bench_full_model_real``.
     - ``("frontend_graph", Graph | None)`` → ``bench_lowered_vs_torch`` (per-kernel reproducer; ``None``
       benches emmy-only when the graph isn't torch-runnable).

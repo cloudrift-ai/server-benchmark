@@ -17,10 +17,12 @@ from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Graph, Tensor
-from emmy.compiler.ir.axis import AxisRole
+from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.elementwise import ElementwiseImpl
+from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
-from emmy.compiler.ir.stmt import Loop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.ir.tile import Contraction, Map, TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
@@ -52,6 +54,61 @@ def test_recognize_fires_on_reduction(recording_dump):
 
     Pipeline.build(TILE_PASSES).run(g, dump=recording_dump)
     assert "recognize" in recording_dump.fired_rules("lowering/tile")
+
+
+def test_lift_partitions_independent_reduce_and_epilogue_preamble():
+    """Independent loop-invariant values may feed opposite sides of a contraction.
+
+    This is the shape of DiT's final MLP projection: GELU constants feed computed A
+    inside K, while the linear bias feeds only the accumulator epilogue. Grouping the
+    whole preamble together demotes the contraction to a scalar ``Map``.
+    """
+    from importlib import import_module
+
+    recognize = import_module("emmy.compiler.pipeline.passes.lowering.tile.010_recognize")
+
+    m, n, k = (Axis(name, Dim(extent)) for name, extent in (("m", 32), ("n", 64), ("k", 128)))
+    body = Body(
+        (
+            Load(name="one", input="one_buf", index=(Literal(0),)),
+            Loop(
+                axis=m,
+                body=Body(
+                    (
+                        Loop(
+                            axis=n,
+                            body=Body(
+                                (
+                                    Load(name="bias", input="bias_buf", index=(Var("n"),)),
+                                    Loop(
+                                        axis=k,
+                                        body=Body(
+                                            (
+                                                Load(name="xv", input="x", index=(Var("m"), Var("k"))),
+                                                Assign(name="av", op=ElementwiseImpl("add"), args=("xv", "one")),
+                                                Load(name="wv", input="w", index=(Var("n"), Var("k"))),
+                                                Assign(name="prod", op=ElementwiseImpl("multiply"), args=("av", "wv")),
+                                                Accum(name="acc", value="prod", op=ElementwiseImpl("add"), axes=("k",)),
+                                            )
+                                        ),
+                                    ),
+                                    Assign(name="outv", op=ElementwiseImpl("add"), args=("acc", "bias")),
+                                    Write(output="out", index=(Var("m"), Var("n")), value="outv"),
+                                )
+                            ),
+                        ),
+                    )
+                ),
+            ),
+        )
+    )
+
+    node, free = recognize._lift(list(body), "out")
+
+    assert [axis.name for axis in free] == ["m", "n"]
+    assert isinstance(node, Contraction) and node.a_computed
+    assert {stmt.input for stmt in node.a_body if isinstance(stmt, Load)} == {"one_buf", "x"}
+    assert isinstance(node.epilogue[0], Load) and node.epilogue[0].input == "bias_buf"
 
 
 # --------------------------------------------------------------------------- #

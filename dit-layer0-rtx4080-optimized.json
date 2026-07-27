@@ -1,0 +1,431 @@
+{
+  "input": "facebook/DiT-XL-2-256",
+  "golden": null,
+  "dynamic": [],
+  "gpu": "NVIDIA GeForce RTX 4080",
+  "warmup": 20,
+  "iters": 500,
+  "backends": {
+    "Eager PyTorch": {
+      "latency_us": 186.15999675932386,
+      "speedup_vs_eager": 1.0
+    },
+    "torch.compile": {
+      "latency_us": 165.26628675914947,
+      "speedup_vs_eager": 1.1264245140972025
+    },
+    "Emmy": {
+      "latency_us": 478.06400060653687,
+      "speedup_vs_eager": 0.3894039219082299
+    }
+  },
+  "greedy": {
+    "status": "ok",
+    "lane": "std",
+    "total_us": 453.25940281861705,
+    "kernels": [
+      {
+        "kernel": "k_linear_6c2834",
+        "us": 27.0203871111716,
+        "smem_bytes": 0,
+        "knobs": {
+          "REDUCE": "",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "",
+          "REDUCE": "",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_layer_norm_reduce_ee228a",
+        "us": 2.441142818757466,
+        "smem_bytes": 64,
+        "knobs": {
+          "REDUCE": "b512",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "",
+          "REDUCE": "b512",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_silu_pointwise",
+        "us": 0.798476150348073,
+        "smem_bytes": 0,
+        "knobs": {
+          "TILE": "f4",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "f4",
+          "REDUCE": "",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_fc3610",
+        "us": 6.231771622385297,
+        "smem_bytes": 64,
+        "knobs": {
+          "REDUCE": "b512",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "",
+          "REDUCE": "b512",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_silu_1_pointwise",
+        "us": 0.7978405323496626,
+        "smem_bytes": 0,
+        "knobs": {
+          "TILE": "f4",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "f4",
+          "REDUCE": "",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_b31918",
+        "us": 30.389895564631413,
+        "smem_bytes": 64,
+        "knobs": {
+          "REDUCE": "b512",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "",
+          "REDUCE": "b512",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_layer_norm_reduce_6917df",
+        "us": 3.1377615731790525,
+        "smem_bytes": 64,
+        "knobs": {
+          "PLACE@stat": "fuse",
+          "REDUCE": "b512",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "PLACE@stat": "fuse",
+          "TILE": "",
+          "REDUCE": "b512",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_7167eb",
+        "us": 33.63446088937613,
+        "smem_bytes": 6144,
+        "knobs": {
+          "TILE": "a:mma_m16n8k16_f16_f32/w4x1/f2x8",
+          "STAGE": "d1/cp",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        },
+        "record_knobs": {
+          "TILE": "a:mma_m16n8k16_f16_f32/w4x1/f2x8",
+          "REDUCE": "",
+          "STAGE": "d1/cp",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_7167eb",
+        "us": 33.203555477990044,
+        "smem_bytes": 6144,
+        "knobs": {
+          "TILE": "a:mma_m16n8k16_f16_f32/w4x1/f2x8",
+          "STAGE": "d1/cp",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        },
+        "record_knobs": {
+          "TILE": "a:mma_m16n8k16_f16_f32/w4x1/f2x8",
+          "REDUCE": "",
+          "STAGE": "d1/cp",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_7167eb",
+        "us": 33.22311242421468,
+        "smem_bytes": 6144,
+        "knobs": {
+          "TILE": "a:mma_m16n8k16_f16_f32/w4x1/f2x8",
+          "STAGE": "d1/cp",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        },
+        "record_knobs": {
+          "TILE": "a:mma_m16n8k16_f16_f32/w4x1/f2x8",
+          "REDUCE": "",
+          "STAGE": "d1/cp",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_sdpa_reduce_b6c3d8",
+        "us": 65.52123106442966,
+        "smem_bytes": 0,
+        "knobs": {
+          "TILE": "n32x16/f4x8",
+          "REDUCE": "",
+          "STAGE": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        },
+        "record_knobs": {
+          "TILE": "n32x16/f4x8",
+          "REDUCE": "",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_sdpa_reduce_4a9491",
+        "us": 75.40363615209405,
+        "smem_bytes": 64,
+        "knobs": {
+          "REDUCE": "b256",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "",
+          "REDUCE": "b256",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_sdpa_reduce_475496",
+        "us": 37.52658998264986,
+        "smem_bytes": 6144,
+        "knobs": {
+          "TILE": "a:mma_m16n8k16_f16_f32/w4x1/f2x8",
+          "STAGE": "d1/cp",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        },
+        "record_knobs": {
+          "TILE": "a:mma_m16n8k16_f16_f32/w4x1/f2x8",
+          "REDUCE": "",
+          "STAGE": "d1/cp",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_layer_norm_reduce_ee228a",
+        "us": 2.427870948468485,
+        "smem_bytes": 64,
+        "knobs": {
+          "PLACE@stat": "fuse",
+          "REDUCE": "b512",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "PLACE@stat": "fuse",
+          "TILE": "",
+          "REDUCE": "b512",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_layer_norm_reduce_3cf7cf",
+        "us": 3.0300328966046943,
+        "smem_bytes": 64,
+        "knobs": {
+          "PLACE@stat": "fuse",
+          "REDUCE": "b512",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "PLACE@stat": "fuse",
+          "TILE": "",
+          "REDUCE": "b512",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_1517d4",
+        "us": 47.177144459315706,
+        "smem_bytes": 8192,
+        "knobs": {
+          "PLACE@cone": "fuse",
+          "TILE": "a:mma_m16n8k16_f16_f32/w4x1/f2x8",
+          "STAGE": "d2/sync",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        },
+        "record_knobs": {
+          "PLACE@cone": "fuse",
+          "TILE": "a:mma_m16n8k16_f16_f32/w4x1/f2x8",
+          "REDUCE": "",
+          "STAGE": "d2/sync",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_gelu_scaled_pointwise",
+        "us": 1.9638356688904437,
+        "smem_bytes": 0,
+        "knobs": {
+          "TILE": "f4",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "f4",
+          "REDUCE": "",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_dropout_1_pointwise",
+        "us": 2.2092597691092903,
+        "smem_bytes": 0,
+        "knobs": {
+          "TILE": "f4",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "f4",
+          "REDUCE": "",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_315899__partial",
+        "us": 44.73788247388952,
+        "smem_bytes": 8192,
+        "knobs": {
+          "TILE": "a:mma_m16n8k16_f16_f32/w1x2/f4x4",
+          "REDUCE": "g4k",
+          "STAGE": "d2/cp/ring",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        },
+        "record_knobs": {
+          "TILE": "a:mma_m16n8k16_f16_f32/w1x2/f4x4",
+          "REDUCE": "g4k",
+          "STAGE": "d2/cp/ring",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_315899",
+        "us": 2.383515238761902,
+        "smem_bytes": 0,
+        "knobs": {
+          "LOOPIFY": "0"
+        },
+        "record_knobs": {
+          "TILE": "",
+          "REDUCE": "",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "RASTER": ""
+        }
+      }
+    ]
+  },
+  "pinned": []
+}

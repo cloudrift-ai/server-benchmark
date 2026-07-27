@@ -26,6 +26,19 @@ emmy run --bench --profile -c "torch.nn.Softmax(dim=-1)(torch.randn(1, 28, 2048,
 emmy compile Qwen/Qwen3-Embedding-0.6B
 ```
 
+The experimental fixed-shape DiT block adapter needs the image extra and compares the identical selected block across
+eager PyTorch, `torch.compile`, and Emmy:
+
+```bash
+pip install -e ".[compile,image]"
+emmy run facebook/DiT-XL-2-256 --adapter dit --layer 0 --bench \
+  --bench-backends eager,tcompile,emmy --warmup 10 --iters 100 --json dit-layer0.json
+```
+
+This block-level workload traces only the checkpoint's transformer component, not its VAE or scheduler. The
+`facebook/DiT-XL-2-256` checkpoint is licensed
+[CC-BY-NC-4.0](https://huggingface.co/facebook/DiT-XL-2-256).
+
 Layer-norm-style reduction (two reductions, broadcast subtract, elementwise chain) fused into two kernels:
 
 ```bash

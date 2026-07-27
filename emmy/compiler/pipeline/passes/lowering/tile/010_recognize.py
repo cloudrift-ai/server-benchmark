@@ -203,18 +203,39 @@ def _lift_cell(cell: list[Stmt], free: list, output: str) -> Map | Reduction:
     if _reduce_in(list(rloop.body)):
         return Map(body=tuple(cell))  # nested (non-flash) reduce — keep loop-IR form
     # Route the loop-invariant prologue (stmts above the reduce, sans the regenerated ``Init``
-    # seeds): a stmt feeding the reduce moves INTO the loop (``pre_reduce``); one feeding only the
-    # epilogue stays as a sibling after it. A stmt feeding BOTH can't be placed by reordering —
-    # keep the whole cell as a flat ``Map`` (its loop-IR order is preserved verbatim).
+    # seeds) one dependency cone at a time: stmts feeding the reduce move INTO the loop
+    # (``pre_reduce``), while independent stmts feeding only the epilogue stay after it. Treating
+    # the whole preamble as one unit demoted contractions with both kinds of independent values —
+    # e.g. DiT's GELU constants feed computed A while the linear bias feeds the epilogue. A single
+    # stmt/cone feeding BOTH still can't be placed by reordering, so keep that cell as a flat
+    # ``Map`` (its loop-IR order is preserved verbatim).
     before = [s for s in cell[:idx] if not isinstance(s, Init)]
     after = list(cell[idx + 1 :])
-    before_defs = {n for s in before for n in s.defines()}
-    feeds_reduce = bool(before_defs & _reads(list(rloop.body)))
-    feeds_epilogue = bool(before_defs & _reads(after))
-    if feeds_reduce and feeds_epilogue:
+    reduce_need = _reads(list(rloop.body))
+    epilogue_need = _reads(after)
+    reduce_idx: set[int] = set()
+    epilogue_idx: set[int] = set()
+    for i in range(len(before) - 1, -1, -1):
+        stmt = before[i]
+        defs = set(stmt.defines())
+        feeds_reduce = bool(defs & reduce_need)
+        feeds_epilogue = bool(defs & epilogue_need)
+        if feeds_reduce and feeds_epilogue:
+            return Map(body=tuple(cell))
+        if feeds_reduce:
+            reduce_idx.add(i)
+            reduce_need.update(stmt.deps())
+        else:
+            # Keep unused pure preamble stmts on the epilogue side, preserving the old behavior
+            # and original order. If a later epilogue stmt depends on this one, the reverse walk
+            # has already added that dependency to ``epilogue_need``.
+            epilogue_idx.add(i)
+            if feeds_epilogue:
+                epilogue_need.update(stmt.deps())
+    if reduce_idx & epilogue_idx:
         return Map(body=tuple(cell))
-    pre_reduce = tuple(before) if feeds_reduce else ()
-    pre_epilogue = () if feeds_reduce else tuple(before)
+    pre_reduce = tuple(s for i, s in enumerate(before) if i in reduce_idx)
+    pre_epilogue = tuple(s for i, s in enumerate(before) if i in epilogue_idx)
     annotated = _annotate_reduce(rloop, pre_reduce)
     if annotated is None:
         return Map(body=tuple(cell))

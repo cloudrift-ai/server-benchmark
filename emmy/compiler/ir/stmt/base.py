@@ -237,7 +237,7 @@ def op_to_expr(fn: str, inputs: list[Expr]) -> Expr:
         neg_x = BinaryExpr("-", Literal(0.0, "float"), inputs[0])
         exp_neg = FuncCallExpr("exp", (neg_x,))
         return BinaryExpr("/", Literal(1.0, "float"), BinaryExpr("+", Literal(1.0, "float"), exp_neg))
-    if fn in ("exp", "exp_fast", "rsqrt", "tanh", "sqrt", "erf"):
+    if fn in ("exp", "exp_fast", "rsqrt", "sin", "cos", "tanh", "sqrt", "erf"):
         return FuncCallExpr(fn, tuple(inputs))
     if fn == "abs":
         return FuncCallExpr("fabs", tuple(inputs))

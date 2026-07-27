@@ -24,6 +24,8 @@ _INTRINSIC_F32: dict[str, str] = {
     "exp": "expf",
     "exp_fast": "__expf",
     "rsqrt": "rsqrtf",
+    "sin": "sinf",
+    "cos": "cosf",
     "tanh": "tanhf",
     "fabs": "fabsf",
     "fmax": "fmaxf",

@@ -217,6 +217,10 @@ large fraction of the card FREE at startup, plus checkpoint downloads and minute
 mark on anything else silently drops it from `make test` even on GPU machines (this hid the serving runner's GPU
 correctness pins for a while). GPU correctness tests guard themselves with `requires_cuda` / `importorskip` instead.
 
+Optional adapter tests use `pytest.importorskip` for their own dependency extras. The network-free tiny Diffusers DiT
+trace runs when the `image` extra is installed; the real checkpoint/CUDA comparison is additionally `perf`-marked and
+requires `EMMY_RUN_DIT_PRETRAINED=1`, so normal CI never downloads the multi-gigabyte checkpoint.
+
 `tests/compiler/conftest.py` also exposes `device_compute_capability()` and the `requires_sm90` skip marker. The
 mma.sync warp tier (swizzled `ldmatrix` + `mma.sync`, TMA transport) auto-enumerates and is validated on **sm_90+**;
 on sm_80-89 it is pin-only and currently non-functional for two independent reasons — the `sm_NNa` arch-accelerated

@@ -1370,8 +1370,12 @@ def test_write_ab_json_greedy_isolated_block(tmp_path):
     args = SimpleNamespace(
         json=str(tmp_path / "ab.json"), code="torch.matmul(a, b)", input=None, ir=None, golden=None, dynamic=None, warmup=1, iters=1
     )
-    _write_ab_json(args, {}, greedy, bench, [], greedy_iso=iso)
+    results = {"Eager PyTorch": 100.0, "torch.compile": 50.0, "Emmy": 25.0}
+    _write_ab_json(args, results, greedy, bench, [], greedy_iso=iso)
     rec = json.loads((tmp_path / "ab.json").read_text())
+    assert rec["backends"]["Eager PyTorch"] == {"latency_us": 100.0, "speedup_vs_eager": 1.0}
+    assert rec["backends"]["torch.compile"]["speedup_vs_eager"] == 2.0
+    assert rec["backends"]["Emmy"]["speedup_vs_eager"] == 4.0
     assert rec["greedy"]["total_us"] == 500.0
     iso_rec = rec["greedy"]["isolated"]
     assert iso_rec["status"] == "ok" and iso_rec["total_us"] == 400.0

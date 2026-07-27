@@ -40,16 +40,31 @@ def test_serving_ab_expands_to_18_lane_points(project_root):
         want = 3 if t.recipe.benchmark.max_concurrency == 1 else 1
         assert t.recipe.benchmark.repeats == want
 
-    # Lane split: 6 stock variants, 12 emmy variants (6 + 6 fastmath); the emmy c=64
-    # cells carry the documented decode-bucket knob.
+    # Lane split: 6 stock variants, 12 emmy variants (6 + 6 fastmath). Equal-tuning
+    # protocol: EVERY lane at util 0.96; the emmy cells carry the two documented
+    # per-workload knobs — the decode bucket matched to the concurrency, and the 2048
+    # chunk quantum (EMMY_GEN_PREFILL_BUCKET=2048 + mnbt 2056) on the mixed 4K/4K
+    # c=4/c=8 cells.
     stock = [t for t in tasks if "vllm-openai" in t.recipe.engine.llm.vllm.image]
     emmy = [t for t in tasks if "vllm-emmy" in t.recipe.engine.llm.vllm.image]
     assert len(stock) == 6 and len(emmy) == 12
+    for t in tasks:
+        assert t.recipe.engine.llm.gpu_memory_utilization == 0.96
     for t in emmy:
         env = t.recipe.engine.llm.vllm.extra_env or ""
-        if t.recipe.benchmark.max_concurrency == 64:
+        conc = t.recipe.benchmark.max_concurrency
+        if conc == 64:
             assert "EMMY_GEN_DECODE_BUCKET=64" in env
-        assert t.recipe.engine.llm.gpu_memory_utilization == 0.97
+        elif conc == 1:
+            assert "EMMY_GEN_DECODE_BUCKET=32" in env
+        else:
+            assert "EMMY_GEN_DECODE_BUCKET=8" in env
+        args = t.recipe.engine.llm.vllm.extra_args or ""
+        if t.recipe.benchmark.random_input_len == 4096 and conc in (4, 8):
+            assert "EMMY_GEN_PREFILL_BUCKET=2048" in env
+            assert "--max-num-batched-tokens 2056" in args
+        else:
+            assert "EMMY_GEN_PREFILL_BUCKET" not in env
     fm = [t for t in emmy if "EMMY_FAST_MATH=1" in (t.recipe.engine.llm.vllm.extra_env or "")]
     assert len(fm) == 6
 

@@ -181,7 +181,12 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `test_gen_capture_gpu` / the two-size live-replay test; over-bucket capture was worth +10.6% req/s at c=64,
   and a decode bucket matched to the concurrency beats riding the symbolic captures — the bucket-64 golden set
   took c=64 TPOT 35.4 → 22.5 ms, and the bucket-8 set (m8 goldens, 2026-07-25) took c=4 TPOT 19.6 → 18.9 and
-  c=8 21.4 → 20.6 on the same per-lane-knob rule). Under the
+  c=8 21.4 → 20.6 on the same per-lane-knob rule). The mixed prefill+decode cells take a second per-workload
+  knob, the CHUNK QUANTUM: `EMMY_GEN_PREFILL_BUCKET=2048` + `--max-num-batched-tokens 2056` (chunk width +
+  bucket-sized rider headroom; m2048 goldens 2026-07-26) pipelines queued prompts in ~200 ms static-twin steps
+  instead of ~500 ms 4096-chunks — c=4 TTFT 1363 → 1063 and c=8 1828 → 1014 on the 5090, both below stock —
+  and as a side effect the smaller profiling dummy peak restores KV capacity to stock parity (38k vs 24k
+  tokens at util 0.96). Under the
   outer capture,
   `_Program.run_device` detects `torch.cuda.is_current_stream_capturing()` and issues the raw launch sequence
   (`run_once`) instead of its own graph machinery — nested stream capture and graph launch are both illegal in a

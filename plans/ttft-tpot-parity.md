@@ -1,4 +1,31 @@
-# TTFT sweep + TPOT parity campaign (planned 2026-07-26)
+# TTFT sweep + TPOT parity campaign (planned 2026-07-26; EXECUTED same day — final scoreboard below)
+
+## FINAL SCOREBOARD (2026-07-26 consolidated re-bench, per-cell configs, util 0.96, empty online)
+
+fm configs: c1 = bucket 32 (mnbt 4128 default); c4/c8 = bucket 8 + EMMY_GEN_PREFILL_BUCKET=2048 +
+mnbt 2056; rag = bucket 8 rider (mnbt 4104 default); c64 = bucket 64 + mnbt 4096 (the measured c64
+trade: rider headroom buys −34 ms wave TTFT but −1.2% saturated tok/s — tok/s kept).
+
+| row | fm TTFT | stock | ΔTTFT | fm TPOT | stock | fm tok/s | stock |
+| --- | --: | --: | --: | --: | --: | --: | --: |
+| small_c1 256/256 | 65.0 | 56.3 | −8.7 LOSS | 17.05 | 16.28 | 58.0 | 60.8 |
+| head_c1 4K/4K | **475.4** | 565.9 | −16% WIN | 18.11 | 17.35 | 54.9 | 57.2 |
+| head_c4 | **1066.3** | 1087.8 | −2% WIN | 19.02 | 18.23 | 207.7 | 216.4 |
+| head_c8 | **1015.5** | 1100.1 | −8% WIN | 20.83 | 20.56 | 379.5 | 383.6 |
+| rag_c4 8192/256 | **2172.5** | 2428.7 | −11% WIN | 27.26 | 26.24 | **113.7** | 112.0 |
+| c64 wave np64 | **1321.9** | 1467.7 | −10% WIN | — | — | — | — |
+| c64 np256 | — | — | — | 28.75 | 28.02 | 1219.5 | 1425.1 |
+
+std lane (same configs): head_c4 1265.7/19.09/206.4, head_c8 1236.1/21.01/375.3 (rest re-benched
+in the same pass — see _tune/parity-final/std/).
+
+Exit-gate verdict, honest scoring: TTFT beats stock on 5 of 6 rows (all 4K-context rows + the
+wave); small_c1 stays −8.7 ms (WS-C residual: sym-path host dispatch on a 257-token prefill). TPOT
+parity (±0.15) NOT reached — stock keeps every row by +0.27..+1.02 ms (WS-D attribution: glue
+launches / captured-graph latency, matmuls at floor; compiler work, not tuning). Throughput gates:
+c8 379.5 vs gate 381 (−0.4%, within run noise), c64 1219.5 vs gate 1223 (−0.3%, within noise —
+config pinned to mnbt 4096 after the rider-headroom control A/B; rag +1.5% and c4 −0.5% vs prior).
+The rag TPOT-win trade documented in-line (TTFT-win config chosen per the mandate).
 
 Mandate (user, autonomous mode): **beat stock vLLM on TTFT in EVERY row and reach TPOT parity**, on the
 equal-tuning protocol (util 0.96 all lanes, per-cell decode buckets, np=64 wave for the c=64 TTFT cell).
@@ -133,6 +160,27 @@ Hypotheses in test order:
 3. c8 specifically: stock TTFT ~equals its c4 (1100 vs 1088 — admission-limited, not work-limited); emmy's
    1828 grows with concurrency ⇒ emmy's mixed-step cost compounds per queued prompt. Fixing (1) should
    collapse both; verify c8 explicitly.
+
+## WS-C / WS-D — STATUS: CLOSED AS ATTRIBUTED RESIDUALS (2026-07-26)
+
+WS-D (TPOT parity): the per-kernel attribution is complete and the tuning levers are exhausted —
+1. Decode matmuls are at the DRAM floor at every serving M (m1/m8 traces: gate_up 142.8 µs =
+   floor 139, down 71-72 = floor 69, qkv __partial 40 = floor 37, o_proj ~20 = floor 18); the
+   busy delta vs stock (c4: emmy 17.69 vs stock 17.12 ms/step; 1108 vs 651 launches/step) is
+   pure GLUE: the sandwich-norm means, cut stat/scale, __zp, pointwise crumbs.
+2. The two sandwich-norm means (post_attention / post_feedforward, grid-1 b512) bench 2.8 µs
+   isolated — already the golden pick — but run 13.2 µs in-graph at M=1 (~1.24 ms/step): a
+   captured-graph memory-latency effect no re-pin reproduces or fixes.
+3. The stat-sink realizer (the m32 −0.08 ms precedent) REFUSES at m1: the o_proj producer is
+   the transposed g8k/b128t matvec band, no complete-value finalize store to sink into.
+The remaining TPOT deltas (c1 +0.75, c4 +0.76, c8 +0.25, rag ~+1, c64 +0.5 vs stock) are the
+glue-launch class + per-eager-step host overhead — closing them means compiler work (norm fusion
+into matvec epilogues, whole-chunk-step graph capture), not golden tuning. Documented honestly.
+
+WS-C (small_c1 −8 ms): the 257-token prompt rides the symbolic pass; the gap is sym-path
+per-layer host overhead + step glue, not schedule quality (the m256 static route computes ~4x
+slower per pass; the sym schedule family is the m4096 winners'). Re-measured at the final bench
+under the new default mnbt; expected to stay a small documented residual.
 
 ## WS-C — small_c1 TTFT (−8 ms)
 

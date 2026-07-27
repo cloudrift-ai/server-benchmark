@@ -46,6 +46,20 @@ candidates; one 4090 rental died in provisioning) — both cards fell back to va
 - hd512 fm greedy realizes the all-f32 config — no `[fm]` row recorded (would violate nothing, but it would
   be a duplicate std row; `GoldenConfig.fast_math` derives from knobs).
 
+## Follow-up (2026-07-27, full-set 4090 re-bench): mlp_down.m4096 std misdeploy, same offer-gap class
+
+The full 139-name golden-set bench (fresh vast.ai 4090, driver 580.119.02) exposed that the 4090's
+`mlp_down.m4096(.lin)` std lane had NO realizable golden row: the g2k rows realize only under pin (no
+split-K offer — the identical gap as attention.hd512.s4096), the floor fell through, and the clean-evidence
+greedy deployed a **111 ms kernel on the canonical twin (0.03x eager)** and a bench-budget-blowing one on
+`.lin`. Downstream, `mlp_geglu.m4096.cut(.lin)` intermittently FAILED ACCURACY (mean_diff=nan) because its
+cut consumes that pathological down-half. Fixed by recording pinned SERIAL std siblings (canonical
+`w4x2/f2x4/k2` 3324.9 µs, `.lin` `w4x2/f4x8/k4` 3415.8 µs, both d2/cp/ring): floors now decide (3320/3712
+greedy, 0.90x/0.79x) and the geglu accuracy failures disappear. The 5090 file already carried its serial
+sibling — the 4090 port had missed it. Every un-pinnable golden needs a realizable floor sibling; an
+`eval golden` audit that flags pin-only shapes (golden realizes under pin but not in the enumeration)
+would have caught both cases statically.
+
 ## Blog chart regen (the consuming workflow)
 
 - Chart shape set is now **26 per card**: 13 seq-512 base + 13 4K-tier (`.m4096` matmuls incl.

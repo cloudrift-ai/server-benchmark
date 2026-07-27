@@ -46,8 +46,8 @@ def is_castfree_indexmap(graph: Graph, producer) -> bool:
         return False
     out_dt = producer.output.dtype.name
     for i in producer.inputs:
-        src = graph.nodes.get(i)
-        if src is not None and src.output.dtype.name != out_dt:
+        src_t = graph.buffer(i)
+        if src_t is not None and src_t.dtype.name != out_dt:
             return False
     return True
 
@@ -81,9 +81,9 @@ def build_merged_op(graph: Graph, producer: Node, consumer: Node) -> LoopOp | No
     for ext_id in list(producer.inputs) + list(consumer.inputs):
         if ext_id == producer.id or ext_id in sub.nodes:
             continue
-        ext = graph.nodes.get(ext_id)
-        shape = ext.output.shape if ext is not None else ()
-        dtype = ext.output.dtype if ext is not None else "f32"
+        ext_t = graph.buffer(ext_id)
+        shape = ext_t.shape if ext_t is not None else ()
+        dtype = ext_t.dtype if ext_t is not None else "f32"
         sub.add_node(InputOp(), [], Tensor(ext_id, shape, dtype), node_id=ext_id)
     sub.add_node(producer.op, list(producer.inputs), producer.output, node_id=producer.id)
     sub.add_node(consumer.op, list(consumer.inputs), consumer.output, node_id=consumer.id)
@@ -105,9 +105,9 @@ def wrap_merge_fragment(graph: Graph, merged: LoopOp, consumer: Node) -> Graph:
     merged_inputs = list(merged.inputs)
     frag = Graph()
     for inp_id in merged_inputs:
-        ext = graph.nodes.get(inp_id)
-        shape = ext.output.shape if ext is not None else ()
-        dtype = ext.output.dtype if ext is not None else "f32"
+        ext_t = graph.buffer(inp_id)
+        shape = ext_t.shape if ext_t is not None else ()
+        dtype = ext_t.dtype if ext_t is not None else "f32"
         frag.add_node(InputOp(), [], Tensor(inp_id, shape, dtype), node_id=inp_id)
     out_id = frag.add_node(
         merged,

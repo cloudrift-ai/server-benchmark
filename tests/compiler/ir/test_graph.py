@@ -171,3 +171,139 @@ def test_to_dict_serializes_composite_shape_dim():
     assert isinstance(shape[1], str) and "seq_len" in shape[1] and "64" in shape[1], (
         f"composite dim must serialize to its pretty expr string, got {shape[1]!r}"
     )
+
+
+# ---- multi-output (MIMO) foundation ----
+
+
+def _make_mimo_graph():
+    """x → mo(outputs: Y primary, Y__sq aux) → c(reads both)."""
+    g = Graph()
+    x = g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4, 4)), node_id="x")
+    g.inputs = [x]
+    mo = g.add_node(
+        op=ElementwiseOp(op="exp"),
+        inputs=[x],
+        outputs=[Tensor("Y", (4, 4)), Tensor("Y__sq", (4,))],
+        node_id="Y",
+    )
+    c = g.add_node(op=ElementwiseOp(op="negative"), inputs=[mo, "Y__sq"], output=Tensor("C", (4, 4)), node_id="c")
+    g.outputs = [c]
+    return g
+
+
+def test_mimo_node_outputs_and_primary_alias():
+    g = _make_mimo_graph()
+    node = g.nodes["Y"]
+    assert len(node.outputs) == 2
+    assert node.output is node.outputs[0]  # primary alias
+    assert node.buffer_names() == ("Y", "Y__sq")
+
+
+def test_mimo_indexes_producer_and_users():
+    g = _make_mimo_graph()
+    assert g.producer("Y").id == "Y"
+    assert g.producer("Y__sq").id == "Y"
+    assert g.buffer("Y__sq").shape == (4,)
+    assert g.buffer_users("Y") == {"c"}
+    assert g.buffer_users("Y__sq") == {"c"}
+    assert g.users("Y") == {"c"}  # union over both buffers
+    assert g.producer("nope") is None and g.buffer("nope") is None
+
+
+def test_mimo_add_node_rejects_duplicate_buffer():
+    g = _make_mimo_graph()
+    with pytest.raises(ValueError, match="already has a producer"):
+        g.add_node(
+            op=ElementwiseOp(op="exp"),
+            inputs=["x"],
+            outputs=[Tensor("Z", (4,)), Tensor("Y__sq", (4,))],
+            node_id="z",
+        )
+
+
+def test_add_node_requires_exactly_one_output_form():
+    g = Graph()
+    with pytest.raises(ValueError, match="exactly one"):
+        g.add_node(op=InputOp(), inputs=[], node_id="x")
+    with pytest.raises(ValueError, match="exactly one"):
+        g.add_node(op=InputOp(), inputs=[], output=Tensor("X", (4,)), outputs=[Tensor("X", (4,))], node_id="x")
+
+
+def test_mimo_topological_order_and_validate():
+    g = _make_mimo_graph()
+    g.validate()
+    order = g.topological_order()
+    assert order.index("x") < order.index("Y") < order.index("c")
+
+
+def test_mimo_remove_node_clears_buffer_indexes():
+    g = _make_mimo_graph()
+    g.outputs = []
+    g.remove_node("c")
+    g.remove_node("Y")
+    assert g.producer("Y__sq") is None
+    assert g.buffer_users("Y__sq") == set()
+    g.validate()
+
+
+def test_mimo_rename_node_keeps_aux_buffer():
+    g = _make_mimo_graph()
+    g.rename_node("Y", "Y2")
+    assert g.producer("Y2").id == "Y2"
+    assert g.producer("Y__sq").id == "Y2"  # aux buffer follows the renamed producer
+    assert g.nodes["c"].inputs == ["Y2", "Y__sq"]
+    g.validate()
+
+
+def test_mimo_remove_orphans_keeps_producer_alive_via_aux_edge():
+    """A consumer reading ONLY the aux buffer still keeps the producer alive."""
+    g = Graph()
+    x = g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4,)), node_id="x")
+    g.inputs = [x]
+    g.add_node(op=ElementwiseOp(op="exp"), inputs=[x], outputs=[Tensor("Y", (4,)), Tensor("Y__sq", (2,))], node_id="Y")
+    c = g.add_node(op=ElementwiseOp(op="negative"), inputs=["Y__sq"], output=Tensor("C", (2,)), node_id="c")
+    g.outputs = [c]
+    g.remove_orphans()
+    assert "Y" in g.nodes
+    g.validate()
+
+
+def test_mimo_copy_and_structural_key_stability():
+    g = _make_mimo_graph()
+    g2 = g.copy()
+    g2.validate()
+    assert g2.structural_key() == g.structural_key()
+    # aux shape participates in the digest
+    g2.nodes["Y"].outputs = (g2.nodes["Y"].outputs[0], Tensor("Y__sq", (8,)))
+    assert g2.structural_key() != g.structural_key()
+
+
+def test_single_output_structural_key_unchanged_by_mimo_fold():
+    """Single-output digests must be byte-identical to the pre-MIMO scheme —
+    golden/tune evidence keyed on structure must not notice the migration."""
+    g = _make_matmul_graph()
+    key = g.structural_key()
+    assert key == g.copy().structural_key()
+
+
+def test_graph_validate_catches_index_corruption():
+    g = _make_mimo_graph()
+    g._users["Y"].add("ghost")
+    with pytest.raises(ValueError, match="out of sync"):
+        g.validate()
+
+
+def test_mimo_from_dict_dual_read():
+    """from_dict reads both the historic single-``output`` dict and the plural
+    ``outputs`` list."""
+    import json
+
+    g = _make_matmul_graph()
+    d = json.loads(json.dumps(g.to_dict()))
+    # rewrite one node to the plural form; loader must accept both in one dump
+    nd = d["nodes"]["ew"]
+    nd["outputs"] = [nd.pop("output")]
+    g2 = Graph.from_dict(d)
+    g2.validate()
+    assert g2.structural_key() == g.structural_key()

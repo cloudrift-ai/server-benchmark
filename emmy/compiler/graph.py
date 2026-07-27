@@ -111,13 +111,31 @@ class Node[T_Op: Op]:
     elementwise ops, or a ``ReduceStage`` whose ``reduce`` field must be
     a reduction). The parameter is erased at runtime; owning dataclasses
     enforce the invariant via ``__post_init__``.
+
+    ``outputs`` is the ordered, non-empty tuple of buffers this node's
+    kernel writes. Slot 0 is the **primary** output — its buffer travels
+    under the node's id (``node.id == outputs[0].name`` in steady state),
+    which is what :attr:`output` returns, so single-output call sites
+    read exactly what they always did. Non-primary buffers (slot ≥ 1)
+    are addressed by their own tensor names (``<primary>__sq`` style).
     """
 
     id: str
     op: T_Op
-    inputs: list[str]  # node ids
-    output: Tensor
+    inputs: list[str]  # buffer names (the producing node's id for primary outputs)
+    outputs: tuple[Tensor, ...]
     hints: Hints = field(default_factory=Hints)
+
+    @property
+    def output(self) -> Tensor:
+        """The primary output (slot 0). Single-output nodes — the vast
+        majority — read this exactly as before the MIMO migration."""
+        return self.outputs[0]
+
+    def buffer_names(self) -> tuple[str, ...]:
+        """The edge keys this node's outputs travel under: the node id
+        for slot 0, each tensor's own name for slots ≥ 1."""
+        return (self.id, *(t.name for t in self.outputs[1:]))
 
 
 def _lookup_op_class(name: str) -> type[Op] | None:
@@ -389,7 +407,12 @@ class Graph:
         self.outputs: list[str] = []
         self.hints: Hints = Hints()
         self._id_counter = itertools.count()
+        # Both indexes are keyed by BUFFER name (== node id for primary
+        # outputs): ``_users`` maps buffer → consumer node ids, ``_producers``
+        # maps buffer → (producing node id, output slot). Mutation methods
+        # keep them in lockstep with ``node.inputs`` / ``node.outputs``.
         self._users: dict[str, set[str]] = {}
+        self._producers: dict[str, tuple[str, int]] = {}
 
     def _next_id(self) -> str:
         while True:
@@ -401,37 +424,57 @@ class Graph:
         self,
         op: Op,
         inputs: list[Node | str],
-        output: Tensor,
+        output: Tensor | None = None,
         *,
+        outputs: Iterable[Tensor] | None = None,
         node_id: str | None = None,
     ) -> str:
         """Add a node to the graph. Returns the node id.
 
-        ``inputs`` accepts a mix of ids and ``Node`` objects (Nodes get
-        their ``id`` extracted) — convenient for decomposition rules that
-        thread ``Node`` values through pipelines of helpers.
+        ``inputs`` accepts a mix of buffer names and ``Node`` objects
+        (Nodes get their ``id`` extracted) — convenient for decomposition
+        rules that thread ``Node`` values through pipelines of helpers.
 
-        When ``node_id`` is omitted, defaults to ``output.name`` if that
-        name is non-empty and not already taken; otherwise falls back to
-        an auto-generated ``n<i>`` id. This keeps semantic names visible
-        in kernel buf refs (Load.input / Write.output) without forcing
-        every caller to repeat ``node_id=name``.
+        Exactly one of ``output`` (the single-output convenience form) or
+        ``outputs`` (the ordered multi-output form, slot 0 primary) is
+        given. Non-primary buffer names must be free — every buffer name
+        has exactly one producer graph-wide (SSA per buffer).
+
+        When ``node_id`` is omitted, defaults to the primary output's
+        ``name`` if that name is non-empty and not already taken;
+        otherwise falls back to an auto-generated ``n<i>`` id. This keeps
+        semantic names visible in kernel buf refs (Load.input /
+        Write.output) without forcing every caller to repeat
+        ``node_id=name``.
         """
+        if (output is None) == (outputs is None):
+            raise ValueError("add_node: pass exactly one of output= / outputs=")
+        outs = (output,) if output is not None else tuple(outputs)
+        if not outs:
+            raise ValueError("add_node: outputs must be non-empty")
         if node_id is None:
-            if output.name and output.name not in self.nodes:
-                nid = output.name
+            if outs[0].name and outs[0].name not in self.nodes:
+                nid = outs[0].name
             else:
                 nid = self._next_id()
         else:
             nid = node_id
         if nid in self.nodes:
             raise ValueError(f"Node id {nid!r} already exists")
+        for t in outs[1:]:
+            if not t.name:
+                raise ValueError(f"add_node: non-primary output of {nid!r} needs a name")
+            if t.name in self._producers or t.name in self.nodes:
+                raise ValueError(f"Buffer name {t.name!r} already has a producer")
         input_ids = [inp.id if isinstance(inp, Node) else inp for inp in inputs]
         for inp in input_ids:
-            if inp not in self.nodes:
-                raise ValueError(f"Input node {inp!r} does not exist")
-        self.nodes[nid] = Node(id=nid, op=op, inputs=input_ids, output=output)
-        self._users[nid] = set()
+            if inp not in self._producers and inp not in self.nodes:
+                raise ValueError(f"Input buffer {inp!r} does not exist")
+        node = Node(id=nid, op=op, inputs=input_ids, outputs=outs)
+        self.nodes[nid] = node
+        for slot, buf in enumerate(node.buffer_names()):
+            self._producers[buf] = (nid, slot)
+            self._users.setdefault(buf, set())
         for inp in input_ids:
             self._users[inp].add(nid)
         return nid
@@ -445,10 +488,13 @@ class Graph:
             users = self._users.get(inp)
             if users is not None:
                 users.discard(node_id)
-        self.inputs = [i for i in self.inputs if i != node_id]
-        self.outputs = [o for o in self.outputs if o != node_id]
+        bufs = set(node.buffer_names())
+        self.inputs = [i for i in self.inputs if i not in bufs]
+        self.outputs = [o for o in self.outputs if o not in bufs]
         del self.nodes[node_id]
-        self._users.pop(node_id, None)
+        for buf in bufs:
+            self._producers.pop(buf, None)
+            self._users.pop(buf, None)
 
     def rename_node(self, old_id: str, new_id: str) -> None:
         """Change a node's id in place, updating every reference.
@@ -463,13 +509,18 @@ class Graph:
             return
         if old_id not in self.nodes:
             raise KeyError(f"Node {old_id!r} not found")
-        if new_id in self.nodes:
+        if new_id in self.nodes or new_id in self._producers:
             raise ValueError(f"Node id {new_id!r} already exists")
         node = self.nodes.pop(old_id)
         node.id = new_id
         self.nodes[new_id] = node
         consumers = self._users.pop(old_id, set())
         self._users[new_id] = consumers
+        self._producers.pop(old_id, None)
+        self._producers[new_id] = (new_id, 0)
+        # Non-primary buffers keep their own names; only their producer id moves.
+        for buf in node.buffer_names()[1:]:
+            self._producers[buf] = (new_id, self._producers[buf][1])
         for consumer_id in consumers:
             consumer = self.nodes[consumer_id]
             consumer.inputs = [new_id if i == old_id else i for i in consumer.inputs]
@@ -484,15 +535,17 @@ class Graph:
         node.op = _rename_buf_in_op(node.op, old_id, new_id)
 
     def replace_node(self, old_id: str, new_id: str) -> None:
-        """Rewire all references from old_id to new_id.
+        """Rewire all references from buffer ``old_id`` to buffer ``new_id``.
 
         Updates graph-level edges (consumer ``node.inputs`` and
         ``graph.inputs/outputs``) AND any LoopOp's internal buf references
         (``Load.source`` / ``Write.output`` are buf names tracking the same
-        identity as the graph node ids).
+        identity as the graph node ids). Both arguments are buffer names —
+        a node id for primary outputs, the tensor's own name for
+        non-primary ones.
         """
-        if new_id not in self.nodes:
-            raise KeyError(f"Replacement node {new_id!r} not found")
+        if new_id not in self._producers and new_id not in self.nodes:
+            raise KeyError(f"Replacement buffer {new_id!r} not found")
         old_users = self._users.get(old_id, set())
         for consumer_id in list(old_users):
             node = self.nodes[consumer_id]
@@ -546,12 +599,14 @@ class Graph:
         consumed = list(consumed)
         consumed_prov = {nid: provenance.get(self.nodes[nid]) for nid in consumed if nid in self.nodes}
         id_map: dict[str, str] = {}
+        buf_map: dict[str, str] = {}  # fragment buffer name → post-add buffer name
         for frag_id in fragment.topological_order():
             frag_node = fragment.nodes[frag_id]
             if isinstance(frag_node.op, InputOp):
                 id_map[frag_id] = frag_id  # references existing graph node
+                buf_map[frag_id] = frag_id
                 continue
-            mapped_inputs = [id_map.get(inp, inp) for inp in frag_node.inputs]
+            mapped_inputs = [buf_map.get(inp, inp) for inp in frag_node.inputs]
             # Preserve fragment ids when they don't collide. Lifting / fusion
             # use stable names (``lift_<nid>``, ``merged_<nid>``) that don't
             # clash because the original is already consumed. Stable ids keep
@@ -561,20 +616,23 @@ class Graph:
             new_id = self.add_node(
                 op=frag_node.op,
                 inputs=mapped_inputs,
-                output=Tensor(frag_node.output.name, frag_node.output.shape, frag_node.output.dtype),
+                outputs=tuple(Tensor(t.name, t.shape, t.dtype) for t in frag_node.outputs),
                 node_id=preferred_id,
             )
             if frag_node.hints:
                 self.nodes[new_id].hints = frag_node.hints
             id_map[frag_id] = new_id
+            buf_map[frag_id] = new_id
+            for t in frag_node.outputs[1:]:
+                buf_map[t.name] = t.name  # non-primary buffers keep their names on add
 
         single = isinstance(output, str)
         output_map = {output: fragment.outputs[0]} if single else dict(output)
 
-        # Redirect each old node's consumers onto its fragment output.
+        # Redirect each old buffer's consumers onto its fragment buffer.
         new_by_old: dict[str, str] = {}
         for old_id, frag_out in output_map.items():
-            new_out = id_map[frag_out]
+            new_out = buf_map[frag_out]
             self.replace_node(old_id, new_out)
             new_by_old[old_id] = new_out
 
@@ -588,9 +646,9 @@ class Graph:
                 continue
             if orig.hints:
                 if single:
-                    self.nodes[new_by_old[output]].hints.merge(orig.hints)
+                    self.producer(new_by_old[output]).hints.merge(orig.hints)
                 elif nid in new_by_old:
-                    self.nodes[new_by_old[nid]].hints.merge(orig.hints)
+                    self.producer(new_by_old[nid]).hints.merge(orig.hints)
             if nid not in output_map:
                 self.remove_node(nid)
         for old_id in output_map:
@@ -605,20 +663,25 @@ class Graph:
             self,
             consumed_prov=consumed_prov,
             new_compute_ids=new_compute_ids,
-            new_by_old=new_by_old,
+            # Prov hints live on nodes — resolve each redirected buffer to its
+            # producing node id (identity for primary outputs).
+            new_by_old={old: self._producers[new][0] for old, new in new_by_old.items()},
             output_map=output_map,
             mint_pieces=mint_pieces,
         )
 
         # Promote each new node's id to its friendly output.name once consumed
         # nodes are gone — keeps kernel buf names (which embed the node id)
-        # readable. Falls back silently if the friendly name is taken.
+        # readable. Falls back silently if the friendly name is taken. A
+        # non-primary redirected buffer keeps its own name — nothing to promote.
         result: dict[str, str] = {}
         for old_id, new_out in new_by_old.items():
-            desired = self.nodes[new_out].output.name
-            if desired and desired != new_out and desired not in self.nodes:
-                self.rename_node(new_out, desired)
-                new_out = desired
+            node = self.nodes.get(new_out)
+            if node is not None:
+                desired = node.output.name
+                if desired and desired != new_out and desired not in self.nodes and desired not in self._producers:
+                    self.rename_node(new_out, desired)
+                    new_out = desired
             result[old_id] = new_out
 
         self.remove_orphans()
@@ -635,11 +698,16 @@ class Graph:
             node = self.nodes.get(nid)
             return node is not None and isinstance(node.op, InputOp)
 
+        def _dep_ids(node: Node) -> set[str]:
+            """Producing node ids of ``node``'s input buffers (an edge naming
+            ANY of a producer's buffers keeps that producer alive)."""
+            return {self._producers[inp][0] for inp in node.inputs if inp in self._producers}
+
         consumer_count: dict[str, int] = dict.fromkeys(self.nodes, 0)
         for node in self.nodes.values():
-            for inp in set(node.inputs):
-                if inp in consumer_count:
-                    consumer_count[inp] += 1
+            for dep in _dep_ids(node):
+                if dep in consumer_count:
+                    consumer_count[dep] += 1
 
         queue: list[str] = [nid for nid, c in consumer_count.items() if c == 0 and not _is_protected(nid)]
         while queue:
@@ -647,20 +715,88 @@ class Graph:
             if nid not in self.nodes:
                 continue
             node = self.nodes[nid]
-            for inp in set(node.inputs):
-                if inp in consumer_count:
-                    consumer_count[inp] -= 1
-                    if consumer_count[inp] == 0 and not _is_protected(inp):
-                        queue.append(inp)
+            deps = _dep_ids(node)
             self.remove_node(nid)
+            for dep in deps:
+                if dep in consumer_count:
+                    consumer_count[dep] -= 1
+                    if consumer_count[dep] == 0 and not _is_protected(dep):
+                        queue.append(dep)
 
     def users(self, node_id: str) -> set[str]:
-        """Return the set of node ids that consume ``node_id``. O(1)."""
-        return self._users.get(node_id, set())
+        """Return the set of node ids that consume ANY output buffer of
+        ``node_id`` (the union over its buffers — identical to the historic
+        semantics for single-output nodes). O(1) for those; rules that care
+        which specific buffer an edge reads use :meth:`buffer_users`."""
+        node = self.nodes.get(node_id)
+        if node is None or len(node.outputs) == 1:
+            return self._users.get(node_id, set())
+        out: set[str] = set()
+        for buf in node.buffer_names():
+            out |= self._users.get(buf, set())
+        return out
 
     def consumers(self, node_id: str) -> list[str]:
         """List form of :meth:`users`, preserved for existing callers."""
-        return list(self._users.get(node_id, ()))
+        return list(self.users(node_id))
+
+    def producer(self, buf: str) -> Node | None:
+        """The node producing buffer ``buf`` (any output slot), or ``None``
+        when no such buffer exists. The buffer-name counterpart of
+        ``graph.nodes.get(nid)`` — identical for primary outputs."""
+        entry = self._producers.get(buf)
+        return self.nodes[entry[0]] if entry is not None else None
+
+    def buffer(self, buf: str) -> Tensor | None:
+        """The :class:`Tensor` traveling under buffer name ``buf``, or
+        ``None`` when no such buffer exists."""
+        entry = self._producers.get(buf)
+        if entry is None:
+            return None
+        nid, slot = entry
+        return self.nodes[nid].outputs[slot]
+
+    def buffer_users(self, buf: str) -> set[str]:
+        """The node ids reading buffer ``buf`` specifically (one output
+        slot — not the producing node's other buffers). O(1)."""
+        return self._users.get(buf, set())
+
+    def validate(self) -> None:
+        """Check the graph's structural invariants; raise ``ValueError`` on the
+        first violation. Covers: non-empty ``node.outputs``; SSA per buffer
+        (``_producers`` maps every buffer to exactly its producing node/slot,
+        no orphan or missing entries); ``_users`` consistency with every
+        ``node.inputs`` edge; ``graph.inputs`` / ``graph.outputs`` naming known
+        buffers. Runs in tests always and behind ``EMMY_VALIDATE_GRAPH`` at
+        pass boundaries — never in production compile paths."""
+        expected_producers: dict[str, tuple[str, int]] = {}
+        for nid, node in self.nodes.items():
+            if node.id != nid:
+                raise ValueError(f"node keyed {nid!r} carries id {node.id!r}")
+            if not node.outputs:
+                raise ValueError(f"node {nid!r} has no outputs")
+            for slot, buf in enumerate(node.buffer_names()):
+                if buf in expected_producers:
+                    raise ValueError(f"buffer {buf!r} has two producers: {expected_producers[buf]} and {(nid, slot)}")
+                expected_producers[buf] = (nid, slot)
+        if expected_producers != self._producers:
+            missing = expected_producers.keys() - self._producers.keys()
+            stale = self._producers.keys() - expected_producers.keys()
+            wrong = {b for b in expected_producers.keys() & self._producers.keys() if expected_producers[b] != self._producers[b]}
+            raise ValueError(f"_producers index out of sync: missing={sorted(missing)} stale={sorted(stale)} wrong={sorted(wrong)}")
+        expected_users: dict[str, set[str]] = {buf: set() for buf in expected_producers}
+        for nid, node in self.nodes.items():
+            for inp in node.inputs:
+                if inp not in expected_producers:
+                    raise ValueError(f"node {nid!r} reads unknown buffer {inp!r}")
+                expected_users[inp].add(nid)
+        if expected_users != self._users:
+            diff = {b for b in expected_users.keys() | self._users.keys() if expected_users.get(b) != self._users.get(b)}
+            raise ValueError(f"_users index out of sync for buffers {sorted(diff)}")
+        for label, refs in (("inputs", self.inputs), ("outputs", self.outputs)):
+            for buf in refs:
+                if buf not in expected_producers:
+                    raise ValueError(f"graph.{label} names unknown buffer {buf!r}")
 
     # ------------------------------------------------------------------
     # Boundary / symbolic-dim queries
@@ -825,15 +961,30 @@ class Graph:
                 op_payload = ("attrs", attrs)
             out = node.output
             out_payload = (_unwrap_dims(tuple(out.shape)), out.dtype)
-            input_payload = tuple(node_key(i) for i in node.inputs)
+            if len(node.outputs) > 1:
+                # Fold non-primary outputs in slot order. Appended (rather than
+                # always tupling every output) so single-output digests are
+                # byte-identical to the pre-MIMO scheme.
+                out_payload = (out_payload, tuple((_unwrap_dims(tuple(t.shape)), t.dtype) for t in node.outputs[1:]))
+            input_payload = tuple(edge_key(i) for i in node.inputs)
             d = digest(type(op).__name__, op_payload, out_payload, input_payload)
             keys[nid] = d
             return d
 
+        def edge_key(buf: str) -> str:
+            """Digest of one edge: the producing node's key, with the output
+            slot folded in for non-primary buffers (slot 0 stays the bare node
+            key — pre-MIMO digests unchanged)."""
+            entry = self._producers.get(buf)
+            if entry is None:
+                return node_key(buf)  # dangling ref — keyerror as before
+            nid, slot = entry
+            return node_key(nid) if slot == 0 else digest("slot", node_key(nid), slot)
+
         # Hash from outputs back so disconnected dead nodes don't perturb the
         # key, and from inputs forward so an input-order swap is observable.
-        out_keys = tuple(node_key(o) for o in self.outputs)
-        in_keys = tuple(node_key(i) for i in self.inputs)
+        out_keys = tuple(edge_key(o) for o in self.outputs)
+        in_keys = tuple(edge_key(i) for i in self.inputs)
         return digest("graph", in_keys, out_keys)
 
     def topological_order(self) -> list[str]:
@@ -843,16 +994,15 @@ class Graph:
         """
         in_degree: dict[str, int] = {nid: 0 for nid in self.nodes}
         for node in self.nodes.values():
-            for inp in set(node.inputs):
-                if inp in in_degree:
-                    in_degree[node.id] += 1
+            deps = {self._producers[inp][0] for inp in node.inputs if inp in self._producers}
+            in_degree[node.id] += len(deps - {node.id})
 
         queue = [nid for nid, deg in in_degree.items() if deg == 0]
         result: list[str] = []
         while queue:
             nid = queue.pop(0)
             result.append(nid)
-            for consumer_id in self._users.get(nid, ()):
+            for consumer_id in self.users(nid):
                 in_degree[consumer_id] -= 1
                 if in_degree[consumer_id] == 0:
                     queue.append(consumer_id)
@@ -871,14 +1021,11 @@ class Graph:
                 id=node.id,
                 op=node.op,
                 inputs=list(node.inputs),
-                output=Tensor(
-                    name=node.output.name,
-                    shape=node.output.shape,
-                    dtype=node.output.dtype,
-                ),
+                outputs=tuple(Tensor(name=t.name, shape=t.shape, dtype=t.dtype) for t in node.outputs),
                 hints=Hints.from_dict(node.hints.to_dict()),
             )
-        g._users = {nid: set(users) for nid, users in self._users.items()}
+        g._users = {buf: set(users) for buf, users in self._users.items()}
+        g._producers = dict(self._producers)
         g.inputs = list(self.inputs)
         g.outputs = list(self.outputs)
         return g
@@ -897,18 +1044,21 @@ class Graph:
 
             fields = {k: _deserialize_field(k, v) for k, v in ndata.get("op_fields", {}).items()}
             op = op_cls(**fields) if fields else op_cls()
-            out = ndata["output"]
-            tensor = Tensor(
-                name=out["name"],
-                shape=tuple(out["shape"]),
-                dtype=out.get("dtype", "f32"),
+            # Dual-read: the historic single-``output`` dict and the plural
+            # ``outputs`` list (slot order). Old dumps stay loadable.
+            outs_data = ndata["outputs"] if "outputs" in ndata else [ndata["output"]]
+            tensors = tuple(
+                Tensor(name=out["name"], shape=tuple(out["shape"]), dtype=out.get("dtype", "f32")) for out in outs_data
             )
             node_hints = Hints.from_dict(ndata.get("hints", {}))
             # Add directly to bypass input validation (nodes may reference later nodes).
-            g.nodes[nid] = Node(id=nid, op=op, inputs=list(ndata["inputs"]), output=tensor, hints=node_hints)
+            g.nodes[nid] = Node(id=nid, op=op, inputs=list(ndata["inputs"]), outputs=tensors, hints=node_hints)
 
-        # Rebuild the forward-edge index now that every node is present.
-        g._users = {nid: set() for nid in g.nodes}
+        # Rebuild the producer / forward-edge indexes now that every node is present.
+        for nid, node in g.nodes.items():
+            for slot, buf in enumerate(node.buffer_names()):
+                g._producers[buf] = (nid, slot)
+                g._users.setdefault(buf, set())
         for nid, node in g.nodes.items():
             for inp in node.inputs:
                 if inp in g._users:
@@ -1072,7 +1222,7 @@ def _fmt_op(node: Node, graph: Graph) -> str:
     """Render `node` as a function-call-like string using input tensor names."""
     op = node.op
     cls = type(op).__name__
-    arg_names = [graph.nodes[inp].output.name for inp in node.inputs]
+    arg_names = [t.name if (t := graph.buffer(inp)) is not None else inp for inp in node.inputs]
 
     if cls == "ElementwiseOp":
         return f"{op.name}({', '.join(arg_names)})"
@@ -1110,7 +1260,7 @@ def _fmt_indexmap(node: Node, graph: Graph) -> str:
     op = node.op
     sources = op.sources
     out_shape = op.out_shape
-    arg_names = [graph.nodes[inp].output.name for inp in node.inputs]
+    arg_names = [t.name if (t := graph.buffer(inp)) is not None else inp for inp in node.inputs]
 
     if len(sources) != 1 or sources[0].select is not None or len(out_shape) > len(_DIM_NAMES):
         return f"indexmap({', '.join(arg_names)})"
@@ -1118,7 +1268,8 @@ def _fmt_indexmap(node: Node, graph: Graph) -> str:
     src = sources[0]
     input_name = arg_names[src.input_idx] if src.input_idx < len(arg_names) else f"${src.input_idx}"
     input_id = node.inputs[src.input_idx] if src.input_idx < len(node.inputs) else None
-    input_shape = graph.nodes[input_id].output.shape if input_id and input_id in graph.nodes else ()
+    input_t = graph.buffer(input_id) if input_id else None
+    input_shape = input_t.shape if input_t is not None else ()
 
     placeholder_rename = {f"{PLACEHOLDER_PREFIX}{n}": Var(name) for n, name in enumerate(_DIM_NAMES)}
 

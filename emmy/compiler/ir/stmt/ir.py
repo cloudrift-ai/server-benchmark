@@ -114,13 +114,13 @@ class BodyOp(Op):
         if stray_out:
             raise ValueError(f"{type(self).__name__}: body has Write buffers {stray_out} not covered by outputs={list(self.outputs)}")
         for name in self.inputs:
-            gnode = graph.nodes.get(name)
-            if gnode is not None:
-                self.inputs[name] = _tensor_for_node(gnode)
+            t = _tensor_for_buffer(graph, name)
+            if t is not None:
+                self.inputs[name] = t
         for name in self.outputs:
-            gnode = graph.nodes.get(name)
-            if gnode is not None:
-                self.outputs[name] = _tensor_for_node(gnode)
+            t = _tensor_for_buffer(graph, name)
+            if t is not None:
+                self.outputs[name] = t
 
     def pretty_body(self) -> str:
         """Indented body listing — one stmt per line via per-stmt
@@ -130,12 +130,17 @@ class BodyOp(Op):
         return "\n".join(_pretty_body_stmts(self.body, "    "))
 
 
-def _tensor_for_node(node) -> Tensor:  # noqa: ANN001 — Node lives in compiler.graph; would cycle to import.
-    """Return ``node.output``, but for ``ConstantOp`` predecessors stamp
+def _tensor_for_buffer(graph, name: str) -> Tensor | None:  # noqa: ANN001 — Graph lives in compiler.graph; would cycle to import.
+    """Return the graph tensor traveling under buffer ``name`` (any output
+    slot of its producer), but for ``ConstantOp`` producers stamp
     ``constant=True`` (and ``value`` for scalar literals) onto a fresh
     Tensor so downstream consumers can recognize literal-scalar buffers
-    without re-querying the graph for ConstantOp predecessors."""
-    t = node.output
+    without re-querying the graph for ConstantOp predecessors. ``None``
+    when the buffer isn't a graph buffer (matcher-known external)."""
+    t = graph.buffer(name)
+    if t is None:
+        return None
+    node = graph.producer(name)
     if isinstance(node.op, ConstantOp):
         return Tensor(t.name, t.shape, t.dtype, constant=True, value=node.op.value)
     return t

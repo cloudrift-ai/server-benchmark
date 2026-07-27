@@ -190,7 +190,7 @@ def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
     """
     if len(graph.outputs) != 1:
         return None
-    root_node = graph.nodes.get(graph.outputs[0])
+    root_node = graph.producer(graph.outputs[0])
     if root_node is None or not isinstance(root_node.op, LoopOp):
         return None
 

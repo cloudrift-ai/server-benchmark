@@ -836,7 +836,7 @@ def greedy_decide(
         # golden deploys them on a scalar tile (36 ms on the gemma-4 M=256 q cone). So the cut
         # can only ever win where it was actually MEASURED to, which is the same principle the
         # structural-pricing gate encodes, applied at row level. ``PLACE@stat=sink``
-        # (``025_sink_row_reduce`` — the producer gains an epilogue, the norm re-emits as a
+        # (the retained row-stat TAP — the producer keeps the aux fold, the norm stays a wide
         # sweep) changes the kernel set the same way and is withheld identically.
         restructured = (("PLACE@cone", "cut"), ("PLACE@stat", "sink"), ("PLACE@fin", "fuse"), ("PLACE@cstat", "fuse"))
         model_rows = [i for i, r in enumerate(rows) if all(r.get(k) != v for k, v in restructured)] or list(range(len(rows)))

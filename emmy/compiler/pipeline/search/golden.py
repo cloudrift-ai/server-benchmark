@@ -389,24 +389,28 @@ class RmsNormGoldenConfig(GoldenConfig):
 
 @dataclass(frozen=True, kw_only=True)
 class LinearNormGoldenConfig(GoldenConfig):
-    """A whole-pair golden for the ROW-STAT SINK decision (``PLACE@stat`` —
-    ``025_sink_row_reduce``): ``F.linear(x, w)`` + a trailing ``F.rms_norm`` (+ residual add for
-    the post-attn form), the producer→norm pair whose statistic can migrate into the producer's
-    epilogue. The snippet builds the PAIR so a seeding A/B measures the sink's true e2e effect
-    (producer epilogue + memset + the norm dropping to a wide pointwise sweep).
+    """A whole-pair golden for the ROW-STAT TAP decision (``PLACE@stat`` — the loop-level tap
+    fusion, ``010_tap_row_stat`` / ``034_attach_taps``): ``F.linear(x, w)`` + a trailing
+    ``F.rms_norm`` (+ residual add for the post-attn form), the producer→norm pair whose
+    statistic fuses into the producer as a tap. The snippet builds the PAIR so a seeding A/B
+    measures the tap's true e2e effect (producer fold + memset + the norm dropping to a wide
+    pointwise sweep vs the cut-out's local coop norm).
 
-    The recorded row lives at the NORM's fork (``shape_key`` mirrors
-    :class:`RmsNormGoldenConfig` — ``kind="rms_norm"``, free ``M·K``, reduce ``K``) and records
-    ``knobs: {PLACE@stat: 'sink'}`` alone (the cut convention: the realizer re-emits the sweep,
-    so the representative row's own schedule is discarded). Two ordering facts make per-site
-    selection work with no re-anchoring: ``_golden_matches_row`` REFUSES a ``PLACE``-bearing
-    golden at a fork whose rows never offered the element (an input-norm fork falls through to
-    the plain ``rms_norm`` coop anchor at the same key), and ``emmy_us`` records the fork's OWN
-    realized kernel (the ~1 µs post-sink sweep, NOT the pair total) so the sink row sorts ahead
-    of that coop anchor and is tried first exactly where the offer exists. ``cublas_us`` records
-    the LOCAL-stat baseline (the coop kernel the sink replaces), so ``ratio`` reads as the
-    per-kernel rescue. The pair-level e2e verdict that justifies seeding lives in the seeding
-    session's findings, not in the row."""
+    The recorded row lives at the tapped PRODUCER's fork (``shape_key`` mirrors
+    :class:`MatmulGoldenConfig` over ``(M, H) @ (H, K)`` — the inverted resting state keys the
+    decision where the tap rides) and records ``{PLACE@stat: 'sink', …}`` plus the producer's
+    OWN schedule row (the tap deploys on that row; a split row's tap relocates onto the
+    finalize). Selection facts: ``_golden_matches_row`` REFUSES a ``PLACE``-bearing golden at a
+    fork whose rows never offered the element (an untapped matmul of the same extents falls
+    through to its plain matmul anchor at the same key), and the symmetric clause bars the plain
+    anchor from vouching for a ``sink`` mirror row. ``emmy_us`` records the fork's EFFECTIVE
+    cost under the tap — the plain anchor's µs minus the measured pair-level saving — so the
+    sink entry sorts ahead of the plain anchor exactly where the pair A/B won; ``cublas_us``
+    records the plain anchor's µs (the fuse baseline at this fork), so ``ratio`` reads as the
+    pair-level rescue. The e2e verdict that justifies seeding lives in the seeding session's
+    findings, not in the row. Where the row can't host a tap (an atomic split), the attach
+    realizer degrades to the cut-out and the deployment is exactly the fuse kernels — which is
+    what makes the entry safe to record against any schedule row."""
 
     M: int
     K: int  # the norm width (= the linear's output N)
@@ -420,7 +424,7 @@ class LinearNormGoldenConfig(GoldenConfig):
         if self.knobs and "PLACE@stat" not in self.knobs:
             raise ValueError(
                 f"linear_norm golden {self.name!r} must record the PLACE@stat placement — a stampless row would "
-                f"shadow the plain rms_norm anchors at the same ShapeKey"
+                f"shadow the plain matmul anchors at the same ShapeKey"
             )
 
     def dynamic_specs(self) -> list[str]:
@@ -439,13 +443,13 @@ class LinearNormGoldenConfig(GoldenConfig):
         return 2.0 * self.M * self.K * self.H  # the producer contraction dominates; the norm sweep is extra
 
     def shape_key(self):
-        """Keys the NORM kernel's fork — identical to the plain row norm's key
-        (:class:`RmsNormGoldenConfig` with ``heads=1``): the sweep's output is ``(M, K)`` so
-        ``free_prod = M*K``, reduce ``K``, ``is_warp=False``, ``kind="rms_norm"``."""
+        """Keys the tapped PRODUCER's fork — identical to the plain matmul key over
+        ``(M, H) @ (H, K)`` (:class:`MatmulGoldenConfig` with ``N = K``, ``K = H``): the
+        recognition peel classifies the tapped host as its untapped self, so the fork key IS the
+        plain matmul's."""
         from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
 
-        free = self.K if self.dynamic else self.M * self.K
-        return ShapeKey(free_prod=free, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic, kind="rms_norm")
+        return ShapeKey.from_matmul(self.M, self.K, self.H, self.dtype, dynamic=self.dynamic)
 
 
 def _require_cone_anchor(cfg) -> None:

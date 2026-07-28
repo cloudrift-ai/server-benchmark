@@ -34,7 +34,17 @@ def name_for_loop(op: LoopOp, node: Node, graph: Graph) -> str:
     """The provenance-derived ``k_…`` kernel label ``010_stamp_loop_names``
     stamps onto ``op``, factored out so fragment builders name their LoopOps
     the same way. Threads the node id + per-node provenance + graph-wide
-    coverage totals into :func:`provenance.name_for`."""
+    coverage totals into :func:`provenance.name_for`.
+
+    Tap-blind like :func:`structure_features`: the label's structural-body hash is computed on
+    the UNTAPPED body, so a tapped producer keeps its untapped kernel name (the ``fuse`` cut-out
+    then reproduces main-line kernel names byte-for-byte — no dump/kname churn)."""
+    from emmy.compiler.ir.loop.tap import has_taps, strip_taps  # noqa: PLC0415 — leaf import
+
+    if has_taps(op.body):
+        from emmy.compiler.ir.loop import LoopOp as _LoopOp  # noqa: PLC0415
+
+        op = _LoopOp(body=strip_taps(op.body))
     return provenance.name_for(op, node.id, provenance.get(node), provenance.totals(graph))
 
 

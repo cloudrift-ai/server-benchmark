@@ -146,25 +146,31 @@ dimensions, with their own re-entry contracts — keep them apart:
   no golden — the gemma-4 gate/up edge measures 35,558 / 71,160 / 142,702 µs at M=32/64/128 (the channel matmuls fall
   to a scalar tile) against 368.7 µs at the seeded M=256. An unseeded shape simply never matches and stays fused, so
   the choice is never made geometrically.
-- **`025_sink_row_reduce`** migrates a **row statistic** across the dataflow edge in the OPPOSITE direction from the
-  cut (the PLACE codec's `stat` element, `PLACE@stat=sink`): a fused norm kernel B —
-  `Map(body=[π…, sweep Loop], source=Reduction(PLANAR))` whose reduce folds a pure per-cell term (`Σ x²`) of ONE
-  tensor its in-graph producer A just computed — drops its `Reduction` to a `Load` of a fresh f32 `T__sq[row]` aux
-  buffer, and A's complete-value store site (a split-K FINALIZE or pointwise sweep — never an atomic partial, whose
-  per-partition values are incomplete) gains the term re-evaluated on each just-stored value plus a `RowAccum`
-  (a hierarchical warp-shfl + smem block fold + one `atomicAdd` per block, zero-init'd per launch through the
-  ordinary `zero_outputs` memset machinery). `T__sq` is output slot 1 of the producer node itself (a true
-  multi-output node — planned/allocated per buffer, consumed through an ordinary buffer edge; the old
-  `AuxOutputOp` sentinel is retired); B re-emits as an un-mapped `LoopOp` so `010_recognize` peels BOTH the row and sweep
-  axes free — the whole point: the grid-per-row latency-bound stat kernel becomes a wide 2-D pointwise sweep. The
-  structural probe (`_sink.bind_sinkable_stat`) gates in the negative: the reduce's flat address in T must be affine
-  with reduce coefficient 1 and mixed-radix row coefficients (so `row = flat / N` is a bijection — the per-head
-  qknorm case falls out for free), the projection must be `[pure prefix…, one sweep Loop]`. Like the cut it is a
-  pure realizer of a recognizer-offered stamp, its rows are **evidence-only** (withheld from the model fallback),
-  and its sink siblings mirror EVERY local row so an unrealizable site (atomic producer — the pass waits via
-  `RuleSkipped` for `010`/`030` to settle the producer, then refuses permanently) degrades to the picked row's own
-  local-stat schedule. It runs BEFORE `030` so a sink-stamped row is realized before any grid split of the norm
-  could be.
+- **The row-statistic TAP** (the PLACE codec's `stat` element) divides the same edge as the old sink but with the
+  RESTING STATE INVERTED: fusing the statistic IN happens at **loop level**, unconditionally, and the tile passes
+  realize the *escape*. `loop/fission/010_tap_row_stat` fissions the assembled norm at merge-fixpoint — the per-cell
+  term (`Σ x²`'s `v·v`) plus an atomic-accumulate `Write T__sq[rows…] += term` splice in after the producer's store
+  while the row index is still a live loop variable (`ir/loop/tap.py`, the closed-vocabulary stored form: no new
+  stmt kind; the chain is the exclusive backward Assign-cone of the accumulated value), and the norm drops to a
+  wide sweep reading `T__sq` — output slot 1 of the producer node (a true multi-output node). No address algebra
+  exists anywhere: the index correspondence is a σ-solve anchored at the producer's `Write` (the same solve
+  `splice_graph` does), the per-head mixed-radix row is `index // W` positionally, and symbolic rows are
+  expressible for free (offered static-only so the un-lifted dynamic tier keeps its deployments). Tile
+  recognition PEELS the tap (`_tap.peel_taps`) so the host classifies exactly as its untapped self — same
+  structural nodes, same fork keys, same golden identity (the `S_*` stamps and the kernel-name hash are tap-blind
+  too) — and the `PLACE@stat` fork rides the tapped PRODUCER's fork, sink mirrors on every row, evidence-only.
+  Realizers: **`015_cut_stat_tap`** (option-0 `fuse`, always legal — which is what makes the fused/tapped state safe
+  to be canonical) re-emits the producer untapped with its picked schedule intact and re-welds the DEFERRED sweep's
+  statistic back (`010_recognize` holds every `__sq` reader as a `LoopOp` until its producer's taps resolve, so the
+  re-weld is verbatim and the compile is byte-identical to the never-fissioned pipeline — the round-trip contract
+  `tests/compiler/e2e/test_stat_tap.py` pins); **`030_split_reduce`** relocates a retained tap onto the split's
+  FINALIZE (no thread of a partial holds the complete value — split-K sites gain the sink constructively where the
+  old realizer refused permanently); **`034_attach_taps`** materializes what remains, deriving the fold tier from
+  the settled schedule (derive-never-store): a store group covering the whole row folds serially in-thread (plain
+  store, no atomics, no zero-init — the memset floor never exists on this tier), anything wider takes the
+  hierarchical `RowAccum` fold (warp shfl → smem stage → ~1 atomic per block, zero-init'd through the ordinary
+  `zero_outputs` machinery), and an ineligible host (atomic partial / mma epilogue) degrades to the cut-out —
+  exactly the fuse deployment, which is why the sink rows are safe to mirror onto every schedule row.
 - **`030_split_reduce`** splits the **reduce axis** (the REDUCE codec's `g<w>` cross-CTA shard): the SAME
   computation, its K partitioned across CTAs into a partial + finalize. It runs AFTER its decision — the `g` row was
   chosen FOR the split form — so the partial carries the decided knob row verbatim and the finalize is deliberately

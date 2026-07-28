@@ -15,10 +15,14 @@ norm form over the producer ``A``'s output ``T``:
 
     for rows…: [prefix…, for n: (Load T, term chain, additive Accum), π…, sweep Loop reading T]
 
-Because rule ``010_merge_loop_ops`` precedes this one in scan order, ``B`` only reaches here once
-every merge has exhausted — a norm whose sole consumer absorbs it (the norm→linear computed-A
-edge) fissions never, and ``B`` is maximal (residual adds already in its sweep). The rewrite is
-**tap-only** (the sweep needs the completed stat, so it keeps its own kernel):
+This rule lives in its OWN pass (``loop/fission``, after ``loop/fusion``): a pass advances only
+when a full scan applies nothing, so ``B`` only reaches here once every merge has truly
+exhausted — a norm whose sole consumer absorbs it (the norm→linear computed-A edge) fissions
+never, and ``B`` is maximal (residual adds already in its sweep). Sharing fusion's pass would
+NOT give that guarantee: within one scan every rule gets a batch, so a mid-assembly form (the
+softmax's ``Σ exp`` + div sweep, one merge short of its P@V offer site) would fission out from
+under the flash certification. The rewrite is **tap-only** (the sweep needs the completed stat,
+so it keeps its own kernel):
 
 - **A′** — ``A`` with the consumer's per-cell term chain (``__tap``-minted names, evaluated on the
   pre-store value) + the atomic tap ``Write T__sq[rows…] += term`` spliced after its store of
@@ -38,8 +42,11 @@ the negative:
 - ``A`` must be an in-graph ``LoopOp`` with ONE output and ONE store of ``T`` (an input-norm has
   no in-graph producer and never matches — the refusal carries over by construction); ``A`` (or
   ``B``) being a graph output is FINE (``T`` stays materialized, ``S`` inherits ``B``'s id).
-- ``A`` must not carry a rowmax (``maximum`` ``Accum``): a softmax / flash offer site's operands
-  and certification are owned by ``try_flash`` — a tap would de-certify the form.
+- ``A`` must not carry a rowmax (``maximum`` ``Accum``) or an ``exp``: the softmax halves and
+  the flash offer site's operands/certification are owned by ``try_flash`` — a softmax's
+  ``Σ exp`` IS the norm shape over its exp-piece producer, and tapping it would de-certify the
+  flash form. (``Σ exp`` over a *materialized* exp buffer is algebraically tappable; the refusal
+  protects the flash boundary, exactly like ``010_merge_loop_ops``'s flash guards.)
 - every extent this rule reasons about is STATIC, and the statistic's read must cover ``T``
   exactly (each row folds exactly the reduce extent, every cell in exactly one row). The stored
   form expresses symbolic rows for free, but offering them would create tapped kernels on the
@@ -239,6 +246,8 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
         raise RuleSkipped(f"stat already tapped — {sq} exists")
     if any(isinstance(s, Accum) and s.op.reduce_canon == "maximum" for s in producer.op.body.iter()):
         raise RuleSkipped("rowmax-bearing producer (softmax / flash offer site) — its form is owned by try_flash")
+    if any(isinstance(s, Assign) and s.op.name == "exp" for s in producer.op.body.iter()):
+        raise RuleSkipped("exp-bearing producer (a softmax half) — the flash boundary's forms are owned by try_flash")
 
     # --- bind B as the fused norm form over A's output -----------------------------------
     cell = _cell(consumer.op.body)

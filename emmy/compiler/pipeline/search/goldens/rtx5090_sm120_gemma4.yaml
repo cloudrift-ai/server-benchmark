@@ -2576,20 +2576,22 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k4', REDUCE: 'g2k', STAGE: 'd2/tma/ring', WSPEC: '', RASTER: ''}
     emmy_us: 81.4
     cublas_us: 113.1
-  # ROW-STAT SINK (PLACE@stat, 025_sink_row_reduce; seeded 2026-07-22): at the decode post-attn
-  # site the norm's Σx² migrates into the o_proj split-K finalize's epilogue and the norm deploys
-  # as a wide residual-add sweep (k_mean 3.8 → 0.9 µs). Whole-twin verdict (fm, bucket-32
-  # captures, 3×): post32 e2e 260.5-260.9 → 258.8-259.4, post32-global 280.2 → 277.7. emmy_us
-  # records the fork's OWN realized sweep kernel (NOT the pair) so this row sorts ahead of the
-  # coop anchor below; cublas_us records the local-stat kernel the sink replaces. The REDUCE/b512
-  # constraint is the DEGRADE anchor: the sink siblings mirror every coop row, so at a fork where
-  # the realizer must refuse (the post_ff norm — its producer `down` deploys the ATOMIC g4a
-  # partial, no complete-value store) the picked sink row deploys its own b512 coop schedule,
-  # byte-identical to the plain anchor's pick. Non-offer forks at the same key (the pre-twin
-  # input norm — its producer is the twin INPUT) refuse the PLACE constraint entirely and fall
-  # through to the anchor. NOT seeded: qknorm sites (sweeps already wide post-reshape-fold — the
-  # epilogue+memset is a net loss), the post_ff site (needs down on g4k, whose +0.9 eats the
-  # saving), and m64 (whole-twin wash; only post64-global won ~−0.7).
+  # ROW-STAT TAP (PLACE@stat — the loop-level tap fusion; seeded 2026-07-22 at the norm fork,
+  # MIGRATED 2026-07-28 to the tapped PRODUCER's fork by the resting-state inversion): at the
+  # decode post-attn site the norm's Σx² rides the o_proj matmul as a tap, relocated onto the
+  # g8k split's FINALIZE, and the norm deploys as a wide residual-add sweep (k_mean 3.8 → 0.9 µs).
+  # Whole-twin verdict (fm, bucket-32 captures, 3×): post32 e2e 260.5-260.9 → 258.8-259.4,
+  # post32-global 280.2 → 277.7 (≈ −1.4 µs/site). The entry records the o_proj anchor's OWN row
+  # (kept in lockstep with `gemma4_12b.o_proj.m32` above — re-tune them together) + the sink
+  # stamp; emmy_us = that anchor's 11.1 minus the measured pair saving (−1.4) so this entry
+  # sorts ahead of the plain anchor exactly where the pair A/B won, cublas_us = the anchor's µs
+  # (the fuse baseline at this fork). Untapped forks of the same extents refuse the PLACE
+  # constraint and keep the plain anchor; a row that can't host the tap (the post_ff `down`
+  # producer's ATOMIC g4a split — no complete-value store) degrades to the cut-out, i.e. exactly
+  # the fuse kernels + the re-welded coop norm (its own rms_norm anchor). NOT seeded: qknorm
+  # sites (sweeps already wide post-reshape-fold — the fold+memset is a net loss), the post_ff
+  # site (needs down on g4k, whose +0.9 eats the saving), and m64 (whole-twin wash; only
+  # post64-global won ~−0.7).
   - kernel: linear_norm
     name: gemma4_12b.post_attn_norm.sink.m32
     M: 32
@@ -2598,9 +2600,9 @@ configs:
     dtype: 'fp16'
     trans_b: true
     residual: true
-    knobs: {PLACE@stat: 'sink', TILE: '', REDUCE: 'b512', STAGE: '', WSPEC: '', RASTER: ''}
-    emmy_us: 0.9
-    cublas_us: 3.8
+    knobs: {PLACE@stat: 'sink', TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', STAGE: 'd2/tma/ring', WSPEC: '', RASTER: ''}
+    emmy_us: 9.7
+    cublas_us: 11.1
   - kernel: rms_norm
     name: gemma4_12b.rms_norm.k3840.m32
     M: 32

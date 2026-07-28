@@ -465,7 +465,7 @@ def _solve_sigma(
 
 
 # The writer-vs-reader index pairing, exported for rules that anchor a σ-solve at a producer's
-# ``Write`` instead of a splice edge (``loop/fusion/015_tap_row_stat``).
+# ``Write`` instead of a splice edge (``loop/fission/010_tap_row_stat``).
 solve_sigma = _solve_sigma
 
 

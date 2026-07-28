@@ -1603,13 +1603,17 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', STAGE: 'd2/cp/ring', WSPEC: '', RASTER: ''}
     emmy_us: 107.3
     cublas_us: 102.0
-  # ROW-STAT SINK (PLACE@stat, 025_sink_row_reduce; seeded 2026-07-22 — see the 5090 twin's
-  # comment for the full mechanics): the decode post-attn norm's Σx² sinks into the o_proj
-  # split-K finalize (k_mean 5.6 → 1.1 µs k_add sweep). Whole-twin verdict (fm, bucket-32):
-  # post32 e2e 493.5 → 488.4, post32-global 557.6 → 551.4. The REDUCE/b128 constraint is the
-  # degrade anchor (the post_ff fork's down producer is the atomic g4a — the picked sink row
-  # deploys its own b128 coop, identical to the plain anchor's pick). m64 measured a LOSS on
-  # this card (post64 1526.8 → 1542.1) — not seeded.
+  # ROW-STAT TAP (PLACE@stat — the loop-level tap fusion; seeded 2026-07-22 at the norm fork,
+  # MIGRATED 2026-07-28 to the tapped PRODUCER's fork by the resting-state inversion — see the
+  # 5090 twin's comment for the full mechanics): the decode post-attn norm's Σx² rides the
+  # o_proj matmul as a tap, relocated onto the g8k split's finalize (k_mean 5.6 → 1.1 µs k_add
+  # sweep). Whole-twin verdict (fm, bucket-32): post32 e2e 493.5 → 488.4, post32-global
+  # 557.6 → 551.4 (≈ −5.1 µs/site). TWO entries mirror the `gemma4_12b.o_proj.m32.lin` std/fm
+  # anchor twins above (kept in lockstep — re-tune them together); emmy_us = each anchor's µs
+  # minus the measured pair saving, cublas_us = the anchor's µs. m64 measured a LOSS on this
+  # card (post64 1526.8 → 1542.1) — not seeded. ⚠ migrated mechanically from the norm-fork
+  # entry; the 4090 box was unavailable for the migration re-verify — re-run `emmy eval golden
+  # --in-model` there before trusting a drift-free deploy.
   - kernel: linear_norm
     name: gemma4_12b.post_attn_norm.sink.m32
     M: 32
@@ -1618,9 +1622,20 @@ configs:
     dtype: 'fp16'
     trans_b: true
     residual: true
-    knobs: {PLACE@stat: 'sink', TILE: '', REDUCE: 'b128', STAGE: '', WSPEC: '', RASTER: ''}
-    emmy_us: 1.1
-    cublas_us: 5.6
+    knobs: {PLACE@stat: 'sink', TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', STAGE: 'd2/cp/ring', WSPEC: '', RASTER: ''}
+    emmy_us: 7.7
+    cublas_us: 12.8
+  - kernel: linear_norm
+    name: gemma4_12b.post_attn_norm.sink.m32.fm
+    M: 32
+    K: 3840
+    H: 4096
+    dtype: 'fp16'
+    trans_b: true
+    residual: true
+    knobs: {PLACE@stat: 'sink', TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k2', REDUCE: 'g8k', STAGE: 'd2/cp/ring', WSPEC: '', RASTER: ''}
+    emmy_us: 7.5
+    cublas_us: 12.6
   - kernel: rms_norm
     name: gemma4_12b.rms_norm.k3840.m32
     M: 32

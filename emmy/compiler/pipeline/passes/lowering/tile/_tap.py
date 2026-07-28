@@ -52,7 +52,7 @@ def peel_taps(body: Body, out) -> tuple[tuple[Stmt, ...], tuple[Tap, ...]]:
     """Strip the tap stmts off ``body`` and lift each into a :class:`Tap`. ``out`` is the host
     node's primary output :class:`Tensor` (the tapped buffer — the tap fusion rule only ever taps
     the producer's own output). Raises :class:`LoweringError` on a malformed stored form — the
-    naming contract is minted by ``015_tap_row_stat`` alone, so a shape this can't re-derive is a
+    naming contract is minted by ``010_tap_row_stat`` alone, so a shape this can't re-derive is a
     broken invariant, never a decline."""
     deep = _deep_stmts(body)
     tap_writes = [s for s in deep if is_tap_write(s)]
@@ -160,7 +160,7 @@ def _reweld(body: Body, tap: Tap, seq: int) -> Body:
     # The T read index: destination coords come from the sweep's OWN dst-load exprs; reduce-only
     # positions take the fresh reduce var; a mixed-radix position recombines ``W·coord + n``.
     index: list[Expr] = []
-    for p, slot, w in tap.row_slots:
+    for _p, slot, w in tap.row_slots:
         if slot is None:
             index.append(Var(n_name))
         elif w is None:

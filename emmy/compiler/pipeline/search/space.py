@@ -226,8 +226,9 @@ PLACE = Knob(
 # The built-in ``auto`` defaults per element — today's emission behavior (fuse everywhere: flash,
 # online softmax, and producer-cone inlining are all on when recognizable; a row statistic stays
 # LOCAL to its kernel). Flipping a default is a behavior change gated on the validation suite, not
-# a spelling change. ``stat``'s alternative is ``sink`` (not ``cut``): the statistic reduce
-# migrates into the producer kernel's epilogue (``025_sink_row_reduce``) instead of splitting out.
+# a spelling change. ``stat``'s alternative is ``sink`` (not ``cut``): the statistic rides the
+# producer as a loop-level TAP (``010_tap_row_stat``); ``sink`` keeps it (``034_attach_taps``),
+# ``fuse`` cuts it back out (``015_cut_stat_tap``) — the fused/tapped state is the resting one.
 _PLACE_DEFAULTS = {"cone": "fuse", "fold": "fuse", "tuple": "fuse", "stat": "fuse", "fin": "cut", "cstat": "cut"}
 _PLACE_VALUES = {
     "cone": ("fuse", "cut"),

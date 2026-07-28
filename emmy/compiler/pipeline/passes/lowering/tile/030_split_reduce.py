@@ -242,9 +242,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, contraction: Cont
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
     # A relocated tap keeps its aux row-stat buffer as output slot 1 — now of the FINALIZE (the
     # complete-value store site); without this the sweep's edge to it would dangle.
-    frag.add_node(
-        op=fin_tile, inputs=[ws_name], outputs=[Tensor(out.name, out.shape, out.dtype), *root.outputs[1:]], node_id=out.name
-    )
+    frag.add_node(op=fin_tile, inputs=[ws_name], outputs=[Tensor(out.name, out.shape, out.dtype), *root.outputs[1:]], node_id=out.name)
     frag.outputs = [out.name]
     return frag
 
@@ -462,8 +460,6 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
         frag.add_node(op=InputOp(), inputs=[], output=match.graph.buffer(inp), node_id=inp)
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, out.dtype), node_id=ws_name)
     # The relocated tap's aux buffer stays output slot 1 of the finalize (see the contraction arm).
-    frag.add_node(
-        op=fin_tile, inputs=[ws_name], outputs=[Tensor(out.name, out.shape, out.dtype), *root.outputs[1:]], node_id=out.name
-    )
+    frag.add_node(op=fin_tile, inputs=[ws_name], outputs=[Tensor(out.name, out.shape, out.dtype), *root.outputs[1:]], node_id=out.name)
     frag.outputs = [out.name]
     return frag

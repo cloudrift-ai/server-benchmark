@@ -1,7 +1,7 @@
 """Realize ``PLACE@stat=fuse`` — cut a row-statistic TAP back out of its settled host.
 
 The inverted resting state of the retired ``025_sink_row_reduce``: loop fusion taps the norm's
-statistic into its producer unconditionally (``loop/fusion/015_tap_row_stat``), and THIS rule is
+statistic into its producer unconditionally (``loop/fission/010_tap_row_stat``), and THIS rule is
 option-0's realizer — always legal, so the fused (tapped) state is safe to be canonical. Like
 ``020_cut_edge`` it is a pure REALIZER: the decision lives in the schedule (the ``PLACE@stat``
 stamp the scheduler threads onto every tapped row), the graph carries the kernel shape.

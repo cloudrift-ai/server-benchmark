@@ -64,16 +64,16 @@ from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Write
-from emmy.compiler.ir.stmt.base import Stmt
-from emmy.compiler.ir.tile import Contraction, Map, Placement, Reduction, TileOp, TilePlan
-from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.fork import Fork
 
 # NOTE: no ``Knob`` objects (``TILE`` / ``REDUCE`` / ``STAGE``) may be imported here — ``Pass.load``
 # scans rule modules for ``Knob`` attrs and OFF-fills any it finds bare onto every variant of the
 # pass. Pin reads / knob-key spelling ride the ``_schedule`` helpers instead.
 from emmy.compiler.ir.loop.tap import TAP_BUF_SUFFIX, has_taps
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Write
+from emmy.compiler.ir.stmt.base import Stmt
+from emmy.compiler.ir.tile import Contraction, Map, Placement, Reduction, TileOp, TilePlan
+from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
+from emmy.compiler.pipeline.fork import Fork
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction, bind_prologue_contraction, map_cone
 from emmy.compiler.pipeline.passes.lowering.tile._flash import is_flash_score_producer, is_fold_offer_site, try_flash
 from emmy.compiler.pipeline.passes.lowering.tile._schedule import prologue_knob_bases, schedule, warp_tile_pinned
@@ -377,7 +377,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
             raise RuleSkipped("TileOp already scheduled / nothing to map")
         return schedule(tile, tile.name, tile.knobs, ctx)
     graph = match.graph
-    # (0.5) Defer a row-stat SWEEP (a ``__sq`` reader — ``015_tap_row_stat``'s fission artifact)
+    # (0.5) Defer a row-stat SWEEP (a ``__sq`` reader — ``010_tap_row_stat``'s fission artifact)
     # until its producer's ``PLACE@stat`` decision settles: under ``fuse`` (option-0) the cut-out
     # realizer consumes the sweep VERBATIM (the re-weld's bit-parity rests on it still being the
     # un-recognized ``LoopOp`` the fission emitted); under ``sink`` the attach realizer clears the
@@ -413,7 +413,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
         # so the realized merged kernel reports it (reproducibility check / recording).
         knob_base["PLACE@cstat"] = "fuse"
     loop: LoopOp = root.op
-    # (2.5) PEEL a tapped producer (``015_tap_row_stat``'s fission artifact): strip the tap stmts
+    # (2.5) PEEL a tapped producer (``010_tap_row_stat``'s fission artifact): strip the tap stmts
     # so the host classifies EXACTLY as its untapped self — same structural nodes, same fork keys,
     # same golden identity — and stamp the peeled facts onto every scheduled row (``TileOp.taps``,
     # propagated by the option builders). The ``PLACE@stat`` decision then rides THIS fork: option-0

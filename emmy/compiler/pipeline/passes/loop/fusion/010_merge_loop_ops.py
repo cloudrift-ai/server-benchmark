@@ -50,8 +50,8 @@ from emmy.compiler.pipeline.passes.loop.fusion._helpers import wrap_merge_fragme
 
 _BLOWUP_FACTOR = 8
 # ``020_cut_edge``'s workspace node ids — the cone / bridged-statistic / per-channel halves of a
-# realized ``PLACE@cone=cut`` — plus ``025_sink_row_reduce``'s ``__sq`` row-stat aux buffer (a
-# realized ``PLACE@stat=sink``). Minted only by those rules; see the cut-workspace brake in
+# realized ``PLACE@cone=cut`` — plus the row-stat TAP's ``__sq`` aux buffer
+# (``010_tap_row_stat``). Minted only by those rules; see the cut-workspace brake in
 # `rewrite`.
 _CUT_WS_RE = re.compile(r"__(cone|stat|ch\d+|sq)$")
 
@@ -305,7 +305,7 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
     if producer.id in graph.outputs:
         raise RuleSkipped(f"producer {producer.id!r} is a graph output — it must stay materialized")
 
-    # Tap-fission brake (``015_tap_row_stat``): its artifacts are a DECIDED placement, not
+    # Tap-fission brake (``010_tap_row_stat``): its artifacts are a DECIDED placement, not
     # fusion's to undo — and not fusion's to grow, either. A multi-output node (the tapped
     # producer A′) can neither be consumed wholesale (its aux output would be dropped) nor grown
     # (the merged single-output wrapper loses slot 1); a ``__sq``-reading sweep S must keep the

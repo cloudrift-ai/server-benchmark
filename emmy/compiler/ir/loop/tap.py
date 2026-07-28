@@ -1,7 +1,7 @@
 """The row-statistic TAP's loop-dialect stored form — recognition contract + strip helper.
 
 A **tap** is a downstream norm's row statistic fused into its producer at loop-fusion time
-(``loop/fusion/015_tap_row_stat``): an ordinary accumulate at the producer's write site while the
+(``loop/fission/010_tap_row_stat``): an ordinary accumulate at the producer's write site while the
 row index is still a live loop variable:
 
     Loop m:
@@ -39,7 +39,7 @@ from __future__ import annotations
 
 from emmy.compiler.ir.stmt import Assign, Body, Loop, Stmt, Write
 
-TAP_BUF_SUFFIX = "__sq"  # the aux row-stat buffer suffix (minted only by 015_tap_row_stat)
+TAP_BUF_SUFFIX = "__sq"  # the aux row-stat buffer suffix (minted only by loop/fission/010_tap_row_stat)
 
 
 def is_tap_write(s: Stmt) -> bool:

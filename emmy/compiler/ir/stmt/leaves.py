@@ -955,14 +955,15 @@ class Select(Stmt):
 
 @dataclass(frozen=True)
 class RowAccum(Stmt):
-    """Accumulate ``value`` into ``dst[flat / n]`` — the row-statistic sink epilogue
-    (``025_sink_row_reduce``).
+    """Accumulate ``value`` into ``dst[index]`` — the row-statistic TAP's cross-CTA (tier-3)
+    fold (``034_attach_taps``).
 
     A producer kernel that writes each cell of a tensor exactly once contributes that cell's
-    statistic term (e.g. ``v·v`` for a downstream Σx² norm stat) into a per-row f32 aux buffer:
-    ``flat`` is the just-stored cell's flat address in the produced tensor and ``n`` the row
-    width, so ``flat / n`` is the consuming reduce's row. ``dst`` is atomically accumulated
-    (zero-init'd per launch via ``CudaOp.zero_outputs``, exactly like an atomic ``Write``).
+    statistic term (e.g. ``v·v`` for a downstream Σx² norm stat) into a per-row f32 aux buffer.
+    ``index`` is the destination row's coordinates — live exprs at the write site (the tap's
+    row index is derived positionally from the host store's own index, so there is no flat
+    address arithmetic here). ``dst`` is atomically accumulated (zero-init'd per launch via
+    ``CudaOp.zero_outputs``, exactly like an atomic ``Write``).
 
     Rendering folds hierarchically. In a **full-block** scope (``RenderCtx.full_block`` — the
     ``Tile`` decode elided its tail guard, so every thread of the block is here) each warp
@@ -973,9 +974,8 @@ class RowAccum(Stmt):
     barrier-free warp fold (full active warp + row-uniform → one atomic per warp), and boundary
     warps to per-lane ``atomicAdd`` — always correct, just slower."""
 
-    dst: str  # the per-row f32 statistic buffer (flat rows)
-    flat: Expr  # the stored cell's flat address in the produced tensor
-    n: int  # row width: row = flat / n
+    dst: str  # the per-row f32 statistic buffer
+    index: tuple[Expr, ...]  # the destination row coords (live exprs at the write site)
     value: str  # SSA name of the contribution term (accumulated in f32)
 
     def deps(self) -> tuple[str, ...]:
@@ -985,13 +985,14 @@ class RowAccum(Stmt):
         return (self.dst,)
 
     def exprs(self) -> tuple[Expr, ...]:
-        return (self.flat,)
+        return self.index
 
     def has_side_effects(self) -> bool:
         return True
 
     def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}{self.dst}[({self.flat.pretty()}) / {self.n}] += {self.value}  (row-accum)"]
+        idx = ", ".join(e.pretty() for e in self.index)
+        return [f"{indent}{self.dst}[{idx}] += {self.value}  (row-accum)"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         pad = _pad(ctx.indent)
@@ -1003,8 +1004,7 @@ class RowAccum(Stmt):
         full = "0xffffffffu"
         head = [
             f"{pad}{{",
-            f"{p1}long {t}_f = (long)({self.flat.render(ctx)});",
-            f"{p1}int {t}_r = (int)({t}_f / {self.n});",
+            f"{p1}int {t}_r = (int)({render_index(self.dst, self.index, ctx)});",
             f"{p1}float {t}_v = (float)({val});",
         ]
         if ctx.full_block:  # full-block arm (barrier legal — see class docstring)

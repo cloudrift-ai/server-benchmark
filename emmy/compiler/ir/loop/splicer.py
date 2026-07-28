@@ -464,6 +464,11 @@ def _solve_sigma(
     return Sigma(mapping)
 
 
+# The writer-vs-reader index pairing, exported for rules that anchor a σ-solve at a producer's
+# ``Write`` instead of a splice edge (``loop/fusion/015_tap_row_stat``).
+solve_sigma = _solve_sigma
+
+
 def _collect_names(op: LoopOp) -> set[str]:
     """All SSA names plus all axis names used anywhere in ``op``."""
     names: set[str] = set()

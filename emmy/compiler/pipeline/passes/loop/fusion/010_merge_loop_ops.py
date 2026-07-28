@@ -305,6 +305,21 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
     if producer.id in graph.outputs:
         raise RuleSkipped(f"producer {producer.id!r} is a graph output — it must stay materialized")
 
+    # Tap-fission brake (``015_tap_row_stat``): its artifacts are a DECIDED placement, not
+    # fusion's to undo — and not fusion's to grow, either. A multi-output node (the tapped
+    # producer A′) can neither be consumed wholesale (its aux output would be dropped) nor grown
+    # (the merged single-output wrapper loses slot 1); a ``__sq``-reading sweep S must keep the
+    # exact form the ``PLACE@stat`` realizers re-weld — merging it (either direction) would
+    # diverge the graph from the never-fissioned shape the ``fuse`` cut-out must reproduce
+    # (fission drops B's reduce-heaviness, so merges B's own guards refused become newly legal;
+    # this brake keeps every OTHER pending merge seeing the graph it would have seen).
+    from emmy.compiler.ir.loop.tap import TAP_BUF_SUFFIX  # noqa: PLC0415 — leaf import
+
+    if len(producer.outputs) > 1 or len(consumer.outputs) > 1:
+        raise RuleSkipped("multi-output node (a tapped producer) — its aux output cannot ride a splice")
+    if any(i.endswith(TAP_BUF_SUFFIX) for i in (*producer.inputs, *consumer.inputs)):
+        raise RuleSkipped("a row-stat sweep (reads __sq) — the tap fission's artifacts are not fusion's to reshape")
+
     # Cut-workspace brake: ``020_cut_edge`` realizes a DECIDED ``PLACE@cone=cut`` by
     # materializing the cone into ``<out>__cone`` / ``<out>__stat`` / ``<out>__ch<i>``
     # workspace kernels, and the restarted scan re-enters this pass while those halves are

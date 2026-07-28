@@ -59,6 +59,10 @@ def _is_finalize(node: Node) -> bool:
         and op.op.source is None
         and len(node.inputs) == 1
         and node.inputs[0].endswith("__partial")
+        # A finalize carrying a retained row-stat tap can't inline: the per-read-site body copy
+        # would duplicate the tap's side-effecting accumulate (double-counted statistic), and the
+        # aux output slot has nowhere to ride. ``034_attach_taps`` materializes it in place instead.
+        and not op.taps
     )
 
 

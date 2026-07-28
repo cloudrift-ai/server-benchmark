@@ -493,8 +493,14 @@ class Graph:
         self.outputs = [o for o in self.outputs if o not in bufs]
         del self.nodes[node_id]
         for buf in bufs:
-            self._producers.pop(buf, None)
-            self._users.pop(buf, None)
+            # Ownership-aware: a splice may have RE-registered this buffer name to a fresh
+            # fragment node before removing the consumed original (a 1:1 multi-output re-emission
+            # keeps its aux buffer names) — popping unconditionally would orphan the new node's
+            # registration and its consumers' edges.
+            owner = self._producers.get(buf)
+            if owner is None or owner[0] == node_id:
+                self._producers.pop(buf, None)
+                self._users.pop(buf, None)
 
     def rename_node(self, old_id: str, new_id: str) -> None:
         """Change a node's id in place, updating every reference.
@@ -598,6 +604,16 @@ class Graph:
 
         consumed = list(consumed)
         consumed_prov = {nid: provenance.get(self.nodes[nid]) for nid in consumed if nid in self.nodes}
+        # Release the consumed nodes' NON-PRIMARY buffer registrations up front: fragment adds
+        # happen before consumed-node removal, and a fragment may legitimately re-emit a consumed
+        # node under the same id with the same aux outputs (a 1:1 multi-output rewrite — the tap
+        # attach / relocation). The buffers are re-registered by the add, or gone with the removal;
+        # ``_users`` entries stay put so existing consumers keep their edges either way.
+        for nid in consumed:
+            n = self.nodes.get(nid)
+            if n is not None:
+                for t in n.outputs[1:]:
+                    self._producers.pop(t.name, None)
         id_map: dict[str, str] = {}
         buf_map: dict[str, str] = {}  # fragment buffer name → post-add buffer name
         for frag_id in fragment.topological_order():

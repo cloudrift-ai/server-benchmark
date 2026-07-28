@@ -73,6 +73,11 @@ def rewrite(match: Match, root: Node) -> Graph | None:
     decision = stamped if stamped in ("fuse", "cut") else place_decision("cone")
     if decision != "cut":
         raise RuleSkipped("PLACE@cone is fuse — the cone stays register-resident")
+    if tile.taps:
+        # ``015_cut_stat_tap`` (earlier in scan order) strips taps off any cone-cut host — a tap
+        # cannot ride this restructure (both halves re-enter ``010`` un-mapped). Reaching here
+        # tapped means that rule hasn't fired yet this scan; wait for it.
+        raise RuleSkipped("tapped host — the stat tap cuts out first (015_cut_stat_tap)")
     if tile.op is None:
         raise RuleSkipped("kernel-less TileOp — nothing to cut")
     bound = bind_prologue_contraction(tile.op, tile.place.free)

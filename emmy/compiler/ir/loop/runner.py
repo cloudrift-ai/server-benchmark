@@ -58,6 +58,9 @@ PRELUDE = """\
 #include <cmath>
 #include <algorithm>
 static inline float rsqrtf_(float x) { return 1.0f / sqrtf(x); }
+// Host shim for the atomic-accumulate Write (a tapped LoopOp's row-stat fold): the reference
+// runner is single-threaded, so a plain += is the exact semantics.
+static inline void atomicAdd(float* addr, float v) { *addr += v; }
 """
 
 

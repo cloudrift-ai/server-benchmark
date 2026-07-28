@@ -130,7 +130,7 @@ def _fin_knobs(knobs: dict) -> dict:
     return {k: v for k, v in knobs.items() if k == "PLACE@fin"}
 
 
-def _mapped(op, grid, *, name: str = "", tier=None, stage=None, knobs: dict | None = None) -> TileOp:
+def _mapped(op, grid, *, name: str = "", tier=None, stage=None, knobs: dict | None = None, taps: tuple = ()) -> TileOp:
     """A **mapped** ``TileOp`` wrapping ``op`` over ``grid`` (so ``_schedule`` skips it). ``tier``
     preserves a contraction's scalar output tier (:class:`TilePlan`); ``stage`` threads the
     scheduler-resolved operand :class:`Stage` onto a split partial (resolved against the sliced
@@ -139,12 +139,16 @@ def _mapped(op, grid, *, name: str = "", tier=None, stage=None, knobs: dict | No
     the split node's decided knob row (schedule codecs + stamped ``S_*``) onto the **partial** —
     the engine merges knobs forward on 1:1 rebinds only, so without this the graph splice drops
     them and the deployed split kernels record no schedule identity (the A/B table / ``--json``
-    then can't say what greedy deployed, and a golden's ``ShapeKey`` matches no kernel)."""
+    then can't say what greedy deployed, and a golden's ``ShapeKey`` matches no kernel). ``taps``
+    RELOCATES a retained row-stat tap: no thread of a partial holds the complete value (atomic
+    partials), so the caller threads the host's taps onto the FINALIZE alone — the split-K sites
+    the old sink realizer refused permanently gain the sink constructively — and onto the atomic
+    single-kernel arm as-is (``034_attach_taps`` degrades that one to the cut-out)."""
     place = Placement(free=tuple(grid), grid=tuple(grid))
     kw: dict = {}
     if axis_role(op) is AxisRole.CONTRACTION and tier is not None:
         kw["tier"] = tier
-    return TileOp(op=op, name=name, place=place, stage=stage, knobs=dict(knobs or {}), **kw)
+    return TileOp(op=op, name=name, place=place, stage=stage, knobs=dict(knobs or {}), taps=taps, **kw)
 
 
 def _split_contraction(match: Match, root: Node, tile: TileOp, contraction: Contraction, carrier, plan: ReducePlan, split: Axis):
@@ -188,7 +192,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, contraction: Cont
         else:
             atomic_epi = (Write(output=out.name, index=cell, value=acc, atomic=True),)
         part = replace(contraction, lead_axes=lead, epilogue=Body(atomic_epi))
-        return _mapped(part, (split, *grid), name=tile.name, stage=tile.stage, knobs=tile.knobs)
+        return _mapped(part, (split, *grid), name=tile.name, stage=tile.stage, knobs=tile.knobs, taps=tile.taps)
 
     # --- deferred kernel finalize: partial writes each raw state to ``ws[(comp,) ksplit, *cell]``.
     # The workspace shape MUST match the rank of the index the writes/loads use — or
@@ -230,13 +234,17 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, contraction: Cont
         out_val = next((s.defines()[-1] for s in reversed(fin_proj) if s.defines()), acc)
         fin_proj.append(Write(output=out.name, index=cell, value=out_val))
     fin_op = Map(body=Body((*seeds, fin_loop, *fin_proj)))
-    fin_tile = _mapped(fin_op, grid, name=tile.name, knobs=_fin_knobs(tile.knobs))
+    fin_tile = _mapped(fin_op, grid, name=tile.name, knobs=_fin_knobs(tile.knobs), taps=tile.taps)
 
     frag = Graph()
     for inp in root.inputs:
         frag.add_node(op=InputOp(), inputs=[], output=match.graph.buffer(inp), node_id=inp)
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
-    frag.add_node(op=fin_tile, inputs=[ws_name], output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
+    # A relocated tap keeps its aux row-stat buffer as output slot 1 — now of the FINALIZE (the
+    # complete-value store site); without this the sweep's edge to it would dangle.
+    frag.add_node(
+        op=fin_tile, inputs=[ws_name], outputs=[Tensor(out.name, out.shape, out.dtype), *root.outputs[1:]], node_id=out.name
+    )
     frag.outputs = [out.name]
     return frag
 
@@ -411,7 +419,7 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
             # the atomic ``Write`` of the carrier state directly.
             atomic_proj = (Write(output=out.name, index=cell, values=states, atomic=True),)
         atomic_op = Map(body=Body((*before, sliced_loop, *atomic_proj)))
-        return _mapped(_residual(atomic_op, plan), (split, *grid), name=tile.name, tier=tile_plan, knobs=tile.knobs)
+        return _mapped(_residual(atomic_op, plan), (split, *grid), name=tile.name, tier=tile_plan, knobs=tile.knobs, taps=tile.taps)
 
     # The ``__partial`` workspace packs every carrier-state component: ``ws[comp, cta, *free]``
     # (the ``comp`` leading axis dropped for a single-component additive carrier, so the
@@ -446,13 +454,16 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
         out_val = next((s.defines()[-1] for s in reversed(fin_proj) if s.defines()), states[0])
         fin_proj.append(Write(output=out.name, index=cell, value=out_val))
     fin_op = Map(body=Body((*seeds, fin_loop, *fin_proj)))
-    fin_tile = _mapped(fin_op, grid, name=tile.name, knobs=_fin_knobs(tile.knobs))
+    fin_tile = _mapped(fin_op, grid, name=tile.name, knobs=_fin_knobs(tile.knobs), taps=tile.taps)
 
     # --- splice the two-kernel fragment in place of the single split TileOp ----------------
     frag = Graph()
     for inp in root.inputs:
         frag.add_node(op=InputOp(), inputs=[], output=match.graph.buffer(inp), node_id=inp)
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, out.dtype), node_id=ws_name)
-    frag.add_node(op=fin_tile, inputs=[ws_name], output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
+    # The relocated tap's aux buffer stays output slot 1 of the finalize (see the contraction arm).
+    frag.add_node(
+        op=fin_tile, inputs=[ws_name], outputs=[Tensor(out.name, out.shape, out.dtype), *root.outputs[1:]], node_id=out.name
+    )
     frag.outputs = [out.name]
     return frag

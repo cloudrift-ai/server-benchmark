@@ -49,7 +49,17 @@ def structure_features(body: Body, graph: Graph | None = None) -> dict[str, floa
 
     ``graph`` supplies operand dtypes for the ``S_dtype_*`` multiset; omit it
     (e.g. ad-hoc callers without a surrounding graph) to skip dtype features.
-    Values are floats so the dict drops straight into the numeric knob row."""
+    Values are floats so the dict drops straight into the numeric knob row.
+
+    Row-statistic TAPS (``ir/loop/tap.py`` — the fused-in norm stat a downstream realizer
+    decides on) are stripped before featurizing: a tapped kernel's structural identity — its
+    fork key, golden identity, prior featurization — is its UNTAPPED self's, by contract."""
+    from emmy.compiler.ir.loop.tap import has_taps, strip_taps  # noqa: PLC0415 — leaf import
+
+    if has_taps(body):
+        from emmy.compiler.ir.stmt.body import Body  # noqa: PLC0415
+
+        body = Body(strip_taps(body))
     return {**_skeleton(body, graph), **_extents(body)}
 
 

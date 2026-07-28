@@ -73,11 +73,12 @@ from emmy.compiler.pipeline.fork import Fork
 # NOTE: no ``Knob`` objects (``TILE`` / ``REDUCE`` / ``STAGE``) may be imported here — ``Pass.load``
 # scans rule modules for ``Knob`` attrs and OFF-fills any it finds bare onto every variant of the
 # pass. Pin reads / knob-key spelling ride the ``_schedule`` helpers instead.
+from emmy.compiler.ir.loop.tap import TAP_BUF_SUFFIX, has_taps
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction, bind_prologue_contraction, map_cone
 from emmy.compiler.pipeline.passes.lowering.tile._flash import is_flash_score_producer, is_fold_offer_site, try_flash
 from emmy.compiler.pipeline.passes.lowering.tile._schedule import prologue_knob_bases, schedule, warp_tile_pinned
-from emmy.compiler.pipeline.passes.lowering.tile._sink import bind_sinkable_stat
 from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse
+from emmy.compiler.pipeline.passes.lowering.tile._tap import peel_taps
 from emmy.compiler.pipeline.pipeline import LoweringError
 from emmy.compiler.pipeline.search.space import PLACE, place_decision
 
@@ -337,6 +338,33 @@ def _as_list(scheduled) -> list:
     return scheduled if isinstance(scheduled, list) else [scheduled]
 
 
+def _stat_offer(opts: list, taps: tuple) -> list:
+    """The ``PLACE@stat`` sink mirrors for a TAPPED kernel's list-shaped options (pointwise /
+    reduction rows — the contraction fork tree grows its mirrors at row level inside
+    ``schedule``): every fuse row gains a ``sink`` sibling, evidence-only like the cone cut
+    (``greedy_decide`` withholds it from the model fallback, so an unseeded shape never keeps a
+    tap cold). The mirrors span EVERY row so a golden spelling ``{PLACE@stat: sink, REDUCE: …}``
+    constrains the tapped host's own schedule; where the attach realizer must refuse (an atomic
+    partial), ``034`` degrades to the cut-out and the deployment is exactly the fuse kernels.
+    A live pin threads authoritatively instead — no mirrors. Fork elements pass through."""
+    if not taps:
+        return opts
+    pin = PLACE.narrow_at("stat")
+    pinned = pin in ("fuse", "sink")
+    base = pin if pinned else "fuse"
+    out = []
+    for o in opts:
+        if isinstance(o, TileOp):
+            if "PLACE@stat" not in o.knobs:
+                o = replace(o, knobs={**o.knobs, "PLACE@stat": base})
+            out.append(o)
+            if not pinned and o.knobs.get("PLACE@stat") == "fuse" and o.knobs.get("PLACE@cone") != "cut":
+                out.append(replace(o, knobs={**o.knobs, "PLACE@stat": "sink"}))
+        else:
+            out.append(o)
+    return out
+
+
 def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp | Graph | None:
     # (0) Schedule an UNMAPPED ``TileOp`` — a kernel that recognition emitted as a *graph
     # rewrite* (flash's fused fragment, ``try_flash``) rather than scheduling inline, because a
@@ -348,12 +376,22 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
         if tile.op is None or tile.place.is_mapped:
             raise RuleSkipped("TileOp already scheduled / nothing to map")
         return schedule(tile, tile.name, tile.knobs, ctx)
+    graph = match.graph
+    # (0.5) Defer a row-stat SWEEP (a ``__sq`` reader — ``015_tap_row_stat``'s fission artifact)
+    # until its producer's ``PLACE@stat`` decision settles: under ``fuse`` (option-0) the cut-out
+    # realizer consumes the sweep VERBATIM (the re-weld's bit-parity rests on it still being the
+    # un-recognized ``LoopOp`` the fission emitted); under ``sink`` the attach realizer clears the
+    # producer's taps first and the sweep then recognizes as the wide 2-D pointwise grid.
+    for inp in root.inputs:
+        if inp.endswith(TAP_BUF_SUFFIX):
+            p = graph.producer(inp)
+            if p is not None and (isinstance(p.op, LoopOp) or (isinstance(p.op, TileOp) and p.op.taps)):
+                raise RuleSkipped("row-stat sweep — deferred until the tapped producer's PLACE@stat settles")
     # (1) Flash attention — a graph rewrite that fuses a softmax-then-P@V kernel with its
     # scaled-QK producer. Tried first on every node; flash precedes online-softmax precedes
     # normalize, each consuming the Accums the next would match. The downstream-fold
     # absorption is the ``PLACE@fold`` placement: ``cut`` keeps the score producer and the
     # softmax-then-P@V as separate kernels (the multi-kernel attention escape).
-    graph = match.graph
     if place_decision("fold") == "fuse":
         flash = try_flash(graph, root)
         if flash is not None:
@@ -375,9 +413,20 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
         # so the realized merged kernel reports it (reproducibility check / recording).
         knob_base["PLACE@cstat"] = "fuse"
     loop: LoopOp = root.op
+    # (2.5) PEEL a tapped producer (``015_tap_row_stat``'s fission artifact): strip the tap stmts
+    # so the host classifies EXACTLY as its untapped self — same structural nodes, same fork keys,
+    # same golden identity — and stamp the peeled facts onto every scheduled row (``TileOp.taps``,
+    # propagated by the option builders). The ``PLACE@stat`` decision then rides THIS fork: option-0
+    # ``fuse`` cuts the tap back out (``015_cut_stat_tap``); the evidence-only ``sink`` mirrors keep
+    # it (``030`` relocates across a split, ``034`` attaches the tier-derived fold).
+    taps = ()
+    body = loop.body
+    if has_taps(body):
+        stripped, taps = peel_taps(body, root.output)
+        body = Body(stripped)
     # (3) Online softmax — the sibling-fold tupling (``PLACE@tuple``): fuse the adjacent
     # (rowmax, Σexp) reduce pair into one streaming pass; ``cut`` keeps the two-pass stats.
-    fused, _ = _fuse(loop.body) if place_decision("tuple") == "fuse" else (loop.body, False)
+    fused, _ = _fuse(body) if place_decision("tuple") == "fuse" else (body, False)
     node, free = _lift(list(fused), root.output.name)
     # A symbolic FREE (parallel) axis rides a **symbolic grid**: the ``Tile`` decode sizes the
     # launch from the runtime extent (``_gid < ∏extents``, the ``Dim`` name threaded as an
@@ -392,7 +441,14 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     # ``inputs`` is seeded from the matched ``LoopOp`` (the matcher populated its real Tensors) so
     # the scheduler can read operand shapes (the shared-row stage detection); the matcher refreshes
     # it from the graph again when a later pass matches the scheduled op.
-    map_tile = TileOp(op=node, place=Placement(free=free), inputs=dict(loop.inputs))
+    map_tile = TileOp(op=node, place=Placement(free=free), inputs=dict(loop.inputs), taps=taps)
+    if taps:
+        # The tap placement's knob base: a live pin is authoritative (threads onto every row);
+        # unpinned, the base is ``fuse`` and the scheduler / ``_stat_offer`` add the evidence-only
+        # ``sink`` mirrors. The key is present iff the kernel is tapped, which is what scopes the
+        # PLACE clause of the golden join to genuine offer sites.
+        stat_pin = PLACE.narrow_at("stat")
+        knob_base["PLACE@stat"] = stat_pin if stat_pin in ("fuse", "sink") else "fuse"
     pro = bind_prologue_contraction(node, free) if place_decision("cone") == "fuse" else None
     if pro is None and place_decision("cone") == "cut" and bind_prologue_contraction(node, free) is not None:
         # An explicit ``PLACE@cone=cut`` pin on the MONOID composition (the fused norm→linear /
@@ -413,31 +469,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
         # plain-matmul goldens (``mlp_down.*``) live. Offering it as a stamped row keeps the choice
         # on the ordinary evidence pick; ``020_cut_edge`` realizes it.
         if not _cuttable_cone(node):
-            # The ROW-STAT SINK offer (``PLACE@stat`` — the fused norm form, ``Map(body=[π…,
-            # sweep], source=Reduction(PLANAR))`` re-reading an in-graph producer's output):
-            # option-0 stays the local (coop) statistic; ONE representative ``sink`` sibling is
-            # appended (its own schedule is discarded — ``025_sink_row_reduce`` re-emits the
-            # producer epilogue + a fresh un-mapped sweep the restarted scan re-recognizes,
-            # the same division of labour as the cone cut). Evidence-only like the cut row:
-            # ``greedy_decide`` withholds it from the model fallback, so an unseeded shape
-            # never sinks cold. Only offered unpinned — a ``PLACE@stat`` pin is authoritative
-            # and threads onto every row instead.
-            sink = bind_sinkable_stat(node, free, loop.inputs)
-            offer_sink = sink is not None and sink.src in graph.nodes and sink.src not in graph.inputs
-            if offer_sink:
-                pin = PLACE.narrow_at("stat")
-                base_val = pin if pin in ("fuse", "sink") else "fuse"
-                rows = _as_list(schedule(map_tile, loop.name, {**knob_base, "PLACE@stat": base_val}, ctx))
-                if rows and pin not in ("fuse", "sink"):
-                    # The sink siblings mirror EVERY fuse row (not one representative): when the
-                    # realizer must refuse (an atomic producer), the picked sink row deploys its
-                    # own underlying schedule — so a golden spelling {PLACE@stat: sink, REDUCE:
-                    # b512} degrades to exactly the b512 coop kernel the plain anchor would have
-                    # picked, instead of stranding the norm on option-0's slower fallback.
-                    rows = [*rows, *(replace(r, knobs={**r.knobs, "PLACE@stat": "sink"}) for r in rows)]
-                if rows:
-                    return rows if len(rows) > 1 else rows[0]
-            plain = _as_list(schedule(map_tile, loop.name, knob_base, ctx))
+            plain = _stat_offer(_as_list(schedule(map_tile, loop.name, knob_base, ctx)), taps)
             if not plain:
                 # Same fp32 / no-atoms / bad-geometry hole as the cuttable branch below: a
                 # stat-free computed-A ``Contraction`` (a fused operand cone over a non-cuttable
@@ -446,7 +478,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
                 # so without this demote the node leaks as a ``LoopOp`` all the way to
                 # ``plan_from_graph`` — the merged-sibling gate/up edge on the fp32 symbolic
                 # Qwen path was the first shape to hit it.
-                fallback = TileOp(op=_demote_planar(node), place=Placement(free=free), inputs=dict(loop.inputs))
+                fallback = TileOp(op=_demote_planar(node), place=Placement(free=free), inputs=dict(loop.inputs), taps=taps)
                 return schedule(fallback, loop.name, knob_base, ctx)
             return plain if len(plain) > 1 else plain[0]
         pin = PLACE.narrow_at("cone")
@@ -471,8 +503,9 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
             # composition below there is no Map-form fork sibling to stand alone — demote the
             # node back to its PLANAR reduce so the kernel still compiles (the pre-nodification
             # fallback: a working serial/coop fold, no cut offer).
-            fallback = TileOp(op=_demote_planar(node), place=Placement(free=free), inputs=dict(loop.inputs))
+            fallback = TileOp(op=_demote_planar(node), place=Placement(free=free), inputs=dict(loop.inputs), taps=taps)
             return schedule(fallback, loop.name, knob_base, ctx)
+        rows = _stat_offer(rows, taps)
         return rows if len(rows) > 1 else rows[0]
     # (4) The MONOID-producer composition — the fused norm→linear edge (``rmsnorm(x)·nw @ w``, and
     # its N-channel form, the gate/up MLP edge): the tail fold(s) ALSO nodify to
@@ -490,11 +523,11 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     c_map, n_ax = pro
     src = c_map.source
     con_base, map_base = prologue_knob_bases(src.k_axis.name, src.a_operand[0].axis.name)
-    con_tile = TileOp(op=c_map, place=Placement(free=(*free, n_ax)), inputs=dict(loop.inputs))
+    con_tile = TileOp(op=c_map, place=Placement(free=(*free, n_ax)), inputs=dict(loop.inputs), taps=taps)
     con = _as_list(schedule(con_tile, loop.name, {**knob_base, **con_base}, ctx))
     if con and warp_tile_pinned():
         return con if len(con) > 1 else con[0]
-    maps = _as_list(schedule(map_tile, loop.name, {**knob_base, **map_base}, ctx))
+    maps = _stat_offer(_as_list(schedule(map_tile, loop.name, {**knob_base, **map_base}, ctx)), taps)
     # The CUT sibling — the third form of this edge, beside the fused warp mma (``con``) and the
     # fused coop reduce (``maps``): materialize the cone to a workspace and let the projection run
     # as a plain gmem-A matmul. It is offered as a stamped ``PLACE@cone: cut`` ROW, not a Graph:

@@ -228,8 +228,7 @@ def _(s: RowAccum, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     # the ``RegStore.atomic`` silent-degrade bug class.
     return RowAccum(
         dst=s.dst,
-        flat=_rename_ssa_vars_in_expr(sigma.apply(s.flat), rename),
-        n=s.n,
+        index=tuple(_rename_ssa_vars_in_expr(sigma.apply(e), rename) for e in s.index),
         value=rename(s.value),
     )
 
@@ -309,7 +308,7 @@ def _(s: Select, ctx: SimplifyCtx) -> Stmt:
 
 @simplify.register
 def _(s: RowAccum, ctx: SimplifyCtx) -> Stmt:
-    return RowAccum(dst=s.dst, flat=s.flat.simplify(ctx), n=s.n, value=s.value)
+    return RowAccum(dst=s.dst, index=tuple(e.simplify(ctx) for e in s.index), value=s.value)
 
 
 @simplify.register

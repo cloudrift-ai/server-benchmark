@@ -403,7 +403,7 @@ def _option(tile, place, spec: str, name: str, knobs: dict) -> TileOp:
     op = _with_reduce(tile.op, plan)
     raxis = reduce_loop(tile.op).axis.name
     stage = _row_stage(tile, place) if plan.coop > 1 else None
-    return TileOp(op=op, name=name, place=place, stage=stage, knobs={**knobs, _at(REDUCE, raxis): spec})
+    return TileOp(op=op, name=name, place=place, stage=stage, knobs={**knobs, _at(REDUCE, raxis): spec}, taps=tile.taps)
 
 
 # The mma atoms eligible per operand dtype — the warp tier's dtype gate (16-bit operands only).
@@ -1321,7 +1321,7 @@ def _splitk_option(
     kaxis = reduce_loop(tile.op).axis.name  # the ORIGINAL k-axis name — single-eligible-axis keying
     stamped = {**knobs, _at(TILE, kaxis): tile_spec, _at(REDUCE, kaxis): split_spec}
     stamped[_at(STAGE, kaxis)] = stage.spell() if stage is not None else ""
-    return TileOp(op=op, name=name, place=place, tier=inner.tile, stage=stage, knobs=stamped)
+    return TileOp(op=op, name=name, place=place, tier=inner.tile, stage=stage, knobs=stamped, taps=tile.taps)
 
 
 def _warp_option(
@@ -1365,7 +1365,7 @@ def _warp_option(
     stamped[_at(STAGE, kaxis)] = stage.spell() if stage is not None else ""
     if wspec_spec:
         stamped[WSPEC.name] = wspec_spec
-    return TileOp(op=emitted, name=name, place=place, tier=wt, stage=stage, workers=workers, knobs=stamped)
+    return TileOp(op=emitted, name=name, place=place, tier=wt, stage=stage, workers=workers, knobs=stamped, taps=tile.taps)
 
 
 def _tile_option(
@@ -1419,7 +1419,7 @@ def _tile_option(
     kaxis = reduce_loop(tile.op).axis.name
     stamped = {**knobs, _at(TILE, kaxis): spec, _at(REDUCE, kaxis): reduce_spec}
     stamped[_at(STAGE, kaxis)] = stage.spell() if stage is not None else ""
-    return TileOp(op=op, name=name, place=place, tier=plan, stage=stage, knobs=stamped)
+    return TileOp(op=op, name=name, place=place, tier=plan, stage=stage, knobs=stamped, taps=tile.taps)
 
 
 def _map_reg_width(spec: str) -> int:
@@ -1467,7 +1467,7 @@ def _map_strip_option(tile: TileOp, place: Placement, inner: Axis, r: int, spec:
     new_inner = replace(inner, extent=Dim(inner.extent.as_static() // r))
     new_free = (*place.free[:-1], new_inner)
     new_place = Placement(free=new_free, grid=new_free)
-    return TileOp(op=Map(body=body, source=None), name=name, place=new_place, knobs={_at(TILE, inner.name): spec})
+    return TileOp(op=Map(body=body, source=None), name=name, place=new_place, knobs={_at(TILE, inner.name): spec}, taps=tile.taps)
 
 
 def _map_strip_fork(tile: TileOp, place: Placement, name: str) -> list[TileOp] | TileOp:
@@ -1480,9 +1480,9 @@ def _map_strip_fork(tile: TileOp, place: Placement, name: str) -> list[TileOp] |
     directly (no fork)."""
     op = tile.op
     if not (isinstance(op, Map) and op.source is None) or not place.free:
-        return TileOp(op=op, name=name, place=place)
+        return TileOp(op=op, name=name, place=place, taps=tile.taps)
     inner = place.free[-1]
-    base = TileOp(op=op, name=name, place=place, knobs={_at(TILE, inner.name): ""})
+    base = TileOp(op=op, name=name, place=place, knobs={_at(TILE, inner.name): ""}, taps=tile.taps)
     # Only a FLAT elementwise body (per-cell Load/Assign/Write, no nested Loop / Accum / carried
     # state) is safely unrollable: every output cell is independent, so replicating adjacent cells
     # and regrouping preserves semantics. A sweep / stateful-fallback Map (which also reaches the
@@ -1570,6 +1570,17 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
                 return _is_splitk_spec(spec) and ReducePlan.parse(spec).finalize == "kernel"
 
             rows = [*rows, *({**r, "PLACE@fin": "fuse"} for r in rows if _deferred_split(r))]
+        # The row-statistic tap placement (``PLACE@stat``, on a TAPPED kernel only — ``knobs``
+        # carries the key iff ``010_recognize`` peeled taps off this host). The base value threads
+        # onto every row (a pin is authoritative); unpinned, every non-cut row gains a ``sink``
+        # mirror sibling — the same evidence-only offer idiom as ``PLACE@fin``: withheld from the
+        # model fallback, so an unseeded shape always cuts the tap back out (``015_cut_stat_tap``)
+        # and deploys the untapped kernel. Cut rows are excluded — a ``PLACE@cone=cut`` host is
+        # restructured by ``020_cut_edge`` and the tap cut-out runs first (its own degrade rule).
+        if "PLACE@stat" in knobs:
+            rows = [{**r, "PLACE@stat": knobs["PLACE@stat"]} for r in rows]
+            if knobs["PLACE@stat"] == "fuse" and PLACE.narrow_at("stat") not in ("fuse", "sink"):
+                rows = [*rows, *({**r, "PLACE@stat": "sink"} for r in rows if r.get("PLACE@cone") != "cut")]
         if not rows:
             # A computed-A (fused-cone) contraction with no legal warp row (fp32, no atoms, bad
             # geometry, over-budget slabs) contributes nothing — the recognizer's ``Map``-form
@@ -1591,6 +1602,10 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
                 # The finalize placement must reach the op: ``030_split_reduce`` threads it onto
                 # the finalize tile (``_fin_knobs``) where ``032_fuse_finalize`` reads the stamp.
                 op_knobs["PLACE@fin"] = row["PLACE@fin"]
+            if "PLACE@stat" in row:
+                # The tap placement must reach the op too: ``015_cut_stat_tap`` / ``034_attach_taps``
+                # read the stamp off the picked TileOp.
+                op_knobs["PLACE@stat"] = row["PLACE@stat"]
             # The rasterization codec rides op-level knobs (kernel-scoped launch-order metadata,
             # not a per-node schedule structure) — the kernel materializer's ``grid_tile`` seal
             # reads it back off the TileOp and stamps the grouped decode on the ``Tile``.
@@ -1619,6 +1634,10 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
             _level(WSPEC.name),
             _level(RASTER.name),
             _level("PLACE@fin"),
+            # The tap placement's own level — a ``sink`` mirror row is schedule-identical to its
+            # base on every codec level, so without this the two collapse into one leaf and the
+            # mirror (and any golden spelling it) is unreachable (the ``PLACE@fin`` rule).
+            _level("PLACE@stat"),
         ]
         return build_fork_tree(params=rows, levels=levels, materialize=_materialize)
     # A TWISTED streaming reduce whose per-step partial is a contraction pair (the flash tree,
@@ -1823,7 +1842,7 @@ def _twisted_chain_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp
         _at(REDUCE, red.axis.name): "",
         _at(STAGE, red.axis.name): "",
     }
-    return TileOp(op=op2, name=name, place=Placement(free=tile.place.free, grid=tuple(grid[:-1])), knobs=stamped)
+    return TileOp(op=op2, name=name, place=Placement(free=tile.place.free, grid=tuple(grid[:-1])), knobs=stamped, taps=tile.taps)
 
 
 def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp | None:
@@ -1907,7 +1926,7 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     # of the cone element (the cut side — materialize the producer as its own kernel — has no
     # emitter in the rebuilt tree, so only ``fuse`` is ever stamped today).
     stamped = {**knobs, _at(TILE, k_ax.name): spec, "PLACE@cone": "fuse"}
-    return TileOp(op=node, name=name, place=place, tier=wt, stage=stage, knobs=stamped)
+    return TileOp(op=node, name=name, place=place, tier=wt, stage=stage, knobs=stamped, taps=tile.taps)
 
 
 def _resolve_twisted_stage(
@@ -2256,5 +2275,5 @@ def _twisted_warp_options(
                     }
                     if wspec_spec:
                         stamped[WSPEC.name] = wspec_spec
-                    out.append(TileOp(op=op2, name=name, place=place, stage=stage, workers=workers, knobs=stamped))
+                    out.append(TileOp(op=op2, name=name, place=place, stage=stage, workers=workers, knobs=stamped, taps=tile.taps))
     return out

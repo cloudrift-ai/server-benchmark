@@ -549,6 +549,37 @@ class Map:
         return self.body[-1].defines()[-1]
 
 
+@dataclass(frozen=True)
+class Tap:
+    """A peeled row-statistic tap — the tile-side DECORATION of the loop dialect's stored tap form
+    (``ir/loop/tap.py``). ``lowering/tile``'s recognition peel strips the tap stmts off a tapped
+    ``LoopOp`` so the host classifies exactly as its untapped self, and stamps the peeled facts
+    here (``TileOp.taps``); the two realizers consume them:
+
+    - ``015_cut_stat_tap`` (``PLACE@stat=fuse``, option-0) reconstructs the local-stat norm from
+      ``chain``/``width``/``row_slots`` + the deferred sweep node and drops the decoration;
+    - ``034_attach_taps`` (``PLACE@stat=sink``) re-attaches the term chain + row fold after the
+      settled host's stores, deriving the fold tier from what the schedule did to the tapped axis.
+
+    All exprs/names are in the HOST's (producer's) frame. ``row_slots`` maps each position of the
+    tapped tensor's store index to its destination coordinate: ``(pos, dst_slot, W)`` — ``dst_slot
+    is None`` for a reduce-only position (dropped from the destination index), ``W`` non-``None``
+    for a mixed-radix position whose row coordinate is ``index[pos] // W`` (the per-head norm over
+    a flattened ``(heads·W)`` axis). The attach site re-derives each store's destination index from
+    the store's OWN index exprs through this map, so register-tiled / σ-rewritten stores need no
+    address algebra and symbolic row extents are expressible for free."""
+
+    dst: str  # the aux row-stat buffer (``T__sq``)
+    src: str  # the tapped output buffer (``T``)
+    anchor: str  # SSA name of the stored value the chain reads (the host ``Write``'s value)
+    chain: tuple[Stmt, ...]  # the per-cell term chain (``__tap``-minted ``Assign``\\ s, program order)
+    value: str  # SSA name the fold accumulates (the chain's tail, or ``anchor`` for a bare tap)
+    src_index: tuple[Expr, ...]  # the host's store index for ``src`` at fission time
+    row_slots: tuple[tuple[int, int | None, int | None], ...]  # per src-index position: (pos, dst_slot | None, W | None)
+    width: int  # the reduce (row) width N — the cell count each destination row folds
+    op: str = "add"  # the fold op (the atomic-accumulate stored form is add-only today)
+
+
 @dataclass
 class TileOp(Op):
     """One scheduled map/reduce kernel (see module docstring).
@@ -584,6 +615,11 @@ class TileOp(Op):
     tier: TilePlan | None = None
     stage: Stage | None = None
     workers: WarpSpec | None = None
+    # The peeled row-statistic taps (:class:`Tap`) — decoration stamped by the recognition peel
+    # and consumed by the ``PLACE@stat`` realizers (``015_cut_stat_tap`` / ``034_attach_taps``).
+    # Empty for the untapped majority; every schedule option builder propagates it verbatim
+    # (``taps=tile.taps``), and ``030_split_reduce`` relocates it partial → finalize.
+    taps: tuple[Tap, ...] = ()
 
     def pretty_body(self) -> str:
         """Render the ``op`` tree structurally (the dump view) — no lowering."""
@@ -594,4 +630,4 @@ class TileOp(Op):
         return "\n".join(pretty(self.op, "    "))
 
 
-__all__ = ["Contraction", "Map", "Reduction", "TileOp"]
+__all__ = ["Contraction", "Map", "Reduction", "Tap", "TileOp"]

@@ -73,9 +73,9 @@ def test_serving_ab_expands_to_18_lane_points(project_root):
 def test_mtp_smoke_test_expands_to_32_lane_points(project_root):
     """The article's MTP smoke-test table, self-contained: 5 plain stock + 5 plain emmy
     baseline cells plus 11 stock-MTP + 11 emmy-MTP cells (depths 2/3/5 single-stream,
-    2/3 under batching, 2 at c=64). Every emmy row's decode bucket covers the
-    verification width (concurrency x (depth+1)); the knobs pin what the article's
-    table ran (util 0.9, default bucket 16 where it fits — see the recipe header)."""
+    2/3 under batching, 2 at c=64), all under the main tables' equal-tuning protocol
+    (util 0.96; emmy per-workload knobs, MTP buckets covering the verification width
+    concurrency x (depth+1) — see the recipe header)."""
     tasks = enumerate_tasks([_exp(project_root, "serving_mtp_rtx5090")])
     assert len(tasks) == 32
 
@@ -83,7 +83,7 @@ def test_mtp_smoke_test_expands_to_32_lane_points(project_root):
         b = t.recipe.benchmark
         assert b.seed == 0 and b.temperature == 0 and b.ignore_eos is True
         assert t.recipe.engine.llm.context_length == 8448
-        assert t.recipe.engine.llm.gpu_memory_utilization == 0.9
+        assert t.recipe.engine.llm.gpu_memory_utilization == 0.96
 
     stock = [t for t in tasks if "vllm-openai" in t.recipe.engine.llm.vllm.image]
     emmy = [t for t in tasks if "vllm-emmy" in t.recipe.engine.llm.vllm.image]
@@ -97,18 +97,28 @@ def test_mtp_smoke_test_expands_to_32_lane_points(project_root):
     assert sum(1 for t in emmy if depth(t)) == 11 and sum(1 for t in emmy if not depth(t)) == 5
 
     for t in emmy:
-        bucket = int(re.search(r"EMMY_GEN_DECODE_BUCKET=(\d+)", t.recipe.engine.llm.vllm.extra_env).group(1))
+        env = t.recipe.engine.llm.vllm.extra_env
+        args = t.recipe.engine.llm.vllm.extra_args
+        bucket = int(re.search(r"EMMY_GEN_DECODE_BUCKET=(\d+)", env).group(1))
         conc = t.recipe.benchmark.max_concurrency
         d = depth(t)
         assert bucket >= conc * (d + 1)
         if d:
-            # As measured: default 16 where the verification width fits, 32 at c=8, and
-            # the documented untuned 192 on the c=64 depth-2 cell.
-            assert bucket in {16, 32, 192}
-            assert (bucket == 192) == (conc == 64)
+            # Smallest tuned width covering the verification step; the c=64 depth-2
+            # cell needs the documented untuned 192.
+            want = {1: 8, 4: 16, 8: 32, 64: 192}[conc]
         else:
-            # Plain baselines: default 16, tuned 64 at c=64 (rerun_c64 policy).
-            assert bucket == (64 if conc == 64 else 16)
+            # The serving_rtx5090 protocol: 32 at c=1, 8 on the mixed batched cells,
+            # 64 at c=64.
+            want = {1: 32, 4: 8, 8: 8, 64: 64}[conc]
+        assert bucket == want
+        # The 2048 chunk quantum rides only on the mixed 4k/4k batched cells.
+        mixed = t.recipe.benchmark.random_input_len == 4096 and conc in (4, 8)
+        assert ("EMMY_GEN_PREFILL_BUCKET=2048" in env) == mixed
+        # mnbt = chunk + bucket-sized rider headroom (4096 + bucket at c=1,
+        # 2048 + bucket on the mixed cells, bare 4096 at c=64).
+        mnbt = int(re.search(r"--max-num-batched-tokens (\d+)", args).group(1))
+        assert mnbt == (2048 + bucket if mixed else 4096 if conc == 64 else 4096 + bucket)
 
 
 def test_command_experiments_load(project_root):

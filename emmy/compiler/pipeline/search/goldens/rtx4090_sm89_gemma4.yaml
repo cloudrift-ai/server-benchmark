@@ -906,6 +906,19 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
     emmy_us: 2221.1
     cublas_us: 2915.3
+  # SERIAL std deploy-floor siblings (2026-07-27, vast.ai 4090 580.119.02): as on the 5090, the std
+  # g2k rows above realize only under pin — the un-pinned enumeration offers no split-K here, the
+  # floor fell through, and the prior deployed a 111 ms (canonical) / bench-budget-blowing (.lin)
+  # kernel (0.03x eager, isolated + clean-evidence reproduced). Pinned serial A/B winners recorded.
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.m4096
+    M: 4096
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 3324.9
+    cublas_us: 2915.3
   - kernel: matmul
     name: gemma4_12b.mlp_down.m4096.lin
     M: 4096
@@ -925,6 +938,16 @@ configs:
     trans_b: true
     knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
     emmy_us: 2154.5
+    cublas_us: 2922.5
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.m4096.lin
+    M: 4096
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    emmy_us: 3415.8
     cublas_us: 2922.5
   - kernel: matmul
     name: gemma4_12b.q_proj_global.m4096

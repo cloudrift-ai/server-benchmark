@@ -284,10 +284,11 @@ class CompilerDump:
         stack = [root_id]
         while stack:
             cur = stack.pop()
+            node = graph.producer(cur)
+            cur = node.id if node is not None else cur
             if cur in keep:
                 continue
             keep.add(cur)
-            node = graph.nodes.get(cur)
             if node is None:
                 continue
             if cur == root_id or isinstance(node.op, (ConstantOp, InputOp)):
@@ -412,9 +413,10 @@ def _scalar_constant_inputs(graph, node, constant_op_type) -> dict[str, float]:
     producer is a 0-D ``ConstantOp`` with a captured scalar value."""
     out: dict[str, float] = {}
     for inp in node.inputs:
-        if inp not in graph.nodes:
+        p = graph.producer(inp)
+        if p is None:
             continue
-        op = graph.nodes[inp].op
+        op = p.op
         if isinstance(op, constant_op_type) and op.value is not None:
             out[inp] = float(op.value)
     return out
@@ -516,7 +518,8 @@ def _graph_to_dot(graph: Graph) -> str:
     lines.append("")
     for nid in graph.topological_order():
         for src in graph.nodes[nid].inputs:
-            lines.append(f'  "{src}" -> "{nid}";')
+            p = graph.producer(src)
+            lines.append(f'  "{p.id if p is not None else src}" -> "{nid}";')
 
     lines.append("}")
     lines.append("")  # trailing newline

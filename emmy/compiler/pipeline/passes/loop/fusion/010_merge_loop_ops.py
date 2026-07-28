@@ -218,12 +218,12 @@ def _sum_contracts_exp_producer(graph: Graph, consumer: Node, producer: Node) ->
     for inp in consumer.inputs:
         if inp == producer.id:
             continue
-        n = graph.nodes.get(inp)
+        n = graph.producer(inp)
         if n is None or not isinstance(n.op, LoopOp):
             continue
         # The softmax may still be mid-assembly: the div piece feeding the P@V carries no exp of
         # its own until the exp piece merges in, so scan one producer hop deeper too.
-        if has_exp(n) or any(has_exp(graph.nodes[i]) for i in n.inputs if i in graph.nodes):
+        if has_exp(n) or any(has_exp(p) for i in n.inputs if (p := graph.producer(i)) is not None):
             return True
     return False
 

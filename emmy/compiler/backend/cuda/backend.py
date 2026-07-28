@@ -172,8 +172,9 @@ class CudaBackend(Backend):
         sym_env = compiled.symbolic_env(input_data)
         outputs: dict[str, np.ndarray] = {}
         for name, vals in result_outputs.items():
-            shape = tuple(int(d.expr.eval(sym_env)) for d in compiled.nodes[name].output.shape)
-            outputs[name] = np.asarray(vals, dtype=compiled.nodes[name].output.dtype.np).reshape(shape)
+            t = compiled.buffer(name)
+            shape = tuple(int(d.expr.eval(sym_env)) for d in t.shape)
+            outputs[name] = np.asarray(vals, dtype=t.dtype.np).reshape(shape)
         return RunResult(outputs=outputs, time_ms=time_ms), pre_result
 
     async def benchmark_async(

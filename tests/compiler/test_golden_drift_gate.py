@@ -164,19 +164,12 @@ EXPECTED_GAPS = {
 # fixed one is deleted. Unlike a gap, an expected drift asserts the recorded golden and the
 # audit twin genuinely disagree for a KNOWN reason that is not a serving regression.
 EXPECTED_DRIFTS: dict[str, set[tuple[str, str]]] = {
+    # The historic 4090 entries (down_proj.m1.t in post1/post1-global) burned down when the
+    # transpose-into-constant fold gained its sub-sm_90 matvec exception (``_fold_constant``):
+    # sm_89 m1 twins now walk the k-major transposed arm — the layout the ``.m1.t`` rows were
+    # recorded on — so the goldens realize in-model again.
     "NVIDIA GeForce RTX 5090": set(),
-    "NVIDIA GeForce RTX 4090": {
-        # The WS5 layout gate stopped offering the transposed ``b<n>t`` band on a K-contiguous B
-        # (space.py::coop_reduce_moves), so the m1 gemv-tier down_proj golden no longer "matches"
-        # on the F.linear-layout arm the 4090's cold prior happens to walk in the standard-forward
-        # twins. That pre-gate MATCH was the cold-poison itself — ``g16k/b256t`` lane-sweeps
-        # uncoalesced on that arm (the 5090's prior walks the transposed arm, where the same
-        # golden still MATCHes). The row still describes the REAL m1 serving graph (the runner's
-        # materialized-transpose weights); burn this down with the deferred 4090 mirror re-tune —
-        # either greedy lands the transposed arm there too, or the row gets re-recorded.
-        ("gemma4_12b.down_proj.m1.t", "post1"),
-        ("gemma4_12b.down_proj.m1.t", "post1-global"),
-    },
+    "NVIDIA GeForce RTX 4090": set(),
 }
 
 # A wholesale re-key of the twins (tracer/classifier change) turns MATCHes into GAPs without

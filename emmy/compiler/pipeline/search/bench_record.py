@@ -198,7 +198,7 @@ def bench_leaves(compiled, bench, *, status: str = "ok") -> list[BenchLeaf]:
         for _ in range(hops):
             nxt: list[str] = []
             for cur in frontier:
-                node = compiled.nodes.get(cur)
+                node = compiled.producer(cur)
                 for pid in getattr(node, "inputs", None) or []:
                     if pid in sig_by_nid:
                         return sig_by_nid[pid]

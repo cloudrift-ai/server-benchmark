@@ -90,8 +90,8 @@ def _skeleton(body: Body, graph: Graph | None) -> dict[str, float]:
     feats["S_loop_depth"] = _loop_depth(body)
     if graph is not None:
         for ld in loads:
-            node = graph.nodes.get(ld.input)
-            dt = str(node.output.dtype) if node is not None else "?"
+            t = graph.buffer(ld.input)
+            dt = str(t.dtype) if t is not None else "?"
             feats[f"S_dtype_{dt}"] += 1
     return {k: float(v) for k, v in feats.items()}
 

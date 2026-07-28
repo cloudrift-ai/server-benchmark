@@ -30,12 +30,20 @@ _GPU = "NVIDIA GeForce RTX 5090"
 
 @pytest.fixture(scope="module")
 def compiled_matmul():
+    from emmy import config
     from emmy.commands.trace import graph_from_code
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 
     code = "torch.matmul(torch.randn(512,512,dtype=torch.float16), torch.randn(512,512,dtype=torch.float16))"
     graph, _, _ = graph_from_code(code)
-    return Pipeline.build(CUDA_PASSES).run(graph)
+    # Pin the nvcc lane to the suite's correctness lane (``make test`` exports
+    # it): the deploy evidence hierarchy is lane-aware, and on a dev box whose
+    # live card has repo-shipped goldens the default lane deploys a golden
+    # trajectory whose offer site already carries every S_* stamp — making the
+    # pre-descent-vs-terminal digest assertions trajectory-dependent. One
+    # pinned lane keeps a bare ``pytest`` run identical to ``make test``.
+    with config.nvcc_flags_override("-Xcicc -O1"):
+        return Pipeline.build(CUDA_PASSES).run(graph)
 
 
 def _fake_bench(n_launches: int = 1, time_ms: float = 0.5) -> SimpleNamespace:

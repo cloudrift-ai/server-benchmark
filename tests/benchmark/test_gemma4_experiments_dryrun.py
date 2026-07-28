@@ -130,6 +130,7 @@ def test_command_experiments_load(project_root):
         ("kernels_rtx4090", "NVIDIA GeForce RTX 4090"),
         ("accum_error", "NVIDIA GeForce RTX 5090"),
         ("gsm8k_mtp_rtx5090", "NVIDIA GeForce RTX 5090"),
+        ("gsm8k_rtx5090", "NVIDIA GeForce RTX 5090"),
     ]:
         r = load_recipe(_exp(project_root, name))
         assert r.kind == "command", name

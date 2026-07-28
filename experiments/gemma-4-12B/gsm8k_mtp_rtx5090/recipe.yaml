@@ -41,7 +41,7 @@ command:
     export PATH=/usr/local/cuda/bin:$$PATH
     cd $repo_dir
     [ -d venv ] || make setup
-    ./venv/bin/pip install -q vllm lm_eval 2>/dev/null || true
+    ./venv/bin/pip install -q vllm==0.23.0 lm_eval ninja 2>/dev/null || true
     MODEL=google/gemma-4-12B-it
     DRAFT=google/gemma-4-12B-it-assistant
     SPEC='{"method":"mtp","model":"'$$DRAFT'","num_speculative_tokens":3}'

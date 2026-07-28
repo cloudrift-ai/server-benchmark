@@ -1,0 +1,128 @@
+# GSM8K correctness check for the gemma-4-12B-it serving lanes (RTX 5090) — the blog
+# article's quality table: 200 questions, few-shot, seed 0, strict exact-match, identical
+# client (scripts/run_lmeval_gate.py) against each lane's live server. Four lanes: stock
+# vLLM, vLLM+emmy, vLLM+emmy FAST_MATH, and llama.cpp (built from source here, same as
+# serving_llamacpp_rtx5090, with its own F16 GGUF conversion).
+#
+# Expected: all lanes land within one standard error of each other (~0.665-0.690).
+# FAST_MATH's hybrid accumulation sits inside FP16 representational noise — a lane
+# scoring below the band means broken numerics or a serving bug, not "tuning".
+#
+# BOS trap, the reason for the tokenizer detour below: gemma's tokenizer ships
+# add_bos_token=false AND an empty tokenizer.json post_processor, so raw /v1/completions
+# prompts reach the model without <bos> — GSM8K drops from ~0.67 to ~0.27. The config
+# flag is decorative for fast tokenizers; BOS insertion lives in the post_processor, so
+# the vLLM lanes serve a patched tokenizer dir (verified to prepend id 2). llama.cpp
+# prepends BOS on its own — without the patch the vLLM lanes lose to it on a tokenizer
+# artifact, not on numerics.
+#
+# Bare-metal (venv, no docker); needs the CUDA toolkit's nvcc on PATH for the emmy lanes
+# and cmake + CUDA for the llama.cpp build. vllm is pinned to the article's 0.23.0 —
+# newer pips change both numbers and behavior. Runtime is boot-dominated (each emmy boot
+# compiles kernels; the llama.cpp build takes ~20 min); the evaluation itself is ~2
+# minutes per lane. The stock lane runs first, so a broken setup surfaces early.
+#
+# Repro on a pre-allocated card (no cloud provisioning):
+#   emmy bench experiments/gemma-4-12B/gsm8k_rtx5090 --local
+command:
+  stage:
+    - emmy
+    - scripts
+    - pyproject.toml
+    - requirements.txt
+    - Makefile
+    # The Makefile `include`s docker/vllm-emmy-gemma4/config.env.
+    - docker
+  run: |
+    set -uo pipefail
+    export PATH=/usr/local/cuda/bin:$$PATH
+    cd $repo_dir
+    [ -d venv ] || make setup
+    ./venv/bin/pip install -q vllm==0.23.0 lm_eval ninja gguf sentencepiece 2>/dev/null || true
+    MODEL=google/gemma-4-12B-it
+    TOK=$task_dir/tok-bos
+
+    # Patched tokenizer dir for the vLLM lanes: copy the checkpoint's tokenizer, write
+    # <bos> into the post_processor, assert the first encoded id is 2.
+    if [ ! -f $$TOK/tokenizer.json ]; then
+      ./venv/bin/python -c "from huggingface_hub import snapshot_download; print(snapshot_download('$$MODEL'))" > $task_dir/snap.txt
+      mkdir -p $$TOK
+      cp -L $$(cat $task_dir/snap.txt)/tokenizer* $$(cat $task_dir/snap.txt)/special_tokens_map.json $$TOK/ 2>/dev/null || true
+      TOK_DIR=$$TOK ./venv/bin/python - <<'PYEOF'
+    import json, os
+    p = os.path.join(os.environ["TOK_DIR"], "tokenizer.json")
+    d = json.load(open(p))
+    bos = {"SpecialToken": {"id": "<bos>", "type_id": 0}}
+    pp = d["post_processor"]
+    pp["single"] = [bos, {"Sequence": {"id": "A", "type_id": 0}}]
+    pp["pair"] = [bos, {"Sequence": {"id": "A", "type_id": 0}}, {"Sequence": {"id": "B", "type_id": 1}}]
+    pp["special_tokens"] = {"<bos>": {"id": "<bos>", "ids": [2], "tokens": ["<bos>"]}}
+    json.dump(d, open(p, "w"))
+    from transformers import AutoTokenizer
+    ids = AutoTokenizer.from_pretrained(os.environ["TOK_DIR"])("The capital of France is")["input_ids"]
+    assert ids[0] == 2, f"BOS not prepended: {ids[:6]}"
+    print("BOS post-processor verified:", ids[:6])
+    PYEOF
+    fi
+
+    # LANE_ENV carries per-lane env assignments (word-split on purpose; empty = none).
+    LANE_ENV=""
+    gate() { # label serve-args...
+      label=$$1; shift
+      pkill -f "[v]llm serve" 2>/dev/null || true; sleep 5
+      env $$LANE_ENV ./venv/bin/emmy serve $$MODEL --generate --dtype float16 --max-model-len 8448 \
+        --no-enable-prefix-caching --tokenizer $$TOK "$$@" > $task_dir/serve_$$label.log 2>&1 &
+      pid=$$!
+      for i in $$(seq 1 360); do
+        curl -sf localhost:8000/health >/dev/null && break
+        kill -0 $$pid 2>/dev/null || { echo "SERVE_$${label}_DIED"; tail -5 $task_dir/serve_$$label.log; return 1; }
+        sleep 10
+      done
+      curl -sf localhost:8000/health >/dev/null || { echo "SERVE_$${label}_TIMEOUT"; kill $$pid; return 1; }
+      ./venv/bin/python scripts/run_lmeval_gate.py --base-url http://localhost:8000/v1 --model $$MODEL \
+        --label $$label --limit 200 --seed 0 --out $task_dir/$$label.json
+      kill $$pid 2>/dev/null
+    }
+
+    gate stock --stock || true
+    gate emmy || true
+    LANE_ENV="EMMY_FAST_MATH=1"
+    gate fastmath || true
+    LANE_ENV=""
+    pkill -f "[v]llm serve" 2>/dev/null || true
+
+    # llama.cpp lane: source build (CUDA, native arch) + F16 GGUF, same client. The
+    # server prepends BOS itself, so no tokenizer patch here. 8 slots x 2048: the gate
+    # sends 8 concurrent ~1-2k-token few-shot prompts.
+    SRC=$task_dir/llama.cpp
+    GGUF=$task_dir/gemma-4-12B-it-f16.gguf
+    if [ ! -x "$$SRC/build/bin/llama-server" ]; then
+      git clone --depth 1 https://github.com/ggml-org/llama.cpp $$SRC
+      arch=$$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d '.')
+      cmake -S $$SRC -B $$SRC/build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=$$arch -DLLAMA_CURL=ON > $task_dir/cmake.log 2>&1
+      cmake --build $$SRC/build --target llama-server -j $$(nproc) >> $task_dir/cmake.log 2>&1
+    fi
+    if [ ! -f "$$GGUF" ]; then
+      ./venv/bin/python $$SRC/convert_hf_to_gguf.py $$(cat $task_dir/snap.txt) --outtype f16 --outfile $$GGUF > $task_dir/convert.log 2>&1
+    fi
+    pkill -f "[l]lama-server" 2>/dev/null || true; sleep 3
+    $$SRC/build/bin/llama-server -m $$GGUF --alias $$MODEL -ngl 99 -fa on --no-webui \
+      --parallel 8 -c 16384 --host 0.0.0.0 --port 8000 > $task_dir/serve_llamacpp.log 2>&1 &
+    lpid=$$!
+    for i in $$(seq 1 120); do curl -sf localhost:8000/health >/dev/null && break; kill -0 $$lpid 2>/dev/null || break; sleep 5; done
+    if curl -sf localhost:8000/health >/dev/null; then
+      ./venv/bin/python scripts/run_lmeval_gate.py --base-url http://localhost:8000/v1 --model $$MODEL \
+        --label llamacpp --limit 200 --seed 0 --out $task_dir/llamacpp.json || true
+    else
+      echo "SERVE_llamacpp_FAILED"; tail -5 $task_dir/serve_llamacpp.log
+    fi
+    kill $$lpid 2>/dev/null; pkill -f "[l]lama-server" 2>/dev/null || true
+    echo GSM8K_LANES_DONE
+  result_files:
+    - "*.json"
+    - "*.log"
+  timeout: 18000
+
+matrices:
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1

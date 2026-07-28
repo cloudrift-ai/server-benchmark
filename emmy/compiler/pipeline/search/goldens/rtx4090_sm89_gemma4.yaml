@@ -495,6 +495,20 @@ configs:
     knobs: {PLACE: 'fuse', REDUCE: 'g2k', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x64', WSPEC: ''}
     emmy_us: 116.1
     cublas_us: 95.6
+  # SERIAL std deploy-floor sibling (2026-07-27, vast.ai 4090 590.48.01): the g2k row above realizes only
+  # under pin (no split-KV offer at this grid — the s4096 / mlp_down.m4096 gap class), so the shape fell
+  # through the golden floor and cold greedy deployed the 0.59x warp flash. Pinned serial A/B 129.5
+  # (3x, 0.2% spread — the 8.9% alt jitter did not show at s512 on this host); floor now decides.
+  - kernel: attention
+    name: gemma4_12b.attention.hd512
+    n_heads: 16
+    seq: 512
+    head_dim: 512
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', REDUCE: '', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x64', WSPEC: ''}
+    emmy_us: 129.5
+    cublas_us: 95.6
   # fm lane (2026-07-20 cold sweep, vast.ai 4090): the un-split f16-accumulate pj twin — dropping the
   # g2k split and swapping TILE@pj to the f16acc atom lands 104.1 (3x reproduced, -11% vs the std row;
   # the dynM twin already carried this family). The gap left to torch SDPA (fm-lane eager 93.5) is the
@@ -675,6 +689,20 @@ configs:
     causal: true
     knobs: {PLACE: 'fuse', REDUCE: 'g2k', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x64', WSPEC: ''}
     emmy_us: 1069.0
+    cublas_us: 926.5
+  # SERIAL std deploy-floor sibling (2026-07-27, vast.ai 4090 590.48.01): same offer-gap class as s512 —
+  # the g2k row realizes only under pin, so the shape fell through (cold greedy 5419 us, 0.17x). Pinned
+  # serial A/B 1310.8 (six of nine measurements ~1311, two ~1431 excursions — the 4090 alt jitter);
+  # floor now decides. The g2k row stays the pinned lever (1063 reproduced 3x, 0.1% spread).
+  - kernel: attention
+    name: gemma4_12b.attention.hd512.s2048
+    n_heads: 16
+    seq: 2048
+    head_dim: 512
+    dtype: 'fp16'
+    causal: true
+    knobs: {PLACE: 'fuse', REDUCE: '', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x64', WSPEC: ''}
+    emmy_us: 1310.8
     cublas_us: 926.5
   # ---- attention at seq 4096 (2026-07-23, vast.ai 4090, fm-superset tune + pinned --ab) -------------
   # The s2048 families transfer: hd256 stays SERIAL on d1/cp/alt (g2k pins lose — std 1359.7,

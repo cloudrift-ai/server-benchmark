@@ -54,7 +54,7 @@ Terms used throughout:
 | `search/prior/` | The ONE ranking path: a `Prior` ABC with the cold `OfflinePrior` and the `OnlinePrior` composed behind `FallbackPrior` (`load_prior`). `diagnostics.py` here backs the `eval` reachability / calibration reports; `fit/` is the offline fitter core (`linear.py`) plus the `emmy fit` cross-validation harness (`cv.py` — fold axes, pooled holdout/train tables, the metrics dict). |
 | `search/data/` | The harmonized read-view over the three data sources (golden configs / DB `perf` rows / prior reservoir): `Sample`, `Dataset`, and `ShapeKey` (the single golden↔measured join key). |
 | `search/golden.py` | `GoldenConfig` and its subclasses (see Part 7, "Golden configs and the A/B integrity gates"). |
-| `search/audit.py` | The golden drift audit: compile graphs with the golden tier as the only evidence, one MATCH / DRIFT / GAP verdict per consulted fork (via `greedy.golden_audit`, the supported sink). Backs `emmy eval golden --in-model` and the CI gate (see Part 7). |
+| `search/audit.py` | The golden drift audit: compile graphs with the golden tier as the only evidence, one MATCH / DRIFT / GAP verdict per consulted fork (via `greedy.golden_audit`, the supported sink; records also carry `unrealized`, the per-entry pin-only signal). Backs `emmy eval golden` (the pin-only offer audit), `--in-model`, and the CI gate (see Part 7). |
 | `keys.py` | `op_cache_key` / `dialect_of` / `source_chain`. |
 | `slice.py` | Isolates one finalized kernel into a standalone graph (used by the inner tune and structural pricing). |
 | `dump.py`, `rule_diff.py` | The dump and `-vv` presentation layers (see the end of this file). |
@@ -758,6 +758,20 @@ baseline means full model coverage is thereafter enforced (only fork-free determ
 gathers — sit outside the gate, having no fork for the golden tier to decide). The twins track the installed `transformers` modeling code by design: a transformers
 bump that changes the forward changes the twins exactly as it changes serving, and the gate goes loudly red.
 `scripts/diagnostics/audit_golden_match.py` is the same audit over explicit graph JSONs on a live box.
+
+**The pin-only offer audit** (`emmy eval golden`, same `search/audit` seam) is the record-time complement: for every
+forking golden entry it re-compiles the shape's OWN snippet un-pinned (deployable regime, the golden file's own card —
+the enumeration is static given shape+context, so no GPU bench) and checks the recorded knobs against the offered
+candidates. An entry only a pin can realize (`EMMY_KNOBS` / `tune --golden` benches it, the enumeration never offers
+it) reports **PIN-ONLY** — legal as a documented lever while an OFFERED sibling floors the shape (the 4090
+`attention.hd512.s4096` split-KV row beside its serial deploy-floor sibling); a shape whose entries are ALL pin-only
+reports **FALL-THROUGH** and exits 1: a deploy logs "no offered candidate realizes any of them" and falls past the
+golden tier — the missing-floor pathology that deployed a 111 ms 0.03x `mlp_down.m4096` kernel and NaN-poisoned the
+downstream accuracy check before the floor-sibling discipline. Fast-math entries audit under the pinned
+`F16_MMA_F32_ACC` gate (their own deploy regime). The own-snippet and in-model views genuinely differ: the 5090
+`mlp_down.m4096` split-K row realizes standalone but not on the serving twin's epilogue-fused down — the offer audit
+passes it and `--in-model` is the authority there, while the s4096 split-KV row fails even standalone, which is what
+this audit catches at record time.
 
 **Live-GPU scoping.** `tune --dataset golden` (and `--golden NAME` resolution) scopes to the **live** card's goldens
 (`goldens_for_live_gpu`) — names repeat across per-GPU golden files with diverging shapes/dtypes, so a flat union

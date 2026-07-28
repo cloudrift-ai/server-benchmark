@@ -121,6 +121,43 @@ def test_floor_respects_blocklist(monkeypatch, caplog):
     assert any("no longer realize" in r.message for r in caplog.records)
 
 
+def test_audit_sink_records_unrealized_pin_only_entries(monkeypatch):
+    """Under ``golden_audit`` the MATCH record carries ``unrealized`` — the shape's recorded
+    entries NO offered candidate realizes (the ``eval golden`` offer audit's pin-only
+    signal). The deploy outcome is unchanged: the realizable sibling still floors the pick.
+    A shape whose entries are ALL unrealized records DRIFT with every entry listed."""
+    from emmy.compiler.pipeline.search.policy.greedy import golden_audit
+
+    pin_only = MatmulGoldenConfig(
+        name="gemma4_12b.q_proj",
+        M=512,
+        N=4096,
+        K=3840,
+        dtype="fp16",
+        knobs={"TILE": _STD_TILE, "STAGE": "d4/tma/ring"},  # a STAGE these leaves never offer
+        emmy_us=50.0,  # fastest → consulted first; must not decide the pick
+        gpu_name=CARD,
+        compute_cap=CAP,
+    )
+    leaves = [SimpleNamespace(knobs=dict(_ROW_W1X1)), SimpleNamespace(knobs=dict(_ROW_GOLD))]
+    records: list[dict] = []
+    with golden_audit(records):
+        picked, fp = _decide_no_prior(monkeypatch, [pin_only, _golden()], leaves)
+    assert picked is leaves[1], "the realizable sibling floors the deploy exactly as before"
+    assert fp.score == 78.0
+    (rec,) = records
+    assert rec["verdict"] == "MATCH"
+    assert rec["unrealized"] == [pin_only]
+
+    records.clear()
+    with golden_audit(records):
+        picked, _ = _decide_no_prior(monkeypatch, [pin_only], leaves)
+    assert picked is leaves[0]  # nothing realizes → option-0
+    (rec,) = records
+    assert rec["verdict"] == "DRIFT"
+    assert rec["unrealized"] == [pin_only]
+
+
 def test_fork_shape_key_flash_sniff_scans_every_row():
     """The flash OFFER signal (the ``TILE@dd`` + ``TILE@pj`` pair) marks the fork when
     ANY row carries it — row 0 is whichever leaf the planner emitted first and need

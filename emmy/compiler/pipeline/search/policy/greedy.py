@@ -602,11 +602,15 @@ _AUDIT_SINK: list[dict] | None = None
 
 @contextmanager
 def golden_audit(records: list[dict]):
-    """Collect one ``{node, key, verdict, golden, us, n_rows}`` record per golden-tier
-    consultation into ``records`` for the duration of the block. Verdicts: ``MATCH``
-    (a recorded golden realized on an offered candidate), ``DRIFT`` (goldens keyed to
-    the fork's shape but none realizes — a graph/enumeration change invalidated them),
-    ``GAP`` (no golden recorded for the shape)."""
+    """Collect one ``{node, key, verdict, golden, us, n_rows, unrealized}`` record per
+    golden-tier consultation into ``records`` for the duration of the block. Verdicts:
+    ``MATCH`` (a recorded golden realized on an offered candidate), ``DRIFT`` (goldens
+    keyed to the fork's shape but none realizes — a graph/enumeration change invalidated
+    them), ``GAP`` (no golden recorded for the shape). ``unrealized`` (MATCH/DRIFT only;
+    ``None`` on GAP) lists the shape's recorded :class:`GoldenConfig` entries that NO
+    offered candidate realizes — the per-entry "pin-only" signal the ``eval golden``
+    offer audit reads (an entry can be individually unrealizable while a sibling still
+    MATCHes and floors the deploy)."""
     global _AUDIT_SINK
     prev = _AUDIT_SINK
     _AUDIT_SINK = records
@@ -616,11 +620,15 @@ def golden_audit(records: list[dict]):
         _AUDIT_SINK = prev
 
 
-def _audit_record(node_id: str, key, verdict: str, golden: str | None, us: float | None, n_rows: int) -> None:
+def _audit_record(
+    node_id: str, key, verdict: str, golden: str | None, us: float | None, n_rows: int, unrealized: list | None = None
+) -> None:
     if _AUDIT_SINK is not None:
         # ``key`` stays the ShapeKey object — coverage policy (major-gap classification)
         # reads its fields; presentation layers stringify at print/JSON time.
-        _AUDIT_SINK.append({"node": node_id, "key": key, "verdict": verdict, "golden": golden, "us": us, "n_rows": n_rows})
+        _AUDIT_SINK.append(
+            {"node": node_id, "key": key, "verdict": verdict, "golden": golden, "us": us, "n_rows": n_rows, "unrealized": unrealized}
+        )
 
 
 def _golden_pick(index: dict, rows: list[dict], node_id: str) -> tuple[int, float] | None:
@@ -647,6 +655,12 @@ def _golden_pick(index: dict, rows: list[dict], node_id: str) -> tuple[int, floa
     if not goldens:
         _audit_record(node_id, key, "GAP", None, None, len(rows))
         return None
+    # Per-entry realizability, computed only under an active audit sink: the ``eval golden``
+    # offer audit reads which recorded entries the un-pinned enumeration never offers
+    # (pin-only rows); the deploy hot path below still stops at the first realizing golden.
+    unrealized = None
+    if _AUDIT_SINK is not None:
+        unrealized = [g for g in goldens if not any(_golden_matches_row(dict(tuning_knob_items(g.knobs)), row) for row in rows)]
     for g in goldens:  # fastest recorded entry first
         gold = dict(tuning_knob_items(g.knobs))
         # Several rows can realize one golden (a golden pins a knob PREFIX); the
@@ -654,9 +668,9 @@ def _golden_pick(index: dict, rows: list[dict], node_id: str) -> tuple[int, floa
         matches = [i for i, row in enumerate(rows) if _golden_matches_row(gold, row)]
         if matches:
             best = min(matches, key=lambda i: canonical_row_key(rows[i]))
-            _audit_record(node_id, key, "MATCH", g.name, float(g.emmy_us or 0.0), len(rows))
+            _audit_record(node_id, key, "MATCH", g.name, float(g.emmy_us or 0.0), len(rows), unrealized=unrealized)
             return best, float(g.emmy_us or 0.0)
-    _audit_record(node_id, key, "DRIFT", ", ".join(g.name for g in goldens), None, len(rows))
+    _audit_record(node_id, key, "DRIFT", ", ".join(g.name for g in goldens), None, len(rows), unrealized=unrealized)
     logger.warning(
         "deploy: node %r matches golden shape %s (%d recorded entr%s), but no offered candidate realizes any of "
         "them — the golden(s) no longer realize under the current enumeration; falling through to the normal "

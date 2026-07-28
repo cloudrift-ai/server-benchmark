@@ -104,9 +104,11 @@ def test_traced_s_features_matmul_parity_and_no_match() -> None:
 
 
 def test_traced_s_features_selects_the_keyed_op_in_multi_op_graphs() -> None:
-    """A ``linear_norm`` snippet traces a producer matmul BESIDE the norm op — the
-    selection must return the norm's histogram (the golden's key), not the matmul's
-    and not a cross-op merge."""
+    """A ``linear_norm`` snippet traces a producer matmul BESIDE the norm sweep — the
+    selection must return the op the golden keys, not a cross-op merge. Since the
+    resting-state inversion the ``linear_norm`` kind keys the tapped PRODUCER's matmul
+    fork (the recognition peel keeps the tapped host's untapped identity), so the
+    selected histogram is the producer's, never the norm's."""
     from emmy.compiler.pipeline.search.data.sample import traced_s_features
     from emmy.compiler.pipeline.search.golden import LinearNormGoldenConfig
 
@@ -115,11 +117,11 @@ def test_traced_s_features_selects_the_keyed_op_in_multi_op_graphs() -> None:
     assert traced is not None
     s = dict(traced)
     op_key = ShapeKey.from_s_features(s)
-    assert op_key.kind == "rms_norm"  # the norm op, not the producer matmul
-    # The fp16-pure snippet flips the sweep op's dtype-derived is_warp (no f32 constants,
-    # unlike a served graph) — exactly what ShapeKey.joins tolerates for sweep kinds.
+    assert op_key.kind == ""  # the producer matmul, not the norm sweep
     assert op_key.joins(cfg.shape_key())
-    assert not op_key.joins(ShapeKey.from_matmul(64, 64, 64, "fp16"))  # never the producer's key
+    assert op_key.joins(ShapeKey.from_matmul(64, 64, 64, "fp16"))  # the producer's own key
+    # The norm's sweep key must NOT be selected — the decision no longer lives there.
+    assert not op_key.joins(ShapeKey(free_prod=64 * 64, reduce_max=64, is_warp=False, is_dyn=False, kind="rms_norm"))
 
 
 # --- Sample round-trips (the acceptance gates) ------------------------------

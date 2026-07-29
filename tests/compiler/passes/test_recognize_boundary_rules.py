@@ -449,3 +449,69 @@ def test_bind_contraction_declined_cone_raises_not_positional():
     loop = Loop(axis=Axis(name="k", extent=Dim(64)), body=body, role=AxisRole.CONTRACTION)
     with pytest.raises(LoweringError, match="computed cone"):
         bind_contraction(loop, "m", "n", Body(()))
+
+
+# --------------------------------------------------------------------------- #
+# Group formation — the ``b_trans`` gate. Channels whose B operands are stored the
+# other way round were never legally fusable (one shared A fragment, one slab
+# orientation), so they simply never group: recognition declines the composition and
+# the reduce ``Map`` form stands alone. Driven directly on ``bind_prologue_contraction``
+# (the frontend always emits canonical B, so the disagreeing shape has no graph).
+# --------------------------------------------------------------------------- #
+
+
+def _prologue_shape(*, b_layouts):
+    """The recognized MONOID-producer shape: a per-row statistic reduce, its scalar sweep, and a
+    column loop folding one ⊗-channel per entry of ``b_layouts`` over the shared normalized row."""
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+    from emmy.compiler.ir.tile import Reduction
+
+    m, n, k, r = Axis("m", 8), Axis("n", 16), Axis("k", 32), Axis("r", 32)
+    fold = Accum(name="sacc", value="sq", op="add")
+    stat = Reduction(
+        carrier=fold.as_carrier(),
+        axis=r,
+        partial=Body(
+            (Load(name="x_e", input="x", index=(Var("m"), Var("r"))), Assign(name="sq", op="multiply", args=("x_e", "x_e")), fold)
+        ),
+    )
+    kbody = [Load(name="x_k", input="x", index=(Var("m"), Var("k"))), Assign(name="xh", op="multiply", args=("x_k", "rs"))]
+    for i, trans in enumerate(b_layouts):
+        idx = (Var("n"), Var("k")) if trans else (Var("k"), Var("n"))
+        kbody += [
+            Load(name=f"b{i}", input=f"w{i}", index=idx),
+            Assign(name=f"v{i}", op="multiply", args=("xh", f"b{i}")),
+            Accum(name=f"acc{i}", value=f"v{i}", op="add"),
+        ]
+    accs = tuple(f"acc{i}" for i in range(len(b_layouts)))
+    tail = (Assign(name="y", op="multiply", args=accs),) if len(accs) > 1 else ()
+    nloop = Loop(
+        axis=n,
+        body=Body(
+            (Loop(axis=k, body=Body(tuple(kbody))), *tail, Write(output="o", index=(Var("m"), Var("n")), value="y" if tail else accs[0]))
+        ),
+    )
+    return Map(body=Body((Assign(name="rs", op="rsqrt", args=("sacc",)), nloop)), sources=(stat,)), (m,)
+
+
+def test_channels_with_agreeing_b_layouts_form_one_group():
+    from emmy.compiler.ir.tile.ops import is_group
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
+
+    node, free = _prologue_shape(b_layouts=(False, False))
+    bound = bind_prologue_contraction(node, free)
+    assert bound is not None
+    c_map, _, binds = bound
+    assert is_group(c_map), "two channels over one bound cone are a fused sibling group"
+    assert len({c.a_ref for c in c_map.sources}) == 1 and set(binds) == {c_map.sources[0].a_ref}
+
+
+def test_channels_with_disagreeing_b_layouts_never_group():
+    """A group-formation GATE, not a node assert: the composition declines and the caller keeps the
+    reduce ``Map`` form, rather than building a node whose channels cannot share a slab."""
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
+
+    node, free = _prologue_shape(b_layouts=(False, True))
+    assert bind_prologue_contraction(node, free) is None

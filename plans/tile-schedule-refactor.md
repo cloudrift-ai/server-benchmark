@@ -296,32 +296,38 @@ Goal: the target IR above, with recognition/scheduling/materialization producing
 
 Sub-steps, in landing order:
 
-1a. **Vocabulary first, no behavior change** — LANDED. `TileOp.bindings` (out-name-keyed) + `Map.sources`
-    + construction-time validation, and binding-name resolution threaded through the shared walkers
-    (`ops.resolve` inlines every name operand ahead of `lower` / `pretty` / `reduce_loop` / `axis_role`;
-    the rewrite rename map covers references). NOTE: the uniqueness check is scoped to the BINDING NAMES,
-    not every SSA name — loop IR legitimately binds one name from several stmts (a fold's `Init` seed plus
-    its `Accum` steps; split-K's outer reduce folding its inner contraction's accumulator), and what a
-    reference needs is only that its own name be defined in exactly one place.
-1b. **Recognize-side flip** — LANDED except `TileOp.stage`. The cone is nodified into a binding
-    (`Map(body=per-cell normalize, sources=(Reduction(stat),))`) and every computed A — the fused edge, the
-    plain cone, the mixed-dtype demotion, flash's `P` — references it by name; the contraction nodifier
-    emits N sibling `Contraction`s over that one reference instead of stacking fold channels; the scheduler
-    stamps one shared row per group; `b_trans` is a group-formation gate. `Contraction.epilogue` and the
-    (dead) `TileOp.tier` are retired. STILL OPEN: `TileOp.stage` — it is live (read by `_factor` / `_twist`
-    through `Ctx`), so moving it onto the `Contraction` / `Reduction` it decorates needs the `rewrite`
-    handler to keep it OUT of the canonicalized copy, or `op_cache_key` shifts for every staged flash
-    kernel (whose per-node stage would enter the digest) and stored evidence stops matching.
-1c. **Materialize/split** — LANDED. `_factor` binds the group as one unit (`_AtomOps.siblings`: one A
-    fragment, N mma chains, one C fragment per channel — unchanged emission) and `030_split_reduce` splits
-    the group, deriving the N-component carrier from `ops.group_loop`. STILL OPEN: re-run the #389
-    multichannel-split A/B — correct-but-null under the bespoke encoding, it may flip now that the split is
-    structural (needs GPU bench time on the gemma gate-up shapes).
-1d. **Composition + windowing unification (required)** — composition LANDED (`Reduction.source` retired; a
-    composed reduce puts the node in `partial`, and "is this a bare statistic reduce?" is the structural
-    negation). STILL OPEN: `Reduction.offset`/`bound` + `Axis.source_axis`/`real_extent` → one slice/window
-    representation. Orthogonal to the sharing work and touching the flash split-KV mask/guard emitters, so
-    it wants its own commit.
+1a. **Vocabulary first, no behavior change** — LANDED. `TileOp.bindings` (out-name-keyed) +
+    `Map.sources` + construction-time validation, and binding-name resolution threaded through the
+    shared walkers (`ops.resolve` inlines every name operand ahead of `lower` / `pretty` /
+    `reduce_loop` / `axis_role`; the rewrite rename map covers references). NOTE: the uniqueness
+    check is scoped to the BINDING NAMES, not every SSA name — loop IR legitimately binds one name
+    from several stmts (a fold's `Init` seed plus its `Accum` steps; split-K's outer reduce folding
+    its inner contraction's accumulator), and what a reference needs is only that its own name be
+    defined in exactly one place.
+1b. **Recognize-side flip** — LANDED. The cone is a real node tree bound in the let table: its
+    SOURCE is the row-invariant prologue (the per-row statistic — a projected reduce over the stat
+    `Reduction` — plus any k-invariant cone prefix) and its `body` the per-cell normalize, so the K
+    seam IS the node boundary (`ops.cone_seam` reads it; `Contraction.stat_prologue`'s stmt scan is
+    retired). Every computed A goes through the one binder (`_atomize.bind_cone`): the fused edge,
+    the stat-free cone, the mixed-dtype demotion, the pin-driven demoted warp tier, flash's `P`.
+    The contraction nodifier emits N sibling `Contraction`s over that one reference instead of
+    stacking fold channels; the scheduler stamps one shared row per group; `b_trans` is a
+    group-formation gate. `Contraction.epilogue`, `TileOp.tier` and `TileOp.stage` are all retired —
+    every schedule slice rides the node it decorates.
+1c. **Materialize/split** — LANDED. `_factor` binds the group as one unit (`_AtomOps.siblings`: one
+    A fragment, N mma chains, one C fragment per channel) and `030_split_reduce` splits the group,
+    deriving the N-component carrier from `ops.group_loop`. STILL OPEN: re-run the #389
+    multichannel-split A/B — correct-but-null under the bespoke encoding, it may flip now that the
+    split is structural (needs GPU bench time on the gemma gate-up shapes).
+1d. **Composition + windowing unification** — LANDED. `Reduction.source` is retired (a composed
+    reduce puts the node in `partial`, and "is this a bare statistic reduce?" is the structural
+    negation), and `Reduction.offset`/`bound` + `Axis.source_axis`/`real_extent` collapse into one
+    `Axis.window` (`parent` + the slice's absolute `base`/`bound`); `real_extent` was dead and is
+    dropped.
+
+Byte-compatibility was checked directly, not just by construction: kernel-source digests for
+norm_linear, gate-up, matmul, rms_norm and sdpa across gmem-direct / cp.async ring / warp mma /
+pinned split-K matched the pre-change commit on every step that claimed to be emission-neutral.
 
 Done when: `make test` green; unit tests cover binding-reference round-trip through rewrite/structural-key
 (name uniqueness violations + dangling references rejected at construction; two references to

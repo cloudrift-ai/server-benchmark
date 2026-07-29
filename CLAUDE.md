@@ -21,17 +21,21 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   projection — a reduce that COMPOSES another node, split-K's sliced contraction or flash's score, puts it in
   `partial`, the one composition rule); EVERY recognized contraction — per-cell scalar included — is a `Contraction`
   node (nodified at recognize time with a deferred `TilePlan()`; an unbindable one demotes to `PLANAR`) holding ONE
-  `b_load`/`acc` and an `a_operand` that is a gmem `Load` or the NAME of a bound cone; the lift / projection wrapper
+  `b_load`/`acc` and an `a` operand that is a gmem `Load` or the NAME of a bound cone — whose own SOURCE is the
+  row-invariant prologue (the per-row statistic) and whose `body` is the per-cell normalize, so the K seam is the node
+  boundary (`ops.cone_seam`); the lift / projection wrapper
   is a `Map` (`body` + `sources` — `project ∘ reduce`, `source` the len-≤1 compat read). Operand sharing is
   structural: N sibling `Contraction`s under one `Map.sources` naming ONE bound cone is the fused gate/up MLP edge
   (the product-monoid fold), scheduled and lowered as one unit — `ops.is_group` / `ops.group_loop` DERIVE its single
   fold loop and N-component carrier, and `ops.resolve` inlines every name operand before any lowering walk. A
   projection has ONE home, the wrapping `Map.body` — never a node field. A bare reduce is the root `Reduction`;
   softmax/RMSNorm is a `Map(body=sweep, sources=(Reduction,))`; the fused norm→linear / gate-up composition is a
-  `Map(body=combine, sources=(Contraction, …))` over a bound cone whose own `Reduction` source IS the row statistic
-  (a fork sibling of its coop-reduce form — option-0 stays coop; the warp mma rows ride the sync compute-fill); a
-  pure pointwise cell is a `Map(sources=())`; the only annotated `Loop`s still riding a flat `Map.body` are
-  `030_split_reduce`'s sliced partials.
+  `Map(body=combine, sources=(Contraction, …))` over that bound cone (a fork sibling of its coop-reduce form —
+  option-0 stays coop; the warp mma rows ride the sync compute-fill); a pure pointwise cell is a `Map(sources=())`;
+  the only annotated `Loop`s still riding a flat `Map.body` are `030_split_reduce`'s sliced partials. Every schedule
+  slice rides the node it decorates (a `Contraction`'s `tile` / `stage`, a `Reduction`'s `reduce` / `stage`) — the
+  `TileOp` keeps only `op + bindings + place + workers + knobs` — and a sliced axis's window (its split parentage plus
+  a cross-CTA slice's absolute base/bound) is the one `Axis.window`.
   Dispatch reads the role/carrier off the node (`ops.axis_role`/`reduce_loop` recurse through `Map.sources`), and
   `ops.lower` flattens any node back to the same loop nest — there is no stored `Monoid`/`Semiring` node kind (those
   wrappers were retired). Flash attention is the `TWISTED` reduce on the streaming schedule, a twisted monoid is a

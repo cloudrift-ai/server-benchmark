@@ -19,6 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 test = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff"]
 compile = ["torch", "transformers>=5.10", "cppyy==3.5.0", "safetensors"]
+image = ["diffusers>=0.39,<0.40"]
 # vLLM out-of-tree embedding plugin (emmy/serving); vllm pins its own torch.
 # >=0.23: 0.22.1's FlashInfer dispatch cannot run gemma-4's 512-dim global attention
 # (0.23 supports head sizes [64,128,256,512] and has native gemma-4). Our old
@@ -32,7 +33,7 @@ eval = ["lm-eval[api]>=0.4.9"]
 visualize = ["playwright>=1.40"]
 # flash-attn requires torch at build time, install separately:
 #   pip install flash-attn --no-build-isolation
-dev = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff", "matplotlib", "graphviz", "torch", "transformers>=5.10", "cupy-cuda12x; sys_platform == 'linux'", "cppyy==3.5.0", "safetensors", "playwright>=1.40"]
+dev = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff", "matplotlib", "graphviz", "torch", "transformers>=5.10", "diffusers>=0.39,<0.40", "cupy-cuda12x; sys_platform == 'linux'", "cppyy==3.5.0", "safetensors", "playwright>=1.40"]
 
 [tool.setuptools.packages.find]
 include = ["emmy*"]

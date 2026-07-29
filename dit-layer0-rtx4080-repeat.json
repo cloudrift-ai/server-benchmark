@@ -1,0 +1,355 @@
+{
+  "input": "facebook/DiT-XL-2-256",
+  "golden": null,
+  "dynamic": [],
+  "gpu": "NVIDIA GeForce RTX 4080",
+  "warmup": 20,
+  "iters": 500,
+  "backends": {
+    "Eager PyTorch": {
+      "latency_us": 185.59639890429,
+      "speedup_vs_eager": 1.0
+    },
+    "torch.compile": {
+      "latency_us": 164.77746023258692,
+      "speedup_vs_eager": 1.1263457917261057
+    },
+    "Emmy": {
+      "latency_us": 8469.504356384277,
+      "speedup_vs_eager": 0.021913489986505313
+    }
+  },
+  "greedy": {
+    "status": "ok",
+    "lane": "std",
+    "total_us": 8419.49079912953,
+    "kernels": [
+      {
+        "kernel": "k_linear_6c2834",
+        "us": 26.921289582406324,
+        "smem_bytes": 0,
+        "knobs": {
+          "TILE": "",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "",
+          "REDUCE": "",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_layer_norm_reduce_ee228a",
+        "us": 2.594133218129476,
+        "smem_bytes": 64,
+        "knobs": {
+          "REDUCE": "b512",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "",
+          "REDUCE": "b512",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_d7966b",
+        "us": 117.17485530035836,
+        "smem_bytes": 0,
+        "knobs": {
+          "TILE": "",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "",
+          "REDUCE": "",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_3c4461",
+        "us": 123.12685591833932,
+        "smem_bytes": 0,
+        "knobs": {
+          "TILE": "",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "",
+          "REDUCE": "",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_layer_norm_reduce_6917df",
+        "us": 3.1679999083280563,
+        "smem_bytes": 64,
+        "knobs": {
+          "PLACE@stat": "fuse",
+          "REDUCE": "b512",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "PLACE@stat": "fuse",
+          "TILE": "",
+          "REDUCE": "b512",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_7167eb",
+        "us": 33.37035459630629,
+        "smem_bytes": 6144,
+        "knobs": {
+          "TILE": "a:mma_m16n8k16_f16_f32/w4x1/f2x8",
+          "STAGE": "d1/cp",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        },
+        "record_knobs": {
+          "TILE": "a:mma_m16n8k16_f16_f32/w4x1/f2x8",
+          "REDUCE": "",
+          "STAGE": "d1/cp",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_7167eb",
+        "us": 33.27999843491448,
+        "smem_bytes": 6144,
+        "knobs": {
+          "TILE": "a:mma_m16n8k16_f16_f32/w4x1/f2x8",
+          "STAGE": "d1/cp",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        },
+        "record_knobs": {
+          "TILE": "a:mma_m16n8k16_f16_f32/w4x1/f2x8",
+          "REDUCE": "",
+          "STAGE": "d1/cp",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_7167eb",
+        "us": 33.22133421897888,
+        "smem_bytes": 6144,
+        "knobs": {
+          "TILE": "a:mma_m16n8k16_f16_f32/w4x1/f2x8",
+          "STAGE": "d1/cp",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        },
+        "record_knobs": {
+          "TILE": "a:mma_m16n8k16_f16_f32/w4x1/f2x8",
+          "REDUCE": "",
+          "STAGE": "d1/cp",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_sdpa_reduce_b6c3d8",
+        "us": 65.29969435471756,
+        "smem_bytes": 0,
+        "knobs": {
+          "TILE": "n32x16/f4x8",
+          "REDUCE": "",
+          "STAGE": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        },
+        "record_knobs": {
+          "TILE": "n32x16/f4x8",
+          "REDUCE": "",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_sdpa_reduce_4a9491",
+        "us": 75.34400224685669,
+        "smem_bytes": 64,
+        "knobs": {
+          "REDUCE": "b256",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "",
+          "REDUCE": "b256",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_sdpa_reduce_475496",
+        "us": 37.5021170167362,
+        "smem_bytes": 6144,
+        "knobs": {
+          "TILE": "a:mma_m16n8k16_f16_f32/w4x1/f2x8",
+          "STAGE": "d1/cp",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        },
+        "record_knobs": {
+          "TILE": "a:mma_m16n8k16_f16_f32/w4x1/f2x8",
+          "REDUCE": "",
+          "STAGE": "d1/cp",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_layer_norm_reduce_ee228a",
+        "us": 2.4229858962582873,
+        "smem_bytes": 64,
+        "knobs": {
+          "PLACE@stat": "fuse",
+          "REDUCE": "b512",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "PLACE@stat": "fuse",
+          "TILE": "",
+          "REDUCE": "b512",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_layer_norm_reduce_3cf7cf",
+        "us": 3.072000078616604,
+        "smem_bytes": 64,
+        "knobs": {
+          "PLACE@stat": "fuse",
+          "REDUCE": "b512",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "PLACE@stat": "fuse",
+          "TILE": "",
+          "REDUCE": "b512",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_1517d4",
+        "us": 47.0357338587443,
+        "smem_bytes": 8192,
+        "knobs": {
+          "PLACE@cone": "fuse",
+          "TILE": "a:mma_m16n8k16_f16_f32/w4x1/f2x8",
+          "STAGE": "d2/sync",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        },
+        "record_knobs": {
+          "PLACE@cone": "fuse",
+          "TILE": "a:mma_m16n8k16_f16_f32/w4x1/f2x8",
+          "REDUCE": "",
+          "STAGE": "d2/sync",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_gelu_scaled_pointwise",
+        "us": 1.973527263511311,
+        "smem_bytes": 0,
+        "knobs": {
+          "TILE": "f4",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "f4",
+          "REDUCE": "",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_2235a1",
+        "us": 7813.983917236328,
+        "smem_bytes": 0,
+        "knobs": {
+          "TILE": "",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "",
+          "REDUCE": "",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      }
+    ]
+  },
+  "pinned": []
+}

@@ -57,6 +57,11 @@ recorded if set. A self-contained ECharts plot of `ratio` per case (sorted ascen
 `torch.compile` overlay) is written next to the JSON as `<utc-timestamp>.html` — open it in a browser; no server
 needed (the chart loads ECharts from the jsDelivr CDN).
 
+`test_dit_comparison.py` is the separate block-level acceptance lane for `facebook/DiT-XL-2-256`. It is both
+`perf`-marked and gated by `EMMY_RUN_DIT_PRETRAINED=1` because it downloads a multi-gigabyte checkpoint. On CUDA it
+runs layer 0 through the fatal eager-correctness gate and requires eager PyTorch, `torch.compile`, and Emmy latency
+plus eager-relative speedups in the requested JSON report.
+
 ## Adding a case
 
 Append to the appropriate builder in `cases.py` (`_matmul_proj_cases`, `_rmsnorm_layer_cases`, …) — no test code

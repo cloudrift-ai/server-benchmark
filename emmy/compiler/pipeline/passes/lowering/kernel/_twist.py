@@ -241,7 +241,7 @@ def _frag_contraction(
                 swizzle=b_swizzle,
             )
         n_guard = mask.get(n_name)
-        kz = mask.get(k_name) if not b_trans else None
+        kz = mask.get(k_name)
         return LdmatrixLoad(
             frag=_bname(t, step),
             src_buffer=c.b_load.input,
@@ -577,17 +577,21 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         # they load ONCE ahead of the stream — ``bk`` resident fragments per tile instead of
         # ``bk`` gmem fills per KV block. Same loads, same values: bit-identical to the in-loop form.
         q_guard = (qt.row_base, _ext(qk.m_axis)) if symbolic_q else None
+        q_kzero_bound = _ext(qk.k_axis) if qk.k_axis.extent.as_static() % atom.atom_k else None
         for s, qaf in enumerate(qt.qa):
+            k_base = Literal(s * atom.atom_k, "int")
+            q_kzero = (k_base, q_kzero_bound) if q_kzero_bound is not None else None
             stmts.append(RegFragment(name=qaf, role="a", shape=shape, dtype=atom.operand_dtype("a")))
             stmts.append(
                 LdmatrixLoad(
                     frag=qaf,
                     src_buffer=qk.a_operand.input,
-                    src_index=_idx(qk.a_operand, {qk.m_axis.name: qt.row_base, qk.k_axis.name: Literal(s * atom.atom_k, "int")}),
+                    src_index=_idx(qk.a_operand, {qk.m_axis.name: qt.row_base, qk.k_axis.name: k_base}),
                     role="a",
                     ldm=q_gmem_ldm,
                     staged=False,
                     gmem_guard=q_guard,
+                    k_zero=q_kzero,
                 )
             )
         return stmts
@@ -624,6 +628,8 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             # operand's own (absolute) coordinates (``col_bases`` / ``_abs_kv(kv0)``), so a slice
             # partial bounds at its absolute end, not the window-local one.
             qk_mask[qk.n_axis.name] = (kv0_var, abs_kv_end)
+        if qk.k_axis.extent.as_static() % atom.atom_k:
+            qk_mask[qk.k_axis.name] = (Literal(0, "int"), _ext(qk.k_axis))
         stream += _frag_contraction(
             qk,
             [(qt.sfrags, qt.qa) for qt in qtiles],

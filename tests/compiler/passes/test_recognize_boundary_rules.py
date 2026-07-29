@@ -17,10 +17,12 @@ from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Graph, Tensor
-from emmy.compiler.ir.axis import AxisRole
+from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.elementwise import ElementwiseImpl
+from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
-from emmy.compiler.ir.stmt import Loop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.ir.tile import Contraction, Map, TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
@@ -54,6 +56,111 @@ def test_recognize_fires_on_reduction(recording_dump):
     assert "recognize" in recording_dump.fired_rules("lowering/tile")
 
 
+def test_lift_partitions_independent_reduce_and_epilogue_preamble():
+    """Independent loop-invariant values may feed opposite sides of a contraction.
+
+    This is the shape of DiT's final MLP projection: GELU constants feed computed A
+    inside K, while the linear bias feeds only the accumulator epilogue. Grouping the
+    whole preamble together demotes the contraction to a scalar ``Map``.
+    """
+    from importlib import import_module
+
+    recognize = import_module("emmy.compiler.pipeline.passes.lowering.tile.010_recognize")
+
+    m, n, k = (Axis(name, Dim(extent)) for name, extent in (("m", 32), ("n", 64), ("k", 128)))
+    body = Body(
+        (
+            Load(name="one", input="one_buf", index=(Literal(0),)),
+            Loop(
+                axis=m,
+                body=Body(
+                    (
+                        Loop(
+                            axis=n,
+                            body=Body(
+                                (
+                                    Load(name="bias", input="bias_buf", index=(Var("n"),)),
+                                    Loop(
+                                        axis=k,
+                                        body=Body(
+                                            (
+                                                Load(name="xv", input="x", index=(Var("m"), Var("k"))),
+                                                Assign(name="av", op=ElementwiseImpl("add"), args=("xv", "one")),
+                                                Load(name="wv", input="w", index=(Var("n"), Var("k"))),
+                                                Assign(name="prod", op=ElementwiseImpl("multiply"), args=("av", "wv")),
+                                                Accum(name="acc", value="prod", op=ElementwiseImpl("add"), axes=("k",)),
+                                            )
+                                        ),
+                                    ),
+                                    Assign(name="outv", op=ElementwiseImpl("add"), args=("acc", "bias")),
+                                    Write(output="out", index=(Var("m"), Var("n")), value="outv"),
+                                )
+                            ),
+                        ),
+                    )
+                ),
+            ),
+        )
+    )
+
+    node, free = recognize._lift(list(body), "out")
+
+    assert [axis.name for axis in free] == ["m", "n"]
+    assert isinstance(node, Contraction) and node.a_computed
+    assert {stmt.input for stmt in node.a_body if isinstance(stmt, Load)} == {"one_buf", "x"}
+    assert isinstance(node.epilogue[0], Load) and node.epilogue[0].input == "bias_buf"
+
+
+def test_lift_recognizes_contraction_between_views_of_same_packed_buffer():
+    """Q and K can occupy different affine regions of one load-time-packed QKV buffer."""
+    from importlib import import_module
+
+    recognize = import_module("emmy.compiler.pipeline.passes.lowering.tile.010_recognize")
+
+    m, n, k = (Axis(name, Dim(extent)) for name, extent in (("m", 32), ("n", 32), ("k", 64)))
+    body = Body(
+        (
+            Loop(
+                axis=m,
+                body=Body(
+                    (
+                        Loop(
+                            axis=n,
+                            body=Body(
+                                (
+                                    Loop(
+                                        axis=k,
+                                        body=Body(
+                                            (
+                                                Load(name="q", input="packed_qkv", index=(Var("m"), Var("k"))),
+                                                Load(
+                                                    name="key",
+                                                    input="packed_qkv",
+                                                    index=(Var("n"), Var("k") + Literal(64)),
+                                                ),
+                                                Assign(name="prod", op=ElementwiseImpl("multiply"), args=("q", "key")),
+                                                Accum(name="acc", value="prod", op=ElementwiseImpl("add"), axes=("k",)),
+                                            )
+                                        ),
+                                    ),
+                                    Write(output="score", index=(Var("m"), Var("n")), value="acc"),
+                                )
+                            ),
+                        ),
+                    )
+                ),
+            ),
+        )
+    )
+
+    node, free = recognize._lift(list(body), "score")
+
+    assert [axis.name for axis in free] == ["m", "n"]
+    assert isinstance(node, Contraction)
+    assert isinstance(node.a_operand, Load)
+    assert node.a_operand.input == node.b_load.input == "packed_qkv"
+
+
 # --------------------------------------------------------------------------- #
 # The MONOID-producer composition — ``rmsnorm(x)·nw @ w`` nodifies to a computed-A
 # ``Contraction`` fork sibling of the ``Map(source=Reduction)`` form (``010_recognize``'s
@@ -74,7 +181,16 @@ def _norm_linear_graph(dt=F16, S: int | Dim = 32, H: int = 1024, inter: int = 30
     return g
 
 
-def _resolve(g: Graph, pick=None) -> tuple[list[dict], TileOp]:
+def _m1_linear_graph() -> Graph:
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (1, Dim(1), Dim(1152)), dtype=F16), node_id="x")
+    g.add_node(InputOp(), [], Tensor("w", (Dim(1152), Dim(1152)), dtype=F16), node_id="w")
+    g.add_node(LinearOp(), ["x", "w"], Tensor("y", (1, Dim(1), Dim(1152)), dtype=F16), node_id="y")
+    g.inputs, g.outputs = ["x", "w"], ["y"]
+    return g
+
+
+def _resolve(g: Graph, pick=None, ctx: Context | None = None) -> tuple[list[dict], TileOp]:
     """Run the tile passes, capturing every fork leaf's knob row; ``pick`` selects the applied
     leaf (default: option-0, the emission-order head). Returns ``(rows, the one TileOp)``."""
     rows: list[dict] = []
@@ -88,7 +204,7 @@ def _resolve(g: Graph, pick=None) -> tuple[list[dict], TileOp]:
                     return leaf
         return leaves[0]
 
-    rg, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(g, decide)
+    rg, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx or Context.from_target((12, 0))).resolve(g, decide)
     tiles = [n.op for n in rg.nodes.values() if isinstance(n.op, TileOp)]
     assert len(tiles) == 1, f"expected the fused norm→linear to be ONE kernel, got {len(tiles)}"
     return rows, tiles[0]
@@ -96,6 +212,40 @@ def _resolve(g: Graph, pick=None) -> tuple[list[dict], TileOp]:
 
 def _is_warp_row(row: dict) -> bool:
     return any("a:" in str(v) for v in row.values())
+
+
+def test_wide_m1_flinear_uses_single_warp_k_fold():
+    """A coalesced wide-K M=1 F.linear must not expose the dominated serial
+    reduction to deploy selection, while tune retains the complete fork."""
+    from dataclasses import replace
+
+    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4080")
+    _, tile = _resolve(_m1_linear_graph(), ctx=ctx)
+    reduce_specs = [v for k, v in tile.knobs.items() if k.startswith("REDUCE@")]
+    assert reduce_specs == ["b32"]
+    tune_rows, _ = _resolve(_m1_linear_graph(), ctx=replace(ctx, validate_pins=False))
+    offered = {v for row in tune_rows for k, v in row.items() if k.startswith("REDUCE@")}
+    assert "" in offered and "b32" in offered
+
+
+def test_rtx4080_dit_qkv_narrows_to_measured_deploy_schedule():
+    """The SKU-exact deploy keeps one stable computed-A QKV row; tune mode keeps
+    the full legal search space."""
+    from dataclasses import replace
+
+    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4080")
+    rows, _ = _resolve(_norm_linear_graph(S=256, H=1152, inter=3456), pick=_is_warp_row, ctx=ctx)
+    warp = [r for r in rows if _is_warp_row(r)]
+    assert len(warp) == 1
+    assert any(v == "a:mma_m16n8k16_f16_f32/w4x1/f2x4/k4" for k, v in warp[0].items() if k.startswith("TILE@"))
+    assert any(v == "d1/sync" for k, v in warp[0].items() if k.startswith("STAGE@"))
+
+    tune_rows, _ = _resolve(
+        _norm_linear_graph(S=256, H=1152, inter=3456),
+        pick=_is_warp_row,
+        ctx=replace(ctx, validate_pins=False),
+    )
+    assert len([r for r in tune_rows if _is_warp_row(r)]) > 1
 
 
 def test_norm_linear_offers_map_rows_then_warp_contraction_rows():

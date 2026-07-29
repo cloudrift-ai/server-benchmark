@@ -1,0 +1,375 @@
+{
+  "input": "facebook/DiT-XL-2-256",
+  "golden": null,
+  "dynamic": [],
+  "gpu": "NVIDIA GeForce RTX 4080",
+  "warmup": 20,
+  "iters": 500,
+  "backends": {
+    "Eager PyTorch": {
+      "latency_us": 185.97950128654338,
+      "speedup_vs_eager": 1.0
+    },
+    "torch.compile": {
+      "latency_us": 165.23621270005629,
+      "speedup_vs_eager": 1.1255371824827598
+    },
+    "Emmy": {
+      "latency_us": 163.81866733233133,
+      "speedup_vs_eager": 1.1352766098948626
+    }
+  },
+  "greedy": {
+    "status": "ok",
+    "lane": "std",
+    "total_us": 162.20356897786476,
+    "kernels": [
+      {
+        "kernel": "k_linear_6c2834",
+        "us": 2.60491224757412,
+        "smem_bytes": 0,
+        "knobs": {
+          "REDUCE": "b32",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "",
+          "REDUCE": "b32",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_layer_norm_reduce_ee228a",
+        "us": 1.6816355122460258,
+        "smem_bytes": 16,
+        "knobs": {
+          "REDUCE": "b128",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "",
+          "REDUCE": "b128",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_silu_pointwise",
+        "us": 0.7417960953040134,
+        "smem_bytes": 0,
+        "knobs": {
+          "TILE": "",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "",
+          "REDUCE": "",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_fc3610",
+        "us": 2.377663752292296,
+        "smem_bytes": 0,
+        "knobs": {
+          "REDUCE": "b32",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "",
+          "REDUCE": "b32",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_silu_1_pointwise",
+        "us": 0.7401272979014283,
+        "smem_bytes": 0,
+        "knobs": {
+          "TILE": "",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "",
+          "REDUCE": "",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_b31918",
+        "us": 6.916491086022896,
+        "smem_bytes": 0,
+        "knobs": {
+          "REDUCE": "b32",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "",
+          "REDUCE": "b32",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_layer_norm_reduce_f89e6a",
+        "us": 2.5600000790187294,
+        "smem_bytes": 16,
+        "knobs": {
+          "PLACE@stat": "fuse",
+          "REDUCE": "b128",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "PLACE@stat": "fuse",
+          "TILE": "",
+          "REDUCE": "b128",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_reduce_265730",
+        "us": 30.105600754419964,
+        "smem_bytes": 20480,
+        "knobs": {
+          "PLACE@cone": "fuse",
+          "TILE": "a:mma_m16n8k16_f16_f32/w4x1/f2x4/k4",
+          "STAGE": "d1/sync",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        },
+        "record_knobs": {
+          "PLACE@cone": "fuse",
+          "TILE": "a:mma_m16n8k16_f16_f32/w4x1/f2x4/k4",
+          "REDUCE": "",
+          "STAGE": "d1/sync",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_scaled_dot_product_attention_reduce",
+        "us": 13.744000345468521,
+        "smem_bytes": 0,
+        "knobs": {
+          "PLACE@fold": "fuse",
+          "TILE@dd": "a:mma_m16n8k16_f16_f32/w2x1/f2x8/k5",
+          "TILE@pj": "a:mma_m16n8k16_f16_f32/w2x1/f2x9/k4",
+          "REDUCE": "",
+          "STAGE": "",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "PLACE@fold": "fuse",
+          "TILE@dd": "a:mma_m16n8k16_f16_f32/w2x1/f2x8/k5",
+          "TILE@pj": "a:mma_m16n8k16_f16_f32/w2x1/f2x9/k4",
+          "REDUCE": "",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_sdpa_reduce_475496",
+        "us": 13.800368859217716,
+        "smem_bytes": 32768,
+        "knobs": {
+          "TILE": "a:mma_m16n8k16_f16_f32/w1x4/f4x2/k4",
+          "STAGE": "d2/cp/ring/p2",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        },
+        "record_knobs": {
+          "TILE": "a:mma_m16n8k16_f16_f32/w1x4/f4x2/k4",
+          "REDUCE": "",
+          "STAGE": "d2/cp/ring/p2",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_layer_norm_reduce_ee228a",
+        "us": 1.6590817197287593,
+        "smem_bytes": 16,
+        "knobs": {
+          "PLACE@stat": "fuse",
+          "REDUCE": "b128",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "PLACE@stat": "fuse",
+          "TILE": "",
+          "REDUCE": "b128",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_layer_norm_reduce_3cf7cf",
+        "us": 2.5765161710051148,
+        "smem_bytes": 16,
+        "knobs": {
+          "PLACE@stat": "fuse",
+          "REDUCE": "b128",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "PLACE@stat": "fuse",
+          "TILE": "",
+          "REDUCE": "b128",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_1517d4",
+        "us": 36.43733263015747,
+        "smem_bytes": 16384,
+        "knobs": {
+          "PLACE@cone": "fuse",
+          "TILE": "a:mma_m16n8k16_f16_f32/w1x2/f4x4/k4",
+          "STAGE": "d1/sync",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        },
+        "record_knobs": {
+          "PLACE@cone": "fuse",
+          "TILE": "a:mma_m16n8k16_f16_f32/w1x2/f4x4/k4",
+          "REDUCE": "",
+          "STAGE": "d1/sync",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_gelu_scaled_pointwise",
+        "us": 3.8323090311795345,
+        "smem_bytes": 0,
+        "knobs": {
+          "TILE": "",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "",
+          "REDUCE": "",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_dropout_1_pointwise",
+        "us": 3.8279141479295724,
+        "smem_bytes": 0,
+        "knobs": {
+          "TILE": "",
+          "LOOPIFY": "0",
+          "PLACE": ""
+        },
+        "record_knobs": {
+          "TILE": "",
+          "REDUCE": "",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_315899__partial",
+        "us": 36.24959945678711,
+        "smem_bytes": 16384,
+        "knobs": {
+          "TILE": "a:mma_m16n8k16_f16_f32/w1x2/f4x4/k2",
+          "REDUCE": "g4k",
+          "STAGE": "d2/cp/ring/p2",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        },
+        "record_knobs": {
+          "TILE": "a:mma_m16n8k16_f16_f32/w1x2/f4x4/k2",
+          "REDUCE": "g4k",
+          "STAGE": "d2/cp/ring/p2",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "PLACE": "",
+          "RASTER": ""
+        }
+      },
+      {
+        "kernel": "k_linear_315899",
+        "us": 2.3482197916114727,
+        "smem_bytes": 0,
+        "knobs": {
+          "LOOPIFY": "0"
+        },
+        "record_knobs": {
+          "TILE": "",
+          "REDUCE": "",
+          "STAGE": "",
+          "WSPEC": "",
+          "LOOPIFY": "0",
+          "RASTER": ""
+        }
+      }
+    ]
+  },
+  "pinned": []
+}

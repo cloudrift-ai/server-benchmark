@@ -376,6 +376,114 @@ def test_trace_multiple_outputs():
     assert len(g.outputs) == 2
 
 
+@pytest.mark.parametrize(
+    ("width", "expected_widths", "expected_starts"),
+    [
+        (6, (2, 2, 2), (0, 2, 4)),
+        (7, (3, 3, 1), (0, 3, 6)),
+        (2, (1, 1), (0, 1)),
+    ],
+)
+def test_trace_chunk_materializes_static_slices_and_matches_eager(width, expected_widths, expected_starts):
+    """Divisible and uneven ``aten.chunk`` outputs become cumulative slices with
+    PyTorch's exact output shapes and values."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.ir.frontend.ir import SliceOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Chunk(nn.Module):
+        def forward(self, x):
+            return torch.chunk(x, 3, dim=1)
+
+    x = torch.arange(2 * width, dtype=torch.float32).reshape(2, width)
+    graph = trace_module(Chunk(), (x,))
+    slices = [node for node in graph.nodes.values() if isinstance(node.op, SliceOp)]
+    assert tuple(node.op.start for node in slices) == expected_starts
+    assert tuple(node.output.shape[1].as_static() for node in slices) == expected_widths
+
+    backend = LoopBackend()
+    compiled = backend.compile(graph)
+    result, _ = backend.run(compiled, input_data={compiled.inputs[0]: x.numpy()})
+    for got, expected in zip(result.outputs.values(), torch.chunk(x, 3, dim=1), strict=True):
+        np.testing.assert_array_equal(got, expected.numpy())
+
+
+def test_trace_chunk_getitem_routes_to_selected_slice():
+    """A downstream tuple getitem aliases the requested chunk, not the chunk input."""
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.ir.frontend.ir import SliceOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class MiddleChunk(nn.Module):
+        def forward(self, x):
+            return torch.chunk(x, 3, dim=-1)[1]
+
+    graph = trace_module(MiddleChunk(), (torch.randn(2, 7),))
+    output = graph.nodes[graph.outputs[0]]
+    assert isinstance(output.op, SliceOp)
+    assert output.op.start == 3
+    assert output.output.shape[-1].as_static() == 3
+
+
+@pytest.mark.parametrize(("chunks", "dim", "message"), [(object(), 1, "chunk count"), (3, object(), "dimension")])
+def test_trace_chunk_rejects_nonconstant_arguments(chunks, dim, message):
+    """Dynamic chunk counts and dimensions fail explicitly instead of producing a bad tuple alias."""
+    from types import SimpleNamespace
+
+    import torch
+
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.trace.torch import _handle_chunk
+
+    graph = Graph()
+    source_id = graph.add_node(InputOp(), [], Tensor("x", (2, 6)), node_id="x")
+    source = SimpleNamespace(name="x")
+    fx_node = SimpleNamespace(
+        name="chunk",
+        args=(source, chunks, dim),
+        meta={"val": [torch.empty(2, 2), torch.empty(2, 2), torch.empty(2, 2)]},
+    )
+    with pytest.raises(NotImplementedError, match=message):
+        _handle_chunk(graph, fx_node, {"x": source_id})
+
+
+def test_trace_chunk_rejects_dynamic_chunked_extent():
+    """A symbolic output extent cannot be encoded as a static SliceOp window."""
+    from types import SimpleNamespace
+
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.trace.torch import _handle_chunk
+
+    graph = Graph()
+    source_id = graph.add_node(InputOp(), [], Tensor("x", (2, "seq_len")), node_id="x")
+    source = SimpleNamespace(name="x")
+    symbolic_extent = object()
+    value = SimpleNamespace(shape=(2, symbolic_extent), dtype="float32")
+    fx_node = SimpleNamespace(name="chunk", args=(source, 3, 1), meta={"val": [value]})
+    with pytest.raises(NotImplementedError, match="dynamic chunked dimension"):
+        _handle_chunk(graph, fx_node, {"x": source_id})
+
+
+def test_trace_chunk_rejects_invalid_tuple_index():
+    """Invalid tuple getitem indices name the tuple arity in the error."""
+    from types import SimpleNamespace
+
+    from emmy.compiler.trace.torch import _handle_getitem
+
+    source = SimpleNamespace(name="chunk")
+    fx_node = SimpleNamespace(name="getitem", args=(source, 3))
+    with pytest.raises(IndexError, match="out of range for 3 outputs"):
+        _handle_getitem(fx_node, {"chunk": ("slice0", "slice1", "slice2")})
+
+
 def test_trace_expand_is_broadcast_not_reshape():
     """``expand`` (size-1 -> N) is a broadcast, not a reshape: it changes the
     element count. Tracing it as a ``ReshapeOp`` makes the decomposition apply

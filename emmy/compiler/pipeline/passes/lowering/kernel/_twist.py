@@ -27,7 +27,7 @@ residence — the fragment row of the placement-keyed fold (a within-warp ``Frag
   no smem round-trip, no sync; gated at schedule time);
 - the projection tail (``O / l``) realizes as an in-place ``FragmentApply`` + the ``RegStore``
   output close;
-- a resolved K/V ``Stage`` on the streaming ``Reduction`` node (``_schedule._resolve_twisted_stage``,
+- a resolved K/V ``Stage`` on the streaming ``Fold`` node (``_schedule._resolve_twisted_stage``,
   cp.async or TMA over a block-divisible-or-symbolic kv) re-parents the streaming step under the same
   ``staged_kloop`` skeleton the matmul tier runs: the K/V slabs fill per KV block (each in its
   operand's own layout — verbatim row copies, so staged stays bit-identical to gmem-direct) and
@@ -68,10 +68,10 @@ from emmy.compiler.ir.kernel.ir import (
     RegFragment,
     RegStore,
 )
-from emmy.compiler.ir.schedule import Fold, Level, ReduceStage
+from emmy.compiler.ir.schedule import FoldMove, Level, ReduceStage
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Cond, Init, Load, Select, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile.ir import Contraction, Map, Reduction, contraction_view, gmem_row_stride, is_contraction_fold
+from emmy.compiler.ir.tile.ir import Contraction, Fold, Map, contraction_view, gmem_row_stride, is_contraction_fold
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _clamp_last, _f16acc, unroll_ok
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
@@ -112,15 +112,15 @@ _NEGATE = {"<=": ">", "<": ">=", ">=": "<", ">": "<=", "==": "!="}
 
 
 def warp_source(op):
-    """The warp-tiled stream-head fold of a ``TWISTED`` :class:`Reduction` tree
+    """The warp-tiled stream-head fold of a ``TWISTED`` :class:`Fold` tree
     (``op`` bare or under a projecting :class:`Map`), or ``None`` — the structural schedule read
     the one binder keys the fragment realization on (like ``plan.coop`` keys the lane tiling).
     Returns the STORED ``role=CONTRACTION`` fold — its ``tile`` is the schedule fact the caller
     reads; :func:`realize_warp_twist` derives the full views itself."""
     red = op.source if isinstance(op, Map) else op
-    if not isinstance(red, Reduction) or len(red.partial) == 0:
+    if not isinstance(red, Fold) or len(red.step) == 0:
         return None
-    head = red.partial[0]
+    head = red.step[0]
     if is_contraction_fold(head) and head.tile is not None and head.tile.is_warp:
         return head
     return None
@@ -408,8 +408,8 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     close)`` triple the one ``_bind`` pipeline seals (state = the handoff slab + running stats +
     output fragments + hoisted scalars; fold = the streaming :class:`StridedLoop`; close = the
     realized projection + the fragment output store). See the module docstring for the walk."""
-    red: Reduction = op.source if isinstance(op, Map) else op
-    partial = list(red.partial)
+    red: Fold = op.source if isinstance(op, Map) else op
+    partial = list(red.step)
     # The stored steps are role=CONTRACTION folds; the realizer works on their DERIVED views. The
     # query / value axes come off the placement's free axes (``Ctx.free`` — the un-shrunk
     # originals); the score's stream axis is the fold's own, read through a slice partial's window
@@ -675,7 +675,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         # _factor.emit_combine realizes as a WarpShuffle over scalar registers). Each query tile's
         # merge is an independent chain — ptxas interleaves them (the reg_m ILP).
         (row_move,) = ReduceStage(Level.BLOCK, 32).combine(warp_size=32)
-        assert row_move is Fold.SHFL, row_move
+        assert row_move is FoldMove.SHFL, row_move
         for qt in qtiles:
             s = qt.sfx
             # pivot: the per-block fold (rowmax) then the running update mn = fold(m, rowmax(S)) + α.

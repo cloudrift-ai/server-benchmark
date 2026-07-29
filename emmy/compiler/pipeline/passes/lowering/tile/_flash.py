@@ -10,16 +10,16 @@ halves:
   ``gqa_group`` predicates, and the fragment builder ``build_flash_frag``. It doesn't
   hand-assemble a kernel body — it builds the high-level **structural-node tree**
   (``ir/tile/ir``): flash is the **two-``Contraction`` tree** ``Map(body=[O/l projection],
-  sources=(Reduction(role=TWISTED, axis=kv, partial=[Contraction(Σ_dd Q·K), …, Contraction(Σ_j P·V)]),))``
-  — the ``(m,l,O)`` LSE streaming reduce over kv whose per-step ``partial`` holds BOTH the ``Σ_dd Q·K``
+  sources=(Fold(role=TWISTED, axis=kv, step=[Contraction(Σ_dd Q·K), …, Contraction(Σ_j P·V)]),))``
+  — the ``(m,l,O)`` LSE streaming reduce over kv whose per-step ``step`` holds BOTH the ``Σ_dd Q·K``
   score :class:`Contraction` (at its head) and the **P@V** ``Σ_j P·V`` :class:`Contraction` (its A
   operand the register-resident softmax weight ``P``; ``_split_pv`` redirects the carrier's
   expectation-fold value through it), projected ``O/l`` after the loop. Both Q@K and P@V ride the
-  single walked ``partial`` edge (no ``source`` asymmetry) and factorize through the one
+  single walked ``step`` edge (no ``source`` asymmetry) and factorize through the one
   ``_factor`` contraction path; block=1 is the scalar streaming degenerate (``j`` a singleton reduce).
   ``build_flash_frag`` returns that ``Map`` UNLOWERED, on a ``TileOp`` with an UNMAPPED ``Placement``
   — the free ``(batch…, m, d)`` axes are the schedule's (like every recognizer), and ``_schedule``
-  maps them onto the grid; ``materialize`` lowers the nodes (``Reduction.loop`` splices the
+  maps them onto the grid; ``materialize`` lowers the nodes (``Fold.loop`` splices the
   contraction's ``Σ Q·K`` loop ahead of the partial, the scalar tier expanding the same loop nest) +
   generates the output-store glue (the ``Write`` at the grid cell — not stored).
 
@@ -91,7 +91,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop.ir import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Carrier, Load, Loop, Select, SelectBranch, Write
-from emmy.compiler.ir.tile import Channel, Contraction, Placement, Reduction, TileOp, TilePlan
+from emmy.compiler.ir.tile import Channel, Contraction, Fold, Placement, TileOp, TilePlan
 from emmy.compiler.ir.tile.ops import Map
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import make_cone
 from emmy.compiler.pipeline.passes.lowering.tile._carrier import denom, exp_family_twist, expect
@@ -388,11 +388,11 @@ def _flash_op(
     out_store: tuple[str, tuple] | None = None,
 ) -> Map:
     """The per-output-element ``(…, m, d)`` compute as the structural-node tree: flash is
-    ``Map(body=[O/l projection], sources=(Reduction(role=TWISTED, axis=kv, partial=[Contraction(QK), …,
+    ``Map(body=[O/l projection], sources=(Fold(role=TWISTED, axis=kv, step=[Contraction(QK), …,
     Contraction(PV)]))`` — the ``(m,l,O)`` LSE streaming reduce over ``kv`` whose per-step **partial**
     holds the NESTED ``Σ_dd Q·K`` :class:`Contraction` node at its head (then scaled, optionally
     masked, the value read + the carrier's dissolved merge with the PV contraction), projected ``O/l``
-    after the loop. :meth:`Reduction.loop` flattens the head QK node the same way it flattens the
+    after the loop. :meth:`Fold.loop` flattens the head QK node the same way it flattens the
     embedded PV, so the scalar tier expands the same loop-in-body nest as before. The free
     ``(batch…, m, d)`` axes are the ``TileOp``'s grid, not loops here; the output store is glue
     generated at materialize.
@@ -416,7 +416,7 @@ def _flash_op(
         q_idx, k_idx, v_idx = access_indices
 
     # s = Σ_dd Q·K — the inner contraction as a high-level :class:`Contraction` structural node, the
-    # ``source`` of the streaming kv :class:`Reduction`. Per-cell scalar (``TilePlan()``): the
+    # ``source`` of the streaming kv :class:`Fold`. Per-cell scalar (``TilePlan()``): the
     # redundant one-dot-per-output-element score. Its output axes are the score matrix ``[m, kv]``.
     # The scale / mask reads ``sacc``.
     score_contraction = Contraction(
@@ -465,25 +465,25 @@ def _flash_op(
             )
         )
         score_name = "s_banded"
-    # The (m,l,O) streaming fold over kv, as a ``TWISTED`` :class:`Reduction` node: its per-step
-    # ``partial`` is the scale / mask binding ``score_name``, then the carrier's dissolved streaming
+    # The (m,l,O) streaming fold over kv, as a ``TWISTED`` :class:`Fold` node: its per-step
+    # ``step`` is the scale / mask binding ``score_name``, then the carrier's dissolved streaming
     # ``merge`` with the **PV split out as a real contraction**. ``flash_combine`` supplies the state +
-    # twist; the nested ``Σ Q·K`` contraction rides on ``source`` (``Reduction.loop`` splices its loop
+    # twist; the nested ``Σ Q·K`` contraction rides on ``source`` (``Fold.loop`` splices its loop
     # ahead of the partial). Both P@V and Q@K are now :class:`Contraction` nodes — the two-contraction tree.
     carrier = flash_combine("m_i", "l_i", "O_i", score_name, "v_e")
     m_axis = Axis(name="m", extent=s_q)
     d_axis = Axis(name="d", extent=Dim(d_v))
-    # Both contractions ride the single walked edge — ``partial``: the ``Σ_dd Q·K`` score at its head,
+    # Both contractions ride the single walked edge — ``step``: the ``Σ_dd Q·K`` score at its head,
     # then the scale / mask binding ``score_name``, then the carrier's dissolved streaming ``merge``
-    # with the **PV split out as a real Contraction**. ``Reduction.loop`` flattens the head QK node the
+    # with the **PV split out as a real Contraction**. ``Fold.loop`` flattens the head QK node the
     # same way it flattens the embedded PV, so the scalar tier expands the identical loop-in-body nest
-    # — but the recursion can now reach BOTH contractions as nodes on ``partial`` (no ``source``
+    # — but the recursion can now reach BOTH contractions as nodes on ``step`` (no ``source``
     # asymmetry between QK and PV).
     partial = [score_contraction.as_fold(), *score_post, *_split_pv(carrier.dissolve(), "O_i", "v_e", v_buf, v_idx, m_axis, d_axis)]
-    reduction = Reduction(
+    reduction = Fold(
         carrier=carrier,
         axis=Axis(name="kv", extent=s_k),
-        partial=Body(tuple(partial)),
+        step=Body(tuple(partial)),
         role=AxisRole.TWISTED,
     )
     # φ projection: normalize the streamed (unnormalized) output by the LSE denominator —

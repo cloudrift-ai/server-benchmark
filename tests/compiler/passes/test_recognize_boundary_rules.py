@@ -1,7 +1,7 @@
 """The Loop-IR → Tile-IR boundary fires for every kernel kind.
 
 ``lowering/tile/010_recognize`` is the sole recognizer that lifts a
-``LoopOp`` into the tile IR (a ``Map`` / ``Reduction`` / ``Contraction``
+``LoopOp`` into the tile IR (a ``Map`` / ``Fold`` / ``Contraction``
 node). These assert it fires on the two simplest kinds — pointwise and
 reduce — transitively proving the axes got lifted and the kernel entered
 the tile dialect (no planner / launch-geometry fallback needed), and that
@@ -163,7 +163,7 @@ def test_lift_recognizes_contraction_between_views_of_same_packed_buffer():
 
 # --------------------------------------------------------------------------- #
 # The MONOID-producer composition — ``rmsnorm(x)·nw @ w`` nodifies to a computed-A
-# ``Contraction`` fork sibling of the ``Map(source=Reduction)`` form (``010_recognize``'s
+# ``Contraction`` fork sibling of the ``Map(source=Fold)`` form (``010_recognize``'s
 # ``bind_prologue_contraction`` merge). Pipeline-only (no CUDA): resolve the tile passes with a
 # capturing ``decide`` and assert the fork rows / the picked node's structure.
 # --------------------------------------------------------------------------- #
@@ -282,9 +282,9 @@ def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
 
 def test_norm_linear_warp_pick_is_computed_a_contraction():
     """Picking a warp row materializes the recognize-built ``Map(body=projection, source=node)``
-    tree — the same ``project ∘ contract`` spelling the Reduction tiers use: the source is a
+    tree — the same ``project ∘ contract`` spelling the Fold tiers use: the source is a
     computed-A :class:`Contraction` holding its A cone INLINE, a real node tree
-    (``Map(body=per-cell normalize, sources=(Reduction(stat),))``), one channel, its (m, n)
+    (``Map(body=per-cell normalize, sources=(Fold(stat),))``), one channel, its (m, n)
     output on the grid (the column axis joined); the ``Map`` body carries the ``Write``; and the knob
     stamps the DB rows key on (``PLACE@cone`` + the decided-empty stat ``REDUCE``). Xfail-parked on
     the PLACE wipe — the ``PLACE@cone`` stamp returns with the phase-4 realizer."""
@@ -309,7 +309,7 @@ def test_norm_linear_cone_is_an_inline_node_tree():
     """The computed-A cone lives ONCE, inline on an operand edge of the stored fold, as a real node
     tree: its SOURCE is
     the row-invariant prologue — the per-row statistic (a projected reduce over the stat
-    :class:`Reduction`) plus any k-invariant cone prefix — and its ``body`` is the per-cell
+    :class:`Fold`) plus any k-invariant cone prefix — and its ``body`` is the per-cell
     normalize. The K seam is therefore the NODE BOUNDARY: ``ops.cone_seam`` reads it instead of
     re-scanning stmts for "the maximal leading run that never indexes K", and the statistic is
     addressable (and later cuttable) in its own right. Lowering flattens the whole thing back to the
@@ -426,7 +426,7 @@ def test_normed_gqa_sdpa_certifies_flash():
     src = flash[0].op.source
     from emmy.compiler.ir.tile import is_contraction_fold
 
-    assert is_contraction_fold(src.partial[0]), "flash did not absorb the score contraction (fold stayed cut)"
+    assert is_contraction_fold(src.step[0]), "flash did not absorb the score contraction (fold stayed cut)"
 
 
 def test_bind_contraction_declined_cone_raises_not_positional():
@@ -474,16 +474,14 @@ def _prologue_shape(*, b_layouts):
     from emmy.compiler.ir.axis import Axis
     from emmy.compiler.ir.expr import Var
     from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-    from emmy.compiler.ir.tile import Reduction
+    from emmy.compiler.ir.tile import Fold
 
     m, n, k, r = Axis("m", 8), Axis("n", 16), Axis("k", 32), Axis("r", 32)
     fold = Accum(name="sacc", value="sq", op="add")
-    stat = Reduction(
+    stat = Fold(
         carrier=fold.as_carrier(),
         axis=r,
-        partial=Body(
-            (Load(name="x_e", input="x", index=(Var("m"), Var("r"))), Assign(name="sq", op="multiply", args=("x_e", "x_e")), fold)
-        ),
+        step=Body((Load(name="x_e", input="x", index=(Var("m"), Var("r"))), Assign(name="sq", op="multiply", args=("x_e", "x_e")), fold)),
     )
     kbody = [Load(name="x_k", input="x", index=(Var("m"), Var("k"))), Assign(name="xh", op="multiply", args=("x_k", "rs"))]
     for i, trans in enumerate(b_layouts):

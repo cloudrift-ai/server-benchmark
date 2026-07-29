@@ -8,16 +8,16 @@ It sits between Loop IR (pure iteration) and Kernel IR (threads / smem):
 
 The whole point of the layer is the article's thesis: **the schedule is
 separate from the combine.** A ``TileOp`` holds the structural-IR root ``op``
-(the *combine* — the :class:`Map` / :class:`Reduction` / :class:`Contraction`
+(the *combine* — the :class:`Map` / :class:`Fold` / :class:`Contraction`
 nodes defined **in this module**, alongside ``ir/stmt/algebra``) directly,
 plus a thin set of **root-global schedule fields** — the
 free-axis → grid :class:`~.schedule.Placement` (``place``) and the warp split
 (``workers``). The
 per-node schedule slices ride the structural nodes themselves (a
-:class:`Contraction`'s ``tile``, a :class:`Reduction`'s
-``reduce``, a :class:`Contraction`'s / :class:`Reduction`'s ``stage`` — EVERY schedule slice rides
+:class:`Contraction`'s ``tile``, a :class:`Fold`'s
+``reduce``, a :class:`Contraction`'s / :class:`Fold`'s ``stage`` — EVERY schedule slice rides
 the node it decorates, none on the ``TileOp`` (flash is now a
-``Map(sources=(Reduction(partial=[Contraction(QK), …, Contraction(PV)]),))`` node tree, so its
+``Map(sources=(Fold(step=[Contraction(QK), …, Contraction(PV)]),))`` node tree, so its
 partition rides the node). There is no per-kind kernel/schedule type: the algebra is read
 structurally off the axes' :class:`~emmy.compiler.ir.axis.AxisRole`
 (``ops.axis_role``), so MAP / MONOID / SEMIRING all ride the same ``TileOp``.
@@ -43,7 +43,7 @@ max its own loop step updates, and that seam is simply not cuttable.
 
 **Every structural node is a ``Stmt``.** A composed step occupies a statement
 position in another node's body — flash's ``Σ_dd Q·K`` and ``Σ_j P·V`` in a
-reduce ``partial``, split-K's sliced contraction, the fused sibling group inside
+reduce ``step``, split-K's sliced contraction, the fused sibling group inside
 a split reduce — and its POSITION there is semantic: flash's PV reads the softmax
 weight the merge stmts of that same loop step produce, so it cannot be hoisted
 ahead of them. Composition therefore rides the sequence, not a hoisted operand
@@ -53,7 +53,7 @@ stmt's). ``Map.sources`` are the exception on purpose: they are node EDGES,
 reached by the node-aware walk (:func:`tree_nodes`), like a contraction operand.
 
 The combine lives entirely in the ``op`` wrapper (the :class:`Map` /
-:class:`Reduction` / :class:`Contraction` nodes here + ``ir/stmt/algebra``): a
+:class:`Fold` / :class:`Contraction` nodes here + ``ir/stmt/algebra``): a
 node whose per-cell loop nest carries the role (``AxisRole``) + the decoupled
 ``Carrier`` (the ⊕ algebra). The algebra is **not stored as a node kind**; the
 role/carrier are read off the node / annotated loop where a pass needs them
@@ -119,7 +119,7 @@ def _splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ..
 
 
 def _flatten_nodes(body: Body) -> tuple[Stmt, ...]:
-    """Flatten any nested **structural node** — a :class:`Contraction`, :class:`Reduction`, or
+    """Flatten any nested **structural node** — a :class:`Contraction`, :class:`Fold`, or
     :class:`Map` — that sits as a stmt in ``body`` to its own lowered loop nest; plain stmts pass
     through. All three node kinds ARE ``Stmt``\\ s, which is what makes a composed step a legal member
     of a ``Body``: flash's ``Σ_dd Q·K`` score and its ``Σ_j P·V``, split-K's sliced contraction, and
@@ -134,7 +134,7 @@ def _flatten_nodes(body: Body) -> tuple[Stmt, ...]:
 
     out: list[Stmt] = []
     for s in body:
-        if isinstance(s, (Reduction, Map)):
+        if isinstance(s, (Fold, Map)):
             out.extend(lower(s))
         else:
             out.append(s)
@@ -142,20 +142,20 @@ def _flatten_nodes(body: Body) -> tuple[Stmt, ...]:
 
 
 @dataclass(frozen=True)
-class Reduction(Stmt):
+class Fold(Stmt):
     """A scheduled ``PLANAR`` / ``TWISTED`` reduce — the typed successor of the bare annotated reduce
     ``Loop`` (``ir/stmt/algebra``). It splits the reduce's **algebra** (the loop-carried
     :class:`~emmy.compiler.ir.stmt.algebra.Carrier` — degenerate ``id`` for a plain
     ``sum`` / ``max`` / ``mean``, twisted ``exp`` for online-softmax / flash) from its **structure**
-    (the reduce ``axis`` + the per-element ``partial`` it folds). The fold ``Loop`` is **synthesized on
+    (the reduce ``axis`` + the per-element ``step`` it folds). The fold ``Loop`` is **synthesized on
     demand** (:attr:`loop`), never stored — so the same node tiles under any
     :class:`~emmy.compiler.ir.schedule.ReducePlan` (the reduce partition rides the node's
     ``reduce`` field, read via ``ops.reduce_plan``).
 
-    A reduce whose per-step partial COMPOSES another node — split-K's ``Reduction ⊃ Contraction``
+    A reduce whose per-step partial COMPOSES another node — split-K's ``Fold ⊃ Contraction``
     (whose ``axis`` ``ksplit`` differs from the inner ``k_axis`` ``kslice``, so no double-reduce),
     flash's ``Σ Q·K`` score at the head of its kv step — spells it ONE way: the node sits in
-    ``partial`` and :func:`_flatten_nodes` flattens it in place. There is no second ``source`` edge.
+    ``step`` and :func:`_flatten_nodes` flattens it in place. There is no second ``source`` edge.
 
     It holds **no projection**: a bare reduce (``sum`` / ``max``) is the kernel root (its grid ``Write``
     is glue); a reduce with a post-fold sweep (softmax / RMSNorm) is the ``source`` of a wrapping
@@ -171,7 +171,7 @@ class Reduction(Stmt):
 
     carrier: Carrier  # the loop-carried ⊕ algebra (degenerate id / twisted exp / the product monoid)
     axis: Axis  # the reduce axis
-    partial: Body = field(default_factory=Body)  # the per-cell fold STEP (the reduce Loop's body, operands excluded)
+    step: Body = field(default_factory=Body)  # the per-cell fold STEP (the reduce Loop's body, operands excluded)
     role: AxisRole = AxisRole.PLANAR  # PLANAR (plain), TWISTED (online-softmax / flash) or CONTRACTION (1k)
     unroll: bool = False
     # The CLOSED inputs, each an operand edge (a gmem ``Load`` or an inline node) — the 1k fold
@@ -191,21 +191,21 @@ class Reduction(Stmt):
     # split parentage uses, read by the realizer and the mask machinery alike.
 
     def __post_init__(self) -> None:
-        if not isinstance(self.partial, Body):
-            object.__setattr__(self, "partial", Body.coerce(self.partial))
+        if not isinstance(self.step, Body):
+            object.__setattr__(self, "partial", Body.coerce(self.step))
 
     @classmethod
-    def from_loop(cls, loop: Loop) -> Reduction:
-        """Build a :class:`Reduction` from an already-annotated reduce ``Loop`` (its ``carrier`` /
+    def from_loop(cls, loop: Loop) -> Fold:
+        """Build a :class:`Fold` from an already-annotated reduce ``Loop`` (its ``carrier`` /
         ``role`` / ``axis`` / body) — the recognize-side constructor. :attr:`loop` reconstructs the
         exact same ``Loop`` (any post-fold projection rides the wrapping ``Map``, not here)."""
-        return cls(carrier=loop.carrier, axis=loop.axis, partial=loop.body, role=loop.role, unroll=loop.unroll)
+        return cls(carrier=loop.carrier, axis=loop.axis, step=loop.body, role=loop.role, unroll=loop.unroll)
 
     @property
     def loop(self) -> Loop:
         """The synthesized annotated reduce ``Loop`` — reconstructed from the params. With a plain
-        ``partial`` it is byte-identical to the loop :meth:`from_loop` captured. Any **nested
-        structural node inside the ``partial``** — a :class:`Contraction` / :class:`Reduction` /
+        ``step`` it is byte-identical to the loop :meth:`from_loop` captured. Any **nested
+        structural node inside the ``step``** — a :class:`Contraction` / :class:`Fold` /
         :class:`Map` — is flattened to its own loop nest in place by the shared :func:`_flatten_nodes`
         node-walk (so flash's kv loop holds the head ``Σ Q·K`` score contraction loop and the embedded
         ``Σ_j P·V`` PV contraction loop, and split-K's kslice contraction its own nest — exactly the
@@ -213,14 +213,14 @@ class Reduction(Stmt):
         partial composes other nodes. Operand edges splice in ahead of their first use
         (:func:`_splice_operands`), so a fold with hoisted inputs lowers byte-identically to the
         flat form that carried them in its body."""
-        stmts = _splice_operands(self.operands, _flatten_nodes(self.partial))
+        stmts = _splice_operands(self.operands, _flatten_nodes(self.step))
         return Loop(axis=self.axis, body=Body(stmts), unroll=self.unroll, role=self.role, carrier=self.carrier)
 
     def spliced_step(self) -> tuple[Stmt, ...]:
         """The step with every operand edge's body spliced before its first use — the stmt sequence
         the emit-side node walk consumes (nested structural nodes NOT flattened; :attr:`loop`
         additionally flattens them)."""
-        return _splice_operands(self.operands, tuple(self.partial))
+        return _splice_operands(self.operands, tuple(self.step))
 
     @property
     def out(self) -> str:
@@ -235,16 +235,16 @@ class Reduction(Stmt):
 
     # ---- the stmt protocol: a composed step occupies a statement position, so generic body walks
     # must reach its children. ``defines`` stays the block-stmt default — the fold's names are bound
-    # by the ``Accum``\\ s inside ``partial``, exactly as for a plain reduce ``Loop``. ---------- #
+    # by the ``Accum``\\ s inside ``step``, exactly as for a plain reduce ``Loop``. ---------- #
     def nested(self) -> tuple[Body, ...]:
-        return (self.partial,)
+        return (self.step,)
 
     def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
         (partial,) = bodies
-        return replace(self, partial=partial)
+        return replace(self, step=partial)
 
     def render(self, ctx: RenderCtx) -> list[str]:
-        raise AssertionError("Reduction must be lowered (ops.lower) before render")
+        raise AssertionError("Fold must be lowered (ops.lower) before render")
 
 
 @dataclass(frozen=True)
@@ -317,9 +317,9 @@ def axis_names(root) -> set[str]:
     not by any value tree, so a subtree reading one is never capturing a value."""
     out: set[str] = set()
     for node in tree_nodes(root):
-        if isinstance(node, Reduction):
+        if isinstance(node, Fold):
             out.add(node.axis.name)
-            out |= _stmt_axis_names(node.partial)
+            out |= _stmt_axis_names(node.step)
         elif isinstance(node, Map):
             out |= _stmt_axis_names(node.body)
     return out
@@ -407,7 +407,7 @@ class Channel:
     fused gate⊗up MLP edge is two channels over the node's single shared ``a`` (sharing is arity,
     not naming — the product-carrier contraction outputs a tuple)."""
 
-    b: Load | Map | Reduction | Contraction  # the streamed operand edge — MATERIALIZED or COMPUTED
+    b: Load | Map | Fold | Contraction  # the streamed operand edge — MATERIALIZED or COMPUTED
     acc: str  # this channel's fold accumulator
 
 
@@ -458,7 +458,7 @@ class Contraction:
     # needs B's gmem address states ``isinstance(c.b, Load)`` as an explicit eligibility
     # precondition and declines otherwise — not in the structural type. A computed B lowers on the
     # gmem-direct scalar tier through the same ``contraction_loop`` builder a computed A does.
-    a: Load | Map | Reduction | Contraction
+    a: Load | Map | Fold | Contraction
     channels: tuple[Channel, ...]  # the product channels (b_i, acc_i) — params; arity 1 = plain matmul
     tile: TilePlan  # the schedule: leaf atom + unit/register widths + K-chunk
     lead_axes: tuple[Axis, ...] = ()  # params
@@ -532,7 +532,7 @@ class Contraction:
         back to the loop nest; the node never stores the loop.
 
         At arity N the ONE fused group loop is DERIVED here (never stored, exactly like
-        :attr:`Reduction.loop`): the shared A is lifted once (the primary channel's loop), each
+        :attr:`Fold.loop`): the shared A is lifted once (the primary channel's loop), each
         further channel splices its ``b → ⊗ → ⊕`` triple after it reusing that A value, and the
         carrier is the N-COMPONENT identity-family state (one additive component per channel) — the
         true product-monoid state, so the cross-CTA split tier folds every channel's partials;
@@ -569,11 +569,11 @@ class Contraction:
         through ``_factor.factorize`` instead; this is the structural-key / dump path."""
         return [self.loop]
 
-    def as_fold(self) -> Reduction:
-        """The STORED (1k) form of this view — a ``role=CONTRACTION`` :class:`Reduction`/fold whose
-        ``operands`` are the closed inputs and whose ``partial`` is the pure lift/fold step. The
+    def as_fold(self) -> Fold:
+        """The STORED (1k) form of this view — a ``role=CONTRACTION`` :class:`Fold`/fold whose
+        ``operands`` are the closed inputs and whose ``step`` is the pure lift/fold step. The
         operand tuple order and the lift arg spellings reproduce the historical synthesis exactly
-        (primary lift ``(b, a)``, further channels ``(a, b_i)``), so :attr:`Reduction.loop`'s
+        (primary lift ``(b, a)``, further channels ``(a, b_i)``), so :attr:`Fold.loop`'s
         first-use splice yields a loop byte-identical to :attr:`loop` — the round-trip
         ``contraction_view(as_fold()) == self`` (axes supplied by the caller's placement) is what
         keeps kernel identity fixed across the storage change."""
@@ -591,10 +591,10 @@ class Contraction:
                 Assign(name=f"{ch.acc}__v", op=mul, args=(self.a_name, _operand_name(ch.b))),
                 Accum(name=ch.acc, value=f"{ch.acc}__v", op=add, axes=(k,)),
             ]
-        return Reduction(
+        return Fold(
             carrier=self.loop.carrier,
             axis=self.k_axis,
-            partial=Body(tuple(step)),
+            step=Body(tuple(step)),
             role=AxisRole.CONTRACTION,
             operands=(prim.b, self.a, *(ch.b for ch in self.channels[1:])),
             tile=self.tile,
@@ -688,9 +688,9 @@ class Map(Stmt):
 
     ``body`` is the per-cell pointwise / projection compute: operand ``Load``\\ s, the lift
     ``Assign``\\ s, and — at the kernel root — the output ``Write``. ``sources`` are the structural
-    nodes it projects over (:class:`Reduction` / :class:`Contraction` — ``project ∘ reduce``), empty
+    nodes it projects over (:class:`Fold` / :class:`Contraction` — ``project ∘ reduce``), empty
     for a pure pointwise map. A pure pointwise cell is a ``Map`` of plain stmts (``sources=()``);
-    softmax / RMSNorm is a ``Map`` whose ``body`` is the post-fold sweep over a ``Reduction`` source.
+    softmax / RMSNorm is a ``Map`` whose ``body`` is the post-fold sweep over a ``Fold`` source.
     SEVERAL sources is the **fused sibling group** — N :class:`Contraction`\\ s over one shared A
     (referenced by binding name), the gate⊗up MLP edge; the group schedules and lowers as ONE unit.
     Every recognized contraction — per-cell scalar included — is a :class:`Contraction` node
@@ -698,11 +698,11 @@ class Map(Stmt):
     a flat ``Map`` body are ``030_split_reduce``'s sliced partials. ``out`` is the bound output name (the
     body's last def, or the primary source's carried state for an empty-body wrap). It HAS a Body, not
     IS one — and it is itself a ``Stmt``, so it can occupy a statement position in another node's body
-    (the fused sibling group inside a split reduce's ``partial``).
+    (the fused sibling group inside a split reduce's ``step``).
     :attr:`source` is the len-≤1 compat read for the single-source forms."""
 
     body: Body = field(default_factory=Body)
-    sources: tuple[Reduction | Contraction | Map, ...] = ()  # the project∘reduce sources, () = pure pointwise
+    sources: tuple[Fold | Contraction | Map, ...] = ()  # the project∘reduce sources, () = pure pointwise
 
     def __post_init__(self) -> None:
         if not isinstance(self.body, Body):
@@ -711,7 +711,7 @@ class Map(Stmt):
             object.__setattr__(self, "sources", tuple(self.sources))
 
     @property
-    def source(self) -> Reduction | Contraction | Map | None:
+    def source(self) -> Fold | Contraction | Map | None:
         """The single projected source, or ``None`` (pure pointwise) — the compat read every
         single-source form uses. A fused sibling group (N sources) has no single source; read
         ``sources`` there."""
@@ -726,7 +726,7 @@ class Map(Stmt):
             return self.sources[0].out
         return self.body[-1].defines()[-1]
 
-    # ---- the stmt protocol (see ``Reduction``): ``sources`` are NOT nested bodies — they are node
+    # ---- the stmt protocol (see ``Fold``): ``sources`` are NOT nested bodies — they are node
     # edges, reached by the node-aware walk (:func:`tree_nodes`), the same way a ``Contraction``'s
     # operand is. ---------- #
     def nested(self) -> tuple[Body, ...]:
@@ -756,7 +756,7 @@ def _(s: Map, rename, sigma, axis_fn):
 
 
 @_rewrite.register
-def _(s: Reduction, rename, sigma, axis_fn):
+def _(s: Fold, rename, sigma, axis_fn):
     # The schedule slices (``tile`` / ``reduce`` / ``stage``) pass through; the carrier renames in
     # lockstep with the partial's ``Accum``\\ s — the same rule the ``Loop`` handler applies
     # (``Carrier.rename``) — and every operand edge dispatches back through the registry.
@@ -764,7 +764,7 @@ def _(s: Reduction, rename, sigma, axis_fn):
         s,
         carrier=s.carrier.rename(rename),
         axis=axis_fn(s.axis),
-        partial=Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.partial)),
+        step=Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.step)),
         operands=tuple(_rewrite(edge, rename, sigma, axis_fn) for edge in s.operands),
     )
 
@@ -775,11 +775,11 @@ def _parse_bilinear(fold) -> tuple[object, tuple] | None:
     stored spellings: the primary lift's args are ``(b, a)``, further channels' ``(a, b_i)``, and at
     arity N the shared operand is the one name common to every lift. ``None`` when the fold is not
     that shape (a hand-built fold, a foreign step) — the caller keeps the general fold reading."""
-    if not isinstance(fold, Reduction) or fold.role is not AxisRole.CONTRACTION or not fold.operands:
+    if not isinstance(fold, Fold) or fold.role is not AxisRole.CONTRACTION or not fold.operands:
         return None
-    accums = [st for st in fold.partial if isinstance(st, Accum)]
-    lifts = {st.name: st for st in fold.partial if isinstance(st, Assign)}
-    if not accums or len(fold.partial) != 2 * len(accums):
+    accums = [st for st in fold.step if isinstance(st, Accum)]
+    lifts = {st.name: st for st in fold.step if isinstance(st, Assign)}
+    if not accums or len(fold.step) != 2 * len(accums):
         return None
     by_name = {_operand_name(e): e for e in fold.operands}
     try:
@@ -811,7 +811,7 @@ def _parse_bilinear(fold) -> tuple[object, tuple] | None:
 def is_contraction_fold(s) -> bool:
     """``s`` is a stored ``role=CONTRACTION`` fold — the one test every walk over a step sequence
     uses to spot a composed contraction (flash's QK / PV, split-K's sliced fold)."""
-    return isinstance(s, Reduction) and s.role is AxisRole.CONTRACTION
+    return isinstance(s, Fold) and s.role is AxisRole.CONTRACTION
 
 
 def shared_operand(fold):
@@ -846,7 +846,7 @@ def contraction_view(fold, m_axis: Axis, n_axis: Axis, lead_axes: tuple = ()) ->
 
 def _stmt_nodes(s: Stmt):
     """Every structural node reachable from stmt ``s`` (deep through nested bodies)."""
-    if isinstance(s, (Map, Reduction)):
+    if isinstance(s, (Map, Fold)):
         yield from tree_nodes(s)
         return
     for b in s.nested():
@@ -866,11 +866,11 @@ def tree_nodes(op):
             yield from tree_nodes(src)
         for s in op.body:
             yield from _stmt_nodes(s)
-    elif isinstance(op, Reduction):
+    elif isinstance(op, Fold):
         for edge in op.operands:
-            if isinstance(edge, (Map, Reduction)):
+            if isinstance(edge, (Map, Fold)):
                 yield from tree_nodes(edge)
-        for s in op.partial:
+        for s in op.step:
             yield from _stmt_nodes(s)
 
 
@@ -879,7 +879,7 @@ class TileOp(Op):
     """One scheduled map/reduce kernel (see module docstring).
 
     Holds the structural-IR root ``op`` (a :class:`Map` /
-    :class:`Reduction` / :class:`Contraction`, or ``None`` for a
+    :class:`Fold` / :class:`Contraction`, or ``None`` for a
     placeholder node) plus the schedule fields — not a pre-lowered body. The per-cell loop-IR
     body is generated at materialize time by ``lower(op)``, and a bare reduction / contraction's
     output ``Write`` is glue generated there too (from ``place.grid`` + the graph node's output
@@ -897,7 +897,7 @@ class TileOp(Op):
     resolved and every walk is a plain tree walk. There is **no** residual reduce-partition field
     either: EVERY partitioned reduce — a plain / twisted
     monoid, flash, a coop-K / split-K contraction — carries its :class:`~.schedule.ReducePlan` on its
-    ``Reduction`` node (read via ``ops.reduce_plan``); the flat-``Map`` coop-K contraction is nodified
+    ``Fold`` node (read via ``ops.reduce_plan``); the flat-``Map`` coop-K contraction is nodified
     by ``ops.nodify_reduce`` at schedule / split time. The contraction operand→role binding is not a
     ``TileOp`` field either — a tiled contraction carries its A operand / channels on
     its ``Contraction`` node (``op``), the single source of truth; ``_schedule._contraction_node``
@@ -921,7 +921,7 @@ __all__ = [
     "Channel",
     "Contraction",
     "Map",
-    "Reduction",
+    "Fold",
     "TileOp",
     "contraction_view",
     "is_contraction_fold",

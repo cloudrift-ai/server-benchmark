@@ -345,7 +345,7 @@ class PointwiseGoldenConfig(GoldenConfig):
 class RmsNormGoldenConfig(GoldenConfig):
     """A golden config for RMSNorm ``(M, K) → (M, K)`` (``torch.nn.RMSNorm(K)``).
 
-    RMSNorm is a ``Map(body=sweep, source=Reduction)``: a per-row mean-of-squares reduce
+    RMSNorm is a ``Map(body=sweep, source=Fold)``: a per-row mean-of-squares reduce
     over ``K`` feeds an rsqrt that rescales every element of the row (the ``k_rms_norm``
     kernel). It is reduce-tier — the good config reduces each row cooperatively
     (``REDUCE`` coop>1), so it shares the reduce regime's arithmetic key (free=M, reduce=K)
@@ -603,7 +603,7 @@ class MlpGeGluGoldenConfig(GoldenConfig):
 class SoftmaxGoldenConfig(GoldenConfig):
     """Row-softmax ``(M, K) → (M, K)`` over the last axis (``torch.softmax(dim=-1)``).
 
-    A twisted Reduction (max / exp / sum) + a normalize sweep — the ``k_softmax`` kernel.
+    A twisted Fold (max / exp / sum) + a normalize sweep — the ``k_softmax`` kernel.
     Reduce-tier: free rows ``(M,)``, reduce extent ``K``, cooperative ``REDUCE`` over ``K``. The
     reference is torch softmax eager (fp32), so the ratio compares emmy's fused softmax vs PyTorch."""
 
@@ -638,7 +638,7 @@ class AttentionGoldenConfig(GoldenConfig):
     """Scaled-dot-product (flash) attention over ``(1, n_heads, seq, head_dim)`` inputs, causal
     (``F.scaled_dot_product_attention(q, k, v, is_causal=True)``).
 
-    The ``k_scaled_dot_product_attention`` kernel is a TWISTED streaming Reduction over the KV
+    The ``k_scaled_dot_product_attention`` kernel is a TWISTED streaming Fold over the KV
     axis (online-softmax flash) fused with the QKᵀ / ·V matmuls. When ``dynamic: true`` the seq
     axis (``x{0,1,2}:2`` of q / k / v) is symbolic — the masked-tile flash, the deployable
     artifact. The reference is torch SDPA (its own fused path), so the ratio is vs PyTorch."""

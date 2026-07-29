@@ -26,14 +26,14 @@ from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.schedule import ReducePlan
 from emmy.compiler.ir.stmt import Assign, Body, Loop, StridedLoop
 from emmy.compiler.ir.stmt.base import Stmt, pretty_body
-from emmy.compiler.ir.tile.ir import Contraction, Map, Reduction
+from emmy.compiler.ir.tile.ir import Contraction, Fold, Map
 
 
 def cone_seam(cone) -> tuple[tuple, tuple, tuple[str, ...]]:
     """The computed-A cone's ``(prologue, cell, stats)`` — read off the NODE BOUNDARY, not by
     scanning stmts: the cone is ``Map(body=<the per-cell normalize>, sources=(<the row-invariant
     prologue>,))``, and the prologue node IS the per-row statistic (its own ``Map`` over the stat
-    ``Reduction``) plus any row-invariant cone prefix, placed there when the cone was built
+    ``Fold``) plus any row-invariant cone prefix, placed there when the cone was built
     (``_atomize.make_cone`` splits at the K seam once, structurally).
 
     ``stats`` are the prologue defs the cell reads — the values bridged through the stat smem rows;
@@ -53,16 +53,16 @@ def cone_seam(cone) -> tuple[tuple, tuple, tuple[str, ...]]:
 def reduce_loop(op):
     """The kernel's outermost **annotated** reduce ``Loop`` (its ``carrier`` set by recognition),
     or ``None`` for a pure pointwise / flat-fallback ``Map`` (no annotated reduce). A
-    :class:`~emmy.compiler.ir.tile.ir.Reduction` / :class:`Contraction` synthesizes its loop
+    :class:`~emmy.compiler.ir.tile.ir.Fold` / :class:`Contraction` synthesizes its loop
     directly (a multi-channel contraction derives the ONE fused product loop — see
     :attr:`Contraction.loop`); a ``Map``
     is read off the top-level body — the annotated reduce loop is a top-level stmt (a
     single-flat-reduce cell); a nested / multi reduce stays un-annotated (flat fallback) and is
     invisible here, so it materializes on the scalar tier."""
-    if isinstance(op, (Reduction, Contraction)):
+    if isinstance(op, (Fold, Contraction)):
         return op.loop
     if isinstance(op, Map) and op.sources:
-        return reduce_loop(op.sources[0])  # a Map projecting over a Reduction / Contraction source
+        return reduce_loop(op.sources[0])  # a Map projecting over a Fold / Contraction source
     for s in op.body:
         if isinstance(s, (Loop, StridedLoop)) and s.carrier is not None:
             return s
@@ -71,24 +71,24 @@ def reduce_loop(op):
 
 def reduce_plan(tile):
     """The tile's reduce partition (:class:`~emmy.compiler.ir.schedule.ReducePlan`), read
-    **off the** :class:`~emmy.compiler.ir.tile.ir.Reduction` **node** — when ``tile.op`` is a
-    ``Reduction`` (bare, or wrapped via ``Map.source``), else ``None`` (a pure pointwise / scalar
+    **off the** :class:`~emmy.compiler.ir.tile.ir.Fold` **node** — when ``tile.op`` is a
+    ``Fold`` (bare, or wrapped via ``Map.source``), else ``None`` (a pure pointwise / scalar
     per-cell ``Map`` has no partition). Every partitioned reduce — a plain / twisted monoid, flash,
     a coop-K / split-K contraction (:func:`nodify_reduce`) — carries its plan on the node; there is
     **no** residual ``TileOp.reduce`` field. The single accessor the materializer / ``030_split_reduce`` read."""
     op = tile.op
     head = op.sources[0] if isinstance(op, Map) and op.sources else op
-    red = head if isinstance(head, Reduction) else None
+    red = head if isinstance(head, Fold) else None
     return red.reduce if red is not None else None
 
 
 def nodify_reduce(op, plan: ReducePlan):
-    """Nodify a kernel op into a :class:`~emmy.compiler.ir.tile.ir.Reduction` node carrying the
+    """Nodify a kernel op into a :class:`~emmy.compiler.ir.tile.ir.Fold` node carrying the
     reduce partition ``plan`` **on the node** (not a residual ``TileOp.reduce`` field). A
     :class:`Contraction` node (the recognize-side per-cell contraction) folds through its
     synthesized loop — the coop / ILP K partition treats it as the degenerate carrier of its
     additive fold, any projection riding the wrapping ``Map``. A flat ``Map`` holding an annotated
-    reduce ``Loop`` (a split partial) nodifies via :meth:`Reduction.from_loop`, which reconstructs
+    reduce ``Loop`` (a split partial) nodifies via :meth:`Fold.from_loop`, which reconstructs
     the identical annotated loop, so the lowering is byte-identical; a projection tail (a fused
     epilogue) rides a wrapping ``Map`` over the node, a bare reduce becomes the root node.
 
@@ -98,16 +98,16 @@ def nodify_reduce(op, plan: ReducePlan):
     must be a top-level stmt of ``op.body`` with no prologue ahead of it (true for a split partial /
     bare sum: the reduce is the body's head); a projection tail after it becomes the wrapping
     ``Map`` body."""
-    if isinstance(op, Reduction) and op.role is AxisRole.CONTRACTION:
+    if isinstance(op, Fold) and op.role is AxisRole.CONTRACTION:
         # A stored contraction fold: the K partition replaces the (dropped) output tile — the
         # per-cell coop/ILP tier's contract. The derived loop is unchanged (tile is metadata).
         return replace(op, reduce=plan, tile=None)
     head = op.sources[0] if isinstance(op, Map) and op.sources else None
-    if isinstance(head, Reduction) and head.role is AxisRole.CONTRACTION:
+    if isinstance(head, Fold) and head.role is AxisRole.CONTRACTION:
         # A projecting wrapper: nodify the contraction fold under it, the projection staying put.
         return replace(op, sources=(nodify_reduce(head, plan),))
     rloop = reduce_loop(op)
-    red = replace(Reduction.from_loop(rloop), reduce=plan)
+    red = replace(Fold.from_loop(rloop), reduce=plan)
     body = list(op.body)
     idx = body.index(rloop)
     pre, tail = body[:idx], body[idx + 1 :]
@@ -136,9 +136,9 @@ def lower(op) -> list[Stmt]:
     if isinstance(op, Map):
         prefix = [s for src in op.sources for s in lower(src)]
         return [*prefix, *op.body]  # the sources' reduce/contract loop nests, then the projection body
-    if isinstance(op, (Reduction, Contraction)):
+    if isinstance(op, (Fold, Contraction)):
         return op.lower()
-    raise TypeError(f"lower: expected a Map lift wrapper, Reduction, or Contraction, got {type(op).__name__}")
+    raise TypeError(f"lower: expected a Map lift wrapper, Fold, or Contraction, got {type(op).__name__}")
 
 
 def contraction_loop(lift, fold, operand_bodies, reduce_axis) -> Loop:
@@ -162,11 +162,11 @@ def contraction_loop(lift, fold, operand_bodies, reduce_axis) -> Loop:
 
 def pretty(op, indent: str = "") -> list[str]:
     """Structurally pretty-print a kernel op (for dumps) — a
-    :class:`~emmy.compiler.ir.tile.ir.Reduction` as a typed header over its synthesized
+    :class:`~emmy.compiler.ir.tile.ir.Fold` as a typed header over its synthesized
     loop nest, the ``Map``'s body (its annotated reduce ``Loop`` + projection), or a bare stmt's own
     pretty."""
-    if isinstance(op, Reduction):
-        head = f"{indent}Reduction[{op.axis.name}] {op.role.name.lower()}"
+    if isinstance(op, Fold):
+        head = f"{indent}Fold[{op.axis.name}] {op.role.name.lower()}"
         return [head, *pretty_body(Body(op.lower()), indent + "    ")]
     if isinstance(op, Map):
         src = [line for s in op.sources for line in pretty(s, indent)]

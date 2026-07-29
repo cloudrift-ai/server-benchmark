@@ -19,8 +19,8 @@ fork construction, alongside ``_check_warp_static_k``, instead of failing severa
 Leading ``_`` so the pass loader skips this module.
 
 **Flash contractions are not recursively atomized.** Flash is a ``TWISTED`` kv
-``Reduction`` over a ``Q@K`` :class:`~emmy.compiler.ir.tile.ir.Contraction` ``source`` +
-a ``P@V`` one in the ``partial``, lowered on the scalar tier (block=1) — each contraction carries a
+``Fold`` over a ``Q@K`` :class:`~emmy.compiler.ir.tile.ir.Contraction` ``source`` +
+a ``P@V`` one in the ``step``, lowered on the scalar tier (block=1) — each contraction carries a
 scalar ``TilePlan()`` and factorizes through the one ``_factor`` contraction path. A tensor-core
 flash tier would attach an mma ``TilePlan`` to those same nodes and route through that same path (no
 bespoke emitter); ``bind_contraction`` stays loop-addressable (it binds the root contraction
@@ -33,7 +33,7 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.tile import Channel, Contraction, Map, Reduction, TilePlan
+from emmy.compiler.ir.tile import Channel, Contraction, Fold, Map, TilePlan
 from emmy.compiler.ir.tile.ir import _refs_axis
 from emmy.compiler.pipeline.pipeline import LoweringError
 
@@ -88,7 +88,7 @@ def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Map:
 
     The K seam is decided HERE, once, and lives ON the node: the maximal leading run of cone stmts
     that never index the contraction axis is **row-invariant**, so it joins the per-row statistic
-    (``stat``, the :class:`Reduction`, plus its scalar ``sweep``) in the cone's SOURCE node — one
+    (``stat``, the :class:`Fold`, plus its scalar ``sweep``) in the cone's SOURCE node — one
     projected reduce, exactly the RMSNorm shape; the k-varying remainder is the cone's ``body``, the
     per-cell normalize. Everything downstream then READS that boundary (``ops.cone_seam``) instead of
     re-scanning stmts: the scheduler sizes the stat smem rows off it, the materializer runs the
@@ -198,9 +198,9 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis] | None:
     (``rmsnorm(x)·nw @ w``); N channels sharing ONE A value with a pointwise combine tail is the
     fused gate/up MLP edge (``swiglu(x̂@Wg, x̂@Wu)`` — a product-monoid fold; fusion duplicates the
     cone SSA per channel, deduped by value-tree equality). Returns the same
-    ``Map(body=projection, source=node)`` factorization the ``Reduction`` spelling uses: the
+    ``Map(body=projection, source=node)`` factorization the ``Fold`` spelling uses: the
     ``source`` is ONE computed-A product :class:`Contraction` whose A edge holds the cone INLINE —
-    a real node tree, ``Map(body=<the per-cell cone>, sources=(<the statistic Reduction>,))``, so the
+    a real node tree, ``Map(body=<the per-cell cone>, sources=(<the statistic Fold>,))``, so the
     statistic is addressable and cuttable in its own right instead of hiding inside an operand body —
     with one :class:`Channel` ``(b, acc)`` per ⊗-fold (sharing is the node's arity; the node carries
     a **deferred** ``TilePlan()``); the ``body`` is the
@@ -210,12 +210,12 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis] | None:
 
     STRUCTURE-ONLY: no dtype / geometry / pin legality here — those are per-move scheduling guards
     (``_schedule``), so the same node offers whatever tiers the target legally supports."""
-    if not isinstance(op, Map) or not isinstance(op.source, Reduction):
+    if not isinstance(op, Map) or not isinstance(op.source, Fold):
         return None
     red = op.source
     if red.role is not AxisRole.PLANAR or red.carrier.twist.family != "id":
         return None
-    if any(isinstance(s, (Map, Reduction)) for s in red.partial):
+    if any(isinstance(s, (Map, Fold)) for s in red.step):
         return None  # a composed reduce (its partial holds a node) is not the bare statistic shape
     body = list(op.body)
     if not body or not isinstance(body[-1], Loop) or body[-1].is_reduce:
@@ -286,7 +286,7 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis] | None:
         return None  # a stat-free cone is the demoted option's shape, not ours
     # The statistic prologue must be row-local: its gmem reads may index (m, its own reduce axis)
     # but never the column / contraction axes.
-    if _idx_vars_deep([*red.partial, *stat_epi]) & {n_ax.name, k_ax.name}:
+    if _idx_vars_deep([*red.step, *stat_epi]) & {n_ax.name, k_ax.name}:
         return None
     # The combine tail: its reads must be the fold accumulators, its own defs, or STAT-FREE prefix
     # defs (a k/n-invariant value like SiLU's ``1.0`` scalar — its backward cone within the prefix
@@ -323,7 +323,7 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis] | None:
     if len({k_ax.name in bl.index[-1].free_vars() for bl, _ in folds}) != 1:
         return None
     # The cone as a NODE TREE: the per-row statistic is its own projected reduce
-    # (``Map(body=<the stat's scalar sweep>, sources=(Reduction,))``) and the cone's source, the
+    # (``Map(body=<the stat's scalar sweep>, sources=(Fold,))``) and the cone's source, the
     # per-cell normalize its body — so the K seam is the node boundary, not a stmt scan.
     # ONE bilinear fold with a component per ⊗-fold: operand sharing is edge reuse (the shared A
     # cone read once per component), and the node schedules / lowers as one unit through its own

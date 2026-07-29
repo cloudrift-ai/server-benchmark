@@ -1080,7 +1080,7 @@ def test_warp_flash_split_kv_matches_torch(monkeypatch, variant):
 )
 def test_warp_flash_split_kv_symbolic_matches_torch(monkeypatch, variant, reduce, seq):
     """SYMBOLIC flash split-KV: the slice width is the bn-aligned runtime ``B = ceil(S/(cta·bn))·bn``
-    and each slice stops/masks at its absolute ``bound = min((s+1)·B, S)`` (``Reduction.bound``) —
+    and each slice stops/masks at its absolute ``bound = min((s+1)·B, S)`` (``Fold.bound``) —
     a mid-tensor slice end reads VALID next-slice keys the extent-only tail masks would keep, and
     the tail CTA's overhanging query rows must NOT write their state into the next head's ws rows
     (the split partial's ``m_guard``, the regression this test pins). One cached kernel pair serves

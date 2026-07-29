@@ -268,7 +268,7 @@ def _scalar_stage_graph(M: int = 64, N: int = 64, K: int = 64) -> Graph:
 
 def _node_stage(tile_op):
     """The resolved operand pipeline — read off the node it decorates (a ``Contraction``'s
-    ``stage``, a ``Reduction``'s for the cooperative shared-row tier); there is no ``TileOp.stage``."""
+    ``stage``, a ``Fold``'s for the cooperative shared-row tier); there is no ``TileOp.stage``."""
     op = tile_op.op
     node = op.sources[0] if getattr(op, "sources", ()) else op
     return getattr(node, "stage", None)
@@ -1427,7 +1427,7 @@ def test_bf16_operands_stage_via_cp_async(monkeypatch):
 
 
 # --- split-K finalizes on the warp tier --------------------------------------
-# MMA split-K rides the structural ``Reduction(axis=ksplit, partial=[Contraction(k_axis=kslice)])`` fork
+# MMA split-K rides the structural ``Fold(axis=ksplit, step=[Contraction(k_axis=kslice)])`` fork
 # (``_schedule._splitk_option``): the inner ``Contraction`` factorizes to mma exactly like a non-split
 # matmul. Deferred (``g2k``): ``030_split_reduce`` retargets each partition's C-fragment into a
 # ``ws[ksplit, M, N]`` workspace summed by a sibling additive finalize kernel — NO codegen

@@ -25,7 +25,7 @@ kind, sealed through the one `grid_tile` finalizer (the article's "schedule sepa
 - **REDUCE-tiled** (`_tile_reduce_axis`, a `PLANAR` / `TWISTED` reduce — or a non-output-tiled `CONTRACTION` — whose
   `ReducePlan` cooperates / register-folds) — the reduce axis is tiled instead: `coop` lanes across the CTA's threads
   (its unit level) and `reg` ILP chains across per-thread accumulators (its register level), then a REG-tree fold, the
-  cross-thread combine (`emit_combine`), and the projection. It reads the reduce straight off the `Reduction` node (no
+  cross-thread combine (`emit_combine`), and the projection. It reads the reduce straight off the `Fold` node (no
   `lower`-then-refind) and builds its per-cell body via the recursion (`_emit`, below); the output stays one cell per
   thread (the 1×1 `atomize`, the grid riding `lead_axes` untiled).
 - **Degenerate** — nothing tiled: one thread per output cell (`_emit(op)` + an output-store glue).
@@ -34,10 +34,10 @@ kind, sealed through the one `grid_tile` finalizer (the article's "schedule sepa
 
 Two recursions cooperate. The **root** recursion `_factorize(op, ctx, tail, out_val)` binds a node to the grid: a `Map`
 with a `source` recurses (projection → `tail`), the leaf binds via the one `_bind` pipeline. The **body**
-recursion `_emit(op, ctx) -> Frag` builds the per-cell loop-IR — over the `Map` / `Reduction` / `Contraction` tree,
+recursion `_emit(op, ctx) -> Frag` builds the per-cell loop-IR — over the `Map` / `Fold` / `Contraction` tree,
 through **`source` AND `partial`** — threading a `Ctx` **down** (the ambient cell environment: the grid axes, operand
 `inputs`, `stage`, output buffer) and returning a `Frag` **up** (the per-cell `body` this node contributes, the produced
-`Handle` wire, and the reduce `carrier` when it folds one). The reduce binder drives `_emit` off the `Reduction` node to
+`Handle` wire, and the reduce `carrier` when it folds one). The reduce binder drives `_emit` off the `Fold` node to
 build its per-cell reduce loop, so a **nested** `Contraction` (flash's Q@K / P@V) is reached AS A NODE. This is the
 tile-IR-rebuild mandate's *one hierarchical emitter, no divergent codegen path*: `_emit(node).body` is byte-identical to
 `ir/tile/ops.lower(node)` for a scalar-nested (block=1) node today. `Handle` carries `name` + `residence` (a scalar
@@ -46,7 +46,9 @@ register value); the **tensor-core seam** is the `Contraction` case in `_emit` �
 extends `Handle` with the mma fragment descriptor `(mma_role, shape, dtype)` and `_emit`'s `Ctx` grows the warp binding +
 the inbound `wires` (flash's score fragment feeding P@V's A operand).
 
-The `Contraction` node is **one flat** Stmt — binding-driven for both atoms, with **no per-atom subclass** — that cleanly
+The `Contraction` is the **derived view** of a stored `role=CONTRACTION` `Fold` (`ir.contraction_view` — output axes
+off the placement: the trailing grid for a root kernel, `Ctx.free` for the flash realizer) — binding-driven for both
+atoms, with **no per-atom subclass** — that cleanly
 splits the **algebra params** (what to contract: the m/n output `axes` + the `k_axis`, the leading batch `lead_axes`, the
 shared `a` operand edge plus the product `channels` `(b_i, acc_i)` — every edge a gmem `Load` (materialized) or the
 computed node itself, stored inline (flash PV's
@@ -71,7 +73,7 @@ dispatches `tile.op` into the recursion `_factorize(op, ctx, tail, out_val)`. `_
 with a `source` **recurses** (its projection `body` walked, via `_emit_body`, into the `tail`), and the leaf binds to
 the grid via the **ONE** root binder, `_bind` — a single pipeline that reads WHICH AXES the schedule tiles off the node
 and seals through the one `grid_tile` finalizer. A tiled `Contraction` tiles its OUTPUT `(m, n)` axes (register / warp
-cells; the reduce K serial per cell); a cooperating `Reduction` tiles its REDUCE axis instead (`_tile_reduce_axis` —
+cells; the reduce K serial per cell); a cooperating `Fold` tiles its REDUCE axis instead (`_tile_reduce_axis` —
 BLOCK `coop` lanes at the unit level, REG `reg` ILP chains at the register level, the carrier merge closing the fold),
 its per-cell reduce loop built via `_emit` off the node; each ILP copy suffixes only its per-copy SSA temps (`__r{r}`)
 — the shared iteration coordinates, **including any nested contraction's own reduce-axis var** (flash's `dd` Q@K / `j`
@@ -215,7 +217,7 @@ composes with the causal tile-skip (`k_end`) and the split-KV window; flash stre
 decline `alt`).
 
 **A split-KV partial windows the same stream** (`030_split_reduce._split_twisted_warp`, the flash `REDUCE=g<n>k` arm): the
-`Reduction` arrives with its axis shrunk to the slice length and the slice's absolute base/bound on that axis's
+`Fold` arrives with its axis shrunk to the slice length and the slice's absolute base/bound on that axis's
 `Axis.window` —
 the fold walks its local `[0, B)` window and `_twist` re-bases every absolute-key consumer (the score-column mask
 bases, the gmem/TMA operand coords, and the causal bound above, which goes slice-local so an above-the-diagonal

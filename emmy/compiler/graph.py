@@ -356,7 +356,7 @@ def _stmt_eval_scope() -> dict:
         "dtype": _np.dtype,
         "__builtins__": {},
     }
-    # The tile-IR structural nodes (``Map`` / ``Reduction`` / ``Contraction``) and the
+    # The tile-IR structural nodes (``Map`` / ``Fold`` / ``Contraction``) and the
     # schedule descriptors (``Placement`` / ``TilePlan`` / ``ReducePlan`` / ``Stage`` /
     # ``WarpSpec`` + their component dataclasses / enums) round-trip through ``TileOp``'s
     # repr-string fields (``op`` / ``place`` / ``reduce`` / ``tier`` / ``stage`` /

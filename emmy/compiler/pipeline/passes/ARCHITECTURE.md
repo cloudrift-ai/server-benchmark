@@ -61,24 +61,28 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
 - a `CONTRACTION` contraction → the `(a, b, acc, projection)` operand→role facts
   (`_atomize.bind_contraction`): the operands are named by the ⊗ **lift** (the `Assign` the fold accumulates) — B is its
   (n, k)-indexed `Load`, A is the lift's other argument, either a plain `Load` (clean gmem-direct) or, when loop fusion
-  has inlined an operand cone, the cone as a `Map` NODE stored INLINE on the `a` edge (`_atomize.make_cone` — a
+  has inlined an operand cone, the cone as a `Map` NODE stored INLINE on an operand edge (`_atomize.make_cone` — a
   STAT-FREE computed A, which rides the `sync` compute-fill like the norm→linear cone but carries
-  no statistic prologue) — plus the fold accumulator and the projection.
+  no statistic prologue) — plus the fold accumulator and the projection. The STORED form is the `role=CONTRACTION`
+  `Fold` (symmetric `operands` tuple + the pure lift/fold `step`; sharing is edge REUSE in the step); the
+  `Contraction` READING — shared A + `(b, acc)` channels + the `(m, n)` geometry — is the DERIVED view
+  (`ir.contraction_view`, output axes off the caller's placement; `Contraction.as_fold` the storage direction).
   An **operand is an edge** with two inhabitants — the two things an input can be: MATERIALIZED (a gmem `Load`) or
-  COMPUTED (the node itself, stored inline). Tree ownership gives an inline node exactly one consumer — sharing is the
-  product contraction's channel ARITY, never a name — so there is no let table, no reference arm, and no resolve step:
-  every downstream reader takes the cone's K seam straight off `Contraction.a` (`ops.cone_seam`); `lower` flattens it
-  once, at the point of use. A subtree reading no value name from its enclosing body is **closed**
-  (`ir.captured_values`, iteration variables excluded) — the precondition for lifting any subtree into its own
-  kernel (a placement cut), and nothing else requires it: flash's `P = exp(s − m)` reads the online-softmax carrier's
+  COMPUTED (the node itself, stored inline). Tree ownership gives an inline node exactly one consumer — so there is
+  no let table, no reference arm, and no resolve step:
+  every downstream reader takes the cone's K seam straight off the view's `a` edge (`ops.cone_seam`); `lower`
+  flattens it once, at the point of use. A subtree reading no value name from its enclosing body is **closed**
+  (`ir.captured_values`, iteration variables excluded) — the rule deciding edge-vs-step attachment AND the
+  precondition for lifting any subtree into its own kernel (a placement cut): flash's `P = exp(s − m)` reads the
+  online-softmax carrier's
   running max, updated by the merge stmts of the very loop step that consumes it — legal (its one home is in scope),
-  just uncuttable.
+  just uncuttable; flash's QK is closed but stays a step element (hoisting would reorder the lowered nest).
   Binding off the lift rather than off "the first (m, k)-indexed `Load`" is load-bearing: a cone-INTERNAL load is
   (m, k)-indexed too, so the positional rule bound gemma's GeGLU combine as `gate @ W` and silently dropped the gelu and
   the up projection. Refusing to bind a stat-free cone at all is equally wrong — it demotes the cell to a PLANAR
   scalar fold, which cost the gemma-4 M=256 post twin 144 ms against 4.3 ms bound. The binding now happens ONCE at **recognize time** (`010_recognize._nodify_contraction` — every
   recognized contraction, per-cell scalar included, is a `Contraction` node with a deferred `TilePlan()`; an unbindable
-  one — a 1-D matvec-shaped output — demotes to `PLANAR` and folds as an ordinary `Reduction`); the schedule fork only
+  one — a 1-D matvec-shaped output — demotes to `PLANAR` and folds as an ordinary `Fold`); the schedule fork only
   swaps the node's `tile` field (`_schedule._contraction_node`), and `_factor.factorize` reads the facts off the node
   instead of `lower()`-ing the contraction and pattern-matching the result. A `STAGE` pin follows the same rule: the
   option builders resolve it against the built node ONCE (`_resolve_warp_stage` / `_resolve_scalar_stage` — transport
@@ -119,12 +123,12 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
 - the **MONOID-producer composition** — the fused norm→linear edge and its N-channel form, the gate/up MLP edge —
   binds at recognize time too (`_atomize.bind_prologue_contraction`, structure-only): a projecting `Map` over a
   per-row `PLANAR` statistic whose tail is one or more ⊗-folds of one shared A value nodifies to
-  `Map(body=projection, sources=(Contraction,))` — ONE product-carrier `Contraction` with a `Channel` `(b, acc)` per
-  ⊗-fold over its single inline A cone (itself a node tree: the statistic is the cone's `Reduction`
-  source, the per-cell normalize its `Map` body). Sharing is the node's ARITY — the product semiring outputting N
+  `Map(body=projection, sources=(fold,))` — ONE `role=CONTRACTION` `Fold` whose step folds a component per
+  ⊗-channel over its single inline A cone (itself a node tree: the statistic is the cone's inner `Fold`
+  source, the per-cell normalize its `Map` body). Sharing is edge REUSE — the product semiring outputting N
   matrices — and the node schedules and lowers as ONE unit (one `TilePlan`/`Stage`/`ReducePlan` row;
-  `Contraction.loop` derives the single fused fold loop and its
-  N-component product-monoid carrier) — a product-monoid fold: channels never interact
+  `Fold.loop` splices the shared cone once and carries the
+  N-component product-monoid carrier) — a product-monoid fold: components never interact
   per step; the combine — SwiGLU — is projection, riding the wrapping `Map.body`. Channels whose B layouts disagree
   were never legally fusable, so they simply never product (a formation gate, not a node assert).
   `010_recognize` schedules it as a fork SIBLING of the
@@ -167,7 +171,7 @@ is what lets such rules compose without knowing about each other.
 The atom spec is subtyped by kind (`ir/atom.py`: `AtomKind` is the fixed mma cell selected by name; `ScalarAtom`
 is the plain scalar fma cell). The contraction binder (`bind_contraction`) is loop-addressable so warp-flash can later
 reuse it on flash's nested QK^T / PV; flash's inner score IS now a structural `Contraction` **node** (per-cell
-`TilePlan()` today, `source` of the streaming `Reduction` — the `Reduction ⊃ Contraction` composition), so warp-flash is
+`TilePlan()` today, `source` of the streaming `Fold` — the `Fold ⊃ Contraction` composition), so warp-flash is
 just that node gaining a warp `TilePlan` — no new path.
 
 **The f16-accumulate atom sibling** (`mma_m16n8k16_f16_f16`, C→f16 — atom names follow
@@ -213,12 +217,12 @@ P@V mma `TilePlan`s are derived per point, `_schedule._twisted_warp_options`), t
 register-vector CHAIN (the FA-2 shared-score form), then the cooperative / per-cell reduce-partition escapes — every
 leaf row spelling the same `TILE@<qk_k>` / `TILE@<pv_k>` / `REDUCE@<kv>` key set (decided-empty where a form doesn't
 tile). A cross-CTA `REDUCE=g<n>k` pin selects the **flash split-KV** warp rows instead (pin-driven): the plan stamps
-onto each row's `Reduction` node and `030_split_reduce` realizes it as a fragment-resident partial (the kv stream windowed to
+onto each row's `Fold` node and `030_split_reduce` realizes it as a fragment-resident partial (the kv stream windowed to
 the CTA's slice, its absolute base/bound on the sliced axis's `Axis.window`; raw `(m, l, O)` state to an f32
 `__partial` workspace) plus
 an LSE-combine finalize — kernel finalize only (the twisted `e^{Δm}` rescale can't be an atomic). A static kv must be
 block-divisible; a **symbolic kv splits too**: the slice width is the bn-aligned runtime `ceil(S/(cta·bn))·bn` (a
-composite `Dim`) and each slice stops/masks at its absolute end `min((s+1)·B, S)` (`Reduction.bound` — a mid-tensor
+composite `Dim`) and each slice stops/masks at its absolute end `min((s+1)·B, S)` (`Fold.bound` — a mid-tensor
 slice end reads VALID next-slice keys the extent-only tail masks would keep), an empty last slice contributing the
 exact carrier identities; the split partial guards every state write with the symbolic-M `m_guard` (the tail CTA's
 clamp-read overhanging query rows would otherwise write into the next head's workspace rows). It pays where the

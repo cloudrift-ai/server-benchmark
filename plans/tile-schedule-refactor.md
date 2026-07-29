@@ -73,12 +73,12 @@ From this everything else follows:
 Operand = Load | Fold | Map        # materialized | computed (inline node, one consumer by tree ownership)
 
 @dataclass(frozen=True)
-class Fold(Stmt):                  # today spelled `Reduction` — the rename is the last 1k step
+class Fold(Stmt):
     axis: Axis                     # the reduced iteration space
     carrier: Carrier               # the ⊕ monoid on an N-component product state
                                    #   family "id"  → componentwise ⊕ (sum, max, the gate⊗up product)
                                    #   family "exp" → the twisted action (online softmax / flash)
-    step: Body                     # (today `partial`) the lift + carrier update, reading operand values
+    step: Body                     # the lift + carrier update, reading operand values
                                    # by their out-names. A SEQUENCE on purpose: a twisted lift may read
                                    # state its own step updates (flash's P) — algebra, not an emitter
                                    # limitation
@@ -125,7 +125,7 @@ Loop IR ──recognize──▶ pure Fold/Map tree              (structure only
         ──split / materialize──▶ slices off the nodes, roles off the view (re-derived from ctx.grid)
 ```
 
-Worked shapes (target vocabulary; `Fold` is spelled `Reduction` in code until the rename):
+Worked shapes:
 
 ```
 RMSNorm:   Map(body=[rsqrt stat + sweep + Write],
@@ -170,29 +170,23 @@ materializer glue. Every schedule slice rides the node it decorates; `TileOp` ke
   grid axes (a split partial's lead axes fall out of its own grid — nothing restamped on the node);
   `nodify_reduce` drops `tile` when the coop/ILP K partition takes over. 17/17 digests identical;
   round-trip unit-tested (`tests/compiler/ir/tile`).
-
-## Remaining 1k work (1k-iii)
-
-1. **Flash storage.** `_flash` stores QK and PV as in-step `role=CONTRACTION` folds (PV's `P` cone
-   stays a capturing operand — legal below an uncuttable step; QK is closed and cuttable in place,
-   but hoisting it to an operand edge would reorder the lowered nest — the scale `Load` precedes the
-   score's first use — so under zero-migration it stays a step element; edge-hoisting closed steps
-   is deferred to a re-keying window). Consumers ported: `_twisted_pair` (takes `free`, returns the
-   stored folds + the derived views — stamping targets the folds by identity, reads go through the
-   views), `_twisted_warp_options` / `_twisted_chain_option` / `_stamp_twisted_split`,
-   `030._split_twisted_warp` (`m`/`d` off `tile.place.free`; the split partial's placement keeps the
-   true `(m, d)` tail on its `free` while its grid carries `_ksplit` + the shrunk query axis), and
-   `_factor`'s `chain_source` / `_realize_chain` + `_twist`'s `warp_source` / `realize_warp_twist`
-   (`place.free` threaded through `Ctx.free`; the score view's stream axis reads through a slice
-   partial's `window.parent` so fragment clamps keep the pre-slice geometry). The flash digests
-   (hd128/hd256/dynM + split-KV) are the gate.
-2. **Retire `Contraction`'s `Stmt`-hood** once no stored tree carries it: drop the legacy arms in
-   `ops.lower` / `ops.reduce_loop` / `_factor._emit` / `_factor._bind` / `ir._flatten_nodes` /
-   `ir.tree_nodes` / `nodify_reduce`, and the raw-`Contraction` storage in tests.
-3. **The rename**: `Reduction` → `Fold`, `partial` → `step`. NOTE the collision: `ir/schedule.py`
-   already exports a `Fold` enum (the reduce-move vocabulary, re-exported by `ir/tile`); rename that
-   enum first (e.g. `FoldMove`) in its own commit. Then the docs sweep (`ir/tile` docstrings,
-   tile-lowering + kernel ARCHITECTURE, CLAUDE.md blurb).
+- **1k-iii** (landed — phase 1 CLOSED on the pure-Fold IR):
+  - *Flash storage*: QK and PV store as in-step `role=CONTRACTION` folds (PV's `P` cone a capturing
+    operand — legal below an uncuttable step; QK is closed and cuttable in place, but hoisting it to
+    an operand edge would REORDER the lowered nest — the scale `Load` precedes the score's first use
+    — so under zero-migration it stays a step element; edge-hoisting closed steps is deferred to a
+    re-keying window). Consumers derive views: `_twisted_pair` takes `free` and returns the stored
+    folds + the views (stamping targets folds by identity, reads go through views);
+    `030._split_twisted_warp` reads `(m, d)` off `tile.place.free` and hands the split partial a
+    placement whose `free` keeps the true `(m, d)` tail; `place.free` threads through `Ctx.free` so
+    `realize_warp_twist` / `_realize_chain` derive views in the materializer (the score view's
+    stream axis reads through a slice partial's `window.parent`). Verified by the 17-kernel digest
+    A/B plus a stash A/B on the hd512.s2048 split-KV golden — all byte-identical.
+  - *`Contraction` de-Stmt'd*: a plain frozen dataclass (the view); every stored-tree walk is
+    `Fold`/`Map`-only; `ops.lower`/`reduce_loop` keep a view-convenience arm.
+  - *The rename*: the schedule enum became `FoldMove`; `Reduction` → `Fold` and the `partial` field
+    → `step` across the compiler, tests and docs. Digests unaffected (identity keys off the lowered
+    nest).
 
 ## Knob codec (phases 2–3)
 

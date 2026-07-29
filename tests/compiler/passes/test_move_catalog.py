@@ -202,7 +202,7 @@ def test_warp_staged_rows_fit_the_smem_budget():
 
 def _reduce_graph() -> Graph:
     """A bare full-row sum reduce (the ``reduce.2048x2048`` golden shape) — a lifted
-    :class:`Reduction` with a 2048-cell free grid, well past the coop heuristic's free cap."""
+    :class:`Fold` with a 2048-cell free grid, well past the coop heuristic's free cap."""
     from emmy.compiler.ir.frontend.ir import MeanOp
 
     g = Graph()

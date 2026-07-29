@@ -14,39 +14,40 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
 - **Compiler** (Graph IR dialects, passes, backends) → [`emmy/compiler/ARCHITECTURE.md`](emmy/compiler/ARCHITECTURE.md) and child docs
 - **Pipeline / autotune** (pass framework, knob/fork system, online/offline-prior search, two-level tune) →
   [`emmy/compiler/pipeline/ARCHITECTURE.md`](emmy/compiler/pipeline/ARCHITECTURE.md)
-- **Tile lowering** (LoopOp → TileOp; **purely algebraic moveset — no shape specializations**. The stored tile IR is
-  a tree of **structural nodes** (all in `ir/tile/ir.py`): a `PLANAR`/`TWISTED` reduce lifts to a typed `Reduction`
-  (its `Carrier` + reduce `axis` + `partial` split out, the fold `Loop` synthesized on demand, holding no
-  projection — a reduce that COMPOSES another node, split-K's sliced contraction or flash's score, puts it in
-  `partial`, the one composition rule); EVERY recognized contraction — per-cell scalar included — is a `Contraction`
-  node (nodified at recognize time with a deferred `TilePlan()`; an unbindable one demotes to `PLANAR`) holding ONE
-  shared `a` **operand edge** plus product **`channels`** `(b_i, acc_i)`. An operand edge has two inhabitants — the
-  two things an input can be: MATERIALIZED (a gmem `Load`) or COMPUTED (the node itself, stored INLINE on the edge —
-  the cone via the one builder `_atomize.make_cone`, flash's `P`). Tree ownership gives an inline node exactly one
-  consumer, so **sharing is arity, not naming**: "these two matmuls read the same A" is one arity-2 product
-  contraction (the fused gate/up MLP edge — a product semiring outputting N matrices), scheduled and lowered as ONE
-  unit through `Contraction.loop`'s derived product fold (N-component identity-family carrier); there is no let
-  table, no reference arm, and no resolve step. Closure (`ir.captured_values`: no value name captured from the
-  enclosing body, iteration vars excluded) is the placement-cut precondition — a capturing inline operand like
-  flash's `P` is legal, just uncuttable. The A/B asymmetry that is real — A is M-resident and
-  compute-fillable, B is the K×N operand the loop streams — is a SCHEDULE fact: every staged/mma tier states
-  `isinstance(c.b, Load)` as an eligibility precondition and declines a computed B to the gmem-direct tier, which
-  lowers it through the same `contraction_loop` builder. A cone's own SOURCE is the
-  row-invariant prologue (the per-row statistic) and its `body` is the per-cell normalize, so the K seam is the node
-  boundary (`ops.cone_seam`); the lift / projection wrapper
-  is a `Map` (`body` + `sources` — `project ∘ reduce`, `source` the len-≤1 compat read). A
-  projection has ONE home, the wrapping `Map.body` — never a node field. A bare reduce is the root `Reduction`;
-  softmax/RMSNorm is a `Map(body=sweep, sources=(Reduction,))`; the fused norm→linear / gate-up composition is a
-  `Map(body=combine, sources=(Contraction,))` over the product node (a fork sibling of its coop-reduce form —
-  option-0 stays coop; the warp mma rows ride the sync compute-fill); a pure pointwise cell is a `Map(sources=())`;
-  the only annotated `Loop`s still riding a flat `Map.body` are `030_split_reduce`'s sliced partials. Every schedule
-  slice rides the node it decorates (a `Contraction`'s `tile` / `stage`, a `Reduction`'s `reduce` / `stage`) — the
-  `TileOp` keeps only `op + place + workers + knobs` — and a sliced axis's window (its split parentage plus
-  a cross-CTA slice's absolute base/bound) is the one `Axis.window`.
-  Dispatch reads the role/carrier off the node (`ops.axis_role`/`reduce_loop` recurse through `Map.sources`), and
-  `ops.lower` flattens any node back to the same loop nest — there is no stored `Monoid`/`Semiring` node kind (those
-  wrappers were retired). Flash attention is the `TWISTED` reduce on the streaming schedule, a twisted monoid is a
-  monoid, selected structurally not as a distinct kind) →
+- **Tile lowering** (LoopOp → TileOp; **purely algebraic moveset — no shape specializations**. The stored tile IR
+  has exactly TWO node kinds (both in `ir/tile/ir.py`): the general **`Fold`** — `reduce(⊕) ∘ map(f)`: an
+  iteration `axis`, a `carrier` (the ⊕ monoid on an N-component product state, id or twisted family), a symmetric
+  tuple of **`operands`** (the CLOSED inputs, each an edge), and a `step` (the lift + carrier update, a SEQUENCE —
+  a twisted lift may read state its own step updates) — and the lift/projection wrapper `Map` (`body` + `sources`,
+  `source` the len-≤1 compat read). A matmul, a bare sum, RMSNorm's statistic, the fused gate⊗up edge and flash are
+  all `Fold` at different carrier arities and roles (`PLANAR`/`TWISTED`/`CONTRACTION`). **Sharing is edge reuse**:
+  the gate⊗up step reads one cone edge twice — no privileged operand slot, no let table, no reference arm.
+  `Fold.loop` splices each operand's body before its first use in the step (ties in tuple order) and flattens
+  nested nodes in place, so kernel identity depends only on the stored params. An operand edge has two inhabitants
+  — MATERIALIZED (a gmem `Load`) or COMPUTED (the node itself, stored INLINE; the cone via `_atomize.make_cone`).
+  **Edge iff closed** (`ir.captured_values`, iteration vars excluded) decides attachment AND cut legality: closed
+  subtrees may hoist to edges (and hoist where the splice keeps the lowered nest fixed); a state-capturing
+  composition sits in the step at its semantic position — flash's PV, whose `P` reads the running max the same
+  step's merge updates, is legal and simply not cuttable; flash's QK is closed but stays a step element (hoisting
+  would reorder the nest). **The `Contraction` view is DERIVED, never stored**: one shared `a` edge + product
+  `Channel`s `(b_i, acc_i)` + the `(m, n)` `Side` geometry — the bilinear reading the tensor-core/staged tiers
+  require, built by `contraction_view(fold, m, n, lead)` from a `role=CONTRACTION` fold plus the CALLER's placement
+  axes (trailing grid for a root kernel; `place.free` threads to the materializer via `Ctx.free` for flash), stored
+  back via `Contraction.as_fold()` (round-trip + loop byte-identity unit-tested; `ir.shared_operand` is the
+  placement-free cone read). The A/B asymmetry that is real — A M-resident/compute-fillable, B streamed — is a
+  SCHEDULE fact read off the view's roles (`isinstance(c.b, Load)` eligibility gates), not a storage fact. A cone's
+  SOURCE is the row-invariant prologue (the per-row statistic) and its `body` the per-cell normalize, so the K seam
+  is the node boundary (`ops.cone_seam`). A projection has ONE home, the wrapping `Map.body` — never a node field.
+  A bare reduce is a root `Fold`; softmax/RMSNorm is `Map(body=sweep, sources=(Fold,))`; the fused norm→linear /
+  gate⊗up composition is `Map(body=combine, sources=(fold,))` over the product fold (a fork sibling of its
+  coop-reduce form — option-0 stays coop; warp mma rows ride the sync compute-fill); a pure pointwise cell is a
+  `Map(sources=())`; the only annotated `Loop`s still riding a flat `Map.body` are `030_split_reduce`'s sliced
+  partials. Every schedule slice (`tile` / `reduce` / `stage`) rides the fold it decorates — the `TileOp` keeps
+  only `op + place + workers + knobs` — and a sliced axis's window is the one `Axis.window`. Dispatch reads the
+  role/carrier off the node (`ops.axis_role`/`reduce_loop` recurse through `Map.sources`), and `ops.lower` flattens
+  any node back to the same loop nest — no stored `Monoid`/`Semiring` kind. Flash is the `TWISTED` fold on the
+  streaming schedule, its QK/PV composed as in-step `role=CONTRACTION` folds — a twisted monoid is a monoid,
+  selected structurally not as a distinct kind) →
   [`emmy/compiler/pipeline/passes/ARCHITECTURE.md`](emmy/compiler/pipeline/passes/ARCHITECTURE.md)
 
 When the user asks about a CLI flag, recipe field, or matrix combinator, read the relevant ARCHITECTURE.md before

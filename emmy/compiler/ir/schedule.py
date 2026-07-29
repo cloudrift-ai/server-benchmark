@@ -10,7 +10,7 @@ beside :mod:`~emmy.compiler.ir.atom`, not under ``ir/tile``.
 schedule — which axes are parallel, how the reduce axis partitions across hardware levels — is the
 **codec value types** here (:class:`ReducePlan` / :class:`TilePlan` / :class:`Stage` /
 :class:`WarpSpec` + :class:`Placement`). They ride on the structural nodes (a ``Contraction``'s
-``tile``, a ``Reduction``'s ``reduce``) and on the thin root :class:`~emmy.compiler.ir.tile.ir.TileOp`
+``tile``, a ``Fold``'s ``reduce``) and on the thin root :class:`~emmy.compiler.ir.tile.ir.TileOp`
 fields (``place`` / ``workers`` + the residual reduce/tier/stage).
 
 A reduction's only freedom is **how the reduce axis is partitioned across hardware levels**
@@ -382,7 +382,7 @@ class Level(enum.Enum):
     SERIAL = "serial"  # the per-thread serial remainder (never spelled — derived)
 
 
-class Fold(enum.Enum):
+class FoldMove(enum.Enum):
     """The per-level combine *mechanism* — the placement-keyed fold MOVE, derived from the
     :class:`Level` (where the reduced axis sits), never tuned and never re-decided at a consumer.
     :meth:`ReduceStage.combine` is the ONE selector; every fold emitter consumes its output —
@@ -421,9 +421,9 @@ class ReduceStage:
     # different output). The interleaved default keeps lanes on the reduce axis.
     transposed: bool = False
 
-    def combine(self, *, warp_size: int, segmented: bool = False) -> tuple[Fold, ...]:
+    def combine(self, *, warp_size: int, segmented: bool = False) -> tuple[FoldMove, ...]:
         """The derived per-level combine fold(s), fine→coarse within this stage — the ONE
-        placement-keyed move selector every fold emitter consumes (see :class:`Fold`).
+        placement-keyed move selector every fold emitter consumes (see :class:`FoldMove`).
 
         - ``SERIAL`` / ``REG`` → ``()`` (no cross-unit combine; REG-fold is TODO(reg)).
         - ``GRID`` → ``(ATOMIC,)`` or ``(KERNEL,)`` per the ``finalize`` letter (the split-K
@@ -437,16 +437,16 @@ class ReduceStage:
         if self.level in (Level.SERIAL, Level.REG):
             return ()
         if self.level is Level.GRID:
-            return (Fold.ATOMIC,) if self.finalize == "atomic" else (Fold.KERNEL,)
+            return (FoldMove.ATOMIC,) if self.finalize == "atomic" else (FoldMove.KERNEL,)
         # BLOCK.
         w = self.width
         if w & (w - 1):
             raise ValueError(f"BLOCK reduce width must be a power of two, got {w}")
         if segmented or w <= warp_size:
-            return (Fold.SHFL,)
+            return (FoldMove.SHFL,)
         if w % warp_size == 0:
-            return (Fold.SHFL, Fold.SMEM)
-        return (Fold.SMEM,)
+            return (FoldMove.SHFL, FoldMove.SMEM)
+        return (FoldMove.SMEM,)
 
 
 #: The ``REDUCE`` codec schema (decoded / encoded by :func:`decode`): ``g<n>[a|k]`` (GRID cross-CTA
@@ -961,7 +961,7 @@ __all__ = [
     "Emit",
     "Field",
     "FieldKind",
-    "Fold",
+    "FoldMove",
     "Level",
     "Placement",
     "ROLE_REGISTRY",

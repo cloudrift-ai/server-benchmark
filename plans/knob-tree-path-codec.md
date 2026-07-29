@@ -39,10 +39,14 @@ FAMILY@<node-path>[.<axis>][<n>] = value
 bare family (`REDUCE`) resolves to the unique eligible node (the current `resolve_axis` contract, one level
 deeper). Rules:
 
-- **Accept short, store long**: pins / hand-written YAML may use any unique suffix; the stamped knob row and
-  all recorded evidence (DB, online prior, goldens) carry the canonical full path. Evidence *reads* match by
-  suffix, so pre-refactor rows keyed `TILE@dd` / bare `REDUCE` keep matching without migration.
-- An ambiguous suffix is a `ValueError` naming the candidates (extends `knob.resolve_axis`).
+- **Short paths are canonical**: the stamped knob row and all recorded evidence (DB, online prior, goldens)
+  carry the SHORTEST-unique spelling for the kernel's tree — bare family where one node is eligible,
+  `FAMILY@<axis>` where the axis disambiguates, longer suffixes only where kind+axis collide. Existing
+  golden/DB/prior rows (`TILE@dd`, bare `REDUCE`) are therefore already canonical — **no migration**.
+- An ambiguous suffix is a `ValueError` naming the candidates (extends `knob.resolve_axis`). If a future
+  nodification makes a STORED short key ambiguous for its kernel (a second same-named axis appears), the
+  resolver fails loudly and that entry alone is re-spelled by hand — rare, explicit, and caught by the
+  golden compat test rather than silently re-keyed.
 - **Axis names survive placement cuts** (see below), so a suffix key names the same node on both sides of a
   `cut` — pin strings stay valid across a cut/fuse A/B.
 
@@ -54,20 +58,23 @@ tree (its keys re-root: `map.contraction.a.reduce.k` → `reduce.k`), and the pa
 decision MUST resolve to the same evidence as the child-tree spelling (suffix matching + preserved axis
 names make this automatic).
 
-## Spelling migration (gemma goldens, all ~580 live entries)
+## Spellings (gemma goldens, all ~580 live entries — unchanged)
 
-| Kind | Old | New canonical |
+Short paths are canonical, so every live spelling stays exactly as recorded; the full path exists only as
+the resolution target. Longer spellings appear only where a kernel actually needs them:
+
+| Kind | Stored spelling (today = after) | Resolves to |
 | --- | --- | --- |
-| matmul | `TILE` / `REDUCE` / `STAGE` (bare) | `TILE@contraction.k` / `REDUCE@contraction.k` / `STAGE@contraction.k` |
-| norm_linear, mlp_geglu | bare | `…@map.contraction.k` |
-| flash | `TILE@dd` / `TILE@pj` / `REDUCE` / `STAGE` | `TILE@map.reduce.contraction.dd` / `…pj` / `REDUCE@map.reduce.kv` / `STAGE@map.reduce.kv` |
-| rms_norm | `REDUCE` | `REDUCE@map.reduce.k` |
-| bare reduce (`cut_cone_stat`) | `REDUCE` | `REDUCE@reduce.k` (child-tree anchor, unchanged role) |
-| pointwise | `TILE` | `TILE@map` |
+| matmul | `TILE` / `REDUCE` / `STAGE` (bare) | `contraction.k` |
+| norm_linear, mlp_geglu | bare | `map.contraction.k` |
+| flash | `TILE@dd` / `TILE@pj` / `REDUCE` / `STAGE` | `map.reduce.contraction.dd` / `…pj` / `map.reduce.kv` (×2) |
+| rms_norm | `REDUCE` | `map.reduce.k` |
+| bare reduce (`cut_cone_stat`) | `REDUCE` | `reduce.k` (child-tree anchor, unchanged role) |
+| pointwise | `TILE` | `map` |
 | root-globals | `RASTER` / `WSPEC` / `LOOPIFY` | unchanged, bare |
+| norm_linear cone (NEW, post-nodification) | `REDUCE@a.reduce.k` (vs `REDUCE` for the K fold) | `map.contraction.a.reduce.k` |
 
-Every live spelling is already a valid unique suffix of its canonical form → **no YAML edit is required to
-keep parsing**; the migration script (below) only *canonicalizes* stored spellings, mechanically.
+No YAML, DB, or prior migration; the golden compat test (phase 1) is the guard that this stays true.
 
 ## PLACE restoration under the new schema
 
@@ -99,6 +106,10 @@ Path addressing only reaches nodes. Two flat forms must become nodes first:
 1. The computed-A cone's stat reduce (`Contraction.a_operand` body's annotated `Loop`) → a `Reduction` node
    under a new `a` edge (`stat_prologue()` already finds the seam). This unlocks addressing the norm→linear
    same-axis collision (`REDUCE@a.reduce.k` vs `REDUCE@contraction.k`) and the cone cut's child schedule.
+   **Bare-resolution guard**: the ~46 norm_linear/geglu goldens store bare `REDUCE` for the contraction K
+   fold — nodifying the cone must NOT make that ambiguous. Rule: bare-family sugar resolves only over nodes
+   the scheduler enumerates forks for; the cone stat reduce stays out of that set (address it explicitly via
+   `REDUCE@a.reduce.k`), so stored bare spellings keep meaning the fold.
 2. `030_split_reduce`'s sliced partials riding flat `Map` bodies → keep as-is initially (they are
    post-rewrite artifacts, never key targets), but assert they never receive keys.
 
@@ -118,8 +129,9 @@ Path addressing only reaches nodes. Two flat forms must become nodes first:
 
 ### Phase 2 — stamp sites (`_schedule.py`, `010_recognize.py`)
 
-- `_option` / `_at(REDUCE, raxis)` and the TILE/STAGE stampers emit canonical full paths (from the walker),
-  not bare axis names. Evidence reads stay suffix-tolerant, so old DB/prior rows keep matching.
+- `_option` / `_at(REDUCE, raxis)` and the TILE/STAGE stampers emit the shortest-unique spelling (from the
+  walker) — byte-identical to today's keys on every current kernel shape, so DB/prior rows match with no
+  suffix translation at all.
 - Nodify the cone stat reduce (prerequisite #1); re-run the norm_linear/geglu fork enumeration and confirm
   identical option sets (keys re-spelled only).
 - Verify: `emmy compile --golden <one per kind> --ir tile` on 4090+5090 golden sets deploys the recorded
@@ -138,13 +150,13 @@ Path addressing only reaches nodes. Two flat forms must become nodes first:
   the golden YAML); rms_norm `REDUCE@map.reduce.k=b256` unchanged; new 3-kernel split-reduce compiles and
   passes accuracy on the `--golden rms_norm.k3840` shape.
 
-### Phase 4 — evidence migration + goldens
+### Phase 4 — PLACE golden re-seeding (no evidence migration)
 
-- Script: canonicalize stored knob spellings in golden YAMLs + tune DB rows + online prior (mechanical,
-  suffix → full path; commented-out PLACE entries re-keyed to the new spellings and re-enabled ONLY behind
-  a fresh `--ab` verification per entry — do not trust pre-wipe µs).
+- Existing golden YAMLs / tune DB / online prior stay byte-identical (short spellings are canonical).
 - Re-seed the retired PLACE goldens by hand-pinned `--ab` (the manual sweep method): flash `PLACE@map`,
-  cone cuts on norm_linear/geglu at the recorded shapes, both cards.
+  cone cuts on norm_linear/geglu at the recorded shapes, both cards. The commented-out PLACE entries are
+  re-keyed to the new spellings and re-enabled ONLY behind a fresh `--ab` per entry — do not trust
+  pre-wipe µs.
 - Verify: `eval golden` pin-only offer audit green; serving twins deploy from tier (decode TPOT / TTFT
   parity numbers within noise of the pre-wipe baselines recorded in the YAML comments).
 

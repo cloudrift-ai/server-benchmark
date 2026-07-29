@@ -21,8 +21,9 @@ derived view of it. A kernel IS `π ∘ foldMap`** — a projection over a monoi
 per-element lift: `⟦Fold⟧ = ⊕_{k ∈ axis} ι(lift(k))`, seeded at `e`. The design rests on five ideas:
 
 1. **ONE general fold node — axis + monoid + lift.** A `Fold` stores the reduced `axis`, the ⊕
-   `Monoid` presentation (the product `components` `(⊕ᵢ, eᵢ)`, the singleton embedding
-   `inject : A → S`, and the twist family `psi` — transport of structure: `⊕_ψ` is generated from the
+   `Monoid` presentation (the product `components` — the `ElementwiseImpl` ⊕ᵢ ops themselves, each
+   eᵢ its `identity` trait; the singleton embedding `inject : A → S`; and the twist family `psi` —
+   transport of structure: `⊕_ψ` is generated from the
    presentation, never spelled), a PURE `lift` `Lambda` (`λ(k, v₁…vₙ) → A` — it sees the iteration var
    and the operand values, nothing else), and one CLOSED operand edge per lift param. ALL state-reading
    lives inside ⊕: the carrier update — the stabilized streaming step, the cross-partition combine, the
@@ -39,9 +40,9 @@ per-element lift: `⟦Fold⟧ = ⊕_{k ∈ axis} ι(lift(k))`, seeded at `e`. Th
    `out` / last-def convention). Purity is a FORMATION invariant, not a new type universe: no `Accum`,
    `Write` or `Loop` inside a lift; free names ⊆ params ∪ iteration vars; results defined. α-invariance
    is canonical renumbering (the existing rename machinery), not de Bruijn. **Primitives live in their
-   home modules** — they are not tile-IR-private: `Lambda` beside `Body` in `ir/stmt`;
-   `Monoid`/`Component` in `ir/stmt/algebra` (the finished form of `Carrier`/`Twist` — channels ≙
-   components, `inject` an explicit `Lambda`, bound mode surviving for the one-shot `StateMerge`);
+   home modules** — they are not tile-IR-private: `Lambda` beside `Body` in `ir/stmt` (NEVER in
+   `tile/ir.py`); `Monoid` in `ir/stmt/algebra` (the finished form of `Carrier`/`Twist` — components
+   are the ⊕ ops, `inject` an explicit `Lambda`, bound mode surviving for the one-shot `StateMerge`);
    scalar/index exprs stay `ir/expr`; `Fold`/`Map`/`TileOp` and the derived views stay `ir/tile`.
 3. **Edge iff closed — by CONSTRUCTION.** An operand edge has two inhabitants — MATERIALIZED (a gmem
    `Load`) or COMPUTED (an inline node; tree ownership gives it one consumer) — and operands bind
@@ -91,11 +92,12 @@ From this everything else follows:
 
 ## The IR (target)
 
-```python
-Operand = Load | Fold | Map          # materialized | computed (inline node, one consumer by tree ownership)
+The primitives are NOT tile-IR-private — each lives in its home module, importable by any IR layer:
 
+```python
+# ── ir/stmt (beside Body) — the ONE binder kind, common to every IR level ──────────────────────────
 @dataclass(frozen=True)
-class Lambda:                        # ir/stmt (beside Body) — the ONE binder kind, usable by ANY IR layer
+class Lambda:
     params: tuple[str, ...]          # explicit binders — closedness by construction
     body: Body                       # PURE stmts only (ANF ≙ a let-chain); __post_init__ VALIDATES the
                                      # LOCAL invariant: every stmt passes the `Stmt.pure` trait (declared
@@ -106,20 +108,25 @@ class Lambda:                        # ir/stmt (beside Body) — the ONE binder 
                                      # (Fold/Map formation), since a bare Lambda can't know its scope
     results: tuple[str, ...]         # the returned defs — replaces every `out` / last-def convention
 
+# ── ir/stmt/algebra — the finished form of Carrier/Twist ──────────────────────────────────────────
 @dataclass(frozen=True)
-class Component:                     # ir/stmt/algebra
-    fold: ElementwiseImpl            # ⊕ᵢ
-    identity: float                  # eᵢ
-
-@dataclass(frozen=True)
-class Monoid:                        # ir/stmt/algebra — the finished form of Carrier/Twist
-    components: tuple[Component, ...]  # S = the product state
-    inject: Lambda | None = None     # ι : A → S (None = the identity embedding, arity-matched)
+class Monoid:
+    components: tuple[ElementwiseImpl, ...]  # the ⊕ᵢ ops THEMSELVES; eᵢ = ⊕ᵢ.identity — the op trait
+                                             # already carries the neutral element, so there is NO
+                                             # Component wrapper duplicating it
+    inject: Lambda | None = None     # ι : A → S (None = the identity embedding); subsumes Channel.term
     psi: str | None = None           # twist family ("exp") — a PRESENTATION: ⊕_ψ, the stabilized
                                      # streaming step and the cross-partition combine are DERIVED
+                                     # (subsumes Channel.lift — the expectation ⊗ is ψ's business)
+    # the per-component ACCUMULATOR dtype (today Channel.dtype, None = lowering default) is
+    # precision, not algebra — it survives only as an optional parallel tuple so lowered Accums stay
+    # byte-identical; a precision decoration may absorb it later
+
+# ── ir/tile/ir.py — the two node kinds only (plus TileOp and the derived views) ───────────────────
+Operand = Load | Fold | Map          # materialized | computed (inline node, one consumer by tree ownership)
 
 @dataclass(frozen=True)
-class Fold(Stmt):                    # ir/tile
+class Fold(Stmt):
     axis: Axis                       # the reduced iteration space
     monoid: Monoid
     lift: Lambda                     # λ(k, v₁…vₙ) → A — PURE; state-reading lives ONLY inside ⊕
@@ -130,7 +137,7 @@ class Fold(Stmt):                    # ir/tile
     stage: Stage | None
 
 @dataclass(frozen=True)
-class Map(Stmt):                     # ir/tile
+class Map(Stmt):
     fn: Lambda                       # π : λ(s₁…sₙ) → out; sources bind positionally to params
     sources: tuple[Operand, ...]     # project ∘ fold; must admit Load — the cut terminal (phase 4)
 ```
@@ -249,8 +256,10 @@ identity keys off the lowered nest throughout).
   excluded from lambdas until it declares itself) and every result is defined; the contextual half
   (free names ⊆ params ∪ enclosing iteration vars) is validated at Fold/Map formation, where the scope
   exists — plus canonical renumbering for α-invariant equality/hash. `Carrier`/`Twist` refit into the
-  `Monoid` presentation in `ir/stmt/algebra` (channels ≙ components; `inject` an explicit `Lambda`;
-  `psi` the family; bound mode survives for the one-shot `StateMerge`). Ships the executable SPEC too:
+  `Monoid` presentation in `ir/stmt/algebra`: components are the `ElementwiseImpl` ⊕ ops themselves
+  (eᵢ read off the op's `identity` trait — no `Component` wrapper; `Channel.term`/`lift` subsumed by
+  `inject` and the derived ⊕_ψ; the accumulator dtype survives as a precision side-tuple only for
+  byte-identical Accums); bound mode survives for the one-shot `StateMerge`. Ships the executable SPEC too:
   the denotational `foldMap` evaluator + the ⟦tree⟧ == lowered-loop agreement test. Pure additions —
   no storage change, no digest impact.
 - **1n — `Map` grows its binder.** `Map.body` → `fn: Lambda`: sources bind positionally to params,

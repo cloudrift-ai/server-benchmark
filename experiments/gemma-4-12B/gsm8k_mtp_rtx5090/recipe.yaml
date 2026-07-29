@@ -1,0 +1,112 @@
+# GSM8K check for the gemma-4-12B-it MTP lanes (RTX 5090) — the blog article's
+# speculative-decoding losslessness rows: stock vLLM and vLLM+emmy, each serving with the
+# MTP drafter (google/gemma-4-12B-it-assistant, 3 speculated tokens), evaluated with the
+# same client (scripts/run_lmeval_gate.py: 200 questions, few-shot, seed 0, strict
+# exact-match) as the plain lanes' quality table.
+#
+# Expected: both lanes land in the plain lanes' band (~0.665-0.690). Speculative decoding
+# only emits tokens the target verifies against its own greedy choice, so a lower score
+# means broken numerics or a serving bug, not "tuning".
+#
+# The serve logs double as the drafter's acceptance measurement on NATURAL text (GSM8K
+# prose) — the throughput benchmarks' random-token prompts inflate acceptance on long
+# outputs (degenerate repetition) and depress it on short ones. The two engines'
+# acceptance should match to ~two decimals; a gap means their logits diverge.
+#
+# BOS trap, the reason for the tokenizer detour below: gemma's tokenizer ships
+# add_bos_token=false AND an empty tokenizer.json post_processor, so raw /v1/completions
+# prompts reach the model without <bos> — GSM8K drops from ~0.67 to ~0.27. The config flag
+# is decorative for fast tokenizers; BOS insertion lives in the post_processor, so both
+# lanes serve a patched tokenizer dir (verified to prepend id 2).
+#
+# Bare-metal like the llama.cpp lane (venv, no docker); needs the CUDA toolkit's nvcc on
+# PATH for the emmy lane, and an emmy tree at or after the MTP shim (PR #426). Runtime is
+# boot-dominated (the emmy boot compiles kernels and captures decode graphs — ~30 min on a
+# cold cache); the evaluation itself is ~2 minutes per lane.
+#
+# Repro on a pre-allocated card (no cloud provisioning):
+#   emmy bench experiments/gemma-4-12B/gsm8k_mtp_rtx5090 --local
+command:
+  stage:
+    - emmy
+    - scripts
+    - pyproject.toml
+    - requirements.txt
+    - Makefile
+    # The Makefile `include`s docker/vllm-emmy-gemma4/config.env, so the staged tree
+    # needs docker/ or `make setup` dies before creating the venv.
+    - docker
+  run: |
+    set -e
+    export PATH=/usr/local/cuda/bin:$$PATH
+    cd $repo_dir
+    [ -d venv ] || make setup
+    ./venv/bin/pip install -q vllm==0.23.0 lm_eval ninja tenacity
+    # A stale staged venv once kept an unpinned vllm and failed here silently —
+    # install loudly and assert the pin took.
+    ./venv/bin/python -c "import vllm; assert vllm.__version__ == '0.23.0', vllm.__version__"
+    MODEL=google/gemma-4-12B-it
+    DRAFT=google/gemma-4-12B-it-assistant
+    SPEC='{"method":"mtp","model":"'$$DRAFT'","num_speculative_tokens":3}'
+    TOK=$task_dir/tok-bos
+
+    # Patched tokenizer dir: copy the checkpoint's tokenizer, write <bos> into the
+    # post_processor, assert the first encoded id is 2.
+    if [ ! -f $$TOK/tokenizer.json ]; then
+      ./venv/bin/python -c "from huggingface_hub import snapshot_download; print(snapshot_download('$$MODEL'))" > $task_dir/snap.txt
+      mkdir -p $$TOK
+      cp -L $$(cat $task_dir/snap.txt)/tokenizer* $$(cat $task_dir/snap.txt)/special_tokens_map.json $$TOK/ 2>/dev/null || true
+      TOK_DIR=$$TOK ./venv/bin/python - <<'PYEOF'
+    import json, os
+    p = os.path.join(os.environ["TOK_DIR"], "tokenizer.json")
+    d = json.load(open(p))
+    bos = {"SpecialToken": {"id": "<bos>", "type_id": 0}}
+    pp = d["post_processor"]
+    pp["single"] = [bos, {"Sequence": {"id": "A", "type_id": 0}}]
+    pp["pair"] = [bos, {"Sequence": {"id": "A", "type_id": 0}}, {"Sequence": {"id": "B", "type_id": 1}}]
+    pp["special_tokens"] = {"<bos>": {"id": "<bos>", "ids": [2], "tokens": ["<bos>"]}}
+    json.dump(d, open(p, "w"))
+    from transformers import AutoTokenizer
+    ids = AutoTokenizer.from_pretrained(os.environ["TOK_DIR"])("The capital of France is")["input_ids"]
+    assert ids[0] == 2, f"BOS not prepended: {ids[:6]}"
+    print("BOS post-processor verified:", ids[:6])
+    PYEOF
+    fi
+
+    gate() { # label serve-args...
+      label=$$1; shift
+      pkill -f "[v]llm serve" 2>/dev/null || true
+      # Wait for the previous lane's VRAM to actually drain — a fixed sleep raced the
+      # teardown and OOM'd the next boot.
+      for i in $$(seq 1 24); do
+        [ "$$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)" -lt 2000 ] && break
+        sleep 5
+      done
+      ./venv/bin/emmy serve $$MODEL --generate --dtype float16 --max-model-len 8448 \
+        --no-enable-prefix-caching --tokenizer $$TOK --speculative-config "$$SPEC" "$$@" \
+        > $task_dir/serve_$$label.log 2>&1 &
+      pid=$$!
+      for i in $$(seq 1 360); do
+        curl -sf localhost:8000/health >/dev/null && break
+        kill -0 $$pid 2>/dev/null || { echo "SERVE_$${label}_DIED"; tail -5 $task_dir/serve_$$label.log; return 1; }
+        sleep 10
+      done
+      curl -sf localhost:8000/health >/dev/null || { echo "SERVE_$${label}_TIMEOUT"; kill $$pid; return 1; }
+      ./venv/bin/python scripts/run_lmeval_gate.py --base-url http://localhost:8000/v1 --model $$MODEL \
+        --label $$label --limit 200 --seed 0 --out $task_dir/$$label.json
+      grep "Mean acceptance length" $task_dir/serve_$$label.log | tail -1 || true
+      kill $$pid 2>/dev/null
+    }
+
+    gate stock-mtp-d3 --stock || true
+    gate emmy-mtp-d3 || true
+    pkill -f "[v]llm serve" 2>/dev/null || true
+    echo GSM8K_MTP_DONE
+  result_files:
+    - "*.json"
+    - "*.log"
+  timeout: 10800
+
+matrices:
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1

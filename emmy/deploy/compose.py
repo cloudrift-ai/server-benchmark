@@ -8,6 +8,17 @@ from emmy.recipe.engines import build_engine_args
 from emmy.recipe.types import Recipe
 
 
+def _env_items(extra_env) -> list[tuple[str, str]]:
+    """``extra_env`` as (key, value) pairs, whether it's a dict or a string.
+
+    The schema declares a dict, but matrix recipes (and their dryrun tests) write
+    space-separated ``K=V`` strings — e.g. ``"EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=32"``
+    — and the variant expansion passes them through verbatim. Accept both."""
+    if isinstance(extra_env, str):
+        return [tuple(kv.split("=", 1)) for kv in extra_env.split()]
+    return list(extra_env.items())
+
+
 def _render_docker_options(docker_options: dict[str, Any]) -> str:
     """Render docker_options dict as indented YAML lines for a compose service."""
     if not docker_options:
@@ -45,7 +56,7 @@ def generate_compose(recipe: Recipe, model_dir, hf_token, num_instances=1, gpu_d
 
     engine_args = build_engine_args(llm, model_name)
     command_str = "\n      ".join(engine_args)
-    extra_env_lines = "".join(f"\n      - {k}={v}" for k, v in llm.extra_env.items())
+    extra_env_lines = "".join(f"\n      - {k}={v}" for k, v in _env_items(llm.extra_env))
     docker_options_lines = _render_docker_options(llm.docker_options)
 
     is_amd = recipe.deploy.gpu is not None and recipe.deploy.gpu.startswith("AMD")

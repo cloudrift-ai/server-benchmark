@@ -41,6 +41,12 @@ From this one idea everything else follows:
 - **Defaults are the recognized form.** An unseeded shape deploys exactly what recognition produced —
   every rewrite away from it (a cut, a split, an exotic tier) is evidence- or pin-driven. "An unseeded
   site never pays" is the deployment-safety invariant the whole golden system rests on.
+- **All fusion happens in loop IR; tile IR only cuts.** Loop-level fusion (`merge_loop_ops` and friends)
+  decides what lives together; recognition STRUCTURES that output into trees, never merges more; the only
+  placement rewrite at tile level is the cut. This is a hard direction invariant — do not add a tile-level
+  fusion rewrite, however convenient. Anything that wants more fusion (a tap, an inline) is realized by
+  fusing at loop level with a tile-level cut escape (the stat-tap architecture), never by a tile-level
+  merge.
 
 ## The tree vocabulary (worked examples)
 
@@ -112,10 +118,15 @@ single strongest motivation for path addressing).
   each schedule slice rides the node it decorates (split partials carry theirs on their own node). `TileOp`
   shrinks to `op + bindings + place + workers + knobs` — the root keeps only what is genuinely
   root-global (the free-axis grid binding, the warp split, the knob row).
-- **Stretch (do only if the `Ref` work makes it nearly free): one composition rule for nested reduces.**
+- **One composition rule for nested reduces (required — the no-duplication invariant).**
   `Reduction.source` (split-K's `Reduction ⊃ Contraction`, spliced ahead of the partial) and
-  node-in-`partial` (flash) are two mechanisms for the same thing. Folding `source` into "node at the head
-  of `partial`" leaves one rule for `_flatten_nodes` / `.loop` / seam walkers. Otherwise defer.
+  node-in-`partial` (flash) are two mechanisms for the same thing. Fold `source` into "node at the head
+  of `partial`" so `_flatten_nodes` / `.loop` / seam walkers handle ONE shape.
+- **One windowing representation (required — same invariant).** A sliced reduce stream currently spells
+  its window across two overlapping vocabularies: `Reduction.offset` / `bound` (absolute base/end of a
+  cross-CTA slice) and `Axis.source_axis` / `real_extent`. Unify into a single slice/window concept read
+  by the realizer and the mask machinery. Orthogonal to the sharing work — may land as its own late
+  phase-1 commit.
 
 ### Knob codec (phases 2–3)
 
@@ -138,10 +149,18 @@ Grammar: `FAMILY@<node-path>[.<axis>][<n>] = value`.
   fails loudly and that entry alone is re-spelled by hand — caught by the compat test, never silently
   re-keyed. The ordinal `<n>` (canonicalized traversal order) exists only for true same-path
   same-kind same-axis collisions (LayerNorm's mean/var); current kernels never need it.
-- **Bare-resolution guard**: bare-family sugar resolves only over nodes the scheduler ENUMERATES FORKS for.
-  The cone's stat reduce stays out of that set (spell it explicitly: `REDUCE@a.reduce.k`), so the ~46
-  stored bare `REDUCE` keys on norm_linear/geglu goldens keep meaning the contraction's K fold after the
-  cone is nodified. General principle: nodifying something must never change what existing spellings mean.
+- **Bare-resolution guard**: bare-family sugar resolves to the PRIMARY node for that family — the
+  root-most schedule-bearing node in the tree — NOT to "whichever node is unique". So after the cone is
+  nodified, bare `REDUCE` on norm_linear/geglu still means the contraction's K fold (the primary), and the
+  ~46 stored bare keys keep their meaning; the cone's stat reduce is addressed explicitly
+  (`REDUCE@a.reduce.k`). Crucially this is a RESOLUTION rule, not an enumeration limit: the walker
+  enumerates forks for EVERY schedule-bearing node under explicit spellings — non-primary nodes are fully
+  part of the fork space (full enumerability), they just never claim the bare spelling. General principle:
+  nodifying something must never change what existing spellings mean.
+- **Only the pre-placement tree receives keys.** Post-rewrite artifacts of derived kernels — the split
+  pass's sliced partials, synthesized finalize kernels — are never key targets; the stamper asserts it.
+  (A cut CHILD that re-enters recognition is a fresh pre-placement tree and keys normally — the assert is
+  about rewrite debris, not re-rooted children.)
 - **Cut/fuse invariance**: keys stamp against the pre-placement tree; a cut child re-recognizes as its own
   tree and its keys re-root (`map.contraction.a.reduce.k` → `reduce.k`). Axis names are preserved through
   cuts, so a suffix key names the same node on BOTH sides of a placement decision — one pin string stays
@@ -161,7 +180,10 @@ Grammar: `FAMILY@<node-path>[.<axis>][<n>] = value`.
   `PLACE@=xhat_17`) are accepted ONLY as pin-time sugar resolved against the live compile — site-specific
   names are never stored as evidence. Phase 2 reserves: the `in.` path prefix, the leading-`=` value-name
   pin form, and the three tokens — the parser recognizes and rejects them with "reserved for graph-level
-  placement", so no future spelling migration.
+  placement", so no future spelling migration. Realization constraint for whoever restores them: the
+  fusion-direction tokens (`consumer` / `producer`) must be realized as LOOP-LEVEL fusion with a
+  tile-level cut escape (the stat-tap architecture) — never as a tile-level merge rewrite; the
+  all-fusion-in-loop-IR invariant (north star) applies to them too.
 
 Spellings on the live gemma goldens (~580 entries — all unchanged; resolution targets shown):
 
@@ -276,7 +298,10 @@ Sub-steps, in landing order:
     fragment, N mma chains, one C fragment per channel — unchanged emission); the split pass derives the
     N-component carrier from the group. Re-run the #389 multichannel-split A/B — it was correct-but-null
     under the bespoke encoding and may flip once the split is structural.
-1d. **Stretch**: `Reduction.source` → head-of-partial, only if 1a's plumbing already did the work.
+1d. **Composition + windowing unification (required)**: `Reduction.source` → head-of-partial (one
+    composition rule); `Reduction.offset`/`bound` + `Axis.source_axis`/`real_extent` → one slice/window
+    representation. Both are no-duplication invariant items; the windowing half is orthogonal to sharing
+    and may land as its own commit at the end of the phase.
 
 Done when: `make test` green; unit tests cover Ref round-trip through rewrite/structural-key (two refs to
 one binding ≢ two copies), group formation + fallback (disagreeing layouts recognize separately), cone

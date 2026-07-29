@@ -23,7 +23,7 @@ from emmy.compiler.ir.schedule import (
     WarpSpec,
     role_for,
 )
-from emmy.compiler.ir.tile.ir import Channel, Contraction, Map, Reduction, TileOp
+from emmy.compiler.ir.tile.ir import Channel, Contraction, Map, Reduction, TileOp, contraction_view, shared_operand
 
 __all__ = [
     "AtomKind",
@@ -42,5 +42,7 @@ __all__ = [
     "TileOp",
     "TilePlan",
     "WarpSpec",
+    "contraction_view",
     "role_for",
+    "shared_operand",
 ]

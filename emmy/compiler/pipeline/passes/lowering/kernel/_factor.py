@@ -46,13 +46,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from emmy.compiler.dtype import F32
-from emmy.compiler.ir.axis import Axis, Window
+from emmy.compiler.ir.axis import Axis, AxisRole, Window
 from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, Literal, Var
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile import Fold, Level, ReduceStage
+from emmy.compiler.ir.tile import Fold, Level, ReduceStage, contraction_view
 from emmy.compiler.ir.tile.ir import Contraction, Map, Reduction, Side
 from emmy.compiler.ir.tile.ops import cone_seam
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import copy_cell, reduce_codegen, shrink_axis, store_sink
@@ -251,7 +251,8 @@ def _emit(op, ctx: Ctx) -> Frag:
         prefix = list(src.body) if src is not None else []
         return Frag(body=[*prefix, *_emit_body(op.body, ctx)], out=_map_wire(op), carrier=src.carrier if src is not None else None)
     if isinstance(op, Reduction):
-        loop = Loop(axis=op.axis, body=Body(tuple(_emit_body(op.partial, ctx))), unroll=op.unroll, role=op.role, carrier=op.carrier)
+        stmts = _emit_body(Body(op.spliced_step()), ctx)  # operand edges splice ahead of first use
+        loop = Loop(axis=op.axis, body=Body(tuple(stmts)), unroll=op.unroll, role=op.role, carrier=op.carrier)
         return Frag(body=[loop], out=Handle(op.out), carrier=op.carrier)
     if isinstance(op, Contraction):
         # Scalar / block=1: the synthesized ``CONTRACTION`` loop nest — byte-identical to
@@ -386,6 +387,13 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
       one-thread-per-cell fold: the per-cell body (:func:`_emit`; a serial reduce ``Loop`` sits
       inside it) + ``tail`` + the ``out_val`` store glue is the whole fold region."""
     grid = tuple(ctx.grid)
+    if isinstance(op, Reduction) and op.role is AxisRole.CONTRACTION and op.tile is not None and len(grid) >= 2:
+        # The STORED form is the bilinear fold; the Contraction reading is DERIVED here, its output
+        # axes the kernel grid's trailing pair (a split partial's ksplit rides the leading grid, so
+        # the lead axes fall out of the same read).
+        view = contraction_view(op, grid[-2], grid[-1], tuple(grid[:-2]))
+        if view is not None:
+            op = view
     if isinstance(op, Contraction):
         epi = list(tail)
         if not has_write(epi):

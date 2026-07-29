@@ -306,19 +306,23 @@ def test_norm_linear_warp_pick_is_computed_a_contraction():
 
 
 def test_norm_linear_cone_is_an_inline_node_tree():
-    """The computed-A cone lives ONCE, inline on the ``a`` edge, as a real node tree: its SOURCE is
+    """The computed-A cone lives ONCE, inline on an operand edge of the stored fold, as a real node
+    tree: its SOURCE is
     the row-invariant prologue — the per-row statistic (a projected reduce over the stat
     :class:`Reduction`) plus any k-invariant cone prefix — and its ``body`` is the per-cell
     normalize. The K seam is therefore the NODE BOUNDARY: ``ops.cone_seam`` reads it instead of
     re-scanning stmts for "the maximal leading run that never indexes K", and the statistic is
     addressable (and later cuttable) in its own right. Lowering flattens the whole thing back to the
-    identical ``[stat loop, …, cone]`` stmt run."""
+    identical ``[stat loop, …, cone]`` stmt run. The stored form is the role=CONTRACTION fold; the
+    ``Contraction`` reading is the DERIVED view (``contraction_view``)."""
+    from emmy.compiler.ir.tile import contraction_view
     from emmy.compiler.ir.tile.ir import _refs_axis
     from emmy.compiler.ir.tile.ops import cone_seam, lower
 
     _, tile = _resolve(_norm_linear_graph(), pick=_is_warp_row)
-    c = tile.op.source
-    assert c.a_computed
+    grid = tile.place.grid
+    c = contraction_view(tile.op.source, grid[-2], grid[-1], tuple(grid[:-2]))
+    assert c is not None and c.a_computed
     cone = c.a
     assert isinstance(cone, Map) and cone.out == c.a_name
     assert cone.source.source.role is AxisRole.PLANAR, "the statistic reduce is the prologue's source"
@@ -369,10 +373,13 @@ def test_mlp_gate_up_nodifies_as_two_channel_product_contraction():
     combine as projection — nodifies to ``Map(body=combine…Write, sources=(Contraction,))``: ONE
     product-carrier contraction, two ``(b, acc)`` channels over its single inline A cone (sharing
     is arity), and offers warp sync rows."""
+    from emmy.compiler.ir.tile import contraction_view
+
     rows, tile = _resolve(_mlp_gate_up_graph(), pick=_is_warp_row)
     assert isinstance(tile.op, Map) and len(tile.op.sources) == 1
-    node = tile.op.source
-    assert len(node.channels) == 2 and node.a_computed
+    grid = tile.place.grid
+    node = contraction_view(tile.op.source, grid[-2], grid[-1], tuple(grid[:-2]))
+    assert node is not None and len(node.channels) == 2 and node.a_computed
     assert {ch.b.input for ch in node.channels} == {"wg", "wu"}
     assert isinstance(tile.op.body[-1], Write)
     assert any(_is_warp_row(r) for r in rows)
@@ -496,14 +503,18 @@ def _prologue_shape(*, b_layouts):
 
 
 def test_channels_with_agreeing_b_layouts_form_one_product_node():
+    from emmy.compiler.ir.tile import shared_operand
+    from emmy.compiler.ir.tile.ir import _parse_bilinear
     from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
 
     node, free = _prologue_shape(b_layouts=(False, False))
     bound = bind_prologue_contraction(node, free)
     assert bound is not None
     c_map, _ = bound
-    (product,) = c_map.sources
-    assert len(product.channels) == 2 and product.a_computed, "two channels over ONE inline cone — sharing is arity"
+    (product,) = c_map.sources  # the stored role=CONTRACTION fold
+    parsed = _parse_bilinear(product)
+    assert parsed is not None and len(parsed[1]) == 2, "two components over ONE shared edge — sharing is edge reuse"
+    assert not isinstance(shared_operand(product), type(None)) and shared_operand(product) is parsed[0]
 
 
 def test_channels_with_disagreeing_b_layouts_never_group():

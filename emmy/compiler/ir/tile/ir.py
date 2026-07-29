@@ -104,12 +104,17 @@ def _splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ..
     depends only on the stored params."""
     if not operands:
         return stmts
-    out = list(stmts)
-    for edge in reversed(operands):  # reversed + insert-before keeps tuple order at shared points
-        body = list(_operand_body(edge))
+    at: dict[int, list] = {}
+    for edge in operands:  # first-use indexes against the ORIGINAL stmts — ties keep tuple order
         name = _operand_name(edge)
-        idx = next((i for i, st in enumerate(out) if name in _deep_reads([st])), len(out))
-        out[idx:idx] = body
+        idx = next((i for i, st in enumerate(stmts) if name in _deep_reads([st])), len(stmts))
+        at.setdefault(idx, []).append(edge)
+    out: list[Stmt] = []
+    for i, st in enumerate((*stmts, None)):
+        for edge in at.get(i, ()):
+            out.extend(_operand_body(edge))
+        if st is not None:
+            out.append(st)
     return tuple(out)
 
 
@@ -210,6 +215,12 @@ class Reduction(Stmt):
         flat form that carried them in its body."""
         stmts = _splice_operands(self.operands, _flatten_nodes(self.partial))
         return Loop(axis=self.axis, body=Body(stmts), unroll=self.unroll, role=self.role, carrier=self.carrier)
+
+    def spliced_step(self) -> tuple[Stmt, ...]:
+        """The step with every operand edge's body spliced before its first use — the stmt sequence
+        the emit-side node walk consumes (nested structural nodes NOT flattened; :attr:`loop`
+        additionally flattens them)."""
+        return _splice_operands(self.operands, tuple(self.partial))
 
     @property
     def out(self) -> str:
@@ -558,6 +569,38 @@ class Contraction(Stmt):
         through ``_factor.factorize`` instead; this is the structural-key / dump path."""
         return [self.loop]
 
+    def as_fold(self) -> Reduction:
+        """The STORED (1k) form of this view — a ``role=CONTRACTION`` :class:`Reduction`/fold whose
+        ``operands`` are the closed inputs and whose ``partial`` is the pure lift/fold step. The
+        operand tuple order and the lift arg spellings reproduce the historical synthesis exactly
+        (primary lift ``(b, a)``, further channels ``(a, b_i)``), so :attr:`Reduction.loop`'s
+        first-use splice yields a loop byte-identical to :attr:`loop` — the round-trip
+        ``contraction_view(as_fold()) == self`` (axes supplied by the caller's placement) is what
+        keeps kernel identity fixed across the storage change."""
+        from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
+
+        mul, add = ElementwiseImpl("multiply"), ElementwiseImpl("add")
+        prim = self.channels[0]
+        k = self.k_axis.name
+        step: list[Stmt] = [
+            Assign(name=f"{prim.acc}__v", op=mul, args=(_operand_name(prim.b), self.a_name)),
+            Accum(name=prim.acc, value=f"{prim.acc}__v", op=add, axes=(k,)),
+        ]
+        for ch in self.channels[1:]:
+            step += [
+                Assign(name=f"{ch.acc}__v", op=mul, args=(self.a_name, _operand_name(ch.b))),
+                Accum(name=ch.acc, value=f"{ch.acc}__v", op=add, axes=(k,)),
+            ]
+        return Reduction(
+            carrier=self.loop.carrier,
+            axis=self.k_axis,
+            partial=Body(tuple(step)),
+            role=AxisRole.CONTRACTION,
+            operands=(prim.b, self.a, *(ch.b for ch in self.channels[1:])),
+            tile=self.tile,
+            stage=self.stage,
+        )
+
     # ---- params: the (m, n) output axes unpacked ---------- #
     @property
     def m_axis(self) -> Axis:
@@ -756,6 +799,75 @@ def _(s: Reduction, rename, sigma, axis_fn):
     )
 
 
+def _parse_bilinear(fold) -> tuple[object, tuple] | None:
+    """Parse a ``role=CONTRACTION`` fold's ``(operands, partial)`` back into ``(shared A edge,
+    ((b_edge, acc), …))`` — the inverse of :meth:`Contraction.as_fold`'s synthesis, keyed on its
+    stored spellings: the primary lift's args are ``(b, a)``, further channels' ``(a, b_i)``, and at
+    arity N the shared operand is the one name common to every lift. ``None`` when the fold is not
+    that shape (a hand-built fold, a foreign step) — the caller keeps the general fold reading."""
+    if not isinstance(fold, Reduction) or fold.role is not AxisRole.CONTRACTION or not fold.operands:
+        return None
+    accums = [st for st in fold.partial if isinstance(st, Accum)]
+    lifts = {st.name: st for st in fold.partial if isinstance(st, Assign)}
+    if not accums or len(fold.partial) != 2 * len(accums):
+        return None
+    by_name = {_operand_name(e): e for e in fold.operands}
+    try:
+        args = [lifts[acc.value].args for acc in accums]
+    except KeyError:
+        return None
+    if any(len(ar) != 2 for ar in args):
+        return None
+    if len(accums) == 1:
+        b_nm, a_nm = args[0]
+    else:
+        common = set(args[0])
+        for ar in args[1:]:
+            common &= set(ar)
+        if len(common) != 1:
+            return None
+        (a_nm,) = common
+    if a_nm not in by_name:
+        return None
+    chans = []
+    for ar, acc in zip(args, accums, strict=True):
+        b_nm = next((x for x in ar if x != a_nm), None)
+        if b_nm is None or b_nm not in by_name:
+            return None
+        chans.append((by_name[b_nm], acc.name))
+    return by_name[a_nm], tuple(chans)
+
+
+def shared_operand(fold):
+    """The shared-multiplicand (A-role) operand edge of a bilinear ``role=CONTRACTION`` fold, or
+    ``None`` — the placement-free read for callers that need only the edge (the cone), not the full
+    view."""
+    parsed = _parse_bilinear(fold)
+    return parsed[0] if parsed is not None else None
+
+
+def contraction_view(fold, m_axis: Axis, n_axis: Axis, lead_axes: tuple = ()) -> Contraction | None:
+    """The DERIVED bilinear reading of a stored ``role=CONTRACTION`` fold — a :class:`Contraction`
+    view over it, never stored. The output axes are the CALLER's placement facts (the trailing grid
+    axes for a root kernel; a flash consumer supplies its own), which is exactly why they are
+    parameters and not fold fields; everything else — the shared A edge, the ``(b, acc)`` channels,
+    the k axis, the ``tile`` / ``stage`` slices — is read off the fold. ``None`` when the fold is not
+    bilinear (the general fold reading stands alone)."""
+    parsed = _parse_bilinear(fold)
+    if parsed is None:
+        return None
+    a_edge, chans = parsed
+    return Contraction(
+        axes=(m_axis, n_axis),
+        k_axis=fold.axis,
+        a=a_edge,
+        channels=tuple(Channel(b=b, acc=acc) for b, acc in chans),
+        tile=fold.tile if fold.tile is not None else TilePlan(),
+        lead_axes=tuple(lead_axes),
+        stage=fold.stage,
+    )
+
+
 def _stmt_nodes(s: Stmt):
     """Every structural node reachable from stmt ``s`` (deep through nested bodies)."""
     if isinstance(s, (Map, Reduction, Contraction)):
@@ -833,4 +945,4 @@ class TileOp(Op):
         return "\n".join(pretty(self.op, "    "))
 
 
-__all__ = ["Channel", "Contraction", "Map", "Reduction", "TileOp", "tree_nodes"]
+__all__ = ["Channel", "Contraction", "Map", "Reduction", "TileOp", "contraction_view", "shared_operand", "tree_nodes"]

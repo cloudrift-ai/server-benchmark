@@ -325,9 +325,10 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis] | None:
     # The cone as a NODE TREE: the per-row statistic is its own projected reduce
     # (``Map(body=<the stat's scalar sweep>, sources=(Reduction,))``) and the cone's source, the
     # per-cell normalize its body — so the K seam is the node boundary, not a stmt scan.
-    # ONE product-carrier contraction with a channel per ⊗-fold: operand sharing is the node's
-    # ARITY (one shared A edge, N ``(b_i, acc_i)`` channels), and the node schedules / lowers as
-    # one unit through its own derived product loop (``Contraction.loop``).
+    # ONE bilinear fold with a component per ⊗-fold: operand sharing is edge reuse (the shared A
+    # cone read once per component), and the node schedules / lowers as one unit through its own
+    # derived product loop. Built through the view (which knows the output axes) and STORED as the
+    # role=CONTRACTION fold (``Contraction.as_fold`` — the 1k storage form).
     node = Contraction(
         axes=(m_ax, n_ax),
         k_axis=k_ax,
@@ -336,7 +337,7 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis] | None:
         tile=TilePlan(),
         lead_axes=tuple(grid[:-1]),
     )
-    return Map(body=Body((*prefix, *tail_ops, write)), sources=(node,)), n_ax
+    return Map(body=Body((*prefix, *tail_ops, write)), sources=(node.as_fold(),)), n_ax
 
 
 __all__ = ["bind_contraction", "bind_prologue_contraction", "make_cone", "map_cone", "semiring_binding"]

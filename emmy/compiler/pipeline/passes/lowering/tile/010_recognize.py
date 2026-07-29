@@ -65,7 +65,7 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import Stmt
-from emmy.compiler.ir.tile import Channel, Contraction, Map, Placement, Reduction, TileOp, TilePlan
+from emmy.compiler.ir.tile import Channel, Contraction, Map, Placement, Reduction, TileOp, TilePlan, shared_operand
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import Fork
 
@@ -293,8 +293,11 @@ def _nodify_contraction(node, free: tuple):
                 tile=TilePlan(),
                 lead_axes=tuple(free[:-2]),
             )
-            # ONE home for the projection: the wrapping ``Map``'s body, never a node field.
-            return Map(body=epi, sources=(con,)) if len(epi) else con
+            # ONE home for the projection: the wrapping ``Map``'s body, never a node field. The
+            # STORED form is the role=CONTRACTION fold (the 1k vocabulary); ``Contraction`` is the
+            # derived view the schedule re-extracts (``contraction_view``).
+            fold = con.as_fold()
+            return Map(body=epi, sources=(fold,)) if len(epi) else fold
     demoted = Loop(axis=rloop.axis, body=rloop.body, unroll=rloop.unroll, role=AxisRole.PLANAR, carrier=rloop.carrier)
     red = Reduction.from_loop(demoted)
     return Map(body=projection, sources=(red,)) if len(projection) else red
@@ -425,9 +428,9 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     # decided-empty stamps, so every leaf row spells the same key set (the evidence pick's
     # prefix-consistency: an absent key reads as "free").
     c_map, n_ax = pro
-    src = c_map.sources[0]  # the ONE product node — its channels share one k axis / cone
+    src = c_map.sources[0]  # the ONE bilinear fold — its components share one k axis / cone
     # The cone's source node IS the row-invariant prologue; ITS source is the statistic reduce.
-    con_base, map_base = prologue_knob_bases(src.k_axis.name, src.a.source.source.axis.name)
+    con_base, map_base = prologue_knob_bases(src.axis.name, shared_operand(src).source.source.axis.name)
     con_tile = TileOp(op=c_map, place=Placement(free=(*free, n_ax)), inputs=dict(loop.inputs))
     con = _as_list(schedule(con_tile, loop.name, {**knob_base, **con_base}, ctx))
     if con and warp_tile_pinned():

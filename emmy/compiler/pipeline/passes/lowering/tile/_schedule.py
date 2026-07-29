@@ -45,7 +45,7 @@ from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.schedule import Raster, Stage, WarpSpec, has_scalar_atom_alias, is_warp_codec
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt, Write
-from emmy.compiler.ir.tile import Channel, Contraction, Map, Placement, ReducePlan, Reduction, TileOp, TilePlan
+from emmy.compiler.ir.tile import Channel, Contraction, Map, Placement, ReducePlan, Reduction, TileOp, TilePlan, contraction_view
 from emmy.compiler.ir.tile.ir import gmem_row_stride
 from emmy.compiler.ir.tile.ops import axis_role, cone_seam, nodify_reduce, reduce_loop
 from emmy.compiler.ir.tile.ops import lower as lower_op
@@ -1240,13 +1240,20 @@ def _contraction_node(node, place, tile_plan: TilePlan) -> tuple[Contraction, Bo
     materialize peels it into the store tail (the synthesized grid-``Write`` for a bare contraction
     stays a materialize concern — it needs ``root.output``). A computed-A cone the binding resolves
     is stored INLINE on the ``a`` edge (:func:`make_cone`)."""
-    if isinstance(node, Map) and len(node.sources) == 1 and isinstance(node.sources[0], Contraction):
-        # The recognizer's ``Map(body=projection, sources=(Contraction,))`` spelling — the ONE
-        # product node under the wrapper is the schedulable unit, the projection its ``Map`` body.
-        return replace(node.sources[0], tile=tile_plan), node.body
+    grid = list(place.grid)
+    if isinstance(node, Map) and len(node.sources) == 1 and len(grid) >= 2:
+        # The recognizer's ``Map(body=projection, sources=(fold,))`` spelling — the ONE bilinear
+        # fold under the wrapper is the schedulable unit, the projection its ``Map`` body. The view
+        # (``contraction_view``) is DERIVED here, its output axes the placement's trailing grid.
+        view = contraction_view(node.sources[0], grid[-2], grid[-1], tuple(grid[:-2]))
+        if view is not None:
+            return replace(view, tile=tile_plan), node.body
+    if len(grid) >= 2:
+        view = contraction_view(node, grid[-2], grid[-1], tuple(grid[:-2]))
+        if view is not None:
+            return replace(view, tile=tile_plan), Body(())
     if isinstance(node, Contraction):
         return replace(node, tile=tile_plan), Body(())
-    grid = list(place.grid)
     a_load, b_load, acc, epilogue = semiring_binding(node, place.grid)
     kaxis = reduce_loop(node).axis
     return (
@@ -1376,12 +1383,14 @@ def _splitk_option(
     # The resolved pipeline rides the node it decorates — ``030_split_reduce`` carries the sliced
     # contraction into the partial kernel and the stage travels with it.
     inner = replace(inner, stage=stage)
-    # The carrier is DERIVED from the node's own synthesized fold loop — the 1-component additive
-    # ``Accum`` for a plain matmul, the N-component product-monoid state for a multi-channel
-    # (gate/up) node — so the split finalize folds exactly the state the kernel accumulates.
-    carrier = inner.loop.carrier
-    # ONE composition rule: the sliced contraction (multi-channel included) rides the reduce's ``partial``.
-    op = Reduction(carrier=carrier, axis=ksplit, role=AxisRole.CONTRACTION, partial=Body((inner,)), reduce=ReducePlan.parse(split_spec))
+    # The carrier is the sliced fold's own — the 1-component additive ``Accum`` for a plain matmul,
+    # the N-component product-monoid state for a multi-channel (gate/up) node — so the split
+    # finalize folds exactly the state the kernel accumulates.
+    inner_fold = inner.as_fold()
+    # ONE composition rule: the sliced fold (multi-channel included) rides the reduce's ``partial``.
+    op = Reduction(
+        carrier=inner_fold.carrier, axis=ksplit, role=AxisRole.CONTRACTION, partial=Body((inner_fold,)), reduce=ReducePlan.parse(split_spec)
+    )
     # The projection rides the ``Map`` wrapper — its ONE home; ``030_split_reduce`` reads it there and
     # retargets it (per-partition atomic store / a deferred finalize after the cross-partition sums).
     if len(epi):
@@ -1418,7 +1427,7 @@ def _warp_option(
     # Re-wrap the recognizer's projecting ``Map`` around the tiled node (materialize peels it into
     # the store tail — the same ``project ∘ contract`` spelling the Reduction tiers use).
     node = replace(node, stage=stage)
-    emitted = Map(body=proj, sources=(node,)) if len(proj) else node
+    emitted = Map(body=proj, sources=(node.as_fold(),)) if len(proj) else node.as_fold()
     # Warp specialization rides ORTHOGONAL to the tile/stage just resolved: an optional WSPEC row /
     # pin splits the warps into roles over this fixed pipeline (gated on the RESOLVED ``stage`` — an
     # ineligible spec leaves no pipeline for a producer to drive, so WSPEC degrades to uniform).
@@ -1482,7 +1491,7 @@ def _tile_option(
             if stage_spec:
                 stage = _resolve_scalar_stage(node, Stage.parse(stage_spec), tile.inputs, budget)
             node = replace(node, stage=stage)
-            op = Map(body=proj, sources=(node,)) if len(proj) else node
+            op = Map(body=proj, sources=(node.as_fold(),)) if len(proj) else node.as_fold()
     elif reduce_spec:
         op = nodify_reduce(tile.op, ReducePlan.parse(reduce_spec))
     # ``TILE`` / ``REDUCE`` / ``STAGE`` key ``@<k_axis>`` (the contraction axis this node schedules),
@@ -1964,7 +1973,7 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     stage = Stage(transport="sync", smem=(node.a_name,), bk_elems=bk_elems)
     stamped = {**knobs, _at(TILE, k_ax.name): spec}
     node = replace(node, stage=stage)
-    emitted = Map(body=epilogue, sources=(node,)) if len(epilogue) else node
+    emitted = Map(body=epilogue, sources=(node.as_fold(),)) if len(epilogue) else node.as_fold()
     return TileOp(op=emitted, name=name, place=place, knobs=stamped)
 
 

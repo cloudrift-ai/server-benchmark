@@ -135,7 +135,7 @@ def _mapped(op, grid, *, name: str = "", knobs: dict | None = None) -> TileOp:
     return TileOp(op=op, name=name, place=place, knobs=dict(knobs or {}))
 
 
-def _split_contraction(match: Match, root: Node, tile: TileOp, node: Contraction, carrier, plan: ReducePlan, split: Axis, projection=()):
+def _split_contraction(match: Match, root: Node, tile: TileOp, node, carrier, plan: ReducePlan, split: Axis, projection=()):
     """Realize a **structural** split-K ``Reduction(axis=ksplit, partial=[Contraction])`` — the K axis is
     already factored (``split`` == ``ksplit``, extent == ``cta``) and the operands offset, so the
     partial is the **bare Contraction** with ``ksplit`` prefixed as a lead grid axis (each CTA a fixed
@@ -155,13 +155,14 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node: Contraction
     states = carrier.state.names
     n_comp = len(states)  # 1 = plain matmul; N = the multi-channel (gate/up) node's per-channel accs
     acc = states[0]
-    lead = (split, *node.lead_axes)
     epilogue = list(projection)  # the fused projection off the ``Map`` wrapper (empty for a bare matmul)
 
     def _partial(body):
-        """The partial kernel's node: the contraction with ``ksplit`` prefixed as a lead grid axis,
-        its retargeted stores riding the ``Map`` wrapper (the one home for a projection)."""
-        return Map(body=Body(body), sources=(replace(node, lead_axes=lead),))
+        """The partial kernel's node: the stored fold verbatim, its retargeted stores riding the
+        ``Map`` wrapper (the one home for a projection). ``ksplit`` joins as a lead grid axis via
+        the partial tile's OWN grid — the view derives lead axes from the placement, so nothing is
+        restamped on the node."""
+        return Map(body=Body(body), sources=(node,))
 
     # The cross-CTA MOVE derives from the one placement-keyed selector (ReduceStage.combine over
     # the GRID stage) — this rewrite only realizes it; the carrier / projection legality raises
@@ -345,7 +346,9 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
         # The split node's inner contraction — multi-channel included — rides the reduce's
         # ``partial`` (the one composition rule).
         inner = split_root.partial[0]
-        if isinstance(inner, Contraction):
+        if isinstance(inner, Contraction) or (
+            isinstance(inner, Reduction) and inner.role is AxisRole.CONTRACTION and inner.tile is not None
+        ):
             return _split_contraction(match, root, tile, inner, carrier, plan, rax, projection)
     # Flash split-KV: a warp-tiled TWISTED streaming tree keeps its fragment residence in the
     # partial (the scalar residual path below would drop it to the per-cell tier).

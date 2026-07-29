@@ -63,10 +63,10 @@ Map                               ← body: rsqrt(acc/N+ε) statistic + the per-
 Fused norm→linear / gate⊗up after phase 1 — sharing is a binding, channels are siblings:
 
 ```
-bindings: x̂ = Map(body=scale, source=Reduction(stat over k))     # the cone, defined ONCE, a real node tree
+bindings: { "x̂": Map(body=scale, source=Reduction(stat over k)) }   # the cone, defined ONCE, keyed by its out
 op:       Map(body=swiglu(acc_g, acc_u) + Write,
-              sources=(Contraction(a=Ref(x̂), b=Wg → acc_g),
-                       Contraction(a=Ref(x̂), b=Wu → acc_u)))
+              sources=(Contraction(a="x̂", b=Wg → acc_g),
+                       Contraction(a="x̂", b=Wu → acc_u)))
 ```
 
 Flash — a twisted streaming reduce whose per-step partial composes two contractions:
@@ -86,15 +86,25 @@ single strongest motivation for path addressing).
 
 ### Phase-1 IR generalization
 
-- **Let-bound sharing.** `TileOp.bindings` (name → node tree) + a `Ref(name)` leaf wherever a bound subtree
-  is consumed. Deliberately a let-tree, NOT an implicit DAG: a shared subtree has exactly one home (its
-  binding), so paths stay unique, `structural_key` stays a tree fold, and every existing walk gains one
-  `Ref` case instead of needing visited-set DAG traversal. The rewrite machinery renames binding names the
-  way it renames SSA names, so two refs to one binding canonicalize differently from two copies — sharing
-  is part of the structural identity.
+- **Let-bound sharing, referenced by SSA name — no new reference primitive.** `TileOp.bindings` is a table
+  of bound subtrees keyed by the name each tree's root defines (its `out`); a consumer references the bound
+  value by that plain SSA name in an operand field (`Contraction.a = "x̂"`). There is deliberately NO `Ref`
+  node kind: SSA names are already the IR's one reference mechanism (`deps`/`defines`, the rewrite rename
+  maps, `structural_key` canonicalization all speak names), and a wrapper node would add vocabulary without
+  information. The invariant that replaces it: **tree-wide name uniqueness** — every name defined anywhere
+  in `op` + `bindings` is defined exactly once per `TileOp`, validated in `__post_init__` (which also
+  rejects a string operand that resolves to no binding — dangling references fail at construction, not at
+  lowering). The rewrite machinery renames binding keys through the same rename map as SSA names, so
+  references and definitions stay in lockstep and two references to one binding canonicalize differently
+  from two copies — sharing is part of the structural identity. Still a let-tree, NOT an implicit DAG: a
+  shared subtree has exactly one home (its binding), so paths stay unique and `structural_key` stays a
+  tree fold; walks consult `bindings` at name-operand fields instead of needing visited-set DAG traversal.
+  (If a shared subtree ever needs to sit in STATEMENT position inside a `Body` — where a bare string
+  cannot stand — add a tiny Ref-stmt then; no current form needs it.)
 - **Sibling contractions replace fold channels.** `Contraction` drops `folds` and holds one `b_load` / one
   `acc`. A fused multi-fold edge (gate⊗up) is N sibling contractions under `Map.sources` (a tuple now;
-  `source` remains as the len-≤1 compat property) sharing an A `Ref`. Consequences, all deliberate:
+  `source` remains as the len-≤1 compat property) referencing one shared A name. Consequences, all
+  deliberate:
   - A fused sibling group is SCHEDULED AS ONE UNIT — one shared TilePlan/Stage/ReducePlan row for the
     group. Rationale: the fused lowering requires the channels to agree anyway (today the shared `tile`
     field enforced this implicitly), and it means the knob codec needs no sibling ordinals — one
@@ -106,7 +116,8 @@ single strongest motivation for path addressing).
     `op_cache_key` and kernel identity hang off it.
   - `b_trans`-must-agree stops being a node assert and becomes a group-formation gate: channels with
     disagreeing B layouts simply never group (they were never legally fusable).
-- **The cone becomes a real node tree.** `a_operand: Load | Body` → `a: Load | Ref`; the computed-A cone is
+- **The cone becomes a real node tree.** `a_operand: Load | Body` → `a: Load | str` (a binding name); the
+  computed-A cone is
   a bound `Map(body=per-cell normalize, source=Reduction(stat))`. The stat reduce is thereby addressable
   and cuttable; `stat_prologue()`'s ad-hoc body-splitting at the K seam becomes a read of the node
   boundary (Reduction = the statistic, Map body = the per-cell cone).
@@ -285,16 +296,17 @@ Goal: the target IR above, with recognition/scheduling/materialization producing
 
 Sub-steps, in landing order:
 
-1a. **Vocabulary first, no behavior change**: introduce `Ref` + `TileOp.bindings` + `Map.sources` and
-    thread `Ref` resolution through the shared walkers (`lower`, `_flatten_nodes`, `pretty`, role/carrier
-    readers, `rewrite`/`structural_key`). Nothing produces bindings yet; all tests must pass untouched.
+1a. **Vocabulary first, no behavior change**: introduce `TileOp.bindings` (out-name-keyed) + `Map.sources`
+    + the tree-wide name-uniqueness validation, and thread binding-name resolution through the shared
+    walkers (`lower`, `_flatten_nodes`, `pretty`, role/carrier readers, `rewrite`/`structural_key` — the
+    rewrite rename map covers binding keys). Nothing produces bindings yet; all tests must pass untouched.
 1b. **Recognize-side flip**: the contraction nodifier emits binding + sibling group instead of stacking
     fold channels; the cone is nodified (with the bare-resolution guard from the codec design — decide the
     guard's mechanism here even though the codec lands later, so spellings never shift twice); the
     scheduler stamps one shared row per fused group; `b_trans` becomes a group-formation gate. Retire
     `Contraction.epilogue` and `TileOp.tier`/`stage` in this step — they are recognize/schedule-side
     concepts and moving them later would mean touching the same call sites twice.
-1c. **Materialize/split**: factorization reads the group off `Map.sources` + `Ref` identity (one A
+1c. **Materialize/split**: factorization reads the group off `Map.sources` + shared-name identity (one A
     fragment, N mma chains, one C fragment per channel — unchanged emission); the split pass derives the
     N-component carrier from the group. Re-run the #389 multichannel-split A/B — it was correct-but-null
     under the bespoke encoding and may flip once the split is structural.
@@ -303,7 +315,8 @@ Sub-steps, in landing order:
     representation. Both are no-duplication invariant items; the windowing half is orthogonal to sharing
     and may land as its own commit at the end of the phase.
 
-Done when: `make test` green; unit tests cover Ref round-trip through rewrite/structural-key (two refs to
+Done when: `make test` green; unit tests cover binding-reference round-trip through rewrite/structural-key
+(name uniqueness violations + dangling references rejected at construction; two references to
 one binding ≢ two copies), group formation + fallback (disagreeing layouts recognize separately), cone
 nodification; accuracy on the geglu / norm_linear golden snippets passes vs eager.
 
@@ -392,5 +405,6 @@ YAML-comment baselines.
 ## Cleanup
 
 Docs at the end of each landed phase: the pipeline ARCHITECTURE (knob/fork system), the tile-lowering
-ARCHITECTURE (bindings/Ref, sibling groups, PLACE as edge property), and CLAUDE.md's tile-lowering blurb
+ARCHITECTURE (bindings + name references, sibling groups, PLACE as edge property), and CLAUDE.md's
+tile-lowering blurb
 (node vocabulary changes in phase 1). Delete this plan when phase 5 lands.

@@ -87,12 +87,6 @@ Spellings (all ~580 live gemma golden entries — unchanged; resolution targets 
 
 ## Phases
 
-### Phase 0 — baseline capture
-
-Capture on THIS branch (not main): `emmy eval golden --in-model` MATCH/DRIFT/GAP counts both cards;
-`op_cache_key`s for the fused shapes (geglu, norm_linear, lm_head fused, flash); `EMMY_DUMP_DIR` CUDA dumps
-for gemma-4 layer-0. These are the parity gates every later phase diffs against.
-
 ### Phase 1 — IR generalization (`ir/tile/ir.py`, `ir/tile/ops.py`, recognize/schedule/factorize)
 
 1a. `Ref` + `TileOp.bindings` + `Map.sources`; strip `folds`; `a: Load | Ref`; retire `Contraction.epilogue`
@@ -105,9 +99,9 @@ for gemma-4 layer-0. These are the parity gates every later phase diffs against.
     N-component carrier from the group; re-run the #389 multichannel-split A/B (null may flip).
 1d. Stretch: `Reduction.source` → head-of-partial, only if `Ref` plumbing already did the work.
 
-Verify: group-loop `op_cache_key` byte-parity vs phase-0 capture; `make test`; eval-golden counts identical;
-CUDA dumps byte-identical (or name-churn-only); accuracy on geglu/norm_linear snippets + 5090 decode twin
-TPOT within noise.
+Verify: `make test` + unit tests (Ref round-trip through `rewrite`/`structural_key`; group-formation gates
+fall back to separate recognition); accuracy on geglu/norm_linear snippets. Full parity (goldens, dumps,
+twins) is settled once at the end — phase 5.
 
 ### Phase 2 — codec core (`knob.py`, `search/keys.py`, `search/space.py`)
 
@@ -145,8 +139,10 @@ No evidence migration (short spellings canonical). Re-seed retired PLACE goldens
 Commented-out PLACE entries re-keyed + re-enabled ONLY behind a fresh `--ab` each — pre-wipe µs are not
 evidence.
 
-Verify: eval-golden pin-only audit green; serving twins deploy from tier; decode TPOT / TTFT within noise
-of the YAML-comment baselines.
+Verify (the consolidated end-of-refactor parity pass — replaces per-phase parity gates): `emmy eval golden
+--in-model` both cards, MATCH across the board (any DRIFT/GAP is triaged here — golden µs re-verified by
+`--ab` where the deployed config moved); pin-only offer audit green; serving twins deploy from tier; decode
+TPOT / TTFT within noise of the YAML-comment baselines.
 
 ### Phase 6 — deferred follow-ups (separate plans when picked up)
 
@@ -157,8 +153,9 @@ axis-window unification (`Reduction.offset`/`bound` vs `Axis.source_axis`/`real_
 
 ## Risks
 
-- **Fused-lowering byte-parity (phase 1) is THE load-bearing gate** — drift re-keys kernel caches and
-  invalidates golden µs. The captured-key test lands before the recognize-side flip.
+- **Fused-lowering drift** (phase 1) re-keys kernel caches and can invalidate golden µs. Parity is settled
+  once, at phase 5 — budget triage time there; if the eval-golden pass surfaces broad drift, bisect back to
+  the phase-1 commits rather than patching goldens forward.
 - Cone nodification changes `--ir tile` dumps and structural test assertions — sweep
   `tests/compiler/passes/` early (test_structural_features and friends).
 - Stored-short-key ambiguity from future nodifications — resolver fails loudly; compat test is the tripwire.

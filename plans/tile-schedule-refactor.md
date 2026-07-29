@@ -170,14 +170,21 @@ class Map(Stmt):
     fn: Lambda                       # π : λ(s₁…sₙ) → out; sources bind positionally to params
     sources: tuple[Operand, ...]     # project ∘ fold; must admit Load — the cut terminal (phase 4)
 
+Slice = TilePlan | ReducePlan | Stage  # the EXISTING schedule value types (ir/schedule.py) — no new class
+
 @dataclass
 class TileOp(Op):
     op: Fold | Map                   # the pure term tree — IMMUTABLE across the whole schedule search
     place: Placement
     workers: WarpSpec | None
-    schedule: dict[Path, Slice]      # the TILE / REDUCE / STAGE decorations, keyed by the phase-2
-                                     # tree paths (1r): a fork is a DIFFERENT MAP, never a rebuilt
-                                     # tree — "keys stamp against the pre-placement tree" by type
+    schedule: dict[Key, Slice]       # the slice decorations (1r), keyed by the phase-2 CODEC key —
+                                     # `FAMILY@path` — NOT by path alone: one fold may carry all
+                                     # three families at once, and the family selects the slice
+                                     # kind, so key and value agree by construction. Values are the
+                                     # RESOLVED slices, which makes the stamped knob row DERIVABLE
+                                     # (spell() of each value + the root-globals) — honest stamping
+                                     # by type. A fork is a DIFFERENT MAP, never a rebuilt tree —
+                                     # "keys stamp against the pre-placement tree" holds by type
 ```
 
 **Lowering rule.** `Fold.loop` = the operand bodies (positional binding — no first-use scan, no tie
@@ -346,8 +353,11 @@ lowered nest throughout).
   switches from lowered-nest bytes to the α-invariant term hash — a re-keying event by definition,
   never a silent one.
 - **1r — schedule slices move off the nodes.** `tile` / `reduce` / `stage` leave `Fold`; `TileOp`
-  carries `schedule: {path → slice}` keyed by the phase-2 path vocabulary — the walker is the
-  prerequisite, so 1r lands with or after the codec core. The term becomes pure algebra, IMMUTABLE
+  carries `schedule: {FAMILY@path → slice}` — the values are the existing `TilePlan` / `ReducePlan` /
+  `Stage` objects, resolved, and the key is the phase-2 codec key (a fold may carry all three
+  families at once, so the path alone cannot key the map; the stamped knob row becomes `spell()` of
+  the values + the root-globals). The walker is the prerequisite, so 1r lands with or after the
+  codec core. The term becomes pure algebra, IMMUTABLE
   across the whole schedule search: a fork is a different map, never a rebuilt tree, and "keys stamp
   against the pre-placement tree" holds by type. Byte-neutral (`lower` already ignores the slices —
   they are metadata); the readers re-key mechanically (`reduce_plan`, `nodify_reduce`, `030`'s plan

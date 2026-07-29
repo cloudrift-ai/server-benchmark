@@ -9,7 +9,7 @@ beside :mod:`~emmy.compiler.ir.atom`, not under ``ir/tile``.
 (:mod:`emmy.compiler.ir.stmt.algebra` + :mod:`~emmy.compiler.ir.tile.ir`); the
 schedule — which axes are parallel, how the reduce axis partitions across hardware levels — is the
 **codec value types** here (:class:`ReducePlan` / :class:`TilePlan` / :class:`Stage` /
-:class:`WarpSpec` + :class:`Placement`). They ride on the structural nodes (a ``Contraction``'s
+:class:`WarpSpec` + :class:`Placement`). They ride on the structural nodes (a ``ContractionView``'s
 ``tile``, a ``Fold``'s ``reduce``) and on the thin root :class:`~emmy.compiler.ir.tile.ir.TileOp`
 fields (``place`` / ``workers`` + the residual reduce/tier/stage).
 

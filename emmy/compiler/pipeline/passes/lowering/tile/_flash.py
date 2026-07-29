@@ -9,10 +9,10 @@ halves:
 - **Construction** — the ``flash_combine`` carrier, the ``flash_shape_eligible`` /
   ``gqa_group`` predicates, and the fragment builder ``build_flash_frag``. It doesn't
   hand-assemble a kernel body — it builds the high-level **structural-node tree**
-  (``ir/tile/ir``): flash is the **two-``Contraction`` tree** ``Map(body=[O/l projection],
-  sources=(Fold(role=TWISTED, axis=kv, step=[Contraction(Σ_dd Q·K), …, Contraction(Σ_j P·V)]),))``
+  (``ir/tile/ir``): flash is the **two-``ContractionView`` tree** ``Map(body=[O/l projection],
+  sources=(Fold(role=TWISTED, axis=kv, step=[ContractionView(Σ_dd Q·K), …, ContractionView(Σ_j P·V)]),))``
   — the ``(m,l,O)`` LSE streaming reduce over kv whose per-step ``step`` holds BOTH the ``Σ_dd Q·K``
-  score :class:`Contraction` (at its head) and the **P@V** ``Σ_j P·V`` :class:`Contraction` (its A
+  score :class:`ContractionView` (at its head) and the **P@V** ``Σ_j P·V`` :class:`ContractionView` (its A
   operand the register-resident softmax weight ``P``; ``_split_pv`` redirects the carrier's
   expectation-fold value through it), projected ``O/l`` after the loop. Both Q@K and P@V ride the
   single walked ``step`` edge (no ``source`` asymmetry) and factorize through the one
@@ -55,11 +55,11 @@ redundant, form::
       Init (m_i = -inf, l_i = 0, O_i = 0)            # running (max, denom, out)
       for kv in 0..S_k:                              # streaming reduce (TWISTED)
         Init sacc = 0
-        for dd in 0..head_dim: sacc += Q[…,m,dd]·K[…,kv,dd]   # Q@K score Contraction
+        for dd in 0..head_dim: sacc += Q[…,m,dd]·K[…,kv,dd]   # Q@K score ContractionView
         s = sacc · scale
         M = max(m_i, s); alpha = exp(m_i − M); P = exp(s − M)  # softmax stats (flash_combine merge)
         l_i = l_i·alpha + P
-        for j in 0..1:  O_i__pv += P · V[…,kv,d]     # P@V Contraction (block=1: singleton j)
+        for j in 0..1:  O_i__pv += P · V[…,kv,d]     # P@V ContractionView (block=1: singleton j)
         O_i = O_i·alpha + O_i__pv                    # the LSE rescale + PV fold
       out[…,m,d] = O_i / l_i
 
@@ -91,7 +91,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop.ir import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Carrier, Load, Loop, Select, SelectBranch, Write
-from emmy.compiler.ir.tile import Channel, Contraction, Fold, Placement, TileOp, TilePlan
+from emmy.compiler.ir.tile import Channel, ContractionView, Fold, Placement, TileOp, TilePlan
 from emmy.compiler.ir.tile.ops import Map
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import make_cone
 from emmy.compiler.pipeline.passes.lowering.tile._carrier import denom, exp_family_twist, expect
@@ -327,7 +327,7 @@ def _batch_vars(n: int) -> tuple[Var, ...]:
 
 
 def _split_pv(merge: list, o: str, v: str, v_buf: str, v_idx: tuple, m_axis: Axis, d_axis: Axis) -> list:
-    """Split the exp carrier's streaming ``merge`` around a real **PV** :class:`Contraction`.
+    """Split the exp carrier's streaming ``merge`` around a real **PV** :class:`ContractionView`.
 
     The generated merge folds the expectation channel ``O = O·α + v·P`` **atomically** (``P = exp(s − M)``
     the softmax weight). This rewrites it so the ``v·P`` product becomes the output of a
@@ -336,7 +336,7 @@ def _split_pv(merge: list, o: str, v: str, v_buf: str, v_idx: tuple, m_axis: Axi
     ``Oblk`` (``O = O·α + Oblk``). ``O`` stays a carrier channel (so its seed + cross-tier machinery are
     untouched); only the value it folds is redirected through the contraction.
 
-    This is the scalar two-``Contraction`` flash tree at ``block = 1``: the ``j`` reduce is a singleton
+    This is the scalar two-``ContractionView`` flash tree at ``block = 1``: the ``j`` reduce is a singleton
     (the scalar streaming degenerate). The tensor-core tier tiles the same ``P@V`` node with an mma
     ``TilePlan`` (``_schedule._twisted_warp_option``), realized at fragment residence by ``_factor``'s
     one binder (``_twist``) — never a bespoke emitter. ``O``
@@ -346,7 +346,7 @@ def _split_pv(merge: list, o: str, v: str, v_buf: str, v_idx: tuple, m_axis: Axi
     defs = {s.name: s for s in merge if isinstance(s, Assign)}
     prod = defs[o_accum.value]  # the fused ``v·P`` (multiply(v, P))
     p_name = next(a for a in prod.args if a != v)  # the softmax weight P (register-resident)
-    pv = Contraction(
+    pv = ContractionView(
         axes=(m_axis, d_axis),
         k_axis=Axis(name="pj", extent=Dim(1)),  # block=1: a singleton intra-block reduce
         # A = P, register-resident: a one-stmt cone stored INLINE on the edge, the same shape
@@ -388,9 +388,9 @@ def _flash_op(
     out_store: tuple[str, tuple] | None = None,
 ) -> Map:
     """The per-output-element ``(…, m, d)`` compute as the structural-node tree: flash is
-    ``Map(body=[O/l projection], sources=(Fold(role=TWISTED, axis=kv, step=[Contraction(QK), …,
-    Contraction(PV)]))`` — the ``(m,l,O)`` LSE streaming reduce over ``kv`` whose per-step **partial**
-    holds the NESTED ``Σ_dd Q·K`` :class:`Contraction` node at its head (then scaled, optionally
+    ``Map(body=[O/l projection], sources=(Fold(role=TWISTED, axis=kv, step=[ContractionView(QK), …,
+    ContractionView(PV)]))`` — the ``(m,l,O)`` LSE streaming reduce over ``kv`` whose per-step **partial**
+    holds the NESTED ``Σ_dd Q·K`` :class:`ContractionView` node at its head (then scaled, optionally
     masked, the value read + the carrier's dissolved merge with the PV contraction), projected ``O/l``
     after the loop. :meth:`Fold.loop` flattens the head QK node the same way it flattens the
     embedded PV, so the scalar tier expands the same loop-in-body nest as before. The free
@@ -415,11 +415,11 @@ def _flash_op(
     else:
         q_idx, k_idx, v_idx = access_indices
 
-    # s = Σ_dd Q·K — the inner contraction as a high-level :class:`Contraction` structural node, the
+    # s = Σ_dd Q·K — the inner contraction as a high-level :class:`ContractionView` structural node, the
     # ``source`` of the streaming kv :class:`Fold`. Per-cell scalar (``TilePlan()``): the
     # redundant one-dot-per-output-element score. Its output axes are the score matrix ``[m, kv]``.
     # The scale / mask reads ``sacc``.
-    score_contraction = Contraction(
+    score_contraction = ContractionView(
         axes=(Axis(name="m", extent=s_q), Axis(name="kv", extent=s_k)),
         k_axis=Axis(name="dd", extent=Dim(head_dim)),
         a=Load(name="q_e", input=q_buf, index=q_idx),
@@ -469,13 +469,13 @@ def _flash_op(
     # ``step`` is the scale / mask binding ``score_name``, then the carrier's dissolved streaming
     # ``merge`` with the **PV split out as a real contraction**. ``flash_combine`` supplies the state +
     # twist; the nested ``Σ Q·K`` contraction rides on ``source`` (``Fold.loop`` splices its loop
-    # ahead of the partial). Both P@V and Q@K are now :class:`Contraction` nodes — the two-contraction tree.
+    # ahead of the partial). Both P@V and Q@K are now :class:`ContractionView` nodes — the two-contraction tree.
     carrier = flash_combine("m_i", "l_i", "O_i", score_name, "v_e")
     m_axis = Axis(name="m", extent=s_q)
     d_axis = Axis(name="d", extent=Dim(d_v))
     # Both contractions ride the single walked edge — ``step``: the ``Σ_dd Q·K`` score at its head,
     # then the scale / mask binding ``score_name``, then the carrier's dissolved streaming ``merge``
-    # with the **PV split out as a real Contraction**. ``Fold.loop`` flattens the head QK node the
+    # with the **PV split out as a real ContractionView**. ``Fold.loop`` flattens the head QK node the
     # same way it flattens the embedded PV, so the scalar tier expands the identical loop-in-body nest
     # — but the recursion can now reach BOTH contractions as nodes on ``step`` (no ``source``
     # asymmetry between QK and PV).

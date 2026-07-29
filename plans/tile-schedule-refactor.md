@@ -103,15 +103,15 @@ so the derived loop — and with it `op_cache_key` / kernel identity — depends
 **The contraction view** — derived at fork-emit, never stored:
 
 ```python
-def contraction_view(fold, m_axis, n_axis, lead_axes) -> Contraction | None:
+def contraction_view(fold, m_axis, n_axis, lead_axes) -> ContractionView | None:
     ...  # role=CONTRACTION + the step factors as one multiply per component sharing a common factor
          # (`ir._parse_bilinear`); the OUTPUT axes are the CALLER's placement facts (trailing grid for
          # a root kernel), which is why they are parameters and not fold fields
 ```
 
-The `Contraction` dataclass IS the view: one shared `a` edge, `(b, acc)` channels, the `(m, n)` `Side`
+The `ContractionView` dataclass IS the view: one shared `a` edge, `(b, acc)` channels, the `(m, n)` `Side`
 geometry, `b_trans` — the whole reading the warp/staged tiers and `_atom`/`_factor` consume.
-`Contraction.as_fold()` is the storage direction; the round-trip `contraction_view(as_fold(v)) == v` and
+`ContractionView.as_fold()` is the storage direction; the round-trip `contraction_view(as_fold(v)) == v` and
 `as_fold(v).loop == v.loop` (byte-identical) are unit-tested. `ir.shared_operand(fold)` is the
 placement-free read for callers that need only the shared edge (the cone).
 

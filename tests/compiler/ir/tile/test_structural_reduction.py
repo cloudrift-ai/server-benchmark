@@ -1,9 +1,9 @@
-"""The :class:`Fold` / :class:`Contraction` / :class:`Map` structural tile-IR nodes — their
+"""The :class:`Fold` / :class:`ContractionView` / :class:`Map` structural tile-IR nodes — their
 algebra/structure split and the round-trip invariant the materializer relies on.
 
 A ``Fold`` is the typed successor of the bare annotated reduce ``Loop`` (holding no projection);
 a projected reduce (softmax / RMSNorm) is a ``Map`` whose body IS the projection over a ``Fold``
-``source``. A ``Contraction`` is the tiled matmul node (built recognize-side at fork-emit), holding
+``source``. A ``ContractionView`` is the tiled matmul node (built recognize-side at fork-emit), holding
 its ``a`` edge + product channels + ``tile``; it synthesizes the canonical mul-add ``CONTRACTION``
 loop on demand so ``ops.lower`` / ``reduce_loop`` flatten it back to the loop nest the materializer
 expands (via ``_factor.factorize``). These pin that contract plus the structural reads (``axis_role`` /
@@ -18,7 +18,7 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import Channel, Contraction, Fold, Map, ReducePlan, TileOp
+from emmy.compiler.ir.tile import Channel, ContractionView, Fold, Map, ReducePlan, TileOp
 from emmy.compiler.ir.tile.ops import axis_role, lower, reduce_loop, reduce_plan
 
 
@@ -111,11 +111,11 @@ def test_twisted_role_propagates() -> None:
     assert axis_role(Map(body=Body(()), sources=(red,))) is AxisRole.TWISTED
 
 
-def _contraction() -> Contraction:
+def _contraction() -> ContractionView:
     """A minimal tiled contraction node — ``acc = Σ_k A[m, k]·B[k, n]`` over a scalar tile."""
     a = Load(name="a_e", input="A", index=(Var("m"), Var("k")))
     b = Load(name="b_e", input="B", index=(Var("k"), Var("n")))
-    return Contraction(
+    return ContractionView(
         axes=(Axis("m", 128), Axis("n", 128)),
         k_axis=Axis("k", 256),
         a=a,
@@ -143,7 +143,7 @@ def test_contraction_dispatches_through_ops() -> None:
 
 
 def test_a_projection_rides_the_map_wrapper_not_the_node() -> None:
-    """ONE home for a projection: the wrapping ``Map``'s body. A ``Contraction`` lowers to just its
+    """ONE home for a projection: the wrapping ``Map``'s body. A ``ContractionView`` lowers to just its
     synthesized loop, and the projected form is the same ``project ∘ contract`` spelling the
     ``Fold`` tiers use — so the future cut realizer sees a single seam shape."""
     proj = (Assign(name="y", op="relu", args=("acc",)), Write(output="out", index=(Var("m"), Var("n")), value="y"))
@@ -186,7 +186,7 @@ def test_nodify_reduce_keeps_a_projection_tail_as_a_wrapping_map() -> None:
     assert axis_role(node) is AxisRole.CONTRACTION
 
 
-# --- split-K: Fold ⊃ Contraction (E1) --------------------------------------------------- #
+# --- split-K: Fold ⊃ ContractionView (E1) --------------------------------------------------- #
 
 
 def test_factor_k_splits_the_axis_with_distinct_names() -> None:
@@ -201,7 +201,7 @@ def test_factor_k_splits_the_axis_with_distinct_names() -> None:
 
 
 def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
-    """Split-K is ``Fold(axis=ksplit, step=[Contraction(k_axis=kslice)])``: the outer additive
+    """Split-K is ``Fold(axis=ksplit, step=[ContractionView(k_axis=kslice)])``: the outer additive
     reduce sums partials across CTAs, the inner contraction folds its slice. ``lower`` is a SINGLE
     ``for ksplit:[for kslice: mul-add]`` with DISTINCT axis names (not ``for k:[for k:]``), and it
     still classifies as a ``CONTRACTION`` carrying the GRID (cta) partition."""
@@ -234,12 +234,12 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
     assert isinstance(inner_loops[0].body[-1], Accum) and inner_loops[0].body[-1].name == "acc"
 
 
-# --- flash: a reduce partial composing a nested PV Contraction (tensor-core-flash seam) --------- #
+# --- flash: a reduce partial composing a nested PV ContractionView (tensor-core-flash seam) --------- #
 
 
 def test_reduce_partial_flattens_a_nested_pv_contraction() -> None:
     """Flash composes TWO contractions — QK on ``source`` and PV **inside the partial**. The QK loop
-    splices ahead of the partial and the nested PV ``Contraction`` (a ``Stmt``) flattens to its own
+    splices ahead of the partial and the nested PV ``ContractionView`` (a ``Stmt``) flattens to its own
     loop in place — one recursion rule, so the scalar tier expands ``for kv:[QK loop; P; PV loop;
     fold]``. This is the structural seam warp-flash rides."""
     qk = _contraction()  # Σ_k A·B -> acc (the score S)
@@ -252,7 +252,7 @@ def test_reduce_partial_flattens_a_nested_pv_contraction() -> None:
     (kv_loop,) = lower(red)
     assert kv_loop.axis.name == "kv" and kv_loop.role is AxisRole.TWISTED
     body = list(kv_loop.body)
-    assert not any(isinstance(s, (Contraction, Fold, Map)) for s in body), "the nested PV fold must be flattened, not left raw"
+    assert not any(isinstance(s, (ContractionView, Fold, Map)) for s in body), "the nested PV fold must be flattened, not left raw"
     (qk_loop,) = [s for s in body if isinstance(s, Loop) and s.axis.name == "k"]
     (pv_loop,) = [s for s in body if isinstance(s, Loop) and s.axis.name == "j"]
     # QK (source) first, then the pre-PV probability, then the flattened PV loop, then the carrier fold.
@@ -261,7 +261,7 @@ def test_reduce_partial_flattens_a_nested_pv_contraction() -> None:
 
 
 def test_flash_op_is_a_two_contraction_tree() -> None:
-    """``_flash_op`` builds the blocked two-``Contraction`` tree: BOTH contractions ride the single
+    """``_flash_op`` builds the blocked two-``ContractionView`` tree: BOTH contractions ride the single
     walked edge — ``step`` — with QK (``Σ_dd Q·K`` score) at its head and PV — a
     **register-resident-A** contraction (``A = P``, the exp weight, a one-stmt cone INLINE on the
     edge) — spliced later (block=1: a singleton ``pj`` reduce). There is no second composition
@@ -315,13 +315,13 @@ def test_out_store_index_reproduces_output_layout() -> None:
 # --- computed (register-resident) A operand: the tensor-core-flash PV crux ---------------------- #
 
 
-def _pv_contraction(tile: str = "") -> Contraction:
+def _pv_contraction(tile: str = "") -> ContractionView:
     """A PV-style contraction whose **A operand is computed**, not a gmem ``Load``:
     ``O[m, d] = Σ_j P[m, j]·V[j, d]`` with ``P = exp(S[m, j])`` produced from an in-register score
     (the flash PV shape — its A is register-resident, so the operand edge holds the cone NODE
     inline)."""
     cone = Map(body=Body((Load(name="s_e", input="S", index=(Var("m"), Var("j"))), Assign(name="p", op="exp", args=("s_e",)))))
-    return Contraction(
+    return ContractionView(
         axes=(Axis("m", 8), Axis("d", 8)),
         k_axis=Axis("j", 8),
         a=cone,
@@ -371,12 +371,12 @@ def test_contraction_computed_a_factorizes_at_the_scalar_tier() -> None:
 def test_stored_node_kinds_are_stmts_and_the_view_is_not() -> None:
     """A composed step occupies a STATEMENT position in another node's body — flash's Q@K and P@V
     folds in a reduce partial, split-K's sliced fold. Uniform ``Stmt``-hood over the STORED kinds is
-    what makes that legal; the :class:`Contraction` VIEW is derived, never stored, and deliberately
+    what makes that legal; the :class:`ContractionView` VIEW is derived, never stored, and deliberately
     not a ``Stmt``."""
     from emmy.compiler.ir.stmt.base import Stmt
 
     assert all(issubclass(k, Stmt) for k in (Fold, Map))
-    assert not issubclass(Contraction, Stmt)
+    assert not issubclass(ContractionView, Stmt)
 
 
 def test_a_generic_body_walk_reaches_a_composed_nodes_children() -> None:
@@ -406,12 +406,12 @@ def test_a_composed_step_keeps_its_position_when_flattened() -> None:
 # --- the B operand edge: same type as A, asymmetric only in the schedule ------------------------- #
 
 
-def _computed_b_contraction(a_load: bool = True) -> Contraction:
+def _computed_b_contraction(a_load: bool = True) -> ContractionView:
     """``O[m, n] = Σ_k A[m, k]·B'[k, n]`` where **B is computed**, not a gmem ``Load``:
     ``B' = exp(W[k, n])`` — the shape a fused per-column prologue takes (qk-norm / RoPE folded into a
     score, an on-the-fly dequant). The mirror of ``_pv_contraction``'s computed A."""
     cone = Map(body=Body((Load(name="w_e", input="W", index=(Var("k"), Var("n"))), Assign(name="wn", op="exp", args=("w_e",)))))
-    return Contraction(
+    return ContractionView(
         axes=(Axis("m", 8), Axis("n", 8)),
         k_axis=Axis("k", 8),
         a=Load(name="a_e", input="A", index=(Var("m"), Var("k"))) if a_load else cone,
@@ -426,7 +426,7 @@ def test_both_operand_edges_have_the_same_type() -> None:
     that lives in the tier gates, not in the structural type."""
     from typing import get_type_hints
 
-    assert get_type_hints(Contraction)["a"] == get_type_hints(Channel)["b"]
+    assert get_type_hints(ContractionView)["a"] == get_type_hints(Channel)["b"]
 
 
 def test_computed_b_exposes_the_same_accessors_as_a() -> None:

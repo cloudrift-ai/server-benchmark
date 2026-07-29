@@ -47,7 +47,7 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.tile import (
     Channel,
-    Contraction,
+    ContractionView,
     Fold,
     Map,
     Placement,
@@ -601,7 +601,7 @@ def _stage_candidates(kernel, probe, plan: TilePlan, budget: int = STATIC_SMEM_C
     return out
 
 
-def _reduce_candidates(kernel, place, plan: TilePlan, probe: Contraction | None = None, channels: int = 1) -> list[str]:
+def _reduce_candidates(kernel, place, plan: TilePlan, probe: ContractionView | None = None, channels: int = 1) -> list[str]:
     """The ``REDUCE`` codec candidates for one tile candidate — serial ``""`` first (option-0),
     then the legal coop / ILP moves (per-cell tier only — the non-output-tiled contract) and the
     divisor- and occupancy-guarded split-K moves (both finalizes, both tiers). An **atomic**
@@ -808,7 +808,7 @@ def _is_splitk_spec(spec: str) -> bool:
 
 def _splitk_pin() -> str:
     """The pinned ``g<w>[a|k]`` split-K spec (or ``""``) — the cross-CTA K partition a
-    ``CONTRACTION`` honors through the structural ``Fold ⊃ Contraction`` fork
+    ``CONTRACTION`` honors through the structural ``Fold ⊃ ContractionView`` fork
     (:func:`_splitk_option`), consumed by ``030_split_reduce``. Reads the ``REDUCE`` pin and returns it
     only when it parses to a **GRID split** (``needs_split``); a non-split ``b`` / ``r`` pin or
     another codec is not a split-K request — ignore it rather than fail."""
@@ -858,7 +858,7 @@ def _stage_spec(kernel) -> str:
 
 
 # ---- contraction operand-stage RESOLUTION (eligibility + sizing, once, scheduler-side) ---------- #
-# A ``STAGE`` pin on a contraction is resolved HERE against the built :class:`Contraction` node —
+# A ``STAGE`` pin on a contraction is resolved HERE against the built :class:`ContractionView` node —
 # transport eligibility, the slab K-chunk (``bk_elems``), and the depth clamps — and the RESOLVED
 # :class:`Stage` (or ``None``, gmem-direct) is stamped on the ``TileOp``. The materializer
 # (``_atom._staged``) applies it verbatim, deciding nothing — the same stamp-then-apply shape as the
@@ -927,7 +927,7 @@ def _can_stage_warp_tma(
     return all((x * elem_bytes) % 16 == 0 for x in inner)
 
 
-def _resolve_warp_stage(c: Contraction, stage: Stage, budget: int = STATIC_SMEM_CAP) -> Stage | None:
+def _resolve_warp_stage(c: ContractionView, stage: Stage, budget: int = STATIC_SMEM_CAP) -> Stage | None:
     """Resolve a pinned operand ``Stage`` against the warp (mma) contraction ``c`` — TMA > cp.async >
     gmem-direct (``None``). The resolved stage carries ``bk_elems`` (the codec-spelled ``TilePlan.bk``
     in elements), ``depth`` clamped so the ring's slots fit the smem ``budget`` (the device's dynamic
@@ -974,7 +974,7 @@ def _resolve_warp_stage(c: Contraction, stage: Stage, budget: int = STATIC_SMEM_
     return replace(stage, depth=depth, ring=stage.ring and depth >= 2, reg_depth=min(stage.reg_depth, bk), bk_elems=bk_elems)
 
 
-def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = STATIC_SMEM_CAP) -> Stage | None:
+def _resolve_scalar_stage(c: ContractionView, stage: Stage, inputs, budget: int = STATIC_SMEM_CAP) -> Stage | None:
     """Resolve a pinned operand ``Stage`` against the scalar register-tile contraction ``c``, or
     ``None`` (gmem-direct). Staging is **opt-in behind a ``STAGE`` pin**: eligible when the transport
     is ``tma`` / ``cp.async`` and K is static (a computed-A contraction never reaches here — it keeps
@@ -1070,7 +1070,7 @@ def prologue_knob_bases(k2: str, stat_axis: str) -> tuple[dict, dict]:
     return con, map_
 
 
-def _resolve_sync_stage(c: Contraction, budget: int = STATIC_SMEM_CAP, want_depth: int = 1) -> Stage | None:
+def _resolve_sync_stage(c: ContractionView, budget: int = STATIC_SMEM_CAP, want_depth: int = 1) -> Stage | None:
     """The ``sync`` compute-fill :class:`Stage` for a **computed-A** warp contraction with tile plan
     ``c.tile`` — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A; cp.async /
     TMA are copy transports that cannot evaluate a producer cone), so there is no gmem-direct ``""``
@@ -1111,7 +1111,7 @@ def _resolve_sync_stage(c: Contraction, budget: int = STATIC_SMEM_CAP, want_dept
 def _computed_a_rows(
     kernel,
     place,
-    probe: Contraction,
+    probe: ContractionView,
     kaxis: str,
     budget: int = STATIC_SMEM_CAP,
     ctx=None,
@@ -1239,8 +1239,8 @@ def _check_warp_static_k(kernel, wt) -> None:
         )
 
 
-def _contraction_node(node, place, tile_plan: TilePlan) -> tuple[Contraction, Body]:
-    """The high-level :class:`Contraction` structural node for a tiled ``CONTRACTION`` leaf. A
+def _contraction_node(node, place, tile_plan: TilePlan) -> tuple[ContractionView, Body]:
+    """The high-level :class:`ContractionView` structural node for a tiled ``CONTRACTION`` leaf. A
     kernel recognition already nodified (the per-cell scalar contraction — ``_nodify_contraction``
     in ``010_recognize``) only swaps the ``tile`` schedule field; a still-``Map`` form (a fused /
     flash-side contraction) is bound here at fork-emit (seam #1): the ``(a_load, b_load, acc,
@@ -1266,7 +1266,7 @@ def _contraction_node(node, place, tile_plan: TilePlan) -> tuple[Contraction, Bo
     a_load, b_load, acc, epilogue = semiring_binding(node, place.grid)
     kaxis = reduce_loop(node).axis
     return (
-        Contraction(
+        ContractionView(
             axes=(grid[-2], grid[-1]),
             k_axis=kaxis,
             a=a_load if isinstance(a_load, Load) else make_cone(a_load, kaxis.name),
@@ -1284,7 +1284,7 @@ def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
     ``ksplit`` (extent ``w``, name ``<k>_ks``) is the outer *partition index* — becomes the
     :class:`Fold`'s reduce axis, parallelized across CTAs and summed in the finalize; ``kslice``
     (extent ``K/w``, the **original** name) is the per-partition chunk — stays the inner
-    :class:`Contraction`'s ``k_axis``. The returned ``sigma`` maps the original ``k`` var to
+    :class:`ContractionView`'s ``k_axis``. The returned ``sigma`` maps the original ``k`` var to
     ``ksplit·(K/w) + kslice`` so the operand loads reconstruct the absolute index. Distinct names
     (``k`` vs ``<k>_ks``) are what avoid a double-reduce ``for k:[for k:]`` — every original ``k`` is
     visited once (``kslice`` folded into a partial, ``ksplit`` summed across partials)."""
@@ -1306,7 +1306,7 @@ def _splitk_option(
     tile, place, tile_spec: str, split_spec: str, name: str, knobs: dict, stage_spec: str = "", budget: int = STATIC_SMEM_CAP
 ) -> TileOp:
     """One scheduled **split-K** contraction ``TileOp``: the structural ``Fold(axis=ksplit,
-    source=Contraction(k_axis=kslice))``. The inner :class:`Contraction` is the **same** node a
+    source=ContractionView(k_axis=kslice))``. The inner :class:`ContractionView` is the **same** node a
     non-split matmul builds (:func:`_contraction_node`, so it factorizes through ``_factor`` to mma or
     scalar per the ``tile_spec`` atom) but over ``kslice`` with operands reindexed to
     ``ksplit·(K/w) + kslice``; the outer additive :class:`Fold` carries the ``g<w>[a|k]`` GRID
@@ -1315,7 +1315,7 @@ def _splitk_option(
     The additive carrier is built exactly as ``contraction_loop`` / a plain-sum reduce does — an
     ``Accum(op="add").as_carrier()`` (identity ``0.0``, 1 component) — so ``030_split_reduce``'s finalize
     (which reads the carrier's identity + ``as_state_merge``) needs no change. The output tile
-    (``tier``) rides the inner ``Contraction``; the ``Fold`` holds only the K partition.
+    (``tier``) rides the inner ``ContractionView``; the ``Fold`` holds only the K partition.
 
     An operand ``stage_spec`` is RESOLVED against the **sliced** inner node (its ``kslice`` extent +
     offset operand indices), so eligibility is judged on the pipeline the partial kernel actually
@@ -1415,12 +1415,12 @@ def _warp_option(
 ) -> TileOp:
     """One scheduled warp-tier contraction ``TileOp``: ``place`` mapped onto the grid + the warp
     form of the ``TILE`` spec resolved into the warp-atom :class:`TilePlan`, plus an optional operand
-    ``STAGE`` resolved into a :class:`Stage`. The tiled :class:`Contraction` leaf is built here (``op``),
+    ``STAGE`` resolved into a :class:`Stage`. The tiled :class:`ContractionView` leaf is built here (``op``),
     so materialize only ``factorize``\\ s. The packed ``TILE`` codec is the sole on-dict spelling — the
     online-prior featurizer parses it directly (one codec, not a per-knob ``WM``/``WN``/``MMA`` explosion)."""
     wt = TilePlan.parse(spec)
     _check_warp_static_k(tile, wt)
-    # Build the tiled Contraction node here — it resolves the operand→role facts internally, so an
+    # Build the tiled ContractionView node here — it resolves the operand→role facts internally, so an
     # unbindable atom (a non-Load operand: a computed-cone / demoted matmul) raises and is rejected
     # at fork construction, like the static-K check.
     node, proj = _contraction_node(tile.op, place, wt)
@@ -1476,7 +1476,7 @@ def _tile_option(
             f"TILE parallel block {plan.units_n}×{plan.units_m}={block} threads exceeds the "
             f"{MAX_BLOCK_THREADS}-thread/CTA limit; shrink n/m or move work to the f register sub-tile."
         )
-    # A tiled register-tile leaf (a ``TILE`` pin) becomes a :class:`Contraction` node here, so
+    # A tiled register-tile leaf (a ``TILE`` pin) becomes a :class:`ContractionView` node here, so
     # materialize only ``factorize``\\ s. An unbindable contraction (a non-``Load`` operand) keeps the
     # ``Map`` form — materialize's per-cell scalar tier lowers it. A coop / ILP ``reduce_spec``
     # **nodifies** the flat ``Map`` contraction to a :class:`Fold` node carrying the K partition
@@ -1495,7 +1495,7 @@ def _tile_option(
         except LoweringError:
             pass  # an unbindable contraction (a non-Load operand) keeps the Map form
         else:
-            # Only a built Contraction node can engage operand staging — resolve the pin against it
+            # Only a built ContractionView node can engage operand staging — resolve the pin against it
             # (per-cell / coop-K / unbindable forms stamp None: nothing downstream would read a stage).
             if stage_spec:
                 stage = _resolve_scalar_stage(node, Stage.parse(stage_spec), tile.inputs, budget)
@@ -1617,7 +1617,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         # ``FAMILY@<k_axis>``), offered as a lazy hierarchical fork tree — greedy descent flattens
         # the rows for one prior-scoring pass; MCTS pays one level per pop. Env pins narrow each
         # family (a fully-pinned space collapses to the single materialized option, no fork). A
-        # split ``g`` row routes through the structural ``Fold ⊃ Contraction`` fork
+        # split ``g`` row routes through the structural ``Fold ⊃ ContractionView`` fork
         # (:func:`_splitk_option`, consumed by ``030_split_reduce``); a warp row through
         # :func:`_warp_option`; the rest through :func:`_tile_option`.
         rows, kaxis = _tile_rows(tile, place, ctx)
@@ -1733,7 +1733,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
             if demoted is not None:
                 return demoted
         # (The MONOID-producer cone — the fused norm→linear edge — no longer needs a rescue here:
-        # recognition nodifies it to a computed-A Contraction fork sibling, ``010_recognize``'s
+        # recognition nodifies it to a computed-A ContractionView fork sibling, ``010_recognize``'s
         # ``bind_prologue_contraction`` merge, so it arrives at this dispatch as CONTRACTION.)
     specs = _reduce_specs(tile, place)
     return [_option(tile, place, spec, name, knobs) for spec in specs]
@@ -1754,7 +1754,7 @@ def _canon_tile_spec(spec: str) -> str:
         return spec
 
 
-def _narrow_flash_forms(forms: list[TileOp], head: Contraction, pv: Contraction, *, keyed_only: bool = False) -> list[TileOp]:
+def _narrow_flash_forms(forms: list[TileOp], head: ContractionView, pv: ContractionView, *, keyed_only: bool = False) -> list[TileOp]:
     """Narrow the flash fork's leaf rows by the live per-node ``TILE`` pins. Every flash row spells
     the same key set (``TILE@<qk_k>`` / ``TILE@<pv_k>``), so a pin selects rows by their stamped
     spelling: ``f<d>`` on the PV k-axis keeps the CHAIN row, ``""`` / ``a:scalar`` the per-cell
@@ -1834,10 +1834,10 @@ def _stamp_twisted_split(rows: list[TileOp], kv_name: str, plan: ReducePlan) -> 
     return out
 
 
-def _twisted_pair(op, free) -> tuple[Fold, Fold, Fold, Contraction, Contraction] | None:
+def _twisted_pair(op, free) -> tuple[Fold, Fold, Fold, ContractionView, ContractionView] | None:
     """The flash-shaped ``TWISTED`` streaming contraction pair — ``(reduction, head_fold, pv_fold,
     head, pv)``: the STORED ``role=CONTRACTION`` folds (the score at the partial's head, the single
-    computed-A expect later in the sequence) plus their DERIVED :class:`Contraction` views (output
+    computed-A expect later in the sequence) plus their DERIVED :class:`ContractionView` views (output
     axes off the placement's trailing ``free`` — the query axis, and the stream axis for the score /
     the value axis for the expect). ``None`` when not a streaming pair (an online-softmax / RMSNorm
     ``TWISTED`` reduce takes the reduce-partition tiers). The one structural guard the warp / chain /
@@ -1917,7 +1917,7 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     """The warp (mma) candidate for a **demoted-cone contraction** — a ``PLANAR`` ⊗-fold whose
     lift multiplies a gmem ``Load`` B with a computed pure-MAP cone A (the fused producer → matmul
     edge: ``f(x, …) @ w``), or ``None`` (stay scalar). PIN-DRIVEN like the matmul warp tier: fires
-    only under a warp ``TILE`` pin. Nodifies the fold to a computed-A :class:`Contraction` (the
+    only under a warp ``TILE`` pin. Nodifies the fold to a computed-A :class:`ContractionView` (the
     same ``a = Body`` the flash P@V rides) and stamps the ``sync`` compute-fill
     :class:`Stage` — the producer cone materializes the A tile straight into the smem slab the
     ``ldmatrix`` drain reads (the fused edge IS the mma tier's ``sync`` transport). First cut:
@@ -1979,7 +1979,7 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     epilogue = Body(tuple(op.body)) if isinstance(op, Map) else Body(())
     if not _fragment_epilogue_ok(epilogue):
         return None  # a gather epilogue is fragment-unrealizable — stay scalar
-    node = Contraction(
+    node = ContractionView(
         axes=(m_ax, n_ax),
         k_axis=k_ax,
         a=make_cone(list(cone), k_ax.name),

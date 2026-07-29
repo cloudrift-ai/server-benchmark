@@ -29,11 +29,11 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   subtrees may hoist to edges (and hoist where the splice keeps the lowered nest fixed); a state-capturing
   composition sits in the step at its semantic position — flash's PV, whose `P` reads the running max the same
   step's merge updates, is legal and simply not cuttable; flash's QK is closed but stays a step element (hoisting
-  would reorder the nest). **The `Contraction` view is DERIVED, never stored**: one shared `a` edge + product
+  would reorder the nest). **The `ContractionView` is DERIVED, never stored**: one shared `a` edge + product
   `Channel`s `(b_i, acc_i)` + the `(m, n)` `Side` geometry — the bilinear reading the tensor-core/staged tiers
   require, built by `contraction_view(fold, m, n, lead)` from a `role=CONTRACTION` fold plus the CALLER's placement
   axes (trailing grid for a root kernel; `place.free` threads to the materializer via `Ctx.free` for flash), stored
-  back via `Contraction.as_fold()` (round-trip + loop byte-identity unit-tested; `ir.shared_operand` is the
+  back via `ContractionView.as_fold()` (round-trip + loop byte-identity unit-tested; `ir.shared_operand` is the
   placement-free cone read). The A/B asymmetry that is real — A M-resident/compute-fillable, B streamed — is a
   SCHEDULE fact read off the view's roles (`isinstance(c.b, Load)` eligibility gates), not a storage fact. A cone's
   SOURCE is the row-invariant prologue (the per-row statistic) and its `body` the per-cell normalize, so the K seam

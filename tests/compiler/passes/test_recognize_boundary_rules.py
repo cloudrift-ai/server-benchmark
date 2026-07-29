@@ -1,12 +1,12 @@
 """The Loop-IR → Tile-IR boundary fires for every kernel kind.
 
 ``lowering/tile/010_recognize`` is the sole recognizer that lifts a
-``LoopOp`` into the tile IR (a ``Map`` / ``Fold`` / ``Contraction``
+``LoopOp`` into the tile IR (a ``Map`` / ``Fold`` / ``ContractionView``
 node). These assert it fires on the two simplest kinds — pointwise and
 reduce — transitively proving the axes got lifted and the kernel entered
 the tile dialect (no planner / launch-geometry fallback needed), and that
 the MONOID-producer composition (the fused norm→linear edge) nodifies to
-a computed-A ``Contraction`` fork sibling of the ``Map`` form.
+a computed-A ``ContractionView`` fork sibling of the ``Map`` form.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
-from emmy.compiler.ir.tile import Contraction, Map, TileOp
+from emmy.compiler.ir.tile import ContractionView, Map, TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.pipeline import Run
@@ -163,7 +163,7 @@ def test_lift_recognizes_contraction_between_views_of_same_packed_buffer():
 
 # --------------------------------------------------------------------------- #
 # The MONOID-producer composition — ``rmsnorm(x)·nw @ w`` nodifies to a computed-A
-# ``Contraction`` fork sibling of the ``Map(source=Fold)`` form (``010_recognize``'s
+# ``ContractionView`` fork sibling of the ``Map(source=Fold)`` form (``010_recognize``'s
 # ``bind_prologue_contraction`` merge). Pipeline-only (no CUDA): resolve the tile passes with a
 # capturing ``decide`` and assert the fork rows / the picked node's structure.
 # --------------------------------------------------------------------------- #
@@ -250,7 +250,7 @@ def test_rtx4080_dit_qkv_narrows_to_measured_deploy_schedule():
 
 def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
     """The merged fork: the ``Map``-form reduce rows lead (option-0 = the conservative coop pick,
-    lowerable everywhere), then the computed-A Contraction form's warp rows — every one riding a
+    lowerable everywhere), then the computed-A ContractionView form's warp rows — every one riding a
     resolved ``sync`` compute-fill stage, at BOTH depths (``d1`` + the asymmetric B-ring ``d2``
     as fork siblings), with the K partition either decided-empty or a redundant-statistic
     split — deferred ``g<w>k`` or, this fixture's plain-store tail being distributive, the
@@ -260,7 +260,7 @@ def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
     assert not _is_warp_row(rows[0]), "option-0 must be the Map-form coop row, not a warp row"
     assert any(v.startswith("b") for v in rows[0].values() if isinstance(v, str)), "option-0 must cooperate on the stat reduce"
     warp = [r for r in rows if _is_warp_row(r)]
-    assert warp, "the Contraction form contributed no warp rows"
+    assert warp, "the ContractionView form contributed no warp rows"
     stages_seen = set()
     reds_seen = set()
     for r in warp:
@@ -283,7 +283,7 @@ def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
 def test_norm_linear_warp_pick_is_computed_a_contraction():
     """Picking a warp row materializes the recognize-built ``Map(body=projection, source=node)``
     tree — the same ``project ∘ contract`` spelling the Fold tiers use: the source is a
-    computed-A :class:`Contraction` holding its A cone INLINE, a real node tree
+    computed-A :class:`ContractionView` holding its A cone INLINE, a real node tree
     (``Map(body=per-cell normalize, sources=(Fold(stat),))``), one channel, its (m, n)
     output on the grid (the column axis joined); the ``Map`` body carries the ``Write``; and the knob
     stamps the DB rows key on (``PLACE@cone`` + the decided-empty stat ``REDUCE``). Xfail-parked on
@@ -291,7 +291,7 @@ def test_norm_linear_warp_pick_is_computed_a_contraction():
     _, tile = _resolve(_norm_linear_graph(), pick=_is_warp_row)
     assert isinstance(tile.op, Map)
     c = tile.op.source
-    assert isinstance(c, Contraction) and c.a_computed and len(tile.op.sources) == 1
+    assert isinstance(c, ContractionView) and c.a_computed and len(tile.op.sources) == 1
     stat_loop = c.a.source.source.loop
     assert isinstance(stat_loop, Loop) and stat_loop.is_reduce and stat_loop.role is AxisRole.PLANAR
     assert [a.extent.as_static() for a in c.axes] == [32, 3072]
@@ -314,7 +314,7 @@ def test_norm_linear_cone_is_an_inline_node_tree():
     re-scanning stmts for "the maximal leading run that never indexes K", and the statistic is
     addressable (and later cuttable) in its own right. Lowering flattens the whole thing back to the
     identical ``[stat loop, …, cone]`` stmt run. The stored form is the role=CONTRACTION fold; the
-    ``Contraction`` reading is the DERIVED view (``contraction_view``)."""
+    ``ContractionView`` reading is the DERIVED view (``contraction_view``)."""
     from emmy.compiler.ir.tile import contraction_view
     from emmy.compiler.ir.tile.ir import _refs_axis
     from emmy.compiler.ir.tile.ops import cone_seam, lower
@@ -337,7 +337,7 @@ def test_norm_linear_cone_is_an_inline_node_tree():
 
 
 def test_norm_linear_fp32_keeps_map_rows_only():
-    """No 16-bit mma atom ⇒ the Contraction form contributes ZERO rows (never a raising row) and
+    """No 16-bit mma atom ⇒ the ContractionView form contributes ZERO rows (never a raising row) and
     the fork is exactly the Map-form reduce rows — the graceful fallback."""
     rows, tile = _resolve(_norm_linear_graph(dt=F32))
     assert rows and not any(_is_warp_row(r) for r in rows)
@@ -370,7 +370,7 @@ def _mlp_gate_up_graph() -> Graph:
 def test_mlp_gate_up_nodifies_as_two_channel_product_contraction():
     """The fused gate/up MLP edge — TWO ⊗-folds sharing one normalized-row A value (fusion
     duplicates the cone SSA per fold; the matcher dedupes by value-tree equality) with the SwiGLU
-    combine as projection — nodifies to ``Map(body=combine…Write, sources=(Contraction,))``: ONE
+    combine as projection — nodifies to ``Map(body=combine…Write, sources=(ContractionView,))``: ONE
     product-carrier contraction, two ``(b, acc)`` channels over its single inline A cone (sharing
     is arity), and offers warp sync rows."""
     from emmy.compiler.ir.tile import contraction_view

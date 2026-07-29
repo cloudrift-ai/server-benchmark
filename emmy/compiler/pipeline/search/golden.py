@@ -465,7 +465,7 @@ class NormLinearGoldenConfig(GoldenConfig):
     """A golden config for the fused RMSNorm→linear **computed-A** megakernel:
     ``rms_norm(x, (H,))·nw @ W`` in ONE mma kernel (``(M, H) → (M, N)``).
 
-    This is the single-channel computed-A ``Contraction`` (``010_recognize``'s
+    This is the single-channel computed-A ``ContractionView`` (``010_recognize``'s
     ``bind_prologue_contraction`` merge): the per-row RMSNorm statistic rides the A cone as a
     ``sync`` compute-fill prologue and the warp mma rows contract the scaled A against ``W`` — a
     different kernel family than the bare ``mlp_gate_up`` matmul (which round-trips ``xn`` through

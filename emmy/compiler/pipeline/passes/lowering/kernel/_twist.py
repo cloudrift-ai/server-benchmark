@@ -1,7 +1,7 @@
 """The fragment realizer — a TWISTED carrier realized at WARP-FRAGMENT residence.
 
 The one ``_bind`` pipeline calls :func:`realize_warp_twist` when the reduce arm's tree carries a
-warp tile (:func:`warp_source` — the stream's head :class:`Contraction` stamped with an mma
+warp tile (:func:`warp_source` — the stream's head :class:`ContractionView` stamped with an mma
 :class:`TilePlan` by ``_schedule`` (inside ``010_recognize``)): the streaming reduce keeps its per-step values in mma
 C-fragments instead of scalars, so every piece of the scalar lowering is *realized* at the new
 residence — the fragment row of the placement-keyed fold (a within-warp ``FragmentRowReduce``
@@ -21,7 +21,7 @@ residence — the fragment row of the placement-keyed fold (a within-warp ``Frag
   "exp"``, ``channels = (pivot, …)``): the pivot's per-block fold is a ``FragmentRowReduce`` of its
   ``fold`` op (rowmax) + the running-stat update / rescale; a ``denom`` channel (no lift)
   row-reduces the exp-weight fragments (rowsum) into ``l = l·α + Σp``; an ``expect`` channel
-  (``lift = multiply``) IS the P@V :class:`Contraction` node — its ⊗ lowers to ``mma.sync`` with
+  (``lift = multiply``) IS the P@V :class:`ContractionView` node — its ⊗ lowers to ``mma.sync`` with
   the register-resident probability converted straight into its A-operand fragments by the C→A
   REGISTER repack (``FragmentRepack``, the ``AtomKind.c_to_a_repack`` lane-map compatibility —
   no smem round-trip, no sync; gated at schedule time);
@@ -71,7 +71,7 @@ from emmy.compiler.ir.kernel.ir import (
 from emmy.compiler.ir.schedule import FoldMove, Level, ReduceStage
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Cond, Init, Load, Select, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile.ir import Contraction, Fold, Map, contraction_view, gmem_row_stride, is_contraction_fold
+from emmy.compiler.ir.tile.ir import ContractionView, Fold, Map, contraction_view, gmem_row_stride, is_contraction_fold
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _clamp_last, _f16acc, unroll_ok
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
@@ -162,7 +162,7 @@ def _reads(s: Stmt) -> set[str]:
 
 
 def _frag_contraction(
-    c: Contraction,
+    c: ContractionView,
     tiles: list[tuple[tuple[str, ...], tuple[str, ...]]],
     *,
     n_sub,
@@ -175,7 +175,7 @@ def _frag_contraction(
     b_swizzle: str = "NONE",
     reg_depth: int = 1,
 ) -> list[Stmt]:
-    """One warp-tiled :class:`Contraction` step as fragment codegen — the ``read → ⊗ → fold`` spine
+    """One warp-tiled :class:`ContractionView` step as fragment codegen — the ``read → ⊗ → fold`` spine
     at fragment residence, geometry off the node (``b_trans`` / operand indices / ``ldm``) and its
     stamped :class:`TilePlan` (``regs`` / ``bk``). ``tiles`` is the ``(acc_frags, a_frags)`` pair
     per REGISTER QUERY TILE (the plan's ``regs[0]``): the A fragments are always resident (flash Q
@@ -294,7 +294,7 @@ def _frag_contraction(
     return out
 
 
-def _realize_prologue(stmts, qk: Contraction, frags: tuple[str, ...], col_bases, row_base: Expr, state) -> tuple[list, list]:
+def _realize_prologue(stmts, qk: ContractionView, frags: tuple[str, ...], col_bases, row_base: Expr, state) -> tuple[list, list]:
     """Realize the score prologue (the plain stmts between the head contraction and the carrier's
     streaming merge) at fragment residence, stmt kind by stmt kind. Returns ``(hoisted, stream)`` —
     the loop-invariant scalar ``Load``\\ s (hoisted above the stream when a realized stmt reads
@@ -353,7 +353,7 @@ def _realize_prologue(stmts, qk: Contraction, frags: tuple[str, ...], col_bases,
     return [ld for ld in hoisted if set(ld.names) & used], stream
 
 
-def _causal_stream(stmts, qk: Contraction) -> bool:
+def _causal_stream(stmts, qk: ContractionView) -> bool:
     """True when the score prologue carries the causal coordinate ``Select`` — keep ``kv ≤ m`` over
     the contraction's own axis vars. Structural: the triangular kv bound below derives from the
     predicate's shape, never from a kernel identity (an additive-mask or unmasked stream has no
@@ -373,7 +373,7 @@ def _causal_stream(stmts, qk: Contraction) -> bool:
     return False
 
 
-def _banded_stream(stmts, qk: Contraction) -> int | None:
+def _banded_stream(stmts, qk: ContractionView) -> int | None:
     """The sliding-window width W when the score prologue carries the band coordinate ``Select``
     — keep ``kv > m − W`` over the contraction's own axis vars. Structural, like
     :func:`_causal_stream`: the banded kv stream START below derives from the predicate's shape."""
@@ -395,7 +395,7 @@ def _banded_stream(stmts, qk: Contraction) -> int | None:
     return None
 
 
-def _pv_streamed(pv: Contraction, kv_axis: Axis) -> Contraction:
+def _pv_streamed(pv: ContractionView, kv_axis: Axis) -> ContractionView:
     """The expect contraction with its singleton intra-block axis swapped for the STREAM axis — the
     scalar tree contracts one key per step (``k_axis = pj``, extent 1); the fragment tier contracts
     the whole block, whose keys ride the stream axis in the value ``Load``'s index (``tile.bk = 1``:
@@ -415,9 +415,9 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # originals); the score's stream axis is the fold's own, read through a slice partial's window
     # PARENT so the view carries the pre-slice geometry the fragment clamps were built against.
     kv_parent = red.axis.window.parent if red.axis.window is not None else red.axis
-    qk: Contraction = contraction_view(partial[0], ctx.free[-2], kv_parent)
+    qk: ContractionView = contraction_view(partial[0], ctx.free[-2], kv_parent)
     pv_fold = next(s for s in partial[1:] if is_contraction_fold(s))
-    pv: Contraction = contraction_view(pv_fold, ctx.free[-2], ctx.free[-1])
+    pv: ContractionView = contraction_view(pv_fold, ctx.free[-2], ctx.free[-1])
     atom = qk.tile.atom
     shape = atom.shape
     atom_n = shape[1]

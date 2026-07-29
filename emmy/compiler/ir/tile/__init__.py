@@ -2,7 +2,7 @@
 
 See :mod:`.ir` and :mod:`.schedule`. The layer between Loop IR and Kernel IR: a
 :class:`TileOp` holds the structural-IR root ``op`` (the *combine* — a :class:`~.ir.Map` /
-:class:`~.ir.Fold` / :class:`~.ir.Contraction`, with computed operands stored inline on their
+:class:`~.ir.Fold` / :class:`~.ir.ContractionView`, with computed operands stored inline on their
 edges and sharing spelled as the product contraction's :class:`~.ir.Channel` arity) directly, plus
 thin schedule fields (``place`` / ``workers``) so the *schedule* (free axes,
 reduce partition, grid binding) stays separate from the *combine*, and one ``TileOp`` covers
@@ -23,12 +23,12 @@ from emmy.compiler.ir.schedule import (
     WarpSpec,
     role_for,
 )
-from emmy.compiler.ir.tile.ir import Channel, Contraction, Fold, Map, TileOp, contraction_view, is_contraction_fold, shared_operand
+from emmy.compiler.ir.tile.ir import Channel, ContractionView, Fold, Map, TileOp, contraction_view, is_contraction_fold, shared_operand
 
 __all__ = [
     "AtomKind",
     "Channel",
-    "Contraction",
+    "ContractionView",
     "FoldMove",
     "Level",
     "Map",

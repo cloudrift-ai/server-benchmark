@@ -35,8 +35,8 @@ exp-family LSE combine before projecting. Pays where the un-split grid starves t
 heads / short query axis); pin ``REDUCE=g<n>k``.
 
 **Two shapes of contraction split-K.** A structural ``Fold(axis=ksplit,
-source=Contraction(k_axis=kslice))`` (built by ``_schedule._splitk_option``) has its K axis already
-factored + operands offset, so :func:`_split_contraction` makes the partial the **bare Contraction**
+source=ContractionView(k_axis=kslice))`` (built by ``_schedule._splitk_option``) has its K axis already
+factored + operands offset, so :func:`_split_contraction` makes the partial the **bare ContractionView**
 — it factorizes to **mma** (or scalar) through ``_factor.factorize``, ``ksplit`` prefixed as a lead
 grid axis, no ``_slice_loop``. The residual path below (a plain-sum ``sum`` split, or a coop/ILP
 contraction still on a ``Map``) keeps the loop-slicing rewrite.
@@ -135,11 +135,11 @@ def _mapped(op, grid, *, name: str = "", knobs: dict | None = None, free=None) -
 
 
 def _split_contraction(match: Match, root: Node, tile: TileOp, node, carrier, plan: ReducePlan, split: Axis, projection=()):
-    """Realize a **structural** split-K ``Fold(axis=ksplit, step=[Contraction])`` — the K axis is
+    """Realize a **structural** split-K ``Fold(axis=ksplit, step=[ContractionView])`` — the K axis is
     already factored (``split`` == ``ksplit``, extent == ``cta``) and the operands offset, so the
-    partial is the **bare Contraction** with ``ksplit`` prefixed as a lead grid axis (each CTA a fixed
+    partial is the **bare ContractionView** with ``ksplit`` prefixed as a lead grid axis (each CTA a fixed
     partition) and its projection retargeted to the workspace / an atomic output. Because the partial
-    is a ``Contraction``, materialize expands it through ``_factor.factorize`` — **mma** for a warp
+    is a ``ContractionView``, materialize expands it through ``_factor.factorize`` — **mma** for a warp
     atom, scalar otherwise. No ``_slice_loop`` (unlike the residual plain-sum path).
 
     Finalize matches the additive-carrier finalize: ``atomic`` (``g<w>a``) atomicAdds the partition's
@@ -340,9 +340,9 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     carrier = rloop.carrier
     cta = plan.cta
     rax = rloop.axis
-    # Structural split-K: ``op`` is ``Fold(axis=ksplit, step=[Contraction(k_axis=kslice)])`` —
+    # Structural split-K: ``op`` is ``Fold(axis=ksplit, step=[ContractionView(k_axis=kslice)])`` —
     # the axis is already factored + operands offset (``_schedule._splitk_option``), so the partial
-    # is the **bare Contraction** (→ ``factorize`` → mma / scalar), no ``_slice_loop``.
+    # is the **bare ContractionView** (→ ``factorize`` → mma / scalar), no ``_slice_loop``.
     # The projection (when the split node carries one) rides the ``Map`` wrapper over the split
     # ``Fold`` — its ONE home; peel it here and hand it to the realizer.
     split_root, projection = (op.sources[0], op.body) if isinstance(op, Map) and op.sources else (op, ())

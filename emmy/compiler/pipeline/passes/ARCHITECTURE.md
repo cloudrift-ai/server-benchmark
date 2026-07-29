@@ -52,7 +52,7 @@ coverage until that entire cone has been measured.
 The same invariant applies *across* the tile→kernel boundary: the kernel materializer must not re-recognize structure
 the tile IR already holds. The **atomize** step (`lowering/tile/_atomize.py`, called from the `_schedule` helper inside `010_recognize` when it builds
 the warp / register-tiled option — *not* a standalone pass) resolves the algebra→hardware-atom binding once at fork-emit
-and feeds it into the `Contraction` structural node (`_schedule._contraction_node`), so materialize reads the operands /
+and feeds it into the `ContractionView` (`_schedule._contraction_node`), so materialize reads the operands /
 `acc` off the node and only `factorize`s (the projection is peeled off the wrapping `Map` — its one home). Resolving it
 at option-build time means an atom that **cannot** be
 bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is rejected at fork construction, alongside
@@ -65,7 +65,7 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   STAT-FREE computed A, which rides the `sync` compute-fill like the norm→linear cone but carries
   no statistic prologue) — plus the fold accumulator and the projection. The STORED form is the `role=CONTRACTION`
   `Fold` (symmetric `operands` tuple + the pure lift/fold `step`; sharing is edge REUSE in the step); the
-  `Contraction` READING — shared A + `(b, acc)` channels + the `(m, n)` geometry — is the DERIVED view
+  `ContractionView` READING — shared A + `(b, acc)` channels + the `(m, n)` geometry — is the DERIVED view
   (`ir.contraction_view`, output axes off the caller's placement; `Contraction.as_fold` the storage direction).
   An **operand is an edge** with two inhabitants — the two things an input can be: MATERIALIZED (a gmem `Load`) or
   COMPUTED (the node itself, stored inline). Tree ownership gives an inline node exactly one consumer — so there is
@@ -81,7 +81,7 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   (m, k)-indexed too, so the positional rule bound gemma's GeGLU combine as `gate @ W` and silently dropped the gelu and
   the up projection. Refusing to bind a stat-free cone at all is equally wrong — it demotes the cell to a PLANAR
   scalar fold, which cost the gemma-4 M=256 post twin 144 ms against 4.3 ms bound. The binding now happens ONCE at **recognize time** (`010_recognize._nodify_contraction` — every
-  recognized contraction, per-cell scalar included, is a `Contraction` node with a deferred `TilePlan()`; an unbindable
+  recognized contraction, per-cell scalar included, is a role=CONTRACTION fold with a deferred `TilePlan()`; an unbindable
   one — a 1-D matvec-shaped output — demotes to `PLANAR` and folds as an ordinary `Fold`); the schedule fork only
   swaps the node's `tile` field (`_schedule._contraction_node`), and `_factor.factorize` reads the facts off the node
   instead of `lower()`-ing the contraction and pattern-matching the result. A `STAGE` pin follows the same rule: the
@@ -96,7 +96,7 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   dims whose origin coordinates are the operand's own index exprs — eligible when those exprs don't move with the
   tile or the K loop (`_tma_operand_rank_ok`), so a model's `[1, seq, K]` unit-batch view stages exactly like the
   rank-2 snippet twin (the gemma in-model matmuls' TMA lockout). A **transposed B** (the serving `F.linear` layout —
-  B given `(N, K)`, K gmem-contiguous, `Contraction.b_trans`) stages on the warp tier through an **N-major slab**:
+  B given `(N, K)`, K gmem-contiguous, `ContractionView.b_trans`) stages on the warp tier through an **N-major slab**:
   the B slot takes A's geometry (`tile_n × bk`, K the inner dim — stride-1 in gmem and smem alike, so cp.async chunks
   and the TMA box stay contiguous; `Operand.trans` stamps the layout) and the drain is the plain no-`.trans`
   ldmatrix (`LdmatrixLoad(b_trans=True)` — the same staged path flash's K slab rides). Both operands' inner span is
@@ -170,8 +170,8 @@ is what lets such rules compose without knowing about each other.
 
 The atom spec is subtyped by kind (`ir/atom.py`: `AtomKind` is the fixed mma cell selected by name; `ScalarAtom`
 is the plain scalar fma cell). The contraction binder (`bind_contraction`) is loop-addressable so warp-flash can later
-reuse it on flash's nested QK^T / PV; flash's inner score IS now a structural `Contraction` **node** (per-cell
-`TilePlan()` today, `source` of the streaming `Fold` — the `Fold ⊃ Contraction` composition), so warp-flash is
+reuse it on flash's nested QK^T / PV; flash's inner score IS now an in-step role=CONTRACTION **fold** (per-cell
+`TilePlan()` today, composed in the streaming fold's step), so warp-flash is
 just that node gaining a warp `TilePlan` — no new path.
 
 **The f16-accumulate atom sibling** (`mma_m16n8k16_f16_f16`, C→f16 — atom names follow
@@ -191,7 +191,7 @@ codec's atom token and priced by the `MMA_acc_bits` feature; f16 only (mma.sync 
 `AxisRole`: `scalar_tile_moves()` is the legality-guarded scalar register-tile product (`par × reg`, `block_threads ≤
 1024`) with per-cell `""` as the conservative option-0, crossed with the warp / reduce / stage move families by
 `_schedule._tile_rows` for an unpinned contraction so `compile` / `tune` explores the space (each row → a structural
-`Contraction`-node leaf keyed `TILE@<k_axis>` in a hierarchical `build_fork_tree`; an env pin wins via `Knob.narrow`).
+contraction-fold leaf keyed `TILE@<k_axis>` in a hierarchical `build_fork_tree`; an env pin wins via `Knob.narrow`).
 `wspec_moves()` is the fourth level (bare `WSPEC`, option-0 `""` = uniform SIMT) — offered only on a warp row over a
 resolved **TMA** stage without a cross-CTA split, and resolved/thread-budget-gated at materialization
 (`_wspec_workers`; an ineligible spec degrades to uniform). A computed-A (fused-cone) contraction enumerates its own

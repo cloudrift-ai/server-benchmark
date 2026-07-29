@@ -15,7 +15,7 @@ the carriers already dissolved into loose folds at recognition) plus the structu
 (:func:`contraction_loop`). Stored trees are already resolved — a computed operand is an inline
 node on its edge, so there is no name-resolution step ahead of a lowering walk (the old
 ``resolve`` splice over ``TileOp.bindings`` retired with the let table), and the fused
-multi-channel edge lowers through :attr:`Contraction.loop`'s own product derivation (the old
+multi-channel edge lowers through :attr:`ContractionView.loop`'s own product derivation (the old
 ``is_group`` / ``group_loop`` sibling matching retired with it)."""
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.schedule import ReducePlan
 from emmy.compiler.ir.stmt import Assign, Body, Loop, StridedLoop
 from emmy.compiler.ir.stmt.base import Stmt, pretty_body
-from emmy.compiler.ir.tile.ir import Contraction, Fold, Map
+from emmy.compiler.ir.tile.ir import ContractionView, Fold, Map
 
 
 def cone_seam(cone) -> tuple[tuple, tuple, tuple[str, ...]]:
@@ -53,16 +53,16 @@ def cone_seam(cone) -> tuple[tuple, tuple, tuple[str, ...]]:
 def reduce_loop(op):
     """The kernel's outermost **annotated** reduce ``Loop`` (its ``carrier`` set by recognition),
     or ``None`` for a pure pointwise / flat-fallback ``Map`` (no annotated reduce). A
-    :class:`~emmy.compiler.ir.tile.ir.Fold` / :class:`Contraction` synthesizes its loop
+    :class:`~emmy.compiler.ir.tile.ir.Fold` / :class:`ContractionView` synthesizes its loop
     directly (a multi-channel contraction derives the ONE fused product loop — see
-    :attr:`Contraction.loop`); a ``Map``
+    :attr:`ContractionView.loop`); a ``Map``
     is read off the top-level body — the annotated reduce loop is a top-level stmt (a
     single-flat-reduce cell); a nested / multi reduce stays un-annotated (flat fallback) and is
     invisible here, so it materializes on the scalar tier."""
-    if isinstance(op, (Fold, Contraction)):
+    if isinstance(op, (Fold, ContractionView)):
         return op.loop
     if isinstance(op, Map) and op.sources:
-        return reduce_loop(op.sources[0])  # a Map projecting over a Fold / Contraction source
+        return reduce_loop(op.sources[0])  # a Map projecting over a Fold / ContractionView source
     for s in op.body:
         if isinstance(s, (Loop, StridedLoop)) and s.carrier is not None:
             return s
@@ -85,7 +85,7 @@ def reduce_plan(tile):
 def nodify_reduce(op, plan: ReducePlan):
     """Nodify a kernel op into a :class:`~emmy.compiler.ir.tile.ir.Fold` node carrying the
     reduce partition ``plan`` **on the node** (not a residual ``TileOp.reduce`` field). A
-    :class:`Contraction` node (the recognize-side per-cell contraction) folds through its
+    :class:`ContractionView` node (the recognize-side per-cell contraction) folds through its
     synthesized loop — the coop / ILP K partition treats it as the degenerate carrier of its
     additive fold, any projection riding the wrapping ``Map``. A flat ``Map`` holding an annotated
     reduce ``Loop`` (a split partial) nodifies via :meth:`Fold.from_loop`, which reconstructs
@@ -132,13 +132,13 @@ def lower(op) -> list[Stmt]:
     one ``lower`` call emits the kernel's per-cell body with nothing left to expand. Stored trees
     are already resolved (computed operands are inline nodes), so there is no name-inlining step;
     a multi-channel contraction lowers through its own derived product loop
-    (:attr:`Contraction.loop`)."""
+    (:attr:`ContractionView.loop`)."""
     if isinstance(op, Map):
         prefix = [s for src in op.sources for s in lower(src)]
         return [*prefix, *op.body]  # the sources' reduce/contract loop nests, then the projection body
-    if isinstance(op, (Fold, Contraction)):
+    if isinstance(op, (Fold, ContractionView)):
         return op.lower()
-    raise TypeError(f"lower: expected a Map lift wrapper, Fold, or Contraction, got {type(op).__name__}")
+    raise TypeError(f"lower: expected a Map lift wrapper, Fold, or ContractionView, got {type(op).__name__}")
 
 
 def contraction_loop(lift, fold, operand_bodies, reduce_axis) -> Loop:

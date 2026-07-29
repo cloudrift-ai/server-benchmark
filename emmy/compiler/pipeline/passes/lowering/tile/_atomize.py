@@ -298,7 +298,7 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis] | None:
         tile=TilePlan(),
         lead_axes=tuple(grid[:-1]),
     )
-    return Map(body=Body((*prefix, *tail_ops, write)), source=node), n_ax
+    return Map(body=Body((*prefix, *tail_ops, write)), sources=(node,)), n_ax
 
 
 __all__ = ["bind_contraction", "bind_prologue_contraction", "map_cone", "semiring_binding"]

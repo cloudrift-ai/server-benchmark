@@ -297,7 +297,7 @@ def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Map, plan: R
     off = BinaryExpr("*", Var(split.name), b_dim.expr)
     sliced = replace(red, axis=replace(red.axis, extent=b_dim), reduce=_strip_grid(plan), offset=off, bound=bound)
     ws_writes = tuple(Write(output=ws_name, index=ws_index(i, names[i]), value=names[i]) for i in range(n_comp))
-    partial_map = Map(body=Body(ws_writes), source=sliced)
+    partial_map = Map(body=Body(ws_writes), sources=(sliced,))
     partial_tile = _mapped(partial_map, (split, *grid), name=f"{tile.name}__partial", stage=tile.stage, knobs=tile.knobs)
 
     # Finalize: per output element, seed the state, fold the partitions (the exp-family LSE

@@ -68,16 +68,16 @@ def test_sinkable_stat_binding_gates():
         axis=n,
         body=Body((Load(name="x1", input="t", index=(Var("a0"), Var("a1"))), Write(output="o", index=(Var("a0"), Var("a1")), value="x1"))),
     )
-    node = Map(body=Body((sweep,)), source=red)
+    node = Map(body=Body((sweep,)), sources=(red,))
     inputs = {"t": Tensor("t", (Dim(32), Dim(64)), F16)}
     b = bind_sinkable_stat(node, (m,), inputs)
     assert b is not None and b.src == "t" and b.n == 64 and b.rows == 32 and b.acc == "acc0"
     # A max fold is not additive — decline.
     acc_max = Accum(name="acc0", value="v0", op=ElementwiseImpl("maximum"), axes=("a1",))
     red_max = Reduction(carrier=acc_max.as_carrier(), axis=n, partial=Body((load, sq, acc_max)), role=AxisRole.PLANAR)
-    assert bind_sinkable_stat(Map(body=Body((sweep,)), source=red_max), (m,), inputs) is None
+    assert bind_sinkable_stat(Map(body=Body((sweep,)), sources=(red_max,)), (m,), inputs) is None
     # A second trailing loop strands the re-emitted sweep on the row-only grid — decline.
-    assert bind_sinkable_stat(Map(body=Body((sweep, sweep)), source=red), (m,), inputs) is None
+    assert bind_sinkable_stat(Map(body=Body((sweep, sweep)), sources=(red,)), (m,), inputs) is None
 
 
 @requires_cuda

@@ -25,17 +25,55 @@ from emmy.compiler.ir.stmt.base import Stmt, pretty_body
 from emmy.compiler.ir.tile.ir import Contraction, Map, Reduction
 
 
-def reduce_loop(op):
+def resolve(op, bindings=None):
+    """Inline every binding-name operand in ``op``'s tree — each reference replaced by the lowered
+    stmts of its bound subtree — yielding a NAME-FREE tree the lowering walkers consume unchanged.
+    This is the one place ``TileOp.bindings`` is consulted: sharing is structural in the stored tree
+    (two siblings referencing one name), and the derived loop nest a shared group lowers to is the
+    group's concern, not the resolver's. An empty table means a name-free tree (construction
+    validates that every reference has a binding), so this is a free identity on the unshared forms."""
+    if not bindings:
+        return op
+    if isinstance(op, Map):
+        srcs = tuple(resolve(s, bindings) for s in op.sources)
+        body = _resolve_stmts(op.body, bindings)
+        return op if (srcs == op.sources and body is None) else replace(op, sources=srcs, body=body if body is not None else op.body)
+    if isinstance(op, Reduction):
+        src = resolve(op.source, bindings) if op.source is not None else None
+        partial = _resolve_stmts(op.partial, bindings)
+        if src is op.source and partial is None:
+            return op
+        return replace(op, source=src, partial=partial if partial is not None else op.partial)
+    if isinstance(op, Contraction):
+        epi = _resolve_stmts(op.epilogue, bindings)
+        if op.a_ref is None:
+            return op if epi is None else replace(op, epilogue=epi)
+        bound = bindings.get(op.a_ref)
+        if bound is None:
+            raise KeyError(f"resolve: operand reference {op.a_ref!r} resolves to no binding")
+        return replace(op, a_operand=Body(tuple(lower(bound, bindings))), epilogue=epi if epi is not None else op.epilogue)
+    return op
+
+
+def _resolve_stmts(body: Body, bindings) -> Body | None:
+    """``body`` with every structural-node stmt resolved, or ``None`` when nothing changed."""
+    out = [resolve(s, bindings) if isinstance(s, (Map, Reduction, Contraction)) else s for s in body]
+    return None if all(a is b for a, b in zip(out, body, strict=True)) else Body(tuple(out))
+
+
+def reduce_loop(op, bindings=None):
     """The kernel's outermost **annotated** reduce ``Loop`` (its ``carrier`` set by recognition),
     or ``None`` for a pure pointwise / flat-fallback ``Map`` (no annotated reduce). A
     :class:`~emmy.compiler.ir.tile.ir.Reduction` synthesizes its loop directly; a ``Map``
     is read off the top-level body — the annotated reduce loop is a top-level stmt (a
     single-flat-reduce cell); a nested / multi reduce stays un-annotated (flat fallback) and is
-    invisible here, so it materializes on the scalar tier."""
+    invisible here, so it materializes on the scalar tier. A fused sibling group reads off its
+    PRIMARY source (the channels share one fold structure by construction)."""
+    op = resolve(op, bindings)
     if isinstance(op, (Reduction, Contraction)):
         return op.loop
-    if getattr(op, "source", None) is not None:
-        return reduce_loop(op.source)  # a Map projecting over a Reduction / Contraction source
+    if isinstance(op, Map) and op.sources:
+        return reduce_loop(op.sources[0])  # a Map projecting over a Reduction / Contraction source
     for s in op.body:
         if isinstance(s, (Loop, StridedLoop)) and s.carrier is not None:
             return s
@@ -50,7 +88,8 @@ def reduce_plan(tile):
     a coop-K / split-K contraction (:func:`nodify_reduce`) — carries its plan on the node; there is
     **no** residual ``TileOp.reduce`` field. The single accessor the materializer / ``030_split_reduce`` read."""
     op = tile.op
-    red = op.source if isinstance(op, Map) and isinstance(op.source, Reduction) else (op if isinstance(op, Reduction) else None)
+    head = op.sources[0] if isinstance(op, Map) and op.sources else op
+    red = head if isinstance(head, Reduction) else None
     return red.reduce if red is not None else None
 
 
@@ -72,34 +111,37 @@ def nodify_reduce(op, plan: ReducePlan):
     ``Map`` body."""
     if isinstance(op, Contraction):
         red = replace(Reduction.from_loop(op.loop), reduce=plan)
-        return Map(body=op.epilogue, source=red) if len(op.epilogue) else red
+        return Map(body=op.epilogue, sources=(red,)) if len(op.epilogue) else red
     rloop = reduce_loop(op)
     red = replace(Reduction.from_loop(rloop), reduce=plan)
     body = list(op.body)
     idx = body.index(rloop)
     pre, tail = body[:idx], body[idx + 1 :]
     assert not pre, f"nodify_reduce: unexpected prologue ahead of the reduce loop: {pre}"
-    return Map(body=Body(tuple(tail)), source=red) if tail else red
+    return Map(body=Body(tuple(tail)), sources=(red,)) if tail else red
 
 
-def axis_role(op) -> AxisRole:
+def axis_role(op, bindings=None) -> AxisRole:
     """The reduce :class:`~emmy.compiler.ir.axis.AxisRole` of a kernel's outermost reduction,
     read **structurally** off the annotated reduce loop (no stored kind tag): a ``CONTRACTION``
     contraction, a ``TWISTED`` (online-softmax / flash) or ``PLANAR`` (plain ``sum`` / ``max`` /
     ``mean``) reduce, or ``FREE`` for a pure pointwise / flat-fallback ``Map``. This is what the
     schedule / materialize passes dispatch on."""
-    rl = reduce_loop(op)
+    rl = reduce_loop(op, bindings)
     return rl.role if rl is not None else AxisRole.FREE
 
 
-def lower(op) -> list[Stmt]:
+def lower(op, bindings=None) -> list[Stmt]:
     """Lower the lift wrapper to loop-IR stmts — the ``Map``'s body verbatim. The carriers are
     already dissolved into loose fold ``Accum``\\ s (and the streaming ``merge`` for a twisted
     carrier) at recognition, and the reduce ``Loop``\\ s carry their role/carrier annotations, so
-    one ``lower`` call emits the kernel's per-cell body with nothing left to expand."""
+    one ``lower`` call emits the kernel's per-cell body with nothing left to expand. ``bindings``
+    (the owning :class:`TileOp`'s let table) is inlined first (:func:`resolve`) — a name-operand
+    tree cannot lower without it."""
+    op = resolve(op, bindings)
     if isinstance(op, Map):
-        prefix = lower(op.source) if op.source is not None else []
-        return [*prefix, *op.body]  # the source's reduce/contract loop nest, then the projection body
+        prefix = [s for src in op.sources for s in lower(src)]
+        return [*prefix, *op.body]  # the sources' reduce/contract loop nests, then the projection body
     if isinstance(op, (Reduction, Contraction)):
         return op.lower()
     raise TypeError(f"lower: expected a Map lift wrapper, Reduction, or Contraction, got {type(op).__name__}")
@@ -124,20 +166,26 @@ def contraction_loop(lift, fold, operand_bodies, reduce_axis) -> Loop:
     return Loop(axis=reduce_axis, body=Body(tuple(body)), role=AxisRole.CONTRACTION, carrier=fold.as_carrier())
 
 
-def pretty(op, indent: str = "") -> list[str]:
+def pretty(op, indent: str = "", bindings=None) -> list[str]:
     """Structurally pretty-print a kernel op (for dumps) — a
     :class:`~emmy.compiler.ir.tile.ir.Reduction` as a typed header over its synthesized
     loop nest, the ``Map``'s body (its annotated reduce ``Loop`` + projection), or a bare stmt's own
-    pretty."""
+    pretty. Each ``bindings`` entry prints as a ``let <name> =`` block ahead of the tree, so a
+    shared subtree is shown once, where it lives."""
+    if bindings:
+        out: list[str] = []
+        for name, tree in bindings.items():
+            out += [f"{indent}let {name} =", *pretty(tree, indent + "    ")]
+        return [*out, *pretty(op, indent)]
     if isinstance(op, Reduction):
         head = f"{indent}Reduction[{op.axis.name}] {op.role.name.lower()}"
         return [head, *pretty_body(Body(op.lower()), indent + "    ")]
     if isinstance(op, Map):
-        src = pretty(op.source, indent) if op.source is not None else []
+        src = [line for s in op.sources for line in pretty(s, indent)]
         return [*src, *pretty_body(op.body, indent)]
     if isinstance(op, Stmt):
         return list(op.pretty(indent))
     return [f"{indent}{op!r}"]
 
 
-__all__ = ["Map", "axis_role", "contraction_loop", "lower", "nodify_reduce", "pretty", "reduce_loop", "reduce_plan"]
+__all__ = ["Map", "axis_role", "contraction_loop", "lower", "nodify_reduce", "pretty", "reduce_loop", "reduce_plan", "resolve"]

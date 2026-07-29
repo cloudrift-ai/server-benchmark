@@ -347,7 +347,7 @@ def _with_reduce(op, plan: ReducePlan):
     if isinstance(op, Reduction):
         return replace(op, reduce=plan)
     assert isinstance(op, Map) and isinstance(op.source, Reduction), f"reduce op must nodify to Reduction, got {type(op).__name__}"
-    return replace(op, source=replace(op.source, reduce=plan))
+    return replace(op, sources=(replace(op.source, reduce=plan),))
 
 
 # ---- shared-row operand staging (the fused norm→linear prologue) -------------------------------- #
@@ -1433,7 +1433,7 @@ def _warp_option(
         stage = _resolve_warp_stage(op, Stage.parse(stage_spec), budget) if stage_spec else None
     # Re-wrap the recognizer's projecting ``Map`` around the tiled node (materialize peels it into
     # the store tail — the same ``project ∘ contract`` spelling the Reduction tiers use).
-    emitted = replace(tile.op, source=op) if isinstance(tile.op, Map) and isinstance(tile.op.source, Contraction) else op
+    emitted = replace(tile.op, sources=(op,)) if isinstance(tile.op, Map) and isinstance(tile.op.source, Contraction) else op
     # Warp specialization rides ORTHOGONAL to the tile/stage just resolved: an optional WSPEC row /
     # pin splits the warps into roles over this fixed pipeline (gated on the RESOLVED ``stage`` — an
     # ineligible spec leaves no pipeline for a producer to drive, so WSPEC degrades to uniform).
@@ -1552,7 +1552,7 @@ def _map_strip_option(tile: TileOp, place: Placement, inner: Axis, r: int, spec:
     new_inner = replace(inner, extent=Dim(inner.extent.as_static() // r))
     new_free = (*place.free[:-1], new_inner)
     new_place = Placement(free=new_free, grid=new_free)
-    return TileOp(op=Map(body=body, source=None), name=name, place=new_place, knobs={_at(TILE, inner.name): spec})
+    return TileOp(op=Map(body=body), name=name, place=new_place, knobs={_at(TILE, inner.name): spec})
 
 
 def _map_strip_fork(tile: TileOp, place: Placement, name: str) -> list[TileOp] | TileOp:
@@ -1870,7 +1870,7 @@ def _twisted_chain_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp
     pv2 = replace(pv, tile=TilePlan(regs=(d, 1)))  # scalar reg order (reg_n, reg_m): the column vector
     partial = tuple(pv2 if st is pv else st for st in red.partial)
     red2 = replace(red, partial=type(red.partial)(partial))
-    op2 = replace(op, source=red2) if isinstance(op, Map) else red2
+    op2 = replace(op, sources=(red2,)) if isinstance(op, Map) else red2
     # A fork SIBLING of the warp / reduce-partition schedules: the resolved register-vector plan is
     # stamped (keyed on the PV contraction's k axis, like every per-node schedule codec) — the row
     # identity the DB / prior separate it from the per-cell serial by — and the sibling families it
@@ -2256,7 +2256,7 @@ def _twisted_warp_options(
             pv_plan = TilePlan(atom=pv_atom, units=(um, 1), regs=(fm, d_v.as_static() // atom_n), bk=max(1, bn // atom_k))
             partial = tuple(replace(s, tile=qk_plan) if s is head else (replace(s, tile=pv_plan) if s is pv else s) for s in red.partial)
             red2 = replace(red, partial=type(red.partial)(partial))
-            variants.append((pv_plan, replace(op, source=red2) if isinstance(op, Map) else red2))
+            variants.append((pv_plan, replace(op, sources=(red2,)) if isinstance(op, Map) else red2))
         # ``um`` warps per CTA, each owning ``fm`` register query tiles of ``atom_m`` rows: the
         # query axis shrinks to its CTA-block count; the value (expect output) axis folds into the
         # fragment tile and leaves the grid.

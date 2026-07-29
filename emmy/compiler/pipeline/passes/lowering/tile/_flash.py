@@ -493,7 +493,7 @@ def _flash_op(
     if out_store is not None:
         out_buf, out_idx = out_store
         proj = (*proj, Write(output=out_buf, index=out_idx, value="O_i__proj"))
-    return Map(body=Body(proj), source=reduction)
+    return Map(body=Body(proj), sources=(reduction,))
 
 
 # --------------------------------------------------------------------------- #

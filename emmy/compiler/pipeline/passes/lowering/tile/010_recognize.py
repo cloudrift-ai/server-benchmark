@@ -257,7 +257,7 @@ def _lift_cell(cell: list[Stmt], free: list, output: str) -> Map | Reduction:
         reduction = Reduction.from_loop(annotated)
         # A bare reduce is the kernel root (its grid ``Write`` is glue); a projected reduce
         # (softmax / RMSNorm) is the ``source`` of a ``Map`` whose body IS that projection.
-        return reduction if bare else Map(body=Body(projection), source=reduction)
+        return reduction if bare else Map(body=Body(projection), sources=(reduction,))
     return Map(body=(annotated, *projection))
 
 
@@ -294,7 +294,7 @@ def _nodify_contraction(node, free: tuple):
             )
     demoted = Loop(axis=rloop.axis, body=rloop.body, unroll=rloop.unroll, role=AxisRole.PLANAR, carrier=rloop.carrier)
     red = Reduction.from_loop(demoted)
-    return Map(body=projection, source=red) if len(projection) else red
+    return Map(body=projection, sources=(red,)) if len(projection) else red
 
 
 def _demote_planar(node):
@@ -308,7 +308,7 @@ def _demote_planar(node):
     demoted = Loop(axis=rloop.axis, body=rloop.body, unroll=rloop.unroll, role=AxisRole.PLANAR, carrier=rloop.carrier)
     red = Reduction.from_loop(demoted)
     projection = Body((*src.epilogue, *(node.body if isinstance(node, Map) else ())))
-    return Map(body=projection, source=red) if len(projection) else red
+    return Map(body=projection, sources=(red,)) if len(projection) else red
 
 
 def _lift(stmts: list[Stmt], output: str) -> tuple[Map | Reduction | Contraction, tuple]:

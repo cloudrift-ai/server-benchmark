@@ -10,17 +10,25 @@ The whole point of the layer is the article's thesis: **the schedule is
 separate from the combine.** A ``TileOp`` holds the structural-IR root ``op``
 (the *combine* — the :class:`Map` / :class:`Reduction` / :class:`Contraction`
 nodes defined **in this module**, alongside ``ir/stmt/algebra``) directly,
-plus a thin set of **root-global schedule fields** — the free-axis → grid
-:class:`~.schedule.Placement` (``place``) and the warp split (``workers``). The
+plus the **let table** ``bindings`` (shared subtrees, keyed by the name each
+one's root defines) and a thin set of **root-global schedule fields** — the
+free-axis → grid :class:`~.schedule.Placement` (``place``) and the warp split
+(``workers``). The
 per-node schedule slices ride the structural nodes themselves (a
 :class:`Contraction`'s ``tile``, a :class:`Reduction`'s
 ``reduce`` — EVERY reduce partition rides its node, none on the ``TileOp``); the residual root fields
 (``tier`` / ``stage``) hold the schedule for the not-yet-nodified forms (a non-tiled
 contraction's output tile, the resolved ``STAGE`` / ``WSPEC``; flash is now a
-``Map(source=Reduction(partial=[Contraction(QK), …, Contraction(PV)]))`` node tree, so its
+``Map(sources=(Reduction(partial=[Contraction(QK), …, Contraction(PV)]),))`` node tree, so its
 partition rides the node). There is no per-kind kernel/schedule type: the algebra is read
 structurally off the axes' :class:`~emmy.compiler.ir.axis.AxisRole`
 (``ops.axis_role``), so MAP / MONOID / SEMIRING all ride the same ``TileOp``.
+
+**Operand sharing is structural.** "These two matmuls read the same A" is a FACT
+the tree states — N sibling :class:`Contraction`\\ s under one ``Map.sources``,
+each naming the same bound subtree in ``bindings`` — separate from the
+scheduling DECISION of how to lower them. ``ops.resolve`` inlines those
+references before any lowering walk, so the walkers stay name-free.
 
 The combine lives entirely in the ``op`` wrapper (the :class:`Map` /
 :class:`Reduction` / :class:`Contraction` nodes here + ``ir/stmt/algebra``): a
@@ -293,7 +301,12 @@ class Contraction(Stmt):
 
     axes: tuple[Axis, Axis]  # the tiled output (m_axis, n_axis) — params
     k_axis: Axis  # the contraction axis — params
-    a_operand: Load | Body  # A: a gmem ``Load`` OR a computed register-resident ``Body`` (flash PV's ``P = exp(S − M)``) — params
+    # A: a gmem ``Load``, a computed register-resident ``Body`` (flash PV's ``P = exp(S − M)``), or the
+    # SSA NAME of a let-bound subtree in the owning ``TileOp.bindings`` (the shared computed-A cone —
+    # sibling channels referencing one name is what makes their operand sharing structural). A name
+    # operand is inlined by ``ops.resolve`` before any lowering walk, so every accessor below sees the
+    # ``Load`` / ``Body`` form. — params
+    a_operand: Load | Body | str
     # The fold CHANNELS — ``(b_load, acc)`` per channel, every channel folding the SAME lifted A
     # value over the same ``(m, n, k)`` space: the product-monoid carrier specialized to
     # contractions. One channel is the ordinary matmul; N channels is the fused gate/up MLP edge
@@ -332,10 +345,19 @@ class Contraction(Stmt):
         return self.acc
 
     @property
+    def a_ref(self) -> str | None:
+        """The binding NAME this node's A operand references, or ``None`` (an inline ``Load`` /
+        ``Body``). Two siblings sharing one A are exactly two nodes with the same ``a_ref``."""
+        return self.a_operand if isinstance(self.a_operand, str) else None
+
+    @property
     def a_body(self) -> tuple[Stmt, ...]:
         """The A operand's producing stmts — a singleton gmem ``Load``, or a computed body's stmts
         (a **register-resident** A: flash PV's ``P = exp(S − M)``, produced from an in-register score,
-        not a gmem address). The last stmt's def is the operand value ``contraction_loop`` multiplies."""
+        not a gmem address). The last stmt's def is the operand value ``contraction_loop`` multiplies.
+        An unresolved binding NAME has no stmts here — ``ops.resolve`` inlines it first."""
+        if isinstance(self.a_operand, str):
+            raise AssertionError(f"Contraction.a_operand is the unresolved binding {self.a_operand!r} — call ops.resolve first")
         return (self.a_operand,) if isinstance(self.a_operand, Load) else tuple(self.a_operand)
 
     @property
@@ -346,8 +368,9 @@ class Contraction(Stmt):
 
     @property
     def a_name(self) -> str:
-        """The A operand's bound SSA name (its producing body's last def)."""
-        return self.a_body[-1].defines()[-1]
+        """The A operand's bound SSA name — the referenced binding's name, or the producing body's
+        last def."""
+        return self.a_operand if isinstance(self.a_operand, str) else self.a_body[-1].defines()[-1]
 
     def stat_prologue(self) -> tuple[tuple[Stmt, ...], tuple[Stmt, ...], tuple[str, ...]]:
         """Split the computed-A body at the contraction-axis seam: the maximal leading run of stmts
@@ -476,8 +499,10 @@ class Contraction(Stmt):
                     yield from loads(b)
 
         # Deep over the A body — a computed cone may nest its loads (the fused norm→linear cone's
-        # per-row statistic reduce ``Loop``).
-        return (*dict.fromkeys(loads(self.a_body)), *(bl.input for bl, _ in self.folds))
+        # per-row statistic reduce ``Loop``). A binding REFERENCE reads no buffer here: the bound
+        # subtree is the owning ``TileOp``'s, and its loads are reached through ``bindings``.
+        a = () if isinstance(self.a_operand, str) else loads(self.a_body)
+        return (*dict.fromkeys(a), *(bl.input for bl, _ in self.folds))
 
     def pretty(self, indent: str = "") -> list[str]:
         t = " trans" if self.b_trans else ""
@@ -501,11 +526,14 @@ def _(s: Contraction, rename, sigma, axis_fn):
     # Route the operand Loads + accumulator + epilogue through the generic rewrite (SSA / Expr / axis
     # canonicalization); map the skeleton axes; pass the ``tile`` schedule through unchanged.
     # ``b_trans`` is derived from ``b_load`` (a property), so the rewritten load carries it.
-    a_operand = (
-        _rewrite(s.a_operand, rename, sigma, axis_fn)
-        if isinstance(s.a_operand, Load)
-        else Body(tuple(_rewrite(c, rename, sigma, axis_fn) for c in s.a_operand))
-    )
+    # A binding REFERENCE is a plain SSA name — it renames through the same map as any other, which
+    # is what keeps references and their definitions (the ``bindings`` keys) in lockstep.
+    if isinstance(s.a_operand, str):
+        a_operand = rename(s.a_operand)
+    elif isinstance(s.a_operand, Load):
+        a_operand = _rewrite(s.a_operand, rename, sigma, axis_fn)
+    else:
+        a_operand = Body(tuple(_rewrite(c, rename, sigma, axis_fn) for c in s.a_operand))
     return Contraction(
         axes=tuple(axis_fn(a) for a in s.axes),
         k_axis=axis_fn(s.k_axis),
@@ -520,33 +548,97 @@ def _(s: Contraction, rename, sigma, axis_fn):
 @dataclass(frozen=True)
 class Map:
     """A pointwise lift / projection wrapper around a :class:`Body` of loop-IR stmts, optionally over
-    a reduction / contraction ``source``.
+    one or more reduction / contraction ``sources``.
 
     ``body`` is the per-cell pointwise / projection compute: operand ``Load``\\ s, the lift
-    ``Assign``\\ s, and — at the kernel root — the output ``Write``. ``source`` is the structural node
-    it projects over (a :class:`Reduction` / :class:`Contraction` — ``project ∘ reduce``) or ``None``
-    for a pure pointwise map. A pure pointwise cell is a ``Map`` of plain stmts (``source=None``);
+    ``Assign``\\ s, and — at the kernel root — the output ``Write``. ``sources`` are the structural
+    nodes it projects over (:class:`Reduction` / :class:`Contraction` — ``project ∘ reduce``), empty
+    for a pure pointwise map. A pure pointwise cell is a ``Map`` of plain stmts (``sources=()``);
     softmax / RMSNorm is a ``Map`` whose ``body`` is the post-fold sweep over a ``Reduction`` source.
+    SEVERAL sources is the **fused sibling group** — N :class:`Contraction`\\ s over one shared A
+    (referenced by binding name), the gate⊗up MLP edge; the group schedules and lowers as ONE unit.
     Every recognized contraction — per-cell scalar included — is a :class:`Contraction` node
     (``_nodify_contraction`` in ``010_recognize``); the only annotated reduce ``Loop``\\ s still riding
     a flat ``Map`` body are ``030_split_reduce``'s sliced partials. ``out`` is the bound output name (the
-    body's last def, or the source's carried state for an empty-body wrap). It HAS a Body, not IS
-    one."""
+    body's last def, or the primary source's carried state for an empty-body wrap). It HAS a Body, not
+    IS one. :attr:`source` is the len-≤1 compat read for the single-source forms."""
 
     body: Body = field(default_factory=Body)
-    source: Reduction | Contraction | None = None  # the project∘reduce source, or None (pure pointwise)
+    sources: tuple[Reduction | Contraction, ...] = ()  # the project∘reduce sources, () = pure pointwise
 
     def __post_init__(self) -> None:
         if not isinstance(self.body, Body):
             object.__setattr__(self, "body", Body.coerce(self.body))
+        if not isinstance(self.sources, tuple):
+            object.__setattr__(self, "sources", tuple(self.sources))
+
+    @property
+    def source(self) -> Reduction | Contraction | None:
+        """The single projected source, or ``None`` (pure pointwise) — the compat read every
+        single-source form uses. A fused sibling group (N sources) has no single source; read
+        ``sources`` there."""
+        assert len(self.sources) <= 1, f"Map has {len(self.sources)} sources — read `sources`, not `source`"
+        return self.sources[0] if self.sources else None
 
     @property
     def out(self) -> str:
-        """The bound output name. With no projection body it is the ``source``'s carried state;
+        """The bound output name. With no projection body it is the primary source's carried state;
         otherwise the last defining stmt's name (a pointwise lift / a post-reduce projection)."""
-        if len(self.body) == 0 and self.source is not None:
-            return self.source.out
+        if len(self.body) == 0 and self.sources:
+            return self.sources[0].out
         return self.body[-1].defines()[-1]
+
+
+def _stmt_nodes(s: Stmt):
+    """Every structural node reachable from stmt ``s`` (deep through nested bodies)."""
+    if isinstance(s, (Map, Reduction, Contraction)):
+        yield from tree_nodes(s)
+        return
+    for b in s.nested():
+        for child in b:
+            yield from _stmt_nodes(child)
+
+
+def tree_nodes(op):
+    """Every structural node in ``op``'s tree, root first — the ONE node walk the name-uniqueness
+    check, the binding resolver, and (later) the path/seam enumerators share. ``bindings`` are the
+    owning :class:`TileOp`'s, walked separately: a bound subtree has exactly one home, so the tree
+    stays a tree and no visited set is needed."""
+    if op is None:
+        return
+    yield op
+    if isinstance(op, Map):
+        for src in op.sources:
+            yield from tree_nodes(src)
+        for s in op.body:
+            yield from _stmt_nodes(s)
+    elif isinstance(op, Reduction):
+        yield from tree_nodes(op.source)
+        for s in op.partial:
+            yield from _stmt_nodes(s)
+    elif isinstance(op, Contraction):
+        if isinstance(op.a_operand, Body):
+            for s in op.a_operand:
+                yield from _stmt_nodes(s)
+        for s in op.epilogue:
+            yield from _stmt_nodes(s)
+
+
+def _node_defines(node) -> list[str]:
+    """The SSA names ``node`` itself binds — its own stmts' deep defs plus, for a
+    :class:`Contraction`, the accumulators its SYNTHESIZED loop defines (no stored stmt binds them)."""
+    out: list[str] = []
+    if isinstance(node, Map):
+        stmts = [s for s in node.body if not isinstance(s, (Map, Reduction, Contraction))]
+    elif isinstance(node, Reduction):
+        stmts = [s for s in node.partial if not isinstance(s, (Map, Reduction, Contraction))]
+    else:
+        cone = list(node.a_operand) if isinstance(node.a_operand, Body) else []
+        stmts = [s for s in (*cone, *node.epilogue) if not isinstance(s, (Map, Reduction, Contraction))]
+        out += list(node.defines())
+    for s in stmts:
+        out += sorted(_deep_defines(s))
+    return out
 
 
 @dataclass
@@ -570,6 +662,17 @@ class TileOp(Op):
       contraction; a tiled contraction rides its ``tile`` on the ``Contraction`` node. ``None`` = per-cell.
     - ``stage`` — the operand smem pipeline (:class:`~.schedule.Stage`); ``None`` = gmem-direct.
 
+    ``bindings`` is the kernel's **let table** — shared subtrees keyed by the name each tree's root
+    defines (its ``out``), referenced from an operand field by that plain SSA name
+    (``Contraction.a_operand = "xhat"``). There is deliberately no ``Ref`` node kind: SSA names are
+    already the IR's one reference mechanism, so ``deps`` / ``defines``, the rewrite rename maps and
+    ``structural_key`` canonicalization all speak them unchanged. The invariant that replaces it is
+    **binding-name uniqueness** (:meth:`validate_bindings`, run at construction): a binding's key is
+    the only definition of that name anywhere in ``op`` + ``bindings``, and every name operand
+    resolves to a binding — so a shared subtree has exactly one home, paths stay unique, and two
+    references to one binding are distinguishable from two copies. ``ops.resolve`` inlines the
+    references before any lowering walk.
+
     There is **no** residual reduce-partition field: EVERY partitioned reduce — a plain / twisted
     monoid, flash, a coop-K / split-K contraction — carries its :class:`~.schedule.ReducePlan` on its
     ``Reduction`` node (read via ``ops.reduce_plan``); the flat-``Map`` coop-K contraction is nodified
@@ -584,6 +687,40 @@ class TileOp(Op):
     tier: TilePlan | None = None
     stage: Stage | None = None
     workers: WarpSpec | None = None
+    bindings: dict = field(default_factory=dict)  # the let table: out-name → shared subtree
+
+    def __post_init__(self) -> None:
+        self.validate_bindings()
+
+    def validate_bindings(self) -> None:
+        """Enforce the binding invariants at CONSTRUCTION — a violation would otherwise surface as a
+        missing (or silently wrong) operand several passes later:
+
+        - every name operand resolves to a binding (no dangling reference);
+        - a binding's key IS its tree's output name;
+        - a binding's key is defined nowhere else — not in ``op``, not in another binding.
+
+        The uniqueness check is scoped to the binding NAMES rather than every SSA name in the tree:
+        loop IR legitimately binds one name from several stmts (a fold's ``Init`` seed plus its
+        ``Accum`` steps, and split-K's outer reduce folding the accumulator its inner contraction
+        also names). What the let table needs is that a REFERENCE is unambiguous, and that is
+        exactly what this asserts."""
+        refs: set[str] = set()
+        homes: dict[str, list[str]] = {}
+        keys = set(self.bindings)
+        for home, root in (("op", self.op), *((f"bindings[{k!r}]", v) for k, v in self.bindings.items())):
+            for node in tree_nodes(root):
+                if isinstance(node, Contraction) and node.a_ref is not None:
+                    refs.add(node.a_ref)
+                for nm in _node_defines(node) if keys else ():  # the def walk only pays where a table exists
+                    homes.setdefault(nm, []).append(home)
+        if dangling := refs - set(self.bindings):
+            raise AssertionError(f"TileOp: operand reference(s) {sorted(dangling)} resolve to no binding")
+        for key, root in self.bindings.items():
+            if root is None or key != root.out:
+                raise AssertionError(f"TileOp.bindings key {key!r} is not its tree's output name ({root and root.out!r})")
+            if other := sorted(set(homes.get(key, ())) - {f"bindings[{key!r}]"}):
+                raise AssertionError(f"TileOp: binding name {key!r} is also defined in {other} — a reference must be unambiguous")
 
     def pretty_body(self) -> str:
         """Render the ``op`` tree structurally (the dump view) — no lowering."""
@@ -591,7 +728,7 @@ class TileOp(Op):
 
         if self.op is None:
             return ""
-        return "\n".join(pretty(self.op, "    "))
+        return "\n".join(pretty(self.op, "    ", self.bindings))
 
 
-__all__ = ["Contraction", "Map", "Reduction", "TileOp"]
+__all__ = ["Contraction", "Map", "Reduction", "TileOp", "tree_nodes"]

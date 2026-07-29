@@ -50,7 +50,7 @@ def test_bare_reduction_lowers_to_just_the_loop() -> None:
 def test_projected_reduce_is_a_map_over_the_reduction() -> None:
     loop = _sum_loop()
     proj = (Assign(name="rms", op="sqrt", args=("acc",)),)
-    node = Map(body=Body(proj), source=Reduction.from_loop(loop))
+    node = Map(body=Body(proj), sources=(Reduction.from_loop(loop),))
     # lower flattens the source's loop then the projection body — the bare-loop ``Map`` body.
     assert lower(node) == [loop, *proj]
     assert node.out == "rms"  # the projection's last def
@@ -64,7 +64,7 @@ def test_map_over_reduction_matches_the_legacy_loop_in_body_form() -> None:
     guarantee that keeps ``op_cache_key`` stable across the lift."""
     loop = _sum_loop()
     proj = (Write(output="out", index=(Var("m"),), value="acc"),)
-    node = Map(body=Body(proj), source=Reduction.from_loop(loop))
+    node = Map(body=Body(proj), sources=(Reduction.from_loop(loop),))
     legacy = Map(body=(loop, *proj))
     assert lower(node) == lower(legacy)
     assert reduce_loop(node) == reduce_loop(legacy)
@@ -90,7 +90,7 @@ def test_reduce_plan_reads_the_partition_off_the_reduction_node() -> None:
     red = replace(Reduction.from_loop(_sum_loop()), reduce=plan)
     # A bare reduce root and a projecting Map both surface the node's partition.
     assert reduce_plan(_tile(red)) is plan
-    wrapped = Map(body=Body((Assign(name="rms", op="sqrt", args=("acc",)),)), source=red)
+    wrapped = Map(body=Body((Assign(name="rms", op="sqrt", args=("acc",)),)), sources=(red,))
     assert reduce_plan(_tile(wrapped)) is plan
 
 
@@ -108,7 +108,7 @@ def test_twisted_role_propagates() -> None:
     red = Reduction.from_loop(_sum_loop(role=AxisRole.TWISTED))
     assert red.role is AxisRole.TWISTED
     assert axis_role(red) is AxisRole.TWISTED
-    assert axis_role(Map(body=Body(()), source=red)) is AxisRole.TWISTED
+    assert axis_role(Map(body=Body(()), sources=(red,))) is AxisRole.TWISTED
 
 
 def _contraction(epilogue: Body | None = None) -> Contraction:

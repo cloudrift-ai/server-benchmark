@@ -27,32 +27,6 @@ from emmy.compiler.structural import digest
 
 Dialect = Literal["loop", "tile", "kernel", "cuda"]
 
-# The ``PLACE@<element>`` placement family records a **structural** (kernel-set-changing)
-# decision — ``fuse`` (registers) / ``cut`` (materialize the edge to gmem) per edge class
-# (``cone`` producer-cone inlining, ``fold`` flash vs multi-kernel attention; ``tuple`` is
-# dominance policy and never stamped). A source-chain hop that introduces a ``PLACE@`` key is
-# a decomposition hop whose cost is a Σ owned by the two-level tuner, NOT a ``lowering`` row.
-# Matched by family prefix (search/ shouldn't import the lowering pass that stamps them).
-_PLACE_PREFIX = "PLACE@"
-
-
-def structural_decision_delta(knobs: dict) -> dict:
-    """The structural-decision knobs ``knobs`` carries — the ``PLACE@<element>`` placements
-    (resolved ``fuse`` / ``cut``); ``{}`` when the op carries none. Read by the candidate
-    replay (``search/candidate``) and the decomposition-row featurizer
-    (``two_level._decomposition_rows``) to attribute each side's Σ cost."""
-    return {k: v for k, v in knobs.items() if k.startswith(_PLACE_PREFIX)}
-
-
-def introduces_structural_decision(parent_op: object, child_op: object) -> bool:
-    """True when ``child_op`` carries a ``PLACE@<element>`` structural decision the
-    ``parent_op`` lacks — the fuse-vs-cut fork hop. Covers both the cut (fragment splice)
-    and the fuse (the fused-kernel jump), so the recorder skips the decision hop regardless
-    of dialect crossing."""
-    p = getattr(parent_op, "knobs", None) or {}
-    c = getattr(child_op, "knobs", None) or {}
-    return any(k.startswith(_PLACE_PREFIX) and k not in p for k in c)
-
 
 def op_cache_key(op: object) -> str | None:
     """Cache key for any kernel-bearing op, or ``None`` if not cacheable."""

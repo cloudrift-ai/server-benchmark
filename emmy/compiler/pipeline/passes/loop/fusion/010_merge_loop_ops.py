@@ -407,18 +407,6 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
     if producer.id in graph.outputs:
         raise RuleSkipped(f"producer {producer.id!r} is a graph output — it must stay materialized")
 
-    # Cut-workspace brake: ``020_cut_edge`` realizes a DECIDED ``PLACE@cone=cut`` by
-    # materializing the cone into ``<out>__cone`` / ``<out>__stat`` / ``<out>__ch<i>``
-    # workspace kernels, and the restarted scan re-enters this pass while those halves are
-    # still LoopOps. The stat-BEARING producer is braked incidentally (reduce-heavy), but a
-    # STAT-FREE cone producer is pure pointwise with one consumer — this rule's core move —
-    # and re-inlining it recreates the fused kernel, silently reverting the decided placement
-    # (observed on the gemma-4 pre256 norm→kv cone: the re-cut then collided on the existing
-    # workspace node). The workspace names are 020's minting contract; a decided cut is never
-    # fusion's to undo.
-    if _CUT_WS_RE.search(producer.id):
-        raise RuleSkipped(f"{producer.id!r} is a decided cone-cut workspace — the cut placement is not fusion's to undo")
-
     # Multi-load-of-reduce-heavy-producer guard: if the consumer references
     # the producer's output via more than one Load stmt AND the producer does
     # more than a few ops per output element (i.e., has a real reduce whose

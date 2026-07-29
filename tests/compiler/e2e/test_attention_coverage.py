@@ -315,7 +315,6 @@ def test_flash_chain_pin_selects_chain_on_warp_eligible_shape(monkeypatch):
     # Individual EMMY_* vars, not the EMMY_KNOBS aggregate: the aggregate splats into per-knob env
     # vars with overwrite=False, so a var another test already set (or left behind) would win over
     # this test's aggregate under xdist; monkeypatch on the individual vars reverts cleanly.
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_TILE", "a:scalar")
     monkeypatch.setenv("EMMY_TILE@PJ", "f64")
     monkeypatch.setenv("EMMY_REDUCE", "")
@@ -973,7 +972,6 @@ def test_warp_flash_alt_staging_matches_torch(monkeypatch, variant, stage):
     ldmatrix'd per atom-K chunk). Structure pinned via the emitted source (the per-operand
     mbarriers + the Q slab), values vs torch — the fills are verbatim copies, so alt stays
     bit-identical to gmem-direct."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_STAGE", stage)
     torch.manual_seed(11)
     module = _Causal() if variant == "causal" else _Sdpa()
@@ -1013,7 +1011,6 @@ def test_warp_flash_alt_staging_symbolic_bit_identical(monkeypatch, variant, sta
     kernel is BIT-identical to its gmem-direct symbolic sibling at both a block-divisible (64)
     and an overhanging (100) seq; the causal case composes the ``k_end`` early stop with the
     symbolic clamp."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x1/f1x4/k4")
     B, H, D = 1, 4, 64
     sd = torch.export.Dim("seq_len", min=4, max=4096)
@@ -1049,7 +1046,6 @@ def test_warp_flash_split_kv_matches_torch(monkeypatch, variant):
     combine and projects. Two kernels, and the result matches torch — causal composes (each
     slice's triangular tile-skip is slice-local; an above-the-diagonal slice contributes the
     exact carrier identity)."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
     torch.manual_seed(7)
     module = _Causal() if variant == "causal" else _Sdpa()
@@ -1089,7 +1085,6 @@ def test_warp_flash_split_kv_symbolic_matches_torch(monkeypatch, variant, reduce
     the tail CTA's overhanging query rows must NOT write their state into the next head's ws rows
     (the split partial's ``m_guard``, the regression this test pins). One cached kernel pair serves
     every runtime size, including an empty last slice (pure carrier identities)."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_REDUCE", reduce)
     B, H, D = 1, 4, 64
     module = _Causal() if variant == "causal" else _Sdpa()
@@ -1167,7 +1162,6 @@ def test_warp_flash_banded_matches_torch(monkeypatch, stage, S, W):
     carries BOTH FragmentMasks and both stream bounds (the causal end, the banded start). One
     fused kernel, torch-banded-reference accuracy, on the unstaged and both staged pipelines —
     a non-block-aligned W (100) exercises the boundary tiles' band mask."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     if stage is not None:
         monkeypatch.setenv("EMMY_STAGE", stage)
     torch.manual_seed(S + W)
@@ -1191,7 +1185,6 @@ def test_warp_flash_banded_tile_skip_structure(monkeypatch):
     """The banded start is DERIVED from the band Select's predicate shape, never from a kernel
     identity: the stamped kernel starts its stream at ``⌊max(0, first_row − W + 1)/bn⌋·bn`` and
     keeps the causal ``kv0_end``; the un-stamped twin has neither band mask nor late start."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     torch.manual_seed(0)
     q, k, v = (torch.randn(1, 4, 256, 64, dtype=torch.float16) for _ in range(3))
     _backend, compiled, _graph, kernels = _stamp_window(_Causal(), (q, k, v), 64)
@@ -1215,7 +1208,6 @@ def test_warp_flash_vacuous_band_still_fuses(monkeypatch, W):
     ``seq 512 < window 1024`` trace deployed a sequential grid-1 softmax·P@V that ran for
     minutes). Expect: ONE fused flash kernel, causal stream end only (no banded start), plain
     causal numerics."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     torch.manual_seed(W)
     S = 256
     q, k, v = (torch.randn(1, 4, S, 64, dtype=torch.float16) for _ in range(3))
@@ -1239,7 +1231,6 @@ def test_warp_flash_banded_symbolic_matches_torch(monkeypatch, seq):
     """SYMBOLIC banded flash: the banded start is grid-derived (CTA row × W), independent of the
     runtime seq_len, so one cached kernel serves every size; the band FragmentMask composes with
     the symbolic tail clamp-masks."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     B, H, D, W = 1, 4, 64, 64
     sd = torch.export.Dim("seq_len", min=4, max=4096)
     seed = tuple(torch.randn(B, H, 16, D, dtype=torch.float16) for _ in range(3))
@@ -1262,7 +1253,6 @@ def test_warp_flash_banded_split_kv_matches_torch(monkeypatch):
     """Banded flash × split-KV (``REDUCE=g2k``): each slice's banded start is slice-local (the
     base subtracted) — a slice wholly below the band runs zero steps and contributes the exact
     carrier identity, mirroring the causal above-the-diagonal case."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
     torch.manual_seed(7)
     W = 64
@@ -1285,7 +1275,6 @@ def test_warp_flash_banded_with_additive_bias_matches_torch(monkeypatch):
     loaded (it may mask more than the band — padding), the coord Selects ride beside it and
     drive both stream bounds; the fused kernel carries FragmentBiasAdd AND both FragmentMasks.
     The bias here masks an extra key block the band alone would keep — the result must honor it."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     torch.manual_seed(3)
     S, W = 256, 64
     q, k, v = (torch.randn(1, 4, S, 64, dtype=torch.float16) for _ in range(3))
@@ -1315,7 +1304,6 @@ def test_warp_flash_causal_stamp_with_bias_matches_torch(monkeypatch):
     """The full-attention layer's whole-model shape: an explicit causal bias operand plus the
     ``is_causal`` stamp alone (no window). The stamp's coord Select rides beside the bias and
     derives the causal stream END through the otherwise-opaque operand."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     torch.manual_seed(5)
     S = 256
     q, k, v = (torch.randn(1, 4, S, 64, dtype=torch.float16) for _ in range(3))
@@ -1812,7 +1800,6 @@ def test_warp_flash_f32_value_operand_converts(monkeypatch):
     atom-dtype operand and the pinned cp.async ring RESOLVES (the pre-split behavior fused
     the cast into the flash load, and the f32 buffer declined every staged row —
     gmem-direct forever, the gemma layer-0 lockout)."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w2x1/f1x4/k4")
     monkeypatch.setenv("EMMY_STAGE", "d2/cp/ring")  # resolves: the split-out cast feeds f16 V
     monkeypatch.setenv("EMMY_WSPEC", "")
@@ -1865,7 +1852,6 @@ def test_warp_flash_explicit_additive_mask_matches_torch(monkeypatch, stage):
     absolute coordinates and adds it before the softmax merge — instead of demoting the whole
     kernel to the scalar tier (the gemma-4 seq>window regression: every layer's attention went
     scalar and hung). Banded (sliding-window) mask; composes with the K/V staging forms."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w2x1/f1x4/k4")
     monkeypatch.setenv("EMMY_WSPEC", "")
     if stage:

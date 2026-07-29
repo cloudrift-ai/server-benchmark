@@ -183,9 +183,7 @@ class Candidate:
         structural decomposition — ``tile/010_split_demoted``'s split)
         stamps the consumed root op as each fragment kernel's
         ``source``, so the chain also records *which op a decomposition
-        came from*: the two-level tuner groups a terminal's kernels by
-        that ancestor to emit composed Σ training rows for the prior
-        (``two_level._decomposition_rows``). Knobs are NOT merged
+        came from*. Knobs are NOT merged
         forward on this path — fragment kernels carry their own
         restamped structural features."""
         self._log_apply(match, option)
@@ -285,15 +283,9 @@ class LazyCandidate:
         ``try_rewrite``'s filter) is lifted into an :class:`OptionFork`
         leaf — an ``Op``'s knob delta rides along as the fork's ``knobs``."""
         if not isinstance(option, Fork):
-            if isinstance(option, Op):
-                knobs = dict(getattr(option, "knobs", None) or {})
-            else:
-                # A ``Graph`` option is a structural decomposition (the cut's
-                # producer+consumer): the graph itself has no knobs, but its
-                # kernels carry the ``CUT`` decision. Surface it so the prior can
-                # rank the split branch — without this the cut scores as a
-                # knob-less generic row and the outer PUCT never prefers it.
-                knobs = _graph_decision_knobs(option)
+            # A ``Graph`` option is a structural decomposition (a multi-kernel rewrite): the
+            # graph itself carries no knobs, so it scores as a knob-less generic row.
+            knobs = dict(getattr(option, "knobs", None) or {}) if isinstance(option, Op) else {}
             option = OptionFork(option=option, knobs=knobs)
         return cls(inner=inner, cursor=cursor, pending=(match, option))
 
@@ -367,20 +359,6 @@ class LazyCandidate:
 # routed to ``pipeline.dump.on_rule`` when a dump sink is set).
 # Module-private helpers used only by :meth:`Candidate._log_apply`.
 # ---------------------------------------------------------------------------
-
-
-def _graph_decision_knobs(graph: Graph) -> dict:
-    """The structural-decision knobs (``PLACE@cone``) carried by a ``Graph`` option's
-    kernels — the cut's producer/consumer stamp the decision; the graph itself
-    has none. Lets the outer prior rank a structural decomposition option (else
-    it scores as a knob-less generic row, never preferred)."""
-    from emmy.compiler.pipeline.search.keys import structural_decision_delta  # noqa: PLC0415
-
-    for node in graph.nodes.values():
-        hit = structural_decision_delta(getattr(node.op, "knobs", None) or {})
-        if hit:
-            return hit
-    return {}
 
 
 def _format_rule_application(name: str, graph: Graph, match: Match, fragment: Graph, *, pass_name: str | None = None) -> str:

@@ -389,24 +389,20 @@ class RmsNormGoldenConfig(GoldenConfig):
 
 @dataclass(frozen=True, kw_only=True)
 class LinearNormGoldenConfig(GoldenConfig):
-    """A whole-pair golden for the ROW-STAT SINK decision (``PLACE@stat`` —
-    ``025_sink_row_reduce``): ``F.linear(x, w)`` + a trailing ``F.rms_norm`` (+ residual add for
-    the post-attn form), the producer→norm pair whose statistic can migrate into the producer's
-    epilogue. The snippet builds the PAIR so a seeding A/B measures the sink's true e2e effect
-    (producer epilogue + memset + the norm dropping to a wide pointwise sweep).
+    """A whole-pair golden for the producer→norm pair: ``F.linear(x, w)`` + a trailing
+    ``F.rms_norm`` (+ residual add for the post-attn form). The snippet builds the PAIR so a
+    seeding A/B measures the pair's true e2e cost, not the norm sweep alone.
 
     The recorded row lives at the NORM's fork (``shape_key`` mirrors
-    :class:`RmsNormGoldenConfig` — ``kind="rms_norm"``, free ``M·K``, reduce ``K``) and records
-    ``knobs: {PLACE@stat: 'sink'}`` alone (the cut convention: the realizer re-emits the sweep,
-    so the representative row's own schedule is discarded). Two ordering facts make per-site
-    selection work with no re-anchoring: ``_golden_matches_row`` REFUSES a ``PLACE``-bearing
-    golden at a fork whose rows never offered the element (an input-norm fork falls through to
-    the plain ``rms_norm`` coop anchor at the same key), and ``emmy_us`` records the fork's OWN
-    realized kernel (the ~1 µs post-sink sweep, NOT the pair total) so the sink row sorts ahead
-    of that coop anchor and is tried first exactly where the offer exists. ``cublas_us`` records
-    the LOCAL-stat baseline (the coop kernel the sink replaces), so ``ratio`` reads as the
-    per-kernel rescue. The pair-level e2e verdict that justifies seeding lives in the seeding
-    session's findings, not in the row."""
+    :class:`RmsNormGoldenConfig` — ``kind="rms_norm"``, free ``M·K``, reduce ``K``), which it
+    SHARES with the plain ``rms_norm`` anchors: a recorded entry here competes with them on the
+    ordinary fastest-first ordering, so seed one only when the pair form genuinely measures
+    faster at that key.
+
+    NOTE: this kind was introduced to record the row-statistic sink placement
+    (the retired ``PLACE`` knob's ``stat`` element). With that placement gone there is no
+    sink-vs-local decision left to record, and every shipped entry is commented out in the
+    golden YAMLs; the kind is kept for its snippet/keying, which the data samplers still use."""
 
     M: int
     K: int  # the norm width (= the linear's output N)
@@ -417,11 +413,6 @@ class LinearNormGoldenConfig(GoldenConfig):
 
     def __post_init__(self):
         self._require_dynamic_hint(self.M)
-        if self.knobs and "PLACE@stat" not in self.knobs:
-            raise ValueError(
-                f"linear_norm golden {self.name!r} must record the PLACE@stat placement — a stampless row would "
-                f"shadow the plain rms_norm anchors at the same ShapeKey"
-            )
 
     def dynamic_specs(self) -> list[str]:
         return ["seq_len@x:0"] if self.dynamic else []
@@ -451,8 +442,7 @@ class LinearNormGoldenConfig(GoldenConfig):
 def _require_cone_anchor(cfg) -> None:
     """Schema guard for the fused computed-A kinds (``NormLinearGoldenConfig`` /
     ``MlpGeGluGoldenConfig``): a RECORDED entry (non-empty knobs) must anchor itself to the cone
-    fork — a ``d*/sync`` STAGE (the compute-fill only a computed-A contraction offers) or the
-    explicit ``PLACE@cone: cut`` placement (guarded by ``_golden_matches_row``'s PLACE rule).
+    fork with a ``d*/sync`` STAGE — the compute-fill only a computed-A contraction offers.
     The deploy join's over-fire safety rests on "a fused golden's config can't realize on a
     plain gmem-A matmul"; an entry recorded with a gmem-direct STAGE plus plain warp tiles WOULD
     realize there, deploying a cross-family config with its foreign µs — enforce the data
@@ -461,12 +451,10 @@ def _require_cone_anchor(cfg) -> None:
     if not cfg.knobs:
         return
     knobs = {str(k): str(v) for k, v in cfg.knobs.items()}
-    if knobs.get("PLACE@cone") == "cut":
-        return
     if any(k.split("@", 1)[0] == "STAGE" and "sync" in v.split("/") for k, v in knobs.items()):
         return
     raise ValueError(
-        f"golden {cfg.name!r}: a fused computed-A entry must record a d*/sync STAGE or PLACE@cone: cut — "
+        f"golden {cfg.name!r}: a fused computed-A entry must record a d*/sync STAGE — "
         f"its config would otherwise realize on a plain gmem-A matmul fork of coincident extents "
         f"(cross-family deploy); got knobs {cfg.knobs!r}"
     )

@@ -272,7 +272,7 @@ def test_tune_path_never_routes_through_the_deploy_pick():
 # Stamp bases measured off the real traced ops (see test_shape_key_kinds): the flash op is a sweep
 # (S_loop_depth < n_free + n_reduce + n_sym) with exp + 3 free loops -> kind="flash"; RMSNorm sweeps
 # with rsqrt -> kind="rms_norm". Fork leaves captured off the live flash enumeration key
-# TILE@dd + TILE@pj (+ PLACE@fold / REDUCE@kv / STAGE@kv) for BOTH the static and masked forms.
+# TILE@dd + TILE@pj (+ REDUCE@kv / STAGE@kv) for BOTH the static and masked forms.
 
 from emmy.compiler.pipeline.search.golden import AttentionGoldenConfig, RmsNormGoldenConfig  # noqa: E402
 
@@ -319,7 +319,7 @@ _PJ_FM = "a:mma_m16n8k16_f16_f16/w4x1/f1x32"
 
 
 def _flash_row(dd, pj, stage="d2/cp/ring", base=None):
-    return {**(base or _FLASH_SIG), "PLACE@fold": "fuse", "TILE@dd": dd, "TILE@pj": pj, "REDUCE@kv": "", "STAGE@kv": stage}
+    return {**(base or _FLASH_SIG), "TILE@dd": dd, "TILE@pj": pj, "REDUCE@kv": "", "STAGE@kv": stage}
 
 
 def _attention(name="gemma4_12b.attention.hd256", knobs=None, us=44.3, *, dynamic=False):
@@ -360,7 +360,7 @@ def test_attention_dynM_bare_plan_golden_matches_axis_keyed_leaves(monkeypatch):
         name="attention.hd256.dynM",
         dynamic=True,
         us=40.4,
-        knobs={"PLACE": "fuse", "TILE": "a:mma_m16n8k16_f16/w4x1/f1x2/k16", "STAGE": "d2/cp/ring"},
+        knobs={"TILE": "a:mma_m16n8k16_f16/w4x1/f1x2/k16", "STAGE": "d2/cp/ring"},
     )
     index = _index(monkeypatch, [gold])
     rows = [

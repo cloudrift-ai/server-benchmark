@@ -91,26 +91,6 @@ def is_warp(knobs: dict) -> bool:
     return mma_atom(knobs) is not None
 
 
-def _cut_features(knobs: dict) -> dict[str, float]:
-    """The engineered ``D_*`` edge-cost feature for the demoted-matmul cut (the ``PLACE@cone``
-    placement). A cut materializes the demoted operand cone to a **gmem intermediate** — a
-    round-trip the fused keep avoids — so the prior needs the materialized volume to price the
-    cut's Σ vs. keep's. ``D_cut_roundtrip`` is the cost axis that discriminates the two
-    realizations of one decision: positive on a cut fragment (``PLACE@cone=cut``), **zero on the
-    fused keep** (``fuse``) and absent on a never-offered kernel (no ``PLACE@cone`` key → the
-    prior's NaN "not considered").
-
-    Coarse like the rest of the ``D_*`` family — sized from the ``S_ext_free_prod``
-    product the structural vocabulary carries (a cut producer's free output IS the
-    materialized intermediate). Precise per-operand intermediate bytes (split from
-    the consumer's own M·N output) and the cross-kernel ``D_cone_fanout`` /
-    ``D_recompute_flops`` terms need per-operand shape stamping the coarse
-    ``S_ext_*`` skeleton lacks — the deferred §3 follow-up."""
-    cut = 1 if str(knobs.get("PLACE@cone", "")) == "cut" else 0  # the materialize-to-gmem decision
-    free = float(knobs.get("S_ext_free_prod", 0.0) or 0.0)
-    return {"D_cut_roundtrip": math.log2(free) if (cut and free > 1.0) else 0.0}
-
-
 def _stage_features(knobs: dict) -> dict[str, float]:
     """Engineered ``D_*`` features for the operand-staging decision (the ``STAGE`` codec
     ``d<depth>/sync|cp|tma[/ring]``). The prior prices the smem pipeline: a deeper / async
@@ -181,14 +161,13 @@ def _node_axes(knobs: dict) -> list[str | None]:
 
 def _node_slice(knobs: dict, axis: str | None) -> dict:
     """The single-node ``knobs`` sub-dict the geometry featurizers see for the node keyed ``axis``:
-    that node's ``FAMILY@<axis>`` schedule codecs plus the shared ``S_*`` / ``H_*`` / ``PLACE`` context,
+    that node's ``FAMILY@<axis>`` schedule codecs plus the shared ``S_*`` / ``H_*`` context,
     with any addressed per-node structural feature (``S_ext_reduce_prod@<axis>``) substituted in bare so
     ``_geom_feats`` reads the node's own extents. ``axis is None`` (the bare single node) returns
     ``knobs`` unchanged — the whole dict is that one node (byte-identical to the pre-loop featurizer)."""
     if axis is None:
         return knobs
-    # The shared structural / regime context (bare ``S_*`` / ``H_*``); ``PLACE@cone`` is a root-global
-    # cut cost read once in :func:`knob_features`, not per node, so it stays out of the slice.
+    # The shared structural / regime context (bare ``S_*`` / ``H_*``).
     sub: dict = {k: v for k, v in knobs.items() if k.startswith((STRUCT_PREFIX, CTX_PREFIX)) and "@" not in k}
     for fam in _AXIS_FAMILIES:
         key = f"{fam}@{axis}"
@@ -305,13 +284,6 @@ def knob_features(knobs: dict) -> dict[str, float]:
         for name, val in _schedule_node_features(_node_slice(knobs, axis)).items():
             feats[name] = feats.get(name, 0.0) + val
     feats.setdefault("MMA_tier", 0.0)  # scalar tier / no schedule node = no warp atom
-    if "PLACE@cone" in knobs:  # the demoted-matmul cut's round-trip cost axis (only at offer sites)
-        feats.update(_cut_features(knobs))
-    if "PLACE@fold" in knobs:  # the downstream-fold placement (flash fuse vs multi-kernel attention)
-        # Present only at offer sites (absent = the prior's "not considered"). The cut's
-        # materialized-score volume / fused-carrier-width terms need per-operand shape stamping
-        # the coarse S_ext_* skeleton lacks — the same deferral as the cone's precise terms.
-        feats["D_fold_cut"] = 1.0 if str(knobs["PLACE@fold"]) == "cut" else 0.0
     return feats
 
 
@@ -564,9 +536,8 @@ def _geom_feats(
         # had only penalties (``D_splitk_le2`` / ``D_splitk_excess``), never a reward when justified.
         out["D_splitk_deficit"] = math.log2(max(needed / max(float(splitk), 1.0), 1.0))
         # The deferred split-K finalize (``g<w>k``) writes + re-reads a full free-size partial
-        # workspace and launches the combine kernel — the same round-trip volume axis
-        # ``D_cut_roundtrip`` prices for the demoted-cone cut, un-priced here until now (the
-        # in-place atomic ``g<w>a`` finalize pays no workspace).
+        # workspace and launches the combine kernel — a round-trip volume the in-place atomic
+        # ``g<w>a`` finalize does not pay.
         out["D_splitk_roundtrip"] = l2(free_prod) if out["D_finalize_kernel"] else 0.0
         # Register-tile intensity × occupancy interaction: a wide per-thread
         # register tile (big FM·FN) is a win only while the grid still covers

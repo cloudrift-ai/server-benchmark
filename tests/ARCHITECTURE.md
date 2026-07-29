@@ -9,6 +9,7 @@ All tests use **pytest** with **pytest-asyncio** (`asyncio_mode = "auto"` in `py
 ```
 tests/
 ├── conftest.py              # shared fixtures
+├── xfail_registry.py        # the known-failing registry (node id → reason), applied at collection
 ├── test_detect.py               # emmy.detect (GPU detection via PCI sysfs)
 ├── test_hardware.py         # emmy.hardware (top-level module)
 ├── test_redact.py           # emmy.redact (secret redaction)
@@ -188,6 +189,13 @@ CLI tests use the **`run_cli` fixture** (a subprocess wrapper) and **`make_bench
 - **Plain functions** — no test classes; tests are grouped by file and separated with comment headers.
 - **Assertions on stdout** — dry-run tests verify that the correct commands and messages appear in the expected order.
 - **Mirror source layout** — test directories match `emmy/` subdirectories (e.g. `tests/deploy/` ↔ `emmy/deploy/`).
+- **Known-failing tests go in the registry, not inline `@pytest.mark.xfail`.** When a behavior is deliberately
+  removed and its tests are kept (so restoring the feature restores their coverage), list their node ids in
+  `tests/xfail_registry.py` with a reason; the root `conftest.py` applies the marks at collection. One file
+  answers "what is knowingly not covered right now, and why". Entries are `strict` by default — an unexpected
+  PASS fails, forcing the entry to be deleted when the behavior returns — with `strict=False` reserved for a
+  test that still passes but only **vacuously** (its subject is gone, so its assertions prove nothing).
+  Deleting a test instead is right when the behavior is gone for good; the registry is for the in-between.
 
 ## Running
 

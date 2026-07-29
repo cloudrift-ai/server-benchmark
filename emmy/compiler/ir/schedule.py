@@ -594,8 +594,8 @@ _WARP_SCHEMA = Schema(
 #: scalar output tile, symmetric with the warp form's ``a:<atom>``. ``a:scalar`` names the scalar atom
 #: (:data:`~emmy.compiler.ir.atom.SCALAR_ATOM`'s name); ``a:none`` is an alias. **Pin vocabulary only**
 #: — a producer never emits these: :meth:`TilePlan.parse` normalizes them to the canonical scalar
-#: spelling (``""`` / ``n../f..``), so the alias never rides a stored knob dict (mirrors ``PLACE``'s
-#: ``auto`` token). Lets a pin force the scalar tier explicitly instead of the invisible empty string.
+#: spelling (``""`` / ``n../f..``), so the alias never rides a stored knob dict. Lets a pin force the
+#: scalar tier explicitly instead of the invisible empty string.
 _SCALAR_ATOM_ALIASES = frozenset({"a:scalar", "a:none"})
 
 

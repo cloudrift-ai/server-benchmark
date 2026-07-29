@@ -70,10 +70,10 @@ score per element, ``kv ≤ m`` else −inf; the warp tier additionally tile-ski
 ``_twist`` bounds the stream at the CTA's last query row off that ``Select``'s
 shape), an optional broadcast additive mask (the HF ``(1,1,S,S)`` float bias),
 and GQA (``q_heads == group · kv_heads``; the K/V head axis read at ``head //
-group`` directly, no materialized broadcast). Fusion is the ``PLACE@fold`` placement
-(default ``fuse``; ``cut`` is the multi-kernel attention escape — gated in
-``010_recognize``, before :func:`try_flash` is even tried); the two-level ``OptionFork``
-offer + ``OfflinePrior`` cold-start are a follow-up.
+group`` directly, no materialized broadcast). Fusion is unconditional — a recognized,
+certifiable pair always fuses; an uncertifiable one falls back to the separate score
+producer + softmax-then-P@V kernels. The two-level ``OptionFork`` offer +
+``OfflinePrior`` cold-start are a follow-up.
 """
 
 from __future__ import annotations
@@ -286,12 +286,9 @@ def build_flash_frag(
     )
     # The free axes are the schedule's, carried on the ``TileOp`` with an UNMAPPED grid —
     # like every other recognizer; ``_schedule`` (inside ``010_recognize``) maps ``free`` onto the grid.
-    # ``PLACE@fold=fuse`` is the RESOLVED downstream-fold placement this fragment realizes (the fused
-    # flash kernel vs the cut's separate score + softmax-P@V kernels) — root-global, ridden through
-    # scheduling on ``knobs`` so the DB row / featurizer sees the structural decision. The
-    # ``S_ext_*`` skeleton rides alongside (:func:`_struct_features` — the fused fragment never
-    # passes the loop-dialect stamp) so the prior can price the flash forms' occupancy.
-    knobs = {"PLACE@fold": "fuse", **_struct_features(batch, s_q_dim, s_k_dim, head_dim, d_v)}
+    # The ``S_ext_*`` skeleton rides on ``knobs`` (:func:`_struct_features` — the fused fragment
+    # never passes the loop-dialect stamp) so the prior can price the flash forms' occupancy.
+    knobs = dict(_struct_features(batch, s_q_dim, s_k_dim, head_dim, d_v))
     tile = TileOp(op=flash_op, place=Placement(free=grid), knobs=knobs)
 
     frag = Graph()
@@ -929,24 +926,11 @@ def _recognize(graph: Graph, node: Node) -> tuple[str, str, bool, int | None, st
     return x_buf, v_buf, causal, window, mask_buf
 
 
-def is_fold_offer_site(graph: Graph, root: Node) -> bool:
-    """True iff ``root`` is a softmax-then-P@V consumer — the kernel where the ``PLACE@fold``
-    decision (fuse into flash vs keep the score producer separate) is offered. Purely structural
-    (:func:`_recognize` on ``root``'s own body), independent of whether the producer is still a
-    ``LoopOp`` or the fused form is certifiable — an offer site that did NOT fuse (pin-forced or
-    degraded) stamps the resolved ``cut``."""
-    return _recognize(graph, root) is not None
-
-
 def _fuse_degraded(root: Node, reason: str) -> None:
     """A softmax-then-P@V kernel was recognized but cannot be certified for the fused flash
-    form — the fuse degrades to cut (the un-fused tiers). Loud only under an explicit
-    ``PLACE@fold=fuse`` pin (the standard pin-validity rule); silent for the ``auto``
-    default, where most kernels legitimately decline."""
-    from emmy.compiler.pipeline.search.space import PLACE  # noqa: PLC0415
-
-    if PLACE.narrow_at("fold") == "fuse":
-        logger.warning("PLACE@fold=fuse: flash fuse of %r not certifiable (%s); degrading to cut", root.id, reason)
+    form — it falls back to the un-fused tiers (a separate score producer + softmax-then-P@V).
+    Debug-only: most kernels legitimately decline."""
+    logger.debug("flash fuse of %r not certifiable (%s); keeping the un-fused kernels", root.id, reason)
 
 
 def _extract_v_layout(root: Node, v_buf: str) -> tuple[int, int] | None:
@@ -1070,15 +1054,10 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
 def fused_producer_ids(graph: Graph, root: Node) -> tuple[str, ...]:
     """The producer node ids a flash fusion of ``root`` would CONSUME — the score ``LoopOp``
     absent from the fused fragment — or ``()`` (``root`` is not a fusable softmax-then-P@V
-    consumer, or the ``PLACE@fold`` pin forces the cut). The two-level tuner's slicing reads
-    this: the inner per-op slice for ``root`` must carry the consumed producer as a REAL node
-    (not a synthetic input boundary), otherwise ``try_flash`` can never re-fuse inside the
-    slice and every tune trajectory silently degrades to the cut — the fused flash fork would
-    be unreachable under tune."""
-    from emmy.compiler.pipeline.search.space import place_decision  # noqa: PLC0415
-
-    if place_decision("fold") != "fuse":
-        return ()
+    consumer). The two-level tuner's slicing reads this: the inner per-op slice for ``root``
+    must carry the consumed producer as a REAL node (not a synthetic input boundary), otherwise
+    ``try_flash`` can never re-fuse inside the slice and every tune trajectory silently loses the
+    fused flash form."""
     frag = try_flash(graph, root)
     if frag is None:
         return ()

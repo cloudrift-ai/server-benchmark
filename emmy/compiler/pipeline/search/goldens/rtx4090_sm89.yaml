@@ -524,7 +524,7 @@ configs:
     head_dim: 64
     dtype: 'fp16'
     causal: false
-    knobs: {PLACE: 'fuse', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', STAGE: 'd2/cp/ring'}
+    knobs: {'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 10.6
     cublas_us: 10.0
   # FAST_MATH-lane pair (2026-07-14, 3x reproduced): the f16acc-PV sibling beats the std golden
@@ -538,7 +538,7 @@ configs:
     head_dim: 64
     dtype: 'fp16'
     causal: false
-    knobs: {PLACE: 'fuse', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x8/k8', STAGE: 'd2/cp/ring'}
+    knobs: {'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x8/k8', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 9.6
     cublas_us: 10.0
   - kernel: attention
@@ -548,7 +548,7 @@ configs:
     head_dim: 64
     dtype: 'fp16'
     causal: false
-    knobs: {PLACE: 'fuse', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x8/k8', STAGE: 'd1/cp/alt'}
+    knobs: {'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x8/k8', STAGE: 'd1/cp/alt'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 9.3
     cublas_us: 10.0
   - kernel: attention
@@ -558,7 +558,7 @@ configs:
     head_dim: 128
     dtype: 'fp16'
     causal: false
-    knobs: {PLACE: 'fuse', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', STAGE: 'd2/cp/ring'}
+    knobs: {'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 19.9
     cublas_us: 18.0
   # FAST_MATH-lane pair (2026-07-14, 3x reproduced): fm-alt 17.7 is the hd128 frontier on this card
@@ -573,7 +573,7 @@ configs:
     head_dim: 128
     dtype: 'fp16'
     causal: false
-    knobs: {PLACE: 'fuse', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x16/k4', STAGE: 'd2/cp/ring'}
+    knobs: {'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x16/k4', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 18.2
     cublas_us: 18.0
   - kernel: attention
@@ -583,7 +583,7 @@ configs:
     head_dim: 128
     dtype: 'fp16'
     causal: false
-    knobs: {PLACE: 'fuse', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x16/k4', STAGE: 'd1/cp/alt'}
+    knobs: {'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x16/k4', STAGE: 'd1/cp/alt'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 17.7
     cublas_us: 18.0
   - kernel: attention
@@ -594,7 +594,7 @@ configs:
     dtype: 'fp16'
     causal: false
     dynamic: true
-    knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', STAGE: 'd2/cp/ring'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 10.7
     cublas_us: 11.0
   - kernel: attention
@@ -605,7 +605,7 @@ configs:
     dtype: 'fp16'
     causal: false
     dynamic: true
-    knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', STAGE: 'd2/cp/ring'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 20.3
     cublas_us: 19.0
   # FAST_MATH-lane pair on the symbolic twin (2026-07-14 — the alternating pipeline now resolves on
@@ -619,7 +619,7 @@ configs:
     dtype: 'fp16'
     causal: false
     dynamic: true
-    knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f1x16/k4', STAGE: 'd2/cp/ring'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f1x16/k4', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 18.6
     cublas_us: 19.0
   - kernel: attention
@@ -630,7 +630,7 @@ configs:
     dtype: 'fp16'
     causal: false
     dynamic: true
-    knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f1x16/k4', STAGE: 'd1/cp/alt'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f1x16/k4', STAGE: 'd1/cp/alt'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 18.1
     cublas_us: 19.0
   # Values re-measured 2026-07-13 after the causal tile-skip (3x reproduced): nt=2 44.1 → 40.4, and
@@ -644,7 +644,7 @@ configs:
     dtype: 'fp16'
     causal: true
     dynamic: true
-    knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16/w4x1/f1x2/k16', STAGE: 'd2/cp/ring'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16/w4x1/f1x2/k16', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 40.4
     cublas_us: 42.0
   - kernel: attention
@@ -655,7 +655,7 @@ configs:
     dtype: 'fp16'
     causal: true
     dynamic: true
-    knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16/w4x1/f1x4/k16', STAGE: 'd2/cp/ring'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16/w4x1/f1x4/k16', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 38.0
     cublas_us: 42.0
   - kernel: rms_norm

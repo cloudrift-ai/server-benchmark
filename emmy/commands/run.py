@@ -629,9 +629,8 @@ def _unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | No
     planner's own pick — the A/B then measures greedy-vs-greedy and reports a fake 1.00x
     while the recorded config never ran (the retired ``w2x1`` hd128 flash form). Check
     every pinned knob against the compiled graph's realized knobs: honored iff SOME
-    kernel carries a same-family key that satisfies the pin (``knob.pin_key_matches`` —
-    a bare ``PLACE``/``TILE`` golden spelling matches the axis-stamped ``PLACE@fold`` /
-    ``TILE@dd``) with an equal value (``knob.values_equal`` — registry-canonical, so
+    kernel carries a same-family key that satisfies the pin (``knob.pin_key_matches`` — a
+    bare ``TILE`` golden spelling matches the axis-stamped ``TILE@dd``) with an equal value (``knob.values_equal`` — registry-canonical, so
     alias spellings like ``FAST_EXP=1`` don't false-flag). Declared OFF values are
     "not applicable", never conflicts (``knob.is_off_value``). The any-kernel scan
     tolerates a split main+finalize pair where a knob applies to one kernel only — the
@@ -659,14 +658,6 @@ def _unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | No
             for key, got in raw.items():
                 if family_of(key) != fam:
                     continue
-                # The PLACE family carries several INDEPENDENT elements per kernel (``PLACE@cone``
-                # / ``PLACE@cstat`` / …): a sibling element's stamp is a different decision, not
-                # "what ran instead" of this pin — compare same-key only (``pin_key_matches``
-                # keeps the bare-pin ↔ element-keyed collapse). Schedule families keep the
-                # family-wide pool: their @-keys are one decision spelled per AXIS, and an axis
-                # the re-lowering renamed must still surface as the realized value, not (unset).
-                if fam == "PLACE" and not pin_key_matches(name, key):
-                    continue
                 if pin_key_matches(name, key) and values_equal(name, want, got):
                     hit = True
                 elif is_off_value(fam, got):
@@ -681,13 +672,6 @@ def _unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | No
             continue
         if not others and not saw_off and get(fam) is not None:
             continue  # registered family, no stamp anywhere — ungateable (see docstring)
-        if fam == "PLACE" and str(want) == "cut" and not others:
-            # A realized CUT leaves no ``PLACE@cone`` stamp: ``020_cut_edge`` rewrites the picked
-            # row into producer + consumer halves that ``010`` re-enters fresh (their kernels spell
-            # only the ordinary off-valued ``PLACE`` fill). Every NON-cut sibling of a cone fork
-            # stamps ``PLACE@cone=fuse`` on its rows, so a dropped pin that fell back to any fused /
-            # coop form surfaces in ``others`` and still flags; off-only evidence means the cut ran.
-            continue
         ran = "/".join(others) if others else ("(off)" if saw_off else "(unset)")
         misses.append(f"{name}={want} realized {ran}")
     return f"unreproducible pin: {'; '.join(misses)}" if misses else None

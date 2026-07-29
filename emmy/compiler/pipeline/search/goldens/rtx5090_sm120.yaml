@@ -486,7 +486,7 @@ configs:
     head_dim: 64
     dtype: 'fp16'
     causal: false
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, PLACE: 'fuse', STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', VECTORIZE_LOADS: true, WSPEC: ''}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', VECTORIZE_LOADS: true, WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 8.6
     cublas_us: 10.24
   # Fast-math sibling (FAST_MATH lane): the P·V contraction (TILE@pj) on the f16-accumulate atom;
@@ -501,7 +501,7 @@ configs:
     head_dim: 64
     dtype: 'fp16'
     causal: false
-    knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x8/k8', WSPEC: ''}
+    knobs: {STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x8/k8', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 7.2
     cublas_us: 10.24
   - kernel: attention
@@ -511,7 +511,7 @@ configs:
     head_dim: 128
     dtype: 'fp16'
     causal: false
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, PLACE: 'fuse', STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w2x1/f1x16/k4', VECTORIZE_LOADS: true, WSPEC: ''}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w2x1/f1x16/k4', VECTORIZE_LOADS: true, WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 16.5
     cublas_us: 18.42
   # The std-lane PRIMARY (2026-07-14, alternating staging): the same w2x1 geometry on d1/tma/alt —
@@ -524,7 +524,7 @@ configs:
     head_dim: 128
     dtype: 'fp16'
     causal: false
-    knobs: {PLACE: 'fuse', STAGE: 'd1/tma/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w2x1/f1x16/k4', WSPEC: ''}
+    knobs: {STAGE: 'd1/tma/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w2x1/f1x16/k4', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 15.7
     cublas_us: 18.42
   # Fast-math sibling (FAST_MATH lane): P·V on the f16-accumulate atom, QK^T stays f32-acc (softmax
@@ -539,7 +539,7 @@ configs:
     head_dim: 128
     dtype: 'fp16'
     causal: false
-    knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w2x1/f1x16/k4', WSPEC: ''}
+    knobs: {STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w2x1/f1x16/k4', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 14.6
     cublas_us: 18.42
   # The fm PRIMARY (2026-07-14): the fm sibling on d1/tma/alt — 1.36x vs torch SDPA, 3x reproduced.
@@ -550,7 +550,7 @@ configs:
     head_dim: 128
     dtype: 'fp16'
     causal: false
-    knobs: {PLACE: 'fuse', STAGE: 'd1/tma/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w2x1/f1x16/k4', WSPEC: ''}
+    knobs: {STAGE: 'd1/tma/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w2x1/f1x16/k4', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 13.5
     cublas_us: 18.42
   - kernel: attention
@@ -561,7 +561,7 @@ configs:
     dtype: 'fp16'
     causal: false
     dynamic: true
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, PLACE: 'fuse', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', VECTORIZE_LOADS: true, WSPEC: ''}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', VECTORIZE_LOADS: true, WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 8.6
     cublas_us: 10.23
   # Fast-math sibling (FAST_MATH lane): the masked-flash fm form — the bare TILE spells the
@@ -576,7 +576,7 @@ configs:
     dtype: 'fp16'
     causal: false
     dynamic: true
-    knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f1x8/k8', WSPEC: ''}
+    knobs: {STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f1x8/k8', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 7.5
     cublas_us: 10.23
   - kernel: attention
@@ -587,7 +587,7 @@ configs:
     dtype: 'fp16'
     causal: false
     dynamic: true
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, PLACE: 'fuse', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k8', VECTORIZE_LOADS: true, WSPEC: ''}
+    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k8', VECTORIZE_LOADS: true, WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 16.4
     cublas_us: 18.4
   # Fast-math sibling (FAST_MATH lane): masked-flash fm form (bare TILE = the f16-accumulate PV
@@ -601,7 +601,7 @@ configs:
     dtype: 'fp16'
     causal: false
     dynamic: true
-    knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f16/w2x1/f1x16/k4', WSPEC: ''}
+    knobs: {STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f16/w2x1/f1x16/k4', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 15.3
     cublas_us: 18.4
   # Symbolic-kv alt pair (2026-07-14): the alternating pipeline resolves on dynM and closes the gap
@@ -616,7 +616,7 @@ configs:
     dtype: 'fp16'
     causal: false
     dynamic: true
-    knobs: {PLACE: 'fuse', STAGE: 'd1/tma/alt', TILE: 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k8', WSPEC: ''}
+    knobs: {STAGE: 'd1/tma/alt', TILE: 'a:mma_m16n8k16_f16_f32/w2x1/f1x8/k8', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 16.0
     cublas_us: 18.4
   - kernel: attention
@@ -627,6 +627,6 @@ configs:
     dtype: 'fp16'
     causal: false
     dynamic: true
-    knobs: {PLACE: 'fuse', STAGE: 'd1/tma/alt', TILE: 'a:mma_m16n8k16_f16_f16/w2x1/f1x16/k4', WSPEC: ''}
+    knobs: {STAGE: 'd1/tma/alt', TILE: 'a:mma_m16n8k16_f16_f16/w2x1/f1x16/k4', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 13.5
     cublas_us: 18.4

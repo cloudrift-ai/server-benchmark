@@ -399,9 +399,7 @@ def _db_measured_pick(index: dict[frozenset, list[tuple[dict, float, bool]]], ro
             groups_memo[sig] = _sig_groups(index, sig)
         for measured in groups_memo[sig]:
             for row_tun, us, deployable in measured:
-                # Value-of-position join, except the cut placement: a pre-cut row (no
-                # ``PLACE@cone`` key) measured the fused twin and must not vouch for the
-                # knob-identical cut candidate (``evidence_row_vouches``).
+                # Value-of-position join (``evidence_row_vouches``).
                 if not evidence_row_vouches(cand_tun, row_tun):
                     continue
                 if deployable:
@@ -494,33 +492,12 @@ def _golden_matches_row(golden_knobs: dict, row: dict) -> bool:
         fam = family_of(gk)
         hits = [(rk, rv) for rk, rv in row.items() if not rk.startswith(("S_", "H_")) and family_of(rk) == fam and pin_key_matches(gk, rk)]
         if not hits:
-            # A STRUCTURAL placement is the one family where "undecided" cannot mean free. Every
-            # other family is a schedule knob a later pass fills in, so an absent key legitimately
-            # reads as "any realization will do". ``PLACE`` instead names which KERNELS exist, and a
-            # fork that never offered the decision can never realize it — the golden's structure
-            # simply is not on the table there. Treating it as free is a silent WRONG deploy: the
-            # gemma-4 norm→qkv cones fork PRE-split (no ``PLACE@cone`` on any of their 13k rows) yet
-            # ``_fork_shape_key`` rebuilds their key to ``kind="fused"``, so they share a ShapeKey
-            # with genuine post-split cones — a ``PLACE@cone: cut`` golden matched them as free and
-            # deployed the bare map form at 1244 µs while reporting the cut's 54.4 µs (5.3x
-            # regression on the prefill half). Refusing the match turns that into a loud drift
-            # warning and a fall-through to the normal hierarchy.
-            if fam == "PLACE":
-                return False
             continue  # family not decided at this fork — free
         matched = [values_equal(rk, gv, rv) for rk, rv in hits]
         if "@" in gk:  # axis-keyed: names exactly one realization — all-or-nothing
             if not all(matched):
                 return False
         elif not any(matched):  # bare: one plan, satisfied by any same-family realization
-            return False
-    # The symmetric PLACE clause: a golden that does NOT name a kernel-set-changing placement
-    # measured the un-restructured form, so it must not vouch for a row carrying the CHANGING
-    # value — the ``fuse``-mirror finalize row is knob-identical to its base and would win the
-    # content tie-break on a keyless golden, deploying a kernel set the golden never measured
-    # (the ``evidence_row_vouches`` principle applied to the golden tier).
-    for k, changing in (("PLACE@cone", "cut"), ("PLACE@stat", "sink"), ("PLACE@fin", "fuse"), ("PLACE@cstat", "fuse")):
-        if k not in golden_knobs and str(row.get(k)) == changing:
             return False
     return True
 
@@ -827,23 +804,9 @@ def greedy_decide(
         if golden_state[0] is None:
             golden_state[0] = _golden_evidence_index(fp.ctx)
         got = _golden_pick(golden_state[0], rows, fp.node_id) if golden_state[0] else None
-        # A row that changes the KERNEL SET (``PLACE@cone=cut`` — realized by
-        # ``020_cut_edge`` into producer + N consumers) is offered to the EVIDENCE tiers above
-        # but withheld from the model fallback below: the per-op prior scores one kernel's knob
-        # row, so its number for a row that becomes several kernels is meaningless, and the cut
-        # row is knob-identical to its fused twin — it ties on score and can win the content
-        # tie-break on nothing. Cold that is actively dangerous: a cut whose consumers have no
-        # golden deploys them on a scalar tile (36 ms on the gemma-4 M=256 q cone). So the cut
-        # can only ever win where it was actually MEASURED to, which is the same principle the
-        # structural-pricing gate encodes, applied at row level. ``PLACE@stat=sink``
-        # (``025_sink_row_reduce`` — the producer gains an epilogue, the norm re-emits as a
-        # sweep) changes the kernel set the same way and is withheld identically.
-        restructured = (("PLACE@cone", "cut"), ("PLACE@stat", "sink"), ("PLACE@fin", "fuse"), ("PLACE@cstat", "fuse"))
-        model_rows = [i for i, r in enumerate(rows) if all(r.get(k) != v for k, v in restructured)] or list(range(len(rows)))
 
         def _model_pick(rank) -> tuple[int, float]:
-            j, p = rank([rows[i] for i in model_rows])
-            return model_rows[j], p
+            return rank(rows)
 
         picker = getattr(the_prior, "pick", None)
         if picker is not None:

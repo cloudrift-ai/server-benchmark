@@ -99,7 +99,6 @@ def test_stage_pin_does_not_bypass_keyed_tile_pins(monkeypatch):
     )
     g = d["graph"] if isinstance(d, dict) else d
     pins = {
-        "PLACE": "fuse",
         "TILE@dd": "a:mma_m16n8k16_f16_f32/w2x1/f1x8/k4",
         "TILE@pj": "a:mma_m16n8k16_f16_f32/w2x1/f1x8/k4",
         "STAGE": "d2/cp/ring",

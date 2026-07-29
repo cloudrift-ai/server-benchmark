@@ -45,7 +45,7 @@ Terms used throughout:
 | `pipeline.py` | Engine core: `Pattern` / `Match` / `Rule` / `Pass` / `Pipeline` (the frozen pass layout) plus `Run` — the per-run state and engine loop. |
 | `fork.py` | The `Fork` interface (`OptionFork`, `ThunkFork`) and the reusable `Level` + `build_fork_tree` lazy knob-cartesian tree builder. |
 | `knob.py` | The `Knob` descriptor system and the `EMMY_<KNOB>` env namespace (borrowing `config.knob_var` / `config.knob_raw`; `format_tuning_knobs` renders the real tuning knobs for `tune` output). Holds NO concrete knob declarations. |
-| `search/space.py` | **The single home of the search space.** Every `Knob` instance is declared here and nowhere else — the schedule codecs (`REDUCE` / `TILE` / `STAGE` / `WSPEC` / `RASTER`), the pin-only structural `PLACE`, the kernel-lowering policy knobs (`VECTORIZE_LOADS` / `INTERLEAVE_LOADS`), and the enumeration value grids (`scalar_tile_moves` & co). A rule that decides a knob imports it from here; registration is construction (`Knob.__post_init__`), and `knob.registry()` imports `space.py` before answering, so the registry is complete in any process. |
+| `search/space.py` | **The single home of the search space.** Every `Knob` instance is declared here and nowhere else — the schedule codecs (`REDUCE` / `TILE` / `STAGE` / `WSPEC` / `RASTER`), the kernel-lowering policy knobs (`VECTORIZE_LOADS` / `INTERLEAVE_LOADS`), and the enumeration value grids (`scalar_tile_moves` & co). A rule that decides a knob imports it from here; `knob.registry()` still discovers knobs by walking loaded modules (`space.py` loads at pipeline startup via those rules). |
 | `search/features.py` | The featurizers (`knob_features`, `tile_signature`, the `D_*` / `MMA_*` encodings) — kept beside `space.py` so the whole space (dimensions × values × encoding) is analyzable in one package. |
 | `search/db.py` | `SearchDB`, the persistent SQLite store (see Part 6, "Search persistence"). |
 | `search/policy/mcts.py` | The in-memory MCTS (`SearchTree`) colocated with its only reader, `TuningSearch`. |
@@ -249,7 +249,7 @@ the computed-A norm→linear cone is likewise recognized at the deploy fork from
 the mandatory compute-fill only a computed-A contraction enumerates (the catalog spells only gmem-direct/cp/tma) —
 since its PRE-SPLIT fork carries only one reduce axis with the rsqrt still buried in the A sub-body, so the histogram
 misreads it as a plain scalar matmul; it is rebuilt to the fused key so the norm→qkv cones join their goldens at cold
-deploy, and a fused golden is schema-required to record a `d*/sync` STAGE or `PLACE@cone: cut` so its config can
+deploy, and a fused golden is schema-required to record a `d*/sync` STAGE so its config can
 never realize on a plain gmem-A matmul fork of coincident extents)
 and picks the offered candidate prefix-consistent with the fastest recorded entry — keys and values compare through
 the A/B pin gate's canonical matching. An axis-keyed golden key (a static attention golden's `TILE@dd` + `TILE@pj`)
@@ -796,8 +796,8 @@ live), and off-GPU the full union is returned (pure-logic tests).
    the pin's name (a misspelled hd256 flash pin was read as a form refusal this way). The check runs right after the
    pinned compile: a pin matching no realized knob marks the row `pin_unmatched` / `unreproducible pin … NOT benched`
    (loud error log, row kept in the table and `--json`, zero GPU time spent), and the remaining rows still run.
-   Matching is family-aware — a bare golden spelling like `PLACE: fuse` matches its axis-stamped
-   `PLACE@fold` realization — and values compare through the registered knob's canonical `Knob.parse`, so alias
+   Matching is family-aware — a bare golden spelling like `TILE: …` matches its axis-stamped
+   `TILE@dd` realization — and values compare through the registered knob's canonical `Knob.parse`, so alias
    spellings like `FAST_EXP=1` don't false-flag. A pin satisfied by ANY kernel counts as honored, which tolerates
    split main+finalize pairs but means a pin dropped on its target kernel that a sibling coincidentally matches passes
    undetected.
@@ -994,7 +994,7 @@ sub-tile + K-chunk), never both. The value self-discriminates: an `a:<atom>` tok
 tensor-core-atom `TilePlan`; `schedule.is_warp_codec`), otherwise the scalar `TilePlan`. Empty = per-cell. A pin may
 spell the scalar tier explicitly as `a:scalar` (alias `a:none`) — the one `a:`-prefixed value that is *not* warp;
 pin-input vocabulary only, normalized back to the canonical scalar spelling (`""` / `n../f..`) so it never rides a
-stored knob (mirrors `PLACE`'s `auto`).
+stored knob.
 
 **`REDUCE`** (STR codec, `010_recognize` / `_schedule`) — the reduce-axis partition codec `g<n>[a|k]/b<n>/r<n>`: `g`
 cross-CTA split-K (+ finalize letter), `b` cooperative-thread fold, `r` ILP register fold. Empty = serial (the
@@ -1047,20 +1047,6 @@ no per-CTA work, layout, or schedule — only the block-id decode (`ir/kernel` `
 `grid_tile` eligibility). Enumerated `('', 'gm8')` on 2-D contraction rows; wall-time effect is small and
 shape-dependent (±2–4% measured), so the search/goldens arbitrate per shape.
 
-**`PLACE`** (STR, pin-only, `010_recognize`) — structural placement of an intermediate edge: `auto` | `fuse` | `cut`,
-per edge-class element — `PLACE@cone` (producer-cone inlining), `PLACE@fold` (flash vs separate softmax + P@V
-kernels), `PLACE@tuple` (online softmax vs two-pass stats), `PLACE@stat` (`fuse` | `sink` — a norm's row statistic
-staying local vs migrating into its producer kernel's epilogue as a `RowAccum` row fold over a `__sq` aux buffer;
-realized by `lowering/tile/025_sink_row_reduce`, which also re-emits the norm as an un-mapped wide sweep). Precedence
-`PLACE@<element>` > bare `PLACE` > built-in `auto` (today: fuse everywhere). `auto` is pin vocabulary only — the
-stamped value is the *resolved* `fuse`/`cut`/`sink`, stamped for `fold`/`cone`/`stat` only (`tuple` is dominance —
-never stamped, never enumerated). A forced `fuse` on an uncertifiable kernel (RoPE'd QK) degrades to `cut` with a log
-line; a `sink` whose producer turns out ineligible (an atomic split-K partial, an mma epilogue, a graph input)
-degrades to the picked row's own local-stat schedule. Since `@` is not a valid shell var character, per-element pins
-ride `EMMY_KNOBS` (e.g. `EMMY_KNOBS="PLACE@fold=cut"`); bare `EMMY_PLACE` pins every eligible edge. Never enumerated
-as a search dimension — but `stat`'s `sink` rows are offered as evidence-only fork SIBLINGS (mirroring every local
-row), selectable by a recorded golden exactly like `PLACE@cone: cut`.
-
 **`S_*`** (FLOAT, `loop/stamp/020_stamp_structural_features`) — the LoopOp's structural features (stmt/op histogram +
 loop extents + operand dtypes). Not tunable — identity facts that make a knob dict a complete variant identity (the
 online prior's feature vector). Skipped by `format_tuning_knobs`.
@@ -1077,7 +1063,7 @@ identified by what it enables: `FAST_EXP`'s stamped BOOL, the `TILE` atom token)
 
 A per-node schedule codec is stored keyed `FAMILY@<axis>` — `TILE@<k_axis>` / `STAGE@<axis>` / `REDUCE@<axis>`, the
 reduce/contraction axis the node schedules — so a multi-node kernel (flash: `TILE@d` QK + `TILE@sk` PV) can address
-each schedule-bearing node; `WSPEC` / `PLACE` stay root-global (bare). The **bare** form is first-class:
+each schedule-bearing node; `WSPEC` stays root-global (bare). The **bare** form is first-class:
 `resolve_axis(family, key, eligible)` maps a bare `TILE` to the unique eligible axis (a hand pin on a two-node kernel
 raises naming the candidates; a family with no eligible axis drops). Readers go through `family_value(knobs, family)`
 so a bare and a suffixed key parse / featurize / golden-match identically — the schema is **invisible on one-node

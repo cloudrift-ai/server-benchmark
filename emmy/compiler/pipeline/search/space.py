@@ -15,7 +15,7 @@ candidate grids. Per-kernel legality (the warp static-K divisibility check, the 
 eligibility, the ``_COOP_*`` constants) stays with the scheduler in
 ``passes/lowering/tile/_schedule.py`` — the legal subset is a function of the node.
 
-Three groups:
+Two groups:
 
 - **Schedule codec knobs** (``REDUCE`` / ``TILE`` / ``STAGE`` / ``WSPEC`` / ``RASTER``) — the tile-lowering schedule
   fork points that spell the ir schedule codecs (:mod:`emmy.compiler.ir.schedule`). Decided in
@@ -24,8 +24,6 @@ Three groups:
   schedule slice (``ReducePlan`` / ``TilePlan`` / ``Stage`` / ``WarpSpec``) and rides on ``TileOp.knobs``
   so the online prior featurizes / tunes the decision. ``off=""`` (the conservative serial / per-cell /
   gmem-direct / uniform default) is auto-stamped on kernels the pass doesn't schedule.
-- **The structural placement pin** (``PLACE``) — pin-only: where an intermediate edge lives, registers
-  (``fuse``) or memory (``cut``), per edge-class element (``PLACE@<element>`` via ``EMMY_KNOBS``).
 - **Kernel-lowering policy knobs** (``VECTORIZE_LOADS`` / ``INTERLEAVE_LOADS``) — boolean codegen
   policies recorded on the kernel op (idempotence + env override), on by default and not search
   dimensions (``hints=(True,)``).
@@ -175,84 +173,6 @@ def map_tile_moves() -> list[str]:
     The ladder stops at ``f4``: ``f8`` regressed both pointwise goldens (register pressure — 22 vs 14
     regs — outweighs the wider access), so it's left out until a shape wants it."""
     return ["f2", "f4"]
-
-
-# --- The structural placement pin (PLACE) -----------------------------------
-#
-# ONE pin-only family controlling structural emission: where an intermediate edge lives — registers
-# (``fuse``) or memory (``cut``). Elements are named by the MOVE, not the shape:
-#
-#   PLACE@cone   producer-cone inlining (the fused producer → matmul edge). ``cut`` is realized
-#                by ``lowering/tile/020_cut_edge`` — a ``030_split_reduce``-style graph rewrite that
-#                splits the recognized cone kernel at the A seam (the producer materializes the
-#                cone value to a workspace; the matmul re-lowers with a plain gmem A) — and both
-#                halves re-enter recognition on the pass-scan restart, so each gets its own
-#                schedule / fork. The recognizer's nodification gate is the ``fuse`` half.
-#   PLACE@fold   downstream-fold absorption (flash vs separate softmax + P@V kernels)
-#   PLACE@tuple  sibling-fold tupling (online softmax vs two-pass stats)
-#   PLACE@fin    deferred split-reduce finalize placement — its own kernel (``cut``) vs inlined
-#                into every consumer's read sites (``fuse``, realized by
-#                ``lowering/tile/032_fuse_finalize``; kills the finalize launch + sync point)
-#   PLACE@cstat  the cone cut's bridged statistic placement — its own ``__stat`` kernel (``cut``,
-#                today's split; the statistic must leave the cone kernel to give the scale sweep
-#                its 2-D grid at prefill M) vs kept INSIDE the cone producer (``fuse``: the
-#                pre-split ``for m: [stat…, for k: …]`` LoopOp, whose re-recognition gives it the
-#                per-row coop-stat schedule — the M=1 case, where the separate stat kernel is
-#                pure launch overhead). Realized by ``020_cut_edge``.
-#
-# Vocabulary: ``auto`` (the built-in per-element default) / ``fuse`` / ``cut``. Precedence:
-# ``PLACE@<element>`` > bare ``PLACE`` > built-in ``auto`` (read via :func:`place_decision` /
-# ``Knob.narrow_at``). ``auto`` never appears in a knob dict — it is pin vocabulary; the stamped
-# value is the *resolved* decision (``fuse`` / ``cut``), stamped for ``fold`` / ``cone`` only
-# (``tuple`` is pure policy — dominance — and is never stamped). ``fuse`` is a request, not a
-# guarantee: a forced fuse on an uncertifiable kernel (e.g. RoPE'd QK, which flash recognition
-# rejects) degrades to ``cut`` with a log line — the standard pin-validity rule. Since ``@`` is not
-# a valid shell var name character, per-element pins ride the ``EMMY_KNOBS`` aggregate
-# (``EMMY_KNOBS="PLACE@fold=cut"``); the bare ``EMMY_PLACE`` env var pins every element.
-PLACE = Knob(
-    "PLACE",
-    KnobType.STR,
-    help="Structural placement of an intermediate edge — auto|fuse|cut, per element via "
-    "PLACE@cone (producer-cone inlining) / PLACE@fold (flash vs multi-kernel attention) / "
-    "PLACE@tuple (online softmax vs two-pass stats) / PLACE@stat (auto|fuse|sink — a norm's "
-    "row statistic staying local vs sunk into its producer's epilogue) / PLACE@fin (auto|cut|fuse "
-    "— a deferred split-reduce finalize as its own kernel vs inlined into its consumers) / "
-    "PLACE@cstat (auto|cut|fuse — the cone cut's bridged statistic as its own kernel vs kept in "
-    "the cone producer); bare PLACE pins every eligible edge. Pin-only (never enumerated); read "
-    "in lowering/tile/010_recognize.",
-    off="",
-)
-
-# The built-in ``auto`` defaults per element — today's emission behavior (fuse everywhere: flash,
-# online softmax, and producer-cone inlining are all on when recognizable; a row statistic stays
-# LOCAL to its kernel). Flipping a default is a behavior change gated on the validation suite, not
-# a spelling change. ``stat``'s alternative is ``sink`` (not ``cut``): the statistic reduce
-# migrates into the producer kernel's epilogue (``025_sink_row_reduce``) instead of splitting out.
-_PLACE_DEFAULTS = {"cone": "fuse", "fold": "fuse", "tuple": "fuse", "stat": "fuse", "fin": "cut", "cstat": "cut"}
-_PLACE_VALUES = {
-    "cone": ("fuse", "cut"),
-    "fold": ("fuse", "cut"),
-    "tuple": ("fuse", "cut"),
-    "stat": ("fuse", "sink"),
-    "fin": ("cut", "fuse"),
-    "cstat": ("cut", "fuse"),
-}
-
-
-def place_decision(element: str) -> str:
-    """The resolved ``PLACE`` decision (``"fuse"`` / ``"cut"`` — ``"sink"`` for ``stat``) for
-    ``element`` — the pin (``PLACE@<element>`` > bare ``PLACE``, via ``Knob.narrow_at``) with the
-    explicit ``auto`` token (and no pin at all) resolving to the built-in per-element default. An
-    unknown pin value degrades to the default with a log line — the standard pin-validity rule."""
-    default = _PLACE_DEFAULTS[element]
-    allowed = _PLACE_VALUES[element]
-    pin = PLACE.narrow_at(element)
-    if pin is None or pin in ("", "auto"):
-        return default
-    if pin in allowed:
-        return pin
-    logger.warning("PLACE@%s pin %r is not auto|%s; using the built-in %r", element, pin, "|".join(allowed), default)
-    return default
 
 
 # --- Kernel-lowering policy knobs -------------------------------------------

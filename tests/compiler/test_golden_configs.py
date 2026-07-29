@@ -107,8 +107,7 @@ def test_golden_configs_set_is_well_formed():
         if isinstance(c, MatmulGoldenConfig):
             assert c.M > 0 and c.N > 0 and c.K > 0, c.name
         elif isinstance(c, LinearNormGoldenConfig):
-            # The linear→norm PAIR (the PLACE@stat row-stat sink): keyed at the NORM's fork with the
-            # placement stamp alone — no coop requirement (the realizer re-emits the sweep).
+            # The linear→norm PAIR: keyed at the NORM's fork — no coop requirement.
             assert c.M > 0 and c.K > 0 and c.H > 0, c.name
         elif isinstance(c, NormLinearGoldenConfig):
             # The fused RMSNorm→linear computed-A megakernel: a warp contraction (M,H)@(H,N), not the
@@ -201,16 +200,10 @@ def test_goldens_speak_native_codecs_and_featurize():
         ReducePlan.parse(g.knobs.get("REDUCE"))
         if g.knobs.get("STAGE"):
             Stage.parse(g.knobs["STAGE"])
-        # A ``PLACE@cone: cut`` golden records a PLACEMENT and the cut's TOTAL cost, not a tile: the
-        # cut row's own schedule is discarded (``020_cut_edge`` emits un-mapped LoopOps and each half
-        # re-enters ``010`` to get its own fork and its own golden), so there is no geometry to
-        # featurize. Spelling one is worse than omitting it — the consumer's transport (``d2/tma/ring``)
-        # cannot appear on a cut row, which is computed-A, so a tile-bearing cut golden stops matching.
-        # The ``mlp_geglu.*.cut`` goldens are exempt for the same reason, via their kind.
         # A gemv-class M=1 row (``TILE: ''`` + a ``bN`` block-reduce) is scalar BY DESIGN — a
         # per-token decode matvec has one output row per CTA and no tile geometry at all, so the
         # empty featurization is the correct one, not an accident. Exempt exactly that shape.
-        if isinstance(g, MatmulGoldenConfig) and g.knobs.get("PLACE@cone") != "cut":
+        if isinstance(g, MatmulGoldenConfig):
             if g.M == 1 and not g.knobs.get("TILE") and ReducePlan.parse(g.knobs.get("REDUCE")).coop > 1:
                 continue  # gemv-class row (b<n> / g<w>k/b<n>t): scalar by design, no tile geometry
             feats = features.knob_features(g.knobs)

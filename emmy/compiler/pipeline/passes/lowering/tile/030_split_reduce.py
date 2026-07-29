@@ -123,13 +123,6 @@ def _carrier_identities(carrier) -> dict[str, float]:
     return {s.name: s.op.identity for s in carrier.merge if isinstance(s, Accum)}
 
 
-def _fin_knobs(knobs: dict) -> dict:
-    """The finalize tile's knob row: ONLY the ``PLACE@fin`` stamp (read by ``032_fuse_finalize``).
-    The full row stays on the partial — the finalize never had schedule identity, and threading
-    ``REDUCE``/``TILE`` onto it would make the A/B table report the split codec twice."""
-    return {k: v for k, v in knobs.items() if k == "PLACE@fin"}
-
-
 def _mapped(op, grid, *, name: str = "", tier=None, stage=None, knobs: dict | None = None) -> TileOp:
     """A **mapped** ``TileOp`` wrapping ``op`` over ``grid`` (so ``_schedule`` skips it). ``tier``
     preserves a contraction's scalar output tier (:class:`TilePlan`); ``stage`` threads the
@@ -230,7 +223,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, contraction: Cont
         out_val = next((s.defines()[-1] for s in reversed(fin_proj) if s.defines()), acc)
         fin_proj.append(Write(output=out.name, index=cell, value=out_val))
     fin_op = Map(body=Body((*seeds, fin_loop, *fin_proj)))
-    fin_tile = _mapped(fin_op, grid, name=tile.name, knobs=_fin_knobs(tile.knobs))
+    fin_tile = _mapped(fin_op, grid, name=tile.name)
 
     frag = Graph()
     for inp in root.inputs:
@@ -446,7 +439,7 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
         out_val = next((s.defines()[-1] for s in reversed(fin_proj) if s.defines()), states[0])
         fin_proj.append(Write(output=out.name, index=cell, value=out_val))
     fin_op = Map(body=Body((*seeds, fin_loop, *fin_proj)))
-    fin_tile = _mapped(fin_op, grid, name=tile.name, knobs=_fin_knobs(tile.knobs))
+    fin_tile = _mapped(fin_op, grid, name=tile.name)
 
     # --- splice the two-kernel fragment in place of the single split TileOp ----------------
     frag = Graph()

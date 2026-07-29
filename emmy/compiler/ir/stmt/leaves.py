@@ -955,8 +955,10 @@ class Select(Stmt):
 
 @dataclass(frozen=True)
 class RowAccum(Stmt):
-    """Accumulate ``value`` into ``dst[flat / n]`` — the row-statistic sink epilogue
-    (``025_sink_row_reduce``).
+    """Accumulate ``value`` into ``dst[flat / n]`` — a row-statistic epilogue.
+
+    Currently unused: its only producer was the retired ``PLACE@stat=sink`` realizer. Kept for the
+    cuda-lowering rendering path (the hierarchical warp-shfl + smem + atomic row fold).
 
     A producer kernel that writes each cell of a tensor exactly once contributes that cell's
     statistic term (e.g. ``v·v`` for a downstream Σx² norm stat) into a per-row f32 aux buffer:

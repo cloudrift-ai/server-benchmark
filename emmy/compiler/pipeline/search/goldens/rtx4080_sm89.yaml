@@ -86,6 +86,6 @@ configs:
     dtype: 'fp16'
     causal: true
     dynamic: true
-    knobs: {PLACE: 'fuse', TILE: 'a:mma_m16n8k16_f16/w4x1/f1x2/k16', STAGE: 'd2/cp/ring'}
+    knobs: {TILE: 'a:mma_m16n8k16_f16/w4x1/f1x2/k16', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 68.4
     cublas_us: 49.0

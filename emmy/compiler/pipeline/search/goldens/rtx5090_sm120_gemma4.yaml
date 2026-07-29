@@ -263,7 +263,7 @@ configs:
     head_dim: 256
     dtype: 'fp16'
     causal: true
-    knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32', WSPEC: ''}
+    knobs: {STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 35.5
     cublas_us: 30.7
   # The std-lane PRIMARY (2026-07-14, alternating staging): the 64-key streaming block (nt=8) on
@@ -279,7 +279,7 @@ configs:
     head_dim: 256
     dtype: 'fp16'
     causal: true
-    knobs: {PLACE: 'fuse', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k4', WSPEC: ''}
+    knobs: {STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k4', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 31.7
     cublas_us: 30.7
   # The tma-alt sibling (0.95x) — kept beside the cp primary (both directions 3x reproduced).
@@ -290,7 +290,7 @@ configs:
     head_dim: 256
     dtype: 'fp16'
     causal: true
-    knobs: {PLACE: 'fuse', STAGE: 'd1/tma/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k4', WSPEC: ''}
+    knobs: {STAGE: 'd1/tma/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k4', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 32.2
     cublas_us: 30.7
   # The FM PRIMARY — and the first emmy-past-torch-SDPA hd256 entry on the 5090: the f16-accumulate
@@ -303,7 +303,7 @@ configs:
     head_dim: 256
     dtype: 'fp16'
     causal: true
-    knobs: {PLACE: 'fuse', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x32/k4', WSPEC: ''}
+    knobs: {STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x32/k4', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 29.7
     cublas_us: 30.7
   # The paired-ring runner-up: the nt=4 streaming block (32 keys/step, 32 KB slabs) — 32.9, 7% past
@@ -322,7 +322,7 @@ configs:
     head_dim: 256
     dtype: 'fp16'
     causal: true
-    knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x4/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k2', WSPEC: ''}
+    knobs: {STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x4/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k2', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 32.9
     cublas_us: 30.7
   # (A second fm sibling — the nt=4 d2/cp/ring PV-f16acc form at 33.9 — was dropped 2026-07-21 by the
@@ -340,7 +340,7 @@ configs:
     dtype: 'fp16'
     causal: true
     dynamic: true
-    knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', WSPEC: ''}
+    knobs: {STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 35.5
     cublas_us: 30.7
   # The faster dynM twin post-tile-skip (3% past nt=2, zero-spread): the nt=4 streaming block,
@@ -353,7 +353,7 @@ configs:
     dtype: 'fp16'
     causal: true
     dynamic: true
-    knobs: {PLACE: 'fuse', STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x4/k16', WSPEC: ''}
+    knobs: {STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x4/k16', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 34.4
     cublas_us: 30.7
   # (The fm dynM sibling — d2/cp/ring on the bare f16acc PV-plan TILE spelling, 35.5 — was dropped
@@ -375,7 +375,7 @@ configs:
     dtype: 'fp16'
     causal: true
     dynamic: true
-    knobs: {PLACE: 'fuse', STAGE: 'd1/cp/alt', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x4/k16', WSPEC: ''}
+    knobs: {STAGE: 'd1/cp/alt', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x4/k16', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 32.0
     cublas_us: 30.7
   # ---- norms -----------------------------------------------------------------------------------------
@@ -588,7 +588,7 @@ configs:
     head_dim: 256
     dtype: 'fp16'
     causal: true
-    knobs: {PLACE: 'fuse', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k4', WSPEC: ''}
+    knobs: {STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k4', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 262.7
     cublas_us: 247.0
   - kernel: attention
@@ -598,7 +598,7 @@ configs:
     head_dim: 256
     dtype: 'fp16'
     causal: true
-    knobs: {PLACE: 'fuse', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x32/k4', WSPEC: ''}
+    knobs: {STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x32/k4', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 246.0
     cublas_us: 247.0
   # ---- global (full_attention) layers (2026-07-14) -----------------------------------------------
@@ -680,7 +680,7 @@ configs:
     head_dim: 512
     dtype: 'fp16'
     causal: true
-    knobs: {PLACE: 'fuse', REDUCE: 'g2k', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x64', WSPEC: ''}
+    knobs: {REDUCE: 'g2k', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x64', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 113.0
     cublas_us: 98.2
   # Q-norm over the global head_dim: 512 rows x 16 heads reshaped to 8192 x 512. Greedy's b256
@@ -767,7 +767,7 @@ configs:
     dtype: 'fp16'
     causal: true
     dynamic: true
-    knobs: {PLACE: 'fuse', REDUCE: 'g2k', STAGE: 'd1/cp/alt', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', WSPEC: ''}
+    knobs: {REDUCE: 'g2k', STAGE: 'd1/cp/alt', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 116.6
     cublas_us: 104.0
   # The un-split alt sibling, kept for the transfer record.
@@ -779,7 +779,7 @@ configs:
     dtype: 'fp16'
     causal: true
     dynamic: true
-    knobs: {PLACE: 'fuse', STAGE: 'd1/cp/alt', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', WSPEC: ''}
+    knobs: {STAGE: 'd1/cp/alt', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 135.2
     cublas_us: 103.9
   # s2048 tier for the global-layer shapes. The split-K story differs from the hd256 s2048 tier:
@@ -855,7 +855,7 @@ configs:
     head_dim: 512
     dtype: 'fp16'
     causal: true
-    knobs: {PLACE: 'fuse', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x64', WSPEC: ''}
+    knobs: {STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x64', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 1034.6
     cublas_us: 1040.4
   # ---- attention at seq 4096 (2026-07-24, vast.ai 5090, fm-superset tune + greedy A/B) --------------
@@ -870,7 +870,7 @@ configs:
     head_dim: 256
     dtype: 'fp16'
     causal: true
-    knobs: {PLACE: 'fuse', REDUCE: '', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k4', WSPEC: ''}
+    knobs: {REDUCE: '', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k4', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 871.5
     cublas_us: 792.8
   - kernel: attention
@@ -880,7 +880,7 @@ configs:
     head_dim: 256
     dtype: 'fp16'
     causal: true
-    knobs: {PLACE: 'fuse', REDUCE: '', STAGE: 'd2/cp/ring/p2', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x32', WSPEC: ''}
+    knobs: {REDUCE: '', STAGE: 'd2/cp/ring/p2', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x32', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 736.5
     cublas_us: 792.8
   - kernel: attention
@@ -890,7 +890,7 @@ configs:
     head_dim: 512
     dtype: 'fp16'
     causal: true
-    knobs: {PLACE: 'fuse', REDUCE: '', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x64', WSPEC: ''}
+    knobs: {REDUCE: '', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x64', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 3521.4
     cublas_us: 3672.7
   # ---- decode-bucket twins (M = EMMY_GEN_DECODE_BUCKET; the serving decode static shapes) -----------
@@ -1414,25 +1414,29 @@ configs:
   # mlp_gate_up_split.m64 entries above, and an unseeded M never reaches the cut (withheld from the
   # model fallback). Measured 2026-07-21 (3x, spread <=0.2%): .lin 169.2 = 0.99x eager 170.2 (the
   # fused form's best 199.6 loses 15%; cold fused greedy 767 — a 4.5x rescue).
-  - kernel: mlp_geglu
-    name: gemma4_12b.mlp_geglu.m64.cut
-    M: 64
-    H: 3840
-    inter: 15360
-    dtype: 'fp16'
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 166.1
-    cublas_us: 161.5
-  - kernel: mlp_geglu
-    name: gemma4_12b.mlp_geglu.m64.cut.lin
-    M: 64
-    H: 3840
-    inter: 15360
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 169.2
-    cublas_us: 170.2
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: mlp_geglu
+    # name: gemma4_12b.mlp_geglu.m64.cut
+    # M: 64
+    # H: 3840
+    # inter: 15360
+    # dtype: 'fp16'
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 166.1
+    # cublas_us: 161.5
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: mlp_geglu
+    # name: gemma4_12b.mlp_geglu.m64.cut.lin
+    # M: 64
+    # H: 3840
+    # inter: 15360
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 169.2
+    # cublas_us: 170.2
   # M=64 norms / pointwise (rms follows the m32 b512 winner; the qknorm rows are the three bucket-64
   # row counts — k256 q -> 64x16 = 1024, k512 kv -> 64x1 = 64, k512 q -> 64x16 = 1024 — following the
   # row-count rule: many rows b128, few rows b512):
@@ -1999,25 +2003,29 @@ configs:
   # ~10.1 (.lin std) / 12.1 ms (can fm) and the pinned std big tile is a 191.7 ms catastrophe — the
   # guard caps a cut-unrealizable deploy at the measured w2x2/f4x8 d1/sync. No fm fused rows: fm fused
   # (11.1-11.5 ms) records ABOVE the std fused guard, exactly the fm-never-loses drop rule.
-  - kernel: mlp_geglu
-    name: gemma4_12b.mlp_geglu.m4096.cut
-    M: 4096
-    H: 3840
-    inter: 15360
-    dtype: 'fp16'
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 5204.2
-    cublas_us: 4954.1
-  - kernel: mlp_geglu
-    name: gemma4_12b.mlp_geglu.m4096.cut.lin
-    M: 4096
-    H: 3840
-    inter: 15360
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 5574.6
-    cublas_us: 4869.7
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: mlp_geglu
+    # name: gemma4_12b.mlp_geglu.m4096.cut
+    # M: 4096
+    # H: 3840
+    # inter: 15360
+    # dtype: 'fp16'
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 5204.2
+    # cublas_us: 4954.1
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: mlp_geglu
+    # name: gemma4_12b.mlp_geglu.m4096.cut.lin
+    # M: 4096
+    # H: 3840
+    # inter: 15360
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 5574.6
+    # cublas_us: 4869.7
   - kernel: mlp_geglu
     name: gemma4_12b.mlp_geglu.m4096
     M: 4096
@@ -2257,15 +2265,17 @@ configs:
   # the ~76-78 µs weight-stream floor), stat + 2 golden halves + combine = 158.0 (can) / 162.8 (.lin),
   # 3x at <=0.2% — beating the fused megakernel (179/173) AND the unfused eager (159.7/166.6). The
   # m64/m256/m4096 cut pattern now covers every serving M; the fused rows above stay as fallbacks.
-  - kernel: mlp_geglu
-    name: gemma4_12b.mlp_geglu.m32.cut
-    M: 32
-    H: 3840
-    inter: 15360
-    dtype: 'fp16'
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 152.5
-    cublas_us: 159.7
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: mlp_geglu
+    # name: gemma4_12b.mlp_geglu.m32.cut
+    # M: 32
+    # H: 3840
+    # inter: 15360
+    # dtype: 'fp16'
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 152.5
+    # cublas_us: 159.7
   # ---- fused .lin twins (serving F.linear layout, trans_b) ---------------------------------------
   # The fused edges a SERVED model actually deploys: same computed-A megakernels as the canonical entries
   # above, but B given (N, K) and contracted via F.linear — the sync compute-fill stages every B fold
@@ -2379,16 +2389,18 @@ configs:
     emmy_us: 172.5
     cublas_us: 166.6
   # The .lin cut twin of mlp_geglu.m32.cut above (the serving decode layout).
-  - kernel: mlp_geglu
-    name: gemma4_12b.mlp_geglu.m32.cut.lin
-    M: 32
-    H: 3840
-    inter: 15360
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 152.3
-    cublas_us: 166.6
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: mlp_geglu
+    # name: gemma4_12b.mlp_geglu.m32.cut.lin
+    # M: 32
+    # H: 3840
+    # inter: 15360
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 152.3
+    # cublas_us: 166.6
   # The PREFILL-chunk (M=256) mlp edge is NOT anchored as a FUSED computed-A golden: the fused form is
   # memory-pipeline-stall bound at M=256 and provably cannot beat cuBLAS (its compute floor ≈ eager, and a 2-fold
   # node can't ride d2/tma/ring), so a fused mlp_geglu.m256 golden would only ever record a losing config and muddy
@@ -2407,15 +2419,17 @@ configs:
   # consumers have no golden — the same edge at M=32/64/128 measures 35,558 / 71,160 / 142,702 µs, because the
   # channel matmuls fall to a scalar tile. That is why the cut row is withheld from the model fallback in
   # greedy_decide and can be selected by measured evidence alone: an unseeded M simply never matches and stays fused.
-  - kernel: mlp_geglu
-    name: gemma4_12b.mlp_geglu.m256.cut
-    M: 256
-    H: 3840
-    inter: 15360
-    dtype: 'fp16'
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 372.7
-    cublas_us: 329.6
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: mlp_geglu
+    # name: gemma4_12b.mlp_geglu.m256.cut
+    # M: 256
+    # H: 3840
+    # inter: 15360
+    # dtype: 'fp16'
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 372.7
+    # cublas_us: 329.6
   # The CUT (PLACE@cone=cut) consumer: ONE single-channel matmul (M=256, N=15360, K=3840) — the gate OR up half
   # after 020_cut_edge splits the multi-fold cone. A single-fold matmul reads a clean gmem A, so it rides
   # d2/tma/ring and BEATS cuBLAS in the FAST_MATH regime (f16acc 125.6 = 1.20x cuBLAS 151);
@@ -2600,17 +2614,19 @@ configs:
   # through to the anchor. NOT seeded: qknorm sites (sweeps already wide post-reshape-fold — the
   # epilogue+memset is a net loss), the post_ff site (needs down on g4k, whose +0.9 eats the
   # saving), and m64 (whole-twin wash; only post64-global won ~−0.7).
-  - kernel: linear_norm
-    name: gemma4_12b.post_attn_norm.sink.m32
-    M: 32
-    K: 3840
-    H: 4096
-    dtype: 'fp16'
-    trans_b: true
-    residual: true
-    knobs: {PLACE@stat: 'sink', TILE: '', REDUCE: 'b512', STAGE: '', WSPEC: '', RASTER: ''}
-    emmy_us: 0.9
-    cublas_us: 3.8
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: linear_norm
+    # name: gemma4_12b.post_attn_norm.sink.m32
+    # M: 32
+    # K: 3840
+    # H: 4096
+    # dtype: 'fp16'
+    # trans_b: true
+    # residual: true
+    # knobs: {PLACE@stat: 'sink', TILE: '', REDUCE: 'b512', STAGE: '', WSPEC: '', RASTER: ''}
+    # emmy_us: 0.9
+    # cublas_us: 3.8
   - kernel: rms_norm
     name: gemma4_12b.rms_norm.k3840.m32
     M: 32
@@ -2765,16 +2781,18 @@ configs:
   # crude pinned cut below, which the fragment goldens will reclaim. emmy_us is the pinned cut row
   # (the --ab PLACE pin gate cannot verify a cut; a TILE pin on the channel matmuls forced the
   # pinned bench path).
-  - kernel: mlp_geglu
-    name: gemma4_12b.mlp_geglu.dynM.cut
-    M: 512
-    H: 3840
-    inter: 15360
-    dtype: 'fp16'
-    dynamic: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 690.4
-    cublas_us: 626.8
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: mlp_geglu
+    # name: gemma4_12b.mlp_geglu.dynM.cut
+    # M: 512
+    # H: 3840
+    # inter: 15360
+    # dtype: 'fp16'
+    # dynamic: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 690.4
+    # cublas_us: 626.8
   # GeGLU dyn-cut fragments (see the 4090 file's fragment note):
   - kernel: matmul
     name: gemma4_12b.mlp_ch.dynM
@@ -3135,36 +3153,42 @@ configs:
   # g<w>k/b<n>t winners AT THE SERVING LAYOUT (floor parity: down 75.7 vs eager 80, gate_up
   # 142.4 vs 146, qkv 14.1 vs 48, qkg 15.9 vs 51). ShapeKey is layout-blind, so each m1 key
   # carries both orientations' rows and the deploy realizes whichever fits its operand.
-  - kernel: norm_linear
-    name: gemma4_12b.norm_gate_up.m1.lin
-    M: 1
-    H: 3840
-    N: 30720
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 142.8
-    cublas_us: 148.6
-  - kernel: norm_linear
-    name: gemma4_12b.norm_qkv.m1.lin
-    M: 1
-    H: 3840
-    N: 8192
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 14.4
-    cublas_us: 46.5
-  - kernel: norm_linear
-    name: gemma4_12b.norm_qk_global.m1.lin
-    M: 1
-    H: 3840
-    N: 8704
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 16.2
-    cublas_us: 47.1
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.norm_gate_up.m1.lin
+    # M: 1
+    # H: 3840
+    # N: 30720
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 142.8
+    # cublas_us: 148.6
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.norm_qkv.m1.lin
+    # M: 1
+    # H: 3840
+    # N: 8192
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 14.4
+    # cublas_us: 46.5
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.norm_qk_global.m1.lin
+    # M: 1
+    # H: 3840
+    # N: 8704
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 16.2
+    # cublas_us: 47.1
   # the cut consumers re-recognize as plain M=1 matvecs; block-reduce beats the cold b256 pick
   # (gate_up 140 vs 180; b64/b128 tie on gate_up, b64 clear on the two smaller N)
   # down-proj at M=1 recognizes plain (GeGLU combine stays a separate pointwise); greedy b256
@@ -3177,26 +3201,30 @@ configs:
   # the consumers carry std+fm rows, so each lane's cut re-entry deploys its own transport.
   # m64 gate_up stays FUSED (cut consumer 229 loses to the fused 169). Values are same-day
   # pinned --ab (seed session logs: _tune/m4096-merged/).
-  - kernel: norm_linear
-    name: gemma4_12b.norm_qkv.m64.lin
-    M: 64
-    H: 3840
-    N: 8192
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 38.2
-    cublas_us: 38.3
-  - kernel: norm_linear
-    name: gemma4_12b.norm_qk_global.m64.lin
-    M: 64
-    H: 3840
-    N: 8704
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 39.8
-    cublas_us: 39.8
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.norm_qkv.m64.lin
+    # M: 64
+    # H: 3840
+    # N: 8192
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 38.2
+    # cublas_us: 38.3
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.norm_qk_global.m64.lin
+    # M: 64
+    # H: 3840
+    # N: 8704
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 39.8
+    # cublas_us: 39.8
   - kernel: norm_linear
     name: gemma4_12b.norm_gate_up.m64.lin
     M: 64
@@ -3207,16 +3235,18 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
     emmy_us: 169.4
     cublas_us: 163.5
-  - kernel: norm_linear
-    name: gemma4_12b.mlp_down_fused.m64.lin
-    M: 64
-    H: 15360
-    N: 3840
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 87.3
-    cublas_us: 91.7
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.mlp_down_fused.m64.lin
+    # M: 64
+    # H: 15360
+    # N: 3840
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 87.3
+    # cublas_us: 91.7
   # gate_up_cat m64 .lin: the missing layout twin — the cold pick fell to the transposed b<n>t
   # band on the .lin operand (16.9 ms, the 2026-07-25 per-kernel table's 109x case). NOTE the m1
   # .lin twins are deliberately NOT recorded: their b64 optima (12.6 us, L2-warm) would out-rank
@@ -3279,46 +3309,54 @@ configs:
   # into an eager win (qkv cut total 940 fm vs eager 1200); the std consumers sit at parity.
   # gate_up at this width remains the research-class computed-A gap: fused-std 8267, best
   # consumer fm 3292 — recorded honestly, both beaten by cuBLAS's composite ~4400.
-  - kernel: norm_linear
-    name: gemma4_12b.norm_qkv.m4096.lin
-    M: 4096
-    H: 3840
-    N: 8192
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 1324.8
-    cublas_us: 1200.2
-  - kernel: norm_linear
-    name: gemma4_12b.norm_qk_global.m4096.lin
-    M: 4096
-    H: 3840
-    N: 8704
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 1340.9
-    cublas_us: 1236.0
-  - kernel: norm_linear
-    name: gemma4_12b.norm_gate_up.m4096.lin
-    M: 4096
-    H: 3840
-    N: 30720
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 3318.0
-    cublas_us: 4416.8
-  - kernel: norm_linear
-    name: gemma4_12b.mlp_down_fused.m4096.lin
-    M: 4096
-    H: 15360
-    N: 3840
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 2703.9
-    cublas_us: 2718.8
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.norm_qkv.m4096.lin
+    # M: 4096
+    # H: 3840
+    # N: 8192
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 1324.8
+    # cublas_us: 1200.2
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.norm_qk_global.m4096.lin
+    # M: 4096
+    # H: 3840
+    # N: 8704
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 1340.9
+    # cublas_us: 1236.0
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.norm_gate_up.m4096.lin
+    # M: 4096
+    # H: 3840
+    # N: 30720
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 3318.0
+    # cublas_us: 4416.8
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.mlp_down_fused.m4096.lin
+    # M: 4096
+    # H: 15360
+    # N: 3840
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 2703.9
+    # cublas_us: 2718.8
   - kernel: matmul
     name: gemma4_12b.qkv_cat.m4096.lin
     M: 4096
@@ -3438,50 +3476,58 @@ configs:
   # the .dynM goldens above/below): norm_qkv 210.8 (eager 215; deployed-fused-cold 304),
   # norm_qk_global 211.9 (218), norm_gate_up 656.4 (645; deployed 1039), down-cone 353.8 (345;
   # deployed 530). The fm lane's consumer rows push further (qkv 124, gate_up 362 class).
-  - kernel: norm_linear
-    name: gemma4_12b.norm_qkv.dynM
-    M: 512
-    H: 3840
-    N: 8192
-    dtype: 'fp16'
-    trans_b: true
-    dynamic: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 210.8
-    cublas_us: 215.0
-  - kernel: norm_linear
-    name: gemma4_12b.norm_qk_global.dynM
-    M: 512
-    H: 3840
-    N: 8704
-    dtype: 'fp16'
-    trans_b: true
-    dynamic: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 211.9
-    cublas_us: 218.0
-  - kernel: norm_linear
-    name: gemma4_12b.norm_gate_up.dynM
-    M: 512
-    H: 3840
-    N: 30720
-    dtype: 'fp16'
-    trans_b: true
-    dynamic: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 656.4
-    cublas_us: 645.0
-  - kernel: norm_linear
-    name: gemma4_12b.mlp_down_fused.dynM
-    M: 512
-    H: 15360
-    N: 3840
-    dtype: 'fp16'
-    trans_b: true
-    dynamic: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 353.8
-    cublas_us: 345.0
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.norm_qkv.dynM
+    # M: 512
+    # H: 3840
+    # N: 8192
+    # dtype: 'fp16'
+    # trans_b: true
+    # dynamic: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 210.8
+    # cublas_us: 215.0
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.norm_qk_global.dynM
+    # M: 512
+    # H: 3840
+    # N: 8704
+    # dtype: 'fp16'
+    # trans_b: true
+    # dynamic: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 211.9
+    # cublas_us: 218.0
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.norm_gate_up.dynM
+    # M: 512
+    # H: 3840
+    # N: 30720
+    # dtype: 'fp16'
+    # trans_b: true
+    # dynamic: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 656.4
+    # cublas_us: 645.0
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.mlp_down_fused.dynM
+    # M: 512
+    # H: 15360
+    # N: 3840
+    # dtype: 'fp16'
+    # trans_b: true
+    # dynamic: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 353.8
+    # cublas_us: 345.0
 
   # ---- MERGED keys at M=256 (the legacy prefill bucket + the c=64 run's unmixed static chunks):
   # the 2026-07-25 per-kernel table flagged the fused forms 1.7-2x behind torch.compile (the
@@ -3489,46 +3535,54 @@ configs:
   # (eager 109), qk_global ~113 (101), gate_up 486 vs fused 542 (292; the fm consumer 287 makes
   # the fm-lane total ~293), down-cone 187.1 vs fused 378 (201). Consumers carry std+fm rows so
   # each lane's cut re-entry deploys its own transport (the m4096 convention).
-  - kernel: norm_linear
-    name: gemma4_12b.norm_qkv.m256.lin
-    M: 256
-    H: 3840
-    N: 8192
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 110.1
-    cublas_us: 109.0
-  - kernel: norm_linear
-    name: gemma4_12b.norm_qk_global.m256.lin
-    M: 256
-    H: 3840
-    N: 8704
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 113.1
-    cublas_us: 101.0
-  - kernel: norm_linear
-    name: gemma4_12b.norm_gate_up.m256.lin
-    M: 256
-    H: 3840
-    N: 30720
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 486.5
-    cublas_us: 292.0
-  - kernel: norm_linear
-    name: gemma4_12b.mlp_down_fused.m256.lin
-    M: 256
-    H: 15360
-    N: 3840
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 187.1
-    cublas_us: 201.0
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.norm_qkv.m256.lin
+    # M: 256
+    # H: 3840
+    # N: 8192
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 110.1
+    # cublas_us: 109.0
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.norm_qk_global.m256.lin
+    # M: 256
+    # H: 3840
+    # N: 8704
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 113.1
+    # cublas_us: 101.0
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.norm_gate_up.m256.lin
+    # M: 256
+    # H: 3840
+    # N: 30720
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 486.5
+    # cublas_us: 292.0
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.mlp_down_fused.m256.lin
+    # M: 256
+    # H: 15360
+    # N: 3840
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 187.1
+    # cublas_us: 201.0
   - kernel: matmul
     name: gemma4_12b.qkv_cat.m256.lin
     M: 256
@@ -3835,46 +3889,54 @@ configs:
   # norm_qkv cut 20.6 vs fused 24.5 (cold 106.5), norm_qk_global 21.0 vs 24.2 (107.1),
   # norm_gate_up 144.7 vs 154.3 (461.6), mlp_down_fused 74.1 vs 82.0 (371.3). Cut totals =
   # stat b128 + scale f4 + the seeded m8 consumer (+ finalize); glue rows recorded below.
-  - kernel: norm_linear
-    name: gemma4_12b.norm_qkv.m8.lin
-    M: 8
-    H: 3840
-    N: 8192
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 20.6
-    cublas_us: 24.0
-  - kernel: norm_linear
-    name: gemma4_12b.norm_qk_global.m8.lin
-    M: 8
-    H: 3840
-    N: 8704
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 21.0
-    cublas_us: 25.0
-  - kernel: norm_linear
-    name: gemma4_12b.norm_gate_up.m8.lin
-    M: 8
-    H: 3840
-    N: 30720
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 144.7
-    cublas_us: 150.0
-  - kernel: norm_linear
-    name: gemma4_12b.mlp_down_fused.m8.lin
-    M: 8
-    H: 15360
-    N: 3840
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 74.1
-    cublas_us: 93.0
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.norm_qkv.m8.lin
+    # M: 8
+    # H: 3840
+    # N: 8192
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 20.6
+    # cublas_us: 24.0
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.norm_qk_global.m8.lin
+    # M: 8
+    # H: 3840
+    # N: 8704
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 21.0
+    # cublas_us: 25.0
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.norm_gate_up.m8.lin
+    # M: 8
+    # H: 3840
+    # N: 30720
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 144.7
+    # cublas_us: 150.0
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.mlp_down_fused.m8.lin
+    # M: 8
+    # H: 15360
+    # N: 3840
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 74.1
+    # cublas_us: 93.0
   - kernel: reduce
     name: gemma4_12b.cut_cone_stat.m8
     M: 8
@@ -4059,46 +4121,54 @@ configs:
     cublas_us: 10.0
   # m2048 fused norm->merged / geglu-down verdicts: the CUT wins every key (fused megakernel
   # 2.5-4.1x worse, as at m4096); totals = stat + scale + consumer (+ combine).
-  - kernel: norm_linear
-    name: gemma4_12b.norm_qkv.m2048.lin
-    M: 2048
-    H: 3840
-    N: 8192
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 578.1
-    cublas_us: 705.0
-  - kernel: norm_linear
-    name: gemma4_12b.norm_qk_global.m2048.lin
-    M: 2048
-    H: 3840
-    N: 8704
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 547.4
-    cublas_us: 718.0
-  - kernel: norm_linear
-    name: gemma4_12b.norm_gate_up.m2048.lin
-    M: 2048
-    H: 3840
-    N: 30720
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 1765.9
-    cublas_us: 2339.0
-  - kernel: norm_linear
-    name: gemma4_12b.mlp_down_fused.m2048.lin
-    M: 2048
-    H: 15360
-    N: 3840
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 974.3
-    cublas_us: 1410.0
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.norm_qkv.m2048.lin
+    # M: 2048
+    # H: 3840
+    # N: 8192
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 578.1
+    # cublas_us: 705.0
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.norm_qk_global.m2048.lin
+    # M: 2048
+    # H: 3840
+    # N: 8704
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 547.4
+    # cublas_us: 718.0
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.norm_gate_up.m2048.lin
+    # M: 2048
+    # H: 3840
+    # N: 30720
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 1765.9
+    # cublas_us: 2339.0
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.mlp_down_fused.m2048.lin
+    # M: 2048
+    # H: 15360
+    # N: 3840
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 974.3
+    # cublas_us: 1410.0
   # m2048 canonical-layout matmul siblings (the twins realize both layouts; within a few % of
   # .lin, serial w4x2/f4x8/k4 everywhere — gm8 ties on the gate_up half) + the cut auxiliaries
   # (from the sweep2 cut runs). qknorm heads-view keys stay in EXPECTED_GAPS per the m8/m32

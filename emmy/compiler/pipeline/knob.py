@@ -226,8 +226,8 @@ class Knob:
     def narrow_at(self, element: str) -> str | None:
         """The env pin for this knob's ``<NAME>@<element>`` key, falling back to the bare
         ``<NAME>`` pin — the per-element read mirroring :func:`family_value`'s precedence
-        (``PLACE@fold`` > bare ``PLACE``). Returns the raw pin string (``None`` when neither is
-        set); the caller resolves vocabulary (e.g. the ``PLACE`` family's ``auto`` token). The
+        (``TILE@d`` > bare ``TILE``). Returns the raw pin string (``None`` when neither is
+        set); the caller resolves vocabulary. The
         ``@``-suffixed key is not a valid shell var name, so it rides the ``EMMY_KNOBS``
         aggregate; :func:`parse_knob_spec` canonicalizes its element to lowercase, matching the
         lowercase element spelling producers use."""
@@ -246,10 +246,10 @@ class Knob:
 # existing pin / recipe / golden — keeps working unchanged (the suffix disambiguates only a kernel with
 # two eligible nodes). ``TILE`` / ``STAGE`` / ``REDUCE`` all carry the suffix: the schedule reduce
 # partition IS the axis-named reduce decision (there is no separate native ``REDUCE@`` family — the
-# reduce/split-K partition is the one reduce family). ``WSPEC`` / ``PLACE`` stay root-global (always
+# reduce/split-K partition is the one reduce family). ``WSPEC`` stays root-global (always
 # bare). Readers use :func:`family_value` so a bare and a suffixed key featurize / match identically.
 
-# The per-node schedule codec families that carry an ``@<axis>`` element (``WSPEC`` / ``PLACE`` are
+# The per-node schedule codec families that carry an ``@<axis>`` element (``WSPEC`` is
 # root-global, always bare).
 _AXIS_FAMILIES = ("TILE", "REDUCE", "STAGE")
 
@@ -437,8 +437,7 @@ def parse_knob_spec(raw: str) -> dict[str, str]:
     tolerated, empty entries skipped. A malformed entry (missing ``=`` / empty
     KEY) raises ``ValueError``. Case is canonicalized per key part: the family
     (before any ``@``) uppercases, the element (after it) lowercases — so
-    ``place@FOLD=cut`` pins ``PLACE@fold`` and ``tile@d=…`` keeps its lowercase
-    axis element instead of being mangled to ``TILE@D``."""
+    ``tile@D=…`` pins ``TILE@d`` instead of being mangled to ``TILE@D``."""
     out: dict[str, str] = {}
     for entry in (raw or "").split(","):
         entry = entry.strip()
@@ -464,12 +463,11 @@ apply_knobs_env()
 
 # --- Rendering -------------------------------------------------------------
 
-# Canonical display order for tuning knobs. The ``FAMILY@element`` keys lead — the structural
-# ``PLACE@`` placement, then the axis-named schedule codecs (``TILE@`` / ``REDUCE@`` / ``STAGE@``)
-# — each family's keys sorted by element; the bare exact-name knobs follow in ``KNOB_ORDER``,
-# unknown knobs last (alpha). Shared by the ``run --bench`` kernel table and the ``emmy
-# eval`` tables so columns read stably.
-_FAMILY_ORDER = ("PLACE@", "TILE@", "REDUCE@", "STAGE@")
+# Canonical display order for tuning knobs. The axis-named schedule codecs (``TILE@`` /
+# ``REDUCE@`` / ``STAGE@``) lead, each family's keys sorted by element; the bare exact-name knobs
+# follow in ``KNOB_ORDER``, unknown knobs last (alpha). Shared by the ``run --bench`` kernel table
+# and the ``emmy eval`` tables so columns read stably.
+_FAMILY_ORDER = ("TILE@", "REDUCE@", "STAGE@")
 KNOB_ORDER = ("TILE", "REDUCE", "STAGE", "WSPEC")
 _KNOB_RANK = {k: i for i, k in enumerate(KNOB_ORDER)}
 
@@ -558,23 +556,8 @@ def canonical_row_key(knobs: dict) -> tuple[tuple[str, str], ...]:
 def evidence_row_vouches(cand_tun: dict, row_tun: dict) -> bool:
     """Whether a measured evidence row can vouch for a candidate under value-of-position
     semantics: every tunable knob the candidate specifies must match the row, a key absent
-    from the ROW reading as free — EXCEPT a kernel-set-changing placement. A row recorded
-    before ``PLACE@cone`` existed (any pre-cut tune DB / reservoir) measured the FUSED twin,
-    which is knob-identical to the cut row apart from the placement — letting the absent key
-    wildcard-match a ``cut`` candidate deploys the catastrophic cold cut at the fused row's
-    µs (and the content tie-break then PREFERS it: ``('PLACE@cone','cut') <
-    ('PLACE@cone','fuse')``). The cut may only win where it was actually measured, so a
-    ``cut`` candidate requires the row to record the placement explicitly. ``PLACE@stat=sink``
-    (the row-stat sink, an identical kernel-set change) takes the same clause."""
-    if any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items()):
-        return False
-    if str(cand_tun.get("PLACE@cone")) == "cut" and "PLACE@cone" not in row_tun:
-        return False
-    if str(cand_tun.get("PLACE@fin")) == "fuse" and "PLACE@fin" not in row_tun:
-        return False  # a pre-fin row measured the separate-finalize twin — same kernel-set clause
-    if str(cand_tun.get("PLACE@cstat")) == "fuse" and "PLACE@cstat" not in row_tun:
-        return False  # a pre-cstat row measured the split-stat twin — same kernel-set clause
-    return not (str(cand_tun.get("PLACE@stat")) == "sink" and "PLACE@stat" not in row_tun)
+    from the ROW reading as free (a later pass decides it)."""
+    return not any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items())
 
 
 def stamp_schedule_families(knobs: dict) -> dict[str, str]:

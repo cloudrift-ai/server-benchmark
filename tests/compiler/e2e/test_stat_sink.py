@@ -48,6 +48,8 @@ def test_rowaccum_rewrite_preserves_fields():
 def test_sinkable_stat_binding_gates():
     """The structural probe: a well-formed norm form binds; breaking any gate (non-additive fold,
     a second trailing loop, a symbolic reduce) declines."""
+    from emmy.compiler.pipeline.passes.lowering.tile._sink import bind_sinkable_stat
+
     from emmy.compiler.dim import Dim
     from emmy.compiler.dtype import F16
     from emmy.compiler.ir.axis import Axis, AxisRole
@@ -55,7 +57,6 @@ def test_sinkable_stat_binding_gates():
     from emmy.compiler.ir.expr import Var
     from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
     from emmy.compiler.ir.tile import Map, Reduction
-    from emmy.compiler.pipeline.passes.lowering.tile._sink import bind_sinkable_stat
     from emmy.compiler.tensor import Tensor
 
     m, n = Axis(name="a0", extent=Dim(32)), Axis(name="a1", extent=Dim(64))

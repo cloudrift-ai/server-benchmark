@@ -277,7 +277,7 @@ def test_attention_combine_accuracy(variant, monkeypatch):
 # The carrier-generic cross-CTA producer + finalize, one case per (carrier × finalize). The
 # additive carriers (matmul split-K, ``sum`` split-reduce) take BOTH finalize folds; the twisted
 # flash ``(m, l, O)`` carrier is **kernel-only** (the ``e^{Δm}`` rescale can't be an ``atomicAdd``).
-# ``flash`` marks the fused streaming flash op (fusion is the default; ``PLACE@fold`` is the escape); all split the reduce/KV axis
+# ``flash`` marks the fused streaming flash op (fusion is unconditional); all split the reduce/KV axis
 # across 2 CTAs via the native ``REDUCE`` ``c2`` codec, the same knob for matmul / reduce / flash.
 _CROSS_CTA = {
     "matmul": {"op": "matmul", "flash": False, "tol": 1e-2, "finalizes": ("atomic", "kernel")},

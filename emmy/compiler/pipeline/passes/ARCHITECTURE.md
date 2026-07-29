@@ -114,9 +114,8 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   cooperative reduce form (option-0 stays the coop row; the warp mma rows ride the mandatory `sync` compute-fill;
   dtype / geometry legality stays schedule-side in `_computed_a_rows`). This retired the pin-only
   `_prologue_warp_option` rescue. The **degenerate M=1** composition (per-token decode: the unit row axis elided,
-  `free = ()`) binds too — a synthesized unit free axis keeps the column grid and the cut anchor
-  (`020_cut_edge` accepts `free ≤ 1`); without it the fused kernel schedules at grid 1, ~300× off the memory
-  floor. The M=1 cut consumer is also why annotated-loop rewrites map the `Carrier` through SSA renames
+  `free = ()`) binds too — a synthesized unit free axis keeps the column grid; without it the fused kernel
+  schedules at grid 1, ~300× off the memory floor. Annotated-loop rewrites map the `Carrier` through SSA renames
   (`Carrier.rename` — a verbatim carrier left the cooperative combine reading a state name the renamed body no
   longer defined).
 - a cooperative / ILP reduce (`PLANAR` / `TWISTED`, or a non-output-tiled `CONTRACTION`) needs **no** binding here — its
@@ -126,75 +125,27 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   partition is chosen and stamps a `sync` `Stage` naming it (`smem`) on the `TileOp` — a derived schedule field, not a
   knob — so `_factor._tile_reduce_axis` only applies it, never re-detects.
 
-## The divide rules: `cut` a dataflow edge, `sink` a row statistic, `split` an iteration axis
+## The divide rule: `split` an iteration axis
 
-`lowering/tile` carries three one-kernel→graph-fragment rules whose names sound alike but divide along different
-dimensions, with their own re-entry contracts — keep them apart:
+`lowering/tile` carries one one-kernel→graph-fragment rule:
 
-- **`020_cut_edge`** cuts the **dataflow** (the PLACE codec's memory edge, `PLACE@cone=cut` today): two different
-  computations that loop fusion welded together — the producer cone and its matmul — become separate kernels again,
-  the intermediate materialized to a workspace. Its pieces are emitted as plain **un-mapped `LoopOp`s** precisely so
-  the pass-scan restart hands them back to `010_recognize`: the fused kernel's schedule is meaningless for the
-  halves, and each must earn its own recognition, schedule and fork (the gmem-A matmul then reaches the staged
-  cp.async/TMA tiers a computed A can never ride). The statistic materializes as its OWN kernel — a nested
-  `for m: [stat…, for k: …]` producer only lifts `m` onto the grid, serializing the K sweep per thread. A
-  **multi-fold** cone (the gate/up ⊗-folds — `swiglu(x̂@Wg, x̂@Wu)`) can't cut into one consumer (a multi-fold plain
-  matmul has no mma tier), so it splits into **N single-channel matmuls** (each rides `d2/tma/ring` and beats cuBLAS)
-  writing per-channel workspaces + a downstream pointwise **combine** kernel carrying the ⊗-combine (GeGLU) tail — the
-  form that beats cuBLAS at prefill M (~270 vs ~317 µs eager on the 5090), which the fused computed-A megakernel can't.
-
-  Like `030_split_reduce`, this rule **decides nothing** — it realizes a decision already in the schedule.
-  `PLACE@cone` is a knob `010_recognize` enumerates as a fork sibling (a `cut`-stamped row beside the fused warp-mma
-  and coop-reduce rows) and stamps on the chosen op; `020_cut_edge` reads that stamp, exactly as `030_split_reduce`
-  reads the `GRID` reduce stage. That is what makes the placement selectable by the ordinary **evidence pick**: a
-  golden records `PLACE@cone: cut` against the cut's measured TOTAL (stat + cone + channels + combine), the same
-  whole-cost convention a split-K golden uses for partial+finalize, and `_golden_pick` compares it to the fused rows
-  like any other knob. No Σ-of-predictions structural pricing is involved.
-
-  **The cut row is evidence-only.** `greedy_decide` withholds it from the model fallback, so it can win only where it
-  was actually measured. This is a safety property, not a preference: the cut is catastrophic where its consumers have
-  no golden — the gemma-4 gate/up edge measures 35,558 / 71,160 / 142,702 µs at M=32/64/128 (the channel matmuls fall
-  to a scalar tile) against 368.7 µs at the seeded M=256. An unseeded shape simply never matches and stays fused, so
-  the choice is never made geometrically.
-- **`025_sink_row_reduce`** migrates a **row statistic** across the dataflow edge in the OPPOSITE direction from the
-  cut (the PLACE codec's `stat` element, `PLACE@stat=sink`): a fused norm kernel B —
-  `Map(body=[π…, sweep Loop], source=Reduction(PLANAR))` whose reduce folds a pure per-cell term (`Σ x²`) of ONE
-  tensor its in-graph producer A just computed — drops its `Reduction` to a `Load` of a fresh f32 `T__sq[row]` aux
-  buffer, and A's complete-value store site (a split-K FINALIZE or pointwise sweep — never an atomic partial, whose
-  per-partition values are incomplete) gains the term re-evaluated on each just-stored value plus a `RowAccum`
-  (a hierarchical warp-shfl + smem block fold + one `atomicAdd` per block, zero-init'd per launch through the
-  ordinary `zero_outputs` memset machinery). `T__sq` is output slot 1 of the producer node itself (a true
-  multi-output node — planned/allocated per buffer, consumed through an ordinary buffer edge; the old
-  `AuxOutputOp` sentinel is retired); B re-emits as an un-mapped `LoopOp` so `010_recognize` peels BOTH the row and sweep
-  axes free — the whole point: the grid-per-row latency-bound stat kernel becomes a wide 2-D pointwise sweep. The
-  structural probe (`_sink.bind_sinkable_stat`) gates in the negative: the reduce's flat address in T must be affine
-  with reduce coefficient 1 and mixed-radix row coefficients (so `row = flat / N` is a bijection — the per-head
-  qknorm case falls out for free), the projection must be `[pure prefix…, one sweep Loop]`. Like the cut it is a
-  pure realizer of a recognizer-offered stamp, its rows are **evidence-only** (withheld from the model fallback),
-  and its sink siblings mirror EVERY local row so an unrealizable site (atomic producer — the pass waits via
-  `RuleSkipped` for `010`/`030` to settle the producer, then refuses permanently) degrades to the picked row's own
-  local-stat schedule. It runs BEFORE `030` so a sink-stamped row is realized before any grid split of the norm
-  could be.
 - **`030_split_reduce`** splits the **reduce axis** (the REDUCE codec's `g<w>` cross-CTA shard): the SAME
   computation, its K partitioned across CTAs into a partial + finalize. It runs AFTER its decision — the `g` row was
   chosen FOR the split form — so the partial carries the decided knob row verbatim and the finalize is deliberately
   `_mapped`: both **opt out** of re-recognition, because re-entering would discard the very decision being realized.
-- **`032_fuse_finalize`** realizes `PLACE@fin=fuse` — the deferred `g<w>k` finalize inlines into its CONSUMERS'
-  read sites instead of launching (the M=1 decode twins' split-chain closer: each finalize is ~2-3 µs of serialized
-  launch + sync around a fold that is a handful of f32 adds per cell). Every consumer `Load` of the finalize output
-  is replaced by the finalize's own body σ-substituted to that load's index (per-site `__fin<n>` rename; redundant
-  per-read recompute, no barrier — each thread folds exactly the cells it reads). Anchored on the consumer; the
-  finalize node dissolves via the splice's orphan removal once its last reader is rewired, and the firing that
-  removes the last EDGE consumer also inlines the remaining body-level readers in place (a `030` finalize's sweep
-  operands are body refs without edges). Gates: not a graph output, every reader inlinable (flat `Map` / plain
-  `Reduction` shapes; a `Contraction` reader bails), single-component workspace (flash's `(m,l,O)` stays a kernel).
-  Default `cut` (evidence-only: golden rows / `PLACE@fin` pin opt sites in); `030` threads the stamp onto the
-  finalize tile via `_fin_knobs`.
 
-Same fragment idiom, inverted re-entry semantics, different decision altitude (placement: "should this be one
-kernel at all" vs schedule: "how does this kernel run"). The shared fixpoint is what lets them compose without
-knowing about each other: a cut consumer re-enters recognition, may pick a `g<w>k` row, and `030_split_reduce`
-then shards it — cut-then-split on what was originally one fused kernel.
+The fragment idiom's re-entry semantics are the rule's own: `030` opts its halves OUT of recognition, while a rule
+that emits plain un-mapped `LoopOp`s hands them back to `010_recognize` on the pass-scan restart. The shared fixpoint
+is what lets such rules compose without knowing about each other.
+
+> **Retired: the `PLACE` placement family.** `020_cut_edge` (cut a fused producer→matmul dataflow edge into separate
+> kernels), `025_sink_row_reduce` (migrate a norm's row statistic into its producer's epilogue) and
+> `032_fuse_finalize` (inline a deferred `g<w>k` finalize into its consumers' read sites) realized the three
+> non-default elements of the pin-only `PLACE` knob. The knob and all three realizers were removed; recognition now
+> always takes the built-in default (fuse the producer cone, fuse flash, fuse the online-softmax tuple, keep the row
+> statistic local, keep the finalize its own kernel). The golden entries that recorded a `PLACE@` placement are
+> commented out in `search/goldens/*.yaml`, and the tests that exercised the removed forms are xfailed through
+> `tests/xfail_registry.py`.
 
 The atom spec is subtyped by kind (`ir/atom.py`: `AtomKind` is the fixed mma cell selected by name; `ScalarAtom`
 is the plain scalar fma cell). The contraction binder (`bind_contraction`) is loop-addressable so warp-flash can later

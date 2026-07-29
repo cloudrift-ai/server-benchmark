@@ -96,6 +96,23 @@ def _overhangs(axis: Axis, tile: int) -> bool:
     return not (axis.extent.is_static and axis.extent.as_static() % tile == 0)
 
 
+def _splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ...]:
+    """Splice each operand edge's producing stmts into ``stmts`` immediately BEFORE the first stmt
+    that reads the operand's bound name (appended when nothing reads it), ties resolved in operand
+    TUPLE order. This is the one lowering rule that turns the stored ``(operands, step)`` pair back
+    into the flat loop body — deterministic, so the derived loop (and with it ``op_cache_key``)
+    depends only on the stored params."""
+    if not operands:
+        return stmts
+    out = list(stmts)
+    for edge in reversed(operands):  # reversed + insert-before keeps tuple order at shared points
+        body = list(_operand_body(edge))
+        name = _operand_name(edge)
+        idx = next((i for i, st in enumerate(out) if name in _deep_reads([st])), len(out))
+        out[idx:idx] = body
+    return tuple(out)
+
+
 def _flatten_nodes(body: Body) -> tuple[Stmt, ...]:
     """Flatten any nested **structural node** — a :class:`Contraction`, :class:`Reduction`, or
     :class:`Map` — that sits as a stmt in ``body`` to its own lowered loop nest; plain stmts pass
@@ -147,12 +164,19 @@ class Reduction(Stmt):
     — read via ``ops.reduce_plan``). ``lower`` ignores it (it's metadata the materializer / ``030_split_reduce``
     read), so it leaves ``op_cache_key`` byte-identical."""
 
-    carrier: Carrier  # the loop-carried ⊕ algebra (degenerate id / twisted exp)
+    carrier: Carrier  # the loop-carried ⊕ algebra (degenerate id / twisted exp / the product monoid)
     axis: Axis  # the reduce axis
-    partial: Body = field(default_factory=Body)  # the per-cell fold body (the reduce Loop's body)
-    role: AxisRole = AxisRole.PLANAR  # PLANAR (plain) or TWISTED (online-softmax / flash)
+    partial: Body = field(default_factory=Body)  # the per-cell fold STEP (the reduce Loop's body, operands excluded)
+    role: AxisRole = AxisRole.PLANAR  # PLANAR (plain), TWISTED (online-softmax / flash) or CONTRACTION (1k)
     unroll: bool = False
+    # The CLOSED inputs, each an operand edge (a gmem ``Load`` or an inline node) — the 1k fold
+    # vocabulary. Sharing is edge reuse: the step reads an operand's bound name as many times as it
+    # needs. ``lower`` splices each edge's body before its first use (:func:`_splice_operands`).
+    operands: tuple = ()
     reduce: ReducePlan = field(default_factory=ReducePlan)  # the reduce partition (schedule slice), stamped by the _schedule helper
+    # The output tile (schedule slice) of a role=CONTRACTION fold — the ``TilePlan`` the view
+    # (``ops.contraction_view``) reads back; ``None`` for a plain / twisted reduce.
+    tile: TilePlan | None = None
     # The operand smem pipeline this reduce runs under (schedule slice): the cooperative tier's
     # shared-row ``sync`` stage, or a warp-flash tree's resolved K/V stage. ``None`` = gmem-direct.
     stage: Stage | None = None
@@ -181,8 +205,11 @@ class Reduction(Stmt):
         node-walk (so flash's kv loop holds the head ``Σ Q·K`` score contraction loop and the embedded
         ``Σ_j P·V`` PV contraction loop, and split-K's kslice contraction its own nest — exactly the
         loop-in-body form the scalar tier expands): ONE structural rule for a reduce whose per-step
-        partial composes other nodes."""
-        return Loop(axis=self.axis, body=Body(_flatten_nodes(self.partial)), unroll=self.unroll, role=self.role, carrier=self.carrier)
+        partial composes other nodes. Operand edges splice in ahead of their first use
+        (:func:`_splice_operands`), so a fold with hoisted inputs lowers byte-identically to the
+        flat form that carried them in its body."""
+        stmts = _splice_operands(self.operands, _flatten_nodes(self.partial))
+        return Loop(axis=self.axis, body=Body(stmts), unroll=self.unroll, role=self.role, carrier=self.carrier)
 
     @property
     def out(self) -> str:
@@ -717,14 +744,15 @@ def _(s: Map, rename, sigma, axis_fn):
 
 @_rewrite.register
 def _(s: Reduction, rename, sigma, axis_fn):
-    # The schedule slices (``reduce`` / ``stage``) pass through like a ``Contraction``'s ``tile``;
-    # the carrier renames in lockstep with the partial's ``Accum``\\ s — the same rule the ``Loop``
-    # handler applies (``Carrier.rename``).
+    # The schedule slices (``tile`` / ``reduce`` / ``stage``) pass through; the carrier renames in
+    # lockstep with the partial's ``Accum``\\ s — the same rule the ``Loop`` handler applies
+    # (``Carrier.rename``) — and every operand edge dispatches back through the registry.
     return replace(
         s,
         carrier=s.carrier.rename(rename),
         axis=axis_fn(s.axis),
         partial=Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.partial)),
+        operands=tuple(_rewrite(edge, rename, sigma, axis_fn) for edge in s.operands),
     )
 
 
@@ -751,6 +779,9 @@ def tree_nodes(op):
         for s in op.body:
             yield from _stmt_nodes(s)
     elif isinstance(op, Reduction):
+        for edge in op.operands:
+            if isinstance(edge, (Map, Reduction, Contraction)):
+                yield from tree_nodes(edge)
         for s in op.partial:
             yield from _stmt_nodes(s)
     elif isinstance(op, Contraction):

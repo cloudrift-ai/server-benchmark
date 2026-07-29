@@ -78,11 +78,11 @@ class Fold(Stmt):
     carrier: Carrier               # the ⊕ monoid on an N-component product state
                                    #   family "id"  → componentwise ⊕ (sum, max, the gate⊗up product)
                                    #   family "exp" → the twisted action (online softmax / flash)
+    role: AxisRole                 # PLANAR | TWISTED | CONTRACTION — slated for derivation (1l)
     step: Body                     # the lift + carrier update, reading operand values
                                    # by their out-names. A SEQUENCE on purpose: a twisted lift may read
                                    # state its own step updates (flash's P) — algebra, not an emitter
                                    # limitation
-    role: AxisRole                 # PLANAR | TWISTED | CONTRACTION — the recognized algebra annotation
     operands: tuple[Operand, ...]  # the CLOSED inputs, one edge each; sharing = repeated reads in step
     # schedule slices (decorations; composition supplies multi-slice forms — split-K is an outer
     # reduce-partitioned fold whose step composes the inner tiled one):
@@ -185,8 +185,33 @@ materializer glue. Every schedule slice rides the node it decorates; `TileOp` ke
   - *`Contraction` de-Stmt'd*: a plain frozen dataclass (the view); every stored-tree walk is
     `Fold`/`Map`-only; `ops.lower`/`reduce_loop` keep a view-convenience arm.
   - *The rename*: the schedule enum became `FoldMove`; `Reduction` → `Fold` and the `partial` field
-    → `step` across the compiler, tests and docs. Digests unaffected (identity keys off the lowered
-    nest).
+    → `step` across the compiler, tests and docs; `Contraction` → `ContractionView` (the name now
+    announces the lifecycle). Digests unaffected (identity keys off the lowered nest).
+
+## 1l (open): derive `AxisRole`, relocate the demotion decision
+
+`Fold.role` violates derive-never-store for its derivable half and hides a scheduling decision in an
+algebra field for the rest:
+
+- **PLANAR vs TWISTED is redundant with the carrier** — `carrier.twist.family` ("id" vs "exp")
+  already stores it, and parts of the code derive it that way today
+  (`_tile_reduce_axis_transposed`'s `twisted`). Stage 1: derive this half (assert role/family
+  consistency across the suite first, then drop the distinction from reads). Byte-neutral when the
+  assert holds everywhere.
+- **CONTRACTION vs PLANAR carries the DEMOTION decision.** The structural part derives from the
+  step's bilinear parse (`_is_clean_contraction` at recognition ≙ `_parse_bilinear` now). But an
+  unbindable contraction (matvec-shaped 1-D output, no `(m, n)` loads, the zero-legal-rows
+  fallback) is today REWRITTEN to `role=PLANAR` with the same mul-add step — the stored role is the
+  only thing routing those folds to the reduce tiers. That is a recognition-time scheduling
+  decision, not algebra. Stage 2: retire `role`; contraction-ness derives from the parse, and the
+  demotion relocates to schedule dispatch (which `_tile_rows`' `LoweringError` fallback already
+  half-implements).
+
+Constraint that gates both stages: the role is stamped onto the lowered ``Loop``\ s
+(`contraction_loop` marks CONTRACTION; `semiring_binding` scans for it), and the lowered nest is
+what kernel identity digests — the derivation (plus the relocated decision) must reproduce today's
+annotations exactly, the demoted-matvec kernels being the specific digest rows to watch (e.g.
+`down_proj.m1.t`). Independent of phase 2; same digest discipline as 1k.
 
 ## Knob codec (phases 2–3)
 

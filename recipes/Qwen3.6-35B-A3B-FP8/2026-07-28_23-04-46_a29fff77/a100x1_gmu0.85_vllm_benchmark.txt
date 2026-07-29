@@ -1,0 +1,264 @@
+============ Benchmark Task ============
+recipe_dir: recipes/Qwen3.6-35B-A3B-FP8
+variant: a100x1_gmu0.85
+gpu_name: NVIDIA A100 80GB
+gpu_count: 1
+recipe:
+  model:
+    huggingface: Qwen/Qwen3.6-35B-A3B-FP8
+    task: generate
+  engine:
+    llm:
+      context_length: 262144
+      max_concurrent_requests: 16
+      tensor_parallel_size: 1
+      pipeline_parallel_size: 1
+      data_parallel_size: 1
+      gpu_memory_utilization: 0.85
+      vllm:
+        image: vllm/vllm-openai:v0.20.1
+        extra_args: '--enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser
+          qwen3 --language-model-only --default-chat-template-kwargs ''{"preserve_thinking":
+          true}'''
+        extra_env: {}
+      sglang: null
+      docker_options: {}
+  benchmark:
+    max_concurrency: 16
+    num_prompts: 64
+    random_input_len: 2000
+    random_output_len: 2000
+    seed: null
+    temperature: null
+    ignore_eos: false
+    repeats: 1
+  deploy:
+    gpu: NVIDIA A100 80GB
+    gpu_count: 1
+    driver_version: null
+    cuda_version: null
+  command: null
+  aggregate: null
+==================================================
+
+============ Serving Benchmark Result ============
+Successful requests:                     64        
+Failed requests:                         0         
+Maximum request concurrency:             16        
+Benchmark duration (s):                  135.03    
+Total input tokens:                      128000    
+Total generated tokens:                  128000    
+Request throughput (req/s):              0.47      
+Output token throughput (tok/s):         947.91    
+Peak output token throughput (tok/s):    1136.00   
+Peak concurrent requests:                26.00     
+Total token throughput (tok/s):          1895.81   
+---------------Time to First Token----------------
+Mean TTFT (ms):                          2652.78   
+Median TTFT (ms):                        602.43    
+P99 TTFT (ms):                           12830.07  
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          15.55     
+Median TPOT (ms):                        15.19     
+P99 TPOT (ms):                           20.18     
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           15.55     
+Median ITL (ms):                         14.65     
+P99 ITL (ms):                            15.87     
+==================================================
+
+============ Docker Compose Configuration ============
+services:
+
+  vllm_0:
+    image: vllm/vllm-openai:v0.20.1
+    container_name: vllm_0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
+    volumes:
+      - /hf_models:/hf_models
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=***
+      - HF_HOME=/hf_models
+    ports:
+      - "8000:8000"
+    shm_size: '16gb'
+    ipc: host
+    restart: unless-stopped
+    command: >
+      --trust-remote-code
+      --gpu-memory-utilization=0.85
+      --host 0.0.0.0
+      --port 8000
+      --tensor-parallel-size 1
+      --pipeline-parallel-size 1
+      --data-parallel-size 1
+      --model Qwen/Qwen3.6-35B-A3B-FP8
+      --served-model-name Qwen/Qwen3.6-35B-A3B-FP8
+      --max-model-len 262144
+      --max-num-seqs 16
+      --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 --language-model-only --default-chat-template-kwargs '{"preserve_thinking": true}'
+    healthcheck:
+      test: ["CMD", "bash", "-c", "curl -f http://localhost:8000/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 180
+      start_period: 1200s
+==================================================
+
+============ Benchmark Command ============
+vllm bench serve
+    --model Qwen/Qwen3.6-35B-A3B-FP8
+    --trust-remote-code
+    --max-concurrency 16
+    --num-prompts 64
+    --random-input-len 2000
+    --random-output-len 2000
+    --base-url http://localhost:8000
+==================================================
+
+============ Timing ============
+remote_provision            2.8s
+image_pull                  1.3s
+model_download            173.0s
+model_load_and_warmup     254.4s
+  startup                  75.2s
+  weights_load             19.1s
+  torch_compile            53.2s
+  engine_warmup           103.0s
+  cuda_graph_capture        4.0s
+smoke_test                  4.9s
+benchmark                 160.4s
+total                     596.8s
+==================================================
+
+============ System Information ============
+=== HOSTNAME ===
+riftvm
+
+=== OS ===
+PRETTY_NAME="Ubuntu 24.04.1 LTS"
+NAME="Ubuntu"
+VERSION_ID="24.04"
+VERSION="24.04.1 LTS (Noble Numbat)"
+VERSION_CODENAME=noble
+ID=ubuntu
+ID_LIKE=debian
+HOME_URL="https://www.ubuntu.com/"
+SUPPORT_URL="https://help.ubuntu.com/"
+BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"
+UBUNTU_CODENAME=noble
+LOGO=ubuntu-logo
+
+=== KERNEL ===
+6.8.0-51-generic
+
+=== CPU INFORMATION ===
+Architecture:                         x86_64
+CPU op-mode(s):                       32-bit, 64-bit
+Address sizes:                        48 bits physical, 48 bits virtual
+Byte Order:                           Little Endian
+CPU(s):                               15
+On-line CPU(s) list:                  0-14
+Vendor ID:                            AuthenticAMD
+Model name:                           AMD EPYC 7742 64-Core Processor
+CPU family:                           23
+Model:                                49
+Thread(s) per core:                   1
+Core(s) per socket:                   1
+Socket(s):                            15
+Stepping:                             0
+BogoMIPS:                             4491.56
+Flags:                                fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm rep_good nopl cpuid extd_apicid tsc_known_freq pni pclmulqdq ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw perfctr_core ssbd ibrs ibpb stibp vmmcall fsgsbase tsc_adjust bmi1 avx2 smep bmi2 rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves clzero xsaveerptr wbnoinvd arat npt lbrv nrip_save tsc_scale vmcb_clean flushbyasid pausefilter pfthreshold v_vmsave_vmload vgif umip rdpid arch_capabilities
+Virtualization:                       AMD-V
+Hypervisor vendor:                    KVM
+Virtualization type:                  full
+L1d cache:                            960 KiB (15 instances)
+L1i cache:                            960 KiB (15 instances)
+L2 cache:                             7.5 MiB (15 instances)
+L3 cache:                             240 MiB (15 instances)
+NUMA node(s):                         1
+NUMA node0 CPU(s):                    0-14
+Vulnerability Gather data sampling:   Not affected
+Vulnerability Itlb multihit:          Not affected
+Vulnerability L1tf:                   Not affected
+Vulnerability Mds:                    Not affected
+Vulnerability Meltdown:               Not affected
+Vulnerability Mmio stale data:        Not affected
+Vulnerability Reg file data sampling: Not affected
+Vulnerability Retbleed:               Mitigation; untrained return thunk; SMT disabled
+Vulnerability Spec rstack overflow:   Mitigation; SMT disabled
+Vulnerability Spec store bypass:      Mitigation; Speculative Store Bypass disabled via prctl
+Vulnerability Spectre v1:             Mitigation; usercopy/swapgs barriers and __user pointer sanitization
+Vulnerability Spectre v2:             Mitigation; Retpolines; IBPB conditional; STIBP disabled; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected
+Vulnerability Srbds:                  Not affected
+Vulnerability Tsx async abort:        Not affected
+
+=== CPU COUNT ===
+15
+
+=== MEMORY ===
+               total        used        free      shared  buff/cache   available
+Mem:           206Gi       7.7Gi       140Gi        31Mi        60Gi       198Gi
+Swap:             0B          0B          0B
+
+=== GPU INFORMATION ===
+NVIDIA A100-SXM4-80GB, 81920 MiB, 580.65.06, P0, 35, 0 %
+
+=== GPU DETAILS ===
+Wed Jul 29 06:04:51 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.65.06              Driver Version: 580.65.06      CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA A100-SXM4-80GB          Off |   00000000:01:00.0 Off |                    0 |
+| N/A   35C    P0             64W /  400W |   68786MiB /  81920MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A            3657      C   VLLM::EngineCore                      68774MiB |
++-----------------------------------------------------------------------------------------+
+
+=== DISK USAGE ===
+Filesystem      Size  Used Avail Use% Mounted on
+tmpfs            21G  1.3M   21G   1% /run
+efivarfs        256K   18K  234K   7% /sys/firmware/efi/efivars
+/dev/vda1       774G   71G  704G  10% /
+tmpfs           104G  4.0K  104G   1% /dev/shm
+tmpfs           5.0M     0  5.0M   0% /run/lock
+/dev/vda16      881M   62M  758M   8% /boot
+/dev/vda15      105M  8.4M   97M   8% /boot/efi
+tmpfs            21G   20K   21G   1% /run/user/1000
+
+=== BLOCK DEVICES ===
+NAME    MAJ:MIN RM  SIZE RO TYPE MOUNTPOINTS
+sr0      11:0    1  368K  0 rom  
+vda     253:0    0  800G  0 disk 
+|-vda1  253:1    0  799G  0 part /
+|-vda14 253:14   0    4M  0 part 
+|-vda15 253:15   0  106M  0 part /boot/efi
+`-vda16 259:0    0  913M  0 part /boot
+
+=== UPTIME ===
+ 06:04:51 up  1:45,  1 user,  load average: 0.06, 0.02, 0.02
+
+=== DOCKER VERSION ===
+Docker version 28.5.1, build e180ab8
+
+=== DOCKER INFO ===
+28.5.1 | OS: Ubuntu 24.04.1 LTS | Containers: 1 | Images: 1
+==================================================

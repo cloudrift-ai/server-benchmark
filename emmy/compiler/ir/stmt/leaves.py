@@ -129,6 +129,8 @@ class Load(Stmt):
     index: tuple[Expr, ...]
     dtype: DataType | None
 
+    pure = True  # a pure value binding — legal inside a stored ``Lambda`` body
+
     def __init__(
         self,
         name: str | None = None,
@@ -357,6 +359,8 @@ class Assign(Stmt):
     op: ElementwiseImpl
     args: tuple[str, ...]
     dtype: DataType | None = None
+
+    pure = True  # a pure value binding — legal inside a stored ``Lambda`` body
 
     def __post_init__(self) -> None:
         if isinstance(self.op, str):

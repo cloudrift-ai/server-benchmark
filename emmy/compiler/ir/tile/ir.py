@@ -171,6 +171,8 @@ class Fold(Stmt):
     — read via ``ops.reduce_plan``). ``lower`` ignores it (it's metadata the materializer / ``030_split_reduce``
     read), so it leaves ``op_cache_key`` byte-identical."""
 
+    pure = True  # a term is a value — its internals are its own; legal inside a stored ``Lambda``
+
     carrier: Carrier  # the loop-carried ⊕ algebra (degenerate id / twisted exp / the product monoid)
     axis: Axis  # the reduce axis
     step: Body = field(default_factory=Body)  # the per-cell fold STEP (the reduce Loop's body, operands excluded)
@@ -724,6 +726,8 @@ class Map(Stmt):
     IS one — and it is itself a ``Stmt``, so it can occupy a statement position in another node's body
     (the fused sibling group inside a split reduce's ``step``).
     :attr:`source` is the len-≤1 compat read for the single-source forms."""
+
+    pure = True  # a term is a value — its internals are its own; legal inside a stored ``Lambda``
 
     body: Body = field(default_factory=Body)
     sources: tuple[Fold | ContractionView | Map, ...] = ()  # the project∘reduce sources, () = pure pointwise

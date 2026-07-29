@@ -370,6 +370,15 @@ class Stmt:
       no children; block-structured stmts override).
     """
 
+    # Purity trait — True iff this stmt is a pure value binding, a legal member of a stored
+    # ``Lambda`` body (the λ-foldMap term vocabulary). Declared on the interface with a
+    # CONSERVATIVE ``False`` default and per-class opt-in (no isinstance whitelist): ``Load`` /
+    # ``Assign`` declare pure; the effectful / scope-bound kinds (``Accum``, ``Write``, ``Init``,
+    # ``Loop``…) never do; the structural nodes (``Fold`` / ``Map``) declare pure — a term is a
+    # value, its internals are its own. A NEW stmt kind is excluded from lambdas until it
+    # declares itself. ``Lambda.__post_init__`` is the enforcing formation gate.
+    pure: bool = False
+
     def deps(self) -> tuple[str, ...]:
         """SSA names this stmt reads — its 'requirements'.
 

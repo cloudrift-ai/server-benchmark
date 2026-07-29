@@ -37,7 +37,7 @@ they enforce Loop-IR's invariants (SSA scoping rules, axis uniqueness)
 and produce Loop-IR's canonical form.
 """
 
-from emmy.compiler.ir.stmt.algebra import Carrier, State, StateMerge, Twist
+from emmy.compiler.ir.stmt.algebra import Carrier, Monoid, State, StateMerge, Twist, eval_lambda, foldmap_eval
 from emmy.compiler.ir.stmt.base import (
     INDENT,
     RenderCtx,
@@ -55,7 +55,7 @@ from emmy.compiler.ir.stmt.base import (
     _pad as _pad,  # re-export for ir.kernel.ir
 )
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
-from emmy.compiler.ir.stmt.body import Body
+from emmy.compiler.ir.stmt.body import Body, Lambda
 from emmy.compiler.ir.stmt.leaves import (
     Accum,
     Assign,
@@ -93,9 +93,11 @@ __all__ = [
     "StateMerge",
     "Cond",
     "Init",
+    "Lambda",
     "Load",
     "Loop",
     "Mma",
+    "Monoid",
     "Pack",
     "RenderCtx",
     "RowAccum",
@@ -113,6 +115,8 @@ __all__ = [
     "dedup_loads",
     "drop_size_one_free_axes",
     "eliminate_copy_aliases",
+    "eval_lambda",
+    "foldmap_eval",
     "hoist_loop_invariants",
     "normalize_body",
     "op_to_expr",

@@ -20,7 +20,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cached_property
 
+from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.stmt.base import RenderCtx, Stmt, render_merge_program
+from emmy.compiler.ir.stmt.body import Body, Lambda
 from emmy.compiler.ir.stmt.carrier import (
     Channel,  # noqa: F401 — re-exported for the carrier builders / tests
     exp_combine_states,
@@ -238,6 +240,120 @@ class StateMerge(Stmt):
         return render_merge_program(self.merge, self.state.names, ctx)
 
 
+@dataclass(frozen=True)
+class Monoid:
+    """A TRUE monoid — ``(init, combine)``, ONE program. The finished form of
+    :class:`Carrier`/:class:`Twist`: ``combine : S × S → S`` is a pure :class:`Lambda` whose
+    params are ``(s₁…sₙ, s₁′…sₙ′)`` and whose results are the merged state — state enters as
+    params and leaves as results, no ``Accum`` in any stored program.
+
+    The serial streaming step is NOT stored: it is ``s′ = combine(s, lift(k))`` — combine
+    specialized at the singleton state the lift produces, simplified deterministically at
+    lowering — so update-vs-combine consistency is correct BY CONSTRUCTION (there is no second
+    program to keep coupled). Generated ONCE at construction: :meth:`of` (the componentwise
+    convenience constructor, the ``M(add)`` spelling) for a plain fold, recognition's pattern
+    builders for a twisted one — the family name dissolves there, and downstream reads the
+    program, never a name.
+
+    DEGENERATE is a DERIVED shape predicate, not a storage arm: :meth:`component_ops` is the
+    componentwise test on ``combine`` (every result ``sᵢ″ = ⊕ᵢ(sᵢ, sᵢ′)``, independently — the
+    ``as_accums`` read), and the trait/legality queries (additive? commutative? which op?) read
+    the ⊕ᵢ handles off that same trivially-shaped program, so the op handles survive without a
+    field.
+
+    ``dtypes`` is the optional per-component ACCUMULATOR dtype side-tuple (``()`` = lowering
+    default throughout) — precision, not algebra; it exists only so lowered ``Accum``\\ s stay
+    byte-identical, and a precision decoration may absorb it later.
+
+    ASSOCIATIVITY is TEST-enforced (the certificate the split/coop tiers rest on): the
+    :func:`foldmap_eval` property tests check ``combine(a, combine(b, c)) ==
+    combine(combine(a, b), c)`` on random states."""
+
+    init: tuple[float, ...]  # the seeds — the op identities for a plain fold; (−inf, 0, 0) LSE
+    combine: Lambda  # S × S → S — THE ⊕
+    dtypes: tuple = ()  # optional per-component accumulator dtype (precision side-tuple)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.init, tuple):
+            object.__setattr__(self, "init", tuple(self.init))
+        n = len(self.init)
+        if len(self.combine.params) != 2 * n or len(self.combine.results) != n:
+            raise ValueError(f"Monoid combine must be S × S → S at arity {n}: params={self.combine.params} results={self.combine.results}")
+
+    @property
+    def arity(self) -> int:
+        return len(self.init)
+
+    @classmethod
+    def of(cls, *ops, dtypes: tuple = ()) -> Monoid:
+        """The componentwise convenience constructor — the ``M(op…)`` spelling: one independent
+        self-fold ⊕ᵢ per state component, seeds the op identities. The ONE construction site of
+        a plain fold's combine program."""
+        impls = tuple(ElementwiseImpl(o) if isinstance(o, str) else o for o in ops)
+        idents = []
+        for op in impls:
+            if op.identity is None:
+                raise ValueError(f"Monoid.of: op {op.name!r} has no identity — not a monoid ⊕")
+            idents.append(op.identity)
+        n = len(impls)
+        s = tuple(f"s{i}" for i in range(n))
+        o = tuple(f"s{i}__o" for i in range(n))
+        r = tuple(f"s{i}__c" for i in range(n))
+        body = Body(tuple(Assign(name=r[i], op=impls[i], args=(s[i], o[i])) for i in range(n)))
+        return cls(init=tuple(idents), combine=Lambda(params=s + o, body=body, results=r), dtypes=dtypes)
+
+    def component_ops(self) -> tuple[ElementwiseImpl, ...] | None:
+        """The DEGENERATE shape test on ``combine`` — every result ``sᵢ″ = ⊕ᵢ(sᵢ, sᵢ′)``,
+        independently and in order (the ``as_accums`` read). Returns the per-component ⊕ᵢ
+        handles (what the trait/legality queries consume), or ``None`` for a twisted monoid
+        (any cross-component read, rescale temp, or reordering fails the shape)."""
+        n = self.arity
+        lam = self.combine
+        if len(lam.body) != n:
+            return None
+        s, o = lam.params[:n], lam.params[n:]
+        ops: list[ElementwiseImpl] = []
+        for i, st in enumerate(lam.body):
+            if not isinstance(st, Assign) or st.name != lam.results[i] or st.args != (s[i], o[i]):
+                return None
+            ops.append(st.op)
+        return tuple(ops)
+
+    @property
+    def degenerate(self) -> bool:
+        """True iff the combine is componentwise (a plain fold) — a derived predicate, never a
+        storage arm."""
+        return self.component_ops() is not None
+
+
+# --------------------------------------------------------------------------------------------
+# The executable SPEC — the denotational foldMap evaluator. ⟦Fold⟧ = ⊕_{k ∈ axis} ι(lift(k)),
+# seeded at init: the ~20-line oracle the agreement + associativity property tests run against.
+# --------------------------------------------------------------------------------------------
+
+
+def eval_lambda(lam: Lambda, args: tuple) -> tuple:
+    """Evaluate a pure ``Lambda`` denotationally on numeric ``args`` (positional binding).
+    Covers the ANF ``Assign`` chain — the stored combine/lift vocabulary; an arg spelling that
+    is not a bound name evaluates as a float literal (the ``str(term)`` convention), and a
+    ``float`` result passes through (ι's literal components — softmax's ``(x, 1)``)."""
+    env = dict(zip(lam.params, args, strict=True))
+    for s in lam.body:
+        assert isinstance(s, Assign), f"spec evaluator covers the ANF Assign chain, got {type(s).__name__}"
+        env[s.name] = s.op(*(env[a] if a in env else float(a) for a in s.args))
+    return tuple(env[r] if isinstance(r, str) else r for r in lam.results)
+
+
+def foldmap_eval(monoid: Monoid, lift: Lambda, elements) -> tuple:
+    """⟦Fold⟧ — the denotational foldMap: fold ``combine`` over the per-element singleton states
+    ``lift(k, v₁…vₙ)``, seeded at ``init``. Each element of ``elements`` is the positional arg
+    tuple of one ``lift`` application (the iteration var first, then the operand values)."""
+    state = tuple(monoid.init)
+    for el in elements:
+        state = eval_lambda(monoid.combine, (*state, *eval_lambda(lift, tuple(el))))
+    return state
+
+
 def _stmt_reads(a: Stmt) -> tuple[str, ...]:
     """The arg reads of one merge-program stmt. An ``Assign`` reads its ``args``; an
     ``Accum`` reads its folded ``value`` and (when redirected) its rescaled ``base`` — its
@@ -263,4 +379,4 @@ def _merge_reads(merge: tuple[Stmt, ...], state_names: tuple[str, ...]) -> tuple
     return tuple(reads)
 
 
-__all__ = ["Carrier", "State", "StateMerge", "Twist"]
+__all__ = ["Carrier", "Monoid", "State", "StateMerge", "Twist", "eval_lambda", "foldmap_eval"]

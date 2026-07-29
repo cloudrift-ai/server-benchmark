@@ -253,8 +253,8 @@ def _emit(op, ctx: Ctx) -> Frag:
         loop = Loop(axis=op.axis, body=Body((*prefix, *_emit_body(op.partial, ctx))), unroll=op.unroll, role=op.role, carrier=op.carrier)
         return Frag(body=[loop], out=Handle(op.out), carrier=op.carrier)
     if isinstance(op, Contraction):
-        # Scalar / block=1: the synthesized ``CONTRACTION`` loop nest + fused epilogue — byte-identical
-        # to ``op.lower()``. A warp-tiled nested contraction never reaches here — the warp-tiled tree
+        # Scalar / block=1: the synthesized ``CONTRACTION`` loop nest — byte-identical to
+        # ``op.lower()``. A warp-tiled nested contraction never reaches here — the warp-tiled tree
         # realizes wholesale at fragment residence (``_twist``, keyed in ``_bind``).
         return Frag(body=list(op.lower()), out=Handle(op.acc))
     raise TypeError(f"_emit: expected a Map / Reduction / Contraction node, got {type(op).__name__}")
@@ -377,8 +377,8 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
       ``atomize → register_tile → unit_tile``, the reduce (K) serial per cell from the atom's
       :func:`reduce_codegen`, ``store`` the per-cell sink (default :func:`store_sink`; the flash
       inner QK/PV pass a sink that bridges the accumulator into the softmax twist). Its projection
-      ``epilogue`` (+ any ``tail``) rides the node; the bare grid-``Write`` glue is synthesized here
-      (it needs ``ctx.output``, so it can't ride the node).
+      arrives as ``tail`` — peeled off the wrapping ``Map``, the ONE home for a projection; the bare
+      grid-``Write`` glue is synthesized here (it needs ``ctx.output``, so it can't ride the node).
     - a :class:`Reduction` whose :class:`ReducePlan` cooperates tiles its REDUCE axis instead
       (:func:`_tile_reduce_axis` — ``coop`` lanes at the unit level, ``reg`` ILP chains at the
       register level, the carrier merge closing the fold). The output stays one cell per thread:
@@ -388,12 +388,12 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
       inside it) + ``tail`` + the ``out_val`` store glue is the whole fold region."""
     grid = tuple(ctx.grid)
     if isinstance(op, Contraction):
-        epi = [*op.epilogue, *tail]
+        epi = list(tail)
         if not has_write(epi):
             epi = with_store(epi, ctx.output, grid, op.out)
-        c = replace(op, epilogue=Body(tuple(epi)))
+        c = op
         state_decls, reduce_region = reduce_codegen(c, ctx.stage, ctx.inputs, ctx.workers)
-        sink = store if store is not None else store_sink(c)
+        sink = store if store is not None else store_sink(c, Body(tuple(epi)))
         t = unit_tile(register_tile(atomize(c.atom.shape[:2]), c.mn), c.mn)
         mn, lead, bt, lanes = c.mn, c.lead_axes, c.block_threads, c.atom.lanes
     else:

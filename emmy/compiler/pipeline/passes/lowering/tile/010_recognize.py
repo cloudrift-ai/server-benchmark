@@ -285,15 +285,16 @@ def _nodify_contraction(node, free: tuple, bindings: dict):
         except LoweringError:
             pass
         else:
-            return Contraction(
+            con = Contraction(
                 axes=(free[-2], free[-1]),
                 k_axis=rloop.axis,
                 a_operand=bind_operand(a_load, bindings),
                 folds=((b_load, acc),),
                 tile=TilePlan(),
                 lead_axes=tuple(free[:-2]),
-                epilogue=epi,
             )
+            # ONE home for the projection: the wrapping ``Map``'s body, never a node field.
+            return Map(body=epi, sources=(con,)) if len(epi) else con
     demoted = Loop(axis=rloop.axis, body=rloop.body, unroll=rloop.unroll, role=AxisRole.PLANAR, carrier=rloop.carrier)
     red = Reduction.from_loop(demoted)
     return Map(body=projection, sources=(red,)) if len(projection) else red
@@ -311,7 +312,7 @@ def _demote_planar(node, bindings: dict):
     rloop = src.loop
     demoted = Loop(axis=rloop.axis, body=rloop.body, unroll=rloop.unroll, role=AxisRole.PLANAR, carrier=rloop.carrier)
     red = Reduction.from_loop(demoted)
-    projection = Body((*src.epilogue, *(node.body if isinstance(node, Map) else ())))
+    projection = Body(tuple(node.body) if isinstance(node, Map) else ())
     return Map(body=projection, sources=(red,)) if len(projection) else red
 
 

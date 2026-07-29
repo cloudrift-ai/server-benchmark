@@ -19,7 +19,7 @@ Leading ``_`` so the pass loader (globs ``*.py``, skips ``_``-prefixed) skips it
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dtype import F32
@@ -738,6 +738,10 @@ class _AtomOps:
     stage: Stage | None = None
     inputs: object = None
     workers: object = None  # the resolved WarpSpec (None = uniform SIMT) — consumed by _staged
+    # The projection this node's store folds in — the wrapping ``Map``'s body plus the grid-``Write``
+    # glue, assembled by ``_factor._bind``. It is NOT a node field: every projection has ONE home,
+    # the ``Map`` wrapper, and the store sink is where it lands.
+    epilogue: Body = field(default_factory=Body)
 
     def reduce(self, cells, offset, mn):
         """The contraction K-loop — the ONE driver both atoms flow through, deciding nothing: a
@@ -934,7 +938,7 @@ class _MmaOps(_AtomOps):
         atom = c.atom
         m, n = mn
         mcell, ncell = offset[0].base(i), offset[1].base(j)
-        tail = list(c.epilogue)
+        tail = list(self.epilogue)
         sigma = Sigma({m.axis.name: mcell, n.axis.name: ncell})
         accs = (c.acc, *(acc for _, acc in c.folds[1:]))
         frags = (f"_c{i}_{j}", *(_fold_frag(f"_c{i}_{j}", f) for f in range(1, len(c.folds))))
@@ -1045,14 +1049,15 @@ class _ScalarOps(_AtomOps):
         the (overhanging) write, dedup shared operand loads."""
         c = self.c
         sigma = _scalar_sigma(mn, offset, i, j)
-        cell = copy_cell(c.epilogue, sigma, f"__c{i}_{j}", _scalar_protected(c))
+        cell = copy_cell(self.epilogue, sigma, f"__c{i}_{j}", _scalar_protected(c))
         cell = _guard_writes(cell, _scalar_bound(mn, offset, i, j))
         return _dedup_loads(cell)
 
 
-def _atom_ops(c: Contraction, stage: Stage | None = None, inputs=None, workers=None) -> _AtomOps:
+def _atom_ops(c: Contraction, stage: Stage | None = None, inputs=None, workers=None, epilogue: Body | None = None) -> _AtomOps:
     """The **one** atom dispatch — select the codegen strategy off the atom kind."""
-    return _MmaOps(c, stage, inputs, workers) if isinstance(c.atom, AtomKind) else _ScalarOps(c, stage, inputs, workers)
+    cls = _MmaOps if isinstance(c.atom, AtomKind) else _ScalarOps
+    return cls(c, stage, inputs, workers, Body(()) if epilogue is None else epilogue)
 
 
 def reduce_codegen(c: Contraction, stage: Stage | None = None, inputs=None, workers=None):
@@ -1066,9 +1071,10 @@ def reduce_codegen(c: Contraction, stage: Stage | None = None, inputs=None, work
     return ops.state, ops.reduce
 
 
-def store_sink(c: Contraction):
+def store_sink(c: Contraction, epilogue: Body | None = None):
     """The default **matmul sink** — the per-cell ``store(i, j, offset, mn)`` from the atom strategy
-    (an mma ``RegStore`` / the replicated scalar ``epilogue`` tail). ``factorize(c, store=…)`` swaps it
-    (a flash sink that bridges the accumulator into the streaming-softmax twist), reusing the shared
-    ``reduce`` emission."""
-    return _atom_ops(c).store
+    (an mma ``RegStore`` / the replicated scalar ``epilogue`` tail), folding in the ``epilogue`` (the
+    projection off the node's ``Map`` wrapper + the store glue). ``factorize(c, store=…)`` swaps the
+    sink (a flash sink that bridges the accumulator into the streaming-softmax twist), reusing the
+    shared ``reduce`` emission."""
+    return _atom_ops(c, epilogue=epilogue).store

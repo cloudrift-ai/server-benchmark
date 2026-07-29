@@ -45,13 +45,12 @@ def resolve(op, bindings=None):
             return op
         return replace(op, source=src, partial=partial if partial is not None else op.partial)
     if isinstance(op, Contraction):
-        epi = _resolve_stmts(op.epilogue, bindings)
         if op.a_ref is None:
-            return op if epi is None else replace(op, epilogue=epi)
+            return op
         bound = bindings.get(op.a_ref)
         if bound is None:
             raise KeyError(f"resolve: operand reference {op.a_ref!r} resolves to no binding")
-        return replace(op, a_operand=Body(tuple(lower(bound, bindings))), epilogue=epi if epi is not None else op.epilogue)
+        return replace(op, a_operand=Body(tuple(lower(bound, bindings))))
     return op
 
 
@@ -98,7 +97,7 @@ def nodify_reduce(op, plan: ReducePlan):
     reduce partition ``plan`` **on the node** (not a residual ``TileOp.reduce`` field). A
     :class:`Contraction` node (the recognize-side per-cell contraction) folds through its
     synthesized loop — the coop / ILP K partition treats it as the degenerate carrier of its
-    additive fold, the epilogue riding the wrapping ``Map``. A flat ``Map`` holding an annotated
+    additive fold, any projection riding the wrapping ``Map``. A flat ``Map`` holding an annotated
     reduce ``Loop`` (a split partial) nodifies via :meth:`Reduction.from_loop`, which reconstructs
     the identical annotated loop, so the lowering is byte-identical; a projection tail (a fused
     epilogue) rides a wrapping ``Map`` over the node, a bare reduce becomes the root node.
@@ -110,8 +109,10 @@ def nodify_reduce(op, plan: ReducePlan):
     bare sum: the reduce is the body's head); a projection tail after it becomes the wrapping
     ``Map`` body."""
     if isinstance(op, Contraction):
-        red = replace(Reduction.from_loop(op.loop), reduce=plan)
-        return Map(body=op.epilogue, sources=(red,)) if len(op.epilogue) else red
+        return replace(Reduction.from_loop(op.loop), reduce=plan)
+    if isinstance(op, Map) and op.sources and isinstance(op.sources[0], Contraction):
+        # A projecting wrapper: nodify the contraction under it, the projection staying put.
+        return replace(op, sources=(nodify_reduce(op.sources[0], plan),))
     rloop = reduce_loop(op)
     red = replace(Reduction.from_loop(rloop), reduce=plan)
     body = list(op.body)

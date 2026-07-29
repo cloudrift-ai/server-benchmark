@@ -111,7 +111,7 @@ def test_twisted_role_propagates() -> None:
     assert axis_role(Map(body=Body(()), sources=(red,))) is AxisRole.TWISTED
 
 
-def _contraction(epilogue: Body | None = None) -> Contraction:
+def _contraction() -> Contraction:
     """A minimal tiled contraction node — ``acc = Σ_k A[m, k]·B[k, n]`` over a scalar tile."""
     a = Load(name="a_e", input="A", index=(Var("m"), Var("k")))
     b = Load(name="b_e", input="B", index=(Var("k"), Var("n")))
@@ -121,7 +121,6 @@ def _contraction(epilogue: Body | None = None) -> Contraction:
         a_operand=a,
         folds=((b, "acc"),),
         tile=TilePlan.parse("n2/f2"),
-        epilogue=epilogue or Body(()),
     )
 
 
@@ -143,11 +142,17 @@ def test_contraction_dispatches_through_ops() -> None:
     assert c.out == "acc"
 
 
-def test_contraction_lower_appends_the_fused_epilogue() -> None:
+def test_a_projection_rides_the_map_wrapper_not_the_node() -> None:
+    """ONE home for a projection: the wrapping ``Map``'s body. A ``Contraction`` lowers to just its
+    synthesized loop, and the projected form is the same ``project ∘ contract`` spelling the
+    ``Reduction`` tiers use — so the future cut realizer sees a single seam shape."""
     proj = (Assign(name="y", op="relu", args=("acc",)), Write(output="out", index=(Var("m"), Var("n")), value="y"))
-    c = _contraction(epilogue=Body(proj))
-    assert lower(c) == [c.loop, *proj]
-    assert reduce_loop(c).role is AxisRole.CONTRACTION  # the projection doesn't hide the contraction
+    c = _contraction()
+    node = Map(body=Body(proj), sources=(c,))
+    assert lower(c) == [c.loop]
+    assert lower(node) == [c.loop, *proj]
+    assert c.nested() == ()
+    assert reduce_loop(node).role is AxisRole.CONTRACTION  # the projection doesn't hide the contraction
 
 
 # --- nodify_reduce: the coop-K / split partial flat-Map → Reduction node lift ------------------ #
@@ -316,7 +321,6 @@ def _pv_contraction(tile: str = "") -> Contraction:
         a_operand=a_body,
         folds=((Load(name="v_e", input="V", index=(Var("j"), Var("d"))), "oblk"),),
         tile=TilePlan.parse(tile) if tile else TilePlan(),
-        epilogue=Body((Write(output="out", index=(Var("m"), Var("d")), value="oblk"),)),
     )
 
 

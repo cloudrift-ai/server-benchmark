@@ -48,14 +48,14 @@ re-recognizes structure the tile IR already holds.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.expr import Expr, Literal
 from emmy.compiler.ir.schedule import Placement, ReducePlan, Stage, TilePlan, WarpSpec
-from emmy.compiler.ir.stmt import INDENT, Accum, Assign, Body, Carrier, Load, Loop, RenderCtx, Stmt, pretty_body
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carrier, Load, Loop, RenderCtx, Stmt
 
 if TYPE_CHECKING:
     from emmy.compiler.ir.atom import Atom
@@ -282,7 +282,7 @@ class Contraction(Stmt):
     flat node** that cleanly splits the **algebra params** (what to contract) from the **schedule**
     (how to tile it): the params are the tiled output ``axes`` ``(m, n)``, the contraction ``k_axis``,
     the leading batch ``lead_axes``, the A operand, the ``folds`` fold channels (``(b_load, acc)``
-    pairs), and the projection ``epilogue`` (which carries the output ``Write``); the schedule is the
+    pairs); the projection has ONE home — the wrapping :class:`Map`'s body — never a node field; the schedule is the
     one ``tile`` field — a resolved :class:`~emmy.compiler.ir.schedule.TilePlan` carrying the
     leaf ``atom`` (tensor-core :class:`AtomKind` or the ``1×1`` :class:`ScalarAtom`), the per-CTA
     **UNIT** grid + per-unit **REGISTER** sub-tile, and the K-chunk. Keeping the schedule a single
@@ -291,9 +291,9 @@ class Contraction(Stmt):
 
     The contraction itself is **never stored** — both tiers *synthesize* it from the operands:
     ``_atom.reduce_codegen`` lowers the mma atom into ``ldmatrix`` + ``mma.sync`` and the scalar atom into a
-    ``for k: acc += a*b`` register-tiled loop — then run the ``epilogue`` (``acc`` is the SSA name the
-    synthesized reduce produces and the epilogue consumes). The operand buffers ride
-    :meth:`external_reads`; the epilogue is the only nested ``Body``. ``_factor.factorize`` reads the
+    ``for k: acc += a*b`` register-tiled loop — then run the projection peeled off the wrapping
+    ``Map`` (``acc`` is the SSA name the synthesized reduce produces and the projection consumes). The
+    operand buffers ride :meth:`external_reads`; the node has no nested ``Body``. ``_factor.factorize`` reads the
     **derived** geometry below (the ``(m, n)`` :class:`Side` pair — ``tile`` / ``mask`` / ``block`` /
     ``unit`` per axis — plus ``block_threads`` / ``b_trans``) straight off the node; it's ``@property``, so it stays out of the fields
     ``structural_key`` digests (the node IS keyed as an intermediate ``KernelOp``). The atom selects
@@ -317,11 +317,8 @@ class Contraction(Stmt):
     folds: tuple[tuple[Load, str], ...]
     tile: TilePlan  # the schedule: leaf atom + unit/register widths + K-chunk (the only schedule field)
     lead_axes: tuple[Axis, ...] = ()  # params
-    epilogue: Body = field(default_factory=Body)  # params
 
     def __post_init__(self) -> None:
-        if not isinstance(self.epilogue, Body):
-            object.__setattr__(self, "epilogue", Body(self.epilogue))
         assert self.folds, "a Contraction needs at least one fold channel"
         k = self.k_axis.name
         assert len({k in bl.index[-1].free_vars() for bl, _ in self.folds}) == 1, (
@@ -425,10 +422,10 @@ class Contraction(Stmt):
         return Loop(axis=base.axis, body=Body((*base.body, *extra)), unroll=base.unroll, role=base.role, carrier=carrier)
 
     def lower(self) -> list[Stmt]:
-        """Flatten to the loop-IR body — the synthesized reduce ``Loop`` followed by the projection
-        ``epilogue`` (a fused-epilogue contraction's own stmts, empty for a bare one). The materializer
-        expands the node through ``_factor.factorize`` instead; this is the structural-key / dump path."""
-        return [self.loop, *self.epilogue]
+        """Flatten to the loop-IR body — just the synthesized reduce ``Loop``. A projection is NEVER
+        here: it has one home, the wrapping :class:`Map`'s body. The materializer expands the node
+        through ``_factor.factorize`` instead; this is the structural-key / dump path."""
+        return [self.loop]
 
     # ---- params: the (m, n) output axes unpacked ---------- #
     @property
@@ -478,14 +475,14 @@ class Contraction(Stmt):
         binding load, the same test ``_atomize`` made when it bound the operand."""
         return self.k_axis.name in self.b_load.index[-1].free_vars()
 
-    # ---- the kernel-stmt protocol (the epilogue is the only nested Body; the operand buffers are
-    # external reads; the synthesized reduce produces ``acc``) ---------- #
+    # ---- the kernel-stmt protocol (no nested Body — a projection rides the wrapping ``Map``; the
+    # operand buffers are external reads; the synthesized reduce produces ``acc``) ---------- #
     def nested(self) -> tuple[Body, ...]:
-        return (self.epilogue,)
+        return ()
 
     def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
-        (epilogue,) = bodies
-        return replace(self, epilogue=epilogue)
+        assert not bodies, "Contraction has no nested body — a projection rides the wrapping Map"
+        return self
 
     def defines(self) -> tuple[str, ...]:
         return tuple(acc for _, acc in self.folds)
@@ -510,7 +507,7 @@ class Contraction(Stmt):
         bs = " + ".join(bl.input for bl, _ in self.folds)
         accs = ", ".join(acc for _, acc in self.folds)
         ops = f"{a_src} @ {bs}{t} -> {accs} ({self.atom.name})"
-        return [f"{indent}Contraction [{self.m_axis.name}, {self.n_axis.name}] {ops}", *pretty_body(self.epilogue, indent + INDENT)]
+        return [f"{indent}Contraction [{self.m_axis.name}, {self.n_axis.name}] {ops}"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         raise AssertionError("Contraction must be expanded by 010_materialize before render")
@@ -523,7 +520,7 @@ from emmy.compiler.ir.stmt.passes import rewrite as _rewrite  # noqa: E402
 
 @_rewrite.register
 def _(s: Contraction, rename, sigma, axis_fn):
-    # Route the operand Loads + accumulator + epilogue through the generic rewrite (SSA / Expr / axis
+    # Route the operand Loads + accumulator through the generic rewrite (SSA / Expr / axis
     # canonicalization); map the skeleton axes; pass the ``tile`` schedule through unchanged.
     # ``b_trans`` is derived from ``b_load`` (a property), so the rewritten load carries it.
     # A binding REFERENCE is a plain SSA name — it renames through the same map as any other, which
@@ -541,7 +538,6 @@ def _(s: Contraction, rename, sigma, axis_fn):
         folds=tuple((_rewrite(bl, rename, sigma, axis_fn), rename(acc)) for bl, acc in s.folds),
         tile=s.tile,
         lead_axes=tuple(axis_fn(a) for a in s.lead_axes),
-        epilogue=Body(tuple(_rewrite(c, rename, sigma, axis_fn) for c in s.epilogue)),
     )
 
 
@@ -616,11 +612,8 @@ def tree_nodes(op):
         yield from tree_nodes(op.source)
         for s in op.partial:
             yield from _stmt_nodes(s)
-    elif isinstance(op, Contraction):
-        if isinstance(op.a_operand, Body):
-            for s in op.a_operand:
-                yield from _stmt_nodes(s)
-        for s in op.epilogue:
+    elif isinstance(op, Contraction) and isinstance(op.a_operand, Body):
+        for s in op.a_operand:
             yield from _stmt_nodes(s)
 
 
@@ -634,7 +627,7 @@ def _node_defines(node) -> list[str]:
         stmts = [s for s in node.partial if not isinstance(s, (Map, Reduction, Contraction))]
     else:
         cone = list(node.a_operand) if isinstance(node.a_operand, Body) else []
-        stmts = [s for s in (*cone, *node.epilogue) if not isinstance(s, (Map, Reduction, Contraction))]
+        stmts = [s for s in cone if not isinstance(s, (Map, Reduction, Contraction))]
         out += list(node.defines())
     for s in stmts:
         out += sorted(_deep_defines(s))
@@ -677,7 +670,7 @@ class TileOp(Op):
     monoid, flash, a coop-K / split-K contraction — carries its :class:`~.schedule.ReducePlan` on its
     ``Reduction`` node (read via ``ops.reduce_plan``); the flat-``Map`` coop-K contraction is nodified
     by ``ops.nodify_reduce`` at schedule / split time. The contraction operand→role binding is not a
-    ``TileOp`` field either — a tiled contraction carries its A/B operands / accumulator / epilogue on
+    ``TileOp`` field either — a tiled contraction carries its A/B operands / accumulator on
     its ``Contraction`` node (``op``), the single source of truth; ``_schedule._contraction_node``
     resolves them via ``_atomize.semiring_binding``."""
 

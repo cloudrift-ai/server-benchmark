@@ -1250,13 +1250,9 @@ def test_write_ab_json_greedy_bench_fail_and_record_knobs(tmp_path):
     import json
     from types import SimpleNamespace
 
-    import emmy.compiler.pipeline.knob as knob_mod
-    import emmy.compiler.pipeline.search.space  # noqa: F401 — the schedule codec declarations
     from emmy.commands.run import _GoldenBench, _write_ab_json
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.cuda.ir import CudaOp
-
-    knob_mod.reset_registry()  # the lazy registry may predate the space import above
 
     def graph_with(knobs):
         g = Graph()

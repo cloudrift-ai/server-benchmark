@@ -6,9 +6,9 @@ and the env plumbing; :mod:`~emmy.compiler.pipeline.search.features` owns the fe
 module owns the concrete *declarations* AND the candidate-value generators — so the whole tunable
 surface (dimensions × values) is visible in one place. A rule that decides a knob imports it from here
 (``from emmy.compiler.pipeline.search.space import VECTORIZE_LOADS``) rather than declaring its
-own. ``knob.registry()`` still discovers them via ``knob._walk_modules`` (any package module with
-module-level ``Knob`` attributes is walked, and this module is imported at pipeline startup by the
-rules that consume its knobs). When adding a knob, declare it here and import it into the owning rule.
+own. Registration is construction (``Knob.__post_init__``), and ``knob.registry()`` imports this
+module before answering — so the registry is complete in any process that can ask, however little
+of the pipeline it loaded. When adding a knob, declare it here and import it into the owning rule.
 
 Scope note: this module holds the **static** space only — the declared dimensions and their bounded
 candidate grids. Per-kernel legality (the warp static-K divisibility check, the stage resolvers, coop
@@ -275,6 +275,18 @@ INTERLEAVE_LOADS = Knob(
     hints=(True,),  # on by default; not a search dimension — manual override only via the env var
     help="Sink each Load to just before its first SSA-consumer in flat compute blocks.",
     off=False,
+)
+
+#: The unroll budget — the max static loop trip count eligible for ``#pragma unroll``. Pin-only
+#: (``off`` defaults to ``_UNSET`` → never stamped / featurized / enumerated, so it can't perturb the
+#: search or the goldens): ``EMMY_UNROLL=0`` keeps every extent-driven loop **rolled** (compact,
+#: readable kernels — e.g. for a blog listing), a high value unrolls more. Unset → each call site's
+#: built-in cap (64 for an inner reduce, 128 for the flash KV fold, uncapped for the tensor-core
+#: K-chunk), so the default codegen is byte-identical. Consumed by ``lowering/kernel/_atom.unroll_ok``.
+UNROLL = Knob(
+    "UNROLL",
+    KnobType.INT,
+    help="Max static loop trip count to #pragma-unroll (the unroll budget); pin 0 to keep loops rolled. Unset = per-site cap.",
 )
 
 FAST_EXP = Knob(

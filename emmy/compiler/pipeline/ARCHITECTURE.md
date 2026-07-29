@@ -45,7 +45,7 @@ Terms used throughout:
 | `pipeline.py` | Engine core: `Pattern` / `Match` / `Rule` / `Pass` / `Pipeline` (the frozen pass layout) plus `Run` — the per-run state and engine loop. |
 | `fork.py` | The `Fork` interface (`OptionFork`, `ThunkFork`) and the reusable `Level` + `build_fork_tree` lazy knob-cartesian tree builder. |
 | `knob.py` | The `Knob` descriptor system and the `EMMY_<KNOB>` env namespace (borrowing `config.knob_var` / `config.knob_raw`; `format_tuning_knobs` renders the real tuning knobs for `tune` output). Holds NO concrete knob declarations. |
-| `search/space.py` | **The single home of the search space.** Every `Knob` instance is declared here and nowhere else — the schedule codecs (`REDUCE` / `TILE` / `STAGE` / `WSPEC` / `RASTER`), the pin-only structural `PLACE`, the kernel-lowering policy knobs (`VECTORIZE_LOADS` / `INTERLEAVE_LOADS`), and the enumeration value grids (`scalar_tile_moves` & co). A rule that decides a knob imports it from here; `knob.registry()` still discovers knobs by walking loaded modules (`space.py` loads at pipeline startup via those rules). |
+| `search/space.py` | **The single home of the search space.** Every `Knob` instance is declared here and nowhere else — the schedule codecs (`REDUCE` / `TILE` / `STAGE` / `WSPEC` / `RASTER`), the pin-only structural `PLACE`, the kernel-lowering policy knobs (`VECTORIZE_LOADS` / `INTERLEAVE_LOADS`), and the enumeration value grids (`scalar_tile_moves` & co). A rule that decides a knob imports it from here; registration is construction (`Knob.__post_init__`), and `knob.registry()` imports `space.py` before answering, so the registry is complete in any process. |
 | `search/features.py` | The featurizers (`knob_features`, `tile_signature`, the `D_*` / `MMA_*` encodings) — kept beside `space.py` so the whole space (dimensions × values × encoding) is analyzable in one package. |
 | `search/db.py` | `SearchDB`, the persistent SQLite store (see Part 6, "Search persistence"). |
 | `search/policy/mcts.py` | The in-memory MCTS (`SearchTree`) colocated with its only reader, `TuningSearch`. |
@@ -939,8 +939,9 @@ A **`Knob`** (`knob.py`) is the canonical schema for one tuning dimension: name,
 `STR`), candidate `hints` (advisory — the rule still validates structural fit), and a help string. Rules stamp values
 into `TileOp.knobs` dicts; the autotuner reads those back as the per-hop knob delta in the `lowering` table. Every
 knob is declared **in `search/space.py`** — the single home for the whole tunable surface — and imported by the rule
-(`lowering/tile/_schedule`, the scheduling helper inside `010_recognize`) that resolves it. The registry
-(`knob.registry()`) auto-collects every `Knob` instance in every loaded module — no manual registration. `knob.py`
+(`lowering/tile/_schedule`, the scheduling helper inside `010_recognize`) that resolves it. Declaring a `Knob` IS
+registering it (`Knob.__post_init__`); `knob.registry()` imports `space.py` before answering, so the set is complete
+in any process — no module scanning, no manual registration. `knob.py`
 also owns the `EMMY_<KNOB>` env namespace (decode per `Knob` type; `config.py` remains the sole owner of
 `os.environ`).
 

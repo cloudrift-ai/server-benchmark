@@ -40,7 +40,7 @@ from types import SimpleNamespace
 from emmy.compiler.context import STATIC_SMEM_CAP
 from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim
 from emmy.compiler.ir.atom import ATOM_REGISTRY
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis, AxisRole, Window
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.schedule import Raster, Stage, WarpSpec, has_scalar_atom_alias, is_warp_codec
 from emmy.compiler.ir.sigma import Sigma
@@ -2282,7 +2282,9 @@ def _twisted_warp_options(
         # query axis shrinks to its CTA-block count; the value (expect output) axis folds into the
         # fragment tile and leaves the grid.
         grid = tuple(
-            Axis(name=ax.name, extent=ax.extent.ceil_div(um * fm * atom_m), source_axis=ax.source_axis or ax) if ax.name == m_name else ax
+            Axis(name=ax.name, extent=ax.extent.ceil_div(um * fm * atom_m), window=Window(parent=ax.source_axis or ax))
+            if ax.name == m_name
+            else ax
             for ax in tile.place.free
             if ax.name != pv.n_axis.name
         )

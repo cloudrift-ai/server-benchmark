@@ -129,18 +129,10 @@ class Reduction:
     # The operand smem pipeline this reduce runs under (schedule slice): the cooperative tier's
     # shared-row ``sync`` stage, or a warp-flash tree's resolved K/V stage. ``None`` = gmem-direct.
     stage: Stage | None = None
-    # The stream's ABSOLUTE base for a cross-CTA slice partial (flash split-KV: ``030_split_reduce`` shrinks
-    # ``axis`` to the slice length B and sets ``offset = _ksplit · B``). The fold walks its local
-    # ``[0, B)`` window; a consumer needing the absolute reduce-axis coordinate (gmem/TMA operand
-    # bases, the causal mask's key columns) adds this. ``None`` = the un-split stream (base 0).
-    offset: Expr | None = None
-    # The stream's ABSOLUTE end for a cross-CTA slice partial over a SYMBOLIC axis:
-    # ``min((_ksplit + 1) · B, S)`` where ``S`` is the runtime extent (``axis`` then carries the
-    # bn-aligned slice width ``B = ceil(S / (cta·bn)) · bn`` as a composite Dim). The realizer stops
-    # the stream at ``bound − offset`` local steps and masks/clamps against it — a mid-tensor slice
-    # end reads VALID keys belonging to the next slice, which the extent-only tail machinery would
-    # not exclude. ``None`` = static slice (extent alone bounds it) or the un-split stream.
-    bound: Expr | None = None
+    # A cross-CTA SLICE of the stream (flash split-KV) is not spelled here: ``030_split_reduce``
+    # shrinks ``axis`` to the slice length and the slice's absolute base / end ride that axis's
+    # :class:`~emmy.compiler.ir.axis.Window` — ONE windowing vocabulary, the same one an axis's
+    # split parentage uses, read by the realizer and the mask machinery alike.
 
     def __post_init__(self) -> None:
         if not isinstance(self.partial, Body):

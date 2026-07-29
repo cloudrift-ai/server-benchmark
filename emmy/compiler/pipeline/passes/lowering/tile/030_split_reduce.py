@@ -29,7 +29,7 @@ This cut handles **additive** carriers — a degenerate ``PLANAR`` reduce (``sum
 ``CONTRACTION`` contraction (split-K matmul), one carrier-state component each — and the twisted
 multi-component carrier: **flash split-KV** (:func:`_split_twisted_warp`), where a WARP-tiled
 ``TWISTED`` streaming tree keeps its fragment residence in the partial (the ``Reduction`` axis
-shrinks to the slice and its absolute base rides ``Reduction.offset``), stores the raw
+shrinks to the slice and its absolute base rides that axis's ``Window``), stores the raw
 ``(m, l, O)`` state to an f32 workspace, and the finalize folds the partitions through the
 exp-family LSE combine before projecting. Pays where the un-split grid starves the SMs (few
 heads / short query axis); pin ``REDUCE=g<n>k``.
@@ -49,7 +49,7 @@ from dataclasses import replace
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis, AxisRole, Window
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.schedule import Fold, Level
@@ -293,7 +293,10 @@ def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Map, plan: R
         return (Literal(i, "int"), Var(split.name), *(Var(a.name) for a in batch), *cell)
 
     off = BinaryExpr("*", Var(split.name), b_dim.expr)
-    sliced = replace(red, axis=replace(red.axis, extent=b_dim), reduce=_strip_grid(plan), offset=off, bound=bound)
+    # The slice rides the AXIS's window — its absolute base / end in the un-split stream.
+    sliced = replace(
+        red, axis=replace(red.axis, extent=b_dim, window=Window(parent=red.axis, base=off, bound=bound)), reduce=_strip_grid(plan)
+    )
     ws_writes = tuple(Write(output=ws_name, index=ws_index(i, names[i]), value=names[i]) for i in range(n_comp))
     partial_map = Map(body=Body(ws_writes), sources=(sliced,))
     partial_tile = _mapped(partial_map, (split, *grid), name=f"{tile.name}__partial", knobs=tile.knobs, bindings=tile.bindings)

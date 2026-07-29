@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.atom import AtomKind
-from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.kernel.ir import (
@@ -82,7 +82,7 @@ def shrink_axis(axis: Axis, reg: int) -> Axis:
     symbolic (``(seq_len+reg-1)//reg``) so the launch grid sizes from the runtime extent."""
     if reg <= 1:
         return axis
-    return Axis(name=axis.name, extent=axis.extent.ceil_div(reg), source_axis=axis.source_axis or axis)
+    return Axis(name=axis.name, extent=axis.extent.ceil_div(reg), window=Window(parent=axis.source_axis or axis))
 
 
 def copy_cell(body, sigma, suffix: str, protected) -> list:

@@ -61,6 +61,31 @@ _SYMBOLIC_AXIS_HI = 1 << 30
 
 
 @dataclass(frozen=True)
+class Window:
+    """The slice of a PARENT axis an axis walks — the ONE windowing vocabulary.
+
+    ``parent`` is the pre-split axis this one was carved out of: top-level axes (the ones the
+    frontend traces) carry no window at all, and every sub-axis the partition planner produces
+    (``M_b`` / ``M_t`` / ``M_r`` from ``M``) points at the original. Downstream passes (MMA
+    factorization, the scope-walk origin derivation) group surrounding axes by that identity
+    instead of by name-suffix convention.
+
+    ``base`` / ``bound`` are the slice's ABSOLUTE start / end in the parent's coordinates, set
+    when a cross-CTA split hands each CTA its own window of a reduce stream (``030_split_reduce``
+    shrinks the axis to the slice length): the fold walks its local ``[0, extent)`` and any
+    consumer needing the absolute coordinate — gmem / TMA operand bases, the causal mask's key
+    columns — adds ``base``. ``bound`` additionally stops a SYMBOLIC slice whose end falls
+    mid-tensor (``min((s+1)·B, S)``): the realizer runs ``bound − base`` local steps and masks
+    against it, since a mid-tensor slice end reads VALID keys belonging to the next slice, which
+    the extent-only tail machinery would not exclude. ``None`` on both = the whole parent.
+    """
+
+    parent: Axis | None = None
+    base: Expr | None = None
+    bound: Expr | None = None
+
+
+@dataclass(frozen=True)
 class Axis:
     """One named iteration variable.
 
@@ -70,35 +95,25 @@ class Axis:
     ``int`` / ``str`` to ``Dim`` for ergonomics, so ``Axis("m", 32)``
     keeps working.
 
-    ``source_axis`` is the original (pre-split) axis this one was carved
-    out of. Top-level axes (the ones the frontend traces) have
-    ``source_axis = None``; every sub-axis the partition planner produces
-    (e.g. ``M_b``, ``M_t``, ``M_r`` from ``M``) points to the original.
-    Used by downstream passes (MMA factorization, scope-walk origin
-    derivation) to group surrounding axes by source-axis identity instead
-    of name-suffix convention. Equality and hashing exclude ``source_axis``
-    so Var-rename invariance is preserved — two Axes with the same name
-    and extent are the same axis regardless of where they came from.
-
-    ``real_extent`` is the original static N (or M) extent BEFORE ceil-div
-    rounding for masked tiles. Set on the block axis (``*_b``) by the
-    partition planner when the underlying source axis has no divisor in
-    ``_TUNE_AXIS_CHOICES``: the ``extent`` becomes ``ceil_div(real, BN·FN)``
-    so the grid covers a partial last tile, and ``real_extent`` carries
-    the bound used to gate boundary lanes. Materializer emits
-    ``if (decoded_src_coord < real_extent) { ... }`` around the per-thread
-    body. Excluded from equality / hashing for the same Var-rename-invariance
-    reason as ``source_axis``.
+    ``window`` is the slice of a parent axis this one walks (:class:`Window` — its ``parent``
+    provenance and, for a cross-CTA slice, the absolute ``base`` / ``bound``). ONE windowing
+    concept, read by the realizer and the mask machinery alike. Excluded from equality / hashing so
+    Var-rename invariance is preserved — two Axes with the same name and extent are the same axis
+    regardless of which window of what they walk.
     """
 
     name: str
     extent: Dim
-    source_axis: Axis | None = field(default=None, compare=False, hash=False)
-    real_extent: int | None = field(default=None, compare=False, hash=False)
+    window: Window | None = field(default=None, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.extent, Dim):
             object.__setattr__(self, "extent", to_dim(self.extent))
+
+    @property
+    def source_axis(self) -> Axis | None:
+        """The pre-split axis this one was carved out of — the window's ``parent``."""
+        return self.window.parent if self.window is not None else None
 
     def split(self, factor: int) -> tuple[Axis, Axis]:
         """Split this axis into ``(outer, inner)`` for tile-style decomposition.
@@ -109,18 +124,15 @@ class Axis:
         extents need a residue-tail story that no current rule wants. Symbolic
         extents refuse to split (M3 of the dynamic-shapes plan).
 
-        Children inherit ``source_axis = self.source_axis or self`` — top-level
-        axes become their own source on first split; further splits chain to
-        the same original.
+        Children inherit the window's ``parent = self.source_axis or self`` —
+        top-level axes become their own parent on first split; further splits
+        chain to the same original.
         """
         ext = self.extent.as_static()
         if ext % factor != 0:
             raise ValueError(f"Axis.split: {self.name} extent {ext} not divisible by {factor}")
-        src = self.source_axis or self
-        return (
-            Axis(f"{self.name}_o", ext // factor, source_axis=src),
-            Axis(f"{self.name}_i", factor, source_axis=src),
-        )
+        w = Window(parent=self.source_axis or self)
+        return (Axis(f"{self.name}_o", ext // factor, window=w), Axis(f"{self.name}_i", factor, window=w))
 
     def extent_expr(self) -> Expr:
         """This axis's extent as an ``Expr`` — a literal int (static) or the symbolic ``Dim``
@@ -147,4 +159,4 @@ def extend_simplify_ctx(ctx: SimplifyCtx, axis: Axis) -> SimplifyCtx:
     return ctx.extend(axis.name, Interval(0, _SYMBOLIC_AXIS_HI), bound=ext.expr)
 
 
-__all__ = ["Axis", "AxisRole", "extend_simplify_ctx"]
+__all__ = ["Axis", "AxisRole", "Window", "extend_simplify_ctx"]

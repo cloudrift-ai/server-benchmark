@@ -442,15 +442,15 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # (``seq`` is the slice length after ``030_split_reduce`` shrank the axis) and ``red.offset`` is the
     # slice's absolute base — added wherever the absolute key coordinate matters: the score-column
     # masks (``col_bases``), the gmem/TMA operand bases, and the causal bound below.
-    kv_off = red.offset
+    kv_off = red.axis.window.base if red.axis.window is not None else None
     # A SYMBOLIC slice partial additionally carries ``red.bound`` — the slice's absolute end
     # ``min((s+1)·B, S)``. The extent (``seq``) is then the uniform bn-aligned width ``B``, so the
     # extent-only tail machinery would keep a mid-tensor slice's overrun keys (VALID data belonging
     # to the next slice): every kv mask/clamp below bounds against the slice end instead —
     # ``abs_kv_end`` for absolute coordinates, ``local_kv_end`` (= bound − offset) for window-local
     # ones, and the stream stops at ``local_kv_end`` (composed with the causal bound).
-    kv_bound = red.bound
-    assert kv_bound is None or kv_off is not None, "Reduction.bound rides only a slice partial (offset set)"
+    kv_bound = red.axis.window.bound if red.axis.window is not None else None
+    assert kv_bound is None or kv_off is not None, "a window bound rides only a slice partial (base set)"
     abs_kv_end: Expr = kv_bound if kv_bound is not None else seq
     local_kv_end: Expr | None = BinaryExpr("-", kv_bound, kv_off) if kv_bound is not None else None
 

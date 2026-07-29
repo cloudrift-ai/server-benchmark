@@ -46,7 +46,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
 from emmy.compiler.dtype import F32
-from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, Literal, Var
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
@@ -156,7 +156,9 @@ def grid_tile(
     guards the stores to the compute band — an aux thread's wrapped decode aliases a compute cell,
     so an unguarded ``store`` would double-write it."""
     offset = tuple(replace(o, block_var=s.block) if s is not None else o for o, s in zip(t.offset, mn, strict=True))
-    block_axes = tuple(shrink_axis(Axis(name=s.block, extent=s.axis.extent, source_axis=s.axis), s.tile) for s in mn if s is not None)
+    block_axes = tuple(
+        shrink_axis(Axis(name=s.block, extent=s.axis.extent, window=Window(parent=s.axis)), s.tile) for s in mn if s is not None
+    )
     lane_axes = (Axis(name="_lane", extent=lanes),) if lanes > 1 else ()
     axes = (*lead_axes, *block_axes, *t.axes, *lane_axes)
 
@@ -444,7 +446,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, siblings: tuple =
             # output-var references were σ-substituted to ``blk·32 + n_lane`` inside.
             state, fold, close, lanes_axes = _tile_reduce_axis_transposed(op, plan, ctx, tail, out_val)
             out_ax = next(a for a in reversed(grid) if not (a.extent.is_static and a.extent.as_static() == 1))
-            blk = Axis(name=f"{out_ax.name}_blk", extent=out_ax.extent.ceil_div(32), source_axis=out_ax)
+            blk = Axis(name=f"{out_ax.name}_blk", extent=out_ax.extent.ceil_div(32), window=Window(parent=out_ax))
             lead = tuple(blk if a.name == out_ax.name else a for a in grid)
             t = replace(t, axes=lanes_axes)
             bt = plan.coop

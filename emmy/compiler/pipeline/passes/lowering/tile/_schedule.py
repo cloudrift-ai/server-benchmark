@@ -8,8 +8,8 @@ separate ``020`` pass). Scheduling binds the placement's ``free`` axes onto the 
 scheduling forks — the reduce-axis **partition** (:class:`~...schedule.ReducePlan`, the
 ``REDUCE`` codec) for a reduce axis and the output **tile** (:class:`~...schedule.TilePlan`,
 the ``TILE`` codec) for a contraction — read off the axes' :class:`~...axis.AxisRole`, never a
-kernel kind. This is a helper module (``_``-prefixed, not a standalone rule); its knob
-constants still register (``knob._walk_modules`` walks every imported module under the package).
+kernel kind. This is a helper module (``_``-prefixed, not a standalone rule); the knobs it
+decides are imported from ``search/space.py`` (registration happens at declaration there).
 
 This cut picks a **whole-CTA cooperative** partition for a **static, scalar-output,
 degenerate-monoid** reduce (plain ``sum`` / ``max`` / ``mean``) when the reduce axis is

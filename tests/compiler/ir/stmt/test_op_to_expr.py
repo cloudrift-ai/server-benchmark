@@ -1,6 +1,6 @@
 """Unit tests for ``op_to_expr`` — elementwise op-name → Expr translation."""
 
-from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr
+from emmy.compiler.ir.expr import BinaryExpr, FuncCallExpr, Literal, TernaryExpr
 from emmy.compiler.ir.stmt.base import op_to_expr
 
 
@@ -21,6 +21,15 @@ def test_copy_is_identity_passthrough():
     """``copy`` returns its input unchanged (dropout lowers through this path)."""
     x = Literal(1.0, "float")
     assert op_to_expr("copy", [x]) is x
+
+
+def test_sin_cos_render_as_intrinsics():
+    """DiT timestep embedding keeps its runtime trigonometric ops."""
+    x = Literal(1.0, "float")
+    for name in ("sin", "cos"):
+        expr = op_to_expr(name, [x])
+        assert isinstance(expr, FuncCallExpr)
+        assert expr.name == name
 
 
 def test_mask_ops_render():

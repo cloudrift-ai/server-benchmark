@@ -1003,6 +1003,15 @@ rides the atomic; a non-distributive epilogue (`l2`'s `sqrt`, a fused bias/activ
 (`NotImplementedError` → pin `g<n>k`, which projects once after the combine). The check is
 `030_split_reduce._projection_distributes`.
 
+Two deploy-only dominance/default rules live beside the generic schedule enumeration. A coalesced wide-K `F.linear`
+MATVEC (the M=1 contraction-demotion tier) always uses a `b32` single-warp fold unless `REDUCE` is explicitly pinned;
+the serial sibling walks all of K in one thread and measured 4–16× slower on DiT conditioning projections. Separately,
+RTX 4080 runs of the `(rows=256, K=1152)` LayerNorm, four exact static contraction shapes, and the
+S256/head-dim-72 flash shape in `facebook/DiT-XL-2-256` select their measured winning rows (contractions key by
+`(computed-A, B layout, M, N, K)`). This SKU-exact selection is active only for deterministic deploy
+(`Context.validate_pins`); tune mode retains the complete legal space and explicit `TILE` / `STAGE` / `REDUCE` pins
+remain authoritative.
+
 **`STAGE`** (STR codec, `010_recognize` / `_schedule` → `lowering/kernel/010_materialize`) — the operand-staging codec
 `d<depth>/sync|cp|tma[/ring][/alt][/p<reg_depth>]` on the typed `Stage` schedule struct (composes with both fragments
 of the `TILE` knob): `d<depth>` the gmem→smem ring depth, `sync`/`cp.async`/TMA transport, `p<reg_depth>` the
@@ -1089,7 +1098,7 @@ moveset are also documented there.
 
 | Pass                      | What rules do                                                                                |
 |---------------------------|----------------------------------------------------------------------------------------------|
-| `frontend/decomposition/` | Rewrite frontend ops (`LinearOp`, `MatmulOp`, `SdpaOp`, layout ops, fused `rms_norm` / `layer_norm` / `softmax`) into tensor-IR primitives + layout-only `IndexMapOp`s, broadcast-explicit via `_broadcast.broadcast_to`. Before `LinearOp` decomposes, `merge_sibling_linears` folds ALL sibling linears sharing one activation (q/k/v, gate/up) into ONE linear over a load-time N-concat weight (`ConstantOp.source_parts` — the loader concatenates before the `load_ops` chain, zero runtime cost) with `SliceOp` views re-deriving each original output; one launch (one split-K partial+finalize) replaces the per-projection set, and the merged edge is a plain matmul every downstream tier handles. Guards: pristine exclusively-owned weights only, no bias, and no sibling whose output reaches a graph output through layout ops alone (the view would demote to a copy kernel at the capture ABI). The concat order is graph-insertion order — canonical regardless of match enumeration, because the buffer layout is ABI for goldens and packs. |
+| `frontend/decomposition/` | Rewrite frontend ops (`LinearOp`, `MatmulOp`, `SdpaOp`, layout ops, fused `rms_norm` / `layer_norm` / `softmax`) into tensor-IR primitives + layout-only `IndexMapOp`s, broadcast-explicit via `_broadcast.broadcast_to`. Before `LinearOp` decomposes, `merge_sibling_linears` folds ALL sibling linears sharing one activation (q/k/v, gate/up) into ONE linear over load-time N-concat weights and optional biases (`ConstantOp.source_parts` — the loader concatenates before the `load_ops` chain, zero runtime cost) with `SliceOp` views re-deriving each original output; one launch (one split-K partial+finalize) replaces the per-projection set, and the merged edge is a plain matmul every downstream tier handles. Guards: pristine exclusively-owned parameters with uniform bias presence, and no sibling whose output reaches a graph output through layout ops alone (the view would demote to a copy kernel at the capture ABI). The concat order is graph-insertion order — canonical regardless of match enumeration, because the buffer layout is ABI for goldens and packs. |
 | `frontend/optimization/`  | `compose_indexmaps`: collapse chains of single-source / single-consumer `IndexMapOp` into one coord_map, so trivial layout kernels don't block fusion. |
 | `loop/lifting/`           | `lift_*` rules wrap each surviving tensor primitive in a trivial one-op `LoopOp`.            |
 | `loop/fusion/`            | `split_shared_indexmap` (first) fuses a fan-out pure-indexmap `LoopOp` into all its consumers in one rewrite; `merge_loop_ops` then splices adjacent single-consumer `LoopOp` pairs; `dedup_loads` drops identical `(input, index)` Loads; `fold_output_reshape` retargets a producer's `Write` through a graph-output memcpy-identity flatten (verified exactly over the finite domain; clean affine re-decomposition onto the output strides) — the copy kernel the splicer can't take (reduce-bearing producer × div/mod reader σ). Folding scalar-constant broadcasts into consumers cuts Qwen3-Embedding-0.6B from 394 → 337 kernels. |

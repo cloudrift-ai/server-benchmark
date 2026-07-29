@@ -129,7 +129,7 @@ it replaces the frontend layout ops via `coord_map` expressions.
 
 | Symbol                               | Role                                                           |
 |--------------------------------------|----------------------------------------------------------------|
-| `ElementwiseOp`                      | Per-element scalar function (`add`/`mul`/`exp`/…).             |
+| `ElementwiseOp`                      | Per-element scalar function (`add`/`mul`/`exp`/`sin`/`cos`/…). |
 | `ReduceOp`                           | Collapse one axis via associative binary op.                   |
 | `ScanOp`                             | Cumulative variant of reduce.                                  |
 | `GatherOp`, `ScatterOp`              | Data-dependent reads / writes.                                 |

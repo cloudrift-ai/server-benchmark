@@ -45,6 +45,15 @@ def register_run_command(subparsers):
         ),
     )
     parser.add_argument(
+        "--adapter",
+        choices=["causal-lm", "dit"],
+        default="causal-lm",
+        help=(
+            "Model trace adapter. ``causal-lm`` preserves the existing HuggingFace text-model path; "
+            "``dit`` traces one fixed-shape FP16 Diffusers DiT transformer block (requires --layer)."
+        ),
+    )
+    parser.add_argument(
         "--ir",
         help=(
             "Path to a JSON IR dump (any stage: torch / tensor / loop / tile / kernel / cuda). "
@@ -196,7 +205,7 @@ def handle_run(args):
         logger.error("torch is required: pip install torch")
         sys.exit(1)
 
-    from emmy.commands.compile import load_or_trace, resolve_golden_arg
+    from emmy.commands.compile import load_or_trace, resolve_golden_arg, validate_trace_adapter_args
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.pipeline.dump import CompilerDump
 
@@ -204,6 +213,7 @@ def handle_run(args):
     if sum(x is not None for x in (args.input, args.code, args.ir)) > 1:
         logger.error("input / --code / --ir are mutually exclusive")
         sys.exit(1)
+    validate_trace_adapter_args(args)
 
     # A .json input (via --ir or as the positional) takes the IR path: finish
     # lowering an arbitrary-stage dump, no traced module to bench against torch.
@@ -318,6 +328,7 @@ def handle_run(args):
     trace_payload = {
         "code": args.code,
         "input": args.input,
+        "adapter": getattr(args, "adapter", "causal-lm"),
         "layer": args.layer,
         "seq_len": args.seq_len,
         "dynamic": list(args.dynamic) if getattr(args, "dynamic", None) else None,
@@ -1121,6 +1132,12 @@ def _write_ab_json(args, results: dict, graph, bench, golden_benches, greedy_fai
             "kernels": _kernel_rows(greedy_iso.graph, greedy_iso.bench),
             "flags": list(greedy_iso.flags),
         }
+    backend_rows = {name: {"latency_us": us} for name, us in (results or {}).items()}
+    eager_us = (results or {}).get("Eager PyTorch")
+    if eager_us:
+        for name, us in (results or {}).items():
+            backend_rows[name]["speedup_vs_eager"] = eager_us / us if us else 0.0
+
     payload = {
         "input": args.code or args.input or getattr(args, "ir", None),
         "golden": getattr(args, "golden", None),
@@ -1128,7 +1145,7 @@ def _write_ab_json(args, results: dict, graph, bench, golden_benches, greedy_fai
         "gpu": gpu.live_name(),
         "warmup": args.warmup,
         "iters": args.iters,
-        "backends": {name: {"latency_us": us} for name, us in (results or {}).items()},
+        "backends": backend_rows,
         "greedy": greedy,
         "pinned": pinned,
     }

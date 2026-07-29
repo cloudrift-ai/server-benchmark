@@ -354,7 +354,10 @@ def _compile_tc(q, k, v, module=None):
 
 
 @requires_cuda
-@pytest.mark.parametrize(("B", "H", "S", "D"), [(1, 2, 32, 16), (2, 3, 64, 32), (1, 4, 128, 64), (1, 1, 16, 16)])
+@pytest.mark.parametrize(
+    ("B", "H", "S", "D"),
+    [(1, 2, 32, 16), (2, 3, 64, 32), (1, 4, 128, 64), (1, 2, 32, 72), (1, 1, 16, 16)],
+)
 def test_generated_tensorcore_flash_matches_torch(monkeypatch, B, H, S, D):
     torch.manual_seed(S + D)
     q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))

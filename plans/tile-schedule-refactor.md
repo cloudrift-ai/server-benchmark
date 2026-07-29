@@ -116,9 +116,12 @@ class Monoid:
                                              # Component wrapper duplicating it
     inject: Lambda | None = None     # ι : A → S (None = the identity embedding); subsumes Channel.term
     psi: str | None = None           # twist family ("exp"; None = degenerate) — Twist.family purified.
-                                     # WHY it must exist: components underdetermine ⊕ — flash and the
-                                     # plain (max,add,add) product share a components tuple but differ
-                                     # in ⊕ (coupled rescale vs componentwise); psi is the coupling.
+                                     # WHY it must exist: (components, inject) underdetermine ⊕. With
+                                     # state (m,l), components (max,add) and the SAME ι(s)=(s,1):
+                                     # psi=None folds (rowmax, count); psi="exp" folds the stabilized
+                                     # LSE — the update is s ⊕ ι(a), inject is only the ι half, and the
+                                     # rescale e^{m−m″} reads BOTH operands' pivots, so the coupling is
+                                     # irreducibly ⊕'s (a pure ι cannot see the running state).
                                      # WHY a NAME and not a ψ Lambda: the stable form is NOT derivable
                                      # from the bijection (naive conjugation is the overflow the
                                      # representation avoids) — each family pairs a generator with a

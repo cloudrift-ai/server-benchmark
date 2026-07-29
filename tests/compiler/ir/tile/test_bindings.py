@@ -21,17 +21,20 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.stmt.passes import rewrite
 from emmy.compiler.ir.tile import Contraction, Map, TileOp
+from emmy.compiler.ir.tile.ir import axis_names, captured_values
 from emmy.compiler.ir.tile.ops import group_loop, is_group, lower, resolve
 
 
 def _cone(name: str = "xhat") -> Map:
-    """A minimal bound A-cone — ``xhat = x[m, k] * s``, the shape the fused norm→linear edge's
-    computed A takes (here without its statistic reduce, which the tree vocabulary does not need)."""
+    """A minimal bound A-cone — ``xhat = x[m, k] * s[k]``, the shape the fused norm→linear edge's
+    computed A takes (here without its statistic reduce, which the tree vocabulary does not need).
+    The scale is LOADED, not read free: a shared binding must be closed (``captured_values``)."""
     load = Load(name=f"{name}_e", input="x", index=(Var("m"), Var("k")))
-    return Map(body=Body((load, Assign(name=name, op="multiply", args=(f"{name}_e", "s")))))
+    scale = Load(name=f"{name}_s", input="w", index=(Var("k"),))
+    return Map(body=Body((load, scale, Assign(name=name, op="multiply", args=(f"{name}_e", f"{name}_s")))))
 
 
-def _channel(acc: str, weight: str, a: str | Body = "xhat") -> Contraction:
+def _channel(acc: str, weight: str, a: str | Map = "xhat") -> Contraction:
     """One ⊗-fold channel over the shared A — ``acc = Σ_k A[m, k]·W[k, n]``."""
     return Contraction(
         axes=(Axis("m", 128), Axis("n", 128)),
@@ -77,6 +80,41 @@ def test_a_wellformed_shared_group_validates() -> None:
     assert [c.a_ref for c in tile.op.sources] == ["xhat", "xhat"]
 
 
+# --- closure: a subtree read from many places must be computable at every one of them ------------ #
+
+
+def _capturing_cone(name: str = "xhat") -> Map:
+    """A cone that READS a value the enclosing body defines (``m_run``) instead of producing it —
+    the flash ``P = exp(s − m)`` shape, where the running max comes from the carrier merge."""
+    load = Load(name=f"{name}_e", input="x", index=(Var("m"), Var("k")))
+    return Map(body=Body((load, Assign(name=name, op="subtract", args=(f"{name}_e", "m_run")))))
+
+
+def test_a_shared_binding_that_captures_an_enclosing_value_is_rejected() -> None:
+    """A shared subtree has ONE home but N reading sites, so a name it captures would have to be in
+    scope at all of them. Closure is what makes the seam liftable — the precondition a placement cut
+    rests on."""
+    op = Map(body=_shared_group().op.body, sources=(_channel("acc_g", "Wg"), _channel("acc_u", "Wu")))
+    with pytest.raises(AssertionError, match=re.escape("captures ['m_run']")):
+        TileOp(op=op, bindings={"xhat": _capturing_cone()})
+
+
+def test_a_single_reference_binding_may_capture() -> None:
+    """Flash's ``P`` is exactly this: one reference, reading the running max its own loop step
+    updates. Legal to build and lower — just not cuttable, which ``captured_values`` is the
+    predicate for."""
+    tile = TileOp(op=Map(body=Body(()), sources=(_channel("acc_g", "Wg"),)), bindings={"xhat": _capturing_cone()})
+    assert captured_values(tile.bindings["xhat"], axis_names(tile.op) | axis_names(tile.bindings["xhat"])) == ("m_run",)
+
+
+def test_iteration_variables_are_not_captures() -> None:
+    """The dominant free names in any cone are loop induction variables (``m`` / ``k``), bound by
+    the enclosing nest — excluding them is what makes the predicate mean anything."""
+    cone = _cone()
+    assert captured_values(cone, set()) == ("k", "m")  # unfiltered: the axes show up
+    assert captured_values(cone, {"m", "k"}) == ()  # filtered: closed
+
+
 # --- resolution: the inlining every lowering walk goes through ---------------------------------- #
 
 
@@ -102,8 +140,8 @@ def test_two_references_to_one_binding_are_not_two_copies() -> None:
         op=Map(
             body=shared.op.body,
             sources=(
-                _channel("acc_g", "Wg", a=Body(cone)),
-                _channel("acc_u", "Wu", a=Body(tuple(s.rewrite(lambda n: f"{n}__2", Sigma({})) for s in cone))),
+                _channel("acc_g", "Wg", a=Map(body=Body(cone))),
+                _channel("acc_u", "Wu", a=Map(body=Body(tuple(s.rewrite(lambda n: f"{n}__2", Sigma({})) for s in cone)))),
             ),
         )
     )

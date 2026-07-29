@@ -17,7 +17,7 @@ derived view of it.**
 A kernel's math is the `project ∘ reduce ∘ map` composition stored as structural nodes (`Map` /
 `Reduction` / `Contraction`, in `ir/tile`). Today that tree already separates the *combine* (the algebra)
 from the *schedule* (tile plans, reduce partitions, staging). This refactor extends the same separation to
-two things the current design still conflates or scatters:
+three things the current design still conflates or scatters:
 
 1. **Operand sharing vs fusion.** "These two matmuls read the same A" is a structural FACT; "lower them as
    one loop with one A fragment" is a scheduling DECISION. `Contraction.folds` bakes both into one field.
@@ -28,6 +28,13 @@ two things the current design still conflates or scatters:
    partitions the tree, each partition materializes as one launch, each cut seam materializes its value to
    a buffer. The old design had this backwards: four hand-named PLACE sites (`@fold` / `@fin` / `@cone` /
    `@stat`), each with its own bespoke realizer pass, each invented when a new seam was needed.
+3. **How a node names its inputs.** Every node consumes values, and today every node kind spells that
+   differently: `Contraction.a` is `Load | Body | str`, `Contraction.b_load` is `Load`-only, `Map.sources`
+   is node-only, and a `Reduction` composes by placing a node *inside* `partial` at a load-bearing
+   position. Four vocabularies for one relation, and the differences are not algebraic — they are the
+   accidents of which case was built first. After the refactor there is ONE: the **operand edge**
+   (see *The operand edge* below), whose three inhabitants are the three things an input can be —
+   materialized, computed, or shared.
 
 From this one idea everything else follows:
 
@@ -53,29 +60,39 @@ From this one idea everything else follows:
 Agents should read the `ir/tile/ir.py` module docstring first; these examples fix the shapes this plan
 talks about.
 
+Every input below is an **operand edge** (`Load` = materialized, a node = computed, `str` = shared) — see
+*The operand edge*. Read `└─` as an edge, never as a stmt position.
+
 RMSNorm — projection over a fold (`project ∘ reduce`):
 
 ```
 Map                               ← body: rsqrt(acc/N+ε) statistic + the per-element sweep + Write
-└─ source: Reduction(axis=k)      ← carrier: sum monoid; partial: load, square, accumulate
+└─ sources: Reduction(axis=k)     ← carrier: sum monoid; partial: square, accumulate
+   └─ sources: Load(x[k])         ← the materialized edge — already-cut, no placement decision
 ```
 
 Fused norm→linear / gate⊗up after phase 1 — sharing is a binding, channels are siblings:
 
 ```
-bindings: { "x̂": Map(body=scale, source=Reduction(stat over k)) }   # the cone, defined ONCE, keyed by its out
+bindings: { "x̂": Map(body=scale, sources=(Reduction(stat over k),)) }  # the cone, defined ONCE, keyed by its out
 op:       Map(body=swiglu(acc_g, acc_u) + Write,
-              sources=(Contraction(a="x̂", b=Wg → acc_g),
-                       Contraction(a="x̂", b=Wu → acc_u)))
+              sources=(Contraction(a="x̂", b=Load(Wg) → acc_g),
+                       Contraction(a="x̂", b=Load(Wu) → acc_u)))
 ```
 
-Flash — a twisted streaming reduce whose per-step partial composes two contractions:
+Flash — a twisted streaming reduce over two contraction edges; `partial` is the softmax merge alone:
 
 ```
 Map
-└─ source: Reduction(axis=kv, TWISTED)
-   └─ partial: [Contraction(QK, k=dd), …softmax step…, Contraction(PV, k=pj)]
+└─ sources: Reduction(axis=kv, TWISTED)          ← partial: the online-softmax merge stmts, no nodes
+   ├─ sources[0]: Contraction(QK, k=dd)          ← a=Load(Q), b=Load(K)
+   └─ sources[1]: Contraction(PV, k=pj)          ← a="P" (the exp-weight cone, reading QK's out + the
+                                                     carrier's running max), b=Load(V)
 ```
+
+Emission order across the two edges is derived from the name dependencies (QK's out feeds `P` feeds PV),
+not from a stored position. Today flash instead splices both nodes into `partial` at load-bearing indices
+and `P` is a `copy` of a merge-local name; the phase-1 log records that residual.
 
 Path examples read off these trees: `REDUCE@map.reduce.k` (RMSNorm's fold partition),
 `TILE@map.reduce.contraction.dd` (flash QK), `REDUCE@map.contraction.a.reduce.k` (the cone's stat fold —
@@ -83,6 +100,121 @@ note it reduces the SAME `k` the contraction folds over; only the path distingui
 single strongest motivation for path addressing).
 
 ## Target design
+
+### The operand edge
+
+```python
+Operand = Load | Map | Reduction | Contraction | str
+```
+
+ONE type for ONE relation — *how a node names a value it consumes*. Its three inhabitants are the three
+things an input can be, and there is no fourth:
+
+- **`Load` — materialized.** The value is already in a buffer. This is NOT a degenerate node to be wrapped
+  as `Map(body=(Load,))`: it is the **terminal of the cut lattice**. Cut semantics (phases 4–5) say the
+  parent consumes a plain `Load` of the child's buffer, so `Load` is exactly what an edge decays to when
+  its seam is cut. It carries no schedule slice and admits no placement decision — its seam is trivially
+  already-cut. Wrapping it would add a tree level to the overwhelmingly common case and hide the
+  `.input` / `.index` leaf reads the whole staging / TMA / dtype machinery is built on.
+- **a node (`Map` / `Reduction` / `Contraction`) — computed.** The value is produced by a subtree.
+- **`str` — shared.** A name into `TileOp.bindings`.
+
+Invariants:
+
+- **Every edge admits `Load`.** This is the universal part, and it is what cut needs: no edge may be
+  node-only. `Map.sources` is node-only today, so a cut at a projection seam cannot yet be spelled in the
+  parent at all.
+- **A labelled `Contraction` operand stores `Load | str` — a computed one is ALWAYS a binding**, shared or
+  not (`_atomize.bind_cone` is already the one binder, and every construction site already produces a
+  `Load` or a name). These are precisely the edges where sharing is the point — N siblings over one A is
+  the reason the let table exists — so admitting an inline node beside the name would make "shared" and
+  "not shared" differ in spelling, the defect this refactor already retired twice (`Reduction.source` vs
+  node-in-`partial`; `Contraction.epilogue` vs `Map.body`).
+- **A `Map` / `Reduction` source stores the node inline**, and takes the `str` arm only if a source ever
+  becomes shared. The discriminator is arity, not taste: *bind iff the value can have more than one
+  consumer.* A contraction operand can (the fused edge). A source, by tree ownership, has exactly one
+  consumer — its parent. Cut is what creates a second consumer, and a cut child that is shared goes through
+  the MIMO foundation (#433) and reaches its parents as a `Load` of the materialized buffer anyway.
+- The node arm on a `Contraction` operand field is therefore the *resolved* form only.
+- **`Body` is not an operand form.** It survives today only because `ops.resolve` inlines with
+  `Body(tuple(lower(bound, bindings)))` — it *lowers* mid-resolve. Resolve is a tree operation and must
+  splice the bound NODE (`replace(op, a=bindings[nm])`). That drops the third spelling, makes `tree_nodes`
+  uniform (it currently special-cases an operand `Body` and iterates its stmts), and makes `ops.cone_seam`
+  readable on a resolved tree instead of pre-resolve only.
+- **Closure is a property, checked where it is required — not a universal invariant.** A subtree is
+  *closed* when it reads no VALUE name from its enclosing body (iteration variables excluded — they are
+  bound by the loop nest, not by any value tree). Closure is what makes a seam liftable, so it is
+  *required* of a SHARED binding (one home, N reading sites: a captured name would have to be in scope at
+  all of them) and it is the precondition a placement cut asks before lifting anything into its own
+  kernel. It is NOT required in general: flash's `P = exp(s − m)` reads the online-softmax carrier's
+  running max, updated by the merge stmts of the very loop step that consumes it. That seam is simply not
+  cuttable. `ir.captured_values` is the predicate; `validate_bindings` enforces it on shared bindings.
+- **Contraction operands are edges; a `Reduction`'s composed steps are a SEQUENCE.** See the correction
+  below — `partial` position is semantic, not an accident.
+
+| node | inputs | body |
+| --- | --- | --- |
+| `Contraction` | `a`, `b` — labelled operand edges (M-resident / streamed) | none; the projection rides the wrapping `Map` |
+| `Reduction` | composed nodes in `partial`, positionally | `partial` — the lift, the composed steps, the carrier update |
+| `Map` | `sources: tuple[Operand, ...]` | `body` — the per-cell sweep / projection |
+
+**Correction (measured, 2026-07-29): a `Reduction`'s composed nodes cannot become a hoisted `sources`
+tuple.** An earlier draft of this section had `Reduction.sources: tuple[Operand, ...]` with `partial` going
+stmt-only, on the argument that only an edge can be cut and addressed. Flash refutes it. Online softmax is
+`m' = max(m, s); α = exp(m − m'); P = exp(s − m'); O = O·α + P·V`: the PV contraction's A operand (`P`)
+depends on `m'`, which the merge stmts of that same loop step compute. Hoisting the PV node ahead of the
+merge would read a value that does not exist yet — a correctness break, not a digest change. Measured
+directly: `captured_values` over the whole compiler suite reports flash's `P` binding capturing exactly one
+value name (the running max) while every other binding's free names are iteration variables only. So a
+reduce's per-step body is a **sequence**, composed nodes are steps in it, and their position carries
+dataflow meaning. That is the algebra, not a defect — and it is why 1d's node-in-`partial` survivor was
+right after all.
+
+What DOES survive from that draft is the type honesty. `Body` is `tuple[Stmt]`; `Contraction` subclasses
+`Stmt` for the sole purpose of being smuggled into one; `Map` and `Reduction` are not `Stmt`s at all, yet
+`030_split_reduce` puts a `Map` into a `Reduction.partial` (measured across the suite: 4214 `Contraction`
+occurrences, 2 `Map`). The sequence should be typed as what it is — `tuple[Stmt | Node, ...]` — rather than
+relying on one node kind's accidental `Stmt` inheritance. Cut at such a step is then a substitution in
+place (`partial[i] = Load(buf)`), which is well-defined precisely because `Load` IS a `Stmt`.
+
+Consequences:
+
+- **`a` and `b` are symmetric** — `b_load: Load` → `b: Operand`, `b_trans` becomes a `Load`-only property.
+  The A/B asymmetry that IS real — A is M-resident and can be compute-filled, B is streamed and staged —
+  is a **schedule** fact, and encoding it in the structural type is the same conflation as `folds` baking
+  sharing-plus-fusion into one field. After symmetry the schedule gates *state* it
+  (`isinstance(c.b, Load)` as an explicit eligibility precondition in `_demoted_atoms`,
+  `_tma_operand_rank_ok`, `_sync_operands`) rather than inheriting it from an unstated type guarantee.
+  `_demoted_atoms` already writes that check — dead under today's type, and a hint the surrounding code
+  already thinks in the wider vocabulary.
+- **Cut becomes a pure edge substitution** — `replace(node, <edge>=Load(buf))`. Same edge, same path,
+  flippable back, and the parent's keys never re-root. This is what makes `PLACE@<path> = cut | fuse` a
+  *bit* rather than a restructuring, and it is the reason the edge must admit `Load`. A composed input
+  sitting at position *i* of a `Body` has no stable path to address, and cutting it means deleting a node
+  and inserting a stmt at the right index.
+- **A composed reduce step is addressed by kind + axis, and cut in place.** Flash's two contractions under
+  one `Reduction` are already spelled `TILE@dd` / `TILE@pj` on the live goldens — kind + axis, never an
+  index — so a positional sequence costs the grammar nothing. Cut substitutes a `Load` stmt at that
+  position; the child re-roots exactly as the plan's cut/fuse-invariance rule already says.
+- **The path grammar gains `b` as a peer label to `a`**, and `in.b` beside `in.a` in the reserved
+  graph-placement prefix. Reserve both NOW even though no producer needs `b` yet: the grammar and the cut
+  model are being designed in phases 2–5, and retrofitting an operand label after evidence is stored
+  re-keys entries, against this plan's zero-migration goal. Flash's two `Contraction` sources under one
+  `Reduction` stay disambiguated by axis (`TILE@dd` / `TILE@pj`), exactly as the live goldens spell them.
+
+**Sequencing.** The `b: Operand` widening should land *with* its first producer, not ahead of it. Nothing
+can construct a non-`Load` B today (`_atomize.semiring_binding` binds cones into `a` only; `_flash` builds
+both K and V as `Load`s), so a widened type with no producer is untestable dead vocabulary whose every new
+branch reads "decline the optimization". The first real producer is a B-side fused prologue — qk-norm or
+RoPE folded into flash's QK, where K is the B operand indexed `[j, dd]` and gemma's qk-norm is a per-`j`
+statistic over the contraction axis, structurally the mirror of the norm→linear cone; on-the-fly weight
+dequant is the other. The machinery is already shape-symmetric — `SyncOperand(tag="a", value=a_value)` plus
+`sync_stat_fill` for the row-invariant prologue is the right primitive, just written A-side. That work is
+`_sync_operands` compute-filling a B slab, a column-invariant `cone_seam`, and lifting
+`assert len(ops.channels) == 1` on the non-sync path; the type line is the last 5% of it.
+
+What SHOULD land ahead of any producer, because the placement phases depend on it: `resolve` splicing nodes
+instead of lowering them, the closure invariant, and the `b` / `in.b` grammar reservations.
 
 ### Phase-1 IR generalization
 
@@ -116,8 +248,8 @@ single strongest motivation for path addressing).
     `op_cache_key` and kernel identity hang off it.
   - `b_trans`-must-agree stops being a node assert and becomes a group-formation gate: channels with
     disagreeing B layouts simply never group (they were never legally fusable).
-- **The cone becomes a real node tree.** `a_operand: Load | Body` → `a: Load | str` (a binding name); the
-  computed-A cone is
+- **The cone becomes a real node tree.** `a_operand: Load | Body` → `a: Operand` stored as `Load | str` (a
+  binding name); the computed-A cone is
   a bound `Map(body=per-cell normalize, source=Reduction(stat))`. The stat reduce is thereby addressable
   and cuttable; `stat_prologue()`'s ad-hoc body-splitting at the K seam becomes a read of the node
   boundary (Reduction = the statistic, Map body = the per-cell cone).
@@ -133,6 +265,9 @@ single strongest motivation for path addressing).
   `Reduction.source` (split-K's `Reduction ⊃ Contraction`, spliced ahead of the partial) and
   node-in-`partial` (flash) are two mechanisms for the same thing. Fold `source` into "node at the head
   of `partial`" so `_flatten_nodes` / `.loop` / seam walkers handle ONE shape.
+  **Confirmed correct.** A later draft proposed hoisting composed nodes onto a `Reduction.sources` tuple
+  instead, on the argument that only an edge is cuttable; flash's `P`-depends-on-the-just-updated-running-max
+  refutes it (see the correction under *The operand edge*). Node-in-`partial` stays.
 - **One windowing representation (required — same invariant).** A sliced reduce stream currently spells
   its window across two overlapping vocabularies: `Reduction.offset` / `bound` (absolute base/end of a
   cross-CTA slice) and `Axis.source_axis` / `real_extent`. Unify into a single slice/window concept read
@@ -253,7 +388,9 @@ inside a sweep have no identity outside their loop instance. The values that ARE
 point are exactly the outputs of finished algebraic operators — i.e. the bound outputs of structural nodes
 (`Reduction.out` at fold close, `Contraction.acc` at contraction close, `Map.out` at sweep close). So the
 tree's seam set is the legal-cut set; enumerating SSA names over-generates candidates whose legality check
-would reject them, and the tree is that legality check, precomputed.
+would reject them, and the tree is that legality check, precomputed. Once every input is an operand edge,
+the seam set is literally the edge set — one `Operand`-typed field per seam, each cut by substituting a
+`Load` for the node it holds.
 
 **Claim 2 — the only quantization loss is mid-pointwise cuts, and it is schedule-trivial.** A cut between
 two statements INSIDE one `Map.body` (after `v4`, before the sweep) is not a seam. Such a cut never
@@ -294,7 +431,8 @@ should not burn time on golden/dump diffing mid-stream.
 
 Goal: the target IR above, with recognition/scheduling/materialization producing byte-compatible kernels.
 
-Sub-steps, in landing order:
+**Status: 1a–1d LANDED** on `feature/remove-place-knob`, through `c8755dc2` "Phase 1 close-out:
+group-formation gate tests + docs". Sub-steps, in landing order:
 
 1a. **Vocabulary first, no behavior change** — LANDED. `TileOp.bindings` (out-name-keyed) +
     `Map.sources` + construction-time validation, and binding-name resolution threaded through the
@@ -333,6 +471,68 @@ Done when: `make test` green; unit tests cover binding-reference round-trip thro
 (name uniqueness violations + dangling references rejected at construction; two references to
 one binding ≢ two copies), group formation + fallback (disagreeing layouts recognize separately), cone
 nodification; accuracy on the geglu / norm_linear golden snippets passes vs eager.
+
+#### Current state of the codebase
+
+What a phase-2 agent actually finds today, and where it sits against *The operand edge*:
+
+| stored field | today | target |
+| --- | --- | --- |
+| `Contraction.a` | `Load \| str`; node when resolved (1e) | reached |
+| `Contraction.b_load` | `Load` | `b: Operand` (same union as `a`) — deferred to a producer, 1h |
+| `Reduction.partial` | `Body`, carries composed nodes positionally | `tuple[Stmt \| Node, ...]` — same shape, honest type |
+| `Map.sources` | `tuple[Reduction \| Contraction \| Map, ...]` | `tuple[Operand, ...]` (must admit `Load` for cut) |
+| `TileOp` | `op + name + place + workers + bindings` (+ the inherited `Op` knob metadata) | unchanged |
+
+Everything else the design section calls for is in place: every schedule slice rides its node
+(`Contraction.tile` / `.stage`, `Reduction.reduce` / `.stage`); `Contraction.epilogue`, `TileOp.tier`,
+`TileOp.stage`, `Reduction.source`, `Reduction.offset` / `bound` and `Axis.source_axis` / `real_extent` are
+all gone; `Axis.window` is the one windowing vocabulary. The shared walkers are `ops.resolve` / `lower` /
+`reduce_loop` / `axis_role` / `pretty` / `cone_seam` / `is_group` / `group_loop` / `nodify_reduce`, with
+`ir.tree_nodes` the one node walk and `ir._flatten_nodes` the one flatten-a-node-sitting-in-a-Body helper.
+Tests: `tests/compiler/ir/tile/test_bindings.py` (binding validation, resolve, reference-vs-copy identity,
+rename lockstep, pretty), `test_structural_reduction.py`, and the group-formation gates in
+`tests/compiler/passes/test_recognize_boundary_rules.py`. `make test` green at HEAD.
+
+#### Residuals — the delta to *The operand edge*
+
+1e and 1g have LANDED (below). Nothing remaining blocks phase 2's codec work — paths and families are
+already well-defined on the landed tree. 1f / 1i are phase-4 prerequisites; 1h waits on a producer.
+
+1e. **`resolve` splices instead of lowering; the `Body` arm retires** — LANDED. `ops.resolve` now returns
+    `replace(op, a=resolve(bound, bindings))`, so the operand edge keeps its NODE. `Body` was never a
+    *stored* spelling (every construction site produces a `Load` or a name), and the resolved arm was
+    provably unreached by the canonicalizer: instrumenting `_rewrite(Contraction)` across the whole
+    compiler suite recorded 1 hit, on the `str` arm, 0 on the resolved arm — so that branch is now a loud
+    assertion. Payoff banked in the same step: `_factor` no longer precomputes
+    `seams = {name: cone_seam(node) …}` ahead of `resolve` and threads it through `Ctx.seams`; it reads
+    `cone_seam(c.a)` at the point of use, and the side table is gone. `tree_nodes` walks a spliced operand
+    like any other node instead of special-casing a stmt `Body`. Verified emission-neutral by
+    kernel-source digest A/B over 11 kernels (matmul f32/f16/thin-M, norm_linear f32/f16, mlp_geglu
+    f32/f16, softmax, sdpa, sdpa causal, pointwise): all 11 digests identical across the change.
+1f. **Type the composed-step sequence honestly** — OPEN, and REDUCED in scope. The original plan here
+    (hoist composed nodes onto `Reduction.sources`) is refuted; see the correction under *The operand
+    edge*. What remains is that `Reduction.partial` is a `Body` (= `tuple[Stmt]`) that legitimately carries
+    structural nodes, which works only because `Contraction` subclasses `Stmt`; `Map` and `Reduction` do
+    not, and `030_split_reduce` puts a `Map` in there anyway (measured over the suite: 4214 `Contraction`
+    occurrences inside a `Body`, 2 `Map`). Type it `tuple[Stmt | Node, ...]` so the sequence stops relying
+    on one node kind's accidental inheritance. Not a blocker for phase 2; it touches `Body` / `Body.coerce`
+    and the structural-key dispatch, so land it deliberately rather than opportunistically.
+1g. **Closure — LANDED as a predicate plus a shared-binding check.** `ir.captured_values(root, axes)`
+    returns the VALUE names a subtree reads but does not define (iteration variables excluded via
+    `ir.axis_names`); `validate_bindings` rejects a binding with two or more references that captures
+    anything. Measured before enforcing: across the compiler suite, every multi-reference binding is closed
+    and exactly one binding captures a value — flash's `P`, reading the carrier's running max, at one
+    reference. So the check is enforced where it is a correctness requirement and available as a predicate
+    everywhere else; phase 4's seam-legality gate calls it before lifting any subtree. Note this *reverses*
+    the earlier framing of flash's `P` as a defect to re-derive: it is legal, it is simply not cuttable.
+1h. **`b: Operand`, deferred to its first producer; the grammar reservation is not.** Widening the type with
+    no producer is untestable dead vocabulary (see *Sequencing* above) — but phase 2 must still reserve the
+    `b` edge label and the `in.b` prefix, since retrofitting an operand label after evidence is stored
+    re-keys entries.
+1i. **`Map.sources` must admit `Load`** — OPEN, and correctly deferred to phase 4. It is node-only today,
+    so a cut at a projection seam cannot be spelled in the parent at all. The widening is one line; it
+    belongs in the commit that teaches the realizer to perform the substitution, not ahead of it.
 
 ### Phase 2 — codec core
 
@@ -415,6 +615,10 @@ YAML-comment baselines.
   compat test is the tripwire. Never "fix" it by silently re-keying evidence.
 - Dump/kname churn: kernel names derive from realized ops; verify the per-kernel torch-reproducer slicing
   still attributes the cone's ops correctly once it lives in a binding.
+- **Non-closed subtrees are legal but uncuttable (residual 1g, landed).** `ir.captured_values` is the
+  predicate; phase 4 must call it before lifting a seam, or flash's `P` — which reads the running max its
+  own loop step updates — will be silently cut into a kernel that cannot compute it. Shared bindings are
+  already rejected at construction; single-reference ones are the phase-4 caller's responsibility.
 
 ## Cleanup
 

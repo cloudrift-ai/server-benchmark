@@ -43,7 +43,7 @@ module."""
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis, Window
@@ -238,10 +238,6 @@ class Ctx:
     output: str = ""
     workers: object = None  # the resolved WarpSpec worker split (None = uniform SIMT)
     raster: object = None  # the parsed RASTER codec (ir.schedule.Raster; None = flat launch order)
-    # Each bound computed-A cone's ``(prologue, cell, stats)`` K seam, keyed by the binding name —
-    # read off the NODE BOUNDARY before the let table is inlined (``ops.cone_seam``), since a
-    # resolved operand body no longer shows where the row-invariant prologue ends.
-    seams: dict = field(default_factory=dict)
 
 
 def _emit(op, ctx: Ctx) -> Frag:
@@ -319,10 +315,9 @@ def factorize(tile, root, store=None) -> Tile:
     from emmy.compiler.ir.schedule import Raster  # noqa: PLC0415 — keep the module torch-free at import
     from emmy.compiler.ir.tile.ops import resolve  # noqa: PLC0415
 
-    # Inline the let table once, here: the emitter below walks a NAME-FREE tree, so every node's
-    # operand accessors read stmts (``ops.resolve`` reproduces exactly the operand body the
-    # pre-binding IR carried, so the emitted kernel is byte-identical).
-    seams = {name: cone_seam(node) for name, node in tile.bindings.items()}
+    # Inline the let table once, here: the emitter below walks a NAME-FREE tree. ``ops.resolve``
+    # SPLICES each bound subtree onto its operand edge, so the node boundary survives and every
+    # reader (``cone_seam``) reads it straight off ``Contraction.a`` — no pre-resolve side table.
     op = resolve(tile.op, tile.bindings)
     ctx = Ctx(
         grid=tuple(tile.place.grid),
@@ -333,7 +328,6 @@ def factorize(tile, root, store=None) -> Tile:
         # per-node structure) — parse it once here; ``grid_tile`` applies it where the 2-D
         # (m, n) block grid makes it meaningful.
         raster=Raster.parse((tile.knobs or {}).get("RASTER", "")),
-        seams=seams,
     )
     out_val = _emit_wire(op).name if op is not None else ""
     return _factorize(op, ctx, tail=(), out_val=out_val, store=store)
@@ -405,7 +399,9 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, siblings: tuple =
         if not has_write(epi):
             epi = with_store(epi, ctx.output, grid, op.out)
         c = op
-        seam = ctx.seams.get(c.a_name)
+        # The cone's K seam, read straight off the spliced operand node (``None`` for a gmem-``Load``
+        # A — its whole body is the per-cell fill).
+        seam = cone_seam(c.a) if c.a_computed else None
         state_decls, reduce_region = reduce_codegen(c, c.stage, ctx.inputs, ctx.workers, siblings, seam)
         sink = store if store is not None else store_sink(c, Body(tuple(epi)), siblings)
         t = unit_tile(register_tile(atomize(c.atom.shape[:2]), c.mn), c.mn)

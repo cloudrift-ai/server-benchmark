@@ -64,6 +64,16 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   has inlined an operand cone, the cone as a `Map` NODE the caller binds into `TileOp.bindings` and the contraction
   references by name (a STAT-FREE computed A, which rides the `sync` compute-fill like the norm→linear cone but carries
   no statistic prologue) — plus the fold accumulator and the projection.
+  An **operand is an edge** with three inhabitants — the three things an input can be: MATERIALIZED (a gmem `Load`),
+  SHARED (a binding name) or COMPUTED (the node). Only the first two are ever *stored*, because every computed operand
+  goes through the one binder, so "shared" and "not shared" never differ in spelling. `ops.resolve` SPLICES the bound
+  node onto the edge rather than flattening it, which is what lets every downstream reader take the cone's K seam
+  straight off `Contraction.a` (`ops.cone_seam`) instead of through a pre-resolve side table; `lower` flattens it once,
+  at the point of use. A subtree reading no value name from its enclosing body is **closed**
+  (`ir.captured_values`, iteration variables excluded): required of a SHARED binding — one home, N reading sites, so a
+  captured name would have to be in scope at all of them — and the precondition for lifting any subtree into its own
+  kernel. A single-reference binding may capture: flash's `P = exp(s − m)` reads the online-softmax carrier's running
+  max, updated by the merge stmts of the very loop step that consumes it.
   Binding off the lift rather than off "the first (m, k)-indexed `Load`" is load-bearing: a cone-INTERNAL load is
   (m, k)-indexed too, so the positional rule bound gemma's GeGLU combine as `gate @ W` and silently dropped the gelu and
   the up projection. Refusing to bind a stat-free cone at all is equally wrong — it demotes the cell to a PLANAR

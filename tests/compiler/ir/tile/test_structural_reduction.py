@@ -315,12 +315,13 @@ def test_out_store_index_reproduces_output_layout() -> None:
 def _pv_contraction(tile: str = "") -> Contraction:
     """A PV-style contraction whose **A operand is computed**, not a gmem ``Load``:
     ``O[m, d] = Σ_j P[m, j]·V[j, d]`` with ``P = exp(S[m, j])`` produced from an in-register score
-    (the flash PV shape — its A is register-resident, so ``a`` is a ``Body``, not a ``Load``)."""
-    a_body = Body((Load(name="s_e", input="S", index=(Var("m"), Var("j"))), Assign(name="p", op="exp", args=("s_e",))))
+    (the flash PV shape — its A is register-resident, so the operand edge holds the cone NODE, the
+    form ``ops.resolve`` splices in for a bound reference)."""
+    cone = Map(body=Body((Load(name="s_e", input="S", index=(Var("m"), Var("j"))), Assign(name="p", op="exp", args=("s_e",)))))
     return Contraction(
         axes=(Axis("m", 8), Axis("d", 8)),
         k_axis=Axis("j", 8),
-        a=a_body,
+        a=cone,
         b_load=Load(name="v_e", input="V", index=(Var("j"), Var("d"))),
         acc="oblk",
         tile=TilePlan.parse(tile) if tile else TilePlan(),

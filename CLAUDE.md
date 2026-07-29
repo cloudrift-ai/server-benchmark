@@ -21,8 +21,13 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   projection — a reduce that COMPOSES another node, split-K's sliced contraction or flash's score, puts it in
   `partial`, the one composition rule); EVERY recognized contraction — per-cell scalar included — is a `Contraction`
   node (nodified at recognize time with a deferred `TilePlan()`; an unbindable one demotes to `PLANAR`) holding ONE
-  `b_load`/`acc` and an `a` operand that is a gmem `Load` or the NAME of a bound cone — whose own SOURCE is the
-  row-invariant prologue (the per-row statistic) and whose `body` is the per-cell normalize, so the K seam is the node
+  `b_load`/`acc` and an `a` **operand edge** whose three inhabitants are the three things an input can be —
+  MATERIALIZED (a gmem `Load`), SHARED (the NAME of a bound cone) or COMPUTED (the node, the form `ops.resolve`
+  SPLICES in; it splices rather than flattens, so the cone's boundary survives resolution and is read straight off
+  the edge). Only `Load` / name are ever stored — every computed operand goes through the one binder — and a SHARED
+  binding must be **closed** (`ir.captured_values`: no value name captured from the enclosing body; a
+  single-reference one may capture, as flash's `P` does). A cone's own SOURCE is the
+  row-invariant prologue (the per-row statistic) and its `body` is the per-cell normalize, so the K seam is the node
   boundary (`ops.cone_seam`); the lift / projection wrapper
   is a `Map` (`body` + `sources` — `project ∘ reduce`, `source` the len-≤1 compat read). Operand sharing is
   structural: N sibling `Contraction`s under one `Map.sources` naming ONE bound cone is the fused gate/up MLP edge

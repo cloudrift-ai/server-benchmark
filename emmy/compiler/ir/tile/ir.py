@@ -26,8 +26,21 @@ structurally off the axes' :class:`~emmy.compiler.ir.axis.AxisRole`
 **Operand sharing is structural.** "These two matmuls read the same A" is a FACT
 the tree states — N sibling :class:`Contraction`\\ s under one ``Map.sources``,
 each naming the same bound subtree in ``bindings`` — separate from the
-scheduling DECISION of how to lower them. ``ops.resolve`` inlines those
-references before any lowering walk, so the walkers stay name-free.
+scheduling DECISION of how to lower them. ``ops.resolve`` SPLICES those bound
+subtrees onto the operand edge before any lowering walk, so the walkers stay
+name-free.
+
+**An operand is an edge with three inhabitants** — the three things an input can
+be: MATERIALIZED (a gmem ``Load``), SHARED (the NAME of a binding) or COMPUTED
+(the node itself). Only the first two are ever *stored*: every computed operand
+goes through the one binder (``_atomize.bind_cone``), so "shared" and "not
+shared" never differ in spelling. The node arm is what ``resolve`` splices in,
+and because it splices rather than flattens, the boundary a reader wants
+(``ops.cone_seam``'s prologue / per-cell split) survives resolution — ``lower``
+flattens it once, at the point of use. A subtree that reads no value name from
+its enclosing body is **closed** (:func:`captured_values`); closure is required
+of a SHARED binding (one home, many reading sites) and is the precondition for
+lifting any subtree into its own kernel.
 
 The combine lives entirely in the ``op`` wrapper (the :class:`Map` /
 :class:`Reduction` / :class:`Contraction` nodes here + ``ir/stmt/algebra``): a
@@ -219,6 +232,59 @@ def _deep_reads(stmts: list[Stmt]) -> set[str]:
     return out
 
 
+def _stmt_axis_names(stmts) -> set[str]:
+    """Every loop induction variable bound anywhere in ``stmts`` (deep). A structural node sitting
+    in the body (``030_split_reduce``'s sliced partials) is skipped — ``tree_nodes`` reaches it, and
+    :func:`axis_names` collects its axes there."""
+    out: set[str] = set()
+    for s in stmts:
+        if isinstance(s, (Map, Reduction, Contraction)):
+            continue
+        ax = getattr(s, "axis", None)
+        if ax is not None and hasattr(ax, "name"):
+            out.add(ax.name)
+        for b in s.nested():
+            out |= _stmt_axis_names(b)
+    return out
+
+
+def axis_names(root) -> set[str]:
+    """Every ITERATION-SPACE name in ``root``'s tree — the structural nodes' axes plus every loop
+    induction variable in their bodies. An induction variable is bound by the enclosing loop nest,
+    not by any value tree, so a subtree reading one is never capturing a value."""
+    out: set[str] = set()
+    for node in tree_nodes(root):
+        if isinstance(node, Reduction):
+            out.add(node.axis.name)
+            out |= _stmt_axis_names(node.partial)
+        elif isinstance(node, Contraction):
+            out |= {node.k_axis.name, *(a.name for a in node.axes), *(a.name for a in node.lead_axes)}
+        elif isinstance(node, Map):
+            out |= _stmt_axis_names(node.body)
+    return out
+
+
+def captured_values(root, axes: set[str], bindings=None) -> tuple[str, ...]:
+    """The VALUE names ``root``'s subtree reads but does not itself define — its capture set, with
+    iteration-space names (``axes``) excluded.
+
+    Empty means the subtree is **closed**: it can be lifted out of its enclosing body and computed
+    on its own, which is exactly what a placement cut does to a seam. A non-empty capture set is not
+    an error per se — flash's ``P = exp(s − m)`` genuinely reads the online-softmax carrier's
+    running max, updated by the merge stmts of the very loop step that consumes it — but it IS the
+    reason such a seam is not cuttable, and a SHARED subtree must never capture (its one home would
+    have to be in scope at every reference).
+
+    Returned sorted, so callers can put it straight into an error message."""
+    from emmy.compiler.ir.tile.ops import lower  # noqa: PLC0415 — avoid an import cycle
+
+    stmts = list(lower(root, bindings))
+    defs: set[str] = set()
+    for s in stmts:
+        defs |= _deep_defines(s)
+    return tuple(sorted(_deep_reads(stmts) - defs - axes))
+
+
 def _refs_axis(s: Stmt, name: str) -> bool:
     """``s`` references axis ``name`` in any index expr (deep)."""
     idx = getattr(s, "index", None)
@@ -290,12 +356,13 @@ class Contraction(Stmt):
 
     axes: tuple[Axis, Axis]  # the tiled output (m_axis, n_axis) — params
     k_axis: Axis  # the contraction axis — params
-    # A: a gmem ``Load``, a computed register-resident ``Body`` (flash PV's ``P = exp(S − M)``), or the
-    # SSA NAME of a let-bound subtree in the owning ``TileOp.bindings`` (the shared computed-A cone —
-    # sibling channels referencing one name is what makes their operand sharing structural). A name
-    # operand is inlined by ``ops.resolve`` before any lowering walk, so every accessor below sees the
-    # ``Load`` / ``Body`` form. — params
-    a: Load | Body | str
+    # A: an **operand edge**, whose three inhabitants are the three things an input can be —
+    # MATERIALIZED (a gmem ``Load``), SHARED (the SSA NAME of a let-bound subtree in the owning
+    # ``TileOp.bindings``) or COMPUTED (the node itself). A *stored* operand is only ever the ``Load``
+    # or the name: every computed A goes through the one binder (``_atomize.bind_cone``), so "shared"
+    # and "not shared" never differ in spelling and N siblings naming one cone IS the structural
+    # sharing fact. The node arm is what ``ops.resolve`` splices in ahead of any lowering walk. — params
+    a: Load | Map | Reduction | Contraction | str
     b_load: Load  # the B operand — params
     acc: str  # the fold accumulator this node produces — params
     tile: TilePlan  # the schedule: leaf atom + unit/register widths + K-chunk
@@ -310,31 +377,38 @@ class Contraction(Stmt):
 
     @property
     def a_ref(self) -> str | None:
-        """The binding NAME this node's A operand references, or ``None`` (an inline ``Load`` /
-        ``Body``). Two siblings sharing one A are exactly two nodes with the same ``a_ref``."""
+        """The binding NAME this node's A operand references, or ``None`` (a materialized ``Load``, or
+        an already-spliced node). Two siblings sharing one A are exactly two nodes with the same
+        ``a_ref``."""
         return self.a if isinstance(self.a, str) else None
 
     @property
     def a_body(self) -> tuple[Stmt, ...]:
-        """The A operand's producing stmts — a singleton gmem ``Load``, or a computed body's stmts
-        (a **register-resident** A: flash PV's ``P = exp(S − M)``, produced from an in-register score,
-        not a gmem address). The last stmt's def is the operand value ``contraction_loop`` multiplies.
-        An unresolved binding NAME has no stmts here — ``ops.resolve`` inlines it first."""
+        """The A operand's producing stmts — a singleton gmem ``Load``, or the spliced cone node
+        flattened (a **register-resident** A: flash PV's ``P = exp(S − M)``, produced from an
+        in-register score, not a gmem address). The last stmt's def is the operand value
+        ``contraction_loop`` multiplies. An unresolved binding NAME has no stmts here —
+        ``ops.resolve`` splices it first."""
+        from emmy.compiler.ir.tile.ops import lower  # noqa: PLC0415 — avoid an import cycle
+
         if isinstance(self.a, str):
             raise AssertionError(f"Contraction.a is the unresolved binding {self.a!r} — call ops.resolve first")
-        return (self.a,) if isinstance(self.a, Load) else tuple(self.a)
+        return (self.a,) if isinstance(self.a, Load) else tuple(lower(self.a))
 
     @property
     def a_computed(self) -> bool:
-        """True when A is a computed register-resident operand (a ``Body``), not a gmem ``Load`` — the
-        mma tier reads it as a fragment, the scalar tier as the value."""
+        """True when A is a computed register-resident operand (a spliced cone node / an unresolved
+        reference to one), not a gmem ``Load`` — the mma tier reads it as a fragment, the scalar tier
+        as the value."""
         return not isinstance(self.a, Load)
 
     @property
     def a_name(self) -> str:
-        """The A operand's bound SSA name — the referenced binding's name, or the producing body's
-        last def."""
-        return self.a if isinstance(self.a, str) else self.a_body[-1].defines()[-1]
+        """The A operand's bound SSA name — the referenced binding's name, the spliced node's ``out``,
+        or the ``Load``'s def."""
+        if isinstance(self.a, str):
+            return self.a
+        return self.a.defines()[-1] if isinstance(self.a, Load) else self.a.out
 
     @property
     def loop(self) -> Loop:
@@ -427,7 +501,7 @@ class Contraction(Stmt):
                 for b in s.nested():
                     yield from loads(b)
 
-        # Deep over the A body — a computed cone may nest its loads (the fused norm→linear cone's
+        # Deep over the A operand — a spliced cone may nest its loads (the fused norm→linear cone's
         # per-row statistic reduce ``Loop``). A binding REFERENCE reads no buffer here: the bound
         # subtree is the owning ``TileOp``'s, and its loads are reached through ``bindings``.
         a = () if isinstance(self.a, str) else loads(self.a_body)
@@ -455,12 +529,14 @@ def _(s: Contraction, rename, sigma, axis_fn):
     # ``b_trans`` is derived from ``b_load`` (a property), so the rewritten load carries it.
     # A binding REFERENCE is a plain SSA name — it renames through the same map as any other, which
     # is what keeps references and their definitions (the ``bindings`` keys) in lockstep.
+    # Only the two STORED operand forms are handled: this rewrite is the ``structural_key``
+    # canonicalization, which runs over stored trees, never over a ``ops.resolve``-spliced one.
     if isinstance(s.a, str):
         a = rename(s.a)
     elif isinstance(s.a, Load):
         a = _rewrite(s.a, rename, sigma, axis_fn)
     else:
-        a = Body(tuple(_rewrite(c, rename, sigma, axis_fn) for c in s.a))
+        raise AssertionError(f"rewrite: Contraction.a is a spliced {type(s.a).__name__} node — canonicalize the stored tree")
     return Contraction(
         axes=tuple(axis_fn(a) for a in s.axes),
         k_axis=axis_fn(s.k_axis),
@@ -546,9 +622,8 @@ def tree_nodes(op):
     elif isinstance(op, Reduction):
         for s in op.partial:
             yield from _stmt_nodes(s)
-    elif isinstance(op, Contraction) and isinstance(op.a, Body):
-        for s in op.a:
-            yield from _stmt_nodes(s)
+    elif isinstance(op, Contraction) and isinstance(op.a, (Map, Reduction, Contraction)):
+        yield from tree_nodes(op.a)  # a spliced operand edge is walked like any other node
 
 
 def _node_defines(node) -> list[str]:
@@ -560,8 +635,9 @@ def _node_defines(node) -> list[str]:
     elif isinstance(node, Reduction):
         stmts = [s for s in node.partial if not isinstance(s, (Map, Reduction, Contraction))]
     else:
-        cone = list(node.a) if isinstance(node.a, Body) else []
-        stmts = [s for s in cone if not isinstance(s, (Map, Reduction, Contraction))]
+        # A spliced operand edge is its own node in the walk (``tree_nodes`` yields it), so a
+        # ``Contraction`` binds only its own accumulator here.
+        stmts = []
         out += list(node.defines())
     for s in stmts:
         out += sorted(_deep_defines(s))
@@ -620,27 +696,42 @@ class TileOp(Op):
 
         - every name operand resolves to a binding (no dangling reference);
         - a binding's key IS its tree's output name;
-        - a binding's key is defined nowhere else — not in ``op``, not in another binding.
+        - a binding's key is defined nowhere else — not in ``op``, not in another binding;
+        - a SHARED binding (two or more references) is **closed** — it captures no value name from
+          an enclosing body.
 
         The uniqueness check is scoped to the binding NAMES rather than every SSA name in the tree:
         loop IR legitimately binds one name from several stmts (a fold's ``Init`` seed plus its
         ``Accum`` steps, and split-K's outer reduce folding the accumulator its inner contraction
         also names). What the let table needs is that a REFERENCE is unambiguous, and that is
-        exactly what this asserts."""
-        refs: set[str] = set()
+        exactly what this asserts.
+
+        Closure is checked only on SHARED bindings because that is where it is a correctness
+        requirement: a subtree with one home read from N places must be computable at every one of
+        them. A single-reference binding may legitimately capture — flash's ``P = exp(s − m)`` reads
+        the online-softmax carrier's running max, updated by the merge stmts of the very loop step
+        that consumes it. Such a seam is simply not cuttable; :func:`captured_values` is the
+        predicate a placement pass asks before lifting any subtree into its own kernel."""
+        refs: dict[str, int] = {}
         homes: dict[str, list[str]] = {}
         keys = set(self.bindings)
         for home, root in (("op", self.op), *((f"bindings[{k!r}]", v) for k, v in self.bindings.items())):
             for node in tree_nodes(root):
                 if isinstance(node, Contraction) and node.a_ref is not None:
-                    refs.add(node.a_ref)
+                    refs[node.a_ref] = refs.get(node.a_ref, 0) + 1
                 for nm in _node_defines(node) if keys else ():  # the def walk only pays where a table exists
                     homes.setdefault(nm, []).append(home)
-        if dangling := refs - set(self.bindings):
+        if dangling := set(refs) - set(self.bindings):
             raise AssertionError(f"TileOp: operand reference(s) {sorted(dangling)} resolve to no binding")
+        axes = axis_names(self.op) if any(n > 1 for n in refs.values()) else set()
         for key, root in self.bindings.items():
             if root is None or key != root.out:
                 raise AssertionError(f"TileOp.bindings key {key!r} is not its tree's output name ({root and root.out!r})")
+            if refs.get(key, 0) > 1 and (captured := captured_values(root, axes | axis_names(root), self.bindings)):
+                raise AssertionError(
+                    f"TileOp.bindings[{key!r}] is shared by {refs[key]} references but captures {list(captured)} "
+                    f"from an enclosing body — a shared subtree must be closed (it has one home, read from many places)"
+                )
             if other := sorted(set(homes.get(key, ())) - {f"bindings[{key!r}]"}):
                 raise AssertionError(f"TileOp: binding name {key!r} is also defined in {other} — a reference must be unambiguous")
 

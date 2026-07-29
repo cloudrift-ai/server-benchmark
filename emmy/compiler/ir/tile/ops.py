@@ -26,8 +26,10 @@ from emmy.compiler.ir.tile.ir import Contraction, Map, Reduction
 
 
 def resolve(op, bindings=None):
-    """Inline every binding-name operand in ``op``'s tree — each reference replaced by the lowered
-    stmts of its bound subtree — yielding a NAME-FREE tree the lowering walkers consume unchanged.
+    """Inline every binding-name operand in ``op``'s tree — each reference replaced by the bound
+    SUBTREE ITSELF — yielding a NAME-FREE tree the lowering walkers consume unchanged. The operand
+    edge keeps its node, so the boundary a reader wants (``cone_seam``'s prologue / per-cell split)
+    survives resolution; ``lower`` flattens it at the point of use, once.
     This is the one place ``TileOp.bindings`` is consulted: sharing is structural in the stored tree
     (two siblings referencing one name), and the derived loop nest a shared group lowers to is the
     group's concern, not the resolver's. An empty table means a name-free tree (construction
@@ -47,7 +49,10 @@ def resolve(op, bindings=None):
         bound = bindings.get(op.a_ref)
         if bound is None:
             raise KeyError(f"resolve: operand reference {op.a_ref!r} resolves to no binding")
-        return replace(op, a=Body(tuple(lower(bound, bindings))))
+        # SPLICE the bound NODE onto the edge — do not lower it here. Resolve is a tree operation;
+        # flattening mid-resolve is what used to leave a stmt ``Body`` on the operand field, which
+        # erased the node boundary every downstream reader (``cone_seam``) wants to read back.
+        return replace(op, a=resolve(bound, bindings))
     return op
 
 

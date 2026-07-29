@@ -208,6 +208,49 @@ Spellings on the live gemma goldens (~580 entries — all unchanged; resolution 
   `sink`→`fuse`, old `fuse`→`cut`) but keeps `cut` as ITS default — measured anti-wins (qknorm / post_ff /
   m64) make evidence-only taps the safe resting state; that will be the one exception to fuse-default.
 
+### Completeness (proof sketch)
+
+Why the seam/path schema loses no schedules relative to "cut along any SSA variable", and why the fork
+space stays enumerable. Not a formal proof — the invariants an implementing agent should be able to defend.
+
+**Claim 1 — legal cut points = node outputs.** A cut along value `v` is legal iff `v` is a complete,
+materializable value: every element of `v` is fully computed before any consumer in the other kernel reads
+it. SSA names inside a fold (`acc` mid-reduction) are incomplete until the loop closes; per-cell names
+inside a sweep have no identity outside their loop instance. The values that ARE complete at a program
+point are exactly the outputs of finished algebraic operators — i.e. the bound outputs of structural nodes
+(`Reduction.out` at fold close, `Contraction.acc` at contraction close, `Map.out` at sweep close). So the
+tree's seam set is the legal-cut set; enumerating SSA names over-generates candidates whose legality check
+would reject them, and the tree is that legality check, precomputed.
+
+**Claim 2 — the only quantization loss is mid-pointwise cuts, and it is schedule-trivial.** A cut between
+two statements INSIDE one `Map.body` (after `v4`, before the sweep) is not a seam. Such a cut never
+changes schedule class: a pointwise chain has one parallelization regime (per-cell), no reuse structure,
+and no partition decision — an interior cut only inserts a gmem round-trip between memory-bound
+statements. Any case where an interior split ever mattered is expressible by re-associating the tree
+(`Map ∘ Map`), i.e. by changing the ALGEBRA, not by extending the codec. Empirical check: every cut the
+old system actually deployed lands on a node seam in the new trees — the cone cut's two distinct values
+(the stat and `x̂`) are the binding's internal `map.reduce` seam and the `contraction.a` seam respectively.
+
+**Claim 3 — the fork space is a finite, generically enumerable product.** One shared walker yields the
+finite site sets; the schedule space is:
+
+```
+Π over (path, node, axis) sites:  family vocab(node kind)      # TILE / REDUCE / STAGE rows — as today
+× Π over (path, edge) seams:      { fuse, cut } gated by seam legality
+× root-globals                                                  # RASTER / WSPEC / LOOPIFY
+[ × Π over boundary operands:     { own, consumer, producer }   # reserved, graph-level, also finite ]
+```
+
+Seam legality is structural and decidable per seam (carrier materializability — a twisted multi-component
+state needs the kernel-finalize arm; f32 workspace for reduce seams; no graph-output crossing) — no
+liveness analysis. The old design required hand-REGISTERING each site (`@fold`/`@fin`/`@cone`/`@stat`,
+one realizer each); here the site registry is DERIVED, and only the per-family value vocabularies and the
+legality gates remain hand-written.
+
+**Boundedness caveats** (enumerable ≠ cheap): cut sets compose (2^seams per tree), so enumeration stays
+prior-ranked, never exhaustive — the same combinatorics discipline the fork tree already applies to knob
+values; and evidence-only-`cut` is what keeps the enumerated space from being paid for cold.
+
 ## Phases
 
 Each phase is independently landable and keeps `make test` green. Parity with pre-refactor deployments is

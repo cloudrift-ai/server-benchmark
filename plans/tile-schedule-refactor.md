@@ -115,8 +115,17 @@ class Monoid:
                                              # already carries the neutral element, so there is NO
                                              # Component wrapper duplicating it
     inject: Lambda | None = None     # ι : A → S (None = the identity embedding); subsumes Channel.term
-    psi: str | None = None           # twist family ("exp") — a PRESENTATION: ⊕_ψ, the stabilized
-                                     # streaming step and the cross-partition combine are DERIVED
+    psi: str | None = None           # twist family ("exp"; None = degenerate) — Twist.family purified.
+                                     # WHY it must exist: components underdetermine ⊕ — flash and the
+                                     # plain (max,add,add) product share a components tuple but differ
+                                     # in ⊕ (coupled rescale vs componentwise); psi is the coupling.
+                                     # WHY a NAME and not a ψ Lambda: the stable form is NOT derivable
+                                     # from the bijection (naive conjugation is the overflow the
+                                     # representation avoids) — each family pairs a generator with a
+                                     # hand-written stabilizer, keying ONE source for many derived
+                                     # shapes: the streaming step, the blocked (warp) evaluation, the
+                                     # LSE cross-partition combine, StateMerge, seeds, and the psi-keyed
+                                     # gates (role TWISTED, no atomic finalize)
                                      # (subsumes Channel.lift — the expectation ⊗ is ψ's business)
     # the per-component ACCUMULATOR dtype (today Channel.dtype, None = lowering default) is
     # precision, not algebra — it survives only as an optional parallel tuple so lowered Accums stay

@@ -75,7 +75,13 @@ command:
 
     gate() { # label serve-args...
       label=$$1; shift
-      pkill -f "[v]llm serve" 2>/dev/null || true; sleep 5
+      pkill -f "[v]llm serve" 2>/dev/null || true
+      # Wait for the previous lane's VRAM to actually drain — a fixed sleep raced the
+      # teardown and OOM'd the next boot.
+      for i in $$(seq 1 24); do
+        [ "$$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)" -lt 2000 ] && break
+        sleep 5
+      done
       ./venv/bin/emmy serve $$MODEL --generate --dtype float16 --max-model-len 8448 \
         --no-enable-prefix-caching --tokenizer $$TOK --speculative-config "$$SPEC" "$$@" \
         > $task_dir/serve_$$label.log 2>&1 &

@@ -130,6 +130,16 @@ class Monoid:
                                      # LSE cross-partition combine, StateMerge, seeds, and the psi-keyed
                                      # gates (role TWISTED, no atomic finalize)
                                      # (subsumes Channel.lift — the expectation ⊗ is ψ's business)
+    # WHY NOT store (init, update-Lambda) instead — the "more generic, no family matching" option:
+    # serial execution needs the step S×A→S but every parallel tier needs the combine S×S→S, and an
+    # opaque update derives neither the combine (arbitrary foldl has none — BEING a monoid is what
+    # licenses split/coop/atomic) nor the blocked reassociation the warp realizer emits, nor the
+    # legality facts (associativity is unknowable for an opaque program). It also doesn't remove
+    # matching — it relocates it: one recognition-time matcher stamping a name becomes shape
+    # re-recognition in every consumer (split/coop/twist realizers, the role predicate). The name is
+    # a CERTIFICATE of the algebra, not a dispatch convenience. The generic arm has a legal home as
+    # the LONG-TAIL fallback instead: an unnamed fold may carry opaque (init, update) — bound mode
+    # generalized — and is honestly priced serial-only (no split, no coop, no warp).
     # the per-component ACCUMULATOR dtype (today Channel.dtype, None = lowering default) is
     # precision, not algebra — it survives only as an optional parallel tuple so lowered Accums stay
     # byte-identical; a precision decoration may absorb it later

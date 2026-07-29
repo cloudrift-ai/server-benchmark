@@ -1,6 +1,7 @@
 """``emmy serve`` command construction + flag routing + dry-run (no vllm/GPU)."""
 
 import argparse
+import json
 
 import pytest
 
@@ -169,6 +170,35 @@ def test_serve_cmd_generate_capture_sizes_follow_max_num_seqs():
     cfg = cmd[cmd.index("--compilation-config") + 1]
     # The decode bucket (16) and the cap itself always ride the list; the ladder fills between.
     assert '"cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 48]' in cfg
+
+
+def _spec(depth: int) -> list[str]:
+    return ["--speculative-config", json.dumps({"method": "mtp", "model": "m", "num_speculative_tokens": depth})]
+
+
+def test_serve_cmd_generate_capture_sizes_floor_to_spec_query_len():
+    """Depth 2 (query_len 3): vLLM would round a power-of-two ladder UP to multiples of 3,
+    lifting the 16 and 32 rungs to 18 and 33 — one step ABOVE their own decode bucket, so every
+    verify step misses the static twin. Flooring keeps every rung at or below its power of two."""
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=_spec(2), generate=True)
+    cfg = cmd[cmd.index("--compilation-config") + 1]
+    assert '"cudagraph_capture_sizes": [3, 6, 15, 30, 63, 126, 255]' in cfg
+    # The bucket's own rung must stay reachable — 15 <= the default bucket 16.
+    assert max(s for s in json.loads(cfg)["cudagraph_capture_sizes"] if s <= 16) == 15
+
+
+def test_serve_cmd_generate_capture_sizes_unchanged_when_query_len_divides():
+    """Depth 3 (query_len 4) already divides every power-of-two rung, so the ladder is untouched
+    — the collision is specific to query lengths that share no factor with the ladder."""
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=_spec(3), generate=True)
+    cfg = cmd[cmd.index("--compilation-config") + 1]
+    assert '"cudagraph_capture_sizes": [4, 8, 16, 32, 64, 128, 256]' in cfg
+
+
+def test_serve_cmd_generate_capture_sizes_ignore_absent_spec_config():
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
+    cfg = cmd[cmd.index("--compilation-config") + 1]
+    assert '"cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 64, 128, 256]' in cfg
 
 
 def test_serve_cmd_generate_enforce_eager_opts_out_of_capture():

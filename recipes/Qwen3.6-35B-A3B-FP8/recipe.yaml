@@ -23,6 +23,20 @@ matrices:
   - deploy.gpu: "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"
     deploy.gpu_count: 1
 
+  # 1x A100 80GB (sm_80 Ampere) -- no FP8 tensor cores. This checkpoint is block-scaled
+  # FP8 (weight_block_size [128,128]); vLLM v0.20.1 falls back to weight-only FP8 and
+  # picks MarlinFP8ScaledMMLinearKernel for the dense layers AND the MARLIN Fp8 MoE
+  # backend for the experts, so the whole model runs. Attention backend auto-selects
+  # FLASH_ATTN. Verified: 947.91 output tok/s at concurrency 16, and correct recall on a
+  # 245,043-token prompt, i.e. the full 262144 window works (KV pool 32.1 GiB /
+  # 1.66M tokens). Do NOT add --kv-cache-dtype fp8 here; sm_80 has no hardware FP8.
+  # gpu_memory_utilization 0.85 leaves headroom for the Gated-DeltaNet Triton autotune,
+  # which is not warmed during profiling on non-SM90 cards. No --speculative-config here:
+  # MTP would need --no-enable-prefix-caching and adds a variable to a first boot.
+  - deploy.gpu: "NVIDIA A100 80GB"
+    deploy.gpu_count: 1
+    engine.llm.gpu_memory_utilization: 0.85
+
   - deploy.gpu: "NVIDIA H200 141GB"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.85

@@ -117,7 +117,7 @@ def warp_source(op):
     the one binder keys the fragment realization on (like ``plan.coop`` keys the lane tiling).
     Returns the STORED ``role=CONTRACTION`` fold — its ``tile`` is the schedule fact the caller
     reads; :func:`realize_warp_twist` derives the full views itself."""
-    red = op.source if isinstance(op, Map) else op
+    red = (op.sources[0] if op.sources else None) if isinstance(op, Map) else op
     if not isinstance(red, Fold) or len(red.step) == 0:
         return None
     head = red.step[0]
@@ -408,7 +408,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     close)`` triple the one ``_bind`` pipeline seals (state = the handoff slab + running stats +
     output fragments + hoisted scalars; fold = the streaming :class:`StridedLoop`; close = the
     realized projection + the fragment output store). See the module docstring for the walk."""
-    red: Fold = op.source if isinstance(op, Map) else op
+    red: Fold = op.sources[0] if isinstance(op, Map) else op
     partial = list(red.step)
     # The stored steps are role=CONTRACTION folds; the realizer works on their DERIVED views. The
     # query / value axes come off the placement's free axes (``Ctx.free`` — the un-shrunk

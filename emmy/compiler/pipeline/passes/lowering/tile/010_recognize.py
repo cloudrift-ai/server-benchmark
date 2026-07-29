@@ -274,7 +274,7 @@ def _nodify_contraction(node, free: tuple):
     carries an annotated ``CONTRACTION`` loop — the scheduler and materializer read contraction
     structure only off the node. A computed-A cone is stored INLINE on the ``a`` edge
     (:func:`make_cone`)."""
-    if not isinstance(node, Map) or node.source is not None or len(node.body) == 0:
+    if not isinstance(node, Map) or node.sources or len(node.body) == 0:
         return node
     rloop = node.body[0]
     if not isinstance(rloop, Loop) or rloop.role is not AxisRole.CONTRACTION:
@@ -311,7 +311,7 @@ def _demote_planar(node):
     ``PLANAR`` (``Fold.role``), the same route :func:`_nodify_contraction` leaves an unbindable
     cell on, applied post-nodification. The flattening puts the inline cone in the fold body
     (recomputed per cell)."""
-    src = node.source if isinstance(node, Map) else node
+    src = node.sources[0] if isinstance(node, Map) else node
     red = Fold.from_loop(src.loop)
     projection = Body(tuple(node.body) if isinstance(node, Map) else ())
     return Map(body=projection, sources=(red,)) if len(projection) else red
@@ -429,7 +429,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     c_map, n_ax = pro
     src = c_map.sources[0]  # the ONE bilinear fold — its components share one k axis / cone
     # The cone's source node IS the row-invariant prologue; ITS source is the statistic reduce.
-    con_base, map_base = prologue_knob_bases(src.axis.name, shared_operand(src).source.source.axis.name)
+    con_base, map_base = prologue_knob_bases(src.axis.name, shared_operand(src).sources[0].sources[0].axis.name)
     con_tile = TileOp(op=c_map, place=Placement(free=(*free, n_ax)), inputs=dict(loop.inputs))
     con = _as_list(schedule(con_tile, loop.name, {**knob_base, **con_base}, ctx))
     if con and warp_tile_pinned():

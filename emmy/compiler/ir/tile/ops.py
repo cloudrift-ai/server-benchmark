@@ -72,7 +72,7 @@ def reduce_loop(op):
 def reduce_plan(tile):
     """The tile's reduce partition (:class:`~emmy.compiler.ir.schedule.ReducePlan`), read
     **off the** :class:`~emmy.compiler.ir.tile.ir.Fold` **node** — when ``tile.op`` is a
-    ``Fold`` (bare, or wrapped via ``Map.source``), else ``None`` (a pure pointwise / scalar
+    ``Fold`` (bare, or wrapped via ``Map.sources``), else ``None`` (a pure pointwise / scalar
     per-cell ``Map`` has no partition). Every partitioned reduce — a plain / twisted monoid, flash,
     a coop-K / split-K contraction (:func:`nodify_reduce`) — carries its plan on the node; there is
     **no** residual ``TileOp.reduce`` field. The single accessor the materializer / ``030_split_reduce`` read."""

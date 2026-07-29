@@ -274,6 +274,14 @@ def _eval_stmt(s: str):
 _STMT_EVAL_SCOPE: dict | None = None
 
 
+def _lenient_lambda(params=(), body=(), results=()):
+    """Rehydrate a dumped ``Lambda`` repr through the interim ``effectful_lambda`` path (see the
+    scope entry below — retires at 1q)."""
+    from emmy.compiler.ir.stmt.body import Body, effectful_lambda  # noqa: PLC0415
+
+    return effectful_lambda(params, Body.coerce(body), results)
+
+
 def _stmt_eval_scope() -> dict:
     """Lazy-built eval scope for Stmt-repr strings."""
     global _STMT_EVAL_SCOPE
@@ -354,6 +362,11 @@ def _stmt_eval_scope() -> dict:
         # ``repr(np.dtype('float32'))`` is ``dtype('float32')`` — eval needs
         # ``dtype`` in scope to round-trip ``DataType.np``.
         "dtype": _np.dtype,
+        # INTERIM (retires at 1q): a dumped ``Map.fn`` lambda may still carry the projection
+        # ``Write``s / a split partial's ``Loop`` (the effects that move to the kernel boundary
+        # at 1q), so the round-trip rebuilds through the same lenient path ``Map`` construction
+        # uses — strict ``Lambda`` formation once the body is pure.
+        "Lambda": _lenient_lambda,
         "__builtins__": {},
     }
     # The tile-IR structural nodes (``Map`` / ``Fold`` / ``ContractionView``) and the

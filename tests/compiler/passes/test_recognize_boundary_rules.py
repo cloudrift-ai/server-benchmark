@@ -290,9 +290,9 @@ def test_norm_linear_warp_pick_is_computed_a_contraction():
     the PLACE wipe — the ``PLACE@cone`` stamp returns with the phase-4 realizer."""
     _, tile = _resolve(_norm_linear_graph(), pick=_is_warp_row)
     assert isinstance(tile.op, Map)
-    c = tile.op.source
+    c = tile.op.sources[0]
     assert isinstance(c, ContractionView) and c.a_computed and len(tile.op.sources) == 1
-    stat_loop = c.a.source.source.loop
+    stat_loop = c.a.sources[0].sources[0].loop
     assert isinstance(stat_loop, Loop) and stat_loop.is_reduce and stat_loop.role is AxisRole.PLANAR
     assert [a.extent.as_static() for a in c.axes] == [32, 3072]
     assert c.axes[0].name == tile.place.grid[-2].name and c.axes[1].name == tile.place.grid[-1].name
@@ -321,14 +321,14 @@ def test_norm_linear_cone_is_an_inline_node_tree():
 
     _, tile = _resolve(_norm_linear_graph(), pick=_is_warp_row)
     grid = tile.place.grid
-    c = contraction_view(tile.op.source, grid[-2], grid[-1], tuple(grid[:-2]))
+    c = contraction_view(tile.op.sources[0], grid[-2], grid[-1], tuple(grid[:-2]))
     assert c is not None and c.a_computed
     cone = c.a
     assert isinstance(cone, Map) and cone.out == c.a_name
-    assert cone.source.source.role is AxisRole.PLANAR, "the statistic reduce is the prologue's source"
+    assert cone.sources[0].sources[0].role is AxisRole.PLANAR, "the statistic reduce is the prologue's source"
     # The seam IS the boundary: prologue row-invariant, body k-varying, stats the bridged values.
     pro, cell, stats = cone_seam(cone)
-    assert pro == tuple(lower(cone.source)) and cell == tuple(cone.body)
+    assert pro == tuple(lower(cone.sources[0])) and cell == tuple(cone.body)
     assert not any(_refs_axis(s, c.k_axis.name) for s in pro), "the prologue never indexes K — it runs once per row"
     assert any(_refs_axis(s, c.k_axis.name) for s in cell), "the per-cell body is the k-varying remainder"
     assert stats, "the statistic bridges through the stat smem rows"
@@ -378,7 +378,7 @@ def test_mlp_gate_up_nodifies_as_two_channel_product_contraction():
     rows, tile = _resolve(_mlp_gate_up_graph(), pick=_is_warp_row)
     assert isinstance(tile.op, Map) and len(tile.op.sources) == 1
     grid = tile.place.grid
-    node = contraction_view(tile.op.source, grid[-2], grid[-1], tuple(grid[:-2]))
+    node = contraction_view(tile.op.sources[0], grid[-2], grid[-1], tuple(grid[:-2]))
     assert node is not None and len(node.channels) == 2 and node.a_computed
     assert {ch.b.input for ch in node.channels} == {"wg", "wu"}
     assert isinstance(tile.op.body[-1], Write)
@@ -420,10 +420,13 @@ def test_normed_gqa_sdpa_certifies_flash():
     flash = [
         n.op
         for n in terminal.nodes.values()
-        if type(n.op).__name__ == "TileOp" and isinstance(n.op.op, Map) and getattr(n.op.op.source, "role", None) is AxisRole.TWISTED
+        if type(n.op).__name__ == "TileOp"
+        and isinstance(n.op.op, Map)
+        and n.op.op.sources
+        and getattr(n.op.op.sources[0], "role", None) is AxisRole.TWISTED
     ]
     assert flash, "no TWISTED flash kernel certified for the normed GQA sdpa"
-    src = flash[0].op.source
+    src = flash[0].op.sources[0]
     from emmy.compiler.ir.tile import is_contraction_fold
 
     assert is_contraction_fold(src.step[0]), "flash did not absorb the score contraction (fold stayed cut)"

@@ -357,8 +357,10 @@ def _with_reduce(op, plan: ReducePlan, stage: Stage | None = None):
     recognition always emits as a bare ``Fold`` or a projecting ``Map(source=Fold)``."""
     if isinstance(op, Fold):
         return replace(op, reduce=plan, stage=stage)
-    assert isinstance(op, Map) and isinstance(op.source, Fold), f"reduce op must nodify to Fold, got {type(op).__name__}"
-    return replace(op, sources=(replace(op.source, reduce=plan, stage=stage),))
+    assert isinstance(op, Map) and len(op.sources) == 1 and isinstance(op.sources[0], Fold), (
+        f"reduce op must nodify to Fold, got {type(op).__name__}"
+    )
+    return replace(op, sources=(replace(op.sources[0], reduce=plan, stage=stage),))
 
 
 # ---- shared-row operand staging (the fused norm→linear prologue) -------------------------------- #
@@ -1369,7 +1371,7 @@ def _splitk_option(
         inner = replace(
             inner,
             k_axis=kslice,
-            a=replace(cone, body=Body(tuple(st.rewrite(lambda nm: nm, sigma) for st in cone.body))),
+            a=cone.with_body(Body(tuple(st.rewrite(lambda nm: nm, sigma) for st in cone.body))),
             channels=tuple(replace(ch, b=replace(ch.b, index=tuple(sigma.apply(e) for e in ch.b.index))) for ch in inner.channels),
         )
     else:
@@ -1568,7 +1570,7 @@ def _map_strip_fork(tile: TileOp, place: Placement, name: str) -> list[TileOp] |
     by the width; a ``TILE`` pin narrows the ladder (``Knob.narrow``), one surviving candidate applies
     directly (no fork)."""
     op = tile.op
-    if not (isinstance(op, Map) and op.source is None) or not place.free:
+    if not (isinstance(op, Map) and not op.sources) or not place.free:
         return TileOp(op=op, name=name, place=place)
     inner = place.free[-1]
     base = TileOp(op=op, name=name, place=place, knobs={_at(TILE, inner.name): ""})
@@ -1822,7 +1824,7 @@ def _stamp_twisted_split(rows: list[TileOp], kv_name: str, plan: ReducePlan) -> 
     the bn-aligned runtime slice width and the absolute ``bound`` the realizer stops/masks against."""
     out: list[TileOp] = []
     for r in rows:
-        red = r.op.source if isinstance(r.op, Map) else r.op
+        red = (r.op.sources[0] if r.op.sources else None) if isinstance(r.op, Map) else r.op
         head = red.step[0]
         bn = head.tile.regs[1] * head.tile.atom.shape[1]
         ext = red.axis.extent
@@ -1843,7 +1845,8 @@ def _twisted_pair(op, free) -> tuple[Fold, Fold, Fold, ContractionView, Contract
     scalar flash forms share; each form's own demands (a gmem-``Load`` A, the mma atom's dtype /
     divisibility, the chain's register budget) stay with its builder. Stamping targets the FOLDS
     (`s is head_fold` in the partial); reads go through the views."""
-    red = op.source if isinstance(op, Map) and isinstance(op.source, Fold) else (op if isinstance(op, Fold) else None)
+    src = op.sources[0] if isinstance(op, Map) and len(op.sources) == 1 else None
+    red = src if isinstance(src, Fold) else (op if isinstance(op, Fold) else None)
     if red is None or red.role is not AxisRole.TWISTED or len(red.step) == 0:
         return None
     head_fold = red.step[0]
@@ -1926,7 +1929,8 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     if not is_warp_codec(spec):
         return None
     op = tile.op
-    red = op.source if isinstance(op, Map) and isinstance(op.source, Fold) else (op if isinstance(op, Fold) else None)
+    src = op.sources[0] if isinstance(op, Map) and len(op.sources) == 1 else None
+    red = src if isinstance(src, Fold) else (op if isinstance(op, Fold) else None)
     if red is None or red.role is not AxisRole.PLANAR or _composes(red):
         return None
     body = list(red.step)

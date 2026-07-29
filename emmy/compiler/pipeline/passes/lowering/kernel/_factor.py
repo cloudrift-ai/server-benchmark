@@ -677,7 +677,7 @@ def chain_source(op):
     """The expect fold of a TWISTED tree carrying a SCALAR register tile over its
     output column axis (the chain schedule — the column axis rides a per-thread register vector),
     or ``None``. The structural schedule read the one binder keys the chain realization on."""
-    red = op.source if isinstance(op, Map) else op
+    red = (op.sources[0] if op.sources else None) if isinstance(op, Map) else op
     if not isinstance(red, Fold) or red.role is not AxisRole.TWISTED:
         return None
     pv = next((s for s in list(red.step)[1:] if is_contraction_fold(s)), None)

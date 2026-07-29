@@ -73,7 +73,7 @@ def test_map_over_reduction_matches_the_legacy_loop_in_body_form() -> None:
 
 def test_pure_pointwise_map_has_no_reduce() -> None:
     node = Map(body=(Load(name="x_e", input="x", index=(Var("m"),)), Assign(name="y", op="relu", args=("x_e",))))
-    assert node.source is None
+    assert node.sources == ()
     assert reduce_loop(node) is None
     assert axis_role(node) is AxisRole.FREE
     assert node.out == "y"
@@ -192,7 +192,7 @@ def test_nodify_reduce_keeps_a_projection_tail_as_a_wrapping_map() -> None:
     proj = (Assign(name="y", op="relu", args=("acc",)), Write(output="out", index=(Var("m"),), value="y"))
     flat = Map(body=(loop, *proj))
     node = nodify_reduce(flat, ReducePlan.of(reg=2))
-    assert isinstance(node, Map) and isinstance(node.source, Fold)
+    assert isinstance(node, Map) and isinstance(node.sources[0], Fold)
     assert tuple(node.body) == proj
     assert lower(node) == lower(flat)  # bit-identical
     assert axis_role(node) is AxisRole.PLANAR
@@ -289,7 +289,7 @@ def test_flash_op_is_a_two_contraction_tree() -> None:
     from emmy.compiler.pipeline.passes.lowering.tile._flash import _flash_op
 
     op = _flash_op("Q", "K", "V", [1, 2], Dim(16), Dim(16), 8, 8)  # (batch, s_q, s_k, head_dim, d_v)
-    red = op.source  # the streaming Fold under the O/l projection Map
+    (red,) = op.sources  # the streaming Fold under the O/l projection Map
     assert red.role is AxisRole.TWISTED  # derived off the exp-family flash carrier
     folds = [s for s in red.step if is_contraction_fold(s)]
     assert len(folds) == 2 and folds[0].out == "sacc", "the QK score fold is the partial's head node"

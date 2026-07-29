@@ -77,7 +77,8 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.expr import Expr, Literal
 from emmy.compiler.ir.schedule import Placement, ReducePlan, Stage, TilePlan, WarpSpec
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carrier, Load, Loop, RenderCtx, Stmt
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carrier, Lambda, Load, Loop, RenderCtx, Stmt
+from emmy.compiler.ir.stmt.body import effectful_lambda
 
 if TYPE_CHECKING:
     from emmy.compiler.ir.atom import Atom
@@ -707,62 +708,92 @@ class ContractionView:
         return [f"{indent}ContractionView [{self.m_axis.name}, {self.n_axis.name}] {ops}"]
 
 
-@dataclass(frozen=True)
-class Map(Stmt):
-    """A pointwise lift / projection wrapper around a :class:`Body` of loop-IR stmts, optionally over
-    one or more reduction / contraction ``sources``.
+def _map_results(body: Body) -> tuple[str, ...]:
+    """The synthesized ``results`` of a legacy ``Map(body=…)`` construction — the last defining
+    stmt's name (the retired ``out`` last-def convention, run ONCE at construction instead of on
+    every read). Empty when nothing in the body defines a name (a store-only projection tail)."""
+    for s in reversed(body):
+        d = s.defines()
+        if d:
+            return (d[-1],)
+    return ()
 
-    ``body`` is the per-cell pointwise / projection compute: operand ``Load``\\ s, the lift
-    ``Assign``\\ s, and — at the kernel root — the output ``Write``. ``sources`` are the structural
-    nodes it projects over (:class:`Fold` / :class:`ContractionView` — ``project ∘ reduce``), empty
-    for a pure pointwise map. A pure pointwise cell is a ``Map`` of plain stmts (``sources=()``);
-    softmax / RMSNorm is a ``Map`` whose ``body`` is the post-fold sweep over a ``Fold`` source.
-    SEVERAL sources is the **fused sibling group** — N :class:`ContractionView`\\ s over one shared A
-    (referenced by binding name), the gate⊗up MLP edge; the group schedules and lowers as ONE unit.
-    Every recognized contraction — per-cell scalar included — is a :class:`ContractionView` node
-    (``_nodify_contraction`` in ``010_recognize``); the only annotated reduce ``Loop``\\ s still riding
-    a flat ``Map`` body are ``030_split_reduce``'s sliced partials. ``out`` is the bound output name (the
-    body's last def, or the primary source's carried state for an empty-body wrap). It HAS a Body, not
-    IS one — and it is itself a ``Stmt``, so it can occupy a statement position in another node's body
-    (the fused sibling group inside a split reduce's ``step``).
-    :attr:`source` is the len-≤1 compat read for the single-source forms."""
+
+@dataclass(frozen=True, init=False)
+class Map(Stmt):
+    """A pointwise lift / projection wrapper — ``fn: Lambda`` over zero or more reduction /
+    contraction ``sources``, bound POSITIONALLY: ``sources[i]`` produces the value ``fn.params[i]``
+    names (at construction the params ARE the sources' bound output names, so lowering splices the
+    body verbatim). ``fn.results`` are the bound output names — they replace the retired ``out``
+    last-def convention (``out`` reads ``fn.results[0]``).
+
+    ``fn.body`` is the per-cell pointwise / projection compute: operand ``Load``\\ s, the lift
+    ``Assign``\\ s, and — UNTIL 1q moves effects to the kernel boundary — the root output
+    ``Write`` and ``030_split_reduce``'s sliced-partial ``Loop``\\ s (the one sanctioned impurity,
+    built through ``effectful_lambda``). ``sources`` are the structural nodes it projects over
+    (:class:`Fold` / :class:`ContractionView` — ``project ∘ reduce``), empty for a pure pointwise
+    map; SEVERAL sources is the **fused sibling group** — N contractions over one shared A, the
+    gate⊗up MLP edge; the group schedules and lowers as ONE unit. Every recognized contraction —
+    per-cell scalar included — is stored as a ``role=CONTRACTION`` fold (``_nodify_contraction``
+    in ``010_recognize``). It is itself a ``Stmt``, so it can occupy a statement position in
+    another node's body (the fused sibling group inside a split reduce's ``step``); ``body`` is
+    the compat read for ``fn.body``.
+
+    The legacy ``Map(body=…, sources=…)`` construction shape keeps working: the binder is
+    synthesized (params = the sources' output names; results = the last def, once, here)."""
 
     pure = True  # a term is a value — its internals are its own; legal inside a stored ``Lambda``
 
-    body: Body = field(default_factory=Body)
-    sources: tuple[Fold | ContractionView | Map, ...] = ()  # the project∘reduce sources, () = pure pointwise
+    fn: Lambda
+    sources: tuple[Fold | ContractionView | Map, ...]
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.body, Body):
-            object.__setattr__(self, "body", Body.coerce(self.body))
-        if not isinstance(self.sources, tuple):
-            object.__setattr__(self, "sources", tuple(self.sources))
+    def __init__(
+        self,
+        fn: Lambda | None = None,
+        sources: tuple = (),
+        *,
+        body=None,
+        results: tuple[str, ...] | None = None,
+    ) -> None:
+        sources = tuple(sources)
+        if fn is None:
+            b = Body.coerce(body) if body is not None else Body()
+            params = tuple(_operand_name(s) for s in sources)
+            if results is None:
+                results = _map_results(b) or params[:1]
+            fn = effectful_lambda(params, b, results)
+        elif body is not None or results is not None:
+            raise TypeError("Map: pass fn= xor (body= / results=), not both")
+        object.__setattr__(self, "fn", fn)
+        object.__setattr__(self, "sources", sources)
 
     @property
-    def source(self) -> Fold | ContractionView | Map | None:
-        """The single projected source, or ``None`` (pure pointwise) — the compat read every
-        single-source form uses. A fused sibling group (N sources) has no single source; read
-        ``sources`` there."""
-        assert len(self.sources) <= 1, f"Map has {len(self.sources)} sources — read `sources`, not `source`"
-        return self.sources[0] if self.sources else None
+    def body(self) -> Body:
+        """The projection body — ``fn.body`` (the stmts live on the lambda)."""
+        return self.fn.body
 
     @property
     def out(self) -> str:
-        """The bound output name. With no projection body it is the primary source's carried state;
-        otherwise the last defining stmt's name (a pointwise lift / a post-reduce projection)."""
-        if len(self.body) == 0 and self.sources:
-            return self.sources[0].out
-        return self.body[-1].defines()[-1]
+        """The bound output name — the lambda's primary result (``fn.results`` replaced the
+        last-def convention; an empty-body wrap's result is its primary param, i.e. the source's
+        carried state)."""
+        r = self.fn.results
+        assert r and isinstance(r[0], str), f"Map has no named result: {r!r}"
+        return r[0]
+
+    def with_body(self, body) -> Map:
+        """A copy with the lambda's body replaced (params / results preserved)."""
+        return Map(fn=effectful_lambda(self.fn.params, Body.coerce(body), self.fn.results), sources=self.sources)
 
     # ---- the stmt protocol (see ``Fold``): ``sources`` are NOT nested bodies — they are node
     # edges, reached by the node-aware walk (:func:`tree_nodes`), the same way a ``ContractionView``'s
     # operand is. ---------- #
     def nested(self) -> tuple[Body, ...]:
-        return (self.body,)
+        return (self.fn.body,)
 
     def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
         (body,) = bodies
-        return replace(self, body=body)
+        return self.with_body(body)
 
     def render(self, ctx: RenderCtx) -> list[str]:
         raise AssertionError("Map must be lowered (ops.lower) before render")
@@ -777,10 +808,14 @@ from emmy.compiler.ir.stmt.passes import rewrite as _rewrite  # noqa: E402
 
 @_rewrite.register
 def _(s: Map, rename, sigma, axis_fn):
-    return Map(
-        body=Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.body)),
-        sources=tuple(_rewrite(src, rename, sigma, axis_fn) for src in s.sources),
+    # The binder renames in lockstep with the body and sources: params track the sources' output
+    # names (positional binding), results track the projection defs.
+    fn = effectful_lambda(
+        tuple(rename(p) for p in s.fn.params),
+        Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.fn.body)),
+        tuple(rename(r) if isinstance(r, str) else r for r in s.fn.results),
     )
+    return Map(fn=fn, sources=tuple(_rewrite(src, rename, sigma, axis_fn) for src in s.sources))
 
 
 @_rewrite.register

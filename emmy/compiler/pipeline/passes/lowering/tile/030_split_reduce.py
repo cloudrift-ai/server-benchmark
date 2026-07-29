@@ -244,7 +244,7 @@ def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Map, plan: R
     carrier's ``as_state_merge`` (the LSE cross-partition combine) and runs the ORIGINAL
     projection (``O/l`` + the layout-aware store) per output element. Deferred-kernel finalize
     only — the twisted ``e^{Δm}`` rescale can't be an atomic."""
-    red: Fold = op.source
+    (red,) = op.sources
     head = red.step[0]  # the stored role=CONTRACTION score fold — its tile is the schedule read
     carrier = red.carrier
     cta = plan.cta
@@ -354,8 +354,8 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
             return _split_contraction(match, root, tile, inner, carrier, plan, rax, projection)
     # Flash split-KV: a warp-tiled TWISTED streaming tree keeps its fragment residence in the
     # partial (the scalar residual path below would drop it to the per-cell tier).
-    if isinstance(op, Map) and isinstance(op.source, Fold) and op.source.role is AxisRole.TWISTED:
-        head = op.source.step[0] if len(op.source.step) else None
+    if isinstance(op, Map) and len(op.sources) == 1 and isinstance(op.sources[0], Fold) and op.sources[0].role is AxisRole.TWISTED:
+        head = op.sources[0].step[0] if len(op.sources[0].step) else None
         if head is not None and getattr(head, "tile", None) is not None and head.tile.is_warp:
             # A symbolic kv splits too: ``_split_twisted_warp`` builds the bn-aligned runtime slice
             # width and the absolute ``bound`` the realizer stops/masks against.

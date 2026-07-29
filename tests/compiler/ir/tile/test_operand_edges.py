@@ -10,8 +10,6 @@ asks before lifting a subtree.
 
 from __future__ import annotations
 
-import pytest
-
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.schedule import TilePlan
@@ -166,13 +164,12 @@ def test_rewrite_reaches_a_channels_b_edge() -> None:
     assert view is not None and view.channels[1].b.names == ("vb",)
 
 
-# --- Map.sources: the len-≤1 compat read --------------------------------------------------------- #
+# --- Map.fn: the binder (1n — the ``source`` compat read retired with the ``out`` convention) ---- #
 
 
-def test_source_is_the_len_le_one_compat_read() -> None:
+def test_map_binder_binds_sources_positionally() -> None:
     single = Map(sources=(_product(),))
-    assert single.source is single.sources[0]
-    assert Map().source is None
-    multi = Map(sources=(_node(_cone(), ("a1", "W1")), _node(_cone("x2"), ("a2", "W2"))))
-    with pytest.raises(AssertionError, match="read `sources`"):
-        _ = multi.source
+    assert single.fn.params == (_product().out,)  # params ARE the sources' bound output names
+    assert single.fn.results == single.fn.params[:1]  # empty-body wrap: result = the carried state
+    assert single.out == _product().out
+    assert Map().fn.params == () and Map().fn.results == ()

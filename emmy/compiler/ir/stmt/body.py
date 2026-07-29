@@ -717,6 +717,24 @@ class Lambda:
         return [head, *pretty_body(self.body, indent + "    ")]
 
 
+def effectful_lambda(params, body, results) -> Lambda:
+    """INTERIM (1n → retires at 1q): the ``Map.fn`` builder while the projection body still
+    carries its effects — the root-store ``Write``\\ s and ``030_split_reduce``'s sliced-partial
+    ``Loop``\\ s that move to the kernel boundary at 1q. A PURE body goes through strict
+    :class:`Lambda` formation (the purity + results-defined gates); an effectful body skips
+    validation — sanctioned HERE and nowhere else, because the plan sequences the binder (1n)
+    ahead of the effects relocation (1q). Delete this with 1q and let every ``Map.fn`` construct
+    ``Lambda`` directly."""
+    body = Body.coerce(body)
+    if all(s.pure for s in body):
+        return Lambda(params=tuple(params), body=body, results=tuple(results))
+    lam = object.__new__(Lambda)
+    object.__setattr__(lam, "params", tuple(params))
+    object.__setattr__(lam, "body", body)
+    object.__setattr__(lam, "results", tuple(results))
+    return lam
+
+
 @lru_cache(maxsize=4096)
 def _shared_structural_key(body: Body) -> str:
     """Module-level memoization for :meth:`Body.structural_key`.

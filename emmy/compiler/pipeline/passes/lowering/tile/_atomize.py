@@ -210,9 +210,9 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis] | None:
 
     STRUCTURE-ONLY: no dtype / geometry / pin legality here — those are per-move scheduling guards
     (``_schedule``), so the same node offers whatever tiers the target legally supports."""
-    if not isinstance(op, Map) or not isinstance(op.source, Fold):
+    if not isinstance(op, Map) or len(op.sources) != 1 or not isinstance(op.sources[0], Fold):
         return None
-    red = op.source
+    red = op.sources[0]
     if red.role is not AxisRole.PLANAR:
         return None
     if any(isinstance(s, (Map, Fold)) for s in red.step):

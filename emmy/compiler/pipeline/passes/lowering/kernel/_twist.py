@@ -27,7 +27,7 @@ residence — the fragment row of the placement-keyed fold (a within-warp ``Frag
   no smem round-trip, no sync; gated at schedule time);
 - the projection tail (``O / l``) realizes as an in-place ``FragmentApply`` + the ``RegStore``
   output close;
-- a resolved K/V ``Stage`` on the ``TileOp`` (``ctx.stage`` — ``_schedule._resolve_twisted_stage``,
+- a resolved K/V ``Stage`` on the streaming ``Reduction`` node (``_schedule._resolve_twisted_stage``,
   cp.async or TMA over a block-divisible-or-symbolic kv) re-parents the streaming step under the same
   ``staged_kloop`` skeleton the matmul tier runs: the K/V slabs fill per KV block (each in its
   operand's own layout — verbatim row copies, so staged stays bit-identical to gmem-direct) and
@@ -535,7 +535,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # pipeline (``stage.alt``) additionally stages Q: a padded row-major smem tile filled once,
     # its A fragments ldmatrix'd per atom-K chunk INSIDE the stream — the freed resident registers
     # are what make the wide (64-key) block fit.
-    stage = ctx.stage
+    stage = red.stage
     alt = stage is not None and stage.alt
     is_tma = stage is not None and stage.transport == "tma"
     elem_bytes = atom.operand_dtype("b").nbytes

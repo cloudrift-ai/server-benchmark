@@ -266,6 +266,14 @@ def _scalar_stage_graph(M: int = 64, N: int = 64, K: int = 64) -> Graph:
     return g
 
 
+def _node_stage(tile_op):
+    """The resolved operand pipeline — read off the node it decorates (a ``Contraction``'s
+    ``stage``, a ``Reduction``'s for the cooperative shared-row tier); there is no ``TileOp.stage``."""
+    op = tile_op.op
+    node = op.sources[0] if getattr(op, "sources", ()) else op
+    return getattr(node, "stage", None)
+
+
 def test_scalar_matmul_stages_through_pipeline(monkeypatch) -> None:
     """The ``TILE_PASSES`` chain RESOLVES the ``STAGE`` codec against the scheduled contraction and
     stamps the resolved ``Stage`` (eligibility + sizing run once, scheduler-side): a ``tma`` pin on a
@@ -283,7 +291,7 @@ def test_scalar_matmul_stages_through_pipeline(monkeypatch) -> None:
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
     # ``STAGE`` is keyed ``@<k_axis>`` (axis-named schedule knob); ``family_value`` reads it.
     assert family_value(tile_op.knobs, "STAGE") == "d2/tma", tile_op.knobs  # resolved at the pinned depth
-    stage = tile_op.stage
+    stage = _node_stage(tile_op)
     assert stage is not None and stage.transport == "tma", stage
     assert stage.depth == 2, stage  # the scalar ring honors the pinned depth (slots fit 48 KiB)
     assert stage.bk_elems == 64, stage  # derived depth-aware fit-to-smem K-chunk (K=64 divides)
@@ -292,7 +300,7 @@ def test_scalar_matmul_stages_through_pipeline(monkeypatch) -> None:
     out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((9, 0)))
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
     assert family_value(tile_op.knobs, "STAGE") == "", tile_op.knobs  # declined pin stamps the OFF value
-    assert tile_op.stage is None, tile_op.stage  # resolved: ineligible pin ⇒ gmem-direct
+    assert _node_stage(tile_op) is None, _node_stage(tile_op)  # resolved: ineligible pin ⇒ gmem-direct
 
 
 def test_scalar_masked_n_stage_declines(monkeypatch) -> None:
@@ -310,7 +318,7 @@ def test_scalar_masked_n_stage_declines(monkeypatch) -> None:
         monkeypatch.setenv("EMMY_STAGE", stage)
         out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(M=64, N=48, K=64), ctx=Context.from_target((9, 0)))
         tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
-        assert tile_op.stage is None, (stage, tile_op.stage)  # masked-N declines staging (no row-crossing fill)
+        assert _node_stage(tile_op) is None, (stage, _node_stage(tile_op))  # masked-N declines staging (no row-crossing fill)
         assert family_value(tile_op.knobs, "STAGE") == "", (stage, tile_op.knobs)  # OFF-stamped (gmem-direct)
 
 
@@ -341,13 +349,13 @@ def test_tma_stage_declines_below_sm90(monkeypatch) -> None:
     out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((8, 9)))
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
     assert family_value(tile_op.knobs, "STAGE") == "", tile_op.knobs  # tma declined below sm_90
-    assert tile_op.stage is None, tile_op.stage
+    assert _node_stage(tile_op) is None, _node_stage(tile_op)
 
     # Control: cp.async is unaffected by the gate — a d2/cp/ring pin still rings at sm_89.
     monkeypatch.setenv("EMMY_STAGE", "d2/cp/ring")
     out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((8, 9)))
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
-    stage = tile_op.stage
+    stage = _node_stage(tile_op)
     assert stage is not None and stage.transport == "cp.async", stage
 
 

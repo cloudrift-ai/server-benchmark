@@ -16,8 +16,8 @@ free-axis → grid :class:`~.schedule.Placement` (``place``) and the warp split
 (``workers``). The
 per-node schedule slices ride the structural nodes themselves (a
 :class:`Contraction`'s ``tile``, a :class:`Reduction`'s
-``reduce`` — EVERY reduce partition rides its node, none on the ``TileOp``); the residual root field
-``stage`` holds the resolved operand pipeline (flash is now a
+``reduce``, a :class:`Contraction`'s / :class:`Reduction`'s ``stage`` — EVERY schedule slice rides
+the node it decorates, none on the ``TileOp`` (flash is now a
 ``Map(sources=(Reduction(partial=[Contraction(QK), …, Contraction(PV)]),))`` node tree, so its
 partition rides the node). There is no per-kind kernel/schedule type: the algebra is read
 structurally off the axes' :class:`~emmy.compiler.ir.axis.AxisRole`
@@ -126,6 +126,9 @@ class Reduction:
     role: AxisRole = AxisRole.PLANAR  # PLANAR (plain) or TWISTED (online-softmax / flash)
     unroll: bool = False
     reduce: ReducePlan = field(default_factory=ReducePlan)  # the reduce partition (schedule slice), stamped by the _schedule helper
+    # The operand smem pipeline this reduce runs under (schedule slice): the cooperative tier's
+    # shared-row ``sync`` stage, or a warp-flash tree's resolved K/V stage. ``None`` = gmem-direct.
+    stage: Stage | None = None
     # The stream's ABSOLUTE base for a cross-CTA slice partial (flash split-KV: ``030_split_reduce`` shrinks
     # ``axis`` to the slice length B and sets ``offset = _ksplit · B``). The fold walks its local
     # ``[0, B)`` window; a consumer needing the absolute reduce-axis coordinate (gmem/TMA operand
@@ -303,8 +306,9 @@ class Contraction(Stmt):
     a: Load | Body | str
     b_load: Load  # the B operand — params
     acc: str  # the fold accumulator this node produces — params
-    tile: TilePlan  # the schedule: leaf atom + unit/register widths + K-chunk (the only schedule field)
+    tile: TilePlan  # the schedule: leaf atom + unit/register widths + K-chunk
     lead_axes: tuple[Axis, ...] = ()  # params
+    stage: Stage | None = None  # the schedule: the resolved operand smem pipeline (None = gmem-direct)
 
     @property
     def out(self) -> str:
@@ -472,6 +476,10 @@ def _(s: Contraction, rename, sigma, axis_fn):
         b_load=_rewrite(s.b_load, rename, sigma, axis_fn),
         acc=rename(s.acc),
         tile=s.tile,
+        # ``stage`` is deliberately DROPPED: this rewrite is the ``structural_key``
+        # canonicalization, and the resolved pipeline is already spelled on the knob row
+        # (``STAGE@<k>``) — folding it into the digest here would re-key every staged kernel
+        # against its stored evidence for no added identity.
         lead_axes=tuple(axis_fn(a) for a in s.lead_axes),
     )
 
@@ -585,7 +593,6 @@ class TileOp(Op):
     - ``place`` — the free-axis → grid binding (:class:`~.schedule.Placement`); root-global.
     - ``workers`` — the warp-specialization split (:class:`~.schedule.WarpSpec`); root-global, ``None`` =
       uniform SIMT.
-    - ``stage`` — the operand smem pipeline (:class:`~.schedule.Stage`); ``None`` = gmem-direct.
 
     ``bindings`` is the kernel's **let table** — shared subtrees keyed by the name each tree's root
     defines (its ``out``), referenced from an operand field by that plain SSA name
@@ -609,7 +616,6 @@ class TileOp(Op):
     op: object = None
     name: str = ""
     place: Placement = field(default_factory=Placement)
-    stage: Stage | None = None
     workers: WarpSpec | None = None
     bindings: dict = field(default_factory=dict)  # the let table: out-name → shared subtree
 

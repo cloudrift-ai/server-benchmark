@@ -122,17 +122,17 @@ def _carrier_identities(carrier) -> dict[str, float]:
     return {s.name: s.op.identity for s in carrier.merge if isinstance(s, Accum)}
 
 
-def _mapped(op, grid, *, name: str = "", stage=None, knobs: dict | None = None, bindings: dict | None = None) -> TileOp:
-    """A **mapped** ``TileOp`` wrapping ``op`` over ``grid`` (so ``_schedule`` skips it). ``stage`` threads the
-    scheduler-resolved operand :class:`Stage` onto a split partial (resolved against the sliced
-    inner node by ``_splitk_option``); a residual reduce partition rides the op's
+def _mapped(op, grid, *, name: str = "", knobs: dict | None = None, bindings: dict | None = None) -> TileOp:
+    """A **mapped** ``TileOp`` wrapping ``op`` over ``grid`` (so ``_schedule`` skips it). The
+    scheduler-resolved operand :class:`Stage` travels ON the sliced node itself; a residual reduce
+    partition rides the op's
     :class:`Reduction` **node** (:func:`nodify_reduce`), not a ``TileOp`` field. ``knobs`` carries
     the split node's decided knob row (schedule codecs + stamped ``S_*``) onto the **partial** —
     the engine merges knobs forward on 1:1 rebinds only, so without this the graph splice drops
     them and the deployed split kernels record no schedule identity (the A/B table / ``--json``
     then can't say what greedy deployed, and a golden's ``ShapeKey`` matches no kernel)."""
     place = Placement(free=tuple(grid), grid=tuple(grid))
-    return TileOp(op=op, name=name, place=place, stage=stage, knobs=dict(knobs or {}), bindings=dict(bindings or {}))
+    return TileOp(op=op, name=name, place=place, knobs=dict(knobs or {}), bindings=dict(bindings or {}))
 
 
 def _split_contraction(match: Match, root: Node, tile: TileOp, group: tuple, carrier, plan: ReducePlan, split: Axis, projection=()):
@@ -180,7 +180,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, group: tuple, car
             atomic_epi = tuple(replace(s, atomic=True) if isinstance(s, Write) else s for s in epilogue)
         else:
             atomic_epi = (Write(output=out.name, index=cell, value=acc, atomic=True),)
-        return _mapped(_partial(atomic_epi), (split, *grid), name=tile.name, stage=tile.stage, knobs=tile.knobs, bindings=tile.bindings)
+        return _mapped(_partial(atomic_epi), (split, *grid), name=tile.name, knobs=tile.knobs, bindings=tile.bindings)
 
     # --- deferred kernel finalize: partial writes each raw state to ``ws[(comp,) ksplit, *cell]``.
     # The workspace shape MUST match the rank of the index the writes/loads use — or
@@ -202,9 +202,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, group: tuple, car
         return (*lead_ix, *cell)
 
     ws_writes = tuple(Write(output=ws_name, index=ws_index(i), value=states[i]) for i in range(n_comp))
-    partial_tile = _mapped(
-        _partial(ws_writes), (split, *grid), name=f"{tile.name}__partial", stage=tile.stage, knobs=tile.knobs, bindings=tile.bindings
-    )
+    partial_tile = _mapped(_partial(ws_writes), (split, *grid), name=f"{tile.name}__partial", knobs=tile.knobs, bindings=tile.bindings)
 
     # --- finalize kernel: seed each state, fold ``ws`` over ``ksplit`` (``as_state_merge`` — the
     # 1-component additive fold, or the N-component per-channel sums), then the original
@@ -298,9 +296,7 @@ def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Map, plan: R
     sliced = replace(red, axis=replace(red.axis, extent=b_dim), reduce=_strip_grid(plan), offset=off, bound=bound)
     ws_writes = tuple(Write(output=ws_name, index=ws_index(i, names[i]), value=names[i]) for i in range(n_comp))
     partial_map = Map(body=Body(ws_writes), sources=(sliced,))
-    partial_tile = _mapped(
-        partial_map, (split, *grid), name=f"{tile.name}__partial", stage=tile.stage, knobs=tile.knobs, bindings=tile.bindings
-    )
+    partial_tile = _mapped(partial_map, (split, *grid), name=f"{tile.name}__partial", knobs=tile.knobs, bindings=tile.bindings)
 
     # Finalize: per output element, seed the state, fold the partitions (the exp-family LSE
     # combine), then the original projection + layout-aware store (``op.body`` verbatim).

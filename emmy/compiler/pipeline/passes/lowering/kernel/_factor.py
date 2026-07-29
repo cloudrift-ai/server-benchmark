@@ -50,7 +50,6 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, Literal, Var
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
-from emmy.compiler.ir.schedule import Stage
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import Fold, Level, ReduceStage
@@ -226,14 +225,14 @@ class Frag:
 class Ctx:
     """The ambient cell environment threaded DOWN the recursion — established once for the whole
     kernel and passed unchanged so every node reads/writes at the same output cell. ``grid`` is the
-    kernel's grid axes; ``inputs`` the operand buffer table (dtype/shape); ``stage`` the operand smem
-    pipeline; ``output`` the root output buffer name. (The tensor-core rebuild adds the warp
+    kernel's grid axes; ``inputs`` the operand buffer table (dtype/shape); ``output`` the root
+    output buffer name. The operand smem pipeline is NOT here — it rides the node it decorates
+    (``Contraction.stage`` / ``Reduction.stage``). (The tensor-core rebuild adds the warp
     ``bind``/``cell`` register tile — owned per-node by a ``Contraction``'s ``tile`` — and the
     inbound ``wires`` handles, e.g. flash's score fragment feeding P@V's A operand.)"""
 
     grid: tuple
     inputs: dict | None = None
-    stage: Stage | None = None
     output: str = ""
     workers: object = None  # the resolved WarpSpec worker split (None = uniform SIMT)
     raster: object = None  # the parsed RASTER codec (ir.schedule.Raster; None = flat launch order)
@@ -326,7 +325,6 @@ def factorize(tile, root, store=None) -> Tile:
     ctx = Ctx(
         grid=tuple(tile.place.grid),
         inputs=tile.inputs,
-        stage=tile.stage,
         output=(root.output.name if root is not None else ""),
         workers=tile.workers,
         # The launch-order codec rides the TileOp's stamped knobs (kernel-scoped metadata, no
@@ -406,7 +404,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, siblings: tuple =
             epi = with_store(epi, ctx.output, grid, op.out)
         c = op
         seam = ctx.seams.get(c.a_name)
-        state_decls, reduce_region = reduce_codegen(c, ctx.stage, ctx.inputs, ctx.workers, siblings, seam)
+        state_decls, reduce_region = reduce_codegen(c, c.stage, ctx.inputs, ctx.workers, siblings, seam)
         sink = store if store is not None else store_sink(c, Body(tuple(epi)), siblings)
         t = unit_tile(register_tile(atomize(c.atom.shape[:2]), c.mn), c.mn)
         mn, lead, bt, lanes = c.mn, c.lead_axes, c.block_threads, c.atom.lanes
@@ -818,7 +816,7 @@ def _tile_reduce_axis_transposed(
     lanes_n = 32
     k_ways = coop // lanes_n
     assert coop % lanes_n == 0 and k_ways >= 1, f"b{coop}t needs a multiple of {lanes_n}"
-    assert not (ctx.stage is not None and ctx.stage.smem), "transposed coop cannot ride shared-row staging"
+    assert not (op.stage is not None and op.stage.smem), "transposed coop cannot ride shared-row staging"
     out_ax = next(a for a in reversed(grid) if not (a.extent.is_static and a.extent.as_static() == 1))
 
     (rloop,) = _emit(op, ctx).body
@@ -901,10 +899,10 @@ def _tile_reduce_axis(op: Reduction, plan, ctx: Ctx, tail: tuple, out_val: str) 
     # (the coop-K matmul's pinned pipeline) never sets ``smem``, so it passes through untouched.
     tail_src = list(tail)
     fill_stmts: list[Stmt] = []
-    if lane is not None and ctx.stage is not None and ctx.stage.smem:
+    if lane is not None and op.stage is not None and op.stage.smem:
         from emmy.compiler.backend.cuda.dtype import cuda_name  # noqa: PLC0415
 
-        (staged,) = ctx.stage.smem
+        (staged,) = op.stage.smem
         grid_vars = tuple(Var(a.name) for a in grid)
         smem_name = f"{staged}_smem"
         fill_stmts = sync_row_fill(

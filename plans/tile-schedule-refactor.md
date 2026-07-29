@@ -19,16 +19,17 @@ A kernel's math is the `project ∘ reduce ∘ map` composition stored as struct
 from the *schedule* (tile plans, reduce partitions, staging). This refactor extends the same separation to
 three things the current design still conflates or scatters:
 
-1. **Operand sharing is algebra, not naming.** "These two matmuls read the same A" is ONE contraction
-   whose output is a tuple: a product-carrier `Contraction` with one `a` and N channels `(b_i, acc_i)`,
-   folding the componentwise `(+, ×)` — the same N-component product monoid `ops.group_loop` already
-   derives, stored as node shape instead of recovered from a sibling pattern. Reuse is visible as arity;
-   there is no name-reference mechanism to police. This is NOT `Contraction.folds` back: that defect was
-   channels as bolted-on `b_load`-only appendages on a node that also carried `epilogue`; here channels
-   are first-class operand edges, the carrier stays derived, and the fusion decision stays where the
-   north star puts it — loop IR fused these channels before recognition ever saw them, and recognition
-   only STRUCTURES the fact. (Supersedes the sibling-contractions-over-a-let-binding design an earlier
-   revision landed as 1a/1b; see *The operand edge* and residual 1j.)
+1. **Operand sharing is edge reuse in ONE general fold.** "These two matmuls read the same A" is one
+   `Fold` whose step reads one operand edge twice — the tuple lift `(a·b, a·c)` into an N-component
+   product carrier. The stored tree is fully symmetric: no privileged operand slot, no channel pairing,
+   no name-reference mechanism to police. The factored reading `a·(b, c)` — the bilinear normal form
+   tensor cores require — is a DERIVED view (`extract_contraction`), computed at fork-emit where a
+   consumer exists, never stored; the fusion decision stays where the north star puts it — loop IR
+   fused these components before recognition ever saw them, and recognition only STRUCTURES the fact.
+   (Two landed intermediates preceded this: sibling contractions over a let binding (1a/1b), then the
+   product-carrier `Contraction` — one `a` edge + `(b_i, acc_i)` channels — as 1j. Each retired the
+   previous one's naming machinery; 1k retires the stored kind split itself. See *The pure Fold IR and
+   the contraction view*.)
 2. **Kernel boundaries.** Which parts of the tree end up in which CUDA launch is a placement DECISION —
    a `cut | fuse` bit on each parent↔child seam of the tree. Kernels are a derived view: the cut set
    partitions the tree, each partition materializes as one launch, each cut seam materializes its value to
@@ -40,8 +41,11 @@ three things the current design still conflates or scatters:
    position. Four vocabularies for one relation, and the differences are not algebraic — they are the
    accidents of which case was built first. After the refactor there is ONE: the **operand edge**
    (see *The operand edge* below), whose two inhabitants are the two things an input can be —
-   materialized or computed. Sharing is not a third thing an input can be — it is the product
-   contraction's arity (point 1), so no reference arm exists.
+   materialized or computed. Sharing is not a third thing an input can be — it is edge reuse inside one
+   fold's step (point 1), so no reference arm exists. WHERE an input attaches is decided by one rule,
+   **edge iff closed**: a subtree that captures no value from its enclosing step is an operand edge; a
+   state-capturing composition (flash's PV) sits in the step sequence at its semantic position. Edges
+   are exactly the cuttable seams.
 
 From this one idea everything else follows:
 
@@ -64,8 +68,9 @@ From this one idea everything else follows:
 
 ## The tree vocabulary (worked examples)
 
-Agents should read the `ir/tile/ir.py` module docstring first; these examples fix the shapes this plan
-talks about.
+Agents should read the `ir/tile/ir.py` module docstring for the LANDED (1j) vocabulary; the examples
+below spell the 1k target (*The pure Fold IR and the contraction view*), which the landed tree migrates
+to.
 
 Every input below is an **operand edge** (`Load` = materialized, a node = computed) — see *The operand
 edge*. Read `└─` as an edge, never as a stmt position.
@@ -74,41 +79,54 @@ RMSNorm — projection over a fold (`project ∘ reduce`):
 
 ```
 Map                               ← body: rsqrt(acc/N+ε) statistic + the per-element sweep + Write
-└─ sources: Reduction(axis=k)     ← carrier: sum monoid; partial: square, accumulate
-   └─ sources: Load(x[k])         ← the materialized edge — already-cut, no placement decision
+└─ sources: Fold(axis=k, sum)     ← operands: (Load(x[m, k]),) — the materialized edge, already-cut
+                                    step: square, accumulate
 ```
 
-Fused norm→linear / gate⊗up — sharing is arity, ONE product-carrier contraction:
+Fused norm→linear / gate⊗up — sharing is edge reuse, ONE fold with a product carrier:
 
 ```
 Map                                  ← body: swiglu(acc_g, acc_u) + Write
-└─ sources: Contraction(a=cone, channels=((Load(Wg) → acc_g), (Load(Wu) → acc_u)))
-   └─ a: Map(body=scale, sources=(Reduction(stat over k),))    ← the cone, an inline computed operand
+└─ sources: Fold(axis=k, product("acc_g", "acc_u"))
+   ├─ operands: (cone, Load(Wg[k, n]), Load(Wu[k, n]))   ← cone = Map(normalize, sources=(Fold(stat),)), inline
+   └─ step: vg = xn·wg_e; acc_g += vg; vu = xn·wu_e; acc_u += vu   ← xn read twice — sharing, no channels
 ```
 
-Flash — a twisted streaming reduce whose per-step `partial` is a SEQUENCE composing two contractions:
+Flash — a twisted streaming fold; the score fold is CLOSED (an operand edge), PV captures P (a step
+element):
 
 ```
 Map
-└─ sources: Reduction(axis=kv, TWISTED)
-   └─ partial: [ Contraction(QK, k=dd),      ← a=Load(Q), b=Load(K)
-                 …online-softmax merge: m' = max(m, s); α = exp(m − m'); P = exp(s − m')…
-                 Contraction(PV, k=pj) ]     ← a = the P node, inline (computed), b=Load(V)
+└─ sources: Fold(axis=kv, exp("m", "l", "O"))
+   ├─ operands: (Fold(axis=dd, sum, (Load(Q), Load(K))),  Load(V[kv, d]))   ← QK: closed → an edge
+   └─ step: [ …merge: m' = max(m, s·scale); α = exp(m − m'); P = exp(s' − m')…,
+              Fold(axis=pj, sum, P·V),       ← captures P → stays in the sequence, at its position
+              O = O·α + O_blk; … ]
 ```
 
-Position here is **semantic**, not incidental: PV's A operand is the `P` the merge stmts of that same loop
-step produce, so the step cannot be hoisted ahead of them. That is why a reduce composes through its
-sequence while a contraction composes through labelled edges — see the correction under *The operand
-edge*, which records the hoisted-`sources`-tuple design this example once showed and why it is refuted.
+Position here is **semantic**, not incidental: PV's multiplicand is the `P` the merge stmts of that same
+loop step produce, so PV cannot be hoisted ahead of them — while QK, which captures nothing, hoists to an
+operand edge. That is the **edge-iff-closed** rule, and it is the principled form of the measured
+correction under *The operand edge* (which refuted hoisting composed nodes *unconditionally*): closure
+decides edge vs step, and the same predicate is cut legality — every operand edge is a legal seam by
+construction.
 
-Path examples read off these trees: `REDUCE@map.reduce.k` (RMSNorm's fold partition),
-`TILE@map.reduce.contraction.dd` (flash QK), `REDUCE@map.contraction.a.reduce.k` (the cone's stat fold —
-note it reduces the SAME `k` the contraction folds over; only the path distinguishes them, which is the
-single strongest motivation for path addressing).
+Path examples read off these trees: `REDUCE@map.fold.k` (RMSNorm's fold partition), `TILE@…dd` (flash
+QK). With ONE node kind the kind segment carries little — the axis is the real discriminator, and an
+operand-edge label (positional, or view-role sugar like `a`) disambiguates the cone's stat fold from the
+outer fold contracting the SAME `k` — still the single strongest motivation for path addressing. Phase 2
+designs the segment grammar on the one-kind tree; stored short spellings (bare / `@axis`) are unaffected.
 
 ## Target design
 
 ### The operand edge
+
+**Status (1k revision):** this section is being revised a second time. The LANDED vocabulary (through
+1j) stores `Contraction` (one `a` edge + `(b_i, acc_i)` channels) and `Reduction` as separate kinds; the
+1k target merges them into ONE `Fold` with a symmetric `operands` tuple and moves the factored bilinear
+reading into a derived `ContractionView` — see *The pure Fold IR and the contraction view* below.
+Bullets speaking in `Contraction`/channel terms describe the landed intermediate the migration starts
+from.
 
 ```python
 Operand = Load | Map | Reduction | Contraction
@@ -186,6 +204,12 @@ reduce's per-step body is a **sequence**, composed nodes are steps in it, and th
 dataflow meaning. That is the algebra, not a defect — and it is why 1d's node-in-`partial` survivor was
 right after all.
 
+**Refinement (1k):** the refutation is of hoisting composed nodes *unconditionally*. The principled
+boundary is **edge iff closed** (`ir.captured_values` empty): flash's QK score captures nothing and may
+hoist to an operand edge; PV captures the running max and must stay a step element. The same predicate
+is a placement cut's legality, so on the 1k tree every operand edge is a legal seam by construction, and
+step-position stays semantic exactly where the algebra demands it.
+
 What DID survive from that draft is the type honesty, and it resolved in the opposite direction to the one
 first sketched. `Body` is `tuple[Stmt]`, and `Contraction` was the only node kind that subclassed `Stmt` —
 yet `_schedule` legitimately puts a `Map` (the fused sibling group) into a split reduce's `partial`
@@ -240,7 +264,96 @@ What SHOULD land ahead of any producer, because the placement phases depend on i
 grammar reservations. (The other two items once listed here — resolve splicing nodes, the closure
 invariant — landed as 1e / 1g; 1j then retires `resolve` outright, there being no names left to splice.)
 
+### The pure Fold IR and the contraction view (the 1k target)
+
+The purest form of the vocabulary above, designed ahead of the scheduling rework that will consume it:
+`Reduction` and `Contraction` merge into ONE fold node, the stored tree goes fully symmetric, and the
+bilinear reading tensor cores require becomes a derived, hardware-gated view. Identity keys off the
+LOWERED loop nest (`structural_key` lowers first — proved by the 1j digest A/B), so the stored node
+shapes are free to change; the invariant to preserve is `Fold.loop`'s output, and the digest harness is
+the safety net for every step.
+
+```python
+Operand = Load | Fold | Map        # materialized | computed (inline node, one consumer by tree ownership)
+
+@dataclass(frozen=True)
+class Fold(Stmt):                  # absorbs today's Reduction AND Contraction
+    axis: Axis                     # the reduced iteration space
+    carrier: Carrier               # the ⊕ monoid on an N-component product state
+                                   #   family "id"  → componentwise ⊕ (sum, max, the gate⊗up product)
+                                   #   family "exp" → the twisted action (online softmax / flash)
+    operands: tuple[Operand, ...]  # every CLOSED input, one edge each; sharing = repeated reads in step
+    step: Body                     # the per-step lift + carrier update, reading operand values by their
+                                   # out-names. A SEQUENCE on purpose: a twisted lift may read state its
+                                   # own step updates (flash's P) — algebra, not an emitter limitation
+    # schedule slices (decorations; composition supplies multi-slice forms — split-K is an outer
+    # reduce-partitioned Fold whose step composes the inner tiled one):
+    tile: TilePlan | None = None
+    reduce: ReducePlan | None = None
+    stage: Stage | None = None
+
+@dataclass(frozen=True)
+class Map(Stmt):
+    body: Body                     # projection / pointwise sweep
+    sources: tuple[Operand, ...]   # project ∘ fold; admits Load — the cut terminal
+```
+
+- **Edge iff closed.** An input attaches as an operand edge exactly when it captures nothing from the
+  enclosing step (`ir.captured_values`, iteration variables excluded); a state-capturing composition
+  sits in `step` at its semantic position. ONE rule decides attachment, canonical form (maximal
+  hoisting of closed subtrees), and cut legality at once: the seam set is the edge set, legal by
+  construction.
+- **Sharing is edge reuse.** The gate⊗up fold reads its cone edge once per component; `Channel`
+  retires. Two reads of one edge ≢ two edges holding equal subtrees — the structural-identity
+  distinction the let table and the product node each preserved in their own vocabulary survives here
+  as edge multiplicity.
+- **The contraction view — derived, never stored:**
+
+```python
+@dataclass(frozen=True)
+class ContractionView:             # the bilinear reading of a Fold, computed at fork-emit
+    fold: Fold
+    m_axis: Axis                   # the tiled output axes, off the placement's trailing grid
+    n_axis: Axis
+    shared: Operand                # the common multiplicand — the A role (resident, compute-fillable)
+    cofactors: tuple[tuple[Operand, str], ...]   # per-component (B-role edge, acc) — the streamed side
+    # b_trans / dtypes / K geometry stay consumer-side gates, read off the cofactor Loads
+
+def extract_contraction(fold, place) -> ContractionView | None:
+    ...  # carrier family "id", every component additive, and the step factors: exactly one multiply
+         # per component, all sharing a common factor (recognition's value-tree test, moved here)
+```
+
+  A VIEW and not a rewrite, for three reasons that are design-level, not scheduling-level: the same
+  fold must keep offering its scalar / coop rows as fork siblings beside the warp rows (a destructive
+  rewrite loses the unrefined reading); one relation keeps one spelling (a stored refined kind beside
+  the general `Fold` is the two-spellings defect again); and knob keys stamp against the
+  pre-specialization tree (the cut/fuse-invariance rule, applied to refinement). The factored
+  `a·(b₁…bₙ)` form does not vanish — it moves into the view, where a normal form belongs: computed by
+  the consumer that requires it (tensor cores genuinely need the pure bilinear shape), absent from
+  storage. The A/B asymmetry is therefore fully evicted from the type: `shared` / `cofactors` are the
+  view's role names, and the resident-vs-streamed schedule facts hang off them.
+- **Pipeline:**
+
+```
+Loop IR ──recognize──▶ pure Fold/Map tree              (structure only; no hardware knowledge)
+        ──schedule───▶ scalar / coop rows read the Fold directly;
+                       tensor cores present? view = extract_contraction(fold, place)
+                       view ─▶ warp / staged rows: operand roles from the view, TilePlan on the fold
+        ──split / materialize──▶ as today: slices off the nodes, roles off the view
+```
+
+- **Knob-codec impact (phase 2):** with one node kind, `TILE` / `REDUCE` / `STAGE` select which slice
+  decorates the addressed fold (the family IS the slice); kind path-segments carry little and the axis
+  stays the leaf discriminator. Operand-edge labels (`a` / `b`, `in.a` / `in.b`) become view-role sugar
+  resolved through `extract_contraction`; positional edge addressing is the general fallback. Stored
+  short spellings (bare / `@axis`) are untouched.
+
 ### Phase-1 IR generalization
+
+**Status note:** the bullets below are the record of the LANDED phase-1 vocabulary (through 1j — the
+product-carrier contraction). The 1k revision above supersedes the node split they assume; they stay as
+the description of the landed intermediate the 1k migration starts from.
 
 - **No sharing mechanism at all.** An earlier revision of this plan spelled sharing as let-bound subtrees
   (`TileOp.bindings`, SSA-name-referenced, landed as 1a/1b — no `Ref` node, name-uniqueness validated at
@@ -296,7 +409,9 @@ Grammar: `FAMILY@<node-path>[.<axis>][<n>] = value`.
   prior's featurizers, `_FAMILY_ORDER` grouping, and every stored evidence row parse unchanged.
 - **Path** = lowercase node-kind segments from the tree root (`map.reduce.contraction`), plus field-edge
   labels only where kind alone is ambiguous under one parent (`a` for the A-operand edge, `b` for a
-  channel's). **Axis** = the schedule-bearing axis, the leaf discriminator for TILE/REDUCE/STAGE;
+  channel's). After 1k the kind vocabulary collapses to `map` / `fold` and edge labels resolve through
+  the contraction view — see the 1k section's codec note. **Axis** = the schedule-bearing axis, the leaf
+  discriminator for TILE/REDUCE/STAGE;
   absent for PLACE (whose path names the seam's CHILD node) and for a `Map` body tile (`TILE@map = f2`).
 - **Short paths are canonical.** Stampers and ALL stored evidence (goldens, tune DB, online prior) use the
   SHORTEST spelling that is unique for the kernel's tree: bare family where one node is eligible,
@@ -486,15 +601,15 @@ nodification; accuracy on the geglu / norm_linear golden snippets passes vs eage
 
 #### Current state of the codebase
 
-What a phase-2 agent actually finds today, and where it sits against *The operand edge*:
+What a phase-2 agent actually finds today, and where it sits against the 1k target:
 
 | stored field | today | target |
 | --- | --- | --- |
-| `Contraction.a` | `Load \| node`, stored inline — no `str` (1j) | reached |
-| `Contraction.channels` | `tuple[Channel, ...]` — `(b_i, acc_i)`, each `b_i` an operand edge (1j) | reached |
-| `Reduction.partial` | `Body`, carries composed nodes positionally; all node kinds are `Stmt`s (1f) | reached |
-| `Map.sources` | `tuple[Reduction \| Contraction \| Map, ...]`, ≤1 source in every current form (1j) | must admit `Load` for cut (1i) |
-| `TileOp` | `op + name + place + workers` (+ the inherited `Op` knob metadata) | reached |
+| `Contraction.a` | `Load \| node`, stored inline — no `str` (1j) | absorbed into `Fold.operands` (1k) |
+| `Contraction.channels` | `tuple[Channel, ...]` — `(b_i, acc_i)`, each `b_i` an operand edge (1j) | `Fold.operands` + `step`; `Channel` retires (1k) |
+| `Reduction.partial` | `Body`, carries composed nodes positionally; all node kinds are `Stmt`s (1f) | becomes `Fold.step`; closed compositions hoist to edges (1k) |
+| `Map.sources` | `tuple[Reduction \| Contraction \| Map, ...]`, ≤1 source in every current form (1j) | `tuple[Operand, ...]`; must admit `Load` for cut (1i) |
+| `TileOp` | `op + name + place + workers` (+ the inherited `Op` knob metadata) | unchanged |
 
 Everything else the design section calls for is in place: every schedule slice rides its node
 (`Contraction.tile` / `.stage`, `Reduction.reduce` / `.stage`); `Contraction.epilogue`, `TileOp.tier`,
@@ -508,10 +623,10 @@ rename lockstep, pretty), `test_structural_reduction.py`, and the group-formatio
 
 #### Residuals — the delta to *The operand edge*
 
-1e–1h and 1j have LANDED (below); phase 1 is closed on the product-contraction vocabulary. Nothing
-remaining blocks phase 2's codec work — paths and families are well-defined on the landed tree, and the
-binding-name spellings the codec would have had to speak no longer exist. 1i is a phase-4 prerequisite
-that belongs in the realizer's own commit.
+1e–1h and 1j have LANDED (below). 1k — the pure-Fold revision (*The pure Fold IR and the contraction
+view*) — REOPENS phase 1 a second time and should land ahead of the phase-2 codec (one node kind is a
+smaller grammar than two, and the operand-label question resolves through the view). 1i is a phase-4
+prerequisite that belongs in the realizer's own commit.
 
 1e. **`resolve` splices instead of lowering; the `Body` arm retires** — LANDED. `ops.resolve` now returns
     `replace(op, a=resolve(bound, bindings))`, so the operand edge keeps its NODE. `Body` was never a
@@ -582,6 +697,16 @@ that belongs in the realizer's own commit.
     hd128/hd256, rms+attention dynM) — ALL digests identical to the pre-1j baseline; the binding tests
     re-targeted to arity (`test_operand_edges.py`: a 2-channel node ≢ two separate contractions;
     formation gates unchanged in `test_recognize_boundary_rules.py`).
+1k. **The one-Fold IR + the contraction view** — OPEN; the pure-IR revision (*The pure Fold IR and the
+    contraction view*). Merge `Reduction` and `Contraction` into `Fold` (axis + carrier + symmetric
+    `operands` tuple + `step` sequence; `Channel` retires; the `tile` / `reduce` / `stage` slices ride
+    the one node); hoist every CLOSED input to an operand edge (edge-iff-closed — flash's QK score
+    becomes an edge, PV stays a step element); port every `isinstance(…, Contraction)` consumer to
+    `extract_contraction` (the derived bilinear view: shared multiplicand + per-component cofactors,
+    computed at fork-emit, gated by the tensor-core tiers that need it — never stored). The scheduling
+    rework then consumes the view instead of shaping the IR. Verification bar: `Fold.loop` byte-identical
+    to today's synthesized nests (the same 17-kernel digest A/B), and the view reproducing today's
+    operand→role binding on every golden kind.
 1i. **`Map.sources` must admit `Load`** — OPEN, and correctly deferred to phase 4. It is node-only today,
     so a cut at a projection seam cannot be spelled in the parent at all. The widening is one line; it
     belongs in the commit that teaches the realizer to perform the substitution, not ahead of it.
@@ -630,7 +755,8 @@ Design notes:
   no MIMO case in-tree), re-enter recognition for both halves. It should know NOTHING about which seam it
   is — seam-specific knowledge (what buffer dtype, what the child recognizes as) must fall out of the node
   kinds, or it has been factored wrong. Thanks to phase 1 + 1j there are exactly two seam shapes: a `Map`
-  projection seam and a contraction operand edge.
+  projection seam and a fold operand edge — and after 1k every operand edge is closed by construction
+  (edge-iff-closed), so seam legality is structural rather than a checked predicate.
 - Enumeration: recognition offers PLACE rows per seam with option-0 = `fuse` (the no-rewrite row); `cut`
   rows are enumerated only where evidence or a pin exists. Pin precedence: exact path > suffix > bare.
 - Composition order with the split-reduce rewrite matters: the split consumes the GRID stage and produces
@@ -663,7 +789,12 @@ YAML-comment baselines.
   the phase-1 commits rather than patching goldens forward.
 - **1j identity churn**: the channel-tuple conversion and flash's `P` moving from `bindings` to an inline
   edge must leave kernel-source digests and `structural_key` unchanged — prove it by the same 11-kernel
-  digest A/B 1e/1f used, before trusting any golden µs.
+  digest A/B 1e/1f used, before trusting any golden µs. (Landed clean: 17/17 digests identical.)
+- **1k identity churn**: the `Fold` merge must keep `Fold.loop` byte-identical to today's synthesized
+  nests, and `extract_contraction` must reproduce the recognize-time operand→role binding it replaces on
+  every golden kind — the same digest A/B gates every step; a divergence is a bug in the view, never
+  something to migrate around. Watch the QK hoist specifically: moving the score fold from step to edge
+  must not perturb the lowered nest's stmt order (the flatten walk re-splices it at the head).
 - Cone nodification changes `--ir tile` dumps and structural test assertions — sweep the structural tests
   early in 1b, they are the likeliest silent-assumption breakage.
 - Stored-short-key ambiguity from future nodifications — the resolver fails loudly by design; the phase-2

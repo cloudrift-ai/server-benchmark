@@ -254,8 +254,7 @@ def _emit(op, ctx: Ctx) -> Frag:
         prefix = list(src.body) if src is not None else []
         return Frag(body=[*prefix, *_emit_body(op.body, ctx)], out=_map_wire(op), carrier=src.carrier if src is not None else None)
     if isinstance(op, Reduction):
-        prefix = list(_emit(op.source, ctx).body) if op.source is not None else []
-        loop = Loop(axis=op.axis, body=Body((*prefix, *_emit_body(op.partial, ctx))), unroll=op.unroll, role=op.role, carrier=op.carrier)
+        loop = Loop(axis=op.axis, body=Body(tuple(_emit_body(op.partial, ctx))), unroll=op.unroll, role=op.role, carrier=op.carrier)
         return Frag(body=[loop], out=Handle(op.out), carrier=op.carrier)
     if isinstance(op, Contraction):
         # Scalar / block=1: the synthesized ``CONTRACTION`` loop nest — byte-identical to
@@ -274,7 +273,7 @@ def _map_wire(op: Map) -> Handle:
     otherwise the last defining stmt (a pointwise lift / projection), or ``""`` for a sink whose store
     rides inside a projection sweep ``Loop`` (a don't-care — nothing consumes it)."""
     if len(op.body) == 0:
-        return _emit_wire(op.source) if op.source is not None else Handle("")
+        return _emit_wire(op.sources[0]) if op.sources else Handle("")
     last = op.body[-1]
     if isinstance(last, Write):
         return Handle(last.values[-1], residence="gmem")

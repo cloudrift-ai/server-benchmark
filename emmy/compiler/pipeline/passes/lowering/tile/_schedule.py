@@ -1394,7 +1394,8 @@ def _splitk_option(
     # exactly the state the kernel accumulates.
     carrier = group_loop(tuple(resolve(c, binds) for c in group)).carrier
     sliced = Map(sources=group) if len(group) > 1 else inner
-    op = Reduction(carrier=carrier, axis=ksplit, role=AxisRole.CONTRACTION, source=sliced, reduce=ReducePlan.parse(split_spec))
+    # ONE composition rule: the sliced contraction (or fused group) rides the reduce's ``partial``.
+    op = Reduction(carrier=carrier, axis=ksplit, role=AxisRole.CONTRACTION, partial=Body((sliced,)), reduce=ReducePlan.parse(split_spec))
     # The projection rides the ``Map`` wrapper — its ONE home; ``030_split_reduce`` reads it there and
     # retargets it (per-partition atomic store / a deferred finalize after the cross-partition sums).
     if len(epi):
@@ -1887,6 +1888,13 @@ def _twisted_chain_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp
     return TileOp(op=op2, name=name, place=Placement(free=tile.place.free, grid=tuple(grid[:-1])), knobs=stamped, bindings=tile.bindings)
 
 
+def _composes(red: Reduction) -> bool:
+    """True when the reduce's per-step ``partial`` composes another structural node (split-K's
+    sliced contraction, flash's score) — the ONE spelling for a composed reduce, so a "bare
+    statistic reduce" test is just its negation."""
+    return any(isinstance(s, (Map, Reduction, Contraction)) for s in red.partial)
+
+
 def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp | None:
     """The warp (mma) candidate for a **demoted-cone contraction** — a ``PLANAR`` ⊗-fold whose
     lift multiplies a gmem ``Load`` B with a computed pure-MAP cone A (the fused producer → matmul
@@ -1902,7 +1910,7 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
         return None
     op = tile.op
     red = op.source if isinstance(op, Map) and isinstance(op.source, Reduction) else (op if isinstance(op, Reduction) else None)
-    if red is None or red.role is not AxisRole.PLANAR or red.source is not None or red.carrier.twist.family != "id":
+    if red is None or red.role is not AxisRole.PLANAR or _composes(red) or red.carrier.twist.family != "id":
         return None
     body = list(red.partial)
     accums = [st for st in body if isinstance(st, Accum)]

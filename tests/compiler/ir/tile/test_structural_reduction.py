@@ -203,7 +203,7 @@ def test_factor_k_splits_the_axis_with_distinct_names() -> None:
 
 
 def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
-    """Split-K is ``Reduction(axis=ksplit, source=Contraction(k_axis=kslice))``: the outer additive
+    """Split-K is ``Reduction(axis=ksplit, partial=[Contraction(k_axis=kslice)])``: the outer additive
     reduce sums partials across CTAs, the inner contraction folds its slice. ``lower`` is a SINGLE
     ``for ksplit:[for kslice: mul-add]`` with DISTINCT axis names (not ``for k:[for k:]``), and it
     still classifies as a ``CONTRACTION`` carrying the GRID (cta) partition."""
@@ -219,7 +219,9 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
         b_load=replace(c.b_load, index=tuple(sigma.apply(e) for e in c.b_load.index)),
     )
     carrier = Accum(name="acc", value="acc__v", op=ElementwiseImpl("add")).as_carrier()
-    red = Reduction(carrier=carrier, axis=ksplit, role=AxisRole.CONTRACTION, source=inner, reduce=ReducePlan.of(cta=2, finalize="atomic"))
+    red = Reduction(
+        carrier=carrier, axis=ksplit, role=AxisRole.CONTRACTION, partial=Body((inner,)), reduce=ReducePlan.of(cta=2, finalize="atomic")
+    )
 
     assert axis_role(red) is AxisRole.CONTRACTION
     assert reduce_plan(_tile(red)).cta == 2
@@ -243,7 +245,7 @@ def test_reduce_partial_flattens_a_nested_pv_contraction() -> None:
     pv = replace(pv, acc="oblk")
     prob = Assign(name="p", op="exp", args=("acc",))  # softmax weight between the two contractions
     fold = Accum(name="O_i", value="oblk", op="add")
-    red = Reduction(carrier=fold.as_carrier(), axis=Axis("kv", 128), partial=Body((prob, pv, fold)), role=AxisRole.TWISTED, source=qk)
+    red = Reduction(carrier=fold.as_carrier(), axis=Axis("kv", 128), partial=Body((qk, prob, pv, fold)), role=AxisRole.TWISTED)
 
     (kv_loop,) = lower(red)
     assert kv_loop.axis.name == "kv" and kv_loop.role is AxisRole.TWISTED
@@ -260,8 +262,8 @@ def test_flash_op_is_a_two_contraction_tree() -> None:
     """``_flash_op`` builds the blocked two-``Contraction`` tree: BOTH contractions ride the single
     walked edge — ``partial`` — with QK (``Σ_dd Q·K`` score) at its head and PV — a
     **register-resident-A** contraction (``A = P``, the exp weight, a one-stmt cone in the let
-    table) — spliced later (block=1: a singleton ``pj`` reduce). No ``source`` asymmetry: the
-    streaming reduce's ``source`` is ``None`` and the walk reaches both QK and PV as nodes on
+    table) — spliced later (block=1: a singleton ``pj`` reduce). There is no second composition
+    edge: a composed reduce spells it ONE way, so the walk reaches both QK and PV as nodes on
     ``partial``. Its A is computed, not a gmem load; its O-fold consumes the PV output ``O_i__pv``,
     so the ⊗ is a contraction node, not an inline FMA."""
     from emmy.compiler.dim import Dim
@@ -270,8 +272,7 @@ def test_flash_op_is_a_two_contraction_tree() -> None:
 
     binds: dict = {}
     op = _flash_op("Q", "K", "V", [1, 2], Dim(16), Dim(16), 8, 8, bindings=binds)  # (batch, s_q, s_k, head_dim, d_v)
-    red = op.source  # Map(body=[O/l proj], source=Reduction(TWISTED, partial=[QK, ..., PV, ...]))
-    assert red.source is None, "flash's streaming reduce has no source — both contractions ride partial"
+    red = op.source  # Map(body=[O/l proj], sources=(Reduction(TWISTED, partial=[QK, ..., PV, ...]),))
     contractions = [s for s in red.partial if isinstance(s, _C)]
     assert len(contractions) == 2 and contractions[0].acc == "sacc", "QK score contraction is the partial's head node"
     pv = contractions[1]

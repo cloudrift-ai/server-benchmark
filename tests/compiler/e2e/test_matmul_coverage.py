@@ -1419,7 +1419,7 @@ def test_bf16_operands_stage_via_cp_async(monkeypatch):
 
 
 # --- split-K finalizes on the warp tier --------------------------------------
-# MMA split-K rides the structural ``Reduction(axis=ksplit, source=Contraction(k_axis=kslice))`` fork
+# MMA split-K rides the structural ``Reduction(axis=ksplit, partial=[Contraction(k_axis=kslice)])`` fork
 # (``_schedule._splitk_option``): the inner ``Contraction`` factorizes to mma exactly like a non-split
 # matmul. Deferred (``g2k``): ``030_split_reduce`` retargets each partition's C-fragment into a
 # ``ws[ksplit, M, N]`` workspace summed by a sibling additive finalize kernel — NO codegen

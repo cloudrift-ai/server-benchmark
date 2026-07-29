@@ -10,7 +10,7 @@ halves:
   ``gqa_group`` predicates, and the fragment builder ``build_flash_frag``. It doesn't
   hand-assemble a kernel body — it builds the high-level **structural-node tree**
   (``ir/tile/ir``): flash is the **two-``Contraction`` tree** ``Map(body=[O/l projection],
-  source=Reduction(role=TWISTED, axis=kv, partial=[Contraction(Σ_dd Q·K), …, Contraction(Σ_j P·V)]))``
+  sources=(Reduction(role=TWISTED, axis=kv, partial=[Contraction(Σ_dd Q·K), …, Contraction(Σ_j P·V)]),))``
   — the ``(m,l,O)`` LSE streaming reduce over kv whose per-step ``partial`` holds BOTH the ``Σ_dd Q·K``
   score :class:`Contraction` (at its head) and the **P@V** ``Σ_j P·V`` :class:`Contraction` (its A
   operand the register-resident softmax weight ``P``; ``_split_pv`` redirects the carrier's
@@ -391,7 +391,7 @@ def _flash_op(
     bindings: dict | None = None,
 ) -> Map:
     """The per-output-element ``(…, m, d)`` compute as the structural-node tree: flash is
-    ``Map(body=[O/l projection], source=Reduction(role=TWISTED, axis=kv, partial=[Contraction(QK), …,
+    ``Map(body=[O/l projection], sources=(Reduction(role=TWISTED, axis=kv, partial=[Contraction(QK), …,
     Contraction(PV)]))`` — the ``(m,l,O)`` LSE streaming reduce over ``kv`` whose per-step **partial**
     holds the NESTED ``Σ_dd Q·K`` :class:`Contraction` node at its head (then scaled, optionally
     masked, the value read + the carrier's dissolved merge with the PV contraction), projected ``O/l``

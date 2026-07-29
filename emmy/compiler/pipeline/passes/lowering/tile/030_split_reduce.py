@@ -142,7 +142,7 @@ def _mapped(op, grid, *, name: str = "", tier=None, stage=None, knobs: dict | No
 
 
 def _split_contraction(match: Match, root: Node, tile: TileOp, group: tuple, carrier, plan: ReducePlan, split: Axis, projection=()):
-    """Realize a **structural** split-K ``Reduction(axis=ksplit, source=Contraction)`` — the K axis is
+    """Realize a **structural** split-K ``Reduction(axis=ksplit, partial=[Contraction])`` — the K axis is
     already factored (``split`` == ``ksplit``, extent == ``cta``) and the operands offset, so the
     partial is the **bare Contraction** with ``ksplit`` prefixed as a lead grid axis (each CTA a fixed
     partition) and its projection retargeted to the workspace / an atomic output. Because the partial
@@ -342,15 +342,16 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     carrier = rloop.carrier
     cta = plan.cta
     rax = rloop.axis
-    # Structural split-K: ``op`` is ``Reduction(axis=ksplit, source=Contraction(k_axis=kslice))`` —
+    # Structural split-K: ``op`` is ``Reduction(axis=ksplit, partial=[Contraction(k_axis=kslice)])`` —
     # the axis is already factored + operands offset (``_schedule._splitk_option``), so the partial
     # is the **bare Contraction** (→ ``factorize`` → mma / scalar), no ``_slice_loop``.
     # The projection (when the split node carries one) rides the ``Map`` wrapper over the split
     # ``Reduction`` — its ONE home; peel it here and hand it to the realizer.
     split_root, projection = (op.sources[0], op.body) if isinstance(op, Map) and op.sources else (op, ())
-    if isinstance(split_root, Reduction) and split_root.source is not None:
-        # The split node's inner contraction — one, or a FUSED SIBLING GROUP under a ``Map``.
-        inner = split_root.source
+    if isinstance(split_root, Reduction) and len(split_root.partial) == 1:
+        # The split node's inner contraction — one, or a FUSED SIBLING GROUP under a ``Map`` — rides
+        # the reduce's ``partial`` (the one composition rule).
+        inner = split_root.partial[0]
         group = inner.sources if isinstance(inner, Map) else (inner,)
         if group and all(isinstance(c, Contraction) for c in group):
             return _split_contraction(match, root, tile, group, carrier, plan, rax, projection)

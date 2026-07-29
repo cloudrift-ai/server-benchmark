@@ -104,6 +104,11 @@ class Reduction:
     :class:`~emmy.compiler.ir.schedule.ReducePlan` (the reduce partition rides the node's
     ``reduce`` field, read via ``ops.reduce_plan``).
 
+    A reduce whose per-step partial COMPOSES another node — split-K's ``Reduction ⊃ Contraction``
+    (whose ``axis`` ``ksplit`` differs from the inner ``k_axis`` ``kslice``, so no double-reduce),
+    flash's ``Σ Q·K`` score at the head of its kv step — spells it ONE way: the node sits in
+    ``partial`` and :func:`_flatten_nodes` flattens it in place. There is no second ``source`` edge.
+
     It holds **no projection**: a bare reduce (``sum`` / ``max``) is the kernel root (its grid ``Write``
     is glue); a reduce with a post-fold sweep (softmax / RMSNorm) is the ``source`` of a wrapping
     :class:`Map` whose body IS that projection. It is NOT a ``Stmt``
@@ -122,14 +127,6 @@ class Reduction:
     role: AxisRole = AxisRole.PLANAR  # PLANAR (plain) or TWISTED (online-softmax / flash)
     unroll: bool = False
     reduce: ReducePlan = field(default_factory=ReducePlan)  # the reduce partition (schedule slice), stamped by the _schedule helper
-    # An OPTIONAL nested structural node whose lowered loop nest is spliced AHEAD of the ``partial`` —
-    # the split-K ``Reduction ⊃ Contraction`` composition, where ``axis`` (``ksplit``) differs from the
-    # inner contraction's ``k_axis`` (``kslice``), so no double-reduce: ``Reduction(source=Contraction,
-    # reduce=g<n>)``. Flash does NOT use ``source`` — both its contractions ride the ``partial`` edge
-    # (QK at the head, PV embedded), reached by the same :func:`_flatten_nodes` node-walk. ``None`` for
-    # a bare reduce (``sum`` / ``max`` / softmax's PLANAR row reduce), whose ``partial`` is plain
-    # loop-IR stmts. :attr:`loop` splices the source's lowered loop nest ahead of the ``partial``.
-    source: Reduction | Contraction | Map | None = None
     # The stream's ABSOLUTE base for a cross-CTA slice partial (flash split-KV: ``030_split_reduce`` shrinks
     # ``axis`` to the slice length B and sets ``offset = _ksplit · B``). The fold walks its local
     # ``[0, B)`` window; a consumer needing the absolute reduce-axis coordinate (gmem/TMA operand
@@ -156,21 +153,15 @@ class Reduction:
 
     @property
     def loop(self) -> Loop:
-        """The synthesized annotated reduce ``Loop`` — reconstructed from the params. With no
-        :attr:`source` and a plain ``partial`` it is byte-identical to the loop :meth:`from_loop`
-        captured; a ``source`` (the split-K ``Reduction ⊃ Contraction`` composition) splices the
-        source's lowered loop nest ahead of the ``partial`` inside the loop body. Any **nested
+        """The synthesized annotated reduce ``Loop`` — reconstructed from the params. With a plain
+        ``partial`` it is byte-identical to the loop :meth:`from_loop` captured. Any **nested
         structural node inside the ``partial``** — a :class:`Contraction` / :class:`Reduction` /
         :class:`Map` — is flattened to its own loop nest in place by the shared :func:`_flatten_nodes`
         node-walk (so flash's kv loop holds the head ``Σ Q·K`` score contraction loop and the embedded
-        ``Σ_j P·V`` PV contraction loop, exactly the loop-in-body form the scalar tier expands): one
-        structural rule for a reduce whose per-step partial composes contractions."""
-        from emmy.compiler.ir.tile.ops import lower  # noqa: PLC0415 — avoid an import cycle
-
-        # A ``Map`` source is the split-K FUSED SIBLING GROUP (its one derived fold loop).
-        prefix = lower(self.source) if self.source is not None else ()
-        body = Body((*prefix, *_flatten_nodes(self.partial)))
-        return Loop(axis=self.axis, body=body, unroll=self.unroll, role=self.role, carrier=self.carrier)
+        ``Σ_j P·V`` PV contraction loop, and split-K's kslice contraction its own nest — exactly the
+        loop-in-body form the scalar tier expands): ONE structural rule for a reduce whose per-step
+        partial composes other nodes."""
+        return Loop(axis=self.axis, body=Body(_flatten_nodes(self.partial)), unroll=self.unroll, role=self.role, carrier=self.carrier)
 
     @property
     def out(self) -> str:
@@ -571,7 +562,6 @@ def tree_nodes(op):
         for s in op.body:
             yield from _stmt_nodes(s)
     elif isinstance(op, Reduction):
-        yield from tree_nodes(op.source)
         for s in op.partial:
             yield from _stmt_nodes(s)
     elif isinstance(op, Contraction) and isinstance(op.a_operand, Body):

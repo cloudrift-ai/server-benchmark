@@ -39,11 +39,8 @@ def resolve(op, bindings=None):
         body = _resolve_stmts(op.body, bindings)
         return op if (srcs == op.sources and body is None) else replace(op, sources=srcs, body=body if body is not None else op.body)
     if isinstance(op, Reduction):
-        src = resolve(op.source, bindings) if op.source is not None else None
         partial = _resolve_stmts(op.partial, bindings)
-        if src is op.source and partial is None:
-            return op
-        return replace(op, source=src, partial=partial if partial is not None else op.partial)
+        return op if partial is None else replace(op, partial=partial)
     if isinstance(op, Contraction):
         if op.a_ref is None:
             return op

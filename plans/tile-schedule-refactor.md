@@ -150,6 +150,18 @@ Grammar: `FAMILY@<node-path>[.<axis>][<n>] = value`.
   decision must resolve to the same evidence as the child-tree anchor.
 - **Shared bindings**: canonical spelling from the binding root (its name); a single-reference binding may
   be spelled through the referencing edge as sugar.
+- **RESERVED grammar (implement nothing, reject cleanly, never reuse the tokens):** graph-level placement,
+  when it earns its way back in, spells as value-centric placement in this same namespace. Every seam IS a
+  value (an in-tree seam materializes the child node's bound output; a graph edge is a named tensor), so
+  the vocabulary generalizes from `cut | fuse` to WHO COMPUTES THE VALUE: `own` (its own kernel — in-tree
+  cut), `consumer` (inline where read — in-tree fuse / old `fin=fuse`), `producer` (computed upstream —
+  old `stat=sink`). Canonical stored spellings stay KERNEL-ANCHORED so evidence rides a ShapeKey and stays
+  shape-transferable: the path prefix `in.<operand>` addresses the graph edge feeding an operand
+  (`PLACE@in.a.stat = producer`, `PLACE@in.ws = consumer`). Absolute SSA / tensor names (`PLACE@=acc0`,
+  `PLACE@=xhat_17`) are accepted ONLY as pin-time sugar resolved against the live compile — site-specific
+  names are never stored as evidence. Phase 2 reserves: the `in.` path prefix, the leading-`=` value-name
+  pin form, and the three tokens — the parser recognizes and rejects them with "reserved for graph-level
+  placement", so no future spelling migration.
 
 Spellings on the live gemma goldens (~580 entries — all unchanged; resolution targets shown):
 
@@ -189,7 +201,9 @@ Spellings on the live gemma goldens (~580 entries — all unchanged; resolution 
   child-tree anchor (shape-transferable). Both spellings of a child decision resolve to the same evidence.
 - **Graph-level placement stays out of scope**: inlining a finalize into its CONSUMERS (old
   `PLACE@fin=fuse`, refuted e2e once) and producer-side stat taps (old `PLACE@stat=sink`) cross graph
-  edges, not tree seams — this plan does not restore them. One forward constraint to honor anyway: if the
+  edges, not tree seams — this plan does not restore them; the codec merely RESERVES their grammar (the
+  `in.<operand>` prefix + `own | consumer | producer` value vocabulary above) so restoring them later
+  needs no spelling migration. One forward constraint to honor anyway: if the
   stat-tap plan (`stat-tap-loop-fusion.md`) lands later, its tap seam joins this namespace (old
   `sink`→`fuse`, old `fuse`→`cut`) but keeps `cut` as ITS default — measured anti-wins (qknorm / post_ff /
   m64) make evidence-only taps the safe resting state; that will be the one exception to fuse-default.
@@ -241,9 +255,10 @@ Design notes for the implementing agent:
 - Family-level reads (`family_of` / `axis_of` / pooled `family_value`) keep their signatures — downstream
   featurizers and ordering must not notice the change.
 
-Done when: unit tests cover round-trip, every sugar level, ambiguity errors, ordinal emission; a compat
-test resolves every knob dict in ALL golden YAML files (not just gemma) against its kernel kind's tree and
-asserts the stored spelling is already canonical.
+Done when: unit tests cover round-trip, every sugar level, ambiguity errors, ordinal emission, and the
+reserved graph-level forms (`in.` prefix, `=`-value pins, `own`/`consumer`/`producer` tokens) rejecting
+with the reserved-grammar error; a compat test resolves every knob dict in ALL golden YAML files (not just
+gemma) against its kernel kind's tree and asserts the stored spelling is already canonical.
 
 ### Phase 3 — stamp sites
 

@@ -361,3 +361,40 @@ def test_contraction_computed_a_factorizes_at_the_scalar_tier() -> None:
     tile = factorize(TileOp(op=_pv_contraction()), root=None)
     exps = [s for s in tile.body.iter_of_type(Assign) if s.op.name == "exp"]
     assert exps, "the computed A operand (exp of the score) must survive into the scalar kernel body"
+
+
+# --- composed steps: every structural node is a Stmt, so a body can hold one ---------------------- #
+
+
+def test_every_structural_node_is_a_stmt() -> None:
+    """A composed step occupies a STATEMENT position in another node's body — flash's Q@K and P@V in
+    a reduce partial, split-K's sliced contraction, the fused sibling group (a ``Map``) inside a
+    split reduce. Uniform ``Stmt``-hood is what makes that legal instead of resting on one node
+    kind's inheritance."""
+    from emmy.compiler.ir.stmt.base import Stmt
+
+    assert all(issubclass(k, Stmt) for k in (Contraction, Reduction, Map))
+
+
+def test_a_generic_body_walk_reaches_a_composed_nodes_children() -> None:
+    """The protocol that matters: ``nested()`` exposes a composed node's body, so the generic deep
+    walks (``_deep_defines`` and friends) descend into it instead of stopping at — or crashing on —
+    the node. This is the shape ``030_split_reduce`` produces: a ``Map`` group inside a partial."""
+    from emmy.compiler.ir.tile.ir import _deep_defines
+
+    inner = Assign(name="g", op="copy", args=("x",))
+    group = Map(body=Body((inner,)))
+    assert group.nested() == (Body((inner,)),)
+    assert "g" in _deep_defines(Loop(axis=Axis("k", 8), body=Body((group,))))
+
+
+def test_a_composed_step_keeps_its_position_when_flattened() -> None:
+    """Position in the sequence is semantic — flash's P@V reads the softmax weight the merge stmts of
+    that same loop step produce, so a composed step may not be hoisted ahead of them. ``_flatten_nodes``
+    expands each node in place."""
+    from emmy.compiler.ir.tile.ir import _flatten_nodes
+
+    before, after = Assign(name="m", op="copy", args=("s",)), Assign(name="o", op="copy", args=("p",))
+    flat = _flatten_nodes(Body((before, _pv_contraction(), after)))
+    assert flat[0] is before and flat[-1] is after
+    assert any(isinstance(s, Loop) and s.role is AxisRole.CONTRACTION for s in flat[1:-1])

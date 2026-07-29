@@ -42,6 +42,17 @@ its enclosing body is **closed** (:func:`captured_values`); closure is required
 of a SHARED binding (one home, many reading sites) and is the precondition for
 lifting any subtree into its own kernel.
 
+**Every structural node is a ``Stmt``.** A composed step occupies a statement
+position in another node's body — flash's ``Σ_dd Q·K`` and ``Σ_j P·V`` in a
+reduce ``partial``, split-K's sliced contraction, the fused sibling group inside
+a split reduce — and its POSITION there is semantic: flash's PV reads the softmax
+weight the merge stmts of that same loop step produce, so it cannot be hoisted
+ahead of them. Composition therefore rides the sequence, not a hoisted operand
+tuple, and uniform ``Stmt``-hood is what makes a node a legal member of a
+``Body`` (generic walks reach its children through ``nested()`` like any block
+stmt's). ``Map.sources`` are the exception on purpose: they are node EDGES,
+reached by the node-aware walk (:func:`tree_nodes`), like a contraction operand.
+
 The combine lives entirely in the ``op`` wrapper (the :class:`Map` /
 :class:`Reduction` / :class:`Contraction` nodes here + ``ir/stmt/algebra``): a
 node whose per-cell loop nest carries the role (``AxisRole``) + the decoupled
@@ -60,7 +71,7 @@ re-recognizes structure the tile IR already holds.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from emmy.compiler.ir.axis import Axis, AxisRole
@@ -89,11 +100,15 @@ def _overhangs(axis: Axis, tile: int) -> bool:
 def _flatten_nodes(body: Body) -> tuple[Stmt, ...]:
     """Flatten any nested **structural node** — a :class:`Contraction`, :class:`Reduction`, or
     :class:`Map` — that sits as a stmt in ``body`` to its own lowered loop nest; plain stmts pass
-    through. ``Contraction`` is a ``Stmt``, so it can ride inside a reduce ``partial`` (the flash QK
-    ``Σ_dd Q·K`` score AND the flash PV ``Σ_j P·V``); ``Reduction`` / ``Map`` ride here too once a
-    per-step partial composes them. This is the single **node-walk** the ``.loop`` splice and the
-    kernel materializer's recursion share: ``partial`` is a ``Body`` that may carry nodes, and the
-    walk yields the same loop nest whether a node was pre-flattened or reached structurally."""
+    through. All three node kinds ARE ``Stmt``\\ s, which is what makes a composed step a legal member
+    of a ``Body``: flash's ``Σ_dd Q·K`` score and its ``Σ_j P·V``, split-K's sliced contraction, and
+    the fused sibling group (a ``Map``) inside a split reduce's partial. This is the single
+    **node-walk** the ``.loop`` splice and the kernel materializer's recursion share, and it yields
+    the same loop nest whether a node was pre-flattened or reached structurally.
+
+    A composed step's POSITION in the body is semantic, not incidental: flash's PV reads the softmax
+    weight the merge stmts of that same loop step produce, so the step cannot be hoisted ahead of
+    them. That is why composition rides the sequence rather than a hoisted operand tuple."""
     from emmy.compiler.ir.tile.ops import lower  # noqa: PLC0415 — avoid an import cycle
 
     out: list[Stmt] = []
@@ -106,7 +121,7 @@ def _flatten_nodes(body: Body) -> tuple[Stmt, ...]:
 
 
 @dataclass(frozen=True)
-class Reduction:
+class Reduction(Stmt):
     """A scheduled ``PLANAR`` / ``TWISTED`` reduce — the typed successor of the bare annotated reduce
     ``Loop`` (``ir/stmt/algebra``). It splits the reduce's **algebra** (the loop-carried
     :class:`~emmy.compiler.ir.stmt.algebra.Carrier` — degenerate ``id`` for a plain
@@ -123,8 +138,8 @@ class Reduction:
 
     It holds **no projection**: a bare reduce (``sum`` / ``max``) is the kernel root (its grid ``Write``
     is glue); a reduce with a post-fold sweep (softmax / RMSNorm) is the ``source`` of a wrapping
-    :class:`Map` whose body IS that projection. It is NOT a ``Stmt``
-    — like ``Map`` it is an op-tree node a :class:`TileOp` holds;
+    :class:`Map` whose body IS that projection. Like every structural node it IS a ``Stmt`` — that is
+    what lets a composed step occupy a statement position in another node's body;
     :func:`ops.lower` flattens it to the synthesized loop (``[loop]``), so ``op_cache_key`` and the
     ``_factor._tile_reduce_axis`` expander stay byte-identical to the bare-loop form.
 
@@ -181,6 +196,19 @@ class Reduction:
         ``Loop`` (a wrapping ``Map`` appends its projection)."""
         return [self.loop]
 
+    # ---- the stmt protocol: a composed step occupies a statement position, so generic body walks
+    # must reach its children. ``defines`` stays the block-stmt default — the fold's names are bound
+    # by the ``Accum``\\ s inside ``partial``, exactly as for a plain reduce ``Loop``. ---------- #
+    def nested(self) -> tuple[Body, ...]:
+        return (self.partial,)
+
+    def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
+        (partial,) = bodies
+        return replace(self, partial=partial)
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        raise AssertionError("Reduction must be lowered (ops.lower) before render")
+
 
 @dataclass(frozen=True)
 class Side:
@@ -233,13 +261,11 @@ def _deep_reads(stmts: list[Stmt]) -> set[str]:
 
 
 def _stmt_axis_names(stmts) -> set[str]:
-    """Every loop induction variable bound anywhere in ``stmts`` (deep). A structural node sitting
-    in the body (``030_split_reduce``'s sliced partials) is skipped — ``tree_nodes`` reaches it, and
-    :func:`axis_names` collects its axes there."""
+    """Every loop induction variable bound anywhere in ``stmts`` (deep). A composed structural node
+    sitting in the body needs no special case — it is a ``Stmt``, so its children are reached through
+    the same ``nested()`` walk as any block stmt's."""
     out: set[str] = set()
     for s in stmts:
-        if isinstance(s, (Map, Reduction, Contraction)):
-            continue
         ax = getattr(s, "axis", None)
         if ax is not None and hasattr(ax, "name"):
             out.add(ax.name)
@@ -553,7 +579,7 @@ def _(s: Contraction, rename, sigma, axis_fn):
 
 
 @dataclass(frozen=True)
-class Map:
+class Map(Stmt):
     """A pointwise lift / projection wrapper around a :class:`Body` of loop-IR stmts, optionally over
     one or more reduction / contraction ``sources``.
 
@@ -568,7 +594,9 @@ class Map:
     (``_nodify_contraction`` in ``010_recognize``); the only annotated reduce ``Loop``\\ s still riding
     a flat ``Map`` body are ``030_split_reduce``'s sliced partials. ``out`` is the bound output name (the
     body's last def, or the primary source's carried state for an empty-body wrap). It HAS a Body, not
-    IS one. :attr:`source` is the len-≤1 compat read for the single-source forms."""
+    IS one — and it is itself a ``Stmt``, so it can occupy a statement position in another node's body
+    (the fused sibling group inside a split reduce's ``partial``).
+    :attr:`source` is the len-≤1 compat read for the single-source forms."""
 
     body: Body = field(default_factory=Body)
     sources: tuple[Reduction | Contraction | Map, ...] = ()  # the project∘reduce sources, () = pure pointwise
@@ -594,6 +622,19 @@ class Map:
         if len(self.body) == 0 and self.sources:
             return self.sources[0].out
         return self.body[-1].defines()[-1]
+
+    # ---- the stmt protocol (see ``Reduction``): ``sources`` are NOT nested bodies — they are node
+    # edges, reached by the node-aware walk (:func:`tree_nodes`), the same way a ``Contraction``'s
+    # operand is. ---------- #
+    def nested(self) -> tuple[Body, ...]:
+        return (self.body,)
+
+    def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
+        (body,) = bodies
+        return replace(self, body=body)
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        raise AssertionError("Map must be lowered (ops.lower) before render")
 
 
 def _stmt_nodes(s: Stmt):

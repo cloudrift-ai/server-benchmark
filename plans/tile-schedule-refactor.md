@@ -170,12 +170,16 @@ reduce's per-step body is a **sequence**, composed nodes are steps in it, and th
 dataflow meaning. That is the algebra, not a defect — and it is why 1d's node-in-`partial` survivor was
 right after all.
 
-What DOES survive from that draft is the type honesty. `Body` is `tuple[Stmt]`; `Contraction` subclasses
-`Stmt` for the sole purpose of being smuggled into one; `Map` and `Reduction` are not `Stmt`s at all, yet
-`030_split_reduce` puts a `Map` into a `Reduction.partial` (measured across the suite: 4214 `Contraction`
-occurrences, 2 `Map`). The sequence should be typed as what it is — `tuple[Stmt | Node, ...]` — rather than
-relying on one node kind's accidental `Stmt` inheritance. Cut at such a step is then a substitution in
-place (`partial[i] = Load(buf)`), which is well-defined precisely because `Load` IS a `Stmt`.
+What DID survive from that draft is the type honesty, and it resolved in the opposite direction to the one
+first sketched. `Body` is `tuple[Stmt]`, and `Contraction` was the only node kind that subclassed `Stmt` —
+yet `_schedule` legitimately puts a `Map` (the fused sibling group) into a split reduce's `partial`
+(measured across the suite: 4214 `Contraction` occurrences inside a `Body`, 2 `Map`). The answer is not to
+widen the sequence to `tuple[Stmt | Node, ...]` but to make the data honest: **every structural node IS a
+`Stmt`** (1f, landed). A composed step genuinely occupies a statement position and lowers to a loop nest —
+that is what `Contraction` already demonstrated — so uniform `Stmt`-hood removes the special case rather
+than encoding it, and generic body walks reach a composed node's children through the same `nested()` they
+use for any block stmt. Cut at such a step is then a substitution in place (`partial[i] = Load(buf)`),
+well-defined precisely because `Load` is a `Stmt` too.
 
 Consequences:
 
@@ -480,7 +484,7 @@ What a phase-2 agent actually finds today, and where it sits against *The operan
 | --- | --- | --- |
 | `Contraction.a` | `Load \| str`; node when resolved (1e) | reached |
 | `Contraction.b_load` | `Load` | `b: Operand` (same union as `a`) — deferred to a producer, 1h |
-| `Reduction.partial` | `Body`, carries composed nodes positionally | `tuple[Stmt \| Node, ...]` — same shape, honest type |
+| `Reduction.partial` | `Body`, carries composed nodes positionally; all node kinds are `Stmt`s (1f) | reached |
 | `Map.sources` | `tuple[Reduction \| Contraction \| Map, ...]` | `tuple[Operand, ...]` (must admit `Load` for cut) |
 | `TileOp` | `op + name + place + workers + bindings` (+ the inherited `Op` knob metadata) | unchanged |
 
@@ -496,8 +500,9 @@ rename lockstep, pretty), `test_structural_reduction.py`, and the group-formatio
 
 #### Residuals — the delta to *The operand edge*
 
-1e and 1g have LANDED (below). Nothing remaining blocks phase 2's codec work — paths and families are
-already well-defined on the landed tree. 1f / 1i are phase-4 prerequisites; 1h waits on a producer.
+1e, 1f and 1g have LANDED (below); phase 1 is closed. Nothing remaining blocks phase 2's codec work —
+paths and families are well-defined on the landed tree. 1i is a phase-4 prerequisite that belongs in the
+realizer's own commit; 1h waits on a producer.
 
 1e. **`resolve` splices instead of lowering; the `Body` arm retires** — LANDED. `ops.resolve` now returns
     `replace(op, a=resolve(bound, bindings))`, so the operand edge keeps its NODE. `Body` was never a
@@ -510,14 +515,17 @@ already well-defined on the landed tree. 1f / 1i are phase-4 prerequisites; 1h w
     like any other node instead of special-casing a stmt `Body`. Verified emission-neutral by
     kernel-source digest A/B over 11 kernels (matmul f32/f16/thin-M, norm_linear f32/f16, mlp_geglu
     f32/f16, softmax, sdpa, sdpa causal, pointwise): all 11 digests identical across the change.
-1f. **Type the composed-step sequence honestly** — OPEN, and REDUCED in scope. The original plan here
-    (hoist composed nodes onto `Reduction.sources`) is refuted; see the correction under *The operand
-    edge*. What remains is that `Reduction.partial` is a `Body` (= `tuple[Stmt]`) that legitimately carries
-    structural nodes, which works only because `Contraction` subclasses `Stmt`; `Map` and `Reduction` do
-    not, and `030_split_reduce` puts a `Map` in there anyway (measured over the suite: 4214 `Contraction`
-    occurrences inside a `Body`, 2 `Map`). Type it `tuple[Stmt | Node, ...]` so the sequence stops relying
-    on one node kind's accidental inheritance. Not a blocker for phase 2; it touches `Body` / `Body.coerce`
-    and the structural-key dispatch, so land it deliberately rather than opportunistically.
+1f. **Every structural node is a `Stmt`** — LANDED. The original plan here (hoist composed nodes onto
+    `Reduction.sources`) is refuted; see the correction under *The operand edge*. The residual was that
+    `Reduction.partial` is a `Body` (= `tuple[Stmt]`) legitimately carrying structural nodes, which worked
+    only because `Contraction` subclassed `Stmt` while `Map` / `Reduction` did not — so any generic stmt
+    walk crashed on the `Map` group `_schedule` puts inside a split reduce's partial (hit exactly that
+    while building 1g's `axis_names`). `Map` and `Reduction` now subclass `Stmt` with `nested()` /
+    `with_bodies()` / a raising `render()`; `defines()` stays the block-stmt default, since a fold's names
+    are bound by the `Accum`s inside `partial` exactly as for a plain reduce `Loop`. `_stmt_axis_names`
+    drops its node special case. `Map.sources` are deliberately NOT `nested()`: they are node edges,
+    reached by the node-aware walk (`tree_nodes`), the same way a `Contraction`'s operand is.
+    Emission-neutral by the same 11-kernel digest A/B.
 1g. **Closure — LANDED as a predicate plus a shared-binding check.** `ir.captured_values(root, axes)`
     returns the VALUE names a subtree reads but does not define (iteration variables excluded via
     `ir.axis_names`); `validate_bindings` rejects a binding with two or more references that captures

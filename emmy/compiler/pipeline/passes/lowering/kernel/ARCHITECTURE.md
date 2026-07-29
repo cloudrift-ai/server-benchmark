@@ -48,8 +48,10 @@ the inbound `wires` (flash's score fragment feeding P@V's A operand).
 
 The `Contraction` node is **one flat** Stmt — binding-driven for both atoms, with **no per-atom subclass** — that cleanly
 splits the **algebra params** (what to contract: the m/n output `axes` + the `k_axis`, the leading batch `lead_axes`, the
-B operand `Load` + the A `a_operand` — a gmem `Load` **or** a computed register-resident `Body` (flash PV's `P = exp(S −
-M)`, produced from an in-register score, not a gmem address) — the fold accumulator `acc`, and the projection `epilogue`)
+B operand `b_load` + the A operand `a` — a gmem `Load`, a computed register-resident `Body` (flash PV's `P = exp(S −
+M)`, produced from an in-register score, not a gmem address), or the NAME of a let-bound cone in `TileOp.bindings`
+(inlined by `ops.resolve` before any lowering walk) — and the fold accumulator `acc`; a projection is NEVER a node field,
+its one home is the wrapping `Map.body`)
 from the **schedule** (one `tile: TilePlan` field carrying the leaf `atom` — a tensor-core `AtomKind` / the scalar
 `ScalarAtom`, `ir/atom.py` — plus the unit/register widths + K-chunk). The per-CTA geometry (the `(m, n)` `Side` pair —
 tile width / mask / block+unit var names — plus `block_threads`) is **derived** on the node from `tile` × `axes`
@@ -211,7 +213,8 @@ composes with the causal tile-skip (`k_end`) and the split-KV window; flash stre
 decline `alt`).
 
 **A split-KV partial windows the same stream** (`030_split_reduce._split_twisted_warp`, the flash `REDUCE=g<n>k` arm): the
-`Reduction` arrives with its axis shrunk to the slice length and the slice's absolute base on `Reduction.offset` —
+`Reduction` arrives with its axis shrunk to the slice length and the slice's absolute base/bound on that axis's
+`Axis.window` —
 the fold walks its local `[0, B)` window and `_twist` re-bases every absolute-key consumer (the score-column mask
 bases, the gmem/TMA operand coords, and the causal bound above, which goes slice-local so an above-the-diagonal
 slice runs zero steps). The close swaps the projection for RAW state stores when the tail is one `Write` per carrier
@@ -220,7 +223,7 @@ state component: O rides the normal fragment store into the f32 `__partial` work
 
 **The fused edge — the mma tier's `sync` transport.** A demoted-cone matmul (`f(x, …) @ w`) takes the warp tier
 under a warp `TILE` pin: `_schedule._demoted_warp_option` nodifies the PLANAR ⊗-fold to a computed-A `Contraction`
-(the same `a_operand = Body` flash P@V rides) and stamps a `sync` `Stage`; `_staged` then builds a `SyncTransport`
+(the same computed-A `a = Body` form flash P@V rides) and stamps a `sync` `Stage`; `_staged` then builds a `SyncTransport`
 whose A fill is the producer CONE evaluated per slab cell (compute-fill) — the same `fill`/`commit`/`wait` seam,
 feeding the unchanged `ldmatrix` drain. The compute fill assigns each thread a 16-byte run of CONTIGUOUS slab
 cells (the row/col derivation hoists out of the per-cell code; per-thread gmem reads and smem stores merge into
@@ -232,15 +235,17 @@ from `bk_elems`, drained by the plain no-`.trans` ldmatrix — the per-thread pe
 served fused edges' weight-stream deficit); when a two-slot ring also fits the smem budget the
 stage resolves at `depth=2` and the prefetched chunk's B copies stay in flight across the current chunk's drain. A
 **reduce-bearing (MONOID) cone** — the fused norm→linear edge — is nodified at RECOGNIZE time
-(`_atomize.bind_prologue_contraction`; real fork rows, not a pin rescue): the A cone carries its k-invariant prefix
-(the per-row statistic reduce `Loop` + scalar epilogue), split off at the K seam by `_sync_operands`
-(`Contraction.stat_prologue`, the node-owned seam) and run ONCE per tile row as the transport prologue
+(`_atomize.bind_prologue_contraction`; real fork rows, not a pin rescue): the A cone is a let-bound node tree whose
+SOURCE is the row-invariant prologue (the per-row statistic) and whose `body` is the per-cell normalize, so the K seam
+IS the node boundary — read by `ops.cone_seam` in `_sync_operands` — and the prologue runs ONCE per tile row as the
+transport prologue
 (`_stage.sync_stat_fill` — one row per WARP: the 32 lanes stride the row's reduce coalesced and close the fold with
 the carrier's shuffle butterfly (`emit_combine`), lane 0 writing the bridged stat into its smem row; one barrier);
 the per-cell compute-fill reads the bridged values back from the stat rows. Geometry: exact cover on N/K only — a
 masked / symbolic **M** clamp-reads (the A / stat-prologue σ ride `_clamp_last`; the overhang store is discarded by
-the `RegStore` guard). A **multi-fold** node (the gate/up MLP edge — N `(B, acc)` channels folding one shared A
-value, `Contraction.folds`) fills one B slab per channel, drains N mma chains off the ONE ldmatrix'd A fragment
+the `RegStore` guard). A **fused sibling group** (the gate/up MLP edge — N sibling `Contraction`s under one
+`Map.sources`, each naming the ONE shared bound cone; `_AtomOps.siblings`) fills one B slab per channel, drains N
+mma chains off the ONE ldmatrix'd A fragment
 into per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the channels per element in the
 store's `RegEpilogue` (`extra_accs`).
 

@@ -1342,7 +1342,7 @@ def _splitk_option(
     ksplit, kslice, sigma = _factor_k(inner.k_axis, w)
     if inner.a_computed:
         # REDUNDANT-STATISTIC split: the leading k-invariant run of the cone (the per-row stat
-        # prologue — the same seam ``Contraction.stat_prologue`` reads) stays FULL-ROW in every
+        # prologue — the same K seam ``ops.cone_seam`` reads off the node boundary) stays FULL-ROW in every
         # partition, recomputed redundantly; only the k-indexed per-cell remainder is σ-reindexed
         # to absolute k. The sync fill's own σ (``k := k0 + col``) then composes to
         # ``ksplit·(K/w) + k0 + col``. The projection riding the recognizer's ``Map`` wrapper is

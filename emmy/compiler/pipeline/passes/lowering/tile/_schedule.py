@@ -45,7 +45,18 @@ from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.schedule import Raster, Stage, WarpSpec, has_scalar_atom_alias, is_warp_codec
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt, Write
-from emmy.compiler.ir.tile import Channel, Contraction, Map, Placement, ReducePlan, Reduction, TileOp, TilePlan, contraction_view
+from emmy.compiler.ir.tile import (
+    Channel,
+    Contraction,
+    Map,
+    Placement,
+    ReducePlan,
+    Reduction,
+    TileOp,
+    TilePlan,
+    contraction_view,
+    is_contraction_fold,
+)
 from emmy.compiler.ir.tile.ir import gmem_row_stride
 from emmy.compiler.ir.tile.ops import axis_role, cone_seam, nodify_reduce, reduce_loop
 from emmy.compiler.ir.tile.ops import lower as lower_op
@@ -1674,18 +1685,18 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         except Exception:  # noqa: BLE001 — an unparseable pin keeps the historical scalar escape
             rplan = None
         if rplan is not None and rplan.needs_split and rplan.finalize == "kernel":
-            pair = _twisted_pair(tile.op)
+            pair = _twisted_pair(tile.op, tile.place.free)
             if pair is not None:
-                red, head, pv = pair
+                red, _, _, head, pv = pair
                 warps = _twisted_warp_options(tile, name, knobs, _smem_budget(ctx), _tma_allowed(ctx), _f16acc_allowed(ctx))
                 rows = _stamp_twisted_split(warps, red.axis.name, rplan)
                 if rows:
                     rows = _narrow_flash_forms(rows, head, pv, keyed_only=True)
                     return rows if len(rows) > 1 else rows[0]
     if not REDUCE.narrow([""])[0]:
-        pair = _twisted_pair(tile.op)
+        pair = _twisted_pair(tile.op, tile.place.free)
         if pair is not None:
-            red, head, pv = pair
+            red, _, _, head, pv = pair
             warps = _twisted_warp_options(tile, name, knobs, _smem_budget(ctx), _tma_allowed(ctx), _f16acc_allowed(ctx))
             measured_flash = _rtx4080_dit_flash_deploy(warps, red, head, pv, ctx)
             if measured_flash is not None:
@@ -1825,23 +1836,31 @@ def _stamp_twisted_split(rows: list[TileOp], kv_name: str, plan: ReducePlan) -> 
     return out
 
 
-def _twisted_pair(op) -> tuple[Reduction, Contraction, Contraction] | None:
-    """The flash-shaped ``TWISTED`` streaming contraction pair — ``(reduction, head, pv)`` where
-    ``head`` is the score :class:`Contraction` at the partial's head and ``pv`` the single
-    computed-A expect :class:`Contraction` — or ``None`` (not a streaming pair: an online-softmax /
-    RMSNorm ``TWISTED`` reduce takes the reduce-partition tiers). The one structural guard the
-    warp / chain / scalar flash forms share; each form's own demands (a gmem-``Load`` A, the mma
-    atom's dtype / divisibility, the chain's register budget) stay with its builder."""
+def _twisted_pair(op, free) -> tuple[Reduction, Reduction, Reduction, Contraction, Contraction] | None:
+    """The flash-shaped ``TWISTED`` streaming contraction pair — ``(reduction, head_fold, pv_fold,
+    head, pv)``: the STORED ``role=CONTRACTION`` folds (the score at the partial's head, the single
+    computed-A expect later in the sequence) plus their DERIVED :class:`Contraction` views (output
+    axes off the placement's trailing ``free`` — the query axis, and the stream axis for the score /
+    the value axis for the expect). ``None`` when not a streaming pair (an online-softmax / RMSNorm
+    ``TWISTED`` reduce takes the reduce-partition tiers). The one structural guard the warp / chain /
+    scalar flash forms share; each form's own demands (a gmem-``Load`` A, the mma atom's dtype /
+    divisibility, the chain's register budget) stay with its builder. Stamping targets the FOLDS
+    (`s is head_fold` in the partial); reads go through the views."""
     red = op.source if isinstance(op, Map) and isinstance(op.source, Reduction) else (op if isinstance(op, Reduction) else None)
     if red is None or red.role is not AxisRole.TWISTED or red.carrier.twist.family != "exp" or len(red.partial) == 0:
         return None
-    head = red.partial[0]
-    if not isinstance(head, Contraction):
+    head_fold = red.partial[0]
+    if not is_contraction_fold(head_fold) or len(free) < 2:
         return None
-    tail_contractions = [st for st in list(red.partial)[1:] if isinstance(st, Contraction)]
-    if len(tail_contractions) != 1 or not tail_contractions[0].a_computed:
+    tail_folds = [st for st in list(red.partial)[1:] if is_contraction_fold(st)]
+    if len(tail_folds) != 1:
         return None
-    return red, head, tail_contractions[0]
+    pv_fold = tail_folds[0]
+    head = contraction_view(head_fold, free[-2], red.axis)
+    pv = contraction_view(pv_fold, free[-2], free[-1])
+    if head is None or pv is None or not pv.a_computed:
+        return None
+    return red, head_fold, pv_fold, head, pv
 
 
 def _twisted_chain_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp | None:
@@ -1851,10 +1870,10 @@ def _twisted_chain_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp
     score computes ONCE per streamed key and is shared across the columns (vs the per-cell tier's
     redundant recompute per column). A fork SIBLING of the warp / reduce-partition schedules,
     offered when the column axis is small + static (``≤ _CHAIN_MAX_D``, the register budget)."""
-    pair = _twisted_pair(tile.op)
+    pair = _twisted_pair(tile.op, tile.place.free)
     if pair is None:
         return None
-    red, head, pv = pair
+    red, _, pv_fold, head, pv = pair
     op = tile.op
     d_ax = pv.n_axis
     grid = list(place.grid)
@@ -1863,8 +1882,8 @@ def _twisted_chain_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp
     d = d_ax.extent.as_static()
     if d > _CHAIN_MAX_D:
         return None
-    pv2 = replace(pv, tile=TilePlan(regs=(d, 1)))  # scalar reg order (reg_n, reg_m): the column vector
-    partial = tuple(pv2 if st is pv else st for st in red.partial)
+    pv2 = replace(pv_fold, tile=TilePlan(regs=(d, 1)))  # scalar reg order (reg_n, reg_m): the column vector
+    partial = tuple(pv2 if st is pv_fold else st for st in red.partial)
     red2 = replace(red, partial=type(red.partial)(partial))
     op2 = replace(op, sources=(red2,)) if isinstance(op, Map) else red2
     # A fork SIBLING of the warp / reduce-partition schedules: the resolved register-vector plan is
@@ -2133,10 +2152,10 @@ def _twisted_warp_options(
     a pin that doesn't fit the flash form (wrong atom / a column split / a foreign ``bk``) declines
     the tier with a log line — the standard pin-validity degrade, since a bare warp pin may target
     another kernel in the same graph."""
-    pair = _twisted_pair(tile.op)
+    pair = _twisted_pair(tile.op, tile.place.free)
     if pair is None:
         return []
-    red, head, pv = pair
+    red, head_fold, pv_fold, head, pv = pair
     op = tile.op
     if not isinstance(head.a, Load):
         return []
@@ -2266,7 +2285,9 @@ def _twisted_warp_options(
         variants: list[tuple[TilePlan, object]] = []
         for pv_atom in pv_atoms:
             pv_plan = TilePlan(atom=pv_atom, units=(um, 1), regs=(fm, d_v.as_static() // atom_n), bk=max(1, bn // atom_k))
-            partial = tuple(replace(s, tile=qk_plan) if s is head else (replace(s, tile=pv_plan) if s is pv else s) for s in red.partial)
+            partial = tuple(
+                replace(s, tile=qk_plan) if s is head_fold else (replace(s, tile=pv_plan) if s is pv_fold else s) for s in red.partial
+            )
             red2 = replace(red, partial=type(red.partial)(partial))
             variants.append((pv_plan, replace(op, sources=(red2,)) if isinstance(op, Map) else red2))
         # ``um`` warps per CTA, each owning ``fm`` register query tiles of ``atom_m`` rows: the

@@ -122,7 +122,7 @@ def _carrier_identities(carrier) -> dict[str, float]:
     return {s.name: s.op.identity for s in carrier.merge if isinstance(s, Accum)}
 
 
-def _mapped(op, grid, *, name: str = "", knobs: dict | None = None) -> TileOp:
+def _mapped(op, grid, *, name: str = "", knobs: dict | None = None, free=None) -> TileOp:
     """A **mapped** ``TileOp`` wrapping ``op`` over ``grid`` (so ``_schedule`` skips it). The
     scheduler-resolved operand :class:`Stage` travels ON the sliced node itself; a residual reduce
     partition rides the op's
@@ -131,7 +131,7 @@ def _mapped(op, grid, *, name: str = "", knobs: dict | None = None) -> TileOp:
     the engine merges knobs forward on 1:1 rebinds only, so without this the graph splice drops
     them and the deployed split kernels record no schedule identity (the A/B table / ``--json``
     then can't say what greedy deployed, and a golden's ``ShapeKey`` matches no kernel)."""
-    place = Placement(free=tuple(grid), grid=tuple(grid))
+    place = Placement(free=tuple(free) if free is not None else tuple(grid), grid=tuple(grid))
     return TileOp(op=op, name=name, place=place, knobs=dict(knobs or {}))
 
 
@@ -246,8 +246,7 @@ def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Map, plan: R
     projection (``O/l`` + the layout-aware store) per output element. Deferred-kernel finalize
     only — the twisted ``e^{Δm}`` rescale can't be an atomic."""
     red: Reduction = op.source
-    head: Contraction = red.partial[0]
-    pv: Contraction = next(s for s in list(red.partial)[1:] if isinstance(s, Contraction))
+    head = red.partial[0]  # the stored role=CONTRACTION score fold — its tile is the schedule read
     carrier = red.carrier
     cta = plan.cta
     atom_n = head.tile.atom.shape[1]
@@ -281,7 +280,9 @@ def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Map, plan: R
     channels = carrier.twist.channels
     expect = next(n for n, ch in zip(names, channels, strict=True) if ch.lift is not None)
     n_comp = len(names)
-    m_axis, d_axis = head.m_axis, pv.n_axis
+    # The query / value axes are PLACEMENT facts — the pre-split tile's trailing free axes (the
+    # warp placement preserves ``free`` while its grid shrinks the query axis and folds ``d`` away).
+    m_axis, d_axis = tile.place.free[-2], tile.place.free[-1]
     batch = tuple(a for a in grid[:-1])
 
     # The workspace is OURS (bare ``(batch…, m, d)`` order — the fused output layout only matters
@@ -300,7 +301,11 @@ def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Map, plan: R
     )
     ws_writes = tuple(Write(output=ws_name, index=ws_index(i, names[i]), value=names[i]) for i in range(n_comp))
     partial_map = Map(body=Body(ws_writes), sources=(sliced,))
-    partial_tile = _mapped(partial_map, (split, *grid), name=f"{tile.name}__partial", knobs=tile.knobs)
+    # The partial's grid gains ``_ksplit`` and keeps the shrunk query axis; its FREE axes keep the
+    # true ``(m, d)`` tail so the fragment realizer re-derives the views (``Ctx.free``).
+    partial_tile = _mapped(
+        partial_map, (split, *grid), name=f"{tile.name}__partial", knobs=tile.knobs, free=(split, *grid[:-1], m_axis, d_axis)
+    )
 
     # Finalize: per output element, seed the state, fold the partitions (the exp-family LSE
     # combine), then the original projection + layout-aware store (``op.body`` verbatim).
@@ -354,7 +359,7 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     # partial (the scalar residual path below would drop it to the per-cell tier).
     if isinstance(op, Map) and isinstance(op.source, Reduction) and op.source.role is AxisRole.TWISTED:
         head = op.source.partial[0] if len(op.source.partial) else None
-        if isinstance(head, Contraction) and head.tile.is_warp:
+        if head is not None and getattr(head, "tile", None) is not None and head.tile.is_warp:
             # A symbolic kv splits too: ``_split_twisted_warp`` builds the bn-aligned runtime slice
             # width and the absolute ``bound`` the realizer stops/masks against.
             return _split_twisted_warp(match, root, tile, op, plan, Axis(name=_SPLIT, extent=Dim(cta)))

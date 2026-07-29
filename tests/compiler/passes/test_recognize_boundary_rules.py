@@ -424,7 +424,9 @@ def test_normed_gqa_sdpa_certifies_flash():
     ]
     assert flash, "no TWISTED flash kernel certified for the normed GQA sdpa"
     src = flash[0].op.source
-    assert isinstance(src.partial[0], Contraction), "flash did not absorb the score contraction (fold stayed cut)"
+    from emmy.compiler.ir.tile import is_contraction_fold
+
+    assert is_contraction_fold(src.partial[0]), "flash did not absorb the score contraction (fold stayed cut)"
 
 
 def test_bind_contraction_declined_cone_raises_not_positional():

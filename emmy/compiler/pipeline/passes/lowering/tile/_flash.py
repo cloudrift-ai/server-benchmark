@@ -361,7 +361,7 @@ def _split_pv(merge: list, o: str, v: str, v_buf: str, v_idx: tuple, m_axis: Axi
         if s is prod:
             continue  # the inline v·P is dropped — the PV contraction computes it
         if s is o_accum:
-            out.append(pv)  # Oblk = Σ_j P·V, flattened in place by Reduction.loop
+            out.append(pv.as_fold())  # Oblk = Σ_j P·V, a role=CONTRACTION fold flattened in place
             out.append(replace(o_accum, value=f"{o}__pv"))  # O = O·α + Oblk (base O·α unchanged)
             continue
         out.append(s)
@@ -479,7 +479,7 @@ def _flash_op(
     # same way it flattens the embedded PV, so the scalar tier expands the identical loop-in-body nest
     # — but the recursion can now reach BOTH contractions as nodes on ``partial`` (no ``source``
     # asymmetry between QK and PV).
-    partial = [score_contraction, *score_post, *_split_pv(carrier.dissolve(), "O_i", "v_e", v_buf, v_idx, m_axis, d_axis)]
+    partial = [score_contraction.as_fold(), *score_post, *_split_pv(carrier.dissolve(), "O_i", "v_e", v_buf, v_idx, m_axis, d_axis)]
     reduction = Reduction(
         carrier=carrier,
         axis=Axis(name="kv", extent=s_k),

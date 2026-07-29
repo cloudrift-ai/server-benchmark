@@ -838,6 +838,12 @@ def _parse_bilinear(fold) -> tuple[object, tuple] | None:
     return by_name[a_nm], tuple(chans)
 
 
+def is_contraction_fold(s) -> bool:
+    """``s`` is a stored ``role=CONTRACTION`` fold — the one test every walk over a step sequence
+    uses to spot a composed contraction (flash's QK / PV, split-K's sliced fold)."""
+    return isinstance(s, Reduction) and s.role is AxisRole.CONTRACTION
+
+
 def shared_operand(fold):
     """The shared-multiplicand (A-role) operand edge of a bilinear ``role=CONTRACTION`` fold, or
     ``None`` — the placement-free read for callers that need only the edge (the cone), not the full
@@ -945,4 +951,14 @@ class TileOp(Op):
         return "\n".join(pretty(self.op, "    "))
 
 
-__all__ = ["Channel", "Contraction", "Map", "Reduction", "TileOp", "contraction_view", "shared_operand", "tree_nodes"]
+__all__ = [
+    "Channel",
+    "Contraction",
+    "Map",
+    "Reduction",
+    "TileOp",
+    "contraction_view",
+    "is_contraction_fold",
+    "shared_operand",
+    "tree_nodes",
+]

@@ -33,10 +33,12 @@ design rests on four ideas:
    one rule, **edge iff closed**: a subtree that captures no value from its enclosing step
    (`ir.captured_values`, iteration variables excluded) is an operand edge; a state-capturing
    composition (flash's PV, whose multiplicand `P` the same loop step's merge produces) sits in the step
-   sequence at its semantic position. One rule decides attachment, canonical form (maximal hoisting of
+   sequence at its semantic position. One rule decides attachment, the canonical direction (hoist
    closed subtrees), and cut legality at once: on the cut lattice — nodes reachable from the root
-   through edges alone — every seam is closed by construction. (An IN-STEP node's own operand may
-   capture from the step scope, as flash's `P` does; it sits below an uncuttable step anyway.)
+   through edges alone — every seam is closed by construction. A closed STEP element is equally
+   legal and cuttable in place, and stays put where hoisting would perturb the lowered nest (flash's
+   QK — see the worked example). (An IN-STEP node's own operand may capture from the step scope, as
+   flash's `P` does; it sits below an uncuttable step anyway.)
 3. **Hardware readings are DERIVED views, never stored.** The bilinear factored form `a·(b₁…bₙ)` that
    tensor cores require is `contraction_view` — computed at fork-emit where a consumer exists, absent
    from storage. Three design-level reasons it is a view and not a rewrite: the same fold must keep
@@ -137,9 +139,12 @@ gate⊗up:   Map(body=[swiglu(acc_g, acc_u) + Write],
 
 Flash:     Map(body=[O/l projection + Write],
                sources=(Fold(axis=kv, exp("m","l","O"),
-                             operands=(QK-fold,),                   ← closed → an edge (1k-iii)
-                             step=[…merge; P = exp(s′−m′); PV-fold; O = O·α + O_blk…])))
-           PV captures P → a step element, at its semantic position
+                             step=[QK-fold; …merge; P = exp(s′−m′); PV-fold; O = O·α + O_blk…])))
+           PV captures P → a step element at its semantic position. QK is CLOSED and therefore
+           cuttable in place, but stays a step element too — hoisting it to an operand edge would
+           REORDER the lowered nest (the scale Load precedes the score's first use, so the
+           first-use splice lands QK after it), re-keying every flash kernel against zero-migration.
+           Edge-hoisting closed steps is optional canonicalization, deferred to a re-keying window.
 ```
 
 A projection has ONE home — the wrapping `Map.body`, never a node field; a bare fold's grid `Write` is
@@ -168,14 +173,19 @@ materializer glue. Every schedule slice rides the node it decorates; `TileOp` ke
 
 ## Remaining 1k work (1k-iii)
 
-1. **Flash storage.** `_flash` stores QK as the fold's first operand edge (closed → byte-identical under
-   the head splice) and PV as an in-step fold (its `P` cone stays a capturing operand — legal below an
-   uncuttable step). Consumers to port: `_twisted_pair` / `_twisted_warp_options` /
-   `_twisted_chain_option` / `_stamp_twisted_split` (place in hand), `030._split_twisted_warp`
-   (`m`/`d` from `tile.place.free`), and `_factor`'s `warp_source` / `realize_warp_twist` / `_twist`
-   (thread `place.free` through `Ctx` so the realizer can derive the view axes). This is the subtlest
-   emitter in the repo — do it as its own digest-gated commit; the flash digests (hd128/hd256/dynM +
-   split-KV) are the gate.
+1. **Flash storage.** `_flash` stores QK and PV as in-step `role=CONTRACTION` folds (PV's `P` cone
+   stays a capturing operand — legal below an uncuttable step; QK is closed and cuttable in place,
+   but hoisting it to an operand edge would reorder the lowered nest — the scale `Load` precedes the
+   score's first use — so under zero-migration it stays a step element; edge-hoisting closed steps
+   is deferred to a re-keying window). Consumers ported: `_twisted_pair` (takes `free`, returns the
+   stored folds + the derived views — stamping targets the folds by identity, reads go through the
+   views), `_twisted_warp_options` / `_twisted_chain_option` / `_stamp_twisted_split`,
+   `030._split_twisted_warp` (`m`/`d` off `tile.place.free`; the split partial's placement keeps the
+   true `(m, d)` tail on its `free` while its grid carries `_ksplit` + the shrunk query axis), and
+   `_factor`'s `chain_source` / `_realize_chain` + `_twist`'s `warp_source` / `realize_warp_twist`
+   (`place.free` threaded through `Ctx.free`; the score view's stream axis reads through a slice
+   partial's `window.parent` so fragment clamps keep the pre-slice geometry). The flash digests
+   (hd128/hd256/dynM + split-KV) are the gate.
 2. **Retire `Contraction`'s `Stmt`-hood** once no stored tree carries it: drop the legacy arms in
    `ops.lower` / `ops.reduce_loop` / `_factor._emit` / `_factor._bind` / `ir._flatten_nodes` /
    `ir.tree_nodes` / `nodify_reduce`, and the raw-`Contraction` storage in tests.

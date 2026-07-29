@@ -52,7 +52,7 @@ from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile import Fold, Level, ReduceStage, contraction_view
+from emmy.compiler.ir.tile import Fold, Level, ReduceStage, contraction_view, is_contraction_fold
 from emmy.compiler.ir.tile.ir import Contraction, Map, Reduction, Side
 from emmy.compiler.ir.tile.ops import cone_seam
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import copy_cell, reduce_codegen, shrink_axis, store_sink
@@ -238,6 +238,10 @@ class Ctx:
     output: str = ""
     workers: object = None  # the resolved WarpSpec worker split (None = uniform SIMT)
     raster: object = None  # the parsed RASTER codec (ir.schedule.Raster; None = flat launch order)
+    # The placement's FREE axes — the un-shrunk originals (a warp-flash grid shrinks the query axis
+    # and folds the value axis away; a split partial prefixes ``_ksplit``). The twist / chain
+    # realizers derive their contraction views' output axes from the trailing pair.
+    free: tuple = ()
 
 
 def _emit(op, ctx: Ctx) -> Frag:
@@ -320,6 +324,7 @@ def factorize(tile, root, store=None) -> Tile:
         inputs=tile.inputs,
         output=(root.output.name if root is not None else ""),
         workers=tile.workers,
+        free=tuple(tile.place.free),
         # The launch-order codec rides the TileOp's stamped knobs (kernel-scoped metadata, no
         # per-node structure) — parse it once here; ``grid_tile`` applies it where the 2-D
         # (m, n) block grid makes it meaningful.
@@ -673,15 +678,15 @@ def combine_tail(carrier, *, reg: int, coop: int, lane) -> list[Stmt]:
     return merge
 
 
-def chain_source(op) -> Contraction | None:
-    """The expect :class:`Contraction` of a TWISTED tree carrying a SCALAR register tile over its
+def chain_source(op):
+    """The expect fold of a TWISTED tree carrying a SCALAR register tile over its
     output column axis (the chain schedule — the column axis rides a per-thread register vector),
     or ``None``. The structural schedule read the one binder keys the chain realization on."""
     red = op.source if isinstance(op, Map) else op
-    if not isinstance(red, Reduction):
+    if not isinstance(red, Reduction) or red.role is not AxisRole.TWISTED:
         return None
-    pv = next((s for s in list(red.partial)[1:] if isinstance(s, Contraction)), None)
-    if pv is not None and not pv.tile.is_warp and pv.tile.regs != (1, 1):
+    pv = next((s for s in list(red.partial)[1:] if is_contraction_fold(s)), None)
+    if pv is not None and pv.tile is not None and not pv.tile.is_warp and pv.tile.regs != (1, 1):
         return pv
     return None
 
@@ -764,11 +769,12 @@ def _vectorize_axis(stmts: list[Stmt], axis: str, count: int, tainted: frozenset
     return out
 
 
-def _realize_chain(op, ctx: Ctx, tail: tuple, pv: Contraction) -> tuple[list[Stmt], list[Stmt], list[Stmt]]:
+def _realize_chain(op, ctx: Ctx, tail: tuple, pv) -> tuple[list[Stmt], list[Stmt], list[Stmt]]:
     """Realize a chain-scheduled TWISTED tree — the ``(state, fold, close)`` triple: the per-cell
     body with the expect column axis register-vectorized (the score shared), and the projection +
-    store replicated per column (the column index a literal — the axis left the grid)."""
-    axis = pv.n_axis.name
+    store replicated per column (the column index a literal — the axis left the grid). ``pv`` is the
+    stored expect fold; its column axis is the placement's trailing free axis (it left the grid)."""
+    axis = ctx.free[-1].name
     count = pv.tile.regs[0]  # scalar reg order (reg_n, reg_m) — the column (n) register vector
     (rloop,) = _emit(op, ctx).body
     # A layout-aware output ``Write`` the node carries (flash's ``_out_store_index``) is the store
@@ -788,7 +794,7 @@ def _realize_chain(op, ctx: Ctx, tail: tuple, pv: Contraction) -> tuple[list[Stm
         out_val = store_tmpl.values[-1]
         base_index = store_tmpl.index
     else:
-        out_val = proj_tail[-1].defines()[-1] if proj_tail else pv.acc
+        out_val = proj_tail[-1].defines()[-1] if proj_tail else pv.out
         base_index = (*(Var(a.name) for a in ctx.grid), Var(axis))
     for j in range(count):
         val = f"{out_val}_{j}" if out_val in tainted else out_val

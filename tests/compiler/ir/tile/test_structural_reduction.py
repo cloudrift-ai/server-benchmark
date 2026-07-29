@@ -219,7 +219,11 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
     )
     carrier = Accum(name="acc", value="acc__v", op=ElementwiseImpl("add")).as_carrier()
     red = Reduction(
-        carrier=carrier, axis=ksplit, role=AxisRole.CONTRACTION, partial=Body((inner,)), reduce=ReducePlan.of(cta=2, finalize="atomic")
+        carrier=carrier,
+        axis=ksplit,
+        role=AxisRole.CONTRACTION,
+        partial=Body((inner.as_fold(),)),  # the sliced fold rides the partial — the stored (1k) form
+        reduce=ReducePlan.of(cta=2, finalize="atomic"),
     )
 
     assert axis_role(red) is AxisRole.CONTRACTION
@@ -244,12 +248,14 @@ def test_reduce_partial_flattens_a_nested_pv_contraction() -> None:
     pv = replace(pv, channels=(replace(pv.channels[0], acc="oblk"),))
     prob = Assign(name="p", op="exp", args=("acc",))  # softmax weight between the two contractions
     fold = Accum(name="O_i", value="oblk", op="add")
-    red = Reduction(carrier=fold.as_carrier(), axis=Axis("kv", 128), partial=Body((qk, prob, pv, fold)), role=AxisRole.TWISTED)
+    red = Reduction(
+        carrier=fold.as_carrier(), axis=Axis("kv", 128), partial=Body((qk.as_fold(), prob, pv.as_fold(), fold)), role=AxisRole.TWISTED
+    )
 
     (kv_loop,) = lower(red)
     assert kv_loop.axis.name == "kv" and kv_loop.role is AxisRole.TWISTED
     body = list(kv_loop.body)
-    assert not any(isinstance(s, Contraction) for s in body), "the nested PV contraction must be flattened, not left raw"
+    assert not any(isinstance(s, (Contraction, Reduction, Map)) for s in body), "the nested PV fold must be flattened, not left raw"
     (qk_loop,) = [s for s in body if isinstance(s, Loop) and s.axis.name == "k"]
     (pv_loop,) = [s for s in body if isinstance(s, Loop) and s.axis.name == "j"]
     # QK (source) first, then the pre-PV probability, then the flattened PV loop, then the carrier fold.
@@ -266,18 +272,20 @@ def test_flash_op_is_a_two_contraction_tree() -> None:
     ``partial``. Its A is computed, not a gmem load; its O-fold consumes the PV output ``O_i__pv``,
     so the ⊗ is a contraction node, not an inline FMA."""
     from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.tile.ir import Contraction as _C
+    from emmy.compiler.ir.tile import contraction_view
+    from emmy.compiler.ir.tile.ir import is_contraction_fold
     from emmy.compiler.pipeline.passes.lowering.tile._flash import _flash_op
 
     op = _flash_op("Q", "K", "V", [1, 2], Dim(16), Dim(16), 8, 8)  # (batch, s_q, s_k, head_dim, d_v)
     red = op.source  # Map(body=[O/l proj], sources=(Reduction(TWISTED, partial=[QK, ..., PV, ...]),))
-    contractions = [s for s in red.partial if isinstance(s, _C)]
-    assert len(contractions) == 2 and contractions[0].acc == "sacc", "QK score contraction is the partial's head node"
-    pv = contractions[1]
-    assert pv.a_computed and pv.a_name == "O_i__p", "PV's A operand is the inline exp weight P"
+    folds = [s for s in red.partial if is_contraction_fold(s)]
+    assert len(folds) == 2 and folds[0].out == "sacc", "the QK score fold is the partial's head node"
+    # The view's output axes are placement facts — placeholders suffice for the operand reads.
+    pv = contraction_view(folds[1], folds[1].axis, folds[1].axis)
+    assert pv is not None and pv.a_computed and pv.a_name == "O_i__p", "PV's A operand is the inline exp weight P"
     assert pv.a.out == "O_i__p"
     assert pv.acc == "O_i__pv"
-    # The reduce loop flattens BOTH contractions; the O-fold reads the PV output (no inline v·P).
+    # The reduce loop flattens BOTH folds; the O-fold reads the PV output (no inline v·P).
     (kv_loop,) = lower(red)
     o_fold = next(s for s in kv_loop.body if isinstance(s, Accum) and s.name == "O_i")
     assert o_fold.value == "O_i__pv", "the O-fold consumes the PV contraction's output, not an inline product"

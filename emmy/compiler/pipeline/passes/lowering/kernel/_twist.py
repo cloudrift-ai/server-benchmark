@@ -71,7 +71,7 @@ from emmy.compiler.ir.kernel.ir import (
 from emmy.compiler.ir.schedule import Fold, Level, ReduceStage
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Cond, Init, Load, Select, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile.ir import Contraction, Map, Reduction, gmem_row_stride
+from emmy.compiler.ir.tile.ir import Contraction, Map, Reduction, contraction_view, gmem_row_stride, is_contraction_fold
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _clamp_last, _f16acc, unroll_ok
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
@@ -111,15 +111,17 @@ FLASH_WARP_AXIS = "_wq"
 _NEGATE = {"<=": ">", "<": ">=", ">=": "<", ">": "<=", "==": "!="}
 
 
-def warp_source(op) -> Contraction | None:
-    """The warp-tiled stream-head :class:`Contraction` of a ``TWISTED`` :class:`Reduction` tree
+def warp_source(op):
+    """The warp-tiled stream-head fold of a ``TWISTED`` :class:`Reduction` tree
     (``op`` bare or under a projecting :class:`Map`), or ``None`` — the structural schedule read
-    the one binder keys the fragment realization on (like ``plan.coop`` keys the lane tiling)."""
+    the one binder keys the fragment realization on (like ``plan.coop`` keys the lane tiling).
+    Returns the STORED ``role=CONTRACTION`` fold — its ``tile`` is the schedule fact the caller
+    reads; :func:`realize_warp_twist` derives the full views itself."""
     red = op.source if isinstance(op, Map) else op
     if not isinstance(red, Reduction) or len(red.partial) == 0:
         return None
     head = red.partial[0]
-    if isinstance(head, Contraction) and head.tile.is_warp:
+    if is_contraction_fold(head) and head.tile is not None and head.tile.is_warp:
         return head
     return None
 
@@ -311,7 +313,7 @@ def _realize_prologue(stmts, qk: Contraction, frags: tuple[str, ...], col_bases,
     row_coord: Expr = Var(FRAG_ROW) if qk.m_axis.extent.is_static else _clamp_last(Var(FRAG_ROW), _ext(qk.m_axis))
     col_coord: Expr = Var(FRAG_COL) if qk.n_axis.extent.is_static else _clamp_last(Var(FRAG_COL), _ext(qk.n_axis))
     for s in stmts:
-        if isinstance(s, Contraction):
+        if isinstance(s, Contraction) or is_contraction_fold(s):
             continue  # the expect contraction — regenerated from its channel
         if state & (set(s.defines()) | _reads(s)):
             break  # the dissolved merge — regenerated from the twist channels
@@ -408,8 +410,14 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     realized projection + the fragment output store). See the module docstring for the walk."""
     red: Reduction = op.source if isinstance(op, Map) else op
     partial = list(red.partial)
-    qk: Contraction = partial[0]
-    pv: Contraction = next(s for s in partial[1:] if isinstance(s, Contraction))
+    # The stored steps are role=CONTRACTION folds; the realizer works on their DERIVED views. The
+    # query / value axes come off the placement's free axes (``Ctx.free`` — the un-shrunk
+    # originals); the score's stream axis is the fold's own, read through a slice partial's window
+    # PARENT so the view carries the pre-slice geometry the fragment clamps were built against.
+    kv_parent = red.axis.window.parent if red.axis.window is not None else red.axis
+    qk: Contraction = contraction_view(partial[0], ctx.free[-2], kv_parent)
+    pv_fold = next(s for s in partial[1:] if is_contraction_fold(s))
+    pv: Contraction = contraction_view(pv_fold, ctx.free[-2], ctx.free[-1])
     atom = qk.tile.atom
     shape = atom.shape
     atom_n = shape[1]

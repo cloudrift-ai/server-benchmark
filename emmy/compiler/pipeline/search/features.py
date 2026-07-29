@@ -30,9 +30,14 @@ from emmy.compiler.pipeline.knob import (
 # collapses to constant predictions — worse than random). Every persisted training artifact (the
 # prior checkpoint's reservoir, the autotune DB's ``node`` rows) is stamped with this version, and
 # readers drop rows from another version. Version 1 is the retired pre-rebuild vocabulary (old
-# artifacts carry no stamp and default to it). Bump on any incompatible knob-spelling or
-# feature-encoding change.
-FEATURIZER_VERSION = 2
+# artifacts carry no stamp and default to it). Version 2 is the retired blind encoding of the
+# codec vocabulary: the warp ``TilePlan.bk`` never reached the features, ``_free_slots`` sorted
+# the warp grid wide-is-n (transposed siblings collapsed; ``tile_m``/``tile_n`` mislabelled),
+# warp rows dropped the split-K finalize letter, and the ``STAGE`` ``alt`` / ``REDUCE`` ``b<n>t``
+# letters were unfeaturized — same raw knobs, different emitted VALUES, so artifacts fit on v2
+# are semantically stale.
+# Bump on any incompatible knob-spelling or feature-encoding change.
+FEATURIZER_VERSION = 3
 
 
 def masked_axis_features(*, m: bool = False, n: bool = False, k: bool = False) -> dict[str, float]:
@@ -130,6 +135,10 @@ def _stage_features(knobs: dict) -> dict[str, float]:
         "D_stage_tma": 1.0 if st.transport == "tma" else 0.0,
         "D_stage_ring": 1.0 if st.ring else 0.0,
         "D_stage_reg_depth": float(st.reg_depth),  # smem→register double-buffer (p<n>)
+        # The alternating single-slab pipeline (``/alt`` — the flash stream's FA-2 choreography,
+        # which also stages Q): enumerated as a sibling of the paired ring on flash rows, so
+        # without this flag ``d1/tma/alt`` featurized byte-identically to plain ``d1/tma``.
+        "D_stage_alt": 1.0 if st.alt else 0.0,
     }
 
 
@@ -307,14 +316,18 @@ def knob_features(knobs: dict) -> dict[str, float]:
 
 
 def _free_slots(knobs: dict) -> tuple[int, int, int, int] | None:
-    """Canonical ``(par_n, reg_n, par_m, reg_m)`` for the (≤2) tiled free axes.
+    """The ``(par_n, reg_n, par_m, reg_m)`` slot widths for the (≤2) tiled free axes.
 
-    Both fragments source the free split from the single ``TILE`` codec: the **scalar** fragment
-    from ``n<N>[x<M>]/f<fn>[x<fm>]`` (the wider parallel binding is the ``n`` / coalesced slot,
-    the narrower the ``m`` slot), the **warp** fragment from ``a:<atom>/w<WM>x<WN>/f<FM>x<FN>``
-    (the ``(WN, FN)`` / ``(WM, FM)`` warp + register sub-tiles). A single free axis fills the ``n``
-    slot with a degenerate ``(1, 1)`` ``m`` slot. Returns ``None`` for a non-tiled scalar kernel
-    (per-cell ``TILE``)."""
+    Both fragments source the free split from the single ``TILE`` codec. The **warp** fragment
+    (``a:<atom>/w<WM>x<WN>/f<FM>x<FN>``) keeps the TRUE codec axes — ``(WN, FN)`` / ``(WM, FM)``
+    verbatim: the mma atom is physically asymmetric (``atom_m ≠ atom_n``) and the enumeration
+    offers both orientations (``w4x2`` and ``w2x4`` are different tiles), so any re-ordering here
+    collapses transposed siblings into one feature vector / signature and mislabels ``tile_m`` /
+    ``tile_n`` on every row whose wide slot is M. The **scalar** fragment
+    (``n<N>[x<M>]/f<fn>[x<fm>]``) canonicalizes wide-is-``n`` (the coalesced slot) — a no-op for
+    every enumerated row (the scalar grid spells ``par_n ≥ par_m``), kept so recorded scalar rows'
+    historical encoding does not shift. A single free axis fills the ``n`` slot with a degenerate
+    ``(1, 1)`` ``m`` slot. Returns ``None`` for a non-tiled scalar kernel (per-cell ``TILE``)."""
     from emmy.compiler.ir.schedule import TilePlan  # noqa: PLC0415
 
     spec = family_value(knobs, "TILE")
@@ -324,6 +337,8 @@ def _free_slots(knobs: dict) -> tuple[int, int, int, int] | None:
         return None
     if not tile.is_tiled:
         return None
+    if tile.is_warp:
+        return tile.units_n, tile.reg_n, tile.units_m, tile.reg_m
     pairs = [(tile.units_n, tile.reg_n), (tile.units_m, tile.reg_m)]
     pairs.sort(key=lambda pr: (pr[0], pr[1]), reverse=True)  # wider par = the n slot
     (par_n, reg_n) = pairs[0]
@@ -333,14 +348,20 @@ def _free_slots(knobs: dict) -> tuple[int, int, int, int] | None:
 
 @dataclass(frozen=True)
 class _Decomp:
-    """The reduce-axis decomposition factors the featurizer reads (``serial``/``fold``/``cta``/``coop``)
-    plus the cross-CTA ``finalize`` codec letter."""
+    """The reduce-axis decomposition factors the featurizer reads (``fold``/``cta``/``coop``)
+    plus the cross-CTA ``finalize`` codec letter. The per-thread serial remainder is derived by
+    the materializer (``ceil(extent / parallel)``), never spelled by the ``REDUCE`` codec, so it
+    is NOT a field here — a ``serial`` field defaulting to 1 is what silently fed the warp
+    K-chunk features for a year (the K-chunk lives on the ``TILE`` codec, ``TilePlan.bk``)."""
 
-    serial: int = 1
     fold: int = 1
     cta: int = 1
     coop: int = 1
     finalize: str = "atomic"
+    # The ``b<n>t`` transposed cooperative band (k-major matvec lane mapping) — a different
+    # kernel from the interleaved ``b<n>`` at the same width, so it must reach both the features
+    # and the ``tile_signature`` identity (``b<n>t`` goldens are recorded in the per-GPU YAMLs).
+    coop_transposed: bool = False
 
 
 def _reduce_decomp(knobs: dict) -> _Decomp:
@@ -352,29 +373,44 @@ def _reduce_decomp(knobs: dict) -> _Decomp:
     from emmy.compiler.ir.schedule import ReducePlan  # noqa: PLC0415
 
     plan = ReducePlan.parse(family_value(knobs, "REDUCE"))
-    # ``finalize`` must be forwarded: dropping it left ``_Decomp``'s "atomic" default in place, so
-    # ``D_finalize_kernel`` was dead (0.0) on EVERY row — including tiled g<n>k splits — and the
-    # offline prior's atomic-free split interaction never fired (found by the 2026-07-07
-    # reduce-featurization tests).
-    return _Decomp(fold=plan.reg, cta=plan.cta, coop=plan.coop, finalize=plan.finalize)
+    # ``finalize`` must be forwarded here AND by every ``_geom_feats`` caller: dropping it leaves
+    # a default "atomic" in place, so ``D_finalize_kernel`` goes dead (0.0) on the affected rows
+    # and the offline prior's atomic-free split interaction never fires (found scalar-side by the
+    # 2026-07-07 reduce-featurization tests; the warp tier repeated the same drop until 2026-07-28).
+    return _Decomp(fold=plan.reg, cta=plan.cta, coop=plan.coop, finalize=plan.finalize, coop_transposed=plan.coop_transposed)
 
 
 def tile_signature(knobs: dict) -> tuple:
-    """Schema-agnostic structural identity of a tile config: the canonical free-axis
-    slots, the primary reduce decomposition, and the atom kind — read from the native codec
+    """Schema-agnostic structural identity of a tile config: the free-axis slots, the slab
+    K-chunk, the primary reduce decomposition, and the atom kind — read from the native codec
     knobs (``TILE`` / ``REDUCE`` / ``STAGE``, bare or ``@<axis>``-suffixed alike). Two configs
     with equal signatures are the same kernel variant whichever key form spelled them, so this
     is the bridge for matching a recorded golden YAML row against the native enumeration's
     candidate rows (``scripts/golden_knob_heuristics.py`` / ``search/golden_eval.evaluate_golden``).
+    The K-chunk (``TilePlan.bk``) is part of the identity — without it every ``k<n>`` sibling in
+    a warp pool joined ambiguously (a golden recorded at ``k4`` matched the ``k1`` candidate).
     Operand staging (the ``STAGE`` codec) is part of the identity — a staged and a gmem-direct
     config are different variants — but defaults to ``None`` when absent, so a golden recorded
     without a ``STAGE`` still matches a native unstaged candidate (both ``None``)."""
-    return (_free_slots(knobs), _reduce_decomp(knobs), mma_atom(knobs), _stage_sig(knobs))
+    return (_free_slots(knobs), _tile_bk(knobs), _reduce_decomp(knobs), mma_atom(knobs), _stage_sig(knobs))
+
+
+def _tile_bk(knobs: dict) -> int:
+    """The warp tile's slab K-chunk (``TilePlan.bk``, atom_k multiples) for ``tile_signature``;
+    1 on the scalar tier / per-cell / unparseable rows (the scalar codec spells no K token)."""
+    from emmy.compiler.ir.schedule import TilePlan  # noqa: PLC0415
+
+    try:
+        return TilePlan.parse(family_value(knobs, "TILE")).bk
+    except ValueError:
+        return 1
 
 
 def _stage_sig(knobs: dict) -> tuple | None:
-    """The structural staging identity ``(depth, transport, ring)`` for ``tile_signature``, or
-    ``None`` when ``STAGE`` is absent / empty (the gmem-direct baseline)."""
+    """The structural staging identity ``(depth, transport, ring, alt)`` for ``tile_signature``,
+    or ``None`` when ``STAGE`` is absent / empty (the gmem-direct baseline). ``alt`` (the flash
+    stream's alternating single-slab pipeline) is a different variant from the paired ring, so it
+    is part of the identity."""
     spec = family_value(knobs, "STAGE")
     if not spec:
         return None
@@ -384,7 +420,7 @@ def _stage_sig(knobs: dict) -> tuple | None:
         st = Stage.parse(spec)
     except ValueError:
         return None
-    return (st.depth, st.transport, st.ring)
+    return (st.depth, st.transport, st.ring, st.alt)
 
 
 def _geom_feats(
@@ -420,10 +456,12 @@ def _geom_feats(
     ``#CTAs ≈ M·N / tile_area · SPLITK`` (ceil-free, needs only the product the
     ``S_*`` features carry, not the per-axis split). The ``BN``/``BM`` band
     features are the OFF sentinel ``0`` on a warp row (so they don't fire there);
-    ``BK`` is a real knob on both tiers but pulls opposite ways, so it rides
-    tier-split features (``D_*_bk`` scalar vs ``D_w_*_bk`` warp). The rest of the
-    warp tier's signal rides the geometry / occupancy terms via the tier-aware
-    targets."""
+    the K-chunk ``bk`` is a live knob on the warp tier only today (the ``TILE``
+    codec's ``k<n>``, atom_k multiples — the scalar codec spells no K token, so
+    the scalar ``D_*_bk`` bands stay 0), riding tier-split features (``D_*_bk``
+    scalar vs ``D_w_*_bk`` warp) because the tiers pull opposite ways. The rest
+    of the warp tier's signal rides the geometry / occupancy terms via the
+    tier-aware targets."""
 
     def l2(x: float) -> float:
         return math.log2(max(float(x), 1.0))
@@ -590,7 +628,7 @@ def _reduce_features(knobs: dict) -> dict[str, float]:
         splitk=d.cta,
         bn=0,
         bm=0,
-        bk=d.serial,
+        bk=1,  # a TILE-less row has no K-chunk knob (the serial remainder is derived, not spelled)
         br=d.coop,
         free_prod=knobs.get("S_ext_free_prod"),
         sm=float(knobs.get("H_sm_count") or 170.0),
@@ -599,6 +637,11 @@ def _reduce_features(knobs: dict) -> dict[str, float]:
     )
     out = {k: g[k] for k in _REDUCE_FEATURE_KEYS if k in g}
     out["D_reduce_ilp"] = math.log2(max(float(d.fold), 1.0))
+    # The ``b<n>t`` transposed band: same thread count as its interleaved twin, entirely different
+    # kernel (k-major lane sweep, smem-tree combine) — without this flag the two featurize
+    # byte-identically. Coop moves enumerate on the TILE-less / per-cell tier only, so this block
+    # is the one place the letter needs to surface.
+    out["D_reduce_transposed"] = 1.0 if d.coop_transposed else 0.0
     return out
 
 
@@ -618,7 +661,10 @@ def _tile_features(knobs: dict) -> dict[str, float]:
         return {}
     par_n, reg_n, par_m, reg_m = slots  # (BN, FN, BM, FM)
     d = _reduce_decomp(knobs)
-    bn, bm, fm, fn, br, bk, splitk = par_n, par_m, reg_m, reg_n, d.coop, d.serial, d.cta
+    # The scalar ``TILE`` codec spells no K-chunk (the smem slab's K granularity is derived
+    # fit-to-smem at stage resolution, never a knob), so ``bk`` is structurally 1 here and the
+    # scalar ``D_l2_bk`` / ``D_bk_ge32`` bands stay 0 until the codec grows a K token.
+    bn, bm, fm, fn, br, bk, splitk = par_n, par_m, reg_m, reg_n, d.coop, 1, d.cta
     return _geom_feats(
         knobs,
         threads=bn * bm * br,
@@ -649,14 +695,14 @@ def _warp_tile_features(knobs: dict) -> dict[str, float]:
     if not is_warp_codec(spec):
         return {}
     try:
-        atom = TilePlan.parse(spec).atom
-        am, an = atom.atom_m, atom.atom_n
+        plan = TilePlan.parse(spec)
+        am, an = plan.atom.atom_m, plan.atom.atom_n
     except ValueError:
         return {}
     slots = _free_slots(knobs)
     if slots is None:
         return {}
-    wn, fn, wm, fm = slots  # (WN, FN, WM, FM) — warp counts in the par slots
+    wn, fn, wm, fm = slots  # (WN, FN, WM, FM) — the true codec axes (units_n/reg_n/units_m/reg_m)
     if wm <= 0 or wn <= 0:
         return {}
     d = _reduce_decomp(knobs)
@@ -669,11 +715,19 @@ def _warp_tile_features(knobs: dict) -> dict[str, float]:
         splitk=d.cta,
         bn=0,  # OFF sentinels: the BN/BM bands don't fire on a warp row
         bm=0,
-        bk=d.serial,
+        # The slab K-chunk is the TILE codec's ``k<n>`` token (``TilePlan.bk``, atom_k multiples —
+        # the codec's native unit, matching the shallow ``D_w_near_bk`` ≈2 target). It used to read
+        # the never-set ``_Decomp.serial`` (always 1), so every ``D_w_*_bk`` was constant and
+        # k-chunk siblings featurized byte-identically.
+        bk=plan.bk,
         br=d.coop,
         free_prod=knobs.get("S_ext_free_prod"),
         sm=float(knobs.get("H_sm_count") or 170.0),
         warp=True,
+        # Forward the split-K finalize letter: without it the ``_geom_feats`` default ("atomic")
+        # made a warp ``g<n>k`` row featurize as its ``g<n>a`` twin — the deferred-combine choice
+        # was invisible exactly on the tensor-core tier where wide split-K matters most.
+        finalize=d.finalize,
     )
     # The warp-grid arrangement: how the CTA's warps split across the two canonical free slots
     # (``_free_slots``' wide/narrow ordering, same convention as the scalar ``D_l2_bn``/``D_l2_bm``

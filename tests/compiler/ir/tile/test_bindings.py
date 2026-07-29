@@ -21,7 +21,7 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.stmt.passes import rewrite
 from emmy.compiler.ir.tile import Contraction, Map, TileOp
-from emmy.compiler.ir.tile.ops import lower, resolve
+from emmy.compiler.ir.tile.ops import group_loop, is_group, lower, resolve
 
 
 def _cone(name: str = "xhat") -> Map:
@@ -31,13 +31,14 @@ def _cone(name: str = "xhat") -> Map:
     return Map(body=Body((load, Assign(name=name, op="multiply", args=(f"{name}_e", "s")))))
 
 
-def _channel(acc: str, weight: str, a="xhat") -> Contraction:
+def _channel(acc: str, weight: str, a: str | Body = "xhat") -> Contraction:
     """One ⊗-fold channel over the shared A — ``acc = Σ_k A[m, k]·W[k, n]``."""
     return Contraction(
         axes=(Axis("m", 128), Axis("n", 128)),
         k_axis=Axis("k", 256),
         a_operand=a,
-        folds=((Load(name=f"{acc}_b", input=weight, index=(Var("k"), Var("n"))), acc),),
+        b_load=Load(name=f"{acc}_b", input=weight, index=(Var("k"), Var("n"))),
+        acc=acc,
         tile=TilePlan(),
     )
 
@@ -86,8 +87,31 @@ def test_resolve_inlines_the_bound_subtree_at_every_reference() -> None:
     for channel in resolved.sources:
         assert channel.a_ref is None
         assert channel.a_body == cone_stmts
-    # Lowering the group yields each channel's loop nest over the inlined cone, then the projection.
-    assert lower(tile.op, tile.bindings) == [*(s for c in resolved.sources for s in c.lower()), *tile.op.body]
+    # The group lowers to ONE derived fold loop, then the projection — never one loop per channel.
+    assert lower(tile.op, tile.bindings) == [group_loop(resolved.sources), *tile.op.body]
+
+
+def test_two_references_to_one_binding_are_not_two_copies() -> None:
+    """Sharing is part of the structural identity: the group lowers its shared A ONCE (the derived
+    group loop), so it is distinguishable from two independent channels that each compute their own
+    A — which lower to two separate fold loops, each carrying its own cone."""
+    shared = _shared_group()
+    fused = lower(shared.op, shared.bindings)
+    cone = tuple(lower(shared.bindings["xhat"]))
+    copies = TileOp(
+        op=Map(
+            body=shared.op.body,
+            sources=(
+                _channel("acc_g", "Wg", a=Body(cone)),
+                _channel("acc_u", "Wu", a=Body(tuple(s.rewrite(lambda n: f"{n}__2", Sigma({})) for s in cone))),
+            ),
+        )
+    )
+    assert is_group(shared.op)
+    # One fold loop, one lifted A; the unshared spelling is two loops with a cone each.
+    assert len([s for s in fused if s.__class__.__name__ == "Loop"]) == 1
+    assert sum(1 for s in fused[0].body if isinstance(s, Assign) and s.name.startswith("xhat")) == 1
+    assert len([s for s in lower(copies.op) if s.__class__.__name__ == "Loop"]) == 2
 
 
 def test_lowering_without_the_table_fails_loudly() -> None:

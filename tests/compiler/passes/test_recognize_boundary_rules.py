@@ -290,7 +290,7 @@ def test_norm_linear_warp_pick_is_computed_a_contraction():
     _, tile = _resolve(_norm_linear_graph(), pick=_is_warp_row)
     assert isinstance(tile.op, Map)
     c = tile.op.source
-    assert isinstance(c, Contraction) and c.a_computed and len(c.folds) == 1
+    assert isinstance(c, Contraction) and c.a_computed and len(tile.op.sources) == 1
     stat_loop = tile.bindings[c.a_ref].source.loop
     assert isinstance(stat_loop, Loop) and stat_loop.is_reduce and stat_loop.role is AxisRole.PLANAR
     assert [a.extent.as_static() for a in c.axes] == [32, 3072]
@@ -356,13 +356,16 @@ def _mlp_gate_up_graph() -> Graph:
 def test_mlp_gate_up_nodifies_as_two_fold_contraction():
     """The fused gate/up MLP edge — TWO ⊗-folds sharing one normalized-row A value (fusion
     duplicates the cone SSA per fold; the matcher dedupes by value-tree equality) with the SwiGLU
-    combine as projection — nodifies to ``Map(body=combine…Write, source=Contraction(folds=2))``,
-    the product-monoid fold, and offers warp sync rows."""
+    combine as projection — nodifies to ``Map(body=combine…Write, sources=(Contraction, Contraction))``,
+    the product-monoid fold as a FUSED SIBLING GROUP over one bound cone, and offers warp sync rows."""
+    from emmy.compiler.ir.tile.ops import is_group
+
     rows, tile = _resolve(_mlp_gate_up_graph(), pick=_is_warp_row)
-    assert isinstance(tile.op, Map) and isinstance(tile.op.source, Contraction)
-    c = tile.op.source
-    assert len(c.folds) == 2 and c.a_computed
-    assert {bl.input for bl, _ in c.folds} == {"wg", "wu"}
+    assert isinstance(tile.op, Map) and is_group(tile.op)
+    channels = tile.op.sources
+    assert len(channels) == 2 and all(c.a_computed for c in channels)
+    assert len({c.a_ref for c in channels}) == 1, "both channels reference ONE bound cone"
+    assert {c.b_load.input for c in channels} == {"wg", "wu"}
     assert isinstance(tile.op.body[-1], Write)
     assert any(_is_warp_row(r) for r in rows)
     assert not _is_warp_row(rows[0]), "option-0 stays the coop reduce row"

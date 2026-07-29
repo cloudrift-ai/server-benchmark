@@ -60,6 +60,47 @@ def _resolve_stmts(body: Body, bindings) -> Body | None:
     return None if all(a is b for a, b in zip(out, body, strict=True)) else Body(tuple(out))
 
 
+def is_group(op) -> bool:
+    """True when ``op`` is a FUSED SIBLING GROUP — a :class:`Map` over several
+    :class:`~emmy.compiler.ir.tile.ir.Contraction` channels sharing one A operand (the gate⊗up MLP
+    edge). Sharing is the structural fact (same operand reference); scheduling and lowering the
+    group as ONE unit is the decision that follows from it."""
+    if not (isinstance(op, Map) and len(op.sources) > 1 and all(isinstance(s, Contraction) for s in op.sources)):
+        return False
+    # The SHARED operand is what makes it a group: same A value (the binding name before resolution,
+    # the inlined cone's own name after) over the same contraction axis. Channels that each compute
+    # their own A are independent contractions and lower to their own fold loops.
+    return len({(s.a_name, s.k_axis.name) for s in op.sources}) == 1
+
+
+def group_loop(sources) -> Loop:
+    """The ONE fold ``Loop`` a fused sibling group DERIVES — never stored, exactly like
+    :attr:`Reduction.loop`. The shared A is lifted once (the primary channel's loop), then each
+    further channel splices its ``b_load → ⊗ → ⊕`` triple after it, reusing that A value. The carrier
+    is the N-COMPONENT identity-family state (one additive component per channel) — the true
+    product-monoid state, so the cross-CTA split tier folds every channel's partials (the
+    redundant-statistic split of the gate/up edge); ``carrier.out`` stays the primary component, and
+    the coop tier remains contraction-blind."""
+    from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import Accum  # noqa: PLC0415
+    from emmy.compiler.ir.stmt.algebra import Carrier, State, Twist  # noqa: PLC0415 — algebra imports leaves
+    from emmy.compiler.ir.stmt.carrier import Channel  # noqa: PLC0415
+
+    base = sources[0].loop
+    if len(sources) == 1:
+        return base
+    a_name, k = sources[0].a_name, sources[0].k_axis.name
+    extra: list[Stmt] = []
+    for c in sources[1:]:
+        lift = Assign(name=f"{c.acc}__v", op=ElementwiseImpl("multiply"), args=(a_name, c.b_load.names[0]))
+        extra += [c.b_load, lift, Accum(name=c.acc, value=lift.name, op=ElementwiseImpl("add"), axes=(k,))]
+    add = ElementwiseImpl("add")
+    names = tuple(c.acc for c in sources)
+    channels = tuple(Channel(fold=add, term=f"{nm}__v", dtype=base.carrier.twist.channels[0].dtype) for nm in names)
+    carrier = Carrier(state=State(names=names), twist=Twist(family="id", channels=channels))
+    return Loop(axis=base.axis, body=Body((*base.body, *extra)), unroll=base.unroll, role=base.role, carrier=carrier)
+
+
 def reduce_loop(op, bindings=None):
     """The kernel's outermost **annotated** reduce ``Loop`` (its ``carrier`` set by recognition),
     or ``None`` for a pure pointwise / flat-fallback ``Map`` (no annotated reduce). A
@@ -71,6 +112,8 @@ def reduce_loop(op, bindings=None):
     op = resolve(op, bindings)
     if isinstance(op, (Reduction, Contraction)):
         return op.loop
+    if is_group(op):
+        return group_loop(op.sources)  # the fused group's ONE derived fold loop
     if isinstance(op, Map) and op.sources:
         return reduce_loop(op.sources[0], bindings)  # a Map projecting over a Reduction / Contraction source
     for s in op.body:
@@ -140,6 +183,8 @@ def lower(op, bindings=None) -> list[Stmt]:
     (the owning :class:`TileOp`'s let table) is inlined first (:func:`resolve`) — a name-operand
     tree cannot lower without it."""
     op = resolve(op, bindings)
+    if is_group(op):
+        return [group_loop(op.sources), *op.body]  # ONE derived loop for the group, then the projection
     if isinstance(op, Map):
         prefix = [s for src in op.sources for s in lower(src)]
         return [*prefix, *op.body]  # the sources' reduce/contract loop nests, then the projection body
@@ -189,4 +234,16 @@ def pretty(op, indent: str = "", bindings=None) -> list[str]:
     return [f"{indent}{op!r}"]
 
 
-__all__ = ["Map", "axis_role", "contraction_loop", "lower", "nodify_reduce", "pretty", "reduce_loop", "reduce_plan", "resolve"]
+__all__ = [
+    "Map",
+    "axis_role",
+    "contraction_loop",
+    "group_loop",
+    "is_group",
+    "lower",
+    "nodify_reduce",
+    "pretty",
+    "reduce_loop",
+    "reduce_plan",
+    "resolve",
+]

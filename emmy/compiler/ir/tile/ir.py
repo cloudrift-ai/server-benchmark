@@ -55,7 +55,7 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.expr import Expr, Literal
 from emmy.compiler.ir.schedule import Placement, ReducePlan, Stage, TilePlan, WarpSpec
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carrier, Load, Loop, RenderCtx, Stmt
+from emmy.compiler.ir.stmt import Accum, Body, Carrier, Load, Loop, RenderCtx, Stmt
 
 if TYPE_CHECKING:
     from emmy.compiler.ir.atom import Atom
@@ -129,7 +129,7 @@ class Reduction:
     # (QK at the head, PV embedded), reached by the same :func:`_flatten_nodes` node-walk. ``None`` for
     # a bare reduce (``sum`` / ``max`` / softmax's PLANAR row reduce), whose ``partial`` is plain
     # loop-IR stmts. :attr:`loop` splices the source's lowered loop nest ahead of the ``partial``.
-    source: Reduction | Contraction | None = None
+    source: Reduction | Contraction | Map | None = None
     # The stream's ABSOLUTE base for a cross-CTA slice partial (flash split-KV: ``030_split_reduce`` shrinks
     # ``axis`` to the slice length B and sets ``offset = _ksplit · B``). The fold walks its local
     # ``[0, B)`` window; a consumer needing the absolute reduce-axis coordinate (gmem/TMA operand
@@ -165,7 +165,10 @@ class Reduction:
         node-walk (so flash's kv loop holds the head ``Σ Q·K`` score contraction loop and the embedded
         ``Σ_j P·V`` PV contraction loop, exactly the loop-in-body form the scalar tier expands): one
         structural rule for a reduce whose per-step partial composes contractions."""
-        prefix = self.source.lower() if self.source is not None else ()
+        from emmy.compiler.ir.tile.ops import lower  # noqa: PLC0415 — avoid an import cycle
+
+        # A ``Map`` source is the split-K FUSED SIBLING GROUP (its one derived fold loop).
+        prefix = lower(self.source) if self.source is not None else ()
         body = Body((*prefix, *_flatten_nodes(self.partial)))
         return Loop(axis=self.axis, body=body, unroll=self.unroll, role=self.role, carrier=self.carrier)
 
@@ -281,8 +284,9 @@ class Contraction(Stmt):
     register-tiles through the shared ``_contract_kloop`` skeleton. **ONE
     flat node** that cleanly splits the **algebra params** (what to contract) from the **schedule**
     (how to tile it): the params are the tiled output ``axes`` ``(m, n)``, the contraction ``k_axis``,
-    the leading batch ``lead_axes``, the A operand, the ``folds`` fold channels (``(b_load, acc)``
-    pairs); the projection has ONE home — the wrapping :class:`Map`'s body — never a node field; the schedule is the
+    the leading batch ``lead_axes``, the A operand, the B operand (``b_load``) and the fold
+    accumulator (``acc``); the projection has ONE home — the wrapping :class:`Map`'s body — never a
+    node field; the schedule is the
     one ``tile`` field — a resolved :class:`~emmy.compiler.ir.schedule.TilePlan` carrying the
     leaf ``atom`` (tensor-core :class:`AtomKind` or the ``1×1`` :class:`ScalarAtom`), the per-CTA
     **UNIT** grid + per-unit **REGISTER** sub-tile, and the K-chunk. Keeping the schedule a single
@@ -307,33 +311,10 @@ class Contraction(Stmt):
     # operand is inlined by ``ops.resolve`` before any lowering walk, so every accessor below sees the
     # ``Load`` / ``Body`` form. — params
     a_operand: Load | Body | str
-    # The fold CHANNELS — ``(b_load, acc)`` per channel, every channel folding the SAME lifted A
-    # value over the same ``(m, n, k)`` space: the product-monoid carrier specialized to
-    # contractions. One channel is the ordinary matmul; N channels is the fused gate/up MLP edge
-    # (``swiglu(x̂@Wg, x̂@Wu)`` — the combine is projection, riding the wrapping ``Map.body``, never
-    # per-step state). A multi-channel node is computed-A only and lowers through the warp ``sync``
-    # compute-fill tier alone: one A fragment reused across the per-channel mma chains, one C
-    # fragment per channel.
-    folds: tuple[tuple[Load, str], ...]
+    b_load: Load  # the B operand — params
+    acc: str  # the fold accumulator this node produces — params
     tile: TilePlan  # the schedule: leaf atom + unit/register widths + K-chunk (the only schedule field)
     lead_axes: tuple[Axis, ...] = ()  # params
-
-    def __post_init__(self) -> None:
-        assert self.folds, "a Contraction needs at least one fold channel"
-        k = self.k_axis.name
-        assert len({k in bl.index[-1].free_vars() for bl, _ in self.folds}) == 1, (
-            "every fold channel's B layout must agree (one b_trans per node)"
-        )
-
-    # ---- the primary fold channel unpacked (the single-fold common case; every multi-channel
-    # consumer iterates ``folds`` itself) ---------- #
-    @property
-    def b_load(self) -> Load:
-        return self.folds[0][0]
-
-    @property
-    def acc(self) -> str:
-        return self.folds[0][1]
 
     @property
     def out(self) -> str:
@@ -391,35 +372,17 @@ class Contraction(Stmt):
         """The synthesized ``CONTRACTION`` reduce ``Loop`` — the canonical ``for k: v = a*b; acc += v``
         mul-add form (built by the shared ``ops.contraction_loop``, the same fold ``_factor``'s scalar
         contraction tier register-tiles). Lets :func:`ops.lower` / ``ops.reduce_loop`` flatten the node
-        back to the loop nest; the node never stores the loop."""
+        back to the loop nest; the node never stores the loop. A FUSED SIBLING GROUP (N channels over
+        one shared A) derives its single loop from the group instead — ``ops.group_loop``."""
         from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
         from emmy.compiler.ir.tile.ops import contraction_loop  # noqa: PLC0415 — avoid an import cycle
 
-        base = contraction_loop(
+        return contraction_loop(
             lift=ElementwiseImpl("multiply"),
             fold=Accum(name=self.acc, value=f"{self.acc}__v", op=ElementwiseImpl("add"), axes=(self.k_axis.name,)),
             operand_bodies=([self.b_load], self.a_body),  # B[k, n], A[m, k] (or A's computed body) — keep B-then-A load reuse
             reduce_axis=self.k_axis,
         )
-        if len(self.folds) == 1:
-            return base
-        # Each extra fold channel splices its ``b_load → lift → accum`` triple after the primary's,
-        # reusing the shared A value. The carrier is the N-COMPONENT identity-family state (one
-        # additive component per channel) — the true product-monoid state, so the cross-CTA split
-        # tier folds every channel's partials (the redundant-statistic split of the gate/up edge);
-        # ``carrier.out`` stays the primary component, and the coop tier remains contraction-blind.
-        from emmy.compiler.ir.stmt.algebra import Carrier, State, Twist  # noqa: PLC0415 — algebra imports leaves
-        from emmy.compiler.ir.stmt.carrier import Channel  # noqa: PLC0415
-
-        extra: list[Stmt] = []
-        for bl, acc in self.folds[1:]:
-            lift = Assign(name=f"{acc}__v", op=ElementwiseImpl("multiply"), args=(self.a_name, bl.names[0]))
-            extra += [bl, lift, Accum(name=acc, value=lift.name, op=ElementwiseImpl("add"), axes=(self.k_axis.name,))]
-        add = ElementwiseImpl("add")
-        names = (self.acc, *(acc for _, acc in self.folds[1:]))
-        channels = tuple(Channel(fold=add, term=f"{nm}__v", dtype=base.carrier.twist.channels[0].dtype) for nm in names)
-        carrier = Carrier(state=State(names=names), twist=Twist(family="id", channels=channels))
-        return Loop(axis=base.axis, body=Body((*base.body, *extra)), unroll=base.unroll, role=base.role, carrier=carrier)
 
     def lower(self) -> list[Stmt]:
         """Flatten to the loop-IR body — just the synthesized reduce ``Loop``. A projection is NEVER
@@ -485,7 +448,7 @@ class Contraction(Stmt):
         return self
 
     def defines(self) -> tuple[str, ...]:
-        return tuple(acc for _, acc in self.folds)
+        return (self.acc,)
 
     def external_reads(self) -> tuple[str, ...]:
         def loads(stmts):
@@ -499,14 +462,12 @@ class Contraction(Stmt):
         # per-row statistic reduce ``Loop``). A binding REFERENCE reads no buffer here: the bound
         # subtree is the owning ``TileOp``'s, and its loads are reached through ``bindings``.
         a = () if isinstance(self.a_operand, str) else loads(self.a_body)
-        return (*dict.fromkeys(a), *(bl.input for bl, _ in self.folds))
+        return (*dict.fromkeys(a), self.b_load.input)
 
     def pretty(self, indent: str = "") -> list[str]:
         t = " trans" if self.b_trans else ""
         a_src = self.a_operand.input if isinstance(self.a_operand, Load) else self.a_name
-        bs = " + ".join(bl.input for bl, _ in self.folds)
-        accs = ", ".join(acc for _, acc in self.folds)
-        ops = f"{a_src} @ {bs}{t} -> {accs} ({self.atom.name})"
+        ops = f"{a_src} @ {self.b_load.input}{t} -> {self.acc} ({self.atom.name})"
         return [f"{indent}Contraction [{self.m_axis.name}, {self.n_axis.name}] {ops}"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
@@ -535,7 +496,8 @@ def _(s: Contraction, rename, sigma, axis_fn):
         axes=tuple(axis_fn(a) for a in s.axes),
         k_axis=axis_fn(s.k_axis),
         a_operand=a_operand,
-        folds=tuple((_rewrite(bl, rename, sigma, axis_fn), rename(acc)) for bl, acc in s.folds),
+        b_load=_rewrite(s.b_load, rename, sigma, axis_fn),
+        acc=rename(s.acc),
         tile=s.tile,
         lead_axes=tuple(axis_fn(a) for a in s.lead_axes),
     )

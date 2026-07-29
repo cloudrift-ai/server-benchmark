@@ -191,7 +191,8 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis, dict] | None:
     ``source`` is the computed-A :class:`Contraction` whose A operand REFERENCES the bound cone —
     a real node tree, ``Map(body=<the per-cell cone>, sources=(<the statistic Reduction>,))``, so the
     statistic is addressable and cuttable in its own right instead of hiding inside an operand body —
-    its ``folds`` the ``(B, acc)`` channels, a **deferred** ``TilePlan()``; the ``body`` is the
+    with one SIBLING :class:`Contraction` per ⊗-fold channel (all naming that one cone, all carrying a
+    **deferred** ``TilePlan()``); the ``body`` is the
     projection (the combine tail + any stat-free prefix defs it reads + the ``Write``). Returns that
     node, the column axis (the scheduler adds it to the grid), and the let table the cone lives in,
     or ``None`` (not this shape; the reduce ``Map`` form stands alone).
@@ -303,20 +304,31 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis, dict] | None:
                 prefix.append(st)
     if not write.is_scalar or write.values != ((tail_ops[-1].name,) if tail_ops else (folds[0][1],)):
         return None
+    # B-layout agreement is a GROUP-FORMATION gate, not a node assert: channels whose B is stored
+    # the other way round were never legally fusable (one shared A fragment, one slab orientation),
+    # so they simply never group.
+    if len({k_ax.name in bl.index[-1].free_vars() for bl, _ in folds}) != 1:
+        return None
     # The cone as a NODE: the statistic is the ``Reduction`` source, its scalar epilogue + the
     # per-cell map stmts the projection body — exactly the ``[stat loop, *stat_epi, *cone]`` stmt run
     # the operand body used to hold, now with the K seam readable off the node boundary.
     bindings: dict = {}
     a_ref = bind_operand(Map(body=Body((*stat_epi, *cone)), sources=(red,)), bindings)
-    node = Contraction(
-        axes=(m_ax, n_ax),
-        k_axis=k_ax,
-        a_operand=a_ref,
-        folds=tuple(folds),
-        tile=TilePlan(),
-        lead_axes=tuple(grid[:-1]),
+    # One SIBLING contraction per ⊗-fold channel, all naming the same bound cone: operand sharing is
+    # the structural fact, and the group schedules / lowers as one unit (``ops.group_loop``).
+    channels = tuple(
+        Contraction(
+            axes=(m_ax, n_ax),
+            k_axis=k_ax,
+            a_operand=a_ref,
+            b_load=bl,
+            acc=acc,
+            tile=TilePlan(),
+            lead_axes=tuple(grid[:-1]),
+        )
+        for bl, acc in folds
     )
-    return Map(body=Body((*prefix, *tail_ops, write)), sources=(node,)), n_ax, bindings
+    return Map(body=Body((*prefix, *tail_ops, write)), sources=channels), n_ax, bindings
 
 
 __all__ = ["bind_contraction", "bind_operand", "bind_prologue_contraction", "map_cone", "semiring_binding"]

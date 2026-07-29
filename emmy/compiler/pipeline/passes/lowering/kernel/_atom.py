@@ -454,7 +454,7 @@ def _stat_slab(name: str) -> str:
 
 
 def _sync_operands(
-    c: Contraction, bk_elems: int, mn: tuple[Side, Side], cta: CtaTile, swizzles: tuple[str, str] = ("NONE", "NONE")
+    c: Contraction, bk_elems: int, mn: tuple[Side, Side], cta: CtaTile, swizzles: tuple[str, str] = ("NONE", "NONE"), channels=()
 ) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...], list[Stmt]]:
     """The ``sync``-transport (fused-edge) operands + the one-shot prologue stmts, returned as
     ``(drain-ordered operands, compute-filled, cp.async-filled, prologue)``: A is **compute-filled**
@@ -502,11 +502,12 @@ def _sync_operands(
     # the ldmatrix drain reads each slab back through its own mode. Unswizzled these slabs drain
     # 4-way (64 B A rows) / 8-way (128 B B rows) bank-conflicted — the measured megakernel residual
     # (294.9 M ld conflicts / 82.5 M LSU inst on the gemma-shape fused edge, 5090).
+    channels = channels or ((c.b_load, c.acc),)
     a_op = SyncOperand(tag="a", shape=(mn[0].tile, bk_elems), value=a_value, swizzle=swizzles[0])
     drain: list = [a_op]
     sync_ops: list[SyncOperand] = [a_op]
     async_ops: list[Operand] = []
-    for f, (bl, _) in enumerate(c.folds):
+    for f, (bl, _) in enumerate(channels):
         tag = "b" if f == 0 else f"b_x{f}"
         # A transposed B stages N-major (``tile_n × bk`` — its own gmem orientation, K stride-1 in
         # gmem and smem alike), so its cp.async chunks are contiguous exactly like the canonical
@@ -550,7 +551,9 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         # tier's ``sync`` transport; single-buffer, one wait + CTA barrier. A k-invariant cone
         # prefix (the fused norm→linear per-row statistic) rides the transport prologue, run once
         # ahead of the K-loop.
-        operands, sync_ops, async_ops, stat_pro = _sync_operands(c, stage.bk_elems, mn, cta, ops.slab_swizzles(mn, elem.nbytes))
+        operands, sync_ops, async_ops, stat_pro = _sync_operands(
+            c, stage.bk_elems, mn, cta, ops.slab_swizzles(mn, elem.nbytes), ops.channels
+        )
         transport = SyncTransport(
             operands=sync_ops,
             async_operands=async_ops,
@@ -560,7 +563,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             prologue_stmts=tuple(stat_pro),
         )
     else:
-        assert len(c.folds) == 1, "cp.async / TMA staging is single-fold — a multi-B node rides the sync compute-fill"
+        assert len(ops.channels) == 1, "cp.async / TMA staging is single-fold — a multi-B node rides the sync compute-fill"
         operands = _slab_operands(
             index_srcs=(c.a_operand.index, c.b_load.index),
             bufs=(c.a_operand.input, c.b_load.input),
@@ -742,6 +745,15 @@ class _AtomOps:
     # glue, assembled by ``_factor._bind``. It is NOT a node field: every projection has ONE home,
     # the ``Map`` wrapper, and the store sink is where it lands.
     epilogue: Body = field(default_factory=Body)
+    # The FUSED SIBLING GROUP's ``(b_load, acc)`` channels — ``c`` is the primary, and everything
+    # here is DERIVED from the group at emit time (one A fragment, N mma chains, one C fragment per
+    # channel). ``()`` means the plain single-channel node, i.e. just ``c``'s own pair.
+    siblings: tuple = ()
+
+    @property
+    def channels(self) -> tuple:
+        """The ``(b_load, acc)`` pairs this emission folds — the group's, or the node's own."""
+        return self.siblings or ((self.c.b_load, self.c.acc),)
 
     def reduce(self, cells, offset, mn):
         """The contraction K-loop — the ONE driver both atoms flow through, deciding nothing: a
@@ -795,7 +807,7 @@ class _MmaOps(_AtomOps):
             trans=tuple(getattr(op, "trans", False) for op in operands),
         )
         if _f16acc(self.c.atom):
-            stmts = [*stmts, *_f16acc_promotes(mn[0].reg, mn[1].reg, len(self.c.folds))]
+            stmts = [*stmts, *_f16acc_promotes(mn[0].reg, mn[1].reg, len(self.channels))]
         return stmts
 
     def slab_swizzles(self, mn, elem_bytes: int) -> tuple[str, str]:
@@ -832,7 +844,7 @@ class _MmaOps(_AtomOps):
 
         # One A fragment set; one B and one C fragment set PER fold channel (the multi-B node's
         # shared-A / per-channel-accumulate drain).
-        n_folds = len(c.folds)
+        n_folds = len(self.channels)
         decls: list[Stmt] = [
             RegFragment(name=nm, role="a", shape=atom.shape, dtype=atom.operand_dtype("a")) for nm in frags(lambda i: f"_a{i}", m.reg)
         ]
@@ -869,7 +881,7 @@ class _MmaOps(_AtomOps):
         assert not c.a_computed, (
             "mma matmul arm: a register-resident (computed) A operand lowers through the fragment realizer (_twist), not here"
         )
-        assert len(c.folds) == 1, "gmem-direct mma is single-fold — a multi-B node rides the sync compute-fill"
+        assert len(self.channels) == 1, "gmem-direct mma is single-fold — a multi-B node rides the sync compute-fill"
         a_load, b_load, b_trans = c.a_operand, c.b_load, c.b_trans
         k_static = k_axis.extent.is_static
         k_zero = None if k_static else (Var(k_axis.name), k_axis.extent_expr())
@@ -940,10 +952,11 @@ class _MmaOps(_AtomOps):
         mcell, ncell = offset[0].base(i), offset[1].base(j)
         tail = list(self.epilogue)
         sigma = Sigma({m.axis.name: mcell, n.axis.name: ncell})
-        accs = (c.acc, *(acc for _, acc in c.folds[1:]))
-        frags = (f"_c{i}_{j}", *(_fold_frag(f"_c{i}_{j}", f) for f in range(1, len(c.folds))))
+        chans = self.channels
+        accs = tuple(acc for _, acc in chans)
+        frags = (f"_c{i}_{j}", *(_fold_frag(f"_c{i}_{j}", f) for f in range(1, len(chans))))
         writes = [s for s in tail if isinstance(s, Write)]
-        if len(c.folds) > 1 and len(tail) == len(writes) == len(c.folds) and {w.value for w in writes} == set(accs):
+        if len(chans) > 1 and len(tail) == len(writes) == len(chans) and {w.value for w in writes} == set(accs):
             # RAW per-channel stores — the split-K partial's epilogue is one workspace ``Write``
             # per accumulator, NO ⊗-combine (the finalize applies the projection once after the
             # cross-partition sums): each channel's C fragment stores to its own ws slice.
@@ -962,9 +975,9 @@ class _MmaOps(_AtomOps):
                 for acc, frag in zip(accs, frags, strict=True)
             ]
         write = next(s for s in writes)
-        extra = tuple((acc, _fold_frag(f"_c{i}_{j}", f)) for f, (_, acc) in enumerate(c.folds[1:], 1))
+        extra = tuple((acc, _fold_frag(f"_c{i}_{j}", f)) for f, (_, acc) in enumerate(chans[1:], 1))
         epi = _warp_epilogue(tail, c.acc, m.axis.name, n.axis.name, sigma, extra_accs=extra)
-        assert len(c.folds) == 1 or epi is not None, "a multi-fold contraction's projection must combine the accumulators"
+        assert len(chans) == 1 or epi is not None, "a fused sibling group's projection must combine the accumulators"
         return [
             RegStore(
                 dst_buffer=write.output,
@@ -1018,7 +1031,7 @@ class _ScalarOps(_AtomOps):
         ``Loop`` (``Loop.render`` seeds the accumulators; the store reads them). A masked axis wraps
         its read in-bounds (``% extent``) and the overhanging store is guarded (:meth:`store`)."""
         c = self.c
-        assert len(c.folds) == 1, "the scalar tier is single-fold — a multi-B node rides the warp sync compute-fill"
+        assert len(self.channels) == 1, "the scalar tier is single-fold — a multi-B node rides the warp sync compute-fill"
         k_axis = c.k_axis
         m, n = mn
         prot = _scalar_protected(c)
@@ -1054,27 +1067,27 @@ class _ScalarOps(_AtomOps):
         return _dedup_loads(cell)
 
 
-def _atom_ops(c: Contraction, stage: Stage | None = None, inputs=None, workers=None, epilogue: Body | None = None) -> _AtomOps:
+def _atom_ops(c: Contraction, stage: Stage | None = None, inputs=None, workers=None, epilogue: Body | None = None, siblings=()) -> _AtomOps:
     """The **one** atom dispatch — select the codegen strategy off the atom kind."""
     cls = _MmaOps if isinstance(c.atom, AtomKind) else _ScalarOps
-    return cls(c, stage, inputs, workers, Body(()) if epilogue is None else epilogue)
+    return cls(c, stage, inputs, workers, Body(()) if epilogue is None else epilogue, tuple(siblings))
 
 
-def reduce_codegen(c: Contraction, stage: Stage | None = None, inputs=None, workers=None):
+def reduce_codegen(c: Contraction, stage: Stage | None = None, inputs=None, workers=None, siblings=()):
     """The reusable, **sink-agnostic** ``(state_decls, reduce_region)`` from the atom strategy — the
     accumulator decls + the contraction K-loop (the ONE :meth:`_AtomOps.reduce` driver: the shared
     :func:`_contract_kloop` spine gmem-direct, the shared :func:`_staged` fill→drain skeleton staged).
     ``stage`` / ``inputs`` bind operand staging (both atoms stage the same smem slab off it, differing
     only in the drain leaf — ``ldmatrix`` vs plain ``Load``); ``workers`` splits the staged phases
     across producer / compute warp bands (the resolved :class:`WarpSpec`; ``None`` = uniform)."""
-    ops = _atom_ops(c, stage, inputs, workers)
+    ops = _atom_ops(c, stage, inputs, workers, siblings=siblings)
     return ops.state, ops.reduce
 
 
-def store_sink(c: Contraction, epilogue: Body | None = None):
+def store_sink(c: Contraction, epilogue: Body | None = None, siblings=()):
     """The default **matmul sink** — the per-cell ``store(i, j, offset, mn)`` from the atom strategy
     (an mma ``RegStore`` / the replicated scalar ``epilogue`` tail), folding in the ``epilogue`` (the
     projection off the node's ``Map`` wrapper + the store glue). ``factorize(c, store=…)`` swaps the
     sink (a flash sink that bridges the accumulator into the streaming-softmax twist), reusing the
     shared ``reduce`` emission."""
-    return _atom_ops(c, epilogue=epilogue).store
+    return _atom_ops(c, epilogue=epilogue, siblings=siblings).store

@@ -141,9 +141,7 @@ def _mapped(op, grid, *, name: str = "", tier=None, stage=None, knobs: dict | No
     return TileOp(op=op, name=name, place=place, stage=stage, knobs=dict(knobs or {}), bindings=binds, **kw)
 
 
-def _split_contraction(
-    match: Match, root: Node, tile: TileOp, contraction: Contraction, carrier, plan: ReducePlan, split: Axis, projection=()
-):
+def _split_contraction(match: Match, root: Node, tile: TileOp, group: tuple, carrier, plan: ReducePlan, split: Axis, projection=()):
     """Realize a **structural** split-K ``Reduction(axis=ksplit, source=Contraction)`` — the K axis is
     already factored (``split`` == ``ksplit``, extent == ``cta``) and the operands offset, so the
     partial is the **bare Contraction** with ``ksplit`` prefixed as a lead grid axis (each CTA a fixed
@@ -163,8 +161,13 @@ def _split_contraction(
     states = carrier.state.names
     n_comp = len(states)  # 1 = plain matmul; N = the multi-channel (gate/up) node's per-channel accs
     acc = states[0]
-    lead = (split, *contraction.lead_axes)
+    lead = (split, *group[0].lead_axes)
     epilogue = list(projection)  # the fused projection off the ``Map`` wrapper (empty for a bare matmul)
+
+    def _partial(body):
+        """The partial kernel's node: the group with ``ksplit`` prefixed as a lead grid axis, its
+        retargeted stores riding the ``Map`` wrapper (the one home for a projection)."""
+        return Map(body=Body(body), sources=tuple(replace(c, lead_axes=lead) for c in group))
 
     # The cross-CTA MOVE derives from the one placement-keyed selector (ReduceStage.combine over
     # the GRID stage) — this rewrite only realizes it; the carrier / projection legality raises
@@ -183,8 +186,7 @@ def _split_contraction(
             atomic_epi = tuple(replace(s, atomic=True) if isinstance(s, Write) else s for s in epilogue)
         else:
             atomic_epi = (Write(output=out.name, index=cell, value=acc, atomic=True),)
-        part = Map(body=Body(atomic_epi), sources=(replace(contraction, lead_axes=lead),))
-        return _mapped(part, (split, *grid), name=tile.name, stage=tile.stage, knobs=tile.knobs, bindings=tile.bindings)
+        return _mapped(_partial(atomic_epi), (split, *grid), name=tile.name, stage=tile.stage, knobs=tile.knobs, bindings=tile.bindings)
 
     # --- deferred kernel finalize: partial writes each raw state to ``ws[(comp,) ksplit, *cell]``.
     # The workspace shape MUST match the rank of the index the writes/loads use — or
@@ -206,8 +208,9 @@ def _split_contraction(
         return (*lead_ix, *cell)
 
     ws_writes = tuple(Write(output=ws_name, index=ws_index(i), value=states[i]) for i in range(n_comp))
-    part = Map(body=Body(ws_writes), sources=(replace(contraction, lead_axes=lead),))
-    partial_tile = _mapped(part, (split, *grid), name=f"{tile.name}__partial", stage=tile.stage, knobs=tile.knobs, bindings=tile.bindings)
+    partial_tile = _mapped(
+        _partial(ws_writes), (split, *grid), name=f"{tile.name}__partial", stage=tile.stage, knobs=tile.knobs, bindings=tile.bindings
+    )
 
     # --- finalize kernel: seed each state, fold ``ws`` over ``ksplit`` (``as_state_merge`` — the
     # 1-component additive fold, or the N-component per-channel sums), then the original
@@ -345,8 +348,12 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     # The projection (when the split node carries one) rides the ``Map`` wrapper over the split
     # ``Reduction`` — its ONE home; peel it here and hand it to the realizer.
     split_root, projection = (op.sources[0], op.body) if isinstance(op, Map) and op.sources else (op, ())
-    if isinstance(split_root, Reduction) and isinstance(split_root.source, Contraction):
-        return _split_contraction(match, root, tile, split_root.source, carrier, plan, rax, projection)
+    if isinstance(split_root, Reduction) and split_root.source is not None:
+        # The split node's inner contraction — one, or a FUSED SIBLING GROUP under a ``Map``.
+        inner = split_root.source
+        group = inner.sources if isinstance(inner, Map) else (inner,)
+        if group and all(isinstance(c, Contraction) for c in group):
+            return _split_contraction(match, root, tile, group, carrier, plan, rax, projection)
     # Flash split-KV: a warp-tiled TWISTED streaming tree keeps its fragment residence in the
     # partial (the scalar residual path below would drop it to the per-cell tier).
     if isinstance(op, Map) and isinstance(op.source, Reduction) and op.source.role is AxisRole.TWISTED:

@@ -40,10 +40,11 @@ step unconditional — no knobs):
    statistic's scalar epilogue + a fresh free (column) ``Loop`` over one or more ⊗-folds of ONE
    shared A value reading the statistic (the fused norm→linear edge ``rmsnorm(x)·nw @ w``; its
    N-channel form the gate/up MLP edge ``swiglu(x̂@Wg, x̂@Wu)`` — a product-monoid fold) ALSO
-   nodifies to ``Map(body=projection, source=Contraction)``: a computed-A :class:`Contraction`
-   whose A cone carries the per-row statistic prologue and whose ``folds`` are the ``(B, acc)``
-   channels (``_atomize.bind_prologue_contraction``, structure-only), its column axis joining the
-   grid. Both forms are scheduled and merged into ONE fork — the reduce rows first (option-0 stays
+   nodifies to ``Map(body=projection, sources=(Contraction, …))``: one computed-A
+   :class:`Contraction` per ⊗-fold channel, all referencing ONE bound A cone (a real node tree —
+   the per-row statistic its ``Reduction`` source) — the fused sibling group
+   (``_atomize.bind_prologue_contraction``, structure-only), its column axis joining the grid.
+   Both forms are scheduled and merged into ONE fork — the reduce rows first (option-0 stays
    the conservative coop pick), then the Contraction form's warp (mma) rows over the ``sync``
    compute-fill stage; a warp ``TILE`` pin keeps the Contraction rows alone.
 
@@ -289,7 +290,8 @@ def _nodify_contraction(node, free: tuple, bindings: dict):
                 axes=(free[-2], free[-1]),
                 k_axis=rloop.axis,
                 a_operand=bind_operand(a_load, bindings),
-                folds=((b_load, acc),),
+                b_load=b_load,
+                acc=acc,
                 tile=TilePlan(),
                 lead_axes=tuple(free[:-2]),
             )
@@ -417,9 +419,9 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
         return rows if len(rows) > 1 else rows[0]
     # (4) The MONOID-producer composition — the fused norm→linear edge (``rmsnorm(x)·nw @ w``, and
     # its N-channel form, the gate/up MLP edge): the tail fold(s) ALSO nodify to
-    # ``Map(body=projection, source=Contraction)`` — a computed-A :class:`Contraction` whose A cone
-    # carries the per-row statistic prologue and whose ``folds`` are the ``(B, acc)`` channels
-    # (:func:`bind_prologue_contraction`), its column axis joining the grid. Both forms are
+    # ``Map(body=projection, sources=(Contraction, …))`` — one computed-A :class:`Contraction` per
+    # ⊗-fold channel over ONE bound A cone (:func:`bind_prologue_contraction`), its column axis
+    # joining the grid. Both forms are
     # scheduled and their candidates merged into ONE fork: the reduce-``Map`` rows first (the
     # cooperative / serial tiers — option-0 stays the conservative coop pick, lowerable
     # everywhere), then the Contraction form's warp (mma) rows (the sync compute-fill tier — zero
@@ -429,7 +431,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     # decided-empty stamps, so every leaf row spells the same key set (the evidence pick's
     # prefix-consistency: an absent key reads as "free").
     c_map, n_ax, con_binds = pro
-    src = c_map.source
+    src = c_map.sources[0]  # the group's primary channel — every channel shares one k axis / cone
     con_base, map_base = prologue_knob_bases(src.k_axis.name, con_binds[src.a_ref].source.axis.name)
     con_tile = TileOp(op=c_map, place=Placement(free=(*free, n_ax)), inputs=dict(loop.inputs), bindings=con_binds)
     con = _as_list(schedule(con_tile, loop.name, {**knob_base, **con_base}, ctx))

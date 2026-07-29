@@ -55,6 +55,7 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import Fold, Level, ReduceStage
 from emmy.compiler.ir.tile.ir import Contraction, Map, Reduction, Side
+from emmy.compiler.ir.tile.ops import group_loop, is_group
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import copy_cell, reduce_codegen, shrink_axis, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import sync_row_fill
 from emmy.compiler.pipeline.passes.lowering.kernel._twist import FLASH_WARP_AXIS, realize_warp_twist, warp_source
@@ -245,7 +246,11 @@ def _emit(op, ctx: Ctx) -> Frag:
     is its lowered loop-IR (byte-identical to ``ops.lower``); a WARP-TILED tree does not reach this
     walk — ``_bind`` realizes it at fragment residence through ``_twist`` instead."""
     if isinstance(op, Map):
-        src = _emit(op.source, ctx) if op.source is not None else None
+        if is_group(op):
+            # The fused group emits its ONE derived fold loop (scalar-nested), never N loops.
+            loop = group_loop(op.sources)
+            return Frag(body=[loop, *_emit_body(op.body, ctx)], out=_map_wire(op), carrier=loop.carrier)
+        src = _emit(op.sources[0], ctx) if op.sources else None
         prefix = list(src.body) if src is not None else []
         return Frag(body=[*prefix, *_emit_body(op.body, ctx)], out=_map_wire(op), carrier=src.carrier if src is not None else None)
     if isinstance(op, Reduction):
@@ -329,7 +334,7 @@ def factorize(tile, root, store=None) -> Tile:
     return _factorize(op, ctx, tail=(), out_val=out_val, store=store)
 
 
-def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
+def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, siblings: tuple = ()) -> Tile:
     """The recursive root walk — peel the projecting ``Map``\\ s, then bind the leaf to the grid via
     the ONE binder. A :class:`Map` with a ``source`` **recurses**: its ``body`` (the projection /
     epilogue) is walked (:func:`_emit_body`, reaching any nested node) and prepended to ``tail``;
@@ -339,9 +344,12 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
     P@V contractions and its streaming reduce factorize through this one walk (scalar block=1
     today; a nested warp-tiled contraction routes through the ``_emit`` ``Contraction`` seam). A
     bespoke emitter would be a divergent codegen path the mandate forbids."""
-    if isinstance(op, Map) and op.source is not None:
-        return _factorize(op.source, ctx, tail=(*_emit_body(op.body, ctx), *tail), out_val=out_val, store=store)
-    return _bind(op, ctx, tail, out_val, store)
+    if isinstance(op, Map) and op.sources:
+        # A FUSED SIBLING GROUP binds as ONE unit: the primary channel is the leaf, the rest ride as
+        # derived channels (one shared A fragment, N mma chains, one C fragment each).
+        siblings = tuple((s.b_load, s.acc) for s in op.sources) if is_group(op) else ()
+        return _factorize(op.sources[0], ctx, tail=(*_emit_body(op.body, ctx), *tail), out_val=out_val, store=store, siblings=siblings)
+    return _bind(op, ctx, tail, out_val, store, siblings)
 
 
 def has_write(stmts: list[Stmt]) -> bool:
@@ -367,7 +375,7 @@ def with_store(stmts: list[Stmt], output: str, grid, value: str) -> list[Stmt]:
     return [*stmts, Write(output=output, index=index, value=value)]
 
 
-def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
+def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, siblings: tuple = ()) -> Tile:
     """The ONE root binder — every kernel binds through the same pipeline: read WHICH AXES the
     schedule tiles off the node, build the fold region, and seal through the one :func:`grid_tile`
     finalizer. The cases are points of one ``(output-tiling) × (reduce-folding)`` space, selected by
@@ -392,8 +400,8 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
         if not has_write(epi):
             epi = with_store(epi, ctx.output, grid, op.out)
         c = op
-        state_decls, reduce_region = reduce_codegen(c, ctx.stage, ctx.inputs, ctx.workers)
-        sink = store if store is not None else store_sink(c, Body(tuple(epi)))
+        state_decls, reduce_region = reduce_codegen(c, ctx.stage, ctx.inputs, ctx.workers, siblings)
+        sink = store if store is not None else store_sink(c, Body(tuple(epi)), siblings)
         t = unit_tile(register_tile(atomize(c.atom.shape[:2]), c.mn), c.mn)
         mn, lead, bt, lanes = c.mn, c.lead_axes, c.block_threads, c.atom.lanes
     else:

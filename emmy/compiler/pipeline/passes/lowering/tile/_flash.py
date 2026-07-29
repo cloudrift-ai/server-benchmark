@@ -354,7 +354,8 @@ def _split_pv(merge: list, o: str, v: str, v_buf: str, v_idx: tuple, m_axis: Axi
         # A = P, register-resident: a one-stmt cone bound in the let table and referenced by name,
         # the same shape every computed A takes.
         a_operand=bind_operand(Map(body=Body((Assign(name=f"{o}__p", op="copy", args=(p_name,)),))), bindings),
-        folds=((Load(name=v, input=v_buf, index=v_idx), f"{o}__pv"),),  # B = V (the value tile)
+        b_load=Load(name=v, input=v_buf, index=v_idx),  # B = V (the value tile)
+        acc=f"{o}__pv",
         tile=TilePlan(),
     )
     out: list = []
@@ -426,7 +427,8 @@ def _flash_op(
         axes=(Axis(name="m", extent=s_q), Axis(name="kv", extent=s_k)),
         k_axis=Axis(name="dd", extent=Dim(head_dim)),
         a_operand=Load(name="q_e", input=q_buf, index=q_idx),
-        folds=((Load(name="k_e", input=k_buf, index=k_idx), "sacc"),),
+        b_load=Load(name="k_e", input=k_buf, index=k_idx),
+        acc="sacc",
         tile=TilePlan(),
     )
     score_post = [

@@ -99,6 +99,14 @@ Invariants carried over from the old design:
 - MIMO (#433) is the mechanism for a cut child that shares operands with siblings (multi-output node instead
   of recompute).
 
+## Sequencing note (added 2026-07-28)
+
+The Contraction generalization (`contraction-shared-operand-refactor.md` — let-bound shared operands,
+sibling nodes instead of `folds` channels) executes BEFORE phases 2–4 below, while no placement realizer
+exists to consume the tree. It delivers prerequisite #1 (cone nodification) including its bare-`REDUCE`
+guard; phase 2's stampers target the post-refactor nodes. Fused sibling groups schedule as one unit (one
+shared key set), so the codec needs no sibling ordinals for them.
+
 ## Prerequisite: full nodification
 
 Path addressing only reaches nodes. Two flat forms must become nodes first:

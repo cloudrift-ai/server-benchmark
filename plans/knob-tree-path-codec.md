@@ -90,10 +90,10 @@ No YAML, DB, or prior migration; the golden compat test (phase 1) is the guard t
 
 Invariants carried over from the old design:
 
-- **`cut` is the default on every seam; `fuse` (and any non-default cut) is evidence-only** — an unseeded
-  site never pays. Exception: seams whose fused form IS the recognized default kernel (the `map` projection
-  seam, the cone) default to the recognized form (`fuse`); verify each seam's pre-wipe default against the
-  deleted realizers' gates in git history (`git show <pre-wipe>:.../020_cut_edge.py` etc.) before wiring.
+- **`fuse` is the default on every seam; `cut` is evidence/pin-only.** The recognized tree IS the fused
+  form, so the default means "no rewrite" — an unseeded site deploys the recognized kernel and never pays
+  for a cut it has no evidence for. This also kills the old per-site default zoo (fin=cut vs cone=fuse):
+  one rule, and the realizer only ever fires on an explicit `cut`.
 - Accuracy: a cut materializes the seam value (f32 state for reduce seams, like `030_split_reduce`'s
   workspace); numerics gates unchanged.
 - MIMO (#433) is the mechanism for a cut child that shares operands with siblings (multi-output node instead
@@ -143,8 +143,8 @@ Path addressing only reaches nodes. Two flat forms must become nodes first:
   kernels — materialize the seam value (MIMO node when operands are shared), re-recognize children.
   Seams in scope: `map` (projection off a reduce/contraction), `contraction.a` (the cone). The split-reduce
   finalize `map` seam composes with `REDUCE=g<n>k` for the 3-kernel form.
-- `010_recognize` enumerates PLACE rows per seam (evidence-gated, default per seam as verified from
-  pre-wipe gates); greedy pin precedence: exact path > suffix > bare, mirroring `narrow_at`.
+- `010_recognize` enumerates PLACE rows per seam (option-0 = `fuse`, the recognized form; `cut` rows are
+  evidence-gated); greedy pin precedence: exact path > suffix > bare, mirroring `narrow_at`.
 - Verify: A/B the restored cuts against this branch's baseline on the recorded shapes —
   `cut_cone_stat.m256` + `cut_cone_scale.m256` pair ≈ 3.8 µs vs fused `F.rms_norm` 6.0 µs (5090 comments in
   the golden YAML); rms_norm `REDUCE@map.reduce.k=b256` unchanged; new 3-kernel split-reduce compiles and

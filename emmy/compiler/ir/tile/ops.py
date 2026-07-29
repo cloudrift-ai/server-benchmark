@@ -44,15 +44,20 @@ def resolve(op, bindings=None):
         partial = _resolve_stmts(op.partial, bindings)
         return op if partial is None else replace(op, partial=partial)
     if isinstance(op, Contraction):
-        if op.a_ref is None:
-            return op
-        bound = bindings.get(op.a_ref)
-        if bound is None:
-            raise KeyError(f"resolve: operand reference {op.a_ref!r} resolves to no binding")
         # SPLICE the bound NODE onto the edge — do not lower it here. Resolve is a tree operation;
         # flattening mid-resolve is what used to leave a stmt ``Body`` on the operand field, which
         # erased the node boundary every downstream reader (``cone_seam``) wants to read back.
-        return replace(op, a=resolve(bound, bindings))
+        # Both edges resolve the same way: the two are one vocabulary.
+        def edge(op_edge, ref):
+            if ref is None:
+                return op_edge
+            bound = bindings.get(ref)
+            if bound is None:
+                raise KeyError(f"resolve: operand reference {ref!r} resolves to no binding")
+            return resolve(bound, bindings)
+
+        a, b = edge(op.a, op.a_ref), edge(op.b, op.b_ref)
+        return op if (a is op.a and b is op.b) else replace(op, a=a, b=b)
     return op
 
 
@@ -99,7 +104,7 @@ def is_group(op) -> bool:
 def group_loop(sources) -> Loop:
     """The ONE fold ``Loop`` a fused sibling group DERIVES — never stored, exactly like
     :attr:`Reduction.loop`. The shared A is lifted once (the primary channel's loop), then each
-    further channel splices its ``b_load → ⊗ → ⊕`` triple after it, reusing that A value. The carrier
+    further channel splices its ``b → ⊗ → ⊕`` triple after it, reusing that A value. The carrier
     is the N-COMPONENT identity-family state (one additive component per channel) — the true
     product-monoid state, so the cross-CTA split tier folds every channel's partials (the
     redundant-statistic split of the gate/up edge); ``carrier.out`` stays the primary component, and
@@ -115,8 +120,8 @@ def group_loop(sources) -> Loop:
     a_name, k = sources[0].a_name, sources[0].k_axis.name
     extra: list[Stmt] = []
     for c in sources[1:]:
-        lift = Assign(name=f"{c.acc}__v", op=ElementwiseImpl("multiply"), args=(a_name, c.b_load.names[0]))
-        extra += [c.b_load, lift, Accum(name=c.acc, value=lift.name, op=ElementwiseImpl("add"), axes=(k,))]
+        lift = Assign(name=f"{c.acc}__v", op=ElementwiseImpl("multiply"), args=(a_name, c.b_name))
+        extra += [*c.b_body, lift, Accum(name=c.acc, value=lift.name, op=ElementwiseImpl("add"), axes=(k,))]
     add = ElementwiseImpl("add")
     names = tuple(c.acc for c in sources)
     channels = tuple(Channel(fold=add, term=f"{nm}__v", dtype=base.carrier.twist.channels[0].dtype) for nm in names)

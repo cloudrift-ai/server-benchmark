@@ -290,7 +290,7 @@ def _nodify_contraction(node, free: tuple, bindings: dict):
                 axes=(free[-2], free[-1]),
                 k_axis=rloop.axis,
                 a=a_load if isinstance(a_load, Load) else bind_cone(a_load, rloop.axis.name, bindings),
-                b_load=b_load,
+                b=b_load,
                 acc=acc,
                 tile=TilePlan(),
                 lead_axes=tuple(free[:-2]),

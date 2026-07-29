@@ -6,7 +6,7 @@ axis-in-index), the fold accumulator, and the projection epilogue.
 — the operand ``Load``\\ s indexed over the K axis, the fold ``Accum`` target — and returns them as
 the ``(a_load, b_load, acc, epilogue)`` facts that ``_schedule._contraction_node`` stamps onto the
 :class:`~emmy.compiler.ir.tile.ir.Contraction` structural node at fork-emit (the node
-is then the single source of truth — it re-derives ``b_trans`` off ``b_load`` itself). Reading the
+is then the single source of truth — it re-derives ``b_trans`` off ``b`` itself). Reading the
 binding **structurally** off the annotated loop — not a stored node kind — is what keeps the ⊗/⊕
 algebra a property of the loop, so no per-algebra op-tree node class is needed. The cooperative reduce
 needs no binding here — its accumulator dtype + shuffle/tree
@@ -135,7 +135,7 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
     :func:`bind_prologue_contraction` (it carries a statistic prologue and a column loop this shape
     has no notion of); flash's PV binds at fusion. An unbindable body raises, matching the warp
     gmem-direct guard. ``b_trans`` is not returned — the ``Contraction`` node re-derives it off its
-    fold's ``b_load``."""
+    fold's ``b``."""
     k_name = loop.axis.name
     body = list(loop.body)
     loads = [s for s in body if isinstance(s, Load) and k_name in _idx_vars(s.index)]
@@ -347,7 +347,7 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis, dict] | None:
             axes=(m_ax, n_ax),
             k_axis=k_ax,
             a=a_ref,
-            b_load=bl,
+            b=bl,
             acc=acc,
             tile=TilePlan(),
             lead_axes=tuple(grid[:-1]),

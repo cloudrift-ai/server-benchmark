@@ -58,7 +58,7 @@ at option-build time means an atom that **cannot** be
 bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is rejected at fork construction, alongside
 `_check_warp_static_k`, instead of failing several passes later:
 
-- a `CONTRACTION` contraction → the `(a, b_load, acc, projection)` operand→role facts
+- a `CONTRACTION` contraction → the `(a, b, acc, projection)` operand→role facts
   (`_atomize.bind_contraction`): the operands are named by the ⊗ **lift** (the `Assign` the fold accumulates) — B is its
   (n, k)-indexed `Load`, A is the lift's other argument, either a plain `Load` (clean gmem-direct) or, when loop fusion
   has inlined an operand cone, the cone as a `Map` NODE the caller binds into `TileOp.bindings` and the contraction

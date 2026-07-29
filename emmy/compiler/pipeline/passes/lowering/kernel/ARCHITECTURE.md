@@ -48,10 +48,12 @@ the inbound `wires` (flash's score fragment feeding P@V's A operand).
 
 The `Contraction` node is **one flat** Stmt — binding-driven for both atoms, with **no per-atom subclass** — that cleanly
 splits the **algebra params** (what to contract: the m/n output `axes` + the `k_axis`, the leading batch `lead_axes`, the
-B operand `b_load` + the A operand `a` — a gmem `Load`, a computed register-resident `Body` (flash PV's `P = exp(S −
-M)`, produced from an in-register score, not a gmem address), or the NAME of a let-bound cone in `TileOp.bindings`
-(inlined by `ops.resolve` before any lowering walk) — and the fold accumulator `acc`; a projection is NEVER a node field,
-its one home is the wrapping `Map.body`)
+two operand edges `a` and `b` — each a gmem `Load` (materialized), the NAME of a let-bound cone in `TileOp.bindings`
+(shared; spliced onto the edge by `ops.resolve` before any lowering walk), or the computed node itself (flash PV's
+`P = exp(S − M)`, produced from an in-register score, not a gmem address) — and the fold accumulator `acc`; a projection
+is NEVER a node field, its one home is the wrapping `Map.body`. The edges share ONE type: the A/B asymmetry that is real
+— A is M-resident and compute-fillable, B is the K×N operand the loop streams — is a SCHEDULE fact, so each staged /
+mma tier states `isinstance(c.b, Load)` as an eligibility precondition and declines a computed B to gmem-direct)
 from the **schedule** (one `tile: TilePlan` field carrying the leaf `atom` — a tensor-core `AtomKind` / the scalar
 `ScalarAtom`, `ir/atom.py` — plus the unit/register widths + K-chunk). The per-CTA geometry (the `(m, n)` `Side` pair —
 tile width / mask / block+unit var names — plus `block_threads`) is **derived** on the node from `tile` × `axes`

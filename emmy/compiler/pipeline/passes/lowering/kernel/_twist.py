@@ -244,8 +244,8 @@ def _frag_contraction(
         kz = mask.get(k_name)
         return LdmatrixLoad(
             frag=_bname(t, step),
-            src_buffer=c.b_load.input,
-            src_index=_idx(c.b_load, {n_name: col, k_name: k0}),
+            src_buffer=c.b.input,
+            src_index=_idx(c.b, {n_name: col, k_name: k0}),
             role="b",
             ldm=ldm_b,
             staged=False,
@@ -550,8 +550,8 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # (the gemma layer-0 NaN). Canonical ``(batch…, row, dd)`` layouts derive the same values as
     # before (bit-identical). The schedule gate guarantees derivability.
     q_gmem_ldm = gmem_row_stride(qk.a, qk.m_axis.name, ctx.inputs)
-    k_gmem_ldm = gmem_row_stride(qk.b_load, qk.n_axis.name if qk.b_trans else qk.k_axis.name, ctx.inputs)
-    v_gmem_ldm = gmem_row_stride(pv.b_load, pv.n_axis.name if pv.b_trans else kv_axis.name, ctx.inputs)
+    k_gmem_ldm = gmem_row_stride(qk.b, qk.n_axis.name if qk.b_trans else qk.k_axis.name, ctx.inputs)
+    v_gmem_ldm = gmem_row_stride(pv.b, pv.n_axis.name if pv.b_trans else kv_axis.name, ctx.inputs)
     assert q_gmem_ldm and k_gmem_ldm and v_gmem_ldm, "warp twist: underivable gmem row stride (schedule-gate breach)"
 
     def _q_frag_stmts(qt, i: int) -> list[Stmt]:
@@ -744,7 +744,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         kv_ext = kv_axis.extent if symbolic_k else kv_axis.extent.as_static()
         n_chunks = kv_axis.extent.ceil_div(bn) if symbolic_k else kv_axis.extent.as_static() // bn
         head_dim = qk.k_axis.extent.as_static()
-        k_load, v_load = qk.b_load, pv.b_load
+        k_load, v_load = qk.b, pv.b
         kn, kk, vn = qk.n_axis.name, qk.k_axis.name, pv.n_axis.name
 
         def _key_row(k0: Expr, row) -> Expr:

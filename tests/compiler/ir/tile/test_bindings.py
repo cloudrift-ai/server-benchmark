@@ -40,7 +40,7 @@ def _channel(acc: str, weight: str, a: str | Map = "xhat") -> Contraction:
         axes=(Axis("m", 128), Axis("n", 128)),
         k_axis=Axis("k", 256),
         a=a,
-        b_load=Load(name=f"{acc}_b", input=weight, index=(Var("k"), Var("n"))),
+        b=Load(name=f"{acc}_b", input=weight, index=(Var("k"), Var("n"))),
         acc=acc,
         tile=TilePlan(),
     )
@@ -198,3 +198,41 @@ def test_pretty_prints_each_binding_once_where_it_lives() -> None:
     assert text.count("let xhat =") == 1
     assert text.count("Contraction") == 2  # the two channels, each naming the shared operand
     assert "xhat @ Wg" in text and "xhat @ Wu" in text
+
+
+# --- the B edge references bindings by the same mechanism as A ----------------------------------- #
+
+
+def _b_ref_channel(acc: str, b: str) -> Contraction:
+    """A channel whose **B** is a binding reference — the transposed sharing shape (one B value read
+    by several contractions), expressible because both edges are the same kind of edge."""
+    return Contraction(
+        axes=(Axis("m", 128), Axis("n", 128)),
+        k_axis=Axis("k", 256),
+        a=Load(name=f"{acc}_a", input="x", index=(Var("m"), Var("k"))),
+        b=b,
+        acc=acc,
+        tile=TilePlan(),
+    )
+
+
+def test_a_dangling_b_reference_is_rejected_at_construction() -> None:
+    """The B edge goes through the same validation as A — one reference mechanism, not two."""
+    with pytest.raises(AssertionError, match=re.escape("resolve to no binding")):
+        TileOp(op=Map(sources=(_b_ref_channel("acc", "wn"),)))
+
+
+def test_resolve_splices_the_b_edge_too() -> None:
+    cone = _cone("wn")
+    tile = TileOp(op=Map(body=Body(()), sources=(_b_ref_channel("acc", "wn"),)), bindings={"wn": cone})
+    (channel,) = resolve(tile.op, tile.bindings).sources
+    assert channel.b_ref is None and channel.b is cone
+    assert channel.b_body == tuple(lower(cone))
+
+
+def test_a_shared_b_binding_must_be_closed_too() -> None:
+    """Closure is a property of the EDGE's target, so it is enforced identically whichever side the
+    reference sits on."""
+    op = Map(body=Body(()), sources=(_b_ref_channel("acc_g", "wn"), _b_ref_channel("acc_u", "wn")))
+    with pytest.raises(AssertionError, match=re.escape("captures ['m_run']")):
+        TileOp(op=op, bindings={"wn": _capturing_cone("wn")})

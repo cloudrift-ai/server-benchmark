@@ -346,7 +346,7 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, siblings: tu
     if isinstance(op, Map) and op.sources:
         # A FUSED SIBLING GROUP binds as ONE unit: the primary channel is the leaf, the rest ride as
         # derived channels (one shared A fragment, N mma chains, one C fragment each).
-        siblings = tuple((s.b_load, s.acc) for s in op.sources) if is_group(op) else ()
+        siblings = tuple((s.b, s.acc) for s in op.sources) if is_group(op) else ()
         return _factorize(op.sources[0], ctx, tail=(*_emit_body(op.body, ctx), *tail), out_val=out_val, store=store, siblings=siblings)
     return _bind(op, ctx, tail, out_val, store, siblings)
 

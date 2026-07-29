@@ -508,7 +508,7 @@ def _sync_operands(
     # the ldmatrix drain reads each slab back through its own mode. Unswizzled these slabs drain
     # 4-way (64 B A rows) / 8-way (128 B B rows) bank-conflicted — the measured megakernel residual
     # (294.9 M ld conflicts / 82.5 M LSU inst on the gemma-shape fused edge, 5090).
-    channels = channels or ((c.b_load, c.acc),)
+    channels = channels or ((c.b, c.acc),)
     a_op = SyncOperand(tag="a", shape=(mn[0].tile, bk_elems), value=a_value, swizzle=swizzles[0])
     drain: list = [a_op]
     sync_ops: list[SyncOperand] = [a_op]
@@ -571,8 +571,8 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     else:
         assert len(ops.channels) == 1, "cp.async / TMA staging is single-fold — a multi-B node rides the sync compute-fill"
         operands = _slab_operands(
-            index_srcs=(c.a.index, c.b_load.index),
-            bufs=(c.a.input, c.b_load.input),
+            index_srcs=(c.a.index, c.b.index),
+            bufs=(c.a.input, c.b.input),
             mn=mn,
             k_axis=k_axis,
             bk_elems=stage.bk_elems,
@@ -711,7 +711,7 @@ def _scalar_drain(
     seam the mma drain rides."""
     (a_slab, b_slab), (row_base, col_base) = slabs, base
     off_a, off_b = offs
-    b_name, a_name = c.b_load.names[0], c.a_name
+    b_name, a_name = c.b_name, c.a_name
     body: list[Stmt] = []
     for i, j in cells:
         sfx = f"__c{i}_{j}"
@@ -751,7 +751,7 @@ class _AtomOps:
     # glue, assembled by ``_factor._bind``. It is NOT a node field: every projection has ONE home,
     # the ``Map`` wrapper, and the store sink is where it lands.
     epilogue: Body = field(default_factory=Body)
-    # The FUSED SIBLING GROUP's ``(b_load, acc)`` channels — ``c`` is the primary, and everything
+    # The FUSED SIBLING GROUP's ``(b, acc)`` channels — ``c`` is the primary, and everything
     # here is DERIVED from the group at emit time (one A fragment, N mma chains, one C fragment per
     # channel). ``()`` means the plain single-channel node, i.e. just ``c``'s own pair.
     siblings: tuple = ()
@@ -762,8 +762,8 @@ class _AtomOps:
 
     @property
     def channels(self) -> tuple:
-        """The ``(b_load, acc)`` pairs this emission folds — the group's, or the node's own."""
-        return self.siblings or ((self.c.b_load, self.c.acc),)
+        """The ``(b, acc)`` pairs this emission folds — the group's, or the node's own."""
+        return self.siblings or ((self.c.b, self.c.acc),)
 
     @property
     def cone(self) -> tuple:
@@ -898,7 +898,7 @@ class _MmaOps(_AtomOps):
             "mma matmul arm: a register-resident (computed) A operand lowers through the fragment realizer (_twist), not here"
         )
         assert len(self.channels) == 1, "gmem-direct mma is single-fold — a multi-B node rides the sync compute-fill"
-        a_load, b_load, b_trans = c.a, c.b_load, c.b_trans
+        a_load, b_load, b_trans = c.a, c.b, c.b_trans
         k_static = k_axis.extent.is_static
         k_zero = None if k_static else (Var(k_axis.name), k_axis.extent_expr())
 
@@ -1018,7 +1018,7 @@ class _ScalarOps(_AtomOps):
     def slab_elems(self) -> tuple:
         """Each gmem operand's OWN dtype — A and B may differ on the scalar tier (fp32 split
         partials × fp16 weights); the drain's fma converts like the gmem-direct path does."""
-        return (self.inputs[self.c.a.input].dtype, self.inputs[self.c.b_load.input].dtype)
+        return (self.inputs[self.c.a.input].dtype, self.inputs[self.c.b.input].dtype)
 
     def staged_drain(self, operands, slot, cells, offset, mn):
         """The scalar slab drain — the plain-``Load`` fma leaf (:func:`_scalar_drain`), reading by
@@ -1051,7 +1051,7 @@ class _ScalarOps(_AtomOps):
         k_axis = c.k_axis
         m, n = mn
         prot = _scalar_protected(c)
-        b_name, a_name = c.b_load.names[0], c.a_name
+        b_name, a_name = c.b_name, c.a_name
 
         def read_row(i):
             if m is None:
@@ -1059,7 +1059,7 @@ class _ScalarOps(_AtomOps):
             return copy_cell(c.a_body, Sigma({m.name: _wrap(m, offset[0].base(i))}), f"__ar{i}", prot)
 
         def read_col(j):
-            return copy_cell([c.b_load], Sigma({n.name: _wrap(n, offset[1].base(j))}), f"__bc{j}", prot)
+            return copy_cell(c.b_body, Sigma({n.name: _wrap(n, offset[1].base(j))}), f"__bc{j}", prot)
 
         def contract(i, j):
             v = f"{c.acc}__v__c{i}_{j}"

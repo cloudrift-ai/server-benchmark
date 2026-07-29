@@ -119,7 +119,7 @@ def _contraction() -> Contraction:
         axes=(Axis("m", 128), Axis("n", 128)),
         k_axis=Axis("k", 256),
         a=a,
-        b_load=b,
+        b=b,
         acc="acc",
         tile=TilePlan.parse("n2/f2"),
     )
@@ -216,7 +216,7 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
         c,
         k_axis=kslice,
         a=replace(c.a, index=tuple(sigma.apply(e) for e in c.a.index)),
-        b_load=replace(c.b_load, index=tuple(sigma.apply(e) for e in c.b_load.index)),
+        b=replace(c.b, index=tuple(sigma.apply(e) for e in c.b.index)),
     )
     carrier = Accum(name="acc", value="acc__v", op=ElementwiseImpl("add")).as_carrier()
     red = Reduction(
@@ -322,7 +322,7 @@ def _pv_contraction(tile: str = "") -> Contraction:
         axes=(Axis("m", 8), Axis("d", 8)),
         k_axis=Axis("j", 8),
         a=cone,
-        b_load=Load(name="v_e", input="V", index=(Var("j"), Var("d"))),
+        b=Load(name="v_e", input="V", index=(Var("j"), Var("d"))),
         acc="oblk",
         tile=TilePlan.parse(tile) if tile else TilePlan(),
     )
@@ -398,3 +398,87 @@ def test_a_composed_step_keeps_its_position_when_flattened() -> None:
     flat = _flatten_nodes(Body((before, _pv_contraction(), after)))
     assert flat[0] is before and flat[-1] is after
     assert any(isinstance(s, Loop) and s.role is AxisRole.CONTRACTION for s in flat[1:-1])
+
+
+# --- the B operand edge: same type as A, asymmetric only in the schedule ------------------------- #
+
+
+def _computed_b_contraction(a_load: bool = True) -> Contraction:
+    """``O[m, n] = Σ_k A[m, k]·B'[k, n]`` where **B is computed**, not a gmem ``Load``:
+    ``B' = exp(W[k, n])`` — the shape a fused per-column prologue takes (qk-norm / RoPE folded into a
+    score, an on-the-fly dequant). The mirror of ``_pv_contraction``'s computed A."""
+    cone = Map(body=Body((Load(name="w_e", input="W", index=(Var("k"), Var("n"))), Assign(name="wn", op="exp", args=("w_e",)))))
+    return Contraction(
+        axes=(Axis("m", 8), Axis("n", 8)),
+        k_axis=Axis("k", 8),
+        a=Load(name="a_e", input="A", index=(Var("m"), Var("k"))) if a_load else cone,
+        b=cone,
+        acc="o",
+        tile=TilePlan(),
+    )
+
+
+def test_both_operand_edges_have_the_same_type() -> None:
+    """A and B are ONE vocabulary: the algebra is symmetric in them, and the asymmetry that is real
+    (A is M-resident and compute-fillable, B is the K×N operand the loop streams) is a SCHEDULE fact
+    that lives in the tier gates, not in the structural type."""
+    from typing import get_type_hints
+
+    hints = get_type_hints(Contraction)
+    assert hints["a"] == hints["b"]
+
+
+def test_computed_b_exposes_the_same_accessors_as_a() -> None:
+    c = _computed_b_contraction()
+    assert c.b_computed and not c.a_computed
+    assert c.b_name == "wn" and c.b_ref is None
+    assert isinstance(c.b_body[0], Load) and c.b_body[-1].op.name == "exp"
+    # Both edges' loaded buffers are external reads; the computed ``wn`` is an internal temp.
+    assert set(c.external_reads()) == {"A", "W"}
+
+
+def test_a_computed_b_has_no_gmem_layout() -> None:
+    """``b_trans`` asks a gmem LAYOUT question, so it is meaningful only for a materialized B. Every
+    tier that would act on the layout gates on ``isinstance(c.b, Load)`` first."""
+    assert _computed_b_contraction().b_trans is False
+
+
+def test_computed_b_lowers_into_the_k_loop() -> None:
+    """The computed B body is spliced into the synthesized ``CONTRACTION`` loop ahead of the ⊗
+    multiply, exactly as a computed A's is — the same ``contraction_loop`` builder, no B-specific
+    path: ``for k: w_e = W[k, n]; wn = exp(w_e); a_e = A[m, k]; o__v = wn·a_e; o += o__v``."""
+    loop = _computed_b_contraction().loop
+    assert loop.role is AxisRole.CONTRACTION and loop.axis.name == "k"
+    body = list(loop.body)
+    exp_i = next(i for i, s in enumerate(body) if isinstance(s, Assign) and s.op.name == "exp")
+    mul_i = next(i for i, s in enumerate(body) if isinstance(s, Assign) and s.op.name == "multiply")
+    acc_i = next(i for i, s in enumerate(body) if isinstance(s, Accum))
+    assert exp_i < mul_i < acc_i
+    assert "wn" in body[mul_i].args  # the ⊗ multiplies the computed B, no gmem B load at the cell
+
+
+def test_computed_b_factorizes_at_the_scalar_tier() -> None:
+    """The widening is not dead vocabulary: the gmem-direct scalar tier genuinely executes a computed
+    B, through the same register-tile replication a computed A rides. The staged / mma tiers decline
+    (they need B's gmem address) — that decline is the schedule's, not the type's."""
+    from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize
+
+    tile = factorize(TileOp(op=_computed_b_contraction()), root=None)
+    exps = [s for s in tile.body.iter_of_type(Assign) if s.op.name == "exp"]
+    assert exps, "the computed B operand (exp of the weight) must survive into the scalar kernel body"
+
+
+def test_both_edges_may_be_computed_at_once() -> None:
+    """Nothing privileges one side: a contraction of two computed operands lowers too."""
+    c = _computed_b_contraction(a_load=False)
+    assert c.a_computed and c.b_computed
+    assert any(isinstance(s, Accum) for s in c.loop.body)
+
+
+def test_a_spliced_b_edge_is_walked_like_any_other_node() -> None:
+    """``tree_nodes`` descends BOTH operand edges — the node walk the binding resolver, the
+    name-uniqueness check and the path enumerators share."""
+    from emmy.compiler.ir.tile.ir import tree_nodes
+
+    c = _computed_b_contraction()
+    assert c.b in list(tree_nodes(c))

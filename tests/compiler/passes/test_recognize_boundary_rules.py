@@ -374,7 +374,7 @@ def test_mlp_gate_up_nodifies_as_two_fold_contraction():
     channels = tile.op.sources
     assert len(channels) == 2 and all(c.a_computed for c in channels)
     assert len({c.a_ref for c in channels}) == 1, "both channels reference ONE bound cone"
-    assert {c.b_load.input for c in channels} == {"wg", "wu"}
+    assert {c.b.input for c in channels} == {"wg", "wu"}
     assert isinstance(tile.op.body[-1], Write)
     assert any(_is_warp_row(r) for r in rows)
     assert not _is_warp_row(rows[0]), "option-0 stays the coop reduce row"

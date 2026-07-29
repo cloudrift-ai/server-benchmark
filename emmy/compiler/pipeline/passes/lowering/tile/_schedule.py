@@ -517,7 +517,7 @@ def _demoted_atoms(kernel, con, group=()) -> tuple[str, ...]:
     relative noise on A — the rounding the model performed anyway in the dominant erased-downcast
     case. (The converse erased-upcast graph — ``w.float()`` on a 16-bit weight — shows B=f32 and
     never triggers this.)"""
-    b_loads = [c.b_load for c in (group or (con,))]
+    b_loads = [c.b for c in (group or (con,))]
     if not b_loads or not all(isinstance(b, Load) for b in b_loads):
         return ()
     b_names = {getattr(getattr(kernel.inputs.get(b.input), "dtype", None), "name", None) for b in b_loads}
@@ -944,8 +944,9 @@ def _resolve_warp_stage(c: Contraction, stage: Stage, budget: int = STATIC_SMEM_
     # (its fill closure carries the extra index dims verbatim), so it never gated on rank.
     tma_rank_ok = (
         isinstance(c.a, Load)
+        and isinstance(c.b, Load)  # a descriptor needs a gmem address on BOTH edges
         and _tma_operand_rank_ok(c.a.index, m.axis.name, c.k_axis.name)
-        and _tma_operand_rank_ok(c.b_load.index, n.axis.name, c.k_axis.name)
+        and _tma_operand_rank_ok(c.b.index, n.axis.name, c.k_axis.name)
     )
     # TMA hardware: every box dim must be 1..256 — the slot shapes are A (tile_m, bk) / B (bk,
     # tile_n), so an oversized warp register tile (e.g. tile_m = 512 at w4/f8) must decline TMA
@@ -994,12 +995,15 @@ def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = ST
     # serving fork rides it).
     if c.n.mask or c.b_trans:
         return None
-    if not inputs or c.a.input not in inputs:
+    # Staging transports a gmem OPERAND: both edges must be materialized. A computed B (a fused
+    # per-column prologue) has no gmem address to copy from, so the tier declines and the node stays
+    # gmem-direct — the schedule stating the A/B asymmetry the structural type does not.
+    if not inputs or not isinstance(c.a, Load) or not isinstance(c.b, Load) or c.a.input not in inputs:
         return None
     # TMA's box encodes extra leading (batch) dims as extent-1 dims when they are tile/K-invariant
     # (:func:`_tma_operand_rank_ok`); cp.async's fill closure carries them verbatim, no rank gate.
     if stage.transport == "tma" and not (
-        _tma_operand_rank_ok(c.a.index, c.m.axis.name, c.k_axis.name) and _tma_operand_rank_ok(c.b_load.index, c.n.axis.name, c.k_axis.name)
+        _tma_operand_rank_ok(c.a.index, c.m.axis.name, c.k_axis.name) and _tma_operand_rank_ok(c.b.index, c.n.axis.name, c.k_axis.name)
     ):
         return None
     # Staging needs the CTA to BE one (tile_m × tile_n) output tile (the cooperative fill / drain
@@ -1028,7 +1032,7 @@ def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = ST
     # Per-operand slot bytes: A's slab is (tile_m × bk) at A's element size, B's (bk × tile_n) at
     # B's — the operands may differ (fp32 split partials × fp16 weights), so sizing both with A's
     # element over-books the budget on the mixed shape.
-    b_bytes = inputs[c.b_load.input].dtype.nbytes if c.b_load.input in inputs else elem_bytes
+    b_bytes = inputs[c.b.input].dtype.nbytes if c.b.input in inputs else elem_bytes
     depth, bk_elems = max(1, stage.depth), 0
     while depth >= 1:
         cap = budget // (depth * max(1, c.m.tile * elem_bytes + c.n.tile * b_bytes))
@@ -1259,7 +1263,7 @@ def _contraction_node(node, place, tile_plan: TilePlan, bindings: dict | None = 
                 axes=(grid[-2], grid[-1]),
                 k_axis=reduce_loop(node, bindings).axis,
                 a=a_load if isinstance(a_load, Load) else bind_cone(a_load, reduce_loop(node, bindings).axis.name, bindings or {}),
-                b_load=b_load,
+                b=b_load,
                 acc=acc,
                 tile=tile_plan,
                 lead_axes=tuple(grid[:-2]),
@@ -1339,6 +1343,12 @@ def _splitk_option(
                 f"split-K slice K={ks} (K/{w}) is not a multiple of the mma K-step {step} "
                 f"(atom_k={wt.atom.atom_k}·bk={wt.bk}); pick a split width whose slice is divisible."
             )
+    # Every channel's B is σ-reindexed to its K slice below, which needs a gmem index to rewrite. A
+    # computed B would have to slice its producing subtree instead (the mirror of the cone's
+    # redundant-statistic split); nothing builds one yet, so the option declines rather than
+    # silently slicing the wrong operand.
+    if any(c.b_computed for c in group):
+        raise ValueError("split-K needs a materialized B on every channel — a computed B has no gmem index to σ-reindex")
     ksplit, kslice, sigma = _factor_k(inner.k_axis, w)
     if inner.a_computed:
         # REDUNDANT-STATISTIC split: the leading k-invariant run of the cone (the per-row stat
@@ -1354,16 +1364,14 @@ def _splitk_option(
         # the split trades for parallelism). Only the cone's ``body``, the per-cell normalize, is
         # σ-reindexed to absolute k. No stmt scan: the K seam is the node boundary.
         binds[inner.a_ref] = replace(cone, body=Body(tuple(s.rewrite(lambda nm: nm, sigma) for s in cone.body)))
-        group = tuple(
-            replace(c, k_axis=kslice, b_load=replace(c.b_load, index=tuple(sigma.apply(e) for e in c.b_load.index))) for c in group
-        )
+        group = tuple(replace(c, k_axis=kslice, b=replace(c.b, index=tuple(sigma.apply(e) for e in c.b.index))) for c in group)
     else:
         group = tuple(
             replace(
                 c,
                 k_axis=kslice,
                 a=replace(c.a, index=tuple(sigma.apply(e) for e in c.a.index)),
-                b_load=replace(c.b_load, index=tuple(sigma.apply(e) for e in c.b_load.index)),
+                b=replace(c.b, index=tuple(sigma.apply(e) for e in c.b.index)),
             )
             for c in group
         )
@@ -1974,7 +1982,7 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
         axes=(m_ax, n_ax),
         k_axis=k_ax,
         a=bind_cone(list(cone), k_ax.name, binds),
-        b_load=loads[b_name],
+        b=loads[b_name],
         acc=acc.name,
         tile=wt,
         lead_axes=tuple(grid[:-2]),
@@ -2187,7 +2195,7 @@ def _twisted_warp_options(
             and not any(kv_name in e.free_vars() for e in (*idx[:-2], idx[-1]))
         )
 
-    tma_ok = tma_ok and _kv_penultimate(head.b_load) and _kv_penultimate(pv.b_load)
+    tma_ok = tma_ok and _kv_penultimate(head.b) and _kv_penultimate(pv.b)
     # The fragment loaders step gmem rows at the buffer's REAL row stride, derived from the load
     # index + buffer shape (``gmem_row_stride`` — H·D on an un-transposed (B, S, H, D) trace,
     # where the old trailing-extent assumption read the wrong rows: the gemma layer-0 NaN).
@@ -2195,8 +2203,8 @@ def _twisted_warp_options(
     # trailing extent) have no fragment realization — decline the tier.
     strides = (
         gmem_row_stride(head.a, m_name, tile.inputs),
-        gmem_row_stride(head.b_load, head.n_axis.name if head.b_trans else head.k_axis.name, tile.inputs),
-        gmem_row_stride(pv.b_load, pv.n_axis.name if pv.b_trans else kv_name, tile.inputs),
+        gmem_row_stride(head.b, head.n_axis.name if head.b_trans else head.k_axis.name, tile.inputs),
+        gmem_row_stride(pv.b, pv.n_axis.name if pv.b_trans else kv_name, tile.inputs),
     )
     if any(s is None for s in strides):
         return []
@@ -2308,7 +2316,7 @@ def _twisted_warp_options(
             return getattr(getattr(t, "dtype", None), "name", None)
 
         b_dt = atom.operand_dtype("b").name
-        kv_stage_ok = _buf_dtype_name(head.b_load) == b_dt and _buf_dtype_name(pv.b_load) == b_dt
+        kv_stage_ok = _buf_dtype_name(head.b) == b_dt and _buf_dtype_name(pv.b) == b_dt
         q_stage_ok = _buf_dtype_name(head.a) == atom.operand_dtype("a").name
         stage_cands = (
             [None]

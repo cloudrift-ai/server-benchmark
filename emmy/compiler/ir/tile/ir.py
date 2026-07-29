@@ -193,7 +193,7 @@ class Fold(Stmt):
 
     def __post_init__(self) -> None:
         if not isinstance(self.step, Body):
-            object.__setattr__(self, "partial", Body.coerce(self.step))
+            object.__setattr__(self, "step", Body.coerce(self.step))
 
     @classmethod
     def from_loop(cls, loop: Loop) -> Fold:

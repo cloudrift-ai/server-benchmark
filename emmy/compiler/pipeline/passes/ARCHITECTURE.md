@@ -53,15 +53,17 @@ The same invariant applies *across* the tile→kernel boundary: the kernel mater
 the tile IR already holds. The **atomize** step (`lowering/tile/_atomize.py`, called from the `_schedule` helper inside `010_recognize` when it builds
 the warp / register-tiled option — *not* a standalone pass) resolves the algebra→hardware-atom binding once at fork-emit
 and feeds it into the `Contraction` structural node (`_schedule._contraction_node`), so materialize reads the operands /
-`acc` / epilogue off the node and only `factorize`s. Resolving it at option-build time means an atom that **cannot** be
+`acc` off the node and only `factorize`s (the projection is peeled off the wrapping `Map` — its one home). Resolving it
+at option-build time means an atom that **cannot** be
 bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is rejected at fork construction, alongside
 `_check_warp_static_k`, instead of failing several passes later:
 
-- a `CONTRACTION` contraction → the `(a_operand, b_load, acc, epilogue)` operand→role facts
+- a `CONTRACTION` contraction → the `(a, b_load, acc, projection)` operand→role facts
   (`_atomize.bind_contraction`): the operands are named by the ⊗ **lift** (the `Assign` the fold accumulates) — B is its
   (n, k)-indexed `Load`, A is the lift's other argument, either a plain `Load` (clean gmem-direct) or, when loop fusion
-  has inlined an operand cone, the cone itself as a `Body` (a STAT-FREE computed A, which rides the `sync` compute-fill
-  like the norm→linear cone but carries no statistic prologue) — plus the fold accumulator and the projection epilogue.
+  has inlined an operand cone, the cone as a `Map` NODE the caller binds into `TileOp.bindings` and the contraction
+  references by name (a STAT-FREE computed A, which rides the `sync` compute-fill like the norm→linear cone but carries
+  no statistic prologue) — plus the fold accumulator and the projection.
   Binding off the lift rather than off "the first (m, k)-indexed `Load`" is load-bearing: a cone-INTERNAL load is
   (m, k)-indexed too, so the positional rule bound gemma's GeGLU combine as `gate @ W` and silently dropped the gelu and
   the up projection. Refusing to bind a stat-free cone at all is equally wrong — it demotes the cell to a PLANAR
@@ -108,9 +110,14 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
 - the **MONOID-producer composition** — the fused norm→linear edge and its N-channel form, the gate/up MLP edge —
   binds at recognize time too (`_atomize.bind_prologue_contraction`, structure-only): a projecting `Map` over a
   per-row `PLANAR` statistic whose tail is one or more ⊗-folds of one shared A value nodifies to
-  `Map(body=projection, source=Contraction)` — the computed-A `Contraction` carrying the statistic prologue in its A
-  cone and the `(B, acc)` channels on `folds` (a product-monoid fold: channels never interact per step; the combine
-  — SwiGLU — is projection, riding the wrapping `Map.body`). `010_recognize` schedules it as a fork SIBLING of the
+  `Map(body=projection, sources=(Contraction, …))` — one computed-A `Contraction` per ⊗-fold channel, all
+  REFERENCING one bound A cone in `TileOp.bindings` (itself a node tree: the statistic is the cone's `Reduction`
+  source, the per-cell normalize its `Map` body). Sharing the operand is the structural FACT; scheduling and lowering
+  the siblings as ONE unit (one `TilePlan`/`Stage`/`ReducePlan` row, `ops.group_loop`'s single derived fold loop and
+  N-component product-monoid carrier) is the DECISION that follows — a product-monoid fold: channels never interact
+  per step; the combine — SwiGLU — is projection, riding the wrapping `Map.body`. Channels whose B layouts disagree
+  were never legally fusable, so they simply never group (a group-formation gate, not a node assert).
+  `010_recognize` schedules it as a fork SIBLING of the
   cooperative reduce form (option-0 stays the coop row; the warp mma rows ride the mandatory `sync` compute-fill;
   dtype / geometry legality stays schedule-side in `_computed_a_rows`). This retired the pin-only
   `_prologue_warp_option` rescue. The **degenerate M=1** composition (per-token decode: the unit row axis elided,

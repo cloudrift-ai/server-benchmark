@@ -296,24 +296,32 @@ Goal: the target IR above, with recognition/scheduling/materialization producing
 
 Sub-steps, in landing order:
 
-1a. **Vocabulary first, no behavior change**: introduce `TileOp.bindings` (out-name-keyed) + `Map.sources`
-    + the tree-wide name-uniqueness validation, and thread binding-name resolution through the shared
-    walkers (`lower`, `_flatten_nodes`, `pretty`, role/carrier readers, `rewrite`/`structural_key` — the
-    rewrite rename map covers binding keys). Nothing produces bindings yet; all tests must pass untouched.
-1b. **Recognize-side flip**: the contraction nodifier emits binding + sibling group instead of stacking
-    fold channels; the cone is nodified (with the bare-resolution guard from the codec design — decide the
-    guard's mechanism here even though the codec lands later, so spellings never shift twice); the
-    scheduler stamps one shared row per fused group; `b_trans` becomes a group-formation gate. Retire
-    `Contraction.epilogue` and `TileOp.tier`/`stage` in this step — they are recognize/schedule-side
-    concepts and moving them later would mean touching the same call sites twice.
-1c. **Materialize/split**: factorization reads the group off `Map.sources` + shared-name identity (one A
-    fragment, N mma chains, one C fragment per channel — unchanged emission); the split pass derives the
-    N-component carrier from the group. Re-run the #389 multichannel-split A/B — it was correct-but-null
-    under the bespoke encoding and may flip once the split is structural.
-1d. **Composition + windowing unification (required)**: `Reduction.source` → head-of-partial (one
-    composition rule); `Reduction.offset`/`bound` + `Axis.source_axis`/`real_extent` → one slice/window
-    representation. Both are no-duplication invariant items; the windowing half is orthogonal to sharing
-    and may land as its own commit at the end of the phase.
+1a. **Vocabulary first, no behavior change** — LANDED. `TileOp.bindings` (out-name-keyed) + `Map.sources`
+    + construction-time validation, and binding-name resolution threaded through the shared walkers
+    (`ops.resolve` inlines every name operand ahead of `lower` / `pretty` / `reduce_loop` / `axis_role`;
+    the rewrite rename map covers references). NOTE: the uniqueness check is scoped to the BINDING NAMES,
+    not every SSA name — loop IR legitimately binds one name from several stmts (a fold's `Init` seed plus
+    its `Accum` steps; split-K's outer reduce folding its inner contraction's accumulator), and what a
+    reference needs is only that its own name be defined in exactly one place.
+1b. **Recognize-side flip** — LANDED except `TileOp.stage`. The cone is nodified into a binding
+    (`Map(body=per-cell normalize, sources=(Reduction(stat),))`) and every computed A — the fused edge, the
+    plain cone, the mixed-dtype demotion, flash's `P` — references it by name; the contraction nodifier
+    emits N sibling `Contraction`s over that one reference instead of stacking fold channels; the scheduler
+    stamps one shared row per group; `b_trans` is a group-formation gate. `Contraction.epilogue` and the
+    (dead) `TileOp.tier` are retired. STILL OPEN: `TileOp.stage` — it is live (read by `_factor` / `_twist`
+    through `Ctx`), so moving it onto the `Contraction` / `Reduction` it decorates needs the `rewrite`
+    handler to keep it OUT of the canonicalized copy, or `op_cache_key` shifts for every staged flash
+    kernel (whose per-node stage would enter the digest) and stored evidence stops matching.
+1c. **Materialize/split** — LANDED. `_factor` binds the group as one unit (`_AtomOps.siblings`: one A
+    fragment, N mma chains, one C fragment per channel — unchanged emission) and `030_split_reduce` splits
+    the group, deriving the N-component carrier from `ops.group_loop`. STILL OPEN: re-run the #389
+    multichannel-split A/B — correct-but-null under the bespoke encoding, it may flip now that the split is
+    structural (needs GPU bench time on the gemma gate-up shapes).
+1d. **Composition + windowing unification (required)** — composition LANDED (`Reduction.source` retired; a
+    composed reduce puts the node in `partial`, and "is this a bare statistic reduce?" is the structural
+    negation). STILL OPEN: `Reduction.offset`/`bound` + `Axis.source_axis`/`real_extent` → one slice/window
+    representation. Orthogonal to the sharing work and touching the flash split-KV mask/guard emitters, so
+    it wants its own commit.
 
 Done when: `make test` green; unit tests cover binding-reference round-trip through rewrite/structural-key
 (name uniqueness violations + dangling references rejected at construction; two references to

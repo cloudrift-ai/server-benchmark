@@ -55,7 +55,7 @@ def op_cache_key(op: object) -> str | None:
             from emmy.compiler.ir.stmt.body import Body  # noqa: PLC0415
             from emmy.compiler.ir.tile.ops import lower  # noqa: PLC0415
 
-            body = Body(lower(op.op, op.bindings)) if op.op is not None else Body(())
+            body = Body(lower(op.op)) if op.op is not None else Body(())
         else:
             body = op.body
         return digest(type(op).__name__, body.structural_key(), knob_key)

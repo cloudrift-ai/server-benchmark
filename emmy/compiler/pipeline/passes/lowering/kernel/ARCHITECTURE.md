@@ -48,9 +48,9 @@ the inbound `wires` (flash's score fragment feeding P@V's A operand).
 
 The `Contraction` node is **one flat** Stmt — binding-driven for both atoms, with **no per-atom subclass** — that cleanly
 splits the **algebra params** (what to contract: the m/n output `axes` + the `k_axis`, the leading batch `lead_axes`, the
-two operand edges `a` and `b` — each a gmem `Load` (materialized), the NAME of a let-bound cone in `TileOp.bindings`
-(shared; spliced onto the edge by `ops.resolve` before any lowering walk), or the computed node itself (flash PV's
-`P = exp(S − M)`, produced from an in-register score, not a gmem address) — and the fold accumulator `acc`; a projection
+shared `a` operand edge plus the product `channels` `(b_i, acc_i)` — every edge a gmem `Load` (materialized) or the
+computed node itself, stored inline (flash PV's
+`P = exp(S − M)`, produced from an in-register score, not a gmem address); a projection
 is NEVER a node field, its one home is the wrapping `Map.body`. The edges share ONE type: the A/B asymmetry that is real
 — A is M-resident and compute-fillable, B is the K×N operand the loop streams — is a SCHEDULE fact, so each staged /
 mma tier states `isinstance(c.b, Load)` as an eligibility precondition and declines a computed B to gmem-direct)
@@ -237,7 +237,7 @@ from `bk_elems`, drained by the plain no-`.trans` ldmatrix — the per-thread pe
 served fused edges' weight-stream deficit); when a two-slot ring also fits the smem budget the
 stage resolves at `depth=2` and the prefetched chunk's B copies stay in flight across the current chunk's drain. A
 **reduce-bearing (MONOID) cone** — the fused norm→linear edge — is nodified at RECOGNIZE time
-(`_atomize.bind_prologue_contraction`; real fork rows, not a pin rescue): the A cone is a let-bound node tree whose
+(`_atomize.bind_prologue_contraction`; real fork rows, not a pin rescue): the A cone is an inline node tree whose
 SOURCE is the row-invariant prologue (the per-row statistic) and whose `body` is the per-cell normalize, so the K seam
 IS the node boundary — read by `ops.cone_seam` in `_sync_operands` — and the prologue runs ONCE per tile row as the
 transport prologue
@@ -245,8 +245,8 @@ transport prologue
 the carrier's shuffle butterfly (`emit_combine`), lane 0 writing the bridged stat into its smem row; one barrier);
 the per-cell compute-fill reads the bridged values back from the stat rows. Geometry: exact cover on N/K only — a
 masked / symbolic **M** clamp-reads (the A / stat-prologue σ ride `_clamp_last`; the overhang store is discarded by
-the `RegStore` guard). A **fused sibling group** (the gate/up MLP edge — N sibling `Contraction`s under one
-`Map.sources`, each naming the ONE shared bound cone; `_AtomOps.siblings`) fills one B slab per channel, drains N
+the `RegStore` guard). A **multi-channel product node** (the gate/up MLP edge — N `(b, acc)` channels over the ONE
+shared inline cone; `_AtomOps.channels` reads them off the node) fills one B slab per channel, drains N
 mma chains off the ONE ldmatrix'd A fragment
 into per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the channels per element in the
 store's `RegEpilogue` (`extra_accs`).

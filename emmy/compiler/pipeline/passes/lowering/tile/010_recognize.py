@@ -40,9 +40,9 @@ step unconditional — no knobs):
    statistic's scalar epilogue + a fresh free (column) ``Loop`` over one or more ⊗-folds of ONE
    shared A value reading the statistic (the fused norm→linear edge ``rmsnorm(x)·nw @ w``; its
    N-channel form the gate/up MLP edge ``swiglu(x̂@Wg, x̂@Wu)`` — a product-monoid fold) ALSO
-   nodifies to ``Map(body=projection, sources=(Contraction, …))``: one computed-A
-   :class:`Contraction` per ⊗-fold channel, all referencing ONE bound A cone (a real node tree —
-   the per-row statistic its ``Reduction`` source) — the fused sibling group
+   nodifies to ``Map(body=projection, sources=(Contraction,))``: ONE computed-A product
+   :class:`Contraction` with a :class:`Channel` per ⊗-fold, the A cone stored inline on its edge
+   (a real node tree — the per-row statistic its ``Reduction`` source)
    (``_atomize.bind_prologue_contraction``, structure-only), its column axis joining the grid.
    Both forms are scheduled and merged into ONE fork — the reduce rows first (option-0 stays
    the conservative coop pick), then the Contraction form's warp (mma) rows over the ``sync``
@@ -65,15 +65,14 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import Stmt
-from emmy.compiler.ir.tile import Contraction, Map, Placement, Reduction, TileOp, TilePlan
-from emmy.compiler.ir.tile.ops import resolve
+from emmy.compiler.ir.tile import Channel, Contraction, Map, Placement, Reduction, TileOp, TilePlan
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import Fork
 
 # NOTE: no ``Knob`` objects (``TILE`` / ``REDUCE`` / ``STAGE``) may be imported here — ``Pass.load``
 # scans rule modules for ``Knob`` attrs and OFF-fills any it finds bare onto every variant of the
 # pass. Pin reads / knob-key spelling ride the ``_schedule`` helpers instead.
-from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_cone, bind_contraction, bind_prologue_contraction, map_cone
+from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction, bind_prologue_contraction, make_cone, map_cone
 from emmy.compiler.pipeline.passes.lowering.tile._flash import is_flash_score_producer, try_flash
 from emmy.compiler.pipeline.passes.lowering.tile._schedule import prologue_knob_bases, schedule, warp_tile_pinned
 from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse
@@ -263,7 +262,7 @@ def _lift_cell(cell: list[Stmt], free: list, output: str) -> Map | Reduction:
     return Map(body=(annotated, *projection))
 
 
-def _nodify_contraction(node, free: tuple, bindings: dict):
+def _nodify_contraction(node, free: tuple):
     """Nodify a freshly-lifted flat ``CONTRACTION`` ``Map`` into the :class:`Contraction`
     structural node with a **deferred** per-cell ``TilePlan()`` (the schedule fork re-tiles it),
     resolving the operand→role binding ONCE, recognize-side (:func:`bind_contraction` over the
@@ -272,8 +271,8 @@ def _nodify_contraction(node, free: tuple, bindings: dict):
     already the additive fold, so it becomes an ordinary :class:`Reduction` (gaining the
     cooperative / ILP partitions a per-cell serial fold never offered). After this step no flat
     ``Map`` carries an annotated ``CONTRACTION`` loop — the scheduler and materializer read
-    contraction structure only off the node. A computed-A cone is registered in ``bindings`` and
-    referenced by name (:func:`bind_operand`)."""
+    contraction structure only off the node. A computed-A cone is stored INLINE on the ``a`` edge
+    (:func:`make_cone`)."""
     if not isinstance(node, Map) or node.source is not None or len(node.body) == 0:
         return node
     rloop = node.body[0]
@@ -289,9 +288,8 @@ def _nodify_contraction(node, free: tuple, bindings: dict):
             con = Contraction(
                 axes=(free[-2], free[-1]),
                 k_axis=rloop.axis,
-                a=a_load if isinstance(a_load, Load) else bind_cone(a_load, rloop.axis.name, bindings),
-                b=b_load,
-                acc=acc,
+                a=a_load if isinstance(a_load, Load) else make_cone(a_load, rloop.axis.name),
+                channels=(Channel(b=b_load, acc=acc),),
                 tile=TilePlan(),
                 lead_axes=tuple(free[:-2]),
             )
@@ -302,14 +300,13 @@ def _nodify_contraction(node, free: tuple, bindings: dict):
     return Map(body=projection, sources=(red,)) if len(projection) else red
 
 
-def _demote_planar(node, bindings: dict):
+def _demote_planar(node):
     """The PLANAR-demoted sibling of a computed-A :class:`Contraction` whose contraction form
     yielded no legal schedule row (fp32 / no atoms / bad geometry — the scheduler's
     never-a-raising-row guardrail returns ``[]``): flatten the node back through its synthesized
     fold ``Loop`` and re-annotate it ``PLANAR`` — the same demotion :func:`_nodify_contraction`
-    applies to an unbindable cell, applied post-nodification. The demotion INLINES any bound cone
-    (the fold recomputes it per cell), so the fallback carries no bindings."""
-    node = resolve(node, bindings)
+    applies to an unbindable cell, applied post-nodification. The demotion flattens the inline
+    cone into the fold body (recomputed per cell)."""
     src = node.source if isinstance(node, Map) else node
     rloop = src.loop
     demoted = Loop(axis=rloop.axis, body=rloop.body, unroll=rloop.unroll, role=AxisRole.PLANAR, carrier=rloop.carrier)
@@ -318,7 +315,7 @@ def _demote_planar(node, bindings: dict):
     return Map(body=projection, sources=(red,)) if len(projection) else red
 
 
-def _lift(stmts: list[Stmt], output: str, bindings: dict) -> tuple[Map | Reduction | Contraction, tuple]:
+def _lift(stmts: list[Stmt], output: str) -> tuple[Map | Reduction | Contraction, tuple]:
     """Peel the free axes and lift the per-cell compute, returning ``(root node, free
     axes)``. The free axes are the schedule's (carried on the ``TileOp``, not the node);
     ``_schedule`` (inside ``010_recognize``) maps them onto the grid. A ``CONTRACTION`` cell
@@ -327,7 +324,7 @@ def _lift(stmts: list[Stmt], output: str, bindings: dict) -> tuple[Map | Reducti
     free, cell = _peel(Body(tuple(stmts)))
     node = _lift_cell(cell, free, output)
     free = _order_free_by_output(node, free)
-    return _nodify_contraction(node, free, bindings), free
+    return _nodify_contraction(node, free), free
 
 
 def _order_free_by_output(node: Map | Reduction, free: list) -> tuple:
@@ -385,10 +382,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     # (3) Online softmax — the sibling-fold tupling: fuse the adjacent (rowmax, Σexp) reduce
     # pair into one streaming pass.
     fused, _ = _fuse(loop.body)
-    # The let table this kernel's shared subtrees live in — a computed-A cone is bound here and
-    # referenced by name from the node that reads it (:func:`bind_operand`).
-    binds: dict = {}
-    node, free = _lift(list(fused), root.output.name, binds)
+    node, free = _lift(list(fused), root.output.name)
     # A symbolic FREE (parallel) axis rides a **symbolic grid**: the ``Tile`` decode sizes the
     # launch from the runtime extent (``_gid < ∏extents``, the ``Dim`` name threaded as an
     # ``int`` arg by the cuda lowering) — the dynamic-grid tier. A symbolic REDUCE /
@@ -402,7 +396,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     # ``inputs`` is seeded from the matched ``LoopOp`` (the matcher populated its real Tensors) so
     # the scheduler can read operand shapes (the shared-row stage detection); the matcher refreshes
     # it from the graph again when a later pass matches the scheduled op.
-    map_tile = TileOp(op=node, place=Placement(free=free), inputs=dict(loop.inputs), bindings=binds)
+    map_tile = TileOp(op=node, place=Placement(free=free), inputs=dict(loop.inputs))
     pro = bind_prologue_contraction(node, free)
     if pro is None:
         rows = _as_list(schedule(map_tile, loop.name, knob_base, ctx))
@@ -414,14 +408,14 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
             # (the merged-sibling gate/up edge on the fp32 symbolic Qwen path was the first shape
             # to hit it). Demote it back to its PLANAR reduce so the kernel still compiles: the
             # pre-nodification fallback, a working serial/coop fold.
-            fallback = TileOp(op=_demote_planar(node, binds), place=Placement(free=free), inputs=dict(loop.inputs))
+            fallback = TileOp(op=_demote_planar(node), place=Placement(free=free), inputs=dict(loop.inputs))
             return schedule(fallback, loop.name, knob_base, ctx)
         return rows if len(rows) > 1 else rows[0]
     # (4) The MONOID-producer composition — the fused norm→linear edge (``rmsnorm(x)·nw @ w``, and
     # its N-channel form, the gate/up MLP edge): the tail fold(s) ALSO nodify to
-    # ``Map(body=projection, sources=(Contraction, …))`` — one computed-A :class:`Contraction` per
-    # ⊗-fold channel over ONE bound A cone (:func:`bind_prologue_contraction`), its column axis
-    # joining the grid. Both forms are
+    # ``Map(body=projection, sources=(Contraction,))`` — ONE computed-A product :class:`Contraction`
+    # with a channel per ⊗-fold, its A cone inline (:func:`bind_prologue_contraction`), its column
+    # axis joining the grid. Both forms are
     # scheduled and their candidates merged into ONE fork: the reduce-``Map`` rows first (the
     # cooperative / serial tiers — option-0 stays the conservative coop pick, lowerable
     # everywhere), then the Contraction form's warp (mma) rows (the sync compute-fill tier — zero
@@ -430,11 +424,11 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     # cold greedy pick past the pin). Each form's rows carry the OTHER form's family keys as
     # decided-empty stamps, so every leaf row spells the same key set (the evidence pick's
     # prefix-consistency: an absent key reads as "free").
-    c_map, n_ax, con_binds = pro
-    src = c_map.sources[0]  # the group's primary channel — every channel shares one k axis / cone
+    c_map, n_ax = pro
+    src = c_map.sources[0]  # the ONE product node — its channels share one k axis / cone
     # The cone's source node IS the row-invariant prologue; ITS source is the statistic reduce.
-    con_base, map_base = prologue_knob_bases(src.k_axis.name, con_binds[src.a_ref].source.source.axis.name)
-    con_tile = TileOp(op=c_map, place=Placement(free=(*free, n_ax)), inputs=dict(loop.inputs), bindings=con_binds)
+    con_base, map_base = prologue_knob_bases(src.k_axis.name, src.a.source.source.axis.name)
+    con_tile = TileOp(op=c_map, place=Placement(free=(*free, n_ax)), inputs=dict(loop.inputs))
     con = _as_list(schedule(con_tile, loop.name, {**knob_base, **con_base}, ctx))
     if con and warp_tile_pinned():
         return con if len(con) > 1 else con[0]

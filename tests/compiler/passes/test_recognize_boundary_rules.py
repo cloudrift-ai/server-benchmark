@@ -283,43 +283,44 @@ def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
 def test_norm_linear_warp_pick_is_computed_a_contraction():
     """Picking a warp row materializes the recognize-built ``Map(body=projection, source=node)``
     tree — the same ``project ∘ contract`` spelling the Reduction tiers use: the source is a
-    computed-A :class:`Contraction` REFERENCING its A cone by name, the bound cone a real node tree
-    (``Map(body=per-cell normalize, sources=(Reduction(stat),))``), one fold channel, its (m, n)
+    computed-A :class:`Contraction` holding its A cone INLINE, a real node tree
+    (``Map(body=per-cell normalize, sources=(Reduction(stat),))``), one channel, its (m, n)
     output on the grid (the column axis joined); the ``Map`` body carries the ``Write``; and the knob
-    stamps the DB rows key on (``PLACE@cone`` + the decided-empty stat ``REDUCE``)."""
+    stamps the DB rows key on (``PLACE@cone`` + the decided-empty stat ``REDUCE``). Xfail-parked on
+    the PLACE wipe — the ``PLACE@cone`` stamp returns with the phase-4 realizer."""
     _, tile = _resolve(_norm_linear_graph(), pick=_is_warp_row)
     assert isinstance(tile.op, Map)
     c = tile.op.source
     assert isinstance(c, Contraction) and c.a_computed and len(tile.op.sources) == 1
-    stat_loop = tile.bindings[c.a_ref].source.loop
+    stat_loop = c.a.source.source.loop
     assert isinstance(stat_loop, Loop) and stat_loop.is_reduce and stat_loop.role is AxisRole.PLANAR
     assert [a.extent.as_static() for a in c.axes] == [32, 3072]
     assert c.axes[0].name == tile.place.grid[-2].name and c.axes[1].name == tile.place.grid[-1].name
-    assert len(c.epilogue) == 0 and [type(s) for s in tile.op.body] == [Write]
+    assert len(c.channels) == 1 and [type(s) for s in tile.op.body] == [Write]
     assert {"x", "wn", "w"} <= set(c.external_reads())
-    assert tile.stage is not None and tile.stage.transport == "sync" and tile.stage.bk_elems > 0
+    assert c.stage is not None and c.stage.transport == "sync" and c.stage.bk_elems > 0
     assert tile.knobs.get("PLACE@cone") == "fuse"
     assert tile.knobs.get(f"REDUCE@{stat_loop.axis.name}") == ""
     assert tile.knobs.get(f"TILE@{c.k_axis.name}", "").startswith("a:")
     assert tile.knobs.get(f"STAGE@{c.k_axis.name}") == "d1/sync"
 
 
-def test_norm_linear_cone_is_a_bound_node_tree():
-    """The computed-A cone lives ONCE, in ``TileOp.bindings``, as a real node tree: its SOURCE is the
-    row-invariant prologue — the per-row statistic (a projected reduce over the stat
+def test_norm_linear_cone_is_an_inline_node_tree():
+    """The computed-A cone lives ONCE, inline on the ``a`` edge, as a real node tree: its SOURCE is
+    the row-invariant prologue — the per-row statistic (a projected reduce over the stat
     :class:`Reduction`) plus any k-invariant cone prefix — and its ``body`` is the per-cell
     normalize. The K seam is therefore the NODE BOUNDARY: ``ops.cone_seam`` reads it instead of
     re-scanning stmts for "the maximal leading run that never indexes K", and the statistic is
-    addressable (and later cuttable) in its own right. Lowering inlines the whole thing back to the
+    addressable (and later cuttable) in its own right. Lowering flattens the whole thing back to the
     identical ``[stat loop, …, cone]`` stmt run."""
     from emmy.compiler.ir.tile.ir import _refs_axis
-    from emmy.compiler.ir.tile.ops import cone_seam, lower, resolve
+    from emmy.compiler.ir.tile.ops import cone_seam, lower
 
     _, tile = _resolve(_norm_linear_graph(), pick=_is_warp_row)
     c = tile.op.source
-    assert c.a_ref is not None and set(tile.bindings) == {c.a_ref}
-    cone = tile.bindings[c.a_ref]
-    assert isinstance(cone, Map) and cone.out == c.a_ref
+    assert c.a_computed
+    cone = c.a
+    assert isinstance(cone, Map) and cone.out == c.a_name
     assert cone.source.source.role is AxisRole.PLANAR, "the statistic reduce is the prologue's source"
     # The seam IS the boundary: prologue row-invariant, body k-varying, stats the bridged values.
     pro, cell, stats = cone_seam(cone)
@@ -327,8 +328,8 @@ def test_norm_linear_cone_is_a_bound_node_tree():
     assert not any(_refs_axis(s, c.k_axis.name) for s in pro), "the prologue never indexes K — it runs once per row"
     assert any(_refs_axis(s, c.k_axis.name) for s in cell), "the per-cell body is the k-varying remainder"
     assert stats, "the statistic bridges through the stat smem rows"
-    # Resolution reproduces the operand body verbatim: the stat loop, its sweep, then the cone.
-    assert resolve(c, tile.bindings).a_body == tuple(lower(cone)) == (*pro, *cell)
+    # The operand body is the flattened cone verbatim: the stat loop, its sweep, then the cone.
+    assert c.a_body == tuple(lower(cone)) == (*pro, *cell)
 
 
 def test_norm_linear_fp32_keeps_map_rows_only():
@@ -362,19 +363,17 @@ def _mlp_gate_up_graph() -> Graph:
     return g
 
 
-def test_mlp_gate_up_nodifies_as_two_fold_contraction():
+def test_mlp_gate_up_nodifies_as_two_channel_product_contraction():
     """The fused gate/up MLP edge — TWO ⊗-folds sharing one normalized-row A value (fusion
     duplicates the cone SSA per fold; the matcher dedupes by value-tree equality) with the SwiGLU
-    combine as projection — nodifies to ``Map(body=combine…Write, sources=(Contraction, Contraction))``,
-    the product-monoid fold as a FUSED SIBLING GROUP over one bound cone, and offers warp sync rows."""
-    from emmy.compiler.ir.tile.ops import is_group
-
+    combine as projection — nodifies to ``Map(body=combine…Write, sources=(Contraction,))``: ONE
+    product-carrier contraction, two ``(b, acc)`` channels over its single inline A cone (sharing
+    is arity), and offers warp sync rows."""
     rows, tile = _resolve(_mlp_gate_up_graph(), pick=_is_warp_row)
-    assert isinstance(tile.op, Map) and is_group(tile.op)
-    channels = tile.op.sources
-    assert len(channels) == 2 and all(c.a_computed for c in channels)
-    assert len({c.a_ref for c in channels}) == 1, "both channels reference ONE bound cone"
-    assert {c.b.input for c in channels} == {"wg", "wu"}
+    assert isinstance(tile.op, Map) and len(tile.op.sources) == 1
+    node = tile.op.source
+    assert len(node.channels) == 2 and node.a_computed
+    assert {ch.b.input for ch in node.channels} == {"wg", "wu"}
     assert isinstance(tile.op.body[-1], Write)
     assert any(_is_warp_row(r) for r in rows)
     assert not _is_warp_row(rows[0]), "option-0 stays the coop reduce row"
@@ -496,16 +495,15 @@ def _prologue_shape(*, b_layouts):
     return Map(body=Body((Assign(name="rs", op="rsqrt", args=("sacc",)), nloop)), sources=(stat,)), (m,)
 
 
-def test_channels_with_agreeing_b_layouts_form_one_group():
-    from emmy.compiler.ir.tile.ops import is_group
+def test_channels_with_agreeing_b_layouts_form_one_product_node():
     from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
 
     node, free = _prologue_shape(b_layouts=(False, False))
     bound = bind_prologue_contraction(node, free)
     assert bound is not None
-    c_map, _, binds = bound
-    assert is_group(c_map), "two channels over one bound cone are a fused sibling group"
-    assert len({c.a_ref for c in c_map.sources}) == 1 and set(binds) == {c_map.sources[0].a_ref}
+    c_map, _ = bound
+    (product,) = c_map.sources
+    assert len(product.channels) == 2 and product.a_computed, "two channels over ONE inline cone — sharing is arity"
 
 
 def test_channels_with_disagreeing_b_layouts_never_group():

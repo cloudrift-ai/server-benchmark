@@ -54,7 +54,7 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import Fold, Level, ReduceStage
 from emmy.compiler.ir.tile.ir import Contraction, Map, Reduction, Side
-from emmy.compiler.ir.tile.ops import cone_seam, group_loop, is_group
+from emmy.compiler.ir.tile.ops import cone_seam
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import copy_cell, reduce_codegen, shrink_axis, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import sync_row_fill
 from emmy.compiler.pipeline.passes.lowering.kernel._twist import FLASH_WARP_AXIS, realize_warp_twist, warp_source
@@ -247,10 +247,6 @@ def _emit(op, ctx: Ctx) -> Frag:
     is its lowered loop-IR (byte-identical to ``ops.lower``); a WARP-TILED tree does not reach this
     walk — ``_bind`` realizes it at fragment residence through ``_twist`` instead."""
     if isinstance(op, Map):
-        if is_group(op):
-            # The fused group emits its ONE derived fold loop (scalar-nested), never N loops.
-            loop = group_loop(op.sources)
-            return Frag(body=[loop, *_emit_body(op.body, ctx)], out=_map_wire(op), carrier=loop.carrier)
         src = _emit(op.sources[0], ctx) if op.sources else None
         prefix = list(src.body) if src is not None else []
         return Frag(body=[*prefix, *_emit_body(op.body, ctx)], out=_map_wire(op), carrier=src.carrier if src is not None else None)
@@ -313,12 +309,11 @@ def factorize(tile, root, store=None) -> Tile:
     (the kernel's finalized output SSA name — the root node's produced :class:`Handle`) is resolved
     once here and threaded down for the store glue."""
     from emmy.compiler.ir.schedule import Raster  # noqa: PLC0415 — keep the module torch-free at import
-    from emmy.compiler.ir.tile.ops import resolve  # noqa: PLC0415
 
-    # Inline the let table once, here: the emitter below walks a NAME-FREE tree. ``ops.resolve``
-    # SPLICES each bound subtree onto its operand edge, so the node boundary survives and every
-    # reader (``cone_seam``) reads it straight off ``Contraction.a`` — no pre-resolve side table.
-    op = resolve(tile.op, tile.bindings)
+    # Stored trees are already resolved — a computed operand is an inline node on its edge, so the
+    # emitter below walks the tree as stored and every reader (``cone_seam``) reads the node
+    # boundary straight off ``Contraction.a``.
+    op = tile.op
     ctx = Ctx(
         grid=tuple(tile.place.grid),
         inputs=tile.inputs,
@@ -333,7 +328,7 @@ def factorize(tile, root, store=None) -> Tile:
     return _factorize(op, ctx, tail=(), out_val=out_val, store=store)
 
 
-def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, siblings: tuple = ()) -> Tile:
+def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
     """The recursive root walk — peel the projecting ``Map``\\ s, then bind the leaf to the grid via
     the ONE binder. A :class:`Map` with a ``source`` **recurses**: its ``body`` (the projection /
     epilogue) is walked (:func:`_emit_body`, reaching any nested node) and prepended to ``tail``;
@@ -344,11 +339,8 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, siblings: tu
     today; a nested warp-tiled contraction routes through the ``_emit`` ``Contraction`` seam). A
     bespoke emitter would be a divergent codegen path the mandate forbids."""
     if isinstance(op, Map) and op.sources:
-        # A FUSED SIBLING GROUP binds as ONE unit: the primary channel is the leaf, the rest ride as
-        # derived channels (one shared A fragment, N mma chains, one C fragment each).
-        siblings = tuple((s.b, s.acc) for s in op.sources) if is_group(op) else ()
-        return _factorize(op.sources[0], ctx, tail=(*_emit_body(op.body, ctx), *tail), out_val=out_val, store=store, siblings=siblings)
-    return _bind(op, ctx, tail, out_val, store, siblings)
+        return _factorize(op.sources[0], ctx, tail=(*_emit_body(op.body, ctx), *tail), out_val=out_val, store=store)
+    return _bind(op, ctx, tail, out_val, store)
 
 
 def has_write(stmts: list[Stmt]) -> bool:
@@ -374,7 +366,7 @@ def with_store(stmts: list[Stmt], output: str, grid, value: str) -> list[Stmt]:
     return [*stmts, Write(output=output, index=index, value=value)]
 
 
-def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, siblings: tuple = ()) -> Tile:
+def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
     """The ONE root binder — every kernel binds through the same pipeline: read WHICH AXES the
     schedule tiles off the node, build the fold region, and seal through the one :func:`grid_tile`
     finalizer. The cases are points of one ``(output-tiling) × (reduce-folding)`` space, selected by
@@ -399,11 +391,11 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, siblings: tuple =
         if not has_write(epi):
             epi = with_store(epi, ctx.output, grid, op.out)
         c = op
-        # The cone's K seam, read straight off the spliced operand node (``None`` for a gmem-``Load``
+        # The cone's K seam, read straight off the inline operand node (``None`` for a gmem-``Load``
         # A — its whole body is the per-cell fill).
         seam = cone_seam(c.a) if c.a_computed else None
-        state_decls, reduce_region = reduce_codegen(c, c.stage, ctx.inputs, ctx.workers, siblings, seam)
-        sink = store if store is not None else store_sink(c, Body(tuple(epi)), siblings)
+        state_decls, reduce_region = reduce_codegen(c, c.stage, ctx.inputs, ctx.workers, seam)
+        sink = store if store is not None else store_sink(c, Body(tuple(epi)))
         t = unit_tile(register_tile(atomize(c.atom.shape[:2]), c.mn), c.mn)
         mn, lead, bt, lanes = c.mn, c.lead_axes, c.block_threads, c.atom.lanes
     else:

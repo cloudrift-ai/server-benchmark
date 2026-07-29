@@ -751,19 +751,16 @@ class _AtomOps:
     # glue, assembled by ``_factor._bind``. It is NOT a node field: every projection has ONE home,
     # the ``Map`` wrapper, and the store sink is where it lands.
     epilogue: Body = field(default_factory=Body)
-    # The FUSED SIBLING GROUP's ``(b, acc)`` channels — ``c`` is the primary, and everything
-    # here is DERIVED from the group at emit time (one A fragment, N mma chains, one C fragment per
-    # channel). ``()`` means the plain single-channel node, i.e. just ``c``'s own pair.
-    siblings: tuple = ()
-    # The computed-A cone's ``(prologue, cell, stats)`` K seam, read off the NODE BOUNDARY by
-    # ``_factor.factorize`` before the let table was inlined (``ops.cone_seam``). ``None`` for a
+    # The computed-A cone's ``(prologue, cell, stats)`` K seam, read off the NODE BOUNDARY
+    # (``ops.cone_seam``). ``None`` for a
     # plain gmem-``Load`` A — its whole body is the per-cell fill.
     seam: tuple | None = None
 
     @property
     def channels(self) -> tuple:
-        """The ``(b, acc)`` pairs this emission folds — the group's, or the node's own."""
-        return self.siblings or ((self.c.b, self.c.acc),)
+        """The ``(b, acc)`` pairs this emission folds — the node's product channels (one A
+        fragment, N mma chains, one C fragment per channel at arity N)."""
+        return tuple((ch.b, ch.acc) for ch in self.c.channels)
 
     @property
     def cone(self) -> tuple:
@@ -1083,29 +1080,27 @@ class _ScalarOps(_AtomOps):
         return _dedup_loads(cell)
 
 
-def _atom_ops(
-    c: Contraction, stage: Stage | None = None, inputs=None, workers=None, epilogue: Body | None = None, siblings=(), seam=None
-) -> _AtomOps:
+def _atom_ops(c: Contraction, stage: Stage | None = None, inputs=None, workers=None, epilogue: Body | None = None, seam=None) -> _AtomOps:
     """The **one** atom dispatch — select the codegen strategy off the atom kind."""
     cls = _MmaOps if isinstance(c.atom, AtomKind) else _ScalarOps
-    return cls(c, stage, inputs, workers, Body(()) if epilogue is None else epilogue, tuple(siblings), seam)
+    return cls(c, stage, inputs, workers, Body(()) if epilogue is None else epilogue, seam)
 
 
-def reduce_codegen(c: Contraction, stage: Stage | None = None, inputs=None, workers=None, siblings=(), seam=None):
+def reduce_codegen(c: Contraction, stage: Stage | None = None, inputs=None, workers=None, seam=None):
     """The reusable, **sink-agnostic** ``(state_decls, reduce_region)`` from the atom strategy — the
     accumulator decls + the contraction K-loop (the ONE :meth:`_AtomOps.reduce` driver: the shared
     :func:`_contract_kloop` spine gmem-direct, the shared :func:`_staged` fill→drain skeleton staged).
     ``stage`` / ``inputs`` bind operand staging (both atoms stage the same smem slab off it, differing
     only in the drain leaf — ``ldmatrix`` vs plain ``Load``); ``workers`` splits the staged phases
     across producer / compute warp bands (the resolved :class:`WarpSpec`; ``None`` = uniform)."""
-    ops = _atom_ops(c, stage, inputs, workers, siblings=siblings, seam=seam)
+    ops = _atom_ops(c, stage, inputs, workers, seam=seam)
     return ops.state, ops.reduce
 
 
-def store_sink(c: Contraction, epilogue: Body | None = None, siblings=()):
+def store_sink(c: Contraction, epilogue: Body | None = None):
     """The default **matmul sink** — the per-cell ``store(i, j, offset, mn)`` from the atom strategy
     (an mma ``RegStore`` / the replicated scalar ``epilogue`` tail), folding in the ``epilogue`` (the
     projection off the node's ``Map`` wrapper + the store glue). ``factorize(c, store=…)`` swaps the
     sink (a flash sink that bridges the accumulator into the streaming-softmax twist), reusing the
     shared ``reduce`` emission."""
-    return _atom_ops(c, epilogue=epilogue, siblings=siblings).store
+    return _atom_ops(c, epilogue=epilogue).store

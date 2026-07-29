@@ -490,11 +490,11 @@ What a phase-2 agent actually finds today, and where it sits against *The operan
 
 | stored field | today | target |
 | --- | --- | --- |
-| `Contraction.a` | `Load \| str`; node when resolved (1e) | `Load \| node`, stored inline — no `str` (1j) |
-| `Contraction.b` | same union as `a` (1h) | channels `(b_i, acc_i)`, each `b_i` an operand edge (1j) |
+| `Contraction.a` | `Load \| node`, stored inline — no `str` (1j) | reached |
+| `Contraction.channels` | `tuple[Channel, ...]` — `(b_i, acc_i)`, each `b_i` an operand edge (1j) | reached |
 | `Reduction.partial` | `Body`, carries composed nodes positionally; all node kinds are `Stmt`s (1f) | reached |
-| `Map.sources` | `tuple[Reduction \| Contraction \| Map, ...]` | ≤1 source after 1j; must admit `Load` for cut (1i) |
-| `TileOp` | `op + name + place + workers + bindings` (+ the inherited `Op` knob metadata) | drops `bindings` (1j) |
+| `Map.sources` | `tuple[Reduction \| Contraction \| Map, ...]`, ≤1 source in every current form (1j) | must admit `Load` for cut (1i) |
+| `TileOp` | `op + name + place + workers` (+ the inherited `Op` knob metadata) | reached |
 
 Everything else the design section calls for is in place: every schedule slice rides its node
 (`Contraction.tile` / `.stage`, `Reduction.reduce` / `.stage`); `Contraction.epilogue`, `TileOp.tier`,
@@ -508,10 +508,10 @@ rename lockstep, pretty), `test_structural_reduction.py`, and the group-formatio
 
 #### Residuals — the delta to *The operand edge*
 
-1e–1h have LANDED (below). 1j — the product-contraction revision of the north star — REOPENS phase 1 and
-should land ahead of the phase-2 codec (it deletes the binding-name spellings and the resolve step the
-codec would otherwise have to speak). 1i is a phase-4 prerequisite that belongs in the realizer's own
-commit.
+1e–1h and 1j have LANDED (below); phase 1 is closed on the product-contraction vocabulary. Nothing
+remaining blocks phase 2's codec work — paths and families are well-defined on the landed tree, and the
+binding-name spellings the codec would have had to speak no longer exist. 1i is a phase-4 prerequisite
+that belongs in the realizer's own commit.
 
 1e. **`resolve` splices instead of lowering; the `Body` arm retires** — LANDED. `ops.resolve` now returns
     `replace(op, a=resolve(bound, bindings))`, so the operand edge keeps its NODE. `Body` was never a
@@ -564,16 +564,24 @@ commit.
     RoPE folded into flash's QK, on-the-fly weight dequant), and the work there is `_sync_operands`
     compute-filling a B slab plus a column-invariant `cone_seam` — not the type. Phase 2 must still
     reserve the `b` edge label and the `in.b` prefix in the grammar.
-1j. **The product contraction — `str` retires, the let table with it** — OPEN; the north-star revision
-    (supersedes the sibling/binding encoding 1a/1b landed). `Contraction` holds one `a` and N channels
-    `(b_i, acc_i)`; the fused gate⊗up edge is arity 2 and the wrapping `Map` returns to a single source.
-    Every computed operand stores inline (flash's `P` moves out of `bindings` onto PV's `a` edge);
-    `TileOp.bindings` / `validate_bindings` / `ops.resolve` / the rename-lockstep and name-uniqueness
-    rules are deleted; the `rewrite` canonicalizer learns to walk a stored node arm (a loud assert
-    today); `is_group` / `group_loop` read the channel tuple instead of matching siblings. Verification:
-    the 11-kernel source-digest A/B (the derived channel loop must stay byte-identical to the
-    sibling-group loop) plus the binding tests re-targeted to arity (a 2-channel node ≢ two separate
-    contractions; formation gates unchanged).
+1j. **The product contraction — `str` retires, the let table with it** — LANDED; the north-star revision
+    (supersedes the sibling/binding encoding 1a/1b landed). `Contraction` holds one `a` and N
+    `Channel`\ s `(b_i, acc_i)`; the fused gate⊗up edge is arity 2 and the wrapping `Map` carries a
+    single source. Every computed operand stores inline (flash's `P` moved out of `bindings` onto PV's
+    `a` edge); `TileOp.bindings` / `validate_bindings` / `ops.resolve` / the rename-lockstep and
+    name-uniqueness rules are deleted, and `TileOp` is `op + place + workers` (+ the inherited knob
+    metadata). The `rewrite` canonicalizer walks stored node arms (Map / Reduction handlers registered;
+    the carrier renames via `Carrier.rename`, the same rule the `Loop` handler applies). `is_group` /
+    `group_loop` went further than planned and RETIRED outright: `Contraction.loop` derives the
+    N-channel product fold itself, so the generic `Map`-source paths in `lower` / `reduce_loop` /
+    `_factor._emit` cover the fused edge with no group special case, and `_atom`'s channel tuple reads
+    `c.channels` directly (the `siblings` threading through `_factor` deleted). `030_split_reduce`'s
+    structural branch reads the bare product node from `partial` (no `Map`-of-siblings wrapper).
+    Verified: kernel-source digest A/B over 17 golden kernels (matmul f32/f16/warp, split-K, matvec
+    coop-t, norm_linear, norm_gate_up `.lin`, mlp_geglu, lm_head, rms/softmax/reduce/pointwise, flash
+    hd128/hd256, rms+attention dynM) — ALL digests identical to the pre-1j baseline; the binding tests
+    re-targeted to arity (`test_operand_edges.py`: a 2-channel node ≢ two separate contractions;
+    formation gates unchanged in `test_recognize_boundary_rules.py`).
 1i. **`Map.sources` must admit `Load`** — OPEN, and correctly deferred to phase 4. It is node-only today,
     so a cut at a projection seam cannot be spelled in the parent at all. The widening is one line; it
     belongs in the commit that teaches the realizer to perform the substitution, not ahead of it.

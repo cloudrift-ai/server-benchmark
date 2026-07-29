@@ -91,9 +91,9 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop.ir import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Carrier, Load, Loop, Select, SelectBranch, Write
-from emmy.compiler.ir.tile import Contraction, Placement, Reduction, TileOp, TilePlan
+from emmy.compiler.ir.tile import Channel, Contraction, Placement, Reduction, TileOp, TilePlan
 from emmy.compiler.ir.tile.ops import Map
-from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_cone
+from emmy.compiler.pipeline.passes.lowering.tile._atomize import make_cone
 from emmy.compiler.pipeline.passes.lowering.tile._carrier import denom, exp_family_twist, expect
 
 if TYPE_CHECKING:
@@ -267,7 +267,6 @@ def build_flash_frag(
             return None
         out_store = (out.name, store_idx)
 
-    binds: dict = {}
     flash_op = _flash_op(
         q_id,
         k_id,
@@ -285,14 +284,13 @@ def build_flash_frag(
         layouts=layouts,
         access_indices=access_indices,
         out_store=out_store,
-        bindings=binds,
     )
     # The free axes are the schedule's, carried on the ``TileOp`` with an UNMAPPED grid —
     # like every other recognizer; ``_schedule`` (inside ``010_recognize``) maps ``free`` onto the grid.
     # The ``S_ext_*`` skeleton rides on ``knobs`` (:func:`_struct_features` — the fused fragment
     # never passes the loop-dialect stamp) so the prior can price the flash forms' occupancy.
     knobs = dict(_struct_features(batch, s_q_dim, s_k_dim, head_dim, d_v))
-    tile = TileOp(op=flash_op, place=Placement(free=grid), knobs=knobs, bindings=binds)
+    tile = TileOp(op=flash_op, place=Placement(free=grid), knobs=knobs)
 
     frag = Graph()
     in_shapes = raw_shapes if raw_shapes is not None else (q_shape, k_shape, v_shape)
@@ -328,7 +326,7 @@ def _batch_vars(n: int) -> tuple[Var, ...]:
     return tuple(Var(f"b{i}") for i in range(n))
 
 
-def _split_pv(merge: list, o: str, v: str, v_buf: str, v_idx: tuple, m_axis: Axis, d_axis: Axis, bindings: dict) -> list:
+def _split_pv(merge: list, o: str, v: str, v_buf: str, v_idx: tuple, m_axis: Axis, d_axis: Axis) -> list:
     """Split the exp carrier's streaming ``merge`` around a real **PV** :class:`Contraction`.
 
     The generated merge folds the expectation channel ``O = O·α + v·P`` **atomically** (``P = exp(s − M)``
@@ -351,11 +349,11 @@ def _split_pv(merge: list, o: str, v: str, v_buf: str, v_idx: tuple, m_axis: Axi
     pv = Contraction(
         axes=(m_axis, d_axis),
         k_axis=Axis(name="pj", extent=Dim(1)),  # block=1: a singleton intra-block reduce
-        # A = P, register-resident: a one-stmt cone bound in the let table and referenced by name,
-        # the same shape every computed A takes.
-        a=bind_cone([Assign(name=f"{o}__p", op="copy", args=(p_name,))], "pj", bindings),
-        b=Load(name=v, input=v_buf, index=v_idx),  # B = V (the value tile)
-        acc=f"{o}__pv",
+        # A = P, register-resident: a one-stmt cone stored INLINE on the edge, the same shape
+        # every computed A takes. It captures the carrier's running max — legal (its one home is
+        # in scope), just uncuttable.
+        a=make_cone([Assign(name=f"{o}__p", op="copy", args=(p_name,))], "pj"),
+        channels=(Channel(b=Load(name=v, input=v_buf, index=v_idx), acc=f"{o}__pv"),),  # B = V (the value tile)
         tile=TilePlan(),
     )
     out: list = []
@@ -388,7 +386,6 @@ def _flash_op(
     layouts: tuple = (None, None, None),
     access_indices: tuple[tuple, tuple, tuple] | None = None,
     out_store: tuple[str, tuple] | None = None,
-    bindings: dict | None = None,
 ) -> Map:
     """The per-output-element ``(…, m, d)`` compute as the structural-node tree: flash is
     ``Map(body=[O/l projection], sources=(Reduction(role=TWISTED, axis=kv, partial=[Contraction(QK), …,
@@ -407,7 +404,6 @@ def _flash_op(
     ``Select`` stmt (``kv ≤ m`` else −inf) in the score ``Map`` — the index predicate
     lives in the op tree, never in the carrier. Both make ``exp(s − m_new) = 0``, so
     masked keys contribute nothing."""
-    bindings = {} if bindings is None else bindings
     bvars = _batch_vars(len(batch))
     head_axis = len(batch) - 1  # last batch dim is the head (when there is one)
     kv_bvars = tuple(BinaryExpr("/", bv, Literal(group, "int")) if (group > 1 and i == head_axis) else bv for i, bv in enumerate(bvars))
@@ -427,8 +423,7 @@ def _flash_op(
         axes=(Axis(name="m", extent=s_q), Axis(name="kv", extent=s_k)),
         k_axis=Axis(name="dd", extent=Dim(head_dim)),
         a=Load(name="q_e", input=q_buf, index=q_idx),
-        b=Load(name="k_e", input=k_buf, index=k_idx),
-        acc="sacc",
+        channels=(Channel(b=Load(name="k_e", input=k_buf, index=k_idx), acc="sacc"),),
         tile=TilePlan(),
     )
     score_post = [
@@ -484,7 +479,7 @@ def _flash_op(
     # same way it flattens the embedded PV, so the scalar tier expands the identical loop-in-body nest
     # — but the recursion can now reach BOTH contractions as nodes on ``partial`` (no ``source``
     # asymmetry between QK and PV).
-    partial = [score_contraction, *score_post, *_split_pv(carrier.dissolve(), "O_i", "v_e", v_buf, v_idx, m_axis, d_axis, bindings)]
+    partial = [score_contraction, *score_post, *_split_pv(carrier.dissolve(), "O_i", "v_e", v_buf, v_idx, m_axis, d_axis)]
     reduction = Reduction(
         carrier=carrier,
         axis=Axis(name="kv", extent=s_k),

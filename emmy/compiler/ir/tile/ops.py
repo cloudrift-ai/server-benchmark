@@ -12,7 +12,11 @@ node wrappers are retired.
 This module is the thin lowering of that wrapper to loop IR (:func:`lower` — the body verbatim,
 the carriers already dissolved into loose folds at recognition) plus the structural reads
 (:func:`axis_role` / :func:`reduce_loop`) and the shared contraction-loop builder
-(:func:`contraction_loop`)."""
+(:func:`contraction_loop`). Stored trees are already resolved — a computed operand is an inline
+node on its edge, so there is no name-resolution step ahead of a lowering walk (the old
+``resolve`` splice over ``TileOp.bindings`` retired with the let table), and the fused
+multi-channel edge lowers through :attr:`Contraction.loop`'s own product derivation (the old
+``is_group`` / ``group_loop`` sibling matching retired with it)."""
 
 from __future__ import annotations
 
@@ -25,54 +29,12 @@ from emmy.compiler.ir.stmt.base import Stmt, pretty_body
 from emmy.compiler.ir.tile.ir import Contraction, Map, Reduction
 
 
-def resolve(op, bindings=None):
-    """Inline every binding-name operand in ``op``'s tree — each reference replaced by the bound
-    SUBTREE ITSELF — yielding a NAME-FREE tree the lowering walkers consume unchanged. The operand
-    edge keeps its node, so the boundary a reader wants (``cone_seam``'s prologue / per-cell split)
-    survives resolution; ``lower`` flattens it at the point of use, once.
-    This is the one place ``TileOp.bindings`` is consulted: sharing is structural in the stored tree
-    (two siblings referencing one name), and the derived loop nest a shared group lowers to is the
-    group's concern, not the resolver's. An empty table means a name-free tree (construction
-    validates that every reference has a binding), so this is a free identity on the unshared forms."""
-    if not bindings:
-        return op
-    if isinstance(op, Map):
-        srcs = tuple(resolve(s, bindings) for s in op.sources)
-        body = _resolve_stmts(op.body, bindings)
-        return op if (srcs == op.sources and body is None) else replace(op, sources=srcs, body=body if body is not None else op.body)
-    if isinstance(op, Reduction):
-        partial = _resolve_stmts(op.partial, bindings)
-        return op if partial is None else replace(op, partial=partial)
-    if isinstance(op, Contraction):
-        # SPLICE the bound NODE onto the edge — do not lower it here. Resolve is a tree operation;
-        # flattening mid-resolve is what used to leave a stmt ``Body`` on the operand field, which
-        # erased the node boundary every downstream reader (``cone_seam``) wants to read back.
-        # Both edges resolve the same way: the two are one vocabulary.
-        def edge(op_edge, ref):
-            if ref is None:
-                return op_edge
-            bound = bindings.get(ref)
-            if bound is None:
-                raise KeyError(f"resolve: operand reference {ref!r} resolves to no binding")
-            return resolve(bound, bindings)
-
-        a, b = edge(op.a, op.a_ref), edge(op.b, op.b_ref)
-        return op if (a is op.a and b is op.b) else replace(op, a=a, b=b)
-    return op
-
-
-def _resolve_stmts(body: Body, bindings) -> Body | None:
-    """``body`` with every structural-node stmt resolved, or ``None`` when nothing changed."""
-    out = [resolve(s, bindings) if isinstance(s, (Map, Reduction, Contraction)) else s for s in body]
-    return None if all(a is b for a, b in zip(out, body, strict=True)) else Body(tuple(out))
-
-
 def cone_seam(cone) -> tuple[tuple, tuple, tuple[str, ...]]:
     """The computed-A cone's ``(prologue, cell, stats)`` — read off the NODE BOUNDARY, not by
     scanning stmts: the cone is ``Map(body=<the per-cell normalize>, sources=(<the row-invariant
     prologue>,))``, and the prologue node IS the per-row statistic (its own ``Map`` over the stat
-    ``Reduction``) plus any row-invariant cone prefix, placed there when the cone was bound
-    (``_atomize.bind_cone`` splits at the K seam once, structurally).
+    ``Reduction``) plus any row-invariant cone prefix, placed there when the cone was built
+    (``_atomize.make_cone`` splits at the K seam once, structurally).
 
     ``stats`` are the prologue defs the cell reads — the values bridged through the stat smem rows;
     a prologue whose defs go unread is dropped (nothing to bridge). The ONE seam both sides read:
@@ -88,62 +50,19 @@ def cone_seam(cone) -> tuple[tuple, tuple, tuple[str, ...]]:
     return (pro, cell, stats) if stats else ((), cell, ())
 
 
-def is_group(op) -> bool:
-    """True when ``op`` is a FUSED SIBLING GROUP — a :class:`Map` over several
-    :class:`~emmy.compiler.ir.tile.ir.Contraction` channels sharing one A operand (the gate⊗up MLP
-    edge). Sharing is the structural fact (same operand reference); scheduling and lowering the
-    group as ONE unit is the decision that follows from it."""
-    if not (isinstance(op, Map) and len(op.sources) > 1 and all(isinstance(s, Contraction) for s in op.sources)):
-        return False
-    # The SHARED operand is what makes it a group: same A value (the binding name before resolution,
-    # the inlined cone's own name after) over the same contraction axis. Channels that each compute
-    # their own A are independent contractions and lower to their own fold loops.
-    return len({(s.a_name, s.k_axis.name) for s in op.sources}) == 1
-
-
-def group_loop(sources) -> Loop:
-    """The ONE fold ``Loop`` a fused sibling group DERIVES — never stored, exactly like
-    :attr:`Reduction.loop`. The shared A is lifted once (the primary channel's loop), then each
-    further channel splices its ``b → ⊗ → ⊕`` triple after it, reusing that A value. The carrier
-    is the N-COMPONENT identity-family state (one additive component per channel) — the true
-    product-monoid state, so the cross-CTA split tier folds every channel's partials (the
-    redundant-statistic split of the gate/up edge); ``carrier.out`` stays the primary component, and
-    the coop tier remains contraction-blind."""
-    from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
-    from emmy.compiler.ir.stmt import Accum  # noqa: PLC0415
-    from emmy.compiler.ir.stmt.algebra import Carrier, State, Twist  # noqa: PLC0415 — algebra imports leaves
-    from emmy.compiler.ir.stmt.carrier import Channel  # noqa: PLC0415
-
-    base = sources[0].loop
-    if len(sources) == 1:
-        return base
-    a_name, k = sources[0].a_name, sources[0].k_axis.name
-    extra: list[Stmt] = []
-    for c in sources[1:]:
-        lift = Assign(name=f"{c.acc}__v", op=ElementwiseImpl("multiply"), args=(a_name, c.b_name))
-        extra += [*c.b_body, lift, Accum(name=c.acc, value=lift.name, op=ElementwiseImpl("add"), axes=(k,))]
-    add = ElementwiseImpl("add")
-    names = tuple(c.acc for c in sources)
-    channels = tuple(Channel(fold=add, term=f"{nm}__v", dtype=base.carrier.twist.channels[0].dtype) for nm in names)
-    carrier = Carrier(state=State(names=names), twist=Twist(family="id", channels=channels))
-    return Loop(axis=base.axis, body=Body((*base.body, *extra)), unroll=base.unroll, role=base.role, carrier=carrier)
-
-
-def reduce_loop(op, bindings=None):
+def reduce_loop(op):
     """The kernel's outermost **annotated** reduce ``Loop`` (its ``carrier`` set by recognition),
     or ``None`` for a pure pointwise / flat-fallback ``Map`` (no annotated reduce). A
-    :class:`~emmy.compiler.ir.tile.ir.Reduction` synthesizes its loop directly; a ``Map``
+    :class:`~emmy.compiler.ir.tile.ir.Reduction` / :class:`Contraction` synthesizes its loop
+    directly (a multi-channel contraction derives the ONE fused product loop — see
+    :attr:`Contraction.loop`); a ``Map``
     is read off the top-level body — the annotated reduce loop is a top-level stmt (a
     single-flat-reduce cell); a nested / multi reduce stays un-annotated (flat fallback) and is
-    invisible here, so it materializes on the scalar tier. A fused sibling group reads off its
-    PRIMARY source (the channels share one fold structure by construction)."""
-    op = resolve(op, bindings)
+    invisible here, so it materializes on the scalar tier."""
     if isinstance(op, (Reduction, Contraction)):
         return op.loop
-    if is_group(op):
-        return group_loop(op.sources)  # the fused group's ONE derived fold loop
     if isinstance(op, Map) and op.sources:
-        return reduce_loop(op.sources[0], bindings)  # a Map projecting over a Reduction / Contraction source
+        return reduce_loop(op.sources[0])  # a Map projecting over a Reduction / Contraction source
     for s in op.body:
         if isinstance(s, (Loop, StridedLoop)) and s.carrier is not None:
             return s
@@ -193,26 +112,24 @@ def nodify_reduce(op, plan: ReducePlan):
     return Map(body=Body(tuple(tail)), sources=(red,)) if tail else red
 
 
-def axis_role(op, bindings=None) -> AxisRole:
+def axis_role(op) -> AxisRole:
     """The reduce :class:`~emmy.compiler.ir.axis.AxisRole` of a kernel's outermost reduction,
     read **structurally** off the annotated reduce loop (no stored kind tag): a ``CONTRACTION``
     contraction, a ``TWISTED`` (online-softmax / flash) or ``PLANAR`` (plain ``sum`` / ``max`` /
     ``mean``) reduce, or ``FREE`` for a pure pointwise / flat-fallback ``Map``. This is what the
     schedule / materialize passes dispatch on."""
-    rl = reduce_loop(op, bindings)
+    rl = reduce_loop(op)
     return rl.role if rl is not None else AxisRole.FREE
 
 
-def lower(op, bindings=None) -> list[Stmt]:
+def lower(op) -> list[Stmt]:
     """Lower the lift wrapper to loop-IR stmts — the ``Map``'s body verbatim. The carriers are
     already dissolved into loose fold ``Accum``\\ s (and the streaming ``merge`` for a twisted
     carrier) at recognition, and the reduce ``Loop``\\ s carry their role/carrier annotations, so
-    one ``lower`` call emits the kernel's per-cell body with nothing left to expand. ``bindings``
-    (the owning :class:`TileOp`'s let table) is inlined first (:func:`resolve`) — a name-operand
-    tree cannot lower without it."""
-    op = resolve(op, bindings)
-    if is_group(op):
-        return [group_loop(op.sources), *op.body]  # ONE derived loop for the group, then the projection
+    one ``lower`` call emits the kernel's per-cell body with nothing left to expand. Stored trees
+    are already resolved (computed operands are inline nodes), so there is no name-inlining step;
+    a multi-channel contraction lowers through its own derived product loop
+    (:attr:`Contraction.loop`)."""
     if isinstance(op, Map):
         prefix = [s for src in op.sources for s in lower(src)]
         return [*prefix, *op.body]  # the sources' reduce/contract loop nests, then the projection body
@@ -240,17 +157,11 @@ def contraction_loop(lift, fold, operand_bodies, reduce_axis) -> Loop:
     return Loop(axis=reduce_axis, body=Body(tuple(body)), role=AxisRole.CONTRACTION, carrier=fold.as_carrier())
 
 
-def pretty(op, indent: str = "", bindings=None) -> list[str]:
+def pretty(op, indent: str = "") -> list[str]:
     """Structurally pretty-print a kernel op (for dumps) — a
     :class:`~emmy.compiler.ir.tile.ir.Reduction` as a typed header over its synthesized
     loop nest, the ``Map``'s body (its annotated reduce ``Loop`` + projection), or a bare stmt's own
-    pretty. Each ``bindings`` entry prints as a ``let <name> =`` block ahead of the tree, so a
-    shared subtree is shown once, where it lives."""
-    if bindings:
-        out: list[str] = []
-        for name, tree in bindings.items():
-            out += [f"{indent}let {name} =", *pretty(tree, indent + "    ")]
-        return [*out, *pretty(op, indent)]
+    pretty."""
     if isinstance(op, Reduction):
         head = f"{indent}Reduction[{op.axis.name}] {op.role.name.lower()}"
         return [head, *pretty_body(Body(op.lower()), indent + "    ")]
@@ -267,12 +178,9 @@ __all__ = [
     "axis_role",
     "cone_seam",
     "contraction_loop",
-    "group_loop",
-    "is_group",
     "lower",
     "nodify_reduce",
     "pretty",
     "reduce_loop",
     "reduce_plan",
-    "resolve",
 ]

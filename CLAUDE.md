@@ -15,34 +15,33 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
 - **Pipeline / autotune** (pass framework, knob/fork system, online/offline-prior search, two-level tune) →
   [`emmy/compiler/pipeline/ARCHITECTURE.md`](emmy/compiler/pipeline/ARCHITECTURE.md)
 - **Tile lowering** (LoopOp → TileOp; **purely algebraic moveset — no shape specializations**. The stored tile IR is
-  a tree of **structural nodes** (all in `ir/tile/ir.py`) plus a **let table** (`TileOp.bindings`, shared subtrees
-  keyed by the name each one's root defines): a `PLANAR`/`TWISTED` reduce lifts to a typed `Reduction`
+  a tree of **structural nodes** (all in `ir/tile/ir.py`): a `PLANAR`/`TWISTED` reduce lifts to a typed `Reduction`
   (its `Carrier` + reduce `axis` + `partial` split out, the fold `Loop` synthesized on demand, holding no
   projection — a reduce that COMPOSES another node, split-K's sliced contraction or flash's score, puts it in
   `partial`, the one composition rule); EVERY recognized contraction — per-cell scalar included — is a `Contraction`
   node (nodified at recognize time with a deferred `TilePlan()`; an unbindable one demotes to `PLANAR`) holding ONE
-  `acc` and TWO **operand edges** `a`/`b` of one type, whose three inhabitants are the three things an input can be —
-  MATERIALIZED (a gmem `Load`), SHARED (the NAME of a bound cone) or COMPUTED (the node, the form `ops.resolve`
-  SPLICES in; it splices rather than flattens, so the cone's boundary survives resolution and is read straight off
-  the edge). Only `Load` / name are ever stored — every computed operand goes through the one binder — and a SHARED
-  binding must be **closed** (`ir.captured_values`: no value name captured from the enclosing body; a
-  single-reference one may capture, as flash's `P` does). The A/B asymmetry that is real — A is M-resident and
+  shared `a` **operand edge** plus product **`channels`** `(b_i, acc_i)`. An operand edge has two inhabitants — the
+  two things an input can be: MATERIALIZED (a gmem `Load`) or COMPUTED (the node itself, stored INLINE on the edge —
+  the cone via the one builder `_atomize.make_cone`, flash's `P`). Tree ownership gives an inline node exactly one
+  consumer, so **sharing is arity, not naming**: "these two matmuls read the same A" is one arity-2 product
+  contraction (the fused gate/up MLP edge — a product semiring outputting N matrices), scheduled and lowered as ONE
+  unit through `Contraction.loop`'s derived product fold (N-component identity-family carrier); there is no let
+  table, no reference arm, and no resolve step. Closure (`ir.captured_values`: no value name captured from the
+  enclosing body, iteration vars excluded) is the placement-cut precondition — a capturing inline operand like
+  flash's `P` is legal, just uncuttable. The A/B asymmetry that is real — A is M-resident and
   compute-fillable, B is the K×N operand the loop streams — is a SCHEDULE fact: every staged/mma tier states
   `isinstance(c.b, Load)` as an eligibility precondition and declines a computed B to the gmem-direct tier, which
   lowers it through the same `contraction_loop` builder. A cone's own SOURCE is the
   row-invariant prologue (the per-row statistic) and its `body` is the per-cell normalize, so the K seam is the node
   boundary (`ops.cone_seam`); the lift / projection wrapper
-  is a `Map` (`body` + `sources` — `project ∘ reduce`, `source` the len-≤1 compat read). Operand sharing is
-  structural: N sibling `Contraction`s under one `Map.sources` naming ONE bound cone is the fused gate/up MLP edge
-  (the product-monoid fold), scheduled and lowered as one unit — `ops.is_group` / `ops.group_loop` DERIVE its single
-  fold loop and N-component carrier, and `ops.resolve` inlines every name operand before any lowering walk. A
+  is a `Map` (`body` + `sources` — `project ∘ reduce`, `source` the len-≤1 compat read). A
   projection has ONE home, the wrapping `Map.body` — never a node field. A bare reduce is the root `Reduction`;
   softmax/RMSNorm is a `Map(body=sweep, sources=(Reduction,))`; the fused norm→linear / gate-up composition is a
-  `Map(body=combine, sources=(Contraction, …))` over that bound cone (a fork sibling of its coop-reduce form —
+  `Map(body=combine, sources=(Contraction,))` over the product node (a fork sibling of its coop-reduce form —
   option-0 stays coop; the warp mma rows ride the sync compute-fill); a pure pointwise cell is a `Map(sources=())`;
   the only annotated `Loop`s still riding a flat `Map.body` are `030_split_reduce`'s sliced partials. Every schedule
   slice rides the node it decorates (a `Contraction`'s `tile` / `stage`, a `Reduction`'s `reduce` / `stage`) — the
-  `TileOp` keeps only `op + bindings + place + workers + knobs` — and a sliced axis's window (its split parentage plus
+  `TileOp` keeps only `op + place + workers + knobs` — and a sliced axis's window (its split parentage plus
   a cross-CTA slice's absolute base/bound) is the one `Axis.window`.
   Dispatch reads the role/carrier off the node (`ops.axis_role`/`reduce_loop` recurse through `Map.sources`), and
   `ops.lower` flattens any node back to the same loop nest — there is no stored `Monoid`/`Semiring` node kind (those

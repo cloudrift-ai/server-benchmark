@@ -61,19 +61,18 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
 - a `CONTRACTION` contraction → the `(a, b, acc, projection)` operand→role facts
   (`_atomize.bind_contraction`): the operands are named by the ⊗ **lift** (the `Assign` the fold accumulates) — B is its
   (n, k)-indexed `Load`, A is the lift's other argument, either a plain `Load` (clean gmem-direct) or, when loop fusion
-  has inlined an operand cone, the cone as a `Map` NODE the caller binds into `TileOp.bindings` and the contraction
-  references by name (a STAT-FREE computed A, which rides the `sync` compute-fill like the norm→linear cone but carries
+  has inlined an operand cone, the cone as a `Map` NODE stored INLINE on the `a` edge (`_atomize.make_cone` — a
+  STAT-FREE computed A, which rides the `sync` compute-fill like the norm→linear cone but carries
   no statistic prologue) — plus the fold accumulator and the projection.
-  An **operand is an edge** with three inhabitants — the three things an input can be: MATERIALIZED (a gmem `Load`),
-  SHARED (a binding name) or COMPUTED (the node). Only the first two are ever *stored*, because every computed operand
-  goes through the one binder, so "shared" and "not shared" never differ in spelling. `ops.resolve` SPLICES the bound
-  node onto the edge rather than flattening it, which is what lets every downstream reader take the cone's K seam
-  straight off `Contraction.a` (`ops.cone_seam`) instead of through a pre-resolve side table; `lower` flattens it once,
-  at the point of use. A subtree reading no value name from its enclosing body is **closed**
-  (`ir.captured_values`, iteration variables excluded): required of a SHARED binding — one home, N reading sites, so a
-  captured name would have to be in scope at all of them — and the precondition for lifting any subtree into its own
-  kernel. A single-reference binding may capture: flash's `P = exp(s − m)` reads the online-softmax carrier's running
-  max, updated by the merge stmts of the very loop step that consumes it.
+  An **operand is an edge** with two inhabitants — the two things an input can be: MATERIALIZED (a gmem `Load`) or
+  COMPUTED (the node itself, stored inline). Tree ownership gives an inline node exactly one consumer — sharing is the
+  product contraction's channel ARITY, never a name — so there is no let table, no reference arm, and no resolve step:
+  every downstream reader takes the cone's K seam straight off `Contraction.a` (`ops.cone_seam`); `lower` flattens it
+  once, at the point of use. A subtree reading no value name from its enclosing body is **closed**
+  (`ir.captured_values`, iteration variables excluded) — the precondition for lifting any subtree into its own
+  kernel (a placement cut), and nothing else requires it: flash's `P = exp(s − m)` reads the online-softmax carrier's
+  running max, updated by the merge stmts of the very loop step that consumes it — legal (its one home is in scope),
+  just uncuttable.
   Binding off the lift rather than off "the first (m, k)-indexed `Load`" is load-bearing: a cone-INTERNAL load is
   (m, k)-indexed too, so the positional rule bound gemma's GeGLU combine as `gate @ W` and silently dropped the gelu and
   the up projection. Refusing to bind a stat-free cone at all is equally wrong — it demotes the cell to a PLANAR
@@ -120,13 +119,14 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
 - the **MONOID-producer composition** — the fused norm→linear edge and its N-channel form, the gate/up MLP edge —
   binds at recognize time too (`_atomize.bind_prologue_contraction`, structure-only): a projecting `Map` over a
   per-row `PLANAR` statistic whose tail is one or more ⊗-folds of one shared A value nodifies to
-  `Map(body=projection, sources=(Contraction, …))` — one computed-A `Contraction` per ⊗-fold channel, all
-  REFERENCING one bound A cone in `TileOp.bindings` (itself a node tree: the statistic is the cone's `Reduction`
-  source, the per-cell normalize its `Map` body). Sharing the operand is the structural FACT; scheduling and lowering
-  the siblings as ONE unit (one `TilePlan`/`Stage`/`ReducePlan` row, `ops.group_loop`'s single derived fold loop and
-  N-component product-monoid carrier) is the DECISION that follows — a product-monoid fold: channels never interact
+  `Map(body=projection, sources=(Contraction,))` — ONE product-carrier `Contraction` with a `Channel` `(b, acc)` per
+  ⊗-fold over its single inline A cone (itself a node tree: the statistic is the cone's `Reduction`
+  source, the per-cell normalize its `Map` body). Sharing is the node's ARITY — the product semiring outputting N
+  matrices — and the node schedules and lowers as ONE unit (one `TilePlan`/`Stage`/`ReducePlan` row;
+  `Contraction.loop` derives the single fused fold loop and its
+  N-component product-monoid carrier) — a product-monoid fold: channels never interact
   per step; the combine — SwiGLU — is projection, riding the wrapping `Map.body`. Channels whose B layouts disagree
-  were never legally fusable, so they simply never group (a group-formation gate, not a node assert).
+  were never legally fusable, so they simply never product (a formation gate, not a node assert).
   `010_recognize` schedules it as a fork SIBLING of the
   cooperative reduce form (option-0 stays the coop row; the warp mma rows ride the mandatory `sync` compute-fill;
   dtype / geometry legality stays schedule-side in `_computed_a_rows`). This retired the pin-only

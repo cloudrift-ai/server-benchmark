@@ -10,8 +10,7 @@ The whole point of the layer is the article's thesis: **the schedule is
 separate from the combine.** A ``TileOp`` holds the structural-IR root ``op``
 (the *combine* — the :class:`Map` / :class:`Reduction` / :class:`Contraction`
 nodes defined **in this module**, alongside ``ir/stmt/algebra``) directly,
-plus the **let table** ``bindings`` (shared subtrees, keyed by the name each
-one's root defines) and a thin set of **root-global schedule fields** — the
+plus a thin set of **root-global schedule fields** — the
 free-axis → grid :class:`~.schedule.Placement` (``place``) and the warp split
 (``workers``). The
 per-node schedule slices ride the structural nodes themselves (a
@@ -23,24 +22,24 @@ partition rides the node). There is no per-kind kernel/schedule type: the algebr
 structurally off the axes' :class:`~emmy.compiler.ir.axis.AxisRole`
 (``ops.axis_role``), so MAP / MONOID / SEMIRING all ride the same ``TileOp``.
 
-**Operand sharing is structural.** "These two matmuls read the same A" is a FACT
-the tree states — N sibling :class:`Contraction`\\ s under one ``Map.sources``,
-each naming the same bound subtree in ``bindings`` — separate from the
-scheduling DECISION of how to lower them. ``ops.resolve`` SPLICES those bound
-subtrees onto the operand edge before any lowering walk, so the walkers stay
-name-free.
+**Operand sharing is arity.** "These two matmuls read the same A" is ONE
+:class:`Contraction` whose output is a tuple: one ``a`` edge plus N product
+:class:`Channel`\\ s ``(b_i, acc_i)``, folding the componentwise ``(+, ×)`` —
+the N-component product monoid the derived :attr:`Contraction.loop` carries.
+There is no let table and no name-reference mechanism: the one in-tree relation
+that had several consumers is a single edge, so a shared subtree has exactly one
+home by construction.
 
-**An operand is an edge with three inhabitants** — the three things an input can
-be: MATERIALIZED (a gmem ``Load``), SHARED (the NAME of a binding) or COMPUTED
-(the node itself). Only the first two are ever *stored*: every computed operand
-goes through the one binder (``_atomize.bind_cone``), so "shared" and "not
-shared" never differ in spelling. The node arm is what ``resolve`` splices in,
-and because it splices rather than flattens, the boundary a reader wants
-(``ops.cone_seam``'s prologue / per-cell split) survives resolution — ``lower``
-flattens it once, at the point of use. A subtree that reads no value name from
-its enclosing body is **closed** (:func:`captured_values`); closure is required
-of a SHARED binding (one home, many reading sites) and is the precondition for
-lifting any subtree into its own kernel.
+**An operand is an edge with two inhabitants** — the two things an input can
+be: MATERIALIZED (a gmem ``Load``) or COMPUTED (the node itself, stored inline
+on the edge). Tree ownership gives an inline node exactly one consumer — its
+parent — so sharing needs no reference arm. The node boundary a reader wants
+(``ops.cone_seam``'s prologue / per-cell split) is read straight off the edge;
+``lower`` flattens it once, at the point of use. A subtree that reads no value
+name from its enclosing body is **closed** (:func:`captured_values`); closure is
+the precondition for lifting any subtree into its own kernel (a placement cut),
+and nothing else requires it — flash's ``P`` legitimately captures the running
+max its own loop step updates, and that seam is simply not cuttable.
 
 **Every structural node is a ``Stmt``.** A composed step occupies a statement
 position in another node's body — flash's ``Σ_dd Q·K`` and ``Σ_j P·V`` in a
@@ -78,7 +77,7 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.expr import Expr, Literal
 from emmy.compiler.ir.schedule import Placement, ReducePlan, Stage, TilePlan, WarpSpec
-from emmy.compiler.ir.stmt import Accum, Body, Carrier, Load, Loop, RenderCtx, Stmt
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carrier, Load, Loop, RenderCtx, Stmt
 
 if TYPE_CHECKING:
     from emmy.compiler.ir.atom import Atom
@@ -290,47 +289,38 @@ def axis_names(root) -> set[str]:
     return out
 
 
-def captured_values(root, axes: set[str], bindings=None) -> tuple[str, ...]:
+def captured_values(root, axes: set[str]) -> tuple[str, ...]:
     """The VALUE names ``root``'s subtree reads but does not itself define — its capture set, with
     iteration-space names (``axes``) excluded.
 
     Empty means the subtree is **closed**: it can be lifted out of its enclosing body and computed
     on its own, which is exactly what a placement cut does to a seam. A non-empty capture set is not
-    an error per se — flash's ``P = exp(s − m)`` genuinely reads the online-softmax carrier's
-    running max, updated by the merge stmts of the very loop step that consumes it — but it IS the
-    reason such a seam is not cuttable, and a SHARED subtree must never capture (its one home would
-    have to be in scope at every reference).
+    an error — flash's ``P = exp(s − m)`` genuinely reads the online-softmax carrier's
+    running max, updated by the merge stmts of the very loop step that consumes it (legal: an inline
+    operand's one home is always inside the scope it captures from) — but it IS the
+    reason such a seam is not cuttable. This is the predicate a placement cut asks before lifting
+    any subtree into its own kernel.
 
     Returned sorted, so callers can put it straight into an error message."""
     from emmy.compiler.ir.tile.ops import lower  # noqa: PLC0415 — avoid an import cycle
 
-    stmts = list(lower(root, bindings))
+    stmts = list(lower(root))
     defs: set[str] = set()
     for s in stmts:
         defs |= _deep_defines(s)
     return tuple(sorted(_deep_reads(stmts) - defs - axes))
 
 
-def _operand_ref(op) -> str | None:
-    """The binding NAME an operand edge references, or ``None`` (materialized / already spliced)."""
-    return op if isinstance(op, str) else None
-
-
-def _operand_body(op, side: str) -> tuple[Stmt, ...]:
-    """An operand edge's producing stmts — the singleton gmem ``Load``, or the spliced node
-    flattened. An unresolved binding NAME has none: ``ops.resolve`` splices it first."""
+def _operand_body(op) -> tuple[Stmt, ...]:
+    """An operand edge's producing stmts — the singleton gmem ``Load``, or the inline node
+    flattened."""
     from emmy.compiler.ir.tile.ops import lower  # noqa: PLC0415 — avoid an import cycle
 
-    if isinstance(op, str):
-        raise AssertionError(f"Contraction.{side} is the unresolved binding {op!r} — call ops.resolve first")
     return (op,) if isinstance(op, Load) else tuple(lower(op))
 
 
 def _operand_name(op) -> str:
-    """An operand edge's bound SSA name — the referenced binding's name, the spliced node's ``out``,
-    or the ``Load``'s def."""
-    if isinstance(op, str):
-        return op
+    """An operand edge's bound SSA name — the inline node's ``out``, or the ``Load``'s def."""
     return op.defines()[-1] if isinstance(op, Load) else op.out
 
 
@@ -375,6 +365,17 @@ def gmem_row_stride(load: Load, axis_name: str, inputs) -> int | None:
 
 
 @dataclass(frozen=True)
+class Channel:
+    """One product channel of a :class:`Contraction` — the streamed K×N operand edge ``b`` plus the
+    additive fold accumulator ``acc`` that channel produces. A plain matmul is one channel; the
+    fused gate⊗up MLP edge is two channels over the node's single shared ``a`` (sharing is arity,
+    not naming — the product-carrier contraction outputs a tuple)."""
+
+    b: Load | Map | Reduction | Contraction  # the streamed operand edge — MATERIALIZED or COMPUTED
+    acc: str  # this channel's fold accumulator
+
+
+@dataclass(frozen=True)
 class Contraction(Stmt):
     """A contraction **before** atom factorization — built **recognize-side** at fork-emit
     (``_schedule._contraction_node`` resolves the operand→role binding via ``_atomize.semiring_binding``
@@ -384,14 +385,16 @@ class Contraction(Stmt):
     register-tiles through the shared ``_contract_kloop`` skeleton. **ONE
     flat node** that cleanly splits the **algebra params** (what to contract) from the **schedule**
     (how to tile it): the params are the tiled output ``axes`` ``(m, n)``, the contraction ``k_axis``,
-    the leading batch ``lead_axes``, the two operand edges (``a`` / ``b``) and the fold
-    accumulator (``acc``); the projection has ONE home — the wrapping :class:`Map`'s body — never a
+    the leading batch ``lead_axes``, the shared ``a`` operand edge and the product ``channels``
+    ``(b_i, acc_i)``; the projection has ONE home — the wrapping :class:`Map`'s body — never a
     node field; the schedule is the
     one ``tile`` field — a resolved :class:`~emmy.compiler.ir.schedule.TilePlan` carrying the
     leaf ``atom`` (tensor-core :class:`AtomKind` or the ``1×1`` :class:`ScalarAtom`), the per-CTA
     **UNIT** grid + per-unit **REGISTER** sub-tile, and the K-chunk. Keeping the schedule a single
     swappable field is what lets the same operand/acc params be tiled by a different ``TilePlan`` (the
-    flash inner QK/PV reuse).
+    flash inner QK/PV reuse). Arity N ≥ 2 is the fused sibling edge (gate⊗up) — a product semiring
+    outputting N matrices over ONE shared A, scheduled and lowered as one unit under this node's
+    single ``tile`` / ``stage`` row.
 
     The contraction itself is **never stored** — both tiers *synthesize* it from the operands:
     ``_atom.reduce_codegen`` lowers the mma atom into ``ldmatrix`` + ``mma.sync`` and the scalar atom into a
@@ -405,90 +408,82 @@ class Contraction(Stmt):
 
     axes: tuple[Axis, Axis]  # the tiled output (m_axis, n_axis) — params
     k_axis: Axis  # the contraction axis — params
-    # A and B are **operand edges** of the SAME type, whose three inhabitants are the three things an
-    # input can be — MATERIALIZED (a gmem ``Load``), SHARED (the SSA NAME of a let-bound subtree in
-    # the owning ``TileOp.bindings``) or COMPUTED (the node itself). A *stored* operand is only ever
-    # the ``Load`` or the name: every computed operand goes through the one binder
-    # (``_atomize.bind_cone``), so "shared" and "not shared" never differ in spelling and N siblings
-    # naming one cone IS the structural sharing fact. The node arm is what ``ops.resolve`` splices in
-    # ahead of any lowering walk.
+    # A and every channel's B are **operand edges** of the SAME type, whose two inhabitants are the
+    # two things an input can be — MATERIALIZED (a gmem ``Load``) or COMPUTED (the node itself,
+    # stored inline; ``_atomize.make_cone`` is the one cone builder). Tree ownership gives an inline
+    # node exactly one consumer — sharing is this node's ARITY, never a name.
     #
-    # The two edges are SYMMETRIC in the algebra and asymmetric only in the SCHEDULE: A is the
-    # M-resident operand (held across the K loop, so it can be compute-filled), B is the K×N operand
-    # the K loop streams (staged through smem / TMA / cp.async, its buffer dtype selecting the atom).
-    # That is a scheduling fact, so it lives in the schedule gates — every tier that needs B's gmem
-    # address states ``isinstance(c.b, Load)`` as an explicit eligibility precondition and declines
-    # otherwise — not in the structural type. A computed B lowers on the gmem-direct scalar tier
-    # through the same ``contraction_loop`` builder a computed A does. — params
-    a: Load | Map | Reduction | Contraction | str
-    b: Load | Map | Reduction | Contraction | str
-    acc: str  # the fold accumulator this node produces — params
+    # The edges are SYMMETRIC in the algebra and asymmetric only in the SCHEDULE: A is the
+    # M-resident operand (held across the K loop, so it can be compute-filled), each B the K×N
+    # operand the K loop streams (staged through smem / TMA / cp.async, its buffer dtype selecting
+    # the atom). That is a scheduling fact, so it lives in the schedule gates — every tier that
+    # needs B's gmem address states ``isinstance(c.b, Load)`` as an explicit eligibility
+    # precondition and declines otherwise — not in the structural type. A computed B lowers on the
+    # gmem-direct scalar tier through the same ``contraction_loop`` builder a computed A does.
+    a: Load | Map | Reduction | Contraction
+    channels: tuple[Channel, ...]  # the product channels (b_i, acc_i) — params; arity 1 = plain matmul
     tile: TilePlan  # the schedule: leaf atom + unit/register widths + K-chunk
     lead_axes: tuple[Axis, ...] = ()  # params
     stage: Stage | None = None  # the schedule: the resolved operand smem pipeline (None = gmem-direct)
 
     @property
     def out(self) -> str:
-        """The bound output name — the primary fold accumulator (a bare contraction's grid ``Write``
-        stores it at the cell; a fused-projection contraction carries its own ``Write``)."""
-        return self.acc
-
-    # ---- the two operand edges, read through ONE set of accessors each. A and B differ only in
-    # which field they read, because the edge type is the same. ---------- #
-    @property
-    def a_ref(self) -> str | None:
-        """The binding NAME this node's A operand references, or ``None`` (a materialized ``Load``, or
-        an already-spliced node). Two siblings sharing one A are exactly two nodes with the same
-        ``a_ref``."""
-        return _operand_ref(self.a)
+        """The bound output name — the PRIMARY channel's fold accumulator (a bare contraction's grid
+        ``Write`` stores it at the cell; a fused-projection contraction carries its own ``Write``)."""
+        return self.channels[0].acc
 
     @property
-    def b_ref(self) -> str | None:
-        """The binding NAME this node's B operand references, or ``None``. Symmetric to
-        :attr:`a_ref`; ``None`` for every B built today, which is a plain weight ``Load``."""
-        return _operand_ref(self.b)
+    def acc(self) -> str:
+        """The primary channel's fold accumulator (``channels[0]``) — the single-channel read every
+        arity-1 consumer uses, and the group's primary component at arity N."""
+        return self.channels[0].acc
+
+    # ---- the operand edges, read through ONE set of accessors each. ``b``-prefixed reads are the
+    # PRIMARY channel's: single-channel tiers read them under their own arity gates, and the layout
+    # facts (``b_trans``) read them because channel agreement is a formation invariant. ---------- #
+    @property
+    def b(self):
+        """The primary channel's streamed operand edge (``channels[0].b``)."""
+        return self.channels[0].b
 
     @property
     def a_body(self) -> tuple[Stmt, ...]:
-        """The A operand's producing stmts — a singleton gmem ``Load``, or the spliced cone node
+        """The A operand's producing stmts — a singleton gmem ``Load``, or the inline cone node
         flattened (a **register-resident** A: flash PV's ``P = exp(S − M)``, produced from an
         in-register score, not a gmem address). The last stmt's def is the operand value
-        ``contraction_loop`` multiplies. An unresolved binding NAME has no stmts here —
-        ``ops.resolve`` splices it first."""
-        return _operand_body(self.a, "a")
+        ``contraction_loop`` multiplies."""
+        return _operand_body(self.a)
 
     @property
     def b_body(self) -> tuple[Stmt, ...]:
-        """The B operand's producing stmts — symmetric to :attr:`a_body`. A gmem ``Load`` for every B
-        built today; a computed B (a fused per-column prologue — qk-norm / RoPE folded into a score,
-        an on-the-fly dequant) would flatten here the same way, and the gmem-direct scalar tier
-        consumes it through the same :attr:`loop` builder."""
-        return _operand_body(self.b, "b")
+        """The primary B operand's producing stmts — symmetric to :attr:`a_body`. A gmem ``Load``
+        for every B built today; a computed B (a fused per-column prologue — qk-norm / RoPE folded
+        into a score, an on-the-fly dequant) would flatten here the same way, and the gmem-direct
+        scalar tier consumes it through the same :attr:`loop` builder."""
+        return _operand_body(self.b)
 
     @property
     def a_computed(self) -> bool:
-        """True when A is a computed register-resident operand (a spliced cone node / an unresolved
-        reference to one), not a gmem ``Load`` — the mma tier reads it as a fragment, the scalar tier
-        as the value."""
+        """True when A is a computed register-resident operand (an inline cone node), not a gmem
+        ``Load`` — the mma tier reads it as a fragment, the scalar tier as the value."""
         return not isinstance(self.a, Load)
 
     @property
     def b_computed(self) -> bool:
-        """True when B is computed rather than a gmem ``Load``. Every staged tier (cp.async / TMA /
-        the sync compute-fill's B channels) needs B's gmem address, so each gates on
-        ``isinstance(c.b, Load)`` and declines here — the schedule states the asymmetry the
+        """True when the primary B is computed rather than a gmem ``Load``. Every staged tier
+        (cp.async / TMA / the sync compute-fill's B channels) needs B's gmem address, so each gates
+        on ``isinstance(c.b, Load)`` and declines here — the schedule states the asymmetry the
         structural type deliberately does not."""
         return not isinstance(self.b, Load)
 
     @property
     def a_name(self) -> str:
-        """The A operand's bound SSA name — the referenced binding's name, the spliced node's ``out``,
-        or the ``Load``'s def."""
+        """The A operand's bound SSA name — the inline node's ``out``, or the ``Load``'s def."""
         return _operand_name(self.a)
 
     @property
     def b_name(self) -> str:
-        """The B operand's bound SSA name — symmetric to :attr:`a_name`."""
+        """The primary B operand's bound SSA name — symmetric to :attr:`a_name`."""
         return _operand_name(self.b)
 
     @property
@@ -496,20 +491,42 @@ class Contraction(Stmt):
         """The synthesized ``CONTRACTION`` reduce ``Loop`` — the canonical ``for k: v = a*b; acc += v``
         mul-add form (built by the shared ``ops.contraction_loop``, the same fold ``_factor``'s scalar
         contraction tier register-tiles). Lets :func:`ops.lower` / ``ops.reduce_loop`` flatten the node
-        back to the loop nest; the node never stores the loop. A FUSED SIBLING GROUP (N channels over
-        one shared A) derives its single loop from the group instead — ``ops.group_loop``."""
+        back to the loop nest; the node never stores the loop.
+
+        At arity N the ONE fused group loop is DERIVED here (never stored, exactly like
+        :attr:`Reduction.loop`): the shared A is lifted once (the primary channel's loop), each
+        further channel splices its ``b → ⊗ → ⊕`` triple after it reusing that A value, and the
+        carrier is the N-COMPONENT identity-family state (one additive component per channel) — the
+        true product-monoid state, so the cross-CTA split tier folds every channel's partials;
+        ``carrier.out`` stays the primary component, and the coop tier remains contraction-blind."""
         from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
         from emmy.compiler.ir.tile.ops import contraction_loop  # noqa: PLC0415 — avoid an import cycle
 
-        return contraction_loop(
+        base = contraction_loop(
             lift=ElementwiseImpl("multiply"),
             fold=Accum(name=self.acc, value=f"{self.acc}__v", op=ElementwiseImpl("add"), axes=(self.k_axis.name,)),
             operand_bodies=(self.b_body, self.a_body),  # B[k, n], A[m, k] (or either's computed body) — keep B-then-A load reuse
             reduce_axis=self.k_axis,
         )
+        if len(self.channels) == 1:
+            return base
+        from emmy.compiler.ir.stmt.algebra import State, Twist  # noqa: PLC0415 — algebra imports leaves
+        from emmy.compiler.ir.stmt.carrier import Channel as CarrierChannel  # noqa: PLC0415
+
+        a_name, k = self.a_name, self.k_axis.name
+        extra: list[Stmt] = []
+        for ch in self.channels[1:]:
+            lift = Assign(name=f"{ch.acc}__v", op=ElementwiseImpl("multiply"), args=(a_name, _operand_name(ch.b)))
+            extra += [*_operand_body(ch.b), lift, Accum(name=ch.acc, value=lift.name, op=ElementwiseImpl("add"), axes=(k,))]
+        add = ElementwiseImpl("add")
+        names = tuple(ch.acc for ch in self.channels)
+        cchans = tuple(CarrierChannel(fold=add, term=f"{nm}__v", dtype=base.carrier.twist.channels[0].dtype) for nm in names)
+        carrier = Carrier(state=State(names=names), twist=Twist(family="id", channels=cchans))
+        return Loop(axis=base.axis, body=Body((*base.body, *extra)), unroll=base.unroll, role=base.role, carrier=carrier)
 
     def lower(self) -> list[Stmt]:
-        """Flatten to the loop-IR body — just the synthesized reduce ``Loop``. A projection is NEVER
+        """Flatten to the loop-IR body — just the synthesized reduce ``Loop`` (the derived product
+        loop at arity N). A projection is NEVER
         here: it has one home, the wrapping :class:`Map`'s body. The materializer expands the node
         through ``_factor.factorize`` instead; this is the structural-key / dump path."""
         return [self.loop]
@@ -559,7 +576,8 @@ class Contraction(Stmt):
     @property
     def b_trans(self) -> bool:
         """B stored N×K (the K axis last in its index) vs the canonical B[k, n] — read off the
-        binding load, the same test ``_atomize`` made when it bound the operand. A gmem LAYOUT
+        primary channel's load, the same test ``_atomize`` made when it bound the operand (channel
+        layout agreement is a formation gate, so the primary speaks for the group). A gmem LAYOUT
         question, so it is meaningful only for a materialized B; a computed B has no gmem address and
         answers ``False`` (every tier that would act on the layout gates on ``isinstance(c.b, Load)``
         first)."""
@@ -575,7 +593,7 @@ class Contraction(Stmt):
         return self
 
     def defines(self) -> tuple[str, ...]:
-        return (self.acc,)
+        return tuple(ch.acc for ch in self.channels)
 
     def external_reads(self) -> tuple[str, ...]:
         def loads(stmts):
@@ -585,58 +603,23 @@ class Contraction(Stmt):
                 for b in s.nested():
                     yield from loads(b)
 
-        # Deep over BOTH operands — a spliced cone may nest its loads (the fused norm→linear cone's
-        # per-row statistic reduce ``Loop``). A binding REFERENCE reads no buffer here: the bound
-        # subtree is the owning ``TileOp``'s, and its loads are reached through ``bindings``.
+        # Deep over EVERY operand edge — an inline cone may nest its loads (the fused norm→linear
+        # cone's per-row statistic reduce ``Loop``).
         def edge(op):
-            return () if isinstance(op, str) else loads(_operand_body(op, "?"))
+            return loads(_operand_body(op))
 
-        return tuple(dict.fromkeys((*edge(self.a), *edge(self.b))))
+        return tuple(dict.fromkeys((*edge(self.a), *(nm for ch in self.channels for nm in edge(ch.b)))))
 
     def pretty(self, indent: str = "") -> list[str]:
         t = " trans" if self.b_trans else ""
         src = lambda op, nm: op.input if isinstance(op, Load) else nm  # noqa: E731 — buffer name, else the bound SSA name
-        ops = f"{src(self.a, self.a_name)} @ {src(self.b, self.b_name)}{t} -> {self.acc} ({self.atom.name})"
+        bs = ",".join(src(ch.b, _operand_name(ch.b)) for ch in self.channels)
+        accs = ",".join(ch.acc for ch in self.channels)
+        ops = f"{src(self.a, self.a_name)} @ {bs}{t} -> {accs} ({self.atom.name})"
         return [f"{indent}Contraction [{self.m_axis.name}, {self.n_axis.name}] {ops}"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         raise AssertionError("Contraction must be expanded by 010_materialize before render")
-
-
-# ``Body.structural_key()`` dispatches :func:`emmy.compiler.ir.stmt.passes.rewrite` over every
-# stmt for SSA / Expr / axis canonicalization. Register ``Contraction``'s handler here, with the node.
-from emmy.compiler.ir.stmt.passes import rewrite as _rewrite  # noqa: E402
-
-
-@_rewrite.register
-def _(s: Contraction, rename, sigma, axis_fn):
-    # Route both operand edges + the accumulator through the generic rewrite (SSA / Expr / axis
-    # canonicalization); map the skeleton axes; pass the ``tile`` schedule through unchanged.
-    # ``b_trans`` is derived from ``b`` (a property), so the rewritten load carries it.
-    # A binding REFERENCE is a plain SSA name — it renames through the same map as any other, which
-    # is what keeps references and their definitions (the ``bindings`` keys) in lockstep.
-    # Only the two STORED operand forms are handled: this rewrite is the ``structural_key``
-    # canonicalization, which runs over stored trees, never over a ``ops.resolve``-spliced one.
-    def edge(op, side):
-        if isinstance(op, str):
-            return rename(op)
-        if isinstance(op, Load):
-            return _rewrite(op, rename, sigma, axis_fn)
-        raise AssertionError(f"rewrite: Contraction.{side} is a spliced {type(op).__name__} node — canonicalize the stored tree")
-
-    return Contraction(
-        axes=tuple(axis_fn(a) for a in s.axes),
-        k_axis=axis_fn(s.k_axis),
-        a=edge(s.a, "a"),
-        b=edge(s.b, "b"),
-        acc=rename(s.acc),
-        tile=s.tile,
-        # ``stage`` is deliberately DROPPED: this rewrite is the ``structural_key``
-        # canonicalization, and the resolved pipeline is already spelled on the knob row
-        # (``STAGE@<k>``) — folding it into the digest here would re-key every staged kernel
-        # against its stored evidence for no added identity.
-        lead_axes=tuple(axis_fn(a) for a in s.lead_axes),
-    )
 
 
 @dataclass(frozen=True)
@@ -698,6 +681,53 @@ class Map(Stmt):
         raise AssertionError("Map must be lowered (ops.lower) before render")
 
 
+# ``Body.structural_key()`` dispatches :func:`emmy.compiler.ir.stmt.passes.rewrite` over every
+# stmt for SSA / Expr / axis canonicalization. Register the structural nodes' handlers here — an
+# INLINE node operand dispatches back through the same registry, so a stored computed operand
+# (the cone, flash's ``P``) canonicalizes like any other subtree.
+from emmy.compiler.ir.stmt.passes import rewrite as _rewrite  # noqa: E402
+
+
+@_rewrite.register
+def _(s: Contraction, rename, sigma, axis_fn):
+    # Route the shared A edge + every channel through the generic rewrite (SSA / Expr / axis
+    # canonicalization); map the skeleton axes; pass the ``tile`` schedule through unchanged.
+    # ``b_trans`` is derived from the primary channel (a property), so the rewritten load carries it.
+    return Contraction(
+        axes=tuple(axis_fn(a) for a in s.axes),
+        k_axis=axis_fn(s.k_axis),
+        a=_rewrite(s.a, rename, sigma, axis_fn),
+        channels=tuple(Channel(b=_rewrite(ch.b, rename, sigma, axis_fn), acc=rename(ch.acc)) for ch in s.channels),
+        tile=s.tile,
+        # ``stage`` is deliberately DROPPED: this rewrite is the ``structural_key``
+        # canonicalization, and the resolved pipeline is already spelled on the knob row
+        # (``STAGE@<k>``) — folding it into the digest here would re-key every staged kernel
+        # against its stored evidence for no added identity.
+        lead_axes=tuple(axis_fn(a) for a in s.lead_axes),
+    )
+
+
+@_rewrite.register
+def _(s: Map, rename, sigma, axis_fn):
+    return Map(
+        body=Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.body)),
+        sources=tuple(_rewrite(src, rename, sigma, axis_fn) for src in s.sources),
+    )
+
+
+@_rewrite.register
+def _(s: Reduction, rename, sigma, axis_fn):
+    # The schedule slices (``reduce`` / ``stage``) pass through like a ``Contraction``'s ``tile``;
+    # the carrier renames in lockstep with the partial's ``Accum``\\ s — the same rule the ``Loop``
+    # handler applies (``Carrier.rename``).
+    return replace(
+        s,
+        carrier=s.carrier.rename(rename),
+        axis=axis_fn(s.axis),
+        partial=Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.partial)),
+    )
+
+
 def _stmt_nodes(s: Stmt):
     """Every structural node reachable from stmt ``s`` (deep through nested bodies)."""
     if isinstance(s, (Map, Reduction, Contraction)):
@@ -709,9 +739,8 @@ def _stmt_nodes(s: Stmt):
 
 
 def tree_nodes(op):
-    """Every structural node in ``op``'s tree, root first — the ONE node walk the name-uniqueness
-    check, the binding resolver, and (later) the path/seam enumerators share. ``bindings`` are the
-    owning :class:`TileOp`'s, walked separately: a bound subtree has exactly one home, so the tree
+    """Every structural node in ``op``'s tree, root first — the ONE node walk the path/seam
+    enumerators share. An inline operand subtree has exactly one home (its edge), so the tree
     stays a tree and no visited set is needed."""
     if op is None:
         return
@@ -725,27 +754,9 @@ def tree_nodes(op):
         for s in op.partial:
             yield from _stmt_nodes(s)
     elif isinstance(op, Contraction):
-        for edge in (op.a, op.b):  # a spliced operand edge is walked like any other node
+        for edge in (op.a, *(ch.b for ch in op.channels)):  # an inline operand edge is walked like any other node
             if isinstance(edge, (Map, Reduction, Contraction)):
                 yield from tree_nodes(edge)
-
-
-def _node_defines(node) -> list[str]:
-    """The SSA names ``node`` itself binds — its own stmts' deep defs plus, for a
-    :class:`Contraction`, the accumulators its SYNTHESIZED loop defines (no stored stmt binds them)."""
-    out: list[str] = []
-    if isinstance(node, Map):
-        stmts = [s for s in node.body if not isinstance(s, (Map, Reduction, Contraction))]
-    elif isinstance(node, Reduction):
-        stmts = [s for s in node.partial if not isinstance(s, (Map, Reduction, Contraction))]
-    else:
-        # A spliced operand edge is its own node in the walk (``tree_nodes`` yields it), so a
-        # ``Contraction`` binds only its own accumulator here.
-        stmts = []
-        out += list(node.defines())
-    for s in stmts:
-        out += sorted(_deep_defines(s))
-    return out
 
 
 @dataclass
@@ -766,22 +777,14 @@ class TileOp(Op):
     - ``workers`` — the warp-specialization split (:class:`~.schedule.WarpSpec`); root-global, ``None`` =
       uniform SIMT.
 
-    ``bindings`` is the kernel's **let table** — shared subtrees keyed by the name each tree's root
-    defines (its ``out``), referenced from an operand field by that plain SSA name
-    (``Contraction.a = "xhat"``). There is deliberately no ``Ref`` node kind: SSA names are
-    already the IR's one reference mechanism, so ``deps`` / ``defines``, the rewrite rename maps and
-    ``structural_key`` canonicalization all speak them unchanged. The invariant that replaces it is
-    **binding-name uniqueness** (:meth:`validate_bindings`, run at construction): a binding's key is
-    the only definition of that name anywhere in ``op`` + ``bindings``, and every name operand
-    resolves to a binding — so a shared subtree has exactly one home, paths stay unique, and two
-    references to one binding are distinguishable from two copies. ``ops.resolve`` inlines the
-    references before any lowering walk.
-
-    There is **no** residual reduce-partition field: EVERY partitioned reduce — a plain / twisted
+    There is **no** let table: a computed operand is stored inline on its edge, and sharing is the
+    product :class:`Contraction`'s arity (see the module docstring), so stored trees are already
+    resolved and every walk is a plain tree walk. There is **no** residual reduce-partition field
+    either: EVERY partitioned reduce — a plain / twisted
     monoid, flash, a coop-K / split-K contraction — carries its :class:`~.schedule.ReducePlan` on its
     ``Reduction`` node (read via ``ops.reduce_plan``); the flat-``Map`` coop-K contraction is nodified
     by ``ops.nodify_reduce`` at schedule / split time. The contraction operand→role binding is not a
-    ``TileOp`` field either — a tiled contraction carries its A/B operands / accumulator on
+    ``TileOp`` field either — a tiled contraction carries its A operand / channels on
     its ``Contraction`` node (``op``), the single source of truth; ``_schedule._contraction_node``
     resolves them via ``_atomize.semiring_binding``."""
 
@@ -789,56 +792,6 @@ class TileOp(Op):
     name: str = ""
     place: Placement = field(default_factory=Placement)
     workers: WarpSpec | None = None
-    bindings: dict = field(default_factory=dict)  # the let table: out-name → shared subtree
-
-    def __post_init__(self) -> None:
-        self.validate_bindings()
-
-    def validate_bindings(self) -> None:
-        """Enforce the binding invariants at CONSTRUCTION — a violation would otherwise surface as a
-        missing (or silently wrong) operand several passes later:
-
-        - every name operand resolves to a binding (no dangling reference);
-        - a binding's key IS its tree's output name;
-        - a binding's key is defined nowhere else — not in ``op``, not in another binding;
-        - a SHARED binding (two or more references) is **closed** — it captures no value name from
-          an enclosing body.
-
-        The uniqueness check is scoped to the binding NAMES rather than every SSA name in the tree:
-        loop IR legitimately binds one name from several stmts (a fold's ``Init`` seed plus its
-        ``Accum`` steps, and split-K's outer reduce folding the accumulator its inner contraction
-        also names). What the let table needs is that a REFERENCE is unambiguous, and that is
-        exactly what this asserts.
-
-        Closure is checked only on SHARED bindings because that is where it is a correctness
-        requirement: a subtree with one home read from N places must be computable at every one of
-        them. A single-reference binding may legitimately capture — flash's ``P = exp(s − m)`` reads
-        the online-softmax carrier's running max, updated by the merge stmts of the very loop step
-        that consumes it. Such a seam is simply not cuttable; :func:`captured_values` is the
-        predicate a placement pass asks before lifting any subtree into its own kernel."""
-        refs: dict[str, int] = {}
-        homes: dict[str, list[str]] = {}
-        keys = set(self.bindings)
-        for home, root in (("op", self.op), *((f"bindings[{k!r}]", v) for k, v in self.bindings.items())):
-            for node in tree_nodes(root):
-                for ref in (node.a_ref, node.b_ref) if isinstance(node, Contraction) else ():
-                    if ref is not None:
-                        refs[ref] = refs.get(ref, 0) + 1
-                for nm in _node_defines(node) if keys else ():  # the def walk only pays where a table exists
-                    homes.setdefault(nm, []).append(home)
-        if dangling := set(refs) - set(self.bindings):
-            raise AssertionError(f"TileOp: operand reference(s) {sorted(dangling)} resolve to no binding")
-        axes = axis_names(self.op) if any(n > 1 for n in refs.values()) else set()
-        for key, root in self.bindings.items():
-            if root is None or key != root.out:
-                raise AssertionError(f"TileOp.bindings key {key!r} is not its tree's output name ({root and root.out!r})")
-            if refs.get(key, 0) > 1 and (captured := captured_values(root, axes | axis_names(root), self.bindings)):
-                raise AssertionError(
-                    f"TileOp.bindings[{key!r}] is shared by {refs[key]} references but captures {list(captured)} "
-                    f"from an enclosing body — a shared subtree must be closed (it has one home, read from many places)"
-                )
-            if other := sorted(set(homes.get(key, ())) - {f"bindings[{key!r}]"}):
-                raise AssertionError(f"TileOp: binding name {key!r} is also defined in {other} — a reference must be unambiguous")
 
     def pretty_body(self) -> str:
         """Render the ``op`` tree structurally (the dump view) — no lowering."""
@@ -846,7 +799,7 @@ class TileOp(Op):
 
         if self.op is None:
             return ""
-        return "\n".join(pretty(self.op, "    ", self.bindings))
+        return "\n".join(pretty(self.op, "    "))
 
 
-__all__ = ["Contraction", "Map", "Reduction", "TileOp", "tree_nodes"]
+__all__ = ["Channel", "Contraction", "Map", "Reduction", "TileOp", "tree_nodes"]

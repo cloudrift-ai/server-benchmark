@@ -4,7 +4,7 @@ algebra/structure split and the round-trip invariant the materializer relies on.
 A ``Reduction`` is the typed successor of the bare annotated reduce ``Loop`` (holding no projection);
 a projected reduce (softmax / RMSNorm) is a ``Map`` whose body IS the projection over a ``Reduction``
 ``source``. A ``Contraction`` is the tiled matmul node (built recognize-side at fork-emit), holding
-its operands + ``tile`` + projection ``epilogue``; it synthesizes the canonical mul-add ``CONTRACTION``
+its ``a`` edge + product channels + ``tile``; it synthesizes the canonical mul-add ``CONTRACTION``
 loop on demand so ``ops.lower`` / ``reduce_loop`` flatten it back to the loop nest the materializer
 expands (via ``_factor.factorize``). These pin that contract plus the structural reads (``axis_role`` /
 ``reduce_loop`` / ``out``) dispatching on the nodes.
@@ -18,7 +18,7 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import Contraction, Map, ReducePlan, Reduction, TileOp
+from emmy.compiler.ir.tile import Channel, Contraction, Map, ReducePlan, Reduction, TileOp
 from emmy.compiler.ir.tile.ops import axis_role, lower, reduce_loop, reduce_plan
 
 
@@ -119,8 +119,7 @@ def _contraction() -> Contraction:
         axes=(Axis("m", 128), Axis("n", 128)),
         k_axis=Axis("k", 256),
         a=a,
-        b=b,
-        acc="acc",
+        channels=(Channel(b=b, acc="acc"),),
         tile=TilePlan.parse("n2/f2"),
     )
 
@@ -216,7 +215,7 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
         c,
         k_axis=kslice,
         a=replace(c.a, index=tuple(sigma.apply(e) for e in c.a.index)),
-        b=replace(c.b, index=tuple(sigma.apply(e) for e in c.b.index)),
+        channels=(replace(c.channels[0], b=replace(c.b, index=tuple(sigma.apply(e) for e in c.b.index))),),
     )
     carrier = Accum(name="acc", value="acc__v", op=ElementwiseImpl("add")).as_carrier()
     red = Reduction(
@@ -242,7 +241,7 @@ def test_reduce_partial_flattens_a_nested_pv_contraction() -> None:
     fold]``. This is the structural seam warp-flash rides."""
     qk = _contraction()  # Σ_k A·B -> acc (the score S)
     pv = replace(_contraction(), axes=(Axis("m", 128), Axis("d", 64)), k_axis=Axis("j", 32))
-    pv = replace(pv, acc="oblk")
+    pv = replace(pv, channels=(replace(pv.channels[0], acc="oblk"),))
     prob = Assign(name="p", op="exp", args=("acc",))  # softmax weight between the two contractions
     fold = Accum(name="O_i", value="oblk", op="add")
     red = Reduction(carrier=fold.as_carrier(), axis=Axis("kv", 128), partial=Body((qk, prob, pv, fold)), role=AxisRole.TWISTED)
@@ -261,8 +260,8 @@ def test_reduce_partial_flattens_a_nested_pv_contraction() -> None:
 def test_flash_op_is_a_two_contraction_tree() -> None:
     """``_flash_op`` builds the blocked two-``Contraction`` tree: BOTH contractions ride the single
     walked edge — ``partial`` — with QK (``Σ_dd Q·K`` score) at its head and PV — a
-    **register-resident-A** contraction (``A = P``, the exp weight, a one-stmt cone in the let
-    table) — spliced later (block=1: a singleton ``pj`` reduce). There is no second composition
+    **register-resident-A** contraction (``A = P``, the exp weight, a one-stmt cone INLINE on the
+    edge) — spliced later (block=1: a singleton ``pj`` reduce). There is no second composition
     edge: a composed reduce spells it ONE way, so the walk reaches both QK and PV as nodes on
     ``partial``. Its A is computed, not a gmem load; its O-fold consumes the PV output ``O_i__pv``,
     so the ⊗ is a contraction node, not an inline FMA."""
@@ -270,17 +269,16 @@ def test_flash_op_is_a_two_contraction_tree() -> None:
     from emmy.compiler.ir.tile.ir import Contraction as _C
     from emmy.compiler.pipeline.passes.lowering.tile._flash import _flash_op
 
-    binds: dict = {}
-    op = _flash_op("Q", "K", "V", [1, 2], Dim(16), Dim(16), 8, 8, bindings=binds)  # (batch, s_q, s_k, head_dim, d_v)
+    op = _flash_op("Q", "K", "V", [1, 2], Dim(16), Dim(16), 8, 8)  # (batch, s_q, s_k, head_dim, d_v)
     red = op.source  # Map(body=[O/l proj], sources=(Reduction(TWISTED, partial=[QK, ..., PV, ...]),))
     contractions = [s for s in red.partial if isinstance(s, _C)]
     assert len(contractions) == 2 and contractions[0].acc == "sacc", "QK score contraction is the partial's head node"
     pv = contractions[1]
-    assert pv.a_computed and pv.a_ref == "O_i__p", "PV's A operand references the bound exp weight P"
-    assert binds["O_i__p"].out == "O_i__p"
+    assert pv.a_computed and pv.a_name == "O_i__p", "PV's A operand is the inline exp weight P"
+    assert pv.a.out == "O_i__p"
     assert pv.acc == "O_i__pv"
     # The reduce loop flattens BOTH contractions; the O-fold reads the PV output (no inline v·P).
-    (kv_loop,) = lower(red, binds)
+    (kv_loop,) = lower(red)
     o_fold = next(s for s in kv_loop.body if isinstance(s, Accum) and s.name == "O_i")
     assert o_fold.value == "O_i__pv", "the O-fold consumes the PV contraction's output, not an inline product"
 
@@ -315,15 +313,14 @@ def test_out_store_index_reproduces_output_layout() -> None:
 def _pv_contraction(tile: str = "") -> Contraction:
     """A PV-style contraction whose **A operand is computed**, not a gmem ``Load``:
     ``O[m, d] = Σ_j P[m, j]·V[j, d]`` with ``P = exp(S[m, j])`` produced from an in-register score
-    (the flash PV shape — its A is register-resident, so the operand edge holds the cone NODE, the
-    form ``ops.resolve`` splices in for a bound reference)."""
+    (the flash PV shape — its A is register-resident, so the operand edge holds the cone NODE
+    inline)."""
     cone = Map(body=Body((Load(name="s_e", input="S", index=(Var("m"), Var("j"))), Assign(name="p", op="exp", args=("s_e",)))))
     return Contraction(
         axes=(Axis("m", 8), Axis("d", 8)),
         k_axis=Axis("j", 8),
         a=cone,
-        b=Load(name="v_e", input="V", index=(Var("j"), Var("d"))),
-        acc="oblk",
+        channels=(Channel(b=Load(name="v_e", input="V", index=(Var("j"), Var("d"))), acc="oblk"),),
         tile=TilePlan.parse(tile) if tile else TilePlan(),
     )
 
@@ -412,8 +409,7 @@ def _computed_b_contraction(a_load: bool = True) -> Contraction:
         axes=(Axis("m", 8), Axis("n", 8)),
         k_axis=Axis("k", 8),
         a=Load(name="a_e", input="A", index=(Var("m"), Var("k"))) if a_load else cone,
-        b=cone,
-        acc="o",
+        channels=(Channel(b=cone, acc="o"),),
         tile=TilePlan(),
     )
 
@@ -424,14 +420,13 @@ def test_both_operand_edges_have_the_same_type() -> None:
     that lives in the tier gates, not in the structural type."""
     from typing import get_type_hints
 
-    hints = get_type_hints(Contraction)
-    assert hints["a"] == hints["b"]
+    assert get_type_hints(Contraction)["a"] == get_type_hints(Channel)["b"]
 
 
 def test_computed_b_exposes_the_same_accessors_as_a() -> None:
     c = _computed_b_contraction()
     assert c.b_computed and not c.a_computed
-    assert c.b_name == "wn" and c.b_ref is None
+    assert c.b_name == "wn"
     assert isinstance(c.b_body[0], Load) and c.b_body[-1].op.name == "exp"
     # Both edges' loaded buffers are external reads; the computed ``wn`` is an internal temp.
     assert set(c.external_reads()) == {"A", "W"}
@@ -475,9 +470,9 @@ def test_both_edges_may_be_computed_at_once() -> None:
     assert any(isinstance(s, Accum) for s in c.loop.body)
 
 
-def test_a_spliced_b_edge_is_walked_like_any_other_node() -> None:
-    """``tree_nodes`` descends BOTH operand edges — the node walk the binding resolver, the
-    name-uniqueness check and the path enumerators share."""
+def test_an_inline_b_edge_is_walked_like_any_other_node() -> None:
+    """``tree_nodes`` descends the A edge AND every channel's B — the one node walk the path/seam
+    enumerators share."""
     from emmy.compiler.ir.tile.ir import tree_nodes
 
     c = _computed_b_contraction()

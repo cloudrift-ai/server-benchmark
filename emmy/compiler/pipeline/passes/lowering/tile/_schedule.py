@@ -1403,7 +1403,7 @@ def _splitk_option(
     kaxis = reduce_loop(tile.op, tile.bindings).axis.name  # the ORIGINAL k-axis name — single-eligible-axis keying
     stamped = {**knobs, _at(TILE, kaxis): tile_spec, _at(REDUCE, kaxis): split_spec}
     stamped[_at(STAGE, kaxis)] = stage.spell() if stage is not None else ""
-    return TileOp(op=op, name=name, place=place, tier=inner.tile, stage=stage, knobs=stamped, bindings=binds)
+    return TileOp(op=op, name=name, place=place, stage=stage, knobs=stamped, bindings=binds)
 
 
 def _warp_option(
@@ -1450,7 +1450,7 @@ def _warp_option(
     stamped[_at(STAGE, kaxis)] = stage.spell() if stage is not None else ""
     if wspec_spec:
         stamped[WSPEC.name] = wspec_spec
-    return TileOp(op=emitted, name=name, place=place, tier=wt, stage=stage, workers=workers, knobs=stamped, bindings=binds)
+    return TileOp(op=emitted, name=name, place=place, stage=stage, workers=workers, knobs=stamped, bindings=binds)
 
 
 def _tile_option(
@@ -1507,7 +1507,7 @@ def _tile_option(
     kaxis = reduce_loop(tile.op, tile.bindings).axis.name
     stamped = {**knobs, _at(TILE, kaxis): spec, _at(REDUCE, kaxis): reduce_spec}
     stamped[_at(STAGE, kaxis)] = stage.spell() if stage is not None else ""
-    return TileOp(op=op, name=name, place=place, tier=plan, stage=stage, knobs=stamped, bindings=binds)
+    return TileOp(op=op, name=name, place=place, stage=stage, knobs=stamped, bindings=binds)
 
 
 def _map_reg_width(spec: str) -> int:
@@ -1974,7 +1974,7 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     stage = Stage(transport="sync", smem=(node.a_name,), bk_elems=bk_elems)
     stamped = {**knobs, _at(TILE, k_ax.name): spec}
     emitted = Map(body=epilogue, sources=(node,)) if len(epilogue) else node
-    return TileOp(op=emitted, name=name, place=place, tier=wt, stage=stage, knobs=stamped, bindings=binds)
+    return TileOp(op=emitted, name=name, place=place, stage=stage, knobs=stamped, bindings=binds)
 
 
 def _resolve_twisted_stage(

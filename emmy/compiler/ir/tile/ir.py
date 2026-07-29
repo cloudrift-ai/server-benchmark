@@ -16,9 +16,8 @@ free-axis → grid :class:`~.schedule.Placement` (``place``) and the warp split
 (``workers``). The
 per-node schedule slices ride the structural nodes themselves (a
 :class:`Contraction`'s ``tile``, a :class:`Reduction`'s
-``reduce`` — EVERY reduce partition rides its node, none on the ``TileOp``); the residual root fields
-(``tier`` / ``stage``) hold the schedule for the not-yet-nodified forms (a non-tiled
-contraction's output tile, the resolved ``STAGE`` / ``WSPEC``; flash is now a
+``reduce`` — EVERY reduce partition rides its node, none on the ``TileOp``); the residual root field
+``stage`` holds the resolved operand pipeline (flash is now a
 ``Map(sources=(Reduction(partial=[Contraction(QK), …, Contraction(PV)]),))`` node tree, so its
 partition rides the node). There is no per-kind kernel/schedule type: the algebra is read
 structurally off the axes' :class:`~emmy.compiler.ir.axis.AxisRole`
@@ -603,8 +602,6 @@ class TileOp(Op):
     - ``place`` — the free-axis → grid binding (:class:`~.schedule.Placement`); root-global.
     - ``workers`` — the warp-specialization split (:class:`~.schedule.WarpSpec`); root-global, ``None`` =
       uniform SIMT.
-    - ``tier`` — the output fragment (:class:`~.schedule.TilePlan`) for a non-tiled / split-partial
-      contraction; a tiled contraction rides its ``tile`` on the ``Contraction`` node. ``None`` = per-cell.
     - ``stage`` — the operand smem pipeline (:class:`~.schedule.Stage`); ``None`` = gmem-direct.
 
     ``bindings`` is the kernel's **let table** — shared subtrees keyed by the name each tree's root
@@ -629,7 +626,6 @@ class TileOp(Op):
     op: object = None
     name: str = ""
     place: Placement = field(default_factory=Placement)
-    tier: TilePlan | None = None
     stage: Stage | None = None
     workers: WarpSpec | None = None
     bindings: dict = field(default_factory=dict)  # the let table: out-name → shared subtree

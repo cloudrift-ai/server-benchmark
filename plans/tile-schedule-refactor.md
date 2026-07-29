@@ -19,10 +19,16 @@ A kernel's math is the `project ∘ reduce ∘ map` composition stored as struct
 from the *schedule* (tile plans, reduce partitions, staging). This refactor extends the same separation to
 three things the current design still conflates or scatters:
 
-1. **Operand sharing vs fusion.** "These two matmuls read the same A" is a structural FACT; "lower them as
-   one loop with one A fragment" is a scheduling DECISION. `Contraction.folds` bakes both into one field.
-   After the refactor, the fact is a shared reference in the tree and the decision is schedule/placement
-   state — so the compiler can *see* reuse and *choose* what to do about it.
+1. **Operand sharing is algebra, not naming.** "These two matmuls read the same A" is ONE contraction
+   whose output is a tuple: a product-carrier `Contraction` with one `a` and N channels `(b_i, acc_i)`,
+   folding the componentwise `(+, ×)` — the same N-component product monoid `ops.group_loop` already
+   derives, stored as node shape instead of recovered from a sibling pattern. Reuse is visible as arity;
+   there is no name-reference mechanism to police. This is NOT `Contraction.folds` back: that defect was
+   channels as bolted-on `b_load`-only appendages on a node that also carried `epilogue`; here channels
+   are first-class operand edges, the carrier stays derived, and the fusion decision stays where the
+   north star puts it — loop IR fused these channels before recognition ever saw them, and recognition
+   only STRUCTURES the fact. (Supersedes the sibling-contractions-over-a-let-binding design an earlier
+   revision landed as 1a/1b; see *The operand edge* and residual 1j.)
 2. **Kernel boundaries.** Which parts of the tree end up in which CUDA launch is a placement DECISION —
    a `cut | fuse` bit on each parent↔child seam of the tree. Kernels are a derived view: the cut set
    partitions the tree, each partition materializes as one launch, each cut seam materializes its value to
@@ -33,8 +39,9 @@ three things the current design still conflates or scatters:
    is node-only, and a `Reduction` composes by placing a node *inside* `partial` at a load-bearing
    position. Four vocabularies for one relation, and the differences are not algebraic — they are the
    accidents of which case was built first. After the refactor there is ONE: the **operand edge**
-   (see *The operand edge* below), whose three inhabitants are the three things an input can be —
-   materialized, computed, or shared.
+   (see *The operand edge* below), whose two inhabitants are the two things an input can be —
+   materialized or computed. Sharing is not a third thing an input can be — it is the product
+   contraction's arity (point 1), so no reference arm exists.
 
 From this one idea everything else follows:
 
@@ -60,8 +67,8 @@ From this one idea everything else follows:
 Agents should read the `ir/tile/ir.py` module docstring first; these examples fix the shapes this plan
 talks about.
 
-Every input below is an **operand edge** (`Load` = materialized, a node = computed, `str` = shared) — see
-*The operand edge*. Read `└─` as an edge, never as a stmt position.
+Every input below is an **operand edge** (`Load` = materialized, a node = computed) — see *The operand
+edge*. Read `└─` as an edge, never as a stmt position.
 
 RMSNorm — projection over a fold (`project ∘ reduce`):
 
@@ -71,13 +78,12 @@ Map                               ← body: rsqrt(acc/N+ε) statistic + the per-
    └─ sources: Load(x[k])         ← the materialized edge — already-cut, no placement decision
 ```
 
-Fused norm→linear / gate⊗up after phase 1 — sharing is a binding, channels are siblings:
+Fused norm→linear / gate⊗up — sharing is arity, ONE product-carrier contraction:
 
 ```
-bindings: { "x̂": Map(body=scale, sources=(Reduction(stat over k),)) }  # the cone, defined ONCE, keyed by its out
-op:       Map(body=swiglu(acc_g, acc_u) + Write,
-              sources=(Contraction(a="x̂", b=Load(Wg) → acc_g),
-                       Contraction(a="x̂", b=Load(Wu) → acc_u)))
+Map                                  ← body: swiglu(acc_g, acc_u) + Write
+└─ sources: Contraction(a=cone, channels=((Load(Wg) → acc_g), (Load(Wu) → acc_u)))
+   └─ a: Map(body=scale, sources=(Reduction(stat over k),))    ← the cone, an inline computed operand
 ```
 
 Flash — a twisted streaming reduce whose per-step `partial` is a SEQUENCE composing two contractions:
@@ -87,7 +93,7 @@ Map
 └─ sources: Reduction(axis=kv, TWISTED)
    └─ partial: [ Contraction(QK, k=dd),      ← a=Load(Q), b=Load(K)
                  …online-softmax merge: m' = max(m, s); α = exp(m − m'); P = exp(s − m')…
-                 Contraction(PV, k=pj) ]     ← a="P" (bound cone), b=Load(V)
+                 Contraction(PV, k=pj) ]     ← a = the P node, inline (computed), b=Load(V)
 ```
 
 Position here is **semantic**, not incidental: PV's A operand is the `P` the merge stmts of that same loop
@@ -105,11 +111,11 @@ single strongest motivation for path addressing).
 ### The operand edge
 
 ```python
-Operand = Load | Map | Reduction | Contraction | str
+Operand = Load | Map | Reduction | Contraction
 ```
 
-ONE type for ONE relation — *how a node names a value it consumes*. Its three inhabitants are the three
-things an input can be, and there is no fourth:
+ONE type for ONE relation — *how a node names a value it consumes*. Its two inhabitants are the two
+things an input can be, and there is no third:
 
 - **`Load` — materialized.** The value is already in a buffer. This is NOT a degenerate node to be wrapped
   as `Map(body=(Load,))`: it is the **terminal of the cut lattice**. Cut semantics (phases 4–5) say the
@@ -117,45 +123,54 @@ things an input can be, and there is no fourth:
   its seam is cut. It carries no schedule slice and admits no placement decision — its seam is trivially
   already-cut. Wrapping it would add a tree level to the overwhelmingly common case and hide the
   `.input` / `.index` leaf reads the whole staging / TMA / dtype machinery is built on.
-- **a node (`Map` / `Reduction` / `Contraction`) — computed.** The value is produced by a subtree.
-- **`str` — shared.** A name into `TileOp.bindings`.
+- **a node (`Map` / `Reduction` / `Contraction`) — computed.** The value is produced by a subtree, stored
+  inline on the edge. Tree ownership gives it exactly one consumer — its parent — because the one in-tree
+  relation that HAD several consumers (N matmuls over one A) is now a single edge: the product
+  contraction's `a`. So there is no shared arm and no reference machinery: `TileOp.bindings`,
+  `validate_bindings`, `ops.resolve` and the rename-lockstep all retire (1j); stored trees are already
+  resolved. A computed operand may capture enclosing loop state (flash's `P` reads the running max its
+  own loop step updates) — legal, since its one home is in scope; just uncuttable (`ir.captured_values`).
 
 Invariants:
 
 - **Every edge admits `Load`.** This is the universal part, and it is what cut needs: no edge may be
   node-only. `Map.sources` is node-only today, so a cut at a projection seam cannot yet be spelled in the
   parent at all.
-- **A labelled `Contraction` operand stores `Load | str` — a computed one is ALWAYS a binding**, shared or
-  not (`_atomize.bind_cone` is already the one binder, and every construction site already produces a
-  `Load` or a name). These are precisely the edges where sharing is the point — N siblings over one A is
-  the reason the let table exists — so admitting an inline node beside the name would make "shared" and
-  "not shared" differ in spelling, the defect this refactor already retired twice (`Reduction.source` vs
-  node-in-`partial`; `Contraction.epilogue` vs `Map.body`).
-- **A `Map` / `Reduction` source stores the node inline**, and takes the `str` arm only if a source ever
-  becomes shared. The discriminator is arity, not taste: *bind iff the value can have more than one
-  consumer.* A contraction operand can (the fused edge). A source, by tree ownership, has exactly one
-  consumer — its parent. Cut is what creates a second consumer, and a cut child that is shared goes through
-  the MIMO foundation (#433) and reaches its parents as a `Load` of the materialized buffer anyway.
-- The node arm on a `Contraction` operand field is therefore the *resolved* form only.
-- **`Body` is not an operand form.** It survives today only because `ops.resolve` inlines with
-  `Body(tuple(lower(bound, bindings)))` — it *lowers* mid-resolve. Resolve is a tree operation and must
-  splice the bound NODE (`replace(op, a=bindings[nm])`). That drops the third spelling, makes `tree_nodes`
-  uniform (it currently special-cases an operand `Body` and iterates its stmts), and makes `ops.cone_seam`
-  readable on a resolved tree instead of pre-resolve only.
+- **A `Contraction` is the product node: one `a`, channels `(b_i, acc_i)`, one schedule row.** The
+  gate⊗up edge is arity 2; the plain matmul is arity 1 (the overwhelmingly common case — keep its reads
+  cheap through len-1 accessors). The product carrier and the fused group loop stay DERIVED (the
+  `ops.group_loop` derivation, read off the channel tuple), byte-compatible with the sibling-group loop,
+  because `op_cache_key` and kernel identity hang off it. Product FORMATION is a recognize-time gate, not
+  a fusion decision: the channels arrive already loop-fused, and channels whose B layouts disagree
+  (`b_trans`) simply never product — the group-formation gate moves, unchanged.
+- **Channel separation is deliberately forfeited at tile level.** Siblings-under-`Map.sources` could in
+  principle exile one channel by a source cut; a product node cannot be split per channel by any edge
+  substitution. This is the all-fusion-in-loop-IR invariant applied honestly: de-fusing channels is loop
+  IR's decision (don't merge them), never a tile rewrite — and the measured evidence agrees (#389
+  multichannel split: correct-but-null). A forfeit, not an oversight.
+- **Every computed input stores the node inline** — sources and contraction operands alike; there is no
+  stored/resolved distinction any more. If some future form ever needs one value consumed from two places
+  neither arity nor a product can absorb, that is a graph-level materialization (the MIMO foundation,
+  #433) — the consumers read a `Load` of the buffer — never a new in-tree reference mechanism.
+- **`Body` is not an operand form** (retired with 1e), and neither is a name: with inline nodes the
+  `rewrite` / `structural_key` canonicalizer must walk a stored node arm — the branch that is a loud
+  assertion today — and `tree_nodes` / `ops.cone_seam` read every tree the same way, there being no
+  pre-/post-resolve distinction left.
 - **Closure is a property, checked where it is required — not a universal invariant.** A subtree is
   *closed* when it reads no VALUE name from its enclosing body (iteration variables excluded — they are
-  bound by the loop nest, not by any value tree). Closure is what makes a seam liftable, so it is
-  *required* of a SHARED binding (one home, N reading sites: a captured name would have to be in scope at
-  all of them) and it is the precondition a placement cut asks before lifting anything into its own
-  kernel. It is NOT required in general: flash's `P = exp(s − m)` reads the online-softmax carrier's
-  running max, updated by the merge stmts of the very loop step that consumes it. That seam is simply not
-  cuttable. `ir.captured_values` is the predicate; `validate_bindings` enforces it on shared bindings.
+  bound by the loop nest, not by any value tree). Closure is what makes a seam liftable, so it is the
+  precondition a placement cut asks before lifting anything into its own kernel — and nothing else
+  requires it: flash's `P = exp(s − m)` reads the online-softmax carrier's running max, updated by the
+  merge stmts of the very loop step that consumes it — legal (its one home is in scope), just uncuttable.
+  `ir.captured_values` is the predicate; with the let table gone there is no construction-time
+  enforcement site left, and none is needed — an inline operand's single consumer always sits inside the
+  scope it captures from.
 - **Contraction operands are edges; a `Reduction`'s composed steps are a SEQUENCE.** See the correction
   below — `partial` position is semantic, not an accident.
 
 | node | inputs | body |
 | --- | --- | --- |
-| `Contraction` | `a`, `b` — labelled operand edges (M-resident / streamed) | none; the projection rides the wrapping `Map` |
+| `Contraction` | `a` (M-resident) + channels `(b_i, acc_i)` — labelled operand edges, `b_i` streamed | none; the projection rides the wrapping `Map` |
 | `Reduction` | composed nodes in `partial`, positionally | `partial` — the lift, the composed steps, the carrier update |
 | `Map` | `sources: tuple[Operand, ...]` | `body` — the per-cell sweep / projection |
 
@@ -191,7 +206,8 @@ Consequences:
   (`isinstance(c.b, Load)` as an explicit eligibility precondition in `_demoted_atoms`,
   `_tma_operand_rank_ok`, `_sync_operands`) rather than inheriting it from an unstated type guarantee.
   `_demoted_atoms` already writes that check — dead under today's type, and a hint the surrounding code
-  already thinks in the wider vocabulary.
+  already thinks in the wider vocabulary. Under the product node each channel carries its own `b_i` edge;
+  the gates quantify over all of them (one schedule row ⇒ one verdict for the whole node).
 - **Cut becomes a pure edge substitution** — `replace(node, <edge>=Load(buf))`. Same edge, same path,
   flippable back, and the parent's keys never re-root. This is what makes `PLACE@<path> = cut | fuse` a
   *bit* rather than a restructuring, and it is the reason the edge must admit `Load`. A composed input
@@ -204,8 +220,10 @@ Consequences:
 - **The path grammar gains `b` as a peer label to `a`**, and `in.b` beside `in.a` in the reserved
   graph-placement prefix. Reserve both NOW even though no producer needs `b` yet: the grammar and the cut
   model are being designed in phases 2–5, and retrofitting an operand label after evidence is stored
-  re-keys entries, against this plan's zero-migration goal. Flash's two `Contraction` sources under one
-  `Reduction` stay disambiguated by axis (`TILE@dd` / `TILE@pj`), exactly as the live goldens spell them.
+  re-keys entries, against this plan's zero-migration goal. Channels share the `b` label — a per-channel
+  key (none exists today; the node schedules as ONE row) would disambiguate with the ordinal `<n>`.
+  Flash's two `Contraction` steps under one `Reduction` stay disambiguated by axis (`TILE@dd` /
+  `TILE@pj`), exactly as the live goldens spell them.
 
 **Sequencing.** The `b: Operand` widening should land *with* its first producer, not ahead of it. Nothing
 can construct a non-`Load` B today (`_atomize.semiring_binding` binds cones into `a` only; `_flash` builds
@@ -218,53 +236,42 @@ dequant is the other. The machinery is already shape-symmetric — `SyncOperand(
 `_sync_operands` compute-filling a B slab, a column-invariant `cone_seam`, and lifting
 `assert len(ops.channels) == 1` on the non-sync path; the type line is the last 5% of it.
 
-What SHOULD land ahead of any producer, because the placement phases depend on it: `resolve` splicing nodes
-instead of lowering them, the closure invariant, and the `b` / `in.b` grammar reservations.
+What SHOULD land ahead of any producer, because the placement phases depend on it: the `b` / `in.b`
+grammar reservations. (The other two items once listed here — resolve splicing nodes, the closure
+invariant — landed as 1e / 1g; 1j then retires `resolve` outright, there being no names left to splice.)
 
 ### Phase-1 IR generalization
 
-- **Let-bound sharing, referenced by SSA name — no new reference primitive.** `TileOp.bindings` is a table
-  of bound subtrees keyed by the name each tree's root defines (its `out`); a consumer references the bound
-  value by that plain SSA name in an operand field (`Contraction.a = "x̂"`). There is deliberately NO `Ref`
-  node kind: SSA names are already the IR's one reference mechanism (`deps`/`defines`, the rewrite rename
-  maps, `structural_key` canonicalization all speak names), and a wrapper node would add vocabulary without
-  information. The invariant that replaces it: **tree-wide name uniqueness** — every name defined anywhere
-  in `op` + `bindings` is defined exactly once per `TileOp`, validated in `__post_init__` (which also
-  rejects a string operand that resolves to no binding — dangling references fail at construction, not at
-  lowering). The rewrite machinery renames binding keys through the same rename map as SSA names, so
-  references and definitions stay in lockstep and two references to one binding canonicalize differently
-  from two copies — sharing is part of the structural identity. Still a let-tree, NOT an implicit DAG: a
-  shared subtree has exactly one home (its binding), so paths stay unique and `structural_key` stays a
-  tree fold; walks consult `bindings` at name-operand fields instead of needing visited-set DAG traversal.
-  (If a shared subtree ever needs to sit in STATEMENT position inside a `Body` — where a bare string
-  cannot stand — add a tiny Ref-stmt then; no current form needs it.)
-- **Sibling contractions replace fold channels.** `Contraction` drops `folds` and holds one `b` / one
-  `acc`. A fused multi-fold edge (gate⊗up) is N sibling contractions under `Map.sources` (a tuple now;
-  `source` remains as the len-≤1 compat property) referencing one shared A name. Consequences, all
+- **No sharing mechanism at all.** An earlier revision of this plan spelled sharing as let-bound subtrees
+  (`TileOp.bindings`, SSA-name-referenced, landed as 1a/1b — no `Ref` node, name-uniqueness validated at
+  construction, rename-lockstep through the rewrite maps). The product contraction removes the only
+  in-tree multi-consumer relation, so the whole apparatus retires with it (1j): `bindings`,
+  `validate_bindings`, `ops.resolve`, the rename-lockstep and the uniqueness rules. Computed operands —
+  the cone, flash's `P` — store inline on their edge; the tree is a plain tree, walked without a table
+  lookup, and `structural_key` stays a tree fold trivially.
+- **The product contraction replaces sibling contractions** (which replaced fold channels, 1b).
+  `Contraction` holds one `a` and N channels `(b_i, acc_i)`; gate⊗up is arity 2, the plain matmul arity 1,
+  and `Map.sources` drops back to ≤1 source in every current form. Kept from the sibling design, all
   deliberate:
-  - A fused sibling group is SCHEDULED AS ONE UNIT — one shared TilePlan/Stage/ReducePlan row for the
-    group. Rationale: the fused lowering requires the channels to agree anyway (today the shared `tile`
-    field enforced this implicitly), and it means the knob codec needs no sibling ordinals — one
-    `TILE@…contraction.k` key per group. Siblings only schedule independently after a cut, when they are
-    separate kernels (separate trees) anyway.
+  - The node is SCHEDULED AS ONE UNIT — one TilePlan/Stage/ReducePlan row, so the knob codec needs no
+    channel ordinals: one `TILE@…contraction.k` key per node, exactly the stored spelling today.
   - The fused group loop and the N-component product-monoid carrier (what the cross-CTA split tier folds)
-    are DERIVED from the group at lower/split time — the same derive-never-store rule as `Reduction.loop`.
-    The derived loop must be byte-compatible with what the `folds` path synthesizes today, because
-    `op_cache_key` and kernel identity hang off it.
-  - `b_trans`-must-agree stops being a node assert and becomes a group-formation gate: channels with
-    disagreeing B layouts simply never group (they were never legally fusable).
-- **The cone becomes a real node tree.** `a_operand: Load | Body` → `a: Operand` stored as `Load | str` (a
-  binding name); the computed-A cone is
-  a bound `Map(body=per-cell normalize, source=Reduction(stat))`. The stat reduce is thereby addressable
-  and cuttable; `stat_prologue()`'s ad-hoc body-splitting at the K seam becomes a read of the node
-  boundary (Reduction = the statistic, Map body = the per-cell cone).
+    stay DERIVED at lower/split time — the same derive-never-store rule as `Reduction.loop` — and must
+    stay byte-compatible with what the sibling path synthesizes, because `op_cache_key` and kernel
+    identity hang off it.
+  - `b_trans`-must-agree stays a FORMATION gate, now at product-formation: channels with disagreeing B
+    layouts simply never product (they were never legally fusable).
+- **The cone becomes a real node tree.** The computed-A cone is a
+  `Map(body=per-cell normalize, source=Reduction(stat))` stored inline on the `a` edge. The stat reduce is
+  thereby addressable and cuttable; `stat_prologue()`'s ad-hoc body-splitting at the K seam becomes a read
+  of the node boundary (Reduction = the statistic, Map body = the per-cell cone).
 - **One home for projections.** Retire `Contraction.epilogue`. Today a projection can ride either a
   wrapping `Map.body` or the contraction's own epilogue — two spellings of the same algebra, which would
   force the future cut realizer to handle two seam shapes. After this, EVERY projection is a `Map` wrapper;
   a bare contraction/reduction's grid `Write` remains materializer glue (never part of the tree).
 - **No root-residue schedule fields.** Retire `TileOp.tier` / `TileOp.stage`: with everything nodified,
   each schedule slice rides the node it decorates (split partials carry theirs on their own node). `TileOp`
-  shrinks to `op + bindings + place + workers + knobs` — the root keeps only what is genuinely
+  shrinks to `op + place + workers + knobs` — the root keeps only what is genuinely
   root-global (the free-axis grid binding, the warp split, the knob row).
 - **One composition rule for nested reduces (required — the no-duplication invariant).**
   `Reduction.source` (split-K's `Reduction ⊃ Contraction`, spliced ahead of the partial) and
@@ -288,8 +295,8 @@ Grammar: `FAMILY@<node-path>[.<axis>][<n>] = value`.
   property; `RASTER` / `WSPEC` / `LOOPIFY` stay root-global and bare. The family prefix is what lets the
   prior's featurizers, `_FAMILY_ORDER` grouping, and every stored evidence row parse unchanged.
 - **Path** = lowercase node-kind segments from the tree root (`map.reduce.contraction`), plus field-edge
-  labels only where kind alone is ambiguous under one parent (`a` for the A-operand edge; a binding's name
-  for its subtree). **Axis** = the schedule-bearing axis, the leaf discriminator for TILE/REDUCE/STAGE;
+  labels only where kind alone is ambiguous under one parent (`a` for the A-operand edge, `b` for a
+  channel's). **Axis** = the schedule-bearing axis, the leaf discriminator for TILE/REDUCE/STAGE;
   absent for PLACE (whose path names the seam's CHILD node) and for a `Map` body tile (`TILE@map = f2`).
 - **Short paths are canonical.** Stampers and ALL stored evidence (goldens, tune DB, online prior) use the
   SHORTEST spelling that is unique for the kernel's tree: bare family where one node is eligible,
@@ -318,8 +325,6 @@ Grammar: `FAMILY@<node-path>[.<axis>][<n>] = value`.
   valid across a cut/fuse A/B, and a child kernel's evidence is shape-transferable (a cut-out stat kernel
   at (M, K) is the same kernel whatever parent it was cut from). The parent-path spelling of a child
   decision must resolve to the same evidence as the child-tree anchor.
-- **Shared bindings**: canonical spelling from the binding root (its name); a single-reference binding may
-  be spelled through the referencing edge as sugar.
 - **RESERVED grammar (implement nothing, reject cleanly, never reuse the tokens):** graph-level placement,
   when it earns its way back in, spells as value-centric placement in this same namespace. Every seam IS a
   value (an in-tree seam materializes the child node's bound output; a graph edge is a named tensor), so
@@ -341,7 +346,7 @@ Spellings on the live gemma goldens (~580 entries — all unchanged; resolution 
 | Kind | Stored (today = after) | Resolves to |
 | --- | --- | --- |
 | matmul | bare `TILE` / `REDUCE` / `STAGE` | `contraction.k` |
-| norm_linear, mlp_geglu | bare | `map.contraction.k` (one shared row per fused group) |
+| norm_linear, mlp_geglu | bare | `map.contraction.k` (one row — the product-carrier contraction) |
 | flash | `TILE@dd` / `TILE@pj` / bare `REDUCE` / `STAGE` | `map.reduce.contraction.dd` / `…pj` / `map.reduce.kv` |
 | rms_norm | bare `REDUCE` | `map.reduce.k` |
 | bare reduce | bare `REDUCE` | `reduce.k` |
@@ -355,9 +360,9 @@ Spellings on the live gemma goldens (~580 entries — all unchanged; resolution 
 - **Semantics of `cut`**: split the tree at the seam. The child subtree becomes its own graph node
   (re-entering recognition as a fresh tree); the seam value is materialized to a buffer (f32 state for
   reduce seams, mirroring the split-reduce workspace rule); the parent consumes a plain `Load` of that
-  buffer where the child used to be. A cut child that is SHARED (a multi-reference binding) becomes a
-  multi-output/single producer via the MIMO foundation (#433) — materialize once, read N times, never
-  recompute per consumer.
+  buffer where the child used to be. An in-tree cut child always has exactly ONE consumer — inline
+  operands are single-consumer by tree ownership, and the product node's shared A is one edge — so the
+  realizer needs no MIMO case (#433 stays a graph-level foundation).
 - **`fuse` is the default on every seam; `cut` is evidence/pin-only.** The recognized tree IS the fused
   form, so the default literally means "no rewrite". This kills the old per-site default zoo and preserves
   the safety invariant: an unseeded site deploys the recognized kernel and never pays for a cut it has no
@@ -365,7 +370,8 @@ Spellings on the live gemma goldens (~580 entries — all unchanged; resolution 
 - Old → new mapping: flash's `PLACE: fuse` → `PLACE@map = fuse` (projection seam in-kernel);
   `PLACE@cone: cut` → `PLACE@map.contraction.a = cut` (cone → stat kernel + scale kernel + plain matmul —
   the plain matmul is the payoff, it unlocks the standard matmul tiers/goldens the fused computed-A form
-  cannot legally use). NEW, previously inexpressible: the 3-kernel split reduce —
+  cannot legally use; at arity N the same cut yields the N-channel `Load`-A product node — channels stay
+  together, the forfeit under *The operand edge*). NEW, previously inexpressible: the 3-kernel split reduce —
   `REDUCE@map.reduce.k = g<n>k` + `PLACE@map = cut` = partial kernels → combine kernel → separate
   elementwise projection kernel. Placement decisions COMPOSE with schedule decisions instead of needing
   new vocabulary per combination.
@@ -404,7 +410,8 @@ and no partition decision — an interior cut only inserts a gmem round-trip bet
 statements. Any case where an interior split ever mattered is expressible by re-associating the tree
 (`Map ∘ Map`), i.e. by changing the ALGEBRA, not by extending the codec. Empirical check: every cut the
 old system actually deployed lands on a node seam in the new trees — the cone cut's two distinct values
-(the stat and `x̂`) are the binding's internal `map.reduce` seam and the `contraction.a` seam respectively.
+(the stat and `x̂`) are the cone subtree's internal `map.reduce` seam and the `contraction.a` seam
+respectively.
 
 **Claim 3 — the fork space is a finite, generically enumerable product.** One shared walker yields the
 finite site sets; the schedule space is:
@@ -483,11 +490,11 @@ What a phase-2 agent actually finds today, and where it sits against *The operan
 
 | stored field | today | target |
 | --- | --- | --- |
-| `Contraction.a` | `Load \| str`; node when resolved (1e) | reached |
-| `Contraction.b` | same union as `a` (1h) | reached |
+| `Contraction.a` | `Load \| str`; node when resolved (1e) | `Load \| node`, stored inline — no `str` (1j) |
+| `Contraction.b` | same union as `a` (1h) | channels `(b_i, acc_i)`, each `b_i` an operand edge (1j) |
 | `Reduction.partial` | `Body`, carries composed nodes positionally; all node kinds are `Stmt`s (1f) | reached |
-| `Map.sources` | `tuple[Reduction \| Contraction \| Map, ...]` | `tuple[Operand, ...]` (must admit `Load` for cut) |
-| `TileOp` | `op + name + place + workers + bindings` (+ the inherited `Op` knob metadata) | unchanged |
+| `Map.sources` | `tuple[Reduction \| Contraction \| Map, ...]` | ≤1 source after 1j; must admit `Load` for cut (1i) |
+| `TileOp` | `op + name + place + workers + bindings` (+ the inherited `Op` knob metadata) | drops `bindings` (1j) |
 
 Everything else the design section calls for is in place: every schedule slice rides its node
 (`Contraction.tile` / `.stage`, `Reduction.reduce` / `.stage`); `Contraction.epilogue`, `TileOp.tier`,
@@ -501,9 +508,10 @@ rename lockstep, pretty), `test_structural_reduction.py`, and the group-formatio
 
 #### Residuals — the delta to *The operand edge*
 
-1e, 1f and 1g have LANDED (below); phase 1 is closed. Nothing remaining blocks phase 2's codec work —
-paths and families are well-defined on the landed tree. 1i is a phase-4 prerequisite that belongs in the
-realizer's own commit; 1h waits on a producer.
+1e–1h have LANDED (below). 1j — the product-contraction revision of the north star — REOPENS phase 1 and
+should land ahead of the phase-2 codec (it deletes the binding-name spellings and the resolve step the
+codec would otherwise have to speak). 1i is a phase-4 prerequisite that belongs in the realizer's own
+commit.
 
 1e. **`resolve` splices instead of lowering; the `Body` arm retires** — LANDED. `ops.resolve` now returns
     `replace(op, a=resolve(bound, bindings))`, so the operand edge keeps its NODE. `Body` was never a
@@ -556,6 +564,16 @@ realizer's own commit; 1h waits on a producer.
     RoPE folded into flash's QK, on-the-fly weight dequant), and the work there is `_sync_operands`
     compute-filling a B slab plus a column-invariant `cone_seam` — not the type. Phase 2 must still
     reserve the `b` edge label and the `in.b` prefix in the grammar.
+1j. **The product contraction — `str` retires, the let table with it** — OPEN; the north-star revision
+    (supersedes the sibling/binding encoding 1a/1b landed). `Contraction` holds one `a` and N channels
+    `(b_i, acc_i)`; the fused gate⊗up edge is arity 2 and the wrapping `Map` returns to a single source.
+    Every computed operand stores inline (flash's `P` moves out of `bindings` onto PV's `a` edge);
+    `TileOp.bindings` / `validate_bindings` / `ops.resolve` / the rename-lockstep and name-uniqueness
+    rules are deleted; the `rewrite` canonicalizer learns to walk a stored node arm (a loud assert
+    today); `is_group` / `group_loop` read the channel tuple instead of matching siblings. Verification:
+    the 11-kernel source-digest A/B (the derived channel loop must stay byte-identical to the
+    sibling-group loop) plus the binding tests re-targeted to arity (a 2-channel node ≢ two separate
+    contractions; formation gates unchanged).
 1i. **`Map.sources` must admit `Load`** — OPEN, and correctly deferred to phase 4. It is node-only today,
     so a cut at a projection seam cannot be spelled in the parent at all. The widening is one line; it
     belongs in the commit that teaches the realizer to perform the substitution, not ahead of it.
@@ -600,11 +618,11 @@ Goal: restore placement as ONE generic edge-cut pass + fork enumeration, per the
 Design notes:
 
 - The realizer takes a stamped `PLACE@<path> = cut`, walks to the seam via the shared walker, and performs
-  the split: materialize the seam value, emit the child as its own graph node (MIMO if the binding has
-  other references), re-enter recognition for both halves. It should know NOTHING about which seam it is —
-  seam-specific knowledge (what buffer dtype, what the child recognizes as) must fall out of the node
-  kinds, or it has been factored wrong. Thanks to phase 1 there are exactly two seam shapes: a `Map`
-  projection seam and an operand-binding seam.
+  the split: materialize the seam value, emit the child as its own graph node (always single-consumer —
+  no MIMO case in-tree), re-enter recognition for both halves. It should know NOTHING about which seam it
+  is — seam-specific knowledge (what buffer dtype, what the child recognizes as) must fall out of the node
+  kinds, or it has been factored wrong. Thanks to phase 1 + 1j there are exactly two seam shapes: a `Map`
+  projection seam and a contraction operand edge.
 - Enumeration: recognition offers PLACE rows per seam with option-0 = `fuse` (the no-rewrite row); `cut`
   rows are enumerated only where evidence or a pin exists. Pin precedence: exact path > suffix > bare.
 - Composition order with the split-reduce rewrite matters: the split consumes the GRID stage and produces
@@ -635,20 +653,24 @@ YAML-comment baselines.
 - **Fused-lowering drift (phase 1)** re-keys kernel caches and can invalidate golden µs. Parity is settled
   once at phase 5 — budget triage time there; if the eval-golden pass surfaces broad drift, bisect back to
   the phase-1 commits rather than patching goldens forward.
+- **1j identity churn**: the channel-tuple conversion and flash's `P` moving from `bindings` to an inline
+  edge must leave kernel-source digests and `structural_key` unchanged — prove it by the same 11-kernel
+  digest A/B 1e/1f used, before trusting any golden µs.
 - Cone nodification changes `--ir tile` dumps and structural test assertions — sweep the structural tests
   early in 1b, they are the likeliest silent-assumption breakage.
 - Stored-short-key ambiguity from future nodifications — the resolver fails loudly by design; the phase-2
   compat test is the tripwire. Never "fix" it by silently re-keying evidence.
 - Dump/kname churn: kernel names derive from realized ops; verify the per-kernel torch-reproducer slicing
-  still attributes the cone's ops correctly once it lives in a binding.
+  still attributes the cone's ops correctly once it lives inline on the operand edge.
 - **Non-closed subtrees are legal but uncuttable (residual 1g, landed).** `ir.captured_values` is the
   predicate; phase 4 must call it before lifting a seam, or flash's `P` — which reads the running max its
-  own loop step updates — will be silently cut into a kernel that cannot compute it. Shared bindings are
-  already rejected at construction; single-reference ones are the phase-4 caller's responsibility.
+  own loop step updates — will be silently cut into a kernel that cannot compute it. After 1j there is no
+  construction-time closure check left (no shared bindings exist to require one) — every operand seam is
+  the phase-4 caller's responsibility.
 
 ## Cleanup
 
 Docs at the end of each landed phase: the pipeline ARCHITECTURE (knob/fork system), the tile-lowering
-ARCHITECTURE (bindings + name references, sibling groups, PLACE as edge property), and CLAUDE.md's
-tile-lowering blurb
+ARCHITECTURE (the product-carrier contraction + inline computed operands after 1j, PLACE as edge
+property), and CLAUDE.md's tile-lowering blurb
 (node vocabulary changes in phase 1). Delete this plan when phase 5 lands.

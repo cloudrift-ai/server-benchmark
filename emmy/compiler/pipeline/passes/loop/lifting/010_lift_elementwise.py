@@ -32,8 +32,8 @@ def rewrite(match: Match, root: Node) -> Graph | None:
     load_stmts: list[Stmt] = []
     load_names: list[str] = []
     for i, inp_id in enumerate(root.inputs):
-        inp_node = graph.nodes.get(inp_id)
-        inp_shape = tuple(inp_node.output.shape) if inp_node is not None else ()
+        inp_t = graph.buffer(inp_id)
+        inp_shape = tuple(inp_t.shape) if inp_t is not None else ()
         idx = _identity_index(inp_shape, axes)
         name = f"in{i}"
         load_names.append(name)
@@ -55,9 +55,9 @@ def rewrite(match: Match, root: Node) -> Graph | None:
     for inp_id in root.inputs:
         if inp_id in frag.nodes:
             continue
-        ext = graph.nodes.get(inp_id)
-        shape = ext.output.shape if ext is not None else ()
-        dtype = ext.output.dtype if ext is not None else "f32"
+        ext_t = graph.buffer(inp_id)
+        shape = ext_t.shape if ext_t is not None else ()
+        dtype = ext_t.dtype if ext_t is not None else "f32"
         frag.add_node(InputOp(), [], Tensor(inp_id, shape, dtype), node_id=inp_id)
 
     out_id = frag.add_node(

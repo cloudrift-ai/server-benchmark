@@ -785,7 +785,7 @@ def _extract_scale(graph: Graph, xnode: Node) -> tuple[float | None] | None:
     const_loads: dict[str, float] = {}
     for s in xnode.op.body.iter():
         if isinstance(s, Load):
-            src = graph.nodes.get(s.input)
+            src = graph.producer(s.input)
             if src is not None and isinstance(src.op, ConstantOp) and src.op.value is not None:
                 for nm in s.names:
                     const_loads[nm] = float(src.op.value)
@@ -812,7 +812,7 @@ def _def(stmts: tuple[Stmt, ...], name: str) -> Stmt | None:
 
 
 def _is_loopop(graph: Graph, buf: str) -> bool:
-    node = graph.nodes.get(buf)
+    node = graph.producer(buf)
     return node is not None and isinstance(node.op, LoopOp)
 
 
@@ -980,14 +980,15 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
         return None
     x_buf, v_id, causal, window, mask_buf = found
     operands = (x_buf, v_id, *((mask_buf,) if mask_buf is not None else ()))
-    if any(nid not in graph.nodes for nid in operands):
+    if any(graph.buffer(nid) is None for nid in operands):
         return None
 
     # A clean scaled-QK producer (Q/K recoverable as plain Loads). A fused score
     # producer (RoPE / GQA index inline) whose Q/K aren't plain loads is not handled —
     # flash isn't recognized, and the softmax-then-P@V falls back to its un-fused tiers.
-    qk = _extract_qk(graph.nodes[x_buf])
-    packed = _extract_packed_qkv(graph.nodes[x_buf], root, v_id) if qk is None else None
+    score_producer = graph.producer(x_buf)
+    qk = _extract_qk(score_producer)
+    packed = _extract_packed_qkv(score_producer, root, v_id) if qk is None else None
     if qk is None and packed is None:
         _fuse_degraded(root, "score producer's Q/K are not plain or packed affine loads (e.g. RoPE'd QK)")
         return None
@@ -995,7 +996,7 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
     # silently DROPPED by the canonical re-synthesis below — the fused kernel would attend
     # outside the mask. The fusion boundary keeps masks on the consumer (010_merge_loop_ops);
     # if one lands here anyway, decline the fuse rather than mis-attend.
-    if any(isinstance(s, Select) or (isinstance(s, Assign) and s.op.name == "add") for s in graph.nodes[x_buf].op.body.iter()):
+    if any(isinstance(s, Select) or (isinstance(s, Assign) and s.op.name == "add") for s in graph.producer(x_buf).op.body.iter()):
         _fuse_degraded(root, "score producer carries mask stmts the flash re-synthesis cannot keep")
         return None
     access_indices = None
@@ -1006,11 +1007,11 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
         access_indices = (q_idx, k_idx, v_idx)
     else:
         (q_id, q_layout), (k_id, k_layout), _head_dim = qk
-        if q_id not in graph.nodes or k_id not in graph.nodes:
+        if graph.buffer(q_id) is None or graph.buffer(k_id) is None:
             return None
     # The producer's actual scale — the flash re-synthesis re-applies it; assuming
     # 1/sqrt(d) here mis-scaled every explicit-``scale=`` SDPA (Gemma-nano's scale=1.0).
-    scale = _extract_scale(graph, graph.nodes[x_buf])
+    scale = _extract_scale(graph, graph.producer(x_buf))
     if scale is None:
         _fuse_degraded(root, "score producer's scale constant is ambiguous")
         return None
@@ -1022,14 +1023,14 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
         # Shapes canonicalize to (batch…, seq, last) per each operand's traced layout — the
         # eligibility predicates and the fragment's grid work on canonical shapes; the LOAD
         # indices permute back to each operand's own slot order (``_permute_idx``).
-        q_shape = _canon_shape(graph.nodes[q_id].output.shape, q_layout)
-        k_shape = _canon_shape(graph.nodes[k_id].output.shape, k_layout)
-        v_shape = _canon_shape(graph.nodes[v_id].output.shape, v_layout)
+        q_shape = _canon_shape(graph.buffer(q_id).shape, q_layout)
+        k_shape = _canon_shape(graph.buffer(k_id).shape, k_layout)
+        v_shape = _canon_shape(graph.buffer(v_id).shape, v_layout)
     group = gqa_group(q_shape, k_shape)
     if group is None:
         _fuse_degraded(root, "head axis not statically GQA-divisible")
         return None
-    mask_shape = graph.nodes[mask_buf].output.shape if mask_buf is not None else None
+    mask_shape = graph.buffer(mask_buf).shape if mask_buf is not None else None
     if not flash_shape_eligible(q_shape, k_shape, v_shape, group=group, mask_shape=mask_shape):
         _fuse_degraded(root, "shape not flash-eligible")
         return None
@@ -1054,9 +1055,9 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
         layouts=(q_layout, k_layout, v_layout),
         access_indices=access_indices,
         raw_shapes=(
-            tuple(graph.nodes[q_id].output.shape),
-            tuple(graph.nodes[k_id].output.shape),
-            tuple(graph.nodes[v_id].output.shape),
+            tuple(graph.buffer(q_id).shape),
+            tuple(graph.buffer(k_id).shape),
+            tuple(graph.buffer(v_id).shape),
         ),
         out_index=out_index,
         scale=scale[0],
@@ -1081,7 +1082,9 @@ def fused_producer_ids(graph: Graph, root: Node) -> tuple[str, ...]:
     frag = try_flash(graph, root)
     if frag is None:
         return ()
-    return tuple(nid for nid in root.inputs if nid not in frag.nodes and isinstance(graph.nodes[nid].op, LoopOp))
+    return tuple(
+        nid for nid in root.inputs if nid not in frag.nodes and (p := graph.producer(nid)) is not None and isinstance(p.op, LoopOp)
+    )
 
 
 def is_flash_score_producer(graph: Graph, root: Node) -> bool:

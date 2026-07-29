@@ -214,8 +214,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
 
     frag = Graph()
     for inp in root.inputs:
-        n = match.graph.nodes[inp]
-        frag.add_node(op=InputOp(), inputs=[], output=n.output, node_id=inp)
+        frag.add_node(op=InputOp(), inputs=[], output=match.graph.buffer(inp), node_id=inp)
     from emmy.compiler.dtype import F32  # noqa: PLC0415 — the bridged statistic rows are fp32, as in the fused form
 
     for stat_op, stat_ws in stat_nodes:

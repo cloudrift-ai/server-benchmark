@@ -162,6 +162,10 @@ EXPECTED_GAPS = {
 # fixed one is deleted. Unlike a gap, an expected drift asserts the recorded golden and the
 # audit twin genuinely disagree for a KNOWN reason that is not a serving regression.
 EXPECTED_DRIFTS: dict[str, set[tuple[str, str]]] = {
+    # The historic 4090 entries (down_proj.m1.t in post1/post1-global) burned down when the
+    # transpose-into-constant fold gained its sub-sm_90 matvec exception (``_fold_constant``):
+    # sm_89 m1 twins now walk the k-major transposed arm — the layout the ``.m1.t`` rows were
+    # recorded on — so the goldens realize in-model again.
     "NVIDIA GeForce RTX 5090": set(),
     "NVIDIA GeForce RTX 4090": set(),
 }

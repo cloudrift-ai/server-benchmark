@@ -279,12 +279,12 @@ class Match:
         return self.graph.nodes[nid]
 
     def input(self, i: int) -> Node | None:
-        """Root's ``i``-th input as a ``Node``, or ``None`` when ``i``
-        exceeds the input count or the input node was removed."""
+        """The node producing the root's ``i``-th input buffer, or ``None``
+        when ``i`` exceeds the input count or the producer was removed."""
         root = self.root
         if i >= len(root.inputs):
             return None
-        return self.graph.nodes.get(root.inputs[i])
+        return self.graph.producer(root.inputs[i])
 
     def is_alive(self) -> bool:
         """``True`` when every consumed node still resolves to the same

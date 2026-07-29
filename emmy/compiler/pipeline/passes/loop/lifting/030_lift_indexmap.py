@@ -34,7 +34,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
     if len(root.op.sources) == 1:
         src = root.op.sources[0]
         src_id = root.inputs[src.input_idx]
-        src_shape = graph.nodes[src_id].output.shape if src_id in graph.nodes else ()
+        src_shape = t.shape if (t := graph.buffer(src_id)) is not None else ()
         idx = _substituted_index(src.coord_map, mapping, src_shape)
         input_names.append(src_id)
         body.append(Load(name="in0", input=src_id, index=idx))
@@ -43,7 +43,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
         branches: list[SelectBranch] = []
         for i, src in enumerate(root.op.sources):
             src_id = root.inputs[src.input_idx]
-            src_shape = graph.nodes[src_id].output.shape if src_id in graph.nodes else ()
+            src_shape = t.shape if (t := graph.buffer(src_id)) is not None else ()
             idx = _substituted_index(src.coord_map, mapping, src_shape)
             input_names.append(src_id)
             name = f"in{i}"
@@ -63,9 +63,9 @@ def rewrite(match: Match, root: Node) -> Graph | None:
     for inp_id in input_names:
         if inp_id in frag.nodes:
             continue
-        ext = graph.nodes.get(inp_id)
-        shape = ext.output.shape if ext is not None else ()
-        dtype = ext.output.dtype if ext is not None else "f32"
+        ext_t = graph.buffer(inp_id)
+        shape = ext_t.shape if ext_t is not None else ()
+        dtype = ext_t.dtype if ext_t is not None else "f32"
         frag.add_node(InputOp(), [], Tensor(inp_id, shape, dtype), node_id=inp_id)
 
     out_id = frag.add_node(

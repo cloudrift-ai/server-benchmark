@@ -50,10 +50,13 @@ def collect_kernel_ancestors(
     stack = list(graph.nodes[root_id].inputs)
     while stack:
         cur = stack.pop()
+        # ``cur`` is a buffer name — canonicalize to its producing node id
+        # (identity for primary outputs) so ``keep`` stays node-granular.
+        node = graph.producer(cur)
+        cur = node.id if node is not None else cur
         if cur in keep:
             continue
         keep.add(cur)
-        node = graph.nodes.get(cur)
         if node is None:
             continue
         if isinstance(node.op, compute_types):
@@ -77,7 +80,8 @@ def topo_order(graph: Graph, keep: set[str]) -> list[str]:
             return
         visited.add(nid)
         for dep in graph.nodes[nid].inputs:
-            visit(dep)
+            p = graph.producer(dep)
+            visit(p.id if p is not None else dep)
         order.append(nid)
 
     for nid in keep:
@@ -103,11 +107,16 @@ def single_node_graph(graph: Graph, node_id: str, absorb: frozenset[str] = froze
     for kid in topo_order(graph, keep):
         src = graph.nodes[kid]
         if kid in synthetic:
-            sub.add_node(InputOp(), [], src.output, node_id=src.id)
-            sub.inputs.append(kid)
+            # A synthetic boundary mirrors ALL of the producer's buffers so a
+            # consumer edge naming a non-primary buffer still resolves in-slice,
+            # and every buffer becomes a slice input (fed bench data by name).
+            sub.add_node(InputOp(), [], outputs=src.outputs, node_id=src.id)
+            sub.inputs.extend(src.buffer_names())
         else:
-            sub.add_node(src.op, list(src.inputs), src.output, node_id=src.id)
+            sub.add_node(src.op, list(src.inputs), outputs=src.outputs, node_id=src.id)
             if isinstance(src.op, InputOp) and kid in graph.inputs:
                 sub.inputs.append(kid)
-    sub.outputs.append(node_id)
+    # Every buffer of the sliced node is a slice output (a non-primary buffer
+    # with no in-slice consumer must plan as an output, not dead scratch).
+    sub.outputs.extend(graph.nodes[node_id].buffer_names())
     return sub

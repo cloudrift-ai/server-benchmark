@@ -159,7 +159,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
     candidates += [s.input for b in _op_bodies(cons) for s in b.iter() if isinstance(s, Load) and s.input not in candidates]
     producer = None
     for inp in candidates:
-        p = graph.nodes.get(inp)
+        p = graph.producer(inp)
         if p is None or not _is_finalize(p):
             continue
         stamped = p.op.knobs.get("PLACE@fin")
@@ -175,10 +175,10 @@ def rewrite(match: Match, root: Node) -> Graph | None:
         raise RuleSkipped("a sibling reader can't inline — the finalize kernel would survive anyway")
 
     ws_id = producer.inputs[0]
-    ws_node = graph.nodes.get(ws_id)
-    if ws_node is None:
+    ws_t = graph.buffer(ws_id)
+    if ws_t is None:
         raise RuleSkipped("workspace node missing")
-    tpl = _template(producer.op.op, producer.id, len(ws_node.output.shape))
+    tpl = _template(producer.op.op, producer.id, len(ws_t.shape))
     if tpl is None:
         raise RuleSkipped("finalize body is not the single-component single-store shape")
     stmts, w, defs = tpl
@@ -253,8 +253,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
         new_inputs.append(ws_id)  # a body-only reader gains the workspace edge it now loads from
     frag = Graph()
     for ext in dict.fromkeys(new_inputs):
-        n = graph.nodes[ext]
-        frag.add_node(op=InputOp(), inputs=[], output=n.output, node_id=ext)
+        frag.add_node(op=InputOp(), inputs=[], output=graph.buffer(ext), node_id=ext)
     new_id = f"{root.id}__fin"
     frag.add_node(
         op=new_root,

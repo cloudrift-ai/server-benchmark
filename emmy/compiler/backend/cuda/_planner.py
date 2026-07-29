@@ -48,22 +48,26 @@ def compute_live_intervals(scratch_names: list[str], launches: list) -> dict[str
     first_write: dict[str, int] = {}
     last_read: dict[str, int] = {}
     for i, ln in enumerate(launches):
-        if ln.node_id in scratch:
+        # ``writes`` lists every buffer this launch produces (a multi-output
+        # kernel writes several); plans stored before the field existed carry
+        # none — fall back to the historic one-buffer-per-launch ``node_id``.
+        writes = set(getattr(ln, "writes", ()) or (ln.node_id,))
+        for w in writes:
             # ``setdefault``: a delegated zero-init (``zero_prologues`` below) writes this
             # buffer at an EARLIER launch — the interval must start there, or a slab-slot
             # neighbor still live between the prologue and the producer would be zeroed over.
-            first_write.setdefault(ln.node_id, i)
-        # An AUX output (a second buffer this launch writes — the stat-sink's ``__sq``) has no
-        # launch of its own; its per-launch memset (``zero_outputs``) IS its first write — and a
-        # DELEGATED zero (``zero_prologues``) is this launch's in-kernel write of a downstream
-        # accumulator, the earliest touch of that buffer.
+            if w in scratch:
+                first_write.setdefault(w, i)
+        # A per-launch memset (``zero_outputs``) IS a buffer's first write — and a
+        # DELEGATED zero (``zero_prologues``) is this launch's in-kernel write of a
+        # downstream accumulator, the earliest touch of that buffer.
         for z in (*ln.zero_outputs, *ln.zero_prologues):
             if z in scratch:
                 first_write.setdefault(z, i)
         reads = set(ln.arg_names)
         reads.update(d.src_buf for d in ln.tma_descriptors)
         for name in reads:
-            if name in scratch and name != ln.node_id:
+            if name in scratch and name not in writes:
                 last_read[name] = i
     intervals: dict[str, tuple[int, int]] = {}
     for name in scratch_names:

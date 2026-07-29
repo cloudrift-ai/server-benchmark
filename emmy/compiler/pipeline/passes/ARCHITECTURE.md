@@ -163,8 +163,9 @@ dimensions, with their own re-entry contracts — keep them apart:
   buffer, and A's complete-value store site (a split-K FINALIZE or pointwise sweep — never an atomic partial, whose
   per-partition values are incomplete) gains the term re-evaluated on each just-stored value plus a `RowAccum`
   (a hierarchical warp-shfl + smem block fold + one `atomicAdd` per block, zero-init'd per launch through the
-  ordinary `zero_outputs` memset machinery). `T__sq` is an `AuxOutputOp` graph node (no launch of its own — the
-  producer's launch writes it); B re-emits as an un-mapped `LoopOp` so `010_recognize` peels BOTH the row and sweep
+  ordinary `zero_outputs` memset machinery). `T__sq` is output slot 1 of the producer node itself (a true
+  multi-output node — planned/allocated per buffer, consumed through an ordinary buffer edge; the old
+  `AuxOutputOp` sentinel is retired); B re-emits as an un-mapped `LoopOp` so `010_recognize` peels BOTH the row and sweep
   axes free — the whole point: the grid-per-row latency-bound stat kernel becomes a wide 2-D pointwise sweep. The
   structural probe (`_sink.bind_sinkable_stat`) gates in the negative: the reduce's flat address in T must be affine
   with reduce coefficient 1 and mixed-radix row coefficients (so `row = flat / N` is a bijection — the per-head

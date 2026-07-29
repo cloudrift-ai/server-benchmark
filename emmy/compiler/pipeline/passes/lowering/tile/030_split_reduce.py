@@ -234,8 +234,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, contraction: Cont
 
     frag = Graph()
     for inp in root.inputs:
-        n = match.graph.nodes[inp]
-        frag.add_node(op=InputOp(), inputs=[], output=n.output, node_id=inp)
+        frag.add_node(op=InputOp(), inputs=[], output=match.graph.buffer(inp), node_id=inp)
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
     frag.add_node(op=fin_tile, inputs=[ws_name], output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
     frag.outputs = [out.name]
@@ -321,8 +320,7 @@ def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Map, plan: R
 
     frag = Graph()
     for inp in root.inputs:
-        n = match.graph.nodes[inp]
-        frag.add_node(op=InputOp(), inputs=[], output=n.output, node_id=inp)
+        frag.add_node(op=InputOp(), inputs=[], output=match.graph.buffer(inp), node_id=inp)
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
     frag.add_node(op=fin_tile, inputs=[ws_name], output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
     frag.outputs = [out.name]
@@ -453,8 +451,7 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     # --- splice the two-kernel fragment in place of the single split TileOp ----------------
     frag = Graph()
     for inp in root.inputs:
-        n = match.graph.nodes[inp]
-        frag.add_node(op=InputOp(), inputs=[], output=n.output, node_id=inp)
+        frag.add_node(op=InputOp(), inputs=[], output=match.graph.buffer(inp), node_id=inp)
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, out.dtype), node_id=ws_name)
     frag.add_node(op=fin_tile, inputs=[ws_name], output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
     frag.outputs = [out.name]

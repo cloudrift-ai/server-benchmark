@@ -64,7 +64,7 @@ def rewrite(match: Match, root: Node) -> KernelOp | None:
     if not todo:
         raise RuleSkipped("no undelegated atomic outputs")
 
-    pnode = next((n for i in root.inputs if (n := graph.nodes.get(i)) is not None and isinstance(n.op, KernelOp)), None)
+    pnode = next((n for i in root.inputs if (n := graph.producer(i)) is not None and isinstance(n.op, KernelOp)), None)
     if pnode is None:
         raise RuleSkipped("no KernelOp predecessor — the capture's first launch keeps its memset")
 

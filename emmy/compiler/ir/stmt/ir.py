@@ -106,6 +106,8 @@ class BodyOp(Op):
         body without re-seeding I/O surfaces here, not on a later mystery
         KeyError), then replaces each entry's placeholder Tensor with the
         real graph-sourced one when the buffer is a graph node."""
+        from emmy.compiler.ir.stmt.leaves import ZeroPrologue  # noqa: PLC0415 — leaf import; ir.stmt.__init__ would cycle
+
         body_in, body_out = self._derive_io_names()
         stray_in = [n for n in body_in if n not in self.inputs]
         if stray_in:
@@ -113,14 +115,23 @@ class BodyOp(Op):
         stray_out = [n for n in body_out if n not in self.outputs]
         if stray_out:
             raise ValueError(f"{type(self).__name__}: body has Write buffers {stray_out} not covered by outputs={list(self.outputs)}")
+        # Single-source-of-truth: a body-written buffer that IS a graph buffer
+        # must be produced by THIS node (an output slot), never by another node.
+        # The one sanctioned exception is a delegated zero-init (``ZeroPrologue``
+        # writes a downstream accumulator on purpose — ``005_delegate_zero_init``).
+        delegated = {s.dst for s in self.body.iter() if isinstance(s, ZeroPrologue)}
+        own = set(node.buffer_names())
+        foreign = [n for n in body_out if n not in own and n not in delegated and graph.producer(n) is not None]
+        if foreign:
+            raise ValueError(f"{type(self).__name__}: body writes buffer(s) {foreign} produced by another node — declare them as outputs")
         for name in self.inputs:
-            gnode = graph.nodes.get(name)
-            if gnode is not None:
-                self.inputs[name] = _tensor_for_node(gnode)
+            t = _tensor_for_buffer(graph, name)
+            if t is not None:
+                self.inputs[name] = t
         for name in self.outputs:
-            gnode = graph.nodes.get(name)
-            if gnode is not None:
-                self.outputs[name] = _tensor_for_node(gnode)
+            t = _tensor_for_buffer(graph, name)
+            if t is not None:
+                self.outputs[name] = t
 
     def pretty_body(self) -> str:
         """Indented body listing — one stmt per line via per-stmt
@@ -130,12 +141,17 @@ class BodyOp(Op):
         return "\n".join(_pretty_body_stmts(self.body, "    "))
 
 
-def _tensor_for_node(node) -> Tensor:  # noqa: ANN001 — Node lives in compiler.graph; would cycle to import.
-    """Return ``node.output``, but for ``ConstantOp`` predecessors stamp
+def _tensor_for_buffer(graph, name: str) -> Tensor | None:  # noqa: ANN001 — Graph lives in compiler.graph; would cycle to import.
+    """Return the graph tensor traveling under buffer ``name`` (any output
+    slot of its producer), but for ``ConstantOp`` producers stamp
     ``constant=True`` (and ``value`` for scalar literals) onto a fresh
     Tensor so downstream consumers can recognize literal-scalar buffers
-    without re-querying the graph for ConstantOp predecessors."""
-    t = node.output
+    without re-querying the graph for ConstantOp predecessors. ``None``
+    when the buffer isn't a graph buffer (matcher-known external)."""
+    t = graph.buffer(name)
+    if t is None:
+        return None
+    node = graph.producer(name)
     if isinstance(node.op, ConstantOp):
         return Tensor(t.name, t.shape, t.dtype, constant=True, value=node.op.value)
     return t

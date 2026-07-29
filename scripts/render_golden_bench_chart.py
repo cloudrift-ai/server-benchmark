@@ -2,7 +2,7 @@
 
 Reads a ``golden_bench.json`` (per-golden-case latencies for Eager PyTorch / torch.compile /
 Emmy) and writes a self-contained echarts HTML — one horizontal bar row per case, emmy and
-torch.compile speedups vs the eager baseline, sorted losers-first by the emmy ratio — plus a
+torch.compile speedups vs the eager baseline, sorted winners-first by the emmy ratio — plus a
 ``.csv`` of the plotted values. This is the scripted generator for the per-kernel figures in
 the "Optimizing Gemma4 12B for RTX GPUs" article.
 
@@ -55,7 +55,7 @@ def main() -> None:
         f = fm.get(name)
         fm_ratio = eager / f["Emmy"] if isinstance(f, dict) and f.get("Emmy") else None
         rows.append((name, eager / r["Emmy"], fm_ratio, eager / tc if tc else None))
-    rows.sort(key=lambda t: t[1])
+    rows.sort(key=lambda t: t[1], reverse=True)  # winners first (fastest emmy ratio at the top)
 
     bars = [Bar(name="Emmy (greedy deploy pick)", values=[e for _, e, _, _ in rows], color=EMMY_COLOR)]
     if fm:

@@ -903,7 +903,7 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
     # geometry reflects the hint-sized tile the kernel was tuned for.
     sym_env: dict[str, int] = {}
     for nid in graph.inputs:
-        for dim in graph.nodes[nid].output.shape:
+        for dim in graph.buffer(nid).shape:
             if isinstance(dim.expr, Var) and dim.hint is not None:
                 sym_env.setdefault(dim.expr.name, dim.hint)
 
@@ -2016,7 +2016,7 @@ def _hint_sized_inputs(lowered, example_args, example_kwargs):
         return example_args, example_kwargs, sym_env
     resized = []
     for nid, tensor in zip(input_ids, flat, strict=True):
-        for axis, d in enumerate(lowered.nodes[nid].output.shape):
+        for axis, d in enumerate(lowered.buffer(nid).shape):
             if isinstance(d, Dim) and not d.is_static:
                 tensor = _tile_to(tensor, axis, int(d.expr.eval(sym_env)))
         resized.append(tensor)
@@ -2037,6 +2037,9 @@ def _symbolic_bench_note(sym_env: dict[str, int]) -> str | None:
 
 
 def _eager_output(module, args, kwargs):
+    """Eager reference forward. Returns the module's output — a Tensor, or a
+    TUPLE of Tensors for a multi-output module (``_check_accuracy`` compares
+    each graph output buffer against the tuple positionally)."""
     import torch
 
     cuda_module = module.to("cuda")
@@ -2045,7 +2048,8 @@ def _eager_output(module, args, kwargs):
     with torch.no_grad():
         out = cuda_module(*cuda_args, **cuda_kwargs)
     if isinstance(out, tuple):
-        out = out[0]
+        tensors = tuple(t for t in out if isinstance(t, torch.Tensor))
+        return tensors if len(tensors) > 1 else tensors[0] if tensors else out[0]
     return out
 
 
@@ -2085,11 +2089,17 @@ def _check_accuracy(outputs, eager_out) -> str | None:
 
     import numpy as np  # noqa: PLC0415
 
-    eager_flat = eager_out.detach().cpu().flatten().tolist()
-    if any(e != e for e in eager_flat):
+    # Multi-output: the eager reference may be a tuple — compare each backend
+    # output against its positional eager counterpart (graph-output order).
+    # Historic single-output behavior (every output vs THE eager tensor) is the
+    # degenerate case of the fallback-to-first pairing below.
+    eager_refs = list(eager_out) if isinstance(eager_out, (tuple, list)) else [eager_out]
+    eager_flats = [t.detach().cpu().flatten().tolist() for t in eager_refs]
+    if any(e != e for flat in eager_flats for e in flat):
         return "eager reference contains NaN (reproducer inputs out of domain)"
     failures: list[str] = []
-    for buf_name, arr in outputs.items():
+    for pos, (buf_name, arr) in enumerate(outputs.items()):
+        eager_flat = eager_flats[pos] if len(eager_flats) == len(outputs) else eager_flats[0]
         values = arr.flatten().tolist()
         if any(v != v for v in values):
             return f"CORRECTNESS FAIL: output {buf_name} contains NaN"

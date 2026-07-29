@@ -283,15 +283,15 @@ def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
 def test_norm_linear_warp_pick_is_computed_a_contraction():
     """Picking a warp row materializes the recognize-built ``Map(body=projection, source=node)``
     tree — the same ``project ∘ contract`` spelling the Reduction tiers use: the source is a
-    computed-A :class:`Contraction` whose A cone is headed by the annotated PLANAR statistic reduce
-    ``Loop``, one fold channel, its (m, n) output on the grid (the column axis joined); the ``Map``
-    body carries the ``Write``; and the knob stamps the DB rows key on (``PLACE@cone`` + the
-    decided-empty stat ``REDUCE``)."""
+    computed-A :class:`Contraction` REFERENCING its A cone by name, the bound cone a real node tree
+    (``Map(body=per-cell normalize, sources=(Reduction(stat),))``), one fold channel, its (m, n)
+    output on the grid (the column axis joined); the ``Map`` body carries the ``Write``; and the knob
+    stamps the DB rows key on (``PLACE@cone`` + the decided-empty stat ``REDUCE``)."""
     _, tile = _resolve(_norm_linear_graph(), pick=_is_warp_row)
     assert isinstance(tile.op, Map)
     c = tile.op.source
     assert isinstance(c, Contraction) and c.a_computed and len(c.folds) == 1
-    stat_loop = c.a_operand[0]
+    stat_loop = tile.bindings[c.a_ref].source.loop
     assert isinstance(stat_loop, Loop) and stat_loop.is_reduce and stat_loop.role is AxisRole.PLANAR
     assert [a.extent.as_static() for a in c.axes] == [32, 3072]
     assert c.axes[0].name == tile.place.grid[-2].name and c.axes[1].name == tile.place.grid[-1].name
@@ -302,6 +302,24 @@ def test_norm_linear_warp_pick_is_computed_a_contraction():
     assert tile.knobs.get(f"REDUCE@{stat_loop.axis.name}") == ""
     assert tile.knobs.get(f"TILE@{c.k_axis.name}", "").startswith("a:")
     assert tile.knobs.get(f"STAGE@{c.k_axis.name}") == "d1/sync"
+
+
+def test_norm_linear_cone_is_a_bound_node_tree():
+    """The computed-A cone lives ONCE, in ``TileOp.bindings``, as a real node tree — the per-row
+    statistic is a :class:`Reduction` source, the per-cell normalize its ``Map`` body — and the
+    contraction names it. That is what makes the statistic addressable (and later cuttable) in its
+    own right instead of hiding inside an operand body; lowering inlines it back to the identical
+    ``[stat loop, …, cone]`` stmt run."""
+    from emmy.compiler.ir.tile.ops import lower, resolve
+
+    _, tile = _resolve(_norm_linear_graph(), pick=_is_warp_row)
+    c = tile.op.source
+    assert c.a_ref is not None and set(tile.bindings) == {c.a_ref}
+    cone = tile.bindings[c.a_ref]
+    assert isinstance(cone, Map) and cone.out == c.a_ref
+    assert cone.source.role is AxisRole.PLANAR, "the statistic is the cone's Reduction source"
+    # Resolution reproduces the operand body verbatim: the stat loop, then the per-cell cone.
+    assert resolve(c, tile.bindings).a_body == tuple(lower(cone))
 
 
 def test_norm_linear_fp32_keeps_map_rows_only():

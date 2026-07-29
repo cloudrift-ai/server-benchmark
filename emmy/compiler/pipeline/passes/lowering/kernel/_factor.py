@@ -308,8 +308,12 @@ def factorize(tile, root, store=None) -> Tile:
     (the kernel's finalized output SSA name — the root node's produced :class:`Handle`) is resolved
     once here and threaded down for the store glue."""
     from emmy.compiler.ir.schedule import Raster  # noqa: PLC0415 — keep the module torch-free at import
+    from emmy.compiler.ir.tile.ops import resolve  # noqa: PLC0415
 
-    op = tile.op
+    # Inline the let table once, here: the emitter below walks a NAME-FREE tree, so every node's
+    # operand accessors read stmts (``ops.resolve`` reproduces exactly the operand body the
+    # pre-binding IR carried, so the emitted kernel is byte-identical).
+    op = resolve(tile.op, tile.bindings)
     ctx = Ctx(
         grid=tuple(tile.place.grid),
         inputs=tile.inputs,

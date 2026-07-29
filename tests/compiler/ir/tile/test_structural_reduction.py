@@ -253,24 +253,27 @@ def test_reduce_partial_flattens_a_nested_pv_contraction() -> None:
 def test_flash_op_is_a_two_contraction_tree() -> None:
     """``_flash_op`` builds the blocked two-``Contraction`` tree: BOTH contractions ride the single
     walked edge — ``partial`` — with QK (``Σ_dd Q·K`` score) at its head and PV — a
-    **register-resident-A** contraction (``A = P``, the exp weight) — spliced later (block=1: a
-    singleton ``pj`` reduce). No ``source`` asymmetry: the streaming reduce's ``source`` is ``None``
-    and the walk reaches both QK and PV as nodes on ``partial``. Its A is computed, not a gmem load;
-    its O-fold consumes the PV output ``O_i__pv``, so the ⊗ is a contraction node, not an inline FMA."""
+    **register-resident-A** contraction (``A = P``, the exp weight, a one-stmt cone in the let
+    table) — spliced later (block=1: a singleton ``pj`` reduce). No ``source`` asymmetry: the
+    streaming reduce's ``source`` is ``None`` and the walk reaches both QK and PV as nodes on
+    ``partial``. Its A is computed, not a gmem load; its O-fold consumes the PV output ``O_i__pv``,
+    so the ⊗ is a contraction node, not an inline FMA."""
     from emmy.compiler.dim import Dim
     from emmy.compiler.ir.tile.ir import Contraction as _C
     from emmy.compiler.pipeline.passes.lowering.tile._flash import _flash_op
 
-    op = _flash_op("Q", "K", "V", [1, 2], Dim(16), Dim(16), 8, 8)  # (batch, s_q, s_k, head_dim, d_v)
+    binds: dict = {}
+    op = _flash_op("Q", "K", "V", [1, 2], Dim(16), Dim(16), 8, 8, bindings=binds)  # (batch, s_q, s_k, head_dim, d_v)
     red = op.source  # Map(body=[O/l proj], source=Reduction(TWISTED, partial=[QK, ..., PV, ...]))
     assert red.source is None, "flash's streaming reduce has no source — both contractions ride partial"
     contractions = [s for s in red.partial if isinstance(s, _C)]
     assert len(contractions) == 2 and contractions[0].acc == "sacc", "QK score contraction is the partial's head node"
     pv = contractions[1]
-    assert pv.a_computed and pv.a_name == "O_i__p", "PV's A operand is the register-resident exp weight P"
+    assert pv.a_computed and pv.a_ref == "O_i__p", "PV's A operand references the bound exp weight P"
+    assert binds["O_i__p"].out == "O_i__p"
     assert pv.acc == "O_i__pv"
     # The reduce loop flattens BOTH contractions; the O-fold reads the PV output (no inline v·P).
-    (kv_loop,) = lower(red)
+    (kv_loop,) = lower(red, binds)
     o_fold = next(s for s in kv_loop.body if isinstance(s, Accum) and s.name == "O_i")
     assert o_fold.value == "O_i__pv", "the O-fold consumes the PV contraction's output, not an inline product"
 

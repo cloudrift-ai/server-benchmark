@@ -123,7 +123,7 @@ def _carrier_identities(carrier) -> dict[str, float]:
     return {s.name: s.op.identity for s in carrier.merge if isinstance(s, Accum)}
 
 
-def _mapped(op, grid, *, name: str = "", tier=None, stage=None, knobs: dict | None = None) -> TileOp:
+def _mapped(op, grid, *, name: str = "", tier=None, stage=None, knobs: dict | None = None, bindings: dict | None = None) -> TileOp:
     """A **mapped** ``TileOp`` wrapping ``op`` over ``grid`` (so ``_schedule`` skips it). ``tier``
     preserves a contraction's scalar output tier (:class:`TilePlan`); ``stage`` threads the
     scheduler-resolved operand :class:`Stage` onto a split partial (resolved against the sliced
@@ -134,10 +134,11 @@ def _mapped(op, grid, *, name: str = "", tier=None, stage=None, knobs: dict | No
     them and the deployed split kernels record no schedule identity (the A/B table / ``--json``
     then can't say what greedy deployed, and a golden's ``ShapeKey`` matches no kernel)."""
     place = Placement(free=tuple(grid), grid=tuple(grid))
+    binds = dict(bindings or {})
     kw: dict = {}
-    if axis_role(op) is AxisRole.CONTRACTION and tier is not None:
+    if axis_role(op, binds) is AxisRole.CONTRACTION and tier is not None:
         kw["tier"] = tier
-    return TileOp(op=op, name=name, place=place, stage=stage, knobs=dict(knobs or {}), **kw)
+    return TileOp(op=op, name=name, place=place, stage=stage, knobs=dict(knobs or {}), bindings=binds, **kw)
 
 
 def _split_contraction(match: Match, root: Node, tile: TileOp, contraction: Contraction, carrier, plan: ReducePlan, split: Axis):
@@ -181,7 +182,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, contraction: Cont
         else:
             atomic_epi = (Write(output=out.name, index=cell, value=acc, atomic=True),)
         part = replace(contraction, lead_axes=lead, epilogue=Body(atomic_epi))
-        return _mapped(part, (split, *grid), name=tile.name, stage=tile.stage, knobs=tile.knobs)
+        return _mapped(part, (split, *grid), name=tile.name, stage=tile.stage, knobs=tile.knobs, bindings=tile.bindings)
 
     # --- deferred kernel finalize: partial writes each raw state to ``ws[(comp,) ksplit, *cell]``.
     # The workspace shape MUST match the rank of the index the writes/loads use — or
@@ -204,7 +205,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, contraction: Cont
 
     ws_writes = tuple(Write(output=ws_name, index=ws_index(i), value=states[i]) for i in range(n_comp))
     part = replace(contraction, lead_axes=lead, epilogue=Body(ws_writes))
-    partial_tile = _mapped(part, (split, *grid), name=f"{tile.name}__partial", stage=tile.stage, knobs=tile.knobs)
+    partial_tile = _mapped(part, (split, *grid), name=f"{tile.name}__partial", stage=tile.stage, knobs=tile.knobs, bindings=tile.bindings)
 
     # --- finalize kernel: seed each state, fold ``ws`` over ``ksplit`` (``as_state_merge`` — the
     # 1-component additive fold, or the N-component per-channel sums), then the original
@@ -298,7 +299,9 @@ def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Map, plan: R
     sliced = replace(red, axis=replace(red.axis, extent=b_dim), reduce=_strip_grid(plan), offset=off, bound=bound)
     ws_writes = tuple(Write(output=ws_name, index=ws_index(i, names[i]), value=names[i]) for i in range(n_comp))
     partial_map = Map(body=Body(ws_writes), sources=(sliced,))
-    partial_tile = _mapped(partial_map, (split, *grid), name=f"{tile.name}__partial", stage=tile.stage, knobs=tile.knobs)
+    partial_tile = _mapped(
+        partial_map, (split, *grid), name=f"{tile.name}__partial", stage=tile.stage, knobs=tile.knobs, bindings=tile.bindings
+    )
 
     # Finalize: per output element, seed the state, fold the partitions (the exp-family LSE
     # combine), then the original projection + layout-aware store (``op.body`` verbatim).
@@ -330,7 +333,7 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
         raise RuleSkipped("no cross-CTA split stage — nothing to split")
 
     op = tile.op
-    rloop = reduce_loop(op)
+    rloop = reduce_loop(op, tile.bindings)
     carrier = rloop.carrier
     cta = plan.cta
     rax = rloop.axis
@@ -363,7 +366,7 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     # The lowered loop nest (``Map`` / ``Reduction`` alike) — find the carrier-bearing reduce loop
     # in it by position (``reduce_loop`` returns a fresh synthesized loop for a ``Reduction``, so key
     # off the lowered list, not object identity).
-    stmts = lower(op)
+    stmts = lower(op, tile.bindings)
     cell = _cell_index(stmts, grid)
     split = Axis(name=_SPLIT, extent=Dim(cta))
     idx = next(i for i, s in enumerate(stmts) if isinstance(s, Loop) and s.carrier is not None)

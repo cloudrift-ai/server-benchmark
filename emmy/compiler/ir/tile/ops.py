@@ -73,7 +73,7 @@ def reduce_loop(op, bindings=None):
     if isinstance(op, (Reduction, Contraction)):
         return op.loop
     if isinstance(op, Map) and op.sources:
-        return reduce_loop(op.sources[0])  # a Map projecting over a Reduction / Contraction source
+        return reduce_loop(op.sources[0], bindings)  # a Map projecting over a Reduction / Contraction source
     for s in op.body:
         if isinstance(s, (Loop, StridedLoop)) and s.carrier is not None:
             return s

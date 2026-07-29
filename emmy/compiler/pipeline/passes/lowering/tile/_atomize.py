@@ -81,7 +81,18 @@ def map_cone(body: list, root: str) -> list | None:
     return sorted(cone, key=lambda st: order[id(st)])
 
 
-def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tuple[Load, Load, str, Body]:
+def bind_operand(a: Load | Map, bindings: dict) -> Load | str:
+    """Register a computed-A **cone** in ``bindings`` and return the reference (its ``out`` name); a
+    plain gmem ``Load`` A passes through unchanged. This is the ONE place a cone enters the let
+    table — every computed A is a bound subtree referenced by name, so two channels reading the same
+    cone are two references to one binding rather than two copies."""
+    if isinstance(a, Load):
+        return a
+    bindings[a.out] = a
+    return a.out
+
+
+def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tuple[Load | Map, Load, str, Body]:
     """Resolve the ``(a_load, b_load, acc, epilogue)`` operand→role facts for a ``CONTRACTION``
     reduce ``loop`` (the lowered ``Accum``-in-``Loop`` form) whose output is indexed by grid axes
     ``m_name`` / ``n_name``, with projection ``epilogue``.
@@ -89,8 +100,9 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
     Reads the facts straight off the loop body — no op-tree node: the operands are named by the ⊗
     **lift** (the ``Assign`` the fold accumulates), B is its (n, k)-indexed ``Load``, and A is the
     lift's other argument — a plain ``Load`` (the clean gmem-direct contraction) or, when loop
-    fusion has inlined an operand cone, the cone itself as a ``Body`` (the computed-A form, which
-    rides the ``sync`` compute-fill). The fold accumulator is the loop body's ``Accum`` target.
+    fusion has inlined an operand cone, the cone itself as a ``Map`` NODE (the computed-A form,
+    which rides the ``sync`` compute-fill; the caller binds it into the let table via
+    :func:`bind_operand`). The fold accumulator is the loop body's ``Accum`` target.
 
     Binding A off the LIFT and not off "the first (m, k)-indexed load" is load-bearing: a
     cone-INTERNAL load is (m, k)-indexed too, so the positional rule bound gemma's GeGLU combine as
@@ -124,7 +136,7 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
             return a_leaf, b_leaf, acc, epilogue
         cone = map_cone(body, a_arg)
         if cone and not any(isinstance(st, Load) and n_name in _idx_vars(st.index) for st in cone):
-            return Body(tuple(cone)), b_leaf, acc, epilogue
+            return Map(body=Body(tuple(cone))), b_leaf, acc, epilogue
         # The lift names a COMPUTED A whose cone declined (an Accum / Select inside it, or an
         # n-indexed load riding it) — falling through to the positional (m, k) rule below would
         # bind a cone-INTERNAL load as A and silently drop the rest of the cone: exactly the
@@ -136,7 +148,7 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
     return a_leaf, b_leaf, acc, epilogue
 
 
-def semiring_binding(node, grid) -> tuple[Load, Load, str, Body]:
+def semiring_binding(node, grid, bindings: dict | None = None) -> tuple[Load | Map, Load, str, Body]:
     """The root contraction's ``(a_load, b_load, acc, epilogue)`` facts: lower ``node`` to loop-IR,
     find its ``CONTRACTION`` reduce loop, take the projection ``epilogue`` (the stmts after the loop
     — the ``Map`` body, or empty for a bare contraction), and delegate to :func:`bind_contraction`.
@@ -145,7 +157,7 @@ def semiring_binding(node, grid) -> tuple[Load, Load, str, Body]:
         raise LoweringError("warp tier: contraction output needs an (m, n) grid")
     from emmy.compiler.ir.tile.ops import lower  # noqa: PLC0415 — avoid an import cycle
 
-    stmts = lower(node)
+    stmts = lower(node, bindings)
     ridx = next((i for i, s in enumerate(stmts) if isinstance(s, Loop) and s.role is AxisRole.CONTRACTION), None)
     if ridx is None:
         raise LoweringError("warp tier: no contraction loop to bind")
@@ -167,7 +179,7 @@ def _cone_value_key(name: str, defs: dict) -> tuple:
     return ("op", st.op.name, tuple(_cone_value_key(a, defs) for a in st.args))
 
 
-def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis] | None:
+def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis, dict] | None:
     """Nodify the **reduce-bearing (MONOID) producer cone** composition — the fused norm→linear
     edge: a projecting ``Map`` whose ``source`` is a per-row ``PLANAR`` statistic reduce and whose
     body is that statistic's scalar epilogue followed by a fresh free (column) ``Loop`` over one or
@@ -176,12 +188,13 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis] | None:
     fused gate/up MLP edge (``swiglu(x̂@Wg, x̂@Wu)`` — a product-monoid fold; fusion duplicates the
     cone SSA per channel, deduped by value-tree equality). Returns the same
     ``Map(body=projection, source=node)`` factorization the ``Reduction`` spelling uses: the
-    ``source`` is the computed-A :class:`Contraction` — its A cone **carries the statistic
-    prologue** (the annotated stat reduce ``Loop`` + its scalar epilogue ahead of the per-cell map
-    stmts, the k-invariant prefix), its ``folds`` the ``(B, acc)`` channels, a **deferred**
-    ``TilePlan()`` — and the ``body`` is the projection (the combine tail + any stat-free prefix
-    defs it reads + the ``Write``). Plus the column axis (the scheduler adds it to the grid), or
-    ``None`` (not this shape; the reduce ``Map`` form stands alone).
+    ``source`` is the computed-A :class:`Contraction` whose A operand REFERENCES the bound cone —
+    a real node tree, ``Map(body=<the per-cell cone>, sources=(<the statistic Reduction>,))``, so the
+    statistic is addressable and cuttable in its own right instead of hiding inside an operand body —
+    its ``folds`` the ``(B, acc)`` channels, a **deferred** ``TilePlan()``; the ``body`` is the
+    projection (the combine tail + any stat-free prefix defs it reads + the ``Write``). Returns that
+    node, the column axis (the scheduler adds it to the grid), and the let table the cone lives in,
+    or ``None`` (not this shape; the reduce ``Map`` form stands alone).
 
     STRUCTURE-ONLY: no dtype / geometry / pin legality here — those are per-move scheduling guards
     (``_schedule``), so the same node offers whatever tiers the target legally supports."""
@@ -290,15 +303,20 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis] | None:
                 prefix.append(st)
     if not write.is_scalar or write.values != ((tail_ops[-1].name,) if tail_ops else (folds[0][1],)):
         return None
+    # The cone as a NODE: the statistic is the ``Reduction`` source, its scalar epilogue + the
+    # per-cell map stmts the projection body — exactly the ``[stat loop, *stat_epi, *cone]`` stmt run
+    # the operand body used to hold, now with the K seam readable off the node boundary.
+    bindings: dict = {}
+    a_ref = bind_operand(Map(body=Body((*stat_epi, *cone)), sources=(red,)), bindings)
     node = Contraction(
         axes=(m_ax, n_ax),
         k_axis=k_ax,
-        a_operand=Body((red.loop, *stat_epi, *cone)),
+        a_operand=a_ref,
         folds=tuple(folds),
         tile=TilePlan(),
         lead_axes=tuple(grid[:-1]),
     )
-    return Map(body=Body((*prefix, *tail_ops, write)), sources=(node,)), n_ax
+    return Map(body=Body((*prefix, *tail_ops, write)), sources=(node,)), n_ax, bindings
 
 
-__all__ = ["bind_contraction", "bind_prologue_contraction", "map_cone", "semiring_binding"]
+__all__ = ["bind_contraction", "bind_operand", "bind_prologue_contraction", "map_cone", "semiring_binding"]

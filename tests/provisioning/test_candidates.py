@@ -65,11 +65,19 @@ def test_iter_candidates_unknown_gpu_raises():
 
 def test_iter_candidates_gcp_fallback_zone_when_not_in_table():
     """GPUs without an explicit GPU_GCP_ZONES entry fall back to DEFAULT_GCP_ZONE."""
-    # A100 80GB is GCP-only but not listed in GPU_GCP_ZONES, so it uses DEFAULT_GCP_ZONE
-    cands = iter_candidates("NVIDIA A100 80GB", 1, provider=None)
+    # A100 40GB is GCP-only but not listed in GPU_GCP_ZONES, so it uses DEFAULT_GCP_ZONE
+    cands = iter_candidates("NVIDIA A100 40GB", 1, provider=None)
     assert len(cands) == 1
     assert cands[0].provider == "gcp"
     assert cands[0].zone == "us-central1-b"
+
+
+def test_iter_candidates_a100_80gb_prefers_cloudrift():
+    """A100 80GB tries the CloudRift offering before falling back to GCP a2-ultragpu."""
+    cands = iter_candidates("NVIDIA A100 80GB", 2, provider=None)
+    assert [c.provider for c in cands] == ["cloudrift", "gcp"]
+    assert cands[0].instance_type == "a100-16-210-800-generic.2"
+    assert cands[1].instance_type == "a2-ultragpu-2g"
 
 
 def test_vm_candidate_describe_cloudrift():

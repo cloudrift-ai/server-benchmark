@@ -1,4 +1,4 @@
-# Tile IR + schedule refactor: the pure Fold IR, tree-path knobs, PLACE as a per-seam edge property
+# Tile IR + schedule refactor: the λ-foldMap IR, tree-path knobs, PLACE as a per-seam edge property
 
 ## Context
 
@@ -9,53 +9,69 @@ dropped:` comments. Nothing in the compiler consumes placement seams right now. 
 and the knob codec are redesigned first, on the smaller surface, and the placement functionality is then
 restored on top of the new vocabulary instead of being ported.
 
-The IR design went through three iterations (let-bound sharing → the product-carrier contraction → the
-pure Fold IR); this document describes ONLY the final design and the landed state. The superseded
+The IR design went through four iterations (let-bound sharing → the product-carrier contraction → the
+pure Fold IR → the λ-foldMap IR: `Lambda` lifts + the carrier update derived from the monoid
+presentation); this document describes ONLY the final design and the landed state. The superseded
 intermediates survive as one list under *Landed trail* — do not resurrect their vocabularies.
 
 ## North star
 
 **The recognized algebra tree is the single semantic object. Everything else is a decoration on it or a
-derived view of it.**
+derived view of it. A kernel IS `π ∘ foldMap`** — a projection over a monoidal fold of a pure
+per-element lift: `⟦Fold⟧ = ⊕_{k ∈ axis} ι(lift(k))`, seeded at `e`. The design rests on five ideas:
 
-A kernel's math is the `project ∘ reduce ∘ map` composition stored as structural nodes in `ir/tile`. The
-design rests on four ideas:
-
-1. **ONE general fold node.** `Reduction` and `Contraction` are one kind: a `Fold` with an iteration
-   axis, a carrier (the ⊕ monoid on an N-component product state), a symmetric tuple of **operand
-   edges**, and a **step** (the per-step lift + carrier update, a sequence). A matmul, a bare sum,
-   RMSNorm's statistic, the fused gate⊗up edge and flash are all this node at different carrier arities
-   and roles. Sharing is **edge reuse**: "these two matmuls read the same A" is one fold whose step reads
-   one operand edge twice — the tuple lift `(a·b, a·c)` into a product carrier. No privileged operand
-   slot, no channel pairing, no name-reference mechanism.
-2. **An operand edge has two inhabitants** — MATERIALIZED (a gmem `Load`) or COMPUTED (the node itself,
-   stored inline; tree ownership gives it exactly one consumer). WHERE an input attaches is decided by
-   one rule, **edge iff closed**: a subtree that captures no value from its enclosing step
-   (`ir.captured_values`, iteration variables excluded) is an operand edge; a state-capturing
-   composition (flash's PV, whose multiplicand `P` the same loop step's merge produces) sits in the step
-   sequence at its semantic position. One rule decides attachment, the canonical direction (hoist
-   closed subtrees), and cut legality at once: on the cut lattice — nodes reachable from the root
-   through edges alone — every seam is closed by construction. A closed STEP element is equally
-   legal and cuttable in place, and stays put where hoisting would perturb the lowered nest (flash's
-   QK — see the worked example). (An IN-STEP node's own operand may capture from the step scope, as
-   flash's `P` does; it sits below an uncuttable step anyway.)
-3. **Hardware readings are DERIVED views, never stored.** The bilinear factored form `a·(b₁…bₙ)` that
-   tensor cores require is `contraction_view` — computed at fork-emit where a consumer exists, absent
-   from storage. Three design-level reasons it is a view and not a rewrite: the same fold must keep
-   offering its scalar/coop rows as fork siblings beside the warp rows; one relation keeps one spelling
-   (a stored refined kind beside the general fold is the two-spellings defect); and knob keys stamp
-   against the pre-specialization tree.
-4. **Kernel boundaries are a placement DECISION** — a `cut | fuse` bit on each parent↔child seam.
+1. **ONE general fold node — axis + monoid + lift.** A `Fold` stores the reduced `axis`, the ⊕
+   `Monoid` presentation (the product `components` `(⊕ᵢ, eᵢ)`, the singleton embedding
+   `inject : A → S`, and the twist family `psi` — transport of structure: `⊕_ψ` is generated from the
+   presentation, never spelled), a PURE `lift` `Lambda` (`λ(k, v₁…vₙ) → A` — it sees the iteration var
+   and the operand values, nothing else), and one CLOSED operand edge per lift param. ALL state-reading
+   lives inside ⊕: the carrier update — the stabilized streaming step, the cross-partition combine, the
+   identity seeds — is DERIVED from the presentation at lowering, and nothing dissolved is ever stored,
+   so the step/carrier duplication (and its rename-lockstep bug class) does not exist. A matmul, a bare
+   sum, RMSNorm's statistic, gate⊗up and flash are all this node at different monoid arities and
+   twists. Sharing is still **arity**: the tuple-valued lift into the product monoid; in-lambda sharing
+   is ANF (every `Assign` is a let). Flash's `P = exp(s − m′)` reading the max its own step just
+   updated is the derived INLINED evaluation of `s ⊕ ι(a)` — an operational form, not storage; the
+   "legal but uncuttable state-capturing step element" quirk evaporates with it.
+2. **`Lambda` = explicit binders over the REUSED stmt vocabulary — no second expression language.**
+   `Lambda(params, body, results)`: `params` the binders, `body` a `Body` of PURE stmts only
+   (`Load` / `Assign` — A-normal form ≙ a let-chain), `results` the returned defs (replacing every
+   `out` / last-def convention). Purity is a FORMATION invariant, not a new type universe: no `Accum`,
+   `Write` or `Loop` inside a lift; free names ⊆ params ∪ iteration vars; results defined. α-invariance
+   is canonical renumbering (the existing rename machinery), not de Bruijn. **Primitives live in their
+   home modules** — they are not tile-IR-private: `Lambda` beside `Body` in `ir/stmt`;
+   `Monoid`/`Component` in `ir/stmt/algebra` (the finished form of `Carrier`/`Twist` — channels ≙
+   components, `inject` an explicit `Lambda`, bound mode surviving for the one-shot `StateMerge`);
+   scalar/index exprs stay `ir/expr`; `Fold`/`Map`/`TileOp` and the derived views stay `ir/tile`.
+3. **Edge iff closed — by CONSTRUCTION.** An operand edge has two inhabitants — MATERIALIZED (a gmem
+   `Load`) or COMPUTED (an inline node; tree ownership gives it one consumer) — and operands bind
+   POSITIONALLY to lift params, so an operand cannot see the fold's state or its siblings: closure
+   needs no scan (`captured_values` demotes to a validation assert), every seam on the cut lattice is
+   closed structurally, and composition is nesting a term on an edge. Operands may read the ENCLOSING
+   iteration var (flash's per-key score fold) — never state. Effects sit at the kernel boundary only:
+   `results` + materializer glue synthesize every root store; no `Write` inside a term.
+4. **Hardware readings are DERIVED views, never stored.** The bilinear factored form `a·(b₁…bₙ)` the
+   tensor cores require is `contraction_view` — a factoring of the LIFT (`_parse_bilinear` reads the
+   lambda body), computed at fork-emit where a consumer exists, absent from storage; the role (landed
+   1l) is a predicate — ψ non-id / lift bilinear — not even a derived enum in the end state. Three
+   design-level reasons a view and not a rewrite: the same fold must keep offering its scalar/coop rows
+   as fork siblings beside the warp rows; one relation keeps one spelling (a stored refined kind beside
+   the general fold is the two-spellings defect); and knob keys stamp against the pre-specialization
+   tree.
+5. **Kernel boundaries are a placement DECISION** — a `cut | fuse` bit on each parent↔child seam.
    Kernels are a derived view: the cut set partitions the tree, each partition materializes as one
-   launch, each cut seam materializes its value to a buffer.
+   launch, each cut seam materializes its value to a buffer (a cut = let-materializing a closed term).
 
 From this everything else follows:
 
 - **Knobs are paths into the tree.** A schedule key addresses the node (or edge) it decorates by
-  position; no parallel namespace of hand-invented site names.
+  position; no parallel namespace of hand-invented site names. Explicit binders make paths stable by
+  construction.
 - **Keys stamp against the pre-placement tree.** A cut never re-keys the decisions inside either half.
-- **Derive, never store.** Loop nests, carriers, tile geometry, the contraction view — synthesized on
-  demand from the params. Stored state is only the params + decisions.
+- **Derive, never store.** Loop nests, the carrier update (the stabilized ⊕_ψ step), roles, tile
+  geometry, the contraction view, cross-CTA splits (reassociation `fold_k = fold_{k₁} ∘ fold_{k₂}`,
+  legal by ⊕'s stored associativity) — synthesized on demand from the params. Stored state is only the
+  params + decisions.
 - **Defaults are the recognized form.** An unseeded shape deploys exactly what recognition produced;
   every rewrite away from it is evidence- or pin-driven ("an unseeded site never pays").
 - **All fusion happens in loop IR; tile IR only cuts.** Loop-level fusion decides what lives together;
@@ -65,93 +81,113 @@ From this everything else follows:
   free to change as long as the derived loop is byte-identical — the kernel-source digest harness
   (17 golden kernels: scalar/warp matmul, split-K, coop-t matvec, norm_linear, norm_gate_up `.lin`,
   mlp_geglu, lm_head, rms/softmax/reduce/pointwise, flash hd128/hd256, dynM forms) is the gate for
-  every migration step.
+  every migration step. The END-STATE identity is the α-invariant hash of the canonically renumbered
+  term itself; switching to it is a re-keying event and rides the same deferred re-keying window as the
+  other order-canonicalizations — never a silent re-key.
+- **The λ formulation is also the executable SPEC**: a ~20-line denotational `foldMap` evaluator plus
+  an agreement test (`⟦recognized tree⟧ == lowered loop` on random inputs) pins the algebra — ⊕
+  associativity, ψ-transport, the flash monoid — so every purification step refactors toward an oracle
+  that already runs.
 
-## The IR
+## The IR (target)
 
 ```python
-Operand = Load | Fold | Map        # materialized | computed (inline node, one consumer by tree ownership)
+Operand = Load | Fold | Map          # materialized | computed (inline node, one consumer by tree ownership)
 
 @dataclass(frozen=True)
-class Fold(Stmt):
-    axis: Axis                     # the reduced iteration space
-    carrier: Carrier               # the ⊕ monoid on an N-component product state
-                                   #   family "id"  → componentwise ⊕ (sum, max, the gate⊗up product)
-                                   #   family "exp" → the twisted action (online softmax / flash)
-    # role is DERIVED (1l), never stored: TWISTED ⟺ non-id twist family; CONTRACTION ⟺ the
-    # bilinear parse of (operands, step) succeeds, or the step composes the sliced split-K fold;
-    # PLANAR otherwise — the matvec demotion is the PLANAR arm (unbindable ⇒ loads stay inline)
-    step: Body                     # the lift + carrier update, reading operand values
-                                   # by their out-names. A SEQUENCE on purpose: a twisted lift may read
-                                   # state its own step updates (flash's P) — algebra, not an emitter
-                                   # limitation
-    operands: tuple[Operand, ...]  # the CLOSED inputs, one edge each; sharing = repeated reads in step
-    # schedule slices (decorations; composition supplies multi-slice forms — split-K is an outer
-    # reduce-partitioned fold whose step composes the inner tiled one):
-    tile: TilePlan | None          # role=CONTRACTION only
+class Lambda:                        # ir/stmt (beside Body) — the ONE binder kind, usable by ANY IR layer
+    params: tuple[str, ...]          # explicit binders — closedness by construction
+    body: Body                       # PURE stmts only (ANF ≙ a let-chain); __post_init__ VALIDATES the
+                                     # LOCAL invariant: every stmt passes the `Stmt.pure` trait (declared
+                                     # on the Stmt interface, conservative default False — Load/Assign
+                                     # opt in; Accum/Write/Init/Loop never do; no isinstance whitelist)
+                                     # and every result is defined. The CONTEXTUAL half — free names ⊆
+                                     # params ∪ enclosing iteration vars — is the consuming node's check
+                                     # (Fold/Map formation), since a bare Lambda can't know its scope
+    results: tuple[str, ...]         # the returned defs — replaces every `out` / last-def convention
+
+@dataclass(frozen=True)
+class Component:                     # ir/stmt/algebra
+    fold: ElementwiseImpl            # ⊕ᵢ
+    identity: float                  # eᵢ
+
+@dataclass(frozen=True)
+class Monoid:                        # ir/stmt/algebra — the finished form of Carrier/Twist
+    components: tuple[Component, ...]  # S = the product state
+    inject: Lambda | None = None     # ι : A → S (None = the identity embedding, arity-matched)
+    psi: str | None = None           # twist family ("exp") — a PRESENTATION: ⊕_ψ, the stabilized
+                                     # streaming step and the cross-partition combine are DERIVED
+
+@dataclass(frozen=True)
+class Fold(Stmt):                    # ir/tile
+    axis: Axis                       # the reduced iteration space
+    monoid: Monoid
+    lift: Lambda                     # λ(k, v₁…vₙ) → A — PURE; state-reading lives ONLY inside ⊕
+    operands: tuple[Operand, ...]    # one CLOSED term per lift param vᵢ — POSITIONAL binding
+    # schedule slices (decorations; composition supplies multi-slice forms):
+    tile: TilePlan | None
     reduce: ReducePlan
     stage: Stage | None
 
 @dataclass(frozen=True)
-class Map(Stmt):
-    body: Body                     # projection / pointwise sweep
-    sources: tuple[Operand, ...]   # project ∘ fold; must admit Load — the cut terminal (phase 4)
+class Map(Stmt):                     # ir/tile
+    fn: Lambda                       # π : λ(s₁…sₙ) → out; sources bind positionally to params
+    sources: tuple[Operand, ...]     # project ∘ fold; must admit Load — the cut terminal (phase 4)
 ```
 
-**Lowering rule.** `Fold.loop` splices each operand edge's body immediately before its first use in the
-step (ties in tuple order — `ir._splice_operands`), then flattens nested nodes in place. Deterministic,
-so the derived loop — and with it `op_cache_key` / kernel identity — depends only on the stored params.
+**Lowering rule.** `Fold.loop` = the operand bodies (positional binding — no first-use scan, no tie
+rule), the lift body, then the DERIVED carrier update: the stabilized `s ⊕ ι(lift(k))` unfolding of
+`(psi, components)`. Deterministic, so the derived loop — and with it `op_cache_key` / kernel identity —
+depends only on the stored params. Derived, never stored: the update sequence, the role predicates
+(landed 1l), the contraction view, the loop nest, cross-CTA splits (reassociation), identity.
 
-**The contraction view** — derived at fork-emit, never stored:
-
-```python
-def contraction_view(fold, m_axis, n_axis, lead_axes) -> ContractionView | None:
-    ...  # role=CONTRACTION + the step factors as one multiply per component sharing a common factor
-         # (`ir._parse_bilinear`); the OUTPUT axes are the CALLER's placement facts (trailing grid for
-         # a root kernel), which is why they are parameters and not fold fields
-```
-
-The `ContractionView` dataclass IS the view: one shared `a` edge, `(b, acc)` channels, the `(m, n)` `Side`
-geometry, `b_trans` — the whole reading the warp/staged tiers and `_atom`/`_factor` consume.
-`ContractionView.as_fold()` is the storage direction; the round-trip `contraction_view(as_fold(v)) == v` and
-`as_fold(v).loop == v.loop` (byte-identical) are unit-tested. `ir.shared_operand(fold)` is the
-placement-free read for callers that need only the shared edge (the cone).
+**The contraction view** — derived at fork-emit, never stored: `contraction_view(fold, m, n, lead)`
+requires the LIFT to factor bilinearly — one multiply per component sharing a common factor
+(`_parse_bilinear`, now a read of the lambda body); the OUTPUT axes are the CALLER's placement facts,
+which is why they are parameters and not fold fields. The `ContractionView` dataclass IS the view: one
+shared `a` edge, `(b, acc)` channels, the `(m, n)` `Side` geometry, `b_trans`. `as_fold()` is the
+storage direction; the round-trip and loop byte-identity stay unit-tested; `ir.shared_operand` the
+placement-free cone read.
 
 **Pipeline:**
 
 ```
-Loop IR ──recognize──▶ pure Fold/Map tree              (structure only; no hardware knowledge)
+Loop IR ──recognize──▶ pure Fold/Map term tree         (structure only; no hardware knowledge)
         ──schedule───▶ scalar / coop rows read the fold directly;
                        tensor cores present? view = contraction_view(fold, place)
                        view ─▶ warp / staged rows: operand roles from the view, TilePlan on the fold
         ──split / materialize──▶ slices off the nodes, roles off the view (re-derived from ctx.grid)
 ```
 
-Worked shapes:
+Worked shapes (pure spellings; `M(…)` a Monoid):
 
 ```
-RMSNorm:   Map(body=[rsqrt stat + sweep + Write],
-               sources=(Fold(axis=k, sum, operands=(Load(x[m,k]),), step=[square, accumulate]),))
-
-gate⊗up:   Map(body=[swiglu(acc_g, acc_u) + Write],
-               sources=(Fold(axis=k, product("acc_g","acc_u"),
-                             operands=(Load(Wg), cone, Load(Wu)),   ← cone read by BOTH lifts
-                             step=[vg = wg·xn; acc_g += vg; vu = xn·wu; acc_u += vu]),))
-           cone = Map(body=normalize, sources=(Fold(stat),)) — inline; the K seam is the node boundary
-
-Flash:     Map(body=[O/l projection + Write],
-               sources=(Fold(axis=kv, exp("m","l","O"),
-                             step=[QK-fold; …merge; P = exp(s′−m′); PV-fold; O = O·α + O_blk…])))
-           PV captures P → a step element at its semantic position. QK is CLOSED and therefore
-           cuttable in place, but stays a step element too — hoisting it to an operand edge would
-           REORDER the lowered nest (the scale Load precedes the score's first use, so the
-           first-use splice lands QK after it), re-keying every flash kernel against zero-migration.
-           Edge-hoisting closed steps is optional canonicalization, deferred to a re-keying window.
+sum:      Fold(k, M(add), λ(k,x). x, (Load(x[m,k]),))
+matmul:   Fold(k, M(add), λ(k,a,b). a·b, (Load(A), Load(B)))
+gate⊗up:  Map(swiglu, (Fold(k, M(add, add), λ(k,x̂,g,u). (x̂·g, x̂·u), (cone, Load(Wg), Load(Wu))),))
+          — sharing is arity: ONE pure lambda, tuple-valued, into the product monoid; the cone is an
+          ordinary inline operand (Map(fn=normalize, sources=(Fold(stat),)) — the K seam is the node
+          boundary)
+rmsnorm:  Map(λs. …rsqrt(s/K)…, (Fold(k, M(add), λ(k,x). x², (Load(x),)),))
+softmax:  Map(π, (Fold(k, M(max, add; ι=λs.(s,1); ψ=exp), λ(k,x). x, (Load(x),)),))
+flash:    Map(λ(m,l,O). O/l, (Fold(kv, M(max, add, add; ι=λ(s,v).(s,1,v); ψ=exp),
+                                   λ(j,s,v). (s,v), (score, Load(V))),))
+          score = Fold(dd, M(add), λ(d,q,kk). q·kk, (Load(Q), Load(K))) — an ordinary CLOSED operand
+          (operands may read the enclosing iteration var, never state). Today's interleaved in-step
+          spelling — merge stmts, P = exp(s′−m′), the PV fold — is the DERIVED blocked evaluation of
+          ⊕_ψ, generated at lowering, byte-identical to what is stored today (the 1p gate).
 ```
 
-A projection has ONE home — the wrapping `Map.body`, never a node field; a bare fold's grid `Write` is
-materializer glue. Every schedule slice rides the node it decorates; `TileOp` keeps only
+A projection has ONE home — the wrapping `Map.fn`, never a node field; every root store is materializer
+glue synthesized from `results` + the graph output (the bare-fold `Write` glue, generalized — no `Write`
+inside a term). Every schedule slice rides the node it decorates; `TileOp` keeps only
 `op + place + workers + knobs`; a sliced axis's window is the one `Axis.window` vocabulary.
+
+**Landed today vs target** (the deltas the phase-1 continuation closes): `Fold.step` still stores the
+dissolved lift+update sequence and splices operands by first use (→ 1o/1p); `Map.body` has no binder and
+`out` is a last-def convention (→ 1n); projection `Write`s still ride `Map` bodies (→ 1q); `Lambda` /
+`Monoid` / the `Stmt.pure` trait don't exist yet (→ 1m); identity keys off the lowered nest (kept
+through migration; the α-invariant term hash is a re-keying-window event).
 
 ## Landed trail (compressed history — the vocabularies below are RETIRED)
 
@@ -172,7 +208,7 @@ materializer glue. Every schedule slice rides the node it decorates; `TileOp` ke
   grid axes (a split partial's lead axes fall out of its own grid — nothing restamped on the node);
   `nodify_reduce` drops `tile` when the coop/ILP K partition takes over. 17/17 digests identical;
   round-trip unit-tested (`tests/compiler/ir/tile`).
-- **1k-iii** (landed — phase 1 CLOSED on the pure-Fold IR):
+- **1k-iii** (landed — the pure-Fold milestone; phase 1 reopened by the λ-foldMap target, see 1m–1q):
   - *Flash storage*: QK and PV store as in-step `role=CONTRACTION` folds (PV's `P` cone a capturing
     operand — legal below an uncuttable step; QK is closed and cuttable in place, but hoisting it to
     an operand edge would REORDER the lowered nest — the scale `Load` precedes the score's first use
@@ -199,6 +235,47 @@ materializer glue. Every schedule slice rides the node it decorates; `TileOp` ke
   the 17-kernel digest A/B — all byte-identical, `down_proj.m1.t` (the demoted-matvec row)
   included; the lowered `Loop` annotations reproduce exactly (the loop-level `AxisRole` stays
   stored — `contraction_loop` marks CONTRACTION, `semiring_binding` scans for it).
+
+## Phase 1 continuation (open): 1m–1q — reaching the λ-foldMap target
+
+Ordered so every byte-neutral step lands first; each carries the digest gate. 1p/1q are
+re-keying-window-gated and do NOT block phases 2–3 (the codec resolves by axis on either spelling, and
+identity keys off the lowered nest throughout).
+
+- **1m — the primitives, in their home modules.** `Lambda` lands in `ir/stmt` beside `Body`:
+  `__post_init__` validates the LOCAL formation invariant — every body stmt passes the new **`Stmt.pure`
+  trait** (declared on the `Stmt` interface with a conservative `False` default; `Load` / `Assign` opt
+  in, `Accum` / `Write` / `Init` / `Loop` never do — no isinstance whitelist, and a new stmt kind is
+  excluded from lambdas until it declares itself) and every result is defined; the contextual half
+  (free names ⊆ params ∪ enclosing iteration vars) is validated at Fold/Map formation, where the scope
+  exists — plus canonical renumbering for α-invariant equality/hash. `Carrier`/`Twist` refit into the
+  `Monoid` presentation in `ir/stmt/algebra` (channels ≙ components; `inject` an explicit `Lambda`;
+  `psi` the family; bound mode survives for the one-shot `StateMerge`). Ships the executable SPEC too:
+  the denotational `foldMap` evaluator + the ⟦tree⟧ == lowered-loop agreement test. Pure additions —
+  no storage change, no digest impact.
+- **1n — `Map` grows its binder.** `Map.body` → `fn: Lambda`: sources bind positionally to params,
+  `results` replace the `out` last-def convention (the `source` len-≤1 compat read retires with it).
+  Lowering splices identically — byte-neutral, digest-gated.
+- **1o — the degenerate lift.** For id-family folds, `step` → `lift: Lambda` and the update is
+  DERIVED: the fold `Accum`s are generated from the monoid at lowering and spliced at the step tail,
+  exactly where they sit today. Operands bind positionally (the first-use splice + tuple-order tie rule
+  retire for folds); `_parse_bilinear` becomes a plain read of the lift body. Byte-identical lowering
+  on every `as_fold` / `from_loop` shape is the gate.
+- **1p — the twisted derivation.** Online softmax / flash store `(psi, components, inject)` + the pure
+  block lift; the stabilized interleaved sequence — the merge stmts, `P`, the PV contraction, the
+  rescales — is DERIVED as the blocked evaluation of ⊕_ψ. The generator must reproduce today's stored
+  stmt sequence byte-exactly through `030`'s σ-slicing and the twist realizer's reads — the flash
+  digests including split-KV are the gate. If exact reproduction proves unreachable, this step moves
+  into the deferred RE-KEYING WINDOW already reserved for the QK edge-hoist (one window, all
+  order-canonicalizations at once). Knob spellings must resolve unchanged either way: `TILE@dd`
+  addresses the score operand edge, `TILE@pj` the derived PV site by its axis name (the phase-2 walker
+  enumerates derived-⊕ sites for twisted folds).
+- **1q — effects to the boundary + the identity switch.** Projection `Write`s leave `Map.fn` (`results`
+  + materializer glue synthesize every root store — the bare-fold glue generalized to `030`'s partials
+  and flash's layout-aware store); `captured_values` demotes to a validation assert. Then, inside the
+  same re-keying window as 1p's fallback: `Body` order inside lambdas canonicalizes and kernel identity
+  switches from lowered-nest bytes to the α-invariant term hash — a re-keying event by definition,
+  never a silent one.
 
 ## Knob codec (phases 2–3)
 
@@ -318,10 +395,16 @@ YAML-comment baselines.
 
 ## Risks
 
-- **1k-iii flash churn**: the twist realizer is the subtlest emitter; the QK step→edge hoist must not
-  perturb lowered stmt order (the head splice is order-preserving there, but prove it by the flash
-  digests, including split-KV), and view-side axis derivation must reproduce the stored axes exactly. A
-  divergence is a bug in the view derivation, never something to migrate around.
+- **1p is the riskiest remaining step**: the twist realizer is the subtlest emitter, and the derived
+  ⊕_ψ unfolding must reproduce today's dissolved stmt sequence byte-exactly through `030`'s σ-slicing
+  and the realizer reads (flash digests including split-KV are the gate). A divergence is a bug in the
+  generator, never something to migrate around; the sanctioned escape is the re-keying window, not a
+  silent re-key. The QK edge-hoist constraint survives inside 1p: hoisting must not perturb lowered
+  stmt order outside that window.
+- **Purity erosion in lambdas**: the whole design rests on lifts never touching state — `Accum` (or any
+  effectful stmt) creeping back into a `Lambda` body re-creates the step/carrier duplication. The
+  `Stmt.pure` trait + `Lambda.__post_init__` formation validation (conservative default: a new stmt
+  kind is impure until declared) is the guard; never bypass it with a pre-built `Body`.
 - **Parity is settled once, at phase 5** — intermediate phases carry only unit-level verification plus
   the digest harness; if the eval-golden pass surfaces broad drift, bisect back to the phase-1 commits
   rather than patching goldens forward.

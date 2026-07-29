@@ -38,7 +38,7 @@ command:
     export PATH=/usr/local/cuda/bin:$$PATH
     cd $repo_dir
     [ -d venv ] || make setup
-    ./venv/bin/pip install -q vllm==0.23.0 lm_eval ninja gguf sentencepiece || { echo PIP_INSTALL_FAILED; exit 1; }
+    ./venv/bin/pip install -q vllm==0.23.0 lm_eval ninja tenacity gguf sentencepiece || { echo PIP_INSTALL_FAILED; exit 1; }
     # A stale staged venv once kept an unpinned vllm and failed here silently —
     # install loudly and assert the pin took.
     ./venv/bin/python -c "import vllm; assert vllm.__version__ == '0.23.0', vllm.__version__"

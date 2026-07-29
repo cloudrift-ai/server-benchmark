@@ -300,7 +300,7 @@ class Contraction(Stmt):
     # sibling channels referencing one name is what makes their operand sharing structural). A name
     # operand is inlined by ``ops.resolve`` before any lowering walk, so every accessor below sees the
     # ``Load`` / ``Body`` form. — params
-    a_operand: Load | Body | str
+    a: Load | Body | str
     b_load: Load  # the B operand — params
     acc: str  # the fold accumulator this node produces — params
     tile: TilePlan  # the schedule: leaf atom + unit/register widths + K-chunk (the only schedule field)
@@ -316,7 +316,7 @@ class Contraction(Stmt):
     def a_ref(self) -> str | None:
         """The binding NAME this node's A operand references, or ``None`` (an inline ``Load`` /
         ``Body``). Two siblings sharing one A are exactly two nodes with the same ``a_ref``."""
-        return self.a_operand if isinstance(self.a_operand, str) else None
+        return self.a if isinstance(self.a, str) else None
 
     @property
     def a_body(self) -> tuple[Stmt, ...]:
@@ -324,38 +324,21 @@ class Contraction(Stmt):
         (a **register-resident** A: flash PV's ``P = exp(S − M)``, produced from an in-register score,
         not a gmem address). The last stmt's def is the operand value ``contraction_loop`` multiplies.
         An unresolved binding NAME has no stmts here — ``ops.resolve`` inlines it first."""
-        if isinstance(self.a_operand, str):
-            raise AssertionError(f"Contraction.a_operand is the unresolved binding {self.a_operand!r} — call ops.resolve first")
-        return (self.a_operand,) if isinstance(self.a_operand, Load) else tuple(self.a_operand)
+        if isinstance(self.a, str):
+            raise AssertionError(f"Contraction.a is the unresolved binding {self.a!r} — call ops.resolve first")
+        return (self.a,) if isinstance(self.a, Load) else tuple(self.a)
 
     @property
     def a_computed(self) -> bool:
         """True when A is a computed register-resident operand (a ``Body``), not a gmem ``Load`` — the
         mma tier reads it as a fragment, the scalar tier as the value."""
-        return not isinstance(self.a_operand, Load)
+        return not isinstance(self.a, Load)
 
     @property
     def a_name(self) -> str:
         """The A operand's bound SSA name — the referenced binding's name, or the producing body's
         last def."""
-        return self.a_operand if isinstance(self.a_operand, str) else self.a_body[-1].defines()[-1]
-
-    def stat_prologue(self) -> tuple[tuple[Stmt, ...], tuple[Stmt, ...], tuple[str, ...]]:
-        """Split the computed-A body at the contraction-axis seam: the maximal leading run of stmts
-        that never index the K axis is the **per-row statistic prologue** (the fused norm→linear
-        cone's stat reduce ``Loop`` + scalar epilogue — or a broadcast row scale), the remainder the
-        **per-cell** cone. Returns ``(prologue, cell, stats)`` — ``stats`` are the prologue defs the
-        cell reads, the values bridged through the stat smem rows (a prologue whose defs go unread
-        is dropped). The ONE seam both sides read: the scheduler sizes the stat rows into the sync
-        stage's smem budget, the materializer fills them (``sync_stat_fill``)."""
-        body = list(self.a_body)
-        pro: list[Stmt] = []
-        while body and not _refs_axis(body[0], self.k_axis.name):
-            pro.append(body.pop(0))
-        if not pro:
-            return (), tuple(body), ()
-        stats = tuple(sorted({nm for s in pro for nm in _deep_defines(s)} & _deep_reads(body)))
-        return (tuple(pro), tuple(body), stats) if stats else ((), tuple(body), ())
+        return self.a if isinstance(self.a, str) else self.a_body[-1].defines()[-1]
 
     @property
     def loop(self) -> Loop:
@@ -451,12 +434,12 @@ class Contraction(Stmt):
         # Deep over the A body — a computed cone may nest its loads (the fused norm→linear cone's
         # per-row statistic reduce ``Loop``). A binding REFERENCE reads no buffer here: the bound
         # subtree is the owning ``TileOp``'s, and its loads are reached through ``bindings``.
-        a = () if isinstance(self.a_operand, str) else loads(self.a_body)
+        a = () if isinstance(self.a, str) else loads(self.a_body)
         return (*dict.fromkeys(a), self.b_load.input)
 
     def pretty(self, indent: str = "") -> list[str]:
         t = " trans" if self.b_trans else ""
-        a_src = self.a_operand.input if isinstance(self.a_operand, Load) else self.a_name
+        a_src = self.a.input if isinstance(self.a, Load) else self.a_name
         ops = f"{a_src} @ {self.b_load.input}{t} -> {self.acc} ({self.atom.name})"
         return [f"{indent}Contraction [{self.m_axis.name}, {self.n_axis.name}] {ops}"]
 
@@ -476,16 +459,16 @@ def _(s: Contraction, rename, sigma, axis_fn):
     # ``b_trans`` is derived from ``b_load`` (a property), so the rewritten load carries it.
     # A binding REFERENCE is a plain SSA name — it renames through the same map as any other, which
     # is what keeps references and their definitions (the ``bindings`` keys) in lockstep.
-    if isinstance(s.a_operand, str):
-        a_operand = rename(s.a_operand)
-    elif isinstance(s.a_operand, Load):
-        a_operand = _rewrite(s.a_operand, rename, sigma, axis_fn)
+    if isinstance(s.a, str):
+        a = rename(s.a)
+    elif isinstance(s.a, Load):
+        a = _rewrite(s.a, rename, sigma, axis_fn)
     else:
-        a_operand = Body(tuple(_rewrite(c, rename, sigma, axis_fn) for c in s.a_operand))
+        a = Body(tuple(_rewrite(c, rename, sigma, axis_fn) for c in s.a))
     return Contraction(
         axes=tuple(axis_fn(a) for a in s.axes),
         k_axis=axis_fn(s.k_axis),
-        a_operand=a_operand,
+        a=a,
         b_load=_rewrite(s.b_load, rename, sigma, axis_fn),
         acc=rename(s.acc),
         tile=s.tile,
@@ -512,7 +495,7 @@ class Map:
     IS one. :attr:`source` is the len-≤1 compat read for the single-source forms."""
 
     body: Body = field(default_factory=Body)
-    sources: tuple[Reduction | Contraction, ...] = ()  # the project∘reduce sources, () = pure pointwise
+    sources: tuple[Reduction | Contraction | Map, ...] = ()  # the project∘reduce sources, () = pure pointwise
 
     def __post_init__(self) -> None:
         if not isinstance(self.body, Body):
@@ -521,7 +504,7 @@ class Map:
             object.__setattr__(self, "sources", tuple(self.sources))
 
     @property
-    def source(self) -> Reduction | Contraction | None:
+    def source(self) -> Reduction | Contraction | Map | None:
         """The single projected source, or ``None`` (pure pointwise) — the compat read every
         single-source form uses. A fused sibling group (N sources) has no single source; read
         ``sources`` there."""
@@ -563,8 +546,8 @@ def tree_nodes(op):
     elif isinstance(op, Reduction):
         for s in op.partial:
             yield from _stmt_nodes(s)
-    elif isinstance(op, Contraction) and isinstance(op.a_operand, Body):
-        for s in op.a_operand:
+    elif isinstance(op, Contraction) and isinstance(op.a, Body):
+        for s in op.a:
             yield from _stmt_nodes(s)
 
 
@@ -577,7 +560,7 @@ def _node_defines(node) -> list[str]:
     elif isinstance(node, Reduction):
         stmts = [s for s in node.partial if not isinstance(s, (Map, Reduction, Contraction))]
     else:
-        cone = list(node.a_operand) if isinstance(node.a_operand, Body) else []
+        cone = list(node.a) if isinstance(node.a, Body) else []
         stmts = [s for s in cone if not isinstance(s, (Map, Reduction, Contraction))]
         out += list(node.defines())
     for s in stmts:
@@ -606,7 +589,7 @@ class TileOp(Op):
 
     ``bindings`` is the kernel's **let table** — shared subtrees keyed by the name each tree's root
     defines (its ``out``), referenced from an operand field by that plain SSA name
-    (``Contraction.a_operand = "xhat"``). There is deliberately no ``Ref`` node kind: SSA names are
+    (``Contraction.a = "xhat"``). There is deliberately no ``Ref`` node kind: SSA names are
     already the IR's one reference mechanism, so ``deps`` / ``defines``, the rewrite rename maps and
     ``structural_key`` canonicalization all speak them unchanged. The invariant that replaces it is
     **binding-name uniqueness** (:meth:`validate_bindings`, run at construction): a binding's key is

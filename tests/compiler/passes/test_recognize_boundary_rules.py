@@ -305,21 +305,30 @@ def test_norm_linear_warp_pick_is_computed_a_contraction():
 
 
 def test_norm_linear_cone_is_a_bound_node_tree():
-    """The computed-A cone lives ONCE, in ``TileOp.bindings``, as a real node tree — the per-row
-    statistic is a :class:`Reduction` source, the per-cell normalize its ``Map`` body — and the
-    contraction names it. That is what makes the statistic addressable (and later cuttable) in its
-    own right instead of hiding inside an operand body; lowering inlines it back to the identical
-    ``[stat loop, …, cone]`` stmt run."""
-    from emmy.compiler.ir.tile.ops import lower, resolve
+    """The computed-A cone lives ONCE, in ``TileOp.bindings``, as a real node tree: its SOURCE is the
+    row-invariant prologue — the per-row statistic (a projected reduce over the stat
+    :class:`Reduction`) plus any k-invariant cone prefix — and its ``body`` is the per-cell
+    normalize. The K seam is therefore the NODE BOUNDARY: ``ops.cone_seam`` reads it instead of
+    re-scanning stmts for "the maximal leading run that never indexes K", and the statistic is
+    addressable (and later cuttable) in its own right. Lowering inlines the whole thing back to the
+    identical ``[stat loop, …, cone]`` stmt run."""
+    from emmy.compiler.ir.tile.ir import _refs_axis
+    from emmy.compiler.ir.tile.ops import cone_seam, lower, resolve
 
     _, tile = _resolve(_norm_linear_graph(), pick=_is_warp_row)
     c = tile.op.source
     assert c.a_ref is not None and set(tile.bindings) == {c.a_ref}
     cone = tile.bindings[c.a_ref]
     assert isinstance(cone, Map) and cone.out == c.a_ref
-    assert cone.source.role is AxisRole.PLANAR, "the statistic is the cone's Reduction source"
-    # Resolution reproduces the operand body verbatim: the stat loop, then the per-cell cone.
-    assert resolve(c, tile.bindings).a_body == tuple(lower(cone))
+    assert cone.source.source.role is AxisRole.PLANAR, "the statistic reduce is the prologue's source"
+    # The seam IS the boundary: prologue row-invariant, body k-varying, stats the bridged values.
+    pro, cell, stats = cone_seam(cone)
+    assert pro == tuple(lower(cone.source)) and cell == tuple(cone.body)
+    assert not any(_refs_axis(s, c.k_axis.name) for s in pro), "the prologue never indexes K — it runs once per row"
+    assert any(_refs_axis(s, c.k_axis.name) for s in cell), "the per-cell body is the k-varying remainder"
+    assert stats, "the statistic bridges through the stat smem rows"
+    # Resolution reproduces the operand body verbatim: the stat loop, its sweep, then the cone.
+    assert resolve(c, tile.bindings).a_body == tuple(lower(cone)) == (*pro, *cell)
 
 
 def test_norm_linear_fp32_keeps_map_rows_only():

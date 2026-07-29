@@ -47,10 +47,10 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.tile import Contraction, Map, Placement, ReducePlan, Reduction, TileOp, TilePlan
 from emmy.compiler.ir.tile.ir import gmem_row_stride
-from emmy.compiler.ir.tile.ops import axis_role, group_loop, nodify_reduce, reduce_loop, resolve
+from emmy.compiler.ir.tile.ops import axis_role, cone_seam, group_loop, nodify_reduce, reduce_loop, resolve
 from emmy.compiler.ir.tile.ops import lower as lower_op
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
-from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_operand, map_cone, semiring_binding
+from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_cone, map_cone, semiring_binding
 from emmy.compiler.pipeline.passes.lowering.tile._carrier import projection_distributes
 from emmy.compiler.pipeline.pipeline import LoweringError
 from emmy.compiler.pipeline.search.space import (
@@ -493,15 +493,15 @@ def _warp_atoms(kernel, probe, bindings: dict | None = None, proj: Body | None =
         return ()
     if not _fragment_epilogue_ok(Body(()) if proj is None else proj):
         return ()
-    if isinstance(probe.a_operand, Load):
-        ld = probe.a_operand
+    if isinstance(probe.a, Load):
+        ld = probe.a
     else:
         kname = probe.k_axis.name
         cone = resolve(probe, kernel.bindings if bindings is None else bindings).a_body  # the bound cone's K-indexed leaf carries the dtype
         ld = next((st for st in cone if isinstance(st, Load) and kname in {v for e in st.index for v in e.free_vars()}), None)
     t = kernel.inputs.get(ld.input) if ld is not None else None
     atoms = _ATOMS_BY_DTYPE.get(getattr(getattr(t, "dtype", None), "name", None), ())
-    if atoms or isinstance(probe.a_operand, Load) or getattr(getattr(t, "dtype", None), "name", None) != "f32":
+    if atoms or isinstance(probe.a, Load) or getattr(getattr(t, "dtype", None), "name", None) != "f32":
         return atoms
     return _demoted_atoms(kernel, probe, group)
 
@@ -535,13 +535,13 @@ def _demote_mixed_a(kernel, con, bindings: dict | None = None):
     / TMA) move raw bytes and cannot convert, which is why the demotion routes through the cone form
     instead of the plain warp tier. Anything else (already-computed A, non-Load A, 16-bit A,
     non-16-bit folds) returns unchanged."""
-    if con is None or not isinstance(con.a_operand, Load):
+    if con is None or not isinstance(con.a, Load):
         return con
-    a_t = kernel.inputs.get(con.a_operand.input)
+    a_t = kernel.inputs.get(con.a.input)
     if getattr(getattr(a_t, "dtype", None), "name", None) != "f32" or not _demoted_atoms(kernel, con):
         return con
     binds = {} if bindings is None else bindings
-    return replace(con, a_operand=bind_operand(Map(body=Body((con.a_operand,))), binds))
+    return replace(con, a=bind_cone([con.a], con.k_axis.name, binds))
 
 
 def _warp_move_ok(kernel, spec: str) -> bool:
@@ -944,8 +944,8 @@ def _resolve_warp_stage(c: Contraction, stage: Stage, budget: int = STATIC_SMEM_
     # ``[1, seq, K]`` unit-batch views were the motivating decline). cp.async has no descriptor
     # (its fill closure carries the extra index dims verbatim), so it never gated on rank.
     tma_rank_ok = (
-        isinstance(c.a_operand, Load)
-        and _tma_operand_rank_ok(c.a_operand.index, m.axis.name, c.k_axis.name)
+        isinstance(c.a, Load)
+        and _tma_operand_rank_ok(c.a.index, m.axis.name, c.k_axis.name)
         and _tma_operand_rank_ok(c.b_load.index, n.axis.name, c.k_axis.name)
     )
     # TMA hardware: every box dim must be 1..256 — the slot shapes are A (tile_m, bk) / B (bk,
@@ -995,13 +995,12 @@ def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = ST
     # serving fork rides it).
     if c.n.mask or c.b_trans:
         return None
-    if not inputs or c.a_operand.input not in inputs:
+    if not inputs or c.a.input not in inputs:
         return None
     # TMA's box encodes extra leading (batch) dims as extent-1 dims when they are tile/K-invariant
     # (:func:`_tma_operand_rank_ok`); cp.async's fill closure carries them verbatim, no rank gate.
     if stage.transport == "tma" and not (
-        _tma_operand_rank_ok(c.a_operand.index, c.m.axis.name, c.k_axis.name)
-        and _tma_operand_rank_ok(c.b_load.index, c.n.axis.name, c.k_axis.name)
+        _tma_operand_rank_ok(c.a.index, c.m.axis.name, c.k_axis.name) and _tma_operand_rank_ok(c.b_load.index, c.n.axis.name, c.k_axis.name)
     ):
         return None
     # Staging needs the CTA to BE one (tile_m × tile_n) output tile (the cooperative fill / drain
@@ -1010,7 +1009,7 @@ def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = ST
     if c.block_threads is None:
         return None
     K = c.k_axis.extent.as_static()
-    elem_bytes = inputs[c.a_operand.input].dtype.nbytes
+    elem_bytes = inputs[c.a.input].dtype.nbytes
     # TMA hardware: every box dim must be 1..256 — the slot shapes are A (tile_m, bk) / B (bk,
     # tile_n), and bk never exceeds 128, so the gate is on the tile widths (an oversized scalar
     # register tile like tile_n=832 must decline TMA; cp.async has no box).
@@ -1068,7 +1067,7 @@ def _resolve_sync_stage(
     TMA are copy transports that cannot evaluate a producer cone), so there is no gmem-direct ``""``
     sibling and a ``STAGE`` pin degrades to this resolved row. ``None`` when the slabs don't fit
     the 48 KiB smem budget: the A/B operand slabs plus one fp32 row per bridged statistic
-    (``sync_stat_fill``'s decls — the same ``Contraction.stat_prologue`` seam the materializer
+    (``sync_stat_fill``'s decls — the same ``ops.cone_seam`` node boundary the materializer
     fills through). ``want_depth >= 2`` is the **asymmetric B-only prefetch ring**: only the
     B cp.async slabs ring (their copies for chunk ``i+d-1`` fly under chunk ``i``'s
     compute fill AND drain), while the compute-filled A slab and the stat rows stay
@@ -1087,7 +1086,7 @@ def _resolve_sync_stage(
     atom = c.atom
     bk_elems = c.tile.bk * atom.atom_k
     a_nbytes = atom.operand_dtype("a").nbytes
-    _, _, stats = resolve(c, bindings).stat_prologue()
+    _, _, stats = cone_seam(bindings.get(c.a_ref)) if c.a_ref else ((), (), ())
     # One A slab + one B slab per fold channel (the multi-channel gate/up node fills a B slab per
     # projection) + one fp32 stat row per bridged statistic. Only the B slabs multiply by the
     # ring depth (the asymmetric ring above).
@@ -1260,7 +1259,7 @@ def _contraction_node(node, place, tile_plan: TilePlan, bindings: dict | None = 
             Contraction(
                 axes=(grid[-2], grid[-1]),
                 k_axis=reduce_loop(node, bindings).axis,
-                a_operand=bind_operand(a_load, {} if bindings is None else bindings),
+                a=a_load if isinstance(a_load, Load) else bind_cone(a_load, reduce_loop(node, bindings).axis.name, bindings or {}),
                 b_load=b_load,
                 acc=acc,
                 tile=tile_plan,
@@ -1350,18 +1349,12 @@ def _splitk_option(
         # ``ksplit·(K/w) + k0 + col``. The projection riding the recognizer's ``Map`` wrapper is
         # folded into the node epilogue so ``030_split_reduce``'s deferred finalize re-applies it
         # after the cross-partition sum (the partial's epilogue becomes the workspace write).
-        from emmy.compiler.ir.tile.ir import _refs_axis  # noqa: PLC0415
-
         cone = binds[inner.a_ref]
-        # The cone's ``Reduction`` source IS the statistic — k-invariant by construction, so it stays
-        # whole in every partition (that is the redundancy the split trades for parallelism); only the
-        # per-cell body splits at the K seam.
-        body = list(cone.body)
-        pro: list = []
-        while body and not _refs_axis(body[0], kslice.name):
-            pro.append(body.pop(0))
-        cell = [s.rewrite(lambda nm: nm, sigma) for s in body]
-        binds[inner.a_ref] = replace(cone, body=Body((*pro, *cell)))
+        # The cone's SOURCE node is its row-invariant prologue — the per-row statistic and anything
+        # else that does not index K — so it stays whole in every partition (that redundancy is what
+        # the split trades for parallelism). Only the cone's ``body``, the per-cell normalize, is
+        # σ-reindexed to absolute k. No stmt scan: the K seam is the node boundary.
+        binds[inner.a_ref] = replace(cone, body=Body(tuple(s.rewrite(lambda nm: nm, sigma) for s in cone.body)))
         group = tuple(
             replace(c, k_axis=kslice, b_load=replace(c.b_load, index=tuple(sigma.apply(e) for e in c.b_load.index))) for c in group
         )
@@ -1370,7 +1363,7 @@ def _splitk_option(
             replace(
                 c,
                 k_axis=kslice,
-                a_operand=replace(c.a_operand, index=tuple(sigma.apply(e) for e in c.a_operand.index)),
+                a=replace(c.a, index=tuple(sigma.apply(e) for e in c.a.index)),
                 b_load=replace(c.b_load, index=tuple(sigma.apply(e) for e in c.b_load.index)),
             )
             for c in group
@@ -1900,7 +1893,7 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     lift multiplies a gmem ``Load`` B with a computed pure-MAP cone A (the fused producer → matmul
     edge: ``f(x, …) @ w``), or ``None`` (stay scalar). PIN-DRIVEN like the matmul warp tier: fires
     only under a warp ``TILE`` pin. Nodifies the fold to a computed-A :class:`Contraction` (the
-    same ``a_operand = Body`` the flash P@V rides) and stamps the ``sync`` compute-fill
+    same ``a = Body`` the flash P@V rides) and stamps the ``sync`` compute-fill
     :class:`Stage` — the producer cone materializes the A tile straight into the smem slab the
     ``ldmatrix`` drain reads (the fused edge IS the mma tier's ``sync`` transport). First cut:
     exact-cover geometry only (static M/N/K divisible by the tile / K-chunk — no masked overhang),
@@ -1965,7 +1958,7 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     node = Contraction(
         axes=(m_ax, n_ax),
         k_axis=k_ax,
-        a_operand=bind_operand(Map(body=Body(tuple(cone))), binds),
+        a=bind_cone(list(cone), k_ax.name, binds),
         b_load=loads[b_name],
         acc=acc.name,
         tile=wt,
@@ -2138,12 +2131,12 @@ def _twisted_warp_options(
         return []
     red, head, pv = pair
     op = tile.op
-    if not isinstance(head.a_operand, Load):
+    if not isinstance(head.a, Load):
         return []
     channels = red.carrier.twist.channels
     if len(channels) != 3 or channels[1].lift is not None or channels[2].lift is None:
         return []
-    q_tensor = tile.inputs.get(head.a_operand.input) if tile.inputs else None
+    q_tensor = tile.inputs.get(head.a.input) if tile.inputs else None
     atom_name = {"f16": "mma_m16n8k16_f16_f32", "bf16": "mma_m16n8k16_bf16_f32"}.get(
         getattr(getattr(q_tensor, "dtype", None), "name", None)
     )
@@ -2185,7 +2178,7 @@ def _twisted_warp_options(
     # Underivable strides (an axis split across index components, a non-affine use, a symbolic
     # trailing extent) have no fragment realization — decline the tier.
     strides = (
-        gmem_row_stride(head.a_operand, m_name, tile.inputs),
+        gmem_row_stride(head.a, m_name, tile.inputs),
         gmem_row_stride(head.b_load, head.n_axis.name if head.b_trans else head.k_axis.name, tile.inputs),
         gmem_row_stride(pv.b_load, pv.n_axis.name if pv.b_trans else kv_name, tile.inputs),
     )
@@ -2298,10 +2291,7 @@ def _twisted_warp_options(
 
         b_dt = atom.operand_dtype("b").name
         kv_stage_ok = _buf_dtype_name(head.b_load) == b_dt and _buf_dtype_name(pv.b_load) == b_dt
-        q_stage_ok = _buf_dtype_name(head.a_operand) == atom.operand_dtype("a").name
-        # An overhanging head-dim atom uses the gmem fragment loaders' K-zero helpers. Async
-        # staging currently has no zero-fill contract for the row's padding bytes, so keep this
-        # geometry gmem-direct until the transports learn that mask.
+        q_stage_ok = _buf_dtype_name(head.a) == atom.operand_dtype("a").name
         stage_cands = (
             [None]
             if not kv_stage_ok or head_dim.as_static() % atom_k

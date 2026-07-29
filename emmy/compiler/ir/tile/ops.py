@@ -47,7 +47,7 @@ def resolve(op, bindings=None):
         bound = bindings.get(op.a_ref)
         if bound is None:
             raise KeyError(f"resolve: operand reference {op.a_ref!r} resolves to no binding")
-        return replace(op, a_operand=Body(tuple(lower(bound, bindings))))
+        return replace(op, a=Body(tuple(lower(bound, bindings))))
     return op
 
 
@@ -55,6 +55,27 @@ def _resolve_stmts(body: Body, bindings) -> Body | None:
     """``body`` with every structural-node stmt resolved, or ``None`` when nothing changed."""
     out = [resolve(s, bindings) if isinstance(s, (Map, Reduction, Contraction)) else s for s in body]
     return None if all(a is b for a, b in zip(out, body, strict=True)) else Body(tuple(out))
+
+
+def cone_seam(cone) -> tuple[tuple, tuple, tuple[str, ...]]:
+    """The computed-A cone's ``(prologue, cell, stats)`` — read off the NODE BOUNDARY, not by
+    scanning stmts: the cone is ``Map(body=<the per-cell normalize>, sources=(<the row-invariant
+    prologue>,))``, and the prologue node IS the per-row statistic (its own ``Map`` over the stat
+    ``Reduction``) plus any row-invariant cone prefix, placed there when the cone was bound
+    (``_atomize.bind_cone`` splits at the K seam once, structurally).
+
+    ``stats`` are the prologue defs the cell reads — the values bridged through the stat smem rows;
+    a prologue whose defs go unread is dropped (nothing to bridge). The ONE seam both sides read:
+    the scheduler sizes the stat rows into the sync stage's smem budget, the materializer fills
+    them (``sync_stat_fill``)."""
+    from emmy.compiler.ir.tile.ir import _deep_defines, _deep_reads  # noqa: PLC0415
+
+    if not isinstance(cone, Map) or not cone.sources:
+        return (), tuple(cone.body) if isinstance(cone, Map) else (), ()
+    pro = tuple(lower(cone.sources[0]))
+    cell = tuple(cone.body)
+    stats = tuple(sorted({nm for s in pro for nm in _deep_defines(s)} & _deep_reads(list(cell))))
+    return (pro, cell, stats) if stats else ((), cell, ())
 
 
 def is_group(op) -> bool:
@@ -234,6 +255,7 @@ def pretty(op, indent: str = "", bindings=None) -> list[str]:
 __all__ = [
     "Map",
     "axis_role",
+    "cone_seam",
     "contraction_loop",
     "group_loop",
     "is_group",

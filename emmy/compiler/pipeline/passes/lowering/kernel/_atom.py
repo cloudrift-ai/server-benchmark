@@ -454,21 +454,27 @@ def _stat_slab(name: str) -> str:
 
 
 def _sync_operands(
-    c: Contraction, bk_elems: int, mn: tuple[Side, Side], cta: CtaTile, swizzles: tuple[str, str] = ("NONE", "NONE"), channels=()
+    c: Contraction,
+    bk_elems: int,
+    mn: tuple[Side, Side],
+    cta: CtaTile,
+    swizzles: tuple[str, str] = ("NONE", "NONE"),
+    channels=(),
+    seam: tuple = ((), (), ()),
 ) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...], list[Stmt]]:
     """The ``sync``-transport (fused-edge) operands + the one-shot prologue stmts, returned as
     ``(drain-ordered operands, compute-filled, cp.async-filled, prologue)``: A is **compute-filled**
-    from the node's producer cone (``a_operand`` is a ``Body`` — each thread evaluates the cone at
+    from the node's producer cone (``a`` is a ``Body`` — each thread evaluates the cone at
     the slab cell's absolute ``(m, k)`` coords and writes the result); each fold channel's B is a
     plain weight copy riding a vectorized ``cp.async`` :class:`Operand` that flies UNDER the
     compute fill — a canonical B as the K-major ``(bk × tile_n)`` slab, a transposed B
     (the serving ``F.linear`` layout, K gmem-contiguous) as the N-MAJOR ``(tile_n × bk)`` slab in
     its own gmem orientation (A's geometry; the ``Operand.trans`` stamp routes the drain to the
     plain no-``.trans`` ldmatrix — the same slab the copy transports stage). A cone with a
-    k-invariant prefix (the fused
-    norm→linear per-row statistic — its reduce ``Loop`` + scalar epilogue) is split at the K seam
-    (``Contraction.stat_prologue`` — the node-owned seam the scheduler also sizes the stat rows
-    off): the prefix runs ONCE per tile row (:func:`sync_stat_fill`, returned as the transport
+    row-invariant prologue (the fused
+    norm→linear per-row statistic — its reduce ``Loop`` + scalar sweep) arrives already split at the
+    K seam (``ops.cone_seam`` reads the cone NODE's boundary; the scheduler sizes the stat rows off
+    the same read): the prologue runs ONCE per tile row (:func:`sync_stat_fill`, returned as the transport
     prologue) and the per-cell fill reads the bridged values back from the stat smem rows. The
     schedule's eligibility guarantees exact cover on N and K only; a masked / symbolic **M**
     clamp-reads the overhanging rows in-bounds (the A fill σ and the stat prologue σ — a duplicate
@@ -476,7 +482,7 @@ def _sync_operands(
     contract the copy transports follow)."""
     m_name, k_name = c.m_axis.name, c.k_axis.name
     row_base, col_base = _tile_base(mn)
-    pro, cell, stats = c.stat_prologue()
+    pro, cell, stats = seam
 
     def m_coord(row) -> Expr:
         t = BinaryExpr("+", row_base, row)
@@ -552,7 +558,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         # prefix (the fused norm→linear per-row statistic) rides the transport prologue, run once
         # ahead of the K-loop.
         operands, sync_ops, async_ops, stat_pro = _sync_operands(
-            c, stage.bk_elems, mn, cta, ops.slab_swizzles(mn, elem.nbytes), ops.channels
+            c, stage.bk_elems, mn, cta, ops.slab_swizzles(mn, elem.nbytes), ops.channels, ops.cone
         )
         transport = SyncTransport(
             operands=sync_ops,
@@ -565,8 +571,8 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     else:
         assert len(ops.channels) == 1, "cp.async / TMA staging is single-fold — a multi-B node rides the sync compute-fill"
         operands = _slab_operands(
-            index_srcs=(c.a_operand.index, c.b_load.index),
-            bufs=(c.a_operand.input, c.b_load.input),
+            index_srcs=(c.a.index, c.b_load.index),
+            bufs=(c.a.input, c.b_load.input),
             mn=mn,
             k_axis=k_axis,
             bk_elems=stage.bk_elems,
@@ -749,11 +755,21 @@ class _AtomOps:
     # here is DERIVED from the group at emit time (one A fragment, N mma chains, one C fragment per
     # channel). ``()`` means the plain single-channel node, i.e. just ``c``'s own pair.
     siblings: tuple = ()
+    # The computed-A cone's ``(prologue, cell, stats)`` K seam, read off the NODE BOUNDARY by
+    # ``_factor.factorize`` before the let table was inlined (``ops.cone_seam``). ``None`` for a
+    # plain gmem-``Load`` A — its whole body is the per-cell fill.
+    seam: tuple | None = None
 
     @property
     def channels(self) -> tuple:
         """The ``(b_load, acc)`` pairs this emission folds — the group's, or the node's own."""
         return self.siblings or ((self.c.b_load, self.c.acc),)
+
+    @property
+    def cone(self) -> tuple:
+        """The A cone's ``(row-invariant prologue, per-cell body, bridged stats)`` — the node
+        boundary, or the whole operand body when there is no cone to split."""
+        return self.seam if self.seam is not None else ((), tuple(self.c.a_body), ())
 
     def reduce(self, cells, offset, mn):
         """The contraction K-loop — the ONE driver both atoms flow through, deciding nothing: a
@@ -882,7 +898,7 @@ class _MmaOps(_AtomOps):
             "mma matmul arm: a register-resident (computed) A operand lowers through the fragment realizer (_twist), not here"
         )
         assert len(self.channels) == 1, "gmem-direct mma is single-fold — a multi-B node rides the sync compute-fill"
-        a_load, b_load, b_trans = c.a_operand, c.b_load, c.b_trans
+        a_load, b_load, b_trans = c.a, c.b_load, c.b_trans
         k_static = k_axis.extent.is_static
         k_zero = None if k_static else (Var(k_axis.name), k_axis.extent_expr())
 
@@ -997,12 +1013,12 @@ class _ScalarOps(_AtomOps):
 
     def slab_elem(self):
         """The slab element dtype — the gmem operand's own dtype (fp32 SGEMM stages fp32)."""
-        return self.inputs[self.c.a_operand.input].dtype
+        return self.inputs[self.c.a.input].dtype
 
     def slab_elems(self) -> tuple:
         """Each gmem operand's OWN dtype — A and B may differ on the scalar tier (fp32 split
         partials × fp16 weights); the drain's fma converts like the gmem-direct path does."""
-        return (self.inputs[self.c.a_operand.input].dtype, self.inputs[self.c.b_load.input].dtype)
+        return (self.inputs[self.c.a.input].dtype, self.inputs[self.c.b_load.input].dtype)
 
     def staged_drain(self, operands, slot, cells, offset, mn):
         """The scalar slab drain — the plain-``Load`` fma leaf (:func:`_scalar_drain`), reading by
@@ -1067,20 +1083,22 @@ class _ScalarOps(_AtomOps):
         return _dedup_loads(cell)
 
 
-def _atom_ops(c: Contraction, stage: Stage | None = None, inputs=None, workers=None, epilogue: Body | None = None, siblings=()) -> _AtomOps:
+def _atom_ops(
+    c: Contraction, stage: Stage | None = None, inputs=None, workers=None, epilogue: Body | None = None, siblings=(), seam=None
+) -> _AtomOps:
     """The **one** atom dispatch — select the codegen strategy off the atom kind."""
     cls = _MmaOps if isinstance(c.atom, AtomKind) else _ScalarOps
-    return cls(c, stage, inputs, workers, Body(()) if epilogue is None else epilogue, tuple(siblings))
+    return cls(c, stage, inputs, workers, Body(()) if epilogue is None else epilogue, tuple(siblings), seam)
 
 
-def reduce_codegen(c: Contraction, stage: Stage | None = None, inputs=None, workers=None, siblings=()):
+def reduce_codegen(c: Contraction, stage: Stage | None = None, inputs=None, workers=None, siblings=(), seam=None):
     """The reusable, **sink-agnostic** ``(state_decls, reduce_region)`` from the atom strategy — the
     accumulator decls + the contraction K-loop (the ONE :meth:`_AtomOps.reduce` driver: the shared
     :func:`_contract_kloop` spine gmem-direct, the shared :func:`_staged` fill→drain skeleton staged).
     ``stage`` / ``inputs`` bind operand staging (both atoms stage the same smem slab off it, differing
     only in the drain leaf — ``ldmatrix`` vs plain ``Load``); ``workers`` splits the staged phases
     across producer / compute warp bands (the resolved :class:`WarpSpec`; ``None`` = uniform)."""
-    ops = _atom_ops(c, stage, inputs, workers, siblings=siblings)
+    ops = _atom_ops(c, stage, inputs, workers, siblings=siblings, seam=seam)
     return ops.state, ops.reduce
 
 

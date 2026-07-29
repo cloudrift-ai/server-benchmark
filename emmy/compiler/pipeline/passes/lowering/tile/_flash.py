@@ -93,7 +93,7 @@ from emmy.compiler.ir.loop.ir import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Carrier, Load, Loop, Select, SelectBranch, Write
 from emmy.compiler.ir.tile import Contraction, Placement, Reduction, TileOp, TilePlan
 from emmy.compiler.ir.tile.ops import Map
-from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_operand
+from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_cone
 from emmy.compiler.pipeline.passes.lowering.tile._carrier import denom, exp_family_twist, expect
 
 if TYPE_CHECKING:
@@ -353,7 +353,7 @@ def _split_pv(merge: list, o: str, v: str, v_buf: str, v_idx: tuple, m_axis: Axi
         k_axis=Axis(name="pj", extent=Dim(1)),  # block=1: a singleton intra-block reduce
         # A = P, register-resident: a one-stmt cone bound in the let table and referenced by name,
         # the same shape every computed A takes.
-        a_operand=bind_operand(Map(body=Body((Assign(name=f"{o}__p", op="copy", args=(p_name,)),))), bindings),
+        a=bind_cone([Assign(name=f"{o}__p", op="copy", args=(p_name,))], "pj", bindings),
         b_load=Load(name=v, input=v_buf, index=v_idx),  # B = V (the value tile)
         acc=f"{o}__pv",
         tile=TilePlan(),
@@ -426,7 +426,7 @@ def _flash_op(
     score_contraction = Contraction(
         axes=(Axis(name="m", extent=s_q), Axis(name="kv", extent=s_k)),
         k_axis=Axis(name="dd", extent=Dim(head_dim)),
-        a_operand=Load(name="q_e", input=q_buf, index=q_idx),
+        a=Load(name="q_e", input=q_buf, index=q_idx),
         b_load=Load(name="k_e", input=k_buf, index=k_idx),
         acc="sacc",
         tile=TilePlan(),

@@ -1,7 +1,7 @@
 """``TileOp.bindings`` — the let table, its invariants, and the name-operand round trip.
 
 A shared subtree lives ONCE, in ``TileOp.bindings``, keyed by the name its root defines; a consumer
-references it by that plain SSA name in an operand field (``Contraction.a_operand = "xhat"``). There
+references it by that plain SSA name in an operand field (``Contraction.a = "xhat"``). There
 is no ``Ref`` node kind — names are the IR's one reference mechanism, so the rewrite rename map and
 ``structural_key`` canonicalization carry references and definitions in lockstep. These pin the
 construction-time invariants (no dangling reference, a key IS its tree's ``out``, a binding name is
@@ -36,7 +36,7 @@ def _channel(acc: str, weight: str, a: str | Body = "xhat") -> Contraction:
     return Contraction(
         axes=(Axis("m", 128), Axis("n", 128)),
         k_axis=Axis("k", 256),
-        a_operand=a,
+        a=a,
         b_load=Load(name=f"{acc}_b", input=weight, index=(Var("k"), Var("n"))),
         acc=acc,
         tile=TilePlan(),

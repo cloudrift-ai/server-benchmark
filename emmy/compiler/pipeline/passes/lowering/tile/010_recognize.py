@@ -73,7 +73,7 @@ from emmy.compiler.pipeline.fork import Fork
 # NOTE: no ``Knob`` objects (``TILE`` / ``REDUCE`` / ``STAGE``) may be imported here — ``Pass.load``
 # scans rule modules for ``Knob`` attrs and OFF-fills any it finds bare onto every variant of the
 # pass. Pin reads / knob-key spelling ride the ``_schedule`` helpers instead.
-from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction, bind_operand, bind_prologue_contraction, map_cone
+from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_cone, bind_contraction, bind_prologue_contraction, map_cone
 from emmy.compiler.pipeline.passes.lowering.tile._flash import is_flash_score_producer, try_flash
 from emmy.compiler.pipeline.passes.lowering.tile._schedule import prologue_knob_bases, schedule, warp_tile_pinned
 from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse
@@ -289,7 +289,7 @@ def _nodify_contraction(node, free: tuple, bindings: dict):
             con = Contraction(
                 axes=(free[-2], free[-1]),
                 k_axis=rloop.axis,
-                a_operand=bind_operand(a_load, bindings),
+                a=a_load if isinstance(a_load, Load) else bind_cone(a_load, rloop.axis.name, bindings),
                 b_load=b_load,
                 acc=acc,
                 tile=TilePlan(),
@@ -432,7 +432,8 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     # prefix-consistency: an absent key reads as "free").
     c_map, n_ax, con_binds = pro
     src = c_map.sources[0]  # the group's primary channel — every channel shares one k axis / cone
-    con_base, map_base = prologue_knob_bases(src.k_axis.name, con_binds[src.a_ref].source.axis.name)
+    # The cone's source node IS the row-invariant prologue; ITS source is the statistic reduce.
+    con_base, map_base = prologue_knob_bases(src.k_axis.name, con_binds[src.a_ref].source.source.axis.name)
     con_tile = TileOp(op=c_map, place=Placement(free=(*free, n_ax)), inputs=dict(loop.inputs), bindings=con_binds)
     con = _as_list(schedule(con_tile, loop.name, {**knob_base, **con_base}, ctx))
     if con and warp_tile_pinned():

@@ -549,7 +549,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # trace strides its rows by ``H·D``, and the old ``head_dim`` assumption read the wrong rows
     # (the gemma layer-0 NaN). Canonical ``(batch…, row, dd)`` layouts derive the same values as
     # before (bit-identical). The schedule gate guarantees derivability.
-    q_gmem_ldm = gmem_row_stride(qk.a_operand, qk.m_axis.name, ctx.inputs)
+    q_gmem_ldm = gmem_row_stride(qk.a, qk.m_axis.name, ctx.inputs)
     k_gmem_ldm = gmem_row_stride(qk.b_load, qk.n_axis.name if qk.b_trans else qk.k_axis.name, ctx.inputs)
     v_gmem_ldm = gmem_row_stride(pv.b_load, pv.n_axis.name if pv.b_trans else kv_axis.name, ctx.inputs)
     assert q_gmem_ldm and k_gmem_ldm and v_gmem_ldm, "warp twist: underivable gmem row stride (schedule-gate breach)"
@@ -585,8 +585,8 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             stmts.append(
                 LdmatrixLoad(
                     frag=qaf,
-                    src_buffer=qk.a_operand.input,
-                    src_index=_idx(qk.a_operand, {qk.m_axis.name: qt.row_base, qk.k_axis.name: k_base}),
+                    src_buffer=qk.a.input,
+                    src_index=_idx(qk.a, {qk.m_axis.name: qt.row_base, qk.k_axis.name: k_base}),
                     role="a",
                     ldm=q_gmem_ldm,
                     staged=False,
@@ -817,8 +817,8 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             state += cp_async_fill(
                 slab="_q_smem",
                 shape=(q_rows, head_dim_s),
-                src=qk.a_operand.input,
-                gmem_index=lambda row, col: _idx(qk.a_operand, {qk.m_axis.name: _q_row(row), qk.k_axis.name: col}),
+                src=qk.a.input,
+                gmem_index=lambda row, col: _idx(qk.a, {qk.m_axis.name: _q_row(row), qk.k_axis.name: col}),
                 cta=cta,
                 elem_bytes=elem_bytes,
                 name="q",
@@ -928,7 +928,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     store_tmpl = tail[-1] if tail and isinstance(tail[-1], Write) else None
     proj_tail = tail[:-1] if store_tmpl is not None else tail
     close: list[Stmt] = []
-    batch_idx = tuple(qk.a_operand.index[:-2])  # (batch…, head) — passthrough grid vars (fallback)
+    batch_idx = tuple(qk.a.index[:-2])  # (batch…, head) — passthrough grid vars (fallback)
     for qt in qtiles:
         for s in proj_tail:
             if isinstance(s, Assign) and expect_name in s.args:

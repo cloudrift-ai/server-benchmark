@@ -43,7 +43,7 @@ module."""
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
@@ -55,7 +55,7 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import Fold, Level, ReduceStage
 from emmy.compiler.ir.tile.ir import Contraction, Map, Reduction, Side
-from emmy.compiler.ir.tile.ops import group_loop, is_group
+from emmy.compiler.ir.tile.ops import cone_seam, group_loop, is_group
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import copy_cell, reduce_codegen, shrink_axis, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import sync_row_fill
 from emmy.compiler.pipeline.passes.lowering.kernel._twist import FLASH_WARP_AXIS, realize_warp_twist, warp_source
@@ -237,6 +237,10 @@ class Ctx:
     output: str = ""
     workers: object = None  # the resolved WarpSpec worker split (None = uniform SIMT)
     raster: object = None  # the parsed RASTER codec (ir.schedule.Raster; None = flat launch order)
+    # Each bound computed-A cone's ``(prologue, cell, stats)`` K seam, keyed by the binding name —
+    # read off the NODE BOUNDARY before the let table is inlined (``ops.cone_seam``), since a
+    # resolved operand body no longer shows where the row-invariant prologue ends.
+    seams: dict = field(default_factory=dict)
 
 
 def _emit(op, ctx: Ctx) -> Frag:
@@ -317,6 +321,7 @@ def factorize(tile, root, store=None) -> Tile:
     # Inline the let table once, here: the emitter below walks a NAME-FREE tree, so every node's
     # operand accessors read stmts (``ops.resolve`` reproduces exactly the operand body the
     # pre-binding IR carried, so the emitted kernel is byte-identical).
+    seams = {name: cone_seam(node) for name, node in tile.bindings.items()}
     op = resolve(tile.op, tile.bindings)
     ctx = Ctx(
         grid=tuple(tile.place.grid),
@@ -328,6 +333,7 @@ def factorize(tile, root, store=None) -> Tile:
         # per-node structure) — parse it once here; ``grid_tile`` applies it where the 2-D
         # (m, n) block grid makes it meaningful.
         raster=Raster.parse((tile.knobs or {}).get("RASTER", "")),
+        seams=seams,
     )
     out_val = _emit_wire(op).name if op is not None else ""
     return _factorize(op, ctx, tail=(), out_val=out_val, store=store)
@@ -399,7 +405,8 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, siblings: tuple =
         if not has_write(epi):
             epi = with_store(epi, ctx.output, grid, op.out)
         c = op
-        state_decls, reduce_region = reduce_codegen(c, ctx.stage, ctx.inputs, ctx.workers, siblings)
+        seam = ctx.seams.get(c.a_name)
+        state_decls, reduce_region = reduce_codegen(c, ctx.stage, ctx.inputs, ctx.workers, siblings, seam)
         sink = store if store is not None else store_sink(c, Body(tuple(epi)), siblings)
         t = unit_tile(register_tile(atomize(c.atom.shape[:2]), c.mn), c.mn)
         mn, lead, bt, lanes = c.mn, c.lead_axes, c.block_threads, c.atom.lanes

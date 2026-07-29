@@ -118,7 +118,7 @@ def _contraction() -> Contraction:
     return Contraction(
         axes=(Axis("m", 128), Axis("n", 128)),
         k_axis=Axis("k", 256),
-        a_operand=a,
+        a=a,
         b_load=b,
         acc="acc",
         tile=TilePlan.parse("n2/f2"),
@@ -215,7 +215,7 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
     inner = replace(
         c,
         k_axis=kslice,
-        a_operand=replace(c.a_operand, index=tuple(sigma.apply(e) for e in c.a_operand.index)),
+        a=replace(c.a, index=tuple(sigma.apply(e) for e in c.a.index)),
         b_load=replace(c.b_load, index=tuple(sigma.apply(e) for e in c.b_load.index)),
     )
     carrier = Accum(name="acc", value="acc__v", op=ElementwiseImpl("add")).as_carrier()
@@ -315,12 +315,12 @@ def test_out_store_index_reproduces_output_layout() -> None:
 def _pv_contraction(tile: str = "") -> Contraction:
     """A PV-style contraction whose **A operand is computed**, not a gmem ``Load``:
     ``O[m, d] = Σ_j P[m, j]·V[j, d]`` with ``P = exp(S[m, j])`` produced from an in-register score
-    (the flash PV shape — its A is register-resident, so ``a_operand`` is a ``Body``, not a ``Load``)."""
+    (the flash PV shape — its A is register-resident, so ``a`` is a ``Body``, not a ``Load``)."""
     a_body = Body((Load(name="s_e", input="S", index=(Var("m"), Var("j"))), Assign(name="p", op="exp", args=("s_e",))))
     return Contraction(
         axes=(Axis("m", 8), Axis("d", 8)),
         k_axis=Axis("j", 8),
-        a_operand=a_body,
+        a=a_body,
         b_load=Load(name="v_e", input="V", index=(Var("j"), Var("d"))),
         acc="oblk",
         tile=TilePlan.parse(tile) if tile else TilePlan(),

@@ -98,16 +98,14 @@ def nodify_reduce(op, plan: ReducePlan):
     must be a top-level stmt of ``op.body`` with no prologue ahead of it (true for a split partial /
     bare sum: the reduce is the body's head); a projection tail after it becomes the wrapping
     ``Map`` body."""
-    if isinstance(op, Contraction):
-        return replace(Reduction.from_loop(op.loop), reduce=plan)
     if isinstance(op, Reduction) and op.role is AxisRole.CONTRACTION:
         # A stored contraction fold: the K partition replaces the (dropped) output tile — the
         # per-cell coop/ILP tier's contract. The derived loop is unchanged (tile is metadata).
         return replace(op, reduce=plan, tile=None)
     head = op.sources[0] if isinstance(op, Map) and op.sources else None
-    if isinstance(head, Contraction) or (isinstance(head, Reduction) and head.role is AxisRole.CONTRACTION):
-        # A projecting wrapper: nodify the contraction under it, the projection staying put.
-        return replace(op, sources=(nodify_reduce(op.sources[0], plan),))
+    if isinstance(head, Reduction) and head.role is AxisRole.CONTRACTION:
+        # A projecting wrapper: nodify the contraction fold under it, the projection staying put.
+        return replace(op, sources=(nodify_reduce(head, plan),))
     rloop = reduce_loop(op)
     red = replace(Reduction.from_loop(rloop), reduce=plan)
     body = list(op.body)

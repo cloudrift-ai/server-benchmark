@@ -134,7 +134,7 @@ def _flatten_nodes(body: Body) -> tuple[Stmt, ...]:
 
     out: list[Stmt] = []
     for s in body:
-        if isinstance(s, (Contraction, Reduction, Map)):
+        if isinstance(s, (Reduction, Map)):
             out.extend(lower(s))
         else:
             out.append(s)
@@ -320,8 +320,6 @@ def axis_names(root) -> set[str]:
         if isinstance(node, Reduction):
             out.add(node.axis.name)
             out |= _stmt_axis_names(node.partial)
-        elif isinstance(node, Contraction):
-            out |= {node.k_axis.name, *(a.name for a in node.axes), *(a.name for a in node.lead_axes)}
         elif isinstance(node, Map):
             out |= _stmt_axis_names(node.body)
     return out
@@ -414,8 +412,10 @@ class Channel:
 
 
 @dataclass(frozen=True)
-class Contraction(Stmt):
-    """A contraction **before** atom factorization — built **recognize-side** at fork-emit
+class Contraction:
+    """The DERIVED bilinear view of a ``role=CONTRACTION`` fold — never stored (build it via
+    :func:`contraction_view`; store :meth:`as_fold`). A contraction **before** atom factorization
+    — built **recognize-side** at fork-emit
     (``_schedule._contraction_node`` resolves the operand→role binding via ``_atomize.semiring_binding``
     and stamps the resolved ``tile``), then expanded in ``010_materialize`` (``_factor.factorize``).
     :func:`ops.lower` / ``ops.reduce_loop`` flatten it back to the synthesized mul-add ``CONTRACTION``
@@ -653,15 +653,7 @@ class Contraction(Stmt):
         first)."""
         return isinstance(self.b, Load) and self.k_axis.name in self.b.index[-1].free_vars()
 
-    # ---- the kernel-stmt protocol (no nested Body — a projection rides the wrapping ``Map``; the
-    # operand buffers are external reads; the synthesized reduce produces ``acc``) ---------- #
-    def nested(self) -> tuple[Body, ...]:
-        return ()
-
-    def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
-        assert not bodies, "Contraction has no nested body — a projection rides the wrapping Map"
-        return self
-
+    # ---- reads the view consumers share (no stmt protocol — the view is never stored) ---------- #
     def defines(self) -> tuple[str, ...]:
         return tuple(ch.acc for ch in self.channels)
 
@@ -687,9 +679,6 @@ class Contraction(Stmt):
         accs = ",".join(ch.acc for ch in self.channels)
         ops = f"{src(self.a, self.a_name)} @ {bs}{t} -> {accs} ({self.atom.name})"
         return [f"{indent}Contraction [{self.m_axis.name}, {self.n_axis.name}] {ops}"]
-
-    def render(self, ctx: RenderCtx) -> list[str]:
-        raise AssertionError("Contraction must be expanded by 010_materialize before render")
 
 
 @dataclass(frozen=True)
@@ -756,25 +745,6 @@ class Map(Stmt):
 # INLINE node operand dispatches back through the same registry, so a stored computed operand
 # (the cone, flash's ``P``) canonicalizes like any other subtree.
 from emmy.compiler.ir.stmt.passes import rewrite as _rewrite  # noqa: E402
-
-
-@_rewrite.register
-def _(s: Contraction, rename, sigma, axis_fn):
-    # Route the shared A edge + every channel through the generic rewrite (SSA / Expr / axis
-    # canonicalization); map the skeleton axes; pass the ``tile`` schedule through unchanged.
-    # ``b_trans`` is derived from the primary channel (a property), so the rewritten load carries it.
-    return Contraction(
-        axes=tuple(axis_fn(a) for a in s.axes),
-        k_axis=axis_fn(s.k_axis),
-        a=_rewrite(s.a, rename, sigma, axis_fn),
-        channels=tuple(Channel(b=_rewrite(ch.b, rename, sigma, axis_fn), acc=rename(ch.acc)) for ch in s.channels),
-        tile=s.tile,
-        # ``stage`` is deliberately DROPPED: this rewrite is the ``structural_key``
-        # canonicalization, and the resolved pipeline is already spelled on the knob row
-        # (``STAGE@<k>``) — folding it into the digest here would re-key every staged kernel
-        # against its stored evidence for no added identity.
-        lead_axes=tuple(axis_fn(a) for a in s.lead_axes),
-    )
 
 
 @_rewrite.register
@@ -876,7 +846,7 @@ def contraction_view(fold, m_axis: Axis, n_axis: Axis, lead_axes: tuple = ()) ->
 
 def _stmt_nodes(s: Stmt):
     """Every structural node reachable from stmt ``s`` (deep through nested bodies)."""
-    if isinstance(s, (Map, Reduction, Contraction)):
+    if isinstance(s, (Map, Reduction)):
         yield from tree_nodes(s)
         return
     for b in s.nested():
@@ -898,14 +868,10 @@ def tree_nodes(op):
             yield from _stmt_nodes(s)
     elif isinstance(op, Reduction):
         for edge in op.operands:
-            if isinstance(edge, (Map, Reduction, Contraction)):
+            if isinstance(edge, (Map, Reduction)):
                 yield from tree_nodes(edge)
         for s in op.partial:
             yield from _stmt_nodes(s)
-    elif isinstance(op, Contraction):
-        for edge in (op.a, *(ch.b for ch in op.channels)):  # an inline operand edge is walked like any other node
-            if isinstance(edge, (Map, Reduction, Contraction)):
-                yield from tree_nodes(edge)
 
 
 @dataclass

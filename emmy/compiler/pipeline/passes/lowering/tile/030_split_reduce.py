@@ -56,7 +56,6 @@ from emmy.compiler.ir.schedule import Fold, Level
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Init, Load, Loop, Write
 from emmy.compiler.ir.tile import (
-    Contraction,
     Map,
     Placement,
     ReducePlan,
@@ -351,9 +350,7 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
         # The split node's inner contraction — multi-channel included — rides the reduce's
         # ``partial`` (the one composition rule).
         inner = split_root.partial[0]
-        if isinstance(inner, Contraction) or (
-            isinstance(inner, Reduction) and inner.role is AxisRole.CONTRACTION and inner.tile is not None
-        ):
+        if isinstance(inner, Reduction) and inner.role is AxisRole.CONTRACTION and inner.tile is not None:
             return _split_contraction(match, root, tile, inner, carrier, plan, rax, projection)
     # Flash split-KV: a warp-tiled TWISTED streaming tree keeps its fragment residence in the
     # partial (the scalar residual path below would drop it to the per-cell tier).

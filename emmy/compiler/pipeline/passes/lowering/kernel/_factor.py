@@ -258,12 +258,7 @@ def _emit(op, ctx: Ctx) -> Frag:
         stmts = _emit_body(Body(op.spliced_step()), ctx)  # operand edges splice ahead of first use
         loop = Loop(axis=op.axis, body=Body(tuple(stmts)), unroll=op.unroll, role=op.role, carrier=op.carrier)
         return Frag(body=[loop], out=Handle(op.out), carrier=op.carrier)
-    if isinstance(op, Contraction):
-        # Scalar / block=1: the synthesized ``CONTRACTION`` loop nest — byte-identical to
-        # ``op.lower()``. A warp-tiled nested contraction never reaches here — the warp-tiled tree
-        # realizes wholesale at fragment residence (``_twist``, keyed in ``_bind``).
-        return Frag(body=list(op.lower()), out=Handle(op.acc))
-    raise TypeError(f"_emit: expected a Map / Reduction / Contraction node, got {type(op).__name__}")
+    raise TypeError(f"_emit: expected a Map / Reduction node, got {type(op).__name__}")
 
 
 def _map_wire(op: Map) -> Handle:
@@ -301,7 +296,7 @@ def _emit_body(body, ctx: Ctx) -> list[Stmt]:
     since a warp-tiled nested contraction lowers to mma, not a scalar loop)."""
     out: list[Stmt] = []
     for s in body:
-        if isinstance(s, (Contraction, Reduction, Map)):
+        if isinstance(s, (Reduction, Map)):
             out.extend(_emit(s, ctx).body)
         else:
             out.append(s)

@@ -313,8 +313,8 @@ def _realize_prologue(stmts, qk: Contraction, frags: tuple[str, ...], col_bases,
     row_coord: Expr = Var(FRAG_ROW) if qk.m_axis.extent.is_static else _clamp_last(Var(FRAG_ROW), _ext(qk.m_axis))
     col_coord: Expr = Var(FRAG_COL) if qk.n_axis.extent.is_static else _clamp_last(Var(FRAG_COL), _ext(qk.n_axis))
     for s in stmts:
-        if isinstance(s, Contraction) or is_contraction_fold(s):
-            continue  # the expect contraction — regenerated from its channel
+        if is_contraction_fold(s):
+            continue  # the expect fold — regenerated from its channel
         if state & (set(s.defines()) | _reads(s)):
             break  # the dissolved merge — regenerated from the twist channels
         if isinstance(s, Load) and len(s.index) == 0:

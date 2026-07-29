@@ -1263,8 +1263,6 @@ def _contraction_node(node, place, tile_plan: TilePlan) -> tuple[Contraction, Bo
         view = contraction_view(node, grid[-2], grid[-1], tuple(grid[:-2]))
         if view is not None:
             return replace(view, tile=tile_plan), Body(())
-    if isinstance(node, Contraction):
-        return replace(node, tile=tile_plan), Body(())
     a_load, b_load, acc, epilogue = semiring_binding(node, place.grid)
     kaxis = reduce_loop(node).axis
     return (
@@ -1904,7 +1902,7 @@ def _composes(red: Reduction) -> bool:
     """True when the reduce's per-step ``partial`` composes another structural node (split-K's
     sliced contraction, flash's score) — the ONE spelling for a composed reduce, so a "bare
     statistic reduce" test is just its negation."""
-    return any(isinstance(s, (Map, Reduction, Contraction)) for s in red.partial)
+    return any(isinstance(s, (Map, Reduction)) for s in red.partial)
 
 
 def _with_twisted_stage(op, stage: Stage | None):

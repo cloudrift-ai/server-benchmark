@@ -18,7 +18,7 @@ from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.stmt.passes import rewrite
-from emmy.compiler.ir.tile import Channel, Contraction, Map
+from emmy.compiler.ir.tile import Channel, Contraction, Map, contraction_view
 from emmy.compiler.ir.tile.ir import axis_names, captured_values, tree_nodes
 from emmy.compiler.ir.tile.ops import lower
 
@@ -101,8 +101,8 @@ def test_a_computed_operand_is_stored_inline_and_flattens_on_the_edge() -> None:
 
 
 def test_tree_nodes_walks_inline_operand_edges() -> None:
-    node = _product()
-    assert node.a in list(tree_nodes(node))
+    fold = _product().as_fold()
+    assert _product().a in list(tree_nodes(fold))  # the cone edge, walked off the STORED fold
 
 
 def test_external_reads_cover_every_channel() -> None:
@@ -129,9 +129,11 @@ def test_a_capturing_inline_operand_is_legal_but_reports_its_capture() -> None:
     updates. Legal to build and lower (its one home is in scope) — just not cuttable, which
     ``captured_values`` is the predicate for."""
     node = _node(_capturing_cone(), ("acc_g", "Wg"))
-    assert lower(node)  # lowers fine — position in the enclosing body is what makes it legal
+    fold = node.as_fold()
+    assert lower(fold)  # lowers fine — position in the enclosing body is what makes it legal
     cone = node.a
-    assert captured_values(cone, axis_names(node) | axis_names(cone)) == ("m_run",)
+    axes = axis_names(fold) | {a.name for a in node.axes}  # the output axes are placement facts
+    assert captured_values(cone, axes | axis_names(cone)) == ("m_run",)
 
 
 def test_iteration_variables_are_not_captures() -> None:
@@ -146,17 +148,22 @@ def test_iteration_variables_are_not_captures() -> None:
 
 
 def test_rewrite_renames_channel_accs_and_inline_arms_in_lockstep() -> None:
-    node = _product()
-    renamed = rewrite(node, lambda n: {"xhat": "v0", "acc_g": "v1"}.get(n, n), Sigma({}), lambda a: a)
-    assert renamed.channels[0].acc == "v1" and renamed.channels[1].acc == "acc_u"
-    assert renamed.a.out == "v0"  # the inline cone canonicalized through the same map
-    assert renamed.tile is node.tile  # the schedule passes through untouched
+    """The canonicalizer runs over STORED trees — the fold; the view of the renamed fold shows the
+    accs and the inline cone renamed through one map."""
+    fold = _product().as_fold()
+    renamed = rewrite(fold, lambda n: {"xhat": "v0", "acc_g": "v1", "acc_g__v": "v1__v"}.get(n, n), Sigma({}), lambda a: a)
+    view = contraction_view(renamed, Axis("m", 128), Axis("n", 128))
+    assert view is not None
+    assert view.channels[0].acc == "v1" and view.channels[1].acc == "acc_u"
+    assert view.a.out == "v0"  # the inline cone canonicalized through the same map
+    assert renamed.tile is fold.tile  # the schedule passes through untouched
 
 
 def test_rewrite_reaches_a_channels_b_edge() -> None:
-    node = _product()
-    renamed = rewrite(node, lambda n: {"acc_u_b": "vb"}.get(n, n), Sigma({}), lambda a: a)
-    assert renamed.channels[1].b.names == ("vb",)
+    fold = _product().as_fold()
+    renamed = rewrite(fold, lambda n: {"acc_u_b": "vb"}.get(n, n), Sigma({}), lambda a: a)
+    view = contraction_view(renamed, Axis("m", 128), Axis("n", 128))
+    assert view is not None and view.channels[1].b.names == ("vb",)
 
 
 # --- Map.sources: the len-≤1 compat read --------------------------------------------------------- #

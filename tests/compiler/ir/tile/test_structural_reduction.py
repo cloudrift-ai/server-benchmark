@@ -148,10 +148,9 @@ def test_a_projection_rides_the_map_wrapper_not_the_node() -> None:
     ``Reduction`` tiers use — so the future cut realizer sees a single seam shape."""
     proj = (Assign(name="y", op="relu", args=("acc",)), Write(output="out", index=(Var("m"), Var("n")), value="y"))
     c = _contraction()
-    node = Map(body=Body(proj), sources=(c,))
+    node = Map(body=Body(proj), sources=(c.as_fold(),))  # the STORED form under the wrapper
     assert lower(c) == [c.loop]
     assert lower(node) == [c.loop, *proj]
-    assert c.nested() == ()
     assert reduce_loop(node).role is AxisRole.CONTRACTION  # the projection doesn't hide the contraction
 
 
@@ -371,14 +370,15 @@ def test_contraction_computed_a_factorizes_at_the_scalar_tier() -> None:
 # --- composed steps: every structural node is a Stmt, so a body can hold one ---------------------- #
 
 
-def test_every_structural_node_is_a_stmt() -> None:
-    """A composed step occupies a STATEMENT position in another node's body — flash's Q@K and P@V in
-    a reduce partial, split-K's sliced contraction, the fused sibling group (a ``Map``) inside a
-    split reduce. Uniform ``Stmt``-hood is what makes that legal instead of resting on one node
-    kind's inheritance."""
+def test_stored_node_kinds_are_stmts_and_the_view_is_not() -> None:
+    """A composed step occupies a STATEMENT position in another node's body — flash's Q@K and P@V
+    folds in a reduce partial, split-K's sliced fold. Uniform ``Stmt``-hood over the STORED kinds is
+    what makes that legal; the :class:`Contraction` VIEW is derived, never stored, and deliberately
+    not a ``Stmt``."""
     from emmy.compiler.ir.stmt.base import Stmt
 
-    assert all(issubclass(k, Stmt) for k in (Contraction, Reduction, Map))
+    assert all(issubclass(k, Stmt) for k in (Reduction, Map))
+    assert not issubclass(Contraction, Stmt)
 
 
 def test_a_generic_body_walk_reaches_a_composed_nodes_children() -> None:
@@ -400,7 +400,7 @@ def test_a_composed_step_keeps_its_position_when_flattened() -> None:
     from emmy.compiler.ir.tile.ir import _flatten_nodes
 
     before, after = Assign(name="m", op="copy", args=("s",)), Assign(name="o", op="copy", args=("p",))
-    flat = _flatten_nodes(Body((before, _pv_contraction(), after)))
+    flat = _flatten_nodes(Body((before, _pv_contraction().as_fold(), after)))
     assert flat[0] is before and flat[-1] is after
     assert any(isinstance(s, Loop) and s.role is AxisRole.CONTRACTION for s in flat[1:-1])
 
@@ -479,9 +479,9 @@ def test_both_edges_may_be_computed_at_once() -> None:
 
 
 def test_an_inline_b_edge_is_walked_like_any_other_node() -> None:
-    """``tree_nodes`` descends the A edge AND every channel's B — the one node walk the path/seam
-    enumerators share."""
+    """``tree_nodes`` descends every operand edge of the STORED fold — the one node walk the
+    path/seam enumerators share."""
     from emmy.compiler.ir.tile.ir import tree_nodes
 
     c = _computed_b_contraction()
-    assert c.b in list(tree_nodes(c))
+    assert c.b in list(tree_nodes(c.as_fold()))

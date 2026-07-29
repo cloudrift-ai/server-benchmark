@@ -1396,10 +1396,9 @@ def _splitk_option(
     # the N-component product-monoid state for a multi-channel (gate/up) node — so the split
     # finalize folds exactly the state the kernel accumulates.
     inner_fold = inner.as_fold()
-    # ONE composition rule: the sliced fold (multi-channel included) rides the reduce's ``step``.
-    op = Fold(
-        carrier=inner_fold.carrier, axis=ksplit, role=AxisRole.CONTRACTION, step=Body((inner_fold,)), reduce=ReducePlan.parse(split_spec)
-    )
+    # ONE composition rule: the sliced fold (multi-channel included) rides the reduce's ``step``
+    # (the outer fold DERIVES role=CONTRACTION from that composed step).
+    op = Fold(carrier=inner_fold.carrier, axis=ksplit, step=Body((inner_fold,)), reduce=ReducePlan.parse(split_spec))
     # The projection rides the ``Map`` wrapper — its ONE home; ``030_split_reduce`` reads it there and
     # retargets it (per-partition atomic store / a deferred finalize after the cross-partition sums).
     if len(epi):
@@ -1845,7 +1844,7 @@ def _twisted_pair(op, free) -> tuple[Fold, Fold, Fold, ContractionView, Contract
     divisibility, the chain's register budget) stay with its builder. Stamping targets the FOLDS
     (`s is head_fold` in the partial); reads go through the views."""
     red = op.source if isinstance(op, Map) and isinstance(op.source, Fold) else (op if isinstance(op, Fold) else None)
-    if red is None or red.role is not AxisRole.TWISTED or red.carrier.twist.family != "exp" or len(red.step) == 0:
+    if red is None or red.role is not AxisRole.TWISTED or len(red.step) == 0:
         return None
     head_fold = red.step[0]
     if not is_contraction_fold(head_fold) or len(free) < 2:
@@ -1928,7 +1927,7 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
         return None
     op = tile.op
     red = op.source if isinstance(op, Map) and isinstance(op.source, Fold) else (op if isinstance(op, Fold) else None)
-    if red is None or red.role is not AxisRole.PLANAR or _composes(red) or red.carrier.twist.family != "id":
+    if red is None or red.role is not AxisRole.PLANAR or _composes(red):
         return None
     body = list(red.step)
     accums = [st for st in body if isinstance(st, Accum)]

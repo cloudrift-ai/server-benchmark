@@ -22,12 +22,12 @@ from emmy.compiler.ir.tile import Channel, ContractionView, Fold, Map, ReducePla
 from emmy.compiler.ir.tile.ops import axis_role, lower, reduce_loop, reduce_plan
 
 
-def _sum_loop(role: AxisRole = AxisRole.PLANAR) -> Loop:
+def _sum_loop() -> Loop:
     """A minimal annotated reduce ``Loop`` — ``acc += x[m, k]`` over ``k``, the way recognition
     stamps it (its degenerate ``add`` carrier read off the fold ``Accum``)."""
     acc = Accum(name="acc", value="x_e", op="add")
     body = Body((Load(name="x_e", input="x", index=(Var("m"), Var("k"))), acc))
-    return Loop(axis=Axis("k", 1024), body=body, role=role, carrier=acc.as_carrier())
+    return Loop(axis=Axis("k", 1024), body=body, role=AxisRole.PLANAR, carrier=acc.as_carrier())
 
 
 def test_from_loop_reconstructs_the_loop_exactly() -> None:
@@ -104,9 +104,21 @@ def test_reduce_plan_is_none_for_a_flat_map_without_a_reduction_node() -> None:
     assert reduce_plan(_tile(pointwise)) is None
 
 
-def test_twisted_role_propagates() -> None:
-    red = Fold.from_loop(_sum_loop(role=AxisRole.TWISTED))
+def test_twisted_role_derives_from_the_carrier_and_propagates() -> None:
+    """The PLANAR/TWISTED half of the role is the carrier's twist family — a fold carrying an
+    exp-family (online-softmax) carrier derives ``TWISTED``; no stored role field."""
+    from emmy.compiler.pipeline.passes.lowering.tile._softmax import online_softmax_combine
+
+    carrier = online_softmax_combine("m_i", "l_i", "x_e")
+    loop = Loop(
+        axis=Axis("k", 1024),
+        body=Body((Load(name="x_e", input="x", index=(Var("m"), Var("k"))), *carrier.dissolve())),
+        role=AxisRole.TWISTED,
+        carrier=carrier,
+    )
+    red = Fold.from_loop(loop)
     assert red.role is AxisRole.TWISTED
+    assert red.loop == loop  # the derivation reproduces the recognizer's annotation exactly
     assert axis_role(red) is AxisRole.TWISTED
     assert axis_role(Map(body=Body(()), sources=(red,))) is AxisRole.TWISTED
 
@@ -172,18 +184,18 @@ def test_nodify_reduce_lifts_a_bare_loop_in_body_map_to_a_reduction() -> None:
 
 
 def test_nodify_reduce_keeps_a_projection_tail_as_a_wrapping_map() -> None:
-    """A fused-epilogue contraction (loop then projection) nodifies to ``Map(body=proj,
+    """A fused-epilogue reduce (loop then projection) nodifies to ``Map(body=proj,
     source=Fold)`` — the tail rides the wrapping ``Map``, the partition the ``Fold``."""
     from emmy.compiler.ir.tile.ops import nodify_reduce
 
-    loop = _sum_loop(role=AxisRole.CONTRACTION)
+    loop = _sum_loop()
     proj = (Assign(name="y", op="relu", args=("acc",)), Write(output="out", index=(Var("m"),), value="y"))
     flat = Map(body=(loop, *proj))
     node = nodify_reduce(flat, ReducePlan.of(reg=2))
     assert isinstance(node, Map) and isinstance(node.source, Fold)
     assert tuple(node.body) == proj
     assert lower(node) == lower(flat)  # bit-identical
-    assert axis_role(node) is AxisRole.CONTRACTION
+    assert axis_role(node) is AxisRole.PLANAR
 
 
 # --- split-K: Fold ⊃ ContractionView (E1) --------------------------------------------------- #
@@ -220,11 +232,11 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
     red = Fold(
         carrier=carrier,
         axis=ksplit,
-        role=AxisRole.CONTRACTION,
         step=Body((inner.as_fold(),)),  # the sliced fold rides the partial — the stored (1k) form
         reduce=ReducePlan.of(cta=2, finalize="atomic"),
     )
 
+    # The outer fold derives CONTRACTION off its composed step — the one non-bilinear arm.
     assert axis_role(red) is AxisRole.CONTRACTION
     assert reduce_plan(_tile(red)).cta == 2
     lo = lower(red)
@@ -247,10 +259,13 @@ def test_reduce_partial_flattens_a_nested_pv_contraction() -> None:
     pv = replace(pv, channels=(replace(pv.channels[0], acc="oblk"),))
     prob = Assign(name="p", op="exp", args=("acc",))  # softmax weight between the two contractions
     fold = Accum(name="O_i", value="oblk", op="add")
-    red = Fold(carrier=fold.as_carrier(), axis=Axis("kv", 128), step=Body((qk.as_fold(), prob, pv.as_fold(), fold)), role=AxisRole.TWISTED)
+    # A hand-built stand-in with a plain additive carrier (the real flash fold's exp carrier
+    # derives TWISTED — asserted on ``_flash_op``'s tree below); the flattening under test is
+    # role-independent.
+    red = Fold(carrier=fold.as_carrier(), axis=Axis("kv", 128), step=Body((qk.as_fold(), prob, pv.as_fold(), fold)))
 
     (kv_loop,) = lower(red)
-    assert kv_loop.axis.name == "kv" and kv_loop.role is AxisRole.TWISTED
+    assert kv_loop.axis.name == "kv"
     body = list(kv_loop.body)
     assert not any(isinstance(s, (ContractionView, Fold, Map)) for s in body), "the nested PV fold must be flattened, not left raw"
     (qk_loop,) = [s for s in body if isinstance(s, Loop) and s.axis.name == "k"]
@@ -274,7 +289,8 @@ def test_flash_op_is_a_two_contraction_tree() -> None:
     from emmy.compiler.pipeline.passes.lowering.tile._flash import _flash_op
 
     op = _flash_op("Q", "K", "V", [1, 2], Dim(16), Dim(16), 8, 8)  # (batch, s_q, s_k, head_dim, d_v)
-    red = op.source  # Map(body=[O/l proj], sources=(Fold(TWISTED, step=[QK, ..., PV, ...]),))
+    red = op.source  # the streaming Fold under the O/l projection Map
+    assert red.role is AxisRole.TWISTED  # derived off the exp-family flash carrier
     folds = [s for s in red.step if is_contraction_fold(s)]
     assert len(folds) == 2 and folds[0].out == "sacc", "the QK score fold is the partial's head node"
     # The view's output axes are placement facts — placeholders suffice for the operand reads.

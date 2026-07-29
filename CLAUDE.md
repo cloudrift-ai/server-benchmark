@@ -20,7 +20,11 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   tuple of **`operands`** (the CLOSED inputs, each an edge), and a `step` (the lift + carrier update, a SEQUENCE —
   a twisted lift may read state its own step updates) — and the lift/projection wrapper `Map` (`body` + `sources`,
   `source` the len-≤1 compat read). A matmul, a bare sum, RMSNorm's statistic, the fused gate⊗up edge and flash are
-  all `Fold` at different carrier arities and roles (`PLANAR`/`TWISTED`/`CONTRACTION`). **Sharing is edge reuse**:
+  all `Fold` at different carrier arities and roles (`PLANAR`/`TWISTED`/`CONTRACTION` — the role is DERIVED
+  (`Fold.role`), never stored: TWISTED off the carrier's twist family, CONTRACTION off the bilinear parse of the
+  hoisted `(operands, step)` pair or the composed split-K step, PLANAR otherwise — so an unbindable matvec-shaped
+  contraction, whose loads stay inline, derives PLANAR and takes the reduce tiers at schedule dispatch with no
+  recognition-time demotion rewrite). **Sharing is edge reuse**:
   the gate⊗up step reads one cone edge twice — no privileged operand slot, no let table, no reference arm.
   `Fold.loop` splices each operand's body before its first use in the step (ties in tuple order) and flattens
   nested nodes in place, so kernel identity depends only on the stored params. An operand edge has two inhabitants

@@ -267,11 +267,12 @@ def _nodify_contraction(node, free: tuple):
     structural node with a **deferred** per-cell ``TilePlan()`` (the schedule fork re-tiles it),
     resolving the operand→role binding ONCE, recognize-side (:func:`bind_contraction` over the
     ordered ``free`` axes' trailing ``(m, n)``). An unbindable contraction — a 1-D output (a
-    matvec-shaped cell) or no (m, n)-bearing K-loads — **demotes to PLANAR**: its carrier is
-    already the additive fold, so it becomes an ordinary :class:`Fold` (gaining the
-    cooperative / ILP partitions a per-cell serial fold never offered). After this step no flat
-    ``Map`` carries an annotated ``CONTRACTION`` loop — the scheduler and materializer read
-    contraction structure only off the node. A computed-A cone is stored INLINE on the ``a`` edge
+    matvec-shaped cell) or no (m, n)-bearing K-loads — keeps its loads INLINE in the fold's step
+    (no operand hoist), so the fold **derives PLANAR** (``Fold.role``) and takes the reduce tiers
+    at schedule dispatch, gaining the cooperative / ILP partitions a per-cell serial fold never
+    offered — the old recognition-time role rewrite is gone. After this step no flat ``Map``
+    carries an annotated ``CONTRACTION`` loop — the scheduler and materializer read contraction
+    structure only off the node. A computed-A cone is stored INLINE on the ``a`` edge
     (:func:`make_cone`)."""
     if not isinstance(node, Map) or node.source is not None or len(node.body) == 0:
         return node
@@ -298,22 +299,20 @@ def _nodify_contraction(node, free: tuple):
             # derived view the schedule re-extracts (``contraction_view``).
             fold = con.as_fold()
             return Map(body=epi, sources=(fold,)) if len(epi) else fold
-    demoted = Loop(axis=rloop.axis, body=rloop.body, unroll=rloop.unroll, role=AxisRole.PLANAR, carrier=rloop.carrier)
-    red = Fold.from_loop(demoted)
+    red = Fold.from_loop(rloop)  # loads stay inline in the step — the fold derives PLANAR
     return Map(body=projection, sources=(red,)) if len(projection) else red
 
 
 def _demote_planar(node):
-    """The PLANAR-demoted sibling of a computed-A :class:`ContractionView` whose contraction form
-    yielded no legal schedule row (fp32 / no atoms / bad geometry — the scheduler's
-    never-a-raising-row guardrail returns ``[]``): flatten the node back through its synthesized
-    fold ``Loop`` and re-annotate it ``PLANAR`` — the same demotion :func:`_nodify_contraction`
-    applies to an unbindable cell, applied post-nodification. The demotion flattens the inline
-    cone into the fold body (recomputed per cell)."""
+    """The PLANAR sibling of a computed-A :class:`ContractionView` whose contraction form yielded
+    no legal schedule row (fp32 / no atoms / bad geometry — the scheduler's never-a-raising-row
+    guardrail returns ``[]``): flatten the node back through its synthesized fold ``Loop`` and
+    refold it with everything inline — the operand hoist is undone, so the fold **derives**
+    ``PLANAR`` (``Fold.role``), the same route :func:`_nodify_contraction` leaves an unbindable
+    cell on, applied post-nodification. The flattening puts the inline cone in the fold body
+    (recomputed per cell)."""
     src = node.source if isinstance(node, Map) else node
-    rloop = src.loop
-    demoted = Loop(axis=rloop.axis, body=rloop.body, unroll=rloop.unroll, role=AxisRole.PLANAR, carrier=rloop.carrier)
-    red = Fold.from_loop(demoted)
+    red = Fold.from_loop(src.loop)
     projection = Body(tuple(node.body) if isinstance(node, Map) else ())
     return Map(body=projection, sources=(red,)) if len(projection) else red
 

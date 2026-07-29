@@ -52,7 +52,7 @@ def test_sinkable_stat_binding_gates():
 
     from emmy.compiler.dim import Dim
     from emmy.compiler.dtype import F16
-    from emmy.compiler.ir.axis import Axis, AxisRole
+    from emmy.compiler.ir.axis import Axis
     from emmy.compiler.ir.elementwise import ElementwiseImpl
     from emmy.compiler.ir.expr import Var
     from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
@@ -63,7 +63,7 @@ def test_sinkable_stat_binding_gates():
     load = Load(name="x0", input="t", index=(Var("a0"), Var("a1")))
     sq = Assign(name="v0", op=ElementwiseImpl("multiply"), args=("x0", "x0"))
     acc = Accum(name="acc0", value="v0", op=ElementwiseImpl("add"), axes=("a1",))
-    red = Fold(carrier=acc.as_carrier(), axis=n, step=Body((load, sq, acc)), role=AxisRole.PLANAR)
+    red = Fold(carrier=acc.as_carrier(), axis=n, step=Body((load, sq, acc)))
     sweep = Loop(
         axis=n,
         body=Body((Load(name="x1", input="t", index=(Var("a0"), Var("a1"))), Write(output="o", index=(Var("a0"), Var("a1")), value="x1"))),
@@ -74,7 +74,7 @@ def test_sinkable_stat_binding_gates():
     assert b is not None and b.src == "t" and b.n == 64 and b.rows == 32 and b.acc == "acc0"
     # A max fold is not additive — decline.
     acc_max = Accum(name="acc0", value="v0", op=ElementwiseImpl("maximum"), axes=("a1",))
-    red_max = Fold(carrier=acc_max.as_carrier(), axis=n, step=Body((load, sq, acc_max)), role=AxisRole.PLANAR)
+    red_max = Fold(carrier=acc_max.as_carrier(), axis=n, step=Body((load, sq, acc_max)))
     assert bind_sinkable_stat(Map(body=Body((sweep,)), sources=(red_max,)), (m,), inputs) is None
     # A second trailing loop strands the re-emitted sweep on the row-only grid — decline.
     assert bind_sinkable_stat(Map(body=Body((sweep, sweep)), sources=(red,)), (m,), inputs) is None

@@ -213,7 +213,7 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis] | None:
     if not isinstance(op, Map) or not isinstance(op.source, Fold):
         return None
     red = op.source
-    if red.role is not AxisRole.PLANAR or red.carrier.twist.family != "id":
+    if red.role is not AxisRole.PLANAR:
         return None
     if any(isinstance(s, (Map, Fold)) for s in red.step):
         return None  # a composed reduce (its partial holds a node) is not the bare statistic shape

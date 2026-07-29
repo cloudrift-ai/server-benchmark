@@ -81,8 +81,12 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   (m, k)-indexed too, so the positional rule bound gemma's GeGLU combine as `gate @ W` and silently dropped the gelu and
   the up projection. Refusing to bind a stat-free cone at all is equally wrong — it demotes the cell to a PLANAR
   scalar fold, which cost the gemma-4 M=256 post twin 144 ms against 4.3 ms bound. The binding now happens ONCE at **recognize time** (`010_recognize._nodify_contraction` — every
-  recognized contraction, per-cell scalar included, is a role=CONTRACTION fold with a deferred `TilePlan()`; an unbindable
-  one — a 1-D matvec-shaped output — demotes to `PLANAR` and folds as an ordinary `Fold`); the schedule fork only
+  recognized contraction, per-cell scalar included, stores as a contraction fold with a deferred `TilePlan()`; an
+  unbindable one — a 1-D matvec-shaped output — keeps its loads inline in the step, so the fold **derives** `PLANAR`
+  and takes the reduce tiers at schedule dispatch — no role rewrite. **`Fold.role` is derived, never stored** (1l):
+  `TWISTED` off the carrier's twist family, `CONTRACTION` off the bilinear parse of the hoisted `(operands, step)`
+  pair (`ir._parse_bilinear`) or the composed split-K step, `PLANAR` otherwise — so "a role=CONTRACTION fold" below
+  always means the derived reading, and the lowered `Loop`'s annotation falls out of the same read); the schedule fork only
   swaps the node's `tile` field (`_schedule._contraction_node`), and `_factor.factorize` reads the facts off the node
   instead of `lower()`-ing the contraction and pattern-matching the result. A `STAGE` pin follows the same rule: the
   option builders resolve it against the built node ONCE (`_resolve_warp_stage` / `_resolve_scalar_stage` — transport

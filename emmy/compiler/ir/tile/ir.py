@@ -143,11 +143,13 @@ def _flatten_nodes(body: Body) -> tuple[Stmt, ...]:
 
 @dataclass(frozen=True)
 class Fold(Stmt):
-    """A scheduled ``PLANAR`` / ``TWISTED`` reduce — the typed successor of the bare annotated reduce
+    """A scheduled reduce — the typed successor of the bare annotated reduce
     ``Loop`` (``ir/stmt/algebra``). It splits the reduce's **algebra** (the loop-carried
     :class:`~emmy.compiler.ir.stmt.algebra.Carrier` — degenerate ``id`` for a plain
     ``sum`` / ``max`` / ``mean``, twisted ``exp`` for online-softmax / flash) from its **structure**
-    (the reduce ``axis`` + the per-element ``step`` it folds). The fold ``Loop`` is **synthesized on
+    (the reduce ``axis`` + the per-element ``step`` it folds). Its :class:`AxisRole`
+    (``PLANAR`` / ``TWISTED`` / ``CONTRACTION``) is **derived** from those params (:attr:`role`),
+    never stored. The fold ``Loop`` is **synthesized on
     demand** (:attr:`loop`), never stored — so the same node tiles under any
     :class:`~emmy.compiler.ir.schedule.ReducePlan` (the reduce partition rides the node's
     ``reduce`` field, read via ``ops.reduce_plan``).
@@ -172,7 +174,6 @@ class Fold(Stmt):
     carrier: Carrier  # the loop-carried ⊕ algebra (degenerate id / twisted exp / the product monoid)
     axis: Axis  # the reduce axis
     step: Body = field(default_factory=Body)  # the per-cell fold STEP (the reduce Loop's body, operands excluded)
-    role: AxisRole = AxisRole.PLANAR  # PLANAR (plain), TWISTED (online-softmax / flash) or CONTRACTION (1k)
     unroll: bool = False
     # The CLOSED inputs, each an operand edge (a gmem ``Load`` or an inline node) — the 1k fold
     # vocabulary. Sharing is edge reuse: the step reads an operand's bound name as many times as it
@@ -197,9 +198,33 @@ class Fold(Stmt):
     @classmethod
     def from_loop(cls, loop: Loop) -> Fold:
         """Build a :class:`Fold` from an already-annotated reduce ``Loop`` (its ``carrier`` /
-        ``role`` / ``axis`` / body) — the recognize-side constructor. :attr:`loop` reconstructs the
-        exact same ``Loop`` (any post-fold projection rides the wrapping ``Map``, not here)."""
-        return cls(carrier=loop.carrier, axis=loop.axis, step=loop.body, role=loop.role, unroll=loop.unroll)
+        ``axis`` / body — the role is DERIVED, see :attr:`role`, so the loop's own annotation is
+        not captured) — the recognize-side constructor. :attr:`loop` reconstructs the exact same
+        ``Loop`` whenever the captured annotation agrees with the derivation (every recognizer
+        loop; any post-fold projection rides the wrapping ``Map``, not here)."""
+        return cls(carrier=loop.carrier, axis=loop.axis, step=loop.body, unroll=loop.unroll)
+
+    @property
+    def role(self) -> AxisRole:
+        """The fold's :class:`AxisRole`, DERIVED from the stored params (1l — never stored):
+
+        - ``TWISTED`` iff the carrier's twist family is non-degenerate (``exp`` — online softmax /
+          flash); the PLANAR/TWISTED half of the old stored role was redundant with the carrier.
+        - ``CONTRACTION`` iff the step is the bilinear lift/fold form over hoisted operand edges
+          (:func:`_parse_bilinear` — the ``as_fold`` storage shape), or composes exactly the
+          sliced contraction fold (split-K's outer reduce).
+        - ``PLANAR`` otherwise — which is where the old recognition-time DEMOTION now lives
+          structurally: an unbindable contraction (matvec-shaped 1-D output, no ``(m, n)`` loads,
+          the zero-legal-rows fallback) never hoists its operands, so its loads stay inline in
+          ``step``, the parse declines, and the fold takes the reduce tiers at schedule dispatch.
+          No role rewrite; the lowered loop's ``PLANAR`` annotation falls out of the same read."""
+        if self.carrier.twist.family != "id":
+            return AxisRole.TWISTED
+        if _parse_bilinear(self) is not None:
+            return AxisRole.CONTRACTION
+        if len(self.step) == 1 and is_contraction_fold(self.step[0]):
+            return AxisRole.CONTRACTION  # split-K: the outer additive reduce over the sliced fold
+        return AxisRole.PLANAR
 
     @property
     def loop(self) -> Loop:
@@ -595,7 +620,6 @@ class ContractionView:
             carrier=self.loop.carrier,
             axis=self.k_axis,
             step=Body(tuple(step)),
-            role=AxisRole.CONTRACTION,
             operands=(prim.b, self.a, *(ch.b for ch in self.channels[1:])),
             tile=self.tile,
             stage=self.stage,
@@ -770,12 +794,14 @@ def _(s: Fold, rename, sigma, axis_fn):
 
 
 def _parse_bilinear(fold) -> tuple[object, tuple] | None:
-    """Parse a ``role=CONTRACTION`` fold's ``(operands, partial)`` back into ``(shared A edge,
-    ((b_edge, acc), …))`` — the inverse of :meth:`ContractionView.as_fold`'s synthesis, keyed on its
-    stored spellings: the primary lift's args are ``(b, a)``, further channels' ``(a, b_i)``, and at
-    arity N the shared operand is the one name common to every lift. ``None`` when the fold is not
-    that shape (a hand-built fold, a foreign step) — the caller keeps the general fold reading."""
-    if not isinstance(fold, Fold) or fold.role is not AxisRole.CONTRACTION or not fold.operands:
+    """Parse a fold's ``(operands, partial)`` back into ``(shared A edge, ((b_edge, acc), …))`` —
+    the inverse of :meth:`ContractionView.as_fold`'s synthesis, keyed on its stored spellings: the
+    primary lift's args are ``(b, a)``, further channels' ``(a, b_i)``, and at arity N the shared
+    operand is the one name common to every lift. ``None`` when the fold is not that shape (a
+    hand-built fold, a foreign step, a demoted matvec whose loads stay inline in the step) — the
+    caller keeps the general fold reading. Success IS what makes a fold a contraction — the derived
+    :attr:`Fold.role` reads this parse, so there is no stored role to gate on."""
+    if not isinstance(fold, Fold) or not fold.operands:
         return None
     accums = [st for st in fold.step if isinstance(st, Accum)]
     lifts = {st.name: st for st in fold.step if isinstance(st, Assign)}
@@ -809,8 +835,8 @@ def _parse_bilinear(fold) -> tuple[object, tuple] | None:
 
 
 def is_contraction_fold(s) -> bool:
-    """``s`` is a stored ``role=CONTRACTION`` fold — the one test every walk over a step sequence
-    uses to spot a composed contraction (flash's QK / PV, split-K's sliced fold)."""
+    """``s`` is a stored fold whose DERIVED role is ``CONTRACTION`` — the one test every walk over
+    a step sequence uses to spot a composed contraction (flash's QK / PV, split-K's sliced fold)."""
     return isinstance(s, Fold) and s.role is AxisRole.CONTRACTION
 
 

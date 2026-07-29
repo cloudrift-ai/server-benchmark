@@ -86,7 +86,7 @@ from typing import TYPE_CHECKING
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Tensor
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop.ir import LoopOp
@@ -480,12 +480,7 @@ def _flash_op(
     # — but the recursion can now reach BOTH contractions as nodes on ``step`` (no ``source``
     # asymmetry between QK and PV).
     partial = [score_contraction.as_fold(), *score_post, *_split_pv(carrier.dissolve(), "O_i", "v_e", v_buf, v_idx, m_axis, d_axis)]
-    reduction = Fold(
-        carrier=carrier,
-        axis=Axis(name="kv", extent=s_k),
-        step=Body(tuple(partial)),
-        role=AxisRole.TWISTED,
-    )
+    reduction = Fold(carrier=carrier, axis=Axis(name="kv", extent=s_k), step=Body(tuple(partial)))  # derives TWISTED off the exp carrier
     # φ projection: normalize the streamed (unnormalized) output by the LSE denominator —
     # O_i / l_i after the kv loop, the ``Map`` body over the reduction ``source``. When the caller
     # supplies ``out_store`` (``(buffer, index)``), the body ALSO carries the explicit output

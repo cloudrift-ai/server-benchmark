@@ -214,7 +214,10 @@ Loop IR ──recognize──▶ pure Fold/Map term tree         (structure only
         ──split / materialize──▶ slices off the nodes, roles off the view (re-derived from ctx.grid)
 ```
 
-Worked shapes (pure spellings; `M(op…)` ≡ `Monoid.of(op…)`, the componentwise constructor):
+Worked shapes — each `Fold` spelled positionally, `Fold(axis, monoid, lift, operands)`: the bare λ in
+third position IS the `lift` (first param the iteration var, then one param per operand edge, bound
+positionally; it returns the singleton state). `M(op…)` ≡ `Monoid.of(op…)`, the componentwise
+constructor:
 
 ```
 sum:      Fold(k, M(add), λ(k,x). x, (Load(x[m,k]),))

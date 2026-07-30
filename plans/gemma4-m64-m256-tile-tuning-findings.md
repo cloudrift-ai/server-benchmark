@@ -305,3 +305,13 @@ for the base checkpoint, which is not the `-it` snapshot the boxes cache).
 All numbers: RTX 5090, box A (30 cores) and box C (15 cores), bare-metal, `-O3` (the default for `run`), single
 GPU idle, std lane only — the published emmy rows do not set `EMMY_FAST_MATH`, so the `f16_f16` fast-math siblings
 are not deployable there and were excluded from every comparison.
+
+## A note on the fast-math lane
+
+The tuning above is std-lane only, because the deployed serving lanes do not set `EMMY_FAST_MATH`. But the goldens
+keep `[fm]` siblings beside every std entry and `tests/compiler/test_golden_configs.py` asserts an fm row is never
+recorded *slower* than its std sibling — so raising the std row by 1.55x broke that invariant at m64 and the suite
+caught it. Re-tuning the fm lane at that shape lands on the same rule (`w4x2/f1x4/k8`, tile M 64) at **145.6 us**,
+a hair under std's 146.7, and the superseded `w1x8/f2x2/k2` fm row (tile M 32, 225.4 us) is dropped. That the two
+accumulate dtypes tie to within 1% is itself confirmation the kernel is DRAM-bound and not mma-bound at this width —
+which is the premise the whole tile-M argument rests on.

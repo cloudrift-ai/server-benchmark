@@ -3188,9 +3188,9 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 203.9
-    cublas_us: 156.0
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f1x4/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 145.6
+    cublas_us: 154.0
   - kernel: matmul
     name: gemma4_12b.qkv_cat.m64.lin
     M: 64
@@ -3211,16 +3211,6 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
     emmy_us: 35.5
     cublas_us: 47.8
-  - kernel: matmul
-    name: gemma4_12b.gate_up_cat.m64.lin
-    M: 64
-    N: 30720
-    K: 3840
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 225.4
-    cublas_us: 153.4
 
   # M=4096 merged (the mnbt-4096 prefill chunk). The fm consumer rows are what turn the cut
   # into an eager win (qkv cut total 940 fm vs eager 1200); the std consumers sit at parity.

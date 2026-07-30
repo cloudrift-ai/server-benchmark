@@ -241,9 +241,11 @@ O=O·alpha+exp(s−m_new)·v; m=m_new`.
 stores against (see the tile-lowering ARCHITECTURE for the storage story). `Lambda(params, body, results)` is the ONE
 binder kind over the reused stmt vocabulary — a `Body` of PURE stmts only (ANF ≙ a let-chain), validated in
 `__post_init__` via the **`Stmt.pure` trait** (declared on the `Stmt` interface, conservative `False` default;
-`Load`/`Assign` and the structural nodes `Fold`/`Map` opt in; `Accum`/`Write`/`Init`/`Loop` never do — no isinstance
-whitelist), with results-defined checked there too and α-invariance by canonical renumbering (`Lambda.canonical` —
-free names never renumbered). A result may be a bare `float` literal — ι is spelled in the lift (softmax's singleton
+`Load`/`Assign`/`Select` and the structural nodes `Fold`/`Map` opt in; `Accum`/`Write`/`Init`/`Loop` never do — no
+isinstance whitelist), with results-defined checked there too and α-invariance by canonical renumbering
+(`Lambda.canonical` — free names never renumbered). Formation is STRICT everywhere since 1q (the interim
+`effectful_lambda` is deleted; a kernel's root stores ride `TileOp.stores`, and only the tile layer's raw-loop-IR
+arm — `tile/ir._loop_ir_fn`, for the un-recognized escape / `030` finalize kernels — may hold an impure body). A result may be a bare `float` literal — ι is spelled in the lift (softmax's singleton
 is `(x, 1)`). The TRUE monoid is the flat `(init, combine)` pair stored directly on the `Fold` (the `Monoid` wrapper
 class dissolved at 1r) — ONE program, `combine : S × S → S` a pure `Lambda` whose
 results carry the fold's REAL accumulator names; the serial streaming step is NEVER stored (it derives as combine

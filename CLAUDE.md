@@ -37,7 +37,8 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   `Fold.loop` splices each operand's body before the first read of its bound param and flattens
   nested nodes in place, so kernel identity depends only on the stored params. An operand edge has two inhabitants
   — MATERIALIZED (a gmem `Load`) or COMPUTED (the node itself, stored INLINE; the cone via `_atomize.make_cone`).
-  **Edge iff closed** (`ir.captured_values`, iteration vars excluded) decides attachment AND cut legality: closed
+  **Edge iff closed** holds BY CONSTRUCTION (positional operand binding; `ir.captured_values` demoted to the
+  validation reading) and decides attachment AND cut legality: closed
   subtrees may hoist to edges (and hoist where the splice keeps the lowered nest fixed); a state-capturing
   composition sits in the step at its semantic position — flash's PV, whose `P` reads the running max the same
   step's merge updates, is legal and simply not cuttable; flash's QK is closed but stays a step element (hoisting
@@ -49,19 +50,24 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   placement-free cone read). The A/B asymmetry that is real — A M-resident/compute-fillable, B streamed — is a
   SCHEDULE fact read off the view's roles (`isinstance(c.b, Load)` eligibility gates), not a storage fact. A cone's
   SOURCE is the row-invariant prologue (the per-row statistic) and its `body` the per-cell normalize, so the K seam
-  is the node boundary (`ops.cone_seam`). A projection has ONE home, the wrapping `Map.fn` — never a node field
-  (until 1q moves effects to the kernel boundary, the projection body also carries the root-store `Write`s through
-  the one sanctioned interim constructor, `effectful_lambda` — strict `Lambda` formation the moment a body is pure).
-  A bare reduce is a root `Fold`; softmax/RMSNorm is `Map(body=sweep, sources=(Fold,))`; the fused norm→linear /
+  is the node boundary (`ops.cone_seam`). A projection has ONE home, the wrapping `Map.fn` — never a node field —
+  and since 1q the fn of every recognized term is a STRICT pure `Lambda`: the root-store `Write`s (and the
+  rms/softmax output-sweep `Loop` around them) ride `TileOp.stores` — `Store` decorations at the kernel boundary,
+  reconstituted on demand by `effect_tail` (the scheduler's tail gates, the materializer's peel and
+  `030_split_reduce` all read through it, so the lowered kernels are byte-identical to the stored-`Write` era; the
+  raw-loop-IR kernels that are not recognized algebra — the un-recognized escape cell, `030`'s finalize, the coop
+  fused-tail sibling — keep an impure fn through the one `_loop_ir_fn` arm).
+  A bare reduce is a root `Fold`; softmax/RMSNorm is `Map(fn=per-cell normalize, sources=(Fold,))` + a sweep
+  `Store`; the fused norm→linear /
   gate⊗up composition is `Map(body=combine, sources=(fold,))` over the product fold (a fork sibling of its
   coop-reduce form — option-0 stays coop; warp mma rows ride the sync compute-fill); a pure pointwise cell is a
-  `Map(sources=())`; the only annotated `Loop`s still riding a flat `Map` body are `030_split_reduce`'s sliced
-  partials. Every schedule slice (`TilePlan` / `ReducePlan` / `Stage`) lives in `TileOp.schedule` — a dict keyed by the
+  `Map(sources=())` + its root `Store`s. Every schedule slice (`TilePlan` / `ReducePlan` / `Stage`) lives in `TileOp.schedule` — a dict keyed by the
   tree-path codec's canonical key (`ir/tile/path.py`: ONE walker + resolver, short-path-canonical — bare for the
   primary node, `TILE@dd`/`TILE@pj` on flash; read/written through `ops.Sched`), the term staying pure and
   IMMUTABLE across the schedule search; the `TileOp` keeps `op + place + work + workers + knobs + schedule` (`work`
   is the ONE worker inventory, derived loudly from the TILE slices), and a sliced axis's window is the one
-  `Axis.window`. The stampers spell knob keys via the same resolver, so the stamped row IS the stored/golden
+  `Axis.window`; the root stores are `TileOp.stores`. The stampers spell knob keys via the same resolver, so the
+  stamped row IS the stored/golden
   spelling. Dispatch reads the
   role/carrier off the node (`ops.axis_role`/`reduce_loop` recurse through `Map.sources`), and `ops.lower` flattens
   any node back to the same loop nest — no stored `Monoid`/`Semiring` kind. Flash is the `TWISTED` fold on the

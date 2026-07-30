@@ -275,10 +275,10 @@ stampers spell canonical keys via the resolver. The remaining deltas: COMPOSED f
 reduce, flash's kv stream)
 still store the `step` sequence — their in-step QK/PV folds are the `TILE@dd`/`TILE@pj` sites, so
 dissolving them into the derived blocked evaluation rides the QK edge-hoist
-re-keying window (→ step 7); projection `Write`s and `030`'s sliced-partial `Loop`s still ride
-`Map.fn` through the interim `effectful_lambda` constructor (→ 1q, step 4 — delete it there);
-`TilePlan.units` remains a (validated, `work`-agreeing) value-object field until the step-7 wire
-split; identity keys off the lowered nest (kept through migration;
+re-keying window (→ step 7); the root stores ride `TileOp.stores` and every recognized term's
+`Map.fn` is a strict pure `Lambda` (1q landed — the raw-loop-IR kernels keep the one `_loop_ir_fn`
+arm); `TilePlan.units` remains a (validated, `work`-agreeing) value-object field until the step-7
+wire split; identity keys off the lowered nest (kept through migration;
 the α-invariant term hash is a re-keying-window event).
 
 ## Landed trail (compressed history — the vocabularies below are RETIRED; every step was gated on the
@@ -340,6 +340,26 @@ the α-invariant term hash is a re-keying-window event).
   RESIDUAL (deliberate, step-7 wire item): `TilePlan.units` stays a field of the value object —
   the slot is authoritative and validated, the ~150-site consumer migration rides the
   value-grammar split that re-spells the wire anyway.
+- **Step 4 / 1q (LANDED, four digest-gated commits, 27-kernel harness byte-identical)** — effects
+  to the boundary: (i) the `Store` vocabulary — a kernel-boundary decoration holding the root
+  `Write` whole (+ the output-sweep axis/unroll), `TileOp.stores`, the ONE reconstitution rule
+  `effect_tail` with its conversion-side inverse `split_effects` (round-trip byte-identity gate,
+  the 1o pattern), `Select.pure`, and the params flattening (one `Map.fn` param per source RESULT
+  COMPONENT — the geglu `acc_u` free-name fix); (ii) recognition's root stores converted (the
+  projected reduces incl. the rms/softmax sweep restructuring, matmul epilogues, the fused
+  norm→linear/geglu `Write`, flash's layout-aware store) with every reader reconstituting — the
+  scheduler's tail gates (`ops.projection_tail`), the materializer's peel/flat-root arms, `030`'s
+  projection/cell reads (keyed off the TileOp: an epi-only-`Write` projection leaves a BARE fold);
+  (iii) `030`'s split partials nodify their sliced annotated `Loop` into a `Fold` source + carry
+  workspace/atomic stores as boundary `Store`s, the finalizes and the register strip / pointwise
+  cells convert; (iv) `effectful_lambda` DELETED — strict `Lambda` formation everywhere, ONE
+  Map-private raw-loop-IR arm (`_loop_ir_fn`) for the kernels that are loop IR, not algebra: the
+  un-recognized escape cell, `030`'s finalize (`Init` seeds + un-annotated merge `Loop`), the
+  prologue'd partial, and the coop norm→linear/geglu sibling's composed contraction tail (these
+  carry no root `Write` in-term either — only iteration/seed structure); the graph rehydrator
+  repoints to the same arm, `captured_values` demotes to the validation reading. `op_cache_key` /
+  `Graph.structural_key` shift for the converted kernels (sanctioned — evidence regenerated);
+  CUDA sources byte-identical.
 - **Step 3 / phase 3 (LANDED)** — the stampers spell knob keys via the resolver
   (`_schedule._family_key`; `_at` deleted, dead `knob.resolve_axis` deleted): stamped rows now ARE
   the stored/golden spellings — bare on single-primary trees, `TILE@dd`/`TILE@pj` + bare
@@ -385,20 +405,19 @@ step-7 re-spell rewrites the golden corpus itself.
 - The 1p flash residual (composed `step` + QK edge-hoist) and the α-invariant term-hash identity
   switch — step 7, as before.
 
-**Step 4 — 1q: effects to the boundary** (its own session, BEFORE phase 4: the cut realizer needs
-synthesized stores at every seam anyway, so the generalized glue is shared work — and this deletes
-the interim). Projection `Write`s leave `Map.fn` (`results` + materializer glue synthesize every root
-store — the bare-fold glue generalized to `030`'s partials and flash's layout-aware store);
-`captured_values` demotes to a validation assert; the interim `effectful_lambda` constructor (and the
-graph-scope lenient rehydrator) is DELETED — every `Map.fn` constructs strict `Lambda`s. NOTE the
-real depth here: rms/softmax's projection `Write` sits INSIDE the post-fold sweep `Loop` riding
-`Map.fn`, so this is the projection-as-pure-cell restructuring, not a mechanical Write hoist. Fold in
-the params-flattening fix on the way (ideally already at phase 2, which lands first; else here):
-`Map.fn.params` binds one param per SOURCE, but a product fold produces N components (the geglu body
-reads `acc_g` AND `acc_u` from one source), so the second component reaches the lambda as a free
-name — flatten to one param per result component BEFORE the contextual free-names check turns on.
-The identity switch that used to ride 1q moves to step 7 — 1q itself stays byte-neutral,
-digest-gated.
+**Step 4 — 1q: effects to the boundary — LANDED** (see the trail). Two deviations from the
+original sketch, both deliberate and documented in the code: (a) the stores live as an explicit
+`TileOp.stores` DECORATION (`Store` — the `Write` held whole plus the sweep spelling) rather than
+being re-derived from `results` + graph output alone — flash's layout-aware index and `030`'s
+workspace layouts are recognition-time facts the materializer cannot rediscover; the glue is the
+reconstitution rule `effect_tail`, and byte-identity is enforced by `split_effects`' round-trip
+gate at every conversion site. (b) strict `Lambda` formation is total over recognized ALGEBRA, but
+the kernels that are raw loop IR (the un-recognized escape cell, `030`'s finalize, the prologue'd
+partial, the coop fused-tail sibling) keep an impure fn through the one Map-private `_loop_ir_fn`
+arm — the plan's original text did not inventory these; they carry no root `Write` in-term (only
+iteration/seed structure) and they die as recognition grows toward totality, not at a re-keying
+window. The graph-scope rehydrator therefore survives REPOINTED at that arm (escape dumps must
+round-trip), no longer lenient for algebra terms.
 
 **Step 5 — Phase 4, the placement realizer** (detail under *Placement* below): the two-level
 recursive resolve — ROUTING entries (cuts only) partition the tree, every resulting piece (children
@@ -647,8 +666,8 @@ nothing to delete. Pre-phase-3 DB/reservoir/online evidence is REGENERATED, neve
 | Retiree | Home | Replaced by | Dies at |
 | --- | --- | --- | --- |
 | `TilePlan.units` (the FIELD) + the `w…`/`n…` worker tokens on the wire | `ir/schedule.py` | the ONE `Workers` slot — LANDED at 1r as the authoritative, loudly-validated home (`TileOp.work` / `derive_workers`); the field + wire tokens go with the value-grammar split (~150 consumer sites, one migration) | step 7 |
-| `effectful_lambda` + the graph-scope lenient rehydrator | `ir/stmt/body`, `graph.py` | strict `Lambda` formation; `results` + materializer glue synthesize every root store | 1q (step 4) |
-| `captured_values` as the attachment/legality decider | `ir/tile/ir.py` | edge-iff-closed by construction — DEMOTES to a validation assert, not deleted | 1q (step 4) |
+| ~~`effectful_lambda`~~ — DONE at 1q (deleted; the rehydrator survives repointed at the Map-private raw-loop-IR arm `_loop_ir_fn`, which itself dies with recognizer totality) | `ir/stmt/body`, `graph.py` | strict `Lambda` formation; `TileOp.stores` + the `effect_tail` reconstitution carry every root store | ~~1q~~ landed |
+| ~~`captured_values` as the attachment/legality decider~~ — DONE at 1q (demoted to the validation reading) | `ir/tile/ir.py` | edge-iff-closed by construction | ~~1q~~ landed |
 | the bare-golden matching arm: `pin_key_matches`' bare↔explicit any-of + `family_value`'s pooled read + `axis_of`'s featurizer grouping | `pipeline/knob.py`, `search/features.py` | the live contract of the hand-curated bare golden YAMLs (NOT DB compat — the DB is regenerated); retires when the step-7 re-spell rewrites the golden corpus | step 7 |
 | flash's special-cased pin plumbing remnants: the all-or-nothing `TILE@dd`+`TILE@pj` contract (`greedy.py`), the dynamic-attention bare-`TILE` schema arm (`golden.py`), `_narrow_flash_forms`' keyed-only arm + the masked-flash bare-`TILE` fallback (`_schedule.py`) | `search/`, `_schedule.py` | generic codec keys (a fork row's key set IS its identity) — the documented exceptions steps 1–3 left standing | step 7 |
 | `Fold.step` (the composed step sequence) + `_composes` + the step-splice arm of `Fold.loop` | `ir/tile/ir.py`, `_schedule.py` | the derived blocked evaluation of `combine`; QK hoists to an operand edge | step 7 |

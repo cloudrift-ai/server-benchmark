@@ -82,6 +82,10 @@ loop under the one name; anything else tiles nothing and folds serially one thre
 output cell (the degenerate `_emit(op)` + `with_store`) — there is **no** separate "scalar tier" branch, and no
 per-kind emitter: which axis is tiled is schedule data, not a kernel identity. The projection sink and the store value
 (`out_val`, the root node's produced `Handle`) are threaded down the recursion, so `with_store` is node-agnostic. The
+kernel-boundary `TileOp.stores` (1q — the root `Write`s / output sweep that left the term) are reconstituted into the
+projection `tail` at the `Map` peel (`effect_tail`; plain stores append at a flat/bare root), so everything below the
+peel — the sinks, the sweep's coop `StridedLoop` distribution, the split realizers — consumes the identical stmt
+stream the stored-`Write` era carried. The
 recursion, the binder, the reduce-axis tiling, and the shared-row staging apply live in `_factor.py`. **There is no
 kind-specific path — no flash / attention special case.** Flash is the `TWISTED` fold composing two role=CONTRACTION folds, so its
 Q@K / P@V contractions and its streaming reduce factorize through this one recursion (scalar block=1 today). A

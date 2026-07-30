@@ -172,10 +172,24 @@ move. What still stores a `step`: COMPOSED folds — split-K's outer reduce over
 stream, whose in-step QK / PV contraction folds are the sites the `TILE@dd` / `TILE@pj` slices address; their
 dissolution into the derived blocked evaluation of `combine` rides the phase-2 codec walker (1r) and the QK
 edge-hoist re-keying window. `Map` stores `fn: Lambda` + `sources` (1n): sources bind positionally to `fn.params`
-(the params ARE the sources' bound output names, so lowering splices verbatim), `fn.results` replace the retired
-`out` last-def convention, and — until 1q moves effects to the kernel boundary — the projection body still carries
-the root-store `Write`s / `030`'s sliced-partial `Loop`s through the one sanctioned interim constructor
-(`effectful_lambda`; strict `Lambda` formation the moment a body is pure).
+(one param per source RESULT COMPONENT — a product source binds every channel accumulator — so lowering splices
+verbatim), and `fn.results` replace the retired `out` last-def convention.
+
+**Effects sit at the kernel boundary (1q).** Every recognized term's `fn` is a STRICT pure `Lambda`: the root-store
+`Write`s — and the rms/softmax output-sweep `Loop` around them — left the term for `TileOp.stores`, a tuple of
+`Store` decorations (the `Write` held whole for field fidelity, plus the sweep axis/unroll). ONE reconstitution rule
+(`ir.effect_tail`, read through `ops.projection_tail`) reassembles the effectful stmt stream wherever the pipeline
+consumed it out of the body — the scheduler's tail gates (the `b<n>t` no-sweep condition, the shared-row stage
+detection, the split-K atomic-distributivity gate), the materializer's `Map` peel and flat-root arm, and
+`030_split_reduce`'s projection/cell reads — so the lowered kernels are byte-identical to the stored-`Write` era
+(the conversion sites run `split_effects`, whose round-trip gate is the same 1o construction-time byte-identity
+pattern; a declining shape keeps the raw spelling). `030`'s split partials nodify their sliced annotated `Loop`
+into a `Fold` source and carry the workspace stores as boundary `Store`s; the register strip fans the root store
+out per copy. The interim `effectful_lambda` is DELETED — what remains impure is exactly the raw-loop-IR kernels
+that are not recognized algebra (the un-recognized flat escape cell, `030`'s finalize — `Init` seeds + the
+un-annotated `StateMerge` merge `Loop` — the prologue'd split partial, and the coop norm→linear/geglu sibling's
+composed contraction tail), formed through the one Map-private `_loop_ir_fn` arm and dying with the recognizer's
+growth toward totality. `captured_values` demoted to the validation reading of edge-iff-closed.
 
 ## The divide rule: `split` an iteration axis
 

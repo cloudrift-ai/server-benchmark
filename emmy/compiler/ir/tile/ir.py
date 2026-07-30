@@ -1365,12 +1365,18 @@ class TileOp(Op):
     work: object = None
 
     def pretty_body(self) -> str:
-        """Render the ``op`` tree structurally (the dump view) — no lowering."""
+        """Render the ``op`` tree structurally (the dump view) — no lowering — plus the
+        kernel-boundary ``stores`` (the root ``Write``\\ s live here since 1q, so a dump without
+        them would hide where the kernel's output lands)."""
         from emmy.compiler.ir.tile.ops import pretty  # noqa: PLC0415
 
         if self.op is None:
             return ""
-        return "\n".join(pretty(self.op, "    "))
+        lines = pretty(self.op, "    ")
+        for st in self.stores:
+            sweep = f" sweep({st.sweep.name})" if st.sweep is not None else ""
+            lines += [f"    store{sweep}: {line.strip()}" for line in st.write.pretty()]
+        return "\n".join(lines)
 
 
 __all__ = [

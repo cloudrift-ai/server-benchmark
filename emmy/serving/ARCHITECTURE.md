@@ -299,6 +299,57 @@ Recorded follow-ups, in impact order:
   --generate` therefore defaults the emmy arm to `--gpu-memory-utilization 0.97` (stock keeps 0.90; an explicit
   flag wins).
 
+## Device footprint sets admission capacity (generative)
+
+The generative arm's throughput on long-request batched workloads is set by how many sequences vLLM can
+admit, and that is decided by emmy's device footprint rather than by kernel speed.
+
+**Mechanism.** The runner holds its trunk weights, activation arenas and scratch slabs in **cupy**
+buffers. vLLM's memory profiler only measures torch allocations, so it never attributes any of them; it
+budgets the KV cache as `util × total − currently-used`, i.e. out of whatever is left after emmy has
+already claimed its residents. Every byte of emmy's non-KV footprint therefore comes straight out of the
+KV cache, and the KV cache is what caps concurrency: a request needing `input + output` tokens of KV
+consumes that much of a fixed pool, so a smaller pool admits proportionally fewer streams and queues or
+**preempts** the rest (a preempted request recomputes its prefill — wasted work that yields no token).
+
+**Scale of the effect.** Against stock vLLM at the same utilisation on gemma-4-12B, emmy's larger
+footprint costs on the order of half a GiB of KV, which on the 4k-in/4k-out batched workload is the
+difference between sustaining roughly seven concurrent streams and roughly five and a half. Throughput
+tracks that ratio almost exactly. It is not a kernel effect and cannot be recovered by tuning kernels.
+
+**`--gpu-memory-utilization` does not recover it.** Raising it far enough to match stock's KV budget
+leaves no headroom for allocations vLLM's profiler does not reserve — under speculative decoding the
+rejection sampler's transient buffers then fail at first use — and raising it further exceeds the free
+VRAM at startup and refuses to boot. The footprint has to shrink; the knob cannot substitute.
+
+**Where the footprint goes, and the actionable invariant:** the symbolic programs are built at
+`capacity = max_tokens` and the prefill twin at `prefill_bucket`, so the buffers are sized by the
+*serving shape*, not by the widths a lane actually reaches. A single `[max_tokens, intermediate]` fp16
+intermediate is already hundreds of MB. **A lane that only ever schedules `prefill_bucket`-sized chunks
+still pays for `max_tokens`-row buffers** — so the first place to look when reclaiming footprint is
+`BufferArena` occupancy measured against the widths a deployment can actually reach.
+
+### Reclaiming footprint re-opens the capture-ladder question
+
+These two knobs are coupled, and the coupling is a trap for whoever does the footprint work.
+
+A KV-starved lane admits few streams, so its verify width under speculative decoding
+(`streams × query_len`) stays small and lands on a low capture rung — comfortably at or below the decode
+bucket, i.e. on the static twin, **even with a ladder that violates the invariant above**. Reclaim the
+footprint and concurrency rises; the verify width rises with it; and it can cross the bucket, at which
+point every steady-state step silently falls to the symbolic program. Measured at decode-bucket widths,
+that path costs roughly **2x** the static twin per step.
+
+**Invariant: any change that raises sustained concurrency must re-check the ladder invariant above for
+the widths it newly makes reachable**, and raise the decode bucket (to a width with tuned kernels) or fix
+the ladder in the same change. Otherwise the reward for fixing the memory problem is silently losing the
+static decode twin.
+
+This applies with particular force to **baked serving images**, which may ship a hand-written
+`cudagraph_capture_sizes` list in their entrypoint rather than going through `_gen_graph_args`. Such a
+list does not get the flooring treatment described above, so it can violate the invariant while
+`emmy serve` on the same revision does not — check the image's entrypoint, not just the code.
+
 ## Testing
 
 - `tests/serving/test_packed.py` — pure span-split logic, runs everywhere.

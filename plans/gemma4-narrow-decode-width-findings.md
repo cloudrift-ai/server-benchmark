@@ -680,7 +680,7 @@ vacuous — a differently-pinned variant in the same sweep came back `wrong-answ
 
 | claim | verdict |
 |---|---|
-| "m32 already satisfies the rule (0.97x cuBLAS), so no m32 win exists" | **False.** True of the unfused matmul entries; false of the *fused* `norm_linear` edges the decode twins actually launch, which ran 0.73 - 0.96x eager at m32 against 1.01 - 1.22x at m8. `PLACE@cone=cut` recovers 8 - 49% per edge and now deploys. |
+| "m32 already satisfies the rule (0.97x cuBLAS), so no m32 win exists" | **Both reports are right about different kernel families, and #444's conclusion still stands in practice.** Its claim holds for the *unfused* matmul entries it examined, which are indeed at parity. The *fused* `norm_linear` cone edges are a different family — the one the decode twins actually launch — and there the resolver was picking the slower of two realizing forms (0.73 - 0.96x eager at m32 against 1.01 - 1.22x at m8). But see section 4a: correcting that is worth 0.1% on the served step, so #444's bottom line ("no m32 win worth having") survives even though its reasoning did not cover this family. |
 | "emmy wins at every M against cuBLAS; there is no cliff at 32" | **False in the same way.** There is a cliff at m32, and it is on the fused edges. |
 | "m2048 prefill is at parity; recorded YAML numbers are stale" | **Not reproduced as staleness at m32.** `norm_gate_up.m32.lin` (161.6) and `norm_qk_global.m32.lin` (40.1) both reproduce live to within 4%. `mlp_down_fused.m32.lin` looks 24 - 29% stale but is not: its YAML comment says the recorded µs came from the true geglu-cone snippet while a `--golden` replay traces an rms-cone stand-in. Apparent staleness there is a **snippet mismatch documented in the file**, and I withdrew an earlier draft claim to the contrary. |
 | "A bucket override is a whole-pack miss, not decode-only" | **Confirmed.** The pack key is `{kind, model, config_sha, dtype, decode_bucket, max_tokens, prefill_bucket}`; the image's is `prefill_bucket: 4096`, so every `EMMY_GEN_PREFILL_BUCKET=2048` lane misses the whole pack and cold-resolves all 288 programs (~25 min of boot on 30 cores, observed). |
@@ -695,6 +695,14 @@ vacuous — a differently-pinned variant in the same sweep came back `wrong-answ
    will not start). The buffers are sized by `max_tokens = 4096` and `prefill_bucket`, not by the decode
    width, so a lane that only ever schedules 2048-token chunks is paying for 4096-row capacity. Start by
    measuring `BufferArena` occupancy against the widths a lane can actually reach.
+   **TRAP — read this before starting.** Succeeding at this *activates* the capture-ladder fault. The
+   sparse ladder in the baked image is harmless today only because admission starvation pins the lane at
+   <= 6 running sequences, so every verify width lands on rung 18, under the decode bucket. Reclaim the
+   footprint, concurrency rises to 7-8, the verify width becomes 21-24, the first rung at or above it is
+   **33**, and 33 > bucket 32 puts **every steady-state step on the symbolic path — a measured 2.18x on
+   the trunk**. The reward for fixing the memory bug is silently losing the static decode twin. Raise the
+   decode bucket to a covered width, or fix the baked `serve.sh` ladder, **in the same change**. The
+   invariant is recorded durably in `emmy/serving/ARCHITECTURE.md`.
 2. **Profile the ~10 ms of the step that is not GPU work** (section 1). It is the largest unexplained
    block in the step for *both* engines, and nobody has looked at it. Nsight Systems on a live
    container, or vLLM's own `--enable-layerwise-nvtx-tracing`.

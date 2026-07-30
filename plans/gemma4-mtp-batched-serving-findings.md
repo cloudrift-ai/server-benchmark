@@ -67,6 +67,16 @@ seventh concurrent request makes total throughput *fall below* what six achieved
 
 ### SCOPE — this does not affect the published image
 
+> **CORRECTION (2026-07-30, PR #445).** This section is **wrong for the gemma-4 image**. The check below
+> was run against `cloudriftai/vllm-emmy` — the *generic* serving image — which is indeed immune. But
+> `cloudriftai/vllm-emmy-gemma4` bakes its own `/opt/emmy/serve.sh`, and that script **does** pass
+> `--compilation-config` with the sparse hand-written ladder `[1,2,4,8,16,32,64,128,256]`; a depth-2 boot
+> of it captures exactly the predicted 7 rungs `[3,6,9,18,33,66,129]`. So the fault's scope *does* reach
+> the image the article's emmy lanes pin. It happens to cost those cells nothing, because KV starvation
+> keeps their verify width below the ladder's first gap — but that is luck, not immunity, and it reverses
+> the moment the footprint problem is fixed. See `plans/gemma4-narrow-decode-width-findings.md` §3 and the
+> coupling invariant in `emmy/serving/ARCHITECTURE.md`.
+
 I initially believed this fault explained the article's batched cells. It does not, and the
 correction matters more than the original claim.
 

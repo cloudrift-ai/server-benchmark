@@ -90,11 +90,10 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop.ir import LoopOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carrier, Load, Loop, Select, SelectBranch, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Lambda, Load, Loop, Select, SelectBranch, Write
+from emmy.compiler.ir.stmt.carrier import exp_combine_states
 from emmy.compiler.ir.tile import Channel, ContractionView, Fold, Placement, Store, TileOp, TilePlan
 from emmy.compiler.ir.tile.ops import Map
-from emmy.compiler.pipeline.passes.lowering.tile._atomize import make_cone
-from emmy.compiler.pipeline.passes.lowering.tile._carrier import denom, exp_family_twist, expect
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Node
@@ -103,19 +102,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def flash_combine(m: str, ll: str, o: str, s: str, v: str) -> Carrier:
-    """The online-softmax (log-sum-exp) :class:`Carrier` for one streaming KV step: state
-    ``(m, l, O)`` folds this key's ``(score, value)`` partial::
-
-        m_new = max(m, s);   alpha = exp(m − m_new);   p = exp(s − m_new)
-        l = l·alpha + p;     O = O·alpha + p·v;         m = m_new   (last)
-
-    Built as a name-free exp-family **spec** (``pivot``, ``denom``, ``expect``) — the streaming
-    ``merge`` and the cross-partition ``combine_states`` are *generated* from the spec (and the
-    stable max-rescale recovered by the stabilizer), not authored here. See
-    ``ir/stmt/carrier.py``. Rides on the ``kv`` reduce ``Loop`` (``loop.carrier``); the φ
-    projection ``O/l`` is a stmt after that loop in the ``Map`` body, added in ``_flash_op``."""
-    return exp_family_twist(s, [denom(), expect(v)], (m, ll, o))
+# The online-softmax (log-sum-exp) algebra for one streaming KV step — state ``(m, l, O)`` folds
+# this key's ``(score, value)`` singleton::
+#
+#     m_new = max(m, s);   alpha = exp(m − m_new);   p = exp(s − m_new)
+#     l = l·alpha + p;     O = O·alpha + p·v;         m = m_new   (last)
+#
+# — is no longer authored here at all: ``_flash_op`` stores the TRUE ⊕ (the generated
+# ``exp_combine_states`` program) flat on the ``Fold``, and formation derives the carrier /
+# streaming merge / blocked evaluation from it (``ir/stmt/carrier.py`` generates, the stabilizer
+# recovers the max-rescale, ``ir._twisted_derived_step`` splits the PV contraction out).
 
 
 def _static(d) -> int | None:
@@ -326,46 +322,10 @@ def _batch_vars(n: int) -> tuple[Var, ...]:
     return tuple(Var(f"b{i}") for i in range(n))
 
 
-def _split_pv(merge: list, o: str, v: str, v_buf: str, v_idx: tuple, m_axis: Axis, d_axis: Axis) -> list:
-    """Split the exp carrier's streaming ``merge`` around a real **PV** :class:`ContractionView`.
-
-    The generated merge folds the expectation channel ``O = O·α + v·P`` **atomically** (``P = exp(s − M)``
-    the softmax weight). This rewrites it so the ``v·P`` product becomes the output of a
-    ``Oblk = Σ_j P·V`` contraction whose **A operand is the register-resident ``P``** (rebind of the exp
-    weight the carrier already computed) and whose B is the value ``Load`` — then the O-fold consumes
-    ``Oblk`` (``O = O·α + Oblk``). ``O`` stays a carrier channel (so its seed + cross-tier machinery are
-    untouched); only the value it folds is redirected through the contraction.
-
-    This is the scalar two-``ContractionView`` flash tree at ``block = 1``: the ``j`` reduce is a singleton
-    (the scalar streaming degenerate). The tensor-core tier tiles the same ``P@V`` node with an mma
-    ``TilePlan`` (``_schedule._twisted_warp_option``), realized at fragment residence by ``_factor``'s
-    one binder (``_twist``) — never a bespoke emitter. ``O``
-    and ``V`` are per-``(m, d)``; ``P`` per-``(m, j)`` — different axes from the streaming ``kv``, so
-    the PV contraction never duplicates the streaming reduce."""
-    o_accum = next(s for s in merge if isinstance(s, Accum) and s.name == o)
-    defs = {s.name: s for s in merge if isinstance(s, Assign)}
-    prod = defs[o_accum.value]  # the fused ``v·P`` (multiply(v, P))
-    p_name = next(a for a in prod.args if a != v)  # the softmax weight P (register-resident)
-    pv = ContractionView(
-        axes=(m_axis, d_axis),
-        k_axis=Axis(name="pj", extent=Dim(1)),  # block=1: a singleton intra-block reduce
-        # A = P, register-resident: a one-stmt cone stored INLINE on the edge, the same shape
-        # every computed A takes. It captures the carrier's running max — legal (its one home is
-        # in scope), just uncuttable.
-        a=make_cone([Assign(name=f"{o}__p", op="copy", args=(p_name,))], "pj"),
-        channels=(Channel(b=Load(name=v, input=v_buf, index=v_idx), acc=f"{o}__pv"),),  # B = V (the value tile)
-        tile=TilePlan(),
-    )
-    out: list = []
-    for s in merge:
-        if s is prod:
-            continue  # the inline v·P is dropped — the PV contraction computes it
-        if s is o_accum:
-            out.append(pv.as_fold())  # Oblk = Σ_j P·V, a role=CONTRACTION fold flattened in place
-            out.append(replace(o_accum, value=f"{o}__pv"))  # O = O·α + Oblk (base O·α unchanged)
-            continue
-        out.append(s)
-    return out
+# (The PV split — the ``O = O·α + v·P`` merge rewritten around a real ``Oblk = Σ_j P·V``
+# contraction whose A is the register-resident softmax weight — is DERIVED at step 7:
+# ``ir._split_expect`` / ``ir._derived_expect_fold`` synthesize it inside the twisted fold's
+# blocked evaluation, byte-identical to the step element this module used to store.)
 
 
 def _flash_op(
@@ -465,22 +425,27 @@ def _flash_op(
             )
         )
         score_name = "s_banded"
-    # The (m,l,O) streaming fold over kv, as a ``TWISTED`` :class:`Fold` node: its per-step
-    # ``step`` is the scale / mask binding ``score_name``, then the carrier's dissolved streaming
-    # ``merge`` with the **PV split out as a real contraction**. ``flash_combine`` supplies the state +
-    # twist; the nested ``Σ Q·K`` contraction rides on ``source`` (``Fold.loop`` splices its loop
-    # ahead of the partial). Both P@V and Q@K are now :class:`ContractionView` nodes — the two-contraction tree.
-    carrier = flash_combine("m_i", "l_i", "O_i", score_name, "v_e")
-    m_axis = Axis(name="m", extent=s_q)
-    d_axis = Axis(name="d", extent=Dim(d_v))
-    # Both contractions ride the single walked edge — ``step``: the ``Σ_dd Q·K`` score at its head,
-    # then the scale / mask binding ``score_name``, then the carrier's dissolved streaming ``merge``
-    # with the **PV split out as a real ContractionView**. ``Fold.loop`` flattens the head QK node the
-    # same way it flattens the embedded PV, so the scalar tier expands the identical loop-in-body nest
-    # — but the recursion can now reach BOTH contractions as nodes on ``step`` (no ``source``
-    # asymmetry between QK and PV).
-    partial = [score_contraction.as_fold(), *score_post, *_split_pv(carrier.dissolve(), "O_i", "v_e", v_buf, v_idx, m_axis, d_axis)]
-    reduction = Fold(carrier=carrier, axis=Axis(name="kv", extent=s_k), step=Body(tuple(partial)))  # derives TWISTED off the exp carrier
+    # The (m,l,O) streaming fold over kv, λ-SPELLED (step 7 — the composed step dissolved): the
+    # ``lift`` is ``λ(kv, sacc, v_e) → (score, 1, v_e)`` — its body the scale / mask stmts binding
+    # ``score_name``, ι spelled in the results (the singleton state) — and the ``operands`` are the
+    # ``Σ_dd Q·K`` score fold (an inline-node edge, hoisted; it reads the enclosing ``kv`` var —
+    # legal, never state) and the value ``Load``. The flat ``(init, combine)`` is the TRUE
+    # exp-family ⊕ over the real state names; formation derives the carrier and the DERIVED
+    # blocked evaluation reproduces the retired step material exactly — the score edge at the
+    # head, the lift body, then the generated merge with the PV contraction synthesized
+    # (``ir._twisted_derived_step``), so the lowered nest is byte-identical.
+    names = ("m_i", "l_i", "O_i")
+    other = tuple(f"{n}__o" for n in names)
+    combine = Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
+    lift = Lambda(params=("kv", "sacc", "v_e"), body=Body(tuple(score_post)), results=(score_name, 1.0, "v_e"))
+    reduction = Fold(
+        carrier=None,
+        axis=Axis(name="kv", extent=s_k),
+        operands=(score_contraction.as_fold(), Load(name="v_e", input=v_buf, index=v_idx)),
+        lift=lift,
+        init=(float("-inf"), 0.0, 0.0),
+        combine=combine,
+    )
     # φ projection: normalize the streamed (unnormalized) output by the LSE denominator —
     # O_i / l_i after the kv loop, the ``Map`` body over the reduction ``source``. When the caller
     # supplies ``out_store`` (``(buffer, index)``), the fragment ALSO carries the explicit output

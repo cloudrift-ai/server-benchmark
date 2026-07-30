@@ -70,8 +70,10 @@ re-recognizes structure the tile IR already holds.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from functools import cached_property
 from typing import TYPE_CHECKING
 
+from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.expr import Expr, Literal
@@ -158,6 +160,72 @@ def _flatten_nodes(body: Body) -> tuple[Stmt, ...]:
     return tuple(out)
 
 
+def _derived_expect_fold(o: str, p_name: str, v_edge: Load) -> Fold:
+    """The synthesized expectation contraction of a twisted fold's DERIVED blocked evaluation —
+    flash's ``Oblk = Σ_j P·V`` (the step-7 dissolution of the stored PV step element). A is the
+    register-resident softmax weight ``P`` — a one-stmt cone node whose one legal capture is the
+    running max the same derived merge updates — and B is the fold's own expectation operand edge
+    (the value ``Load``). Byte-identical to the retired ``ContractionView.as_fold()`` output the
+    step spelling stored, so the derived loop — and kernel identity — is unchanged."""
+    prologue = Map(body=Body((Assign(name=f"{o}__p", op="copy", args=(p_name,)),)))
+    cone = Map(body=Body(()), sources=(prologue,))
+    k = Axis(name="pj", extent=Dim(1))  # block=1: a singleton intra-block reduce
+    acc = f"{o}__pv"
+    v_name = _operand_name(v_edge)
+    lift = Lambda(
+        params=(k.name, v_name, f"{o}__p"),
+        body=Body((Assign(name=f"{acc}__v", op="multiply", args=(v_name, f"{o}__p")),)),
+        results=(f"{acc}__v",),
+    )
+    init, combine = M("add", names=(acc,))
+    return Fold(carrier=None, axis=k, operands=(v_edge, cone), lift=lift, init=init, combine=combine, dtypes=(None,))
+
+
+def _split_expect(merge: list[Stmt], o: str, v: str, v_edge: Load) -> list[Stmt]:
+    """Split the generated streaming ``merge`` around the synthesized expectation contraction —
+    the derived counterpart of the retired ``_flash._split_pv`` step rewrite: the fused ``v·P``
+    product becomes :func:`_derived_expect_fold`'s output, and the state fold consumes it
+    (``O = O·α + Oblk``; the ``O·α`` base is untouched)."""
+    o_accum = next(s for s in merge if isinstance(s, Accum) and s.name == o)
+    defs = {s.name: s for s in merge if isinstance(s, Assign)}
+    prod = defs[o_accum.value]  # the fused ``v·P`` (multiply(v, P))
+    p_name = next(a for a in prod.args if a != v)  # the softmax weight P (register-resident)
+    pv = _derived_expect_fold(o, p_name, v_edge)
+    out: list[Stmt] = []
+    for s in merge:
+        if s is prod:
+            continue  # the inline v·P is dropped — the synthesized contraction computes it
+        if s is o_accum:
+            out.append(pv)
+            out.append(replace(o_accum, value=f"{o}__pv"))
+            continue
+        out.append(s)
+    return out
+
+
+def _twisted_derived_step(fold: Fold) -> tuple[Stmt, ...]:
+    """The DERIVED blocked evaluation of a λ-spelled TWISTED fold (step 7 — the composed ``step``
+    sequence dissolved): the INLINE-NODE operand edges at the head in operand order (flash's
+    ``Σ_dd Q·K`` score — its derived position, ahead of the lift body exactly where the stored
+    step held it), the lift body (the scale / mask stmts), then the generated streaming merge
+    with each Load-bound EXPECTATION operand split out as a synthesized contraction
+    (:func:`_split_expect` — flash's PV). Deterministic from the stored params only; the operand
+    edges consumed here are excluded from the generic first-use splice
+    (:meth:`Fold._splice_edges`)."""
+    lam = fold.lift
+    merge = list(fold.carrier.merge)
+    channels = fold.carrier.twist.channels
+    by_param = dict(zip(lam.params[1:], fold.operands, strict=True))
+    for nm, ch in zip(fold.carrier.state.names, channels, strict=True):
+        if ch.lift is None or not isinstance(ch.term, str):
+            continue
+        edge = by_param.get(ch.term)
+        if isinstance(edge, Load):
+            merge = _split_expect(merge, nm, ch.term, edge)
+    head = tuple(e for e in fold.operands if isinstance(e, (Fold, Map)))
+    return (*head, *lam.body, *merge)
+
+
 def _fold_derived_step(fold: Fold) -> tuple[Stmt, ...]:
     """The DERIVED serial step of a λ-spelled fold — ``s′ = combine(s, lift(k))``, the combine
     specialized at the singleton state the lift produces. For a DEGENERATE (componentwise)
@@ -168,15 +236,16 @@ def _fold_derived_step(fold: Fold) -> tuple[Stmt, ...]:
     specializes through the family's own generator (``exp_merge`` — the streaming fold IS
     combine-at-the-singleton with the ψ-rescale simplification applied, temps renumbered by the
     same deterministic emitter that produced the stored combine), landing after the lift body —
-    exactly where recognition's dissolved merge sat. Deterministic from the stored params only —
-    kernel identity (``op_cache_key``) depends on nothing else."""
+    exactly where recognition's dissolved merge sat; a twisted fold with operand edges derives
+    the full blocked evaluation (:func:`_twisted_derived_step` — flash). Deterministic from the
+    stored params only — kernel identity (``op_cache_key``) depends on nothing else."""
     lam = fold.lift
     names = fold.combine.results
     ops = component_ops(fold.combine)
     if ops is None:  # the twisted (exp-family) serial step — the derived carrier's channels
         # carry the singleton terms (the lift results), so the generated streaming merge is the
         # singleton specialization of the stored combine, names included.
-        return (*lam.body, *fold.carrier.merge)
+        return fold._derived_twisted
     dts = fold.dtypes or (None,) * len(names)
     accums = tuple(
         Accum(name=names[i], value=str(lam.results[i]), op=ops[i], dtype=dts[i], axes=(fold.axis.name,)) for i in range(len(names))
@@ -428,14 +497,48 @@ class Fold(Stmt):
             return AxisRole.CONTRACTION  # split-K: the outer additive reduce over the sliced fold
         return AxisRole.PLANAR
 
+    @cached_property
+    def _derived_twisted(self) -> tuple[Stmt, ...]:
+        """The MEMOIZED derived blocked evaluation of a λ-spelled twisted fold — cached so the
+        synthesized expectation contraction (flash's PV) has ONE identity per stored fold: the
+        path walker's derived sites, the schedule accessors (``Sched.tile_of``) and every
+        realizer read the same node object (site matching is by identity)."""
+        return _twisted_derived_step(self)
+
     def _step_stmts(self) -> tuple[Stmt, ...]:
-        """The per-cell stmt sequence — the stored ``step`` for a composed/twisted fold, or the
+        """The per-cell stmt sequence — the stored ``step`` for a composed fold, or the
         DERIVED serial step for a λ-spelled one (:func:`_fold_derived_step`: the lift body with
         each component's ``Accum`` — the combine specialized at the singleton — landing exactly
-        where the dissolved fold sat)."""
+        where the dissolved fold sat; the full blocked evaluation for a twisted fold with
+        operand edges)."""
         if self.lift is None:
             return tuple(self.step)
         return _fold_derived_step(self)
+
+    def step_stmts(self) -> tuple[Stmt, ...]:
+        """The public read of the per-cell stmt sequence — what every consumer that used to
+        read ``.step`` reads (the stored step, or the derived serial step / blocked evaluation
+        of a λ-spelled fold; flash's derived head is its score operand edge, its PV the
+        memoized synthesized contraction)."""
+        return self._step_stmts()
+
+    def _splice_edges(self) -> tuple:
+        """The operand edges the GENERIC first-use splice places — every edge not already
+        consumed by the derived step: a λ-spelled TWISTED fold's derived blocked evaluation
+        embeds its inline-node edges at the head and its Load-bound expectation edges inside
+        the synthesized contraction (:func:`_twisted_derived_step`), so those never splice
+        twice."""
+        if self.lift is None or component_ops(self.combine) is not None:
+            return self.operands
+        channels = self.carrier.twist.channels
+        by_param = dict(zip(self.lift.params[1:], self.operands, strict=True))
+        consumed = {id(e) for e in self.operands if isinstance(e, (Fold, Map))}
+        for ch in channels:
+            if ch.lift is not None and isinstance(ch.term, str):
+                edge = by_param.get(ch.term)
+                if isinstance(edge, Load):
+                    consumed.add(id(edge))
+        return tuple(e for e in self.operands if id(e) not in consumed)
 
     @property
     def loop(self) -> Loop:
@@ -451,14 +554,15 @@ class Fold(Stmt):
         bound param (:func:`_splice_operands` — positional binding names the edges, ties in
         operand order), so a fold with hoisted inputs lowers byte-identically to the flat form
         that carried them in its body."""
-        stmts = _splice_operands(self.operands, _flatten_nodes(Body(self._step_stmts())))
+        stmts = _splice_operands(self._splice_edges(), _flatten_nodes(Body(self._step_stmts())))
         return Loop(axis=self.axis, body=Body(stmts), unroll=self.unroll, role=self.role, carrier=self.carrier)
 
     def spliced_step(self) -> tuple[Stmt, ...]:
         """The (derived) step with every operand edge's body spliced before its first use — the
         stmt sequence the emit-side node walk consumes (nested structural nodes NOT flattened;
-        :attr:`loop` additionally flattens them)."""
-        return _splice_operands(self.operands, self._step_stmts())
+        :attr:`loop` additionally flattens them). Edges the derived blocked evaluation already
+        consumed (a twisted fold's head node / expectation Load) never splice twice."""
+        return _splice_operands(self._splice_edges(), self._step_stmts())
 
     @property
     def out(self) -> str:
@@ -561,7 +665,7 @@ def axis_names(root) -> set[str]:
     for node in tree_nodes(root):
         if isinstance(node, Fold):
             out.add(node.axis.name)
-            out |= _stmt_axis_names(node.step)
+            out |= _stmt_axis_names(node.step_stmts())
         elif isinstance(node, Map):
             out |= _stmt_axis_names(node.body)
     return out
@@ -1311,7 +1415,12 @@ def tree_nodes(op):
         for edge in op.operands:
             if isinstance(edge, (Map, Fold)):
                 yield from tree_nodes(edge)
-        for s in op.step:
+        edge_ids = {id(e) for e in op.operands}
+        # The derived blocked evaluation's synthesized nodes (flash's PV) are tree members too;
+        # an operand edge embedded at its derived head position is skipped — its walk is above.
+        for s in op.step_stmts():
+            if id(s) in edge_ids:
+                continue
             yield from _stmt_nodes(s)
 
 

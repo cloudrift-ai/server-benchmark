@@ -700,7 +700,7 @@ def chain_source(op, sched):
     red = (op.sources[0] if op.sources else None) if isinstance(op, Map) else op
     if not isinstance(red, Fold) or red.role is not AxisRole.TWISTED:
         return None
-    pv = next((s for s in list(red.step)[1:] if is_contraction_fold(s)), None)
+    pv = next((s for s in list(red.step_stmts())[1:] if is_contraction_fold(s)), None)
     if pv is None:
         return None
     ptile = sched.tile_of(pv)

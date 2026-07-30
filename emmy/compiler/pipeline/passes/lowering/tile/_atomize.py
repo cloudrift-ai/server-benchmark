@@ -216,8 +216,8 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis, tuple] | None
     red = op.sources[0]
     if red.role is not AxisRole.PLANAR:
         return None
-    if any(isinstance(s, (Map, Fold)) for s in red.step):
-        return None  # a composed reduce (its partial holds a node) is not the bare statistic shape
+    if any(isinstance(s, (Map, Fold)) for s in red.step_stmts()) or any(isinstance(e, (Map, Fold)) for e in red.operands):
+        return None  # a composed reduce (its partial or an operand edge holds a node) is not the bare statistic shape
     body = list(op.body)
     if not body or not isinstance(body[-1], Loop) or body[-1].is_reduce:
         return None

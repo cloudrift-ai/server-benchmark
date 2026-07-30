@@ -119,9 +119,12 @@ def warp_source(op, sched):
     (``sched`` — the ``TileOp.schedule`` view, 1r), never a node field;
     :func:`realize_warp_twist` derives the full views itself."""
     red = (op.sources[0] if op.sources else None) if isinstance(op, Map) else op
-    if not isinstance(red, Fold) or len(red.step) == 0:
+    if not isinstance(red, Fold):
         return None
-    head = red.step[0]
+    stmts = red.step_stmts()
+    if len(stmts) == 0:
+        return None
+    head = stmts[0]
     if is_contraction_fold(head):
         htile = sched.tile_of(head)
         if htile is not None and htile.is_warp:
@@ -412,7 +415,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     output fragments + hoisted scalars; fold = the streaming :class:`StridedLoop`; close = the
     realized projection + the fragment output store). See the module docstring for the walk."""
     red: Fold = op.sources[0] if isinstance(op, Map) else op
-    partial = list(red.step)
+    partial = list(red.step_stmts())
     # The stored steps are role=CONTRACTION folds; the realizer works on their DERIVED views. The
     # query / value axes come off the placement's free axes (``Ctx.free`` — the un-shrunk
     # originals); the score's stream axis is the fold's own, read through a slice partial's window

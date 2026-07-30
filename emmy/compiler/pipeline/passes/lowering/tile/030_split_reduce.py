@@ -289,7 +289,7 @@ def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Map, plan: R
     projection (``O/l`` + the layout-aware store) per output element. Deferred-kernel finalize
     only — the twisted ``e^{Δm}`` rescale can't be an atomic."""
     (red,) = op.sources
-    head = red.step[0]  # the stored role=CONTRACTION score fold — its tile is the schedule read
+    head = red.step_stmts()[0]  # the role=CONTRACTION score fold (the hoisted operand edge) — its tile is the schedule read
     carrier = red.carrier
     cta = plan.cta
     src_sched = sched_of(tile)
@@ -348,9 +348,9 @@ def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Map, plan: R
     # resolved K/V pipeline carry over; the GRID stage is consumed (any residual partition would
     # re-key here too, but the stream's plan is GRID-only by construction).
     p_sched = Sched(partial_map, {})
-    sliced_head = sliced.step[0]
-    sliced_pv = next(st for st in list(sliced.step)[1:] if getattr(st, "role", None) is AxisRole.CONTRACTION)
-    orig_pv = next(st for st in list(red.step)[1:] if getattr(st, "role", None) is AxisRole.CONTRACTION)
+    sliced_head = sliced.step_stmts()[0]
+    sliced_pv = next(st for st in list(sliced.step_stmts())[1:] if getattr(st, "role", None) is AxisRole.CONTRACTION)
+    orig_pv = next(st for st in list(red.step_stmts())[1:] if getattr(st, "role", None) is AxisRole.CONTRACTION)
     p_sched.put("TILE", sliced_head, head_tile)
     p_sched.put("TILE", sliced_pv, src_sched.tile_of(orig_pv))
     p_sched.put("STAGE", sliced, src_sched.stage_of(red))
@@ -423,7 +423,8 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     # Flash split-KV: a warp-tiled TWISTED streaming tree keeps its fragment residence in the
     # partial (the scalar residual path below would drop it to the per-cell tier).
     if isinstance(op, Map) and len(op.sources) == 1 and isinstance(op.sources[0], Fold) and op.sources[0].role is AxisRole.TWISTED:
-        head = op.sources[0].step[0] if len(op.sources[0].step) else None
+        red_stmts = op.sources[0].step_stmts()
+        head = red_stmts[0] if len(red_stmts) else None
         head_tile = sched_of(tile).tile_of(head) if isinstance(head, Fold) else None
         if head_tile is not None and head_tile.is_warp:
             # A symbolic kv splits too: ``_split_twisted_warp`` builds the bn-aligned runtime slice

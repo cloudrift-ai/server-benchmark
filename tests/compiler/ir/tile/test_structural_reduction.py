@@ -301,8 +301,9 @@ def test_flash_op_is_a_two_contraction_tree() -> None:
     op, _stores = _flash_op("Q", "K", "V", [1, 2], Dim(16), Dim(16), 8, 8)  # (batch, s_q, s_k, head_dim, d_v)
     (red,) = op.sources  # the streaming Fold under the O/l projection Map
     assert red.role is AxisRole.TWISTED  # derived off the exp-family flash carrier
-    folds = [s for s in red.step if is_contraction_fold(s)]
-    assert len(folds) == 2 and folds[0].out == "sacc", "the QK score fold is the partial's head node"
+    folds = [s for s in red.step_stmts() if is_contraction_fold(s)]
+    assert len(folds) == 2 and folds[0].out == "sacc", "the QK score fold is the derived evaluation's head node"
+    assert folds[0] is red.operands[0], "the QK score is the hoisted operand edge (step 7)"
     # The view's output axes are placement facts — placeholders suffice for the operand reads.
     pv = contraction_view(folds[1], folds[1].axis, folds[1].axis)
     assert pv is not None and pv.a_computed and pv.a_name == "O_i__p", "PV's A operand is the inline exp weight P"

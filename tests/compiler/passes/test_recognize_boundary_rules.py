@@ -437,7 +437,7 @@ def test_normed_gqa_sdpa_certifies_flash():
     src = flash[0].op.sources[0]
     from emmy.compiler.ir.tile import is_contraction_fold
 
-    assert is_contraction_fold(src.step[0]), "flash did not absorb the score contraction (fold stayed cut)"
+    assert is_contraction_fold(src.step_stmts()[0]), "flash did not absorb the score contraction (fold stayed cut)"
 
 
 def test_bind_contraction_declined_cone_raises_not_positional():

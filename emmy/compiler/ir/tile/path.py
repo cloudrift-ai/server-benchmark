@@ -59,12 +59,16 @@ class Site:
     """One schedule-bearing tree position: the node, its schedule-bearing axis (``None`` for a
     pointwise ``Map``), the FULL segment path from the root (this node's own segment last), and the
     1-based ``ordinal`` among sites sharing the identical ``(segments, axis)`` (1 when unique —
-    the no-collision common case, where the ordinal is never spelled)."""
+    the no-collision common case, where the ordinal is never spelled). ``derived`` marks a site
+    living in a λ-spelled fold's DERIVED evaluation (flash's synthesized PV contraction) — a real
+    schedule site (``TILE@pj``) but combine material BELOW the seam lattice, never a ``PLACE``
+    target."""
 
     node: object
     axis: str | None
     segments: tuple[str, ...]
     ordinal: int = 1
+    derived: bool = False
 
     @property
     def depth(self) -> int:
@@ -104,23 +108,31 @@ def _stmt_children(stmt):
                 yield from _stmt_children(child)
 
 
-def _walk(node, prefix: tuple[str, ...], out: list[tuple[object, tuple[str, ...]]]) -> None:
-    out.append((node, prefix))
+def _walk(node, prefix: tuple[str, ...], out: list[tuple[object, tuple[str, ...], bool]], derived: bool = False) -> None:
+    out.append((node, prefix, derived))
     if isinstance(node, Map):
         for src in node.sources:
             if isinstance(src, (Map, Fold)):
-                _walk(src, (*prefix, _seg(src)), out)
+                _walk(src, (*prefix, _seg(src)), out, derived)
         for s in node.body:
             for child in _stmt_children(s) if not isinstance(s, (Map, Fold)) else (s,):
-                _walk(child, (*prefix, _seg(child)), out)
+                _walk(child, (*prefix, _seg(child)), out, derived)
     elif isinstance(node, Fold):
         labels = _edge_labels(node)
         for i, edge in enumerate(node.operands):
             if isinstance(edge, (Map, Fold)):
-                _walk(edge, (*prefix, labels.get(i, _seg(edge))), out)
-        for s in node.step:
+                _walk(edge, (*prefix, labels.get(i, _seg(edge))), out, derived)
+        # The stored step for a composed fold; the DERIVED evaluation for a λ-spelled one — its
+        # synthesized nodes (flash's PV, memoized on the fold) are real schedule sites, marked
+        # ``derived`` (combine material below the seam lattice). Operand edges embedded at their
+        # derived head position were walked above.
+        edge_ids = {id(e) for e in node.operands}
+        step_derived = derived or node.lift is not None
+        for s in node.step_stmts():
+            if id(s) in edge_ids:
+                continue
             for child in _stmt_children(s) if not isinstance(s, (Map, Fold)) else (s,):
-                _walk(child, (*prefix, _seg(child)), out)
+                _walk(child, (*prefix, _seg(child)), out, step_derived)
 
 
 def sites(root) -> tuple[Site, ...]:
@@ -129,15 +141,15 @@ def sites(root) -> tuple[Site, ...]:
     among sites with identical ``(segments, axis)``."""
     if root is None:
         return ()
-    nodes: list[tuple[object, tuple[str, ...]]] = []
+    nodes: list[tuple[object, tuple[str, ...], bool]] = []
     _walk(root, (_seg(root),), nodes)
     counts: dict[tuple, int] = {}
     result: list[Site] = []
-    for node, segments in nodes:
+    for node, segments, derived in nodes:
         axis = node.axis.name if isinstance(node, Fold) else None
         key = (segments, axis)
         counts[key] = counts.get(key, 0) + 1
-        result.append(Site(node=node, axis=axis, segments=segments, ordinal=counts[key]))
+        result.append(Site(node=node, axis=axis, segments=segments, ordinal=counts[key], derived=derived))
     return tuple(result)
 
 
@@ -150,7 +162,7 @@ def family_sites(family: str, all_sites: tuple[Site, ...]) -> tuple[Site, ...]:
     if family not in PATH_FAMILIES:
         raise ValueError(f"{family!r} is not a tree-path knob family (have {PATH_FAMILIES})")
     if family == "PLACE":
-        return tuple(s for s in all_sites if s.depth > 1)
+        return tuple(s for s in all_sites if s.depth > 1 and not s.derived)
     if family in ("REDUCE", "STAGE"):
         return tuple(s for s in all_sites if isinstance(s.node, Fold))
     out = []

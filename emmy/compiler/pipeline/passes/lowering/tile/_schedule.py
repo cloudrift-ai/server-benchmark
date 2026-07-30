@@ -1854,7 +1854,7 @@ def _stamp_twisted_split(rows: list[TileOp], plan: ReducePlan) -> list[TileOp]:
     out: list[TileOp] = []
     for r in rows:
         red = (r.op.sources[0] if r.op.sources else None) if isinstance(r.op, Map) else r.op
-        head = red.step[0]
+        head = red.step_stmts()[0]
         head_tile = sched_of(r).tile_of(head)
         bn = head_tile.regs[1] * head_tile.atom.shape[1]
         ext = red.axis.extent
@@ -1878,12 +1878,15 @@ def _twisted_pair(op, free) -> tuple[Fold, Fold, Fold, ContractionView, Contract
     (`s is head_fold` in the partial); reads go through the views."""
     src = op.sources[0] if isinstance(op, Map) and len(op.sources) == 1 else None
     red = src if isinstance(src, Fold) else (op if isinstance(op, Fold) else None)
-    if red is None or red.role is not AxisRole.TWISTED or len(red.step) == 0:
+    if red is None or red.role is not AxisRole.TWISTED:
         return None
-    head_fold = red.step[0]
+    stmts = list(red.step_stmts())
+    if not stmts:
+        return None
+    head_fold = stmts[0]
     if not is_contraction_fold(head_fold) or len(free) < 2:
         return None
-    tail_folds = [st for st in list(red.step)[1:] if is_contraction_fold(st)]
+    tail_folds = [st for st in stmts[1:] if is_contraction_fold(st)]
     if len(tail_folds) != 1:
         return None
     pv_fold = tail_folds[0]
@@ -1933,10 +1936,11 @@ def _twisted_chain_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp
 
 
 def _composes(red: Fold) -> bool:
-    """True when the reduce's per-step ``step`` composes another structural node (split-K's
-    sliced contraction, flash's score) — the ONE spelling for a composed reduce, so a "bare
-    statistic reduce" test is just its negation."""
-    return any(isinstance(s, (Map, Fold)) for s in red.step)
+    """True when the reduce COMPOSES another structural node (split-K's sliced contraction,
+    flash's hoisted score edge) — the ONE test for a composed reduce, so a "bare statistic
+    reduce" test is just its negation. A λ-spelled composed fold carries the node on an operand
+    edge; the stored ``step`` arm covers the residual composed spellings."""
+    return any(isinstance(s, (Map, Fold)) for s in red.step_stmts()) or any(isinstance(e, (Map, Fold)) for e in red.operands)
 
 
 def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp | None:
@@ -2213,7 +2217,7 @@ def _twisted_warp_options(
         return []
     kv_ext, m_ext = red.axis.extent, head.m_axis.extent
     m_name, kv_name = head.m_axis.name, red.axis.name
-    for s in list(red.step)[1:]:
+    for s in list(red.step_stmts())[1:]:
         if isinstance(s, Load) and s.index and not {v for e in s.index for v in e.free_vars()} <= {m_name, kv_name}:
             return []  # a score bias indexed beyond (m, kv) — no fragment realization for it
         # An additive (m, kv) score bias (the explicit SDPA attn_mask) IS realizable: the fragment

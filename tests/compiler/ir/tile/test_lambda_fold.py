@@ -107,17 +107,28 @@ def test_twisted_from_loop_stores_the_true_monoid() -> None:
     assert fold.carrier.twist.family == "exp"  # derived structurally, never stored
 
 
-def test_twisted_composed_step_keeps_the_step_spelling() -> None:
-    """Flash's kv fold embeds its QK / PV contraction folds in the step — schedule-bearing nodes
-    the derivation cannot reproduce until the derived-blocked-evaluation walker exists — so a
-    composed twisted loop keeps the captured step."""
+def test_twisted_composed_fold_is_lambda_spelled_with_derived_evaluation() -> None:
+    """Flash's kv fold stores the λ spelling (step 7 — the composed step dissolved): the QK
+    score is a hoisted operand edge, the PV contraction is SYNTHESIZED into the derived blocked
+    evaluation (memoized — one identity per stored fold), and the derived step reproduces the
+    retired step material exactly."""
     from emmy.compiler.dim import Dim
+    from emmy.compiler.ir.tile.ir import is_contraction_fold
     from emmy.compiler.pipeline.passes.lowering.tile._flash import _flash_op
 
     op, _stores = _flash_op("Q", "K", "V", [1, 2], Dim(16), Dim(16), 8, 8)
     (red,) = op.sources
-    assert red.lift is None and len(red.step) > 0
+    assert red.lift is not None and len(red.step) == 0
     assert red.role is AxisRole.TWISTED
+    assert red.lift.results[1:] == (1.0, "v_e")  # ι: (score, 1, v) — the singleton state
+    assert is_contraction_fold(red.operands[0]) and red.operands[0].out == "sacc"  # the hoisted QK edge
+    stmts = red.step_stmts()
+    assert stmts[0] is red.operands[0]  # the derived head position — ahead of the lift body
+    pvs = [s for s in stmts[1:] if is_contraction_fold(s)]
+    assert len(pvs) == 1 and pvs[0].out == "O_i__pv"  # the synthesized PV contraction
+    assert pvs[0].operands[0] is red.operands[1]  # B is the fold's own value operand edge
+    assert red.step_stmts()[1:] == stmts[1:] and red.step_stmts()[0] is stmts[0]  # memoized — one identity
+    assert red.loop == red.loop  # the derived loop is deterministic from the stored params
 
 
 def test_twisted_rewrite_regenerates_the_combine_over_renamed_state() -> None:

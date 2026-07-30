@@ -78,6 +78,58 @@ def test_as_fold_is_lambda_spelled_and_loop_byte_identical() -> None:
         assert rt == view
 
 
+# --- the twisted derivation (1p) — online softmax stores lift (x, 1) + Monoid(init, combine) ---- #
+
+
+def _softmax_loop() -> Loop:
+    """The recognized online-softmax shape — ``[Load x, *dissolved merge]`` over the (m, l)
+    exp-family carrier, exactly as ``_softmax.try_online_softmax`` builds it."""
+    from emmy.compiler.ir.stmt.algebra import Carrier, State, Twist
+    from emmy.compiler.ir.stmt.carrier import denom, exp_channels
+
+    carrier = Carrier(state=State(names=("m_i", "l_i")), twist=Twist(family="exp", channels=exp_channels("x0", [denom()])))
+    body = Body((Load(name="x0", input="x", index=(Var("m"), Var("k"))), *carrier.merge))
+    return Loop(axis=Axis("k", 2048), body=body, role=AxisRole.TWISTED, carrier=carrier)
+
+
+def test_twisted_from_loop_stores_the_true_monoid() -> None:
+    loop = _softmax_loop()
+    fold = Fold.from_loop(loop)
+    assert fold.lift is not None and len(fold.step) == 0
+    assert fold.lift.results == ("x0", 1.0)  # ι spelled in the lift — the singleton state
+    assert fold.monoid.init == (float("-inf"), 0.0)
+    assert not fold.monoid.degenerate
+    assert fold.monoid.combine.results == ("m_i", "l_i")  # recognition's names thread through
+    # The derived serial step (combine at the singleton) reproduces the dissolved merge exactly.
+    assert fold.loop == loop
+    assert fold.role is AxisRole.TWISTED
+    assert fold.carrier.twist.family == "exp"  # derived structurally, never stored
+
+
+def test_twisted_composed_step_keeps_the_step_spelling() -> None:
+    """Flash's kv fold embeds its QK / PV contraction folds in the step — schedule-bearing nodes
+    the derivation cannot reproduce until the derived-blocked-evaluation walker exists — so a
+    composed twisted loop keeps the captured step."""
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.pipeline.passes.lowering.tile._flash import _flash_op
+
+    op = _flash_op("Q", "K", "V", [1, 2], Dim(16), Dim(16), 8, 8)
+    (red,) = op.sources
+    assert red.lift is None and len(red.step) > 0
+    assert red.role is AxisRole.TWISTED
+
+
+def test_twisted_rewrite_regenerates_the_combine_over_renamed_state() -> None:
+    fold = Fold.from_loop(_softmax_loop())
+    ren = {"m_i": "m2", "l_i": "l2", "x0": "s0"}
+    out = rewrite(fold, lambda n: ren.get(n, n), Sigma.IDENTITY, lambda a: a)
+    assert out.monoid.combine.results == ("m2", "l2")
+    assert out.carrier.state.names == ("m2", "l2")
+    assert out.lift.results == ("s0", 1.0)
+    # The regenerated combine still passes the formation verification (the fold constructed).
+    assert out.carrier.twist.family == "exp"
+
+
 def test_rewrite_renames_lift_monoid_and_carrier_in_lockstep() -> None:
     fold = _view(2).as_fold()
     ren = {"acc0": "r0", "acc1": "r1", "a_e": "av", "b0_e": "b0v", "b1_e": "b1v", "acc0__v": "r0__v", "acc1__v": "r1__v"}

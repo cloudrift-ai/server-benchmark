@@ -149,11 +149,19 @@ def _fold_derived_step(fold: Fold) -> tuple[Stmt, ...]:
     monoid that specialization IS the ``Accum`` form — ``sᵢ = ⊕ᵢ(sᵢ, liftᵢ)`` — and each
     component's ``Accum`` lands immediately after the lift stmt that defines its value (a
     literal / param component falls to the tail), exactly where the dissolved fold sat, so the
-    derived loop is byte-identical to the historical spelling. Deterministic from the stored
-    params only — kernel identity (``op_cache_key``) depends on nothing else."""
+    derived loop is byte-identical to the historical spelling. A TWISTED (exp-family) monoid
+    specializes through the family's own generator (``exp_merge`` — the streaming fold IS
+    combine-at-the-singleton with the ψ-rescale simplification applied, temps renumbered by the
+    same deterministic emitter that produced the stored combine), landing after the lift body —
+    exactly where recognition's dissolved merge sat. Deterministic from the stored params only —
+    kernel identity (``op_cache_key``) depends on nothing else."""
     monoid, lam = fold.monoid, fold.lift
     names = monoid.combine.results
     ops = monoid.component_ops()
+    if ops is None:  # the twisted (exp-family) serial step — the derived carrier's channels
+        # carry the singleton terms (the lift results), so the generated streaming merge is the
+        # singleton specialization of the stored combine, names included.
+        return (*lam.body, *fold.carrier.merge)
     dts = monoid.dtypes or (None,) * len(names)
     accums = tuple(
         Accum(name=names[i], value=str(lam.results[i]), op=ops[i], dtype=dts[i], axes=(fold.axis.name,)) for i in range(len(names))
@@ -184,7 +192,11 @@ def _extract_lift(loop: Loop) -> tuple[Lambda, Monoid] | None:
     :meth:`Fold.from_loop` re-derives the loop and keeps the λ spelling only on byte-identity, so
     this extraction can stay shape-strict without a correctness burden."""
     carrier = loop.carrier
-    if carrier is None or carrier.twist.family != "id":
+    if carrier is None:
+        return None
+    if carrier.twist.family == "exp":
+        return _extract_twisted_lift(loop, carrier)
+    if carrier.twist.family != "id":
         return None
     accums = [s for s in loop.body if isinstance(s, Accum)]
     prefix = [s for s in loop.body if not isinstance(s, Accum)]
@@ -204,6 +216,44 @@ def _extract_lift(loop: Loop) -> tuple[Lambda, Monoid] | None:
     except ValueError:
         return None  # an undefined result / identity-less op — not the canonical dissolved shape
     return lift, monoid
+
+
+def _extract_twisted_lift(loop: Loop, carrier: Carrier) -> tuple[Lambda, Monoid] | None:
+    """Read the λ spelling off an exp-family TWISTED reduce ``Loop`` (1p — online softmax): the
+    body must be ``[pure score prefix…, the dissolved streaming merge]`` verbatim, the prefix
+    becomes the ``lift`` body and the channels' injected terms its results (the singleton —
+    ``(x, 1)``), and the monoid stores the TRUE combine — the generated cross-partition
+    state⊕state program over the loop's REAL state names. ``None`` when the shape does not read
+    off cleanly — a composed step (flash's in-step QK / PV folds, which carry their own schedule
+    slices and stay step-spelled until the derived-blocked-evaluation walker exists), a foreign
+    merge spelling, a role the singleton shape cannot carry. :meth:`Fold.from_loop`'s
+    byte-identity gate stands behind this extraction like the degenerate one's."""
+    merge = tuple(carrier.merge)
+    body = tuple(loop.body)
+    if len(body) < len(merge) or body[-len(merge) :] != merge:
+        return None
+    prefix = body[: -len(merge)]
+    if any(not isinstance(s, (Load, Assign)) for s in prefix):
+        return None  # a composed step keeps the step spelling
+    names = carrier.state.names
+    channels = carrier.twist.channels
+    if not channels or not isinstance(channels[0].term, str) or channels[0].lift is not None:
+        return None
+    for ch in channels[1:]:  # the shape-derived roles must read back losslessly off the singleton
+        expect_like = isinstance(ch.term, str)
+        if expect_like != (ch.lift is not None and ch.lift.name == "multiply"):
+            return None
+    if any(ch.dtype is not None for ch in channels):
+        return None  # a dtype-carrying exp channel has no side-tuple spelling yet
+    from emmy.compiler.ir.stmt.carrier import exp_combine_states  # noqa: PLC0415
+
+    other = State(names=names).other
+    try:
+        lift = Lambda(params=(loop.axis.name,), body=Body(prefix), results=tuple(ch.term for ch in channels))
+        combine = Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
+    except ValueError:
+        return None
+    return lift, Monoid(init=(float("-inf"),) + (0.0,) * (len(names) - 1), combine=combine)
 
 
 @dataclass(frozen=True)
@@ -286,11 +336,30 @@ class Fold(Stmt):
         assert tuple(lam.params[1:]) == bound, f"lift params {lam.params[1:]} must bind the operand edges {bound} positionally"
         assert len(lam.results) == self.monoid.arity, "one lift result per monoid component"
         ops = self.monoid.component_ops()
-        assert ops is not None, "1o stores only DEGENERATE folds λ-spelled — a twisted monoid lands with 1p"
         names = self.monoid.combine.results
-        dts = self.monoid.dtypes or (None,) * len(names)
-        channels = tuple(CarrierChannel(fold=op, term=r, dtype=dt) for op, r, dt in zip(ops, lam.results, dts, strict=True))
-        object.__setattr__(self, "carrier", Carrier(state=State(names=names), twist=Twist(family="id", channels=channels)))
+        if ops is not None:  # DEGENERATE: the componentwise ``id``-family annotation
+            dts = self.monoid.dtypes or (None,) * len(names)
+            channels = tuple(CarrierChannel(fold=op, term=r, dtype=dt) for op, r, dt in zip(ops, lam.results, dts, strict=True))
+            object.__setattr__(self, "carrier", Carrier(state=State(names=names), twist=Twist(family="id", channels=channels)))
+            return
+        # TWISTED (1p): the family is selected STRUCTURALLY, never stored — the stored combine
+        # must BE the exp/LSE generator's program over these state names (recognition built it
+        # exactly there; a foreign twisted combine has no derivation yet and is rejected loudly).
+        # The derived channel spec reads the singleton off the lift — the state-component ROLE
+        # decision, shape-derived, no annotation: the pivot is component 0 (its injected term the
+        # score), a literal-1 injection is a denominator, a value injection an expectation.
+        from emmy.compiler.ir.stmt.carrier import denom, exp_channels, exp_combine_states, expect  # noqa: PLC0415
+
+        other = State(names=names).other
+        expected = exp_combine_states(names, other)
+        assert self.monoid.combine.params == names + other and tuple(self.monoid.combine.body) == tuple(expected), (
+            "a twisted Fold's combine must be the generated exp/LSE-family program over its state names"
+        )
+        score = lam.results[0]
+        assert isinstance(score, str), "the twisted lift's pivot component must inject the score name"
+        accs = [denom() if isinstance(r, float) else expect(r) for r in lam.results[1:]]
+        carrier = Carrier(state=State(names=names), twist=Twist(family="exp", channels=exp_channels(score, accs)))
+        object.__setattr__(self, "carrier", carrier)
 
     @classmethod
     def from_loop(cls, loop: Loop) -> Fold:

@@ -311,7 +311,11 @@ class Monoid:
         """A copy with every state/temp name in ``combine`` mapped through ``rename_ssa`` — the
         lockstep the ``Fold`` rewrite applies so the stored algebra tracks its fold's SSA renames
         (the same contract as :meth:`Carrier.rename`). A second-operand ``<n>__o`` spelling
-        follows its component name so the S × S shape survives canonical renumbering."""
+        follows its component name so the S × S shape survives canonical renumbering. A GENERATED
+        twisted program (the exp/LSE family) is REGENERATED over the renamed state names rather
+        than patched — its internal temps are namespaced on the state spelling, and regeneration
+        is the deterministic rule that keeps the stored program equal to the generator's output
+        (the formation invariant a consuming ``Fold`` asserts)."""
 
         def rn(name: str) -> str:
             if name.endswith("__o"):
@@ -319,6 +323,14 @@ class Monoid:
             return rename_ssa(name)
 
         comb = self.combine
+        if self.component_ops() is None:
+            old = tuple(r for r in comb.results if isinstance(r, str))
+            old_other = tuple(f"{n}__o" for n in old)
+            if comb.params == old + old_other and tuple(comb.body) == tuple(exp_combine_states(old, old_other)):
+                names = tuple(rename_ssa(n) for n in old)
+                other = tuple(f"{n}__o" for n in names)
+                lam = Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
+                return Monoid(init=self.init, combine=lam, dtypes=self.dtypes)
         lam = Lambda(
             params=tuple(rn(p) for p in comb.params),
             body=Body(tuple(st.rewrite(rn) for st in comb.body)),

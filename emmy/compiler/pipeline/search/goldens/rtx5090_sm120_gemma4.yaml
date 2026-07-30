@@ -4120,3 +4120,59 @@ configs:
     knobs: {TILE: 'f4'}
     emmy_us: 6.2
     cublas_us: 12.0
+
+  # ---- M=192: the c=64 MTP-d2 decode bucket (2026-07-30 hand sweep) --------------------------------
+  # This width had NO records of any kind, which is the misdeploy hazard the file exists to close: a
+  # cold resolve there is not reproducible (the same serving configuration has measured 10.7 and
+  # 332.7 tok/s end to end), because with no golden the fused twins fall to a greedy search.
+  #
+  # 192 refines the tile-M rule the m64 / m256 blocks state. No reachable M extent (WM*FM*16) equals
+  # 192, so SOME B re-read is unavoidable: a 64-row tile needs three M-blocks, a 128-row tile two
+  # (the second half-empty), a 256-row tile one but with a quarter of the mma wasted. The winner is
+  # the 64-row tile — but ONLY with `gm8` group-M rasterization, which schedules the three blocks
+  # sharing an N-tile together so their re-reads are L2 hits rather than DRAM traffic: 274.8 us with
+  # gm8 against 434.4 us with the identical tile and no rasterization. So the invariant is "B leaves
+  # DRAM once", and rasterization is a second way to buy it when the tile extent cannot.
+  # These rows still trail cuBLAS (1.17x-1.61x) — 192 is a genuinely awkward width and mlp_down's
+  # long-K shape wants a family this sweep did not explore. They are recorded because a deterministic
+  # 1.2x loss replaces a non-reproducible one that can be 100x.
+  - kernel: matmul
+    name: gemma4_12b.gate_up_cat.m192.lin
+    M: 192
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k8', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 274.8
+    cublas_us: 234.3
+  - kernel: matmul
+    name: gemma4_12b.qkv_cat.m192.lin
+    M: 192
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k8', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 89.3
+    cublas_us: 70.0
+  - kernel: matmul
+    name: gemma4_12b.qk_global_cat.m192.lin
+    M: 192
+    N: 8704
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k8', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 89.8
+    cublas_us: 70.0
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.m192.lin
+    M: 192
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k8', REDUCE: 'g2a', RASTER: 'gm8', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 193.1
+    cublas_us: 120.0

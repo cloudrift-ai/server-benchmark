@@ -23,6 +23,13 @@ prior and `emmy tune`'s sweep are not trusted at the moment, so every number her
 - **The three `gate_up_cat.m64` goldens were dead.** The deploy logs `DRIFT` for that shape — "no offered candidate
   realizes any of them" — so the single biggest decode kernel had no golden floor at all and was resolved by the
   prior. This is a bug in its own right and it is the mechanism by which an untuned width becomes a lottery.
+- **m192 — the width the c=64 MTP-d2 lane actually runs — had no records at all, and now has four.** That width is
+  the documented lottery (the same serving configuration has measured 10.7 and 332.7 tok/s because a cold resolve
+  there is not reproducible). All four dominant edges improve 1.10–1.15x over the cold pick and, more importantly,
+  become deterministic. m192 also **refines the rule**: no reachable tile extent equals 192, so some B re-read is
+  unavoidable, and the winner is a 64-row tile *with* `gm8` group-M rasterization — 274.8 us with it against
+  **434.4** us for the identical tile without it. The invariant is "B leaves DRAM once"; rasterization is a second
+  way to buy it when the tile extent cannot.
 - **The prefill width is NOT the problem.** m2048 — the chunk width the 4k/4k c=4/c=8 cells ride — measures
   0.99–1.08x cuBLAS across every matmul edge, and the best pin buys 1.01–1.05x. So the 4k/4k TTFT gap (24–26 s
   against stock's 8.7 s) is not prefill matmul quality.
@@ -80,6 +87,20 @@ lands on the new row and reproduces its latency, and the DRIFT warning is gone:
 | `qkv_cat.m64` / `q_proj_global.m64` | 35.1 us | **29.2** | 1.05x |
 | `gate_up_cat.m256` | 475.1 us | **283.6** | 1.04x |
 | `norm_gate_up.m256` (fused, deploys cut → floored by the row above) | 483.5 us | **314.4** | 1.11x |
+
+Four new rows seed m192, all on `w1x8/f4x1/k8` + `d2/tma/ring` + `gm8` (`mlp_down` adds `g2a`), each verified to
+deploy:
+
+| new m192 golden | cold pick | recorded | vs cuBLAS |
+|---|--:|--:|--:|
+| `gate_up_cat.m192` | 317.3 us | **274.8** | 1.17x |
+| `mlp_down.m192` | 218.7 us | **193.1** | 1.61x |
+| `qk_global_cat.m192` | 98.5 us | **89.8** | 1.28x |
+| `qkv_cat.m192` | 99.1 us | **89.3** | 1.28x |
+
+These still trail cuBLAS. They are recorded anyway because at that width the alternative is not a 1.2x loss but an
+unbounded one — and `mlp_down.m192` at 1.61x is an open target: its long-K shape (N=3840, K=15360) wants a tile
+family this sweep did not explore, since the candidate set was built for the wide-N case.
 
 `qkv_cat.m64` and `q_proj_global.m64` are the same shape (N=8192, K=3840); they are recorded separately because the
 golden index is name-keyed, and both are needed so either edge floors the deploy.

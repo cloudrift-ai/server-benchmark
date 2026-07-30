@@ -21,11 +21,13 @@ vocabularies.
 derived view of it. A kernel IS `π ∘ foldMap`** — a projection over a monoidal fold of a pure
 per-element lift: `⟦Fold⟧ = ⊕_{k ∈ axis} ι(lift(k))`, seeded at `e`. The design rests on five ideas:
 
-1. **ONE general fold node — axis + monoid + lift.** A `Fold` stores the reduced `axis`, the ⊕
-   `Monoid` — a TRUE monoid, `(init, combine)`, ONE program (`combine : S × S → S`), generated once
-   at construction (`Monoid.of(op…)`, the componentwise convenience constructor, for a plain fold;
-   recognition's pattern builders for a twisted one — the family name is construction-time knowledge
-   and dissolves there; DEGENERATE is a derived shape predicate on `combine`, not a storage arm) — a
+1. **ONE general fold node — axis + algebra + lift, all FLAT fields.** A `Fold` stores the reduced
+   `axis` and the ⊕ as flat `(init, combine)` fields — NO `Monoid` wrapper class (dissolved into the
+   node at 1r; `M(op…)`, the componentwise convenience constructor, survives as a free helper
+   building the pair; recognition's pattern builders build the twisted ones — the family name is
+   construction-time knowledge and dissolves there; DEGENERATE is a derived shape predicate on
+   `combine`, not a storage arm). `combine : S × S → S` is a TRUE monoid's ⊕, ONE program,
+   generated once at construction — a
    PURE `lift` `Lambda` (`λ(k, v₁…vₙ) → S` — it produces the element's SINGLETON STATE, seeing the
    iteration var and the operand values, nothing else; ι is spelled in the lift — flash's emits
    `(s, 1, v)`, and the degenerate lifts are already singleton-shaped), and one CLOSED operand edge
@@ -45,18 +47,20 @@ per-element lift: `⟦Fold⟧ = ⊕_{k ∈ axis} ι(lift(k))`, seeded at `e`. Th
    `Write` or `Loop` inside a lift; free names ⊆ params ∪ iteration vars; results defined. α-invariance
    is canonical renumbering (the existing rename machinery), not de Bruijn. **Primitives live in their
    home modules** — they are not tile-IR-private: `Lambda` beside `Body` in `ir/stmt` (NEVER in
-   `tile/ir.py`); `Monoid` in `ir/stmt/algebra` (the finished form of `Carrier`/`Twist` — the
-   `(init, combine)` pair; `family` / `inject` / `Channel` dissolve at construction; bound mode is
-   GENERALIZED into it, `StateMerge` riding the stored-combine rename unchanged); scalar/index exprs
-   stay `ir/expr`; `Fold`/`Map`/`TileOp` and the derived views stay `ir/tile`.
+   `tile/ir.py`); the algebra HELPERS in `ir/stmt/algebra` — no `Monoid` class, the pair lives flat
+   on `Fold`: the componentwise constructor (`M(op…)`), the `component_ops` shape-readers, the
+   twisted-combine regeneration rule (in the `Fold` rewrite lockstep), `StateMerge` (riding the
+   stored-combine rename unchanged) and the executable spec; `family` / `inject` / `Channel` dissolve
+   at construction; scalar/index exprs stay `ir/expr`; `Fold`/`Map`/`TileOp` and the derived views
+   stay `ir/tile`.
 3. **Edge iff closed — by CONSTRUCTION.** An operand edge has two inhabitants — MATERIALIZED (a gmem
    `Load`) or COMPUTED (an inline node; tree ownership gives it one consumer) — and operands bind
    POSITIONALLY to lift params, so an operand cannot see the fold's state or its siblings: closure
    needs no scan (`captured_values` demotes to a validation assert), every seam on the cut lattice is
    closed structurally, and composition is nesting a term on an edge. Operands may read the ENCLOSING
    iteration var (flash's per-key score fold) — never state. Effects sit at the kernel boundary only:
-   `results` + materializer glue synthesize every root store; no `Write` inside a term. The monoid's
-   stored `combine` sits BELOW the seam lattice — never a cut target — so flash's `P` (its derived
+   `results` + materializer glue synthesize every root store; no `Write` inside a term. The stored
+   `combine` sits BELOW the seam lattice — never a cut target — so flash's `P` (its derived
    serial-step internals) needs no special legality case.
 4. **Hardware readings are DERIVED views, never stored.** The bilinear factored form `a·(b₁…bₙ)` the
    tensor cores require is `contraction_view` — a factoring of the LIFT (`_parse_bilinear` reads the
@@ -67,22 +71,30 @@ per-element lift: `⟦Fold⟧ = ⊕_{k ∈ axis} ι(lift(k))`, seeded at `e`. Th
    as fork siblings beside the warp rows; one relation keeps one spelling (a stored refined kind beside
    the general fold is the two-spellings defect); and knob keys stamp against the pre-specialization
    tree.
-5. **Kernel boundaries are a placement DECISION** — a `cut | fuse` bit on each parent↔child seam.
-   Kernels are a derived view: the cut set partitions the tree, each partition materializes as one
-   launch, each cut seam materializes its value to a buffer (a cut = let-materializing a closed term).
+5. **Kernel boundaries are a placement DECISION, resolved FIRST and recursively.** A `cut | fuse` bit
+   on each parent↔child seam; kernels are a derived view: the cut set partitions the tree, each
+   partition materializes as one launch, each cut seam materializes its value to a buffer (a cut =
+   let-materializing a closed term). Resolution is TWO-LEVEL: structure (the cut set) resolves first,
+   then EVERY resulting kernel — the cut children AND the residue — re-recognizes as a fresh root and
+   resolves its OWN singular schedule independently, recursing through the same lookup (a piece's
+   entry may itself cut). Golden storage factors the same way: ROUTING entries hold cuts only — never
+   schedules — and schedule entries hold ONE kernel's schedule; a cut seam's shape is a recognition
+   fact, so no schedule decision ever spans a kernel boundary.
 
 From this everything else follows:
 
 - **Knobs are paths into the tree.** A schedule key addresses the node (or edge) it decorates by
   position; no parallel namespace of hand-invented site names. Explicit binders make paths stable by
   construction.
-- **Keys stamp against the pre-placement tree.** A cut never re-keys the decisions inside either half.
+- **Keys stamp against the pre-placement tree.** A cut never re-keys the decisions inside either half —
+  and under the factored golden storage this holds trivially: a knob row only ever addresses ONE
+  kernel's own recognized tree, so there is no cross-kernel row to protect.
 - **Derive, never store — and store ONCE what cannot derive.** Loop nests, the serial step (`combine`
   at the singleton), roles, the degeneracy predicate and the op-trait legality reads (off a
   trivially-shaped `combine`), tile geometry, the contraction view, cross-CTA splits (reassociation
   `fold_k = fold_{k₁} ∘ fold_{k₂}`, certified by the associativity property test) — synthesized on
-  demand from the params. Stored state is only the params + decisions; the monoid's `(init, combine)`
-  IS a param, with exactly one home.
+  demand from the params. Stored state is only the params + decisions; `(init, combine)` are
+  themselves params, with exactly one home.
 - **Defaults are the recognized form.** An unseeded shape deploys exactly what recognition produced;
   every rewrite away from it is evidence- or pin-driven ("an unseeded site never pays").
 - **All fusion happens in loop IR; tile IR only cuts.** Loop-level fusion decides what lives together;
@@ -119,39 +131,24 @@ class Lambda:
                                      # (Fold/Map formation), since a bare Lambda can't know its scope
     results: tuple[str, ...]         # the returned defs — replaces every `out` / last-def convention
 
-# ── ir/stmt/algebra — the finished form of Carrier/Twist ──────────────────────────────────────────
-@dataclass(frozen=True)
-class Monoid:
-    # A TRUE monoid — ONE program. The serial streaming step is NOT stored: it is
-    # `s′ = combine(s, lift(k))` — combine specialized at the singleton state the lift produces,
-    # simplified deterministically at lowering (×1 folds, shared-exp CSE; emmy's OWN simplifier,
-    # never nvcc's — kernel identity hashes the source we emit). update-vs-combine consistency is
-    # thereby correct BY CONSTRUCTION: there is no second program to keep coupled. Generated ONCE at
-    # construction — `Monoid.of(op…)` (the componentwise convenience constructor, the `M(add)`
-    # spelling below) for a plain fold, recognition's pattern builders (_softmax / _flash) for a
-    # twisted one; the family name (Twist.family / psi), `inject` and `Channel.term`/`lift` dissolve
-    # there (ι is spelled IN the lift — flash's emits `(s, 1, v)`), and downstream reads the
-    # program, never a name. DEGENERATE is a DERIVED predicate, not a storage arm: the componentwise
-    # shape test on `combine` (every result `sᵢ″ = ⊕ᵢ(sᵢ, sᵢ′)`, independently — the `as_accums`
-    # read) — and the trait queries legality needs (additive? commutative? which op?) read the ⊕ᵢ
-    # off that same trivially-shaped program, so the op handles survive without a field.
-    init: tuple[float, ...]          # the seeds — the op identities for a plain fold; (−inf, 0, 0) LSE
-    combine: Lambda                  # S × S → S — THE ⊕: the serial tiers specialize it at the
-                                     # singleton, split / coop / StateMerge apply it to states
-                                     # (bound-mode rename, generalized), and the blocked (warp) form
-                                     # is its reassociated evaluation. State enters as params and
-                                     # leaves as results — no Accum in any stored program.
-    # A non-monoid long-tail fold (no legal combine) would need an opaque serial-update override
-    # priced serial-only — YAGNI: recognition only builds known monoids; add it if ever real.
-    # ASSOCIATIVITY is TEST-enforced (the certificate the split/coop tiers rest on): the 1m
-    # evaluator's property test — combine(a, combine(b, c)) == combine(combine(a, b), c) on random
-    # states — plus the ⟦tree⟧ == lowered-loop agreement test.
-    # OPEN (decide at 1p, not in the emitter): state-component ROLES for the blocked warp realizer
-    # (pivot / denominator / expectation — today Channel.lift finds O): shape-derived from `combine`,
-    # or a minimal per-component annotation.
-    # the per-component ACCUMULATOR dtype (today Channel.dtype, None = lowering default) is
-    # precision, not algebra — it survives only as an optional parallel tuple so lowered Accums stay
-    # byte-identical; a precision decoration may absorb it later
+# ── ir/stmt/algebra — HELPERS only; NO Monoid class, the ⊕ lives FLAT on Fold ─────────────────────
+# The serial streaming step is NOT stored: it is `s′ = combine(s, lift(k))` — combine specialized at
+# the singleton state the lift produces, simplified deterministically at lowering (×1 folds,
+# shared-exp CSE; emmy's OWN simplifier, never nvcc's) — so update-vs-combine consistency is correct
+# BY CONSTRUCTION: there is no second program to keep coupled. The pair is generated ONCE at
+# construction — `M(op…)` (the componentwise free constructor: one independent self-fold ⊕ᵢ per
+# component, seeds the op identities, threading recognition's REAL accumulator names) for a plain
+# fold, recognition's pattern builders (_softmax / _flash) for a twisted one; the family name
+# (Twist.family / psi), `inject` and `Channel.term`/`lift` dissolve there (ι is spelled IN the
+# lift — flash's emits `(s, 1, v)`), and downstream reads the program, never a name. DEGENERATE is a
+# DERIVED predicate, not a storage arm: `component_ops(combine)` — a free shape-reader (every result
+# `sᵢ″ = ⊕ᵢ(sᵢ, sᵢ′)`, independently) whose ⊕ᵢ handles the trait/legality queries consume. The
+# twisted-combine REGENERATION rule rides the `Fold` rewrite lockstep: a generated program is
+# regenerated over renamed names, asserted equal to its generator's output at formation.
+# ASSOCIATIVITY is TEST-enforced (the certificate the split/coop tiers rest on):
+# combine(a, combine(b, c)) == combine(combine(a, b), c) on random states — plus the
+# ⟦tree⟧ == lowered-loop agreement test. `StateMerge` and the executable spec (eval_lambda /
+# foldmap_eval) stay here; Carrier / Twist / State die at step 7 (see *Retirement ledger*).
 
 # ── ir/tile/ir.py — the two node kinds only (plus TileOp and the derived views) ───────────────────
 Operand = Load | Fold | Map          # materialized | computed (inline node, one consumer by tree ownership)
@@ -159,32 +156,43 @@ Operand = Load | Fold | Map          # materialized | computed (inline node, one
 @dataclass(frozen=True)
 class Fold(Stmt):
     axis: Axis                       # the reduced iteration space
-    monoid: Monoid
+    init: tuple[float, ...]          # the ⊕ seeds — op identities for a plain fold; (−inf, 0, 0) LSE
+    combine: Lambda                  # S × S → S — THE ⊕: the serial tiers specialize it at the
+                                     # singleton, split / coop / StateMerge apply it to states
+                                     # (bound-mode rename, generalized), the blocked (warp) form is
+                                     # its reassociated evaluation. State enters as params and
+                                     # leaves as results — no Accum in any stored program.
     lift: Lambda                     # λ(k, v₁…vₙ) → S — PURE, produces the element's SINGLETON
-                                     # state; state-reading lives ONLY inside the monoid's combine
+                                     # state; state-reading lives ONLY inside combine
     operands: tuple[Operand, ...]    # one CLOSED term per lift param vᵢ — POSITIONAL binding
+    dtypes: tuple = ()               # optional per-component accumulator dtype — precision, not
+                                     # algebra; a precision decoration may absorb it later
     # NO schedule fields: the slices live on TileOp.schedule (1r) — the term is pure algebra
+    # __post_init__ carries the S×S→S arity check (params 2n / results n vs init) — Monoid's old
+    # formation invariant, relocated
 
 @dataclass(frozen=True)
 class Map(Stmt):
     fn: Lambda                       # π : λ(s₁…sₙ) → out; sources bind positionally to params
     sources: tuple[Operand, ...]     # project ∘ fold; must admit Load — the cut terminal (phase 4)
 
-Slice = TilePlan | ReducePlan | Stage  # the EXISTING schedule value types (ir/schedule.py) — no new class
+Slice = TilePlan | ReducePlan | Stage  # the EXISTING schedule value types (ir/schedule.py) — no new
+                                       # class; at 1r the warp-form TilePlan sheds `units` into `work`
 
 @dataclass
 class TileOp(Op):
     op: Fold | Map                   # the pure term tree — IMMUTABLE across the whole schedule search
     place: Placement
-    workers: WarpSpec | None
+    work: Workers                    # the ONE worker inventory (w4x1 / t16x8 / t512) — factored
+                                     # in-memory at 1r; absorbs WarpSpec/WSPEC at step 7
     schedule: dict[Key, Slice]       # the slice decorations (1r), keyed by the phase-2 CODEC key —
                                      # `FAMILY@path` — NOT by path alone: one fold may carry all
                                      # three families at once, and the family selects the slice
                                      # kind, so key and value agree by construction. Values are the
                                      # RESOLVED slices, which makes the stamped knob row DERIVABLE
-                                     # (spell() of each value + the root-globals) — honest stamping
-                                     # by type. A fork is a DIFFERENT MAP, never a rebuilt tree —
-                                     # "keys stamp against the pre-placement tree" holds by type
+                                     # (spell() of the values + `work` + the root-globals) — honest
+                                     # stamping by type. A fork is a DIFFERENT MAP, never a rebuilt
+                                     # tree — "keys stamp against the pre-placement tree" holds by type
 ```
 
 **Lowering rule.** `Fold.loop` = the operand bodies (positional binding — no first-use scan, no tie
@@ -210,37 +218,47 @@ placement-free cone read.
 Loop IR ──recognize──▶ pure Fold/Map term tree         (structure only; no hardware knowledge)
         ──schedule───▶ scalar / coop rows read the fold directly;
                        tensor cores present? view = contraction_view(fold, place)
-                       view ─▶ warp / staged rows: operand roles from the view, TilePlan on the fold
-        ──split / materialize──▶ slices off the nodes, roles off the view (re-derived from ctx.grid)
+                       view ─▶ warp / staged rows: operand roles from the view, the slices into
+                       TileOp.schedule
+        ──split / materialize──▶ slices off the schedule dict, roles off the view (re-derived from ctx.grid)
 ```
 
-Worked shapes — each `Fold` spelled positionally, `Fold(axis, monoid, lift, operands)`: the bare λ in
-third position IS the `lift` (first param the iteration var, then one param per operand edge, bound
-positionally; it returns the singleton state). `M(op…)` ≡ `Monoid.of(op…)`, the componentwise
-constructor:
+Worked examples — the term in YAML-like spelling: the node kind is a `!Fold` / `!Map` tag, one field
+per line; a nested node is hoisted to a named key (`stat:`, `product:`, `score:`) for READABILITY
+ONLY — storage is inline, sharing is edge reuse, there is no let table. The lift's first param is the
+iteration var, then one per operand edge, bound positionally; the ⊕ is the flat `(init, combine)`
+pair — a componentwise combine is spelled by its ops (`add`, `(add, add)` — what the free `M(op…)`
+constructor builds), a twisted one by its generator family (`lse`, `flash`; programs in the notes
+below). Schedules are END-STATE codec entries (grammar under *Knob codec*; values
+illustrative): one block = ONE kernel's golden entry; a labeled cascade = the recursive routing
+resolution (*Placement*); "same term" = a fork sibling — a fork is a different map over the immutable
+term:
 
-```
-sum:      Fold(k, M(add), λ(k,x). x, (Load(x[m,k]),))
-matmul:   Fold(k, M(add), λ(k,a,b). a·b, (Load(A), Load(B)))
-gate⊗up:  Map(swiglu, (Fold(k, M(add, add), λ(k,x̂,g,u). (x̂·g, x̂·u), (cone, Load(Wg), Load(Wu))),))
-          — sharing is arity: ONE pure lambda, tuple-valued, into the product monoid; the cone is an
-          ordinary inline operand (Map(fn=normalize, sources=(Fold(stat),)) — the K seam is the node
-          boundary)
-rmsnorm:  Map(λs. …rsqrt(s/K)…, (Fold(k, M(add), λ(k,x). x², (Load(x),)),))
-softmax:  Map(π, (Fold(k, M_lse, λ(k,x). (x, 1), (Load(x),)),))
-          M_lse = Monoid(init=(−inf, 0),
-                         combine = λ((m,l), (m′,l′)). (m″, l·e^{m−m″} + l′·e^{m′−m″}))
-          serial step = combine at the singleton (m′=x, l′=1), simplified: m″ = max(m, x);
-          l = l·e^{m−m″} + e^{x−m″} — today's dissolved merge, DERIVED
-flash:    Map(λ(m,l,O). O/l, (Fold(kv, M_flash, λ(j,s,v). (s, 1, v), (score, Load(V))),))
-          M_flash = Monoid(init=(−inf, 0, 0), combine = the coupled-rescale (m, l, O) ⊕), built once
-          by flash recognition. score = Fold(dd, M(add), λ(d,q,kk). q·kk, (Load(Q), Load(K))) — an
-          ordinary CLOSED operand (operands may read the enclosing iteration var, never state).
-          Today's interleaved in-step spelling — merge stmts, P = exp(s′−m′), the PV fold — is the
-          singleton specialization of `combine` (P = the singleton's e^{s−m″} rescale, P·v its
-          O-term), reproduced by the 1p derivation (the gate); the blocked warp form is the same
-          combine reassociated over key blocks.
-```
+| Operation | Tile IR (YAML-like) | Schedule entries (end-state codec) |
+| --- | --- | --- |
+| bare reduce (sum) | `!Fold`<br>`axis: k`<br>`init: [0]`<br>`combine: add`<br>`lift: λ(k,x)→x`<br>`operands: [Load x]` | `WORK: t512`<br>`REDUCE@fold.k: coop` |
+| bare reduce, grid-split sibling | same term | `WORK: t256`<br>`REDUCE@fold.k: g4`<br>— the partials + synthesized finalize stay in-kernel artifacts, never key targets |
+| matmul, warp tier | `!Fold`<br>`axis: k`<br>`init: [0]`<br>`combine: add`<br>`lift: λ(k,a,b)→a·b`<br>`operands: [Load A, Load B]` | `WORK: w1x8`<br>`TILE@fold.k: mma_m16n8k16_f16_f32/f4x1/k4`<br>`REDUCE@fold.k: g2`<br>`STAGE@fold.k: d3/tma/ring` |
+| matmul, scalar-tier sibling | same term | `WORK: t16x8`<br>`TILE@fold.k: f4x8`<br>`REDUCE@fold.k: g2`<br>`STAGE@fold.k: d3/tma/ring` |
+| pointwise cell | `!Map {fn: cell, sources: []}` | `WORK: t16x8`<br>`TILE@map: f4x8` |
+| rms_norm | `!Map`<br>`fn: λ(s)→…rsqrt(s/K)…`<br>`sources: [stat]`<br>`stat: !Fold`<br>`  axis: k`<br>`  init: [0]`<br>`  combine: add`<br>`  lift: λ(k,x)→x²`<br>`  operands: [Load x]` | `WORK: t512`<br>`REDUCE@fold.k: coop` |
+| softmax (online) | `!Map`<br>`fn: π`<br>`sources: [lse]`<br>`lse: !Fold`<br>`  axis: k`<br>`  init: [−inf, 0]`<br>`  combine: lse`<br>`  lift: λ(k,x)→(x,1)`<br>`  operands: [Load x]` | `WORK: t256`<br>`REDUCE@fold.k: coop` |
+| norm_linear / gate⊗up, fused | `!Map`<br>`fn: swiglu`<br>`sources: [product]`<br>`product: !Fold`<br>`  axis: k`<br>`  init: [0, 0]`<br>`  combine: (add, add)`<br>`  lift: λ(k,x̂,g,u)→(x̂·g, x̂·u)`<br>`  operands: [cone, Load Wg, Load Wu]`<br>`cone: !Map`<br>`  fn: normalize`<br>`  sources: [stat]`<br>`stat: !Fold`<br>`  axis: k`<br>`  init: [0]`<br>`  combine: add`<br>`  lift: λ(k,x)→x²`<br>`  operands: [Load x]` | `WORK: w4x2`<br>`TILE@fold.k: mma_m16n8k16_f16_f32/f4x8/k4`<br>`STAGE@fold.k: d2/tma/ring`<br>`REDUCE@a.fold.k: serial`<br>— the cone's stat; the path disambiguates the same-named `k` |
+| norm_linear, cut | same term — placement is a decision, never a rewrite of the term | `norm_linear:  # routing — no schedules`<br>`  PLACE@a: cut`<br>`rms_norm:  # the cone, re-recognized — routes again`<br>`  PLACE@map: cut`<br>`reduce:  # the stat`<br>`  WORK: t512`<br>`  REDUCE@fold.k: coop`<br>`pointwise:  # the scale`<br>`  WORK: t16x8`<br>`  TILE@map: f4x8`<br>`matmul:  # the residue — the warp-tier entry above; evidence reuse` |
+| flash | `!Map`<br>`fn: λ(m,l,O)→O/l`<br>`sources: [stream]`<br>`stream: !Fold`<br>`  axis: kv`<br>`  init: [−inf, 0, 0]`<br>`  combine: flash`<br>`  lift: λ(j,s,v)→(s,1,v)`<br>`  operands: [score, Load V]`<br>`score: !Fold`<br>`  axis: dd`<br>`  init: [0]`<br>`  combine: add`<br>`  lift: λ(d,q,kk)→q·kk`<br>`  operands: [Load Q, Load K]` | `WORK: w4x1`<br>`TILE@fold.dd: mma_m16n8k16_f16_f32/f1x16/k4`<br>`TILE@fold.pj: mma_m16n8k16_f16_f16/f1x8/k8`<br>`STAGE@fold.kv: d2/cp/ring` |
+
+Notes the examples rest on:
+
+- `lse`: `combine = λ((m,l), (m′,l′)) → (m″, l·e^{m−m″} + l′·e^{m′−m″})`, seeds `(−inf, 0)`; the
+  serial step is combine at the singleton (m′ = x, l′ = 1), simplified — m″ = max(m, x),
+  l = l·e^{m−m″} + e^{x−m″} — today's dissolved merge, DERIVED.
+- `flash`: the coupled-rescale (m, l, O) ⊕, seeds (−inf, 0, 0), built once by flash recognition.
+  Today's interleaved in-step spelling — merge stmts, P = exp(s′−m′), the PV fold — is combine's
+  singleton specialization (the 1p derivation gate); the blocked warp form is the same combine
+  reassociated over key blocks. `score` is an ordinary CLOSED operand — operands may read the
+  enclosing iteration var, never state.
+- Sharing is arity / edge reuse: gate⊗up is ONE tuple-valued lift into the product monoid, and the
+  cone an ordinary inline operand read as one edge — the K seam is the node boundary.
 
 A projection has ONE home — the wrapping `Map.fn`, never a node field; every root store is materializer
 glue synthesized from `results` + the graph output (the bare-fold `Write` glue, generalized — no `Write`
@@ -256,11 +274,13 @@ still store the `step` sequence — their in-step QK/PV folds carry the `TILE@dd
 dissolving them into the derived blocked evaluation rides the phase-2 walker (1r) and the QK edge-hoist
 re-keying window (→ step 7); projection `Write`s and `030`'s sliced-partial `Loop`s still ride
 `Map.fn` through the interim `effectful_lambda` constructor (→ 1q, step 4 — delete it there); the
-schedule slices still ride the `Fold` node (→ 1r, step 2); identity keys off the lowered nest (kept
-through migration;
+schedule slices still ride the `Fold` node and the `Monoid` wrapper still wraps `(init, combine)`
+(→ 1r, step 2 — slices to the `TileOp.schedule` dict, the wrapper dissolved into flat `Fold`
+fields); identity keys off the lowered nest (kept through migration;
 the α-invariant term hash is a re-keying-window event).
 
-## Landed trail (compressed history — the vocabularies below are RETIRED)
+## Landed trail (compressed history — the vocabularies below are RETIRED; every step was gated on the
+17-kernel source-digest A/B, byte-identical)
 
 - **1a–1g** built the structural-node tree (typed reduce, nodified contractions, cone as a node tree,
   one composition rule, `Axis.window`, closure predicate, every node a `Stmt`, resolve-as-splice) via a
@@ -268,79 +288,46 @@ the α-invariant term hash is a re-keying-window event).
 - **1h** made both contraction operand edges the same union; the A/B asymmetry moved to schedule gates
   (`isinstance(c.b, Load)` eligibility preconditions) — that stance survives, now via the view's roles.
 - **1j** replaced let-bound sharing with the product-carrier `Contraction` (one `a` edge + `(b, acc)`
-  channels; sharing as arity) and deleted the whole reference apparatus (`bindings`,
-  `validate_bindings`, `ops.resolve`, rename-lockstep, `is_group`/`group_loop`). 17/17 digests
-  identical. The `Contraction` dataclass survives as the 1k VIEW; its `Stmt`-hood is a 1k-iii removal.
-- **1k-i** (landed): `operands` + the first-use splice + `tile` slot on the fold node; walks and the
-  rewrite canonicalizer cover the edges.
-- **1k-ii** (landed): every ROOT contraction is stored as a `role=CONTRACTION` fold —
-  recognition/`_schedule` build the view and store `view.as_fold()`; `_schedule._contraction_node`,
-  `_factor._bind` and `030_split_reduce` re-derive the view from the fold + the placement's trailing
-  grid axes (a split partial's lead axes fall out of its own grid — nothing restamped on the node);
-  `nodify_reduce` drops `tile` when the coop/ILP K partition takes over. 17/17 digests identical;
-  round-trip unit-tested (`tests/compiler/ir/tile`).
-- **1k-iii** (landed — the pure-Fold milestone; phase 1 reopened by the λ-foldMap target, see 1m–1r):
-  - *Flash storage*: QK and PV store as in-step `role=CONTRACTION` folds (PV's `P` cone a capturing
-    operand — legal below an uncuttable step; QK is closed and cuttable in place, but hoisting it to
-    an operand edge would REORDER the lowered nest — the scale `Load` precedes the score's first use
-    — so under zero-migration it stays a step element; edge-hoisting closed steps is deferred to a
-    re-keying window). Consumers derive views: `_twisted_pair` takes `free` and returns the stored
-    folds + the views (stamping targets folds by identity, reads go through views);
-    `030._split_twisted_warp` reads `(m, d)` off `tile.place.free` and hands the split partial a
-    placement whose `free` keeps the true `(m, d)` tail; `place.free` threads through `Ctx.free` so
-    `realize_warp_twist` / `_realize_chain` derive views in the materializer (the score view's
-    stream axis reads through a slice partial's `window.parent`). Verified by the 17-kernel digest
-    A/B plus a stash A/B on the hd512.s2048 split-KV golden — all byte-identical.
-  - *`Contraction` de-Stmt'd*: a plain frozen dataclass (the view); every stored-tree walk is
-    `Fold`/`Map`-only; `ops.lower`/`reduce_loop` keep a view-convenience arm.
-  - *The rename*: the schedule enum became `FoldMove`; `Reduction` → `Fold` and the `partial` field
-    → `step` across the compiler, tests and docs; `Contraction` → `ContractionView` (the name now
-    announces the lifecycle). Digests unaffected (identity keys off the lowered nest).
-- **1l** (landed): `Fold.role` retired — the role is a DERIVED property (TWISTED off the carrier's
-  twist family; CONTRACTION off the bilinear parse of the hoisted `(operands, step)` pair, the
-  `_parse_bilinear` role gate dropped, or the composed split-K step; PLANAR otherwise). The
-  matvec DEMOTION relocated out of recognition: an unbindable contraction just keeps its loads
-  inline (no operand hoist, no role rewrite — `_nodify_contraction` / `_demote_planar` are plain
-  `Fold.from_loop`), derives PLANAR and takes the reduce tiers at schedule dispatch. Verified by a
-  transient stored-vs-derived assert across the suite (only hand-built test folds diverged) and
-  the 17-kernel digest A/B — all byte-identical, `down_proj.m1.t` (the demoted-matvec row)
-  included; the lowered `Loop` annotations reproduce exactly (the loop-level `AxisRole` stays
-  stored — `contraction_loop` marks CONTRACTION, `semiring_binding` scans for it).
-- **1m** (landed): the primitives, in their home modules — `Lambda` beside `Body` (the `Stmt.pure`
-  trait gate, results-defined, α-invariance by canonical renumbering), `Monoid` in `ir/stmt/algebra`
-  (`Monoid.of(op…, names=…)` threading real accumulator names; `component_ops` the derived DEGENERATE
-  predicate; `dtypes` the precision side-tuple; `rename` the rewrite lockstep), plus the executable
-  SPEC (`eval_lambda` / `foldmap_eval` + the agreement and associativity property tests). Pure
-  additions; 17/17 digests identical.
-- **1n** (landed): `Map.body` → `fn: Lambda` — sources bind positionally to params (the params ARE the
-  sources' bound output names, so lowering splices verbatim), `results` replaced the `out` last-def
-  convention (synthesized once, at construction), the `source` compat read retired. INTERIM: the
-  projection body still carries its effects (root `Write`s, `030`'s partial `Loop`s) through the one
-  sanctioned `effectful_lambda` constructor — strict `Lambda` formation the moment a body is pure;
-  deleted at 1q. 17/17 digests identical.
-- **1o** (landed): the plain-fold lift — every DEGENERATE fold stores `lift: Lambda` + `Monoid`;
-  serial step / `Accum` forms (names, dtypes, axes included) / carrier annotation DERIVED (combine at
-  the singleton, each component's Accum after its defining lift stmt); `Fold.from_loop` keeps the λ
-  spelling ONLY on construction-time byte-identity of the derived loop; `as_fold` stores λ-spelled;
-  `_parse_bilinear` reads the lift body. 17/17 digests identical.
-- **1p** (landed for the non-composed twisted shape — online softmax): lift `(x, 1)` + the TRUE
-  `Monoid(init, combine)` over recognition's real state names; the serial step derives through the
-  exp/LSE generator (`exp_merge` — combine at the singleton); the carrier reconstructs structurally
-  (the stored combine must BE the generator's program — asserted at formation) and the
-  state-component ROLES are SHAPE-DERIVED off the singleton (pivot = comp 0, literal-1 = denominator,
-  value name = expectation — the 1p role decision: no annotation). `Monoid.rename` regenerates a
-  generated twisted combine over renamed names. RESIDUAL: flash's kv fold keeps the composed `step` —
-  its in-step QK/PV folds carry `TILE@dd`/`TILE@pj`, so their dissolution into the derived blocked
-  evaluation rides the phase-2 walker (1r) + the QK edge-hoist re-keying window. 17/17 digests
-  identical; the hd512.s2048 split-KV digest matches the pre-refactor base byte-exactly.
+  channels; sharing as arity) and deleted the whole reference apparatus (`bindings`, `ops.resolve`,
+  rename-lockstep, `is_group`/`group_loop`).
+- **1k-i/ii**: `operands` + the first-use splice + the `tile` slot; every ROOT contraction stored as a
+  `role=CONTRACTION` fold, consumers re-deriving the view from the fold + the caller's placement axes
+  (`view.as_fold()` the storage direction; round-trip unit-tested).
+- **1k-iii** (the pure-Fold milestone): flash's QK/PV store as in-step `role=CONTRACTION` folds (PV's
+  `P` cone a capturing operand; QK closed, but hoisting it to an edge would REORDER the lowered nest —
+  deferred to the step-7 window); consumers derive views (`_twisted_pair`; `place.free` threads
+  through `Ctx.free` to the materializer). `Contraction` de-Stmt'd into the view; the renames:
+  `Reduction`→`Fold`, `partial`→`step`, `Contraction`→`ContractionView`. Also verified by a stash A/B
+  on the hd512.s2048 split-KV golden.
+- **1l**: `Fold.role` retired — derived (TWISTED off the twist family; CONTRACTION off the bilinear
+  parse or the composed split-K step; PLANAR otherwise); the matvec DEMOTION relocated out of
+  recognition (an unbindable contraction keeps its loads inline, derives PLANAR, takes the reduce
+  tiers at dispatch — `down_proj.m1.t` verified). The loop-level `AxisRole` stays stored.
+- **1m**: the primitives in their home modules — `Lambda` beside `Body` (the `Stmt.pure` trait gate,
+  α-invariance by canonical renumbering), `Monoid` in `ir/stmt/algebra` (dissolves into flat `Fold`
+  fields at 1r), the executable SPEC (`eval_lambda` / `foldmap_eval` + the agreement and
+  associativity property tests). Pure additions.
+- **1n**: `Map.body` → `fn: Lambda` — positional `sources`, `results` replaced the `out` last-def
+  convention. INTERIM: projection effects ride the one sanctioned `effectful_lambda` constructor —
+  deleted at 1q.
+- **1o**: every DEGENERATE fold stores `lift` + the ⊕ pair; serial step / `Accum` forms / carrier
+  annotation DERIVED (combine at the singleton); `Fold.from_loop` keeps the λ spelling ONLY on
+  construction-time byte-identity of the derived loop; `_parse_bilinear` reads the lift body.
+- **1p** (the non-composed twisted shape — online softmax): lift `(x, 1)` + the true `(init, combine)`
+  over recognition's real state names; the serial step derives through the exp/LSE generator
+  (`exp_merge`); the carrier reconstructs structurally (the stored combine must BE the generator's
+  program — asserted at formation); state-component ROLES are SHAPE-DERIVED off the singleton
+  (pivot = comp 0, literal-1 = denominator, value name = expectation — no annotation). RESIDUAL:
+  flash's kv fold keeps the composed `step`; its dissolution rides the phase-2 walker + the step-7
+  window. The hd512.s2048 split-KV digest matches the pre-refactor base byte-exactly.
 
 ## Execution order (remaining work)
 
 1m / 1n / 1o and 1p's non-composed half are LANDED (see the trail above). The remaining work runs in
 the order below — chosen so every step consumes only what already landed, the codec walker (the
 bottleneck for everything else) lands first, and EVERYTHING re-keying-gated is bundled into ONE
-deliberately scheduled window at the very end, against a phase-5-verified baseline, instead of three
-separate re-key events. Identity keys off the lowered nest until that final step.
+deliberately scheduled window at the very end, against a phase-5-verified baseline, instead of
+scattered re-key events. Identity keys off the lowered nest until that final step.
 
 **Step 1 — Phase 2, the codec core** (detail under *Knob codec* below). Self-contained: no GPU, no
 re-keying risk, and it unblocks 1r, phase 3, and the `TILE@pj` half of the flash residual. Write the
@@ -357,7 +344,19 @@ root-globals). The term becomes pure algebra, IMMUTABLE across the whole schedul
 different map, never a rebuilt tree, and "keys stamp against the pre-placement tree" holds by type —
 which the phase-3 stampers then get for free. Byte-neutral (`lower` already ignores the slices — they
 are metadata); the readers re-key mechanically (`reduce_plan`, `nodify_reduce`, `030`'s plan reads,
-`_stamp_twisted_split`, the materializer); digest-gated as usual.
+`_stamp_twisted_split`, the materializer); digest-gated as usual. 1r also gives worker geometry ONE
+in-memory home, the way the end-state codec will (see *Knob codec*): the warp-form values factor into
+per-site fragment plans (atom / regs / bk) plus a single worker slot on the op; `parse` folds each
+value's embedded `w` token into that slot and FAILS LOUDLY on disagreement — today an inconsistent
+`TILE@dd`/`TILE@pj` pin is silently half-ignored (the mechanism under *Knob codec*, end state) —
+while `spell()` re-emits the legacy embedded-`w` strings byte-identically. Wire format
+untouched; the value-grammar split itself is a step-7 item. 1r also DISSOLVES the `Monoid` wrapper:
+`Fold` stores flat `init` / `combine` / `dtypes` fields (`Monoid.of` → the free componentwise
+constructor, `component_ops`/`degenerate` → free shape-readers on `combine`, `Monoid.rename` → the
+`Fold` rewrite lockstep incl. the twisted-regeneration rule, the S×S→S arity check →
+`Fold.__post_init__`). Byte-neutral by construction — identity keys off the lowered nest, stored
+shapes are free to change — and bundled here so the node's field set changes ONCE (slices out,
+worker slot in, algebra flattened): one digest-gated migration instead of three.
 
 **Step 3 — Phase 3, stamp sites** (detail under *Knob codec* below): the scheduler's fork rows spell
 keys via the resolver, byte-identical to today's spellings on every current shape.
@@ -370,19 +369,21 @@ store — the bare-fold glue generalized to `030`'s partials and flash's layout-
 graph-scope lenient rehydrator) is DELETED — every `Map.fn` constructs strict `Lambda`s. NOTE the
 real depth here: rms/softmax's projection `Write` sits INSIDE the post-fold sweep `Loop` riding
 `Map.fn`, so this is the projection-as-pure-cell restructuring, not a mechanical Write hoist. Fold in
-the params-flattening fix on the way (here, or at phase 2 if it lands first — whichever comes first):
+the params-flattening fix on the way (ideally already at phase 2, which lands first; else here):
 `Map.fn.params` binds one param per SOURCE, but a product fold produces N components (the geglu body
 reads `acc_g` AND `acc_u` from one source), so the second component reaches the lambda as a free
 name — flatten to one param per result component BEFORE the contextual free-names check turns on.
 The identity switch that used to ride 1q moves to step 7 — 1q itself stays byte-neutral,
 digest-gated.
 
-**Step 5 — Phase 4, the placement realizer** (detail under *Placement* below): `PLACE@<child-path> =
-cut | fuse`, fuse-default, cut evidence/pin-only.
+**Step 5 — Phase 4, the placement realizer** (detail under *Placement* below): the two-level
+recursive resolve — ROUTING entries (cuts only) partition the tree, every resulting piece (children
+AND residue) re-recognizes and resolves its own entry — plus the cut realizer; fuse-default = no
+routing entry, cut evidence/pin-only.
 
 **Step 6 — Phase 5, THE consolidated parity gate** (detail under *Placement* below): re-seed the
-retired PLACE goldens by hand-pinned `--ab` sweeps on both cards, eval-golden MATCH across the board,
-twins from tier, TPOT/TTFT within noise.
+retired PLACE goldens as routing + child schedule entries by hand-pinned `--ab` sweeps on both cards,
+eval-golden MATCH across the board, twins from tier, TPOT/TTFT within noise.
 
 **Step 7 — the ONE re-keying window** (after phase 5, so the re-key lands against a verified
 baseline; a re-keying event by definition, never a silent one — it re-keys goldens/DB on both cards,
@@ -390,15 +391,20 @@ so it runs the manual `--ab` re-seed workflow and Dmitry schedules it). Bundled 
 event:
 
 - **The QK edge-hoist + flash's composed step dissolving into the derived blocked evaluation** (the
-  1p residual). Flash's kv fold still stores its step SEQUENCE because the in-step QK/PV
-  `role=CONTRACTION` folds carry their own schedule slices: `TILE@dd` must address the score operand
-  edge (the hoist reorders the lowered nest — hence window-gated) and `TILE@pj` the PV site in the
-  DERIVED blocked evaluation by its axis name (the phase-2 walker enumerates derived-combine sites
-  for twisted folds; the monoid's program stays BELOW the seam lattice — never a cut target). The
-  lift/monoid storage and the shape-derived role decision (pivot / denominator / expectation) landed
-  with 1p; the flash digests including split-KV remain the gate, and the window is the escape for
-  residual spelling drift.
+  1p residual). Flash's kv fold still stores its step SEQUENCE because the in-step QK/PV folds are
+  the sites `TILE@dd`/`TILE@pj` address: `TILE@dd` must address the score operand edge (the hoist
+  reorders the lowered nest — hence window-gated) and `TILE@pj` the PV site in the DERIVED blocked
+  evaluation by its axis name (the phase-2 walker enumerates derived-combine sites for twisted
+  folds; the combine program stays BELOW the seam lattice — never a cut target). The lift/combine
+  storage and the shape-derived role decision (pivot / denominator / expectation) landed with 1p;
+  the flash digests including split-KV remain the gate, and the window is the escape for residual
+  spelling drift.
 - **`Body` order inside lambdas canonicalizes.**
+- **The value-grammar split** — the end-state codec (see *Knob codec*): `WORK` hoists out of the
+  per-site values (`TILE` drops its `w`/`n` worker tokens, `REDUCE` its axis token and coop width,
+  WSPEC folds into `WORK`), and the whole golden/DB/prior corpus re-spells via the mechanical
+  re-speller — semantics-preserving (the same kernels deploy, digest-verified), but every stored
+  knob-row string re-keys, which is exactly why it lives here and nowhere else.
 - **Kernel identity switches** from lowered-nest bytes to the α-invariant term hash of the
   canonically renumbered term.
 
@@ -408,7 +414,8 @@ Grammar: `FAMILY@<node-path>[.<axis>][<n>] = value`.
 
 - **Families keep their names** — `TILE` / `REDUCE` / `STAGE` select which slice decorates the addressed
   fold (the family IS the slice); `PLACE` is the edge property; `RASTER` / `WSPEC` / `LOOPIFY` stay
-  root-global and bare. Full backwards compatibility of the outer key shape.
+  root-global and bare (`WSPEC` folds into `WORK` at the step-7 value-grammar split; until then
+  unchanged). Full backwards compatibility of the outer key shape.
 - **Path** = lowercase node-kind segments from the root. With one fold kind the segments collapse to
   `map` / `fold` and carry little — the **axis** is the real discriminator (the leaf key for
   TILE/REDUCE/STAGE); operand-edge labels (`a` / `b`, and `in.a` / `in.b` in the reserved graph prefix)
@@ -444,7 +451,7 @@ Spellings on the live gemma goldens (~580 entries — all unchanged):
 | --- | --- | --- |
 | matmul | bare `TILE` / `REDUCE` / `STAGE` | the fold's k |
 | norm_linear, mlp_geglu | bare | the product fold's k (one row per node) |
-| flash | `TILE@dd` / `TILE@pj` / bare `REDUCE` / `STAGE` | the QK edge / the PV step fold / the kv stream |
+| flash | `TILE@dd` / `TILE@pj` / bare `REDUCE` / `STAGE` | the QK / PV in-step folds (QK an operand edge after step 7) / the kv stream |
 | rms_norm / bare reduce | bare `REDUCE` | the fold's k |
 | pointwise | bare `TILE` | the map |
 | cone stat (NEW) | `REDUCE@a.fold.k` | the cone's stat fold (the SAME `k` name the outer fold contracts — the path disambiguates; the strongest motivation for path addressing) |
@@ -461,45 +468,127 @@ today's spellings on every current shape (any spelling change is a resolver bug,
 when `--golden` deploys the recorded configs on both cards' golden sets, the pin-only offer audit stays
 green, and `eval` tooling shows unchanged knob rows.
 
+**End state — the factored value grammar (a step-7 window item; phases 2–3 change KEYS only, never
+values).** Today's VALUE spellings denormalize two kernel-global facts into per-site strings: the
+worker inventory (`TILE`'s `w4x1` warp split and the scalar form's `n16x8` thread prefix, `REDUCE`'s
+coop width `b512`) and the axis name (`REDUCE`'s `g2k`). The end-state codec stores each fact once —
+the key names the site and axis, the value holds only site-local facts, the worker inventory is
+spelled exactly once:
+
+```
+WORK                 = <worker inventory>          # kernel-global, exactly one: w4x1 (warps — the
+                                                   # mma tier) / t16x8, t512 (threads — the
+                                                   # scalar/coop tiers); `+p<n>` absorbs WSPEC
+                                                   # (producer/aux warps are inventory too; live
+                                                   # value today: 'p1'). The tier discriminator IS
+                                                   # the worker kind — never a per-TILE spelling.
+TILE@<path>.<axis>   = <atom>/f<FM>x<FN>/k<bk>     # atom (incl. accumulator dtype) + register
+                                                   # repeat + serial-K; NO `w`/`n` worker token
+REDUCE@<path>.<axis> = [g<n>][/coop[-t]][/r<n>]    # the STAGE PIPELINE (ReducePlan, coarse→fine:
+                                                   # GRID split / BLOCK coop / REG), minus the axis
+                                                   # token (in the key) and the coop WIDTH (= WORK);
+                                                   # `-t` = the transposed-coop lane map (today's
+                                                   # `b256t`), empty = serial. Live `g16k/b256t`
+                                                   # composes — the value stays a pipeline, never a
+                                                   # 3-way enum
+STAGE@<path>.<axis>  = d<n>/<transport>/<pattern>  # already site-local — unchanged
+PLACE@<path>         = cut | fuse                  # ROUTING entries only (see *Placement*) — a
+                                                   # cutting entry stores no schedules
+```
+
+Full worked rows (term + schedule per kernel kind, including the cut/routing forms) live in the
+examples table under *The IR (target)*. The step-7 re-speller's mechanical mapping, per stored value:
+
+| Today | End state |
+| --- | --- |
+| `TILE: a:mma…f16_f32/w1x8/f4x1/k4` | `WORK: w1x8` + `TILE@fold.k: mma…f16_f32/f4x1/k4` |
+| `TILE: n16x8/f4x8` (scalar) | `WORK: t16x8` + `TILE@fold.k: f4x8` |
+| flash `TILE@dd: …/w4x1/f1x16/k4` + `TILE@pj: …/w4x1/f1x8/k8` | `WORK: w4x1` once + `TILE@fold.dd: …/f1x16/k4` + `TILE@fold.pj: …/f1x8/k8` |
+| `REDUCE: g2k` | `REDUCE@fold.k: g2` |
+| `REDUCE: b512` (rms coop) | `WORK: t512` + `REDUCE@fold.k: coop` |
+| `REDUCE: g16k/b256t` (split-K + transposed coop) | `WORK: t256` + `REDUCE@fold.k: g16/coop-t` |
+
+Unrepresentable by construction: disagreeing warp geometry across sites (flash's PV `w` token is DEAD
+today — `realize_warp_twist` reads `um`/`fm` off the stream head only, so an inconsistent pin is
+silently half-ignored, the worst failure mode); key/value axis mismatch; scalar/warp tier conflation
+in one kernel. One cross-check stays a loud validation, not a type: a warp atom requires `WORK: w…`.
+And `WORK`'s kernel-global-ness encodes today's TRUE invariant — fragment-resident dataflow between
+composed folds shares the warp map — not a law of nature: a future fused form whose seam goes through
+smem (barrier + re-read) could legally re-partition workers between phases; if that kernel ever
+exists, relax the validation, don't pre-build per-site worker geometry.
+
+This split re-spells every stored `TILE`/`REDUCE` value (~580 golden entries + DB + prior, both
+cards) — by definition a re-keying event, so the wire format ships ONLY inside the step-7 window, via
+a mechanical re-speller with the phase-2 compat test as the tripwire.
+
 ## Placement (phases 4–5)
 
-`PLACE@<child-path> = cut | fuse` on every in-tree parent↔child seam.
+`PLACE@<child-path> = cut | fuse` on every in-tree parent↔child seam — but resolution and storage are
+TWO-LEVEL and RECURSIVE, never one compound row:
 
-- **`cut`**: split the tree at the seam — the child subtree becomes its own graph node (re-entering
-  recognition as a fresh tree), the seam value materializes to a buffer (f32 for reduce seams,
-  mirroring the split-reduce workspace rule), the parent consumes a plain `Load` where the child was
-  (which is why every edge must admit `Load`; the `Map.sources` widening is 1i, deferred to the
-  realizer's own commit). An in-tree cut child always has exactly ONE consumer (inline operands are
-  single-consumer by tree ownership; the shared A is one edge), so the realizer needs no MIMO case —
-  #433 stays a graph-level foundation.
-- **`fuse` is the default on every seam; `cut` is evidence/pin-only.** The recognized tree IS the fused
-  form, so the default means "no rewrite" — the deployment-safety invariant.
+- **Two entry roles in the goldens.** A ROUTING entry stores the cut set only — NO schedules. A
+  SCHEDULE entry stores ONE kernel's singular schedule (one `WORK` + its site slices under the
+  end-state codec). The golden LOADER enforces the split: an entry mixing `PLACE` keys with schedule
+  keys is rejected at load, not silently accepted. PLACE is wiped on this branch and the retired keys
+  survive only as comments, so the factored format has ZERO migration cost — it is phase 4's design,
+  not a later re-format.
+- **Recursive resolution.** `(kind, shape)` → entry; a routing entry applies its cuts, then EVERY
+  resulting piece (the cut children AND the residue) re-recognizes as a fresh root and resolves its
+  own `(kind, shape)` through the full deploy hierarchy (goldens → DB/reservoir → prior), recursing —
+  a piece's entry may itself cut. Terminates: trees strictly shrink. NO routing entry = fuse = the
+  recognized form — the deployment-safety invariant holds by absence. A cutting entry stores no
+  schedules at all.
+- **Residue evidence reuse is the payoff.** The cone cut's pieces — stat kernel, scale kernel, plain
+  matmul — are all EXISTING golden kinds: the cut arm inherits their whole evidence corpus, and
+  re-tuning the matmul golden automatically improves every parent that cuts into it. The
+  dual-spelling machinery is DELETED: a child decision has exactly ONE spelling, on its own tree.
+- **`cut` mechanics**: split the tree at the seam — the child subtree becomes its own graph node
+  (re-entering recognition as a fresh tree), the seam value materializes to a buffer (f32 for reduce
+  seams, mirroring the split-reduce workspace rule), the parent consumes a plain `Load` where the
+  child was (which is why every edge must admit `Load`; the `Map.sources` widening is 1i, deferred to
+  the realizer's own commit). An in-tree cut child always has exactly ONE consumer (inline operands
+  are single-consumer by tree ownership; the shared A is one edge), so the realizer needs no MIMO
+  case — #433 stays a graph-level foundation.
+- **`fuse` is the default on every seam; `cut` is evidence/pin-only.** The recognized tree IS the
+  fused form, so the default means "no rewrite" — spelled as the ABSENCE of a routing entry.
 - There are exactly two seam shapes: a `Map` projection seam and a fold operand edge — and every edge on
   the cut lattice is closed by construction (edge-iff-closed), so seam legality is structural. The
   realizer should know NOTHING about which seam it is — seam-specific knowledge must fall out of the
   node kinds.
-- Cut composes with the split rewrite (split first, then cuts — cuts operate on post-split trees whose
-  keys are the pre-placement spellings). The cone cut's payoff is the stat kernel + scale kernel +
-  plain matmul; at arity N the cut lands on the N-component `Load`-A fold — per-component separation is
-  deliberately forfeited at tile level (de-fusing components is loop IR's decision; #389 measured null).
-- Old → new: flash's `PLACE: fuse` → `PLACE@map = fuse`; `PLACE@cone: cut` → the `a`-edge cut. NEW,
-  previously inexpressible: the 3-kernel split reduce (`REDUCE@…k = g<n>k` + `PLACE@map = cut`).
-- **Honest evidence accounting**: cut-vs-fuse is judged on the parent row (N-kernel total vs the fused
-  kernel), each child's schedule evidence lives on its own child-tree anchor (shape-transferable), and
-  both spellings of a child decision resolve to the same evidence.
+- **Cuts resolve first; splits are per-kernel schedule.** A cut seam is a node output whose shape is
+  a recognition fact — never a function of any schedule decision — which is what makes the two-level
+  order sound. The `g<n>` split stays a schedule decision on whichever piece retains the reduce (its
+  partials / synthesized finalize are post-rewrite artifacts inside that kernel's own compilation,
+  never key targets). The cone cut's payoff is the stat kernel + scale kernel + plain matmul; at
+  arity N the cut lands on the N-component `Load`-A fold — per-component separation is deliberately
+  forfeited at tile level (de-fusing components is loop IR's decision; #389 measured null).
+- Old → new: flash's `PLACE: fuse` → no routing entry; `PLACE@cone: cut` → a routing entry with the
+  `a`-edge cut. The 3-kernel split reduce — previously inexpressible — needs no compound row either:
+  `PLACE@map = cut` routes, and the cut-out stat kernel's OWN entry carries `REDUCE: g<n>` + its
+  schedule.
+- **Honest evidence accounting**: cut-vs-fuse is judged on the routing entry's recorded total
+  (N-kernel pipeline vs the fused kernel) — now a claim about a CONFIGURATION of other entries at
+  seed time, so the children's resolved schedules are recorded as provenance comments and the
+  eval-golden audit is what catches drift when a child golden re-tunes.
+- **Context-blindness is accepted deliberately.** A piece's own golden was tuned standalone (cold
+  gmem inputs); post-cut its input may be L2-hot, so the standalone optimum can be mildly wrong in
+  context. Safe by construction — a handicapped cut arm loses the A/B to fuse rather than deploying
+  badly; a pin-form per-child override in the routing entry is the escape, built only if phase 5
+  measures a real case, never speculatively.
 - **Graph-level placement stays out of scope** (old `fin=fuse` / `stat=sink` crossed graph edges); the
   codec merely reserves its grammar. If the stat-tap plan lands later, its seam joins this namespace but
   keeps `cut` as its default (measured anti-wins) — the one exception to fuse-default.
 
-**Phase 4 done when**: the cone cut reproduces the recorded pair economics (~3.8 µs pair vs 6.0 µs fused
-on the 5090 per the YAML comments); rms_norm deploys unchanged under default fuse; the 3-kernel
-split-reduce form compiles and passes accuracy.
+**Phase 4 done when**: the recursive routing resolve is implemented; the cone cut reproduces the
+recorded pair economics (~3.8 µs pair vs 6.0 µs fused on the 5090 per the YAML comments) with the
+pieces resolving EXISTING golden entries; rms_norm deploys unchanged under default fuse (no routing
+entry); the 3-kernel split-reduce form compiles and passes accuracy.
 
 **Phase 5** carries THE consolidated parity gate for the whole refactor: re-seed the retired PLACE
-goldens by hand-pinned `--ab` sweeps (the manual method — the tuner is not used for golden work; both
-cards; pre-wipe µs are not evidence), then `emmy eval golden --in-model` MATCH across the board,
-pin-only offer audit green, serving twins deploy from tier, decode TPOT / TTFT within noise of the
-YAML-comment baselines.
+goldens as ROUTING + child schedule entries (never compound rows) by hand-pinned `--ab` sweeps (the
+manual method — the tuner is not used for golden work; both cards; pre-wipe µs are not evidence),
+then `emmy eval golden --in-model` MATCH across the board, pin-only offer audit green, serving twins
+deploy from tier, decode TPOT / TTFT within noise of the YAML-comment baselines.
 
 ## Completeness (proof sketch)
 
@@ -511,12 +600,47 @@ YAML-comment baselines.
   inserts a gmem round-trip between memory-bound stmts and never changes schedule class; anything that
   ever mattered is re-association (`Map ∘ Map`) — a change of algebra, not codec. Every cut the old
   system deployed lands on a node seam in the new trees.
-- **The fork space is a finite, generically enumerable product**: Π schedule-family vocab per
-  (path, node, axis) site × Π {fuse, cut} per seam (legality structural — carrier materializability,
-  f32 workspace, no graph-output crossing) × root-globals, with the reserved graph-level triple also
+- **The fork space is a finite, generically enumerable product — and it FACTORIZES.** Level 1:
+  Π {fuse, cut} per seam (legality structural — state materializability, f32 workspace, no
+  graph-output crossing). Level 2, per resulting kernel: Π schedule-family vocab per
+  (path, node, axis) site × root-globals — searched INDEPENDENTLY per piece, so a piece's evidence is
+  shared across every parent and shape that cuts to it; the reserved graph-level triple is also
   finite. The site registry is DERIVED from one walker; only per-family vocabularies and legality gates
-  stay hand-written. Enumerable ≠ cheap: cut sets compose (2^seams), so enumeration stays prior-ranked,
+  stay hand-written. Enumerable ≠ cheap: cut sets compose (2^seams), so level 1 stays prior-ranked,
   and evidence-only-`cut` keeps the space unpaid-for cold.
+
+## Retirement ledger (everything still standing that is GONE at end state)
+
+The deletion contract, audited against the live tree (2026-07-29). When a step lands, grep for its
+retirees — a stated deletion that still answers a grep is not done (the refactor-invariant rule).
+The already-dead (`020`/`025`/`032` + `_sink.py`, `TileOp.bindings` + `ops.resolve`, `Fold.role`,
+`Map.body`/`out`, `_best_fork`) live in the *Landed trail*; this table is only what remains. The
+placement dual-spelling apparatus is cancelled before construction (factored golden storage) —
+nothing to delete.
+
+| Retiree | Home | Replaced by | Dies at |
+| --- | --- | --- | --- |
+| `Fold.tile` / `Fold.reduce` / `Fold.stage` node fields + the node-slice stampers (`_with_reduce`, `_with_twisted_stage`, the `tile=` replaces in the option builders) | `ir/tile/ir.py`, `_schedule.py` | `TileOp.schedule` dict keyed by the codec | 1r (step 2) |
+| `Monoid` (the class) | `ir/stmt/algebra` | flat `Fold.init`/`combine`/`dtypes`; `M(op…)` free constructor; `component_ops` free reader; rename → the `Fold` lockstep; arity check → `Fold.__post_init__` | 1r (step 2) |
+| `TilePlan.units` + the `w…`/`n…` worker tokens as per-site facts | `ir/schedule.py` | the ONE `Workers` slot (`parse` folds tokens in, fails loudly on disagreement) | 1r in-memory; step 7 wire |
+| `effectful_lambda` + the graph-scope lenient rehydrator | `ir/stmt/body`, `graph.py` | strict `Lambda` formation; `results` + materializer glue synthesize every root store | 1q (step 4) |
+| `captured_values` as the attachment/legality decider | `ir/tile/ir.py` | edge-iff-closed by construction — DEMOTES to a validation assert, not deleted | 1q (step 4) |
+| the axis-suffix knob codec: `knob.resolve_axis` / `axis_of`, `pin_key_matches`' axis arm, the bare-collapse in `tuning_knob_items`, `_schedule._at` | `pipeline/knob.py`, `_schedule.py` | the phase-2 tree-path resolver — ONE walker, short-path-canonical, idempotent over the sugar forms | steps 1–3 |
+| flash's special-cased pin plumbing: the all-or-nothing `TILE@dd`+`TILE@pj` contract (`greedy.py`), the keyed-`TILE` golden branch (`golden.py`), `_narrow_flash_forms`' keyed-only arm + the masked-flash bare-`TILE` fallback (`_schedule.py`) | `search/`, `_schedule.py` | generic codec keys + the 1r schedule dict (a fork row's key set IS its identity) | step 3; remnants step 7 |
+| `Fold.step` (the composed step sequence) + `_composes` + the step-splice arm of `Fold.loop` | `ir/tile/ir.py`, `_schedule.py` | the derived blocked evaluation of `combine`; QK hoists to an operand edge | step 7 |
+| `Carrier` / `Twist` / `State` + every reader (`_coop_carrier`, `_twisted_pair`'s carrier reads, the kernel-realizer carrier plumbing, the `graph.py` ser/de arms) | `ir/stmt/algebra` + tile/kernel lowering | structural derivation off the stored `combine` (landed 1p, extended to the composed forms) | step 7 |
+| `_carrier.py` — the Carrier-assembly layer (`exp_family_twist`, the spec-`Twist` path); `projection_distributes` MOVES to `030`'s home, not deleted | `lowering/tile/_carrier.py` | recognition builds `(init, combine)` directly via the `ir/stmt/carrier` generators | step 7 |
+| `ir/stmt/carrier.py`'s Carrier-facing surface (`id_accums`/`id_merge`/`id_combine_states`' carrier arms, `Channel.term`/`lift`/`dtype`) — the exp-family generators (`exp_merge`, `exp_combine_states`) + `Channel` SURVIVE as twisted-combine construction | `ir/stmt/carrier.py` | the stored `combine` + singleton specialization | step 7 |
+| the `from_loop` byte-identity FALLBACK (a fold failing the gate keeps the dissolved spelling) + the `_lambda_of_*` reader tolerance | `ir/tile/ir.py` | every recognized fold λ-spelled by construction; the gate hardens to an assert | step 7 |
+| `WSPEC` as a root knob family; the denormalized value spellings (`REDUCE`'s axis token `g2k` + coop width `b512`, `TILE`'s worker tokens) | goldens/DB/prior, `knob.py` codecs | `WORK` + site-local values (the end-state grammar; mechanical re-speller) | step 7 |
+| lowered-nest kernel identity (`structural_key` lowers first) | `ir/tile/ops.py` | the α-invariant hash of the canonically renumbered term | step 7 |
+
+`_schedule.py` (2.3k lines) splits across three fates, which is the cleanup the codec buys: the
+candidate vocabularies and option/row builders (`_stage_candidates`, `_reduce_candidates`,
+`_warp_option`, `_splitk_option`, …) SURVIVE as the per-family vocab the walker-derived site
+registry consumes; the key-spelling / pin-matching / flash-narrowing layer DIES into the resolver
+(steps 1–3); the node-slice stamping re-keys to the `TileOp.schedule` dict (1r). Anything in it
+still spelling a knob key by hand after phase 3 is a bug.
 
 ## Risks
 
@@ -537,10 +661,15 @@ YAML-comment baselines.
   rather than patching goldens forward.
 - Stored-short-key ambiguity from future structural changes — the resolver fails loudly by design; the
   phase-2 compat test is the tripwire. Never "fix" it by silently re-keying evidence.
+- **The factored placement storage couples entries**: a routing entry's recorded total is only
+  reproducible against the child goldens as of seed time — a child re-tune shifts it silently until
+  the eval-golden audit runs. The provenance comments + the phase-5 audit are the guard; never "fix"
+  drift by re-benching only one side of the cut A/B.
 - Dump/kname churn: kernel names derive from realized ops; verify the per-kernel torch-reproducer
   slicing still attributes the cone's ops correctly from the operand edge.
 
 ## Cleanup
 
 Docs at the end of each landed phase: the pipeline ARCHITECTURE (knob/fork system), the tile-lowering +
-kernel ARCHITECTURE files, and CLAUDE.md's tile-lowering blurb. Delete this plan when phase 5 lands.
+kernel ARCHITECTURE files, and CLAUDE.md's tile-lowering blurb. Delete this plan when step 7 (the
+re-keying window) lands — it is the last item, after phase 5.

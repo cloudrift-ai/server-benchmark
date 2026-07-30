@@ -175,7 +175,9 @@ def test_gen_runner_gemma4_heterogeneous_stitch():
 
 @pytest.mark.xfail(
     strict=False,
-    reason="main #438's offline-weights refit steers this tiny fp32 shape onto a TMA-staged pick with run-to-run last-ulp instability (reproducible within one runner on pristine origin/main) — the bit-parity contract holds again once the staging race is fixed; see the step-7 merge notes",
+    reason="main #438's offline-weights refit steers this tiny fp32 shape onto a TMA-staged pick with "
+    "run-to-run last-ulp instability (reproducible within one runner on pristine origin/main) — the "
+    "bit-parity contract holds again once the staging race is fixed; see the step-7 merge notes",
 )
 def test_gen_runner_device_path_matches_host():
     """The device-resident decode path (``run_device`` / ``*_device``) must match the host numpy

@@ -33,10 +33,11 @@ logger = logging.getLogger(__name__)
 class _Program:
     """One compiled dynamic-``num_tokens`` split subgraph, run via the host ``rebind`` path."""
 
-    def __init__(self, program, input_names, output_names):
+    def __init__(self, program, input_names, output_names, const_bytes=0):
         self.program = program
         self.input_names = input_names
         self.output_names = output_names
+        self.const_bytes = const_bytes  # deduped bound-constant footprint — the boot roofline audit's floor input
 
     def run(self, arrays):
         """arrays: numpy arrays aligned to ``input_names`` (each ``[T, …]``). Returns the
@@ -219,7 +220,10 @@ def _compile_split(wrapper, example_args, argnames, np_dtype, dev_consts=None, a
     with gpu_lock():
         const_feed = _bind_plan_constants(plan, sources, dev_consts)
         program = CompiledProgram.build_from_plan(plan, {**const_feed, **feed}, arena=arena)
-    return _Program(program, list(plan.inputs), list(plan.outputs)), plan
+    # Deduped by storage: a weight bound under two nids (e.g. gemma's K=V projection reuse) is
+    # one physical read stream, and the shared-upload cache aliases arrays across nids.
+    const_bytes = sum(a.nbytes for a in {id(a): a for a in const_feed.values()}.values())
+    return _Program(program, list(plan.inputs), list(plan.outputs), const_bytes=const_bytes), plan
 
 
 class EmmyGenRunner:
@@ -667,6 +671,30 @@ class EmmyGenRunner:
             # small-batch decode (T <= bucket). Allocating here puts the device
             # residents inside the profiled footprint.
             runner._ensure_device()
+        # Boot roofline audit over the STATIC twins (symbolic programs sit at capacity shape at
+        # boot — wrong width to time). One layer per attention class: homogeneous models audit
+        # layer 0 only; gemma-4 adds its first global layer (different head_dim → different
+        # programs). Advisory only — audit_boot_programs never raises.
+        from emmy.serving.roofline import audit_boot_programs
+
+        audit_layers = [0]
+        hetero = next((i for i in range(1, len(attn_meta)) if attn_meta[i] != attn_meta[0]), None)
+        if hetero is not None:
+            audit_layers.append(hetero)
+        named = [
+            (f"L{li}.{role}.{tag}", plist[li])
+            for li in audit_layers
+            for tag, role, plist in (
+                (f"decode.m{decode_bucket}", "pre", runner._pre_decode),
+                (f"decode.m{decode_bucket}", "post", runner._post_decode),
+                ("decode.m1", "pre", runner._pre_m1),
+                ("decode.m1", "post", runner._post_m1),
+                (f"chunk.m{prefill_bucket}", "pre", runner._pre_prefill),
+                (f"chunk.m{prefill_bucket}", "post", runner._post_prefill),
+            )
+            if plist is not None and plist[li] is not None
+        ]
+        audit_boot_programs(named)
         return runner
 
     def embed(self, input_ids):

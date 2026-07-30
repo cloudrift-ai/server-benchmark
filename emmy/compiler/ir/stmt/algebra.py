@@ -285,10 +285,14 @@ class Monoid:
         return len(self.init)
 
     @classmethod
-    def of(cls, *ops, dtypes: tuple = ()) -> Monoid:
+    def of(cls, *ops, names: tuple[str, ...] | None = None, dtypes: tuple = ()) -> Monoid:
         """The componentwise convenience constructor — the ``M(op…)`` spelling: one independent
-        self-fold ⊕ᵢ per state component, seeds the op identities. The ONE construction site of
-        a plain fold's combine program."""
+        self-fold ⊕ᵢ per state component (``sᵢ = ⊕ᵢ(sᵢ, sᵢ′)`` — the reassignment shape
+        ``id_combine_states`` spells), seeds the op identities. The ONE construction site of a
+        plain fold's combine program. ``names`` are the state component names — recognition
+        threads its REAL accumulator names through here (the byte-identity requirement: the
+        derived serial step's ``Accum``\\ s carry these names); the generic ``s{i}`` default
+        serves nameless algebra (the spec/property tests)."""
         impls = tuple(ElementwiseImpl(o) if isinstance(o, str) else o for o in ops)
         idents = []
         for op in impls:
@@ -296,11 +300,31 @@ class Monoid:
                 raise ValueError(f"Monoid.of: op {op.name!r} has no identity — not a monoid ⊕")
             idents.append(op.identity)
         n = len(impls)
-        s = tuple(f"s{i}" for i in range(n))
-        o = tuple(f"s{i}__o" for i in range(n))
-        r = tuple(f"s{i}__c" for i in range(n))
-        body = Body(tuple(Assign(name=r[i], op=impls[i], args=(s[i], o[i])) for i in range(n)))
-        return cls(init=tuple(idents), combine=Lambda(params=s + o, body=body, results=r), dtypes=dtypes)
+        s = tuple(names) if names is not None else tuple(f"s{i}" for i in range(n))
+        if len(s) != n:
+            raise ValueError(f"Monoid.of: {n} ops but {len(s)} state names")
+        o = tuple(f"{nm}__o" for nm in s)
+        body = Body(tuple(Assign(name=s[i], op=impls[i], args=(s[i], o[i])) for i in range(n)))
+        return cls(init=tuple(idents), combine=Lambda(params=s + o, body=body, results=s), dtypes=dtypes)
+
+    def rename(self, rename_ssa) -> Monoid:
+        """A copy with every state/temp name in ``combine`` mapped through ``rename_ssa`` — the
+        lockstep the ``Fold`` rewrite applies so the stored algebra tracks its fold's SSA renames
+        (the same contract as :meth:`Carrier.rename`). A second-operand ``<n>__o`` spelling
+        follows its component name so the S × S shape survives canonical renumbering."""
+
+        def rn(name: str) -> str:
+            if name.endswith("__o"):
+                return f"{rename_ssa(name[:-3])}__o"
+            return rename_ssa(name)
+
+        comb = self.combine
+        lam = Lambda(
+            params=tuple(rn(p) for p in comb.params),
+            body=Body(tuple(st.rewrite(rn) for st in comb.body)),
+            results=tuple(rn(r) if isinstance(r, str) else r for r in comb.results),
+        )
+        return Monoid(init=self.init, combine=lam, dtypes=self.dtypes)
 
     def component_ops(self) -> tuple[ElementwiseImpl, ...] | None:
         """The DEGENERATE shape test on ``combine`` — every result ``sᵢ″ = ⊕ᵢ(sᵢ, sᵢ′)``,

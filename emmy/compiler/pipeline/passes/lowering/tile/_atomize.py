@@ -286,7 +286,7 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis] | None:
         return None  # a stat-free cone is the demoted option's shape, not ours
     # The statistic prologue must be row-local: its gmem reads may index (m, its own reduce axis)
     # but never the column / contraction axes.
-    if _idx_vars_deep([*red.step, *stat_epi]) & {n_ax.name, k_ax.name}:
+    if _idx_vars_deep([*red.spliced_step(), *stat_epi]) & {n_ax.name, k_ax.name}:
         return None
     # The combine tail: its reads must be the fold accumulators, its own defs, or STAT-FREE prefix
     # defs (a k/n-invariant value like SiLU's ``1.0`` scalar — its backward cone within the prefix

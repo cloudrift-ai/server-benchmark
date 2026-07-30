@@ -461,6 +461,7 @@ def _option(tile, place, spec: str, name: str, knobs: dict, reduce_key: str | No
         sched.put("REDUCE", fold, plan)
     if plan.coop > 1:
         sched.put("STAGE", fold, _row_stage(tile, place))
+    seal_workers(out)  # the coop width IS this row's worker inventory (WORK: t<n>)
     return out
 
 

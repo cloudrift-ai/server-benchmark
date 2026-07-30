@@ -120,13 +120,35 @@ def projection_tail(tile) -> list[Stmt]:
 
 
 def seal_workers(tile) -> None:
-    """Derive the kernel's ONE worker inventory (``TileOp.work``) from its resolved ``TILE``
-    slices — the 1r factoring of the per-site ``w``/``n`` worker tokens into a single slot,
-    FAILING LOUDLY on cross-site disagreement (one kernel, one inventory). Called by every
-    option builder / split realizer after the schedule dict is assembled."""
-    from emmy.compiler.ir.schedule import derive_workers  # noqa: PLC0415
+    """Derive and STAMP the kernel's ONE worker inventory (``TileOp.work`` + the ``WORK`` knob —
+    the step-7 value-grammar family): the per-site ``w``/``n`` worker tokens factored out of the
+    resolved ``TILE`` slices (1r), the cooperative width off the ``REDUCE`` slices (``b512`` →
+    ``t512``), and the producer band off the resolved :class:`WarpSpec` (the ``WSPEC`` absorb —
+    ``+p<n>``). FAILING LOUDLY on cross-site disagreement (one kernel, one inventory). A 1-thread
+    inventory (a bare register strip) keeps ``None`` — the per-cell forms' launch geometry stays
+    derived. Called by every option builder / split realizer after the schedule dict is
+    assembled."""
+    from dataclasses import replace  # noqa: PLC0415
 
-    tile.work = derive_workers(v for k, v in tile.schedule.items() if k.split("@", 1)[0] == "TILE")
+    from emmy.compiler.ir.schedule import Workers, derive_workers  # noqa: PLC0415
+
+    work = derive_workers(v for k, v in tile.schedule.items() if k.split("@", 1)[0] == "TILE")
+    if work is not None and work.kind == "thread" and work.count == 1:
+        work = None  # a bare register strip — one worker per cell, geometry stays derived
+    coop = max(
+        (v.coop for k, v in tile.schedule.items() if k.split("@", 1)[0] == "REDUCE" and hasattr(v, "coop")),
+        default=1,
+    )
+    if coop > 1:
+        if work is not None and work.count != coop:
+            raise ValueError(f"disagreeing worker geometry: TILE workers {work.spell()} vs coop width {coop} — one kernel, one inventory")
+        if work is None:
+            work = Workers(kind="thread", units=(coop, 1))
+    ws = getattr(tile, "workers", None)
+    if work is not None and ws is not None and getattr(ws, "aux_warps", 0):
+        work = replace(work, producer=ws.aux_warps)
+    tile.work = work
+    tile.knobs["WORK"] = work.spell() if work is not None else ""
 
 
 def reduce_loop(op):

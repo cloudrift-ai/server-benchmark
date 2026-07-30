@@ -113,6 +113,19 @@ WSPEC = Knob(
 )
 
 
+# The kernel-global worker inventory (the step-7 value-grammar family): the w/n worker tokens
+# factored out of the per-site TILE values, the coop width out of REDUCE, the WSPEC producer band
+# absorbed as ``+p<n>``. Stamped by ``ops.seal_workers`` on every assembled option row; ``off=""``
+# = the per-cell / pure-reduce forms' derived launch geometry.
+WORK = Knob(
+    "WORK",
+    KnobType.STR,
+    help="Kernel-global worker inventory (w<M>x<N>[+p<np>] warps / t<N>[x<M>] threads; empty=derived per-cell geometry). "
+    "The step-7 value-grammar family — TILE/REDUCE values become site-local; the tier discriminator IS the worker kind.",
+    off="",
+)
+
+
 def wspec_moves() -> list[str]:
     """The warp-specialization ``WSPEC`` codec candidates — uniform ``""`` first (the conservative
     option-0), then the producer-band splits. Per-row legality (a warp tile over a resolved TMA

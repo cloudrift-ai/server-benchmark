@@ -1072,11 +1072,14 @@ bilinear parse). Bare-family sugar resolves to the PRIMARY (root-most schedule-b
 norm_linear/geglu still means the contraction's K fold; `WSPEC` / `RASTER` stay root-global (bare). The reserved
 graph-level placement grammar (`in.<operand>` path prefix, leading-`=` value pins) is rejected, never reused. The
 golden compat tripwire (`tests/.../test_golden_key_compat.py`) resolves every stored knob dict against its kind's
-tree and proves every spelling already canonical — the zero-migration invariant; the one documented exception is
-the dynamic-attention bare `TILE` (its PV plan, matched any-of by the golden layer). Readers still go through
-`family_value(knobs, family)` so old axis-suffixed evidence rows and canonical rows parse / featurize /
-golden-match identically (the display collapse in `tuning_knob_items` now serves only that stored-evidence
-compat and never collapses onto a bare key already present).
+tree and proves every spelling already canonical — the zero-migration invariant for the hand-curated goldens; the
+one documented exception is
+the dynamic-attention bare `TILE` (its PV plan, matched any-of by the golden layer). The tune DB / reservoir /
+online prior are REGENERATED after the re-key, never migrated — no reader special-cases pre-phase-3 axis-suffixed
+spellings, and `tuning_knob_items` renders keys AS STORED (the old `@<axis>`→bare display collapse is gone). What
+remains is the live bare-golden contract: `family_value(knobs, family)` / `pin_key_matches`' bare↔explicit any-of
+is how a stored bare `REDUCE` matches a row that also carries the cone stat's explicit `REDUCE@<axis>` key; it
+retires only when the step-7 re-spell rewrites the golden corpus itself.
 
 ### Odds and ends
 

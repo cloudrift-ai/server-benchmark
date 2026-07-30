@@ -451,12 +451,6 @@ _FAMILY_ORDER = ("TILE@", "REDUCE@", "STAGE@")
 KNOB_ORDER = ("TILE", "REDUCE", "STAGE", "WSPEC")
 _KNOB_RANK = {k: i for i, k in enumerate(KNOB_ORDER)}
 
-# Schedule codec families whose ``@<axis>`` display collapses back to bare when the kernel has a
-# single eligible axis (so one-node tables read as ``TILE=…`` / ``REDUCE=…`` / ``STAGE=…``, exactly as
-# before the axis-naming, matching the bare golden YAML). All three per-node schedule codecs collapse —
-# the schedule reduce partition is the one reduce family, so ``REDUCE@<axis>`` bares out like the rest.
-_COLLAPSE_FAMILIES = ("TILE", "REDUCE", "STAGE")
-
 # The greedy-fillable schedule codec families a golden RECORDING must pin explicitly. An entry that
 # omits one leaves that family to the planner's fill at replay time, and the fill drifts as the
 # planner evolves — the recurring unpinned-``REDUCE`` phantom-regression class (a recorded un-split
@@ -498,13 +492,10 @@ def tuning_knob_items(knobs: dict) -> list[tuple[str, str]]:
     ``TILE`` output-fragment knob is one column for both the scalar and warp tiers
     (the value self-describes), so there are no tier-foreign OFF knobs to hide.
 
-    A per-node schedule codec keyed ``@<axis>`` (``TILE@d`` / ``STAGE@d``) **collapses back to bare**
-    (``TILE`` / ``STAGE``) when the kernel has a single eligible axis for that family (one such key),
-    so a one-node table reads exactly as it did before axis-naming; a multi-node kernel (flash) keeps
-    the ``@<axis>`` suffix to disambiguate."""
-    from collections import Counter  # noqa: PLC0415
-
-    fam_counts = Counter(family_of(k) for k in knobs if "@" in k and family_of(k) in _COLLAPSE_FAMILIES)
+    Keys render AS STORED — since phase 3 the stampers spell the canonical codec key (bare for the
+    primary node, ``TILE@dd``-style where the tree needs it), so the view needs no bare-collapse:
+    the stamped row IS the stored/golden spelling. (The old ``@<axis>``→bare display collapse died
+    with the axis-suffix codec; pre-phase-3 evidence is regenerated, not migrated.)"""
     rendered: list[tuple[str, str]] = []
     for k, v in knobs.items():
         if k.startswith(STRUCT_PREFIX) or k.startswith(CTX_PREFIX):
@@ -514,12 +505,7 @@ def tuning_knob_items(knobs: dict) -> list[tuple[str, str]]:
             continue
         if knob is None and isinstance(v, bool):
             continue
-        fam = family_of(k)
-        # Never collapse onto a bare same-family key already present (a phase-3 canonical row may
-        # carry bare ``REDUCE`` for the primary fold beside an explicit ``REDUCE@<axis>`` for a
-        # secondary one — collapsing the latter would collide two decisions onto one column).
-        disp = fam if ("@" in k and fam in _COLLAPSE_FAMILIES and fam_counts[fam] == 1 and fam not in knobs) else k
-        rendered.append((disp, str(v)))
+        rendered.append((k, str(v)))
     return sorted(rendered, key=lambda kv: knob_sort_key(kv[0]))
 
 

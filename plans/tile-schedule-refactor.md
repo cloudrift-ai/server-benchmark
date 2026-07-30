@@ -266,17 +266,19 @@ inside a term). The schedule slices live in `TileOp.schedule`, keyed by tree pat
 pure algebra, immutable across the whole schedule search — and a sliced axis's window is the one
 `Axis.window` vocabulary.
 
-**Landed today vs target** (after 1m–1p): the non-composed folds — every degenerate fold and online
-softmax — store the λ spelling (`lift` + `Monoid`, carrier/step/Accums DERIVED, byte-identity gated at
-construction); `Map` stores `fn: Lambda` + positional `sources` (`results` replaced `out`; the `source`
-compat read retired). The remaining deltas: COMPOSED folds (split-K's outer reduce, flash's kv stream)
-still store the `step` sequence — their in-step QK/PV folds carry the `TILE@dd`/`TILE@pj` slices, so
-dissolving them into the derived blocked evaluation rides the phase-2 walker (1r) and the QK edge-hoist
+**Landed today vs target** (after 1m–1p + steps 1–3): the non-composed folds — every degenerate fold
+and online softmax — store the λ spelling (`lift` + flat `(init, combine)`, carrier/step/Accums
+DERIVED, byte-identity gated at construction; the `Monoid` wrapper dissolved at 1r); `Map` stores
+`fn: Lambda` + positional `sources`; the schedule slices live in `TileOp.schedule` keyed by the codec
+(the term IMMUTABLE across the search) with the worker inventory sealed into `TileOp.work`; the
+stampers spell canonical keys via the resolver. The remaining deltas: COMPOSED folds (split-K's outer
+reduce, flash's kv stream)
+still store the `step` sequence — their in-step QK/PV folds are the `TILE@dd`/`TILE@pj` sites, so
+dissolving them into the derived blocked evaluation rides the QK edge-hoist
 re-keying window (→ step 7); projection `Write`s and `030`'s sliced-partial `Loop`s still ride
-`Map.fn` through the interim `effectful_lambda` constructor (→ 1q, step 4 — delete it there); the
-schedule slices still ride the `Fold` node and the `Monoid` wrapper still wraps `(init, combine)`
-(→ 1r, step 2 — slices to the `TileOp.schedule` dict, the wrapper dissolved into flat `Fold`
-fields); identity keys off the lowered nest (kept through migration;
+`Map.fn` through the interim `effectful_lambda` constructor (→ 1q, step 4 — delete it there);
+`TilePlan.units` remains a (validated, `work`-agreeing) value-object field until the step-7 wire
+split; identity keys off the lowered nest (kept through migration;
 the α-invariant term hash is a re-keying-window event).
 
 ## Landed trail (compressed history — the vocabularies below are RETIRED; every step was gated on the
@@ -343,53 +345,45 @@ the α-invariant term hash is a re-keying-window event).
   the stored/golden spellings — bare on single-primary trees, `TILE@dd`/`TILE@pj` + bare
   `REDUCE`/`STAGE` on flash, the cone stat's explicit `REDUCE@<stat axis>` shared across the
   merged prologue fork (`prologue_knob_bases` spells against the con tree; the map form keys its
-  own reduce spec on the stat key). `tuning_knob_items`' collapse survives ONLY as stored-evidence
-  compat (never collapsing onto a present bare key); `_node_axes/_node_slice` grew the
+  own reduce spec on the stat key). The `tuning_knob_items` bare-collapse is DELETED — keys render
+  as stored — and pre-phase-3 DB/prior evidence is REGENERATED, not migrated (decided 2026-07-29);
+  `_node_axes/_node_slice` grew the
   bare-remainder group so mixed flash rows keep their stage/reduce geometry in the sum-pool;
   `enumerate_graph` keeps rows by family, not `@`-presence. Kernel sources digest-identical;
   golden drift gate + offer-compat tests green on the 5090 goldens.
 
 ## Execution order (remaining work)
 
-1m / 1n / 1o and 1p's non-composed half are LANDED (see the trail above). The remaining work runs in
-the order below — chosen so every step consumes only what already landed, the codec walker (the
-bottleneck for everything else) lands first, and EVERYTHING re-keying-gated is bundled into ONE
-deliberately scheduled window at the very end, against a phase-5-verified baseline, instead of
-scattered re-key events. Identity keys off the lowered nest until that final step.
+Steps 1–3 (the phase-2 codec core, 1r, the phase-3 stamp sites) are LANDED — see the trail above.
+The remaining work runs in the order below; EVERYTHING re-keying-gated stays bundled into the ONE
+deliberately scheduled window at the very end, against a phase-5-verified baseline. Identity keys
+off the lowered nest until that final step. The digest gate is now in-repo:
+`scripts/digest_kernels.py` (27 kernels, off-GPU) — every storage change A/Bs against it.
 
-(Steps 1–3 below are LANDED — see the trail above; the text is kept as the design record.)
+**Evidence stance (decided 2026-07-29): the tune DB / reservoir / online prior are REGENERATED, not
+migrated.** Pre-phase-3 evidence rows (axis-suffixed `TILE@k`-era spellings) are simply discarded
+with the DB; no compat layer bridges them — the display bare-collapse in `tuning_knob_items` is
+DELETED (keys render as stored), and no reader special-cases old spellings. What SURVIVES is the
+bare-golden matching contract, which is a live semantic of the hand-curated YAMLs, not DB compat:
+`pin_key_matches` / `family_value`'s bare↔explicit any-of is how a stored bare `REDUCE` matches a
+row that also carries the cone stat's explicit `REDUCE@<axis>` key — it retires only when the
+step-7 re-spell rewrites the golden corpus itself.
 
-**Step 1 — Phase 2, the codec core** (detail under *Knob codec* below). Self-contained: no GPU, no
-re-keying risk, and it unblocks 1r, phase 3, and the `TILE@pj` half of the flash residual. Write the
-COMPAT TEST FIRST — resolve every knob dict in ALL golden YAML files against its kernel kind's tree
-and assert the stored spelling is already canonical — it is the tripwire that proves the
-zero-migration claim before any stamper changes.
+**Deferred work (deliberate residuals, owned by later steps):**
 
-**Step 2 — 1r: schedule slices move off the nodes** (immediately after the walker — it is mechanical
-once the codec key exists). `tile` / `reduce` / `stage` leave `Fold`; `TileOp` carries
-`schedule: {FAMILY@path → slice}` — the values are the existing `TilePlan` / `ReducePlan` / `Stage`
-objects, resolved, and the key is the phase-2 codec key (a fold may carry all three families at once,
-so the path alone cannot key the map; the stamped knob row becomes `spell()` of the values + the
-root-globals). The term becomes pure algebra, IMMUTABLE across the whole schedule search: a fork is a
-different map, never a rebuilt tree, and "keys stamp against the pre-placement tree" holds by type —
-which the phase-3 stampers then get for free. Byte-neutral (`lower` already ignores the slices — they
-are metadata); the readers re-key mechanically (`reduce_plan`, `nodify_reduce`, `030`'s plan reads,
-`_stamp_twisted_split`, the materializer); digest-gated as usual. 1r also gives worker geometry ONE
-in-memory home, the way the end-state codec will (see *Knob codec*): the warp-form values factor into
-per-site fragment plans (atom / regs / bk) plus a single worker slot on the op; `parse` folds each
-value's embedded `w` token into that slot and FAILS LOUDLY on disagreement — today an inconsistent
-`TILE@dd`/`TILE@pj` pin is silently half-ignored (the mechanism under *Knob codec*, end state) —
-while `spell()` re-emits the legacy embedded-`w` strings byte-identically. Wire format
-untouched; the value-grammar split itself is a step-7 item. 1r also DISSOLVES the `Monoid` wrapper:
-`Fold` stores flat `init` / `combine` / `dtypes` fields (`Monoid.of` → the free componentwise
-constructor, `component_ops`/`degenerate` → free shape-readers on `combine`, `Monoid.rename` → the
-`Fold` rewrite lockstep incl. the twisted-regeneration rule, the S×S→S arity check →
-`Fold.__post_init__`). Byte-neutral by construction — identity keys off the lowered nest, stored
-shapes are free to change — and bundled here so the node's field set changes ONCE (slices out,
-worker slot in, algebra flattened): one digest-gated migration instead of three.
-
-**Step 3 — Phase 3, stamp sites** (detail under *Knob codec* below): the scheduler's fork rows spell
-keys via the resolver, byte-identical to today's spellings on every current shape.
+- `TilePlan.units` field deletion (~150 consumer sites across the materializer): `TileOp.work` is
+  the authoritative slot and `derive_workers` fails loudly on disagreement, but the value object
+  keeps its field until the step-7 value-grammar split re-spells the wire anyway — one consumer
+  migration, not two.
+- Flash's special-cased pin plumbing remnants (the greedy all-or-nothing `TILE@dd`+`TILE@pj`
+  contract, golden.py's dynamic-attention bare-`TILE` schema arm, `_narrow_flash_forms`'
+  keyed-only arm + the masked-flash bare-`TILE` fallback): step 3 left them standing as the
+  documented exceptions; they die with the step-7 QK edge-hoist / re-spell.
+- Newly RECORDED fused entries now spell the cone stat's `REDUCE@<stat axis>` key explicitly
+  (no collapse); the axis name is trace-deterministic but ugly — the step-7 re-spell moves it to
+  the path form (`REDUCE@a.fold.k`).
+- The 1p flash residual (composed `step` + QK edge-hoist) and the α-invariant term-hash identity
+  switch — step 7, as before.
 
 **Step 4 — 1q: effects to the boundary** (its own session, BEFORE phase 4: the cut realizer needs
 synthesized stores at every seam anyway, so the generalized glue is shared work — and this deletes
@@ -641,22 +635,22 @@ deploy from tier, decode TPOT / TTFT within noise of the YAML-comment baselines.
 
 ## Retirement ledger (everything still standing that is GONE at end state)
 
-The deletion contract, audited against the live tree (2026-07-29). When a step lands, grep for its
+The deletion contract, re-audited after steps 1–3 (2026-07-29). When a step lands, grep for its
 retirees — a stated deletion that still answers a grep is not done (the refactor-invariant rule).
 The already-dead (`020`/`025`/`032` + `_sink.py`, `TileOp.bindings` + `ops.resolve`, `Fold.role`,
-`Map.body`/`out`, `_best_fork`) live in the *Landed trail*; this table is only what remains. The
+`Map.body`/`out`, `_best_fork`, and — with steps 1–3 — `Fold.tile/reduce/stage` + the node-slice
+stampers, the `Monoid` class, `knob.resolve_axis`, `_schedule._at`, and the `tuning_knob_items`
+bare-collapse) live in the *Landed trail*; this table is only what remains. The
 placement dual-spelling apparatus is cancelled before construction (factored golden storage) —
-nothing to delete.
+nothing to delete. Pre-phase-3 DB/reservoir/online evidence is REGENERATED, never migrated.
 
 | Retiree | Home | Replaced by | Dies at |
 | --- | --- | --- | --- |
-| `Fold.tile` / `Fold.reduce` / `Fold.stage` node fields + the node-slice stampers (`_with_reduce`, `_with_twisted_stage`, the `tile=` replaces in the option builders) | `ir/tile/ir.py`, `_schedule.py` | `TileOp.schedule` dict keyed by the codec | 1r (step 2) |
-| `Monoid` (the class) | `ir/stmt/algebra` | flat `Fold.init`/`combine`/`dtypes`; `M(op…)` free constructor; `component_ops` free reader; rename → the `Fold` lockstep; arity check → `Fold.__post_init__` | 1r (step 2) |
-| `TilePlan.units` + the `w…`/`n…` worker tokens as per-site facts | `ir/schedule.py` | the ONE `Workers` slot (`parse` folds tokens in, fails loudly on disagreement) | 1r in-memory; step 7 wire |
+| `TilePlan.units` (the FIELD) + the `w…`/`n…` worker tokens on the wire | `ir/schedule.py` | the ONE `Workers` slot — LANDED at 1r as the authoritative, loudly-validated home (`TileOp.work` / `derive_workers`); the field + wire tokens go with the value-grammar split (~150 consumer sites, one migration) | step 7 |
 | `effectful_lambda` + the graph-scope lenient rehydrator | `ir/stmt/body`, `graph.py` | strict `Lambda` formation; `results` + materializer glue synthesize every root store | 1q (step 4) |
 | `captured_values` as the attachment/legality decider | `ir/tile/ir.py` | edge-iff-closed by construction — DEMOTES to a validation assert, not deleted | 1q (step 4) |
-| the axis-suffix knob codec: `knob.resolve_axis` / `axis_of`, `pin_key_matches`' axis arm, the bare-collapse in `tuning_knob_items`, `_schedule._at` | `pipeline/knob.py`, `_schedule.py` | the phase-2 tree-path resolver — ONE walker, short-path-canonical, idempotent over the sugar forms | steps 1–3 |
-| flash's special-cased pin plumbing: the all-or-nothing `TILE@dd`+`TILE@pj` contract (`greedy.py`), the keyed-`TILE` golden branch (`golden.py`), `_narrow_flash_forms`' keyed-only arm + the masked-flash bare-`TILE` fallback (`_schedule.py`) | `search/`, `_schedule.py` | generic codec keys + the 1r schedule dict (a fork row's key set IS its identity) | step 3; remnants step 7 |
+| the bare-golden matching arm: `pin_key_matches`' bare↔explicit any-of + `family_value`'s pooled read + `axis_of`'s featurizer grouping | `pipeline/knob.py`, `search/features.py` | the live contract of the hand-curated bare golden YAMLs (NOT DB compat — the DB is regenerated); retires when the step-7 re-spell rewrites the golden corpus | step 7 |
+| flash's special-cased pin plumbing remnants: the all-or-nothing `TILE@dd`+`TILE@pj` contract (`greedy.py`), the dynamic-attention bare-`TILE` schema arm (`golden.py`), `_narrow_flash_forms`' keyed-only arm + the masked-flash bare-`TILE` fallback (`_schedule.py`) | `search/`, `_schedule.py` | generic codec keys (a fork row's key set IS its identity) — the documented exceptions steps 1–3 left standing | step 7 |
 | `Fold.step` (the composed step sequence) + `_composes` + the step-splice arm of `Fold.loop` | `ir/tile/ir.py`, `_schedule.py` | the derived blocked evaluation of `combine`; QK hoists to an operand edge | step 7 |
 | `Carrier` / `Twist` / `State` + every reader (`_coop_carrier`, `_twisted_pair`'s carrier reads, the kernel-realizer carrier plumbing, the `graph.py` ser/de arms) | `ir/stmt/algebra` + tile/kernel lowering | structural derivation off the stored `combine` (landed 1p, extended to the composed forms) | step 7 |
 | `_carrier.py` — the Carrier-assembly layer (`exp_family_twist`, the spec-`Twist` path); `projection_distributes` MOVES to `030`'s home, not deleted | `lowering/tile/_carrier.py` | recognition builds `(init, combine)` directly via the `ir/stmt/carrier` generators | step 7 |
@@ -665,12 +659,13 @@ nothing to delete.
 | `WSPEC` as a root knob family; the denormalized value spellings (`REDUCE`'s axis token `g2k` + coop width `b512`, `TILE`'s worker tokens) | goldens/DB/prior, `knob.py` codecs | `WORK` + site-local values (the end-state grammar; mechanical re-speller) | step 7 |
 | lowered-nest kernel identity (`structural_key` lowers first) | `ir/tile/ops.py` | the α-invariant hash of the canonically renumbered term | step 7 |
 
-`_schedule.py` (2.3k lines) splits across three fates, which is the cleanup the codec buys: the
+`_schedule.py` splits across three fates, which is the cleanup the codec buys: the
 candidate vocabularies and option/row builders (`_stage_candidates`, `_reduce_candidates`,
 `_warp_option`, `_splitk_option`, …) SURVIVE as the per-family vocab the walker-derived site
-registry consumes; the key-spelling / pin-matching / flash-narrowing layer DIES into the resolver
-(steps 1–3); the node-slice stamping re-keys to the `TileOp.schedule` dict (1r). Anything in it
-still spelling a knob key by hand after phase 3 is a bug.
+registry consumes; the key-spelling layer DIED into the resolver (steps 1–3: `_family_key` is the
+one speller, `_at` is gone) and the node-slice stamping re-keyed to the `TileOp.schedule` dict
+(1r). The flash pin-narrowing remnant (`_narrow_flash_forms`) survives to step 7. Anything in it
+spelling a knob key by hand is a bug.
 
 ## Risks
 
@@ -690,7 +685,9 @@ still spelling a knob key by hand after phase 3 is a bug.
   the digest harness; if the eval-golden pass surfaces broad drift, bisect back to the phase-1 commits
   rather than patching goldens forward.
 - Stored-short-key ambiguity from future structural changes — the resolver fails loudly by design; the
-  phase-2 compat test is the tripwire. Never "fix" it by silently re-keying evidence.
+  phase-2 compat test is the tripwire. Never "fix" it by silently re-keying evidence. (The tune
+  DB/prior are regenerable and carry no key contract; the GOLDEN YAMLs are the hand-curated corpus
+  the tripwire protects.)
 - **The factored placement storage couples entries**: a routing entry's recorded total is only
   reproducible against the child goldens as of seed time — a child re-tune shifts it silently until
   the eval-golden audit runs. The provenance comments + the phase-5 audit are the guard; never "fix"

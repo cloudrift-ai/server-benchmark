@@ -52,6 +52,7 @@ from emmy.compiler.ir.tile import (
     Map,
     Placement,
     ReducePlan,
+    Store,
     TileOp,
     TilePlan,
     contraction_view,
@@ -1596,7 +1597,7 @@ def _map_strip_option(tile: TileOp, place: Placement, inner: Axis, r: int, spec:
     ssa = _map_body_defs(op.body)
     loads: list[Stmt] = []
     computes: list[Stmt] = []
-    writes: list[Stmt] = []
+    stores: list = []
     for i in range(r):
 
         def rename(n: str, i: int = i) -> str:  # suffix only the body's SSA names per copy; axis vars stay
@@ -1605,12 +1606,16 @@ def _map_strip_option(tile: TileOp, place: Placement, inner: Axis, r: int, spec:
         sigma = Sigma({inner.name: BinaryExpr("+", BinaryExpr("*", Var(inner.name), Literal(r, "int")), Literal(i, "int"))})
         for s in op.body:
             s2 = s.rewrite(rename, sigma)
-            (loads if isinstance(s2, Load) else writes if isinstance(s2, Write) else computes).append(s2)
-    body = Body((*loads, *computes, *writes))
+            (loads if isinstance(s2, Load) else computes).append(s2)
+        # The root store fans out per copy too — as boundary ``Store``\\ s (1q): the materializer
+        # reattaches them after the compute run, exactly where the regrouped ``Write``\\ s sat, so
+        # ``080_vectorize_stores`` still sees the unit-stride run.
+        stores.extend(Store(write=st.write.rewrite(rename, sigma)) for st in tile.stores)
+    body = Body((*loads, *computes))
     new_inner = replace(inner, extent=Dim(inner.extent.as_static() // r))
     new_free = (*place.free[:-1], new_inner)
     new_place = Placement(free=new_free, grid=new_free)
-    return TileOp(op=Map(body=body), name=name, place=new_place, knobs={TILE.name: spec})
+    return TileOp(op=Map(body=body), name=name, place=new_place, knobs={TILE.name: spec}, stores=tuple(stores))
 
 
 def _map_strip_fork(tile: TileOp, place: Placement, name: str) -> list[TileOp] | TileOp:
@@ -1626,11 +1631,15 @@ def _map_strip_fork(tile: TileOp, place: Placement, name: str) -> list[TileOp] |
         return TileOp(op=op, name=name, place=place, stores=tile.stores)
     inner = place.free[-1]
     base = TileOp(op=op, name=name, place=place, knobs={TILE.name: ""}, stores=tile.stores)
-    # Only a FLAT elementwise body (per-cell Load/Assign/Write, no nested Loop / Accum / carried
-    # state) is safely unrollable: every output cell is independent, so replicating adjacent cells
-    # and regrouping preserves semantics. A sweep / stateful-fallback Map (which also reaches the
-    # FREE dispatch) has cross-cell dependencies the naive copy would break — leave it at option-0.
-    if not inner.extent.is_static or not all(isinstance(s, (Load, Assign, Write)) for s in op.body):
+    # Only a FLAT elementwise body (per-cell Load/Assign + boundary root stores, no nested Loop /
+    # Accum / carried state — the pre-1q spelling carried the ``Write``\\ s in-body, hence the
+    # historical gate) is safely unrollable: every output cell is independent, so replicating
+    # adjacent cells and regrouping preserves semantics. A sweep / stateful-fallback Map (which
+    # also reaches the FREE dispatch) has cross-cell dependencies the naive copy would break —
+    # leave it at option-0. A ``Select``-bearing cell (the concat / index-map form) was never
+    # strippable and stays excluded.
+    strippable = all(isinstance(s, (Load, Assign, Write)) for s in op.body) and all(st.sweep is None for st in tile.stores)
+    if not inner.extent.is_static or not strippable:
         return base
     ext = inner.extent.as_static()
     opts = [base]

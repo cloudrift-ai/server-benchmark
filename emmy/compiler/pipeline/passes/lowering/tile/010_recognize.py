@@ -112,6 +112,20 @@ def _peel(body: Body) -> tuple[list, list[Stmt]]:
         cur = list(rest[0].body)
 
 
+def _flat_cell(cell: list[Stmt]) -> tuple[Map, tuple]:
+    """A FLAT ``Map`` of the cell stmts — the pointwise / un-recognized spelling — with the
+    trailing root ``Write``\\ s split to boundary :class:`Store`\\ s when the cell is otherwise
+    pure (the pointwise / concat forms; 1q). A reduce-bearing or interleaved-effect cell keeps
+    the raw-loop-IR spelling verbatim (the scalar-tier escape — split declines). Sweep stores are
+    not taken on a flat cell: without a fold source the materializer's flat-root arm reattaches
+    plain ``Write``\\ s only."""
+    split = split_effects(tuple(cell))
+    if split is not None and split[1] and all(st.sweep is None for st in split[1]):
+        pure, stores = split
+        return Map(body=Body(pure)), stores
+    return Map(body=tuple(cell)), ()
+
+
 def _reduce_in(stmts) -> bool:
     """Any reduce ``Loop`` reachable in ``stmts`` (deep)."""
     for s in stmts:
@@ -200,11 +214,11 @@ def _lift_cell(cell: list[Stmt], free: list, output: str) -> tuple[Map | Fold, t
     several, or a nested reduce stays a flat ``Map`` (un-annotated → the scalar tier)."""
     reduces = [i for i, s in enumerate(cell) if isinstance(s, Loop) and s.is_reduce]
     if len(reduces) != 1:
-        return Map(body=tuple(cell)), ()
+        return _flat_cell(cell)
     idx = reduces[0]
     rloop = cell[idx]
     if _reduce_in(list(rloop.body)):
-        return Map(body=tuple(cell)), ()  # nested (non-flash) reduce — keep loop-IR form
+        return _flat_cell(cell)  # nested (non-flash) reduce — keep loop-IR form
     # Route the loop-invariant prologue (stmts above the reduce, sans the regenerated ``Init``
     # seeds) one dependency cone at a time: stmts feeding the reduce move INTO the loop
     # (``pre_reduce``), while independent stmts feeding only the epilogue stay after it. Treating
@@ -218,12 +232,12 @@ def _lift_cell(cell: list[Stmt], free: list, output: str) -> tuple[Map | Fold, t
     feeds_reduce = bool(before_defs & _reads(list(rloop.body)))
     feeds_epilogue = bool(before_defs & _reads(after))
     if feeds_reduce and feeds_epilogue:
-        return Map(body=tuple(cell)), ()
+        return _flat_cell(cell)
     pre_reduce = tuple(before) if feeds_reduce else ()
     pre_epilogue = () if feeds_reduce else tuple(before)
     annotated = _annotate_reduce(rloop, pre_reduce)
     if annotated is None:
-        return Map(body=tuple(cell)), ()
+        return _flat_cell(cell)
     grid_index = tuple(Var(ax.name) for ax in free)
     bare = (
         not before

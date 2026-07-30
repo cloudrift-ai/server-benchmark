@@ -10,11 +10,21 @@
 # established at one width says nothing about another. Depth 2 is also the only depth whose
 # capture ladder the flooring rule reshapes (serving/ARCHITECTURE.md).
 #
-# Expected: every lane lands in the plain lanes' band (~0.665-0.690). Speculative decoding
-# only emits tokens the target verifies against its own greedy choice, so a lower score
-# means broken numerics or a serving bug, not "tuning". Measured at bucket 32: 0.670 at a
-# 24-token verify step, 0.660 at 16, 0.665 at 12 — against stock 0.665 (8 concurrent) and
-# 0.640 (4 concurrent), so the width's whole padding range is covered.
+# Expected: every emmy lane matches a STOCK LANE RUN AT ITS OWN CLIENT CONCURRENCY. Speculative
+# decoding only emits tokens the target verifies against its own greedy choice, so a genuine
+# shortfall means broken numerics or a serving bug, not "tuning".
+#
+# There is NO fixed pass band, and reading one off another concurrency is a false-alarm generator:
+# stock itself scores 0.690 at 8 concurrent but 0.655 at 64, outside the ~0.665-0.690 range the
+# concurrency-8 runs suggest. Measured at bucket 32: 0.670 at a 24-token verify step, 0.660 at 16,
+# 0.665 at 12 — against stock 0.665 (8 concurrent) and 0.640 (4 concurrent). At bucket 192: emmy
+# 0.675 (8 concurrent) and 0.665 (64) against stock 0.690 and 0.655 — emmy is 0.015 under stock at
+# one concurrency and 0.010 OVER it at the other. At 200 examples the standard error is ~0.033, so
+# differences of this size are noise; a real numerics break reads ~0.27 (the BOS trap below) or 0.0.
+#
+# `exact_match,flexible-extract` sits at 0.345-0.370 on BOTH engines, stock included, because the
+# model keeps generating past its `#### N` answer and the permissive filter grabs a later number.
+# Read `strict-match`; a low flexible score alone is an extraction artifact, not an engine fault.
 #
 # Read the stock lane at the same depth FIRST. It shares the harness, tokenizer and client
 # with the emmy lanes but none of emmy's kernels, so stock ≈ 0 means the probe is invalid,

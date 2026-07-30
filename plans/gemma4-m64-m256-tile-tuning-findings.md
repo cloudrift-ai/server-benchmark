@@ -22,11 +22,11 @@ prior and `emmy tune`'s sweep are not trusted at the moment, so every number her
   undeployable today.
 - **The three `gate_up_cat.m64` goldens were dead.** The deploy logs `DRIFT` for that shape — "no offered candidate
   realizes any of them" — so the single biggest decode kernel had no golden floor at all and was resolved by the
-  prior. This is a bug in its own right and it is the mechanism by which an untuned width becomes a lottery.
-- **m192 — the width the c=64 MTP-d2 lane actually runs — had no records at all, and now has four.** That width is
-  the documented lottery (the same serving configuration has measured 10.7 and 332.7 tok/s because a cold resolve
-  there is not reproducible). All four dominant edges improve 1.10–1.15x over the cold pick and, more importantly,
-  become deterministic. m192 also **refines the rule**: no reachable tile extent equals 192, so some B re-read is
+  prior. This is a bug in its own right, and it is the mechanism by which an uncovered width silently loses its
+  floor.
+- **m192 — the width the c=64 MTP-d2 lane actually runs — had no records at all, and now has four.** All four
+  dominant edges improve 1.10–1.15x over the cold pick and, more importantly, become deterministic. m192 also
+  **refines the rule**: no reachable tile extent equals 192, so some B re-read is
   unavoidable, and the winner is a 64-row tile *with* `gm8` group-M rasterization — 274.8 us with it against
   **434.4** us for the identical tile without it. The invariant is "B leaves DRAM once"; rasterization is a second
   way to buy it when the tile extent cannot.
@@ -37,8 +37,11 @@ prior and `emmy tune`'s sweep are not trusted at the moment, so every number her
   kernel time per decode step before, ~39 ms after**. A live bare-metal server at bucket 192 generated at
   **4–6 tok/s** with a perfectly healthy 2.33–2.67 acceptance length — exactly what that arithmetic predicts. This
   is the mechanism behind the c=64 lane's 10.7 tok/s reading, and it is **deterministic, not the run-to-run lottery
-  it was read as**: an absent fused golden picks the scalar config every time. Four `norm_linear` rows close it, and
-  all four want the same geometry the m64 fused rows already carry.
+  it was read as**: an absent fused golden picks the scalar config every time. This supersedes the "an untuned width
+  is a lottery" reading in `gemma4-mtp-batched-serving-findings.md`, which inferred non-reproducibility from two very
+  different numbers on the same configuration — those two numbers are the docker/bare-metal split reconciled at the
+  end of this report, not a search that lands somewhere new each run. Four `norm_linear` rows close it, and all four
+  want the same geometry the m64 fused rows already carry.
 - **The prefill width is NOT the problem.** m2048 — the chunk width the 4k/4k c=4/c=8 cells ride — measures
   0.99–1.08x cuBLAS across every matmul edge, and the best pin buys 1.01–1.05x. So the 4k/4k TTFT gap (24–26 s
   against stock's 8.7 s) is not prefill matmul quality.
@@ -271,8 +274,9 @@ latencies exactly), which is why the isolated golden-reproduction check passes a
 it. The same audit reports **GAP 86** against the 4090's golden file for these twins, so this is not a one-shape
 accident.
 
-This matters beyond the one shape: it is the concrete mechanism behind "an untuned width is a lottery". A width
-whose goldens do not realize is indistinguishable, at deploy time, from a width with no goldens at all.
+This matters beyond the one shape: a width whose goldens do not realize is indistinguishable, at deploy time, from a
+width with no goldens at all — and, as the m192 result below shows, what that costs is not a random draw but a
+specific, repeatable bad kernel.
 
 ## What is not established
 
@@ -395,3 +399,29 @@ Two things the controls earned, both of which would have been misread without th
 The same run also confirms the fused-cone fix end to end: this server sustained **310–353 tok/s** at these
 concurrencies, against the **4–6 tok/s** measured on the identical configuration before the four `norm_linear` rows
 existed — about 60x, on the same box, same commit, same knobs, the only difference being the golden records.
+
+## Reconciling the three c=64 numbers — what this work actually is
+
+Three measurements of the same cell, which only make sense together:
+
+| measurement | tok/s |
+|---|--:|
+| published image `cloudriftai/vllm-emmy-gemma4:0.23.0-58733e02`, docker | 332.7 |
+| bare-metal from this branch, **after** the four `norm_linear` rows | 310–353 |
+| bare-metal from the same commit, **before** them | 4–6 |
+
+The published image is roughly where the fixed bare-metal build lands, and both are ~60x above the unfixed build.
+So **the published image never carried this misdeploy — a fresh build from `main` does.** The image was baked with
+its execution-plan pack written at warm time, which froze a working pick for the fused cone before the golden gap
+could bite; a build without that pack re-resolves the cone from the goldens on every boot, finds nothing at m192,
+and takes the scalar config.
+
+The consequence is worth stating plainly because it changes the merge decision:
+
+> **This is not a throughput improvement over what ships today.** It is roughly parity with the published artifact.
+> What it is: the thing that stops a **~60x collapse — about 330 tok/s down to about 5 — the next time anyone bakes
+> an image**, because the pack that currently hides the gap is rebuilt from the goldens.
+
+"Restores parity" and "required before the next rebake" are very different propositions, and only the second one is
+true. The same reasoning applies to any width added to a recipe in future: the pack masks a missing fused golden
+until the moment it is regenerated, which is exactly when nobody is looking for a regression.

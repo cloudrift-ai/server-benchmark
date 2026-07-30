@@ -17,7 +17,7 @@
 # 2048-token chunk quantum (EMMY_GEN_PREFILL_BUCKET=2048, mnbt 2048+bucket) on the mixed
 # 4k/4k batched cells, bucket 64 / chunk 4096 at c=64. The MTP lanes widen the decode
 # bucket to cover the verification step (concurrency x (depth+1) tokens): 8 at c=1,
-# 32 at c=4 and c=8, 256 at c=64.
+# 32 at c=4 and c=8, 192 at c=64.
 #
 # Why the MTP buckets are NOT simply the smallest tuned width >= the verify width: vLLM
 # rounds every cudagraph capture size up to a multiple of (depth+1) and pads a step to the
@@ -29,8 +29,19 @@
 # bucket is close to free — doubling the padded rung costs under 1% of TPOT, because decode
 # reads the weights once per step regardless of width — so landing on a WELL-COVERED width
 # beats landing tightly on a thin one. That is why c=4 uses 32 (full fused golden set at
-# m32) rather than 16 (m16 carries only the unfused projections), and why c=64 uses 256
-# (near-full set at m256) rather than 192, which has no golden records of any kind.
+# m32) rather than 16 (m16 carries only the unfused projections) — worth +41% at depth 2 and
+# +78% at depth 3 against m16, on a same-box A/B.
+#
+# c=64 is the exception, and it stays at 192 DESPITE having no golden records at that width.
+# The same reasoning says it should use 256 (near-full set at m256) and that is measurably
+# faster, but bucket 256 FAILS the output-quality gate: GSM8K collapses to 0.0 with empty
+# completions where bucket 32 scores 0.665-0.670 and stock scores 0.640-0.665 on the same
+# harness. Bucket 192's number is therefore a poor one (its kernels resolve cold, and the
+# same configuration has measured anywhere from 10.7 to 332.7 tok/s) but it is a *correct*
+# one. Do not widen this lane again without re-running the quality gate — the leading
+# explanation is that a width outside the image's warmed execution-plan pack resolves its
+# kernels cold and is not accuracy-gated, so any uncovered width carries the same risk.
+# See plans/gemma4-mtp-batched-serving-findings.md.
 #
 # Acceptance caveat (also in the article): on random-token prompts, long outputs collapse
 # into repetition the drafter predicts near-perfectly, so the 4k-output cells run at
@@ -183,13 +194,13 @@ matrices:
     benchmark.max_concurrency: 8
     benchmark.num_prompts: 64
 
-  # ---- emmy + MTP, depth 2: c=64 (verify width 192 -> rung 255 under bucket 256, tuned m256) ----
+  # ---- emmy + MTP, depth 2: c=64 (verify width 192 -> bucket 192, untuned; see header) ----
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
     engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma4:0.23.0-58733e02"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4096 --no-enable-prefix-caching --speculative-config '{\"method\":\"mtp\",\"model\":\"google/gemma-4-12B-it-assistant\",\"num_speculative_tokens\":2}'"
-    engine.llm.vllm.extra_env: "EMMY_GEN_DECODE_BUCKET=256"
+    engine.llm.vllm.extra_env: "EMMY_GEN_DECODE_BUCKET=192"
     benchmark.random_input_len: 256
     benchmark.random_output_len: 256
     benchmark.max_concurrency: 64

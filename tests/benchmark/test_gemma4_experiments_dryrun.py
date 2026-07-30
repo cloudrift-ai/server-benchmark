@@ -110,8 +110,10 @@ def test_mtp_smoke_test_expands_to_32_lane_points(project_root):
             # bucket gets overshot by its own steps and loses the static twin. Overshooting the
             # bucket instead costs almost nothing (decode reads the weights once per step), so
             # these pick the well-covered width: 32 rather than 16 (m16 carries only the
-            # unfused projections), 256 rather than 192 (no golden records at all).
-            want = {1: 8, 4: 32, 8: 32, 64: 256}[conc]
+            # unfused projections). c=64 is pinned to 192 as the exception — the same rule says
+            # 256, and it is faster, but bucket 256 fails the output-quality gate (see the
+            # recipe header), so the untuned-but-correct width stays.
+            want = {1: 8, 4: 32, 8: 32, 64: 192}[conc]
         else:
             # The serving_rtx5090 protocol: 32 at c=1, 8 on the mixed batched cells,
             # 64 at c=64.

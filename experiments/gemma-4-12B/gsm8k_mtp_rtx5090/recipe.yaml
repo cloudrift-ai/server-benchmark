@@ -3,16 +3,18 @@
 # client (scripts/run_lmeval_gate.py: 200 questions, few-shot, seed 0, strict exact-match,
 # 8 concurrent requests) as the plain lanes' quality table.
 #
-# Five lanes in two groups. The depth-3 pair at emmy's default decode bucket is the article's
-# published losslessness row. The depth-2 trio covers what the THROUGHPUT recipe actually
-# serves — the widths serving_mtp_rtx5090 routes MTP verify steps onto (bucket 32 at c=4/c=8,
-# 256 at c=64) — because a decode bucket selects which static twin every step runs, so quality
+# Four lanes in two groups. The depth-3 pair at emmy's default decode bucket is the article's
+# published losslessness row. The depth-2 pair covers what the THROUGHPUT recipe actually
+# serves — bucket 32, the width serving_mtp_rtx5090 routes its c=4 and c=8 MTP verify steps
+# onto — because a decode bucket selects which static twin every step runs, so quality
 # established at one width says nothing about another. Depth 2 is also the only depth whose
 # capture ladder the flooring rule reshapes (serving/ARCHITECTURE.md).
 #
 # Expected: every lane lands in the plain lanes' band (~0.665-0.690). Speculative decoding
 # only emits tokens the target verifies against its own greedy choice, so a lower score
-# means broken numerics or a serving bug, not "tuning".
+# means broken numerics or a serving bug, not "tuning". Measured at bucket 32: 0.670 at a
+# 24-token verify step, 0.660 at 16, 0.665 at 12 — against stock 0.665 (8 concurrent) and
+# 0.640 (4 concurrent), so the width's whole padding range is covered.
 #
 # Read the stock lane at the same depth FIRST. It shares the harness, tokenizer and client
 # with the emmy lanes but none of emmy's kernels, so stock ≈ 0 means the probe is invalid,
@@ -121,13 +123,18 @@ command:
     gate stock-mtp-d3 3 "" --stock || true
     gate emmy-mtp-d3 3 "" || true
     # The configuration the throughput recipe serves: depth 2 (the only depth whose capture
-    # ladder the flooring rule changes) at the two widths its MTP lanes route onto — 32 for
-    # c=4/c=8, 256 for c=64. The stock lane at the same depth is the control: it shares this
-    # harness, tokenizer and client but none of emmy's kernels, so a low score there means
-    # the probe is invalid rather than the engine.
+    # ladder the flooring rule changes) at bucket 32, the width its c=4 and c=8 MTP lanes route
+    # onto. The stock lane at the same depth is the control: it shares this harness, tokenizer
+    # and client but none of emmy's kernels, so a low score there means the probe is invalid
+    # rather than the engine.
+    #
+    # Bucket 192 (the c=64 lane) is NOT gated here: at this client concurrency the verify step
+    # is far narrower than that bucket, so the lane would measure a padding ratio no deployment
+    # of it runs. Bucket 256 is not gated either because the throughput recipe no longer uses
+    # it — it was tried and produces empty completions, which is the open bug this gate's
+    # protocol was used to find (plans/gemma4-mtp-batched-serving-findings.md).
     gate stock-mtp-d2 2 "" --stock || true
     gate emmy-mtp-d2-b32 2 EMMY_GEN_DECODE_BUCKET=32 || true
-    gate emmy-mtp-d2-b256 2 EMMY_GEN_DECODE_BUCKET=256 || true
     pkill -f "[v]llm serve" 2>/dev/null || true
     echo GSM8K_MTP_DONE
   result_files:

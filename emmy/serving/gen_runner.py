@@ -268,14 +268,21 @@ class EmmyGenRunner:
         only cover the widths in :mod:`emmy.serving.twins`, so a step landing just above the
         bucket looks like ordinary symbolic traffic. The live cause is the cudagraph ladder —
         vLLM pads a step UP to a captured size before the runner ever sees it, so a rung sitting
-        one step above the bucket silently retires the twin (see ``_gen_graph_args``)."""
+        one step above the bucket silently retires the twin (see ``_gen_graph_args``).
+
+        The advice deliberately leads with the ladder rather than with the bucket: widening the
+        bucket to an UNCOVERED width trades a throughput loss for a correctness risk, because such
+        a width resolves its kernels cold at boot, which is neither reproducible nor accuracy-gated
+        (bucket 256 on the gemma-4 image returns empty completions)."""
         if t in self._sym_decode_warned or t > 2 * self._decode_bucket:
             return
         self._sym_decode_warned.add(t)
         logger.warning(
             "[gen_runner] decode-shaped step of %d tokens missed the decode twin (bucket %d) and fell to the "
-            "symbolic path — raise EMMY_GEN_DECODE_BUCKET to >= %d, or check that the cudagraph capture ladder "
-            "has a rung <= the bucket (speculative decoding re-rounds it)",
+            "symbolic path — check that the cudagraph capture ladder has a rung <= the bucket (speculative "
+            "decoding re-rounds it), or raise EMMY_GEN_DECODE_BUCKET to >= %d. Prefer a width this deployment "
+            "has tuned kernels for: an uncovered width resolves its kernels cold, which is neither reproducible "
+            "nor accuracy-gated",
             t,
             self._decode_bucket,
             t,

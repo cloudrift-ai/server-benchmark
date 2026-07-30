@@ -31,7 +31,8 @@ path prefix and the leading-``=`` value-name pin form. Whoever restores graph-le
 that namespace; this parser only refuses to let a tile key squat on it.
 
 Ambiguity failures are LOUD by design: a stored short key broken by a future structural change must
-fail and be re-spelled by hand (the golden compat test is the tripwire) — never silently re-keyed.
+fail and be re-spelled by hand (``test_golden_spelling_canonical`` is the tripwire) — never
+silently re-keyed.
 """
 
 from __future__ import annotations

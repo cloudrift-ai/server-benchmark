@@ -327,7 +327,7 @@ contract stays a documented live exception (blocked on symbolic-trace keyed reso
 - **Step 1 / phase 2 (LANDED)** — the codec core: `ir/tile/path.py` (ONE walker `sites` +
   resolver `resolve` + canonical speller `spell`; anchored path subsequences, edge-label
   preference, primary-bare guard, ordinal emission, reserved-form rejection) + the golden compat
-  tripwire (`test_golden_key_compat.py` — every stored spelling proven canonical against per-kind
+  tripwire (`test_golden_spelling_canonical.py` — every stored spelling proven canonical against per-kind
   recognized trees; the dynamic-attention bare-`TILE` any-of contract the one asserted exception).
 - **Step 2 / 1r (LANDED, three digest-gated commits, 27-kernel harness byte-identical)** —
   (i) `Monoid` dissolved into flat `Fold.init/combine/dtypes` (`M(op…)` / `component_ops` /

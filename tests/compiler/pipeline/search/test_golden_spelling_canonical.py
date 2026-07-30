@@ -1,9 +1,11 @@
-"""The phase-2 compat tripwire: every stored golden knob spelling is ALREADY canonical.
+"""The golden-spelling tripwire: every stored golden knob spelling is canonical.
 
 Resolves every knob dict in ALL golden YAML files against its kernel kind's recognized tree
 through the tree-path codec (:mod:`emmy.compiler.ir.tile.path`) and asserts the stored spelling
-is the canonical (shortest-unique) one — the proof behind the zero-migration claim: switching the
-stampers to the resolver (phase 3) changes no stored key. Documented exceptions, asserted
+is the canonical (shortest-unique) one. The golden loader does not validate spellings, so this is
+the only guard on the corpus: a structural change to a recognized tree that re-keys a canonical
+site, or a hand-seeded entry with a stale/wrong-site spelling, would otherwise just stop matching
+the stamped rows and the golden would silently never deploy. Documented exceptions, asserted
 exactly:
 
 - a DYNAMIC attention golden records ONE bare ``TILE`` naming its PV plan (the masked-flash

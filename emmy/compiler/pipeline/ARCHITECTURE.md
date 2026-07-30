@@ -1094,8 +1094,8 @@ ingestion (`ingest_legacy_row` — a loudly-validated pin alias that must agree 
 golden corpus itself was re-spelled mechanically (`scripts/respell_goldens.py`, 715 rows, replay digest-identical).
 The reserved
 graph-level placement grammar (`in.<operand>` path prefix, leading-`=` value pins) is rejected, never reused. The
-golden compat tripwire (`tests/.../test_golden_key_compat.py`) resolves every stored knob dict against its kind's
-tree and proves every spelling canonical; the
+golden-spelling tripwire (`tests/.../test_golden_spelling_canonical.py`) resolves every stored knob dict against its
+kind's tree and proves every spelling canonical; the
 one documented exception is
 the dynamic-attention bare `TILE` (its PV plan, matched any-of by the golden layer — a symbolic trace resolves no
 stable axis key, so the bare spelling is LIVE corpus semantics, not legacy debt). The tune DB / reservoir /

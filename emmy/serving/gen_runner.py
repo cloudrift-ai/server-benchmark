@@ -276,7 +276,9 @@ class EmmyGenRunner:
             "[gen_runner] decode-shaped step of %d tokens missed the decode twin (bucket %d) and fell to the "
             "symbolic path — raise EMMY_GEN_DECODE_BUCKET to >= %d, or check that the cudagraph capture ladder "
             "has a rung <= the bucket (speculative decoding re-rounds it)",
-            t, self._decode_bucket, t,
+            t,
+            self._decode_bucket,
+            t,
         )
 
     def layer_meta(self, layer: int) -> tuple[int, int, int, float]:

@@ -57,9 +57,12 @@ class XfailEntry:
 # parametrization of that test.
 
 XFAIL_TESTS: dict[str, XfailEntry] = {
-    # -- PLACE@cone: the producer-cone cut (020_cut_edge) --------------------
-    "tests/compiler/e2e/test_fused_edge.py::test_place_cone_cut_splits_the_kernels": XfailEntry(_PLACE_REMOVED),
-    "tests/compiler/e2e/test_fused_edge.py::test_place_cone_cut_degenerate_m1": XfailEntry(_PLACE_REMOVED),
+    # -- PLACE@cone: the producer-cone cut ------------------------------------
+    # test_place_cone_cut_splits_the_kernels / test_place_cone_cut_degenerate_m1 came BACK with
+    # the phase-4 routing realizer (lowering/tile/_cut.py) — their entries are deleted per the
+    # registry contract. The multi-fold variant stays xfailed: the plan deliberately forfeits
+    # per-component separation at tile level (the sanctioned fused-edge cut is the shared `a`
+    # operand; the old 020 realizer's N-channel split measured null — #389).
     "tests/compiler/e2e/test_fused_edge.py::test_place_cone_cut_splits_multi_fold": XfailEntry(_PLACE_REMOVED),
     "tests/compiler/passes/test_fusion_rules.py::test_cut_workspace_producer_never_refuses": XfailEntry(_PLACE_REMOVED),
     "tests/compiler/passes/test_recognize_boundary_rules.py::test_norm_linear_warp_pick_is_computed_a_contraction": XfailEntry(

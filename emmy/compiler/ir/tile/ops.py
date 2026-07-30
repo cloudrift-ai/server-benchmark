@@ -211,8 +211,12 @@ def lower(op) -> list[Stmt]:
     are already resolved (computed operands are inline nodes), so there is no name-inlining step;
     a multi-channel contraction lowers through its own derived product loop
     (:attr:`ContractionView.loop`)."""
+    from emmy.compiler.ir.stmt import Load  # noqa: PLC0415
+
     if isinstance(op, Map):
-        prefix = [s for src in op.sources for s in lower(src)]
+        # A Load source is the CUT TERMINAL (phase 4 — every edge admits Load): the seam value
+        # arrives materialized, so the "nest" is the load itself.
+        prefix = [s for src in op.sources for s in ((src,) if isinstance(src, Load) else lower(src))]
         return [*prefix, *op.body]  # the sources' reduce/contract loop nests, then the projection body
     if isinstance(op, (Fold, ContractionView)):
         return op.lower()

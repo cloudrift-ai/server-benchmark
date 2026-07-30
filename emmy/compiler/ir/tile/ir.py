@@ -1084,7 +1084,9 @@ class Map(Stmt):
     pure = True  # a term is a value — its internals are its own; legal inside a stored ``Lambda``
 
     fn: Lambda
-    sources: tuple[Fold | ContractionView | Map, ...]
+    # A ``Load`` source is the CUT TERMINAL (phase 4): a placement cut materializes the seam
+    # value to a buffer and the parent consumes it as a plain load — every edge admits ``Load``.
+    sources: tuple[Fold | ContractionView | Map | Load, ...]
 
     def __init__(
         self,

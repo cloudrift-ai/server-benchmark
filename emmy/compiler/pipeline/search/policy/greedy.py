@@ -459,6 +459,8 @@ def _golden_evidence_index(ctx: Context) -> dict:
         for g in GOLDEN_CONFIGS:
             if g.gpu_name != gpu_name or tuple(g.compute_cap) != cap:
                 continue
+            if g.is_routing:
+                continue  # a ROUTING entry (PLACE-only) decides cuts pre-schedule — never a fork row
             index.setdefault(g.shape_key(), []).append(g)
         for entries in index.values():
             entries.sort(key=lambda g: g.emmy_us or float("inf"))  # unmeasured entries rank last

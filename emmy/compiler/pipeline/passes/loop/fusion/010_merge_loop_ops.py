@@ -406,6 +406,14 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
     # ``005_split_shared_indexmap`` applies.
     if producer.id in graph.outputs:
         raise RuleSkipped(f"producer {producer.id!r} is a graph output — it must stay materialized")
+    # A decided placement-cut workspace is not fusion's to undo: the cut realizer names its seam
+    # buffers ``…__cut_…``, and a sliced re-compile (tune mode) re-enters loop fusion with the
+    # pieces as ordinary producer→consumer pairs — a stat-BEARING piece is braked incidentally
+    # (reduce-heavy), but a stat-free value piece is pure pointwise with one consumer, this
+    # rule's core move, and re-inlining it silently reverts the decided placement (then the
+    # re-cut collides on the existing workspace node).
+    if "__cut_" in producer.id:
+        raise RuleSkipped(f"{producer.id!r} is a decided placement-cut workspace — the cut is not fusion's to undo")
 
     # Multi-load-of-reduce-heavy-producer guard: if the consumer references
     # the producer's output via more than one Load stmt AND the producer does

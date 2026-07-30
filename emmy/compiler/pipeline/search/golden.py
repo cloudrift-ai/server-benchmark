@@ -148,6 +148,16 @@ class GoldenConfig:
     model: str | None = None
 
     @property
+    def is_routing(self) -> bool:
+        """A ROUTING entry (phase 4): its knobs are ``PLACE@<seam>`` cut decisions ONLY — it
+        stores the cut set for its ``(kind, shape)`` and NO schedules (every resulting piece
+        re-recognizes and resolves its OWN entry; ``emmy_us`` is the recorded pipeline total, a
+        claim about the child entries as of seed time). The loader rejects a mixed entry
+        (:func:`_require_routing_split`); the schedule-tier index skips routing entries and the
+        routing consult skips schedule entries, so the two roles never cross."""
+        return bool(self.knobs) and all(str(k).split("@", 1)[0] == "PLACE" for k in self.knobs)
+
+    @property
     def ratio(self) -> float:
         """cuBLAS latency / emmy latency — 1.0 means parity, >1 means faster."""
         return self.cublas_us / self.emmy_us if self.emmy_us else 0.0
@@ -439,6 +449,19 @@ class LinearNormGoldenConfig(GoldenConfig):
         return ShapeKey(free_prod=free, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic, kind="rms_norm")
 
 
+def _require_routing_split(cfg) -> None:
+    """The phase-4 golden-storage split, enforced at load: an entry either ROUTES (``PLACE``
+    keys only — the cut set, no schedules) or SCHEDULES (no ``PLACE`` key at all). A mixed
+    entry would re-create the retired single-namespace hazard (a cut row knob-identical to its
+    fused twin, tying on evidence joins) — reject it loudly, never accept-and-hope."""
+    fams = {str(k).split("@", 1)[0] for k in cfg.knobs}
+    if "PLACE" in fams and fams != {"PLACE"}:
+        raise ValueError(
+            f"golden {cfg.name!r}: an entry mixes PLACE (routing) keys with schedule keys {sorted(fams - {'PLACE'})} — "
+            f"a ROUTING entry stores the cut set only; each piece's schedule lives in that piece's own entry"
+        )
+
+
 def _require_cone_anchor(cfg) -> None:
     """Schema guard for the fused computed-A kinds (``NormLinearGoldenConfig`` /
     ``MlpGeGluGoldenConfig``): a RECORDED entry (non-empty knobs) must anchor itself to the cone
@@ -447,8 +470,8 @@ def _require_cone_anchor(cfg) -> None:
     plain gmem-A matmul"; an entry recorded with a gmem-direct STAGE plus plain warp tiles WOULD
     realize there, deploying a cross-family config with its foreign µs — enforce the data
     convention at load, like the flash pin-form guard. Key-only instances (empty knobs — key
-    computations and fixtures) are exempt."""
-    if not cfg.knobs:
+    computations and fixtures) and ROUTING entries (no schedules to anchor) are exempt."""
+    if not cfg.knobs or cfg.is_routing:
         return
     knobs = {str(k): str(v) for k, v in cfg.knobs.items()}
     if any(k.split("@", 1)[0] == "STAGE" and "sync" in v.split("/") for k, v in knobs.items()):
@@ -820,7 +843,9 @@ def _load_goldens() -> list[GoldenConfig]:
         gpu_name, cap = doc["gpu_name"], tuple(doc["compute_cap"])
         file_model = doc.get("model")  # optional provenance header; a per-entry ``model:`` overrides it
         for c in doc["configs"]:
-            out.append(_KERNEL_CLASSES[c.pop("kernel")](gpu_name=gpu_name, compute_cap=cap, model=c.pop("model", file_model), **c))
+            cfg = _KERNEL_CLASSES[c.pop("kernel")](gpu_name=gpu_name, compute_cap=cap, model=c.pop("model", file_model), **c)
+            _require_routing_split(cfg)  # routing entries store cuts ONLY; schedule entries never spell PLACE
+            out.append(cfg)
     return out
 
 

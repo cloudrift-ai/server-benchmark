@@ -43,8 +43,10 @@ from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.tile.ir import Fold, Map, _parse_bilinear
 
 #: The knob families whose keys address a tree site (``WSPEC`` / ``RASTER`` / ``LOOPIFY`` stay
-#: root-global and bare; ``PLACE`` — the edge property — joins at phase 4).
-PATH_FAMILIES = ("TILE", "REDUCE", "STAGE")
+#: root-global and bare). ``PLACE`` (phase 4) is the per-seam edge property: its sites are every
+#: NON-ROOT node — each in-tree child names its parent↔child seam — and its values are
+#: ``cut | fuse``, resolved from ROUTING golden entries / pins, never a schedule slice.
+PATH_FAMILIES = ("TILE", "REDUCE", "STAGE", "PLACE")
 
 #: The path-segment vocabulary: node kinds + the contraction operand-edge role labels.
 _SEGMENT_TOKENS = frozenset({"map", "fold", "a", "b"})
@@ -142,9 +144,13 @@ def sites(root) -> tuple[Site, ...]:
 def family_sites(family: str, all_sites: tuple[Site, ...]) -> tuple[Site, ...]:
     """The sites ``family`` may decorate: every fold for ``REDUCE`` / ``STAGE``; ``TILE`` takes the
     ``role=CONTRACTION`` folds plus the pure pointwise ROOT ``Map`` (the register-strip tier — a
-    non-root sourceless ``Map``, e.g. a one-load demoted cone, is not a strip target)."""
+    non-root sourceless ``Map``, e.g. a one-load demoted cone, is not a strip target); ``PLACE``
+    every NON-ROOT node (the child names its parent↔child seam — cut legality is structural,
+    edge-iff-closed by construction)."""
     if family not in PATH_FAMILIES:
         raise ValueError(f"{family!r} is not a tree-path knob family (have {PATH_FAMILIES})")
+    if family == "PLACE":
+        return tuple(s for s in all_sites if s.depth > 1)
     if family in ("REDUCE", "STAGE"):
         return tuple(s for s in all_sites if isinstance(s.node, Fold))
     out = []

@@ -240,126 +240,95 @@ class StateMerge(Stmt):
         return render_merge_program(self.merge, self.state.names, ctx)
 
 
-@dataclass(frozen=True)
-class Monoid:
-    """A TRUE monoid — ``(init, combine)``, ONE program. The finished form of
-    :class:`Carrier`/:class:`Twist`: ``combine : S × S → S`` is a pure :class:`Lambda` whose
-    params are ``(s₁…sₙ, s₁′…sₙ′)`` and whose results are the merged state — state enters as
-    params and leaves as results, no ``Accum`` in any stored program.
+# --------------------------------------------------------------------------------------------
+# The TRUE monoid — ``(init, combine)``, ONE program, stored FLAT on the ``Fold`` node (the
+# ``Monoid`` wrapper class dissolved at 1r). ``combine : S × S → S`` is a pure :class:`Lambda`
+# whose params are ``(s₁…sₙ, s₁′…sₙ′)`` and whose results are the merged state — state enters as
+# params and leaves as results, no ``Accum`` in any stored program. The serial streaming step is
+# NOT stored: it is ``s′ = combine(s, lift(k))`` — combine specialized at the singleton state the
+# lift produces — so update-vs-combine consistency is correct BY CONSTRUCTION. The pair is
+# generated ONCE at construction: :func:`M` (the componentwise free constructor) for a plain
+# fold, recognition's pattern builders for a twisted one — the family name dissolves there and
+# downstream reads the program, never a name. DEGENERATE is the DERIVED shape predicate
+# :func:`component_ops` / :func:`degenerate`; the S × S → S arity check lives in
+# ``Fold.__post_init__`` (the wrapper's old formation invariant, relocated). ASSOCIATIVITY is
+# TEST-enforced: ``combine(a, combine(b, c)) == combine(combine(a, b), c)`` on random states.
+# --------------------------------------------------------------------------------------------
 
-    The serial streaming step is NOT stored: it is ``s′ = combine(s, lift(k))`` — combine
-    specialized at the singleton state the lift produces, simplified deterministically at
-    lowering — so update-vs-combine consistency is correct BY CONSTRUCTION (there is no second
-    program to keep coupled). Generated ONCE at construction: :meth:`of` (the componentwise
-    convenience constructor, the ``M(add)`` spelling) for a plain fold, recognition's pattern
-    builders for a twisted one — the family name dissolves there, and downstream reads the
-    program, never a name.
 
-    DEGENERATE is a DERIVED shape predicate, not a storage arm: :meth:`component_ops` is the
-    componentwise test on ``combine`` (every result ``sᵢ″ = ⊕ᵢ(sᵢ, sᵢ′)``, independently — the
-    ``as_accums`` read), and the trait/legality queries (additive? commutative? which op?) read
-    the ⊕ᵢ handles off that same trivially-shaped program, so the op handles survive without a
-    field.
+def M(*ops, names: tuple[str, ...] | None = None) -> tuple[tuple[float, ...], Lambda]:
+    """The componentwise ``(init, combine)`` constructor — the ``M(op…)`` spelling: one
+    independent self-fold ⊕ᵢ per state component (``sᵢ = ⊕ᵢ(sᵢ, sᵢ′)`` — the reassignment shape
+    ``id_combine_states`` spells), seeds the op identities. The ONE construction site of a plain
+    fold's combine program. ``names`` are the state component names — recognition threads its
+    REAL accumulator names through here (the byte-identity requirement: the derived serial
+    step's ``Accum``\\ s carry these names); the generic ``s{i}`` default serves nameless algebra
+    (the spec/property tests)."""
+    impls = tuple(ElementwiseImpl(o) if isinstance(o, str) else o for o in ops)
+    idents = []
+    for op in impls:
+        if op.identity is None:
+            raise ValueError(f"M: op {op.name!r} has no identity — not a monoid ⊕")
+        idents.append(op.identity)
+    n = len(impls)
+    s = tuple(names) if names is not None else tuple(f"s{i}" for i in range(n))
+    if len(s) != n:
+        raise ValueError(f"M: {n} ops but {len(s)} state names")
+    o = tuple(f"{nm}__o" for nm in s)
+    body = Body(tuple(Assign(name=s[i], op=impls[i], args=(s[i], o[i])) for i in range(n)))
+    return tuple(idents), Lambda(params=s + o, body=body, results=s)
 
-    ``dtypes`` is the optional per-component ACCUMULATOR dtype side-tuple (``()`` = lowering
-    default throughout) — precision, not algebra; it exists only so lowered ``Accum``\\ s stay
-    byte-identical, and a precision decoration may absorb it later.
 
-    ASSOCIATIVITY is TEST-enforced (the certificate the split/coop tiers rest on): the
-    :func:`foldmap_eval` property tests check ``combine(a, combine(b, c)) ==
-    combine(combine(a, b), c)`` on random states."""
-
-    init: tuple[float, ...]  # the seeds — the op identities for a plain fold; (−inf, 0, 0) LSE
-    combine: Lambda  # S × S → S — THE ⊕
-    dtypes: tuple = ()  # optional per-component accumulator dtype (precision side-tuple)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.init, tuple):
-            object.__setattr__(self, "init", tuple(self.init))
-        n = len(self.init)
-        if len(self.combine.params) != 2 * n or len(self.combine.results) != n:
-            raise ValueError(f"Monoid combine must be S × S → S at arity {n}: params={self.combine.params} results={self.combine.results}")
-
-    @property
-    def arity(self) -> int:
-        return len(self.init)
-
-    @classmethod
-    def of(cls, *ops, names: tuple[str, ...] | None = None, dtypes: tuple = ()) -> Monoid:
-        """The componentwise convenience constructor — the ``M(op…)`` spelling: one independent
-        self-fold ⊕ᵢ per state component (``sᵢ = ⊕ᵢ(sᵢ, sᵢ′)`` — the reassignment shape
-        ``id_combine_states`` spells), seeds the op identities. The ONE construction site of a
-        plain fold's combine program. ``names`` are the state component names — recognition
-        threads its REAL accumulator names through here (the byte-identity requirement: the
-        derived serial step's ``Accum``\\ s carry these names); the generic ``s{i}`` default
-        serves nameless algebra (the spec/property tests)."""
-        impls = tuple(ElementwiseImpl(o) if isinstance(o, str) else o for o in ops)
-        idents = []
-        for op in impls:
-            if op.identity is None:
-                raise ValueError(f"Monoid.of: op {op.name!r} has no identity — not a monoid ⊕")
-            idents.append(op.identity)
-        n = len(impls)
-        s = tuple(names) if names is not None else tuple(f"s{i}" for i in range(n))
-        if len(s) != n:
-            raise ValueError(f"Monoid.of: {n} ops but {len(s)} state names")
-        o = tuple(f"{nm}__o" for nm in s)
-        body = Body(tuple(Assign(name=s[i], op=impls[i], args=(s[i], o[i])) for i in range(n)))
-        return cls(init=tuple(idents), combine=Lambda(params=s + o, body=body, results=s), dtypes=dtypes)
-
-    def rename(self, rename_ssa) -> Monoid:
-        """A copy with every state/temp name in ``combine`` mapped through ``rename_ssa`` — the
-        lockstep the ``Fold`` rewrite applies so the stored algebra tracks its fold's SSA renames
-        (the same contract as :meth:`Carrier.rename`). A second-operand ``<n>__o`` spelling
-        follows its component name so the S × S shape survives canonical renumbering. A GENERATED
-        twisted program (the exp/LSE family) is REGENERATED over the renamed state names rather
-        than patched — its internal temps are namespaced on the state spelling, and regeneration
-        is the deterministic rule that keeps the stored program equal to the generator's output
-        (the formation invariant a consuming ``Fold`` asserts)."""
-
-        def rn(name: str) -> str:
-            if name.endswith("__o"):
-                return f"{rename_ssa(name[:-3])}__o"
-            return rename_ssa(name)
-
-        comb = self.combine
-        if self.component_ops() is None:
-            old = tuple(r for r in comb.results if isinstance(r, str))
-            old_other = tuple(f"{n}__o" for n in old)
-            if comb.params == old + old_other and tuple(comb.body) == tuple(exp_combine_states(old, old_other)):
-                names = tuple(rename_ssa(n) for n in old)
-                other = tuple(f"{n}__o" for n in names)
-                lam = Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
-                return Monoid(init=self.init, combine=lam, dtypes=self.dtypes)
-        lam = Lambda(
-            params=tuple(rn(p) for p in comb.params),
-            body=Body(tuple(st.rewrite(rn) for st in comb.body)),
-            results=tuple(rn(r) if isinstance(r, str) else r for r in comb.results),
-        )
-        return Monoid(init=self.init, combine=lam, dtypes=self.dtypes)
-
-    def component_ops(self) -> tuple[ElementwiseImpl, ...] | None:
-        """The DEGENERATE shape test on ``combine`` — every result ``sᵢ″ = ⊕ᵢ(sᵢ, sᵢ′)``,
-        independently and in order (the ``as_accums`` read). Returns the per-component ⊕ᵢ
-        handles (what the trait/legality queries consume), or ``None`` for a twisted monoid
-        (any cross-component read, rescale temp, or reordering fails the shape)."""
-        n = self.arity
-        lam = self.combine
-        if len(lam.body) != n:
+def component_ops(combine: Lambda) -> tuple[ElementwiseImpl, ...] | None:
+    """The DEGENERATE shape test on a stored ``combine`` — every result ``sᵢ″ = ⊕ᵢ(sᵢ, sᵢ′)``,
+    independently and in order (the ``as_accums`` read). Returns the per-component ⊕ᵢ handles
+    (what the trait/legality queries consume), or ``None`` for a twisted monoid (any
+    cross-component read, rescale temp, or reordering fails the shape)."""
+    n = len(combine.results)
+    if len(combine.body) != n or len(combine.params) != 2 * n:
+        return None
+    s, o = combine.params[:n], combine.params[n:]
+    ops: list[ElementwiseImpl] = []
+    for i, st in enumerate(combine.body):
+        if not isinstance(st, Assign) or st.name != combine.results[i] or st.args != (s[i], o[i]):
             return None
-        s, o = lam.params[:n], lam.params[n:]
-        ops: list[ElementwiseImpl] = []
-        for i, st in enumerate(lam.body):
-            if not isinstance(st, Assign) or st.name != lam.results[i] or st.args != (s[i], o[i]):
-                return None
-            ops.append(st.op)
-        return tuple(ops)
+        ops.append(st.op)
+    return tuple(ops)
 
-    @property
-    def degenerate(self) -> bool:
-        """True iff the combine is componentwise (a plain fold) — a derived predicate, never a
-        storage arm."""
-        return self.component_ops() is not None
+
+def degenerate(combine: Lambda) -> bool:
+    """True iff ``combine`` is componentwise (a plain fold) — a derived predicate, never a
+    storage arm."""
+    return component_ops(combine) is not None
+
+
+def rename_combine(combine: Lambda, rename_ssa) -> Lambda:
+    """A copy of a stored ``combine`` with every state/temp name mapped through ``rename_ssa`` —
+    the lockstep the ``Fold`` rewrite applies so the stored algebra tracks its fold's SSA renames
+    (the same contract as :meth:`Carrier.rename`). A second-operand ``<n>__o`` spelling follows
+    its component name so the S × S shape survives canonical renumbering. A GENERATED twisted
+    program (the exp/LSE family) is REGENERATED over the renamed state names rather than patched —
+    its internal temps are namespaced on the state spelling, and regeneration is the
+    deterministic rule that keeps the stored program equal to the generator's output (the
+    formation invariant the consuming ``Fold`` asserts)."""
+
+    def rn(name: str) -> str:
+        if name.endswith("__o"):
+            return f"{rename_ssa(name[:-3])}__o"
+        return rename_ssa(name)
+
+    if component_ops(combine) is None:
+        old = tuple(r for r in combine.results if isinstance(r, str))
+        old_other = tuple(f"{n}__o" for n in old)
+        if combine.params == old + old_other and tuple(combine.body) == tuple(exp_combine_states(old, old_other)):
+            names = tuple(rename_ssa(n) for n in old)
+            other = tuple(f"{n}__o" for n in names)
+            return Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
+    return Lambda(
+        params=tuple(rn(p) for p in combine.params),
+        body=Body(tuple(st.rewrite(rn) for st in combine.body)),
+        results=tuple(rn(r) if isinstance(r, str) else r for r in combine.results),
+    )
 
 
 # --------------------------------------------------------------------------------------------
@@ -380,13 +349,13 @@ def eval_lambda(lam: Lambda, args: tuple) -> tuple:
     return tuple(env[r] if isinstance(r, str) else r for r in lam.results)
 
 
-def foldmap_eval(monoid: Monoid, lift: Lambda, elements) -> tuple:
+def foldmap_eval(init: tuple, combine: Lambda, lift: Lambda, elements) -> tuple:
     """⟦Fold⟧ — the denotational foldMap: fold ``combine`` over the per-element singleton states
     ``lift(k, v₁…vₙ)``, seeded at ``init``. Each element of ``elements`` is the positional arg
     tuple of one ``lift`` application (the iteration var first, then the operand values)."""
-    state = tuple(monoid.init)
+    state = tuple(init)
     for el in elements:
-        state = eval_lambda(monoid.combine, (*state, *eval_lambda(lift, tuple(el))))
+        state = eval_lambda(combine, (*state, *eval_lambda(lift, tuple(el))))
     return state
 
 
@@ -415,4 +384,4 @@ def _merge_reads(merge: tuple[Stmt, ...], state_names: tuple[str, ...]) -> tuple
     return tuple(reads)
 
 
-__all__ = ["Carrier", "Monoid", "State", "StateMerge", "Twist", "eval_lambda", "foldmap_eval"]
+__all__ = ["Carrier", "M", "State", "StateMerge", "Twist", "component_ops", "degenerate", "eval_lambda", "foldmap_eval", "rename_combine"]

@@ -1,4 +1,5 @@
-"""The λ-spelled :class:`Fold` (1o) — degenerate folds store ``lift: Lambda`` + ``Monoid`` and
+"""The λ-spelled :class:`Fold` (1o) — degenerate folds store ``lift: Lambda`` + the flat
+``(init, combine)`` pair (the ``Monoid`` wrapper dissolved at 1r) and
 DERIVE the serial step, the ``Accum`` forms, and the ``carrier`` annotation.
 
 The contract these pin: (a) :meth:`Fold.from_loop` keeps the λ spelling ONLY when the derived
@@ -14,7 +15,7 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, degenerate
 from emmy.compiler.ir.stmt.passes import rewrite
 from emmy.compiler.ir.tile import Channel, ContractionView, Fold, contraction_view
 
@@ -38,7 +39,7 @@ def test_from_loop_stores_the_canonical_shape_lambda_spelled() -> None:
     assert fold.lift is not None and len(fold.step) == 0
     assert fold.lift.params == ("k",)  # the iteration var; loads stay inline in the lift
     assert fold.lift.results == ("v1",)
-    assert fold.monoid.degenerate and fold.monoid.combine.results == ("acc0",)
+    assert degenerate(fold.combine) and fold.combine.results == ("acc0",)
     # The gate's promise: the derived loop IS the captured loop — carrier annotation included.
     assert fold.loop == loop
     assert fold.out == "acc0"
@@ -97,9 +98,9 @@ def test_twisted_from_loop_stores_the_true_monoid() -> None:
     fold = Fold.from_loop(loop)
     assert fold.lift is not None and len(fold.step) == 0
     assert fold.lift.results == ("x0", 1.0)  # ι spelled in the lift — the singleton state
-    assert fold.monoid.init == (float("-inf"), 0.0)
-    assert not fold.monoid.degenerate
-    assert fold.monoid.combine.results == ("m_i", "l_i")  # recognition's names thread through
+    assert fold.init == (float("-inf"), 0.0)
+    assert not degenerate(fold.combine)
+    assert fold.combine.results == ("m_i", "l_i")  # recognition's names thread through
     # The derived serial step (combine at the singleton) reproduces the dissolved merge exactly.
     assert fold.loop == loop
     assert fold.role is AxisRole.TWISTED
@@ -123,7 +124,7 @@ def test_twisted_rewrite_regenerates_the_combine_over_renamed_state() -> None:
     fold = Fold.from_loop(_softmax_loop())
     ren = {"m_i": "m2", "l_i": "l2", "x0": "s0"}
     out = rewrite(fold, lambda n: ren.get(n, n), Sigma.IDENTITY, lambda a: a)
-    assert out.monoid.combine.results == ("m2", "l2")
+    assert out.combine.results == ("m2", "l2")
     assert out.carrier.state.names == ("m2", "l2")
     assert out.lift.results == ("s0", 1.0)
     # The regenerated combine still passes the formation verification (the fold constructed).
@@ -134,7 +135,7 @@ def test_rewrite_renames_lift_monoid_and_carrier_in_lockstep() -> None:
     fold = _view(2).as_fold()
     ren = {"acc0": "r0", "acc1": "r1", "a_e": "av", "b0_e": "b0v", "b1_e": "b1v", "acc0__v": "r0__v", "acc1__v": "r1__v"}
     out = rewrite(fold, lambda n: ren.get(n, n), Sigma.IDENTITY, lambda a: a)
-    assert out.monoid.combine.results == ("r0", "r1")
+    assert out.combine.results == ("r0", "r1")
     assert out.carrier.state.names == ("r0", "r1")  # the derived annotation tracks
     assert out.lift.params == ("k", "b0v", "av", "b1v")
     assert out.lift.results == ("r0__v", "r1__v")

@@ -77,7 +77,22 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.expr import Expr, Literal
 from emmy.compiler.ir.schedule import Placement, ReducePlan, Stage, TilePlan, WarpSpec
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carrier, Lambda, Load, Loop, Monoid, RenderCtx, State, Stmt, Twist
+from emmy.compiler.ir.stmt import (
+    Accum,
+    Assign,
+    Body,
+    Carrier,
+    Lambda,
+    Load,
+    Loop,
+    M,
+    RenderCtx,
+    State,
+    Stmt,
+    Twist,
+    component_ops,
+    rename_combine,
+)
 from emmy.compiler.ir.stmt.body import effectful_lambda
 from emmy.compiler.ir.stmt.carrier import Channel as CarrierChannel
 
@@ -155,14 +170,14 @@ def _fold_derived_step(fold: Fold) -> tuple[Stmt, ...]:
     same deterministic emitter that produced the stored combine), landing after the lift body —
     exactly where recognition's dissolved merge sat. Deterministic from the stored params only —
     kernel identity (``op_cache_key``) depends on nothing else."""
-    monoid, lam = fold.monoid, fold.lift
-    names = monoid.combine.results
-    ops = monoid.component_ops()
+    lam = fold.lift
+    names = fold.combine.results
+    ops = component_ops(fold.combine)
     if ops is None:  # the twisted (exp-family) serial step — the derived carrier's channels
         # carry the singleton terms (the lift results), so the generated streaming merge is the
         # singleton specialization of the stored combine, names included.
         return (*lam.body, *fold.carrier.merge)
-    dts = monoid.dtypes or (None,) * len(names)
+    dts = fold.dtypes or (None,) * len(names)
     accums = tuple(
         Accum(name=names[i], value=str(lam.results[i]), op=ops[i], dtype=dts[i], axes=(fold.axis.name,)) for i in range(len(names))
     )
@@ -182,12 +197,13 @@ def _fold_derived_step(fold: Fold) -> tuple[Stmt, ...]:
     return tuple(out)
 
 
-def _extract_lift(loop: Loop) -> tuple[Lambda, Monoid] | None:
+def _extract_lift(loop: Loop) -> tuple[Lambda, tuple, Lambda, tuple] | None:
     """Read the λ spelling off a DEGENERATE annotated reduce ``Loop`` whose body is the dissolved
     ``[pure lift stmts…, Accum folds]`` sequence: the pure prefix becomes the ``lift`` body (its
     loads stay inline — the demoted-matvec shape included), the ``Accum``\\ s' values its results,
-    and the carrier's channel ops thread into ``Monoid.of`` with the loop's REAL accumulator
-    names. ``None`` when the shape does not read off cleanly (a twisted carrier, a composed step,
+    and the carrier's channel ops thread into :func:`~emmy.compiler.ir.stmt.algebra.M` with the
+    loop's REAL accumulator names. Returns ``(lift, init, combine, dtypes)`` — the flat ⊕ pair —
+    or ``None`` when the shape does not read off cleanly (a twisted carrier, a composed step,
     a ``base``-``Accum``, a channel disagreement) — the caller keeps the ``step`` spelling.
     :meth:`Fold.from_loop` re-derives the loop and keeps the λ spelling only on byte-identity, so
     this extraction can stay shape-strict without a correctness burden."""
@@ -212,17 +228,17 @@ def _extract_lift(loop: Loop) -> tuple[Lambda, Monoid] | None:
         return None
     try:
         lift = Lambda(params=(loop.axis.name,), body=Body(tuple(prefix)), results=tuple(a.value for a in accums))
-        monoid = Monoid.of(*(ch.fold for ch in channels), names=names, dtypes=tuple(ch.dtype for ch in channels))
+        init, combine = M(*(ch.fold for ch in channels), names=names)
     except ValueError:
         return None  # an undefined result / identity-less op — not the canonical dissolved shape
-    return lift, monoid
+    return lift, init, combine, tuple(ch.dtype for ch in channels)
 
 
-def _extract_twisted_lift(loop: Loop, carrier: Carrier) -> tuple[Lambda, Monoid] | None:
+def _extract_twisted_lift(loop: Loop, carrier: Carrier) -> tuple[Lambda, tuple, Lambda, tuple] | None:
     """Read the λ spelling off an exp-family TWISTED reduce ``Loop`` (1p — online softmax): the
     body must be ``[pure score prefix…, the dissolved streaming merge]`` verbatim, the prefix
     becomes the ``lift`` body and the channels' injected terms its results (the singleton —
-    ``(x, 1)``), and the monoid stores the TRUE combine — the generated cross-partition
+    ``(x, 1)``), and the flat ⊕ pair stores the TRUE combine — the generated cross-partition
     state⊕state program over the loop's REAL state names. ``None`` when the shape does not read
     off cleanly — a composed step (flash's in-step QK / PV folds, which carry their own schedule
     slices and stay step-spelled until the derived-blocked-evaluation walker exists), a foreign
@@ -253,7 +269,7 @@ def _extract_twisted_lift(loop: Loop, carrier: Carrier) -> tuple[Lambda, Monoid]
         combine = Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
     except ValueError:
         return None
-    return lift, Monoid(init=(float("-inf"),) + (0.0,) * (len(names) - 1), combine=combine)
+    return lift, (float("-inf"),) + (0.0,) * (len(names) - 1), combine, ()
 
 
 @dataclass(frozen=True)
@@ -313,32 +329,43 @@ class Fold(Stmt):
     #
     # ---- the λ-foldMap spelling (1o) — the DEGENERATE fold's storage: a PURE ``lift``
     # ``λ(k, v₁…vₙ) → S`` (params: the iteration var first, then one per operand edge, bound
-    # POSITIONALLY) plus the true ``Monoid`` ``(init, combine)`` whose combine carries the REAL
-    # accumulator names (its results). The serial step, the ``Accum`` forms and the ``carrier``
-    # annotation are DERIVED (:func:`_fold_derived_step` / ``__post_init__``); a twisted /
-    # composed-step fold keeps the ``step`` spelling until 1p. ---------------------------------- #
+    # POSITIONALLY) plus the TRUE monoid's flat ``(init, combine)`` pair whose combine carries
+    # the REAL accumulator names (its results) — the ``Monoid`` wrapper dissolved at 1r. The
+    # serial step, the ``Accum`` forms and the ``carrier`` annotation are DERIVED
+    # (:func:`_fold_derived_step` / ``__post_init__``). ``dtypes`` is the optional per-component
+    # ACCUMULATOR dtype side-tuple (precision, not algebra — it exists only so lowered
+    # ``Accum``\\ s stay byte-identical). --------------------------------------------------- #
     lift: Lambda | None = None
-    monoid: Monoid | None = None
+    init: tuple = ()  # the ⊕ seeds — op identities for a plain fold; (−inf, 0, …) LSE
+    combine: Lambda | None = None  # S × S → S — THE ⊕ (one program; λ-spelled folds only)
+    dtypes: tuple = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.step, Body):
             object.__setattr__(self, "step", Body.coerce(self.step))
+        if not isinstance(self.init, tuple):
+            object.__setattr__(self, "init", tuple(self.init))
         if self.lift is None:
             assert self.carrier is not None, "a step-spelled Fold needs its carrier annotation"
             return
         # λ-spelled formation: one program per relation — validate the positional binding and
-        # derive the carrier annotation from (monoid, lift), never storing a second spelling.
-        assert self.monoid is not None, "a λ-spelled Fold stores (monoid, lift) together"
+        # derive the carrier annotation from (init, combine, lift), never storing a second
+        # spelling. The S × S → S arity check is the dissolved wrapper's formation invariant,
+        # relocated here.
+        assert self.combine is not None, "a λ-spelled Fold stores (init, combine, lift) together"
         assert len(self.step) == 0, "a λ-spelled Fold has no step — the serial step is derived"
+        n = len(self.init)
+        if len(self.combine.params) != 2 * n or len(self.combine.results) != n:
+            raise ValueError(f"Fold combine must be S × S → S at arity {n}: params={self.combine.params} results={self.combine.results}")
         lam = self.lift
         assert lam.params[:1] == (self.axis.name,), f"lift param 0 must be the iteration var {self.axis.name!r}: {lam.params}"
         bound = tuple(_operand_name(e) for e in self.operands)
         assert tuple(lam.params[1:]) == bound, f"lift params {lam.params[1:]} must bind the operand edges {bound} positionally"
-        assert len(lam.results) == self.monoid.arity, "one lift result per monoid component"
-        ops = self.monoid.component_ops()
-        names = self.monoid.combine.results
+        assert len(lam.results) == n, "one lift result per monoid component"
+        ops = component_ops(self.combine)
+        names = self.combine.results
         if ops is not None:  # DEGENERATE: the componentwise ``id``-family annotation
-            dts = self.monoid.dtypes or (None,) * len(names)
+            dts = self.dtypes or (None,) * len(names)
             channels = tuple(CarrierChannel(fold=op, term=r, dtype=dt) for op, r, dt in zip(ops, lam.results, dts, strict=True))
             object.__setattr__(self, "carrier", Carrier(state=State(names=names), twist=Twist(family="id", channels=channels)))
             return
@@ -352,7 +379,7 @@ class Fold(Stmt):
 
         other = State(names=names).other
         expected = exp_combine_states(names, other)
-        assert self.monoid.combine.params == names + other and tuple(self.monoid.combine.body) == tuple(expected), (
+        assert self.combine.params == names + other and tuple(self.combine.body) == tuple(expected), (
             "a twisted Fold's combine must be the generated exp/LSE-family program over its state names"
         )
         score = lam.results[0]
@@ -366,8 +393,9 @@ class Fold(Stmt):
         """Build a :class:`Fold` from an already-annotated reduce ``Loop`` (its ``carrier`` /
         ``axis`` / body — the role is DERIVED, see :attr:`role`, so the loop's own annotation is
         not captured) — the recognize-side constructor. A DEGENERATE loop whose body is the
-        dissolved ``[pure lift stmts…, Accum folds]`` sequence stores λ-spelled (``lift`` +
-        ``Monoid.of`` threading the loop's real accumulator names); the reconstruction gate is
+        dissolved ``[pure lift stmts…, Accum folds]`` sequence stores λ-spelled (``lift`` + the
+        flat ``(init, combine)`` pair threading the loop's real accumulator names); the
+        reconstruction gate is
         exact — the λ spelling is kept ONLY when :attr:`loop` reproduces ``loop`` byte-identically
         (fields, names, ``axes`` tuples included), else the captured ``step`` spelling stands
         (twisted carriers, composed steps, any non-canonical shape). :attr:`loop` reconstructs the
@@ -375,8 +403,8 @@ class Fold(Stmt):
         here)."""
         lifted = _extract_lift(loop)
         if lifted is not None:
-            lift, monoid = lifted
-            fold = cls(carrier=None, axis=loop.axis, unroll=loop.unroll, lift=lift, monoid=monoid)
+            lift, init, combine, dts = lifted
+            fold = cls(carrier=None, axis=loop.axis, unroll=loop.unroll, lift=lift, init=init, combine=combine, dtypes=dts)
             if fold.loop == loop:  # the byte-identity gate, settled at construction
                 return fold
         return cls(carrier=loop.carrier, axis=loop.axis, step=loop.body, unroll=loop.unroll)
@@ -812,7 +840,7 @@ class ContractionView:
             results=tuple(f"{acc}__v" for acc in accs),
         )
         dtypes = tuple(ch.dtype for ch in self.loop.carrier.twist.channels)
-        monoid = Monoid.of(*(["add"] * len(accs)), names=accs, dtypes=dtypes)
+        init, combine = M(*(["add"] * len(accs)), names=accs)
         return Fold(
             carrier=None,
             axis=self.k_axis,
@@ -820,7 +848,9 @@ class ContractionView:
             tile=self.tile,
             stage=self.stage,
             lift=lift,
-            monoid=monoid,
+            init=init,
+            combine=combine,
+            dtypes=dtypes,
         )
 
     # ---- params: the (m, n) output axes unpacked ---------- #
@@ -1028,7 +1058,7 @@ def _(s: Fold, rename, sigma, axis_fn):
             body=Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.lift.body)),
             results=tuple(rename(r) if isinstance(r, str) else r for r in s.lift.results),
         )
-        return replace(s, carrier=None, axis=axis, operands=operands, lift=lift, monoid=s.monoid.rename(rename))
+        return replace(s, carrier=None, axis=axis, operands=operands, lift=lift, combine=rename_combine(s.combine, rename))
     return replace(
         s,
         carrier=s.carrier.rename(rename),
@@ -1054,7 +1084,7 @@ def _parse_bilinear(fold) -> tuple[object, tuple] | None:
     by_name = {_operand_name(e): e for e in fold.operands}
     if fold.lift is not None:
         lam = fold.lift
-        acc_names = fold.monoid.combine.results
+        acc_names = fold.combine.results
         lifts = {st.name: st for st in lam.body if isinstance(st, Assign)}
         if len(lam.body) != len(acc_names):
             return None  # exactly one lift Assign per component — nothing else in the λ body

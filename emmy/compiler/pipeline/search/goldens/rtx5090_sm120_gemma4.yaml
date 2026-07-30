@@ -1335,9 +1335,9 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
-    emmy_us: 33.9
-    cublas_us: 31.5
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x4/k4', REDUCE: 'g2a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 28.6
+    cublas_us: 26.7
   - kernel: matmul
     name: gemma4_12b.k_proj_global.m64.lin
     M: 64
@@ -3055,8 +3055,23 @@ configs:
     knobs: {PLACE: 'cut'}
     emmy_us: 190.0
     cublas_us: 184.0
-  # global m32: the g8k split total (38.1 + 2.0 finalize); at this shape the split beats every
-  # unsplit tile by >2x (68 CTAs of w1x16 under-fill 170 SMs).
+  # global m32: the CUT placement halves the fused g8k split total below — same reason the split beat
+  # the unsplit tiles (68 CTAs of w1x16 under-fill 170 SMs), taken further: cut into a plain gmem-A
+  # matmul the enumeration can tile at 136 CTAs on d2/tma/ring.
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.norm_qk_global.m32.cut.lin
+    # M: 32
+    # H: 3840
+    # N: 8704
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 19.8
+    # cublas_us: 29.0
+  # the fused g8k split total (38.1 + 2.0 finalize); at this shape the split beats every
+  # unsplit tile by >2x.
   - kernel: norm_linear
     name: gemma4_12b.norm_qk_global.m32.lin
     M: 32
@@ -3385,9 +3400,9 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
-    emmy_us: 233.6
-    cublas_us: 156.0
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 146.7
+    cublas_us: 154.0
   - kernel: matmul
     name: gemma4_12b.gate_up_cat.m64.lin
     M: 64
@@ -3395,9 +3410,9 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
-    emmy_us: 203.9
-    cublas_us: 156.0
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f1x4/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 145.6
+    cublas_us: 154.0
   - kernel: matmul
     name: gemma4_12b.qkv_cat.m64.lin
     M: 64
@@ -3405,9 +3420,9 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
-    emmy_us: 34.0
-    cublas_us: 29.6
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x4/k4', REDUCE: 'g2a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 28.6
+    cublas_us: 26.7
   - kernel: matmul
     name: gemma4_12b.qk_global_cat.m64.lin
     M: 64
@@ -3418,16 +3433,6 @@ configs:
     knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 35.5
     cublas_us: 47.8
-  - kernel: matmul
-    name: gemma4_12b.gate_up_cat.m64.lin
-    M: 64
-    N: 30720
-    K: 3840
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
-    emmy_us: 225.4
-    cublas_us: 153.4
 
   # M=4096 merged (the mnbt-4096 prefill chunk). The fm consumer rows are what turn the cut
   # into an eager win (qkv cut total 940 fm vs eager 1200); the std consumers sit at parity.
@@ -3754,9 +3759,14 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
-    emmy_us: 481.4
-    cublas_us: 292.0
+    # The std lane's tile-M rule at M=256: `k4` and `gm8` group-M rasterization (L2 reuse across the
+    # N sweep) are both required, and the cross-CTA split is not. w4x2/f2x4 at k2 with a g4k split —
+    # the pre-2026-07-30 record — costs 1.74x cuBLAS; the same tile at k4 with gm8 and no split costs
+    # 1.07x. This row also floors the FUSED norm_gate_up.m256 edge, which deploys `PLACE@cone: cut`
+    # and so resolves its matmul against this shape: that path measures 483.5 -> 296.4 us.
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k4', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 291.8
+    cublas_us: 273.7
   - kernel: matmul
     name: gemma4_12b.gate_up_cat.m256.lin
     M: 256

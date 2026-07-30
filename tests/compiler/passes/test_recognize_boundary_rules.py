@@ -103,12 +103,22 @@ def test_lift_partitions_independent_reduce_and_epilogue_preamble():
         )
     )
 
-    node, free = recognize._lift(list(body), "out")
+    node, free, stores = recognize._lift(list(body), "out")
 
     assert [axis.name for axis in free] == ["m", "n"]
-    assert isinstance(node, Contraction) and node.a_computed
-    assert {stmt.input for stmt in node.a_body if isinstance(stmt, Load)} == {"one_buf", "x"}
-    assert isinstance(node.epilogue[0], Load) and node.epilogue[0].input == "bias_buf"
+    # The λ-era spelling: a projecting Map over the stored role=CONTRACTION fold whose shared A
+    # is the computed cone (the GELU-constant preamble folded INSIDE K), the bias load riding the
+    # projection body — the preamble split kept the two independent feeds apart.
+    from emmy.compiler.ir.tile import Map as _Map
+    from emmy.compiler.ir.tile.ir import _operand_body, shared_operand
+
+    assert isinstance(node, _Map) and len(node.sources) == 1
+    fold = node.sources[0]
+    a_edge = shared_operand(fold)
+    assert a_edge is not None and not isinstance(a_edge, Load), "A must be the computed cone"
+    a_loads = {st.input for st in _operand_body(a_edge) if isinstance(st, Load)}
+    assert a_loads == {"one_buf", "x"}
+    assert isinstance(node.body[0], Load) and node.body[0].input == "bias_buf"
 
 
 def test_lift_recognizes_contraction_between_views_of_same_packed_buffer():
@@ -153,12 +163,18 @@ def test_lift_recognizes_contraction_between_views_of_same_packed_buffer():
         )
     )
 
-    node, free = recognize._lift(list(body), "score")
+    node, free, stores = recognize._lift(list(body), "score")
 
     assert [axis.name for axis in free] == ["m", "n"]
-    assert isinstance(node, Contraction)
-    assert isinstance(node.a_operand, Load)
-    assert node.a_operand.input == node.b_load.input == "packed_qkv"
+    # Both views of the packed buffer hoist as materialized operand edges of the stored fold.
+    from emmy.compiler.ir.tile import Fold as _Fold
+    from emmy.compiler.ir.tile.ir import shared_operand
+
+    fold = node.sources[0] if not isinstance(node, _Fold) else node
+    assert isinstance(fold, _Fold) and fold.role.name == "CONTRACTION"
+    a_edge = shared_operand(fold)
+    assert isinstance(a_edge, Load)
+    assert {e.input for e in fold.operands if isinstance(e, Load)} == {"packed_qkv"}
 
 
 # --------------------------------------------------------------------------- #
@@ -220,13 +236,18 @@ def test_wide_m1_flinear_uses_single_warp_k_fold():
     reduction to deploy selection, while tune retains the complete fork."""
     from dataclasses import replace
 
+    from emmy.compiler.pipeline.knob import family_of
+
     ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4080")
     _, tile = _resolve(_m1_linear_graph(), ctx=ctx)
-    reduce_specs = [v for k, v in tile.knobs.items() if k.startswith("REDUCE@")]
-    assert reduce_specs == ["b32"]
+    # F1 site grammar: the coop WIDTH rides the ONE WORK entry; the REDUCE value is site-local.
+    reduce_specs = [v for k, v in tile.knobs.items() if family_of(k) == "REDUCE"]
+    assert reduce_specs == ["coop"]
+    assert tile.knobs.get("WORK") == "t32"
     tune_rows, _ = _resolve(_m1_linear_graph(), ctx=replace(ctx, validate_pins=False))
-    offered = {v for row in tune_rows for k, v in row.items() if k.startswith("REDUCE@")}
-    assert "" in offered and "b32" in offered
+    offered = {v for row in tune_rows for k, v in row.items() if family_of(k) == "REDUCE"}
+    assert "" in offered and "coop" in offered
+    assert any(row.get("WORK") == "t32" for row in tune_rows)
 
 
 def test_rtx4080_dit_qkv_narrows_to_measured_deploy_schedule():
@@ -238,8 +259,12 @@ def test_rtx4080_dit_qkv_narrows_to_measured_deploy_schedule():
     rows, _ = _resolve(_norm_linear_graph(S=256, H=1152, inter=3456), pick=_is_warp_row, ctx=ctx)
     warp = [r for r in rows if _is_warp_row(r)]
     assert len(warp) == 1
-    assert any(v == "a:mma_m16n8k16_f16_f32/w4x1/f2x4/k4" for k, v in warp[0].items() if k.startswith("TILE@"))
-    assert any(v == "d1/sync" for k, v in warp[0].items() if k.startswith("STAGE@"))
+    # F1 site grammar: the measured legacy winner narrows via its site half + the WORK inventory.
+    from emmy.compiler.pipeline.knob import family_of as _fam
+
+    assert any(v == "mma_m16n8k16_f16_f32/f2x4/k4" for k, v in warp[0].items() if _fam(k) == "TILE")
+    assert warp[0].get("WORK") == "w4x1"
+    assert any(v == "d1/sync" for k, v in warp[0].items() if _fam(k) == "STAGE")
 
     tune_rows, _ = _resolve(
         _norm_linear_graph(S=256, H=1152, inter=3456),

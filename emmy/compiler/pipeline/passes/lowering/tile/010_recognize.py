@@ -241,13 +241,31 @@ def _lift_cell(cell: list[Stmt], free: list, output: str) -> tuple[Map | Fold, t
     # ``Map`` (its loop-IR order is preserved verbatim).
     before = [s for s in cell[:idx] if not isinstance(s, Init)]
     after = list(cell[idx + 1 :])
-    before_defs = {n for s in before for n in s.defines()}
-    feeds_reduce = bool(before_defs & _reads(list(rloop.body)))
-    feeds_epilogue = bool(before_defs & _reads(after))
-    if feeds_reduce and feeds_epilogue:
+    reduce_need = _reads(list(rloop.body))
+    epilogue_need = _reads(after)
+    reduce_idx: set[int] = set()
+    epilogue_idx: set[int] = set()
+    for i in range(len(before) - 1, -1, -1):
+        stmt = before[i]
+        defs = set(stmt.defines())
+        feeds_reduce = bool(defs & reduce_need)
+        feeds_epilogue = bool(defs & epilogue_need)
+        if feeds_reduce and feeds_epilogue:
+            return _flat_cell(cell)
+        if feeds_reduce:
+            reduce_idx.add(i)
+            reduce_need.update(stmt.deps())
+        else:
+            # Keep unused pure preamble stmts on the epilogue side, preserving the old behavior
+            # and original order. If a later epilogue stmt depends on this one, the reverse walk
+            # has already added that dependency to ``epilogue_need``.
+            epilogue_idx.add(i)
+            if feeds_epilogue:
+                epilogue_need.update(stmt.deps())
+    if reduce_idx & epilogue_idx:
         return _flat_cell(cell)
-    pre_reduce = tuple(before) if feeds_reduce else ()
-    pre_epilogue = () if feeds_reduce else tuple(before)
+    pre_reduce = tuple(s for i, s in enumerate(before) if i in reduce_idx)
+    pre_epilogue = tuple(s for i, s in enumerate(before) if i in epilogue_idx)
     annotated = _annotate_reduce(rloop, pre_reduce)
     if annotated is None:
         return _flat_cell(cell)

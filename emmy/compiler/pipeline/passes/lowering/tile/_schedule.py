@@ -645,6 +645,51 @@ def _fragment_epilogue_ok(epilogue: Body) -> bool:
     return True
 
 
+def _rtx4080_dit_deploy_rows(rows: list[dict], probe: ContractionView | None, keys: tuple[str, str, str], ctx) -> list[dict]:
+    """Narrow a deterministic RTX-4080 deploy to the measured DiT contraction winner, while
+    leaving tune/search and explicit knob pins untouched. The recorded winners are LEGACY
+    spellings; the comparison canonicalizes both sides through the site codec
+    (``canon_family_value``) and checks the row's WORK against the winner's embedded worker
+    tokens, so the table survives the step-7 value-grammar split verbatim."""
+    if (
+        probe is None
+        or ctx is None
+        or not ctx.validate_pins
+        or ctx.gpu_name != "NVIDIA GeForce RTX 4080"
+        or any(k.raw() is not None for k in (TILE, STAGE, REDUCE))
+        or not (probe.m.axis.extent.is_static and probe.n.axis.extent.is_static and probe.k_axis.extent.is_static)
+    ):
+        return rows
+    shape = (
+        probe.a_computed,
+        probe.b_trans,
+        probe.m.axis.extent.as_static(),
+        probe.n.axis.extent.as_static(),
+        probe.k_axis.extent.as_static(),
+    )
+    preferred = _RTX4080_DIT_CONTRACTION_DEFAULTS.get(shape)
+    if preferred is None:
+        return rows
+    from emmy.compiler.pipeline.knob import canon_family_value  # noqa: PLC0415
+
+    tile, stage, reduce = preferred
+    tkey, skey, rkey = keys
+    want_work = plan_workers(TilePlan.parse(tile))
+    picked = [
+        row
+        for row in rows
+        if canon_family_value("TILE", row.get(tkey, "")) == canon_family_value("TILE", tile)
+        and row.get(skey, "") == stage
+        and canon_family_value("REDUCE", row.get(rkey, "")) == canon_family_value("REDUCE", reduce)
+        and row.get(RASTER.name, "") == ""
+        and Workers.parse(row.get(WORK.name, "") or None) == want_work
+    ]
+    if not picked:
+        logger.warning("measured RTX 4080 DiT schedule is no longer enumerable for shape %s", shape)
+        return rows
+    return picked
+
+
 def _warp_atoms(kernel, probe, proj: Body | None = None) -> tuple[str, ...]:
     """The dtype-eligible tensor-core atom names for this contraction, ``()`` when the warp tier
     doesn't apply (unbindable node, a non-16-bit operand dtype, or a fragment-unrealizable gather
@@ -1837,6 +1882,14 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None, reduce_key: str | N
         # (:func:`_splitk_option`, consumed by ``030_split_reduce``); a warp row through
         # :func:`_warp_option`; the rest through :func:`_tile_option`.
         rows, keys = _tile_rows(tile, place, ctx)
+        # The measured RTX-4080 DiT deploy narrowing (main's #431), ported to the site grammar:
+        # probe the contraction view for the shape key and narrow a plain deploy to the recorded
+        # winner (tune/search and explicit pins untouched — the guard lives in the helper).
+        try:
+            deploy_probe, _dit_proj = _contraction_node(tile.op, place, TilePlan())
+        except LoweringError:
+            deploy_probe = None
+        rows = _rtx4080_dit_deploy_rows(rows, deploy_probe, keys, ctx)
         if not rows:
             # A computed-A (fused-cone) contraction with no legal warp row (fp32, no atoms, bad
             # geometry, over-budget slabs) contributes nothing — the recognizer's ``Map``-form
@@ -1979,7 +2032,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None, reduce_key: str | N
             forms = [*warps, *([chain] if chain is not None else [])]
             if forms:
                 empty = {_family_key(tile.op, TILE.name, head_f): "", _family_key(tile.op, TILE.name, pv_f): "", STAGE.name: ""}
-                forms += [_option(tile, place, spec, name, {**knobs, **empty}) for spec in _reduce_specs(tile, place)]
+                forms += [_option(tile, place, spec, name, {**knobs, **empty}) for spec in _reduce_specs(tile, place, ctx)]
                 forms = _filter_work(_narrow_flash_forms(forms, head, pv), lambda o: o.knobs.get(WORK.name, ""))
                 return forms if len(forms) > 1 else forms[0]
         else:
@@ -1992,7 +2045,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None, reduce_key: str | N
         # (The MONOID-producer cone — the fused norm→linear edge — no longer needs a rescue here:
         # recognition nodifies it to a computed-A ContractionView fork sibling, ``010_recognize``'s
         # ``bind_prologue_contraction`` merge, so it arrives at this dispatch as CONTRACTION.)
-    specs = _reduce_specs(tile, place)
+    specs = _reduce_specs(tile, place, ctx)
     return _filter_work(
         [_option(tile, place, spec, name, knobs, reduce_key=reduce_key) for spec in specs], lambda o: o.knobs.get(WORK.name, "")
     )
@@ -2058,6 +2111,53 @@ def _narrow_flash_forms(forms: list[TileOp], head: ContractionView, pv: Contract
         )
         return forms
     return kept
+
+
+def _rtx4080_dit_flash_deploy(forms: list[TileOp], red: Fold, head: ContractionView, pv: ContractionView, ctx) -> TileOp | None:
+    """The measured DiT S256/Hd72 flash winner on RTX 4080, or ``None``.
+
+    Like the contraction defaults above, this applies only to a deterministic unpinned deploy;
+    autotuning retains every flash geometry. The recorded winners are LEGACY spellings — matched
+    through the site codec (values via ``canon_family_value``, the worker halves via the row's
+    ``WORK`` inventory), so the table survives the step-7 value-grammar split verbatim."""
+    if (
+        ctx is None
+        or not ctx.validate_pins
+        or ctx.gpu_name != "NVIDIA GeForce RTX 4080"
+        or any(k.raw() is not None for k in (TILE, STAGE, REDUCE))
+        or not (red.axis.extent.is_static and head.m_axis.extent.is_static and head.k_axis.extent.is_static and pv.n_axis.extent.is_static)
+        or (
+            red.axis.extent.as_static(),
+            head.m_axis.extent.as_static(),
+            head.k_axis.extent.as_static(),
+            pv.n_axis.extent.as_static(),
+        )
+        != (256, 256, 72, 72)
+    ):
+        return None
+    from emmy.compiler.pipeline.knob import axis_of, canon_family_value, family_of  # noqa: PLC0415
+
+    qk = "a:mma_m16n8k16_f16_f32/w2x1/f2x8/k5"
+    expect = "a:mma_m16n8k16_f16_f32/w2x1/f2x9/k4"
+
+    def _fam_at(knobs: dict, family: str, axis: str) -> str:
+        for k, v in knobs.items():
+            if family_of(k) == family and axis_of(k) == axis:
+                return str(v)
+        return str(knobs.get(family, ""))
+
+    want_work = plan_workers(TilePlan.parse(qk))
+    for form in forms:
+        if (
+            canon_family_value("TILE", _fam_at(form.knobs, TILE.name, head.k_axis.name)) == canon_family_value("TILE", qk)
+            and canon_family_value("TILE", _fam_at(form.knobs, TILE.name, pv.k_axis.name)) == canon_family_value("TILE", expect)
+            and _fam_at(form.knobs, REDUCE.name, red.axis.name) in ("",)
+            and _fam_at(form.knobs, STAGE.name, red.axis.name) in ("",)
+            and Workers.parse(form.knobs.get(WORK.name, "") or None) == want_work
+        ):
+            return form
+    logger.warning("measured RTX 4080 DiT flash schedule is no longer enumerable")
+    return None
 
 
 def _stamp_twisted_split(rows: list[TileOp], plan: ReducePlan) -> list[TileOp]:
@@ -2579,6 +2679,9 @@ def _twisted_warp_options(
         b_dt = atom.operand_dtype("b").name
         kv_stage_ok = _buf_dtype_name(head.b) == b_dt and _buf_dtype_name(pv.b) == b_dt
         q_stage_ok = _buf_dtype_name(head.a) == atom.operand_dtype("a").name
+        # An overhanging head-dim atom uses the gmem fragment loaders' K-zero helpers. Async
+        # staging currently has no zero-fill contract for the row's padding bytes, so keep this
+        # geometry gmem-direct until the transports learn that mask.
         stage_cands = (
             [None]
             if not kv_stage_ok or head_dim.as_static() % atom_k

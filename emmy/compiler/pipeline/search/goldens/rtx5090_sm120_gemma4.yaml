@@ -1325,9 +1325,9 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 33.9
-    cublas_us: 31.5
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x4/k4', REDUCE: 'g2a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 28.6
+    cublas_us: 26.7
   - kernel: matmul
     name: gemma4_12b.k_proj_global.m64.lin
     M: 64
@@ -3155,11 +3155,22 @@ configs:
     emmy_us: 87.3
     cublas_us: 91.7
   # gate_up_cat m64 .lin: the missing layout twin — the cold pick fell to the transposed b<n>t
-  # band on the .lin operand (16.9 ms, the 2026-07-25 per-kernel table's 109x case). Both lanes
-  # trail eager at this width (the fused norm_gate_up.m64 form owns serving at 169.4); the rows
-  # pin the isolated/cut-re-entry deploy to sanity. NOTE the m1 .lin twins are deliberately NOT
-  # recorded: their b64 optima (12.6 us, L2-warm) would out-rank the .t rows on the layout-blind
-  # key and poison the serving (.t) deploy — the interleaved-row removal lesson.
+  # band on the .lin operand (16.9 ms, the 2026-07-25 per-kernel table's 109x case). NOTE the m1
+  # .lin twins are deliberately NOT recorded: their b64 optima (12.6 us, L2-warm) would out-rank
+  # the .t rows on the layout-blind key and poison the serving (.t) deploy — the interleaved-row
+  # removal lesson.
+  #
+  # THE TILE-M RULE AT THIS WIDTH. A wide-N streaming edge is DRAM-bound at M=64: the whole B slab
+  # (30720x3840 fp16 = 236 MB) has to be read exactly once, so the output tile's M extent must be
+  # exactly 64. A 32-row tile splits M into two blocks that each stream the full slab (B read
+  # twice); a 128- or 256-row tile reads it once but wastes half to three quarters of the mma. Both
+  # mistakes cost the same ~1.55x — the std lane measures 228 us at w4x2/f2x4 (tile M 128) AND at
+  # w1x8/f2x2 (tile M 32), against 147 us for every tile-M-64 geometry (w1x8/f4x1, w2x4/f2x2,
+  # w4x2/f1x4, w1x8/f4x4 all land 146.7-152.2). k>=4 is required with it: the same winner at k2
+  # falls back to 222.9. 146.7 us is 1.61 TB/s = 90% of the card's DRAM peak, and 0.95x cuBLAS.
+  # The rule generalizes to the other wide-N m64 edges (qkv_cat / q_proj_global below, 35.1 -> 28.6)
+  # and NOT to the narrow-N or long-K ones — q_proj (N=4096, L2-resident) and mlp_down (K=15360,
+  # K-bound) are 3-6% SLOWER on the tile-M-64 family, so their w1x8/f2x2 records stand.
   - kernel: matmul
     name: gemma4_12b.gate_up_cat.m64.lin
     M: 64
@@ -3167,9 +3178,9 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 233.6
-    cublas_us: 156.0
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 146.7
+    cublas_us: 154.0
   - kernel: matmul
     name: gemma4_12b.gate_up_cat.m64.lin
     M: 64
@@ -3187,9 +3198,9 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 34.0
-    cublas_us: 29.6
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x4/k4', REDUCE: 'g2a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 28.6
+    cublas_us: 26.7
   - kernel: matmul
     name: gemma4_12b.qk_global_cat.m64.lin
     M: 64
@@ -3512,9 +3523,14 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 481.4
-    cublas_us: 292.0
+    # The std lane's tile-M rule at M=256: `k4` and `gm8` group-M rasterization (L2 reuse across the
+    # N sweep) are both required, and the cross-CTA split is not. w4x2/f2x4 at k2 with a g4k split —
+    # the pre-2026-07-30 record — costs 1.74x cuBLAS; the same tile at k4 with gm8 and no split costs
+    # 1.07x. This row also floors the FUSED norm_gate_up.m256 edge, which deploys `PLACE@cone: cut`
+    # and so resolves its matmul against this shape: that path measures 483.5 -> 296.4 us.
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k4', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 291.8
+    cublas_us: 273.7
   - kernel: matmul
     name: gemma4_12b.gate_up_cat.m256.lin
     M: 256

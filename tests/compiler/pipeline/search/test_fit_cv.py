@@ -8,7 +8,7 @@ import json
 import pytest
 
 from emmy.commands.fit import register_fit_command
-from emmy.compiler.pipeline.search.prior.fit import Group, TwoStageFit, dual_rank, op_family
+from emmy.compiler.pipeline.search.prior.fit import Group, TwoStageFit, dual_rank, fit_two_stage, op_family
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 
 # --- op-family derivation ----------------------------------------------------------
@@ -55,7 +55,7 @@ def test_dual_rank_tie_plateau():
 def _case(name, tier, gpu, gidx=1, n_rows=6, key=None):
     """A tiny case whose rows carry a monotone D_a so a samples=0 descent has signal."""
     feats = [{"D_a": float(i), "D_b": float((i * 7) % 3)} for i in range(n_rows)]
-    return Group(key or f"{gpu}/{name}", name, tier, gpu, gidx, feats)
+    return Group.from_dicts(key or f"{gpu}/{name}", name, tier, gpu, gidx, feats)
 
 
 def _cases():
@@ -74,11 +74,16 @@ def _cases():
 NAMES = ["D_a", "D_b"]
 
 
+def _fit_model(groups, rng):
+    """The zero-seeded fold trainer the command layer wires up, at samples=0."""
+    return fit_two_stage(groups, NAMES, seed_weights={}, rng=rng, samples=0)
+
+
 # --- fold partitioning + pooling ---------------------------------------------------
 
 
 def test_run_axis_gpu_pools_every_golden_exactly_once():
-    out = fit_cv.run_axis(_cases(), NAMES, "gpu", samples=0, seed=0)
+    out = fit_cv.run_axis(_cases(), "gpu", fit_model=_fit_model, seed=0)
     # Every case held out exactly once, tagged with the fold (= its own card) that never trained on it.
     assert set(out["holdout"]["per_golden"]) == {c.key for c in _cases()}
     for key, row in out["holdout"]["per_golden"].items():
@@ -96,7 +101,7 @@ def test_run_axis_gpu_pools_every_golden_exactly_once():
 
 
 def test_run_axis_op_family_folds_group_variants():
-    out = fit_cv.run_axis(_cases(), NAMES, "op_family", samples=0, seed=0)
+    out = fit_cv.run_axis(_cases(), "op_family", fit_model=_fit_model, seed=0)
     # matmul.qkv.h4096 and its .dynM variant share one fold: held out together.
     qkv = [row for key, row in out["holdout"]["per_golden"].items() if "qkv" in key]
     assert len(qkv) == 3 and {r["fold"] for r in qkv} == {"matmul.qkv"}
@@ -113,7 +118,7 @@ def test_fittability_guard_excludes_fold_loudly():
         _case("matmul.mlp_down.h4096.dynM", "dyn", "gpuA", gidx=3),  # the ONLY dyn case
         _case("matmul.square.512", "thread", "gpuB"),
     ]
-    out = fit_cv.run_axis(cases, NAMES, "op_family", samples=0, seed=0)
+    out = fit_cv.run_axis(cases, "op_family", fit_model=_fit_model, seed=0)
     assert out["fold_detail"]["excluded"] == {"matmul.mlp_down": "dynamic weight set unfittable (0 dyn cases in training)"}
     assert "gpuA/matmul.mlp_down.h4096.dynM" not in out["holdout"]["per_golden"]
     assert "matmul.mlp_down" not in out["fold_detail"]["holdout_medians"]
@@ -127,7 +132,7 @@ def test_fittability_guard_excludes_fold_loudly():
 def _metrics():
     cases = _cases()
     model = TwoStageFit({"D_a": -1.0, "D_b": 0.25}, [0], {"D_a": -0.5}, [0])
-    cv = {"gpu": fit_cv.run_axis(cases, NAMES, "gpu", samples=0, seed=0)}
+    cv = {"gpu": fit_cv.run_axis(cases, "gpu", fit_model=_fit_model, seed=0)}
     skipped = [
         ("gpuA", "attention.hd128", fit_cv.OUT_OF_SCOPE),
         ("gpuA", "matmul.o_proj.h4096", "golden not in 12 candidates"),

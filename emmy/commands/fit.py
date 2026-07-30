@@ -37,7 +37,7 @@ from emmy.compiler.pipeline.search.golden import (
     ReduceGoldenConfig,
 )
 from emmy.compiler.pipeline.search.golden_eval import _enumerate, enumerate_graph
-from emmy.compiler.pipeline.search.prior.fit import Group, build_artifact, fit_two_stage, topk_table
+from emmy.compiler.pipeline.search.prior.fit import Group, fit_two_stage, topk_table
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit import linear as fit_linear
 
@@ -175,7 +175,7 @@ def build_cases() -> tuple[list[Group], list[tuple[str, str, str]]]:
         key_counts[key] = key_counts.get(key, 0) + 1
         if key_counts[key] > 1:
             key = f"{key}#{key_counts[key]}"
-        cases.append(Group(key, g.name, tier, g.gpu_name, gidx, feats))
+        cases.append(Group.from_dicts(key, g.name, tier, g.gpu_name, gidx, feats))
     return cases, skipped
 
 
@@ -202,7 +202,7 @@ def handle_fit(args) -> None:
 
     logger.info("Building golden dataset (each golden under its own card's context) ...")
     cases, skipped = build_cases()
-    names = sorted({k for c in cases for f in c.feats for k in f})
+    names = sorted({n for c in cases for n in c.feat_names})
     n_dyn = sum(1 for c in cases if c.tier == "dyn")
     logger.info("  %d static + %d dynamic golden cases, %d D_* features, %d skipped", len(cases) - n_dyn, n_dyn, len(names), len(skipped))
 
@@ -213,11 +213,7 @@ def handle_fit(args) -> None:
     if not isinstance(incumbent, dict) or "params" not in incumbent:
         raise SystemExit(f"no incumbent weights artifact to seed from at {config.offline_path() or _DEFAULT_FILE}")
     full = fit_two_stage(
-        [c.fit_case for c in cases],
-        names,
-        seed_weights=incumbent.get("weights", {}),
-        rng=np.random.default_rng(args.seed),
-        samples=args.samples,
+        cases, names, seed_weights=incumbent.get("weights", {}), rng=np.random.default_rng(args.seed), samples=args.samples
     )
     dyn_raw = full.dyn_raw if full.dyn_raw is not None else incumbent.get("weights_dynamic", full.static_raw)
     dyn_note = f"dynamic {topk_table(full.dyn_ranks)}" if full.dyn_ranks is not None else "carried from incumbent (no dynamic cases)"
@@ -227,8 +223,15 @@ def handle_fit(args) -> None:
     fit_logger = logging.getLogger(fit_linear.__name__)
     level = fit_logger.level
     fit_logger.setLevel(logging.WARNING)
+
+    # Fold-seeding policy lives here (recorded in the header): fold models seed from
+    # ZEROS — the incumbent's weights were fit on every golden, so seeding folds from
+    # them would leak each held-out golden into its own holdout model.
+    def fit_model(groups, rng):
+        return fit_two_stage(groups, names, seed_weights={}, rng=rng, samples=args.samples)
+
     try:
-        cv = {axis: fit_cv.run_axis(cases, names, axis, samples=args.samples, seed=args.seed) for axis in axes}
+        cv = {axis: fit_cv.run_axis(cases, axis, fit_model=fit_model, seed=args.seed) for axis in axes}
     finally:
         fit_logger.setLevel(level)
 
@@ -247,9 +250,7 @@ def handle_fit(args) -> None:
 
     import datetime  # noqa: PLC0415
 
-    artifact = build_artifact(
-        weights=full.static_raw,
-        weights_dynamic=dyn_raw,
+    artifact = shipped.to_artifact(
         params=incumbent["params"],
         provenance={
             "fitted": datetime.date.today().isoformat(),

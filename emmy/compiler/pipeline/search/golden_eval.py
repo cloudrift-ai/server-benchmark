@@ -16,7 +16,7 @@ from collections.abc import Callable
 
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search.features import tile_signature
-from emmy.compiler.pipeline.search.prior.fit.linear import dual_rank
+from emmy.compiler.pipeline.search.prior.fit.rank import dual_rank
 
 # Golden dtype spelling → the graph Tensor dtype name.
 _DTYPES = {"fp32": "f32", "fp16": "f16", "bf16": "bf16"}
@@ -116,7 +116,7 @@ def evaluate_golden(
     argmin deploys instead — rank 0 therefore means "greedy finds the golden", not
     "nothing scores strictly better". The pessimistic-optimistic gap is the tie-plateau
     width at the golden's score — the score-saturation canary (see
-    :func:`prior.fit.linear.dual_rank`, the one rank computation both flavors come
+    :func:`prior.fit.rank.dual_rank`, the one rank computation both flavors come
     from). ``scorer`` (``row → float``, higher better) defaults to the
     :class:`OfflinePrior` (negated latency); the online-prior diagnostics pass
     ``-prior.mean_score`` instead. Returns ``({}, None, 0, None)`` if nothing

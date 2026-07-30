@@ -1,21 +1,18 @@
-"""Offline learning-to-rank fit of the :class:`OfflinePrior` linear weights.
+"""The linear trainer and its fitted model — the offline learning-to-rank fit of the
+:class:`OfflinePrior` weights.
 
-The fit core behind ``scripts/golden_knob_heuristics.py`` — the script keeps the
-golden *case building* (reconstructing each golden's candidate enumeration needs
-the command layer's snippet tracer, which ``pipeline/`` must not import) and
-delegates the model fitting, rank evaluation, and artifact assembly here, so the
-trainer is importable library code with the one featurization and one artifact
-format shared by every caller.
+This module owns everything specific to the linear model class: the loss (:func:`objective` — tier-weighted
+golden rank), the optimizer (:func:`fit_weights` — random search + coordinate descent), the static/dyn
+two-stage chaining (:func:`fit_two_stage`), and the fitted model (:class:`TwoStageFit`, whose
+:meth:`~TwoStageFit.score_rows` is the single fit-side home of the static-vs-dynamic weight-set split — the
+CV harness and any other consumer score through it and never touch weight dicts). The dataset representation
+lives in :mod:`.group`, the model-agnostic rank metrics in :mod:`.rank`, and the fold/metrics harness in
+:mod:`.cv`; the trainer is importable library code with the one featurization and one artifact format shared
+by every caller (``emmy fit`` and the legacy ``scripts/golden_knob_heuristics.py`` wrapper).
 
-A **case** is the tuple ``(name, tier, golden_idx, feats)``: one golden's candidate
-pool, already featurized (``feats`` is the per-row ``D_*`` (+ ``MMA_tier``) feature
-dict list) with the golden's row pinned at ``golden_idx``. ``tier`` is
-``"thread"`` / ``"warp"`` / ``"dyn"`` / ``"reduce"`` / ``"pointwise"`` — used only
-to balance the per-tier case weights in the rank objective.
-
-The fit itself (:func:`fit_weights`) is random search + coordinate descent over one
-linear weight vector, minimizing the tier-weighted mean ``log2(rank+1)`` of the
-golden across all cases — deterministic for a given seeded ``rng``.
+The fit consumes :class:`~.group.Group` lists directly. Each fit z-scores over its own candidate pool;
+``seed_w`` arrives scaled by ``sd_ref`` (``ones`` for a raw-weight seed, the previous fit's ``sd`` to chain
+fits). Deterministic for a given seeded ``rng``.
 """
 
 from __future__ import annotations
@@ -27,47 +24,10 @@ from dataclasses import dataclass
 import numpy as np
 
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
+from emmy.compiler.pipeline.search.prior.fit.group import Group
+from emmy.compiler.pipeline.search.prior.fit.rank import rank_of_golden, topk_table
 
 logger = logging.getLogger(__name__)
-
-
-def feature_matrix(feats: list[dict[str, float]], names: list[str]) -> np.ndarray:
-    return np.array([[f.get(n, 0.0) for n in names] for f in feats], dtype=float)
-
-
-def rank_of_golden(scores: np.ndarray, gidx: int) -> int:
-    """0-based rank of the golden by descending score. Ties count AGAINST the golden
-    (``>=``): greedy deploy breaks score ties by enumeration order, and option-0 is the
-    per-cell / gmem-direct row — a tie IS a miss at deploy time. (The old ``>`` tie-optimism
-    let a fit with zero ``D_stage_*`` weights report top-1 golden ranks while the deploy pick
-    landed on the per-cell row — the 2026-07-02 sweep's 5-15x regressions.)
-
-    This is the FIT OBJECTIVE's rank (all ties count, emission order ignored) — the
-    reported metric rank is :func:`dual_rank`, whose pessimistic flavor mirrors the
-    deploy tiebreak exactly (only ties *earlier* in emission order count)."""
-    return int((scores >= scores[gidx]).sum()) - 1
-
-
-def dual_rank(scores, gidx: int) -> tuple[int, int]:
-    """The golden's 0-based rank by descending score, both tie semantics, from one pass:
-    ``(rank, rank_optimistic)``. ``rank`` is tie-PESSIMISTIC — strictly-greater rows plus
-    score-ties earlier in emission order, i.e. exactly the rows a greedy argmin deploys
-    ahead of the golden. ``rank_optimistic`` counts strictly-greater rows only — fair when
-    tied rows are genuine equivalents. The difference is the tie-plateau width at the
-    golden's score: a large gap flags a saturated/undecided scorer (the 2026-07 exp-squash
-    bug scored "top-1" on the optimistic count while cold deploys shipped emission-order
-    picks 12-29x off)."""
-    s = np.asarray(scores, dtype=float)
-    g = s[gidx]
-    optimistic = int((s > g).sum())
-    return optimistic + int((s[:gidx] == g).sum()), optimistic
-
-
-def topk_table(ranks: list[int], ks=(1, 5, 10, 25, 50, 100)) -> str:
-    n = len(ranks)
-    parts = [f"top{k}={sum(r < k for r in ranks)}/{n}" for k in ks]
-    med = sorted(ranks)[n // 2]
-    return "  ".join(parts) + f"   median={med}  mean_log2={np.mean([math.log2(r + 1) for r in ranks]):.2f}"
 
 
 def eval_weights(mats: list[np.ndarray], gidx: list[int], w: np.ndarray) -> list[int]:
@@ -82,16 +42,16 @@ def objective(ranks: list[int], weights: list[float]) -> float:
     return float(sum(vals) / sum(weights))
 
 
-def fit_weights(cases, names, sd_ref, *, seed_w, rng, samples):
-    """Random-search + coordinate-descent one weight vector over ``cases``.
+def fit_weights(groups: list[Group], names, sd_ref, *, seed_w, rng, samples):
+    """Random-search + coordinate-descent one weight vector over ``groups``.
     Each fit z-scores over its own candidate pool; ``seed_w`` arrives scaled by
     ``sd_ref`` (``ones`` for a raw-weight seed, the previous fit's ``sd`` to
     chain fits) and is re-scaled into this pool's z-space. Returns
     ``(best_w, best_ranks, mu, sd)`` in this pool's z-space."""
-    mats = [feature_matrix(feats, names) for _, _, _, feats in cases]
-    gidx = [gi for _, _, gi, _ in cases]
-    tier_n = {t: sum(1 for _, ct, _, _ in cases if ct == t) for _, t, _, _ in cases}
-    cw = [1.0 / tier_n[t] for _, t, _, _ in cases]
+    mats = [g.matrix(names) for g in groups]
+    gidx = [g.pinned_idx for g in groups]
+    tier_n = {t: sum(1 for g in groups if g.tier == t) for t in {g.tier for g in groups}}
+    cw = [1.0 / tier_n[g.tier] for g in groups]
 
     # Z-score over this fit's candidate pool so weights are comparable across features.
     allf = np.concatenate(mats, axis=0)
@@ -127,8 +87,8 @@ def fit_weights(cases, names, sd_ref, *, seed_w, rng, samples):
             step /= 2
 
     logger.info("  best: %s", topk_table(best_ranks))
-    for (name, tier, _, _), r in sorted(zip(cases, best_ranks, strict=True), key=lambda t: -t[1]):
-        logger.info("    %-32s [%-6s] rank=%5d", name, tier, r)
+    for g, r in sorted(zip(groups, best_ranks, strict=True), key=lambda t: -t[1]):
+        logger.info("    %-32s [%-6s] rank=%5d", g.name, g.tier, r)
     return best_w, best_ranks, mu, sd
 
 
@@ -151,25 +111,45 @@ class TwoStageFit:
     dyn_raw: dict[str, float] | None
     dyn_ranks: list[int] | None
 
+    def score_rows(self, group: Group) -> np.ndarray | None:
+        """The group's per-row linear scores (higher = predicted faster) under the raw
+        weight sets — the artifact-spelling scoring, exactly what the shipped prior
+        ranks with (away from the interaction gates). The static-vs-dynamic weight-set
+        selection lives HERE and nowhere else on the fit side. ``None`` when the group
+        needs the dynamic set and this fit has none (an unfittable fold — callers
+        exclude it up front)."""
+        w = self.dyn_raw if group.tier == "dyn" else self.static_raw
+        if w is None:
+            return None
+        names = sorted(w)
+        return group.matrix(names) @ np.array([w[n] for n in names])
 
-def fit_two_stage(cases, names, *, seed_weights: dict[str, float], rng, samples: int) -> TwoStageFit:
+    def to_artifact(self, *, params: dict, provenance: dict) -> dict:
+        """This fit as the ``OfflinePrior`` weights artifact dict. Both weight sets must
+        be present — a caller shipping a fit with no dynamic set substitutes its
+        fallback (e.g. the incumbent's) into ``dyn_raw`` first."""
+        assert self.dyn_raw is not None, "no dynamic weight set — substitute a fallback before assembling the artifact"
+        return build_artifact(weights=self.static_raw, weights_dynamic=self.dyn_raw, params=params, provenance=provenance)
+
+
+def fit_two_stage(groups: list[Group], names, *, seed_weights: dict[str, float], rng, samples: int) -> TwoStageFit:
     """The incumbent trainer's full chaining as one call: a static fit over the
-    non-``dyn`` cases seeded from the ``seed_weights`` raw dict (zeros where a name is
+    non-``dyn`` groups seeded from the ``seed_weights`` raw dict (zeros where a name is
     absent — an empty dict seeds from zero), then the dynamic fit over the ``dyn``
-    cases seeded from the static result in its z-space (``sd_ref`` chaining). ``rng``
+    groups seeded from the static result in its z-space (``sd_ref`` chaining). ``rng``
     is consumed sequentially by both stages, matching the script's draw order. The
-    static case list must be non-empty (the dynamic stage seeds from it) — callers
+    static group list must be non-empty (the dynamic stage seeds from it) — callers
     guard, this function does not."""
-    static_cases = [c for c in cases if c[1] != "dyn"]
-    dyn_cases = [c for c in cases if c[1] == "dyn"]
+    static_groups = [g for g in groups if g.tier != "dyn"]
+    dyn_groups = [g for g in groups if g.tier == "dyn"]
     seed_raw = np.array([seed_weights.get(n, 0.0) for n in names])
-    logger.info("== static fit (%d cases) ==", len(static_cases))
-    static_w, static_ranks, _, static_sd = fit_weights(static_cases, names, np.ones(len(names)), seed_w=seed_raw, rng=rng, samples=samples)
+    logger.info("== static fit (%d cases) ==", len(static_groups))
+    static_w, static_ranks, _, static_sd = fit_weights(static_groups, names, np.ones(len(names)), seed_w=seed_raw, rng=rng, samples=samples)
     static_raw = raw_weights(names, static_w, static_sd)
-    if not dyn_cases:
+    if not dyn_groups:
         return TwoStageFit(static_raw, static_ranks, None, None)
-    logger.info("== dynamic fit (%d cases) ==", len(dyn_cases))
-    dyn_w, dyn_ranks, _, dyn_sd = fit_weights(dyn_cases, names, static_sd, seed_w=static_w, rng=rng, samples=samples)
+    logger.info("== dynamic fit (%d cases) ==", len(dyn_groups))
+    dyn_w, dyn_ranks, _, dyn_sd = fit_weights(dyn_groups, names, static_sd, seed_w=static_w, rng=rng, samples=samples)
     return TwoStageFit(static_raw, static_ranks, raw_weights(names, dyn_w, dyn_sd), dyn_ranks)
 
 

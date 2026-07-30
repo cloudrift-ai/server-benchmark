@@ -73,7 +73,7 @@ def main() -> None:
 
     print("Building golden dataset (each golden under its own card's context) ...")
     cases, _skipped = build_cases()
-    names = sorted({k for c in cases for f in c.feats for k in f})
+    names = sorted({n for c in cases for n in c.feat_names})
     n_dyn = sum(1 for c in cases if c.tier == "dyn")
     print(f"  {len(cases) - n_dyn} static + {n_dyn} dynamic golden cases, {len(names)} D_* features")
 
@@ -88,13 +88,7 @@ def main() -> None:
     if not isinstance(incumbent, dict) or "params" not in incumbent:
         raise SystemExit(f"no incumbent weights artifact to seed from at {config.offline_path() or _DEFAULT_FILE}")
 
-    res = fit_two_stage(
-        [c.fit_case for c in cases],
-        names,
-        seed_weights=incumbent.get("weights", {}),
-        rng=np.random.default_rng(args.seed),
-        samples=args.samples,
-    )
+    res = fit_two_stage(cases, names, seed_weights=incumbent.get("weights", {}), rng=np.random.default_rng(args.seed), samples=args.samples)
     _print_weights("weights (static)", res.static_raw)
     dyn_raw, dyn_note = incumbent.get("weights_dynamic", res.static_raw), "carried from incumbent (no dynamic cases)"
     if res.dyn_ranks is not None:

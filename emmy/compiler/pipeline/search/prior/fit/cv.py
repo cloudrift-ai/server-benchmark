@@ -30,7 +30,7 @@ import statistics
 import numpy as np
 
 from emmy.compiler.pipeline.search.prior.fit.group import Group
-from emmy.compiler.pipeline.search.prior.fit.linear import TwoStageFit, dual_rank, feature_matrix, fit_two_stage
+from emmy.compiler.pipeline.search.prior.fit.rank import dual_rank
 
 TOP_KS = (1, 10, 25, 50, 100)
 
@@ -46,16 +46,15 @@ def fold_key(case: Group, axis: str) -> str:
     return case.gpu if axis == "gpu" else case.family
 
 
-def case_ranks(case: Group, model: TwoStageFit) -> tuple[int, int] | None:
-    """The case's golden ``(rank, rank_optimistic)`` under a fitted model's raw weight
-    sets — the artifact-spelling linear scoring, exactly what the shipped prior ranks
-    with (away from the interaction gates). ``None`` when the case needs the dynamic
-    set and the model has none (an unfittable fold — callers exclude it up front)."""
-    w = model.dyn_raw if case.tier == "dyn" else model.static_raw
-    if w is None:
+def case_ranks(case: Group, model) -> tuple[int, int] | None:
+    """The case's golden ``(rank, rank_optimistic)`` under a fitted model — any object
+    with the trainer protocol's ``score_rows(group) -> scores | None`` (higher =
+    predicted faster; the linear model's weight-set selection lives inside it).
+    ``None`` when the model can't score the group (an unfittable fold — callers
+    exclude it up front)."""
+    scores = model.score_rows(case)
+    if scores is None:
         return None
-    names = sorted(w)
-    scores = feature_matrix(case.feats, names) @ np.array([w[n] for n in names])
     return dual_rank(scores, case.pinned_idx)
 
 
@@ -82,22 +81,26 @@ def _per_card(entries: list[tuple[Group, tuple[int, int]]]) -> dict:
     return out
 
 
-def evaluate_full_train(cases: list[Group], model: TwoStageFit) -> dict:
+def evaluate_full_train(cases: list[Group], model) -> dict:
     """The ``full_train`` metrics block: every case ranked under the shippable model."""
     entries = [(c, r) for c in cases if (r := case_ranks(c, model)) is not None]
     per_golden = {c.key: {"rank": r, "rank_optimistic": o, "pool": len(c.feats)} for c, (r, o) in entries}
     return {"per_golden": per_golden, "per_card": _per_card(entries)}
 
 
-def run_axis(cases: list[Group], names: list[str], axis: str, *, samples: int, seed: int) -> dict:
+def run_axis(cases: list[Group], axis: str, *, fit_model, seed: int) -> dict:
     """One fold axis's full cross-validation → its ``cv.<axis>`` metrics block.
 
-    Every fold gets a FRESH ``default_rng(seed)`` so a fold's fit never depends on how
-    many folds ran before it — adding a golden family changes that family's fold and
-    nothing else, keeping cross-run diffs meaningful. Guard: a fold is excluded (with a
-    recorded reason) when its training slice has no static cases (the dynamic stage
-    seeds from the static fit, so nothing is fittable) or when its holdout needs the
-    dynamic set and the training slice has no dynamic cases."""
+    ``fit_model(train_groups, rng) -> model`` is the trainer callable (the caller bakes
+    in its params — and the fold-seeding policy: fold models are seeded from ZEROS, not
+    the incumbent artifact, since the incumbent's weights were fit on every golden and
+    would leak each held-out golden into its own holdout model). Every fold gets a
+    FRESH ``default_rng(seed)`` so a fold's fit never depends on how many folds ran
+    before it — adding a golden family changes that family's fold and nothing else,
+    keeping cross-run diffs meaningful. Guard: a fold is excluded (with a recorded
+    reason) when its training slice has no static cases (the dynamic stage seeds from
+    the static fit, so nothing is fittable) or when its holdout needs the dynamic set
+    and the training slice has no dynamic cases."""
     folds = sorted({fold_key(c, axis) for c in cases})
     holdout: list[tuple[Group, tuple[int, int]]] = []
     holdout_fold: dict[str, str] = {}
@@ -114,7 +117,7 @@ def run_axis(cases: list[Group], names: list[str], axis: str, *, samples: int, s
         if any(c.tier == "dyn" for c in hold) and not any(c.tier == "dyn" for c in train):
             excluded[f] = "dynamic weight set unfittable (0 dyn cases in training)"
             continue
-        model = fit_two_stage([c.fit_case for c in train], names, seed_weights={}, rng=np.random.default_rng(seed), samples=samples)
+        model = fit_model(train, np.random.default_rng(seed))
         hold_entries = [(c, r) for c in hold if (r := case_ranks(c, model)) is not None]
         holdout.extend(hold_entries)
         holdout_fold.update({c.key: f for c, _ in hold_entries})
@@ -142,9 +145,7 @@ def run_axis(cases: list[Group], names: list[str], axis: str, *, samples: int, s
     }
 
 
-def build_metrics(
-    header: dict, cases: list[Group], skipped: list[tuple[str, str, str]], full_model: TwoStageFit, cv: dict[str, dict]
-) -> dict:
+def build_metrics(header: dict, cases: list[Group], skipped: list[tuple[str, str, str]], full_model, cv: dict[str, dict]) -> dict:
     """Assemble the run's complete metrics dict (JSON-ready, deterministic — no
     timestamps or host info; the caller serializes with sorted keys). ``skipped`` rows
     are ``(gpu, name, reason)`` for goldens that never became cases: enumeration

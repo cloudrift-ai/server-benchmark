@@ -176,23 +176,34 @@ def _spec(depth: int) -> list[str]:
     return ["--speculative-config", json.dumps({"method": "mtp", "model": "m", "num_speculative_tokens": depth})]
 
 
-def test_serve_cmd_generate_capture_sizes_floor_to_spec_query_len():
-    """Depth 2 (query_len 3): vLLM would round a power-of-two ladder UP to multiples of 3,
-    lifting the 16 and 32 rungs to 18 and 33 — one step ABOVE their own decode bucket, so every
-    verify step misses the static twin. Flooring keeps every rung at or below its power of two."""
-    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=_spec(2), generate=True)
-    cfg = cmd[cmd.index("--compilation-config") + 1]
-    assert '"cudagraph_capture_sizes": [3, 6, 15, 30, 63, 126, 255]' in cfg
-    # The bucket's own rung must stay reachable — 15 <= the default bucket 16.
-    assert max(s for s in json.loads(cfg)["cudagraph_capture_sizes"] if s <= 16) == 15
+def _sizes(depth: int, vllm_args: list[str] | None = None) -> list[int]:
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=_spec(depth) + (vllm_args or []), generate=True)
+    return json.loads(cmd[cmd.index("--compilation-config") + 1])["cudagraph_capture_sizes"]
 
 
-def test_serve_cmd_generate_capture_sizes_unchanged_when_query_len_divides():
-    """Depth 3 (query_len 4) already divides every power-of-two rung, so the ladder is untouched
-    — the collision is specific to query lengths that share no factor with the ladder."""
-    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=_spec(3), generate=True)
-    cfg = cmd[cmd.index("--compilation-config") + 1]
-    assert '"cudagraph_capture_sizes": [4, 8, 16, 32, 64, 128, 256]' in cfg
+@pytest.mark.parametrize("depth", [1, 2, 3, 5])
+def test_serve_cmd_generate_spec_ladder_never_overshoots_the_bucket(depth):
+    """THE invariant. vLLM rounds every capture size UP to a multiple of query_len and dispatches a
+    step to the first size at or above its width, so the runner sees a PADDED width. If the first
+    rung at or above a step's width exceeds the decode bucket, that step misses the static decode
+    twin and silently runs the symbolic program. Every reachable verify width must therefore land on
+    a rung that is still <= the bucket."""
+    query_len = depth + 1
+    sizes = _sizes(depth)
+    bucket = 16  # emmy_config default
+    assert all(s % query_len == 0 for s in sizes), sizes
+    for width in range(query_len, bucket + 1, query_len):
+        rung = min((s for s in sizes if s >= width), default=None)
+        assert rung is not None and rung <= bucket, f"width {width} -> rung {rung} > bucket {bucket}"
+
+
+def test_serve_cmd_generate_spec_ladder_is_dense_enough_to_avoid_padding():
+    """A ladder that merely stays under the bucket can still waste rows: floored powers of two give
+    15 then 30, so a 24-token step pads to 30. Mirroring vLLM's own dense default (stride 8) lands
+    the common verify widths exactly, which is also why the shipped image never hit the fault."""
+    sizes = _sizes(2, ["--max-num-seqs", "256"])
+    for width in (24, 192):
+        assert min(s for s in sizes if s >= width) == width, (width, sizes)
 
 
 def test_serve_cmd_generate_capture_sizes_ignore_absent_spec_config():

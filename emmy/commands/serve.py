@@ -184,9 +184,16 @@ def _gen_graph_args(vllm_args: list[str]) -> list[str]:
     # symbolic masked-tile path (which run_device_sym also declines to graph-capture). Floor
     # the rungs to multiples of query_len instead: flooring can only move a rung DOWN, so the
     # bucket's own rung stays reachable at <= bucket and vLLM's round-up is then a no-op.
+    # Flooring alone is not enough, because a SPARSE ladder still overshoots: floored to multiples
+    # of 3 the power-of-two rungs are 15 then 30, so a 24-token step lands on 30 — under the bucket,
+    # but 6 rows of padding. vLLM's own default ladder is dense (stride 8), which is why the shipped
+    # image never hit this at all. Mirror that shape under speculation: dense candidates, each
+    # floored to a multiple of query_len. A 24-token step then lands exactly on 24, and a 192-token
+    # one exactly on 192, instead of on the next power of two.
     query_len = _spec_query_len(vllm_args)
     if query_len > 1:
-        sizes = sorted({s - s % query_len for s in sizes} - {0})
+        dense = {1, 2, 4} | set(range(8, top + 1, 8)) | {bucket, top}
+        sizes = sorted({s - s % query_len for s in dense} - {0})
         if not sizes:
             logger.warning("no capture size survives flooring to num_speculative_tokens+1=%d; serving eager", query_len)
             return ["--enforce-eager"]

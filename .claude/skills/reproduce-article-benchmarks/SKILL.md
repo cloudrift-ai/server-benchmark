@@ -114,8 +114,10 @@ Report it concretely — "the image was baked at `<sha>` (<date>); `origin/main`
 > artifact still perform as published" — valid, and the cheap answer. It does **not** answer "does current main
 > still perform as published". Only a locally built image answers that.
 
-**Offer the rebuild when (b) is non-empty and a deploy recipe is in scope** — never start one unprompted; it is a
-multi-hour GPU session.
+**When (b) is non-empty and a deploy recipe is in scope, this is a decision point, not a note.** Either the image
+matches the code under test, or the user tells you to proceed anyway knowing what is being measured. Present both
+and ask; never start a rebuild unprompted (it is a multi-hour GPU session), and never quietly run the stale image
+and let the report imply it covered current code.
 
 ## Step 5 — Image selection
 
@@ -225,8 +227,44 @@ Judge deltas honestly:
   points at the box/driver/client, while a steady control beside a moving emmy localises the fault to emmy. A driver
   or engine-version change since publication does the same thing — check the article's stated stack against the
   host's before blaming the code.
+- **List every deviation from the article's procedure**, with what forced it — an API or CLI change, a knob that no
+  longer exists, a lane that wouldn't boot, a host stack that differs from the published one. State which
+  comparisons each deviation weakens. A best-effort reproduction is a legitimate result; an undisclosed one is not.
 - **Say what you did not measure.** Recipes skipped, cells that failed, tables with no backing recipe, a
   command-recipe-only run that never touched the image question. Silence reads as coverage.
+
+## Common pitfalls
+
+**A docker-backed experiment silently measuring old code.** This is the one that quietly ruins a report. A deploy
+recipe runs whatever is inside its image, so if the image predates the code you were asked about, the run answers a
+different question than the one asked — and the report reads as if it didn't. Before running any deploy recipe,
+establish that the image corresponds to the code under test, or **get an explicit decision from the user** to
+proceed with a known-stale image. Then carry that decision into the report: name the image, its sha, and how far
+`origin/main` has moved past it, on the same line as the numbers. "vLLM+Emmy hit X tok/s" is not a claim you can
+make without saying which Emmy.
+
+**Assuming the recipe still runs.** These recipes were written against the emmy of their day. Flags get renamed,
+commands get restructured, env knobs get retired, defaults move. Dry-run first (`emmy bench <recipe> --dry-run`)
+and read the failure honestly — a recipe that no longer loads is a finding about the repo, not a reason to guess.
+
+**Refusing to deviate when the API has moved.** If emmy's CLI, API, or behavior has changed such that the article's
+exact procedure is no longer expressible, **a best-effort reproduction is the right call** — do not abandon the run,
+and do not silently fake the old path. Translate the intent to what current emmy actually supports, keeping the
+article's protocol (same workload points, same lanes, same equal-tuning discipline) wherever you still can. Then
+say so, precisely: what changed, what you ran instead, and which comparisons that weakens. A deviation stated
+plainly is a usable result; a deviation buried in a table is a false regression waiting to be quoted.
+
+**Treating a deviation as a small footnote.** If the substitution touches something load-bearing — a different
+knob, a different metric, a lane you couldn't reproduce at all — that belongs in the report's summary, not only in
+the row. The reader's question is "can I trust this number against the published one", and only you know the answer.
+
+**Reproducing an article whose stack no longer exists.** The article pins a driver, CUDA, torch and engine version.
+If the host or the current repo has moved past them, the delta includes that move. Check the article's stated stack
+against the host's before attributing anything to emmy — and if they differ materially, say the comparison is
+against a different stack rather than presenting it as a clean A/B.
+
+**Editing recipes in place.** Recipes are the protocol. Override images and knobs in a scratch copy (Step 5), never
+in the checkout, and never to make a number look better.
 
 ## Teardown
 

@@ -6,7 +6,7 @@ configs:
     M: 512
     N: 512
     K: 512
-    knobs: {TILE: 'n16x8/f4x8', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 't16x8', TILE: 'f4x8', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 10.1
     cublas_us: 10.8
   # 2026-07-15 cold golden sweep (rented 4090): the deeper f4x10 register tile replaces n32x8/f2x8 —
@@ -17,7 +17,7 @@ configs:
     M: 1024
     N: 1024
     K: 1024
-    knobs: {TILE: 'n32x8/f4x10', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    knobs: {WORK: 't32x8', TILE: 'f4x10', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 58.5
     cublas_us: 45.4
   - kernel: matmul
@@ -25,7 +25,7 @@ configs:
     M: 2048
     N: 2048
     K: 2048
-    knobs: {TILE: 'n32x16/f4x8', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 't32x16', TILE: 'f4x8', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 359.1
     cublas_us: 320.0
   - kernel: matmul
@@ -33,7 +33,7 @@ configs:
     M: 4096
     N: 4096
     K: 4096
-    knobs: {TILE: 'n32x8/f4x26', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 't32x8', TILE: 'f4x26', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 2727.9
     cublas_us: 2458.6
   - kernel: matmul
@@ -43,7 +43,7 @@ configs:
     K: 512
     dtype: fp16
     # 2026-07-12 post-swizzle refresh (cp.async slab swizzle, PR #351): 6.1 -> 4.9 (3x at zero spread).
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x2/f2x2/k4', RASTER: '', STAGE: 'd2/cp/ring/p2'}
+    knobs: {WORK: 'w1x2', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', RASTER: '', STAGE: 'd2/cp/ring/p2'}
     emmy_us: 4.9
     cublas_us: 5.8
   - kernel: matmul
@@ -53,7 +53,7 @@ configs:
     K: 512
     dtype: fp16
     # 2026-07-12 post-swizzle refresh: 6.3 -> 6.0 total (4.5 + 1.5 finalize, 3x).
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x2/f4x2/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w1x2', TILE: 'mma_m16n8k16_f16_f32/f4x2/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 6.0
     cublas_us: 5.8
   # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): atom-swap of the p2 standard golden.
@@ -65,7 +65,7 @@ configs:
     N: 512
     K: 512
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x2/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring/p2'}
+    knobs: {WORK: 'w1x2', TILE: 'mma_m16n8k16_f16_f16/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring/p2'}
     emmy_us: 4.8
     cublas_us: 5.8
   - kernel: matmul
@@ -76,7 +76,7 @@ configs:
     dtype: fp16
     # 2026-07-12 manual sweep: REDUCE stamped '' (replayed fill-free); emmy_us refreshed 22.2 -> 24.0.
     # Post-swizzle refresh (same day, PR #351): 24.0 -> 20.4 (2 passes 20.2/20.4).
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x2/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w1x2', TILE: 'mma_m16n8k16_f16_f32/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 20.4
     cublas_us: 18.1
   # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): atom-swap of the standard golden.
@@ -88,7 +88,7 @@ configs:
     N: 1024
     K: 1024
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x2/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w1x2', TILE: 'mma_m16n8k16_f16_f16/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 15.8
     cublas_us: 18.1
   - kernel: matmul
@@ -99,7 +99,7 @@ configs:
     dtype: fp16
     # 2026-07-12 manual sweep: REDUCE stamped '' (fill-free); emmy_us refreshed 116.0 -> 123.4
     # (live median, 4 passes at 123.1-123.9 — consistent +6% drift).
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x4/f4x4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f4x4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 123.4
     cublas_us: 115.2
   # Fast-math sibling (FAST_MATH lane). 2026-07-12 post-swizzle manual refresh (PR #351): the
@@ -112,7 +112,7 @@ configs:
     N: 2048
     K: 2048
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 82.7
     cublas_us: 115.2
   - kernel: matmul
@@ -123,7 +123,7 @@ configs:
     dtype: fp16
     # 2026-07-12 manual sweep: REDUCE stamped '' (fill-free). emmy_us left at 869.4 — live replays
     # wobbled 840-919 around it (median 841, -3.3%, under the 5% refresh gate).
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x4/f4x8', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f4x8', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 869.4
     cublas_us: 822.3
   # Fast-math sibling (FAST_MATH lane). 2026-07-12 post-swizzle manual refresh (PR #351): w2x2/f4x8/k2
@@ -135,7 +135,7 @@ configs:
     N: 4096
     K: 4096
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 603.1
     cublas_us: 822.3
   - kernel: matmul
@@ -144,7 +144,7 @@ configs:
     N: 512
     K: 512
     dynamic: true
-    knobs: {TILE: 'n16x8/f4x8', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 't16x8', TILE: 'f4x8', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 10.6
     cublas_us: 10.8
   - kernel: matmul
@@ -155,7 +155,7 @@ configs:
     dtype: fp16
     # 2026-07-12 manual sweep: REDUCE stamped '' (fill-free). Post-swizzle refresh (PR #351):
     # 374.1 -> 343.7 (4 passes 343.0-353.6).
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 343.7
     cublas_us: 328.0
   # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): 336.8 µs total (324.2 + 12.6 finalize;
@@ -171,7 +171,7 @@ configs:
     dtype: fp16
     # Post-swizzle refresh (2026-07-12, PR #351): 323.5 -> 267.7 total (255.2 + 12.5 finalize, 3x
     # at <0.3% spread), 0.82x vs cuBLAS — beats cuBLAS.
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: 'gm8', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k2', REDUCE: 'g2k', RASTER: 'gm8', STAGE: 'd2/cp/ring'}
     emmy_us: 267.7
     cublas_us: 328.0
   - kernel: matmul
@@ -181,7 +181,7 @@ configs:
     K: 4096
     dtype: fp16
     # Post-swizzle refresh (2026-07-12, PR #351): 380.3 -> 362.0 total (3 tight passes).
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 362.0
     cublas_us: 328.0
   - kernel: matmul
@@ -190,7 +190,7 @@ configs:
     N: 4096
     K: 4096
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x4/f4x4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f4x4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 119.9
     cublas_us: 119.0
   - kernel: matmul
@@ -201,7 +201,7 @@ configs:
     dtype: fp16
     # 2026-07-12 manual sweep: REDUCE stamped '' (replayed fill-free at 117.4, 2x). Post-swizzle
     # refresh (same day, PR #351): 121.6 -> 108.7 (4 passes 108.5-108.8).
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring/p2'}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring/p2'}
     emmy_us: 108.7
     cublas_us: 119.0
   # Fast-math sibling (FAST_MATH lane), first fm entry for this shape — pre-swizzle the fm atom was
@@ -215,7 +215,7 @@ configs:
     N: 4096
     K: 4096
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 88.4
     cublas_us: 119.0
   # 2026-07-15 cold golden sweep (rented 4090): the narrow-N w2x2/f2x8/k2 tile through the gm8 raster
@@ -228,7 +228,7 @@ configs:
     N: 28672
     K: 4096
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f2x8/k2', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/cp/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f2x8/k2', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/cp/ring'}
     emmy_us: 803.8
     cublas_us: 721.0
   # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): the atom-swap of the standard golden —
@@ -241,7 +241,7 @@ configs:
     N: 28672
     K: 4096
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w4x1', TILE: 'mma_m16n8k16_f16_f16/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 664.6
     cublas_us: 721.0
   # Fast-math parity sibling: same tile through the /p2 smem->register double-buffer — 648.2 (3x,
@@ -253,7 +253,7 @@ configs:
     N: 28672
     K: 4096
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring/p2'}
+    knobs: {WORK: 'w4x1', TILE: 'mma_m16n8k16_f16_f16/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring/p2'}
     emmy_us: 648.2
     cublas_us: 721.0
   - kernel: matmul
@@ -264,7 +264,7 @@ configs:
     dtype: fp16
     # 2026-07-12 manual sweep: emmy_us refreshed 397.5 -> 371.0 (live median of 4 passes at
     # 370.0-372.9 — the recorded value was 6.7% pessimistic).
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f4x8', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 371.0
     cublas_us: 388.0
   # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): beats cuBLAS on the deep-K (14336)
@@ -276,7 +276,7 @@ configs:
     N: 4096
     K: 14336
     dtype: fp16
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 274.0
     cublas_us: 388.0
   - kernel: matmul
@@ -288,7 +288,7 @@ configs:
     dynamic: true
     # 2026-07-12 manual sweep: REDUCE stamped '' (fill-free). Post-swizzle refresh (same day,
     # PR #351): 370.0 -> 343.0 (3 passes 342.7-351.6).
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f4x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 343.0
     cublas_us: 330.0
   # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): mirrors the static twin.
@@ -301,7 +301,7 @@ configs:
     K: 4096
     dtype: fp16
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 298.9
     cublas_us: 330.0
   - kernel: matmul
@@ -312,7 +312,7 @@ configs:
     dtype: fp16
     dynamic: true
     # Post-swizzle refresh (2026-07-12, PR #351): 123.3 -> 119.5 (4 tight passes 119.0-119.5).
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f4x8', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 119.5
     cublas_us: 112.0
   # Fast-math sibling (FAST_MATH lane), first fm entry for this shape — the static twin's
@@ -326,7 +326,7 @@ configs:
     K: 4096
     dtype: fp16
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 89.3
     cublas_us: 112.0
   - kernel: matmul
@@ -337,7 +337,7 @@ configs:
     dtype: fp16
     dynamic: true
     # 2026-07-12 manual sweep: REDUCE stamped '' (fill-free). emmy_us kept — live wobbled 904-985.
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w4x1', TILE: 'mma_m16n8k16_f16_f32/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 923.6
     cublas_us: 742.0
   # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): mirrors the static twin. 2026-07-12.
@@ -350,7 +350,7 @@ configs:
     K: 4096
     dtype: fp16
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w4x1', TILE: 'mma_m16n8k16_f16_f16/f4x8/k2', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 665.6
     cublas_us: 742.0
   # 2026-07-15 cold golden sweep (rented 4090): converges to the static twin's family — w2x2/f4x8 g2k
@@ -363,7 +363,7 @@ configs:
     K: 14336
     dtype: fp16
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f4x8', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 376.4
     cublas_us: 388.0
   # Fast-math sibling (f16-accumulate atom, FAST_MATH lane): mirrors the static twin. 2026-07-12
@@ -376,7 +376,7 @@ configs:
     K: 14336
     dtype: fp16
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/cp/ring'}
     emmy_us: 275.5
     cublas_us: 388.0
   # 2026-07-14 audit (post-#355 rebase): same-knobs replay runs 4.6 (3x, zero spread — now matching
@@ -385,7 +385,7 @@ configs:
     name: pointwise.n4096
     M: 512
     N: 4096
-    knobs: {FAST_EXP: false, INTERLEAVE_LOADS: true, VECTORIZE_LOADS: true}
+    knobs: {WORK: '', FAST_EXP: false, INTERLEAVE_LOADS: true, VECTORIZE_LOADS: true}
     emmy_us: 4.6
     cublas_us: 5.0
   # 2026-07-14 audit: same-knobs replay runs 16.2-16.3 (3x); emmy_us refreshed from 17.4.
@@ -393,7 +393,7 @@ configs:
     name: pointwise.n16384
     M: 512
     N: 16384
-    knobs: {TILE: 'f4'}
+    knobs: {WORK: '', TILE: 'f4'}
     emmy_us: 16.3
     cublas_us: 18.0
   - kernel: pointwise
@@ -401,7 +401,7 @@ configs:
     M: 512
     N: 4096
     dynamic: true
-    knobs: {TILE: 'f2'}
+    knobs: {WORK: '', TILE: 'f2'}
     emmy_us: 4.6
     cublas_us: 5.0
   - kernel: pointwise
@@ -409,21 +409,21 @@ configs:
     M: 512
     N: 16384
     dynamic: true
-    knobs: {TILE: 'f4'}
+    knobs: {WORK: '', TILE: 'f4'}
     emmy_us: 16.5
     cublas_us: 19.0
   - kernel: softmax
     name: softmax.k2048
     M: 512
     K: 2048
-    knobs: {REDUCE: 'b256'}
+    knobs: {WORK: 't256', REDUCE: 'coop'}
     emmy_us: 3.5
     cublas_us: 6.0
   - kernel: softmax
     name: softmax.k8192
     M: 512
     K: 8192
-    knobs: {REDUCE: 'b512'}
+    knobs: {WORK: 't512', REDUCE: 'coop'}
     emmy_us: 12.4
     cublas_us: 14.0
   - kernel: softmax
@@ -431,7 +431,7 @@ configs:
     M: 512
     K: 2048
     dynamic: true
-    knobs: {REDUCE: 'b128'}
+    knobs: {WORK: 't128', REDUCE: 'coop'}
     emmy_us: 3.6
     cublas_us: 6.0
   - kernel: softmax
@@ -439,21 +439,21 @@ configs:
     M: 512
     K: 8192
     dynamic: true
-    knobs: {REDUCE: 'b256'}
+    knobs: {WORK: 't256', REDUCE: 'coop'}
     emmy_us: 13.2
     cublas_us: 14.0
   - kernel: reduce
     name: reduce.k2048
     M: 512
     K: 2048
-    knobs: {REDUCE: 'b128'}
+    knobs: {WORK: 't128', REDUCE: 'coop'}
     emmy_us: 2.1
     cublas_us: 4.0
   - kernel: reduce
     name: reduce.k8192
     M: 512
     K: 8192
-    knobs: {REDUCE: 'b256'}
+    knobs: {WORK: 't256', REDUCE: 'coop'}
     emmy_us: 4.5
     cublas_us: 7.0
   - kernel: reduce
@@ -461,7 +461,7 @@ configs:
     M: 512
     K: 2048
     dynamic: true
-    knobs: {REDUCE: 'b128'}
+    knobs: {WORK: 't128', REDUCE: 'coop'}
     emmy_us: 2.1
     cublas_us: 4.0
   - kernel: reduce
@@ -469,28 +469,28 @@ configs:
     M: 512
     K: 8192
     dynamic: true
-    knobs: {REDUCE: 'b256'}
+    knobs: {WORK: 't256', REDUCE: 'coop'}
     emmy_us: 4.6
     cublas_us: 7.0
   - kernel: rms_norm
     name: rms_norm.k2048
     M: 512
     K: 2048
-    knobs: {REDUCE: 'b256'}
+    knobs: {WORK: 't256', REDUCE: 'coop'}
     emmy_us: 4.1
     cublas_us: 4.0
   - kernel: rms_norm
     name: rms_norm.k4096
     M: 512
     K: 4096
-    knobs: {REDUCE: 'b256'}
+    knobs: {WORK: 't256', REDUCE: 'coop'}
     emmy_us: 7.2
     cublas_us: 7.0
   - kernel: rms_norm
     name: rms_norm.k8192
     M: 512
     K: 8192
-    knobs: {REDUCE: 'b256'}
+    knobs: {WORK: 't256', REDUCE: 'coop'}
     emmy_us: 13.8
     cublas_us: 13.0
   - kernel: rms_norm
@@ -498,7 +498,7 @@ configs:
     M: 512
     K: 2048
     dynamic: true
-    knobs: {REDUCE: 'b256'}
+    knobs: {WORK: 't256', REDUCE: 'coop'}
     emmy_us: 4.1
     cublas_us: 4.0
   - kernel: rms_norm
@@ -506,7 +506,7 @@ configs:
     M: 512
     K: 4096
     dynamic: true
-    knobs: {REDUCE: 'b256'}
+    knobs: {WORK: 't256', REDUCE: 'coop'}
     emmy_us: 7.2
     cublas_us: 7.0
   - kernel: rms_norm
@@ -514,7 +514,7 @@ configs:
     M: 512
     K: 8192
     dynamic: true
-    knobs: {REDUCE: 'b256'}
+    knobs: {WORK: 't256', REDUCE: 'coop'}
     emmy_us: 13.8
     cublas_us: 13.0
   - kernel: attention
@@ -524,7 +524,7 @@ configs:
     head_dim: 64
     dtype: 'fp16'
     causal: false
-    knobs: {'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', 'TILE@dd': 'mma_m16n8k16_f16_f32/f1x16/k4', 'TILE@pj': 'mma_m16n8k16_f16_f32/f1x8/k8', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 10.6
     cublas_us: 10.0
   # FAST_MATH-lane pair (2026-07-14, 3x reproduced): the f16acc-PV sibling beats the std golden
@@ -538,7 +538,7 @@ configs:
     head_dim: 64
     dtype: 'fp16'
     causal: false
-    knobs: {'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x8/k8', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', 'TILE@dd': 'mma_m16n8k16_f16_f32/f1x16/k4', 'TILE@pj': 'mma_m16n8k16_f16_f16/f1x8/k8', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 9.6
     cublas_us: 10.0
   - kernel: attention
@@ -548,7 +548,7 @@ configs:
     head_dim: 64
     dtype: 'fp16'
     causal: false
-    knobs: {'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x8/k8', STAGE: 'd1/cp/alt'}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', 'TILE@dd': 'mma_m16n8k16_f16_f32/f1x16/k4', 'TILE@pj': 'mma_m16n8k16_f16_f16/f1x8/k8', STAGE: 'd1/cp/alt'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 9.3
     cublas_us: 10.0
   - kernel: attention
@@ -558,7 +558,7 @@ configs:
     head_dim: 128
     dtype: 'fp16'
     causal: false
-    knobs: {'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', 'TILE@dd': 'mma_m16n8k16_f16_f32/f1x8/k8', 'TILE@pj': 'mma_m16n8k16_f16_f32/f1x16/k4', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 19.9
     cublas_us: 18.0
   # FAST_MATH-lane pair (2026-07-14, 3x reproduced): fm-alt 17.7 is the hd128 frontier on this card
@@ -573,7 +573,7 @@ configs:
     head_dim: 128
     dtype: 'fp16'
     causal: false
-    knobs: {'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x16/k4', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', 'TILE@dd': 'mma_m16n8k16_f16_f32/f1x8/k8', 'TILE@pj': 'mma_m16n8k16_f16_f16/f1x16/k4', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 18.2
     cublas_us: 18.0
   - kernel: attention
@@ -583,7 +583,7 @@ configs:
     head_dim: 128
     dtype: 'fp16'
     causal: false
-    knobs: {'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x16/k4', STAGE: 'd1/cp/alt'}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', 'TILE@dd': 'mma_m16n8k16_f16_f32/f1x8/k8', 'TILE@pj': 'mma_m16n8k16_f16_f16/f1x16/k4', STAGE: 'd1/cp/alt'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 17.7
     cublas_us: 18.0
   - kernel: attention
@@ -594,7 +594,7 @@ configs:
     dtype: 'fp16'
     causal: false
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x16/k4', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', TILE: 'mma_m16n8k16_f16_f32/f1x16/k4', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 10.7
     cublas_us: 11.0
   - kernel: attention
@@ -605,7 +605,7 @@ configs:
     dtype: 'fp16'
     causal: false
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k8', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', TILE: 'mma_m16n8k16_f16_f32/f1x8/k8', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 20.3
     cublas_us: 19.0
   # FAST_MATH-lane pair on the symbolic twin (2026-07-14 — the alternating pipeline now resolves on
@@ -619,7 +619,7 @@ configs:
     dtype: 'fp16'
     causal: false
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f1x16/k4', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', TILE: 'mma_m16n8k16_f16_f16/f1x16/k4', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 18.6
     cublas_us: 19.0
   - kernel: attention
@@ -630,7 +630,7 @@ configs:
     dtype: 'fp16'
     causal: false
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f1x16/k4', STAGE: 'd1/cp/alt'}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', TILE: 'mma_m16n8k16_f16_f16/f1x16/k4', STAGE: 'd1/cp/alt'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 18.1
     cublas_us: 19.0
   # Values re-measured 2026-07-13 after the causal tile-skip (3x reproduced): nt=2 44.1 → 40.4, and
@@ -644,7 +644,7 @@ configs:
     dtype: 'fp16'
     causal: true
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16/w4x1/f1x2/k16', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', TILE: 'mma_m16n8k16_f16_f32/f1x2/k16', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 40.4
     cublas_us: 42.0
   - kernel: attention
@@ -655,21 +655,21 @@ configs:
     dtype: 'fp16'
     causal: true
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16/w4x1/f1x4/k16', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', TILE: 'mma_m16n8k16_f16_f32/f1x4/k16', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 38.0
     cublas_us: 42.0
   - kernel: rms_norm
     name: rms_norm.k3840
     M: 512
     K: 3840
-    knobs: {REDUCE: 'b256'}
+    knobs: {WORK: 't256', REDUCE: 'coop'}
     emmy_us: 6.9
     cublas_us: 7.0
   - kernel: rms_norm
     name: gemma4_12b.qknorm.k256
     M: 4096
     K: 256
-    knobs: {REDUCE: 'b64'}
+    knobs: {WORK: 't64', REDUCE: 'coop'}
     emmy_us: 3.7
     cublas_us: 5.0
   - kernel: rms_norm
@@ -677,6 +677,6 @@ configs:
     M: 512
     K: 3840
     dynamic: true
-    knobs: {REDUCE: 'b256'}
+    knobs: {WORK: 't256', REDUCE: 'coop'}
     emmy_us: 6.9
     cublas_us: 7.0

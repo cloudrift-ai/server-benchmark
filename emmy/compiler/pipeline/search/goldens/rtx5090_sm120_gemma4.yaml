@@ -37,7 +37,7 @@ configs:
     N: 4096
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 84.2
     cublas_us: 97.6
   - kernel: matmul
@@ -46,7 +46,7 @@ configs:
     N: 4096
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 61.5
     cublas_us: 97.6
   - kernel: matmul
@@ -56,7 +56,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 84.8
     cublas_us: 98.7
   - kernel: matmul
@@ -66,7 +66,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 61.7
     cublas_us: 98.7
   # kv_proj: the k/v projections (8 KV heads x 256 = N 2048); the traced graph dedups k and v into one
@@ -77,7 +77,7 @@ configs:
     N: 2048
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 45.3
     cublas_us: 48.8
   - kernel: matmul
@@ -86,7 +86,7 @@ configs:
     N: 2048
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x4/f2x4/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x4', TILE: 'mma_m16n8k16_f16_f16/f2x4/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 36.4
     cublas_us: 48.8
   - kernel: matmul
@@ -96,7 +96,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 45.8
     cublas_us: 48.9
   - kernel: matmul
@@ -106,7 +106,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x4/f2x4/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x4', TILE: 'mma_m16n8k16_f16_f16/f2x4/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 36.3
     cublas_us: 48.9
   - kernel: matmul
@@ -115,7 +115,7 @@ configs:
     N: 3840
     K: 4096
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 82.0
     cublas_us: 103.3
   - kernel: matmul
@@ -124,7 +124,7 @@ configs:
     N: 3840
     K: 4096
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 64.1
     cublas_us: 103.3
   - kernel: matmul
@@ -134,7 +134,7 @@ configs:
     K: 4096
     dtype: 'fp16'
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 82.1
     cublas_us: 99.8
   - kernel: matmul
@@ -144,7 +144,7 @@ configs:
     K: 4096
     dtype: 'fp16'
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 63.9
     cublas_us: 99.8
   # ---- MLP -------------------------------------------------------------------------------------------
@@ -157,7 +157,7 @@ configs:
     N: 30720
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 561.7
     cublas_us: 573.3
   - kernel: matmul
@@ -166,7 +166,7 @@ configs:
     N: 30720
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 362.4
     cublas_us: 573.3
   - kernel: matmul
@@ -176,7 +176,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 562.4
     cublas_us: 561.7
   - kernel: matmul
@@ -186,7 +186,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 362.4
     cublas_us: 561.7
   # mlp_down: deep-K (15360) — the classic f16acc profile; the [fm] entry is 1.34x past cuBLAS.
@@ -196,7 +196,7 @@ configs:
     N: 3840
     K: 15360
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 286.2
     cublas_us: 286.3
   - kernel: matmul
@@ -205,7 +205,7 @@ configs:
     N: 3840
     K: 15360
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 214.2
     cublas_us: 286.3
   # (2026-07-22, merged-sibling re-record) The sibling-linear concat (WS1) fuses the GeGLU combine
@@ -229,7 +229,7 @@ configs:
     dtype: 'fp16'
     trans_b: true
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 339.2
     cublas_us: 309.0
   - kernel: matmul
@@ -240,7 +240,7 @@ configs:
     dtype: 'fp16'
     trans_b: true
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 245.9
     cublas_us: 309.0
   # ---- attention (flash, hd256) ----------------------------------------------------------------------
@@ -263,7 +263,7 @@ configs:
     head_dim: 256
     dtype: 'fp16'
     causal: true
-    knobs: {STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', STAGE: 'd2/tma/ring', 'TILE@dd': 'mma_m16n8k16_f16_f32/f1x2/k16', 'TILE@pj': 'mma_m16n8k16_f16_f32/f1x32'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 35.5
     cublas_us: 30.7
   # The std-lane PRIMARY (2026-07-14, alternating staging): the 64-key streaming block (nt=8) on
@@ -279,7 +279,7 @@ configs:
     head_dim: 256
     dtype: 'fp16'
     causal: true
-    knobs: {STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k4', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', STAGE: 'd1/cp/alt', 'TILE@dd': 'mma_m16n8k16_f16_f32/f1x8/k16', 'TILE@pj': 'mma_m16n8k16_f16_f32/f1x32/k4'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 31.7
     cublas_us: 30.7
   # The tma-alt sibling (0.95x) — kept beside the cp primary (both directions 3x reproduced).
@@ -290,7 +290,7 @@ configs:
     head_dim: 256
     dtype: 'fp16'
     causal: true
-    knobs: {STAGE: 'd1/tma/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k4', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', STAGE: 'd1/tma/alt', 'TILE@dd': 'mma_m16n8k16_f16_f32/f1x8/k16', 'TILE@pj': 'mma_m16n8k16_f16_f32/f1x32/k4'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 32.2
     cublas_us: 30.7
   # The FM PRIMARY — and the first emmy-past-torch-SDPA hd256 entry on the 5090: the f16-accumulate
@@ -303,7 +303,7 @@ configs:
     head_dim: 256
     dtype: 'fp16'
     causal: true
-    knobs: {STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x32/k4', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', STAGE: 'd1/cp/alt', 'TILE@dd': 'mma_m16n8k16_f16_f32/f1x8/k16', 'TILE@pj': 'mma_m16n8k16_f16_f16/f1x32/k4'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 29.7
     cublas_us: 30.7
   # The paired-ring runner-up: the nt=4 streaming block (32 keys/step, 32 KB slabs) — 32.9, 7% past
@@ -322,7 +322,7 @@ configs:
     head_dim: 256
     dtype: 'fp16'
     causal: true
-    knobs: {STAGE: 'd2/tma/ring', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x4/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k2', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', STAGE: 'd2/tma/ring', 'TILE@dd': 'mma_m16n8k16_f16_f32/f1x4/k16', 'TILE@pj': 'mma_m16n8k16_f16_f32/f1x32/k2'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 32.9
     cublas_us: 30.7
   # (A second fm sibling — the nt=4 d2/cp/ring PV-f16acc form at 33.9 — was dropped 2026-07-21 by the
@@ -340,7 +340,7 @@ configs:
     dtype: 'fp16'
     causal: true
     dynamic: true
-    knobs: {STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', STAGE: 'd2/tma/ring', TILE: 'mma_m16n8k16_f16_f32/f1x2/k16'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 35.5
     cublas_us: 30.7
   # The faster dynM twin post-tile-skip (3% past nt=2, zero-spread): the nt=4 streaming block,
@@ -353,7 +353,7 @@ configs:
     dtype: 'fp16'
     causal: true
     dynamic: true
-    knobs: {STAGE: 'd2/tma/ring', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x4/k16', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', STAGE: 'd2/tma/ring', TILE: 'mma_m16n8k16_f16_f32/f1x4/k16'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 34.4
     cublas_us: 30.7
   # (The fm dynM sibling — d2/cp/ring on the bare f16acc PV-plan TILE spelling, 35.5 — was dropped
@@ -375,7 +375,7 @@ configs:
     dtype: 'fp16'
     causal: true
     dynamic: true
-    knobs: {STAGE: 'd1/cp/alt', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x4/k16', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', STAGE: 'd1/cp/alt', TILE: 'mma_m16n8k16_f16_f32/f1x4/k16'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 32.0
     cublas_us: 30.7
   # ---- norms -----------------------------------------------------------------------------------------
@@ -383,7 +383,7 @@ configs:
     name: gemma4_12b.rms_norm.k3840
     M: 512
     K: 3840
-    knobs: {REDUCE: 'b256'}
+    knobs: {WORK: 't256', REDUCE: 'coop'}
     emmy_us: 6.3
     cublas_us: 6.1
   # M=1 (the EMMY_GEN_M1_TIER decode twins' residual+norm sweeps — k_mean_3e2fba / k_mean_48fcdf,
@@ -396,7 +396,7 @@ configs:
     name: gemma4_12b.rms_norm.k3840.m1
     M: 1
     K: 3840
-    knobs: {REDUCE: 'b512'}
+    knobs: {WORK: 't512', REDUCE: 'coop'}
     emmy_us: 3.0
     cublas_us: 4.0
   - kernel: rms_norm
@@ -404,7 +404,7 @@ configs:
     M: 512
     K: 3840
     dynamic: true
-    knobs: {REDUCE: 'b256'}
+    knobs: {WORK: 't256', REDUCE: 'coop'}
     emmy_us: 6.3
     cublas_us: 6.1
   # Q/K-norm over head_dim: 512 rows x (16 heads x 256) reshaped to 4096 x 256 (mirrors the rtx4090
@@ -413,7 +413,7 @@ configs:
     name: gemma4_12b.qknorm.k256
     M: 4096
     K: 256
-    knobs: {REDUCE: 'b64'}
+    knobs: {WORK: 't64', REDUCE: 'coop'}
     emmy_us: 3.6
     cublas_us: 4.1
   # The rest of the per-head q/k-norm row counts, seeded 2026-07-19 (3x, 0% spread). The entry above covers only
@@ -432,49 +432,49 @@ configs:
     name: gemma4_12b.qknorm.k256.m256
     M: 256
     K: 256
-    knobs: {REDUCE: 'b256'}
+    knobs: {WORK: 't256', REDUCE: 'coop'}
     emmy_us: 1.5
     cublas_us: 3.0
   - kernel: rms_norm
     name: gemma4_12b.qknorm.k256.m512
     M: 512
     K: 256
-    knobs: {REDUCE: 'b256'}
+    knobs: {WORK: 't256', REDUCE: 'coop'}
     emmy_us: 1.6
     cublas_us: 4.0
   - kernel: rms_norm
     name: gemma4_12b.qknorm.k256.m2048
     M: 2048
     K: 256
-    knobs: {REDUCE: 'b128'}
+    knobs: {WORK: 't128', REDUCE: 'coop'}
     emmy_us: 2.4
     cublas_us: 4.0
   - kernel: rms_norm
     name: gemma4_12b.qknorm.k512.m32
     M: 32
     K: 512
-    knobs: {REDUCE: 'b512'}
+    knobs: {WORK: 't512', REDUCE: 'coop'}
     emmy_us: 1.4
     cublas_us: 2.0
   - kernel: rms_norm
     name: gemma4_12b.qknorm.k512.m256
     M: 256
     K: 512
-    knobs: {REDUCE: 'b256'}
+    knobs: {WORK: 't256', REDUCE: 'coop'}
     emmy_us: 1.9
     cublas_us: 3.0
   - kernel: rms_norm
     name: gemma4_12b.qknorm.k512.m512
     M: 512
     K: 512
-    knobs: {REDUCE: 'b256'}
+    knobs: {WORK: 't256', REDUCE: 'coop'}
     emmy_us: 2.1
     cublas_us: 4.0
   - kernel: rms_norm
     name: gemma4_12b.qknorm.k512.m4096
     M: 4096
     K: 512
-    knobs: {REDUCE: 'b128'}
+    knobs: {WORK: 't128', REDUCE: 'coop'}
     emmy_us: 5.2
     cublas_us: 6.0
   # ---- seq-2048 tier (2026-07-14) ----------------------------------------------------------------
@@ -490,7 +490,7 @@ configs:
     N: 4096
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 313.0
     cublas_us: 318.4
   - kernel: matmul
@@ -499,7 +499,7 @@ configs:
     N: 4096
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 223.7
     cublas_us: 318.4
   - kernel: matmul
@@ -508,7 +508,7 @@ configs:
     N: 2048
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 168.4
     cublas_us: 170.3
   - kernel: matmul
@@ -517,7 +517,7 @@ configs:
     N: 2048
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 109.6
     cublas_us: 170.3
   - kernel: matmul
@@ -526,7 +526,7 @@ configs:
     N: 3840
     K: 4096
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 294.0
     cublas_us: 285.4
   - kernel: matmul
@@ -535,7 +535,7 @@ configs:
     N: 3840
     K: 4096
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 205.0
     cublas_us: 285.4
   # std re-swept 2026-07-14: the wide-fragment f4x8 std geometry (the gate_up.h4096 std pick)
@@ -548,7 +548,7 @@ configs:
     N: 30720
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 2191.0
     cublas_us: 2099.8
   - kernel: matmul
@@ -557,7 +557,7 @@ configs:
     N: 30720
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 1413.0
     cublas_us: 2210.7
   - kernel: matmul
@@ -566,7 +566,7 @@ configs:
     N: 3840
     K: 15360
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 1112.0
     cublas_us: 1171.1
   - kernel: matmul
@@ -575,7 +575,7 @@ configs:
     N: 3840
     K: 15360
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 697.0
     cublas_us: 1171.1
   # Attention at seq 2048: the 512 alt family transfers (fm d1/cp/alt nt8 wins, same ordering);
@@ -588,7 +588,7 @@ configs:
     head_dim: 256
     dtype: 'fp16'
     causal: true
-    knobs: {STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k4', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', STAGE: 'd1/cp/alt', 'TILE@dd': 'mma_m16n8k16_f16_f32/f1x8/k16', 'TILE@pj': 'mma_m16n8k16_f16_f32/f1x32/k4'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 262.7
     cublas_us: 247.0
   - kernel: attention
@@ -598,7 +598,7 @@ configs:
     head_dim: 256
     dtype: 'fp16'
     causal: true
-    knobs: {STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x32/k4', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', STAGE: 'd1/cp/alt', 'TILE@dd': 'mma_m16n8k16_f16_f32/f1x8/k16', 'TILE@pj': 'mma_m16n8k16_f16_f16/f1x32/k4'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 246.0
     cublas_us: 247.0
   # ---- global (full_attention) layers (2026-07-14) -----------------------------------------------
@@ -616,7 +616,7 @@ configs:
     N: 8192
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 169.0
     cublas_us: 180.3
   - kernel: matmul
@@ -625,7 +625,7 @@ configs:
     N: 8192
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 108.6
     cublas_us: 180.3
   - kernel: matmul
@@ -634,7 +634,7 @@ configs:
     N: 512
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 15.3
     cublas_us: 14.3
   - kernel: matmul
@@ -643,7 +643,7 @@ configs:
     N: 512
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x4/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x4', TILE: 'mma_m16n8k16_f16_f16/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 11.8
     cublas_us: 14.3
   - kernel: matmul
@@ -652,7 +652,7 @@ configs:
     N: 3840
     K: 8192
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 154.3
     cublas_us: 158.1
   - kernel: matmul
@@ -661,7 +661,7 @@ configs:
     N: 3840
     K: 8192
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 118.2
     cublas_us: 158.1
   # attention hd512 (16 Q heads, the 1 KV head broadcast; benched via the MHA snippet proxy like the
@@ -680,7 +680,7 @@ configs:
     head_dim: 512
     dtype: 'fp16'
     causal: true
-    knobs: {REDUCE: 'g2k', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x64', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', REDUCE: 'g2k', STAGE: 'd1/cp/alt', 'TILE@dd': 'mma_m16n8k16_f16_f32/f1x2/k32', 'TILE@pj': 'mma_m16n8k16_f16_f32/f1x64'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 113.0
     cublas_us: 98.2
   # Q-norm over the global head_dim: 512 rows x 16 heads reshaped to 8192 x 512. Greedy's b256
@@ -689,7 +689,7 @@ configs:
     name: gemma4_12b.qknorm.k512
     M: 8192
     K: 512
-    knobs: {REDUCE: 'b128'}
+    knobs: {WORK: 't128', REDUCE: 'coop'}
     emmy_us: 8.7
     cublas_us: 8.2
   # dynM twins: dynM == static parity on all three global matmuls (the 07-13 observation holds).
@@ -700,7 +700,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 168.7
     cublas_us: 180.3
   - kernel: matmul
@@ -710,7 +710,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 109.6
     cublas_us: 180.3
   - kernel: matmul
@@ -720,7 +720,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 15.4
     cublas_us: 14.3
   - kernel: matmul
@@ -730,7 +730,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x4/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x4', TILE: 'mma_m16n8k16_f16_f16/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 11.9
     cublas_us: 14.3
   - kernel: matmul
@@ -740,7 +740,7 @@ configs:
     K: 8192
     dtype: 'fp16'
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 154.4
     cublas_us: 158.1
   - kernel: matmul
@@ -750,7 +750,7 @@ configs:
     K: 8192
     dtype: 'fp16'
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 117.1
     cublas_us: 158.1
   # attention.hd512 dynM (bare TILE, dd spelling — the masked-flash pin contract). SYMBOLIC
@@ -767,7 +767,7 @@ configs:
     dtype: 'fp16'
     causal: true
     dynamic: true
-    knobs: {REDUCE: 'g2k', STAGE: 'd1/cp/alt', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', REDUCE: 'g2k', STAGE: 'd1/cp/alt', TILE: 'mma_m16n8k16_f16_f32/f1x2/k32'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 116.6
     cublas_us: 104.0
   # The un-split alt sibling, kept for the transfer record.
@@ -779,7 +779,7 @@ configs:
     dtype: 'fp16'
     causal: true
     dynamic: true
-    knobs: {STAGE: 'd1/cp/alt', TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', STAGE: 'd1/cp/alt', TILE: 'mma_m16n8k16_f16_f32/f1x2/k32'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 135.2
     cublas_us: 103.9
   # s2048 tier for the global-layer shapes. The split-K story differs from the hd256 s2048 tier:
@@ -793,7 +793,7 @@ configs:
     N: 8192
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 601.4
     cublas_us: 600.9
   - kernel: matmul
@@ -802,7 +802,7 @@ configs:
     N: 8192
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 439.8
     cublas_us: 600.9
   - kernel: matmul
@@ -811,7 +811,7 @@ configs:
     N: 512
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 45.4
     cublas_us: 47.1
   - kernel: matmul
@@ -820,7 +820,7 @@ configs:
     N: 512
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x4/f2x4/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x4', TILE: 'mma_m16n8k16_f16_f16/f2x4/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 36.4
     cublas_us: 47.1
   - kernel: matmul
@@ -829,7 +829,7 @@ configs:
     N: 3840
     K: 8192
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 595.1
     cublas_us: 570.2
   - kernel: matmul
@@ -838,7 +838,7 @@ configs:
     N: 3840
     K: 8192
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 389.5
     cublas_us: 570.2
   # attention.hd512 at seq 2048: PARITY with torch SDPA (1.00x) — the 255-reg / 8%-occ penalty that
@@ -855,7 +855,7 @@ configs:
     head_dim: 512
     dtype: 'fp16'
     causal: true
-    knobs: {STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x64', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', STAGE: 'd1/cp/alt', 'TILE@dd': 'mma_m16n8k16_f16_f32/f1x2/k32', 'TILE@pj': 'mma_m16n8k16_f16_f32/f1x64'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 1034.6
     cublas_us: 1040.4
   # ---- attention at seq 4096 (2026-07-24, vast.ai 5090, fm-superset tune + greedy A/B) --------------
@@ -870,7 +870,7 @@ configs:
     head_dim: 256
     dtype: 'fp16'
     causal: true
-    knobs: {REDUCE: '', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x8/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x32/k4', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', REDUCE: '', STAGE: 'd1/cp/alt', 'TILE@dd': 'mma_m16n8k16_f16_f32/f1x8/k16', 'TILE@pj': 'mma_m16n8k16_f16_f32/f1x32/k4'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 871.5
     cublas_us: 792.8
   - kernel: attention
@@ -880,7 +880,7 @@ configs:
     head_dim: 256
     dtype: 'fp16'
     causal: true
-    knobs: {REDUCE: '', STAGE: 'd2/cp/ring/p2', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16', 'TILE@pj': 'a:mma_m16n8k16_f16_f16/w4x1/f1x32', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', REDUCE: '', STAGE: 'd2/cp/ring/p2', 'TILE@dd': 'mma_m16n8k16_f16_f32/f1x2/k16', 'TILE@pj': 'mma_m16n8k16_f16_f16/f1x32'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 736.5
     cublas_us: 792.8
   - kernel: attention
@@ -890,7 +890,7 @@ configs:
     head_dim: 512
     dtype: 'fp16'
     causal: true
-    knobs: {REDUCE: '', STAGE: 'd1/cp/alt', 'TILE@dd': 'a:mma_m16n8k16_f16_f32/w4x1/f1x2/k32', 'TILE@pj': 'a:mma_m16n8k16_f16_f32/w4x1/f1x64', WSPEC: ''}  # retired knob dropped: PLACE: 'fuse'
+    knobs: {WORK: 'w4x1', REDUCE: '', STAGE: 'd1/cp/alt', 'TILE@dd': 'mma_m16n8k16_f16_f32/f1x2/k32', 'TILE@pj': 'mma_m16n8k16_f16_f32/f1x64'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 3521.4
     cublas_us: 3672.7
   # ---- decode-bucket twins (M = EMMY_GEN_DECODE_BUCKET; the serving decode static shapes) -----------
@@ -912,7 +912,7 @@ configs:
     N: 4096
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 9.4
     cublas_us: 53.2
   - kernel: matmul
@@ -921,7 +921,7 @@ configs:
     N: 2048
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 5.7
     cublas_us: 12.3
   - kernel: matmul
@@ -930,7 +930,7 @@ configs:
     N: 3840
     K: 4096
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 8.8
     cublas_us: 22.5
   - kernel: matmul
@@ -939,7 +939,7 @@ configs:
     N: 8192
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 16.7
     cublas_us: 47.1
   - kernel: matmul
@@ -948,7 +948,7 @@ configs:
     N: 512
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f1x1/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f1x1/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 5.3
     cublas_us: 6.1
   - kernel: matmul
@@ -957,7 +957,7 @@ configs:
     N: 3840
     K: 8192
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 15.4
     cublas_us: 38.6
   - kernel: matmul
@@ -966,7 +966,7 @@ configs:
     N: 30720
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/tma', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f4x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/tma'}
     emmy_us: 145.2
     cublas_us: 147.1
   - kernel: matmul
@@ -975,7 +975,7 @@ configs:
     N: 3840
     K: 15360
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f4x1/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 72.9
     cublas_us: 79.7
   - kernel: matmul
@@ -984,7 +984,7 @@ configs:
     N: 4096
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 10.7
     cublas_us: 16.4
   - kernel: matmul
@@ -993,7 +993,7 @@ configs:
     N: 2048
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 6.6
     cublas_us: 10.2
   - kernel: matmul
@@ -1002,7 +1002,7 @@ configs:
     N: 3840
     K: 4096
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 11.1
     cublas_us: 16.4
   - kernel: matmul
@@ -1011,7 +1011,7 @@ configs:
     N: 8192
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 17.6
     cublas_us: 26.6
   - kernel: matmul
@@ -1020,7 +1020,7 @@ configs:
     N: 512
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f1x1/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f1x1/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 4.3
     cublas_us: 6.1
   - kernel: matmul
@@ -1029,7 +1029,7 @@ configs:
     N: 3840
     K: 8192
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 18.7
     cublas_us: 26.6
   - kernel: matmul
@@ -1038,7 +1038,7 @@ configs:
     N: 30720
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd1/tma', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd1/tma'}
     emmy_us: 144.8
     cublas_us: 151.6
   - kernel: matmul
@@ -1047,7 +1047,7 @@ configs:
     N: 3840
     K: 15360
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 74.1
     cublas_us: 77.1
   # [fm] single-kernel atomic split (2026-07-21): k4/g4a beats the std k2/g8k partial+finalize by
@@ -1059,7 +1059,7 @@ configs:
     N: 3840
     K: 15360
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 73.5
     cublas_us: 76.9
   - kernel: matmul
@@ -1069,7 +1069,7 @@ configs:
     K: 15360
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 74.7
     cublas_us: 81.9
   # ---- decode-bucket M=64 twins (EMMY_GEN_DECODE_BUCKET=64 — the c>32 serving decode shapes) ------
@@ -1094,7 +1094,7 @@ configs:
     N: 4096
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 18.9
     cublas_us: 16.4
   - kernel: matmul
@@ -1103,7 +1103,7 @@ configs:
     N: 4096
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 16.9
     cublas_us: 16.4
   - kernel: matmul
@@ -1112,7 +1112,7 @@ configs:
     N: 2048
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x4', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 10.9
     cublas_us: 10.6
   - kernel: matmul
@@ -1121,7 +1121,7 @@ configs:
     N: 2048
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 9.5
     cublas_us: 10.6
   - kernel: matmul
@@ -1130,7 +1130,7 @@ configs:
     N: 3840
     K: 4096
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 16.1
     cublas_us: 18.4
   - kernel: matmul
@@ -1139,7 +1139,7 @@ configs:
     N: 3840
     K: 4096
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 15.9
     cublas_us: 18.4
   - kernel: matmul
@@ -1148,7 +1148,7 @@ configs:
     N: 8192
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 31.4
     cublas_us: 30.5
   - kernel: matmul
@@ -1157,7 +1157,7 @@ configs:
     N: 512
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f1x1/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x4', TILE: 'mma_m16n8k16_f16_f32/f1x1/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 5.2
     cublas_us: 6.2
   - kernel: matmul
@@ -1166,7 +1166,7 @@ configs:
     N: 3840
     K: 8192
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 28.0
     cublas_us: 28.3
   - kernel: matmul
@@ -1175,7 +1175,7 @@ configs:
     N: 3840
     K: 8192
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 27.2
     cublas_us: 28.3
   - kernel: matmul
@@ -1184,7 +1184,7 @@ configs:
     N: 3840
     K: 15360
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 76.9
     cublas_us: 78.2
   - kernel: matmul
@@ -1193,7 +1193,7 @@ configs:
     N: 3840
     K: 15360
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 75.8
     cublas_us: 78.2
   # M=32 split halves (2026-07-21): seeded for the mlp_geglu.m32 CUT flip — the m64/m256/m4096 cut
@@ -1208,7 +1208,7 @@ configs:
     N: 15360
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 73.8
     cublas_us: 76.0
   - kernel: matmul
@@ -1217,7 +1217,7 @@ configs:
     N: 15360
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 73.4
     cublas_us: 76.0
   - kernel: matmul
@@ -1227,7 +1227,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 73.9
     cublas_us: 78.0
   - kernel: matmul
@@ -1237,7 +1237,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 73.5
     cublas_us: 78.0
   - kernel: matmul
@@ -1246,7 +1246,7 @@ configs:
     N: 15360
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 70.0
     cublas_us: 78.0
   - kernel: matmul
@@ -1255,7 +1255,7 @@ configs:
     N: 15360
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 67.5
     cublas_us: 78.0
   - kernel: matmul
@@ -1264,7 +1264,7 @@ configs:
     N: 262144
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x8/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: 'p1'}
+    knobs: {WORK: 'w2x8+p1', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 1216.5
     cublas_us: 1220.2
   # The .lin serving-layout twins of the M=64 set (F.linear, trans_b — same tiles, N-major B slab):
@@ -1275,7 +1275,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 18.3
     cublas_us: 16.4
   - kernel: matmul
@@ -1285,7 +1285,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 17.8
     cublas_us: 16.4
   - kernel: matmul
@@ -1295,7 +1295,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x4', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 10.7
     cublas_us: 12.3
   - kernel: matmul
@@ -1305,7 +1305,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 9.6
     cublas_us: 12.3
   - kernel: matmul
@@ -1315,7 +1315,7 @@ configs:
     K: 4096
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 16.7
     cublas_us: 18.4
   - kernel: matmul
@@ -1325,7 +1325,7 @@ configs:
     K: 4096
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 16.5
     cublas_us: 18.4
   - kernel: matmul
@@ -1335,9 +1335,9 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x4/k4', REDUCE: 'g2a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 28.6
-    cublas_us: 26.7
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 33.9
+    cublas_us: 31.5
   - kernel: matmul
     name: gemma4_12b.k_proj_global.m64.lin
     M: 64
@@ -1345,7 +1345,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f1x1/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x4', TILE: 'mma_m16n8k16_f16_f32/f1x1/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 5.2
     cublas_us: 8.2
   - kernel: matmul
@@ -1355,7 +1355,7 @@ configs:
     K: 8192
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 28.9
     cublas_us: 28.4
   - kernel: matmul
@@ -1365,7 +1365,7 @@ configs:
     K: 8192
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 28.1
     cublas_us: 28.4
   - kernel: matmul
@@ -1375,7 +1375,7 @@ configs:
     K: 15360
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 79.4
     cublas_us: 83.0
   - kernel: matmul
@@ -1385,7 +1385,7 @@ configs:
     K: 15360
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 76.6
     cublas_us: 83.0
   - kernel: matmul
@@ -1395,7 +1395,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 71.4
     cublas_us: 79.4
   - kernel: matmul
@@ -1405,7 +1405,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 69.1
     cublas_us: 79.4
   # The M=64 gate⊗up route: PLACE@cone=cut (both layouts — the serving twin contracts .lin). Same
@@ -1444,28 +1444,28 @@ configs:
     name: gemma4_12b.rms_norm.k3840.m64
     M: 64
     K: 3840
-    knobs: {TILE: '', REDUCE: 'b512', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: 't512', TILE: '', REDUCE: 'coop', STAGE: '', RASTER: ''}
     emmy_us: 3.7
     cublas_us: 4.1
   - kernel: rms_norm
     name: gemma4_12b.qknorm.k256.m1024
     M: 1024
     K: 256
-    knobs: {REDUCE: 'b128'}
+    knobs: {WORK: 't128', REDUCE: 'coop'}
     emmy_us: 1.9
     cublas_us: 4.1
   - kernel: rms_norm
     name: gemma4_12b.qknorm.k512.m64
     M: 64
     K: 512
-    knobs: {REDUCE: 'b512'}
+    knobs: {WORK: 't512', REDUCE: 'coop'}
     emmy_us: 1.5
     cublas_us: 2.1
   - kernel: rms_norm
     name: gemma4_12b.qknorm.k512.m1024
     M: 1024
     K: 512
-    knobs: {REDUCE: 'b128'}
+    knobs: {WORK: 't128', REDUCE: 'coop'}
     emmy_us: 2.6
     cublas_us: 4.1
   - kernel: pointwise
@@ -1473,7 +1473,7 @@ configs:
     M: 64
     N: 4096
     dtype: 'fp16'
-    knobs: {TILE: 'f2', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f2', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 0.9
     cublas_us: 1.9
   - kernel: pointwise
@@ -1481,7 +1481,7 @@ configs:
     M: 64
     N: 8192
     dtype: 'fp16'
-    knobs: {TILE: 'f2', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f2', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 1.1
     cublas_us: 2.0
   - kernel: pointwise
@@ -1489,7 +1489,7 @@ configs:
     M: 64
     N: 2048
     dtype: 'fp16'
-    knobs: {TILE: 'f2', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f2', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 0.8
     cublas_us: 1.8
   # ---- prefill-chunk twins (M=256, the serving prefill static shapes) ----------------------------
@@ -1513,7 +1513,7 @@ configs:
     N: 3840
     K: 4096
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 48.4
     cublas_us: 50.0
   - kernel: matmul
@@ -1522,7 +1522,7 @@ configs:
     N: 3840
     K: 4096
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 42.0
     cublas_us: 50.0
   - kernel: matmul
@@ -1531,7 +1531,7 @@ configs:
     N: 3840
     K: 8192
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 89.8
     cublas_us: 99.0
   - kernel: matmul
@@ -1540,7 +1540,7 @@ configs:
     N: 3840
     K: 8192
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 76.7
     cublas_us: 99.0
   - kernel: matmul
@@ -1549,7 +1549,7 @@ configs:
     N: 3840
     K: 15360
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 167.7
     cublas_us: 185.0
   - kernel: matmul
@@ -1558,7 +1558,7 @@ configs:
     N: 3840
     K: 15360
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 140.0
     cublas_us: 184.0
   # The norm→qkv CUT consumers at prefill M=256. Like the MLP edge, the norm→q/kv PROLOGUE is NOT anchored as a
@@ -1581,7 +1581,7 @@ configs:
     N: 4096
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 51.5
     cublas_us: 47.0
   - kernel: matmul
@@ -1590,7 +1590,7 @@ configs:
     N: 4096
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 40.1
     cublas_us: 47.0
   - kernel: matmul
@@ -1599,7 +1599,7 @@ configs:
     N: 2048
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 31.5
     cublas_us: 25.5
   - kernel: matmul
@@ -1608,7 +1608,7 @@ configs:
     N: 2048
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 22.5
     cublas_us: 26.0
   # ---- prefill-chunk twins (M=4096, EMMY_GEN_PREFILL_BUCKET=mnbt — the 4K serving prefill shapes) --
@@ -1631,7 +1631,7 @@ configs:
     N: 4096
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 672.7
     cublas_us: 698.7
   - kernel: matmul
@@ -1640,7 +1640,7 @@ configs:
     N: 4096
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 516.4
     cublas_us: 698.7
   - kernel: matmul
@@ -1650,7 +1650,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 680.9
     cublas_us: 701.1
   - kernel: matmul
@@ -1660,7 +1660,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 530.6
     cublas_us: 701.1
   - kernel: matmul
@@ -1669,7 +1669,7 @@ configs:
     N: 2048
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 369.0
     cublas_us: 360.5
   - kernel: matmul
@@ -1678,7 +1678,7 @@ configs:
     N: 2048
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 257.7
     cublas_us: 360.5
   - kernel: matmul
@@ -1688,7 +1688,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 372.8
     cublas_us: 361.6
   - kernel: matmul
@@ -1698,7 +1698,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 261.3
     cublas_us: 361.6
   - kernel: matmul
@@ -1707,7 +1707,7 @@ configs:
     N: 3840
     K: 4096
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 662.6
     cublas_us: 683.8
   - kernel: matmul
@@ -1716,7 +1716,7 @@ configs:
     N: 3840
     K: 4096
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 415.3
     cublas_us: 683.8
   - kernel: matmul
@@ -1726,7 +1726,7 @@ configs:
     K: 4096
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 675.3
     cublas_us: 673.5
   - kernel: matmul
@@ -1736,7 +1736,7 @@ configs:
     K: 4096
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 421.3
     cublas_us: 673.5
   - kernel: matmul
@@ -1745,7 +1745,7 @@ configs:
     N: 15360
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 2316.0
     cublas_us: 2317.8
   # The fm gate/up halves take RASTER=gm8 (the grouped-M stripe): the ONE m4096 shape where the L2
@@ -1757,7 +1757,7 @@ configs:
     N: 15360
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring'}
     emmy_us: 1500.8
     cublas_us: 2317.8
   - kernel: matmul
@@ -1767,7 +1767,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 2426.3
     cublas_us: 2318.4
   - kernel: matmul
@@ -1777,7 +1777,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring'}
     emmy_us: 1557.4
     cublas_us: 2318.4
   # std mlp_down keeps g2k standalone/canonical, but the g2k row CANNOT realize on the serving twin's
@@ -1789,7 +1789,7 @@ configs:
     N: 3840
     K: 15360
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 2375.9
     cublas_us: 2398.5
   - kernel: matmul
@@ -1798,7 +1798,7 @@ configs:
     N: 3840
     K: 15360
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 2444.4
     cublas_us: 2398.5
   - kernel: matmul
@@ -1807,7 +1807,7 @@ configs:
     N: 3840
     K: 15360
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 1454.7
     cublas_us: 2398.5
   - kernel: matmul
@@ -1817,7 +1817,7 @@ configs:
     K: 15360
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 2399.3
     cublas_us: 2321.9
   - kernel: matmul
@@ -1827,7 +1827,7 @@ configs:
     K: 15360
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 2463.5
     cublas_us: 2321.9
   - kernel: matmul
@@ -1837,7 +1837,7 @@ configs:
     K: 15360
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 1527.5
     cublas_us: 2321.9
   - kernel: matmul
@@ -1846,7 +1846,7 @@ configs:
     N: 8192
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 1246.2
     cublas_us: 1298.5
   - kernel: matmul
@@ -1855,7 +1855,7 @@ configs:
     N: 8192
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 882.3
     cublas_us: 1298.5
   - kernel: matmul
@@ -1865,7 +1865,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 1257.3
     cublas_us: 1302.8
   - kernel: matmul
@@ -1875,7 +1875,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 913.9
     cublas_us: 1302.8
   - kernel: matmul
@@ -1884,7 +1884,7 @@ configs:
     N: 512
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 109.8
     cublas_us: 105.0
   - kernel: matmul
@@ -1893,7 +1893,7 @@ configs:
     N: 512
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x1', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 71.0
     cublas_us: 105.0
   - kernel: matmul
@@ -1903,7 +1903,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 111.2
     cublas_us: 105.7
   - kernel: matmul
@@ -1913,7 +1913,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x1/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x1', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 71.9
     cublas_us: 105.7
   # (2026-07-21, RESOLVED 2026-07-22) The post4096-global twin's --bench "hang" at every o_proj tile
@@ -1929,7 +1929,7 @@ configs:
     N: 3840
     K: 8192
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 1288.2
     cublas_us: 1306.4
   - kernel: matmul
@@ -1938,7 +1938,7 @@ configs:
     N: 3840
     K: 8192
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 826.0
     cublas_us: 1306.4
   - kernel: matmul
@@ -1948,7 +1948,7 @@ configs:
     K: 8192
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 1301.9
     cublas_us: 1297.7
   - kernel: matmul
@@ -1958,7 +1958,7 @@ configs:
     K: 8192
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 855.3
     cublas_us: 1297.7
   # M=4096 norms: rms follows the many-rows b128 rule; the qknorm rows are the 4096-chunk row counts
@@ -1969,28 +1969,28 @@ configs:
     name: gemma4_12b.rms_norm.k3840.m4096
     M: 4096
     K: 3840
-    knobs: {TILE: '', REDUCE: 'b128', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: 't128', TILE: '', REDUCE: 'coop', STAGE: '', RASTER: ''}
     emmy_us: 20.0
     cublas_us: 16.7
   - kernel: rms_norm
     name: gemma4_12b.qknorm.k256.m65536
     M: 65536
     K: 256
-    knobs: {TILE: '', REDUCE: 'b64', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: 't64', TILE: '', REDUCE: 'coop', STAGE: '', RASTER: ''}
     emmy_us: 31.3
     cublas_us: 39.2
   - kernel: rms_norm
     name: gemma4_12b.qknorm.k512.m4096
     M: 4096
     K: 512
-    knobs: {TILE: '', REDUCE: 'b128', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: 't128', TILE: '', REDUCE: 'coop', STAGE: '', RASTER: ''}
     emmy_us: 5.2
     cublas_us: 6.1
   - kernel: rms_norm
     name: gemma4_12b.qknorm.k512.m65536
     M: 65536
     K: 512
-    knobs: {TILE: '', REDUCE: 'b128', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: 't128', TILE: '', REDUCE: 'coop', STAGE: '', RASTER: ''}
     emmy_us: 91.3
     cublas_us: 71.1
   # The M=4096 gate⊗up route: PLACE@cone=cut (both layouts), the m64/m256 pattern at chunk M. emmy_us
@@ -2032,7 +2032,7 @@ configs:
     H: 3840
     inter: 15360
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f4x8', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 8994.9
     cublas_us: 4954.1
   - kernel: mlp_geglu
@@ -2042,7 +2042,7 @@ configs:
     inter: 15360
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f4x8', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 10137.7
     cublas_us: 4869.7
   # ---- serving Linear layout (trans_b) twins: o_proj / mlp_down at decode m16 + dynM -------------
@@ -2067,7 +2067,7 @@ configs:
     K: 4096
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 9.1
     cublas_us: 14.0
   - kernel: matmul
@@ -2077,7 +2077,7 @@ configs:
     K: 4096
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 8.9
     cublas_us: 14.0
   - kernel: matmul
@@ -2087,7 +2087,7 @@ configs:
     K: 8192
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 15.7
     cublas_us: 29.0
   - kernel: matmul
@@ -2097,7 +2097,7 @@ configs:
     K: 8192
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 15.6
     cublas_us: 29.0
   - kernel: matmul
@@ -2107,7 +2107,7 @@ configs:
     K: 15360
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f4x1/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 73.8
     cublas_us: 85.0
   - kernel: matmul
@@ -2117,7 +2117,7 @@ configs:
     K: 15360
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f4x1/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f4x1/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 73.7
     cublas_us: 85.0
   - kernel: matmul
@@ -2128,7 +2128,7 @@ configs:
     dtype: 'fp16'
     dynamic: true
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 94.3
     cublas_us: 97.0
   - kernel: matmul
@@ -2139,7 +2139,7 @@ configs:
     dtype: 'fp16'
     dynamic: true
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 73.9
     cublas_us: 97.0
   - kernel: matmul
@@ -2150,7 +2150,7 @@ configs:
     dtype: 'fp16'
     dynamic: true
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 179.3
     cublas_us: 159.0
   - kernel: matmul
@@ -2161,7 +2161,7 @@ configs:
     dtype: 'fp16'
     dynamic: true
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 136.8
     cublas_us: 159.0
   # (2026-07-22) Same merged-sibling re-record as .dynM above — see that comment.
@@ -2173,7 +2173,7 @@ configs:
     dtype: 'fp16'
     dynamic: true
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4k', RASTER: ''}
     emmy_us: 530.5
     cublas_us: 295.0
   # ---- fused RMSNorm→linear (computed-A / norm_linear kind) --------------------------------------
@@ -2194,7 +2194,7 @@ configs:
     H: 3840
     N: 4096
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync'}
     emmy_us: 26.7
     cublas_us: 19.8
   # norm→k/v projection (input_layernorm → k_proj/v_proj, N=2048): the other single-channel norm→linear
@@ -2209,7 +2209,7 @@ configs:
     H: 3840
     N: 2048
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync'}
     emmy_us: 23.1
     cublas_us: 14.3
   # The GLOBAL-layer (full_attention, hd512) twins of the two entries above — gemma-4 12B alternates 8 global
@@ -2230,7 +2230,7 @@ configs:
     H: 3840
     N: 8192
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync'}
     emmy_us: 38.1
     cublas_us: 31.5
   - kernel: norm_linear
@@ -2239,7 +2239,7 @@ configs:
     H: 3840
     N: 512
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync'}
     emmy_us: 21.1
     cublas_us: 10.2
   # ---- fused RMSNorm→gate⊗up→GeGLU megakernel (computed-A / mlp_geglu kind) ----------------------
@@ -2258,7 +2258,7 @@ configs:
     H: 3840
     inter: 15360
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 179.3
     cublas_us: 159.7
   # (2026-07-21) The CUT reaches decode M=32: with the mlp_gate_up_split.m32 halves seeded (each at
@@ -2295,7 +2295,7 @@ configs:
     N: 4096
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync'}
     emmy_us: 26.5
     cublas_us: 20.5
   - kernel: norm_linear
@@ -2305,7 +2305,7 @@ configs:
     N: 4096
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync'}
     emmy_us: 24.2
     cublas_us: 20.5
   - kernel: norm_linear
@@ -2315,7 +2315,7 @@ configs:
     N: 2048
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f1x1/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f32/f1x1/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 18.4
     cublas_us: 14.3
   - kernel: norm_linear
@@ -2325,7 +2325,7 @@ configs:
     N: 2048
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x16/f1x1/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f16/f1x1/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 18.2
     cublas_us: 14.3
   - kernel: norm_linear
@@ -2335,7 +2335,7 @@ configs:
     N: 8192
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 36.5
     cublas_us: 30.9
   - kernel: norm_linear
@@ -2345,7 +2345,7 @@ configs:
     N: 8192
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x16/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f16/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 30.6
     cublas_us: 30.9
   - kernel: norm_linear
@@ -2355,7 +2355,7 @@ configs:
     N: 512
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f1x1/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f32/f1x1/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync'}
     emmy_us: 13.3
     cublas_us: 10.2
   - kernel: norm_linear
@@ -2365,7 +2365,7 @@ configs:
     N: 512
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x16/f1x1/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f16/f1x1/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 12.7
     cublas_us: 10.2
   - kernel: mlp_geglu
@@ -2375,7 +2375,7 @@ configs:
     inter: 15360
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 178.6
     cublas_us: 166.6
   - kernel: mlp_geglu
@@ -2385,7 +2385,7 @@ configs:
     inter: 15360
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x16/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f16/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 172.5
     cublas_us: 166.6
   # The .lin cut twin of mlp_geglu.m32.cut above (the serving decode layout).
@@ -2446,7 +2446,7 @@ configs:
     N: 15360
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f4x8/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f4x8/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 178.8
     cublas_us: 152.8
   - kernel: matmul
@@ -2455,7 +2455,7 @@ configs:
     N: 15360
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 125.6
     cublas_us: 151.0
   # ---- lm_head (the vocab logits projection) ----------------------------------------------------
@@ -2471,7 +2471,7 @@ configs:
     N: 262144
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: 'p1'}
+    knobs: {WORK: 'w1x8+p1', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 1199.1
     cublas_us: 1208.2
   # ---- memory-bound kernels (regression anchors) ------------------------------------------------
@@ -2487,7 +2487,7 @@ configs:
     seq: 512
     head_dim: 256
     dtype: 'fp16'
-    knobs: {}
+    knobs: {WORK: ''}
     emmy_us: 4.5
     cublas_us: 20.5
   - kernel: embedding
@@ -2496,7 +2496,7 @@ configs:
     seq: 512
     hidden: 3840
     dtype: 'fp16'
-    knobs: {}
+    knobs: {WORK: ''}
     emmy_us: 4.3
     cublas_us: 4.1
   # ---- the CUT's producer halves (PLACE@cone=cut, M=256) ----------------------------------------
@@ -2520,7 +2520,7 @@ configs:
     M: 256
     K: 3840
     dtype: 'fp16'
-    knobs: {REDUCE: 'b128'}
+    knobs: {WORK: 't128', REDUCE: 'coop'}
     emmy_us: 1.9
     cublas_us: 10.0
   - kernel: pointwise
@@ -2528,7 +2528,7 @@ configs:
     M: 256
     N: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'f4'}
+    knobs: {WORK: '', TILE: 'f4'}
     emmy_us: 1.9
     cublas_us: 6.0
   # The M=32 producers (2026-07-21, the mlp_geglu.m32.cut flip) + the cut's GeGLU COMBINE — at m32
@@ -2540,7 +2540,7 @@ configs:
     M: 32
     K: 3840
     dtype: 'fp16'
-    knobs: {REDUCE: 'b128'}
+    knobs: {WORK: 't128', REDUCE: 'coop'}
     emmy_us: 1.7
     cublas_us: 8.0
   # (dtype records fp32 on these two: the cut-emitted cone/combine forks stamp is_warp=False —
@@ -2551,7 +2551,7 @@ configs:
     M: 32
     N: 3840
     dtype: 'fp32'
-    knobs: {TILE: 'f4'}
+    knobs: {WORK: '', TILE: 'f4'}
     emmy_us: 1.2
     cublas_us: 4.0
   - kernel: pointwise
@@ -2559,7 +2559,7 @@ configs:
     M: 32
     N: 15360
     dtype: 'fp32'
-    knobs: {TILE: 'f4'}
+    knobs: {WORK: '', TILE: 'f4'}
     emmy_us: 1.2
     cublas_us: 4.0
   # ---- 2026-07-20 coverage session (manual pinned sweeps on kenshin; no tuner) ---------------------
@@ -2577,7 +2577,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x4/k2', REDUCE: 'g8k', STAGE: 'd2/tma/ring', WSPEC: '', RASTER: ''}
+    knobs: {WORK: 'w2x4', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g8k', STAGE: 'd2/tma/ring', RASTER: ''}
     emmy_us: 10.7
     cublas_us: 12.3
   - kernel: matmul
@@ -2587,7 +2587,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x2/f2x4/k2', REDUCE: 'g4k', STAGE: 'd2/tma/ring', WSPEC: '', RASTER: ''}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g4k', STAGE: 'd2/tma/ring', RASTER: ''}
     emmy_us: 101.7
     cublas_us: 113.1
   - kernel: matmul
@@ -2597,7 +2597,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w2x2/f4x8/k4', REDUCE: 'g2k', STAGE: 'd2/tma/ring', WSPEC: '', RASTER: ''}
+    knobs: {WORK: 'w2x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', STAGE: 'd2/tma/ring', RASTER: ''}
     emmy_us: 81.4
     cublas_us: 113.1
   # ROW-STAT SINK (PLACE@stat, 025_sink_row_reduce; seeded 2026-07-22): at the decode post-attn
@@ -2631,7 +2631,7 @@ configs:
     name: gemma4_12b.rms_norm.k3840.m32
     M: 32
     K: 3840
-    knobs: {TILE: '', REDUCE: 'b512', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: 't512', TILE: '', REDUCE: 'coop', STAGE: '', RASTER: ''}
     emmy_us: 3.6
     cublas_us: 4.1
     # lane: std, pinned: {'RASTER': '', 'REDUCE': 'b256', 'STAGE': '', 'TILE': '', 'WSPEC': ''}
@@ -2639,7 +2639,7 @@ configs:
     name: gemma4_12b.rms_norm.k3840.m256
     M: 256
     K: 3840
-    knobs: {TILE: '', REDUCE: 'b256', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: 't256', TILE: '', REDUCE: 'coop', STAGE: '', RASTER: ''}
     emmy_us: 5.9
     cublas_us: 6.1
     # lane: std, pinned: {'RASTER': '', 'REDUCE': 'b256', 'STAGE': '', 'TILE': '', 'WSPEC': ''}
@@ -2649,7 +2649,7 @@ configs:
     K: 256
     heads: 16
     dynamic: true
-    knobs: {TILE: '', REDUCE: 'b128', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: 't128', TILE: '', REDUCE: 'coop', STAGE: '', RASTER: ''}
     emmy_us: 6.0
     cublas_us: 8.2
     # lane: std, pinned: {'REDUCE': 'b128'}
@@ -2659,7 +2659,7 @@ configs:
     K: 256
     heads: 8
     dynamic: true
-    knobs: {TILE: '', REDUCE: 'b64', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: 't64', TILE: '', REDUCE: 'coop', STAGE: '', RASTER: ''}
     emmy_us: 3.7
     cublas_us: 6.1
     # lane: std, pinned: {'REDUCE': 'b64'}
@@ -2669,7 +2669,7 @@ configs:
     K: 512
     heads: 16
     dynamic: true
-    knobs: {TILE: '', REDUCE: 'b128', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: 't128', TILE: '', REDUCE: 'coop', STAGE: '', RASTER: ''}
     emmy_us: 9.3
     cublas_us: 10.2
     # lane: std, pinned: {'REDUCE': 'b128'}
@@ -2678,7 +2678,7 @@ configs:
     M: 512
     K: 512
     dynamic: true
-    knobs: {TILE: '', REDUCE: 'b256', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: 't256', TILE: '', REDUCE: 'coop', STAGE: '', RASTER: ''}
     emmy_us: 2.2
     cublas_us: 4.1
     # lane: std, pinned: {'RASTER': '', 'REDUCE': 'b256', 'STAGE': '', 'TILE': '', 'WSPEC': ''}
@@ -2687,7 +2687,7 @@ configs:
     M: 32
     N: 4096
     dtype: 'fp16'
-    knobs: {TILE: 'f2', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f2', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 0.7
     cublas_us: 1.9
     # lane: std, pinned: {'RASTER': '', 'REDUCE': '', 'STAGE': '', 'TILE': 'f2', 'WSPEC': ''}
@@ -2696,7 +2696,7 @@ configs:
     M: 256
     N: 4096
     dtype: 'fp16'
-    knobs: {TILE: 'f2', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f2', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 1.5
     cublas_us: 2.0
     # lane: std, pinned: {'RASTER': '', 'REDUCE': '', 'STAGE': '', 'TILE': 'f2', 'WSPEC': ''}
@@ -2705,7 +2705,7 @@ configs:
     M: 32
     N: 8192
     dtype: 'fp16'
-    knobs: {TILE: 'f2', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f2', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 0.8
     cublas_us: 1.9
     # lane: std, pinned: {'RASTER': '', 'REDUCE': '', 'STAGE': '', 'TILE': 'f2', 'WSPEC': ''}
@@ -2714,7 +2714,7 @@ configs:
     M: 256
     N: 8192
     dtype: 'fp16'
-    knobs: {TILE: 'f2', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f2', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 2.5
     cublas_us: 4.1
     # lane: std, pinned: {'RASTER': '', 'REDUCE': '', 'STAGE': '', 'TILE': 'f2', 'WSPEC': ''}
@@ -2723,7 +2723,7 @@ configs:
     M: 32
     N: 2048
     dtype: 'fp16'
-    knobs: {TILE: 'f2', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f2', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 0.7
     cublas_us: 1.6
     # lane: std, pinned: {'RASTER': '', 'REDUCE': '', 'STAGE': '', 'TILE': 'f2', 'WSPEC': ''}
@@ -2732,7 +2732,7 @@ configs:
     M: 256
     N: 2048
     dtype: 'fp16'
-    knobs: {TILE: 'f2', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f2', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 1.1
     cublas_us: 1.9
     # lane: std, pinned: {'RASTER': '', 'REDUCE': '', 'STAGE': '', 'TILE': 'f2', 'WSPEC': ''}
@@ -2741,7 +2741,7 @@ configs:
     M: 256
     N: 15360
     dtype: 'fp32'
-    knobs: {TILE: 'f2', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f2', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 5.7
     cublas_us: 8.2
     # lane: std, pinned: {'RASTER': '', 'REDUCE': '', 'STAGE': '', 'TILE': 'f2', 'WSPEC': ''}
@@ -2751,7 +2751,7 @@ configs:
     N: 2048
     dtype: 'fp16'
     dynamic: true
-    knobs: {TILE: 'f2', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f2', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 1.6
     cublas_us: 2.0
     # lane: std, pinned: {'RASTER': '', 'REDUCE': '', 'STAGE': '', 'TILE': 'f2', 'WSPEC': ''}
@@ -2761,7 +2761,7 @@ configs:
     N: 4096
     dtype: 'fp16'
     dynamic: true
-    knobs: {TILE: 'f4', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f4', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 2.0
     cublas_us: 4.1
     # lane: std, pinned: {'RASTER': '', 'REDUCE': '', 'STAGE': '', 'TILE': 'f4', 'WSPEC': ''}
@@ -2771,7 +2771,7 @@ configs:
     N: 8192
     dtype: 'fp16'
     dynamic: true
-    knobs: {TILE: 'f2', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f2', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 4.4
     cublas_us: 4.1
     # lane: std, pinned: {'RASTER': '', 'REDUCE': '', 'STAGE': '', 'TILE': 'f2', 'WSPEC': ''}
@@ -2801,7 +2801,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x1/f4x8/k2', REDUCE: '', STAGE: 'd2/tma/ring', WSPEC: '', RASTER: ''}
+    knobs: {WORK: 'w4x1', TILE: 'mma_m16n8k16_f16_f32/f4x8/k2', REDUCE: '', STAGE: 'd2/tma/ring', RASTER: ''}
     emmy_us: 333.5
     cublas_us: 315.6
     # lane: std, pinned: {'TILE': 'a:mma_m16n8k16_f16_f32/w4x1/f4x8/k2', 'STAGE': 'd2/cp/ring', 'REDUCE': ''}
@@ -2812,7 +2812,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', STAGE: 'd2/cp/ring', WSPEC: '', RASTER: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', STAGE: 'd2/cp/ring', RASTER: ''}
     emmy_us: 255.9
     cublas_us: 289.5
     # lane: fm, pinned: {'TILE': 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', 'STAGE': 'd2/cp/ring', 'REDUCE': 'g2k'}
@@ -2821,7 +2821,7 @@ configs:
     M: 512
     K: 3840
     dynamic: true
-    knobs: {TILE: '', REDUCE: 'b64', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: 't64', TILE: '', REDUCE: 'coop', STAGE: '', RASTER: ''}
     emmy_us: 2.2
     cublas_us: 8.2
     # lane: std, pinned: {'REDUCE': 'b64'}
@@ -2831,7 +2831,7 @@ configs:
     N: 15360
     dtype: 'fp32'
     dynamic: true
-    knobs: {TILE: 'f4', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f4', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 10.7
     cublas_us: 12.4
     # lane: std, pinned: {'RASTER': '', 'REDUCE': '', 'STAGE': '', 'TILE': 'f4', 'WSPEC': ''}
@@ -2840,7 +2840,7 @@ configs:
     M: 256
     N: 3840
     dtype: 'fp32'
-    knobs: {TILE: 'f2', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f2', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 1.9
     cublas_us: 4.1
     # lane: std, pinned: {'RASTER': '', 'REDUCE': '', 'STAGE': '', 'TILE': 'f2', 'WSPEC': ''}
@@ -2850,7 +2850,7 @@ configs:
     N: 3840
     dtype: 'fp32'
     dynamic: true
-    knobs: {TILE: 'f4', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f4', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 3.2
     cublas_us: 4.1
     # lane: std, pinned: {'RASTER': '', 'REDUCE': '', 'STAGE': '', 'TILE': 'f4', 'WSPEC': ''}
@@ -2896,7 +2896,7 @@ configs:
     N: 30720
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 161.6
     cublas_us: 154.1
   - kernel: norm_linear
@@ -2906,7 +2906,7 @@ configs:
     N: 30720
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 559.4
     cublas_us: 362.0
   - kernel: norm_linear
@@ -2917,7 +2917,7 @@ configs:
     dtype: 'fp16'
     dynamic: true
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 1079.2
     cublas_us: 664.0
   # The SLIDING layers' merged q||k||v edge at the decode bucket — 40 of the 48 `pre` programs. It had
@@ -2940,7 +2940,7 @@ configs:
     N: 8192
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 174.5
     cublas_us: 114.0
   - kernel: norm_linear
@@ -2951,7 +2951,7 @@ configs:
     dtype: 'fp16'
     dynamic: true
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x8/f4x4/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w2x8', TILE: 'mma_m16n8k16_f16_f32/f4x4/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 299.8
     cublas_us: 224.0
   # global m32: the CUT placement halves the fused g8k split total below — same reason the split beat
@@ -2976,7 +2976,7 @@ configs:
     N: 8704
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 40.1
     cublas_us: 37.0
   - kernel: norm_linear
@@ -2986,7 +2986,7 @@ configs:
     N: 8704
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 176.3
     cublas_us: 117.0
   - kernel: norm_linear
@@ -2997,7 +2997,7 @@ configs:
     dtype: 'fp16'
     dynamic: true
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x8/f4x4/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w2x8', TILE: 'mma_m16n8k16_f16_f32/f4x4/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 297.9
     cublas_us: 222.0
   # mlp_down_fused: the STATIC down-proj fork post-merge — the GeGLU combine cone (one merged
@@ -3013,7 +3013,7 @@ configs:
     N: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 95.9
     cublas_us: 90.0
   - kernel: norm_linear
@@ -3023,7 +3023,7 @@ configs:
     N: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 293.0
     cublas_us: 231.0
   # dup__view: the global pre-twin's materialized copy of the merged q||k projection (k_eq_v fans the
@@ -3033,7 +3033,7 @@ configs:
     M: 32
     N: 8704
     dtype: 'fp16'
-    knobs: {TILE: 'f2', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f2', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 0.8
     cublas_us: 2.0
   - kernel: pointwise
@@ -3041,7 +3041,7 @@ configs:
     M: 256
     N: 8704
     dtype: 'fp16'
-    knobs: {TILE: 'f4', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f4', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 2.2
     cublas_us: 4.0
   - kernel: pointwise
@@ -3050,7 +3050,7 @@ configs:
     N: 8704
     dtype: 'fp16'
     dynamic: true
-    knobs: {TILE: 'f4', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f4', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 3.5
     cublas_us: 4.0
 
@@ -3067,7 +3067,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 17.7
     cublas_us: 29.0
   - kernel: matmul
@@ -3077,7 +3077,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 15.4
     cublas_us: 29.0
   - kernel: matmul
@@ -3087,7 +3087,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 18.9
     cublas_us: 47.0
   - kernel: matmul
@@ -3097,7 +3097,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 16.2
     cublas_us: 47.0
   - kernel: matmul
@@ -3107,7 +3107,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 144.6
     cublas_us: 148.0
   - kernel: matmul
@@ -3117,7 +3117,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 143.9
     cublas_us: 148.0
 
@@ -3127,7 +3127,7 @@ configs:
     M: 32
     N: 15360
     dtype: 'fp16'
-    knobs: {TILE: 'f4', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f4', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 0.9
     cublas_us: 2.0
   # the m256 down-cut's GeGLU combine workspace (fp16 sibling of pw.n15360.m256.fp32 — the fp32
@@ -3137,7 +3137,7 @@ configs:
     M: 256
     N: 15360
     dtype: 'fp16'
-    knobs: {TILE: 'f4', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f4', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 3.2
     cublas_us: 4.0
 
@@ -3232,7 +3232,7 @@ configs:
     N: 30720
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 169.4
     cublas_us: 163.5
   # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
@@ -3271,9 +3271,9 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 146.7
-    cublas_us: 154.0
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 233.6
+    cublas_us: 156.0
   - kernel: matmul
     name: gemma4_12b.gate_up_cat.m64.lin
     M: 64
@@ -3281,9 +3281,9 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f1x4/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 145.6
-    cublas_us: 154.0
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 203.9
+    cublas_us: 156.0
   - kernel: matmul
     name: gemma4_12b.qkv_cat.m64.lin
     M: 64
@@ -3291,9 +3291,9 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x4/k4', REDUCE: 'g2a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 28.6
-    cublas_us: 26.7
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 34.0
+    cublas_us: 29.6
   - kernel: matmul
     name: gemma4_12b.qk_global_cat.m64.lin
     M: 64
@@ -3301,9 +3301,19 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 35.5
     cublas_us: 47.8
+  - kernel: matmul
+    name: gemma4_12b.gate_up_cat.m64.lin
+    M: 64
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 225.4
+    cublas_us: 153.4
 
   # M=4096 merged (the mnbt-4096 prefill chunk). The fm consumer rows are what turn the cut
   # into an eager win (qkv cut total 940 fm vs eager 1200); the std consumers sit at parity.
@@ -3364,7 +3374,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 1262.8
     cublas_us: 1295.6
   - kernel: matmul
@@ -3374,7 +3384,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 913.9
     cublas_us: 1295.6
   - kernel: matmul
@@ -3384,7 +3394,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 1316.3
     cublas_us: 1201.3
   - kernel: matmul
@@ -3394,7 +3404,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 921.4
     cublas_us: 1201.3
   - kernel: matmul
@@ -3404,7 +3414,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 7352.0
     cublas_us: 4416.8
   - kernel: matmul
@@ -3414,7 +3424,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 3292.3
     cublas_us: 4416.8
 
@@ -3434,7 +3444,7 @@ configs:
     dtype: 'fp16'
     trans_b: true
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 204.3
     cublas_us: 180.0
   - kernel: matmul
@@ -3445,7 +3455,7 @@ configs:
     dtype: 'fp16'
     trans_b: true
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 124.3
     cublas_us: 180.0
   - kernel: matmul
@@ -3456,7 +3466,7 @@ configs:
     dtype: 'fp16'
     trans_b: true
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 203.3
     cublas_us: 205.0
   - kernel: matmul
@@ -3467,7 +3477,7 @@ configs:
     dtype: 'fp16'
     trans_b: true
     dynamic: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 125.5
     cublas_us: 205.0
 
@@ -3590,7 +3600,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 99.9
     cublas_us: 102.0
   - kernel: matmul
@@ -3600,7 +3610,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 74.3
     cublas_us: 102.0
   - kernel: matmul
@@ -3610,7 +3620,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 108.0
     cublas_us: 101.0
   - kernel: matmul
@@ -3620,7 +3630,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 75.9
     cublas_us: 101.0
   - kernel: matmul
@@ -3630,14 +3640,9 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    # The std lane's tile-M rule at M=256: `k4` and `gm8` group-M rasterization (L2 reuse across the
-    # N sweep) are both required, and the cross-CTA split is not. w4x2/f2x4 at k2 with a g4k split —
-    # the pre-2026-07-30 record — costs 1.74x cuBLAS; the same tile at k4 with gm8 and no split costs
-    # 1.07x. This row also floors the FUSED norm_gate_up.m256 edge, which deploys `PLACE@cone: cut`
-    # and so resolves its matmul against this shape: that path measures 483.5 -> 296.4 us.
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k4', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 291.8
-    cublas_us: 273.7
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 481.4
+    cublas_us: 292.0
   - kernel: matmul
     name: gemma4_12b.gate_up_cat.m256.lin
     M: 256
@@ -3645,7 +3650,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 287.1
     cublas_us: 292.0
 
@@ -3663,7 +3668,7 @@ configs:
     N: 30720
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: '', REDUCE: 'b256t', RASTER: '', STAGE: '', WSPEC: ''}
+    knobs: {WORK: 't256', TILE: '', REDUCE: 'coop-t', RASTER: '', STAGE: ''}
     emmy_us: 142.6
     cublas_us: 145.4
   - kernel: matmul
@@ -3672,7 +3677,7 @@ configs:
     N: 8192
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: '', REDUCE: 'g8k/b128t', RASTER: '', STAGE: '', WSPEC: ''}
+    knobs: {WORK: 't128', TILE: '', REDUCE: 'g8k/coop-t', RASTER: '', STAGE: ''}
     emmy_us: 14.1
     cublas_us: 48.4
   - kernel: matmul
@@ -3681,7 +3686,7 @@ configs:
     N: 8704
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: '', REDUCE: 'g8k/b128t', RASTER: '', STAGE: '', WSPEC: ''}
+    knobs: {WORK: 't128', TILE: '', REDUCE: 'g8k/coop-t', RASTER: '', STAGE: ''}
     emmy_us: 15.9
     cublas_us: 51.0
   - kernel: matmul
@@ -3690,7 +3695,7 @@ configs:
     N: 3840
     K: 15360
     dtype: 'fp16'
-    knobs: {TILE: '', REDUCE: 'g16k/b256t', RASTER: '', STAGE: '', WSPEC: ''}
+    knobs: {WORK: 't256', TILE: '', REDUCE: 'g16k/coop-t', RASTER: '', STAGE: ''}
     emmy_us: 70.8
     cublas_us: 76.1
   - kernel: matmul
@@ -3699,7 +3704,7 @@ configs:
     N: 3840
     K: 4096
     dtype: 'fp16'
-    knobs: {TILE: '', REDUCE: 'g8k/b128t', RASTER: '', STAGE: '', WSPEC: ''}
+    knobs: {WORK: 't128', TILE: '', REDUCE: 'g8k/coop-t', RASTER: '', STAGE: ''}
     emmy_us: 8.1
     cublas_us: 32.0
   - kernel: matmul
@@ -3708,7 +3713,7 @@ configs:
     N: 3840
     K: 8192
     dtype: 'fp16'
-    knobs: {TILE: '', REDUCE: 'g16k/b256t', RASTER: '', STAGE: '', WSPEC: ''}
+    knobs: {WORK: 't256', TILE: '', REDUCE: 'g16k/coop-t', RASTER: '', STAGE: ''}
     emmy_us: 14.2
     cublas_us: 45.0
 
@@ -3727,7 +3732,7 @@ configs:
     K: 3840
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 18.0
     cublas_us: 20.0
   - kernel: matmul
@@ -3737,7 +3742,7 @@ configs:
     K: 3840
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 19.1
     cublas_us: 21.0
   - kernel: matmul
@@ -3747,7 +3752,7 @@ configs:
     K: 3840
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 143.7
     cublas_us: 145.0
   - kernel: matmul
@@ -3757,7 +3762,7 @@ configs:
     K: 3840
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 142.7
     cublas_us: 145.0
   - kernel: matmul
@@ -3767,7 +3772,7 @@ configs:
     K: 4096
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 10.2
     cublas_us: 14.0
   - kernel: matmul
@@ -3777,7 +3782,7 @@ configs:
     K: 4096
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 10.1
     cublas_us: 14.0
   - kernel: matmul
@@ -3787,7 +3792,7 @@ configs:
     K: 8192
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 14.5
     cublas_us: 26.0
   - kernel: matmul
@@ -3797,7 +3802,7 @@ configs:
     K: 8192
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 14.3
     cublas_us: 26.0
   - kernel: matmul
@@ -3807,7 +3812,7 @@ configs:
     K: 15360
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 73.6
     cublas_us: 86.0
   - kernel: matmul
@@ -3817,7 +3822,7 @@ configs:
     K: 15360
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 73.2
     cublas_us: 86.0
   - kernel: matmul
@@ -3827,21 +3832,21 @@ configs:
     K: 3840
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: 'p1'}
+    knobs: {WORK: 'w1x8+p1', TILE: 'mma_m16n8k16_f16_f32/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 1193.1
     cublas_us: 1190.0
   - kernel: rms_norm
     name: gemma4_12b.rms_norm.k3840.m8
     M: 8
     K: 3840
-    knobs: {REDUCE: 'b512'}
+    knobs: {WORK: 't512', REDUCE: 'coop'}
     emmy_us: 3.7
     cublas_us: 4.0
   - kernel: rms_norm
     name: gemma4_12b.qknorm.k512.m8
     M: 8
     K: 512
-    knobs: {REDUCE: 'b512'}
+    knobs: {WORK: 't512', REDUCE: 'coop'}
     emmy_us: 1.4
     cublas_us: 2.0
   - kernel: pointwise
@@ -3849,7 +3854,7 @@ configs:
     M: 8
     N: 2048
     dtype: 'fp16'
-    knobs: {TILE: 'f4', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f4', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 0.8
     cublas_us: 2.0
   - kernel: pointwise
@@ -3857,7 +3862,7 @@ configs:
     M: 8
     N: 4096
     dtype: 'fp16'
-    knobs: {TILE: 'f4', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f4', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 0.8
     cublas_us: 2.0
   - kernel: pointwise
@@ -3865,7 +3870,7 @@ configs:
     M: 8
     N: 8192
     dtype: 'fp16'
-    knobs: {TILE: 'f4', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f4', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 0.8
     cublas_us: 2.0
   - kernel: pointwise
@@ -3873,7 +3878,7 @@ configs:
     M: 8
     N: 8704
     dtype: 'fp16'
-    knobs: {TILE: 'f4', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f4', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 0.8
     cublas_us: 2.0
   - kernel: pointwise
@@ -3881,7 +3886,7 @@ configs:
     M: 8
     N: 15360
     dtype: 'fp16'
-    knobs: {TILE: 'f4', REDUCE: '', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: '', TILE: 'f4', REDUCE: '', STAGE: '', RASTER: ''}
     emmy_us: 0.8
     cublas_us: 2.0
 
@@ -3942,7 +3947,7 @@ configs:
     M: 8
     K: 3840
     dtype: 'fp16'
-    knobs: {REDUCE: 'b128'}
+    knobs: {WORK: 't128', REDUCE: 'coop'}
     emmy_us: 1.5
     cublas_us: 8.0
   - kernel: pointwise
@@ -3950,7 +3955,7 @@ configs:
     M: 8
     N: 3840
     dtype: 'fp32'
-    knobs: {TILE: 'f4'}
+    knobs: {WORK: '', TILE: 'f4'}
     emmy_us: 0.8
     cublas_us: 4.0
   - kernel: pointwise
@@ -3958,7 +3963,7 @@ configs:
     M: 8
     N: 15360
     dtype: 'fp32'
-    knobs: {TILE: 'f4'}
+    knobs: {WORK: '', TILE: 'f4'}
     emmy_us: 1.7
     cublas_us: 4.0
   # ---- M=2048 chunk-tier rows (2026-07-26, TTFT/TPOT parity campaign round 3) ----
@@ -3978,7 +3983,7 @@ configs:
     K: 3840
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 696.5
     cublas_us: 664.0
   - kernel: matmul
@@ -3988,7 +3993,7 @@ configs:
     K: 3840
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 532.7
     cublas_us: 664.0
   - kernel: matmul
@@ -3998,7 +4003,7 @@ configs:
     K: 3840
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 702.1
     cublas_us: 712.0
   - kernel: matmul
@@ -4008,7 +4013,7 @@ configs:
     K: 3840
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 541.2
     cublas_us: 712.0
   - kernel: matmul
@@ -4018,7 +4023,7 @@ configs:
     K: 3840
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 3644.6
     cublas_us: 2302.0
   - kernel: matmul
@@ -4028,7 +4033,7 @@ configs:
     K: 3840
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring'}
     emmy_us: 1549.7
     cublas_us: 2302.0
   - kernel: matmul
@@ -4038,7 +4043,7 @@ configs:
     K: 3840
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 1252.7
     cublas_us: 1201.0
   - kernel: matmul
@@ -4048,7 +4053,7 @@ configs:
     K: 3840
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring'}
     emmy_us: 830.3
     cublas_us: 1201.0
   - kernel: matmul
@@ -4058,7 +4063,7 @@ configs:
     K: 4096
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 336.2
     cublas_us: 305.0
   - kernel: matmul
@@ -4068,7 +4073,7 @@ configs:
     K: 4096
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 222.1
     cublas_us: 305.0
   - kernel: matmul
@@ -4078,7 +4083,7 @@ configs:
     K: 8192
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 699.6
     cublas_us: 606.0
   - kernel: matmul
@@ -4088,7 +4093,7 @@ configs:
     K: 8192
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 419.5
     cublas_us: 606.0
   - kernel: matmul
@@ -4098,7 +4103,7 @@ configs:
     K: 15360
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 1275.5
     cublas_us: 1161.0
   - kernel: matmul
@@ -4108,7 +4113,7 @@ configs:
     K: 15360
     trans_b: true
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 799.2
     cublas_us: 1161.0
   - kernel: rms_norm
@@ -4116,7 +4121,7 @@ configs:
     M: 2048
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: '', REDUCE: 'b128', STAGE: '', WSPEC: '', RASTER: ''}
+    knobs: {WORK: 't128', TILE: '', REDUCE: 'coop', STAGE: '', RASTER: ''}
     emmy_us: 13.1
     cublas_us: 10.0
   # m2048 fused norm->merged / geglu-down verdicts: the CUT wins every key (fused megakernel
@@ -4179,7 +4184,7 @@ configs:
     N: 8192
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 679.2
     cublas_us: 667.9
   - kernel: matmul
@@ -4188,7 +4193,7 @@ configs:
     N: 8192
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 513.5
     cublas_us: 667.9
   - kernel: matmul
@@ -4197,7 +4202,7 @@ configs:
     N: 8704
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 685.1
     cublas_us: 687.0
   - kernel: matmul
@@ -4206,7 +4211,7 @@ configs:
     N: 8704
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 517.6
     cublas_us: 687.0
   - kernel: matmul
@@ -4215,7 +4220,7 @@ configs:
     N: 15360
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 1182.7
     cublas_us: 1191.6
   - kernel: matmul
@@ -4224,7 +4229,7 @@ configs:
     N: 15360
     K: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f4x8/k4', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 790.9
     cublas_us: 1191.6
   - kernel: reduce
@@ -4232,7 +4237,7 @@ configs:
     M: 2048
     K: 3840
     dtype: 'fp16'
-    knobs: {REDUCE: 'b128'}
+    knobs: {WORK: 't128', REDUCE: 'coop'}
     emmy_us: 4.1
     cublas_us: 10.0
   - kernel: pointwise
@@ -4240,7 +4245,7 @@ configs:
     M: 2048
     N: 3840
     dtype: 'fp16'
-    knobs: {TILE: 'f4'}
+    knobs: {WORK: '', TILE: 'f4'}
     emmy_us: 6.2
     cublas_us: 12.0
 

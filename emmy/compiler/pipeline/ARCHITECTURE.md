@@ -224,7 +224,12 @@ Who consumes the ranking: `TuningSearch` (`tune`) ranks the PUCT frontier; `gree
 `Run.resolve`) picks through the deploy evidence hierarchy, top first: (1) the card's recorded **goldens** — the
 verified evidence tier below — then (2) measured -O3 reservoir evidence (`evidence_pick`: the candidate
 prefix-consistent with the fastest `H_opt=3` row of the same op), (3) the tune DB's measured rows, and (4) the
-`mean_score` argmin only when no candidate has evidence.
+`mean_score` argmin only when no candidate has evidence. PLACEMENT resolves BEFORE this schedule pick entirely:
+a ROUTING golden entry (a kind entry whose knobs are `PLACE@<seam>` cuts only — the loader rejects an entry mixing
+`PLACE` with schedule keys, and `_golden_evidence_index` skips routing entries) is consulted at recognition
+(`lowering/tile/_cut.py`, `ShapeKey.joins` on the live card, -O3-gated like the tier itself), each resulting piece
+re-recognizing and resolving its OWN `(kind, shape)` through this same hierarchy — see the tile-lowering
+ARCHITECTURE's placement-routing section. Fuse is the default by absence; cut is evidence/pin-only.
 
 The two file-backed inputs to that pick — the parsed online prior and the DB perf index — are built **once per
 process**, memoized on the source file's `(path, mtime)` (the online file; the DB file plus its `-wal` sidecar). A

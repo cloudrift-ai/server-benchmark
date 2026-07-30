@@ -170,14 +170,18 @@ def test_pin_naming_no_seam_is_skipped(monkeypatch) -> None:
 
 
 def test_routing_golden_cuts_without_a_pin(monkeypatch) -> None:
+    from emmy import config
     from emmy.compiler.pipeline.search import golden as golden_mod
 
     entry = RmsNormGoldenConfig(
         name="rms.routing", M=64, K=4096, dtype="fp16", knobs={"PLACE": "cut"}, emmy_us=3.8, gpu_name="NVIDIA GeForce RTX 5090"
     )
     monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", [entry])
-    ctx = Context.from_target((12, 0), gpu_name=entry.gpu_name)
-    out = _compile(_rms_graph(), None, monkeypatch, ctx=ctx)
+    # Goldens are -O3 truth: under make test's -Xcicc -O1 lane the routing consult (like the
+    # schedule golden tier) is silent — force the deployable regime, the audit's own move.
+    with config.nvcc_flags_override(""):
+        ctx = Context.from_target((12, 0), gpu_name=entry.gpu_name)
+        out = _compile(_rms_graph(), None, monkeypatch, ctx=ctx)
     assert any("__cut_" in k for k in _kernel_ids(out)), "the routing entry cuts with no pin present"
 
 

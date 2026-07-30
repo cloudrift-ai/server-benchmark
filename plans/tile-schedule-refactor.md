@@ -375,9 +375,12 @@ the α-invariant term hash is a re-keying-window event).
 ## Execution order (remaining work)
 
 Steps 1–3 (the phase-2 codec core, 1r, the phase-3 stamp sites) are LANDED — see the trail above.
-The remaining work runs in the order below; EVERYTHING re-keying-gated stays bundled into the ONE
-deliberately scheduled window at the very end, against a phase-5-verified baseline. Identity keys
-off the lowered nest until that final step. The digest gate is now in-repo:
+Steps 4 (1q) and 5 (phase 4) are now ALSO LANDED — see their entries below and the trail. The
+remaining work is step 6 (phase 5 — the consolidated parity gate: hand-pinned `--ab` re-seeding
+of routing + piece entries on BOTH cards) and step 7 (the ONE re-keying window, Dmitry-scheduled).
+EVERYTHING re-keying-gated stays bundled into that final window, against a phase-5-verified
+baseline. Identity keys
+off the lowered nest until that final step. The digest gate is in-repo:
 `scripts/digest_kernels.py` (27 kernels, off-GPU) — every storage change A/Bs against it.
 
 **Evidence stance (decided 2026-07-29): the tune DB / reservoir / online prior are REGENERATED, not
@@ -419,10 +422,22 @@ iteration/seed structure) and they die as recognition grows toward totality, not
 window. The graph-scope rehydrator therefore survives REPOINTED at that arm (escape dumps must
 round-trip), no longer lenient for algebra terms.
 
-**Step 5 — Phase 4, the placement realizer** (detail under *Placement* below): the two-level
-recursive resolve — ROUTING entries (cuts only) partition the tree, every resulting piece (children
-AND residue) re-recognizes and resolves its own entry — plus the cut realizer; fuse-default = no
-routing entry, cut evidence/pin-only.
+**Step 5 — Phase 4, the placement realizer — LANDED** (`lowering/tile/_cut.py` + the `PLACE` path
+family + the routing-entry loader split; tests in `test_placement_routing.py`, the two restored
+020-era cone-cut e2e tests back from the xfail registry). All three done-gates verified on the
+5090: the cone cut cascades recursively to statistic + scale + plain matmul (accuracy PASS; the
+greedy-cold pair benches 4.9 µs vs torch's 6.0 at the gemma M=256/K=3840 shape), rms_norm
+deploys unchanged under default fuse (byte-identical digests with routing off), and the 3-kernel
+split-reduce form compiles + passes accuracy (the cut-out stat piece's own schedule g-splits).
+Deviations, deliberate: (a) v1 realizes ONE cut per routing entry (the recursion covers every
+cascade the examples spell; multi-cut entries raise loudly); (b) cut legality adds two structural
+gates the plan text implied — single-component closed children only, and the pure-copy projection
+seam of an empty-body root refused (the first cascade run found the non-terminating degenerate);
+(c) the 020-era `cut_cone_*` schedule entries stamp the OLD piece shapes' keys (the eps epilogue
+sat in 020's stat kernel; the new realizer cuts at the fold output), so the pieces resolve
+existing KINDS but not those stale entries — phase 5 re-seeds them fresh, per the already-decided
+"pre-wipe µs are not evidence" stance; (d) the loop-fusion brake on `__cut_` workspaces returns
+(tune-mode slicing re-enters fusion with the pieces as ordinary pairs).
 
 **Step 6 — Phase 5, THE consolidated parity gate** (detail under *Placement* below): re-seed the
 retired PLACE goldens as routing + child schedule entries by hand-pinned `--ab` sweeps on both cards,

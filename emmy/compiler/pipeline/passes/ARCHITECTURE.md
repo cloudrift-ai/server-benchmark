@@ -204,14 +204,30 @@ The fragment idiom's re-entry semantics are the rule's own: `030` opts its halve
 that emits plain un-mapped `LoopOp`s hands them back to `010_recognize` on the pass-scan restart. The shared fixpoint
 is what lets such rules compose without knowing about each other.
 
-> **Retired: the `PLACE` placement family.** `020_cut_edge` (cut a fused producer→matmul dataflow edge into separate
-> kernels), `025_sink_row_reduce` (migrate a norm's row statistic into its producer's epilogue) and
-> `032_fuse_finalize` (inline a deferred `g<w>k` finalize into its consumers' read sites) realized the three
-> non-default elements of the pin-only `PLACE` knob. The knob and all three realizers were removed; recognition now
-> always takes the built-in default (fuse the producer cone, fuse flash, fuse the online-softmax tuple, keep the row
-> statistic local, keep the finalize its own kernel). The golden entries that recorded a `PLACE@` placement are
-> commented out in `search/goldens/*.yaml`, and the tests that exercised the removed forms are xfailed through
-> `tests/xfail_registry.py`.
+**Placement routing (phase 4).** `PLACE@<child-path> = cut | fuse` is the per-seam edge property on the recognized
+tree — a `PLACE` site is every NON-ROOT node (the child names its parent↔child seam; the cone edge spells `PLACE@a`
+through the view-role label), spelled/resolved by the same tree-path codec as the schedule families. Resolution is
+TWO-LEVEL and RECURSIVE, decided BEFORE any schedule fork exists (`010_recognize` consults it right after the lift /
+prologue bind): a ROUTING golden entry — an ordinary kind entry whose knobs are `PLACE` keys ONLY (the cut set,
+never a schedule; the loader rejects a mixed entry, and the schedule golden tier skips routing entries, so the
+retired single-namespace hazards — a cut row tying its knob-identical fused twin — cannot return) — or an
+authoritative `PLACE` pin picks a cut seam; the realizer (`lowering/tile/_cut.py`) splits the tree there: the child
+subtree becomes a plain un-mapped `LoopOp` computing the seam value into a `…__cut_…` workspace over its DERIVED
+index space (the enclosing axes its lowered body reads, loop-invariantly nested; a fold child's carrier state
+bridges as **f32** per the split-reduce workspace rule, a value seam keeps its leaf operand dtype), and the parent
+consumes a plain workspace `Load` (every edge admits `Load` — the cut terminal). Both pieces re-recognize as fresh
+roots on the pass-scan restart and resolve their OWN `(kind, shape)` entries through the full deploy hierarchy —
+recursively: the cone piece re-recognizes as the rms_norm shape and its own entry (or a bare pin) cuts the statistic
+out, yielding the cascade statistic + scale + plain matmul, every piece joining an EXISTING golden kind's evidence.
+**Fuse is the default by ABSENCE** — no routing entry and no pin leaves recognition byte-untouched (digest-verified),
+and cut is evidence/pin-only. Cut legality is structural: single-component CLOSED children only (`captured_values`
+in its demoted validation role — flash's state-capturing `P` is simply not cuttable), and the pure-copy degenerate
+(cutting an empty-body root `Map`'s only source, whose parent would merely copy the workspace out — the
+non-terminating case) is refused. Loop fusion brakes on `__cut_` workspace producers — a decided placement is not
+fusion's to undo (tune-mode slicing re-enters fusion with the pieces as ordinary pairs). The old `020_cut_edge` /
+`025_sink_row_reduce` / `032_fuse_finalize` realizers stay retired; their non-default placements return only as
+routing entries re-seeded by fresh `--ab` evidence (phase 5 — the 020-era `cut_cone_*` schedule entries stamp the
+OLD piece shapes' keys and are re-seeded rather than joined).
 
 The atom spec is subtyped by kind (`ir/atom.py`: `AtomKind` is the fixed mma cell selected by name; `ScalarAtom`
 is the plain scalar fma cell). The contraction binder (`bind_contraction`) is loop-addressable so warp-flash can later

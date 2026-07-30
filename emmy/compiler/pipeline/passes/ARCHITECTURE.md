@@ -64,7 +64,10 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   has inlined an operand cone, the cone as a `Map` NODE stored INLINE on an operand edge (`_atomize.make_cone` — a
   STAT-FREE computed A, which rides the `sync` compute-fill like the norm→linear cone but carries
   no statistic prologue) — plus the fold accumulator and the projection. The STORED form is the `role=CONTRACTION`
-  `Fold` (symmetric `operands` tuple + the pure lift/fold `step`; sharing is edge REUSE in the step); the
+  `Fold` in the λ spelling (symmetric `operands` tuple bound POSITIONALLY to the lift params + the pure bilinear
+  `lift` Lambda + the componentwise additive `Monoid` threading the channel accumulator names; sharing is edge
+  REUSE in the lift; the serial step / `Accum` forms / carrier annotation are DERIVED — see the λ-foldMap paragraph
+  below); the
   `ContractionView` READING — shared A + `(b, acc)` channels + the `(m, n)` geometry — is the DERIVED view
   (`ir.contraction_view`, output axes off the caller's placement; `Contraction.as_fold` the storage direction).
   An **operand is an edge** with two inhabitants — the two things an input can be: MATERIALIZED (a gmem `Load`) or
@@ -82,10 +85,11 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   the up projection. Refusing to bind a stat-free cone at all is equally wrong — it demotes the cell to a PLANAR
   scalar fold, which cost the gemma-4 M=256 post twin 144 ms against 4.3 ms bound. The binding now happens ONCE at **recognize time** (`010_recognize._nodify_contraction` — every
   recognized contraction, per-cell scalar included, stores as a contraction fold with a deferred `TilePlan()`; an
-  unbindable one — a 1-D matvec-shaped output — keeps its loads inline in the step, so the fold **derives** `PLANAR`
+  unbindable one — a 1-D matvec-shaped output — keeps its loads inline in the lift, so the fold **derives** `PLANAR`
   and takes the reduce tiers at schedule dispatch — no role rewrite. **`Fold.role` is derived, never stored** (1l):
-  `TWISTED` off the carrier's twist family, `CONTRACTION` off the bilinear parse of the hoisted `(operands, step)`
-  pair (`ir._parse_bilinear`) or the composed split-K step, `PLANAR` otherwise — so "a role=CONTRACTION fold" below
+  `TWISTED` off the carrier's twist family, `CONTRACTION` off the bilinear parse of the lift body
+  (`ir._parse_bilinear` — a plain read of the λ, params binding operand edges positionally) or the composed split-K
+  step, `PLANAR` otherwise — so "a role=CONTRACTION fold" below
   always means the derived reading, and the lowered `Loop`'s annotation falls out of the same read); the schedule fork only
   swaps the node's `tile` field (`_schedule._contraction_node`), and `_factor.factorize` reads the facts off the node
   instead of `lower()`-ing the contraction and pattern-matching the result. A `STAGE` pin follows the same rule: the
@@ -149,6 +153,26 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   resolve-once-structurally rule: `_schedule._row_stage` detects the fused norm→linear shared row when the cooperative
   partition is chosen and stamps a `sync` `Stage` naming it (`smem`) on the `TileOp` — a derived schedule field, not a
   knob — so `_factor._tile_reduce_axis` only applies it, never re-detects.
+
+**The λ-foldMap storage (1m–1p).** A non-composed `Fold` stores pure algebra: a `lift` `Lambda` — `λ(k, v₁…vₙ) → S`,
+the iteration var first, one param per operand edge bound POSITIONALLY, its results the element's SINGLETON state
+(softmax's is `(x, 1)` — ι spelled in the lift, a literal component a bare float) — plus the TRUE `Monoid`
+`(init, combine)` whose combine threads the fold's REAL accumulator names (its results). Everything else about the
+serial form is DERIVED, never stored: the streaming step is combine specialized at the singleton (the `Accum` forms
+for a componentwise monoid, each landing right after the lift stmt defining its value; the exp family's generated
+merge for a twisted one), the `carrier` annotation reconstructs from `(monoid, lift)` at construction (the twist
+family selected STRUCTURALLY — the stored combine must BE the exp/LSE generator's program, asserted at formation;
+the state-component roles read off the singleton shape: pivot = component 0, literal-1 = denominator, value name =
+expectation), and `Fold.from_loop` keeps the λ spelling ONLY when the derived loop reproduces the captured one
+byte-identically (the construction-time gate) — so kernel identity (`op_cache_key`, off the lowered nest) cannot
+move. What still stores a `step`: COMPOSED folds — split-K's outer reduce over its sliced fold, and flash's kv
+stream, whose in-step QK / PV contraction folds carry their own schedule slices (`TILE@dd` / `TILE@pj`); their
+dissolution into the derived blocked evaluation of `combine` rides the phase-2 codec walker (1r) and the QK
+edge-hoist re-keying window. `Map` stores `fn: Lambda` + `sources` (1n): sources bind positionally to `fn.params`
+(the params ARE the sources' bound output names, so lowering splices verbatim), `fn.results` replace the retired
+`out` last-def convention, and — until 1q moves effects to the kernel boundary — the projection body still carries
+the root-store `Write`s / `030`'s sliced-partial `Loop`s through the one sanctioned interim constructor
+(`effectful_lambda`; strict `Lambda` formation the moment a body is pure).
 
 ## The divide rule: `split` an iteration axis
 

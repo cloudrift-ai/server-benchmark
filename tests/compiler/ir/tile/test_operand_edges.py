@@ -168,7 +168,9 @@ def test_rewrite_reaches_a_channels_b_edge() -> None:
 
 def test_map_binder_binds_sources_positionally() -> None:
     single = Map(sources=(_product(),))
-    assert single.fn.params == (_product().out,)  # params ARE the sources' bound output names
+    # One param per source RESULT COMPONENT (1q params flattening) — the product source binds
+    # BOTH channel accumulators, so a combine reading the second never sees a free name.
+    assert single.fn.params == _product().defines()
     assert single.fn.results == single.fn.params[:1]  # empty-body wrap: result = the carried state
     assert single.out == _product().out
     assert Map().fn.params == () and Map().fn.results == ()

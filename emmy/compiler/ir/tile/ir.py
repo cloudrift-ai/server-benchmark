@@ -89,10 +89,11 @@ from emmy.compiler.ir.stmt import (
     State,
     Stmt,
     Twist,
+    Write,
     component_ops,
     rename_combine,
 )
-from emmy.compiler.ir.stmt.body import effectful_lambda
+from emmy.compiler.ir.stmt.body import _member_reads, effectful_lambda
 from emmy.compiler.ir.stmt.carrier import Channel as CarrierChannel
 
 if TYPE_CHECKING:
@@ -601,6 +602,96 @@ def _operand_name(op) -> str:
     return op.defines()[-1] if isinstance(op, Load) else op.out
 
 
+def _operand_result_names(op) -> tuple[str, ...]:
+    """An operand edge's bound RESULT names — one per produced component. A single-valued edge
+    (a gmem ``Load``) is the 1-tuple of :func:`_operand_name`; a product fold / multi-channel
+    node exposes EVERY component, so a wrapping ``Map``'s synthesized params bind one name per
+    component (the 1q params-flattening fix: the geglu combine reads BOTH ``acc_g`` and
+    ``acc_u`` from one source — before the flattening the second component reached the lambda
+    as a free name)."""
+    if isinstance(op, Load):
+        return (op.defines()[-1],)
+    if isinstance(op, Fold):
+        return tuple(op.combine.results) if op.combine is not None else tuple(op.carrier.state.names)
+    if isinstance(op, ContractionView):
+        return op.defines()
+    if isinstance(op, Map):
+        named = tuple(r for r in op.fn.results if isinstance(r, str))
+        return named if named else (op.out,)
+    return (_operand_name(op),)
+
+
+@dataclass(frozen=True)
+class Store:
+    """One ROOT-STORE decoration at the kernel boundary (1q) — the effect the stored term no
+    longer carries. ``write`` is the store verbatim (target buffer, index template, stored value
+    names, the atomic flag — holding the ``Write`` whole keeps every field lossless), and it is
+    NOT part of the term: ``TileOp.stores`` owns the tuple, and every consumer that used to read
+    the ``Write`` out of ``Map.fn`` reconstitutes the effectful stmt stream via
+    :func:`effect_tail`. A ``sweep`` store's ``Write`` rides a per-cell output ``Loop`` over
+    that axis (rms/softmax's normalize sweep, ``unroll`` preserved); the swept members are the
+    trailing projection stmts reading the axis (:func:`_sweep_start`). Conversion sites go
+    through :func:`split_effects`, whose reconstitution round-trip gate is what keeps kernel
+    sources byte-identical to the stored-``Write`` era."""
+
+    write: Write
+    sweep: Axis | None = None
+    unroll: bool = False
+
+
+def _sweep_start(stmts, axis_name: str) -> int:
+    """The first index of the trailing projection run a ``sweep`` store's output ``Loop``
+    wraps — the earliest stmt reading the sweep axis (SSA deps + Expr free vars, deep). The
+    trailing-RUN rule (everything from that stmt on is swept) is deliberately simple; the
+    :func:`split_effects` round-trip gate is what proves it reproduces the captured loop."""
+    for i, s in enumerate(stmts):
+        if axis_name in _member_reads(s):
+            return i
+    return len(stmts)
+
+
+def effect_tail(stmts, stores) -> list[Stmt]:
+    """Reassemble the EFFECTFUL projection stmt stream from a pure projection body + the
+    kernel-boundary ``stores`` — the ONE reconstitution rule the scheduler's tail gates, the
+    materializer's ``Map`` peel and ``030_split_reduce`` share, so the lowered kernels stay
+    byte-identical to the stored-``Write`` era. A plain store appends its ``Write``; a
+    ``sweep`` store wraps the trailing run of stmts reading its axis (:func:`_sweep_start`)
+    into the per-cell output ``Loop``, the ``Write`` last."""
+    out = list(stmts)
+    for st in stores:
+        if st.sweep is None:
+            out.append(st.write)
+        else:
+            i = _sweep_start(out, st.sweep.name)
+            out = [*out[:i], Loop(axis=st.sweep, body=Body((*out[i:], st.write)), unroll=st.unroll)]
+    return out
+
+
+def split_effects(stmts) -> tuple[tuple[Stmt, ...], tuple[Store, ...]] | None:
+    """Split an effectful projection stmt stream into ``(pure stmts, Store decorations)`` — the
+    conversion-side inverse of :func:`effect_tail`, valid ONLY when the reconstitution
+    round-trips byte-identically (checked here; ``None`` otherwise — the caller keeps the
+    raw-loop-IR spelling, the 1o construction-gate pattern). Recognized shapes: a trailing run
+    of top-level root ``Write``\\ s, or ONE trailing non-reduce output sweep ``Loop`` of pure
+    stmts whose last stmt is the ``Write``. An already-pure stream returns ``(stmts, ())``."""
+    original = list(stmts)
+    rest = list(stmts)
+    stores: list[Store] = []
+    while rest and isinstance(rest[-1], Write):
+        stores.insert(0, Store(write=rest.pop()))
+    if not stores and rest and isinstance(rest[-1], Loop) and not rest[-1].is_reduce:
+        loop = rest[-1]
+        inner = list(loop.body)
+        if inner and isinstance(inner[-1], Write) and all(s.pure for s in inner[:-1]):
+            stores.insert(0, Store(write=inner[-1], sweep=loop.axis, unroll=loop.unroll))
+            rest = [*rest[:-1], *inner[:-1]]
+    if not all(s.pure for s in rest):
+        return None
+    if effect_tail(rest, stores) != original:
+        return None
+    return tuple(rest), tuple(stores)
+
+
 def _refs_axis(s: Stmt, name: str) -> bool:
     """``s`` references axis ``name`` in any index expr (deep)."""
     idx = getattr(s, "index", None)
@@ -979,7 +1070,11 @@ class Map(Stmt):
         sources = tuple(sources)
         if fn is None:
             b = Body.coerce(body) if body is not None else Body()
-            params = tuple(_operand_name(s) for s in sources)
+            # One param per source RESULT COMPONENT (1q params flattening): a product fold /
+            # multi-channel source produces N values and the projection may read all of them
+            # (the geglu combine reads ``acc_g`` AND ``acc_u`` from one source), so every
+            # component is a bound param — never a free name.
+            params = tuple(n for s in sources for n in _operand_result_names(s))
             if results is None:
                 results = _map_results(b) or params[:1]
             fn = effectful_lambda(params, b, results)
@@ -1229,6 +1324,12 @@ class TileOp(Op):
     place: Placement = field(default_factory=Placement)
     workers: WarpSpec | None = None
     schedule: dict = field(default_factory=dict)
+    # The kernel's ROOT-STORE decorations (1q — ``Store``): the output ``Write``\\ s (and the
+    # rms/softmax output-sweep spelling) that used to ride ``Map.fn``, now a kernel-boundary
+    # fact beside ``place``. Empty for a bare reduction / contraction — its grid-cell store
+    # stays the materializer's default glue (``_factor.with_store``). Consumers reconstitute
+    # the effectful stmt stream via ``effect_tail`` — never read a ``Write`` out of the term.
+    stores: tuple = ()
     # The ONE worker inventory (1r in-memory — ``ir.schedule.Workers``): the ``w``/``n`` worker
     # tokens factored out of the per-site TILE values, derived at option assembly
     # (``ops.Sched.seal_workers`` — loud on cross-site disagreement). ``None`` = the per-cell /
@@ -1250,9 +1351,12 @@ __all__ = [
     "ContractionView",
     "Map",
     "Fold",
+    "Store",
     "TileOp",
     "contraction_view",
+    "effect_tail",
     "is_contraction_fold",
     "shared_operand",
+    "split_effects",
     "tree_nodes",
 ]

@@ -23,7 +23,19 @@ from emmy.compiler.ir.schedule import (
     WarpSpec,
     role_for,
 )
-from emmy.compiler.ir.tile.ir import Channel, ContractionView, Fold, Map, TileOp, contraction_view, is_contraction_fold, shared_operand
+from emmy.compiler.ir.tile.ir import (
+    Channel,
+    ContractionView,
+    Fold,
+    Map,
+    Store,
+    TileOp,
+    contraction_view,
+    effect_tail,
+    is_contraction_fold,
+    shared_operand,
+    split_effects,
+)
 
 __all__ = [
     "AtomKind",
@@ -39,11 +51,14 @@ __all__ = [
     "RoleAlloc",
     "RoleKind",
     "Stage",
+    "Store",
     "TileOp",
     "TilePlan",
     "WarpSpec",
     "contraction_view",
+    "effect_tail",
     "is_contraction_fold",
     "role_for",
     "shared_operand",
+    "split_effects",
 ]

@@ -929,6 +929,8 @@ class Select(Stmt):
     catch-alls when no earlier predicate matches.
     """
 
+    pure = True  # a coord-predicated value binding — no effect; legal inside a stored ``Lambda``
+
     name: str
     branches: tuple[SelectBranch, ...]
 

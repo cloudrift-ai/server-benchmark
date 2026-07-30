@@ -254,9 +254,10 @@ construction); `Map` stores `fn: Lambda` + positional `sources` (`results` repla
 compat read retired). The remaining deltas: COMPOSED folds (split-K's outer reduce, flash's kv stream)
 still store the `step` sequence — their in-step QK/PV folds carry the `TILE@dd`/`TILE@pj` slices, so
 dissolving them into the derived blocked evaluation rides the phase-2 walker (1r) and the QK edge-hoist
-re-keying window (→ 1p residual); projection `Write`s and `030`'s sliced-partial `Loop`s still ride
-`Map.fn` through the interim `effectful_lambda` constructor (→ 1q — delete it there); the schedule
-slices still ride the `Fold` node (→ 1r); identity keys off the lowered nest (kept through migration;
+re-keying window (→ step 7); projection `Write`s and `030`'s sliced-partial `Loop`s still ride
+`Map.fn` through the interim `effectful_lambda` constructor (→ 1q, step 4 — delete it there); the
+schedule slices still ride the `Fold` node (→ 1r, step 2); identity keys off the lowered nest (kept
+through migration;
 the α-invariant term hash is a re-keying-window event).
 
 ## Landed trail (compressed history — the vocabularies below are RETIRED)
@@ -333,42 +334,73 @@ the α-invariant term hash is a re-keying-window event).
   evaluation rides the phase-2 walker (1r) + the QK edge-hoist re-keying window. 17/17 digests
   identical; the hd512.s2048 split-KV digest matches the pre-refactor base byte-exactly.
 
-## Phase 1 continuation (open): 1p residual, 1q, 1r — reaching the λ-foldMap target
+## Execution order (remaining work)
 
-1m / 1n / 1o and 1p's non-composed half are LANDED (see the trail above). What remains, and its gates:
-1p's flash residual and 1q's identity switch are re-keying-window-gated, and 1r rides the phase-2
-walker (it lands with or after the codec core); none of it blocks phases 2–3 (the codec resolves by
-axis on either spelling, and identity keys off the lowered nest throughout).
+1m / 1n / 1o and 1p's non-composed half are LANDED (see the trail above). The remaining work runs in
+the order below — chosen so every step consumes only what already landed, the codec walker (the
+bottleneck for everything else) lands first, and EVERYTHING re-keying-gated is bundled into ONE
+deliberately scheduled window at the very end, against a phase-5-verified baseline, instead of three
+separate re-key events. Identity keys off the lowered nest until that final step.
 
-- **1p residual — flash's composed step dissolves into the derived blocked evaluation.** Flash's kv
-  fold still stores its step SEQUENCE because the in-step QK/PV `role=CONTRACTION` folds carry their
-  own schedule slices: `TILE@dd` must address the score operand edge (the QK edge-hoist — deferred to
-  the re-keying window because hoisting reorders the lowered nest) and `TILE@pj` the PV site in the
-  DERIVED blocked evaluation by its axis name — which needs the phase-2 walker to enumerate
-  derived-combine sites for twisted folds (the monoid's program stays BELOW the seam lattice — never
-  a cut target). The lift/monoid storage and the shape-derived role decision (pivot / denominator /
-  expectation) landed with 1p; the flash digests including split-KV remain the gate, and the
-  RE-KEYING WINDOW is the escape for residual spelling drift.
-- **1q — effects to the boundary + the identity switch.** Projection `Write`s leave `Map.fn` (`results`
-  + materializer glue synthesize every root store — the bare-fold glue generalized to `030`'s partials
-  and flash's layout-aware store); `captured_values` demotes to a validation assert; the interim
-  `effectful_lambda` constructor (and the graph-scope lenient rehydrator) is DELETED — every `Map.fn`
-  constructs strict `Lambda`s. NOTE the real depth here: rms/softmax's projection `Write` sits INSIDE
-  the post-fold sweep `Loop` riding `Map.fn`, so this is the projection-as-pure-cell restructuring,
-  not a mechanical Write hoist. Then, inside the
-  same re-keying window as 1p's fallback: `Body` order inside lambdas canonicalizes and kernel identity
-  switches from lowered-nest bytes to the α-invariant term hash — a re-keying event by definition,
-  never a silent one.
-- **1r — schedule slices move off the nodes.** `tile` / `reduce` / `stage` leave `Fold`; `TileOp`
-  carries `schedule: {FAMILY@path → slice}` — the values are the existing `TilePlan` / `ReducePlan` /
-  `Stage` objects, resolved, and the key is the phase-2 codec key (a fold may carry all three
-  families at once, so the path alone cannot key the map; the stamped knob row becomes `spell()` of
-  the values + the root-globals). The walker is the prerequisite, so 1r lands with or after the
-  codec core. The term becomes pure algebra, IMMUTABLE
-  across the whole schedule search: a fork is a different map, never a rebuilt tree, and "keys stamp
-  against the pre-placement tree" holds by type. Byte-neutral (`lower` already ignores the slices —
-  they are metadata); the readers re-key mechanically (`reduce_plan`, `nodify_reduce`, `030`'s plan
-  reads, `_stamp_twisted_split`, the materializer); digest-gated as usual.
+**Step 1 — Phase 2, the codec core** (detail under *Knob codec* below). Self-contained: no GPU, no
+re-keying risk, and it unblocks 1r, phase 3, and the `TILE@pj` half of the flash residual. Write the
+COMPAT TEST FIRST — resolve every knob dict in ALL golden YAML files against its kernel kind's tree
+and assert the stored spelling is already canonical — it is the tripwire that proves the
+zero-migration claim before any stamper changes.
+
+**Step 2 — 1r: schedule slices move off the nodes** (immediately after the walker — it is mechanical
+once the codec key exists). `tile` / `reduce` / `stage` leave `Fold`; `TileOp` carries
+`schedule: {FAMILY@path → slice}` — the values are the existing `TilePlan` / `ReducePlan` / `Stage`
+objects, resolved, and the key is the phase-2 codec key (a fold may carry all three families at once,
+so the path alone cannot key the map; the stamped knob row becomes `spell()` of the values + the
+root-globals). The term becomes pure algebra, IMMUTABLE across the whole schedule search: a fork is a
+different map, never a rebuilt tree, and "keys stamp against the pre-placement tree" holds by type —
+which the phase-3 stampers then get for free. Byte-neutral (`lower` already ignores the slices — they
+are metadata); the readers re-key mechanically (`reduce_plan`, `nodify_reduce`, `030`'s plan reads,
+`_stamp_twisted_split`, the materializer); digest-gated as usual.
+
+**Step 3 — Phase 3, stamp sites** (detail under *Knob codec* below): the scheduler's fork rows spell
+keys via the resolver, byte-identical to today's spellings on every current shape.
+
+**Step 4 — 1q: effects to the boundary** (its own session, BEFORE phase 4: the cut realizer needs
+synthesized stores at every seam anyway, so the generalized glue is shared work — and this deletes
+the interim). Projection `Write`s leave `Map.fn` (`results` + materializer glue synthesize every root
+store — the bare-fold glue generalized to `030`'s partials and flash's layout-aware store);
+`captured_values` demotes to a validation assert; the interim `effectful_lambda` constructor (and the
+graph-scope lenient rehydrator) is DELETED — every `Map.fn` constructs strict `Lambda`s. NOTE the
+real depth here: rms/softmax's projection `Write` sits INSIDE the post-fold sweep `Loop` riding
+`Map.fn`, so this is the projection-as-pure-cell restructuring, not a mechanical Write hoist. Fold in
+the params-flattening fix on the way (here, or at phase 2 if it lands first — whichever comes first):
+`Map.fn.params` binds one param per SOURCE, but a product fold produces N components (the geglu body
+reads `acc_g` AND `acc_u` from one source), so the second component reaches the lambda as a free
+name — flatten to one param per result component BEFORE the contextual free-names check turns on.
+The identity switch that used to ride 1q moves to step 7 — 1q itself stays byte-neutral,
+digest-gated.
+
+**Step 5 — Phase 4, the placement realizer** (detail under *Placement* below): `PLACE@<child-path> =
+cut | fuse`, fuse-default, cut evidence/pin-only.
+
+**Step 6 — Phase 5, THE consolidated parity gate** (detail under *Placement* below): re-seed the
+retired PLACE goldens by hand-pinned `--ab` sweeps on both cards, eval-golden MATCH across the board,
+twins from tier, TPOT/TTFT within noise.
+
+**Step 7 — the ONE re-keying window** (after phase 5, so the re-key lands against a verified
+baseline; a re-keying event by definition, never a silent one — it re-keys goldens/DB on both cards,
+so it runs the manual `--ab` re-seed workflow and Dmitry schedules it). Bundled into this single
+event:
+
+- **The QK edge-hoist + flash's composed step dissolving into the derived blocked evaluation** (the
+  1p residual). Flash's kv fold still stores its step SEQUENCE because the in-step QK/PV
+  `role=CONTRACTION` folds carry their own schedule slices: `TILE@dd` must address the score operand
+  edge (the hoist reorders the lowered nest — hence window-gated) and `TILE@pj` the PV site in the
+  DERIVED blocked evaluation by its axis name (the phase-2 walker enumerates derived-combine sites
+  for twisted folds; the monoid's program stays BELOW the seam lattice — never a cut target). The
+  lift/monoid storage and the shape-derived role decision (pivot / denominator / expectation) landed
+  with 1p; the flash digests including split-KV remain the gate, and the window is the escape for
+  residual spelling drift.
+- **`Body` order inside lambdas canonicalizes.**
+- **Kernel identity switches** from lowered-nest bytes to the α-invariant term hash of the
+  canonically renumbered term.
 
 ## Knob codec (phases 2–3)
 
@@ -488,13 +520,12 @@ YAML-comment baselines.
 
 ## Risks
 
-- **1p stays the subtlest step**: the singleton-specialization + simplify pipeline must reproduce
-  today's dissolved stmt sequence byte-exactly — names included — and the twist realizer's reads
-  must survive the step's material becoming derived (flash digests including split-KV are the gate);
-  the state-component-role story must be DECIDED there (shape-derivation vs annotation); keep the
-  associativity + agreement tests green before touching the emitter. The sanctioned escape for
-  residual spelling drift is the re-keying window, never a silent re-key; the QK edge-hoist
-  constraint survives inside it.
+- **The flash dissolution (step 7) stays the subtlest move**: the derived blocked evaluation must
+  reproduce today's step material through the twist realizer's reads (flash digests including
+  split-KV are the gate; the shape-derived role story landed with 1p and must survive the PV fold
+  becoming derived); keep the associativity + agreement tests green before touching the emitter.
+  It lives INSIDE the one re-keying window by design — residual spelling drift re-keys there,
+  never silently outside it.
 - **Purity erosion in lambdas**: the whole design rests on state entering `combine` as params and
   leaving as results — `Accum` (or any effectful stmt) creeping into ANY stored `Lambda` (lift,
   combine) re-creates dissolved-state storage. The `Stmt.pure` trait + `Lambda.__post_init__`

@@ -1,6 +1,6 @@
 """Delegate an atomic accumulator's per-launch zero-init to a predecessor kernel (WS2).
 
-Every atomic accumulator (atomic ``Write`` / ``RegStore`` output, a ``RowAccum`` aux buffer)
+Every atomic accumulator (atomic ``Write`` / ``RegStore`` output)
 pays a per-launch memset — a CUDA-graph MEMSET node per site (~1.3 µs isolated, 3-5 per gemma-4
 decode layer). The zero only has to happen-before the accumulating launch IN THE SAME STREAM, so
 it can ride any launch that precedes it: this rule injects a ``ZeroPrologue`` stmt (CTA 0 writes
@@ -50,7 +50,7 @@ PATTERN = [Pattern("root", KernelOp)]
 # Delegation cap: CTA 0 zeroes the prologue SERIALLY (~70 B/ns measured on the 5090 — the m64
 # gate_up workspace's 983 KB burned 14 µs/launch, 1.8% of the c=64 decode window), while the
 # runtime MEMSET node it replaces costs ~1.3 µs regardless of size — break-even ≈ 90 KB. Past
-# the cap the buffer keeps its runtime memset; the tiny RowAccum/stat buffers and small-M
+# the cap the buffer keeps its runtime memset; the tiny stat buffers and small-M
 # accumulator outputs the delegation was built for sit far under it.
 _MAX_DELEGATED_WORDS = 16384  # 64 KB
 

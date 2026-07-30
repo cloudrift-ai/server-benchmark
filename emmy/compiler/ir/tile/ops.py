@@ -1,22 +1,16 @@
-r"""The geometry-free compute layer — the lift wrapper and its lowering.
+r"""The geometry-free compute layer — node lowering and the structural reads.
 
-A kernel's compute is a :class:`~emmy.compiler.ir.tile.ir.Map` (re-exported here) — a
-:class:`~emmy.compiler.ir.stmt.body.Body` of loop-IR stmts holding the per-cell compute. A
-reduction is a ``Map`` whose body contains the **annotated reduce ``Loop``** (its
-:class:`~emmy.compiler.ir.axis.AxisRole`
-stamped by recognition; the algebra is the body) followed by the post-reduce projection; a contraction is a ``Map`` whose
-reduce ``Loop`` is ``CONTRACTION`` (the ``⊗`` lift sits in the loop body). The algebra is read
-**structurally** off the annotated loop, never a stored node kind — the ``Monoid`` / ``Semiring``
-node wrappers are retired.
+A kernel's compute is a stored :class:`~emmy.compiler.ir.tile.ir.Fold` (a bare reduce) or a
+:class:`~emmy.compiler.ir.tile.ir.Map` (a pure pointwise cell, or the projection wrapper over its
+source fold). The algebra is read **structurally** off the node — :func:`axis_role` /
+:func:`reduce_loop` recurse through ``Map.sources``; there is no stored node kind.
 
-This module is the thin lowering of that wrapper to loop IR (:func:`lower` — the body verbatim,
-the folds already dissolved into loose ``Accum``\ s at recognition) plus the structural reads
-(:func:`axis_role` / :func:`reduce_loop`) and the shared contraction-loop builder
-(:func:`contraction_loop`). Stored trees are already resolved — a computed operand is an inline
-node on its edge, so there is no name-resolution step ahead of a lowering walk (the old
-``resolve`` splice over ``TileOp.bindings`` retired with the let table), and the fused
-multi-channel edge lowers through :attr:`ContractionView.loop`'s own product derivation (the old
-``is_group`` / ``group_loop`` sibling matching retired with it)."""
+This module is the thin lowering of any node back to its loop nest (:func:`lower` — a fold
+flattens through :attr:`Fold.loop`, a wrapping projection appends) plus the shared
+contraction-loop builder (:func:`contraction_loop`), the tree-path schedule accessor
+(:class:`Sched`), kernel identity (:func:`term_key`) and the worker sealing
+(:func:`seal_workers`). Stored trees are already resolved — a computed operand is an inline node
+on its edge, so there is no name-resolution step ahead of a lowering walk."""
 
 from __future__ import annotations
 

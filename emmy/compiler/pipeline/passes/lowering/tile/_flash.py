@@ -71,8 +71,7 @@ shape), an optional broadcast additive mask (the HF ``(1,1,S,S)`` float bias),
 and GQA (``q_heads == group · kv_heads``; the K/V head axis read at ``head //
 group`` directly, no materialized broadcast). Fusion is unconditional — a recognized,
 certifiable pair always fuses; an uncertifiable one falls back to the separate score
-producer + softmax-then-P@V kernels. The two-level ``OptionFork`` offer +
-``OfflinePrior`` cold-start are a follow-up.
+producer + softmax-then-P@V kernels.
 """
 
 from __future__ import annotations

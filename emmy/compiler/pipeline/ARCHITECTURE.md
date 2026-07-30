@@ -432,8 +432,7 @@ ops. The two kinds have opposite structure, so `two_level.py` splits them on the
 `Op`-rebind vs `Graph`-splice classification):
 
 **Outer search** (`run_two_level_tune`) drives the graph-changing passes — `frontend` + `loop` plus the pre-partition
-head of `lowering/tile` (`010_split_demoted`'s keep-vs-split offer followed by the non-forking post-split re-fusion
-aliases). A **terminal** is the state where the cursor reaches `partition_loops` with every structural fork resolved.
+head of `lowering/tile`. A **terminal** is the state where the cursor reaches `partition_loops` with every structural fork resolved.
 Each terminal is a candidate fused graph; its **reward** is `1 / Σ best-per-op time` from the inner search,
 backpropagated by the reused `TuningSearch`. Structurally identical offer sites within one trajectory take the same
 side: `Run.drive` replays the first decision read off the trajectory's own graph (`_replay_structural_decision`), so
@@ -930,21 +929,10 @@ cards and regimes — regret is a within-fork ratio, so it compares safely.
 grid, pick the reduce partition + output `TILE` fragment, and **atomize** — resolve the algebra→hardware-atom binding
 structurally onto the schedule as each warp / cooperative option is built, so an unbindable atom is rejected at fork
 construction; `_atomize.py`) → `030_split_reduce` (cross-CTA split-K as a graph rewrite). It **never dispatches on a named
-shape** — every decision is gated on the reduce axes' fold algebra read off the body (`MAP` / `SEMIRING` /
-`MONOID`; flash attention is the `MONOID` algebra on the streaming schedule, a twisted monoid is a monoid, selected
-structurally), not on a matmul / pointwise / attention archetype. The full design lives in
-[`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md). One interaction reaches up to the pipeline level:
-
-**The demoted-matmul split (`CUT`) as an outer structural fork.** `split/010_split_demoted` may un-fuse a demoted
-matmul (a multiply operand reading a computed / K-folded cone that keeps the matmul off the warp tier) into an
-`xn`-producer + clean-gemm-consumer `Graph` fragment — a kernel-set change. The two-level tuner owns the offer as an
-outer structural fork: keep-vs-split branches the outer tree, each side's kernels are tuned in first-class per-op
-slices, and the Σ-per-op terminal rewards compare the kernel sets; greedy deploys the split only via the *trained*
-prior's structural pricing, never cold. The `op.knobs` `CUT` stamp is the considered-vs-declined idiom (`keys.py`):
-simultaneously the rule's idempotence guard, the online prior's training signal (absent = never offered →
-NaN-filled; `"0"` / `"1"` = the decision), and the `op_cache_key` separation that keeps each decision state distinct
-in the search tree. The stamp is deterministic per offer site, so identical kernels across graphs stamp identically
-and keep sharing perf rows.
+shape** — every decision is gated on the derived role of the stored fold (`PLANAR` / `CONTRACTION` / `TWISTED`; flash
+attention is the `TWISTED` fold on the streaming schedule, a twisted monoid is a monoid, selected structurally), not
+on a matmul / pointwise / attention archetype. The full design lives in
+[`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md).
 
 ## Tunable knobs
 

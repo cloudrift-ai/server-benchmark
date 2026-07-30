@@ -913,7 +913,7 @@ def _is_structural_option(option: object) -> bool:
     """Classify one raw rewrite option by its effect: a ``Graph`` splice
     changes which ops exist — **structural**; an ``Op`` rebind is in-place —
     **op-variant**. The Op/Graph return type IS the classification; rules wrap
-    a Graph option in a leaf :class:`OptionFork` (e.g. ``tile/010_split_demoted``),
+    a Graph option in a leaf :class:`OptionFork` (no production rule emits one today),
     whose ``option`` is readable without firing any thunk. A *branch* ``Fork``
     reads op-variant: the sole branch-Fork emitter today is the partition
     planner (all ``TileOp`` leaves), and typing it would require ``expand()`` —

@@ -660,6 +660,11 @@ def _unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | No
     misses: list[str] = []
     for name, want in pinned.items():
         fam = family_of(name)
+        if fam == "PLACE":
+            # A realized cut leaves no knob stamp — the routed pieces are plain re-recognized
+            # kernels (the cut is visible as the ``__cut_`` workspace kernel, not a knob) — so
+            # a PLACE pin is ungateable here, never a miss.
+            continue
         others: list[str] = []
         saw_off = False
         hit = False

@@ -277,23 +277,15 @@ def _replace_edge(node, child, load: Load):
             return Map(fn=node.fn, sources=tuple(load if s is child else s for s in node.sources))
         return Map(fn=node.fn, sources=tuple(_replace_edge(s, child, load) if isinstance(s, (Map, Fold)) else s for s in node.sources))
     if isinstance(node, Fold):
-        if any(e is child for e in node.operands):
-            from dataclasses import replace as _dc_replace  # noqa: PLC0415
-
-            ops2 = tuple(load if e is child else e for e in node.operands)
-            if node.lift is not None:
-                return _dc_replace(node, operands=ops2)
-            return _dc_replace(node, operands=ops2)
         from dataclasses import replace as _dc_replace  # noqa: PLC0415
 
-        ops2 = tuple(_replace_edge(e, child, load) if isinstance(e, (Map, Fold)) else e for e in node.operands)
-        if node.lift is not None:
-            return _dc_replace(node, operands=ops2)
-        return _dc_replace(node, operands=ops2)
+        if any(e is child for e in node.operands):
+            return _dc_replace(node, operands=tuple(load if e is child else e for e in node.operands))
+        return _dc_replace(node, operands=tuple(_replace_edge(e, child, load) if isinstance(e, (Map, Fold)) else e for e in node.operands))
     return node
 
 
-def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Site, ctx=None) -> Graph:
+def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Site) -> Graph:
     """Split the recognized tree at ``site``'s seam into a two-kernel fragment: the CHILD piece
     computes the seam value into a workspace over its derived index space; the PARENT piece is
     the same tree with the seam edge replaced by a plain workspace ``Load``. Both pieces are

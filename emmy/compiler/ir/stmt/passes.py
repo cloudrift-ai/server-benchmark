@@ -26,7 +26,6 @@ from emmy.compiler.ir.stmt.leaves import (
     Load,
     Mma,
     Pack,
-    RowAccum,
     Select,
     SelectBranch,
     StateMerge,
@@ -223,18 +222,6 @@ def _(s: Select, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
 
 
 @rewrite.register
-def _(s: RowAccum, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
-    # EVERY field rides through — a field-by-field reconstruction that drops one is exactly
-    # the ``RegStore.atomic`` silent-degrade bug class.
-    return RowAccum(
-        dst=s.dst,
-        flat=_rename_ssa_vars_in_expr(sigma.apply(s.flat), rename),
-        n=s.n,
-        value=rename(s.value),
-    )
-
-
-@rewrite.register
 def _(s: Loop, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     # Preserve the reduce ``role`` annotation through σ-offsets / axis-renames. The loop carries
     # no algebra — the fold's ⊕ lives on the ``Fold`` node, whose own rewrite handler renames the
@@ -301,11 +288,6 @@ def _(s: Write, ctx: SimplifyCtx) -> Stmt:
 @simplify.register
 def _(s: Select, ctx: SimplifyCtx) -> Stmt:
     return Select(name=s.name, branches=tuple(SelectBranch(b.value, b.select.simplify(ctx)) for b in s.branches))
-
-
-@simplify.register
-def _(s: RowAccum, ctx: SimplifyCtx) -> Stmt:
-    return RowAccum(dst=s.dst, flat=s.flat.simplify(ctx), n=s.n, value=s.value)
 
 
 @simplify.register

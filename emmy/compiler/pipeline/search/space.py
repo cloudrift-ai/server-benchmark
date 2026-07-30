@@ -78,38 +78,17 @@ STAGE = Knob(
     off="",
 )
 
-# Warp specialization — the worker-mapping sibling of ``REDUCE``/``TILE``/``STAGE`` and ORTHOGONAL to
-# all three: the pipeline (what's staged, the mma tile, the reduce partition) is fixed by those pins;
-# ``WSPEC`` only splits the warps that run it into roles (``p<np>`` producer warps drive the ``STAGE``
-# load half; the compute warps stay on the mma). ``off=""`` is uniform SIMT (every warp does both
-# halves). Resolved into the schedule's :class:`WarpSpec` (``None`` = uniform) and gated on a warp
-# ``TILE`` + a resolved **TMA** ``STAGE`` (the producer band drives the box-copy mbarrier ring;
-# cp.async's wait-group is issuing-thread-scoped and a sync compute-fill has no async load half).
-
-
-def _wspec_features(val) -> dict[str, float]:
-    """The ``WSPEC`` sub-features for the online prior — the dedicated (non-COMPUTE) warp count
-    (``0.0`` = uniform SIMT). The producer ``q`` window is reserved (inert) and not featurized."""
-    if not val:
-        return {"D_wspec_warps": 0.0}
-    from emmy.compiler.ir.schedule import WarpSpec  # noqa: PLC0415 — schedule imports this module's knobs' consumers
-
-    try:
-        ws = WarpSpec.parse(str(val))
-    except ValueError:
-        return {"D_wspec_warps": 0.0}
-    return {"D_wspec_warps": float(ws.aux_warps)}
-
-
+# Warp specialization — an env-pin alias: the role→warp split (``p<np>`` producer warps drive the
+# ``STAGE`` load half; compute warps stay on the mma) lives in the WORK inventory's ``+p`` suffix.
+# Gated on a warp ``TILE`` + a resolved **TMA** ``STAGE`` (the producer band drives the box-copy
+# mbarrier ring; cp.async's wait-group is issuing-thread-scoped and a sync compute-fill has no
+# async load half).
 WSPEC = Knob(
     "WSPEC",
     KnobType.STR,
-    help="Warp-specialization codec — role→warp split over the fixed pipeline "
-    "(p<np> producer[:q<window>, reserved], s<ns> sfu, …; compute warps implicit = TilePlan.units; empty=uniform SIMT). "
-    "Decided in lowering/tile/010_recognize (the _schedule helper), materialized in lowering/kernel/010_materialize "
-    "(the staged K-loop's producer/compute band split; warp TILE + TMA STAGE only).",
-    features=_wspec_features,
-    off="",
+    help="Warp-specialization env-pin ALIAS — the producer band now rides WORK's +p suffix; a "
+    "WSPEC pin (p<np> producer[:q<window>, reserved]; empty=uniform SIMT) narrows the WORK "
+    "inventory via seal_workers. No realized row carries the key.",
 )
 
 
@@ -127,7 +106,7 @@ def _work_features(val) -> dict[str, float]:
     ``TILE``/``REDUCE`` values against WORK (``features._tile_plan`` / ``_reduce_decomp``)."""
     if not val:
         return {"D_wspec_warps": 0.0}
-    from emmy.compiler.ir.schedule import Workers  # noqa: PLC0415 — same deferred pattern as _wspec_features
+    from emmy.compiler.ir.schedule import Workers  # noqa: PLC0415 — deferred: schedule imports this module
 
     try:
         w = Workers.parse(str(val))
@@ -159,7 +138,7 @@ def _raster_features(val) -> dict[str, float]:
     N-fastest order) and the orientation flag (``1.0`` = ``gn``, the transposed grouping)."""
     if not val:
         return {"D_raster_group": 0.0, "D_raster_gn": 0.0}
-    from emmy.compiler.ir.schedule import Raster  # noqa: PLC0415 — same deferred pattern as _wspec_features
+    from emmy.compiler.ir.schedule import Raster  # noqa: PLC0415 — deferred: schedule imports this module
 
     try:
         r = Raster.parse(str(val))

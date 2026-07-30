@@ -159,11 +159,10 @@ def _flatten_nodes(body: Body) -> tuple[Stmt, ...]:
 
 def _derived_expect_fold(o: str, p_name: str, v_edge: Load) -> Fold:
     """The synthesized expectation contraction of a twisted fold's DERIVED blocked evaluation —
-    flash's ``Oblk = Σ_j P·V`` (the step-7 dissolution of the stored PV step element). A is the
+    flash's ``Oblk = Σ_j P·V``. A is the
     register-resident softmax weight ``P`` — a one-stmt cone node whose one legal capture is the
     running max the same derived merge updates — and B is the fold's own expectation operand edge
-    (the value ``Load``). Byte-identical to the retired ``ContractionView.as_fold()`` output the
-    step spelling stored, so the derived loop — and kernel identity — is unchanged."""
+    (the value ``Load``)."""
     prologue = Map(body=Body((Assign(name=f"{o}__p", op="copy", args=(p_name,)),)))
     cone = Map(body=Body(()), sources=(prologue,))
     k = Axis(name="pj", extent=Dim(1))  # block=1: a singleton intra-block reduce
@@ -179,9 +178,8 @@ def _derived_expect_fold(o: str, p_name: str, v_edge: Load) -> Fold:
 
 
 def _split_expect(merge: list[Stmt], o: str, v: str, v_edge: Load) -> list[Stmt]:
-    """Split the generated streaming ``merge`` around the synthesized expectation contraction —
-    the derived counterpart of the retired ``_flash._split_pv`` step rewrite: the fused ``v·P``
-    product becomes :func:`_derived_expect_fold`'s output, and the state fold consumes it
+    """Split the generated streaming ``merge`` around the synthesized expectation contraction:
+    the fused ``v·P`` product becomes :func:`_derived_expect_fold`'s output, and the state fold consumes it
     (``O = O·α + Oblk``; the ``O·α`` base is untouched)."""
     o_accum = next(s for s in merge if isinstance(s, Accum) and s.name == o)
     defs = {s.name: s for s in merge if isinstance(s, Assign)}
@@ -261,7 +259,6 @@ def _fold_derived_step(fold: Fold) -> tuple[Stmt, ...]:
         and tuple(lam.results) == tuple(names)
         and len(fold.operands) == 1
         and isinstance(fold.operands[0], Fold)
-        and fold.operands[0].combine is not None
         and tuple(fold.operands[0].combine.results) == tuple(names)
         and component_ops(fold.operands[0].combine) == ops
     ):
@@ -269,7 +266,7 @@ def _fold_derived_step(fold: Fold) -> tuple[Stmt, ...]:
         # inline fold operand sharing the outer's exact accumulator state. Combine at that
         # singleton is the shared-accumulator simplification (a ×1 fold): the derived step is
         # the sliced fold in place — its own ``Accum``\\ s carry across both loops — with NO
-        # outer folds, byte-identical to the retired ``step=(inner,)`` spelling.
+        # outer folds.
         return (fold.operands[0],)
     dts = fold.dtypes or (None,) * len(names)
     accums = tuple(
@@ -450,29 +447,23 @@ class Fold(Stmt):
     # :class:`~emmy.compiler.ir.axis.Window` — ONE windowing vocabulary, the same one an axis's
     # split parentage uses, read by the realizer and the mask machinery alike.
     #
-    # ---- the λ-foldMap spelling (1o) — the DEGENERATE fold's storage: a PURE ``lift``
-    # ``λ(k, v₁…vₙ) → S`` (params: the iteration var first, then one per operand edge, bound
-    # POSITIONALLY) plus the TRUE monoid's flat ``(init, combine)`` pair whose combine carries
-    # the REAL accumulator names (its results) — the ``Monoid`` wrapper dissolved at 1r. The
-    # serial step, the ``Accum`` forms and the ``carrier`` annotation are DERIVED
-    # (:func:`_fold_derived_step` / ``__post_init__``). ``dtypes`` is the optional per-component
-    # ACCUMULATOR dtype side-tuple (precision, not algebra — it exists only so lowered
-    # ``Accum``\\ s stay byte-identical). --------------------------------------------------- #
-    lift: Lambda | None = None
+    # ---- the λ-foldMap spelling — the fold's storage: a PURE ``lift`` ``λ(k, v₁…vₙ) → S``
+    # (params: the iteration var first, then one per operand edge, bound POSITIONALLY) plus the
+    # TRUE monoid's flat ``(init, combine)`` pair whose combine carries the REAL accumulator
+    # names (its results). The serial step, the ``Accum`` forms and the ``carrier`` annotation
+    # are DERIVED (:func:`_fold_derived_step` / ``__post_init__``). ``dtypes`` is the optional
+    # per-component ACCUMULATOR dtype side-tuple (precision, not algebra — it pins the lowered
+    # ``Accum`` dtypes). ---------------------------------------------------------------------- #
+    lift: Lambda = field(kw_only=True)
     init: tuple = ()  # the ⊕ seeds — op identities for a plain fold; (−inf, 0, …) LSE
-    combine: Lambda | None = None  # S × S → S — THE ⊕ (one program; λ-spelled folds only)
+    combine: Lambda = field(kw_only=True)  # S × S → S — THE ⊕ (one program)
     dtypes: tuple = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.init, tuple):
             object.__setattr__(self, "init", tuple(self.init))
-        # λ-spelled formation (the ONE spelling since step 7): one program per relation —
-        # validate the positional binding; the ``carrier`` annotation is a DERIVED read
-        # (:attr:`carrier` — the flat :class:`Algebra` over the stored params), never a second
-        # stored spelling. The S × S → S arity check is the dissolved wrapper's formation
-        # invariant, relocated here.
-        assert self.lift is not None, "a Fold stores the λ spelling — (init, combine, lift); the step spelling died at step 7"
-        assert self.combine is not None, "a λ-spelled Fold stores (init, combine, lift) together"
+        # Formation validates the positional binding and the S × S → S arity; the ``carrier``
+        # annotation is a DERIVED read (:attr:`carrier`), never a second stored spelling.
         n = len(self.init)
         if len(self.combine.params) != 2 * n or len(self.combine.results) != n:
             raise ValueError(f"Fold combine must be S × S → S at arity {n}: params={self.combine.params} results={self.combine.results}")
@@ -513,8 +504,7 @@ class Fold(Stmt):
         ``(init, combine)`` pair threading the loop's real accumulator names — and the
         byte-identity gate settled at construction. A NON-canonical shape (an effectful /
         raw-block step, a non-reproducible derivation) returns ``None`` — the caller keeps the
-        raw-loop-IR ``Map`` escape, since the retired ``step`` spelling no longer exists to fall
-        back to."""
+        raw-loop-IR ``Map`` escape."""
         lifted = _extract_lift(loop, like)
         if lifted is None:
             return None
@@ -531,19 +521,17 @@ class Fold(Stmt):
 
     @property
     def role(self) -> AxisRole:
-        """The fold's :class:`AxisRole`, DERIVED from the stored params (1l — never stored):
+        """The fold's :class:`AxisRole`, DERIVED from the stored params — never stored:
 
         - ``TWISTED`` iff the stored combine's twist family is non-degenerate (``exp`` — online
-          softmax / flash); the PLANAR/TWISTED half of the old stored role was redundant with it.
+          softmax / flash).
         - ``CONTRACTION`` iff the lift factors bilinearly over hoisted operand edges
-          (:func:`_parse_bilinear` — a plain read of the λ body; the legacy dissolved-step shape
-          parses the same way), or the step composes exactly the sliced contraction fold
-          (split-K's outer reduce).
-        - ``PLANAR`` otherwise — which is where the old recognition-time DEMOTION now lives
-          structurally: an unbindable contraction (matvec-shaped 1-D output, no ``(m, n)`` loads,
-          the zero-legal-rows fallback) never hoists its operands, so its loads stay inline in
-          the lift, the parse declines, and the fold takes the reduce tiers at schedule dispatch.
-          No role rewrite; the lowered loop's ``PLANAR`` annotation falls out of the same read."""
+          (:func:`_parse_bilinear` — a plain read of the λ body), or the step composes exactly
+          the sliced contraction fold (split-K's outer reduce).
+        - ``PLANAR`` otherwise — including an unbindable contraction (matvec-shaped 1-D output,
+          no ``(m, n)`` loads, the zero-legal-rows fallback): its operands never hoist, so its
+          loads stay inline in the lift, the parse declines, and the fold takes the reduce tiers
+          at schedule dispatch. No role rewrite anywhere."""
         if component_ops(self.combine) is None:
             return AxisRole.TWISTED
         if _parse_bilinear(self) is not None:
@@ -560,19 +548,13 @@ class Fold(Stmt):
         realizer read the same node object (site matching is by identity)."""
         return _twisted_derived_step(self)
 
-    def _step_stmts(self) -> tuple[Stmt, ...]:
-        """The DERIVED per-cell stmt sequence (:func:`_fold_derived_step`: the lift body with
-        each component's ``Accum`` — the combine specialized at the singleton — landing exactly
-        where the dissolved fold sat; the full blocked evaluation for a twisted fold with
-        operand edges; the embedded operand for the identity-lift composition)."""
-        return _fold_derived_step(self)
-
     def step_stmts(self) -> tuple[Stmt, ...]:
-        """The public read of the per-cell stmt sequence — what every consumer that used to
-        read the retired ``.step`` field reads (the derived serial step / blocked evaluation;
-        flash's derived head is its score operand edge, its PV the memoized synthesized
-        contraction)."""
-        return self._step_stmts()
+        """The DERIVED per-cell stmt sequence (:func:`_fold_derived_step`): the lift body with
+        each component's ``Accum`` — the combine specialized at the singleton; the full blocked
+        evaluation for a twisted fold with operand edges (flash's derived head is its score
+        operand edge, its PV the memoized synthesized contraction); the embedded operand for
+        the identity-lift composition."""
+        return _fold_derived_step(self)
 
     def _splice_edges(self) -> tuple:
         """The operand edges the GENERIC first-use splice places — every edge not already
@@ -581,7 +563,7 @@ class Fold(Stmt):
         the synthesized contraction (:func:`_twisted_derived_step`); the identity-lift
         composition (split-K) embeds its one fold operand verbatim. None of those splice
         twice."""
-        consumed = {id(s) for s in self._step_stmts()}
+        consumed = {id(s) for s in self.step_stmts()}
         if component_ops(self.combine) is None:
             by_param = _operand_binding(self)
             for term in self.lift.results[1:]:  # EXPECTATION components: a str-injected non-pivot
@@ -605,7 +587,7 @@ class Fold(Stmt):
         bound param (:func:`_splice_operands` — positional binding names the edges, ties in
         operand order), so a fold with hoisted inputs lowers byte-identically to the flat form
         that carried them in its body."""
-        stmts = _splice_operands(self._splice_edges(), _flatten_nodes(Body(self._step_stmts())))
+        stmts = _splice_operands(self._splice_edges(), _flatten_nodes(Body(self.step_stmts())))
         return Loop(axis=self.axis, body=Body(stmts), unroll=self.unroll, role=self.role)
 
     def spliced_step(self) -> tuple[Stmt, ...]:
@@ -613,7 +595,7 @@ class Fold(Stmt):
         stmt sequence the emit-side node walk consumes (nested structural nodes NOT flattened;
         :attr:`loop` additionally flattens them). Edges the derived blocked evaluation already
         consumed (a twisted fold's head node / expectation Load) never splice twice."""
-        return _splice_operands(self._splice_edges(), self._step_stmts())
+        return _splice_operands(self._splice_edges(), self.step_stmts())
 
     @property
     def out(self) -> str:
@@ -781,9 +763,8 @@ class Store:
     """One ROOT-STORE decoration at the kernel boundary (1q) — the effect the stored term no
     longer carries. ``write`` is the store verbatim (target buffer, index template, stored value
     names, the atomic flag — holding the ``Write`` whole keeps every field lossless), and it is
-    NOT part of the term: ``TileOp.stores`` owns the tuple, and every consumer that used to read
-    the ``Write`` out of ``Map.fn`` reconstitutes the effectful stmt stream via
-    :func:`effect_tail`. A ``sweep`` store's ``Write`` rides a per-cell output ``Loop`` over
+    NOT part of the term: ``TileOp.stores`` owns the tuple, and consumers reconstitute the
+    effectful stmt stream via :func:`effect_tail`. A ``sweep`` store's ``Write`` rides a per-cell output ``Loop`` over
     that axis (rms/softmax's normalize sweep, ``unroll`` preserved); the swept members are the
     trailing projection stmts reading the axis (:func:`_sweep_start`). Conversion sites go
     through :func:`split_effects`, whose reconstitution round-trip gate is what keeps kernel
@@ -1192,8 +1173,8 @@ def _loop_ir_fn(params, body, results) -> Lambda:
 
 def _map_results(body: Body) -> tuple[str, ...]:
     """The synthesized ``results`` of a legacy ``Map(body=…)`` construction — the last defining
-    stmt's name (the retired ``out`` last-def convention, run ONCE at construction instead of on
-    every read). Empty when nothing in the body defines a name (a store-only projection tail)."""
+    stmt's name (the last-def convention, run ONCE at construction instead of on every read).
+    Empty when nothing in the body defines a name (a store-only projection tail)."""
     for s in reversed(body):
         d = s.defines()
         if d:
@@ -1207,11 +1188,10 @@ class Map(Stmt):
     contraction ``sources``, bound POSITIONALLY: ``sources[i]``'s result components produce the
     values ``fn.params`` name (one param per component — a product source binds every channel
     accumulator, so the geglu combine's second read is a bound param, never a free name).
-    ``fn.results`` are the bound output names — they replace the retired ``out``
-    last-def convention (``out`` reads ``fn.results[0]``).
+    ``fn.results`` are the bound output names (``out`` reads ``fn.results[0]``).
 
     ``fn.body`` is the per-cell pointwise / projection compute — operand ``Load``\\ s, the lift
-    ``Assign``\\ s / ``Select``\\ s — and since 1q it is PURE for every recognized term: the root
+    ``Assign``\\ s / ``Select``\\ s — and it is PURE for every recognized term: the root
     output ``Write`` (and the rms/softmax output-sweep ``Loop`` around it) rides ``TileOp.stores``
     at the kernel boundary, reconstituted on demand (``effect_tail``). The raw-loop-IR kernels
     that are NOT recognized algebra — the un-recognized flat escape cell, ``030_split_reduce``'s
@@ -1313,11 +1293,9 @@ def _(s: Map, rename, sigma, axis_fn):
 
 @_rewrite.register
 def _(s: Fold, rename, sigma, axis_fn):
-    # Every operand edge
-    # dispatches back through the registry. A λ-spelled fold renames its lift / monoid in lockstep
-    # (params track the operand names positionally, the combine's results ARE the accumulator
-    # names) and re-derives the carrier; a step-spelled one renames the carrier with the partial's
-    # ``Accum``\\ s — the same rule the ``Loop`` handler applies (``Algebra.rename``).
+    # Every operand edge dispatches back through the registry. The fold renames its lift /
+    # monoid in lockstep (params track the operand names positionally, the combine's results
+    # ARE the accumulator names) and re-derives the carrier.
     axis = axis_fn(s.axis)
     operands = tuple(_rewrite(edge, rename, sigma, axis_fn) for edge in s.operands)
     lift = Lambda(
@@ -1519,9 +1497,9 @@ class TileOp(Op):
     place: Placement = field(default_factory=Placement)
     workers: WarpSpec | None = None
     schedule: dict = field(default_factory=dict)
-    # The kernel's ROOT-STORE decorations (1q — ``Store``): the output ``Write``\\ s (and the
-    # rms/softmax output-sweep spelling) that used to ride ``Map.fn``, now a kernel-boundary
-    # fact beside ``place``. Empty for a bare reduction / contraction — its grid-cell store
+    # The kernel's ROOT-STORE decorations (``Store``): the output ``Write``\\ s (and the
+    # rms/softmax output-sweep spelling) — a kernel-boundary fact beside ``place``. Empty for a
+    # bare reduction / contraction — its grid-cell store
     # stays the materializer's default glue (``_factor.with_store``). Consumers reconstitute
     # the effectful stmt stream via ``effect_tail`` — never read a ``Write`` out of the term.
     stores: tuple = ()

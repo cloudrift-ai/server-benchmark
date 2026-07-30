@@ -1615,9 +1615,8 @@ def _splitk_option(
     # ONE composition rule (step 7 — λ-spelled): the outer reduce is the IDENTITY lift over the
     # sliced fold operand, its combine the same componentwise ⊕ over the same accumulator names —
     # the reassociation ``fold_k = fold_{ksplit} ∘ fold_{kslice}``. The derived step embeds the
-    # operand verbatim (the shared-accumulator ×1-fold simplification), so the lowered nest is
-    # byte-identical to the retired ``step=(inner,)`` spelling, and the outer fold DERIVES
-    # role=CONTRACTION off the composition (``ir.composed_contraction``).
+    # operand verbatim (the shared-accumulator ×1-fold simplification), and the outer fold
+    # DERIVES role=CONTRACTION off the composition (``ir.composed_contraction``).
     accs = tuple(inner_fold.combine.results)
     ident_lift = Lambda(params=(ksplit.name, *accs), body=Body(()), results=accs)
     o_init, o_combine = M(*component_ops(inner_fold.combine), names=accs)
@@ -1936,8 +1935,8 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None, reduce_key: str | N
 
         # The worker inventory (``WORK``, kernel-global) leads — mirroring ``KNOB_ORDER`` and
         # keeping every deeper prefix row self-decoding (a site TILE/REDUCE value resolves
-        # against the WORK already decided above it; a ``+p`` producer band — the retired WSPEC
-        # family's slot — forks here). The launch-order codec (``RASTER``, bare — one grid, one
+        # against the WORK already decided above it; a ``+p`` producer band forks here). The
+        # launch-order codec (``RASTER``, bare — one grid, one
         # order) closes — option-0 ``""`` is the flat N-fastest raster.
         levels = [_level(WORK.name), *(_level(k) for k in keys), _level(RASTER.name)]
         return build_fork_tree(params=rows, levels=levels, materialize=_materialize)
@@ -1993,15 +1992,13 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None, reduce_key: str | N
             warp_pinned = TILE.raw() is not None and is_warp_codec(_legacy_tile(TILE.raw()))
             if warps and (warp_pinned or stage_pinned):
                 # The axis-keyed ``TILE@<dd>``/``TILE@<pj>`` pins (a static attention golden's
-                # spelling) must still select their geometry among the kept mma rows — this early
-                # return used to skip the narrowing entirely, so a golden that also pins ``STAGE``
-                # benched the prior's tile under the pinned stage (the findings-5 F2 coercion).
+                # spelling) must still select their geometry among the kept mma rows — skipping
+                # the narrowing here would bench the prior's tile under the pinned stage.
                 warps = _filter_work(_narrow_flash_forms(warps, head, pv, keyed_only=True), lambda o: o.knobs.get(WORK.name, ""))
                 return warps if len(warps) > 1 else warps[0]
-            # Cold SPLIT-KV siblings on an under-occupied grid (2026-07-30): the split-KV form
-            # used to be PIN-ONLY, so every recorded split-KV golden (attention.hd512's
-            # ``g2k`` + ``d1/cp/alt`` pair, ~1.4× over the un-split pick) logged DRIFT at
-            # deploy — the golden tier picks only among OFFERED rows. Offer the ``g<n>k``
+            # Cold SPLIT-KV siblings on an under-occupied grid — the golden tier picks only
+            # among OFFERED rows, so the recorded split-KV entries (attention.hd512's
+            # ``g2k`` + ``d1/cp/alt`` pair) need these rows offered. Offer the ``g<n>k``
             # splits as LATER fork siblings when the un-split grid cannot fill the card
             # (the matmul ``_SPLITK_MAX_CTAS`` gate's flash analogue): option-0 stays the
             # conservative un-split row, seeded shapes keep matching their recorded entry

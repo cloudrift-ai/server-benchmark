@@ -41,8 +41,6 @@ through.
 
 from __future__ import annotations
 
-import re
-
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.loop import Accum, Assign, Load, Loop, LoopOp
 from emmy.compiler.ir.stmt import Body, Select
@@ -73,11 +71,6 @@ _EXPENSIVE_OPS = frozenset(
         "tanh",
     }
 )
-# ``020_cut_edge``'s workspace node ids — the cone / bridged-statistic / per-channel halves of a
-# realized ``PLACE@cone=cut`` — plus ``025_sink_row_reduce``'s ``__sq`` row-stat aux buffer (a
-# realized ``PLACE@stat=sink``). Minted only by those rules; see the cut-workspace brake in
-# `rewrite`.
-_CUT_WS_RE = re.compile(r"__(cone|stat|ch\d+|sq)$")
 
 
 def _walk_leaf_costs(loop_op: LoopOp):

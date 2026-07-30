@@ -69,14 +69,9 @@ XFAIL_TESTS: dict[str, XfailEntry] = {
         _PLACE_REMOVED
     ),
     "tests/compiler/test_golden_configs.py::test_fused_golden_requires_a_cone_anchor": XfailEntry(_PLACE_REMOVED),
-    # -- PLACE@stat: the row-statistic sink (025_sink_row_reduce) ------------
-    "tests/compiler/e2e/test_stat_sink.py::test_sinkable_stat_binding_gates": XfailEntry(_PLACE_REMOVED),
-    "tests/compiler/e2e/test_stat_sink.py::test_stat_sink_pinned_e2e": XfailEntry(_PLACE_REMOVED),
-    "tests/compiler/e2e/test_stat_sink.py::test_stat_sink_refuses_input_norm": XfailEntry(_PLACE_VACUOUS, strict=False),
-    # -- PLACE@fin: the deferred-finalize inline (032_fuse_finalize) ---------
-    "tests/compiler/passes/test_fuse_finalize.py::test_fuse_inlines_finalize_into_consumers": XfailEntry(_PLACE_REMOVED),
-    "tests/compiler/passes/test_fuse_finalize.py::test_default_keeps_finalize_kernel": XfailEntry(_PLACE_VACUOUS, strict=False),
-    "tests/compiler/passes/test_fuse_finalize.py::test_fuse_finalize_matches_numpy": XfailEntry(_PLACE_VACUOUS, strict=False),
+    # (The PLACE@stat stat-sink and PLACE@fin fuse-finalize test files were DELETED, not
+    # registered: they imported the deleted realizer modules and built the retired Fold step
+    # spelling, so their bodies could never be repaired by restoring the feature.)
     # -- PLACE@fold / PLACE@tuple: the flash + online-softmax escapes --------
     "tests/compiler/cli/test_compile.py::test_compile_unfused_softmax_loopify_survives_dim": XfailEntry(_PLACE_VACUOUS, strict=False),
     # -- The evidence / featurizer plumbing that carried PLACE@ stamps -------

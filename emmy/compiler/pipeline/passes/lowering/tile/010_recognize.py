@@ -477,7 +477,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     route_tree, route_free, route_stores = (pro[0], (*free, pro[1]), pro[2]) if pro is not None else (node, free, stores)
     seam = route_cut(ctx, dict(loop.knobs or {}), route_tree, route_stores, route_free)
     if seam is not None:
-        return realize_cut(match, root, route_tree, route_free, route_stores, seam, ctx)
+        return realize_cut(match, root, route_tree, route_free, route_stores, seam)
     if pro is None:
         rows = _as_list(schedule(map_tile, loop.name, knob_base, ctx))
         if not rows:

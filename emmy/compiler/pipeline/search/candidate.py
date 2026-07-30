@@ -180,7 +180,7 @@ class Candidate:
         knob merge, which is idempotent for rules that already merged
         manually). A
         lowering-tier ``Graph`` splice of a loop-dialect kernel (a
-        structural decomposition — ``tile/010_split_demoted``'s split)
+        structural decomposition — the placement realizer's cut)
         stamps the consumed root op as each fragment kernel's
         ``source``, so the chain also records *which op a decomposition
         came from*. Knobs are NOT merged

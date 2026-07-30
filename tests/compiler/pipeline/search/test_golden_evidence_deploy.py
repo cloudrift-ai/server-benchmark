@@ -310,10 +310,9 @@ _RMS_SIG = {
     "H_opt": 3.0,
 }
 
-# Real recorded spellings (rtx4090 golden files): the known-hang w2x1 form vs the golden w4x1 form.
-# The GOLDEN corpus keeps its legacy embedded-worker spellings (the YAML re-spell is the next
-# commit); the realized fork ROWS spell the F1 site grammar — site TILE halves + the ONE WORK
-# entry (the legacy w tokens' geometry).
+# Real recorded spellings (rtx4090 golden files): the known-hang w2x1 form vs the golden w4x1
+# form, in the legacy embedded-worker grammar (loudly-validated pin aliases); the realized fork
+# ROWS spell the site grammar — site TILE halves + the ONE WORK entry.
 _DD_W4X1 = "a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16"
 _PJ_W4X1 = "a:mma_m16n8k16_f16_f32/w4x1/f1x32"
 _PJ_FM = "a:mma_m16n8k16_f16_f16/w4x1/f1x32"

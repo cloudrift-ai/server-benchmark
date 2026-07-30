@@ -625,7 +625,7 @@ def test_registry_complete_in_a_bare_process():
 
     code = (
         "from emmy.compiler.pipeline.search.features import knob_features\n"
-        "f = knob_features({'WSPEC': 'p2', 'RASTER': 'gm8'})\n"
+        "f = knob_features({'WORK': 'w4x1+p2', 'RASTER': 'gm8'})\n"
         "assert f['D_wspec_warps'] == 2.0, f\n"
         "assert f['D_raster_group'] == 8.0, f\n"
         "from emmy.compiler.pipeline.knob import get\n"

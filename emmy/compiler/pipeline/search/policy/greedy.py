@@ -814,9 +814,6 @@ def greedy_decide(
             golden_state[0] = _golden_evidence_index(fp.ctx)
         got = _golden_pick(golden_state[0], rows, fp.node_id) if golden_state[0] else None
 
-        def _model_pick(rank) -> tuple[int, float]:
-            return rank(rows)
-
         picker = getattr(the_prior, "pick", None)
         if picker is not None:
             ev = getattr(the_prior, "evidence_pick", None)
@@ -826,18 +823,15 @@ def greedy_decide(
                 got = _db_measured_pick(db_index(), rows)
                 if got is None:
                     _warn_disjoint_evidence(db_index(), rows, fp.node_id)
-            best_i, price = got if got is not None else _model_pick(picker)
+            best_i, price = got if got is not None else picker(rows)
         elif got is not None:  # golden decides even for bare-mean_scores priors
             best_i, price = got
         else:  # bare-mean_scores prior object (tests / custom callers)
             from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
 
-            def _mean_rank(sub: list[dict]) -> tuple[int, float]:
-                s = the_prior.mean_scores(sub)
-                j = min(range(len(sub)), key=lambda i: (s[i], canonical_row_key(sub[i])))
-                return j, s[j]
-
-            best_i, price = _model_pick(_mean_rank)
+            s = the_prior.mean_scores(rows)
+            best_i = min(range(len(rows)), key=lambda i: (s[i], canonical_row_key(rows[i])))
+            price = s[best_i]
         fp.score = price  # measured µs when evidence decided, predicted µs otherwise
         return live[best_i][0]
 

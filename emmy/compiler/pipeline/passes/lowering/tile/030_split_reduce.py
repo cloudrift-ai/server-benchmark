@@ -264,7 +264,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold
     fin_proj, fin_stores = _boundary(epilogue)
     if not fin_stores and not any(isinstance(s, Write) for s in fin_proj):
         # The projected value is the LAST defining stmt's name — the epilogue tail may end with
-        # non-defining stmts (e.g. a sunk RowAccum), so scan backward instead of indexing [-1].
+        # non-defining stmts, so scan backward instead of indexing [-1].
         out_val = next((s.defines()[-1] for s in reversed(fin_proj) if s.defines()), acc)
         fin_stores = (Store(write=Write(output=out.name, index=cell, value=out_val)),)
     fin_op = Map(body=Body((*seeds, fin_loop, *fin_proj)))

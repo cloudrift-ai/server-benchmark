@@ -20,8 +20,7 @@ pass index:
 
 - **Outer** (:func:`run_two_level_tune`) drives the graph-changing passes —
   ``frontend`` + ``loop`` plus the pre-partition head of ``lowering/tile``
-  (:func:`outer_pipeline`), where the structural fork emitters live (today
-  ``010_split_demoted``'s keep-vs-split offer). A terminal is the state where
+  (:func:`outer_pipeline`), where any structural fork emitters live. A terminal is the state where
   the cursor reaches ``partition_loops`` with every structural fork resolved —
   every op post-fusion and structurally final, split producers/consumers
   included as real ``LoopOp`` nodes. Each terminal is a candidate fused graph;
@@ -93,9 +92,9 @@ LOWERING_PASSES = CUDA_PASSES[len(LOOP_PASSES) :]
 
 def outer_pipeline() -> Pipeline:
     """The graph-changing passes the outer search drives: ``frontend`` + ``loop``
-    (any fusion forks) **plus the ``split`` phase** — the structural fork emitter
-    (``010_split_demoted``'s keep-vs-cut ``CUT`` offer), the only move that changes
-    *which kernels exist*. An outer terminal is a graph whose kernel set is final:
+    (any fusion forks) **plus the ``split`` phase** — where a structural fork, the
+    only move that changes *which kernels exist*, would be offered.
+    An outer terminal is a graph whose kernel set is final:
     the keep(SMEM) side is one fused ``TileGraphOp`` (``seed_fused``), the cut side
     its producer + consumer; :func:`_inner_reward_async` picks each up as its own
     slice (own patience, own progress leaf, deduped by ``op_cache_key``) and tunes
@@ -400,8 +399,8 @@ async def run_two_level_tune(
     The outer drives a :class:`Run` directly (manual ``observe``)
     because its terminal reward comes from the inner tuning, not
     ``_bench_terminal_async``. The outer pipeline (:func:`outer_pipeline`) runs
-    through the pre-partition tile rules, so each structural fork (the
-    keep-vs-split offer of ``010_split_demoted``) branches the outer tree —
+    through the pre-partition tile rules, so each structural fork
+    branches the outer tree —
     one terminal per kernel-set, compared by Σ-per-op cost. A graph with no
     structural offers yields a single terminal and this reduces to "tune each
     op once, sum, assemble". Identical offer sites within one trajectory

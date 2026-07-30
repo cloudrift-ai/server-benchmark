@@ -382,7 +382,8 @@ def test_flash_form_fork_offers_geometry_grid():
     warp move grid (every divisibility-legal ``(warps_m, key_atoms)`` point), each geometry crossed
     with its K/V operand-stage candidates (gmem-direct option-0 + the resolver-gated cp.async ring
     depths), plus the chain and the per-cell serial escape — every row spelling the SAME
-    ``TILE@dd`` / ``TILE@pj`` / ``REDUCE@kv`` / ``STAGE@kv`` key set (the evidence pick's
+    ``TILE@dd`` / ``TILE@pj`` / bare ``REDUCE`` / ``STAGE`` key set — the canonical codec
+    spellings, the stream fold being the primary (the evidence pick's
     prefix-consistency); f32 (no mma atom) offers chain + serial."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.schedule import is_warp_codec  # noqa: PLC0415
@@ -394,8 +395,8 @@ def test_flash_form_fork_offers_geometry_grid():
     for dtype, want_warp in ((torch.float16, len(twisted_warp_moves())), (torch.float32, 0)):
         q, k, v = (torch.randn(1, 4, 128, 64, dtype=dtype) for _ in range(3))
         graph = trace_module(_Sdpa().cpu(), (q, k, v))
-        rows = [r for r in enumerate_graph(graph, ctx) if "TILE@dd" in r or "TILE@pj" in r or "REDUCE@kv" in r]
-        assert all({"TILE@dd", "TILE@pj", "REDUCE@kv", "STAGE@kv"} <= set(r) for r in rows), "flash rows must spell one uniform key set"
+        rows = [r for r in enumerate_graph(graph, ctx) if "TILE@dd" in r or "TILE@pj" in r]
+        assert all({"TILE@dd", "TILE@pj", "REDUCE", "STAGE"} <= set(r) for r in rows), "flash rows must spell one uniform key set"
         warp = [r for r in rows if is_warp_codec(r["TILE@dd"])]
         chain = [r for r in rows if not is_warp_codec(r["TILE@dd"]) and r["TILE@pj"]]
         serial = [r for r in rows if not r["TILE@dd"] and not r["TILE@pj"]]
@@ -406,10 +407,10 @@ def test_flash_form_fork_offers_geometry_grid():
         geoms = {r["TILE@dd"] for r in warp}
         assert len(geoms) == want_warp, f"{dtype}: expected {want_warp} warp geometries, got {len(geoms)}"
         for g in geoms:
-            stages = {r["STAGE@kv"] for r in warp if r["TILE@dd"] == g}
+            stages = {r["STAGE"] for r in warp if r["TILE@dd"] == g}
             assert "" in stages, f"{dtype} {g}: the gmem-direct option-0 row is missing"
             assert any("cp" in s for s in stages), f"{dtype} {g}: no resolved cp.async stage row"
-        assert all(not r["STAGE@kv"] for r in [*chain, *serial]), "chain/serial rows stamp the decided-empty stage"
+        assert all(not r["STAGE"] for r in [*chain, *serial]), "chain/serial rows stamp the decided-empty stage"
         assert len(chain) == 1 and len(serial) >= 1, f"{dtype}: chain/serial siblings missing ({len(chain)}/{len(serial)})"
 
 

@@ -244,11 +244,13 @@ binder kind over the reused stmt vocabulary — a `Body` of PURE stmts only (ANF
 `Load`/`Assign` and the structural nodes `Fold`/`Map` opt in; `Accum`/`Write`/`Init`/`Loop` never do — no isinstance
 whitelist), with results-defined checked there too and α-invariance by canonical renumbering (`Lambda.canonical` —
 free names never renumbered). A result may be a bare `float` literal — ι is spelled in the lift (softmax's singleton
-is `(x, 1)`). `Monoid(init, combine)` is the TRUE monoid — ONE program, `combine : S × S → S` a pure `Lambda` whose
+is `(x, 1)`). The TRUE monoid is the flat `(init, combine)` pair stored directly on the `Fold` (the `Monoid` wrapper
+class dissolved at 1r) — ONE program, `combine : S × S → S` a pure `Lambda` whose
 results carry the fold's REAL accumulator names; the serial streaming step is NEVER stored (it derives as combine
-specialized at the singleton), so update-vs-combine consistency holds by construction. `Monoid.of(op…)` is the
-componentwise convenience constructor (DEGENERATE is the derived `component_ops` shape predicate, not a storage arm;
-the per-component accumulator dtype survives only as the optional `dtypes` precision side-tuple); a twisted monoid's
+specialized at the singleton), so update-vs-combine consistency holds by construction. `M(op…)` is the free
+componentwise pair constructor (DEGENERATE is the derived `component_ops(combine)` shape predicate, not a storage
+arm; `rename_combine` carries the rename lockstep incl. the twisted regeneration rule; the per-component accumulator
+dtype survives only as the optional `Fold.dtypes` precision side-tuple); a twisted monoid's
 combine is the exp/LSE generator's program, selected structurally, never by a stored family name. The module also
 ships the executable SPEC: `eval_lambda` / `foldmap_eval`, the ~20-line denotational evaluator the agreement
 (`⟦tree⟧ == lowered loop`) and ASSOCIATIVITY property tests in `tests/compiler/ir/stmt/test_lambda_monoid.py` run

@@ -47,8 +47,10 @@ and `commands/run.py:_handle_run_ir`.
 `Backend.run` provides a default implementation: walks the compiled
 graph in topological order and calls `node.op.forward(*args)` at each
 compute node. `InputOp` and `ConstantOp` boundaries are seeded from
-`input_data`; post-compute outputs are reshaped to `node.output.shape`
-when the target shape is statically known.
+`input_data`; values are stored **per buffer** — a multi-output node's
+`forward` returns a tuple matched positionally to `node.outputs`, and
+each result is reshaped to its own output tensor's shape when statically
+known.
 
 Every op implements `forward(*inputs: np.ndarray) → np.ndarray`,
 including `LoopOp`: its `forward` delegates to `ir/loop/runner.py`
@@ -94,9 +96,12 @@ kernels via cupy `RawKernel` (NVRTC-compiled).
 ## Execution plan + pack (`plan.py`, `pack.py`)
 
 `plan.py` defines the **execution plan** — the serializable runtime projection of a lowered `Graph[CudaOp]`:
-buffer specs, scalar/runtime constants, the launch list, symbolic-axis plumbing, kernel refs (source and/or a
-content-addressed cubin-cache key), and per-weight checkpoint bindings (`source_path` + a pack-own load-op
-vocabulary applied with pure numpy). `plan_from_graph` is the seam the whole runtime builds from: after it runs,
+buffer specs (one `BufferSpec` per BUFFER — a multi-output node mints one per output slot, each with its own
+role via `graph.buffer_role`), scalar/runtime constants, the launch list (`LaunchSpec.writes` names every
+buffer a launch produces; the slab planner's first-write test reads it, falling back to `node_id` for plans
+stored before the field existed), symbolic-axis plumbing, kernel refs (source and/or a content-addressed
+cubin-cache key), and per-weight checkpoint bindings (`source_path` + a pack-own load-op vocabulary applied
+with pure numpy). `plan_from_graph` is the seam the whole runtime builds from: after it runs,
 nothing reads the graph again — `CompiledProgram.build(graph)` is exactly `build_from_plan(plan_from_graph(g))`,
 so a plan loaded from disk and a freshly compiled one share one launch path. The JSON form (`plan_to_dict` /
 `plan_from_dict`) carries symbolic shapes and ceil-div grid factors through a tiny self-contained expression

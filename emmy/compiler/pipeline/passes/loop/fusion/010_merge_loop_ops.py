@@ -14,6 +14,10 @@ doubles).
 
 - ``_total_work``: sum over compute leaves (``Assign`` / ``Accum``) of
   ``enclosing_free × enclosing_reduce`` — proxy for arithmetic.
+- ``_total_expensive_work``: the same count restricted to transcendental
+  ``Assign`` operations. These cannot hide behind a large contraction's
+  cheap-FMA count: duplicating GELU's tanh across the output-column loop
+  is much slower than materializing its input once.
 - ``_total_reads``: sum over ``Load`` stmts of the same product — proxy
   for memory traffic. Global reads dominate cost on small-M matmuls
   where arithmetic is bandwidth-bound, so a fusion that grows reads
@@ -49,6 +53,26 @@ from emmy.compiler.pipeline.passes.loop.fusion._helpers import is_pure_indexmap 
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import wrap_merge_fragment as _wrap_merge_fragment
 
 _BLOWUP_FACTOR = 8
+# Expensive scalar functions are costed separately from the aggregate FMA
+# proxy. A producer-side tanh/exp executed once per (M, K) value must not
+# move under a contraction's N loop merely because the contraction's own
+# multiply/accumulate count dominates ``_total_work``.
+_EXPENSIVE_OPS = frozenset(
+    {
+        "cos",
+        "erf",
+        "exp",
+        "exp_fast",
+        "log",
+        "log10",
+        "log2",
+        "rsqrt",
+        "sin",
+        "sqrt",
+        "tan",
+        "tanh",
+    }
+)
 # ``020_cut_edge``'s workspace node ids — the cone / bridged-statistic / per-channel halves of a
 # realized ``PLACE@cone=cut`` — plus ``025_sink_row_reduce``'s ``__sq`` row-stat aux buffer (a
 # realized ``PLACE@stat=sink``). Minted only by those rules; see the cut-workspace brake in
@@ -90,6 +114,84 @@ def _total_work(loop_op: LoopOp) -> int:
     doubles this number — the old max-nest metric couldn't see that.
     """
     return sum(cost for stmt, cost in _walk_leaf_costs(loop_op) if isinstance(stmt, (Assign, Accum))) or 1
+
+
+def _total_expensive_work(loop_op: LoopOp) -> int:
+    """Count executions of transcendental elementwise operations.
+
+    Unlike :func:`_total_work`, zero is meaningful here: most kernels have
+    no transcendental work at all.
+    """
+    return sum(cost for stmt, cost in _walk_leaf_costs(loop_op) if isinstance(stmt, Assign) and stmt.op.name in _EXPENSIVE_OPS)
+
+
+def _single_source_activation(graph: Graph, producer: Node) -> bool:
+    """Whether ``producer``'s non-scalar data dependencies share one root.
+
+    A decomposed unary activation can retain both an intermediate and its
+    original input as external buffers (GELU reads ``scaled(x)`` and ``x``),
+    so counting direct inputs is insufficient. Collapse inputs reachable
+    from another input to their independent roots. Multi-source gated
+    activations (GeGLU/SwiGLU) deliberately stay outside the generic
+    materialization policy: changing those serving kernels requires
+    measured placement evidence and matching GPU goldens.
+    """
+
+    def non_scalar(node_id: str) -> bool:
+        node = graph.nodes.get(node_id)
+        if node is None:
+            return False
+        numel = 1
+        for extent in node.output.shape:
+            if not extent.is_static:
+                return True
+            numel *= extent.as_static()
+        return numel > 1
+
+    data_inputs = {node_id for node_id in producer.inputs if non_scalar(node_id)}
+
+    def has_data_input_ancestor(node_id: str) -> bool:
+        pending = list(graph.nodes[node_id].inputs)
+        seen: set[str] = set()
+        while pending:
+            ancestor = pending.pop()
+            if ancestor in seen:
+                continue
+            seen.add(ancestor)
+            if ancestor in data_inputs:
+                return True
+            node = graph.nodes.get(ancestor)
+            if node is not None:
+                pending.extend(node.inputs)
+        return False
+
+    roots = {node_id for node_id in data_inputs if not has_data_input_ancestor(node_id)}
+    return len(roots) == 1
+
+
+def _has_peer_activation_input(graph: Graph, producer: Node, consumer: Node) -> bool:
+    """Whether the consumer combines the activation with a peer value.
+
+    A merged sibling-linear may expose gate and up as two slices of one
+    packed buffer, so the peer can have a different declared shape while
+    still being an ancestor shared by the activation and its consumer.
+    """
+    shape = producer.output.shape
+    ancestors: set[str] = set()
+    pending = list(producer.inputs)
+    while pending:
+        ancestor = pending.pop()
+        if ancestor in ancestors:
+            continue
+        ancestors.add(ancestor)
+        node = graph.nodes.get(ancestor)
+        if node is not None:
+            pending.extend(node.inputs)
+
+    return any(
+        node_id != producer.id and (node := graph.nodes.get(node_id)) is not None and (node.output.shape == shape or node_id in ancestors)
+        for node_id in consumer.inputs
+    )
 
 
 def _total_reads(loop_op: LoopOp) -> int:
@@ -218,12 +320,12 @@ def _sum_contracts_exp_producer(graph: Graph, consumer: Node, producer: Node) ->
     for inp in consumer.inputs:
         if inp == producer.id:
             continue
-        n = graph.nodes.get(inp)
+        n = graph.producer(inp)
         if n is None or not isinstance(n.op, LoopOp):
             continue
         # The softmax may still be mid-assembly: the div piece feeding the P@V carries no exp of
         # its own until the exp piece merges in, so scan one producer hop deeper too.
-        if has_exp(n) or any(has_exp(graph.nodes[i]) for i in n.inputs if i in graph.nodes):
+        if has_exp(n) or any(has_exp(p) for i in n.inputs if (p := graph.producer(i)) is not None):
             return True
     return False
 
@@ -403,11 +505,24 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
         raise RuleSkipped(f"splice_graph rejected pattern: {producer.id!r} -> {consumer.id!r}")
 
     pre_work = _total_work(producer.op) + _total_work(consumer.op)
+    pre_expensive_work = _total_expensive_work(producer.op) + _total_expensive_work(consumer.op)
     pre_reads = _total_reads(producer.op) + _total_reads(consumer.op)
     post_work = _total_work(merged)
+    post_expensive_work = _total_expensive_work(merged)
     post_reads = _total_reads(merged)
     if post_work > _BLOWUP_FACTOR * pre_work:
         raise RuleSkipped(f"work blowup: post={post_work} > {_BLOWUP_FACTOR}× pre={pre_work}")
+    # Flash attention deliberately streams exp(score) into P@V: no full
+    # probability matrix is materialized, and the tile recognizer owns that
+    # composite. Do not apply the generic activation→contraction brake to it.
+    if (
+        pre_expensive_work
+        and post_expensive_work > _BLOWUP_FACTOR * pre_expensive_work
+        and not _is_flash_offer_shaped(merged)
+        and _single_source_activation(graph, producer)
+        and not _has_peer_activation_input(graph, producer, consumer)
+    ):
+        raise RuleSkipped(f"expensive-work blowup: post={post_expensive_work} > {_BLOWUP_FACTOR}× pre={pre_expensive_work}")
     if post_reads > _BLOWUP_FACTOR * pre_reads:
         raise RuleSkipped(f"read blowup: post={post_reads} > {_BLOWUP_FACTOR}× pre={pre_reads}")
 

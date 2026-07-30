@@ -45,7 +45,7 @@ Terms used throughout:
 | `pipeline.py` | Engine core: `Pattern` / `Match` / `Rule` / `Pass` / `Pipeline` (the frozen pass layout) plus `Run` — the per-run state and engine loop. |
 | `fork.py` | The `Fork` interface (`OptionFork`, `ThunkFork`) and the reusable `Level` + `build_fork_tree` lazy knob-cartesian tree builder. |
 | `knob.py` | The `Knob` descriptor system and the `EMMY_<KNOB>` env namespace (borrowing `config.knob_var` / `config.knob_raw`; `format_tuning_knobs` renders the real tuning knobs for `tune` output). Holds NO concrete knob declarations. |
-| `search/space.py` | **The single home of the search space.** Every `Knob` instance is declared here and nowhere else — the schedule codecs (`REDUCE` / `TILE` / `STAGE` / `WSPEC` / `RASTER`), the pin-only structural `PLACE`, the kernel-lowering policy knobs (`VECTORIZE_LOADS` / `INTERLEAVE_LOADS`), and the enumeration value grids (`scalar_tile_moves` & co). A rule that decides a knob imports it from here; `knob.registry()` still discovers knobs by walking loaded modules (`space.py` loads at pipeline startup via those rules). |
+| `search/space.py` | **The single home of the search space.** Every `Knob` instance is declared here and nowhere else — the schedule codecs (`REDUCE` / `TILE` / `STAGE` / `WSPEC` / `RASTER`), the pin-only structural `PLACE`, the kernel-lowering policy knobs (`VECTORIZE_LOADS` / `INTERLEAVE_LOADS`), and the enumeration value grids (`scalar_tile_moves` & co). A rule that decides a knob imports it from here; registration is construction (`Knob.__post_init__`), and `knob.registry()` imports `space.py` before answering, so the registry is complete in any process. |
 | `search/features.py` | The featurizers (`knob_features`, `tile_signature`, the `D_*` / `MMA_*` encodings) — kept beside `space.py` so the whole space (dimensions × values × encoding) is analyzable in one package. |
 | `search/db.py` | `SearchDB`, the persistent SQLite store (see Part 6, "Search persistence"). |
 | `search/policy/mcts.py` | The in-memory MCTS (`SearchTree`) colocated with its only reader, `TuningSearch`. |
@@ -54,7 +54,7 @@ Terms used throughout:
 | `search/prior/` | The ONE ranking path: a `Prior` ABC with the cold `OfflinePrior` and the `OnlinePrior` composed behind `FallbackPrior` (`load_prior`). `diagnostics.py` here backs the `eval` reachability / calibration reports; `fit/` is the offline fitter core (`linear.py`) plus the `emmy fit` cross-validation harness (`cv.py` — fold axes, pooled holdout/train tables, the metrics dict). |
 | `search/data/` | The harmonized read-view over the three data sources (golden configs / DB `perf` rows / prior reservoir): `Sample`, `Dataset`, and `ShapeKey` (the single golden↔measured join key). |
 | `search/golden.py` | `GoldenConfig` and its subclasses (see Part 7, "Golden configs and the A/B integrity gates"). |
-| `search/audit.py` | The golden drift audit: compile graphs with the golden tier as the only evidence, one MATCH / DRIFT / GAP verdict per consulted fork (via `greedy.golden_audit`, the supported sink). Backs `emmy eval golden --in-model` and the CI gate (see Part 7). |
+| `search/audit.py` | The golden drift audit: compile graphs with the golden tier as the only evidence, one MATCH / DRIFT / GAP verdict per consulted fork (via `greedy.golden_audit`, the supported sink; records also carry `unrealized`, the per-entry pin-only signal). Backs `emmy eval golden` (the pin-only offer audit), `--in-model`, and the CI gate (see Part 7). |
 | `keys.py` | `op_cache_key` / `dialect_of` / `source_chain`. |
 | `slice.py` | Isolates one finalized kernel into a standalone graph (used by the inner tune and structural pricing). |
 | `dump.py`, `rule_diff.py` | The dump and `-vv` presentation layers (see the end of this file). |
@@ -759,6 +759,20 @@ gathers — sit outside the gate, having no fork for the golden tier to decide).
 bump that changes the forward changes the twins exactly as it changes serving, and the gate goes loudly red.
 `scripts/diagnostics/audit_golden_match.py` is the same audit over explicit graph JSONs on a live box.
 
+**The pin-only offer audit** (`emmy eval golden`, same `search/audit` seam) is the record-time complement: for every
+forking golden entry it re-compiles the shape's OWN snippet un-pinned (deployable regime, the golden file's own card —
+the enumeration is static given shape+context, so no GPU bench) and checks the recorded knobs against the offered
+candidates. An entry only a pin can realize (`EMMY_KNOBS` / `tune --golden` benches it, the enumeration never offers
+it) reports **PIN-ONLY** — legal as a documented lever while an OFFERED sibling floors the shape (the 4090
+`attention.hd512.s4096` split-KV row beside its serial deploy-floor sibling); a shape whose entries are ALL pin-only
+reports **FALL-THROUGH** and exits 1: a deploy logs "no offered candidate realizes any of them" and falls past the
+golden tier — the missing-floor pathology that deployed a 111 ms 0.03x `mlp_down.m4096` kernel and NaN-poisoned the
+downstream accuracy check before the floor-sibling discipline. Fast-math entries audit under the pinned
+`F16_MMA_F32_ACC` gate (their own deploy regime). The own-snippet and in-model views genuinely differ: the 5090
+`mlp_down.m4096` split-K row realizes standalone but not on the serving twin's epilogue-fused down — the offer audit
+passes it and `--in-model` is the authority there, while the s4096 split-KV row fails even standalone, which is what
+this audit catches at record time.
+
 **Live-GPU scoping.** `tune --dataset golden` (and `--golden NAME` resolution) scopes to the **live** card's goldens
 (`goldens_for_live_gpu`) — names repeat across per-GPU golden files with diverging shapes/dtypes, so a flat union
 would tune another card's config under the live card's name. For `tune` the scoping is strict: a live card with no
@@ -925,8 +939,9 @@ A **`Knob`** (`knob.py`) is the canonical schema for one tuning dimension: name,
 `STR`), candidate `hints` (advisory — the rule still validates structural fit), and a help string. Rules stamp values
 into `TileOp.knobs` dicts; the autotuner reads those back as the per-hop knob delta in the `lowering` table. Every
 knob is declared **in `search/space.py`** — the single home for the whole tunable surface — and imported by the rule
-(`lowering/tile/_schedule`, the scheduling helper inside `010_recognize`) that resolves it. The registry
-(`knob.registry()`) auto-collects every `Knob` instance in every loaded module — no manual registration. `knob.py`
+(`lowering/tile/_schedule`, the scheduling helper inside `010_recognize`) that resolves it. Declaring a `Knob` IS
+registering it (`Knob.__post_init__`); `knob.registry()` imports `space.py` before answering, so the set is complete
+in any process — no module scanning, no manual registration. `knob.py`
 also owns the `EMMY_<KNOB>` env namespace (decode per `Knob` type; `config.py` remains the sole owner of
 `os.environ`).
 
@@ -988,6 +1003,15 @@ projection *distributes* over the add (`Σ φ(xₛ) = φ(Σ xₛ)`): a constant 
 rides the atomic; a non-distributive epilogue (`l2`'s `sqrt`, a fused bias/activation) is refused
 (`NotImplementedError` → pin `g<n>k`, which projects once after the combine). The check is
 `030_split_reduce._projection_distributes`.
+
+Two deploy-only dominance/default rules live beside the generic schedule enumeration. A coalesced wide-K `F.linear`
+MATVEC (the M=1 contraction-demotion tier) always uses a `b32` single-warp fold unless `REDUCE` is explicitly pinned;
+the serial sibling walks all of K in one thread and measured 4–16× slower on DiT conditioning projections. Separately,
+RTX 4080 runs of the `(rows=256, K=1152)` LayerNorm, four exact static contraction shapes, and the
+S256/head-dim-72 flash shape in `facebook/DiT-XL-2-256` select their measured winning rows (contractions key by
+`(computed-A, B layout, M, N, K)`). This SKU-exact selection is active only for deterministic deploy
+(`Context.validate_pins`); tune mode retains the complete legal space and explicit `TILE` / `STAGE` / `REDUCE` pins
+remain authoritative.
 
 **`STAGE`** (STR codec, `010_recognize` / `_schedule` → `lowering/kernel/010_materialize`) — the operand-staging codec
 `d<depth>/sync|cp|tma[/ring][/alt][/p<reg_depth>]` on the typed `Stage` schedule struct (composes with both fragments
@@ -1075,7 +1099,7 @@ moveset are also documented there.
 
 | Pass                      | What rules do                                                                                |
 |---------------------------|----------------------------------------------------------------------------------------------|
-| `frontend/decomposition/` | Rewrite frontend ops (`LinearOp`, `MatmulOp`, `SdpaOp`, layout ops, fused `rms_norm` / `layer_norm` / `softmax`) into tensor-IR primitives + layout-only `IndexMapOp`s, broadcast-explicit via `_broadcast.broadcast_to`. Before `LinearOp` decomposes, `merge_sibling_linears` folds ALL sibling linears sharing one activation (q/k/v, gate/up) into ONE linear over a load-time N-concat weight (`ConstantOp.source_parts` — the loader concatenates before the `load_ops` chain, zero runtime cost) with `SliceOp` views re-deriving each original output; one launch (one split-K partial+finalize) replaces the per-projection set, and the merged edge is a plain matmul every downstream tier handles. Guards: pristine exclusively-owned weights only, no bias, and no sibling whose output reaches a graph output through layout ops alone (the view would demote to a copy kernel at the capture ABI). The concat order is graph-insertion order — canonical regardless of match enumeration, because the buffer layout is ABI for goldens and packs. |
+| `frontend/decomposition/` | Rewrite frontend ops (`LinearOp`, `MatmulOp`, `SdpaOp`, layout ops, fused `rms_norm` / `layer_norm` / `softmax`) into tensor-IR primitives + layout-only `IndexMapOp`s, broadcast-explicit via `_broadcast.broadcast_to`. Before `LinearOp` decomposes, `merge_sibling_linears` folds ALL sibling linears sharing one activation (q/k/v, gate/up) into ONE linear over load-time N-concat weights and optional biases (`ConstantOp.source_parts` — the loader concatenates before the `load_ops` chain, zero runtime cost) with `SliceOp` views re-deriving each original output; one launch (one split-K partial+finalize) replaces the per-projection set, and the merged edge is a plain matmul every downstream tier handles. Guards: pristine exclusively-owned parameters with uniform bias presence, and no sibling whose output reaches a graph output through layout ops alone (the view would demote to a copy kernel at the capture ABI). The concat order is graph-insertion order — canonical regardless of match enumeration, because the buffer layout is ABI for goldens and packs. |
 | `frontend/optimization/`  | `compose_indexmaps`: collapse chains of single-source / single-consumer `IndexMapOp` into one coord_map, so trivial layout kernels don't block fusion. |
 | `loop/lifting/`           | `lift_*` rules wrap each surviving tensor primitive in a trivial one-op `LoopOp`.            |
 | `loop/fusion/`            | `split_shared_indexmap` (first) fuses a fan-out pure-indexmap `LoopOp` into all its consumers in one rewrite; `merge_loop_ops` then splices adjacent single-consumer `LoopOp` pairs; `dedup_loads` drops identical `(input, index)` Loads; `fold_output_reshape` retargets a producer's `Write` through a graph-output memcpy-identity flatten (verified exactly over the finite domain; clean affine re-decomposition onto the output strides) — the copy kernel the splicer can't take (reduce-bearing producer × div/mod reader σ). Folding scalar-constant broadcasts into consumers cuts Qwen3-Embedding-0.6B from 394 → 337 kernels. |
@@ -1083,7 +1107,7 @@ moveset are also documented there.
 | `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) + `stamp_structural_features` (the `S_*` dict). Runs last in the loop dialect — after fusion and recognition — so every kernel is named / stamped against its final body. |
 | `lowering/tile/`          | `LoopOp → TileOp` over the block-DAG Tile IR: `010_recognize` (recognition + inline scheduling via the `_schedule` helper — maps the grid, picks the reduce/output fragment, and **atomizes** — resolves the algebra→atom binding onto the schedule via `_atomize.py` when each option is built, rejecting an unbindable atom at fork construction) → `030_split_reduce`. Dispatch is on the carrier algebra (`MAP` / `SEMIRING` / `MONOID`), never a named shape. |
 | `lowering/kernel/`        | `010_materialize` is a `TileOp → KernelOp` tier dispatcher (scalar / `_reduce`). A tiled `CONTRACTION` arrives as a high-level `Contraction` node already **built recognize-side** (`lowering/tile/_schedule._contraction_node` at fork-emit — one flat node splitting the algebra params (axes / operands / acc / epilogue) from the schedule (a `tile: TilePlan`); seam #1), so materialize only synthesizes its bare grid-`Write` and **expands** it through the one atom-generic `_factor.factorize` over the shared tiling layer (in `_factor.py`) (the geometry is derived on the `Contraction` node; `_atom.reduce_codegen` emits the shared K-loop and a swappable `store` sink, dispatched off the atom). Then the Kernel-IR peepholes: `030_stamp_types` (+ `040_demote_to_write_dtype`) resolve dtypes, `050_vectorize_loads` / `080_vectorize_stores` / `095_interleave_loads` pack/reorder memory ops, `110_drop_redundant_syncs`. See [`passes/lowering/kernel/ARCHITECTURE.md`](passes/lowering/kernel/ARCHITECTURE.md). |
-| `lowering/cuda/`          | `delegate_zero_init` (first) moves an atomic accumulator's per-launch zero-init off the runtime memset and into a dataflow-predecessor kernel as a `ZeroPrologue` stmt (CTA 0 writes zero words; stream order guarantees happen-before) — one CUDA-graph MEMSET node saved per site; the capture's first launch and symbolic-shaped accumulators keep their memset, and the slab planner starts the buffer's live interval at the delegating launch (`CudaOp.zero_prologues`). `lower_kernelop` then renders the `KernelOp` body to a `__global__` source string (`ir/kernel/render.py::render_kernelop`) and mutates the node's op to `CudaOp` in place. |
+| `lowering/cuda/`          | `delegate_zero_init` (first) moves an atomic accumulator's per-launch zero-init off the runtime memset and into a dataflow-predecessor kernel as a `ZeroPrologue` stmt (CTA 0 writes zero words; stream order guarantees happen-before) — one CUDA-graph MEMSET node saved per site; the capture's first launch, symbolic-shaped accumulators, and accumulators past the one-CTA break-even cap (`_MAX_DELEGATED_WORDS`, 64 KB — CTA 0 zeroes serially, so a large buffer costs more than the MEMSET node it replaces) keep their memset, and the slab planner starts the buffer's live interval at the delegating launch (`CudaOp.zero_prologues`). `lower_kernelop` then renders the `KernelOp` body to a `__global__` source string (`ir/kernel/render.py::render_kernelop`) and mutates the node's op to `CudaOp` in place. |
 
 ## Dump hooks (`dump.py`)
 

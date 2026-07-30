@@ -52,6 +52,19 @@ def test_ilp_fold_rides_its_own_feature():
     assert ilp["D_reduce_ilp"] == 2.0
 
 
+def test_transposed_coop_band_featurizes_distinctly():
+    """``b<n>t`` (the k-major transposed matvec band) is an entirely different kernel from its
+    interleaved ``b<n>`` twin at the same width — the letter must reach the features and the
+    signature (``b<n>t`` goldens are recorded in the per-GPU YAMLs and must join unambiguously)."""
+    from emmy.compiler.pipeline.search.features import tile_signature
+
+    inter, transp = _feats("b256"), _feats("b256t")
+    assert inter["D_threads"] == transp["D_threads"] == 256.0
+    assert inter["D_reduce_transposed"] == 0.0
+    assert transp["D_reduce_transposed"] == 1.0
+    assert tile_signature({"REDUCE@a1": "b256"}) != tile_signature({"REDUCE@a1": "b256t"})
+
+
 def test_pointwise_rows_stay_feature_free():
     """A row with no REDUCE family key gets no ``D_*`` block — pointwise behavior unchanged."""
     feats = knob_features(dict(_CTX))
@@ -105,6 +118,120 @@ def test_warp_grid_absent_on_scalar_rows():
     skip-if-missing 0.0 default is the tier-split convention, like ``D_w_*_bk``)."""
     scalar = knob_features({**_CTX, "TILE@a1": "n16x8/f2x4", "REDUCE@a1": "b8"})
     assert not any(k.startswith("D_w_grid") for k in scalar)
+
+
+def test_warp_bk_siblings_featurize_distinctly():
+    """The slab K-chunk (the warp ``TILE`` codec's ``k<n>``, ``TilePlan.bk``) must reach the
+    ``D_w_*_bk`` features — it used to read the never-set reduce ``serial`` (always 1), so every
+    ``k<n>`` sibling featurized byte-identically and no prior could rank them."""
+    k1, k4 = _warp_feats("a:mma_m16n8k16_f16/w4x2/f2x2"), _warp_feats("a:mma_m16n8k16_f16/w4x2/f2x2/k4")
+    assert k1["D_w_l2_bk"] == 0.0
+    assert k4["D_w_l2_bk"] == 2.0
+    k2 = _warp_feats("a:mma_m16n8k16_f16/w4x2/f2x2/k2")
+    assert k2["D_w_near_bk"] == 0.0  # the shallow bk≈2 target
+    assert k1["D_w_near_bk"] == -1.0
+
+
+def test_warp_rows_carry_the_finalize_letter():
+    """A warp ``g<n>k`` row must featurize its deferred-combine finalize — the letter was dropped
+    on the warp tier (the ``_geom_feats`` "atomic" default applied), so a warp ``g2k`` row was
+    indistinguishable from its ``g2a`` twin exactly where wide split-K matters most."""
+    kernel = knob_features({**_CTX, "TILE@a1": "a:mma_m16n8k16_f16/w4x2/f2x2", "REDUCE@a1": "g2k"})
+    atomic = knob_features({**_CTX, "TILE@a1": "a:mma_m16n8k16_f16/w4x2/f2x2", "REDUCE@a1": "g2a"})
+    assert kernel["D_finalize_kernel"] == 1.0
+    assert atomic["D_finalize_kernel"] == 0.0
+
+
+def test_warp_grid_orientation_is_physical():
+    """The warp codec's m/n orientation is physical (``atom_m = 16 ≠ atom_n = 8``) and both
+    orders enumerate — transposed siblings must featurize distinctly, with ``tile_m``/``tile_n``
+    on the TRUE axes (the old wide-is-n slot sort collapsed ``w4x2``/``w2x4`` and emitted a
+    fictitious square 64×64 for both)."""
+    a = _warp_feats("a:mma_m16n8k16_f16/w4x2/f2x2")  # 4·2·16 = 128 rows × 2·2·8 = 32 cols
+    b = _warp_feats("a:mma_m16n8k16_f16/w2x4/f2x2")  # the transpose: 64 × 64
+    assert (a["D_tile_m"], a["D_tile_n"]) == (128.0, 32.0)
+    assert (b["D_tile_m"], b["D_tile_n"]) == (64.0, 64.0)
+    assert a["D_w_grid_m"] != b["D_w_grid_m"]
+
+
+def test_stage_alt_flag_featurizes():
+    """The flash stream enumerates the alternating single-slab pipeline (``d1/tma/alt``) as a
+    sibling of the plain stage — the ``alt`` flag must reach the features and the signature."""
+    from emmy.compiler.pipeline.search.features import tile_signature
+
+    plain = {**_CTX, "TILE@a1": "a:mma_m16n8k16_f16/w4x2/f2x2", "REDUCE@a1": "", "STAGE@a1": "d1/tma"}
+    alt = {**plain, "STAGE@a1": "d1/tma/alt"}
+    assert knob_features(plain)["D_stage_alt"] == 0.0
+    assert knob_features(alt)["D_stage_alt"] == 1.0
+    assert tile_signature(plain) != tile_signature(alt)
+
+
+def test_enumerated_warp_pool_featurizes_injectively():
+    """The propagation property behind all of the above: every tile in the enumerated warp pool
+    (``_WARP_UNITS × _WARP_REGS × _WARP_BK`` for one atom) must produce a distinct feature vector
+    AND a distinct ``tile_signature`` — a collision class is a set of siblings no prior can rank
+    and no golden can join unambiguously (the pre-fix pool collapsed 468 tiles → 83 classes)."""
+    from emmy.compiler.pipeline.search.features import tile_signature
+    from emmy.compiler.pipeline.search.space import warp_tile_moves
+
+    moves = warp_tile_moves(("mma_m16n8k16_f16_f32",))
+    vectors = {tuple(sorted(knob_features({**_CTX, "TILE@a1": m, "REDUCE@a1": ""}).items())) for m in moves}
+    signatures = {tile_signature({"TILE@a1": m, "REDUCE@a1": ""}) for m in moves}
+    assert len(vectors) == len(moves)
+    assert len(signatures) == len(moves)
+
+
+def test_warp_row_full_vector_matches_hand_computed_encoding():
+    """The FEATURIZER_VERSION=3 encoding anchor: the complete feature vector of one maximal warp
+    row (atom expansion + true-axis geometry + occupancy + stage/TMA + wspec/raster), with every
+    value hand-derived from the codec definitions — ``w4x2/f2x2`` on ``m16n8k16`` is a 128×32
+    tile (``WM·FM·atom_m × WN·FN·atom_n``), 8 warps = 256 threads, ``k2`` = 2 atom_k units. Any
+    key or value drift here is an encoding change and must ride a version bump."""
+    import math
+
+    free, k_ext, sm = 2097152.0, 4096.0, 170.0  # M=512·N=4096, K=4096
+    ctx = {"S_ext_free_prod": free, "S_ext_reduce_prod": k_ext, "S_warp_eligible": 1.0, "H_sm_count": sm}
+    got = knob_features(
+        {
+            **ctx,
+            "TILE@a1": "a:mma_m16n8k16_f16_f16/w4x2/f2x2/k2",
+            "REDUCE@a1": "g2k",
+            "STAGE@a1": "d3/tma/ring/p2",
+            "WSPEC": "p2",
+            "RASTER": "gm8",
+        }
+    )
+    waves = math.log2((free / 4096 * 2) / sm)  # 1024 CTAs over 170 SMs
+    needed = k_ext / math.sqrt(free)  # the K-heavy split floor 2√2 (occupancy already saturated)
+    reuse = 4096.0 / 160.0
+    expect = {
+        **ctx,
+        "MMA_tier": 1.0, "MMA_atom_m": 16.0, "MMA_atom_n": 8.0, "MMA_atom_k": 16.0,
+        "MMA_a_bits": 16.0, "MMA_acc_bits": 16.0,
+        "D_threads": 256.0, "D_cells": 4.0, "D_tile_m": 128.0, "D_tile_n": 32.0,
+        "D_log2_area": 12.0, "D_reuse": reuse, "D_aspect": 2.0,
+        "D_l2_threads": 8.0, "D_near_threads": -1.0, "D_pow2_threads": 1.0,
+        "D_cells_cap": 4.0, "D_near_cells": -12.0, "D_near_area": 0.0, "D_square": -2.0,
+        "D_l2_reuse": math.log2(reuse), "D_near_intensity": -abs(math.log2(reuse) - 5.0),
+        "D_near_kchunks": -abs(math.log2(k_ext / 2) - 5.0),
+        "D_neg_masked_m": 0.0, "D_neg_masked_n": 0.0, "D_neg_masked_k": 0.0,
+        "D_l2_bn": 0.0, "D_l2_bm": 0.0, "D_bn_ge_bm": 0.0, "D_bn_band": 0.0, "D_bm_band": 0.0,
+        "D_l2_bk": 0.0, "D_bk_ge32": 0.0, "D_w_l2_bk": 1.0, "D_w_near_bk": 0.0,
+        "D_splitk": 2.0, "D_splitk_le2": 1.0, "D_finalize_kernel": 1.0,
+        "D_tilen_clean": 1.0, "D_near_tilen": -1.0, "D_scalar_on_warp_eligible": 0.0,
+        "D_log2_ctas": 10.0, "D_log2_waves": waves, "D_near_waves": -abs(waves - 1.0),
+        "D_ctas_ge_sm": 1.0, "D_splitk_excess": 0.0, "D_splitk_deficit": math.log2(needed / 2.0),
+        "D_splitk_roundtrip": 21.0, "D_l2_cells_occ": 2.0,
+        "D_w_grid_m": 2.0, "D_w_grid_n": 1.0, "D_w_grid_aspect": 1.0,
+        "D_stage_depth": 3.0, "D_stage_async": 1.0, "D_stage_tma": 1.0, "D_stage_ring": 1.0,
+        "D_stage_reg_depth": 2.0, "D_stage_alt": 0.0,
+        "D_tma_aspect": 2.0, "D_tma_log2_area": 12.0, "D_tma_grid_m": 2.0, "D_tma_grid_n": 1.0,
+        "D_tma_l2_splitk": 1.0,
+        "D_wspec_warps": 2.0, "D_raster_group": 8.0, "D_raster_gn": 0.0,
+    }  # fmt: skip
+    assert set(got) == set(expect), sorted(set(got) ^ set(expect))
+    for key, val in expect.items():
+        assert math.isclose(got[key], val, rel_tol=0, abs_tol=1e-9), (key, got[key], val)
 
 
 def test_tma_interactions_fire_only_on_tma_stage():

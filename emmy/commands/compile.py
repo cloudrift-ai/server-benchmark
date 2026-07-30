@@ -66,6 +66,15 @@ def add_input_args(parser) -> None:
     """Register the model/IR input arguments shared by ``compile`` and ``tune``."""
     parser.add_argument("input", nargs="?", help="HuggingFace model ID or .json IR file. Mutually exclusive with --code.")
     parser.add_argument(
+        "--adapter",
+        choices=["causal-lm", "dit"],
+        default="causal-lm",
+        help=(
+            "Model trace adapter. ``causal-lm`` preserves the existing HuggingFace text-model path; "
+            "``dit`` traces one fixed-shape FP16 Diffusers DiT transformer block (requires --layer)."
+        ),
+    )
+    parser.add_argument(
         "--code",
         "-c",
         help=(
@@ -412,6 +421,7 @@ def load_or_trace(args) -> tuple[Graph, str, tuple | None]:
     """Return ``(graph, base_name, bundle)`` where ``bundle = (module, args, kwargs)``
     is the runnable torch module + its example inputs (for ``--bench`` real-module
     timing), or ``None`` when no module is available (``--ir`` JSON path)."""
+    adapter = validate_trace_adapter_args(args)
     dynamic_shapes = _resolve_dynamic_shapes(args)
     if args.code:
         from emmy.commands.trace import graph_from_code
@@ -425,10 +435,51 @@ def load_or_trace(args) -> tuple[Graph, str, tuple | None]:
             sys.exit(2)
         return _load_graph(input_path), input_path.stem, None
 
-    graph, bundle = _trace_model(args.input, args.layer, args.seq_len, dynamic_shapes=dynamic_shapes)
+    if adapter == "dit":
+        graph, bundle = _trace_dit_model(args.input, args.layer)
+    else:
+        graph, bundle = _trace_model(args.input, args.layer, args.seq_len, dynamic_shapes=dynamic_shapes)
     safe_name = args.input.replace("/", "-").lower()
-    base_name = f"{safe_name}-full-s{args.seq_len}" if args.layer is None else f"{safe_name}-layer{args.layer}"
+    if args.layer is None:
+        base_name = f"{safe_name}-full-s{args.seq_len}"
+    elif adapter == "dit":
+        base_name = f"{safe_name}-dit-layer{args.layer}"
+    else:
+        base_name = f"{safe_name}-layer{args.layer}"
     return graph, base_name, bundle
+
+
+def validate_trace_adapter_args(args) -> str:
+    """Validate adapter-specific CLI invariants and return the selected adapter."""
+    adapter = getattr(args, "adapter", "causal-lm")
+    if adapter == "causal-lm":
+        return adapter
+    if adapter != "dit":
+        logger.error("unknown model adapter %r", adapter)
+        sys.exit(2)
+    if getattr(args, "code", None) is not None:
+        logger.error("--adapter dit requires a positional HuggingFace model ID, not --code")
+        sys.exit(2)
+    if getattr(args, "input", None) is None:
+        logger.error("--adapter dit requires a positional HuggingFace model ID")
+        sys.exit(2)
+    input_path = Path(args.input)
+    if input_path.suffix == ".json" and input_path.exists():
+        logger.error("--adapter dit requires a HuggingFace model ID, not pre-traced JSON IR")
+        sys.exit(2)
+    layer = getattr(args, "layer", None)
+    if layer is None:
+        logger.error("--layer is required with --adapter dit")
+        sys.exit(2)
+    from emmy.compiler.trace.dit import DIT_NUM_LAYERS
+
+    if not 0 <= layer < DIT_NUM_LAYERS:
+        logger.error("DiT layer %d is out of range; expected 0-%d", layer, DIT_NUM_LAYERS - 1)
+        sys.exit(2)
+    if getattr(args, "dynamic", None):
+        logger.error("--dynamic is not supported with --adapter dit in v1")
+        sys.exit(2)
+    return adapter
 
 
 def _resolve_dynamic_shapes(args) -> dict | None:
@@ -453,6 +504,19 @@ def _load_graph(path: Path) -> Graph:
     with open(path) as f:
         data = json.load(f)
     return Graph.from_dict(data)
+
+
+def _trace_dit_model(model_id: str, layer: int) -> tuple[Graph, tuple]:
+    """Load and trace one Diffusers DiT transformer block."""
+    try:
+        from emmy.compiler.trace.dit import trace_dit_model
+
+        return trace_dit_model(model_id, layer)
+    except ModuleNotFoundError as exc:
+        if exc.name and (exc.name == "diffusers" or exc.name.startswith("diffusers.")):
+            logger.error("The DiT adapter requires Diffusers; install it with: pip install -e '.[compile,image]'")
+            sys.exit(1)
+        raise
 
 
 def _trace_model(model_id: str, layer: int | None, seq_len: int, *, dynamic_shapes: dict | None = None) -> tuple[Graph, tuple]:

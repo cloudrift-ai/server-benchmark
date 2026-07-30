@@ -26,6 +26,17 @@ GPU
 `Graph` (`compiler/graph.py`) hosts nodes from every dialect; rewrite
 passes swap node ops in place, so there is no separate "program" type.
 
+Nodes are **multi-output**: `Node.outputs` is an ordered, non-empty tuple of `Tensor`s, and `node.output` is a
+read-only alias of slot 0 (the **primary** output), so single-output code reads exactly what it always did.
+**Buffer names are the edge currency** — `node.inputs`, `graph.inputs`/`outputs`, and body `Load`/`Write` refs
+all name buffers: a primary buffer travels under its node's id (`node.id == outputs[0].name` in steady state),
+a non-primary buffer under its own tensor name (`<primary>__sq` style). Every buffer has exactly one
+`(node, slot)` producer (SSA per buffer; `add_node` rejects duplicates). The graph maintains two buffer-keyed
+indexes in lockstep with every mutation: `graph.producer(buf)` / `graph.buffer(buf)` resolve a buffer to its
+producing node / its `Tensor`, and `graph.buffer_users(buf)` lists the consumers of that one buffer —
+`graph.users(node_id)` stays node-granular (the union over the node's buffers). `Graph.validate()` checks the
+index/SSA invariants; tests call it directly (never production compile paths).
+
 `Graph.structural_key()` implements the `Structural` protocol
 (`compiler/structural.py`) — a Merkle-style hex sha256 digest used for
 candidate dedup in autotuning loops. Per node it folds in op kind,

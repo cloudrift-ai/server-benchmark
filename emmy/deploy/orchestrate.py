@@ -75,14 +75,27 @@ async def run_deploy(
 
     # Step 1: Pull images. --ignore-pull-failures keeps a locally-built image
     # usable before it's pushed to a registry (e.g. testing a fresh
-    # vllm-emmy build with `bench --local`); a genuinely missing image
-    # still fails clearly at `docker compose up`.
+    # vllm-emmy build with `bench --local`), but compose's exit code is
+    # unreliable across versions (non-zero for a registry-lookup miss on
+    # some, zero on others) — so ignore it and enforce the actual
+    # invariant instead: after the pull, every image the compose file
+    # references must exist locally. Missing images abort here with their
+    # names (instead of a confusing failure later); a never-pulled image
+    # that exists locally proceeds with a stale-copy warning.
     logger.info("Pulling images...")
     async with timer.ameasure(PHASE_IMAGE_PULL):
         rc, _, _ = await run_cmd("docker compose pull --ignore-pull-failures", timeout=1800, log_output=True)
-    if rc != 0:
-        logger.error("Failed to pull images")
+    _, images_out, _ = await run_cmd("docker compose config --images", timeout=60)
+    missing = []
+    for image in images_out.split():
+        rc_i, _, _ = await run_cmd(f"docker image inspect {image}", timeout=60)
+        if rc_i != 0:
+            missing.append(image)
+    if missing:
+        logger.error(f"Images neither pullable nor available locally: {', '.join(missing)}")
         return False
+    if rc != 0:
+        logger.warning("Image pull reported failures, but every image exists locally — proceeding (local copies may be stale)")
 
     # Step 2: Download model via hf CLI in container
     logger.info(f"Downloading model {model_name}...")

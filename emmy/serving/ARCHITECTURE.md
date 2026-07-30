@@ -84,13 +84,18 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `pre` and `post` (a reference torch SDPA in the Phase-2 host stitch; vLLM paged `Attention` in Phase 3). **I/O:**
   the plugin runs **device-resident at every width**: the **decode hot path** (`num_tokens ≤ bucket`) rides the
   captured static twins (`run_device` — captured-replay, torch↔cupy DLPack zero-copy), a **FULL chunked-prefill
-  step** rides the static **prefill-chunk twin** (`num_tokens == prefill_bucket` EXACTLY — default = mnbt,
-  `EMMY_GEN_PREFILL_BUCKET` overrides / `0` disables; exact grids on the hot chunk width. The boundary is equality,
-  not a range: the twin always computes `prefill_bucket` rows, so an over-bucket decode batch or a partial tail
-  chunk routed through it would pay the full-bucket grids for a sliver of real rows), and every other width rides
-  the SYMBOLIC programs' `run_device_sym`
-  (`num_tokens ≤ prefill_capacity`, capacity = vLLM's `max_num_batched_tokens`, passed as `max_tokens` at runner
-  build) — grids sized per step via
+  step** rides the static **prefill-chunk twin** (`num_tokens == prefill_bucket` EXACTLY — default = the dynamic-dim
+  cap, `EMMY_GEN_PREFILL_BUCKET` overrides / `0` disables; exact grids on the hot chunk width. The boundary is
+  equality, not a range: the twin always computes `prefill_bucket` rows, so an over-bucket decode batch or a partial
+  tail chunk routed through it would pay the full-bucket grids for a sliver of real rows), a **rider-carrying full
+  chunk step** (`prefill_bucket < num_tokens ≤ prefill_bucket + rider_width`, `rider_width` = the decode bucket when
+  both twin families exist) **splits row-wise** across the chunk twin + the decode twin — correct because pre/post are
+  per-token-independent — which is what lets `--max-num-batched-tokens` default to `DYNAMIC_DIM_MAX + bucket`: a full
+  chunk step keeps carrying its decode riders and the previous prompt's 1-token BOS tail instead of freezing every
+  decoding request for the whole chunk and deferring first-token sampling (the measured c=4/c=8 TTFT structure), and
+  every other width rides the SYMBOLIC programs' `run_device_sym`
+  (`num_tokens ≤ prefill_capacity`, capacity = `min(max_num_batched_tokens, DYNAMIC_DIM_MAX)`, passed as `max_tokens`
+  at runner build) — grids sized per step via
   `set_sym_values` over capacity-built buffers, launches issued on torch's stream, no per-T graph capture
   (chunked-prefill T varies per step; the dispatch hides behind prefill-width GPU work). The per-layer host numpy
   `rebind` path survives only for the standalone `emmy generate` oracle and as the over-capacity fallback — its
@@ -102,7 +107,10 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   **weights are shared**: `_compile_split` binds constants through a per-wrapper device cache
   (`_bind_device_constants` — one upload per `(source_path, load_ops)`, the same cupy array fed to both builds), so
   the decode twin adds no weight copy. **`EMMY_GEN_DECODE_BUCKET=0`** (`config.gen_decode_bucket`) still disables the
-  twin entirely at the cost of decode speed.
+  twin entirely at the cost of decode speed. A further static **M=1** twin pair (`EMMY_GEN_M1_TIER`, default on)
+  routes true single-token decode onto gemv-class matvec programs, and `EMMY_GEN_ALIAS_ATTN` (default off) lets
+  vLLM's paged attention write directly into the M=1 post twin's `attn_out` input backing — the prefix upload
+  self-copy-skips on pointer equality, dropping the per-layer D2D seam copy from the captured decode graph.
   **Multimodal wrappers:** the trunk is resolved through `language_model` (gemma-4 "unified" nests the decoder stack +
   embed/norm there) and the text dims come from `config.text_config`.
   **Tuning what serving actually runs.** The deploy pick reads the golden tier, then box-local `perf`/reservoir
@@ -151,7 +159,17 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   torch/cupy blocks to the driver **before vLLM's KV-cache profiling** — the reclaimed memory becomes KV blocks
   (gemma-4-12B on a 5090: 17.7k → 27.5k KV tokens, the difference between admission-queueing and beating stock TTFT
   on the 4K/4K c=8 workload). `forward` brackets each `self.attn[L](q,k,v)` with two emmy replays (pre/post), applying that
-  layer's RoPE in between (A2). Uniform sliding-window (Qwen2-style `use_sliding_window`) and dual-chunk are rejected. `forward` branches on `num_tokens`: the decode hot
+  layer's RoPE in between (A2). Uniform sliding-window (Qwen2-style `use_sliding_window`) and dual-chunk are rejected.
+  **Speculative decoding (MTP drafter, vllm#41745 — gemma-4-assistant).** vLLM's drafter shares the target's embedding
+  by reaching into `target.model.embed_tokens` (stock model classes nest their trunk under `.model`; the emmy trunk lives
+  in the runner instead). So — only when a draft is configured — the model exposes a thin `.model` shim
+  (`_EmmyTargetInner`) whose `embed_tokens` (`_SharedRawEmbedding`) gathers RAW rows from the SAME tied embed/`lm_head`
+  tensor the runner adopts (no copy); the gemma-4 drafter applies its own `sqrt(hidden)` normalizer, matching the
+  runner's folded embed-scale. The KV cache is genuinely shared through vLLM's own attention-layer registry — the
+  drafter's Q-only layers read K/V from the target's real `Attention` layers. Only tied-embedding targets are sound
+  (untied `lm_head` ≠ embedding), so an untied target is rejected at init; a one-time check at the end of `load_weights`
+  verifies the runner adopted that same tensor (not in the gather itself — vLLM compiles the drafter's forward, and
+  dynamo can't trace `data_ptr()`). `forward` branches on `num_tokens`: the decode hot
   path (`≤ bucket`) runs `_forward_device` (q/k/v + attn_out stay CUDA tensors through RoPE + attention, no host
   hop); prefill keeps the numpy path. Select via `--runner generate` +
   `--hf-overrides '{"architectures":["EmmyGenModel"]}'` + `--dtype float16` (the `serve --generate` branch forces
@@ -162,7 +180,13 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   decode twin; sizes above it capture the device-resident symbolic programs — both paths are capture-validated,
   `test_gen_capture_gpu` / the two-size live-replay test; over-bucket capture was worth +10.6% req/s at c=64,
   and a decode bucket matched to the concurrency beats riding the symbolic captures — the bucket-64 golden set
-  took c=64 TPOT 35.4 → 22.5 ms). Under the
+  took c=64 TPOT 35.4 → 22.5 ms, and the bucket-8 set (m8 goldens, 2026-07-25) took c=4 TPOT 19.6 → 18.9 and
+  c=8 21.4 → 20.6 on the same per-lane-knob rule). The mixed prefill+decode cells take a second per-workload
+  knob, the CHUNK QUANTUM: `EMMY_GEN_PREFILL_BUCKET=2048` + `--max-num-batched-tokens 2056` (chunk width +
+  bucket-sized rider headroom; m2048 goldens 2026-07-26) pipelines queued prompts in ~200 ms static-twin steps
+  instead of ~500 ms 4096-chunks — c=4 TTFT 1363 → 1063 and c=8 1828 → 1014 on the 5090, both below stock —
+  and as a side effect the smaller profiling dummy peak restores KV capacity to stock parity (38k vs 24k
+  tokens at util 0.96). Under the
   outer capture,
   `_Program.run_device` detects `torch.cuda.is_current_stream_capturing()` and issues the raw launch sequence
   (`run_once`) instead of its own graph machinery — nested stream capture and graph launch are both illegal in a
@@ -260,6 +284,9 @@ Recorded follow-ups, in impact order:
 ## Testing
 
 - `tests/serving/test_packed.py` — pure span-split logic, runs everywhere.
+- `tests/serving/test_gen_mtp_shim.py` — the spec-decode `.model.embed_tokens` shim (no GPU): pins the attribute
+  contract vLLM's MTP drafter shares off the target, that it gathers RAW rows from the shared tied weight, and that an
+  untied target raises. Imports vllm at module level, so it runs where vllm is installed (skips otherwise).
 - `tests/serving/test_vllm_plugin_gpu.py` — `perf`-marked (deselected by default), needs CUDA + vllm: in-process
   `vllm.LLM(runner="pooling", hf_overrides=...)` on Qwen3-Embedding-0.6B, `.embed()` cosine vs the HF eager reference.
   The three texts have different token counts, so it exercises the per-seq_len captured-graph cache end to end.

@@ -41,16 +41,22 @@ def test_run_device_sym_matches_host_path():
     runner = EmmyGenRunner.from_model(model, dtype_str="float16", decode_bucket=16, max_tokens=64, prefill_bucket=32)
     assert runner.prefill_capacity == 64
     assert runner.prefill_bucket == 32
+    assert runner.rider_width == 16  # chunk twin + decode twin -> split coverage above the chunk
 
     rng = np.random.default_rng(0)
     H = config.hidden_size
-    # T=24: decode_bucket < T <= prefill_bucket — the static CHUNK-TWIN regime (pad → run →
-    # slice); the host reference runs the SYMBOLIC program, a different kernel, so fp16
-    # accumulation order may differ by rounding (allclose). T=48: prefill_bucket < T <=
-    # capacity — the SYMBOLIC device regime, same program as the host path (bit-exact).
+    close = lambda dev, host: np.testing.assert_allclose(dev, host, rtol=2e-2, atol=2e-3)  # noqa: E731
+    # T=24: decode_bucket < T <= prefill_bucket — routed to the symbolic device path (the
+    # chunk twin is exact-width only); same program as the host path but the host reference
+    # tolerance is kept loose. T=40: prefill_bucket < T <= prefill_bucket + rider_width —
+    # the chunk+decode twin row SPLIT (different kernels from the host's symbolic program,
+    # so fp16 accumulation order may differ by rounding). T=56: past the rider window
+    # (48 = pb + rider is still split) — the SYMBOLIC device regime, same program as the
+    # host path (bit-exact).
     for T, check in (
-        (24, lambda dev, host: np.testing.assert_allclose(dev, host, rtol=2e-2, atol=2e-3)),
-        (48, np.testing.assert_array_equal),
+        (24, close),
+        (40, close),
+        (56, np.testing.assert_array_equal),
     ):
         hidden = (rng.standard_normal((T, H)) * 0.3).astype(np.float16)
         q_np, k_np, v_np = runner.forward_layer_pre(0, hidden)  # host rebind path

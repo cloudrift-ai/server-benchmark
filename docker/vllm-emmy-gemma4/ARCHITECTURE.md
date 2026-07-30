@@ -63,7 +63,9 @@ the load falls back — then the old cubin-union behavior is exactly what runs.
 - `config.env` — the pinned serving config. Every value is cache-key-relevant; it must be **final before warming**
   (re-measure memory headroom on the card first — see the workflow). Make-includable `VAR=value` syntax.
 - `serve.sh` — the frozen generative serve invocation (the arg set `emmy serve --generate` builds: `--runner
-  generate --enforce-eager --dtype float16 --hf-overrides EmmyGenModel` + the `GEMMA4_*` config).
+  generate --dtype float16 --hf-overrides EmmyGenModel`, the `FULL_DECODE_ONLY` whole-step decode-cudagraph
+  compilation-config with the forced fused `rotary_embedding` CustomOp, `--no-enable-prefix-caching`, + the
+  `GEMMA4_*` config; keep in sync with `_generate_compile_args` in `emmy/commands/serve.py`).
 - `warm.sh` — runs the **plain** `vllm-emmy` image on the target GPU with `./warm` mounted at `/opt/emmy`, waits for
   `/health`, issues one completion (covers prefill + decode kernels), stops. Result: `warm/hf` (the model snapshot —
   the gated download happens here, once, via `HF_TOKEN`), `warm/cubin` (every compiled kernel), and `warm/pack`

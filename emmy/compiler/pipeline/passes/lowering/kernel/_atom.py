@@ -40,7 +40,6 @@ from emmy.compiler.ir.schedule import Stage
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile.ir import Contraction, Side
-from emmy.compiler.pipeline.knob import Knob, KnobType
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
     CtaTile,
@@ -52,24 +51,12 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     staged_kloop,
     sync_stat_fill,
 )
+from emmy.compiler.pipeline.search.space import UNROLL
 
 #: The contraction semiring — multiply ⊗ then accumulate ⊕ (add). The same multiply-add ``mma.sync``
 #: realizes; in the scalar tier it is a plain scalar fma loop.
 _MUL = ElementwiseImpl("multiply")
 _ADD = ElementwiseImpl("add")
-
-
-#: The unroll budget — the max static loop trip count eligible for ``#pragma unroll``. Pin-only
-#: (``off`` defaults to ``_UNSET`` → never stamped / featurized / enumerated, so it can't perturb the
-#: search or the goldens): ``EMMY_UNROLL=0`` keeps every extent-driven loop **rolled** (compact,
-#: readable kernels — e.g. for a blog listing), a high value unrolls more. Unset → each call site's
-#: built-in cap (64 for an inner reduce, 128 for the flash KV fold, uncapped for the tensor-core
-#: K-chunk), so the default codegen is byte-identical.
-UNROLL = Knob(
-    "UNROLL",
-    KnobType.INT,
-    help="Max static loop trip count to #pragma-unroll (the unroll budget); pin 0 to keep loops rolled. Unset = per-site cap.",
-)
 
 
 def unroll_ok(extent, cap: int | None = None) -> bool:

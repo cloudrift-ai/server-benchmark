@@ -408,9 +408,9 @@ def _wrap_op_as_fragment(graph: Graph, root_id: str, new_op: Op) -> Graph:
     for inp_id in root.inputs:
         if inp_id in frag.nodes:
             continue
-        inp = graph.nodes.get(inp_id)
-        shape = inp.output.shape if inp is not None else ()
-        dtype = inp.output.dtype if inp is not None else "f32"
+        inp_t = graph.buffer(inp_id)
+        shape = inp_t.shape if inp_t is not None else ()
+        dtype = inp_t.dtype if inp_t is not None else "f32"
         frag.add_node(InputOp(), [], Tensor(inp_id, shape, dtype), node_id=inp_id)
     out_id = frag.add_node(new_op, list(root.inputs), root.output, node_id=root.id)
     frag.outputs = [out_id]
@@ -462,7 +462,7 @@ def _format_nodes(nodes: list, graph: Graph) -> str:
         if body is None:
             lines.append(f"{node.output.name} = {_fmt_op(node, graph)}")
             continue
-        arg_names = [graph.nodes[inp].output.name for inp in node.inputs if inp in graph.nodes]
+        arg_names = [t.name for inp in node.inputs if (t := graph.buffer(inp)) is not None]
         lines.append(f"{node.output.name} = {type(op).__name__}({', '.join(arg_names)})")
         scalar_inputs = _scalar_constant_inputs(graph, node, ConstantOp)
         if scalar_inputs:
@@ -496,7 +496,7 @@ def _build_rewrite_kwargs(rule, match: Match, ctx: Context | None) -> dict:
             kwargs[pname] = match.node(pname)
         else:
             if input_slot < len(root_node.inputs):
-                kwargs[pname] = graph.nodes.get(root_node.inputs[input_slot])
+                kwargs[pname] = graph.producer(root_node.inputs[input_slot])
             else:
                 kwargs[pname] = None
             input_slot += 1

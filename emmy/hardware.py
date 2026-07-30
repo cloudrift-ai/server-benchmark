@@ -56,6 +56,7 @@ GPU_INSTANCE_TYPES = {
         ("gcp", "a2-highgpu"),
     ],
     "NVIDIA A100 80GB": [
+        ("cloudrift", "a100-16-210-800-generic"),
         ("gcp", "a2-ultragpu"),
     ],
     "AMD Instinct MI350X": [

@@ -19,6 +19,12 @@ Per-op handlers map aten names (`aten.add.Tensor`,
 pulled from the FX meta and fed into the op's `infer_output_shape` to
 stamp the output tensor.
 
+`aten.chunk` is the deliberate exception to the otherwise single-output frontend: the walker materializes every
+FX-described static chunk as its own `SliceOp` and stores a transient tuple of node IDs only while walking FX.
+`operator.getitem` resolves an integer tuple index to the matching slice, so no multi-output Graph IR is introduced.
+Offsets accumulate the actual FX output extents, preserving PyTorch's uneven/fewer-final-chunks behavior. Dynamic
+chunk counts, nonconstant dimensions, a dynamic chunked extent, and invalid tuple indices fail explicitly.
+
 `scaled_dot_product_attention` captures an explicit `attn_mask` tensor (when
 present) as a 4th `SdpaOp` input — HF passes its precomputed `(1, 1, S, S)`
 causal mask this way (an additive `0` / `-inf` bias) rather than via the
@@ -86,12 +92,25 @@ args): the legacy constant-input convention can't represent a `None` start (`x[:
 `_resolve_inputs` drops both, leaving the surviving constants positionally ambiguous. Pre-field IR dumps still
 decompose via the constant-input fallback.
 
+### `dit.py` — fixed DiT block adapter
+
+The experimental Diffusers adapter loads only a checkpoint's `transformer` subfolder with `AutoModel`, selects one
+`transformer_blocks` entry, converts it to FP16, and forces `AttnProcessor2_0` so attention traces as PyTorch SDPA. Its
+v1 workload is deterministic: hidden states `[1, 256, 1152]` from seed 0, timestep 500, and class label 207.
+
+Diffusers' timestep embedding constructs a static sinusoidal frequency vector with `arange` on every call. The adapter
+materializes that vector as a float32 module buffer before export; timestep multiplication, sin/cos, class embedding,
+AdaLayerNorm-Zero, chunking, and all learned projections remain in the graph. The result uses the standard
+`(graph, module, args, kwargs)` bundle, so binding, eager accuracy, profiling, and interleaved benchmarking remain
+shared with CausalLM traces.
+
 ## Entry points
 
 - Whole-model trace: `trace_module(build_full_model_wrapper(model, …), (input_ids,))`.
 - Single-layer trace: `trace_module(model.model.layers[N], (x,), kwargs={…})` (static); with `--dynamic`,
   `trace_module(build_layer_wrapper(block, …), (x,), dynamic_shapes={"x": {1: Dim("seq_len")}})`.
 - Inline expression: `graph_from_code("torch.nn.RMSNorm(2048)(torch.randn(1,32,2048))")` (used by `emmy compile --code` and `emmy trace --code`).
+- DiT block: `trace_dit_model("facebook/DiT-XL-2-256", 0)` (fixed FP16 block workload).
 
 ## Rule
 

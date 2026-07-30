@@ -100,6 +100,12 @@ async def _handle_foo(args):
     await ...
 ```
 
+The compiler commands (`compile`, `run`, and `tune`) share a model-adapter selector. `causal-lm` is the default and
+keeps the existing Transformers path. `dit` delegates to the Diffusers block adapter in `compiler/trace/dit.py`; it
+requires `--layer`, accepts the checkpoint's layers 0-27, and rejects dynamic shapes in v1. `run --bench` and
+`tune --bench` include the adapter in the isolated worker's reconstruction payload, so eager PyTorch, `torch.compile`,
+and Emmy always rebuild the same module and example inputs.
+
 **Command modules:** `commands/bench/` (with `GitCommitter` for incremental result commits),
 `commands/deploy/{ssh,local,cloud}.py` (`deploy ssh` auto-detects the remote GPU via SSH, `deploy local` the local GPU
 via PCI sysfs, both resolve the matrix + apply a scale-out strategy; `deploy cloud` uses the recipe's `deploy.gpu` for
@@ -250,8 +256,11 @@ laddered up to `--max-num-seqs` — sizes above the decode bucket capture the de
 `serving/ARCHITECTURE.md`); pass vLLM's own `--enforce-eager` to opt out (forced automatically when
 `EMMY_GEN_DECODE_BUCKET=0`). The emmy generative arm also defaults `--gpu-memory-utilization` to **0.97** (its
 cupy residents are invisible to vLLM's torch-only profiler, so the 0.90 line can fail the min-KV fit at long
-model lens; stock keeps 0.90), and `EMMY_SERVING_BATCHED=1` embedding serving defaults `--max-num-batched-tokens`
-to `max_num_seqs × max_model_len` so scheduler steps can fill the batch.
+model lens; stock keeps 0.90) and `--max-num-batched-tokens` to **the dynamic-dim cap + the decode bucket** — the
+bucket-sized rider headroom is covered by the chunk+decode twin row split (`serving/ARCHITECTURE.md`), so full
+chunk steps keep carrying their decode riders; an explicit value past that cap is rejected. `EMMY_SERVING_BATCHED=1`
+embedding serving defaults `--max-num-batched-tokens` to `max_num_seqs × max_model_len` so scheduler steps can fill
+the batch.
 
 ```bash
 emmy serve Qwen/Qwen3-Embedding-0.6B --gpu-memory-utilization 0.8   # plugin server (Ctrl-C to stop)

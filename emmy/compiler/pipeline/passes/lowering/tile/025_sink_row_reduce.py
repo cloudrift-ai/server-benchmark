@@ -15,9 +15,8 @@ The rewrite:
   SSA value) plus a :class:`RowAccum` accumulating it into a fresh f32 row buffer
   ``T__sq[row]``, ``row = flat(cell) / n`` (zero-init'd per launch via the ordinary
   ``zero_outputs`` memset machinery — ``RowAccum`` is detected exactly as ``RegStore.atomic``).
-- **aux node** — ``T__sq`` becomes an :class:`AuxOutputOp` graph node whose sole input is A:
-  no launch of its own, but a real node so the buffer is planned/allocated and B' depends on A
-  through ordinary edges.
+  ``T__sq`` is output slot 1 of the producer node itself — planned/allocated per buffer, with
+  B' reading it through an ordinary buffer edge.
 - **consumer** — B re-emits as an UN-mapped ``LoopOp`` (the 020-cut re-entry idiom): its
   ``Reduction`` drops to a ``Load`` of ``T__sq[row]`` and the projection rides verbatim inside
   the free row loops — the restarted scan hands it back to ``010_recognize``, which peels BOTH
@@ -42,7 +41,7 @@ from dataclasses import replace
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
-from emmy.compiler.ir.base import AuxOutputOp, InputOp
+from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, RowAccum, Write
 from emmy.compiler.ir.tile import Map, TileOp
@@ -124,7 +123,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
     graph = match.graph
     src = binding.src
     sq = f"{src}__sq"
-    if sq in graph.nodes:
+    if graph.buffer(sq) is not None:
         raise RuleSkipped(f"stat already sunk — {sq} exists")
     producer = graph.nodes.get(src)
     if producer is None or src in graph.inputs:
@@ -188,8 +187,12 @@ def rewrite(match: Match, root: Node) -> Graph | None:
     for inp in ext_inputs:
         n = graph.nodes[inp]
         frag.add_node(op=InputOp(), inputs=[], output=n.output, node_id=inp)
-    frag.add_node(op=new_pop, inputs=list(producer.inputs), output=producer.output, node_id=src)
-    frag.add_node(op=AuxOutputOp(), inputs=[src], output=Tensor(sq, (Dim(binding.rows),), F32), node_id=sq)
+    frag.add_node(
+        op=new_pop,
+        inputs=list(producer.inputs),
+        outputs=[producer.output, Tensor(sq, (Dim(binding.rows),), F32)],
+        node_id=src,
+    )
     cons_inputs = [*(i for i in root.inputs if i != src and i in consumer.inputs), src, sq]
     frag.add_node(op=consumer, inputs=cons_inputs, output=out, node_id=out.name)
     for node in frag.nodes.values():

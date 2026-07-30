@@ -295,6 +295,20 @@ class EmmyGenRunner:
         (and captured-replay) on the hot chunk shape."""
         return self._prefill_bucket if self._pre_prefill is not None else 0
 
+    @property
+    def rider_width(self) -> int:
+        """Static-tier coverage ABOVE the chunk twin: a step of ``T`` in
+        ``(prefill_bucket, prefill_bucket + rider_width]`` splits row-wise into the chunk
+        twin (first ``prefill_bucket`` rows) + the decode twin (the rider rows) — correct
+        because pre/post are per-token-independent, so the row split is request-agnostic.
+        This is what lets ``--max-num-batched-tokens`` sit ABOVE the chunk width: a full
+        chunk step keeps carrying its decode riders (and the previous prompt's tail
+        tokens) instead of freezing every decoding request for the whole chunk. 0 = no
+        split coverage (either twin family missing)."""
+        if self._pre_prefill is None or self._pre_decode is None:
+            return 0
+        return self._decode_bucket
+
     @classmethod
     def create(cls, model_id, *, dtype_str="float16", decode_bucket=16, max_tokens=None, prefill_bucket=0):
         import torch
@@ -358,13 +372,26 @@ class EmmyGenRunner:
         # warm boot uses the hub id, and the config hash already pins identity.
         import hashlib
 
+        # The config hash must strip the VOLATILE fields or the path sneaks back in:
+        # ``_name_or_path`` records the load spelling (the hub id at warm time, the snapshot
+        # path on a baked offline boot), so hashing to_json_string() keyed the warm pack and
+        # the baked boot APART — the 2026-07-24 verify failure (66 runtime recompiles on an
+        # image whose warm had converged). ``transformers_version`` churns the same way.
+        import json as _json
+
         from emmy import config as emmy_config
         from emmy.compiler.backend.pack import load_pack, pack_path
 
+        cfg_dict = model.config.to_dict()
+        for volatile in ("_name_or_path", "transformers_version"):
+            cfg_dict.pop(volatile, None)
+            for sub in cfg_dict.values():
+                if isinstance(sub, dict):
+                    sub.pop(volatile, None)
         pack_key = {
             "kind": "gen-split",
             "model": str(getattr(text_config, "model_type", "gen")),  # label + key; config-derived, path-stable
-            "config_sha": hashlib.sha1(model.config.to_json_string().encode()).hexdigest()[:16],
+            "config_sha": hashlib.sha1(_json.dumps(cfg_dict, sort_keys=True, default=str).encode()).hexdigest()[:16],
             "dtype": dtype_str,
             "decode_bucket": int(decode_bucket or 0),
             "max_tokens": int(max_tokens or 0),
@@ -375,6 +402,13 @@ class EmmyGenRunner:
         if loaded is not None:
             # "pack hit" is a contract: the gemma4 image's verify.sh greps docker logs for it.
             logger.info("[gen_runner] pack hit at %s — skipping trace + compile for %d program(s)", pack_at, len(loaded))
+            # A logger-independent hit marker: the container logging config swallows this
+            # module's INFO lines, so the image verify (docker/vllm-emmy-gemma4/verify.sh)
+            # asserts the pack hit on this file instead of a log grep.
+            try:
+                (pack_at / ".pack_hit").touch()
+            except OSError:
+                pass
             # The pack records which twin sets survived their compiles — honor that instead
             # of re-attempting a twin the save-time boot already saw fail.
             decode_ok = decode_ok and "L00.pre.decode" in loaded
@@ -693,9 +727,12 @@ class EmmyGenRunner:
         """Device twin of :meth:`forward_layer_pre`: ``hidden[T,H]`` CUDA → un-rotated
         ``(q, k, v)`` CUDA tensors. ``T <= decode_bucket`` rides the static decode twin
         (captured-replay); ``T == prefill_bucket`` — the FULL chunked-prefill step, the
-        width the twin was built for — rides the static chunk twin's exact grids; every
-        other width (an over-bucket decode batch, a partial tail chunk) rides the SYMBOLIC
-        program device-resident (``run_device_sym``) — no per-layer host numpy hop any way.
+        width the twin was built for — rides the static chunk twin's exact grids;
+        ``prefill_bucket < T <= prefill_bucket + rider_width`` — a full chunk step carrying
+        decode riders / a prompt tail — splits row-wise across the chunk twin + the decode
+        twin (see :attr:`rider_width`); every other width (an over-bucket decode batch, a
+        partial tail chunk) rides the SYMBOLIC program device-resident
+        (``run_device_sym``) — no per-layer host numpy hop any way.
         The twin boundary is EXACT equality, not ``<=``: the twin always computes
         ``prefill_bucket`` rows (pad → run → slice), so routing a T≈32 over-bucket decode
         step or a T≈450 tail chunk through it pays the full-bucket grids for a sliver of
@@ -708,6 +745,13 @@ class EmmyGenRunner:
             return tuple(self._pre_decode[layer].run_device([hidden]))
         if self._pre_prefill is not None and t == self._prefill_bucket:
             return tuple(self._pre_prefill[layer].run_device([hidden]))
+        if 0 < t - self._prefill_bucket <= self.rider_width:
+            import torch  # noqa: PLC0415
+
+            pb = self._prefill_bucket
+            head = self._pre_prefill[layer].run_device([hidden[:pb]])
+            tail = self._pre_decode[layer].run_device([hidden[pb:]])
+            return tuple(torch.cat(pair, dim=0) for pair in zip(head, tail, strict=True))
         return tuple(self._pre[layer].run_device_sym([hidden]))
 
     def forward_layer_post_device(self, layer, attn_out, residual):
@@ -721,7 +765,45 @@ class EmmyGenRunner:
             return self._post_decode[layer].run_device([attn_out, residual])[0]
         if self._post_prefill is not None and t == self._prefill_bucket:
             return self._post_prefill[layer].run_device([attn_out, residual])[0]
+        if 0 < t - self._prefill_bucket <= self.rider_width:
+            import torch  # noqa: PLC0415
+
+            pb = self._prefill_bucket
+            head = self._post_prefill[layer].run_device([attn_out[:pb], residual[:pb]])[0]
+            tail = self._post_decode[layer].run_device([attn_out[pb:], residual[pb:]])[0]
+            return torch.cat((head, tail), dim=0)
         return self._post[layer].run_device_sym([attn_out, residual])[0]
+
+    def post_attn_backing(self, layer: int, rows: int):
+        """A torch CUDA view of the M=1 post twin's ``attn_out`` INPUT backing (first ``rows``
+        rows), or ``None`` when the m1 tier is off / this layer fell back. vLLM's paged attention
+        writes into this view under ``EMMY_GEN_ALIAS_ATTN`` so :meth:`_Program.run_device`'s
+        prefix upload self-copy-skips — the seam copy drops out of the captured decode graph.
+        The backing is allocated once per program, so the pointer is stable across steps.
+
+        The wrap is CACHED per layer: ``torch.from_dlpack`` on a cupy array negotiates a stream
+        sync, which INVALIDATES an in-flight CUDA-graph capture — the view must be minted on an
+        uncaptured (warmup) step and only re-served under capture. An uncached layer asked for
+        mid-capture returns ``None`` (the caller falls back to the ordinary copy path)."""
+        if self._post_m1 is None:
+            return None
+        handle = self._post_m1[layer]
+        if handle is None:
+            return None
+        views = getattr(self, "_post_m1_attn_views", None)
+        if views is None:
+            views = self._post_m1_attn_views = {}
+        view = views.get(layer)
+        if view is None:
+            import torch  # noqa: PLC0415
+
+            if torch.cuda.is_current_stream_capturing():
+                return None
+            arr = handle.program.arrays.get("attn_out")
+            if arr is None:
+                return None
+            view = views[layer] = torch.from_dlpack(arr)
+        return view[:rows]
 
     def final_norm_device(self, hidden):
         """Apply the final norm on CUDA to a ``hidden[T,H]`` CUDA tensor."""

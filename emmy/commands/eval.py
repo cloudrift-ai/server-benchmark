@@ -264,10 +264,13 @@ def handle_eval_online(args) -> None:
 
 def handle_eval_golden(args) -> None:
     """``eval golden`` — the greedy pipeline pick vs recorded golden per config (the
-    actionable "did the pipeline reproduce the golden knobs?" view). Watch it while
-    iteratively tuning golden shapes one at a time (``emmy tune --golden
-    <name>``). Use ``eval offline`` / ``eval online`` for the offline-prior rank and
-    the online rank-under-prior diagnostics."""
+    actionable "did the pipeline reproduce the golden knobs?" view), then the pin-only
+    offer audit (:func:`_emit_offer_audit`: does each recorded entry realize on its
+    shape's UN-PINNED enumeration, or does the shape fall through the deploy's golden
+    floor?). Watch it while iteratively tuning golden shapes one at a time (``emmy tune
+    --golden <name>``). Use ``eval offline`` / ``eval online`` for the offline-prior
+    rank and the online rank-under-prior diagnostics. Exits 1 when the audit finds a
+    fall-through shape."""
     if args.in_model:
         if args.features or args.kernel:
             logger.error("--in-model audits whole serving twins — --features / --kernel apply only to the per-config check")
@@ -280,6 +283,8 @@ def handle_eval_golden(args) -> None:
         _emit_golden_features(args.kernel)
     configs = _golden_configs(args.kernel)
     _emit_prior_golden_check(configs, title=False)
+    if _emit_offer_audit(_offer_audit_configs(args.kernel)):
+        sys.exit(1)
 
 
 def _in_model_audit(model_filter: str | None) -> None:
@@ -908,6 +913,149 @@ def _emit_prior_golden_check(configs: list, *, title: bool = True, perf: dict | 
     entries.append(("total", total_lead, total_cells))
     lead_cols = [Col("kernel"), Col("m/t")] + ([Col("vs gold", "r")] if perf is not None else [])
     _emit_golden_table(lead_cols, entries, "knobs (found/golden)")
+
+
+def _offer_audit_configs(kernel_filter: str | None) -> list:
+    """The live card's golden entries that deploy through a fork — every kind except the
+    fork-nothing regression anchors (rope / embedding gathers never consult the golden tier),
+    optionally name-filtered. Broader than :func:`_golden_configs` (matmul-only): a pin-only
+    row on any forking kind — the 4090 ``attention.hd512.s4096`` split-KV row — falls through
+    the deploy's golden floor exactly like a matmul one."""
+    from emmy.compiler.pipeline.search.golden import EmbeddingGoldenConfig, RopeGoldenConfig, goldens_for_live_gpu  # noqa: PLC0415
+
+    configs = [g for g in goldens_for_live_gpu() if not isinstance(g, (RopeGoldenConfig, EmbeddingGoldenConfig))]
+    if kernel_filter:
+        configs = [g for g in configs if kernel_filter in g.name]
+    return configs
+
+
+def _emit_offer_audit(configs: list) -> bool:
+    """The pin-only offer audit — does each recorded golden realize on its shape's UN-PINNED
+    enumeration? Re-compiles every golden's own snippet greedily under the golden-audit seam
+    (``search/audit.audit_card``: deployable regime, the golden file's own card, no local tune
+    evidence — the enumeration is static given shape+context, so no GPU bench is needed) and
+    reads per-entry realizability off the verdict records:
+
+      PIN-ONLY      the entry's knobs realize only under an explicit pin (``EMMY_KNOBS`` /
+                    ``tune --golden``) — the un-pinned enumeration never offers them, so the
+                    entry never deploys. Legal as a documented lever while an OFFERED sibling
+                    floors the shape.
+      FALL-THROUGH  NO entry of the shape realizes: a deploy logs "no offered candidate
+                    realizes any of them" and falls past the golden tier (the 4090
+                    ``attention.hd512.s4096`` pathology: a 111 ms 0.03x kernel NaN-poisoning
+                    the downstream accuracy check) — the defect this audit catches at record
+                    time. Fix: record an offered deploy-floor sibling (re-tune un-pinned) or
+                    close the enumeration gap.
+
+    Fast-math entries audit under the pinned ``F16_MMA_F32_ACC`` gate (their deploy regime), so
+    each regime's rows judge against their own enumeration. This is the OWN-SNIPPET view — an
+    entry can realize here yet still drift inside a served model's fused graph (the 5090
+    ``mlp_down.m4096`` split-K row on the epilogue-fused twin); ``--in-model`` audits that
+    side. Returns True when any shape falls through (``eval golden`` exits 1 on it)."""
+    import logging as _logging  # noqa: PLC0415
+    from contextlib import nullcontext  # noqa: PLC0415
+
+    from emmy.commands.trace import graph_from_code  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.audit import COMPILE_FAIL, audit_card  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC  # noqa: PLC0415
+    from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs  # noqa: PLC0415
+
+    def label_of(name: str, fm: bool) -> str:
+        return f"{name} [fm]" if fm else name
+
+    def kstr(g) -> str:  # the entry's distinguishing knobs, empty families dropped
+        return ",".join(f"{k}={v}" for k, v in g.knobs.items() if v not in ("", None))
+
+    logger.info("")
+    logger.info("Offer audit — do the recorded knobs realize on the shape's un-pinned enumeration (own snippet, deployable regime)?")
+    cards: dict[tuple, list] = {}
+    for g in configs:
+        cards.setdefault((g.gpu_name, tuple(g.compute_cap)), []).append(g)
+    n_shapes = n_entries = n_pin = 0
+    fell: list[str] = []
+    # Silence the trace/compile chatter — at ERROR, not WARNING: the greedy tier's per-fork
+    # drift warning is this audit's MEASUREMENT (re-reported as FALL-THROUGH below), not news.
+    quiet = [_logging.getLogger(n) for n in ("emmy.compiler", "emmy.commands.trace")]
+    prev = [lg.level for lg in quiet]
+    for lg in quiet:
+        lg.setLevel(_logging.ERROR)
+    try:
+        for (gpu_name, cap), card_cfgs in sorted(cards.items()):
+            if len(cards) > 1:
+                logger.info("  --- %s (sm_%d%d) ---", gpu_name, cap[0], cap[1])
+            for fm in (False, True):
+                groups: dict[str, list] = {}
+                for g in card_cfgs:
+                    if g.fast_math == fm:
+                        groups.setdefault(g.name, []).append(g)
+                graphs: dict[str, object] = {}
+                for name, sub in groups.items():
+                    try:
+                        dyn = sub[0].dynamic_specs()
+                        shapes = build_torch_dynamic_shapes(parse_position_specs(dyn)) if dyn else None
+                        graphs[name], _, _ = graph_from_code(sub[0].snippet(), dynamic_shapes=shapes)
+                    except Exception as e:  # noqa: BLE001 — one shape's error shouldn't abort the audit
+                        logger.info("  %-44s  ERR  %s", label_of(name, fm), " ".join(f"{type(e).__name__}: {e}".split())[:100])
+                if not graphs:
+                    continue
+                with F16_MMA_F32_ACC.pinned("1") if fm else nullcontext():
+                    res = audit_card(graphs, gpu_name, cap)
+                for name, sub in groups.items():
+                    if name not in graphs:
+                        continue  # trace error, already reported
+                    recs = res.get(name, [])
+                    fail = next((r for r in recs if r["verdict"] == COMPILE_FAIL), None)
+                    if fail is not None:
+                        logger.info("  %-44s  ERR  %s", label_of(name, fm), " ".join(str(fail.get("error", "")).split())[:100])
+                        continue
+                    n_shapes += 1
+                    n_entries += len(sub)
+                    key = sub[0].shape_key()
+                    hits = [r for r in recs if r["key"] == key]
+                    if not hits:
+                        logger.warning(
+                            "  %-44s  NO-FORK  no fork of its own snippet keys %s — the golden tier was never "
+                            "consulted at this shape (key drift; `eval golden --in-model` is the deploy-side authority)",
+                            label_of(name, fm),
+                            key,
+                        )
+                        continue
+                    floor = next((r for r in hits if r["verdict"] == "MATCH"), None)
+                    for g in sub:
+                        if any(g not in (r["unrealized"] or ()) for r in hits):
+                            continue  # offered somewhere in its own snippet — deploys un-pinned
+                        n_pin += 1
+                        via = f"deploy floor: {floor['golden']} @ {floor['us']:g}us" if floor else "NO offered sibling"
+                        logger.info("  %-44s  PIN-ONLY  %.1fus  %s  (%s)", label_of(name, fm), g.emmy_us, kstr(g), via)
+                    if all(r["verdict"] == "DRIFT" for r in hits):
+                        fell.append(label_of(name, fm))
+                        logger.error(
+                            "  %-44s  FALL-THROUGH  none of the shape's %d recorded entr%s realizes un-pinned — a deploy "
+                            'logs "no offered candidate realizes any of them" and falls past the golden tier; record an '
+                            "offered deploy-floor sibling or fix the enumeration",
+                            label_of(name, fm),
+                            len(sub),
+                            "y" if len(sub) == 1 else "ies",
+                        )
+    finally:
+        for lg, lv in zip(quiet, prev, strict=True):
+            lg.setLevel(lv)
+    logger.info("")
+    if fell:
+        logger.info(
+            "  offer audit: %d shape(s) FALL THROUGH the golden floor (%s); %d/%d entries pin-only",
+            len(fell),
+            ", ".join(fell),
+            n_pin,
+            n_entries,
+        )
+    elif n_pin:
+        logger.info(
+            "  offer audit: %d/%d entries pin-only across %d shapes — every shape keeps an offered deploy floor", n_pin, n_entries, n_shapes
+        )
+    else:
+        logger.info("  offer audit: all %d entries realize un-pinned across %d shapes", n_entries, n_shapes)
+    return bool(fell)
 
 
 @dataclass(frozen=True)

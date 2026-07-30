@@ -6,9 +6,9 @@ and the env plumbing; :mod:`~emmy.compiler.pipeline.search.features` owns the fe
 module owns the concrete *declarations* AND the candidate-value generators — so the whole tunable
 surface (dimensions × values) is visible in one place. A rule that decides a knob imports it from here
 (``from emmy.compiler.pipeline.search.space import VECTORIZE_LOADS``) rather than declaring its
-own. ``knob.registry()`` still discovers them via ``knob._walk_modules`` (any package module with
-module-level ``Knob`` attributes is walked, and this module is imported at pipeline startup by the
-rules that consume its knobs). When adding a knob, declare it here and import it into the owning rule.
+own. Registration is construction (``Knob.__post_init__``), and ``knob.registry()`` imports this
+module before answering — so the registry is complete in any process that can ask, however little
+of the pipeline it loaded. When adding a knob, declare it here and import it into the owning rule.
 
 Scope note: this module holds the **static** space only — the declared dimensions and their bounded
 candidate grids. Per-kernel legality (the warp static-K divisibility check, the stage resolvers, coop
@@ -190,6 +190,15 @@ def map_tile_moves() -> list[str]:
 #                schedule / fork. The recognizer's nodification gate is the ``fuse`` half.
 #   PLACE@fold   downstream-fold absorption (flash vs separate softmax + P@V kernels)
 #   PLACE@tuple  sibling-fold tupling (online softmax vs two-pass stats)
+#   PLACE@fin    deferred split-reduce finalize placement — its own kernel (``cut``) vs inlined
+#                into every consumer's read sites (``fuse``, realized by
+#                ``lowering/tile/032_fuse_finalize``; kills the finalize launch + sync point)
+#   PLACE@cstat  the cone cut's bridged statistic placement — its own ``__stat`` kernel (``cut``,
+#                today's split; the statistic must leave the cone kernel to give the scale sweep
+#                its 2-D grid at prefill M) vs kept INSIDE the cone producer (``fuse``: the
+#                pre-split ``for m: [stat…, for k: …]`` LoopOp, whose re-recognition gives it the
+#                per-row coop-stat schedule — the M=1 case, where the separate stat kernel is
+#                pure launch overhead). Realized by ``020_cut_edge``.
 #
 # Vocabulary: ``auto`` (the built-in per-element default) / ``fuse`` / ``cut``. Precedence:
 # ``PLACE@<element>`` > bare ``PLACE`` > built-in ``auto`` (read via :func:`place_decision` /
@@ -206,8 +215,11 @@ PLACE = Knob(
     help="Structural placement of an intermediate edge — auto|fuse|cut, per element via "
     "PLACE@cone (producer-cone inlining) / PLACE@fold (flash vs multi-kernel attention) / "
     "PLACE@tuple (online softmax vs two-pass stats) / PLACE@stat (auto|fuse|sink — a norm's "
-    "row statistic staying local vs sunk into its producer's epilogue); bare PLACE pins every "
-    "eligible edge. Pin-only (never enumerated); read in lowering/tile/010_recognize.",
+    "row statistic staying local vs sunk into its producer's epilogue) / PLACE@fin (auto|cut|fuse "
+    "— a deferred split-reduce finalize as its own kernel vs inlined into its consumers) / "
+    "PLACE@cstat (auto|cut|fuse — the cone cut's bridged statistic as its own kernel vs kept in "
+    "the cone producer); bare PLACE pins every eligible edge. Pin-only (never enumerated); read "
+    "in lowering/tile/010_recognize.",
     off="",
 )
 
@@ -216,8 +228,15 @@ PLACE = Knob(
 # LOCAL to its kernel). Flipping a default is a behavior change gated on the validation suite, not
 # a spelling change. ``stat``'s alternative is ``sink`` (not ``cut``): the statistic reduce
 # migrates into the producer kernel's epilogue (``025_sink_row_reduce``) instead of splitting out.
-_PLACE_DEFAULTS = {"cone": "fuse", "fold": "fuse", "tuple": "fuse", "stat": "fuse"}
-_PLACE_VALUES = {"cone": ("fuse", "cut"), "fold": ("fuse", "cut"), "tuple": ("fuse", "cut"), "stat": ("fuse", "sink")}
+_PLACE_DEFAULTS = {"cone": "fuse", "fold": "fuse", "tuple": "fuse", "stat": "fuse", "fin": "cut", "cstat": "cut"}
+_PLACE_VALUES = {
+    "cone": ("fuse", "cut"),
+    "fold": ("fuse", "cut"),
+    "tuple": ("fuse", "cut"),
+    "stat": ("fuse", "sink"),
+    "fin": ("cut", "fuse"),
+    "cstat": ("cut", "fuse"),
+}
 
 
 def place_decision(element: str) -> str:
@@ -256,6 +275,18 @@ INTERLEAVE_LOADS = Knob(
     hints=(True,),  # on by default; not a search dimension — manual override only via the env var
     help="Sink each Load to just before its first SSA-consumer in flat compute blocks.",
     off=False,
+)
+
+#: The unroll budget — the max static loop trip count eligible for ``#pragma unroll``. Pin-only
+#: (``off`` defaults to ``_UNSET`` → never stamped / featurized / enumerated, so it can't perturb the
+#: search or the goldens): ``EMMY_UNROLL=0`` keeps every extent-driven loop **rolled** (compact,
+#: readable kernels — e.g. for a blog listing), a high value unrolls more. Unset → each call site's
+#: built-in cap (64 for an inner reduce, 128 for the flash KV fold, uncapped for the tensor-core
+#: K-chunk), so the default codegen is byte-identical. Consumed by ``lowering/kernel/_atom.unroll_ok``.
+UNROLL = Knob(
+    "UNROLL",
+    KnobType.INT,
+    help="Max static loop trip count to #pragma-unroll (the unroll budget); pin 0 to keep loops rolled. Unset = per-site cap.",
 )
 
 FAST_EXP = Knob(
@@ -490,5 +521,35 @@ def coop_reduce_moves() -> list[str]:
     the reduce goldens stay reachable. The wide ``b64``–``b512`` folds are the memory-bound
     normalizer band: a wide-K softmax / rms_norm saturates bandwidth only with a full-block coop
     row (``softmax.k2048`` wants ``b512`` — 2.6× over ``b32``). The scheduler's ``_coop_reduce_spec``
-    declines a ``b<n>`` wider than the row has work for, so enumerating them is safe on small K."""
-    return ["b4", "b8", "b16", "b32", "b64", "b128", "b256", "b512", "r2", "r4", "r2/b4"]
+    declines a ``b<n>`` wider than the row has work for, so enumerating them is safe on small K.
+    The ``b<n>t`` transposed band is the k-major-B matvec partition (warp lanes sweep the output
+    axis — the M=1 gemv tier's coalescing fix); ``_reduce_candidates`` gates it structurally
+    (plain contraction, 32-divisible inner free axis) AND by layout: the band is offered only on
+    k-major B, and plain ``b<n>`` only on K-contiguous B at the matvec tier. Measurement used to
+    decide the layout, but ShapeKey is layout-blind — cross-orientation golden/evidence rows tie,
+    and a cold/tied pick landed the band on the wrong operand three times in one day (10-100×
+    regressions; the WS5 cold-poison hardening). An env pin bypasses the gate (exploration)."""
+    return [
+        "b4",
+        "b8",
+        "b16",
+        "b32",
+        "b64",
+        "b128",
+        "b256",
+        "b512",
+        "r2",
+        "r4",
+        "r2/b4",
+        # The transposed band + its grid-split composites: a bare b<n>t is latency-bound on
+        # long-K matvecs (120 CTAs of serial K), so the deployable winners pair it with a
+        # g<w>k split (down g32k/b256t 75.7 us = the row-major floor on the k-major layout).
+        "b32t",
+        "b64t",
+        "b128t",
+        "b256t",
+        "g8k/b128t",
+        "g8k/b256t",
+        "g16k/b256t",
+        "g32k/b256t",
+    ]

@@ -20,6 +20,7 @@ from emmy.commands.compile import (
     resolve_golden_arg,
     resolve_tune_db,
     setup_pipeline_runtime,
+    validate_trace_adapter_args,
 )
 from emmy.commands.dataset_args import add_dataset_args, require_source
 from emmy.compiler.pipeline import TuningSearch
@@ -344,6 +345,7 @@ def handle_tune(args):
         return
 
     targets = _tune_targets(args)  # one shape, or the whole golden set — same loop below
+    validate_trace_adapter_args(args)
 
     from emmy.compiler.context import Context
     from emmy.compiler.pipeline.search import SearchDB
@@ -516,6 +518,7 @@ def _run_bench(args, bench_bundle, assembled, dump, *, html_dir) -> None:
         trace_args = {
             "code": args.code,
             "input": args.input,
+            "adapter": getattr(args, "adapter", "causal-lm"),
             "layer": args.layer,
             "seq_len": args.seq_len,
             "dynamic": getattr(args, "dynamic", None),

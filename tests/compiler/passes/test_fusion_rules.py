@@ -14,6 +14,7 @@ import numpy as np
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
+from emmy.compiler.ir.frontend.ir import LinearOp
 from emmy.compiler.ir.loop import Accum, Assign, LoopOp, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, ReduceOp
 from emmy.compiler.pipeline import Pipeline
@@ -129,6 +130,55 @@ def test_pointwise_chain_no_residual_copies():
     result = _fuse(_make_pointwise_chain())
     kernel = _kernel_nodes(result)[0]
     assert _count_copies(kernel.op.body) == 0
+
+
+# ===================================================================
+# Expensive pointwise producer → contraction
+# ===================================================================
+
+
+def _make_activation_linear(activation: str):
+    """``activation(x[M,K]) @ w[N,K].T`` with enough N to expose duplication."""
+    m, k, n = 2, 16, 16
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (m, k)), node_id="x")
+    g.add_node(InputOp(), [], Tensor("w", (n, k)), node_id="w")
+    g.add_node(ElementwiseOp(activation), ["x"], Tensor("activated", (m, k)), node_id="activated")
+    g.add_node(LinearOp(), ["activated", "w"], Tensor("out", (m, n)), node_id="out")
+    g.inputs, g.outputs = ["x", "w"], ["out"]
+    return g
+
+
+def _decompose_and_fuse(graph: Graph) -> Graph:
+    return Pipeline.build(["frontend/decomposition", "frontend/optimization", "loop/lifting", "loop/fusion"]).run(graph)
+
+
+def test_transcendental_is_not_duplicated_across_contraction_columns():
+    """Materialize exp once per (M,K), instead of recomputing it N times."""
+    result = _decompose_and_fuse(_make_activation_linear("exp"))
+    kernels = _kernel_nodes(result)
+    assert len(kernels) == 2
+    exp_kernels = [node for node in kernels if "exp" in _assign_fns(node.op.body)]
+    assert len(exp_kernels) == 1
+    assert exp_kernels[0].output.shape == (2, 16)
+
+
+def test_cheap_activation_still_fuses_into_contraction():
+    """The narrow transcendental guard does not become a blanket fusion barrier."""
+    result = _decompose_and_fuse(_make_activation_linear("negative"))
+    assert len(_kernel_nodes(result)) == 1
+
+
+def test_multisource_gated_activation_still_fuses_into_contraction():
+    """Gated activations remain evidence-controlled serving kernels."""
+    g = _make_activation_linear("exp")
+    g.add_node(InputOp(), [], Tensor("gate", (2, 16)), node_id="gate")
+    g.add_node(ElementwiseOp("multiply"), ["activated", "gate"], Tensor("gated", (2, 16)), node_id="gated")
+    g.nodes["out"].inputs[0] = "gated"
+    g.inputs.append("gate")
+
+    result = _decompose_and_fuse(g)
+    assert len(_kernel_nodes(result)) == 1
 
 
 # ===================================================================

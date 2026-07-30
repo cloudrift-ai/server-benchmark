@@ -93,12 +93,21 @@ def test_schedule_leaf_set_equals_catalog():
     # The per-cell tier offers serial + every coop/ILP move whose fold fits the reduce extent
     # (``_reduce_specs``'s ``coop <= extent and reg <= extent`` gate) — so the wide ``b64``–``b512``
     # folds drop out on this K=64 matmul, exactly as they would on any reduce narrower than the fold.
-    legal_coop = {m for m in coop_reduce_moves() if (p := ReducePlan.parse(m)).coop <= 64 and p.reg <= 64}
+    # Layout gates the bands too (WS5): this fixture's B is canonical ``B[k, n]``, so the plain
+    # ``b<n>`` coop moves (lanes interleaved along K — uncoalesced on k-major B) are refused and
+    # only the transposed ``b<n>t`` band (lanes sweep N) plus the reg-only ILP moves survive.
+    legal_coop = {
+        m for m in coop_reduce_moves() if (p := ReducePlan.parse(m)).coop <= 64 and p.reg <= 64 and (p.coop_transposed or p.coop == 1)
+    }
     assert {str(family_value(r, "REDUCE")) for r in percell} == {"", *legal_coop}
     assert all(family_value(r, "STAGE") == "" for r in percell), "per-cell has no operand slab to stage (decided-empty)"
     # Every tiled tile is the full (resolved stages) × (serial + split widths) product, the split
     # rows carrying the SAME stage spellings as the unsplit rows (staging composes with split-K).
+    # Each DEFERRED-KERNEL split (``g<w>k`` — a partial + finalize pair) additionally mirrors a
+    # ``PLACE@fin=fuse`` sibling (the finalize-inline offer, evidence-only), so those widths count
+    # twice.
     n_reduces = 1 + len(splitk_moves(warp=False))
+    n_fin_mirrors = sum(1 for m in splitk_moves(warp=False) if ReducePlan.parse(m).finalize == "kernel")
     for tile_spec, tiled in by_tile.items():
         if not tile_spec:
             continue
@@ -119,7 +128,7 @@ def test_schedule_leaf_set_equals_catalog():
         # the flat ``""`` and the grouped ``gm8`` siblings, crossing the whole (stage × reduce)
         # product; the fifth factor of the catalog.
         assert {r.get("RASTER") for r in tiled} == set(raster_moves()), f"{tile_spec}: RASTER family incomplete"
-        assert len(tiled) == len(stages) * n_reduces * len(raster_moves()), f"{tile_spec}: {len(tiled)} rows"
+        assert len(tiled) == len(stages) * (n_reduces + n_fin_mirrors) * len(raster_moves()), f"{tile_spec}: {len(tiled)} rows"
     # This matmul is BATCHED (a leading literal batch dim in A's gmem index). The leading dim is
     # tile/K-invariant, so TMA boxes it as an extent-1 dim with the operand's own origin expr
     # (``_tma_operand_rank_ok`` — the flash K/V convention extended to the matmul tiers; the gemma
@@ -224,6 +233,10 @@ def test_bare_reduce_forks_the_coop_catalog():
     assert rows, "no fork was offered for the bare reduce"
     reduces = [str(family_value(r, "REDUCE")) for r in rows]
     assert reduces[0] == ""  # 2048 free cells > _FREE_CAP: the conservative heuristic pick leads
+    # This bare reduce meets the transposed band's structural gate (scalar tail, no
+    # shared-row stage, static K, 32-divisible free grid), so the FULL catalog is offered —
+    # bt/g-composites included. Rows that fail the gate (softmax/rms shapes) drop the band;
+    # that arm is covered by the schedule tests, not this catalog assertion.
     assert set(reduces) == {"", *coop_reduce_moves()}, f"catalog rows missing: {reduces}"
 
 

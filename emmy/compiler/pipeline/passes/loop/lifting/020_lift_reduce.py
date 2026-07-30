@@ -23,7 +23,7 @@ PATTERN = [Pattern("root", ReduceOp)]
 def rewrite(match: Match, root: Node) -> Graph | None:
     graph = match.graph
     src_id = root.inputs[0]
-    src_node = graph.nodes.get(src_id)
+    src_node = graph.producer(src_id)
     if src_node is None:
         raise RuleSkipped(f"reduce input {src_id!r} no longer in graph")
     src_shape = tuple(src_node.output.shape)

@@ -111,8 +111,8 @@ def rewrite(match: Match, producer: Node) -> Graph | None:
     # first, then copies, then consumers — ``add_node`` validates inputs exist.
     frag_ids = {nid for *_r, nid in copy_specs} | {nid for *_r, nid in consumer_specs}
     for ext in dict.fromkeys(r for r in referenced if r not in frag_ids):
-        e = graph.nodes[ext]
-        frag.add_node(InputOp(), [], Tensor(ext, e.output.shape, e.output.dtype), node_id=ext)
+        e_t = graph.buffer(ext)
+        frag.add_node(InputOp(), [], Tensor(ext, e_t.shape, e_t.dtype), node_id=ext)
     for op, inputs, out_t, nid in (*copy_specs, *consumer_specs):
         frag.add_node(op, inputs, Tensor(out_t.name, out_t.shape, out_t.dtype), node_id=nid)
     frag.outputs = list(output_map.values())

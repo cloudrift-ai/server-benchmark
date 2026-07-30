@@ -37,6 +37,16 @@ How to comply:
 - **When generalizing an existing rule, normalize its incidental divergences** (one dtype rule, one index rule)
   and name the behavioral deltas explicitly in the commit — don't preserve two behaviors behind one entry point.
 
+Loop fusion's profitability guard follows the same structural rule. `loop/fusion/010_merge_loop_ops` counts aggregate
+arithmetic and reads, and separately counts transcendental executions. The separate count prevents an expensive
+pointwise producer such as GELU's `tanh`, originally evaluated once per `(M,K)` element, from moving under a
+contraction's `N` loop merely because the contraction's much larger cheap-FMA count hides that duplication. Flash
+attention is the structural exception: a merged softmax-then-P@V offer deliberately streams `exp(score)` without
+materializing the probability matrix, so the tile recognizer owns that composite and the generic transcendental
+brake does not split it. The automatic brake is also limited to unary/single-source activation cones. A multi-source
+gated activation such as GeGLU/SwiGLU remains an evidence-controlled placement choice, preserving its GPU golden
+coverage until that entire cone has been measured.
+
 ## Resolve the hardware-atom binding once, structurally, at the tile level
 
 The same invariant applies *across* the tile→kernel boundary: the kernel materializer must not re-recognize structure
@@ -153,8 +163,9 @@ dimensions, with their own re-entry contracts — keep them apart:
   buffer, and A's complete-value store site (a split-K FINALIZE or pointwise sweep — never an atomic partial, whose
   per-partition values are incomplete) gains the term re-evaluated on each just-stored value plus a `RowAccum`
   (a hierarchical warp-shfl + smem block fold + one `atomicAdd` per block, zero-init'd per launch through the
-  ordinary `zero_outputs` memset machinery). `T__sq` is an `AuxOutputOp` graph node (no launch of its own — the
-  producer's launch writes it); B re-emits as an un-mapped `LoopOp` so `010_recognize` peels BOTH the row and sweep
+  ordinary `zero_outputs` memset machinery). `T__sq` is output slot 1 of the producer node itself (a true
+  multi-output node — planned/allocated per buffer, consumed through an ordinary buffer edge; the old
+  `AuxOutputOp` sentinel is retired); B re-emits as an un-mapped `LoopOp` so `010_recognize` peels BOTH the row and sweep
   axes free — the whole point: the grid-per-row latency-bound stat kernel becomes a wide 2-D pointwise sweep. The
   structural probe (`_sink.bind_sinkable_stat`) gates in the negative: the reduce's flat address in T must be affine
   with reduce coefficient 1 and mixed-radix row coefficients (so `row = flat / N` is a bijection — the per-head
@@ -168,6 +179,17 @@ dimensions, with their own re-entry contracts — keep them apart:
   computation, its K partitioned across CTAs into a partial + finalize. It runs AFTER its decision — the `g` row was
   chosen FOR the split form — so the partial carries the decided knob row verbatim and the finalize is deliberately
   `_mapped`: both **opt out** of re-recognition, because re-entering would discard the very decision being realized.
+- **`032_fuse_finalize`** realizes `PLACE@fin=fuse` — the deferred `g<w>k` finalize inlines into its CONSUMERS'
+  read sites instead of launching (the M=1 decode twins' split-chain closer: each finalize is ~2-3 µs of serialized
+  launch + sync around a fold that is a handful of f32 adds per cell). Every consumer `Load` of the finalize output
+  is replaced by the finalize's own body σ-substituted to that load's index (per-site `__fin<n>` rename; redundant
+  per-read recompute, no barrier — each thread folds exactly the cells it reads). Anchored on the consumer; the
+  finalize node dissolves via the splice's orphan removal once its last reader is rewired, and the firing that
+  removes the last EDGE consumer also inlines the remaining body-level readers in place (a `030` finalize's sweep
+  operands are body refs without edges). Gates: not a graph output, every reader inlinable (flat `Map` / plain
+  `Reduction` shapes; a `Contraction` reader bails), single-component workspace (flash's `(m,l,O)` stays a kernel).
+  Default `cut` (evidence-only: golden rows / `PLACE@fin` pin opt sites in); `030` threads the stamp onto the
+  finalize tile via `_fin_knobs`.
 
 Same fragment idiom, inverted re-entry semantics, different decision altitude (placement: "should this be one
 kernel at all" vs schedule: "how does this kernel run"). The shared fixpoint is what lets them compose without

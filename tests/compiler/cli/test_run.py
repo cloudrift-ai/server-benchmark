@@ -1250,13 +1250,9 @@ def test_write_ab_json_greedy_bench_fail_and_record_knobs(tmp_path):
     import json
     from types import SimpleNamespace
 
-    import emmy.compiler.pipeline.knob as knob_mod
-    import emmy.compiler.pipeline.search.space  # noqa: F401 — the schedule codec declarations
     from emmy.commands.run import _GoldenBench, _write_ab_json
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.cuda.ir import CudaOp
-
-    knob_mod.reset_registry()  # the lazy registry may predate the space import above
 
     def graph_with(knobs):
         g = Graph()
@@ -1370,8 +1366,12 @@ def test_write_ab_json_greedy_isolated_block(tmp_path):
     args = SimpleNamespace(
         json=str(tmp_path / "ab.json"), code="torch.matmul(a, b)", input=None, ir=None, golden=None, dynamic=None, warmup=1, iters=1
     )
-    _write_ab_json(args, {}, greedy, bench, [], greedy_iso=iso)
+    results = {"Eager PyTorch": 100.0, "torch.compile": 50.0, "Emmy": 25.0}
+    _write_ab_json(args, results, greedy, bench, [], greedy_iso=iso)
     rec = json.loads((tmp_path / "ab.json").read_text())
+    assert rec["backends"]["Eager PyTorch"] == {"latency_us": 100.0, "speedup_vs_eager": 1.0}
+    assert rec["backends"]["torch.compile"]["speedup_vs_eager"] == 2.0
+    assert rec["backends"]["Emmy"]["speedup_vs_eager"] == 4.0
     assert rec["greedy"]["total_us"] == 500.0
     iso_rec = rec["greedy"]["isolated"]
     assert iso_rec["status"] == "ok" and iso_rec["total_us"] == 400.0

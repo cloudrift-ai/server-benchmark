@@ -421,6 +421,17 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
             bt = None
         elif plan is None or (plan.coop <= 1 and plan.reg <= 1):
             state, fold, close, bt = [], with_store([*_emit(op, ctx).body, *tail], ctx.output, grid, out_val), [], None
+        elif plan.coop_transposed:
+            # The ``b<n>t`` k-major matvec partition: the innermost output axis splits into a
+            # shrunk ``<out>_blk`` grid axis (×32) + the 32-wide ``n_lane`` thread axis (with
+            # ``k_co`` between them), so B loads coalesce across lanes. The emitted body's
+            # output-var references were σ-substituted to ``blk·32 + n_lane`` inside.
+            state, fold, close, lanes_axes = _tile_reduce_axis_transposed(op, plan, ctx, tail, out_val)
+            out_ax = next(a for a in reversed(grid) if not (a.extent.is_static and a.extent.as_static() == 1))
+            blk = Axis(name=f"{out_ax.name}_blk", extent=out_ax.extent.ceil_div(32), source_axis=out_ax)
+            lead = tuple(blk if a.name == out_ax.name else a for a in grid)
+            t = replace(t, axes=lanes_axes)
+            bt = plan.coop
         else:
             state, fold, close, lane = _tile_reduce_axis(op, plan, ctx, tail, out_val)
             t = replace(t, axes=(lane,)) if lane is not None else t
@@ -559,7 +570,9 @@ def _restage_loads(stmts: list[Stmt], buf: str, smem: str, n_grid: int, grid_var
     return out
 
 
-def emit_combine(carrier, t: str, n_threads: int, *, warp_size: int = 32, segmented: bool = False) -> list[Stmt]:
+def emit_combine(
+    carrier, t: str, n_threads: int, *, warp_size: int = 32, segmented: bool = False, inner: tuple[str, int] | None = None
+) -> list[Stmt]:
     """Build the cross-thread combine of a cooperative reduce ``carrier`` (a :class:`Carrier`)
     over ``n_threads`` cooperating threads, reassigning the carried state in place.
 
@@ -581,13 +594,27 @@ def emit_combine(carrier, t: str, n_threads: int, *, warp_size: int = 32, segmen
     state_b = carrier.state_b
     prog = carrier.combine_states
     dtype = next((a.dtype for a in prog if a.dtype is not None), None) or F32
-    folds = ReduceStage(Level.BLOCK, n_threads).combine(warp_size=warp_size, segmented=segmented)
 
     from emmy.compiler.backend.cuda.dtype import cuda_name as _cuda_name  # noqa: PLC0415
 
     smem_c = _cuda_name(dtype)
     bufs = tuple(f"{st}_smem" for st in state)
-    out: list[Stmt] = []
+    if inner is not None:
+        # The transposed (``b<n>t``) combine: threads sharing an output lane sit ``scale``
+        # apart in tid, so a shuffle would fold DIFFERENT outputs — always the segment-indexed
+        # smem tree: ``n_threads`` k-slices × ``scale`` lanes per slab, each lane's tree
+        # halving its own segment (``TreeHalve.inner``).
+        iv, scale = inner
+        idx = BinaryExpr("+", BinaryExpr("*", Var(t), Literal(scale, "int")), Var(iv))
+        out: list[Stmt] = [Smem(name=b, extents=(n_threads * scale,), dtype=smem_c) for b in bufs]
+        out += [Write(output=b, index=(idx,), value=st) for b, st in zip(bufs, state, strict=True)]
+        out.append(Sync())
+        out.append(
+            TreeHalve(bufs=bufs, state=state, state_b=state_b, combine_states=prog, length=n_threads, tid_var=t, dtype=dtype, inner=inner)
+        )
+        return out
+    folds = ReduceStage(Level.BLOCK, n_threads).combine(warp_size=warp_size, segmented=segmented)
+    out = []
     for i, fold in enumerate(folds):
         if fold is Fold.SHFL:
             # The lane-level butterfly: warp-wide when followed by a cross-warp SMEM stage
@@ -754,6 +781,68 @@ def _realize_chain(op, ctx: Ctx, tail: tuple, pv: Contraction) -> tuple[list[Stm
         idx = tuple(Literal(j, "int") if (isinstance(e, Var) and e.name == axis) else e for e in base_index)
         close.append(Write(output=ctx.output, index=idx, value=val))
     return [], fold, close
+
+
+def _tile_reduce_axis_transposed(
+    op: Reduction, plan, ctx: Ctx, tail: tuple, out_val: str
+) -> tuple[list[Stmt], list[Stmt], list[Stmt], tuple[Axis, ...]]:
+    """The ``b<n>t`` (transposed) cooperative reduce — the k-major-B matvec partition: 32
+    ``n_lane`` threads (innermost) sweep the OUTPUT axis so B loads coalesce across lanes at
+    every k step, and ``coop/32`` ``k_co`` slices ride the upper thread bits. The emitted body
+    keeps referencing the original output axis var — one σ substitutes it with
+    ``blk·32 + n_lane`` (the caller rebinds the shrunk ``<out>_blk`` grid axis). The combine is
+    the segment-indexed smem tree (``emit_combine(inner=…)`` — never a shuffle: adjacent lanes
+    hold different outputs); the projection stores guard on ``k_co == 0``, each lane writing its
+    own cell. Unsupported here (the enumeration must not offer ``t`` on them): shared-row
+    ``sync`` staging, distributed full-row projections (a ``Loop`` in the tail)."""
+    grid = ctx.grid
+    coop, reg = plan.coop, plan.reg
+    lanes_n = 32
+    k_ways = coop // lanes_n
+    assert coop % lanes_n == 0 and k_ways >= 1, f"b{coop}t needs a multiple of {lanes_n}"
+    assert not (ctx.stage is not None and ctx.stage.smem), "transposed coop cannot ride shared-row staging"
+    out_ax = next(a for a in reversed(grid) if not (a.extent.is_static and a.extent.as_static() == 1))
+
+    (rloop,) = _emit(op, ctx).body
+    carrier = rloop.carrier
+    axis = rloop.axis
+    stride = k_ways * reg
+    masked = reg > 1 and not (axis.extent.is_static and axis.extent.as_static() % stride == 0)
+
+    n_lane = Axis(name=f"{out_ax.name}_ln", extent=lanes_n)
+    k_co = Axis(name=f"{axis.name}_co", extent=k_ways) if k_ways > 1 else None
+    start = Var(k_co.name) if k_co is not None else Literal(0, "int")
+    blk_name = f"{out_ax.name}_blk"
+    subst = Sigma({out_ax.name: BinaryExpr("+", BinaryExpr("*", Var(blk_name), Literal(lanes_n, "int")), Var(n_lane.name))})
+    ident = lambda n: n  # noqa: E731
+
+    nested_axes = {lp.axis.name for lp in rloop.body.iter_of_type(Loop, StridedLoop)}
+    defined = {nm for s in rloop.body.iter() for nm in s.defines()}
+    expr_external = {v for s in rloop.body.iter() for e in s.exprs() for v in e.free_vars()} - defined
+    protected = frozenset(
+        {axis.name, *(ax.name for ax in grid), blk_name, n_lane.name, *axis.extent_expr().free_vars(), *nested_axes, *expr_external}
+        | ({k_co.name} if k_co is not None else set())
+    )
+    twisted = carrier.twist.family is not None and carrier.twist.family != "id"
+    pivot = carrier.twist.channels[0] if twisted else None
+    stream_identity = (str(pivot.term), pivot.fold.identity) if twisted else None
+    copies: list[Stmt] = []
+    for r in range(reg):
+        copies.extend(_replicate(rloop.body, r, k_ways, axis, masked, protected, stream_identity))
+    strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=rloop.unroll)
+    strided = strided.rewrite(ident, subst)
+
+    merge: list[Stmt] = [carrier.as_state_merge(tuple(f"{n}__r{r}" for n in carrier.state.names)) for r in range(1, reg)]
+    if k_co is not None:
+        merge += emit_combine(carrier, t=k_co.name, n_threads=k_ways, inner=(n_lane.name, lanes_n))
+
+    tail_stmts = with_store(list(tail), ctx.output, grid, out_val)
+    tail_stmts = [s.rewrite(ident, subst) for s in tail_stmts]
+    if k_co is not None:
+        tail_stmts = [Cond(cond=BinaryExpr("==", Var(k_co.name), Literal(0, "int")), body=tuple(tail_stmts))]
+
+    lanes_axes = ((k_co,) if k_co is not None else ()) + (n_lane,)
+    return [], [strided, *merge], tail_stmts, lanes_axes
 
 
 def _tile_reduce_axis(op: Reduction, plan, ctx: Ctx, tail: tuple, out_val: str) -> tuple[list[Stmt], list[Stmt], list[Stmt], Axis | None]:

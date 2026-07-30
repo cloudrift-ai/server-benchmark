@@ -169,6 +169,8 @@ def _gen_graph_args(vllm_args: list[str]) -> list[str]:
 
 
 def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: bool = False) -> list[str]:
+    from emmy import config as emmy_config  # noqa: PLC0415
+
     cmd = ["vllm", "serve", model, "--runner", "generate" if generate else "pooling"]
     if not stock and generate:
         cmd += _gen_graph_args(vllm_args)
@@ -182,22 +184,26 @@ def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: 
         else:
             cmd += ["--dtype", "float16"]
         # The flattened width (sum of newly-scheduled tokens per step) must stay within
-        # DYNAMIC_DIM_MAX (= _DEFAULT_MAX_MODEL_LEN). vLLM's default max_num_batched_tokens
-        # (e.g. 8192 on a big GPU) would trip the model's startup bound, so cap it here.
+        # DYNAMIC_DIM_MAX (= _DEFAULT_MAX_MODEL_LEN) PLUS the decode bucket: the chunk-twin
+        # + decode-twin row split covers the bucket-sized headroom, so a full chunk step
+        # keeps carrying its decode riders (and the previous prompt's tail) instead of
+        # freezing every decoding request per chunk. vLLM's default max_num_batched_tokens
+        # (e.g. 8192 on a big GPU) would trip the model's startup bound, so default it to
+        # the covered maximum here.
+        bucket = emmy_config.gen_decode_bucket()
+        top = int(_DEFAULT_MAX_MODEL_LEN) + max(bucket, 0)
         if _has_flag(vllm_args, "--max-num-batched-tokens"):
             mnbt = _flag_value(vllm_args, "--max-num-batched-tokens", "")
-            if mnbt.isdigit() and int(mnbt) > int(_DEFAULT_MAX_MODEL_LEN):
-                raise ValueError(f"--max-num-batched-tokens {mnbt} exceeds the dynamic-dim cap ({_DEFAULT_MAX_MODEL_LEN}); use it or lower")
+            if mnbt.isdigit() and int(mnbt) > top:
+                raise ValueError(f"--max-num-batched-tokens {mnbt} exceeds the dynamic-dim cap + decode bucket ({top}); use it or lower")
         else:
-            cmd += ["--max-num-batched-tokens", _DEFAULT_MAX_MODEL_LEN]
+            cmd += ["--max-num-batched-tokens", str(top)]
     elif not stock:
         cmd += _PLUGIN_ARGS
         # Batched symbolic-seq mode pays the FULL batch-cap cost per step (dummy rows pad
         # the group), so a step must be allowed to FILL the batch: without this, vLLM's
         # default max_num_batched_tokens (2048) schedules ~4 sequences per step into a
         # 32-row program — 28 rows of pure waste (measured 0.63 req/s vs 2.33 per-seq).
-        from emmy import config as emmy_config  # noqa: PLC0415
-
         if emmy_config.serving_batched() and not _has_flag(vllm_args, "--max-num-batched-tokens"):
             seqs_raw = _flag_value(vllm_args, "--max-num-seqs", "256")
             len_raw = _flag_value(vllm_args, "--max-model-len", _DEFAULT_MAX_MODEL_LEN)

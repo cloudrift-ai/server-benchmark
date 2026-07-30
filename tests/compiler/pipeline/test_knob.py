@@ -623,17 +623,34 @@ def test_knob_pinned_scopes_and_restores(monkeypatch):
     assert F16_MMA_F32_ACC.raw() == "0", "the pin must restore on the exception path"
 
 
+def test_registry_complete_in_a_bare_process():
+    """Declaring a ``Knob`` IS registering it, and ``registry()`` imports ``space.py`` itself — so
+    a process that loads nothing but the featurizer still sees every canonical declaration. The
+    retired module-scan registry silently dropped registry-dispatched features (``D_wspec_warps``)
+    in exactly such processes (offline fit/eval tooling) and cached the empty view for the process
+    lifetime."""
+    import subprocess
+    import sys
+
+    code = (
+        "from emmy.compiler.pipeline.search.features import knob_features\n"
+        "f = knob_features({'WSPEC': 'p2', 'RASTER': 'gm8'})\n"
+        "assert f['D_wspec_warps'] == 2.0, f\n"
+        "assert f['D_raster_group'] == 8.0, f\n"
+        "from emmy.compiler.pipeline.knob import get\n"
+        "assert get('UNROLL') is not None  # declared in space.py, no pass module loaded\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
 def test_stamp_schedule_families_fills_absent_families_with_off():
     """The recording view stamps EVERY schedule codec family explicitly: realized values pass
     through, and a family the compile never stamped (a target-gated pass — ``WSPEC`` off
     Hopper/Blackwell) gains its registered OFF spelling. A recorded entry that omits a family
     leaves it to the planner's replay-time fill, which drifts as the planner evolves (the
     recurring unpinned-``REDUCE`` phantom-regression class) — this is the recorder-side fix."""
-    # The real registry: the schedule codecs are declared in search/space.py.
-    import emmy.compiler.pipeline.search.space  # noqa: F401
     from emmy.compiler.pipeline.knob import stamp_schedule_families
 
-    knob_mod.reset_registry()
     out = stamp_schedule_families({"TILE": "a:mma_m16n8k16_f16_f32/w1x1/f1x1", "REDUCE": "g2k", "STAGE": "", "S_ext_free_prod": 64.0})
     # Realized values pass through; the struct stamp is dropped (not a tuning decision).
     assert out["TILE"] == "a:mma_m16n8k16_f16_f32/w1x1/f1x1" and out["REDUCE"] == "g2k"

@@ -21,6 +21,11 @@ none). ``forward`` brackets each vLLM attention call with two emmy replays (``pr
 
 Numpy host I/O at the runner boundary (the per-layer host-sync interleave — Top risk #1);
 the device zero-copy path is the Phase-4 optimization.
+
+Speculative decoding (MTP drafter, e.g. gemma-4-assistant) works: vLLM's drafter reaches into
+``target.model.embed_tokens`` to share the target's raw embedding with the draft head, so this
+class exposes a thin ``.model`` shim over the tied embed/``lm_head`` weight the runner gathers from
+(built only when a draft is configured). See ``_SharedRawEmbedding``.
 """
 
 from __future__ import annotations
@@ -30,7 +35,13 @@ import logging
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.attention import (
+    _encode_layer_name,
+    unified_attention_with_output,
+    unified_kv_cache_update,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -82,6 +93,67 @@ def _build_rotaries(config, runner, n_layers, max_position):
     return [_build_rotary(config, runner.layer_meta(0)[0], max_position)] * n_layers
 
 
+class _SharedRawEmbedding(nn.Module):
+    """The token embedding vLLM's speculative-decoding drafter shares off the target model.
+
+    vLLM's Gemma-4 MTP drafter reaches into ``target.model.embed_tokens``, adopts it as its OWN
+    embedding, and then applies a ``* sqrt(hidden)`` normalizer itself (``Gemma4MultiTokenPredictor``)
+    — the same ``embed_scale`` the emmy runner folds into its gather table — so this module must
+    return the **raw, unscaled** table rows, exactly as stock vLLM's ``VocabParallelEmbedding`` does.
+
+    It carries no weights of its own: gemma-4 ties the embedding to ``lm_head``, and on that tied path
+    the emmy runner already gathers from the same ``lm_head.weight`` tensor (``adopt_embed_table``), so
+    backing the drafter here shares ONE device table with the target rather than copying ~2 GiB. The
+    forward guards that identity: if the runner is not gathering from this same raw tensor (an untied
+    target, where ``lm_head`` is the distinct output head), it raises rather than silently feeding the
+    draft head an embedding the target never uses.
+    """
+
+    def __init__(self, model: EmmyGenModel):
+        super().__init__()
+        # Not a registered submodule (``object.__setattr__``): the owner already owns this module,
+        # so registering it back would make ``named_modules`` recurse through a cycle.
+        object.__setattr__(self, "_model", model)
+
+    @property
+    def weight(self) -> torch.Tensor:
+        return self._model.lm_head.weight
+
+    def forward(self, input_ids):
+        # Pure gather, no guards: vLLM torch.compiles the drafter's forward (this module included),
+        # and dynamo cannot trace ``data_ptr()`` — the tie check runs once, eagerly, in
+        # ``validate_tied`` at the end of ``EmmyGenModel.load_weights``.
+        return F.embedding(input_ids.long(), self.weight)
+
+    def validate_tied(self):
+        """One-time eager check that the shared head weight IS the table the runner gathers from.
+
+        Same storage, not object identity: ``Tensor.data`` yields a fresh view each access, and the
+        runner captured its own view of this tensor at ``adopt_embed_table`` time. Called from
+        ``load_weights`` (after the adopt hand-off), never from the compiled forward."""
+        w = self.weight
+        dev = getattr(self._model.runner, "_embed_weight_dev", None)
+        if dev is None or dev.data_ptr() != w.data_ptr():
+            raise RuntimeError(
+                "EmmyGenModel MTP shim: the target's lm_head weight is not the tied embedding table "
+                "the runner gathers from, so sharing it as the draft head's embedding would corrupt "
+                "draft tokens. Speculative decoding needs a tied-embedding target (e.g. gemma-4)."
+            )
+
+
+class _EmmyTargetInner(nn.Module):
+    """The ``.model`` attribute vLLM's spec-decode drafter expects on a target model.
+
+    Stock vLLM model classes nest their trunk under ``.model`` and the drafter reads
+    ``target.model.embed_tokens`` from it to share the embedding. EmmyGenModel keeps its trunk
+    (embedding included) inside the emmy runner, not a vLLM-style ``.model`` submodule, so this thin
+    container re-exposes just that one attribute — the shim's whole compatibility surface."""
+
+    def __init__(self, embed_tokens: nn.Module):
+        super().__init__()
+        self.embed_tokens = embed_tokens
+
+
 class EmmyGenModel(nn.Module):
     def __init__(self, *, vllm_config, prefix: str = ""):
         super().__init__()
@@ -107,28 +179,47 @@ class EmmyGenModel(nn.Module):
         from emmy.compiler.trace.dynamic import DYNAMIC_DIM_MAX
 
         max_batched = vllm_config.scheduler_config.max_num_batched_tokens
-        if max_batched and max_batched > DYNAMIC_DIM_MAX:
+        decode_bucket = emmy_config.gen_decode_bucket()
+        # RIDER HEADROOM: mnbt may sit up to decode_bucket ABOVE the dynamic-dim cap — the
+        # chunk-twin + decode-twin row SPLIT covers T in (DYNAMIC_DIM_MAX, DYNAMIC_DIM_MAX
+        # + bucket] (``EmmyGenRunner.rider_width``), so a full chunk step keeps carrying
+        # its decode riders instead of freezing every decoding request for the chunk.
+        rider = max(decode_bucket, 0)
+        if max_batched and max_batched > DYNAMIC_DIM_MAX + rider:
             raise ValueError(
-                f"max_num_batched_tokens={max_batched} exceeds DYNAMIC_DIM_MAX ({DYNAMIC_DIM_MAX}); "
-                f"serve with --max-num-batched-tokens {DYNAMIC_DIM_MAX} or lower"
+                f"max_num_batched_tokens={max_batched} exceeds DYNAMIC_DIM_MAX + decode_bucket "
+                f"({DYNAMIC_DIM_MAX} + {rider}); serve with --max-num-batched-tokens {DYNAMIC_DIM_MAX + rider} or lower"
             )
 
-        # ``max_tokens`` sizes the symbolic programs' device buffers at the widest step vLLM
-        # can schedule — the device-resident PREFILL path (``run_device_sym``) needs fixed
-        # capacity buffers; without it prefill falls back to the per-layer host numpy hops.
-        # The prefill-chunk twin defaults to the mnbt width (chunked prefill fills steps to
-        # it whenever the queue is deep); EMMY_GEN_PREFILL_BUCKET=0 disables, an explicit
-        # value overrides.
+        # ``max_tokens`` sizes the symbolic programs' device buffers at the widest step they
+        # serve (the dynamic-dim cap; wider steps are the split's) — the device-resident
+        # PREFILL path (``run_device_sym``) needs fixed capacity buffers; without it prefill
+        # falls back to the per-layer host numpy hops. Capacity is pinned at the CAP, not at
+        # mnbt: the pack key carries `max_tokens`/`prefill_bucket`, so tying them to the
+        # scheduler knob would recompile the whole program set (and cold-build twins at
+        # unseeded golden widths) every time mnbt is tuned per lane. The prefill-chunk twin
+        # defaults to that same width (chunked prefill fills steps to mnbt whenever the
+        # queue is deep); EMMY_GEN_PREFILL_BUCKET=0 disables, an explicit value overrides.
+        capacity = DYNAMIC_DIM_MAX if max_batched else None
         prefill_bucket = emmy_config.gen_prefill_bucket()
         if prefill_bucket < 0:
-            prefill_bucket = max_batched or 0
+            prefill_bucket = capacity or 0
         self.runner = EmmyGenRunner.create(
             model_id=mc.model,
             dtype_str=_trunk_dtype_str(mc.dtype),
-            decode_bucket=emmy_config.gen_decode_bucket(),
-            max_tokens=max_batched or None,
+            decode_bucket=decode_bucket,
+            max_tokens=capacity,
             prefill_bucket=prefill_bucket,
         )
+        if max_batched and max_batched > max(self.runner.prefill_capacity, self.runner.prefill_bucket + self.runner.rider_width):
+            # The over-cap headroom was granted on the promise of the split; if the twin
+            # families it needs failed to build, an over-wide step would silently take the
+            # per-layer host numpy path — refuse the boot instead.
+            raise ValueError(
+                f"max_num_batched_tokens={max_batched} needs the chunk+decode twin split, which is "
+                f"unavailable (prefill_bucket={self.runner.prefill_bucket}, rider_width={self.runner.rider_width}); "
+                f"serve with --max-num-batched-tokens {self.runner.prefill_capacity} or lower"
+            )
         n_layers = self.runner.num_layers
 
         sliding_window = getattr(config, "sliding_window", None)
@@ -183,6 +274,25 @@ class EmmyGenModel(nn.Module):
         # list; stock vLLM's gemma4 models -inf those ids in compute_logits — mirror that.
         gen_cfg = vllm_config.model_config.try_get_generation_config()
         self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
+        # ``EMMY_GEN_ALIAS_ATTN`` — write attention output directly into the M=1 post twin's
+        # ``attn_out`` input backing (the seam-copy closer; see ``config.gen_alias_attn``).
+        self._alias_attn = bool(emmy_config.gen_alias_attn())
+
+        # Speculative-decoding shim: vLLM's MTP drafter (vllm#41745, gemma-4) reaches into
+        # ``target.model.embed_tokens`` to share the target's raw embedding with the draft head.
+        # The runner keeps the trunk (embedding included) outside a vLLM-style ``.model`` submodule,
+        # so expose that one attribute — backed by the tied embed/lm_head weight the runner gathers
+        # from, no copy. Only built when a draft is configured; plain serving is untouched. The
+        # drafter's ``* sqrt(hidden)`` normalizer only reproduces the target's embed scale when the
+        # embedding is tied to ``lm_head``, so reject an untied target early and clearly.
+        if getattr(vllm_config, "speculative_config", None) is not None:
+            if not getattr(config, "tie_word_embeddings", False):
+                raise NotImplementedError(
+                    "EmmyGenModel: speculative decoding requires a tied-embedding target so the draft "
+                    "head can share the raw embedding table (this checkpoint is untied). Serve without "
+                    "--speculative-config, or use a tied target such as gemma-4."
+                )
+            self.model = _EmmyTargetInner(_SharedRawEmbedding(self))
 
     def forward(self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None, **kwargs):
         device = positions.device
@@ -190,12 +300,14 @@ class EmmyGenModel(nn.Module):
         ids = input_ids.clamp(0, self.config.vocab_size - 1)
         t = int(ids.shape[0])
         # Device-resident forward for EVERY width the compiled programs cover: decode
-        # (T <= bucket, the captured static twins) AND prefill / mixed chunked-prefill steps
-        # (bucket < T <= prefill_capacity, the symbolic programs via ``run_device_sym``) — no
-        # per-layer host numpy round-trip. The numpy path below survives only as the fallback
-        # for a runner built without capacity (the standalone oracle) or an over-capacity T.
+        # (T <= bucket, the captured static twins), prefill / mixed chunked-prefill steps
+        # (bucket < T <= prefill_capacity, the symbolic programs via ``run_device_sym``),
+        # AND rider-carrying full-chunk steps (prefill_bucket < T <= prefill_bucket +
+        # rider_width, the chunk+decode twin row split) — no per-layer host numpy
+        # round-trip. The numpy path below survives only as the fallback for a runner built
+        # without capacity (the standalone oracle) or an over-coverage T.
         decode_ok = self.runner.has_device_decode and 0 < t <= self.runner.decode_bucket
-        prefill_ok = 0 < t <= self.runner.prefill_capacity
+        prefill_ok = 0 < t <= max(self.runner.prefill_capacity, self.runner.prefill_bucket + self.runner.rider_width)
         if decode_ok or prefill_ok:
             return self._forward_device(ids, positions)
         ids_np = ids.cpu().numpy()
@@ -218,15 +330,47 @@ class EmmyGenModel(nn.Module):
     def _forward_device(self, ids, positions):
         """Device-resident decode forward (T <= decode_bucket): q/k/v and attn_out stay CUDA
         tensors through RoPE + vLLM attention — no per-layer numpy↔torch host hop."""
+        t = ids.shape[0]
         hidden = self.runner.embed_device(ids)  # [T, H] CUDA
         for layer in range(self.runner.num_layers):
             residual = hidden
             q, k, v = self.runner.forward_layer_pre_device(layer, hidden)
             q, k = self.rotary_emb[layer](positions, q, k)  # A2: per-layer RoPE (Gemma local/global theta)
             q, k = q.to(self.dtype), k.to(self.dtype)  # rotary may promote to fp32; flash-attn needs fp16/bf16
-            attn_out = self.attn[layer](q, k, v)  # vLLM paged attention
+            attn_out = self._attn_aliased(layer, q, k, v) if self._alias_attn and t == 1 else None
+            if attn_out is None:
+                attn_out = self.attn[layer](q, k, v)  # vLLM paged attention
             hidden = self.runner.forward_layer_post_device(layer, attn_out, residual)
         return self.runner.final_norm_device(hidden)
+
+    def _attn_aliased(self, layer, q, k, v):
+        """vLLM paged attention writing INTO the M=1 post twin's ``attn_out`` input backing —
+        ``Attention.forward`` minus its own output allocation, so ``run_device``'s prefix upload
+        self-copy-skips (the seam copy drops out of the captured decode graph). Returns ``None``
+        to fall back to the ordinary module call (m1 twin absent for this layer, or an attention
+        feature this tail doesn't replicate — kv scales / query quant)."""
+        attn = self.attn[layer]
+        if attn.calculate_kv_scales or getattr(attn, "query_quant", None) is not None:
+            return None
+        out = self.runner.post_attn_backing(layer, rows=q.shape[0])
+        if out is None or out.dtype != q.dtype:
+            return None
+        query = q.view(-1, attn.num_heads, attn.head_size)
+        key = k.view(-1, attn.num_kv_heads, attn.head_size)
+        value = v.view(-1, attn.num_kv_heads, attn.head_size_v)
+        output = out.view(-1, attn.num_heads, attn.head_size_v)
+        kv_dep = None
+        update_kv = not attn.attn_backend.forward_includes_kv_cache_update and attn.kv_sharing_target_layer_name is None
+        if attn.use_direct_call:
+            if update_kv:
+                kv_dep = unified_kv_cache_update(key, value, attn.layer_name)
+            unified_attention_with_output(query, key, value, output, attn.layer_name, kv_cache_dummy_dep=kv_dep)
+        else:
+            encoded = _encode_layer_name(attn.layer_name)
+            if update_kv:
+                kv_dep = torch.ops.vllm.unified_kv_cache_update(key, value, encoded)
+            torch.ops.vllm.unified_attention_with_output(query, key, value, output, encoded, kv_cache_dummy_dep=kv_dep)
+        return out
 
     def compute_logits(self, hidden_states, *args):
         logits = self.logits_processor(self.lm_head, hidden_states)
@@ -266,4 +410,9 @@ class EmmyGenModel(nn.Module):
 
             torch.cuda.empty_cache()
             cp.get_default_memory_pool().free_all_blocks()
+        # The spec-decode shim shares this table with the drafter; verify the tie once, here,
+        # where the adopt hand-off just happened (the compiled forward carries no guards).
+        shim = getattr(self, "model", None)
+        if shim is not None:
+            shim.embed_tokens.validate_tied()
         return loaded

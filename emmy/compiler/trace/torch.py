@@ -10,6 +10,7 @@ Requires PyTorch (optional dependency). All torch imports are guarded.
 from __future__ import annotations
 
 import logging
+import operator
 from typing import TYPE_CHECKING, Any
 
 from emmy.compiler.graph import Graph, Tensor
@@ -37,6 +38,8 @@ if TYPE_CHECKING:
     import torch.nn as nn
 
 logger = logging.getLogger(__name__)
+
+NodeRef = str | tuple[str, ...]
 
 
 def has_torch() -> bool:
@@ -114,7 +117,7 @@ def trace_module_with_constants(
     sym_rename = _sym_rename_map(exported, dynamic_shapes) if dynamic_shapes else {}
 
     g = Graph()
-    node_map: dict[str, str] = {}
+    node_map: dict[str, NodeRef] = {}
 
     sig = exported.graph_signature
     const_targets: dict[str, str] = {}
@@ -322,16 +325,20 @@ def _get_dtype(fx_node: Any) -> str:
     return "f32"
 
 
-def _resolve_inputs(fx_node: Any, node_map: dict[str, str], g: Graph | None = None) -> list[str]:
+def _resolve_inputs(fx_node: Any, node_map: dict[str, NodeRef], g: Graph | None = None) -> list[str]:
     """Resolve FX node args to our node IDs. Scalars become ConstantOp nodes."""
     result = []
     for a in fx_node.args:
         if hasattr(a, "name") and a.name in node_map:
-            result.append(node_map[a.name])
+            ref = node_map[a.name]
+            if isinstance(ref, str):
+                result.append(ref)
         elif isinstance(a, (list, tuple)):
             for item in a:
                 if hasattr(item, "name") and item.name in node_map:
-                    result.append(node_map[item.name])
+                    ref = node_map[item.name]
+                    if isinstance(ref, str):
+                        result.append(ref)
         elif isinstance(a, (int, float)) and not isinstance(a, bool) and g is not None:
             const_name = f"{fx_node.name}_c{len(result)}"
             # Inherit dtype from the consuming op's output — scalar literals
@@ -355,7 +362,7 @@ def _resolve_inputs(fx_node: Any, node_map: dict[str, str], g: Graph | None = No
 def _handle_placeholder(
     g: Graph,
     fx_node: Any,
-    node_map: dict[str, str],
+    node_map: dict[str, NodeRef],
     module: nn.Module,
     const_targets: dict[str, str],
     *,
@@ -392,11 +399,15 @@ def _handle_placeholder(
     node_map[name] = nid
 
 
-def _handle_output(g: Graph, fx_node: Any, node_map: dict[str, str]) -> None:
+def _handle_output(g: Graph, fx_node: Any, node_map: dict[str, NodeRef]) -> None:
     """Handle output nodes."""
     for arg in fx_node.args[0] if isinstance(fx_node.args[0], (tuple, list)) else [fx_node.args[0]]:
         if hasattr(arg, "name") and arg.name in node_map:
-            g.outputs.append(node_map[arg.name])
+            ref = node_map[arg.name]
+            if isinstance(ref, str):
+                g.outputs.append(ref)
+            else:
+                g.outputs.extend(ref)
 
 
 def _op_name(target: Any) -> str | None:
@@ -453,8 +464,100 @@ def _squeeze_indexmap(in_shape: tuple, out_shape: tuple, axis: int | str) -> Ind
     return IndexMapOp(out_shape=tuple(out_shape), sources=(IndexSource(input_idx=0, coord_map=tuple(coord_map)),))
 
 
-def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, str], *, sym_rename: dict[str, str] | None = None) -> None:
+def _handle_getitem(fx_node: Any, node_map: dict[str, NodeRef]) -> None:
+    """Resolve a tuple-producing ``aten.chunk`` result to one materialized slice."""
+    if len(fx_node.args) < 2:
+        raise ValueError("operator.getitem on an aten.chunk result requires a tuple index")
+    source, raw_index = fx_node.args[:2]
+    source_name = getattr(source, "name", None)
+    ref = node_map.get(source_name)
+    if not isinstance(ref, tuple):
+        if isinstance(ref, str):
+            node_map[fx_node.name] = ref
+        return
+    if not isinstance(raw_index, int) or isinstance(raw_index, bool):
+        raise NotImplementedError("operator.getitem on an aten.chunk result requires a constant integer tuple index")
+    index = raw_index if raw_index >= 0 else len(ref) + raw_index
+    if not 0 <= index < len(ref):
+        raise IndexError(f"aten.chunk tuple index {raw_index} is out of range for {len(ref)} outputs")
+    node_map[fx_node.name] = ref[index]
+
+
+def _handle_chunk(
+    g: Graph,
+    fx_node: Any,
+    node_map: dict[str, NodeRef],
+    *,
+    sym_rename: dict[str, str] | None = None,
+) -> None:
+    """Materialize a static ``aten.chunk`` tuple as cumulative ``SliceOp`` nodes."""
+    if len(fx_node.args) < 2:
+        raise ValueError("aten.chunk requires a chunk count")
+    source = fx_node.args[0]
+    source_ref = node_map.get(getattr(source, "name", None))
+    if not isinstance(source_ref, str):
+        raise ValueError("aten.chunk input did not resolve to a tensor")
+
+    raw_chunks = fx_node.args[1]
+    if not isinstance(raw_chunks, int) or isinstance(raw_chunks, bool):
+        raise NotImplementedError("aten.chunk requires a static integer chunk count")
+    if raw_chunks <= 0:
+        raise ValueError("aten.chunk chunk count must be greater than zero")
+
+    raw_dim = fx_node.args[2] if len(fx_node.args) > 2 else 0
+    if not isinstance(raw_dim, int) or isinstance(raw_dim, bool):
+        raise NotImplementedError("aten.chunk requires a constant integer dimension")
+
+    source_node = g.nodes[source_ref]
+    rank = len(source_node.output.shape)
+    dim = raw_dim if raw_dim >= 0 else rank + raw_dim
+    if not 0 <= dim < rank:
+        raise ValueError(f"aten.chunk dimension {raw_dim} is out of range for rank-{rank} input")
+
+    values = fx_node.meta.get("val")
+    if not isinstance(values, (list, tuple)):
+        raise NotImplementedError("aten.chunk requires FX-provided static tuple output metadata")
+
+    output_ids: list[str] = []
+    offset = 0
+    for index, value in enumerate(values):
+        if not hasattr(value, "shape"):
+            raise NotImplementedError("aten.chunk output metadata must contain tensor shapes")
+        raw_shape = tuple(value.shape)
+        chunk_extent = raw_shape[dim]
+        if not isinstance(chunk_extent, int):
+            raise NotImplementedError("aten.chunk does not support a dynamic chunked dimension")
+        shape = _wrap_shape(raw_shape, sym_rename)
+        dtype = str(value.dtype).replace("torch.", "")
+        output_name = f"{fx_node.name}_{index}"
+        output_id = g.add_node(
+            op=SliceOp(shape=_dim_tuple_to_op_shape(shape), dim=dim, start=offset),
+            inputs=[source_ref],
+            output=Tensor(output_name, shape, dtype),
+            node_id=output_name,
+        )
+        output_ids.append(output_id)
+        offset += chunk_extent
+
+    if len(output_ids) > raw_chunks:
+        raise ValueError(f"aten.chunk produced {len(output_ids)} outputs for chunk count {raw_chunks}")
+    input_extent = source_node.output.shape[dim]
+    if getattr(input_extent, "is_static", False) and offset != input_extent.as_static():
+        raise ValueError(f"aten.chunk output extents cover {offset} elements but input dimension has {input_extent.as_static()}")
+    node_map[fx_node.name] = tuple(output_ids)
+
+
+def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], *, sym_rename: dict[str, str] | None = None) -> None:
     """Handle call_function nodes — faithful 1:1 capture of FX ops."""
+    if fx_node.target is operator.getitem:
+        _handle_getitem(fx_node, node_map)
+        return
+
+    op_name = _op_name(fx_node.target)
+    if op_name == "chunk":
+        _handle_chunk(g, fx_node, node_map, sym_rename=sym_rename)
+        return
+
     # ``aten.sym_size.int`` and similar shape-metadata ops return a
     # scalar ``SymInt`` (no tensor shape). They're consumed inline by
     # ``_op_shape`` when a downstream reshape / view references them via
@@ -465,7 +568,6 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, str], *, s
     name = fx_node.name
     shape = _get_shape(fx_node, sym_rename)
     dtype = _get_dtype(fx_node)
-    op_name = _op_name(fx_node.target)
     input_ids = _resolve_inputs(fx_node, node_map, g)
 
     if op_name is None:

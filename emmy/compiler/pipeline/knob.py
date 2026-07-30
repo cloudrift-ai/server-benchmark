@@ -13,28 +13,25 @@ declarations (those live in :mod:`emmy.compiler.pipeline.search.space`,
 beside the enumeration value grids) and **not** the featurizers (those
 live in :mod:`emmy.compiler.pipeline.search.features`). INVARIANT:
 every ``Knob`` *instance* is declared in ``search/space.py``, and rules
-import the knobs they decide from there. The :func:`registry`
-introspects every loaded module under ``emmy/`` and collects every
-``Knob`` instance — no ``register(...)`` wrapper, no manual bookkeeping
-— so a knob declared in ``space.py`` is discovered as soon as a rule
-imports it (all rules load at pipeline startup).
+import the knobs they decide from there. Registration is construction:
+``Knob.__post_init__`` records every instance in the registry the
+moment its declaration executes — no ``register(...)`` wrapper, no
+manual bookkeeping, and no dependence on what else the process has
+imported. :func:`registry` imports ``space.py`` before answering, so
+the canonical set is complete in ANY process that can ask — the
+pre-2026-07-28 module-scan discovery silently dropped a knob's
+features in processes that featurized without the pipeline loaded.
 """
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
-from types import ModuleType
 from typing import Any
 
 from emmy import config
-
-# The ``emmy/`` package dir (knob.py → pipeline → compiler → emmy).
-_PKG_ROOT = Path(__file__).resolve().parents[2]
 
 # Reserved prefix for the structural-feature knobs stamped by
 # ``loop/stamp/020_stamp_structural_features`` — distinct from any tuning Knob
@@ -110,6 +107,12 @@ class Knob:
     # the ``TILE`` codec's atom token). Either way the value cannot disambiguate kernels, and
     # letting it perturb the features would split one perf class into spurious variants.
     unfeatured: bool = False
+
+    def __post_init__(self) -> None:
+        # Construction IS registration: a module-level ``Knob`` declaration lands in the registry
+        # the moment it executes, wherever it lives. First-seen wins, matching the old module-scan
+        # collapse rule (duplicate declarations should agree on type / hints anyway).
+        _REGISTRY.setdefault(self.name, self)
 
     @property
     def env(self) -> str:
@@ -299,51 +302,19 @@ def resolve_axis(family: str, key: str, eligible: Sequence[str]) -> str | None:
 
 # --- Registry --------------------------------------------------------------
 
-_REGISTRY: dict[str, Knob] | None = None
-
-
-def _walk_modules() -> list[ModuleType]:
-    # Every ``Knob`` is declared in a rule module under ``emmy/`` — but rule
-    # modules are loaded via ``importlib.util.spec_from_file_location`` and registered
-    # under their bare file stem (e.g. ``005_blockify_launch``), not the full
-    # ``emmy.compiler.pipeline.passes.…`` dotted path, so we can't filter on
-    # ``__name__``. Filter on ``__file__`` living under the package instead: this keeps
-    # every Knob-bearing module while skipping the thousands of stdlib / third-party
-    # modules — which both slows the walk and, for e.g. ``torch.distributed``, emits a
-    # spurious ``FutureWarning`` when ``vars(mod)`` materializes its deprecated members.
-    #
-    # Snapshot ``sys.modules`` with ``tuple(...)`` (one GIL-held C call) before walking:
-    # the per-module body releases the GIL, and a concurrent kernel compile / bench
-    # worker importing a module would otherwise mutate ``sys.modules`` mid-iteration
-    # ("dictionary changed size during iteration").
-    mods: list[ModuleType] = []
-    for m in tuple(sys.modules.values()):
-        f = getattr(m, "__file__", None) if m is not None else None
-        if f and Path(f).is_relative_to(_PKG_ROOT):
-            mods.append(m)
-    return mods
+#: ``name → Knob`` — filled at declaration time by ``Knob.__post_init__``, first-seen wins.
+_REGISTRY: dict[str, Knob] = {}
 
 
 def registry() -> dict[str, Knob]:
-    """``{name: Knob}`` table, built lazily on first access by walking
-    every loaded module for module-level ``Knob`` attributes.
+    """``{name: Knob}`` — every declared knob, registered at construction time.
 
-    Rule modules are imported at pipeline-startup (to collect their
-    ``PATTERN`` / ``rewrite``), so by the time anyone asks for knobs
-    they're all present in ``sys.modules``. Duplicate names across
-    rules (e.g. multiple rules declaring ``BN``) collapse to the
-    first-seen ``Knob`` — declarations should agree on type / hints."""
-    global _REGISTRY
-    if _REGISTRY is None:
-        _REGISTRY = {}
-        for mod in _walk_modules():
-            try:
-                attrs = vars(mod).values()
-            except TypeError:
-                continue  # some built-in modules don't expose __dict__
-            for attr in attrs:
-                if isinstance(attr, Knob) and attr.name not in _REGISTRY:
-                    _REGISTRY[attr.name] = attr
+    Completeness is guaranteed by importing ``search/space.py`` (the single home of every
+    ``Knob`` declaration) before answering: any process that can ask for a knob sees the full
+    canonical set, no matter how little of the pipeline it has loaded. The import is deferred
+    (``space`` imports this module at its top level)."""
+    from emmy.compiler.pipeline.search import space  # noqa: F401, PLC0415 — deferred: space imports knob
+
     return _REGISTRY
 
 
@@ -351,13 +322,6 @@ def get(name: str) -> Knob | None:
     """Lookup a registered ``Knob`` by name. ``None`` if no rule has
     declared it."""
     return registry().get(name)
-
-
-def reset_registry() -> None:
-    """Clear the lazy registry cache. Test-only — pytest fixtures that
-    monkeypatch ``sys.modules`` use this to force a rebuild."""
-    global _REGISTRY
-    _REGISTRY = None
 
 
 def apply_off_defaults(knobs: dict, declared: Iterable[Knob]) -> dict:
@@ -606,6 +570,10 @@ def evidence_row_vouches(cand_tun: dict, row_tun: dict) -> bool:
         return False
     if str(cand_tun.get("PLACE@cone")) == "cut" and "PLACE@cone" not in row_tun:
         return False
+    if str(cand_tun.get("PLACE@fin")) == "fuse" and "PLACE@fin" not in row_tun:
+        return False  # a pre-fin row measured the separate-finalize twin — same kernel-set clause
+    if str(cand_tun.get("PLACE@cstat")) == "fuse" and "PLACE@cstat" not in row_tun:
+        return False  # a pre-cstat row measured the split-stat twin — same kernel-set clause
     return not (str(cand_tun.get("PLACE@stat")) == "sink" and "PLACE@stat" not in row_tun)
 
 

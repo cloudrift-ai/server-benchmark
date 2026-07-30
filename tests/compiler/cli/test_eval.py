@@ -588,3 +588,54 @@ def test_offline_eval_scores_each_golden_under_its_own_card(monkeypatch):
     assert ctx.gpu_name == "NVIDIA GeForce RTX 4090"
     assert ctx.sm_count == 128  # the 4090's registered SM count, regardless of the host GPU
     assert ctx.compute_capability == (8, 9)
+
+
+def test_offer_audit_flags_pin_only_and_fall_through(monkeypatch, caplog):
+    """``eval golden``'s offer audit: an entry no offered candidate realizes is PIN-ONLY
+    (fine while an offered sibling floors the shape); a shape whose entries are ALL
+    pin-only FALLS THROUGH the deploy's golden floor and the audit returns True (the
+    command exits 1) — the 4090 ``attention.hd512.s4096`` split-KV class, caught at
+    record time instead of in production benches. ``PLACE@cone: cut`` is the
+    guaranteed-unrealizable pin here: a plain matmul fork never offers the placement and
+    ``_golden_matches_row`` refuses PLACE as free."""
+    import logging
+
+    import pytest
+
+    pytest.importorskip("torch")
+    import emmy.commands.eval as eval_cmd
+    import emmy.compiler.pipeline.search.golden as golden_mod
+    from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig
+
+    def cfg(name, m, knobs, us):
+        return MatmulGoldenConfig(
+            name=name, M=m, N=32, K=32, dtype="fp32", knobs=knobs, emmy_us=us, gpu_name="NVIDIA GeForce RTX 4090", compute_cap=(8, 9)
+        )
+
+    floored = [
+        cfg("audit.floored", 32, {"PLACE@cone": "cut"}, 10.0),  # pin-only; the sibling below floors the shape
+        cfg("audit.floored", 32, {}, 20.0),  # prefix-consistent with any offered row — the deploy floor
+    ]
+    orphan = [cfg("audit.orphan", 48, {"PLACE@cone": "cut"}, 10.0)]  # ALL pin-only → falls through
+    # The compile-time golden index reads GOLDEN_CONFIGS scoped to the audited card — patch it
+    # so the verdicts are hermetic (no dependence on the repo's real 4090 recordings).
+    monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", floored + orphan)
+
+    with caplog.at_level(logging.INFO, logger="emmy.commands.eval"):
+        fell = eval_cmd._emit_offer_audit(floored + orphan)
+
+    assert fell is True
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("PIN-ONLY" in m and "audit.floored" in m and "deploy floor" in m for m in msgs)
+    assert any("PIN-ONLY" in m and "audit.orphan" in m and "NO offered sibling" in m for m in msgs)
+    assert any("FALL-THROUGH" in m and "audit.orphan" in m for m in msgs)
+    assert not any("FALL-THROUGH" in m and "audit.floored" in m for m in msgs)
+
+    # A set whose every entry realizes un-pinned is clean: no flags, audit returns False.
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="emmy.commands.eval"):
+        fell = eval_cmd._emit_offer_audit([floored[1]])
+    assert fell is False
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("realize un-pinned" in m for m in msgs)
+    assert not any("PIN-ONLY" in m or "FALL-THROUGH" in m for m in msgs)

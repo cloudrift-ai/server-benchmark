@@ -1273,9 +1273,10 @@ def test_write_ab_json_greedy_bench_fail_and_record_knobs(tmp_path):
     assert rec["greedy"]["total_us"] is None
     krow = rec["greedy"]["kernels"][0]
     assert krow["us"] is None
-    # record_knobs: realized values + explicit OFF for families the compile never stamped.
+    # record_knobs: realized values + explicit OFF for families the compile never stamped
+    # (WORK replaced WSPEC in SCHEDULE_FAMILIES — F1: the producer band rides WORK's +p suffix).
     assert krow["record_knobs"]["REDUCE"] == "g2k"
-    for fam in ("STAGE", "WSPEC", "RASTER"):
+    for fam in ("STAGE", "WORK", "RASTER"):
         assert krow["record_knobs"][fam] == ""
     row = rec["pinned"][0]
     assert row["status"] == "pin_unmatched" and row["total_us"] is None

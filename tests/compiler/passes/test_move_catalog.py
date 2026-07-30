@@ -186,15 +186,19 @@ def test_warp_staged_rows_fit_the_smem_budget():
         return leaves[0]
 
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(_fp16_matmul_graph(), decide)
-    staged = [r for r in rows if str(family_value(r, "TILE")).startswith("a:") and family_value(r, "STAGE")]
+    # F1 site grammar: the warp tier is discriminated by the WORK entry; the site TILE value
+    # resolves its units against it.
+    from emmy.compiler.ir.schedule import Workers
+
+    staged = [r for r in rows if str(r.get("WORK", "")).startswith("w") and family_value(r, "STAGE")]
     assert staged, "no staged warp rows were enumerated"
     for r in staged:
-        plan = TilePlan.parse(str(family_value(r, "TILE")))
+        plan = TilePlan.parse_site(str(family_value(r, "TILE")), Workers.parse(str(r["WORK"])))
         slot = (plan.tile_m + plan.tile_n) * plan.bk * plan.atom.atom_k * plan.atom.operand_dtype("a").nbytes
         assert slot <= ctx.max_dynamic_smem, f"{family_value(r, 'TILE')} / {family_value(r, 'STAGE')}: slot {slot} over budget"
     # The over-budget tile itself stays enumerable — gmem-direct only (its every staged sibling
     # resolver-declines), split-K rows included.
-    big = [r for r in rows if family_value(r, "TILE") == "a:mma_m16n8k16_f16_f32/w4x4/f4x8/k8"]
+    big = [r for r in rows if family_value(r, "TILE") == "mma_m16n8k16_f16_f32/f4x8/k8" and r.get("WORK") == "w4x4"]
     assert big, "the 256x256 warp tile dropped out of the enumeration"
     assert all(family_value(r, "STAGE") == "" for r in big)
     assert any(family_value(r, "REDUCE") for r in big), "split-K must still ride the gmem-direct rows"
@@ -231,13 +235,23 @@ def test_bare_reduce_forks_the_coop_catalog():
 
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_reduce_graph(), decide)
     assert rows, "no fork was offered for the bare reduce"
-    reduces = [str(family_value(r, "REDUCE")) for r in rows]
-    assert reduces[0] == ""  # 2048 free cells > _FREE_CAP: the conservative heuristic pick leads
+    # F1 site grammar: a row's REDUCE value sheds the coop width into WORK, so the catalog
+    # identity is the (site value, WORK) pair — "b16" and "b32" both spell "coop" but ride
+    # distinct t16/t32 inventories.
+    from emmy.compiler.ir.schedule import ReducePlan
+
+    offered = [(str(family_value(r, "REDUCE")), str(r.get("WORK", ""))) for r in rows]
+    assert offered[0] == ("", "")  # 2048 free cells > _FREE_CAP: the conservative heuristic pick leads
+
     # This bare reduce meets the transposed band's structural gate (scalar tail, no
     # shared-row stage, static K, 32-divisible free grid), so the FULL catalog is offered —
     # bt/g-composites included. Rows that fail the gate (softmax/rms shapes) drop the band;
     # that arm is covered by the schedule tests, not this catalog assertion.
-    assert set(reduces) == {"", *coop_reduce_moves()}, f"catalog rows missing: {reduces}"
+    def site_of(move: str) -> tuple[str, str]:
+        plan = ReducePlan.parse(move)
+        return plan.spell_site(), (f"t{plan.coop}" if plan.coop > 1 else "")
+
+    assert set(offered) == {("", ""), *(site_of(m) for m in coop_reduce_moves())}, f"catalog rows missing: {offered}"
 
 
 def test_factor_k_refuses_non_dividing_pin_width():

@@ -133,8 +133,6 @@ def seal_workers(tile) -> None:
     from emmy.compiler.ir.schedule import Workers, derive_workers  # noqa: PLC0415
 
     work = derive_workers(v for k, v in tile.schedule.items() if k.split("@", 1)[0] == "TILE")
-    if work is not None and work.kind == "thread" and work.count == 1:
-        work = None  # a bare register strip — one worker per cell, geometry stays derived
     coop = max(
         (v.coop for k, v in tile.schedule.items() if k.split("@", 1)[0] == "REDUCE" and hasattr(v, "coop")),
         default=1,

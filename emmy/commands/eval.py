@@ -531,11 +531,22 @@ def _knob_cells(entry: tuple) -> dict[str, tuple[str, bool]]:
     """``{knob: (value_text, red?)}`` for one renderable entry (no ``NAME=`` prefix —
     :func:`~emmy.commands.table.knob_columns` puts the name in the column header).
     A ``("row", lead, gold, got)`` entry renders ``found/golden`` per knob, red where the
-    two differ; a ``("total", lead, cells)`` entry carries its cells pre-built."""
+    two differ (``knob.values_equal`` — so a legacy golden spelling compares equal to the
+    site-form pick it realizes as); a ``("total", lead, cells)`` entry carries its cells
+    pre-built."""
     if entry[0] == "total":
         return entry[2]
     _, _, gold, got = entry
-    return {k: (f"{got.get(k, '-')}/{gold[k]}", got.get(k) != gold[k]) for k in gold}
+    return {k: (f"{got.get(k, '-')}/{gold[k]}", not _knob_eq(k, gold[k], got)) for k in gold}
+
+
+def _knob_eq(k: str, gv, got: dict) -> bool:
+    """Whether the picked knob dict ``got`` reproduces the golden's ``k=gv`` — value equality
+    through the registry-canonical :func:`~emmy.compiler.pipeline.knob.values_equal`, so the
+    legacy golden corpus keeps matching the site-form picks during the step-7 window."""
+    from emmy.compiler.pipeline.knob import values_equal  # noqa: PLC0415
+
+    return k in got and values_equal(k, gv, got[k])
 
 
 def _emit_golden_table(lead_cols: list[Col], entries: list[tuple], caption: str) -> None:
@@ -629,14 +640,18 @@ def _emit_offline_eval(kernel_filter: str | None) -> None:
     from statistics import median  # noqa: PLC0415
 
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import (
+        ingest_legacy_row,  # noqa: PLC0415
+        tuning_knob_items,  # noqa: PLC0415
+    )
     from emmy.compiler.pipeline.search.golden_eval import evaluate_golden  # noqa: PLC0415
 
     configs = _golden_configs(kernel_filter)
     ranks: list[int] = []
     entries: list[tuple] = []  # ("row", lead_cells, gold, got) | ("err", name, message)
     for g in configs:
-        gold = dict(tuning_knob_items(g.knobs))  # the native codec knobs (TILE/REDUCE/STAGE), tier-agnostic
+        # Legacy worker halves become one WORK row (F1) so the site-form pick compares fact-for-fact.
+        gold = ingest_legacy_row(dict(tuning_knob_items(g.knobs)))
         try:
             dyn = bool(getattr(g, "dynamic", None))
             ctx = Context.from_target(g.compute_cap, gpu_name=g.gpu_name)  # the golden's own card, not the live host's
@@ -644,7 +659,7 @@ def _emit_offline_eval(kernel_filter: str | None) -> None:
         except Exception as e:  # noqa: BLE001 — one shape's error shouldn't abort the report
             entries.append(("err", g.name, " ".join(f"{type(e).__name__}: {e}".split())[:100]))
             continue
-        matched = sum(1 for k in gold if (got.get(k) == gold[k]))
+        matched = sum(1 for k in gold if _knob_eq(k, gold[k], got))
         lead = [g.name, (f"{matched}/{len(gold)}", _ratio_color(matched, len(gold))), str(rank) if rank is not None else "?", str(pool)]
         entries.append(("row", lead, gold, got))
         if rank is not None:
@@ -881,14 +896,18 @@ def _emit_prior_golden_check(configs: list, *, title: bool = True, perf: dict | 
                 except Exception as e:  # noqa: BLE001 — one shape's error shouldn't abort the report
                     entries.append(("err", label, " ".join(f"{type(e).__name__}: {e}".split())[:100]))
                     continue
-                # Closest golden: most knobs reproduced, tie-broken by match fraction.
-                scored = [(sum(1 for k in gd if (got.get(k) == gd[k])), gd) for gd in (tunable(c.knobs) for c in sub)]
+                # Closest golden: most knobs reproduced (registry-canonical values_equal, via
+                # _knob_eq — the legacy corpus vs the site-form pick), tie-broken by match fraction.
+                from emmy.compiler.pipeline.knob import ingest_legacy_row  # noqa: PLC0415
+
+                golds = [ingest_legacy_row(tunable(c.knobs)) for c in sub]
+                scored = [(sum(1 for k in gd if _knob_eq(k, gd[k], got)), gd) for gd in golds]
                 matched, gold = max(scored, key=lambda t: (t[0], t[0] / len(t[1]) if t[1] else 1.0))
                 n_match += matched == len(gold)
                 n_rows += 1
                 for k in gold:
                     knob_total[k] = knob_total.get(k, 0) + 1
-                    knob_match[k] = knob_match.get(k, 0) + (got.get(k) == gold[k])
+                    knob_match[k] = knob_match.get(k, 0) + _knob_eq(k, gold[k], got)
                 lead = [label, (f"{matched}/{len(gold)}", _ratio_color(matched, len(gold)))]
                 pc = _perf_cell(perf, name)
                 if pc is not None:

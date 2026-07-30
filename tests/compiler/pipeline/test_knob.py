@@ -646,11 +646,13 @@ def test_stamp_schedule_families_fills_absent_families_with_off():
     # Realized values pass through; the struct stamp is dropped (not a tuning decision).
     assert out["TILE"] == "a:mma_m16n8k16_f16_f32/w1x1/f1x1" and out["REDUCE"] == "g2k"
     assert "S_ext_free_prod" not in out
-    # Families the compile never stamped are pinned as declined (OFF spelling).
-    assert out["WSPEC"] == "" and out["RASTER"] == "" and out["STAGE"] == ""
+    # Families the compile never stamped are pinned as declined (OFF spelling) — WORK included
+    # (F1: the worker-inventory family replaced WSPEC in SCHEDULE_FAMILIES).
+    assert out["WORK"] == "" and out["RASTER"] == "" and out["STAGE"] == ""
+    assert "WSPEC" not in out  # retired from the recording view — the +p band rides WORK
     # A family present under an explicit ``@`` spelling (flash's TILE pair, the cone stat's
     # REDUCE) counts as present — the fill never duplicates it under the bare key.
     axed = stamp_schedule_families({"TILE@dd": "n4/f2", "REDUCE@a1": "b8"})
     assert axed["TILE@dd"] == "n4/f2" and axed["REDUCE@a1"] == "b8"
     assert "TILE" not in axed and "REDUCE" not in axed
-    assert "REDUCE@d" not in axed and axed["STAGE"] == "" and axed["WSPEC"] == "" and axed["RASTER"] == ""
+    assert "REDUCE@d" not in axed and axed["STAGE"] == "" and axed["WORK"] == "" and axed["RASTER"] == ""

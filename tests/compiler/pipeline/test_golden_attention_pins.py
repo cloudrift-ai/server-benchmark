@@ -44,5 +44,17 @@ def test_static_attention_golden_pins_bind(golden, monkeypatch):
     assert tile_pins, f"{golden.name}: static attention golden should record axis-keyed TILE pins"
     stamped = next((k for _, n in out.nodes.items() if (k := getattr(n.op, "knobs", None)) and set(tile_pins) <= set(k)), None)
     assert stamped is not None, f"{golden.name}: no node stamps the recorded TILE keys {sorted(tile_pins)}"
+    # F1 site grammar: the stamp is the recorded pin's SITE half; the pin's embedded worker
+    # geometry lands in the kernel's ONE WORK entry (units compared — a producer band, absent
+    # from a legacy TILE pin, rides WORK's ``+p`` suffix and is not the pin's claim).
+    from emmy.compiler.ir.schedule import TilePlan, Workers, plan_workers  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import canon_family_value  # noqa: PLC0415
+
     for key, want in tile_pins.items():
-        assert stamped[key] == want, f"{golden.name}: recorded {key}={want!r} resolved to {stamped[key]!r}"
+        assert stamped[key] == canon_family_value(key, want), f"{golden.name}: recorded {key}={want!r} resolved to {stamped[key]!r}"
+        pin_work = plan_workers(TilePlan.parse(want))
+        if pin_work is not None:
+            got_work = Workers.parse(stamped.get("WORK") or "")
+            assert got_work is not None and (got_work.kind, got_work.units) == (pin_work.kind, pin_work.units), (
+                f"{golden.name}: recorded {key}={want!r} implies WORK {pin_work.spell()!r}, stamped {stamped.get('WORK')!r}"
+            )

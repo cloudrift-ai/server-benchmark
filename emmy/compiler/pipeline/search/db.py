@@ -280,13 +280,14 @@ def impossible_kernel_reason(row: NodeRow) -> str | None:
     stage_spec = next((str(v) for k, v in f.items() if k.startswith("STAGE") and v), "")
     if not tile_spec or not stage_spec.startswith("d"):
         return None
-    from emmy.compiler.ir.schedule import Stage, TilePlan, is_warp_codec  # noqa: PLC0415
+    from emmy.compiler.ir.schedule import Stage, TilePlan, Workers  # noqa: PLC0415
 
-    if not is_warp_codec(tile_spec):
-        return None
     try:
-        tp, st = TilePlan.parse(tile_spec), Stage.parse(stage_spec)
+        work = Workers.parse(str(f.get("WORK") or ""))  # site rows factor the units here (F1)
+        tp, st = TilePlan.parse_site(tile_spec, work), Stage.parse(stage_spec)
     except ValueError:
+        return None
+    if not tp.is_warp:
         return None
     if st.transport != "cp.async":
         return None

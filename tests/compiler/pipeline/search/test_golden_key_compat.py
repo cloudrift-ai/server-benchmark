@@ -144,7 +144,8 @@ def _tree(build, pick=None):
 
 
 def _is_warp_row(row: dict) -> bool:
-    return any("a:" in str(v) for v in row.values())
+    # F1 site grammar: the tier discriminator is the row's ONE WORK entry, not an ``a:`` token.
+    return str(row.get("WORK", "")).startswith("w")
 
 
 @pytest.fixture(scope="module")

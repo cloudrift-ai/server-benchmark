@@ -644,10 +644,19 @@ def _unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | No
     conflicting value). An UNREGISTERED family with no realized key is a typo in the
     pin and flags ``(unset)``. Returns a flag naming each dropped pin and what ran
     instead, or ``None`` when clean / ungateable."""
-    from emmy.compiler.pipeline.knob import family_of, get, is_off_value, pin_key_matches, values_equal  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import family_of, get, ingest_legacy_row, is_off_value, pin_key_matches, values_equal  # noqa: PLC0415
 
     if not any(kernel_knobs):
         return None
+    # Step-7 F1: a legacy pin row's embedded worker halves (TILE w/n tokens, coop width, WSPEC
+    # band) gate as one synthesized WORK pin against the realized rows' WORK entry; site-form
+    # rows pass through unchanged. A SYNTHESIZED entry with no realized WORK key anywhere is
+    # dropped, not flagged — on a reloaded ``--ir`` graph knobs are absent wholesale, and the
+    # legacy TILE/REDUCE value it was derived from already gates the same facts there.
+    ingested = ingest_legacy_row(pinned)
+    if "WORK" in ingested and "WORK" not in pinned and not any("WORK" in raw for raw in kernel_knobs):
+        ingested.pop("WORK")
+    pinned = ingested
     misses: list[str] = []
     for name, want in pinned.items():
         fam = family_of(name)

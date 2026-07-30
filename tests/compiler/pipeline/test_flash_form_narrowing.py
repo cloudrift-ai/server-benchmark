@@ -14,12 +14,15 @@ from types import SimpleNamespace
 from emmy.compiler.pipeline.passes.lowering.tile._schedule import _narrow_flash_forms
 
 _WARP_SPEC = "a:mma_m16n8k16_f16_f32/w1x1/f1x2/k4"
+# The realized rows spell SITE values + the ONE ``WORK`` entry (F1); the recorded/legacy pin
+# above keeps its embedded-worker spelling and must still select among them.
+_WARP_SITE = "mma_m16n8k16_f16_f32/f1x2/k4"
 
 
 def _forms():
-    warp = SimpleNamespace(knobs={"TILE@dd": _WARP_SPEC, "TILE@pj": _WARP_SPEC}, tag="warp")
-    chain = SimpleNamespace(knobs={"TILE@dd": "", "TILE@pj": "f64"}, tag="chain")
-    cell = SimpleNamespace(knobs={"TILE@dd": "", "TILE@pj": ""}, tag="cell")
+    warp = SimpleNamespace(knobs={"TILE@dd": _WARP_SITE, "TILE@pj": _WARP_SITE, "WORK": "w1x1"}, tag="warp")
+    chain = SimpleNamespace(knobs={"TILE@dd": "", "TILE@pj": "f64", "WORK": ""}, tag="chain")
+    cell = SimpleNamespace(knobs={"TILE@dd": "", "TILE@pj": "", "WORK": ""}, tag="cell")
     return [warp, chain, cell]
 
 
@@ -113,5 +116,7 @@ def test_stage_pin_does_not_bypass_keyed_tile_pins(monkeypatch):
     with _pinned_knobs(pins):
         out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context(compute_capability=(8, 9))).resolve(g, decide)
     stamped = next(k for _, n in out.nodes.items() if (k := getattr(n.op, "knobs", None)) and "TILE@dd" in k)
-    assert stamped["TILE@dd"] == pins["TILE@dd"], stamped
-    assert stamped["TILE@pj"] == pins["TILE@pj"], stamped
+    # F1: the stamp is the SITE spelling; the pin's worker half lands in the ONE WORK entry.
+    assert stamped["TILE@dd"] == "mma_m16n8k16_f16_f32/f1x8/k4", stamped
+    assert stamped["TILE@pj"] == "mma_m16n8k16_f16_f32/f1x8/k4", stamped
+    assert stamped["WORK"] == "w2x1", stamped

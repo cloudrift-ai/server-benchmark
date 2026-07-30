@@ -396,9 +396,10 @@ def test_scalar_ring_matches_gmem_direct_bit_for_bit(monkeypatch, stage):
 
 def test_warp_matmul_stamps_wspec(monkeypatch) -> None:
     """A legal ``WSPEC`` split — a warp tile over a resolved TMA stage — STAMPS: ``workers``
-    resolves on the ``TileOp`` and the codec rides ``knobs`` bare (root-global). The
-    honest-stamping rule holds because the staged K-loop now materializes the split (the
-    producer/compute band split in ``_stage._wspec_kloop``)."""
+    resolves on the ``TileOp`` and the producer band rides the ONE ``WORK`` entry as its ``+p``
+    suffix (F1 — the rows carry no WSPEC key). The honest-stamping rule holds because the
+    staged K-loop materializes the split (the producer/compute band split in
+    ``_stage._wspec_kloop``)."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
 
     monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x2/f2x2/k2")  # warp (mma) tier
@@ -407,7 +408,8 @@ def test_warp_matmul_stamps_wspec(monkeypatch) -> None:
     monkeypatch.setenv("EMMY_WSPEC", "p1")
     out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((9, 0)))
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
-    assert tile_op.knobs.get("WSPEC", "") == "p1", tile_op.knobs  # stamped: the split materializes
+    assert "WSPEC" not in tile_op.knobs, tile_op.knobs  # the band spells on WORK, never a row key
+    assert tile_op.knobs.get("WORK") == "w2x2+p1", tile_op.knobs  # stamped: the split materializes
     assert tile_op.workers is not None and tile_op.workers.aux_warps == 1, tile_op.workers
 
 

@@ -117,11 +117,31 @@ WSPEC = Knob(
 # factored out of the per-site TILE values, the coop width out of REDUCE, the WSPEC producer band
 # absorbed as ``+p<n>``. Stamped by ``ops.seal_workers`` on every assembled option row; ``off=""``
 # = the per-cell / pure-reduce forms' derived launch geometry.
+
+
+def _work_features(val) -> dict[str, float]:
+    """The ``WORK`` sub-features for the online prior — ONLY the ``+p`` producer band, as the
+    same ``D_wspec_warps`` the retired per-row ``WSPEC`` key spelled (name/semantics preserved;
+    a legacy row's ``WSPEC`` key writes the identical value). The inventory's tile geometry is
+    NOT re-featurized here — the per-node featurizers already fold it in by resolving the site
+    ``TILE``/``REDUCE`` values against WORK (``features._tile_plan`` / ``_reduce_decomp``)."""
+    if not val:
+        return {"D_wspec_warps": 0.0}
+    from emmy.compiler.ir.schedule import Workers  # noqa: PLC0415 — same deferred pattern as _wspec_features
+
+    try:
+        w = Workers.parse(str(val))
+    except ValueError:
+        return {"D_wspec_warps": 0.0}
+    return {"D_wspec_warps": float(w.producer if w is not None else 0)}
+
+
 WORK = Knob(
     "WORK",
     KnobType.STR,
     help="Kernel-global worker inventory (w<M>x<N>[+p<np>] warps / t<N>[x<M>] threads; empty=derived per-cell geometry). "
     "The step-7 value-grammar family — TILE/REDUCE values become site-local; the tier discriminator IS the worker kind.",
+    features=_work_features,
     off="",
 )
 

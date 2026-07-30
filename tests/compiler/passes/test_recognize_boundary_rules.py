@@ -211,7 +211,8 @@ def _resolve(g: Graph, pick=None, ctx: Context | None = None) -> tuple[list[dict
 
 
 def _is_warp_row(row: dict) -> bool:
-    return any("a:" in str(v) for v in row.values())
+    # F1 site grammar: the tier discriminator is the row's ONE WORK entry, not an ``a:`` token.
+    return str(row.get("WORK", "")).startswith("w")
 
 
 def test_wide_m1_flinear_uses_single_warp_k_fold():
@@ -258,7 +259,9 @@ def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
     rows, _ = _resolve(_norm_linear_graph())
     assert rows, "no fork was offered for the fused norm→linear"
     assert not _is_warp_row(rows[0]), "option-0 must be the Map-form coop row, not a warp row"
-    assert any(v.startswith("b") for v in rows[0].values() if isinstance(v, str)), "option-0 must cooperate on the stat reduce"
+    # F1: a coop partition spells the site value ``coop`` with its width in the WORK entry.
+    assert any(isinstance(v, str) and v.startswith("coop") for v in rows[0].values()), "option-0 must cooperate on the stat reduce"
+    assert str(rows[0].get("WORK", "")).startswith("t"), "the coop width rides the WORK inventory"
     warp = [r for r in rows if _is_warp_row(r)]
     assert warp, "the ContractionView form contributed no warp rows"
     stages_seen = set()
@@ -303,7 +306,10 @@ def test_norm_linear_warp_pick_is_computed_a_contraction():
     # Phase 3: the stamped keys are the CANONICAL codec spellings — bare for the primary product
     # fold, the explicit axis form for the cone's stat.
     assert tile.knobs.get(f"REDUCE@{stat_loop.axis.name}") == ""
-    assert tile.knobs.get("TILE", "").startswith("a:")
+    # F1 site grammar: the TILE value spells the bare atom (no worker tokens); the warp
+    # inventory is the ONE WORK entry.
+    assert tile.knobs.get("TILE", "").startswith("mma_")
+    assert tile.knobs.get("WORK", "").startswith("w")
     assert tile.knobs.get("STAGE") == "d1/sync"
 
 

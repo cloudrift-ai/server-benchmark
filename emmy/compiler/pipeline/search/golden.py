@@ -100,18 +100,28 @@ def fast_math_knobs(knobs: dict) -> bool:
     under the ``FAST_MATH`` / ``F16_MMA_F32_ACC`` gate, so regime-aware consumers (the
     ``eval`` rank / reproduction views) pin the gate on before comparing against it. Replay
     itself needs no gate — the recorded ``TILE`` pin is authoritative."""
-    from emmy.compiler.ir.schedule import TilePlan, is_warp_codec  # noqa: PLC0415 — keep module import-light
+    from emmy.compiler.ir.schedule import TilePlan, Workers, is_warp_codec  # noqa: PLC0415 — keep module import-light
 
     from .space import FAST_EXP  # noqa: PLC0415
 
+    def _atom_of(spec: str):
+        """The warp atom a TILE value names — legacy ``a:<atom>`` or the site form's bare
+        leading atom (parsed under a dummy warp inventory: the units never reach the atom)."""
+        try:
+            if is_warp_codec(spec):
+                return TilePlan.parse(spec).atom
+            plan = TilePlan.parse_site(spec, Workers(kind="warp", units=(1, 1)))
+            return plan.atom if plan.is_warp else None
+        except ValueError:
+            return None  # an unparseable historic spelling can't name an f16acc atom
+
     for k, v in knobs.items():
-        if k.split("@", 1)[0] == "TILE" and is_warp_codec(str(v)):
-            try:
-                if TilePlan.parse(str(v)).atom.operand_dtype("c").nbytes == 2:
-                    return True
-            except ValueError:
-                continue  # an unparseable historic spelling can't name an f16acc atom
-        if k == FAST_EXP.name and str(v).strip().casefold() in {"true", "1", "yes", "on"}:
+        s = str(v).strip()
+        if k.split("@", 1)[0] == "TILE" and s:
+            atom = _atom_of(s)
+            if atom is not None and atom.operand_dtype("c").nbytes == 2:
+                return True
+        if k == FAST_EXP.name and s.casefold() in {"true", "1", "yes", "on"}:
             return True
     return False
 

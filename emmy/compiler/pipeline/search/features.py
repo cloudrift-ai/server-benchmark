@@ -66,22 +66,46 @@ def masked_axis_features(*, m: bool = False, n: bool = False, k: bool = False) -
     return feats
 
 
+def _row_workers(knobs: dict):
+    """The row's ``WORK`` inventory (:class:`~emmy.compiler.ir.schedule.Workers`), or ``None``
+    — absent / empty / unparseable. The site-value grammar (step 7 F1) factors the worker
+    geometry out of the TILE/REDUCE values into this one entry, so every geometry featurizer
+    resolves its parse against it; a legacy row (the golden YAML corpus) has no ``WORK`` key
+    and its values decode self-contained."""
+    from emmy.compiler.ir.schedule import Workers  # noqa: PLC0415
+
+    try:
+        return Workers.parse(str(knobs.get("WORK") or ""))
+    except ValueError:
+        return None
+
+
+def _tile_plan(knobs: dict):
+    """The row's parsed :class:`TilePlan` — the SITE value resolved against the row's ``WORK``
+    inventory (``schedule.resolve_site_tile``, which also accepts the legacy embedded-worker
+    spellings self-contained and disambiguates the empty-TILE-beside-thread-WORK unit-register
+    tile from the coop tier via the REDUCE value) — or ``None`` for the per-cell / untiled
+    forms and unparseable values."""
+    from emmy.compiler.ir.schedule import resolve_site_tile  # noqa: PLC0415
+
+    spec = family_value(knobs, "TILE")
+    red = family_value(knobs, "REDUCE")
+    try:
+        plan = resolve_site_tile(str(spec) if spec is not None else None, _row_workers(knobs), str(red) if red is not None else "")
+    except ValueError:
+        return None
+    return plan if plan.is_tiled else None
+
+
 def mma_atom(knobs: dict) -> str | None:
     """The concrete tensor-core atom-kind name carried by ``knobs``, or ``None`` for the scalar
     tier (no warp fragment).
 
-    The atom is named by the warp form of the unified ``TILE`` codec (``a:<atom>/…``): a ``TILE``
-    value carrying an ``a:<atom>`` token is the warp fragment, and its parsed :class:`TilePlan`'s
-    ``atom`` names it. A scalar ``TILE`` (``n../f..`` or empty) names no atom → ``None``."""
-    from emmy.compiler.ir.schedule import TilePlan, is_warp_codec  # noqa: PLC0415
-
-    spec = family_value(knobs, "TILE")
-    if not is_warp_codec(spec):
-        return None
-    try:
-        return TilePlan.parse(spec).atom.name
-    except ValueError:
-        return None
+    The atom is named by the ``TILE`` value's warp form — legacy ``a:<atom>/…`` or the site
+    spelling's bare leading atom (resolved against the row's ``WORK`` inventory). A scalar
+    ``TILE`` (``f..`` / ``n../f..`` or empty) names no atom → ``None``."""
+    plan = _tile_plan(knobs)
+    return plan.atom.name if plan is not None and plan.is_warp else None
 
 
 def is_warp(knobs: dict) -> bool:
@@ -179,11 +203,21 @@ def _node_slice(knobs: dict, axis: str | None) -> dict:
         for fam in _AXIS_FAMILIES:
             if fam in knobs:
                 sub[fam] = knobs[fam]
+        if knobs.get("WORK"):
+            # The bare group carries the bare REDUCE, so ``resolve_site_tile``'s coop-vs-tile
+            # disambiguation of an empty TILE beside a thread inventory works on the slice.
+            sub["WORK"] = knobs["WORK"]
         return sub
     for fam in _AXIS_FAMILIES:
         key = f"{fam}@{axis}"
         if key in knobs:
             sub[key] = knobs[key]
+    # The kernel-global WORK inventory rides the slice only where this node's own values need
+    # it — a non-empty site TILE (its units) or a coop REDUCE (its width). An empty-TILE node
+    # beside another node's thread inventory must NOT read it as a tile (the flash coop row's
+    # dd/pj slices would otherwise featurize a phantom thread tile).
+    if knobs.get("WORK") and (sub.get(f"TILE@{axis}") or "coop" in str(sub.get(f"REDUCE@{axis}", ""))):
+        sub["WORK"] = knobs["WORK"]
     for base in _NODE_STRUCT_BASES:  # addressed per-node override; bare fallback already copied above
         addressed = knobs.get(f"{base}@{axis}")
         if addressed is not None:
@@ -196,18 +230,14 @@ def _schedule_node_features(node_knobs: dict) -> dict[str, float]:
     (its ``TILE`` / ``REDUCE`` / ``STAGE`` codecs + the node's structural context). Reads every codec
     via :func:`family_value`, so a bare and a suffixed key featurize identically. ``MMA_tier`` is left
     unset for a scalar node (the caller defaults it to ``0.0`` once, after pooling)."""
-    from emmy.compiler.ir.schedule import TilePlan, is_warp_codec  # noqa: PLC0415
-
     feats: dict[str, float] = {}
-    # Atom (tensor-core cell) features. The warp fragment names its atom on the ``TILE`` codec
-    # (``a:<atom>``); expand its physical cell / dtype properties into the ``MMA_*`` family the priors
+    # Atom (tensor-core cell) features. The warp fragment names its atom on the ``TILE`` value
+    # (legacy ``a:<atom>`` or the site form's bare atom, resolved via the row WORK); expand its
+    # physical cell / dtype properties into the ``MMA_*`` family the priors
     # rank on. A scalar ``TILE`` names no atom → no ``MMA_tier`` here (the caller's default fills it).
-    tile_spec = family_value(node_knobs, "TILE")
-    if is_warp_codec(tile_spec):
-        try:
-            feats.update(_atom_features(TilePlan.parse(tile_spec).atom))
-        except ValueError:
-            pass
+    plan = _tile_plan(node_knobs)
+    if plan is not None and plan.is_warp:
+        feats.update(_atom_features(plan.atom))
     tile_feats = _tile_features(node_knobs)
     feats.update(tile_feats)
     # Warp-tier occupancy: the scalar ``_tile_features`` above models the thread tile (``BN·BM``) and
@@ -301,24 +331,18 @@ def knob_features(knobs: dict) -> dict[str, float]:
 def _free_slots(knobs: dict) -> tuple[int, int, int, int] | None:
     """The ``(par_n, reg_n, par_m, reg_m)`` slot widths for the (≤2) tiled free axes.
 
-    Both fragments source the free split from the single ``TILE`` codec. The **warp** fragment
-    (``a:<atom>/w<WM>x<WN>/f<FM>x<FN>``) keeps the TRUE codec axes — ``(WN, FN)`` / ``(WM, FM)``
-    verbatim: the mma atom is physically asymmetric (``atom_m ≠ atom_n``) and the enumeration
-    offers both orientations (``w4x2`` and ``w2x4`` are different tiles), so any re-ordering here
-    collapses transposed siblings into one feature vector / signature and mislabels ``tile_m`` /
-    ``tile_n`` on every row whose wide slot is M. The **scalar** fragment
-    (``n<N>[x<M>]/f<fn>[x<fm>]``) canonicalizes wide-is-``n`` (the coalesced slot) — a no-op for
-    every enumerated row (the scalar grid spells ``par_n ≥ par_m``), kept so recorded scalar rows'
+    Both fragments source the free split from the single ``TILE`` codec (site value + the row's
+    ``WORK`` inventory — ``_tile_plan`` decodes both grammars). The **warp** fragment keeps the
+    TRUE codec axes — ``(WN, FN)`` / ``(WM, FM)`` verbatim: the mma atom is physically asymmetric
+    (``atom_m ≠ atom_n``) and the enumeration offers both orientations (``w4x2`` and ``w2x4`` are
+    different tiles), so any re-ordering here collapses transposed siblings into one feature
+    vector / signature and mislabels ``tile_m`` / ``tile_n`` on every row whose wide slot is M.
+    The **scalar** fragment canonicalizes wide-is-``n`` (the coalesced slot) — a no-op for every
+    enumerated row (the scalar grid spells ``par_n ≥ par_m``), kept so recorded scalar rows'
     historical encoding does not shift. A single free axis fills the ``n`` slot with a degenerate
     ``(1, 1)`` ``m`` slot. Returns ``None`` for a non-tiled scalar kernel (per-cell ``TILE``)."""
-    from emmy.compiler.ir.schedule import TilePlan  # noqa: PLC0415
-
-    spec = family_value(knobs, "TILE")
-    try:
-        tile = TilePlan.parse(spec)  # one parse for both fragments — the atom discriminates
-    except ValueError:
-        return None
-    if not tile.is_tiled:
+    tile = _tile_plan(knobs)  # one parse for both fragments (site or legacy) — the atom discriminates
+    if tile is None or not tile.is_tiled:
         return None
     if tile.is_warp:
         return tile.units_n, tile.reg_n, tile.units_m, tile.reg_m
@@ -355,7 +379,16 @@ def _reduce_decomp(knobs: dict) -> _Decomp:
     stays the ``_Decomp`` default."""
     from emmy.compiler.ir.schedule import ReducePlan  # noqa: PLC0415
 
-    plan = ReducePlan.parse(family_value(knobs, "REDUCE"))
+    spec = family_value(knobs, "REDUCE")
+    try:
+        plan = ReducePlan.parse_site(str(spec) if spec is not None else None, _row_workers(knobs))
+    except ValueError:
+        if spec and "coop" in str(spec):
+            # A site ``coop`` value with no WORK inventory in the dict (a fork PREFIX row cut
+            # above the WORK level, or a stripped evidence dict): the width is genuinely
+            # unknown — degrade to the serial decomposition rather than raise mid-featurize.
+            return _Decomp()
+        raise
     # ``finalize`` must be forwarded here AND by every ``_geom_feats`` caller: dropping it leaves
     # a default "atomic" in place, so ``D_finalize_kernel`` goes dead (0.0) on the affected rows
     # and the offline prior's atomic-free split interaction never fires (found scalar-side by the
@@ -380,13 +413,10 @@ def tile_signature(knobs: dict) -> tuple:
 
 def _tile_bk(knobs: dict) -> int:
     """The warp tile's slab K-chunk (``TilePlan.bk``, atom_k multiples) for ``tile_signature``;
-    1 on the scalar tier / per-cell / unparseable rows (the scalar codec spells no K token)."""
-    from emmy.compiler.ir.schedule import TilePlan  # noqa: PLC0415
-
-    try:
-        return TilePlan.parse(family_value(knobs, "TILE")).bk
-    except ValueError:
-        return 1
+    1 on the scalar tier / per-cell / unparseable rows (the scalar codec spells no K token).
+    Decoded via ``_tile_plan`` — site values (the step-7 grammar) and legacy spellings alike."""
+    plan = _tile_plan(knobs)
+    return plan.bk if plan is not None else 1
 
 
 def _stage_sig(knobs: dict) -> tuple | None:
@@ -669,18 +699,12 @@ def _warp_tile_features(knobs: dict) -> dict[str, float]:
     """Warp-tier (tensor-core MMA) tile ``D_*`` features — the warp analogue of
     :func:`_tile_features`. The CTA runs ``WM·WN`` warps (``·32`` lanes) over a
     ``WM·FM·atom_m × WN·FN·atom_n`` output tile, where ``atom_m/atom_n`` are the MMA cell dims read
-    from the parsed warp ``TILE`` codec's atom. Empty if the ``TILE`` value isn't a warp codec or
+    from the parsed warp ``TILE`` value's atom. Empty if the ``TILE`` value isn't a warp form or
     doesn't parse (so a malformed row degrades gracefully)."""
-    from emmy.compiler.ir.schedule import TilePlan, is_warp_codec  # noqa: PLC0415
-
-    spec = family_value(knobs, "TILE")
-    if not is_warp_codec(spec):
+    plan = _tile_plan(knobs)
+    if plan is None or not plan.is_warp:
         return {}
-    try:
-        plan = TilePlan.parse(spec)
-        am, an = plan.atom.atom_m, plan.atom.atom_n
-    except ValueError:
-        return {}
+    am, an = plan.atom.atom_m, plan.atom.atom_n
     slots = _free_slots(knobs)
     if slots is None:
         return {}

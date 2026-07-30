@@ -875,6 +875,36 @@ class Workers:
         return cls(kind=kind, units=units, producer=producer)
 
 
+def resolve_site_tile(spec: str | None, work: Workers | None, reduce_spec: str | None = "") -> TilePlan:
+    """The :class:`TilePlan` a SITE-grammar row denotes — :meth:`TilePlan.parse_site` plus the ONE
+    ambiguity rule the site spelling has: an EMPTY ``TILE`` beside a THREAD ``WORK`` inventory is
+    the unit-register parallel thread tile (legacy ``n<N>x<M>`` with no ``f`` sub-tile — its site
+    half spells ``""``), UNLESS the row's ``REDUCE`` value claims the threads as a cooperative
+    band (a ``coop`` token, or a legacy ``b<n>`` width) — then ``TILE`` stays the per-cell tier.
+    Every reader that reconstructs a plan from a row (the scheduler's materialize, the
+    featurizers) resolves through this one rule."""
+    plan = TilePlan.parse_site(spec, work)
+    if (spec or "").strip() or work is None or work.kind != "thread":
+        return plan
+    try:
+        red = ReducePlan.parse_site(reduce_spec, work)
+    except ValueError:
+        return plan
+    if red.coop > 1:
+        return plan  # the thread inventory is the coop band — TILE stays per-cell
+    return TilePlan(units=tuple(work.units))
+
+
+def plan_workers(plan: TilePlan | None) -> Workers | None:
+    """The worker inventory ONE tile plan implies — ``None`` for an untiled plan or a 1-thread
+    thread inventory (a bare register strip: the per-cell forms keep their derived launch
+    geometry)."""
+    if plan is None or not plan.is_tiled:
+        return None
+    w = Workers(kind="warp" if plan.is_warp else "thread", units=tuple(plan.units))
+    return None if (w.kind == "thread" and w.count == 1) else w
+
+
 def derive_workers(tiles) -> Workers | None:
     """Fold the worker inventory out of a kernel's resolved ``TILE`` slices (``TilePlan`` values,
     any iterable) — ``None`` when no slice tiles (the per-cell / pure-reduce forms keep their
@@ -883,9 +913,9 @@ def derive_workers(tiles) -> Workers | None:
     disagrees must fail loudly, never be half-ignored)."""
     work: Workers | None = None
     for plan in tiles:
-        if plan is None or not plan.is_tiled:
+        w = plan_workers(plan)
+        if w is None:
             continue
-        w = Workers(kind="warp" if plan.is_warp else "thread", units=tuple(plan.units))
         if work is None:
             work = w
         elif work != w:

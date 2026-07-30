@@ -386,7 +386,6 @@ def test_flash_form_fork_offers_geometry_grid():
     spellings, the stream fold being the primary (the evidence pick's
     prefix-consistency); f32 (no mma atom) offers chain + serial."""
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.ir.schedule import is_warp_codec  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import twisted_warp_moves  # noqa: PLC0415
     from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
@@ -396,18 +395,21 @@ def test_flash_form_fork_offers_geometry_grid():
         q, k, v = (torch.randn(1, 4, 128, 64, dtype=dtype) for _ in range(3))
         graph = trace_module(_Sdpa().cpu(), (q, k, v))
         rows = [r for r in enumerate_graph(graph, ctx) if "TILE@dd" in r or "TILE@pj" in r]
-        assert all({"TILE@dd", "TILE@pj", "REDUCE", "STAGE"} <= set(r) for r in rows), "flash rows must spell one uniform key set"
-        warp = [r for r in rows if is_warp_codec(r["TILE@dd"])]
-        chain = [r for r in rows if not is_warp_codec(r["TILE@dd"]) and r["TILE@pj"]]
+        assert all({"TILE@dd", "TILE@pj", "REDUCE", "STAGE", "WORK"} <= set(r) for r in rows), "flash rows must spell one uniform key set"
+        warp = [r for r in rows if str(r.get("WORK", "")).startswith("w")]  # F1: the tier rides the WORK entry
+        chain = [r for r in rows if not str(r.get("WORK", "")).startswith("w") and r["TILE@pj"]]
         serial = [r for r in rows if not r["TILE@dd"] and not r["TILE@pj"]]
         # (1, 4, 128, 64): every (warps_m, key_atoms) point is divisibility-legal (128 % (um·16) == 0,
         # 128 % (nt·8) == 0), so the fp16 pool spans the whole geometry grid; each geometry offers a
         # gmem-direct row plus at least one resolved cp.async stage row (the exact stage count is
-        # budget-dependent — the depth clamp dedups on the resolved spelling).
-        geoms = {r["TILE@dd"] for r in warp}
+        # budget-dependent — the depth clamp dedups on the resolved spelling). A geometry is the
+        # (site TILE@dd, WORK compute half) pair — the warp count lives in the ONE WORK entry
+        # (F1); a resolved TMA row's ``+p`` producer band is a WSPEC-successor fork, not a
+        # geometry.
+        geoms = {(r["TILE@dd"], r["WORK"].partition("+")[0]) for r in warp}
         assert len(geoms) == want_warp, f"{dtype}: expected {want_warp} warp geometries, got {len(geoms)}"
         for g in geoms:
-            stages = {r["STAGE"] for r in warp if r["TILE@dd"] == g}
+            stages = {r["STAGE"] for r in warp if (r["TILE@dd"], r["WORK"].partition("+")[0]) == g}
             assert "" in stages, f"{dtype} {g}: the gmem-direct option-0 row is missing"
             assert any("cp" in s for s in stages), f"{dtype} {g}: no resolved cp.async stage row"
         assert all(not r["STAGE"] for r in [*chain, *serial]), "chain/serial rows stamp the decided-empty stage"
@@ -451,7 +453,6 @@ def test_flash_form_fork_offers_f16acc_pv(monkeypatch):
     the realizer — while ``TILE@dd`` (the score node, softmax-bound) NEVER does. A datacenter
     target (sm_90 — full-rate f32-accumulate) and the unset gate offer none."""
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.ir.schedule import is_warp_codec  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
     from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
 
@@ -464,7 +465,7 @@ def test_flash_form_fork_offers_f16acc_pv(monkeypatch):
     monkeypatch.setenv("EMMY_FAST_MATH", "1")
     rows = pv_rows((12, 0))
     acc = [r for r in rows if "mma_m16n8k16_f16_f16/" in r["TILE@pj"]]
-    base = [r for r in rows if is_warp_codec(r["TILE@dd"]) and "mma_m16n8k16_f16_f16/" not in r["TILE@pj"]]
+    base = [r for r in rows if str(r.get("WORK", "")).startswith("w") and "mma_m16n8k16_f16_f16/" not in r["TILE@pj"]]
     assert len(acc) == len(base) > 0, f"FAST_MATH must double the warp pv rows ({len(acc)} vs {len(base)})"
     assert not any("mma_m16n8k16_f16_f16/" in r["TILE@dd"] for r in rows), "the score node must stay f32-accumulate"
     assert not any("mma_m16n8k16_f16_f16/" in r["TILE@pj"] for r in pv_rows((9, 0))), "no f16acc rows on a full-rate f32-acc target"
@@ -494,8 +495,11 @@ def test_bare_sibling_pin_selects_the_f16acc_pv_plan(monkeypatch, dynamic):
     graph = trace_module(_Sdpa().cpu(), (q, k, v), dynamic_shapes=ds)
     warp = [r for r in enumerate_graph(graph, Context.from_target((12, 0))) if "TILE@pj" in r]
     assert warp, "the bare sibling-PV pin must keep the warp tier (it used to decline to scalar)"
-    assert all(r["TILE@pj"] == "a:mma_m16n8k16_f16_f16/w2x1/f1x8/k2" for r in warp), "PV must ride the pinned sibling plan verbatim"
-    assert all(r["TILE@dd"] == "a:mma_m16n8k16_f16_f32/w2x1/f1x4/k4" for r in warp), "scores must stay on the base f32-accumulate atom"
+    # F1: rows spell the SITE halves; the pinned plan's warp geometry rides the ONE WORK entry.
+    assert all(r["TILE@pj"] == "mma_m16n8k16_f16_f16/f1x8/k2" for r in warp), "PV must ride the pinned sibling plan verbatim"
+    assert all(r["TILE@dd"] == "mma_m16n8k16_f16_f32/f1x4/k4" for r in warp), "scores must stay on the base f32-accumulate atom"
+    # (a resolved TMA stage row may add a producer band — the ``+p`` suffix is not the pin's claim)
+    assert all(r["WORK"].partition("+")[0] == "w2x1" for r in warp), "the pinned plan's warp geometry rides the WORK entry"
 
 
 @requires_cuda

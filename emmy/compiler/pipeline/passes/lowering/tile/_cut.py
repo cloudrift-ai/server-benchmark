@@ -117,7 +117,7 @@ def _cuttable(root, site: Site, stores: tuple, free: tuple) -> bool:
       projection body is empty and the store is a plain write leaves a parent that merely
       copies the workspace back out — the child IS the kernel, the tree does not shrink, and
       the recursion never terminates."""
-    from emmy.compiler.ir.tile.ir import _operand_result_names, axis_names, captured_values  # noqa: PLC0415
+    from emmy.compiler.ir.tile.ir import _operand_name, _operand_result_names, axis_names, captured_values  # noqa: PLC0415
 
     child = site.node
     if len(_operand_result_names(child)) != 1:
@@ -126,6 +126,17 @@ def _cuttable(root, site: Site, stores: tuple, free: tuple) -> bool:
         return False
     trivial_body = isinstance(root, Map) and not len(root.body) and all(st.sweep is None for st in stores)
     if trivial_body and any(s is child for s in root.sources):
+        return False
+    # The PARENT must be closed once the seam materializes: replace the child with its workspace
+    # ``Load`` and require no residual free value reads. A seam whose subtree feeds the parent
+    # through a SECOND dataflow path — the geglu map form, where the projection reads the up
+    # channel's accumulator while the seam value is only the gate's — is not a cut: only the
+    # seam value crosses the kernel boundary, so the second path's def would vanish with the
+    # subtree (found live: ``Assign v9: arg 'acc1' not defined`` on the m4096 geglu cut).
+    probe = Load(name=_operand_name(child), input="__seam_probe", index=())
+    parent_tree = _replace_edge(root, child, probe)
+    sweep_axes = {st.sweep.name for st in stores if st.sweep is not None}  # boundary-store sweeps live off-term (1q)
+    if captured_values(parent_tree, axis_names(parent_tree) | sweep_axes | {a.name for a in free}):
         return False
     return True
 

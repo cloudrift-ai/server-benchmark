@@ -1,5 +1,5 @@
-"""The generated exp-family carrier (``carrier.exp_merge`` / ``exp_combine_states``, via
-``exp_family_twist``) must reproduce the original hand-authored flash / online-softmax combine
+"""The generated exp-family algebra (``carrier.exp_merge`` / ``exp_combine_states``, via
+``Algebra.exp_family``) must reproduce the original hand-authored flash / online-softmax combine
 programs — the frozen golden below — so the hand-authored bodies could be deleted. Compared by
 value-numbering (inline temps to per-output expression trees), since the generator chooses its own
 temp names and statement order.
@@ -12,8 +12,8 @@ import pytest
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.stmt import Accum, Assign
 from emmy.compiler.ir.stmt import carrier as _carrier
+from emmy.compiler.ir.stmt.algebra import Algebra
 from emmy.compiler.ir.stmt.carrier import UnstableCarrierError
-from emmy.compiler.pipeline.passes.lowering.tile._carrier import denom, exp_family_twist, expect
 
 _COMMUTATIVE = {"add", "multiply", "maximum"}
 
@@ -134,7 +134,7 @@ def _merge_is_seedable(prog: tuple, state: tuple[str, ...]) -> bool:
 
 def test_generated_flash_matches_handwritten():
     state = ("m_i", "l_i", "O_i")
-    gen = exp_family_twist("s_e", [denom(), expect("v_e")], state)  # spec-mode Monoid
+    gen = Algebra.exp_family("s_e", (1.0, "v_e"), state)
     assert _canon(gen.merge, state) == _canon(_HAND_FLASH_MERGE, state)
     assert _canon(gen.combine_states, state) == _canon(_HAND_FLASH_COMBINE_STATES, state)
     assert gen.state_b == ("m_i__o", "l_i__o", "O_i__o")
@@ -143,7 +143,7 @@ def test_generated_flash_matches_handwritten():
 
 def test_generated_online_softmax_matches_handwritten():
     state = ("m", "d")
-    gen = exp_family_twist("s", [denom()], state)
+    gen = Algebra.exp_family("s", (1.0,), state)
     assert _canon(gen.merge, state) == _canon(_HAND_SOFTMAX_MERGE, state)
     assert _canon(gen.combine_states, state) == _canon(_HAND_SOFTMAX_COMBINE_STATES, state)
     assert gen.state_b == ("m__o", "d__o")
@@ -165,7 +165,7 @@ def test_certificate_rejects_unstable_combine():
 def test_every_exp_arg_is_nonpositive_by_construction():
     # The certificate runs inside the builders; if it passed, every exp is x − max(…, x, …).
     state = ("m_i", "l_i", "O_i")
-    tw = exp_family_twist("s_e", [denom(), expect("v_e")], state)
+    tw = Algebra.exp_family("s_e", (1.0, "v_e"), state)
     for prog in (tw.merge, tw.combine_states):
         defs = {s.name: s for s in prog if isinstance(s, Assign)}
         exps = [s for s in prog if isinstance(s, Assign) and s.op.name == "exp"]
@@ -178,8 +178,8 @@ def test_every_exp_arg_is_nonpositive_by_construction():
 def test_softmax_is_flash_minus_the_expectation_channel():
     # Structural: the (m, d) softmax combine_states is the (m, l) projection of flash's — same
     # generator, one fewer accumulator channel.
-    flash = exp_family_twist("s", [denom(), expect("v")], ("m", "l", "O"))
-    soft = exp_family_twist("s", [denom()], ("m", "d"))
+    flash = Algebra.exp_family("s", (1.0, "v"), ("m", "l", "O"))
+    soft = Algebra.exp_family("s", (1.0,), ("m", "d"))
     # both have exactly one exp-rescale pair (a, b) in combine_states
     n_exp = lambda p: sum(isinstance(s, Assign) and s.op.name == "exp" for s in p)  # noqa: E731
     assert n_exp(soft.combine_states) == n_exp(flash.combine_states) == 2

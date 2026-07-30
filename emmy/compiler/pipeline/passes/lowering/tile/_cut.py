@@ -282,13 +282,13 @@ def _replace_edge(node, child, load: Load):
 
             ops2 = tuple(load if e is child else e for e in node.operands)
             if node.lift is not None:
-                return _dc_replace(node, carrier=None, operands=ops2)
+                return _dc_replace(node, operands=ops2)
             return _dc_replace(node, operands=ops2)
         from dataclasses import replace as _dc_replace  # noqa: PLC0415
 
         ops2 = tuple(_replace_edge(e, child, load) if isinstance(e, (Map, Fold)) else e for e in node.operands)
         if node.lift is not None:
-            return _dc_replace(node, carrier=None, operands=ops2)
+            return _dc_replace(node, operands=ops2)
         return _dc_replace(node, operands=ops2)
     return node
 

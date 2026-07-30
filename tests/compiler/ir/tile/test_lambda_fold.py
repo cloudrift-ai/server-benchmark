@@ -31,7 +31,7 @@ def _dissolved_loop(*, axes_stamped: bool = True) -> Loop:
             acc,
         )
     )
-    return Loop(axis=Axis("k", 512), body=body, role=AxisRole.PLANAR, carrier=acc.as_carrier())
+    return Loop(axis=Axis("k", 512), body=body, role=AxisRole.PLANAR, carrier=acc.as_algebra())
 
 
 def test_from_loop_stores_the_canonical_shape_lambda_spelled() -> None:
@@ -85,10 +85,9 @@ def test_as_fold_is_lambda_spelled_and_loop_byte_identical() -> None:
 def _softmax_loop() -> Loop:
     """The recognized online-softmax shape — ``[Load x, *dissolved merge]`` over the (m, l)
     exp-family carrier, exactly as ``_softmax.try_online_softmax`` builds it."""
-    from emmy.compiler.ir.stmt.algebra import Carrier, State, Twist
-    from emmy.compiler.ir.stmt.carrier import denom, exp_channels
+    from emmy.compiler.ir.stmt.algebra import Algebra
 
-    carrier = Carrier(state=State(names=("m_i", "l_i")), twist=Twist(family="exp", channels=exp_channels("x0", [denom()])))
+    carrier = Algebra.exp_family("x0", (1.0,), ("m_i", "l_i"))
     body = Body((Load(name="x0", input="x", index=(Var("m"), Var("k"))), *carrier.merge))
     return Loop(axis=Axis("k", 2048), body=body, role=AxisRole.TWISTED, carrier=carrier)
 
@@ -104,7 +103,7 @@ def test_twisted_from_loop_stores_the_true_monoid() -> None:
     # The derived serial step (combine at the singleton) reproduces the dissolved merge exactly.
     assert fold.loop == loop
     assert fold.role is AxisRole.TWISTED
-    assert fold.carrier.twist.family == "exp"  # derived structurally, never stored
+    assert fold.carrier.ops is None  # twisted — derived structurally, never stored
 
 
 def test_twisted_composed_fold_is_lambda_spelled_with_derived_evaluation() -> None:
@@ -136,10 +135,10 @@ def test_twisted_rewrite_regenerates_the_combine_over_renamed_state() -> None:
     ren = {"m_i": "m2", "l_i": "l2", "x0": "s0"}
     out = rewrite(fold, lambda n: ren.get(n, n), Sigma.IDENTITY, lambda a: a)
     assert out.combine.results == ("m2", "l2")
-    assert out.carrier.state.names == ("m2", "l2")
+    assert out.carrier.names == ("m2", "l2")
     assert out.lift.results == ("s0", 1.0)
     # The regenerated combine still passes the formation verification (the fold constructed).
-    assert out.carrier.twist.family == "exp"
+    assert out.carrier.ops is None
 
 
 def test_rewrite_renames_lift_monoid_and_carrier_in_lockstep() -> None:
@@ -147,7 +146,7 @@ def test_rewrite_renames_lift_monoid_and_carrier_in_lockstep() -> None:
     ren = {"acc0": "r0", "acc1": "r1", "a_e": "av", "b0_e": "b0v", "b1_e": "b1v", "acc0__v": "r0__v", "acc1__v": "r1__v"}
     out = rewrite(fold, lambda n: ren.get(n, n), Sigma.IDENTITY, lambda a: a)
     assert out.combine.results == ("r0", "r1")
-    assert out.carrier.state.names == ("r0", "r1")  # the derived annotation tracks
+    assert out.carrier.names == ("r0", "r1")  # the derived annotation tracks
     assert out.lift.params == ("k", "b0v", "av", "b1v")
     assert out.lift.results == ("r0__v", "r1__v")
     assert [s.name for s in out.loop.body if isinstance(s, Accum)] == ["r0", "r1"]

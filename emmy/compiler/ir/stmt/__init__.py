@@ -38,11 +38,9 @@ and produce Loop-IR's canonical form.
 """
 
 from emmy.compiler.ir.stmt.algebra import (
-    Carrier,
+    Algebra,
     M,
-    State,
     StateMerge,
-    Twist,
     component_ops,
     degenerate,
     eval_lambda,
@@ -100,7 +98,7 @@ __all__ = [
     "Accum",
     "Assign",
     "Body",
-    "Carrier",
+    "Algebra",
     "StateMerge",
     "Cond",
     "Init",
@@ -118,10 +116,8 @@ __all__ = [
     "ZeroPrologue",
     "Select",
     "SelectBranch",
-    "State",
     "Stmt",
     "StridedLoop",
-    "Twist",
     "Unpack",
     "Write",
     "canonicalize_buffer_names",

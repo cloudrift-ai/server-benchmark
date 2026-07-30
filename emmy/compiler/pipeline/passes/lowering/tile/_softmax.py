@@ -4,7 +4,7 @@ standalone two-pass softmax into it.
 The classic softmax reads its input three times: a row-max reduce, a ``Σ exp(x − max)``
 reduce, then a normalize. The **online-softmax** trick (flash's softmax-stats half,
 without the P@V value accumulator) collapses the two reduces into ONE streaming pass
-over a ``(m, d)`` log-sum-exp ``TWISTED`` :class:`Carrier` — running row-max ``m`` and exp-sum
+over a ``(m, d)`` log-sum-exp ``TWISTED`` :class:`Algebra` — running row-max ``m`` and exp-sum
 denominator ``d`` — so only two reads of ``x`` remain (the normalize pass downstream is
 untouched, reading the final ``m`` + ``1/d``).
 
@@ -12,7 +12,7 @@ untouched, reading the final ``m`` + ``1/d``).
 recognizes an adjacent ``(rowmax, Σexp)`` reduce pair over the same input + reduce
 extent in a ``LoopOp`` body and rewrites it to the fused streaming loop. The carried
 ``(m, d)`` states fold through ``base``-``Accum``\\ s, so when the cell is lifted (the reduce
-``Loop`` annotated ``TWISTED`` with its ``Carrier``) the seed is derived from ``op.identity`` by
+``Loop`` annotated ``TWISTED`` with its ``Algebra``) the seed is derived from ``op.identity`` by
 ``Loop.render``; explicit
 ``Init`` stmts are emitted before the loop as well, load-bearing only on the flat-``Map``
 fallback (a cell kept as loop-IR verbatim). Recognition is called from
@@ -28,22 +28,21 @@ from dataclasses import replace
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carrier, Load, Loop
-from emmy.compiler.pipeline.passes.lowering.tile._carrier import denom, exp_family_twist
+from emmy.compiler.ir.stmt import Accum, Algebra, Assign, Body, Load, Loop
 
 
-def online_softmax_combine(m: str, d: str, s: str) -> Carrier:
-    """The standalone **online-softmax** :class:`Carrier` — flash's softmax-stats half without the
-    P@V accumulator (``expect`` channel). State ``(m, d)`` (running row max / exp-sum denominator)
-    folds this element's score partial ``s`` in ONE streaming pass::
+def online_softmax_combine(m: str, d: str, s: str) -> Algebra:
+    """The standalone **online-softmax** :class:`Algebra` — flash's softmax-stats half without the
+    P@V accumulator (expectation component). State ``(m, d)`` (running row max / exp-sum
+    denominator) folds this element's score partial ``s`` in ONE streaming pass::
 
         m_new = max(m, s);   alpha = exp(m − m_new);   p = exp(s − m_new)
         d = d·alpha + p;     m = m_new   (last)
 
-    Built as a name-free exp-family **spec** (``pivot`` + ``denom``); ``merge`` /
-    ``combine_states`` are *generated* (see ``ir/stmt/carrier.py``). The downstream normalize pass
-    reads the final ``m`` and ``1/d``."""
-    return exp_family_twist(s, [denom()], (m, d))
+    Built as the exp-family algebra over ``(m, d)`` with injected terms ``(s, 1.0)`` (pivot +
+    denominator); ``merge`` / ``combine_states`` are *generated* (see ``ir/stmt/carrier.py``). The
+    downstream normalize pass reads the final ``m`` and ``1/d``."""
+    return Algebra.exp_family(s, (1.0,), (m, d))
 
 
 def _rowmax(loop: Loop) -> tuple[str, str, tuple] | None:
@@ -78,7 +77,7 @@ def _sumexp(loop: Loop, maxacc: str, input_buf: str) -> str | None:
 def _fuse(body: Body) -> tuple[Body, bool]:
     """Recurse into nested ``Loop`` bodies; fuse any adjacent ``(rowmax, sum-of-exp)``
     reduce pair over the same input + reduce extent into one streaming online-softmax loop —
-    a ``TWISTED`` reduce ``Loop`` carrying the exp-family :class:`Carrier`, its body the score
+    a ``TWISTED`` reduce ``Loop`` carrying the exp-family :class:`Algebra`, its body the score
     ``Load`` + the carrier's dissolved streaming ``merge`` (``base``-``Accum`` folds + ψ
     rescales)."""
     stmts = list(body)

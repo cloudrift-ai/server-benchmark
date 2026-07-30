@@ -275,8 +275,11 @@ identity-lift embedding — derive at step 7); `Map` stores
 slices live in `TileOp.schedule` keyed by the codec
 (the term IMMUTABLE across the search) with the worker inventory sealed into `TileOp.work` AND spelled once as the
 `WORK` row entry beside site-local `TILE`/`REDUCE` values (step 7; legacy spellings are validated pin aliases);
-identity is the α-invariant term hash (`ops.term_key`). The remaining deltas: the `Carrier`/`Twist`/`State`
-apparatus still backs the derived reads (its retirement needs the `Loop.carrier`-replacement design pass);
+identity is the α-invariant term hash (`ops.term_key`). The `Carrier`/`Twist`/`State` apparatus is RETIRED
+(2026-07-30): the loop annotation is the flat `Algebra(combine, terms, dtypes)` — the SAME combine `Lambda` the
+`Fold` stores, family derived via `component_ops`, `combine_states` the stored body, `Fold.carrier` a derived
+property (no stored field) — with `Channel`/`exp_channels`/`_carrier.py`/the `id_*` channel arms deleted and
+`StateMerge.state` a plain name tuple (27-kernel digest byte-identical). The remaining deltas:
 `TilePlan.units` remains a (validated, `work`-agreeing) value-object field; the dynamic-attention bare-`TILE`
 contract stays a documented live exception (blocked on symbolic-trace keyed resolution).
 
@@ -422,10 +425,12 @@ re-spell) are LANDED — see the trail above. What remains:
   hand-pinned golden `--ab` verification — including re-seeding the retired PLACE goldens as routing + child
   schedule entries — on BOTH cards. Dmitry executes this separately (the manual golden method; the tuner is not
   used for golden work).
-- **`Carrier` / `Twist` / `State` retirement** (with `_carrier.py` and `ir/stmt/carrier.py`'s Carrier-facing
-  surface): NOT part of the landed window — the loop-level `Loop.carrier` annotation still stores and consumes
-  them, so the retirement needs a `Loop.carrier`-replacement DESIGN pass first (what annotates a recognized reduce
-  `Loop` when the Carrier is gone), not just a consumer migration.
+- ~~**`Carrier` / `Twist` / `State` retirement**~~ — DONE (2026-07-30). The design pass resolved `Loop.carrier`
+  to the flat `Algebra(combine, terms, dtypes)` (the field name survives; the classes and the SPEC/BOUND
+  dual-mode apparatus do not — BOUND was already construction-dead). Two deviations: `projection_distributes`
+  moved to `ir/stmt/passes.py`, not "030's home" (a digit-leading module name cannot be an import target, and
+  `_schedule` consumes it too); `Channel` was deleted rather than surviving (the `terms` tuple subsumed its one
+  irreplaceable field — `exp_merge` now takes `(state, terms)`).
 - **`TilePlan.units` field deletion** (~150 consumer sites): deliberately NOT taken by the value-grammar split —
   the site wire no longer spells workers but the value object keeps its validated, `work`-agreeing field; one
   dedicated consumer-migration commit.
@@ -735,9 +740,9 @@ nothing to delete. Pre-phase-3 DB/reservoir/online evidence is REGENERATED, neve
 | **BLOCKED** — the bare-golden matching arm: `pin_key_matches`' bare↔explicit any-of + `family_value`'s pooled read + `axis_of`'s featurizer grouping | `pipeline/knob.py`, `search/features.py` | the step-7 re-spell rewrote VALUES only and deliberately kept this: the dynamic-attention `.dynM` corpus records the PV plan on bare `TILE` (a symbolic trace resolves no stable axis key) and must match axis-keyed leaves any-of — LIVE corpus semantics | symbolic-trace keyed resolution |
 | **BLOCKED** — flash's special-cased pin plumbing remnants: the all-or-nothing `TILE@dd`+`TILE@pj` contract (`greedy.py`), the dynamic-attention bare-`TILE` schema arm (`golden.py`), `_narrow_flash_forms`' keyed-only arm + the masked-flash bare-`TILE` fallback (`_schedule.py`) | `search/`, `_schedule.py` | the live mechanics of the same bare-`TILE` contract (the row above) — generic codec keys can replace them only when a symbolic-axis tree spells a stable site key | symbolic-trace keyed resolution |
 | ~~`Fold.step` (the composed step sequence) + the step-splice arm of `Fold.loop`~~ — DONE at step 7(i–iii) (the derived blocked evaluation; QK a hoisted operand edge; `_composes` deliberately SURVIVES as the derived composed-reduce predicate reading `step_stmts()`/operand edges; residual stale docstrings in `ir/tile/ir.py`/`_flash.py`) | `ir/tile/ir.py`, `_schedule.py` | the derived blocked evaluation of `combine` | ~~step 7~~ landed |
-| `Carrier` / `Twist` / `State` + every reader (`_coop_carrier`, `_twisted_pair`'s carrier reads, the kernel-realizer carrier plumbing, the `graph.py` ser/de arms) | `ir/stmt/algebra` + tile/kernel lowering | structural derivation off the stored `combine` (landed 1p, extended to the composed forms at step 7) — but the loop-level `Loop.carrier` annotation still stores/consumes them | a follow-up window, after the `Loop.carrier`-replacement design pass |
-| `_carrier.py` — the Carrier-assembly layer (`exp_family_twist`, the spec-`Twist` path); `projection_distributes` MOVES to `030`'s home, not deleted | `lowering/tile/_carrier.py` | recognition builds `(init, combine)` directly via the `ir/stmt/carrier` generators | with the `Carrier` retirement above |
-| `ir/stmt/carrier.py`'s Carrier-facing surface (`id_accums`/`id_merge`/`id_combine_states`' carrier arms, `Channel.term`/`lift`/`dtype`) — the exp-family generators (`exp_merge`, `exp_combine_states`) + `Channel` SURVIVE as twisted-combine construction | `ir/stmt/carrier.py` | the stored `combine` + singleton specialization | with the `Carrier` retirement above |
+| ~~`Carrier` / `Twist` / `State` + every reader~~ — DONE 2026-07-30 (the flat `Algebra(combine, terms, dtypes)` annotation; `Fold.carrier` a derived property; realizer/030/graph arms read `names`/`terms`/`ops`/`combine_states` off it) | `ir/stmt/algebra` + tile/kernel lowering | structural derivation off the stored `combine` | ~~follow-up window~~ landed |
+| ~~`_carrier.py` — the Carrier-assembly layer~~ — DONE (deleted; `Algebra.exp_family` is the constructor; `projection_distributes` moved to `ir/stmt/passes.py` — a digit-named pass module can't be imported from) | `lowering/tile/_carrier.py` | recognition builds `(init, combine)` directly via the `ir/stmt/carrier` generators | ~~with the retirement~~ landed |
+| ~~`ir/stmt/carrier.py`'s Carrier-facing surface~~ — DONE (`id_*` deleted, emission inlined into `Algebra`; `Channel` deleted too — a DEVIATION from the survive-plan: `terms` subsumed it, `exp_merge` takes `(state, terms)`; `exp_combine_states` + the generator/stabilizer/certificate survive) | `ir/stmt/carrier.py` | the stored `combine` + singleton specialization | ~~with the retirement~~ landed |
 | ~~the `from_loop` byte-identity FALLBACK + the `_lambda_of_*` reader tolerance~~ — DONE at step 7(iii), with a deviation: the gate became the raw-loop-escape discriminator (`from_loop → Fold \| None`; byte gate on body/axis/unroll only), not an assert — asserting would forbid the legitimate raw-loop-IR kernels | `ir/tile/ir.py` | every recognized fold λ-spelled by construction; non-λ shapes keep the `Map` raw-loop escape | ~~step 7~~ landed |
 | ~~`WSPEC` as a root knob family; the denormalized value spellings (`REDUCE`'s coop width `b512`, `TILE`'s worker tokens)~~ — DONE at step 7(v) (the `WSPEC` Knob + legacy spellings survive as loudly-validated env-pin ALIASES; the `g<n>a\|k` finalize letter KEPT — a mode, not an axis token) | goldens/DB/prior, `knob.py` codecs | `WORK` + site-local values (mechanical re-speller, 715 rows) | ~~step 7~~ landed |
 | ~~lowered-nest kernel identity (`structural_key` lowers first)~~ — DONE at step 7(iv) | `ir/tile/ops.py` / `search/keys.py` | the α-invariant hash of the canonically renumbered term (`ops.term_key`) | ~~step 7~~ landed |

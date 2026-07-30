@@ -23,8 +23,8 @@ from emmy.compiler.ir.stmt.base import (
     select_to_ternary,
 )
 
-if TYPE_CHECKING:  # annotation only — algebra imports leaves (Accum.as_carrier does the runtime import)
-    from emmy.compiler.ir.stmt.algebra import Carrier
+if TYPE_CHECKING:  # annotation only — algebra imports leaves (Accum.as_algebra does the runtime import)
+    from emmy.compiler.ir.stmt.algebra import Algebra
 
 
 def _resolve_value(name: str, ctx: RenderCtx) -> str:
@@ -502,25 +502,21 @@ class Accum(Stmt):
         """The scalar op-fold of two partials: ``name = op(name, name__o)`` — the
         same combine the cooperative / split-K realizations apply, reified as a
         one-``Assign`` program so the decomposition move reads it uniformly with
-        ``Carrier.combine_states``."""
+        ``Algebra.combine_states``."""
         return (Assign(name=self.name, op=self.op, args=(self.name, f"{self.name}__o"), dtype=self.dtype),)
 
-    def as_carrier(self) -> Carrier:
-        """This additive/associative ``Accum`` AS the degenerate 1-component :class:`Carrier` it already is —
-        state ``(name,)``, ``merge`` = ``name = op(name, value)``, identity the op's. The carrier-algebra
-        fact that a contraction / scalar reduce is the trivial (``id``-twist) carrier: it lets the reduce
-        ``Loop`` fold through the **same** cooperative / cross-partition path as a twisted carrier, with no
-        additive special-case. The auto-derived ``combine_states`` (``name = op(name, name__o)``) equals
+    def as_algebra(self) -> Algebra:
+        """This additive/associative ``Accum`` AS the degenerate 1-component :class:`Algebra` it already
+        is — state ``(name,)``, ``merge`` = ``name = op(name, value)``, identity the op's. The fold-algebra
+        fact that a contraction / scalar reduce is the trivial (componentwise) algebra: it lets the reduce
+        ``Loop`` fold through the **same** cooperative / cross-partition path as a twisted algebra, with no
+        additive special-case. The derived ``combine_states`` (``name = op(name, name__o)``) equals
         :meth:`combine_partials`, so the ``⊙`` realization is identical."""
-        from emmy.compiler.ir.stmt.algebra import Carrier, State, Twist  # local: algebra imports leaves
-        from emmy.compiler.ir.stmt.carrier import Channel
+        from emmy.compiler.ir.stmt.algebra import Algebra  # local: algebra imports leaves
 
-        # The folded ``value`` is a sibling whose name lives in the degenerate ``merge``
-        # (``name = op(name, value)``), built as the ``id``-family spec.
-        return Carrier(
-            state=State(names=(self.name,)),
-            twist=Twist(family="id", channels=(Channel(fold=self.op, term=self.value, dtype=self.dtype),)),
-        )
+        # The folded ``value`` is the injected term whose name lives in the degenerate ``merge``
+        # (``name = op(name, value)``).
+        return Algebra.degenerate(folds=(self.op,), names=(self.name,), terms=(self.value,), dtypes=(self.dtype,))
 
     # Algebraic traits forward to the scalar combine op — a ``max`` Accum and a
     # ``sum`` Accum differ, and ``self.op`` is the source of truth.
@@ -666,9 +662,8 @@ class Init(Stmt):
     """Explicit accumulator / carried-state seed at this scope:
     ``<dtype> <name> = <identity>;`` — a scope-local declaration.
 
-    Currently UNPRODUCED — a carrier's seed now rides on its fold and is derived by
-    ``Loop.render`` (an ``Accum`` from ``op.identity``, a ``Carrier`` from
-    ``State.identity``), so no pass emits an explicit ``Init``. Kept as a primitive
+    Currently UNPRODUCED — a fold's seed now rides on its ``Accum`` and is derived by
+    ``Loop.render`` from ``op.identity``, so no pass emits an explicit ``Init``. Kept as a primitive
     (with its render / rewrite / validation handlers) for an explicit cross-scope seed
     the cooperative / split-K reduce tier may want — e.g. a chunked-K accumulator that
     must seed above the outer loop and NOT reset per chunk. ``identity`` is the neutral

@@ -934,7 +934,7 @@ def canonicalize_op_clusters(stmts: Body) -> Body:
     ``dataclasses.fields`` to locate any field currently holding an
     ``ElementwiseImpl`` (covers ``Init.op`` / ``Assign.op`` /
     ``Accum.op`` without coupling this module to those IR dialects). A
-    carrier (``Carrier``) and the kernel-IR cross-thread combine
+    carrier (``Algebra``) and the kernel-IR cross-thread combine
     stmts (``WarpShuffle`` / ``TreeHalve``) carry their op inside an
     ``Assign`` program (``merge`` / ``combine_states``), already
     canonicalized at the carrier before lowering. The replacement is

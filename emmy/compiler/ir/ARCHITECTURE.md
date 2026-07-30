@@ -34,12 +34,12 @@ top-level layer/pass picture see `compiler/ARCHITECTURE.md`.
   is read off its annotated reduce loop's `AxisRole`, not a Python
   type. `010_recognize` lifts the `Map` (a thin `Body` wrapper over
   the annotated loop nest, each reduce `Loop` carrying its `AxisRole` +
-  `Carrier`) with an UNMAPPED `Placement`; the `_schedule` helper (inside `010_recognize`) maps the free
+  `Algebra`) with an UNMAPPED `Placement`; the `_schedule` helper (inside `010_recognize`) maps the free
   axes onto the grid and decides the reduce `ReducePlan` via the single
   `REDUCE` codec knob (`g<n>` cta / `b<n>` coop / `r<n>` reg; the
   decision hierarchy = env pin > search/prior fork > conservative
   default). The knob is ephemeral — resolved here into the schedule's
-  `ReducePlan`; the combine stays on the loop's `Carrier`. Any static
+  `ReducePlan`; the combine stays on the loop's `Algebra`. Any static
   `PLANAR` / `TWISTED` reduce is cooperation-eligible (degenerate
   `sum`/`max`/`mean` AND twisted online-softmax / flash, scalar AND
   full-row outputs); the default cooperates a wide reduce feeding an
@@ -163,7 +163,7 @@ tuple — there is no shared base class; the carriers are plain `Stmt`s
 that happen to share the reduce-surface methods. `Accum` / `Mma` expose
 `associative` / `commutative` / `has_identity` traits (`Accum` forwards to its scalar
 `op`; `Mma` reports the additive-fold constants). A reduce `Loop` also carries its
-scheduling `AxisRole` (`loop.role`) and the decoupled `Carrier` algebra payload
+scheduling `AxisRole` (`loop.role`) and the decoupled `Algebra` payload
 (`loop.carrier`), both stamped by tile-lowering recognition (commutativity is unused —
 split/reorder legality is a future cooperative-tier concern, recorded structurally when
 it returns).
@@ -180,12 +180,12 @@ reduce loop where it needs it, never a Python type:
   HAS a `Body`, it is not one; there is no `source` / nested-node field — composition is
   just stmt order in the body.
 - A reduction is a `Map` whose body holds the **annotated reduce `Loop`** followed by its
-  projection. The `Loop` carries its `AxisRole` (`loop.role`) and a `Carrier`
+  projection. The `Loop` carries its `AxisRole` (`loop.role`) and an `Algebra`
   (`loop.carrier`); `ops.reduce_loop(op)` returns the outermost annotated reduce `Loop` and
   `ops.axis_role(op)` reads its role — `PLANAR` (plain `sum`/`max`/`mean`), `TWISTED`
   (online-softmax / flash), `CONTRACTION` (matmul), or `FREE` (pointwise / flat fallback).
 - A contraction is a `Map` whose reduce `Loop` is `CONTRACTION`: the `⊗` lift `Assign` sits
-  in the loop body and the additive fold's degenerate `Carrier` rides the loop. The shared
+  in the loop body and the additive fold's degenerate `Algebra` rides the loop. The shared
   builder `ops.contraction_loop(lift, fold, operand_bodies, reduce_axis)` builds it in the
   recognizable `Accum`-in-`Loop` form (used by flash's score producer and the scalar matmul).
 
@@ -202,40 +202,41 @@ contraction). Recognition stamps the `CONTRACTION` role on that form (keeping th
 the `_schedule` helper (inside `010_recognize`) gates flash structurally (a reduce loop nested inside a reduce loop); the mma
 atom tier reads the operands off the annotated loop to pick the tensor-core cell.
 
-`Carrier` (`ir/stmt/algebra.py`) is the carrier **algebra** of a reduce — its carried
-`State` plus the ψ-conjugated `Twist` combine — decoupled from any loop position. It is NOT
-a `Stmt` and carries no `partial` / `axis`; a reduce `Loop` carries one (`loop.carrier`) so
-the streaming / cooperative / cross-CTA materializers read the combine off the loop. It
-derives the streaming fold (`merge`), the cross-partition fold (`combine_states`), the
-degenerate `Accum` form (`as_accums`), and the one-shot cross-partition combine
-(`as_state_merge` → a renderable `StateMerge` stmt) from `(state, twist)`. A *degenerate*
-carrier (the `id` twist) is a plain `sum`/`max`/`mean` reduce; a *twisted* one (`exp`) is
-online-softmax / flash; a contraction's carrier is the degenerate carrier of its additive
-fold. `Accum.as_carrier()` is that additive `Accum` AS the degenerate 1-component `Carrier`
-it already is. `State` bundles the internal-state SSA `names`. The neutral element (seed) is
-NOT stored on `State` — a carrier dissolves into its fold `Accum`s (`Carrier.as_accums`) and
-each fold's seed is its `op.identity`, so there is one source of truth for the seed.
-`State.other` is the second-operand names `"<n>__o"` the cross-partition combine reads.
+`Algebra` (`ir/stmt/algebra.py`) is the fold **algebra** of a reduce — the flat monoid `combine`
+`Lambda` (the SAME one-program S × S → S spelling a `Fold` node stores) plus the per-element
+injected `terms` (one per state component: a folded SSA name, or a float literal — softmax's
+denominator `1.0`) and the optional per-component accumulator-`dtypes` side-tuple — decoupled
+from any loop position. It replaced the retired `Carrier`/`Twist`/`State` ψ-conjugation
+apparatus (a family string + channel spec that stored a SECOND, generated spelling of ⊕): there
+is now ONE spelling of the combine, and everything else derives structurally. It is NOT a `Stmt`
+and carries no `partial` / `axis`; a reduce `Loop` carries one (`loop.carrier`) so the
+streaming / cooperative / cross-CTA materializers read the combine off the loop. Derived reads:
+the state `names` are `combine.results`, `state_b` is the second param half (the `"<n>__o"`
+spelling), DEGENERATE-vs-TWISTED is the `component_ops(combine)` shape test (`Algebra.ops` —
+`None` ⇒ the exp family; no family annotation), the streaming fold (`merge`) is combine
+specialized at the injection singleton, the cross-partition fold (`combine_states`) IS the
+stored combine's body (re-emitted with the dtypes for a degenerate ⊕, whose stored program is
+dtype-free), and `as_accums` / `dissolve` / `as_state_merge` (→ a renderable `StateMerge` stmt,
+a twisted program regenerating keyed on `other[0]`) follow. A *degenerate* algebra is a plain
+`sum`/`max`/`mean` reduce; a *twisted* one is online-softmax / flash; a contraction's algebra is
+the degenerate algebra of its additive fold. `Accum.as_algebra()` is that additive `Accum` AS
+the degenerate 1-component `Algebra` it already is. The neutral element (seed) is NOT stored —
+a degenerate algebra dissolves into its fold `Accum`s and each fold's seed is its `op.identity`,
+so there is one source of truth for the seed.
 
-**The `Twist` — the part that varies, generated not hand-authored.** Transport of structure: a
-monoid `(·, e)` conjugated by a bijection ψ gives the twisted combine `x ⊕ y = ψ(ψ⁻¹(x) · ψ⁻¹(y))`.
-The carrier algebra above is shared; ψ is the twist, carried on `Carrier.twist` **as data** in one of
-two modes. In **SPEC mode** the twist is a name-free `(family, channels)` — a tuple of `Channel`s
-(`fold` ⊕, `term`, `lift` ⊗) — and the combine *programs* are GENERATED on demand by the
-mode-dispatching `Carrier` accessors `carrier.merge` (streaming fold) / `.combine_states` (cross-partition
-state⊕state, reading the `state_b` operand `"<n>__o"`) / `.state_b`. Generation (`ir/stmt/carrier.py`)
-builds the naive `ψ∘base∘(ψ⁻¹×ψ⁻¹)` combine — associativity inherited from the base monoid for free —
-then a per-family stabilizer rewrites it to the numerically-stable form (distribute the ψ-rescale,
-fuse exponentials, fold identities, DCE/CSE) and a structural certificate asserts every surviving
-`exp` has a `≤ 0` argument. `family="exp"` is the online-softmax / flash log-sum-exp carrier (built
-from `pivot`/`denom`/`expect` channels — softmax is flash minus the `expect` channel); `family="id"`
-is the degenerate identity twist (a plain reduce, `Accum.as_carrier`). In **BOUND mode**
-(`family is None`) the programs are stored verbatim — used only by `as_state_merge(other)`, the
-one-shot finalize `StateMerge` whose `merge` IS its `combine_states` (regenerated with temps keyed on
-`other[0]`), so a two-partition merge renders through the same machinery as a streaming step. **Example** — flash
-attention's online softmax (the log-sum-exp carrier): state `(m, l, O)`, partial `(score, value)`,
-identity `(−inf, 0, 0)`, merge `m_new=max(m,s); alpha=exp(m−m_new); l=l·alpha+exp(s−m_new);
-O=O·alpha+exp(s−m_new)·v; m=m_new`.
+**The twisted combine — generated, not hand-authored.** Transport of structure: a monoid `(·, e)`
+conjugated by a bijection ψ gives the twisted combine `x ⊕ y = ψ(ψ⁻¹(x) · ψ⁻¹(y))`. Generation
+(`ir/stmt/carrier.py` — `exp_combine_states` / `exp_merge` over `(names, terms)`) builds the naive
+`ψ∘base∘(ψ⁻¹×ψ⁻¹)` combine — associativity inherited from the base monoid for free — then a
+per-family stabilizer rewrites it to the numerically-stable form (distribute the ψ-rescale, fuse
+exponentials, fold identities, DCE/CSE) and a structural certificate asserts every surviving
+`exp` has a `≤ 0` argument. `Algebra.exp_family(score, extra_terms, names)` builds the
+online-softmax / flash log-sum-exp algebra — its stored combine IS the generator's program (the
+formation invariant a consuming `Fold` asserts), and the component ROLES are shape-derived off
+the terms: component 0 the pivot (score), a literal-`1.0` term a denominator, a value term an
+expectation — softmax is flash minus the expectation component. **Example** — flash attention's
+online softmax: state `(m, l, O)`, partial `(score, value)`, identity `(−inf, 0, 0)`, merge
+`m_new=max(m,s); alpha=exp(m−m_new); l=l·alpha+exp(s−m_new); O=O·alpha+exp(s−m_new)·v; m=m_new`.
 
 **The λ-foldMap primitives** (`ir/stmt/body.py` / `ir/stmt/algebra.py`) — the finished algebra vocabulary the tile IR
 stores against (see the tile-lowering ARCHITECTURE for the storage story). `Lambda(params, body, results)` is the ONE
@@ -267,7 +268,7 @@ against.
 | `Load`                       | Body-form external read: `name = load(input)[index...]`. `input` matches the producing graph node's id.           |
 | `Assign`                     | SSA body stmt: `name = op(args)` with `op: ElementwiseImpl`.                                                      |
 | `Accum`                      | Reduce accumulator: `name = op(name, value)` inside a reduce `Loop`. Initialized to its op's identity. ``axes`` lists the reduction axis names — propagated through Sigma renames (including σ-splits via `Expr.free_vars()`); the escape-analysis helper derives cross-thread cooperativity from ``axes ∩ enclosing ThreadTile.axes``. |
-| `Init`                       | Explicit `<dtype> name = identity;` seed at this scope (`name` + scalar `identity` + `dtype`). Used for a `Carrier`'s state (one per `State` component, via `State.inits()`), emitted above the streaming `Loop`. Scope-bound (never hoisted); shadows a deeper same-named `Accum` init. |
+| `Init`                       | Explicit `<dtype> name = identity;` seed at this scope (`name` + scalar `identity` + `dtype`). Used for a carried state's seed (one per component), emitted above the streaming `Loop`. Scope-bound (never hoisted); shadows a deeper same-named `Accum` init. |
 | `Write`                      | Write an SSA value to output at `index`.                                                                          |
 | `Select` + `SelectBranch`    | Coord-predicated binding (replaces the old Mux).                                                                  |
 | `Loop`                       | Serial iteration block: `axis` + nested `body`.                                                                   |

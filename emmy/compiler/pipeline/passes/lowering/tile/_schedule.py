@@ -55,6 +55,7 @@ from emmy.compiler.ir.schedule import (
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Lambda, Load, Loop, Stmt, Write
 from emmy.compiler.ir.stmt.algebra import M, component_ops
+from emmy.compiler.ir.stmt.passes import projection_distributes
 from emmy.compiler.ir.tile import (
     Channel,
     ContractionView,
@@ -74,7 +75,6 @@ from emmy.compiler.ir.tile.ops import lower as lower_op
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.knob import canon_family_value, family_of, values_equal
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import make_cone, map_cone, semiring_binding
-from emmy.compiler.pipeline.passes.lowering.tile._carrier import projection_distributes
 from emmy.compiler.pipeline.pipeline import LoweringError
 from emmy.compiler.pipeline.search.space import (
     F16_MMA_F32_ACC,
@@ -1487,7 +1487,7 @@ def _splitk_option(
     partition (:class:`ReducePlan`) that ``030_split_reduce`` consumes into the cross-CTA partial + finalize.
 
     The additive carrier is built exactly as ``contraction_loop`` / a plain-sum reduce does — an
-    ``Accum(op="add").as_carrier()`` (identity ``0.0``, 1 component) — so ``030_split_reduce``'s finalize
+    ``Accum(op="add").as_algebra()`` (identity ``0.0``, 1 component) — so ``030_split_reduce``'s finalize
     (which reads the carrier's identity + ``as_state_merge``) needs no change. The output tile
     (``tier``) rides the inner ``ContractionView``; the ``Fold`` holds only the K partition.
 
@@ -1576,7 +1576,7 @@ def _splitk_option(
     accs = tuple(inner_fold.combine.results)
     ident_lift = Lambda(params=(ksplit.name, *accs), body=Body(()), results=accs)
     o_init, o_combine = M(*component_ops(inner_fold.combine), names=accs)
-    op = Fold(carrier=None, axis=ksplit, operands=(inner_fold,), lift=ident_lift, init=o_init, combine=o_combine, dtypes=inner_fold.dtypes)
+    op = Fold(axis=ksplit, operands=(inner_fold,), lift=ident_lift, init=o_init, combine=o_combine, dtypes=inner_fold.dtypes)
     outer_fold = op
     # The projection rides the ``Map`` wrapper — its ONE home; ``030_split_reduce`` reads it there and
     # retargets it (per-partition atomic store / a deferred finalize after the cross-partition sums).
@@ -2416,8 +2416,8 @@ def _twisted_warp_options(
     stage_key = _family_key(op, STAGE.name, red)
     if not isinstance(head.a, Load):
         return []
-    channels = red.carrier.twist.channels
-    if len(channels) != 3 or channels[1].lift is not None or channels[2].lift is None:
+    terms = red.carrier.terms
+    if len(terms) != 3 or isinstance(terms[1], str) or not isinstance(terms[2], str):
         return []
     q_tensor = tile.inputs.get(head.a.input) if tile.inputs else None
     atom_name = {"f16": "mma_m16n8k16_f16_f32", "bf16": "mma_m16n8k16_bf16_f32"}.get(

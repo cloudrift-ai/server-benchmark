@@ -1,15 +1,19 @@
-"""The carrier algebra — the decoupled reduce carrier.
+"""The fold algebra — the loop-carried ⊕, spelled ONCE.
 
-The algebra of a kernel is **in the body**: the fold ``⊕`` is a :class:`Carrier` (state + a
-ψ-conjugated :class:`Twist`) that rides on the reduce ``Loop`` it folds through (``loop.carrier``).
-A contraction (matmul) is just a reduce ``Loop`` whose ``AxisRole`` is ``CONTRACTION`` — the ``⊗``
-lift sits in the loop body, recognized structurally on demand, never stored as a node kind. The
-old ``Monoid`` / ``Semiring`` op-tree node *wrappers* are retired; passes read the structure
-(the annotated loop + its carrier) directly. These primitives are consolidated here so the
-algebra lives in one place:
+The algebra of a kernel is **in the body**: a reduce ``Loop`` carries an :class:`Algebra`
+(``loop.carrier``) — the TRUE monoid's flat ``combine`` :class:`Lambda` (the SAME one-program
+spelling a ``Fold`` node stores) plus the per-element injected ``terms`` — and every derived
+program (the streaming merge, the cross-partition combine, the ``Accum`` forms, the one-shot
+:class:`StateMerge`) reads off it structurally. A contraction (matmul) is just a reduce ``Loop``
+whose ``AxisRole`` is ``CONTRACTION`` — the ``⊗`` lift sits in the loop body, recognized
+structurally on demand, never stored as a node kind. The old ``Monoid`` / ``Semiring`` node
+wrappers AND the ψ-conjugation apparatus (``Carrier`` / ``Twist`` / ``State`` — a family string
++ channel spec with a second, generated spelling of ⊕) are retired: there is no family
+annotation (DEGENERATE vs TWISTED is the :func:`component_ops` shape test) and no second
+spelling (``combine_states`` IS the stored combine's body).
 
-- :class:`State` / :class:`Twist` / :class:`Carrier` — the loop-carried associative combine (⊕).
-- :class:`StateMerge` — the renderable cross-partition state⊕state combine a carrier emits.
+- :class:`Algebra` — the loop-carried associative combine (⊕) + injection terms.
+- :class:`StateMerge` — the renderable cross-partition state⊕state combine it emits.
 
 The lift / projection wrapper itself — :class:`~emmy.compiler.ir.tile.ir.Map` — is a
 *tile-IR* op-tree node (it carries the kernel's schedule), so it lives in ``ir/tile/ir.py``.
@@ -23,14 +27,7 @@ from functools import cached_property
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.stmt.base import RenderCtx, Stmt, render_merge_program
 from emmy.compiler.ir.stmt.body import Body, Lambda
-from emmy.compiler.ir.stmt.carrier import (
-    Channel,  # noqa: F401 — re-exported for the carrier builders / tests
-    exp_combine_states,
-    exp_merge,
-    id_accums,
-    id_combine_states,
-    id_merge,
-)
+from emmy.compiler.ir.stmt.carrier import exp_combine_states, exp_merge
 from emmy.compiler.ir.stmt.leaves import Accum, Assign
 
 
@@ -39,180 +36,153 @@ def _rename_assign_args(a: Assign, sub: dict[str, str]) -> Assign:
 
 
 @dataclass(frozen=True)
-class State:
-    """The carried state of a reduce :class:`Carrier` — the internal-state SSA ``names``. The
-    state is the *carrier* a :class:`Twist` operates on: the twist's ``merge`` folds a partial
-    into :attr:`names`, its ``combine_states`` merges this state with a second one named by
-    :attr:`other`. The seed (neutral element) is NOT stored here — a carrier dissolves into its
-    fold ``Accum``\\ s (:meth:`Carrier.as_accums`), and each fold's seed is its ``op.identity``
-    (so there's one source of truth for the seed: the fold, not a separately-authored identity
-    that could drift)."""
+class Algebra:
+    """The fold **algebra** of a reduce — the flat monoid ``combine`` (``S × S → S``, the ONE ⊕
+    program, the same :class:`Lambda` spelling a ``Fold`` node stores) plus the per-element
+    injected ``terms`` (one per state component: the folded SSA name, or a float literal —
+    softmax's denominator ``1.0``) — decoupled from any op-tree node or loop position.
 
-    names: tuple[str, ...]
+    It derives the streaming fold (:attr:`merge`), the cross-partition fold
+    (:attr:`combine_states` — the stored combine's body, re-emitted with the accumulator dtypes
+    for a degenerate ⊕), the ``Accum`` form (:meth:`as_accums`) and the one-shot cross-partition
+    combine (:meth:`as_state_merge`). It is NOT a ``Stmt`` and carries no ``partial`` / ``axis``:
+    a reduce ``Loop`` carries one (``loop.carrier``) so the streaming / cooperative / cross-CTA
+    materializers read the combine off the loop, not a node. DEGENERATE (a plain
+    ``sum`` / ``max`` / ``mean`` — each component folded by its own self-op) vs TWISTED
+    (online-softmax / flash's exp/LSE rescale) is the :func:`component_ops` shape test on the
+    stored combine — no family annotation. A contraction's algebra is the degenerate algebra of
+    its additive fold (the ``⊗`` lift sits in the loop body). ``dtypes`` is the per-component
+    accumulator-dtype side-tuple (precision, not algebra — it keeps the emitted programs
+    byte-identical); empty means default per component."""
+
+    combine: Lambda
+    terms: tuple = ()
+    dtypes: tuple = ()
+
+    @classmethod
+    def degenerate(cls, folds: tuple[ElementwiseImpl, ...], names: tuple[str, ...], terms: tuple, dtypes: tuple = ()) -> Algebra:
+        """The componentwise (plain-fold) algebra — combine spelled exactly as :func:`M` spells
+        it (``sᵢ = ⊕ᵢ(sᵢ, sᵢ__o)``), with no identity requirement (the seed is the consuming
+        fold's ``op.identity``, derived where needed)."""
+        other = tuple(f"{n}__o" for n in names)
+        body = Body(tuple(Assign(name=n, op=op, args=(n, o)) for n, op, o in zip(names, folds, other, strict=True)))
+        return cls(combine=Lambda(params=names + other, body=body, results=names), terms=terms, dtypes=dtypes)
+
+    @classmethod
+    def exp_family(cls, score: str, extra_terms: tuple, names: tuple[str, ...]) -> Algebra:
+        """The exp/LSE-family (twisted) algebra over ``names`` (pivot first) — the combine IS the
+        generated cross-partition program (``exp_combine_states``), the terms the injection
+        singleton (``score``, then ``1.0`` for a denominator / a value name for an expectation)."""
+        other = tuple(f"{n}__o" for n in names)
+        combine = Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
+        return cls(combine=combine, terms=(score, *extra_terms))
 
     @property
-    def other(self) -> tuple[str, ...]:
-        """The second-operand state names for the cross-partition combine — ``"<n>__o"``
-        per component, the right operand ``combine_states`` reads."""
-        return tuple(f"{n}__o" for n in self.names)
+    def names(self) -> tuple[str, ...]:
+        """The carried state's SSA names — the combine's results."""
+        return tuple(self.combine.results)
 
+    @property
+    def state_b(self) -> tuple[str, ...]:
+        """The second-operand state names for the cross-partition combine — the combine's
+        second param half (the ``"<n>__o"`` spelling both constructors use)."""
+        return tuple(self.combine.params[len(self.combine.results) :])
 
-@dataclass(frozen=True)
-class Twist:
-    """The ψ-conjugated combine of a reduce carrier — the part that VARIES while the carrier
-    algebra (carried state + neutral element) stays the same.
+    @cached_property
+    def ops(self) -> tuple[ElementwiseImpl, ...] | None:
+        """The per-component ⊕ handles of a DEGENERATE combine (:func:`component_ops`), or
+        ``None`` for a twisted (exp-family) one — the family discriminator."""
+        return component_ops(self.combine)
 
-    Transport of structure (the article): a monoid ``(·, e)`` conjugated by a bijection ψ gives
-    the twisted combine ``x ⊕ y = ψ(ψ⁻¹(x) · ψ⁻¹(y))``. The twist is carried here as DATA, in one
-    of two modes:
-
-    - **SPEC mode** (``family`` set, with ``channels``): the combine is generated on demand by
-      :class:`Carrier` from ``(family, channels, state)`` — the inverse-ψ generator builds the
-      naive combine and a per-family stabilizer recovers the numerically-stable form (see
-      ``ir/stmt/carrier.py``). ``"exp"`` is online-softmax / flash's max-rescale LSE; ``"id"`` is
-      the degenerate identity twist (a plain reduce). The stored program fields stay empty.
-    - **BOUND mode** (``family is None``): the programs are stored verbatim — used by the one-shot
-      ``Carrier.as_state_merge`` finalize, whose ``merge`` IS its ``combine_states``.
-
-    A :class:`Carrier` reads ``carrier.merge`` / ``.combine_states`` / ``.state_b`` (the
-    mode-dispatching accessors), never these fields directly.
-    """
-
-    family: str | None = None
-    channels: tuple[Channel, ...] = ()
-    merge: tuple[Stmt, ...] = ()
-    combine_states: tuple[Assign, ...] = ()
-    state_b: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class Carrier:
-    """The carrier **algebra** of a reduce — its carried :class:`State` plus the ψ-conjugated
-    :class:`Twist` combine — decoupled from any op-tree node or loop position.
-
-    It knows how to derive the streaming fold (:attr:`merge`), the cross-partition fold
-    (:attr:`combine_states`), the degenerate ``Accum`` form (:meth:`as_accums`), and the
-    one-shot cross-partition combine (:meth:`as_state_merge`) from ``(state, twist)``. It is NOT
-    a ``Stmt`` and carries no ``partial`` / ``axis``: a reduce ``Loop`` carries one
-    (``loop.carrier``) so the streaming / cooperative / cross-CTA materializers read the combine
-    off the loop, not a node. A *degenerate* carrier (the ``id`` twist) is a plain
-    ``sum`` / ``max`` / ``mean`` reduce; a *twisted* one (``exp``) is online-softmax / flash. A
-    contraction's carrier is the degenerate carrier of its additive fold (the ``⊗`` lift sits in
-    the loop body)."""
-
-    state: State
-    twist: Twist
+    @property
+    def component_dtypes(self) -> tuple:
+        """The per-component accumulator dtype, ``None``-filled when unset."""
+        return self.dtypes or (None,) * len(self.combine.results)
 
     @property
     def out(self) -> str:
         """The bound output name — the primary carried state component."""
-        return self.state.names[0]
+        return self.combine.results[0]
 
-    def rename(self, rename_ssa) -> Carrier:
-        """A copy with every SSA name mapped through ``rename_ssa`` — the carried state, the
-        channels' injected-term names, and (bound mode) the stored combine programs. The
-        ``Loop`` / ``StridedLoop`` rewrites call this so an annotated reduce's ALGEBRA tracks
-        its body through SSA renaming: a verbatim carrier after ``rename_ssa_sequential`` left
-        the cooperative combine reading a state name the renamed body no longer defines (the
-        M=1 cut-consumer's ``acc1``-undefined miscompile). σ / axis substitutions still never
-        touch the carrier — only names move here."""
-        from dataclasses import replace as _replace
-
-        state = State(names=tuple(rename_ssa(n) for n in self.state.names))
-        tw = self.twist
-        channels = tuple(_replace(c, term=rename_ssa(c.term) if isinstance(c.term, str) else c.term) for c in tw.channels)
-        if tw.family is not None:
-            twist = _replace(tw, channels=channels)
-        else:
-            twist = Twist(
-                family=None,
-                channels=channels,
-                merge=tuple(st.rewrite(rename_ssa) for st in tw.merge),
-                combine_states=tuple(st.rewrite(rename_ssa) for st in tw.combine_states),
-                state_b=tuple(rename_ssa(n) for n in tw.state_b),
-            )
-        return Carrier(state=state, twist=twist)
-
-    @property
-    def state_b(self) -> tuple[str, ...]:
-        """The second-operand state names for the cross-partition combine — derived
-        (``"<n>__o"``) in spec mode, the stored value in bound mode."""
-        tw = self.twist
-        return self.state.other if tw.family is not None else tw.state_b
+    def rename(self, rename_ssa) -> Algebra:
+        """A copy with every SSA name mapped through ``rename_ssa`` — the combine (via
+        :func:`rename_combine`, which regenerates a twisted program over the renamed state) and
+        the injected term names. The ``Loop`` / ``StridedLoop`` rewrites call this so an
+        annotated reduce's ALGEBRA tracks its body through SSA renaming: a verbatim algebra
+        after ``rename_ssa_sequential`` left the cooperative combine reading a state name the
+        renamed body no longer defines (the M=1 cut-consumer's ``acc1``-undefined miscompile).
+        σ / axis substitutions still never touch the algebra — only names move here."""
+        terms = tuple(rename_ssa(t) if isinstance(t, str) else t for t in self.terms)
+        return Algebra(combine=rename_combine(self.combine, rename_ssa), terms=terms, dtypes=self.dtypes)
 
     @cached_property
     def merge(self) -> tuple[Stmt, ...]:
-        """The streaming single-element fold program — generated from the channel spec in spec
-        mode, the stored program in bound mode."""
-        tw = self.twist
-        if tw.family == "exp":
-            return exp_merge(self.state.names, tw.channels, key=self.state.names[0])
-        if tw.family == "id":
-            return id_merge(self.state.names, tw.channels)
-        return tw.merge
+        """The streaming single-element fold program — the combine specialized at the injection
+        singleton: the componentwise self-fold for a degenerate ⊕, the generated exp-family
+        streaming form for a twisted one."""
+        if self.ops is None:
+            return exp_merge(self.names, self.terms, key=self.names[0])
+        return tuple(
+            Assign(name=n, op=op, args=(n, str(t)), dtype=dt)
+            for n, op, t, dt in zip(self.names, self.ops, self.terms, self.component_dtypes, strict=True)
+        )
 
     @cached_property
     def combine_states(self) -> tuple[Assign, ...]:
-        """The cross-partition state⊕state fold program."""
-        tw = self.twist
-        if tw.family == "exp":
-            return exp_combine_states(self.state.names, self.state_b, key=self.state_b[0])
-        if tw.family == "id":
-            return id_combine_states(self.state.names, self.state_b, tw.channels)
-        return tw.combine_states
+        """The cross-partition state⊕state fold program — the stored combine's body (re-emitted
+        with the accumulator dtypes for a degenerate ⊕, whose stored program is dtype-free)."""
+        if self.ops is None:
+            return tuple(self.combine.body)
+        return tuple(
+            Assign(name=n, op=op, args=(n, o), dtype=dt)
+            for n, op, o, dt in zip(self.names, self.ops, self.state_b, self.component_dtypes, strict=True)
+        )
 
     def partial_names(self) -> tuple[str, ...]:
         """The bound name of each partial the merge folds in (its external reads)."""
-        return _merge_reads(self.merge, self.state.names)
+        return _merge_reads(self.merge, self.names)
 
     def dissolve(self) -> list[Stmt]:
-        """The loose fold stmts this carrier lowers to — bare ``Accum``\\ s for a degenerate
-        carrier (:meth:`as_accums`), else the streaming ``merge``."""
+        """The loose fold stmts this algebra lowers to — bare ``Accum``\\ s for a degenerate ⊕
+        (:meth:`as_accums`), else the streaming ``merge``."""
         accums = self.as_accums()
         return list(accums) if accums is not None else list(self.merge)
 
     def as_accums(self) -> list[Accum] | None:
-        """If this is a **degenerate** carrier (the identity twist — each state component folded
-        by its own self-op, no rescale temps), the equivalent ``Accum`` folds; else ``None``."""
-        if self.twist.family == "id":  # the degenerate family IS the bare folds
-            return id_accums(self.state.names, self.twist.channels)
-        if self.twist.family is not None:  # a twisted family (exp) is never degenerate
+        """If this is a **degenerate** algebra (componentwise — each state component folded by
+        its own self-op, no rescale temps), the equivalent ``Accum`` folds; else ``None``."""
+        if self.ops is None:
             return None
-        merge = self.merge
-        names = set(self.state.names)
-        if len(merge) != len(self.state.names):
-            return None
-        accums: list[Accum] = []
-        for a in merge:
-            if a.name not in names or len(a.args) != 2 or a.args[0] != a.name:
-                return None
-            accums.append(Accum(name=a.name, value=a.args[1], op=a.op, dtype=a.dtype))
-        return accums
+        return [
+            Accum(name=n, value=str(t), op=op, dtype=dt)
+            for n, op, t, dt in zip(self.names, self.ops, self.terms, self.component_dtypes, strict=True)
+        ]
 
     def as_state_merge(self, other: tuple[str, ...]) -> StateMerge:
-        """A one-shot :class:`StateMerge` stmt that folds this carrier's ``state`` with a second
+        """A one-shot :class:`StateMerge` stmt that folds this algebra's state with a second
         fully-reduced state named ``other`` (the cross-partition combine's right operand). The
-        merge program IS ``combine_states`` with ``state_b`` renamed to ``other``, so the
+        merge program IS ``combine_states`` with ``state_b`` renamed to ``other`` (a twisted
+        program regenerates keyed on ``other[0]`` so distinct folds' temps never collide), so the
         cooperative-tree / cross-CTA reduce renders it through the same machinery as a streaming
         step."""
-        if self.twist.family == "exp":
-            merged = exp_combine_states(self.state.names, other, key=other[0])
+        if self.ops is None:
+            merged: tuple[Stmt, ...] = exp_combine_states(self.names, other, key=other[0])
         else:
             sub = dict(zip(self.state_b, other, strict=True))
             merged = tuple(_rename_assign_args(a, sub) for a in self.combine_states)
-        return StateMerge(state=self.state, merge=merged, state_b=other)
+        return StateMerge(state=self.names, merge=merged, state_b=other)
 
 
 @dataclass(frozen=True)
 class StateMerge(Stmt):
     """The cross-partition state⊕state combine, as a **renderable** loop-IR stmt (its right
     operand is a second fully-reduced state named :attr:`state_b`). Emitted by
-    :meth:`Carrier.as_state_merge` for the REG tree / cooperative-tree / cross-CTA finalize; it
+    :meth:`Algebra.as_state_merge` for the REG tree / cooperative-tree / cross-CTA finalize; it
     renders the ψ-rescale state reassignment via ``render_merge_program``. Unlike ``Accum`` it is
     not a fold carrier — it sits in a combine region, not a streaming fold loop, so it never
     makes its enclosing loop ``is_reduce``."""
 
-    state: State
+    state: tuple[str, ...]
     merge: tuple[Stmt, ...]
     state_b: tuple[str, ...]
 
@@ -224,20 +194,20 @@ class StateMerge(Stmt):
         splicer's rename resolve references through it, and the render walks the merge program
         directly (``merge`` is not a nested ``Body``), so a read absent here is invisible to them."""
         seen = set(self.state_b)
-        extra = tuple(n for n in _merge_reads(self.merge, self.state.names) if n not in seen)
+        extra = tuple(n for n in _merge_reads(self.merge, self.state) if n not in seen)
         return self.state_b + extra
 
     def defines(self) -> tuple[str, ...]:
-        return self.state.names
+        return self.state
 
     def pretty(self, indent: str = "") -> list[str]:
-        lines = [f"{indent}({', '.join(self.state.names)}) <- combine_states({', '.join(self.state_b)})"]
+        lines = [f"{indent}({', '.join(self.state)}) <- combine_states({', '.join(self.state_b)})"]
         for a in self.merge:
             lines += a.pretty(indent + "    ")
         return lines
 
     def render(self, ctx: RenderCtx) -> list[str]:
-        return render_merge_program(self.merge, self.state.names, ctx)
+        return render_merge_program(self.merge, self.state, ctx)
 
 
 # --------------------------------------------------------------------------------------------
@@ -305,7 +275,7 @@ def degenerate(combine: Lambda) -> bool:
 def rename_combine(combine: Lambda, rename_ssa) -> Lambda:
     """A copy of a stored ``combine`` with every state/temp name mapped through ``rename_ssa`` —
     the lockstep the ``Fold`` rewrite applies so the stored algebra tracks its fold's SSA renames
-    (the same contract as :meth:`Carrier.rename`). A second-operand ``<n>__o`` spelling follows
+    (the same contract as :meth:`Algebra.rename`). A second-operand ``<n>__o`` spelling follows
     its component name so the S × S shape survives canonical renumbering. A GENERATED twisted
     program (the exp/LSE family) is REGENERATED over the renamed state names rather than patched —
     its internal temps are namespaced on the state spelling, and regeneration is the
@@ -384,4 +354,4 @@ def _merge_reads(merge: tuple[Stmt, ...], state_names: tuple[str, ...]) -> tuple
     return tuple(reads)
 
 
-__all__ = ["Carrier", "M", "State", "StateMerge", "Twist", "component_ops", "degenerate", "eval_lambda", "foldmap_eval", "rename_combine"]
+__all__ = ["Algebra", "M", "StateMerge", "component_ops", "degenerate", "eval_lambda", "foldmap_eval", "rename_combine"]

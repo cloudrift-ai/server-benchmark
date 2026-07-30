@@ -19,10 +19,9 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.stmt.algebra import Carrier, State, Twist
+from emmy.compiler.ir.stmt.algebra import Algebra
 from emmy.compiler.ir.stmt.blocks import Loop
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.carrier import Channel
 from emmy.compiler.ir.stmt.leaves import Accum, Load
 from emmy.compiler.ir.stmt.normalize import rename_ssa_sequential
 
@@ -66,7 +65,7 @@ def test_gather_index_survives_rename_chain_collision() -> None:
 
 
 def test_reduce_loop_carrier_tracks_accum_rename() -> None:
-    # An annotated reduce Loop whose body folds into ``acc1`` while its Carrier carries
+    # An annotated reduce Loop whose body folds into ``acc1`` while its Algebra carries
     # ``("acc1",)``. The renumber renames the body's Accum (acc1 → acc0) and the Load term
     # (v9 → in0); the carrier must follow BOTH — a verbatim carrier left the cooperative
     # combine reading a state name the renamed body no longer defines (the M=1 cut-consumer's
@@ -74,10 +73,7 @@ def test_reduce_loop_carrier_tracks_accum_rename() -> None:
     loop = Loop(
         axis=Axis(name="k0", extent=Dim(8)),
         role=AxisRole.CONTRACTION,
-        carrier=Carrier(
-            state=State(names=("acc1",)),
-            twist=Twist(family="id", channels=(Channel(fold=ElementwiseImpl("add"), term="v9"),)),
-        ),
+        carrier=Algebra.degenerate(folds=(ElementwiseImpl("add"),), names=("acc1",), terms=("v9",)),
         body=Body(
             (
                 Load(name="v9", input="a", index=(Var("k0"),)),
@@ -92,5 +88,5 @@ def test_reduce_loop_carrier_tracks_accum_rename() -> None:
     accum = next(s for s in renamed.body.iter() if isinstance(s, Accum))
     load = next(s for s in renamed.body.iter() if isinstance(s, Load))
     assert renamed.carrier is not None
-    assert renamed.carrier.state.names == (accum.name,), (renamed.carrier.state.names, accum.name)
-    assert renamed.carrier.twist.channels[0].term == load.names[0], renamed.carrier.twist.channels[0].term
+    assert renamed.carrier.names == (accum.name,), (renamed.carrier.names, accum.name)
+    assert renamed.carrier.terms[0] == load.names[0], renamed.carrier.terms[0]

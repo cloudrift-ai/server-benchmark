@@ -437,7 +437,6 @@ def _flash_op(
     combine = Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
     lift = Lambda(params=("kv", "sacc", "v_e"), body=Body(tuple(score_post)), results=(score_name, 1.0, "v_e"))
     reduction = Fold(
-        carrier=None,
         axis=Axis(name="kv", extent=s_k),
         operands=(score_contraction.as_fold(), Load(name="v_e", input=v_buf, index=v_idx)),
         lift=lift,

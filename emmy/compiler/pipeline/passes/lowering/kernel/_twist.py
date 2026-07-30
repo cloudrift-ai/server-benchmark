@@ -17,11 +17,11 @@ residence — the fragment row of the placement-keyed fold (a within-warp ``Frag
   sliding-window band) → one :class:`FragmentBiasAdd` per score fragment (each element reads the mask
   at its absolute coordinates; a symbolic extent clamp-reads, the duplicates landing on masked /
   store-guarded cells), a loop-invariant scalar ``Load`` hoisted above the stream;
-- the twisted carrier's streaming merge is regenerated FROM ITS CHANNEL SPEC (``twist.family ==
-  "exp"``, ``channels = (pivot, …)``): the pivot's per-block fold is a ``FragmentRowReduce`` of its
-  ``fold`` op (rowmax) + the running-stat update / rescale; a ``denom`` channel (no lift)
-  row-reduces the exp-weight fragments (rowsum) into ``l = l·α + Σp``; an ``expect`` channel
-  (``lift = multiply``) IS the P@V :class:`ContractionView` node — its ⊗ lowers to ``mma.sync`` with
+- the twisted algebra's streaming merge is regenerated FROM ITS INJECTION SPEC (``terms =
+  (score, …)``, pivot first): the pivot's per-block fold is a ``FragmentRowReduce`` of its
+  ``maximum`` (rowmax) + the running-stat update / rescale; a denominator component (literal-1
+  term) row-reduces the exp-weight fragments (rowsum) into ``l = l·α + Σp``; an expectation
+  component (a value term) IS the P@V :class:`ContractionView` node — its ⊗ lowers to ``mma.sync`` with
   the register-resident probability converted straight into its A-operand fragments by the C→A
   REGISTER repack (``FragmentRepack``, the ``AtomKind.c_to_a_repack`` lane-map compatibility —
   no smem round-trip, no sync; gated at schedule time);
@@ -91,6 +91,7 @@ _ADD = ElementwiseImpl("add")
 _SUB = ElementwiseImpl("subtract")
 _MUL = ElementwiseImpl("multiply")
 _EXP = ElementwiseImpl("exp")
+_MAX = ElementwiseImpl("maximum")
 
 #: The 2 C-fragment rows per lane the m16n8 stats distribute over (the ``0`` / ``1`` suffixes).
 _COMPS = ("0", "1")
@@ -322,7 +323,7 @@ def _realize_prologue(stmts, qk: ContractionView, frags: tuple[str, ...], col_ba
         if is_contraction_fold(s):
             continue  # the expect fold — regenerated from its channel
         if state & (set(s.defines()) | _reads(s)):
-            break  # the dissolved merge — regenerated from the twist channels
+            break  # the dissolved merge — regenerated from the injection spec
         if isinstance(s, Load) and len(s.index) == 0:
             hoisted.append(s)  # a scalar constant (the 1/√d scale, the −inf fill) — loop-invariant
             continue
@@ -505,13 +506,14 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         aligned = BinaryExpr("*", BinaryExpr("/", start_rows, Literal(bn, "int")), Literal(bn, "int"))
         kv_start = TernaryExpr(cond=BinaryExpr(">", start_rows, Literal(0, "int")), if_true=aligned, if_false=Literal(0, "int"))
 
-    # The channel spec (pivot first, one carried name per channel) — the merge is REGENERATED from
-    # it at fragment residence. The expect channel's ⊗ is the pv node; the denom folds the weights.
-    channels = red.carrier.twist.channels
-    names = red.carrier.state.names
+    # The injection spec (pivot first, one carried name per component) — the merge is REGENERATED
+    # from it at fragment residence. An expectation component injects a value name (its ⊗ is the
+    # pv node); the denominator injects the literal ``1.0`` and folds the weights.
+    terms = red.carrier.terms
+    names = red.carrier.names
     pivot_name = names[0]
-    expect_name = next(n for n, ch in zip(names, channels, strict=True) if ch.lift is not None)
-    denom_name = next(n for n, ch in zip(names[1:], channels[1:], strict=True) if ch.lift is None)
+    expect_name = next(n for n, t in zip(names[1:], terms[1:], strict=True) if isinstance(t, str))
+    denom_name = next(n for n, t in zip(names[1:], terms[1:], strict=True) if not isinstance(t, str))
 
     # ---- per-query-tile naming + state --------------------------------------------------------- #
     # Each of the warp's ``fm`` register query tiles carries its OWN running stats, score / output
@@ -685,15 +687,15 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         for qt in qtiles:
             s = qt.sfx
             # pivot: the per-block fold (rowmax) then the running update mn = fold(m, rowmax(S)) + α.
-            stream.append(FragmentRowReduce(top=f"_rmx{s}0", bot=f"_rmx{s}1", frags=qt.sfrags, op=channels[0].fold, group=4))
-            stream += _stats(f"_mn{s}", channels[0].fold, (qt.pivot, f"_rmx{s}"))
+            stream.append(FragmentRowReduce(top=f"_rmx{s}0", bot=f"_rmx{s}1", frags=qt.sfrags, op=_MAX, group=4))
+            stream += _stats(f"_mn{s}", _MAX, (qt.pivot, f"_rmx{s}"))
             stream += _stats(f"_al{s}__d", _SUB, (qt.pivot, f"_mn{s}"))  # α = exp(m − mn)
             stream += _stats(f"_al{s}", _EXP, (f"_al{s}__d",))
             for sf, pf in zip(qt.sfrags, qt.pfrags, strict=True):  # the softmax weights P = exp(S − mn)
                 stream.append(FragmentApply(out=pf, op=_SUB, args=(sf, _row_pair(f"_mn{s}")), kinds=(FRAG, ROW)))
                 stream.append(FragmentApply(out=pf, op=_EXP, args=(pf,), kinds=(FRAG,), in_place=True))
-            # denom (no lift): the per-block fold is the exp-weight rowsum; l = l·α + Σp.
-            stream.append(FragmentRowReduce(top=f"_rsm{s}0", bot=f"_rsm{s}1", frags=qt.pfrags, op=channels[1].fold, group=4))
+            # denom (literal-1 term): the per-block fold is the exp-weight rowsum; l = l·α + Σp.
+            stream.append(FragmentRowReduce(top=f"_rsm{s}0", bot=f"_rsm{s}1", frags=qt.pfrags, op=_ADD, group=4))
             stream += _stats(f"{qt.denom}__s", _MUL, (qt.denom, f"_al{s}"))
             stream += _stats(f"{qt.denom}__n", _ADD, (f"{qt.denom}__s", f"_rsm{s}"))
             stream += _rebind(qt.denom, f"{qt.denom}__n")

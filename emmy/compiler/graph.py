@@ -311,8 +311,8 @@ def _stmt_eval_scope() -> dict:
     from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
     from emmy.compiler.ir.stmt import (
         Accum,
+        Algebra,
         Assign,
-        Carrier,
         Cond,
         Init,
         Load,
@@ -320,14 +320,11 @@ def _stmt_eval_scope() -> dict:
         Pack,
         Select,
         SelectBranch,
-        State,
         StateMerge,
         StridedLoop,
-        Twist,
         Unpack,
         Write,
     )
-    from emmy.compiler.ir.stmt.carrier import Channel
     from emmy.compiler.ir.tensor.ir import IndexSource
 
     _STMT_EVAL_SCOPE = {
@@ -353,11 +350,8 @@ def _stmt_eval_scope() -> dict:
         "StridedLoop": StridedLoop,
         "Cond": Cond,
         "AxisRole": AxisRole,
-        "Carrier": Carrier,
-        "State": State,
-        "Twist": Twist,
+        "Algebra": Algebra,
         "StateMerge": StateMerge,
-        "Channel": Channel,
         "Smem": Smem,
         "Sync": Sync,
         "TreeHalve": TreeHalve,

@@ -2,7 +2,7 @@
 
 1. **Recognize + Schedule** (``010_recognize``) — the Loop-IR → Tile-IR boundary, both halves
    in ONE rewrite. **Recognition**: fuse flash attention, fuse online softmax, annotate each
-   reduce ``Loop`` with its ``AxisRole`` + ``Carrier``, then **lift** the kernel to a ``Kernel``
+   reduce ``Loop`` with its ``AxisRole`` + ``Algebra``, then **lift** the kernel to a ``Kernel``
    carrying ONE op-tree ``Map`` — a thin ``Body`` wrapper over the annotated loop nest — with an
    **unmapped** placement (its parallel ``free`` axes). **Scheduling** (the ``_schedule`` helper, called inline): map the
    ``free`` axes onto ``grid`` and offer the per-axis scheduling forks — the reduce-axis partition

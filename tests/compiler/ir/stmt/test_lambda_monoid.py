@@ -23,8 +23,8 @@ import pytest
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Lambda, Load, Loop, M, Write
-from emmy.compiler.ir.stmt.algebra import Carrier, State, Twist, component_ops, degenerate, eval_lambda, foldmap_eval
-from emmy.compiler.ir.stmt.carrier import denom, exp_channels, exp_combine_states, expect
+from emmy.compiler.ir.stmt.algebra import Algebra, component_ops, degenerate, eval_lambda, foldmap_eval
+from emmy.compiler.ir.stmt.carrier import exp_combine_states
 from emmy.compiler.ir.tile.ir import Fold
 
 # --- the mini loop-IR interpreter (the agreement test's right-hand side) ------------------------- #
@@ -156,7 +156,7 @@ def test_fold_arity_mismatch_rejected() -> None:
     lam = Lambda(params=("a", "b"), body=Body((Assign(name="c", op="add", args=("a", "b")),)), results=("c",))
     lift = Lambda(params=("k",), body=Body(()), results=(1.0, 1.0))
     with pytest.raises(ValueError, match="S × S → S"):
-        _Fold(carrier=None, axis=_Axis("k", 4), lift=lift, init=(0.0, 0.0), combine=lam)
+        _Fold(axis=_Axis("k", 4), lift=lift, init=(0.0, 0.0), combine=lam)
 
 
 def _lse_monoid(n_expect: int = 0) -> tuple[tuple, Lambda]:
@@ -212,7 +212,7 @@ def _id_fold(op: str, value_stmts, acc: str, axis: Axis, value_name: str) -> Fol
     loop (the λ spelling is the ONE spelling since step 7; the byte-identity gate settles at
     construction, so the derived ``loop`` reproduces this exact body)."""
     accum = Accum(name=acc, value=value_name, op=op, axes=(axis.name,))
-    loop = Loop(axis=axis, body=Body((*value_stmts, accum)), role=AxisRole.PLANAR, carrier=accum.as_carrier())
+    loop = Loop(axis=axis, body=Body((*value_stmts, accum)), role=AxisRole.PLANAR, carrier=accum.as_algebra())
     fold = Fold.from_loop(loop)
     assert fold is not None
     return fold
@@ -282,7 +282,7 @@ def test_agreement_online_softmax() -> None:
     rng = np.random.default_rng(4)
     x = rng.normal(size=20) * 2.0
     axis = Axis("k", 20)
-    carrier = Carrier(state=State(names=("m_i", "l_i")), twist=Twist(family="exp", channels=exp_channels("x0", [denom()])))
+    carrier = Algebra.exp_family("x0", (1.0,), ("m_i", "l_i"))
     step = Body((Load(name="x0", input="x", index=(Var("k"),)), *carrier.merge))
     fold = Fold.from_loop(Loop(axis=axis, body=step, role=AxisRole.TWISTED, carrier=carrier))
     assert fold is not None
@@ -300,10 +300,7 @@ def test_agreement_flash_arity3() -> None:
     rng = np.random.default_rng(5)
     s, v = rng.normal(size=10) * 2.0, rng.normal(size=10)
     axis = Axis("j", 10)
-    carrier = Carrier(
-        state=State(names=("m_i", "l_i", "O_i")),
-        twist=Twist(family="exp", channels=exp_channels("s0", [denom(), expect("v0")])),
-    )
+    carrier = Algebra.exp_family("s0", (1.0, "v0"), ("m_i", "l_i", "O_i"))
     step = Body(
         (
             Load(name="s0", input="s", index=(Var("j"),)),

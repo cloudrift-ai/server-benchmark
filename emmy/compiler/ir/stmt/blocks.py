@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from emmy.compiler.dtype import F32 as _F32
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Expr, Var
-from emmy.compiler.ir.stmt.algebra import Carrier
+from emmy.compiler.ir.stmt.algebra import Algebra
 from emmy.compiler.ir.stmt.base import INDENT, RenderCtx, Stmt, _pad, pretty_body, render_body
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Accum, Mma
@@ -60,8 +60,8 @@ class Loop(Stmt):
 
     ``role`` is the axis's scheduling :class:`~emmy.compiler.ir.axis.AxisRole`
     (``FREE`` / ``PLANAR`` / ``CONTRACTION`` / ``TWISTED``), stamped by tile-lowering
-    detection; ``carrier`` is the :class:`~emmy.compiler.ir.stmt.algebra.Carrier`
-    algebra payload (state + twist) a reduce loop folds through (``None`` on a ``FREE`` loop
+    detection; ``carrier`` is the :class:`~emmy.compiler.ir.stmt.algebra.Algebra`
+    payload (the flat ⊕ + injection terms) a reduce loop folds through (``None`` on a ``FREE`` loop
     or a not-yet-annotated reduce). Both default to the unannotated ``FREE`` / ``None`` so
     every existing construction site keeps working.
     """
@@ -70,7 +70,7 @@ class Loop(Stmt):
     body: Body
     unroll: bool = False
     role: AxisRole = AxisRole.FREE
-    carrier: Carrier | None = None
+    carrier: Algebra | None = None
     seed: bool = True  # emit the per-Accum ``<acc> = identity;`` seed before the loop; False when a
     # nested drain whose accumulators are pre-seeded once outside an enclosing loop (the staged
     # scalar contraction — re-seeding per outer-slab iteration would zero the running sum).
@@ -114,7 +114,7 @@ class Loop(Stmt):
         # immediate body — the seed rides on the fold, derived here from ``op.identity`` at
         # the fold's ``dtype`` (so fp32-over-fp16 declares ``float acc = 0.0f;``, a fp16
         # ``max`` declares ``__half acc = __float2half(0.0f);``), no explicit ``Init``. This
-        # is the SINGLE seed-placement path: a reduce ``Loop`` carries its ``Carrier`` but its
+        # is the SINGLE seed-placement path: a reduce ``Loop`` carries its ``Algebra`` but its
         # body already holds the loose fold ``Accum``\\ s (dissolved at recognition), so there
         # is never a carrier stmt to special-case here. A nested fold re-declares per enclosing
         # iteration (scope-local shadowing), so a same-named outer carrier is harmless. This
@@ -307,7 +307,7 @@ class StridedLoop(Stmt):
     body: Body
     unroll: bool = False
     role: AxisRole = AxisRole.FREE
-    carrier: Carrier | None = None
+    carrier: Algebra | None = None
     end: Expr | None = None
 
     def __post_init__(self) -> None:

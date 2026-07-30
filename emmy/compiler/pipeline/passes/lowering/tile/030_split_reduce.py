@@ -55,6 +55,7 @@ from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.schedule import FoldMove, Level
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Init, Load, Loop, Write
+from emmy.compiler.ir.stmt.passes import projection_distributes as _projection_distributes
 from emmy.compiler.ir.tile import (
     Fold,
     Map,
@@ -67,7 +68,6 @@ from emmy.compiler.ir.tile import (
 from emmy.compiler.ir.tile.ir import composed_contraction, effect_tail
 from emmy.compiler.ir.tile.ops import Sched, lower, nodify_reduce, projection_tail, reduce_loop, reduce_plan, sched_of, seal_workers
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.passes.lowering.tile._carrier import projection_distributes as _projection_distributes
 
 PATTERN = [Pattern("root", TileOp)]
 
@@ -200,7 +200,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node, carrier, pl
         sched.put("STAGE", node, inner_stage)
         return sched.table
 
-    states = carrier.state.names
+    states = carrier.names
     n_comp = len(states)  # 1 = plain matmul; N = the multi-channel (gate/up) node's per-channel accs
     acc = states[0]
     epilogue = list(projection)  # the fused projection off the ``Map`` wrapper (empty for a bare matmul)
@@ -332,9 +332,8 @@ def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Map, plan: R
 
     out = root.output
     grid = tile.place.grid  # (batch…, m_blocks) — the warp placement's shrunk query axis, d folded away
-    names = carrier.state.names
-    channels = carrier.twist.channels
-    expect = next(n for n, ch in zip(names, channels, strict=True) if ch.lift is not None)
+    names = carrier.names
+    expect = next(n for n, t in zip(names[1:], carrier.terms[1:], strict=True) if isinstance(t, str))
     n_comp = len(names)
     # The query / value axes are PLACEMENT facts — the pre-split tile's trailing free axes (the
     # warp placement preserves ``free`` while its grid shrinks the query axis and folds ``d`` away).
@@ -448,7 +447,7 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     if extent % cta != 0:
         raise NotImplementedError(f"cross-CTA split needs a divisible reduce axis (extent {extent} % cta {cta})")
     b = extent // cta
-    states = carrier.state.names
+    states = carrier.names
     n_comp = len(states)
 
     out = root.output

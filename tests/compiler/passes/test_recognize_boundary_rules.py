@@ -502,7 +502,7 @@ def _prologue_shape(*, b_layouts):
                 (Load(name="x_e", input="x", index=(Var("m"), Var("r"))), Assign(name="sq", op="multiply", args=("x_e", "x_e")), fold)
             ),
             role=AxisRole.PLANAR,
-            carrier=fold.as_carrier(),
+            carrier=fold.as_algebra(),
         )
     )
     assert stat is not None

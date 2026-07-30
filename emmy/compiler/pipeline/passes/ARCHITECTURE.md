@@ -144,8 +144,8 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   dtype / geometry legality stays schedule-side in `_computed_a_rows`). This retired the pin-only
   `_prologue_warp_option` rescue. The **degenerate M=1** composition (per-token decode: the unit row axis elided,
   `free = ()`) binds too — a synthesized unit free axis keeps the column grid; without it the fused kernel
-  schedules at grid 1, ~300× off the memory floor. Annotated-loop rewrites map the `Carrier` through SSA renames
-  (`Carrier.rename` — a verbatim carrier left the cooperative combine reading a state name the renamed body no
+  schedules at grid 1, ~300× off the memory floor. Annotated-loop rewrites map the `Algebra` through SSA renames
+  (`Algebra.rename` — a verbatim algebra left the cooperative combine reading a state name the renamed body no
   longer defined).
 - a cooperative / ILP reduce (`PLANAR` / `TWISTED`, or a non-output-tiled `CONTRACTION`) needs **no** binding here — its
   accumulator dtype + the shuffle/tree fold mechanism are **derived** at materialize time (`emit_combine` off the carrier

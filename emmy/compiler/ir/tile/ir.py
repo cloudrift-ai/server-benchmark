@@ -55,7 +55,7 @@ reached by the node-aware walk (:func:`tree_nodes`), like a contraction operand.
 The combine lives entirely in the ``op`` wrapper (the :class:`Map` /
 :class:`Fold` / :class:`ContractionView` nodes here + ``ir/stmt/algebra``): a
 node whose per-cell loop nest carries the role (``AxisRole``) + the decoupled
-``Carrier`` (the ⊕ algebra). The algebra is **not stored as a node kind**; the
+``Algebra`` (the flat ⊕). The algebra is **not stored as a node kind**; the
 role/carrier are read off the node / annotated loop where a pass needs them
 (``ops.axis_role`` / ``ops.reduce_loop``). ``lower(op)`` flattens the structural
 tree back to the loop nest.
@@ -81,23 +81,20 @@ from emmy.compiler.ir.expr import Expr, Literal
 from emmy.compiler.ir.schedule import Placement, Stage, TilePlan, WarpSpec
 from emmy.compiler.ir.stmt import (
     Accum,
+    Algebra,
     Assign,
     Body,
-    Carrier,
     Lambda,
     Load,
     Loop,
     M,
     RenderCtx,
-    State,
     Stmt,
-    Twist,
     Write,
     component_ops,
     rename_combine,
 )
 from emmy.compiler.ir.stmt.body import _member_reads
-from emmy.compiler.ir.stmt.carrier import Channel as CarrierChannel
 
 if TYPE_CHECKING:
     from emmy.compiler.ir.atom import Atom
@@ -179,7 +176,7 @@ def _derived_expect_fold(o: str, p_name: str, v_edge: Load) -> Fold:
         results=(f"{acc}__v",),
     )
     init, combine = M("add", names=(acc,))
-    return Fold(carrier=None, axis=k, operands=(v_edge, cone), lift=lift, init=init, combine=combine, dtypes=(None,))
+    return Fold(axis=k, operands=(v_edge, cone), lift=lift, init=init, combine=combine, dtypes=(None,))
 
 
 def _split_expect(merge: list[Stmt], o: str, v: str, v_edge: Load) -> list[Stmt]:
@@ -224,15 +221,15 @@ def _twisted_derived_step(fold: Fold) -> tuple[Stmt, ...]:
     edges consumed here are excluded from the generic first-use splice
     (:meth:`Fold._splice_edges`)."""
     lam = fold.lift
-    merge = list(fold.carrier.merge)
-    channels = fold.carrier.twist.channels
+    alg = fold.carrier
+    merge = list(alg.merge)
     by_param = _operand_binding(fold)
-    for nm, ch in zip(fold.carrier.state.names, channels, strict=True):
-        if ch.lift is None or not isinstance(ch.term, str):
-            continue
-        edge = by_param.get(ch.term)
+    for i, (nm, term) in enumerate(zip(alg.names, alg.terms, strict=True)):
+        if i == 0 or not isinstance(term, str):
+            continue  # the pivot / a literal denominator — only EXPECTATION components split
+        edge = by_param.get(term)
         if isinstance(edge, Load):
-            merge = _split_expect(merge, nm, ch.term, edge)
+            merge = _split_expect(merge, nm, term, edge)
     head = tuple(e for e in fold.operands if isinstance(e, (Fold, Map)))
     return (*head, *lam.body, *merge)
 
@@ -302,13 +299,12 @@ def _extract_lift(loop: Loop) -> tuple[Lambda, tuple, Lambda, tuple] | None:
     a ``base``-``Accum``, a channel disagreement) — the caller keeps the ``step`` spelling.
     :meth:`Fold.from_loop` re-derives the loop and keeps the λ spelling only on byte-identity, so
     this extraction can stay shape-strict without a correctness burden."""
-    carrier = loop.carrier
-    if carrier is None:
+    alg = loop.carrier
+    if alg is None:
         return None
-    if carrier.twist.family == "exp":
-        return _extract_twisted_lift(loop, carrier)
-    if carrier.twist.family != "id":
-        return None
+    ops = alg.ops
+    if ops is None:
+        return _extract_twisted_lift(loop, alg)
     accums = [s for s in loop.body if isinstance(s, Accum)]
     prefix = [s for s in loop.body if not isinstance(s, Accum)]
     if not accums or any(a.base is not None for a in accums):
@@ -316,63 +312,60 @@ def _extract_lift(loop: Loop) -> tuple[Lambda, tuple, Lambda, tuple] | None:
     if any(not s.pure for s in prefix):
         return None  # an effectful / raw-block step is not λ-representable (the flat-Map escape)
     names = tuple(a.name for a in accums)
-    channels = carrier.twist.channels
-    if names != carrier.state.names or len(channels) != len(accums):
+    if names != alg.names or len(alg.terms) != len(accums):
         return None
-    if any(a.op != ch.fold or str(a.value) != str(ch.term) for a, ch in zip(accums, channels, strict=True)):
+    if any(a.op != op or str(a.value) != str(t) for a, op, t in zip(accums, ops, alg.terms, strict=True)):
         return None
     try:
         lift = Lambda(params=(loop.axis.name,), body=Body(tuple(prefix)), results=tuple(a.value for a in accums))
-        init, combine = M(*(ch.fold for ch in channels), names=names)
+        init, combine = M(*ops, names=names)
     except ValueError:
         return None  # an undefined result / identity-less op — not the canonical dissolved shape
-    return lift, init, combine, tuple(ch.dtype for ch in channels)
+    return lift, init, combine, alg.component_dtypes
 
 
-def _extract_twisted_lift(loop: Loop, carrier: Carrier) -> tuple[Lambda, tuple, Lambda, tuple] | None:
+def _extract_twisted_lift(loop: Loop, alg: Algebra) -> tuple[Lambda, tuple, Lambda, tuple] | None:
     """Read the λ spelling off an exp-family TWISTED reduce ``Loop`` (1p — online softmax): the
     body must be ``[pure score prefix…, the dissolved streaming merge]`` verbatim, the prefix
-    becomes the ``lift`` body and the channels' injected terms its results (the singleton —
+    becomes the ``lift`` body and the algebra's injected terms its results (the singleton —
     ``(x, 1)``), and the flat ⊕ pair stores the TRUE combine — the generated cross-partition
-    state⊕state program over the loop's REAL state names. ``None`` when the shape does not read
-    off cleanly — a composed step (flash's in-step QK / PV folds, which carry their own schedule
-    slices and stay step-spelled until the derived-blocked-evaluation walker exists), a foreign
-    merge spelling, a role the singleton shape cannot carry. :meth:`Fold.from_loop`'s
-    byte-identity gate stands behind this extraction like the degenerate one's."""
-    merge = tuple(carrier.merge)
+    state⊕state program over the loop's REAL state names (the annotation's own ``combine``,
+    verified to BE the generator's program — the formation invariant the consuming ``Fold``
+    asserts). ``None`` when the shape does not read off cleanly — a composed step (flash's
+    in-step QK / PV folds, which carry their own schedule slices), a foreign merge or combine
+    spelling, a role the singleton shape cannot carry. :meth:`Fold.from_loop`'s byte-identity
+    gate stands behind this extraction like the degenerate one's."""
+    merge = tuple(alg.merge)
     body = tuple(loop.body)
     if len(body) < len(merge) or body[-len(merge) :] != merge:
         return None
     prefix = body[: -len(merge)]
     if any(not isinstance(s, (Load, Assign)) for s in prefix):
         return None  # a composed step keeps the step spelling
-    names = carrier.state.names
-    channels = carrier.twist.channels
-    if not channels or not isinstance(channels[0].term, str) or channels[0].lift is not None:
+    names = alg.names
+    terms = alg.terms
+    if not terms or not isinstance(terms[0], str):
         return None
-    for ch in channels[1:]:  # the shape-derived roles must read back losslessly off the singleton
-        expect_like = isinstance(ch.term, str)
-        if expect_like != (ch.lift is not None and ch.lift.name == "multiply"):
-            return None
-    if any(ch.dtype is not None for ch in channels):
-        return None  # a dtype-carrying exp channel has no side-tuple spelling yet
+    if any(dt is not None for dt in alg.dtypes):
+        return None  # a dtype-carrying exp component has no side-tuple spelling yet
     from emmy.compiler.ir.stmt.carrier import exp_combine_states  # noqa: PLC0415
 
-    other = State(names=names).other
+    other = tuple(f"{n}__o" for n in names)
+    if alg.combine.params != names + other or tuple(alg.combine.body) != tuple(exp_combine_states(names, other)):
+        return None  # a foreign twisted combine — not the generator's program
     try:
-        lift = Lambda(params=(loop.axis.name,), body=Body(prefix), results=tuple(ch.term for ch in channels))
-        combine = Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
+        lift = Lambda(params=(loop.axis.name,), body=Body(prefix), results=terms)
     except ValueError:
         return None
-    return lift, (float("-inf"),) + (0.0,) * (len(names) - 1), combine, ()
+    return lift, (float("-inf"),) + (0.0,) * (len(names) - 1), alg.combine, ()
 
 
 @dataclass(frozen=True)
 class Fold(Stmt):
     """A scheduled reduce — the typed successor of the bare annotated reduce
     ``Loop`` (``ir/stmt/algebra``). It splits the reduce's **algebra** (the loop-carried
-    :class:`~emmy.compiler.ir.stmt.algebra.Carrier` — degenerate ``id`` for a plain
-    ``sum`` / ``max`` / ``mean``, twisted ``exp`` for online-softmax / flash) from its **structure**
+    :class:`~emmy.compiler.ir.stmt.algebra.Algebra` — degenerate/componentwise for a plain
+    ``sum`` / ``max`` / ``mean``, twisted (exp-family) for online-softmax / flash) from its **structure**
     (the reduce ``axis`` + the per-element ``step`` it folds). Its :class:`AxisRole`
     (``PLANAR`` / ``TWISTED`` / ``CONTRACTION``) is **derived** from those params (:attr:`role`),
     never stored. The fold ``Loop`` is **synthesized on
@@ -399,10 +392,6 @@ class Fold(Stmt):
 
     pure = True  # a term is a value — its internals are its own; legal inside a stored ``Lambda``
 
-    # ALWAYS ``None`` at construction — DERIVED from ``(init, combine, lift)`` in
-    # ``__post_init__``, so there is one source of truth and no rename lockstep. (The stored
-    # ``step`` spelling died at step 7: every fold is λ-spelled, composed evaluation DERIVES.)
-    carrier: Carrier | None
     axis: Axis  # the reduce axis
     unroll: bool = False
     # The CLOSED inputs, each an operand edge (a gmem ``Load`` or an inline node) — the 1k fold
@@ -434,9 +423,10 @@ class Fold(Stmt):
         if not isinstance(self.init, tuple):
             object.__setattr__(self, "init", tuple(self.init))
         # λ-spelled formation (the ONE spelling since step 7): one program per relation —
-        # validate the positional binding and derive the carrier annotation from
-        # (init, combine, lift), never storing a second spelling. The S × S → S arity check is
-        # the dissolved wrapper's formation invariant, relocated here.
+        # validate the positional binding; the ``carrier`` annotation is a DERIVED read
+        # (:attr:`carrier` — the flat :class:`Algebra` over the stored params), never a second
+        # stored spelling. The S × S → S arity check is the dissolved wrapper's formation
+        # invariant, relocated here.
         assert self.lift is not None, "a Fold stores the λ spelling — (init, combine, lift); the step spelling died at step 7"
         assert self.combine is not None, "a λ-spelled Fold stores (init, combine, lift) together"
         n = len(self.init)
@@ -449,31 +439,30 @@ class Fold(Stmt):
         bound = tuple(n for e in self.operands for n in _operand_result_names(e))
         assert tuple(lam.params[1:]) == bound, f"lift params {lam.params[1:]} must bind the operand edges {bound} positionally"
         assert len(lam.results) == n, "one lift result per monoid component"
-        ops = component_ops(self.combine)
-        names = self.combine.results
-        if ops is not None:  # DEGENERATE: the componentwise ``id``-family annotation
-            dts = self.dtypes or (None,) * len(names)
-            channels = tuple(CarrierChannel(fold=op, term=r, dtype=dt) for op, r, dt in zip(ops, lam.results, dts, strict=True))
-            object.__setattr__(self, "carrier", Carrier(state=State(names=names), twist=Twist(family="id", channels=channels)))
-            return
+        if component_ops(self.combine) is not None:
+            return  # DEGENERATE: the componentwise family — nothing further to validate
         # TWISTED (1p): the family is selected STRUCTURALLY, never stored — the stored combine
         # must BE the exp/LSE generator's program over these state names (recognition built it
         # exactly there; a foreign twisted combine has no derivation yet and is rejected loudly).
-        # The derived channel spec reads the singleton off the lift — the state-component ROLE
-        # decision, shape-derived, no annotation: the pivot is component 0 (its injected term the
-        # score), a literal-1 injection is a denominator, a value injection an expectation.
-        from emmy.compiler.ir.stmt.carrier import denom, exp_channels, exp_combine_states, expect  # noqa: PLC0415
+        # The state-component ROLE decision is shape-derived off the lift's injected singleton,
+        # no annotation: the pivot is component 0 (its injected term the score), a literal-1
+        # injection is a denominator, a value injection an expectation.
+        from emmy.compiler.ir.stmt.carrier import exp_combine_states  # noqa: PLC0415
 
-        other = State(names=names).other
+        names = self.combine.results
+        other = tuple(f"{nm}__o" for nm in names)
         expected = exp_combine_states(names, other)
         assert self.combine.params == names + other and tuple(self.combine.body) == tuple(expected), (
             "a twisted Fold's combine must be the generated exp/LSE-family program over its state names"
         )
-        score = lam.results[0]
-        assert isinstance(score, str), "the twisted lift's pivot component must inject the score name"
-        accs = [denom() if isinstance(r, float) else expect(r) for r in lam.results[1:]]
-        carrier = Carrier(state=State(names=names), twist=Twist(family="exp", channels=exp_channels(score, accs)))
-        object.__setattr__(self, "carrier", carrier)
+        assert isinstance(lam.results[0], str), "the twisted lift's pivot component must inject the score name"
+
+    @cached_property
+    def carrier(self) -> Algebra:
+        """The fold's loop-carried :class:`Algebra` — DERIVED from the stored params (the flat
+        ``combine`` verbatim; the injected terms are the lift's results, the singleton), never
+        stored: one source of truth, no rename lockstep."""
+        return Algebra(combine=self.combine, terms=tuple(self.lift.results), dtypes=self.dtypes)
 
     @classmethod
     def from_loop(cls, loop: Loop) -> Fold | None:
@@ -490,7 +479,7 @@ class Fold(Stmt):
         if lifted is None:
             return None
         lift, init, combine, dts = lifted
-        fold = cls(carrier=None, axis=loop.axis, unroll=loop.unroll, lift=lift, init=init, combine=combine, dtypes=dts)
+        fold = cls(axis=loop.axis, unroll=loop.unroll, lift=lift, init=init, combine=combine, dtypes=dts)
         # The byte-identity gate — a non-reproducible BODY keeps the raw-loop escape. The role /
         # carrier annotations are the fold's own DERIVED reads, deliberately excluded: an
         # unbindable matvec captures a CONTRACTION-annotated loop and derives PLANAR — the 1l
@@ -515,7 +504,7 @@ class Fold(Stmt):
           the zero-legal-rows fallback) never hoists its operands, so its loads stay inline in
           the lift, the parse declines, and the fold takes the reduce tiers at schedule dispatch.
           No role rewrite; the lowered loop's ``PLANAR`` annotation falls out of the same read."""
-        if self.carrier.twist.family != "id":
+        if component_ops(self.combine) is None:
             return AxisRole.TWISTED
         if _parse_bilinear(self) is not None:
             return AxisRole.CONTRACTION
@@ -555,9 +544,9 @@ class Fold(Stmt):
         consumed = {id(s) for s in self._step_stmts()}
         if component_ops(self.combine) is None:
             by_param = _operand_binding(self)
-            for ch in self.carrier.twist.channels:
-                if ch.lift is not None and isinstance(ch.term, str):
-                    edge = by_param.get(ch.term)
+            for term in self.lift.results[1:]:  # EXPECTATION components: a str-injected non-pivot
+                if isinstance(term, str):
+                    edge = by_param.get(term)
                     if isinstance(edge, Load):
                         consumed.add(id(edge))
         return tuple(e for e in self.operands if id(e) not in consumed)
@@ -607,7 +596,7 @@ class Fold(Stmt):
     def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
         (partial,) = bodies
         lift = Lambda(params=self.lift.params, body=Body.coerce(partial), results=self.lift.results)
-        return replace(self, carrier=None, lift=lift)
+        return replace(self, lift=lift)
 
     def render(self, ctx: RenderCtx) -> list[str]:
         raise AssertionError("Fold must be lowered (ops.lower) before render")
@@ -737,7 +726,7 @@ def _operand_result_names(op) -> tuple[str, ...]:
     if isinstance(op, Load):
         return (op.defines()[-1],)
     if isinstance(op, Fold):
-        return tuple(op.combine.results) if op.combine is not None else tuple(op.carrier.state.names)
+        return tuple(op.combine.results)
     if isinstance(op, ContractionView):
         return op.defines()
     if isinstance(op, Map):
@@ -1005,9 +994,6 @@ class ContractionView:
         )
         if len(self.channels) == 1:
             return base
-        from emmy.compiler.ir.stmt.algebra import State, Twist  # noqa: PLC0415 — algebra imports leaves
-        from emmy.compiler.ir.stmt.carrier import Channel as CarrierChannel  # noqa: PLC0415
-
         a_name, k = self.a_name, self.k_axis.name
         extra: list[Stmt] = []
         for ch in self.channels[1:]:
@@ -1015,8 +1001,10 @@ class ContractionView:
             extra += [*_operand_body(ch.b), lift, Accum(name=ch.acc, value=lift.name, op=ElementwiseImpl("add"), axes=(k,))]
         add = ElementwiseImpl("add")
         names = tuple(ch.acc for ch in self.channels)
-        cchans = tuple(CarrierChannel(fold=add, term=f"{nm}__v", dtype=base.carrier.twist.channels[0].dtype) for nm in names)
-        carrier = Carrier(state=State(names=names), twist=Twist(family="id", channels=cchans))
+        base_dt = base.carrier.component_dtypes[0]
+        carrier = Algebra.degenerate(
+            folds=(add,) * len(names), names=names, terms=tuple(f"{nm}__v" for nm in names), dtypes=(base_dt,) * len(names)
+        )
         return Loop(axis=base.axis, body=Body((*base.body, *extra)), unroll=base.unroll, role=base.role, carrier=carrier)
 
     def lower(self) -> list[Stmt]:
@@ -1053,10 +1041,9 @@ class ContractionView:
             body=Body(tuple(body)),
             results=tuple(f"{acc}__v" for acc in accs),
         )
-        dtypes = tuple(ch.dtype for ch in self.loop.carrier.twist.channels)
+        dtypes = tuple(self.loop.carrier.component_dtypes)
         init, combine = M(*(["add"] * len(accs)), names=accs)
         return Fold(
-            carrier=None,
             axis=self.k_axis,
             operands=operands,
             lift=lift,
@@ -1293,7 +1280,7 @@ def _(s: Fold, rename, sigma, axis_fn):
     # dispatches back through the registry. A λ-spelled fold renames its lift / monoid in lockstep
     # (params track the operand names positionally, the combine's results ARE the accumulator
     # names) and re-derives the carrier; a step-spelled one renames the carrier with the partial's
-    # ``Accum``\\ s — the same rule the ``Loop`` handler applies (``Carrier.rename``).
+    # ``Accum``\\ s — the same rule the ``Loop`` handler applies (``Algebra.rename``).
     axis = axis_fn(s.axis)
     operands = tuple(_rewrite(edge, rename, sigma, axis_fn) for edge in s.operands)
     lift = Lambda(
@@ -1301,7 +1288,7 @@ def _(s: Fold, rename, sigma, axis_fn):
         body=Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.lift.body)),
         results=tuple(rename(r) if isinstance(r, str) else r for r in s.lift.results),
     )
-    return replace(s, carrier=None, axis=axis, operands=operands, lift=lift, combine=rename_combine(s.combine, rename))
+    return replace(s, axis=axis, operands=operands, lift=lift, combine=rename_combine(s.combine, rename))
 
 
 def _parse_bilinear(fold) -> tuple[object, tuple] | None:
@@ -1372,7 +1359,7 @@ def demote_operands(fold: Fold) -> Fold:
         idx = next((i for i, st in enumerate(body) if name in _deep_reads([st])), len(body))
         body.insert(idx, edge)
     lift = Lambda(params=(lam.params[0],), body=Body(tuple(body)), results=lam.results)
-    return Fold(carrier=None, axis=fold.axis, unroll=fold.unroll, lift=lift, init=fold.init, combine=fold.combine, dtypes=fold.dtypes)
+    return Fold(axis=fold.axis, unroll=fold.unroll, lift=lift, init=fold.init, combine=fold.combine, dtypes=fold.dtypes)
 
 
 def composed_contraction(fold):

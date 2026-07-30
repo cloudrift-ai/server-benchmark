@@ -17,7 +17,7 @@ from functools import singledispatch
 from emmy.compiler.ir.axis import Axis, extend_simplify_ctx
 from emmy.compiler.ir.expr import Expr, SimplifyCtx, Var
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt.algebra import State, StateMerge
+from emmy.compiler.ir.stmt.algebra import StateMerge
 from emmy.compiler.ir.stmt.base import Stmt, _axis_identity
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.leaves import (
@@ -157,11 +157,11 @@ def _(s: Mma, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
 @rewrite.register
 def _(s: StateMerge, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     # The renderable cross-partition combine: rename the state / state_b (in the rename map)
-    # PLUS the carrier-internal temps NOT surfaced via ``defines()`` — so a register-tile
+    # PLUS the merge-internal temps NOT surfaced via ``defines()`` — so a register-tile
     # replicator that renames the state per cell leaves the temps shared, colliding across
     # replicas. Uniquify the temps with a suffix derived from the renamed first state name
     # whenever the state actually moves (identity rename / pure σ-split leaves them untouched).
-    names = s.state.names
+    names = s.state
     new_state0 = rename(names[0]) if names else None
     carried = set(names) | set(s.state_b)
     temps = {a.name for a in s.merge} - carried
@@ -172,7 +172,7 @@ def _(s: StateMerge, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
         return r if r != name else overlay.get(name, name)
 
     return StateMerge(
-        state=State(names=tuple(rn(n) for n in names)),
+        state=tuple(rn(n) for n in names),
         merge=tuple(rewrite(m, rn, sigma, axis_fn) for m in s.merge),
         state_b=tuple(rn(n) for n in s.state_b),
     )
@@ -198,7 +198,7 @@ def _rewrite_axis_name(name: str, sigma: Sigma) -> tuple[str, ...]:
 @rewrite.register
 def _(s: Init, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     # ``identity`` is a constant scalar — only the name moves. Renamed in lockstep with
-    # the carrier's ``Accum`` / ``Carrier.state`` (registered above) so the seed stays paired.
+    # the fold's ``Accum`` / ``StateMerge.state`` (registered above) so the seed stays paired.
     return Init(name=rename(s.name), identity=s.identity, dtype=s.dtype)
 
 
@@ -238,7 +238,7 @@ def _(s: RowAccum, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
 def _(s: Loop, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     # Preserve the reduce annotation (``role`` / ``carrier``) through σ-offsets / axis-renames —
     # the carried-state ALGEBRA is untouched by index motion. SSA renames DO move through it
-    # (``Carrier.rename``): the state / channel-term / bound-program names must track the body's
+    # (``Algebra.rename``): the state / injected-term / combine-program names must track the body's
     # ``Accum`` renames, or the cooperative combine reads a name the renamed body no longer
     # defines (the M=1 cut-consumer miscompile).
     return Loop(
@@ -345,3 +345,34 @@ def _(s: Cond, ctx: SimplifyCtx) -> Stmt:
 
 # Tile-IR Stmt registrations were DEMOLISHED along with the tile IR; pending
 # rebuild.
+
+
+def projection_distributes(body, states: tuple[str, ...]) -> bool:
+    """True if the kernel's projection epilogue is a **linear-homogeneous** map of the carried
+    state(s) — i.e. it distributes over the atomic-add combine, so applying it to each CTA's
+    partition before the ``atomicAdd`` equals applying it once after the cross-CTA sum
+    (``Σ c·xₛ = c·(Σ xₛ)``). A bare state write (``proj = id``) trivially distributes; a constant
+    *scale* — ``mean``'s ``×1/N`` — does; an additive offset (a fused bias), a nonlinear unary
+    (``relu`` / ``reciprocal`` of the *state*), or a product of two state-derived values do NOT.
+
+    Conservative forward dataflow: ``linear`` is the set of SSA names that are a
+    linear-homogeneous function of the state. A value is grown into it only by ``multiply`` with
+    a state-independent operand (an arg not itself in ``linear``); any other op that consumes a
+    ``linear`` value — or any projection stmt we can't reason about — refuses. The final ``Write``
+    must store only ``linear`` values."""
+    linear = set(states)
+    for s in body:
+        if isinstance(s, Write):
+            return all(v in linear for v in s.values)
+        if isinstance(s, Load):
+            continue  # reads memory (the count / a per-output operand) — state-independent
+        if not isinstance(s, Assign):
+            return False  # an unfamiliar projection stmt — can't prove distributivity
+        hot = [a for a in s.args if a in linear]
+        if not hot:
+            continue  # state-independent — a constant w.r.t. the split
+        if s.op.name == "multiply" and len(hot) == 1:
+            linear.add(s.name)  # state · constant — still linear-homogeneous
+            continue
+        return False  # add / divide / nonlinear of a state value breaks distributivity
+    return False  # no Write reached

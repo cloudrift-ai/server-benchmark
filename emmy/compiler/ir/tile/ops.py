@@ -3,7 +3,7 @@
 A kernel's compute is a :class:`~emmy.compiler.ir.tile.ir.Map` (re-exported here) — a
 :class:`~emmy.compiler.ir.stmt.body.Body` of loop-IR stmts holding the per-cell compute. A
 reduction is a ``Map`` whose body contains the **annotated reduce ``Loop``** (its
-:class:`~emmy.compiler.ir.axis.AxisRole` + :class:`~emmy.compiler.ir.stmt.algebra.Carrier`
+:class:`~emmy.compiler.ir.axis.AxisRole` + :class:`~emmy.compiler.ir.stmt.algebra.Algebra`
 stamped by recognition) followed by the post-reduce projection; a contraction is a ``Map`` whose
 reduce ``Loop`` is ``CONTRACTION`` (the ``⊗`` lift sits in the loop body). The algebra is read
 **structurally** off the annotated loop, never a stored node kind — the ``Monoid`` / ``Semiring``
@@ -188,7 +188,7 @@ def nodify_reduce(op):
     partition can key on (the plan itself lives in ``TileOp.schedule`` — the caller stores it
     against the returned fold). Returns ``(op2, fold)``. A stored contraction fold (the
     recognize-side per-cell contraction) is already the node — the coop / ILP K partition treats
-    it as the degenerate carrier of its additive fold, any projection riding the wrapping ``Map``.
+    it as the degenerate algebra of its additive fold, any projection riding the wrapping ``Map``.
     A flat ``Map`` holding an annotated reduce ``Loop`` (a split partial) nodifies via
     :meth:`Fold.from_loop`, which reconstructs the identical annotated loop, so the lowering is
     byte-identical; a projection tail (a fused epilogue) rides a wrapping ``Map`` over the node, a
@@ -250,7 +250,7 @@ def contraction_loop(lift, fold, operand_bodies, reduce_axis) -> Loop:
     form: expand each operand source's stmts (siblings), the ``⊗`` lift ``Assign``
     (``fold.value = lift(operands…)``), and the additive ``fold`` ⊕ (its identity init is the
     ``Loop``'s immediate-``Accum`` prelude — no explicit ``Init``). The loop is stamped
-    ``CONTRACTION`` + the degenerate carrier of its additive fold (``fold.as_carrier()``), so the
+    ``CONTRACTION`` + the degenerate algebra of its additive fold (``fold.as_algebra()``), so the
     K loop carries its combine and the warp / cooperative tiers read the operands structurally off
     the body. Shared by the flash score producer and the scalar register-tile contraction."""
     body: list[Stmt] = []
@@ -261,7 +261,7 @@ def contraction_loop(lift, fold, operand_bodies, reduce_axis) -> Loop:
         names.append(stmts[-1].defines()[-1])
     body.append(Assign(name=fold.value, op=lift, args=tuple(names)))
     body.append(fold)
-    return Loop(axis=reduce_axis, body=Body(tuple(body)), role=AxisRole.CONTRACTION, carrier=fold.as_carrier())
+    return Loop(axis=reduce_axis, body=Body(tuple(body)), role=AxisRole.CONTRACTION, carrier=fold.as_algebra())
 
 
 def _term_names(root) -> tuple[list[str], list[str]]:
@@ -394,7 +394,7 @@ def _canon_tree(node):
         body = tuple(canon_stmt(s) for s in _canon_order(tuple(node.lift.body)))
         lift = Lambda(params=node.lift.params, body=_B(body), results=node.lift.results)
         ops2 = tuple(canon_stmt(e) for e in node.operands)
-        return replace(node, carrier=None, lift=lift, operands=ops2)
+        return replace(node, lift=lift, operands=ops2)
     return node
 
 

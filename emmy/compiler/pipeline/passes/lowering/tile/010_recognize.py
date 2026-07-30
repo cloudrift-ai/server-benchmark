@@ -6,7 +6,7 @@ This is the Loop-IR → Tile-IR boundary: after this pass nothing downstream tra
 ``LoopOp``. **Recognition** (here) reads the algebra off the body and lifts the per-cell
 compute into a :class:`~emmy.compiler.ir.tile.ir.Map` whose body is the **annotated
 loop nest** (the reduce ``Loop`` stamped with its
-:class:`~emmy.compiler.ir.axis.AxisRole` + :class:`~emmy.compiler.ir.stmt.algebra.Carrier`)
+:class:`~emmy.compiler.ir.axis.AxisRole` + :class:`~emmy.compiler.ir.stmt.algebra.Algebra`)
 on an UNMAPPED :class:`~emmy.compiler.ir.tile.ir.TileOp`; the final step hands that tile op to
 **scheduling** (:func:`~emmy.compiler.pipeline.passes.lowering.tile._schedule.schedule`, the
 ``_schedule`` helper) which maps the free axes onto the grid and offers the per-axis
@@ -26,13 +26,13 @@ step unconditional — no knobs):
    so step 3 doesn't lift it out from under its consumer.
 2. **Online softmax** — an adjacent ``(rowmax, Σ exp)`` reduce pair over the same input fuses
    into one streaming online-softmax loop: a ``TWISTED`` reduce ``Loop`` carrying the ``(m, d)``
-   exp-family ``Carrier`` (its dissolved ``merge`` in the body). The ``_softmax`` helper
+   exp-family ``Algebra`` (its dissolved ``merge`` in the body). The ``_softmax`` helper
    (``_fuse``).
 3. **Lift** — peel the free (parallel) axes off the kernel and lift the per-cell compute into a
    ``Map`` whose body holds the annotated reduce ``Loop`` + projection: a pure pointwise body is a
    flat ``Map``; a single flat reduce is annotated in place — ``CONTRACTION`` (clean contraction)
    / ``PLANAR`` (plain ``sum`` / ``max`` / ``mean``) / pre-annotated ``TWISTED`` (online softmax) —
-   with its degenerate / exp-family ``Carrier`` and the projection after it. The free axes ride on
+   with its degenerate / exp-family ``Algebra`` and the projection after it. The free axes ride on
    the ``TileOp``'s schedule (the root's concern); ``_schedule`` maps them onto the grid. A cell
    the lift can't cleanly factor (no reduce, several reduces, or a nested non-flash reduce) stays a
    flat un-annotated ``Map`` (→ the scalar tier).
@@ -194,23 +194,23 @@ def _is_clean_contraction(body: list[Stmt], k_name: str) -> bool:
 
 
 def _annotate_reduce(rloop: Loop, pre_reduce: tuple[Stmt, ...]) -> Loop | None:
-    """Annotate a single FLAT reduce ``Loop`` with its :class:`AxisRole` + :class:`Carrier`,
+    """Annotate a single FLAT reduce ``Loop`` with its :class:`AxisRole` + :class:`Algebra`,
     moving any reduce-feeding ``pre_reduce`` prologue INTO the loop body (so the cooperative
     register fold replicates it per accumulator chain). An already-annotated loop (online-softmax
     / flash from ``_fuse``) keeps its carrier; a clean contraction becomes ``CONTRACTION`` + the
-    additive fold's degenerate carrier; a single-``Accum`` reduce becomes ``PLANAR`` + that
-    ``Accum``'s degenerate carrier. Returns ``None`` (→ flat ``Map`` fallback) when the carrier
+    additive fold's degenerate algebra; a single-``Accum`` reduce becomes ``PLANAR`` + that
+    ``Accum``'s degenerate algebra. Returns ``None`` (→ flat ``Map`` fallback) when the algebra
     can't be read (several ``Accum``\\ s, no fold)."""
     body = (*pre_reduce, *rloop.body)
     if rloop.carrier is not None:
         return Loop(axis=rloop.axis, body=Body(body), unroll=rloop.unroll, role=rloop.role, carrier=rloop.carrier)
     if _is_clean_contraction(list(body), rloop.axis.name):
         fold = next(s for s in body if isinstance(s, Accum))
-        return Loop(axis=rloop.axis, body=Body(body), unroll=rloop.unroll, role=AxisRole.CONTRACTION, carrier=fold.as_carrier())
+        return Loop(axis=rloop.axis, body=Body(body), unroll=rloop.unroll, role=AxisRole.CONTRACTION, carrier=fold.as_algebra())
     accs = [s for s in body if isinstance(s, Accum)]
     if len(accs) != 1:
         return None
-    return Loop(axis=rloop.axis, body=Body(body), unroll=rloop.unroll, role=AxisRole.PLANAR, carrier=accs[0].as_carrier())
+    return Loop(axis=rloop.axis, body=Body(body), unroll=rloop.unroll, role=AxisRole.PLANAR, carrier=accs[0].as_algebra())
 
 
 def _lift_cell(cell: list[Stmt], free: list, output: str) -> tuple[Map | Fold, tuple]:

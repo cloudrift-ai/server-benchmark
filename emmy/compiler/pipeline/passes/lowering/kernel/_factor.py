@@ -47,11 +47,12 @@ from dataclasses import dataclass, replace
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis, AxisRole, Window
+from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, Literal, Var
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
+from emmy.compiler.ir.stmt import Accum, Algebra, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import FoldMove, Level, ReducePlan, ReduceStage, contraction_view, is_contraction_fold
 from emmy.compiler.ir.tile.ir import ContractionView, Fold, Map, Side, effect_tail
 from emmy.compiler.ir.tile.ops import cone_seam
@@ -606,7 +607,7 @@ def _restage_loads(stmts: list[Stmt], buf: str, smem: str, n_grid: int, grid_var
 def emit_combine(
     carrier, t: str, n_threads: int, *, warp_size: int = 32, segmented: bool = False, inner: tuple[str, int] | None = None
 ) -> list[Stmt]:
-    """Build the cross-thread combine of a cooperative reduce ``carrier`` (a :class:`Carrier`)
+    """Build the cross-thread combine of a cooperative reduce ``carrier`` (an :class:`Algebra`)
     over ``n_threads`` cooperating threads, reassigning the carried state in place.
 
     The mechanism per level is derived by :meth:`ReduceStage.combine`:
@@ -620,10 +621,10 @@ def emit_combine(
     - a standalone ``SMEM`` → the block slab: every thread stages its partial, one ``Sync``,
       a single ``TreeHalve`` reduces + broadcasts in place.
 
-    The carrier's combine surface (``state.names`` / ``twist.state_b`` /
-    ``twist.combine_states``) drives the nodes; the combine renders at the accumulator dtype
-    (fp32 for a reduction, with the carrier's own dtype honored when set)."""
-    state = carrier.state.names
+    The algebra's combine surface (``names`` / ``state_b`` / ``combine_states``) drives the
+    nodes; the combine renders at the accumulator dtype (fp32 for a reduction, with the
+    algebra's own dtype honored when set)."""
+    state = carrier.names
     state_b = carrier.state_b
     prog = carrier.combine_states
     dtype = next((a.dtype for a in prog if a.dtype is not None), None) or F32
@@ -686,7 +687,7 @@ def combine_tail(carrier, *, reg: int, coop: int, lane) -> list[Stmt]:
     Carrier-generic: a monoid reduce and a contraction's degenerate additive carrier fold identically,
     so a cooperative reduce and a (future) cooperative-K contraction share this tail. ``as_state_merge``
     keys its finalize temps on the copy name, so each fold's internals are already unique."""
-    merge: list[Stmt] = [carrier.as_state_merge(tuple(f"{n}__r{r}" for n in carrier.state.names)) for r in range(1, reg)]
+    merge: list[Stmt] = [carrier.as_state_merge(tuple(f"{n}__r{r}" for n in carrier.names)) for r in range(1, reg)]
     if lane is not None:
         merge += emit_combine(carrier, t=lane.name, n_threads=coop)
     return merge
@@ -748,21 +749,27 @@ def _taint(stmts: list[Stmt], axis: str) -> frozenset[str]:
 
 
 def _vector_carrier(carrier, tainted: frozenset[str], count: int):
-    """The carrier with each column-dependent state component fanned out per register column —
-    one expectation channel per column, so the loop render seeds every replica (the chain IS the
-    same LSE carrier with ``count`` expect channels)."""
-    if carrier is None or not (set(carrier.state.names) & tainted):
+    """The algebra with each column-dependent state component fanned out per register column —
+    one expectation component per column, so the loop render seeds every replica (the chain IS
+    the same LSE algebra with ``count`` expectation components). The combine regenerates over the
+    expanded state (the same deterministic generators the original spelling came from)."""
+    if carrier is None or not (set(carrier.names) & tainted):
         return carrier
     names: list[str] = []
-    channels: list = []
-    for nm, ch in zip(carrier.state.names, carrier.twist.channels, strict=True):
-        if nm in tainted:
-            names += [f"{nm}_{j}" for j in range(count)]
-            channels += [ch] * count
-        else:
-            names.append(nm)
-            channels.append(ch)
-    return replace(carrier, state=replace(carrier.state, names=tuple(names)), twist=replace(carrier.twist, channels=tuple(channels)))
+    terms: list = []
+    dts: list = []
+    folds: list = []
+    ops = carrier.ops
+    for i, (nm, t, dt) in enumerate(zip(carrier.names, carrier.terms, carrier.component_dtypes, strict=True)):
+        rep = count if nm in tainted else 1
+        names += [f"{nm}_{j}" for j in range(count)] if nm in tainted else [nm]
+        terms += [t] * rep
+        dts += [dt] * rep
+        if ops is not None:
+            folds += [ops[i]] * rep
+    if ops is None:
+        return Algebra.exp_family(terms[0], tuple(terms[1:]), tuple(names))
+    return Algebra.degenerate(folds=tuple(folds), names=tuple(names), terms=tuple(terms), dtypes=tuple(dts))
 
 
 def _vectorize_axis(stmts: list[Stmt], axis: str, count: int, tainted: frozenset[str], protected: frozenset[str]) -> list[Stmt]:
@@ -861,16 +868,15 @@ def _tile_reduce_axis_transposed(
         {axis.name, *(ax.name for ax in grid), blk_name, n_lane.name, *axis.extent_expr().free_vars(), *nested_axes, *expr_external}
         | ({k_co.name} if k_co is not None else set())
     )
-    twisted = carrier.twist.family is not None and carrier.twist.family != "id"
-    pivot = carrier.twist.channels[0] if twisted else None
-    stream_identity = (str(pivot.term), pivot.fold.identity) if twisted else None
+    twisted = carrier.ops is None
+    stream_identity = (str(carrier.terms[0]), ElementwiseImpl("maximum").identity) if twisted else None
     copies: list[Stmt] = []
     for r in range(reg):
         copies.extend(_replicate(rloop.body, r, k_ways, axis, masked, protected, stream_identity))
     strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=rloop.unroll)
     strided = strided.rewrite(ident, subst)
 
-    merge: list[Stmt] = [carrier.as_state_merge(tuple(f"{n}__r{r}" for n in carrier.state.names)) for r in range(1, reg)]
+    merge: list[Stmt] = [carrier.as_state_merge(tuple(f"{n}__r{r}" for n in carrier.names)) for r in range(1, reg)]
     if k_co is not None:
         merge += emit_combine(carrier, t=k_co.name, n_threads=k_ways, inner=(n_lane.name, lanes_n))
 
@@ -898,7 +904,7 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
 
     # Build the per-cell reduce loop via the recursion (:func:`_emit`) off the :class:`Fold`
     # **node** — the walk reaches any nested contraction (flash Q@K / P@V) as a node. The synthesized
-    # ``loop`` carries the :class:`Carrier` (a contraction's K loop and a monoid's reduce loop both
+    # ``loop`` carries the :class:`Algebra` (a contraction's K loop and a monoid's reduce loop both
     # carry it here — the ⊗ lift already sits in the loop body, so the carrier-generic ``state`` /
     # ``as_state_merge`` / ``combine_states`` machinery folds either). A ``Fold`` has no prologue
     # ahead of its loop; the enclosing ``Map``'s projection is ``tail`` (already walked).
@@ -965,9 +971,8 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
     )
     # A twisted carrier's masked tail clamps the STREAMED VALUE to the pivot fold's identity
     # (the ``exp`` family's running max, −inf) — see :func:`_mask_streamed`'s twisted form.
-    twisted = carrier.twist.family is not None and carrier.twist.family != "id"
-    pivot = carrier.twist.channels[0] if twisted else None
-    stream_identity = (str(pivot.term), pivot.fold.identity) if twisted else None
+    twisted = carrier.ops is None
+    stream_identity = (str(carrier.terms[0]), ElementwiseImpl("maximum").identity) if twisted else None
     copies: list[Stmt] = []
     for r in range(reg):
         copies.extend(_replicate(rloop.body, r, coop, axis, masked, protected, stream_identity))

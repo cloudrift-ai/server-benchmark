@@ -403,7 +403,7 @@ def test_online_softmax_combine_builds_asymmetric_monoid() -> None:
     # state (m, d), partial (s); the asymmetric LSE monoid derives combine_states (the
     # cross-partition state⊕state combine) from its exp-family spec.
     mono = online_softmax_combine("m", "d", "s")
-    assert mono.state.names == ("m", "d") and mono.partial_names() == ("s",)
+    assert mono.names == ("m", "d") and mono.partial_names() == ("s",)
     assert mono.combine_states, "combine_states must be derived for the asymmetric LSE monoid"
 
 
@@ -420,7 +420,7 @@ def test_fuse_collapses_only_the_online_softmax_pair(kind, should_fuse) -> None:
         assert len(loops) == 1, "the two reduce loops fuse into one online-softmax loop"
         fused_loop = loops[0]
         assert fused_loop.role is AxisRole.TWISTED and fused_loop.carrier is not None, "the fused loop is a TWISTED carrier"
-        assert fused_loop.carrier.state.names == ("acc0", "acc1"), "carrier keeps the original acc names"
+        assert fused_loop.carrier.names == ("acc0", "acc1"), "carrier keeps the original acc names"
 
 
 @requires_cuda

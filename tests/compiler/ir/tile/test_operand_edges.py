@@ -60,9 +60,8 @@ def test_product_node_derives_one_fold_loop_with_the_shared_a_lifted_once() -> N
 
 def test_product_carrier_is_the_n_component_product_monoid() -> None:
     loop = _product().loop
-    assert loop.carrier.state.names == ("acc_g", "acc_u")
-    assert loop.carrier.twist.family == "id"
-    assert len(loop.carrier.twist.channels) == 2
+    assert loop.carrier.names == ("acc_g", "acc_u")
+    assert loop.carrier.ops is not None and len(loop.carrier.ops) == 2
 
 
 def test_arity_is_not_two_copies() -> None:
@@ -84,7 +83,7 @@ def test_defines_and_out_read_the_channels() -> None:
 def test_single_channel_node_is_the_plain_matmul() -> None:
     node = _node(Load(name="a_e", input="x", index=(Var("m"), Var("k"))), ("acc", "W"))
     (loop,) = lower(node)
-    assert loop.carrier.state.names == ("acc",)
+    assert loop.carrier.names == ("acc",)
     assert not node.a_computed
 
 

@@ -28,7 +28,7 @@ def _sum_loop() -> Loop:
     included — the canonical dissolved shape ``from_loop``'s byte gate reproduces)."""
     acc = Accum(name="acc", value="x_e", op="add", axes=("k",))
     body = Body((Load(name="x_e", input="x", index=(Var("m"), Var("k"))), acc))
-    return Loop(axis=Axis("k", 1024), body=body, role=AxisRole.PLANAR, carrier=acc.as_carrier())
+    return Loop(axis=Axis("k", 1024), body=body, role=AxisRole.PLANAR, carrier=acc.as_algebra())
 
 
 def test_from_loop_reconstructs_the_loop_exactly() -> None:
@@ -248,7 +248,6 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
     accs = inner_fold.combine.results
     init, combine = M(*component_ops(inner_fold.combine), names=accs)
     red = Fold(
-        carrier=None,
         axis=ksplit,
         operands=(inner_fold,),  # the sliced fold rides the ONE operand edge — the λ-spelled (step 7) form
         lift=Lambda(params=(ksplit.name, *accs), body=Body(()), results=accs),
@@ -286,7 +285,6 @@ def test_reduce_partial_flattens_a_nested_pv_contraction() -> None:
     names = ("m_i", "l_i", "O_i")
     other = tuple(f"{n}__o" for n in names)
     red = Fold(
-        carrier=None,
         axis=Axis("kv", 128),
         operands=(qk, Load(name="v_e", input="V", index=(Var("kv"), Var("d")))),
         lift=Lambda(params=("kv", "acc", "v_e"), body=Body((prob,)), results=("p", 1.0, "v_e")),

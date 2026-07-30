@@ -41,7 +41,7 @@ def _planar_fold(k_name: str = "k", *, acc: str = "s0", val: str = "v1", load: s
             accum,
         )
     )
-    loop = Loop(axis=Axis(k_name, 512), body=body, role=AxisRole.PLANAR, carrier=accum.as_carrier())
+    loop = Loop(axis=Axis(k_name, 512), body=body, role=AxisRole.PLANAR, carrier=accum.as_algebra())
     fold = Fold.from_loop(loop)
     assert fold.lift is not None
     return fold
@@ -86,7 +86,6 @@ def _flash_tree() -> tuple[Map, Fold, Fold, Fold]:
         results=("s", 1.0, "v_e"),
     )
     stream = Fold(
-        carrier=None,
         axis=Axis("kv", 512),
         operands=(qk, Load(name="v_e", input="V", index=(Var("kv"), Var("d")))),
         lift=lift,

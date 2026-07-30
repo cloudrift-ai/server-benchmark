@@ -64,7 +64,7 @@ from emmy.compiler.ir.tile import (
     TileOp,
     split_effects,
 )
-from emmy.compiler.ir.tile.ir import effect_tail
+from emmy.compiler.ir.tile.ir import composed_contraction, effect_tail
 from emmy.compiler.ir.tile.ops import Sched, lower, nodify_reduce, projection_tail, reduce_loop, reduce_plan, sched_of, seal_workers
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.tile._carrier import projection_distributes as _projection_distributes
@@ -414,12 +414,11 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     # with its last in-body stmt), so the reconstitution keys off the TileOp, not the node shape.
     split_root = op.sources[0] if isinstance(op, Map) and op.sources else op
     projection = tuple(projection_tail(tile))
-    if isinstance(split_root, Fold) and len(split_root.step) == 1:
-        # The split node's inner contraction — multi-channel included — rides the reduce's
-        # ``step`` (the one composition rule).
-        inner = split_root.step[0]
-        if isinstance(inner, Fold) and inner.role is AxisRole.CONTRACTION and sched_of(tile).tile_of(inner) is not None:
-            return _split_contraction(match, root, tile, inner, carrier, plan, rax, projection)
+    # The split node's inner contraction — multi-channel included — rides the outer reduce's
+    # identity-lift operand composition (the one composition rule; ``ir.composed_contraction``).
+    inner = composed_contraction(split_root)
+    if inner is not None and sched_of(tile).tile_of(inner) is not None:
+        return _split_contraction(match, root, tile, inner, carrier, plan, rax, projection)
     # Flash split-KV: a warp-tiled TWISTED streaming tree keeps its fragment residence in the
     # partial (the scalar residual path below would drop it to the per-cell tier).
     if isinstance(op, Map) and len(op.sources) == 1 and isinstance(op.sources[0], Fold) and op.sources[0].role is AxisRole.TWISTED:

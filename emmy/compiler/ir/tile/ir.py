@@ -203,6 +203,16 @@ def _split_expect(merge: list[Stmt], o: str, v: str, v_edge: Load) -> list[Stmt]
     return out
 
 
+def _operand_binding(fold: Fold) -> dict:
+    """The bound-name → operand-edge map (positional binding, one lift param per operand RESULT
+    COMPONENT — a product edge binds every component to the same edge)."""
+    out: dict = {}
+    for e in fold.operands:
+        for n in _operand_result_names(e):
+            out[n] = e
+    return out
+
+
 def _twisted_derived_step(fold: Fold) -> tuple[Stmt, ...]:
     """The DERIVED blocked evaluation of a λ-spelled TWISTED fold (step 7 — the composed ``step``
     sequence dissolved): the INLINE-NODE operand edges at the head in operand order (flash's
@@ -215,7 +225,7 @@ def _twisted_derived_step(fold: Fold) -> tuple[Stmt, ...]:
     lam = fold.lift
     merge = list(fold.carrier.merge)
     channels = fold.carrier.twist.channels
-    by_param = dict(zip(lam.params[1:], fold.operands, strict=True))
+    by_param = _operand_binding(fold)
     for nm, ch in zip(fold.carrier.state.names, channels, strict=True):
         if ch.lift is None or not isinstance(ch.term, str):
             continue
@@ -246,6 +256,21 @@ def _fold_derived_step(fold: Fold) -> tuple[Stmt, ...]:
         # carry the singleton terms (the lift results), so the generated streaming merge is the
         # singleton specialization of the stored combine, names included.
         return fold._derived_twisted
+    if (
+        not len(lam.body)
+        and tuple(lam.results) == tuple(names)
+        and len(fold.operands) == 1
+        and isinstance(fold.operands[0], Fold)
+        and fold.operands[0].combine is not None
+        and tuple(fold.operands[0].combine.results) == tuple(names)
+        and component_ops(fold.operands[0].combine) == ops
+    ):
+        # The reassociation COMPOSITION (split-K's outer reduce): an IDENTITY lift over one
+        # inline fold operand sharing the outer's exact accumulator state. Combine at that
+        # singleton is the shared-accumulator simplification (a ×1 fold): the derived step is
+        # the sliced fold in place — its own ``Accum``\\ s carry across both loops — with NO
+        # outer folds, byte-identical to the retired ``step=(inner,)`` spelling.
+        return (fold.operands[0],)
     dts = fold.dtypes or (None,) * len(names)
     accums = tuple(
         Accum(name=names[i], value=str(lam.results[i]), op=ops[i], dtype=dts[i], axes=(fold.axis.name,)) for i in range(len(names))
@@ -424,7 +449,9 @@ class Fold(Stmt):
             raise ValueError(f"Fold combine must be S × S → S at arity {n}: params={self.combine.params} results={self.combine.results}")
         lam = self.lift
         assert lam.params[:1] == (self.axis.name,), f"lift param 0 must be the iteration var {self.axis.name!r}: {lam.params}"
-        bound = tuple(_operand_name(e) for e in self.operands)
+        # One lift param per operand RESULT COMPONENT (a product edge — split-K's sliced
+        # multi-channel fold — binds every component), positionally.
+        bound = tuple(n for e in self.operands for n in _operand_result_names(e))
         assert tuple(lam.params[1:]) == bound, f"lift params {lam.params[1:]} must bind the operand edges {bound} positionally"
         assert len(lam.results) == n, "one lift result per monoid component"
         ops = component_ops(self.combine)
@@ -493,7 +520,7 @@ class Fold(Stmt):
             return AxisRole.TWISTED
         if _parse_bilinear(self) is not None:
             return AxisRole.CONTRACTION
-        if len(self.step) == 1 and is_contraction_fold(self.step[0]):
+        if composed_contraction(self) is not None:
             return AxisRole.CONTRACTION  # split-K: the outer additive reduce over the sliced fold
         return AxisRole.PLANAR
 
@@ -526,18 +553,19 @@ class Fold(Stmt):
         """The operand edges the GENERIC first-use splice places — every edge not already
         consumed by the derived step: a λ-spelled TWISTED fold's derived blocked evaluation
         embeds its inline-node edges at the head and its Load-bound expectation edges inside
-        the synthesized contraction (:func:`_twisted_derived_step`), so those never splice
+        the synthesized contraction (:func:`_twisted_derived_step`); the identity-lift
+        composition (split-K) embeds its one fold operand verbatim. None of those splice
         twice."""
-        if self.lift is None or component_ops(self.combine) is not None:
+        if self.lift is None:
             return self.operands
-        channels = self.carrier.twist.channels
-        by_param = dict(zip(self.lift.params[1:], self.operands, strict=True))
-        consumed = {id(e) for e in self.operands if isinstance(e, (Fold, Map))}
-        for ch in channels:
-            if ch.lift is not None and isinstance(ch.term, str):
-                edge = by_param.get(ch.term)
-                if isinstance(edge, Load):
-                    consumed.add(id(edge))
+        consumed = {id(s) for s in self._step_stmts()}
+        if component_ops(self.combine) is None:
+            by_param = _operand_binding(self)
+            for ch in self.carrier.twist.channels:
+                if ch.lift is not None and isinstance(ch.term, str):
+                    edge = by_param.get(ch.term)
+                    if isinstance(edge, Load):
+                        consumed.add(id(edge))
         return tuple(e for e in self.operands if id(e) not in consumed)
 
     @property
@@ -1354,6 +1382,26 @@ def is_contraction_fold(s) -> bool:
     """``s`` is a stored fold whose DERIVED role is ``CONTRACTION`` — the one test every walk over
     a step sequence uses to spot a composed contraction (flash's QK / PV, split-K's sliced fold)."""
     return isinstance(s, Fold) and s.role is AxisRole.CONTRACTION
+
+
+def composed_contraction(fold):
+    """The single sliced contraction fold an outer reduce COMPOSES (split-K's reassociation
+    ``fold_k = fold_{ksplit} ∘ fold_{kslice}``), or ``None`` — the identity-lift λ spelling (one
+    inline fold operand carrying the outer's exact accumulator state), with the residual stored
+    ``step`` spelling as the fallback arm. The ONE read ``030_split_reduce`` and the derived
+    :attr:`Fold.role` share."""
+    if not isinstance(fold, Fold):
+        return None
+    if fold.lift is not None:
+        if len(fold.lift.body) or len(fold.operands) != 1:
+            return None
+        inner = fold.operands[0]
+        if isinstance(inner, Fold) and inner.role is AxisRole.CONTRACTION:
+            return inner
+        return None
+    if len(fold.step) == 1 and isinstance(fold.step[0], Fold) and fold.step[0].role is AxisRole.CONTRACTION:
+        return fold.step[0]
+    return None
 
 
 def shared_operand(fold):

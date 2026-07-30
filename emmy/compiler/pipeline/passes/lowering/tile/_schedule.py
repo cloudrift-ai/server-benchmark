@@ -44,7 +44,8 @@ from emmy.compiler.ir.axis import Axis, AxisRole, Window
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.schedule import Raster, Stage, WarpSpec, has_scalar_atom_alias, is_warp_codec
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Lambda, Load, Loop, Stmt, Write
+from emmy.compiler.ir.stmt.algebra import M, component_ops
 from emmy.compiler.ir.tile import (
     Channel,
     ContractionView,
@@ -1419,13 +1420,22 @@ def _splitk_option(
     elif stage_spec:
         st = Stage.parse(stage_spec)
         stage = _resolve_warp_stage(inner, st, budget) if wt.is_warp else _resolve_scalar_stage(inner, st, tile.inputs, budget)
-    # The carrier is the sliced fold's own — the 1-component additive ``Accum`` for a plain matmul,
-    # the N-component product-monoid state for a multi-channel (gate/up) node — so the split
-    # finalize folds exactly the state the kernel accumulates.
+    # The state is the sliced fold's own — the 1-component additive accumulator for a plain
+    # matmul, the N-component product-monoid state for a multi-channel (gate/up) node — so the
+    # split finalize folds exactly the state the kernel accumulates.
     inner_fold = inner.as_fold()
-    # ONE composition rule: the sliced fold (multi-channel included) rides the reduce's ``step``
-    # (the outer fold DERIVES role=CONTRACTION from that composed step).
-    op = Fold(carrier=inner_fold.carrier, axis=ksplit, step=Body((inner_fold,)))
+    # ONE composition rule (step 7 — λ-spelled): the outer reduce is the IDENTITY lift over the
+    # sliced fold operand, its combine the same componentwise ⊕ over the same accumulator names —
+    # the reassociation ``fold_k = fold_{ksplit} ∘ fold_{kslice}``. The derived step embeds the
+    # operand verbatim (the shared-accumulator ×1-fold simplification), so the lowered nest is
+    # byte-identical to the retired ``step=(inner,)`` spelling, and the outer fold DERIVES
+    # role=CONTRACTION off the composition (``ir.composed_contraction``).
+    accs = tuple(inner_fold.combine.results)
+    ident_lift = Lambda(params=(ksplit.name, *accs), body=Body(()), results=accs)
+    o_init, o_combine = M(*component_ops(inner_fold.combine), names=accs)
+    op = Fold(
+        carrier=None, axis=ksplit, operands=(inner_fold,), lift=ident_lift, init=o_init, combine=o_combine, dtypes=inner_fold.dtypes
+    )
     outer_fold = op
     # The projection rides the ``Map`` wrapper — its ONE home; ``030_split_reduce`` reads it there and
     # retargets it (per-partition atomic store / a deferred finalize after the cross-partition sums).
@@ -1961,7 +1971,7 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     red = src if isinstance(src, Fold) else (op if isinstance(op, Fold) else None)
     if red is None or red.role is not AxisRole.PLANAR or _composes(red):
         return None
-    body = list(red.step)
+    body = list(red.step_stmts())
     accums = [st for st in body if isinstance(st, Accum)]
     if len(accums) != 1 or accums[0].op.name != "add":
         return None

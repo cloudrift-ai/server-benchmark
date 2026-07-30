@@ -4,12 +4,24 @@ Goal: bring emmy's speculative-decoding (MTP) serving throughput at batch up to 
 gemma-4-12B-it with the official drafter. Single-stream was already at parity; the batched cells sat
 at 0.24x to 0.74x.
 
-Short version. I found and fixed a real fault that silently switched emmy's tuned decode kernels off
-under speculative decoding, worth **+30% to +34%** on decode-dominated load. But I also established
-that this fault **does not explain the article's numbers**, because the published serving image never
-runs the code path that has it. The article's batched gap has two other causes: the 4k/4k cells are
-prefill-bound rather than decode-bound, and the c=64 cell runs on a kernel width with no tuning data
-at all. Details, evidence, and the things that turned out to be wrong are all below.
+### Short version
+
+- **c=64 depth 2 is fixed**, and it was the worst cell. Pointing its decode bucket at a *covered*
+  width (192 -> 256) took it from 10.72 to 889.27 tok/s on a same-box before/after (83x), and to
+  1194.82 at the full protocol — now **1.08x** emmy's own speculation-off number, where it used to lose
+  to it by 3.3x, and **0.92x** of stock+MTP.
+- **A real fault was found and fixed** in the capture ladder: under speculative decoding it silently
+  routed every verify step off emmy's tuned decode kernels. Worth **+30% to +34%** on decode-dominated
+  load, taking those points from 0.61-0.67x to 0.82-0.87x of stock.
+- **But that fault does not explain the article's numbers**, because the published image never runs
+  the code path that has it. I over-claimed this early and the correction is documented below.
+- **The article's 4k/4k batched cells did not move**, because they are prefill-bound, not
+  decode-bound: emmy's TTFT there is 24-26 s against stock's 8.7 s. That is where their gap lives.
+- **A 22% regression on the shipped docker path** turned up while baselining (published 450.6 against
+  merged main 353.22 at identical knobs). Flagged with candidates; larger than most of what I was sent
+  to fix.
+- **Quality is not established** — the GSM8K gate was not run, and my cheap substitute was invalid.
+  See the quality section; this must run before anything ships.
 
 ---
 
@@ -232,7 +244,32 @@ problem. Both numbers are far below the 1109 speculation-off bar. This is exactl
 the golden file exists to prevent, and it is the strongest argument for the bucket change: m256
 resolves deterministically from records, with no search and no lottery.
 
-<!-- C64 RESULT -->
+### c=64 result — the fix works here, and this is the session's biggest win
+
+Bucket 192 -> 256, bare-metal on one box, same code except the bucket and the ladder fix:
+
+| c=64 d2, 256/256 | 64 prompts | 256 prompts (protocol) |
+|---|--:|--:|
+| before, bucket 192 | 10.72 | not completed (killed at 80/256 after 21 min) |
+| after, bucket 256 | **889.27** | **1194.82** |
+
+The 64-prompt pair is the clean same-path before/after: **83x**. At the full protocol the after
+measures 1194.82 tok/s (TPOT 19.23, TTFT 7651 ms) and the whole run takes about a minute instead of
+timing out.
+
+Against the two bars:
+
+| reference | tok/s | after / reference |
+|---|--:|--:|
+| emmy without speculation (docker) | 1109.2 | **1.08x** — clears bar 1 |
+| stock without speculation (bare-metal) | 1242.98 | 0.96x |
+| stock + MTP (bare-metal) | 1302.80 | **0.92x** |
+| emmy + MTP bucket 192 (docker, published) | 332.7 | 3.6x |
+
+**Speculation is no longer self-defeating at c=64** — it now beats emmy's own speculation-off number
+rather than losing to it by 3.3x. The cell lands at 0.92x of stock+MTP, just short of the 0.95x
+target. Cross-path comparisons (bare-metal after against docker bars) are flagged as such; the
+same-path pair is the 64-prompt column.
 
 **If bucket 256 cannot clear the first bar, the honest recommendation is to run this cell with
 speculation off** rather than keep tuning it — a defensible engineering answer, not a concession,
@@ -289,6 +326,22 @@ main (353.2) at the same knobs.
   bucket at an existing well-covered width is both cheaper and better, so new tiers were not the
   right spend. A direct bucket-16-versus-32 A/B at c=4 was also not run — the recommendation to
   prefer 32 rests on the coverage matrix plus the padding-is-free result, not on its own measurement.
+
+## Quality checking — not established, and why
+
+The GSM8K gate was not run (it was scoped as minimal and last, and the boots consumed the budget). My
+attempted cheap substitute — a few greedy `/v1/completions` probes against the fixed server — turned
+out to be **invalid**: it returns empty or degenerate text, but so does **stock vLLM on the same box
+with the same probe** (`'111.111.11.....'`). That is the known BOS pitfall on this model: the
+`gsm8k_mtp_rtx5090` recipe builds a dedicated BOS-pinned tokenizer directory precisely because raw
+completions without it compare tokenizers rather than engines. So the probe says nothing about either
+engine, and I am not claiming quality from it.
+
+What limits the risk: this work changes no kernel math. It changes which precompiled program width a
+step is routed to, and every width it now lands on (m32, m256) is already covered by golden records
+that the repo's own audit validates. The residual risk is reduction-order differences between widths,
+which is exactly what the GSM8K gate exists to catch. **Running it remains a required follow-up before
+any of this ships.**
 
 ## Reproducing
 

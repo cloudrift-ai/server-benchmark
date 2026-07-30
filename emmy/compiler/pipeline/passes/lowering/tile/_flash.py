@@ -6,15 +6,14 @@ halves:
 - **Recognition** — :func:`try_flash` matches a softmax-then-P@V kernel (+ its clean
   scaled-QK producer) via ``_recognize`` / ``_extract_qk`` / ``_classify_rowmax``, and
   emits the fused fragment.
-- **Construction** — the ``flash_combine`` carrier, the ``flash_shape_eligible`` /
-  ``gqa_group`` predicates, and the fragment builder ``build_flash_frag``. It doesn't
-  hand-assemble a kernel body — it builds the high-level **structural-node tree**
-  (``ir/tile/ir``): flash is the **two-``ContractionView`` tree** ``Map(body=[O/l projection],
-  sources=(Fold(role=TWISTED, axis=kv, step=[ContractionView(Σ_dd Q·K), …, ContractionView(Σ_j P·V)]),))``
-  — the ``(m,l,O)`` LSE streaming reduce over kv whose per-step ``step`` holds BOTH the ``Σ_dd Q·K``
-  score :class:`ContractionView` (at its head) and the **P@V** ``Σ_j P·V`` :class:`ContractionView` (its A
-  operand the register-resident softmax weight ``P``; ``_split_pv`` redirects the carrier's
-  expectation-fold value through it), projected ``O/l`` after the loop. Both Q@K and P@V ride the
+- **Construction** — the ``flash_shape_eligible`` / ``gqa_group`` predicates and the fragment
+  builder ``build_flash_frag``. It doesn't hand-assemble a kernel body — it builds the high-level
+  **λ-spelled structural-node tree** (``ir/tile/ir``): flash is ``Map(body=[O/l projection],
+  sources=(Fold(axis=kv, operands=(Fold(Σ_dd Q·K), Load(V)), lift=λ(kv, sacc, v_e) → (score, 1,
+  v_e), init/combine = the exp-family ⊕),))`` — the ``(m,l,O)`` LSE streaming reduce over kv whose
+  ``Σ_dd Q·K`` score is a HOISTED operand edge and whose **P@V** ``Σ_j P·V`` contraction (its A the
+  register-resident softmax weight ``P``) is SYNTHESIZED into the DERIVED blocked evaluation
+  (``ir._twisted_derived_step``), projected ``O/l`` after the loop. Both Q@K and P@V ride
   single walked ``step`` edge (no ``source`` asymmetry) and factorize through the one
   ``_factor`` contraction path; block=1 is the scalar streaming degenerate (``j`` a singleton reduce).
   ``build_flash_frag`` returns that ``Map`` UNLOWERED, on a ``TileOp`` with an UNMAPPED ``Placement``
@@ -57,7 +56,7 @@ redundant, form::
         Init sacc = 0
         for dd in 0..head_dim: sacc += Q[…,m,dd]·K[…,kv,dd]   # Q@K score ContractionView
         s = sacc · scale
-        M = max(m_i, s); alpha = exp(m_i − M); P = exp(s − M)  # softmax stats (flash_combine merge)
+        M = max(m_i, s); alpha = exp(m_i − M); P = exp(s − M)  # softmax stats (the derived exp merge)
         l_i = l_i·alpha + P
         for j in 0..1:  O_i__pv += P · V[…,kv,d]     # P@V ContractionView (block=1: singleton j)
         O_i = O_i·alpha + O_i__pv                    # the LSE rescale + PV fold

@@ -427,13 +427,17 @@ partitioned across, coarse→fine: `GRID` (split-K across CTAs), `BLOCK` (cooper
 or tuned. The single `REDUCE` codec knob decides the plan in the `_schedule` helper (inside `010_recognize`); the combine itself stays in the op
 tree.
 
-All four schedule codecs — `REDUCE`, `TILE` (scalar or warp `TilePlan`), `STAGE`, and `WSPEC` — share one
+The schedule codecs — `REDUCE`, `TILE` (scalar or warp `TilePlan`), `STAGE`, and `WSPEC` — share one
 schema-driven ser/de engine (the codec half of `schedule.py`): a `Schema` of typed `Field`s plus generic `desugar` / `decode` /
 `encode`. Each codec class keeps its `parse` / `spell` API and its semantics, delegating only the string ↔ struct
-conversion to the engine, so the featurizer and the `_schedule` helper (inside `010_recognize`) call sites — and the on-disk golden wire format — are
-unchanged. The grammar collapses int and pair widths into one tuple kind and supports per-field params (the recursive
+conversion to the engine. The grammar collapses int and pair widths into one tuple kind and supports per-field
+params (the recursive
 `WSPEC` role case); the one non-uniform value codec is the `REDUCE` `g<n>[a|k]` finalize letter, kept inside the value
-so the round-trip stays byte-identical.
+so the round-trip stays byte-identical. Since step 7 the WIRE forms are site-local: `Workers` is the kernel-global
+inventory (`WORK` — `Workers.spell`/`parse`, the `+p<n>` producer band absorbing the retired per-row `WSPEC` key), and
+`TilePlan.spell_site`/`parse_site` + `ReducePlan.spell_site`/`parse_site` are the worker-token-free site values the
+stamped rows and the golden corpus carry; the legacy embedded-worker `parse`/`spell` spellings survive as
+pin-alias vocabulary.
 
 `WSPEC` (warp specialization) is the worker-mapping codec — a role→warp-count allocation (`WarpSpec`; role descriptors
 in `schedule.py`, the COMPUTE consumer implicit and sized by `TilePlan.units`) carried on an **orthogonal**

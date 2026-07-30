@@ -16,8 +16,9 @@ and the warp-spec split (``workers``). The
 per-node schedule slices live in ``TileOp.schedule`` (1r): ``{codec key → resolved TilePlan /
 ReducePlan / Stage}``, keyed by the tree-path codec's canonical key and read through
 ``ops.Sched`` — the stored term is pure algebra, IMMUTABLE across the whole schedule search
-(flash is a ``Map(sources=(Fold(step=[Fold(QK), …, Fold(PV)]),))`` node tree whose in-step folds
-are the ``TILE@dd`` / ``TILE@pj`` sites). There is no per-kind kernel/schedule type: the algebra is read
+(flash is a ``Map(sources=(Fold(operands=(Fold(QK), Load(V)), lift, combine),))`` node tree whose
+hoisted score edge and DERIVED PV contraction are the ``TILE@dd`` / ``TILE@pj`` sites).
+There is no per-kind kernel/schedule type: the algebra is read
 structurally off the axes' :class:`~emmy.compiler.ir.axis.AxisRole`
 (``ops.axis_role``), so MAP / MONOID / SEMIRING all ride the same ``TileOp``.
 
@@ -118,7 +119,7 @@ def _overhangs(axis: Axis, tile: int) -> bool:
 def _splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ...]:
     """Splice each operand edge's producing stmts into ``stmts`` immediately BEFORE the first stmt
     that reads the operand's bound name (appended when nothing reads it), ties resolved in operand
-    TUPLE order. This is the one lowering rule that turns the stored ``(operands, step)`` pair back
+    TUPLE order. This is the one lowering rule that turns the stored operands + derived step back
     into the flat loop body — deterministic, so the derived loop (and with it ``op_cache_key``)
     depends only on the stored params."""
     if not operands:

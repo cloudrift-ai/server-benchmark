@@ -257,7 +257,8 @@ mma chains off the ONE ldmatrix'd A fragment
 into per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the channels per element in the
 store's `RegEpilogue` (`extra_accs`).
 
-**Warp specialization (`WSPEC` → `TileOp.workers`).** A resolved `WarpSpec` splits the SAME staged phases across two
+**Warp specialization (the producer band → `TileOp.workers`; rows spell it as `WORK`'s `+p<n>` suffix since step 7,
+the `EMMY_WSPEC` pin surviving as an alias).** A resolved `WarpSpec` splits the SAME staged phases across two
 warp bands instead of software-pipelining them in-warp (`_stage._wspec_kloop` — the workers arm of `staged_kloop`,
 TMA transport only per the scheduler's legality): the **producer** band rides at the TAIL of the thread block
 (`blockDim = block_threads + 32·aux_warps`; the `Tile` decode wraps `threadIdx.x % block_threads`, so the compute

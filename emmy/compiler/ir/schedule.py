@@ -717,6 +717,48 @@ class TilePlan:
 
 
 @dataclass(frozen=True)
+class Workers:
+    """The kernel's ONE worker inventory (1r, in-memory) — the per-site ``w``/``n`` worker tokens
+    factored out of the ``TILE`` values into a single kernel-global slot (``w4x1`` warps for the
+    mma tier / ``t16x8`` threads for the scalar tier). Derived at option assembly from the TILE
+    slices (:func:`derive_workers`), FAILING LOUDLY when two sites disagree — today an
+    inconsistent ``TILE@dd``/``TILE@pj`` pin pair can only miss rows silently; the slot makes the
+    disagreement unrepresentable. The WIRE format still spells the embedded ``w``/``n`` tokens
+    (``TilePlan.spell`` re-emits them byte-identically); shedding them from the stored strings —
+    and absorbing ``WSPEC`` — is the step-7 value-grammar split. Kernel-global-ness encodes
+    today's TRUE invariant: fragment-resident dataflow between composed folds shares the warp map."""
+
+    kind: str  # "warp" (mma tier) | "thread" (scalar / coop tiers)
+    units: tuple[int, int]  # the native codec order of the TILE value the slot came from
+
+    @property
+    def count(self) -> int:
+        """Workers in the inventory (warps or threads, by ``kind``)."""
+        return self.units[0] * self.units[1]
+
+    def spell(self) -> str:
+        return f"{'w' if self.kind == 'warp' else 't'}{self.units[0]}x{self.units[1]}"
+
+
+def derive_workers(tiles) -> Workers | None:
+    """Fold the worker inventory out of a kernel's resolved ``TILE`` slices (``TilePlan`` values,
+    any iterable) — ``None`` when no slice tiles (the per-cell / pure-reduce forms keep their
+    derived launch geometry). Raises on DISAGREEMENT between sites: one kernel has ONE worker
+    inventory (the flash QK/PV pair shares the warp map by construction; a pin pair that
+    disagrees must fail loudly, never be half-ignored)."""
+    work: Workers | None = None
+    for plan in tiles:
+        if plan is None or not plan.is_tiled:
+            continue
+        w = Workers(kind="warp" if plan.is_warp else "thread", units=tuple(plan.units))
+        if work is None:
+            work = w
+        elif work != w:
+            raise ValueError(f"disagreeing worker geometry across TILE sites: {work.spell()} vs {w.spell()} — one kernel, one inventory")
+    return work
+
+
+@dataclass(frozen=True)
 class Placement:
     """Kind-neutral free-axis → grid binding (the parallel output axes and their grid
     mapping). ``010_recognize`` builds an UNMAPPED placement (just ``free``);
@@ -974,9 +1016,11 @@ __all__ = [
     "Stage",
     "TilePlan",
     "WarpSpec",
+    "Workers",
     "_codec_width",
     "atom_for",
     "decode",
+    "derive_workers",
     "desugar",
     "encode",
     "field_default",

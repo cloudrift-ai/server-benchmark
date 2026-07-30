@@ -107,6 +107,16 @@ def sched_of(tile) -> Sched:
     return Sched(tile.op, tile.schedule)
 
 
+def seal_workers(tile) -> None:
+    """Derive the kernel's ONE worker inventory (``TileOp.work``) from its resolved ``TILE``
+    slices — the 1r factoring of the per-site ``w``/``n`` worker tokens into a single slot,
+    FAILING LOUDLY on cross-site disagreement (one kernel, one inventory). Called by every
+    option builder / split realizer after the schedule dict is assembled."""
+    from emmy.compiler.ir.schedule import derive_workers  # noqa: PLC0415
+
+    tile.work = derive_workers(v for k, v in tile.schedule.items() if k.split("@", 1)[0] == "TILE")
+
+
 def reduce_loop(op):
     """The kernel's outermost **annotated** reduce ``Loop`` (its ``carrier`` set by recognition),
     or ``None`` for a pure pointwise / flat-fallback ``Map`` (no annotated reduce). A
@@ -244,4 +254,5 @@ __all__ = [
     "reduce_loop",
     "reduce_plan",
     "sched_of",
+    "seal_workers",
 ]

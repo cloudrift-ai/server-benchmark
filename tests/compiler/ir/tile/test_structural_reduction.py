@@ -509,3 +509,34 @@ def test_an_inline_b_edge_is_walked_like_any_other_node() -> None:
 
     c = _computed_b_contraction()
     assert c.b in list(tree_nodes(c.as_fold()))
+
+
+# --- the ONE worker inventory (1r): TileOp.work derived from the TILE slices ---------------------- #
+
+
+def test_workers_derive_from_tile_slices_and_disagreement_is_loud() -> None:
+    """``derive_workers`` folds each TILE value's embedded worker geometry into the one
+    kernel-global slot; two sites disagreeing on it is unrepresentable — the assembly FAILS LOUDLY
+    (today an inconsistent ``TILE@dd``/``TILE@pj`` pin pair could only miss rows silently)."""
+    import pytest
+
+    from emmy.compiler.ir.schedule import Workers, derive_workers
+
+    warp = TilePlan.parse("a:mma_m16n8k16_f16_f32/w4x1/f1x2/k8")
+    assert derive_workers([warp, warp]) == Workers(kind="warp", units=(4, 1))
+    assert derive_workers([TilePlan.parse("n16x8/f4x8")]) == Workers(kind="thread", units=(16, 8))
+    assert derive_workers([TilePlan()]) is None  # per-cell — no inventory to factor
+    with pytest.raises(ValueError, match="disagreeing worker geometry"):
+        derive_workers([warp, TilePlan.parse("a:mma_m16n8k16_f16_f32/w2x1/f1x2/k8")])
+
+
+def test_seal_workers_fills_the_slot_off_the_schedule_dict() -> None:
+    from emmy.compiler.ir.schedule import Workers
+    from emmy.compiler.ir.tile.ops import sched_of, seal_workers
+
+    c = _contraction()
+    fold = c.as_fold()
+    t = _tile(fold)
+    sched_of(t).put("TILE", fold, TilePlan.parse("n2/f2"))
+    seal_workers(t)
+    assert t.work == Workers(kind="thread", units=(2, 1))

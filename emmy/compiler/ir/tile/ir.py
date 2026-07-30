@@ -1230,6 +1230,12 @@ class TileOp(Op):
     place: Placement = field(default_factory=Placement)
     workers: WarpSpec | None = None
     schedule: dict = field(default_factory=dict)
+    # The ONE worker inventory (1r in-memory — ``ir.schedule.Workers``): the ``w``/``n`` worker
+    # tokens factored out of the per-site TILE values, derived at option assembly
+    # (``ops.Sched.seal_workers`` — loud on cross-site disagreement). ``None`` = the per-cell /
+    # pure-reduce forms (derived launch geometry). The wire format still spells the embedded
+    # tokens until the step-7 value-grammar split.
+    work: object = None
 
     def pretty_body(self) -> str:
         """Render the ``op`` tree structurally (the dump view) — no lowering."""

@@ -58,7 +58,7 @@ from emmy.compiler.ir.tile import (
     is_contraction_fold,
 )
 from emmy.compiler.ir.tile.ir import gmem_row_stride
-from emmy.compiler.ir.tile.ops import axis_role, cone_seam, nodify_reduce, reduce_loop, sched_of
+from emmy.compiler.ir.tile.ops import axis_role, cone_seam, nodify_reduce, reduce_loop, sched_of, seal_workers
 from emmy.compiler.ir.tile.ops import lower as lower_op
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import make_cone, map_cone, semiring_binding
@@ -1421,6 +1421,7 @@ def _splitk_option(
     sched.put("REDUCE", outer_fold, ReducePlan.parse(split_spec))
     sched.put("TILE", inner_fold, wt)
     sched.put("STAGE", inner_fold, stage)
+    seal_workers(out)
     return out
 
 
@@ -1471,6 +1472,7 @@ def _warp_option(
     sched = sched_of(out)
     sched.put("TILE", fold, node.tile)
     sched.put("STAGE", fold, stage)
+    seal_workers(out)
     return out
 
 
@@ -1534,6 +1536,7 @@ def _tile_option(
     sched = sched_of(out)
     for family, node_, value in slices:
         sched.put(family, node_, value)
+    seal_workers(out)
     return out
 
 
@@ -1924,6 +1927,7 @@ def _twisted_chain_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp
     }
     out = TileOp(op=op, name=name, place=Placement(free=tile.place.free, grid=tuple(grid[:-1])), knobs=stamped)
     sched_of(out).put("TILE", pv_fold, chain_plan)
+    seal_workers(out)
     return out
 
 
@@ -2017,6 +2021,7 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     sched = sched_of(out)
     sched.put("TILE", fold, wt)
     sched.put("STAGE", fold, stage)
+    seal_workers(out)
     return out
 
 
@@ -2374,5 +2379,6 @@ def _twisted_warp_options(
                     sched.put("TILE", head_fold, qk_plan)
                     sched.put("TILE", pv_fold, pv_plan)
                     sched.put("STAGE", red, stage)
+                    seal_workers(row)
                     out.append(row)
     return out

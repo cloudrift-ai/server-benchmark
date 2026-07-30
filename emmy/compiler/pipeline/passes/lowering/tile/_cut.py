@@ -163,6 +163,14 @@ def route_cut(ctx, knobs: dict, root, stores: tuple = (), free: tuple = ()) -> S
     cuts = [k for k, v in entry.knobs.items() if str(v) == _CUT]
     if len(cuts) != 1:
         raise NotImplementedError(f"routing golden {entry.name!r}: exactly ONE cut per entry for now, got {sorted(cuts)}")
+    if cuts[0] == "PLACE":
+        # A bare routing cut takes the SHALLOWEST CUTTABLE seam — the same rule as the bare pin.
+        # The consult tree is the PRE-fork recognized form (the fused kinds' map form), whose
+        # canonical primary seam can be uncuttable (the fold) or spell differently than the
+        # warp-form tree a suffixed key was recorded against; the recursion reaches the same
+        # cascade from whichever legal seam goes first, so the shallowest-cuttable rule is the
+        # tree-robust reading of a bare entry (measured: the cone-cut A/Bs ran exactly this).
+        return min(seams, key=lambda s: s.depth)
     try:
         site = resolve(root, cuts[0], all_sites=all_sites)
     except ValueError as e:

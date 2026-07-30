@@ -2197,6 +2197,18 @@ configs:
     knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync'}
     emmy_us: 26.7
     cublas_us: 19.8
+  # ROUTING (2026-07-30, step-7 campaign re-seed): PLACE@a=cut through the phase-4 realizer —
+  # measured today vs the fused entry above (29 µs): cut 16 µs, eager 19 µs. decode M=32 q: cut 1.8x over fused.
+  # A routing entry stores the cut set ONLY; each piece re-recognizes and resolves its own kind.
+  - kernel: norm_linear
+    name: gemma4_12b.norm_q_proj.m32.cut
+    M: 32
+    H: 3840
+    N: 4096
+    dtype: 'fp16'
+    knobs: {PLACE: 'cut'}
+    emmy_us: 16.0
+    cublas_us: 19.0
   # norm→k/v projection (input_layernorm → k_proj/v_proj, N=2048): the other single-channel norm→linear
   # prologue in the block (q/k/v all fuse the input norm; q is above). Narrower N than q_proj, so the
   # un=8 tile wins (w1x16 over-splits the 2048 columns): w1x8/f2x2/k2 d2/sync g8k, 20.8 = 0.60x. Same
@@ -2212,6 +2224,18 @@ configs:
     knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync'}
     emmy_us: 23.1
     cublas_us: 14.3
+  # ROUTING (2026-07-30, step-7 campaign re-seed): PLACE@a=cut through the phase-4 realizer —
+  # measured today vs the fused entry above (20 µs): cut 10 µs, eager 14 µs. decode M=32: cut beats fused 2.0x and eager 1.4x.
+  # A routing entry stores the cut set ONLY; each piece re-recognizes and resolves its own kind.
+  - kernel: norm_linear
+    name: gemma4_12b.norm_kv_proj.m32.cut
+    M: 32
+    H: 3840
+    N: 2048
+    dtype: 'fp16'
+    knobs: {PLACE: 'cut'}
+    emmy_us: 10.0
+    cublas_us: 14.0
   # The GLOBAL-layer (full_attention, hd512) twins of the two entries above — gemma-4 12B alternates 8 global
   # layers among the local ones, and their q/kv projections are a different WIDTH (q N=8192, kv N=512) at the same
   # M=32/H=3840. Seeded 2026-07-19 by manual pinned --ab (3x; q spread <0.6%, kv 0%). These were the LAST fused
@@ -2242,6 +2266,18 @@ configs:
     knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync'}
     emmy_us: 21.1
     cublas_us: 10.2
+  # ROUTING (2026-07-30, step-7 campaign re-seed): PLACE@a=cut through the phase-4 realizer —
+  # measured today vs the fused entry above (14 µs): cut 8 µs, eager 10 µs. global-layer decode twin.
+  # A routing entry stores the cut set ONLY; each piece re-recognizes and resolves its own kind.
+  - kernel: norm_linear
+    name: gemma4_12b.norm_kv_proj_global.m32.cut
+    M: 32
+    H: 3840
+    N: 512
+    dtype: 'fp16'
+    knobs: {PLACE: 'cut'}
+    emmy_us: 8.0
+    cublas_us: 10.0
   # ---- fused RMSNorm→gate⊗up→GeGLU megakernel (computed-A / mlp_geglu kind) ----------------------
   # The MLP hot kernel gemma-4 ACTUALLY deploys (k_linear_mean_reduce, the mul_4 twin): gate + up matmuls
   # share ONE compute-filled A slab (product-monoid ⊗-fold channels), the pre-FF RMSNorm statistic rides
@@ -2298,6 +2334,19 @@ configs:
     knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/sync'}
     emmy_us: 26.5
     cublas_us: 20.5
+  # ROUTING (2026-07-30, step-7 campaign re-seed): PLACE@a=cut through the phase-4 realizer —
+  # measured today vs the fused entry above (29 µs): cut 16 µs, eager 20 µs. serving layout twin.
+  # A routing entry stores the cut set ONLY; each piece re-recognizes and resolves its own kind.
+  - kernel: norm_linear
+    name: gemma4_12b.norm_q_proj.m32.lin.cut
+    M: 32
+    H: 3840
+    N: 4096
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 16.0
+    cublas_us: 20.0
   - kernel: norm_linear
     name: gemma4_12b.norm_q_proj.m32.lin
     M: 32
@@ -2318,6 +2367,19 @@ configs:
     knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f32/f1x1/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 18.4
     cublas_us: 14.3
+  # ROUTING (2026-07-30, step-7 campaign re-seed): PLACE@a=cut through the phase-4 realizer —
+  # measured today vs the fused entry above (20 µs): cut 10 µs, eager 14 µs. serving layout twin of the m32 cut.
+  # A routing entry stores the cut set ONLY; each piece re-recognizes and resolves its own kind.
+  - kernel: norm_linear
+    name: gemma4_12b.norm_kv_proj.m32.lin.cut
+    M: 32
+    H: 3840
+    N: 2048
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 10.0
+    cublas_us: 14.0
   - kernel: norm_linear
     name: gemma4_12b.norm_kv_proj.m32.lin
     M: 32
@@ -2909,6 +2971,19 @@ configs:
     knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 559.4
     cublas_us: 362.0
+  # ROUTING (2026-07-30, step-7 campaign re-seed): PLACE@a=cut through the phase-4 realizer —
+  # measured today vs the fused entry above (539 µs): cut 465 µs, eager 315 µs. best-known route; still trails eager (the m256 gate-up residual) — cut beats fused 1.16x.
+  # A routing entry stores the cut set ONLY; each piece re-recognizes and resolves its own kind.
+  - kernel: norm_linear
+    name: gemma4_12b.norm_gate_up.m256.lin.cut
+    M: 256
+    H: 3840
+    N: 30720
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 465.0
+    cublas_us: 315.0
   - kernel: norm_linear
     name: gemma4_12b.norm_gate_up.dynM.lin
     M: 512
@@ -2943,6 +3018,19 @@ configs:
     knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 174.5
     cublas_us: 114.0
+  # ROUTING (2026-07-30, step-7 campaign re-seed): PLACE@a=cut through the phase-4 realizer —
+  # measured today vs the fused entry above (175 µs): cut 99 µs, eager 94 µs. the m256 computed-A transport loss again; pieces resolve rms_norm.k3840 kinds + qkv_cat.m256.lin.
+  # A routing entry stores the cut set ONLY; each piece re-recognizes and resolves its own kind.
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qkv.m256.lin.cut
+    M: 256
+    H: 3840
+    N: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 99.0
+    cublas_us: 94.0
   - kernel: norm_linear
     name: gemma4_12b.norm_qkv.dynM.lin
     M: 512
@@ -2954,21 +3042,21 @@ configs:
     knobs: {WORK: 'w2x8', TILE: 'mma_m16n8k16_f16_f32/f4x4/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 299.8
     cublas_us: 224.0
-  # global m32: the CUT placement halves the fused g8k split total below — same reason the split beat
-  # the unsplit tiles (68 CTAs of w1x16 under-fill 170 SMs), taken further: cut into a plain gmem-A
-  # matmul the enumeration can tile at 136 CTAs on d2/tma/ring.
+  # ROUTING (2026-07-30, step-7 campaign re-seed): PLACE=cut (bare — the shallowest cuttable seam,
+  # the pin rule) — measured vs the fused entry above (304 µs): cut 190 µs, eager 184 µs. symbolic-M serving twin; pieces resolve the rms/pointwise kinds + qkv_cat dynM matmul.
   - kernel: norm_linear
-    name: gemma4_12b.norm_qk_global.m32.cut.lin
-    M: 32
+    name: gemma4_12b.norm_qkv.dynM.lin.cut
+    M: 512
     H: 3840
-    N: 8704
+    N: 8192
     dtype: 'fp16'
+    dynamic: true
     trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 19.8
-    cublas_us: 29.0
-  # the fused g8k split total (38.1 + 2.0 finalize); at this shape the split beats every
-  # unsplit tile by >2x.
+    knobs: {PLACE: 'cut'}
+    emmy_us: 190.0
+    cublas_us: 184.0
+  # global m32: the g8k split total (38.1 + 2.0 finalize); at this shape the split beats every
+  # unsplit tile by >2x (68 CTAs of w1x16 under-fill 170 SMs).
   - kernel: norm_linear
     name: gemma4_12b.norm_qk_global.m32.lin
     M: 32
@@ -2989,6 +3077,19 @@ configs:
     knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 176.3
     cublas_us: 117.0
+  # ROUTING (2026-07-30, step-7 campaign re-seed): PLACE@a=cut through the phase-4 realizer —
+  # measured today vs the fused entry above (176 µs): cut 108 µs, eager 94 µs. pieces resolve the stat/scale kinds + qk_global_cat.m256.lin.
+  # A routing entry stores the cut set ONLY; each piece re-recognizes and resolves its own kind.
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qk_global.m256.lin.cut
+    M: 256
+    H: 3840
+    N: 8704
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 108.0
+    cublas_us: 94.0
   - kernel: norm_linear
     name: gemma4_12b.norm_qk_global.dynM.lin
     M: 512
@@ -3026,6 +3127,19 @@ configs:
     knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 293.0
     cublas_us: 231.0
+  # ROUTING (2026-07-30, step-7 campaign re-seed): PLACE@a=cut through the phase-4 realizer —
+  # measured today vs the fused entry above (374 µs): cut 178 µs, eager 195 µs. stat+scale+split matmul; pieces resolve cut_cone_stat.m256 / pointwise / mlp_down.m256.lin.
+  # A routing entry stores the cut set ONLY; each piece re-recognizes and resolves its own kind.
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m256.lin.cut
+    M: 256
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 178.0
+    cublas_us: 195.0
   # dup__view: the global pre-twin's materialized copy of the merged q||k projection (k_eq_v fans the
   # k slice out to both k- and v-norm, so the shared view stays a copy kernel).
   - kernel: pointwise

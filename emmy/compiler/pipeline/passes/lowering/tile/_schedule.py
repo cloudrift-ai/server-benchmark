@@ -1945,6 +1945,36 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None, reduce_key: str | N
                 # benched the prior's tile under the pinned stage (the findings-5 F2 coercion).
                 warps = _filter_work(_narrow_flash_forms(warps, head, pv, keyed_only=True), lambda o: o.knobs.get(WORK.name, ""))
                 return warps if len(warps) > 1 else warps[0]
+            # Cold SPLIT-KV siblings on an under-occupied grid (2026-07-30): the split-KV form
+            # used to be PIN-ONLY, so every recorded split-KV golden (attention.hd512's
+            # ``g2k`` + ``d1/cp/alt`` pair, ~1.4× over the un-split pick) logged DRIFT at
+            # deploy — the golden tier picks only among OFFERED rows. Offer the ``g<n>k``
+            # splits as LATER fork siblings when the un-split grid cannot fill the card
+            # (the matmul ``_SPLITK_MAX_CTAS`` gate's flash analogue): option-0 stays the
+            # conservative un-split row, seeded shapes keep matching their recorded entry
+            # (fastest-first), and an under-occupied unseeded shape gains the rows the prior's
+            # split features already price. ``_stamp_twisted_split`` keeps its per-row
+            # legality (block-divisible static kv; a symbolic kv always stamps).
+            if warps and REDUCE.raw() is None:
+                # The occupancy read is each WARP row's OWN launch grid (batch × heads × query
+                # blocks — the row's shrunk placement; geometries differ per row), never the
+                # pre-tiled per-cell ``place`` (whose element grid is astronomically larger and
+                # would gate the splits off always). Only the under-occupied rows gain split
+                # siblings — a grid that already fills the card has nothing to win from a split.
+                def _row_ctas(r: TileOp) -> int:
+                    n = 1
+                    for ax in r.place.grid:
+                        if ax.extent.is_static:
+                            n *= ax.extent.as_static()
+                    return n
+
+                try:
+                    sms = float(ctx.features().get("H_sm_count", 170.0)) if ctx is not None else 170.0
+                except Exception:  # noqa: BLE001 — an off-GPU ctx keeps the default
+                    sms = 170.0
+                base_rows = [r for r in warps if _row_ctas(r) <= sms]  # the UN-split originals
+                for spec in ("g2k", "g4k"):
+                    warps = [*warps, *_stamp_twisted_split(base_rows, ReducePlan.parse(spec))]
             chain = _twisted_chain_option(tile, place, name, knobs)
             forms = [*warps, *([chain] if chain is not None else [])]
             if forms:

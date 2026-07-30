@@ -154,7 +154,6 @@ def test_rewrite_renames_channel_accs_and_inline_arms_in_lockstep() -> None:
     assert view is not None
     assert view.channels[0].acc == "v1" and view.channels[1].acc == "acc_u"
     assert view.a.out == "v0"  # the inline cone canonicalized through the same map
-    assert renamed.tile is fold.tile  # the schedule passes through untouched
 
 
 def test_rewrite_reaches_a_channels_b_edge() -> None:

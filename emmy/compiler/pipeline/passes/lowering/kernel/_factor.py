@@ -52,7 +52,7 @@ from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile import FoldMove, Level, ReduceStage, contraction_view, is_contraction_fold
+from emmy.compiler.ir.tile import FoldMove, Level, ReducePlan, ReduceStage, contraction_view, is_contraction_fold
 from emmy.compiler.ir.tile.ir import ContractionView, Fold, Map, Side
 from emmy.compiler.ir.tile.ops import cone_seam
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import copy_cell, reduce_codegen, shrink_axis, store_sink
@@ -238,6 +238,10 @@ class Ctx:
     output: str = ""
     workers: object = None  # the resolved WarpSpec worker split (None = uniform SIMT)
     raster: object = None  # the parsed RASTER codec (ir.schedule.Raster; None = flat launch order)
+    # The kernel's schedule slices (``TileOp.schedule`` bound to its op tree — ``ops.Sched``): the
+    # per-node ``tile`` / ``reduce`` / ``stage`` reads all go through here (1r — the term stores
+    # no slices).
+    sched: object = None
     # The placement's FREE axes — the un-shrunk originals (a warp-flash grid shrinks the query axis
     # and folds the value axis away; a split partial prefixes ``_ksplit``). The twist / chain
     # realizers derive their contraction views' output axes from the trailing pair.
@@ -313,6 +317,8 @@ def factorize(tile, root, store=None) -> Tile:
     # Stored trees are already resolved — a computed operand is an inline node on its edge, so the
     # emitter below walks the tree as stored and every reader (``cone_seam``) reads the node
     # boundary straight off ``ContractionView.a``.
+    from emmy.compiler.ir.tile.ops import sched_of  # noqa: PLC0415
+
     op = tile.op
     ctx = Ctx(
         grid=tuple(tile.place.grid),
@@ -320,6 +326,7 @@ def factorize(tile, root, store=None) -> Tile:
         output=(root.output.name if root is not None else ""),
         workers=tile.workers,
         free=tuple(tile.place.free),
+        sched=sched_of(tile),
         # The launch-order codec rides the TileOp's stamped knobs (kernel-scoped metadata, no
         # per-node structure) — parse it once here; ``grid_tile`` applies it where the 2-D
         # (m, n) block grid makes it meaningful.
@@ -387,11 +394,11 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
       one-thread-per-cell fold: the per-cell body (:func:`_emit`; a serial reduce ``Loop`` sits
       inside it) + ``tail`` + the ``out_val`` store glue is the whole fold region."""
     grid = tuple(ctx.grid)
-    if isinstance(op, Fold) and op.role is AxisRole.CONTRACTION and op.tile is not None and len(grid) >= 2:
+    if isinstance(op, Fold) and op.role is AxisRole.CONTRACTION and ctx.sched.tile_of(op) is not None and len(grid) >= 2:
         # The STORED form is the bilinear fold; the ContractionView reading is DERIVED here, its output
         # axes the kernel grid's trailing pair (a split partial's ksplit rides the leading grid, so
-        # the lead axes fall out of the same read).
-        view = contraction_view(op, grid[-2], grid[-1], tuple(grid[:-2]))
+        # the lead axes fall out of the same read) and its tile / stage the schedule slices.
+        view = contraction_view(op, grid[-2], grid[-1], tuple(grid[:-2]), tile=ctx.sched.tile_of(op), stage=ctx.sched.stage_of(op))
         if view is not None:
             op = view
     if isinstance(op, ContractionView):
@@ -411,10 +418,10 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
         # scalar per-cell ``Map`` (no partition). Every partitioned reduce — monoid, flash, coop-K /
         # split contraction — is a ``Fold`` node after ``ops.nodify_reduce`` (a projecting
         # ``Map`` was already peeled off by :func:`_factorize`).
-        plan = op.reduce if isinstance(op, Fold) else None
+        plan = (ctx.sched.reduce_of(op) or ReducePlan()) if isinstance(op, Fold) else None
         t, mn, lead, lanes = atomize((1, 1)), (None, None), grid, 1
-        wsrc = warp_source(op)
-        csrc = chain_source(op) if wsrc is None else None
+        wsrc = warp_source(op, ctx.sched)
+        csrc = chain_source(op, ctx.sched) if wsrc is None else None
         if wsrc is not None:
             # A warp-tiled TWISTED tree (the schedule stamped mma TilePlans on its contractions):
             # the per-step values live in mma C-fragments, so the whole reduce realizes at fragment
@@ -423,8 +430,9 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
             # query-row block: the warp axis joins the Tile decode ahead of the lane axis, and the
             # block launches ``units[0]`` warps.
             state, fold, close = realize_warp_twist(op, ctx, tail)
-            lanes = wsrc.tile.atom.lanes
-            um = wsrc.tile.units[0]
+            wtile = ctx.sched.tile_of(wsrc)
+            lanes = wtile.atom.lanes
+            um = wtile.units[0]
             if um > 1:
                 t = replace(t, axes=(Axis(name=FLASH_WARP_AXIS, extent=um),))
             bt = lanes * um
@@ -673,15 +681,19 @@ def combine_tail(carrier, *, reg: int, coop: int, lane) -> list[Stmt]:
     return merge
 
 
-def chain_source(op):
+def chain_source(op, sched):
     """The expect fold of a TWISTED tree carrying a SCALAR register tile over its
     output column axis (the chain schedule — the column axis rides a per-thread register vector),
-    or ``None``. The structural schedule read the one binder keys the chain realization on."""
+    or ``None``. The structural schedule read the one binder keys the chain realization on; the
+    tile is a schedule slice (``sched``), never a node field."""
     red = (op.sources[0] if op.sources else None) if isinstance(op, Map) else op
     if not isinstance(red, Fold) or red.role is not AxisRole.TWISTED:
         return None
     pv = next((s for s in list(red.step)[1:] if is_contraction_fold(s)), None)
-    if pv is not None and pv.tile is not None and not pv.tile.is_warp and pv.tile.regs != (1, 1):
+    if pv is None:
+        return None
+    ptile = sched.tile_of(pv)
+    if ptile is not None and not ptile.is_warp and ptile.regs != (1, 1):
         return pv
     return None
 
@@ -770,7 +782,7 @@ def _realize_chain(op, ctx: Ctx, tail: tuple, pv) -> tuple[list[Stmt], list[Stmt
     store replicated per column (the column index a literal — the axis left the grid). ``pv`` is the
     stored expect fold; its column axis is the placement's trailing free axis (it left the grid)."""
     axis = ctx.free[-1].name
-    count = pv.tile.regs[0]  # scalar reg order (reg_n, reg_m) — the column (n) register vector
+    count = ctx.sched.tile_of(pv).regs[0]  # scalar reg order (reg_n, reg_m) — the column (n) register vector
     (rloop,) = _emit(op, ctx).body
     # A layout-aware output ``Write`` the node carries (flash's ``_out_store_index``) is the store
     # TEMPLATE — its index already places the grid axes at the output buffer's real slots (transpose /
@@ -815,7 +827,7 @@ def _tile_reduce_axis_transposed(
     lanes_n = 32
     k_ways = coop // lanes_n
     assert coop % lanes_n == 0 and k_ways >= 1, f"b{coop}t needs a multiple of {lanes_n}"
-    assert not (op.stage is not None and op.stage.smem), "transposed coop cannot ride shared-row staging"
+    assert not (ctx.sched.stage_of(op) is not None and ctx.sched.stage_of(op).smem), "transposed coop cannot ride shared-row staging"
     out_ax = next(a for a in reversed(grid) if not (a.extent.is_static and a.extent.as_static() == 1))
 
     (rloop,) = _emit(op, ctx).body
@@ -898,10 +910,11 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
     # (the coop-K matmul's pinned pipeline) never sets ``smem``, so it passes through untouched.
     tail_src = list(tail)
     fill_stmts: list[Stmt] = []
-    if lane is not None and op.stage is not None and op.stage.smem:
+    op_stage = ctx.sched.stage_of(op)
+    if lane is not None and op_stage is not None and op_stage.smem:
         from emmy.compiler.backend.cuda.dtype import cuda_name  # noqa: PLC0415
 
-        (staged,) = op.stage.smem
+        (staged,) = op_stage.smem
         grid_vars = tuple(Var(a.name) for a in grid)
         smem_name = f"{staged}_smem"
         fill_stmts = sync_row_fill(

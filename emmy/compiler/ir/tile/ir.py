@@ -76,7 +76,7 @@ from typing import TYPE_CHECKING
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.expr import Expr, Literal
-from emmy.compiler.ir.schedule import Placement, ReducePlan, Stage, TilePlan, WarpSpec
+from emmy.compiler.ir.schedule import Placement, Stage, TilePlan, WarpSpec
 from emmy.compiler.ir.stmt import (
     Accum,
     Assign,
@@ -315,13 +315,9 @@ class Fold(Stmt):
     # vocabulary. Sharing is edge reuse: the step reads an operand's bound name as many times as it
     # needs. ``lower`` splices each edge's body before its first use (:func:`_splice_operands`).
     operands: tuple = ()
-    reduce: ReducePlan = field(default_factory=ReducePlan)  # the reduce partition (schedule slice), stamped by the _schedule helper
-    # The output tile (schedule slice) of a role=CONTRACTION fold — the ``TilePlan`` the view
-    # (``ops.contraction_view``) reads back; ``None`` for a plain / twisted reduce.
-    tile: TilePlan | None = None
-    # The operand smem pipeline this reduce runs under (schedule slice): the cooperative tier's
-    # shared-row ``sync`` stage, or a warp-flash tree's resolved K/V stage. ``None`` = gmem-direct.
-    stage: Stage | None = None
+    # NO schedule fields (1r): the ``tile`` / ``reduce`` / ``stage`` slices live in
+    # ``TileOp.schedule``, keyed by the tree-path codec key — the term is pure algebra, IMMUTABLE
+    # across the whole schedule search (a fork is a different map, never a rebuilt tree).
     # A cross-CTA SLICE of the stream (flash split-KV) is not spelled here: ``030_split_reduce``
     # shrinks ``axis`` to the slice length and the slice's absolute base / end ride that axis's
     # :class:`~emmy.compiler.ir.axis.Window` — ONE windowing vocabulary, the same one an axis's
@@ -818,13 +814,16 @@ class ContractionView:
     def as_fold(self) -> Fold:
         """The STORED form of this view — a ``role=CONTRACTION`` λ-spelled :class:`Fold` (1o):
         ``operands`` the closed inputs bound positionally to the lift params, the ``lift`` the
-        bilinear ``λ(k, b, a, b₂…). (b·a, a·b₂, …)``, the ``monoid`` the componentwise additive
+        bilinear ``λ(k, b, a, b₂…). (b·a, a·b₂, …)``, the flat ``(init, combine)`` the
+        componentwise additive
         combine threading the channel accumulator names. The operand tuple order and the lift arg
         spellings reproduce the historical synthesis exactly (primary lift ``(b, a)``, further
         channels ``(a, b_i)``), so the derived serial step + first-use splice yield a loop
-        byte-identical to :attr:`loop` — the round-trip ``contraction_view(as_fold()) == self``
-        (axes supplied by the caller's placement) is what keeps kernel identity fixed across the
-        storage change."""
+        byte-identical to :attr:`loop` — the round-trip ``contraction_view(as_fold(), …,
+        tile=view.tile, stage=view.stage) == self`` (axes supplied by the caller's placement, the
+        slices by the caller's ``TileOp.schedule``) is what keeps kernel identity fixed across the
+        storage change. The view's ``tile`` / ``stage`` do NOT ride the fold — they are schedule
+        slices, stored in ``TileOp.schedule`` (1r)."""
         from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
 
         mul = ElementwiseImpl("multiply")
@@ -845,8 +844,6 @@ class ContractionView:
             carrier=None,
             axis=self.k_axis,
             operands=operands,
-            tile=self.tile,
-            stage=self.stage,
             lift=lift,
             init=init,
             combine=combine,
@@ -1045,7 +1042,7 @@ def _(s: Map, rename, sigma, axis_fn):
 
 @_rewrite.register
 def _(s: Fold, rename, sigma, axis_fn):
-    # The schedule slices (``tile`` / ``reduce`` / ``stage``) pass through, and every operand edge
+    # Every operand edge
     # dispatches back through the registry. A λ-spelled fold renames its lift / monoid in lockstep
     # (params track the operand names positionally, the combine's results ARE the accumulator
     # names) and re-derives the carrier; a step-spelled one renames the carrier with the partial's
@@ -1140,12 +1137,15 @@ def shared_operand(fold):
     return parsed[0] if parsed is not None else None
 
 
-def contraction_view(fold, m_axis: Axis, n_axis: Axis, lead_axes: tuple = ()) -> ContractionView | None:
+def contraction_view(
+    fold, m_axis: Axis, n_axis: Axis, lead_axes: tuple = (), tile: TilePlan | None = None, stage: Stage | None = None
+) -> ContractionView | None:
     """The DERIVED bilinear reading of a stored ``role=CONTRACTION`` fold — a :class:`ContractionView`
     view over it, never stored. The output axes are the CALLER's placement facts (the trailing grid
-    axes for a root kernel; a flash consumer supplies its own), which is exactly why they are
-    parameters and not fold fields; everything else — the shared A edge, the ``(b, acc)`` channels,
-    the k axis, the ``tile`` / ``stage`` slices — is read off the fold. ``None`` when the fold is not
+    axes for a root kernel; a flash consumer supplies its own), and the ``tile`` / ``stage`` slices
+    the CALLER's schedule facts (read from ``TileOp.schedule`` — the term stores no slices at 1r),
+    which is exactly why all of them are parameters and not fold fields; the shared A edge, the
+    ``(b, acc)`` channels and the k axis are read off the fold. ``None`` when the fold is not
     bilinear (the general fold reading stands alone)."""
     parsed = _parse_bilinear(fold)
     if parsed is None:
@@ -1156,9 +1156,9 @@ def contraction_view(fold, m_axis: Axis, n_axis: Axis, lead_axes: tuple = ()) ->
         k_axis=fold.axis,
         a=a_edge,
         channels=tuple(Channel(b=b, acc=acc) for b, acc in chans),
-        tile=fold.tile if fold.tile is not None else TilePlan(),
+        tile=tile if tile is not None else TilePlan(),
         lead_axes=tuple(lead_axes),
-        stage=fold.stage,
+        stage=stage,
     )
 
 
@@ -1212,19 +1212,24 @@ class TileOp(Op):
 
     There is **no** let table: a computed operand is stored inline on its edge, and sharing is the
     product :class:`ContractionView`'s arity (see the module docstring), so stored trees are already
-    resolved and every walk is a plain tree walk. There is **no** residual reduce-partition field
-    either: EVERY partitioned reduce — a plain / twisted
-    monoid, flash, a coop-K / split-K contraction — carries its :class:`~.schedule.ReducePlan` on its
-    ``Fold`` node (read via ``ops.reduce_plan``); the flat-``Map`` coop-K contraction is nodified
-    by ``ops.nodify_reduce`` at schedule / split time. The contraction operand→role binding is not a
+    resolved and every walk is a plain tree walk. The per-node schedule SLICES live in
+    ``schedule`` (1r): ``{codec key → resolved TilePlan / ReducePlan / Stage}``, keyed by the
+    tree-path codec's canonical key (:mod:`~emmy.compiler.ir.tile.path` — a fold may carry all
+    three families at once, so the path alone cannot key the map; the family selects the slice
+    kind, so key and value agree by construction). The ``op`` term is pure algebra, IMMUTABLE
+    across the whole schedule search — a fork is a different map, never a rebuilt tree. Read /
+    write through :class:`~emmy.compiler.ir.tile.ops.Sched` (``ops.reduce_plan`` is the plan
+    accessor); ``lower`` never sees the slices, so kernel identity (``op_cache_key``) is
+    untouched. The contraction operand→role binding is not a
     ``TileOp`` field either — a tiled contraction carries its A operand / channels on
-    its ``ContractionView`` node (``op``), the single source of truth; ``_schedule._contraction_node``
+    its stored fold (``op``), the single source of truth; ``_schedule._contraction_node``
     resolves them via ``_atomize.semiring_binding``."""
 
     op: object = None
     name: str = ""
     place: Placement = field(default_factory=Placement)
     workers: WarpSpec | None = None
+    schedule: dict = field(default_factory=dict)
 
     def pretty_body(self) -> str:
         """Render the ``op`` tree structurally (the dump view) — no lowering."""

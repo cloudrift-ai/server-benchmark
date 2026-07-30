@@ -111,18 +111,21 @@ FLASH_WARP_AXIS = "_wq"
 _NEGATE = {"<=": ">", "<": ">=", ">=": "<", ">": "<=", "==": "!="}
 
 
-def warp_source(op):
+def warp_source(op, sched):
     """The warp-tiled stream-head fold of a ``TWISTED`` :class:`Fold` tree
     (``op`` bare or under a projecting :class:`Map`), or ``None`` — the structural schedule read
     the one binder keys the fragment realization on (like ``plan.coop`` keys the lane tiling).
-    Returns the STORED ``role=CONTRACTION`` fold — its ``tile`` is the schedule fact the caller
-    reads; :func:`realize_warp_twist` derives the full views itself."""
+    Returns the STORED ``role=CONTRACTION`` fold — its warp tile is a schedule slice
+    (``sched`` — the ``TileOp.schedule`` view, 1r), never a node field;
+    :func:`realize_warp_twist` derives the full views itself."""
     red = (op.sources[0] if op.sources else None) if isinstance(op, Map) else op
     if not isinstance(red, Fold) or len(red.step) == 0:
         return None
     head = red.step[0]
-    if is_contraction_fold(head) and head.tile is not None and head.tile.is_warp:
-        return head
+    if is_contraction_fold(head):
+        htile = sched.tile_of(head)
+        if htile is not None and htile.is_warp:
+            return head
     return None
 
 
@@ -415,9 +418,9 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # originals); the score's stream axis is the fold's own, read through a slice partial's window
     # PARENT so the view carries the pre-slice geometry the fragment clamps were built against.
     kv_parent = red.axis.window.parent if red.axis.window is not None else red.axis
-    qk: ContractionView = contraction_view(partial[0], ctx.free[-2], kv_parent)
+    qk: ContractionView = contraction_view(partial[0], ctx.free[-2], kv_parent, tile=ctx.sched.tile_of(partial[0]))
     pv_fold = next(s for s in partial[1:] if is_contraction_fold(s))
-    pv: ContractionView = contraction_view(pv_fold, ctx.free[-2], ctx.free[-1])
+    pv: ContractionView = contraction_view(pv_fold, ctx.free[-2], ctx.free[-1], tile=ctx.sched.tile_of(pv_fold))
     atom = qk.tile.atom
     shape = atom.shape
     atom_n = shape[1]
@@ -543,7 +546,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # pipeline (``stage.alt``) additionally stages Q: a padded row-major smem tile filled once,
     # its A fragments ldmatrix'd per atom-K chunk INSIDE the stream — the freed resident registers
     # are what make the wide (64-key) block fit.
-    stage = red.stage
+    stage = ctx.sched.stage_of(red)
     alt = stage is not None and stage.alt
     is_tma = stage is not None and stage.transport == "tma"
     elem_bytes = atom.operand_dtype("b").nbytes

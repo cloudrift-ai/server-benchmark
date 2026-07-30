@@ -85,13 +85,18 @@ def _tile(op) -> TileOp:
     return TileOp(op=op)
 
 
-def test_reduce_plan_reads_the_partition_off_the_reduction_node() -> None:
+def test_reduce_plan_reads_the_partition_off_the_schedule_dict() -> None:
+    from emmy.compiler.ir.tile.ops import sched_of
+
     plan = ReducePlan.of(coop=128)
-    red = replace(Fold.from_loop(_sum_loop()), reduce=plan)
-    # A bare reduce root and a projecting Map both surface the node's partition.
-    assert reduce_plan(_tile(red)) is plan
-    wrapped = Map(body=Body((Assign(name="rms", op="sqrt", args=("acc",)),)), sources=(red,))
-    assert reduce_plan(_tile(wrapped)) is plan
+    red = Fold.from_loop(_sum_loop())
+    # A bare reduce root and a projecting Map both surface the partition keyed on the fold.
+    bare = _tile(red)
+    sched_of(bare).put("REDUCE", red, plan)
+    assert reduce_plan(bare) is plan
+    wrapped = _tile(Map(body=Body((Assign(name="rms", op="sqrt", args=("acc",)),)), sources=(red,)))
+    sched_of(wrapped).put("REDUCE", red, plan)
+    assert reduce_plan(wrapped) is plan
 
 
 def test_reduce_plan_is_none_for_a_flat_map_without_a_reduction_node() -> None:
@@ -172,15 +177,17 @@ def test_a_projection_rides_the_map_wrapper_not_the_node() -> None:
 def test_nodify_reduce_lifts_a_bare_loop_in_body_map_to_a_reduction() -> None:
     """A flat ``Map`` holding just the annotated reduce loop nodifies to a **bare** ``Fold`` node
     carrying the partition — ``lower`` byte-identical, ``reduce_plan`` reading the node."""
-    from emmy.compiler.ir.tile.ops import nodify_reduce
+    from emmy.compiler.ir.tile.ops import nodify_reduce, sched_of
 
     loop = _sum_loop()
     flat = Map(body=(loop,))
     plan = ReducePlan.of(coop=4)
-    node = nodify_reduce(flat, plan)
-    assert isinstance(node, Fold) and node.reduce is plan
+    node, fold = nodify_reduce(flat)
+    assert isinstance(node, Fold) and fold is node
     assert lower(node) == lower(flat)  # bit-identical lowering
-    assert reduce_plan(_tile(node)) is plan
+    t = _tile(node)
+    sched_of(t).put("REDUCE", fold, plan)
+    assert reduce_plan(t) is plan
 
 
 def test_nodify_reduce_keeps_a_projection_tail_as_a_wrapping_map() -> None:
@@ -191,8 +198,8 @@ def test_nodify_reduce_keeps_a_projection_tail_as_a_wrapping_map() -> None:
     loop = _sum_loop()
     proj = (Assign(name="y", op="relu", args=("acc",)), Write(output="out", index=(Var("m"),), value="y"))
     flat = Map(body=(loop, *proj))
-    node = nodify_reduce(flat, ReducePlan.of(reg=2))
-    assert isinstance(node, Map) and isinstance(node.sources[0], Fold)
+    node, fold = nodify_reduce(flat)
+    assert isinstance(node, Map) and node.sources[0] is fold and isinstance(fold, Fold)
     assert tuple(node.body) == proj
     assert lower(node) == lower(flat)  # bit-identical
     assert axis_role(node) is AxisRole.PLANAR
@@ -228,17 +235,20 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
         a=replace(c.a, index=tuple(sigma.apply(e) for e in c.a.index)),
         channels=(replace(c.channels[0], b=replace(c.b, index=tuple(sigma.apply(e) for e in c.b.index))),),
     )
+    from emmy.compiler.ir.tile.ops import sched_of
+
     carrier = Accum(name="acc", value="acc__v", op=ElementwiseImpl("add")).as_carrier()
     red = Fold(
         carrier=carrier,
         axis=ksplit,
         step=Body((inner.as_fold(),)),  # the sliced fold rides the partial — the stored (1k) form
-        reduce=ReducePlan.of(cta=2, finalize="atomic"),
     )
 
     # The outer fold derives CONTRACTION off its composed step — the one non-bilinear arm.
     assert axis_role(red) is AxisRole.CONTRACTION
-    assert reduce_plan(_tile(red)).cta == 2
+    t = _tile(red)
+    sched_of(t).put("REDUCE", red, ReducePlan.of(cta=2, finalize="atomic"))
+    assert reduce_plan(t).cta == 2
     lo = lower(red)
     assert len(lo) == 1 and isinstance(lo[0], Loop) and lo[0].axis.name == "k_ks"
     inner_loops = [s for s in lo[0].body if isinstance(s, Loop)]

@@ -247,6 +247,10 @@ def _deserialize_field(k, v):
         # e.g. ``CudaOp.tma_descriptors``'s ``TmaDescMeta(...)`` reprs (stringified by the
         # dump's ``json.dumps(default=str)``), which a plain ``tuple(v)`` left as strings.
         return tuple(_maybe_eval_ctor(e) if isinstance(e, str) else e for e in v)
+    if isinstance(v, dict):
+        # Dict-valued op fields (``TileOp.schedule`` — codec key → resolved slice) round-trip
+        # their VALUES as constructor reprs under the same known-class guard.
+        return {dk: (_maybe_eval_ctor(dv) if isinstance(dv, str) else dv) for dk, dv in v.items()}
     return v
 
 

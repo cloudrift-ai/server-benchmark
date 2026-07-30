@@ -267,11 +267,13 @@ def _scalar_stage_graph(M: int = 64, N: int = 64, K: int = 64) -> Graph:
 
 
 def _node_stage(tile_op):
-    """The resolved operand pipeline — read off the node it decorates (a ``ContractionView``'s
-    ``stage``, a ``Fold``'s for the cooperative shared-row tier); there is no ``TileOp.stage``."""
+    """The resolved operand pipeline — a schedule slice in ``TileOp.schedule`` keyed on the node
+    it decorates (1r); there is no node ``stage`` field and no ``TileOp.stage``."""
+    from emmy.compiler.ir.tile.ops import sched_of  # noqa: PLC0415
+
     op = tile_op.op
     node = op.sources[0] if getattr(op, "sources", ()) else op
-    return getattr(node, "stage", None)
+    return sched_of(tile_op).stage_of(node)
 
 
 def test_scalar_matmul_stages_through_pipeline(monkeypatch) -> None:

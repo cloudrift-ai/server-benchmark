@@ -58,7 +58,7 @@ from emmy.compiler.ir.tile import (
     is_contraction_fold,
 )
 from emmy.compiler.ir.tile.ir import gmem_row_stride
-from emmy.compiler.ir.tile.ops import axis_role, cone_seam, nodify_reduce, reduce_loop
+from emmy.compiler.ir.tile.ops import axis_role, cone_seam, nodify_reduce, reduce_loop, sched_of
 from emmy.compiler.ir.tile.ops import lower as lower_op
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import make_cone, map_cone, semiring_binding
@@ -350,17 +350,17 @@ def _reduce_specs(kernel, place, ctx=None) -> list[str]:
     return list(REDUCE.narrow(cands))
 
 
-def _with_reduce(op, plan: ReducePlan, stage: Stage | None = None):
-    """Stamp the chosen ``ReducePlan`` onto the op's :class:`Fold` node (bare, or wrapped under a
-    projecting :class:`Map`). The reduce partition lives **on the node**, not the ``TileSchedule`` —
-    read back via ``ops.reduce_plan``. ``_option`` only schedules a PLANAR / TWISTED reduce, whose op
-    recognition always emits as a bare ``Fold`` or a projecting ``Map(source=Fold)``."""
+def _primary_fold(op) -> Fold:
+    """The op's primary reduce :class:`Fold` (bare, or wrapped under a projecting :class:`Map`) —
+    the node the ``REDUCE`` / shared-row ``STAGE`` slices key on. ``_option`` only schedules a
+    PLANAR / TWISTED reduce, whose op recognition always emits as a bare ``Fold`` or a projecting
+    ``Map(source=Fold)``."""
     if isinstance(op, Fold):
-        return replace(op, reduce=plan, stage=stage)
+        return op
     assert isinstance(op, Map) and len(op.sources) == 1 and isinstance(op.sources[0], Fold), (
         f"reduce op must nodify to Fold, got {type(op).__name__}"
     )
-    return replace(op, sources=(replace(op.sources[0], reduce=plan, stage=stage),))
+    return op.sources[0]
 
 
 # ---- shared-row operand staging (the fused norm→linear prologue) -------------------------------- #
@@ -437,16 +437,23 @@ def _row_stage(tile, place) -> Stage | None:
 
 
 def _option(tile, place, spec: str, name: str, knobs: dict) -> TileOp:
-    """One scheduled ``TileOp``: ``place`` mapped onto the grid + the ``REDUCE`` spec resolved into the
-    :class:`Fold` node's ``ReducePlan`` (the ephemeral knob → materialized plan stamped **on the
-    node**), with the spec stamped on ``knobs`` for the prior. The spec is keyed ``REDUCE@<axis>``
-    (the reduce axis this node partitions), so a multi-node kernel addresses each reduce. A
-    cooperative partition also derives the shared-row operand :class:`Stage` (:func:`_row_stage`,
-    stamped on the schedule field only — a derived perf transform, never a knob)."""
+    """One scheduled ``TileOp``: ``place`` mapped onto the grid + the ``REDUCE`` spec resolved into
+    a :class:`ReducePlan` in ``TileOp.schedule`` (keyed on the primary :class:`Fold` — the term
+    stays pure), with the spec stamped on ``knobs`` for the prior. The knob spec is keyed
+    ``REDUCE@<axis>`` (the reduce axis this node partitions), so a multi-node kernel addresses
+    each reduce. A cooperative partition also derives the shared-row operand :class:`Stage`
+    (:func:`_row_stage`, stored as a schedule slice only — a derived perf transform, never a
+    knob)."""
     plan = ReducePlan.parse(spec)
-    op = _with_reduce(tile.op, plan, _row_stage(tile, place) if plan.coop > 1 else None)
     raxis = reduce_loop(tile.op).axis.name
-    return TileOp(op=op, name=name, place=place, knobs={**knobs, _at(REDUCE, raxis): spec})
+    out = TileOp(op=tile.op, name=name, place=place, knobs={**knobs, _at(REDUCE, raxis): spec})
+    fold = _primary_fold(tile.op)
+    sched = sched_of(out)
+    if plan.stages:
+        sched.put("REDUCE", fold, plan)
+    if plan.coop > 1:
+        sched.put("STAGE", fold, _row_stage(tile, place))
+    return out
 
 
 # The mma atoms eligible per operand dtype — the warp tier's dtype gate (16-bit operands only).
@@ -1391,16 +1398,14 @@ def _splitk_option(
     elif stage_spec:
         st = Stage.parse(stage_spec)
         stage = _resolve_warp_stage(inner, st, budget) if wt.is_warp else _resolve_scalar_stage(inner, st, tile.inputs, budget)
-    # The resolved pipeline rides the node it decorates — ``030_split_reduce`` carries the sliced
-    # contraction into the partial kernel and the stage travels with it.
-    inner = replace(inner, stage=stage)
     # The carrier is the sliced fold's own — the 1-component additive ``Accum`` for a plain matmul,
     # the N-component product-monoid state for a multi-channel (gate/up) node — so the split
     # finalize folds exactly the state the kernel accumulates.
     inner_fold = inner.as_fold()
     # ONE composition rule: the sliced fold (multi-channel included) rides the reduce's ``step``
     # (the outer fold DERIVES role=CONTRACTION from that composed step).
-    op = Fold(carrier=inner_fold.carrier, axis=ksplit, step=Body((inner_fold,)), reduce=ReducePlan.parse(split_spec))
+    op = Fold(carrier=inner_fold.carrier, axis=ksplit, step=Body((inner_fold,)))
+    outer_fold = op
     # The projection rides the ``Map`` wrapper — its ONE home; ``030_split_reduce`` reads it there and
     # retargets it (per-partition atomic store / a deferred finalize after the cross-partition sums).
     if len(epi):
@@ -1408,7 +1413,15 @@ def _splitk_option(
     kaxis = reduce_loop(tile.op).axis.name  # the ORIGINAL k-axis name — single-eligible-axis keying
     stamped = {**knobs, _at(TILE, kaxis): tile_spec, _at(REDUCE, kaxis): split_spec}
     stamped[_at(STAGE, kaxis)] = stage.spell() if stage is not None else ""
-    return TileOp(op=op, name=name, place=place, knobs=stamped)
+    out = TileOp(op=op, name=name, place=place, knobs=stamped)
+    # The slices live in ``TileOp.schedule`` (1r): the split partition keyed on the OUTER fold,
+    # the inner contraction's tile / resolved pipeline on the SLICED fold — ``030_split_reduce``
+    # re-keys them onto the partial kernel's own tree.
+    sched = sched_of(out)
+    sched.put("REDUCE", outer_fold, ReducePlan.parse(split_spec))
+    sched.put("TILE", inner_fold, wt)
+    sched.put("STAGE", inner_fold, stage)
+    return out
 
 
 def _warp_option(
@@ -1434,10 +1447,10 @@ def _warp_option(
         assert stage is not None, "computed-A row enumerated past its smem budget"  # _computed_a_rows resolved this
     else:
         stage = _resolve_warp_stage(node, Stage.parse(stage_spec), budget) if stage_spec else None
-    # Re-wrap the recognizer's projecting ``Map`` around the tiled node (materialize peels it into
+    # Re-wrap the recognizer's projecting ``Map`` around the stored fold (materialize peels it into
     # the store tail — the same ``project ∘ contract`` spelling the Fold tiers use).
-    node = replace(node, stage=stage)
-    emitted = Map(body=proj, sources=(node.as_fold(),)) if len(proj) else node.as_fold()
+    fold = node.as_fold()
+    emitted = Map(body=proj, sources=(fold,)) if len(proj) else fold
     # Warp specialization rides ORTHOGONAL to the tile/stage just resolved: an optional WSPEC row /
     # pin splits the warps into roles over this fixed pipeline (gated on the RESOLVED ``stage`` — an
     # ineligible spec leaves no pipeline for a producer to drive, so WSPEC degrades to uniform).
@@ -1454,7 +1467,11 @@ def _warp_option(
     stamped[_at(STAGE, kaxis)] = stage.spell() if stage is not None else ""
     if wspec_spec:
         stamped[WSPEC.name] = wspec_spec
-    return TileOp(op=emitted, name=name, place=place, workers=workers, knobs=stamped)
+    out = TileOp(op=emitted, name=name, place=place, workers=workers, knobs=stamped)
+    sched = sched_of(out)
+    sched.put("TILE", fold, node.tile)
+    sched.put("STAGE", fold, stage)
+    return out
 
 
 def _tile_option(
@@ -1485,6 +1502,7 @@ def _tile_option(
     # and ``_factor._tile_reduce_axis`` folds it off the node.
     op = tile.op
     stage = None
+    slices: list[tuple[str, object, object]] = []  # (family, node, value) — stored once the TileOp exists
     if plan.is_tiled:
         # The coop / ILP ``REDUCE`` partition rides the NON-output-tiled tier only
         # (``_coop_reduce_spec``'s contract — ``_tile_reduce_axis`` folds one cell per thread): a
@@ -1497,20 +1515,26 @@ def _tile_option(
             pass  # an unbindable contraction (a non-Load operand) keeps the Map form
         else:
             # Only a built ContractionView node can engage operand staging — resolve the pin against it
-            # (per-cell / coop-K / unbindable forms stamp None: nothing downstream would read a stage).
+            # (per-cell / coop-K / unbindable forms store nothing: nothing downstream would read a stage).
             if stage_spec:
                 stage = _resolve_scalar_stage(node, Stage.parse(stage_spec), tile.inputs, budget)
-            node = replace(node, stage=stage)
-            op = Map(body=proj, sources=(node.as_fold(),)) if len(proj) else node.as_fold()
+            fold = node.as_fold()
+            op = Map(body=proj, sources=(fold,)) if len(proj) else fold
+            slices = [("TILE", fold, node.tile), ("STAGE", fold, stage)]
     elif reduce_spec:
-        op = nodify_reduce(tile.op, ReducePlan.parse(reduce_spec))
+        op, red_fold = nodify_reduce(tile.op)
+        slices = [("REDUCE", red_fold, ReducePlan.parse(reduce_spec))]
     # ``TILE`` / ``REDUCE`` / ``STAGE`` key ``@<k_axis>`` (the contraction axis this node schedules),
     # unifying the schedule onto the axis-named family. STAGE stamps the RESOLVED spelling, and only
     # when resolution took (see ``_warp_option`` — the same honest-stamping rule).
     kaxis = reduce_loop(tile.op).axis.name
     stamped = {**knobs, _at(TILE, kaxis): spec, _at(REDUCE, kaxis): reduce_spec}
     stamped[_at(STAGE, kaxis)] = stage.spell() if stage is not None else ""
-    return TileOp(op=op, name=name, place=place, knobs=stamped)
+    out = TileOp(op=op, name=name, place=place, knobs=stamped)
+    sched = sched_of(out)
+    for family, node_, value in slices:
+        sched.put(family, node_, value)
+    return out
 
 
 def _map_reg_width(spec: str) -> int:
@@ -1816,8 +1840,9 @@ def _rtx4080_dit_flash_deploy(forms: list[TileOp], red: Reduction, head: Contrac
 
 
 def _stamp_twisted_split(rows: list[TileOp], kv_name: str, plan: ReducePlan) -> list[TileOp]:
-    """The flash split-KV rows: each warp row with the pinned cross-CTA partition stamped on its
-    :class:`Fold` node (``030_split_reduce`` consumes it) and spelled on ``REDUCE@<kv>``. Per-row
+    """The flash split-KV rows: each warp row with the pinned cross-CTA partition stored in its
+    ``TileOp.schedule`` (keyed on the stream fold — ``030_split_reduce`` consumes it) and spelled
+    on ``REDUCE@<kv>``. Per-row
     legality for a STATIC kv: an extent divisible by ``cta`` and a slice divisible by the row's own
     streaming key block (the staged chunking + fragment masks assume block-whole slices); an
     illegal row is dropped, not degraded. A SYMBOLIC kv always stamps — ``030_split_reduce`` builds
@@ -1826,12 +1851,14 @@ def _stamp_twisted_split(rows: list[TileOp], kv_name: str, plan: ReducePlan) -> 
     for r in rows:
         red = (r.op.sources[0] if r.op.sources else None) if isinstance(r.op, Map) else r.op
         head = red.step[0]
-        bn = head.tile.regs[1] * head.tile.atom.shape[1]
+        head_tile = sched_of(r).tile_of(head)
+        bn = head_tile.regs[1] * head_tile.atom.shape[1]
         ext = red.axis.extent
         if ext.is_static and (ext.as_static() % plan.cta != 0 or (ext.as_static() // plan.cta) % bn != 0):
             continue
-        op2 = _with_reduce(r.op, plan)
-        out.append(replace(r, op=op2, knobs={**r.knobs, _at(REDUCE, kv_name): plan.spell()}))
+        r2 = replace(r, knobs={**r.knobs, _at(REDUCE, kv_name): plan.spell()}, schedule=dict(r.schedule))
+        sched_of(r2).put("REDUCE", red, plan)
+        out.append(r2)
     return out
 
 
@@ -1882,22 +1909,22 @@ def _twisted_chain_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp
     d = d_ax.extent.as_static()
     if d > _CHAIN_MAX_D:
         return None
-    pv2 = replace(pv_fold, tile=TilePlan(regs=(d, 1)))  # scalar reg order (reg_n, reg_m): the column vector
-    partial = tuple(pv2 if st is pv_fold else st for st in red.step)
-    red2 = replace(red, step=type(red.step)(partial))
-    op2 = replace(op, sources=(red2,)) if isinstance(op, Map) else red2
+    chain_plan = TilePlan(regs=(d, 1))  # scalar reg order (reg_n, reg_m): the column vector
     # A fork SIBLING of the warp / reduce-partition schedules: the resolved register-vector plan is
     # stamped (keyed on the PV contraction's k axis, like every per-node schedule codec) — the row
     # identity the DB / prior separate it from the per-cell serial by — and the sibling families it
-    # does NOT schedule are decided-empty so every flash leaf row spells the same key set.
+    # does NOT schedule are decided-empty so every flash leaf row spells the same key set. The term
+    # is IMMUTABLE (1r): the plan lives in ``TileOp.schedule``, keyed on the PV fold.
     stamped = {
         **knobs,
-        _at(TILE, pv.k_axis.name): pv2.tile.spell(),
+        _at(TILE, pv.k_axis.name): chain_plan.spell(),
         _at(TILE, head.k_axis.name): "",
         _at(REDUCE, red.axis.name): "",
         _at(STAGE, red.axis.name): "",
     }
-    return TileOp(op=op2, name=name, place=Placement(free=tile.place.free, grid=tuple(grid[:-1])), knobs=stamped)
+    out = TileOp(op=op, name=name, place=Placement(free=tile.place.free, grid=tuple(grid[:-1])), knobs=stamped)
+    sched_of(out).put("TILE", pv_fold, chain_plan)
+    return out
 
 
 def _composes(red: Fold) -> bool:
@@ -1905,14 +1932,6 @@ def _composes(red: Fold) -> bool:
     sliced contraction, flash's score) — the ONE spelling for a composed reduce, so a "bare
     statistic reduce" test is just its negation."""
     return any(isinstance(s, (Map, Fold)) for s in red.step)
-
-
-def _with_twisted_stage(op, stage: Stage | None):
-    """Stamp the resolved K/V pipeline onto the flash tree's :class:`Fold` — the node it
-    decorates (the streaming reduce whose per-step partial reads the staged slabs)."""
-    red = op.sources[0] if isinstance(op, Map) and op.sources else op
-    staged = replace(red, stage=stage)
-    return replace(op, sources=(staged,)) if isinstance(op, Map) and op.sources else staged
 
 
 def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp | None:
@@ -1992,9 +2011,13 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     )
     stage = Stage(transport="sync", smem=(node.a_name,), bk_elems=bk_elems)
     stamped = {**knobs, _at(TILE, k_ax.name): spec}
-    node = replace(node, stage=stage)
-    emitted = Map(body=epilogue, sources=(node.as_fold(),)) if len(epilogue) else node.as_fold()
-    return TileOp(op=emitted, name=name, place=place, knobs=stamped)
+    fold = node.as_fold()
+    emitted = Map(body=epilogue, sources=(fold,)) if len(epilogue) else fold
+    out = TileOp(op=emitted, name=name, place=place, knobs=stamped)
+    sched = sched_of(out)
+    sched.put("TILE", fold, wt)
+    sched.put("STAGE", fold, stage)
+    return out
 
 
 def _resolve_twisted_stage(
@@ -2283,14 +2306,12 @@ def _twisted_warp_options(
                 )
             continue
         qk_plan = TilePlan(atom=atom, units=(um, 1), regs=(fm, nt), bk=bk)
-        variants: list[tuple[TilePlan, object]] = []
-        for pv_atom in pv_atoms:
-            pv_plan = TilePlan(atom=pv_atom, units=(um, 1), regs=(fm, d_v.as_static() // atom_n), bk=max(1, bn // atom_k))
-            partial = tuple(
-                replace(s, tile=qk_plan) if s is head_fold else (replace(s, tile=pv_plan) if s is pv_fold else s) for s in red.step
-            )
-            red2 = replace(red, step=type(red.step)(partial))
-            variants.append((pv_plan, replace(op, sources=(red2,)) if isinstance(op, Map) else red2))
+        # The term is IMMUTABLE across the schedule search (1r): every variant shares ``op``
+        # verbatim — the per-node plans live in each row's ``TileOp.schedule``, keyed on the
+        # stored QK / PV folds.
+        variants: list[TilePlan] = [
+            TilePlan(atom=pv_atom, units=(um, 1), regs=(fm, d_v.as_static() // atom_n), bk=max(1, bn // atom_k)) for pv_atom in pv_atoms
+        ]
         # ``um`` warps per CTA, each owning ``fm`` register query tiles of ``atom_m`` rows: the
         # query axis shrinks to its CTA-block count; the value (expect output) axis folds into the
         # fragment tile and leaves the grid.
@@ -2338,7 +2359,7 @@ def _twisted_warp_options(
                 workers, wspec_spec = _wspec_workers(wspec_cand, stage, 32 * um)
                 if wspec_cand and workers is None:
                     continue  # over-budget / illegal split — identical to the uniform row
-                for pv_plan, op2 in variants:
+                for pv_plan in variants:
                     stamped = {
                         **knobs,
                         _at(TILE, head.k_axis.name): qk_plan.spell(),
@@ -2348,6 +2369,10 @@ def _twisted_warp_options(
                     }
                     if wspec_spec:
                         stamped[WSPEC.name] = wspec_spec
-                    op2 = _with_twisted_stage(op2, stage)
-                    out.append(TileOp(op=op2, name=name, place=place, workers=workers, knobs=stamped))
+                    row = TileOp(op=op, name=name, place=place, workers=workers, knobs=stamped)
+                    sched = sched_of(row)
+                    sched.put("TILE", head_fold, qk_plan)
+                    sched.put("TILE", pv_fold, pv_plan)
+                    sched.put("STAGE", red, stage)
+                    out.append(row)
     return out

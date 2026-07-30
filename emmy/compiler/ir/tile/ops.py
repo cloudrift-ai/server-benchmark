@@ -20,8 +20,6 @@ multi-channel edge lowers through :attr:`ContractionView.loop`'s own product der
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.schedule import ReducePlan
 from emmy.compiler.ir.stmt import Assign, Body, Loop, StridedLoop
@@ -50,6 +48,65 @@ def cone_seam(cone) -> tuple[tuple, tuple, tuple[str, ...]]:
     return (pro, cell, stats) if stats else ((), cell, ())
 
 
+class Sched:
+    """Read/write view of one kernel's schedule slices — the ``TileOp.schedule`` dict (1r:
+    ``{codec key → resolved TilePlan / ReducePlan / Stage}``) bound to the op tree the keys spell
+    against. The ONE accessor pair every reader (materializer, ``030_split_reduce``) and stamper
+    (the ``_schedule`` option builders) goes through, so a slice has exactly one home and the key
+    spelling is always the tree-path codec's canonical one (:mod:`~emmy.compiler.ir.tile.path`).
+    A node that is not a site of the family reads ``None`` and refuses writes loudly."""
+
+    def __init__(self, root, table: dict | None) -> None:
+        self.root = root
+        self.table = table if table is not None else {}
+        self._sites = None
+
+    def _all_sites(self):
+        from emmy.compiler.ir.tile.path import sites  # noqa: PLC0415 — path imports ir; keep ops light
+
+        if self._sites is None:
+            self._sites = sites(self.root)
+        return self._sites
+
+    def key(self, family: str, node) -> str | None:
+        """The canonical codec key addressing ``node`` under ``family`` — ``None`` when the node
+        is not a site of that family on this tree (nothing to key)."""
+        from emmy.compiler.ir.tile.path import spell  # noqa: PLC0415
+
+        try:
+            return spell(self.root, family, node, all_sites=self._all_sites())
+        except ValueError:
+            return None
+
+    def get(self, family: str, node):
+        k = self.key(family, node)
+        return self.table.get(k) if k is not None else None
+
+    def put(self, family: str, node, value) -> None:
+        """Store a resolved slice for ``node`` (drop a ``None`` / empty value — an absent key IS
+        the decided-empty)."""
+        if value is None:
+            return
+        k = self.key(family, node)
+        if k is None:
+            raise ValueError(f"{family} does not apply to this {type(node).__name__} — no site to key the slice on")
+        self.table[k] = value
+
+    def tile_of(self, node):
+        return self.get("TILE", node)
+
+    def reduce_of(self, node):
+        return self.get("REDUCE", node)
+
+    def stage_of(self, node):
+        return self.get("STAGE", node)
+
+
+def sched_of(tile) -> Sched:
+    """The :class:`Sched` view of a ``TileOp`` (binds its ``schedule`` dict to its op tree)."""
+    return Sched(tile.op, tile.schedule)
+
+
 def reduce_loop(op):
     """The kernel's outermost **annotated** reduce ``Loop`` (its ``carrier`` set by recognition),
     or ``None`` for a pure pointwise / flat-fallback ``Map`` (no annotated reduce). A
@@ -70,49 +127,48 @@ def reduce_loop(op):
 
 
 def reduce_plan(tile):
-    """The tile's reduce partition (:class:`~emmy.compiler.ir.schedule.ReducePlan`), read
-    **off the** :class:`~emmy.compiler.ir.tile.ir.Fold` **node** — when ``tile.op`` is a
-    ``Fold`` (bare, or wrapped via ``Map.sources``), else ``None`` (a pure pointwise / scalar
-    per-cell ``Map`` has no partition). Every partitioned reduce — a plain / twisted monoid, flash,
-    a coop-K / split-K contraction (:func:`nodify_reduce`) — carries its plan on the node; there is
-    **no** residual ``TileOp.reduce`` field. The single accessor the materializer / ``030_split_reduce`` read."""
+    """The tile's reduce partition (:class:`~emmy.compiler.ir.schedule.ReducePlan`), read from
+    ``TileOp.schedule`` for the PRIMARY :class:`~emmy.compiler.ir.tile.ir.Fold` — when ``tile.op``
+    is a ``Fold`` (bare, or wrapped via ``Map.sources``), else ``None`` (a pure pointwise / scalar
+    per-cell ``Map`` has no partition). An unstamped fold reads the empty plan (the scalar serial
+    fold), matching the retired node field's default. The single accessor the materializer /
+    ``030_split_reduce`` read."""
     op = tile.op
     head = op.sources[0] if isinstance(op, Map) and op.sources else op
-    red = head if isinstance(head, Fold) else None
-    return red.reduce if red is not None else None
+    if not isinstance(head, Fold):
+        return None
+    plan = sched_of(tile).reduce_of(head)
+    return plan if plan is not None else ReducePlan()
 
 
-def nodify_reduce(op, plan: ReducePlan):
-    """Nodify a kernel op into a :class:`~emmy.compiler.ir.tile.ir.Fold` node carrying the
-    reduce partition ``plan`` **on the node** (not a residual ``TileOp.reduce`` field). A
-    :class:`ContractionView` node (the recognize-side per-cell contraction) folds through its
-    synthesized loop — the coop / ILP K partition treats it as the degenerate carrier of its
-    additive fold, any projection riding the wrapping ``Map``. A flat ``Map`` holding an annotated
-    reduce ``Loop`` (a split partial) nodifies via :meth:`Fold.from_loop`, which reconstructs
-    the identical annotated loop, so the lowering is byte-identical; a projection tail (a fused
-    epilogue) rides a wrapping ``Map`` over the node, a bare reduce becomes the root node.
+def nodify_reduce(op):
+    """Nodify a kernel op into a :class:`~emmy.compiler.ir.tile.ir.Fold` node the reduce
+    partition can key on (the plan itself lives in ``TileOp.schedule`` — the caller stores it
+    against the returned fold). Returns ``(op2, fold)``. A stored contraction fold (the
+    recognize-side per-cell contraction) is already the node — the coop / ILP K partition treats
+    it as the degenerate carrier of its additive fold, any projection riding the wrapping ``Map``.
+    A flat ``Map`` holding an annotated reduce ``Loop`` (a split partial) nodifies via
+    :meth:`Fold.from_loop`, which reconstructs the identical annotated loop, so the lowering is
+    byte-identical; a projection tail (a fused epilogue) rides a wrapping ``Map`` over the node, a
+    bare reduce becomes the root node.
 
     Used by the scheduler (the coop / ILP-K contraction) and ``030_split_reduce`` (the split partial) so
-    EVERY partitioned reduce reads its plan off a node uniformly — the ``lower(op)``-then-refind
-    smell (and the ``TileOp.reduce`` residual) is gone. For the ``Map`` form the reduce ``Loop``
+    EVERY partitioned reduce keys its plan off a node uniformly. For the ``Map`` form the reduce ``Loop``
     must be a top-level stmt of ``op.body`` with no prologue ahead of it (true for a split partial /
     bare sum: the reduce is the body's head); a projection tail after it becomes the wrapping
     ``Map`` body."""
     if isinstance(op, Fold) and op.role is AxisRole.CONTRACTION:
-        # A stored contraction fold: the K partition replaces the (dropped) output tile — the
-        # per-cell coop/ILP tier's contract. The derived loop is unchanged (tile is metadata).
-        return replace(op, reduce=plan, tile=None)
+        return op, op
     head = op.sources[0] if isinstance(op, Map) and op.sources else None
     if isinstance(head, Fold) and head.role is AxisRole.CONTRACTION:
-        # A projecting wrapper: nodify the contraction fold under it, the projection staying put.
-        return replace(op, sources=(nodify_reduce(head, plan),))
+        return op, head
     rloop = reduce_loop(op)
-    red = replace(Fold.from_loop(rloop), reduce=plan)
+    red = Fold.from_loop(rloop)
     body = list(op.body)
     idx = body.index(rloop)
     pre, tail = body[:idx], body[idx + 1 :]
     assert not pre, f"nodify_reduce: unexpected prologue ahead of the reduce loop: {pre}"
-    return Map(body=Body(tuple(tail)), sources=(red,)) if tail else red
+    return (Map(body=Body(tuple(tail)), sources=(red,)) if tail else red), red
 
 
 def axis_role(op) -> AxisRole:
@@ -179,6 +235,7 @@ def pretty(op, indent: str = "") -> list[str]:
 __all__ = [
     "Map",
     "axis_role",
+    "Sched",
     "cone_seam",
     "contraction_loop",
     "lower",
@@ -186,4 +243,5 @@ __all__ = [
     "pretty",
     "reduce_loop",
     "reduce_plan",
+    "sched_of",
 ]

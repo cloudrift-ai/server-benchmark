@@ -263,6 +263,13 @@ deploys the std config there. Goldens are
 **consulted, never trained on**: they enter no reservoir, no checkpoint, no dataset (they are the held-out
 acceptance set). Golden µs is deployable-regime truth and never arbitrates a non--O3 compile. A shape match none of
 whose entries realizes against the offer logs a loud enumeration-drift warning and falls through to the tiers below.
+**That fallthrough is a hazard, not a graceful degradation**, which makes an unrealizable entry worse than an absent
+one: on the gemma-4 m64 gate/up cone the tiers below land on a per-cell `fuse`/`b128` scalar config and the edge
+measures 54.6 ms against the realizing entry's 169 µs — 323×. Two consequences when recording a fused row. Pinning
+`PLACE@cone` **together with** a `TILE` never realizes — no single offered candidate carries both — so record one or
+the other; the schema gate accepts a combination the offer then rejects. And a row must be verified to **deploy**,
+not merely to pin: `--ab` reproduces configs the enumeration would never choose, so a pin-only row looks healthy in
+the isolated golden-reproduction check and only the in-model drift audit (`eval golden --in-model`) catches it.
 The tier depends on **no prior**: a resolve with no prior at all — a failed `load_prior` (corrupt/unreadable online
 checkpoint) or `Pipeline.run`'s last-resort emission-order resolve — still consults the goldens and deploys a
 realizable one (the **golden floor**, logged loudly when it overrides option-0), so a broken checkpoint can never

@@ -17,7 +17,6 @@ from functools import singledispatch
 from emmy.compiler.ir.axis import Axis, extend_simplify_ctx
 from emmy.compiler.ir.expr import Expr, SimplifyCtx, Var
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt.algebra import StateMerge
 from emmy.compiler.ir.stmt.base import Stmt, _axis_identity
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.leaves import (
@@ -30,6 +29,7 @@ from emmy.compiler.ir.stmt.leaves import (
     RowAccum,
     Select,
     SelectBranch,
+    StateMerge,
     Unpack,
     Write,
 )

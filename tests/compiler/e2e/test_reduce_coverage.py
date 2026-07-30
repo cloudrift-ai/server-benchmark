@@ -403,7 +403,7 @@ def _unrelated_reduce_pair() -> Body:
 def test_exp_family_generator_builds_asymmetric_monoid() -> None:
     # state (m, d), partial (s); the asymmetric LSE monoid's streaming merge folds exactly the
     # injected score, and the cross-partition state⊕state combine is generated from the same spec.
-    from emmy.compiler.ir.stmt.algebra import _merge_reads
+    from emmy.compiler.ir.stmt.leaves import _merge_reads
 
     merge = exp_merge(("m", "d"), ("s", 1.0), key="m")
     assert _merge_reads(merge, ("m", "d")) == ("s",)

@@ -12,8 +12,6 @@ is consumed. This module holds only what the STORED TERM itself needs:
   combine (the family discriminator; no family annotation exists).
 - :func:`rename_combine` — the SSA-rename lockstep for the stored program (a generated twisted
   program is REGENERATED over the renamed state, keeping the formation invariant).
-- :class:`StateMerge` — the renderable cross-partition state⊕state stmt (kernel-IR vocabulary;
-  built by the lowering layer's ``Reduction`` helper).
 - :func:`eval_lambda` / :func:`foldmap_eval` — the denotational spec oracle the agreement +
   associativity property tests run against.
 
@@ -26,50 +24,9 @@ bundle are all retired: the node's stored combine is the single spelling of ⊕.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.stmt.base import RenderCtx, Stmt, render_merge_program
 from emmy.compiler.ir.stmt.body import Body, Lambda
-from emmy.compiler.ir.stmt.leaves import Accum, Assign
-
-
-@dataclass(frozen=True)
-class StateMerge(Stmt):
-    """The cross-partition state⊕state combine, as a **renderable** loop-IR stmt (its right
-    operand is a second fully-reduced state named :attr:`state_b`). Built by the lowering layer
-    (``Reduction.state_merge``) for the REG tree / cooperative-tree / cross-CTA finalize; it
-    renders the ψ-rescale state reassignment via ``render_merge_program``. Unlike ``Accum`` it is
-    not a fold carrier — it sits in a combine region, not a streaming fold loop, so it never
-    makes its enclosing loop ``is_reduce``."""
-
-    state: tuple[str, ...]
-    merge: tuple[Stmt, ...]
-    state_b: tuple[str, ...]
-
-    def deps(self) -> tuple[str, ...]:
-        """Every external name the render references: ``state_b`` plus any other outer name a
-        merge-program stmt reads (:func:`_merge_reads` — carried state and program-internal temps
-        excluded, matching the ``Accum`` convention that read-modify-written names live in
-        ``defines()``). ``deps`` must be the COMPLETE read set — read counters / liveness / the
-        splicer's rename resolve references through it, and the render walks the merge program
-        directly (``merge`` is not a nested ``Body``), so a read absent here is invisible to them."""
-        seen = set(self.state_b)
-        extra = tuple(n for n in _merge_reads(self.merge, self.state) if n not in seen)
-        return self.state_b + extra
-
-    def defines(self) -> tuple[str, ...]:
-        return self.state
-
-    def pretty(self, indent: str = "") -> list[str]:
-        lines = [f"{indent}({', '.join(self.state)}) <- combine_states({', '.join(self.state_b)})"]
-        for a in self.merge:
-            lines += a.pretty(indent + "    ")
-        return lines
-
-    def render(self, ctx: RenderCtx) -> list[str]:
-        return render_merge_program(self.merge, self.state, ctx)
-
+from emmy.compiler.ir.stmt.leaves import Assign
 
 # --------------------------------------------------------------------------------------------
 # The TRUE monoid — ``(init, combine)``, ONE program, stored FLAT on the ``Fold`` node.
@@ -190,29 +147,4 @@ def foldmap_eval(init: tuple, combine: Lambda, lift: Lambda, elements) -> tuple:
     return state
 
 
-def _stmt_reads(a: Stmt) -> tuple[str, ...]:
-    """The arg reads of one merge-program stmt. An ``Assign`` reads its ``args``; an
-    ``Accum`` reads its folded ``value`` and (when redirected) its rescaled ``base`` — its
-    carried ``name`` is the loop-carried state, not a same-program read."""
-    if isinstance(a, Accum):
-        return (a.base, a.value) if a.base is not None and a.base != a.name else (a.value,)
-    return a.args
-
-
-def _merge_reads(merge: tuple[Stmt, ...], state_names: tuple[str, ...]) -> tuple[str, ...]:
-    """The external read names of a merge program — args read but neither carried state
-    nor a temp defined within the program — in first-use order. These are the partials the
-    merge folds into the state. The program is a mix of ``Assign`` temps/rescales and ``Accum``
-    folds (a twisted fold's streaming merge); both expose their reads via :func:`_stmt_reads`
-    and their def via ``name``."""
-    state, defined, seen, reads = set(state_names), set(), set(), []
-    for a in merge:
-        for arg in _stmt_reads(a):
-            if arg not in state and arg not in defined and arg not in seen:
-                seen.add(arg)
-                reads.append(arg)
-        defined.add(a.name)
-    return tuple(reads)
-
-
-__all__ = ["M", "StateMerge", "component_ops", "degenerate", "eval_lambda", "foldmap_eval", "rename_combine"]
+__all__ = ["M", "component_ops", "degenerate", "eval_lambda", "foldmap_eval", "rename_combine"]

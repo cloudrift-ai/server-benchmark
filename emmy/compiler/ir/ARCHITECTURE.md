@@ -210,8 +210,9 @@ atom tier reads the operands off the annotated loop to pick the tensor-core cell
 `ir/stmt/algebra.py` is the IR core only: `M` (the componentwise free constructor),
 `component_ops`/`degenerate` (the DEGENERATE-vs-TWISTED shape test on a stored combine — `None` ⇒
 the exp family; no family annotation), `rename_combine` (the SSA-rename lockstep, applied by the
-`Fold` rewrite handler — a twisted program regenerates over the renamed state), the renderable
-`StateMerge` stmt, and the denotational foldMap spec oracle. The lowering side reads the algebra
+`Fold` rewrite handler — a twisted program regenerates over the renamed state), and the
+denotational foldMap spec oracle; the renderable `StateMerge` stmt lives with the other stmt
+leaves (`ir/stmt/leaves.py`, next to `Accum`). The lowering side reads the algebra
 through ONE helper, `pipeline/passes/lowering/_reduction.Reduction` (wrap a `Fold`; `names` /
 `state_b` / `twisted`, the `combine_states` re-emission, `state_merge(other)`, the finalize
 `identities`, and `loop_state_head` — the loop-body read of the carried state's head), consumed

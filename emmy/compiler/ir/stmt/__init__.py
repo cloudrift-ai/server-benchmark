@@ -39,7 +39,6 @@ and produce Loop-IR's canonical form.
 
 from emmy.compiler.ir.stmt.algebra import (
     M,
-    StateMerge,
     component_ops,
     degenerate,
     eval_lambda,
@@ -74,6 +73,7 @@ from emmy.compiler.ir.stmt.leaves import (
     RowAccum,
     Select,
     SelectBranch,
+    StateMerge,
     Unpack,
     Write,
     ZeroPrologue,

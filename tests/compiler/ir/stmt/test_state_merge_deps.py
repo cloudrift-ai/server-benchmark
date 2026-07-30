@@ -9,8 +9,7 @@ carried state names and program-internal temps stay excluded (the ``Accum`` conv
 
 from __future__ import annotations
 
-from emmy.compiler.ir.stmt.algebra import StateMerge
-from emmy.compiler.ir.stmt.leaves import Accum, Assign
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, StateMerge
 
 
 def _merge_with_outer_read() -> StateMerge:

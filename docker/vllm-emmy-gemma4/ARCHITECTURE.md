@@ -58,6 +58,15 @@ artifact, so the bimodal-pick class vanishes and the fixpoint converges immediat
 loop stays as a safety net for the case where the pack write was skipped (a weight outside the pack vocabulary) or
 the load falls back — then the old cubin-union behavior is exactly what runs.
 
+**A serving-shape override at run time is a pack miss, and it is expensive.** The pack is keyed on the serving shape,
+of which `EMMY_GEN_DECODE_BUCKET` is part, so a deployment that overrides the bucket the image was warmed at gets no
+pack hit for the decode programs — the boot re-runs the whole compiler frontend (trace, pass pipeline, fork
+resolution, codegen) once per program. Measured at bucket 256 against a 32-warmed image: ~50 minutes of pure host CPU,
+with the cubins already baked (`compile+alloc=0.00s`) so nothing is saved by the cubin cache. That exceeds the
+compose healthcheck's own boot window (`start_period` 1200s + 180 × 10s probes = 3000s), which makes a bucket
+override a coin flip on host core count rather than a supported configuration. Recipes that need a width outside the
+warmed set should either re-warm the image at that width or expect the deploy to be killed as unhealthy.
+
 ## Files
 
 - `config.env` — the pinned serving config. Every value is cache-key-relevant; it must be **final before warming**

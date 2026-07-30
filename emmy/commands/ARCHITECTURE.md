@@ -254,7 +254,11 @@ applied for both engines unless overridden, so `--stock` is an apples-to-apples 
 defaults to **whole-step decode CUDA graphs** (a `--compilation-config` with `FULL_DECODE_ONLY` + capture sizes
 laddered up to `--max-num-seqs` — sizes above the decode bucket capture the device-resident symbolic programs; see
 `serving/ARCHITECTURE.md`); pass vLLM's own `--enforce-eager` to opt out (forced automatically when
-`EMMY_GEN_DECODE_BUCKET=0`). The emmy generative arm also defaults `--gpu-memory-utilization` to **0.97** (its
+`EMMY_GEN_DECODE_BUCKET=0`). Under `--speculative-config` the ladder is derived from the resulting
+`query_len = num_speculative_tokens + 1`: dense candidates, each floored to a multiple of `query_len`, so that vLLM's
+round-up to that multiple cannot push a step's padded width past the decode bucket and off the static decode twin
+(`serving/ARCHITECTURE.md` carries the rule and its invariant). The emmy generative arm also defaults
+`--gpu-memory-utilization` to **0.97** (its
 cupy residents are invisible to vLLM's torch-only profiler, so the 0.90 line can fail the min-KV fit at long
 model lens; stock keeps 0.90) and `--max-num-batched-tokens` to **the dynamic-dim cap + the decode bucket** — the
 bucket-sized rider headroom is covered by the chunk+decode twin row split (`serving/ARCHITECTURE.md`), so full

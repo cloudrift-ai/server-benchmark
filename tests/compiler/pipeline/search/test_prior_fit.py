@@ -18,6 +18,7 @@ import pytest
 
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 from emmy.compiler.pipeline.search.prior.fit import build_artifact, feature_matrix, fit_weights, rank_of_golden, raw_weights
+from emmy.compiler.pipeline.search.prior.fit import linear as fit_linear
 from emmy.compiler.pipeline.search.prior.offline import _DEFAULT_FILE, OfflinePrior
 
 # The features the OfflinePrior scores OUTSIDE the linear weights (the hardcoded
@@ -122,3 +123,30 @@ def test_incumbent_weights_rank_identically_through_fit_eval_and_prior(monkeypat
 
     for i in range(len(rows)):
         assert rank_of_golden(linear_scores, i) == rank_of_golden(-proxies, i)
+
+
+# --- declared weight bounds ---------------------------------------------------------
+
+
+def test_weight_bounds_heal_seed_and_cap_descent(monkeypatch):
+    """A poisoned seed above a declared bound is clamped on entry, and no search step
+    escapes it — the raw exported weight lands within the bound in both stages (the
+    D_pow2_threads 686-vs-112 incident: the rank objective is flat above the bound, so
+    only the bound keeps the magnitude identified)."""
+    monkeypatch.setattr(fit_linear, "WEIGHT_BOUNDS", {"D_f0": 0.5})
+    cases, names = _synthetic_cases()
+    seed = np.zeros(len(names))
+    seed[names.index("D_f0")] = 1e6  # poisoned incumbent
+    w, _, _, sd = fit_weights(cases, names, np.ones(len(names)), seed_w=seed, rng=np.random.default_rng(0), samples=50)
+    raw = raw_weights(names, w, sd)
+    assert abs(raw["D_f0"]) <= 0.5 + 1e-9
+
+
+def test_shipped_artifact_respects_declared_bounds():
+    """The repo-checked artifact honors every declared bound in BOTH weight sets — trips
+    on a hand-edited or stale artifact that a bounded refit would have healed."""
+    art = json.loads(_DEFAULT_FILE.read_text())
+    for name, bound in fit_linear.WEIGHT_BOUNDS.items():
+        for w_set in (art["weights"], art["weights_dynamic"]):
+            if name in w_set:
+                assert abs(w_set[name]) <= bound + 1e-9, f"{name} = {w_set[name]} exceeds declared bound {bound}"

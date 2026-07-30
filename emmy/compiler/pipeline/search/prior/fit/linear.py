@@ -30,6 +30,20 @@ from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 
 logger = logging.getLogger(__name__)
 
+# Declared per-feature |raw weight| bounds — the decision-8 "bound damage" pattern for the fit.
+# The rank objective has no counterpressure on a feature whose golden-pool variance is tiny: descent
+# inflates it until every off-feature candidate in every pool is suppressed, and the surplus magnitude
+# is invisible to the objective but catastrophic at fork scoring, where a partial prefix that has not
+# decided the knob scores the feature as 0.0 — a subtree that decided it then beats every undecided
+# sibling by exp(w·scale) unconditionally. Measured on D_pow2_threads (2026-07-29, TinyLlama twin DB +
+# the 436-case golden set): the golden objective saturates by 112 (static top1 57/436, identical to the
+# unbounded 686 on every metric) while cold-shape fork sibling regret poisons above it (8.3x at ≤112,
+# 110x at ≥224 — the 10 ms/layer serial fused-norm misdeploy). Bounds are RAW-space |weight| caps,
+# enforced on the seed (so a poisoned incumbent heals on the next refit) and on every search step.
+WEIGHT_BOUNDS: dict[str, float] = {
+    "D_pow2_threads": 112.0,
+}
+
 
 def feature_matrix(feats: list[dict[str, float]], names: list[str]) -> np.ndarray:
     return np.array([[f.get(n, 0.0) for n in names] for f in feats], dtype=float)
@@ -99,13 +113,16 @@ def fit_weights(cases, names, sd_ref, *, seed_w, rng, samples):
     sd[sd == 0] = 1.0
     matsz = [(m - mu) / sd for m in mats]
 
-    best_w = seed_w * sd / sd_ref  # re-scale the seed into this pool's z-space
+    # WEIGHT_BOUNDS are raw-space caps; raw = w_z / sd (see raw_weights), so bound_z = bound_raw · sd.
+    bz = np.array([WEIGHT_BOUNDS.get(n, np.inf) for n in names]) * sd
+
+    best_w = np.clip(seed_w * sd / sd_ref, -bz, bz)  # re-scale the seed into this pool's z-space
     best_ranks = eval_weights(matsz, gidx, best_w)
     best_obj = objective(best_ranks, cw)
     logger.info("  seed: %s", topk_table(best_ranks))
 
     for _ in range(samples):
-        w = rng.standard_normal(len(names))
+        w = np.clip(rng.standard_normal(len(names)), -bz, bz)
         ranks = eval_weights(matsz, gidx, w)
         ob = objective(ranks, cw)
         if ob < best_obj:
@@ -118,7 +135,9 @@ def fit_weights(cases, names, sd_ref, *, seed_w, rng, samples):
         for j in range(len(names)):
             for delta in (step, -step):
                 w = best_w.copy()
-                w[j] += delta
+                w[j] = min(max(w[j] + delta, -bz[j]), bz[j])
+                if w[j] == best_w[j]:
+                    continue
                 ranks = eval_weights(matsz, gidx, w)
                 ob = objective(ranks, cw)
                 if ob < best_obj:

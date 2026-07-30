@@ -456,6 +456,31 @@ of Phase 4. Phase 2 is diagnostic tooling — parallel with 3, consumed by 4's f
    readable and a refit fully recovers). Touches `features.py`, the DB `feat_ver` stamp, checkpoint + freeze formats.
    The freeze header should reserve both axes from day one (currently equal) so this split needs no format migration.
 
+## Update 2026-07-30 — declared weight bounds land in the fitter (the D_pow2_threads 686 incident)
+
+The 2026-07-28 featurizer-v3 refit (#438) ran the fitter with `--samples 20000` — the random-restart mode the
+decision-11 STATUS note recorded as a trap — and shipped `D_pow2_threads` at 686 (was 56 in the #364
+descent-from-seed fit). Consequence, measured on a cold TinyLlama-1.1B/RTX 4080 serve
+(`plans/emmy-serve-performance-findings.md`): the fused norm→gate/up contraction deployed a serial schedule
+~150x off the DRAM floor (10 ms/layer — a 54x serving TPOT gap), and the twin-DB fork forensics blamed the one
+term (+150k regret-weighted at the PLACE+REDUCE+STAGE+TILE fork, 114.87x sibling regret).
+
+Root cause is structural, not just the restart mode: the rank objective is FLAT in a feature whose golden-pool
+variance is tiny, so descent inflates it without bound (a de-poisoned seed climbed 0 → 630 with byte-identical
+golden metrics), and the surplus magnitude only bites at fork scoring, where an undecided prefix scores the
+feature 0.0 — any subtree that decided the knob then beats every undecided sibling by `exp(w·scale)`. Measured
+saturation: the golden objective's entire gain (static top1 28 → 57/436) completes by W=112; fork poisoning
+starts between 112 and 224 (8.3x → 110x).
+
+Landed (branch `fix/offline-prior-pow2-refit`): `fit/linear.py::WEIGHT_BOUNDS` — declared raw-space |weight|
+caps (decision 8's "bound damage" pattern applied to the fit), clamped on the seed (a poisoned incumbent heals
+on the next refit) and on every random-sample / descent step; `D_pow2_threads: 112`. Bounded refit from the
+poisoned seed: golden metrics identical to unbounded (static top1=57 median=58, dyn median=19), twin-DB fork
+regret 114.87x → 8.30x, global-DB leaf reachability improves (median 1.29x → 1.07x @-O1). Tests pin both the
+mechanism (seed-heal + step cap) and the shipped artifact against future undisciplined refits. Phase-4's
+CatBoost fitter should carry the same declared-bounds surface (or its monotone-constraint equivalent) — and the
+per-feature blame + twin-DB regret loop used here is exactly the Phase-2 tooling working as designed.
+
 ## Update 2026-07-23 — collection strategy reworked (three-slice golden-anchored sweep); first real fitter, goldens only
 
 Two things moved since 07-16: the data-collection strategy was replaced end to end, and the Phase-4 fitter now

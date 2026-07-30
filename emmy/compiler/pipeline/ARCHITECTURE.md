@@ -197,7 +197,12 @@ The two halves of the one path:
   `cv.py` cross-validation harness), driven by `emmy fit` (which also writes the per-run metrics file) or by the
   legacy wrapper `scripts/golden_knob_heuristics.py`; the golden case building lives in `emmy/commands/fit.py`
   (reconstructing each golden's candidate pool needs the command layer's snippet tracer, which `pipeline/` never
-  imports);
+  imports). The fit enforces declared per-feature **weight bounds** (`fit/linear.py::WEIGHT_BOUNDS`, raw-space
+  |weight| caps, clamped on the seed and on every search step): the rank objective is flat in a feature whose
+  golden-pool variance is tiny, so an unbounded search inflates it arbitrarily — invisible to golden rank,
+  catastrophic at fork scoring where an undecided prefix scores the feature 0.0 (the `D_pow2_threads` 686
+  incident: a cold TinyLlama/4080 serve deployed a 150×-off-floor serial schedule; bounded at the measured
+  golden-objective saturation point, 112);
   `EMMY_OFFLINE_FILE` (or `emmy eval … --offline-file`) swaps in a candidate
   fit for an A/B. Loading is strict: a missing or `feat_ver`-mismatched artifact is a hard error (refit it), never a
   silent fallback — a retired weight key inside a current-version artifact is merely a dead term. A separate

@@ -30,6 +30,15 @@ prior and `emmy tune`'s sweep are not trusted at the moment, so every number her
   unavoidable, and the winner is a 64-row tile *with* `gm8` group-M rasterization — 274.8 us with it against
   **434.4** us for the identical tile without it. The invariant is "B leaves DRAM once"; rasterization is a second
   way to buy it when the tile extent cannot.
+- **The biggest finding is not a tuning gap at all: at m192 the fused norm→linear cone cold-resolves to a ~300x
+  misdeploy.** With no fused golden the computed-A cone falls to the per-cell `fuse`/`b128` scalar config —
+  `norm_gate_up` **132,633 us** against a tuned 429.3 (**309x**), `mlp_down_fused` 65,067 → 265.5 (245x),
+  `norm_qkv` 35,579 → 116.2 (306x), `norm_qk_global` 37,965 → 118.2 (321x). Over 48 layers that is **~11.2 s of
+  kernel time per decode step before, ~39 ms after**. A live bare-metal server at bucket 192 generated at
+  **4–6 tok/s** with a perfectly healthy 2.33–2.67 acceptance length — exactly what that arithmetic predicts. This
+  is the mechanism behind the c=64 lane's 10.7 tok/s reading, and it is **deterministic, not the run-to-run lottery
+  it was read as**: an absent fused golden picks the scalar config every time. Four `norm_linear` rows close it, and
+  all four want the same geometry the m64 fused rows already carry.
 - **The prefill width is NOT the problem.** m2048 — the chunk width the 4k/4k c=4/c=8 cells ride — measures
   0.99–1.08x cuBLAS across every matmul edge, and the best pin buys 1.01–1.05x. So the 4k/4k TTFT gap (24–26 s
   against stock's 8.7 s) is not prefill matmul quality.
@@ -315,3 +324,39 @@ caught it. Re-tuning the fm lane at that shape lands on the same rule (`w4x2/f1x
 a hair under std's 146.7, and the superseded `w1x8/f2x2/k2` fm row (tile M 32, 225.4 us) is dropped. That the two
 accumulate dtypes tie to within 1% is itself confirmation the kernel is DRAM-bound and not mma-bound at this width —
 which is the premise the whole tile-M argument rests on.
+
+## Measurement caveat: `--bench` times a small weight slab out of L2, not DRAM
+
+`emmy run --bench` replays ONE weight slab ~100 times, so any slab that fits the 5090's **96 MB L2** is timed
+L2-resident. A live decode step streams ~21.8 GB of weights, so nothing is L2-resident in production and such a row
+is not a throughput claim. This caveat applies to the reproduction recipe below — anyone following it on a narrow-N
+shape will get L2 numbers.
+
+Slab size alone is only half the test, though: fitting in L2 is **necessary but not sufficient** for a number to be
+inflated. A row is *proven* compromised only when its implied bandwidth (slab ÷ measured µs) exceeds what DRAM could
+physically deliver — a kernel that fits in L2 but runs far below DRAM peak is latency- or compute-bound, and L2
+residency has little room to help it. Applying both tests to every row recorded here:
+
+| row | slab | implied BW | verdict |
+|---|--:|--:|---|
+| `gate_up_cat` m64 / m192 / m256 | 236 MB | 1.61 / 0.86 / 0.81 TB/s | **stands** — slab exceeds L2 |
+| `mlp_down.m192` | 118 MB | 0.61 TB/s | **stands** — slab exceeds L2 |
+| `norm_gate_up.m192` (fused) | 236 MB | 0.55 TB/s | **stands** — slab exceeds L2 |
+| `mlp_down_fused.m192` (fused) | 118 MB | 0.44 TB/s | **stands** — slab exceeds L2 |
+| `qkv_cat.m64` / `q_proj_global.m64` | 63 MB | **2.20 TB/s** | **COMPROMISED** — above the 1.79 TB/s DRAM peak |
+| `qkv_cat.m192`, `qk_global_cat.m192` | 63 / 67 MB | 0.70 / 0.74 TB/s | unconfirmed — fits L2, not BW-saturated |
+| `norm_qkv.m192`, `norm_qk_global.m192` (fused) | 63 / 67 MB | 0.54 / 0.57 TB/s | unconfirmed — same |
+
+**The one proven-compromised shape is `qkv_cat.m64` / `q_proj_global.m64`.** 28.6 µs for a 62.9 MB slab implies
+2.20 TB/s, which DRAM cannot supply — the measurement is L2-assisted. Worse for the claim: the *before* number
+(35.1 µs) implies 1.79 TB/s, exactly the DRAM floor, so in a cache-cold regime the old config may already be optimal
+and the recorded 1.22x may be entirely artifact. **The throughput claim on that pair is withdrawn.** The entries are
+kept because they are realizable and correct, and because the value of a golden row is not only its speed — see the
+DRIFT section.
+
+**Nothing load-bearing depends on the compromised class.** The tile-M rule was derived from the 236 MB slab against
+an explicit DRAM floor, which is precisely the regime where the artifact cannot occur; its headline row measures
+1.61 TB/s, 90% of peak and comfortably under it. And the ~300x fused misdeploy is immune three times over: its two
+largest rows exceed L2; the cold picks (35,579 µs for a 63 MB slab ≈ 1.8 GB/s) are ~1000x below DRAM bandwidth, so
+they are compute-pathological rather than memory-timed and L2 residency can only *understate* the gap; and the
+finding was confirmed **end to end on a live server** at 4–6 tok/s, which no microbenchmark artifact can produce.

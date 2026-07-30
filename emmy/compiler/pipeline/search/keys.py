@@ -49,16 +49,15 @@ def op_cache_key(op: object) -> str | None:
         # ``SearchTree.expand`` self-parents the node and
         # ``_propagate_expected`` walks the parent chain forever.
         knob_key = tuple(sorted(op.knobs.items())) if op.knobs else ()
-        # ``TileOp`` has no stored body — its compute is the ``op`` tree; lower it on
-        # demand for the structural key (the body proper is generated at materialize).
+        # ``TileOp`` identity is the α-invariant hash of the canonically renumbered TERM (step 7
+        # — no longer the lowered loop nest): SSA / buffer names canonicalize positionally, the
+        # structure is the stored params verbatim (``ops.term_key``). Shape discrimination rides
+        # the stamped ``S_ext_*`` features in ``knob_key``, exactly as before.
         if isinstance(op, TileOp):
-            from emmy.compiler.ir.stmt.body import Body  # noqa: PLC0415
-            from emmy.compiler.ir.tile.ops import lower  # noqa: PLC0415
+            from emmy.compiler.ir.tile.ops import term_key  # noqa: PLC0415
 
-            body = Body(lower(op.op)) if op.op is not None else Body(())
-        else:
-            body = op.body
-        return digest(type(op).__name__, body.structural_key(), knob_key)
+            return digest(type(op).__name__, term_key(op.op), knob_key)
+        return digest(type(op).__name__, op.body.structural_key(), knob_key)
     return None
 
 

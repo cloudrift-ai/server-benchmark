@@ -22,8 +22,12 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   `ir/stmt/algebra`), and a symmetric tuple of
   **`operands`** (the CLOSED inputs, each an edge, bound POSITIONALLY to the lift params) — and the lift/projection
   wrapper `Map` (`fn: Lambda` + `sources`, bound positionally; `fn.results` replaced the `out` last-def convention).
-  The serial step, the `Accum` forms and the `carrier` annotation are DERIVED (combine at the singleton; the twist
-  family selected structurally, never stored); `Fold.from_loop` returns `None` for a non-λ-representable loop (the
+  The serial step and the `Accum` forms are DERIVED (combine at the singleton; the twist
+  family selected structurally, never stored), and loops carry NO algebra — `Loop`/`StridedLoop` hold only their
+  `AxisRole`; the retired `Algebra` bundle's lowering-side reads live in `passes/lowering/_reduction.Reduction`
+  (the materializer's + `030_split_reduce`'s view). `Fold.from_loop` reconstructs the algebra from the loop BODY
+  alone (degenerate facts off its `Accum`s; a twisted merge regenerated-and-byte-compared, or extracted against a
+  `like` fold for a split partial), returns `None` for a non-λ-representable loop (the
   callers keep the raw-loop-IR `Map` escape) and its byte-identity gate compares the derived body/axis only — the
   matvec demotion is a formation fact. There is NO stored `step` SEQUENCE (deleted at step 7): the composed
   evaluations DERIVE — flash's kv stream λ-spells with its QK score a HOISTED operand edge and its PV
@@ -75,7 +79,7 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   `seal_workers`; the retired `WSPEC` row family's producer band rides `+p`), `TILE`/`REDUCE` values shed their
   worker tokens — so the stamped row IS the stored/golden spelling (legacy spellings are loudly-validated pin
   aliases; the golden corpus re-spelled mechanically). Dispatch reads the
-  role/carrier off the node (`ops.axis_role`/`reduce_loop` recurse through `Map.sources`), and `ops.lower` flattens
+  role/algebra off the node (`ops.axis_role`/`reduce_loop` recurse through `Map.sources`), and `ops.lower` flattens
   any node back to the same loop nest — no stored `Monoid`/`Semiring` kind. Flash is the `TWISTED` fold on the
   streaming schedule, its QK a hoisted operand-edge `role=CONTRACTION` fold and its PV the derived evaluation's
   synthesized contraction — a twisted monoid is a monoid,

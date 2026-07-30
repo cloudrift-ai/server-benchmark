@@ -3,7 +3,7 @@
 Rules that apply to EVERY pass in this tree (`frontend/`, `loop/`, `lowering/`). Per-dialect details live in
 [`../ARCHITECTURE.md`](../ARCHITECTURE.md) (pass order, knob table, fork semantics). The **tile-lowering** phase
 (`lowering/tile/`) is the canonical instance of the invariant below — a **purely algebraic moveset, no
-specializations**: it dispatches on the carrier algebra (`MAP` / `SEMIRING` / `MONOID`), never on a named shape
+specializations**: it dispatches on the fold algebra (`MAP` / `SEMIRING` / `MONOID`), never on a named shape
 (matmul / pointwise / attention) — flash attention is the `MONOID` algebra on the streaming schedule (a twisted
 monoid is a monoid), selected structurally, not a distinct kind.
 
@@ -66,7 +66,7 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   no statistic prologue) — plus the fold accumulator and the projection. The STORED form is the `role=CONTRACTION`
   `Fold` in the λ spelling (symmetric `operands` tuple bound POSITIONALLY to the lift params + the pure bilinear
   `lift` Lambda + the componentwise additive `(init, combine)` pair threading the channel accumulator names; sharing is edge
-  REUSE in the lift; the serial step / `Accum` forms / carrier annotation are DERIVED — see the λ-foldMap paragraph
+  REUSE in the lift; the serial step / `Accum` forms are DERIVED, and loops carry no algebra — see the λ-foldMap paragraph
   below); the
   `ContractionView` READING — shared A + `(b, acc)` channels + the `(m, n)` geometry — is the DERIVED view
   (`ir.contraction_view`, output axes off the caller's placement; `Contraction.as_fold` the storage direction).
@@ -87,7 +87,7 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   recognized contraction, per-cell scalar included, stores as a contraction fold with a deferred `TilePlan()`; an
   unbindable one — a 1-D matvec-shaped output — keeps its loads inline in the lift, so the fold **derives** `PLANAR`
   and takes the reduce tiers at schedule dispatch — no role rewrite. **`Fold.role` is derived, never stored** (1l):
-  `TWISTED` off the carrier's twist family, `CONTRACTION` off the bilinear parse of the lift body
+  `TWISTED` off the stored combine's twist family, `CONTRACTION` off the bilinear parse of the lift body
   (`ir._parse_bilinear` — a plain read of the λ, params binding operand edges positionally) or the composed split-K
   operand (`ir.composed_contraction`), `PLANAR` otherwise — so "a role=CONTRACTION fold" below
   always means the derived reading, and the lowered `Loop`'s annotation falls out of the same read); the schedule fork only
@@ -144,12 +144,12 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   dtype / geometry legality stays schedule-side in `_computed_a_rows`). This retired the pin-only
   `_prologue_warp_option` rescue. The **degenerate M=1** composition (per-token decode: the unit row axis elided,
   `free = ()`) binds too — a synthesized unit free axis keeps the column grid; without it the fused kernel
-  schedules at grid 1, ~300× off the memory floor. Annotated-loop rewrites map the `Algebra` through SSA renames
-  (`Algebra.rename` — a verbatim algebra left the cooperative combine reading a state name the renamed body no
-  longer defined).
+  schedules at grid 1, ~300× off the memory floor. SSA renames track the stored algebra through the `Fold`
+  rewrite handler (`rename_combine` — a verbatim combine left the cooperative combine reading a state name the
+  renamed body no longer defined).
 - a cooperative / ILP reduce (`PLANAR` / `TWISTED`, or a non-output-tiled `CONTRACTION`) needs **no** binding here — its
-  accumulator dtype + the shuffle/tree fold mechanism are **derived** at materialize time (`emit_combine` off the carrier
-  + `ReduceStage.combine`), never stored. Its one schedule-time staging decision follows the same
+  accumulator dtype + the shuffle/tree fold mechanism are **derived** at materialize time (`emit_combine` off the fold
+  node's `Reduction` view + `ReduceStage.combine`), never stored. Its one schedule-time staging decision follows the same
   resolve-once-structurally rule: `_schedule._row_stage` detects the fused norm→linear shared row when the cooperative
   partition is chosen and stamps a `sync` `Stage` naming it (`smem`) on the `TileOp` — a derived schedule field, not a
   knob — so `_factor._tile_reduce_axis` only applies it, never re-detects.
@@ -165,8 +165,13 @@ lockstep as `rename_combine`, the S×S→S arity check in `Fold.__post_init__`) 
 accumulator names (its results). Everything else is DERIVED, never stored: the streaming step is combine specialized
 at the singleton (the `Accum` forms
 for a componentwise monoid, each landing right after the lift stmt defining its value; the exp family's generated
-merge for a twisted one), and the `carrier` annotation reconstructs from `(init, combine, lift)` at construction (the
-twist family selected STRUCTURALLY — the stored combine must BE the exp/LSE generator's program, asserted at
+merge for a twisted one), and NO loop-level algebra annotation exists — `Loop`/`StridedLoop` carry only their
+`AxisRole`, and `Fold.from_loop` reconstructs the algebra from the loop BODY alone: the degenerate facts off its
+`Accum`s, the twisted spelling by regenerating the exp-family merge over the body-derived `(state, terms)` candidates
+and byte-comparing (`_extract_twisted_self`; a split partial extracts against the pre-slice fold — `from_loop(loop,
+like)`). The lowering layer's one algebra reader is `passes/lowering/_reduction.Reduction` (the materializer's and
+`030_split_reduce`'s view: `combine_states` / `state_merge` / `identities`). The
+twist family is selected STRUCTURALLY — the stored combine must BE the exp/LSE generator's program, asserted at
 formation; the state-component roles read off the singleton shape: pivot = component 0, literal-1 = denominator,
 value name = expectation). The COMPOSED evaluations derive too (step 7): flash's kv stream λ-spells with its QK score
 fold a HOISTED inline-node operand edge (reading the enclosing kv var, never state) and its PV contraction
@@ -177,8 +182,8 @@ verbatim — no outer `Accum`s; `ir.composed_contraction` is the one read of the
 `030_split_reduce`'s structural arm). `Fold.step_stmts()` is the public per-cell read every former `.step` consumer
 goes through; `.loop` splices only the operand edges the derived step did not consume. `Fold.from_loop` returns
 `None` for a non-λ-representable loop (an effectful / raw-block body — the callers keep the raw-loop-IR `Map`
-escape), and its byte-identity gate compares the derived body/axis/unroll only — the role/carrier annotations are the
-fold's own derived reads, so an unbindable matvec captures a CONTRACTION-annotated loop and derives `PLANAR` (the 1l
+escape), and its byte-identity gate compares the derived body/axis/unroll only — the role annotation is the
+fold's own derived read, so an unbindable matvec captures a CONTRACTION-shaped loop and derives `PLANAR` (the 1l
 demotion, now a formation fact; `_extract_lift` accepts any PURE prefix, and `ir.demote_operands` un-hoists a
 demoted cone into the lift body). Kernel identity is the α-INVARIANT TERM HASH (`ops.term_key`: canonical
 renumbering in first-appearance walk order plus hash-time ANF body-order canonicalization — the stored term is never

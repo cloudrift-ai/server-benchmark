@@ -37,7 +37,7 @@ with a `source` recurses (projection → `tail`), the leaf binds via the one `_b
 recursion `_emit(op, ctx) -> Frag` builds the per-cell loop-IR — over the `Map` / `Fold` tree,
 through **`source` AND `partial`** — threading a `Ctx` **down** (the ambient cell environment: the grid axes, operand
 `inputs`, `stage`, output buffer) and returning a `Frag` **up** (the per-cell `body` this node contributes, the produced
-`Handle` wire, and the reduce `carrier` when it folds one). The reduce binder drives `_emit` off the `Fold` node to
+`Handle` wire). The reduce binder drives `_emit` off the `Fold` node to
 build its per-cell reduce loop, so a **nested** role=CONTRACTION `Fold` (flash's Q@K / P@V) is reached AS A NODE. This is the
 tile-IR-rebuild mandate's *one hierarchical emitter, no divergent codegen path*: `_emit(node).body` is byte-identical to
 `ir/tile/ops.lower(node)` for a scalar-nested (block=1) node today. `Handle` carries `name` + `residence` (a scalar
@@ -74,7 +74,8 @@ with a `source` **recurses** (its projection `body` walked, via `_emit_body`, in
 the grid via the **ONE** root binder, `_bind` — a single pipeline that reads WHICH AXES the schedule tiles off the node
 and seals through the one `grid_tile` finalizer. A tiled contraction (`ContractionView`) tiles its OUTPUT `(m, n)` axes (register / warp
 cells; the reduce K serial per cell); a cooperating `Fold` tiles its REDUCE axis instead (`_tile_reduce_axis` —
-BLOCK `coop` lanes at the unit level, REG `reg` ILP chains at the register level, the carrier merge closing the fold),
+BLOCK `coop` lanes at the unit level, REG `reg` ILP chains at the register level, the algebra merge — read off the
+fold node's `Reduction` view — closing the fold),
 its per-cell reduce loop built via `_emit` off the node; each ILP copy suffixes only its per-copy SSA temps (`__r{r}`)
 — the shared iteration coordinates, **including any nested contraction's own reduce-axis var** (flash's `dd` Q@K / `j`
 P@V loops, whose `for` declarations `copy_cell` does not rename), stay shared, so each copy re-declares its own nested
@@ -185,7 +186,7 @@ holds either way — same values, same mma order.
 `Select` (`kv ≤ m`, detected off the predicate shape in `_twist`), the stream stops at the CTA's last query row —
 `staged_kloop`'s `k_end` / the `StridedLoop.end` for-init override, `min(seq, (grid_m + 1) · um·fm·atom_m)`, with the
 prefetch clamp re-pinned onto the last needed chunk. CTA-uniform (the in-loop barriers stay legal) and bit-identical
-(skipped steps fold the carrier's exact identity: `α = 1`, `P = expf(−1e30 − m_i) = 0`); it halves the streamed
+(skipped steps fold the fold's exact identity: `α = 1`, `P = expf(−1e30 − m_i) = 0`); it halves the streamed
 keys/mma work on average, paying wall-clock wherever the grid oversubscribes the SMs.
 
 **A banded stream also STARTS late** — the sliding-window mirror of the causal stop, derived the same way: when the
@@ -225,7 +226,7 @@ decline `alt`).
 `Axis.window` —
 the fold walks its local `[0, B)` window and `_twist` re-bases every absolute-key consumer (the score-column mask
 bases, the gmem/TMA operand coords, and the causal bound above, which goes slice-local so an above-the-diagonal
-slice runs zero steps). The close swaps the projection for RAW state stores when the tail is one `Write` per carrier
+slice runs zero steps). The close swaps the projection for RAW state stores when the tail is one `Write` per state
 state component: O rides the normal fragment store into the f32 `__partial` workspace; the d-invariant row stats
 (m, l) are written once per query row (the `_t == 0` lanes) at their template's pinned last slot.
 
@@ -248,7 +249,7 @@ SOURCE is the row-invariant prologue (the per-row statistic) and whose `body` is
 IS the node boundary — read by `ops.cone_seam` in `_sync_operands` — and the prologue runs ONCE per tile row as the
 transport prologue
 (`_stage.sync_stat_fill` — one row per WARP: the 32 lanes stride the row's reduce coalesced and close the fold with
-the carrier's shuffle butterfly (`emit_combine`), lane 0 writing the bridged stat into its smem row; one barrier);
+the stat fold's shuffle butterfly (`emit_combine` off the threaded `Reduction`), lane 0 writing the bridged stat into its smem row; one barrier);
 the per-cell compute-fill reads the bridged values back from the stat rows. Geometry: exact cover on N/K only — a
 masked / symbolic **M** clamp-reads (the A / stat-prologue σ ride `_clamp_last`; the overhang store is discarded by
 the `RegStore` guard). A **multi-channel product node** (the gate/up MLP edge — N `(b, acc)` channels over the ONE

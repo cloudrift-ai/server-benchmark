@@ -6,7 +6,7 @@ This is the Loop-IR → Tile-IR boundary: after this pass nothing downstream tra
 ``LoopOp``. **Recognition** (here) reads the algebra off the body and lifts the per-cell
 compute into a :class:`~emmy.compiler.ir.tile.ir.Map` whose body is the **annotated
 loop nest** (the reduce ``Loop`` stamped with its
-:class:`~emmy.compiler.ir.axis.AxisRole` + :class:`~emmy.compiler.ir.stmt.algebra.Algebra`)
+:class:`~emmy.compiler.ir.axis.AxisRole` — the only loop annotation; the algebra is the body)
 on an UNMAPPED :class:`~emmy.compiler.ir.tile.ir.TileOp`; the final step hands that tile op to
 **scheduling** (:func:`~emmy.compiler.pipeline.passes.lowering.tile._schedule.schedule`, the
 ``_schedule`` helper) which maps the free axes onto the grid and offers the per-axis
@@ -26,13 +26,13 @@ step unconditional — no knobs):
    so step 3 doesn't lift it out from under its consumer.
 2. **Online softmax** — an adjacent ``(rowmax, Σ exp)`` reduce pair over the same input fuses
    into one streaming online-softmax loop: a ``TWISTED`` reduce ``Loop`` carrying the ``(m, d)``
-   exp-family ``Algebra`` (its dissolved ``merge`` in the body). The ``_softmax`` helper
+   exp-family merge dissolved in the body. The ``_softmax`` helper
    (``_fuse``).
 3. **Lift** — peel the free (parallel) axes off the kernel and lift the per-cell compute into a
    ``Map`` whose body holds the annotated reduce ``Loop`` + projection: a pure pointwise body is a
    flat ``Map``; a single flat reduce is annotated in place — ``CONTRACTION`` (clean contraction)
    / ``PLANAR`` (plain ``sum`` / ``max`` / ``mean``) / pre-annotated ``TWISTED`` (online softmax) —
-   with its degenerate / exp-family ``Algebra`` and the projection after it. The free axes ride on
+   with the projection after it. The free axes ride on
    the ``TileOp``'s schedule (the root's concern); ``_schedule`` maps them onto the grid. A cell
    the lift can't cleanly factor (no reduce, several reduces, or a nested non-flash reduce) stays a
    flat un-annotated ``Map`` (→ the scalar tier).

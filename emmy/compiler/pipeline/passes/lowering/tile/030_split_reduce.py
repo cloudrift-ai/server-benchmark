@@ -2,9 +2,9 @@
 
 A reduce partition with a ``GRID`` stage (``ReducePlan.needs_split``) splits the reduce
 axis across CTAs. This pass realizes that split as a **graph rewrite** — the schedule
-carries the partition, the graph carries the kernel count. It reads the reduce structure
-off the kernel's annotated reduce ``Loop`` (``loop.carrier`` / ``loop.axis``), never an
-op-tree node:
+carries the partition, the graph carries the kernel count. It reads the reduce STRUCTURE off
+the kernel's annotated reduce ``Loop`` (``loop.axis`` / position) and the ALGEBRA off the
+``Fold`` node through the lowering-side :class:`Reduction` view:
 
 - **partial kernel** — the ``cta`` stage becomes an extra grid axis (``_ksplit``); each CTA
   reduces its **contiguous slice** ``[s·B, (s+1)·B)`` of the reduce axis (``B =
@@ -13,7 +13,7 @@ op-tree node:
   (``ReducePlan.finalize``):
   - ``"kernel"`` — the partial writes its state to a ``ws[cta, *free]`` ``__partial``
     workspace; a sibling **finalize kernel** seeds the carrier state then folds the
-    workspace over the split axis via ``carrier.as_state_merge`` (the cross-partition
+    workspace over the split axis via ``Reduction.state_merge`` (the cross-partition
     combine, a renderable :class:`StateMerge`) and projects the output. **2 nodes.** The only
     legal arm for a twisted carrier (flash's ``e^{Δm}`` rescale can't be an atomic).
   - ``"atomic"`` — the partial ``atomicAdd``\\ s its (additive) state into the output (applying
@@ -510,7 +510,7 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     partial_tile = _mapped(res_op, (split, *grid), name=f"{tile.name}__partial", knobs=tile.knobs, schedule=res_sched, stores=ws_stores)
 
     # --- finalize kernel: seed the carrier state, then fold each partition's state from the
-    # workspace over the split axis via the fold's cross-partition combine (``state_merge_of`` —
+    # workspace over the split axis via the fold's cross-partition combine (``Reduction.state_merge`` —
     # a renderable :class:`StateMerge`, the same combine the cooperative tier uses). A flat ``Map``
     # of loop-IR: ``Init`` seeds, the split ``Loop`` (loads + the combine), then the original
     # projection + store.

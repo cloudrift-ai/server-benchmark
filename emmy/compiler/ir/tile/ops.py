@@ -1,16 +1,16 @@
-"""The geometry-free compute layer — the lift wrapper and its lowering.
+r"""The geometry-free compute layer — the lift wrapper and its lowering.
 
 A kernel's compute is a :class:`~emmy.compiler.ir.tile.ir.Map` (re-exported here) — a
 :class:`~emmy.compiler.ir.stmt.body.Body` of loop-IR stmts holding the per-cell compute. A
 reduction is a ``Map`` whose body contains the **annotated reduce ``Loop``** (its
-:class:`~emmy.compiler.ir.axis.AxisRole` + :class:`~emmy.compiler.ir.stmt.algebra.Algebra`
-stamped by recognition) followed by the post-reduce projection; a contraction is a ``Map`` whose
+:class:`~emmy.compiler.ir.axis.AxisRole`
+stamped by recognition; the algebra is the body) followed by the post-reduce projection; a contraction is a ``Map`` whose
 reduce ``Loop`` is ``CONTRACTION`` (the ``⊗`` lift sits in the loop body). The algebra is read
 **structurally** off the annotated loop, never a stored node kind — the ``Monoid`` / ``Semiring``
 node wrappers are retired.
 
 This module is the thin lowering of that wrapper to loop IR (:func:`lower` — the body verbatim,
-the carriers already dissolved into loose folds at recognition) plus the structural reads
+the folds already dissolved into loose ``Accum``\ s at recognition) plus the structural reads
 (:func:`axis_role` / :func:`reduce_loop`) and the shared contraction-loop builder
 (:func:`contraction_loop`). Stored trees are already resolved — a computed operand is an inline
 node on its edge, so there is no name-resolution step ahead of a lowering walk (the old
@@ -408,7 +408,7 @@ def term_key(root) -> str:
     canonically renumbered TERM, no longer the lowered loop nest): every SSA name maps to
     ``s<i>`` and every buffer to ``b<i>`` in the deterministic first-appearance order of
     :func:`_term_names`, the rename applied through the ONE ``_rewrite`` registry (the Fold /
-    Map handlers rename lift / combine / derived carrier in lockstep, regenerating the
+    Map handlers rename lift / combine in lockstep, regenerating the
     exp-family programs over the renamed state), and the renumbered term's ``repr`` is the key
     text. Two terms differing only in SSA / buffer spelling — trace naming, fusion suffixes —
     key identically; any structural difference (an op, an axis, an operand shape) keys apart."""

@@ -707,8 +707,8 @@ def _scalar_drain(
     overhanging cell): the slab is indexed by the **local** tile coordinate ``offset[{0,1}].base(...) −
     base`` (``m_uvar·reg_m + i`` ∈ [0, tile_m), always in-slab), so an overhanging cell reads a
     clamped / zero-filled slab row and its store is discarded by the guard. ``_dedup_loads`` still
-    shares A across the n-cells and B across the m-cells exactly as gmem-direct does. **Carrier-less**
-    (no ``Loop.carrier``): the accumulators are pre-seeded once by :meth:`_ScalarOps.state` outside the
+    shares A across the n-cells and B across the m-cells exactly as gmem-direct does. **Seed-less**
+    (the accumulators are pre-seeded once by :meth:`_ScalarOps.state` outside the
     outer slab loop, so the drain folds into them without re-seeding. ``offs`` (the gmem→smem ring,
     depth > 1) is the ``(a, b)`` read SLOT row offset pair, added to each slab's ROW — the same slot
     seam the mma drain rides."""

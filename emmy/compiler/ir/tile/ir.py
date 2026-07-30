@@ -55,8 +55,8 @@ reached by the node-aware walk (:func:`tree_nodes`), like a contraction operand.
 The combine lives entirely in the ``op`` wrapper (the :class:`Map` /
 :class:`Fold` / :class:`ContractionView` nodes here + ``ir/stmt/algebra``): a
 node whose per-cell loop nest carries the role (``AxisRole``) + the decoupled
-``Algebra`` (the flat ⊕). The algebra is **not stored as a node kind**; the
-role/carrier are read off the node / annotated loop where a pass needs them
+the flat ⊕ pair. The algebra is **not stored as a node kind**; the
+role/algebra are read off the node / the loop body where a pass needs them
 (``ops.axis_role`` / ``ops.reduce_loop``). ``lower(op)`` flattens the structural
 tree back to the loop nest.
 
@@ -252,7 +252,7 @@ def _fold_derived_step(fold: Fold) -> tuple[Stmt, ...]:
     lam = fold.lift
     names = fold.combine.results
     ops = component_ops(fold.combine)
-    if ops is None:  # the twisted (exp-family) serial step — the derived carrier's channels
+    if ops is None:  # the twisted (exp-family) serial step — the derived state's channels
         # carry the singleton terms (the lift results), so the generated streaming merge is the
         # singleton specialization of the stored combine, names included.
         return fold._derived_twisted
@@ -408,7 +408,7 @@ def _extract_twisted_lift(loop: Loop, like: Fold) -> tuple[Lambda, tuple, Lambda
 class Fold(Stmt):
     """A scheduled reduce — the typed successor of the bare annotated reduce
     ``Loop`` (``ir/stmt/algebra``). It splits the reduce's **algebra** (the loop-carried
-    :class:`~emmy.compiler.ir.stmt.algebra.Algebra` — degenerate/componentwise for a plain
+    flat ⊕ — degenerate/componentwise for a plain
     ``sum`` / ``max`` / ``mean``, twisted (exp-family) for online-softmax / flash) from its **structure**
     (the reduce ``axis`` + the per-element ``step`` it folds). Its :class:`AxisRole`
     (``PLANAR`` / ``TWISTED`` / ``CONTRACTION``) is **derived** from those params (:attr:`role`),
@@ -533,8 +533,8 @@ class Fold(Stmt):
     def role(self) -> AxisRole:
         """The fold's :class:`AxisRole`, DERIVED from the stored params (1l — never stored):
 
-        - ``TWISTED`` iff the carrier's twist family is non-degenerate (``exp`` — online softmax /
-          flash); the PLANAR/TWISTED half of the old stored role was redundant with the carrier.
+        - ``TWISTED`` iff the stored combine's twist family is non-degenerate (``exp`` — online
+          softmax / flash); the PLANAR/TWISTED half of the old stored role was redundant with it.
         - ``CONTRACTION`` iff the lift factors bilinearly over hoisted operand edges
           (:func:`_parse_bilinear` — a plain read of the λ body; the legacy dissolved-step shape
           parses the same way), or the step composes exactly the sliced contraction fold

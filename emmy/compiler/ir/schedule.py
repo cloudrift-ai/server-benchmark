@@ -467,7 +467,7 @@ _REDUCE_SCHEMA = Schema(
 class ReducePlan:
     """The kernel's single reduce partition — the **tuned widths only**, coarse→fine.
 
-    There is one reduce carrier per kernel (1:1 and singular — the carrier owns the axis),
+    There is one reduce fold per kernel (1:1 and singular — the fold owns the axis),
     so the plan holds no axis; the per-thread ``serial`` remainder is derived by the
     materializer as ``ceil(extent / parallel)``. ``stages=()`` is the scalar serial fold
     (today's one-thread-per-cell tier)."""

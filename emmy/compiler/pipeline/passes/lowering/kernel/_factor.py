@@ -26,8 +26,9 @@ reusing the same ``reduce_codegen``).
 
 The reduce-axis tiling (:func:`_tile_reduce_axis` + the shared-row staging apply) folds the reduce
 axis ``coop`` ways across threads and ``reg`` ways across per-thread accumulators, then the
-REG-tree fold, the cross-thread combine (:func:`emit_combine`), and the projection — carrier-
-generic (a contraction is the degenerate carrier of its additive fold).
+REG-tree fold, the cross-thread combine (:func:`emit_combine`), and the projection — algebra-
+generic through the :class:`Reduction` view (a contraction is the degenerate algebra of its
+additive fold).
 
 The smem operand-staging pipeline lives in ``_stage.py`` (the :class:`~...kernel._stage.Transport`
 strategy + the one :func:`~...kernel._stage.staged_kloop`); the ONE atom-agnostic driver

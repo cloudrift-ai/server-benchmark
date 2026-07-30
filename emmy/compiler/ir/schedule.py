@@ -509,6 +509,52 @@ class ReducePlan:
         mode = "transposed" if self.coop_transposed else "interleaved"
         return encode(_REDUCE_SCHEMA, {"g": (self.cta, self.finalize), "b": (self.coop, mode), "r": self.reg})
 
+    def spell_site(self) -> str:
+        """The SITE-LOCAL ``REDUCE`` value (the step-7 value-grammar split): the pipeline
+        coarse→fine minus the coop WIDTH (= the ``WORK`` inventory) — ``[g<n>[a|k]][/coop[-t]]
+        [/r<n>]``. The GRID finalize letter is KEPT (a deliberate deviation from the plan's
+        re-spell table, which read it as an axis token: ``a``/``k`` is the atomic-vs-deferred
+        finalize MODE — ``g4a`` and ``g2k`` are semantically different rows, both live in the
+        golden corpus — and a mode is a site-local fact)."""
+        parts: list[str] = []
+        if self.cta > 1:
+            parts.append(f"g{self.cta}{'a' if self.finalize == 'atomic' else 'k'}")
+        if self.coop > 1:
+            parts.append("coop-t" if self.coop_transposed else "coop")
+        if self.reg > 1:
+            parts.append(f"r{self.reg}")
+        return "/".join(parts)
+
+    @classmethod
+    def parse_site(cls, spec: str | None, work: Workers | None) -> ReducePlan:
+        """Decode a SITE-LOCAL ``REDUCE`` value against the kernel's ``WORK`` inventory (inverse
+        of :meth:`spell_site` — the coop width is ``work.count``, never the string). The legacy
+        width-carrying spelling (``b<n>[t]``) is accepted as a PIN ALIAS (its width must agree
+        with a thread ``work`` when both are given)."""
+        s = (spec or "").strip()
+        if "coop" not in s:
+            plan = cls.parse(spec)
+            if plan.coop > 1 and work is not None and (work.kind != "thread" or work.count != plan.coop):
+                raise ValueError(f"REDUCE {spec!r}: embedded coop width disagrees with WORK {work.spell() if work else None!r}")
+            return plan
+        cta, coop, reg, finalize, transposed = 1, 1, 1, "kernel", False
+        for t in s.split("/"):
+            if t.startswith("g"):
+                body = t[1:]
+                if body.endswith(("a", "k")):
+                    finalize = "atomic" if body[-1] == "a" else "kernel"
+                    body = body[:-1]
+                cta = int(body)
+            elif t in ("coop", "coop-t"):
+                if work is None or work.kind != "thread":
+                    raise ValueError(f"REDUCE {spec!r}: 'coop' requires a thread WORK inventory (t<N>)")
+                coop, transposed = work.count, t.endswith("-t")
+            elif t.startswith("r") and t[1:].isdigit():
+                reg = int(t[1:])
+            else:
+                raise ValueError(f"REDUCE {spec!r}: unknown site-local token {t!r}")
+        return cls.of(cta=cta, coop=coop, reg=reg, finalize=finalize, coop_transposed=transposed)
+
     @property
     def parallel(self) -> int:
         """The total parallel degree = ∏ stage widths (the lane/CTA fan-out the serial
@@ -669,6 +715,58 @@ class TilePlan:
             return encode(_WARP_SCHEMA, {"a": self.atom, "w": self.units, "f": self.regs, "k": self.bk})
         return encode(_TILE_SCALAR_SCHEMA, {"n": self.units, "f": self.regs})
 
+    def spell_site(self) -> str:
+        """The SITE-LOCAL ``TILE`` value (the step-7 value-grammar split): the worker tokens live
+        in the kernel-global ``WORK`` family, so the warp form is ``<atom>/f<FM>x<FN>[/k<bk>]``
+        (the atom name bare — the tier discriminator IS the worker kind, never a per-TILE
+        spelling) and the scalar form ``f<fn>[x<fm>]`` (``""`` for the per-cell tier)."""
+        if self.is_warp:
+            k = f"/k{self.bk}" if self.bk > 1 else ""
+            return f"{self.atom.name}/f{self.regs[0]}x{self.regs[1]}{k}"
+        if not any(v > 1 for v in self.regs):
+            return ""
+        return f"f{self.regs[0]}" if self.regs[1] == 1 else f"f{self.regs[0]}x{self.regs[1]}"
+
+    @classmethod
+    def parse_site(cls, spec: str | None, work: Workers | None) -> TilePlan:
+        """Decode a SITE-LOCAL ``TILE`` value against the kernel's ``WORK`` inventory (inverse of
+        :meth:`spell_site` — the units come from ``work``, never the string). The legacy
+        embedded-token spellings (``a:<atom>/w../f..``, ``n../f..``) are accepted as PIN ALIASES
+        and decode self-contained (their worker tokens must agree with ``work`` when both are
+        given — the loud one-inventory rule)."""
+        s = (spec or "").strip()
+        first = s.split("/", 1)[0]
+        legacy = not s or is_warp_codec(s) or has_scalar_atom_alias(s) or first[:1] in ("n", "w") or first.startswith("a:")
+        if legacy and not (first.startswith("f") and first[1:2].isdigit()):
+            plan = cls.parse(spec)
+            if work is not None and plan.is_tiled and tuple(plan.units) != tuple(work.units):
+                raise ValueError(f"TILE {spec!r}: embedded worker tokens disagree with WORK {work.spell()!r} — one kernel, one inventory")
+            return plan
+        tokens = s.split("/")
+        atom_tok = tokens[0] if tokens and not tokens[0].startswith(("f", "k")) else None
+        units = tuple(work.units) if work is not None else (1, 1)
+        if atom_tok is not None:
+            if work is None or work.kind != "warp":
+                raise ValueError(f"TILE {spec!r}: a warp atom requires a warp WORK inventory (w<M>x<N>)")
+            regs, bk = (1, 1), 1
+            for t in tokens[1:]:
+                if t.startswith("f"):
+                    d = t[1:].split("x")
+                    regs = (int(d[0]), int(d[1]) if len(d) == 2 else 1)
+                elif t.startswith("k") and t[1:].isdigit():
+                    bk = int(t[1:])
+                else:
+                    raise ValueError(f"TILE {spec!r}: unknown site-local token {t!r}")
+            return cls(atom=atom_for(atom_tok), units=units, regs=regs, bk=bk)
+        regs = (1, 1)
+        for t in tokens:
+            if t.startswith("f"):
+                d = t[1:].split("x")
+                regs = (int(d[0]), int(d[1]) if len(d) == 2 else 1)
+            else:
+                raise ValueError(f"TILE {spec!r}: unknown site-local token {t!r}")
+        return cls(units=units, regs=regs)
+
     @property
     def is_warp(self) -> bool:
         """True iff this is the tensor-core (mma) tile — :attr:`atom` is a real :class:`AtomKind`."""
@@ -719,26 +817,62 @@ class TilePlan:
 
 @dataclass(frozen=True)
 class Workers:
-    """The kernel's ONE worker inventory (1r, in-memory) — the per-site ``w``/``n`` worker tokens
-    factored out of the ``TILE`` values into a single kernel-global slot (``w4x1`` warps for the
-    mma tier / ``t16x8`` threads for the scalar tier). Derived at option assembly from the TILE
-    slices (:func:`derive_workers`), FAILING LOUDLY when two sites disagree — today an
-    inconsistent ``TILE@dd``/``TILE@pj`` pin pair can only miss rows silently; the slot makes the
-    disagreement unrepresentable. The WIRE format still spells the embedded ``w``/``n`` tokens
-    (``TilePlan.spell`` re-emits them byte-identically); shedding them from the stored strings —
-    and absorbing ``WSPEC`` — is the step-7 value-grammar split. Kernel-global-ness encodes
-    today's TRUE invariant: fragment-resident dataflow between composed folds shares the warp map."""
+    """The kernel's ONE worker inventory (1r in-memory; the step-7 ``WORK`` wire family) — the
+    per-site ``w``/``n`` worker tokens factored out of the ``TILE`` values into a single
+    kernel-global slot (``w4x1`` warps for the mma tier / ``t16x8`` threads for the scalar tier /
+    ``t512`` the 1-D cooperative width), plus the ``+p<n>`` PRODUCER band the retired ``WSPEC``
+    family spelled (aux warps are inventory too). Derived at option assembly from the TILE
+    slices (:func:`derive_workers`), FAILING LOUDLY when two sites disagree — an inconsistent
+    ``TILE@dd``/``TILE@pj`` pin pair could only miss rows silently; the slot makes the
+    disagreement unrepresentable. Kernel-global-ness encodes today's TRUE invariant:
+    fragment-resident dataflow between composed folds shares the warp map."""
 
     kind: str  # "warp" (mma tier) | "thread" (scalar / coop tiers)
     units: tuple[int, int]  # the native codec order of the TILE value the slot came from
+    producer: int = 0  # dedicated producer warps (the WSPEC absorb — ``+p<n>``; warp kind only)
 
     @property
     def count(self) -> int:
-        """Workers in the inventory (warps or threads, by ``kind``)."""
+        """Workers in the inventory (warps or threads, by ``kind``) — the COMPUTE band; the
+        producer band is on top."""
         return self.units[0] * self.units[1]
 
     def spell(self) -> str:
-        return f"{'w' if self.kind == 'warp' else 't'}{self.units[0]}x{self.units[1]}"
+        """The ``WORK`` codec string: ``w<M>x<N>[+p<np>]`` (warps; both dims always) /
+        ``t<N>x<M>`` (the scalar thread tile, native n-then-m order) / ``t<N>`` (the 1-D
+        cooperative width — a trailing ``x1`` is suppressed for threads only)."""
+        if self.kind == "warp":
+            base = f"w{self.units[0]}x{self.units[1]}"
+            return f"{base}+p{self.producer}" if self.producer else base
+        if self.units[1] == 1:
+            return f"t{self.units[0]}"
+        return f"t{self.units[0]}x{self.units[1]}"
+
+    @classmethod
+    def parse(cls, spec: str | None) -> Workers | None:
+        """Decode a ``WORK`` codec string (inverse of :meth:`spell`); ``""`` / ``None`` = no
+        inventory (the per-cell / pure-reduce forms keep their derived launch geometry)."""
+        if not spec:
+            return None
+        s = spec.strip()
+        producer = 0
+        if "+" in s:
+            s, _, band = s.partition("+")
+            if not band.startswith("p") or not band[1:].isdigit():
+                raise ValueError(f"WORK {spec!r}: expected a +p<n> producer band, got {band!r}")
+            producer = int(band[1:])
+        kind = {"w": "warp", "t": "thread"}.get(s[:1])
+        if kind is None:
+            raise ValueError(f"WORK {spec!r}: expected w<M>x<N>[+p<n>] or t<N>[x<M>]")
+        dims = s[1:].split("x")
+        if not all(d.isdigit() for d in dims) or len(dims) > 2:
+            raise ValueError(f"WORK {spec!r}: bad worker dims {s[1:]!r}")
+        if kind == "warp" and (len(dims) != 2 or producer < 0):
+            raise ValueError(f"WORK {spec!r}: the warp inventory spells both dims (w<M>x<N>)")
+        if kind == "thread" and producer:
+            raise ValueError(f"WORK {spec!r}: a producer band needs the warp inventory")
+        units = (int(dims[0]), int(dims[1]) if len(dims) == 2 else 1)
+        return cls(kind=kind, units=units, producer=producer)
 
 
 def derive_workers(tiles) -> Workers | None:

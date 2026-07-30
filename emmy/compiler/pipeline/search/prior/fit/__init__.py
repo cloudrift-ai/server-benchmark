@@ -1,3 +1,4 @@
+from emmy.compiler.pipeline.search.prior.fit.group import Group, op_family
 from emmy.compiler.pipeline.search.prior.fit.linear import (
     TwoStageFit,
     build_artifact,
@@ -13,6 +14,7 @@ from emmy.compiler.pipeline.search.prior.fit.linear import (
 )
 
 __all__ = [
+    "Group",
     "TwoStageFit",
     "build_artifact",
     "dual_rank",
@@ -21,6 +23,7 @@ __all__ = [
     "fit_two_stage",
     "fit_weights",
     "objective",
+    "op_family",
     "rank_of_golden",
     "raw_weights",
     "topk_table",

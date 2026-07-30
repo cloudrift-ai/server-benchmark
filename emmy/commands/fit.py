@@ -37,7 +37,7 @@ from emmy.compiler.pipeline.search.golden import (
     ReduceGoldenConfig,
 )
 from emmy.compiler.pipeline.search.golden_eval import _enumerate, enumerate_graph
-from emmy.compiler.pipeline.search.prior.fit import build_artifact, fit_two_stage, topk_table
+from emmy.compiler.pipeline.search.prior.fit import Group, build_artifact, fit_two_stage, topk_table
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit import linear as fit_linear
 
@@ -94,9 +94,9 @@ def _snippet_rows(snippet: str, ctx: Context) -> list[dict]:
     return enumerate_graph(graph, ctx)
 
 
-def build_cases() -> tuple[list[fit_cv.GoldenCase], list[tuple[str, str, str]]]:
+def build_cases() -> tuple[list[Group], list[tuple[str, str, str]]]:
     """Reconstruct each golden's candidate enumeration, pin the golden's index, and
-    featurize every row, as :class:`fit_cv.GoldenCase` records (name, tier, card, golden
+    featurize every row, as :class:`Group` records (name, tier, card, golden
     index, per-row ``D_*`` (+ ``MMA_tier``) feature dicts; ``key`` is ``"<gpu>/<name>"``,
     parity duplicates suffixed ``#2``, ``#3``, … in dataset order). The second return is
     the goldens that did NOT become cases, as ``(gpu, name, reason)`` — enumeration
@@ -121,7 +121,7 @@ def build_cases() -> tuple[list[fit_cv.GoldenCase], list[tuple[str, str, str]]]:
     TMA tiers gate on cap) and the ``H_*`` / ``D_*`` occupancy features must use the
     recording card's regime — not one global cap — for the rank objective to match
     the deployed per-card featurization."""
-    cases: list[fit_cv.GoldenCase] = []
+    cases: list[Group] = []
     skipped: list[tuple[str, str, str]] = []
     key_counts: dict[str, int] = {}
     for g in GOLDEN_CONFIGS:
@@ -175,7 +175,7 @@ def build_cases() -> tuple[list[fit_cv.GoldenCase], list[tuple[str, str, str]]]:
         key_counts[key] = key_counts.get(key, 0) + 1
         if key_counts[key] > 1:
             key = f"{key}#{key_counts[key]}"
-        cases.append(fit_cv.GoldenCase(key, g.name, tier, g.gpu_name, gidx, feats))
+        cases.append(Group(key, g.name, tier, g.gpu_name, gidx, feats))
     return cases, skipped
 
 

@@ -8,7 +8,7 @@ import json
 import pytest
 
 from emmy.commands.fit import register_fit_command
-from emmy.compiler.pipeline.search.prior.fit import TwoStageFit, dual_rank
+from emmy.compiler.pipeline.search.prior.fit import Group, TwoStageFit, dual_rank, op_family
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 
 # --- op-family derivation ----------------------------------------------------------
@@ -29,7 +29,7 @@ from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
     ],
 )
 def test_op_family_strips_variant_segments(name, family):
-    assert fit_cv.op_family(name) == family
+    assert op_family(name) == family
 
 
 # --- dual-rank tie semantics -------------------------------------------------------
@@ -55,7 +55,7 @@ def test_dual_rank_tie_plateau():
 def _case(name, tier, gpu, gidx=1, n_rows=6, key=None):
     """A tiny case whose rows carry a monotone D_a so a samples=0 descent has signal."""
     feats = [{"D_a": float(i), "D_b": float((i * 7) % 3)} for i in range(n_rows)]
-    return fit_cv.GoldenCase(key or f"{gpu}/{name}", name, tier, gpu, gidx, feats)
+    return Group(key or f"{gpu}/{name}", name, tier, gpu, gidx, feats)
 
 
 def _cases():

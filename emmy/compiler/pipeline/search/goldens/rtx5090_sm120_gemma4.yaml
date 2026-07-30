@@ -10,6 +10,16 @@
 # (~770x off cuBLAS), and on mlp_gate_up.dynM / attention.hd256.dynM it picks kernels that hang outright
 # (>1 s accuracy probe / >10 s bench cap) — the misdeploy + hang hazard class these goldens pin down.
 #
+# HOW TO READ emmy_us / cublas_us: both come from `run --bench --golden`, which replays ONE kernel over
+# ONE weight slab ~100x. Any slab under this card's 96 MB L2 is therefore timed L2-RESIDENT, not from
+# DRAM. Most narrow-N projection shapes here are in that regime (N=8192 K=3840 is 63 MB; N=30720 K=3840
+# is 236 MB and is not). Two consequences: (1) comparing two configs of the SAME shape stays valid — both
+# arms get the same L2 benefit, which is what the resolver ranks on; (2) the absolute microseconds must
+# NOT be used to predict in-model step time, because a decode step streams the whole ~21.8 GB trunk and
+# nothing stays resident. Measured the hard way on 2026-07-30: an m32 cone-placement change worth 42-49%
+# on two L2-resident edges moved a live server's per-step latency by 0.1%, while the one edge too big for
+# L2 won 8%. See plans/gemma4-narrow-decode-width-findings.md section 4a.
+#
 # Fast-math [fm] siblings (f16-accumulate mma atom) are kept BESIDE the standard entries, never replacing
 # them (a gate-off compile can't reach an f16acc config). The big-tile f16acc family (w4x2/f4x8/k4
 # d2/tma/ring, split g2k on the small-N shapes) wins 1.3-1.6x vs cuBLAS on every projection — the same

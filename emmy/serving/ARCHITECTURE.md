@@ -196,6 +196,24 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   capturable then); a caller-supplied `--compilation-config` wins over the default. Prefill and
   over-bucket decode batches stay eager under FULL_DECODE_ONLY by construction.
 
+**The capture ladder under speculative decoding.** vLLM rounds every requested capture size UP to a multiple of
+`query_len = num_speculative_tokens + 1` (`CompilationConfig.adjust_cudagraph_sizes_for_spec_decode`, guarding vLLM
+issue #28207), then pads each step to the first captured size at or above its width — so the runner routes on the
+PADDED width, never the real one. A sparse power-of-two ladder loses every rung to that rounding whenever `query_len`
+is not itself a power of two: at depth 2 (`query_len` 3) the `16` and `32` rungs become `18` and `33`, one rung ABOVE
+the decode bucket each existed to serve, and every steady-state verify step then misses its static twin and runs the
+symbolic masked-tile program. The cost is kernel quality, not launch overhead — vLLM still captures the whole step at
+the padded size, so nothing runs eager. The ladder is therefore built from DENSE candidates (mirroring vLLM's stride-8
+default), each FLOORED to a multiple of `query_len`: flooring only moves a rung down, so the bucket's own rung stays
+reachable and vLLM's round-up becomes a no-op, while density removes the leftover padding. The invariant the tests
+assert, parametrised over depths 1/2/3/5: **for every reachable verify width, the first rung at or above it is still at
+or below the decode bucket.** Overshoot WITHIN the bucket is nearly free — doubling the padded rung costs under 1% of
+TPOT, since a decode step reads the weights once regardless of width — so a bucket should be chosen for kernel
+coverage at that width, not for tightness against the verify width. Overshoot PAST the bucket is the fatal case.
+`gen_runner._warn_symbolic_decode` reports once per width when a decode-shaped step misses the twin: the twins audit
+only covers widths it is handed, so without that line a rung one step above the bucket looks like ordinary symbolic
+traffic.
+
 ## Batched modes — `EMMY_SERVING_BATCHED=1` (symbolic seq) and `EMMY_SERVING_STATIC=1` (static extents)
 
 The default path is symbolic-seq, **one sequence per forward** (`batch_cap = 1`). Two opt-ins run a whole scheduler

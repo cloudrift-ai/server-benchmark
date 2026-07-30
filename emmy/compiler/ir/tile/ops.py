@@ -24,7 +24,7 @@ from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.schedule import ReducePlan
 from emmy.compiler.ir.stmt import Assign, Body, Loop, StridedLoop
 from emmy.compiler.ir.stmt.base import Stmt, pretty_body
-from emmy.compiler.ir.tile.ir import ContractionView, Fold, Map
+from emmy.compiler.ir.tile.ir import ContractionView, Fold, Map, effect_tail
 
 
 def cone_seam(cone) -> tuple[tuple, tuple, tuple[str, ...]]:
@@ -105,6 +105,18 @@ class Sched:
 def sched_of(tile) -> Sched:
     """The :class:`Sched` view of a ``TileOp`` (binds its ``schedule`` dict to its op tree)."""
     return Sched(tile.op, tile.schedule)
+
+
+def projection_tail(tile) -> list[Stmt]:
+    """The kernel's EFFECTFUL projection stmt stream — the root ``Map``'s (pure) body with the
+    kernel-boundary ``TileOp.stores`` reconstituted (:func:`~emmy.compiler.ir.tile.ir.effect_tail`).
+    The ONE read every scheduler gate that inspects "the tail" goes through (1q), so a converted
+    kernel (stores at the boundary) and a raw-loop-IR one (effects still in-body, empty ``stores``)
+    answer identically — e.g. the ``b<n>t`` band's no-sweep-``Loop`` condition keeps excluding
+    rms/softmax rows after their sweep moved to a ``Store`` decoration."""
+    op = tile.op
+    body = list(op.body) if isinstance(op, Map) else []
+    return effect_tail(body, tile.stores)
 
 
 def seal_workers(tile) -> None:
@@ -251,6 +263,7 @@ __all__ = [
     "lower",
     "nodify_reduce",
     "pretty",
+    "projection_tail",
     "reduce_loop",
     "reduce_plan",
     "sched_of",

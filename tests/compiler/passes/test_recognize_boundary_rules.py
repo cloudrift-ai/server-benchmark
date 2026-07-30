@@ -323,7 +323,11 @@ def test_norm_linear_cone_is_an_inline_node_tree():
 
     _, tile = _resolve(_norm_linear_graph(), pick=_is_warp_row)
     grid = tile.place.grid
-    c = contraction_view(tile.op.sources[0], grid[-2], grid[-1], tuple(grid[:-2]))
+    # The single-channel form's projection was ONLY the root ``Write`` — moved to ``TileOp.stores``
+    # (1q), so the row stores the BARE product fold (the ``Map`` wrapper dropped with its last stmt).
+    fold = tile.op.sources[0] if isinstance(tile.op, Map) else tile.op
+    assert len(tile.stores) == 1 and tile.stores[0].write.output == "y"
+    c = contraction_view(fold, grid[-2], grid[-1], tuple(grid[:-2]))
     assert c is not None and c.a_computed
     cone = c.a
     assert isinstance(cone, Map) and cone.out == c.a_name
@@ -372,9 +376,9 @@ def _mlp_gate_up_graph() -> Graph:
 def test_mlp_gate_up_nodifies_as_two_channel_product_contraction():
     """The fused gate/up MLP edge — TWO ⊗-folds sharing one normalized-row A value (fusion
     duplicates the cone SSA per fold; the matcher dedupes by value-tree equality) with the SwiGLU
-    combine as projection — nodifies to ``Map(body=combine…Write, sources=(ContractionView,))``: ONE
+    combine as projection — nodifies to ``Map(body=combine, sources=(ContractionView,))``: ONE
     product-carrier contraction, two ``(b, acc)`` channels over its single inline A cone (sharing
-    is arity), and offers warp sync rows."""
+    is arity), the root ``Write`` a boundary ``Store`` (1q), and offers warp sync rows."""
     from emmy.compiler.ir.tile import contraction_view
 
     rows, tile = _resolve(_mlp_gate_up_graph(), pick=_is_warp_row)
@@ -383,7 +387,9 @@ def test_mlp_gate_up_nodifies_as_two_channel_product_contraction():
     node = contraction_view(tile.op.sources[0], grid[-2], grid[-1], tuple(grid[:-2]))
     assert node is not None and len(node.channels) == 2 and node.a_computed
     assert {ch.b.input for ch in node.channels} == {"wg", "wu"}
-    assert isinstance(tile.op.body[-1], Write)
+    # The projection body is PURE (the SwiGLU combine); the root store rides ``TileOp.stores``.
+    assert all(s.pure for s in tile.op.body) and not isinstance(tile.op.body[-1], Write)
+    assert len(tile.stores) == 1 and tile.stores[0].write.output == "o"
     assert any(_is_warp_row(r) for r in rows)
     assert not _is_warp_row(rows[0]), "option-0 stays the coop reduce row"
 
@@ -515,7 +521,7 @@ def test_channels_with_agreeing_b_layouts_form_one_product_node():
     node, free = _prologue_shape(b_layouts=(False, False))
     bound = bind_prologue_contraction(node, free)
     assert bound is not None
-    c_map, _ = bound
+    c_map, _, _stores = bound
     (product,) = c_map.sources  # the stored role=CONTRACTION fold
     parsed = _parse_bilinear(product)
     assert parsed is not None and len(parsed[1]) == 2, "two components over ONE shared edge — sharing is edge reuse"

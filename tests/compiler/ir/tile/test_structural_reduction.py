@@ -298,7 +298,7 @@ def test_flash_op_is_a_two_contraction_tree() -> None:
     from emmy.compiler.ir.tile.ir import is_contraction_fold
     from emmy.compiler.pipeline.passes.lowering.tile._flash import _flash_op
 
-    op = _flash_op("Q", "K", "V", [1, 2], Dim(16), Dim(16), 8, 8)  # (batch, s_q, s_k, head_dim, d_v)
+    op, _stores = _flash_op("Q", "K", "V", [1, 2], Dim(16), Dim(16), 8, 8)  # (batch, s_q, s_k, head_dim, d_v)
     (red,) = op.sources  # the streaming Fold under the O/l projection Map
     assert red.role is AxisRole.TWISTED  # derived off the exp-family flash carrier
     folds = [s for s in red.step if is_contraction_fold(s)]

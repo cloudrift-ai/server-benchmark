@@ -65,7 +65,7 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import Stmt
-from emmy.compiler.ir.tile import Channel, ContractionView, Fold, Map, Placement, TileOp, TilePlan, shared_operand
+from emmy.compiler.ir.tile import Channel, ContractionView, Fold, Map, Placement, TileOp, TilePlan, shared_operand, split_effects
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import Fork
 
@@ -187,8 +187,12 @@ def _annotate_reduce(rloop: Loop, pre_reduce: tuple[Stmt, ...]) -> Loop | None:
     return Loop(axis=rloop.axis, body=Body(body), unroll=rloop.unroll, role=AxisRole.PLANAR, carrier=accs[0].as_carrier())
 
 
-def _lift_cell(cell: list[Stmt], free: list, output: str) -> Map | Fold:
-    """Lift the per-cell stmts into a ``Map`` whose body is the annotated loop nest. A pure
+def _lift_cell(cell: list[Stmt], free: list, output: str) -> tuple[Map | Fold, tuple]:
+    """Lift the per-cell stmts into a ``Map`` whose body is the annotated loop nest, returning
+    ``(node, stores)`` — the 1q boundary split: a projected reduce's root ``Write`` (and the
+    rms/softmax output-sweep ``Loop`` around it) leaves the term for a :class:`Store` decoration
+    when :func:`split_effects`' byte-identity gate accepts the shape; a declining projection (a
+    contraction tail's composed loop) keeps the raw-loop-IR spelling with empty stores. A pure
     pointwise cell (no reduce) is a flat ``Map`` of its stmts; a single flat reduce annotates that
     reduce ``Loop`` in place (``CONTRACTION`` / ``PLANAR`` / pre-annotated ``TWISTED``), its body
     holding the reduce loop followed by the projection — stripped to just the loop when the only
@@ -196,11 +200,11 @@ def _lift_cell(cell: list[Stmt], free: list, output: str) -> Map | Fold:
     several, or a nested reduce stays a flat ``Map`` (un-annotated → the scalar tier)."""
     reduces = [i for i, s in enumerate(cell) if isinstance(s, Loop) and s.is_reduce]
     if len(reduces) != 1:
-        return Map(body=tuple(cell))
+        return Map(body=tuple(cell)), ()
     idx = reduces[0]
     rloop = cell[idx]
     if _reduce_in(list(rloop.body)):
-        return Map(body=tuple(cell))  # nested (non-flash) reduce — keep loop-IR form
+        return Map(body=tuple(cell)), ()  # nested (non-flash) reduce — keep loop-IR form
     # Route the loop-invariant prologue (stmts above the reduce, sans the regenerated ``Init``
     # seeds) one dependency cone at a time: stmts feeding the reduce move INTO the loop
     # (``pre_reduce``), while independent stmts feeding only the epilogue stay after it. Treating
@@ -210,34 +214,16 @@ def _lift_cell(cell: list[Stmt], free: list, output: str) -> Map | Fold:
     # ``Map`` (its loop-IR order is preserved verbatim).
     before = [s for s in cell[:idx] if not isinstance(s, Init)]
     after = list(cell[idx + 1 :])
-    reduce_need = _reads(list(rloop.body))
-    epilogue_need = _reads(after)
-    reduce_idx: set[int] = set()
-    epilogue_idx: set[int] = set()
-    for i in range(len(before) - 1, -1, -1):
-        stmt = before[i]
-        defs = set(stmt.defines())
-        feeds_reduce = bool(defs & reduce_need)
-        feeds_epilogue = bool(defs & epilogue_need)
-        if feeds_reduce and feeds_epilogue:
-            return Map(body=tuple(cell))
-        if feeds_reduce:
-            reduce_idx.add(i)
-            reduce_need.update(stmt.deps())
-        else:
-            # Keep unused pure preamble stmts on the epilogue side, preserving the old behavior
-            # and original order. If a later epilogue stmt depends on this one, the reverse walk
-            # has already added that dependency to ``epilogue_need``.
-            epilogue_idx.add(i)
-            if feeds_epilogue:
-                epilogue_need.update(stmt.deps())
-    if reduce_idx & epilogue_idx:
-        return Map(body=tuple(cell))
-    pre_reduce = tuple(s for i, s in enumerate(before) if i in reduce_idx)
-    pre_epilogue = tuple(s for i, s in enumerate(before) if i in epilogue_idx)
+    before_defs = {n for s in before for n in s.defines()}
+    feeds_reduce = bool(before_defs & _reads(list(rloop.body)))
+    feeds_epilogue = bool(before_defs & _reads(after))
+    if feeds_reduce and feeds_epilogue:
+        return Map(body=tuple(cell)), ()
+    pre_reduce = tuple(before) if feeds_reduce else ()
+    pre_epilogue = () if feeds_reduce else tuple(before)
     annotated = _annotate_reduce(rloop, pre_reduce)
     if annotated is None:
-        return Map(body=tuple(cell))
+        return Map(body=tuple(cell)), ()
     grid_index = tuple(Var(ax.name) for ax in free)
     bare = (
         not before
@@ -256,10 +242,18 @@ def _lift_cell(cell: list[Stmt], free: list, output: str) -> Map | Fold:
     # ``lower`` flattens either back identically.
     if annotated.role in (AxisRole.PLANAR, AxisRole.TWISTED):
         reduction = Fold.from_loop(annotated)
-        # A bare reduce is the kernel root (its grid ``Write`` is glue); a projected reduce
-        # (softmax / RMSNorm) is the ``source`` of a ``Map`` whose body IS that projection.
-        return reduction if bare else Map(body=Body(projection), sources=(reduction,))
-    return Map(body=(annotated, *projection))
+        if bare:
+            return reduction, ()
+        # A projected reduce (softmax / RMSNorm) is the ``source`` of a ``Map`` whose body IS that
+        # projection — pure, its root store (and the output sweep around it) a boundary ``Store``
+        # when the split gate accepts; the composed-tail shapes (norm→linear's column loop) decline
+        # and keep the raw-loop-IR spelling for ``bind_prologue_contraction`` to parse.
+        split = split_effects(projection)
+        if split is not None:
+            pure, stores = split
+            return Map(body=Body(pure), sources=(reduction,)), stores
+        return Map(body=Body(projection), sources=(reduction,)), ()
+    return Map(body=(annotated, *projection)), ()
 
 
 def _nodify_contraction(node, free: tuple):
@@ -275,10 +269,10 @@ def _nodify_contraction(node, free: tuple):
     structure only off the node. A computed-A cone is stored INLINE on the ``a`` edge
     (:func:`make_cone`)."""
     if not isinstance(node, Map) or node.sources or len(node.body) == 0:
-        return node
+        return node, ()
     rloop = node.body[0]
     if not isinstance(rloop, Loop) or rloop.role is not AxisRole.CONTRACTION:
-        return node
+        return node, ()
     projection = Body(tuple(node.body[1:]))
     if len(free) >= 2:
         try:
@@ -298,9 +292,23 @@ def _nodify_contraction(node, free: tuple):
             # STORED form is the role=CONTRACTION fold (the 1k vocabulary); ``ContractionView`` is the
             # derived view the schedule re-extracts (``contraction_view``).
             fold = con.as_fold()
-            return Map(body=epi, sources=(fold,)) if len(epi) else fold
+            return _project(fold, epi)
     red = Fold.from_loop(rloop)  # loads stay inline in the step — the fold derives PLANAR
-    return Map(body=projection, sources=(red,)) if len(projection) else red
+    return _project(red, projection)
+
+
+def _project(fold: Fold, projection: Body) -> tuple[Map | Fold, tuple]:
+    """Wrap ``fold`` in its projecting ``Map``, the root store split to the boundary (1q):
+    ``split_effects``' byte-identity gate accepts the epilogue's trailing ``Write`` (and an
+    output sweep) or the raw-loop-IR spelling stands. A bare fold passes through (its grid-cell
+    store stays materialize glue)."""
+    if not len(projection):
+        return fold, ()
+    split = split_effects(tuple(projection))
+    if split is not None:
+        pure, stores = split
+        return Map(body=Body(pure), sources=(fold,)), stores
+    return Map(body=projection, sources=(fold,)), ()
 
 
 def _demote_planar(node):
@@ -317,28 +325,37 @@ def _demote_planar(node):
     return Map(body=projection, sources=(red,)) if len(projection) else red
 
 
-def _lift(stmts: list[Stmt], output: str) -> tuple[Map | Fold | ContractionView, tuple]:
-    """Peel the free axes and lift the per-cell compute, returning ``(root node, free
-    axes)``. The free axes are the schedule's (carried on the ``TileOp``, not the node);
-    ``_schedule`` (inside ``010_recognize``) maps them onto the grid. A ``CONTRACTION`` cell
+def _lift(stmts: list[Stmt], output: str) -> tuple[Map | Fold | ContractionView, tuple, tuple]:
+    """Peel the free axes and lift the per-cell compute, returning ``(root node, free axes,
+    boundary stores)``. The free axes are the schedule's (carried on the ``TileOp``, not the node);
+    ``_schedule`` (inside ``010_recognize``) maps them onto the grid, and the ``stores`` ride
+    ``TileOp.stores`` (1q). A ``CONTRACTION`` cell
     nodifies to a :class:`ContractionView` once the free axes are output-ordered (the binding needs
     the final ``(m, n)``)."""
     free, cell = _peel(Body(tuple(stmts)))
-    node = _lift_cell(cell, free, output)
-    free = _order_free_by_output(node, free)
-    return _nodify_contraction(node, free), free
+    node, stores = _lift_cell(cell, free, output)
+    free = _order_free_by_output(node, free, stores)
+    node, con_stores = _nodify_contraction(node, free)
+    # At most one of the two conversion points fires: ``_nodify_contraction`` only converts the
+    # flat CONTRACTION shape, which ``_lift_cell`` always emits store-less.
+    return node, free, stores or con_stores
 
 
-def _order_free_by_output(node: Map | Fold, free: list) -> tuple:
+def _order_free_by_output(node: Map | Fold, free: list, stores: tuple = ()) -> tuple:
     """Order the free (grid) axes to match the **output Write's index order**, so the innermost
     grid axis is the output's *contiguous* dim. The contraction tier needs ``n_axis == grid[-1] ==``
     the contiguous output axis — the mma fragment store coalesces a ``float2`` along it, and the
     cuda lowering's ``ldm`` is the output's inner extent — but the peel / loop-naming order can
     diverge from the output layout (e.g. a batched ``Q@Kᵀ`` whose ``kv`` got named before ``m``).
-    A node with no explicit output ``Write`` (a bare contraction whose grid-cell store is synthesized
+    The root ``Write`` is read from the body (a raw-loop-IR spelling) or the boundary ``stores``
+    (a converted projection — its top-level store only: a sweep store's ``Write`` was never a
+    top-level stmt, so it never ordered the grid). A node with no explicit output ``Write`` (a
+    bare contraction whose grid-cell store is synthesized
     at materialize, already in free order) is left as-is."""
     body = node.lower() if isinstance(node, Fold) else getattr(node, "body", ())
     write = next((s for s in body if isinstance(s, Write)), None)
+    if write is None:
+        write = next((st.write for st in stores if st.sweep is None), None)
     if write is None:
         return tuple(free)
     pos = {e.name: i for i, e in enumerate(write.index) if isinstance(e, Var)}
@@ -384,7 +401,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     # (3) Online softmax — the sibling-fold tupling: fuse the adjacent (rowmax, Σexp) reduce
     # pair into one streaming pass.
     fused, _ = _fuse(loop.body)
-    node, free = _lift(list(fused), root.output.name)
+    node, free, stores = _lift(list(fused), root.output.name)
     # A symbolic FREE (parallel) axis rides a **symbolic grid**: the ``Tile`` decode sizes the
     # launch from the runtime extent (``_gid < ∏extents``, the ``Dim`` name threaded as an
     # ``int`` arg by the cuda lowering) — the dynamic-grid tier. A symbolic REDUCE /
@@ -398,7 +415,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     # ``inputs`` is seeded from the matched ``LoopOp`` (the matcher populated its real Tensors) so
     # the scheduler can read operand shapes (the shared-row stage detection); the matcher refreshes
     # it from the graph again when a later pass matches the scheduled op.
-    map_tile = TileOp(op=node, place=Placement(free=free), inputs=dict(loop.inputs))
+    map_tile = TileOp(op=node, place=Placement(free=free), inputs=dict(loop.inputs), stores=stores)
     pro = bind_prologue_contraction(node, free)
     if pro is None:
         rows = _as_list(schedule(map_tile, loop.name, knob_base, ctx))
@@ -410,7 +427,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
             # (the merged-sibling gate/up edge on the fp32 symbolic Qwen path was the first shape
             # to hit it). Demote it back to its PLANAR reduce so the kernel still compiles: the
             # pre-nodification fallback, a working serial/coop fold.
-            fallback = TileOp(op=_demote_planar(node), place=Placement(free=free), inputs=dict(loop.inputs))
+            fallback = TileOp(op=_demote_planar(node), place=Placement(free=free), inputs=dict(loop.inputs), stores=stores)
             return schedule(fallback, loop.name, knob_base, ctx)
         return rows if len(rows) > 1 else rows[0]
     # (4) The MONOID-producer composition — the fused norm→linear edge (``rmsnorm(x)·nw @ w``, and
@@ -426,13 +443,13 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     # cold greedy pick past the pin). Each form's rows carry the OTHER form's family keys as
     # decided-empty stamps, so every leaf row spells the same key set (the evidence pick's
     # prefix-consistency: an absent key reads as "free").
-    c_map, n_ax = pro
+    c_map, n_ax, con_stores = pro
     src = c_map.sources[0]  # the ONE bilinear fold — its components share one k axis / cone
     # The cone's source node IS the row-invariant prologue; ITS source is the statistic reduce.
     # Both forms' keys spell against the CONTRACTION tree (the merged fork's one reference tree);
     # the map form keys its own reduce spec on the stat fold's explicit spelling.
     con_base, map_base, stat_key = prologue_knob_bases(c_map, shared_operand(src).sources[0].sources[0])
-    con_tile = TileOp(op=c_map, place=Placement(free=(*free, n_ax)), inputs=dict(loop.inputs))
+    con_tile = TileOp(op=c_map, place=Placement(free=(*free, n_ax)), inputs=dict(loop.inputs), stores=con_stores)
     con = _as_list(schedule(con_tile, loop.name, {**knob_base, **con_base}, ctx))
     if con and warp_tile_pinned():
         return con if len(con) > 1 else con[0]

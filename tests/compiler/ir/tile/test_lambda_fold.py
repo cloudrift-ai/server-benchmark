@@ -114,7 +114,7 @@ def test_twisted_composed_step_keeps_the_step_spelling() -> None:
     from emmy.compiler.dim import Dim
     from emmy.compiler.pipeline.passes.lowering.tile._flash import _flash_op
 
-    op = _flash_op("Q", "K", "V", [1, 2], Dim(16), Dim(16), 8, 8)
+    op, _stores = _flash_op("Q", "K", "V", [1, 2], Dim(16), Dim(16), 8, 8)
     (red,) = op.sources
     assert red.lift is None and len(red.step) > 0
     assert red.role is AxisRole.TWISTED

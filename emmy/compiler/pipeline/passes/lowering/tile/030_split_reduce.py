@@ -62,7 +62,8 @@ from emmy.compiler.ir.tile import (
     ReducePlan,
     TileOp,
 )
-from emmy.compiler.ir.tile.ops import Sched, lower, nodify_reduce, reduce_loop, reduce_plan, sched_of, seal_workers
+from emmy.compiler.ir.tile.ir import effect_tail
+from emmy.compiler.ir.tile.ops import Sched, lower, nodify_reduce, projection_tail, reduce_loop, reduce_plan, sched_of, seal_workers
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.tile._carrier import projection_distributes as _projection_distributes
 
@@ -352,7 +353,7 @@ def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Map, plan: R
     seeds = tuple(Init(name=nm, identity=ids[nm], dtype=F32) for nm in names)
     loads = tuple(Load(name=other[i], input=ws_name, index=ws_index(i, names[i])) for i in range(n_comp))
     fin_loop = Loop(axis=split, body=Body((*loads, combine)))
-    fin_op = Map(body=Body((*seeds, fin_loop, *op.body)))
+    fin_op = Map(body=Body((*seeds, fin_loop, *effect_tail(list(op.body), tile.stores))))
     fin_tile = _mapped(fin_op, (*batch, m_axis, d_axis), name=tile.name)
 
     frag = Graph()
@@ -383,7 +384,12 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     # is the **bare ContractionView** (→ ``factorize`` → mma / scalar), no ``_slice_loop``.
     # The projection (when the split node carries one) rides the ``Map`` wrapper over the split
     # ``Fold`` — its ONE home; peel it here and hand it to the realizer.
-    split_root, projection = (op.sources[0], op.body) if isinstance(op, Map) and op.sources else (op, ())
+    # The projection with the kernel-boundary stores reconstituted (1q) — the split realizers
+    # retarget the root ``Write`` exactly as when it rode the ``Map`` body. A projection whose
+    # only stmt was the root ``Write`` leaves a BARE fold behind (the ``Map`` wrapper dropped
+    # with its last in-body stmt), so the reconstitution keys off the TileOp, not the node shape.
+    split_root = op.sources[0] if isinstance(op, Map) and op.sources else op
+    projection = tuple(projection_tail(tile))
     if isinstance(split_root, Fold) and len(split_root.step) == 1:
         # The split node's inner contraction — multi-channel included — rides the reduce's
         # ``step`` (the one composition rule).
@@ -415,7 +421,7 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     # The lowered loop nest (``Map`` / ``Fold`` alike) — find the carrier-bearing reduce loop
     # in it by position (``reduce_loop`` returns a fresh synthesized loop for a ``Fold``, so key
     # off the lowered list, not object identity).
-    stmts = lower(op)
+    stmts = effect_tail(lower(op), tile.stores)  # boundary stores reconstituted — ``after`` keeps its Write
     cell = _cell_index(stmts, grid)
     split = Axis(name=_SPLIT, extent=Dim(cta))
     idx = next(i for i, s in enumerate(stmts) if isinstance(s, Loop) and s.carrier is not None)

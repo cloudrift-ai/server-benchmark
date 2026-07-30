@@ -91,7 +91,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop.ir import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Carrier, Load, Loop, Select, SelectBranch, Write
-from emmy.compiler.ir.tile import Channel, ContractionView, Fold, Placement, TileOp, TilePlan
+from emmy.compiler.ir.tile import Channel, ContractionView, Fold, Placement, Store, TileOp, TilePlan
 from emmy.compiler.ir.tile.ops import Map
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import make_cone
 from emmy.compiler.pipeline.passes.lowering.tile._carrier import denom, exp_family_twist, expect
@@ -267,7 +267,7 @@ def build_flash_frag(
             return None
         out_store = (out.name, store_idx)
 
-    flash_op = _flash_op(
+    flash_op, flash_stores = _flash_op(
         q_id,
         k_id,
         v_id,
@@ -290,7 +290,7 @@ def build_flash_frag(
     # The ``S_ext_*`` skeleton rides on ``knobs`` (:func:`_struct_features` — the fused fragment
     # never passes the loop-dialect stamp) so the prior can price the flash forms' occupancy.
     knobs = dict(_struct_features(batch, s_q_dim, s_k_dim, head_dim, d_v))
-    tile = TileOp(op=flash_op, place=Placement(free=grid), knobs=knobs)
+    tile = TileOp(op=flash_op, place=Placement(free=grid), knobs=knobs, stores=flash_stores)
 
     frag = Graph()
     in_shapes = raw_shapes if raw_shapes is not None else (q_shape, k_shape, v_shape)
@@ -483,16 +483,19 @@ def _flash_op(
     reduction = Fold(carrier=carrier, axis=Axis(name="kv", extent=s_k), step=Body(tuple(partial)))  # derives TWISTED off the exp carrier
     # φ projection: normalize the streamed (unnormalized) output by the LSE denominator —
     # O_i / l_i after the kv loop, the ``Map`` body over the reduction ``source``. When the caller
-    # supplies ``out_store`` (``(buffer, index)``), the body ALSO carries the explicit output
+    # supplies ``out_store`` (``(buffer, index)``), the fragment ALSO carries the explicit output
     # ``Write`` at that index — the output-layout-aware store (:func:`_out_store_index`) that
-    # reproduces the root's real buffer rank / transpose / broadcast dims. Its presence short-circuits
-    # the materializer's bare grid-order ``with_store`` glue (``has_write``). Absent it, the glue
+    # reproduces the root's real buffer rank / transpose / broadcast dims — as a boundary
+    # :class:`~emmy.compiler.ir.tile.ir.Store` (1q: never inside the term; ``TileOp.stores``).
+    # Reconstituted into the tail it still short-circuits the materializer's bare grid-order
+    # ``with_store`` glue (``has_write``). Absent it, the glue
     # writes the bare grid cell (the head-major identity path — isolated fragments, tests).
     proj: tuple[Stmt, ...] = (Assign(name="O_i__proj", op="divide", args=("O_i", "l_i")),)
+    stores: tuple = ()
     if out_store is not None:
         out_buf, out_idx = out_store
-        proj = (*proj, Write(output=out_buf, index=out_idx, value="O_i__proj"))
-    return Map(body=Body(proj), sources=(reduction,))
+        stores = (Store(write=Write(output=out_buf, index=out_idx, value="O_i__proj")),)
+    return Map(body=Body(proj), sources=(reduction,)), stores
 
 
 # --------------------------------------------------------------------------- #

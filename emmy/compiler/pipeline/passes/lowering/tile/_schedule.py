@@ -58,7 +58,7 @@ from emmy.compiler.ir.tile import (
     is_contraction_fold,
 )
 from emmy.compiler.ir.tile.ir import gmem_row_stride
-from emmy.compiler.ir.tile.ops import axis_role, cone_seam, nodify_reduce, reduce_loop, sched_of, seal_workers
+from emmy.compiler.ir.tile.ops import axis_role, cone_seam, nodify_reduce, projection_tail, reduce_loop, sched_of, seal_workers
 from emmy.compiler.ir.tile.ops import lower as lower_op
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import make_cone, map_cone, semiring_binding
@@ -277,7 +277,7 @@ def _reduce_specs(kernel, place, ctx=None) -> list[str]:
     # (the norm→linear shape — ``_has_contraction_tail``) lifts the free-grid cap: per-cell
     # work scales with the tail's columns, so a big grid does NOT mean the serial tier saturates.
     free = prod(_hint_extent(a) for a in place.free) if place.free else 1
-    tail = list(kernel.op.body) if isinstance(kernel.op, Map) else []
+    tail = projection_tail(kernel)  # boundary stores reconstituted — the sweep-Loop gates below stay honest
     coop = _pick_coop(extent, free, has_tail=_has_contraction_tail(tail))
     # The layout gate (WS5, the cold-poison hardening): at the matvec tier the coop bands are only
     # coalesced on ONE B orientation — plain ``b<n>`` interleaves lanes along K (fast only when K is
@@ -436,7 +436,7 @@ def _row_stage(tile, place) -> Stage | None:
     materializer emits) and the operand shapes off ``tile.inputs`` (seeded from the recognized
     ``LoopOp``); the stamped stage is the depth-1 ``sync`` transport with ``smem`` naming the row."""
     rloop = reduce_loop(tile.op)
-    tail = list(tile.op.body) if isinstance(tile.op, Map) else []
+    tail = projection_tail(tile)
     grid_vars = tuple(Var(a.name) for a in place.grid)
     buf = _shared_row_buf(rloop.body, tail, grid_vars, rloop.axis, tile.inputs)
     return Stage(transport="sync", smem=(buf,)) if buf is not None else None
@@ -453,7 +453,7 @@ def _option(tile, place, spec: str, name: str, knobs: dict, reduce_key: str | No
     plan = ReducePlan.parse(spec)
     fold = _primary_fold(tile.op)
     rkey = reduce_key if reduce_key is not None else _family_key(tile.op, REDUCE.name, fold)
-    out = TileOp(op=tile.op, name=name, place=place, knobs={**knobs, rkey: spec})
+    out = TileOp(op=tile.op, name=name, place=place, knobs={**knobs, rkey: spec}, stores=tile.stores)
     sched = sched_of(out)
     if plan.stages:
         sched.put("REDUCE", fold, plan)
@@ -685,7 +685,7 @@ def _reduce_candidates(kernel, place, plan: TilePlan, probe: ContractionView | N
         # node's ``Map``-wrapper body is folded into the inner epilogue at ``_splitk_option``, so
         # it must distribute too. Multi-fold (gate/up) nodes never offer ``a`` — the per-channel
         # ⊗-combine needs the deferred finalize kernel.
-        tail = tuple(kernel.op.body) if isinstance(kernel.op, Map) else ()
+        tail = tuple(projection_tail(kernel))
         atomic_ok = probe is not None and channels == 1 and (len(tail) == 0 or projection_distributes(tail, (probe.acc,)))
         for move in splitk_moves(warp=plan.is_warp):
             sp = ReducePlan.parse(move)
@@ -1436,7 +1436,7 @@ def _splitk_option(
     tkey, skey, rkey = (_family_key(tile.op, f.name, src_fold) if isinstance(src_fold, Fold) else f.name for f in (TILE, STAGE, REDUCE))
     stamped = {**knobs, tkey: tile_spec, rkey: split_spec}
     stamped[skey] = stage.spell() if stage is not None else ""
-    out = TileOp(op=op, name=name, place=place, knobs=stamped)
+    out = TileOp(op=op, name=name, place=place, knobs=stamped, stores=tile.stores)
     # The slices live in ``TileOp.schedule`` (1r): the split partition keyed on the OUTER fold,
     # the inner contraction's tile / resolved pipeline on the SLICED fold — ``030_split_reduce``
     # re-keys them onto the partial kernel's own tree.
@@ -1492,7 +1492,7 @@ def _warp_option(
     stamped[skey] = stage.spell() if stage is not None else ""
     if wspec_spec:
         stamped[WSPEC.name] = wspec_spec
-    out = TileOp(op=emitted, name=name, place=place, workers=workers, knobs=stamped)
+    out = TileOp(op=emitted, name=name, place=place, workers=workers, knobs=stamped, stores=tile.stores)
     sched = sched_of(out)
     sched.put("TILE", fold, node.tile)
     sched.put("STAGE", fold, stage)
@@ -1557,7 +1557,7 @@ def _tile_option(
     tkey, skey, rkey = ((_family_key(tile.op, f.name, head) if isinstance(head, Fold) else f.name) for f in (TILE, STAGE, REDUCE))
     stamped = {**knobs, tkey: spec, rkey: reduce_spec}
     stamped[skey] = stage.spell() if stage is not None else ""
-    out = TileOp(op=op, name=name, place=place, knobs=stamped)
+    out = TileOp(op=op, name=name, place=place, knobs=stamped, stores=tile.stores)
     sched = sched_of(out)
     for family, node_, value in slices:
         sched.put(family, node_, value)
@@ -1623,9 +1623,9 @@ def _map_strip_fork(tile: TileOp, place: Placement, name: str) -> list[TileOp] |
     directly (no fork)."""
     op = tile.op
     if not (isinstance(op, Map) and not op.sources) or not place.free:
-        return TileOp(op=op, name=name, place=place)
+        return TileOp(op=op, name=name, place=place, stores=tile.stores)
     inner = place.free[-1]
-    base = TileOp(op=op, name=name, place=place, knobs={TILE.name: ""})
+    base = TileOp(op=op, name=name, place=place, knobs={TILE.name: ""}, stores=tile.stores)
     # Only a FLAT elementwise body (per-cell Load/Assign/Write, no nested Loop / Accum / carried
     # state) is safely unrollable: every output cell is independent, so replicating adjacent cells
     # and regrouping preserves semantics. A sweep / stateful-fallback Map (which also reaches the
@@ -1917,7 +1917,7 @@ def _twisted_chain_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp
         _family_key(op, REDUCE.name, red): "",
         _family_key(op, STAGE.name, red): "",
     }
-    out = TileOp(op=op, name=name, place=Placement(free=tile.place.free, grid=tuple(grid[:-1])), knobs=stamped)
+    out = TileOp(op=op, name=name, place=Placement(free=tile.place.free, grid=tuple(grid[:-1])), knobs=stamped, stores=tile.stores)
     sched_of(out).put("TILE", pv_fold, chain_plan)
     seal_workers(out)
     return out
@@ -2009,7 +2009,7 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     fold = node.as_fold()
     emitted = Map(body=epilogue, sources=(fold,)) if len(epilogue) else fold
     stamped = {**knobs, _family_key(emitted, TILE.name, fold): spec}
-    out = TileOp(op=emitted, name=name, place=place, knobs=stamped)
+    out = TileOp(op=emitted, name=name, place=place, knobs=stamped, stores=tile.stores)
     sched = sched_of(out)
     sched.put("TILE", fold, wt)
     sched.put("STAGE", fold, stage)
@@ -2372,7 +2372,7 @@ def _twisted_warp_options(
                     }
                     if wspec_spec:
                         stamped[WSPEC.name] = wspec_spec
-                    row = TileOp(op=op, name=name, place=place, workers=workers, knobs=stamped)
+                    row = TileOp(op=op, name=name, place=place, workers=workers, knobs=stamped, stores=tile.stores)
                     sched = sched_of(row)
                     sched.put("TILE", head_fold, qk_plan)
                     sched.put("TILE", pv_fold, pv_plan)

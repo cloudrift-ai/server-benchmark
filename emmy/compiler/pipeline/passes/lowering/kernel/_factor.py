@@ -53,7 +53,7 @@ from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import FoldMove, Level, ReducePlan, ReduceStage, contraction_view, is_contraction_fold
-from emmy.compiler.ir.tile.ir import ContractionView, Fold, Map, Side
+from emmy.compiler.ir.tile.ir import ContractionView, Fold, Map, Side, effect_tail
 from emmy.compiler.ir.tile.ops import cone_seam
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import copy_cell, reduce_codegen, shrink_axis, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import sync_row_fill
@@ -333,13 +333,16 @@ def factorize(tile, root, store=None) -> Tile:
         raster=Raster.parse((tile.knobs or {}).get("RASTER", "")),
     )
     out_val = _emit_wire(op).name if op is not None else ""
-    return _factorize(op, ctx, tail=(), out_val=out_val, store=store)
+    return _factorize(op, ctx, tail=(), out_val=out_val, store=store, stores=tuple(tile.stores))
 
 
-def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
+def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, stores: tuple = ()) -> Tile:
     """The recursive root walk — peel the projecting ``Map``\\ s, then bind the leaf to the grid via
     the ONE binder. A :class:`Map` with a ``source`` **recurses**: its ``body`` (the projection /
-    epilogue) is walked (:func:`_emit_body`, reaching any nested node) and prepended to ``tail``;
+    epilogue) is walked (:func:`_emit_body`, reaching any nested node), the kernel-boundary
+    ``stores`` reconstituted into it (``effect_tail`` — 1q: the root ``Write``\\ s / output sweep
+    left the term for ``TileOp.stores``, so the tail downstream sees is byte-identical to the
+    stored-``Write`` era), and the result prepended to ``tail``;
     everything else is a leaf, bound by :func:`_bind` — the single pipeline, whose form is read off
     the node's SCHEDULE (which axes are tiled), never a kernel kind. There is **no** flash /
     attention special case: flash is the two-``ContractionView`` ``TWISTED`` reduce tree, so its Q@K /
@@ -347,7 +350,15 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
     today; a nested warp-tiled contraction routes through the ``_emit`` ``ContractionView`` seam). A
     bespoke emitter would be a divergent codegen path the mandate forbids."""
     if isinstance(op, Map) and op.sources:
-        return _factorize(op.sources[0], ctx, tail=(*_emit_body(op.body, ctx), *tail), out_val=out_val, store=store)
+        proj = _emit_body(op.body, ctx)
+        if stores:
+            proj = effect_tail(proj, stores)
+        return _factorize(op.sources[0], ctx, tail=(*proj, *tail), out_val=out_val, store=store)
+    if stores:
+        # A flat / bare root with boundary stores — plain root ``Write``\\ s only (a sweep store
+        # always rides a projecting ``Map``, whose peel above consumed it).
+        assert all(st.sweep is None for st in stores), "sweep stores ride a projecting Map"
+        tail = (*tail, *(st.write for st in stores))
     return _bind(op, ctx, tail, out_val, store)
 
 

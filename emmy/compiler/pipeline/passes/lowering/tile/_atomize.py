@@ -33,7 +33,7 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.tile import Channel, ContractionView, Fold, Map, TilePlan
+from emmy.compiler.ir.tile import Channel, ContractionView, Fold, Map, Store, TilePlan
 from emmy.compiler.ir.tile.ir import _refs_axis
 from emmy.compiler.pipeline.pipeline import LoweringError
 
@@ -190,7 +190,7 @@ def _cone_value_key(name: str, defs: dict) -> tuple:
     return ("op", st.op.name, tuple(_cone_value_key(a, defs) for a in st.args))
 
 
-def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis] | None:
+def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis, tuple] | None:
     """Nodify the **reduce-bearing (MONOID) producer cone** composition — the fused norm→linear
     edge: a projecting ``Map`` whose ``source`` is a per-row ``PLANAR`` statistic reduce and whose
     body is that statistic's scalar epilogue followed by a fresh free (column) ``Loop`` over one or
@@ -203,9 +203,10 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis] | None:
     a real node tree, ``Map(body=<the per-cell cone>, sources=(<the statistic Fold>,))``, so the
     statistic is addressable and cuttable in its own right instead of hiding inside an operand body —
     with one :class:`Channel` ``(b, acc)`` per ⊗-fold (sharing is the node's arity; the node carries
-    a **deferred** ``TilePlan()``); the ``body`` is the
-    projection (the combine tail + any stat-free prefix defs it reads + the ``Write``). Returns that
-    node and the column axis (the scheduler adds it to the grid),
+    a **deferred** ``TilePlan()``); the ``body`` is the PURE
+    projection (the combine tail + any stat-free prefix defs it reads) and the root ``Write`` a
+    boundary :class:`~emmy.compiler.ir.tile.ir.Store` (1q). Returns ``(node, column axis, stores)``
+    — the scheduler adds the axis to the grid and the stores to the ``TileOp`` —
     or ``None`` (not this shape; the reduce ``Map`` form stands alone).
 
     STRUCTURE-ONLY: no dtype / geometry / pin legality here — those are per-move scheduling guards
@@ -337,7 +338,7 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis] | None:
         tile=TilePlan(),
         lead_axes=tuple(grid[:-1]),
     )
-    return Map(body=Body((*prefix, *tail_ops, write)), sources=(node.as_fold(),)), n_ax
+    return Map(body=Body((*prefix, *tail_ops)), sources=(node.as_fold(),)), n_ax, (Store(write=write),)
 
 
 __all__ = ["bind_contraction", "bind_prologue_contraction", "make_cone", "map_cone", "semiring_binding"]

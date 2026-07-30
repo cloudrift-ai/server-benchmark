@@ -429,11 +429,13 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     c_map, n_ax = pro
     src = c_map.sources[0]  # the ONE bilinear fold — its components share one k axis / cone
     # The cone's source node IS the row-invariant prologue; ITS source is the statistic reduce.
-    con_base, map_base = prologue_knob_bases(src.axis.name, shared_operand(src).sources[0].sources[0].axis.name)
+    # Both forms' keys spell against the CONTRACTION tree (the merged fork's one reference tree);
+    # the map form keys its own reduce spec on the stat fold's explicit spelling.
+    con_base, map_base, stat_key = prologue_knob_bases(c_map, shared_operand(src).sources[0].sources[0])
     con_tile = TileOp(op=c_map, place=Placement(free=(*free, n_ax)), inputs=dict(loop.inputs))
     con = _as_list(schedule(con_tile, loop.name, {**knob_base, **con_base}, ctx))
     if con and warp_tile_pinned():
         return con if len(con) > 1 else con[0]
-    maps = _as_list(schedule(map_tile, loop.name, {**knob_base, **map_base}, ctx))
+    maps = _as_list(schedule(map_tile, loop.name, {**knob_base, **map_base}, ctx, reduce_key=stat_key))
     merged = [*maps, *con]
     return merged if len(merged) > 1 else merged[0]

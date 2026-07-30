@@ -25,7 +25,7 @@ features in processes that featurized without the pipeline loaded.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
@@ -280,26 +280,6 @@ def family_value(knobs: dict, family: str):
     return None
 
 
-def resolve_axis(family: str, key: str, eligible: Sequence[str]) -> str | None:
-    """Canonicalize a schedule-knob ``key`` (bare ``TILE`` or suffixed ``TILE@d``) to its
-    ``FAMILY@<axis>`` form given the kernel's ``eligible`` axes for that ``family``:
-
-    - already suffixed (``TILE@d``) → returned unchanged (idempotent).
-    - bare, exactly one eligible axis → ``TILE@<that axis>`` (the suffix is sugar).
-    - bare, no eligible axis → ``None`` (the family doesn't apply — drop / OFF).
-    - bare, ≥2 eligible axes → ``ValueError`` naming the candidates (a hand-written pin must
-      disambiguate, e.g. ``TILE@d`` vs ``TILE@sk``); enumeration never emits a bare key here, so the
-      ambiguous case only arises from a pin."""
-    if "@" in key:
-        return key
-    if not eligible:
-        return None
-    if len(eligible) == 1:
-        return f"{family}@{eligible[0]}"
-    cands = " or ".join(f"{family}@{a}" for a in eligible)
-    raise ValueError(f"{family} is ambiguous: use {cands}")
-
-
 # --- Registry --------------------------------------------------------------
 
 #: ``name → Knob`` — filled at declaration time by ``Knob.__post_init__``, first-seen wins.
@@ -535,7 +515,10 @@ def tuning_knob_items(knobs: dict) -> list[tuple[str, str]]:
         if knob is None and isinstance(v, bool):
             continue
         fam = family_of(k)
-        disp = fam if ("@" in k and fam in _COLLAPSE_FAMILIES and fam_counts[fam] == 1) else k
+        # Never collapse onto a bare same-family key already present (a phase-3 canonical row may
+        # carry bare ``REDUCE`` for the primary fold beside an explicit ``REDUCE@<axis>`` for a
+        # secondary one — collapsing the latter would collide two decisions onto one column).
+        disp = fam if ("@" in k and fam in _COLLAPSE_FAMILIES and fam_counts[fam] == 1 and fam not in knobs) else k
         rendered.append((disp, str(v)))
     return sorted(rendered, key=lambda kv: knob_sort_key(kv[0]))
 

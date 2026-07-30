@@ -138,9 +138,10 @@ def test_schedule_leaf_set_equals_catalog():
     assert any("tma" in s for s in all_stages), f"batched tile/K-invariant operands must offer TMA somewhere: {all_stages}"
 
 
-def test_schedule_leaves_key_tile_by_contraction_axis():
-    """Each emitted contraction leaf keys its output tile ``TILE@<k_axis>`` (a single eligible axis),
-    so the bare catalog spelling canonicalizes onto the node's contraction axis."""
+def test_schedule_leaves_key_tile_canonically():
+    """Each emitted contraction leaf keys its output tile by the CANONICAL codec spelling
+    (phase 3): a single-contraction kernel's shortest unique key is bare ``TILE`` — the exact
+    spelling the golden/DB corpus stores, so the stamped row IS the stored row."""
     axes: set[str | None] = set()
 
     def decide(fp):
@@ -152,8 +153,7 @@ def test_schedule_leaves_key_tile_by_contraction_axis():
         return leaves[0]
 
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_matmul_graph(), decide)
-    assert axes and None not in axes  # every TILE key is axis-named (TILE@<k>), never bare
-    assert len(axes) == 1  # one contraction → one eligible k-axis
+    assert axes == {None}  # one contraction -> the bare canonical spelling, never axis-suffixed
 
 
 def _fp16_matmul_graph() -> Graph:

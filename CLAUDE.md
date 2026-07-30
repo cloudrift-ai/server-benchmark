@@ -17,8 +17,9 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
 - **Tile lowering** (LoopOp → TileOp; **purely algebraic moveset — no shape specializations**. The stored tile IR
   has exactly TWO node kinds (both in `ir/tile/ir.py`): the general **`Fold`** — `reduce(⊕) ∘ map(f)`, stored in
   the λ-foldMap spelling (1m–1p): an iteration `axis`, a pure **`lift`** `Lambda` (`λ(k, v₁…vₙ) → S` — the
-  element's SINGLETON state; ι spelled in the lift, softmax's is `(x, 1)`), the TRUE **`Monoid`** `(init, combine)`
-  (ONE program, its results the fold's real accumulator names; `ir/stmt/algebra`), and a symmetric tuple of
+  element's SINGLETON state; ι spelled in the lift, softmax's is `(x, 1)`), the TRUE monoid's flat **`(init,
+  combine)`** fields (ONE program, its results the fold's real accumulator names; the free helpers in
+  `ir/stmt/algebra`), and a symmetric tuple of
   **`operands`** (the CLOSED inputs, each an edge, bound POSITIONALLY to the lift params) — and the lift/projection
   wrapper `Map` (`fn: Lambda` + `sources`, bound positionally; `fn.results` replaced the `out` last-def convention).
   The serial step, the `Accum` forms and the `carrier` annotation are DERIVED (combine at the singleton; the twist
@@ -55,8 +56,13 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   gate⊗up composition is `Map(body=combine, sources=(fold,))` over the product fold (a fork sibling of its
   coop-reduce form — option-0 stays coop; warp mma rows ride the sync compute-fill); a pure pointwise cell is a
   `Map(sources=())`; the only annotated `Loop`s still riding a flat `Map` body are `030_split_reduce`'s sliced
-  partials. Every schedule slice (`tile` / `reduce` / `stage`) rides the fold it decorates — the `TileOp` keeps
-  only `op + place + workers + knobs` — and a sliced axis's window is the one `Axis.window`. Dispatch reads the
+  partials. Every schedule slice (`TilePlan` / `ReducePlan` / `Stage`) lives in `TileOp.schedule` — a dict keyed by the
+  tree-path codec's canonical key (`ir/tile/path.py`: ONE walker + resolver, short-path-canonical — bare for the
+  primary node, `TILE@dd`/`TILE@pj` on flash; read/written through `ops.Sched`), the term staying pure and
+  IMMUTABLE across the schedule search; the `TileOp` keeps `op + place + work + workers + knobs + schedule` (`work`
+  is the ONE worker inventory, derived loudly from the TILE slices), and a sliced axis's window is the one
+  `Axis.window`. The stampers spell knob keys via the same resolver, so the stamped row IS the stored/golden
+  spelling. Dispatch reads the
   role/carrier off the node (`ops.axis_role`/`reduce_loop` recurse through `Map.sources`), and `ops.lower` flattens
   any node back to the same loop nest — no stored `Monoid`/`Semiring` kind. Flash is the `TWISTED` fold on the
   streaming schedule, its QK/PV composed as in-step `role=CONTRACTION` folds — a twisted monoid is a monoid,

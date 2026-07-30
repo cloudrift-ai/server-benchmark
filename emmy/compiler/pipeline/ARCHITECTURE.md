@@ -1059,19 +1059,24 @@ its own pin offers on any target, the umbrella only on the consumer dies where f
 `FAST_MATH` is a meta gate over the others — `unfeatured`, never stamped/enumerated/featurized (the realized fork is
 identified by what it enables: `FAST_EXP`'s stamped BOOL, the `TILE` atom token).
 
-### Axis-named schedule keys
+### Tree-path schedule keys (the phase-2/3 codec)
 
-A per-node schedule codec is stored keyed `FAMILY@<axis>` — `TILE@<k_axis>` / `STAGE@<axis>` / `REDUCE@<axis>`, the
-reduce/contraction axis the node schedules — so a multi-node kernel (flash: `TILE@d` QK + `TILE@sk` PV) can address
-each schedule-bearing node; `WSPEC` stays root-global (bare). The **bare** form is first-class:
-`resolve_axis(family, key, eligible)` maps a bare `TILE` to the unique eligible axis (a hand pin on a two-node kernel
-raises naming the candidates; a family with no eligible axis drops). Readers go through `family_value(knobs, family)`
-so a bare and a suffixed key parse / featurize / golden-match identically — the schema is **invisible on one-node
-kernels** (the display collapses `TILE@d` / `REDUCE@d` back to bare when there is a single eligible axis for the
-family, so those tables read as before and match the bare golden YAML). The schedule reduce partition IS the
-axis-named reduce family — there is no separate native `REDUCE@` decision to collide with (the reduce/split-K
-partition is the one reduce family), so `REDUCE` joins `TILE`/`STAGE` on the `@<axis>` keying. The op cache key
-re-keys onto the axis-named identity (expected — the transfer handle for the prior, not a regression).
+A per-node schedule key addresses the node it decorates by POSITION in the recognized tile tree —
+`FAMILY@<node-path>[.<axis>][<n>]`, resolved by the ONE walker/resolver in `ir/tile/path.py` (`sites` / `resolve` /
+`spell` — total over the sugar levels, idempotent, loud on ambiguity and on a stored short key a structural change
+broke). **Short paths are canonical**: the stampers spell the SHORTEST key unique for the kernel's tree, which is
+exactly the stored golden/DB spelling — bare `TILE`/`REDUCE`/`STAGE` on today's single-primary trees, `TILE@dd` /
+`TILE@pj` on flash (the axis is the real discriminator), `REDUCE@<stat axis>` for the fused kernel's cone statistic
+(the path form — `REDUCE@a.fold.k` — when the axis name collides; edge labels `a`/`b` are view-role sugar off the
+bilinear parse). Bare-family sugar resolves to the PRIMARY (root-most schedule-bearing) node, so bare `REDUCE` on
+norm_linear/geglu still means the contraction's K fold; `WSPEC` / `RASTER` stay root-global (bare). The reserved
+graph-level placement grammar (`in.<operand>` path prefix, leading-`=` value pins) is rejected, never reused. The
+golden compat tripwire (`tests/.../test_golden_key_compat.py`) resolves every stored knob dict against its kind's
+tree and proves every spelling already canonical — the zero-migration invariant; the one documented exception is
+the dynamic-attention bare `TILE` (its PV plan, matched any-of by the golden layer). Readers still go through
+`family_value(knobs, family)` so old axis-suffixed evidence rows and canonical rows parse / featurize /
+golden-match identically (the display collapse in `tuning_knob_items` now serves only that stored-evidence
+compat and never collapses onto a bare key already present).
 
 ### Odds and ends
 

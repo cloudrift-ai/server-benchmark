@@ -16,7 +16,6 @@ from emmy.compiler.pipeline.knob import (
     format_tuning_knobs,
     is_off_value,
     pin_key_matches,
-    resolve_axis,
     tuning_knob_items,
     values_equal,
 )
@@ -433,14 +432,6 @@ def test_family_and_axis_of():
     assert family_of("TILE") == "TILE" and axis_of("TILE") is None
     # A native ``MOVE@element`` splits on the first ``@`` (the ``.cta`` rides the element).
     assert family_of("REDUCE@k.cta") == "REDUCE" and axis_of("REDUCE@k.cta") == "k.cta"
-
-
-def test_resolve_axis_bare_suffixed_and_ambiguous():
-    assert resolve_axis("TILE", "TILE", ["d"]) == "TILE@d"  # bare → the unique eligible axis
-    assert resolve_axis("TILE", "TILE@d", ["d"]) == "TILE@d"  # already suffixed: idempotent
-    assert resolve_axis("TILE", "TILE", []) is None  # no eligible axis → drop
-    with pytest.raises(ValueError, match=r"TILE is ambiguous: use TILE@d or TILE@sk"):
-        resolve_axis("TILE", "TILE", ["d", "sk"])  # a bare pin on a flash kernel is ambiguous
 
 
 def test_family_value_reads_bare_or_suffixed():

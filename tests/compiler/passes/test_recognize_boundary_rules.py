@@ -264,8 +264,8 @@ def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
     stages_seen = set()
     reds_seen = set()
     for r in warp:
-        stage = [v for k, v in r.items() if k.startswith("STAGE@")]
-        red = [v for k, v in r.items() if k.startswith("REDUCE@")]
+        stage = [v for k, v in r.items() if k.startswith("STAGE")]
+        red = [v for k, v in r.items() if k == "REDUCE"]
         assert stage and all(v in ("d1/sync", "d2/sync") for v in stage), f"warp rows must ride the resolved sync compute-fill: {r}"
         assert all(v == "" or (v.startswith("g") and v.endswith(("k", "a"))) for v in red), (
             f"the computed-A form allows only the empty or split (g<w>k / g<w>a) K partition: {r}"
@@ -300,9 +300,11 @@ def test_norm_linear_warp_pick_is_computed_a_contraction():
     assert {"x", "wn", "w"} <= set(c.external_reads())
     assert c.stage is not None and c.stage.transport == "sync" and c.stage.bk_elems > 0
     assert tile.knobs.get("PLACE@cone") == "fuse"
+    # Phase 3: the stamped keys are the CANONICAL codec spellings — bare for the primary product
+    # fold, the explicit axis form for the cone's stat.
     assert tile.knobs.get(f"REDUCE@{stat_loop.axis.name}") == ""
-    assert tile.knobs.get(f"TILE@{c.k_axis.name}", "").startswith("a:")
-    assert tile.knobs.get(f"STAGE@{c.k_axis.name}") == "d1/sync"
+    assert tile.knobs.get("TILE", "").startswith("a:")
+    assert tile.knobs.get("STAGE") == "d1/sync"
 
 
 def test_norm_linear_cone_is_an_inline_node_tree():

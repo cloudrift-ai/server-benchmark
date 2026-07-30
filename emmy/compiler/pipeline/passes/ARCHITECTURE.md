@@ -65,7 +65,7 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   STAT-FREE computed A, which rides the `sync` compute-fill like the norm→linear cone but carries
   no statistic prologue) — plus the fold accumulator and the projection. The STORED form is the `role=CONTRACTION`
   `Fold` in the λ spelling (symmetric `operands` tuple bound POSITIONALLY to the lift params + the pure bilinear
-  `lift` Lambda + the componentwise additive `Monoid` threading the channel accumulator names; sharing is edge
+  `lift` Lambda + the componentwise additive `(init, combine)` pair threading the channel accumulator names; sharing is edge
   REUSE in the lift; the serial step / `Accum` forms / carrier annotation are DERIVED — see the λ-foldMap paragraph
   below); the
   `ContractionView` READING — shared A + `(b, acc)` channels + the `(m, n)` geometry — is the DERIVED view
@@ -156,17 +156,20 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
 
 **The λ-foldMap storage (1m–1p).** A non-composed `Fold` stores pure algebra: a `lift` `Lambda` — `λ(k, v₁…vₙ) → S`,
 the iteration var first, one param per operand edge bound POSITIONALLY, its results the element's SINGLETON state
-(softmax's is `(x, 1)` — ι spelled in the lift, a literal component a bare float) — plus the TRUE `Monoid`
-`(init, combine)` whose combine threads the fold's REAL accumulator names (its results). Everything else about the
+(softmax's is `(x, 1)` — ι spelled in the lift, a literal component a bare float) — plus the TRUE monoid's flat
+`(init, combine)` fields (1r: the `Monoid` wrapper class is dissolved — `M(op…)` survives as the free componentwise
+pair constructor in `ir/stmt/algebra`, `component_ops`/`degenerate` as free shape-readers on the combine, the rename
+lockstep as `rename_combine`, the S×S→S arity check in `Fold.__post_init__`) whose combine threads the fold's REAL
+accumulator names (its results). Everything else about the
 serial form is DERIVED, never stored: the streaming step is combine specialized at the singleton (the `Accum` forms
 for a componentwise monoid, each landing right after the lift stmt defining its value; the exp family's generated
-merge for a twisted one), the `carrier` annotation reconstructs from `(monoid, lift)` at construction (the twist
+merge for a twisted one), the `carrier` annotation reconstructs from `(init, combine, lift)` at construction (the twist
 family selected STRUCTURALLY — the stored combine must BE the exp/LSE generator's program, asserted at formation;
 the state-component roles read off the singleton shape: pivot = component 0, literal-1 = denominator, value name =
 expectation), and `Fold.from_loop` keeps the λ spelling ONLY when the derived loop reproduces the captured one
 byte-identically (the construction-time gate) — so kernel identity (`op_cache_key`, off the lowered nest) cannot
 move. What still stores a `step`: COMPOSED folds — split-K's outer reduce over its sliced fold, and flash's kv
-stream, whose in-step QK / PV contraction folds carry their own schedule slices (`TILE@dd` / `TILE@pj`); their
+stream, whose in-step QK / PV contraction folds are the sites the `TILE@dd` / `TILE@pj` slices address; their
 dissolution into the derived blocked evaluation of `combine` rides the phase-2 codec walker (1r) and the QK
 edge-hoist re-keying window. `Map` stores `fn: Lambda` + `sources` (1n): sources bind positionally to `fn.params`
 (the params ARE the sources' bound output names, so lowering splices verbatim), `fn.results` replace the retired

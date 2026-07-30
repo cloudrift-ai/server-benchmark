@@ -140,8 +140,12 @@ _NODE_STRUCT_BASES = (
 def _node_axes(knobs: dict) -> list[str | None]:
     """The schedule-bearing nodes' axes, in first-seen order — one per distinct ``@<axis>`` element
     across the per-node schedule families (``TILE`` / ``REDUCE`` / ``STAGE``). ``[None]`` (one bare
-    node) when a schedule family is present bare (goldens / pins / the single-node canonical-collapse);
-    ``[]`` when the kernel carries no schedule codec at all (a pure pointwise ``Map``)."""
+    node) when the schedule families are ALL bare (goldens / single-node canonical rows); a MIXED
+    row — the phase-3 canonical flash spelling: ``TILE@dd`` / ``TILE@pj`` beside bare ``REDUCE`` /
+    ``STAGE`` for the primary stream — appends the ``""`` bare-remainder group so the primary
+    node's slices keep contributing to the sum-pool (byte-identical to the retired ``@kv``
+    spelling's own group). ``[]`` when the kernel carries no schedule codec at all (a pure
+    pointwise ``Map``)."""
     axes: list[str] = []
     seen: set[str] = set()
     has_bare = False
@@ -155,7 +159,7 @@ def _node_axes(knobs: dict) -> list[str | None]:
             seen.add(ax)
             axes.append(ax)
     if axes:
-        return list(axes)
+        return [*axes, ""] if has_bare else list(axes)
     return [None] if has_bare else []
 
 
@@ -164,11 +168,18 @@ def _node_slice(knobs: dict, axis: str | None) -> dict:
     that node's ``FAMILY@<axis>`` schedule codecs plus the shared ``S_*`` / ``H_*`` context,
     with any addressed per-node structural feature (``S_ext_reduce_prod@<axis>``) substituted in bare so
     ``_geom_feats`` reads the node's own extents. ``axis is None`` (the bare single node) returns
-    ``knobs`` unchanged — the whole dict is that one node (byte-identical to the pre-loop featurizer)."""
+    ``knobs`` unchanged — the whole dict is that one node (byte-identical to the pre-loop
+    featurizer); ``axis == ""`` is the mixed row's bare-remainder group — the BARE schedule
+    families (the phase-3 primary node) plus the context."""
     if axis is None:
         return knobs
     # The shared structural / regime context (bare ``S_*`` / ``H_*``).
     sub: dict = {k: v for k, v in knobs.items() if k.startswith((STRUCT_PREFIX, CTX_PREFIX)) and "@" not in k}
+    if axis == "":
+        for fam in _AXIS_FAMILIES:
+            if fam in knobs:
+                sub[fam] = knobs[fam]
+        return sub
     for fam in _AXIS_FAMILIES:
         key = f"{fam}@{axis}"
         if key in knobs:

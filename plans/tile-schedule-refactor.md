@@ -320,6 +320,34 @@ the α-invariant term hash is a re-keying-window event).
   (pivot = comp 0, literal-1 = denominator, value name = expectation — no annotation). RESIDUAL:
   flash's kv fold keeps the composed `step`; its dissolution rides the phase-2 walker + the step-7
   window. The hd512.s2048 split-KV digest matches the pre-refactor base byte-exactly.
+- **Step 1 / phase 2 (LANDED)** — the codec core: `ir/tile/path.py` (ONE walker `sites` +
+  resolver `resolve` + canonical speller `spell`; anchored path subsequences, edge-label
+  preference, primary-bare guard, ordinal emission, reserved-form rejection) + the golden compat
+  tripwire (`test_golden_key_compat.py` — every stored spelling proven canonical against per-kind
+  recognized trees; the dynamic-attention bare-`TILE` any-of contract the one asserted exception).
+- **Step 2 / 1r (LANDED, three digest-gated commits, 27-kernel harness byte-identical)** —
+  (i) `Monoid` dissolved into flat `Fold.init/combine/dtypes` (`M(op…)` / `component_ops` /
+  `degenerate` / `rename_combine` free helpers; arity check in `Fold.__post_init__`;
+  `foldmap_eval(init, combine, lift, …)`); (ii) `tile`/`reduce`/`stage` left the nodes for
+  `TileOp.schedule` `{codec key → resolved slice}` via the `ops.Sched` accessor
+  (`contraction_view` takes caller slices, `warp_source`/`chain_source`/`Ctx.sched` read it,
+  `nodify_reduce` returns the fold to key on, `030` re-keys onto the partial's own tree, graph
+  JSON round-trips the dict values) — the term is immutable across the schedule search (the flash
+  variants share one op verbatim); (iii) `TileOp.work` — the ONE worker inventory
+  (`ir.schedule.Workers` + `derive_workers`, sealed per option, LOUD on cross-site disagreement).
+  RESIDUAL (deliberate, step-7 wire item): `TilePlan.units` stays a field of the value object —
+  the slot is authoritative and validated, the ~150-site consumer migration rides the
+  value-grammar split that re-spells the wire anyway.
+- **Step 3 / phase 3 (LANDED)** — the stampers spell knob keys via the resolver
+  (`_schedule._family_key`; `_at` deleted, dead `knob.resolve_axis` deleted): stamped rows now ARE
+  the stored/golden spellings — bare on single-primary trees, `TILE@dd`/`TILE@pj` + bare
+  `REDUCE`/`STAGE` on flash, the cone stat's explicit `REDUCE@<stat axis>` shared across the
+  merged prologue fork (`prologue_knob_bases` spells against the con tree; the map form keys its
+  own reduce spec on the stat key). `tuning_knob_items`' collapse survives ONLY as stored-evidence
+  compat (never collapsing onto a present bare key); `_node_axes/_node_slice` grew the
+  bare-remainder group so mixed flash rows keep their stage/reduce geometry in the sum-pool;
+  `enumerate_graph` keeps rows by family, not `@`-presence. Kernel sources digest-identical;
+  golden drift gate + offer-compat tests green on the 5090 goldens.
 
 ## Execution order (remaining work)
 
@@ -328,6 +356,8 @@ the order below — chosen so every step consumes only what already landed, the 
 bottleneck for everything else) lands first, and EVERYTHING re-keying-gated is bundled into ONE
 deliberately scheduled window at the very end, against a phase-5-verified baseline, instead of
 scattered re-key events. Identity keys off the lowered nest until that final step.
+
+(Steps 1–3 below are LANDED — see the trail above; the text is kept as the design record.)
 
 **Step 1 — Phase 2, the codec core** (detail under *Knob codec* below). Self-contained: no GPU, no
 re-keying risk, and it unblocks 1r, phase 3, and the `TILE@pj` half of the flash residual. Write the

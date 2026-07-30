@@ -2841,6 +2841,16 @@ configs:
   # are kept BESIDE the cut ones (a recorded measurement is never deleted, and `fuse` is the form a
   # cone-cut-less enumeration can still reach); the resolver takes the fastest realizing entry, so the
   # cut rows are what deploy. 3x reproduced at <2% spread, 2026-07-30 manual pinned --ab (no tuner).
+  #
+  # CAVEAT, measured end to end and worth more than these entries: swapping these three in on a live
+  # gemma-4 server moves the served step by 0.1% (28.06 vs 28.09 ms at conc 6, 28.77 vs 28.73 at conc 8),
+  # even though the boot log confirms the cut form deploys. `run --bench --golden` replays ONE weight slab
+  # 100x, so any slab under the card's 96 MB L2 is timed L2-resident: norm_qkv (63 MB) and
+  # norm_qk_global (67 MB) fit and showed the 42-49% wins, norm_gate_up (236 MB) does not and showed 8%.
+  # A decode step streams the whole 21.8 GB trunk, so none of it is L2-resident there. These entries are
+  # kept because they are not a regression, they give norm_gate_up.m32 a golden floor it had lost to
+  # enumeration drift, and they close norm_qkv's missing m32 coverage — NOT as a throughput improvement.
+  # See plans/gemma4-narrow-decode-width-findings.md section 4a.
   - kernel: norm_linear
     name: gemma4_12b.norm_gate_up.m32.cut.lin
     M: 32

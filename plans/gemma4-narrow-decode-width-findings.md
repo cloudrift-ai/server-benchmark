@@ -14,18 +14,21 @@ DRAM floor, so kernel work has ~1.3 ms of realistic headroom — 4-5% of the ste
 
 Same-box, full-protocol decomposition of the observed **0.797x** (section 2):
 `0.803 (admission) x 0.945 (step latency) x 1.024 (acceptance — an emmy advantage) = 0.777`.
-**Admission alone (0.803) accounts for the whole observed ratio to within 1%; kernels are the ~5.5%
-step-latency term.** So the honest verdict
-is that **admission capacity is essentially the whole cell gap**, with a real but much smaller kernel
-term beside it — and the brief's suspicion was pointed at the right half of the smaller term (m32 kernel
-quality is genuinely worse than m8's; see section 4b for why, which *is* the bucket 8 -> 32 shift, though
-not for the reason hypothesized).
+**Admission alone (0.803) accounts for the whole observed ratio to within 1%.** So the honest verdict
+is that **admission capacity is essentially the whole cell gap**. There is a ~5.5% step-latency term
+beside it, and m32 kernel quality is genuinely worse than m8's (section 4b explains why, and it *is* the
+bucket 8 -> 32 shift, though not for the reason hypothesised) — but the one kernel change available for
+it turned out not to move the served step, so that term remains unexplained and open.
 
-A real m32 kernel win does exist, is deploy-verified, and ships on this branch (section 4): the three
-fused norm->linear edges the decode twins launch every step were deploying `PLACE@cone=fuse` where
-`cut` is 8 - 49% faster, taking them from 0.73 - 0.96x eager to 1.01 - 1.38x. It is worth ~1.3 ms of
-emmy's 14.86 ms per-step kernel budget — a genuine correction to the previous round's "no m32 win
-exists" — which is ~three quarters of the step-latency term. It cannot touch the other three terms.
+**And the m32 kernel win does not survive contact with the model.** The three fused norm->linear edges
+the decode twins launch were deploying `PLACE@cone=fuse` where `cut` benchmarks 8 - 49% faster
+(section 4), so I recorded it. It deploys — verified in the boot log — and the served step does **not
+move**: 28.06 vs 28.09 ms at `c=6`, 28.77 vs 28.73 ms at `c=8` (section 4a). The reason is that
+`run --bench --golden` replays one weight slab 100 times, so any slab under the card's 96 MB L2 is
+measured L2-resident: the two edges that fit L2 (63 and 67 MB) showed the 42 - 49% wins, the one that
+does not (236 MB) showed 8%, and in a step that streams 21.83 GB nothing is L2-resident. **The change is
+kept — it is not a regression, it fixes a DRIFT and a coverage gap — but its throughput claim is
+withdrawn.** The broader lesson is in section 4a and matters more than the change itself.
 
 Read section 2's honesty notes before quoting any tok/s number from this report: `c=8` at
 `num-prompts 16` is not reproducible for *either* engine (emmy 369 - 492, stock 469 - 540), and the
@@ -544,6 +547,57 @@ credible; **treat ~9% as the number and the rest as unproven.** I did not verify
 whole-step effect end to end — that needs a cold-resolve `stepprof` against the edited goldens, which
 did not fit in the budget.
 
+## 4a. END-TO-END: the m32 kernel win does NOT reach the served model
+
+This is the most important correction in this report, and it is against my own change.
+
+Same box, same published image, same knobs, same client protocol as the E1 baseline. **One variable:**
+the container's goldens file is the image's own with the three `cut` entries appended. The change
+demonstrably takes effect — the boot log's decode-twin kernel sets contain `__cone` (the cut form) in
+**16** program sets and the fused `k_linear_mean_reduce_037454` in **0**, where E1 deployed the fused
+form everywhere. KV is identical (3.0 GiB, 2.78x), so nothing else moved.
+
+| box A, depth 2, bucket 32 | E1 (image goldens) | E9 (+ m32 cut goldens) | delta |
+|---|--:|--:|--:|
+| `c=6` `np=12` median ITL | 28.09 ms | **28.06 ms** | **-0.1%** |
+| `c=8` `np=64` median ITL | 28.73 ms | **28.77 ms** | **+0.1%** |
+| `c=8` `np=64` median TPOT | 10.18 ms | 10.17 ms | -0.1% |
+| `c=8` `np=64` tok/s | 476.75 (E2: 485.91) | 480.22 | within spread |
+
+**Kernels 8 - 49% faster in isolation, verified deploying, and the served step does not move at all.**
+
+### Why: `run --bench --golden` measures L2-resident bandwidth at these shapes
+
+The RTX 5090 has 96 MB of L2. A `--golden` bench replays one kernel 100 times over one weight slab, so
+any slab under ~96 MB stays L2-resident across iterations. The correlation with the measured wins is
+exact:
+
+| edge | weight slab | fits in 96 MB L2? | isolated win from `cut` |
+|---|--:|---|--:|
+| `norm_qkv.m32` | 62.9 MB | **yes** | **-42%** |
+| `norm_qk_global.m32` | 66.8 MB | **yes** | **-49%** |
+| `norm_gate_up.m32` | 235.9 MB | no | **-8%** |
+
+A decode step streams the whole 21.83 GB trunk, so in the model **nothing is L2-resident**. The two
+big wins are L2-bandwidth wins that cannot exist there; the only DRAM-real one is `norm_gate_up`'s 8%,
+worth 12.9 us x 48 layers = **0.62 ms of a 28.7 ms step (2.2%)** — at or below this benchmark's noise
+floor, which is exactly what E9 measures.
+
+**This generalises well beyond my change.** Any golden entry whose weight slab is under ~96 MB on this
+card has a recorded `emmy_us` that reflects L2 bandwidth, not DRAM. That is most of the narrow-N
+projection shapes in this dataset. Comparisons *within* a shape stay valid (both arms get the same L2
+benefit, which is why the resolver still ranks correctly), but **the recorded microsecond figures must
+not be used to predict in-model step time**, and the section 1 kernel budget — measured differently, by
+timing the deployed 48-layer program set — is the number to trust.
+
+### What I did with the change
+
+**Kept, with the performance claim withdrawn.** It is not a regression (480.22 sits dead centre of the
+baseline's 476.75 / 485.91), it fixes a real DRIFT — `norm_gate_up.m32.lin` had no realizable golden, so
+that shape had no floor at all — and it fills a real coverage gap, `norm_qkv.m32`, the sliding layers'
+fused QKV edge with no entry of any kind. Those two are worth having on their own. **What it is not is a
+throughput improvement**, and section 7's recommendation is ordered accordingly.
+
 ## 4b. The brief's puzzle: why plain `c=8` is 0.97x and MTP `c=8` is 0.74x
 
 Same box, same concurrency, same prefill quantum, same drafter-on-stock-vLLM for both engines. The only
@@ -644,12 +698,15 @@ vacuous — a differently-pinned variant in the same sweep came back `wrong-answ
 2. **Profile the ~10 ms of the step that is not GPU work** (section 1). It is the largest unexplained
    block in the step for *both* engines, and nobody has looked at it. Nsight Systems on a live
    container, or vLLM's own `--enable-layerwise-nvtx-tracing`.
-3. **Done on this branch: the `PLACE@cone=cut` m32 goldens** (section 4) — ~9% of emmy's per-step
-   kernel time at every width that routes through bucket 32, independent of everything above. What is
-   left there is `mlp_down_fused.m32`, which needs an A/B on its true geglu-cone snippet.
-4. **Re-open the capture-ladder question if and only if recommendation 1 lands.** Today an added rung
+3. **Treat every golden `emmy_us` under ~96 MB of weight slab as an L2 number** (section 4a). It is the
+   most transferable thing found here: `run --bench --golden` cannot see DRAM bandwidth at those shapes,
+   so its wins do not predict in-model step time. Within-shape A/B comparisons stay valid; absolute
+   figures do not. A slab-size column in the golden bench output would make this impossible to miss.
+4. **Find out what the ~5.5% step-latency term actually is.** m32 kernels are worse than m8's and the
+   only available fix did not move the step, so the cause is not yet identified.
+5. **Re-open the capture-ladder question if and only if recommendation 1 lands.** Today an added rung
    at 24 is worth 1.9% at `np=64` (section 3) — not worth shipping. At a steady eight streams the width
    becomes 24, a rung nobody has A/B'd, and the answer may differ.
-5. **`emmy eval golden`'s drift audit deserves a CI lane.** `norm_gate_up.m32.lin` had been printing
+6. **`emmy eval golden`'s drift audit deserves a CI lane.** `norm_gate_up.m32.lin` had been printing
    `no offered candidate realizes any of them` on every single compile of this model, i.e. that shape
    had no golden floor at all, and nothing surfaced it. (Fixed here as a side effect; the class is not.)

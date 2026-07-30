@@ -278,12 +278,14 @@ def _eval_stmt(s: str):
 _STMT_EVAL_SCOPE: dict | None = None
 
 
-def _lenient_lambda(params=(), body=(), results=()):
-    """Rehydrate a dumped ``Lambda`` repr through the interim ``effectful_lambda`` path (see the
-    scope entry below — retires at 1q)."""
-    from emmy.compiler.ir.stmt.body import Body, effectful_lambda  # noqa: PLC0415
+def _loop_ir_lambda(params=(), body=(), results=()):
+    """Rehydrate a dumped ``Lambda`` repr — strict formation for a pure body, the raw-loop-IR
+    arm for the kernels that legitimately dump impure fn bodies (the un-recognized escape cells,
+    ``030_split_reduce``'s finalize kernels — see ``tile.ir._loop_ir_fn``)."""
+    from emmy.compiler.ir.stmt.body import Body  # noqa: PLC0415
+    from emmy.compiler.ir.tile.ir import _loop_ir_fn  # noqa: PLC0415
 
-    return effectful_lambda(params, Body.coerce(body), results)
+    return _loop_ir_fn(params, Body.coerce(body), results)
 
 
 def _stmt_eval_scope() -> dict:
@@ -366,11 +368,10 @@ def _stmt_eval_scope() -> dict:
         # ``repr(np.dtype('float32'))`` is ``dtype('float32')`` — eval needs
         # ``dtype`` in scope to round-trip ``DataType.np``.
         "dtype": _np.dtype,
-        # INTERIM (retires at 1q): a dumped ``Map.fn`` lambda may still carry the projection
-        # ``Write``s / a split partial's ``Loop`` (the effects that move to the kernel boundary
-        # at 1q), so the round-trip rebuilds through the same lenient path ``Map`` construction
-        # uses — strict ``Lambda`` formation once the body is pure.
-        "Lambda": _lenient_lambda,
+        # A dumped ``Map.fn`` lambda is strict for every recognized term (the root stores left
+        # for ``TileOp.stores`` at 1q); the raw-loop-IR kernels (escape cells, 030 finalizes)
+        # rebuild through the same ``_loop_ir_fn`` arm ``Map`` construction uses.
+        "Lambda": _loop_ir_lambda,
         "__builtins__": {},
     }
     # The tile-IR structural nodes (``Map`` / ``Fold`` / ``ContractionView``) and the

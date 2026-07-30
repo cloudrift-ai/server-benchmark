@@ -93,7 +93,7 @@ from emmy.compiler.ir.stmt import (
     component_ops,
     rename_combine,
 )
-from emmy.compiler.ir.stmt.body import _member_reads, effectful_lambda
+from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.ir.stmt.carrier import Channel as CarrierChannel
 
 if TYPE_CHECKING:
@@ -571,13 +571,14 @@ def captured_values(root, axes: set[str]) -> tuple[str, ...]:
     """The VALUE names ``root``'s subtree reads but does not itself define — its capture set, with
     iteration-space names (``axes``) excluded.
 
-    Empty means the subtree is **closed**: it can be lifted out of its enclosing body and computed
-    on its own, which is exactly what a placement cut does to a seam. A non-empty capture set is not
-    an error — flash's ``P = exp(s − m)`` genuinely reads the online-softmax carrier's
+    DEMOTED to a validation assert at 1q: operands bind POSITIONALLY to lift params, so an edge
+    cannot see the fold's state or its siblings — **edge iff closed holds by construction** — and
+    no decision consults this scan anymore. It remains the executable check behind that invariant
+    (tests assert closure structurally) and the honest reading of the one legal capture: flash's
+    ``P = exp(s − m)`` genuinely reads the online-softmax carrier's
     running max, updated by the merge stmts of the very loop step that consumes it (legal: an inline
-    operand's one home is always inside the scope it captures from) — but it IS the
-    reason such a seam is not cuttable. This is the predicate a placement cut asks before lifting
-    any subtree into its own kernel.
+    operand's one home is always inside the scope it captures from) — which is
+    why that seam is not cuttable.
 
     Returned sorted, so callers can put it straight into an error message."""
     from emmy.compiler.ir.tile.ops import lower  # noqa: PLC0415 — avoid an import cycle
@@ -1020,6 +1021,27 @@ class ContractionView:
         return [f"{indent}ContractionView [{self.m_axis.name}, {self.n_axis.name}] {ops}"]
 
 
+def _loop_ir_fn(params, body, results) -> Lambda:
+    """The RAW-LOOP-IR formation arm — the ONE impure ``Map.fn`` builder left after 1q, for the
+    kernels that are loop IR rather than recognized algebra: ``010_recognize``'s un-recognized
+    flat escape cells (multi/nested reduces), ``030_split_reduce``'s finalize kernels (``Init``
+    seeds + the un-annotated ``StateMerge`` merge ``Loop``), the prologue'd split partial, and
+    the coop norm→linear/geglu sibling's composed contraction tail. A PURE body goes through
+    strict :class:`Lambda` formation — every ROOT STORE left the term at 1q (``TileOp.stores``),
+    so impurity here is only iteration/seed structure, never an effect on the output. Reached
+    exclusively through ``Map``'s legacy ``body=`` construction / ``with_body`` / the rewrite
+    handler — never build one by hand; the escape spelling dies when recognition becomes total
+    (the "ONE algorithmic algebra recognizer" direction)."""
+    body = Body.coerce(body)
+    if all(s.pure for s in body):
+        return Lambda(params=tuple(params), body=body, results=tuple(results))
+    lam = object.__new__(Lambda)
+    object.__setattr__(lam, "params", tuple(params))
+    object.__setattr__(lam, "body", body)
+    object.__setattr__(lam, "results", tuple(results))
+    return lam
+
+
 def _map_results(body: Body) -> tuple[str, ...]:
     """The synthesized ``results`` of a legacy ``Map(body=…)`` construction — the last defining
     stmt's name (the retired ``out`` last-def convention, run ONCE at construction instead of on
@@ -1034,15 +1056,20 @@ def _map_results(body: Body) -> tuple[str, ...]:
 @dataclass(frozen=True, init=False)
 class Map(Stmt):
     """A pointwise lift / projection wrapper — ``fn: Lambda`` over zero or more reduction /
-    contraction ``sources``, bound POSITIONALLY: ``sources[i]`` produces the value ``fn.params[i]``
-    names (at construction the params ARE the sources' bound output names, so lowering splices the
-    body verbatim). ``fn.results`` are the bound output names — they replace the retired ``out``
+    contraction ``sources``, bound POSITIONALLY: ``sources[i]``'s result components produce the
+    values ``fn.params`` name (one param per component — a product source binds every channel
+    accumulator, so the geglu combine's second read is a bound param, never a free name).
+    ``fn.results`` are the bound output names — they replace the retired ``out``
     last-def convention (``out`` reads ``fn.results[0]``).
 
-    ``fn.body`` is the per-cell pointwise / projection compute: operand ``Load``\\ s, the lift
-    ``Assign``\\ s, and — UNTIL 1q moves effects to the kernel boundary — the root output
-    ``Write`` and ``030_split_reduce``'s sliced-partial ``Loop``\\ s (the one sanctioned impurity,
-    built through ``effectful_lambda``). ``sources`` are the structural nodes it projects over
+    ``fn.body`` is the per-cell pointwise / projection compute — operand ``Load``\\ s, the lift
+    ``Assign``\\ s / ``Select``\\ s — and since 1q it is PURE for every recognized term: the root
+    output ``Write`` (and the rms/softmax output-sweep ``Loop`` around it) rides ``TileOp.stores``
+    at the kernel boundary, reconstituted on demand (``effect_tail``). The raw-loop-IR kernels
+    that are NOT recognized algebra — the un-recognized flat escape cell, ``030_split_reduce``'s
+    finalize (``Init`` seeds + the merge ``Loop``), the coop fused-tail sibling — still form an
+    impure fn through the one ``_loop_ir_fn`` arm. ``sources`` are the structural nodes it
+    projects over
     (:class:`Fold` / :class:`ContractionView` — ``project ∘ reduce``), empty for a pure pointwise
     map; SEVERAL sources is the **fused sibling group** — N contractions over one shared A, the
     gate⊗up MLP edge; the group schedules and lowers as ONE unit. Every recognized contraction —
@@ -1052,7 +1079,7 @@ class Map(Stmt):
     the compat read for ``fn.body``.
 
     The legacy ``Map(body=…, sources=…)`` construction shape keeps working: the binder is
-    synthesized (params = the sources' output names; results = the last def, once, here)."""
+    synthesized (params = the sources' result components; results = the last def, once, here)."""
 
     pure = True  # a term is a value — its internals are its own; legal inside a stored ``Lambda``
 
@@ -1077,7 +1104,7 @@ class Map(Stmt):
             params = tuple(n for s in sources for n in _operand_result_names(s))
             if results is None:
                 results = _map_results(b) or params[:1]
-            fn = effectful_lambda(params, b, results)
+            fn = _loop_ir_fn(params, b, results)
         elif body is not None or results is not None:
             raise TypeError("Map: pass fn= xor (body= / results=), not both")
         object.__setattr__(self, "fn", fn)
@@ -1099,7 +1126,7 @@ class Map(Stmt):
 
     def with_body(self, body) -> Map:
         """A copy with the lambda's body replaced (params / results preserved)."""
-        return Map(fn=effectful_lambda(self.fn.params, Body.coerce(body), self.fn.results), sources=self.sources)
+        return Map(fn=_loop_ir_fn(self.fn.params, Body.coerce(body), self.fn.results), sources=self.sources)
 
     # ---- the stmt protocol (see ``Fold``): ``sources`` are NOT nested bodies — they are node
     # edges, reached by the node-aware walk (:func:`tree_nodes`), the same way a ``ContractionView``'s
@@ -1126,7 +1153,7 @@ from emmy.compiler.ir.stmt.passes import rewrite as _rewrite  # noqa: E402
 def _(s: Map, rename, sigma, axis_fn):
     # The binder renames in lockstep with the body and sources: params track the sources' output
     # names (positional binding), results track the projection defs.
-    fn = effectful_lambda(
+    fn = _loop_ir_fn(
         tuple(rename(p) for p in s.fn.params),
         Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.fn.body)),
         tuple(rename(r) if isinstance(r, str) else r for r in s.fn.results),

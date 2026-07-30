@@ -80,7 +80,6 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from emmy.compiler.dim import Dim

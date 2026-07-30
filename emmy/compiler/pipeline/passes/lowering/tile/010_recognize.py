@@ -65,7 +65,18 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import Stmt
-from emmy.compiler.ir.tile import Channel, ContractionView, Fold, Map, Placement, TileOp, TilePlan, shared_operand, split_effects
+from emmy.compiler.ir.tile import (
+    Channel,
+    ContractionView,
+    Fold,
+    Map,
+    Placement,
+    TileOp,
+    TilePlan,
+    demote_operands,
+    shared_operand,
+    split_effects,
+)
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import Fork
 
@@ -257,6 +268,8 @@ def _lift_cell(cell: list[Stmt], free: list, output: str) -> tuple[Map | Fold, t
     # ``lower`` flattens either back identically.
     if annotated.role in (AxisRole.PLANAR, AxisRole.TWISTED):
         reduction = Fold.from_loop(annotated)
+        if reduction is None:  # not λ-representable — the raw-loop-IR escape (the flat Map)
+            return Map(body=(annotated, *projection)), ()
         if bare:
             return reduction, ()
         # A projected reduce (softmax / RMSNorm) is the ``source`` of a ``Map`` whose body IS that
@@ -308,7 +321,9 @@ def _nodify_contraction(node, free: tuple):
             # derived view the schedule re-extracts (``contraction_view``).
             fold = con.as_fold()
             return _project(fold, epi)
-    red = Fold.from_loop(rloop)  # loads stay inline in the step — the fold derives PLANAR
+    red = Fold.from_loop(rloop)  # loads stay inline in the lift — the fold derives PLANAR
+    if red is None:  # not λ-representable — the raw-loop-IR escape (the flat Map)
+        return Map(body=(rloop, *projection)), ()
     return _project(red, projection)
 
 
@@ -329,13 +344,14 @@ def _project(fold: Fold, projection: Body) -> tuple[Map | Fold, tuple]:
 def _demote_planar(node):
     """The PLANAR sibling of a computed-A :class:`ContractionView` whose contraction form yielded
     no legal schedule row (fp32 / no atoms / bad geometry — the scheduler's never-a-raising-row
-    guardrail returns ``[]``): flatten the node back through its synthesized fold ``Loop`` and
-    refold it with everything inline — the operand hoist is undone, so the fold **derives**
-    ``PLANAR`` (``Fold.role``), the same route :func:`_nodify_contraction` leaves an unbindable
-    cell on, applied post-nodification. The flattening puts the inline cone in the fold body
-    (recomputed per cell)."""
+    guardrail returns ``[]``): the operand hoist is UNDONE — every edge moves INLINE into the
+    lift body (the cone as a structural NODE — a term is a value, legal in a pure ``Lambda``;
+    ``_flatten_nodes`` flattens it at lowering, so the loop is byte-identical to the old
+    flatten-and-refold) — and with no operand edges the bilinear parse declines, so the fold
+    **derives** ``PLANAR`` (``Fold.role``), the same route :func:`_nodify_contraction` leaves an
+    unbindable cell on, applied post-nodification."""
     src = node.sources[0] if isinstance(node, Map) else node
-    red = Fold.from_loop(src.loop)
+    red = demote_operands(src)
     projection = Body(tuple(node.body) if isinstance(node, Map) else ())
     return Map(body=projection, sources=(red,)) if len(projection) else red
 

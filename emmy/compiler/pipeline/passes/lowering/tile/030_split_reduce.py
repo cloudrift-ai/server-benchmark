@@ -83,7 +83,18 @@ def _slice_loop(rloop: Loop, b: int) -> Loop:
     offset = BinaryExpr("+", Var(rax.name), BinaryExpr("*", Var(_SPLIT), Literal(b, "int")))
     sigma = Sigma({rax.name: offset})
     ident = lambda n: n  # noqa: E731
-    new_body = tuple(s.rewrite(ident, sigma) for s in rloop.body)
+
+    def _keep_axes(orig, new):
+        # The generic σ arm expands an ``Accum``'s reduce ``axes`` to the substitution's free
+        # vars (``a1`` → ``(_ksplit, a1)``) — correct for a general axis rename, but the slice's
+        # ``_ksplit`` is a GRID axis of the partial, not a reduce axis of its loop: the accum
+        # still folds only its own slice. Keep the original axes so the sliced loop stays the
+        # λ-representable canonical shape (the derived serial step stamps ``(axis,)``).
+        if isinstance(new, Accum):
+            return replace(new, axes=orig.axes)
+        return new
+
+    new_body = tuple(_keep_axes(s, s.rewrite(ident, sigma)) for s in rloop.body)
     new_ax = replace(rax, extent=Dim(b))
     return Loop(axis=new_ax, body=Body(new_body), unroll=rloop.unroll, role=rloop.role, carrier=rloop.carrier)
 
@@ -129,8 +140,8 @@ def _residual(map_op: Map, plan: ReducePlan) -> tuple[Map | Fold, dict]:
     if prologued and not (stripped.coop > 1 or stripped.reg > 1):
         return map_op, {}
     op2, fold = nodify_reduce(map_op)
-    if not (stripped.coop > 1 or stripped.reg > 1):
-        return op2, {}
+    if fold is None or not (stripped.coop > 1 or stripped.reg > 1):
+        return op2, {}  # not λ-representable ⇒ the raw flat spelling, serial only (as before 1q)
     sched = Sched(op2, {})
     sched.put("REDUCE", fold, stripped)
     return op2, sched.table

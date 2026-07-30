@@ -4,7 +4,8 @@ DERIVE the serial step, the ``Accum`` forms, and the ``carrier`` annotation.
 
 The contract these pin: (a) :meth:`Fold.from_loop` keeps the λ spelling ONLY when the derived
 loop reproduces the captured one byte-identically (the construction-time gate) — recognition's
-canonical dissolved shapes migrate, twisted / composed / non-canonical shapes keep ``step``;
+canonical dissolved shapes migrate, a non-reproducible shape returns ``None`` (the raw-loop-IR
+escape; the retired ``step`` fallback is gone);
 (b) :meth:`ContractionView.as_fold` stores λ-spelled and round-trips through
 ``contraction_view`` with a byte-identical derived loop; (c) the rewrite canonicalizer renames
 lift / monoid / derived carrier in lockstep."""
@@ -36,7 +37,7 @@ def _dissolved_loop(*, axes_stamped: bool = True) -> Loop:
 def test_from_loop_stores_the_canonical_shape_lambda_spelled() -> None:
     loop = _dissolved_loop()
     fold = Fold.from_loop(loop)
-    assert fold.lift is not None and len(fold.step) == 0
+    assert fold is not None and fold.lift is not None
     assert fold.lift.params == ("k",)  # the iteration var; loads stay inline in the lift
     assert fold.lift.results == ("v1",)
     assert degenerate(fold.combine) and fold.combine.results == ("acc0",)
@@ -46,13 +47,12 @@ def test_from_loop_stores_the_canonical_shape_lambda_spelled() -> None:
     assert fold.role is AxisRole.PLANAR  # loads inline, no operand edges — the demoted shape
 
 
-def test_from_loop_keeps_step_spelling_when_the_derivation_diverges() -> None:
+def test_from_loop_declines_a_non_reproducible_shape() -> None:
     # An un-stamped Accum (axes=()) is not the canonical dissolved shape — the derived Accum
-    # carries axes=(axis,), so the byte-identity gate declines and the captured step stands.
+    # carries axes=(axis,), so the byte-identity gate declines and ``from_loop`` returns ``None``:
+    # the raw-loop-IR escape replaced the retired step fallback.
     loop = _dissolved_loop(axes_stamped=False)
-    fold = Fold.from_loop(loop)
-    assert fold.lift is None and len(fold.step) == 3
-    assert fold.loop == loop  # reconstruction stays exact either way
+    assert Fold.from_loop(loop) is None
 
 
 def _view(arity: int = 2) -> ContractionView:
@@ -70,7 +70,7 @@ def test_as_fold_is_lambda_spelled_and_loop_byte_identical() -> None:
     for arity in (1, 2):
         view = _view(arity)
         fold = view.as_fold()
-        assert fold.lift is not None and len(fold.step) == 0
+        assert fold.lift is not None
         assert fold.role is AxisRole.CONTRACTION
         # The derived serial step + operand splice reproduce the view's synthesized product loop.
         assert fold.loop == view.loop
@@ -96,7 +96,7 @@ def _softmax_loop() -> Loop:
 def test_twisted_from_loop_stores_the_true_monoid() -> None:
     loop = _softmax_loop()
     fold = Fold.from_loop(loop)
-    assert fold.lift is not None and len(fold.step) == 0
+    assert fold is not None and fold.lift is not None
     assert fold.lift.results == ("x0", 1.0)  # ι spelled in the lift — the singleton state
     assert fold.init == (float("-inf"), 0.0)
     assert not degenerate(fold.combine)
@@ -118,7 +118,7 @@ def test_twisted_composed_fold_is_lambda_spelled_with_derived_evaluation() -> No
 
     op, _stores = _flash_op("Q", "K", "V", [1, 2], Dim(16), Dim(16), 8, 8)
     (red,) = op.sources
-    assert red.lift is not None and len(red.step) == 0
+    assert red.lift is not None
     assert red.role is AxisRole.TWISTED
     assert red.lift.results[1:] == (1.0, "v_e")  # ι: (score, 1, v) — the singleton state
     assert is_contraction_fold(red.operands[0]) and red.operands[0].out == "sacc"  # the hoisted QK edge

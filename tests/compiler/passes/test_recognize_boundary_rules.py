@@ -482,18 +482,24 @@ def test_bind_contraction_declined_cone_raises_not_positional():
 def _prologue_shape(*, b_layouts):
     """The recognized MONOID-producer shape: a per-row statistic reduce, its scalar sweep, and a
     column loop folding one ⊗-channel per entry of ``b_layouts`` over the shared normalized row."""
-    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.axis import Axis, AxisRole
     from emmy.compiler.ir.expr import Var
     from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
     from emmy.compiler.ir.tile import Fold
 
     m, n, k, r = Axis("m", 8), Axis("n", 16), Axis("k", 32), Axis("r", 32)
-    fold = Accum(name="sacc", value="sq", op="add")
-    stat = Fold(
-        carrier=fold.as_carrier(),
-        axis=r,
-        step=Body((Load(name="x_e", input="x", index=(Var("m"), Var("r"))), Assign(name="sq", op="multiply", args=("x_e", "x_e")), fold)),
+    fold = Accum(name="sacc", value="sq", op="add", axes=("r",))
+    stat = Fold.from_loop(
+        Loop(
+            axis=r,
+            body=Body(
+                (Load(name="x_e", input="x", index=(Var("m"), Var("r"))), Assign(name="sq", op="multiply", args=("x_e", "x_e")), fold)
+            ),
+            role=AxisRole.PLANAR,
+            carrier=fold.as_carrier(),
+        )
     )
+    assert stat is not None
     kbody = [Load(name="x_k", input="x", index=(Var("m"), Var("k"))), Assign(name="xh", op="multiply", args=("x_k", "rs"))]
     for i, trans in enumerate(b_layouts):
         idx = (Var("n"), Var("k")) if trans else (Var("k"), Var("n"))

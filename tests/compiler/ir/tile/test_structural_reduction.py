@@ -24,8 +24,9 @@ from emmy.compiler.ir.tile.ops import axis_role, lower, reduce_loop, reduce_plan
 
 def _sum_loop() -> Loop:
     """A minimal annotated reduce ``Loop`` — ``acc += x[m, k]`` over ``k``, the way recognition
-    stamps it (its degenerate ``add`` carrier read off the fold ``Accum``)."""
-    acc = Accum(name="acc", value="x_e", op="add")
+    stamps it (its degenerate ``add`` carrier read off the fold ``Accum``, the ``axes`` stamp
+    included — the canonical dissolved shape ``from_loop``'s byte gate reproduces)."""
+    acc = Accum(name="acc", value="x_e", op="add", axes=("k",))
     body = Body((Load(name="x_e", input="x", index=(Var("m"), Var("k"))), acc))
     return Loop(axis=Axis("k", 1024), body=body, role=AxisRole.PLANAR, carrier=acc.as_carrier())
 
@@ -33,6 +34,7 @@ def _sum_loop() -> Loop:
 def test_from_loop_reconstructs_the_loop_exactly() -> None:
     loop = _sum_loop()
     red = Fold.from_loop(loop)
+    assert red is not None
     # The synthesized loop is byte-identical to the captured one (axis / role / carrier / body).
     assert red.loop == loop
     assert reduce_loop(red) == loop
@@ -42,6 +44,7 @@ def test_from_loop_reconstructs_the_loop_exactly() -> None:
 def test_bare_reduction_lowers_to_just_the_loop() -> None:
     loop = _sum_loop()
     red = Fold.from_loop(loop)
+    assert red is not None
     assert lower(red) == [loop]
     # A bare reduce's grid ``Write`` is glue — ``out`` is the carrier state's primary component.
     assert red.out == loop.carrier.out == "acc"
@@ -90,6 +93,7 @@ def test_reduce_plan_reads_the_partition_off_the_schedule_dict() -> None:
 
     plan = ReducePlan.of(coop=128)
     red = Fold.from_loop(_sum_loop())
+    assert red is not None
     # A bare reduce root and a projecting Map both surface the partition keyed on the fold.
     bare = _tile(red)
     sched_of(bare).put("REDUCE", red, plan)
@@ -220,11 +224,14 @@ def test_factor_k_splits_the_axis_with_distinct_names() -> None:
 
 
 def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
-    """Split-K is ``Fold(axis=ksplit, step=[ContractionView(k_axis=kslice)])``: the outer additive
-    reduce sums partials across CTAs, the inner contraction folds its slice. ``lower`` is a SINGLE
-    ``for ksplit:[for kslice: mul-add]`` with DISTINCT axis names (not ``for k:[for k:]``), and it
-    still classifies as a ``CONTRACTION`` carrying the GRID (cta) partition."""
-    from emmy.compiler.ir.elementwise import ElementwiseImpl
+    """Split-K is the identity-lift composition ``Fold(axis=ksplit, operands=(Fold(k_axis=kslice),))``:
+    the outer additive reduce sums partials across CTAs, the inner contraction folds its slice —
+    the outer's λ spelling is the identity lift over the inner's exact accumulator state (step 7;
+    the sliced fold is the ONE operand edge, the derived step embeds it verbatim). ``lower`` is a
+    SINGLE ``for ksplit:[for kslice: mul-add]`` with DISTINCT axis names (not ``for k:[for k:]``),
+    and it still classifies as a ``CONTRACTION`` carrying the GRID (cta) partition."""
+    from emmy.compiler.ir.stmt import Lambda
+    from emmy.compiler.ir.stmt.algebra import M, component_ops
     from emmy.compiler.pipeline.passes.lowering.tile._schedule import _factor_k
 
     c = _contraction()  # k_axis = k(256)
@@ -237,11 +244,17 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
     )
     from emmy.compiler.ir.tile.ops import sched_of
 
-    carrier = Accum(name="acc", value="acc__v", op=ElementwiseImpl("add")).as_carrier()
+    inner_fold = inner.as_fold()
+    accs = inner_fold.combine.results
+    init, combine = M(*component_ops(inner_fold.combine), names=accs)
     red = Fold(
-        carrier=carrier,
+        carrier=None,
         axis=ksplit,
-        step=Body((inner.as_fold(),)),  # the sliced fold rides the partial — the stored (1k) form
+        operands=(inner_fold,),  # the sliced fold rides the ONE operand edge — the λ-spelled (step 7) form
+        lift=Lambda(params=(ksplit.name, *accs), body=Body(()), results=accs),
+        init=init,
+        combine=combine,
+        dtypes=inner_fold.dtypes,
     )
 
     # The outer fold derives CONTRACTION off its composed step — the one non-bilinear arm.
@@ -260,29 +273,38 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
 
 
 def test_reduce_partial_flattens_a_nested_pv_contraction() -> None:
-    """Flash composes TWO contractions — QK on ``source`` and PV **inside the partial**. The QK loop
-    splices ahead of the partial and the nested PV ``ContractionView`` (a ``Stmt``) flattens to its own
-    loop in place — one recursion rule, so the scalar tier expands ``for kv:[QK loop; P; PV loop;
-    fold]``. This is the structural seam warp-flash rides."""
-    qk = _contraction()  # Σ_k A·B -> acc (the score S)
-    pv = replace(_contraction(), axes=(Axis("m", 128), Axis("d", 64)), k_axis=Axis("j", 32))
-    pv = replace(pv, channels=(replace(pv.channels[0], acc="oblk"),))
-    prob = Assign(name="p", op="exp", args=("acc",))  # softmax weight between the two contractions
-    fold = Accum(name="O_i", value="oblk", op="add")
-    # A hand-built stand-in with a plain additive carrier (the real flash fold's exp carrier
-    # derives TWISTED — asserted on ``_flash_op``'s tree below); the flattening under test is
-    # role-independent.
-    red = Fold(carrier=fold.as_carrier(), axis=Axis("kv", 128), step=Body((qk.as_fold(), prob, pv.as_fold(), fold)))
+    """Flash composes TWO contractions — QK as the hoisted score OPERAND edge and PV **synthesized
+    into the derived blocked evaluation** (step 7: the composed ``step`` dissolved). The QK loop
+    lands at the derived head, the lift body follows, and the synthesized PV ``Fold`` (a ``Stmt``)
+    flattens to its own loop in place — one recursion rule, so the scalar tier expands
+    ``for kv:[QK loop; P; PV loop; fold]``. This is the structural seam warp-flash rides."""
+    from emmy.compiler.ir.stmt import Lambda
+    from emmy.compiler.ir.stmt.carrier import exp_combine_states
+
+    qk = _contraction().as_fold()  # Σ_k A·B -> acc (the score S)
+    prob = Assign(name="p", op="exp", args=("acc",))  # the lift body — between QK and the merge
+    names = ("m_i", "l_i", "O_i")
+    other = tuple(f"{n}__o" for n in names)
+    red = Fold(
+        carrier=None,
+        axis=Axis("kv", 128),
+        operands=(qk, Load(name="v_e", input="V", index=(Var("kv"), Var("d")))),
+        lift=Lambda(params=("kv", "acc", "v_e"), body=Body((prob,)), results=("p", 1.0, "v_e")),
+        init=(float("-inf"), 0.0, 0.0),
+        combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
+    )
+    assert red.role is AxisRole.TWISTED
 
     (kv_loop,) = lower(red)
     assert kv_loop.axis.name == "kv"
     body = list(kv_loop.body)
     assert not any(isinstance(s, (ContractionView, Fold, Map)) for s in body), "the nested PV fold must be flattened, not left raw"
     (qk_loop,) = [s for s in body if isinstance(s, Loop) and s.axis.name == "k"]
-    (pv_loop,) = [s for s in body if isinstance(s, Loop) and s.axis.name == "j"]
-    # QK (source) first, then the pre-PV probability, then the flattened PV loop, then the carrier fold.
-    assert body.index(qk_loop) < body.index(prob) < body.index(pv_loop) < body.index(fold)
-    assert pv_loop.role is AxisRole.CONTRACTION and isinstance(pv_loop.body[-1], Accum) and pv_loop.body[-1].name == "oblk"
+    (pv_loop,) = [s for s in body if isinstance(s, Loop) and s.axis.name == "pj"]
+    o_fold = next(s for s in body if isinstance(s, Accum) and s.name == "O_i")
+    # QK (the hoisted edge) first, then the pre-PV probability, then the flattened PV loop, then the state fold.
+    assert body.index(qk_loop) < body.index(prob) < body.index(pv_loop) < body.index(o_fold)
+    assert pv_loop.role is AxisRole.CONTRACTION and isinstance(pv_loop.body[-1], Accum) and pv_loop.body[-1].name == "O_i__pv"
 
 
 def test_flash_op_is_a_two_contraction_tree() -> None:

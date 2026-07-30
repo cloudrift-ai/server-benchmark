@@ -186,6 +186,8 @@ def nodify_reduce(op):
         return op, head
     rloop = reduce_loop(op)
     red = Fold.from_loop(rloop)
+    if red is None:  # not λ-representable (a raw-block slice) — the caller keeps the flat spelling
+        return op, None
     body = list(op.body)
     idx = body.index(rloop)
     pre, tail = body[:idx], body[idx + 1 :]

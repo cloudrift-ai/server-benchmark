@@ -69,13 +69,32 @@ def _norm_linear_tree() -> tuple[Map, Fold, Fold]:
 
 
 def _flash_tree() -> tuple[Map, Fold, Fold, Fold]:
-    """The flash shape: a streaming reduce whose step composes the QK (axis ``dd``) and PV (axis
-    ``pj``) contraction folds; the stream reduces ``kv``."""
-    qk = _contraction_fold("dd", acc="s_qk", w="K")
-    pv = _contraction_fold("pj", acc="o_pv", w="V")
-    accum = Accum(name="l0", value="p0", op="add", axes=("kv",))
-    stream = Fold(carrier=accum.as_carrier(), axis=Axis("kv", 512), step=Body((qk, pv)))
-    root = Map(body=Body((Write(output="y", value="o_pv", index=(Var("m"), Var("d"))),)), sources=(stream,))
+    """The flash shape, λ-spelled (step 7 — mirroring ``_flash._flash_op``): the stream fold
+    reduces ``kv`` with the QK (axis ``dd``) score fold hoisted as ``operands[0]`` and the value
+    ``Load`` as ``operands[1]``; the PV (axis ``pj``) contraction is DERIVED — synthesized into
+    the blocked evaluation, found among ``stream.step_stmts()``."""
+    from emmy.compiler.ir.stmt import Lambda
+    from emmy.compiler.ir.stmt.carrier import exp_combine_states
+    from emmy.compiler.ir.tile.ir import is_contraction_fold
+
+    qk = _contraction_fold("dd", acc="sacc", w="K")
+    names = ("m_i", "l_i", "O_i")
+    other = tuple(f"{n}__o" for n in names)
+    lift = Lambda(
+        params=("kv", "sacc", "v_e"),
+        body=Body((Load(name="scale", input="_scale", index=()), Assign(name="s", op="multiply", args=("sacc", "scale")))),
+        results=("s", 1.0, "v_e"),
+    )
+    stream = Fold(
+        carrier=None,
+        axis=Axis("kv", 512),
+        operands=(qk, Load(name="v_e", input="V", index=(Var("kv"), Var("d")))),
+        lift=lift,
+        init=(float("-inf"), 0.0, 0.0),
+        combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
+    )
+    pv = next(s for s in stream.step_stmts()[1:] if is_contraction_fold(s))  # the derived PV site
+    root = Map(body=Body((Write(output="y", value="O_i", index=(Var("m"), Var("d"))),)), sources=(stream,))
     return root, stream, qk, pv
 
 

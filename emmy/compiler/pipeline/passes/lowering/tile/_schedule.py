@@ -1433,9 +1433,7 @@ def _splitk_option(
     accs = tuple(inner_fold.combine.results)
     ident_lift = Lambda(params=(ksplit.name, *accs), body=Body(()), results=accs)
     o_init, o_combine = M(*component_ops(inner_fold.combine), names=accs)
-    op = Fold(
-        carrier=None, axis=ksplit, operands=(inner_fold,), lift=ident_lift, init=o_init, combine=o_combine, dtypes=inner_fold.dtypes
-    )
+    op = Fold(carrier=None, axis=ksplit, operands=(inner_fold,), lift=ident_lift, init=o_init, combine=o_combine, dtypes=inner_fold.dtypes)
     outer_fold = op
     # The projection rides the ``Map`` wrapper — its ONE home; ``030_split_reduce`` reads it there and
     # retargets it (per-partition atomic store / a deferred finalize after the cross-partition sums).
@@ -1560,6 +1558,8 @@ def _tile_option(
             slices = [("TILE", fold, node.tile), ("STAGE", fold, stage)]
     elif reduce_spec:
         op, red_fold = nodify_reduce(tile.op)
+        if red_fold is None:
+            raise LoweringError("a partitioned reduce must nodify — the shape is not λ-representable")
         slices = [("REDUCE", red_fold, ReducePlan.parse(reduce_spec))]
     # ``TILE`` / ``REDUCE`` / ``STAGE`` key by the canonical codec spelling. STAGE stamps the
     # RESOLVED spelling, and only when resolution took (see ``_warp_option`` — the same

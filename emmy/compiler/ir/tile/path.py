@@ -122,12 +122,12 @@ def _walk(node, prefix: tuple[str, ...], out: list[tuple[object, tuple[str, ...]
         for i, edge in enumerate(node.operands):
             if isinstance(edge, (Map, Fold)):
                 _walk(edge, (*prefix, labels.get(i, _seg(edge))), out, derived)
-        # The stored step for a composed fold; the DERIVED evaluation for a λ-spelled one — its
-        # synthesized nodes (flash's PV, memoized on the fold) are real schedule sites, marked
-        # ``derived`` (combine material below the seam lattice). Operand edges embedded at their
-        # derived head position were walked above.
+        # The DERIVED evaluation's children — synthesized nodes (flash's PV, memoized on the
+        # fold) are real schedule sites, marked ``derived`` (combine material below the seam
+        # lattice; a lift-body inline node — the demoted cone — likewise: un-realizable as a
+        # seam). Operand edges embedded at their derived head position were walked above.
         edge_ids = {id(e) for e in node.operands}
-        step_derived = derived or node.lift is not None
+        step_derived = True
         for s in node.step_stmts():
             if id(s) in edge_ids:
                 continue

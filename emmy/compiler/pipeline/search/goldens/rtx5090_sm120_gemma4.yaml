@@ -1335,7 +1335,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x4/k4', REDUCE: 'g2a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x4', TILE: 'mma_m16n8k16_f16_f32/f2x4/k4', REDUCE: 'g2a', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 28.6
     cublas_us: 26.7
   - kernel: matmul
@@ -2941,16 +2941,18 @@ configs:
   # kept because they are not a regression, they give norm_gate_up.m32 a golden floor it had lost to
   # enumeration drift, and they close norm_qkv's missing m32 coverage — NOT as a throughput improvement.
   # See plans/gemma4-narrow-decode-width-findings.md section 4a.
-  - kernel: norm_linear
-    name: gemma4_12b.norm_gate_up.m32.cut.lin
-    M: 32
-    H: 3840
-    N: 30720
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 147.2
-    cublas_us: 154.0
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.norm_gate_up.m32.cut.lin
+    # M: 32
+    # H: 3840
+    # N: 30720
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 147.2
+    # cublas_us: 154.0
   - kernel: norm_linear
     name: gemma4_12b.norm_gate_up.m32.lin
     M: 32
@@ -2998,16 +3000,18 @@ configs:
   # The SLIDING layers' merged q||k||v edge at the decode bucket — 40 of the 48 `pre` programs. It had
   # no m32 entry at all while its m8 and m64 siblings both record `cut`, so the single most-launched
   # fused edge in the model had no floor at the width the batched serving lanes route onto.
-  - kernel: norm_linear
-    name: gemma4_12b.norm_qkv.m32.cut.lin
-    M: 32
-    H: 3840
-    N: 8192
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {PLACE@cone: 'cut'}
-    emmy_us: 19.6
-    cublas_us: 29.0
+  # RETIRED (PLACE knob removed): this entry records a PLACE@ placement whose realizer pass
+  # no longer exists, so the kernel set it names cannot be produced. Kept commented out.
+  # - kernel: norm_linear
+    # name: gemma4_12b.norm_qkv.m32.cut.lin
+    # M: 32
+    # H: 3840
+    # N: 8192
+    # dtype: 'fp16'
+    # trans_b: true
+    # knobs: {PLACE@cone: 'cut'}
+    # emmy_us: 19.6
+    # cublas_us: 29.0
   - kernel: norm_linear
     name: gemma4_12b.norm_qkv.m256.lin
     M: 256
@@ -3400,7 +3404,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f4x1/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 146.7
     cublas_us: 154.0
   - kernel: matmul
@@ -3410,7 +3414,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f1x4/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f16/f1x4/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 145.6
     cublas_us: 154.0
   - kernel: matmul
@@ -3420,7 +3424,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x4/k4', REDUCE: 'g2a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w2x4', TILE: 'mma_m16n8k16_f16_f32/f2x4/k4', REDUCE: 'g2a', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 28.6
     cublas_us: 26.7
   - kernel: matmul
@@ -3764,7 +3768,7 @@ configs:
     # the pre-2026-07-30 record — costs 1.74x cuBLAS; the same tile at k4 with gm8 and no split costs
     # 1.07x. This row also floors the FUSED norm_gate_up.m256 edge, which deploys `PLACE@cone: cut`
     # and so resolves its matmul against this shape: that path measures 483.5 -> 296.4 us.
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k4', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w4x2', TILE: 'mma_m16n8k16_f16_f32/f2x4/k4', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring'}
     emmy_us: 291.8
     cublas_us: 273.7
   - kernel: matmul
@@ -4395,7 +4399,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k8', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f4x1/k8', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring'}
     emmy_us: 274.8
     cublas_us: 234.3
   - kernel: matmul
@@ -4405,7 +4409,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k8', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f4x1/k8', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring'}
     emmy_us: 89.3
     cublas_us: 70.0
   - kernel: matmul
@@ -4415,7 +4419,7 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k8', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f4x1/k8', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring'}
     emmy_us: 89.8
     cublas_us: 70.0
   - kernel: matmul
@@ -4425,7 +4429,7 @@ configs:
     K: 15360
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k8', REDUCE: 'g2a', RASTER: 'gm8', STAGE: 'd2/tma/ring', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f4x1/k8', REDUCE: 'g2a', RASTER: 'gm8', STAGE: 'd2/tma/ring'}
     emmy_us: 193.1
     cublas_us: 120.0
   # The FUSED (computed-A) norm->linear cones at this width. These are the rows that matter most
@@ -4451,7 +4455,7 @@ configs:
     N: 30720
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 429.3
     cublas_us: 266.0
   - kernel: norm_linear
@@ -4461,7 +4465,7 @@ configs:
     N: 8192
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 116.2
     cublas_us: 100.0
   - kernel: norm_linear
@@ -4471,7 +4475,7 @@ configs:
     N: 8704
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 118.2
     cublas_us: 101.0
   - kernel: norm_linear
@@ -4481,6 +4485,6 @@ configs:
     N: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 265.5
     cublas_us: 165.0

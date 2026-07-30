@@ -41,7 +41,7 @@ def _planar_fold(k_name: str = "k", *, acc: str = "s0", val: str = "v1", load: s
             accum,
         )
     )
-    loop = Loop(axis=Axis(k_name, 512), body=body, role=AxisRole.PLANAR, carrier=accum.as_algebra())
+    loop = Loop(axis=Axis(k_name, 512), body=body, role=AxisRole.PLANAR)
     fold = Fold.from_loop(loop)
     assert fold.lift is not None
     return fold

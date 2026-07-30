@@ -8,7 +8,6 @@ Tile / Cond) live in ``blocks``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
 from emmy.compiler.dtype import F32, DataType
 from emmy.compiler.ir.elementwise import ElementwiseImpl, reduce_spelling
@@ -22,9 +21,6 @@ from emmy.compiler.ir.stmt.base import (
     render_index,
     select_to_ternary,
 )
-
-if TYPE_CHECKING:  # annotation only — algebra imports leaves (Accum.as_algebra does the runtime import)
-    from emmy.compiler.ir.stmt.algebra import Algebra
 
 
 def _resolve_value(name: str, ctx: RenderCtx) -> str:
@@ -502,21 +498,8 @@ class Accum(Stmt):
         """The scalar op-fold of two partials: ``name = op(name, name__o)`` — the
         same combine the cooperative / split-K realizations apply, reified as a
         one-``Assign`` program so the decomposition move reads it uniformly with
-        ``Algebra.combine_states``."""
+        the stored combine's state⊕state re-emission."""
         return (Assign(name=self.name, op=self.op, args=(self.name, f"{self.name}__o"), dtype=self.dtype),)
-
-    def as_algebra(self) -> Algebra:
-        """This additive/associative ``Accum`` AS the degenerate 1-component :class:`Algebra` it already
-        is — state ``(name,)``, ``merge`` = ``name = op(name, value)``, identity the op's. The fold-algebra
-        fact that a contraction / scalar reduce is the trivial (componentwise) algebra: it lets the reduce
-        ``Loop`` fold through the **same** cooperative / cross-partition path as a twisted algebra, with no
-        additive special-case. The derived ``combine_states`` (``name = op(name, name__o)``) equals
-        :meth:`combine_partials`, so the ``⊙`` realization is identical."""
-        from emmy.compiler.ir.stmt.algebra import Algebra  # local: algebra imports leaves
-
-        # The folded ``value`` is the injected term whose name lives in the degenerate ``merge``
-        # (``name = op(name, value)``).
-        return Algebra.degenerate(folds=(self.op,), names=(self.name,), terms=(self.value,), dtypes=(self.dtype,))
 
     # Algebraic traits forward to the scalar combine op — a ``max`` Accum and a
     # ``sum`` Accum differ, and ``self.op`` is the source of truth.

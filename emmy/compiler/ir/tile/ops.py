@@ -150,20 +150,20 @@ def seal_workers(tile) -> None:
 
 
 def reduce_loop(op):
-    """The kernel's outermost **annotated** reduce ``Loop`` (its ``carrier`` set by recognition),
+    """The kernel's outermost **annotated** reduce ``Loop`` (its ``role`` stamped by recognition),
     or ``None`` for a pure pointwise / flat-fallback ``Map`` (no annotated reduce). A
     :class:`~emmy.compiler.ir.tile.ir.Fold` / :class:`ContractionView` synthesizes its loop
     directly (a multi-channel contraction derives the ONE fused product loop — see
     :attr:`ContractionView.loop`); a ``Map``
     is read off the top-level body — the annotated reduce loop is a top-level stmt (a
-    single-flat-reduce cell); a nested / multi reduce stays un-annotated (flat fallback) and is
-    invisible here, so it materializes on the scalar tier."""
+    single-flat-reduce cell); a nested / multi reduce stays un-annotated (``role=FREE`` — flat
+    fallback) and is invisible here, so it materializes on the scalar tier."""
     if isinstance(op, (Fold, ContractionView)):
         return op.loop
     if isinstance(op, Map) and op.sources:
         return reduce_loop(op.sources[0])  # a Map projecting over a Fold / ContractionView source
     for s in op.body:
-        if isinstance(s, (Loop, StridedLoop)) and s.carrier is not None:
+        if isinstance(s, (Loop, StridedLoop)) and s.role.is_reduce:
             return s
     return None
 
@@ -183,7 +183,7 @@ def reduce_plan(tile):
     return plan if plan is not None else ReducePlan()
 
 
-def nodify_reduce(op):
+def nodify_reduce(op, like=None):
     """Nodify a kernel op into a :class:`~emmy.compiler.ir.tile.ir.Fold` node the reduce
     partition can key on (the plan itself lives in ``TileOp.schedule`` — the caller stores it
     against the returned fold). Returns ``(op2, fold)``. A stored contraction fold (the
@@ -192,7 +192,9 @@ def nodify_reduce(op):
     A flat ``Map`` holding an annotated reduce ``Loop`` (a split partial) nodifies via
     :meth:`Fold.from_loop`, which reconstructs the identical annotated loop, so the lowering is
     byte-identical; a projection tail (a fused epilogue) rides a wrapping ``Map`` over the node, a
-    bare reduce becomes the root node.
+    bare reduce becomes the root node. ``like`` is the fold whose algebra a TWISTED loop extracts
+    against (:meth:`Fold.from_loop`) — defaulted from ``op``'s own head when it is node-form
+    (030 passes the pre-slice fold for its flat split partial).
 
     Used by the scheduler (the coop / ILP-K contraction) and ``030_split_reduce`` (the split partial) so
     EVERY partitioned reduce keys its plan off a node uniformly. For the ``Map`` form the reduce ``Loop``
@@ -204,8 +206,11 @@ def nodify_reduce(op):
     head = op.sources[0] if isinstance(op, Map) and op.sources else None
     if isinstance(head, Fold) and head.role is AxisRole.CONTRACTION:
         return op, head
+    if like is None:
+        self_head = head if head is not None else op
+        like = self_head if isinstance(self_head, Fold) else None
     rloop = reduce_loop(op)
-    red = Fold.from_loop(rloop)
+    red = Fold.from_loop(rloop, like)
     if red is None:  # not λ-representable (a raw-block slice) — the caller keeps the flat spelling
         return op, None
     body = list(op.body)
@@ -250,8 +255,8 @@ def contraction_loop(lift, fold, operand_bodies, reduce_axis) -> Loop:
     form: expand each operand source's stmts (siblings), the ``⊗`` lift ``Assign``
     (``fold.value = lift(operands…)``), and the additive ``fold`` ⊕ (its identity init is the
     ``Loop``'s immediate-``Accum`` prelude — no explicit ``Init``). The loop is stamped
-    ``CONTRACTION`` + the degenerate algebra of its additive fold (``fold.as_algebra()``), so the
-    K loop carries its combine and the warp / cooperative tiers read the operands structurally off
+    ``CONTRACTION`` — its algebra IS the body's additive ``Accum`` — so the
+    warp / cooperative tiers read the operands structurally off
     the body. Shared by the flash score producer and the scalar register-tile contraction."""
     body: list[Stmt] = []
     names: list[str] = []
@@ -261,7 +266,7 @@ def contraction_loop(lift, fold, operand_bodies, reduce_axis) -> Loop:
         names.append(stmts[-1].defines()[-1])
     body.append(Assign(name=fold.value, op=lift, args=tuple(names)))
     body.append(fold)
-    return Loop(axis=reduce_axis, body=Body(tuple(body)), role=AxisRole.CONTRACTION, carrier=fold.as_algebra())
+    return Loop(axis=reduce_axis, body=Body(tuple(body)), role=AxisRole.CONTRACTION)
 
 
 def _term_names(root) -> tuple[list[str], list[str]]:

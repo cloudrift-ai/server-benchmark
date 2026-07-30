@@ -2416,7 +2416,7 @@ def _twisted_warp_options(
     stage_key = _family_key(op, STAGE.name, red)
     if not isinstance(head.a, Load):
         return []
-    terms = red.carrier.terms
+    terms = tuple(red.lift.results)
     if len(terms) != 3 or isinstance(terms[1], str) or not isinstance(terms[2], str):
         return []
     q_tensor = tile.inputs.get(head.a.input) if tile.inputs else None

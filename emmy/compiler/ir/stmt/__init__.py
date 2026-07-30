@@ -38,7 +38,6 @@ and produce Loop-IR's canonical form.
 """
 
 from emmy.compiler.ir.stmt.algebra import (
-    Algebra,
     M,
     StateMerge,
     component_ops,
@@ -98,7 +97,6 @@ __all__ = [
     "Accum",
     "Assign",
     "Body",
-    "Algebra",
     "StateMerge",
     "Cond",
     "Init",

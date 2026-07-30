@@ -236,17 +236,14 @@ def _(s: RowAccum, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
 
 @rewrite.register
 def _(s: Loop, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
-    # Preserve the reduce annotation (``role`` / ``carrier``) through σ-offsets / axis-renames —
-    # the carried-state ALGEBRA is untouched by index motion. SSA renames DO move through it
-    # (``Algebra.rename``): the state / injected-term / combine-program names must track the body's
-    # ``Accum`` renames, or the cooperative combine reads a name the renamed body no longer
-    # defines (the M=1 cut-consumer miscompile).
+    # Preserve the reduce ``role`` annotation through σ-offsets / axis-renames. The loop carries
+    # no algebra — the fold's ⊕ lives on the ``Fold`` node, whose own rewrite handler renames the
+    # stored combine in lockstep (``rename_combine``).
     return Loop(
         axis=axis_fn(s.axis),
         body=tuple(rewrite(c, rename, sigma, axis_fn) for c in s.body),
         unroll=s.unroll,
         role=s.role,
-        carrier=s.carrier.rename(rename) if s.carrier is not None else None,
     )
 
 
@@ -260,7 +257,6 @@ def _(s: StridedLoop, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
         body=tuple(rewrite(c, rename, sigma, axis_fn) for c in s.body),
         unroll=s.unroll,
         role=s.role,
-        carrier=s.carrier.rename(rename) if s.carrier is not None else None,
         end=sigma.apply(s.end) if s.end is not None else None,
     )
 
@@ -315,7 +311,7 @@ def _(s: RowAccum, ctx: SimplifyCtx) -> Stmt:
 @simplify.register
 def _(s: Loop, ctx: SimplifyCtx) -> Stmt:
     inner = extend_simplify_ctx(ctx, s.axis)
-    return Loop(axis=s.axis, body=tuple(simplify(c, inner) for c in s.body), unroll=s.unroll, role=s.role, carrier=s.carrier)
+    return Loop(axis=s.axis, body=tuple(simplify(c, inner) for c in s.body), unroll=s.unroll, role=s.role)
 
 
 @simplify.register
@@ -329,7 +325,6 @@ def _(s: StridedLoop, ctx: SimplifyCtx) -> Stmt:
         body=tuple(simplify(c, inner) for c in s.body),
         unroll=s.unroll,
         role=s.role,
-        carrier=s.carrier,
         end=s.end.simplify(ctx) if s.end is not None else None,
     )
 

@@ -58,10 +58,11 @@ def test_product_node_derives_one_fold_loop_with_the_shared_a_lifted_once() -> N
     assert [s.name for s in body if isinstance(s, Accum)] == ["acc_g", "acc_u"]
 
 
-def test_product_carrier_is_the_n_component_product_monoid() -> None:
+def test_product_loop_folds_the_n_component_product_state() -> None:
     loop = _product().loop
-    assert loop.carrier.names == ("acc_g", "acc_u")
-    assert loop.carrier.ops is not None and len(loop.carrier.ops) == 2
+    accums = [s for s in loop.body if isinstance(s, Accum)]
+    assert [a.name for a in accums] == ["acc_g", "acc_u"]
+    assert all(a.op.reduce_canon == "add" for a in accums)  # the componentwise additive family
 
 
 def test_arity_is_not_two_copies() -> None:
@@ -83,7 +84,7 @@ def test_defines_and_out_read_the_channels() -> None:
 def test_single_channel_node_is_the_plain_matmul() -> None:
     node = _node(Load(name="a_e", input="x", index=(Var("m"), Var("k"))), ("acc", "W"))
     (loop,) = lower(node)
-    assert loop.carrier.names == ("acc",)
+    assert [s.name for s in loop.body if isinstance(s, Accum)] == ["acc"]
     assert not node.a_computed
 
 

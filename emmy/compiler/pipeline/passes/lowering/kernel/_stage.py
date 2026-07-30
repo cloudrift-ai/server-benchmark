@@ -187,21 +187,21 @@ def sync_row_fill(*, slab: str, src: str, extent: int, grid_vars: tuple, linear_
 
 
 def sync_stat_fill(
-    *, stats: tuple[str, ...], slab_of, row_axis: Axis, row_body: list[Stmt], cta: CtaTile, dtype: str = "float"
+    *, stats: tuple[str, ...], slab_of, row_axis: Axis, row_body: list[Stmt], cta: CtaTile, stat=None, dtype: str = "float"
 ) -> list[Stmt]:
     """The ``sync``-transport per-row STATISTIC prologue — the fused norm→linear warp edge's
     cooperative prologue, run ONCE before the staged K-loop: the CTA stripes the tile's rows **one
     row per WARP** (``for r = warp; r < rows; r += n_warps``); the warp's 32 lanes stride the row's
     stat reduce ``Loop`` (coalesced — consecutive lanes read consecutive elements) and close the
-    fold with the carrier's shuffle butterfly (:func:`emit_combine` at warp width — the state
+    fold with the stat fold's shuffle butterfly (``stat`` — its :class:`Reduction`; :func:`emit_combine` at warp width — the state
     broadcasts to every lane), each lane then runs the scalar epilogue redundantly and lane 0
     writes each bridged ``stats`` value into its length-``rows`` smem row (``slab_of(name)``); one
     CTA barrier publishes them to the A compute-fill. A ``row_body`` with no foldable reduce
     ``Loop`` (or a sub-warp CTA) falls back to the serial one-row-per-THREAD stripe."""
     decls: list[Stmt] = [Smem(name=slab_of(nm), extents=(row_axis.extent.as_static(),), dtype=dtype) for nm in stats]
     writes = tuple(Write(output=slab_of(nm), index=(Var(row_axis.name),), value=nm) for nm in stats)
-    rl_i = next((i for i, s in enumerate(row_body) if isinstance(s, Loop) and s.is_reduce and s.carrier is not None), None)
-    if rl_i is None or cta.n_threads % 32 or cta.n_threads < 32:
+    rl_i = next((i for i, s in enumerate(row_body) if isinstance(s, Loop) and s.role.is_reduce), None)
+    if rl_i is None or stat is None or cta.n_threads % 32 or cta.n_threads < 32:
         body = (*row_body, *writes)
         loop = StridedLoop(axis=row_axis, start=cta.linear_tid, step=_lit(cta.n_threads), body=Body(body), unroll=False)
         return [*decls, loop, Sync()]
@@ -211,7 +211,7 @@ def sync_stat_fill(
     lane = BinaryExpr("%", cta.linear_tid, _lit(32))
     warp = BinaryExpr("/", cta.linear_tid, _lit(32))
     fold = StridedLoop(axis=rl.axis, start=lane, step=_lit(32), body=rl.body, unroll=False)
-    combine = emit_combine(rl.carrier, t="_lane", n_threads=32)
+    combine = emit_combine(stat, t="_lane", n_threads=32)
     guarded = Cond(cond=BinaryExpr("==", lane, _lit(0)), body=writes)
     body = (*row_body[:rl_i], fold, *combine, *row_body[rl_i + 1 :], guarded)
     loop = StridedLoop(axis=row_axis, start=warp, step=_lit(cta.n_threads // 32), body=Body(body), unroll=False)

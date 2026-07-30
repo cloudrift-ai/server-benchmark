@@ -509,8 +509,8 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # The injection spec (pivot first, one carried name per component) — the merge is REGENERATED
     # from it at fragment residence. An expectation component injects a value name (its ⊗ is the
     # pv node); the denominator injects the literal ``1.0`` and folds the weights.
-    terms = red.carrier.terms
-    names = red.carrier.names
+    terms = tuple(red.lift.results)
+    names = tuple(red.combine.results)
     pivot_name = names[0]
     expect_name = next(n for n, t in zip(names[1:], terms[1:], strict=True) if isinstance(t, str))
     denom_name = next(n for n, t in zip(names[1:], terms[1:], strict=True) if not isinstance(t, str))

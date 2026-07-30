@@ -1,5 +1,4 @@
-"""Online-softmax shared helper — the carrier builder + the recognition that fuses a
-standalone two-pass softmax into it.
+"""Online-softmax recognition — fuse a standalone two-pass softmax into the streaming form.
 
 The classic softmax reads its input three times: a row-max reduce, a ``Σ exp(x − max)``
 reduce, then a normalize. The **online-softmax** trick (flash's softmax-stats half,
@@ -28,21 +27,8 @@ from dataclasses import replace
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Accum, Algebra, Assign, Body, Load, Loop
-
-
-def online_softmax_combine(m: str, d: str, s: str) -> Algebra:
-    """The standalone **online-softmax** :class:`Algebra` — flash's softmax-stats half without the
-    P@V accumulator (expectation component). State ``(m, d)`` (running row max / exp-sum
-    denominator) folds this element's score partial ``s`` in ONE streaming pass::
-
-        m_new = max(m, s);   alpha = exp(m − m_new);   p = exp(s − m_new)
-        d = d·alpha + p;     m = m_new   (last)
-
-    Built as the exp-family algebra over ``(m, d)`` with injected terms ``(s, 1.0)`` (pivot +
-    denominator); ``merge`` / ``combine_states`` are *generated* (see ``ir/stmt/carrier.py``). The
-    downstream normalize pass reads the final ``m`` and ``1/d``."""
-    return Algebra.exp_family(s, (1.0,), (m, d))
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
+from emmy.compiler.ir.stmt.carrier import exp_merge
 
 
 def _rowmax(loop: Loop) -> tuple[str, str, tuple] | None:
@@ -94,16 +80,18 @@ def _fuse(body: Body) -> tuple[Body, bool]:
                 sumacc = _sumexp(nxt, maxacc, input_buf)
                 if sumacc is not None:
                     src = f"{maxacc}__osin"
-                    carrier = online_softmax_combine(maxacc, sumacc, src)
-                    # The carrier's streaming ``merge`` (``base``-``Accum`` folds + ψ rescales) sits
-                    # in the loop body directly; the loop is stamped TWISTED + the carrier. No
-                    # explicit ``Init`` seeds — ``Loop.render`` seeds each fold ``Accum`` from
-                    # ``op.identity`` ((−inf, 0)).
+                    # The generated streaming merge (``base``-``Accum`` folds + ψ rescales — the
+                    # exp-family program over ``(m, d)`` with injected terms ``(s, 1.0)``) sits in
+                    # the loop body directly; the loop is stamped TWISTED, and the algebra is the
+                    # body itself (``Fold.from_loop`` reconstructs it). No explicit ``Init``
+                    # seeds — ``Loop.render`` seeds each fold ``Accum`` from ``op.identity``
+                    # ((−inf, 0)).
                     fused = Loop(
                         axis=s.axis,
-                        body=Body.coerce((Load(name=src, input=input_buf, index=index), *carrier.dissolve())),
+                        body=Body.coerce(
+                            (Load(name=src, input=input_buf, index=index), *exp_merge((maxacc, sumacc), (src, 1.0), key=maxacc))
+                        ),
                         role=AxisRole.TWISTED,
-                        carrier=carrier,
                     )
                     out.append(fused)
                     changed = True

@@ -311,7 +311,6 @@ def _stmt_eval_scope() -> dict:
     from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
     from emmy.compiler.ir.stmt import (
         Accum,
-        Algebra,
         Assign,
         Cond,
         Init,
@@ -350,7 +349,6 @@ def _stmt_eval_scope() -> dict:
         "StridedLoop": StridedLoop,
         "Cond": Cond,
         "AxisRole": AxisRole,
-        "Algebra": Algebra,
         "StateMerge": StateMerge,
         "Smem": Smem,
         "Sync": Sync,

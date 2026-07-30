@@ -17,9 +17,7 @@ from __future__ import annotations
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis, AxisRole
-from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.stmt.algebra import Algebra
 from emmy.compiler.ir.stmt.blocks import Loop
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Accum, Load
@@ -64,16 +62,16 @@ def test_gather_index_survives_rename_chain_collision() -> None:
     assert idx1_new == ("in0",)
 
 
-def test_reduce_loop_carrier_tracks_accum_rename() -> None:
-    # An annotated reduce Loop whose body folds into ``acc1`` while its Algebra carries
-    # ``("acc1",)``. The renumber renames the body's Accum (acc1 → acc0) and the Load term
-    # (v9 → in0); the carrier must follow BOTH — a verbatim carrier left the cooperative
-    # combine reading a state name the renamed body no longer defines (the M=1 cut-consumer's
+def test_fold_combine_tracks_accum_rename() -> None:
+    # The algebra lives on the ``Fold`` NODE — its stored combine/lift must track the body's SSA
+    # renames in lockstep (the Fold rewrite handler's ``rename_combine``), or the cooperative
+    # combine reads a state name the renamed body no longer defines (the M=1 cut-consumer's
     # ``acc1``-undefined miscompile).
+    from emmy.compiler.ir.tile.ir import Fold
+
     loop = Loop(
         axis=Axis(name="k0", extent=Dim(8)),
-        role=AxisRole.CONTRACTION,
-        carrier=Algebra.degenerate(folds=(ElementwiseImpl("add"),), names=("acc1",), terms=("v9",)),
+        role=AxisRole.PLANAR,
         body=Body(
             (
                 Load(name="v9", input="a", index=(Var("k0"),)),
@@ -81,12 +79,13 @@ def test_reduce_loop_carrier_tracks_accum_rename() -> None:
             )
         ),
     )
+    fold = Fold.from_loop(loop)
+    assert fold is not None
 
-    out = rename_ssa_sequential(Body((loop,)))
+    out = rename_ssa_sequential(Body((fold,)))
 
-    renamed = next(s for s in Body.coerce(out).iter() if isinstance(s, Loop))
-    accum = next(s for s in renamed.body.iter() if isinstance(s, Accum))
-    load = next(s for s in renamed.body.iter() if isinstance(s, Load))
-    assert renamed.carrier is not None
-    assert renamed.carrier.names == (accum.name,), (renamed.carrier.names, accum.name)
-    assert renamed.carrier.terms[0] == load.names[0], renamed.carrier.terms[0]
+    renamed = next(s for s in Body.coerce(out).iter() if isinstance(s, Fold))
+    accum = next(s for s in renamed.loop.body.iter() if isinstance(s, Accum))
+    load = next(s for s in renamed.loop.body.iter() if isinstance(s, Load))
+    assert renamed.combine.results == (accum.name,), (renamed.combine.results, accum.name)
+    assert renamed.lift.results[0] == load.names[0], renamed.lift.results

@@ -40,6 +40,7 @@ from emmy.compiler.ir.schedule import Stage
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile.ir import ContractionView, Side
+from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
     CtaTile,
@@ -499,7 +500,9 @@ def _sync_operands(
         row_axis = Axis(name="_sr", extent=mn[0].tile)
         sigma = Sigma({m_name: m_coord(Var(row_axis.name))})
         row_body = [s.rewrite(lambda nm: nm, sigma) for s in pro]
-        prologue = sync_stat_fill(stats=stats, slab_of=_stat_slab, row_axis=row_axis, row_body=row_body, cta=cta)
+        prologue = sync_stat_fill(
+            stats=stats, slab_of=_stat_slab, row_axis=row_axis, row_body=row_body, cta=cta, stat=Reduction.of_cone_stat(c.a)
+        )
     # One B slab per fold channel (the multi-B node fills each projection's weights alongside the
     # one compute-filled A slab); drain order is (A, B0, B1, …) regardless of which fill each rides.
     # ``swizzles`` are the per-operand slab modes (the mma tier's ``slab_swizzles``; NONE elsewhere):

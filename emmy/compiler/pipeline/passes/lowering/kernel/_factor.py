@@ -52,10 +52,11 @@ from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, Literal, Var
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Algebra, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
+from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import FoldMove, Level, ReducePlan, ReduceStage, contraction_view, is_contraction_fold
 from emmy.compiler.ir.tile.ir import ContractionView, Fold, Map, Side, effect_tail
 from emmy.compiler.ir.tile.ops import cone_seam
+from emmy.compiler.pipeline.passes.lowering._reduction import Reduction, loop_state_head
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import copy_cell, reduce_codegen, shrink_axis, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import sync_row_fill
 from emmy.compiler.pipeline.passes.lowering.kernel._twist import FLASH_WARP_AXIS, realize_warp_twist, warp_source
@@ -221,7 +222,6 @@ class Frag:
 
     body: list[Stmt]
     out: Handle
-    carrier: object | None = None
 
 
 @dataclass(frozen=True)
@@ -258,11 +258,11 @@ def _emit(op, ctx: Ctx) -> Frag:
     if isinstance(op, Map):
         src = _emit(op.sources[0], ctx) if op.sources else None
         prefix = list(src.body) if src is not None else []
-        return Frag(body=[*prefix, *_emit_body(op.body, ctx)], out=_map_wire(op), carrier=src.carrier if src is not None else None)
+        return Frag(body=[*prefix, *_emit_body(op.body, ctx)], out=_map_wire(op))
     if isinstance(op, Fold):
         stmts = _emit_body(Body(op.spliced_step()), ctx)  # operand edges splice ahead of first use
-        loop = Loop(axis=op.axis, body=Body(tuple(stmts)), unroll=op.unroll, role=op.role, carrier=op.carrier)
-        return Frag(body=[loop], out=Handle(op.out), carrier=op.carrier)
+        loop = Loop(axis=op.axis, body=Body(tuple(stmts)), unroll=op.unroll, role=op.role)
+        return Frag(body=[loop], out=Handle(op.out))
     raise TypeError(f"_emit: expected a Map / Fold node, got {type(op).__name__}")
 
 
@@ -271,7 +271,8 @@ def _map_wire(op: Map) -> Handle:
     stays robust where ``Map.out`` would raise. An empty body surfaces the ``source``'s wire; a
     ``Write``-terminated body is a ROOT sink (stored to gmem, never wired) so surfaces the written
     value at ``gmem`` residence; a body ending in an annotated reduce / contraction ``Loop`` surfaces
-    its **carrier** state (``carrier.out`` — the acc / carried value, NOT the loop's empty ``defines``);
+    its carried state's head (:func:`loop_state_head` — the acc / carried value, NOT the loop's
+    empty ``defines``);
     otherwise the last defining stmt (a pointwise lift / projection), or ``""`` for a sink whose store
     rides inside a projection sweep ``Loop`` (a don't-care — nothing consumes it)."""
     if len(op.body) == 0:
@@ -279,9 +280,8 @@ def _map_wire(op: Map) -> Handle:
     last = op.body[-1]
     if isinstance(last, Write):
         return Handle(last.values[-1], residence="gmem")
-    carrier = getattr(last, "carrier", None)
-    if carrier is not None:
-        return Handle(carrier.out)
+    if isinstance(last, (Loop, StridedLoop)) and last.role.is_reduce:
+        return Handle(loop_state_head(last))
     defs = last.defines()
     return Handle(defs[-1] if defs else "")
 
@@ -605,10 +605,11 @@ def _restage_loads(stmts: list[Stmt], buf: str, smem: str, n_grid: int, grid_var
 
 
 def emit_combine(
-    carrier, t: str, n_threads: int, *, warp_size: int = 32, segmented: bool = False, inner: tuple[str, int] | None = None
+    red, t: str, n_threads: int, *, warp_size: int = 32, segmented: bool = False, inner: tuple[str, int] | None = None
 ) -> list[Stmt]:
-    """Build the cross-thread combine of a cooperative reduce ``carrier`` (an :class:`Algebra`)
-    over ``n_threads`` cooperating threads, reassigning the carried state in place.
+    """Build the cross-thread combine of a cooperative reduce — the algebra read off the
+    ``red`` fold NODE's stored ``(combine, dtypes)`` — over ``n_threads`` cooperating threads,
+    reassigning the carried state in place.
 
     The mechanism per level is derived by :meth:`ReduceStage.combine`:
 
@@ -621,12 +622,13 @@ def emit_combine(
     - a standalone ``SMEM`` → the block slab: every thread stages its partial, one ``Sync``,
       a single ``TreeHalve`` reduces + broadcasts in place.
 
-    The algebra's combine surface (``names`` / ``state_b`` / ``combine_states``) drives the
-    nodes; the combine renders at the accumulator dtype (fp32 for a reduction, with the
-    algebra's own dtype honored when set)."""
-    state = carrier.names
-    state_b = carrier.state_b
-    prog = carrier.combine_states
+    The stored combine's surface (its results / second-operand params / the
+    :func:`~emmy.compiler.ir.stmt.algebra.combine_states_of` program) drives the nodes; the
+    combine renders at the accumulator dtype (fp32 for a reduction, with the fold's own dtype
+    honored when set)."""
+    state = red.names
+    state_b = red.state_b
+    prog = red.combine_states
     dtype = next((a.dtype for a in prog if a.dtype is not None), None) or F32
 
     from emmy.compiler.backend.cuda.dtype import cuda_name as _cuda_name  # noqa: PLC0415
@@ -677,19 +679,20 @@ def emit_combine(
     return out
 
 
-def combine_tail(carrier, *, reg: int, coop: int, lane) -> list[Stmt]:
-    """The carrier-driven **partial merge** that follows a partitioned reduce loop — the one place the
+def combine_tail(red, *, reg: int, coop: int, lane) -> list[Stmt]:
+    """The algebra-driven **partial merge** that follows a partitioned reduce loop — the one place the
     two partial-fold geometries are assembled: the REG-tree fold of the ``reg`` ILP register copies
-    into copy 0 (``as_state_merge``), then — when threads cooperate (``lane`` is a lane :class:`Axis`,
+    into copy 0 (``state_merge_of``), then — when threads cooperate (``lane`` is a lane :class:`Axis`,
     not ``None``) — the cross-thread :func:`emit_combine`. Both reassign the carried state **in place**
     (the survivor SSA names hold the full reduction), so the post-reduce projection reads them directly.
 
-    Carrier-generic: a monoid reduce and a contraction's degenerate additive carrier fold identically,
-    so a cooperative reduce and a (future) cooperative-K contraction share this tail. ``as_state_merge``
+    Algebra-generic (the ⊕ read off the ``red`` fold node's stored combine): a monoid reduce and a
+    contraction's degenerate additive fold identically, so a cooperative reduce and a (future)
+    cooperative-K contraction share this tail. ``state_merge_of``
     keys its finalize temps on the copy name, so each fold's internals are already unique."""
-    merge: list[Stmt] = [carrier.as_state_merge(tuple(f"{n}__r{r}" for n in carrier.names)) for r in range(1, reg)]
+    merge: list[Stmt] = [red.state_merge(tuple(f"{n}__r{r}" for n in red.names)) for r in range(1, reg)]
     if lane is not None:
-        merge += emit_combine(carrier, t=lane.name, n_threads=coop)
+        merge += emit_combine(red, t=lane.name, n_threads=coop)
     return merge
 
 
@@ -748,30 +751,6 @@ def _taint(stmts: list[Stmt], axis: str) -> frozenset[str]:
     return frozenset(tainted)
 
 
-def _vector_carrier(carrier, tainted: frozenset[str], count: int):
-    """The algebra with each column-dependent state component fanned out per register column —
-    one expectation component per column, so the loop render seeds every replica (the chain IS
-    the same LSE algebra with ``count`` expectation components). The combine regenerates over the
-    expanded state (the same deterministic generators the original spelling came from)."""
-    if carrier is None or not (set(carrier.names) & tainted):
-        return carrier
-    names: list[str] = []
-    terms: list = []
-    dts: list = []
-    folds: list = []
-    ops = carrier.ops
-    for i, (nm, t, dt) in enumerate(zip(carrier.names, carrier.terms, carrier.component_dtypes, strict=True)):
-        rep = count if nm in tainted else 1
-        names += [f"{nm}_{j}" for j in range(count)] if nm in tainted else [nm]
-        terms += [t] * rep
-        dts += [dt] * rep
-        if ops is not None:
-            folds += [ops[i]] * rep
-    if ops is None:
-        return Algebra.exp_family(terms[0], tuple(terms[1:]), tuple(names))
-    return Algebra.degenerate(folds=tuple(folds), names=tuple(names), terms=tuple(terms), dtypes=tuple(dts))
-
-
 def _vectorize_axis(stmts: list[Stmt], axis: str, count: int, tainted: frozenset[str], protected: frozenset[str]) -> list[Stmt]:
     """Replicate every column-dependent stmt per register column (σ ``axis → j``, names suffixed
     ``_{j}``), keeping shared stmts single — the FA-2 shared-score restructuring: the score /
@@ -782,8 +761,6 @@ def _vectorize_axis(stmts: list[Stmt], axis: str, count: int, tainted: frozenset
         bodies = s.nested()
         if bodies:
             s = s.with_bodies(tuple(Body(tuple(_vectorize_axis(list(b), axis, count, tainted, protected))) for b in bodies))
-            if getattr(s, "carrier", None) is not None:
-                s = replace(s, carrier=_vector_carrier(s.carrier, tainted, count))
             out.append(s)
             continue
         if (set(s.defines()) & tainted) or _stmt_axis_hit(s, axis) or (_stmt_reads(s) & tainted):
@@ -813,7 +790,7 @@ def _realize_chain(op, ctx: Ctx, tail: tuple, pv) -> tuple[list[Stmt], list[Stmt
     tainted = _taint(all_stmts, axis)
     protected = frozenset({nm for s in _flat_stmts(all_stmts) for nm in (*s.defines(), *_stmt_reads(s))} - tainted)
     body = _vectorize_axis(list(rloop.body), axis, count, tainted, protected)
-    fold = [replace(rloop, body=Body(tuple(body)), carrier=_vector_carrier(rloop.carrier, tainted, count))]
+    fold = [replace(rloop, body=Body(tuple(body)))]
     close = _vectorize_axis(list(proj_tail), axis, count, tainted, protected)
     if store_tmpl is not None:
         out_val = store_tmpl.values[-1]
@@ -849,7 +826,7 @@ def _tile_reduce_axis_transposed(
     out_ax = next(a for a in reversed(grid) if not (a.extent.is_static and a.extent.as_static() == 1))
 
     (rloop,) = _emit(op, ctx).body
-    carrier = rloop.carrier
+    alg = Reduction(op)
     axis = rloop.axis
     stride = k_ways * reg
     masked = reg > 1 and not (axis.extent.is_static and axis.extent.as_static() % stride == 0)
@@ -868,17 +845,16 @@ def _tile_reduce_axis_transposed(
         {axis.name, *(ax.name for ax in grid), blk_name, n_lane.name, *axis.extent_expr().free_vars(), *nested_axes, *expr_external}
         | ({k_co.name} if k_co is not None else set())
     )
-    twisted = carrier.ops is None
-    stream_identity = (str(carrier.terms[0]), ElementwiseImpl("maximum").identity) if twisted else None
+    stream_identity = (str(alg.terms[0]), ElementwiseImpl("maximum").identity) if alg.twisted else None
     copies: list[Stmt] = []
     for r in range(reg):
         copies.extend(_replicate(rloop.body, r, k_ways, axis, masked, protected, stream_identity))
     strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=rloop.unroll)
     strided = strided.rewrite(ident, subst)
 
-    merge: list[Stmt] = [carrier.as_state_merge(tuple(f"{n}__r{r}" for n in carrier.names)) for r in range(1, reg)]
+    merge: list[Stmt] = [alg.state_merge(tuple(f"{n}__r{r}" for n in alg.names)) for r in range(1, reg)]
     if k_co is not None:
-        merge += emit_combine(carrier, t=k_co.name, n_threads=k_ways, inner=(n_lane.name, lanes_n))
+        merge += emit_combine(alg, t=k_co.name, n_threads=k_ways, inner=(n_lane.name, lanes_n))
 
     tail_stmts = with_store(list(tail), ctx.output, grid, out_val)
     tail_stmts = [s.rewrite(ident, subst) for s in tail_stmts]
@@ -903,13 +879,13 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
     coop, reg = plan.coop, plan.reg
 
     # Build the per-cell reduce loop via the recursion (:func:`_emit`) off the :class:`Fold`
-    # **node** — the walk reaches any nested contraction (flash Q@K / P@V) as a node. The synthesized
-    # ``loop`` carries the :class:`Algebra` (a contraction's K loop and a monoid's reduce loop both
-    # carry it here — the ⊗ lift already sits in the loop body, so the carrier-generic ``state`` /
-    # ``as_state_merge`` / ``combine_states`` machinery folds either). A ``Fold`` has no prologue
+    # **node** — the walk reaches any nested contraction (flash Q@K / P@V) as a node. The algebra
+    # is read off the ``Fold`` node itself (:class:`Reduction` — a contraction's K fold and a
+    # monoid's reduce fold both answer it, so the algebra-generic ``state_merge`` /
+    # ``combine_states`` machinery folds either). A ``Fold`` has no prologue
     # ahead of its loop; the enclosing ``Map``'s projection is ``tail`` (already walked).
     (rloop,) = _emit(op, ctx).body
-    carrier = rloop.carrier
+    alg = Reduction(op)
     axis = rloop.axis
     stride = coop * reg
     masked = reg > 1 and not (axis.extent.is_static and axis.extent.as_static() % stride == 0)
@@ -969,10 +945,9 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
         {axis.name, *(ax.name for ax in grid), *axis.extent_expr().free_vars(), *nested_axes, *expr_external}
         | ({lane.name} if lane is not None else set())
     )
-    # A twisted carrier's masked tail clamps the STREAMED VALUE to the pivot fold's identity
+    # A twisted fold's masked tail clamps the STREAMED VALUE to the pivot fold's identity
     # (the ``exp`` family's running max, −inf) — see :func:`_mask_streamed`'s twisted form.
-    twisted = carrier.ops is None
-    stream_identity = (str(carrier.terms[0]), ElementwiseImpl("maximum").identity) if twisted else None
+    stream_identity = (str(alg.terms[0]), ElementwiseImpl("maximum").identity) if alg.twisted else None
     copies: list[Stmt] = []
     for r in range(reg):
         copies.extend(_replicate(rloop.body, r, coop, axis, masked, protected, stream_identity))
@@ -982,7 +957,7 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
     # (copy 0's names) + (when threads cooperate) the cross-thread combine, reassigning the carried
     # state in place. The one shared tail a cooperative reduce and a future cooperative-K contraction
     # both emit (``combine_tail``).
-    merge = combine_tail(carrier, reg=reg, coop=coop, lane=lane)
+    merge = combine_tail(alg, reg=reg, coop=coop, lane=lane)
 
     # Post-reduce projection. A full-row output (softmax / RMSNorm) distributes its sweep
     # across the coop lanes; a scalar output is written once, guarded to lane 0. With no

@@ -24,18 +24,19 @@ from emmy.compiler.ir.tile.ops import axis_role, lower, reduce_loop, reduce_plan
 
 def _sum_loop() -> Loop:
     """A minimal annotated reduce ``Loop`` — ``acc += x[m, k]`` over ``k``, the way recognition
-    stamps it (its degenerate ``add`` carrier read off the fold ``Accum``, the ``axes`` stamp
-    included — the canonical dissolved shape ``from_loop``'s byte gate reproduces)."""
+    stamps it (the role its ONLY annotation; the algebra is the body's fold ``Accum``, the
+    ``axes`` stamp included — the canonical dissolved shape ``from_loop``'s byte gate
+    reproduces)."""
     acc = Accum(name="acc", value="x_e", op="add", axes=("k",))
     body = Body((Load(name="x_e", input="x", index=(Var("m"), Var("k"))), acc))
-    return Loop(axis=Axis("k", 1024), body=body, role=AxisRole.PLANAR, carrier=acc.as_algebra())
+    return Loop(axis=Axis("k", 1024), body=body, role=AxisRole.PLANAR)
 
 
 def test_from_loop_reconstructs_the_loop_exactly() -> None:
     loop = _sum_loop()
     red = Fold.from_loop(loop)
     assert red is not None
-    # The synthesized loop is byte-identical to the captured one (axis / role / carrier / body).
+    # The synthesized loop is byte-identical to the captured one (axis / role / body).
     assert red.loop == loop
     assert reduce_loop(red) == loop
     assert axis_role(red) is AxisRole.PLANAR
@@ -46,8 +47,8 @@ def test_bare_reduction_lowers_to_just_the_loop() -> None:
     red = Fold.from_loop(loop)
     assert red is not None
     assert lower(red) == [loop]
-    # A bare reduce's grid ``Write`` is glue — ``out`` is the carrier state's primary component.
-    assert red.out == loop.carrier.out == "acc"
+    # A bare reduce's grid ``Write`` is glue — ``out`` is the carried state's primary component.
+    assert red.out == "acc"
 
 
 def test_projected_reduce_is_a_map_over_the_reduction() -> None:
@@ -113,17 +114,16 @@ def test_reduce_plan_is_none_for_a_flat_map_without_a_reduction_node() -> None:
     assert reduce_plan(_tile(pointwise)) is None
 
 
-def test_twisted_role_derives_from_the_carrier_and_propagates() -> None:
-    """The PLANAR/TWISTED half of the role is the carrier's twist family — a fold carrying an
-    exp-family (online-softmax) carrier derives ``TWISTED``; no stored role field."""
-    from emmy.compiler.pipeline.passes.lowering.tile._softmax import online_softmax_combine
+def test_twisted_role_derives_from_the_combine_and_propagates() -> None:
+    """The PLANAR/TWISTED half of the role is the stored combine's twist family — a fold whose
+    body is the dissolved exp-family (online-softmax) merge derives ``TWISTED``; no stored role
+    field, no side-band algebra (``from_loop`` reconstructs it from the body alone)."""
+    from emmy.compiler.ir.stmt.carrier import exp_merge
 
-    carrier = online_softmax_combine("m_i", "l_i", "x_e")
     loop = Loop(
         axis=Axis("k", 1024),
-        body=Body((Load(name="x_e", input="x", index=(Var("m"), Var("k"))), *carrier.dissolve())),
+        body=Body((Load(name="x_e", input="x", index=(Var("m"), Var("k"))), *exp_merge(("m_i", "l_i"), ("x_e", 1.0), key="m_i"))),
         role=AxisRole.TWISTED,
-        carrier=carrier,
     )
     red = Fold.from_loop(loop)
     assert red.role is AxisRole.TWISTED

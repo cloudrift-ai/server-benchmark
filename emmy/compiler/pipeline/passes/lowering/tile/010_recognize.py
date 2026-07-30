@@ -83,6 +83,7 @@ from emmy.compiler.pipeline.fork import Fork
 # NOTE: no ``Knob`` objects (``TILE`` / ``REDUCE`` / ``STAGE``) may be imported here — ``Pass.load``
 # scans rule modules for ``Knob`` attrs and OFF-fills any it finds bare onto every variant of the
 # pass. Pin reads / knob-key spelling ride the ``_schedule`` helpers instead.
+from emmy.compiler.pipeline.passes.lowering._reduction import loop_state_head
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction, bind_prologue_contraction, make_cone, map_cone
 from emmy.compiler.pipeline.passes.lowering.tile._cut import realize_cut, route_cut
 from emmy.compiler.pipeline.passes.lowering.tile._flash import is_flash_score_producer, try_flash
@@ -194,23 +195,23 @@ def _is_clean_contraction(body: list[Stmt], k_name: str) -> bool:
 
 
 def _annotate_reduce(rloop: Loop, pre_reduce: tuple[Stmt, ...]) -> Loop | None:
-    """Annotate a single FLAT reduce ``Loop`` with its :class:`AxisRole` + :class:`Algebra`,
+    """Annotate a single FLAT reduce ``Loop`` with its :class:`AxisRole`,
     moving any reduce-feeding ``pre_reduce`` prologue INTO the loop body (so the cooperative
-    register fold replicates it per accumulator chain). An already-annotated loop (online-softmax
-    / flash from ``_fuse``) keeps its carrier; a clean contraction becomes ``CONTRACTION`` + the
-    additive fold's degenerate algebra; a single-``Accum`` reduce becomes ``PLANAR`` + that
-    ``Accum``'s degenerate algebra. Returns ``None`` (→ flat ``Map`` fallback) when the algebra
+    register fold replicates it per accumulator chain). The role is the ONLY annotation — the
+    algebra is the body itself (its dissolved fold ``Accum``\\ s / streaming merge, read back by
+    ``Fold.from_loop``). An already-annotated loop (online-softmax from ``_fuse``) keeps its
+    role; a clean contraction stamps ``CONTRACTION``; a single-``Accum`` reduce stamps
+    ``PLANAR``. Returns ``None`` (→ flat ``Map`` fallback) when the shape
     can't be read (several ``Accum``\\ s, no fold)."""
     body = (*pre_reduce, *rloop.body)
-    if rloop.carrier is not None:
-        return Loop(axis=rloop.axis, body=Body(body), unroll=rloop.unroll, role=rloop.role, carrier=rloop.carrier)
+    if rloop.role is not AxisRole.FREE:
+        return Loop(axis=rloop.axis, body=Body(body), unroll=rloop.unroll, role=rloop.role)
     if _is_clean_contraction(list(body), rloop.axis.name):
-        fold = next(s for s in body if isinstance(s, Accum))
-        return Loop(axis=rloop.axis, body=Body(body), unroll=rloop.unroll, role=AxisRole.CONTRACTION, carrier=fold.as_algebra())
+        return Loop(axis=rloop.axis, body=Body(body), unroll=rloop.unroll, role=AxisRole.CONTRACTION)
     accs = [s for s in body if isinstance(s, Accum)]
     if len(accs) != 1:
         return None
-    return Loop(axis=rloop.axis, body=Body(body), unroll=rloop.unroll, role=AxisRole.PLANAR, carrier=accs[0].as_algebra())
+    return Loop(axis=rloop.axis, body=Body(body), unroll=rloop.unroll, role=AxisRole.PLANAR)
 
 
 def _lift_cell(cell: list[Stmt], free: list, output: str) -> tuple[Map | Fold, tuple]:
@@ -256,7 +257,7 @@ def _lift_cell(cell: list[Stmt], free: list, output: str) -> tuple[Map | Fold, t
         and len(after) == 1
         and isinstance(after[0], Write)
         and after[0].is_scalar
-        and after[0].value == annotated.carrier.out
+        and after[0].value == loop_state_head(annotated)
         and after[0].output == output
         and after[0].index == grid_index
     )

@@ -360,3 +360,38 @@ an explicit DRAM floor, which is precisely the regime where the artifact cannot 
 largest rows exceed L2; the cold picks (35,579 µs for a 63 MB slab ≈ 1.8 GB/s) are ~1000x below DRAM bandwidth, so
 they are compute-pathological rather than memory-timed and L2 residency can only *understate* the gap; and the
 finding was confirmed **end to end on a live server** at 4–6 tok/s, which no microbenchmark artifact can produce.
+
+## Quality gate — m192 passes
+
+The four m192 rows land on a width that is live in `serving_mtp_rtx5090` (the c=64 depth-2 lane), and nothing in the
+deploy path checks numbers, so the records were gated before being proposed for merge.
+
+GSM8K, 200 examples, seed 0, lm-eval 0.4.12, bare-metal RTX 5090, `EMMY_GEN_DECODE_BUCKET=192`, MTP depth 2 with the
+official drafter, BOS-patched tokenizer (gemma ships `add_bos_token=false` with an empty `post_processor`; without the
+patch the score collapses to ~0.27 and reads as a numerics bug). Stock vLLM is the control at each concurrency —
+same harness, tokenizer and client, none of emmy's kernels.
+
+| lane | client concurrency | verify step | exact_match (strict) | flexible |
+|---|--:|--:|--:|--:|
+| emmy, bucket 192 | 8 | 24 tokens (padded into the 192 twin) | **0.6750** ± 0.0332 | 0.3700 |
+| emmy, bucket 192 | 64 | 192 tokens (the bucket exactly) | **0.6650** ± 0.0335 | 0.3600 |
+| stock vLLM | 8 | — | 0.6900 ± 0.0328 | 0.3550 |
+| stock vLLM | 64 | — | 0.6550 ± 0.0337 | 0.3450 |
+
+**Pass.** At ±0.033 standard error on 200 examples the full spread across all four lanes (0.655–0.690) is about one
+standard error, so they are statistically indistinguishable. Emmy is 0.015 under stock at concurrency 8 and 0.010
+**over** it at concurrency 64. A numerics break on this harness reads as ~0.27 (the BOS trap) or 0.0 (the bucket-256
+failure), and nothing here is near either.
+
+Two things the controls earned, both of which would have been misread without them:
+
+- **`flexible-extract` is low (0.345–0.370) on BOTH engines, stock included.** It is a harness/model extraction
+  artifact — the model keeps generating past its `#### N` answer and the permissive filter grabs a later number — not
+  an emmy defect. Read alone, emmy's 0.36 would look alarming.
+- **Stock itself scores 0.655 at concurrency 64, below the 0.665–0.690 band** established at concurrency 8. The band
+  drifts with concurrency, so a lane must be compared against a control at ITS OWN concurrency, not against a number
+  measured at another.
+
+The same run also confirms the fused-cone fix end to end: this server sustained **310–353 tok/s** at these
+concurrencies, against the **4–6 tok/s** measured on the identical configuration before the four `norm_linear` rows
+existed — about 60x, on the same box, same commit, same knobs, the only difference being the golden records.

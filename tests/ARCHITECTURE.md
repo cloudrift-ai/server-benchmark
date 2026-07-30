@@ -116,7 +116,8 @@ tests/
 │   └── diagnostics/
 │       └── test_bank_conflicts.py
 ├── scripts/
-│   └── test_plot_mcr_sweep.py  # load_results() from scripts/plot_mcr_sweep.py
+│   ├── test_plot_mcr_sweep.py  # load_results() from scripts/plot_mcr_sweep.py
+│   └── test_serving_image_release.py  # release naming schema + golden coverage gate
 ```
 
 ## Test Layers
@@ -145,6 +146,7 @@ Test individual functions in isolation with synthetic inputs.
 | `provisioning/test_cloudrift.py` | `emmy.provisioning.cloudrift._api_request()`, `_rent_instance()`, etc. — CloudRift API helpers |
 | `provisioning/test_gcp.py` | `emmy.provisioning.gcp._gcloud_*_cmd()` — GCP command builders |
 | `scripts/test_plot_mcr_sweep.py` | `load_results()` — benchmark JSON loading and sorting from `scripts/plot_mcr_sweep.py` |
+| `scripts/test_serving_image_release.py` | `docker/vllm-emmy-serve/model_slug.sh` and `scripts/check_serving_goldens.py` — the image-naming schema (slug rules, org-blindness, empty-slug rejection), the golden `model:` coverage rule (base-checkpoint prefix on `-` boundaries), and that every `models/<slug>.env` is complete and named by its own `SERVE_MODEL` |
 
 Unit tests use **fixtures from `conftest.py`** (`tmp_recipe_dir`, `sample_config`, `sample_config_multi`) to supply pre-built recipe directories and config dicts.
 

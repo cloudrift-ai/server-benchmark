@@ -126,7 +126,7 @@ Three paths; default to the first.
 1. **Published tag (default).** Run as pinned, after any bump from Step 4a. Fastest and reproducible.
 2. **User-supplied reference.** Verify it exists (`docker manifest inspect <ref>`) before provisioning anything.
 3. **Build locally** — the path for testing unreleased or uncommitted changes. Delegate to the repo's release skill
-   for that image (e.g. `release-gemma4-image`) and run it **through its verify gate, stopping before
+   for that image (`release-serving-image`, parameterized by `MODEL`) and run it **through its verify gate, stopping before
    `docker login` / the push**; the local tag `make` produces is what the recipes then reference on that host. State
    the cost up front (hours of wall time, tens of GB of disk) and note it wants the **same host** the benchmarks
    will run on. Its gates apply unchanged — a preflight or parity failure aborts the session and is itself the

@@ -10,6 +10,9 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
 
 - **CLI usage** (deploy local/ssh/cloud, bench, teardown, vm, hardware-aware deploy, fixed-host mode, experiments, CI workflow) → [`emmy/commands/ARCHITECTURE.md`](emmy/commands/ARCHITECTURE.md)
 - **Serving** (vLLM out-of-tree embedding plugin — emmy-compiled kernels behind vLLM's `/v1/embeddings`; `serving` extra) → [`emmy/serving/ARCHITECTURE.md`](emmy/serving/ARCHITECTURE.md)
+- **Prebuilt serving images** (per-model warm/bake/verify/push release pipeline — `make serve-* MODEL=<hf-id>`, the
+  model-slug naming schema, the cubin cache-key parity contract, the golden coverage gate) →
+  [`docker/vllm-emmy-serve/ARCHITECTURE.md`](docker/vllm-emmy-serve/ARCHITECTURE.md)
 - **Recipe format** (matrices/cross/zip combinators, variant filtering, deep merge, named fields, extra_args validation, command recipes, aggregate, docker_options, driver/cuda pinning, SGLang) → [`emmy/recipe/ARCHITECTURE.md`](emmy/recipe/ARCHITECTURE.md)
 - **Compiler** (Graph IR dialects, passes, backends) → [`emmy/compiler/ARCHITECTURE.md`](emmy/compiler/ARCHITECTURE.md) and child docs
 - **Pipeline / autotune** (pass framework, knob/fork system, online/offline-prior search, two-level tune) →

@@ -1,16 +1,41 @@
 #!/bin/bash
-# Verify the baked image on the target GPU: cold-start fully offline (HF_HUB_OFFLINE is
+# Verify a baked per-model serving image on the target GPU: cold-start fully offline (HF_HUB_OFFLINE is
 # baked in; no HF_TOKEN passed) — proving zero downloads — then issue one completion and
 # assert the cubin set did not grow: an empty diff = 100% cache hit (zero nvcc compiles).
 #
-#   IMAGE=cloudriftai/vllm-emmy-gemma4:TAG [GPU_DEVICE=1] ./verify.sh
+#   MODEL=google/gemma-4-12B-it IMAGE=cloudriftai/vllm-emmy-<slug>:TAG [GPU_DEVICE=1] ./verify.sh
 set -euo pipefail
+# Resolve the pinned config from MODEL via the naming schema — models/<slug>.env is the
+# single source the bake reads too, so warm and release cannot drift apart.
 cd "$(dirname "$0")"
-source ./config.env
-: "${IMAGE:?set IMAGE to the baked gemma4 image to verify}"
+MODEL="${MODEL:?set MODEL to the HF model id being released}"
+SLUG=$(./model_slug.sh "$MODEL")
+CONFIG="models/$SLUG.env"
+[ -f "$CONFIG" ] || { echo "no pinned config for $MODEL (expected $CONFIG)" >&2; exit 1; }
+set -a  # export the SERVE_* config so the -e pass-throughs below carry values
+source "$CONFIG"
+set +a
+
+# Every cache-key input is card-specific — the live-probed featurization, the golden picks,
+# the memory headroom the config was swept for. A warm on the wrong GPU bakes a cache the
+# released image can never hit, and the failure only surfaces ~30 min later in verify (or
+# worse, never, on a card whose picks happen to coincide). Check it here, cheaply.
+if [ -n "${SERVE_GPU:-}" ] && [ -z "${SKIP_GPU_CHECK:-}" ]; then
+    # `|| true`: under `set -euo pipefail` a missing nvidia-smi would abort the script here
+    # with no message at all, turning a diagnosable "no GPU on this host" into a silent exit.
+    live=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | sed -n "$(( ${GPU_DEVICE:-0} + 1 ))p" || true)
+    if [ -n "$live" ] && [ "$live" != "$SERVE_GPU" ]; then
+        echo "GPU mismatch: config pins '$SERVE_GPU', device ${GPU_DEVICE:-0} is '$live'." >&2
+        echo "  Warm and verify must run on the card the config was swept for." >&2
+        echo "  Override with SKIP_GPU_CHECK=1 only if you know the picks transfer." >&2
+        exit 1
+    fi
+fi
+
+: "${IMAGE:?set IMAGE to the baked serving image to verify}"
 PORT="${PORT:-8000}"
 GPUS="all"; [ -n "${GPU_DEVICE:-}" ] && GPUS="device=$GPU_DEVICE"
-NAME=gemma4-verify
+NAME="emmy-verify-$SLUG"
 
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 # Cleanup rides an EXIT trap: under `set -e` an inline `docker rm` after a failing
@@ -34,7 +59,7 @@ done
 curl -sf "http://localhost:$PORT/health" >/dev/null || { echo "[verify] timed out"; docker logs --tail 50 "$NAME"; exit 1; }
 
 # Under HF_HUB_OFFLINE vLLM serves the model under the RESOLVED snapshot path, not the
-# repo id — ask the server for its served name rather than assuming $GEMMA4_MODEL.
+# repo id — ask the server for its served name rather than assuming $SERVE_MODEL.
 served=$(curl -sf "http://localhost:$PORT/v1/models" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["id"])')
 curl -sf "http://localhost:$PORT/v1/completions" -H 'Content-Type: application/json' \
     -d "{\"model\": \"$served\", \"prompt\": \"The capital of France is\", \"max_tokens\": 20, \"temperature\": 0}" \

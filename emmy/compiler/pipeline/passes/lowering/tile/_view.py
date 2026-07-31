@@ -8,6 +8,15 @@ node itself is built at fork-emit) and the flash streaming pair (:func:`twisted_
 pure readings: they take an op tree + a placement and return views, deciding no schedule and
 stamping no ``TileOp`` — that stays with ``_schedule``, their one caller.
 
+A schedule-side view binds only the members the schedule READS — the node, the ``(m, n)`` output
+axes and the candidate ``TilePlan``. It binds NO ``lead_axes`` and NO ``stage``: the schedule's
+legality gates (the smem slot sizing, the N-mask / TMA-box refusals, the block-thread limit) are
+functions of the tiled cell alone, and both of those members are the MATERIALIZER's binding —
+``_factor`` rebuilds its own view off the KERNEL grid, which for a split partial is not the
+pre-split grid a probe here saw (the ``ksplit`` axis is introduced by the split option), and the
+resolved ``Stage`` is a schedule RESULT that rides ``TileOp.schedule``, never the probe. So the
+empty defaults are the honest reading on this path, not a dropped fact.
+
 They live apart from ``_schedule`` because the placement conventions they encode (a root kernel's
 output cell is the trailing grid pair, the leading axes ride untiled; a flash consumer supplies the
 query axis and the stream / value axis itself) are the SAME conventions the materializer
@@ -44,9 +53,9 @@ def contraction_view(node, place, tile_plan: TilePlan) -> tuple[Placed, Body]:
         # The recognizer's ``Map(body=projection, sources=(Contraction,))`` spelling — the ONE
         # node under the wrapper is the schedulable unit, the projection its ``Map`` body. The
         # placed reading is STAMPED here, its output axes the placement's trailing grid.
-        return place_view(node.sources[0], grid[-2], grid[-1], tuple(grid[:-2]), tile=tile_plan), node.body
+        return place_view(node.sources[0], grid[-2], grid[-1], tile=tile_plan), node.body
     if isinstance(node, Contraction) and len(grid) >= 2:
-        return place_view(node, grid[-2], grid[-1], tuple(grid[:-2]), tile=tile_plan), Body(())
+        return place_view(node, grid[-2], grid[-1], tile=tile_plan), Body(())
     a_load, b_load, acc, epilogue = semiring_binding(node, place.grid)
     kaxis = reduce_loop(node).axis
     return (
@@ -58,7 +67,6 @@ def contraction_view(node, place, tile_plan: TilePlan) -> tuple[Placed, Body]:
             ),
             grid[-2],
             grid[-1],
-            tuple(grid[:-2]),
             tile=tile_plan,
         ),
         epilogue,

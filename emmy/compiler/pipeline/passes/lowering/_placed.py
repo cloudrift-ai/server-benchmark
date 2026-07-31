@@ -38,6 +38,12 @@ class Placed:
 
     node: Contraction
     axes: tuple[Axis, Axis]  # placement: the tiled output (m_axis, n_axis)
+    # The two MATERIALIZER-only members. A schedule-side probe (``tile/_view.contraction_view``)
+    # leaves both empty by design — its gates read the tiled cell alone — and ``_factor`` /
+    # ``_twist`` bind them when they rebuild the view for emission. Read them only from a view you
+    # built with them: the leading axes come off the KERNEL grid (a split partial's ``ksplit`` is
+    # not on the pre-split grid a probe saw), and ``stage`` is a schedule RESULT living in
+    # ``TileOp.schedule``, threaded back in at materialize.
     lead_axes: tuple[Axis, ...] = ()  # placement: the leading (batch / ksplit) grid axes
     tile: TilePlan = field(default_factory=TilePlan)  # schedule: leaf atom + unit/register widths + K-chunk
     stage: Stage | None = None  # schedule: the resolved operand smem pipeline (None = gmem-direct)

@@ -64,6 +64,13 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
 - `packed.py` — `split_spans(positions, max_seq_len)`: vLLM V1 hands pooling models one packed `(num_tokens,)` tensor
   with per-request 0-based positions; spans split at `positions == 0`. Hardened for `_dummy_run`'s garbage profiling
   batches (index 0 always opens a span; overlong spans are chopped).
+- `roofline.py` — **boot roofline audit**. `EmmyGenRunner.from_model` event-times each STATIC twin (one layer per
+  attention class; symbolic programs skipped — they sit at capacity shape at boot) against its **weight-streaming
+  floor** (`const_bytes / dram_bw`, bandwidth self-calibrated with a D2D copy — no per-card table) and logs a loud
+  WARNING naming any program >10x over it, with the `emmy tune` pointer. Conservative by construction (the weight
+  floor is a true lower bound and copy bw undershoots peak), advisory only (never raises, never blocks boot). Born
+  from the 2026-07-29 TinyLlama/4080 incident: a cold deploy served a fused-norm kernel ~150x off the floor (54x
+  TPOT gap) with zero boot-time signal.
 - `sampling.py` — **no vLLM, no CUDA**. Pure-numpy token sampling (`Sampler`: greedy / temperature / top-k / top-p) +
   `apply_chat_template` (delegates to the HF tokenizer). Used by the standalone **generation oracle**
   (`commands/generate.py`) — `emmy generate`'s host loop re-runs the whole fp16 prefix each step on the CUDA

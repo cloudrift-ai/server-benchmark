@@ -442,21 +442,6 @@ def _reduce_specs(kernel, place, ctx=None) -> list[str]:
     deploy = ctx is None or ctx.validate_pins
     if deploy and REDUCE.raw() is None and kstride == 1 and extent >= _COOP_MIN_EXTENT and free >= _FREE_CAP:
         return ["b32"]
-    # Keep the RTX-4080 DiT LayerNorm rows deterministic too. The local online
-    # prior is mutable (``tune`` retrains it), and one bad checkpoint selected
-    # the 480-us serial row instead of this measured 1.7-us b128 fold. Scope the
-    # guard to the exact SKU/shape; other cards and row widths retain their
-    # recorded golden candidates.
-    if (
-        deploy
-        and REDUCE.raw() is None
-        and ctx is not None
-        and ctx.gpu_name == "NVIDIA GeForce RTX 4080"
-        and kstride is None
-        and extent == 1152
-        and free == 256
-    ):
-        return ["b128"]
     if coop > 1 and kstride is not None and kstride != 1:
         coop = 1  # the heuristic option-0 is a plain band too — uncoalesced on a k-major B
     cands = [f"b{coop}" if coop > 1 else ""]  # conservative heuristic pick first (cold greedy → option-0)
@@ -1905,9 +1890,6 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None, reduce_key: str | N
         if pair is not None:
             red, head_f, pv_f, head, pv = pair
             warps = _twisted_warp_options(tile, name, knobs, _smem_budget(ctx), _tma_allowed(ctx), _f16acc_allowed(ctx))
-            measured_flash = _rtx4080_dit_flash_deploy(warps, red, head, pv, ctx)
-            if measured_flash is not None:
-                return measured_flash
             # A live **warp** ``TILE`` pin (``a:<atom>…``) OR a non-empty ``STAGE`` pin keeps the mma
             # rows alone: ONLY the warp tier stages, so a staging pin (the ``--ab STAGE=…`` /
             # ``emmy tune`` staging probe, or ``EMMY_STAGE``) must not fall through to the chain /
@@ -2038,53 +2020,6 @@ def _narrow_flash_forms(forms: list[TileOp], head: Placed, pv: Placed, *, keyed_
         )
         return forms
     return kept
-
-
-def _rtx4080_dit_flash_deploy(forms: list[TileOp], red: Fold, head: Placed, pv: Placed, ctx) -> TileOp | None:
-    """The measured DiT S256/Hd72 flash winner on RTX 4080, or ``None``.
-
-    Like the contraction defaults above, this applies only to a deterministic unpinned deploy;
-    autotuning retains every flash geometry. The recorded winners are LEGACY spellings — matched
-    through the site codec (values via ``canon_family_value``, the worker halves via the row's
-    ``WORK`` inventory), so the table survives the step-7 value-grammar split verbatim."""
-    if (
-        ctx is None
-        or not ctx.validate_pins
-        or ctx.gpu_name != "NVIDIA GeForce RTX 4080"
-        or any(k.raw() is not None for k in (TILE, STAGE, REDUCE))
-        or not (red.axis.extent.is_static and head.m_axis.extent.is_static and head.k_axis.extent.is_static and pv.n_axis.extent.is_static)
-        or (
-            red.axis.extent.as_static(),
-            head.m_axis.extent.as_static(),
-            head.k_axis.extent.as_static(),
-            pv.n_axis.extent.as_static(),
-        )
-        != (256, 256, 72, 72)
-    ):
-        return None
-    from emmy.compiler.pipeline.knob import axis_of, canon_family_value, family_of  # noqa: PLC0415
-
-    qk = "a:mma_m16n8k16_f16_f32/w2x1/f2x8/k5"
-    expect = "a:mma_m16n8k16_f16_f32/w2x1/f2x9/k4"
-
-    def _fam_at(knobs: dict, family: str, axis: str) -> str:
-        for k, v in knobs.items():
-            if family_of(k) == family and axis_of(k) == axis:
-                return str(v)
-        return str(knobs.get(family, ""))
-
-    want_work = plan_workers(TilePlan.parse(qk))
-    for form in forms:
-        if (
-            canon_family_value("TILE", _fam_at(form.knobs, TILE.name, head.k_axis.name)) == canon_family_value("TILE", qk)
-            and canon_family_value("TILE", _fam_at(form.knobs, TILE.name, pv.k_axis.name)) == canon_family_value("TILE", expect)
-            and _fam_at(form.knobs, REDUCE.name, red.axis.name) in ("",)
-            and _fam_at(form.knobs, STAGE.name, red.axis.name) in ("",)
-            and Workers.parse(form.knobs.get(WORK.name, "") or None) == want_work
-        ):
-            return form
-    logger.warning("measured RTX 4080 DiT flash schedule is no longer enumerable")
-    return None
 
 
 def _stamp_twisted_split(rows: list[TileOp], plan: ReducePlan) -> list[TileOp]:

@@ -1036,18 +1036,24 @@ rides the atomic; a non-distributive epilogue (`l2`'s `sqrt`, a fused bias/activ
 
 Two deploy-only dominance/default rules live beside the generic schedule enumeration. A coalesced wide-K `F.linear`
 MATVEC (the M=1 contraction-demotion tier) always uses a `b32` single-warp fold unless `REDUCE` is explicitly pinned;
-the serial sibling walks all of K in one thread and measured 4–16× slower on DiT conditioning projections. Separately,
-RTX 4080 runs of the `(rows=256, K=1152)` LayerNorm and the S256/head-dim-72 flash shape in
-`facebook/DiT-XL-2-256` select their measured winning rows. This SKU-exact selection is active only for deterministic
-deploy (`Context.validate_pins`); tune mode retains the complete legal space and explicit `TILE` / `STAGE` / `REDUCE`
-pins remain authoritative.
+the serial sibling walks all of K in one thread and measured 4–16× slower on DiT conditioning projections. That
+dominance rule is generic (any card, any coalesced wide-K matvec), which is why it stays here.
 
-The DiT **contraction** table that sat here is gone: recorded winners belong in the golden corpus, which the deploy
-evidence tier already consults ahead of the prior. Its two plain-A shapes moved to
-`goldens/rtx4080_sm89.yaml` (`dit_xl_2.*`, schedule-only — see the unmeasured-entry convention under GOLDEN below);
-its two computed-A shapes were dropped rather than mis-filed, because the DiT prologue is an AdaLayerNorm-Zero
-LayerNorm and every fused golden kind (`norm_linear` / `mlp_geglu`) is RMSNorm by construction — those two shapes now
-deploy off the prior until a LayerNorm-cone golden kind exists to record them.
+The SKU-exact `facebook/DiT-XL-2-256` deploy overrides that used to sit beside it are GONE — a hardcoded contraction
+table, a flash-winner matcher and a `b128` LayerNorm `REDUCE` narrowing, all string-matched on `NVIDIA GeForce RTX
+4080`. A recorded winner belongs in the golden corpus, which the deploy evidence tier already consults ahead of the
+prior, and which is versioned, auditable through `emmy eval golden`, and covered by the drift gate. What could be
+expressed as a golden moved to `goldens/rtx4080_sm89.yaml` (`dit_xl_2.*`, schedule-only — see the unmeasured-entry
+convention under GOLDEN below): the two plain-A projections as `matmul` entries and the block's SDPA as an
+`attention` entry.
+
+What could NOT be expressed was deleted rather than mis-filed, both times for the same reason: **no golden kind
+describes a LayerNorm**. The DiT prologue is AdaLayerNorm-Zero, while every fused kind (`norm_linear` / `mlp_geglu`)
+is RMSNorm by construction — its `snippet()` builds `F.rms_norm` — and the reduce kinds are `torch.sum` /
+`torch.nn.RMSNorm`. An entry filed under those would join correctly at deploy (the ShapeKey matches numerically) and
+hand every re-tune / `eval golden` / drift-gate consumer the wrong kernel to rebuild. So the two LayerNorm→linear
+contractions and the LayerNorm statistic reduce now deploy off the prior; adding a LayerNorm-cone kind is what would
+let them be recorded.
 
 **`STAGE`** (STR codec, `010_recognize` / `_schedule` → `lowering/kernel/010_materialize`) — the operand-staging codec
 `d<depth>/sync|cp|tma[/ring][/alt][/p<reg_depth>]` on the typed `Stage` schedule struct (composes with both fragments

@@ -1,5 +1,6 @@
 """The factorizer — the recursive ``TileOp``-root emitter and the ONE root binder every kernel
-seals through. The per-atom codegen **strategies** it drives live in ``_atom.py``.
+seals through. The per-atom codegen **strategies** it drives live in ``_atom.py``, and the
+axis-realization layer it seals through in ``_tiling.py``.
 
 :func:`factorize` is the entry ``010_materialize`` calls once per kernel: it builds the ambient
 :class:`Ctx` and dispatches ``tile.op`` through the recursion :func:`_factorize`, which walks the
@@ -16,7 +17,8 @@ reaching flash's Q@K / P@V as nodes).
 The output tiling reads its **geometry straight off the** ``Contraction`` **node** (``tile_m`` /
 ``mask_m`` / ``m_b`` / ``block_threads`` / …, derived there from the ``tile`` schedule + the output
 axes), expands both atoms through the *same* four-level tiling pipeline (``atomize →
-register_tile → unit_tile → grid_tile``, in this module), and splices in two codegen halves from
+register_tile → unit_tile → grid_tile``, in **``_tiling.py``** — the algebra-free layer that turns
+the schedule's plan into bound ``Axis`` objects), and splices in two codegen halves from
 the per-atom strategies in **``_atom.py``**: :func:`~...kernel._atom.reduce_codegen` — the reusable,
 **sink-agnostic** ``(state_decls, reduce_region)`` (accumulator/operand decls + the contraction
 K-loop) — and a per-cell **sink** ``store(i, j, offset, mn)`` (default
@@ -43,153 +45,26 @@ module."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis, AxisRole, Window
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import FoldMove, Level, ReducePlan, ReduceStage
-from emmy.compiler.ir.tile.ir import Contraction, Fold, Map, Side, effect_tail
+from emmy.compiler.ir.tile.ir import Contraction, Fold, Map, effect_tail
 from emmy.compiler.ir.tile.ops import cone_seam
 from emmy.compiler.pipeline.passes.lowering._placed import Placed
 from emmy.compiler.pipeline.passes.lowering._placed import place as place_view
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction, loop_state_head
-from emmy.compiler.pipeline.passes.lowering.kernel._atom import copy_cell, reduce_codegen, shrink_axis, store_sink
+from emmy.compiler.pipeline.passes.lowering.kernel._atom import copy_cell, reduce_codegen, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import sync_row_fill
+from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, unit_tile
 from emmy.compiler.pipeline.passes.lowering.kernel._twist import FLASH_WARP_AXIS, realize_warp_twist, warp_source
-
-
-# ---- generic tiling layer: atomize → register_tile → unit_tile → grid_tile ---------------------- #
-# A contraction is lowered by tiling a leaf atom four ways: GRID block / UNIT / REGISTER / ATOM. The
-# UNIT is the atom's parallel thread footprint (a warp for mma, a thread for scalar). Each level zips
-# the per-axis :class:`AxisOffset` pair (``Tiling.offset``) with the ``(m, n)`` :class:`Side` pair, so
-# the two axes never split into ``*_m`` / ``*_n`` locals; :func:`grid_tile` (the finalizer) splices the
-# atom's ``state`` / ``reduce_region`` / ``store`` callables (from :func:`reduce_codegen` / the sink) in.
-@dataclass(frozen=True)
-class AxisOffset:
-    """One output axis's per-register-cell coordinate, accumulated across the tiling levels (atom →
-    register → unit → grid). :meth:`base` reproduces ``block·(units·reg·atom) + unit·(reg·atom) +
-    r·atom`` once the UNIT level is present (the mma warp tile AND the scalar thread tile both go
-    through :func:`unit_tile`), else the bare ``Var(block)·reg + r``."""
-
-    atom_dim: int  # the atom step along this axis
-    reg: int = 1  # register sub-cells per unit
-    block_var: str | None = None  # the grid-block axis var (set at grid_tile)
-    unit_var: str | None = None  # the UNIT-level var — a warp for mma, a thread for scalar
-    unit_count: int = 1
-
-    def base(self, r: int) -> Expr:
-        """The offset of register cell index ``r`` along this axis."""
-        reg_term = Literal(r * self.atom_dim, "int")
-        if self.unit_var is not None:  # block·(units·reg·atom) + unit·(reg·atom) + r·atom
-            tile = self.unit_count * self.reg * self.atom_dim
-            e = BinaryExpr("*", Var(self.block_var), Literal(tile, "int"))
-            e = BinaryExpr("+", e, BinaryExpr("*", Var(self.unit_var), Literal(self.reg * self.atom_dim, "int")))
-            return BinaryExpr("+", e, reg_term)
-        return BinaryExpr("+", BinaryExpr("*", Var(self.block_var), Literal(self.reg, "int")), reg_term)  # no unit level
-
-
-@dataclass(frozen=True)
-class Tiling:
-    """The accumulating tiling state threaded through ``atomize → register_tile → unit_tile →
-    grid_tile`` — the per-axis ``(m, n)`` :class:`AxisOffset` tuple ``offset`` + the bound ``Tile``
-    axes (unit → grid) + ``block_threads``. Each level ``zip``\\ s ``offset`` with the ``(m, n)``
-    :class:`Side` pair, so the two axes never split into ``*_m`` / ``*_n`` locals."""
-
-    offset: tuple[AxisOffset, AxisOffset]
-    axes: tuple[Axis, ...] = ()
-    block_threads: int | None = None
-
-
-def atomize(atoms: tuple[int, int]) -> Tiling:
-    """The leaf: a single ``(atom_m, atom_n)`` atom (1×1 for a scalar cell). Seeds the per-axis
-    offset with the atom step; the atom-lane offset stays OUT of σ (added at render)."""
-    return Tiling(offset=tuple(AxisOffset(atom_dim=a) for a in atoms))
-
-
-def register_tile(t: Tiling, mn: tuple[Side, Side]) -> Tiling:
-    """The REGISTER level: ``m.reg × n.reg`` atoms per thread/warp. Records the cell counts; the
-    per-cell ``r·atom_dim`` term is applied at :meth:`AxisOffset.base`."""
-    return replace(t, offset=tuple(replace(o, reg=s.reg) for o, s in zip(t.offset, mn, strict=True)))
-
-
-def unit_tile(t: Tiling, mn: tuple[Side, Side]) -> Tiling:
-    """The UNIT level: ``m.units × n.units`` parallel units per CTA, where a *unit* is the atom's
-    thread footprint — a warp (32 lanes) for an mma atom, a single thread for a scalar atom (so the
-    tensor-core warp tile and the scalar parallel thread-tile are the same level, differing only in
-    the atom's ``lanes``). Adds the unit term ``unit·(reg·atom)`` to each axis offset + the per-axis
-    unit axes."""
-    offset = tuple(replace(o, unit_var=s.unit, unit_count=s.units) for o, s in zip(t.offset, mn, strict=True))
-    axes = (*t.axes, *(Axis(name=s.unit, extent=s.units) for s in mn))
-    return replace(t, offset=offset, axes=axes)
-
-
-def grid_tile(
-    t: Tiling,
-    *,
-    mn: tuple[Side | None, Side | None],
-    lead_axes: tuple[Axis, ...] = (),
-    block_threads: int | None,
-    lanes: int = 1,
-    state_decls: Callable[[list[tuple[int, int]]], list[Stmt]],
-    reduce_region: Callable[..., tuple[list[Stmt], list[Stmt]]],
-    store: Callable[..., list[Stmt]],
-    workers: object = None,
-    raster: object = None,
-) -> Tile:
-    """The GRID level + finalize — the ONE seal every kernel binds through: bind the block axes (the
-    shrunk grid), set the per-axis grid term ``block·tile``, append any leading (untiled) grid axes
-    verbatim and — when the atom is warp-cooperative (``lanes > 1``) — the atom ``_lane`` axis, then
-    splice the codegen callables' state + reduce-region + per-cell stores into the ``Tile``. The
-    three callables (atom-specific for a contraction, from :func:`reduce_codegen` + the ``store``
-    sink; the reduce tier's fill / partitioned fold / projection close) are the only variation; the
-    splice is shared. They take the per-cell ``offset`` (the ``(m, n)`` :class:`AxisOffset` tuple) +
-    the ``mn`` :class:`Side` pair.
-
-    ``mn[0] is None`` is a 1-D output grid (only ``n`` tiled) — no ``m`` block axis is bound.
-    ``mn == (None, None)`` is the fully-untiled output (the reduce tier / degenerate fold): one cell
-    per thread, no block axis at all — the whole grid rides ``lead_axes``, and a tiled REDUCE axis
-    contributes its lane through ``t.axes``. ``lanes == 1`` (scalar) emits no ``_lane`` axis.
-
-    ``workers`` (a resolved :class:`WarpSpec`) appends its producer band as ``Tile.aux_threads`` and
-    guards the stores to the compute band — an aux thread's wrapped decode aliases a compute cell,
-    so an unguarded ``store`` would double-write it."""
-    offset = tuple(replace(o, block_var=s.block) if s is not None else o for o, s in zip(t.offset, mn, strict=True))
-    block_axes = tuple(
-        shrink_axis(Axis(name=s.block, extent=s.axis.extent, window=Window(parent=s.axis)), s.tile) for s in mn if s is not None
-    )
-    lane_axes = (Axis(name="_lane", extent=lanes),) if lanes > 1 else ()
-    axes = (*lead_axes, *block_axes, *t.axes, *lane_axes)
-
-    cells = [(i, j) for i in range(offset[0].reg) for j in range(offset[1].reg)]
-    state = state_decls(cells)
-    top_decls, kstmts = reduce_region(cells, offset, mn)
-    stores = [s for (i, j) in cells for s in store(i, j, offset, mn)]
-    aux_threads = 0
-    if workers is not None:
-        aux_threads = 32 * workers.aux_warps
-        stores = [Cond(cond=BinaryExpr("<", Builtin("thread_idx.x"), Literal(block_threads, "int")), body=tuple(stores))]
-    # A 2-D-tiled output (both mn Sides bound) marks its (m, n) block axes as
-    # rasterization-eligible — the structural fact only this seal knows; whether (and how) the
-    # CTA order actually groups them is the resolved ``RASTER`` codec threaded down off the
-    # TileOp's knobs (``None`` / ineligible ⇒ the flat N-fastest order, byte-identical codegen).
-    raster_axes = (mn[0].block, mn[1].block) if (mn[0] is not None and mn[1] is not None) else None
-    return Tile(
-        axes=axes,
-        body=Body((*state, *top_decls, *kstmts, *stores)),
-        block_threads=block_threads,
-        aux_threads=aux_threads,
-        raster_axes=raster_axes,
-        raster_group=(raster.group if raster is not None and raster_axes is not None else None),
-        raster_orient=(raster.orient if raster is not None else "m"),
-    )
-
 
 # ---- the recursive node walk: Ctx down, Frag up ------------------------------------------------ #
 # The hierarchical emitter (the tile-IR-rebuild mandate: ONE recursion over the node tree, no

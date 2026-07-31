@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.atom import AtomKind
-from emmy.compiler.ir.axis import Axis, Window
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.kernel.ir import (
@@ -76,17 +76,7 @@ def unroll_ok_n(trips: int, cap: int | None = None) -> bool:
     return trips <= UNROLL.read_int(trips if cap is None else cap)
 
 
-# Shared axis-geometry helpers, used across this module (the atom-generic mma/scalar codegen) AND
-# ``_factor.py`` (the tiling layer + the cooperative / ILP reduce tier).
-def shrink_axis(axis: Axis, reg: int) -> Axis:
-    """The grid (cell) axis for a register-tiled free axis: ``ceil(E / reg)`` cells, each a
-    per-thread ``reg``-wide register sub-tile. ``Dim.ceil_div`` keeps a symbolic extent
-    symbolic (``(seq_len+reg-1)//reg``) so the launch grid sizes from the runtime extent."""
-    if reg <= 1:
-        return axis
-    return Axis(name=axis.name, extent=axis.extent.ceil_div(reg), window=Window(parent=axis.source_axis or axis))
-
-
+# Shared per-cell helpers, used across this module (the atom-generic mma/scalar codegen).
 def copy_cell(body, sigma, suffix: str, protected) -> list:
     """One copy of a tiled reduce ``body``: σ-substitute its indices (``sigma``) and suffix every
     per-copy SSA name (the shared grid / reduce / lane coordinates in ``protected`` pass through

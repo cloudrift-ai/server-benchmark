@@ -69,7 +69,7 @@ reuse needs.
 A symbolic / non-divisible tail is **clamp-to-identity** (the masked overhang folds a no-op or guards its store); the
 dynamic-grid tier ceil-divides the launch and threads the runtime extent as an `int seq_len` arg.
 
-### The one factorizer — the single binder + reduce-axis tiling (`_factor.py`), atom strategies (`_atom.py`)
+### The one factorizer — the single binder + reduce-axis tiling (`_factor.py`), atom strategies (`_atom.py`), axis realization (`_tiling.py`)
 
 `_factor.factorize(tile, root)` is the **entry** every `TileOp` root lowers through: it builds the ambient `Ctx` and
 dispatches `tile.op` into the recursion `_factorize(op, ctx, tail, out_val)`. `_factorize` walks the node tree — a `Map`
@@ -90,7 +90,10 @@ kernel-boundary `TileOp.stores` (1q — the root `Write`s / output sweep that le
 projection `tail` at the `Map` peel (`effect_tail`; plain stores append at a flat/bare root), so everything below the
 peel — the sinks, the sweep's coop `StridedLoop` distribution, the split realizers — consumes the identical stmt
 stream the stored-`Write` era carried. The
-recursion, the binder, the reduce-axis tiling, and the shared-row staging apply live in `_factor.py`. **There is no
+recursion, the binder, the reduce-axis tiling, and the shared-row staging apply live in `_factor.py`; the four tiling
+levels every tier seals through are `_tiling.py`, which knows a `Side` pair, integer counts and three callables — no
+node kinds, no algebra, no `Ctx`. That is the decide/realize seam: `020_schedule` picks the plan, `_tiling` is where a
+plan becomes bound `Axis` objects. **There is no
 kind-specific path — no flash / attention special case.** Flash is the `TWISTED` fold composing two `Contraction` nodes, so its
 Q@K / P@V contractions and its streaming reduce factorize through this one recursion (scalar block=1 today). A
 tensor-core flash tier is a matter of the contractions carrying an mma `TilePlan` (a schedule field on the node) and
@@ -99,7 +102,7 @@ would be a divergent codegen path the mandate forbids.
 
 **The contraction factorization — two atoms.** `_bind`'s output-tiled arm is atom-generic — there is no per-atom
 variant, and **no per-atom geometry object**. It expands any `Contraction` by tiling a **leaf atom** four ways through
-the tiling layer (now inlined in `_factor.py`):
+the tiling layer (**`_tiling.py`**):
 `grid_tile(unit_tile(register_tile(atomize(...))))` — **GRID** block / **UNIT** / **REGISTER** / **ATOM**. The tiling
 geometry (the `(m, n)` `Side` pair — `tile` / `mask` / `block` / `unit` per axis — plus `block_threads` / `lanes`) is
 **derived on the `Contraction`** (`@property`, from the `tile` schedule × the output axes); the two sides

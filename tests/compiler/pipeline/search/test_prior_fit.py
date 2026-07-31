@@ -17,7 +17,16 @@ import numpy as np
 import pytest
 
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
-from emmy.compiler.pipeline.search.prior.fit import Group, build_artifact, feature_matrix, fit_weights, rank_of_golden, raw_weights
+from emmy.compiler.pipeline.search.prior.fit import (
+    DEFAULT_L2,
+    Group,
+    build_artifact,
+    feature_matrix,
+    fit_weights,
+    objective,
+    rank_of_golden,
+    raw_weights,
+)
 from emmy.compiler.pipeline.search.prior.offline import _DEFAULT_FILE, OfflinePrior
 
 # The features the OfflinePrior scores OUTSIDE the linear weights (the hardcoded
@@ -122,3 +131,61 @@ def test_incumbent_weights_rank_identically_through_fit_eval_and_prior(monkeypat
 
     for i in range(len(rows)):
         assert rank_of_golden(linear_scores, i) == rank_of_golden(-proxies, i)
+
+
+# --- raw-space L2 regularization ---------------------------------------------------
+
+
+def _cases_with_flat_feature():
+    """The synthetic set plus one constant feature: its z-scored column is all zeros, so
+    the rank objective is COMPLETELY flat in its weight — the identifiability failure
+    behind the D_pow2_threads 686 incident, in miniature."""
+    cases, names = _synthetic_cases()
+    flat_cases = [
+        Group(g.key, g.name, g.tier, g.gpu, g.pinned_idx, (*g.feat_names, "D_flat"), np.hstack([g.feats, np.full((len(g.feats), 1), 3.0)]))
+        for g in cases
+    ]
+    return flat_cases, [*names, "D_flat"]
+
+
+def test_l2_heals_poisoned_seed_on_rank_flat_feature():
+    """A poisoned incumbent weight on a rank-flat feature survives an unregularized
+    descent-from-seed refit untouched (the objective gives it no gradient); with the
+    L2 penalty in the loss the descent walks the flat direction down to ~zero without
+    giving up rank quality: at the default strength no rank-worsening step is ever
+    accepted (the penalty quantum is orders below the rank quantum), so refitting from
+    a converged incumbent can only hold or improve the data term."""
+    cases, names = _cases_with_flat_feature()
+    tier_n = {t: sum(1 for g in cases if g.tier == t) for t in {g.tier for g in cases}}
+    cw = [1.0 / tier_n[g.tier] for g in cases]
+    ones = np.ones(len(names))
+
+    # Converge unregularized from zero, then poison the flat feature — the shipped-686
+    # shape: an incumbent that is a data-term optimum plus an unidentified magnitude.
+    base_w, base_ranks, _, base_sd = fit_weights(
+        cases, names, ones, seed_w=np.zeros(len(names)), rng=np.random.default_rng(0), samples=0, l2=0.0
+    )
+    poisoned = base_w / base_sd  # the incumbent's raw weights
+    poisoned[names.index("D_flat")] = 5.0
+
+    healed = {}
+    for l2 in (0.0, DEFAULT_L2):
+        w, ranks, _, sd = fit_weights(cases, names, ones, seed_w=poisoned, rng=np.random.default_rng(0), samples=0, l2=l2)
+        healed[l2] = (raw_weights(names, w, sd), ranks)
+    assert abs(healed[0.0][0]["D_flat"] - 5.0) < 1e-9  # unregularized: the poison survives
+    assert abs(healed[DEFAULT_L2][0].get("D_flat", 0.0)) < 0.5  # regularized: walked to ~zero
+    assert objective(healed[DEFAULT_L2][1], cw) <= objective(base_ranks, cw) + 1e-9  # rank quality held or improved
+
+
+def test_l2_default_is_rank_neutral_on_random_restart():
+    """At the declared default strength the penalty is a tie-breaker: the random-restart
+    fit picks the same golden ranks with and without it (any genuine rank improvement
+    dwarfs the penalty), so regularizing cannot cost fit quality."""
+    cases, names = _synthetic_cases()
+    ranks = {}
+    for l2 in (0.0, DEFAULT_L2):
+        _, r, _, _ = fit_weights(
+            cases, names, np.ones(len(names)), seed_w=np.zeros(len(names)), rng=np.random.default_rng(0), samples=200, l2=l2
+        )
+        ranks[l2] = r
+    assert ranks[0.0] == ranks[DEFAULT_L2]

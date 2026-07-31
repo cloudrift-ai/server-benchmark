@@ -2,7 +2,8 @@
 :class:`OfflinePrior` weights.
 
 This module owns everything specific to the linear model class: the loss (:func:`objective` — tier-weighted
-golden rank), the optimizer (:func:`fit_weights` — random search + coordinate descent), the static/dyn
+golden rank — plus :func:`l2_penalty`, the raw-space L2 regularizer), the optimizer (:func:`fit_weights` —
+random search + coordinate descent), the static/dyn
 two-stage chaining (:func:`fit_two_stage`), and the fitted model (:class:`TwoStageFit`, whose
 :meth:`~TwoStageFit.score_rows` is the single fit-side home of the static-vs-dynamic weight-set split — the
 CV harness and any other consumer score through it and never touch weight dicts). The dataset representation
@@ -30,8 +31,30 @@ from emmy.compiler.pipeline.search.prior.fit.rank import rank_of_golden, topk_ta
 logger = logging.getLogger(__name__)
 
 
+# Default strength of the raw-space L2 penalty in the fit loss. The rank objective has no
+# counterpressure on a feature whose golden-pool variance is tiny: any raw magnitude above the
+# rank-saturation point scores identically, so the fit's pick there is arbitrary — invisible to
+# golden rank, catastrophic at fork scoring, where a prefix that has not decided the knob scores
+# the feature 0.0 and an inflated weight hands every decided subtree an unconditional win (the
+# D_pow2_threads 686 cold-deploy incident: a TinyLlama serve deployed ~150x off the DRAM floor).
+# The penalty must be RAW-space (w_z / sd): the poisoned 686 raw weight was an ordinary O(1)
+# z-space weight — plain ridge on w_z cannot see it. Scale: the data-fit term is a mean
+# log2(rank+1), O(1); the shipped artifacts' raw sum-of-squares is ~1.5e4 excluding the poisoned
+# weight, so 1e-6 prices legit magnitudes at ~0.015 — far below any genuine rank improvement —
+# while giving every rank-flat direction a strict descent toward zero (a tie-breaker, not a
+# trade-off; ``emmy fit --l2`` overrides).
+DEFAULT_L2 = 1e-6
+
+
 def eval_weights(mats: list[np.ndarray], gidx: list[int], w: np.ndarray) -> list[int]:
     return [rank_of_golden(m @ w, gi) for m, gi in zip(mats, gidx, strict=True)]
+
+
+def l2_penalty(w: np.ndarray, sd: np.ndarray) -> float:
+    """Sum of squared RAW-space weights for a z-space weight vector (raw = w_z / sd, the
+    artifact spelling — see :func:`raw_weights`). Unweighted by any λ: the loss composes
+    it as ``objective + l2 * l2_penalty``."""
+    return float(np.sum((w / sd) ** 2))
 
 
 def objective(ranks: list[int], weights: list[float]) -> float:
@@ -42,8 +65,10 @@ def objective(ranks: list[int], weights: list[float]) -> float:
     return float(sum(vals) / sum(weights))
 
 
-def fit_weights(groups: list[Group], names, sd_ref, *, seed_w, rng, samples):
-    """Random-search + coordinate-descent one weight vector over ``groups``.
+def fit_weights(groups: list[Group], names, sd_ref, *, seed_w, rng, samples, l2=DEFAULT_L2):
+    """Random-search + coordinate-descent one weight vector over ``groups``, minimizing
+    ``objective + l2 * l2_penalty`` (the tier-weighted golden rank plus the raw-space L2
+    — see :data:`DEFAULT_L2` for why the loss carries the penalty).
     Each fit z-scores over its own candidate pool; ``seed_w`` arrives scaled by
     ``sd_ref`` (``ones`` for a raw-weight seed, the previous fit's ``sd`` to
     chain fits) and is re-scaled into this pool's z-space. Returns
@@ -59,19 +84,24 @@ def fit_weights(groups: list[Group], names, sd_ref, *, seed_w, rng, samples):
     sd[sd == 0] = 1.0
     matsz = [(m - mu) / sd for m in mats]
 
+    def loss(w: np.ndarray, ranks: list[int]) -> float:
+        return objective(ranks, cw) + l2 * l2_penalty(w, sd)
+
     best_w = seed_w * sd / sd_ref  # re-scale the seed into this pool's z-space
     best_ranks = eval_weights(matsz, gidx, best_w)
-    best_obj = objective(best_ranks, cw)
+    best_obj = loss(best_w, best_ranks)
     logger.info("  seed: %s", topk_table(best_ranks))
 
     for _ in range(samples):
         w = rng.standard_normal(len(names))
         ranks = eval_weights(matsz, gidx, w)
-        ob = objective(ranks, cw)
+        ob = loss(w, ranks)
         if ob < best_obj:
             best_obj, best_w, best_ranks = ob, w, ranks
 
-    # Coordinate-descent refine around the best.
+    # Coordinate-descent refine around the best. On a rank-flat direction the penalty
+    # is the only gradient — the descent walks the plateau toward zero magnitude, which
+    # is what heals a poisoned incumbent seed on the next refit.
     step = 1.0
     for _ in range(8):
         improved = False
@@ -80,7 +110,7 @@ def fit_weights(groups: list[Group], names, sd_ref, *, seed_w, rng, samples):
                 w = best_w.copy()
                 w[j] += delta
                 ranks = eval_weights(matsz, gidx, w)
-                ob = objective(ranks, cw)
+                ob = loss(w, ranks)
                 if ob < best_obj:
                     best_obj, best_w, best_ranks, improved = ob, w, ranks, True
         if not improved:
@@ -132,7 +162,7 @@ class TwoStageFit:
         return build_artifact(weights=self.static_raw, weights_dynamic=self.dyn_raw, params=params, provenance=provenance)
 
 
-def fit_two_stage(groups: list[Group], names, *, seed_weights: dict[str, float], rng, samples: int) -> TwoStageFit:
+def fit_two_stage(groups: list[Group], names, *, seed_weights: dict[str, float], rng, samples: int, l2: float = DEFAULT_L2) -> TwoStageFit:
     """The incumbent trainer's full chaining as one call: a static fit over the
     non-``dyn`` groups seeded from the ``seed_weights`` raw dict (zeros where a name is
     absent — an empty dict seeds from zero), then the dynamic fit over the ``dyn``
@@ -144,12 +174,14 @@ def fit_two_stage(groups: list[Group], names, *, seed_weights: dict[str, float],
     dyn_groups = [g for g in groups if g.tier == "dyn"]
     seed_raw = np.array([seed_weights.get(n, 0.0) for n in names])
     logger.info("== static fit (%d cases) ==", len(static_groups))
-    static_w, static_ranks, _, static_sd = fit_weights(static_groups, names, np.ones(len(names)), seed_w=seed_raw, rng=rng, samples=samples)
+    static_w, static_ranks, _, static_sd = fit_weights(
+        static_groups, names, np.ones(len(names)), seed_w=seed_raw, rng=rng, samples=samples, l2=l2
+    )
     static_raw = raw_weights(names, static_w, static_sd)
     if not dyn_groups:
         return TwoStageFit(static_raw, static_ranks, None, None)
     logger.info("== dynamic fit (%d cases) ==", len(dyn_groups))
-    dyn_w, dyn_ranks, _, dyn_sd = fit_weights(dyn_groups, names, static_sd, seed_w=static_w, rng=rng, samples=samples)
+    dyn_w, dyn_ranks, _, dyn_sd = fit_weights(dyn_groups, names, static_sd, seed_w=static_w, rng=rng, samples=samples, l2=l2)
     return TwoStageFit(static_raw, static_ranks, raw_weights(names, dyn_w, dyn_sd), dyn_ranks)
 
 

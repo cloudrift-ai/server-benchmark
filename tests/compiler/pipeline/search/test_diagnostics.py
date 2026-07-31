@@ -363,11 +363,14 @@ def test_offline_explain_selects_the_dynamic_weight_set():
     from emmy.compiler.pipeline.search.prior.offline import OfflinePrior  # noqa: PLC0415
 
     p = OfflinePrior()
-    static = p.explain_features({"D_ctas_ge_sm": 1.0})
-    dyn = p.explain_features({"D_ctas_ge_sm": 1.0, "S_ext_n_symbolic_axis": 1.0})
-    assert static["D_ctas_ge_sm"] == p._w["D_ctas_ge_sm"]
-    assert dyn["D_ctas_ge_sm"] == p._w_dyn["D_ctas_ge_sm"]
-    assert p._w["D_ctas_ge_sm"] != p._w_dyn["D_ctas_ge_sm"]  # the sets genuinely differ on this key
+    # A sentinel key the two shipped sets genuinely differ on — found, not hardcoded: the
+    # dynamic fit chains from the static one, so any coordinate it never moves carries the
+    # static raw weight verbatim and would make a fixed key's selection assert vacuous.
+    key = next(k for k in sorted(p._w) if k in p._w_dyn and p._w[k] != p._w_dyn[k])
+    static = p.explain_features({key: 1.0})
+    dyn = p.explain_features({key: 1.0, "S_ext_n_symbolic_axis": 1.0})
+    assert static[key] == p._w[key]
+    assert dyn[key] == p._w_dyn[key]
 
 
 def _planted_fork():

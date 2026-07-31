@@ -59,6 +59,12 @@ def register_fit_command(subparsers) -> None:
         default=0,
         help="Random weight vectors before coordinate descent (default 0: descent-from-seed, the incumbent practice).",
     )
+    parser.add_argument(
+        "--l2",
+        type=float,
+        default=fit_linear.DEFAULT_L2,
+        help="Raw-space L2 penalty strength in the fit loss (default: the declared tie-breaker strength; 0 disables).",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--folds", choices=(*FOLD_AXES, "both", "none"), default="both", help="Cross-validation fold axes (default: both).")
     parser.add_argument(
@@ -227,7 +233,7 @@ def handle_fit(args) -> None:
     # mismatch, and a stale key simply seeds 0.0). A fit with no dynamic cases carries
     # the incumbent's dynamic set forward into the shippable model.
     def full_train_fit(groups, rng):
-        full = fit_two_stage(groups, names, seed_weights=incumbent.get("weights", {}), rng=rng, samples=args.samples)
+        full = fit_two_stage(groups, names, seed_weights=incumbent.get("weights", {}), rng=rng, samples=args.samples, l2=args.l2)
         dyn_raw = full.dyn_raw if full.dyn_raw is not None else incumbent.get("weights_dynamic", full.static_raw)
         dyn_note = f"dynamic {topk_table(full.dyn_ranks)}" if full.dyn_ranks is not None else "carried from incumbent (no dynamic cases)"
         shipped = fit_linear.TwoStageFit(full.static_raw, full.static_ranks, dyn_raw, full.dyn_ranks)
@@ -237,7 +243,7 @@ def handle_fit(args) -> None:
     # ZEROS — the incumbent's weights were fit on every golden, so seeding folds from
     # them would leak each held-out golden into its own holdout model.
     def fit_model(groups, rng):
-        return fit_two_stage(groups, names, seed_weights={}, rng=rng, samples=args.samples)
+        return fit_two_stage(groups, names, seed_weights={}, rng=rng, samples=args.samples, l2=args.l2)
 
     header = {
         "trainer": args.trainer,
@@ -247,7 +253,7 @@ def handle_fit(args) -> None:
         "features": args.features,
         "fold_axes": axes,
         "repo_commit": _repo_commit(),
-        "trainer_params": {"samples": args.samples, "full_train_seed_weights": "incumbent", "fold_seed_weights": "zeros"},
+        "trainer_params": {"samples": args.samples, "l2": args.l2, "full_train_seed_weights": "incumbent", "fold_seed_weights": "zeros"},
     }
     import datetime  # noqa: PLC0415
 
@@ -263,7 +269,7 @@ def handle_fit(args) -> None:
         provenance={
             "fitted": datetime.date.today().isoformat(),
             "script": "emmy fit",
-            "args": {"samples": args.samples, "seed": args.seed},
+            "args": {"samples": args.samples, "l2": args.l2, "seed": args.seed},
             "features": args.features,
         },
     )

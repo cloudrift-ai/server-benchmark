@@ -278,9 +278,8 @@ def _unify_siblings(body: Body) -> Body:
             continue
         loop = stmts[idx]
         assert isinstance(loop, Loop)
-        # Preserve source_axis / real_extent across the rename so masked-tile
-        # axes don't lose their pre-ceil-div bound.
-        new_axis = Axis(name=canonical, extent=extent, source_axis=loop.axis.source_axis, real_extent=loop.axis.real_extent)
+        # Preserve the window across the rename so a sliced / carved axis doesn't lose it.
+        new_axis = Axis(name=canonical, extent=extent, window=loop.axis.window)
         sub = Sigma({loop.axis.name: Var(canonical)})
         rename_axis = _make_axis_renamer(loop.axis.name, new_axis)
         renamed = tuple(s.rewrite(_identity_rename, sub, rename_axis) for s in loop.body)
@@ -852,9 +851,8 @@ def rename_ssa_sequential(stmts: Body) -> Body:
         new = axis_rename.get(a.name, a.name)
         if new == a.name:
             return a
-        # Preserve source_axis / real_extent so masked-tile metadata
-        # survives the SSA rename pass.
-        return Axis(name=new, extent=a.extent, source_axis=a.source_axis, real_extent=a.real_extent)
+        # Preserve the window so slice / parentage metadata survives the SSA rename pass.
+        return Axis(name=new, extent=a.extent, window=a.window)
 
     return tuple(s.rewrite(rename_ssa, sigma, axis_fn) for s in stmts)
 
@@ -936,7 +934,7 @@ def canonicalize_op_clusters(stmts: Body) -> Body:
     ``dataclasses.fields`` to locate any field currently holding an
     ``ElementwiseImpl`` (covers ``Init.op`` / ``Assign.op`` /
     ``Accum.op`` without coupling this module to those IR dialects). A
-    carrier (``Carrier``) and the kernel-IR cross-thread combine
+    fold algebra and the kernel-IR cross-thread combine
     stmts (``WarpShuffle`` / ``TreeHalve``) carry their op inside an
     ``Assign`` program (``merge`` / ``combine_states``), already
     canonicalized at the carrier before lowering. The replacement is

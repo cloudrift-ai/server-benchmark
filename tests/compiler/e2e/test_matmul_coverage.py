@@ -266,6 +266,16 @@ def _scalar_stage_graph(M: int = 64, N: int = 64, K: int = 64) -> Graph:
     return g
 
 
+def _node_stage(tile_op):
+    """The resolved operand pipeline — a schedule slice in ``TileOp.schedule`` keyed on the node
+    it decorates (1r); there is no node ``stage`` field and no ``TileOp.stage``."""
+    from emmy.compiler.ir.tile.ops import sched_of  # noqa: PLC0415
+
+    op = tile_op.op
+    node = op.sources[0] if getattr(op, "sources", ()) else op
+    return sched_of(tile_op).stage_of(node)
+
+
 def test_scalar_matmul_stages_through_pipeline(monkeypatch) -> None:
     """The ``TILE_PASSES`` chain RESOLVES the ``STAGE`` codec against the scheduled contraction and
     stamps the resolved ``Stage`` (eligibility + sizing run once, scheduler-side): a ``tma`` pin on a
@@ -283,7 +293,7 @@ def test_scalar_matmul_stages_through_pipeline(monkeypatch) -> None:
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
     # ``STAGE`` is keyed ``@<k_axis>`` (axis-named schedule knob); ``family_value`` reads it.
     assert family_value(tile_op.knobs, "STAGE") == "d2/tma", tile_op.knobs  # resolved at the pinned depth
-    stage = tile_op.stage
+    stage = _node_stage(tile_op)
     assert stage is not None and stage.transport == "tma", stage
     assert stage.depth == 2, stage  # the scalar ring honors the pinned depth (slots fit 48 KiB)
     assert stage.bk_elems == 64, stage  # derived depth-aware fit-to-smem K-chunk (K=64 divides)
@@ -292,7 +302,7 @@ def test_scalar_matmul_stages_through_pipeline(monkeypatch) -> None:
     out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((9, 0)))
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
     assert family_value(tile_op.knobs, "STAGE") == "", tile_op.knobs  # declined pin stamps the OFF value
-    assert tile_op.stage is None, tile_op.stage  # resolved: ineligible pin ⇒ gmem-direct
+    assert _node_stage(tile_op) is None, _node_stage(tile_op)  # resolved: ineligible pin ⇒ gmem-direct
 
 
 def test_scalar_masked_n_stage_declines(monkeypatch) -> None:
@@ -310,7 +320,7 @@ def test_scalar_masked_n_stage_declines(monkeypatch) -> None:
         monkeypatch.setenv("EMMY_STAGE", stage)
         out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(M=64, N=48, K=64), ctx=Context.from_target((9, 0)))
         tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
-        assert tile_op.stage is None, (stage, tile_op.stage)  # masked-N declines staging (no row-crossing fill)
+        assert _node_stage(tile_op) is None, (stage, _node_stage(tile_op))  # masked-N declines staging (no row-crossing fill)
         assert family_value(tile_op.knobs, "STAGE") == "", (stage, tile_op.knobs)  # OFF-stamped (gmem-direct)
 
 
@@ -341,13 +351,13 @@ def test_tma_stage_declines_below_sm90(monkeypatch) -> None:
     out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((8, 9)))
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
     assert family_value(tile_op.knobs, "STAGE") == "", tile_op.knobs  # tma declined below sm_90
-    assert tile_op.stage is None, tile_op.stage
+    assert _node_stage(tile_op) is None, _node_stage(tile_op)
 
     # Control: cp.async is unaffected by the gate — a d2/cp/ring pin still rings at sm_89.
     monkeypatch.setenv("EMMY_STAGE", "d2/cp/ring")
     out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((8, 9)))
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
-    stage = tile_op.stage
+    stage = _node_stage(tile_op)
     assert stage is not None and stage.transport == "cp.async", stage
 
 
@@ -386,9 +396,10 @@ def test_scalar_ring_matches_gmem_direct_bit_for_bit(monkeypatch, stage):
 
 def test_warp_matmul_stamps_wspec(monkeypatch) -> None:
     """A legal ``WSPEC`` split — a warp tile over a resolved TMA stage — STAMPS: ``workers``
-    resolves on the ``TileOp`` and the codec rides ``knobs`` bare (root-global). The
-    honest-stamping rule holds because the staged K-loop now materializes the split (the
-    producer/compute band split in ``_stage._wspec_kloop``)."""
+    resolves on the ``TileOp`` and the producer band rides the ONE ``WORK`` entry as its ``+p``
+    suffix (F1 — the rows carry no WSPEC key). The honest-stamping rule holds because the
+    staged K-loop materializes the split (the producer/compute band split in
+    ``_stage._wspec_kloop``)."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
 
     monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x2/f2x2/k2")  # warp (mma) tier
@@ -397,7 +408,8 @@ def test_warp_matmul_stamps_wspec(monkeypatch) -> None:
     monkeypatch.setenv("EMMY_WSPEC", "p1")
     out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((9, 0)))
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
-    assert tile_op.knobs.get("WSPEC", "") == "p1", tile_op.knobs  # stamped: the split materializes
+    assert "WSPEC" not in tile_op.knobs, tile_op.knobs  # the band spells on WORK, never a row key
+    assert tile_op.knobs.get("WORK") == "w2x2+p1", tile_op.knobs  # stamped: the split materializes
     assert tile_op.workers is not None and tile_op.workers.aux_warps == 1, tile_op.workers
 
 
@@ -938,7 +950,7 @@ def _mma_qk_graph(B: int, H: int, M: int, N: int, D: int):
 def test_mma_batched_qk_matches_torch(B, H, M, N, D, monkeypatch):
     """The shared contraction codegen tiles a **batched transposed-B** Q@Kᵀ (flash's score shape:
     leading ``(b, h)`` axes + ``b_trans``) onto ``mma.sync`` and agrees with torch — the reuse seam
-    the warp-flash materializer rides (a ``Contraction`` whose ``lead_axes`` carry the batch dims)."""
+    the warp-flash materializer rides (a ``ContractionView`` whose ``lead_axes`` carry the batch dims)."""
     import torch  # noqa: PLC0415
 
     monkeypatch.setenv("EMMY_TILE", _WARP_PIN)
@@ -1419,8 +1431,8 @@ def test_bf16_operands_stage_via_cp_async(monkeypatch):
 
 
 # --- split-K finalizes on the warp tier --------------------------------------
-# MMA split-K rides the structural ``Reduction(axis=ksplit, source=Contraction(k_axis=kslice))`` fork
-# (``_schedule._splitk_option``): the inner ``Contraction`` factorizes to mma exactly like a non-split
+# MMA split-K rides the structural ``Fold(axis=ksplit, step=[ContractionView(k_axis=kslice)])`` fork
+# (``_schedule._splitk_option``): the inner ``ContractionView`` factorizes to mma exactly like a non-split
 # matmul. Deferred (``g2k``): ``030_split_reduce`` retargets each partition's C-fragment into a
 # ``ws[ksplit, M, N]`` workspace summed by a sibling additive finalize kernel — NO codegen
 # ``atomicAdd``. Atomic (``g2a``): ONE kernel — each partition's C-fragment ``atomicAdd``\\ s into the

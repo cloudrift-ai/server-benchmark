@@ -183,7 +183,7 @@ def test_enumerated_warp_pool_featurizes_injectively():
 
 def test_warp_row_full_vector_matches_hand_computed_encoding():
     """The FEATURIZER_VERSION=3 encoding anchor: the complete feature vector of one maximal warp
-    row (atom expansion + true-axis geometry + occupancy + stage/TMA + wspec/raster), with every
+    row (atom expansion + true-axis geometry + occupancy + stage/TMA + work/raster), with every
     value hand-derived from the codec definitions — ``w4x2/f2x2`` on ``m16n8k16`` is a 128×32
     tile (``WM·FM·atom_m × WN·FN·atom_n``), 8 warps = 256 threads, ``k2`` = 2 atom_k units. Any
     key or value drift here is an encoding change and must ride a version bump."""
@@ -197,7 +197,7 @@ def test_warp_row_full_vector_matches_hand_computed_encoding():
             "TILE@a1": "a:mma_m16n8k16_f16_f16/w4x2/f2x2/k2",
             "REDUCE@a1": "g2k",
             "STAGE@a1": "d3/tma/ring/p2",
-            "WSPEC": "p2",
+            "WORK": "w4x2+p2",
             "RASTER": "gm8",
         }
     )

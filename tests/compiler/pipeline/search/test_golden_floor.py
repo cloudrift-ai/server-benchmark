@@ -176,7 +176,6 @@ def test_fork_shape_key_flash_sniff_scans_every_row():
     scalar_row = {**flash_sig, "TILE": "b32x8/f1x1"}  # a bare-TILE non-warp sibling emitted first
     warp_row = {
         **flash_sig,
-        "PLACE@fold": "fuse",
         "TILE@dd": "a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16",
         "TILE@pj": "a:mma_m16n8k16_f16_f32/w4x1/f1x32",
         "REDUCE@kv": "",

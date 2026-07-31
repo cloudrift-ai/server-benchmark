@@ -1,12 +1,12 @@
 """The Loop-IR → Tile-IR boundary fires for every kernel kind.
 
 ``lowering/tile/010_recognize`` is the sole recognizer that lifts a
-``LoopOp`` into the tile IR (a ``Map`` / ``Reduction`` / ``Contraction``
+``LoopOp`` into the tile IR (a ``Map`` / ``Fold`` / ``ContractionView``
 node). These assert it fires on the two simplest kinds — pointwise and
 reduce — transitively proving the axes got lifted and the kernel entered
 the tile dialect (no planner / launch-geometry fallback needed), and that
 the MONOID-producer composition (the fused norm→linear edge) nodifies to
-a computed-A ``Contraction`` fork sibling of the ``Map`` form.
+a computed-A ``ContractionView`` fork sibling of the ``Map`` form.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
-from emmy.compiler.ir.tile import Contraction, Map, TileOp
+from emmy.compiler.ir.tile import ContractionView, Map, TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.pipeline import Run
@@ -103,12 +103,22 @@ def test_lift_partitions_independent_reduce_and_epilogue_preamble():
         )
     )
 
-    node, free = recognize._lift(list(body), "out")
+    node, free, stores = recognize._lift(list(body), "out")
 
     assert [axis.name for axis in free] == ["m", "n"]
-    assert isinstance(node, Contraction) and node.a_computed
-    assert {stmt.input for stmt in node.a_body if isinstance(stmt, Load)} == {"one_buf", "x"}
-    assert isinstance(node.epilogue[0], Load) and node.epilogue[0].input == "bias_buf"
+    # The λ-era spelling: a projecting Map over the stored role=CONTRACTION fold whose shared A
+    # is the computed cone (the GELU-constant preamble folded INSIDE K), the bias load riding the
+    # projection body — the preamble split kept the two independent feeds apart.
+    from emmy.compiler.ir.tile import Map as _Map
+    from emmy.compiler.ir.tile.ir import _operand_body, shared_operand
+
+    assert isinstance(node, _Map) and len(node.sources) == 1
+    fold = node.sources[0]
+    a_edge = shared_operand(fold)
+    assert a_edge is not None and not isinstance(a_edge, Load), "A must be the computed cone"
+    a_loads = {st.input for st in _operand_body(a_edge) if isinstance(st, Load)}
+    assert a_loads == {"one_buf", "x"}
+    assert isinstance(node.body[0], Load) and node.body[0].input == "bias_buf"
 
 
 def test_lift_recognizes_contraction_between_views_of_same_packed_buffer():
@@ -153,17 +163,23 @@ def test_lift_recognizes_contraction_between_views_of_same_packed_buffer():
         )
     )
 
-    node, free = recognize._lift(list(body), "score")
+    node, free, stores = recognize._lift(list(body), "score")
 
     assert [axis.name for axis in free] == ["m", "n"]
-    assert isinstance(node, Contraction)
-    assert isinstance(node.a_operand, Load)
-    assert node.a_operand.input == node.b_load.input == "packed_qkv"
+    # Both views of the packed buffer hoist as materialized operand edges of the stored fold.
+    from emmy.compiler.ir.tile import Fold as _Fold
+    from emmy.compiler.ir.tile.ir import shared_operand
+
+    fold = node.sources[0] if not isinstance(node, _Fold) else node
+    assert isinstance(fold, _Fold) and fold.role.name == "CONTRACTION"
+    a_edge = shared_operand(fold)
+    assert isinstance(a_edge, Load)
+    assert {e.input for e in fold.operands if isinstance(e, Load)} == {"packed_qkv"}
 
 
 # --------------------------------------------------------------------------- #
 # The MONOID-producer composition — ``rmsnorm(x)·nw @ w`` nodifies to a computed-A
-# ``Contraction`` fork sibling of the ``Map(source=Reduction)`` form (``010_recognize``'s
+# ``ContractionView`` fork sibling of the ``Map(source=Fold)`` form (``010_recognize``'s
 # ``bind_prologue_contraction`` merge). Pipeline-only (no CUDA): resolve the tile passes with a
 # capturing ``decide`` and assert the fork rows / the picked node's structure.
 # --------------------------------------------------------------------------- #
@@ -211,7 +227,8 @@ def _resolve(g: Graph, pick=None, ctx: Context | None = None) -> tuple[list[dict
 
 
 def _is_warp_row(row: dict) -> bool:
-    return any("a:" in str(v) for v in row.values())
+    # F1 site grammar: the tier discriminator is the row's ONE WORK entry, not an ``a:`` token.
+    return str(row.get("WORK", "")).startswith("w")
 
 
 def test_wide_m1_flinear_uses_single_warp_k_fold():
@@ -219,13 +236,18 @@ def test_wide_m1_flinear_uses_single_warp_k_fold():
     reduction to deploy selection, while tune retains the complete fork."""
     from dataclasses import replace
 
+    from emmy.compiler.pipeline.knob import family_of
+
     ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4080")
     _, tile = _resolve(_m1_linear_graph(), ctx=ctx)
-    reduce_specs = [v for k, v in tile.knobs.items() if k.startswith("REDUCE@")]
-    assert reduce_specs == ["b32"]
+    # F1 site grammar: the coop WIDTH rides the ONE WORK entry; the REDUCE value is site-local.
+    reduce_specs = [v for k, v in tile.knobs.items() if family_of(k) == "REDUCE"]
+    assert reduce_specs == ["coop"]
+    assert tile.knobs.get("WORK") == "t32"
     tune_rows, _ = _resolve(_m1_linear_graph(), ctx=replace(ctx, validate_pins=False))
-    offered = {v for row in tune_rows for k, v in row.items() if k.startswith("REDUCE@")}
-    assert "" in offered and "b32" in offered
+    offered = {v for row in tune_rows for k, v in row.items() if family_of(k) == "REDUCE"}
+    assert "" in offered and "coop" in offered
+    assert any(row.get("WORK") == "t32" for row in tune_rows)
 
 
 def test_rtx4080_dit_qkv_narrows_to_measured_deploy_schedule():
@@ -237,8 +259,12 @@ def test_rtx4080_dit_qkv_narrows_to_measured_deploy_schedule():
     rows, _ = _resolve(_norm_linear_graph(S=256, H=1152, inter=3456), pick=_is_warp_row, ctx=ctx)
     warp = [r for r in rows if _is_warp_row(r)]
     assert len(warp) == 1
-    assert any(v == "a:mma_m16n8k16_f16_f32/w4x1/f2x4/k4" for k, v in warp[0].items() if k.startswith("TILE@"))
-    assert any(v == "d1/sync" for k, v in warp[0].items() if k.startswith("STAGE@"))
+    # F1 site grammar: the measured legacy winner narrows via its site half + the WORK inventory.
+    from emmy.compiler.pipeline.knob import family_of as _fam
+
+    assert any(v == "mma_m16n8k16_f16_f32/f2x4/k4" for k, v in warp[0].items() if _fam(k) == "TILE")
+    assert warp[0].get("WORK") == "w4x1"
+    assert any(v == "d1/sync" for k, v in warp[0].items() if _fam(k) == "STAGE")
 
     tune_rows, _ = _resolve(
         _norm_linear_graph(S=256, H=1152, inter=3456),
@@ -250,7 +276,7 @@ def test_rtx4080_dit_qkv_narrows_to_measured_deploy_schedule():
 
 def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
     """The merged fork: the ``Map``-form reduce rows lead (option-0 = the conservative coop pick,
-    lowerable everywhere), then the computed-A Contraction form's warp rows — every one riding a
+    lowerable everywhere), then the computed-A ContractionView form's warp rows — every one riding a
     resolved ``sync`` compute-fill stage, at BOTH depths (``d1`` + the asymmetric B-ring ``d2``
     as fork siblings), with the K partition either decided-empty or a redundant-statistic
     split — deferred ``g<w>k`` or, this fixture's plain-store tail being distributive, the
@@ -258,14 +284,16 @@ def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
     rows, _ = _resolve(_norm_linear_graph())
     assert rows, "no fork was offered for the fused norm→linear"
     assert not _is_warp_row(rows[0]), "option-0 must be the Map-form coop row, not a warp row"
-    assert any(v.startswith("b") for v in rows[0].values() if isinstance(v, str)), "option-0 must cooperate on the stat reduce"
+    # F1: a coop partition spells the site value ``coop`` with its width in the WORK entry.
+    assert any(isinstance(v, str) and v.startswith("coop") for v in rows[0].values()), "option-0 must cooperate on the stat reduce"
+    assert str(rows[0].get("WORK", "")).startswith("t"), "the coop width rides the WORK inventory"
     warp = [r for r in rows if _is_warp_row(r)]
-    assert warp, "the Contraction form contributed no warp rows"
+    assert warp, "the ContractionView form contributed no warp rows"
     stages_seen = set()
     reds_seen = set()
     for r in warp:
-        stage = [v for k, v in r.items() if k.startswith("STAGE@")]
-        red = [v for k, v in r.items() if k.startswith("REDUCE@")]
+        stage = [v for k, v in r.items() if k.startswith("STAGE")]
+        red = [v for k, v in r.items() if k == "REDUCE"]
         assert stage and all(v in ("d1/sync", "d2/sync") for v in stage), f"warp rows must ride the resolved sync compute-fill: {r}"
         assert all(v == "" or (v.startswith("g") and v.endswith(("k", "a"))) for v in red), (
             f"the computed-A form allows only the empty or split (g<w>k / g<w>a) K partition: {r}"
@@ -282,30 +310,71 @@ def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
 
 def test_norm_linear_warp_pick_is_computed_a_contraction():
     """Picking a warp row materializes the recognize-built ``Map(body=projection, source=node)``
-    tree — the same ``project ∘ contract`` spelling the Reduction tiers use: the source is a
-    computed-A :class:`Contraction` whose A cone is headed by the annotated PLANAR statistic reduce
-    ``Loop``, one fold channel, its (m, n) output on the grid (the column axis joined); the ``Map``
-    body carries the ``Write``; and the knob stamps the DB rows key on (``PLACE@cone`` + the
-    decided-empty stat ``REDUCE``)."""
+    tree — the same ``project ∘ contract`` spelling the Fold tiers use: the source is a
+    computed-A :class:`ContractionView` holding its A cone INLINE, a real node tree
+    (``Map(body=per-cell normalize, sources=(Fold(stat),))``), one channel, its (m, n)
+    output on the grid (the column axis joined); the ``Map`` body carries the ``Write``; and the knob
+    stamps the DB rows key on (``PLACE@cone`` + the decided-empty stat ``REDUCE``). Xfail-parked on
+    the PLACE wipe — the ``PLACE@cone`` stamp returns with the phase-4 realizer."""
     _, tile = _resolve(_norm_linear_graph(), pick=_is_warp_row)
     assert isinstance(tile.op, Map)
-    c = tile.op.source
-    assert isinstance(c, Contraction) and c.a_computed and len(c.folds) == 1
-    stat_loop = c.a_operand[0]
+    c = tile.op.sources[0]
+    assert isinstance(c, ContractionView) and c.a_computed and len(tile.op.sources) == 1
+    stat_loop = c.a.sources[0].sources[0].loop
     assert isinstance(stat_loop, Loop) and stat_loop.is_reduce and stat_loop.role is AxisRole.PLANAR
     assert [a.extent.as_static() for a in c.axes] == [32, 3072]
     assert c.axes[0].name == tile.place.grid[-2].name and c.axes[1].name == tile.place.grid[-1].name
-    assert len(c.epilogue) == 0 and [type(s) for s in tile.op.body] == [Write]
+    assert len(c.channels) == 1 and [type(s) for s in tile.op.body] == [Write]
     assert {"x", "wn", "w"} <= set(c.external_reads())
-    assert tile.stage is not None and tile.stage.transport == "sync" and tile.stage.bk_elems > 0
+    assert c.stage is not None and c.stage.transport == "sync" and c.stage.bk_elems > 0
     assert tile.knobs.get("PLACE@cone") == "fuse"
+    # Phase 3: the stamped keys are the CANONICAL codec spellings — bare for the primary product
+    # fold, the explicit axis form for the cone's stat.
     assert tile.knobs.get(f"REDUCE@{stat_loop.axis.name}") == ""
-    assert tile.knobs.get(f"TILE@{c.k_axis.name}", "").startswith("a:")
-    assert tile.knobs.get(f"STAGE@{c.k_axis.name}") == "d1/sync"
+    # F1 site grammar: the TILE value spells the bare atom (no worker tokens); the warp
+    # inventory is the ONE WORK entry.
+    assert tile.knobs.get("TILE", "").startswith("mma_")
+    assert tile.knobs.get("WORK", "").startswith("w")
+    assert tile.knobs.get("STAGE") == "d1/sync"
+
+
+def test_norm_linear_cone_is_an_inline_node_tree():
+    """The computed-A cone lives ONCE, inline on an operand edge of the stored fold, as a real node
+    tree: its SOURCE is
+    the row-invariant prologue — the per-row statistic (a projected reduce over the stat
+    :class:`Fold`) plus any k-invariant cone prefix — and its ``body`` is the per-cell
+    normalize. The K seam is therefore the NODE BOUNDARY: ``ops.cone_seam`` reads it instead of
+    re-scanning stmts for "the maximal leading run that never indexes K", and the statistic is
+    addressable (and later cuttable) in its own right. Lowering flattens the whole thing back to the
+    identical ``[stat loop, …, cone]`` stmt run. The stored form is the role=CONTRACTION fold; the
+    ``ContractionView`` reading is the DERIVED view (``contraction_view``)."""
+    from emmy.compiler.ir.tile import contraction_view
+    from emmy.compiler.ir.tile.ir import _refs_axis
+    from emmy.compiler.ir.tile.ops import cone_seam, lower
+
+    _, tile = _resolve(_norm_linear_graph(), pick=_is_warp_row)
+    grid = tile.place.grid
+    # The single-channel form's projection was ONLY the root ``Write`` — moved to ``TileOp.stores``
+    # (1q), so the row stores the BARE product fold (the ``Map`` wrapper dropped with its last stmt).
+    fold = tile.op.sources[0] if isinstance(tile.op, Map) else tile.op
+    assert len(tile.stores) == 1 and tile.stores[0].write.output == "y"
+    c = contraction_view(fold, grid[-2], grid[-1], tuple(grid[:-2]))
+    assert c is not None and c.a_computed
+    cone = c.a
+    assert isinstance(cone, Map) and cone.out == c.a_name
+    assert cone.sources[0].sources[0].role is AxisRole.PLANAR, "the statistic reduce is the prologue's source"
+    # The seam IS the boundary: prologue row-invariant, body k-varying, stats the bridged values.
+    pro, cell, stats = cone_seam(cone)
+    assert pro == tuple(lower(cone.sources[0])) and cell == tuple(cone.body)
+    assert not any(_refs_axis(s, c.k_axis.name) for s in pro), "the prologue never indexes K — it runs once per row"
+    assert any(_refs_axis(s, c.k_axis.name) for s in cell), "the per-cell body is the k-varying remainder"
+    assert stats, "the statistic bridges through the stat smem rows"
+    # The operand body is the flattened cone verbatim: the stat loop, its sweep, then the cone.
+    assert c.a_body == tuple(lower(cone)) == (*pro, *cell)
 
 
 def test_norm_linear_fp32_keeps_map_rows_only():
-    """No 16-bit mma atom ⇒ the Contraction form contributes ZERO rows (never a raising row) and
+    """No 16-bit mma atom ⇒ the ContractionView form contributes ZERO rows (never a raising row) and
     the fork is exactly the Map-form reduce rows — the graceful fallback."""
     rows, tile = _resolve(_norm_linear_graph(dt=F32))
     assert rows and not any(_is_warp_row(r) for r in rows)
@@ -335,17 +404,23 @@ def _mlp_gate_up_graph() -> Graph:
     return g
 
 
-def test_mlp_gate_up_nodifies_as_two_fold_contraction():
+def test_mlp_gate_up_nodifies_as_two_channel_product_contraction():
     """The fused gate/up MLP edge — TWO ⊗-folds sharing one normalized-row A value (fusion
     duplicates the cone SSA per fold; the matcher dedupes by value-tree equality) with the SwiGLU
-    combine as projection — nodifies to ``Map(body=combine…Write, source=Contraction(folds=2))``,
-    the product-monoid fold, and offers warp sync rows."""
+    combine as projection — nodifies to ``Map(body=combine, sources=(ContractionView,))``: ONE
+    product-carrier contraction, two ``(b, acc)`` channels over its single inline A cone (sharing
+    is arity), the root ``Write`` a boundary ``Store`` (1q), and offers warp sync rows."""
+    from emmy.compiler.ir.tile import contraction_view
+
     rows, tile = _resolve(_mlp_gate_up_graph(), pick=_is_warp_row)
-    assert isinstance(tile.op, Map) and isinstance(tile.op.source, Contraction)
-    c = tile.op.source
-    assert len(c.folds) == 2 and c.a_computed
-    assert {bl.input for bl, _ in c.folds} == {"wg", "wu"}
-    assert isinstance(tile.op.body[-1], Write)
+    assert isinstance(tile.op, Map) and len(tile.op.sources) == 1
+    grid = tile.place.grid
+    node = contraction_view(tile.op.sources[0], grid[-2], grid[-1], tuple(grid[:-2]))
+    assert node is not None and len(node.channels) == 2 and node.a_computed
+    assert {ch.b.input for ch in node.channels} == {"wg", "wu"}
+    # The projection body is PURE (the SwiGLU combine); the root store rides ``TileOp.stores``.
+    assert all(s.pure for s in tile.op.body) and not isinstance(tile.op.body[-1], Write)
+    assert len(tile.stores) == 1 and tile.stores[0].write.output == "o"
     assert any(_is_warp_row(r) for r in rows)
     assert not _is_warp_row(rows[0]), "option-0 stays the coop reduce row"
 
@@ -384,11 +459,16 @@ def test_normed_gqa_sdpa_certifies_flash():
     flash = [
         n.op
         for n in terminal.nodes.values()
-        if type(n.op).__name__ == "TileOp" and isinstance(n.op.op, Map) and getattr(n.op.op.source, "role", None) is AxisRole.TWISTED
+        if type(n.op).__name__ == "TileOp"
+        and isinstance(n.op.op, Map)
+        and n.op.op.sources
+        and getattr(n.op.op.sources[0], "role", None) is AxisRole.TWISTED
     ]
     assert flash, "no TWISTED flash kernel certified for the normed GQA sdpa"
-    src = flash[0].op.source
-    assert isinstance(src.partial[0], Contraction), "flash did not absorb the score contraction (fold stayed cut)"
+    src = flash[0].op.sources[0]
+    from emmy.compiler.ir.tile import is_contraction_fold
+
+    assert is_contraction_fold(src.step_stmts()[0]), "flash did not absorb the score contraction (fold stayed cut)"
 
 
 def test_bind_contraction_declined_cone_raises_not_positional():
@@ -419,3 +499,75 @@ def test_bind_contraction_declined_cone_raises_not_positional():
     loop = Loop(axis=Axis(name="k", extent=Dim(64)), body=body, role=AxisRole.CONTRACTION)
     with pytest.raises(LoweringError, match="computed cone"):
         bind_contraction(loop, "m", "n", Body(()))
+
+
+# --------------------------------------------------------------------------- #
+# Group formation — the ``b_trans`` gate. Channels whose B operands are stored the
+# other way round were never legally fusable (one shared A fragment, one slab
+# orientation), so they simply never group: recognition declines the composition and
+# the reduce ``Map`` form stands alone. Driven directly on ``bind_prologue_contraction``
+# (the frontend always emits canonical B, so the disagreeing shape has no graph).
+# --------------------------------------------------------------------------- #
+
+
+def _prologue_shape(*, b_layouts):
+    """The recognized MONOID-producer shape: a per-row statistic reduce, its scalar sweep, and a
+    column loop folding one ⊗-channel per entry of ``b_layouts`` over the shared normalized row."""
+    from emmy.compiler.ir.axis import Axis, AxisRole
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+    from emmy.compiler.ir.tile import Fold
+
+    m, n, k, r = Axis("m", 8), Axis("n", 16), Axis("k", 32), Axis("r", 32)
+    fold = Accum(name="sacc", value="sq", op="add", axes=("r",))
+    stat = Fold.from_loop(
+        Loop(
+            axis=r,
+            body=Body(
+                (Load(name="x_e", input="x", index=(Var("m"), Var("r"))), Assign(name="sq", op="multiply", args=("x_e", "x_e")), fold)
+            ),
+            role=AxisRole.PLANAR,
+        )
+    )
+    assert stat is not None
+    kbody = [Load(name="x_k", input="x", index=(Var("m"), Var("k"))), Assign(name="xh", op="multiply", args=("x_k", "rs"))]
+    for i, trans in enumerate(b_layouts):
+        idx = (Var("n"), Var("k")) if trans else (Var("k"), Var("n"))
+        kbody += [
+            Load(name=f"b{i}", input=f"w{i}", index=idx),
+            Assign(name=f"v{i}", op="multiply", args=("xh", f"b{i}")),
+            Accum(name=f"acc{i}", value=f"v{i}", op="add"),
+        ]
+    accs = tuple(f"acc{i}" for i in range(len(b_layouts)))
+    tail = (Assign(name="y", op="multiply", args=accs),) if len(accs) > 1 else ()
+    nloop = Loop(
+        axis=n,
+        body=Body(
+            (Loop(axis=k, body=Body(tuple(kbody))), *tail, Write(output="o", index=(Var("m"), Var("n")), value="y" if tail else accs[0]))
+        ),
+    )
+    return Map(body=Body((Assign(name="rs", op="rsqrt", args=("sacc",)), nloop)), sources=(stat,)), (m,)
+
+
+def test_channels_with_agreeing_b_layouts_form_one_product_node():
+    from emmy.compiler.ir.tile import shared_operand
+    from emmy.compiler.ir.tile.ir import _parse_bilinear
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
+
+    node, free = _prologue_shape(b_layouts=(False, False))
+    bound = bind_prologue_contraction(node, free)
+    assert bound is not None
+    c_map, _, _stores = bound
+    (product,) = c_map.sources  # the stored role=CONTRACTION fold
+    parsed = _parse_bilinear(product)
+    assert parsed is not None and len(parsed[1]) == 2, "two components over ONE shared edge — sharing is edge reuse"
+    assert not isinstance(shared_operand(product), type(None)) and shared_operand(product) is parsed[0]
+
+
+def test_channels_with_disagreeing_b_layouts_never_group():
+    """A group-formation GATE, not a node assert: the composition declines and the caller keeps the
+    reduce ``Map`` form, rather than building a node whose channels cannot share a slab."""
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
+
+    node, free = _prologue_shape(b_layouts=(False, True))
+    assert bind_prologue_contraction(node, free) is None

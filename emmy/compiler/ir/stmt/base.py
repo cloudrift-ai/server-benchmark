@@ -98,13 +98,6 @@ class RenderCtx:
     # so they compose with non-default-dtype operands. Set transiently
     # by ``Assign.render`` around the native expression render.
     literal_default_dtype: str | None = None
-    # True iff EVERY thread of the block is executing the current scope — set by ``Tile.render``
-    # when the static grid covers the iteration space exactly (the ``_gid < N`` tail guard is
-    # elided), and CLEARED by any divergent scope (``Cond.render``). Consumed by
-    # ``RowAccum.render`` to pick the block-level fold (smem + ``__syncthreads`` + one
-    # ``atomicAdd`` per block) over the sync-free warp fold — a barrier is only legal when no
-    # thread of the block can be masked off the scope.
-    full_block: bool = False
     # C-scope-local declared locals (the mma lane vars ``_g`` / ``_t``, the
     # ``cp.async`` staging address ``_smem_addr``). A self-scoping stmt declares
     # these once per ``{ }`` scope and reuses / reassigns them afterward instead
@@ -369,6 +362,15 @@ class Stmt:
     - ``nested()`` — child statement bodies for tree traversal (default:
       no children; block-structured stmts override).
     """
+
+    # Purity trait — True iff this stmt is a pure value binding, a legal member of a stored
+    # ``Lambda`` body (the λ-foldMap term vocabulary). Declared on the interface with a
+    # CONSERVATIVE ``False`` default and per-class opt-in (no isinstance whitelist): ``Load`` /
+    # ``Assign`` declare pure; the effectful / scope-bound kinds (``Accum``, ``Write``, ``Init``,
+    # ``Loop``…) never do; the structural nodes (``Fold`` / ``Map``) declare pure — a term is a
+    # value, its internals are its own. A NEW stmt kind is excluded from lambdas until it
+    # declares itself. ``Lambda.__post_init__`` is the enforcing formation gate.
+    pure: bool = False
 
     def deps(self) -> tuple[str, ...]:
         """SSA names this stmt reads — its 'requirements'.

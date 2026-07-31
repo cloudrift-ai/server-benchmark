@@ -25,7 +25,7 @@ features in processes that featurized without the pipeline loaded.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
@@ -226,8 +226,8 @@ class Knob:
     def narrow_at(self, element: str) -> str | None:
         """The env pin for this knob's ``<NAME>@<element>`` key, falling back to the bare
         ``<NAME>`` pin — the per-element read mirroring :func:`family_value`'s precedence
-        (``PLACE@fold`` > bare ``PLACE``). Returns the raw pin string (``None`` when neither is
-        set); the caller resolves vocabulary (e.g. the ``PLACE`` family's ``auto`` token). The
+        (``TILE@d`` > bare ``TILE``). Returns the raw pin string (``None`` when neither is
+        set); the caller resolves vocabulary. The
         ``@``-suffixed key is not a valid shell var name, so it rides the ``EMMY_KNOBS``
         aggregate; :func:`parse_knob_spec` canonicalizes its element to lowercase, matching the
         lowercase element spelling producers use."""
@@ -246,10 +246,10 @@ class Knob:
 # existing pin / recipe / golden — keeps working unchanged (the suffix disambiguates only a kernel with
 # two eligible nodes). ``TILE`` / ``STAGE`` / ``REDUCE`` all carry the suffix: the schedule reduce
 # partition IS the axis-named reduce decision (there is no separate native ``REDUCE@`` family — the
-# reduce/split-K partition is the one reduce family). ``WSPEC`` / ``PLACE`` stay root-global (always
+# reduce/split-K partition is the one reduce family). ``WSPEC`` stays root-global (always
 # bare). Readers use :func:`family_value` so a bare and a suffixed key featurize / match identically.
 
-# The per-node schedule codec families that carry an ``@<axis>`` element (``WSPEC`` / ``PLACE`` are
+# The per-node schedule codec families that carry an ``@<axis>`` element (``WSPEC`` is
 # root-global, always bare).
 _AXIS_FAMILIES = ("TILE", "REDUCE", "STAGE")
 
@@ -278,26 +278,6 @@ def family_value(knobs: dict, family: str):
         if k.startswith(prefix):
             return val
     return None
-
-
-def resolve_axis(family: str, key: str, eligible: Sequence[str]) -> str | None:
-    """Canonicalize a schedule-knob ``key`` (bare ``TILE`` or suffixed ``TILE@d``) to its
-    ``FAMILY@<axis>`` form given the kernel's ``eligible`` axes for that ``family``:
-
-    - already suffixed (``TILE@d``) → returned unchanged (idempotent).
-    - bare, exactly one eligible axis → ``TILE@<that axis>`` (the suffix is sugar).
-    - bare, no eligible axis → ``None`` (the family doesn't apply — drop / OFF).
-    - bare, ≥2 eligible axes → ``ValueError`` naming the candidates (a hand-written pin must
-      disambiguate, e.g. ``TILE@d`` vs ``TILE@sk``); enumeration never emits a bare key here, so the
-      ambiguous case only arises from a pin."""
-    if "@" in key:
-        return key
-    if not eligible:
-        return None
-    if len(eligible) == 1:
-        return f"{family}@{eligible[0]}"
-    cands = " or ".join(f"{family}@{a}" for a in eligible)
-    raise ValueError(f"{family} is ambiguous: use {cands}")
 
 
 # --- Registry --------------------------------------------------------------
@@ -353,25 +333,61 @@ def pin_key_matches(pinned: str, realized: str) -> bool:
     return pinned == realized or axis_of(pinned) is None or axis_of(realized) is None
 
 
+def canon_family_value(name: str, value) -> str:
+    """The SITE-LOCAL canonical spelling of a ``TILE`` / ``REDUCE`` value (step 7 — the
+    value-grammar split): a legacy embedded-worker spelling (``a:<atom>/w../f..``, ``n../f..``,
+    ``b<n>[t]``-bearing pipelines) projects to its site half (``TilePlan.spell_site`` /
+    ``ReducePlan.spell_site`` — the worker tokens live in ``WORK``); an already-site value
+    normalizes through the site parser (a warp site value canonicalizes under a dummy warp
+    inventory — the units never reach the site spelling). Any other family — and any
+    unparseable value — passes through untouched (the caller's own equality applies)."""
+    from emmy.compiler.ir.schedule import ReducePlan, TilePlan, Workers  # noqa: PLC0415
+
+    fam = family_of(name)
+    v = str(value).strip()
+    if not v:
+        return v
+    if fam == "TILE":
+        try:
+            return TilePlan.parse(v).spell_site()  # legacy (and the f-only site scalar) round-trips
+        except ValueError:
+            pass
+        try:
+            return TilePlan.parse_site(v, Workers(kind="warp", units=(1, 1))).spell_site()
+        except ValueError:
+            return v
+    if fam == "REDUCE":
+        try:
+            if "coop" in v:
+                return ReducePlan.parse_site(v, Workers(kind="thread", units=(2, 1))).spell_site()
+            return ReducePlan.parse(v).spell_site()
+        except ValueError:
+            return v
+    return v
+
+
 def values_equal(name: str, want, got) -> bool:
     """Pinned-vs-realized value equality for knob ``name``: casefolded ``str`` equality
     (the env round-trip stringifies), else both sides decoded through the registered
     knob's canonical :meth:`Knob.parse` — a BOOL pinned ``1``/``yes``/``on`` matches a
     realized ``True``, a hex INT its decimal, a BINMASK spelling the stamped binary
     string (width taken from the realized binary spelling — the :meth:`Knob.pretty`
-    storage convention). ``TILE`` values additionally canonicalize through the codec
-    (``TilePlan.parse(...).spell()``) so an atom-ALIAS pin (``a:mma_m16n8k16_f16/…``)
-    matches the canonically-stamped row (``a:mma_m16n8k16_f16_f32/…``) instead of
-    false-flagging ``unreproducible pin``. An unregistered family compares by string
-    only."""
+    storage convention). ``TILE`` / ``REDUCE`` values canonicalize through the SITE
+    codec (:func:`canon_family_value` — step 7): a legacy embedded-worker pin matches
+    the site-local stamped row by its site projection (its worker half constrains the
+    ``WORK`` family, split at ingestion), and an atom-ALIAS pin
+    (``a:mma_m16n8k16_f16/…``) keeps matching the canonically-stamped atom. ``WORK``
+    compares through its own codec. An unregistered family compares by string only."""
     w, g = str(want).strip(), str(got).strip()
     if w.casefold() == g.casefold():
         return True
-    if family_of(name) == "TILE":
-        from emmy.compiler.ir.schedule import TilePlan  # noqa: PLC0415 — the codec layer sits above this descriptor module
+    if family_of(name) in ("TILE", "REDUCE"):
+        return canon_family_value(name, w) == canon_family_value(name, g)
+    if family_of(name) == "WORK":
+        from emmy.compiler.ir.schedule import Workers  # noqa: PLC0415
 
         try:
-            return TilePlan.parse(w).spell() == TilePlan.parse(g).spell()
+            return Workers.parse(w) == Workers.parse(g)
         except ValueError:
             return False
     kn = get(family_of(name))
@@ -386,6 +402,59 @@ def values_equal(name: str, want, got) -> bool:
         return kn.parse(w, width=width) == kn.parse(g, width=width)
     except ValueError:
         return False
+
+
+def ingest_legacy_row(knobs: dict) -> dict:
+    """A stored knob row (a golden YAML entry, an ``--ab`` pin dict) upgraded to the step-7 site
+    grammar for MATCHING against site-form realized rows: the worker halves a LEGACY
+    embedded-worker ``TILE`` (``w..``/``n..`` tokens) or ``REDUCE`` (``b<n>`` coop width) value
+    denormalizes are re-factored into ONE synthesized ``WORK`` entry, with a legacy ``WSPEC``
+    ``p<n>`` band riding it as the ``+p`` suffix — so the legacy corpus constrains the same facts
+    a site row spells (without this, ``values_equal``'s site projection would let a ``w1x8``
+    golden vouch for a ``w4x1`` row of equal register tile). Values themselves stay as recorded
+    (``values_equal`` bridges the spellings); the ``WSPEC`` key dissolves (realized rows no
+    longer carry one). A row already carrying ``WORK`` is returned unchanged (minus any stray
+    WSPEC); rows whose implied inventories disagree — the historically-dead flash PV ``w``
+    token — drop the constraint rather than invent one."""
+    from dataclasses import replace  # noqa: PLC0415
+
+    from emmy.compiler.ir.schedule import ReducePlan, TilePlan, WarpSpec, Workers, plan_workers  # noqa: PLC0415
+
+    out = {k: v for k, v in knobs.items() if family_of(str(k)) != "WSPEC"}
+    if "WORK" in knobs:
+        return out
+    implied: list[Workers] = []
+    for k, v in knobs.items():
+        fam, s = family_of(str(k)), str(v).strip()
+        if not s:
+            continue
+        if fam == "TILE":
+            try:
+                w = plan_workers(TilePlan.parse(s))  # site values fail this parse ⇒ imply nothing
+            except (ValueError, KeyError):
+                w = None
+            if w is not None:
+                implied.append(w)
+        elif fam == "REDUCE":
+            try:
+                plan = ReducePlan.parse(s)  # a site 'coop' spelling fails ⇒ implies nothing
+            except ValueError:
+                continue
+            if plan.coop > 1:
+                implied.append(Workers(kind="thread", units=(plan.coop, 1)))
+    if not implied or any(w != implied[0] for w in implied[1:]):
+        return out
+    work = implied[0]
+    ws = str(knobs.get("WSPEC", "") or "")
+    if ws and work.kind == "warp":
+        try:
+            aux = WarpSpec.parse(ws).aux_warps
+        except ValueError:
+            aux = 0
+        if aux:
+            work = replace(work, producer=aux)
+    out["WORK"] = work.spell()
+    return out
 
 
 def is_off_value(family: str, value) -> bool:
@@ -437,8 +506,7 @@ def parse_knob_spec(raw: str) -> dict[str, str]:
     tolerated, empty entries skipped. A malformed entry (missing ``=`` / empty
     KEY) raises ``ValueError``. Case is canonicalized per key part: the family
     (before any ``@``) uppercases, the element (after it) lowercases — so
-    ``place@FOLD=cut`` pins ``PLACE@fold`` and ``tile@d=…`` keeps its lowercase
-    axis element instead of being mangled to ``TILE@D``."""
+    ``tile@D=…`` pins ``TILE@d`` instead of being mangled to ``TILE@D``."""
     out: dict[str, str] = {}
     for entry in (raw or "").split(","):
         entry = entry.strip()
@@ -464,27 +532,20 @@ apply_knobs_env()
 
 # --- Rendering -------------------------------------------------------------
 
-# Canonical display order for tuning knobs. The ``FAMILY@element`` keys lead — the structural
-# ``PLACE@`` placement, then the axis-named schedule codecs (``TILE@`` / ``REDUCE@`` / ``STAGE@``)
-# — each family's keys sorted by element; the bare exact-name knobs follow in ``KNOB_ORDER``,
-# unknown knobs last (alpha). Shared by the ``run --bench`` kernel table and the ``emmy
-# eval`` tables so columns read stably.
-_FAMILY_ORDER = ("PLACE@", "TILE@", "REDUCE@", "STAGE@")
-KNOB_ORDER = ("TILE", "REDUCE", "STAGE", "WSPEC")
+# Canonical display order for tuning knobs. The axis-named schedule codecs (``TILE@`` /
+# ``REDUCE@`` / ``STAGE@``) lead, each family's keys sorted by element; the bare exact-name knobs
+# follow in ``KNOB_ORDER``, unknown knobs last (alpha). Shared by the ``run --bench`` kernel table
+# and the ``emmy eval`` tables so columns read stably.
+_FAMILY_ORDER = ("TILE@", "REDUCE@", "STAGE@")
+KNOB_ORDER = ("WORK", "TILE", "REDUCE", "STAGE")
 _KNOB_RANK = {k: i for i, k in enumerate(KNOB_ORDER)}
-
-# Schedule codec families whose ``@<axis>`` display collapses back to bare when the kernel has a
-# single eligible axis (so one-node tables read as ``TILE=…`` / ``REDUCE=…`` / ``STAGE=…``, exactly as
-# before the axis-naming, matching the bare golden YAML). All three per-node schedule codecs collapse —
-# the schedule reduce partition is the one reduce family, so ``REDUCE@<axis>`` bares out like the rest.
-_COLLAPSE_FAMILIES = ("TILE", "REDUCE", "STAGE")
 
 # The greedy-fillable schedule codec families a golden RECORDING must pin explicitly. An entry that
 # omits one leaves that family to the planner's fill at replay time, and the fill drifts as the
 # planner evolves — the recurring unpinned-``REDUCE`` phantom-regression class (a recorded un-split
 # config replaying with a surprise ``g2k`` fill). :func:`stamp_schedule_families` is the recording
 # view that closes the gap: every family explicit, OFF spelling (``""`` = decided unused) included.
-SCHEDULE_FAMILIES = ("TILE", "REDUCE", "STAGE", "WSPEC", "RASTER")
+SCHEDULE_FAMILIES = ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")
 
 
 def knob_sort_key(name: str) -> tuple[int, str]:
@@ -520,13 +581,10 @@ def tuning_knob_items(knobs: dict) -> list[tuple[str, str]]:
     ``TILE`` output-fragment knob is one column for both the scalar and warp tiers
     (the value self-describes), so there are no tier-foreign OFF knobs to hide.
 
-    A per-node schedule codec keyed ``@<axis>`` (``TILE@d`` / ``STAGE@d``) **collapses back to bare**
-    (``TILE`` / ``STAGE``) when the kernel has a single eligible axis for that family (one such key),
-    so a one-node table reads exactly as it did before axis-naming; a multi-node kernel (flash) keeps
-    the ``@<axis>`` suffix to disambiguate."""
-    from collections import Counter  # noqa: PLC0415
-
-    fam_counts = Counter(family_of(k) for k in knobs if "@" in k and family_of(k) in _COLLAPSE_FAMILIES)
+    Keys render AS STORED — since phase 3 the stampers spell the canonical codec key (bare for the
+    primary node, ``TILE@dd``-style where the tree needs it), so the view needs no bare-collapse:
+    the stamped row IS the stored/golden spelling. (The old ``@<axis>``→bare display collapse died
+    with the axis-suffix codec; pre-phase-3 evidence is regenerated, not migrated.)"""
     rendered: list[tuple[str, str]] = []
     for k, v in knobs.items():
         if k.startswith(STRUCT_PREFIX) or k.startswith(CTX_PREFIX):
@@ -536,9 +594,7 @@ def tuning_knob_items(knobs: dict) -> list[tuple[str, str]]:
             continue
         if knob is None and isinstance(v, bool):
             continue
-        fam = family_of(k)
-        disp = fam if ("@" in k and fam in _COLLAPSE_FAMILIES and fam_counts[fam] == 1) else k
-        rendered.append((disp, str(v)))
+        rendered.append((k, str(v)))
     return sorted(rendered, key=lambda kv: knob_sort_key(kv[0]))
 
 
@@ -558,23 +614,8 @@ def canonical_row_key(knobs: dict) -> tuple[tuple[str, str], ...]:
 def evidence_row_vouches(cand_tun: dict, row_tun: dict) -> bool:
     """Whether a measured evidence row can vouch for a candidate under value-of-position
     semantics: every tunable knob the candidate specifies must match the row, a key absent
-    from the ROW reading as free — EXCEPT a kernel-set-changing placement. A row recorded
-    before ``PLACE@cone`` existed (any pre-cut tune DB / reservoir) measured the FUSED twin,
-    which is knob-identical to the cut row apart from the placement — letting the absent key
-    wildcard-match a ``cut`` candidate deploys the catastrophic cold cut at the fused row's
-    µs (and the content tie-break then PREFERS it: ``('PLACE@cone','cut') <
-    ('PLACE@cone','fuse')``). The cut may only win where it was actually measured, so a
-    ``cut`` candidate requires the row to record the placement explicitly. ``PLACE@stat=sink``
-    (the row-stat sink, an identical kernel-set change) takes the same clause."""
-    if any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items()):
-        return False
-    if str(cand_tun.get("PLACE@cone")) == "cut" and "PLACE@cone" not in row_tun:
-        return False
-    if str(cand_tun.get("PLACE@fin")) == "fuse" and "PLACE@fin" not in row_tun:
-        return False  # a pre-fin row measured the separate-finalize twin — same kernel-set clause
-    if str(cand_tun.get("PLACE@cstat")) == "fuse" and "PLACE@cstat" not in row_tun:
-        return False  # a pre-cstat row measured the split-stat twin — same kernel-set clause
-    return not (str(cand_tun.get("PLACE@stat")) == "sink" and "PLACE@stat" not in row_tun)
+    from the ROW reading as free (a later pass decides it)."""
+    return not any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items())
 
 
 def stamp_schedule_families(knobs: dict) -> dict[str, str]:

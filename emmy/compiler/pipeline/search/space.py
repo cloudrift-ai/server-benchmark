@@ -15,7 +15,7 @@ candidate grids. Per-kernel legality (the warp static-K divisibility check, the 
 eligibility, the ``_COOP_*`` constants) stays with the scheduler in
 ``passes/lowering/tile/_schedule.py`` — the legal subset is a function of the node.
 
-Three groups:
+Two groups:
 
 - **Schedule codec knobs** (``REDUCE`` / ``TILE`` / ``STAGE`` / ``WSPEC`` / ``RASTER``) — the tile-lowering schedule
   fork points that spell the ir schedule codecs (:mod:`emmy.compiler.ir.schedule`). Decided in
@@ -24,8 +24,6 @@ Three groups:
   schedule slice (``ReducePlan`` / ``TilePlan`` / ``Stage`` / ``WarpSpec``) and rides on ``TileOp.knobs``
   so the online prior featurizes / tunes the decision. ``off=""`` (the conservative serial / per-cell /
   gmem-direct / uniform default) is auto-stamped on kernels the pass doesn't schedule.
-- **The structural placement pin** (``PLACE``) — pin-only: where an intermediate edge lives, registers
-  (``fuse``) or memory (``cut``), per edge-class element (``PLACE@<element>`` via ``EMMY_KNOBS``).
 - **Kernel-lowering policy knobs** (``VECTORIZE_LOADS`` / ``INTERLEAVE_LOADS``) — boolean codegen
   policies recorded on the kernel op (idempotence + env override), on by default and not search
   dimensions (``hints=(True,)``).
@@ -80,37 +78,49 @@ STAGE = Knob(
     off="",
 )
 
-# Warp specialization — the worker-mapping sibling of ``REDUCE``/``TILE``/``STAGE`` and ORTHOGONAL to
-# all three: the pipeline (what's staged, the mma tile, the reduce partition) is fixed by those pins;
-# ``WSPEC`` only splits the warps that run it into roles (``p<np>`` producer warps drive the ``STAGE``
-# load half; the compute warps stay on the mma). ``off=""`` is uniform SIMT (every warp does both
-# halves). Resolved into the schedule's :class:`WarpSpec` (``None`` = uniform) and gated on a warp
-# ``TILE`` + a resolved **TMA** ``STAGE`` (the producer band drives the box-copy mbarrier ring;
-# cp.async's wait-group is issuing-thread-scoped and a sync compute-fill has no async load half).
-
-
-def _wspec_features(val) -> dict[str, float]:
-    """The ``WSPEC`` sub-features for the online prior — the dedicated (non-COMPUTE) warp count
-    (``0.0`` = uniform SIMT). The producer ``q`` window is reserved (inert) and not featurized."""
-    if not val:
-        return {"D_wspec_warps": 0.0}
-    from emmy.compiler.ir.schedule import WarpSpec  # noqa: PLC0415 — schedule imports this module's knobs' consumers
-
-    try:
-        ws = WarpSpec.parse(str(val))
-    except ValueError:
-        return {"D_wspec_warps": 0.0}
-    return {"D_wspec_warps": float(ws.aux_warps)}
-
-
+# Warp specialization — an env-pin alias: the role→warp split (``p<np>`` producer warps drive the
+# ``STAGE`` load half; compute warps stay on the mma) lives in the WORK inventory's ``+p`` suffix.
+# Gated on a warp ``TILE`` + a resolved **TMA** ``STAGE`` (the producer band drives the box-copy
+# mbarrier ring; cp.async's wait-group is issuing-thread-scoped and a sync compute-fill has no
+# async load half).
 WSPEC = Knob(
     "WSPEC",
     KnobType.STR,
-    help="Warp-specialization codec — role→warp split over the fixed pipeline "
-    "(p<np> producer[:q<window>, reserved], s<ns> sfu, …; compute warps implicit = TilePlan.units; empty=uniform SIMT). "
-    "Decided in lowering/tile/010_recognize (the _schedule helper), materialized in lowering/kernel/010_materialize "
-    "(the staged K-loop's producer/compute band split; warp TILE + TMA STAGE only).",
-    features=_wspec_features,
+    help="Warp-specialization env-pin ALIAS — the producer band now rides WORK's +p suffix; a "
+    "WSPEC pin (p<np> producer[:q<window>, reserved]; empty=uniform SIMT) narrows the WORK "
+    "inventory via seal_workers. No realized row carries the key.",
+)
+
+
+# The kernel-global worker inventory (the step-7 value-grammar family): the w/n worker tokens
+# factored out of the per-site TILE values, the coop width out of REDUCE, the WSPEC producer band
+# absorbed as ``+p<n>``. Stamped by ``ops.seal_workers`` on every assembled option row; ``off=""``
+# = the per-cell / pure-reduce forms' derived launch geometry.
+
+
+def _work_features(val) -> dict[str, float]:
+    """The ``WORK`` sub-features for the online prior — ONLY the ``+p`` producer band, as the
+    same ``D_wspec_warps`` the retired per-row ``WSPEC`` key spelled (name/semantics preserved;
+    a legacy row's ``WSPEC`` key writes the identical value). The inventory's tile geometry is
+    NOT re-featurized here — the per-node featurizers already fold it in by resolving the site
+    ``TILE``/``REDUCE`` values against WORK (``features._tile_plan`` / ``_reduce_decomp``)."""
+    if not val:
+        return {"D_wspec_warps": 0.0}
+    from emmy.compiler.ir.schedule import Workers  # noqa: PLC0415 — deferred: schedule imports this module
+
+    try:
+        w = Workers.parse(str(val))
+    except ValueError:
+        return {"D_wspec_warps": 0.0}
+    return {"D_wspec_warps": float(w.producer if w is not None else 0)}
+
+
+WORK = Knob(
+    "WORK",
+    KnobType.STR,
+    help="Kernel-global worker inventory (w<M>x<N>[+p<np>] warps / t<N>[x<M>] threads; empty=derived per-cell geometry). "
+    "The step-7 value-grammar family — TILE/REDUCE values become site-local; the tier discriminator IS the worker kind.",
+    features=_work_features,
     off="",
 )
 
@@ -128,7 +138,7 @@ def _raster_features(val) -> dict[str, float]:
     N-fastest order) and the orientation flag (``1.0`` = ``gn``, the transposed grouping)."""
     if not val:
         return {"D_raster_group": 0.0, "D_raster_gn": 0.0}
-    from emmy.compiler.ir.schedule import Raster  # noqa: PLC0415 — same deferred pattern as _wspec_features
+    from emmy.compiler.ir.schedule import Raster  # noqa: PLC0415 — deferred: schedule imports this module
 
     try:
         r = Raster.parse(str(val))
@@ -175,84 +185,6 @@ def map_tile_moves() -> list[str]:
     The ladder stops at ``f4``: ``f8`` regressed both pointwise goldens (register pressure — 22 vs 14
     regs — outweighs the wider access), so it's left out until a shape wants it."""
     return ["f2", "f4"]
-
-
-# --- The structural placement pin (PLACE) -----------------------------------
-#
-# ONE pin-only family controlling structural emission: where an intermediate edge lives — registers
-# (``fuse``) or memory (``cut``). Elements are named by the MOVE, not the shape:
-#
-#   PLACE@cone   producer-cone inlining (the fused producer → matmul edge). ``cut`` is realized
-#                by ``lowering/tile/020_cut_edge`` — a ``030_split_reduce``-style graph rewrite that
-#                splits the recognized cone kernel at the A seam (the producer materializes the
-#                cone value to a workspace; the matmul re-lowers with a plain gmem A) — and both
-#                halves re-enter recognition on the pass-scan restart, so each gets its own
-#                schedule / fork. The recognizer's nodification gate is the ``fuse`` half.
-#   PLACE@fold   downstream-fold absorption (flash vs separate softmax + P@V kernels)
-#   PLACE@tuple  sibling-fold tupling (online softmax vs two-pass stats)
-#   PLACE@fin    deferred split-reduce finalize placement — its own kernel (``cut``) vs inlined
-#                into every consumer's read sites (``fuse``, realized by
-#                ``lowering/tile/032_fuse_finalize``; kills the finalize launch + sync point)
-#   PLACE@cstat  the cone cut's bridged statistic placement — its own ``__stat`` kernel (``cut``,
-#                today's split; the statistic must leave the cone kernel to give the scale sweep
-#                its 2-D grid at prefill M) vs kept INSIDE the cone producer (``fuse``: the
-#                pre-split ``for m: [stat…, for k: …]`` LoopOp, whose re-recognition gives it the
-#                per-row coop-stat schedule — the M=1 case, where the separate stat kernel is
-#                pure launch overhead). Realized by ``020_cut_edge``.
-#
-# Vocabulary: ``auto`` (the built-in per-element default) / ``fuse`` / ``cut``. Precedence:
-# ``PLACE@<element>`` > bare ``PLACE`` > built-in ``auto`` (read via :func:`place_decision` /
-# ``Knob.narrow_at``). ``auto`` never appears in a knob dict — it is pin vocabulary; the stamped
-# value is the *resolved* decision (``fuse`` / ``cut``), stamped for ``fold`` / ``cone`` only
-# (``tuple`` is pure policy — dominance — and is never stamped). ``fuse`` is a request, not a
-# guarantee: a forced fuse on an uncertifiable kernel (e.g. RoPE'd QK, which flash recognition
-# rejects) degrades to ``cut`` with a log line — the standard pin-validity rule. Since ``@`` is not
-# a valid shell var name character, per-element pins ride the ``EMMY_KNOBS`` aggregate
-# (``EMMY_KNOBS="PLACE@fold=cut"``); the bare ``EMMY_PLACE`` env var pins every element.
-PLACE = Knob(
-    "PLACE",
-    KnobType.STR,
-    help="Structural placement of an intermediate edge — auto|fuse|cut, per element via "
-    "PLACE@cone (producer-cone inlining) / PLACE@fold (flash vs multi-kernel attention) / "
-    "PLACE@tuple (online softmax vs two-pass stats) / PLACE@stat (auto|fuse|sink — a norm's "
-    "row statistic staying local vs sunk into its producer's epilogue) / PLACE@fin (auto|cut|fuse "
-    "— a deferred split-reduce finalize as its own kernel vs inlined into its consumers) / "
-    "PLACE@cstat (auto|cut|fuse — the cone cut's bridged statistic as its own kernel vs kept in "
-    "the cone producer); bare PLACE pins every eligible edge. Pin-only (never enumerated); read "
-    "in lowering/tile/010_recognize.",
-    off="",
-)
-
-# The built-in ``auto`` defaults per element — today's emission behavior (fuse everywhere: flash,
-# online softmax, and producer-cone inlining are all on when recognizable; a row statistic stays
-# LOCAL to its kernel). Flipping a default is a behavior change gated on the validation suite, not
-# a spelling change. ``stat``'s alternative is ``sink`` (not ``cut``): the statistic reduce
-# migrates into the producer kernel's epilogue (``025_sink_row_reduce``) instead of splitting out.
-_PLACE_DEFAULTS = {"cone": "fuse", "fold": "fuse", "tuple": "fuse", "stat": "fuse", "fin": "cut", "cstat": "cut"}
-_PLACE_VALUES = {
-    "cone": ("fuse", "cut"),
-    "fold": ("fuse", "cut"),
-    "tuple": ("fuse", "cut"),
-    "stat": ("fuse", "sink"),
-    "fin": ("cut", "fuse"),
-    "cstat": ("cut", "fuse"),
-}
-
-
-def place_decision(element: str) -> str:
-    """The resolved ``PLACE`` decision (``"fuse"`` / ``"cut"`` — ``"sink"`` for ``stat``) for
-    ``element`` — the pin (``PLACE@<element>`` > bare ``PLACE``, via ``Knob.narrow_at``) with the
-    explicit ``auto`` token (and no pin at all) resolving to the built-in per-element default. An
-    unknown pin value degrades to the default with a log line — the standard pin-validity rule."""
-    default = _PLACE_DEFAULTS[element]
-    allowed = _PLACE_VALUES[element]
-    pin = PLACE.narrow_at(element)
-    if pin is None or pin in ("", "auto"):
-        return default
-    if pin in allowed:
-        return pin
-    logger.warning("PLACE@%s pin %r is not auto|%s; using the built-in %r", element, pin, "|".join(allowed), default)
-    return default
 
 
 # --- Kernel-lowering policy knobs -------------------------------------------

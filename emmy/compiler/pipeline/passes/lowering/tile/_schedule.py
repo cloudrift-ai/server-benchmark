@@ -40,27 +40,50 @@ from types import SimpleNamespace
 from emmy.compiler.context import STATIC_SMEM_CAP
 from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim
 from emmy.compiler.ir.atom import ATOM_REGISTRY
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis, AxisRole, Window
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-from emmy.compiler.ir.schedule import Raster, Stage, WarpSpec, has_scalar_atom_alias, is_warp_codec
+from emmy.compiler.ir.schedule import (
+    Raster,
+    Stage,
+    WarpSpec,
+    Workers,
+    has_scalar_atom_alias,
+    is_warp_codec,
+    plan_workers,
+    resolve_site_tile,
+)
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt, Write
-from emmy.compiler.ir.tile import Contraction, Map, Placement, ReducePlan, Reduction, TileOp, TilePlan
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Lambda, Load, Loop, Stmt, Write
+from emmy.compiler.ir.stmt.algebra import M, component_ops
+from emmy.compiler.ir.stmt.passes import projection_distributes
+from emmy.compiler.ir.tile import (
+    Channel,
+    ContractionView,
+    Fold,
+    Map,
+    Placement,
+    ReducePlan,
+    Store,
+    TileOp,
+    TilePlan,
+    contraction_view,
+    is_contraction_fold,
+)
 from emmy.compiler.ir.tile.ir import gmem_row_stride
-from emmy.compiler.ir.tile.ops import axis_role, nodify_reduce, reduce_loop
+from emmy.compiler.ir.tile.ops import axis_role, cone_seam, nodify_reduce, projection_tail, reduce_loop, sched_of, seal_workers
 from emmy.compiler.ir.tile.ops import lower as lower_op
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
-from emmy.compiler.pipeline.passes.lowering.tile._atomize import map_cone, semiring_binding
-from emmy.compiler.pipeline.passes.lowering.tile._carrier import projection_distributes
+from emmy.compiler.pipeline.knob import canon_family_value, family_of, values_equal
+from emmy.compiler.pipeline.passes.lowering.tile._atomize import make_cone, map_cone, semiring_binding
 from emmy.compiler.pipeline.pipeline import LoweringError
 from emmy.compiler.pipeline.search.space import (
     F16_MMA_F32_ACC,
     MAX_BLOCK_THREADS,
-    PLACE,
     RASTER,
     REDUCE,
     STAGE,
     TILE,
+    WORK,
     WSPEC,
     coop_reduce_moves,
     map_tile_moves,
@@ -138,10 +161,141 @@ def _with_f16acc(atoms: tuple[str, ...], ctx) -> tuple[str, ...]:
     return atoms + tuple(_F16ACC_ATOMS[a] for a in atoms if a in _F16ACC_ATOMS)
 
 
-def _at(knob, axis_name: str) -> str:
-    """The axis-named knob key ``FAMILY@<axis>`` (e.g. ``TILE@d``) — the per-node schedule codec keyed
-    by the reduce/contraction axis it schedules, so a multi-node kernel addresses each node."""
-    return f"{knob.name}@{axis_name}"
+def _family_key(op, family: str, node) -> str:
+    """The CANONICAL knob key for ``family`` addressing ``node`` on ``op``'s tree — phase 3: the
+    fork rows spell keys via the tree-path resolver (:mod:`~emmy.compiler.ir.tile.path`), so the
+    stamped spelling IS the stored/golden spelling (bare for the primary node; ``TILE@dd`` /
+    ``TILE@pj`` on flash; ``REDUCE@<axis>`` for the fused kernel's cone stat). A node that is not
+    a site of the family (the demoted matvec's TILE) keys the bare family — the decided-empty
+    stamp."""
+    from emmy.compiler.ir.tile.ops import Sched  # noqa: PLC0415
+
+    return Sched(op, {}).key(family, node) or family
+
+
+# ---- the step-7 value grammar (F1): SITE-LOCAL TILE/REDUCE values + ONE WORK entry -------------- #
+# The internal enumeration (the ``search/space.py`` move catalogs, the resolvers, the option
+# builders) keeps speaking the LEGACY embedded-worker spellings; the flip happens at the two
+# boundaries where a row becomes STORED state: fork-row assembly (``_site_row`` — the dict rows the
+# search/prior/golden tiers see) and the stamped ``TileOp.knobs`` (``_site_knobs`` in every option
+# builder). Both spell TILE/REDUCE site-local (``spell_site``) and factor the worker geometry —
+# TILE's ``w``/``n`` tokens, REDUCE's coop width, the WSPEC producer band — into ONE ``WORK`` entry
+# (``seal_workers`` stamps the TileOp side; rows carry it explicitly). Pins keep their contracts:
+# a LEGACY pin is a self-contained candidate as before; a SITE-form pin merges the ``WORK`` pin's
+# inventory back in (``_legacy_tile`` / ``_legacy_reduce``) so replaying a post-flip recording
+# selects the same kernel; a WORK pin filters assembled rows via ``values_equal``.
+
+
+def _pinned_workers() -> Workers | None:
+    """The live ``WORK`` env pin's inventory, or ``None`` (unset / empty / unparseable — the
+    row filter reports an unparseable pin loudly via ``values_equal``'s parse)."""
+    raw = WORK.raw()
+    if not raw:
+        return None
+    try:
+        return Workers.parse(raw)
+    except ValueError:
+        return None
+
+
+def _legacy_tile(spec: str | None) -> str | None:
+    """A ``TILE`` pin normalized to the LEGACY embedded-worker spelling the internal enumeration
+    speaks: a SITE-form value (workers factored out into the ``WORK`` pin) merges the pinned
+    inventory back in; legacy / alias / empty spellings pass through. A value that resolves
+    neither way passes through untouched — the downstream ``TilePlan.parse`` raises the loud
+    pin error."""
+    s = (spec or "").strip()
+    if not s or is_warp_codec(s) or has_scalar_atom_alias(s):
+        return spec
+    work = _pinned_workers()
+    if work is None:
+        return spec  # no inventory to merge — the legacy reading stands
+    try:
+        return TilePlan.parse_site(s, work).spell()
+    except ValueError:
+        return spec
+
+
+def _legacy_reduce(spec: str | None) -> str | None:
+    """The ``REDUCE`` counterpart of :func:`_legacy_tile`: a SITE-form ``coop`` value takes its
+    width from the ``WORK`` pin (``coop`` + ``WORK=t512`` → ``b512``); everything else — the
+    legacy ``b<n>[t]`` widths, ``g<n>[a|k]`` splits (site == legacy), ``r<n>`` — passes through."""
+    s = (spec or "").strip()
+    if "coop" not in s:
+        return spec
+    try:
+        return ReducePlan.parse_site(s, _pinned_workers()).spell()
+    except ValueError:
+        return spec  # no thread inventory to size 'coop' — the downstream parse raises loudly
+
+
+def _site_knobs(stamped: dict) -> dict:
+    """A builder's stamped knob dict flipped to the site grammar: TILE/REDUCE values re-spell
+    SITE-LOCAL (:func:`~emmy.compiler.pipeline.knob.canon_family_value` — the worker halves live
+    in the ``WORK`` entry ``seal_workers`` stamps), and the ``WSPEC`` key never stamps (the
+    producer band is ``WORK``'s ``+p`` suffix, absorbed from ``TileOp.workers``). Idempotent on
+    already-site values; non-string values (the ``S_*`` floats) pass through untouched."""
+    return {
+        k: canon_family_value(k, v) if isinstance(v, str) and family_of(k) in ("TILE", "REDUCE") else v
+        for k, v in stamped.items()
+        if k != WSPEC.name
+    }
+
+
+def _site_row(row: dict, keys: tuple[str, str, str]) -> dict | None:
+    """One assembled (legacy-spelled) fork row flipped to the step-7 value grammar: TILE/REDUCE
+    spell their SITE halves and the worker geometry (TILE units, a coop REDUCE width, the WSPEC
+    producer band) merges into ONE ``row["WORK"]`` entry; the WSPEC key is dropped. A genuine
+    inventory conflict (tiled TILE workers vs a differing coop width) drops the row (``None``) —
+    today's enumeration never emits one (``seal_workers`` would raise at materialize), so this
+    is a guard, not a path."""
+    tkey, _, rkey = keys
+    plan = TilePlan.parse(row.get(tkey, ""))
+    rplan = ReducePlan.parse(row.get(rkey, ""))
+    work = plan_workers(plan)
+    if rplan.coop > 1:
+        coop = Workers(kind="thread", units=(rplan.coop, 1))
+        if work is not None and work != coop:
+            return None
+        work = coop
+    wspec = str(row.get(WSPEC.name, "") or "")
+    if wspec:
+        try:
+            aux = WarpSpec.parse(wspec).aux_warps
+        except ValueError:
+            aux = 0
+        if aux:
+            if work is None or work.kind != "warp":
+                return None
+            work = replace(work, producer=aux)
+    out = {k: v for k, v in row.items() if k != WSPEC.name}
+    out[tkey] = plan.spell_site()
+    out[rkey] = rplan.spell_site()
+    out[WORK.name] = work.spell() if work is not None else ""
+    return out
+
+
+def _work_rows(rows: list[dict], keys: tuple[str, str, str]) -> list[dict]:
+    """The assembled fork rows flipped to the site grammar (:func:`_site_row`) and narrowed by a
+    live ``WORK`` env pin (``values_equal`` — codec-canonical, so ``w4x1`` matches ``w4x1``
+    however spelled). A pin that matches NO row keeps the full set with a warning — the standard
+    graceful pin degrade (the replay integrity gate reports the substitution)."""
+    out = [r2 for r in rows if (r2 := _site_row(r, keys)) is not None]
+    return _filter_work(out, lambda r: r.get(WORK.name, ""))
+
+
+def _filter_work(options: list, work_of) -> list:
+    """Narrow ``options`` (row dicts or sealed ``TileOp``\\ s) by the live ``WORK`` env pin;
+    ``work_of`` reads an option's spelled inventory. No pin / no survivor ⇒ the full list (a
+    no-match pin degrades with a warning rather than emptying the enumeration)."""
+    raw = WORK.raw()
+    if raw is None or not options:
+        return options
+    kept = [o for o in options if values_equal(WORK.name, raw, work_of(o))]
+    if not kept:
+        logger.warning("WORK pin %r matches no candidate's worker inventory; keeping the full fork", raw)
+        return options
+    return kept
 
 
 # Conservative cooperative-reduce selection constants (the default when REDUCE is unpinned).
@@ -261,7 +415,7 @@ def _reduce_specs(kernel, place, ctx=None) -> list[str]:
     # (the norm→linear shape — ``_has_contraction_tail``) lifts the free-grid cap: per-cell
     # work scales with the tail's columns, so a big grid does NOT mean the serial tier saturates.
     free = prod(_hint_extent(a) for a in place.free) if place.free else 1
-    tail = list(kernel.op.body) if isinstance(kernel.op, Map) else []
+    tail = projection_tail(kernel)  # boundary stores reconstituted — the sweep-Loop gates below stay honest
     coop = _pick_coop(extent, free, has_tail=_has_contraction_tail(tail))
     # The layout gate (WS5, the cold-poison hardening): at the matvec tier the coop bands are only
     # coalesced on ONE B orientation — plain ``b<n>`` interleaves lanes along K (fast only when K is
@@ -337,18 +491,20 @@ def _reduce_specs(kernel, place, ctx=None) -> list[str]:
             cands.append(move)
     if "" not in cands:
         cands.append("")
-    return list(REDUCE.narrow(cands))
+    return [_legacy_reduce(s) for s in REDUCE.narrow(cands)]
 
 
-def _with_reduce(op, plan: ReducePlan):
-    """Stamp the chosen ``ReducePlan`` onto the op's :class:`Reduction` node (bare, or wrapped under a
-    projecting :class:`Map`). The reduce partition lives **on the node**, not the ``TileSchedule`` —
-    read back via ``ops.reduce_plan``. ``_option`` only schedules a PLANAR / TWISTED reduce, whose op
-    recognition always emits as a bare ``Reduction`` or a projecting ``Map(source=Reduction)``."""
-    if isinstance(op, Reduction):
-        return replace(op, reduce=plan)
-    assert isinstance(op, Map) and isinstance(op.source, Reduction), f"reduce op must nodify to Reduction, got {type(op).__name__}"
-    return replace(op, source=replace(op.source, reduce=plan))
+def _primary_fold(op) -> Fold:
+    """The op's primary reduce :class:`Fold` (bare, or wrapped under a projecting :class:`Map`) —
+    the node the ``REDUCE`` / shared-row ``STAGE`` slices key on. ``_option`` only schedules a
+    PLANAR / TWISTED reduce, whose op recognition always emits as a bare ``Fold`` or a projecting
+    ``Map(source=Fold)``."""
+    if isinstance(op, Fold):
+        return op
+    assert isinstance(op, Map) and len(op.sources) == 1 and isinstance(op.sources[0], Fold), (
+        f"reduce op must nodify to Fold, got {type(op).__name__}"
+    )
+    return op.sources[0]
 
 
 # ---- shared-row operand staging (the fused norm→linear prologue) -------------------------------- #
@@ -418,24 +574,31 @@ def _row_stage(tile, place) -> Stage | None:
     materializer emits) and the operand shapes off ``tile.inputs`` (seeded from the recognized
     ``LoopOp``); the stamped stage is the depth-1 ``sync`` transport with ``smem`` naming the row."""
     rloop = reduce_loop(tile.op)
-    tail = list(tile.op.body) if isinstance(tile.op, Map) else []
+    tail = projection_tail(tile)
     grid_vars = tuple(Var(a.name) for a in place.grid)
     buf = _shared_row_buf(rloop.body, tail, grid_vars, rloop.axis, tile.inputs)
     return Stage(transport="sync", smem=(buf,)) if buf is not None else None
 
 
-def _option(tile, place, spec: str, name: str, knobs: dict) -> TileOp:
-    """One scheduled ``TileOp``: ``place`` mapped onto the grid + the ``REDUCE`` spec resolved into the
-    :class:`Reduction` node's ``ReducePlan`` (the ephemeral knob → materialized plan stamped **on the
-    node**), with the spec stamped on ``knobs`` for the prior. The spec is keyed ``REDUCE@<axis>``
-    (the reduce axis this node partitions), so a multi-node kernel addresses each reduce. A
-    cooperative partition also derives the shared-row operand :class:`Stage` (:func:`_row_stage`,
-    stamped on the schedule field only — a derived perf transform, never a knob)."""
+def _option(tile, place, spec: str, name: str, knobs: dict, reduce_key: str | None = None) -> TileOp:
+    """One scheduled ``TileOp``: ``place`` mapped onto the grid + the ``REDUCE`` spec resolved into
+    a :class:`ReducePlan` in ``TileOp.schedule`` (keyed on the primary :class:`Fold` — the term
+    stays pure), with the spec stamped on ``knobs`` for the prior. The knob spec is keyed
+    ``REDUCE@<axis>`` (the reduce axis this node partitions), so a multi-node kernel addresses
+    each reduce. A cooperative partition also derives the shared-row operand :class:`Stage`
+    (:func:`_row_stage`, stored as a schedule slice only — a derived perf transform, never a
+    knob)."""
     plan = ReducePlan.parse(spec)
-    op = _with_reduce(tile.op, plan)
-    raxis = reduce_loop(tile.op).axis.name
-    stage = _row_stage(tile, place) if plan.coop > 1 else None
-    return TileOp(op=op, name=name, place=place, stage=stage, knobs={**knobs, _at(REDUCE, raxis): spec})
+    fold = _primary_fold(tile.op)
+    rkey = reduce_key if reduce_key is not None else _family_key(tile.op, REDUCE.name, fold)
+    out = TileOp(op=tile.op, name=name, place=place, knobs=_site_knobs({**knobs, rkey: spec}), stores=tile.stores)
+    sched = sched_of(out)
+    if plan.stages:
+        sched.put("REDUCE", fold, plan)
+    if plan.coop > 1:
+        sched.put("STAGE", fold, _row_stage(tile, place))
+    seal_workers(out)  # the coop width IS this row's worker inventory (WORK: t<n>)
+    return out
 
 
 # The mma atoms eligible per operand dtype — the warp tier's dtype gate (16-bit operands only).
@@ -482,9 +645,12 @@ def _fragment_epilogue_ok(epilogue: Body) -> bool:
     return True
 
 
-def _rtx4080_dit_deploy_rows(rows: list[dict], probe: Contraction | None, kaxis: str, ctx) -> list[dict]:
-    """Narrow a deterministic RTX-4080 deploy to the measured DiT contraction
-    winner, while leaving tune/search and explicit knob pins untouched."""
+def _rtx4080_dit_deploy_rows(rows: list[dict], probe: ContractionView | None, keys: tuple[str, str, str], ctx) -> list[dict]:
+    """Narrow a deterministic RTX-4080 deploy to the measured DiT contraction winner, while
+    leaving tune/search and explicit knob pins untouched. The recorded winners are LEGACY
+    spellings; the comparison canonicalizes both sides through the site codec
+    (``canon_family_value``) and checks the row's WORK against the winner's embedded worker
+    tokens, so the table survives the step-7 value-grammar split verbatim."""
     if (
         probe is None
         or ctx is None
@@ -504,16 +670,19 @@ def _rtx4080_dit_deploy_rows(rows: list[dict], probe: Contraction | None, kaxis:
     preferred = _RTX4080_DIT_CONTRACTION_DEFAULTS.get(shape)
     if preferred is None:
         return rows
+    from emmy.compiler.pipeline.knob import canon_family_value  # noqa: PLC0415
+
     tile, stage, reduce = preferred
+    tkey, skey, rkey = keys
+    want_work = plan_workers(TilePlan.parse(tile))
     picked = [
         row
         for row in rows
-        if row.get(_at(TILE, kaxis), "") == tile
-        and row.get(_at(STAGE, kaxis), "") == stage
-        and row.get(_at(REDUCE, kaxis), "") == reduce
-        and row.get(WSPEC.name, "") == ""
+        if canon_family_value("TILE", row.get(tkey, "")) == canon_family_value("TILE", tile)
+        and row.get(skey, "") == stage
+        and canon_family_value("REDUCE", row.get(rkey, "")) == canon_family_value("REDUCE", reduce)
         and row.get(RASTER.name, "") == ""
-        and row.get("PLACE@fin", "cut") != "fuse"
+        and Workers.parse(row.get(WORK.name, "") or None) == want_work
     ]
     if not picked:
         logger.warning("measured RTX 4080 DiT schedule is no longer enumerable for shape %s", shape)
@@ -521,7 +690,7 @@ def _rtx4080_dit_deploy_rows(rows: list[dict], probe: Contraction | None, kaxis:
     return picked
 
 
-def _warp_atoms(kernel, probe) -> tuple[str, ...]:
+def _warp_atoms(kernel, probe, proj: Body | None = None) -> tuple[str, ...]:
     """The dtype-eligible tensor-core atom names for this contraction, ``()`` when the warp tier
     doesn't apply (unbindable node, a non-16-bit operand dtype, or a fragment-unrealizable gather
     epilogue). A computed-A (fused-cone) node reads its operand dtype off the cone's K-indexed
@@ -531,16 +700,17 @@ def _warp_atoms(kernel, probe) -> tuple[str, ...]:
     never convert) and reaches the warp tier through :func:`_demote_mixed_a`'s cone wrap instead."""
     if probe is None or not kernel.inputs:
         return ()
-    if not _fragment_epilogue_ok(probe.epilogue):
+    if not _fragment_epilogue_ok(Body(()) if proj is None else proj):
         return ()
-    if isinstance(probe.a_operand, Load):
-        ld = probe.a_operand
+    if isinstance(probe.a, Load):
+        ld = probe.a
     else:
         kname = probe.k_axis.name
-        ld = next((st for st in probe.a_body if isinstance(st, Load) and kname in {v for e in st.index for v in e.free_vars()}), None)
+        cone = probe.a_body  # the inline cone's K-indexed leaf carries the dtype
+        ld = next((st for st in cone if isinstance(st, Load) and kname in {v for e in st.index for v in e.free_vars()}), None)
     t = kernel.inputs.get(ld.input) if ld is not None else None
     atoms = _ATOMS_BY_DTYPE.get(getattr(getattr(t, "dtype", None), "name", None), ())
-    if atoms or isinstance(probe.a_operand, Load) or getattr(getattr(t, "dtype", None), "name", None) != "f32":
+    if atoms or isinstance(probe.a, Load) or getattr(getattr(t, "dtype", None), "name", None) != "f32":
         return atoms
     return _demoted_atoms(kernel, probe)
 
@@ -557,7 +727,7 @@ def _demoted_atoms(kernel, con) -> tuple[str, ...]:
     relative noise on A — the rounding the model performed anyway in the dominant erased-downcast
     case. (The converse erased-upcast graph — ``w.float()`` on a 16-bit weight — shows B=f32 and
     never triggers this.)"""
-    b_loads = [b for b, _ in con.folds]
+    b_loads = [ch.b for ch in con.channels]
     if not b_loads or not all(isinstance(b, Load) for b in b_loads):
         return ()
     b_names = {getattr(getattr(kernel.inputs.get(b.input), "dtype", None), "name", None) for b in b_loads}
@@ -568,18 +738,18 @@ def _demoted_atoms(kernel, con) -> tuple[str, ...]:
 
 def _demote_mixed_a(kernel, con):
     """A mixed-dtype contraction — plain f32-A ``Load`` against 16-bit folds
-    (:func:`_demoted_atoms`) — re-expressed as a computed-A cone (``a_operand=Body((load,))``), so
-    it rides the mandatory ``sync`` compute-fill whose slab store demotes the value to the atom
-    dtype. The copy transports (gmem-direct ldmatrix / cp.async / TMA) move raw bytes and cannot
-    convert, which is why the demotion routes through the cone form instead of the plain warp
-    tier. Anything else (already-computed A, non-Load A, 16-bit A, non-16-bit folds) returns
-    unchanged."""
-    if con is None or not isinstance(con.a_operand, Load):
+    (:func:`_demoted_atoms`) — re-expressed as a computed-A cone (a one-``Load`` ``Map`` stored
+    inline on the ``a`` edge), so it rides the mandatory ``sync`` compute-fill whose slab
+    store demotes the value to the atom dtype. The copy transports (gmem-direct ldmatrix / cp.async
+    / TMA) move raw bytes and cannot convert, which is why the demotion routes through the cone form
+    instead of the plain warp tier. Anything else (already-computed A, non-Load A, 16-bit A,
+    non-16-bit folds) returns unchanged."""
+    if con is None or not isinstance(con.a, Load):
         return con
-    a_t = kernel.inputs.get(con.a_operand.input)
+    a_t = kernel.inputs.get(con.a.input)
     if getattr(getattr(a_t, "dtype", None), "name", None) != "f32" or not _demoted_atoms(kernel, con):
         return con
-    return replace(con, a_operand=Body((con.a_operand,)))
+    return replace(con, a=make_cone([con.a], con.k_axis.name))
 
 
 def _warp_move_ok(kernel, spec: str) -> bool:
@@ -630,7 +800,7 @@ def _stage_candidates(kernel, probe, plan: TilePlan, budget: int = STATIC_SMEM_C
     return out
 
 
-def _reduce_candidates(kernel, place, plan: TilePlan, probe: Contraction | None = None) -> list[str]:
+def _reduce_candidates(kernel, place, plan: TilePlan, probe: ContractionView | None = None, channels: int = 1) -> list[str]:
     """The ``REDUCE`` codec candidates for one tile candidate — serial ``""`` first (option-0),
     then the legal coop / ILP moves (per-cell tier only — the non-output-tiled contract) and the
     divisor- and occupancy-guarded split-K moves (both finalizes, both tiers). An **atomic**
@@ -699,8 +869,8 @@ def _reduce_candidates(kernel, place, plan: TilePlan, probe: Contraction | None 
         # node's ``Map``-wrapper body is folded into the inner epilogue at ``_splitk_option``, so
         # it must distribute too. Multi-fold (gate/up) nodes never offer ``a`` — the per-channel
         # ⊗-combine needs the deferred finalize kernel.
-        tail = () if probe is None else (*probe.epilogue, *(kernel.op.body if isinstance(kernel.op, Map) else ()))
-        atomic_ok = probe is not None and len(probe.folds) == 1 and (len(tail) == 0 or projection_distributes(tail, (probe.acc,)))
+        tail = tuple(projection_tail(kernel))
+        atomic_ok = probe is not None and channels == 1 and (len(tail) == 0 or projection_distributes(tail, (probe.acc,)))
         for move in splitk_moves(warp=plan.is_warp):
             sp = ReducePlan.parse(move)
             if sp.finalize == "atomic" and not atomic_ok:
@@ -742,23 +912,30 @@ def _wspec_candidates(plan: TilePlan, stage_spelling: str, red: str) -> list[str
     return list(WSPEC.narrow(wspec_moves()))
 
 
-def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], str]:
-    """The contraction's enumerated knob rows (the tile × stage × reduce × wspec legal product,
-    each schedule family keyed ``FAMILY@<k_axis>``, ``WSPEC`` bare/root-global) and the k-axis
-    name. Env pins narrow each family (``Knob.narrow``); the unpinned families come from the
+def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], tuple[str, str, str]]:
+    """The contraction's enumerated knob rows (the tile × stage × reduce × worker legal product,
+    each schedule family keyed by its CANONICAL codec key — bare on today's single-primary
+    trees) and the ``(TILE, STAGE, REDUCE)`` key triple. The returned rows spell the F1 SITE
+    grammar (``_work_rows``): TILE/REDUCE hold their site halves, the worker geometry lives in
+    ONE ``WORK`` entry (the WSPEC producer band riding it as ``+p``). Env pins narrow each
+    family (``Knob.narrow``); the unpinned families come from the
     ``search/space.py`` move catalog, legality-guarded here (the per-node half of the space)."""
-    kaxis = reduce_loop(kernel.op).axis.name
+    head = kernel.op.sources[0] if isinstance(kernel.op, Map) and kernel.op.sources else kernel.op
+    if isinstance(head, Fold):
+        keys = tuple(_family_key(kernel.op, f.name, head) for f in (TILE, STAGE, REDUCE))
+    else:  # a still-Map contraction (bound at fork-emit) — no fold to key on; bare is canonical
+        keys = (TILE.name, STAGE.name, REDUCE.name)
     try:
-        probe = _contraction_node(kernel.op, place, TilePlan())
+        probe, proj = _contraction_node(kernel.op, place, TilePlan())
     except LoweringError:
-        probe = None
+        probe, proj = None, Body(())
     if probe is not None and probe.a_computed:
-        return _computed_a_rows(kernel, place, probe, kaxis, _smem_budget(ctx), ctx), kaxis
+        return _work_rows(_computed_a_rows(kernel, place, probe, keys, _smem_budget(ctx), ctx, proj=proj), keys), keys
     tiles = scalar_tile_moves() if probe is not None else [""]
     warp_offered = False
     demoted_rows: list[dict] = []
     if probe is not None:
-        atoms = _with_f16acc(_warp_atoms(kernel, probe), ctx)
+        atoms = _with_f16acc(_warp_atoms(kernel, probe, proj=proj), ctx)
         if atoms:
             warp_moves = [s for s in warp_tile_moves(atoms) if _warp_move_ok(kernel, s)]
             tiles += warp_moves
@@ -769,13 +946,17 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], str]:
             # resolved, warp pins handled inside); the scalar rows below stay fork siblings.
             demoted = _demote_mixed_a(kernel, probe)
             if demoted is not probe:
-                demoted_rows = _computed_a_rows(kernel, place, demoted, kaxis, _smem_budget(ctx), ctx)
+                demoted_rows = _computed_a_rows(kernel, place, demoted, keys, _smem_budget(ctx), ctx, proj)
                 warp_offered = bool(demoted_rows)
     # A pinned ``a:scalar`` / ``a:none`` is the explicit scalar-tier spelling — canonicalize it to the
     # bare scalar codec (``""`` / ``n../f..``) so the pin-only alias never rides a stored knob row (it
     # would otherwise leak into the prior/DB key and the golden YAML). Non-alias specs pass through
-    # untouched — no blanket re-spell.
-    tiles = [TilePlan.parse(t).spell() if has_scalar_atom_alias(t) else t for t in TILE.narrow(tiles)]
+    # untouched — no blanket re-spell. A SITE-form pin (F1) first merges the WORK pin's inventory
+    # back into the legacy spelling the enumeration speaks (``_legacy_tile``).
+    tiles = list(TILE.narrow(tiles))
+    if TILE.raw() is not None:
+        tiles = [_legacy_tile(t) for t in tiles]
+    tiles = [TilePlan.parse(t).spell() if has_scalar_atom_alias(t) else t for t in tiles]
     if demoted_rows:
         # A warp TILE pin is already honored (or rejected) by the demoted rows — the plain loop
         # must not also emit it over the copy transports, which cannot convert the f32 A.
@@ -792,14 +973,15 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], str]:
         plan = TilePlan.parse(spec)
         if plan.is_warp and TILE.raw() is not None:
             _check_warp_static_k(kernel, plan)  # a PIN with an indivisible K-step raises (the pin contract)
-            if probe is not None and not _fragment_epilogue_ok(probe.epilogue):
+            if probe is not None and not _fragment_epilogue_ok(proj):
                 raise ValueError(
                     "warp TILE pin: the projection epilogue gathers through another epilogue "
                     "load (a data-dependent index) — the fragment epilogue cannot thread it; "
                     "drop the a:<atom> token to use the scalar tier."
                 )
+        tkey, skey, rkey = keys
         for stage in _stage_candidates(kernel, probe, plan, _smem_budget(ctx), _tma_allowed(ctx)):
-            for red in _reduce_candidates(kernel, place, plan, probe):
+            for red in _reduce_candidates(kernel, place, plan, probe, len(probe.channels) if probe else 1):
                 # A staged split row is legal: ``_splitk_option`` re-resolves the stage against the
                 # SLICED inner node (the warp slice divisibility already held in
                 # ``_reduce_candidates``) and ``030_split_reduce`` threads it onto the partial kernel.
@@ -811,16 +993,16 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], str]:
                     for raster in _raster_candidates(place):
                         rows.append(
                             {
-                                _at(TILE, kaxis): spec,
-                                _at(STAGE, kaxis): stage,
-                                _at(REDUCE, kaxis): red,
+                                tkey: spec,
+                                skey: stage,
+                                rkey: red,
                                 WSPEC.name: wspec,
                                 RASTER.name: raster,
                                 **stamp,
                             }
                         )
     rows += [{**r, **stamp} for r in demoted_rows]
-    return rows, kaxis
+    return _work_rows(rows, keys), keys
 
 
 def _is_splitk_spec(spec: str) -> bool:
@@ -837,11 +1019,11 @@ def _is_splitk_spec(spec: str) -> bool:
 
 def _splitk_pin() -> str:
     """The pinned ``g<w>[a|k]`` split-K spec (or ``""``) — the cross-CTA K partition a
-    ``CONTRACTION`` honors through the structural ``Reduction ⊃ Contraction`` fork
+    ``CONTRACTION`` honors through the structural ``Fold ⊃ ContractionView`` fork
     (:func:`_splitk_option`), consumed by ``030_split_reduce``. Reads the ``REDUCE`` pin and returns it
     only when it parses to a **GRID split** (``needs_split``); a non-split ``b`` / ``r`` pin or
     another codec is not a split-K request — ignore it rather than fail."""
-    pinned = REDUCE.narrow([""])[0]
+    pinned = _legacy_reduce(REDUCE.narrow([""])[0])
     try:
         plan = ReducePlan.parse(pinned)
     except ValueError:
@@ -856,7 +1038,7 @@ def _coop_reduce_spec() -> str:
     the ``REDUCE`` pin iff it parses to a coop / reg partition WITHOUT a GRID split (the split-K ``g``
     takes the structural :func:`_splitk_option` fork instead); ``""`` otherwise (a foreign codec is
     not ours — ignore it rather than fail)."""
-    pinned = REDUCE.narrow([""])[0]
+    pinned = _legacy_reduce(REDUCE.narrow([""])[0])
     try:
         plan = ReducePlan.parse(pinned)
     except ValueError:
@@ -887,7 +1069,7 @@ def _stage_spec(kernel) -> str:
 
 
 # ---- contraction operand-stage RESOLUTION (eligibility + sizing, once, scheduler-side) ---------- #
-# A ``STAGE`` pin on a contraction is resolved HERE against the built :class:`Contraction` node —
+# A ``STAGE`` pin on a contraction is resolved HERE against the built :class:`ContractionView` node —
 # transport eligibility, the slab K-chunk (``bk_elems``), and the depth clamps — and the RESOLVED
 # :class:`Stage` (or ``None``, gmem-direct) is stamped on the ``TileOp``. The materializer
 # (``_atom._staged``) applies it verbatim, deciding nothing — the same stamp-then-apply shape as the
@@ -956,7 +1138,7 @@ def _can_stage_warp_tma(
     return all((x * elem_bytes) % 16 == 0 for x in inner)
 
 
-def _resolve_warp_stage(c: Contraction, stage: Stage, budget: int = STATIC_SMEM_CAP) -> Stage | None:
+def _resolve_warp_stage(c: ContractionView, stage: Stage, budget: int = STATIC_SMEM_CAP) -> Stage | None:
     """Resolve a pinned operand ``Stage`` against the warp (mma) contraction ``c`` — TMA > cp.async >
     gmem-direct (``None``). The resolved stage carries ``bk_elems`` (the codec-spelled ``TilePlan.bk``
     in elements), ``depth`` clamped so the ring's slots fit the smem ``budget`` (the device's dynamic
@@ -980,9 +1162,10 @@ def _resolve_warp_stage(c: Contraction, stage: Stage, budget: int = STATIC_SMEM_
     # ``[1, seq, K]`` unit-batch views were the motivating decline). cp.async has no descriptor
     # (its fill closure carries the extra index dims verbatim), so it never gated on rank.
     tma_rank_ok = (
-        isinstance(c.a_operand, Load)
-        and _tma_operand_rank_ok(c.a_operand.index, m.axis.name, c.k_axis.name)
-        and _tma_operand_rank_ok(c.b_load.index, n.axis.name, c.k_axis.name)
+        isinstance(c.a, Load)
+        and isinstance(c.b, Load)  # a descriptor needs a gmem address on BOTH edges
+        and _tma_operand_rank_ok(c.a.index, m.axis.name, c.k_axis.name)
+        and _tma_operand_rank_ok(c.b.index, n.axis.name, c.k_axis.name)
     )
     # TMA hardware: every box dim must be 1..256 — the slot shapes are A (tile_m, bk) / B (bk,
     # tile_n), so an oversized warp register tile (e.g. tile_m = 512 at w4/f8) must decline TMA
@@ -1002,7 +1185,7 @@ def _resolve_warp_stage(c: Contraction, stage: Stage, budget: int = STATIC_SMEM_
     return replace(stage, depth=depth, ring=stage.ring and depth >= 2, reg_depth=min(stage.reg_depth, bk), bk_elems=bk_elems)
 
 
-def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = STATIC_SMEM_CAP) -> Stage | None:
+def _resolve_scalar_stage(c: ContractionView, stage: Stage, inputs, budget: int = STATIC_SMEM_CAP) -> Stage | None:
     """Resolve a pinned operand ``Stage`` against the scalar register-tile contraction ``c``, or
     ``None`` (gmem-direct). Staging is **opt-in behind a ``STAGE`` pin**: eligible when the transport
     is ``tma`` / ``cp.async`` and K is static (a computed-A contraction never reaches here — it keeps
@@ -1031,13 +1214,15 @@ def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = ST
     # serving fork rides it).
     if c.n.mask or c.b_trans:
         return None
-    if not inputs or c.a_operand.input not in inputs:
+    # Staging transports a gmem OPERAND: both edges must be materialized. A computed B (a fused
+    # per-column prologue) has no gmem address to copy from, so the tier declines and the node stays
+    # gmem-direct — the schedule stating the A/B asymmetry the structural type does not.
+    if not inputs or not isinstance(c.a, Load) or not isinstance(c.b, Load) or c.a.input not in inputs:
         return None
     # TMA's box encodes extra leading (batch) dims as extent-1 dims when they are tile/K-invariant
     # (:func:`_tma_operand_rank_ok`); cp.async's fill closure carries them verbatim, no rank gate.
     if stage.transport == "tma" and not (
-        _tma_operand_rank_ok(c.a_operand.index, c.m.axis.name, c.k_axis.name)
-        and _tma_operand_rank_ok(c.b_load.index, c.n.axis.name, c.k_axis.name)
+        _tma_operand_rank_ok(c.a.index, c.m.axis.name, c.k_axis.name) and _tma_operand_rank_ok(c.b.index, c.n.axis.name, c.k_axis.name)
     ):
         return None
     # Staging needs the CTA to BE one (tile_m × tile_n) output tile (the cooperative fill / drain
@@ -1046,7 +1231,7 @@ def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = ST
     if c.block_threads is None:
         return None
     K = c.k_axis.extent.as_static()
-    elem_bytes = inputs[c.a_operand.input].dtype.nbytes
+    elem_bytes = inputs[c.a.input].dtype.nbytes
     # TMA hardware: every box dim must be 1..256 — the slot shapes are A (tile_m, bk) / B (bk,
     # tile_n), and bk never exceeds 128, so the gate is on the tile widths (an oversized scalar
     # register tile like tile_n=832 must decline TMA; cp.async has no box).
@@ -1066,7 +1251,7 @@ def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = ST
     # Per-operand slot bytes: A's slab is (tile_m × bk) at A's element size, B's (bk × tile_n) at
     # B's — the operands may differ (fp32 split partials × fp16 weights), so sizing both with A's
     # element over-books the budget on the mixed shape.
-    b_bytes = inputs[c.b_load.input].dtype.nbytes if c.b_load.input in inputs else elem_bytes
+    b_bytes = inputs[c.b.input].dtype.nbytes if c.b.input in inputs else elem_bytes
     depth, bk_elems = max(1, stage.depth), 0
     while depth >= 1:
         cap = budget // (depth * max(1, c.m.tile * elem_bytes + c.n.tile * b_bytes))
@@ -1083,29 +1268,33 @@ def warp_tile_pinned() -> bool:
     """A live warp (``a:<atom>``) ``TILE`` env pin. Exposed as a function so ``010_recognize`` never
     imports the ``Knob`` objects themselves — ``Pass.load`` scans rule modules for ``Knob`` attrs and
     OFF-fills any it finds onto every variant of the pass (bare ``TILE: ""`` stamps on every kernel)."""
-    return is_warp_codec(TILE.narrow([""])[0])
+    return is_warp_codec(_legacy_tile(TILE.narrow([""])[0]))
 
 
-def prologue_knob_bases(k2: str, stat_axis: str) -> tuple[dict, dict]:
-    """The recognizer merge's two knob bases — ``(contraction-form, map-form)``. Each form carries
-    the OTHER form's family keys as decided-empty stamps so every leaf row of the merged fork spells
-    the same key set (the evidence pick's prefix-consistency: an absent key reads as "free"). Lives
-    here (not the rule module) for the same ``Knob``-import reason as :func:`warp_tile_pinned`."""
-    con = {"PLACE@cone": "fuse", _at(REDUCE, stat_axis): ""}
-    # The map form spells ``PLACE@cone`` too, so the cone placement is a decided key on EVERY row
-    # of the merged fork — that is what makes it selectable by the ordinary evidence pick (an
-    # absent key reads as "free" and would let a ``cut`` golden match a fused row).
-    map_ = {"PLACE@cone": "fuse", _at(TILE, k2): "", _at(STAGE, k2): "", _at(REDUCE, k2): ""}
-    return con, map_
+def prologue_knob_bases(con_root, stat_fold) -> tuple[dict, dict, str]:
+    """The recognizer merge's two knob bases — ``(contraction-form, map-form, stat REDUCE key)``.
+    Each form carries the OTHER form's family keys as decided-empty stamps so every leaf row of
+    the merged fork spells the same key set (the evidence pick's prefix-consistency: an absent key
+    reads as "free"). All keys spell against the CONTRACTION tree — the ONE reference tree of the
+    merged fork — so the same physical decision has the same key on both forms: the product fold's
+    families are bare (the primary), the cone's stat REDUCE is explicit (``REDUCE@<stat axis>``
+    today; the path form when the axis name ever collides). The map form keys its OWN reduce spec
+    on the returned ``stat_key`` (its tree's bare spelling would collide with the product's).
+    Lives here (not the rule module) for the same ``Knob``-import reason as
+    :func:`warp_tile_pinned`."""
+    stat_key = _family_key(con_root, REDUCE.name, stat_fold)
+    con = {stat_key: ""}
+    map_ = {TILE.name: "", STAGE.name: "", REDUCE.name: ""}
+    return con, map_, stat_key
 
 
-def _resolve_sync_stage(c: Contraction, budget: int = STATIC_SMEM_CAP, want_depth: int = 1) -> Stage | None:
+def _resolve_sync_stage(c: ContractionView, budget: int = STATIC_SMEM_CAP, want_depth: int = 1) -> Stage | None:
     """The ``sync`` compute-fill :class:`Stage` for a **computed-A** warp contraction with tile plan
     ``c.tile`` — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A; cp.async /
     TMA are copy transports that cannot evaluate a producer cone), so there is no gmem-direct ``""``
     sibling and a ``STAGE`` pin degrades to this resolved row. ``None`` when the slabs don't fit
     the 48 KiB smem budget: the A/B operand slabs plus one fp32 row per bridged statistic
-    (``sync_stat_fill``'s decls — the same ``Contraction.stat_prologue`` seam the materializer
+    (``sync_stat_fill``'s decls — the same ``ops.cone_seam`` node boundary the materializer
     fills through). ``want_depth >= 2`` is the **asymmetric B-only prefetch ring**: only the
     B cp.async slabs ring (their copies for chunk ``i+d-1`` fly under chunk ``i``'s
     compute fill AND drain), while the compute-filled A slab and the stat rows stay
@@ -1124,12 +1313,12 @@ def _resolve_sync_stage(c: Contraction, budget: int = STATIC_SMEM_CAP, want_dept
     atom = c.atom
     bk_elems = c.tile.bk * atom.atom_k
     a_nbytes = atom.operand_dtype("a").nbytes
-    _, _, stats = c.stat_prologue()
+    _, _, stats = cone_seam(c.a) if c.a_computed else ((), (), ())
     # One A slab + one B slab per fold channel (the multi-channel gate/up node fills a B slab per
     # projection) + one fp32 stat row per bridged statistic. Only the B slabs multiply by the
     # ring depth (the asymmetric ring above).
     a_bytes = c.m.tile * bk_elems * a_nbytes
-    b_bytes = len(c.folds) * c.n.tile * bk_elems * a_nbytes
+    b_bytes = len(c.channels) * c.n.tile * bk_elems * a_nbytes
     stat_bytes = len(stats) * c.m.tile * 4
     if a_bytes + b_bytes + stat_bytes > budget:
         return None
@@ -1137,7 +1326,15 @@ def _resolve_sync_stage(c: Contraction, budget: int = STATIC_SMEM_CAP, want_dept
     return Stage(depth=depth, transport="sync", smem=(c.a_name,), bk_elems=bk_elems)
 
 
-def _computed_a_rows(kernel, place, probe: Contraction, kaxis: str, budget: int = STATIC_SMEM_CAP, ctx=None) -> list[dict]:
+def _computed_a_rows(
+    kernel,
+    place,
+    probe: ContractionView,
+    keys: tuple[str, str, str],
+    budget: int = STATIC_SMEM_CAP,
+    ctx=None,
+    proj=(),
+) -> list[dict]:
     """The knob rows for a **computed-A (fused-cone)** contraction — warp (mma) rows only, each
     riding the mandatory resolved ``sync`` stage. No scalar / per-cell ``""`` row: a per-cell
     expansion would re-run the embedded producer cone (the norm→linear statistic reduce) on every
@@ -1153,12 +1350,12 @@ def _computed_a_rows(kernel, place, probe: Contraction, kaxis: str, budget: int 
     resolved sync row."""
     # The projection rides the recognizer's ``Map`` wrapper (plus any node epilogue) — the store
     # folds it into the fragment epilogue, so it must be fragment-realizable (no gather chains).
-    tail = (*probe.epilogue, *kernel.op.body) if isinstance(kernel.op, Map) else tuple(probe.epilogue)
+    tail = tuple(kernel.op.body) if isinstance(kernel.op, Map) else tuple(proj)
     if not _fragment_epilogue_ok(Body(tail)):
         return []
     if TILE.raw() is not None:
-        spec = TILE.narrow([""])[0]
-        if not is_warp_codec(spec) or not _warp_atoms(kernel, probe):
+        spec = _legacy_tile(TILE.narrow([""])[0])
+        if not is_warp_codec(spec) or not _warp_atoms(kernel, probe, Body(tail)):
             return []  # a scalar/empty pin, or no dtype-eligible atom (fp32) — the reduce sibling's business
         wt = TilePlan.parse(spec)
         _check_warp_static_k(kernel, wt)
@@ -1171,7 +1368,7 @@ def _computed_a_rows(kernel, place, probe: Contraction, kaxis: str, budget: int 
             )
         tiles = [spec]
     else:
-        atoms = _with_f16acc(_warp_atoms(kernel, probe), ctx)
+        atoms = _with_f16acc(_warp_atoms(kernel, probe, Body(tail)), ctx)
         tiles = [
             s
             for s in warp_tile_moves(atoms)
@@ -1192,6 +1389,7 @@ def _computed_a_rows(kernel, place, probe: Contraction, kaxis: str, budget: int 
     # symbolic-M fused edge decides the flat ``""`` through the same gate). The fused edge is the
     # codec's best customer: its B stripes re-stream per M-tile row (64.6% DRAM on the gemma
     # gate_up shape), which is precisely the L2 reuse a grouped order buys.
+    tkey, skey, rkey = keys
     for spec in tiles:
         spellings: list[str] = []
         for want_depth in depths:
@@ -1205,9 +1403,9 @@ def _computed_a_rows(kernel, place, probe: Contraction, kaxis: str, budget: int 
             if stage.spell() in spellings:
                 continue  # d2 clamped to d1 — same resolved pipeline, one row
             spellings.append(stage.spell())
-            for red in _reduce_candidates(kernel, place, TilePlan.parse(spec), probe):
+            for red in _reduce_candidates(kernel, place, TilePlan.parse(spec), probe, len(probe.channels)):
                 for raster in _raster_candidates(place):
-                    rows.append({_at(TILE, kaxis): spec, _at(STAGE, kaxis): stage.spell(), _at(REDUCE, kaxis): red, RASTER.name: raster})
+                    rows.append({tkey: spec, skey: stage.spell(), rkey: red, RASTER.name: raster})
     return rows
 
 
@@ -1260,34 +1458,42 @@ def _check_warp_static_k(kernel, wt) -> None:
         )
 
 
-def _contraction_node(node, place, tile_plan: TilePlan) -> Contraction:
-    """The high-level :class:`Contraction` structural node for a tiled ``CONTRACTION`` leaf. A
+def _contraction_node(node, place, tile_plan: TilePlan) -> tuple[ContractionView, Body]:
+    """The high-level :class:`ContractionView` structural node for a tiled ``CONTRACTION`` leaf. A
     kernel recognition already nodified (the per-cell scalar contraction — ``_nodify_contraction``
     in ``010_recognize``) only swaps the ``tile`` schedule field; a still-``Map`` form (a fused /
     flash-side contraction) is bound here at fork-emit (seam #1): the ``(a_load, b_load, acc,
     epilogue)`` operand→role facts resolve structurally (:func:`semiring_binding`) — raising
     ``LoweringError`` on an unbindable atom — plus the resolved ``tile_plan`` from the schedule
-    fork, and the (m, n) output / K axes off the ``Map``. The projection ``epilogue`` is the
-    binding's body verbatim — the synthesized grid-``Write`` for a bare contraction stays a
-    materialize concern (it needs ``root.output``), appended there when the epilogue carries no
-    ``Write``."""
-    if isinstance(node, Map) and isinstance(node.source, Contraction):
-        # The recognizer's ``Map(body=projection, source=Contraction)`` spelling — the node under
-        # the wrapper is the schedulable contraction; the projection stays on the ``Map`` (the
-        # option builders re-wrap, materialize peels it into the store tail).
-        return replace(node.source, tile=tile_plan)
-    if isinstance(node, Contraction):
-        return replace(node, tile=tile_plan)
+    fork, and the (m, n) output / K axes off the ``Map``. Returns ``(node, projection)`` — the
+    projection has ONE home, the wrapping ``Map``'s body, so the option builders re-wrap it and
+    materialize peels it into the store tail (the synthesized grid-``Write`` for a bare contraction
+    stays a materialize concern — it needs ``root.output``). A computed-A cone the binding resolves
+    is stored INLINE on the ``a`` edge (:func:`make_cone`)."""
     grid = list(place.grid)
+    if isinstance(node, Map) and len(node.sources) == 1 and len(grid) >= 2:
+        # The recognizer's ``Map(body=projection, sources=(fold,))`` spelling — the ONE bilinear
+        # fold under the wrapper is the schedulable unit, the projection its ``Map`` body. The view
+        # (``contraction_view``) is DERIVED here, its output axes the placement's trailing grid.
+        view = contraction_view(node.sources[0], grid[-2], grid[-1], tuple(grid[:-2]))
+        if view is not None:
+            return replace(view, tile=tile_plan), node.body
+    if len(grid) >= 2:
+        view = contraction_view(node, grid[-2], grid[-1], tuple(grid[:-2]))
+        if view is not None:
+            return replace(view, tile=tile_plan), Body(())
     a_load, b_load, acc, epilogue = semiring_binding(node, place.grid)
-    return Contraction(
-        axes=(grid[-2], grid[-1]),
-        k_axis=reduce_loop(node).axis,
-        a_operand=a_load,
-        folds=((b_load, acc),),
-        tile=tile_plan,
-        lead_axes=tuple(grid[:-2]),
-        epilogue=epilogue,
+    kaxis = reduce_loop(node).axis
+    return (
+        ContractionView(
+            axes=(grid[-2], grid[-1]),
+            k_axis=kaxis,
+            a=a_load if isinstance(a_load, Load) else make_cone(a_load, kaxis.name),
+            channels=(Channel(b=b_load, acc=acc),),
+            tile=tile_plan,
+            lead_axes=tuple(grid[:-2]),
+        ),
+        epilogue,
     )
 
 
@@ -1295,9 +1501,9 @@ def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
     """Factor a **static** contraction axis ``k`` into ``ksplit × kslice`` for split-K.
 
     ``ksplit`` (extent ``w``, name ``<k>_ks``) is the outer *partition index* — becomes the
-    :class:`Reduction`'s reduce axis, parallelized across CTAs and summed in the finalize; ``kslice``
+    :class:`Fold`'s reduce axis, parallelized across CTAs and summed in the finalize; ``kslice``
     (extent ``K/w``, the **original** name) is the per-partition chunk — stays the inner
-    :class:`Contraction`'s ``k_axis``. The returned ``sigma`` maps the original ``k`` var to
+    :class:`ContractionView`'s ``k_axis``. The returned ``sigma`` maps the original ``k`` var to
     ``ksplit·(K/w) + kslice`` so the operand loads reconstruct the absolute index. Distinct names
     (``k`` vs ``<k>_ks``) are what avoid a double-reduce ``for k:[for k:]`` — every original ``k`` is
     visited once (``kslice`` folded into a partial, ``ksplit`` summed across partials)."""
@@ -1318,17 +1524,17 @@ def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
 def _splitk_option(
     tile, place, tile_spec: str, split_spec: str, name: str, knobs: dict, stage_spec: str = "", budget: int = STATIC_SMEM_CAP
 ) -> TileOp:
-    """One scheduled **split-K** contraction ``TileOp``: the structural ``Reduction(axis=ksplit,
-    source=Contraction(k_axis=kslice))``. The inner :class:`Contraction` is the **same** node a
+    """One scheduled **split-K** contraction ``TileOp``: the structural ``Fold(axis=ksplit,
+    source=ContractionView(k_axis=kslice))``. The inner :class:`ContractionView` is the **same** node a
     non-split matmul builds (:func:`_contraction_node`, so it factorizes through ``_factor`` to mma or
     scalar per the ``tile_spec`` atom) but over ``kslice`` with operands reindexed to
-    ``ksplit·(K/w) + kslice``; the outer additive :class:`Reduction` carries the ``g<w>[a|k]`` GRID
+    ``ksplit·(K/w) + kslice``; the outer additive :class:`Fold` carries the ``g<w>[a|k]`` GRID
     partition (:class:`ReducePlan`) that ``030_split_reduce`` consumes into the cross-CTA partial + finalize.
 
     The additive carrier is built exactly as ``contraction_loop`` / a plain-sum reduce does — an
-    ``Accum(op="add").as_carrier()`` (identity ``0.0``, 1 component) — so ``030_split_reduce``'s finalize
+    ``Accum(op="add").as_algebra()`` (identity ``0.0``, 1 component) — so ``030_split_reduce``'s finalize
     (which reads the carrier's identity + ``as_state_merge``) needs no change. The output tile
-    (``tier``) rides the inner ``Contraction``; the ``Reduction`` holds only the K partition.
+    (``tier``) rides the inner ``ContractionView``; the ``Fold`` holds only the K partition.
 
     An operand ``stage_spec`` is RESOLVED against the **sliced** inner node (its ``kslice`` extent +
     offset operand indices), so eligibility is judged on the pipeline the partial kernel actually
@@ -1347,7 +1553,7 @@ def _splitk_option(
             f"TILE parallel block {wt.units_n}×{wt.units_m}={wt.block_threads} threads exceeds the "
             f"{MAX_BLOCK_THREADS}-thread/CTA limit; shrink n/m or move work to the f register sub-tile."
         )
-    inner = _contraction_node(tile.op, place, wt)
+    inner, epi = _contraction_node(tile.op, place, wt)
     w = ReducePlan.parse(split_spec).cta
     # A warp (mma) slice must keep the inner K-step dividing K/w — the warp K-loop has no static-K
     # tail masking (same guard as ``_check_warp_static_k``, but on the post-split slice).
@@ -1359,38 +1565,38 @@ def _splitk_option(
                 f"split-K slice K={ks} (K/{w}) is not a multiple of the mma K-step {step} "
                 f"(atom_k={wt.atom.atom_k}·bk={wt.bk}); pick a split width whose slice is divisible."
             )
+    # Every channel's B is σ-reindexed to its K slice below, which needs a gmem index to rewrite. A
+    # computed B would have to slice its producing subtree instead (the mirror of the cone's
+    # redundant-statistic split); nothing builds one yet, so the option declines rather than
+    # silently slicing the wrong operand.
+    if any(not isinstance(ch.b, Load) for ch in inner.channels):
+        raise ValueError("split-K needs a materialized B on every channel — a computed B has no gmem index to σ-reindex")
     ksplit, kslice, sigma = _factor_k(inner.k_axis, w)
     if inner.a_computed:
         # REDUNDANT-STATISTIC split: the leading k-invariant run of the cone (the per-row stat
-        # prologue — the same seam ``Contraction.stat_prologue`` reads) stays FULL-ROW in every
+        # prologue — the same K seam ``ops.cone_seam`` reads off the node boundary) stays FULL-ROW in every
         # partition, recomputed redundantly; only the k-indexed per-cell remainder is σ-reindexed
         # to absolute k. The sync fill's own σ (``k := k0 + col``) then composes to
         # ``ksplit·(K/w) + k0 + col``. The projection riding the recognizer's ``Map`` wrapper is
         # folded into the node epilogue so ``030_split_reduce``'s deferred finalize re-applies it
         # after the cross-partition sum (the partial's epilogue becomes the workspace write).
-        from emmy.compiler.ir.tile.ir import _refs_axis  # noqa: PLC0415
-
-        body = list(inner.a_operand)
-        pro: list = []
-        while body and not _refs_axis(body[0], kslice.name):
-            pro.append(body.pop(0))
-        cell = [s.rewrite(lambda nm: nm, sigma) for s in body]
-        epi = inner.epilogue
-        if isinstance(tile.op, Map) and isinstance(tile.op.source, Contraction):
-            epi = Body((*epi, *tile.op.body))
+        cone = inner.a
+        # The cone's SOURCE node is its row-invariant prologue — the per-row statistic and anything
+        # else that does not index K — so it stays whole in every partition (that redundancy is what
+        # the split trades for parallelism). Only the cone's ``body``, the per-cell normalize, is
+        # σ-reindexed to absolute k. No stmt scan: the K seam is the node boundary.
         inner = replace(
             inner,
             k_axis=kslice,
-            a_operand=Body((*pro, *cell)),
-            folds=tuple((replace(bl, index=tuple(sigma.apply(e) for e in bl.index)), acc) for bl, acc in inner.folds),
-            epilogue=epi,
+            a=cone.with_body(Body(tuple(st.rewrite(lambda nm: nm, sigma) for st in cone.body))),
+            channels=tuple(replace(ch, b=replace(ch.b, index=tuple(sigma.apply(e) for e in ch.b.index))) for ch in inner.channels),
         )
     else:
         inner = replace(
             inner,
             k_axis=kslice,
-            a_operand=replace(inner.a_operand, index=tuple(sigma.apply(e) for e in inner.a_operand.index)),
-            folds=tuple((replace(bl, index=tuple(sigma.apply(e) for e in bl.index)), acc) for bl, acc in inner.folds),
+            a=replace(inner.a, index=tuple(sigma.apply(e) for e in inner.a.index)),
+            channels=tuple(replace(ch, b=replace(ch.b, index=tuple(sigma.apply(e) for e in ch.b.index))) for ch in inner.channels),
         )
     stage = None
     if inner.a_computed:
@@ -1402,15 +1608,40 @@ def _splitk_option(
     elif stage_spec:
         st = Stage.parse(stage_spec)
         stage = _resolve_warp_stage(inner, st, budget) if wt.is_warp else _resolve_scalar_stage(inner, st, tile.inputs, budget)
-    # The carrier comes from the node's own synthesized fold loop — the 1-component additive
-    # ``Accum`` for a plain matmul, the N-component product-monoid state for a multi-channel
-    # (gate/up) node — so the split finalize folds exactly the state the kernel accumulates.
-    carrier = reduce_loop(inner).carrier
-    op = Reduction(carrier=carrier, axis=ksplit, role=AxisRole.CONTRACTION, source=inner, reduce=ReducePlan.parse(split_spec))
-    kaxis = reduce_loop(tile.op).axis.name  # the ORIGINAL k-axis name — single-eligible-axis keying
-    stamped = {**knobs, _at(TILE, kaxis): tile_spec, _at(REDUCE, kaxis): split_spec}
-    stamped[_at(STAGE, kaxis)] = stage.spell() if stage is not None else ""
-    return TileOp(op=op, name=name, place=place, tier=inner.tile, stage=stage, knobs=stamped)
+    # The state is the sliced fold's own — the 1-component additive accumulator for a plain
+    # matmul, the N-component product-monoid state for a multi-channel (gate/up) node — so the
+    # split finalize folds exactly the state the kernel accumulates.
+    inner_fold = inner.as_fold()
+    # ONE composition rule (step 7 — λ-spelled): the outer reduce is the IDENTITY lift over the
+    # sliced fold operand, its combine the same componentwise ⊕ over the same accumulator names —
+    # the reassociation ``fold_k = fold_{ksplit} ∘ fold_{kslice}``. The derived step embeds the
+    # operand verbatim (the shared-accumulator ×1-fold simplification), and the outer fold
+    # DERIVES role=CONTRACTION off the composition (``ir.composed_contraction``).
+    accs = tuple(inner_fold.combine.results)
+    ident_lift = Lambda(params=(ksplit.name, *accs), body=Body(()), results=accs)
+    o_init, o_combine = M(*component_ops(inner_fold.combine), names=accs)
+    op = Fold(axis=ksplit, operands=(inner_fold,), lift=ident_lift, init=o_init, combine=o_combine, dtypes=inner_fold.dtypes)
+    outer_fold = op
+    # The projection rides the ``Map`` wrapper — its ONE home; ``030_split_reduce`` reads it there and
+    # retargets it (per-partition atomic store / a deferred finalize after the cross-partition sums).
+    if len(epi):
+        op = Map(body=epi, sources=(op,))
+    # Keys stamp against the PRE-PLACEMENT tree (the recognized op) — the canonical spellings the
+    # golden/DB corpus stores; the split restructure never re-keys them.
+    src_fold = _primary_fold(tile.op) if isinstance(tile.op, (Fold, Map)) else tile.op
+    tkey, skey, rkey = (_family_key(tile.op, f.name, src_fold) if isinstance(src_fold, Fold) else f.name for f in (TILE, STAGE, REDUCE))
+    stamped = {**knobs, tkey: tile_spec, rkey: split_spec}
+    stamped[skey] = stage.spell() if stage is not None else ""
+    out = TileOp(op=op, name=name, place=place, knobs=_site_knobs(stamped), stores=tile.stores)
+    # The slices live in ``TileOp.schedule`` (1r): the split partition keyed on the OUTER fold,
+    # the inner contraction's tile / resolved pipeline on the SLICED fold — ``030_split_reduce``
+    # re-keys them onto the partial kernel's own tree.
+    sched = sched_of(out)
+    sched.put("REDUCE", outer_fold, ReducePlan.parse(split_spec))
+    sched.put("TILE", inner_fold, wt)
+    sched.put("STAGE", inner_fold, stage)
+    seal_workers(out)
+    return out
 
 
 def _warp_option(
@@ -1418,43 +1649,52 @@ def _warp_option(
 ) -> TileOp:
     """One scheduled warp-tier contraction ``TileOp``: ``place`` mapped onto the grid + the warp
     form of the ``TILE`` spec resolved into the warp-atom :class:`TilePlan`, plus an optional operand
-    ``STAGE`` resolved into a :class:`Stage`. The tiled :class:`Contraction` leaf is built here (``op``),
-    so materialize only ``factorize``\\ s. The packed ``TILE`` codec is the sole on-dict spelling — the
-    online-prior featurizer parses it directly (one codec, not a per-knob ``WM``/``WN``/``MMA`` explosion)."""
+    ``STAGE`` resolved into a :class:`Stage`. The tiled :class:`ContractionView` leaf is built here (``op``),
+    so materialize only ``factorize``\\ s. The stamped dict spells the F1 SITE grammar (``_site_knobs`` +
+    ``seal_workers``'s ``WORK`` entry) — the online-prior featurizer parses it against the row WORK
+    (one codec, not a per-knob ``WM``/``WN``/``MMA`` explosion)."""
     wt = TilePlan.parse(spec)
     _check_warp_static_k(tile, wt)
-    # Build the tiled Contraction node here — it resolves the operand→role facts internally, so an
+    # Build the tiled ContractionView node here — it resolves the operand→role facts internally, so an
     # unbindable atom (a non-Load operand: a computed-cone / demoted matmul) raises and is rejected
     # at fork construction, like the static-K check.
-    op = _demote_mixed_a(tile, _contraction_node(tile.op, place, wt))
+    node, proj = _contraction_node(tile.op, place, wt)
+    node = _demote_mixed_a(tile, node)
     # A computed-A node's stage is the mandatory resolved ``sync`` compute-fill (its ``smem`` /
     # ``bk_elems`` are derived, not codec-spelled, so the row's ``"d1/sync"`` re-resolves here);
     # a Load-operand node resolves the copy transports as usual.
-    if op.a_computed:
-        stage = _resolve_sync_stage(op, budget, Stage.parse(stage_spec).depth if stage_spec else 1)
+    if node.a_computed:
+        stage = _resolve_sync_stage(node, budget, Stage.parse(stage_spec).depth if stage_spec else 1)
         assert stage is not None, "computed-A row enumerated past its smem budget"  # _computed_a_rows resolved this
     else:
-        stage = _resolve_warp_stage(op, Stage.parse(stage_spec), budget) if stage_spec else None
-    # Re-wrap the recognizer's projecting ``Map`` around the tiled node (materialize peels it into
-    # the store tail — the same ``project ∘ contract`` spelling the Reduction tiers use).
-    emitted = replace(tile.op, source=op) if isinstance(tile.op, Map) and isinstance(tile.op.source, Contraction) else op
+        stage = _resolve_warp_stage(node, Stage.parse(stage_spec), budget) if stage_spec else None
+    # Re-wrap the recognizer's projecting ``Map`` around the stored fold (materialize peels it into
+    # the store tail — the same ``project ∘ contract`` spelling the Fold tiers use).
+    fold = node.as_fold()
+    emitted = Map(body=proj, sources=(fold,)) if len(proj) else fold
     # Warp specialization rides ORTHOGONAL to the tile/stage just resolved: an optional WSPEC row /
     # pin splits the warps into roles over this fixed pipeline (gated on the RESOLVED ``stage`` — an
     # ineligible spec leaves no pipeline for a producer to drive, so WSPEC degrades to uniform).
-    workers, wspec_spec = _wspec_workers(wspec_spec, stage, op.block_threads)
-    # The per-node schedule codecs key ``@<k_axis>`` (the contraction axis this node schedules), so a
-    # multi-node kernel can address each node; ``WSPEC`` stays root-global (bare).
-    kaxis = op.k_axis.name
-    stamped = {**knobs, _at(TILE, kaxis): spec}
+    workers, _ = _wspec_workers(wspec_spec, stage, node.block_threads)
+    # The per-node schedule codecs key by the CANONICAL codec spelling (bare on today's
+    # single-primary trees); ``WSPEC`` stays root-global (bare).
+    tkey = _family_key(emitted, TILE.name, fold)
+    skey = _family_key(emitted, STAGE.name, fold)
+    stamped = {**knobs, tkey: spec}
     # Honest stamping: the RESOLVED spelling (depth clamps, dropped ring) — the DB row / feature
     # vector must describe the pipeline the kernel actually has. A declined / absent stage stamps
     # the explicit OFF value ``""`` (decided: gmem-direct), never the raw pin — and never nothing:
     # an absent family key means "not offered", and the evidence pick's prefix-consistency reads an
     # absent key as free, letting a gmem-direct leaf inherit a STAGED row's measurement.
-    stamped[_at(STAGE, kaxis)] = stage.spell() if stage is not None else ""
-    if wspec_spec:
-        stamped[WSPEC.name] = wspec_spec
-    return TileOp(op=emitted, name=name, place=place, tier=wt, stage=stage, workers=workers, knobs=stamped)
+    stamped[skey] = stage.spell() if stage is not None else ""
+    # The WSPEC key never stamps (F1): the resolved producer band rides ``TileOp.workers`` and
+    # ``seal_workers`` spells it as the WORK entry's ``+p`` suffix.
+    out = TileOp(op=emitted, name=name, place=place, workers=workers, knobs=_site_knobs(stamped), stores=tile.stores)
+    sched = sched_of(out)
+    sched.put("TILE", fold, node.tile)
+    sched.put("STAGE", fold, stage)
+    seal_workers(out)
+    return out
 
 
 def _tile_option(
@@ -1462,7 +1702,7 @@ def _tile_option(
 ) -> TileOp:
     """One scheduled scalar-tier contraction ``TileOp``: ``place`` mapped onto the grid + the ``TILE``
     spec resolved into the ``TilePlan`` (an optional cooperative / ILP ``REDUCE`` spec **nodifying** the
-    contraction to a :class:`Reduction` node carrying the K partition — the per-cell tier only, a tiled
+    contraction to a :class:`Fold` node carrying the K partition — the per-cell tier only, a tiled
     candidate drops it; an optional operand ``STAGE`` into the :class:`Stage`), the applied specs stamped
     on ``knobs`` for the prior. ``reduce_spec`` is the ``b`` / ``r`` K partition only — the cross-CTA
     split-K ``g`` rides the separate structural :func:`_splitk_option` fork."""
@@ -1477,14 +1717,15 @@ def _tile_option(
             f"TILE parallel block {plan.units_n}×{plan.units_m}={block} threads exceeds the "
             f"{MAX_BLOCK_THREADS}-thread/CTA limit; shrink n/m or move work to the f register sub-tile."
         )
-    # A tiled register-tile leaf (a ``TILE`` pin) becomes a :class:`Contraction` node here, so
+    # A tiled register-tile leaf (a ``TILE`` pin) becomes a :class:`ContractionView` node here, so
     # materialize only ``factorize``\\ s. An unbindable contraction (a non-``Load`` operand) keeps the
     # ``Map`` form — materialize's per-cell scalar tier lowers it. A coop / ILP ``reduce_spec``
-    # **nodifies** the flat ``Map`` contraction to a :class:`Reduction` node carrying the K partition
+    # **nodifies** the flat ``Map`` contraction to a :class:`Fold` node carrying the K partition
     # (:func:`nodify_reduce`), so the plan rides the node — not a residual ``TileOp.reduce`` field —
     # and ``_factor._tile_reduce_axis`` folds it off the node.
     op = tile.op
     stage = None
+    slices: list[tuple[str, object, object]] = []  # (family, node, value) — stored once the TileOp exists
     if plan.is_tiled:
         # The coop / ILP ``REDUCE`` partition rides the NON-output-tiled tier only
         # (``_coop_reduce_spec``'s contract — ``_tile_reduce_axis`` folds one cell per thread): a
@@ -1492,23 +1733,35 @@ def _tile_option(
         # rather than stamped onto a kernel that doesn't fold it (an honest row, not a claimed one).
         reduce_spec = ""
         try:
-            op = _contraction_node(tile.op, place, plan)
+            node, proj = _contraction_node(tile.op, place, plan)
         except LoweringError:
             pass  # an unbindable contraction (a non-Load operand) keeps the Map form
         else:
-            # Only a built Contraction node can engage operand staging — resolve the pin against it
-            # (per-cell / coop-K / unbindable forms stamp None: nothing downstream would read a stage).
+            # Only a built ContractionView node can engage operand staging — resolve the pin against it
+            # (per-cell / coop-K / unbindable forms store nothing: nothing downstream would read a stage).
             if stage_spec:
-                stage = _resolve_scalar_stage(op, Stage.parse(stage_spec), tile.inputs, budget)
+                stage = _resolve_scalar_stage(node, Stage.parse(stage_spec), tile.inputs, budget)
+            fold = node.as_fold()
+            op = Map(body=proj, sources=(fold,)) if len(proj) else fold
+            slices = [("TILE", fold, node.tile), ("STAGE", fold, stage)]
     elif reduce_spec:
-        op = nodify_reduce(tile.op, ReducePlan.parse(reduce_spec))
-    # ``TILE`` / ``REDUCE`` / ``STAGE`` key ``@<k_axis>`` (the contraction axis this node schedules),
-    # unifying the schedule onto the axis-named family. STAGE stamps the RESOLVED spelling, and only
-    # when resolution took (see ``_warp_option`` — the same honest-stamping rule).
-    kaxis = reduce_loop(tile.op).axis.name
-    stamped = {**knobs, _at(TILE, kaxis): spec, _at(REDUCE, kaxis): reduce_spec}
-    stamped[_at(STAGE, kaxis)] = stage.spell() if stage is not None else ""
-    return TileOp(op=op, name=name, place=place, tier=plan, stage=stage, knobs=stamped)
+        op, red_fold = nodify_reduce(tile.op)
+        if red_fold is None:
+            raise LoweringError("a partitioned reduce must nodify — the shape is not λ-representable")
+        slices = [("REDUCE", red_fold, ReducePlan.parse(reduce_spec))]
+    # ``TILE`` / ``REDUCE`` / ``STAGE`` key by the canonical codec spelling. STAGE stamps the
+    # RESOLVED spelling, and only when resolution took (see ``_warp_option`` — the same
+    # honest-stamping rule).
+    head = tile.op.sources[0] if isinstance(tile.op, Map) and tile.op.sources else tile.op
+    tkey, skey, rkey = ((_family_key(tile.op, f.name, head) if isinstance(head, Fold) else f.name) for f in (TILE, STAGE, REDUCE))
+    stamped = {**knobs, tkey: spec, rkey: reduce_spec}
+    stamped[skey] = stage.spell() if stage is not None else ""
+    out = TileOp(op=op, name=name, place=place, knobs=_site_knobs(stamped), stores=tile.stores)
+    sched = sched_of(out)
+    for family, node_, value in slices:
+        sched.put(family, node_, value)
+    seal_workers(out)
+    return out
 
 
 def _map_reg_width(spec: str) -> int:
@@ -1542,7 +1795,7 @@ def _map_strip_option(tile: TileOp, place: Placement, inner: Axis, r: int, spec:
     ssa = _map_body_defs(op.body)
     loads: list[Stmt] = []
     computes: list[Stmt] = []
-    writes: list[Stmt] = []
+    stores: list = []
     for i in range(r):
 
         def rename(n: str, i: int = i) -> str:  # suffix only the body's SSA names per copy; axis vars stay
@@ -1551,12 +1804,16 @@ def _map_strip_option(tile: TileOp, place: Placement, inner: Axis, r: int, spec:
         sigma = Sigma({inner.name: BinaryExpr("+", BinaryExpr("*", Var(inner.name), Literal(r, "int")), Literal(i, "int"))})
         for s in op.body:
             s2 = s.rewrite(rename, sigma)
-            (loads if isinstance(s2, Load) else writes if isinstance(s2, Write) else computes).append(s2)
-    body = Body((*loads, *computes, *writes))
+            (loads if isinstance(s2, Load) else computes).append(s2)
+        # The root store fans out per copy too — as boundary ``Store``\\ s (1q): the materializer
+        # reattaches them after the compute run, exactly where the regrouped ``Write``\\ s sat, so
+        # ``080_vectorize_stores`` still sees the unit-stride run.
+        stores.extend(Store(write=st.write.rewrite(rename, sigma)) for st in tile.stores)
+    body = Body((*loads, *computes))
     new_inner = replace(inner, extent=Dim(inner.extent.as_static() // r))
     new_free = (*place.free[:-1], new_inner)
     new_place = Placement(free=new_free, grid=new_free)
-    return TileOp(op=Map(body=body, source=None), name=name, place=new_place, knobs={_at(TILE, inner.name): spec})
+    return TileOp(op=Map(body=body), name=name, place=new_place, knobs={TILE.name: spec}, stores=tuple(stores))
 
 
 def _map_strip_fork(tile: TileOp, place: Placement, name: str) -> list[TileOp] | TileOp:
@@ -1568,15 +1825,19 @@ def _map_strip_fork(tile: TileOp, place: Placement, name: str) -> list[TileOp] |
     by the width; a ``TILE`` pin narrows the ladder (``Knob.narrow``), one surviving candidate applies
     directly (no fork)."""
     op = tile.op
-    if not (isinstance(op, Map) and op.source is None) or not place.free:
-        return TileOp(op=op, name=name, place=place)
+    if not (isinstance(op, Map) and not op.sources) or not place.free:
+        return TileOp(op=op, name=name, place=place, stores=tile.stores)
     inner = place.free[-1]
-    base = TileOp(op=op, name=name, place=place, knobs={_at(TILE, inner.name): ""})
-    # Only a FLAT elementwise body (per-cell Load/Assign/Write, no nested Loop / Accum / carried
-    # state) is safely unrollable: every output cell is independent, so replicating adjacent cells
-    # and regrouping preserves semantics. A sweep / stateful-fallback Map (which also reaches the
-    # FREE dispatch) has cross-cell dependencies the naive copy would break — leave it at option-0.
-    if not inner.extent.is_static or not all(isinstance(s, (Load, Assign, Write)) for s in op.body):
+    base = TileOp(op=op, name=name, place=place, knobs={TILE.name: ""}, stores=tile.stores)
+    # Only a FLAT elementwise body (per-cell Load/Assign + boundary root stores, no nested Loop /
+    # Accum / carried state — the pre-1q spelling carried the ``Write``\\ s in-body, hence the
+    # historical gate) is safely unrollable: every output cell is independent, so replicating
+    # adjacent cells and regrouping preserves semantics. A sweep / stateful-fallback Map (which
+    # also reaches the FREE dispatch) has cross-cell dependencies the naive copy would break —
+    # leave it at option-0. A ``Select``-bearing cell (the concat / index-map form) was never
+    # strippable and stays excluded.
+    strippable = all(isinstance(s, (Load, Assign, Write)) for s in op.body) and all(st.sweep is None for st in tile.stores)
+    if not inner.extent.is_static or not strippable:
         return base
     ext = inner.extent.as_static()
     opts = [base]
@@ -1589,7 +1850,7 @@ def _map_strip_fork(tile: TileOp, place: Placement, name: str) -> list[TileOp] |
     return opts if len(opts) > 1 else base
 
 
-def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[TileOp] | TileOp:
+def schedule(tile: TileOp, name: str, knobs: dict, ctx=None, reduce_key: str | None = None) -> Fork | list[TileOp] | TileOp:
     """Map a freshly-recognized (UNMAPPED) ``tile`` onto the grid and offer its scheduling forks —
     the scheduling half of ``010_recognize``, called inline once recognition has built the tile op.
     ``tile`` is an unmapped :class:`TileOp` (its ``op`` set, ``place`` carrying just the free axes).
@@ -1616,54 +1877,18 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         # ``FAMILY@<k_axis>``), offered as a lazy hierarchical fork tree — greedy descent flattens
         # the rows for one prior-scoring pass; MCTS pays one level per pop. Env pins narrow each
         # family (a fully-pinned space collapses to the single materialized option, no fork). A
-        # split ``g`` row routes through the structural ``Reduction ⊃ Contraction`` fork
+        # split ``g`` row routes through the structural ``Fold ⊃ ContractionView`` fork
         # (:func:`_splitk_option`, consumed by ``030_split_reduce``); a warp row through
         # :func:`_warp_option`; the rest through :func:`_tile_option`.
-        rows, kaxis = _tile_rows(tile, place, ctx)
-        # Thread the cone placement onto every FORK ROW, not just the materialized op. The deploy
-        # pick builds its candidate rows from the fork tree's LEAF knobs, and an absent key reads as
-        # "free" in the evidence join — so leaving it off the contraction rows would let a golden
-        # recording ``PLACE@cone: cut`` match a fused row (deploying the fused kernel while
-        # reporting the cut's µs, the silent-wrong-deploy class). Constant across the rows, so it
-        # adds no branching to the tree.
-        if "PLACE@cone" in knobs:
-            rows = [{**r, "PLACE@cone": knobs["PLACE@cone"]} for r in rows]
-            if "PLACE@cstat" in knobs:  # the cut's bridged-statistic sibling — same threading rule
-                rows = [{**r, "PLACE@cstat": knobs["PLACE@cstat"]} for r in rows]
-            if knobs["PLACE@cone"] == "cut":
-                # A cut row's own schedule is DISCARDED — ``020_cut_edge`` emits un-mapped LoopOps
-                # and each half re-enters ``010`` for its own fork, its own tile and its own golden.
-                # A split-K spelling on such a row is therefore not merely wasted enumeration:
-                # ``_splitk_option`` realizes the partial/finalize pair at RECOGNIZE time, so the
-                # cut rule later meets a Contraction carrying a split lead axis over a SLICED K,
-                # which its 2-D (m, k) cone workspace cannot express — and the cut silently never
-                # fires. Measured on the gemma-4 M=256 post twin: the down_proj cone arrived as
-                # ``lead=['a2_ks']`` and every cut attempt skipped, leaving the fused 2,515.8 µs
-                # kernel in place. Keep the serial spelling; the CONSUMER half picks its own
-                # split-K from its own golden (``mlp_down.m256`` records ``g4k``).
-                rows = [r for r in rows if not _is_splitk_spec(r.get(_at(REDUCE, kaxis), ""))]
-        # The deferred-finalize placement (``PLACE@fin``, realized by ``032_fuse_finalize``): an
-        # authoritative pin threads onto every row; otherwise every DEFERRED-KERNEL split row
-        # (``g<w>k`` — the partial + finalize pair) gains a ``fuse``-stamped mirror sibling — the
-        # sink-offer idiom: evidence-only (withheld from the model fallback), so an unseeded shape
-        # never fuses cold, and a golden spelling ``{REDUCE: g8k/b128t, PLACE@fin: fuse}`` has a
-        # row to match (``_golden_matches_row`` refuses a PLACE-bearing golden against rows that
-        # never offered the decision). Atomic splits (``g<w>a``) have no finalize kernel — no mirror.
-        fin_pin = PLACE.narrow_at("fin")
-        if fin_pin in ("cut", "fuse"):
-            rows = [{**r, "PLACE@fin": fin_pin} for r in rows]
-        else:
-
-            def _deferred_split(r: dict) -> bool:
-                spec = r.get(_at(REDUCE, kaxis), "")
-                return _is_splitk_spec(spec) and ReducePlan.parse(spec).finalize == "kernel"
-
-            rows = [*rows, *({**r, "PLACE@fin": "fuse"} for r in rows if _deferred_split(r))]
+        rows, keys = _tile_rows(tile, place, ctx)
+        # The measured RTX-4080 DiT deploy narrowing (main's #431), ported to the site grammar:
+        # probe the contraction view for the shape key and narrow a plain deploy to the recorded
+        # winner (tune/search and explicit pins untouched — the guard lives in the helper).
         try:
-            deploy_probe = _contraction_node(tile.op, place, TilePlan())
+            deploy_probe, _dit_proj = _contraction_node(tile.op, place, TilePlan())
         except LoweringError:
             deploy_probe = None
-        rows = _rtx4080_dit_deploy_rows(rows, deploy_probe, kaxis, ctx)
+        rows = _rtx4080_dit_deploy_rows(rows, deploy_probe, keys, ctx)
         if not rows:
             # A computed-A (fused-cone) contraction with no legal warp row (fp32, no atoms, bad
             # geometry, over-budget slabs) contributes nothing — the recognizer's ``Map``-form
@@ -1671,9 +1896,18 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
             return []
 
         def _materialize(row: dict) -> TileOp:
-            spec = row.get(_at(TILE, kaxis), "")
-            stage_spec = row.get(_at(STAGE, kaxis), "")
-            red = row.get(_at(REDUCE, kaxis), "")
+            # The row carries SITE values + the ONE ``WORK`` entry (F1); the option builders keep
+            # speaking the legacy embedded-worker spellings, so re-merge the inventory here —
+            # ``parse_site`` against the row's WORK — and re-spell legacy. The producer band
+            # rides WORK's ``+p`` suffix, recovered as the wspec spec ``_wspec_workers`` resolves.
+            tkey, skey, rkey = keys
+            work = Workers.parse(row.get(WORK.name) or "")
+            plan = resolve_site_tile(row.get(tkey, ""), work, row.get(rkey, ""))
+            spec = plan.spell()
+            stage_spec = row.get(skey, "")
+            rplan = ReducePlan.parse_site(row.get(rkey, ""), work)
+            red = rplan.spell()
+            wspec_spec = f"p{work.producer}" if work is not None and work.producer else ""
             # Thread the row's structural stamps (``S_warp_eligible``) onto the op. Fork rows carry
             # them for branch identity, but the MATERIALIZED op is what ``realized_knobs`` reads —
             # dropping them here left leaf/evidence rows unstamped while fork rows (deploy
@@ -1681,20 +1915,16 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
             # ``evidence_pick`` never joined the measured -O3 rows, and greedy shipped the online
             # model's unbenched per-cell extrapolation (the 2026-07-07 5090 gate's 330x fp16 miss).
             op_knobs = {**knobs, **{k: v for k, v in row.items() if k.startswith("S_")}}
-            if "PLACE@fin" in row:
-                # The finalize placement must reach the op: ``030_split_reduce`` threads it onto
-                # the finalize tile (``_fin_knobs``) where ``032_fuse_finalize`` reads the stamp.
-                op_knobs["PLACE@fin"] = row["PLACE@fin"]
             # The rasterization codec rides op-level knobs (kernel-scoped launch-order metadata,
             # not a per-node schedule structure) — the kernel materializer's ``grid_tile`` seal
             # reads it back off the TileOp and stamps the grouped decode on the ``Tile``.
             raster_spec = row.get(RASTER.name, "")
             Raster.parse(raster_spec)  # loud pin contract — a malformed spelling fails the row here
             op_knobs = {**op_knobs, RASTER.name: raster_spec}
-            if red and ReducePlan.parse(red).needs_split:
+            if red and rplan.needs_split:
                 return _splitk_option(tile, place, spec, red, name, op_knobs, stage_spec, _smem_budget(ctx))
-            if is_warp_codec(spec):
-                return _warp_option(tile, place, spec, name, op_knobs, stage_spec, _smem_budget(ctx), row.get(WSPEC.name, ""))
+            if plan.is_warp:
+                return _warp_option(tile, place, spec, name, op_knobs, stage_spec, _smem_budget(ctx), wspec_spec)
             return _tile_option(tile, place, spec, name, op_knobs, red, stage_spec, _smem_budget(ctx))
 
         if len(rows) == 1:
@@ -1703,17 +1933,12 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
         def _level(key: str) -> Level:
             return Level((key,), key=lambda r: (r.get(key, ""),))
 
-        # The worker split (``WSPEC``, bare/root-global) is the fourth level, under the pipeline it
-        # splits — option-0 ``""`` is uniform SIMT. The launch-order codec (``RASTER``, also bare —
-        # one grid, one order) is the fifth — option-0 ``""`` is the flat N-fastest raster. The
-        # finalize placement (``PLACE@fin``) is the sixth: a ``fuse``-stamped mirror row is
-        # schedule-identical to its base on every codec level, so without its own level the two
-        # collapse into one leaf and the mirror (and any golden spelling it) is unreachable.
-        levels = [_level(_at(k, kaxis)) for k in (TILE, STAGE, REDUCE)] + [
-            _level(WSPEC.name),
-            _level(RASTER.name),
-            _level("PLACE@fin"),
-        ]
+        # The worker inventory (``WORK``, kernel-global) leads — mirroring ``KNOB_ORDER`` and
+        # keeping every deeper prefix row self-decoding (a site TILE/REDUCE value resolves
+        # against the WORK already decided above it; a ``+p`` producer band forks here). The
+        # launch-order codec (``RASTER``, bare — one grid, one
+        # order) closes — option-0 ``""`` is the flat N-fastest raster.
+        levels = [_level(WORK.name), *(_level(k) for k in keys), _level(RASTER.name)]
         return build_fork_tree(params=rows, levels=levels, materialize=_materialize)
     # A TWISTED streaming reduce whose per-step partial is a contraction pair (the flash tree,
     # :func:`_twisted_pair`) offers its structurally-different schedules as ONE prior-ranked fork:
@@ -1730,25 +1955,25 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
     # pin-driven, like the demoted warp tier. Any other non-empty REDUCE pin keeps its scalar
     # escape below (it asks for a reduce partition only the scalar tiers honor), as does a split
     # pin no warp row can legally carry (symbolic / non-divisible kv, atomic finalize).
-    reduce_pin = REDUCE.raw()
+    reduce_pin = _legacy_reduce(REDUCE.raw())
     if reduce_pin:
         try:
             rplan = ReducePlan.parse(reduce_pin)
         except Exception:  # noqa: BLE001 — an unparseable pin keeps the historical scalar escape
             rplan = None
         if rplan is not None and rplan.needs_split and rplan.finalize == "kernel":
-            pair = _twisted_pair(tile.op)
+            pair = _twisted_pair(tile.op, tile.place.free)
             if pair is not None:
-                red, head, pv = pair
+                red, _, _, head, pv = pair
                 warps = _twisted_warp_options(tile, name, knobs, _smem_budget(ctx), _tma_allowed(ctx), _f16acc_allowed(ctx))
-                rows = _stamp_twisted_split(warps, red.axis.name, rplan)
+                rows = _stamp_twisted_split(warps, rplan)
                 if rows:
-                    rows = _narrow_flash_forms(rows, head, pv, keyed_only=True)
+                    rows = _filter_work(_narrow_flash_forms(rows, head, pv, keyed_only=True), lambda o: o.knobs.get(WORK.name, ""))
                     return rows if len(rows) > 1 else rows[0]
     if not REDUCE.narrow([""])[0]:
-        pair = _twisted_pair(tile.op)
+        pair = _twisted_pair(tile.op, tile.place.free)
         if pair is not None:
-            red, head, pv = pair
+            red, head_f, pv_f, head, pv = pair
             warps = _twisted_warp_options(tile, name, knobs, _smem_budget(ctx), _tma_allowed(ctx), _f16acc_allowed(ctx))
             measured_flash = _rtx4080_dit_flash_deploy(warps, red, head, pv, ctx)
             if measured_flash is not None:
@@ -1764,20 +1989,48 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
             # ``""`` / the chain's ``f<d>``) falls through to the scalar forms and narrows them
             # below (:func:`_narrow_flash_forms`) — routing on ANY pin locked the chain row out.
             stage_pinned = STAGE.raw() is not None and bool(STAGE.narrow([""])[0])
-            warp_pinned = TILE.raw() is not None and is_warp_codec(TILE.raw())
+            warp_pinned = TILE.raw() is not None and is_warp_codec(_legacy_tile(TILE.raw()))
             if warps and (warp_pinned or stage_pinned):
                 # The axis-keyed ``TILE@<dd>``/``TILE@<pj>`` pins (a static attention golden's
-                # spelling) must still select their geometry among the kept mma rows — this early
-                # return used to skip the narrowing entirely, so a golden that also pins ``STAGE``
-                # benched the prior's tile under the pinned stage (the findings-5 F2 coercion).
-                warps = _narrow_flash_forms(warps, head, pv, keyed_only=True)
+                # spelling) must still select their geometry among the kept mma rows — skipping
+                # the narrowing here would bench the prior's tile under the pinned stage.
+                warps = _filter_work(_narrow_flash_forms(warps, head, pv, keyed_only=True), lambda o: o.knobs.get(WORK.name, ""))
                 return warps if len(warps) > 1 else warps[0]
+            # Cold SPLIT-KV siblings on an under-occupied grid — the golden tier picks only
+            # among OFFERED rows, so the recorded split-KV entries (attention.hd512's
+            # ``g2k`` + ``d1/cp/alt`` pair) need these rows offered. Offer the ``g<n>k``
+            # splits as LATER fork siblings when the un-split grid cannot fill the card
+            # (the matmul ``_SPLITK_MAX_CTAS`` gate's flash analogue): option-0 stays the
+            # conservative un-split row, seeded shapes keep matching their recorded entry
+            # (fastest-first), and an under-occupied unseeded shape gains the rows the prior's
+            # split features already price. ``_stamp_twisted_split`` keeps its per-row
+            # legality (block-divisible static kv; a symbolic kv always stamps).
+            if warps and REDUCE.raw() is None:
+                # The occupancy read is each WARP row's OWN launch grid (batch × heads × query
+                # blocks — the row's shrunk placement; geometries differ per row), never the
+                # pre-tiled per-cell ``place`` (whose element grid is astronomically larger and
+                # would gate the splits off always). Only the under-occupied rows gain split
+                # siblings — a grid that already fills the card has nothing to win from a split.
+                def _row_ctas(r: TileOp) -> int:
+                    n = 1
+                    for ax in r.place.grid:
+                        if ax.extent.is_static:
+                            n *= ax.extent.as_static()
+                    return n
+
+                try:
+                    sms = float(ctx.features().get("H_sm_count", 170.0)) if ctx is not None else 170.0
+                except Exception:  # noqa: BLE001 — an off-GPU ctx keeps the default
+                    sms = 170.0
+                base_rows = [r for r in warps if _row_ctas(r) <= sms]  # the UN-split originals
+                for spec in ("g2k", "g4k"):
+                    warps = [*warps, *_stamp_twisted_split(base_rows, ReducePlan.parse(spec))]
             chain = _twisted_chain_option(tile, place, name, knobs)
             forms = [*warps, *([chain] if chain is not None else [])]
             if forms:
-                empty = {_at(TILE, head.k_axis.name): "", _at(TILE, pv.k_axis.name): "", _at(STAGE, red.axis.name): ""}
+                empty = {_family_key(tile.op, TILE.name, head_f): "", _family_key(tile.op, TILE.name, pv_f): "", STAGE.name: ""}
                 forms += [_option(tile, place, spec, name, {**knobs, **empty}) for spec in _reduce_specs(tile, place, ctx)]
-                forms = _narrow_flash_forms(forms, head, pv)
+                forms = _filter_work(_narrow_flash_forms(forms, head, pv), lambda o: o.knobs.get(WORK.name, ""))
                 return forms if len(forms) > 1 else forms[0]
         else:
             # A PLANAR ⊗-fold over a computed MAP cone — the fused producer → matmul edge — honors
@@ -1787,41 +2040,38 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None) -> Fork | list[Tile
             if demoted is not None:
                 return demoted
         # (The MONOID-producer cone — the fused norm→linear edge — no longer needs a rescue here:
-        # recognition nodifies it to a computed-A Contraction fork sibling, ``010_recognize``'s
+        # recognition nodifies it to a computed-A ContractionView fork sibling, ``010_recognize``'s
         # ``bind_prologue_contraction`` merge, so it arrives at this dispatch as CONTRACTION.)
     specs = _reduce_specs(tile, place, ctx)
-    # The deferred-finalize placement mirror on the monoid / demoted-PLANAR reduce tier — the
-    # same offer the contraction arm makes on its split rows (see the ``PLACE@fin`` block above):
-    # a pin threads onto every option; unpinned, each ``g<w>k`` deferred-kernel spec gains a
-    # ``fuse``-stamped sibling (evidence-only; the M=1 decode matvecs fork here).
-    fin_pin = PLACE.narrow_at("fin")
-    if fin_pin in ("cut", "fuse"):
-        return [_option(tile, place, spec, name, {**knobs, "PLACE@fin": fin_pin}) for spec in specs]
-    out = [_option(tile, place, spec, name, knobs) for spec in specs]
-    out += [
-        _option(tile, place, spec, name, {**knobs, "PLACE@fin": "fuse"})
-        for spec in specs
-        if _is_splitk_spec(spec) and ReducePlan.parse(spec).finalize == "kernel"
-    ]
-    return out
+    return _filter_work(
+        [_option(tile, place, spec, name, knobs, reduce_key=reduce_key) for spec in specs], lambda o: o.knobs.get(WORK.name, "")
+    )
 
 
 _CHAIN_MAX_D = 64  # register-vector budget: the chain holds the whole output row per thread
 
 
 def _canon_tile_spec(spec: str) -> str:
-    """A ``TILE`` spelling canonicalized through the codec (``a:scalar`` ≡ ``""``, ``f64x1`` ≡
-    ``f64``) so pin-only aliases compare equal to stamped row spellings; an unparseable pin passes
-    through (it just won't match, and :func:`_narrow_flash_forms` degrades gracefully)."""
-    if not spec:
-        return ""
+    """A ``TILE`` spelling canonicalized to its SITE half (``a:scalar`` ≡ ``""``, ``f64x1`` ≡
+    ``f64``, a legacy warp value sheds its ``w`` token) so pin-only aliases and legacy pins
+    compare equal to the site-spelled row values; an unparseable pin passes through (it just
+    won't match, and :func:`_narrow_flash_forms` degrades gracefully). The worker half a LEGACY
+    pin embeds is compared separately (:func:`_pin_tile_workers`)."""
+    return canon_family_value(TILE.name, spec or "")
+
+
+def _pin_tile_workers(spec: str) -> Workers | None:
+    """The worker inventory a LEGACY embedded-worker ``TILE`` pin implies (``None`` for a
+    site-form / scalar-reg-only / unparseable pin — no constraint). Site values shed the worker
+    tokens, so two flash rows differing only in warp count spell the same ``TILE@dd`` — a legacy
+    pin's ``w`` token must keep selecting among them via the row's WORK inventory."""
     try:
-        return TilePlan.parse(spec).spell()
-    except Exception:  # noqa: BLE001 — an invalid pin must not crash the fork build
-        return spec
+        return plan_workers(TilePlan.parse(spec or ""))
+    except (ValueError, KeyError):
+        return None
 
 
-def _narrow_flash_forms(forms: list[TileOp], head: Contraction, pv: Contraction, *, keyed_only: bool = False) -> list[TileOp]:
+def _narrow_flash_forms(forms: list[TileOp], head: ContractionView, pv: ContractionView, *, keyed_only: bool = False) -> list[TileOp]:
     """Narrow the flash fork's leaf rows by the live per-node ``TILE`` pins. Every flash row spells
     the same key set (``TILE@<qk_k>`` / ``TILE@<pv_k>``), so a pin selects rows by their stamped
     spelling: ``f<d>`` on the PV k-axis keeps the CHAIN row, ``""`` / ``a:scalar`` the per-cell
@@ -1833,25 +2083,40 @@ def _narrow_flash_forms(forms: list[TileOp], head: Contraction, pv: Contraction,
     the *derived* pj spelling would spuriously miss every row."""
     from emmy import config  # noqa: PLC0415
 
-    live: dict[str, str] = {}
+    live: dict[str, tuple[str, Workers | None]] = {}
     for ax in (head.k_axis.name, pv.k_axis.name):
         pin = config.knob_raw(f"{TILE.name}@{ax}") if keyed_only else TILE.narrow_at(ax)
         if pin is not None:
-            live[ax] = _canon_tile_spec(pin)
+            live[ax] = (_canon_tile_spec(pin), _pin_tile_workers(pin))
+
+    def hits(f: TileOp, ax: str, site: str, work: Workers | None) -> bool:
+        # The rows spell SITE values; a legacy pin's worker half constrains the row's WORK
+        # inventory (units/kind — the pin says nothing about a producer band).
+        if _canon_tile_spec(f.knobs.get(f"{TILE.name}@{ax}", "")) != site:
+            return False
+        if work is None:
+            return True
+        row_work = Workers.parse(f.knobs.get(WORK.name) or "")
+        return row_work is not None and row_work.kind == work.kind and row_work.units == work.units
+
     if not live:
         return forms
-    kept = [f for f in forms if all(_canon_tile_spec(f.knobs.get(_at(TILE, ax), "")) == p for ax, p in live.items())]
+    kept = [f for f in forms if all(hits(f, ax, site, work) for ax, (site, work) in live.items())]
     if not kept:
-        logger.warning("TILE pin(s) %s match no flash form (warp / chain / per-cell); keeping the full fork", live)
+        logger.warning(
+            "TILE pin(s) %s match no flash form (warp / chain / per-cell); keeping the full fork", {a: v[0] for a, v in live.items()}
+        )
         return forms
     return kept
 
 
-def _rtx4080_dit_flash_deploy(forms: list[TileOp], red: Reduction, head: Contraction, pv: Contraction, ctx) -> TileOp | None:
+def _rtx4080_dit_flash_deploy(forms: list[TileOp], red: Fold, head: ContractionView, pv: ContractionView, ctx) -> TileOp | None:
     """The measured DiT S256/Hd72 flash winner on RTX 4080, or ``None``.
 
-    Like the contraction defaults above, this applies only to a deterministic
-    unpinned deploy; autotuning retains every flash geometry."""
+    Like the contraction defaults above, this applies only to a deterministic unpinned deploy;
+    autotuning retains every flash geometry. The recorded winners are LEGACY spellings — matched
+    through the site codec (values via ``canon_family_value``, the worker halves via the row's
+    ``WORK`` inventory), so the table survives the step-7 value-grammar split verbatim."""
     if (
         ctx is None
         or not ctx.validate_pins
@@ -1867,57 +2132,83 @@ def _rtx4080_dit_flash_deploy(forms: list[TileOp], red: Reduction, head: Contrac
         != (256, 256, 72, 72)
     ):
         return None
+    from emmy.compiler.pipeline.knob import axis_of, canon_family_value, family_of  # noqa: PLC0415
+
     qk = "a:mma_m16n8k16_f16_f32/w2x1/f2x8/k5"
     expect = "a:mma_m16n8k16_f16_f32/w2x1/f2x9/k4"
+
+    def _fam_at(knobs: dict, family: str, axis: str) -> str:
+        for k, v in knobs.items():
+            if family_of(k) == family and axis_of(k) == axis:
+                return str(v)
+        return str(knobs.get(family, ""))
+
+    want_work = plan_workers(TilePlan.parse(qk))
     for form in forms:
         if (
-            form.knobs.get(_at(TILE, head.k_axis.name), "") == qk
-            and form.knobs.get(_at(TILE, pv.k_axis.name), "") == expect
-            and form.knobs.get(_at(REDUCE, red.axis.name), "") == ""
-            and form.knobs.get(_at(STAGE, red.axis.name), "") == ""
+            canon_family_value("TILE", _fam_at(form.knobs, TILE.name, head.k_axis.name)) == canon_family_value("TILE", qk)
+            and canon_family_value("TILE", _fam_at(form.knobs, TILE.name, pv.k_axis.name)) == canon_family_value("TILE", expect)
+            and _fam_at(form.knobs, REDUCE.name, red.axis.name) in ("",)
+            and _fam_at(form.knobs, STAGE.name, red.axis.name) in ("",)
+            and Workers.parse(form.knobs.get(WORK.name, "") or None) == want_work
         ):
             return form
     logger.warning("measured RTX 4080 DiT flash schedule is no longer enumerable")
     return None
 
 
-def _stamp_twisted_split(rows: list[TileOp], kv_name: str, plan: ReducePlan) -> list[TileOp]:
-    """The flash split-KV rows: each warp row with the pinned cross-CTA partition stamped on its
-    :class:`Reduction` node (``030_split_reduce`` consumes it) and spelled on ``REDUCE@<kv>``. Per-row
+def _stamp_twisted_split(rows: list[TileOp], plan: ReducePlan) -> list[TileOp]:
+    """The flash split-KV rows: each warp row with the pinned cross-CTA partition stored in its
+    ``TileOp.schedule`` (keyed on the stream fold — ``030_split_reduce`` consumes it) and spelled
+    on ``REDUCE@<kv>``. Per-row
     legality for a STATIC kv: an extent divisible by ``cta`` and a slice divisible by the row's own
     streaming key block (the staged chunking + fragment masks assume block-whole slices); an
     illegal row is dropped, not degraded. A SYMBOLIC kv always stamps — ``030_split_reduce`` builds
     the bn-aligned runtime slice width and the absolute ``bound`` the realizer stops/masks against."""
     out: list[TileOp] = []
     for r in rows:
-        red = r.op.source if isinstance(r.op, Map) else r.op
-        head = red.partial[0]
-        bn = head.tile.regs[1] * head.tile.atom.shape[1]
+        red = (r.op.sources[0] if r.op.sources else None) if isinstance(r.op, Map) else r.op
+        head = red.step_stmts()[0]
+        head_tile = sched_of(r).tile_of(head)
+        bn = head_tile.regs[1] * head_tile.atom.shape[1]
         ext = red.axis.extent
         if ext.is_static and (ext.as_static() % plan.cta != 0 or (ext.as_static() // plan.cta) % bn != 0):
             continue
-        op2 = _with_reduce(r.op, plan)
-        out.append(replace(r, op=op2, knobs={**r.knobs, _at(REDUCE, kv_name): plan.spell()}))
+        r2 = replace(r, knobs={**r.knobs, _family_key(r.op, REDUCE.name, red): plan.spell_site()}, schedule=dict(r.schedule))
+        sched_of(r2).put("REDUCE", red, plan)
+        out.append(r2)
     return out
 
 
-def _twisted_pair(op) -> tuple[Reduction, Contraction, Contraction] | None:
-    """The flash-shaped ``TWISTED`` streaming contraction pair — ``(reduction, head, pv)`` where
-    ``head`` is the score :class:`Contraction` at the partial's head and ``pv`` the single
-    computed-A expect :class:`Contraction` — or ``None`` (not a streaming pair: an online-softmax /
-    RMSNorm ``TWISTED`` reduce takes the reduce-partition tiers). The one structural guard the
-    warp / chain / scalar flash forms share; each form's own demands (a gmem-``Load`` A, the mma
-    atom's dtype / divisibility, the chain's register budget) stay with its builder."""
-    red = op.source if isinstance(op, Map) and isinstance(op.source, Reduction) else (op if isinstance(op, Reduction) else None)
-    if red is None or red.role is not AxisRole.TWISTED or red.carrier.twist.family != "exp" or len(red.partial) == 0:
+def _twisted_pair(op, free) -> tuple[Fold, Fold, Fold, ContractionView, ContractionView] | None:
+    """The flash-shaped ``TWISTED`` streaming contraction pair — ``(reduction, head_fold, pv_fold,
+    head, pv)``: the STORED ``role=CONTRACTION`` folds (the score at the partial's head, the single
+    computed-A expect later in the sequence) plus their DERIVED :class:`ContractionView` views (output
+    axes off the placement's trailing ``free`` — the query axis, and the stream axis for the score /
+    the value axis for the expect). ``None`` when not a streaming pair (an online-softmax / RMSNorm
+    ``TWISTED`` reduce takes the reduce-partition tiers). The one structural guard the warp / chain /
+    scalar flash forms share; each form's own demands (a gmem-``Load`` A, the mma atom's dtype /
+    divisibility, the chain's register budget) stay with its builder. Stamping targets the FOLDS
+    (`s is head_fold` in the partial); reads go through the views."""
+    src = op.sources[0] if isinstance(op, Map) and len(op.sources) == 1 else None
+    red = src if isinstance(src, Fold) else (op if isinstance(op, Fold) else None)
+    if red is None or red.role is not AxisRole.TWISTED:
         return None
-    head = red.partial[0]
-    if not isinstance(head, Contraction):
+    stmts = list(red.step_stmts())
+    if not stmts:
         return None
-    tail_contractions = [st for st in list(red.partial)[1:] if isinstance(st, Contraction)]
-    if len(tail_contractions) != 1 or not tail_contractions[0].a_computed:
+    head_fold = stmts[0]
+    if not is_contraction_fold(head_fold) or len(free) < 2:
         return None
-    return red, head, tail_contractions[0]
+    tail_folds = [st for st in stmts[1:] if is_contraction_fold(st)]
+    if len(tail_folds) != 1:
+        return None
+    pv_fold = tail_folds[0]
+    head = contraction_view(head_fold, free[-2], red.axis)
+    pv = contraction_view(pv_fold, free[-2], free[-1])
+    if head is None or pv is None or not pv.a_computed:
+        return None
+    return red, head_fold, pv_fold, head, pv
 
 
 def _twisted_chain_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp | None:
@@ -1927,10 +2218,10 @@ def _twisted_chain_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp
     score computes ONCE per streamed key and is shared across the columns (vs the per-cell tier's
     redundant recompute per column). A fork SIBLING of the warp / reduce-partition schedules,
     offered when the column axis is small + static (``≤ _CHAIN_MAX_D``, the register budget)."""
-    pair = _twisted_pair(tile.op)
+    pair = _twisted_pair(tile.op, tile.place.free)
     if pair is None:
         return None
-    red, head, pv = pair
+    red, head_fold, pv_fold, head, pv = pair
     op = tile.op
     d_ax = pv.n_axis
     grid = list(place.grid)
@@ -1939,42 +2230,52 @@ def _twisted_chain_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp
     d = d_ax.extent.as_static()
     if d > _CHAIN_MAX_D:
         return None
-    pv2 = replace(pv, tile=TilePlan(regs=(d, 1)))  # scalar reg order (reg_n, reg_m): the column vector
-    partial = tuple(pv2 if st is pv else st for st in red.partial)
-    red2 = replace(red, partial=type(red.partial)(partial))
-    op2 = replace(op, source=red2) if isinstance(op, Map) else red2
+    chain_plan = TilePlan(regs=(d, 1))  # scalar reg order (reg_n, reg_m): the column vector
     # A fork SIBLING of the warp / reduce-partition schedules: the resolved register-vector plan is
     # stamped (keyed on the PV contraction's k axis, like every per-node schedule codec) — the row
     # identity the DB / prior separate it from the per-cell serial by — and the sibling families it
-    # does NOT schedule are decided-empty so every flash leaf row spells the same key set.
+    # does NOT schedule are decided-empty so every flash leaf row spells the same key set. The term
+    # is IMMUTABLE (1r): the plan lives in ``TileOp.schedule``, keyed on the PV fold.
     stamped = {
         **knobs,
-        _at(TILE, pv.k_axis.name): pv2.tile.spell(),
-        _at(TILE, head.k_axis.name): "",
-        _at(REDUCE, red.axis.name): "",
-        _at(STAGE, red.axis.name): "",
+        _family_key(op, TILE.name, pv_fold): chain_plan.spell_site(),
+        _family_key(op, TILE.name, head_fold): "",
+        _family_key(op, REDUCE.name, red): "",
+        _family_key(op, STAGE.name, red): "",
     }
-    return TileOp(op=op2, name=name, place=Placement(free=tile.place.free, grid=tuple(grid[:-1])), knobs=stamped)
+    out = TileOp(op=op, name=name, place=Placement(free=tile.place.free, grid=tuple(grid[:-1])), knobs=stamped, stores=tile.stores)
+    sched_of(out).put("TILE", pv_fold, chain_plan)
+    seal_workers(out)
+    return out
+
+
+def _composes(red: Fold) -> bool:
+    """True when the reduce COMPOSES another structural node (split-K's sliced contraction,
+    flash's hoisted score edge) — the ONE test for a composed reduce, so a "bare statistic
+    reduce" test is just its negation. A λ-spelled composed fold carries the node on an operand
+    edge; the stored ``step`` arm covers the residual composed spellings."""
+    return any(isinstance(s, (Map, Fold)) for s in red.step_stmts()) or any(isinstance(e, (Map, Fold)) for e in red.operands)
 
 
 def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp | None:
     """The warp (mma) candidate for a **demoted-cone contraction** — a ``PLANAR`` ⊗-fold whose
     lift multiplies a gmem ``Load`` B with a computed pure-MAP cone A (the fused producer → matmul
     edge: ``f(x, …) @ w``), or ``None`` (stay scalar). PIN-DRIVEN like the matmul warp tier: fires
-    only under a warp ``TILE`` pin. Nodifies the fold to a computed-A :class:`Contraction` (the
-    same ``a_operand = Body`` the flash P@V rides) and stamps the ``sync`` compute-fill
+    only under a warp ``TILE`` pin. Nodifies the fold to a computed-A :class:`ContractionView` (the
+    same ``a = Body`` the flash P@V rides) and stamps the ``sync`` compute-fill
     :class:`Stage` — the producer cone materializes the A tile straight into the smem slab the
     ``ldmatrix`` drain reads (the fused edge IS the mma tier's ``sync`` transport). First cut:
     exact-cover geometry only (static M/N/K divisible by the tile / K-chunk — no masked overhang),
     and the cone may read the ``(m, k)`` axes only."""
-    spec = TILE.narrow([""])[0]
+    spec = _legacy_tile(TILE.narrow([""])[0])
     if not is_warp_codec(spec):
         return None
     op = tile.op
-    red = op.source if isinstance(op, Map) and isinstance(op.source, Reduction) else (op if isinstance(op, Reduction) else None)
-    if red is None or red.role is not AxisRole.PLANAR or red.source is not None or red.carrier.twist.family != "id":
+    src = op.sources[0] if isinstance(op, Map) and len(op.sources) == 1 else None
+    red = src if isinstance(src, Fold) else (op if isinstance(op, Fold) else None)
+    if red is None or red.role is not AxisRole.PLANAR or _composes(red):
         return None
-    body = list(red.partial)
+    body = list(red.step_stmts())
     accums = [st for st in body if isinstance(st, Accum)]
     if len(accums) != 1 or accums[0].op.name != "add":
         return None
@@ -2023,22 +2324,24 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     epilogue = Body(tuple(op.body)) if isinstance(op, Map) else Body(())
     if not _fragment_epilogue_ok(epilogue):
         return None  # a gather epilogue is fragment-unrealizable — stay scalar
-    node = Contraction(
+    node = ContractionView(
         axes=(m_ax, n_ax),
         k_axis=k_ax,
-        a_operand=Body(tuple(cone)),
-        folds=((loads[b_name], acc.name),),
+        a=make_cone(list(cone), k_ax.name),
+        channels=(Channel(b=loads[b_name], acc=acc.name),),
         tile=wt,
         lead_axes=tuple(grid[:-2]),
-        epilogue=epilogue,
     )
     stage = Stage(transport="sync", smem=(node.a_name,), bk_elems=bk_elems)
-    # ``PLACE@cone=fuse`` is the RESOLVED producer-cone placement this option realizes — the cone
-    # compute-fills the A slab instead of round-tripping a gmem intermediate. The one live producer
-    # of the cone element (the cut side — materialize the producer as its own kernel — has no
-    # emitter in the rebuilt tree, so only ``fuse`` is ever stamped today).
-    stamped = {**knobs, _at(TILE, k_ax.name): spec, "PLACE@cone": "fuse"}
-    return TileOp(op=node, name=name, place=place, tier=wt, stage=stage, knobs=stamped)
+    fold = node.as_fold()
+    emitted = Map(body=epilogue, sources=(fold,)) if len(epilogue) else fold
+    stamped = _site_knobs({**knobs, _family_key(emitted, TILE.name, fold): spec})
+    out = TileOp(op=emitted, name=name, place=place, knobs=stamped, stores=tile.stores)
+    sched = sched_of(out)
+    sched.put("TILE", fold, wt)
+    sched.put("STAGE", fold, stage)
+    seal_workers(out)
+    return out
 
 
 def _resolve_twisted_stage(
@@ -2197,17 +2500,23 @@ def _twisted_warp_options(
     a pin that doesn't fit the flash form (wrong atom / a column split / a foreign ``bk``) declines
     the tier with a log line — the standard pin-validity degrade, since a bare warp pin may target
     another kernel in the same graph."""
-    pair = _twisted_pair(tile.op)
+    pair = _twisted_pair(tile.op, tile.place.free)
     if pair is None:
         return []
-    red, head, pv = pair
+    red, head_fold, pv_fold, head, pv = pair
     op = tile.op
-    if not isinstance(head.a_operand, Load):
+    # The canonical codec keys for the flash tree (phase 3): the two contractions by their axes
+    # (``TILE@dd`` / ``TILE@pj``), the stream fold — the primary — bare.
+    qk_key = _family_key(op, TILE.name, head_fold)
+    pv_key = _family_key(op, TILE.name, pv_fold)
+    red_key = _family_key(op, REDUCE.name, red)
+    stage_key = _family_key(op, STAGE.name, red)
+    if not isinstance(head.a, Load):
         return []
-    channels = red.carrier.twist.channels
-    if len(channels) != 3 or channels[1].lift is not None or channels[2].lift is None:
+    terms = tuple(red.lift.results)
+    if len(terms) != 3 or isinstance(terms[1], str) or not isinstance(terms[2], str):
         return []
-    q_tensor = tile.inputs.get(head.a_operand.input) if tile.inputs else None
+    q_tensor = tile.inputs.get(head.a.input) if tile.inputs else None
     atom_name = {"f16": "mma_m16n8k16_f16_f32", "bf16": "mma_m16n8k16_bf16_f32"}.get(
         getattr(getattr(q_tensor, "dtype", None), "name", None)
     )
@@ -2222,7 +2531,7 @@ def _twisted_warp_options(
         return []
     kv_ext, m_ext = red.axis.extent, head.m_axis.extent
     m_name, kv_name = head.m_axis.name, red.axis.name
-    for s in list(red.partial)[1:]:
+    for s in list(red.step_stmts())[1:]:
         if isinstance(s, Load) and s.index and not {v for e in s.index for v in e.free_vars()} <= {m_name, kv_name}:
             return []  # a score bias indexed beyond (m, kv) — no fragment realization for it
         # An additive (m, kv) score bias (the explicit SDPA attn_mask) IS realizable: the fragment
@@ -2242,16 +2551,16 @@ def _twisted_warp_options(
             and not any(kv_name in e.free_vars() for e in (*idx[:-2], idx[-1]))
         )
 
-    tma_ok = tma_ok and _kv_penultimate(head.b_load) and _kv_penultimate(pv.b_load)
+    tma_ok = tma_ok and _kv_penultimate(head.b) and _kv_penultimate(pv.b)
     # The fragment loaders step gmem rows at the buffer's REAL row stride, derived from the load
     # index + buffer shape (``gmem_row_stride`` — H·D on an un-transposed (B, S, H, D) trace,
     # where the old trailing-extent assumption read the wrong rows: the gemma layer-0 NaN).
     # Underivable strides (an axis split across index components, a non-affine use, a symbolic
     # trailing extent) have no fragment realization — decline the tier.
     strides = (
-        gmem_row_stride(head.a_operand, m_name, tile.inputs),
-        gmem_row_stride(head.b_load, head.n_axis.name if head.b_trans else head.k_axis.name, tile.inputs),
-        gmem_row_stride(pv.b_load, pv.n_axis.name if pv.b_trans else kv_name, tile.inputs),
+        gmem_row_stride(head.a, m_name, tile.inputs),
+        gmem_row_stride(head.b, head.n_axis.name if head.b_trans else head.k_axis.name, tile.inputs),
+        gmem_row_stride(pv.b, pv.n_axis.name if pv.b_trans else kv_name, tile.inputs),
     )
     if any(s is None for s in strides):
         return []
@@ -2268,11 +2577,13 @@ def _twisted_warp_options(
     sibling = _F16ACC_ATOMS.get(atom_name)
     pv_pin = config.knob_raw(f"{TILE.name}@{pv.k_axis.name}")
     pv_atoms = [atom]
-    if sibling is not None and (f16acc_ok or (pv_pin is not None and f"a:{sibling}" in pv_pin)):
+    # The sibling-atom name is a substring of the pin in both spellings — legacy ``a:<atom>/…``
+    # and the site form's bare leading ``<atom>/…``.
+    if sibling is not None and (f16acc_ok or (pv_pin is not None and sibling in pv_pin)):
         pv_atoms.append(ATOM_REGISTRY[sibling])
     pinned = TILE.raw() is not None
     if pinned:
-        spec = TILE.narrow([""])[0]
+        spec = _legacy_tile(TILE.narrow([""])[0])
         if not is_warp_codec(spec):
             return []  # a scalar / empty pin asks for a tier this form doesn't offer
         want = TilePlan.parse(spec)
@@ -2327,17 +2638,19 @@ def _twisted_warp_options(
                 )
             continue
         qk_plan = TilePlan(atom=atom, units=(um, 1), regs=(fm, nt), bk=bk)
-        variants: list[tuple[TilePlan, object]] = []
-        for pv_atom in pv_atoms:
-            pv_plan = TilePlan(atom=pv_atom, units=(um, 1), regs=(fm, d_v.as_static() // atom_n), bk=max(1, bn // atom_k))
-            partial = tuple(replace(s, tile=qk_plan) if s is head else (replace(s, tile=pv_plan) if s is pv else s) for s in red.partial)
-            red2 = replace(red, partial=type(red.partial)(partial))
-            variants.append((pv_plan, replace(op, source=red2) if isinstance(op, Map) else red2))
+        # The term is IMMUTABLE across the schedule search (1r): every variant shares ``op``
+        # verbatim — the per-node plans live in each row's ``TileOp.schedule``, keyed on the
+        # stored QK / PV folds.
+        variants: list[TilePlan] = [
+            TilePlan(atom=pv_atom, units=(um, 1), regs=(fm, d_v.as_static() // atom_n), bk=max(1, bn // atom_k)) for pv_atom in pv_atoms
+        ]
         # ``um`` warps per CTA, each owning ``fm`` register query tiles of ``atom_m`` rows: the
         # query axis shrinks to its CTA-block count; the value (expect output) axis folds into the
         # fragment tile and leaves the grid.
         grid = tuple(
-            Axis(name=ax.name, extent=ax.extent.ceil_div(um * fm * atom_m), source_axis=ax.source_axis or ax) if ax.name == m_name else ax
+            Axis(name=ax.name, extent=ax.extent.ceil_div(um * fm * atom_m), window=Window(parent=ax.source_axis or ax))
+            if ax.name == m_name
+            else ax
             for ax in tile.place.free
             if ax.name != pv.n_axis.name
         )
@@ -2361,8 +2674,8 @@ def _twisted_warp_options(
             return getattr(getattr(t, "dtype", None), "name", None)
 
         b_dt = atom.operand_dtype("b").name
-        kv_stage_ok = _buf_dtype_name(head.b_load) == b_dt and _buf_dtype_name(pv.b_load) == b_dt
-        q_stage_ok = _buf_dtype_name(head.a_operand) == atom.operand_dtype("a").name
+        kv_stage_ok = _buf_dtype_name(head.b) == b_dt and _buf_dtype_name(pv.b) == b_dt
+        q_stage_ok = _buf_dtype_name(head.a) == atom.operand_dtype("a").name
         # An overhanging head-dim atom uses the gmem fragment loaders' K-zero helpers. Async
         # staging currently has no zero-fill contract for the row's padding bytes, so keep this
         # geometry gmem-direct until the transports learn that mask.
@@ -2378,18 +2691,24 @@ def _twisted_warp_options(
                 continue  # alt stages Q through smem too — a dtype-mismatched Q cannot byte-copy
             wspecs = list(WSPEC.narrow(wspec_moves())) if (stage is not None and stage.transport == "tma" and not stage.alt) else [""]
             for wspec_cand in wspecs:
-                workers, wspec_spec = _wspec_workers(wspec_cand, stage, 32 * um)
+                workers, _ = _wspec_workers(wspec_cand, stage, 32 * um)
                 if wspec_cand and workers is None:
                     continue  # over-budget / illegal split — identical to the uniform row
-                for pv_plan, op2 in variants:
+                for pv_plan in variants:
+                    # SITE spellings (F1): the shared warp geometry lives once in the WORK entry
+                    # ``seal_workers`` stamps (the resolved producer band riding it as ``+p``).
                     stamped = {
                         **knobs,
-                        _at(TILE, head.k_axis.name): qk_plan.spell(),
-                        _at(TILE, pv.k_axis.name): pv_plan.spell(),
-                        _at(REDUCE, kv_name): "",
-                        _at(STAGE, kv_name): stage.spell() if stage is not None else "",
+                        qk_key: qk_plan.spell_site(),
+                        pv_key: pv_plan.spell_site(),
+                        red_key: "",
+                        stage_key: stage.spell() if stage is not None else "",
                     }
-                    if wspec_spec:
-                        stamped[WSPEC.name] = wspec_spec
-                    out.append(TileOp(op=op2, name=name, place=place, stage=stage, workers=workers, knobs=stamped))
+                    row = TileOp(op=op, name=name, place=place, workers=workers, knobs=stamped, stores=tile.stores)
+                    sched = sched_of(row)
+                    sched.put("TILE", head_fold, qk_plan)
+                    sched.put("TILE", pv_fold, pv_plan)
+                    sched.put("STAGE", red, stage)
+                    seal_workers(row)
+                    out.append(row)
     return out

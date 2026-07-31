@@ -1,4 +1,5 @@
-"""Cross-validated golden-rank evaluation for offline-prior fits — the ``emmy fit`` harness.
+"""Cross-validated golden-rank evaluation for offline-prior fits — the fold machinery
+behind :func:`~.run.run_fit` (the ``emmy fit`` run harness).
 
 Works entirely on pre-built :class:`~.group.Group` lists (the command layer owns case
 building, which needs the snippet tracer ``pipeline/`` must not import) and produces the

@@ -379,13 +379,16 @@ Fit an offline-prior weights artifact and cross-validate it, GPU-free. Two ortho
 {linear,catboost}` × `--data {golden,freeze:<path>}` — of which only `linear` × `golden` (the incumbent trainer on the
 golden dataset) exists today; other combinations exit with "not yet supported". `--samples N` (default 0:
 coordinate-descent-from-seed, the incumbent practice), `--seed`, `--folds {op_family,gpu,both,none}` (default `both`),
-`--out DIR` (default `_tune/fits/<timestamp>-<trainer>-<data>/`). Writes `metrics.json` — the deterministic per-run
-record two fits are diffed by: `full_train` (the shippable artifact's per-golden dual ranks + per-card aggregates) and
-one `cv.<axis>` block per fold axis (pooled holdout / train tables, per-card gap, per-fold detail) — and
-`weights.json`, the full-train artifact in the shipped format. `emmy/commands/fit.py` also owns the snippet-tracing
-golden case builder (`build_cases`, shared with `scripts/golden_knob_heuristics.py` — `pipeline/` must not import the
-tracer); the fold/metrics machinery is library code, documented on
-`emmy/compiler/pipeline/search/prior/fit/cv.py` and in the pipeline ARCHITECTURE's prior sections.
+`--features SPEC` (the feature view — comma-separated names, trailing `*` = prefix glob; default `D_*,MMA_tier`,
+recorded in the metrics header and artifact provenance so two fits are only compared under matching views), `--out DIR`
+(default `_tune/fits/<timestamp>-<trainer>-<data>/`). Writes `metrics.json` — the deterministic per-run record two fits
+are diffed by: `full_train` (the shippable artifact's per-golden dual ranks + per-card aggregates) and one `cv.<axis>`
+block per fold axis (pooled holdout / train tables, per-card gap, per-fold detail) — and `weights.json`, the full-train
+artifact in the shipped format. `emmy/commands/fit.py` owns the snippet-tracing golden case builder
+(`build_golden_groups`, shared with `scripts/golden_knob_heuristics.py` — `pipeline/` must not import the tracer) plus
+the trainer wiring and file writing; the run harness and fold/metrics machinery are library code in
+`emmy/compiler/pipeline/search/prior/fit/` (`run.py` / `cv.py`), documented there and in the pipeline ARCHITECTURE's
+prior sections.
 
 ```bash
 emmy fit                                  # linear x golden, both fold axes, metrics under _tune/fits/

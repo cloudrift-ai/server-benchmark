@@ -195,7 +195,12 @@ The two halves of the one path:
   `provenance` block) lives in the repo-checked artifact `search/prior/offline_weights.json`, written by the offline
   fitter — library code in `search/prior/fit/`, split along the trainer/data/harness seams: `group.py` (the `Group`
   dataset representation — one ndarray-backed candidate pool + its labels — and the `--features` view parser),
-  `linear.py` (the linear trainer + fitted model, owner of the loss and the static/dyn weight-set split), `rank.py`
+  `linear.py` (the linear trainer + fitted model, owner of the loss — the tier-weighted golden-rank objective plus a
+  raw-space L2 penalty (`DEFAULT_L2`, CLI `--l2`) whose job is identifiability, not shrinkage: the rank objective is
+  flat in the magnitude of a feature with tiny golden-pool variance, and an unpenalized fit picks arbitrarily there —
+  invisible to golden rank, catastrophic at fork scoring, where an undecided prefix scores the feature 0.0 (the
+  D_pow2_threads 686 cold-deploy incident); the penalty must be raw-space (`w_z/sd`) because the inflated raw weight
+  is an ordinary O(1) z-space weight — and of the static/dyn weight-set split), `rank.py`
   (model-agnostic rank metrics), `cv.py` (fold axes, pooled holdout/train tables, the metrics dict), `run.py` (the
   pure run harness `run_fit` — trainers plug in as callables). Driven by `emmy fit` (which also writes the per-run
   metrics file, and with `--artifact` regenerates the repo-checked artifact in place); the golden case building

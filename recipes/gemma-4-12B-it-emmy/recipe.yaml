@@ -18,10 +18,22 @@ engine:
     # (serve.py _GENERATE_GPU_MEMORY_UTILIZATION).
     gpu_memory_utilization: 0.97
     vllm:
-      # General compile-on-boot emmy image (registers EmmyGenModel). The prebuilt
-      # cloudriftai/vllm-emmy-gemma4 image bakes the gemma-4-12B snapshot + warmed sm_120
-      # cubins for a fast, tokenless cold start — same kernels, a boot optimization.
-      image: "cloudriftai/vllm-emmy:0.23.0-ec45dd6f"
+      # The published prebuilt image (docker/vllm-emmy-serve/). It bakes the gemma-4-12B
+      # snapshot + warmed sm_120 cubins + the execution-plan pack, so a boot at the SHAPE IT
+      # WAS WARMED AT is tokenless and compile-free. It is also the only published emmy
+      # image — the general compile-on-boot cloudriftai/vllm-emmy base this recipe used to
+      # pin was never pushed to Docker Hub.
+      #
+      # READ THIS BEFORE RUNNING THE SWEEP. The pack is keyed on the serving shape, and this
+      # image was warmed at --max-model-len 8448 / --max-num-batched-tokens 4128. Every
+      # variant below runs a DIFFERENT context_length (8192 ... 73728) and mnbt 4096, so
+      # every one of them misses the pack and re-runs the whole compiler frontend on boot
+      # (~50 min of host CPU measured at an uncovered width). That can exceed the compose
+      # healthcheck window (start_period 1200s + 180x10s = 3000s), in which case the deploy
+      # is killed as unhealthy rather than producing a number. The cubins still hit, so this
+      # is boot cost and not a numerics change — but on a slow host the sweep may simply not
+      # complete. Re-warm the image at the width you need, or expect long boots.
+      image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
       # --runner generate + the EmmyGenModel override + fp16 across the emmy↔vLLM seam;
       # --enforce-eager keeps vLLM from capturing around the runner's own kernel
       # launches; --max-num-batched-tokens 4096 is the per-step prefill-chunk cap (the

@@ -7,10 +7,11 @@
 # kernel siblings (f16-accumulate mma, __expf) on the consumer-die 5090 — measured on
 # the gemma-4-12B goldens as a faster lane at torch-default fp16 numerics.
 #
-# NOTE: the fast-math fork compiles its own kernels; the prebuilt cloudriftai/
-# vllm-emmy-gemma4 image's baked cubins are the STANDARD fork, so this lane recompiles
-# on boot (cubin-cached after first boot). It therefore rides the general compile-on-boot
-# image, same as the standard emmy recipe, so the two forks share one base image.
+# NOTE: the fast-math fork compiles its OWN kernels, and the prebuilt image's baked cubins
+# are the STANDARD fork — so this lane recompiles them on first boot (cubin-cached after
+# that). It rides the prebuilt image anyway, because that is the only published emmy image;
+# the compile-on-boot base it used to pin was never pushed. Budget a long first boot, and
+# see the standard recipe's image comment for the pack-miss hazard across the sweep.
 model:
   huggingface: "google/gemma-4-12B-it"
 
@@ -19,7 +20,7 @@ engine:
     tensor_parallel_size: 1
     gpu_memory_utilization: 0.97
     vllm:
-      image: "cloudriftai/vllm-emmy:0.23.0-ec45dd6f"
+      image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
       extra_args: "--runner generate --dtype float16 --enforce-eager --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4096 --no-enable-prefix-caching"
       # The only difference from gemma-4-12B-it-emmy: enable the fast-math kernel fork.
       extra_env:

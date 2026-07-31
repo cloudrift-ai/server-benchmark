@@ -405,12 +405,12 @@ LoopOp bodies without spelling out every `Loop(Axis(…))` nest.
 ## `tile/`
 
 Tile IR (`tile/ir.py`, `tile/ops.py`) keeps the stored term pure algebra and the schedule beside it. A `TileOp` holds
-the structural-IR root `op` directly — a `Map` / `Fold` / `ContractionView` (the three stored node kinds, defined in
+the structural-IR root `op` directly — a `Map` / `Fold` / `Contraction` (the three stored node kinds, defined in
 `tile/ir.py`) — plus the root-global free→grid `Placement` (`place`), the worker inventory (`work`) and warp split
 (`workers`); every per-node schedule slice (`TilePlan` / `ReducePlan` / `Stage`) lives in the tree-path-keyed
 `TileOp.schedule` dict (1r), and the contraction node's placement/schedule fields are stamped onto a `replace()` copy
 at the point of use (1s), never stored. The `Kernel` / `TileSchedule` wrapper is gone. A kernel's structure is read
-structurally off the node (`ops.axis_role` — the contraction IS the `ContractionView` kind; a fold's role derives),
+structurally off the node (`ops.axis_role` — the contraction IS the `Contraction` kind; a fold's role derives),
 not a bespoke Python type per schedule.
 
 The schedule type system lives at the ir root in `schedule.py` (used by both the tile IR and the kernel

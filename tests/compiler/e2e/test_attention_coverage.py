@@ -6,10 +6,10 @@ softmax reduce. This file pins every tier of it:
 - **scalar-tier flash** (``FLASH`` knob, the Loop-IR ``025_recognize_flash`` pass) — non-causal /
   causal / GQA / additive-mask SDPA fuses to ONE streaming online-softmax kernel matching torch,
   static AND dynamic (symbolic ``seq_len``); KV tiling; the default-path guards. This is the ONLY
-  flash tier that lowers today — the two-``ContractionView`` ``TWISTED`` reduce tree at block=1, through
+  flash tier that lowers today — the two-``Contraction`` ``TWISTED`` reduce tree at block=1, through
   the one ``_factor`` contraction path.
 - **tensor-core flash** — RECOVERED through the one emitter: ``_schedule._twisted_warp_option`` stamps
-  the mma ``TilePlan``\ s on the Q@K / P@V ``ContractionView``\ s and the tree realizes at fragment
+  the mma ``TilePlan``\ s on the Q@K / P@V ``Contraction``\ s and the tree realizes at fragment
   residence (``_twist``) — no private emitter. The ``test_generated_tensorcore_flash_*`` /
   ``test_warp_chain_*`` cases assert that warp chain.
 - **cooperative-KV flash** (``BR``) — the KV axis split across threads, partial ``(m, l, O)`` states
@@ -341,7 +341,7 @@ def test_flash_chain_pin_selects_chain_on_warp_eligible_shape(monkeypatch):
 # These cases expect a fp16/bf16 SDPA to lower to a single ``mma.sync`` kernel (the warp chain:
 # tiled + atomized contractions, fragment online-softmax, C->A register repack) — realized through the
 # ONE pipeline: ``_schedule._twisted_warp_options`` stamps the mma ``TilePlan``\ s on the Q@K / P@V
-# ``ContractionView``\ s and ``_bind``'s reduce arm realizes the TWISTED carrier at fragment residence
+# ``Contraction``\ s and ``_bind``'s reduce arm realizes the TWISTED carrier at fragment residence
 # (``_twist``). No private emitter exists; a bespoke path would be the mandate violation the
 # demolition removed. Unpinned, the warp rows are fork SIBLINGS of the chain / reduce-partition
 # forms (the flash-form fork) — the cold ``OfflinePrior`` pick stays warp-when-eligible, which is

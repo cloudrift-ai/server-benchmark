@@ -13,14 +13,14 @@ import pytest
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import Channel, ContractionView, Map
+from emmy.compiler.ir.tile import Channel, Contraction, Map
 from emmy.compiler.ir.tile.ir import Fold
 from emmy.compiler.ir.tile.path import Site, canonical, family_sites, parse_key, primary, resolve, sites, spell
 
 
-def _contraction_fold(k_name: str = "k", *, a=None, n_name: str = "n", acc: str = "acc0", w: str = "W") -> ContractionView:
-    """A stored :class:`ContractionView` node (1s) — pure algebra, no placement/schedule fields."""
-    return ContractionView(
+def _contraction_fold(k_name: str = "k", *, a=None, n_name: str = "n", acc: str = "acc0", w: str = "W") -> Contraction:
+    """A stored :class:`Contraction` node (1s) — pure algebra, no placement/schedule fields."""
+    return Contraction(
         k_axis=Axis(k_name, 256),
         a=a if a is not None else Load(name="a_e", input="A", index=(Var("m"), Var(k_name))),
         channels=(Channel(b=Load(name="b_e", input=w, index=(Var(k_name), Var(n_name))), acc=acc),),
@@ -71,7 +71,6 @@ def _flash_tree() -> tuple[Map, Fold, Fold, Fold]:
     the blocked evaluation, found among ``stream.step_stmts()``."""
     from emmy.compiler.ir.stmt import Lambda
     from emmy.compiler.ir.stmt.carrier import exp_combine_states
-    from emmy.compiler.ir.tile.ir import is_contraction_fold
 
     qk = _contraction_fold("dd", acc="sacc", w="K")
     names = ("m_i", "l_i", "O_i")
@@ -88,7 +87,7 @@ def _flash_tree() -> tuple[Map, Fold, Fold, Fold]:
         init=(float("-inf"), 0.0, 0.0),
         combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
     )
-    pv = next(s for s in stream.step_stmts()[1:] if is_contraction_fold(s))  # the derived PV site
+    pv = next(s for s in stream.step_stmts()[1:] if isinstance(s, Contraction))  # the derived PV site
     root = Map(body=Body((Write(output="y", value="O_i", index=(Var("m"), Var("d"))),)), sources=(stream,))
     return root, stream, qk, pv
 

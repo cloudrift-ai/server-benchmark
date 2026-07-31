@@ -26,10 +26,10 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   combine)`** fields (ONE program, its results the fold's real accumulator names; the free helpers in
   `ir/stmt/algebra`), and a symmetric tuple of
   **`operands`** (the CLOSED inputs, each an edge, bound POSITIONALLY to the lift params); the bilinear
-  **`ContractionView`** node (1s) — every recognized contraction stores as this kind: its own reduce `k_axis`, the
+  **`Contraction`** node (1s) — every recognized contraction stores as this kind: its own reduce `k_axis`, the
   shared `a` operand edge and the product `Channel`s `(b_i, acc_i)` (arity N = the fused gate⊗up edge; sharing is
   the node's arity), with the placement/schedule fields (`axes`, `lead_axes`, `tile`, `stage`) UNSET in the stored
-  term — caller facts, stamped onto a `replace()` copy at the point of use (`ir.contraction_view`, now a pure field
+  term — caller facts, stamped onto a `replace()` copy at the point of use (`Contraction.placed`, a pure field
   stamp; `as_fold()` survives only as the node's DERIVED λ reading, consumed by the cross-partition `Reduction`
   machinery and the PLANAR demotion, its loop body byte-identical to the node's own) — and the lift/projection
   wrapper `Map` (`fn: Lambda` + `sources`, bound positionally; `fn.results` replaced the `out` last-def convention).
@@ -45,7 +45,7 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   synthesized+memoized inside the derived blocked evaluation (`Fold.step_stmts()` the one consumer read), and
   split-K's outer reduce is the identity-lift composition (`ir.composed_contraction` the one read). A bare sum,
   RMSNorm's statistic and flash's stream are `Fold` at different monoid arities; a matmul, the fused gate⊗up edge,
-  flash's QK score and the derived PV are the `ContractionView` node kind (the kind IS the `CONTRACTION` role — no
+  flash's QK score and the derived PV are the `Contraction` node kind (the kind IS the `CONTRACTION` role — no
   bilinear parse; a `Fold`'s role stays DERIVED (`Fold.role`), never stored: TWISTED off the derived twist family,
   CONTRACTION off the composed split-K operand, PLANAR otherwise — so an unbindable matvec-shaped
   contraction, whose loads recognition keeps inline in the lift instead of building the node, derives PLANAR and
@@ -61,9 +61,9 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   validation reading) and decides cut legality: closed subtrees may hoist to edges; combine's derived material —
   flash's PV, whose `P` reads the running state — sits BELOW the seam lattice, a derived schedule site excluded
   from PLACE (`Site.derived`), while flash's QK operand edge IS a PLACE
-  site. **The `ContractionView`'s placement/schedule fields are STAMPED, never stored**: the stored node is pure
+  site. **The `Contraction`'s placement/schedule fields are STAMPED, never stored**: the stored node is pure
   algebra (`k_axis` + the `a` edge + `Channel`s), and the placed reading the tensor-core/staged tiers require —
-  the `(m, n)` `Side` geometry + `tile`/`stage` — is stamped onto a `replace()` copy by `contraction_view(node, m,
+  the `(m, n)` `Side` geometry + `tile`/`stage` — is stamped onto a `replace()` copy by `Contraction.placed(m,
   n, lead, tile, stage)` from the CALLER's placement axes (trailing grid for a root kernel; `place.free` threads
   to the materializer via `Ctx.free` for flash) and the `TileOp.schedule` slices (`ir.shared_operand` is the
   placement-free cone read). The A/B asymmetry that is real — A M-resident/compute-fillable, B streamed — is a
@@ -78,7 +78,7 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   fused-tail sibling — keep an impure fn through the one `_loop_ir_fn` arm).
   A bare reduce is a root `Fold`; softmax/RMSNorm is `Map(fn=per-cell normalize, sources=(Fold,))` + a sweep
   `Store`; the fused norm→linear /
-  gate⊗up composition is `Map(fn=combine, sources=(ContractionView,))` over the product node (a fork sibling of its
+  gate⊗up composition is `Map(fn=combine, sources=(Contraction,))` over the product node (a fork sibling of its
   coop-reduce form — option-0 stays coop; warp mma rows ride the sync compute-fill); a pure pointwise cell is a
   `Map(sources=())` + its root `Store`s. Every schedule slice (`TilePlan` / `ReducePlan` / `Stage`) lives in `TileOp.schedule` — a dict keyed by the
   tree-path codec's canonical key (`ir/tile/path.py`: ONE walker + resolver, short-path-canonical — bare for the
@@ -92,7 +92,7 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   aliases; the golden corpus re-spelled mechanically). Dispatch reads the
   role/algebra off the node (`ops.axis_role`/`reduce_loop` recurse through `Map.sources`), and `ops.lower` flattens
   any node back to the same loop nest — no stored `Monoid`/`Semiring` kind. Flash is the `TWISTED` fold on the
-  streaming schedule, its QK a hoisted operand-edge `ContractionView` and its PV the derived evaluation's
+  streaming schedule, its QK a hoisted operand-edge `Contraction` and its PV the derived evaluation's
   synthesized contraction node — a twisted monoid is a monoid,
   selected structurally not as a distinct kind) →
   [`emmy/compiler/pipeline/passes/ARCHITECTURE.md`](emmy/compiler/pipeline/passes/ARCHITECTURE.md)

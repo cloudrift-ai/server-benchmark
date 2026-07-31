@@ -14,7 +14,7 @@ kind, sealed through the one `grid_tile` finalizer (the article's "schedule sepa
 + `ir/tile/ops.lower` are shared across kinds; only the partition changes). Its arms are points of one
 `(output-tiling) × (reduce-folding)` space:
 
-- **OUTPUT-tiled** (a contraction — warp / register tile) — the `ContractionView` IS the stored node (1s,
+- **OUTPUT-tiled** (a contraction — warp / register tile) — the `Contraction` IS the stored node (1s,
   `ir/tile/ir.py`), its operand→role binding resolved recognize-side (`010_recognize._nodify_contraction`; the raw
   still-`Map` forms bind at fork-emit via `_schedule._contraction_node` / `_atomize.semiring_binding`), so
   `_bind` only **synthesizes its bare grid-`Write`** (needs `root.output`, so it can't ride the node) and
@@ -38,7 +38,7 @@ recursion `_emit(op, ctx) -> Frag` builds the per-cell loop-IR — over the `Map
 through **`source` AND `partial`** — threading a `Ctx` **down** (the ambient cell environment: the grid axes, operand
 `inputs`, `stage`, output buffer) and returning a `Frag` **up** (the per-cell `body` this node contributes, the produced
 `Handle` wire). The reduce binder drives `_emit` off the `Fold` node to
-build its per-cell reduce loop, so a **nested** `ContractionView` (flash's Q@K / P@V) is reached AS A NODE. This is the
+build its per-cell reduce loop, so a **nested** `Contraction` (flash's Q@K / P@V) is reached AS A NODE. This is the
 tile-IR-rebuild mandate's *one hierarchical emitter, no divergent codegen path*: `_emit(node).body` is byte-identical to
 `ir/tile/ops.lower(node)` for a scalar-nested (block=1) node today. `Handle` carries `name` + `residence` (a scalar
 register value); the **tensor-core seam** is the view arm in `_bind` — an output-warp-tiled contraction (an mma
@@ -46,7 +46,7 @@ register value); the **tensor-core seam** is the view arm in `_bind` — an outp
 extends `Handle` with the mma fragment descriptor `(mma_role, shape, dtype)` and `_emit`'s `Ctx` grows the warp binding +
 the inbound `wires` (flash's score fragment feeding P@V's A operand).
 
-The placed `ContractionView` is the stored node with the caller facts **stamped** onto a copy (`ir.contraction_view`
+The placed `Contraction` is the stored node with the caller facts **stamped** onto a copy (`Contraction.placed`
 — output axes off the placement: the trailing grid for a root kernel, `Ctx.free` for the flash realizer; `tile`/`stage`
 off the `TileOp.schedule` slices) — binding-driven for both atoms, with **no per-atom subclass** — and cleanly
 splits the **algebra params** (what to contract: the m/n output `axes` + the `k_axis`, the leading batch `lead_axes`, the
@@ -72,7 +72,7 @@ dynamic-grid tier ceil-divides the launch and threads the runtime extent as an `
 dispatches `tile.op` into the recursion `_factorize(op, ctx, tail, out_val)`. `_factorize` walks the node tree — a `Map`
 with a `source` **recurses** (its projection `body` walked, via `_emit_body`, into the `tail`), and the leaf binds to
 the grid via the **ONE** root binder, `_bind` — a single pipeline that reads WHICH AXES the schedule tiles off the node
-and seals through the one `grid_tile` finalizer. A tiled contraction (`ContractionView`) tiles its OUTPUT `(m, n)` axes (register / warp
+and seals through the one `grid_tile` finalizer. A tiled contraction (`Contraction`) tiles its OUTPUT `(m, n)` axes (register / warp
 cells; the reduce K serial per cell); a cooperating `Fold` tiles its REDUCE axis instead (`_tile_reduce_axis` —
 BLOCK `coop` lanes at the unit level, REG `reg` ILP chains at the register level, the algebra merge — read off the
 fold node's `Reduction` view — closing the fold),
@@ -88,18 +88,18 @@ projection `tail` at the `Map` peel (`effect_tail`; plain stores append at a fla
 peel — the sinks, the sweep's coop `StridedLoop` distribution, the split realizers — consumes the identical stmt
 stream the stored-`Write` era carried. The
 recursion, the binder, the reduce-axis tiling, and the shared-row staging apply live in `_factor.py`. **There is no
-kind-specific path — no flash / attention special case.** Flash is the `TWISTED` fold composing two `ContractionView` nodes, so its
+kind-specific path — no flash / attention special case.** Flash is the `TWISTED` fold composing two `Contraction` nodes, so its
 Q@K / P@V contractions and its streaming reduce factorize through this one recursion (scalar block=1 today). A
 tensor-core flash tier is a matter of the contractions carrying an mma `TilePlan` (a schedule field on the node) and
 routing through the warp view seam like any other mma matmul — **never** a bespoke emitter, which
 would be a divergent codegen path the mandate forbids.
 
 **The contraction factorization — two atoms.** `_bind`'s output-tiled arm is atom-generic — there is no per-atom
-variant, and **no per-atom geometry object**. It expands any `ContractionView` by tiling a **leaf atom** four ways through
+variant, and **no per-atom geometry object**. It expands any `Contraction` by tiling a **leaf atom** four ways through
 the tiling layer (now inlined in `_factor.py`):
 `grid_tile(unit_tile(register_tile(atomize(...))))` — **GRID** block / **UNIT** / **REGISTER** / **ATOM**. The tiling
 geometry (the `(m, n)` `Side` pair — `tile` / `mask` / `block` / `unit` per axis — plus `block_threads` / `lanes`) is
-**derived on the `ContractionView`** (`@property`, from the `tile` schedule × the output axes); the two sides
+**derived on the `Contraction`** (`@property`, from the `tile` schedule × the output axes); the two sides
 thread through the tiling levels + the codegen callables as one `(m, n)` pair. `factorize` reads it straight off `c`
 and hands
 `grid_tile` the codegen in two halves: `_atom.reduce_codegen` — the reusable, **sink-agnostic** `(state_decls,

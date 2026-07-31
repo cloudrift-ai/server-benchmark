@@ -43,11 +43,12 @@ class Reduction:
     fold: object  # the Fold node (typed loosely — ir.tile imports nothing from here)
 
     def __post_init__(self) -> None:
-        # A ContractionView node answers through its λ-fold reading (``as_fold`` — the one
+        from emmy.compiler.ir.tile.ir import Contraction  # noqa: PLC0415 — ir.tile imports nothing from here
+
+        # A Contraction node answers through its λ-fold reading (``as_fold`` — the one
         # place the algebra machinery still derives the flat combine for a stored contraction).
-        as_fold = getattr(self.fold, "as_fold", None)
-        if as_fold is not None:
-            object.__setattr__(self, "fold", as_fold())
+        if isinstance(self.fold, Contraction):
+            object.__setattr__(self, "fold", self.fold.as_fold())
 
     @property
     def names(self) -> tuple[str, ...]:

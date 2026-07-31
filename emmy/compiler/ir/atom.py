@@ -1,6 +1,6 @@
 """The contraction **atom** — one leaf multiply-accumulate the contraction tier tiles over.
 
-An atom is the smallest cell a :class:`~emmy.compiler.ir.tile.ir.ContractionView` tiles four
+An atom is the smallest cell a :class:`~emmy.compiler.ir.tile.ir.Contraction` tiles four
 ways (GRID / UNIT / REGISTER / ATOM). Two kinds, one interface (``shape`` + :attr:`lanes`):
 
 - :class:`AtomKind` — a tensor-core ``mma.sync`` cell: a fixed ``(m, n, k)`` shape, per-operand
@@ -40,7 +40,7 @@ class AtomKind:
     ``operand_dtypes`` maps each role (``"a"`` / ``"b"`` / ``"c"``) to its element dtype;
     ``a``/``b`` are the multiplicands (f16 or bf16), ``c`` the accumulator (f32, or f16 on the
     ``..._f16_f16`` full-rate variant). Frozen + hashable so
-    it rides on a frozen ``TilePlan`` / ``ContractionView``. :attr:`lanes` is 32 — an mma is
+    it rides on a frozen ``TilePlan`` / ``Contraction``. :attr:`lanes` is 32 — an mma is
     warp-cooperative (one warp executes a cell)."""
 
     name: str

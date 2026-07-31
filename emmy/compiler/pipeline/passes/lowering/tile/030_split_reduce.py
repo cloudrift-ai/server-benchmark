@@ -35,8 +35,8 @@ exp-family LSE combine before projecting. Pays where the un-split grid starves t
 heads / short query axis); pin ``REDUCE=g<n>k``.
 
 **Two shapes of contraction split-K.** A structural ``Fold(axis=ksplit,
-source=ContractionView(k_axis=kslice))`` (built by ``_schedule._splitk_option``) has its K axis already
-factored + operands offset, so :func:`_split_contraction` makes the partial the **bare ContractionView**
+source=Contraction(k_axis=kslice))`` (built by ``_schedule._splitk_option``) has its K axis already
+factored + operands offset, so :func:`_split_contraction` makes the partial the **bare Contraction**
 — it factorizes to **mma** (or scalar) through ``_factor.factorize``, ``ksplit`` prefixed as a lead
 grid axis, no ``_slice_loop``. The residual path below (a plain-sum ``sum`` split, or a coop/ILP
 contraction still on a ``Map``) keeps the loop-slicing rewrite.
@@ -57,7 +57,7 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Init, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import projection_distributes as _projection_distributes
 from emmy.compiler.ir.tile import (
-    ContractionView,
+    Contraction,
     Fold,
     Map,
     Placement,
@@ -165,11 +165,11 @@ def _mapped(op, grid, *, name: str = "", knobs: dict | None = None, free=None, s
 
 
 def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold, plan: ReducePlan, split: Axis, projection=()):
-    """Realize a **structural** split-K ``Fold(axis=ksplit, step=[ContractionView])`` — the K axis is
+    """Realize a **structural** split-K ``Fold(axis=ksplit, step=[Contraction])`` — the K axis is
     already factored (``split`` == ``ksplit``, extent == ``cta``) and the operands offset, so the
-    partial is the **bare ContractionView** with ``ksplit`` prefixed as a lead grid axis (each CTA a fixed
+    partial is the **bare Contraction** with ``ksplit`` prefixed as a lead grid axis (each CTA a fixed
     partition) and its projection retargeted to the workspace / an atomic output. Because the partial
-    is a ``ContractionView``, materialize expands it through ``_factor.factorize`` — **mma** for a warp
+    is a ``Contraction``, materialize expands it through ``_factor.factorize`` — **mma** for a warp
     atom, scalar otherwise. No ``_slice_loop`` (unlike the residual plain-sum path).
 
     Finalize matches the additive-carrier finalize: ``atomic`` (``g<w>a``) atomicAdds the partition's
@@ -407,12 +407,12 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     # algebra read below (state names, identities, the cross-partition combine) is off the node,
     # never a loop annotation.
     fold_node = op.sources[0] if isinstance(op, Map) and op.sources else op
-    assert isinstance(fold_node, (Fold, ContractionView)), "split-reduce fires on node-form kernels only (reduce_plan gates on a node head)"
+    assert isinstance(fold_node, (Fold, Contraction)), "split-reduce fires on node-form kernels only (reduce_plan gates on a node head)"
     cta = plan.cta
     rax = rloop.axis
-    # Structural split-K: ``op`` is ``Fold(axis=ksplit, step=[ContractionView(k_axis=kslice)])`` —
+    # Structural split-K: ``op`` is ``Fold(axis=ksplit, step=[Contraction(k_axis=kslice)])`` —
     # the axis is already factored + operands offset (``_schedule._splitk_option``), so the partial
-    # is the **bare ContractionView** (→ ``factorize`` → mma / scalar), no ``_slice_loop``.
+    # is the **bare Contraction** (→ ``factorize`` → mma / scalar), no ``_slice_loop``.
     # The projection (when the split node carries one) rides the ``Map`` wrapper over the split
     # ``Fold`` — its ONE home; peel it here and hand it to the realizer.
     # The projection with the kernel-boundary stores reconstituted (1q) — the split realizers
@@ -430,7 +430,7 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     if isinstance(op, Map) and len(op.sources) == 1 and isinstance(op.sources[0], Fold) and op.sources[0].role is AxisRole.TWISTED:
         red_stmts = op.sources[0].step_stmts()
         head = red_stmts[0] if len(red_stmts) else None
-        head_tile = sched_of(tile).tile_of(head) if isinstance(head, (Fold, ContractionView)) else None
+        head_tile = sched_of(tile).tile_of(head) if isinstance(head, (Fold, Contraction)) else None
         if head_tile is not None and head_tile.is_warp:
             # A symbolic kv splits too: ``_split_twisted_warp`` builds the bn-aligned runtime slice
             # width and the absolute ``bound`` the realizer stops/masks against.

@@ -260,6 +260,33 @@ class EmmyGenRunner:
         # global layers differ, so the vLLM model reads per-layer dims via ``layer_meta``.
         self.head_dim, self.num_heads, self.num_kv_heads, self.scaling = attn_meta[0]
         self._np_dtype = np_dtype
+        self._sym_decode_warned: set[int] = set()  # widths already reported by _warn_symbolic_decode
+
+    def _warn_symbolic_decode(self, t: int) -> None:
+        """Report ONCE per width when a decode-shaped step misses the decode twin and falls to
+        the symbolic path. Silent here is a ~40% throughput loss that no audit sees: the twins
+        only cover the widths in :mod:`emmy.serving.twins`, so a step landing just above the
+        bucket looks like ordinary symbolic traffic. The live cause is the cudagraph ladder —
+        vLLM pads a step UP to a captured size before the runner ever sees it, so a rung sitting
+        one step above the bucket silently retires the twin (see ``_gen_graph_args``).
+
+        The advice deliberately leads with the ladder rather than with the bucket: widening the
+        bucket to an UNCOVERED width trades a throughput loss for a correctness risk, because such
+        a width resolves its kernels cold at boot, which is neither reproducible nor accuracy-gated
+        (bucket 256 on the gemma-4 image returns empty completions)."""
+        if t in self._sym_decode_warned or t > 2 * self._decode_bucket:
+            return
+        self._sym_decode_warned.add(t)
+        logger.warning(
+            "[gen_runner] decode-shaped step of %d tokens missed the decode twin (bucket %d) and fell to the "
+            "symbolic path — check that the cudagraph capture ladder has a rung <= the bucket (speculative "
+            "decoding re-rounds it), or raise EMMY_GEN_DECODE_BUCKET to >= %d. Prefer a width this deployment "
+            "has tuned kernels for: an uncovered width resolves its kernels cold, which is neither reproducible "
+            "nor accuracy-gated",
+            t,
+            self._decode_bucket,
+            t,
+        )
 
     def layer_meta(self, layer: int) -> tuple[int, int, int, float]:
         """Per-layer ``(head_dim, num_heads, num_kv_heads, scaling)``. Not uniform for Gemma-4:
@@ -752,6 +779,7 @@ class EmmyGenRunner:
             head = self._pre_prefill[layer].run_device([hidden[:pb]])
             tail = self._pre_decode[layer].run_device([hidden[pb:]])
             return tuple(torch.cat(pair, dim=0) for pair in zip(head, tail, strict=True))
+        self._warn_symbolic_decode(t)
         return tuple(self._pre[layer].run_device_sym([hidden]))
 
     def forward_layer_post_device(self, layer, attn_out, residual):

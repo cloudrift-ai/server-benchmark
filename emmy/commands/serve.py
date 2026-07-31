@@ -22,6 +22,7 @@ verbatim without extraction (the escape hatch for a hypothetical name clash).
 """
 
 import argparse
+import json
 import logging
 import os
 import shlex
@@ -130,6 +131,21 @@ def _flag_value(vllm_args: list[str], flag: str, default: str) -> str:
     return default
 
 
+def _spec_query_len(vllm_args: list[str]) -> int:
+    """Tokens per request per decode step: ``num_speculative_tokens + 1``, or 1 without
+    speculative decoding. Under MTP/EAGLE every request contributes the draft tokens PLUS
+    the verified one to the same step, so a steady-state decode step is
+    ``concurrency * query_len`` wide — not ``concurrency``."""
+    raw = _flag_value(vllm_args, "--speculative-config", "")
+    if not raw:
+        return 1
+    try:
+        cfg = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return 1  # vLLM validates it; a shape we can't read just means no adjustment
+    return int(cfg.get("num_speculative_tokens", 0) or 0) + 1
+
+
 def _gen_graph_args(vllm_args: list[str]) -> list[str]:
     """The eager/capture flags for emmy generative serving. DEFAULT is whole-step decode
     capture: a compilation-config asking for FULL_DECODE_ONLY graphs (full cudagraphs need no
@@ -141,7 +157,9 @@ def _gen_graph_args(vllm_args: list[str]) -> list[str]:
     encoding out of the capture window). Opt out with vLLM's own ``--enforce-eager``
     (forwards as-is); a caller-supplied ``--compilation-config`` also wins over ours. With
     the decode bucket off (``EMMY_GEN_DECODE_BUCKET=0``) nothing static is capturable, so
-    eager is forced."""
+    eager is forced. Under speculative decoding the ladder is floored to multiples of
+    ``num_speculative_tokens + 1`` so the bucket rung survives vLLM's own spec re-rounding —
+    see the comment on the flooring below."""
     from emmy import config as emmy_config  # noqa: PLC0415
 
     if _has_flag(vllm_args, "--enforce-eager") or _has_flag(vllm_args, "--compilation-config"):
@@ -157,6 +175,28 @@ def _gen_graph_args(vllm_args: list[str]) -> list[str]:
     max_seqs = int(max_seqs_raw) if max_seqs_raw.isdigit() else 256
     top = max(bucket, max_seqs)
     sizes = sorted({s for s in (1, 2, 4, 8, 16, 32, 64, 128, 256, 512) if s < top} | {bucket, top})
+    # Under speculative decoding vLLM re-rounds every capture size UP to a multiple of
+    # ``query_len`` (config/compilation.py adjust_cudagraph_sizes_for_spec_decode, guarding
+    # its issue #28207) and dispatches a step to the first size >= its width. A power-of-two
+    # ladder has no multiple of 3, so at depth 2 every rung MOVES: {16, 32, 192} became
+    # {18, 33, 192} — the 16 and 32 rungs landed one step ABOVE their own decode bucket, and
+    # every steady-state verify step missed the static twin it was sized for and fell to the
+    # symbolic masked-tile path (which run_device_sym also declines to graph-capture). Floor
+    # the rungs to multiples of query_len instead: flooring can only move a rung DOWN, so the
+    # bucket's own rung stays reachable at <= bucket and vLLM's round-up is then a no-op.
+    # Flooring alone is not enough, because a SPARSE ladder still overshoots: floored to multiples
+    # of 3 the power-of-two rungs are 15 then 30, so a 24-token step lands on 30 — under the bucket,
+    # but 6 rows of padding. vLLM's own default ladder is dense (stride 8), which is why the shipped
+    # image never hit this at all. Mirror that shape under speculation: dense candidates, each
+    # floored to a multiple of query_len. A 24-token step then lands exactly on 24, and a 192-token
+    # one exactly on 192, instead of on the next power of two.
+    query_len = _spec_query_len(vllm_args)
+    if query_len > 1:
+        dense = {1, 2, 4} | set(range(8, top + 1, 8)) | {bucket, top}
+        sizes = sorted({s - s % query_len for s in dense} - {0})
+        if not sizes:
+            logger.warning("no capture size survives flooring to num_speculative_tokens+1=%d; serving eager", query_len)
+            return ["--enforce-eager"]
     # ``custom_ops: +rotary_embedding``: the plugin runs the model EAGERLY inside the cudagraph
     # (no inductor), but vLLM's CustomOp dispatch assumes compilation will fuse native ops and
     # hands out ``forward_native`` — a per-layer torch-op soup (4 cats + 4 adds + an fp32

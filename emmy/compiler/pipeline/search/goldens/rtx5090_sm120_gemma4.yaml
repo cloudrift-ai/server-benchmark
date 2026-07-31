@@ -10,6 +10,16 @@
 # (~770x off cuBLAS), and on mlp_gate_up.dynM / attention.hd256.dynM it picks kernels that hang outright
 # (>1 s accuracy probe / >10 s bench cap) — the misdeploy + hang hazard class these goldens pin down.
 #
+# HOW TO READ emmy_us / cublas_us: both come from `run --bench --golden`, which replays ONE kernel over
+# ONE weight slab ~100x. Any slab under this card's 96 MB L2 is therefore timed L2-RESIDENT, not from
+# DRAM. Most narrow-N projection shapes here are in that regime (N=8192 K=3840 is 63 MB; N=30720 K=3840
+# is 236 MB and is not). Two consequences: (1) comparing two configs of the SAME shape stays valid — both
+# arms get the same L2 benefit, which is what the resolver ranks on; (2) the absolute microseconds must
+# NOT be used to predict in-model step time, because a decode step streams the whole ~21.8 GB trunk and
+# nothing stays resident. Measured the hard way on 2026-07-30: an m32 cone-placement change worth 42-49%
+# on two L2-resident edges moved a live server's per-step latency by 0.1%, while the one edge too big for
+# L2 won 8%. See plans/gemma4-narrow-decode-width-findings.md section 4a.
+#
 # Fast-math [fm] siblings (f16-accumulate mma atom) are kept BESIDE the standard entries, never replacing
 # them (a gate-off compile can't reach an f16acc config). The big-tile f16acc family (w4x2/f4x8/k4
 # d2/tma/ring, split g2k on the small-N shapes) wins 1.3-1.6x vs cuBLAS on every projection — the same
@@ -1325,9 +1335,9 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 33.9
-    cublas_us: 31.5
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x4/k4', REDUCE: 'g2a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 28.6
+    cublas_us: 26.7
   - kernel: matmul
     name: gemma4_12b.k_proj_global.m64.lin
     M: 64
@@ -2834,6 +2844,33 @@ configs:
   # on the .lin (serving F.linear) layout — the layout the twins deploy; canonical twins pending.
   # sliding layers: q(4096)+k(2048)+v(2048) -> N=8192; global layers (k_eq_v): q(8192)+k(512) -> N=8704;
   # MLP gate+up -> N=30720 (the GeGLU combine is now a separate downstream kernel).
+  # m32 (the decode-bucket width the batched serving lanes route onto) prefers the CUT placement on
+  # every fused edge, exactly as m8 and m64 do: the norm materializes to a workspace (a ~1.4 µs stat +
+  # ~0.8 µs scale at this M — free) and the matmul re-lowers with a plain gmem A, which lets it take
+  # the big-tile d2/tma/ring transport instead of the constrained sync compute-fill. The `fuse` twins
+  # are kept BESIDE the cut ones (a recorded measurement is never deleted, and `fuse` is the form a
+  # cone-cut-less enumeration can still reach); the resolver takes the fastest realizing entry, so the
+  # cut rows are what deploy. 3x reproduced at <2% spread, 2026-07-30 manual pinned --ab (no tuner).
+  #
+  # CAVEAT, measured end to end and worth more than these entries: swapping these three in on a live
+  # gemma-4 server moves the served step by 0.1% (28.06 vs 28.09 ms at conc 6, 28.77 vs 28.73 at conc 8),
+  # even though the boot log confirms the cut form deploys. `run --bench --golden` replays ONE weight slab
+  # 100x, so any slab under the card's 96 MB L2 is timed L2-resident: norm_qkv (63 MB) and
+  # norm_qk_global (67 MB) fit and showed the 42-49% wins, norm_gate_up (236 MB) does not and showed 8%.
+  # A decode step streams the whole 21.8 GB trunk, so none of it is L2-resident there. These entries are
+  # kept because they are not a regression, they give norm_gate_up.m32 a golden floor it had lost to
+  # enumeration drift, and they close norm_qkv's missing m32 coverage — NOT as a throughput improvement.
+  # See plans/gemma4-narrow-decode-width-findings.md section 4a.
+  - kernel: norm_linear
+    name: gemma4_12b.norm_gate_up.m32.cut.lin
+    M: 32
+    H: 3840
+    N: 30720
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 147.2
+    cublas_us: 154.0
   - kernel: norm_linear
     name: gemma4_12b.norm_gate_up.m32.lin
     M: 32
@@ -2865,6 +2902,19 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x16/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
     emmy_us: 1079.2
     cublas_us: 664.0
+  # The SLIDING layers' merged q||k||v edge at the decode bucket — 40 of the 48 `pre` programs. It had
+  # no m32 entry at all while its m8 and m64 siblings both record `cut`, so the single most-launched
+  # fused edge in the model had no floor at the width the batched serving lanes route onto.
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qkv.m32.cut.lin
+    M: 32
+    H: 3840
+    N: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 19.6
+    cublas_us: 29.0
   - kernel: norm_linear
     name: gemma4_12b.norm_qkv.m256.lin
     M: 256
@@ -2886,8 +2936,21 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x8/f4x4/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
     emmy_us: 299.8
     cublas_us: 224.0
-  # global m32: the g8k split total (38.1 + 2.0 finalize); at this shape the split beats every
-  # unsplit tile by >2x (68 CTAs of w1x16 under-fill 170 SMs).
+  # global m32: the CUT placement halves the fused g8k split total below — same reason the split beat
+  # the unsplit tiles (68 CTAs of w1x16 under-fill 170 SMs), taken further: cut into a plain gmem-A
+  # matmul the enumeration can tile at 136 CTAs on d2/tma/ring.
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qk_global.m32.cut.lin
+    M: 32
+    H: 3840
+    N: 8704
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE@cone: 'cut'}
+    emmy_us: 19.8
+    cublas_us: 29.0
+  # the fused g8k split total (38.1 + 2.0 finalize); at this shape the split beats every
+  # unsplit tile by >2x.
   - kernel: norm_linear
     name: gemma4_12b.norm_qk_global.m32.lin
     M: 32
@@ -3155,11 +3218,22 @@ configs:
     emmy_us: 87.3
     cublas_us: 91.7
   # gate_up_cat m64 .lin: the missing layout twin — the cold pick fell to the transposed b<n>t
-  # band on the .lin operand (16.9 ms, the 2026-07-25 per-kernel table's 109x case). Both lanes
-  # trail eager at this width (the fused norm_gate_up.m64 form owns serving at 169.4); the rows
-  # pin the isolated/cut-re-entry deploy to sanity. NOTE the m1 .lin twins are deliberately NOT
-  # recorded: their b64 optima (12.6 us, L2-warm) would out-rank the .t rows on the layout-blind
-  # key and poison the serving (.t) deploy — the interleaved-row removal lesson.
+  # band on the .lin operand (16.9 ms, the 2026-07-25 per-kernel table's 109x case). NOTE the m1
+  # .lin twins are deliberately NOT recorded: their b64 optima (12.6 us, L2-warm) would out-rank
+  # the .t rows on the layout-blind key and poison the serving (.t) deploy — the interleaved-row
+  # removal lesson.
+  #
+  # THE TILE-M RULE AT THIS WIDTH. A wide-N streaming edge is DRAM-bound at M=64: the whole B slab
+  # (30720x3840 fp16 = 236 MB) has to be read exactly once, so the output tile's M extent must be
+  # exactly 64. A 32-row tile splits M into two blocks that each stream the full slab (B read
+  # twice); a 128- or 256-row tile reads it once but wastes half to three quarters of the mma. Both
+  # mistakes cost the same ~1.55x — the std lane measures 228 us at w4x2/f2x4 (tile M 128) AND at
+  # w1x8/f2x2 (tile M 32), against 147 us for every tile-M-64 geometry (w1x8/f4x1, w2x4/f2x2,
+  # w4x2/f1x4, w1x8/f4x4 all land 146.7-152.2). k>=4 is required with it: the same winner at k2
+  # falls back to 222.9. 146.7 us is 1.61 TB/s = 90% of the card's DRAM peak, and 0.95x cuBLAS.
+  # The rule generalizes to the other wide-N m64 edges (qkv_cat / q_proj_global below, 35.1 -> 28.6)
+  # and NOT to the narrow-N or long-K ones — q_proj (N=4096, L2-resident) and mlp_down (K=15360,
+  # K-bound) are 3-6% SLOWER on the tile-M-64 family, so their w1x8/f2x2 records stand.
   - kernel: matmul
     name: gemma4_12b.gate_up_cat.m64.lin
     M: 64
@@ -3167,9 +3241,9 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 233.6
-    cublas_us: 156.0
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 146.7
+    cublas_us: 154.0
   - kernel: matmul
     name: gemma4_12b.gate_up_cat.m64.lin
     M: 64
@@ -3177,9 +3251,9 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4', REDUCE: 'g2k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 203.9
-    cublas_us: 156.0
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w4x2/f1x4/k8', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 145.6
+    cublas_us: 154.0
   - kernel: matmul
     name: gemma4_12b.qkv_cat.m64.lin
     M: 64
@@ -3187,9 +3261,9 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 34.0
-    cublas_us: 29.6
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w2x4/f2x4/k4', REDUCE: 'g2a', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 28.6
+    cublas_us: 26.7
   - kernel: matmul
     name: gemma4_12b.qk_global_cat.m64.lin
     M: 64
@@ -3200,16 +3274,6 @@ configs:
     knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
     emmy_us: 35.5
     cublas_us: 47.8
-  - kernel: matmul
-    name: gemma4_12b.gate_up_cat.m64.lin
-    M: 64
-    N: 30720
-    K: 3840
-    dtype: 'fp16'
-    trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f16/w1x8/f2x2/k2', REDUCE: '', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 225.4
-    cublas_us: 153.4
 
   # M=4096 merged (the mnbt-4096 prefill chunk). The fm consumer rows are what turn the cut
   # into an eager win (qkv cut total 940 fm vs eager 1200); the std consumers sit at parity.
@@ -3512,9 +3576,14 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/tma/ring', WSPEC: ''}
-    emmy_us: 481.4
-    cublas_us: 292.0
+    # The std lane's tile-M rule at M=256: `k4` and `gm8` group-M rasterization (L2 reuse across the
+    # N sweep) are both required, and the cross-CTA split is not. w4x2/f2x4 at k2 with a g4k split —
+    # the pre-2026-07-30 record — costs 1.74x cuBLAS; the same tile at k4 with gm8 and no split costs
+    # 1.07x. This row also floors the FUSED norm_gate_up.m256 edge, which deploys `PLACE@cone: cut`
+    # and so resolves its matmul against this shape: that path measures 483.5 -> 296.4 us.
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w4x2/f2x4/k4', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 291.8
+    cublas_us: 273.7
   - kernel: matmul
     name: gemma4_12b.gate_up_cat.m256.lin
     M: 256
@@ -4104,3 +4173,115 @@ configs:
     knobs: {TILE: 'f4'}
     emmy_us: 6.2
     cublas_us: 12.0
+
+  # ---- M=192: the c=64 MTP-d2 decode bucket (2026-07-30 hand sweep) --------------------------------
+  # This width had NO records of any kind, which is the misdeploy hazard the file exists to close: a
+  # cold resolve there is not reproducible (the same serving configuration has measured 10.7 and
+  # 332.7 tok/s end to end), because with no golden the fused twins fall to a greedy search.
+  #
+  # 192 refines the tile-M rule the m64 / m256 blocks state. No reachable M extent (WM*FM*16) equals
+  # 192, so SOME B re-read is unavoidable: a 64-row tile needs three M-blocks, a 128-row tile two
+  # (the second half-empty), a 256-row tile one but with a quarter of the mma wasted. The winner is
+  # the 64-row tile — but ONLY with `gm8` group-M rasterization, which schedules the three blocks
+  # sharing an N-tile together so their re-reads are L2 hits rather than DRAM traffic: 274.8 us with
+  # gm8 against 434.4 us with the identical tile and no rasterization. So the invariant is "B leaves
+  # DRAM once", and rasterization is a second way to buy it when the tile extent cannot.
+  # These rows still trail cuBLAS (1.17x-1.61x) — 192 is a genuinely awkward width and mlp_down's
+  # long-K shape wants a family this sweep did not explore. They are recorded because a deterministic
+  # 1.2x loss replaces a non-reproducible one that can be 100x.
+  - kernel: matmul
+    name: gemma4_12b.gate_up_cat.m192.lin
+    M: 192
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k8', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 274.8
+    cublas_us: 234.3
+  - kernel: matmul
+    name: gemma4_12b.qkv_cat.m192.lin
+    M: 192
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k8', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 89.3
+    cublas_us: 70.0
+  - kernel: matmul
+    name: gemma4_12b.qk_global_cat.m192.lin
+    M: 192
+    N: 8704
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k8', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 89.8
+    cublas_us: 70.0
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.m192.lin
+    M: 192
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f4x1/k8', REDUCE: 'g2a', RASTER: 'gm8', STAGE: 'd2/tma/ring', WSPEC: ''}
+    emmy_us: 193.1
+    cublas_us: 120.0
+  # The FUSED (computed-A) norm->linear cones at this width. These are the rows that matter most
+  # here: with no fused golden the cone cold-resolves to the per-cell `fuse`/`b128` scalar config,
+  # which is not a mild loss but a ~300x one — measured on-card at m192, std lane, against torch's
+  # unfused norm-then-matmul reference:
+  #
+  #   norm_gate_up   132,633 us -> 429.3   (309x)      norm_qkv        35,579 us -> 116.2   (306x)
+  #   norm_qk_global  37,965 us -> 118.2   (321x)      mlp_down_fused  65,067 us -> 265.5   (245x)
+  #
+  # Summed over 48 layers that is ~11.2 s of kernel time per decode step before, ~39 ms after. It is
+  # the mechanism behind the c=64 lane's 10.7 tok/s bare-metal reading, and it is deterministic —
+  # not the run-to-run lottery it was taken for. A computed-A contraction can only ride the sync
+  # compute-fill transports, so the realizable options are `d1/sync` / `d2/sync` and never the TMA
+  # ring; within them all four cones pick the SAME geometry the m64 fused rows already carry
+  # (w1x8/f2x2/k4 + d1/sync), so the fused family is far less width-sensitive than the plain matmuls
+  # above. Recording `PLACE@cone: cut` beside a TILE here would NOT work — that combination never
+  # realizes, and an unrealizable fused row is what produces the scalar config in the first place.
+  - kernel: norm_linear
+    name: gemma4_12b.norm_gate_up.m192.lin
+    M: 192
+    H: 3840
+    N: 30720
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 429.3
+    cublas_us: 266.0
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qkv.m192.lin
+    M: 192
+    H: 3840
+    N: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 116.2
+    cublas_us: 100.0
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qk_global.m192.lin
+    M: 192
+    H: 3840
+    N: 8704
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 118.2
+    cublas_us: 101.0
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m192.lin
+    M: 192
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {TILE: 'a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync', WSPEC: ''}
+    emmy_us: 265.5
+    cublas_us: 165.0

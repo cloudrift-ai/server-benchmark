@@ -104,9 +104,16 @@ def test_mtp_smoke_test_expands_to_32_lane_points(project_root):
         d = depth(t)
         assert bucket >= conc * (d + 1)
         if d:
-            # Smallest tuned width covering the verification step; the c=64 depth-2
-            # cell needs the documented untuned 192.
-            want = {1: 8, 4: 16, 8: 32, 64: 192}[conc]
+            # A tuned width that leaves a capture rung UNDER itself, not the tightest width
+            # covering the verification step. vLLM rounds the capture ladder to multiples of
+            # (depth+1) and pads a step to the first rung at or above its width, so a tightest
+            # bucket gets overshot by its own steps and loses the static twin. Overshooting the
+            # bucket instead costs almost nothing (decode reads the weights once per step), so
+            # these pick the well-covered width: 32 rather than 16 (m16 carries only the
+            # unfused projections). c=64 is pinned to 192 as the exception — the same rule says
+            # 256, and it is faster, but bucket 256 fails the output-quality gate (see the
+            # recipe header), so the untuned-but-correct width stays.
+            want = {1: 8, 4: 32, 8: 32, 64: 192}[conc]
         else:
             # The serving_rtx5090 protocol: 32 at c=1, 8 on the mixed batched cells,
             # 64 at c=64.

@@ -166,15 +166,15 @@ def test_lift_recognizes_contraction_between_views_of_same_packed_buffer():
     node, free, stores = recognize._lift(list(body), "score")
 
     assert [axis.name for axis in free] == ["m", "n"]
-    # Both views of the packed buffer hoist as materialized operand edges of the stored fold.
-    from emmy.compiler.ir.tile import Fold as _Fold
+    # Both views of the packed buffer hoist as materialized operand edges of the stored node.
+    from emmy.compiler.ir.tile import ContractionView as _CV
     from emmy.compiler.ir.tile.ir import shared_operand
 
-    fold = node.sources[0] if not isinstance(node, _Fold) else node
-    assert isinstance(fold, _Fold) and fold.role.name == "CONTRACTION"
-    a_edge = shared_operand(fold)
+    con = node.sources[0] if not isinstance(node, _CV) else node
+    assert isinstance(con, _CV) and con.role.name == "CONTRACTION"
+    a_edge = shared_operand(con)
     assert isinstance(a_edge, Load)
-    assert {e.input for e in fold.operands if isinstance(e, Load)} == {"packed_qkv"}
+    assert {e.input for e in (con.a, *(ch.b for ch in con.channels)) if isinstance(e, Load)} == {"packed_qkv"}
 
 
 # --------------------------------------------------------------------------- #
@@ -520,18 +520,17 @@ def _prologue_shape(*, b_layouts):
 
 
 def test_channels_with_agreeing_b_layouts_form_one_product_node():
-    from emmy.compiler.ir.tile import shared_operand
-    from emmy.compiler.ir.tile.ir import _parse_bilinear
+    from emmy.compiler.ir.tile import ContractionView, shared_operand
     from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
 
     node, free = _prologue_shape(b_layouts=(False, False))
     bound = bind_prologue_contraction(node, free)
     assert bound is not None
     c_map, _, _stores = bound
-    (product,) = c_map.sources  # the stored role=CONTRACTION fold
-    parsed = _parse_bilinear(product)
-    assert parsed is not None and len(parsed[1]) == 2, "two components over ONE shared edge — sharing is edge reuse"
-    assert not isinstance(shared_operand(product), type(None)) and shared_operand(product) is parsed[0]
+    (product,) = c_map.sources  # the stored contraction node
+    assert isinstance(product, ContractionView)
+    assert len(product.channels) == 2, "two channels over ONE shared edge — sharing is the node's arity"
+    assert shared_operand(product) is product.a
 
 
 def test_channels_with_disagreeing_b_layouts_never_group():

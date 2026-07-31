@@ -20,12 +20,18 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
 - **Pipeline / autotune** (pass framework, knob/fork system, online/offline-prior search, two-level tune) →
   [`emmy/compiler/pipeline/ARCHITECTURE.md`](emmy/compiler/pipeline/ARCHITECTURE.md)
 - **Tile lowering** (LoopOp → TileOp; **purely algebraic moveset — no shape specializations**. The stored tile IR
-  has exactly TWO node kinds (both in `ir/tile/ir.py`): the general **`Fold`** — `reduce(⊕) ∘ map(f)`, stored in
+  has exactly THREE node kinds (all in `ir/tile/ir.py`): the general **`Fold`** — `reduce(⊕) ∘ map(f)`, stored in
   the λ-foldMap spelling (1m–1p): an iteration `axis`, a pure **`lift`** `Lambda` (`λ(k, v₁…vₙ) → S` — the
   element's SINGLETON state; ι spelled in the lift, softmax's is `(x, 1)`), the TRUE monoid's flat **`(init,
   combine)`** fields (ONE program, its results the fold's real accumulator names; the free helpers in
   `ir/stmt/algebra`), and a symmetric tuple of
-  **`operands`** (the CLOSED inputs, each an edge, bound POSITIONALLY to the lift params) — and the lift/projection
+  **`operands`** (the CLOSED inputs, each an edge, bound POSITIONALLY to the lift params); the bilinear
+  **`ContractionView`** node (1s) — every recognized contraction stores as this kind: its own reduce `k_axis`, the
+  shared `a` operand edge and the product `Channel`s `(b_i, acc_i)` (arity N = the fused gate⊗up edge; sharing is
+  the node's arity), with the placement/schedule fields (`axes`, `lead_axes`, `tile`, `stage`) UNSET in the stored
+  term — caller facts, stamped onto a `replace()` copy at the point of use (`ir.contraction_view`, now a pure field
+  stamp; `as_fold()` survives only as the node's DERIVED λ reading, consumed by the cross-partition `Reduction`
+  machinery and the PLANAR demotion, its loop body byte-identical to the node's own) — and the lift/projection
   wrapper `Map` (`fn: Lambda` + `sources`, bound positionally; `fn.results` replaced the `out` last-def convention).
   The serial step and the `Accum` forms are DERIVED (combine at the singleton; the twist
   family selected structurally, never stored), and loops carry NO algebra — `Loop`/`StridedLoop` hold only their
@@ -37,14 +43,14 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   matvec demotion is a formation fact. There is NO stored `step` SEQUENCE (deleted at step 7): the composed
   evaluations DERIVE — flash's kv stream λ-spells with its QK score a HOISTED operand edge and its PV
   synthesized+memoized inside the derived blocked evaluation (`Fold.step_stmts()` the one consumer read), and
-  split-K's outer reduce is the identity-lift composition (`ir.composed_contraction` the one read). A matmul, a
-  bare sum, RMSNorm's statistic, the fused gate⊗up edge and flash are
-  all `Fold` at different monoid arities and roles (`PLANAR`/`TWISTED`/`CONTRACTION` — the role is DERIVED
-  (`Fold.role`), never stored: TWISTED off the derived twist family, CONTRACTION off the bilinear parse of the
-  lift body or the composed split-K operand, PLANAR otherwise — so an unbindable matvec-shaped
-  contraction, whose loads stay inline in the lift, derives PLANAR and takes the reduce tiers at schedule dispatch
-  with no recognition-time demotion rewrite). **Sharing is edge reuse**:
-  the gate⊗up lift reads one cone edge twice — no privileged operand slot, no let table, no reference arm.
+  split-K's outer reduce is the identity-lift composition (`ir.composed_contraction` the one read). A bare sum,
+  RMSNorm's statistic and flash's stream are `Fold` at different monoid arities; a matmul, the fused gate⊗up edge,
+  flash's QK score and the derived PV are the `ContractionView` node kind (the kind IS the `CONTRACTION` role — no
+  bilinear parse; a `Fold`'s role stays DERIVED (`Fold.role`), never stored: TWISTED off the derived twist family,
+  CONTRACTION off the composed split-K operand, PLANAR otherwise — so an unbindable matvec-shaped
+  contraction, whose loads recognition keeps inline in the lift instead of building the node, derives PLANAR and
+  takes the reduce tiers at schedule dispatch with no recognition-time demotion rewrite). **Sharing is arity**: the
+  gate⊗up node reads one cone edge across two channels — no privileged operand slot, no let table, no reference arm.
   `Fold.loop` splices each operand's body before the first read of its bound param and flattens
   nested nodes in place — the derived loop depends only on the stored params; kernel identity is the α-INVARIANT
   TERM HASH (`ops.term_key`: canonical renumbering + hash-time ANF body-order canonicalization, consumed by
@@ -55,13 +61,13 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   validation reading) and decides cut legality: closed subtrees may hoist to edges; combine's derived material —
   flash's PV, whose `P` reads the running state — sits BELOW the seam lattice, a derived schedule site excluded
   from PLACE (`Site.derived`), while flash's QK operand edge IS a PLACE
-  site. **The `ContractionView` is DERIVED, never stored**: one shared `a` edge + product
-  `Channel`s `(b_i, acc_i)` + the `(m, n)` `Side` geometry — the bilinear reading the tensor-core/staged tiers
-  require, built by `contraction_view(fold, m, n, lead)` from a `role=CONTRACTION` fold plus the CALLER's placement
-  axes (trailing grid for a root kernel; `place.free` threads to the materializer via `Ctx.free` for flash), stored
-  back via `ContractionView.as_fold()` (round-trip + loop byte-identity unit-tested; `ir.shared_operand` is the
+  site. **The `ContractionView`'s placement/schedule fields are STAMPED, never stored**: the stored node is pure
+  algebra (`k_axis` + the `a` edge + `Channel`s), and the placed reading the tensor-core/staged tiers require —
+  the `(m, n)` `Side` geometry + `tile`/`stage` — is stamped onto a `replace()` copy by `contraction_view(node, m,
+  n, lead, tile, stage)` from the CALLER's placement axes (trailing grid for a root kernel; `place.free` threads
+  to the materializer via `Ctx.free` for flash) and the `TileOp.schedule` slices (`ir.shared_operand` is the
   placement-free cone read). The A/B asymmetry that is real — A M-resident/compute-fillable, B streamed — is a
-  SCHEDULE fact read off the view's roles (`isinstance(c.b, Load)` eligibility gates), not a storage fact. A cone's
+  SCHEDULE fact read off the node's roles (`isinstance(c.b, Load)` eligibility gates), not a storage fact. A cone's
   SOURCE is the row-invariant prologue (the per-row statistic) and its `body` the per-cell normalize, so the K seam
   is the node boundary (`ops.cone_seam`). A projection has ONE home, the wrapping `Map.fn` — never a node field —
   and since 1q the fn of every recognized term is a STRICT pure `Lambda`: the root-store `Write`s (and the
@@ -72,7 +78,7 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   fused-tail sibling — keep an impure fn through the one `_loop_ir_fn` arm).
   A bare reduce is a root `Fold`; softmax/RMSNorm is `Map(fn=per-cell normalize, sources=(Fold,))` + a sweep
   `Store`; the fused norm→linear /
-  gate⊗up composition is `Map(fn=combine, sources=(fold,))` over the product fold (a fork sibling of its
+  gate⊗up composition is `Map(fn=combine, sources=(ContractionView,))` over the product node (a fork sibling of its
   coop-reduce form — option-0 stays coop; warp mma rows ride the sync compute-fill); a pure pointwise cell is a
   `Map(sources=())` + its root `Store`s. Every schedule slice (`TilePlan` / `ReducePlan` / `Stage`) lives in `TileOp.schedule` — a dict keyed by the
   tree-path codec's canonical key (`ir/tile/path.py`: ONE walker + resolver, short-path-canonical — bare for the
@@ -86,8 +92,8 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   aliases; the golden corpus re-spelled mechanically). Dispatch reads the
   role/algebra off the node (`ops.axis_role`/`reduce_loop` recurse through `Map.sources`), and `ops.lower` flattens
   any node back to the same loop nest — no stored `Monoid`/`Semiring` kind. Flash is the `TWISTED` fold on the
-  streaming schedule, its QK a hoisted operand-edge `role=CONTRACTION` fold and its PV the derived evaluation's
-  synthesized contraction — a twisted monoid is a monoid,
+  streaming schedule, its QK a hoisted operand-edge `ContractionView` and its PV the derived evaluation's
+  synthesized contraction node — a twisted monoid is a monoid,
   selected structurally not as a distinct kind) →
   [`emmy/compiler/pipeline/passes/ARCHITECTURE.md`](emmy/compiler/pipeline/passes/ARCHITECTURE.md)
 

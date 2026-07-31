@@ -72,7 +72,6 @@ from emmy.compiler.ir.tile import (
     Map,
     Placement,
     TileOp,
-    TilePlan,
     demote_operands,
     shared_operand,
     split_effects,
@@ -328,18 +327,14 @@ def _nodify_contraction(node, free: tuple):
             pass
         else:
             con = ContractionView(
-                axes=(free[-2], free[-1]),
                 k_axis=rloop.axis,
                 a=a_load if isinstance(a_load, Load) else make_cone(a_load, rloop.axis.name),
                 channels=(Channel(b=b_load, acc=acc),),
-                tile=TilePlan(),
-                lead_axes=tuple(free[:-2]),
             )
             # ONE home for the projection: the wrapping ``Map``'s body, never a node field. The
-            # STORED form is the role=CONTRACTION fold (the 1k vocabulary); ``ContractionView`` is the
-            # derived view the schedule re-extracts (``contraction_view``).
-            fold = con.as_fold()
-            return _project(fold, epi)
+            # STORED form is the :class:`ContractionView` node itself (1s) — pure algebra; the
+            # output axes / tile / stage are caller facts, stamped at the point of use.
+            return _project(con, epi)
     red = Fold.from_loop(rloop)  # loads stay inline in the lift — the fold derives PLANAR
     if red is None:  # not λ-representable — the raw-loop-IR escape (the flat Map)
         return Map(body=(rloop, *projection)), ()

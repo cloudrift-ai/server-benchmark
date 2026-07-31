@@ -169,7 +169,7 @@ def test_a_projection_rides_the_map_wrapper_not_the_node() -> None:
     ``Fold`` tiers use — so the future cut realizer sees a single seam shape."""
     proj = (Assign(name="y", op="relu", args=("acc",)), Write(output="out", index=(Var("m"), Var("n")), value="y"))
     c = _contraction()
-    node = Map(body=Body(proj), sources=(c.as_fold(),))  # the STORED form under the wrapper
+    node = Map(body=Body(proj), sources=(c,))  # the STORED form under the wrapper
     assert lower(c) == [c.loop]
     assert lower(node) == [c.loop, *proj]
     assert reduce_loop(node).role is AxisRole.CONTRACTION  # the projection doesn't hide the contraction
@@ -231,7 +231,7 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
     SINGLE ``for ksplit:[for kslice: mul-add]`` with DISTINCT axis names (not ``for k:[for k:]``),
     and it still classifies as a ``CONTRACTION`` carrying the GRID (cta) partition."""
     from emmy.compiler.ir.stmt import Lambda
-    from emmy.compiler.ir.stmt.algebra import M, component_ops
+    from emmy.compiler.ir.stmt.algebra import M
     from emmy.compiler.pipeline.passes.lowering.tile._schedule import _factor_k
 
     c = _contraction()  # k_axis = k(256)
@@ -244,16 +244,15 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
     )
     from emmy.compiler.ir.tile.ops import sched_of
 
-    inner_fold = inner.as_fold()
-    accs = inner_fold.combine.results
-    init, combine = M(*component_ops(inner_fold.combine), names=accs)
+    accs = inner.defines()
+    init, combine = M(*(["add"] * len(accs)), names=accs)
     red = Fold(
         axis=ksplit,
-        operands=(inner_fold,),  # the sliced fold rides the ONE operand edge — the λ-spelled (step 7) form
+        operands=(inner,),  # the sliced NODE rides the ONE operand edge — the identity-lift composition
         lift=Lambda(params=(ksplit.name, *accs), body=Body(()), results=accs),
         init=init,
         combine=combine,
-        dtypes=inner_fold.dtypes,
+        dtypes=(None,) * len(accs),
     )
 
     # The outer fold derives CONTRACTION off its composed step — the one non-bilinear arm.
@@ -280,7 +279,7 @@ def test_reduce_partial_flattens_a_nested_pv_contraction() -> None:
     from emmy.compiler.ir.stmt import Lambda
     from emmy.compiler.ir.stmt.carrier import exp_combine_states
 
-    qk = _contraction().as_fold()  # Σ_k A·B -> acc (the score S)
+    qk = _contraction()  # Σ_k A·B -> acc (the score S)
     prob = Assign(name="p", op="exp", args=("acc",))  # the lift body — between QK and the merge
     names = ("m_i", "l_i", "O_i")
     other = tuple(f"{n}__o" for n in names)
@@ -415,15 +414,14 @@ def test_contraction_computed_a_factorizes_at_the_scalar_tier() -> None:
 # --- composed steps: every structural node is a Stmt, so a body can hold one ---------------------- #
 
 
-def test_stored_node_kinds_are_stmts_and_the_view_is_not() -> None:
+def test_stored_node_kinds_are_stmts() -> None:
     """A composed step occupies a STATEMENT position in another node's body — flash's Q@K and P@V
-    folds in a reduce partial, split-K's sliced fold. Uniform ``Stmt``-hood over the STORED kinds is
-    what makes that legal; the :class:`ContractionView` VIEW is derived, never stored, and deliberately
-    not a ``Stmt``."""
+    contractions in a reduce partial, split-K's sliced node. Uniform ``Stmt``-hood over the STORED
+    kinds — :class:`Fold`, :class:`Map` and the :class:`ContractionView` node (1s) — is what makes
+    that legal."""
     from emmy.compiler.ir.stmt.base import Stmt
 
-    assert all(issubclass(k, Stmt) for k in (Fold, Map))
-    assert not issubclass(ContractionView, Stmt)
+    assert all(issubclass(k, Stmt) for k in (Fold, Map, ContractionView))
 
 
 def test_a_generic_body_walk_reaches_a_composed_nodes_children() -> None:
@@ -445,7 +443,7 @@ def test_a_composed_step_keeps_its_position_when_flattened() -> None:
     from emmy.compiler.ir.tile.ir import _flatten_nodes
 
     before, after = Assign(name="m", op="copy", args=("s",)), Assign(name="o", op="copy", args=("p",))
-    flat = _flatten_nodes(Body((before, _pv_contraction().as_fold(), after)))
+    flat = _flatten_nodes(Body((before, _pv_contraction(), after)))
     assert flat[0] is before and flat[-1] is after
     assert any(isinstance(s, Loop) and s.role is AxisRole.CONTRACTION for s in flat[1:-1])
 
@@ -529,7 +527,7 @@ def test_an_inline_b_edge_is_walked_like_any_other_node() -> None:
     from emmy.compiler.ir.tile.ir import tree_nodes
 
     c = _computed_b_contraction()
-    assert c.b in list(tree_nodes(c.as_fold()))
+    assert c.b in list(tree_nodes(c))
 
 
 # --- the ONE worker inventory (1r): TileOp.work derived from the TILE slices ---------------------- #
@@ -556,8 +554,7 @@ def test_seal_workers_fills_the_slot_off_the_schedule_dict() -> None:
     from emmy.compiler.ir.tile.ops import sched_of, seal_workers
 
     c = _contraction()
-    fold = c.as_fold()
-    t = _tile(fold)
-    sched_of(t).put("TILE", fold, TilePlan.parse("n2/f2"))
+    t = _tile(c)
+    sched_of(t).put("TILE", c, TilePlan.parse("n2/f2"))
     seal_workers(t)
     assert t.work == Workers(kind="thread", units=(2, 1))

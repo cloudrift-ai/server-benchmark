@@ -89,7 +89,7 @@ from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop.ir import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Lambda, Load, Loop, Select, SelectBranch, Write
 from emmy.compiler.ir.stmt.carrier import exp_combine_states
-from emmy.compiler.ir.tile import Channel, ContractionView, Fold, Placement, Store, TileOp, TilePlan
+from emmy.compiler.ir.tile import Channel, ContractionView, Fold, Placement, Store, TileOp
 from emmy.compiler.ir.tile.ops import Map
 
 if TYPE_CHECKING:
@@ -377,11 +377,9 @@ def _flash_op(
     # redundant one-dot-per-output-element score. Its output axes are the score matrix ``[m, kv]``.
     # The scale / mask reads ``sacc``.
     score_contraction = ContractionView(
-        axes=(Axis(name="m", extent=s_q), Axis(name="kv", extent=s_k)),
         k_axis=Axis(name="dd", extent=Dim(head_dim)),
         a=Load(name="q_e", input=q_buf, index=q_idx),
         channels=(Channel(b=Load(name="k_e", input=k_buf, index=k_idx), acc="sacc"),),
-        tile=TilePlan(),
     )
     score_post = [
         Load(name="scale_c", input="_flash_scale", index=()),
@@ -437,7 +435,7 @@ def _flash_op(
     lift = Lambda(params=("kv", "sacc", "v_e"), body=Body(tuple(score_post)), results=(score_name, 1.0, "v_e"))
     reduction = Fold(
         axis=Axis(name="kv", extent=s_k),
-        operands=(score_contraction.as_fold(), Load(name="v_e", input=v_buf, index=v_idx)),
+        operands=(score_contraction, Load(name="v_e", input=v_buf, index=v_idx)),
         lift=lift,
         init=(float("-inf"), 0.0, 0.0),
         combine=combine,

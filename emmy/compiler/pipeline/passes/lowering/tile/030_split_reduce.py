@@ -57,6 +57,7 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Init, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import projection_distributes as _projection_distributes
 from emmy.compiler.ir.tile import (
+    ContractionView,
     Fold,
     Map,
     Placement,
@@ -406,7 +407,7 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     # algebra read below (state names, identities, the cross-partition combine) is off the node,
     # never a loop annotation.
     fold_node = op.sources[0] if isinstance(op, Map) and op.sources else op
-    assert isinstance(fold_node, Fold), "split-reduce fires on node-form kernels only (reduce_plan gates on a Fold head)"
+    assert isinstance(fold_node, (Fold, ContractionView)), "split-reduce fires on node-form kernels only (reduce_plan gates on a node head)"
     cta = plan.cta
     rax = rloop.axis
     # Structural split-K: ``op`` is ``Fold(axis=ksplit, step=[ContractionView(k_axis=kslice)])`` —
@@ -429,7 +430,7 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     if isinstance(op, Map) and len(op.sources) == 1 and isinstance(op.sources[0], Fold) and op.sources[0].role is AxisRole.TWISTED:
         red_stmts = op.sources[0].step_stmts()
         head = red_stmts[0] if len(red_stmts) else None
-        head_tile = sched_of(tile).tile_of(head) if isinstance(head, Fold) else None
+        head_tile = sched_of(tile).tile_of(head) if isinstance(head, (Fold, ContractionView)) else None
         if head_tile is not None and head_tile.is_warp:
             # A symbolic kv splits too: ``_split_twisted_warp`` builds the bn-aligned runtime slice
             # width and the absolute ``bound`` the realizer stops/masks against.

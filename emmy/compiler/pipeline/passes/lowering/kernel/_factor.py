@@ -264,7 +264,13 @@ def _emit(op, ctx: Ctx) -> Frag:
         stmts = _emit_body(Body(op.spliced_step()), ctx)  # operand edges splice ahead of first use
         loop = Loop(axis=op.axis, body=Body(tuple(stmts)), unroll=op.unroll, role=op.role)
         return Frag(body=[loop], out=Handle(op.out))
-    raise TypeError(f"_emit: expected a Map / Fold node, got {type(op).__name__}")
+    if isinstance(op, ContractionView):
+        # The per-cell scalar contraction (no TILE slice): the node's synthesized mul-add loop —
+        # operand edges already flattened in place, so the walk below only passes stmts through.
+        loop = op.loop
+        stmts = _emit_body(loop.body, ctx)
+        return Frag(body=[Loop(axis=loop.axis, body=Body(tuple(stmts)), unroll=loop.unroll, role=loop.role)], out=Handle(op.out))
+    raise TypeError(f"_emit: expected a Map / Fold / ContractionView node, got {type(op).__name__}")
 
 
 def _map_wire(op: Map) -> Handle:
@@ -302,7 +308,7 @@ def _emit_body(body, ctx: Ctx) -> list[Stmt]:
     since a warp-tiled nested contraction lowers to mma, not a scalar loop)."""
     out: list[Stmt] = []
     for s in body:
-        if isinstance(s, (Fold, Map)):
+        if isinstance(s, (Fold, Map, ContractionView)):
             out.extend(_emit(s, ctx).body)
         else:
             out.append(s)
@@ -407,14 +413,14 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
       one-thread-per-cell fold: the per-cell body (:func:`_emit`; a serial reduce ``Loop`` sits
       inside it) + ``tail`` + the ``out_val`` store glue is the whole fold region."""
     grid = tuple(ctx.grid)
-    if isinstance(op, Fold) and op.role is AxisRole.CONTRACTION and ctx.sched.tile_of(op) is not None and len(grid) >= 2:
-        # The STORED form is the bilinear fold; the ContractionView reading is DERIVED here, its output
-        # axes the kernel grid's trailing pair (a split partial's ksplit rides the leading grid, so
-        # the lead axes fall out of the same read) and its tile / stage the schedule slices.
-        view = contraction_view(op, grid[-2], grid[-1], tuple(grid[:-2]), tile=ctx.sched.tile_of(op), stage=ctx.sched.stage_of(op))
-        if view is not None:
-            op = view
-    if isinstance(op, ContractionView):
+    if isinstance(op, ContractionView) and op.axes is None and ctx.sched.tile_of(op) is not None and len(grid) >= 2:
+        # The STORED node is pure algebra; the tiled reading is STAMPED here — its output axes the
+        # kernel grid's trailing pair (a split partial's ksplit rides the leading grid, so the lead
+        # axes fall out of the same read) and its tile / stage the schedule slices. A stored node
+        # WITHOUT a TILE slice keeps ``axes=None`` and takes the reduce tiers below (the per-cell /
+        # coop-K forms).
+        op = contraction_view(op, grid[-2], grid[-1], tuple(grid[:-2]), tile=ctx.sched.tile_of(op), stage=ctx.sched.stage_of(op))
+    if isinstance(op, ContractionView) and op.axes is not None:
         epi = list(tail)
         if not has_write(epi):
             epi = with_store(epi, ctx.output, grid, op.out)
@@ -431,7 +437,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
         # scalar per-cell ``Map`` (no partition). Every partitioned reduce — monoid, flash, coop-K /
         # split contraction — is a ``Fold`` node after ``ops.nodify_reduce`` (a projecting
         # ``Map`` was already peeled off by :func:`_factorize`).
-        plan = (ctx.sched.reduce_of(op) or ReducePlan()) if isinstance(op, Fold) else None
+        plan = (ctx.sched.reduce_of(op) or ReducePlan()) if isinstance(op, (Fold, ContractionView)) else None
         t, mn, lead, lanes = atomize((1, 1)), (None, None), grid, 1
         wsrc = warp_source(op, ctx.sched)
         csrc = chain_source(op, ctx.sched) if wsrc is None else None

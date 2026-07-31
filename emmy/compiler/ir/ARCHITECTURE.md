@@ -404,15 +404,14 @@ LoopOp bodies without spelling out every `Loop(Axis(…))` nest.
 
 ## `tile/`
 
-Tile IR (`tile/ir.py`, `tile/ops.py`) carries the scheduling decisions on the
-op tree + thin root fields rather than re-deriving them from the body. A `TileOp` holds the structural-IR root `op`
-directly — a `Map` / `Reduction` / `Contraction` (defined in `tile/ir.py`, over the `ir/stmt/algebra.py` annotated loop
-nest) — plus thin schedule fields: the root-global free→grid `Placement` (`place`) and warp split (`workers`), and the
-residual `tier` / `stage` for the not-yet-nodified contraction output tile. Every reduce partition rides the structural
-node itself: a `Contraction`'s `tile`, a `Reduction`'s `reduce` — a coop-K / split contraction is nodified to a
-`Reduction` by `ops.nodify_reduce`, so there is no residual `TileOp.reduce` field. The `Kernel` / `TileSchedule` wrapper
-is gone. A kernel's
-structure is read off its annotated reduce loop's `AxisRole` (`ops.axis_role`), not a Python type.
+Tile IR (`tile/ir.py`, `tile/ops.py`) keeps the stored term pure algebra and the schedule beside it. A `TileOp` holds
+the structural-IR root `op` directly — a `Map` / `Fold` / `ContractionView` (the three stored node kinds, defined in
+`tile/ir.py`) — plus the root-global free→grid `Placement` (`place`), the worker inventory (`work`) and warp split
+(`workers`); every per-node schedule slice (`TilePlan` / `ReducePlan` / `Stage`) lives in the tree-path-keyed
+`TileOp.schedule` dict (1r), and the contraction node's placement/schedule fields are stamped onto a `replace()` copy
+at the point of use (1s), never stored. The `Kernel` / `TileSchedule` wrapper is gone. A kernel's structure is read
+structurally off the node (`ops.axis_role` — the contraction IS the `ContractionView` kind; a fold's role derives),
+not a bespoke Python type per schedule.
 
 The schedule type system lives at the ir root in `schedule.py` (used by both the tile IR and the kernel
 materializer, so it sits beside `atom.py`, not under `tile/`) — the merge of the former

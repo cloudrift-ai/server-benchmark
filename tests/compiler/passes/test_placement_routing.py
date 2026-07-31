@@ -117,7 +117,7 @@ def test_place_sites_are_the_non_root_nodes() -> None:
     seams = family_sites("PLACE", all_sites)
     assert seams and all(s.depth > 1 for s in seams)
     # The cone edge spells through the view-role label — the plan's worked spelling.
-    cone = c_map.sources[0].operands  # noqa: F841 — the a edge is labeled through the bilinear parse
+    cone = c_map.sources[0].a  # noqa: F841 — the a edge carries its role label on the stored node
     labels = {spell(c_map, "PLACE", s.node, all_sites=all_sites) for s in seams}
     assert "PLACE@a" in labels
     assert resolve(c_map, "PLACE@a", all_sites=all_sites).node is next(

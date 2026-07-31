@@ -18,7 +18,7 @@ from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, component_ops, degenerate
 from emmy.compiler.ir.stmt.passes import rewrite
-from emmy.compiler.ir.tile import Channel, ContractionView, Fold, contraction_view
+from emmy.compiler.ir.tile import Channel, ContractionView, Fold
 
 
 def _dissolved_loop(*, axes_stamped: bool = True) -> Loop:
@@ -67,16 +67,17 @@ def _view(arity: int = 2) -> ContractionView:
 
 
 def test_as_fold_is_lambda_spelled_and_loop_byte_identical() -> None:
+    """``as_fold`` is the node's DERIVED λ reading — the algebra spelling ``Reduction`` (the
+    cross-partition programs) and ``demote_operands`` consume. Its derived loop must stay
+    byte-identical to the node's own synthesized loop at every arity."""
     for arity in (1, 2):
         view = _view(arity)
         fold = view.as_fold()
         assert fold.lift is not None
-        assert fold.role is AxisRole.CONTRACTION
-        # The derived serial step + operand splice reproduce the view's synthesized product loop.
-        assert fold.loop == view.loop
-        # And the bilinear parse reads the lift back — the round-trip that keeps identity fixed.
-        rt = contraction_view(fold, view.m_axis, view.n_axis)
-        assert rt == view
+        # The derived serial step + operand splice reproduce the node's synthesized product loop
+        # BODY exactly (the same triple ``from_loop``'s byte-identity gate compares; the λ reading
+        # derives PLANAR by design — the demotion's spelling — so the role annotation differs).
+        assert (fold.loop.body, fold.loop.axis, fold.loop.unroll) == (view.loop.body, view.loop.axis, view.loop.unroll)
 
 
 # --- the twisted derivation (1p) — online softmax stores lift (x, 1) + Monoid(init, combine) ---- #
@@ -124,7 +125,7 @@ def test_twisted_composed_fold_is_lambda_spelled_with_derived_evaluation() -> No
     assert stmts[0] is red.operands[0]  # the derived head position — ahead of the lift body
     pvs = [s for s in stmts[1:] if is_contraction_fold(s)]
     assert len(pvs) == 1 and pvs[0].out == "O_i__pv"  # the synthesized PV contraction
-    assert pvs[0].operands[0] is red.operands[1]  # B is the fold's own value operand edge
+    assert pvs[0].channels[0].b is red.operands[1]  # B is the fold's own value operand edge
     assert red.step_stmts()[1:] == stmts[1:] and red.step_stmts()[0] is stmts[0]  # memoized — one identity
     assert red.loop == red.loop  # the derived loop is deterministic from the stored params
 

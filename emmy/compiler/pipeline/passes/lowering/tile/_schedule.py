@@ -54,7 +54,7 @@ from emmy.compiler.ir.schedule import (
 )
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Lambda, Load, Loop, Stmt, Write
-from emmy.compiler.ir.stmt.algebra import M, component_ops
+from emmy.compiler.ir.stmt.algebra import M
 from emmy.compiler.ir.stmt.passes import projection_distributes
 from emmy.compiler.ir.tile import (
     Channel,
@@ -68,6 +68,7 @@ from emmy.compiler.ir.tile import (
     TilePlan,
     contraction_view,
     is_contraction_fold,
+    stored_contraction,
 )
 from emmy.compiler.ir.tile.ir import gmem_row_stride
 from emmy.compiler.ir.tile.ops import axis_role, cone_seam, nodify_reduce, projection_tail, reduce_loop, sched_of, seal_workers
@@ -494,15 +495,14 @@ def _reduce_specs(kernel, place, ctx=None) -> list[str]:
     return [_legacy_reduce(s) for s in REDUCE.narrow(cands)]
 
 
-def _primary_fold(op) -> Fold:
-    """The op's primary reduce :class:`Fold` (bare, or wrapped under a projecting :class:`Map`) —
-    the node the ``REDUCE`` / shared-row ``STAGE`` slices key on. ``_option`` only schedules a
-    PLANAR / TWISTED reduce, whose op recognition always emits as a bare ``Fold`` or a projecting
-    ``Map(source=Fold)``."""
-    if isinstance(op, Fold):
+def _primary_fold(op) -> Fold | ContractionView:
+    """The op's primary reduce node (bare, or wrapped under a projecting :class:`Map`) — the node
+    the ``REDUCE`` / shared-row ``STAGE`` slices key on: a :class:`Fold`, or the stored
+    :class:`ContractionView` of a contraction kernel."""
+    if isinstance(op, (Fold, ContractionView)):
         return op
-    assert isinstance(op, Map) and len(op.sources) == 1 and isinstance(op.sources[0], Fold), (
-        f"reduce op must nodify to Fold, got {type(op).__name__}"
+    assert isinstance(op, Map) and len(op.sources) == 1 and isinstance(op.sources[0], (Fold, ContractionView)), (
+        f"reduce op must nodify to a structural node, got {type(op).__name__}"
     )
     return op.sources[0]
 
@@ -921,9 +921,9 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], tuple[str, str, str
     family (``Knob.narrow``); the unpinned families come from the
     ``search/space.py`` move catalog, legality-guarded here (the per-node half of the space)."""
     head = kernel.op.sources[0] if isinstance(kernel.op, Map) and kernel.op.sources else kernel.op
-    if isinstance(head, Fold):
+    if isinstance(head, (Fold, ContractionView)):
         keys = tuple(_family_key(kernel.op, f.name, head) for f in (TILE, STAGE, REDUCE))
-    else:  # a still-Map contraction (bound at fork-emit) — no fold to key on; bare is canonical
+    else:  # a still-Map contraction (bound at fork-emit) — no node to key on; bare is canonical
         keys = (TILE.name, STAGE.name, REDUCE.name)
     try:
         probe, proj = _contraction_node(kernel.op, place, TilePlan())
@@ -1608,19 +1608,19 @@ def _splitk_option(
     elif stage_spec:
         st = Stage.parse(stage_spec)
         stage = _resolve_warp_stage(inner, st, budget) if wt.is_warp else _resolve_scalar_stage(inner, st, tile.inputs, budget)
-    # The state is the sliced fold's own — the 1-component additive accumulator for a plain
+    # The state is the sliced node's own — the 1-component additive accumulator for a plain
     # matmul, the N-component product-monoid state for a multi-channel (gate/up) node — so the
     # split finalize folds exactly the state the kernel accumulates.
-    inner_fold = inner.as_fold()
+    inner_fold = stored_contraction(inner)
     # ONE composition rule (step 7 — λ-spelled): the outer reduce is the IDENTITY lift over the
-    # sliced fold operand, its combine the same componentwise ⊕ over the same accumulator names —
-    # the reassociation ``fold_k = fold_{ksplit} ∘ fold_{kslice}``. The derived step embeds the
-    # operand verbatim (the shared-accumulator ×1-fold simplification), and the outer fold
-    # DERIVES role=CONTRACTION off the composition (``ir.composed_contraction``).
-    accs = tuple(inner_fold.combine.results)
+    # sliced contraction operand, its combine the componentwise additive ⊕ over the same
+    # accumulator names — the reassociation ``fold_k = fold_{ksplit} ∘ fold_{kslice}``. The
+    # derived step embeds the operand verbatim (the shared-accumulator ×1-fold simplification),
+    # and the outer fold DERIVES role=CONTRACTION off the composition (``ir.composed_contraction``).
+    accs = tuple(inner_fold.defines())
     ident_lift = Lambda(params=(ksplit.name, *accs), body=Body(()), results=accs)
-    o_init, o_combine = M(*component_ops(inner_fold.combine), names=accs)
-    op = Fold(axis=ksplit, operands=(inner_fold,), lift=ident_lift, init=o_init, combine=o_combine, dtypes=inner_fold.dtypes)
+    o_init, o_combine = M(*(["add"] * len(accs)), names=accs)
+    op = Fold(axis=ksplit, operands=(inner_fold,), lift=ident_lift, init=o_init, combine=o_combine, dtypes=(None,) * len(accs))
     outer_fold = op
     # The projection rides the ``Map`` wrapper — its ONE home; ``030_split_reduce`` reads it there and
     # retargets it (per-partition atomic store / a deferred finalize after the cross-partition sums).
@@ -1629,7 +1629,9 @@ def _splitk_option(
     # Keys stamp against the PRE-PLACEMENT tree (the recognized op) — the canonical spellings the
     # golden/DB corpus stores; the split restructure never re-keys them.
     src_fold = _primary_fold(tile.op) if isinstance(tile.op, (Fold, Map)) else tile.op
-    tkey, skey, rkey = (_family_key(tile.op, f.name, src_fold) if isinstance(src_fold, Fold) else f.name for f in (TILE, STAGE, REDUCE))
+    tkey, skey, rkey = (
+        _family_key(tile.op, f.name, src_fold) if isinstance(src_fold, (Fold, ContractionView)) else f.name for f in (TILE, STAGE, REDUCE)
+    )
     stamped = {**knobs, tkey: tile_spec, rkey: split_spec}
     stamped[skey] = stage.spell() if stage is not None else ""
     out = TileOp(op=op, name=name, place=place, knobs=_site_knobs(stamped), stores=tile.stores)
@@ -1668,9 +1670,10 @@ def _warp_option(
         assert stage is not None, "computed-A row enumerated past its smem budget"  # _computed_a_rows resolved this
     else:
         stage = _resolve_warp_stage(node, Stage.parse(stage_spec), budget) if stage_spec else None
-    # Re-wrap the recognizer's projecting ``Map`` around the stored fold (materialize peels it into
-    # the store tail — the same ``project ∘ contract`` spelling the Fold tiers use).
-    fold = node.as_fold()
+    # Re-wrap the recognizer's projecting ``Map`` around the STORED node (materialize peels it into
+    # the store tail — the same ``project ∘ contract`` spelling the reduce tiers use). The emitted
+    # term embeds the UNSTAMPED node — the resolved tile/stage live in ``TileOp.schedule``.
+    fold = stored_contraction(node)
     emitted = Map(body=proj, sources=(fold,)) if len(proj) else fold
     # Warp specialization rides ORTHOGONAL to the tile/stage just resolved: an optional WSPEC row /
     # pin splits the warps into roles over this fixed pipeline (gated on the RESOLVED ``stage`` — an
@@ -1741,7 +1744,7 @@ def _tile_option(
             # (per-cell / coop-K / unbindable forms store nothing: nothing downstream would read a stage).
             if stage_spec:
                 stage = _resolve_scalar_stage(node, Stage.parse(stage_spec), tile.inputs, budget)
-            fold = node.as_fold()
+            fold = stored_contraction(node)
             op = Map(body=proj, sources=(fold,)) if len(proj) else fold
             slices = [("TILE", fold, node.tile), ("STAGE", fold, stage)]
     elif reduce_spec:
@@ -1753,7 +1756,9 @@ def _tile_option(
     # RESOLVED spelling, and only when resolution took (see ``_warp_option`` — the same
     # honest-stamping rule).
     head = tile.op.sources[0] if isinstance(tile.op, Map) and tile.op.sources else tile.op
-    tkey, skey, rkey = ((_family_key(tile.op, f.name, head) if isinstance(head, Fold) else f.name) for f in (TILE, STAGE, REDUCE))
+    tkey, skey, rkey = (
+        (_family_key(tile.op, f.name, head) if isinstance(head, (Fold, ContractionView)) else f.name) for f in (TILE, STAGE, REDUCE)
+    )
     stamped = {**knobs, tkey: spec, rkey: reduce_spec}
     stamped[skey] = stage.spell() if stage is not None else ""
     out = TileOp(op=op, name=name, place=place, knobs=_site_knobs(stamped), stores=tile.stores)
@@ -2254,7 +2259,9 @@ def _composes(red: Fold) -> bool:
     flash's hoisted score edge) — the ONE test for a composed reduce, so a "bare statistic
     reduce" test is just its negation. A λ-spelled composed fold carries the node on an operand
     edge; the stored ``step`` arm covers the residual composed spellings."""
-    return any(isinstance(s, (Map, Fold)) for s in red.step_stmts()) or any(isinstance(e, (Map, Fold)) for e in red.operands)
+    return any(isinstance(s, (Map, Fold, ContractionView)) for s in red.step_stmts()) or any(
+        isinstance(e, (Map, Fold, ContractionView)) for e in red.operands
+    )
 
 
 def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp | None:
@@ -2324,16 +2331,12 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     epilogue = Body(tuple(op.body)) if isinstance(op, Map) else Body(())
     if not _fragment_epilogue_ok(epilogue):
         return None  # a gather epilogue is fragment-unrealizable — stay scalar
-    node = ContractionView(
-        axes=(m_ax, n_ax),
+    fold = ContractionView(
         k_axis=k_ax,
         a=make_cone(list(cone), k_ax.name),
         channels=(Channel(b=loads[b_name], acc=acc.name),),
-        tile=wt,
-        lead_axes=tuple(grid[:-2]),
     )
-    stage = Stage(transport="sync", smem=(node.a_name,), bk_elems=bk_elems)
-    fold = node.as_fold()
+    stage = Stage(transport="sync", smem=(fold.a_name,), bk_elems=bk_elems)
     emitted = Map(body=epilogue, sources=(fold,)) if len(epilogue) else fold
     stamped = _site_knobs({**knobs, _family_key(emitted, TILE.name, fold): spec})
     out = TileOp(op=emitted, name=name, place=place, knobs=stamped, stores=tile.stores)

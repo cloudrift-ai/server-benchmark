@@ -12,23 +12,19 @@ import pytest
 
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import Channel, ContractionView, Map
 from emmy.compiler.ir.tile.ir import Fold
 from emmy.compiler.ir.tile.path import Site, canonical, family_sites, parse_key, primary, resolve, sites, spell
 
 
-def _contraction_fold(k_name: str = "k", *, a=None, n_name: str = "n", acc: str = "acc0", w: str = "W") -> Fold:
-    """A λ-spelled ``role=CONTRACTION`` fold (via the view's storage direction), operands (B, A)."""
-    view = ContractionView(
-        axes=(Axis("m", 64), Axis(n_name, 64)),
+def _contraction_fold(k_name: str = "k", *, a=None, n_name: str = "n", acc: str = "acc0", w: str = "W") -> ContractionView:
+    """A stored :class:`ContractionView` node (1s) — pure algebra, no placement/schedule fields."""
+    return ContractionView(
         k_axis=Axis(k_name, 256),
         a=a if a is not None else Load(name="a_e", input="A", index=(Var("m"), Var(k_name))),
         channels=(Channel(b=Load(name="b_e", input=w, index=(Var(k_name), Var(n_name))), acc=acc),),
-        tile=TilePlan(),
     )
-    return view.as_fold()
 
 
 def _planar_fold(k_name: str = "k", *, acc: str = "s0", val: str = "v1", load: str = "x") -> Fold:

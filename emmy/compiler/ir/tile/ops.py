@@ -1,9 +1,10 @@
 r"""The geometry-free compute layer — node lowering and the structural reads.
 
-A kernel's compute is a stored :class:`~emmy.compiler.ir.tile.ir.Fold` (a bare reduce) or a
+A kernel's compute is a stored :class:`~emmy.compiler.ir.tile.ir.Fold` (a bare reduce), a
+:class:`~emmy.compiler.ir.tile.ir.ContractionView` (a contraction cell — 1s), or a
 :class:`~emmy.compiler.ir.tile.ir.Map` (a pure pointwise cell, or the projection wrapper over its
-source fold). The algebra is read **structurally** off the node — :func:`axis_role` /
-:func:`reduce_loop` recurse through ``Map.sources``; there is no stored node kind.
+source node). The algebra is read **structurally** off the node — :func:`axis_role` /
+:func:`reduce_loop` recurse through ``Map.sources``; a fold's role is derived, never stored.
 
 This module is the thin lowering of any node back to its loop nest (:func:`lower` — a fold
 flattens through :attr:`Fold.loop`, a wrapping projection appends) plus the shared
@@ -171,7 +172,7 @@ def reduce_plan(tile):
     ``030_split_reduce`` read."""
     op = tile.op
     head = op.sources[0] if isinstance(op, Map) and op.sources else op
-    if not isinstance(head, Fold):
+    if not isinstance(head, (Fold, ContractionView)):
         return None
     plan = sched_of(tile).reduce_of(head)
     return plan if plan is not None else ReducePlan()
@@ -195,10 +196,10 @@ def nodify_reduce(op, like=None):
     must be a top-level stmt of ``op.body`` with no prologue ahead of it (true for a split partial /
     bare sum: the reduce is the body's head); a projection tail after it becomes the wrapping
     ``Map`` body."""
-    if isinstance(op, Fold) and op.role is AxisRole.CONTRACTION:
+    if isinstance(op, (Fold, ContractionView)) and op.role is AxisRole.CONTRACTION:
         return op, op
     head = op.sources[0] if isinstance(op, Map) and op.sources else None
-    if isinstance(head, Fold) and head.role is AxisRole.CONTRACTION:
+    if isinstance(head, (Fold, ContractionView)) and head.role is AxisRole.CONTRACTION:
         return op, head
     if like is None:
         self_head = head if head is not None else op
@@ -378,11 +379,17 @@ def _canon_tree(node):
 
     from emmy.compiler.ir.stmt import Lambda  # noqa: PLC0415
     from emmy.compiler.ir.stmt.body import Body as _B  # noqa: PLC0415
-    from emmy.compiler.ir.tile.ir import Fold, Map  # noqa: PLC0415
+    from emmy.compiler.ir.tile.ir import Channel, Fold, Map  # noqa: PLC0415
 
     def canon_stmt(s):
-        return _canon_tree(s) if isinstance(s, (Fold, Map)) else s
+        return _canon_tree(s) if isinstance(s, (Fold, Map, ContractionView)) else s
 
+    if isinstance(node, ContractionView):
+        return replace(
+            node,
+            a=canon_stmt(node.a),
+            channels=tuple(Channel(b=canon_stmt(ch.b), acc=ch.acc) for ch in node.channels),
+        )
     if isinstance(node, Map):
         body = tuple(canon_stmt(s) for s in _canon_order(tuple(node.fn.body)))
         fn = node.fn
@@ -411,7 +418,7 @@ def term_key(root) -> str:
 
     if root is None:
         return ""
-    root = _canon_tree(root) if isinstance(root, (Fold, Map)) else root
+    root = _canon_tree(root) if isinstance(root, (Fold, Map, ContractionView)) else root
     names, bufs = _term_names(root)
     ren = {n: f"s{i}" for i, n in enumerate(names)}
     canon = _stmt_rewrite(root, lambda n: ren.get(n, n), Sigma.IDENTITY, lambda a: a)
@@ -432,6 +439,8 @@ def pretty(op, indent: str = "") -> list[str]:
     if isinstance(op, Fold):
         head = f"{indent}Fold[{op.axis.name}] {op.role.name.lower()}"
         return [head, *pretty_body(Body(op.lower()), indent + "    ")]
+    if isinstance(op, ContractionView):
+        return [*op.pretty(indent), *pretty_body(Body(op.lower()), indent + "    ")]
     if isinstance(op, Map):
         src = [line for s in op.sources for line in pretty(s, indent)]
         return [*src, *pretty_body(op.body, indent)]

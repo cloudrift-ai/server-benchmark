@@ -1,10 +1,11 @@
 """Tile IR — a map/reduce kernel with its schedule made explicit.
 
 See :mod:`.ir` and :mod:`.schedule`. The layer between Loop IR and Kernel IR: a
-:class:`TileOp` holds the structural-IR root ``op`` (a :class:`~.ir.Map` / :class:`~.ir.Fold`,
-with computed operands stored inline on their edges) plus ``place`` / ``work`` / ``knobs`` and
-the tree-path-keyed ``schedule`` dict, so the *schedule* (free axes, reduce partition, grid
-binding) stays separate from the term; dispatch reads ``ops.axis_role``, no per-kind type.
+:class:`TileOp` holds the structural-IR root ``op`` (a :class:`~.ir.Map` / :class:`~.ir.Fold` /
+:class:`~.ir.ContractionView`, with computed operands stored inline on their edges) plus
+``place`` / ``work`` / ``knobs`` and the tree-path-keyed ``schedule`` dict, so the *schedule*
+(free axes, reduce partition, grid binding) stays separate from the term; dispatch reads
+``ops.axis_role``, no per-kind type.
 """
 
 from emmy.compiler.ir.atom import AtomKind
@@ -32,6 +33,7 @@ from emmy.compiler.ir.tile.ir import (
     is_contraction_fold,
     shared_operand,
     split_effects,
+    stored_contraction,
 )
 
 __all__ = [
@@ -57,4 +59,5 @@ __all__ = [
     "is_contraction_fold",
     "shared_operand",
     "split_effects",
+    "stored_contraction",
 ]

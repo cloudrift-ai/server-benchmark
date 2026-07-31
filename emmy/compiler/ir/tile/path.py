@@ -41,7 +41,7 @@ import re
 from dataclasses import dataclass
 
 from emmy.compiler.ir.axis import AxisRole
-from emmy.compiler.ir.tile.ir import Fold, Map, _parse_bilinear
+from emmy.compiler.ir.tile.ir import ContractionView, Fold, Map
 
 #: The knob families whose keys address a tree site (``WSPEC`` / ``RASTER`` / ``LOOPIFY`` stay
 #: root-global and bare). ``PLACE`` (phase 4) is the per-seam edge property: its sites are every
@@ -77,25 +77,9 @@ class Site:
 
 
 def _seg(node) -> str:
+    # A stored ContractionView spells the same ``fold`` segment its fold-storage predecessor did —
+    # every stored golden/DB key keeps meaning what it always meant.
     return "map" if isinstance(node, Map) else "fold"
-
-
-def _edge_labels(fold: Fold) -> dict[int, str]:
-    """The view-role labels of a contraction fold's INLINE operand edges, keyed by operand index:
-    the shared-A edge is ``a``, a channel's streamed edge ``b`` (read off the bilinear parse — the
-    same read :func:`~emmy.compiler.ir.tile.ir.contraction_view` makes). A fold that doesn't parse
-    bilinearly labels nothing — its inline operands keep their node-kind segments."""
-    parsed = _parse_bilinear(fold)
-    if parsed is None:
-        return {}
-    a_edge, chans = parsed
-    labels: dict[int, str] = {}
-    for i, edge in enumerate(fold.operands):
-        if edge is a_edge:
-            labels[i] = "a"
-        elif any(edge is b for b, _ in chans):
-            labels[i] = "b"
-    return labels
 
 
 def _stmt_children(stmt):
@@ -103,7 +87,7 @@ def _stmt_children(stmt):
     a ``Loop`` — ``030``'s sliced partials)."""
     for body in stmt.nested():
         for child in body:
-            if isinstance(child, (Map, Fold)):
+            if isinstance(child, (Map, Fold, ContractionView)):
                 yield child
             else:
                 yield from _stmt_children(child)
@@ -113,16 +97,15 @@ def _walk(node, prefix: tuple[str, ...], out: list[tuple[object, tuple[str, ...]
     out.append((node, prefix, derived))
     if isinstance(node, Map):
         for src in node.sources:
-            if isinstance(src, (Map, Fold)):
+            if isinstance(src, (Map, Fold, ContractionView)):
                 _walk(src, (*prefix, _seg(src)), out, derived)
         for s in node.body:
-            for child in _stmt_children(s) if not isinstance(s, (Map, Fold)) else (s,):
+            for child in _stmt_children(s) if not isinstance(s, (Map, Fold, ContractionView)) else (s,):
                 _walk(child, (*prefix, _seg(child)), out, derived)
     elif isinstance(node, Fold):
-        labels = _edge_labels(node)
-        for i, edge in enumerate(node.operands):
-            if isinstance(edge, (Map, Fold)):
-                _walk(edge, (*prefix, labels.get(i, _seg(edge))), out, derived)
+        for edge in node.operands:
+            if isinstance(edge, (Map, Fold, ContractionView)):
+                _walk(edge, (*prefix, _seg(edge)), out, derived)
         # The DERIVED evaluation's children — synthesized nodes (flash's PV, memoized on the
         # fold) are real schedule sites, marked ``derived`` (combine material below the seam
         # lattice; a lift-body inline node — the demoted cone — likewise: un-realizable as a
@@ -132,8 +115,15 @@ def _walk(node, prefix: tuple[str, ...], out: list[tuple[object, tuple[str, ...]
         for s in node.step_stmts():
             if id(s) in edge_ids:
                 continue
-            for child in _stmt_children(s) if not isinstance(s, (Map, Fold)) else (s,):
+            for child in _stmt_children(s) if not isinstance(s, (Map, Fold, ContractionView)) else (s,):
                 _walk(child, (*prefix, _seg(child)), out, step_derived)
+    elif isinstance(node, ContractionView):
+        # The stored contraction's operand edges carry the view-role labels directly — the shared
+        # A edge is ``a``, a channel's streamed edge ``b`` (no bilinear parse: the node IS the
+        # binding).
+        for label, edge in (("a", node.a), *(("b", ch.b) for ch in node.channels)):
+            if isinstance(edge, (Map, Fold, ContractionView)):
+                _walk(edge, (*prefix, label), out, derived)
 
 
 def sites(root) -> tuple[Site, ...]:
@@ -147,7 +137,7 @@ def sites(root) -> tuple[Site, ...]:
     counts: dict[tuple, int] = {}
     result: list[Site] = []
     for node, segments, derived in nodes:
-        axis = node.axis.name if isinstance(node, Fold) else None
+        axis = node.axis.name if isinstance(node, (Fold, ContractionView)) else None
         key = (segments, axis)
         counts[key] = counts.get(key, 0) + 1
         result.append(Site(node=node, axis=axis, segments=segments, ordinal=counts[key], derived=derived))
@@ -165,10 +155,10 @@ def family_sites(family: str, all_sites: tuple[Site, ...]) -> tuple[Site, ...]:
     if family == "PLACE":
         return tuple(s for s in all_sites if s.depth > 1 and not s.derived)
     if family in ("REDUCE", "STAGE"):
-        return tuple(s for s in all_sites if isinstance(s.node, Fold))
+        return tuple(s for s in all_sites if isinstance(s.node, (Fold, ContractionView)))
     out = []
     for s in all_sites:
-        if isinstance(s.node, Fold) and s.node.role is AxisRole.CONTRACTION:
+        if isinstance(s.node, (Fold, ContractionView)) and s.node.role is AxisRole.CONTRACTION:
             out.append(s)
         elif isinstance(s.node, Map) and not s.node.sources and s.depth == 1:
             out.append(s)

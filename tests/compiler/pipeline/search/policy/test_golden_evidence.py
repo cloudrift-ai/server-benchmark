@@ -2,7 +2,26 @@
 ``_golden_evidence_index``) — the card's recorded goldens decide a greedy compile
 before the reservoir / DB tiers and the model. Goldens are the only measured data
 that ships with a clone (the reservoir and tune DB are machine-local caches), so
-this tier is what a fresh machine deploys from. Consulted, never trained on."""
+this tier is what a fresh machine deploys from. Consulted, never trained on.
+
+Three sections against the one tier, sharing the q_proj-shaped fixtures below:
+
+- **The tier itself** — index construction, shape/regime/card scoping, and the pick,
+  both as a unit and end-to-end through ``greedy_decide``.
+- **The prior-less floor** — the two paths that resolve WITHOUT a prior and previously
+  skipped the tier entirely: a failed ``load_prior`` (corrupt/unreadable online
+  checkpoint), and ``Pipeline.run``'s last-resort emission-order resolve after the
+  validity-retry budget exhausts (where one over-budget node used to cost every OTHER
+  kernel its verified golden). The prior-loaded path implements the floor by tier order.
+- **The live resolve** — the same tier through the REAL greedy resolve: trace the golden
+  kind's snippet, run the full ``TILE_PASSES`` resolve with ``greedy_decide``, and assert
+  the golden actually decided the fork. The unit sections join against hand-built stamp
+  dicts; this one exists because those passed while a live deploy missed (the flash fork's
+  root op is the tile pass's RESTRUCTURED twisted op whose knobs carry re-derived extents
+  only — no histogram, no ``S_loop_depth`` — so a key classified off final-op stamps never
+  matched at the fork: the 4090 evidence-tier verification, attention goldens silently
+  skipped at 3.7-4.2x deploys).
+"""
 
 from __future__ import annotations
 
@@ -11,6 +30,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from emmy import config
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import golden as golden_mod
 from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig
@@ -19,6 +39,7 @@ from emmy.compiler.pipeline.search.policy.greedy import (
     _golden_evidence_index,
     _golden_pick,
     greedy_decide,
+    tile_identity,
 )
 
 CARD = "NVIDIA GeForce RTX 4090"
@@ -62,6 +83,11 @@ def _rows(*tunings: dict, base: dict = _BASE) -> list[dict]:
 _ROW_W1X1 = {"TILE@a2": _W1X1_TILE, "STAGE@a2": "d2/cp/ring", "REDUCE@a2": ""}
 _ROW_GOLD = {"TILE@a2": _STD_TILE, "STAGE@a2": "d2/cp/ring/p2", "REDUCE@a2": ""}
 _ROW_FM = {"TILE@a2": _FM_TILE, "STAGE@a2": "d2/cp/ring", "REDUCE@a2": "g2k"}
+
+
+# ---------------------------------------------------------------------------
+# The tier: index, scoping, and the pick
+# ---------------------------------------------------------------------------
 
 
 def test_golden_pick_matches_bare_spelling_against_axis_stamped_row(monkeypatch):
@@ -536,3 +562,273 @@ def test_fused_golden_never_crosses_rms_norm_or_matmul(monkeypatch):
     # And a bare rms_norm golden must not decide the fused op.
     rms_gold = RmsNormGoldenConfig(name="rms.k3840", M=512, K=3840, knobs={"REDUCE": "b256"}, emmy_us=6.3, gpu_name=CARD, compute_cap=CAP)
     assert _golden_pick(_index(monkeypatch, [rms_gold]), [_fused_row(_FUSED_TILE)], "n0") is None
+
+
+# ---------------------------------------------------------------------------
+# The prior-less floor (``greedy_decide`` with ``prior=None``)
+# ---------------------------------------------------------------------------
+# The card's recorded goldens are tier-1 evidence independent of any prior, so a fork
+# whose golden still realizes deploys the golden — never option-0.
+
+
+def _decide_no_prior(monkeypatch, goldens, leaves, blocked=None):
+    monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", list(goldens))
+    with config.nvcc_flags_override(""):  # the deployable -O3 regime (H_opt=3) golden consultation is gated on
+        ctx = Context.from_target(CAP, gpu_name=CARD)
+    fp = _FakeFP(ctx=ctx, options=list(leaves), root_op=SimpleNamespace(knobs=dict(_SIG)), node_id="n0", match=None)
+    return greedy_decide(blocked, prior=None)(fp), fp
+
+
+def test_no_prior_resolve_deploys_realizable_golden(monkeypatch, caplog):
+    """A resolve with no prior at all must still land on the recorded golden when it
+    realizes — previously this path fell straight to option-0 (the degenerate w1x1
+    leaf here), silently missing the verified entry. The override is logged loud."""
+    leaves = [SimpleNamespace(knobs=dict(_ROW_W1X1)), SimpleNamespace(knobs=dict(_ROW_GOLD))]
+    with caplog.at_level(logging.WARNING):
+        picked, fp = _decide_no_prior(monkeypatch, [_golden()], leaves)
+    assert picked is leaves[1]
+    assert fp.score == 78.0
+    assert any("golden floor" in r.message for r in caplog.records)
+
+
+def test_no_prior_drift_warns_and_falls_to_option0(monkeypatch, caplog):
+    """A golden keyed to the fork's shape that NO offered candidate realizes is
+    enumeration drift — the loud drift warning fires on this path too (it was silent
+    here before the floor: the tier was never consulted), then emission order."""
+    leaves = [SimpleNamespace(knobs=dict(_ROW_W1X1))]
+    with caplog.at_level(logging.WARNING):
+        picked, fp = _decide_no_prior(monkeypatch, [_golden()], leaves)
+    assert picked is leaves[0]
+    assert fp.score is None
+    assert any("no longer realize" in r.message for r in caplog.records)
+
+
+def test_no_prior_without_goldens_is_pure_emission_order(monkeypatch, caplog):
+    """No golden for the live card ⇒ the old behavior bit-for-bit: option-0, no
+    warnings (parity with ``test_resolve.test_option0_decide_matches_no_prior_greedy``)."""
+    other_card = _golden(gpu="NVIDIA GeForce RTX 5090", cap=(12, 0))
+    leaves = [SimpleNamespace(knobs=dict(_ROW_W1X1)), SimpleNamespace(knobs=dict(_ROW_GOLD))]
+    with caplog.at_level(logging.WARNING):
+        picked, fp = _decide_no_prior(monkeypatch, [other_card], leaves)
+    assert picked is leaves[0]
+    assert fp.score is None
+    assert not caplog.records
+
+
+def test_floor_respects_blocklist(monkeypatch, caplog):
+    """``Pipeline.run``'s last-resort resolve threads ``blocked`` through, so the
+    floor can never re-pick a tile that already failed ``validate(ctx)`` — with the
+    golden's realization blocklisted the shape reads as drift and option-0 stands."""
+    blocked = {"n0": {tile_identity(dict(_ROW_GOLD))}}
+    leaves = [SimpleNamespace(knobs=dict(_ROW_W1X1)), SimpleNamespace(knobs=dict(_ROW_GOLD))]
+    with caplog.at_level(logging.WARNING):
+        picked, fp = _decide_no_prior(monkeypatch, [_golden()], leaves, blocked=blocked)
+    assert picked is leaves[0]
+    assert fp.score is None
+    assert any("no longer realize" in r.message for r in caplog.records)
+
+
+def test_audit_sink_records_unrealized_pin_only_entries(monkeypatch):
+    """Under ``golden_audit`` the MATCH record carries ``unrealized`` — the shape's recorded
+    entries NO offered candidate realizes (the ``eval golden`` offer audit's pin-only
+    signal). The deploy outcome is unchanged: the realizable sibling still floors the pick.
+    A shape whose entries are ALL unrealized records DRIFT with every entry listed."""
+    from emmy.compiler.pipeline.search.policy.greedy import golden_audit
+
+    # A STAGE these leaves never offer, at the fastest µs → consulted first; must not decide.
+    pin_only = _golden(knobs={"TILE": _STD_TILE, "STAGE": "d4/tma/ring"}, us=50.0)
+    leaves = [SimpleNamespace(knobs=dict(_ROW_W1X1)), SimpleNamespace(knobs=dict(_ROW_GOLD))]
+    records: list[dict] = []
+    with golden_audit(records):
+        picked, fp = _decide_no_prior(monkeypatch, [pin_only, _golden()], leaves)
+    assert picked is leaves[1], "the realizable sibling floors the deploy exactly as before"
+    assert fp.score == 78.0
+    (rec,) = records
+    assert rec["verdict"] == "MATCH"
+    assert rec["unrealized"] == [pin_only]
+
+    records.clear()
+    with golden_audit(records):
+        picked, _ = _decide_no_prior(monkeypatch, [pin_only], leaves)
+    assert picked is leaves[0]  # nothing realizes → option-0
+    (rec,) = records
+    assert rec["verdict"] == "DRIFT"
+    assert rec["unrealized"] == [pin_only]
+
+
+def test_fork_shape_key_flash_sniff_scans_every_row():
+    """The flash OFFER signal (the ``TILE@dd`` + ``TILE@pj`` pair) marks the fork when
+    ANY row carries it — row 0 is whichever leaf the planner emitted first and need
+    not be a warp leaf. A row-0-only sniff mis-keyed such a fork ``kind=""`` (GAP), and
+    the attention goldens were silently skipped in favor of the model. The sig is the
+    RESTRUCTURED twisted op's: re-derived extents only, no histogram — so the stamp
+    classifier cannot fire and the key depends on the offer sniff alone."""
+    flash_sig = {
+        "S_ext_free_prod": 2097152.0,
+        "S_ext_reduce_max": 512.0,
+        "S_ext_n_free_axis": 3.0,
+        "S_ext_n_reduce_axis": 3.0,
+        "S_ext_n_symbolic_axis": 0.0,
+        "H_opt": 3.0,
+    }
+    scalar_row = {**flash_sig, "TILE": "b32x8/f1x1"}  # a bare-TILE non-warp sibling emitted first
+    warp_row = {
+        **flash_sig,
+        "TILE@dd": "a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16",
+        "TILE@pj": "a:mma_m16n8k16_f16_f32/w4x1/f1x32",
+        "REDUCE@kv": "",
+        "STAGE@kv": "d2/cp/ring",
+    }
+    assert _fork_shape_key([warp_row, scalar_row]).kind == "flash"
+    assert _fork_shape_key([scalar_row, warp_row]).kind == "flash", "the sniff must not depend on row order"
+
+
+# ---------------------------------------------------------------------------
+# The live resolve: does the tier fire on a real fork?
+# ---------------------------------------------------------------------------
+# Fixture knobs are read off the live offer itself, so enumeration drift moves the
+# fixture instead of false-failing the join.
+
+_SDPA = (
+    "F.scaled_dot_product_attention(torch.randn(1,16,512,256,dtype=torch.float16), "
+    "torch.randn(1,16,512,256,dtype=torch.float16), torch.randn(1,16,512,256,dtype=torch.float16), is_causal=True)"
+)
+_SDPA_DYN = ["seq_len@x0:2", "seq_len@x1:2", "seq_len@x2:2"]
+_RMS = "torch.nn.RMSNorm(3840)(torch.randn(512,3840))"
+
+
+class _StubPrior:
+    """Bare-``mean_scores`` prior preferring emission order — any golden pick must
+    override it, so a pass proves the tier (not the model) decided."""
+
+    def mean_scores(self, rows):
+        return list(range(len(rows)))
+
+
+def _resolve(snippet: str, dyn: list[str]):
+    """One full greedy resolve of the traced snippet under the DEPLOYABLE regime — the
+    ctx's compile flags are forced empty (-O3): ``make test`` runs the -Xcicc -O1
+    correctness lane, where the golden tier is correctly inert (the regime guard), so
+    without this override the suite would exercise nothing. No nvcc runs here (the
+    resolve stops at the tile dialect), so the override is purely a feature stamp."""
+    from dataclasses import replace
+
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.pipeline import TILE_PASSES, Pipeline
+    from emmy.compiler.pipeline.pipeline import Run
+    from emmy.compiler.pipeline.search.policy import greedy as greedy_mod
+    from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs
+
+    ds = build_torch_dynamic_shapes(parse_position_specs(dyn)) if dyn else None
+    graph, _, _ = graph_from_code(snippet, dynamic_shapes=ds)
+    ctx = replace(Context.from_target(CAP, gpu_name=CARD), compile_flags="")
+    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(graph, greedy_mod.greedy_decide(prior=_StubPrior(), price_structural=False))
+    return graph
+
+
+def _spying(monkeypatch, rows_sink: list, picks_sink: list):
+    from emmy.compiler.pipeline.search.policy import greedy as greedy_mod
+
+    orig = greedy_mod._golden_pick
+
+    def spy(index, rows, node_id):
+        got = orig(index, rows, node_id)
+        rows_sink.append(rows)
+        picks_sink.append((node_id, got))
+        return got
+
+    monkeypatch.setattr(greedy_mod, "_golden_pick", spy)
+
+
+def _offered_flash_form(rows: list[dict]) -> dict:
+    """A non-degenerate offered flash form (skip the w1x1 emission-order head) to
+    record as the test golden — read off the live enumeration, never hardcoded."""
+    for r in rows:
+        dd = r.get("TILE@dd", "")
+        if "/w1x1/" not in dd and dd:
+            return r
+    return rows[0]
+
+
+def _decoy():
+    """An off-shape golden keeping the evidence index non-empty during the probe
+    resolve — the tier (and so the spy) only runs when the card has recorded goldens."""
+    return AttentionGoldenConfig(
+        name="attention.hd64.decoy",
+        n_heads=2,
+        seq=512,
+        head_dim=64,
+        dtype="fp16",
+        knobs={"TILE@dd": "a:mma_m16n8k16_f16_f32/w1x1/f1x2/k16"},
+        emmy_us=1.0,
+        gpu_name=CARD,
+        compute_cap=CAP,
+    )
+
+
+@pytest.mark.parametrize("dyn", [[], _SDPA_DYN], ids=["static", "dynM"])
+def test_attention_golden_decides_the_live_flash_fork(monkeypatch, dyn):
+    # Probe resolve: capture the flash fork's offered rows (decoy keeps the tier live).
+    monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", [_decoy()])
+    rows_sink: list = []
+    picks_sink: list = []
+    _spying(monkeypatch, rows_sink, picks_sink)
+    _resolve(_SDPA, dyn)
+    flash_rows = next(r for r in rows_sink if any("TILE@dd" in row for row in r))
+    form = _offered_flash_form(flash_rows)
+    # Record that form as the golden: static keeps the axis-keyed all-or-nothing pins;
+    # the dynamic twin is schema-required to record ONE bare TILE (the dd plan).
+    knobs = (
+        {"TILE": form["TILE@dd"], "STAGE": form.get("STAGE@kv", "")}
+        if dyn
+        else {"TILE@dd": form["TILE@dd"], "TILE@pj": form["TILE@pj"], "STAGE": form.get("STAGE@kv", "")}
+    )
+    gold = AttentionGoldenConfig(
+        name="attention.hd256.test",
+        n_heads=16,
+        seq=512,
+        head_dim=256,
+        dtype="fp16",
+        dynamic=bool(dyn),
+        knobs=knobs,
+        emmy_us=44.3,
+        gpu_name=CARD,
+        compute_cap=CAP,
+    )
+    monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", [gold])
+    rows_sink.clear()
+    picks_sink.clear()
+    graph = _resolve(_SDPA, dyn)
+    hits = [(n, got) for n, got in picks_sink if got is not None]
+    assert hits and hits[0][1][1] == 44.3, f"attention golden never decided a fork: {picks_sink}"
+    # The resolved graph realized the golden's dd plan on its flash kernel.
+    realized = [
+        (getattr(n.op, "knobs", {}) or {}).get("TILE@dd") for n in graph.nodes.values() if "TILE@dd" in (getattr(n.op, "knobs", {}) or {})
+    ]
+    assert form["TILE@dd"] in realized
+
+
+def test_rms_norm_golden_decides_the_live_reduce_fork(monkeypatch):
+    monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", [_decoy()])
+    rows_sink: list = []
+    picks_sink: list = []
+    _spying(monkeypatch, rows_sink, picks_sink)
+    _resolve(_RMS, [])
+    reduce_rows = next((r for r in rows_sink if any(k.startswith("REDUCE@") for row in r for k in row)), None)
+    if reduce_rows is None:
+        pytest.skip("the rms_norm lowering offers no REDUCE fork on this pipeline")
+    form = reduce_rows[-1]  # any non-head row: the stub prior prefers emission order
+    fam_key = next(k for k in form if k.startswith("REDUCE@"))
+    gold = RmsNormGoldenConfig(
+        name="rms_norm.k3840.test",
+        M=512,
+        K=3840,
+        knobs={"REDUCE": form[fam_key]},
+        emmy_us=6.3,
+        gpu_name=CARD,
+        compute_cap=CAP,
+    )
+    monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", [gold])
+    picks_sink.clear()
+    _resolve(_RMS, [])
+    assert any(got is not None and got[1] == 6.3 for _, got in picks_sink), f"rms_norm golden never decided: {picks_sink}"

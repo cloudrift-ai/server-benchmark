@@ -1,10 +1,19 @@
-"""Tests for graph ops across every backend.
+"""Graph ops across every backend, against PyTorch eager as ground truth.
 
-Parametrized over backends (numpy / loop / cuda) via the ``run_graph``
-fixture in ``conftest.py``. For each aten operation the tracer captures,
-each backend's output is compared against PyTorch eager as the ground
-truth. Requires PyTorch.
+Two axes, both parametrized: the **backend** (numpy / loop / cuda) comes from the ``run_graph``
+fixture in ``conftest.py``, and the **op** comes from the case tables below. For each aten
+operation the tracer captures, every backend's output is compared against torch. Requires PyTorch.
+
+Elementwise unary and binary are value-level matrices (one op name + one torch callable per row).
+Everything else is a ``Case``: a builder returning ``(graph, run_inputs, expected)`` plus its
+tolerance. Adding an op is adding a row — do that rather than adding a bespoke test function.
+
+Builders draw from the module-level ``rng``, which the root conftest reseeds before every test,
+so each case sees the same inputs regardless of execution order.
 """
+
+from collections.abc import Callable
+from typing import NamedTuple
 
 import numpy as np
 import pytest
@@ -93,357 +102,264 @@ def test_binary(fn, torch_fn, run_graph):
     np.testing.assert_allclose(_run(run_graph, g, {"x": x_np, "y": y_np}), expected, rtol=rtol, atol=1e-5)
 
 
-def test_pow(run_graph):
-    x_np = rng.uniform(0.1, 5.0, size=(4, 8)).astype(np.float32)
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("x", (4, 8)), node_id="x")
-    g.add_node(ConstantOp(name="p", value=2.0), [], Tensor("p", (1,)), node_id="p")
-    g.add_node(ElementwiseOp("pow"), ["x", "p"], Tensor("y", (4, 8)), node_id="y")
-    g.inputs, g.outputs = ["x"], ["y"]
-    expected = _torch_to_np(torch.from_numpy(x_np).pow(2.0))
-    np.testing.assert_allclose(_run(run_graph, g, {"x": x_np}), expected, rtol=1e-5, atol=1e-5)
-
-
-def test_add_broadcast(run_graph):
-    x_np = rng.standard_normal((4, 8)).astype(np.float32)
-    y_np = rng.standard_normal(8).astype(np.float32)
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("x", (4, 8)), node_id="x")
-    g.add_node(InputOp(), [], Tensor("y", (8,)), node_id="y")
-    g.add_node(ElementwiseOp("add"), ["x", "y"], Tensor("z", (4, 8)), node_id="z")
-    g.inputs, g.outputs = ["x", "y"], ["z"]
-    expected = _torch_to_np(torch.from_numpy(x_np) + torch.from_numpy(y_np))
-    np.testing.assert_allclose(_run(run_graph, g, {"x": x_np, "y": y_np}), expected, rtol=1e-5, atol=1e-5)
-
-
 # ---------------------------------------------------------------------------
-# Reductions
+# The op case table
 # ---------------------------------------------------------------------------
+# A node is ``(op, srcs, node_id, shape)``; ``_graph`` adds them in the order given, so a constant
+# precedes its consumer exactly as it would when hand-written.
 
 
-def test_reduce_sum(run_graph):
-    x_np = rng.standard_normal((4, 8)).astype(np.float32)
+def _graph(nodes, inputs, outputs) -> Graph:
     g = Graph()
-    g.add_node(InputOp(), [], Tensor("x", (4, 8)), node_id="x")
-    g.add_node(ReduceOp("sum", -1), ["x"], Tensor("y", (4, 1)), node_id="y")
-    g.inputs, g.outputs = ["x"], ["y"]
-    expected = _torch_to_np(torch.from_numpy(x_np).sum(dim=-1, keepdim=True))
-    np.testing.assert_allclose(_run(run_graph, g, {"x": x_np}), expected, rtol=1e-5, atol=1e-5)
+    for op, srcs, nid, shape in nodes:
+        g.add_node(op, list(srcs), Tensor(nid, shape), node_id=nid)
+    g.inputs, g.outputs = list(inputs), list(outputs)
+    return g
 
 
-def test_reduce_max(run_graph):
-    x_np = rng.standard_normal((4, 8)).astype(np.float32)
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("x", (4, 8)), node_id="x")
-    g.add_node(ReduceOp("maximum", -1), ["x"], Tensor("y", (4, 1)), node_id="y")
-    g.inputs, g.outputs = ["x"], ["y"]
-    expected = _torch_to_np(torch.from_numpy(x_np).amax(dim=-1, keepdim=True))
-    np.testing.assert_allclose(_run(run_graph, g, {"x": x_np}), expected, rtol=1e-5, atol=1e-5)
+def _in(name: str, shape: tuple):
+    return (InputOp(), [], name, shape)
 
 
-def test_reduce_sum_keepdim(run_graph):
-    x_np = rng.standard_normal((4, 8)).astype(np.float32)
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("x", (4, 8)), node_id="x")
-    g.add_node(ReduceOp("sum", -1), ["x"], Tensor("y", (4, 1)), node_id="y")
-    g.inputs, g.outputs = ["x"], ["y"]
-    expected = _torch_to_np(torch.from_numpy(x_np).sum(dim=-1, keepdim=True))
-    np.testing.assert_allclose(_run(run_graph, g, {"x": x_np}), expected, rtol=1e-5, atol=1e-5)
+def _const(name: str, shape: tuple = (1,), **kw):
+    return (ConstantOp(name=name, **kw), [], name, shape)
 
 
-# ---------------------------------------------------------------------------
-# Mean
-# ---------------------------------------------------------------------------
+def _normal(*shape) -> np.ndarray:
+    return rng.standard_normal(shape if len(shape) > 1 else shape[0]).astype(np.float32)
 
 
-def test_mean(run_graph):
-    x_np = rng.standard_normal((4, 8)).astype(np.float32)
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("x", (4, 8)), node_id="x")
-    g.add_node(MeanOp(axis=-1), ["x"], Tensor("y", (4, 1)), node_id="y")
-    g.inputs, g.outputs = ["x"], ["y"]
-    expected = _torch_to_np(torch.from_numpy(x_np).mean(dim=-1, keepdim=True))
-    np.testing.assert_allclose(_run(run_graph, g, {"x": x_np}), expected, rtol=1e-5, atol=1e-5)
+class Case(NamedTuple):
+    """One op under test: ``build()`` returns the graph, the run inputs, and the torch answer."""
+
+    id: str
+    build: Callable[[], tuple[Graph, dict[str, np.ndarray], np.ndarray]]
+    rtol: float = 1e-5
+    atol: float = 1e-5
 
 
-# ---------------------------------------------------------------------------
-# Layout ops
-# ---------------------------------------------------------------------------
+# --- pointwise with a constant / broadcast ---------------------------------
 
 
-def test_transpose(run_graph):
-    x_np = rng.standard_normal((3, 4)).astype(np.float32)
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("x", (3, 4)), node_id="x")
-    g.add_node(TransposeOp(axes=(1, 0)), ["x"], Tensor("y", (4, 3)), node_id="y")
-    g.inputs, g.outputs = ["x"], ["y"]
-    expected = _torch_to_np(torch.from_numpy(x_np).transpose(0, 1))
-    np.testing.assert_allclose(_run(run_graph, g, {"x": x_np}), expected, rtol=1e-6, atol=1e-6)
+def _pow():
+    x = rng.uniform(0.1, 5.0, size=(4, 8)).astype(np.float32)
+    g = _graph([_in("x", (4, 8)), _const("p", value=2.0), (ElementwiseOp("pow"), ["x", "p"], "y", (4, 8))], ["x"], ["y"])
+    return g, {"x": x}, _torch_to_np(torch.from_numpy(x).pow(2.0))
 
 
-def test_transpose_perm(run_graph):
-    x_np = rng.standard_normal((2, 3, 4)).astype(np.float32)
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("x", (2, 3, 4)), node_id="x")
-    g.add_node(TransposeOp(axes=(0, 2, 1)), ["x"], Tensor("y", (2, 4, 3)), node_id="y")
-    g.inputs, g.outputs = ["x"], ["y"]
-    expected = _torch_to_np(torch.from_numpy(x_np).permute(0, 2, 1))
-    np.testing.assert_allclose(_run(run_graph, g, {"x": x_np}), expected, rtol=1e-6, atol=1e-6)
+def _add_broadcast():
+    x, y = _normal(4, 8), _normal(8)
+    g = _graph([_in("x", (4, 8)), _in("y", (8,)), (ElementwiseOp("add"), ["x", "y"], "z", (4, 8))], ["x", "y"], ["z"])
+    return g, {"x": x, "y": y}, _torch_to_np(torch.from_numpy(x) + torch.from_numpy(y))
 
 
-def test_reshape(run_graph):
-    x_np = rng.standard_normal((3, 4)).astype(np.float32)
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("x", (3, 4)), node_id="x")
-    g.add_node(ReshapeOp(shape=(2, 6)), ["x"], Tensor("y", (2, 6)), node_id="y")
-    g.inputs, g.outputs = ["x"], ["y"]
-    expected = _torch_to_np(torch.from_numpy(x_np).reshape(2, 6))
-    np.testing.assert_allclose(_run(run_graph, g, {"x": x_np}), expected, rtol=1e-6, atol=1e-6)
+# --- reductions ------------------------------------------------------------
 
 
-def test_unsqueeze(run_graph):
-    x_np = rng.standard_normal(4).astype(np.float32)
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("x", (4,)), node_id="x")
-    g.add_node(UnsqueezeOp(dim=0), ["x"], Tensor("y", (1, 4)), node_id="y")
-    g.inputs, g.outputs = ["x"], ["y"]
-    expected = _torch_to_np(torch.from_numpy(x_np).unsqueeze(0))
-    np.testing.assert_allclose(_run(run_graph, g, {"x": x_np}), expected, rtol=1e-6, atol=1e-6)
+def _reduce(op, ref):
+    def build():
+        x = _normal(4, 8)
+        g = _graph([_in("x", (4, 8)), (op, ["x"], "y", (4, 1))], ["x"], ["y"])
+        return g, {"x": x}, _torch_to_np(ref(torch.from_numpy(x)))
+
+    return build
 
 
-# ---------------------------------------------------------------------------
-# Slice / Cat / Gather
-# ---------------------------------------------------------------------------
+# --- layout ----------------------------------------------------------------
 
 
-def test_slice(run_graph):
-    x_np = rng.standard_normal((4, 8)).astype(np.float32)
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("x", (4, 8)), node_id="x")
-    g.add_node(ConstantOp(name="dim", value=1.0), [], Tensor("dim", (1,)), node_id="dim")
-    g.add_node(ConstantOp(name="start", value=2.0), [], Tensor("start", (1,)), node_id="start")
-    g.add_node(ConstantOp(name="end", value=6.0), [], Tensor("end", (1,)), node_id="end")
-    g.add_node(SliceOp(shape=(4, 4)), ["x", "dim", "start", "end"], Tensor("y", (4, 4)), node_id="y")
-    g.inputs, g.outputs = ["x"], ["y"]
-    expected = _torch_to_np(torch.from_numpy(x_np)[:, 2:6])
-    np.testing.assert_allclose(_run(run_graph, g, {"x": x_np}), expected, rtol=1e-6, atol=1e-6)
+def _layout(op, in_shape, out_shape, ref):
+    def build():
+        x = _normal(*in_shape)
+        g = _graph([_in("x", in_shape), (op, ["x"], "y", out_shape)], ["x"], ["y"])
+        return g, {"x": x}, _torch_to_np(ref(torch.from_numpy(x)))
+
+    return build
 
 
-def test_cat(run_graph):
-    a_np = rng.standard_normal((4, 3)).astype(np.float32)
-    b_np = rng.standard_normal((4, 5)).astype(np.float32)
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("a", (4, 3)), node_id="a")
-    g.add_node(InputOp(), [], Tensor("b", (4, 5)), node_id="b")
-    g.add_node(ConstantOp(name="dim", value=1.0), [], Tensor("dim", (1,)), node_id="dim")
-    g.add_node(CatOp(), ["a", "b", "dim"], Tensor("y", (4, 8)), node_id="y")
-    g.inputs, g.outputs = ["a", "b"], ["y"]
-    expected = _torch_to_np(torch.cat([torch.from_numpy(a_np), torch.from_numpy(b_np)], dim=1))
-    np.testing.assert_allclose(_run(run_graph, g, {"a": a_np, "b": b_np}), expected, rtol=1e-6, atol=1e-6)
+# --- slice / cat / gather --------------------------------------------------
 
 
-def test_gather(run_graph):
-    x_np = rng.standard_normal((4, 8)).astype(np.float32)
+def _slice():
+    x = _normal(4, 8)
+    nodes = [
+        _in("x", (4, 8)),
+        _const("dim", value=1.0),
+        _const("start", value=2.0),
+        _const("end", value=6.0),
+        (SliceOp(shape=(4, 4)), ["x", "dim", "start", "end"], "y", (4, 4)),
+    ]
+    return _graph(nodes, ["x"], ["y"]), {"x": x}, _torch_to_np(torch.from_numpy(x)[:, 2:6])
+
+
+def _cat():
+    a, b = _normal(4, 3), _normal(4, 5)
+    nodes = [_in("a", (4, 3)), _in("b", (4, 5)), _const("dim", value=1.0), (CatOp(), ["a", "b", "dim"], "y", (4, 8))]
+    expected = _torch_to_np(torch.cat([torch.from_numpy(a), torch.from_numpy(b)], dim=1))
+    return _graph(nodes, ["a", "b"], ["y"]), {"a": a, "b": b}, expected
+
+
+def _gather():
+    x = _normal(4, 8)
     idx = rng.integers(0, 8, size=(4, 3))
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("x", (4, 8)), node_id="x")
-    g.add_node(InputOp(), [], Tensor("idx", (4, 3)), node_id="idx")
-    g.add_node(GatherOp(axis=1), ["x", "idx"], Tensor("y", (4, 3)), node_id="y")
-    g.inputs, g.outputs = ["x", "idx"], ["y"]
-    expected = _torch_to_np(torch.from_numpy(x_np).gather(1, torch.from_numpy(idx).long()))
-    np.testing.assert_allclose(_run(run_graph, g, {"x": x_np, "idx": idx.astype(np.float32)}), expected, rtol=1e-6, atol=1e-6)
+    g = _graph([_in("x", (4, 8)), _in("idx", (4, 3)), (GatherOp(axis=1), ["x", "idx"], "y", (4, 3))], ["x", "idx"], ["y"])
+    expected = _torch_to_np(torch.from_numpy(x).gather(1, torch.from_numpy(idx).long()))
+    return g, {"x": x, "idx": idx.astype(np.float32)}, expected
 
 
-def test_embedding(run_graph):
-    # GatherOp with output rank = idx_rank + data_rank - 1 (embedding /
-    # index_select semantics). The lift must index data and idx at their
-    # actual ranks — not at the output rank. Qwen3-style: idx (1, S), weight
-    # (V, H), output (1, S, H).
+def _embedding():
+    # GatherOp with output rank = idx_rank + data_rank - 1 (embedding / index_select semantics).
+    # The lift must index data and idx at their ACTUAL ranks — not at the output rank.
+    # Qwen3-style: idx (1, S), weight (V, H), output (1, S, H).
     V, H, S = 16, 4, 5
-    weight = rng.standard_normal((V, H)).astype(np.float32)
+    weight = _normal(V, H)
     idx = rng.integers(0, V, size=(1, S))
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("w", (V, H)), node_id="w")
-    g.add_node(InputOp(), [], Tensor("idx", (1, S)), node_id="idx")
-    g.add_node(GatherOp(axis=0), ["w", "idx"], Tensor("y", (1, S, H)), node_id="y")
-    g.inputs, g.outputs = ["w", "idx"], ["y"]
+    g = _graph([_in("w", (V, H)), _in("idx", (1, S)), (GatherOp(axis=0), ["w", "idx"], "y", (1, S, H))], ["w", "idx"], ["y"])
     expected = _torch_to_np(torch.nn.functional.embedding(torch.from_numpy(idx).long(), torch.from_numpy(weight)))
-    np.testing.assert_allclose(_run(run_graph, g, {"w": weight, "idx": idx.astype(np.float32)}), expected, rtol=1e-6, atol=1e-6)
+    return g, {"w": weight, "idx": idx.astype(np.float32)}, expected
 
 
-def test_index_select_middle_axis(run_graph):
-    # index_select with axis != 0 and idx rank 1. Output rank equals data
-    # rank, with axis-dim replaced by idx size. The lift's embedding/index_select
-    # branch is exercised; mis-mapping the data axes would corrupt indexing.
-    data = rng.standard_normal((3, 5, 4)).astype(np.float32)
+def _index_select_middle_axis():
+    # index_select with axis != 0 and idx rank 1: output rank equals data rank, with the axis-dim
+    # replaced by idx size. Mis-mapping the data axes would corrupt indexing.
+    data = _normal(3, 5, 4)
     idx = rng.integers(0, 5, size=(3,))
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("d", (3, 5, 4)), node_id="d")
-    g.add_node(InputOp(), [], Tensor("idx", (3,)), node_id="idx")
-    g.add_node(GatherOp(axis=1), ["d", "idx"], Tensor("y", (3, 3, 4)), node_id="y")
-    g.inputs, g.outputs = ["d", "idx"], ["y"]
+    g = _graph([_in("d", (3, 5, 4)), _in("idx", (3,)), (GatherOp(axis=1), ["d", "idx"], "y", (3, 3, 4))], ["d", "idx"], ["y"])
     expected = _torch_to_np(torch.index_select(torch.from_numpy(data), 1, torch.from_numpy(idx).long()))
-    np.testing.assert_allclose(_run(run_graph, g, {"d": data, "idx": idx.astype(np.float32)}), expected, rtol=1e-6, atol=1e-6)
+    return g, {"d": data, "idx": idx.astype(np.float32)}, expected
 
 
-# ---------------------------------------------------------------------------
-# Matmul / Linear
-# ---------------------------------------------------------------------------
+# --- matmul / linear -------------------------------------------------------
 
 
-def test_matmul(run_graph):
-    a_np = rng.standard_normal((4, 8)).astype(np.float32)
-    b_np = rng.standard_normal((8, 3)).astype(np.float32)
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("a", (4, 8)), node_id="a")
-    g.add_node(InputOp(), [], Tensor("b", (8, 3)), node_id="b")
-    g.add_node(MatmulOp(), ["a", "b"], Tensor("c", (4, 3)), node_id="c")
-    g.inputs, g.outputs = ["a", "b"], ["c"]
-    expected = _torch_to_np(torch.from_numpy(a_np) @ torch.from_numpy(b_np))
-    np.testing.assert_allclose(_run(run_graph, g, {"a": a_np, "b": b_np}), expected, rtol=5e-5, atol=2e-6)
+def _matmul():
+    a, b = _normal(4, 8), _normal(8, 3)
+    g = _graph([_in("a", (4, 8)), _in("b", (8, 3)), (MatmulOp(), ["a", "b"], "c", (4, 3))], ["a", "b"], ["c"])
+    return g, {"a": a, "b": b}, _torch_to_np(torch.from_numpy(a) @ torch.from_numpy(b))
 
 
-def test_matmul_with_bias(run_graph):
-    a_np = rng.standard_normal((4, 8)).astype(np.float32)
-    b_np = rng.standard_normal((8, 3)).astype(np.float32)
-    bias_np = rng.standard_normal(3).astype(np.float32)
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("a", (4, 8)), node_id="a")
-    g.add_node(InputOp(), [], Tensor("b", (8, 3)), node_id="b")
-    g.add_node(InputOp(), [], Tensor("bias", (3,)), node_id="bias")
-    g.add_node(MatmulOp(has_bias=True), ["a", "b", "bias"], Tensor("c", (4, 3)), node_id="c")
-    g.inputs, g.outputs = ["a", "b", "bias"], ["c"]
-    expected = _torch_to_np(torch.addmm(torch.from_numpy(bias_np), torch.from_numpy(a_np), torch.from_numpy(b_np)))
-    np.testing.assert_allclose(_run(run_graph, g, {"a": a_np, "b": b_np, "bias": bias_np}), expected, rtol=5e-5, atol=2e-6)
+def _matmul_with_bias():
+    a, b, bias = _normal(4, 8), _normal(8, 3), _normal(3)
+    nodes = [_in("a", (4, 8)), _in("b", (8, 3)), _in("bias", (3,)), (MatmulOp(has_bias=True), ["a", "b", "bias"], "c", (4, 3))]
+    expected = _torch_to_np(torch.addmm(torch.from_numpy(bias), torch.from_numpy(a), torch.from_numpy(b)))
+    return _graph(nodes, ["a", "b", "bias"], ["c"]), {"a": a, "b": b, "bias": bias}, expected
 
 
-def test_linear(run_graph):
-    x_np = rng.standard_normal((2, 8)).astype(np.float32)
-    w_np = rng.standard_normal((4, 8)).astype(np.float32)
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("x", (2, 8)), node_id="x")
-    g.add_node(ConstantOp(name="w"), [], Tensor("w", (4, 8)), node_id="w")
-    g.add_node(LinearOp(has_bias=False), ["x", "w"], Tensor("y", (2, 4)), node_id="y")
-    g.inputs, g.outputs = ["x"], ["y"]
-    expected = _torch_to_np(torch.nn.functional.linear(torch.from_numpy(x_np), torch.from_numpy(w_np)))
-    np.testing.assert_allclose(_run(run_graph, g, {"x": x_np, "w": w_np}), expected, rtol=1e-4, atol=2e-6)
+def _linear():
+    x, w = _normal(2, 8), _normal(4, 8)
+    g = _graph([_in("x", (2, 8)), _const("w", (4, 8)), (LinearOp(has_bias=False), ["x", "w"], "y", (2, 4))], ["x"], ["y"])
+    expected = _torch_to_np(torch.nn.functional.linear(torch.from_numpy(x), torch.from_numpy(w)))
+    return g, {"x": x, "w": w}, expected
 
 
-def test_linear_with_bias(run_graph):
-    x_np = rng.standard_normal((2, 8)).astype(np.float32)
-    w_np = rng.standard_normal((4, 8)).astype(np.float32)
-    b_np = rng.standard_normal(4).astype(np.float32)
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("x", (2, 8)), node_id="x")
-    g.add_node(ConstantOp(name="w"), [], Tensor("w", (4, 8)), node_id="w")
-    g.add_node(ConstantOp(name="b"), [], Tensor("b", (4,)), node_id="b")
-    g.add_node(LinearOp(has_bias=True), ["x", "w", "b"], Tensor("y", (2, 4)), node_id="y")
-    g.inputs, g.outputs = ["x"], ["y"]
-    expected = _torch_to_np(torch.nn.functional.linear(torch.from_numpy(x_np), torch.from_numpy(w_np), torch.from_numpy(b_np)))
-    np.testing.assert_allclose(_run(run_graph, g, {"x": x_np, "w": w_np, "b": b_np}), expected, rtol=1e-4, atol=2e-6)
+def _linear_with_bias():
+    x, w, b = _normal(2, 8), _normal(4, 8), _normal(4)
+    nodes = [_in("x", (2, 8)), _const("w", (4, 8)), _const("b", (4,)), (LinearOp(has_bias=True), ["x", "w", "b"], "y", (2, 4))]
+    expected = _torch_to_np(torch.nn.functional.linear(torch.from_numpy(x), torch.from_numpy(w), torch.from_numpy(b)))
+    return _graph(nodes, ["x"], ["y"]), {"x": x, "w": w, "b": b}, expected
 
 
-# ---------------------------------------------------------------------------
-# SDPA
-# ---------------------------------------------------------------------------
+# --- SDPA ------------------------------------------------------------------
 
 
-def test_sdpa(run_graph):
-    q_np = rng.standard_normal((1, 2, 4, 8)).astype(np.float32)
-    k_np = rng.standard_normal((1, 2, 4, 8)).astype(np.float32)
-    v_np = rng.standard_normal((1, 2, 4, 8)).astype(np.float32)
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("q", (1, 2, 4, 8)), node_id="q")
-    g.add_node(InputOp(), [], Tensor("k", (1, 2, 4, 8)), node_id="k")
-    g.add_node(InputOp(), [], Tensor("v", (1, 2, 4, 8)), node_id="v")
-    g.add_node(SdpaOp(), ["q", "k", "v"], Tensor("out", (1, 2, 4, 8)), node_id="out")
-    g.inputs, g.outputs = ["q", "k", "v"], ["out"]
-    expected = _torch_to_np(
-        torch.nn.functional.scaled_dot_product_attention(torch.from_numpy(q_np), torch.from_numpy(k_np), torch.from_numpy(v_np))
-    )
-    np.testing.assert_allclose(_run(run_graph, g, {"q": q_np, "k": k_np, "v": v_np}), expected, rtol=5e-5, atol=2e-6)
-
-
-def test_sdpa_causal(run_graph):
-    """SDPA with causal masking: future positions should be masked out."""
-    q_np = rng.standard_normal((1, 2, 8, 16)).astype(np.float32)
-    k_np = rng.standard_normal((1, 2, 8, 16)).astype(np.float32)
-    v_np = rng.standard_normal((1, 2, 8, 16)).astype(np.float32)
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("q", (1, 2, 8, 16)), node_id="q")
-    g.add_node(InputOp(), [], Tensor("k", (1, 2, 8, 16)), node_id="k")
-    g.add_node(InputOp(), [], Tensor("v", (1, 2, 8, 16)), node_id="v")
-    g.add_node(SdpaOp(is_causal=True), ["q", "k", "v"], Tensor("out", (1, 2, 8, 16)), node_id="out")
-    g.inputs, g.outputs = ["q", "k", "v"], ["out"]
-    expected = _torch_to_np(
-        torch.nn.functional.scaled_dot_product_attention(
-            torch.from_numpy(q_np), torch.from_numpy(k_np), torch.from_numpy(v_np), is_causal=True
+def _sdpa(shape, *, causal=False):
+    def build():
+        q, k, v = _normal(*shape), _normal(*shape), _normal(*shape)
+        nodes = [_in("q", shape), _in("k", shape), _in("v", shape), (SdpaOp(is_causal=causal), ["q", "k", "v"], "out", shape)]
+        expected = _torch_to_np(
+            torch.nn.functional.scaled_dot_product_attention(
+                torch.from_numpy(q), torch.from_numpy(k), torch.from_numpy(v), is_causal=causal
+            )
         )
-    )
-    np.testing.assert_allclose(_run(run_graph, g, {"q": q_np, "k": k_np, "v": v_np}), expected, rtol=1e-4, atol=1e-5)
+        return _graph(nodes, ["q", "k", "v"], ["out"]), {"q": q, "k": k, "v": v}, expected
+
+    return build
 
 
-def test_sdpa_gqa(run_graph):
-    """GQA: Q has more heads than K/V (28 Q heads, 4 KV heads). The
-    cuda backend reaches the P@V matmul via the planner's
-    fused-prologue chain extension (``_classify_fused_prologue``)."""
+def _sdpa_gqa():
+    # GQA: Q has more heads than K/V (28 Q heads, 4 KV heads). The cuda backend reaches the
+    # P@V matmul via the planner's fused-prologue chain extension (``_classify_fused_prologue``).
     B, Hq, Hkv, S, D = 1, 28, 4, 8, 16
-    q_np = rng.standard_normal((B, Hq, S, D)).astype(np.float32)
-    k_np = rng.standard_normal((B, Hkv, S, D)).astype(np.float32)
-    v_np = rng.standard_normal((B, Hkv, S, D)).astype(np.float32)
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("q", (B, Hq, S, D)), node_id="q")
-    g.add_node(InputOp(), [], Tensor("k", (B, Hkv, S, D)), node_id="k")
-    g.add_node(InputOp(), [], Tensor("v", (B, Hkv, S, D)), node_id="v")
-    g.add_node(SdpaOp(), ["q", "k", "v"], Tensor("out", (B, Hq, S, D)), node_id="out")
-    g.inputs, g.outputs = ["q", "k", "v"], ["out"]
+    q, k, v = _normal(B, Hq, S, D), _normal(B, Hkv, S, D), _normal(B, Hkv, S, D)
+    nodes = [
+        _in("q", (B, Hq, S, D)),
+        _in("k", (B, Hkv, S, D)),
+        _in("v", (B, Hkv, S, D)),
+        (SdpaOp(), ["q", "k", "v"], "out", (B, Hq, S, D)),
+    ]
     # Reference: expand K/V heads to match Q, then standard SDPA.
     group = Hq // Hkv
-    k_exp = torch.from_numpy(k_np).repeat_interleave(group, dim=1)
-    v_exp = torch.from_numpy(v_np).repeat_interleave(group, dim=1)
-    expected = _torch_to_np(torch.nn.functional.scaled_dot_product_attention(torch.from_numpy(q_np), k_exp, v_exp))
-    np.testing.assert_allclose(_run(run_graph, g, {"q": q_np, "k": k_np, "v": v_np}), expected, rtol=5e-3, atol=1e-4)
+    k_exp = torch.from_numpy(k).repeat_interleave(group, dim=1)
+    v_exp = torch.from_numpy(v).repeat_interleave(group, dim=1)
+    expected = _torch_to_np(torch.nn.functional.scaled_dot_product_attention(torch.from_numpy(q), k_exp, v_exp))
+    return _graph(nodes, ["q", "k", "v"], ["out"]), {"q": q, "k": k, "v": v}, expected
 
 
-# ---------------------------------------------------------------------------
-# Compound graphs
-# ---------------------------------------------------------------------------
+# --- compound graphs -------------------------------------------------------
 
 
-def test_softmax_graph(run_graph):
+def _softmax_graph():
     rows, cols = 4, 8
-    x_np = rng.standard_normal((rows, cols)).astype(np.float32)
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("x", (rows, cols)), node_id="x")
-    g.add_node(ReduceOp("maximum", -1), ["x"], Tensor("mx", (rows, 1)), node_id="mx")
-    g.add_node(ElementwiseOp("subtract"), ["x", "mx"], Tensor("subtract", (rows, cols)), node_id="subtract")
-    g.add_node(ElementwiseOp("exp"), ["subtract"], Tensor("exp", (rows, cols)), node_id="exp")
-    g.add_node(ReduceOp("sum", -1), ["exp"], Tensor("sm", (rows, 1)), node_id="sm")
-    g.add_node(ElementwiseOp("divide"), ["exp", "sm"], Tensor("out", (rows, cols)), node_id="out")
-    g.inputs, g.outputs = ["x"], ["out"]
-    expected = _torch_to_np(torch.softmax(torch.from_numpy(x_np), dim=-1))
-    np.testing.assert_allclose(_run(run_graph, g, {"x": x_np}), expected, rtol=2e-4, atol=1e-5)
+    x = _normal(rows, cols)
+    nodes = [
+        _in("x", (rows, cols)),
+        (ReduceOp("maximum", -1), ["x"], "mx", (rows, 1)),
+        (ElementwiseOp("subtract"), ["x", "mx"], "subtract", (rows, cols)),
+        (ElementwiseOp("exp"), ["subtract"], "exp", (rows, cols)),
+        (ReduceOp("sum", -1), ["exp"], "sm", (rows, 1)),
+        (ElementwiseOp("divide"), ["exp", "sm"], "out", (rows, cols)),
+    ]
+    return _graph(nodes, ["x"], ["out"]), {"x": x}, _torch_to_np(torch.softmax(torch.from_numpy(x), dim=-1))
 
 
-def test_rmsnorm_graph(run_graph):
-    rows, dim = 8, 64
-    eps = 1e-6
-    X_np = rng.standard_normal((rows, dim)).astype(np.float32)
-    w_np = rng.standard_normal(dim).astype(np.float32)
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("X", (rows, dim)), node_id="X")
-    g.add_node(ConstantOp(name="eps", value=eps), [], Tensor("eps", (1,)), node_id="eps")
-    g.add_node(InputOp(), [], Tensor("w", (dim,)), node_id="w")
-    g.add_node(ElementwiseOp("multiply"), ["X", "X"], Tensor("sq", (rows, dim)), node_id="sq")
-    g.add_node(ReduceOp("sum", axis=-1), ["sq"], Tensor("red", (rows, 1)), node_id="red")
-    g.add_node(ElementwiseOp("add"), ["red", "eps"], Tensor("ae", (rows, 1)), node_id="ae")
-    g.add_node(ElementwiseOp("rsqrt"), ["ae"], Tensor("rsq", (rows, 1)), node_id="rsq")
-    g.add_node(ElementwiseOp("multiply"), ["X", "rsq"], Tensor("norm", (rows, dim)), node_id="norm")
-    g.add_node(ElementwiseOp("multiply"), ["norm", "w"], Tensor("out", (rows, dim)), node_id="out")
-    g.inputs, g.outputs = ["X", "w"], ["out"]
+def _rmsnorm_graph():
+    rows, dim, eps = 8, 64, 1e-6
+    X, w = _normal(rows, dim), _normal(dim)
+    nodes = [
+        _in("X", (rows, dim)),
+        _const("eps", value=eps),
+        _in("w", (dim,)),
+        (ElementwiseOp("multiply"), ["X", "X"], "sq", (rows, dim)),
+        (ReduceOp("sum", axis=-1), ["sq"], "red", (rows, 1)),
+        (ElementwiseOp("add"), ["red", "eps"], "ae", (rows, 1)),
+        (ElementwiseOp("rsqrt"), ["ae"], "rsq", (rows, 1)),
+        (ElementwiseOp("multiply"), ["X", "rsq"], "norm", (rows, dim)),
+        (ElementwiseOp("multiply"), ["norm", "w"], "out", (rows, dim)),
+    ]
+    X_t, w_t = torch.from_numpy(X), torch.from_numpy(w)
+    expected = _torch_to_np(X_t * torch.rsqrt(X_t.pow(2).sum(-1, keepdim=True) + eps) * w_t)
+    return _graph(nodes, ["X", "w"], ["out"]), {"X": X, "w": w}, expected
 
-    X_t = torch.from_numpy(X_np)
-    w_t = torch.from_numpy(w_np)
-    sq_sum = X_t.pow(2).sum(-1, keepdim=True)
-    expected = _torch_to_np(X_t * torch.rsqrt(sq_sum + eps) * w_t)
-    np.testing.assert_allclose(_run(run_graph, g, {"X": X_np, "w": w_np}), expected, rtol=1e-4, atol=1e-5)
+
+CASES = [
+    Case("pow", _pow),
+    Case("add_broadcast", _add_broadcast),
+    Case("reduce_sum", _reduce(ReduceOp("sum", -1), lambda t: t.sum(dim=-1, keepdim=True))),
+    Case("reduce_max", _reduce(ReduceOp("maximum", -1), lambda t: t.amax(dim=-1, keepdim=True))),
+    Case("mean", _reduce(MeanOp(axis=-1), lambda t: t.mean(dim=-1, keepdim=True))),
+    Case("transpose", _layout(TransposeOp(axes=(1, 0)), (3, 4), (4, 3), lambda t: t.transpose(0, 1)), 1e-6, 1e-6),
+    Case("transpose_perm", _layout(TransposeOp(axes=(0, 2, 1)), (2, 3, 4), (2, 4, 3), lambda t: t.permute(0, 2, 1)), 1e-6, 1e-6),
+    Case("reshape", _layout(ReshapeOp(shape=(2, 6)), (3, 4), (2, 6), lambda t: t.reshape(2, 6)), 1e-6, 1e-6),
+    Case("unsqueeze", _layout(UnsqueezeOp(dim=0), (4,), (1, 4), lambda t: t.unsqueeze(0)), 1e-6, 1e-6),
+    Case("slice", _slice, 1e-6, 1e-6),
+    Case("cat", _cat, 1e-6, 1e-6),
+    Case("gather", _gather, 1e-6, 1e-6),
+    Case("embedding", _embedding, 1e-6, 1e-6),
+    Case("index_select_middle_axis", _index_select_middle_axis, 1e-6, 1e-6),
+    Case("matmul", _matmul, 5e-5, 2e-6),
+    Case("matmul_with_bias", _matmul_with_bias, 5e-5, 2e-6),
+    Case("linear", _linear, 1e-4, 2e-6),
+    Case("linear_with_bias", _linear_with_bias, 1e-4, 2e-6),
+    Case("sdpa", _sdpa((1, 2, 4, 8)), 5e-5, 2e-6),
+    # Causal masking: future positions must be masked out.
+    Case("sdpa_causal", _sdpa((1, 2, 8, 16), causal=True), 1e-4, 1e-5),
+    Case("sdpa_gqa", _sdpa_gqa, 5e-3, 1e-4),
+    Case("softmax_graph", _softmax_graph, 2e-4, 1e-5),
+    Case("rmsnorm_graph", _rmsnorm_graph, 1e-4, 1e-5),
+]
+
+
+@pytest.mark.parametrize("case", CASES, ids=[c.id for c in CASES])
+def test_op(case: Case, run_graph):
+    graph, inputs, expected = case.build()
+    np.testing.assert_allclose(_run(run_graph, graph, inputs), expected, rtol=case.rtol, atol=case.atol)

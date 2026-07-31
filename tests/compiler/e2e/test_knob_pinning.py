@@ -40,11 +40,6 @@ import pytest
 from ..conftest import dyn_M, requires_cuda, requires_sm90
 
 
-def _format_knobs(knobs: dict) -> str:
-    """Render a knob dict as ``"K1=V1,K2=V2,..."`` for ``EMMY_KNOBS``."""
-    return ",".join(f"{k}={v}" for k, v in knobs.items())
-
-
 def _build_norm_linear_graph(dims: dict, mode: str = "static"):
     """``RmsNorm(x) @ W.T`` in fp16 — the fused norm+matmul shape of
     Qwen3-Embedding's ``k_linear_mean_reduce``. ``mode='dynamic'`` makes the

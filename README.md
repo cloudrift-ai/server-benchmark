@@ -322,10 +322,12 @@ make format    # auto-fix
   - [provisioning/](emmy/provisioning/) — Cloud provisioning, SSH transport, VM lifecycle
   - [benchmark/](emmy/benchmark/) — Benchmark tracking, config, task enumeration, execution
   - [planner/](emmy/planner/) — Groups benchmark tasks into execution groups for VM allocation
-- [recipes/](recipes/) — Model deploy recipes (YAML configs per model)
+- [recipes/](recipes/) — The recommended serving configuration, one per model — what `emmy deploy` runs
+  (see [ARCHITECTURE.md](recipes/ARCHITECTURE.md); benchmark grids belong in `experiments/`)
 - [docker/](docker/) — Custom image builds ([vllm-emmy](docker/vllm-emmy/) — vLLM + the emmy plugin;
   [vllm-emmy-serve](docker/vllm-emmy-serve/) — prebuilt per-model images: warmed cubins + baked model snapshot)
-- [experiments/](experiments/) — Experiment parameter sweeps (self-contained recipe + results)
+- [experiments/](experiments/) — Benchmark parameter sweeps, self-contained recipe + committed results —
+  what `emmy bench` runs
 - [kernels/](kernels/) — Standalone CUDA kernel sources
 - [docs/](docs/) — Docusaurus user-docs site (getting started, benchmarking, custom configurations, deployment)
 - [tests/](tests/) — pytest tests (see [ARCHITECTURE.md](tests/ARCHITECTURE.md))

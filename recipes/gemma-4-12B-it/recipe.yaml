@@ -1,55 +1,72 @@
-# gemma-4-12B-it benchmark — stock vLLM baseline (FP16, single RTX 5090).
+# gemma-4-12B-it — the recommended serving configuration: vLLM + the emmy generative
+# plugin (EmmyGenModel) on the fast-math kernel fork, FP16, one RTX 5090.
 #
-# One of a three-recipe A/B set that backs the blog article:
-#   gemma-4-12B-it               — stock vLLM (this file)
-#   gemma-4-12B-it-emmy          — vLLM + emmy generative plugin (EmmyGenModel)
-#   gemma-4-12B-it-emmy-fastmath — same plugin, EMMY_FAST_MATH fork
-# All three share the identical workload grid below, so the three engines are compared
-# point-for-point on the same prompt set.
+#   emmy deploy local --recipe recipes/gemma-4-12B-it
+#   emmy deploy ssh   --recipe recipes/gemma-4-12B-it --ssh user@host
+#   emmy deploy cloud --recipe recipes/gemma-4-12B-it            # provisions the VM too
+#
+# This file is a DEPLOYMENT config, not an experiment: one variant, no workload grid, no
+# `benchmark:` block. It answers "how should this model be served", and every value is a
+# decision rather than a sweep point. The A/B grids that justify those decisions — stock
+# vLLM vs emmy vs fast-math, the concurrency and context sweeps, MTP, GSM8K — live in
+# experiments/gemma-4-12B/, which is where benchmark configurations belong.
+#
+# Why fast-math is the serving default: EMMY_FAST_MATH offers the precision-trading kernel
+# siblings (f16-accumulate mma, __expf) on the consumer die. Its hybrid accumulation stays
+# inside FP16 representational noise — the accum_error experiment shows the error flat in K
+# where pure FP16 grows an order of magnitude — and GSM8K measures it level with both stock
+# vLLM and standard-fork emmy. So it is faster at numerics the quality gate cannot
+# distinguish, which is what makes it the default rather than an opt-in.
 model:
   huggingface: "google/gemma-4-12B-it"
 
 engine:
   llm:
     tensor_parallel_size: 1
-    gpu_memory_utilization: 0.9
+    # 0.97 (not stock's 0.9): the emmy generative arm's embed table + norm residents live
+    # in cupy and are claimed BEFORE vLLM's torch-only memory profiler runs, so they must
+    # sit INSIDE the utilization budget or the KV-cache min-fit check fails at boot
+    # (serve.py _GENERATE_GPU_MEMORY_UTILIZATION).
+    context_length: 16384
+    gpu_memory_utilization: 0.97
     vllm:
-      # gemma-4-capable stock image (same tag the gemma-4-31B-it recipe uses).
-      image: "vllm/vllm-openai:gemma4-0505-cu129"
-      # --dtype float16 pins FP16 across all three engines (the checkpoint is bf16 by
-      # default, and the emmy trunk emits fp16 — matching it keeps the A/B honest).
-      # --no-enable-prefix-caching makes every request do full prefill work.
-      extra_args: "--dtype float16 --no-enable-prefix-caching"
-
-benchmark:
-  # Controlled workload, identical across engines: a fixed random prompt set (seed 0),
-  # greedy decoding (temperature 0), and every request emits exactly random_output_len
-  # tokens (ignore_eos) so all engines do the same amount of work. The per-point
-  # concurrency / prompt count / input+output lengths come from the matrix.
-  seed: 0
-  temperature: 0
-  ignore_eos: true
+      # The published prebuilt image (docker/vllm-emmy-serve/): model snapshot, warmed
+      # sm_120 cubins and the execution-plan pack baked in, so a cold start pays no HF
+      # download, no nvcc compile, and — on a pack hit — no compiler frontend either.
+      #
+      # The settings below MATCH the shape models/gemma-4-12b-it.env pins, and that
+      # agreement is the whole point of a serving recipe: the pack is keyed on the serving
+      # shape, so a deployment that drifts off it re-runs the compiler frontend per program
+      # on every boot (~50 min of host CPU measured) and can be killed by the compose
+      # healthcheck. Change any of them and you are choosing to re-warm the image (see
+      # docker/vllm-emmy-serve/ARCHITECTURE.md), not just editing a flag.
+      #
+      # PENDING RE-WARM: context was raised 8448 -> 16384 and the currently published image
+      # is still warmed at 8448, so until the next release session re-warms it, boots take
+      # the pack-miss path described above. Context is capped by KV, not by the compiler:
+      # the measured pool is 25,131 tokens at this utilization, so 16384 leaves room for
+      # roughly 1.5 full-length sequences and anything at/above ~25k fails vLLM's KV
+      # min-fit check at boot. Full native context does not fit a 32 GB card at FP16.
+      image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
+      # --runner generate + the EmmyGenModel override + fp16 across the emmy<->vLLM seam.
+      # --max-num-batched-tokens 4128 = the 4096 dynamic-dim prefill-chunk cap + the decode
+      # bucket, the rider headroom the chunk+decode twin row split covers.
+      # --no-enable-prefix-caching is inherited from the benchmark protocol, where every
+      # request must do full prefill work; a real deployment serving repeated prefixes
+      # should reconsider it, but doing so changes the shape and wants a re-warm.
+      extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4128 --no-enable-prefix-caching"
+      extra_env:
+        # The fast-math kernel fork. NOTE: the published image's baked cubins are the
+        # STANDARD fork, so this lane compiles its own on first boot (cubin-cached after
+        # that). Re-warming the release image under EMMY_FAST_MATH=1 removes that cost and
+        # is the right fix if this config is deployed often.
+        EMMY_FAST_MATH: "1"
+        # The static decode-twin width. 32 is the image's warmed bucket and the tuned
+        # default; it suits low-concurrency interactive serving. Higher concurrency wants a
+        # wider bucket (the experiments use 8 at c=4/8 and 64 at c=64) — but a bucket the
+        # image was not warmed at is a pack miss, so change it and re-warm together.
+        EMMY_GEN_DECODE_BUCKET: "32"
 
 matrices:
-  # Headline + input-size sweep: concurrency 1, output 4096, input swept with the
-  # context length zipped alongside it (context ≥ input + output). The headline point
-  # is random_input_len 4096 @ context 8192; the rest widen the prefill.
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
-    benchmark.max_concurrency: 1
-    benchmark.num_prompts: 32
-    benchmark.random_output_len: 4096
-    zip:
-      benchmark.random_input_len: [512, 2048, 4096, 8192, 16384, 32768, 65536]
-      engine.llm.context_length: [8192, 8192, 8192, 16384, 24576, 40960, 73728]
-
-  # Batching sweep: input 2048 / output 128 / context 8192 at concurrency 4 and 8.
-  # num_prompts ≥ max(32, 8 × concurrency).
-  - deploy.gpu: "NVIDIA GeForce RTX 5090"
-    deploy.gpu_count: 1
-    benchmark.random_input_len: 2048
-    benchmark.random_output_len: 128
-    engine.llm.context_length: 8192
-    zip:
-      benchmark.max_concurrency: [4, 8]
-      benchmark.num_prompts: [32, 64]

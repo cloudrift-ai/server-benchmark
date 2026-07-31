@@ -39,7 +39,8 @@ from emmy.compiler.ir.kernel.ir import (
 from emmy.compiler.ir.schedule import Stage
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile.ir import Contraction, Side
+from emmy.compiler.ir.tile.ir import Side
+from emmy.compiler.pipeline.passes.lowering._placed import Placed
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
@@ -455,7 +456,7 @@ def _stat_slab(name: str) -> str:
 
 
 def _sync_operands(
-    c: Contraction,
+    c: Placed,
     bk_elems: int,
     mn: tuple[Side, Side],
     cta: CtaTile,
@@ -684,7 +685,7 @@ def _scalar_bound(mn, offset, i: int, j: int):
     return cond
 
 
-def _scalar_protected(c: Contraction) -> frozenset[str]:
+def _scalar_protected(c: Placed) -> frozenset[str]:
     """The shared iteration coordinates — the block / unit / loop / extent vars excluded from the
     per-cell SSA rename (everything else is suffixed ``__c{i}_{j}`` so each cell owns its names)."""
     m, n, k_axis = c.m, c.n, c.k_axis
@@ -699,7 +700,7 @@ def _scalar_protected(c: Contraction) -> frozenset[str]:
 
 
 def _scalar_drain(
-    c: Contraction, cells, offset, slabs: tuple[str, str], ki: str, bk_elems: int, base: tuple[Expr, Expr], offs=(None, None)
+    c: Placed, cells, offset, slabs: tuple[str, str], ki: str, bk_elems: int, base: tuple[Expr, Expr], offs=(None, None)
 ) -> Loop:
     """The inner slab-drain reduce loop ``for ki: b = b_slab[ki, n_local]; a = a_slab[m_local, ki];
     v = a·b; acc += v`` — the scalar counterpart of the mma ``ldmatrix`` drain. Built per-cell directly
@@ -746,7 +747,7 @@ class _AtomOps:
     slab-reading leaf) and :meth:`slab_elem` (the slab element dtype). This IS the "atom as
     descriptor" seam: one factory (:func:`_atom_ops`), no scattered ``isinstance``."""
 
-    c: Contraction
+    c: Placed
     stage: Stage | None = None
     inputs: object = None
     workers: object = None  # the resolved WarpSpec (None = uniform SIMT) — consumed by _staged
@@ -1083,13 +1084,13 @@ class _ScalarOps(_AtomOps):
         return _dedup_loads(cell)
 
 
-def _atom_ops(c: Contraction, stage: Stage | None = None, inputs=None, workers=None, epilogue: Body | None = None, seam=None) -> _AtomOps:
+def _atom_ops(c: Placed, stage: Stage | None = None, inputs=None, workers=None, epilogue: Body | None = None, seam=None) -> _AtomOps:
     """The **one** atom dispatch — select the codegen strategy off the atom kind."""
     cls = _MmaOps if isinstance(c.atom, AtomKind) else _ScalarOps
     return cls(c, stage, inputs, workers, Body(()) if epilogue is None else epilogue, seam)
 
 
-def reduce_codegen(c: Contraction, stage: Stage | None = None, inputs=None, workers=None, seam=None):
+def reduce_codegen(c: Placed, stage: Stage | None = None, inputs=None, workers=None, seam=None):
     """The reusable, **sink-agnostic** ``(state_decls, reduce_region)`` from the atom strategy — the
     accumulator decls + the contraction K-loop (the ONE :meth:`_AtomOps.reduce` driver: the shared
     :func:`_contract_kloop` spine gmem-direct, the shared :func:`_staged` fill→drain skeleton staged).
@@ -1100,7 +1101,7 @@ def reduce_codegen(c: Contraction, stage: Stage | None = None, inputs=None, work
     return ops.state, ops.reduce
 
 
-def store_sink(c: Contraction, epilogue: Body | None = None):
+def store_sink(c: Placed, epilogue: Body | None = None):
     """The default **matmul sink** — the per-cell ``store(i, j, offset, mn)`` from the atom strategy
     (an mma ``RegStore`` / the replicated scalar ``epilogue`` tail), folding in the ``epilogue`` (the
     projection off the node's ``Map`` wrapper + the store glue). ``factorize(c, store=…)`` swaps the

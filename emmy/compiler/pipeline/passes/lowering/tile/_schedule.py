@@ -644,7 +644,7 @@ def _fragment_epilogue_ok(epilogue: Body) -> bool:
     return True
 
 
-def _rtx4080_dit_deploy_rows(rows: list[dict], probe: Contraction | None, keys: tuple[str, str, str], ctx) -> list[dict]:
+def _rtx4080_dit_deploy_rows(rows: list[dict], probe: Placed | None, keys: tuple[str, str, str], ctx) -> list[dict]:
     """Narrow a deterministic RTX-4080 deploy to the measured DiT contraction winner, while
     leaving tune/search and explicit knob pins untouched. The recorded winners are LEGACY
     spellings; the comparison canonicalizes both sides through the site codec
@@ -748,7 +748,7 @@ def _demote_mixed_a(kernel, con):
     a_t = kernel.inputs.get(con.a.input)
     if getattr(getattr(a_t, "dtype", None), "name", None) != "f32" or not _demoted_atoms(kernel, con):
         return con
-    return replace(con, a=make_cone([con.a], con.k_axis.name))
+    return con.replace_node(a=make_cone([con.a], con.k_axis.name))
 
 
 def _warp_move_ok(kernel, spec: str) -> bool:
@@ -799,7 +799,7 @@ def _stage_candidates(kernel, probe, plan: TilePlan, budget: int = STATIC_SMEM_C
     return out
 
 
-def _reduce_candidates(kernel, place, plan: TilePlan, probe: Contraction | None = None, channels: int = 1) -> list[str]:
+def _reduce_candidates(kernel, place, plan: TilePlan, probe: Placed | None = None, channels: int = 1) -> list[str]:
     """The ``REDUCE`` codec candidates for one tile candidate — serial ``""`` first (option-0),
     then the legal coop / ILP moves (per-cell tier only — the non-output-tiled contract) and the
     divisor- and occupancy-guarded split-K moves (both finalizes, both tiers). An **atomic**
@@ -1137,7 +1137,7 @@ def _can_stage_warp_tma(
     return all((x * elem_bytes) % 16 == 0 for x in inner)
 
 
-def _resolve_warp_stage(c: Contraction, stage: Stage, budget: int = STATIC_SMEM_CAP) -> Stage | None:
+def _resolve_warp_stage(c: Placed, stage: Stage, budget: int = STATIC_SMEM_CAP) -> Stage | None:
     """Resolve a pinned operand ``Stage`` against the warp (mma) contraction ``c`` — TMA > cp.async >
     gmem-direct (``None``). The resolved stage carries ``bk_elems`` (the codec-spelled ``TilePlan.bk``
     in elements), ``depth`` clamped so the ring's slots fit the smem ``budget`` (the device's dynamic
@@ -1184,7 +1184,7 @@ def _resolve_warp_stage(c: Contraction, stage: Stage, budget: int = STATIC_SMEM_
     return replace(stage, depth=depth, ring=stage.ring and depth >= 2, reg_depth=min(stage.reg_depth, bk), bk_elems=bk_elems)
 
 
-def _resolve_scalar_stage(c: Contraction, stage: Stage, inputs, budget: int = STATIC_SMEM_CAP) -> Stage | None:
+def _resolve_scalar_stage(c: Placed, stage: Stage, inputs, budget: int = STATIC_SMEM_CAP) -> Stage | None:
     """Resolve a pinned operand ``Stage`` against the scalar register-tile contraction ``c``, or
     ``None`` (gmem-direct). Staging is **opt-in behind a ``STAGE`` pin**: eligible when the transport
     is ``tma`` / ``cp.async`` and K is static (a computed-A contraction never reaches here — it keeps
@@ -1287,7 +1287,7 @@ def prologue_knob_bases(con_root, stat_fold) -> tuple[dict, dict, str]:
     return con, map_, stat_key
 
 
-def _resolve_sync_stage(c: Contraction, budget: int = STATIC_SMEM_CAP, want_depth: int = 1) -> Stage | None:
+def _resolve_sync_stage(c: Placed, budget: int = STATIC_SMEM_CAP, want_depth: int = 1) -> Stage | None:
     """The ``sync`` compute-fill :class:`Stage` for a **computed-A** warp contraction with tile plan
     ``c.tile`` — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A; cp.async /
     TMA are copy transports that cannot evaluate a producer cone), so there is no gmem-direct ``""``
@@ -1328,7 +1328,7 @@ def _resolve_sync_stage(c: Contraction, budget: int = STATIC_SMEM_CAP, want_dept
 def _computed_a_rows(
     kernel,
     place,
-    probe: Contraction,
+    probe: Placed,
     keys: tuple[str, str, str],
     budget: int = STATIC_SMEM_CAP,
     ctx=None,
@@ -2072,7 +2072,7 @@ def _pin_tile_workers(spec: str) -> Workers | None:
         return None
 
 
-def _narrow_flash_forms(forms: list[TileOp], head: Contraction, pv: Contraction, *, keyed_only: bool = False) -> list[TileOp]:
+def _narrow_flash_forms(forms: list[TileOp], head: Placed, pv: Placed, *, keyed_only: bool = False) -> list[TileOp]:
     """Narrow the flash fork's leaf rows by the live per-node ``TILE`` pins. Every flash row spells
     the same key set (``TILE@<qk_k>`` / ``TILE@<pv_k>``), so a pin selects rows by their stamped
     spelling: ``f<d>`` on the PV k-axis keeps the CHAIN row, ``""`` / ``a:scalar`` the per-cell
@@ -2111,7 +2111,7 @@ def _narrow_flash_forms(forms: list[TileOp], head: Contraction, pv: Contraction,
     return kept
 
 
-def _rtx4080_dit_flash_deploy(forms: list[TileOp], red: Fold, head: Contraction, pv: Contraction, ctx) -> TileOp | None:
+def _rtx4080_dit_flash_deploy(forms: list[TileOp], red: Fold, head: Placed, pv: Placed, ctx) -> TileOp | None:
     """The measured DiT S256/Hd72 flash winner on RTX 4080, or ``None``.
 
     Like the contraction defaults above, this applies only to a deterministic unpinned deploy;
@@ -2181,7 +2181,7 @@ def _stamp_twisted_split(rows: list[TileOp], plan: ReducePlan) -> list[TileOp]:
     return out
 
 
-def _twisted_pair(op, free) -> tuple[Fold, Contraction, Contraction, Contraction, Contraction] | None:
+def _twisted_pair(op, free) -> tuple[Fold, Contraction, Contraction, Placed, Placed] | None:
     """The flash-shaped ``TWISTED`` streaming contraction pair — ``(reduction, head_fold, pv_fold,
     head, pv)``: the STORED :class:`Contraction` nodes (the score at the partial's head, the single
     computed-A expect later in the sequence) plus their PLACED readings (output

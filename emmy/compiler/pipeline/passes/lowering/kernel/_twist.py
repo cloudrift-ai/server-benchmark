@@ -43,7 +43,6 @@ Leading ``_`` so the pass loader skips this module."""
 
 from __future__ import annotations
 
-from dataclasses import replace
 from types import SimpleNamespace
 
 from emmy.compiler.dtype import F32
@@ -172,7 +171,7 @@ def _reads(s: Stmt) -> set[str]:
 
 
 def _frag_contraction(
-    c: Contraction,
+    c: Placed,
     tiles: list[tuple[tuple[str, ...], tuple[str, ...]]],
     *,
     n_sub,
@@ -304,7 +303,7 @@ def _frag_contraction(
     return out
 
 
-def _realize_prologue(stmts, qk: Contraction, frags: tuple[str, ...], col_bases, row_base: Expr, state) -> tuple[list, list]:
+def _realize_prologue(stmts, qk: Placed, frags: tuple[str, ...], col_bases, row_base: Expr, state) -> tuple[list, list]:
     """Realize the score prologue (the plain stmts between the head contraction and the carrier's
     streaming merge) at fragment residence, stmt kind by stmt kind. Returns ``(hoisted, stream)`` —
     the loop-invariant scalar ``Load``\\ s (hoisted above the stream when a realized stmt reads
@@ -363,7 +362,7 @@ def _realize_prologue(stmts, qk: Contraction, frags: tuple[str, ...], col_bases,
     return [ld for ld in hoisted if set(ld.names) & used], stream
 
 
-def _causal_stream(stmts, qk: Contraction) -> bool:
+def _causal_stream(stmts, qk: Placed) -> bool:
     """True when the score prologue carries the causal coordinate ``Select`` — keep ``kv ≤ m`` over
     the contraction's own axis vars. Structural: the triangular kv bound below derives from the
     predicate's shape, never from a kernel identity (an additive-mask or unmasked stream has no
@@ -383,7 +382,7 @@ def _causal_stream(stmts, qk: Contraction) -> bool:
     return False
 
 
-def _banded_stream(stmts, qk: Contraction) -> int | None:
+def _banded_stream(stmts, qk: Placed) -> int | None:
     """The sliding-window width W when the score prologue carries the band coordinate ``Select``
     — keep ``kv > m − W`` over the contraction's own axis vars. Structural, like
     :func:`_causal_stream`: the banded kv stream START below derives from the predicate's shape."""
@@ -405,12 +404,12 @@ def _banded_stream(stmts, qk: Contraction) -> int | None:
     return None
 
 
-def _pv_streamed(pv: Contraction, kv_axis: Axis) -> Contraction:
+def _pv_streamed(pv: Placed, kv_axis: Axis) -> Placed:
     """The expect contraction with its singleton intra-block axis swapped for the STREAM axis — the
     scalar tree contracts one key per step (``k_axis = pj``, extent 1); the fragment tier contracts
     the whole block, whose keys ride the stream axis in the value ``Load``'s index (``tile.bk = 1``:
     the block is one atom-K step)."""
-    return replace(pv, k_axis=kv_axis)
+    return pv.replace_node(k_axis=kv_axis)
 
 
 def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], list[Stmt]]:

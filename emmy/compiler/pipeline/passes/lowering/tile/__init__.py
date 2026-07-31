@@ -11,7 +11,9 @@
    traffics in ``LoopOp``. (Flash recognition is a *graph rewrite*, so its fused ``TileOp`` is
    scheduled when it re-enters the rule — the rule matches ``LoopOp`` AND an unmapped ``TileOp``.)
    The ``_flash`` / ``_softmax`` helpers hold the pattern matchers; ``_schedule`` holds the
-   geometry + reduce-partition logic and the ``REDUCE`` / ``TILE`` / ``STAGE`` / ``WORK`` knobs.
+   geometry + reduce-partition logic and the ``REDUCE`` / ``TILE`` / ``STAGE`` / ``WORK`` knobs;
+   ``_view`` holds the two PLACED-reading constructors both the schedule and the Kernel-IR
+   lowering tiers read a contraction through (the tiled leaf, the flash streaming pair).
 2. **Split** (``030_split_reduce``) — consume a cross-CTA ``GRID`` stage (``ReducePlan.needs_split``)
    as a **graph rewrite**: a partial kernel reduces each CTA's slice of the reduce axis and
    either ``atomicAdd``\\ s its (additive) state into the output (one kernel) or writes it to a

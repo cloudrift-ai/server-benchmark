@@ -71,8 +71,8 @@ from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.knob import canon_family_value, family_of, values_equal
 from emmy.compiler.pipeline.passes.lowering._addr import gmem_row_stride
 from emmy.compiler.pipeline.passes.lowering._placed import Placed
-from emmy.compiler.pipeline.passes.lowering._placed import place as place_view
-from emmy.compiler.pipeline.passes.lowering.tile._atomize import make_cone, map_cone, semiring_binding
+from emmy.compiler.pipeline.passes.lowering.tile._atomize import make_cone, map_cone
+from emmy.compiler.pipeline.passes.lowering.tile._view import contraction_view, twisted_pair
 from emmy.compiler.pipeline.pipeline import LoweringError
 from emmy.compiler.pipeline.search.space import (
     F16_MMA_F32_ACC,
@@ -828,7 +828,7 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], tuple[str, str, str
     else:  # a still-Map contraction (bound at fork-emit) — no node to key on; bare is canonical
         keys = (TILE.name, STAGE.name, REDUCE.name)
     try:
-        probe, proj = _contraction_node(kernel.op, place, TilePlan())
+        probe, proj = contraction_view(kernel.op, place, TilePlan())
     except LoweringError:
         probe, proj = None, Body(())
     if probe is not None and probe.a_computed:
@@ -1339,44 +1339,6 @@ def _check_warp_static_k(kernel, wt) -> None:
         )
 
 
-def _contraction_node(node, place, tile_plan: TilePlan) -> tuple[Placed, Body]:
-    """The high-level :class:`Contraction` structural node for a tiled ``CONTRACTION`` leaf. A
-    kernel recognition already nodified (the per-cell scalar contraction — ``_nodify_contraction``
-    in ``010_recognize``) only swaps the ``tile`` schedule field; a still-``Map`` form (a fused /
-    flash-side contraction) is bound here at fork-emit (seam #1): the ``(a_load, b_load, acc,
-    epilogue)`` operand→role facts resolve structurally (:func:`semiring_binding`) — raising
-    ``LoweringError`` on an unbindable atom — plus the resolved ``tile_plan`` from the schedule
-    fork, and the (m, n) output / K axes off the ``Map``. Returns ``(node, projection)`` — the
-    projection has ONE home, the wrapping ``Map``'s body, so the option builders re-wrap it and
-    materialize peels it into the store tail (the synthesized grid-``Write`` for a bare contraction
-    stays a materialize concern — it needs ``root.output``). A computed-A cone the binding resolves
-    is stored INLINE on the ``a`` edge (:func:`make_cone`)."""
-    grid = list(place.grid)
-    if isinstance(node, Map) and len(node.sources) == 1 and isinstance(node.sources[0], Contraction) and len(grid) >= 2:
-        # The recognizer's ``Map(body=projection, sources=(Contraction,))`` spelling — the ONE
-        # node under the wrapper is the schedulable unit, the projection its ``Map`` body. The
-        # placed reading is STAMPED here, its output axes the placement's trailing grid.
-        return place_view(node.sources[0], grid[-2], grid[-1], tuple(grid[:-2]), tile=tile_plan), node.body
-    if isinstance(node, Contraction) and len(grid) >= 2:
-        return place_view(node, grid[-2], grid[-1], tuple(grid[:-2]), tile=tile_plan), Body(())
-    a_load, b_load, acc, epilogue = semiring_binding(node, place.grid)
-    kaxis = reduce_loop(node).axis
-    return (
-        place_view(
-            Contraction(
-                k_axis=kaxis,
-                a=a_load if isinstance(a_load, Load) else make_cone(a_load, kaxis.name),
-                channels=(Channel(b=b_load, acc=acc),),
-            ),
-            grid[-2],
-            grid[-1],
-            tuple(grid[:-2]),
-            tile=tile_plan,
-        ),
-        epilogue,
-    )
-
-
 def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
     """Factor a **static** contraction axis ``k`` into ``ksplit × kslice`` for split-K.
 
@@ -1406,7 +1368,7 @@ def _splitk_option(
 ) -> TileOp:
     """One scheduled **split-K** contraction ``TileOp``: the structural ``Fold(axis=ksplit,
     source=Contraction(k_axis=kslice))``. The inner :class:`Contraction` is the **same** node a
-    non-split matmul builds (:func:`_contraction_node`, so it factorizes through ``_factor`` to mma or
+    non-split matmul builds (``_view.contraction_view``, so it factorizes through ``_factor`` to mma or
     scalar per the ``tile_spec`` atom) but over ``kslice`` with operands reindexed to
     ``ksplit·(K/w) + kslice``; the outer additive :class:`Fold` carries the ``g<w>[a|k]`` GRID
     partition (:class:`ReducePlan`) that ``030_split_reduce`` consumes into the cross-CTA partial + finalize.
@@ -1432,7 +1394,7 @@ def _splitk_option(
             f"TILE parallel block {wt.units_n}×{wt.units_m}={wt.block_threads} threads exceeds the "
             f"{MAX_BLOCK_THREADS}-thread/CTA limit; shrink n/m or move work to the f register sub-tile."
         )
-    inner, epi = _contraction_node(tile.op, place, wt)
+    inner, epi = contraction_view(tile.op, place, wt)
     w = rplan.cta
     # A warp (mma) slice must keep the inner K-step dividing K/w — the warp K-loop has no static-K
     # tail masking (same guard as ``_check_warp_static_k``, but on the post-split slice).
@@ -1538,7 +1500,7 @@ def _warp_option(
     # Build the tiled Contraction node here — it resolves the operand→role facts internally, so an
     # unbindable atom (a non-Load operand: a computed-cone / demoted matmul) raises and is rejected
     # at fork construction, like the static-K check.
-    node, proj = _contraction_node(tile.op, place, wt)
+    node, proj = contraction_view(tile.op, place, wt)
     node = _demote_mixed_a(tile, node)
     # A computed-A node's stage is the mandatory resolved ``sync`` compute-fill (its ``smem`` /
     # ``bk_elems`` are derived, not codec-spelled, so the row's ``"d1/sync"`` re-resolves here);
@@ -1620,7 +1582,7 @@ def _tile_option(
         # rather than stamped onto a kernel that doesn't fold it (an honest row, not a claimed one).
         rplan = None
         try:
-            node, proj = _contraction_node(tile.op, place, plan)
+            node, proj = contraction_view(tile.op, place, plan)
         except LoweringError:
             pass  # an unbindable contraction (a non-Load operand) keeps the Map form
         else:
@@ -1811,7 +1773,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None, reduce_key: str | N
         levels = [_level(WORK.name), *(_level(k) for k in keys), _level(RASTER.name)]
         return build_fork_tree(params=rows, levels=levels, materialize=_materialize)
     # A TWISTED streaming reduce whose per-step partial is a contraction pair (the flash tree,
-    # :func:`_twisted_pair`) offers its structurally-different schedules as ONE prior-ranked fork:
+    # ``_view.twisted_pair``) offers its structurally-different schedules as ONE prior-ranked fork:
     # the WARP (fragment-resident) move grid (option-0 = the conservative one-warp / ``2·atom_n``
     # key block — the historical deterministic stamp), the scalar register-vector CHAIN (the FA-2
     # shared-score form), then the reduce-partition tiers (cooperative / per-cell serial —
@@ -1831,7 +1793,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None, reduce_key: str | N
         rplan = None
     if rplan is not None:
         if rplan.needs_split and rplan.finalize == "kernel":
-            pair = _twisted_pair(tile.op, tile.place.free)
+            pair = twisted_pair(tile.op, tile.place.free)
             if pair is not None:
                 red, _, _, head, pv = pair
                 warps = _twisted_warp_options(tile, name, knobs, _smem_budget(ctx), _tma_allowed(ctx), _f16acc_allowed(ctx))
@@ -1840,7 +1802,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None, reduce_key: str | N
                     rows = _filter_work(_narrow_flash_forms(rows, head, pv, keyed_only=True), lambda o: o.knobs.get(WORK.name, ""))
                     return rows if len(rows) > 1 else rows[0]
     if not (REDUCE.raw() or "").strip():
-        pair = _twisted_pair(tile.op, tile.place.free)
+        pair = twisted_pair(tile.op, tile.place.free)
         if pair is not None:
             red, head_f, pv_f, head, pv = pair
             warps = _twisted_warp_options(tile, name, knobs, _smem_budget(ctx), _tma_allowed(ctx), _f16acc_allowed(ctx))
@@ -1976,36 +1938,6 @@ def _stamp_twisted_split(rows: list[TileOp], plan: ReducePlan) -> list[TileOp]:
     return out
 
 
-def _twisted_pair(op, free) -> tuple[Fold, Contraction, Contraction, Placed, Placed] | None:
-    """The flash-shaped ``TWISTED`` streaming contraction pair — ``(reduction, head_fold, pv_fold,
-    head, pv)``: the STORED :class:`Contraction` nodes (the score at the partial's head, the single
-    computed-A expect later in the sequence) plus their PLACED readings (output
-    axes off the placement's trailing ``free`` — the query axis, and the stream axis for the score /
-    the value axis for the expect). ``None`` when not a streaming pair (an online-softmax / RMSNorm
-    ``TWISTED`` reduce takes the reduce-partition tiers). The one structural guard the warp / chain /
-    scalar flash forms share; each form's own demands (a gmem-``Load`` A, the mma atom's dtype /
-    divisibility, the chain's register budget) stay with its builder. Stamping targets the STORED
-    nodes (`s is head_fold` in the partial); reads go through the placed copies."""
-    src = op.sources[0] if isinstance(op, Map) and len(op.sources) == 1 else None
-    red = src if isinstance(src, Fold) else (op if isinstance(op, Fold) else None)
-    if red is None or red.role is not AxisRole.TWISTED:
-        return None
-    stmts = list(red.step_stmts())
-    if not stmts:
-        return None
-    head_fold = stmts[0]
-    if not isinstance(head_fold, Contraction) or len(free) < 2:
-        return None
-    tail_folds = [st for st in stmts[1:] if isinstance(st, Contraction)]
-    if len(tail_folds) != 1:
-        return None
-    pv_fold = tail_folds[0]
-    pv = place_view(pv_fold, free[-2], free[-1])
-    if not pv.a_computed:
-        return None
-    return red, head_fold, pv_fold, place_view(head_fold, free[-2], red.axis), pv
-
-
 def _twisted_chain_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp | None:
     """The scalar register-vector (CHAIN) schedule for a ``TWISTED`` streaming contraction pair —
     the FA-2 shared-score form: the expect contraction's output column axis leaves the grid and
@@ -2013,7 +1945,7 @@ def _twisted_chain_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp
     score computes ONCE per streamed key and is shared across the columns (vs the per-cell tier's
     redundant recompute per column). A fork SIBLING of the warp / reduce-partition schedules,
     offered when the column axis is small + static (``≤ _CHAIN_MAX_D``, the register budget)."""
-    pair = _twisted_pair(tile.op, tile.place.free)
+    pair = twisted_pair(tile.op, tile.place.free)
     if pair is None:
         return None
     red, head_fold, pv_fold, head, pv = pair
@@ -2274,7 +2206,7 @@ def _twisted_warp_options(
     """The fragment-resident (tensor-core) candidates for a ``TWISTED`` streaming reduce — the
     warp-flash MOVE GRID over :func:`~emmy.compiler.pipeline.search.space.twisted_warp_moves`'s
     ``(warps_m, key_atoms)`` geometry — or ``[]`` (not eligible: the scalar options stand alone).
-    Eligible when the tree is the streaming contraction pair (:func:`_twisted_pair`) with a gmem
+    Eligible when the tree is the streaming contraction pair (``_view.twisted_pair``) with a gmem
     ``Load`` A operand producing the score, and the mma atom's own demands hold (a 16-bit operand
     dtype; a static head contraction axis (a non-divisible final atom is gmem-zero-filled) and the
     expect's output axis divisible by the atom; a static
@@ -2292,7 +2224,7 @@ def _twisted_warp_options(
     a pin that doesn't fit the flash form (wrong atom / a column split / a foreign ``bk``) declines
     the tier with a log line — the standard pin-validity degrade, since a bare warp pin may target
     another kernel in the same graph."""
-    pair = _twisted_pair(tile.op, tile.place.free)
+    pair = twisted_pair(tile.op, tile.place.free)
     if pair is None:
         return []
     red, head_fold, pv_fold, head, pv = pair

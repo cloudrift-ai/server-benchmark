@@ -52,7 +52,7 @@ coverage until that entire cone has been measured.
 The same invariant applies *across* the tile→kernel boundary: the kernel materializer must not re-recognize structure
 the tile IR already holds. The **atomize** step (`lowering/tile/_atomize.py`, called from `020_schedule` when it builds
 the warp / register-tiled option — *not* a standalone pass) resolves the algebra→hardware-atom binding once at fork-emit
-and feeds it into the `Contraction` (`_schedule._contraction_node`), so materialize reads the operands /
+and feeds it into the `Contraction` (`_view.contraction_view`), so materialize reads the operands /
 `acc` off the node and only `factorize`s (the projection is peeled off the wrapping `Map` — its one home). Resolving it
 at option-build time means an atom that **cannot** be
 bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is rejected at fork construction, alongside
@@ -92,7 +92,7 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   `TWISTED` off the stored combine's twist family, `CONTRACTION` off the composed split-K
   operand (`Fold.composed`), `PLANAR` otherwise — so "a contraction" below
   always means the stored node, and the lowered `Loop`'s annotation falls out of the same read; the schedule fork only
-  stamps a `tile` onto a `replace()` copy (`_schedule._contraction_node`), and `_factor.factorize` reads the facts off
+  stamps a `tile` onto a `replace()` copy (`_view.contraction_view`), and `_factor.factorize` reads the facts off
   the placed node instead of `lower()`-ing the contraction and pattern-matching the result. A `STAGE` pin follows the same rule: the
   option builders resolve it against the built node ONCE (`_resolve_warp_stage` / `_resolve_scalar_stage` — transport
   eligibility, the slab K-chunk `bk_elems`, the depth clamps) and stamp the resolved `Stage` (or `None`, gmem-direct)

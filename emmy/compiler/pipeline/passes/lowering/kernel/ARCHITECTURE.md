@@ -16,7 +16,7 @@ kind, sealed through the one `grid_tile` finalizer (the article's "schedule sepa
 
 - **OUTPUT-tiled** (a contraction — warp / register tile) — the `Contraction` IS the stored node (1s,
   `ir/tile/ir.py`), its operand→role binding resolved recognize-side (`010_recognize._nodify_contraction`; the raw
-  still-`Map` forms bind at fork-emit via `_schedule._contraction_node` / `_atomize.semiring_binding`), so
+  still-`Map` forms bind at fork-emit via `_view.contraction_view` / `_atomize.semiring_binding`), so
   `_bind` only **synthesizes its bare grid-`Write`** (needs `root.output`, so it can't ride the node) and
   **expands** it through the shared tiling layer (below); the leaf type selects the codegen
   (mma / scalar). An unbindable contraction (a non-`Load` operand) keeps the `Map` form and falls through to the

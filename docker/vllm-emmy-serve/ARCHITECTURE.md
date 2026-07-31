@@ -1,23 +1,39 @@
-# vllm-emmy-gemma4 — the prebuilt gemma-4-12B serving image
+# vllm-emmy-serve — prebuilt per-model serving images
 
-A release image for one model on one GPU: **gemma-4-12B served by `EmmyGenModel` on an RTX 5090**, with the compiled
-CUDA kernels (**cubins**), the **HF model snapshot**, and the **execution-plan pack**
-(`emmy/compiler/backend/pack.py`) baked in. Cold-start pays zero `nvcc` compiles, zero HF downloads, and — on a
-pack hit — none of the compiler frontend either (no trace / pass pipeline / fork resolution / codegen; boot
-collapses from ~25 min to ~weight-load time) — `docker run --gpus all --ipc=host -p 8000:8000
-cloudriftai/vllm-emmy-gemma4:TAG` serves with no `HF_TOKEN` and no network dependency on HuggingFace
-(`HF_HUB_OFFLINE=1` is baked). The plain
-[`vllm-emmy`](../vllm-emmy/) image stays the general-purpose base (any model, compile-on-boot); this image trades a
-~35 GB pull (~24 GB of weights on the ~10 GB base) for a deterministic, tokenless boot.
+The release pipeline for **one model on one GPU**, served by `EmmyGenModel`, with the compiled CUDA kernels
+(**cubins**), the **HF model snapshot**, and the **execution-plan pack** (`emmy/compiler/backend/pack.py`) baked in.
+Cold-start pays zero `nvcc` compiles, zero HF downloads, and — on a pack hit — none of the compiler frontend either
+(no trace / pass pipeline / fork resolution / codegen; boot collapses from ~25 min to ~weight-load time), so
+`docker run --gpus all --ipc=host -p 8000:8000 cloudriftai/vllm-emmy-<slug>:TAG` serves with no `HF_TOKEN` and no
+network dependency on HuggingFace (`HF_HUB_OFFLINE=1` is baked). The plain [`vllm-emmy`](../vllm-emmy/) image stays
+the general-purpose base (any model, compile-on-boot); a baked image trades a large pull (the weights on top of the
+~10 GB base) for a deterministic, tokenless boot.
+
+**One (model, GPU, config) triple per image, and the naming schema says which.** `model_slug.sh` maps an HF id to a
+docker-safe slug — org dropped, lowercased, junk collapsed to `-` — and that one slug names **both** the published
+image and the pinned config:
+
+| HF model id | slug | config | image |
+| --- | --- | --- | --- |
+| `google/gemma-4-12B-it` | `gemma-4-12b-it` | `models/gemma-4-12b-it.env` | `cloudriftai/vllm-emmy-gemma-4-12b-it` |
+| `Qwen/Qwen3-Embedding-0.6B` | `qwen3-embedding-0.6b` | `models/qwen3-embedding-0.6b.env` | `cloudriftai/vllm-emmy-qwen3-embedding-0.6b` |
+
+One implementation of that mapping on purpose (a shell script both `make` and the container scripts call): a slug
+that disagreed between the warm and the bake would silently load two different configs, which is exactly the
+cache-key parity failure the rest of this document exists to prevent. Onboarding a model is therefore one new
+`models/<slug>.env` — no new Makefile targets, no new Dockerfile, no new scripts.
+
+Every step is `make <target> MODEL=<hf-id>`; `make serve-config MODEL=<id>` prints the resolved slug, config, tag
+and target GPU, and `make serve-models` lists the models that already have a pinned config.
 
 ## Why a "warm" step exists: the cache-key parity contract
 
-**Why not just cross-compile?** `nvcc` targets `sm_120` from any machine (that's exactly what the preflight script
+**Why not just cross-compile?** `nvcc` targets any arch from any machine (that's exactly what the preflight script
 does), but the cache is **content-addressed, not searched**: at boot the server generates each kernel's source,
 computes `sha1(source, name, arch, toolkit_tag, flags)` (see `emmy/compiler/backend/cuda/nvcc.py`), and looks up
 that exact file. A cubin built from source that differs by one character has a different hash and is simply never
 found — locally-produced cubins aren't "slightly worse", they're invisible. So the image doesn't need "kernels that
-run on a 5090"; it needs **the exact kernels the released server will ask for**, and two of the hash inputs can't be
+run on the target card"; it needs **the exact kernels the released server will ask for**, and two of the hash inputs can't be
 reproduced off the card:
 
 - the kernel **source** — the compiler picks each kernel's schedule partly from the **live-probed** GPU features; a
@@ -27,16 +43,16 @@ reproduced off the card:
 
 Hence the warm: one real serving run on the target card, inside the image. The full contract it satisfies:
 
-- `source` — live-probed 5090 featurization + the real program enumeration (above).
+- `source` — live-probed target-card featurization + the real program enumeration (above).
 - `toolkit_tag` is the compiling nvcc — the warm must run **inside the image**, not on the host toolchain.
 - `flags` — production `-O3`: never warm with `EMMY_NVCC_FLAGS` set (tune's `-Xcicc -O1` would poison the key).
 - The serving config (model / dtype / max-model-len / max-num-batched-tokens / decode bucket) changes **which
   programs exist and their shapes** — warm and release must use identical values.
 
-The preflight script is the flip side: the *toolchain acceptance* question ("does this nvcc compile every gemma-4
+The preflight script is the flip side: the *toolchain acceptance* question ("does this nvcc compile every
 kernel family for `sm_120`?") IS answerable by cross-compilation, so that part runs anywhere, before the rental.
 
-The machinery enforces the last two points structurally: **`config.env` is the single source** of the serving config
+The machinery enforces the last two points structurally: **`models/<slug>.env` is the single source** of the serving config
 (make passes it to both the warm run and the bake), and **`serve.sh` is the single serve invocation** — the warm run
 bind-mounts it into the plain image and the baked image ships it, so the warmed and released servers execute
 literally the same script with the same env.
@@ -69,12 +85,12 @@ warmed set should either re-warm the image at that width or expect the deploy to
 
 ## Files
 
-- `config.env` — the pinned serving config. Every value is cache-key-relevant; it must be **final before warming**
+- `models/<slug>.env` — the pinned serving config, one file per model (the filename IS the slug). Every value is cache-key-relevant; it must be **final before warming**
   (re-measure memory headroom on the card first — see the workflow). Make-includable `VAR=value` syntax.
 - `serve.sh` — the frozen generative serve invocation (the arg set `emmy serve --generate` builds: `--runner
   generate --dtype float16 --hf-overrides EmmyGenModel`, the `FULL_DECODE_ONLY` whole-step decode-cudagraph
   compilation-config with the forced fused `rotary_embedding` CustomOp, `--no-enable-prefix-caching`, + the
-  `GEMMA4_*` config; keep in sync with `_generate_compile_args` in `emmy/commands/serve.py`).
+  `SERVE_*` config; keep in sync with `_generate_compile_args` in `emmy/commands/serve.py`).
 - `warm.sh` — runs the **plain** `vllm-emmy` image on the target GPU with `./warm` mounted at `/opt/emmy`, waits for
   `/health`, issues one completion (covers prefill + decode kernels), stops. Result: `warm/hf` (the model snapshot —
   the gated download happens here, once, via `HF_TOKEN`), `warm/cubin` (every compiled kernel), and `warm/pack`
@@ -94,26 +110,45 @@ warmed set should either re-warm the image at that width or expect the deploy to
 
 ## Workflow
 
-Only the highlighted steps need the physical 5090; the bake and push are GPU-free (but see the note below on where
-to run them):
+Only the highlighted steps need the physical target card; the bake and push are GPU-free (but see the note below on
+where to run them):
 
 ```mermaid
 flowchart LR
+    gold["make serve-goldens<br/><i>anywhere</i>"]
     base["make vllm-emmy-image<br/><i>anywhere</i>"]
-    warm["make gemma4-warm<br/><b>RTX 5090</b>"]
-    bake["make gemma4-serve-image<br/><i>anywhere</i>"]
-    verify["make gemma4-serve-verify<br/><b>RTX 5090</b>"]
-    push["make gemma4-serve-push<br/><i>anywhere</i>"]
-    base --> warm -- "warm/ (hf + cubin)" --> bake --> verify -- PASS --> push
+    warm["make serve-warm<br/><b>target GPU</b>"]
+    bake["make serve-image<br/><i>anywhere</i>"]
+    verify["make serve-verify<br/><b>target GPU</b>"]
+    push["make serve-push<br/><i>anywhere</i>"]
+    gold -- "coverage OK" --> base --> warm -- "warm/ (hf + cubin)" --> bake --> verify -- PASS --> push
     classDef gpu fill:#76b900,color:#fff,stroke:#4e7a00
     class warm,verify gpu
 ```
 
-The `release-gemma4-image` skill (`.claude/skills/release-gemma4-image/`) automates this whole session — rental or
+The `release-serving-image` skill (`.claude/skills/release-serving-image/`) automates this whole session — rental or
 local mode, abort gates per step, a human approval pause before the push, guaranteed teardown. The manual steps:
 
-The full release session on a rented 5090 (each step from the repo checkout; host prereqs for steps 3–4:
+The full release session on a rented card (each step from the repo checkout; host prereqs for steps 4–5:
 `make setup` + `pip install -e ".[serving]"` + cupy + `export HF_TOKEN=…`):
+
+0. **Golden coverage** — assert this (model, card) pair has recorded goldens before spending anything:
+
+   ```bash
+   make serve-goldens MODEL=google/gemma-4-12B-it
+   ```
+
+   The goldens are the **top tier of the fork-resolution evidence hierarchy**: they are what seeds each kernel with
+   a tuned schedule. Warm a model with no goldens for its shapes and cold greedy picks instead — on unseeded
+   projection shapes that is a scalar tile ~770× off cuBLAS, and on some shapes a kernel that hangs outright — and
+   those picks are then frozen into the shipped cubins **and the pack**, where no later boot revisits them. So a
+   golden-less release does not ship a slightly slower image; it ships a permanently bad one.
+
+   Matching is by the golden's recorded `model:` provenance, compared as slugs, with a `-`-boundary prefix rule so
+   a base checkpoint's goldens cover its instruction-tuned sibling (same layer geometry, same kernel shapes) while a
+   quantized or resized variant correctly misses. On FAIL the script distinguishes "this card has no goldens at all"
+   from "this card is tuned, but for other models" and names them — that difference decides what to do next, so it
+   is a question for a human, not something to proceed through.
 
 1. Build the base image the warm will compile inside of:
 
@@ -127,64 +162,71 @@ The full release session on a rented 5090 (each step from the repo checkout; hos
    (the emmy wheel + nvcc are in the image; it hides CUDA and resolves goldens off-GPU):
 
    ```bash
-   docker run --rm --entrypoint bash -v "$PWD/scripts/preflight_gemma4_sm120.sh":/preflight.sh \
-       cloudriftai/vllm-emmy:TAG /preflight.sh          # expect: 34 OK, 0 FAIL
+   docker run --rm --entrypoint bash -v "$PWD/scripts/preflight_serving_kernels.sh":/preflight.sh \
+       -e MODEL=google/gemma-4-12B-it -e ARCH=sm_120 \
+       cloudriftai/vllm-emmy:TAG /preflight.sh          # expect: <N> OK, 0 FAIL
    ```
 
-3. **Re-measure memory headroom** and finalize `config.env` — the config seals the cache key, so it cannot change
+   The enumeration is this model's golden set (the same matcher as step 0), so the preflight covers exactly the
+   picks the warm will deploy. `<N>` grows as goldens land — the gate is **0 FAIL with at least one OK**, never a
+   specific count.
+
+3. **Re-measure memory headroom** and finalize `models/<slug>.env` — the config seals the cache key, so it cannot change
    after this point without re-warming. Step `--max-model-len` / `--max-num-batched-tokens` up from the old floor
    (256) with the decode bucket ON, watching for OOM, e.g.:
 
    ```bash
-   ./venv/bin/emmy serve --generate google/gemma-4-12B --bench \
+   ./venv/bin/emmy serve --generate google/gemma-4-12B-it --bench \
        --max-model-len 2048 --max-num-batched-tokens 2048 --gpu-memory-utilization 0.97
    ```
 
-   Write the largest passing values into `config.env`.
+   Write the largest passing values into `models/<slug>.env`, including `SERVE_GPU`.
 4. Correctness gate at the pinned config (A/B vs HF eager; the Phase-A exit check):
 
    ```bash
-   ./venv/bin/python scripts/validate_gemma4_serve.py --model google/gemma-4-12B \
+   ./venv/bin/python scripts/validate_serve.py --model google/gemma-4-12B-it \
        --max-model-len <pinned> --max-num-batched-tokens <pinned> --gpu-mem-util <pinned>
    ```
 
-5. `HF_TOKEN=… make gemma4-warm` — fills `warm/` (first boot downloads the model + compiles all layers; minutes).
-6. `make gemma4-serve-image` → `make gemma4-serve-verify` (expect `PASS — served offline with zero new cubins`) →
-   `make gemma4-serve-push`.
-7. Point the gemma-4 recipes at the new tag; tear down the rental.
+5. `HF_TOKEN=… make serve-warm MODEL=<id>` — fills `warm/` (first boot downloads the model + compiles all layers; minutes).
+6. `make serve-image MODEL=<id>` → `make serve-verify MODEL=<id>` (expect `PASS — served offline with zero new cubins`) →
+   `make serve-push MODEL=<id>`.
+7. Point the recipes that should use it at the new tag; tear down the rental.
 
-**Where to run bake/push:** although `gemma4-serve-image` and `-push` are GPU-free, run them on the rental anyway —
+**Where to run bake/push:** although `serve-image` and `serve-push` are GPU-free, run them on the rental anyway —
 moving `warm/` off-datacenter means a ~24 GB download plus a ~35 GB Docker Hub upload from a home link, and the
-verify step needs the card between bake and push regardless. Never "top up" the cache on a non-5090: any kernel
-compiled elsewhere is a dead cache entry the real card never hits.
+verify step needs the card between bake and push regardless. Never "top up" the cache on a
+different card: any kernel compiled elsewhere is a dead cache entry the real card never hits, which is why
+`warm.sh` and `verify.sh` check the live GPU against the config's `SERVE_GPU` and refuse a mismatch.
 
-### Running it locally (a 5090 in the box)
+### Running it locally (the target card in the box)
 
 The steps are identical — the machinery doesn't care where the card lives; steps 1–7 run as written, minus the
 rental/teardown. The local-only deltas:
 
 - **Pin the GPU on a multi-GPU box.** `warm.sh` / `verify.sh` default to `--gpus all` and vLLM takes device 0 — on
   a box that also holds another card, set `GPU_DEVICE=<index>` (both scripts, and `make` passes env through:
-  `GPU_DEVICE=1 make gemma4-warm`). Warming on the wrong card produces a dead cache: wrong arch, wrong
-  featurization, zero hits on a 5090.
+  `GPU_DEVICE=1 make serve-warm MODEL=<id>`). Warming on the wrong card produces a dead cache: wrong arch, wrong
+  featurization, zero hits on the real card. `warm.sh` checks the live GPU against `SERVE_GPU` and refuses a
+  mismatch, but a multi-GPU box still needs `GPU_DEVICE` pointed at the right index.
 - **Skip the 24 GB download by pre-seeding the snapshot.** If the model is already in the local HF cache, copy it
   into the warm dir before warming — the hub client finds it and downloads nothing, and `HF_TOKEN` becomes
   unnecessary (`warm.sh` only requires the token when the snapshot is absent):
 
   ```bash
-  mkdir -p docker/vllm-emmy-gemma4/warm/hf/hub
-  cp -r ~/.cache/huggingface/hub/models--google--gemma-4-12B docker/vllm-emmy-gemma4/warm/hf/hub/
+  mkdir -p docker/vllm-emmy-serve/warm/hf/hub
+  cp -r ~/.cache/huggingface/hub/models--google--gemma-4-12B docker/vllm-emmy-serve/warm/hf/hub/
   ```
 
 - **Disk budget: ~100 GB free** (measured, not the earlier ~60 GB estimate): base images (~21 GB unpacked) +
   `warm/` (~24 GB) + the baked weight layer (~24 GB) + BuildKit's transient context copy of `warm/` during the bake
   (another ~24 GB) + the host venv/HF cache if present. Freeing the venv before the bake is safe — nothing after
   the warm needs it.
-- **The push is the slow part.** `gemma4-serve-push` uploads ~35 GB over your uplink — hours on a residential
+- **The push is the slow part.** `make serve-push` uploads ~35 GB over your uplink — hours on a residential
   connection vs minutes from a datacenter. It's the main reason the rental flow exists; locally, just let it run.
 - **The snapshot ships re-sharded, as four image layers.** Docker Hub rejects blobs past ~10 GB (upload initiation
   503s forever), and gemma-4-12B ships ONE consolidated 23 GB `model.safetensors` — a single file cannot be split
-  across layers by COPY. `make gemma4-serve-image` therefore first runs `reshard_snapshot.py` (inside the base
+  across layers by COPY. `make serve-image MODEL=<id>` therefore first runs `reshard_snapshot.py` (inside the base
   image), rewriting the consolidated file as standard HF shards + `model.safetensors.index.json` — per-tensor
   bytes identical, loader-transparent — then `split_hf.sh` balances the tree into four hardlinked sub-10 GB parts
   that the Dockerfile COPYs back into `/opt/emmy/hf` (the split asserts completeness — every source file lands in

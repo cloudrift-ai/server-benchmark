@@ -48,6 +48,13 @@
 # boot-dominated (the emmy boot compiles kernels and captures decode graphs — ~30 min on a
 # cold cache); the evaluation itself is ~2 minutes per lane.
 #
+#
+# CONTEXT RAISED TO 16384 (2026-07-31), up from the article's 8448. Both engines move
+# together so the A/B stays fair, but this recipe NO LONGER REPRODUCES THE PUBLISHED
+# TABLE — a run here and the article's numbers differ in protocol, not just in code, and
+# the difference is not a regression. Re-measure the whole grid before comparing anything
+# to the blog post, or check out the 8448 revision to reproduce it.
+#
 # Repro on a pre-allocated card (no cloud provisioning):
 #   emmy bench experiments/gemma-4-12B/gsm8k_mtp_rtx5090 --local
 command:
@@ -57,8 +64,9 @@ command:
     - pyproject.toml
     - requirements.txt
     - Makefile
-    # The Makefile `include`s docker/vllm-emmy-gemma4/config.env, so the staged tree
-    # needs docker/ or `make setup` dies before creating the venv.
+    # The Makefile shells out to docker/vllm-emmy-serve/model_slug.sh at parse time, so
+    # a tree without docker/ makes every make call print 'Command not found'. It no
+    # longer dies there (the model config is `-include`d), but keep docker/ staged.
     - docker
   run: |
     set -e
@@ -110,7 +118,7 @@ command:
         [ "$$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)" -lt 2000 ] && break
         sleep 5
       done
-      env $$benv ./venv/bin/emmy serve $$MODEL --generate --dtype float16 --max-model-len 8448 \
+      env $$benv ./venv/bin/emmy serve $$MODEL --generate --dtype float16 --max-model-len 16384 \
         --no-enable-prefix-caching --tokenizer $$TOK --speculative-config "$$spec" "$$@" \
         > $task_dir/serve_$$label.log 2>&1 &
       pid=$$!

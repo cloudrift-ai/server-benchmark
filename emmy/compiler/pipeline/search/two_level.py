@@ -20,8 +20,7 @@ pass index:
 
 - **Outer** (:func:`run_two_level_tune`) drives the graph-changing passes —
   ``frontend`` + ``loop`` plus the pre-partition head of ``lowering/tile``
-  (:func:`outer_pipeline`), where the structural fork emitters live (today
-  ``010_split_demoted``'s keep-vs-split offer). A terminal is the state where
+  (:func:`outer_pipeline`), where any structural fork emitters live. A terminal is the state where
   the cursor reaches ``partition_loops`` with every structural fork resolved —
   every op post-fusion and structurally final, split producers/consumers
   included as real ``LoopOp`` nodes. Each terminal is a candidate fused graph;
@@ -93,9 +92,9 @@ LOWERING_PASSES = CUDA_PASSES[len(LOOP_PASSES) :]
 
 def outer_pipeline() -> Pipeline:
     """The graph-changing passes the outer search drives: ``frontend`` + ``loop``
-    (any fusion forks) **plus the ``split`` phase** — the structural fork emitter
-    (``010_split_demoted``'s keep-vs-cut ``CUT`` offer), the only move that changes
-    *which kernels exist*. An outer terminal is a graph whose kernel set is final:
+    (any fusion forks) **plus the ``split`` phase** — where a structural fork, the
+    only move that changes *which kernels exist*, would be offered.
+    An outer terminal is a graph whose kernel set is final:
     the keep(SMEM) side is one fused ``TileGraphOp`` (``seed_fused``), the cut side
     its producer + consumer; :func:`_inner_reward_async` picks each up as its own
     slice (own patience, own progress leaf, deduped by ``op_cache_key``) and tunes
@@ -186,52 +185,6 @@ def _kernel_nodes(graph: Graph) -> list[tuple[str, object]]:
     from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
 
     return [(nid, n.op) for nid, n in graph.nodes.items() if isinstance(n.op, LoopOp)]
-
-
-def _decomposition_rows(graph: Graph, per_op: list[OpResult], ctx: Context) -> list[tuple[dict, float]]:
-    """Composed value-of-position training rows for structural decompositions.
-
-    A terminal's kernels (post-build ``TileGraphOp``s) attribute back through
-    ``Op.source`` to the op the structural decision was offered on. Group the
-    terminal's unique kernels by that **pre-decision site** — the deepest
-    ``S_*``-stamped *loop* ancestor (the original demoted matmul, before the
-    fission re-stamped each fragment's own shallower ``S_*``) — plus the decision
-    delta (the ``CUT`` mask ``"1"``/``"0"``, read off the kernel), and label each
-    group with the **Σ of its kernels' tuned bests** — the kernel-set cost of that
-    side. Both cut fragments + the keep kernel converge on the one site, so the
-    cut's producer+consumer sum into a single kernel-set Σ. The row's features
-    (``{ctx, site S_*, decision delta}``) are exactly what the outer MCTS's PUCT
-    queries at the structural fork's siblings, so these rows make that selection
-    informed instead of uniform. They are estimates for *search ordering*; greedy's
-    deploy decision keeps the sharper compositional probe
-    (``policy/greedy._pick_structural``)."""
-    from emmy.compiler.pipeline.search.keys import dialect_of, source_chain, structural_decision_delta  # noqa: PLC0415
-
-    best = {r.op_key: r.best_us for r in per_op}
-    unique: dict[str, object] = {}
-    for _nid, op in _kernel_nodes(graph):
-        key = op_cache_key(op)
-        if key is not None and key not in unique:
-            unique[key] = op
-    groups: dict[tuple, tuple[dict, list[float | None]]] = {}
-    for key, op in unique.items():
-        delta = structural_decision_delta(op.knobs)
-        if not delta:
-            continue  # a kernel from no structural decision (no offer fired)
-        site = None
-        for anc in source_chain(op):
-            if dialect_of(anc) == "loop" and any(k.startswith("S_") for k in getattr(anc, "knobs", {})):
-                site = anc  # keep the LAST (deepest) — the pre-decision offer op
-        if site is None:
-            continue
-        site_key = op_cache_key(site)
-        if site_key is None:
-            continue
-        gkey = (site_key, tuple(sorted((k, str(v)) for k, v in delta.items())))
-        site_s = {k: v for k, v in site.knobs.items() if k.startswith("S_")}
-        feats, labels = groups.setdefault(gkey, ({**ctx.features(), **site_s, **delta}, []))
-        labels.append(best.get(key))
-    return [(feats, float(sum(labels))) for feats, labels in groups.values() if labels and all(us is not None for us in labels)]
 
 
 async def _inner_reward_async(
@@ -446,8 +399,8 @@ async def run_two_level_tune(
     The outer drives a :class:`Run` directly (manual ``observe``)
     because its terminal reward comes from the inner tuning, not
     ``_bench_terminal_async``. The outer pipeline (:func:`outer_pipeline`) runs
-    through the pre-partition tile rules, so each structural fork (the
-    keep-vs-split offer of ``010_split_demoted``) branches the outer tree —
+    through the pre-partition tile rules, so each structural fork
+    branches the outer tree —
     one terminal per kernel-set, compared by Σ-per-op cost. A graph with no
     structural offers yields a single terminal and this reduces to "tune each
     op once, sum, assemble". Identical offer sites within one trajectory
@@ -469,11 +422,6 @@ async def run_two_level_tune(
     from emmy.compiler.pipeline.search.prior import load_prior  # noqa: PLC0415
 
     prior = load_prior(seed=prior_seed)
-    # The global prior drives the outer PUCT too: at a structural fork the
-    # siblings' ``_node_knobs`` are ``{ctx, pre-decision op knobs, CUT decision
-    # knob}`` — the exact feature shape :func:`_decomposition_rows` trains on
-    # below — so once composed Σ rows accumulate, the outer descends the
-    # predicted-cheaper kernel set first instead of emission order.
     outer = TuningSearch(patience=patience, ucb_c=ucb_c, prior_model=prior, base_knobs=ctx.features())
     # The outer drives only the graph-changing passes (through the
     # pre-partition tile head) — no dump on this Run; the winning config's
@@ -503,13 +451,6 @@ async def run_two_level_tune(
         )
         stats = PerfStats(median=reward.total_us, min=reward.total_us, max=reward.total_us, mean=reward.total_us, variance=0.0, n_samples=0)
         outer.observe(token, stats, "ok" if reward.ok else "bench_fail")
-        # Composed Σ rows per structural decision this terminal realized —
-        # the kernel-set cost of each side, attributed via the ``Op.source``
-        # decomposition links. Re-emitted every terminal evaluation, so the
-        # reservoir keeps refreshing the sum as per-kernel bests fall.
-        rows = _decomposition_rows(fused.graph, reward.per_op, ctx)
-        if rows:
-            prior.add_rows(rows)
         positions = sum(r.multiplicity for r in reward.per_op)
         logger.info(
             "[tune] fused terminal #%d: Σ per-op = %.2f us (%d unique kernels, %d positions)",

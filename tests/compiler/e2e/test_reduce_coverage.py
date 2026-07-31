@@ -32,7 +32,8 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop.ir import Accum, Assign, Body, Load, Loop
-from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse, online_softmax_combine
+from emmy.compiler.ir.stmt.carrier import exp_combine_states, exp_merge
+from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse
 from emmy.compiler.trace.torch import trace_module
 
 from ..conftest import requires_cuda
@@ -277,7 +278,7 @@ def test_attention_combine_accuracy(variant, monkeypatch):
 # The carrier-generic cross-CTA producer + finalize, one case per (carrier × finalize). The
 # additive carriers (matmul split-K, ``sum`` split-reduce) take BOTH finalize folds; the twisted
 # flash ``(m, l, O)`` carrier is **kernel-only** (the ``e^{Δm}`` rescale can't be an ``atomicAdd``).
-# ``flash`` marks the fused streaming flash op (fusion is the default; ``PLACE@fold`` is the escape); all split the reduce/KV axis
+# ``flash`` marks the fused streaming flash op (fusion is unconditional); all split the reduce/KV axis
 # across 2 CTAs via the native ``REDUCE`` ``c2`` codec, the same knob for matmul / reduce / flash.
 _CROSS_CTA = {
     "matmul": {"op": "matmul", "flash": False, "tol": 1e-2, "finalizes": ("atomic", "kernel")},
@@ -399,18 +400,20 @@ def _unrelated_reduce_pair() -> Body:
     return Body.coerce((rowmax, plainsum))
 
 
-def test_online_softmax_combine_builds_asymmetric_monoid() -> None:
-    # state (m, d), partial (s); the asymmetric LSE monoid derives combine_states (the
-    # cross-partition state⊕state combine) from its exp-family spec.
-    mono = online_softmax_combine("m", "d", "s")
-    assert mono.state.names == ("m", "d") and mono.partial_names() == ("s",)
-    assert mono.combine_states, "combine_states must be derived for the asymmetric LSE monoid"
+def test_exp_family_generator_builds_asymmetric_monoid() -> None:
+    # state (m, d), partial (s); the asymmetric LSE monoid's streaming merge folds exactly the
+    # injected score, and the cross-partition state⊕state combine is generated from the same spec.
+    from emmy.compiler.ir.stmt.leaves import _merge_reads
+
+    merge = exp_merge(("m", "d"), ("s", 1.0), key="m")
+    assert _merge_reads(merge, ("m", "d")) == ("s",)
+    assert exp_combine_states(("m", "d"), ("m__o", "d__o")), "combine_states must be derived for the asymmetric LSE monoid"
 
 
 @pytest.mark.parametrize("kind,should_fuse", [("softmax_pair", True), ("unrelated_pair", False)])
 def test_fuse_collapses_only_the_online_softmax_pair(kind, should_fuse) -> None:
     """``_fuse`` collapses the decomposed two-pass softmax (row-max + ``Σ exp(x − max)``) into one
-    online-softmax loop + monoid (carrier keeps the original ``acc`` names), and is a no-op on an
+    online-softmax loop (the body's merge keeps the original ``acc`` names), and is a no-op on an
     unrelated row-max + plain-sum pair."""
     body = _softmax_body() if should_fuse else _unrelated_reduce_pair()
     fused, changed = _fuse(body)
@@ -419,8 +422,9 @@ def test_fuse_collapses_only_the_online_softmax_pair(kind, should_fuse) -> None:
         loops = [s for s in fused if isinstance(s, Loop)]
         assert len(loops) == 1, "the two reduce loops fuse into one online-softmax loop"
         fused_loop = loops[0]
-        assert fused_loop.role is AxisRole.TWISTED and fused_loop.carrier is not None, "the fused loop is a TWISTED carrier"
-        assert fused_loop.carrier.state.names == ("acc0", "acc1"), "carrier keeps the original acc names"
+        assert fused_loop.role is AxisRole.TWISTED, "the fused loop is TWISTED"
+        accums = {a.name for a in fused_loop.body if isinstance(a, Accum)}
+        assert accums == {"acc0", "acc1"}, "the body's merge keeps the original acc names"
 
 
 @requires_cuda

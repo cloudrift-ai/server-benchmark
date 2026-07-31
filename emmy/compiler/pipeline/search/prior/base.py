@@ -230,9 +230,7 @@ class Prior(ABC):
             cand_tun = {k: v for k, v in cand.items() if not k.startswith(("S_", "H_"))}
             for measured in self.sig_groups(index, sig):
                 for row_tun, us in measured:
-                    # Value-of-position join, except the cut placement: a pre-cut reservoir
-                    # row (no ``PLACE@cone`` key) measured the fused twin and must not vouch
-                    # for the knob-identical cut candidate (``evidence_row_vouches``).
+                    # Value-of-position join (``evidence_row_vouches``).
                     if not evidence_row_vouches(cand_tun, row_tun):
                         continue
                     # Tie on µs (one measured row matching several candidates) breaks by

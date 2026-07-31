@@ -247,6 +247,10 @@ def _deserialize_field(k, v):
         # e.g. ``CudaOp.tma_descriptors``'s ``TmaDescMeta(...)`` reprs (stringified by the
         # dump's ``json.dumps(default=str)``), which a plain ``tuple(v)`` left as strings.
         return tuple(_maybe_eval_ctor(e) if isinstance(e, str) else e for e in v)
+    if isinstance(v, dict):
+        # Dict-valued op fields (``TileOp.schedule`` — codec key → resolved slice) round-trip
+        # their VALUES as constructor reprs under the same known-class guard.
+        return {dk: (_maybe_eval_ctor(dv) if isinstance(dv, str) else dv) for dk, dv in v.items()}
     return v
 
 
@@ -274,6 +278,16 @@ def _eval_stmt(s: str):
 _STMT_EVAL_SCOPE: dict | None = None
 
 
+def _loop_ir_lambda(params=(), body=(), results=()):
+    """Rehydrate a dumped ``Lambda`` repr — strict formation for a pure body, the raw-loop-IR
+    arm for the kernels that legitimately dump impure fn bodies (the un-recognized escape cells,
+    ``030_split_reduce``'s finalize kernels — see ``tile.ir._loop_ir_fn``)."""
+    from emmy.compiler.ir.stmt.body import Body  # noqa: PLC0415
+    from emmy.compiler.ir.tile.ir import _loop_ir_fn  # noqa: PLC0415
+
+    return _loop_ir_fn(params, Body.coerce(body), results)
+
+
 def _stmt_eval_scope() -> dict:
     """Lazy-built eval scope for Stmt-repr strings."""
     global _STMT_EVAL_SCOPE
@@ -298,7 +312,6 @@ def _stmt_eval_scope() -> dict:
     from emmy.compiler.ir.stmt import (
         Accum,
         Assign,
-        Carrier,
         Cond,
         Init,
         Load,
@@ -306,14 +319,11 @@ def _stmt_eval_scope() -> dict:
         Pack,
         Select,
         SelectBranch,
-        State,
         StateMerge,
         StridedLoop,
-        Twist,
         Unpack,
         Write,
     )
-    from emmy.compiler.ir.stmt.carrier import Channel
     from emmy.compiler.ir.tensor.ir import IndexSource
 
     _STMT_EVAL_SCOPE = {
@@ -339,11 +349,7 @@ def _stmt_eval_scope() -> dict:
         "StridedLoop": StridedLoop,
         "Cond": Cond,
         "AxisRole": AxisRole,
-        "Carrier": Carrier,
-        "State": State,
-        "Twist": Twist,
         "StateMerge": StateMerge,
-        "Channel": Channel,
         "Smem": Smem,
         "Sync": Sync,
         "TreeHalve": TreeHalve,
@@ -354,9 +360,13 @@ def _stmt_eval_scope() -> dict:
         # ``repr(np.dtype('float32'))`` is ``dtype('float32')`` — eval needs
         # ``dtype`` in scope to round-trip ``DataType.np``.
         "dtype": _np.dtype,
+        # A dumped ``Map.fn`` lambda is strict for every recognized term (the root stores left
+        # for ``TileOp.stores`` at 1q); the raw-loop-IR kernels (escape cells, 030 finalizes)
+        # rebuild through the same ``_loop_ir_fn`` arm ``Map`` construction uses.
+        "Lambda": _loop_ir_lambda,
         "__builtins__": {},
     }
-    # The tile-IR structural nodes (``Map`` / ``Reduction`` / ``Contraction``) and the
+    # The tile-IR structural nodes (``Map`` / ``Fold`` / ``ContractionView``) and the
     # schedule descriptors (``Placement`` / ``TilePlan`` / ``ReducePlan`` / ``Stage`` /
     # ``WarpSpec`` + their component dataclasses / enums) round-trip through ``TileOp``'s
     # repr-string fields (``op`` / ``place`` / ``reduce`` / ``tier`` / ``stage`` /
@@ -968,9 +978,17 @@ class Graph:
             if isinstance(body, Body):
                 op_payload: tuple = ("body", body.structural_key())
             else:
-                attrs = tuple(
-                    (f.name, repr(_unwrap_dims(getattr(op, f.name)))) for f in dc_fields(op) if f.name not in _STRUCTURAL_SKIP_FIELDS
-                )
+                from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
+                from emmy.compiler.ir.tile.ops import term_key  # noqa: PLC0415
+
+                def _field_key(o: object, name: str) -> str:
+                    # A ``TileOp``'s term digests α-invariantly (step 7 — the canonically
+                    # renumbered term, ``ops.term_key``); every other field keeps its repr.
+                    if name == "op" and isinstance(o, TileOp):
+                        return term_key(o.op)
+                    return repr(_unwrap_dims(getattr(o, name)))
+
+                attrs = tuple((f.name, _field_key(op, f.name)) for f in dc_fields(op) if f.name not in _STRUCTURAL_SKIP_FIELDS)
                 op_payload = ("attrs", attrs)
             out = node.output
             out_payload = (_unwrap_dims(tuple(out.shape)), out.dtype)

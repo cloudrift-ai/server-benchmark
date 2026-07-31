@@ -41,8 +41,6 @@ through.
 
 from __future__ import annotations
 
-import re
-
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.loop import Accum, Assign, Load, Loop, LoopOp
 from emmy.compiler.ir.stmt import Body, Select
@@ -73,11 +71,6 @@ _EXPENSIVE_OPS = frozenset(
         "tanh",
     }
 )
-# ``020_cut_edge``'s workspace node ids — the cone / bridged-statistic / per-channel halves of a
-# realized ``PLACE@cone=cut`` — plus ``025_sink_row_reduce``'s ``__sq`` row-stat aux buffer (a
-# realized ``PLACE@stat=sink``). Minted only by those rules; see the cut-workspace brake in
-# `rewrite`.
-_CUT_WS_RE = re.compile(r"__(cone|stat|ch\d+|sq)$")
 
 
 def _walk_leaf_costs(loop_op: LoopOp):
@@ -406,18 +399,14 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
     # ``005_split_shared_indexmap`` applies.
     if producer.id in graph.outputs:
         raise RuleSkipped(f"producer {producer.id!r} is a graph output — it must stay materialized")
-
-    # Cut-workspace brake: ``020_cut_edge`` realizes a DECIDED ``PLACE@cone=cut`` by
-    # materializing the cone into ``<out>__cone`` / ``<out>__stat`` / ``<out>__ch<i>``
-    # workspace kernels, and the restarted scan re-enters this pass while those halves are
-    # still LoopOps. The stat-BEARING producer is braked incidentally (reduce-heavy), but a
-    # STAT-FREE cone producer is pure pointwise with one consumer — this rule's core move —
-    # and re-inlining it recreates the fused kernel, silently reverting the decided placement
-    # (observed on the gemma-4 pre256 norm→kv cone: the re-cut then collided on the existing
-    # workspace node). The workspace names are 020's minting contract; a decided cut is never
-    # fusion's to undo.
-    if _CUT_WS_RE.search(producer.id):
-        raise RuleSkipped(f"{producer.id!r} is a decided cone-cut workspace — the cut placement is not fusion's to undo")
+    # A decided placement-cut workspace is not fusion's to undo: the cut realizer names its seam
+    # buffers ``…__cut_…``, and a sliced re-compile (tune mode) re-enters loop fusion with the
+    # pieces as ordinary producer→consumer pairs — a stat-BEARING piece is braked incidentally
+    # (reduce-heavy), but a stat-free value piece is pure pointwise with one consumer, this
+    # rule's core move, and re-inlining it silently reverts the decided placement (then the
+    # re-cut collides on the existing workspace node).
+    if "__cut_" in producer.id:
+        raise RuleSkipped(f"{producer.id!r} is a decided placement-cut workspace — the cut is not fusion's to undo")
 
     # Multi-load-of-reduce-heavy-producer guard: if the consumer references
     # the producer's output via more than one Load stmt AND the producer does
@@ -432,7 +421,7 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
     if _reduce_heavy(producer.op) and _count_loads_from(consumer.op, producer.id) > 1:
         raise RuleSkipped("reduce-heavy producer feeds consumer through >1 Load — fusion would duplicate the reduce")
 
-    # Contraction-half protection: only the product's own indexmap plumbing (unsqueeze /
+    # ContractionView-half protection: only the product's own indexmap plumbing (unsqueeze /
     # broadcast scaffolding) may fuse into a bare matmul product before its sum-reduce partner
     # does — see :func:`_pending_contraction_half`. The blocked producer isn't lost: once the
     # halves merge, it retries against the full contraction kernel on a later fixpoint sweep.

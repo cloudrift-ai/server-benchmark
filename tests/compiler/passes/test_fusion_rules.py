@@ -252,7 +252,7 @@ def test_contraction_body_has_mul_and_sum():
 
 
 # ===================================================================
-# Contraction + epilogue: mul → sum → add(bias)
+# ContractionView + epilogue: mul → sum → add(bias)
 # ===================================================================
 
 

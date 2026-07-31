@@ -107,8 +107,7 @@ def test_golden_configs_set_is_well_formed():
         if isinstance(c, MatmulGoldenConfig):
             assert c.M > 0 and c.N > 0 and c.K > 0, c.name
         elif isinstance(c, LinearNormGoldenConfig):
-            # The linear→norm PAIR (the PLACE@stat row-stat sink): keyed at the NORM's fork with the
-            # placement stamp alone — no coop requirement (the realizer re-emits the sweep).
+            # The linear→norm PAIR: keyed at the NORM's fork — no coop requirement.
             assert c.M > 0 and c.K > 0 and c.H > 0, c.name
         elif isinstance(c, NormLinearGoldenConfig):
             # The fused RMSNorm→linear computed-A megakernel: a warp contraction (M,H)@(H,N), not the
@@ -122,12 +121,13 @@ def test_golden_configs_set_is_well_formed():
         elif isinstance(c, EmbeddingGoldenConfig):
             assert c.vocab > 0 and c.seq > 0 and c.hidden > 0, c.name
         elif isinstance(c, (ReduceGoldenConfig, RmsNormGoldenConfig, SoftmaxGoldenConfig)):
-            from emmy.compiler.ir.schedule import ReducePlan
+            from emmy.compiler.ir.schedule import ReducePlan, Workers
 
             assert c.M > 0 and c.K > 0, c.name
-            # The reduce knob is axis-qualified on a Map (``REDUCE@a1`` for rms/softmax); bare on a pure reduce.
+            # The reduce knob is axis-qualified on a Map (``REDUCE@a1`` for rms/softmax); bare on a pure
+            # reduce. Site grammar (F2): the coop width rides the entry's WORK inventory.
             red = next((v for k, v in c.knobs.items() if k == "REDUCE" or k.startswith("REDUCE@")), None)
-            coop = ReducePlan.parse(red).coop
+            coop = ReducePlan.parse_site(red, Workers.parse(c.knobs.get("WORK") or "")).coop
             assert coop > 1, f"{c.name} reduce-family golden must be cooperative (REDUCE coop>1, got {coop})"
         elif isinstance(c, AttentionGoldenConfig):
             assert c.n_heads > 0 and c.seq > 0 and c.head_dim > 0, c.name
@@ -186,33 +186,30 @@ def test_goldens_load_from_yaml():
 
 def test_goldens_speak_native_codecs_and_featurize():
     """Every golden's ``knobs`` parse cleanly through the native output-fragment / reduce / stage
-    codecs (no legacy GEMM-letter vocabulary survives), and every **matmul** golden featurizes to a
-    non-empty tile geometry family — the scalar path that silently produced empty ``D_*`` features
-    while the goldens still spelled ``BM``/``BN`` (the bug the migration fixed)."""
-    from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan
+    codecs — since the F2 re-spell, the SITE grammar: TILE/REDUCE values resolve against the
+    entry's own ``WORK`` inventory (no legacy GEMM-letter vocabulary survives) — and every
+    **matmul** golden featurizes to a non-empty tile geometry family — the scalar path that
+    silently produced empty ``D_*`` features while the goldens still spelled ``BM``/``BN`` (the
+    bug the migration fixed)."""
+    from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, Workers
     from emmy.compiler.pipeline.search import features
 
-    legacy = {"BN", "BM", "FM", "FN", "BK", "BR", "FK", "SPLITK", "WN", "WM", "MMA", "RING", "TMA"}
+    legacy = {"BN", "BM", "FM", "FN", "BK", "BR", "FK", "SPLITK", "WN", "WM", "MMA", "RING", "TMA", "WSPEC"}
     for g in GOLDEN_CONFIGS:
         assert not (legacy & set(g.knobs)), f"{g.name} still carries legacy knobs: {sorted(legacy & set(g.knobs))}"
+        work = Workers.parse(g.knobs.get("WORK") or "")
         tile = g.knobs.get("TILE")
         if tile:
-            TilePlan.parse(tile)  # parses (warp or scalar form), or raises
-        ReducePlan.parse(g.knobs.get("REDUCE"))
+            TilePlan.parse_site(tile, work)  # parses (warp or scalar site form), or raises
+        ReducePlan.parse_site(g.knobs.get("REDUCE"), work)
         if g.knobs.get("STAGE"):
             Stage.parse(g.knobs["STAGE"])
-        # A ``PLACE@cone: cut`` golden records a PLACEMENT and the cut's TOTAL cost, not a tile: the
-        # cut row's own schedule is discarded (``020_cut_edge`` emits un-mapped LoopOps and each half
-        # re-enters ``010`` to get its own fork and its own golden), so there is no geometry to
-        # featurize. Spelling one is worse than omitting it — the consumer's transport (``d2/tma/ring``)
-        # cannot appear on a cut row, which is computed-A, so a tile-bearing cut golden stops matching.
-        # The ``mlp_geglu.*.cut`` goldens are exempt for the same reason, via their kind.
-        # A gemv-class M=1 row (``TILE: ''`` + a ``bN`` block-reduce) is scalar BY DESIGN — a
+        # A gemv-class M=1 row (``TILE: ''`` + a coop block-reduce) is scalar BY DESIGN — a
         # per-token decode matvec has one output row per CTA and no tile geometry at all, so the
         # empty featurization is the correct one, not an accident. Exempt exactly that shape.
-        if isinstance(g, MatmulGoldenConfig) and g.knobs.get("PLACE@cone") != "cut":
-            if g.M == 1 and not g.knobs.get("TILE") and ReducePlan.parse(g.knobs.get("REDUCE")).coop > 1:
-                continue  # gemv-class row (b<n> / g<w>k/b<n>t): scalar by design, no tile geometry
+        if isinstance(g, MatmulGoldenConfig):
+            if g.M == 1 and not g.knobs.get("TILE") and ReducePlan.parse_site(g.knobs.get("REDUCE"), work).coop > 1:
+                continue  # gemv-class row (coop / g<w>k/coop-t): scalar by design, no tile geometry
             feats = features.knob_features(g.knobs)
             assert feats.get("D_threads", 0) > 0 and "D_tile_m" in feats, f"{g.name} featurized to empty tile geometry"
 
@@ -227,29 +224,35 @@ def test_golden_knobs_are_members_of_the_move_catalog():
     exactly the 1.29-1.49× perf-gap shapes). Pointwise goldens are exempt (their kernel forks
     nothing today, so there is no catalog to be a member of); a reduce golden's ``TILE`` is
     likewise uncatalogued (the reduce fork partitions K only), so only its ``REDUCE`` is pinned."""
-    from emmy.compiler.ir.schedule import TilePlan, is_warp_codec
+    from emmy.compiler.ir.schedule import ReducePlan, TilePlan, Workers
     from emmy.compiler.pipeline.search.space import coop_reduce_moves, scalar_tile_moves, splitk_moves, stage_moves, warp_tile_moves
 
+    # The catalogs speak the LEGACY spellings the enumeration generates; a site-form golden
+    # (F2) re-merges its WORK inventory to test membership — the same reconstruction the pin
+    # ingestion performs, so "member" means "the replayed pin selects an enumerated row".
     scalar_moves = set(scalar_tile_moves())
     for g in GOLDEN_CONFIGS:
         where = f"{g.name} ({g.gpu_name})"
+        work = Workers.parse(g.knobs.get("WORK") or "")
         if isinstance(g, (ReduceGoldenConfig, RmsNormGoldenConfig, SoftmaxGoldenConfig)):
             # The reduce knob is axis-qualified on a Map (``REDUCE@a1`` for rms/softmax); bare on a pure reduce.
             reduce_spec = next((v for k, v in g.knobs.items() if k == "REDUCE" or k.startswith("REDUCE@")), "")
-            assert not reduce_spec or reduce_spec in coop_reduce_moves(), f"{where}: REDUCE {reduce_spec!r} not enumerable"
+            legacy_red = ReducePlan.parse_site(reduce_spec, work).spell() if reduce_spec else ""
+            assert not legacy_red or legacy_red in coop_reduce_moves(), f"{where}: REDUCE {reduce_spec!r} not enumerable"
             continue
         if not isinstance(g, MatmulGoldenConfig):
             continue
         tile = g.knobs.get("TILE", "")
-        warp = is_warp_codec(tile)
-        if tile:
-            plan = TilePlan.parse(tile)
+        plan = TilePlan.parse_site(tile, work) if tile else None
+        warp = plan is not None and plan.is_warp
+        if plan is not None:
             pool = set(warp_tile_moves((plan.atom.name,))) if warp else scalar_moves
             assert plan.spell() in pool, f"{where}: TILE {tile!r} not in the enumerated {'warp' if warp else 'scalar'} grid"
         stage = g.knobs.get("STAGE", "")
         assert not stage or stage in stage_moves(warp=warp), f"{where}: STAGE {stage!r} not a catalog spelling"
         reduce_spec = g.knobs.get("REDUCE", "")
-        assert not reduce_spec or reduce_spec in splitk_moves(warp=warp) + coop_reduce_moves(), (
+        legacy_red = ReducePlan.parse_site(reduce_spec, work).spell() if reduce_spec else ""
+        assert not legacy_red or legacy_red in splitk_moves(warp=warp) + coop_reduce_moves(), (
             f"{where}: REDUCE {reduce_spec!r} not enumerable"
         )
 

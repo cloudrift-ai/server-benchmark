@@ -7,7 +7,7 @@ linear); the MONOID producer (RMSNorm → Linear) is the one special case (its s
 structural pin lives with ``test_fused_prologue_compiles_in_budget``).
 
 The **warp tier** engages under a warp ``TILE`` pin: the demoted cone nodifies to a computed-A
-``Contraction`` (``_schedule._demoted_warp_option``) and the producer COMPUTE-FILLS the A slab the
+``ContractionView`` (``_schedule._demoted_warp_option``) and the producer COMPUTE-FILLS the A slab the
 ``ldmatrix`` drain reads (the mma tier's ``sync`` transport). The MONOID (rmsnorm) cone is
 recognize-nodified (``010_recognize``'s ``bind_prologue_contraction`` merge): its statistic reduce
 rides the A cone as a per-row prologue (``sync_stat_fill``), the warp rows are real fork siblings
@@ -103,7 +103,7 @@ def test_fused_map_matmul(tier, producer, monkeypatch):
     # materialized intermediate: neither the graph's own ``xn`` buffer nor a cut workspace
     # (``020_cut_edge``'s ``<out>__cone`` / ``<out>__stat`` — a cut realization materializes the
     # cone under those names, so a name-anchored ``xn`` check alone would miss it). Kernel COUNT
-    # is not the invariant: a stat-free cone binds as a computed-A ``Contraction``, which
+    # is not the invariant: a stat-free cone binds as a computed-A ``ContractionView``, which
     # legitimately offers split-K REDUCE rows, and a chosen one emits a ``__partial`` + finalize
     # pair that still carries the cone inline.
     sigs = [s.split("{")[0] for s in srcs]
@@ -123,7 +123,7 @@ def test_fused_rmsnorm_linear(tier, monkeypatch):
     numpy reference (whether the linear's N axis rides the grid or a tail sweep is the schedule's
     choice — the staged-shared-row structural pin lives with `test_fused_prologue_compiles_in_budget`,
     whose shape keeps the sweep in-tail). The ``warp`` cell demands the mma tier on the fused
-    matmul — the recognize-nodified computed-A ``Contraction`` (the statistic prologue rides the
+    matmul — the recognize-nodified computed-A ``ContractionView`` (the statistic prologue rides the
     A cone, run once per tile row by the sync stat fill)."""
     if tier == "warp":
         monkeypatch.setenv("EMMY_TILE", _WARP_TILE)
@@ -353,7 +353,7 @@ def test_fused_rmsnorm_linear_symbolic_m(runtime_s, monkeypatch):
 @requires_cuda
 def test_fused_rmsnorm_linear_unpinned():
     """UNPINNED greedy on the fused norm→linear: the merged fork (coop ``Map`` rows + the
-    computed-A Contraction's warp rows) lowers and matches numpy whichever row the prior picks —
+    computed-A ContractionView's warp rows) lowers and matches numpy whichever row the prior picks —
     the fork-integrity e2e (runs on any CUDA device; option-0 stays the coop row). The pick may
     be the 1-kernel fused row or a 2-kernel redundant-statistic split row; both are legal fork
     members on this decode-M shape."""

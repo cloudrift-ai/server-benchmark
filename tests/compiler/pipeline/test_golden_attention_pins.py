@@ -44,5 +44,23 @@ def test_static_attention_golden_pins_bind(golden, monkeypatch):
     assert tile_pins, f"{golden.name}: static attention golden should record axis-keyed TILE pins"
     stamped = next((k for _, n in out.nodes.items() if (k := getattr(n.op, "knobs", None)) and set(tile_pins) <= set(k)), None)
     assert stamped is not None, f"{golden.name}: no node stamps the recorded TILE keys {sorted(tile_pins)}"
+    # F1/F2 site grammar: the stamp is the recorded pin's SITE half, and the recorded worker
+    # geometry lands in the kernel's ONE WORK entry. A SITE-form entry (the re-spelled corpus)
+    # claims the geometry via its own recorded ``WORK`` knob; a LEGACY entry via the ``w`` token
+    # embedded in its TILE pins (units compared — a producer band rides WORK's ``+p`` suffix and
+    # is not the TILE pin's claim).
+    from emmy.compiler.ir.schedule import TilePlan, Workers, is_warp_codec, plan_workers  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import canon_family_value, values_equal  # noqa: PLC0415
+
     for key, want in tile_pins.items():
-        assert stamped[key] == want, f"{golden.name}: recorded {key}={want!r} resolved to {stamped[key]!r}"
+        assert stamped[key] == canon_family_value(key, want), f"{golden.name}: recorded {key}={want!r} resolved to {stamped[key]!r}"
+        pin_work = plan_workers(TilePlan.parse(want)) if is_warp_codec(want) else None  # legacy entries only
+        if pin_work is not None:
+            got_work = Workers.parse(stamped.get("WORK") or "")
+            assert got_work is not None and (got_work.kind, got_work.units) == (pin_work.kind, pin_work.units), (
+                f"{golden.name}: recorded {key}={want!r} implies WORK {pin_work.spell()!r}, stamped {stamped.get('WORK')!r}"
+            )
+    if "WORK" in golden.knobs:  # a site-form entry pins the inventory directly — it must realize verbatim
+        assert values_equal("WORK", golden.knobs["WORK"], stamped.get("WORK", "")), (
+            f"{golden.name}: recorded WORK={golden.knobs['WORK']!r} resolved to {stamped.get('WORK')!r}"
+        )

@@ -9,12 +9,11 @@ tile flavors of the (now demolished) tile IR.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from emmy.compiler.dtype import F32 as _F32
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Expr, Var
-from emmy.compiler.ir.stmt.algebra import Carrier
 from emmy.compiler.ir.stmt.base import INDENT, RenderCtx, Stmt, _pad, pretty_body, render_body
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Accum, Mma
@@ -60,17 +59,15 @@ class Loop(Stmt):
 
     ``role`` is the axis's scheduling :class:`~emmy.compiler.ir.axis.AxisRole`
     (``FREE`` / ``PLANAR`` / ``CONTRACTION`` / ``TWISTED``), stamped by tile-lowering
-    detection; ``carrier`` is the :class:`~emmy.compiler.ir.stmt.algebra.Carrier`
-    algebra payload (state + twist) a reduce loop folds through (``None`` on a ``FREE`` loop
-    or a not-yet-annotated reduce). Both default to the unannotated ``FREE`` / ``None`` so
-    every existing construction site keeps working.
+    detection (the unannotated default is ``FREE``). The loop carries NO algebra — the fold's ⊕
+    lives on the :class:`~emmy.compiler.ir.tile.ir.Fold` node's stored ``combine``, and the
+    dissolved fold ``Accum``\\ s in the body are the loop-level spelling.
     """
 
     axis: Axis
     body: Body
     unroll: bool = False
     role: AxisRole = AxisRole.FREE
-    carrier: Carrier | None = None
     seed: bool = True  # emit the per-Accum ``<acc> = identity;`` seed before the loop; False when a
     # nested drain whose accumulators are pre-seeded once outside an enclosing loop (the staged
     # scalar contraction — re-seeding per outer-slab iteration would zero the running sum).
@@ -89,7 +86,7 @@ class Loop(Stmt):
 
     def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
         (body,) = bodies
-        return Loop(axis=self.axis, body=body, unroll=self.unroll, role=self.role, carrier=self.carrier, seed=self.seed)
+        return Loop(axis=self.axis, body=body, unroll=self.unroll, role=self.role, seed=self.seed)
 
     def binds_axes(self) -> frozenset[str]:
         return frozenset({self.axis.name})
@@ -114,8 +111,8 @@ class Loop(Stmt):
         # immediate body — the seed rides on the fold, derived here from ``op.identity`` at
         # the fold's ``dtype`` (so fp32-over-fp16 declares ``float acc = 0.0f;``, a fp16
         # ``max`` declares ``__half acc = __float2half(0.0f);``), no explicit ``Init``. This
-        # is the SINGLE seed-placement path: a reduce ``Loop`` carries its ``Carrier`` but its
-        # body already holds the loose fold ``Accum``\\ s (dissolved at recognition), so there
+        # is the SINGLE seed-placement path: a reduce ``Loop``'s body already holds the loose
+        # fold ``Accum``\\ s (dissolved at recognition), so there
         # is never a carrier stmt to special-case here. A nested fold re-declares per enclosing
         # iteration (scope-local shadowing), so a same-named outer carrier is harmless. This
         # is the *serial* schedule's placement; a cooperative / cross-CTA realization reads
@@ -307,7 +304,6 @@ class StridedLoop(Stmt):
     body: Body
     unroll: bool = False
     role: AxisRole = AxisRole.FREE
-    carrier: Carrier | None = None
     end: Expr | None = None
 
     def __post_init__(self) -> None:
@@ -329,7 +325,6 @@ class StridedLoop(Stmt):
             body=body,
             unroll=self.unroll,
             role=self.role,
-            carrier=self.carrier,
             end=self.end,
         )
 
@@ -445,10 +440,6 @@ class Cond(Stmt):
         pad = _pad(ctx.indent)
         cond = self.cond.render(ctx)
         inner = ctx.child()
-        if inner.full_block:
-            # A conditional scope is divergent — a block-fold ``RowAccum`` (which barriers)
-            # inside it would hang the masked-off threads.
-            inner = replace(inner, full_block=False)
         body = render_body(self.body, inner)
         out = [f"{pad}if ({cond}) {{", *body, f"{pad}}}"]
         if self.else_body:

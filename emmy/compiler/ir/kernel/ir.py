@@ -23,7 +23,7 @@ Tile IR and are materialized away before reaching this layer. A
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import cached_property
 
 from emmy.compiler.dtype import F32, DataType
@@ -381,10 +381,7 @@ class Tile(Stmt):
         # past the cells) needs masking.
         guard = self.aux_threads != 0 or n % self.cells != 0
         out = [f"{pad}{'long long' if wide else 'int'} _gid = {gid};"]
-        # An elided guard means EVERY thread of every block executes the body — the block-fold
-        # arm of ``RowAccum`` (which barriers) is legal exactly here; ``Cond.render`` clears the
-        # flag again for divergent sub-scopes.
-        inner = ctx.child() if guard else replace(ctx, full_block=True)
+        inner = ctx.child()
         ipad = _pad(inner.indent)
         if guard:
             out.append(f"{pad}if (_gid < {n}) {{")

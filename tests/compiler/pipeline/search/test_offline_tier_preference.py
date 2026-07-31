@@ -25,6 +25,11 @@ def _tile_of(row: dict) -> str:
     return row[next(k for k in row if k.startswith("TILE"))]
 
 
+def _is_warp(row: dict) -> bool:
+    # F1 site grammar: the tier discriminator IS the worker kind (the row's ONE WORK entry).
+    return str(row.get("WORK", "")).startswith("w")
+
+
 def _base(M: int, N: int, K: int, *, dynamic: bool) -> dict:
     free = float(N) if dynamic else float(M * N)
     b = {**CTX.features(), "S_ext_free_prod": free, "S_ext_reduce_prod": float(K), "S_ext_reduce_max": float(K)}
@@ -39,7 +44,7 @@ def test_warp_eligible_stamp_fp16_present_fp32_absent():
     rows16, _ = _enumerate(512, 1024, 1024, "fp16", CTX)
     assert rows16, "f16 matmul must enumerate"
     assert all(r.get("S_warp_eligible") == 1.0 for r in rows16)
-    assert any("a:mma" in _tile_of(r) for r in rows16), "warp rows must be offered"
+    assert any(_is_warp(r) for r in rows16), "warp rows must be offered"
     rows32, _ = _enumerate(512, 1024, 1024, "fp32", CTX)
     assert rows32 and all("S_warp_eligible" not in r for r in rows32)
 
@@ -52,7 +57,7 @@ def test_scalar_on_warp_eligible_feature_fires_on_scalar_rows_only():
         if not tile:
             continue  # the per-cell serial row has no tile geometry — no D_* features at all
         feat = knob_features({**base, **r}).get("D_scalar_on_warp_eligible", 0.0)
-        assert feat == (0.0 if "a:mma" in tile else 1.0), tile
+        assert feat == (0.0 if _is_warp(r) else 1.0), tile
 
 
 @pytest.mark.parametrize("dynamic", [False, True], ids=["static", "dynamic"])
@@ -64,8 +69,8 @@ def test_offline_ranks_mma_above_every_scalar_split(dynamic):
     ap = OfflinePrior()
     base = _base(512, 1024, 1024, dynamic=dynamic)
     scored = sorted(rows, key=lambda r: ap.score({**base, **r}))
-    assert "a:mma" in _tile_of(scored[0]), f"top pick must be a warp row, got {_tile_of(scored[0])!r}"
-    best_scalar = next((i for i, r in enumerate(scored) if "a:mma" not in _tile_of(r)), None)
+    assert _is_warp(scored[0]), f"top pick must be a warp row, got {_tile_of(scored[0])!r}"
+    best_scalar = next((i for i, r in enumerate(scored) if not _is_warp(r)), None)
     assert best_scalar is None or best_scalar > 0, "a scalar row must not outrank every mma row"
     # Stronger: no scalar row inside the tuner's first-page patience window.
-    assert all("a:mma" in _tile_of(r) for r in scored[:25]), "scalar rows must not crowd the top-25"
+    assert all(_is_warp(r) for r in scored[:25]), "scalar rows must not crowd the top-25"

@@ -16,7 +16,6 @@ from emmy.compiler.pipeline.knob import (
     format_tuning_knobs,
     is_off_value,
     pin_key_matches,
-    resolve_axis,
     tuning_knob_items,
     values_equal,
 )
@@ -435,14 +434,6 @@ def test_family_and_axis_of():
     assert family_of("REDUCE@k.cta") == "REDUCE" and axis_of("REDUCE@k.cta") == "k.cta"
 
 
-def test_resolve_axis_bare_suffixed_and_ambiguous():
-    assert resolve_axis("TILE", "TILE", ["d"]) == "TILE@d"  # bare → the unique eligible axis
-    assert resolve_axis("TILE", "TILE@d", ["d"]) == "TILE@d"  # already suffixed: idempotent
-    assert resolve_axis("TILE", "TILE", []) is None  # no eligible axis → drop
-    with pytest.raises(ValueError, match=r"TILE is ambiguous: use TILE@d or TILE@sk"):
-        resolve_axis("TILE", "TILE", ["d", "sk"])  # a bare pin on a flash kernel is ambiguous
-
-
 def test_family_value_reads_bare_or_suffixed():
     assert family_value({"TILE@d": "x"}, "TILE") == "x"
     assert family_value({"TILE": "x"}, "TILE") == "x"
@@ -516,16 +507,16 @@ def test_bare_and_axis_named_featurize_identically():
     assert mma_atom(bare) == mma_atom(axed) == "mma_m16n8k16_f16_f32"
 
 
-def test_display_collapses_single_axis_but_keeps_multi():
-    """One eligible axis → ``TILE@d`` / ``REDUCE@d`` display as bare ``TILE`` / ``REDUCE`` (one-node
-    tables read as before, matching the bare golden YAML); two (flash) keep the suffix to disambiguate.
-    ``WSPEC`` (root-global) is never collapsed."""
-    one = dict(tuning_knob_items({"TILE@d": "n4/f2", "REDUCE@d": "b8", "STAGE@d": "d2/cp"}))
+def test_display_renders_keys_as_stored():
+    """Since phase 3 the stampers spell the canonical codec key, so the view renders keys AS
+    STORED — bare stays bare, an explicit ``@`` spelling (flash's pair, the fused kernel's cone
+    stat) stays explicit; there is no display collapse between memory and storage."""
+    one = dict(tuning_knob_items({"TILE": "n4/f2", "REDUCE": "b8", "STAGE": "d2/cp"}))
     assert set(one) == {"TILE", "REDUCE", "STAGE"}
-    # Collapse is per-family: the two-axis ``TILE`` keeps its suffixes to disambiguate, while the
-    # single-axis ``REDUCE`` (only ``sk`` carries a reduce partition) still bares out.
-    flash = dict(tuning_knob_items({"TILE@d": "n4/f2", "TILE@sk": "n2/f4", "REDUCE@sk": "b8"}))
-    assert set(flash) == {"TILE@d", "TILE@sk", "REDUCE"}
+    flash = dict(tuning_knob_items({"TILE@dd": "n4/f2", "TILE@pj": "n2/f4", "REDUCE": "b8"}))
+    assert set(flash) == {"TILE@dd", "TILE@pj", "REDUCE"}
+    fused = dict(tuning_knob_items({"REDUCE@a1": "b128", "TILE": "", "REDUCE": ""}))
+    assert set(fused) == {"REDUCE@a1", "TILE", "REDUCE"}
 
 
 # --- Per-node featurizer (multi-node pool) -----------------------------------
@@ -634,7 +625,7 @@ def test_registry_complete_in_a_bare_process():
 
     code = (
         "from emmy.compiler.pipeline.search.features import knob_features\n"
-        "f = knob_features({'WSPEC': 'p2', 'RASTER': 'gm8'})\n"
+        "f = knob_features({'WORK': 'w4x1+p2', 'RASTER': 'gm8'})\n"
         "assert f['D_wspec_warps'] == 2.0, f\n"
         "assert f['D_raster_group'] == 8.0, f\n"
         "from emmy.compiler.pipeline.knob import get\n"
@@ -655,10 +646,13 @@ def test_stamp_schedule_families_fills_absent_families_with_off():
     # Realized values pass through; the struct stamp is dropped (not a tuning decision).
     assert out["TILE"] == "a:mma_m16n8k16_f16_f32/w1x1/f1x1" and out["REDUCE"] == "g2k"
     assert "S_ext_free_prod" not in out
-    # Families the compile never stamped are pinned as declined (OFF spelling).
-    assert out["WSPEC"] == "" and out["RASTER"] == "" and out["STAGE"] == ""
-    # Axis-keyed single-node spellings collapse to bare (the golden YAML convention),
-    # so the fill never duplicates a family that is present under an @axis key.
-    axed = stamp_schedule_families({"TILE@d": "n4/f2", "REDUCE@d": "b8"})
-    assert axed["TILE"] == "n4/f2" and axed["REDUCE"] == "b8"
-    assert "REDUCE@d" not in axed and axed["STAGE"] == "" and axed["WSPEC"] == "" and axed["RASTER"] == ""
+    # Families the compile never stamped are pinned as declined (OFF spelling) — WORK included
+    # (F1: the worker-inventory family replaced WSPEC in SCHEDULE_FAMILIES).
+    assert out["WORK"] == "" and out["RASTER"] == "" and out["STAGE"] == ""
+    assert "WSPEC" not in out  # retired from the recording view — the +p band rides WORK
+    # A family present under an explicit ``@`` spelling (flash's TILE pair, the cone stat's
+    # REDUCE) counts as present — the fill never duplicates it under the bare key.
+    axed = stamp_schedule_families({"TILE@dd": "n4/f2", "REDUCE@a1": "b8"})
+    assert axed["TILE@dd"] == "n4/f2" and axed["REDUCE@a1"] == "b8"
+    assert "TILE" not in axed and "REDUCE" not in axed
+    assert "REDUCE@d" not in axed and axed["STAGE"] == "" and axed["WORK"] == "" and axed["RASTER"] == ""

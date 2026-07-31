@@ -100,18 +100,28 @@ def fast_math_knobs(knobs: dict) -> bool:
     under the ``FAST_MATH`` / ``F16_MMA_F32_ACC`` gate, so regime-aware consumers (the
     ``eval`` rank / reproduction views) pin the gate on before comparing against it. Replay
     itself needs no gate — the recorded ``TILE`` pin is authoritative."""
-    from emmy.compiler.ir.schedule import TilePlan, is_warp_codec  # noqa: PLC0415 — keep module import-light
+    from emmy.compiler.ir.schedule import TilePlan, Workers, is_warp_codec  # noqa: PLC0415 — keep module import-light
 
     from .space import FAST_EXP  # noqa: PLC0415
 
+    def _atom_of(spec: str):
+        """The warp atom a TILE value names — legacy ``a:<atom>`` or the site form's bare
+        leading atom (parsed under a dummy warp inventory: the units never reach the atom)."""
+        try:
+            if is_warp_codec(spec):
+                return TilePlan.parse(spec).atom
+            plan = TilePlan.parse_site(spec, Workers(kind="warp", units=(1, 1)))
+            return plan.atom if plan.is_warp else None
+        except ValueError:
+            return None  # an unparseable historic spelling can't name an f16acc atom
+
     for k, v in knobs.items():
-        if k.split("@", 1)[0] == "TILE" and is_warp_codec(str(v)):
-            try:
-                if TilePlan.parse(str(v)).atom.operand_dtype("c").nbytes == 2:
-                    return True
-            except ValueError:
-                continue  # an unparseable historic spelling can't name an f16acc atom
-        if k == FAST_EXP.name and str(v).strip().casefold() in {"true", "1", "yes", "on"}:
+        s = str(v).strip()
+        if k.split("@", 1)[0] == "TILE" and s:
+            atom = _atom_of(s)
+            if atom is not None and atom.operand_dtype("c").nbytes == 2:
+                return True
+        if k == FAST_EXP.name and s.casefold() in {"true", "1", "yes", "on"}:
             return True
     return False
 
@@ -146,6 +156,16 @@ class GoldenConfig:
     # model. Model-tagged entries are what ``eval golden --in-model`` audits (it re-traces the
     # model's serving twins and checks each recorded golden still realizes in them).
     model: str | None = None
+
+    @property
+    def is_routing(self) -> bool:
+        """A ROUTING entry (phase 4): its knobs are ``PLACE@<seam>`` cut decisions ONLY — it
+        stores the cut set for its ``(kind, shape)`` and NO schedules (every resulting piece
+        re-recognizes and resolves its OWN entry; ``emmy_us`` is the recorded pipeline total, a
+        claim about the child entries as of seed time). The loader rejects a mixed entry
+        (:func:`_require_routing_split`); the schedule-tier index skips routing entries and the
+        routing consult skips schedule entries, so the two roles never cross."""
+        return bool(self.knobs) and all(str(k).split("@", 1)[0] == "PLACE" for k in self.knobs)
 
     @property
     def ratio(self) -> float:
@@ -345,7 +365,7 @@ class PointwiseGoldenConfig(GoldenConfig):
 class RmsNormGoldenConfig(GoldenConfig):
     """A golden config for RMSNorm ``(M, K) → (M, K)`` (``torch.nn.RMSNorm(K)``).
 
-    RMSNorm is a ``Map(body=sweep, source=Reduction)``: a per-row mean-of-squares reduce
+    RMSNorm is a ``Map(body=sweep, source=Fold)``: a per-row mean-of-squares reduce
     over ``K`` feeds an rsqrt that rescales every element of the row (the ``k_rms_norm``
     kernel). It is reduce-tier — the good config reduces each row cooperatively
     (``REDUCE`` coop>1), so it shares the reduce regime's arithmetic key (free=M, reduce=K)
@@ -389,24 +409,20 @@ class RmsNormGoldenConfig(GoldenConfig):
 
 @dataclass(frozen=True, kw_only=True)
 class LinearNormGoldenConfig(GoldenConfig):
-    """A whole-pair golden for the ROW-STAT SINK decision (``PLACE@stat`` —
-    ``025_sink_row_reduce``): ``F.linear(x, w)`` + a trailing ``F.rms_norm`` (+ residual add for
-    the post-attn form), the producer→norm pair whose statistic can migrate into the producer's
-    epilogue. The snippet builds the PAIR so a seeding A/B measures the sink's true e2e effect
-    (producer epilogue + memset + the norm dropping to a wide pointwise sweep).
+    """A whole-pair golden for the producer→norm pair: ``F.linear(x, w)`` + a trailing
+    ``F.rms_norm`` (+ residual add for the post-attn form). The snippet builds the PAIR so a
+    seeding A/B measures the pair's true e2e cost, not the norm sweep alone.
 
     The recorded row lives at the NORM's fork (``shape_key`` mirrors
-    :class:`RmsNormGoldenConfig` — ``kind="rms_norm"``, free ``M·K``, reduce ``K``) and records
-    ``knobs: {PLACE@stat: 'sink'}`` alone (the cut convention: the realizer re-emits the sweep,
-    so the representative row's own schedule is discarded). Two ordering facts make per-site
-    selection work with no re-anchoring: ``_golden_matches_row`` REFUSES a ``PLACE``-bearing
-    golden at a fork whose rows never offered the element (an input-norm fork falls through to
-    the plain ``rms_norm`` coop anchor at the same key), and ``emmy_us`` records the fork's OWN
-    realized kernel (the ~1 µs post-sink sweep, NOT the pair total) so the sink row sorts ahead
-    of that coop anchor and is tried first exactly where the offer exists. ``cublas_us`` records
-    the LOCAL-stat baseline (the coop kernel the sink replaces), so ``ratio`` reads as the
-    per-kernel rescue. The pair-level e2e verdict that justifies seeding lives in the seeding
-    session's findings, not in the row."""
+    :class:`RmsNormGoldenConfig` — ``kind="rms_norm"``, free ``M·K``, reduce ``K``), which it
+    SHARES with the plain ``rms_norm`` anchors: a recorded entry here competes with them on the
+    ordinary fastest-first ordering, so seed one only when the pair form genuinely measures
+    faster at that key.
+
+    NOTE: this kind was introduced to record the row-statistic sink placement
+    (the retired ``PLACE`` knob's ``stat`` element). With that placement gone there is no
+    sink-vs-local decision left to record, and every shipped entry is commented out in the
+    golden YAMLs; the kind is kept for its snippet/keying, which the data samplers still use."""
 
     M: int
     K: int  # the norm width (= the linear's output N)
@@ -417,11 +433,6 @@ class LinearNormGoldenConfig(GoldenConfig):
 
     def __post_init__(self):
         self._require_dynamic_hint(self.M)
-        if self.knobs and "PLACE@stat" not in self.knobs:
-            raise ValueError(
-                f"linear_norm golden {self.name!r} must record the PLACE@stat placement — a stampless row would "
-                f"shadow the plain rms_norm anchors at the same ShapeKey"
-            )
 
     def dynamic_specs(self) -> list[str]:
         return ["seq_len@x:0"] if self.dynamic else []
@@ -448,25 +459,35 @@ class LinearNormGoldenConfig(GoldenConfig):
         return ShapeKey(free_prod=free, reduce_max=self.K, is_warp=False, is_dyn=self.dynamic, kind="rms_norm")
 
 
+def _require_routing_split(cfg) -> None:
+    """The phase-4 golden-storage split, enforced at load: an entry either ROUTES (``PLACE``
+    keys only — the cut set, no schedules) or SCHEDULES (no ``PLACE`` key at all). A mixed
+    entry would re-create the retired single-namespace hazard (a cut row knob-identical to its
+    fused twin, tying on evidence joins) — reject it loudly, never accept-and-hope."""
+    fams = {str(k).split("@", 1)[0] for k in cfg.knobs}
+    if "PLACE" in fams and fams != {"PLACE"}:
+        raise ValueError(
+            f"golden {cfg.name!r}: an entry mixes PLACE (routing) keys with schedule keys {sorted(fams - {'PLACE'})} — "
+            f"a ROUTING entry stores the cut set only; each piece's schedule lives in that piece's own entry"
+        )
+
+
 def _require_cone_anchor(cfg) -> None:
     """Schema guard for the fused computed-A kinds (``NormLinearGoldenConfig`` /
     ``MlpGeGluGoldenConfig``): a RECORDED entry (non-empty knobs) must anchor itself to the cone
-    fork — a ``d*/sync`` STAGE (the compute-fill only a computed-A contraction offers) or the
-    explicit ``PLACE@cone: cut`` placement (guarded by ``_golden_matches_row``'s PLACE rule).
+    fork with a ``d*/sync`` STAGE — the compute-fill only a computed-A contraction offers.
     The deploy join's over-fire safety rests on "a fused golden's config can't realize on a
     plain gmem-A matmul"; an entry recorded with a gmem-direct STAGE plus plain warp tiles WOULD
     realize there, deploying a cross-family config with its foreign µs — enforce the data
     convention at load, like the flash pin-form guard. Key-only instances (empty knobs — key
-    computations and fixtures) are exempt."""
-    if not cfg.knobs:
+    computations and fixtures) and ROUTING entries (no schedules to anchor) are exempt."""
+    if not cfg.knobs or cfg.is_routing:
         return
     knobs = {str(k): str(v) for k, v in cfg.knobs.items()}
-    if knobs.get("PLACE@cone") == "cut":
-        return
     if any(k.split("@", 1)[0] == "STAGE" and "sync" in v.split("/") for k, v in knobs.items()):
         return
     raise ValueError(
-        f"golden {cfg.name!r}: a fused computed-A entry must record a d*/sync STAGE or PLACE@cone: cut — "
+        f"golden {cfg.name!r}: a fused computed-A entry must record a d*/sync STAGE — "
         f"its config would otherwise realize on a plain gmem-A matmul fork of coincident extents "
         f"(cross-family deploy); got knobs {cfg.knobs!r}"
     )
@@ -477,7 +498,7 @@ class NormLinearGoldenConfig(GoldenConfig):
     """A golden config for the fused RMSNorm→linear **computed-A** megakernel:
     ``rms_norm(x, (H,))·nw @ W`` in ONE mma kernel (``(M, H) → (M, N)``).
 
-    This is the single-channel computed-A ``Contraction`` (``010_recognize``'s
+    This is the single-channel computed-A ``ContractionView`` (``010_recognize``'s
     ``bind_prologue_contraction`` merge): the per-row RMSNorm statistic rides the A cone as a
     ``sync`` compute-fill prologue and the warp mma rows contract the scaled A against ``W`` — a
     different kernel family than the bare ``mlp_gate_up`` matmul (which round-trips ``xn`` through
@@ -615,7 +636,7 @@ class MlpGeGluGoldenConfig(GoldenConfig):
 class SoftmaxGoldenConfig(GoldenConfig):
     """Row-softmax ``(M, K) → (M, K)`` over the last axis (``torch.softmax(dim=-1)``).
 
-    A twisted Reduction (max / exp / sum) + a normalize sweep — the ``k_softmax`` kernel.
+    A twisted Fold (max / exp / sum) + a normalize sweep — the ``k_softmax`` kernel.
     Reduce-tier: free rows ``(M,)``, reduce extent ``K``, cooperative ``REDUCE`` over ``K``. The
     reference is torch softmax eager (fp32), so the ratio compares emmy's fused softmax vs PyTorch."""
 
@@ -650,7 +671,7 @@ class AttentionGoldenConfig(GoldenConfig):
     """Scaled-dot-product (flash) attention over ``(1, n_heads, seq, head_dim)`` inputs, causal
     (``F.scaled_dot_product_attention(q, k, v, is_causal=True)``).
 
-    The ``k_scaled_dot_product_attention`` kernel is a TWISTED streaming Reduction over the KV
+    The ``k_scaled_dot_product_attention`` kernel is a TWISTED streaming Fold over the KV
     axis (online-softmax flash) fused with the QKᵀ / ·V matmuls. When ``dynamic: true`` the seq
     axis (``x{0,1,2}:2`` of q / k / v) is symbolic — the masked-tile flash, the deployable
     artifact. The reference is torch SDPA (its own fused path), so the ratio is vs PyTorch."""
@@ -832,7 +853,9 @@ def _load_goldens() -> list[GoldenConfig]:
         gpu_name, cap = doc["gpu_name"], tuple(doc["compute_cap"])
         file_model = doc.get("model")  # optional provenance header; a per-entry ``model:`` overrides it
         for c in doc["configs"]:
-            out.append(_KERNEL_CLASSES[c.pop("kernel")](gpu_name=gpu_name, compute_cap=cap, model=c.pop("model", file_model), **c))
+            cfg = _KERNEL_CLASSES[c.pop("kernel")](gpu_name=gpu_name, compute_cap=cap, model=c.pop("model", file_model), **c)
+            _require_routing_split(cfg)  # routing entries store cuts ONLY; schedule entries never spell PLACE
+            out.append(cfg)
     return out
 
 

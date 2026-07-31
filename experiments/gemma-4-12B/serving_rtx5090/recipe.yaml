@@ -50,7 +50,7 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "vllm/vllm-openai:gemma4-0505-cu129"
+    engine.llm.vllm.image: "vllm/vllm-openai:v0.23.0"
     zip:
       benchmark.random_input_len: [256, 256, 4096, 4096, 4096, 8192]
       benchmark.random_output_len: [256, 256, 4096, 4096, 4096, 256]
@@ -62,7 +62,7 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-ec45dd6f"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-f7d07661"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4128 --no-enable-prefix-caching"
     cross:
       engine.llm.vllm.extra_env: ["EMMY_GEN_DECODE_BUCKET=32", "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=32"]
@@ -77,7 +77,7 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-ec45dd6f"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-f7d07661"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 2056 --no-enable-prefix-caching"
     cross:
       engine.llm.vllm.extra_env: ["EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048", "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"]
@@ -92,7 +92,7 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-ec45dd6f"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-f7d07661"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4104 --no-enable-prefix-caching"
     cross:
       engine.llm.vllm.extra_env: ["EMMY_GEN_DECODE_BUCKET=8", "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=8"]
@@ -106,7 +106,7 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-ec45dd6f"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-f7d07661"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4096 --no-enable-prefix-caching"
     cross:
       engine.llm.vllm.extra_env: ["EMMY_GEN_DECODE_BUCKET=64", "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=64"]

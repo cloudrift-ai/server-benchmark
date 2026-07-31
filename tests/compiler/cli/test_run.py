@@ -316,11 +316,11 @@ def test_unreproducible_pin_flag(monkeypatch):
     substituted the planner's own pick — the retired ``w2x1`` hd128 flash form) flags
     with the pinned and realized values; a pin realized on ANY kernel of a multi-kernel
     lowering passes; a bare pin matches its axis-stamped ``@``-keyed realizations
-    (``TILE@d``, multi-axis ``TILE@dd``/``TILE@pj``, the never-collapsed ``PLACE@fold``);
+    (``TILE@d``, multi-axis ``TILE@dd``/``TILE@pj``);
     value compare is registry-canonical (``knob.values_equal``); a registered family
     with no stamp anywhere is ungateable (a reloaded ``--ir`` graph drops serialized
     knobs, so absence ≠ dropped), while an unregistered family flags as a pin typo.
-    A synthetic registry (mirroring space.py's TILE/STAGE/PLACE/FAST_EXP declarations)
+    A synthetic registry (mirroring space.py's TILE/STAGE/FAST_EXP declarations)
     keeps the test independent of module-load order."""
     from emmy.commands.run import _unreproducible_pin_flag
     from emmy.compiler.pipeline import knob as knob_mod
@@ -332,7 +332,6 @@ def test_unreproducible_pin_flag(monkeypatch):
         {
             "TILE": Knob("TILE", KnobType.STR, off=""),
             "STAGE": Knob("STAGE", KnobType.STR, off=""),
-            "PLACE": Knob("PLACE", KnobType.STR),
             "FAST_EXP": Knob("FAST_EXP", KnobType.BOOL, off=False),
         },
     )
@@ -354,8 +353,6 @@ def test_unreproducible_pin_flag(monkeypatch):
     assert _unreproducible_pin_flag({"TILE": "n16x8/f2x2"}, [{"TILE@d": "n16x8/f2x2"}]) is None
     # Bare pin vs a MULTI-axis realization (flash stamps two TILE@ keys — no collapse).
     assert _unreproducible_pin_flag({"TILE": "w4x1/f1x16"}, [{"TILE@dd": "w4x1/f1x16", "TILE@pj": "w4x1/f1x16"}]) is None
-    # Bare PLACE (the golden YAML spelling) vs the fold/cone-stamped realization.
-    assert _unreproducible_pin_flag({"PLACE": "fuse"}, [{"PLACE@fold": "fuse", "PLACE@cone": "fuse"}]) is None
     # An @-keyed pin whose axis the re-lowering renamed: a genuine miss, but the
     # diagnostic names the family's realized value instead of (unset).
     flag = _unreproducible_pin_flag({"TILE@dd": "w4x1/f1x16"}, [{"TILE@d2": "w2x1/f1x8"}])
@@ -1276,9 +1273,10 @@ def test_write_ab_json_greedy_bench_fail_and_record_knobs(tmp_path):
     assert rec["greedy"]["total_us"] is None
     krow = rec["greedy"]["kernels"][0]
     assert krow["us"] is None
-    # record_knobs: realized values + explicit OFF for families the compile never stamped.
+    # record_knobs: realized values + explicit OFF for families the compile never stamped
+    # (WORK replaced WSPEC in SCHEDULE_FAMILIES — F1: the producer band rides WORK's +p suffix).
     assert krow["record_knobs"]["REDUCE"] == "g2k"
-    for fam in ("STAGE", "WSPEC", "RASTER"):
+    for fam in ("STAGE", "WORK", "RASTER"):
         assert krow["record_knobs"][fam] == ""
     row = rec["pinned"][0]
     assert row["status"] == "pin_unmatched" and row["total_us"] is None

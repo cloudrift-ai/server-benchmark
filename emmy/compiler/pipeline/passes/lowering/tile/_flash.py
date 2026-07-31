@@ -6,20 +6,19 @@ halves:
 - **Recognition** — :func:`try_flash` matches a softmax-then-P@V kernel (+ its clean
   scaled-QK producer) via ``_recognize`` / ``_extract_qk`` / ``_classify_rowmax``, and
   emits the fused fragment.
-- **Construction** — the ``flash_combine`` carrier, the ``flash_shape_eligible`` /
-  ``gqa_group`` predicates, and the fragment builder ``build_flash_frag``. It doesn't
-  hand-assemble a kernel body — it builds the high-level **structural-node tree**
-  (``ir/tile/ir``): flash is the **two-``Contraction`` tree** ``Map(body=[O/l projection],
-  source=Reduction(role=TWISTED, axis=kv, partial=[Contraction(Σ_dd Q·K), …, Contraction(Σ_j P·V)]))``
-  — the ``(m,l,O)`` LSE streaming reduce over kv whose per-step ``partial`` holds BOTH the ``Σ_dd Q·K``
-  score :class:`Contraction` (at its head) and the **P@V** ``Σ_j P·V`` :class:`Contraction` (its A
-  operand the register-resident softmax weight ``P``; ``_split_pv`` redirects the carrier's
-  expectation-fold value through it), projected ``O/l`` after the loop. Both Q@K and P@V ride the
-  single walked ``partial`` edge (no ``source`` asymmetry) and factorize through the one
+- **Construction** — the ``flash_shape_eligible`` / ``gqa_group`` predicates and the fragment
+  builder ``build_flash_frag``. It doesn't hand-assemble a kernel body — it builds the high-level
+  **λ-spelled structural-node tree** (``ir/tile/ir``): flash is ``Map(body=[O/l projection],
+  sources=(Fold(axis=kv, operands=(Fold(Σ_dd Q·K), Load(V)), lift=λ(kv, sacc, v_e) → (score, 1,
+  v_e), init/combine = the exp-family ⊕),))`` — the ``(m,l,O)`` LSE streaming reduce over kv whose
+  ``Σ_dd Q·K`` score is a HOISTED operand edge and whose **P@V** ``Σ_j P·V`` contraction (its A the
+  register-resident softmax weight ``P``) is SYNTHESIZED into the DERIVED blocked evaluation
+  (``ir._twisted_derived_step``), projected ``O/l`` after the loop. Both Q@K and P@V ride
+  single walked ``step`` edge (no ``source`` asymmetry) and factorize through the one
   ``_factor`` contraction path; block=1 is the scalar streaming degenerate (``j`` a singleton reduce).
   ``build_flash_frag`` returns that ``Map`` UNLOWERED, on a ``TileOp`` with an UNMAPPED ``Placement``
   — the free ``(batch…, m, d)`` axes are the schedule's (like every recognizer), and ``_schedule``
-  maps them onto the grid; ``materialize`` lowers the nodes (``Reduction.loop`` splices the
+  maps them onto the grid; ``materialize`` lowers the nodes (``Fold.loop`` splices the
   contraction's ``Σ Q·K`` loop ahead of the partial, the scalar tier expanding the same loop nest) +
   generates the output-store glue (the ``Write`` at the grid cell — not stored).
 
@@ -55,11 +54,11 @@ redundant, form::
       Init (m_i = -inf, l_i = 0, O_i = 0)            # running (max, denom, out)
       for kv in 0..S_k:                              # streaming reduce (TWISTED)
         Init sacc = 0
-        for dd in 0..head_dim: sacc += Q[…,m,dd]·K[…,kv,dd]   # Q@K score Contraction
+        for dd in 0..head_dim: sacc += Q[…,m,dd]·K[…,kv,dd]   # Q@K score ContractionView
         s = sacc · scale
-        M = max(m_i, s); alpha = exp(m_i − M); P = exp(s − M)  # softmax stats (flash_combine merge)
+        M = max(m_i, s); alpha = exp(m_i − M); P = exp(s − M)  # softmax stats (the derived exp merge)
         l_i = l_i·alpha + P
-        for j in 0..1:  O_i__pv += P · V[…,kv,d]     # P@V Contraction (block=1: singleton j)
+        for j in 0..1:  O_i__pv += P · V[…,kv,d]     # P@V ContractionView (block=1: singleton j)
         O_i = O_i·alpha + O_i__pv                    # the LSE rescale + PV fold
       out[…,m,d] = O_i / l_i
 
@@ -70,30 +69,28 @@ score per element, ``kv ≤ m`` else −inf; the warp tier additionally tile-ski
 ``_twist`` bounds the stream at the CTA's last query row off that ``Select``'s
 shape), an optional broadcast additive mask (the HF ``(1,1,S,S)`` float bias),
 and GQA (``q_heads == group · kv_heads``; the K/V head axis read at ``head //
-group`` directly, no materialized broadcast). Fusion is the ``PLACE@fold`` placement
-(default ``fuse``; ``cut`` is the multi-kernel attention escape — gated in
-``010_recognize``, before :func:`try_flash` is even tried); the two-level ``OptionFork``
-offer + ``OfflinePrior`` cold-start are a follow-up.
+group`` directly, no materialized broadcast). Fusion is unconditional — a recognized,
+certifiable pair always fuses; an uncertifiable one falls back to the separate score
+producer + softmax-then-P@V kernels.
 """
 
 from __future__ import annotations
 
 import logging
 import math
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Tensor
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop.ir import LoopOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carrier, Load, Loop, Select, SelectBranch, Write
-from emmy.compiler.ir.tile import Contraction, Placement, Reduction, TileOp, TilePlan
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Lambda, Load, Loop, Select, SelectBranch, Write
+from emmy.compiler.ir.stmt.carrier import exp_combine_states
+from emmy.compiler.ir.tile import Channel, ContractionView, Fold, Placement, Store, TileOp, TilePlan
 from emmy.compiler.ir.tile.ops import Map
-from emmy.compiler.pipeline.passes.lowering.tile._carrier import denom, exp_family_twist, expect
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Node
@@ -102,19 +99,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def flash_combine(m: str, ll: str, o: str, s: str, v: str) -> Carrier:
-    """The online-softmax (log-sum-exp) :class:`Carrier` for one streaming KV step: state
-    ``(m, l, O)`` folds this key's ``(score, value)`` partial::
-
-        m_new = max(m, s);   alpha = exp(m − m_new);   p = exp(s − m_new)
-        l = l·alpha + p;     O = O·alpha + p·v;         m = m_new   (last)
-
-    Built as a name-free exp-family **spec** (``pivot``, ``denom``, ``expect``) — the streaming
-    ``merge`` and the cross-partition ``combine_states`` are *generated* from the spec (and the
-    stable max-rescale recovered by the stabilizer), not authored here. See
-    ``ir/stmt/carrier.py``. Rides on the ``kv`` reduce ``Loop`` (``loop.carrier``); the φ
-    projection ``O/l`` is a stmt after that loop in the ``Map`` body, added in ``_flash_op``."""
-    return exp_family_twist(s, [denom(), expect(v)], (m, ll, o))
+# The online-softmax (log-sum-exp) algebra for one streaming KV step — state ``(m, l, O)`` folds
+# this key's ``(score, value)`` singleton::
+#
+#     m_new = max(m, s);   alpha = exp(m − m_new);   p = exp(s − m_new)
+#     l = l·alpha + p;     O = O·alpha + p·v;         m = m_new   (last)
+#
+# — is no longer authored here at all: ``_flash_op`` stores the TRUE ⊕ (the generated
+# ``exp_combine_states`` program) flat on the ``Fold``, and formation derives the carrier /
+# streaming merge / blocked evaluation from it (``ir/stmt/carrier.py`` generates, the stabilizer
+# recovers the max-rescale, ``ir._twisted_derived_step`` splits the PV contraction out).
 
 
 def _static(d) -> int | None:
@@ -266,7 +260,7 @@ def build_flash_frag(
             return None
         out_store = (out.name, store_idx)
 
-    flash_op = _flash_op(
+    flash_op, flash_stores = _flash_op(
         q_id,
         k_id,
         v_id,
@@ -286,13 +280,10 @@ def build_flash_frag(
     )
     # The free axes are the schedule's, carried on the ``TileOp`` with an UNMAPPED grid —
     # like every other recognizer; ``_schedule`` (inside ``010_recognize``) maps ``free`` onto the grid.
-    # ``PLACE@fold=fuse`` is the RESOLVED downstream-fold placement this fragment realizes (the fused
-    # flash kernel vs the cut's separate score + softmax-P@V kernels) — root-global, ridden through
-    # scheduling on ``knobs`` so the DB row / featurizer sees the structural decision. The
-    # ``S_ext_*`` skeleton rides alongside (:func:`_struct_features` — the fused fragment never
-    # passes the loop-dialect stamp) so the prior can price the flash forms' occupancy.
-    knobs = {"PLACE@fold": "fuse", **_struct_features(batch, s_q_dim, s_k_dim, head_dim, d_v)}
-    tile = TileOp(op=flash_op, place=Placement(free=grid), knobs=knobs)
+    # The ``S_ext_*`` skeleton rides on ``knobs`` (:func:`_struct_features` — the fused fragment
+    # never passes the loop-dialect stamp) so the prior can price the flash forms' occupancy.
+    knobs = dict(_struct_features(batch, s_q_dim, s_k_dim, head_dim, d_v))
+    tile = TileOp(op=flash_op, place=Placement(free=grid), knobs=knobs, stores=flash_stores)
 
     frag = Graph()
     in_shapes = raw_shapes if raw_shapes is not None else (q_shape, k_shape, v_shape)
@@ -328,43 +319,10 @@ def _batch_vars(n: int) -> tuple[Var, ...]:
     return tuple(Var(f"b{i}") for i in range(n))
 
 
-def _split_pv(merge: list, o: str, v: str, v_buf: str, v_idx: tuple, m_axis: Axis, d_axis: Axis) -> list:
-    """Split the exp carrier's streaming ``merge`` around a real **PV** :class:`Contraction`.
-
-    The generated merge folds the expectation channel ``O = O·α + v·P`` **atomically** (``P = exp(s − M)``
-    the softmax weight). This rewrites it so the ``v·P`` product becomes the output of a
-    ``Oblk = Σ_j P·V`` contraction whose **A operand is the register-resident ``P``** (rebind of the exp
-    weight the carrier already computed) and whose B is the value ``Load`` — then the O-fold consumes
-    ``Oblk`` (``O = O·α + Oblk``). ``O`` stays a carrier channel (so its seed + cross-tier machinery are
-    untouched); only the value it folds is redirected through the contraction.
-
-    This is the scalar two-``Contraction`` flash tree at ``block = 1``: the ``j`` reduce is a singleton
-    (the scalar streaming degenerate). The tensor-core tier tiles the same ``P@V`` node with an mma
-    ``TilePlan`` (``_schedule._twisted_warp_option``), realized at fragment residence by ``_factor``'s
-    one binder (``_twist``) — never a bespoke emitter. ``O``
-    and ``V`` are per-``(m, d)``; ``P`` per-``(m, j)`` — different axes from the streaming ``kv``, so
-    the PV contraction never duplicates the streaming reduce."""
-    o_accum = next(s for s in merge if isinstance(s, Accum) and s.name == o)
-    defs = {s.name: s for s in merge if isinstance(s, Assign)}
-    prod = defs[o_accum.value]  # the fused ``v·P`` (multiply(v, P))
-    p_name = next(a for a in prod.args if a != v)  # the softmax weight P (register-resident)
-    pv = Contraction(
-        axes=(m_axis, d_axis),
-        k_axis=Axis(name="pj", extent=Dim(1)),  # block=1: a singleton intra-block reduce
-        a_operand=Body((Assign(name=f"{o}__p", op="copy", args=(p_name,)),)),  # A = P, register-resident
-        folds=((Load(name=v, input=v_buf, index=v_idx), f"{o}__pv"),),  # B = V (the value tile)
-        tile=TilePlan(),
-    )
-    out: list = []
-    for s in merge:
-        if s is prod:
-            continue  # the inline v·P is dropped — the PV contraction computes it
-        if s is o_accum:
-            out.append(pv)  # Oblk = Σ_j P·V, flattened in place by Reduction.loop
-            out.append(replace(o_accum, value=f"{o}__pv"))  # O = O·α + Oblk (base O·α unchanged)
-            continue
-        out.append(s)
-    return out
+# (The PV split — the ``O = O·α + v·P`` merge rewritten around a real ``Oblk = Σ_j P·V``
+# contraction whose A is the register-resident softmax weight — is DERIVED at step 7:
+# ``ir._split_expect`` / ``ir._derived_expect_fold`` synthesize it inside the twisted fold's
+# blocked evaluation, byte-identical to the step element this module used to store.)
 
 
 def _flash_op(
@@ -387,11 +345,11 @@ def _flash_op(
     out_store: tuple[str, tuple] | None = None,
 ) -> Map:
     """The per-output-element ``(…, m, d)`` compute as the structural-node tree: flash is
-    ``Map(body=[O/l projection], source=Reduction(role=TWISTED, axis=kv, partial=[Contraction(QK), …,
-    Contraction(PV)]))`` — the ``(m,l,O)`` LSE streaming reduce over ``kv`` whose per-step **partial**
-    holds the NESTED ``Σ_dd Q·K`` :class:`Contraction` node at its head (then scaled, optionally
+    ``Map(body=[O/l projection], sources=(Fold(role=TWISTED, axis=kv, step=[ContractionView(QK), …,
+    ContractionView(PV)]))`` — the ``(m,l,O)`` LSE streaming reduce over ``kv`` whose per-step **partial**
+    holds the NESTED ``Σ_dd Q·K`` :class:`ContractionView` node at its head (then scaled, optionally
     masked, the value read + the carrier's dissolved merge with the PV contraction), projected ``O/l``
-    after the loop. :meth:`Reduction.loop` flattens the head QK node the same way it flattens the
+    after the loop. :meth:`Fold.loop` flattens the head QK node the same way it flattens the
     embedded PV, so the scalar tier expands the same loop-in-body nest as before. The free
     ``(batch…, m, d)`` axes are the ``TileOp``'s grid, not loops here; the output store is glue
     generated at materialize.
@@ -414,15 +372,15 @@ def _flash_op(
     else:
         q_idx, k_idx, v_idx = access_indices
 
-    # s = Σ_dd Q·K — the inner contraction as a high-level :class:`Contraction` structural node, the
-    # ``source`` of the streaming kv :class:`Reduction`. Per-cell scalar (``TilePlan()``): the
+    # s = Σ_dd Q·K — the inner contraction as a high-level :class:`ContractionView` structural node, the
+    # ``source`` of the streaming kv :class:`Fold`. Per-cell scalar (``TilePlan()``): the
     # redundant one-dot-per-output-element score. Its output axes are the score matrix ``[m, kv]``.
     # The scale / mask reads ``sacc``.
-    score_contraction = Contraction(
+    score_contraction = ContractionView(
         axes=(Axis(name="m", extent=s_q), Axis(name="kv", extent=s_k)),
         k_axis=Axis(name="dd", extent=Dim(head_dim)),
-        a_operand=Load(name="q_e", input=q_buf, index=q_idx),
-        folds=((Load(name="k_e", input=k_buf, index=k_idx), "sacc"),),
+        a=Load(name="q_e", input=q_buf, index=q_idx),
+        channels=(Channel(b=Load(name="k_e", input=k_buf, index=k_idx), acc="sacc"),),
         tile=TilePlan(),
     )
     score_post = [
@@ -464,39 +422,41 @@ def _flash_op(
             )
         )
         score_name = "s_banded"
-    # The (m,l,O) streaming fold over kv, as a ``TWISTED`` :class:`Reduction` node: its per-step
-    # ``partial`` is the scale / mask binding ``score_name``, then the carrier's dissolved streaming
-    # ``merge`` with the **PV split out as a real contraction**. ``flash_combine`` supplies the state +
-    # twist; the nested ``Σ Q·K`` contraction rides on ``source`` (``Reduction.loop`` splices its loop
-    # ahead of the partial). Both P@V and Q@K are now :class:`Contraction` nodes — the two-contraction tree.
-    carrier = flash_combine("m_i", "l_i", "O_i", score_name, "v_e")
-    m_axis = Axis(name="m", extent=s_q)
-    d_axis = Axis(name="d", extent=Dim(d_v))
-    # Both contractions ride the single walked edge — ``partial``: the ``Σ_dd Q·K`` score at its head,
-    # then the scale / mask binding ``score_name``, then the carrier's dissolved streaming ``merge``
-    # with the **PV split out as a real Contraction**. ``Reduction.loop`` flattens the head QK node the
-    # same way it flattens the embedded PV, so the scalar tier expands the identical loop-in-body nest
-    # — but the recursion can now reach BOTH contractions as nodes on ``partial`` (no ``source``
-    # asymmetry between QK and PV).
-    partial = [score_contraction, *score_post, *_split_pv(carrier.dissolve(), "O_i", "v_e", v_buf, v_idx, m_axis, d_axis)]
-    reduction = Reduction(
-        carrier=carrier,
+    # The (m,l,O) streaming fold over kv, λ-SPELLED (step 7 — the composed step dissolved): the
+    # ``lift`` is ``λ(kv, sacc, v_e) → (score, 1, v_e)`` — its body the scale / mask stmts binding
+    # ``score_name``, ι spelled in the results (the singleton state) — and the ``operands`` are the
+    # ``Σ_dd Q·K`` score fold (an inline-node edge, hoisted; it reads the enclosing ``kv`` var —
+    # legal, never state) and the value ``Load``. The flat ``(init, combine)`` is the TRUE
+    # exp-family ⊕ over the real state names; formation derives the carrier and the DERIVED
+    # blocked evaluation reproduces the retired step material exactly — the score edge at the
+    # head, the lift body, then the generated merge with the PV contraction synthesized
+    # (``ir._twisted_derived_step``), so the lowered nest is byte-identical.
+    names = ("m_i", "l_i", "O_i")
+    other = tuple(f"{n}__o" for n in names)
+    combine = Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
+    lift = Lambda(params=("kv", "sacc", "v_e"), body=Body(tuple(score_post)), results=(score_name, 1.0, "v_e"))
+    reduction = Fold(
         axis=Axis(name="kv", extent=s_k),
-        partial=Body(tuple(partial)),
-        role=AxisRole.TWISTED,
+        operands=(score_contraction.as_fold(), Load(name="v_e", input=v_buf, index=v_idx)),
+        lift=lift,
+        init=(float("-inf"), 0.0, 0.0),
+        combine=combine,
     )
     # φ projection: normalize the streamed (unnormalized) output by the LSE denominator —
     # O_i / l_i after the kv loop, the ``Map`` body over the reduction ``source``. When the caller
-    # supplies ``out_store`` (``(buffer, index)``), the body ALSO carries the explicit output
+    # supplies ``out_store`` (``(buffer, index)``), the fragment ALSO carries the explicit output
     # ``Write`` at that index — the output-layout-aware store (:func:`_out_store_index`) that
-    # reproduces the root's real buffer rank / transpose / broadcast dims. Its presence short-circuits
-    # the materializer's bare grid-order ``with_store`` glue (``has_write``). Absent it, the glue
+    # reproduces the root's real buffer rank / transpose / broadcast dims — as a boundary
+    # :class:`~emmy.compiler.ir.tile.ir.Store` (1q: never inside the term; ``TileOp.stores``).
+    # Reconstituted into the tail it still short-circuits the materializer's bare grid-order
+    # ``with_store`` glue (``has_write``). Absent it, the glue
     # writes the bare grid cell (the head-major identity path — isolated fragments, tests).
     proj: tuple[Stmt, ...] = (Assign(name="O_i__proj", op="divide", args=("O_i", "l_i")),)
+    stores: tuple = ()
     if out_store is not None:
         out_buf, out_idx = out_store
-        proj = (*proj, Write(output=out_buf, index=out_idx, value="O_i__proj"))
-    return Map(body=Body(proj), source=reduction)
+        stores = (Store(write=Write(output=out_buf, index=out_idx, value="O_i__proj")),)
+    return Map(body=Body(proj), sources=(reduction,)), stores
 
 
 # --------------------------------------------------------------------------- #
@@ -929,24 +889,11 @@ def _recognize(graph: Graph, node: Node) -> tuple[str, str, bool, int | None, st
     return x_buf, v_buf, causal, window, mask_buf
 
 
-def is_fold_offer_site(graph: Graph, root: Node) -> bool:
-    """True iff ``root`` is a softmax-then-P@V consumer — the kernel where the ``PLACE@fold``
-    decision (fuse into flash vs keep the score producer separate) is offered. Purely structural
-    (:func:`_recognize` on ``root``'s own body), independent of whether the producer is still a
-    ``LoopOp`` or the fused form is certifiable — an offer site that did NOT fuse (pin-forced or
-    degraded) stamps the resolved ``cut``."""
-    return _recognize(graph, root) is not None
-
-
 def _fuse_degraded(root: Node, reason: str) -> None:
     """A softmax-then-P@V kernel was recognized but cannot be certified for the fused flash
-    form — the fuse degrades to cut (the un-fused tiers). Loud only under an explicit
-    ``PLACE@fold=fuse`` pin (the standard pin-validity rule); silent for the ``auto``
-    default, where most kernels legitimately decline."""
-    from emmy.compiler.pipeline.search.space import PLACE  # noqa: PLC0415
-
-    if PLACE.narrow_at("fold") == "fuse":
-        logger.warning("PLACE@fold=fuse: flash fuse of %r not certifiable (%s); degrading to cut", root.id, reason)
+    form — it falls back to the un-fused tiers (a separate score producer + softmax-then-P@V).
+    Debug-only: most kernels legitimately decline."""
+    logger.debug("flash fuse of %r not certifiable (%s); keeping the un-fused kernels", root.id, reason)
 
 
 def _extract_v_layout(root: Node, v_buf: str) -> tuple[int, int] | None:
@@ -1070,15 +1017,10 @@ def try_flash(graph: Graph, root: Node) -> Graph | None:
 def fused_producer_ids(graph: Graph, root: Node) -> tuple[str, ...]:
     """The producer node ids a flash fusion of ``root`` would CONSUME — the score ``LoopOp``
     absent from the fused fragment — or ``()`` (``root`` is not a fusable softmax-then-P@V
-    consumer, or the ``PLACE@fold`` pin forces the cut). The two-level tuner's slicing reads
-    this: the inner per-op slice for ``root`` must carry the consumed producer as a REAL node
-    (not a synthetic input boundary), otherwise ``try_flash`` can never re-fuse inside the
-    slice and every tune trajectory silently degrades to the cut — the fused flash fork would
-    be unreachable under tune."""
-    from emmy.compiler.pipeline.search.space import place_decision  # noqa: PLC0415
-
-    if place_decision("fold") != "fuse":
-        return ()
+    consumer). The two-level tuner's slicing reads this: the inner per-op slice for ``root``
+    must carry the consumed producer as a REAL node (not a synthetic input boundary), otherwise
+    ``try_flash`` can never re-fuse inside the slice and every tune trajectory silently loses the
+    fused flash form."""
     frag = try_flash(graph, root)
     if frag is None:
         return ()

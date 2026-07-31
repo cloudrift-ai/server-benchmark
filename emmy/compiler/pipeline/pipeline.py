@@ -913,7 +913,7 @@ def _is_structural_option(option: object) -> bool:
     """Classify one raw rewrite option by its effect: a ``Graph`` splice
     changes which ops exist — **structural**; an ``Op`` rebind is in-place —
     **op-variant**. The Op/Graph return type IS the classification; rules wrap
-    a Graph option in a leaf :class:`OptionFork` (e.g. ``tile/010_split_demoted``),
+    a Graph option in a leaf :class:`OptionFork` (no production rule emits one today),
     whose ``option`` is readable without firing any thunk. A *branch* ``Fork``
     reads op-variant: the sole branch-Fork emitter today is the partition
     planner (all ``TileOp`` leaves), and typing it would require ``expand()`` —
@@ -1217,7 +1217,6 @@ class _TerminalBench:
         from emmy.compiler.pipeline.search.keys import (  # noqa: PLC0415
             _is_kernel_bearing,
             dialect_of,
-            introduces_structural_decision,
             op_cache_key,
             source_chain,
         )
@@ -1244,14 +1243,6 @@ class _TerminalBench:
                 # op to a single fragment kernel's median — half the work
                 # masquerading as the whole op. The decomposition's cost
                 # is a Σ, owned by the two-level tuner, never this table.
-                continue
-            if introduces_structural_decision(parent_op, child_op):
-                # The keep(SMEM) side of 005's fork is a loop→tile hop
-                # (``seed_fused`` jumps straight to a ``TileGraphOp``) that
-                # introduces ``CUT`` — a structural decision, not a lowering
-                # rewrite, so it must be skipped like the loop→loop cut hops
-                # above (else the pre-decision site gets a ``lowering`` row and
-                # greedy resolves it bypassing ``_pick_structural``'s Σ).
                 continue
             p_key = op_cache_key(parent_op)
             c_key = op_cache_key(child_op)

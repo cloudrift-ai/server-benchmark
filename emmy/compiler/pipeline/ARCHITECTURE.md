@@ -973,8 +973,8 @@ Two equivalent forms:
 - **Per-knob:** `EMMY_<NAME>=<value>` (e.g. `EMMY_STAGE=d2/cp`). Read by the rule that owns the knob via
   `Knob.narrow`. The env-var key is built by `config.knob_var` and read via `config.knob_raw` / `config.int_env`.
 - **Aggregate:** `EMMY_KNOBS="K1=V1,K2=V2,..."` (e.g.
-  `EMMY_KNOBS="WORK=w2x2,TILE=mma_m16n8k16_f16_f32/f2x2/k2,STAGE=d2/cp"`; the legacy embedded-worker spelling
-  `TILE=a:mma…/w2x2/f2x2/k2` stays a validated alias). Parsed once at `knob.py` import via
+  `EMMY_KNOBS="WORK=w2x2,TILE=mma_m16n8k16_f16_f32/f2x2/k2,STAGE=d2/cp"` — the worker widths ride `WORK`, so a
+  `TILE` / `REDUCE` pin that embeds its own raises). Parsed once at `knob.py` import via
   `apply_knobs_env()`, which splats each entry into the corresponding `EMMY_<K>` var
   (`config.set_knob(..., overwrite=False)`). An explicit per-knob var wins over the aggregate.
 
@@ -1013,14 +1013,15 @@ resolved site slices, failing loudly on cross-site disagreement (one kernel, one
 contraction's output tile is *either* the **scalar** register sub-tile `f<fn>[x<fm>]` *or* the **warp** tensor-core
 mma tile `<atom>/f<FM>x<FN>[/k<bk>]` (atom + register sub-tile + K-chunk) — no worker tokens; the worker halves live
 in `WORK`, and `resolve_site_tile` disambiguates an empty site `TILE` beside a thread `WORK` from the coop tier.
-Empty = per-cell. The legacy embedded-worker spellings (`n<N>[x<M>]/f…`, `a:<atom>/w<WM>x<WN>/f…/k<bk>`, the
-`a:scalar` alias) survive as loudly-validated pin ALIASES that must agree with the given inventory
-(`ingest_legacy_row`) — they never ride a stored knob.
+Empty = per-cell. The retired embedded-worker spellings (`n<N>[x<M>]/f…`, `a:<atom>/w<WM>x<WN>/f…/k<bk>`) RAISE —
+the worker widths have exactly one home, so a value carrying its own cannot decode into a second, self-contained
+reading. The `a:scalar` / `a:none` aliases stay pin-only vocabulary for the scalar tier (stripped at parse, never
+stored).
 
 **`REDUCE`** (STR codec, `010_recognize` / `_schedule`) — the reduce-axis partition codec, site-local since step 7:
 `[g<n>[a|k]][/coop[-t]][/r<n>]` — `g` cross-CTA split-K (+ finalize letter), `coop` the cooperative-thread fold
 (its WIDTH lives in `WORK`; `-t` the transposed lane map), `r` ILP register fold. Empty = serial (the
-per-thread remainder is derived, never spelled); the legacy `b<n>` coop-width spelling stays a pin alias. The
+per-thread remainder is derived, never spelled); the retired `b<n>` coop-width spelling raises. The
 cross-CTA split is the `g<n>` field (GRID stage), and the
 **finalize** is that field's trailing letter — `g<n>a` = in-place `atomicAdd` (one kernel, additive single-fold
 carriers only; both tiers — an mma partial's C fragment rides `RegStore.atomic`, the packed f16x2/bf16x2 red, at the
@@ -1068,9 +1069,9 @@ smem — the wide (64-key) streaming block's staging (flash stream only; the mat
 
 **`WSPEC`** (STR codec, env-pin alias only since step 7) — the warp-specialization producer band `p<np>`, RETIRED as
 a stamped row family: realized rows spell the band as `WORK`'s `+p<np>` suffix (the absorb — producer/aux warps are
-inventory), and `SCHEDULE_FAMILIES` no longer lists it; `ingest_legacy_row` strips a legacy row's `WSPEC` key into
-the synthesized `WORK` entry. The `EMMY_WSPEC` pin is still accepted and the fork level still enumerates
-(`wspec_moves`). Legal on a warp `TILE` over a resolved **TMA** `STAGE` within the thread budget
+inventory), and `SCHEDULE_FAMILIES` no longer lists it; `ingest_row` strips a stray `WSPEC` key off a stored /
+pinned row before matching (no realized row carries one). The `EMMY_WSPEC` pin is still accepted and the fork level
+still enumerates (`wspec_moves`). Legal on a warp `TILE` over a resolved **TMA** `STAGE` within the thread budget
 (`block_threads + 32·aux ≤ 1024`, `32·aux ≤ block_threads`); anything else — including the reserved producer `q`
 param — degrades to uniform. Empty = uniform SIMT. Materialized as the staged K-loop's producer/compute band split
 (`_stage._wspec_kloop`).
@@ -1110,9 +1111,9 @@ norm_linear/geglu still means the contraction's K fold; `WORK` / `RASTER` stay r
 VALUES are site-local too: the worker inventory is spelled once in `WORK` (`w<M>x<N>[+p<np>]` / `t<N>[x<M>]` — the
 `+p` band absorbing the retired per-row `WSPEC` key), `TILE` values drop their worker tokens
 (`<atom>/f<FM>x<FN>[/k<bk>]` | `f<fn>[x<fm>]`) and `REDUCE` its coop width (`[g<n>[a|k]][/coop[-t]][/r<n>]` — the
-finalize letter kept: a MODE, not an axis token); legacy embedded-token spellings are split into site facts at
-ingestion (`ingest_legacy_row` — a loudly-validated pin alias that must agree with the given inventory), and the
-golden corpus itself was re-spelled mechanically (`scripts/respell_goldens.py`, 715 rows, replay digest-identical).
+finalize letter kept: a MODE, not an axis token); the retired embedded-token spellings raise, and the
+golden corpus itself was re-spelled mechanically (715 rows, replay digest-identical; the one-shot script is gone
+with the grammar it read).
 The reserved
 graph-level placement grammar (`in.<operand>` path prefix, leading-`=` value pins) is rejected, never reused. The
 golden-spelling tripwire (`tests/.../test_golden_spelling_canonical.py`) resolves every stored knob dict against its

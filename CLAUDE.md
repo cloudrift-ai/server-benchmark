@@ -90,8 +90,9 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   `Axis.window`; the root stores are `TileOp.stores`. The stampers spell knob keys via the same resolver and
   VALUES site-locally (step 7): the worker inventory once in `WORK` (`w<M>x<N>[+p<np>]`/`t<N>[x<M>]`, sealed by
   `seal_workers`; the retired `WSPEC` row family's producer band rides `+p`), `TILE`/`REDUCE` values shed their
-  worker tokens — so the stamped row IS the stored/golden spelling (legacy spellings are loudly-validated pin
-  aliases; the golden corpus re-spelled mechanically). Dispatch reads the
+  worker tokens — so the stamped row IS the stored/golden spelling (the enumeration itself threads TYPED
+  `TilePlan`/`ReducePlan` slices and spells each row ONCE; the retired embedded-worker spellings RAISE, and the
+  golden corpus was re-spelled mechanically). Dispatch reads the
   role/algebra off the node (`ops.axis_role`/`reduce_loop` recurse through `Map.sources`), and `ops.lower` flattens
   any node back to the same loop nest — no stored `Monoid`/`Semiring` kind. Flash is the `TWISTED` fold on the
   streaming schedule, its QK a hoisted operand-edge `Contraction` and its PV the derived evaluation's

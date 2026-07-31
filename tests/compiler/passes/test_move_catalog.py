@@ -41,7 +41,7 @@ _EXPECTED_MOVES = [("", "")] + [(reg, f"t{pn}x{pm}") for pn, pm in ((16, 8), (16
 def _stored(plan: TilePlan) -> tuple[str, str]:
     """The (site ``TILE`` value, ``WORK`` inventory) pair a tile move stores."""
     work = plan_workers(plan)
-    return plan.spell_site(), (work.spell() if work is not None else "")
+    return plan.spell(), (work.spell() if work is not None else "")
 
 
 def test_scalar_tile_moves_equals_hand_product():
@@ -102,7 +102,7 @@ def test_schedule_leaf_set_equals_catalog():
         return resolve_site_tile(str(family_value(r, "TILE") or ""), work, str(family_value(r, "REDUCE") or ""))
 
     def full_reduce(r: dict) -> ReducePlan:
-        return ReducePlan.parse_site(str(family_value(r, "REDUCE") or ""), Workers.parse(str(r.get("WORK", ""))))
+        return ReducePlan.parse(str(family_value(r, "REDUCE") or ""), Workers.parse(str(r.get("WORK", ""))))
 
     tiles = {full_tile(r) for r in rows}
     assert tiles == set(scalar_tile_moves())
@@ -125,7 +125,7 @@ def test_schedule_leaf_set_equals_catalog():
     for plan, tiled in by_tile.items():
         if not plan.is_tiled:
             continue
-        where = plan.spell_site() or "<per-thread cell>"
+        where = plan.spell() or "<per-thread cell>"
         stages = {str(family_value(r, "STAGE")) for r in tiled if not full_reduce(r).stages}
         # A masked-N tile (tile_n overhangs the fixture's N=64) declines cp.async / TMA staging — the
         # B-slab fill would fault a row-crossing copy — so it rides gmem-direct only, mirroring the
@@ -207,7 +207,7 @@ def test_warp_staged_rows_fit_the_smem_budget():
     staged = [r for r in rows if str(r.get("WORK", "")).startswith("w") and family_value(r, "STAGE")]
     assert staged, "no staged warp rows were enumerated"
     for r in staged:
-        plan = TilePlan.parse_site(str(family_value(r, "TILE")), Workers.parse(str(r["WORK"])))
+        plan = TilePlan.parse(str(family_value(r, "TILE")), Workers.parse(str(r["WORK"])))
         slot = (plan.tile_m + plan.tile_n) * plan.bk * plan.atom.atom_k * plan.atom.operand_dtype("a").nbytes
         assert slot <= ctx.max_dynamic_smem, f"{family_value(r, 'TILE')} / {family_value(r, 'STAGE')}: slot {slot} over budget"
     # The over-budget tile itself stays enumerable — gmem-direct only (its every staged sibling
@@ -260,7 +260,7 @@ def test_bare_reduce_forks_the_coop_catalog():
     # bt/g-composites included. Rows that fail the gate (softmax/rms shapes) drop the band;
     # that arm is covered by the schedule tests, not this catalog assertion.
     def site_of(plan: ReducePlan) -> tuple[str, str]:
-        return plan.spell_site(), (f"t{plan.coop}" if plan.coop > 1 else "")
+        return plan.spell(), (f"t{plan.coop}" if plan.coop > 1 else "")
 
     assert set(offered) == {("", ""), *(site_of(p) for p in coop_reduce_moves())}, f"catalog rows missing: {offered}"
 

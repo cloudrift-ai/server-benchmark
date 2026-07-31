@@ -33,7 +33,7 @@ from emmy.compiler.pipeline.knob import (
 # artifacts carry no stamp and default to it). Version 2 is the retired blind encoding of the
 # codec vocabulary: the warp ``TilePlan.bk`` never reached the features, ``_free_slots`` sorted
 # the warp grid wide-is-n (transposed siblings collapsed; ``tile_m``/``tile_n`` mislabelled),
-# warp rows dropped the split-K finalize letter, and the ``STAGE`` ``alt`` / ``REDUCE`` ``b<n>t``
+# warp rows dropped the split-K finalize letter, and the ``STAGE`` ``alt`` / ``REDUCE`` ``coop-t``
 # letters were unfeaturized — same raw knobs, different emitted VALUES, so artifacts fit on v2
 # are semantically stale.
 # Bump on any incompatible knob-spelling or feature-encoding change.
@@ -68,10 +68,9 @@ def masked_axis_features(*, m: bool = False, n: bool = False, k: bool = False) -
 
 def _row_workers(knobs: dict):
     """The row's ``WORK`` inventory (:class:`~emmy.compiler.ir.schedule.Workers`), or ``None``
-    — absent / empty / unparseable. The site-value grammar (step 7 F1) factors the worker
-    geometry out of the TILE/REDUCE values into this one entry, so every geometry featurizer
-    resolves its parse against it; a legacy row (the golden YAML corpus) has no ``WORK`` key
-    and its values decode self-contained."""
+    — absent / empty / unparseable. The site-value grammar factors the worker geometry out of the
+    TILE/REDUCE values into this one entry, so every geometry featurizer resolves its parse against
+    it; a row without one is the per-cell / pure-reduce form (its launch geometry is derived)."""
     from emmy.compiler.ir.schedule import Workers  # noqa: PLC0415
 
     try:
@@ -82,10 +81,9 @@ def _row_workers(knobs: dict):
 
 def _tile_plan(knobs: dict):
     """The row's parsed :class:`TilePlan` — the SITE value resolved against the row's ``WORK``
-    inventory (``schedule.resolve_site_tile``, which also accepts the legacy embedded-worker
-    spellings self-contained and disambiguates the empty-TILE-beside-thread-WORK unit-register
-    tile from the coop tier via the REDUCE value) — or ``None`` for the per-cell / untiled
-    forms and unparseable values."""
+    inventory (``schedule.resolve_site_tile``, which disambiguates the
+    empty-TILE-beside-thread-WORK unit-register tile from the coop tier via the REDUCE value) —
+    or ``None`` for the per-cell / untiled forms and unparseable values."""
     from emmy.compiler.ir.schedule import resolve_site_tile  # noqa: PLC0415
 
     spec = family_value(knobs, "TILE")
@@ -101,9 +99,9 @@ def mma_atom(knobs: dict) -> str | None:
     """The concrete tensor-core atom-kind name carried by ``knobs``, or ``None`` for the scalar
     tier (no warp fragment).
 
-    The atom is named by the ``TILE`` value's warp form — legacy ``a:<atom>/…`` or the site
-    spelling's bare leading atom (resolved against the row's ``WORK`` inventory). A scalar
-    ``TILE`` (``f..`` / ``n../f..`` or empty) names no atom → ``None``."""
+    The atom is named by the ``TILE`` value's warp form — the bare leading atom token, resolved
+    against the row's ``WORK`` inventory. A scalar ``TILE`` (``f..`` or empty) names no atom →
+    ``None``."""
     plan = _tile_plan(knobs)
     return plan.atom.name if plan is not None and plan.is_warp else None
 
@@ -381,7 +379,7 @@ def _reduce_decomp(knobs: dict) -> _Decomp:
 
     spec = family_value(knobs, "REDUCE")
     try:
-        plan = ReducePlan.parse_site(str(spec) if spec is not None else None, _row_workers(knobs))
+        plan = ReducePlan.parse(str(spec) if spec is not None else None, _row_workers(knobs))
     except ValueError:
         if spec and "coop" in str(spec):
             # A site ``coop`` value with no WORK inventory in the dict (a fork PREFIX row cut

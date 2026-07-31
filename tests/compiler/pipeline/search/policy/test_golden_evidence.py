@@ -49,9 +49,9 @@ CAP = (8, 9)
 _SIG = {"S_ext_free_prod": 2097152.0, "S_ext_free_max": 4096.0, "S_ext_reduce_max": 3840.0, "S_ext_reduce_prod": 3840.0}
 _BASE = {**_SIG, "H_opt": 3.0}
 
-_STD_TILE = "a:mma_m16n8k16_f16_f32/w2x2/f4x4/k2"
-_FM_TILE = "a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2"
-_W1X1_TILE = "a:mma_m16n8k16_f16_f32/w1x1/f1x1"
+_STD_TILE = "mma_m16n8k16_f16_f32/f4x4/k2"
+_FM_TILE = "mma_m16n8k16_f16_f16/f4x8/k2"
+_W1X1_TILE = "mma_m16n8k16_f16_f32/f1x1"
 
 
 def _golden(name="gemma4_12b.q_proj", knobs=None, us=78.0, *, dynamic=False, gpu=CARD, cap=CAP):
@@ -302,11 +302,9 @@ _RMS_SIG = {
 }
 
 # Real recorded spellings (rtx4090 golden files): the known-hang w2x1 form vs the golden w4x1
-# form, in the legacy embedded-worker grammar (loudly-validated pin aliases); the realized fork
-# ROWS spell the site grammar — site TILE halves + the ONE WORK entry.
-_DD_W4X1 = "a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16"
-_PJ_W4X1 = "a:mma_m16n8k16_f16_f32/w4x1/f1x32"
-_PJ_FM = "a:mma_m16n8k16_f16_f16/w4x1/f1x32"
+# form. Entry and realized fork ROW alike spell the site grammar — site TILE halves + the ONE
+# WORK entry.
+_PJ_FM = "mma_m16n8k16_f16_f16/f1x32"
 _DD_W4X1_SITE = "mma_m16n8k16_f16_f32/f1x2/k16"
 _DD_W2X1_SITE = "mma_m16n8k16_f16_f32/f1x8/k16"
 _PJ_SITE = "mma_m16n8k16_f16_f32/f1x32"
@@ -325,7 +323,7 @@ def _attention(name="gemma4_12b.attention.hd256", knobs=None, us=44.3, *, dynami
         head_dim=256,
         dtype="fp16",
         dynamic=dynamic,
-        knobs=knobs or {"TILE@dd": _DD_W4X1, "TILE@pj": _PJ_W4X1, "STAGE": "d2/cp/ring"},
+        knobs=knobs or {"TILE@dd": _DD_W4X1_SITE, "TILE@pj": _PJ_SITE, "WORK": "w4x1", "STAGE": "d2/cp/ring"},
         emmy_us=us,
         gpu_name=CARD,
         compute_cap=CAP,
@@ -355,7 +353,7 @@ def test_attention_dynM_bare_plan_golden_matches_axis_keyed_leaves(monkeypatch):
         name="attention.hd256.dynM",
         dynamic=True,
         us=40.4,
-        knobs={"TILE": "a:mma_m16n8k16_f16/w4x1/f1x2/k16", "STAGE": "d2/cp/ring"},
+        knobs={"TILE": "mma_m16n8k16_f16/f1x2/k16", "WORK": "w4x1", "STAGE": "d2/cp/ring"},
     )
     index = _index(monkeypatch, [gold])
     rows = [
@@ -372,9 +370,12 @@ def test_attention_fm_pv_plan_golden_self_excludes_gate_off(monkeypatch):
     gate off no leaf realizes the f16-accumulate pj, so it self-excludes and the std
     entry decides — gate on (fm pj offered), the faster fm entry wins via ANY-axis."""
     std = _attention(
-        name="attention.hd256.dynM", dynamic=True, us=44.3, knobs={"TILE": "a:mma_m16n8k16_f16/w4x1/f1x2/k16", "STAGE": "d2/cp/ring"}
+        name="attention.hd256.dynM",
+        dynamic=True,
+        us=44.3,
+        knobs={"TILE": "mma_m16n8k16_f16/f1x2/k16", "WORK": "w4x1", "STAGE": "d2/cp/ring"},
     )
-    fm = _attention(name="attention.hd256.dynM", dynamic=True, us=36.1, knobs={"TILE": _PJ_FM, "STAGE": "d2/cp/ring"})
+    fm = _attention(name="attention.hd256.dynM", dynamic=True, us=36.1, knobs={"TILE": _PJ_FM, "WORK": "w4x1", "STAGE": "d2/cp/ring"})
     index = _index(monkeypatch, [std, fm])
     gate_off = [_flash_row(_DD_W4X1_SITE, _PJ_SITE, "w4x1", base=_FLASH_DYN_SIG)]
     assert _golden_pick(index, gate_off, "n0") == (0, 44.3)
@@ -383,9 +384,11 @@ def test_attention_fm_pv_plan_golden_self_excludes_gate_off(monkeypatch):
 
 
 def test_rms_norm_golden_decides_its_op(monkeypatch):
-    gold = RmsNormGoldenConfig(name="rms_norm.k3840", M=512, K=3840, knobs={"REDUCE": "b256"}, emmy_us=6.3, gpu_name=CARD, compute_cap=CAP)
+    gold = RmsNormGoldenConfig(
+        name="rms_norm.k3840", M=512, K=3840, knobs={"REDUCE": "coop", "WORK": "t256"}, emmy_us=6.3, gpu_name=CARD, compute_cap=CAP
+    )
     index = _index(monkeypatch, [gold])
-    rows = [{**_RMS_SIG, "REDUCE@r0": "b32"}, {**_RMS_SIG, "REDUCE@r0": "b256"}]
+    rows = [{**_RMS_SIG, "REDUCE@r0": "coop", "WORK": "t32"}, {**_RMS_SIG, "REDUCE@r0": "coop", "WORK": "t256"}]
     assert _golden_pick(index, rows, "n0") == (1, 6.3)
 
 
@@ -520,7 +523,7 @@ _FUSED_SIG = {
     "S_dtype_f32": 2.0,
     "H_opt": 3.0,
 }
-_FUSED_TILE = "a:mma_m16n8k16_f16_f32/w1x8/f2x2/k2"
+_FUSED_TILE = "mma_m16n8k16_f16_f32/f2x2/k2"
 
 
 def _fused_row(tile, stage="d2/sync", reduce="g4k"):
@@ -545,7 +548,7 @@ def test_fused_golden_decides_its_op_over_a_warp_sibling(monkeypatch):
     """The fused norm→linear golden decides its computed-A op: the recorded bare knobs match the
     axis-keyed warp leaf (``TILE@a3`` etc.) over an offered sibling on a different tile."""
     index = _index(monkeypatch, [_norm_linear()])
-    rows = [_fused_row("a:mma_m16n8k16_f16_f32/w1x1/f1x1", stage="d1/sync", reduce=""), _fused_row(_FUSED_TILE)]
+    rows = [_fused_row("mma_m16n8k16_f16_f32/f1x1", stage="d1/sync", reduce=""), _fused_row(_FUSED_TILE)]
     assert _golden_pick(index, rows, "n0") == (1, 34.8)
 
 
@@ -554,13 +557,15 @@ def test_fused_golden_never_crosses_rms_norm_or_matmul(monkeypatch):
     coincident extents — the ``S_ext_n_reduce_axis>=2`` discriminator keeps the families apart."""
     # A fused golden must not decide a bare rms_norm op (one reduce axis, kind="rms_norm").
     index = _index(monkeypatch, [_norm_linear()])
-    rms_rows = [{**_RMS_SIG, "REDUCE@r0": "b256"}]
+    rms_rows = [{**_RMS_SIG, "REDUCE@r0": "coop", "WORK": "t256"}]
     assert _golden_pick(index, rms_rows, "n0") is None
     # A fused golden must not decide a plain matmul op (no rsqrt, kind="").
     mm_rows = _rows(_ROW_GOLD)
     assert _golden_pick(index, mm_rows, "n0") is None
     # And a bare rms_norm golden must not decide the fused op.
-    rms_gold = RmsNormGoldenConfig(name="rms.k3840", M=512, K=3840, knobs={"REDUCE": "b256"}, emmy_us=6.3, gpu_name=CARD, compute_cap=CAP)
+    rms_gold = RmsNormGoldenConfig(
+        name="rms.k3840", M=512, K=3840, knobs={"REDUCE": "coop", "WORK": "t256"}, emmy_us=6.3, gpu_name=CARD, compute_cap=CAP
+    )
     assert _golden_pick(_index(monkeypatch, [rms_gold]), [_fused_row(_FUSED_TILE)], "n0") is None
 
 
@@ -674,8 +679,9 @@ def test_fork_shape_key_flash_sniff_scans_every_row():
     scalar_row = {**flash_sig, "TILE": "b32x8/f1x1"}  # a bare-TILE non-warp sibling emitted first
     warp_row = {
         **flash_sig,
-        "TILE@dd": "a:mma_m16n8k16_f16_f32/w4x1/f1x2/k16",
-        "TILE@pj": "a:mma_m16n8k16_f16_f32/w4x1/f1x32",
+        "TILE@dd": _DD_W4X1_SITE,
+        "TILE@pj": _PJ_SITE,
+        "WORK": "w4x1",
         "REDUCE@kv": "",
         "STAGE@kv": "d2/cp/ring",
     }
@@ -759,7 +765,7 @@ def _decoy():
         seq=512,
         head_dim=64,
         dtype="fp16",
-        knobs={"TILE@dd": "a:mma_m16n8k16_f16_f32/w1x1/f1x2/k16"},
+        knobs={"TILE@dd": "mma_m16n8k16_f16_f32/f1x2/k16", "WORK": "w1x1"},
         emmy_us=1.0,
         gpu_name=CARD,
         compute_cap=CAP,

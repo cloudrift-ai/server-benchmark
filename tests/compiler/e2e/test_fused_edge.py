@@ -305,7 +305,8 @@ def test_fused_rmsnorm_linear_symbolic_m(runtime_s, monkeypatch):
     at the hint and run at off-hint sizes straddling the 64-row tile (31 under, 130 over + tail):
     the sync compute-fill / stat-prologue σ clamp the overhanging rows and the ``RegStore`` guard
     discards their store."""
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2")  # tile 64×32 — every runtime S is masked
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")  # tile 64×32 — every runtime S is masked
+    monkeypatch.setenv("EMMY_WORK", "w2x2")
     monkeypatch.setenv("EMMY_REDUCE", "")  # serial fold — the ONE-masked-kernel contract is what's under test
     H, inter = 256, 512
     g = _rmsnorm_linear_graph(Dim("seq_len", hint=64), H, inter)
@@ -332,7 +333,8 @@ def test_fused_gate_up_swiglu_symbolic_m(runtime_s, monkeypatch):
     fragment feeding per-fold B slabs / C fragments) and the SwiGLU combine rides the store's
     fragment epilogue; the seq axis is symbolic with a masked M tail (31 under / 130 over the
     64-row tile)."""
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")
+    monkeypatch.setenv("EMMY_WORK", "w2x2")
     monkeypatch.setenv("EMMY_REDUCE", "")  # serial fold — ONE masked kernel is the contract; the split form has its own test
     S, H, inter = runtime_s, 256, 512
     Sd = Dim("seq_len", hint=64)
@@ -446,7 +448,8 @@ def test_fused_cone_splitk_matches_reference(stage, monkeypatch):
     the projection — the output must match the fp32 reference. Parametrized over both sync
     depths (``d1`` + the asymmetric B-only prefetch ring ``d2``). The decode-M shape class
     (M=32) is where this split pays: the un-split cone grid starves the SMs."""
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w1x4/f2x2/k2")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")
+    monkeypatch.setenv("EMMY_WORK", "w1x4")
     monkeypatch.setenv("EMMY_REDUCE", "g4k")
     monkeypatch.setenv("EMMY_STAGE", stage)
     S, H, inter = 32, 1024, 3072
@@ -484,7 +487,8 @@ def test_fused_gate_up_splitk_matches_reference(monkeypatch):
     deferred finalize folds the 2-component carrier and applies the SwiGLU ⊗-combine ONCE after
     the cross-partition sums — the output must match the fp32 reference. The decode-M shape
     class (M=32) is where the multi-channel split pays (the gemma gate⊗up twin)."""
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w1x4/f2x2/k2")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")
+    monkeypatch.setenv("EMMY_WORK", "w1x4")
     monkeypatch.setenv("EMMY_REDUCE", "g4k")
     S, H, inter = 32, 256, 512
     g = Graph()

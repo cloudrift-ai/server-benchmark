@@ -641,7 +641,7 @@ def _emit_offline_eval(kernel_filter: str | None) -> None:
 
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import (
-        ingest_legacy_row,  # noqa: PLC0415
+        ingest_row,  # noqa: PLC0415
         tuning_knob_items,  # noqa: PLC0415
     )
     from emmy.compiler.pipeline.search.golden_eval import evaluate_golden  # noqa: PLC0415
@@ -650,8 +650,8 @@ def _emit_offline_eval(kernel_filter: str | None) -> None:
     ranks: list[int] = []
     entries: list[tuple] = []  # ("row", lead_cells, gold, got) | ("err", name, message)
     for g in configs:
-        # Legacy worker halves become one WORK row (F1) so the site-form pick compares fact-for-fact.
-        gold = ingest_legacy_row(dict(tuning_knob_items(g.knobs)))
+        # The retired WSPEC key drops so the stored row compares fact-for-fact with a realized one.
+        gold = ingest_row(dict(tuning_knob_items(g.knobs)))
         try:
             dyn = bool(getattr(g, "dynamic", None))
             ctx = Context.from_target(g.compute_cap, gpu_name=g.gpu_name)  # the golden's own card, not the live host's
@@ -898,9 +898,9 @@ def _emit_prior_golden_check(configs: list, *, title: bool = True, perf: dict | 
                     continue
                 # Closest golden: most knobs reproduced (registry-canonical values_equal, via
                 # _knob_eq — the legacy corpus vs the site-form pick), tie-broken by match fraction.
-                from emmy.compiler.pipeline.knob import ingest_legacy_row  # noqa: PLC0415
+                from emmy.compiler.pipeline.knob import ingest_row  # noqa: PLC0415
 
-                golds = [ingest_legacy_row(tunable(c.knobs)) for c in sub]
+                golds = [ingest_row(tunable(c.knobs)) for c in sub]
                 scored = [(sum(1 for k in gd if _knob_eq(k, gd[k], got)), gd) for gd in golds]
                 matched, gold = max(scored, key=lambda t: (t[0], t[0] / len(t[1]) if t[1] else 1.0))
                 n_match += matched == len(gold)

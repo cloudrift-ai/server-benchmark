@@ -50,24 +50,24 @@ logger = logging.getLogger(__name__)
 REDUCE = Knob(
     "REDUCE",
     KnobType.STR,
-    help="Reduce-axis partition codec (g<n> cta / b<n> coop / r<n> reg; empty=serial). "
+    help="Reduce-axis partition codec, site-local (g<n>[a|k] cta / coop[-t] / r<n> reg; empty=serial; "
+    "the coop WIDTH lives in WORK). "
     "Decided in lowering/tile/010_recognize (the _schedule helper), materialized in lowering/kernel/010_materialize.",
     off="",
 )
 
 # The free-axis output tile — the **unified output-fragment** knob. A contraction's output tile is
-# *either* the scalar register sub-tile (``n<N>[x<M>]`` parallel thread-tile / ``f<fn>[x<fm>]``
-# register sub-tile) *or* the tensor-core warp mma tile (``a:<atom>/w<WM>x<WN>/f<FM>x<FN>/k<bk>``),
-# never both. The value self-discriminates: an ``a:<atom>`` token selects the warp fragment (see
-# ``schedule.is_warp_codec``); otherwise the scalar fragment. Only a ``CONTRACTION`` tiles its output
-# today; ``off=""`` auto-stamps everything else. The codec is the sole on-dict spelling — the
-# online-prior featurizer (``features.mma_atom`` / ``is_warp`` / ``_free_slots`` / ``tile_signature``)
-# parses it directly (no legacy ``WM``/``WN``/``MMA`` keys).
+# *either* the scalar register sub-tile (``f<fn>[x<fm>]``) *or* the tensor-core warp mma tile
+# (``<atom>/f<FM>x<FN>[/k<bk>]``), never both. The value is SITE-LOCAL — the unit widths live in
+# ``WORK``, and the tier discriminator IS the worker kind, with the leading atom token naming the
+# fragment. Only a ``CONTRACTION`` tiles its output today; ``off=""`` auto-stamps everything else.
+# The codec is the sole on-dict spelling — the online-prior featurizer (``features.mma_atom`` /
+# ``is_warp`` / ``_free_slots`` / ``tile_signature``) resolves it against the row's ``WORK``.
 TILE = Knob(
     "TILE",
     KnobType.STR,
-    help="Output-fragment codec — scalar tile (n<N>[x<M>]/f<fn>[x<fm>]) OR warp mma tile "
-    "(a:<atom>/w<WM>x<WN>/f<FM>x<FN>/k<bk>, selected by the a:<atom> token); empty=per-cell. "
+    help="Output-fragment codec, site-local — scalar tile (f<fn>[x<fm>]) OR warp mma tile "
+    "(<atom>/f<FM>x<FN>[/k<bk>]); empty=per-cell, the worker widths live in WORK. "
     "Decided in lowering/tile/010_recognize (the _schedule helper), materialized in lowering/kernel/010_materialize.",
     off="",
 )

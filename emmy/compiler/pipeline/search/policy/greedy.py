@@ -492,14 +492,12 @@ def _golden_matches_row(golden_knobs: dict, row: dict) -> bool:
     same-family realization equals it. For single-axis families (every matmul row)
     any-of and all-of coincide, so matmul matching is unchanged.
 
-    The golden's knobs pass through :func:`~emmy.compiler.pipeline.knob.ingest_legacy_row`
-    first (step 7 F1): a legacy entry's embedded worker halves (TILE ``w``/``n`` tokens, the
-    coop width, a ``WSPEC`` band) become one synthesized ``WORK`` constraint against the row's
-    site-form ``WORK`` entry — without it the site projection would let a ``w1x8`` golden vouch
-    for a ``w4x1`` row of equal register tile."""
-    from emmy.compiler.pipeline.knob import family_of, ingest_legacy_row, pin_key_matches, values_equal  # noqa: PLC0415
+    The golden's knobs pass through :func:`~emmy.compiler.pipeline.knob.ingest_row`
+    first, which drops the retired ``WSPEC`` key — realized rows spell the producer band as their
+    ``WORK`` entry's ``+p`` suffix, and the row's worker geometry is constrained by that entry."""
+    from emmy.compiler.pipeline.knob import family_of, ingest_row, pin_key_matches, values_equal  # noqa: PLC0415
 
-    golden_knobs = ingest_legacy_row(golden_knobs)
+    golden_knobs = ingest_row(golden_knobs)
     for gk, gv in golden_knobs.items():
         fam = family_of(gk)
         hits = [(rk, rv) for rk, rv in row.items() if not rk.startswith(("S_", "H_")) and family_of(rk) == fam and pin_key_matches(gk, rk)]

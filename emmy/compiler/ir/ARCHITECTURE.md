@@ -37,7 +37,7 @@ top-level layer/pass picture see `compiler/ARCHITECTURE.md`.
   the ONLY loop annotation; the algebra is the body itself) with an UNMAPPED `Placement`;
   the `_schedule` helper (inside `010_recognize`) maps the free
   axes onto the grid and decides the reduce `ReducePlan` via the single
-  `REDUCE` codec knob (`g<n>` cta / `b<n>` coop / `r<n>` reg; the
+  `REDUCE` codec knob (`g<n>` cta / `coop` (its width in `WORK`) / `r<n>` reg; the
   decision hierarchy = env pin > search/prior fork > conservative
   default). The knob is ephemeral — resolved here into the schedule's
   `ReducePlan`; the combine stays the `Fold` node's stored program. Any static
@@ -446,9 +446,10 @@ params (the recursive
 `WSPEC` role case); the one non-uniform value codec is the `REDUCE` `g<n>[a|k]` finalize letter, kept inside the value
 so the round-trip stays byte-identical. Since step 7 the WIRE forms are site-local: `Workers` is the kernel-global
 inventory (`WORK` — `Workers.spell`/`parse`, the `+p<n>` producer band absorbing the retired per-row `WSPEC` key), and
-`TilePlan.spell_site`/`parse_site` + `ReducePlan.spell_site`/`parse_site` are the worker-token-free site values the
-stamped rows and the golden corpus carry; the legacy embedded-worker `parse`/`spell` spellings survive as
-pin-alias vocabulary.
+`TilePlan.spell`/`parse` + `ReducePlan.spell`/`parse` are the worker-token-free site values the stamped rows and the
+golden corpus carry — they parse **against** a `Workers`, and are hand-written rather than schema-driven for exactly
+that reason. There is no second, self-contained reading: the retired embedded-worker spellings raise. The
+`a:scalar` / `a:none` aliases stay pin-only vocabulary for the scalar tier.
 
 `WSPEC` (warp specialization) is the worker-mapping codec — a role→warp-count allocation (`WarpSpec`; role descriptors
 in `schedule.py`, the COMPUTE consumer implicit and sized by `TilePlan.units`) carried on an **orthogonal**

@@ -115,9 +115,9 @@ def _assert_match(forced: np.ndarray, ref: np.ndarray) -> None:
 # offset. The 128 B slot check sized off the fp32 ``BYTES_PER_ELEM`` constant let the fp16 64 B slab
 # through, the materializer left it unpadded, and ``cp.async.bulk.tensor`` faulted with
 # ``CUDA_ERROR_MISALIGNED_ADDRESS`` → 1 s watchdog hang → bench_fail. The dtype-aware gate now
-# declines TMA for this slab (→ cp.async). The scalar ``TILE`` (no ``a:`` atom) forces the scalar
+# declines TMA for this slab (→ cp.async). The thread ``WORK`` inventory (no warp atom) forces the scalar
 # tier; the depth-2 ``STAGE`` ring double-buffers so the slot offset matters.
-_NORM_REDUCE_WEDGE_KNOBS = {"TILE": "n128", "STAGE": "d2/cp"}
+_NORM_REDUCE_WEDGE_KNOBS = {"TILE": "", "WORK": "t128", "STAGE": "d2/cp"}
 _NORM_DIMS = {"S": 32, "H": 128, "I": 512}
 
 
@@ -153,7 +153,7 @@ def test_norm_linear_fp16_scalar_reduce_tma_alignment(shape_mode, monkeypatch):
 # the warp mma tier at a 64-row tile: S=32 overhangs it, so the STATIC mode exercises the masked
 # static-M sync compute-fill (clamped A/stat σ + guarded ``RegStore``) and the DYNAMIC mode the
 # symbolic-M form of the same clamps. K=128 / N=512 exactly cover (the sync fill's N/K contract).
-_NORM_WARP_FUSED_KNOBS = {"TILE": "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2"}
+_NORM_WARP_FUSED_KNOBS = {"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2"}
 
 
 @requires_cuda
@@ -209,7 +209,8 @@ def test_mma_matmul_k_split_staged(M: int, N: int, K: int, monkeypatch):
     from emmy.compiler.ir.base import InputOp
     from emmy.compiler.ir.frontend.ir import MatmulOp
 
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k2")  # force the warp (mma) tier
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")  # force the warp (mma) tier
+    monkeypatch.setenv("EMMY_WORK", "w2x2")
     g = Graph()
     g.add_node(op=InputOp(), inputs=[], output=Tensor("a", (M, K), dtype=F16), node_id="a")
     g.add_node(op=InputOp(), inputs=[], output=Tensor("b", (K, N), dtype=F16), node_id="b")
@@ -236,7 +237,7 @@ def test_mma_matmul_k_split_staged(M: int, N: int, K: int, monkeypatch):
 # warp stage resolver now declines TMA for any tile whose box side exceeds 256 (a pinned tma stage
 # has no cp.async fallback, so the kernel lowers gmem-direct); the pinned config must produce
 # correct output rather than raise at descriptor-encode time.
-_OVERSIZED_BOX_KNOBS = {"TILE": "a:mma_m16n8k16_f16_f32/w4x2/f8x2/k2", "STAGE": "d2/tma/ring"}
+_OVERSIZED_BOX_KNOBS = {"TILE": "mma_m16n8k16_f16_f32/f8x2/k2", "WORK": "w4x2", "STAGE": "d2/tma/ring"}
 
 
 @requires_cuda
@@ -278,8 +279,8 @@ def _build_f16_matmul_graph(M: int, N: int, K: int):
 
 
 # Scalar-tile knob: a scalar ``TILE`` codec (no ``a:`` atom) forces the scalar register-tile FMA
-# path — the ``n32x8/f4x26`` (BN=32 BM=8 FN=4 FM=26) hero tile, gmem-direct.
-_SCALAR_F16_KNOBS = {"TILE": "n32x8/f4x26"}
+# path — the ``f4x26`` + ``t32x8`` (BN=32 BM=8 FN=4 FM=26) hero tile, gmem-direct.
+_SCALAR_F16_KNOBS = {"TILE": "f4x26", "WORK": "t32x8"}
 
 
 @requires_cuda
@@ -307,7 +308,7 @@ def test_sgemm_inner_reduce_is_unrolled(monkeypatch):
     from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline
 
     g, _, _ = _build_2d_matmul_graph(_ARTICLE_DIMS)
-    for k, v in {"TILE": "n32x8/f4x26", "STAGE": "d2/tma"}.items():
+    for k, v in {"TILE": "f4x26", "WORK": "t32x8", "STAGE": "d2/tma"}.items():
         monkeypatch.setenv(f"EMMY_{k}", str(v))
     res = Pipeline.build([*KERNEL_PASSES, "lowering/cuda"]).run(g, ctx=Context.from_target((12, 0)))
     src = "\n".join(n.op.kernel_source for n in res.nodes.values() if isinstance(n.op, CudaOp))
@@ -337,7 +338,8 @@ def test_unstaged_atom_lowers_gmem_direct(monkeypatch):
     # tile + atom-K chunk) and leave STAGE unpinned — an explicit STAGE pin is authoritative (no
     # budget filter), but here we want the budget-aware filter to decline the over-budget staging so
     # the operands fall to the gmem-direct path. The ``a:<atom>`` token forces the warp (mma) tier.
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w1x1/f26x4/k2")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f26x4/k2")
+    monkeypatch.setenv("EMMY_WORK", "w1x1")
     compiled = CudaBackend().compile(g)  # no longer raises
     src = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if isinstance(n.op, CudaOp))
     assert "emmy_mma_load_a_gmem" in src and "emmy_mma_load_b_gmem" in src, "unstaged operands not loaded gmem-direct"
@@ -351,7 +353,7 @@ def test_unstaged_atom_mma_accuracy(monkeypatch):
     matmul (a warp ``TILE`` pin, STAGE unpinned ⇒ gmem-direct) and verify it matches
     the numpy reference. Guards the m16n8k16 fragment layout in the gmem helpers."""
     g, inputs, ref = _build_f16_matmul_graph(128, 128, 128)
-    knobs = {"TILE": "a:mma_m16n8k16_f16_f32/w2x2/f2x2/k1"}
+    knobs = {"TILE": "mma_m16n8k16_f16_f32/f2x2", "WORK": "w2x2"}
     forced = _run_with_knobs(g, inputs, "c", knobs, monkeypatch)
     _assert_match(forced.astype(np.float32), ref.astype(np.float32))
 
@@ -417,27 +419,27 @@ def _build_2d_matmul_graph(dims: dict):
 _SMALL_DIMS = {"M": 512, "K": 512, "N": 512}
 _MASKED_TILE_CONFIGS: tuple[tuple[str, dict, dict, dict], ...] = (
     # A scalar TILE pin (n32x8 = BN=32 BM=8) the planner must honor authoritatively.
-    ("bm8_pin_outside_hints", _ARTICLE_DIMS, {"TILE": "n32x8"}, {}),
+    ("bm8_pin_outside_hints", _ARTICLE_DIMS, {"TILE": "", "WORK": "t32x8"}, {}),
     # reg_m=26 (FM) non-divisor of M → a 208-row masked-M tile (ceil-div grid + per-row
     # boundary Cond on the Write).
-    ("fm26_masked_m", _ARTICLE_DIMS, {"TILE": "n32x8/f1x26"}, {}),
+    ("fm26_masked_m", _ARTICLE_DIMS, {"TILE": "f1x26", "WORK": "t32x8"}, {}),
     # reg_n=4 (FN) multi-axis composite cache on N (BN_thread × FN_register on one source dim) —
     # the composite stride must round-trip through smem stage → revert-to-gmem.
-    ("multi_axis_fn4", _ARTICLE_DIMS, {"TILE": "n32x8/f4"}, {}),
+    ("multi_axis_fn4", _ARTICLE_DIMS, {"TILE": "f4", "WORK": "t32x8"}, {}),
     # Multi-axis composite on BOTH axes: reg_m=4 and reg_n=4 (the FM×FN > 1 register tile).
-    ("multi_axis_fm4_fn4", _ARTICLE_DIMS, {"TILE": "n32x8/f4x4"}, {}),
+    ("multi_axis_fm4_fn4", _ARTICLE_DIMS, {"TILE": "f4x4", "WORK": "t32x8"}, {}),
     # kernel/095_interleave_loads opt-out (flat-LDS layout) must still be correct.
     (
         "interleave_loads_disabled",
         _ARTICLE_DIMS,
-        {"TILE": "n32x8/f4x4"},
+        {"TILE": "f4x4", "WORK": "t32x8"},
         {"EMMY_INTERLEAVE_LOADS": "0"},
     ),
     # Symmetric masked-N: reg_n=26 reg_m=4 on 512³ → a 320-col overhang (boundary Cond on N).
-    ("fn26_masked_n", _SMALL_DIMS, {"TILE": "n32x8/f26x4"}, {}),
+    ("fn26_masked_n", _SMALL_DIMS, {"TILE": "f26x4", "WORK": "t32x8"}, {}),
     # Scalar-tile TMA: the staged operands ride the cp.async.bulk.tensor ring (unswizzled
     # deposit, plain-Load consumer). A clean (f4x4) tile exercises the box copy.
-    ("tma_clean_fm4_fn4", _ARTICLE_DIMS, {"TILE": "n32x8/f4x4", "STAGE": "d2/tma"}, {}),
+    ("tma_clean_fm4_fn4", _ARTICLE_DIMS, {"TILE": "f4x4", "WORK": "t32x8", "STAGE": "d2/tma"}, {}),
 )
 
 
@@ -477,7 +479,7 @@ def test_masked_tile_accuracy_configs(label: str, dims: dict, knobs: dict, env: 
 # watchdog hang at runtime. The scalar stage resolver's 16 B inner-stride gate (previously
 # TMA-only) now covers cp.async too: the pinned stage resolver-declines and the kernel lowers
 # gmem-direct with correct output.
-_ODD_STRIDE_CPASYNC_KNOBS = {"TILE": "n16x8/f2x4", "STAGE": "d2/cp/ring"}
+_ODD_STRIDE_CPASYNC_KNOBS = {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d2/cp/ring"}
 
 
 @requires_cuda
@@ -510,7 +512,7 @@ def test_scalar_cpasync_declines_odd_stride(monkeypatch):
 # (``Operand.dtype``/``elem_bytes``; ``_ScalarOps.slab_elems``); the drain's fma converts like
 # the gmem-direct path. Strides here are 16 B-aligned (K=128, N=96 → 192 B fp16 rows), so the
 # inner-stride gate passes and the mixed-dtype fill itself is what's under test.
-_MIXED_DTYPE_STAGED_KNOBS = {"TILE": "n16x8/f2x4", "STAGE": "d1/cp"}
+_MIXED_DTYPE_STAGED_KNOBS = {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d1/cp"}
 
 
 @requires_cuda

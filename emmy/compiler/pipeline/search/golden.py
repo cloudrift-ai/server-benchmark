@@ -100,20 +100,18 @@ def fast_math_knobs(knobs: dict) -> bool:
     under the ``FAST_MATH`` / ``F16_MMA_F32_ACC`` gate, so regime-aware consumers (the
     ``eval`` rank / reproduction views) pin the gate on before comparing against it. Replay
     itself needs no gate — the recorded ``TILE`` pin is authoritative."""
-    from emmy.compiler.ir.schedule import TilePlan, Workers, is_warp_codec  # noqa: PLC0415 — keep module import-light
+    from emmy.compiler.ir.schedule import TilePlan, Workers  # noqa: PLC0415 — keep module import-light
 
     from .space import FAST_EXP  # noqa: PLC0415
 
     def _atom_of(spec: str):
-        """The warp atom a TILE value names — legacy ``a:<atom>`` or the site form's bare
-        leading atom (parsed under a dummy warp inventory: the units never reach the atom)."""
+        """The warp atom a ``TILE`` value names — the site form's bare leading atom, parsed under
+        a dummy warp inventory (the units never reach the atom)."""
         try:
-            if is_warp_codec(spec):
-                return TilePlan.parse(spec).atom
-            plan = TilePlan.parse_site(spec, Workers(kind="warp", units=(1, 1)))
-            return plan.atom if plan.is_warp else None
+            plan = TilePlan.parse(spec, Workers(kind="warp", units=(1, 1)))
         except ValueError:
             return None  # an unparseable historic spelling can't name an f16acc atom
+        return plan.atom if plan.is_warp else None
 
     for k, v in knobs.items():
         s = str(v).strip()
@@ -280,7 +278,7 @@ class MatmulGoldenConfig(GoldenConfig):
     def repro_command(self, ir: str = "cuda") -> str:
         """A runnable ``emmy`` command that rebuilds this config's kernel.
 
-        e.g. ``EMMY_KNOBS="TILE=n32x8/f4x26,STAGE=d2/tma" emmy compile -c "torch.matmul(...)" --ir cuda``
+        e.g. ``EMMY_KNOBS="TILE=f4x26,WORK=t32x8,STAGE=d2/tma" emmy compile -c "torch.matmul(...)" --ir cuda``
         """
         dyn = "".join(f" --dynamic {s}" for s in self.dynamic_specs())
         return f'EMMY_KNOBS="{_knobs_env(self.knobs)}" emmy compile -c "{self.snippet()}"{dyn} --ir {ir}'

@@ -237,7 +237,7 @@ def test_symbolic_cooperative_softmax_sweep(monkeypatch, seq):
     carries the runtime ``seq_len`` arg + the cooperative ``__shfl_xor_sync`` combine over the
     strided ``< seq_len`` bound (vs the old degenerate per-thread serial reduce), in a 2-warp
     block."""
-    got, xs, src = _compile_run(_STRADDLE_SOFTMAX, {"EMMY_REDUCE": "b64"}, monkeypatch, dynamic="seq_len@x:1", seq=seq)
+    got, xs, src = _compile_run(_STRADDLE_SOFTMAX, {"EMMY_REDUCE": "coop", "EMMY_WORK": "t64"}, monkeypatch, dynamic="seq_len@x:1", seq=seq)
     want = _ref_softmax(xs).reshape(got.shape)
     assert got.shape == (8, seq)
     diff = float(np.abs(got - want).max())

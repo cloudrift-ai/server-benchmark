@@ -53,7 +53,8 @@ def _feats(*, opt: float = 3.0, cc: float = 120.0, **knobs) -> dict:
         "S_ext_n_reduce_axis": 1.0,
         "S_loop_depth": 3.0,
         "S_dtype_f32": 3.0,
-        "TILE": "n16x16/f2x2",
+        "TILE": "f2x2",
+        "WORK": "t16x16",
         **knobs,
     }
 
@@ -168,7 +169,7 @@ def test_write_freeze_round_trip(tmp_path) -> None:
     # from the row's own field, full traced S_* keying to the spec, tunables verbatim.
     assert a3.features["H_cc"] == 120.0 and a3.features["H_opt"] == 3.0
     assert a1.features["H_opt"] == 1.0
-    assert a3.features["TILE"] == "n16x16/f2x2"
+    assert a3.features["TILE"] == "f2x2"
     assert ShapeKey.from_s_features(a3.features).joins(ShapeKey.from_matmul(_SPEC_A["M"], _SPEC_A["N"], _SPEC_A["K"], _SPEC_A["dtype"]))
     assert a3.feat_ver == FEATURIZER_VERSION
     # Treeless contract + identity keys: op_sig is the canonical spec JSON — the -O1/-O3

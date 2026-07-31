@@ -31,7 +31,7 @@ from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: E402
 from emmy.compiler.pipeline.fork import flatten_leaves  # noqa: E402
 from emmy.compiler.pipeline.pipeline import Run  # noqa: E402
 
-WARP = "a:mma_m16n8k16_f16_f32"
+WARP = "mma_m16n8k16_f16_f32"  # the site TILE value's leading atom token; the warps live in WORK
 
 
 def _inp(g: Graph, name: str, shape: tuple, dt=F16) -> str:
@@ -125,38 +125,50 @@ def sdpa(head_dim=128, seq=128, heads=4):
 
 
 CASES = [
-    ("matmul_scalar", lambda: matmul(), {"TILE": "n16x8/f4x8"}),
-    ("matmul_warp_tma", lambda: matmul(), {"TILE": f"{WARP}/w1x8/f4x1/k4", "STAGE": "d3/tma/ring"}),
-    ("matmul_warp_f16acc", lambda: matmul(2048, 2048, 2048), {"TILE": "a:mma_m16n8k16_f16_f16/w4x2/f4x8/k4", "STAGE": "d2/tma/ring"}),
-    ("matmul_splitk", lambda: matmul(), {"TILE": f"{WARP}/w2x2/f2x4/k2", "REDUCE": "g2k", "STAGE": "d2/tma/ring"}),
-    ("matmul_raster", lambda: matmul(2048, 2048, 2048), {"TILE": f"{WARP}/w2x4/f2x2/k4", "STAGE": "d2/tma/ring", "RASTER": "gm8"}),
-    ("matmul_wspec", lambda: matmul(2048, 2048, 2048), {"TILE": f"{WARP}/w2x4/f2x2/k4", "STAGE": "d2/tma/ring", "WSPEC": "p1"}),
-    ("matvec_coopt", lambda: matmul(1, 4096, 4096, lin=True), {"REDUCE": "g16k/b256t"}),
-    ("matmul_dynm", lambda: matmul(Dim("seq_len"), 512, 512), {"TILE": f"{WARP}/w1x8/f4x1/k4"}),
-    ("rms_norm", lambda: rms_norm(), {"REDUCE": "b256"}),
-    ("softmax", lambda: softmax(), {"REDUCE": "b128"}),
-    ("reduce", lambda: reduce_sum(), {"REDUCE": "b128"}),
+    ("matmul_scalar", lambda: matmul(), {"TILE": "f4x8", "WORK": "t16x8"}),
+    ("matmul_warp_tma", lambda: matmul(), {"TILE": f"{WARP}/f4x1/k4", "WORK": "w1x8", "STAGE": "d3/tma/ring"}),
+    (
+        "matmul_warp_f16acc",
+        lambda: matmul(2048, 2048, 2048),
+        {"TILE": "mma_m16n8k16_f16_f16/f4x8/k4", "WORK": "w4x2", "STAGE": "d2/tma/ring"},
+    ),
+    ("matmul_splitk", lambda: matmul(), {"TILE": f"{WARP}/f2x4/k2", "WORK": "w2x2", "REDUCE": "g2k", "STAGE": "d2/tma/ring"}),
+    (
+        "matmul_raster",
+        lambda: matmul(2048, 2048, 2048),
+        {"TILE": f"{WARP}/f2x2/k4", "WORK": "w2x4", "STAGE": "d2/tma/ring", "RASTER": "gm8"},
+    ),
+    ("matmul_wspec", lambda: matmul(2048, 2048, 2048), {"TILE": f"{WARP}/f2x2/k4", "WORK": "w2x4", "STAGE": "d2/tma/ring", "WSPEC": "p1"}),
+    ("matvec_coopt", lambda: matmul(1, 4096, 4096, lin=True), {"REDUCE": "g16k/coop-t", "WORK": "t256"}),
+    ("matmul_dynm", lambda: matmul(Dim("seq_len"), 512, 512), {"TILE": f"{WARP}/f4x1/k4", "WORK": "w1x8"}),
+    ("rms_norm", lambda: rms_norm(), {"REDUCE": "coop", "WORK": "t256"}),
+    ("softmax", lambda: softmax(), {"REDUCE": "coop", "WORK": "t128"}),
+    ("reduce", lambda: reduce_sum(), {"REDUCE": "coop", "WORK": "t128"}),
     ("pointwise", lambda: pointwise(), {"TILE": "f2"}),
-    ("norm_linear", lambda: norm_linear(), {"TILE": f"{WARP}/w1x16/f2x2/k2", "REDUCE": ""}),
-    ("norm_linear_lin", lambda: norm_linear(lin=True), {"TILE": f"{WARP}/w1x16/f2x2/k2", "REDUCE": ""}),
-    ("norm_linear_splitk", lambda: norm_linear(), {"TILE": f"{WARP}/w1x16/f2x2/k2", "REDUCE": "g8k"}),
-    ("norm_linear_coop", lambda: norm_linear(), {"REDUCE": "b128"}),
-    ("norm_linear_dynm", lambda: norm_linear(S=Dim("seq_len")), {"TILE": f"{WARP}/w1x16/f2x2/k2", "REDUCE": ""}),
-    ("mlp_geglu", lambda: mlp_geglu(), {"TILE": f"{WARP}/w2x2/f4x8", "REDUCE": ""}),
-    ("flash_hd128", lambda: sdpa(128), {"TILE@dd": f"{WARP}/w4x1/f1x2/k8", "TILE@pj": f"{WARP}/w4x1/f1x16", "STAGE": "d2/tma/ring"}),
-    ("flash_hd128_cp", lambda: sdpa(128), {"TILE@dd": f"{WARP}/w4x1/f1x2/k8", "TILE@pj": f"{WARP}/w4x1/f1x16", "STAGE": "d2/cp/ring"}),
+    ("norm_linear", lambda: norm_linear(), {"TILE": f"{WARP}/f2x2/k2", "WORK": "w1x16", "REDUCE": ""}),
+    ("norm_linear_lin", lambda: norm_linear(lin=True), {"TILE": f"{WARP}/f2x2/k2", "WORK": "w1x16", "REDUCE": ""}),
+    ("norm_linear_splitk", lambda: norm_linear(), {"TILE": f"{WARP}/f2x2/k2", "WORK": "w1x16", "REDUCE": "g8k"}),
+    ("norm_linear_coop", lambda: norm_linear(), {"REDUCE": "coop", "WORK": "t128"}),
+    ("norm_linear_dynm", lambda: norm_linear(S=Dim("seq_len")), {"TILE": f"{WARP}/f2x2/k2", "WORK": "w1x16", "REDUCE": ""}),
+    ("mlp_geglu", lambda: mlp_geglu(), {"TILE": f"{WARP}/f4x8", "WORK": "w2x2", "REDUCE": ""}),
+    ("flash_hd128", lambda: sdpa(128), {"TILE@dd": f"{WARP}/f1x2/k8", "WORK": "w4x1", "TILE@pj": f"{WARP}/f1x16", "STAGE": "d2/tma/ring"}),
+    (
+        "flash_hd128_cp",
+        lambda: sdpa(128),
+        {"TILE@dd": f"{WARP}/f1x2/k8", "WORK": "w4x1", "TILE@pj": f"{WARP}/f1x16", "STAGE": "d2/cp/ring"},
+    ),
     (
         "flash_hd256_alt",
         lambda: sdpa(256),
-        {"TILE@dd": f"{WARP}/w4x1/f1x8/k16", "TILE@pj": f"{WARP}/w4x1/f1x32/k4", "STAGE": "d1/cp/alt"},
+        {"TILE@dd": f"{WARP}/f1x8/k16", "WORK": "w4x1", "TILE@pj": f"{WARP}/f1x32/k4", "STAGE": "d1/cp/alt"},
     ),
     (
         "flash_hd256_fm",
         lambda: sdpa(256),
-        {"TILE@dd": f"{WARP}/w4x1/f1x8/k16", "TILE@pj": "a:mma_m16n8k16_f16_f16/w4x1/f1x32/k4", "STAGE": "d1/cp/alt"},
+        {"TILE@dd": f"{WARP}/f1x8/k16", "TILE@pj": "mma_m16n8k16_f16_f16/f1x32/k4", "WORK": "w4x1", "STAGE": "d1/cp/alt"},
     ),
     ("flash_chain", lambda: sdpa(64), {"TILE": "a:scalar", "TILE@pj": "f64"}),
-    ("flash_scalar", lambda: sdpa(64), {"REDUCE": "b128"}),
+    ("flash_scalar", lambda: sdpa(64), {"REDUCE": "coop", "WORK": "t128"}),
 ]
 
 

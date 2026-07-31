@@ -532,12 +532,12 @@ def test_workers_derive_from_tile_slices_and_disagreement_is_loud() -> None:
 
     from emmy.compiler.ir.schedule import Workers, derive_workers
 
-    warp = TilePlan.parse("a:mma_m16n8k16_f16_f32/w4x1/f1x2/k8")
+    warp = TilePlan.parse("mma_m16n8k16_f16_f32/f1x2/k8", Workers.parse("w4x1"))
     assert derive_workers([warp, warp]) == Workers(kind="warp", units=(4, 1))
-    assert derive_workers([TilePlan.parse("n16x8/f4x8")]) == Workers(kind="thread", units=(16, 8))
+    assert derive_workers([TilePlan.parse("f4x8", Workers.parse("t16x8"))]) == Workers(kind="thread", units=(16, 8))
     assert derive_workers([TilePlan()]) is None  # per-cell — no inventory to factor
     with pytest.raises(ValueError, match="disagreeing worker geometry"):
-        derive_workers([warp, TilePlan.parse("a:mma_m16n8k16_f16_f32/w2x1/f1x2/k8")])
+        derive_workers([warp, TilePlan.parse("mma_m16n8k16_f16_f32/f1x2/k8", Workers.parse("w2x1"))])
 
 
 def test_seal_workers_fills_the_slot_off_the_schedule_dict() -> None:
@@ -546,6 +546,6 @@ def test_seal_workers_fills_the_slot_off_the_schedule_dict() -> None:
 
     c = _contraction()
     t = _tile(c)
-    sched_of(t).put("TILE", c, TilePlan.parse("n2/f2"))
+    sched_of(t).put("TILE", c, TilePlan.parse("f2", Workers.parse("t2")))
     seal_workers(t)
     assert t.work == Workers(kind="thread", units=(2, 1))

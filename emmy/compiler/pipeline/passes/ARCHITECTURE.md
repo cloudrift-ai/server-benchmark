@@ -198,8 +198,8 @@ verbatim), and `fn.results` replace the retired `out` last-def convention.
 `Write`s — and the rms/softmax output-sweep `Loop` around them — left the term for `TileOp.stores`, a tuple of
 `Store` decorations (the `Write` held whole for field fidelity, plus the sweep axis/unroll). ONE reconstitution rule
 (`ir.effect_tail`, read through `ops.projection_tail`) reassembles the effectful stmt stream wherever the pipeline
-consumed it out of the body — the scheduler's tail gates (the `b<n>t` no-sweep condition, the shared-row stage
-detection, the split-K atomic-distributivity gate), the materializer's `Map` peel and flat-root arm, and
+consumed it out of the body — the scheduler's tail gates (the transposed band's no-sweep condition, the shared-row
+stage detection, the split-K atomic-distributivity gate), the materializer's `Map` peel and flat-root arm, and
 `030_split_reduce`'s projection/cell reads — so the lowered kernels are byte-identical to the stored-`Write` era
 (the conversion sites run `split_effects`, whose round-trip gate is the same 1o construction-time byte-identity
 pattern; a declining shape keeps the raw spelling). `030`'s split partials nodify their sliced annotated `Loop`
@@ -226,10 +226,11 @@ structurally, and env pins resolve into the same objects ONCE at the top (`_sche
 `_pinned_reduce`) — so a codec string is spelled exactly once per family, where a row becomes stored state
 (`_schedule._site_row` for fork rows, `_site_knobs` for the stamped `TileOp.knobs`). `_materialize`
 dispatches warp-vs-scalar on the PARSED plan, and `resolve_site_tile` is the one rule disambiguating an empty site
-`TILE` beside a thread `WORK` from the coop tier. Legacy embedded-worker spellings survive only as loudly-validated
-PIN ALIASES that must agree with the given inventory (`ingest_legacy_row` re-factors a legacy row's worker halves
-into one synthesized `WORK` entry for matching; `values_equal` bridges the value spellings); the stored golden corpus
-was re-spelled mechanically (`scripts/respell_goldens.py`, replay proven digest-identical).
+`TILE` beside a thread `WORK` from the coop tier. The retired embedded-worker spellings RAISE — the worker widths
+have one home, so a value carrying its own cannot decode into a second, self-contained reading that silently
+disagrees with `WORK` (`values_equal` still bridges the atom aliases and the codec's normal form); the stored golden
+corpus was re-spelled mechanically, replay proven digest-identical (the one-shot re-spell script is gone with the
+grammar it read).
 
 ## The divide rule: `split` an iteration axis
 
@@ -390,10 +391,10 @@ score producer anyway declines the fuse rather than being silently dropped. At s
 O(seq·W), not O(seq²) — 40 of gemma-4's 48 layers at real context lengths.
 Two catalog invariants hold: every recorded golden's `WORK`/`TILE`/`STAGE`/`REDUCE` stays a **member** of the
 enumerated grids (the permanence test in `tests/compiler/test_golden_configs.py`, site-aware since the step-7
-re-spell — membership means the replayed pin selects an enumerated row through the same legacy reconstruction
-ingestion performs; a space edit can never silently orphan a
-golden into unreachability again, the sixth sweep's `.s512` regression class; the scalar reg grid carries the
-golden-informed deep-FM points `f2x6..f2x14`, `f4x6..f4x26` for exactly this reason), and a cross-CTA split deploy
+re-spell — membership means the replayed pin resolves to a slice the catalog hands out; a space edit can never
+silently orphan a golden into unreachability again, the sixth sweep's `.s512` regression class; the scalar reg grid
+carries the golden-informed deep-FM points `f2x6..f2x14`, `f4x6..f4x26` for exactly this reason), and a cross-CTA
+split deploy
 (`030_split_reduce`) stamps the decided knob row onto its **partial** kernel — the engine merges knobs forward on 1:1
 rebinds only, so without the explicit stamp the graph splice dropped them and the deployed split recorded no
 schedule identity (the A/B table then couldn't say what greedy deployed).

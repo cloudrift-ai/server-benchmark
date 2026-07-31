@@ -194,13 +194,13 @@ def test_evaluate_golden_rank_is_tie_pessimistic(monkeypatch):
     """A golden tied with earlier-emitted rows loses the greedy argmin to them — the
     rank must count those ties, so a tie plateau can never report rank 0."""
     rows = [
-        {"TILE@a0": "n16x8/f2x4"},
-        {"TILE@a0": "n32x8/f4x8"},
-        {"TILE@a0": "n32x16/f4x8"},  # the golden, emitted third
-        {"TILE@a0": "n64x16/f4x8"},
+        {"TILE@a0": "f2x4", "WORK": "t16x8"},
+        {"TILE@a0": "f4x8", "WORK": "t32x8"},
+        {"TILE@a0": "f4x8", "WORK": "t32x16"},  # the golden, emitted third
+        {"TILE@a0": "f4x8", "WORK": "t64x16"},
     ]
     monkeypatch.setattr(golden_eval, "_enumerate", lambda M, N, K, dtype, ctx: (rows, ()))
-    golden = {"TILE": "n32x16/f4x8"}
+    golden = {"TILE": "f4x8", "WORK": "t32x16"}
 
     _, rank_tied, pool, rank_opt = golden_eval.evaluate_golden(1, 1, 1, "fp16", golden, ctx=None, scorer=lambda r: 1.0)
     assert pool == 4

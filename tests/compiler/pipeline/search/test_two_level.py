@@ -413,10 +413,10 @@ def test_o3_band_is_per_regime_under_a_precision_gate(monkeypatch):
         return search.last_o3_worthy
 
     s = TuningSearch()
-    fm = {"TILE": "a:mma_m16n8k16_f16_f16/w2x4/f2x4/k8", "STAGE": "d1/tma"}
-    std_best = {"TILE": "a:mma_m16n8k16_f16_f32/w2x4/f2x4", "STAGE": "d4/tma/ring"}
-    std_near = {"TILE": "a:mma_m16n8k16_f16_f32/w2x4/f2x4/k2", "STAGE": "d2/tma/ring"}
-    std_far = {"TILE": "a:mma_m16n8k16_f16_f32/w1x1/f1x1", "STAGE": ""}
+    fm = {"TILE": "mma_m16n8k16_f16_f16/f2x4/k8", "WORK": "w2x4", "STAGE": "d1/tma"}
+    std_best = {"TILE": "mma_m16n8k16_f16_f32/f2x4", "WORK": "w2x4", "STAGE": "d4/tma/ring"}
+    std_near = {"TILE": "mma_m16n8k16_f16_f32/f2x4/k2", "WORK": "w2x4", "STAGE": "d2/tma/ring"}
+    std_far = {"TILE": "mma_m16n8k16_f16_f32/f1x1", "WORK": "w1x1", "STAGE": ""}
     assert bench(s, fm, 238.0), "the global-best fast-math row rebenches"
     assert bench(s, std_best, 259.0), "the best STANDARD row must rebench in its own band (8% off the fm best)"
     assert bench(s, std_near, 262.0), "a standard row within tol of the standard best qualifies"

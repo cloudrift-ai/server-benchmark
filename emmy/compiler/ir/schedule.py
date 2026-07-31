@@ -27,13 +27,21 @@ same value types and use the subset their axes admit. Warp specialization is **o
 optional ``workers: WarpSpec | None`` root field (``None`` = uniform SIMT), a role→warp-count split
 *over* the fixed pipeline.
 
+**The codec values are SITE-LOCAL**: a kernel's worker inventory is spelled exactly once, in the
+``WORK`` family (:class:`Workers`), so a ``TILE`` value carries no unit widths
+(``<atom>/f<FM>x<FN>[/k<bk>]`` warp | ``f<fn>[x<fm>]`` scalar) and a ``REDUCE`` value no coop width
+(``[g<n>[a|k]][/coop[-t]][/r<n>]``). Both therefore ``parse`` **against** a :class:`Workers` and are
+hand-written here; :func:`resolve_site_tile` is the one rule resolving the single ambiguity that
+spelling has (an empty ``TILE`` beside a thread inventory). There is no second, self-contained
+reading — the retired embedded-worker grammar (``a:<atom>/w../f..``, ``n../f..``, ``b<n>``) raises.
+
 **The codec engine** (:func:`decode` / :func:`encode` / :class:`Schema` / :class:`Field`) is the
-single ser/de source of truth: every schedule codec is one ``/``-separated string of ``TOKEN`` nodes
-(grammar at :func:`desugar` / :func:`decode`), and each value type declares a :class:`Schema` of typed
-:class:`Field`\\s and routes its ``parse`` / ``spell`` through here, keeping only its own semantics
-(``combine`` / ``tile_m`` / ``block_threads`` / ``is_async`` / validation). The tunable knob
-*declarations* that spell these codecs (``REDUCE`` / ``TILE`` / ``STAGE`` / ``WSPEC``) live one layer
-up in :mod:`emmy.compiler.pipeline.search.space` — they are ``Knob`` instances, a search concern.
+ser/de source of truth for the inventory-free codecs (``STAGE`` / ``WSPEC``): one ``/``-separated
+string of ``TOKEN`` nodes (grammar at :func:`desugar` / :func:`decode`), declared as a
+:class:`Schema` of typed :class:`Field`\\s so the value type keeps only its own semantics
+(``is_async`` / validation). The tunable knob *declarations* that spell these codecs (``REDUCE`` /
+``TILE`` / ``STAGE`` / ``WSPEC``) live one layer up in
+:mod:`emmy.compiler.pipeline.search.space` — they are ``Knob`` instances, a search concern.
 
 **Warp-spec roles** (:class:`RoleKind` / :data:`ROLE_REGISTRY`) are the worker bands a CTA's warps
 split into; the ``WSPEC`` schema is built from the registry so a new role needs no codec edit. The
@@ -53,7 +61,8 @@ from emmy.compiler.ir.atom import SCALAR_ATOM, Atom, AtomKind, atom_for
 from emmy.compiler.ir.axis import Axis
 
 # ===========================================================================================
-# Codec engine — the single ser/de source of truth for the schedule knob codecs below.
+# Codec engine — the ser/de source of truth for the inventory-free schedule codecs below (STAGE /
+# WSPEC). The site-local TILE / REDUCE values parse against a Workers inventory and are hand-written.
 # ===========================================================================================
 
 _TOKEN_RE = re.compile(r"^([A-Za-z]+)(.*)$")
@@ -63,7 +72,7 @@ def _codec_width(num: str, *, tok: str, codec: str) -> int:
     """Parse a codec field's positive-integer width, rejecting empty / non-numeric / ``< 1``
     values with a clear message. A ``1`` width is the legal identity (the level is off); only
     ``0`` / negatives / non-digits are rejected. The ``codec`` name rides the message so a bad
-    pin names the knob it came from (``bad REDUCE token ...`` / ``bad WARP token ...``)."""
+    pin names the knob it came from (``bad REDUCE token ...`` / ``bad TILE token ...``)."""
     if not num.isdigit() or int(num) < 1:
         raise ValueError(f"bad {codec} token {tok!r}: expected a positive integer width, got {num!r}")
     return int(num)
@@ -72,8 +81,8 @@ def _codec_width(num: str, *, tok: str, codec: str) -> int:
 class FieldKind(enum.Enum):
     """The five leaf shapes a codec field can take."""
 
-    TUPLE = "tuple"  # int(xint)* — arity-1 scalar or arity-n pair (n/f/w/b/r/k/d/p)
-    NAME = "name"  # a registry name resolved to an object (the warp atom, a:<atom>)
+    TUPLE = "tuple"  # int(xint)* — arity-1 scalar or arity-n pair (the STAGE d/p, the WSPEC role warp counts)
+    NAME = "name"  # a registry name resolved to an object (an extension point; no live codec uses it)
     CHOICE = "choice"  # a bare token that IS the value (the STAGE transport sync|cp|tma)
     FLAG = "flag"  # a valueless bare token → bool (STAGE ring)
     GROUP = "group"  # a value plus named sub-fields (the WSPEC roles, p<np>[:<param>,...])
@@ -82,8 +91,8 @@ class FieldKind(enum.Enum):
 class Emit(enum.Enum):
     """When :func:`encode` renders a field (the byte-identity lever — mirrors the old ``spell``)."""
 
-    ALWAYS = "always"  # render unconditionally (STAGE d/transport, warp a/w/f)
-    NONDEFAULT = "nondefault"  # render iff the value differs from the field default (g/b/r/k/n/f/p)
+    ALWAYS = "always"  # render unconditionally (the STAGE depth / transport)
+    NONDEFAULT = "nondefault"  # render iff the value differs from the field default (the STAGE p, the WSPEC roles)
     TRUE = "true"  # render iff truthy (the ring flag)
 
 
@@ -96,7 +105,7 @@ class Field:
     arity: int = 1  # TUPLE: number of int elements (1 = scalar int value, ≥2 = tuple value)
     emit: Emit = Emit.NONDEFAULT
     suppress_trailing: bool = True  # TUPLE arity≥2: drop trailing ``x<m>`` when it equals 1
-    required: bool = False  # decode raises if the node is absent (the warp atom)
+    required: bool = False  # decode raises if the node is absent
     suffix: tuple[tuple[str, str], ...] = ()  # TUPLE arity-1 enum letter: ((codec, canonical), ...)
     suffix_default: str = ""  # the canonical suffix when the letter is omitted
     choices: tuple[tuple[str, str], ...] = ()  # CHOICE: ((codec-token, canonical), ...)
@@ -450,19 +459,6 @@ class ReduceStage:
         return (FoldMove.SMEM,)
 
 
-#: The ``REDUCE`` codec schema (decoded / encoded by :func:`decode`): ``g<n>[a|k]`` (GRID cross-CTA
-#: split + finalize letter), ``b<n>`` (BLOCK cooperative threads), ``r<n>`` (REG ILP fold).
-_REDUCE_SCHEMA = Schema(
-    "REDUCE",
-    (
-        Field("g", FieldKind.TUPLE, suffix=(("a", "atomic"), ("k", "kernel")), suffix_default="kernel"),
-        Field("b", FieldKind.TUPLE, suffix=(("t", "transposed"),), suffix_default="interleaved"),
-        Field("r", FieldKind.TUPLE),
-    ),
-    expect="expect g<n> / b<n>[t] / r<n>",
-)
-
-
 @dataclass(frozen=True)
 class ReducePlan:
     """The kernel's single reduce partition — the **tuned widths only**, coarse→fine.
@@ -488,34 +484,14 @@ class ReducePlan:
             stages.append(ReduceStage(Level.REG, reg))
         return cls(tuple(stages))
 
-    @classmethod
-    def parse(cls, spec: str | None) -> ReducePlan:
-        """Decode the ``REDUCE`` knob codec (the schedule's single reduce-partition knob,
-        decided in ``_schedule`` (inside ``010_recognize``)) into a plan: ``/``-separated level-named tokens,
-        coarse→fine — ``g<n>[a|k]`` (GRID cross-CTA split + finalize letter), ``b<n>[t]``
-        (BLOCK cooperative threads; ``t`` = the transposed k-major lane swap), ``r<n>``
-        (REG ILP fold). Empty / ``None`` = the scalar serial fold. (The ``serial`` remainder
-        is never spelled — it's derived as ``ceil(extent / parallel)``.) Ser/de routes
-        through :func:`decode` (``_REDUCE_SCHEMA``)."""
-        v = decode(_REDUCE_SCHEMA, spec)
-        width, finalize = v["g"]
-        coop, coop_mode = v["b"]
-        return cls.of(cta=width, coop=coop, reg=v["r"], finalize=finalize, coop_transposed=coop_mode == "transposed")
-
     def spell(self) -> str:
-        """The ``REDUCE`` codec string for this plan (inverse of :meth:`parse`); ``""`` for
-        the scalar serial fold. A GRID stage re-emits its finalize letter (``g<n>a`` /
-        ``g<n>k``); a transposed BLOCK stage its ``t``."""
-        mode = "transposed" if self.coop_transposed else "interleaved"
-        return encode(_REDUCE_SCHEMA, {"g": (self.cta, self.finalize), "b": (self.coop, mode), "r": self.reg})
-
-    def spell_site(self) -> str:
-        """The SITE-LOCAL ``REDUCE`` value (the step-7 value-grammar split): the pipeline
-        coarse→fine minus the coop WIDTH (= the ``WORK`` inventory) — ``[g<n>[a|k]][/coop[-t]]
-        [/r<n>]``. The GRID finalize letter is KEPT (a deliberate deviation from the plan's
-        re-spell table, which read it as an axis token: ``a``/``k`` is the atomic-vs-deferred
-        finalize MODE — ``g4a`` and ``g2k`` are semantically different rows, both live in the
-        golden corpus — and a mode is a site-local fact)."""
+        """The ``REDUCE`` codec value for this plan — the pipeline coarse→fine, SITE-LOCAL: the
+        coop WIDTH lives in the kernel's ``WORK`` inventory, never here, so the value is
+        ``[g<n>[a|k]][/coop[-t]][/r<n>]``. ``""`` for the scalar serial fold (the per-thread
+        serial remainder is never spelled — it derives as ``ceil(extent / parallel)``). The GRID
+        finalize letter IS kept: ``a``/``k`` is the atomic-vs-deferred finalize MODE, a site-local
+        fact — ``g4a`` and ``g2k`` are semantically different rows, both live in the golden
+        corpus."""
         parts: list[str] = []
         if self.cta > 1:
             parts.append(f"g{self.cta}{'a' if self.finalize == 'atomic' else 'k'}")
@@ -526,33 +502,28 @@ class ReducePlan:
         return "/".join(parts)
 
     @classmethod
-    def parse_site(cls, spec: str | None, work: Workers | None) -> ReducePlan:
-        """Decode a SITE-LOCAL ``REDUCE`` value against the kernel's ``WORK`` inventory (inverse
-        of :meth:`spell_site` — the coop width is ``work.count``, never the string). The legacy
-        width-carrying spelling (``b<n>[t]``) is accepted as a PIN ALIAS (its width must agree
-        with a thread ``work`` when both are given)."""
+    def parse(cls, spec: str | None, work: Workers | None) -> ReducePlan:
+        """Decode a ``REDUCE`` value against the kernel's ``WORK`` inventory (inverse of
+        :meth:`spell` — the coop width is ``work.count``, never the string). Empty / ``None`` =
+        the scalar serial fold. An unknown token raises, so a width-carrying spelling (the retired
+        ``b<n>`` embedded-worker grammar) is a loud error, not a silent second reading."""
         s = (spec or "").strip()
-        if "coop" not in s:
-            plan = cls.parse(spec)
-            if plan.coop > 1 and work is not None and (work.kind != "thread" or work.count != plan.coop):
-                raise ValueError(f"REDUCE {spec!r}: embedded coop width disagrees with WORK {work.spell() if work else None!r}")
-            return plan
         cta, coop, reg, finalize, transposed = 1, 1, 1, "kernel", False
-        for t in s.split("/"):
+        for t in s.split("/") if s else ():
             if t.startswith("g"):
                 body = t[1:]
                 if body.endswith(("a", "k")):
                     finalize = "atomic" if body[-1] == "a" else "kernel"
                     body = body[:-1]
-                cta = int(body)
+                cta = _codec_width(body, tok=t, codec="REDUCE")
             elif t in ("coop", "coop-t"):
                 if work is None or work.kind != "thread":
                     raise ValueError(f"REDUCE {spec!r}: 'coop' requires a thread WORK inventory (t<N>)")
                 coop, transposed = work.count, t.endswith("-t")
             elif t.startswith("r") and t[1:].isdigit():
-                reg = int(t[1:])
+                reg = _codec_width(t[1:], tok=t, codec="REDUCE")
             else:
-                raise ValueError(f"REDUCE {spec!r}: unknown site-local token {t!r}")
+                raise ValueError(f"REDUCE {spec!r}: unknown token {t!r} (expect g<n>[a|k] / coop[-t] / r<n>)")
         return cls.of(cta=cta, coop=coop, reg=reg, finalize=finalize, coop_transposed=transposed)
 
     @property
@@ -614,35 +585,12 @@ class ReducePlan:
         return None
 
 
-#: The scalar form of the ``TILE`` codec: ``n<N>[x<M>]`` (parallel thread-tile, n-then-m) and
-#: ``f<fn>[x<fm>]`` (register sub-tile) — no atom token.
-_TILE_SCALAR_SCHEMA = Schema(
-    "TILE",
-    (Field("n", FieldKind.TUPLE, arity=2), Field("f", FieldKind.TUPLE, arity=2)),
-    expect="expect n<N>[x<M>] / f<fn>[x<fm>]",
-)
-
-#: The warp form of the ``TILE`` codec: ``a:<atom>`` (required, the registered atom), ``w<WM>x<WN>``
-#: (warps m-then-n, always both dims), ``f<FM>x<FN>`` (register sub-tile), ``k<bk>`` (K-chunk,
-#: omitted at 1). ``a``/``w``/``f`` always spell; ``k`` only when > 1.
-_WARP_SCHEMA = Schema(
-    "WARP",
-    (
-        Field("a", FieldKind.NAME, required=True, emit=Emit.ALWAYS),
-        Field("w", FieldKind.TUPLE, arity=2, emit=Emit.ALWAYS, suppress_trailing=False),
-        Field("f", FieldKind.TUPLE, arity=2, emit=Emit.ALWAYS, suppress_trailing=False),
-        Field("k", FieldKind.TUPLE),
-    ),
-    expect="expect a:<atom> / w<WM>x<WN> / f<FM>x<FN> / k<bk>",
-)
-
-
 #: Pin-input aliases for the scalar tier — an explicit ``a:``-prefixed spelling of the (atom-less)
 #: scalar output tile, symmetric with the warp form's ``a:<atom>``. ``a:scalar`` names the scalar atom
 #: (:data:`~emmy.compiler.ir.atom.SCALAR_ATOM`'s name); ``a:none`` is an alias. **Pin vocabulary only**
-#: — a producer never emits these: :meth:`TilePlan.parse` normalizes them to the canonical scalar
-#: spelling (``""`` / ``n../f..``), so the alias never rides a stored knob dict. Lets a pin force the
-#: scalar tier explicitly instead of the invisible empty string.
+#: — a producer never emits these: :meth:`TilePlan.parse` strips them, so the alias never rides a
+#: stored knob dict. Lets a pin force the scalar tier explicitly instead of the invisible empty
+#: string.
 _SCALAR_ATOM_ALIASES = frozenset({"a:scalar", "a:none"})
 
 
@@ -659,17 +607,6 @@ def _strip_scalar_atom(spec: str | None) -> str:
     return "/".join(t for t in spec.split("/") if t.strip() not in _SCALAR_ATOM_ALIASES)
 
 
-def is_warp_codec(spec: str | None) -> bool:
-    """True iff a ``TILE`` codec value names a tensor-core atom (an ``a:<atom>`` token) — the **warp**
-    form, vs the scalar register sub-tile (``n../f..``). This is the single string-side discriminator
-    for the unified output-tile knob: a contraction's output tile is *either* the scalar fragment *or*
-    the warp mma tile, never both, and the value self-describes which. Empty / ``None`` (the per-cell
-    scalar baseline) is not warp. The explicit scalar-atom aliases (``a:scalar`` / ``a:none``) carry an
-    ``a:`` prefix but name the *scalar* atom, so they are **not** warp — the one ``a:``-prefixed
-    exception."""
-    return bool(spec) and any(t.strip().startswith("a:") and t.strip() not in _SCALAR_ATOM_ALIASES for t in spec.split("/"))
-
-
 @dataclass(frozen=True)
 class TilePlan:
     """The contraction's output tile — **one descriptor for both tiers**, discriminated by
@@ -684,42 +621,21 @@ class TilePlan:
     ``(FM, FN)`` (m-then-n), scalar ``(par_n, par_m)`` / ``(reg_n, reg_m)`` (n-then-m, the
     featurizer's inner/coalesced ``n`` vs outer ``m``); the :attr:`units_m` / :attr:`units_n` /
     :attr:`reg_m` / :attr:`reg_n` accessors normalize that order. Spelled by the unified ``TILE``
-    knob — the warp form ``a:<atom>/w<WM>x<WN>/f<FM>x<FN>/k<bk>`` or the scalar ``n<N>x<M>/f<fn>x<fm>``
-    (no atom token); :func:`is_warp_codec` discriminates string-side, :attr:`is_warp` on the object.
-    Decided in ``_schedule`` (inside ``010_recognize``)."""
+    knob — the warp form ``<atom>/f<FM>x<FN>[/k<bk>]`` or the scalar ``f<fn>[x<fm>]``; the unit
+    widths ride the kernel's ``WORK`` inventory, so :meth:`parse` needs it and :attr:`is_warp`
+    discriminates the tier on the object. Decided in ``_schedule`` (inside ``010_recognize``)."""
 
     atom: Atom = SCALAR_ATOM
     units: tuple[int, int] = (1, 1)  # warp (WM, WN) m-then-n / scalar (par_n, par_m) n-then-m
     regs: tuple[int, int] = (1, 1)  # warp (FM, FN) m-then-n / scalar (reg_n, reg_m) n-then-m
     bk: int = 1  # K-chunk per inner mma step, in atom_k units (mma only; 1 for scalar)
 
-    @classmethod
-    def parse(cls, spec: str | None) -> TilePlan:
-        """Decode the unified ``TILE`` knob into a tile: the warp form (``a:<atom>/w../f../k..``) →
-        an mma tile, or the scalar form (``n../f..``, no atom token) → a scalar register sub-tile
-        (``atom`` defaults to the scalar atom). Empty / ``None`` = the per-cell tier. The pin-only
-        scalar-atom aliases ``a:scalar`` / ``a:none`` (an explicit ``a:``-prefixed spelling of the
-        scalar tier, symmetric with ``a:<mma-atom>``) are stripped and the remainder decoded as scalar
-        — ``a:scalar`` alone → per-cell, ``a:scalar/f4x8`` → a register-tiled scalar. Ser/de routes
-        through :func:`decode`; :meth:`spell` re-emits the canonical scalar form, never the alias."""
-        if is_warp_codec(spec):
-            v = decode(_WARP_SCHEMA, spec)
-            return cls(atom=v["a"], units=v["w"], regs=v["f"], bk=v["k"])
-        v = decode(_TILE_SCALAR_SCHEMA, _strip_scalar_atom(spec))
-        return cls(units=v["n"], regs=v["f"])
-
     def spell(self) -> str:
-        """The ``TILE`` codec string for this tile (inverse of :meth:`parse`); ``""`` for the
-        per-cell tier. The warp form when :attr:`atom` is a tensor-core atom, else the scalar form."""
-        if self.is_warp:
-            return encode(_WARP_SCHEMA, {"a": self.atom, "w": self.units, "f": self.regs, "k": self.bk})
-        return encode(_TILE_SCALAR_SCHEMA, {"n": self.units, "f": self.regs})
-
-    def spell_site(self) -> str:
-        """The SITE-LOCAL ``TILE`` value (the step-7 value-grammar split): the worker tokens live
-        in the kernel-global ``WORK`` family, so the warp form is ``<atom>/f<FM>x<FN>[/k<bk>]``
-        (the atom name bare — the tier discriminator IS the worker kind, never a per-TILE
-        spelling) and the scalar form ``f<fn>[x<fm>]`` (``""`` for the per-cell tier)."""
+        """The ``TILE`` codec value for this tile — SITE-LOCAL: the worker tokens live in the
+        kernel-global ``WORK`` family, so the warp form is ``<atom>/f<FM>x<FN>[/k<bk>]`` (the atom
+        name bare — the tier discriminator IS the worker kind, never a per-``TILE`` spelling) and
+        the scalar form ``f<fn>[x<fm>]`` (``""`` for the per-cell tier). Never the pin-only
+        ``a:scalar`` alias."""
         if self.is_warp:
             k = f"/k{self.bk}" if self.bk > 1 else ""
             return f"{self.atom.name}/f{self.regs[0]}x{self.regs[1]}{k}"
@@ -728,44 +644,43 @@ class TilePlan:
         return f"f{self.regs[0]}" if self.regs[1] == 1 else f"f{self.regs[0]}x{self.regs[1]}"
 
     @classmethod
-    def parse_site(cls, spec: str | None, work: Workers | None) -> TilePlan:
-        """Decode a SITE-LOCAL ``TILE`` value against the kernel's ``WORK`` inventory (inverse of
-        :meth:`spell_site` — the units come from ``work``, never the string). The legacy
-        embedded-token spellings (``a:<atom>/w../f..``, ``n../f..``) are accepted as PIN ALIASES
-        and decode self-contained (their worker tokens must agree with ``work`` when both are
-        given — the loud one-inventory rule)."""
-        s = (spec or "").strip()
-        first = s.split("/", 1)[0]
-        legacy = not s or is_warp_codec(s) or has_scalar_atom_alias(s) or first[:1] in ("n", "w") or first.startswith("a:")
-        if legacy and not (first.startswith("f") and first[1:2].isdigit()):
-            plan = cls.parse(spec)
-            if work is not None and plan.is_tiled and tuple(plan.units) != tuple(work.units):
-                raise ValueError(f"TILE {spec!r}: embedded worker tokens disagree with WORK {work.spell()!r} — one kernel, one inventory")
-            return plan
+    def parse(cls, spec: str | None, work: Workers | None) -> TilePlan:
+        """Decode a ``TILE`` value against the kernel's ``WORK`` inventory (inverse of
+        :meth:`spell` — the unit widths come from ``work``, never the string): the warp form
+        ``<atom>/f<FM>x<FN>[/k<bk>]`` or the scalar ``f<fn>[x<fm>]``. Empty / ``None`` is the
+        per-cell tier — beside a thread inventory it can also be the unit-register thread tile,
+        the ONE ambiguity :func:`resolve_site_tile` resolves. The pin-only ``a:scalar`` /
+        ``a:none`` aliases (an explicit spelling of the scalar tier) are stripped first, so
+        ``a:scalar`` alone is per-cell and ``a:scalar/f4x8`` a register-tiled scalar. An unknown
+        token raises, so the retired embedded-worker spellings (``a:<atom>/w../f..``, ``n../f..``)
+        are a loud error, not a silent second reading."""
+        s = _strip_scalar_atom((spec or "").strip()).strip("/").strip()
+        if not s:
+            return cls()
         tokens = s.split("/")
-        atom_tok = tokens[0] if tokens and not tokens[0].startswith(("f", "k")) else None
         units = tuple(work.units) if work is not None else (1, 1)
-        if atom_tok is not None:
+        atom = None
+        if not tokens[0].startswith(("f", "k")):
+            try:  # a non-atom leading token is a retired ``n<N>x<M>`` / ``a:<atom>`` spelling
+                atom = atom_for(tokens[0])
+            except ValueError as e:
+                raise ValueError(f"TILE {spec!r}: {e}") from None
             if work is None or work.kind != "warp":
                 raise ValueError(f"TILE {spec!r}: a warp atom requires a warp WORK inventory (w<M>x<N>)")
-            regs, bk = (1, 1), 1
-            for t in tokens[1:]:
-                if t.startswith("f"):
-                    d = t[1:].split("x")
-                    regs = (int(d[0]), int(d[1]) if len(d) == 2 else 1)
-                elif t.startswith("k") and t[1:].isdigit():
-                    bk = int(t[1:])
-                else:
-                    raise ValueError(f"TILE {spec!r}: unknown site-local token {t!r}")
-            return cls(atom=atom_for(atom_tok), units=units, regs=regs, bk=bk)
-        regs = (1, 1)
+            tokens = tokens[1:]
+        regs, bk = (1, 1), 1
         for t in tokens:
-            if t.startswith("f"):
+            if t.startswith("f") and t[1:2].isdigit():
                 d = t[1:].split("x")
-                regs = (int(d[0]), int(d[1]) if len(d) == 2 else 1)
+                if len(d) > 2:
+                    raise ValueError(f"bad TILE token {t!r}: expected ≤2 dims, got {len(d)}")
+                widths = [_codec_width(x, tok=t, codec="TILE") for x in d]
+                regs = (widths[0], widths[1] if len(widths) == 2 else 1)
+            elif atom is not None and t.startswith("k") and t[1:].isdigit():
+                bk = _codec_width(t[1:], tok=t, codec="TILE")
             else:
-                raise ValueError(f"TILE {spec!r}: unknown site-local token {t!r}")
-        return cls(units=units, regs=regs)
+                raise ValueError(f"TILE {spec!r}: unknown token {t!r} (expect [<atom>/]f<fn>[x<fm>][/k<bk>])")
+        return cls(units=units, regs=regs) if atom is None else cls(atom=atom, units=units, regs=regs, bk=bk)
 
     @property
     def is_warp(self) -> bool:
@@ -876,18 +791,17 @@ class Workers:
 
 
 def resolve_site_tile(spec: str | None, work: Workers | None, reduce_spec: str | None = "") -> TilePlan:
-    """The :class:`TilePlan` a SITE-grammar row denotes — :meth:`TilePlan.parse_site` plus the ONE
-    ambiguity rule the site spelling has: an EMPTY ``TILE`` beside a THREAD ``WORK`` inventory is
-    the unit-register parallel thread tile (legacy ``n<N>x<M>`` with no ``f`` sub-tile — its site
-    half spells ``""``), UNLESS the row's ``REDUCE`` value claims the threads as a cooperative
-    band (a ``coop`` token, or a legacy ``b<n>`` width) — then ``TILE`` stays the per-cell tier.
-    Every reader that reconstructs a plan from a row (the scheduler's materialize, the
-    featurizers) resolves through this one rule."""
-    plan = TilePlan.parse_site(spec, work)
+    """The :class:`TilePlan` a row denotes — :meth:`TilePlan.parse` plus the ONE ambiguity the
+    site spelling has: an EMPTY ``TILE`` beside a THREAD ``WORK`` inventory is the unit-register
+    parallel thread tile (a tile whose register sub-tile is ``f1x1`` spells ``""``), UNLESS the
+    row's ``REDUCE`` value claims those threads as a cooperative band (a ``coop`` token) — then
+    ``TILE`` stays the per-cell tier. Every reader that reconstructs a plan from a row (the
+    scheduler's materialize, the featurizers) resolves through this one rule."""
+    plan = TilePlan.parse(spec, work)
     if (spec or "").strip() or work is None or work.kind != "thread":
         return plan
     try:
-        red = ReducePlan.parse_site(reduce_spec, work)
+        red = ReducePlan.parse(reduce_spec, work)
     except ValueError:
         return plan
     if red.coop > 1:
@@ -1190,6 +1104,5 @@ __all__ = [
     "encode",
     "field_default",
     "has_scalar_atom_alias",
-    "is_warp_codec",
     "role_for",
 ]

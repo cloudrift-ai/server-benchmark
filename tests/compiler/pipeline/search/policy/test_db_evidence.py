@@ -20,11 +20,13 @@ def _index_of(*measured: tuple[dict, float], deployable: bool = True) -> dict:
 
 
 def test_db_pick_prefers_measured_min_over_unmeasured():
-    index = _index_of(({"TILE": "n16x8/f4x8", "REDUCE": "g2a"}, 47.1), ({"TILE": "n32x8/f4x8", "REDUCE": "g8k"}, 51.7))
+    index = _index_of(
+        ({"TILE": "f4x8", "WORK": "t16x8", "REDUCE": "g2a"}, 47.1), ({"TILE": "f4x8", "WORK": "t32x8", "REDUCE": "g8k"}, 51.7)
+    )
     rows = [
-        {**_SIG, "TILE": "n32x8/f4x8", "REDUCE": "g8k"},  # the model's would-be argmax
-        {**_SIG, "TILE": "n16x8/f4x8", "REDUCE": "g2a"},  # the measured-fastest config
-        {**_SIG, "TILE": "n64x16/f4x4", "REDUCE": ""},  # unmeasured — no evidence
+        {**_SIG, "TILE": "f4x8", "WORK": "t32x8", "REDUCE": "g8k"},  # the model's would-be argmax
+        {**_SIG, "TILE": "f4x8", "WORK": "t16x8", "REDUCE": "g2a"},  # the measured-fastest config
+        {**_SIG, "TILE": "f4x4", "WORK": "t64x16", "REDUCE": ""},  # unmeasured — no evidence
     ]
     got = _db_measured_pick(index, rows)
     assert got is not None
@@ -33,8 +35,8 @@ def test_db_pick_prefers_measured_min_over_unmeasured():
 
 
 def test_db_pick_requires_signature_match():
-    index = _index_of(({"TILE": "n16x8/f4x8"}, 10.0))
-    other_shape = {"S_ext_free_prod": 512.0, "S_dtype_f32": 1.0, "TILE": "n16x8/f4x8"}
+    index = _index_of(({"TILE": "f4x8", "WORK": "t16x8"}, 10.0))
+    other_shape = {"S_ext_free_prod": 512.0, "S_dtype_f32": 1.0, "TILE": "f4x8", "WORK": "t16x8"}
     assert _db_measured_pick(index, [other_shape]) is None
 
 
@@ -44,16 +46,16 @@ def test_db_pick_tolerates_signature_vocabulary_drift():
     must match on the shared ``S_*`` keys, or one added feature silently disables the
     whole evidence lane against every existing DB (the ninth-4090-sweep `mlp_gate_up`
     misdeploy: the model's pick beat a measured-faster config the strict join hid)."""
-    index = _index_of(({"TILE": "n16x8/f4x8", "REDUCE": "g2a"}, 47.1))
-    drifted = {**_SIG, "S_warp_eligible": 1.0, "TILE": "n16x8/f4x8", "REDUCE": "g2a"}
+    index = _index_of(({"TILE": "f4x8", "WORK": "t16x8", "REDUCE": "g2a"}, 47.1))
+    drifted = {**_SIG, "S_warp_eligible": 1.0, "TILE": "f4x8", "WORK": "t16x8", "REDUCE": "g2a"}
     assert _db_measured_pick(index, [drifted]) == (0, 47.1)
 
 
 def test_db_pick_drift_tolerance_still_separates_shapes():
     """Shared-key agreement still rejects a different shape: the extent keys are on
     both sides, so drift tolerance never crosses shapes."""
-    index = _index_of(({"TILE": "n16x8/f4x8"}, 10.0))
-    other = {"S_ext_free_prod": 512.0, "S_dtype_f32": 1.0, "S_warp_eligible": 1.0, "TILE": "n16x8/f4x8"}
+    index = _index_of(({"TILE": "f4x8", "WORK": "t16x8"}, 10.0))
+    other = {"S_ext_free_prod": 512.0, "S_dtype_f32": 1.0, "S_warp_eligible": 1.0, "TILE": "f4x8", "WORK": "t16x8"}
     assert _db_measured_pick(index, [other]) is None
 
 
@@ -94,9 +96,9 @@ def test_db_index_reads_the_o3_twin_as_deployable(tmp_path):
 def test_db_pick_prefix_consistency_frees_undecided_knobs():
     # The measured row carries a STAGE the candidate hasn't decided — still a match
     # (value-of-position semantics); a *conflicting* decided knob is not.
-    index = _index_of(({"TILE": "n16x8/f4x8", "STAGE": "d2/tma/ring"}, 20.0))
-    undecided = {**_SIG, "TILE": "n16x8/f4x8"}
-    conflicting = {**_SIG, "TILE": "n16x8/f4x8", "STAGE": "d4/tma/ring"}
+    index = _index_of(({"TILE": "f4x8", "WORK": "t16x8", "STAGE": "d2/tma/ring"}, 20.0))
+    undecided = {**_SIG, "TILE": "f4x8", "WORK": "t16x8"}
+    conflicting = {**_SIG, "TILE": "f4x8", "WORK": "t16x8", "STAGE": "d4/tma/ring"}
     assert _db_measured_pick(index, [undecided]) == (0, 20.0)
     assert _db_measured_pick(index, [conflicting]) is None
 
@@ -116,10 +118,10 @@ def test_db_index_reads_the_o1_tune_twin_context(tmp_path):
         backend="cuda",
         status="ok",
         stats=stats,
-        knobs={**_SIG, "TILE": "n16x8/f4x8", "REDUCE": "g2a"},
+        knobs={**_SIG, "TILE": "f4x8", "WORK": "t16x8", "REDUCE": "g2a"},
     )
     index = _db_measured_index(db, ctx_deploy)
-    rows = [{**_SIG, "TILE": "n16x8/f4x8", "REDUCE": "g2a"}]
+    rows = [{**_SIG, "TILE": "f4x8", "WORK": "t16x8", "REDUCE": "g2a"}]
     assert _db_measured_pick(index, rows) == (0, 47.1)
 
 
@@ -127,7 +129,9 @@ def test_db_index_skips_failed_rows(tmp_path):
     ctx = Context.from_target((12, 0))
     db = SearchDB(path=tmp_path / "tune.db")
     stats = PerfStats(median=2e6, min=2e6, max=2e6, mean=2e6, variance=0.0, n_samples=1)
-    db.record_perf(ctx.structural_key(), "op-key-1", backend="cuda", status="bench_fail", stats=stats, knobs={**_SIG, "TILE": "n16x8/f4x8"})
+    db.record_perf(
+        ctx.structural_key(), "op-key-1", backend="cuda", status="bench_fail", stats=stats, knobs={**_SIG, "TILE": "f4x8", "WORK": "t16x8"}
+    )
     assert _db_measured_index(db, ctx) == {}
 
 
@@ -171,15 +175,18 @@ def test_disjoint_evidence_warns(caplog):
 
     from emmy.compiler.pipeline.search.policy.greedy import _warn_disjoint_evidence
 
-    index = _index_of(({"TILE": "a:mma_m16n8k16_f16/w2x2/f4x8", "REDUCE": "g2k"}, 225.2))
-    scalar_only = [{**_SIG, "TILE": "n32x8/f4x14", "REDUCE": "g2k"}, {**_SIG, "TILE": "n16x16/f4x8", "REDUCE": "b256"}]
+    index = _index_of(({"TILE": "mma_m16n8k16_f16/f4x8", "WORK": "w2x2", "REDUCE": "g2k"}, 225.2))
+    scalar_only = [
+        {**_SIG, "TILE": "f4x14", "WORK": "t32x8", "REDUCE": "g2k"},
+        {**_SIG, "TILE": "f4x8", "WORK": "t16x16", "REDUCE": "coop"},
+    ]
     assert _db_measured_pick(index, scalar_only) is None
     with caplog.at_level(logging.WARNING):
         _warn_disjoint_evidence(index, scalar_only, "linear_3")
     assert any("measured a schedule tier" in r.message for r in caplog.records)
 
     caplog.clear()
-    cold = [{"S_ext_free_prod": 99.0, "TILE": "n32x8/f4x14"}]
+    cold = [{"S_ext_free_prod": 99.0, "TILE": "f4x14", "WORK": "t32x8"}]
     with caplog.at_level(logging.WARNING):
         _warn_disjoint_evidence(index, cold, "linear_3")
     assert not caplog.records, "a cold signature (no evidence at all) must stay silent"

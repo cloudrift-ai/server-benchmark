@@ -316,6 +316,7 @@ def test_flash_chain_pin_selects_chain_on_warp_eligible_shape(monkeypatch):
     # vars with overwrite=False, so a var another test already set (or left behind) would win over
     # this test's aggregate under xdist; monkeypatch on the individual vars reverts cleanly.
     monkeypatch.setenv("EMMY_TILE", "a:scalar")
+    monkeypatch.setenv("EMMY_WORK", "w1x1")
     monkeypatch.setenv("EMMY_TILE@PJ", "f64")
     monkeypatch.setenv("EMMY_REDUCE", "")
     torch.manual_seed(0)
@@ -488,7 +489,8 @@ def test_bare_sibling_pin_selects_the_f16acc_pv_plan(monkeypatch, dynamic):
     from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
     from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
 
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f16/w2x1/f1x8/k2")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f16/f1x8/k2")
+    monkeypatch.setenv("EMMY_WORK", "w2x1")
     q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
     seq = torch.export.Dim("seq_len", min=4, max=4096)
     ds = {"q": {2: seq}, "k": {2: seq}, "v": {2: seq}} if dynamic else None
@@ -591,6 +593,7 @@ def test_readable_scalar_chain_fold_matches_torch(monkeypatch):
     while a multi-use temp (``m_i__t0``, read by two subtracts) stays named. SASS-identical, so it
     still matches torch. ``--no-readable`` (the default off) keeps the SSA ladder."""
     monkeypatch.setenv("EMMY_TILE", "a:scalar")
+    monkeypatch.setenv("EMMY_WORK", "w1x1")
     monkeypatch.setenv("EMMY_READABLE", "1")
     torch.manual_seed(7)
     q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
@@ -668,7 +671,8 @@ def test_staged_warp_flash_bit_identical_to_gmem_direct(monkeypatch, stage):
     output is BIT-identical to its gmem-direct sibling on the same inputs and geometry."""
     torch.manual_seed(11)
     q, k, v = (torch.randn(1, 4, 128, 64, dtype=torch.float16) for _ in range(3))
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x1/f1x4/k4")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f1x4/k4")
+    monkeypatch.setenv("EMMY_WORK", "w2x1")
     backend, compiled, graph, _ = _compile_tc(q, k, v)
     base = _run_flash(backend, compiled, graph, (q, k, v))
     monkeypatch.setenv("EMMY_STAGE", stage)
@@ -766,7 +770,8 @@ def test_staged_flash_symbolic_cp_bit_identical_to_gmem_direct(monkeypatch, s):
     the tail chunk's clamped (duplicated) key rows land on P columns the drain masks to exactly 0 —
     so the staged output is BIT-identical to gmem-direct at both a block-divisible (64) and an
     overhanging (100) seq. The cp.async counterpart of the TMA twin above."""
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x1/f1x4/k4")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f1x4/k4")
+    monkeypatch.setenv("EMMY_WORK", "w2x1")
     B, H, D = 1, 4, 64
     sd = torch.export.Dim("seq_len", min=4, max=4096)
     seed = tuple(torch.randn(B, H, 16, D, dtype=torch.float16) for _ in range(3))
@@ -842,7 +847,8 @@ def test_staged_flash_symbolic_tma_bit_identical_to_gmem_direct(monkeypatch, s):
     box zero-fill of the overhang lands on keys the drain masks to the fold identity — the same
     clamp the gmem-direct symbolic path makes — so the staged output is BIT-identical to gmem-direct
     at both a block-divisible (64) and an overhanging (100) seq."""
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x1/f1x4/k4")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f1x4/k4")
+    monkeypatch.setenv("EMMY_WORK", "w2x1")
     B, H, D = 1, 4, 64
     sd = torch.export.Dim("seq_len", min=4, max=4096)
     seed = tuple(torch.randn(B, H, 16, D, dtype=torch.float16) for _ in range(3))
@@ -1016,7 +1022,8 @@ def test_warp_flash_alt_staging_symbolic_bit_identical(monkeypatch, variant, sta
     kernel is BIT-identical to its gmem-direct symbolic sibling at both a block-divisible (64)
     and an overhanging (100) seq; the causal case composes the ``k_end`` early stop with the
     symbolic clamp."""
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16/w2x1/f1x4/k4")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f1x4/k4")
+    monkeypatch.setenv("EMMY_WORK", "w2x1")
     B, H, D = 1, 4, 64
     sd = torch.export.Dim("seq_len", min=4, max=4096)
     seed = tuple(torch.randn(B, H, 16, D, dtype=torch.float16) for _ in range(3))
@@ -1808,7 +1815,8 @@ def test_warp_flash_f32_value_operand_converts(monkeypatch):
     atom-dtype operand and the pinned cp.async ring RESOLVES (the pre-split behavior fused
     the cast into the flash load, and the f32 buffer declined every staged row —
     gmem-direct forever, the gemma layer-0 lockout)."""
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w2x1/f1x4/k4")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f1x4/k4")
+    monkeypatch.setenv("EMMY_WORK", "w2x1")
     monkeypatch.setenv("EMMY_STAGE", "d2/cp/ring")  # resolves: the split-out cast feeds f16 V
     monkeypatch.setenv("EMMY_WSPEC", "")
     torch.manual_seed(5)
@@ -1860,7 +1868,8 @@ def test_warp_flash_explicit_additive_mask_matches_torch(monkeypatch, stage):
     absolute coordinates and adds it before the softmax merge — instead of demoting the whole
     kernel to the scalar tier (the gemma-4 seq>window regression: every layer's attention went
     scalar and hung). Banded (sliding-window) mask; composes with the K/V staging forms."""
-    monkeypatch.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w2x1/f1x4/k4")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f1x4/k4")
+    monkeypatch.setenv("EMMY_WORK", "w2x1")
     monkeypatch.setenv("EMMY_WSPEC", "")
     if stage:
         monkeypatch.setenv("EMMY_STAGE", stage)

@@ -27,19 +27,19 @@ from emmy.compiler.pipeline.passes.lowering.tile._schedule import _demote_mixed_
 _M, _N, _K = Axis("m", 128), Axis("n", 128), Axis("k", 64)
 
 
-def _placed(tile: str = "n2/f2") -> Placed:
+def _placed(tile: TilePlan | None = None) -> Placed:
     node = Contraction(
         k_axis=_K,
         a=Load(name="a", input="A", index=(Var("m"), Var("k"))),
         channels=(Channel(b=Load(name="b", input="B", index=(Var("k"), Var("n"))), acc="acc"),),
     )
-    return place(node, _M, _N, (), tile=TilePlan.parse(tile))
+    return place(node, _M, _N, (), tile=tile or TilePlan(units=(2, 1), regs=(2, 1)))
 
 
 def test_the_node_carries_no_placement_or_schedule() -> None:
     """The invariant the view exists to keep: a contraction's identity is its algebra, so the
     same node under two tiles is ONE term."""
-    p1, p2 = _placed("n2/f2"), _placed("n4/f4")
+    p1, p2 = _placed(TilePlan(units=(2, 1), regs=(2, 1))), _placed(TilePlan(units=(4, 1), regs=(4, 1)))
     assert p1.node == p2.node and hash(p1.node) == hash(p2.node)
     assert not hasattr(p1.node, "tile") and not hasattr(p1.node, "axes")
     assert p1.block_threads != p2.block_threads  # the geometry is the VIEW's

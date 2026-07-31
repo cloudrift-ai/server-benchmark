@@ -23,7 +23,8 @@ def _compile_chain(n: int):
     # Per-knob vars, NOT EMMY_KNOBS: the aggregate splat runs at knob-module IMPORT time, long
     # before this fixture — and calling apply_knobs_env here would write env keys monkeypatch
     # never cleans up.
-    mp.setenv("EMMY_TILE", "a:mma_m16n8k16_f16_f32/w1x8/f2x2/k4")
+    mp.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k4")
+    mp.setenv("EMMY_WORK", "w1x8")
     mp.setenv("EMMY_REDUCE", "g4a")
     mp.setenv("EMMY_RASTER", "")
     mp.setenv("EMMY_WSPEC", "")

@@ -415,8 +415,8 @@ edge + its `Channel`s and nothing more, so a node's `==` / `hash` / `ops.term_ke
 differing only in tile key identically, and no emission path can leak a schedule into a stored term. The placement +
 schedule a tier needs is bound to the node at the point of use as a lowering-side view
 (`passes/lowering/_placed.Placed`, the `_reduction.Reduction` pattern): it holds the `(m, n)` output axes, the
-`lead_axes`, the `TilePlan` / `Stage` and the `Side` geometry derived from them, and proxies every algebra read
-through to the node. The `Kernel` / `TileSchedule` wrapper is gone. A kernel's structure is read
+`TilePlan` / `Stage` and the `Side` geometry derived from them — the tiled CELL's reading — and proxies every
+algebra read through to the node. The `Kernel` / `TileSchedule` wrapper is gone. A kernel's structure is read
 structurally off the node (`ops.axis_role` — the contraction IS the `Contraction` kind; a fold's role derives),
 not a bespoke Python type per schedule.
 

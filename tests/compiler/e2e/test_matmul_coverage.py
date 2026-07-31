@@ -968,7 +968,7 @@ def _mma_qk_graph(B: int, H: int, M: int, N: int, D: int):
 def test_mma_batched_qk_matches_torch(B, H, M, N, D, monkeypatch):
     """The shared contraction codegen tiles a **batched transposed-B** Q@Kᵀ (flash's score shape:
     leading ``(b, h)`` axes + ``b_trans``) onto ``mma.sync`` and agrees with torch — the reuse seam
-    the warp-flash materializer rides (a ``Contraction`` whose ``lead_axes`` carry the batch dims)."""
+    the warp-flash materializer rides (a ``Contraction`` placed under leading batch grid axes)."""
     import torch  # noqa: PLC0415
 
     _pin_tile(monkeypatch, _WARP_PIN)

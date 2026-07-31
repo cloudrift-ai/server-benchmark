@@ -685,16 +685,18 @@ def _scalar_bound(mn, offset, i: int, j: int):
     return cond
 
 
-def _scalar_protected(c: Placed) -> frozenset[str]:
+def _scalar_protected(c: Placed, lead: tuple = ()) -> frozenset[str]:
     """The shared iteration coordinates — the block / unit / loop / extent vars excluded from the
-    per-cell SSA rename (everything else is suffixed ``__c{i}_{j}`` so each cell owns its names)."""
+    per-cell SSA rename (everything else is suffixed ``__c{i}_{j}`` so each cell owns its names).
+    ``lead`` is the kernel's leading (batch / ksplit) grid axes: one coordinate for the whole cell
+    block, so renaming one would emit a reference no enclosing loop defines."""
     m, n, k_axis = c.m, c.n, c.k_axis
     prot = {k_axis.name}
     for s in (m, n):
         prot |= {s.block, s.unit}
-    for a in c.lead_axes:
+    for a in lead:
         prot.add(a.name)
-    for a in (m.axis, n.axis, k_axis, *c.lead_axes):
+    for a in (m.axis, n.axis, k_axis, *lead):
         prot |= set(a.extent_expr().free_vars())
     return frozenset(prot)
 
@@ -751,6 +753,11 @@ class _AtomOps:
     stage: Stage | None = None
     inputs: object = None
     workers: object = None  # the resolved WarpSpec (None = uniform SIMT) — consumed by _staged
+    # The kernel's LEADING (batch / ksplit) grid axes — the coordinates shared by every register
+    # cell, so the per-cell rename must pass them through (:func:`_scalar_protected`). They come
+    # from the caller that owns the grid (``_factor._bind``), not off the ``Placed`` view: the view
+    # reads the tiled ``(m, n)`` cell, and what sits outside it is the grid's fact.
+    lead: tuple = ()
     # The projection this node's store folds in — the wrapping ``Map``'s body plus the grid-``Write``
     # glue, assembled by ``_factor._bind``. It is NOT a node field: every projection has ONE home,
     # the ``Map`` wrapper, and the store sink is where it lands.
@@ -1051,7 +1058,7 @@ class _ScalarOps(_AtomOps):
         assert len(self.channels) == 1, "the scalar tier is single-fold — a multi-B node rides the warp sync compute-fill"
         k_axis = c.k_axis
         m, n = mn
-        prot = _scalar_protected(c)
+        prot = _scalar_protected(c, self.lead)
         b_name, a_name = c.b_name, c.a_name
 
         def read_row(i):
@@ -1079,32 +1086,34 @@ class _ScalarOps(_AtomOps):
         the (overhanging) write, dedup shared operand loads."""
         c = self.c
         sigma = _scalar_sigma(mn, offset, i, j)
-        cell = copy_cell(self.epilogue, sigma, f"__c{i}_{j}", _scalar_protected(c))
+        cell = copy_cell(self.epilogue, sigma, f"__c{i}_{j}", _scalar_protected(c, self.lead))
         cell = _guard_writes(cell, _scalar_bound(mn, offset, i, j))
         return _dedup_loads(cell)
 
 
-def _atom_ops(c: Placed, stage: Stage | None = None, inputs=None, workers=None, epilogue: Body | None = None, seam=None) -> _AtomOps:
+def _atom_ops(
+    c: Placed, stage: Stage | None = None, inputs=None, workers=None, epilogue: Body | None = None, seam=None, lead: tuple = ()
+) -> _AtomOps:
     """The **one** atom dispatch — select the codegen strategy off the atom kind."""
     cls = _MmaOps if isinstance(c.atom, AtomKind) else _ScalarOps
-    return cls(c, stage, inputs, workers, Body(()) if epilogue is None else epilogue, seam)
+    return cls(c, stage, inputs, workers, lead, Body(()) if epilogue is None else epilogue, seam)
 
 
-def reduce_codegen(c: Placed, stage: Stage | None = None, inputs=None, workers=None, seam=None):
+def reduce_codegen(c: Placed, stage: Stage | None = None, inputs=None, workers=None, seam=None, lead: tuple = ()):
     """The reusable, **sink-agnostic** ``(state_decls, reduce_region)`` from the atom strategy — the
     accumulator decls + the contraction K-loop (the ONE :meth:`_AtomOps.reduce` driver: the shared
     :func:`_contract_kloop` spine gmem-direct, the shared :func:`_staged` fill→drain skeleton staged).
     ``stage`` / ``inputs`` bind operand staging (both atoms stage the same smem slab off it, differing
     only in the drain leaf — ``ldmatrix`` vs plain ``Load``); ``workers`` splits the staged phases
     across producer / compute warp bands (the resolved :class:`WarpSpec`; ``None`` = uniform)."""
-    ops = _atom_ops(c, stage, inputs, workers, seam=seam)
+    ops = _atom_ops(c, stage, inputs, workers, seam=seam, lead=lead)
     return ops.state, ops.reduce
 
 
-def store_sink(c: Placed, epilogue: Body | None = None):
+def store_sink(c: Placed, epilogue: Body | None = None, lead: tuple = ()):
     """The default **matmul sink** — the per-cell ``store(i, j, offset, mn)`` from the atom strategy
     (an mma ``RegStore`` / the replicated scalar ``epilogue`` tail), folding in the ``epilogue`` (the
     projection off the node's ``Map`` wrapper + the store glue). ``factorize(c, store=…)`` swaps the
     sink (a flash sink that bridges the accumulator into the streaming-softmax twist), reusing the
     shared ``reduce`` emission."""
-    return _atom_ops(c, epilogue=epilogue).store
+    return _atom_ops(c, epilogue=epilogue, lead=lead).store

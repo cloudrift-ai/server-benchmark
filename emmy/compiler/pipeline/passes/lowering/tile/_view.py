@@ -8,14 +8,13 @@ node itself is built at fork-emit) and the flash streaming pair (:func:`twisted_
 pure readings: they take an op tree + a placement and return views, deciding no schedule and
 stamping no ``TileOp`` — that stays with ``_schedule``, their one caller.
 
-A schedule-side view binds only the members the schedule READS — the node, the ``(m, n)`` output
-axes and the candidate ``TilePlan``. It binds NO ``lead_axes`` and NO ``stage``: the schedule's
-legality gates (the smem slot sizing, the N-mask / TMA-box refusals, the block-thread limit) are
-functions of the tiled cell alone, and both of those members are the MATERIALIZER's binding —
-``_factor`` rebuilds its own view off the KERNEL grid, which for a split partial is not the
-pre-split grid a probe here saw (the ``ksplit`` axis is introduced by the split option), and the
-resolved ``Stage`` is a schedule RESULT that rides ``TileOp.schedule``, never the probe. So the
-empty defaults are the honest reading on this path, not a dropped fact.
+A view is the TILED CELL's reading — the node, the ``(m, n)`` output axes and a ``TilePlan``. The
+schedule's legality gates (the smem slot sizing, the N-mask / TMA-box refusals, the block-thread
+limit) are functions of that cell alone, so a probe built here binds nothing else: the resolved
+``Stage`` is the schedule's own RESULT (it lands in ``TileOp.schedule``, not in the probe that
+judged it), and the kernel's leading grid axes are the GRID's fact, threaded at materialize by the
+caller that holds one — ``_factor``, whose grid for a split partial is not the pre-split grid a
+probe here ever saw (the ``ksplit`` axis is introduced by the split option).
 
 They live apart from ``_schedule`` because the placement conventions they encode (a root kernel's
 output cell is the trailing grid pair, the leading axes ride untiled; a flash consumer supplies the

@@ -417,11 +417,11 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
     grid = tuple(ctx.grid)
     if isinstance(op, Contraction) and ctx.sched.tile_of(op) is not None and len(grid) >= 2:
         # The STORED node is pure algebra; the tiled reading is STAMPED here — its output axes the
-        # kernel grid's trailing pair (a split partial's ksplit rides the leading grid, so the lead
-        # axes fall out of the same read) and its tile / stage the schedule slices. A stored node
-        # WITHOUT a TILE slice keeps ``axes=None`` and takes the reduce tiers below (the per-cell /
-        # coop-K forms).
-        op = place_view(op, grid[-2], grid[-1], tuple(grid[:-2]), tile=ctx.sched.tile_of(op), stage=ctx.sched.stage_of(op))
+        # kernel grid's trailing pair, its tile / stage the schedule slices. Everything OUTSIDE that
+        # cell (the leading batch / ksplit grid axes) stays the grid's own fact, read off ``grid``
+        # below. A stored node WITHOUT a TILE slice takes the reduce tiers instead (the per-cell /
+        # coop-K forms), where the whole grid rides untiled.
+        op = place_view(op, grid[-2], grid[-1], tile=ctx.sched.tile_of(op), stage=ctx.sched.stage_of(op))
     if isinstance(op, Placed):
         epi = list(tail)
         if not has_write(epi):
@@ -430,10 +430,14 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
         # The cone's K seam, read straight off the inline operand node (``None`` for a gmem-``Load``
         # A — its whole body is the per-cell fill).
         seam = cone_seam(c.a) if c.a_computed else None
-        state_decls, reduce_region = reduce_codegen(c, c.stage, ctx.inputs, ctx.workers, seam)
-        sink = store if store is not None else store_sink(c, Body(tuple(epi)))
+        # The leading (batch / ksplit) grid axes ride untiled below the ``(m, n)`` cell — the GRID's
+        # fact, not the placed view's, so they are threaded to the emission that needs them (the
+        # per-cell rename's shared coordinates) from here, where the kernel grid is in hand.
+        lead = grid[:-2]
+        state_decls, reduce_region = reduce_codegen(c, c.stage, ctx.inputs, ctx.workers, seam, lead)
+        sink = store if store is not None else store_sink(c, Body(tuple(epi)), lead)
         t = unit_tile(register_tile(atomize(c.atom.shape[:2]), c.mn), c.mn)
-        mn, lead, bt, lanes = c.mn, c.lead_axes, c.block_threads, c.atom.lanes
+        mn, bt, lanes = c.mn, c.block_threads, c.atom.lanes
     else:
         # The reduce partition rides the :class:`Fold` node; ``None`` for a pure pointwise /
         # scalar per-cell ``Map`` (no partition). Every partitioned reduce — monoid, flash, coop-K /

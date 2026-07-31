@@ -65,10 +65,12 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   site. **A `Contraction` carries NO placement and NO schedule**: the node is pure algebra (`k_axis` + the `a`
   edge + `Channel`s), so its identity (`==` / `hash` / `term_key`) is its algebra alone, and the placed reading
   the tensor-core/staged tiers require — the `(m, n)` `Side` geometry + `tile`/`stage` — is a lowering-side VIEW
-  (`passes/lowering/_placed.place(node, m, n, lead, tile, stage) -> Placed`, the `_reduction.Reduction` pattern)
+  (`passes/lowering/_placed.place(node, m, n, tile, stage) -> Placed`, the `_reduction.Reduction` pattern)
   built from the CALLER's placement axes (trailing grid for a root kernel; `place.free` threads to the
   materializer via `Ctx.free` for flash) and the `TileOp.schedule` slices; the view proxies every algebra read to
-  the node and owns only the placement-derived geometry (`ir.shared_operand` is the placement-free cone read). The A/B asymmetry that is real — A M-resident/compute-fillable, B streamed — is a
+  the node and owns only the placement-derived geometry (`ir.shared_operand` is the placement-free cone read).
+  The view reads the TILED CELL: what lies OUTSIDE it — the kernel's leading batch/ksplit grid axes, the
+  per-cell rename's shared coordinates — is the grid's fact, threaded to `kernel/_atom` by `_factor`. The A/B asymmetry that is real — A M-resident/compute-fillable, B streamed — is a
   SCHEDULE fact read off the node's roles (`isinstance(c.b, Load)` eligibility gates), not a storage fact. A cone's
   SOURCE is the row-invariant prologue (the per-row statistic) and its `body` the per-cell normalize, so the K seam
   is the node boundary (`ops.cone_seam`). A projection has ONE home, the wrapping `Map.fn` — never a node field —

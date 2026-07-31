@@ -38,14 +38,10 @@ class Placed:
 
     node: Contraction
     axes: tuple[Axis, Axis]  # placement: the tiled output (m_axis, n_axis)
-    # The two MATERIALIZER-only members. A schedule-side probe (``tile/_view.contraction_view``)
-    # leaves both empty by design — its gates read the tiled cell alone — and ``_factor`` /
-    # ``_twist`` bind them when they rebuild the view for emission. Read them only from a view you
-    # built with them: the leading axes come off the KERNEL grid (a split partial's ``ksplit`` is
-    # not on the pre-split grid a probe saw), and ``stage`` is a schedule RESULT living in
-    # ``TileOp.schedule``, threaded back in at materialize.
-    lead_axes: tuple[Axis, ...] = ()  # placement: the leading (batch / ksplit) grid axes
     tile: TilePlan = field(default_factory=TilePlan)  # schedule: leaf atom + unit/register widths + K-chunk
+    # The one MATERIALIZER-only member: a schedule-side probe (``tile/_view.contraction_view``)
+    # leaves it None by design — the schedule's gates read the tiled cell alone — and ``stage`` is
+    # anyway a schedule RESULT, living in ``TileOp.schedule`` and threaded back in at materialize.
     stage: Stage | None = None  # schedule: the resolved operand smem pipeline (None = gmem-direct)
 
     def __getattr__(self, name: str):
@@ -105,16 +101,14 @@ class Placed:
         return bt if bt > 1 else None  # None ⇒ the scalar default block size
 
 
-def place(
-    node: Contraction,
-    m_axis: Axis,
-    n_axis: Axis,
-    lead_axes: tuple = (),
-    tile: TilePlan | None = None,
-    stage: Stage | None = None,
-) -> Placed:
+def place(node: Contraction, m_axis: Axis, n_axis: Axis, tile: TilePlan | None = None, stage: Stage | None = None) -> Placed:
     """Bind ``node`` to its caller placement + schedule facts — the successor of the retired
     ``Contraction.placed`` field stamp. The output axes are the CALLER's placement (the trailing
     grid axes for a root kernel; a flash consumer supplies its own), the ``tile`` / ``stage`` the
-    CALLER's schedule slices read from ``TileOp.schedule``."""
-    return Placed(node=node, axes=(m_axis, n_axis), lead_axes=tuple(lead_axes), tile=tile if tile is not None else TilePlan(), stage=stage)
+    CALLER's schedule slices read from ``TileOp.schedule``.
+
+    The view is the TILED CELL's reading — the ``(m, n)`` pair and nothing outside it. A kernel's
+    LEADING (batch / ksplit) grid axes are not bound here: the emission that needs them
+    (``kernel/_atom``'s per-cell rename) takes them from the caller that owns the grid, so the
+    view never carries a placement fact it cannot decide."""
+    return Placed(node=node, axes=(m_axis, n_axis), tile=tile if tile is not None else TilePlan(), stage=stage)

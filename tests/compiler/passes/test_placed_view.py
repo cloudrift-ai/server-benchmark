@@ -35,7 +35,7 @@ def _placed(tile: TilePlan | None = None) -> Placed:
         a=Load(name="a", input="A", index=(Var("m"), Var("k"))),
         channels=(Channel(b=Load(name="b", input="B", index=(Var("k"), Var("n"))), acc="acc"),),
     )
-    return place(node, _M, _N, (), tile=tile or TilePlan(units=(2, 1), regs=(2, 1)))
+    return place(node, _M, _N, tile=tile or TilePlan(units=(2, 1), regs=(2, 1)))
 
 
 def test_the_node_carries_no_placement_or_schedule() -> None:
@@ -75,16 +75,16 @@ def test_demote_mixed_a_rewrites_the_a_edge_on_a_placed_node() -> None:
 
 
 def test_the_lead_grid_axes_survive_the_per_cell_rename() -> None:
-    """What ``Placed.lead_axes`` is FOR — its one live read. The scalar tier replicates the operand
+    """Why the leading grid axes reach ``_atom`` at all. The scalar tier replicates the operand
     reads and the projection tail once per register cell, suffixing every SSA name that is not
     shared (:func:`copy_cell`). A leading (batch) grid axis IS shared — the whole cell block sits at
     one batch coordinate — so it must be protected; renaming it would emit a reference to a
-    variable no enclosing loop defines. The batched scalar-tile shape that reaches this is absent
-    from the corpus (a batched matmul takes the warp tier, and a bare matmul's epilogue is empty),
-    so the mechanism is pinned directly."""
-    bt = Axis("bt", 8)
-    p = place(_placed().node, _M, _N, (bt,), tile=TilePlan(units=(2, 1), regs=(2, 1)))
-    prot = _scalar_protected(p)
+    variable no enclosing loop defines. They ride as ``_atom``'s own ``lead`` (the grid's fact,
+    passed by ``_factor``), never on the :class:`Placed` view, whose reading is the tiled cell.
+    The batched scalar-tile shape that reaches this is absent from the corpus (a batched matmul
+    takes the warp tier, and a bare matmul's epilogue is empty), so the mechanism is pinned here."""
+    p = _placed()
+    prot = _scalar_protected(p, (Axis("bt", 8),))
     assert "bt" in prot and {"m_b", "m_u", "n_b", "n_u", "k"} <= prot
 
     body = (Load(name="a", input="A", index=(Var("bt"), Var("m"), Var("k"))),)
@@ -92,9 +92,9 @@ def test_the_lead_grid_axes_survive_the_per_cell_rename() -> None:
     assert copied.name == "a__ar0"  # the per-cell value is the cell's own
     assert copied.index[0] == Var("bt")  # ... the batch coordinate is not
 
-    # Unbound (a schedule-side probe, or the field removed): the shared coordinate is captured by
-    # the rename — the failure the field prevents.
-    [captured] = copy_cell(body, Sigma({}), "__ar0", _scalar_protected(place(_placed().node, _M, _N, tile=p.tile)))
+    # Unthreaded (the schedule-side probes, which have no grid and no per-cell emission): the
+    # shared coordinate is captured by the rename — the failure the threading prevents.
+    [captured] = copy_cell(body, Sigma({}), "__ar0", _scalar_protected(p))
     assert captured.index[0] == Var("bt__ar0")
 
 

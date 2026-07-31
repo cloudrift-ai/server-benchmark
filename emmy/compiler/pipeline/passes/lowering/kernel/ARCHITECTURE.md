@@ -50,8 +50,9 @@ The `Placed` view (`lowering/_placed.py`) is the stored node BOUND to the caller
 fields stamped on: output axes off the placement (the trailing grid for a root kernel, `Ctx.free` for the flash
 realizer), `tile`/`stage` off the `TileOp.schedule` slices, and every algebra read proxied through to the node.
 It is binding-driven for both atoms, with **no per-atom subclass**, and cleanly
-splits the **placement/schedule the view owns** (the m/n output `axes`, the leading batch `lead_axes`, the
-`TilePlan`/`Stage`, and the `Side` geometry derived from them) from the **algebra the node owns** (what to
+splits the **placement/schedule the view owns** (the m/n output `axes`, the `TilePlan`/`Stage`, and the `Side`
+geometry derived from them — the tiled CELL and nothing outside it, so the kernel's leading batch axes stay the
+grid's fact and reach the per-cell rename from `_factor`) from the **algebra the node owns** (what to
 contract: the `k_axis`, the shared `a` operand edge plus the product `channels` `(b_i, acc_i)` — every edge a gmem `Load` (materialized) or the
 computed node itself, stored inline (flash PV's
 `P = exp(S − M)`, produced from an in-register score, not a gmem address); a projection

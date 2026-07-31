@@ -18,9 +18,11 @@ from emmy.compiler.dtype import F16, F32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.schedule import TilePlan
+from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Load
 from emmy.compiler.ir.tile import Channel, Contraction
 from emmy.compiler.pipeline.passes.lowering._placed import Placed, place
+from emmy.compiler.pipeline.passes.lowering.kernel._atom import _scalar_protected, copy_cell
 from emmy.compiler.pipeline.passes.lowering.kernel._twist import _pv_streamed
 from emmy.compiler.pipeline.passes.lowering.tile._schedule import _demote_mixed_a
 
@@ -70,6 +72,30 @@ def test_demote_mixed_a_rewrites_the_a_edge_on_a_placed_node() -> None:
     out = _demote_mixed_a(kernel, p)
     assert isinstance(out, Placed) and out.a_computed  # the A edge became an inline cone
     assert out.tile == p.tile and out.axes == p.axes
+
+
+def test_the_lead_grid_axes_survive_the_per_cell_rename() -> None:
+    """What ``Placed.lead_axes`` is FOR — its one live read. The scalar tier replicates the operand
+    reads and the projection tail once per register cell, suffixing every SSA name that is not
+    shared (:func:`copy_cell`). A leading (batch) grid axis IS shared — the whole cell block sits at
+    one batch coordinate — so it must be protected; renaming it would emit a reference to a
+    variable no enclosing loop defines. The batched scalar-tile shape that reaches this is absent
+    from the corpus (a batched matmul takes the warp tier, and a bare matmul's epilogue is empty),
+    so the mechanism is pinned directly."""
+    bt = Axis("bt", 8)
+    p = place(_placed().node, _M, _N, (bt,), tile=TilePlan(units=(2, 1), regs=(2, 1)))
+    prot = _scalar_protected(p)
+    assert "bt" in prot and {"m_b", "m_u", "n_b", "n_u", "k"} <= prot
+
+    body = (Load(name="a", input="A", index=(Var("bt"), Var("m"), Var("k"))),)
+    [copied] = copy_cell(body, Sigma({}), "__ar0", prot)
+    assert copied.name == "a__ar0"  # the per-cell value is the cell's own
+    assert copied.index[0] == Var("bt")  # ... the batch coordinate is not
+
+    # Unbound (a schedule-side probe, or the field removed): the shared coordinate is captured by
+    # the rename — the failure the field prevents.
+    [captured] = copy_cell(body, Sigma({}), "__ar0", _scalar_protected(place(_placed().node, _M, _N, tile=p.tile)))
+    assert captured.index[0] == Var("bt__ar0")
 
 
 def test_demote_mixed_a_passes_through_a_uniform_dtype_contraction() -> None:

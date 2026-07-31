@@ -8,7 +8,7 @@ two-stage chaining (:func:`fit_two_stage`), and the fitted model (:class:`TwoSta
 CV harness and any other consumer score through it and never touch weight dicts). The dataset representation
 lives in :mod:`.group`, the model-agnostic rank metrics in :mod:`.rank`, and the fold/metrics harness in
 :mod:`.cv`; the trainer is importable library code with the one featurization and one artifact format shared
-by every caller (``emmy fit`` and the legacy ``scripts/golden_knob_heuristics.py`` wrapper).
+by every caller of ``emmy fit``.
 
 The fit consumes :class:`~.group.Group` lists directly. Each fit z-scores over its own candidate pool;
 ``seed_w`` arrives scaled by ``sd_ref`` (``ones`` for a raw-weight seed, the previous fit's ``sd`` to chain

@@ -1,5 +1,5 @@
 """The extracted OfflinePrior fit core (``search/prior/fit``) — the two preservation
-guarantees the extraction from ``scripts/golden_knob_heuristics.py`` must keep:
+guarantees the extraction from the original fit script must keep:
 
 1. The fit is a pure, deterministic function of (cases, seed): the same inputs
    produce a byte-identical weights artifact, so a refit is reproducible and an

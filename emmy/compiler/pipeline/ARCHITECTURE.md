@@ -198,7 +198,7 @@ The two halves of the one path:
   `linear.py` (the linear trainer + fitted model, owner of the loss and the static/dyn weight-set split), `rank.py`
   (model-agnostic rank metrics), `cv.py` (fold axes, pooled holdout/train tables, the metrics dict), `run.py` (the
   pure run harness `run_fit` — trainers plug in as callables). Driven by `emmy fit` (which also writes the per-run
-  metrics file) or by the legacy wrapper `scripts/golden_knob_heuristics.py`; the golden case building
+  metrics file, and with `--artifact` regenerates the repo-checked artifact in place); the golden case building
   (`build_golden_groups`) lives in `emmy/commands/fit.py` (reconstructing each golden's candidate pool needs the
   command layer's snippet tracer, which `pipeline/` never imports);
   `EMMY_OFFLINE_FILE` (or `emmy eval … --offline-file`) swaps in a candidate
@@ -850,7 +850,7 @@ context as `Context.from_target(compute_cap, gpu_name=…)` — the card recorde
 SM count / smem specs — never the live host's. The host-context version silently made golden ranks
 machine-dependent (a 4090 golden scored on a 5090 host featurized as "sm_89 with 170 SMs"; on a GPU-less host, with
 the default SM count) — the occupancy features then priced tiles for a card that doesn't exist, reporting rank 0 on
-shapes the real card misdeployed 12–29×. The fitter (`golden_knob_heuristics`) always did this correctly; the eval
+shapes the real card misdeployed 12–29×. The offline fitter's case builder always did this correctly; the eval
 gate now matches it.
 
 **Fork-sibling regret** (`eval online --dataset nodes`, via `iter_nodes` → `diagnostics.node_report`): **per card**, it

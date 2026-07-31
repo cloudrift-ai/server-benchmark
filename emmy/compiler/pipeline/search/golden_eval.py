@@ -45,7 +45,7 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "") -> list[dict]:
     what ``tile_signature`` joins a golden against). ``family`` keeps only rows carrying that knob
     family (``"TILE"`` for a contraction pool); ``""`` keeps every row with an axis-named schedule
     knob (a reduce's ``REDUCE@<axis>`` fork). The one live-fork capture the matmul
-    :func:`_enumerate` and the offline fitter (``scripts/golden_knob_heuristics.py``) share."""
+    :func:`_enumerate` and the offline fitter (``emmy fit``'s case builder) share."""
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import Fork, flatten_leaves  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415

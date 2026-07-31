@@ -384,11 +384,12 @@ recorded in the metrics header and artifact provenance so two fits are only comp
 (default `_tune/fits/<timestamp>-<trainer>-<data>/`). Writes `metrics.json` — the deterministic per-run record two fits
 are diffed by: `full_train` (the shippable artifact's per-golden dual ranks + per-card aggregates) and one `cv.<axis>`
 block per fold axis (pooled holdout / train tables, per-card gap, per-fold detail) — and `weights.json`, the full-train
-artifact in the shipped format. `emmy/commands/fit.py` owns the snippet-tracing golden case builder
-(`build_golden_groups`, shared with `scripts/golden_knob_heuristics.py` — `pipeline/` must not import the tracer) plus
-the trainer wiring and file writing; the run harness and fold/metrics machinery are library code in
-`emmy/compiler/pipeline/search/prior/fit/` (`run.py` / `cv.py`), documented there and in the pipeline ARCHITECTURE's
-prior sections.
+artifact in the shipped format; `--artifact [PATH]` additionally writes the artifact to PATH (no value: the
+repo-checked `offline_weights.json` — the regenerate-the-shipped-weights flow, formerly the retired
+`scripts/golden_knob_heuristics.py`). `emmy/commands/fit.py` owns the snippet-tracing golden case builder
+(`build_golden_groups` — `pipeline/` must not import the tracer) plus the trainer wiring and file writing; the run
+harness and fold/metrics machinery are library code in `emmy/compiler/pipeline/search/prior/fit/` (`run.py` /
+`cv.py`), documented there and in the pipeline ARCHITECTURE's prior sections.
 
 ```bash
 emmy fit                                  # linear x golden, both fold axes, metrics under _tune/fits/

@@ -250,6 +250,10 @@ def test_fit_command_defaults_and_unsupported_cells():
     args = parser.parse_args(["fit"])
     assert (args.trainer, args.data, args.samples, args.seed, args.folds) == ("linear", "golden", 0, 0, "both")
     assert args.features == DEFAULT_FEATURES
+    # --artifact: absent = no extra write, bare = "" (the shipped offline_weights.json), a value = that path.
+    assert args.artifact is None
+    assert parser.parse_args(["fit", "--artifact"]).artifact == ""
+    assert parser.parse_args(["fit", "--artifact", "/tmp/cand.json"]).artifact == "/tmp/cand.json"
 
     for bad in (
         parser.parse_args(["fit", "--trainer", "catboost"]),

@@ -14,8 +14,7 @@ shipped ``offline_weights.json`` format. The metrics layout (``full_train`` +
 :mod:`emmy.compiler.pipeline.search.prior.fit.cv`, which owns all the fold machinery;
 the run itself is :func:`~emmy.compiler.pipeline.search.prior.fit.run.run_fit`. This
 module owns what ``pipeline/`` must not import: the snippet-tracing golden case builder
-(:func:`build_golden_groups`, shared with ``scripts/golden_knob_heuristics.py``) plus
-the CLI, the trainer wiring, and the file writing.
+(:func:`build_golden_groups`) plus the CLI, the trainer wiring, and the file writing.
 """
 
 from __future__ import annotations
@@ -66,6 +65,13 @@ def register_fit_command(subparsers) -> None:
         "--features",
         default=DEFAULT_FEATURES,
         help="Feature view: comma-separated names, trailing '*' = prefix glob (recorded in metrics + provenance).",
+    )
+    parser.add_argument(
+        "--artifact",
+        nargs="?",
+        const="",
+        default=None,
+        help="Also write the fitted weights artifact to this path (no value: the repo-checked offline_weights.json).",
     )
     parser.add_argument("--out", default=None, help="Run dir (default: _tune/fits/<timestamp>-<trainer>-<data>/).")
     parser.set_defaults(func=handle_fit)
@@ -263,6 +269,10 @@ def handle_fit(args) -> None:
     )
     (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n")
     storage.write_json(out_dir / "weights.json", artifact, indent=2)
+    if args.artifact is not None:
+        artifact_path = Path(args.artifact) if args.artifact else _DEFAULT_FILE
+        storage.write_json(artifact_path, artifact, indent=2)
+        logger.info("wrote %s", artifact_path)
 
     for gpu, card in metrics["full_train"]["per_card"].items():
         logger.info(

@@ -19,7 +19,7 @@ whether a *trained* model exists.
 
 The two priors are on **different scales**: CatBoost regresses ``log(latency µs)``
 so its ``score`` is calibrated µs, whereas the offline prior is fit by
-learning-to-rank (``scripts/golden_knob_heuristics.py``) so its ``score`` —
+learning-to-rank (``emmy fit``) so its ``score`` —
 ``exp(-0.1·quality)`` — is an *ordinal* proxy with arbitrary magnitude (only its
 order is meaningful; its neutral "no opinion" value is exactly ``1.0``). So
 :meth:`score` keeps the online µs as the scale and folds the offline in as a

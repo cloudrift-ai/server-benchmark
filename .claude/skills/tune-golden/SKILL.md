@@ -217,11 +217,11 @@ Everything in steps 1–7 applies unchanged — the spec is **part of the config
   whose shape has no tuned data — a `.dynM` entry skipping there means the symbolic shape was never tuned, not that
   the join failed.
 - The cold `OfflinePrior` ranks `.dynM` shapes under a dedicated masked-tier weight set (`weights_dynamic`,
-  selected on the stamped `S_ext_n_symbolic_axis`), fit by `scripts/golden_knob_heuristics.py` over the recorded
-  dynamic goldens (2026-06-12 evening refit: five of eight dynM rows rank ≤1, median ~6). Re-run the script after
-  recording new `.dynM` goldens — it writes both weight sets into the repo-checked
-  `search/prior/offline_weights.json` artifact (use `--out` for a candidate file and A/B it via
-  `emmy eval offline --offline-file <file>` before overwriting the default).
+  selected on the stamped `S_ext_n_symbolic_axis`), fit by `emmy fit` over the recorded dynamic goldens
+  (2026-06-12 evening refit: five of eight dynM rows rank ≤1, median ~6). Re-fit after recording new `.dynM`
+  goldens — `emmy fit --folds none` writes the candidate artifact to `<out>/weights.json`; A/B it via
+  `emmy eval offline --offline-file <out>/weights.json`, then ship with `--artifact` (no value = the
+  repo-checked `search/prior/offline_weights.json`; keep `--folds gpu` when you also want the holdout metrics).
 
 ## Step 6 — Validate
 
@@ -264,7 +264,7 @@ density of the `tune-model` reports (`plans/*-tune-findings.md`; executed ones a
   Mark any entry whose "best" baseline is physically impossible (FLOP-roofline sanity check on the shape) with
   `(*)` and one footnote line under the table — worst-case entries sit on those baselines, medians are robust;
   (3) a closing diagnosis paragraph that names WHICH half misprices: offline regret ⇒ the cold-start
-  weights/features are wrong (fix via `scripts/golden_knob_heuristics.py`); online regret with a cleaner offline
+  weights/features are wrong (fix via an `emmy fit` refit); online regret with a cleaner offline
   ⇒ training-data / calibration / featurization problem (the online half also inherits the offline prior's censoring —
   it never sees regions the cold ranking steered away from). Never paste raw eval output as the section body and
   never quote an unlabeled "prior" number. A family ≫1.00x is a steering gap even if every golden A/B passed.
@@ -306,7 +306,7 @@ density of the `tune-model` reports (`plans/*-tune-findings.md`; executed ones a
     `run --bench --ab "<golden knobs>"` A/B: -O1 ranking flags often invert at -O3, so an apparent pick miss can be
     the -O1/-O3 gap, not the prior.
 - **Each finding ends with a recommendation**, with priority: refit the offline weights
-  (`scripts/golden_knob_heuristics.py`) when a shape family is systematically mispriced, a missing `D_*` engineered
+  (`emmy fit --artifact`) when a shape family is systematically mispriced, a missing `D_*` engineered
   feature when the prior can't see what distinguishes the golden, a patience bump when the golden ranks shallow but
   the search stops early, or an enumeration/eligibility gate (cite `file:line`) when the golden's config was never
   offered at all.

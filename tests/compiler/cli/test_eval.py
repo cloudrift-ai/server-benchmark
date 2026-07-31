@@ -559,7 +559,7 @@ def test_offline_eval_scores_each_golden_under_its_own_card(monkeypatch):
     ``gpu_name`` dropped, the SM count fell back to the host device (or the GPU-less
     default), so the occupancy features priced tiles for a card that doesn't exist —
     the eval said rank 0 on gemma goldens the real 4090 misdeployed 12-29x. The fitter
-    (``golden_knob_heuristics``) already passed it; this pins the eval side to match."""
+    (now ``emmy fit``'s case builder) already passed it; this pins the eval side to match."""
     import emmy.commands.eval as eval_cmd
     from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig
 

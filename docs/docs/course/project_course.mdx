@@ -59,6 +59,10 @@ For hands-on performance work, [Benchmarking and Comparing Emmy](./benchmarking_
 benchmarks from deployed service benchmarks and explains PyTorch baselines, metrics, profiling, fair experiments, and
 result files.
 
+For the full serving path, [Integrating Emmy with vLLM](./vllm_integration) explains plugin discovery, the embedding
+and generation ownership boundaries, command construction, request flow, correctness gates, A/B benchmarking, and
+common failures.
+
 For the implementation of tuning decisions, evidence precedence, offline and CatBoost priors, golden matching, A/B
 integrity gates, and diagnostics, continue with [How Emmy Chooses Fast GPU Schedules](./prior_and_goldens).
 
@@ -1635,8 +1639,11 @@ the model's per-token values into one embedding for each input.
 The runner compiles dynamic-sequence programs, binds model weights, owns capacity buffers, and reuses captured CUDA
 graphs. Torch and cupy exchange device arrays through DLPack. Positions still touch the host to identify packed spans.
 
-The experimental generation path uses a related model and runner but leaves vLLM in charge of scheduler, sampler,
-paged KV cache, and language-model head while Emmy executes embedding and transformer-layer work.
+The generation path uses a related model and runner but leaves vLLM in charge of scheduler, sampler, paged KV cache,
+and language-model head while Emmy executes embedding and transformer-layer work around vLLM's attention calls.
+
+For a complete walkthrough of plugin discovery, generated commands, both request paths, correctness validation, and a
+stock-vLLM A/B, continue with [Integrating Emmy with vLLM](./vllm_integration).
 
 ### Small example — one embedding request
 
@@ -1662,7 +1669,7 @@ returns two embedding vectors. The client does not need to know which internal c
 4. `emmy/serving/packed.py`: packed sequence boundaries.
 5. `emmy/serving/vllm_model.py`: `EmmyEmbedModel` and vLLM's model interface.
 6. `emmy/serving/runner.py`: `EmmyForwardRunner.create` and forward paths.
-7. `emmy/serving/vllm_model_gen.py` and `gen_runner.py`: experimental generation integration.
+7. `emmy/serving/vllm_model_gen.py` and `gen_runner.py`: generation integration.
 8. `emmy/commands/serve.py`: process mode, stock baseline, health polling, and one-shot benchmark mode.
 
 ### Lab — learn the boundary before loading a model
@@ -1686,8 +1693,9 @@ compile whole trunks, and require substantial free GPU memory:
 
 ### Checkpoint
 
-You can draw the ownership line between vLLM and Emmy, explain why `--enforce-eager` is required, and describe how a
-packed batch becomes one or more exact-length compiled-program replays.
+You can draw the ownership line between vLLM and Emmy, explain why the embedding path requires `--enforce-eager` while
+generation defaults to vLLM's outer decode graphs, and describe how a packed batch becomes one or more exact-length
+compiled-program replays.
 
 ## Lesson 14 — Read the tests as the architecture's executable specification
 

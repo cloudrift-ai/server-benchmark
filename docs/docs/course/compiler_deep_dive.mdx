@@ -187,6 +187,37 @@ The filenames now form a timeline:
 The excerpts below are generated from the current compiler. Cosmetic node names and kernel hash suffixes may change as
 the implementation evolves; generate the files locally when exact output matters.
 
+:::info How to read the in-memory views
+Each stage below now has two views. The first is Emmy's ordinary printed listing. The second is a schematic of the
+Python objects in memory:
+
+- arrows are dataflow edges in the persistent `Graph`;
+- `Node(op=...)` is a graph node containing an operation object from the current IR dialect;
+- indented objects inside `LoopOp`, `TileOp`, and `KernelOp` are nested structure, not additional graph nodes; and
+- labels use the real class names and important fields, while omitted details and `...` keep the diagram readable.
+
+These schematics are not Python source to paste or execute. Emmy creates the objects during tracing and rewriting, then
+`Graph.pretty_print()` and each operation's `pretty_body()` produce the human-readable listings.
+:::
+
+The outer representation changes like this:
+
+```mermaid
+flowchart LR
+    Frontend["Frontend IR<br/>3 graph nodes<br/>compute op = RmsNormOp"]
+    Tensor["Tensor IR<br/>15 graph nodes<br/>11 primitive compute ops"]
+    Loop["Loop IR<br/>5 graph nodes<br/>compute op = LoopOp"]
+    Tile["Tile IR<br/>same outer graph<br/>compute op = TileOp"]
+    Kernel["Kernel IR<br/>same outer graph<br/>compute op = KernelOp"]
+    CUDA["CUDA IR<br/>same outer graph<br/>compute op = CudaOp"]
+
+    Frontend -->|decompose| Tensor
+    Tensor -->|lift and fuse| Loop
+    Loop -->|rebind op| Tile
+    Tile -->|rebind op| Kernel
+    Kernel -->|render source| CUDA
+```
+
 ### Stage 1 — frontend Graph IR preserves RMSNorm
 
 ```bash
@@ -206,6 +237,30 @@ rms_norm = rmsnorm(x, p_weight, eps=1e-06) -> (2, 8, 16) f32
 
 outputs:
   rms_norm: (2, 8, 16) f32
+```
+
+**In-memory graph (schematic):**
+
+```mermaid
+flowchart LR
+    subgraph Graph["Graph — 3 nodes"]
+        X["x<br/>Node(op=InputOp)"]
+        Weight["p_weight<br/>Node(op=ConstantOp)"]
+        RMS["rms_norm<br/>Node(op=RmsNormOp)"]
+
+        X --> RMS
+        Weight --> RMS
+    end
+```
+
+The compute node contains:
+
+```text
+Node(
+    inputs=[x, p_weight],
+    op=RmsNormOp(eps=1e-06),
+    outputs=(Tensor(shape=(2, 8, 16), dtype=f32),),
+)
 ```
 
 At this boundary, `torch.export` and Emmy's FX walker have captured the program, but decomposition has not run. The
@@ -234,6 +289,40 @@ rms_norm_rsq_bc         = rms_norm_rsq[i, j, na]                            -> (
 rms_norm_norm           = multiply(x, rms_norm_rsq_bc)                      -> (2, 8, 16)
 rms_norm                = multiply(rms_norm_norm, p_weight_bc)              -> (2, 8, 16)
 ```
+
+**In-memory graph (schematic):**
+
+```mermaid
+flowchart LR
+    subgraph Graph["Graph — 15 nodes"]
+        X["x<br/>InputOp"]
+        Weight["p_weight<br/>ConstantOp"]
+        Eps["rms_norm_eps<br/>ConstantOp"]
+        Count["rms_norm_mean_count<br/>ConstantOp"]
+
+        WeightBC["p_weight_bc<br/>IndexMapOp"]
+        Square["rms_norm_sq<br/>ElementwiseOp: multiply"]
+        EpsBC["rms_norm_eps_bc<br/>IndexMapOp"]
+        CountBC["rms_norm_mean_count_bc<br/>IndexMapOp"]
+        Sum["rms_norm_mean_sum<br/>ReduceOp: sum"]
+        Mean["rms_norm_mean<br/>ElementwiseOp: divide"]
+        AddEps["rms_norm_add_eps<br/>ElementwiseOp: add"]
+        RSqrt["rms_norm_rsq<br/>ElementwiseOp: rsqrt"]
+        RSqrtBC["rms_norm_rsq_bc<br/>IndexMapOp"]
+        Norm["rms_norm_norm<br/>ElementwiseOp: multiply"]
+        Output["rms_norm<br/>ElementwiseOp: multiply"]
+
+        Weight --> WeightBC --> Output
+        X --> Square --> Sum --> Mean --> AddEps --> RSqrt --> RSqrtBC --> Norm --> Output
+        X --> Norm
+        Eps --> EpsBC --> AddEps
+        Count --> CountBC --> Mean
+    end
+```
+
+Every named box is a separate `Node` in the same `Graph`. Each node's `op` is a tensor-dialect object; tensor shapes
+remain on the node's output `Tensor`. The diagram includes the broadcast `IndexMapOp` nodes that the listing refers to
+through names such as `rms_norm_rsq_bc`.
 
 The compound `RmsNormOp` has disappeared. In its place are tensor primitives:
 
@@ -272,6 +361,50 @@ sed -n '1,160p' /tmp/emmy-rmsnorm-loop.txt
                 rms_norm[a0, a1, a3] = v6
 ```
 
+**Outer in-memory graph (schematic):**
+
+```mermaid
+flowchart LR
+    subgraph Graph["Graph — 5 nodes after fusion"]
+        X["x<br/>InputOp"]
+        Count["rms_norm_mean_count<br/>ConstantOp"]
+        Eps["rms_norm_eps<br/>ConstantOp"]
+        Weight["p_weight<br/>ConstantOp"]
+        RMS["rms_norm<br/>Node(op=LoopOp)"]
+
+        X --> RMS
+        Count --> RMS
+        Eps --> RMS
+        Weight --> RMS
+    end
+```
+
+**Nested operation payload:**
+
+```text
+LoopOp
+└── body: Body
+    ├── Load(rms_norm_mean_count)
+    ├── Assign(v0)
+    ├── Load(rms_norm_eps)
+    └── Loop(axis=a0)
+        └── body: Body
+            └── Loop(axis=a1)
+                └── body: Body
+                    ├── Loop(axis=a2)
+                    │   └── body: Body[Load, Assign, Accum]
+                    ├── Assign(v2)
+                    ├── Assign(v3)
+                    ├── Assign(v4)
+                    └── Loop(axis=a3)
+                        └── body: Body[Load, Assign, Load, Assign, Write]
+```
+
+Only the input and constant boundary nodes plus the fused `rms_norm` compute node remain. `Loop`, `Load`, `Assign`,
+`Accum`, and `Write` are statement objects inside the single `LoopOp.body` tree. Fusion removed the intermediate tensor
+nodes and moved their work into that body. The printed listing inlines scalar constant loads as `16` and `1e-06`; the
+underlying graph and body retain those constant inputs so later code generation can supply them.
+
 Loop lifting first gives tensor operations explicit statement bodies. Fusion then combines compatible `LoopOp` graph
 nodes into the one body shown here. Notice what disappeared: there are no global temporary tensors for the square,
 mean, or scale. Their values stay inside the fused computation.
@@ -308,6 +441,31 @@ sed -n '1,160p' /tmp/emmy-rmsnorm-tile.txt
         rms_norm[a0, a1, a3] = multiply(in4, multiply(in3, v4))
 ```
 
+**In-memory structural operation tree (schematic):**
+
+The outer `Graph` has the same five nodes and four input edges shown in Stage 3. Lowering rebinds the compute node's
+operation from `LoopOp` to `TileOp`; the nested payload becomes:
+
+```text
+TileOp
+├── op: Map
+│   ├── source: Reduction
+│   │   ├── axis: a2
+│   │   ├── carrier: Carrier(...)  # state acc0, combined with add
+│   │   ├── partial: Body[Load, Assign, Accum]
+│   │   ├── role: PLANAR
+│   │   └── reduce: ReducePlan(...)
+│   └── body: Body[Load constants, Assign(v0), Assign(v2), Assign(v3), Assign(v4), Loop(a3, ...)]
+├── place: Placement(...)
+├── tier: TilePlan(...) or None
+├── stage: Stage(...) or None
+└── workers: WarpSpec(...) or None
+```
+
+The dataflow graph is still small, but the node now contains a scheduled structural tree. For RMSNorm, the root is a
+`Map` whose `source` is a `Reduction`; the post-reduction projection remains in the map body. Schedule descriptors are
+fields on `TileOp` or its structural nodes rather than separate graph nodes.
+
 The important new fact is `Reduction[a2] planar`. Recognition has recovered the algebraic role of the `a2` loop: it
 is an ordinary reduction whose partial sums may be combined. Tile IR keeps that mathematical structure separate from
 the chosen realization so alternative valid schedules can be compared.
@@ -335,6 +493,32 @@ sed -n '1,160p' /tmp/emmy-rmsnorm-kernel.txt
             f32 v6 = multiply(in4, multiply(in3, v4))
             rms_norm[a0, a1, a3] = v6
 ```
+
+**In-memory hardware statement tree (schematic):**
+
+The outer dataflow is unchanged again. The `rms_norm` node now contains `KernelOp`:
+
+```text
+KernelOp
+├── name: k_rms_norm_<hash>
+└── body: Body
+    └── Tile(axes=[a0, a1, a2_co])
+        └── body: Body
+            ├── StridedLoop(axis=a2, start=a2_co, step=16)
+            │   └── body: Body[Load, Assign, Accum]
+            ├── WarpShuffle(acc0, length=16)
+            ├── Load(rms_norm_mean_count)
+            ├── Load(rms_norm_eps)
+            ├── Assign(v2, dtype=f32)
+            ├── Assign(v3, dtype=f32)
+            ├── Assign(v4, dtype=f32)
+            └── StridedLoop(axis=a3, start=a2_co, step=16)
+                └── body: Body[Load, Load, Assign, Write]
+```
+
+The `TileOp` algebra tree has been materialized into a `KernelOp.body` tree. Hardware actions such as cooperative worker
+coordinates and `WarpShuffle` are statement objects inside that body. They are not Python calls executed to perform
+the normalization; the CUDA lowering pass consumes them as data.
 
 Kernel IR commits to hardware-oriented details:
 
@@ -386,6 +570,27 @@ __launch_bounds__(16) void k_rms_norm_<hash>(
     }
 }
 ```
+
+**In-memory rendered-source object (schematic):**
+
+The outer graph still has the Stage 3 shape. Only the compute node's operation has been rebound:
+
+```text
+CudaOp
+├── kernel_source: "extern \"C\" __global__ ... }"
+├── kernel_name: "k_rms_norm_<hash>"
+├── arg_order: ("x", "rms_norm_mean_count", "rms_norm_eps", "p_weight", "rms_norm")
+├── grid: (...)
+├── block: (...)
+├── smem_bytes: 0
+├── zero_outputs: (...)
+├── tma_descriptors: (...)
+└── runtime_args: (...)
+```
+
+This is the one stage where the operation object contains real generated source text: `CudaOp.kernel_source`.
+The surrounding `Graph` still expresses kernel launch order and buffer dependencies, while the remaining `CudaOp`
+fields tell the runtime how to supply arguments and launch that source.
 
 This listing is lightly renamed and formatted for teaching; `/tmp/emmy-rmsnorm-cuda.txt` contains the exact emitted
 source. The internal `CudaOp` also carries argument order, grid and block expressions, dynamic shared-memory size,
@@ -764,6 +969,63 @@ the statement tree and creates structural nodes:
 - `Reduction`: a planar or twisted fold with an axis, per-element partial, carrier, and reduction schedule.
 - `Contraction`: distributive lift-and-fold work with bound operands and output axes.
 
+These names describe algebra, not GPU hardware:
+
+| Loop IR shape | Tile IR structure | Meaning |
+|---|---|---|
+| Free loops containing independent scalar work | `Map(body=..., source=None)` | Calculate each output cell independently |
+| One associative fold | `Reduction(...)` | Combine values along one axis |
+| A fold followed by post-processing | `Map(source=Reduction(...), body=projection)` | Reduce first, then project the result |
+| A product-like lift followed by an additive fold | `Contraction(..., epilogue=...)` | Contract indexed operands and carry its bound epilogue |
+| A larger projection around structural work | `Map(source=Reduction(...) or Contraction(...), body=...)` | Compose more work around a structural source |
+| Structure that cannot be classified safely | Flat `Map(body=original_statements)` | Preserve Loop IR semantics and use the scalar tier |
+
+A `Map` is therefore more than the pointwise case. It is also the projection wrapper that composes with a reduction or
+contraction:
+
+```text
+pure pointwise:         Map(body=pointwise, source=None)
+projected reduction:    Map(body=projection, source=Reduction(...))
+projected contraction:  Map(body=epilogue, source=Contraction(...))
+```
+
+A `Reduction` stores the parts that make an associative fold explicit:
+
+```text
+Reduction
+├── axis: the dimension being combined
+├── carrier: accumulated state, identity, and combine operation
+├── partial: work that produces one contribution
+├── role: PLANAR or TWISTED
+└── reduce: ReducePlan describing its selected partition
+```
+
+A `Contraction` is a specialized fold. Its two output axes and one reduction axis are bound once:
+
+```text
+Contraction
+├── axes: (m, n)
+├── k_axis: k
+├── a_operand: A[m, k]
+├── folds: B[k, n] and the accumulator they update
+├── tile: TilePlan
+└── epilogue: work after the fold
+```
+
+“Contraction” means a tensor contraction, not the act of merging graph nodes. Ordinary matrix multiplication is the
+familiar example:
+
+```text
+for m
+    for n
+        for k
+            acc[m, n] += A[m, k] * B[k, n]
+```
+
+The small vocabulary does not mean the recognizer must force every loop nest into a high-level category. A flat
+`Map` can retain unclassified `Loop`, `Load`, `Assign`, `Accum`, and `Write` objects unchanged. This conservative
+escape hatch preserves correctness when the compiler cannot prove a stronger algebraic interpretation.
+
 The RMSNorm loop becomes a planar reduction wrapped in a projection map:
 
 ```text
@@ -795,8 +1057,8 @@ Recognition annotates reduction structure with an `AxisRole`:
 - `FREE`: non-reduction iteration.
 
 The dispatch is algebraic, not shape-specific. A rule must not say “this is matmul because the dimensions are 4096 by
-4096.” It recognizes that the lift distributes over the fold and that at least two distinct operand buffers are
-contracted.
+4096.” It recognizes that the lift distributes over the fold and that at least two bindable reduction-axis operand
+loads participate.
 
 ### Carriers
 
@@ -835,12 +1097,178 @@ for m
         C[m, n] = acc
 ```
 
-is recognized as a contraction because multiply distributes over add and the `k`-indexed loads come from two distinct
-buffers. A squared reduction `sum(x * x)` is not classified as a contraction merely because it has two loads in the
-expression; both operands refer to the same buffer.
+is recognized as a contraction because multiply distributes over add and the body contains two bindable
+`k`-indexed operand loads. Those loads can be different affine views of one packed buffer; a squared reduction
+`sum(x * x)` is not classified as a contraction merely because the expression mentions `x` twice.
 
 Recognition binds the contraction's M, N, and K roles once. Later passes consume those roles instead of repeatedly
 guessing operand meaning from indices.
+
+### How Loop IR becomes Tile IR
+
+The boundary is implemented by `pipeline/passes/lowering/tile/010_recognize.py`. It matches a `LoopOp`, reads its
+statement tree, creates one of the structural forms above, wraps it in a `TileOp`, and invokes scheduling. Recognition
+does not use variable names such as `a2` or `acc0` to guess meaning. It examines statement types, dependency edges,
+index expressions, loop roles, and algebraic properties of the elementwise operations.
+
+```mermaid
+flowchart TD
+    Loop["LoopOp.body"] --> Special{"Special streaming form?"}
+    Special -->|Flash attention| Flash["Build fused flash TileOp"]
+    Special -->|Online softmax| Softmax["Annotate TWISTED carrier"]
+    Special -->|Neither| Peel["_peel: separate outer free axes<br/>from the per-cell body"]
+    Softmax --> Peel
+    Peel --> Count{"One flat<br/>reduction loop?"}
+
+    Count -->|No or ambiguous| Flat["Flat Map fallback<br/>retain original statements"]
+    Count -->|Yes| Annotate["_annotate_reduce:<br/>recover role and carrier"]
+    Annotate --> Role{"Recovered role"}
+
+    Role -->|PLANAR or TWISTED| Reduction["Reduction"]
+    Role -->|CONTRACTION| Bind{"Bind operands and<br/>output axes m, n, k?"}
+    Role -->|No safe carrier| Flat
+
+    Bind -->|Yes| Contraction["Contraction"]
+    Bind -->|No| Demote["Demote to PLANAR Reduction"]
+
+    Reduction --> Projection{"Projection remains?"}
+    Contraction --> ContractNode["Contraction<br/>carries its bound epilogue"]
+    Demote --> Projection
+    Projection -->|Yes| Wrap["Map(source=node,<br/>body=projection)"]
+    Projection -->|No| Root["Structural node is root"]
+
+    Flat --> Tile["TileOp + Placement"]
+    Wrap --> Tile
+    Root --> Tile
+    ContractNode --> Tile
+    Flash --> Schedule
+    Tile --> Schedule["Enumerate and select<br/>legal schedules"]
+```
+
+The implementation proceeds in the following order.
+
+#### 1. Recognize streaming special cases first
+
+Flash attention and online softmax must be recognized before the general lift because they combine several ordinary
+folds into one streaming state:
+
+- `try_flash` looks for the compatible score, softmax, and value-contraction structure and can rewrite more than one
+  graph node into a fused flash `TileOp`.
+- `_softmax._fuse` recognizes the adjacent row-maximum and sum-of-exponentials folds and gives the resulting loop a
+  multi-component `TWISTED` carrier.
+
+These are structural recognizers, but they are currently dedicated cases. Emmy does not yet have one universal
+algorithm that derives every possible algebra from arbitrary loops.
+
+#### 2. Peel off independent axes
+
+`_peel` walks through the outer chain of non-reduction loops:
+
+```text
+for batch:                 free
+    for row:               free
+        for k:             reduction begins
+            acc += ...
+```
+
+It returns:
+
+```text
+free axes = [batch, row]
+per-cell body = [the k reduction and its projection]
+```
+
+The free axes belong to placement and later map onto the CUDA grid. Leading pure statements such as invariant loads or
+assignments are moved into the per-cell body so their dependencies remain available.
+
+#### 3. Find a classifiable fold
+
+`_lift_cell` counts top-level reduction loops in the per-cell body:
+
+- no reduction means a pure pointwise `Map`;
+- one flat reduction is eligible for annotation; and
+- several reductions or an unsupported nested reduction remain a flat `Map`.
+
+For one reduction, dependency analysis separates statements before the loop into those feeding the fold and those
+feeding only the projection. Fold dependencies move into the reduction body; projection-only dependencies remain
+after it. If one statement must live on both sides and cannot be moved safely, recognition declines to the flat-map
+fallback rather than changing evaluation order.
+
+#### 4. Recover the reduction role and carrier
+
+`_annotate_reduce` inspects the chosen loop:
+
+1. A loop already annotated by online-softmax or flash recognition keeps its carrier and role.
+2. A clean lift-and-fold pattern receives the `CONTRACTION` role.
+3. A loop containing exactly one `Accum` becomes `PLANAR`; `Accum.as_carrier()` supplies its state, identity, and
+   combine operation.
+4. A loop with no unambiguous carrier remains inside a flat `Map`.
+
+For an ordinary sum:
+
+```text
+acc0 <- add(acc0, value)
+```
+
+the fold operation supplies an additive carrier with zero as its identity. Emmy can later partition the axis because
+addition is associative: separate workers may form partial sums and combine them without changing the intended result.
+
+#### 5. Prove contraction structure and bind operands
+
+`_is_clean_contraction` requires more than the presence of multiplication:
+
+- exactly one `Accum`;
+- an `Assign` whose result is the value folded by that accumulator;
+- at least two operand loads indexed by the reduction axis;
+- a lift operation that distributes over the fold operation; and
+- a body whose operand preprocessing can be assigned safely to the contraction.
+
+The operand loads may be different affine views of one packed buffer, as with packed QKV. Their load expressions and
+indices identify the operands; backing-buffer identity alone does not. Conversely, `sum(x * x)` does not become a
+matrix contraction merely because `x` appears twice.
+
+After the free axes are ordered by the output layout, `_nodify_contraction` tries to bind the final two as `(m, n)`,
+the reduce axis as `k`, and the indexed loads as the A and B operands. If the shape or indexing cannot support that
+binding—for example, a one-dimensional output with no usable `(m, n)` pair—the loop is demoted to a `PLANAR`
+`Reduction`. It still compiles through the general reduction machinery.
+
+#### 6. Separate the fold from its projection
+
+A bare reduction becomes a root `Reduction`. If work remains after that fold, recognition stores it in a wrapping
+`Map`:
+
+```text
+Map
+├── source: Reduction
+└── body: post-fold projection
+```
+
+For RMSNorm, the `a2` sum is the `Reduction`; division, epsilon, reciprocal square root, the `a3` sweep, and the final
+write form the projection map.
+
+A `Contraction` carries the epilogue bound directly to its output cells in `Contraction.epilogue`. In larger composed
+forms, such as a fused statistic feeding a contraction, a `Map` may additionally wrap the `Contraction` as its
+structural source. This distinction keeps ordinary contraction epilogues near their operand binding while still
+allowing higher-level composition.
+
+#### 7. Attach placement and schedule choices
+
+Recognition constructs an initially unmapped wrapper:
+
+```text
+TileOp(
+    op=recognized_node,
+    place=Placement(free=free_axes),
+)
+```
+
+The scheduling half then maps free axes to the grid and offers the legal `ReducePlan`, `TilePlan`, staging, and worker
+alternatives. Recognition determines which transformations preserve the algebra; scheduling chooses among their
+hardware realizations.
+
+One useful invariant closes the loop: `tile.ops.lower` can flatten `Map`, `Reduction`, and `Contraction` back into
+equivalent loop statements. Tile recognition adds algebraic meaning and schedule metadata; it does not change the
+program's mathematical result.
 
 ## 9. Scheduling: choose a valid GPU realization
 

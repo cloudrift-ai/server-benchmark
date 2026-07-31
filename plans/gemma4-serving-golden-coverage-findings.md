@@ -60,35 +60,37 @@ total against the winners' 41.8 / 71.9. Deployability confirmed unpinned — the
 recorded config on both shapes (the g8a/gm8-at-one-tile "benches but cannot deploy" trap from the
 2026-07-30 workflow notes did not bite here).
 
-## Finding — the staged computed-A (fused d*/sync) form no longer realizes in the ISOLATED SNIPPET
+## Finding (CORRECTED 2026-07-31 evening) — the routing consult mis-keys stat-free computed-A cones
 
-The ratchet's prescribed burn-down ("re-record PLACE-free fused rows; the d*/sync anchor") is
-impossible on current main: in the golden SNIPPET compile (`run --bench --golden`), `STAGE=d1/sync`
-(and `d2/sync`) pins report `realized (off)` at every width — **including a replay of the 2026-07-30
-m192/m256/m32 fused rows that snippet-benched that exact spelling the day before** (e.g.
-`norm_gate_up.m192.lin`, recorded 429.3 µs on 2026-07-30). The window is the tile-IR 1s commits
-(`4b947570`/`95b88f9f`, post-`0ffea99d`). The only snippet-realizable fused schedule is the unstaged
-gmem-direct one: ~3725 µs on the m192 gate⊗up cone vs eager 252 — ~15× off.
+The morning's two findings ("the staged computed-A form no longer realizes in the isolated snippet"
+and "the down cone's cut routing is in-model-inert") were **one defect, misdiagnosed twice**, found
+properly during the article-repro serving A/B (emmy lanes −22…−32% vs published with an exact stock
+control; the pack diff showed the published image cutting the m4096 down into cone + big-tile matmul
+where the re-baked image deployed one fused computed-A kernel):
 
-**The in-model twins are NOT affected**: the audit compiles the serving-twin graphs, and there the
-m32/m192 fused rows (same `d1/sync` spelling) MATCH with zero unrealized entries — serving deploys
-still realize the staged fused form. So this is an eval/re-record-side regression, not a serving one:
-the fused rows' isolated reproduction is dead, no NEW fused row can be honestly benched, and the
-isolated-vs-in-model split is exactly the disagreement class the in-model audit was built for — just
-in the opposite direction (the snippet is the broken half this time). **Recommendation:** restore the
-snippet-side realization of the staged computed-A form (likely the snippet's `F.rms_norm(x) @ w` cone
-recognizing differently after 1s), then re-anchor fused rows at the still-open widths.
+- `_cut.py::_routing_entry` (the #446 pre-fork routing consult) keyed the kernel with a raw
+  `ShapeKey.from_s_features`, whose histogram classifier can only fire `kind="fused"` off a
+  top-level `rsqrt`. A **stat-free** computed-A cone — the geglu→down edge — keys `kind=''` and
+  never joins its `fused`-keyed `.cut` routing entries, so the down could not cut **anywhere**
+  (in-model or snippet) and deployed the fused computed-A form at every width: the m4096/m2048
+  chunk-prefill TTFT regression and the bucket-8/64 TPOT regression. `greedy._fork_shape_key`
+  documents the fused-kind convention and rebuilds from the offer's sync-STAGE signal; the routing
+  consult had no such rebuild. **Fixed**: `_routing_entry` now rebuilds the key off the routing
+  tree's computed-A edge (`_has_computed_a` — the structural twin of the offer signal).
+- The "snippet realization loss" was the same consult from the other side: for the **rms** cones the
+  histogram does fire `fused` at routing time, so the `.cut` sibling routes **pre-fork in the golden
+  replay too** — the fused form then never exists for a `STAGE=d1/sync` pin to realize against, and
+  the replay reports `unreproducible pin … realized (off)`. The staged computed-A tier was never
+  broken. Residual eval-side limitation, still open: a fused *schedule* row cannot be replayed by
+  name while a `.cut` sibling exists (the replay would need an implicit `PLACE=fuse` pin for
+  schedule-row goldens); until then fused-row µs can only be refreshed by temporarily removing the
+  sibling.
 
-## Finding — the down cone's PLACE=cut routing is in-model-inert (all widths)
-
-The `mlp_down_fused` keys could not be closed by cut rows either: a down `.cut` routing row fires in
-the isolated snippet (whose cone is rms→down) but never in-model (where the cone is geglu→down — the
-multichannel/#389 residual; verified: the post8 audit shows the norm_gate_up cut firing while the
-down node stays fused and consults as a GAP). The pre-existing m32/m192/m256 down `.cut` rows are
-equally snippet-only — their keys audit MATCH via their in-model-realizable fused siblings, which is
-also why the gate never noticed. Consequence: at m8/m64/m2048/m4096 the down key has no honest
-closure today (no benchable fused row per the finding above, no in-model cut), so those four keys
-stay in the ratchet with the explanation. No down rows were added.
+Closure: the four down `.cut` rows re-recorded (snippet totals were valid), `pw.n15360` tiers added
+at m64/m192/m2048/m4096 (the geglu-materialize piece's key; m8/m32/m256 were already covered), and
+the drift-gate ratchet tightened — the down-fused keys are now enforced covered, which is the
+regression test for the routing key: if it mis-keys again, the fused fork reappears and the gate
+goes red.
 
 ## Fused-fork cut routings (the #446 closure that IS possible)
 

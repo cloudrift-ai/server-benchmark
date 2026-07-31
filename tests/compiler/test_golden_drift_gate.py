@@ -86,19 +86,13 @@ EXPECTED_GAPS = {
         # 2026-07-30: the PLACE-knob retirement (#446) commented out the fused computed-A
         # goldens that recorded a PLACE@ placement, so every fused norm→linear / geglu fork
         # (kind="fused", across the m1/m8/m32/m2048/m4096 audit widths) is uncovered again.
-        # 2026-07-31: mostly closed — the reopened norm→linear forks now carry PLACE=cut routing
-        # rows whose pieces resolve each width's seeded stat/scale/matmul tiers (the cut fires
-        # in-model for those cones). The d*/sync fused anchor could NOT be re-recorded: since the
-        # tile-IR 1s commits the staged computed-A form no longer realizes in the ISOLATED golden
-        # snippet (in-model twins still realize it — the m32/m192 fused rows MATCH here), so no
-        # new fused row can be honestly benched. The four mlp_down_fused keys below stay open:
-        # the down cone's PLACE=cut routing is in-model-inert (the multichannel/geglu residual —
-        # the #389 class), so a cut row cannot cover them, and a fused row cannot be benched
-        # until the snippet-side realization returns. Burn down when either fix lands.
-        ShapeKey(free_prod=30720, reduce_max=15360, is_warp=True, is_dyn=False, kind="fused", free_max=3840),
-        ShapeKey(free_prod=245760, reduce_max=15360, is_warp=True, is_dyn=False, kind="fused", free_max=3840),
-        ShapeKey(free_prod=7864320, reduce_max=15360, is_warp=True, is_dyn=False, kind="fused", free_max=3840),
-        ShapeKey(free_prod=15728640, reduce_max=15360, is_warp=True, is_dyn=False, kind="fused", free_max=4096),
+        # 2026-07-31: closed — every reopened fused fork carries a PLACE=cut routing row whose
+        # pieces resolve each width's seeded stat/scale/matmul/pw tiers. The down (geglu-cone)
+        # forks needed the _cut.py routing-key fix first: the pre-fork consult keyed a stat-free
+        # computed-A cone kind='' and never joined its fused-keyed .cut entries, deploying the
+        # fused computed-A down everywhere — the 2026-07-31 serving TTFT/TPOT regression. With
+        # the key rebuilt off the tree's computed-A edge the down cuts route, their matmul pieces
+        # MATCH the mX tiers, and the geglu-materialize pieces MATCH the pw.n15360.mX rows.
         # 2026-07-31: the m192 width (the MTP c=64 verify bucket, serving_mtp_rtx5090) joined
         # the audit — its aux keys below are the same greedy-near-optimal classes as the other
         # widths' (per-head qk-norm rms sweeps, the post-attn/cut-stat rms key, the merged-cat

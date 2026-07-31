@@ -4681,24 +4681,65 @@ configs:
   # ---- Fused-fork cut routings, remaining serving widths (2026-07-31) -----------------------------
   # The #446 PLACE-knob retirement commented out every fused computed-A golden that spelled a PLACE@
   # placement, reopening the fused norm->linear / down forks at m1/m8/m64/m2048/m4096 (the drift-gate
-  # ratchet's 2026-07-30 block). The prescribed d*/sync fused anchor CANNOT currently be recorded:
-  # since the tile-IR 1s commits (post-0ffea99d) the staged computed-A form no longer realizes in the
-  # ISOLATED GOLDEN SNIPPET — a `STAGE=d1/sync` (or d2/sync) pin reports `realized (off)` on every
-  # width, including a replay of the 2026-07-30 m192/m256/m32 fused rows that snippet-benched it the
-  # day before. The IN-MODEL twins still realize it (the m32/m192 fused rows MATCH in `eval golden
-  # --in-model`), so serving deploys are unaffected; what is broken is the fused rows' isolated
-  # reproduction / re-record path, and the only snippet-realizable fused schedule is the unstaged
-  # gmem-direct one (~13x off eager at m192). So what is recorded here is the PLACE=cut routing
-  # alone: pieces resolve the width's seeded stat/scale/matmul tiers deterministically, the cut fires
-  # in-model for the norm->linear cones, and it IS the measured winner at every width where both
-  # forms last benched (m192/m32: fused d1/sync loses 1.6-1.9x to the cut). NO down-cone rows are
-  # added at m8/m64/m2048/m4096: the down cut is in-model-inert (multichannel/geglu residual, the
-  # #389 class — the pre-existing m32/m192/m256 down .cut rows are equally snippet-only, their keys
-  # covered in-model by their realizable fused siblings), and a down fused row cannot be benched
-  # until the snippet-side realization returns — those four keys stay in the drift-gate ratchet.
-  # When the snippet realization is fixed, re-anchor fused rows beside these and re-check the picks.
+  # ratchet's 2026-07-30 block). These rows close them with PLACE=cut routing entries: pieces resolve
+  # the width's seeded stat/scale/matmul tiers deterministically, and the cut is the measured winner
+  # at every width where both forms last benched (m192/m32: fused d1/sync loses 1.6-1.9x to the cut).
+  # TWO CORRECTIONS to this section's first (2026-07-31 morning) rationale, both from the article-
+  # repro session the same day:
+  # 1. "The staged computed-A tier no longer realizes in the snippet" was a MISDIAGNOSIS: the pin
+  #    failed because the .cut sibling's ROUTING entry fires pre-fork in the snippet replay, so the
+  #    fused form never exists to realize the pin against. The staged tier is healthy; a fused
+  #    schedule row cannot currently be REPLAYED beside a .cut sibling (eval-side limitation, noted
+  #    in plans/gemma4-serving-golden-coverage-findings.md).
+  # 2. "The down cut is in-model-inert (multichannel class)" was the same misdiagnosis from the other
+  #    side: the geglu->down cone's ROUTING consult keyed kind='' (the stamped histogram has no rsqrt
+  #    to fire kind='fused' on — greedy._fork_shape_key documents the convention) so its fused-keyed
+  #    .cut entries never joined. Fixed in _cut.py (_routing_entry rebuilds the key off the tree's
+  #    computed-A edge); the down rows below are recorded now that they route. The un-cut fused down
+  #    was the m4096 chunk-prefill TTFT regression (+35%) and the bucket-8/64 TPOT regression of the
+  #    2026-07-31 serving A/B — the published image (pre-#446) cut the down via PLACE@cone rows.
   # The m2048/m4096 gate_up cut totals trail eager in the STD lane (the FP32-accumulate half-rate
   # wall on the wide matmul piece); the fm lane's piece tier covers those widths at >=1.0x.
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m8.lin.cut
+    M: 8
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 76.7
+    cublas_us: 101.0
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m64.lin.cut
+    M: 64
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 84.2
+    cublas_us: 100.0
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m2048.lin.cut
+    M: 2048
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 1373.2
+    cublas_us: 1276.0
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m4096.lin.cut
+    M: 4096
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 2708.4
+    cublas_us: 2513.0
   - kernel: norm_linear
     name: gemma4_12b.norm_qkv.m1.lin.cut
     M: 1
@@ -4839,3 +4880,39 @@ configs:
     knobs: {PLACE: 'cut'}
     emmy_us: 7290.4
     cublas_us: 4398.0
+
+  # pw.n15360 at the remaining serving widths (2026-07-31): the geglu-materialize piece of the
+  # mlp_down cut routes here once the routing-key fix lands (m8/m32/m256 were already covered by
+  # the tiers above); memory-bound f4 sweep, same config at every width.
+  - kernel: pointwise
+    name: gemma4_12b.pw.n15360.m64
+    M: 64
+    N: 15360
+    dtype: 'fp16'
+    knobs: {WORK: '', TILE: 'f4', REDUCE: '', STAGE: '', RASTER: ''}
+    emmy_us: 1.2
+    cublas_us: 2.0
+  - kernel: pointwise
+    name: gemma4_12b.pw.n15360.m192
+    M: 192
+    N: 15360
+    dtype: 'fp16'
+    knobs: {WORK: '', TILE: 'f4', REDUCE: '', STAGE: '', RASTER: ''}
+    emmy_us: 2.6
+    cublas_us: 4.0
+  - kernel: pointwise
+    name: gemma4_12b.pw.n15360.m2048
+    M: 2048
+    N: 15360
+    dtype: 'fp16'
+    knobs: {WORK: '', TILE: 'f4', REDUCE: '', STAGE: '', RASTER: ''}
+    emmy_us: 59.3
+    cublas_us: 59.0
+  - kernel: pointwise
+    name: gemma4_12b.pw.n15360.m4096
+    M: 4096
+    N: 15360
+    dtype: 'fp16'
+    knobs: {WORK: '', TILE: 'f4', REDUCE: '', STAGE: '', RASTER: ''}
+    emmy_us: 163.3
+    cublas_us: 163.0

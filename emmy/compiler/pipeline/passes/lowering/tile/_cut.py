@@ -72,10 +72,39 @@ def _card_has_routing(gpu_name, cap) -> bool:
         return False
 
 
-def _routing_entry(ctx, knobs: dict):
+def _has_computed_a(node) -> bool:
+    """Whether the tree carries a computed-A :class:`Contraction` — an ``a`` edge stored INLINE
+    (a cone node) rather than materialized (a gmem ``Load``). The structural twin of the offer
+    signal ``greedy._fork_shape_key`` keys the fused convention on (only computed-A resolvers
+    enumerate the ``sync`` compute-fill): at the routing consult no offer exists yet, but the
+    routing reference tree does, and the edge inhabitant is the same fact."""
+    if isinstance(node, Contraction) and not isinstance(node.a, Load):
+        return True
+    if isinstance(node, Map):
+        children = node.sources
+    elif isinstance(node, Fold):
+        children = node.operands
+    elif isinstance(node, Contraction):
+        children = (node.a, *(ch.b for ch in node.channels))
+    else:
+        return False
+    return any(_has_computed_a(c) for c in children if isinstance(c, (Map, Fold, Contraction)))
+
+
+def _routing_entry(ctx, knobs: dict, root=None):
     """The live card's ROUTING golden for this kernel's ``(kind, shape)`` — fastest-first, or
     ``None``. Gated like the schedule golden tier: goldens are -O3 truth, so a correctness-lane
-    (-O1) compile never consults them; off-GPU / unseeded cards read an empty set."""
+    (-O1) compile never consults them; off-GPU / unseeded cards read an empty set.
+
+    The consult key follows the FUSED-KIND CONVENTION ``greedy._fork_shape_key`` documents: a
+    computed-A cone's stamped histogram cannot fire ``kind="fused"`` (the statistic — when there
+    is one at all — lives in the nested A-cone sub-body; a stat-free cone like the geglu→down
+    edge has nothing to fire on), so a raw ``from_s_features`` key reads ``kind=""`` and misses
+    every ``fused``-keyed routing entry. The fork-side rebuild reads the offer's sync-STAGE
+    signal; here no offer exists yet, so the rebuild reads the TREE instead — a computed-A
+    contraction is structural (``_has_computed_a``). Found live: the gemma-4 geglu→down cut
+    entries never fired in-model, so every ``mlp_down`` deployed the fused computed-A form —
+    the m4096 chunk-prefill TTFT regression of the 2026-07-31 article-repro session."""
     from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS  # noqa: PLC0415
     from emmy.compiler.pipeline.search.prior.base import _O3_OPT  # noqa: PLC0415
@@ -91,6 +120,10 @@ def _routing_entry(ctx, knobs: dict):
         return None  # goldens are -O3 truth — the correctness lane never routes off an entry
     try:
         key = ShapeKey.from_s_features(knobs)
+        if key.kind == "" and root is not None and _has_computed_a(root):
+            from dataclasses import replace  # noqa: PLC0415
+
+            key = replace(key, kind="fused", is_warp=True)
         cap = tuple(ctx.compute_capability)
         entries = [
             g
@@ -168,7 +201,7 @@ def route_cut(ctx, knobs: dict, root, stores: tuple = (), free: tuple = ()) -> S
         if site is None or site not in seams:
             continue
         return site if value == _CUT else None  # an explicit fuse pin suppresses any routing entry
-    entry = _routing_entry(ctx, knobs)
+    entry = _routing_entry(ctx, knobs, root)
     if entry is None:
         return None
     cuts = [k for k, v in entry.knobs.items() if str(v) == _CUT]

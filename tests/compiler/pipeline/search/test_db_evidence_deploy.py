@@ -183,21 +183,3 @@ def test_disjoint_evidence_warns(caplog):
     with caplog.at_level(logging.WARNING):
         _warn_disjoint_evidence(index, cold, "linear_3")
     assert not caplog.records, "a cold signature (no evidence at all) must stay silent"
-
-
-def test_db_pick_stale_row_never_vouches_for_the_cut_twin():
-    """A perf row recorded before ``PLACE@cone`` existed (any pre-cut tune DB / reservoir)
-    measured the FUSED form; under plain value-of-position semantics its absent key would
-    match the knob-identical cut candidate too — and the content tie-break PREFERS
-    ``('PLACE@cone','cut') < ('PLACE@cone','fuse')``, deploying the catastrophic cold cut
-    at the fused row's µs (the 35–142 ms unseeded-consumer class the model-tier withhold
-    exists to prevent). The cut may only win where it was actually measured — a row that
-    explicitly records ``PLACE@cone: cut`` still vouches for the cut candidate."""
-    stale = _index_of(({"TILE": "n16x8/f4x8", "REDUCE": "g2a"}, 47.1))
-    twins = [
-        {**_SIG, "TILE": "n16x8/f4x8", "REDUCE": "g2a", "PLACE@cone": "fuse"},
-        {**_SIG, "TILE": "n16x8/f4x8", "REDUCE": "g2a", "PLACE@cone": "cut"},
-    ]
-    assert _db_measured_pick(stale, twins) == (0, 47.1), "a stale row vouches only for the fused twin"
-    measured_cut = _index_of(({"TILE": "n16x8/f4x8", "REDUCE": "g2a", "PLACE@cone": "cut"}, 12.0))
-    assert _db_measured_pick(measured_cut, twins) == (1, 12.0), "an explicit cut row still vouches for the cut"

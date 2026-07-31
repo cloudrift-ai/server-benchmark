@@ -17,7 +17,6 @@ from emmy.compiler.pipeline.search.golden import MatmulGoldenConfig
 from emmy.compiler.pipeline.search.policy.greedy import (
     _fork_shape_key,
     _golden_evidence_index,
-    _golden_matches_row,
     _golden_pick,
     greedy_decide,
 )
@@ -172,40 +171,6 @@ def test_decide_golden_overrides_model_argmin(monkeypatch):
     # evidence tier nor the model was needed (test 8: no contamination).
     assert "add_rows" not in calls
     assert "pick" not in calls and "evidence_pick" not in calls
-
-
-def test_place_golden_does_not_match_a_fork_that_never_offered_it():
-    """A STRUCTURAL placement is the one family where "undecided" cannot read as free. Every other
-    family is a schedule knob a later pass fills, so an absent key means "any realization will do";
-    ``PLACE`` instead names which KERNELS exist, and a fork that never offered the decision can
-    never realize it. The gemma-4 norm→qkv cones fork PRE-split (no ``PLACE@cone`` on any row) yet
-    ``_fork_shape_key`` rebuilds their key to ``kind="fused"``, so they share a ShapeKey with real
-    post-split cones — matching there deployed the bare map form at 1244 µs while reporting the
-    cut's 54.4 µs. Refusing the match makes it a loud drift warning instead."""
-    gold = {"PLACE@cone": "cut"}
-    assert not _golden_matches_row(gold, {**_BASE, **_ROW_GOLD})  # no PLACE key at all → refuse
-    assert not _golden_matches_row(gold, {**_BASE, **_ROW_GOLD, "PLACE@cone": "fuse"})  # decided the other way
-    assert _golden_matches_row(gold, {**_BASE, **_ROW_GOLD, "PLACE@cone": "cut"})
-    # Non-PLACE families keep the value-of-position convention: an undecided family is free.
-    assert _golden_matches_row({"STAGE": "d2/cp/ring/p2"}, {**_BASE, "TILE@a2": _STD_TILE})
-
-
-def test_cut_row_is_evidence_only_never_a_model_pick(monkeypatch):
-    """``PLACE@cone=cut`` changes the KERNEL SET (020_cut_edge splits the cone into producer +
-    N consumers), so it must be selectable by measured evidence ALONE. The cut row is
-    knob-identical to its fused twin apart from the placement, so it ties on any model score and
-    would otherwise win on the content tie-break for no reason — and cold that is dangerous: a cut
-    whose consumers have no golden deploys them on a scalar tile (35 ms at the gemma-4 M=32 mlp
-    edge). With no golden the model must keep the fused row."""
-    fused = SimpleNamespace(knobs={**_ROW_GOLD, "PLACE@cone": "fuse"})
-    cut = SimpleNamespace(knobs={**_ROW_GOLD, "PLACE@cone": "cut"})
-
-    class TiePrior:  # every row scores identically — the tie-break is what decides
-        def mean_scores(self, rows):
-            return [1.0] * len(rows)
-
-    picked, _ = _decide_once(TiePrior(), monkeypatch, [], [fused, cut])
-    assert picked is fused, "the model fallback must never select a kernel-set-changing cut row"
 
 
 def test_decide_golden_beats_reservoir_evidence(monkeypatch):

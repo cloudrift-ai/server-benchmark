@@ -28,9 +28,10 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   **`operands`** (the CLOSED inputs, each an edge, bound POSITIONALLY to the lift params); the bilinear
   **`Contraction`** node (1s) — every recognized contraction stores as this kind: its own reduce `k_axis`, the
   shared `a` operand edge and the product `Channel`s `(b_i, acc_i)` (arity N = the fused gate⊗up edge; sharing is
-  the node's arity), with the placement/schedule fields (`axes`, `lead_axes`, `tile`, `stage`) UNSET in the stored
-  term — caller facts, stamped onto a `replace()` copy at the point of use (`Contraction.placed`, a pure field
-  stamp; `as_fold()` survives only as the node's DERIVED λ reading, consumed by the cross-partition `Reduction`
+  the node's arity) and NOTHING ELSE — placement (`(m, n)` axes, the leading grid axes) and schedule
+  (`TilePlan`/`Stage`) are caller facts living on the `TileOp` (`place` / the `schedule` dict), bound to the node
+  at the point of use as the lowering-side view `passes/lowering/_placed.Placed`; `as_fold()` survives only as the
+  node's DERIVED λ reading, consumed by the cross-partition `Reduction`
   machinery and the PLANAR demotion, its loop body byte-identical to the node's own) — and the lift/projection
   wrapper `Map` (`fn: Lambda` + `sources`, bound positionally; `fn.results` replaced the `out` last-def convention).
   The serial step and the `Accum` forms are DERIVED (combine at the singleton; the twist
@@ -61,12 +62,13 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   validation reading, living with its one consumer in `passes/lowering/tile/_cut.py`) and decides cut legality: closed subtrees may hoist to edges; combine's derived material —
   flash's PV, whose `P` reads the running state — sits BELOW the seam lattice, a derived schedule site excluded
   from PLACE (`Site.derived`), while flash's QK operand edge IS a PLACE
-  site. **The `Contraction`'s placement/schedule fields are STAMPED, never stored**: the stored node is pure
-  algebra (`k_axis` + the `a` edge + `Channel`s), and the placed reading the tensor-core/staged tiers require —
-  the `(m, n)` `Side` geometry + `tile`/`stage` — is stamped onto a `replace()` copy by `Contraction.placed(m,
-  n, lead, tile, stage)` from the CALLER's placement axes (trailing grid for a root kernel; `place.free` threads
-  to the materializer via `Ctx.free` for flash) and the `TileOp.schedule` slices (`ir.shared_operand` is the
-  placement-free cone read). The A/B asymmetry that is real — A M-resident/compute-fillable, B streamed — is a
+  site. **A `Contraction` carries NO placement and NO schedule**: the node is pure algebra (`k_axis` + the `a`
+  edge + `Channel`s), so its identity (`==` / `hash` / `term_key`) is its algebra alone, and the placed reading
+  the tensor-core/staged tiers require — the `(m, n)` `Side` geometry + `tile`/`stage` — is a lowering-side VIEW
+  (`passes/lowering/_placed.place(node, m, n, lead, tile, stage) -> Placed`, the `_reduction.Reduction` pattern)
+  built from the CALLER's placement axes (trailing grid for a root kernel; `place.free` threads to the
+  materializer via `Ctx.free` for flash) and the `TileOp.schedule` slices; the view proxies every algebra read to
+  the node and owns only the placement-derived geometry (`ir.shared_operand` is the placement-free cone read). The A/B asymmetry that is real — A M-resident/compute-fillable, B streamed — is a
   SCHEDULE fact read off the node's roles (`isinstance(c.b, Load)` eligibility gates), not a storage fact. A cone's
   SOURCE is the row-invariant prologue (the per-row statistic) and its `body` the per-cell normalize, so the K seam
   is the node boundary (`ops.cone_seam`). A projection has ONE home, the wrapping `Map.fn` — never a node field —

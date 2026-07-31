@@ -73,6 +73,8 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Cond, Init, Load, Select, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile.ir import Contraction, Fold, Map
 from emmy.compiler.pipeline.passes.lowering._addr import gmem_row_stride
+from emmy.compiler.pipeline.passes.lowering._placed import Placed
+from emmy.compiler.pipeline.passes.lowering._placed import place as place_view
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _clamp_last, _f16acc, unroll_ok
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
@@ -423,9 +425,9 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # originals); the score's stream axis is the fold's own, read through a slice partial's window
     # PARENT so the view carries the pre-slice geometry the fragment clamps were built against.
     kv_parent = red.axis.window.parent if red.axis.window is not None else red.axis
-    qk: Contraction = partial[0].placed(ctx.free[-2], kv_parent, tile=ctx.sched.tile_of(partial[0]))
+    qk: Placed = place_view(partial[0], ctx.free[-2], kv_parent, tile=ctx.sched.tile_of(partial[0]))
     pv_fold = next(s for s in partial[1:] if isinstance(s, Contraction))
-    pv: Contraction = pv_fold.placed(ctx.free[-2], ctx.free[-1], tile=ctx.sched.tile_of(pv_fold))
+    pv: Placed = place_view(pv_fold, ctx.free[-2], ctx.free[-1], tile=ctx.sched.tile_of(pv_fold))
     atom = qk.tile.atom
     shape = atom.shape
     atom_n = shape[1]

@@ -46,11 +46,13 @@ register value); the **tensor-core seam** is the view arm in `_bind` — an outp
 extends `Handle` with the mma fragment descriptor `(mma_role, shape, dtype)` and `_emit`'s `Ctx` grows the warp binding +
 the inbound `wires` (flash's score fragment feeding P@V's A operand).
 
-The placed `Contraction` is the stored node with the caller facts **stamped** onto a copy (`Contraction.placed`
-— output axes off the placement: the trailing grid for a root kernel, `Ctx.free` for the flash realizer; `tile`/`stage`
-off the `TileOp.schedule` slices) — binding-driven for both atoms, with **no per-atom subclass** — and cleanly
-splits the **algebra params** (what to contract: the m/n output `axes` + the `k_axis`, the leading batch `lead_axes`, the
-shared `a` operand edge plus the product `channels` `(b_i, acc_i)` — every edge a gmem `Load` (materialized) or the
+The `Placed` view (`lowering/_placed.py`) is the stored node BOUND to the caller facts — never a copy of it with
+fields stamped on: output axes off the placement (the trailing grid for a root kernel, `Ctx.free` for the flash
+realizer), `tile`/`stage` off the `TileOp.schedule` slices, and every algebra read proxied through to the node.
+It is binding-driven for both atoms, with **no per-atom subclass**, and cleanly
+splits the **placement/schedule the view owns** (the m/n output `axes`, the leading batch `lead_axes`, the
+`TilePlan`/`Stage`, and the `Side` geometry derived from them) from the **algebra the node owns** (what to
+contract: the `k_axis`, the shared `a` operand edge plus the product `channels` `(b_i, acc_i)` — every edge a gmem `Load` (materialized) or the
 computed node itself, stored inline (flash PV's
 `P = exp(S − M)`, produced from an in-register score, not a gmem address); a projection
 is NEVER a node field, its one home is the wrapping `Map.body`. The edges share ONE type: the A/B asymmetry that is real

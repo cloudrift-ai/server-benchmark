@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.stmt.passes import rewrite
@@ -33,11 +32,9 @@ def _cone(name: str = "xhat") -> Map:
 def _node(a, *channels: tuple[str, str]) -> Contraction:
     """A contraction over operand edge ``a`` with one ``(acc, weight-buffer)`` channel per arg."""
     return Contraction(
-        axes=(Axis("m", 128), Axis("n", 128)),
         k_axis=Axis("k", 256),
         a=a,
         channels=tuple(Channel(b=Load(name=f"{acc}_b", input=w, index=(Var("k"), Var("n"))), acc=acc) for acc, w in channels),
-        tile=TilePlan(),
     )
 
 
@@ -131,7 +128,9 @@ def test_a_capturing_inline_operand_is_legal_but_reports_its_capture() -> None:
     fold = node.as_fold()
     assert lower(fold)  # lowers fine — position in the enclosing body is what makes it legal
     cone = node.a
-    axes = _axis_names(fold) | {a.name for a in node.axes}  # the output axes are placement facts
+    # The output axes are the CALLER's placement — never on the node — so the cut supplies them
+    # from ``TileOp.place`` alongside the term's own iteration names.
+    axes = _axis_names(fold) | {"m", "n"}
     assert _captured_values(cone, axes | _axis_names(cone)) == ("m_run",)
 
 

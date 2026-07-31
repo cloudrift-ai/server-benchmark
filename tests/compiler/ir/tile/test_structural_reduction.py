@@ -137,11 +137,9 @@ def _contraction() -> Contraction:
     a = Load(name="a_e", input="A", index=(Var("m"), Var("k")))
     b = Load(name="b_e", input="B", index=(Var("k"), Var("n")))
     return Contraction(
-        axes=(Axis("m", 128), Axis("n", 128)),
         k_axis=Axis("k", 256),
         a=a,
         channels=(Channel(b=b, acc="acc"),),
-        tile=TilePlan.parse("n2/f2"),
     )
 
 
@@ -321,9 +319,9 @@ def test_flash_op_is_a_two_contraction_tree() -> None:
     folds = [s for s in red.step_stmts() if isinstance(s, Contraction)]
     assert len(folds) == 2 and folds[0].out == "sacc", "the QK score fold is the derived evaluation's head node"
     assert folds[0] is red.operands[0], "the QK score is the hoisted operand edge (step 7)"
-    # The view's output axes are placement facts — placeholders suffice for the operand reads.
-    pv = folds[1].placed(folds[1].axis, folds[1].axis)
-    assert pv is not None and pv.a_computed and pv.a_name == "O_i__p", "PV's A operand is the inline exp weight P"
+    # Algebra reads come straight off the stored node — placement is the ``Placed`` view's job.
+    pv = folds[1]
+    assert pv.a_computed and pv.a_name == "O_i__p", "PV's A operand is the inline exp weight P"
     assert pv.a.out == "O_i__p"
     assert pv.acc == "O_i__pv"
     # The reduce loop flattens BOTH folds; the O-fold reads the PV output (no inline v·P).
@@ -359,18 +357,16 @@ def test_out_store_index_reproduces_output_layout() -> None:
 # --- computed (register-resident) A operand: the tensor-core-flash PV crux ---------------------- #
 
 
-def _pv_contraction(tile: str = "") -> Contraction:
+def _pv_contraction() -> Contraction:
     """A PV-style contraction whose **A operand is computed**, not a gmem ``Load``:
     ``O[m, d] = Σ_j P[m, j]·V[j, d]`` with ``P = exp(S[m, j])`` produced from an in-register score
     (the flash PV shape — its A is register-resident, so the operand edge holds the cone NODE
     inline)."""
     cone = Map(body=Body((Load(name="s_e", input="S", index=(Var("m"), Var("j"))), Assign(name="p", op="exp", args=("s_e",)))))
     return Contraction(
-        axes=(Axis("m", 8), Axis("d", 8)),
         k_axis=Axis("j", 8),
         a=cone,
         channels=(Channel(b=Load(name="v_e", input="V", index=(Var("j"), Var("d"))), acc="oblk"),),
-        tile=TilePlan.parse(tile) if tile else TilePlan(),
     )
 
 
@@ -455,11 +451,9 @@ def _computed_b_contraction(a_load: bool = True) -> Contraction:
     score, an on-the-fly dequant). The mirror of ``_pv_contraction``'s computed A."""
     cone = Map(body=Body((Load(name="w_e", input="W", index=(Var("k"), Var("n"))), Assign(name="wn", op="exp", args=("w_e",)))))
     return Contraction(
-        axes=(Axis("m", 8), Axis("n", 8)),
         k_axis=Axis("k", 8),
         a=Load(name="a_e", input="A", index=(Var("m"), Var("k"))) if a_load else cone,
         channels=(Channel(b=cone, acc="o"),),
-        tile=TilePlan(),
     )
 
 

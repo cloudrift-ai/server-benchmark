@@ -72,6 +72,8 @@ from emmy.compiler.ir.tile.ops import lower as lower_op
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.knob import canon_family_value, family_of, values_equal
 from emmy.compiler.pipeline.passes.lowering._addr import gmem_row_stride
+from emmy.compiler.pipeline.passes.lowering._placed import Placed
+from emmy.compiler.pipeline.passes.lowering._placed import place as place_view
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import make_cone, map_cone, semiring_binding
 from emmy.compiler.pipeline.pipeline import LoweringError
 from emmy.compiler.pipeline.search.space import (
@@ -1455,7 +1457,7 @@ def _check_warp_static_k(kernel, wt) -> None:
         )
 
 
-def _contraction_node(node, place, tile_plan: TilePlan) -> tuple[Contraction, Body]:
+def _contraction_node(node, place, tile_plan: TilePlan) -> tuple[Placed, Body]:
     """The high-level :class:`Contraction` structural node for a tiled ``CONTRACTION`` leaf. A
     kernel recognition already nodified (the per-cell scalar contraction — ``_nodify_contraction``
     in ``010_recognize``) only swaps the ``tile`` schedule field; a still-``Map`` form (a fused /
@@ -1472,19 +1474,22 @@ def _contraction_node(node, place, tile_plan: TilePlan) -> tuple[Contraction, Bo
         # The recognizer's ``Map(body=projection, sources=(Contraction,))`` spelling — the ONE
         # node under the wrapper is the schedulable unit, the projection its ``Map`` body. The
         # placed reading is STAMPED here, its output axes the placement's trailing grid.
-        return node.sources[0].placed(grid[-2], grid[-1], tuple(grid[:-2]), tile=tile_plan), node.body
+        return place_view(node.sources[0], grid[-2], grid[-1], tuple(grid[:-2]), tile=tile_plan), node.body
     if isinstance(node, Contraction) and len(grid) >= 2:
-        return node.placed(grid[-2], grid[-1], tuple(grid[:-2]), tile=tile_plan), Body(())
+        return place_view(node, grid[-2], grid[-1], tuple(grid[:-2]), tile=tile_plan), Body(())
     a_load, b_load, acc, epilogue = semiring_binding(node, place.grid)
     kaxis = reduce_loop(node).axis
     return (
-        Contraction(
-            axes=(grid[-2], grid[-1]),
-            k_axis=kaxis,
-            a=a_load if isinstance(a_load, Load) else make_cone(a_load, kaxis.name),
-            channels=(Channel(b=b_load, acc=acc),),
+        place_view(
+            Contraction(
+                k_axis=kaxis,
+                a=a_load if isinstance(a_load, Load) else make_cone(a_load, kaxis.name),
+                channels=(Channel(b=b_load, acc=acc),),
+            ),
+            grid[-2],
+            grid[-1],
+            tuple(grid[:-2]),
             tile=tile_plan,
-            lead_axes=tuple(grid[:-2]),
         ),
         epilogue,
     )
@@ -1578,15 +1583,13 @@ def _splitk_option(
         # else that does not index K — so it stays whole in every partition (that redundancy is what
         # the split trades for parallelism). Only the cone's ``body``, the per-cell normalize, is
         # σ-reindexed to absolute k. No stmt scan: the K seam is the node boundary.
-        inner = replace(
-            inner,
+        inner = inner.replace_node(
             k_axis=kslice,
             a=cone.with_body(Body(tuple(st.rewrite(lambda nm: nm, sigma) for st in cone.body))),
             channels=tuple(replace(ch, b=replace(ch.b, index=tuple(sigma.apply(e) for e in ch.b.index))) for ch in inner.channels),
         )
     else:
-        inner = replace(
-            inner,
+        inner = inner.replace_node(
             k_axis=kslice,
             a=replace(inner.a, index=tuple(sigma.apply(e) for e in inner.a.index)),
             channels=tuple(replace(ch, b=replace(ch.b, index=tuple(sigma.apply(e) for e in ch.b.index))) for ch in inner.channels),
@@ -1604,7 +1607,7 @@ def _splitk_option(
     # The state is the sliced node's own — the 1-component additive accumulator for a plain
     # matmul, the N-component product-monoid state for a multi-channel (gate/up) node — so the
     # split finalize folds exactly the state the kernel accumulates.
-    inner_fold = inner.stored()
+    inner_fold = inner.node
     # ONE composition rule (step 7 — λ-spelled): the outer reduce is the IDENTITY lift over the
     # sliced contraction operand, its combine the componentwise additive ⊕ over the same
     # accumulator names — the reassociation ``fold_k = fold_{ksplit} ∘ fold_{kslice}``. The
@@ -1666,7 +1669,7 @@ def _warp_option(
     # Re-wrap the recognizer's projecting ``Map`` around the STORED node (materialize peels it into
     # the store tail — the same ``project ∘ contract`` spelling the reduce tiers use). The emitted
     # term embeds the UNSTAMPED node — the resolved tile/stage live in ``TileOp.schedule``.
-    fold = node.stored()
+    fold = node.node
     emitted = Map(body=proj, sources=(fold,)) if len(proj) else fold
     # Warp specialization rides ORTHOGONAL to the tile/stage just resolved: an optional WSPEC row /
     # pin splits the warps into roles over this fixed pipeline (gated on the RESOLVED ``stage`` — an
@@ -1737,7 +1740,7 @@ def _tile_option(
             # (per-cell / coop-K / unbindable forms store nothing: nothing downstream would read a stage).
             if stage_spec:
                 stage = _resolve_scalar_stage(node, Stage.parse(stage_spec), tile.inputs, budget)
-            fold = node.stored()
+            fold = node.node
             op = Map(body=proj, sources=(fold,)) if len(proj) else fold
             slices = [("TILE", fold, node.tile), ("STAGE", fold, stage)]
     elif reduce_spec:
@@ -2202,10 +2205,10 @@ def _twisted_pair(op, free) -> tuple[Fold, Contraction, Contraction, Contraction
     if len(tail_folds) != 1:
         return None
     pv_fold = tail_folds[0]
-    pv = pv_fold.placed(free[-2], free[-1])
+    pv = place_view(pv_fold, free[-2], free[-1])
     if not pv.a_computed:
         return None
-    return red, head_fold, pv_fold, head_fold.placed(free[-2], red.axis), pv
+    return red, head_fold, pv_fold, place_view(head_fold, free[-2], red.axis), pv
 
 
 def _twisted_chain_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp | None:

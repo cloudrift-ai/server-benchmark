@@ -408,8 +408,13 @@ Tile IR (`tile/ir.py`, `tile/ops.py`) keeps the stored term pure algebra and the
 the structural-IR root `op` directly — a `Map` / `Fold` / `Contraction` (the three stored node kinds, defined in
 `tile/ir.py`) — plus the root-global free→grid `Placement` (`place`), the worker inventory (`work`) and warp split
 (`workers`); every per-node schedule slice (`TilePlan` / `ReducePlan` / `Stage`) lives in the tree-path-keyed
-`TileOp.schedule` dict (1r), and the contraction node's placement/schedule fields are stamped onto a `replace()` copy
-at the point of use (1s), never stored. The `Kernel` / `TileSchedule` wrapper is gone. A kernel's structure is read
+`TileOp.schedule` dict (1r). **No node kind carries a schedule field at all**: a `Contraction` is `k_axis` + the `a`
+edge + its `Channel`s and nothing more, so a node's `==` / `hash` / `ops.term_key` is its algebra — two kernels
+differing only in tile key identically, and no emission path can leak a schedule into a stored term. The placement +
+schedule a tier needs is bound to the node at the point of use as a lowering-side view
+(`passes/lowering/_placed.Placed`, the `_reduction.Reduction` pattern): it holds the `(m, n)` output axes, the
+`lead_axes`, the `TilePlan` / `Stage` and the `Side` geometry derived from them, and proxies every algebra read
+through to the node. The `Kernel` / `TileSchedule` wrapper is gone. A kernel's structure is read
 structurally off the node (`ops.axis_role` — the contraction IS the `Contraction` kind; a fold's role derives),
 not a bespoke Python type per schedule.
 

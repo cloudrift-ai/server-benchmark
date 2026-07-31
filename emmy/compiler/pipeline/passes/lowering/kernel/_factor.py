@@ -57,6 +57,8 @@ from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, S
 from emmy.compiler.ir.tile import FoldMove, Level, ReducePlan, ReduceStage
 from emmy.compiler.ir.tile.ir import Contraction, Fold, Map, Side, effect_tail
 from emmy.compiler.ir.tile.ops import cone_seam
+from emmy.compiler.pipeline.passes.lowering._placed import Placed
+from emmy.compiler.pipeline.passes.lowering._placed import place as place_view
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction, loop_state_head
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import copy_cell, reduce_codegen, shrink_axis, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import sync_row_fill
@@ -413,14 +415,14 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
       one-thread-per-cell fold: the per-cell body (:func:`_emit`; a serial reduce ``Loop`` sits
       inside it) + ``tail`` + the ``out_val`` store glue is the whole fold region."""
     grid = tuple(ctx.grid)
-    if isinstance(op, Contraction) and op.axes is None and ctx.sched.tile_of(op) is not None and len(grid) >= 2:
+    if isinstance(op, Contraction) and ctx.sched.tile_of(op) is not None and len(grid) >= 2:
         # The STORED node is pure algebra; the tiled reading is STAMPED here — its output axes the
         # kernel grid's trailing pair (a split partial's ksplit rides the leading grid, so the lead
         # axes fall out of the same read) and its tile / stage the schedule slices. A stored node
         # WITHOUT a TILE slice keeps ``axes=None`` and takes the reduce tiers below (the per-cell /
         # coop-K forms).
-        op = op.placed(grid[-2], grid[-1], tuple(grid[:-2]), tile=ctx.sched.tile_of(op), stage=ctx.sched.stage_of(op))
-    if isinstance(op, Contraction) and op.axes is not None:
+        op = place_view(op, grid[-2], grid[-1], tuple(grid[:-2]), tile=ctx.sched.tile_of(op), stage=ctx.sched.stage_of(op))
+    if isinstance(op, Placed):
         epi = list(tail)
         if not has_write(epi):
             epi = with_store(epi, ctx.output, grid, op.out)

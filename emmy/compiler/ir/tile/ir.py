@@ -80,7 +80,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.expr import Expr, Literal
-from emmy.compiler.ir.schedule import Placement, Stage, TilePlan, WarpSpec
+from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.stmt import (
     Accum,
     Assign,
@@ -98,7 +98,7 @@ from emmy.compiler.ir.stmt import (
 from emmy.compiler.ir.stmt.body import _member_reads
 
 if TYPE_CHECKING:
-    from emmy.compiler.ir.atom import Atom
+    pass
 
 
 def _ext_expr(axis: Axis) -> Expr:
@@ -844,30 +844,33 @@ class Contraction(Stmt):
     """The bilinear contraction node — the THIRD stored node kind (1s, next to :class:`Fold` /
     :class:`Map`): every recognized contraction — root matmul cell, fused computed-A edge, flash's
     hoisted QK operand edge, the derived PV, split-K's sliced partial — stores as this node, and
-    the node kind IS the ``CONTRACTION`` role (no bilinear parse). The STORED form is pure algebra:
-    the contraction ``k_axis`` (the node's own reduce axis), the shared ``a`` operand edge and the
-    product ``channels`` ``(b_i, acc_i)``; the projection has ONE home — the wrapping
-    :class:`Map`'s body — never a node field. The placement / schedule fields (``axes`` ``(m, n)``,
-    ``lead_axes``, ``tile``, ``stage``) are UNSET in the stored term — caller facts, stamped onto a
-    ``replace()`` copy at the point of use (:meth:`placed` — the materializer's / option
-    builders' placed reading; the ``tile`` / ``stage`` slices live in ``TileOp.schedule``, keyed by
-    the codec against this very node). :func:`ops.lower` / ``ops.reduce_loop`` flatten it to the
+    the node kind IS the ``CONTRACTION`` role (no bilinear parse). The node is pure algebra AND
+    NOTHING ELSE: the contraction ``k_axis`` (the node's own reduce axis), the shared ``a`` operand
+    edge and the product ``channels`` ``(b_i, acc_i)``; the projection has ONE home — the wrapping
+    :class:`Map`'s body — never a node field. Placement (the ``(m, n)`` output axes, the leading
+    grid axes) and schedule (``TilePlan`` / ``Stage``) are CALLER facts and live nowhere on the
+    node: the schedule slices' one home is ``TileOp.schedule`` (keyed by the tree-path codec
+    against this very node, read through ``ops.Sched``), the placement's is ``TileOp.place``, and a
+    tier binds both to the node at the point of use as a lowering-side VIEW
+    (``passes/lowering/_placed.Placed``, the ``_reduction.Reduction`` pattern). So a node's
+    identity IS its algebra — ``==`` / ``hash`` / :func:`ops.term_key` cannot see a schedule, and
+    no emission path can leak one into a stored term. :func:`ops.lower` / ``ops.reduce_loop``
+    flatten it to the
     synthesized mul-add ``CONTRACTION`` loop nest (:attr:`loop`), the same ``for k: v = a·b; acc
     += v`` form ``_atom._ScalarOps.reduce`` register-tiles through the shared ``_contract_kloop``
-    skeleton. Keeping the schedule in swappable stamped fields is what lets the same operand/acc
-    params be tiled by a different ``TilePlan`` (the flash inner QK/PV reuse). Arity N ≥ 2 is the
-    fused sibling edge (gate⊗up) — a product semiring outputting N matrices over ONE shared A,
-    scheduled and lowered as one unit under this node's single ``tile`` / ``stage`` row.
+    skeleton. Keeping the schedule OFF the node is what lets the same operand/acc params be tiled
+    by a different ``TilePlan`` (the flash inner QK/PV reuse) — two views over one term. Arity N ≥ 2
+    is the fused sibling edge (gate⊗up) — a product semiring outputting N matrices over ONE shared
+    A, scheduled and lowered as one unit under a single ``TILE`` / ``STAGE`` slice.
 
     The contraction LOOP is never stored — both tiers *synthesize* it from the operands:
     ``_atom.reduce_codegen`` lowers the mma atom into ``ldmatrix`` + ``mma.sync`` and the scalar atom into a
     ``for k: acc += a*b`` register-tiled loop — then run the projection peeled off the wrapping
     ``Map`` (``acc`` is the SSA name the synthesized reduce produces and the projection consumes). The
-    operand buffers ride :meth:`external_reads`; the node has no nested ``Body``. ``_factor.factorize`` reads the
-    **derived** geometry below (the ``(m, n)`` :class:`Side` pair — ``tile`` / ``mask`` / ``block`` /
-    ``unit`` per axis — plus ``block_threads`` / ``b_trans``) straight off the placed copy; it's
-    ``@property``, so it stays out of the fields
-    ``structural_key`` digests (the node IS keyed as an intermediate ``KernelOp``). The atom selects
+    operand buffers ride :meth:`external_reads`; the node has no nested ``Body``. ``_factor.factorize``
+    reads the placement-derived geometry (the ``(m, n)`` :class:`Side` pair — ``tile`` / ``mask`` /
+    ``block`` / ``unit`` per axis — plus ``block_threads``) off the ``Placed`` view; only
+    ``b_trans``, a gmem LAYOUT fact of the stored ``b`` edge, stays on the node. The atom selects
     the codegen — there is no separate ``Leaf`` / per-atom subclass. :meth:`as_fold` remains the
     node's DERIVED λ reading — the flat ``(init, combine)`` algebra spelling ``Reduction`` (the
     cross-partition programs) and :meth:`Fold.demoted` consume."""
@@ -889,13 +892,6 @@ class Contraction(Stmt):
     # gmem-direct scalar tier through the same ``contraction_loop`` builder a computed A does.
     a: Load | Map | Fold | Contraction = field(kw_only=True)
     channels: tuple[Channel, ...] = field(kw_only=True)  # the product channels (b_i, acc_i) — params; arity 1 = plain matmul
-    # ---- NOT stored (1s): placement + schedule facts, unset in the stored term and stamped onto a
-    # ``replace()`` copy at the point of use (the materializer / option builders — exactly where the
-    # stamp happens (:meth:`placed`). The stored term stays pure algebra. ---------- #
-    tile: TilePlan = field(default_factory=TilePlan)  # the schedule: leaf atom + unit/register widths + K-chunk
-    lead_axes: tuple[Axis, ...] = ()  # placement: the leading (batch / ksplit) grid axes
-    stage: Stage | None = None  # the schedule: the resolved operand smem pipeline (None = gmem-direct)
-    axes: tuple[Axis, Axis] | None = None  # placement: the tiled output (m_axis, n_axis)
 
     @property
     def out(self) -> str:
@@ -1058,47 +1054,6 @@ class Contraction(Stmt):
         return self.as_fold().demoted()
 
     @property
-    def m_axis(self) -> Axis:
-        return self.axes[0]
-
-    @property
-    def n_axis(self) -> Axis:
-        return self.axes[1]
-
-    @property
-    def atom(self) -> Atom:
-        return self.tile.atom
-
-    # ---- the (m, n) output sides: each axis paired with its derived per-CTA tile geometry (width /
-    # unit / register counts, read off the ``tile``) + the bound block/unit var names (the original
-    # m/n names live in the operand indices, so the bound axes take a fresh ``_b`` / ``_u`` suffix).
-    # ``_factor`` threads these as the ``(m, n)`` pair, mirroring the schedule's tuples. ---------- #
-    @property
-    def mn(self) -> tuple[Side, Side]:
-        """The ``(m, n)`` output sides — each output axis paired with its derived per-CTA tile
-        geometry (width / unit / register counts, read off the ``tile``). Built as the pair; :attr:`m`
-        / :attr:`n` index it."""
-        t = self.tile
-        dims = ((t.tile_m, t.units_m, t.reg_m), (t.tile_n, t.units_n, t.reg_n))
-        return tuple(
-            Side(axis=ax, tile=tile, units=units, reg=reg, block=ax.name + "_b", unit=ax.name + "_u")
-            for ax, (tile, units, reg) in zip(self.axes, dims, strict=True)
-        )
-
-    @property
-    def m(self) -> Side:
-        return self.mn[0]
-
-    @property
-    def n(self) -> Side:
-        return self.mn[1]
-
-    @property
-    def block_threads(self) -> int | None:
-        bt = self.tile.block_threads
-        return bt if bt > 1 else None  # None ⇒ the scalar default block size
-
-    @property
     def b_trans(self) -> bool:
         """B stored N×K (the K axis last in its index) vs the canonical B[k, n] — read off the
         primary channel's load, the same test ``_atomize`` made when it bound the operand (channel
@@ -1107,23 +1062,6 @@ class Contraction(Stmt):
         answers ``False`` (every tier that would act on the layout gates on ``isinstance(c.b, Load)``
         first)."""
         return isinstance(self.b, Load) and self.k_axis.name in self.b.index[-1].free_vars()
-
-    # ---- stored ↔ placed: the caller-fact stamp and its inverse ---------- #
-    def placed(
-        self, m_axis: Axis, n_axis: Axis, lead_axes: tuple = (), tile: TilePlan | None = None, stage: Stage | None = None
-    ) -> Contraction:
-        """The PLACED reading of the stored node — a pure field STAMP onto a copy: the output
-        axes are the CALLER's placement facts (the trailing grid axes for a root kernel; a flash
-        consumer supplies its own), the ``tile`` / ``stage`` slices the CALLER's schedule facts
-        (read from ``TileOp.schedule``). The stored term stays unstamped, pure algebra — which is
-        exactly why all of these are parameters and not stored fields."""
-        return replace(self, axes=(m_axis, n_axis), lead_axes=tuple(lead_axes), tile=tile if tile is not None else TilePlan(), stage=stage)
-
-    def stored(self) -> Contraction:
-        """The caller facts stripped back off — the STORED (pure-algebra) form an option builder
-        embeds in the emitted term: no placement axes, no schedule slices (those live in
-        ``TileOp.schedule``, keyed by the codec against this very node)."""
-        return replace(self, tile=TilePlan(), lead_axes=(), stage=None, axes=None)
 
     # ---- the stmt protocol (see ``Fold``): the operand edges are node EDGES, reached by the
     # node-aware walk (``path.sites``) — ``nested()`` stays the no-children default. ---------- #
@@ -1153,9 +1091,10 @@ class Contraction(Stmt):
         src = lambda op, nm: op.input if isinstance(op, Load) else nm  # noqa: E731 — buffer name, else the bound SSA name
         bs = ",".join(src(ch.b, _operand_name(ch.b)) for ch in self.channels)
         accs = ",".join(ch.acc for ch in self.channels)
-        ops = f"{src(self.a, self.a_name)} @ {bs}{t} -> {accs} ({self.atom.name})"
-        out = f"[{self.m_axis.name}, {self.n_axis.name}]" if self.axes is not None else f"[Σ {self.k_axis.name}]"
-        return [f"{indent}Contraction {out} {ops}"]
+        # Algebra only — the placement / schedule the old stamped fields printed here belongs to
+        # the ``Placed`` view, and ``TileOp.pretty_body`` prints the schedule slices beside the term.
+        ops = f"{src(self.a, self.a_name)} @ {bs}{t} -> {accs}"
+        return [f"{indent}Contraction [Σ {self.k_axis.name}] {ops}"]
 
 
 def _loop_ir_fn(params, body, results) -> Lambda:
@@ -1323,8 +1262,6 @@ def _(s: Contraction, rename, sigma, axis_fn):
         k_axis=axis_fn(s.k_axis),
         a=_rewrite(s.a, rename, sigma, axis_fn),
         channels=tuple(replace(ch, b=_rewrite(ch.b, rename, sigma, axis_fn), acc=rename(ch.acc)) for ch in s.channels),
-        axes=tuple(axis_fn(ax) for ax in s.axes) if s.axes is not None else None,
-        lead_axes=tuple(axis_fn(ax) for ax in s.lead_axes),
     )
 
 

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, component_ops, degenerate
 from emmy.compiler.ir.stmt.passes import rewrite
@@ -58,11 +57,9 @@ def test_from_loop_declines_a_non_reproducible_shape() -> None:
 def _view(arity: int = 2) -> Contraction:
     chans = tuple(Channel(b=Load(name=f"b{i}_e", input=f"W{i}", index=(Var("k"), Var("n"))), acc=f"acc{i}") for i in range(arity))
     return Contraction(
-        axes=(Axis("m", 64), Axis("n", 64)),
         k_axis=Axis("k", 256),
         a=Load(name="a_e", input="A", index=(Var("m"), Var("k"))),
         channels=chans,
-        tile=TilePlan(),
     )
 
 

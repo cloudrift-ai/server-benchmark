@@ -321,13 +321,12 @@ def test_norm_linear_cone_is_an_inline_node_tree():
     from emmy.compiler.ir.tile.ops import cone_seam, lower
 
     _, tile = _resolve(_norm_linear_graph(), pick=_is_warp_row)
-    grid = tile.place.grid
     # The single-channel form's projection was ONLY the root ``Write`` — moved to ``TileOp.stores``
     # (1q), so the row stores the BARE product fold (the ``Map`` wrapper dropped with its last stmt).
     fold = tile.op.sources[0] if isinstance(tile.op, Map) else tile.op
     assert len(tile.stores) == 1 and tile.stores[0].write.output == "y"
-    c = fold.placed(grid[-2], grid[-1], tuple(grid[:-2]))
-    assert c is not None and c.a_computed
+    c = fold
+    assert c.a_computed
     cone = c.a
     assert isinstance(cone, Map) and cone.out == c.a_name
     assert cone.sources[0].sources[0].role is AxisRole.PLANAR, "the statistic reduce is the prologue's source"
@@ -381,9 +380,8 @@ def test_mlp_gate_up_nodifies_as_two_channel_product_contraction():
 
     rows, tile = _resolve(_mlp_gate_up_graph(), pick=_is_warp_row)
     assert isinstance(tile.op, Map) and len(tile.op.sources) == 1
-    grid = tile.place.grid
-    node = tile.op.sources[0].placed(grid[-2], grid[-1], tuple(grid[:-2]))
-    assert node is not None and len(node.channels) == 2 and node.a_computed
+    node = tile.op.sources[0]
+    assert len(node.channels) == 2 and node.a_computed
     assert {ch.b.input for ch in node.channels} == {"wg", "wu"}
     # The projection body is PURE (the SwiGLU combine); the root store rides ``TileOp.stores``.
     assert all(s.pure for s in tile.op.body) and not isinstance(tile.op.body[-1], Write)

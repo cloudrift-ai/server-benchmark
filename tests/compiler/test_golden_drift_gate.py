@@ -86,27 +86,50 @@ EXPECTED_GAPS = {
         # 2026-07-30: the PLACE-knob retirement (#446) commented out the fused computed-A
         # goldens that recorded a PLACE@ placement, so every fused norm→linear / geglu fork
         # (kind="fused", across the m1/m8/m32/m2048/m4096 audit widths) is uncovered again.
-        # Burn down by re-recording PLACE-free fused rows (manual --ab; the d*/sync anchor).
-        ShapeKey(free_prod=8192, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
-        ShapeKey(free_prod=8704, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
-        ShapeKey(free_prod=30720, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
+        # 2026-07-31: mostly closed — the reopened norm→linear forks now carry PLACE=cut routing
+        # rows whose pieces resolve each width's seeded stat/scale/matmul tiers (the cut fires
+        # in-model for those cones). The d*/sync fused anchor could NOT be re-recorded: since the
+        # tile-IR 1s commits the staged computed-A form no longer realizes in the ISOLATED golden
+        # snippet (in-model twins still realize it — the m32/m192 fused rows MATCH here), so no
+        # new fused row can be honestly benched. The four mlp_down_fused keys below stay open:
+        # the down cone's PLACE=cut routing is in-model-inert (the multichannel/geglu residual —
+        # the #389 class), so a cut row cannot cover them, and a fused row cannot be benched
+        # until the snippet-side realization returns. Burn down when either fix lands.
         ShapeKey(free_prod=30720, reduce_max=15360, is_warp=True, is_dyn=False, kind="fused", free_max=3840),
-        ShapeKey(free_prod=65536, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
-        ShapeKey(free_prod=69632, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
-        ShapeKey(free_prod=245760, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
         ShapeKey(free_prod=245760, reduce_max=15360, is_warp=True, is_dyn=False, kind="fused", free_max=3840),
-        ShapeKey(free_prod=524288, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
-        ShapeKey(free_prod=557056, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
         ShapeKey(free_prod=7864320, reduce_max=15360, is_warp=True, is_dyn=False, kind="fused", free_max=3840),
         ShapeKey(free_prod=15728640, reduce_max=15360, is_warp=True, is_dyn=False, kind="fused", free_max=4096),
-        ShapeKey(free_prod=16777216, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
-        ShapeKey(free_prod=17825792, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
-        ShapeKey(free_prod=33554432, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
-        ShapeKey(free_prod=35651584, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
-        ShapeKey(free_prod=62914560, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
-        ShapeKey(free_prod=125829120, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
+        # 2026-07-31: the m192 width (the MTP c=64 verify bucket, serving_mtp_rtx5090) joined
+        # the audit — its aux keys below are the same greedy-near-optimal classes as the other
+        # widths' (per-head qk-norm rms sweeps, the post-attn/cut-stat rms key, the merged-cat
+        # dup-view glue); the m192 matmul/fused/o_proj forks are all golden-covered.
+        ShapeKey(free_prod=737280, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=1572864, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
+        ShapeKey(free_prod=1671168, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
+        ShapeKey(free_prod=393216, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=786432, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=98304, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=1572864, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
     },
     "NVIDIA GeForce RTX 4090": {
+        # 2026-07-31: the m192 width (the MTP c=64 verify bucket) joined the audit. There is no
+        # m192 serving on 24 GB (the 12B does not fit), so the whole m192 fork set is uncovered
+        # here — the merged-cat matmuls/glue, o_proj (reduce 4096/8192), the fused cones, and
+        # the rms/qknorm sweeps. Mirror the 5090's m192 + o_proj + fused-cut seeding if a 4090
+        # m192 tier is ever wanted.
+        ShapeKey(free_prod=1572864, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8192),
+        ShapeKey(free_prod=1572864, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8192),
+        ShapeKey(free_prod=1572864, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=1671168, reduce_max=0, is_warp=True, is_dyn=False, kind="", free_max=8704),
+        ShapeKey(free_prod=1671168, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=8704),
+        ShapeKey(free_prod=393216, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=5898240, reduce_max=3840, is_warp=True, is_dyn=False, kind="fused", free_max=30720),
+        ShapeKey(free_prod=737280, reduce_max=15360, is_warp=True, is_dyn=False, kind="fused", free_max=3840),
+        ShapeKey(free_prod=737280, reduce_max=3840, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=737280, reduce_max=4096, is_warp=True, is_dyn=False, kind="", free_max=3840),
+        ShapeKey(free_prod=737280, reduce_max=8192, is_warp=True, is_dyn=False, kind="", free_max=3840),
+        ShapeKey(free_prod=786432, reduce_max=256, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
+        ShapeKey(free_prod=98304, reduce_max=512, is_warp=False, is_dyn=False, kind="rms_norm", free_max=0),
         # 2026-07-26: the m2048 (chunk-quantum) width joined the audit (parity campaign round
         # 3). The 5090 seeded its m2048 golden set the same day (_tune/m2048/ sweeps); the
         # 4090's rides the same deferred mirror re-tune, so every m2048 fork is uncovered

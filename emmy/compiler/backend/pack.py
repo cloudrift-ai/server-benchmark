@@ -46,14 +46,23 @@ _MANIFEST = "manifest.json"
 def _environment() -> dict:
     """The environment half of the validity key — the same tags the cubin cache keys on
     (arch / toolkit / flags), so a pack never references cubins the current toolchain
-    wouldn't have produced. Probes the live GPU."""
+    wouldn't have produced, PLUS the precision-gate state: the ``FAST_MATH``-family pins
+    change which kernel forks the compile enumerates (not the nvcc flags), so a pack
+    warmed in one precision lane must never serve a boot in the other. Found live
+    (2026-07-31 article repro): an ``EMMY_FAST_MATH=1`` boot at the baked serving shape
+    pack-hit the std plans and silently served std kernels — the fm lane's numbers were
+    the std lane's. A pack whose manifest predates the field mismatches and falls back
+    to the full compile, which is the conservative reading (its lane is unrecorded).
+    Probes the live GPU."""
     from emmy.compiler.backend.cuda import nvcc  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FAST_EXP, precision_pin  # noqa: PLC0415
 
     return {
         "backend": "cuda",
         "arch": nvcc.device_arch(False),
         "toolkit": nvcc._toolkit_tag(),
         "nvcc_flags": nvcc.effective_flags(),
+        "precision": {k.name: precision_pin(k) for k in (FAST_EXP, F16_MMA_F32_ACC)},
     }
 
 

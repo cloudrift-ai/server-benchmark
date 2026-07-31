@@ -1,17 +1,19 @@
-"""Recognize a ``LoopOp``'s algebraic structure, lift it to a ``TileOp``, AND schedule it —
-the merged Loop-IR → Tile-IR pass (recognition + scheduling in one rewrite, no separate
-``020`` step).
+"""Recognize a ``LoopOp``'s algebraic structure and lift it to an UNMAPPED ``TileOp`` — the
+STRUCTURAL half of the Loop-IR → Tile-IR boundary.
 
-This is the Loop-IR → Tile-IR boundary: after this pass nothing downstream traffics in
-``LoopOp``. **Recognition** (here) reads the algebra off the body and lifts the per-cell
-compute into a :class:`~emmy.compiler.ir.tile.ir.Map` whose body is the **annotated
-loop nest** (the reduce ``Loop`` stamped with its
-:class:`~emmy.compiler.ir.axis.AxisRole` — the only loop annotation; the algebra is the body)
-on an UNMAPPED :class:`~emmy.compiler.ir.tile.ir.TileOp`; the final step hands that tile op to
-**scheduling** (:func:`~emmy.compiler.pipeline.passes.lowering.tile._schedule.schedule`, the
-``_schedule`` helper) which maps the free axes onto the grid and offers the per-axis
-scheduling forks (``REDUCE`` partition / ``TILE`` output tile), dispatched on the axes'
-``AxisRole``. Materialization back to loop IR happens in ``lowering/kernel``.
+After this rule nothing downstream traffics in ``LoopOp``. Recognition reads the algebra off the
+body and lifts the per-cell compute into a :class:`~emmy.compiler.ir.tile.ir.Map` whose body is the
+**annotated loop nest** (the reduce ``Loop`` stamped with its
+:class:`~emmy.compiler.ir.axis.AxisRole` — the only loop annotation; the algebra is the body),
+wrapped in a :class:`~emmy.compiler.ir.tile.ir.TileOp` whose ``place`` carries just the free axes.
+That op IS the rewrite's result. ``020_schedule`` picks it up on the next rule sweep, maps the free
+axes onto the grid and offers the scheduling forks; materialization back to loop IR happens in
+``lowering/kernel``.
+
+Nothing here reads a knob or a pin — recognition is structure, and every choice it makes is
+unconditional. (The one exception is PLACEMENT ROUTING, step 3.5: a routing golden / ``PLACE`` pin
+cuts the recognized tree into a fragment of un-mapped ``LoopOp``\\ s, and it must resolve BEFORE any
+schedule fork exists, so it cannot wait for ``020``.)
 
 All recognition lives in THIS one rule (no separate flash / softmax pass), in order (each
 step unconditional — no knobs):
@@ -44,9 +46,9 @@ step unconditional — no knobs):
    :class:`Contraction` with a :class:`Channel` per ⊗-fold, the A cone stored inline on its edge
    (a real node tree — the per-row statistic its ``Fold`` source)
    (``_atomize.bind_prologue_contraction``, structure-only), its column axis joining the grid.
-   Both forms are scheduled and merged into ONE fork — the reduce rows first (option-0 stays
-   the conservative coop pick), then the Contraction form's warp (mma) rows over the ``sync``
-   compute-fill stage; a warp ``TILE`` pin keeps the Contraction rows alone.
+   Recognition only *builds* that reading (for the routing router's reference tree, below);
+   ``020_schedule`` re-derives it and merges both forms' candidates into ONE fork, because which
+   of the two a row realizes is a decision about the SCHEDULE.
 
 Flash must precede online-softmax which must precede the lift: each later step consumes the
 ``Accum``\\ s an earlier one matches. A **symbolic** axis (dynamic ``seq_len``) is left
@@ -75,20 +77,14 @@ from emmy.compiler.ir.tile import (
     split_effects,
 )
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.fork import Fork
-
-# NOTE: no ``Knob`` objects (``TILE`` / ``REDUCE`` / ``STAGE``) may be imported here — ``Pass.load``
-# scans rule modules for ``Knob`` attrs and OFF-fills any it finds bare onto every variant of the
-# pass. Pin reads / knob-key spelling ride the ``_schedule`` helpers instead.
 from emmy.compiler.pipeline.passes.lowering._reduction import loop_state_head
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction, bind_prologue_contraction, make_cone, map_cone
 from emmy.compiler.pipeline.passes.lowering.tile._cut import realize_cut, route_cut
 from emmy.compiler.pipeline.passes.lowering.tile._flash import is_flash_score_producer, try_flash
-from emmy.compiler.pipeline.passes.lowering.tile._schedule import prologue_knob_bases, schedule, warp_tile_pinned
 from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse
 from emmy.compiler.pipeline.pipeline import LoweringError
 
-PATTERN = [Pattern("root", (LoopOp, TileOp))]
+PATTERN = [Pattern("root", LoopOp)]
 
 
 # --------------------------------------------------------------------------- #
@@ -353,25 +349,10 @@ def _project(fold: Fold, projection: Body) -> tuple[Map | Fold, tuple]:
     return Map(body=projection, sources=(fold,)), ()
 
 
-def _demote_planar(node):
-    """The PLANAR sibling of a computed-A :class:`Contraction` whose contraction form yielded
-    no legal schedule row (fp32 / no atoms / bad geometry — the scheduler's never-a-raising-row
-    guardrail returns ``[]``): the operand hoist is UNDONE — every edge moves INLINE into the
-    lift body (the cone as a structural NODE — a term is a value, legal in a pure ``Lambda``;
-    ``_flatten_nodes`` flattens it at lowering, so the loop is byte-identical to the old
-    flatten-and-refold) — and with no operand edges the bilinear parse declines, so the fold
-    **derives** ``PLANAR`` (``Fold.role``), the same route :func:`_nodify_contraction` leaves an
-    unbindable cell on, applied post-nodification."""
-    src = node.sources[0] if isinstance(node, Map) else node
-    red = src.demoted()
-    projection = Body(tuple(node.body) if isinstance(node, Map) else ())
-    return Map(body=projection, sources=(red,)) if len(projection) else red
-
-
 def _lift(stmts: list[Stmt], output: str) -> tuple[Map | Fold | Contraction, tuple, tuple]:
     """Peel the free axes and lift the per-cell compute, returning ``(root node, free axes,
     boundary stores)``. The free axes are the schedule's (carried on the ``TileOp``, not the node);
-    ``_schedule`` (inside ``010_recognize``) maps them onto the grid, and the ``stores`` ride
+    ``020_schedule`` maps them onto the grid, and the ``stores`` ride
     ``TileOp.stores`` (1q). A ``CONTRACTION`` cell
     nodifies to a :class:`Contraction` once the free axes are output-ordered (the binding needs
     the final ``(m, n)``)."""
@@ -407,23 +388,7 @@ def _order_free_by_output(node: Map | Fold, free: list, stores: tuple = ()) -> t
     return tuple(sorted(free, key=lambda ax: pos[ax.name]))
 
 
-def _as_list(scheduled) -> list:
-    """Normalize a ``schedule()`` result (a single ``TileOp``, a branch ``Fork``, or a candidate
-    list — possibly empty) into a flat options list for the recognizer's structural merge."""
-    return scheduled if isinstance(scheduled, list) else [scheduled]
-
-
-def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp | Graph | None:
-    # (0) Schedule an UNMAPPED ``TileOp`` — a kernel that recognition emitted as a *graph
-    # rewrite* (flash's fused fragment, ``try_flash``) rather than scheduling inline, because a
-    # graph fragment can't embed a scheduling fork. The fused ``TileOp`` re-enters this same pass
-    # and is scheduled here, the same ``_schedule.schedule`` the inline path uses. A mapped /
-    # kernel-less ``TileOp`` (already scheduled, or ``030_split_reduce``'s output) is left for materialize.
-    if isinstance(root.op, TileOp):
-        tile: TileOp = root.op
-        if tile.op is None or tile.place.is_mapped:
-            raise RuleSkipped("TileOp already scheduled / nothing to map")
-        return schedule(tile, tile.name, tile.knobs, ctx)
+def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | None:
     # (1) Flash attention — a graph rewrite that fuses a softmax-then-P@V kernel with its
     # scaled-QK producer. Tried first on every node; flash precedes online-softmax precedes
     # normalize, each consuming the Accums the next would match. The fusion is unconditional:
@@ -439,7 +404,6 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     # has had its chance to consume it (a later scan re-visits this node, by then removed).
     if is_flash_score_producer(graph, root):
         raise RuleSkipped("flash score producer — defer to its consumer's fusion")
-    knob_base: dict = {}
     loop: LoopOp = root.op
     # (3) Online softmax — the sibling-fold tupling: fuse the adjacent (rowmax, Σexp) reduce
     # pair into one streaming pass.
@@ -451,14 +415,13 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     # output-sweep axis is likewise supported (the reduce loop strides to the runtime extent,
     # the ``< seq_len`` cap masking the tail). Register-tiled symbolic axes mask their tail
     # cell (clamp-read + guarded write) in ``lowering/kernel``.
-    # Wrap the lifted node + its unmapped placement in an UNMAPPED ``TileOp``, then schedule it inline
-    # (the merged second half, ``_schedule.schedule``): map the free axes onto the grid and offer
-    # the per-axis scheduling forks (``REDUCE`` partition / ``TILE`` output tile), dispatched on
-    # the axes' ``AxisRole``. Returns the scheduled ``TileOp`` (or a fork list of candidates).
+    # Wrap the lifted node + its unmapped placement in an UNMAPPED ``TileOp`` — recognition's
+    # OUTPUT. ``020_schedule`` picks it up on the next rule sweep, maps the free axes onto the grid
+    # and offers the per-axis scheduling forks (``REDUCE`` partition / ``TILE`` output tile).
     # ``inputs`` is seeded from the matched ``LoopOp`` (the matcher populated its real Tensors) so
     # the scheduler can read operand shapes (the shared-row stage detection); the matcher refreshes
     # it from the graph again when a later pass matches the scheduled op.
-    map_tile = TileOp(op=node, place=Placement(free=free), inputs=dict(loop.inputs), stores=stores)
+    map_tile = TileOp(op=node, name=loop.name, place=Placement(free=free), inputs=dict(loop.inputs), stores=stores)
     pro = bind_prologue_contraction(node, free)
     # (3.5) PLACEMENT ROUTING (phase 4) — resolved FIRST, before any schedule fork exists: a
     # ROUTING golden (PLACE-only knobs for this kernel's (kind, shape)) or an authoritative
@@ -471,42 +434,9 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp 
     seam = route_cut(ctx, dict(loop.knobs or {}), route_tree, route_stores, route_free)
     if seam is not None:
         return realize_cut(match, root, route_tree, route_free, route_stores, seam)
-    if pro is None:
-        rows = _as_list(schedule(map_tile, loop.name, knob_base, ctx))
-        if not rows:
-            # fp32 / no atoms / bad geometry: a computed-A ``Contraction`` (a fused operand cone,
-            # e.g. gemma's GeGLU combine ahead of down_proj) can have NO legal row on any tier, and
-            # an empty option list is a SILENT no-op to the engine (no rejection recorded) — so
-            # without this demote the node leaks as a ``LoopOp`` all the way to ``plan_from_graph``
-            # (the merged-sibling gate/up edge on the fp32 symbolic Qwen path was the first shape
-            # to hit it). Demote it back to its PLANAR reduce so the kernel still compiles: the
-            # pre-nodification fallback, a working serial/coop fold.
-            fallback = TileOp(op=_demote_planar(node), place=Placement(free=free), inputs=dict(loop.inputs), stores=stores)
-            return schedule(fallback, loop.name, knob_base, ctx)
-        return rows if len(rows) > 1 else rows[0]
-    # (4) The MONOID-producer composition — the fused norm→linear edge (``rmsnorm(x)·nw @ w``, and
-    # its N-channel form, the gate/up MLP edge): the tail fold(s) ALSO nodify to
-    # ``Map(body=projection, sources=(Contraction,))`` — ONE computed-A product :class:`Contraction`
-    # with a channel per ⊗-fold, its A cone inline (:func:`bind_prologue_contraction`), its column
-    # axis joining the grid. Both forms are
-    # scheduled and their candidates merged into ONE fork: the reduce-``Map`` rows first (the
-    # cooperative / serial tiers — option-0 stays the conservative coop pick, lowerable
-    # everywhere), then the Contraction form's warp (mma) rows (the sync compute-fill tier — zero
-    # rows on fp32 / no atoms / bad geometry). A warp ``TILE`` pin is authoritative: the
-    # Contraction rows alone (the pin demands the mma tier; offering the reduce sibling would let
-    # cold greedy pick past the pin). Each form's rows carry the OTHER form's family keys as
-    # decided-empty stamps, so every leaf row spells the same key set (the evidence pick's
-    # prefix-consistency: an absent key reads as "free").
-    c_map, n_ax, con_stores = pro
-    src = c_map.sources[0]  # the ONE bilinear fold — its components share one k axis / cone
-    # The cone's source node IS the row-invariant prologue; ITS source is the statistic reduce.
-    # Both forms' keys spell against the CONTRACTION tree (the merged fork's one reference tree);
-    # the map form keys its own reduce spec on the stat fold's explicit spelling.
-    con_base, map_base, stat_key = prologue_knob_bases(c_map, src.a.sources[0].sources[0])
-    con_tile = TileOp(op=c_map, place=Placement(free=(*free, n_ax)), inputs=dict(loop.inputs), stores=con_stores)
-    con = _as_list(schedule(con_tile, loop.name, {**knob_base, **con_base}, ctx))
-    if con and warp_tile_pinned():
-        return con if len(con) > 1 else con[0]
-    maps = _as_list(schedule(map_tile, loop.name, {**knob_base, **map_base}, ctx, reduce_key=stat_key))
-    merged = [*maps, *con]
-    return merged if len(merged) > 1 else merged[0]
+    # Recognition ends here: the UNMAPPED tile is the rewrite's result. The MONOID-producer
+    # composition (``pro``) is re-derived by ``020_schedule`` — it is a decision about the SCHEDULE
+    # (which of the two readings of this one loop each fork row realizes), not about the structure,
+    # and it needs the schedule results to arbitrate (a warp ``TILE`` pin keeps the contraction
+    # rows alone; a contraction form with no legal row demotes back to the PLANAR reduce).
+    return map_tile

@@ -58,7 +58,7 @@ def _tile_pipeline():
 
 # The rule whose fork prices a kernel: the prior's predicted µs for the chosen
 # complete schedule row at the contraction fork (the one hierarchical tile → stage → reduce
-# fork ``_schedule`` offers from inside ``010_recognize``) is the per-kernel cost the
+# fork ``020_schedule`` offers) is the per-kernel cost the
 # structural pricing sums (defined here, not in ``two_level``, because that module imports
 # this package at module scope — the reverse would cycle).
 PARTITION_RULE = "010_recognize"

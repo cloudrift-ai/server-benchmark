@@ -25,7 +25,7 @@ Two groups:
 
 - **Schedule codec knobs** (``REDUCE`` / ``TILE`` / ``STAGE`` / ``WSPEC`` / ``RASTER``) — the tile-lowering schedule
   fork points that spell the ir schedule codecs (:mod:`emmy.compiler.ir.schedule`). Decided in
-  the ``_schedule`` helper inside ``lowering/tile/010_recognize`` and materialized in
+  ``lowering/tile/020_schedule`` and materialized in
   ``lowering/kernel/010_materialize``. Each is the **ephemeral** codec spelling: it resolves into a
   schedule slice (``ReducePlan`` / ``TilePlan`` / ``Stage`` / ``WarpSpec``) and rides on ``TileOp.knobs``
   so the online prior featurizes / tunes the decision. ``off=""`` (the conservative serial / per-cell /
@@ -52,7 +52,7 @@ REDUCE = Knob(
     KnobType.STR,
     help="Reduce-axis partition codec, site-local (g<n>[a|k] cta / coop[-t] / r<n> reg; empty=serial; "
     "the coop WIDTH lives in WORK). "
-    "Decided in lowering/tile/010_recognize (the _schedule helper), materialized in lowering/kernel/010_materialize.",
+    "Decided in lowering/tile/020_schedule, materialized in lowering/kernel/010_materialize.",
     off="",
 )
 
@@ -68,7 +68,7 @@ TILE = Knob(
     KnobType.STR,
     help="Output-fragment codec, site-local — scalar tile (f<fn>[x<fm>]) OR warp mma tile "
     "(<atom>/f<FM>x<FN>[/k<bk>]); empty=per-cell, the worker widths live in WORK. "
-    "Decided in lowering/tile/010_recognize (the _schedule helper), materialized in lowering/kernel/010_materialize.",
+    "Decided in lowering/tile/020_schedule, materialized in lowering/kernel/010_materialize.",
     off="",
 )
 
@@ -80,7 +80,7 @@ STAGE = Knob(
     "STAGE",
     KnobType.STR,
     help="Operand-staging codec (d<depth>/sync|cp|tma[/ring][/alt][/p<reg_depth>]; empty=gmem-direct). "
-    "Decided in lowering/tile/010_recognize (the _schedule helper), materialized in lowering/kernel/010_materialize.",
+    "Decided in lowering/tile/020_schedule, materialized in lowering/kernel/010_materialize.",
     off="",
 )
 
@@ -162,7 +162,7 @@ RASTER = Knob(
     "(m, n) block-tile grid (gm<G>: G M block-tiles iterate fastest per stripe, L2 reuse of the "
     "streamed B operand; gn<G>: the transpose, A streamed; empty = flat N-fastest row-major). "
     "Kernel-scoped like WSPEC (no @<axis> key); changes no per-CTA work or layout, only the "
-    "block-id decode. Decided in lowering/tile/010_recognize (the _schedule row product), applied "
+    "block-id decode. Decided in lowering/tile/020_schedule (the _schedule row product), applied "
     "at the kernel materializer's grid_tile seal; 2-D-tiled contraction grids only.",
     features=_raster_features,
     off="",

@@ -50,7 +50,7 @@ coverage until that entire cone has been measured.
 ## Resolve the hardware-atom binding once, structurally, at the tile level
 
 The same invariant applies *across* the tile→kernel boundary: the kernel materializer must not re-recognize structure
-the tile IR already holds. The **atomize** step (`lowering/tile/_atomize.py`, called from the `_schedule` helper inside `010_recognize` when it builds
+the tile IR already holds. The **atomize** step (`lowering/tile/_atomize.py`, called from `020_schedule` when it builds
 the warp / register-tiled option — *not* a standalone pass) resolves the algebra→hardware-atom binding once at fork-emit
 and feeds it into the `Contraction` (`_schedule._contraction_node`), so materialize reads the operands /
 `acc` off the node and only `factorize`s (the projection is peeled off the wrapping `Map` — its one home). Resolving it
@@ -140,7 +140,7 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   N-component product-monoid accumulator set) — a product-monoid fold: components never interact
   per step; the combine — SwiGLU — is projection, riding the wrapping `Map.fn`. Channels whose B layouts disagree
   were never legally fusable, so they simply never product (a formation gate, not a node assert).
-  `010_recognize` schedules it as a fork SIBLING of the
+  `020_schedule` offers it as a fork SIBLING of the
   cooperative reduce form (option-0 stays the coop row; the warp mma rows ride the mandatory `sync` compute-fill;
   dtype / geometry legality stays schedule-side in `_computed_a_rows`). This retired the pin-only
   `_prologue_warp_option` rescue. The **degenerate M=1** composition (per-token decode: the unit row axis elided,

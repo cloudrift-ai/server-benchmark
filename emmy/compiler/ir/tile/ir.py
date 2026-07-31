@@ -429,7 +429,7 @@ class Fold(Stmt):
     ``_factor._tile_reduce_axis`` expander stay byte-identical to the bare-loop form.
 
     The **scheduling param** is the ``reduce`` partition (:class:`ReducePlan` — GRID split / BLOCK coop
-    / REG ILP), stamped onto the node by ``_schedule`` (inside ``010_recognize``) (its decided value lives **here** on the node
+    / REG ILP), stamped onto the node by ``020_schedule`` (its decided value lives **here** on the node
     — read via ``ops.reduce_plan``). ``lower`` ignores it (it's metadata the materializer / ``030_split_reduce``
     read), so it leaves ``op_cache_key`` byte-identical."""
 

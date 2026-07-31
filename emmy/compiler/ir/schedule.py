@@ -623,7 +623,7 @@ class TilePlan:
     :attr:`reg_m` / :attr:`reg_n` accessors normalize that order. Spelled by the unified ``TILE``
     knob — the warp form ``<atom>/f<FM>x<FN>[/k<bk>]`` or the scalar ``f<fn>[x<fm>]``; the unit
     widths ride the kernel's ``WORK`` inventory, so :meth:`parse` needs it and :attr:`is_warp`
-    discriminates the tier on the object. Decided in ``_schedule`` (inside ``010_recognize``)."""
+    discriminates the tier on the object. Decided in ``020_schedule``."""
 
     atom: Atom = SCALAR_ATOM
     units: tuple[int, int] = (1, 1)  # warp (WM, WN) m-then-n / scalar (par_n, par_m) n-then-m
@@ -840,21 +840,29 @@ def derive_workers(tiles) -> Workers | None:
 @dataclass(frozen=True)
 class Placement:
     """Kind-neutral free-axis → grid binding (the parallel output axes and their grid
-    mapping). ``010_recognize`` builds an UNMAPPED placement (just ``free``);
-    ``_schedule`` (inside ``010_recognize``) maps every free axis onto ``grid`` (the per-cell tier)."""
+    mapping). ``010_recognize`` builds an UNMAPPED placement (just ``free``); ``020_schedule``
+    maps every free axis onto ``grid`` (the per-cell tier)."""
 
     free: tuple[Axis, ...] = ()
     grid: tuple[Axis, ...] = ()
+    #: Set by the scheduling transition (:meth:`on_grid`) — the EXPLICIT "the grid has been
+    #: decided" bit. A non-empty ``grid`` already says so, but a **free-less** kernel (a decode
+    #: row whose every axis folded into the tile) maps onto an EMPTY grid, so its scheduled
+    #: placement is value-identical to its unmapped one. ``020_schedule`` is the rule that has to
+    #: tell them apart — reading "no free axes" as mapped silently skipped every such kernel and
+    #: leaked it unscheduled (10 of the gemma-4 decode twins' kernels).
+    mapped: bool = False
 
     @property
     def is_mapped(self) -> bool:
-        """True once the free axes are bound (``grid`` set) — or there were none to bind
-        (a scalar-output kernel materializes on an empty grid)."""
-        return bool(self.grid) or not self.free
+        """True once the grid has been decided — the explicit :attr:`mapped` bit, or a bound
+        ``grid`` (so a scheduled placement built directly with its grid, as the flash / strip /
+        split options do, still reads mapped)."""
+        return self.mapped or bool(self.grid)
 
     def on_grid(self) -> Placement:
         """The scalar-tier mapping: bind every free axis onto the thread grid."""
-        return Placement(free=self.free, grid=self.free)
+        return Placement(free=self.free, grid=self.free, mapped=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -889,13 +897,13 @@ _STAGE_SCHEMA = Schema(
 class Stage:
     """One operand-transport pipeline over the serial reduce loop — one ``Stage`` per reduce
     loop (a reduce ``Loop`` ⇒ one reduce axis ⇒ one pipeline). The schedule's
-    operand-staging knob, decided in ``_schedule`` (inside ``010_recognize``) and materialized in
+    operand-staging knob, decided in ``020_schedule`` and materialized in
     ``010_materialize``.
 
     A constructed ``Stage`` means staging is **on** (the reused gmem operands ride a shared-
     memory slab); ``schedule.stage is None`` is the register / gmem-direct baseline (no
     slab). Spelled by the ``STAGE`` codec ``d<depth>/sync|cp|tma[/ring][/alt][/p<reg_depth>]``
-    (decided in ``_schedule`` (inside ``010_recognize``)). A stage stamped on a ``TileOp`` is **RESOLVED**, not the raw
+    (decided in ``020_schedule``). A stage stamped on a ``TileOp`` is **RESOLVED**, not the raw
     pin: the scheduler runs eligibility + sizing against the node ONCE
     (``_schedule._resolve_warp_stage`` / ``_resolve_scalar_stage`` for a contraction's operand
     pipeline, ``_row_stage`` for the reduce tier's shared row) and stamps the result — or ``None``
@@ -999,7 +1007,7 @@ class WarpSpec:
     launches ``TilePlan.block_threads + 32·aux_warps`` threads. ``workers is None`` on the schedule
     is uniform SIMT (every warp does every role's work, software-pipelined in-warp); a constructed
     ``WarpSpec`` means specialization is on. Spelled by the ``WSPEC`` codec ``<token><np>[:<param>,
-    ...]`` per role (``p2`` / ``p2:q8`` / ``p2:q8/s1``), decided in ``_schedule`` (inside ``010_recognize``).
+    ...]`` per role (``p2`` / ``p2:q8`` / ``p2:q8/s1``), decided in ``020_schedule``.
 
     Materialized by the staged K-loop (``lowering/kernel/_stage.staged_kloop``): the producer band
     rides at the TAIL of the thread block (``threadIdx.x >= block_threads``), so the compute warps'

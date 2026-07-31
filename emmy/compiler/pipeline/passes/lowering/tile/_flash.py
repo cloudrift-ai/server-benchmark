@@ -224,7 +224,7 @@ def build_flash_frag(
     The compute is the op tree itself — a ``Map`` whose body is the ``(m,l,O)`` LSE
     ``TWISTED`` reduce ``Loop`` then the ``O/l`` projection, carried unlowered on the ``TileOp`` with an empty
     schedule; the free ``(batch…, m, d)`` axes are the ``Placement``'s ``free`` (no
-    free-axis loop nest). ``_schedule`` (inside ``010_recognize``) maps them onto the grid; ``materialize`` lowers
+    free-axis loop nest). ``020_schedule`` maps them onto the grid; ``materialize`` lowers
     the node and generates the output-store glue (the ``Write`` at the grid cell) — it
     isn't stored here.
 
@@ -279,7 +279,7 @@ def build_flash_frag(
         out_store=out_store,
     )
     # The free axes are the schedule's, carried on the ``TileOp`` with an UNMAPPED grid —
-    # like every other recognizer; ``_schedule`` (inside ``010_recognize``) maps ``free`` onto the grid.
+    # like every other recognizer; ``020_schedule`` maps ``free`` onto the grid.
     # The ``S_ext_*`` skeleton rides on ``knobs`` (:func:`_struct_features` — the fused fragment
     # never passes the loop-dialect stamp) so the prior can price the flash forms' occupancy.
     knobs = dict(_struct_features(batch, s_q_dim, s_k_dim, head_dim, d_v))

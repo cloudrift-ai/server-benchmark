@@ -1,6 +1,6 @@
 """Schedule a lifted kernel onto the thread grid (+ pick the reduce partition / output tile).
 
-The scheduling **half** of the merged ``010_recognize`` tile-lowering pass — recognition
+The scheduling engine ``020_schedule`` drives — the second half of the tile-lowering boundary; recognition
 builds an UNMAPPED :class:`~emmy.compiler.ir.tile.ir.TileOp` (the structural-IR root ``op`` +
 a ``place`` carrying just the free axes) and calls :func:`schedule` here in the same rewrite (no
 separate ``020`` pass). Scheduling binds the placement's ``free`` axes onto the grid
@@ -1145,7 +1145,7 @@ def _resolve_scalar_stage(c: Placed, stage: Stage, inputs, budget: int = STATIC_
 
 
 def warp_tile_pinned() -> bool:
-    """A live warp (atom-naming) ``TILE`` env pin. Exposed as a function so ``010_recognize`` never
+    """A live warp (atom-naming) ``TILE`` env pin. Exposed as a function so ``020_schedule`` never
     imports the ``Knob`` objects themselves — ``Pass.load`` scans rule modules for ``Knob`` attrs and
     OFF-fills any it finds onto every variant of the pass (bare ``TILE: ""`` stamps on every kernel)."""
     plan = _pinned_tile()
@@ -1731,7 +1731,7 @@ def _map_strip_fork(tile: TileOp, place: Placement, name: str) -> list[TileOp] |
 
 def schedule(tile: TileOp, name: str, knobs: dict, ctx=None, reduce_key: str | None = None) -> Fork | list[TileOp] | TileOp:
     """Map a freshly-recognized (UNMAPPED) ``tile`` onto the grid and offer its scheduling forks —
-    the scheduling half of ``010_recognize``, called inline once recognition has built the tile op.
+    the engine behind ``020_schedule``, called once recognition has emitted the unmapped tile op.
     ``tile`` is an unmapped :class:`TileOp` (its ``op`` set, ``place`` carrying just the free axes).
     Returns a single scheduled ``TileOp`` (no fork) or a list of candidate ``TileOp``\\ s (the search /
     prior ranks them). ``knobs`` is the recognized kernel's knob base (empty for a fresh kernel)."""

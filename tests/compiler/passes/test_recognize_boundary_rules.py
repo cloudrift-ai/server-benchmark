@@ -249,30 +249,6 @@ def test_wide_m1_flinear_uses_single_warp_k_fold():
     assert any(row.get("WORK") == "t32" for row in tune_rows)
 
 
-def test_rtx4080_dit_qkv_narrows_to_measured_deploy_schedule():
-    """The SKU-exact deploy keeps one stable computed-A QKV row; tune mode keeps
-    the full legal search space."""
-    from dataclasses import replace
-
-    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4080")
-    rows, _ = _resolve(_norm_linear_graph(S=256, H=1152, inter=3456), pick=_is_warp_row, ctx=ctx)
-    warp = [r for r in rows if _is_warp_row(r)]
-    assert len(warp) == 1
-    # F1 site grammar: the measured legacy winner narrows via its site half + the WORK inventory.
-    from emmy.compiler.pipeline.knob import family_of as _fam
-
-    assert any(v == "mma_m16n8k16_f16_f32/f2x4/k4" for k, v in warp[0].items() if _fam(k) == "TILE")
-    assert warp[0].get("WORK") == "w4x1"
-    assert any(v == "d1/sync" for k, v in warp[0].items() if _fam(k) == "STAGE")
-
-    tune_rows, _ = _resolve(
-        _norm_linear_graph(S=256, H=1152, inter=3456),
-        pick=_is_warp_row,
-        ctx=replace(ctx, validate_pins=False),
-    )
-    assert len([r for r in tune_rows if _is_warp_row(r)]) > 1
-
-
 def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
     """The merged fork: the ``Map``-form reduce rows lead (option-0 = the conservative coop pick,
     lowerable everywhere), then the computed-A Contraction form's warp rows — every one riding a

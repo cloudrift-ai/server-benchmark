@@ -89,3 +89,33 @@ configs:
     knobs: {WORK: 'w4x1', TILE: 'mma_m16n8k16_f16_f32/f1x2/k16', STAGE: 'd2/cp/ring'}  # retired knob dropped: PLACE: 'fuse'
     emmy_us: 68.4
     cublas_us: 49.0
+  # --- DiT-XL-2-256 transformer block (s256, hidden 1152) — the measured #431 deploy winners.
+  # These were carried as a hardcoded table in ``tile/_schedule.py``; they belong here, where the
+  # deploy evidence tier already reads recorded winners. The knobs are the enumeration's own row
+  # values, captured verbatim off the live fork. NOT benched into this file: #431 recorded the
+  # winning schedule but no latencies, so both entries stay unmeasured (``emmy_us: 0.0`` — the
+  # evidence index ranks unmeasured entries last, which is correct: any later A/B that DOES record
+  # µs for these shapes should outrank them). Re-tune with ``emmy tune`` on a 4080 to fill them in.
+  - kernel: matmul
+    name: dit_xl_2.attn_out_proj.s256
+    model: facebook/DiT-XL-2-256
+    M: 256
+    N: 1152
+    K: 1152
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w1x4', TILE: 'mma_m16n8k16_f16_f32/f4x2/k4', REDUCE: '', RASTER: '', STAGE: 'd2/cp/ring/p2'}
+    emmy_us: 0.0
+    cublas_us: 0.0
+  # Four K slices restore enough CTA parallelism for this small-M, long-K shape.
+  - kernel: matmul
+    name: dit_xl_2.ff_out_proj.s256
+    model: facebook/DiT-XL-2-256
+    M: 256
+    N: 1152
+    K: 4608
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w1x2', TILE: 'mma_m16n8k16_f16_f32/f4x4/k2', REDUCE: 'g4k', RASTER: '', STAGE: 'd2/cp/ring/p2'}
+    emmy_us: 0.0
+    cublas_us: 0.0

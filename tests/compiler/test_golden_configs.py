@@ -133,7 +133,15 @@ def test_golden_configs_set_is_well_formed():
             assert c.n_heads > 0 and c.seq > 0 and c.head_dim > 0, c.name
         else:
             assert c.M > 0 and c.N > 0, c.name
-        assert c.emmy_us > 0 and c.cublas_us > 0, c.name
+        # Latencies are recorded in PAIRS or not at all. A measured entry carries both; an
+        # UNMEASURED entry (both exactly 0.0) records a verified-deployable SCHEDULE with no timing
+        # — the deploy tier accepts it and ranks it last (``_golden_evidence_index`` sorts on
+        # ``emmy_us or inf``), so it decides a shape no measured entry covers and yields the moment
+        # one is recorded. One-sided is always a recording bug: ``ratio`` would silently read 0 or
+        # divide by a missing baseline.
+        measured = (c.emmy_us > 0, c.cublas_us > 0)
+        assert measured in ((True, True), (False, False)), f"{c.name}: latencies must be recorded in pairs, got {c.emmy_us}/{c.cublas_us}"
+        assert c.emmy_us >= 0 and c.cublas_us >= 0, c.name
         assert c.ratio >= 0.0, c.name
         assert c.golden == (c.ratio >= 0.95), c.name
         assert fork_nothing or c.knobs, f"{c.name} has no recorded knobs"

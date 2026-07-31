@@ -603,24 +603,6 @@ def _option(tile, place, spec: str, name: str, knobs: dict, reduce_key: str | No
 # The mma atoms eligible per operand dtype — the warp tier's dtype gate (16-bit operands only).
 _ATOMS_BY_DTYPE = {"f16": ("mma_m16n8k16_f16_f32",), "bf16": ("mma_m16n8k16_bf16_f32",)}
 
-# Measured deploy defaults for the four contraction shapes in
-# facebook/DiT-XL-2-256's first block on an RTX 4080. These are deliberately
-# SKU- and shape-exact: the generic prior remains responsible for every other
-# contraction, and tune mode still sees the complete legal row set. A plain
-# run uses these stable winners instead of depending on mutable machine-local
-# prior state. Keys are ``(computed_a, b_trans, M, N, K)``.
-_RTX4080_DIT_CONTRACTION_DEFAULTS: dict[tuple[bool, bool, int, int, int], tuple[str, str, str]] = {
-    # LayerNorm -> packed QKV.
-    (True, True, 256, 3456, 1152): ("a:mma_m16n8k16_f16_f32/w4x1/f2x4/k4", "d1/sync", ""),
-    # Attention output projection + residual.
-    (False, True, 256, 1152, 1152): ("a:mma_m16n8k16_f16_f32/w1x4/f4x2/k4", "d2/cp/ring/p2", ""),
-    # LayerNorm -> feed-forward input projection.
-    (True, True, 256, 4608, 1152): ("a:mma_m16n8k16_f16_f32/w1x2/f4x4/k4", "d1/sync", ""),
-    # Feed-forward output projection + residual; four K slices restore enough
-    # CTA parallelism for this small-M, long-K shape.
-    (False, True, 256, 1152, 4608): ("a:mma_m16n8k16_f16_f32/w1x2/f4x4/k2", "d2/cp/ring/p2", "g4k"),
-}
-
 # Emit unpinned split-K candidates only when the output grid alone leaves the GPU under-occupied —
 # split-K far past the occupancy need is pure combine/workspace waste (the prior's
 # ``D_splitk_excess`` prices the remainder; this gate keeps the obviously-pointless rows out).
@@ -642,51 +624,6 @@ def _fragment_epilogue_ok(epilogue: Body) -> bool:
             return False
         defs.update(s.defines())
     return True
-
-
-def _rtx4080_dit_deploy_rows(rows: list[dict], probe: Placed | None, keys: tuple[str, str, str], ctx) -> list[dict]:
-    """Narrow a deterministic RTX-4080 deploy to the measured DiT contraction winner, while
-    leaving tune/search and explicit knob pins untouched. The recorded winners are LEGACY
-    spellings; the comparison canonicalizes both sides through the site codec
-    (``canon_family_value``) and checks the row's WORK against the winner's embedded worker
-    tokens, so the table survives the step-7 value-grammar split verbatim."""
-    if (
-        probe is None
-        or ctx is None
-        or not ctx.validate_pins
-        or ctx.gpu_name != "NVIDIA GeForce RTX 4080"
-        or any(k.raw() is not None for k in (TILE, STAGE, REDUCE))
-        or not (probe.m.axis.extent.is_static and probe.n.axis.extent.is_static and probe.k_axis.extent.is_static)
-    ):
-        return rows
-    shape = (
-        probe.a_computed,
-        probe.b_trans,
-        probe.m.axis.extent.as_static(),
-        probe.n.axis.extent.as_static(),
-        probe.k_axis.extent.as_static(),
-    )
-    preferred = _RTX4080_DIT_CONTRACTION_DEFAULTS.get(shape)
-    if preferred is None:
-        return rows
-    from emmy.compiler.pipeline.knob import canon_family_value  # noqa: PLC0415
-
-    tile, stage, reduce = preferred
-    tkey, skey, rkey = keys
-    want_work = plan_workers(TilePlan.parse(tile))
-    picked = [
-        row
-        for row in rows
-        if canon_family_value("TILE", row.get(tkey, "")) == canon_family_value("TILE", tile)
-        and row.get(skey, "") == stage
-        and canon_family_value("REDUCE", row.get(rkey, "")) == canon_family_value("REDUCE", reduce)
-        and row.get(RASTER.name, "") == ""
-        and Workers.parse(row.get(WORK.name, "") or None) == want_work
-    ]
-    if not picked:
-        logger.warning("measured RTX 4080 DiT schedule is no longer enumerable for shape %s", shape)
-        return rows
-    return picked
 
 
 def _warp_atoms(kernel, probe, proj: Body | None = None) -> tuple[str, ...]:
@@ -1882,14 +1819,6 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx=None, reduce_key: str | N
         # (:func:`_splitk_option`, consumed by ``030_split_reduce``); a warp row through
         # :func:`_warp_option`; the rest through :func:`_tile_option`.
         rows, keys = _tile_rows(tile, place, ctx)
-        # The measured RTX-4080 DiT deploy narrowing (main's #431), ported to the site grammar:
-        # probe the contraction view for the shape key and narrow a plain deploy to the recorded
-        # winner (tune/search and explicit pins untouched — the guard lives in the helper).
-        try:
-            deploy_probe, _dit_proj = _contraction_node(tile.op, place, TilePlan())
-        except LoweringError:
-            deploy_probe = None
-        rows = _rtx4080_dit_deploy_rows(rows, deploy_probe, keys, ctx)
         if not rows:
             # A computed-A (fused-cone) contraction with no legal warp row (fp32, no atoms, bad
             # geometry, over-budget slabs) contributes nothing — the recognizer's ``Map``-form

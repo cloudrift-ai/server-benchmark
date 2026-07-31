@@ -1,15 +1,18 @@
-"""The ``emmy fit`` cross-validation harness (``search/prior/fit/cv``): fold
-partitioning on both axes, the fittability-exclusion guard, dual-rank tie semantics,
-and metrics-file determinism — all on synthetic cases, no tracing, no GPU."""
+"""The ``emmy fit`` cross-validation harness (``search/prior/fit/cv``) and run harness
+(``search/prior/fit/run``): fold partitioning on both axes, the fittability-exclusion
+guard, dual-rank tie semantics, metrics-file determinism, and the trainer-callable seam
+— all on synthetic cases, no tracing, no GPU."""
 
 import argparse
 import json
 
+import numpy as np
 import pytest
 
 from emmy.commands.fit import register_fit_command
 from emmy.compiler.pipeline.search.prior.fit import Group, TwoStageFit, dual_rank, fit_two_stage, op_family
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
+from emmy.compiler.pipeline.search.prior.fit.run import run_fit
 
 # --- op-family derivation ----------------------------------------------------------
 
@@ -158,6 +161,67 @@ def test_metrics_counts_every_skipped_golden():
     # full_train per-golden rows carry the pool size; ranks respect the tie ordering.
     row = m["full_train"]["per_golden"]["gpuA/matmul.square.512"]
     assert row["pool"] == 6 and row["rank"] >= row["rank_optimistic"]
+
+
+# --- run harness: the trainer-callable seam ----------------------------------------
+
+
+class _StubModel:
+    """A minimal trainer-protocol model — enough to prove ``run_fit`` never needs the
+    linear model class: ``score_rows`` + ``to_artifact`` and nothing else."""
+
+    def __init__(self, w):
+        self.w = w
+
+    def score_rows(self, group):
+        return group.matrix(NAMES) @ np.array([self.w, 0.0])
+
+    def to_artifact(self, *, params, provenance):
+        return {"kind": "stub", "params": params, "provenance": provenance}
+
+
+def _run_stub_fit():
+    def full_train_fit(groups, rng):
+        return _StubModel(-1.0), "stub notes"
+
+    def fit_model(groups, rng):
+        return _StubModel(float(rng.standard_normal()))
+
+    return run_fit(
+        _cases(),
+        [("gpuC", "softmax.k2048", fit_cv.OUT_OF_SCOPE)],
+        full_train_fit=full_train_fit,
+        fit_model=fit_model,
+        axes=["gpu"],
+        seed=0,
+        header={"trainer": "stub", "seed": 0},
+        params={"scale": 0.1},
+        provenance={"fitted": "2026-01-01", "script": "test"},
+    )
+
+
+def test_run_fit_stub_trainer_deterministic():
+    """``run_fit`` is a pure function of its inputs: a stub trainer (no linear-model
+    machinery) yields the full metrics shape and an artifact whose caller-supplied
+    provenance is completed with the case counts and the trainer's notes — identically
+    on every call."""
+    metrics, artifact = _run_stub_fit()
+    assert set(metrics) == {"header", "full_train", "cv"} and set(metrics["cv"]) == {"gpu"}
+    assert metrics["header"] == {"trainer": "stub", "seed": 0}
+    assert metrics["full_train"]["per_card"]["gpuC"]["out_of_scope"] == 1
+    assert set(metrics["cv"]["gpu"]["holdout"]["per_golden"]) == {c.key for c in _cases()}
+    assert artifact == {
+        "kind": "stub",
+        "params": {"scale": 0.1},
+        "provenance": {
+            "fitted": "2026-01-01",
+            "script": "test",
+            "cases": {"static": 6, "dynamic": 2},
+            "notes": "stub notes",
+        },
+    }
+    a, b = _run_stub_fit(), _run_stub_fit()
+    assert json.dumps(a[0], sort_keys=True) == json.dumps(b[0], sort_keys=True) and a[1] == b[1]
 
 
 # --- CLI surface -------------------------------------------------------------------

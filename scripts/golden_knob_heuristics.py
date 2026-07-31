@@ -21,8 +21,8 @@ snippet tracer ``pipeline/`` must not import, and ``emmy fit`` is the harness th
 also cross-validates the fit), and the fit / rank-eval / artifact-assembly core in
 ``emmy/compiler/pipeline/search/prior/fit/``. What this wrapper does:
 
-  1. Build the golden cases (``build_cases`` — each golden's candidate enumeration
-     reconstructed under its own card's context, the golden's row pinned).
+  1. Build the golden cases (``build_golden_groups`` — each golden's candidate
+     enumeration reconstructed under its own card's context, the golden's row pinned).
   2. Run the incumbent two-stage fit (``fit_two_stage``: static tiers seeded from
      the incumbent artifact, then the dynamic set seeded from the static result).
   3. Write the winning weights (both sets + the carried-over scoring params +
@@ -45,7 +45,7 @@ from pathlib import Path
 import numpy as np
 
 from emmy import config, storage
-from emmy.commands.fit import build_cases
+from emmy.commands.fit import build_golden_groups
 from emmy.compiler.pipeline.search.prior.fit import build_artifact, fit_two_stage, topk_table
 from emmy.logging_setup import setup_cli_logging
 
@@ -72,7 +72,7 @@ def main() -> None:
     setup_cli_logging()  # the fit core logs its progress; render it print()-identical
 
     print("Building golden dataset (each golden under its own card's context) ...")
-    cases, _skipped = build_cases()
+    cases, _skipped = build_golden_groups()
     names = sorted({n for c in cases for n in c.feat_names})
     n_dyn = sum(1 for c in cases if c.tier == "dyn")
     print(f"  {len(cases) - n_dyn} static + {n_dyn} dynamic golden cases, {len(names)} D_* features")

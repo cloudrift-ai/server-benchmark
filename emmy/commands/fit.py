@@ -12,9 +12,10 @@ carries the timestamp) — and ``<out>/weights.json``, the full-train artifact i
 shipped ``offline_weights.json`` format. The metrics layout (``full_train`` +
 ``cv.<axis>`` holdout/train/gap blocks) is documented on
 :mod:`emmy.compiler.pipeline.search.prior.fit.cv`, which owns all the fold machinery;
-this module owns what ``pipeline/`` must not import: the snippet-tracing golden case
-builder (:func:`build_cases`, shared with ``scripts/golden_knob_heuristics.py``) and
-the CLI/IO glue.
+the run itself is :func:`~emmy.compiler.pipeline.search.prior.fit.run.run_fit`. This
+module owns what ``pipeline/`` must not import: the snippet-tracing golden case builder
+(:func:`build_golden_groups`, shared with ``scripts/golden_knob_heuristics.py``) plus
+the CLI, the trainer wiring, and the file writing.
 """
 
 from __future__ import annotations
@@ -24,8 +25,6 @@ import logging
 import subprocess
 import time
 from pathlib import Path
-
-import numpy as np
 
 from emmy import config, storage
 from emmy.compiler.context import Context
@@ -40,6 +39,7 @@ from emmy.compiler.pipeline.search.golden_eval import _enumerate, enumerate_grap
 from emmy.compiler.pipeline.search.prior.fit import Group, fit_two_stage, topk_table
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit import linear as fit_linear
+from emmy.compiler.pipeline.search.prior.fit.run import run_fit
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,7 @@ def _snippet_rows(snippet: str, ctx: Context) -> list[dict]:
     return enumerate_graph(graph, ctx)
 
 
-def build_cases() -> tuple[list[Group], list[tuple[str, str, str]]]:
+def build_golden_groups() -> tuple[list[Group], list[tuple[str, str, str]]]:
     """Reconstruct each golden's candidate enumeration, pin the golden's index, and
     featurize every row, as :class:`Group` records (name, tier, card, golden
     index, per-row ``D_*`` (+ ``MMA_tier``) feature dicts; ``key`` is ``"<gpu>/<name>"``,
@@ -201,39 +201,31 @@ def handle_fit(args) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("Building golden dataset (each golden under its own card's context) ...")
-    cases, skipped = build_cases()
+    cases, skipped = build_golden_groups()
     names = sorted({n for c in cases for n in c.feat_names})
     n_dyn = sum(1 for c in cases if c.tier == "dyn")
     logger.info("  %d static + %d dynamic golden cases, %d D_* features, %d skipped", len(cases) - n_dyn, n_dyn, len(names), len(skipped))
 
-    # Full-train: the incumbent process exactly — seeded from the shipped artifact's
-    # weights (lenient read: a refit after a featurizer change is exactly when versions
-    # mismatch, and a stale key simply seeds 0.0), scoring params carried through.
     incumbent = storage.read_json(config.offline_path() or _DEFAULT_FILE)
     if not isinstance(incumbent, dict) or "params" not in incumbent:
         raise SystemExit(f"no incumbent weights artifact to seed from at {config.offline_path() or _DEFAULT_FILE}")
-    full = fit_two_stage(
-        cases, names, seed_weights=incumbent.get("weights", {}), rng=np.random.default_rng(args.seed), samples=args.samples
-    )
-    dyn_raw = full.dyn_raw if full.dyn_raw is not None else incumbent.get("weights_dynamic", full.static_raw)
-    dyn_note = f"dynamic {topk_table(full.dyn_ranks)}" if full.dyn_ranks is not None else "carried from incumbent (no dynamic cases)"
 
-    # CV folds re-fit ~2x per axis per fold — silence the fit core's per-case rank
-    # logging for that stage (the full-train fit above already reported it).
-    fit_logger = logging.getLogger(fit_linear.__name__)
-    level = fit_logger.level
-    fit_logger.setLevel(logging.WARNING)
+    # Full-train: the incumbent process exactly — seeded from the shipped artifact's
+    # weights (lenient read: a refit after a featurizer change is exactly when versions
+    # mismatch, and a stale key simply seeds 0.0). A fit with no dynamic cases carries
+    # the incumbent's dynamic set forward into the shippable model.
+    def full_train_fit(groups, rng):
+        full = fit_two_stage(groups, names, seed_weights=incumbent.get("weights", {}), rng=rng, samples=args.samples)
+        dyn_raw = full.dyn_raw if full.dyn_raw is not None else incumbent.get("weights_dynamic", full.static_raw)
+        dyn_note = f"dynamic {topk_table(full.dyn_ranks)}" if full.dyn_ranks is not None else "carried from incumbent (no dynamic cases)"
+        shipped = fit_linear.TwoStageFit(full.static_raw, full.static_ranks, dyn_raw, full.dyn_ranks)
+        return shipped, f"static {topk_table(full.static_ranks)}; {dyn_note}"
 
     # Fold-seeding policy lives here (recorded in the header): fold models seed from
     # ZEROS — the incumbent's weights were fit on every golden, so seeding folds from
     # them would leak each held-out golden into its own holdout model.
     def fit_model(groups, rng):
         return fit_two_stage(groups, names, seed_weights={}, rng=rng, samples=args.samples)
-
-    try:
-        cv = {axis: fit_cv.run_axis(cases, axis, fit_model=fit_model, seed=args.seed) for axis in axes}
-    finally:
-        fit_logger.setLevel(level)
 
     header = {
         "trainer": args.trainer,
@@ -244,22 +236,24 @@ def handle_fit(args) -> None:
         "repo_commit": _repo_commit(),
         "trainer_params": {"samples": args.samples, "full_train_seed_weights": "incumbent", "fold_seed_weights": "zeros"},
     }
-    shipped = fit_linear.TwoStageFit(full.static_raw, full.static_ranks, dyn_raw, full.dyn_ranks)
-    metrics = fit_cv.build_metrics(header, cases, skipped, shipped, cv)
-    (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n")
-
     import datetime  # noqa: PLC0415
 
-    artifact = shipped.to_artifact(
+    metrics, artifact = run_fit(
+        cases,
+        skipped,
+        full_train_fit=full_train_fit,
+        fit_model=fit_model,
+        axes=axes,
+        seed=args.seed,
+        header=header,
         params=incumbent["params"],
         provenance={
             "fitted": datetime.date.today().isoformat(),
             "script": "emmy fit",
             "args": {"samples": args.samples, "seed": args.seed},
-            "cases": {"static": len(cases) - n_dyn, "dynamic": n_dyn},
-            "notes": f"static {topk_table(full.static_ranks)}; {dyn_note}",
         },
     )
+    (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n")
     storage.write_json(out_dir / "weights.json", artifact, indent=2)
 
     for gpu, card in metrics["full_train"]["per_card"].items():
@@ -272,7 +266,7 @@ def handle_fit(args) -> None:
             card["unranked"],
             card["out_of_scope"],
         )
-    for axis, block in cv.items():
+    for axis, block in metrics["cv"].items():
         for gpu, card in block["holdout"]["per_card"].items():
             logger.info(
                 "cv.%-9s %-34s holdout median=%s (optimistic %s) train=%s gap=%s",

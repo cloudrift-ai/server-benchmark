@@ -15,6 +15,12 @@ candidate grids. Per-kernel legality (the warp static-K divisibility check, the 
 eligibility, the ``_COOP_*`` constants) stays with the scheduler in
 ``passes/lowering/tile/_schedule.py`` — the legal subset is a function of the node.
 
+The ``TILE`` / ``REDUCE`` grids hand out the **typed schedule slices** themselves
+(:class:`~emmy.compiler.ir.schedule.TilePlan` / :class:`~emmy.compiler.ir.schedule.ReducePlan`,
+built structurally — never a parsed literal), so the enumeration never speaks a codec spelling; the
+scheduler spells each row ONCE, site-local, where it becomes stored state. The ``STAGE`` / ``WSPEC``
+/ ``RASTER`` grids stay codec strings — those families have no worker half to factor out.
+
 Two groups:
 
 - **Schedule codec knobs** (``REDUCE`` / ``TILE`` / ``STAGE`` / ``WSPEC`` / ``RASTER``) — the tile-lowering schedule
@@ -33,7 +39,7 @@ from __future__ import annotations
 
 import logging
 
-from emmy.compiler.ir.schedule import TilePlan
+from emmy.compiler.ir.schedule import ReducePlan, TilePlan
 from emmy.compiler.pipeline.knob import Knob, KnobType
 
 logger = logging.getLogger(__name__)
@@ -174,8 +180,8 @@ def raster_moves() -> list[str]:
     return ["", "gm8"]
 
 
-def map_tile_moves() -> list[str]:
-    """The pointwise-map register-strip candidates — spelled in the **scalar ``TILE`` codec** (the same
+def map_tile_moves() -> list[TilePlan]:
+    """The pointwise-map register-strip candidates — the **scalar output tile** (the same
     ``f<fn>`` register sub-tile a contraction's output rides, here with no ``n`` unit-tile / atom since
     the grid already parallelizes a pure ``Map``). ``f<r>`` hands each thread ``r`` **contiguous**
     inner-axis elements (blocked: thread t owns ``[t·r, t·r+r)``) as ``r`` grouped loads + ``r`` grouped
@@ -184,7 +190,7 @@ def map_tile_moves() -> list[str]:
     Legality (a static inner free axis divisible by r) is the scheduler's (``_schedule._map_strip_fork``).
     The ladder stops at ``f4``: ``f8`` regressed both pointwise goldens (register pressure — 22 vs 14
     regs — outweighs the wider access), so it's left out until a shape wants it."""
-    return ["f2", "f4"]
+    return [TilePlan(regs=(2, 1)), TilePlan(regs=(4, 1))]
 
 
 # --- Kernel-lowering policy knobs -------------------------------------------
@@ -298,10 +304,10 @@ LOOPIFY = Knob(
 # --- Enumeration value grids -------------------------------------------------
 #
 # The permitted-move catalog: the bounded, legality-guarded candidate values the ``_schedule`` emit
-# enumerates into the scheduling fork. Each move is a codec spelling under the node's axis-named key
-# (``TILE@<k_axis>`` / ``REDUCE@<axis>`` / ``STAGE@<axis>``) that the existing ``parse`` / ``spell``
-# grammar, the prior featurizer, and the perf DB already consume — the move is only the **generator**,
-# not new syntax. Two invariants keep a cold greedy compile stable and correct:
+# enumerates into the scheduling fork. A move is the **typed schedule slice** itself — a
+# :class:`TilePlan` / :class:`ReducePlan` built structurally, never a parsed literal — so the
+# enumeration never speaks a codec spelling: ``_schedule`` spells each row ONCE, site-local, at the
+# boundary where it becomes stored state. Two invariants keep a cold greedy compile stable and correct:
 #
 # - **Conservative option-0.** The per-cell / serial / gmem-direct pick leads every list (the reduce
 #   tier deliberately emits its conservative *cooperative* pick first — the option-0 rule is
@@ -333,17 +339,16 @@ _SCALAR_REG: tuple[tuple[int, int], ...] = (
 )  # fmt: skip  # (reg_n, reg_m)
 
 
-def scalar_tile_moves() -> list[str]:
-    """The scalar-contraction output-tile ``TILE`` codec candidates: per-cell (``""``) first — the
-    conservative option-0 — then the register-tile grid (:data:`_SCALAR_PAR` × :data:`_SCALAR_REG`)
-    filtered by the ``par_n·par_m ≤ 1024`` thread budget. Each is spelled through :class:`TilePlan`
-    so it round-trips the codec grammar exactly."""
-    moves = [""]
+def scalar_tile_moves() -> list[TilePlan]:
+    """The scalar-contraction output-tile candidates: the per-cell tile first — the conservative
+    option-0 — then the register-tile grid (:data:`_SCALAR_PAR` × :data:`_SCALAR_REG`) filtered by
+    the ``par_n·par_m ≤ 1024`` thread budget."""
+    moves = [TilePlan()]
     for par in _SCALAR_PAR:
         if par[0] * par[1] > MAX_BLOCK_THREADS:
             continue
         for reg in _SCALAR_REG:
-            moves.append(TilePlan(units=par, regs=reg).spell())
+            moves.append(TilePlan(units=par, regs=reg))
     return moves
 
 
@@ -378,11 +383,11 @@ _WARP_REGS: tuple[tuple[int, int], ...] = ((1, 1), (2, 2), (1, 4), (4, 1), (2, 4
 _WARP_BK: tuple[int, ...] = (1, 2, 4, 8)
 
 
-def warp_tile_moves(atom_names: tuple[str, ...]) -> list[str]:
-    """The warp-contraction output-tile ``TILE`` codec candidates over the (already
-    dtype-eligible) ``atom_names``: the :data:`_WARP_UNITS` × :data:`_WARP_REGS` × :data:`_WARP_BK`
-    grid per atom. No conservative option-0 of its own — these EXTEND :func:`scalar_tile_moves`
-    (whose per-cell ``""`` leads the combined list)."""
+def warp_tile_moves(atom_names: tuple[str, ...]) -> list[TilePlan]:
+    """The warp-contraction output-tile candidates over the (already dtype-eligible)
+    ``atom_names``: the :data:`_WARP_UNITS` × :data:`_WARP_REGS` × :data:`_WARP_BK` grid per atom.
+    No conservative option-0 of its own — these EXTEND :func:`scalar_tile_moves` (whose per-cell
+    tile leads the combined list)."""
     from emmy.compiler.ir.atom import ATOM_REGISTRY  # noqa: PLC0415
 
     moves = []
@@ -391,7 +396,7 @@ def warp_tile_moves(atom_names: tuple[str, ...]) -> list[str]:
         for units in _WARP_UNITS:
             for regs in _WARP_REGS:
                 for bk in _WARP_BK:
-                    moves.append(TilePlan(atom=atom, units=units, regs=regs, bk=bk).spell())
+                    moves.append(TilePlan(atom=atom, units=units, regs=regs, bk=bk))
     return moves
 
 
@@ -434,54 +439,41 @@ def stage_moves(*, warp: bool) -> list[str]:
 SPLITK_WIDTHS: tuple[int, ...] = (2, 4, 8)
 
 
-def splitk_moves(*, warp: bool) -> list[str]:
-    """The cross-CTA split-K ``REDUCE`` codec candidates, both tiers each: the deferred-kernel
-    finalize (``g<w>k``, an f32 workspace + sibling combine kernel) and the in-place atomic
-    (``g<w>a``, one kernel — the partial ``atomicAdd``\\ s into the zero-init'd output; the mma
-    tier rides ``RegStore.atomic``'s packed-pair red). The scheduler's ``atomic_ok`` gate
-    (``_reduce_candidates``) keeps ``a`` rows off multi-fold / non-distributive-projection nodes.
-    These EXTEND the serial ``""`` option-0."""
+def splitk_moves(*, warp: bool) -> list[ReducePlan]:
+    """The cross-CTA split-K ``REDUCE`` candidates, both tiers each: the deferred-kernel finalize
+    (an f32 workspace + sibling combine kernel) and the in-place atomic (one kernel — the partial
+    ``atomicAdd``\\ s into the zero-init'd output; the mma tier rides ``RegStore.atomic``'s
+    packed-pair red). The scheduler's ``atomic_ok`` gate (``_reduce_candidates``) keeps atomic rows
+    off multi-fold / non-distributive-projection nodes. These EXTEND the serial option-0."""
     del warp  # both tiers share the catalog; per-node legality lives in the scheduler's gates
-    return [f"g{w}{f}" for w in SPLITK_WIDTHS for f in ("k", "a")]
+    return [ReducePlan.of(cta=w, finalize=f) for w in SPLITK_WIDTHS for f in ("kernel", "atomic")]
 
 
-def coop_reduce_moves() -> list[str]:
-    """The cooperative / ILP K-partition ``REDUCE`` codec candidates for a NON-output-tiled
-    contraction (``_coop_reduce_spec``'s contract — the per-cell tier folds K across ``b`` coop
-    threads / ``r`` ILP register chains). These EXTEND the serial ``""`` option-0. ``b16`` /
-    ``b32`` are recorded reduce-golden winners (the wide-row coop folds) — kept enumerable so
-    the reduce goldens stay reachable. The wide ``b64``–``b512`` folds are the memory-bound
-    normalizer band: a wide-K softmax / rms_norm saturates bandwidth only with a full-block coop
-    row (``softmax.k2048`` wants ``b512`` — 2.6× over ``b32``). The scheduler's ``_coop_reduce_spec``
-    declines a ``b<n>`` wider than the row has work for, so enumerating them is safe on small K.
-    The ``b<n>t`` transposed band is the k-major-B matvec partition (warp lanes sweep the output
-    axis — the M=1 gemv tier's coalescing fix); ``_reduce_candidates`` gates it structurally
-    (plain contraction, 32-divisible inner free axis) AND by layout: the band is offered only on
-    k-major B, and plain ``b<n>`` only on K-contiguous B at the matvec tier. Measurement used to
-    decide the layout, but ShapeKey is layout-blind — cross-orientation golden/evidence rows tie,
-    and a cold/tied pick landed the band on the wrong operand three times in one day (10-100×
-    regressions; the WS5 cold-poison hardening). An env pin bypasses the gate (exploration)."""
+def coop_reduce_moves() -> list[ReducePlan]:
+    """The cooperative / ILP K-partition ``REDUCE`` candidates for a NON-output-tiled contraction
+    (``_coop_reduce_spec``'s contract — the per-cell tier folds K across the coop threads / ILP
+    register chains). These EXTEND the serial option-0. The 16- / 32-wide coop folds are recorded
+    reduce-golden winners (the wide-row folds) — kept enumerable so the reduce goldens stay
+    reachable. The 64–512-wide folds are the memory-bound normalizer band: a wide-K softmax /
+    rms_norm saturates bandwidth only with a full-block coop row (``softmax.k2048`` wants 512 —
+    2.6× over 32). The scheduler's ``_coop_reduce_spec`` declines a band wider than the row has
+    work for, so enumerating them is safe on small K. The TRANSPOSED band is the k-major-B matvec
+    partition (warp lanes sweep the output axis — the M=1 gemv tier's coalescing fix);
+    ``_reduce_candidates`` gates it structurally (plain contraction, 32-divisible inner free axis)
+    AND by layout: the band is offered only on k-major B, and the plain band only on K-contiguous B
+    at the matvec tier. Measurement used to decide the layout, but ShapeKey is layout-blind —
+    cross-orientation golden/evidence rows tie, and a cold/tied pick landed the band on the wrong
+    operand three times in one day (10-100× regressions; the WS5 cold-poison hardening). An env pin
+    bypasses the gate (exploration)."""
     return [
-        "b4",
-        "b8",
-        "b16",
-        "b32",
-        "b64",
-        "b128",
-        "b256",
-        "b512",
-        "r2",
-        "r4",
-        "r2/b4",
-        # The transposed band + its grid-split composites: a bare b<n>t is latency-bound on
-        # long-K matvecs (120 CTAs of serial K), so the deployable winners pair it with a
-        # g<w>k split (down g32k/b256t 75.7 us = the row-major floor on the k-major layout).
-        "b32t",
-        "b64t",
-        "b128t",
-        "b256t",
-        "g8k/b128t",
-        "g8k/b256t",
-        "g16k/b256t",
-        "g32k/b256t",
+        *(ReducePlan.of(coop=n) for n in (4, 8, 16, 32, 64, 128, 256, 512)),
+        ReducePlan.of(reg=2),
+        ReducePlan.of(reg=4),
+        ReducePlan.of(coop=4, reg=2),
+        # The transposed band + its grid-split composites: a bare transposed fold is latency-bound
+        # on long-K matvecs (120 CTAs of serial K), so the deployable winners pair it with a
+        # deferred-kernel grid split (down g32k/b256t 75.7 us = the row-major floor on k-major B).
+        *(ReducePlan.of(coop=n, coop_transposed=True) for n in (32, 64, 128, 256)),
+        ReducePlan.of(cta=8, coop=128, coop_transposed=True),
+        *(ReducePlan.of(cta=w, coop=256, coop_transposed=True) for w in (8, 16, 32)),
     ]

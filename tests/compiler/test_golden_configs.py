@@ -235,9 +235,9 @@ def test_golden_knobs_are_members_of_the_move_catalog():
     from emmy.compiler.ir.schedule import ReducePlan, TilePlan, Workers
     from emmy.compiler.pipeline.search.space import coop_reduce_moves, scalar_tile_moves, splitk_moves, stage_moves, warp_tile_moves
 
-    # The catalogs speak the LEGACY spellings the enumeration generates; a site-form golden
-    # (F2) re-merges its WORK inventory to test membership — the same reconstruction the pin
-    # ingestion performs, so "member" means "the replayed pin selects an enumerated row".
+    # The catalogs hand out TYPED slices; a golden's stored site value re-merges its WORK
+    # inventory into the same slice — so "member" means "the replayed pin selects an enumerated
+    # row".
     scalar_moves = set(scalar_tile_moves())
     for g in GOLDEN_CONFIGS:
         where = f"{g.name} ({g.gpu_name})"
@@ -245,8 +245,8 @@ def test_golden_knobs_are_members_of_the_move_catalog():
         if isinstance(g, (ReduceGoldenConfig, RmsNormGoldenConfig, SoftmaxGoldenConfig)):
             # The reduce knob is axis-qualified on a Map (``REDUCE@a1`` for rms/softmax); bare on a pure reduce.
             reduce_spec = next((v for k, v in g.knobs.items() if k == "REDUCE" or k.startswith("REDUCE@")), "")
-            legacy_red = ReducePlan.parse_site(reduce_spec, work).spell() if reduce_spec else ""
-            assert not legacy_red or legacy_red in coop_reduce_moves(), f"{where}: REDUCE {reduce_spec!r} not enumerable"
+            red = ReducePlan.parse_site(reduce_spec, work) if reduce_spec else None
+            assert red is None or red in coop_reduce_moves(), f"{where}: REDUCE {reduce_spec!r} not enumerable"
             continue
         if not isinstance(g, MatmulGoldenConfig):
             continue
@@ -255,14 +255,12 @@ def test_golden_knobs_are_members_of_the_move_catalog():
         warp = plan is not None and plan.is_warp
         if plan is not None:
             pool = set(warp_tile_moves((plan.atom.name,))) if warp else scalar_moves
-            assert plan.spell() in pool, f"{where}: TILE {tile!r} not in the enumerated {'warp' if warp else 'scalar'} grid"
+            assert plan in pool, f"{where}: TILE {tile!r} not in the enumerated {'warp' if warp else 'scalar'} grid"
         stage = g.knobs.get("STAGE", "")
         assert not stage or stage in stage_moves(warp=warp), f"{where}: STAGE {stage!r} not a catalog spelling"
         reduce_spec = g.knobs.get("REDUCE", "")
-        legacy_red = ReducePlan.parse_site(reduce_spec, work).spell() if reduce_spec else ""
-        assert not legacy_red or legacy_red in splitk_moves(warp=warp) + coop_reduce_moves(), (
-            f"{where}: REDUCE {reduce_spec!r} not enumerable"
-        )
+        red = ReducePlan.parse_site(reduce_spec, work) if reduce_spec else None
+        assert red is None or red in splitk_moves(warp=warp) + coop_reduce_moves(), f"{where}: REDUCE {reduce_spec!r} not enumerable"
 
 
 # --- dynamic (symbolic-axis) goldens -----------------------------------------
@@ -478,7 +476,7 @@ def test_f16acc_golden_tile_stays_reachable():
     from emmy.compiler.pipeline.search.space import warp_tile_moves
 
     plan = TilePlan.parse("a:mma_m16n8k16_f16_f16/w2x2/f4x8/k2")
-    assert plan.spell() in set(warp_tile_moves((plan.atom.name,)))
+    assert plan in set(warp_tile_moves((plan.atom.name,)))
 
 
 def test_fast_math_golden_ranks_in_gated_enumeration(monkeypatch):

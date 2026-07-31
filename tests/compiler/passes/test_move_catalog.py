@@ -4,7 +4,8 @@ The scheduling emit (``010_recognize`` → ``_schedule``) enumerates the catalog
 file pins the catalog's **legal product** two ways:
 
 - the catalog function ``scalar_tile_moves()`` equals the hand-computed ``(par × reg)`` grid + per-cell,
-  option-0-first and legality-guarded (``par_n·par_m ≤ 1024``);
+  option-0-first and legality-guarded (``par_n·par_m ≤ 1024``), read through the SITE spelling each
+  move stores as (its site ``TILE`` value + the ``WORK`` inventory it implies);
 - the **leaf set** the scheduler actually emits over a matmul fixture equals that product (keyed
   ``TILE@<k_axis>``) — so a missing / extra move is caught structurally, without lowering a kernel.
 """
@@ -16,7 +17,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
-from emmy.compiler.ir.schedule import ReducePlan, TilePlan, Workers
+from emmy.compiler.ir.schedule import ReducePlan, TilePlan, Workers, plan_workers, resolve_site_tile
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.knob import axis_of, family_of, family_value
@@ -25,26 +26,33 @@ from emmy.compiler.pipeline.search.space import MAX_BLOCK_THREADS as _MAX_BLOCK_
 from emmy.compiler.pipeline.search.space import scalar_tile_moves
 
 # The hand-computed legal product as explicit literals — per-cell option-0, then the (par × reg) grid
-# spelled through the codec (the default ``f1x1`` register sub-tile suppresses, so ``reg=(1,1)`` is the
-# bare ``n<par_n>x<par_m>``). Written out (not recomputed from ``_SCALAR_*``) so a change to the grid,
-# the ordering, or the legality filter is caught here explicitly. The per-par register list is the
+# as the pair each move STORES: its site-local ``TILE`` value (the register sub-tile; the default
+# ``f1x1`` suppresses, so ``reg=(1,1)`` spells empty) and the ``WORK`` thread inventory its parallel
+# widths imply. Written out (not recomputed from ``_SCALAR_*``) so a change to the grid, the
+# ordering, or the legality filter is caught here explicitly. The per-par register list is the
 # square/skewed core plus the golden-informed deep-FM points (f2x6..f2x14, f4x6..f4x26).
-_REG_SUFFIXES = [
-    "", "/f2x2", "/f4x4", "/f2x4", "/f4x2",
-    "/f2x6", "/f2x8", "/f2x14", "/f4x6", "/f4x8", "/f4x10", "/f4x12", "/f4x14", "/f4x26",
+_REGS = [
+    "", "f2x2", "f4x4", "f2x4", "f4x2",
+    "f2x6", "f2x8", "f2x14", "f4x6", "f4x8", "f4x10", "f4x12", "f4x14", "f4x26",
 ]  # fmt: skip
-_EXPECTED_MOVES = [""] + [f"n{pn}x{pm}{reg}" for pn, pm in ((16, 8), (16, 16), (32, 8), (32, 16), (64, 16)) for reg in _REG_SUFFIXES]
+_EXPECTED_MOVES = [("", "")] + [(reg, f"t{pn}x{pm}") for pn, pm in ((16, 8), (16, 16), (32, 8), (32, 16), (64, 16)) for reg in _REGS]
+
+
+def _stored(plan: TilePlan) -> tuple[str, str]:
+    """The (site ``TILE`` value, ``WORK`` inventory) pair a tile move stores."""
+    work = plan_workers(plan)
+    return plan.spell_site(), (work.spell() if work is not None else "")
 
 
 def test_scalar_tile_moves_equals_hand_product():
     moves = scalar_tile_moves()
-    assert moves == _EXPECTED_MOVES
-    assert moves[0] == ""  # conservative per-cell option-0 leads (cold greedy stays stable)
+    assert [_stored(p) for p in moves] == _EXPECTED_MOVES
+    assert moves[0] == TilePlan()  # conservative per-cell option-0 leads (cold greedy stays stable)
     assert len(set(moves)) == len(moves)  # no duplicate candidates
-    # Every non-empty move round-trips the codec grammar and stays inside the thread budget.
-    for spec in moves[1:]:
-        plan = TilePlan.parse(spec)
-        assert plan.spell() == spec
+    # Every move round-trips its stored spelling and stays inside the thread budget.
+    for plan in moves:
+        site, work = _stored(plan)
+        assert resolve_site_tile(site, Workers.parse(work)) == plan
         assert plan.units_n * plan.units_m <= _MAX_BLOCK_THREADS
 
 
@@ -85,62 +93,56 @@ def test_schedule_leaf_set_equals_catalog():
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_matmul_graph(), decide)
     assert rows, "no TILE fork was emitted for the matmul"
 
-    # F1 site grammar: a row spells its TILE/REDUCE values site-locally and its worker widths once
-    # in WORK, so the catalog identity is recovered by decoding each value against the row's
-    # inventory and re-spelling the self-contained form the catalog functions return.
-    def full_tile(r: dict) -> str:
-        site = str(family_value(r, "TILE") or "")
+    # A row spells its TILE/REDUCE values site-locally and its worker widths once in WORK, so the
+    # catalog identity is recovered by resolving each value against the row's inventory — the same
+    # rule the scheduler's own ``_materialize`` applies — back into the typed slice the catalog
+    # hands out.
+    def full_tile(r: dict) -> TilePlan:
         work = Workers.parse(str(r.get("WORK", "")))
-        if not site and work is not None and work.units[1] > 1:
-            # A bare par grid spells site-locally as TILE "" + a 2-D thread inventory (the f1x1
-            # register sub-tile suppresses); a 1-D inventory is the coop reduce's, not a tile's.
-            return TilePlan(units=work.units).spell()
-        return TilePlan.parse_site(site, work).spell()
+        return resolve_site_tile(str(family_value(r, "TILE") or ""), work, str(family_value(r, "REDUCE") or ""))
 
-    def full_reduce(r: dict) -> str:
-        return ReducePlan.parse_site(str(family_value(r, "REDUCE") or ""), Workers.parse(str(r.get("WORK", "")))).spell()
+    def full_reduce(r: dict) -> ReducePlan:
+        return ReducePlan.parse_site(str(family_value(r, "REDUCE") or ""), Workers.parse(str(r.get("WORK", ""))))
 
     tiles = {full_tile(r) for r in rows}
     assert tiles == set(scalar_tile_moves())
-    by_tile: dict[str, list[dict]] = {}
+    by_tile: dict[TilePlan, list[dict]] = {}
     for r in rows:
         by_tile.setdefault(full_tile(r), []).append(r)
-    percell = by_tile[""]
+    percell = by_tile[TilePlan()]
     # The per-cell tier offers serial + every coop/ILP move whose fold fits the reduce extent
     # (``_reduce_specs``'s ``coop <= extent and reg <= extent`` gate) — so the wide ``b64``–``b512``
     # folds drop out on this K=64 matmul, exactly as they would on any reduce narrower than the fold.
     # Layout gates the bands too (WS5): this fixture's B is canonical ``B[k, n]``, so the plain
-    # ``b<n>`` coop moves (lanes interleaved along K — uncoalesced on k-major B) are refused and
-    # only the transposed ``b<n>t`` band (lanes sweep N) plus the reg-only ILP moves survive.
-    legal_coop = {
-        m for m in coop_reduce_moves() if (p := ReducePlan.parse(m)).coop <= 64 and p.reg <= 64 and (p.coop_transposed or p.coop == 1)
-    }
-    assert {full_reduce(r) for r in percell} == {"", *legal_coop}
+    # coop moves (lanes interleaved along K — uncoalesced on k-major B) are refused and only the
+    # transposed band (lanes sweep N) plus the reg-only ILP moves survive.
+    legal_coop = {p for p in coop_reduce_moves() if p.coop <= 64 and p.reg <= 64 and (p.coop_transposed or p.coop == 1)}
+    assert {full_reduce(r) for r in percell} == {ReducePlan(), *legal_coop}
     assert all(family_value(r, "STAGE") == "" for r in percell), "per-cell has no operand slab to stage (decided-empty)"
     # Every tiled tile is the full (resolved stages) × (serial + split widths) product, the split
     # rows carrying the SAME stage spellings as the unsplit rows (staging composes with split-K).
     n_reduces = 1 + len(splitk_moves(warp=False))
-    for tile_spec, tiled in by_tile.items():
-        if not tile_spec:
+    for plan, tiled in by_tile.items():
+        if not plan.is_tiled:
             continue
-        stages = {str(family_value(r, "STAGE")) for r in tiled if not full_reduce(r)}
+        where = plan.spell_site() or "<per-thread cell>"
+        stages = {str(family_value(r, "STAGE")) for r in tiled if not full_reduce(r).stages}
         # A masked-N tile (tile_n overhangs the fixture's N=64) declines cp.async / TMA staging — the
         # B-slab fill would fault a row-crossing copy — so it rides gmem-direct only, mirroring the
         # warp tier's refusal. A clean tile carries the full resolved stage spellings.
-        plan = TilePlan.parse(tile_spec)
         if plan.units_n * plan.reg_n > 64:
-            assert stages == {""}, f"{tile_spec}: masked-N must decline staging: {stages}"
+            assert stages == {""}, f"{where}: masked-N must decline staging: {stages}"
         else:
-            assert {"", "d1/cp"} <= stages, f"{tile_spec}: missing the base resolved stages: {stages}"
-        splits = {full_reduce(r) for r in tiled if full_reduce(r)}
-        assert splits == set(splitk_moves(warp=False)), f"{tile_spec}: {splits}"
-        split_stages = {str(family_value(r, "STAGE")) for r in tiled if full_reduce(r)}
-        assert split_stages == stages, f"{tile_spec}: split rows must carry the same stage spellings"
+            assert {"", "d1/cp"} <= stages, f"{where}: missing the base resolved stages: {stages}"
+        splits = {full_reduce(r) for r in tiled if full_reduce(r).stages}
+        assert splits == set(splitk_moves(warp=False)), f"{where}: {splits}"
+        split_stages = {str(family_value(r, "STAGE")) for r in tiled if full_reduce(r).stages}
+        assert split_stages == stages, f"{where}: split rows must carry the same stage spellings"
         # Every contraction row also spells the launch-order codec (``RASTER``, bare/root-global) —
         # the flat ``""`` and the grouped ``gm8`` siblings, crossing the whole (stage × reduce)
         # product; the fifth factor of the catalog.
-        assert {r.get("RASTER") for r in tiled} == set(raster_moves()), f"{tile_spec}: RASTER family incomplete"
-        assert len(tiled) == len(stages) * n_reduces * len(raster_moves()), f"{tile_spec}: {len(tiled)} rows"
+        assert {r.get("RASTER") for r in tiled} == set(raster_moves()), f"{where}: RASTER family incomplete"
+        assert len(tiled) == len(stages) * n_reduces * len(raster_moves()), f"{where}: {len(tiled)} rows"
     # This matmul is BATCHED (a leading literal batch dim in A's gmem index). The leading dim is
     # tile/K-invariant, so TMA boxes it as an extent-1 dim with the operand's own origin expr
     # (``_tma_operand_rank_ok`` — the flash K/V convention extended to the matmul tiers; the gemma
@@ -247,11 +249,9 @@ def test_bare_reduce_forks_the_coop_catalog():
 
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_reduce_graph(), decide)
     assert rows, "no fork was offered for the bare reduce"
-    # F1 site grammar: a row's REDUCE value sheds the coop width into WORK, so the catalog
-    # identity is the (site value, WORK) pair — "b16" and "b32" both spell "coop" but ride
-    # distinct t16/t32 inventories.
-    from emmy.compiler.ir.schedule import ReducePlan
-
+    # A row's REDUCE value sheds the coop width into WORK, so the catalog identity is the
+    # (site value, WORK) pair — the 16- and 32-wide folds both spell "coop" but ride distinct
+    # t16 / t32 inventories.
     offered = [(str(family_value(r, "REDUCE")), str(r.get("WORK", ""))) for r in rows]
     assert offered[0] == ("", "")  # 2048 free cells > _FREE_CAP: the conservative heuristic pick leads
 
@@ -259,11 +259,10 @@ def test_bare_reduce_forks_the_coop_catalog():
     # shared-row stage, static K, 32-divisible free grid), so the FULL catalog is offered —
     # bt/g-composites included. Rows that fail the gate (softmax/rms shapes) drop the band;
     # that arm is covered by the schedule tests, not this catalog assertion.
-    def site_of(move: str) -> tuple[str, str]:
-        plan = ReducePlan.parse(move)
+    def site_of(plan: ReducePlan) -> tuple[str, str]:
         return plan.spell_site(), (f"t{plan.coop}" if plan.coop > 1 else "")
 
-    assert set(offered) == {("", ""), *(site_of(m) for m in coop_reduce_moves())}, f"catalog rows missing: {offered}"
+    assert set(offered) == {("", ""), *(site_of(p) for p in coop_reduce_moves())}, f"catalog rows missing: {offered}"
 
 
 def test_factor_k_refuses_non_dividing_pin_width():

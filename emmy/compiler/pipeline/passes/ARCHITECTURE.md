@@ -220,8 +220,11 @@ its coop width (`[g<n>[a|k]][/coop[-t]][/r<n>]` — the GRID finalize letter is 
 finalize MODE, not an axis token). `seal_workers` (`ir/tile/ops.py`) is the one stamp chokepoint: it derives
 `TileOp.work` + `knobs['WORK']` from the resolved TILE slices, the coop width off the REDUCE slices, and the producer
 band off the resolved `WarpSpec`, failing loudly on cross-site disagreement (one kernel, one inventory; a 1-thread
-register-strip inventory stays empty — per-cell launch geometry remains derived). Row assembly converts the
-legacy-speaking internal enumeration at one chokepoint (`_schedule._site_row` / `_site_knobs`); `_materialize`
+register-strip inventory stays empty — per-cell launch geometry remains derived). The enumeration itself speaks
+TYPED SLICES end to end — the `search/space.py` catalogs hand out `TilePlan` / `ReducePlan` objects built
+structurally, and env pins resolve into the same objects ONCE at the top (`_schedule._pinned_tile` /
+`_pinned_reduce`) — so a codec string is spelled exactly once per family, where a row becomes stored state
+(`_schedule._site_row` for fork rows, `_site_knobs` for the stamped `TileOp.knobs`). `_materialize`
 dispatches warp-vs-scalar on the PARSED plan, and `resolve_site_tile` is the one rule disambiguating an empty site
 `TILE` beside a thread `WORK` from the coop tier. Legacy embedded-worker spellings survive only as loudly-validated
 PIN ALIASES that must agree with the given inventory (`ingest_legacy_row` re-factors a legacy row's worker halves

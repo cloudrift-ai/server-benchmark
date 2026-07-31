@@ -174,7 +174,7 @@ def test_enumerated_warp_pool_featurizes_injectively():
     from emmy.compiler.pipeline.search.features import tile_signature
     from emmy.compiler.pipeline.search.space import warp_tile_moves
 
-    moves = warp_tile_moves(("mma_m16n8k16_f16_f32",))
+    moves = [p.spell() for p in warp_tile_moves(("mma_m16n8k16_f16_f32",))]
     vectors = {tuple(sorted(knob_features({**_CTX, "TILE@a1": m, "REDUCE@a1": ""}).items())) for m in moves}
     signatures = {tile_signature({"TILE@a1": m, "REDUCE@a1": ""}) for m in moves}
     assert len(vectors) == len(moves)

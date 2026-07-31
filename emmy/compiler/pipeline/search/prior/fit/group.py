@@ -31,6 +31,22 @@ import numpy as np
 # ``n16384``, ``k8192``, ``hd128``) — stripped by :func:`op_family`.
 _VARIANT_SEG = re.compile(r"fp16|dynM|(?:hd|[hsnk])?\d+")
 
+# The default feature view: the ``D_*`` geometry/occupancy features plus ``MMA_tier`` (the warp/scalar tier
+# discriminator, where the featurization still emits it) — the ``S_*`` / ``H_*`` shape/regime features are
+# constant within a shape, so they drop out of a within-shape ranking.
+DEFAULT_FEATURES = "D_*,MMA_tier"
+
+
+def feature_view(spec: str):
+    """A feature-view spec — comma-separated feature names, a trailing ``*`` making a prefix glob
+    (``"D_*,MMA_tier"``) — parsed into a ``keep(name) -> bool`` predicate. The view a fit trained
+    under is recorded in its metrics header and artifact provenance, so two fits are only comparable
+    when the recorded specs match."""
+    pats = [p.strip() for p in spec.split(",") if p.strip()]
+    prefixes = tuple(p[:-1] for p in pats if p.endswith("*"))
+    exact = frozenset(p for p in pats if not p.endswith("*"))
+    return lambda name: name in exact or name.startswith(prefixes)
+
 
 def feature_matrix(feats: list[dict[str, float]], names: list[str]) -> np.ndarray:
     """Feature-dict rows as a dense float64 matrix over ``names`` — absent key = 0.0."""

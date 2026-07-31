@@ -39,6 +39,7 @@ from emmy.compiler.pipeline.search.golden_eval import _enumerate, enumerate_grap
 from emmy.compiler.pipeline.search.prior.fit import Group, fit_two_stage, topk_table
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit import linear as fit_linear
+from emmy.compiler.pipeline.search.prior.fit.group import DEFAULT_FEATURES, feature_view
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,11 @@ def register_fit_command(subparsers) -> None:
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--folds", choices=(*FOLD_AXES, "both", "none"), default="both", help="Cross-validation fold axes (default: both).")
+    parser.add_argument(
+        "--features",
+        default=DEFAULT_FEATURES,
+        help="Feature view: comma-separated names, trailing '*' = prefix glob (recorded in metrics + provenance).",
+    )
     parser.add_argument("--out", default=None, help="Run dir (default: _tune/fits/<timestamp>-<trainer>-<data>/).")
     parser.set_defaults(func=handle_fit)
 
@@ -94,10 +100,10 @@ def _snippet_rows(snippet: str, ctx: Context) -> list[dict]:
     return enumerate_graph(graph, ctx)
 
 
-def build_golden_groups() -> tuple[list[Group], list[tuple[str, str, str]]]:
+def build_golden_groups(features_spec: str = DEFAULT_FEATURES) -> tuple[list[Group], list[tuple[str, str, str]]]:
     """Reconstruct each golden's candidate enumeration, pin the golden's index, and
-    featurize every row, as :class:`Group` records (name, tier, card, golden
-    index, per-row ``D_*`` (+ ``MMA_tier``) feature dicts; ``key`` is ``"<gpu>/<name>"``,
+    featurize every row, as :class:`Group` records (name, tier, card, golden index,
+    per-row features filtered through the ``features_spec`` view; ``key`` is ``"<gpu>/<name>"``,
     parity duplicates suffixed ``#2``, ``#3``, … in dataset order). The second return is
     the goldens that did NOT become cases, as ``(gpu, name, reason)`` — enumeration
     failures plus the kinds this fitter has no case builder for
@@ -121,6 +127,7 @@ def build_golden_groups() -> tuple[list[Group], list[tuple[str, str, str]]]:
     TMA tiers gate on cap) and the ``H_*`` / ``D_*`` occupancy features must use the
     recording card's regime — not one global cap — for the rank objective to match
     the deployed per-card featurization."""
+    keep = feature_view(features_spec)
     cases: list[Group] = []
     skipped: list[tuple[str, str, str]] = []
     key_counts: dict[str, int] = {}
@@ -166,11 +173,10 @@ def build_golden_groups() -> tuple[list[Group], list[tuple[str, str, str]]]:
             logger.info("  !! %s: golden not in %d candidates — skipping", g.name, len(rows))
             skipped.append((g.gpu_name, g.name, f"golden not in {len(rows)} candidates"))
             continue
-        # Keep ``D_*`` geometry/occupancy plus ``MMA_tier`` (the warp/scalar tier
-        # discriminator, where the featurization still emits it) — the ``S_*`` /
-        # ``H_*`` shape/regime features are constant within a shape, so they drop out
-        # of a within-shape ranking.
-        feats = [{k: v for k, v in features.knob_features({**base, **r}).items() if k.startswith("D_") or k == "MMA_tier"} for r in rows]
+        # The feature view (default ``DEFAULT_FEATURES``: ``D_*`` geometry/occupancy plus
+        # ``MMA_tier`` — see its rationale in ``prior/fit/group.py``) filters here, before
+        # the pool is packed, so the trained-under view is exactly what the Group stores.
+        feats = [{k: v for k, v in features.knob_features({**base, **r}).items() if keep(k)} for r in rows]
         key = f"{g.gpu_name}/{g.name}"
         key_counts[key] = key_counts.get(key, 0) + 1
         if key_counts[key] > 1:
@@ -201,7 +207,7 @@ def handle_fit(args) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("Building golden dataset (each golden under its own card's context) ...")
-    cases, skipped = build_golden_groups()
+    cases, skipped = build_golden_groups(args.features)
     names = sorted({n for c in cases for n in c.feat_names})
     n_dyn = sum(1 for c in cases if c.tier == "dyn")
     logger.info("  %d static + %d dynamic golden cases, %d D_* features, %d skipped", len(cases) - n_dyn, n_dyn, len(names), len(skipped))
@@ -232,6 +238,7 @@ def handle_fit(args) -> None:
         "data": args.data,
         "seed": args.seed,
         "feat_ver": features.FEATURIZER_VERSION,
+        "features": args.features,
         "fold_axes": axes,
         "repo_commit": _repo_commit(),
         "trainer_params": {"samples": args.samples, "full_train_seed_weights": "incumbent", "fold_seed_weights": "zeros"},
@@ -251,6 +258,7 @@ def handle_fit(args) -> None:
             "fitted": datetime.date.today().isoformat(),
             "script": "emmy fit",
             "args": {"samples": args.samples, "seed": args.seed},
+            "features": args.features,
         },
     )
     (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n")

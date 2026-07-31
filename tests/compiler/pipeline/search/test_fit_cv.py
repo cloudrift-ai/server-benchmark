@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from emmy.commands.fit import register_fit_command
-from emmy.compiler.pipeline.search.prior.fit import Group, TwoStageFit, dual_rank, fit_two_stage, op_family
+from emmy.compiler.pipeline.search.prior.fit import DEFAULT_FEATURES, Group, TwoStageFit, dual_rank, feature_view, fit_two_stage, op_family
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
 
@@ -33,6 +33,23 @@ from emmy.compiler.pipeline.search.prior.fit.run import run_fit
 )
 def test_op_family_strips_variant_segments(name, family):
     assert op_family(name) == family
+
+
+# --- feature view ------------------------------------------------------------------
+
+
+def test_default_feature_view_reproduces_inline_filter():
+    """The default spec keeps exactly what the case builder's historical inline filter
+    kept: ``D_``-prefixed features plus the literal ``MMA_tier``."""
+    keep = feature_view(DEFAULT_FEATURES)
+    sample = {"D_waves": 1.0, "D_bk_gap": 2.0, "MMA_tier": 3.0, "MMA_acc_bits": 4.0, "S_ext_free_prod": 5.0, "H_sm_count": 6.0, "D_": 7.0}
+    assert {k for k in sample if keep(k)} == {k for k in sample if k.startswith("D_") or k == "MMA_tier"}
+
+
+def test_feature_view_globs_and_names():
+    keep = feature_view("MMA_*, D_waves")
+    assert keep("MMA_tier") and keep("MMA_acc_bits") and keep("D_waves")
+    assert not keep("D_bk_gap") and not keep("S_ext_free_prod") and not keep("MMA")
 
 
 # --- dual-rank tie semantics -------------------------------------------------------
@@ -232,6 +249,7 @@ def test_fit_command_defaults_and_unsupported_cells():
     register_fit_command(parser.add_subparsers())
     args = parser.parse_args(["fit"])
     assert (args.trainer, args.data, args.samples, args.seed, args.folds) == ("linear", "golden", 0, 0, "both")
+    assert args.features == DEFAULT_FEATURES
 
     for bad in (
         parser.parse_args(["fit", "--trainer", "catboost"]),

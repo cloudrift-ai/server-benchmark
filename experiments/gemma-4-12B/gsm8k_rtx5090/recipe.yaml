@@ -31,7 +31,8 @@ command:
     - pyproject.toml
     - requirements.txt
     - Makefile
-    # The Makefile `include`s docker/vllm-emmy-gemma4/config.env.
+    # The Makefile shells out to docker/vllm-emmy-serve/model_slug.sh at parse time;
+    # without docker/ staged, every make call prints a 'Command not found' line.
     - docker
   run: |
     set -uo pipefail

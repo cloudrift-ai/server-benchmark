@@ -57,8 +57,9 @@ command:
     - pyproject.toml
     - requirements.txt
     - Makefile
-    # The Makefile `include`s docker/vllm-emmy-gemma4/config.env, so the staged tree
-    # needs docker/ or `make setup` dies before creating the venv.
+    # The Makefile shells out to docker/vllm-emmy-serve/model_slug.sh at parse time, so
+    # a tree without docker/ makes every make call print 'Command not found'. It no
+    # longer dies there (the model config is `-include`d), but keep docker/ staged.
     - docker
   run: |
     set -e

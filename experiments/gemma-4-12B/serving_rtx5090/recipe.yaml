@@ -14,11 +14,16 @@
 #
 # The per-arm recipes with the wider input sweep live in recipes/gemma-4-12B-it*; this
 # experiment pins the article's exact grid. The emmy lanes ride the prebuilt
-# cloudriftai/vllm-emmy-gemma4 image (docker/vllm-emmy-gemma4/), which bakes the model
-# snapshot + warmed sm_120 cubins + the execution-plan pack at the pinned 8448-context
-# config — a tokenless, download-free boot. It is the only PUBLISHED emmy image; the
-# general compile-on-boot cloudriftai/vllm-emmy base this recipe used to pin is not on
-# Docker Hub, so the old tag was unpullable outside the org.
+# cloudriftai/vllm-emmy-gemma-4-12b-it image (docker/vllm-emmy-serve/), which bakes the
+# model snapshot + warmed sm_120 cubins + the execution-plan pack at the pinned
+# 8448-context config — a tokenless, download-free boot. It is the only PUBLISHED emmy
+# image; the general compile-on-boot cloudriftai/vllm-emmy base this recipe used to pin is
+# not on Docker Hub, so that tag was unpullable outside the org.
+#
+# The `:latest` pin is deliberate — these lanes track the current release rather than a
+# frozen one. The cost is that a run does NOT record which emmy revision it measured, so
+# capture `docker inspect`'s digest (or the tag list) alongside any numbers you intend to
+# compare against the article; `latest` today is digest b9756d62 = the 58733e02 build.
 #
 # What the baked artifacts do NOT cover — both are BOOT COST, not numerics; every lane
 # still runs the same kernels and reports comparable numbers, it just pays for them once:
@@ -76,7 +81,7 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma4:0.23.0-58733e02"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4128 --no-enable-prefix-caching"
     cross:
       engine.llm.vllm.extra_env: ["EMMY_GEN_DECODE_BUCKET=32", "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=32"]
@@ -91,7 +96,7 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma4:0.23.0-58733e02"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 2056 --no-enable-prefix-caching"
     cross:
       engine.llm.vllm.extra_env: ["EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048", "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"]
@@ -106,7 +111,7 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma4:0.23.0-58733e02"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4104 --no-enable-prefix-caching"
     cross:
       engine.llm.vllm.extra_env: ["EMMY_GEN_DECODE_BUCKET=8", "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=8"]
@@ -120,7 +125,7 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma4:0.23.0-58733e02"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4096 --no-enable-prefix-caching"
     cross:
       engine.llm.vllm.extra_env: ["EMMY_GEN_DECODE_BUCKET=64", "EMMY_FAST_MATH=1 EMMY_GEN_DECODE_BUCKET=64"]

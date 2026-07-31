@@ -3,17 +3,17 @@ seals through. The per-atom codegen **strategies** it drives live in ``_atom.py`
 
 :func:`factorize` is the entry ``010_materialize`` calls once per kernel: it builds the ambient
 :class:`Ctx` and dispatches ``tile.op`` through the recursion :func:`_factorize`, which walks the
-``Map`` / ``Fold`` / ``ContractionView`` node tree. A :class:`~...ir.Map` with a ``source``
+``Map`` / ``Fold`` / ``Contraction`` node tree. A :class:`~...ir.Map` with a ``source``
 **recurses** (its projection walked into the ``tail``); the leaf binds to the grid via the single
 :func:`_bind` pipeline, whose form is read off the node's SCHEDULE — which axes are tiled — never a
-kernel kind: a tiled :class:`~...ir.ContractionView` tiles its OUTPUT ``(m, n)`` axes (register / warp
+kernel kind: a tiled :class:`~...ir.Contraction` tiles its OUTPUT ``(m, n)`` axes (register / warp
 cells), a cooperating :class:`~...ir.Fold` tiles its REDUCE axis (:func:`_tile_reduce_axis` —
 ``coop`` lanes + ``reg`` ILP chains), and everything else tiles nothing (the degenerate
 one-thread-per-cell fold). All three seal through the one :func:`grid_tile` finalizer; the per-cell
 body is built by the shared recursion :func:`_emit` (which walks ``source`` AND ``step``,
 reaching flash's Q@K / P@V as nodes).
 
-The output tiling reads its **geometry straight off the** ``ContractionView`` **node** (``tile_m`` /
+The output tiling reads its **geometry straight off the** ``Contraction`` **node** (``tile_m`` /
 ``mask_m`` / ``m_b`` / ``block_threads`` / …, derived there from the ``tile`` schedule + the output
 axes), expands both atoms through the *same* four-level tiling pipeline (``atomize →
 register_tile → unit_tile → grid_tile``, in this module), and splices in two codegen halves from
@@ -54,8 +54,8 @@ from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile import FoldMove, Level, ReducePlan, ReduceStage, contraction_view, is_contraction_fold
-from emmy.compiler.ir.tile.ir import ContractionView, Fold, Map, Side, effect_tail
+from emmy.compiler.ir.tile import FoldMove, Level, ReducePlan, ReduceStage
+from emmy.compiler.ir.tile.ir import Contraction, Fold, Map, Side, effect_tail
 from emmy.compiler.ir.tile.ops import cone_seam
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction, loop_state_head
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import copy_cell, reduce_codegen, shrink_axis, store_sink
@@ -191,13 +191,13 @@ def grid_tile(
 
 # ---- the recursive node walk: Ctx down, Frag up ------------------------------------------------ #
 # The hierarchical emitter (the tile-IR-rebuild mandate: ONE recursion over the node tree, no
-# divergent codegen path). :func:`_emit` walks a ``Map`` / ``Fold`` / ``ContractionView`` tree —
+# divergent codegen path). :func:`_emit` walks a ``Map`` / ``Fold`` / ``Contraction`` tree —
 # through ``source`` AND ``step`` — threading a :class:`Ctx` down (the ambient cell environment)
 # and returning a :class:`Frag` up (the per-cell loop-IR body + the produced :class:`Handle` wire +
 # the reduce ``carrier`` when the node folds one). The ONE root binder (:func:`_bind`) consumes the
-# recursion: the output-tiled ``ContractionView`` arm splices the atom's codegen through ``grid_tile``,
+# recursion: the output-tiled ``Contraction`` arm splices the atom's codegen through ``grid_tile``,
 # and the reduce partitioner (:func:`_tile_reduce_axis`) builds its per-cell reduce loop via
-# :func:`_emit`, so a nested ``ContractionView`` (flash's Q@K / P@V) is reached AS A NODE — scalar-nested
+# :func:`_emit`, so a nested ``Contraction`` (flash's Q@K / P@V) is reached AS A NODE — scalar-nested
 # at block=1, while a WARP-TILED tree realizes at fragment residence through ``_twist`` (the
 # ``warp_source`` read in :func:`_bind`), the per-node warp tiles stamped by the scheduler.
 
@@ -231,8 +231,8 @@ class Ctx:
     kernel and passed unchanged so every node reads/writes at the same output cell. ``grid`` is the
     kernel's grid axes; ``inputs`` the operand buffer table (dtype/shape); ``output`` the root
     output buffer name. The operand smem pipeline is NOT here — it rides the node it decorates
-    (``ContractionView.stage`` / ``Fold.stage``). (The tensor-core rebuild adds the warp
-    ``bind``/``cell`` register tile — owned per-node by a ``ContractionView``'s ``tile`` — and the
+    (``Contraction.stage`` / ``Fold.stage``). (The tensor-core rebuild adds the warp
+    ``bind``/``cell`` register tile — owned per-node by a ``Contraction``'s ``tile`` — and the
     inbound ``wires`` handles, e.g. flash's score fragment feeding P@V's A operand.)"""
 
     grid: tuple
@@ -264,7 +264,13 @@ def _emit(op, ctx: Ctx) -> Frag:
         stmts = _emit_body(Body(op.spliced_step()), ctx)  # operand edges splice ahead of first use
         loop = Loop(axis=op.axis, body=Body(tuple(stmts)), unroll=op.unroll, role=op.role)
         return Frag(body=[loop], out=Handle(op.out))
-    raise TypeError(f"_emit: expected a Map / Fold node, got {type(op).__name__}")
+    if isinstance(op, Contraction):
+        # The per-cell scalar contraction (no TILE slice): the node's synthesized mul-add loop —
+        # operand edges already flattened in place, so the walk below only passes stmts through.
+        loop = op.loop
+        stmts = _emit_body(loop.body, ctx)
+        return Frag(body=[Loop(axis=loop.axis, body=Body(tuple(stmts)), unroll=loop.unroll, role=loop.role)], out=Handle(op.out))
+    raise TypeError(f"_emit: expected a Map / Fold / Contraction node, got {type(op).__name__}")
 
 
 def _map_wire(op: Map) -> Handle:
@@ -288,21 +294,21 @@ def _map_wire(op: Map) -> Handle:
 
 
 def _emit_wire(op) -> Handle:
-    """The produced-value :class:`Handle` of any node — a ``Fold`` / ``ContractionView`` names its
+    """The produced-value :class:`Handle` of any node — a ``Fold`` / ``Contraction`` names its
     carrier / accumulator; a ``Map`` scans for its last defining stmt (:func:`_map_wire`)."""
     if isinstance(op, Map):
         return _map_wire(op)
-    return Handle(op.out)  # Fold.out (carrier state) / ContractionView.out (acc) — always safe
+    return Handle(op.out)  # Fold.out (carrier state) / Contraction.out (acc) — always safe
 
 
 def _emit_body(body, ctx: Ctx) -> list[Stmt]:
     """Walk a ``Body`` of loop-IR stmts, recursing into any nested structural node (a
-    :class:`ContractionView` / :class:`Fold` / :class:`Map`) via :func:`_emit` and passing plain
+    :class:`Contraction` / :class:`Fold` / :class:`Map`) via :func:`_emit` and passing plain
     stmts through — the codegen-layer node-walk (the dispatch seam ``ir._flatten_nodes`` cannot host,
     since a warp-tiled nested contraction lowers to mma, not a scalar loop)."""
     out: list[Stmt] = []
     for s in body:
-        if isinstance(s, (Fold, Map)):
+        if isinstance(s, (Fold, Map, Contraction)):
             out.extend(_emit(s, ctx).body)
         else:
             out.append(s)
@@ -318,7 +324,7 @@ def factorize(tile, root, store=None) -> Tile:
 
     # Stored trees are already resolved — a computed operand is an inline node on its edge, so the
     # emitter below walks the tree as stored and every reader (``cone_seam``) reads the node
-    # boundary straight off ``ContractionView.a``.
+    # boundary straight off ``Contraction.a``.
     from emmy.compiler.ir.tile.ops import sched_of  # noqa: PLC0415
 
     op = tile.op
@@ -347,9 +353,9 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, stores: tupl
     stored-``Write`` era), and the result prepended to ``tail``;
     everything else is a leaf, bound by :func:`_bind` — the single pipeline, whose form is read off
     the node's SCHEDULE (which axes are tiled), never a kernel kind. There is **no** flash /
-    attention special case: flash is the two-``ContractionView`` ``TWISTED`` reduce tree, so its Q@K /
+    attention special case: flash is the two-``Contraction`` ``TWISTED`` reduce tree, so its Q@K /
     P@V contractions and its streaming reduce factorize through this one walk (scalar block=1
-    today; a nested warp-tiled contraction routes through the ``_emit`` ``ContractionView`` seam). A
+    today; a nested warp-tiled contraction routes through the ``_emit`` ``Contraction`` seam). A
     bespoke emitter would be a divergent codegen path the mandate forbids."""
     if isinstance(op, Map) and op.sources:
         proj = _emit_body(op.body, ctx)
@@ -380,7 +386,7 @@ def with_store(stmts: list[Stmt], output: str, grid, value: str) -> list[Stmt]:
     its finalized value as the SSA name ``value`` (the carrier state / accumulator, or a projection's
     last def) that must be written to the output buffer at the grid cell. A body that already carries
     a ``Write`` needs no glue (``value`` is left unread). The caller resolves ``value`` off the node
-    (``ContractionView.out`` / the recursion's produced ``Handle``) so this helper stays node-agnostic."""
+    (``Contraction.out`` / the recursion's produced ``Handle``) so this helper stays node-agnostic."""
     if has_write(stmts):
         return stmts
     index = tuple(Var(ax.name) for ax in grid)
@@ -393,7 +399,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
     finalizer. The cases are points of one ``(output-tiling) × (reduce-folding)`` space, selected by
     the schedule — never separate emitters:
 
-    - a :class:`ContractionView` tiles its OUTPUT ``(m, n)`` axes — register / warp cells through
+    - a :class:`Contraction` tiles its OUTPUT ``(m, n)`` axes — register / warp cells through
       ``atomize → register_tile → unit_tile``, the reduce (K) serial per cell from the atom's
       :func:`reduce_codegen`, ``store`` the per-cell sink (default :func:`store_sink`; the flash
       inner QK/PV pass a sink that bridges the accumulator into the softmax twist). Its projection
@@ -407,14 +413,14 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
       one-thread-per-cell fold: the per-cell body (:func:`_emit`; a serial reduce ``Loop`` sits
       inside it) + ``tail`` + the ``out_val`` store glue is the whole fold region."""
     grid = tuple(ctx.grid)
-    if isinstance(op, Fold) and op.role is AxisRole.CONTRACTION and ctx.sched.tile_of(op) is not None and len(grid) >= 2:
-        # The STORED form is the bilinear fold; the ContractionView reading is DERIVED here, its output
-        # axes the kernel grid's trailing pair (a split partial's ksplit rides the leading grid, so
-        # the lead axes fall out of the same read) and its tile / stage the schedule slices.
-        view = contraction_view(op, grid[-2], grid[-1], tuple(grid[:-2]), tile=ctx.sched.tile_of(op), stage=ctx.sched.stage_of(op))
-        if view is not None:
-            op = view
-    if isinstance(op, ContractionView):
+    if isinstance(op, Contraction) and op.axes is None and ctx.sched.tile_of(op) is not None and len(grid) >= 2:
+        # The STORED node is pure algebra; the tiled reading is STAMPED here — its output axes the
+        # kernel grid's trailing pair (a split partial's ksplit rides the leading grid, so the lead
+        # axes fall out of the same read) and its tile / stage the schedule slices. A stored node
+        # WITHOUT a TILE slice keeps ``axes=None`` and takes the reduce tiers below (the per-cell /
+        # coop-K forms).
+        op = op.placed(grid[-2], grid[-1], tuple(grid[:-2]), tile=ctx.sched.tile_of(op), stage=ctx.sched.stage_of(op))
+    if isinstance(op, Contraction) and op.axes is not None:
         epi = list(tail)
         if not has_write(epi):
             epi = with_store(epi, ctx.output, grid, op.out)
@@ -431,7 +437,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
         # scalar per-cell ``Map`` (no partition). Every partitioned reduce — monoid, flash, coop-K /
         # split contraction — is a ``Fold`` node after ``ops.nodify_reduce`` (a projecting
         # ``Map`` was already peeled off by :func:`_factorize`).
-        plan = (ctx.sched.reduce_of(op) or ReducePlan()) if isinstance(op, Fold) else None
+        plan = (ctx.sched.reduce_of(op) or ReducePlan()) if isinstance(op, (Fold, Contraction)) else None
         t, mn, lead, lanes = atomize((1, 1)), (None, None), grid, 1
         wsrc = warp_source(op, ctx.sched)
         csrc = chain_source(op, ctx.sched) if wsrc is None else None
@@ -705,7 +711,7 @@ def chain_source(op, sched):
     red = (op.sources[0] if op.sources else None) if isinstance(op, Map) else op
     if not isinstance(red, Fold) or red.role is not AxisRole.TWISTED:
         return None
-    pv = next((s for s in list(red.step_stmts())[1:] if is_contraction_fold(s)), None)
+    pv = next((s for s in list(red.step_stmts())[1:] if isinstance(s, Contraction)), None)
     if pv is None:
         return None
     ptile = sched.tile_of(pv)

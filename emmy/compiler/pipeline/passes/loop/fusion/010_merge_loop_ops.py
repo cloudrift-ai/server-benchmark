@@ -421,7 +421,7 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
     if _reduce_heavy(producer.op) and _count_loads_from(consumer.op, producer.id) > 1:
         raise RuleSkipped("reduce-heavy producer feeds consumer through >1 Load — fusion would duplicate the reduce")
 
-    # ContractionView-half protection: only the product's own indexmap plumbing (unsqueeze /
+    # Contraction-half protection: only the product's own indexmap plumbing (unsqueeze /
     # broadcast scaffolding) may fuse into a bare matmul product before its sum-reduce partner
     # does — see :func:`_pending_contraction_half`. The blocked producer isn't lost: once the
     # halves merge, it retries against the full contraction kernel on a later fixpoint sweep.

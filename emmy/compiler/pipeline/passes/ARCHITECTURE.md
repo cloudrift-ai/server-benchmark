@@ -52,7 +52,7 @@ coverage until that entire cone has been measured.
 The same invariant applies *across* the tile→kernel boundary: the kernel materializer must not re-recognize structure
 the tile IR already holds. The **atomize** step (`lowering/tile/_atomize.py`, called from the `_schedule` helper inside `010_recognize` when it builds
 the warp / register-tiled option — *not* a standalone pass) resolves the algebra→hardware-atom binding once at fork-emit
-and feeds it into the `ContractionView` (`_schedule._contraction_node`), so materialize reads the operands /
+and feeds it into the `Contraction` (`_schedule._contraction_node`), so materialize reads the operands /
 `acc` off the node and only `factorize`s (the projection is peeled off the wrapping `Map` — its one home). Resolving it
 at option-build time means an atom that **cannot** be
 bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is rejected at fork construction, alongside
@@ -63,13 +63,14 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   (n, k)-indexed `Load`, A is the lift's other argument, either a plain `Load` (clean gmem-direct) or, when loop fusion
   has inlined an operand cone, the cone as a `Map` NODE stored INLINE on an operand edge (`_atomize.make_cone` — a
   STAT-FREE computed A, which rides the `sync` compute-fill like the norm→linear cone but carries
-  no statistic prologue) — plus the fold accumulator and the projection. The STORED form is the `role=CONTRACTION`
-  `Fold` in the λ spelling (symmetric `operands` tuple bound POSITIONALLY to the lift params + the pure bilinear
-  `lift` Lambda + the componentwise additive `(init, combine)` pair threading the channel accumulator names; sharing is edge
-  REUSE in the lift; the serial step / `Accum` forms are DERIVED, and loops carry no algebra — see the λ-foldMap paragraph
-  below); the
-  `ContractionView` READING — shared A + `(b, acc)` channels + the `(m, n)` geometry — is the DERIVED view
-  (`ir.contraction_view`, output axes off the caller's placement; `Contraction.as_fold` the storage direction).
+  no statistic prologue) — plus the fold accumulator and the projection. The STORED form is the `Contraction`
+  NODE itself (1s — the third stored node kind): pure algebra — `k_axis` + the shared `a` edge + the product
+  `Channel`s `(b_i, acc_i)`, sharing the node's ARITY — with the placement/schedule fields (`axes`/`lead_axes`/
+  `tile`/`stage`) UNSET in the stored term; the PLACED reading the tiers require is a pure field STAMP onto a
+  `replace()` copy (`Contraction.placed` — output axes off the caller's placement, `tile`/`stage` off the
+  `TileOp.schedule` slices), and `as_fold()` is the node's DERIVED λ reading (the flat `(init, combine)` algebra
+  spelling `Reduction` and the PLANAR demotion consume; its derived loop body is byte-identical to the node's own,
+  unit-tested).
   An **operand is an edge** with two inhabitants — the two things an input can be: MATERIALIZED (a gmem `Load`) or
   COMPUTED (the node itself, stored inline). Tree ownership gives an inline node exactly one consumer — so there is
   no let table, no reference arm, and no resolve step:
@@ -84,15 +85,15 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   (m, k)-indexed too, so the positional rule bound gemma's GeGLU combine as `gate @ W` and silently dropped the gelu and
   the up projection. Refusing to bind a stat-free cone at all is equally wrong — it demotes the cell to a PLANAR
   scalar fold, which cost the gemma-4 M=256 post twin 144 ms against 4.3 ms bound. The binding now happens ONCE at **recognize time** (`010_recognize._nodify_contraction` — every
-  recognized contraction, per-cell scalar included, stores as a contraction fold with a deferred `TilePlan()`; an
-  unbindable one — a 1-D matvec-shaped output — keeps its loads inline in the lift, so the fold **derives** `PLANAR`
-  and takes the reduce tiers at schedule dispatch — no role rewrite. **`Fold.role` is derived, never stored** (1l):
-  `TWISTED` off the stored combine's twist family, `CONTRACTION` off the bilinear parse of the lift body
-  (`ir._parse_bilinear` — a plain read of the λ, params binding operand edges positionally) or the composed split-K
-  operand (`ir.composed_contraction`), `PLANAR` otherwise — so "a role=CONTRACTION fold" below
-  always means the derived reading, and the lowered `Loop`'s annotation falls out of the same read); the schedule fork only
-  swaps the node's `tile` field (`_schedule._contraction_node`), and `_factor.factorize` reads the facts off the node
-  instead of `lower()`-ing the contraction and pattern-matching the result. A `STAGE` pin follows the same rule: the
+  recognized contraction, per-cell scalar included, stores as the `Contraction` node; an
+  unbindable one — a 1-D matvec-shaped output — keeps its loads inline in a fold's lift instead, so it **derives**
+  `PLANAR` and takes the reduce tiers at schedule dispatch — no role rewrite. **The node kind IS the `CONTRACTION`
+  role** (1s — `Contraction.role`, no bilinear parse), and **`Fold.role` stays derived, never stored** (1l):
+  `TWISTED` off the stored combine's twist family, `CONTRACTION` off the composed split-K
+  operand (`ir.composed_contraction`), `PLANAR` otherwise — so "a contraction" below
+  always means the stored node, and the lowered `Loop`'s annotation falls out of the same read; the schedule fork only
+  stamps a `tile` onto a `replace()` copy (`_schedule._contraction_node`), and `_factor.factorize` reads the facts off
+  the placed node instead of `lower()`-ing the contraction and pattern-matching the result. A `STAGE` pin follows the same rule: the
   option builders resolve it against the built node ONCE (`_resolve_warp_stage` / `_resolve_scalar_stage` — transport
   eligibility, the slab K-chunk `bk_elems`, the depth clamps) and stamp the resolved `Stage` (or `None`, gmem-direct)
   on the `TileOp`, so the materializer's one staged driver applies it verbatim, deciding nothing. Fitting the smem
@@ -104,7 +105,7 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   dims whose origin coordinates are the operand's own index exprs — eligible when those exprs don't move with the
   tile or the K loop (`_tma_operand_rank_ok`), so a model's `[1, seq, K]` unit-batch view stages exactly like the
   rank-2 snippet twin (the gemma in-model matmuls' TMA lockout). A **transposed B** (the serving `F.linear` layout —
-  B given `(N, K)`, K gmem-contiguous, `ContractionView.b_trans`) stages on the warp tier through an **N-major slab**:
+  B given `(N, K)`, K gmem-contiguous, `Contraction.b_trans`) stages on the warp tier through an **N-major slab**:
   the B slot takes A's geometry (`tile_n × bk`, K the inner dim — stride-1 in gmem and smem alike, so cp.async chunks
   and the TMA box stay contiguous; `Operand.trans` stamps the layout) and the drain is the plain no-`.trans`
   ldmatrix (`LdmatrixLoad(b_trans=True)` — the same staged path flash's K slab rides). Both operands' inner span is
@@ -174,10 +175,10 @@ like)`). The lowering layer's one algebra reader is `passes/lowering/_reduction.
 twist family is selected STRUCTURALLY — the stored combine must BE the exp/LSE generator's program, asserted at
 formation; the state-component roles read off the singleton shape: pivot = component 0, literal-1 = denominator,
 value name = expectation). The COMPOSED evaluations derive too (step 7): flash's kv stream λ-spells with its QK score
-fold a HOISTED inline-node operand edge (reading the enclosing kv var, never state) and its PV contraction
-SYNTHESIZED — and memoized, one identity per stored fold — inside the derived blocked evaluation
+`Contraction` a HOISTED inline-node operand edge (reading the enclosing kv var, never state) and its PV
+contraction SYNTHESIZED — and memoized, one identity per stored fold — inside the derived blocked evaluation
 (`ir._twisted_derived_step`, byte-identical to the retired in-step spelling); split-K's outer reduce is the
-IDENTITY-LIFT composition over its one inline sliced-fold operand (combine at that singleton embeds the operand
+IDENTITY-LIFT composition over its one inline sliced contraction node (combine at that singleton embeds the operand
 verbatim — no outer `Accum`s; `ir.composed_contraction` is the one read of the composition, shared by `Fold.role` and
 `030_split_reduce`'s structural arm). `Fold.step_stmts()` is the public per-cell read every former `.step` consumer
 goes through; `.loop` splices only the operand edges the derived step did not consume. `Fold.from_loop` returns

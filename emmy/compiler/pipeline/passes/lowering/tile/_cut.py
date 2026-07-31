@@ -35,7 +35,7 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import _member_reads
-from emmy.compiler.ir.tile.ir import Fold, Map, _operand_name, effect_tail
+from emmy.compiler.ir.tile.ir import Contraction, Fold, Map, _operand_name, effect_tail
 from emmy.compiler.ir.tile.ops import lower
 from emmy.compiler.ir.tile.path import Site, family_sites, resolve, sites, spell
 from emmy.compiler.pipeline.knob import family_of, parse_knob_spec
@@ -209,10 +209,17 @@ def _ancestor_axes(root, child) -> tuple[Axis, ...]:
     def walk(node, acc: tuple[Axis, ...]) -> tuple[Axis, ...] | None:
         if node is child:
             return acc
-        edges = node.sources if isinstance(node, Map) else (node.operands if isinstance(node, Fold) else ())
-        below = (*acc, node.axis) if isinstance(node, Fold) else acc
+        if isinstance(node, Map):
+            edges = node.sources
+        elif isinstance(node, Fold):
+            edges = node.operands
+        elif isinstance(node, Contraction):
+            edges = (node.a, *(ch.b for ch in node.channels))
+        else:
+            edges = ()
+        below = (*acc, node.axis) if isinstance(node, (Fold, Contraction)) else acc
         for e in edges:
-            if isinstance(e, (Map, Fold)):
+            if isinstance(e, (Map, Fold, Contraction)):
                 got = walk(e, below)
                 if got is not None:
                     return got
@@ -259,7 +266,7 @@ def _ws_dtype(child, inputs: dict):
     split-reduce workspace rule (a reduced statistic must not round-trip through the output
     dtype) — while a value seam (a ``Map`` child — the cone's per-cell normalize) keeps its leaf
     operand's dtype: the same bytes the fused form's A slab stored, so numerics match."""
-    if isinstance(child, Fold):
+    if isinstance(child, (Fold, Contraction)):
         return F32
     for s in lower(child):
         for ld in Body(tuple([s])).loads:
@@ -272,16 +279,20 @@ def _ws_dtype(child, inputs: dict):
 def _replace_edge(node, child, load: Load):
     """The parent tree with the seam child replaced by ``load`` — the cut terminal (every edge
     admits ``Load``). Positional bindings hold: the load defines the child's bound name."""
+    _nodes = (Map, Fold, Contraction)
     if isinstance(node, Map):
         if any(s is child for s in node.sources):
             return Map(fn=node.fn, sources=tuple(load if s is child else s for s in node.sources))
-        return Map(fn=node.fn, sources=tuple(_replace_edge(s, child, load) if isinstance(s, (Map, Fold)) else s for s in node.sources))
-    if isinstance(node, Fold):
-        from dataclasses import replace as _dc_replace  # noqa: PLC0415
+        return Map(fn=node.fn, sources=tuple(_replace_edge(s, child, load) if isinstance(s, _nodes) else s for s in node.sources))
+    from dataclasses import replace as _dc_replace  # noqa: PLC0415
 
+    if isinstance(node, Fold):
         if any(e is child for e in node.operands):
             return _dc_replace(node, operands=tuple(load if e is child else e for e in node.operands))
-        return _dc_replace(node, operands=tuple(_replace_edge(e, child, load) if isinstance(e, (Map, Fold)) else e for e in node.operands))
+        return _dc_replace(node, operands=tuple(_replace_edge(e, child, load) if isinstance(e, _nodes) else e for e in node.operands))
+    if isinstance(node, Contraction):
+        sub = lambda e: load if e is child else (_replace_edge(e, child, load) if isinstance(e, _nodes) else e)  # noqa: E731
+        return _dc_replace(node, a=sub(node.a), channels=tuple(_dc_replace(ch, b=sub(ch.b)) for ch in node.channels))
     return node
 
 

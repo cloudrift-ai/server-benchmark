@@ -1,9 +1,10 @@
 r"""The geometry-free compute layer — node lowering and the structural reads.
 
-A kernel's compute is a stored :class:`~emmy.compiler.ir.tile.ir.Fold` (a bare reduce) or a
+A kernel's compute is a stored :class:`~emmy.compiler.ir.tile.ir.Fold` (a bare reduce), a
+:class:`~emmy.compiler.ir.tile.ir.Contraction` (a contraction cell — 1s), or a
 :class:`~emmy.compiler.ir.tile.ir.Map` (a pure pointwise cell, or the projection wrapper over its
-source fold). The algebra is read **structurally** off the node — :func:`axis_role` /
-:func:`reduce_loop` recurse through ``Map.sources``; there is no stored node kind.
+source node). The algebra is read **structurally** off the node — :func:`axis_role` /
+:func:`reduce_loop` recurse through ``Map.sources``; a fold's role is derived, never stored.
 
 This module is the thin lowering of any node back to its loop nest (:func:`lower` — a fold
 flattens through :attr:`Fold.loop`, a wrapping projection appends) plus the shared
@@ -18,7 +19,7 @@ from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.schedule import ReducePlan
 from emmy.compiler.ir.stmt import Assign, Body, Loop, StridedLoop
 from emmy.compiler.ir.stmt.base import Stmt, pretty_body
-from emmy.compiler.ir.tile.ir import ContractionView, Fold, Map, effect_tail
+from emmy.compiler.ir.tile.ir import Contraction, Fold, Map, effect_tail
 
 
 def cone_seam(cone) -> tuple[tuple, tuple, tuple[str, ...]]:
@@ -146,16 +147,16 @@ def seal_workers(tile) -> None:
 def reduce_loop(op):
     """The kernel's outermost **annotated** reduce ``Loop`` (its ``role`` stamped by recognition),
     or ``None`` for a pure pointwise / flat-fallback ``Map`` (no annotated reduce). A
-    :class:`~emmy.compiler.ir.tile.ir.Fold` / :class:`ContractionView` synthesizes its loop
+    :class:`~emmy.compiler.ir.tile.ir.Fold` / :class:`Contraction` synthesizes its loop
     directly (a multi-channel contraction derives the ONE fused product loop — see
-    :attr:`ContractionView.loop`); a ``Map``
+    :attr:`Contraction.loop`); a ``Map``
     is read off the top-level body — the annotated reduce loop is a top-level stmt (a
     single-flat-reduce cell); a nested / multi reduce stays un-annotated (``role=FREE`` — flat
     fallback) and is invisible here, so it materializes on the scalar tier."""
-    if isinstance(op, (Fold, ContractionView)):
+    if isinstance(op, (Fold, Contraction)):
         return op.loop
     if isinstance(op, Map) and op.sources:
-        return reduce_loop(op.sources[0])  # a Map projecting over a Fold / ContractionView source
+        return reduce_loop(op.sources[0])  # a Map projecting over a Fold / Contraction source
     for s in op.body:
         if isinstance(s, (Loop, StridedLoop)) and s.role.is_reduce:
             return s
@@ -171,7 +172,7 @@ def reduce_plan(tile):
     ``030_split_reduce`` read."""
     op = tile.op
     head = op.sources[0] if isinstance(op, Map) and op.sources else op
-    if not isinstance(head, Fold):
+    if not isinstance(head, (Fold, Contraction)):
         return None
     plan = sched_of(tile).reduce_of(head)
     return plan if plan is not None else ReducePlan()
@@ -195,10 +196,10 @@ def nodify_reduce(op, like=None):
     must be a top-level stmt of ``op.body`` with no prologue ahead of it (true for a split partial /
     bare sum: the reduce is the body's head); a projection tail after it becomes the wrapping
     ``Map`` body."""
-    if isinstance(op, Fold) and op.role is AxisRole.CONTRACTION:
+    if isinstance(op, (Fold, Contraction)) and op.role is AxisRole.CONTRACTION:
         return op, op
     head = op.sources[0] if isinstance(op, Map) and op.sources else None
-    if isinstance(head, Fold) and head.role is AxisRole.CONTRACTION:
+    if isinstance(head, (Fold, Contraction)) and head.role is AxisRole.CONTRACTION:
         return op, head
     if like is None:
         self_head = head if head is not None else op
@@ -231,7 +232,7 @@ def lower(op) -> list[Stmt]:
     one ``lower`` call emits the kernel's per-cell body with nothing left to expand. Stored trees
     are already resolved (computed operands are inline nodes), so there is no name-inlining step;
     a multi-channel contraction lowers through its own derived product loop
-    (:attr:`ContractionView.loop`)."""
+    (:attr:`Contraction.loop`)."""
     from emmy.compiler.ir.stmt import Load  # noqa: PLC0415
 
     if isinstance(op, Map):
@@ -239,9 +240,9 @@ def lower(op) -> list[Stmt]:
         # arrives materialized, so the "nest" is the load itself.
         prefix = [s for src in op.sources for s in ((src,) if isinstance(src, Load) else lower(src))]
         return [*prefix, *op.body]  # the sources' reduce/contract loop nests, then the projection body
-    if isinstance(op, (Fold, ContractionView)):
+    if isinstance(op, (Fold, Contraction)):
         return op.lower()
-    raise TypeError(f"lower: expected a Map lift wrapper, Fold, or ContractionView, got {type(op).__name__}")
+    raise TypeError(f"lower: expected a Map lift wrapper, Fold, or Contraction, got {type(op).__name__}")
 
 
 def contraction_loop(lift, fold, operand_bodies, reduce_axis) -> Loop:
@@ -270,7 +271,7 @@ def _term_names(root) -> tuple[list[str], list[str]]:
     The order is a function of the stored params only, so the renumber map — and with it
     :func:`term_key` — is α-invariant."""
     from emmy.compiler.ir.stmt import Load  # noqa: PLC0415
-    from emmy.compiler.ir.tile.ir import ContractionView, Fold, Map  # noqa: PLC0415
+    from emmy.compiler.ir.tile.ir import Contraction, Fold, Map  # noqa: PLC0415
 
     names: list[str] = []
     bufs: list[str] = []
@@ -283,7 +284,7 @@ def _term_names(root) -> tuple[list[str], list[str]]:
             names.append(n)
 
     def note_stmt(s) -> None:
-        if isinstance(s, (Fold, Map, ContractionView)):
+        if isinstance(s, (Fold, Map, Contraction)):
             walk(s)
             return
         if isinstance(s, Load) and s.input not in bseen:
@@ -316,7 +317,7 @@ def _term_names(root) -> tuple[list[str], list[str]]:
                 note(r)
             for r in node.combine.results:
                 note(r)
-        elif isinstance(node, ContractionView):
+        elif isinstance(node, Contraction):
             note_stmt(node.a)
             for ch in node.channels:
                 note_stmt(ch.b)
@@ -378,11 +379,17 @@ def _canon_tree(node):
 
     from emmy.compiler.ir.stmt import Lambda  # noqa: PLC0415
     from emmy.compiler.ir.stmt.body import Body as _B  # noqa: PLC0415
-    from emmy.compiler.ir.tile.ir import Fold, Map  # noqa: PLC0415
+    from emmy.compiler.ir.tile.ir import Channel, Fold, Map  # noqa: PLC0415
 
     def canon_stmt(s):
-        return _canon_tree(s) if isinstance(s, (Fold, Map)) else s
+        return _canon_tree(s) if isinstance(s, (Fold, Map, Contraction)) else s
 
+    if isinstance(node, Contraction):
+        return replace(
+            node,
+            a=canon_stmt(node.a),
+            channels=tuple(Channel(b=canon_stmt(ch.b), acc=ch.acc) for ch in node.channels),
+        )
     if isinstance(node, Map):
         body = tuple(canon_stmt(s) for s in _canon_order(tuple(node.fn.body)))
         fn = node.fn
@@ -411,7 +418,7 @@ def term_key(root) -> str:
 
     if root is None:
         return ""
-    root = _canon_tree(root) if isinstance(root, (Fold, Map)) else root
+    root = _canon_tree(root) if isinstance(root, (Fold, Map, Contraction)) else root
     names, bufs = _term_names(root)
     ren = {n: f"s{i}" for i, n in enumerate(names)}
     canon = _stmt_rewrite(root, lambda n: ren.get(n, n), Sigma.IDENTITY, lambda a: a)
@@ -432,6 +439,8 @@ def pretty(op, indent: str = "") -> list[str]:
     if isinstance(op, Fold):
         head = f"{indent}Fold[{op.axis.name}] {op.role.name.lower()}"
         return [head, *pretty_body(Body(op.lower()), indent + "    ")]
+    if isinstance(op, Contraction):
+        return [*op.pretty(indent), *pretty_body(Body(op.lower()), indent + "    ")]
     if isinstance(op, Map):
         src = [line for s in op.sources for line in pretty(s, indent)]
         return [*src, *pretty_body(op.body, indent)]

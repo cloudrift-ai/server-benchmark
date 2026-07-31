@@ -1041,15 +1041,18 @@ configs:
     knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k8', REDUCE: '', RASTER: '', STAGE: 'd1/tma'}
     emmy_us: 144.8
     cublas_us: 151.6
+  # std twin re-recorded 2026-07-30: k4/g4a single-kernel ties the k2/g8k partial+finalize pair on
+  # this layout and matches the .lin twin's config, so the layout-blind evidence join deploys the
+  # right kernel on BOTH layouts (the .lin greedy was riding this entry's k2/g8k at 107 µs).
   - kernel: matmul
     name: gemma4_12b.mlp_down.m32
     M: 32
     N: 3840
     K: 15360
     dtype: 'fp16'
-    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd2/tma/ring'}
-    emmy_us: 74.1
-    cublas_us: 77.1
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 73.7
+    cublas_us: 77.0
   # [fm] single-kernel atomic split (2026-07-21): k4/g4a beats the std k2/g8k partial+finalize by
   # ~1.9 (can) / ~0.9 (lin) — the deferred finalize kernel + f32 workspace round-trip removed
   # (RegStore.atomic packed-pair red). Seeded in BOTH layouts; the .lin row is the serving twin's.
@@ -1072,6 +1075,17 @@ configs:
     knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f16/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring'}
     emmy_us: 74.7
     cublas_us: 81.9
+  # The std-lane twin (2026-07-30): without it a gate-off deploy cold-resolved to a 110 µs pick.
+  - kernel: matmul
+    name: gemma4_12b.mlp_down.m32.lin
+    M: 32
+    N: 3840
+    K: 15360
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4a', RASTER: '', STAGE: 'd2/tma/ring'}
+    emmy_us: 76.1
+    cublas_us: 82.0
   # ---- decode-bucket M=64 twins (EMMY_GEN_DECODE_BUCKET=64 — the c>32 serving decode shapes) ------
   # Seeded 2026-07-21 by manual pinned --ab (3x, spread <=0.8%), torch eager reference, BOTH layouts
   # (canonical + .lin serving twins — the staged transposed-B tier realizes the same configs on both).
@@ -2997,6 +3011,19 @@ configs:
     knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 1079.2
     cublas_us: 664.0
+  # ROUTING (2026-07-30, m192/dynM re-tune): PLACE=cut — pieces resolve the rms stat + pointwise +
+  # the symbolic-M matmul tier; measured at the hint vs the fused entry (1073.4 µs) and eager (636).
+  - kernel: norm_linear
+    name: gemma4_12b.norm_gate_up.dynM.lin.cut
+    M: 512
+    H: 3840
+    N: 30720
+    dtype: 'fp16'
+    dynamic: true
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 654.3
+    cublas_us: 636.0
   # The SLIDING layers' merged q||k||v edge at the decode bucket — 40 of the 48 `pre` programs. It had
   # no m32 entry at all while its m8 and m64 siblings both record `cut`, so the single most-launched
   # fused edge in the model had no floor at the width the batched serving lanes route onto.
@@ -3086,6 +3113,17 @@ configs:
     knobs: {WORK: 'w1x16', TILE: 'mma_m16n8k16_f16_f32/f2x2/k2', REDUCE: 'g8k', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 40.1
     cublas_us: 37.0
+  # ROUTING (2026-07-30 re-tune): PLACE=cut — stat 1.3 + pointwise 0.9 + the m32 matmul tier 19.1; fused entry 40.3, eager 33 — the #445 cut win, live through the phase-4 realizer.
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qk_global.m32.lin.cut
+    M: 32
+    H: 3840
+    N: 8704
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 21.3
+    cublas_us: 33.0
   - kernel: norm_linear
     name: gemma4_12b.norm_qk_global.m256.lin
     M: 256
@@ -3120,6 +3158,19 @@ configs:
     knobs: {WORK: 'w2x8', TILE: 'mma_m16n8k16_f16_f32/f4x4/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 297.9
     cublas_us: 222.0
+  # ROUTING (2026-07-30, m192/dynM re-tune): PLACE=cut — pieces resolve the rms stat + pointwise +
+  # the symbolic-M matmul tier; measured at the hint vs the fused entry (298.4 µs) and eager (217).
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qk_global.dynM.lin.cut
+    M: 512
+    H: 3840
+    N: 8704
+    dtype: 'fp16'
+    dynamic: true
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 212.5
+    cublas_us: 217.0
   # mlp_down_fused: the STATIC down-proj fork post-merge — the GeGLU combine cone (one merged
   # workspace read at two N-offsets) fused into the down matmul, keyed like a computed-A cone
   # (kind="fused", free_max=3840, reduce=15360). Recorded under norm_linear DIMS (H=15360, N=3840 —
@@ -3136,6 +3187,17 @@ configs:
     knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g4k', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 95.9
     cublas_us: 90.0
+  # ROUTING (2026-07-30 re-tune): PLACE=cut — stat 2.6 + pointwise 1.2 + the re-recorded mlp_down.m32 tier 76.6; fused entry 121.4, eager 98.
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m32.lin.cut
+    M: 32
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 80.4
+    cublas_us: 98.0
   - kernel: norm_linear
     name: gemma4_12b.mlp_down_fused.m256.lin
     M: 256
@@ -4399,9 +4461,19 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f4x1/k8', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring'}
-    emmy_us: 274.8
-    cublas_us: 234.3
+    knobs: {WORK: 'w2x4', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring'}
+    emmy_us: 290.4
+    cublas_us: 290.0
+  - kernel: matmul
+    name: gemma4_12b.gate_up_cat.m192.lin
+    M: 192
+    N: 30720
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w2x4', TILE: 'mma_m16n8k16_f16_f16/f2x2/k4', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring'}
+    emmy_us: 263.3
+    cublas_us: 290.0
   - kernel: matmul
     name: gemma4_12b.qkv_cat.m192.lin
     M: 192
@@ -4409,9 +4481,19 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f4x1/k8', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring'}
-    emmy_us: 89.3
-    cublas_us: 70.0
+    knobs: {WORK: 'w2x4', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g2a', RASTER: 'gm8', STAGE: 'd2/tma/ring'}
+    emmy_us: 76.8
+    cublas_us: 79.0
+  - kernel: matmul
+    name: gemma4_12b.qkv_cat.m192.lin
+    M: 192
+    N: 8192
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w2x4', TILE: 'mma_m16n8k16_f16_f16/f2x2/k4', REDUCE: 'g2a', RASTER: 'gm8', STAGE: 'd2/tma/ring'}
+    emmy_us: 71.0
+    cublas_us: 79.0
   - kernel: matmul
     name: gemma4_12b.qk_global_cat.m192.lin
     M: 192
@@ -4419,9 +4501,19 @@ configs:
     K: 3840
     dtype: 'fp16'
     trans_b: true
-    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f4x1/k8', REDUCE: '', RASTER: 'gm8', STAGE: 'd2/tma/ring'}
-    emmy_us: 89.8
-    cublas_us: 70.0
+    knobs: {WORK: 'w2x4', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g2a', RASTER: 'gm8', STAGE: 'd2/tma/ring'}
+    emmy_us: 79.5
+    cublas_us: 79.0
+  - kernel: matmul
+    name: gemma4_12b.qk_global_cat.m192.lin
+    M: 192
+    N: 8704
+    K: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {WORK: 'w2x4', TILE: 'mma_m16n8k16_f16_f16/f2x2/k4', REDUCE: 'g2a', RASTER: 'gm8', STAGE: 'd2/tma/ring'}
+    emmy_us: 75.8
+    cublas_us: 79.0
   - kernel: matmul
     name: gemma4_12b.mlp_down.m192.lin
     M: 192
@@ -4429,9 +4521,9 @@ configs:
     K: 15360
     dtype: 'fp16'
     trans_b: true
-    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f4x1/k8', REDUCE: 'g2a', RASTER: 'gm8', STAGE: 'd2/tma/ring'}
-    emmy_us: 193.1
-    cublas_us: 120.0
+    knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: 'g8a', RASTER: 'gm8', STAGE: 'd2/tma/ring'}
+    emmy_us: 160.6
+    cublas_us: 147.0
   # The FUSED (computed-A) norm->linear cones at this width. These are the rows that matter most
   # here: with no fused golden the cone cold-resolves to the per-cell `fuse`/`b128` scalar config,
   # which is not a mild loss but a ~300x one — measured on-card at m192, std lane, against torch's
@@ -4458,6 +4550,18 @@ configs:
     knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 429.3
     cublas_us: 266.0
+  # ROUTING (2026-07-30, m192 re-tune): PLACE=cut — pieces resolve the rms stat + pointwise +
+  # the re-tuned m192 matmul tier; measured vs the fused entry (559.5 µs) and eager (307).
+  - kernel: norm_linear
+    name: gemma4_12b.norm_gate_up.m192.lin.cut
+    M: 192
+    H: 3840
+    N: 30720
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 294.2
+    cublas_us: 307.0
   - kernel: norm_linear
     name: gemma4_12b.norm_qkv.m192.lin
     M: 192
@@ -4468,6 +4572,18 @@ configs:
     knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 116.2
     cublas_us: 100.0
+  # ROUTING (2026-07-30, m192 re-tune): PLACE=cut — pieces resolve the rms stat + pointwise +
+  # the re-tuned m192 matmul tier; measured vs the fused entry (139.2 µs) and eager (86).
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qkv.m192.lin.cut
+    M: 192
+    H: 3840
+    N: 8192
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 81.1
+    cublas_us: 86.0
   - kernel: norm_linear
     name: gemma4_12b.norm_qk_global.m192.lin
     M: 192
@@ -4478,6 +4594,18 @@ configs:
     knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 118.2
     cublas_us: 101.0
+  # ROUTING (2026-07-30, m192 re-tune): PLACE=cut — pieces resolve the rms stat + pointwise +
+  # the re-tuned m192 matmul tier; measured vs the fused entry (140.0 µs) and eager (85).
+  - kernel: norm_linear
+    name: gemma4_12b.norm_qk_global.m192.lin.cut
+    M: 192
+    H: 3840
+    N: 8704
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 83.1
+    cublas_us: 85.0
   - kernel: norm_linear
     name: gemma4_12b.mlp_down_fused.m192.lin
     M: 192
@@ -4488,3 +4616,15 @@ configs:
     knobs: {WORK: 'w1x8', TILE: 'mma_m16n8k16_f16_f32/f2x2/k4', REDUCE: '', RASTER: '', STAGE: 'd1/sync'}
     emmy_us: 265.5
     cublas_us: 165.0
+  # ROUTING (2026-07-30, m192 re-tune): PLACE=cut — pieces resolve the rms stat + pointwise +
+  # the re-tuned m192 matmul tier; measured vs the fused entry (319.8 µs) and eager (170).
+  - kernel: norm_linear
+    name: gemma4_12b.mlp_down_fused.m192.lin.cut
+    M: 192
+    H: 15360
+    N: 3840
+    dtype: 'fp16'
+    trans_b: true
+    knobs: {PLACE: 'cut'}
+    emmy_us: 169.2
+    cublas_us: 170.0

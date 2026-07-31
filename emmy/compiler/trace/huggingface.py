@@ -45,7 +45,7 @@ def build_full_model_wrapper(model, seq_len: int, dtype, *, dynamic: bool = Fals
     one row → ``[1, 1, vocab]``. The generate loop only needs the next-token logits, so
     this avoids the O(S·vocab) lm_head over every prefix position and the full-buffer host
     copy each step. The ``hidden[:, -1:, :]`` slice makes lm_head an **M=1 demoted
-    matmul**: it lowers cold (the unbindable ContractionView demotes to PLANAR) and
+    matmul**: it lowers cold (the unbindable Contraction demotes to PLANAR) and
     ``140_slice`` normalizes the negative row index against the symbolic extent
     (``seq_len - 1``, a runtime kernel arg) — pinned by
     ``test_slice_last_logits_lowers_cold``. ``_CompiledLM`` uses this form. Keeping HF's in-graph

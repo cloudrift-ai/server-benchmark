@@ -1,7 +1,7 @@
-"""Operand edges + the product-carrier :class:`ContractionView` — sharing is arity, not naming.
+"""Operand edges + the product-carrier :class:`Contraction` — sharing is arity, not naming.
 
 A computed operand is stored INLINE on its edge (there is no let table and no name-reference arm);
-"these two matmuls read the same A" is ONE ``ContractionView`` with one ``a`` edge and N product
+"these two matmuls read the same A" is ONE ``Contraction`` with one ``a`` edge and N product
 :class:`Channel`\\ s ``(b_i, acc_i)``. These pin the node's derived product loop (shared A lifted
 once, N-component product-monoid carrier), the arity-vs-copies distinction, the inline-arm
 canonicalization through ``rewrite``, and the ``captured_values`` closure predicate a placement cut
@@ -16,7 +16,7 @@ from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.stmt.passes import rewrite
-from emmy.compiler.ir.tile import Channel, ContractionView, Map, contraction_view
+from emmy.compiler.ir.tile import Channel, Contraction, Map
 from emmy.compiler.ir.tile.ir import axis_names, captured_values, tree_nodes
 from emmy.compiler.ir.tile.ops import lower
 
@@ -29,9 +29,9 @@ def _cone(name: str = "xhat") -> Map:
     return Map(body=Body((load, scale, Assign(name=name, op="multiply", args=(f"{name}_e", f"{name}_s")))))
 
 
-def _node(a, *channels: tuple[str, str]) -> ContractionView:
+def _node(a, *channels: tuple[str, str]) -> Contraction:
     """A contraction over operand edge ``a`` with one ``(acc, weight-buffer)`` channel per arg."""
-    return ContractionView(
+    return Contraction(
         axes=(Axis("m", 128), Axis("n", 128)),
         k_axis=Axis("k", 256),
         a=a,
@@ -40,7 +40,7 @@ def _node(a, *channels: tuple[str, str]) -> ContractionView:
     )
 
 
-def _product() -> ContractionView:
+def _product() -> Contraction:
     """The gate⊗up shape: ONE product contraction, two channels over one inline cone."""
     return _node(_cone(), ("acc_g", "Wg"), ("acc_u", "Wu"))
 
@@ -146,21 +146,18 @@ def test_iteration_variables_are_not_captures() -> None:
 
 
 def test_rewrite_renames_channel_accs_and_inline_arms_in_lockstep() -> None:
-    """The canonicalizer runs over STORED trees — the fold; the view of the renamed fold shows the
-    accs and the inline cone renamed through one map."""
-    fold = _product().as_fold()
-    renamed = rewrite(fold, lambda n: {"xhat": "v0", "acc_g": "v1", "acc_g__v": "v1__v"}.get(n, n), Sigma({}), lambda a: a)
-    view = contraction_view(renamed, Axis("m", 128), Axis("n", 128))
-    assert view is not None
-    assert view.channels[0].acc == "v1" and view.channels[1].acc == "acc_u"
-    assert view.a.out == "v0"  # the inline cone canonicalized through the same map
+    """The canonicalizer runs over STORED trees — the node: the accs and the inline cone rename
+    through one map."""
+    node = _product()
+    renamed = rewrite(node, lambda n: {"xhat": "v0", "acc_g": "v1", "acc_g__v": "v1__v"}.get(n, n), Sigma({}), lambda a: a)
+    assert renamed.channels[0].acc == "v1" and renamed.channels[1].acc == "acc_u"
+    assert renamed.a.out == "v0"  # the inline cone canonicalized through the same map
 
 
 def test_rewrite_reaches_a_channels_b_edge() -> None:
-    fold = _product().as_fold()
-    renamed = rewrite(fold, lambda n: {"acc_u_b": "vb"}.get(n, n), Sigma({}), lambda a: a)
-    view = contraction_view(renamed, Axis("m", 128), Axis("n", 128))
-    assert view is not None and view.channels[1].b.names == ("vb",)
+    node = _product()
+    renamed = rewrite(node, lambda n: {"acc_u_b": "vb"}.get(n, n), Sigma({}), lambda a: a)
+    assert renamed.channels[1].b.names == ("vb",)
 
 
 # --- Map.fn: the binder (1n — the ``source`` compat read retired with the ``out`` convention) ---- #

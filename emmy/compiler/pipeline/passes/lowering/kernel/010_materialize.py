@@ -1,11 +1,11 @@
 """Materialize a ``TileOp``'s schedule into a ``KernelOp``.
 
 Binds the schedule's grid axes to GPU threads and realizes the reduce partition through the **one**
-node-kind dispatcher, ``_factor.factorize`` — every ``TileOp`` root (a tiled ``ContractionView``, a
+node-kind dispatcher, ``_factor.factorize`` — every ``TileOp`` root (a tiled ``Contraction``, a
 cooperative / ILP reduce, or a pointwise / scalar cell) lowers through that single emitter, which
 reads the node kind + role + reduce plan off ``tile.op`` and picks the tier:
 
-- **Tiled ``CONTRACTION``** (warp / register tile) — the high-level :class:`ContractionView` node was
+- **Tiled ``CONTRACTION``** (warp / register tile) — the high-level :class:`Contraction` node was
   built recognize-side (``_schedule._contraction_node``, seam #1); ``factorize`` synthesizes its bare
   grid-``Write`` (needs ``root.output``, so it can't ride the node) and expands it (mma → the
   ``RegFragment`` / ``LdmatrixLoad`` / ``MmaSyncPtx`` / ``RegStore`` fragment soup; scalar → the

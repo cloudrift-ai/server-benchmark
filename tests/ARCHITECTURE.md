@@ -6,161 +6,45 @@ All tests use **pytest** with **pytest-asyncio** (`asyncio_mode = "auto"` in `py
 
 ## Directory Structure
 
-```
-tests/
-├── conftest.py              # shared fixtures
-├── test_detect.py               # emmy.detect (GPU detection via PCI sysfs)
-├── test_hardware.py         # emmy.hardware (top-level module)
-├── test_redact.py           # emmy.redact (secret redaction)
-├── test_new_models.py       # scripts/new_models.py (model discovery: base-key match, dedup, arena linking)
-├── test_golden_neighbor_bench.py # scripts/golden_neighbor_bench.py (knob distance, point keys, slice assignment/shares, sampling, resume ledger, shape specs)
-├── benchmark/
-│   ├── test_bench_dryrun.py # bench CLI dry-run
-│   ├── test_code_hash.py    # BenchmarkTask.compute_code_hash()
-│   ├── test_tasks_json.py   # BenchmarkTask.write_tasks_json(), read_tasks_json()
-│   ├── test_run_dir.py      # BenchmarkTask.create_run_dir()
-│   ├── test_results.py      # parse_benchmark_metrics(), parse_system_info(), compose_json_result()
-│   ├── test_embedding_workload.py # embed bench command, embeddings output parsing, smoke-response checks
-│   └── test_command_workload.py # build_substitution_map(), render_command()
-├── serving/                   # mirrors emmy/serving/ (vLLM embedding plugin)
-│   ├── test_packed.py       # split_spans packed-batch span splitting (pure, no GPU)
-│   ├── test_gen_pack_gpu.py # gen-runner EMMY_PACK_DIR round-trip: 2nd boot hits, outputs bit-equal (CUDA)
-│   └── test_vllm_plugin_gpu.py # in-process vLLM engine + plugin vs HF eager (perf-marked, CUDA + vllm)
-├── recipe/
-│   ├── test_types.py        # Recipe.from_dict(), LLMConfig properties, dataclass defaults
-│   └── test_engines.py      # build_engine_args(), banned_extra_arg_flags()
-├── deploy/
-│   ├── test_compose.py      # generate_compose(), generate_nginx_conf()
-│   ├── test_deploy_cloud_dryrun.py  # deploy cloud CLI dry-run
-│   ├── test_deploy_dryrun.py        # deploy ssh/local CLI dry-run
-│   ├── test_recipe.py       # load_recipe(), deep_merge(), validate_extra_args(), resolve_for_hardware()
-│   └── test_scale_out.py    # DataParallelismScaleOutStrategy, ReplicaParallelismScaleOutStrategy
-├── planner/
-│   ├── test_planner.py      # BenchmarkTask, GroupByModelAndGpuPlanner
-│   └── test_variant.py      # Variant class, _abbreviate()
-├── provisioning/
-│   ├── test_cloud.py        # resolve_vm_spec(), delete_cloud_vm(), VMConnectionInfo
-│   ├── test_cloudrift.py    # CloudRift API helpers
-│   ├── test_gcp.py             # GCP command builders
-│   ├── test_staging.py      # enumerate_staged_files(), build_stage_tar()
-│   └── test_vm_dryrun.py    # vm create/delete CLI dry-run
-├── perf/                      # GPU perf comparison vs PyTorch (gated by `perf` marker)
-│   ├── ARCHITECTURE.md            # how to run, how to read the table, how to add a case
-│   ├── cases.py                   # curated (op, shape) cases + torch/emmy builders
-│   ├── conftest.py                # `bench_pair` fixture, session summary, JSON dump
-│   ├── test_primitives.py         # matmul / rmsnorm / softmax / silu_mul
-│   └── test_fused.py              # SDPA fused-kernel perf comparison
-├── compiler/                       # mirrors emmy/compiler/
-│   ├── conftest.py                     # requires_cuda / requires_sm90 markers, run_graph fixture,
-│   │                                   # device_compute_capability(), matmul_graph(m,k,n) shared builder
-│   ├── fixtures/                       # pre-computed traces (tinyllama_layer0.json) + model configs
-│   │                                   # (gemma4_12b/config.json — the drift gate's offline HF config)
-│   ├── test_golden_drift_gate.py       # golden drift CI gate: weight-free gemma-4 serving twins re-traced
-│   │                                   # from the fixture config, audited per card (DRIFT=0 + major-gap
-│   │                                   # ratchet; offline, CPU-only; ~80 s — the heaviest non-perf test)
-│   ├── ir/                             # IR datatypes (mirrors emmy/compiler/ir/)
-│   │   ├── test_graph.py                       # Graph / Node / Tensor primitives
-│   │   ├── test_graph_splice.py                # Graph.splice rewrite primitive
-│   │   ├── test_graph_structural_key.py        # Merkle-style structural digest
-│   │   ├── test_hints.py                       # Hints get/set/merge/serialize
-│   │   ├── test_indexmap.py                    # IndexMapOp + coord_expr helpers
-│   │   ├── test_loop_op.py                     # LoopOp SSA body (Loop/Assign/Accum/…)
-│   │   ├── test_shape_inference.py             # infer_output_shape (static + Dim symbolic)
-│   │   ├── test_provenance.py                  # provenance data model + propagation
-│   │   ├── test_dynamic_shapes.py              # Dim round-trips trace/lift/LoopOp + per-seq_len captured-graph replay
-│   │   ├── test_real_trace.py                  # TinyLlama fixture sanity (op-type counts)
-│   │   ├── test_body_deps.py / test_op_shape_invariants.py / …
-│   │   ├── stmt/   — SSA-body unit tests (hoist / merge / rename / structural_key)
-│   │   ├── tile/   — TileOp / schedule-codec (TILE / WARP / STAGE / REDUCE) unit tests
-│   │   └── loop/   — splicer / runner-cache unit tests
-│   ├── passes/                         # single-pass + pass-suite tests
-│   │   ├── conftest.py                         # RecordingDump fixture
-│   │   ├── test_decompose_rules.py / test_optimization_rules.py / test_fusion_rules.py
-│   │   ├── test_matcher.py                     # Pattern matcher unit tests
-│   │   ├── test_matmul_rules.py / test_reduction_rules.py / test_register_tile_rules.py
-│   │   ├── test_partition_planner_rules.py / test_partition_planner_forks.py
-│   │   ├── test_partition_planner_memo.py      # enumeration memo + lazy fork-tree call counts
-│   │   ├── test_launch_geometry_rules.py / test_masked_tile.py
-│   │   ├── test_stage_inputs_classify.py
-│   │   ├── test_lowering_accuracy.py           # 040 / 060 / 070 + TMA end-to-end
-│   │   ├── test_knob_pinning.py                # EMMY_KNOBS regression configs
-│   │   ├── test_tile_naming.py                 # provenance-driven kernel naming
-│   │   └── test_pipeline_semantics.py          # full pass chain vs numpy
-│   ├── pipeline/                       # pipeline-level tests (knob, dump, rule_diff)
-│   │   ├── test_knob.py / test_rule_diff.py
-│   │   ├── test_dump.py                        # _graph_to_dot + CompilerDump repro
-│   │   ├── test_dedup_replicated.py            # Kernel-IR 011 CSE pass (Load + Assign)
-│   │   └── search/ — DB, slice, thunk_forks, two_level, greedy_db_lookup, tune_accuracy
-│   ├── backend/                        # backend code-emission + dispatch
-│   │   ├── test_dtype_cuda.py / test_dtype_numpy.py
-│   │   ├── test_emit.py                        # CUDA source-level assertions + GPU runs
-│   │   ├── test_loader.py / test_nvcc_compile.py
-│   │   ├── test_program.py                     # cupy dispatch of Graph[CudaOp]
-│   │   ├── test_execution_plan.py              # plan projection + JSON round-trip (CPU)
-│   │   ├── test_pack_gpu.py                    # pack save/load + recompile fallback (CUDA)
-│   │   ├── test_torch_ref.py                   # eager-reference evaluator
-│   │   └── test_bench_worker_recovery.py       # sticky-CUDA-error sub-process recovery
-│   ├── trace/
-│   │   └── test_torch.py                       # PyTorch tracer per-op handlers
-│   ├── cli/                            # subprocess CLI tests via run_cli fixture
-│   │   ├── test_compile.py / test_knobs.py / test_run.py
-│   ├── e2e/                            # end-to-end accuracy / pipeline / blocks
-│   │   ├── test_accuracy.py                    # backend × dtype × pattern parity matrix
-│   │   ├── test_ops_vs_torch.py                # backend × op vs torch eager (parity layer)
-│   │   ├── test_matmul_coverage.py             # SEMIRING: scalar TILE + warp MMA + masked-symbolic
-│   │   ├── test_reduce_coverage.py             # MONOID: cooperative combine + online-softmax fusion
-│   │   ├── test_attention_coverage.py          # flash (scalar + TC warp chains) + model chains
-│   │   ├── test_block.py                       # TinyLlama / Qwen block vs eager
-│   │   └── test_pipeline.py                    # LOOP_PASSES → CudaBackend on toys
-│   └── diagnostics/
-│       └── test_bank_conflicts.py
-├── scripts/
-│   ├── test_plot_mcr_sweep.py  # load_results() from scripts/plot_mcr_sweep.py
-│   └── test_serving_image_release.py  # release naming schema + golden coverage gate
-```
+`tests/` mirrors the `emmy/` source tree: a test directory exists because a source package does, and a test
+module is named for the source module it covers. To find the tests for `emmy/<a>/<b>.py`, look in
+`tests/<a>/test_<b>.py`. The one file at the root that belongs to no package is `conftest.py` — shared fixtures
+plus the CUDA / LPT xdist routing hook (see **Running**).
+
+Mirroring is the rule, not a coincidence — when a source package grows subpackages, the test directory follows.
+`tests/compiler/pipeline/search/` is the worked example: its `data/`, `policy/`, and `prior/` subdirectories exist
+because `emmy/compiler/pipeline/search/` has them, so a test for `policy/greedy.py` lives in `policy/`, one for
+`prior/offline.py` in `prior/`, and only tests of the package's own top-level modules (`db.py`, `features.py`,
+`slice.py`, …) stay flat. Tests that span several modules of a package — a cross-cutting property like
+deploy-pick order invariance, or a process-wide cache over two subsystems — sit at the level that owns all of
+them, not inside one arbitrary child.
+
+Four directories break the mirror deliberately, because their organizing axis is the *kind* of test, not the
+source module:
+
+| Directory | Axis |
+|---|---|
+| `compiler/e2e/` | end-to-end coverage matrices — the whole pipeline per regime (matmul / reduce / attention / fused), not per pass |
+| `compiler/cli/` | `emmy <command>` as a subprocess, via the `run_cli` fixture |
+| `compiler/fixtures/` | checked-in traces and model configs, not tests |
+| `perf/` | GPU perf comparison vs PyTorch, gated by the `perf` marker (see `tests/perf/ARCHITECTURE.md`) |
+
+`compiler/passes/` and `compiler/perf/` carry their own `ARCHITECTURE.md`; read those before adding to them.
 
 ## Test Layers
 
-### Unit Tests
+The suite runs in four layers, distinguished by what they touch rather than by where they live:
 
-Test individual functions in isolation with synthetic inputs.
+- **Unit** — pure functions and dataclasses with synthetic inputs. No I/O. The bulk of the suite.
+- **CLI dry-run** — the full argument-parsing → config-loading → orchestration path invoked as a subprocess with
+  `--dry-run`, stopping just before any real side effect (SSH, Docker, file writes). Covers `deploy ssh/local/cloud`,
+  `bench`, `teardown`, and `vm create/delete`. These use real recipes from `recipes/` so config drift fails a test.
+- **GPU** — guarded by `requires_cuda` / `requires_sm90` / `importorskip` so they skip cleanly off-GPU, and routed
+  onto a serial worker chain by the root conftest (see **Running**).
+- **End-to-end** — a traced model or snippet through the whole compiler, compared against PyTorch eager or numpy.
 
-| File | Covers |
-|------|--------|
-| `recipe/test_types.py` | `Recipe.from_dict()`, `LLMConfig` properties (`engine_name`, `gpus_per_instance`, `image`, `extra_args`, `extra_env`, `docker_options`), dataclass defaults |
-| `recipe/test_engines.py` | `build_engine_args()`, `banned_extra_arg_flags()` — engine flag mapping, CLI argument building for vLLM and SGLang |
-| `deploy/test_recipe.py` | `emmy.recipe.load_recipe()`, `deep_merge()`, `validate_extra_args()`, `validate_docker_options()`, `resolve_for_hardware()` — recipe loading, variant resolution, YAML parsing, extra_args validation, docker_options validation, hardware-aware matrix resolution |
-| `deploy/test_scale_out.py` | `DataParallelismScaleOutStrategy`, `ReplicaParallelismScaleOutStrategy` — scale-out strategy application, GPU count validation, immutability |
-| `deploy/test_compose.py` | `emmy.deploy.generate_compose()`, `generate_nginx_conf()` — Docker Compose and nginx config generation, `gpu_device_ids` support, `docker_options` rendering |
-| `provisioning/test_cloud.py` | `emmy.provisioning.cloud.resolve_vm_spec()`, `delete_cloud_vm()`, `_provision_once()`, `VMConnectionInfo` — cloud provisioning unit tests |
-| `planner/test_planner.py` | `BenchmarkTask`, `GroupByModelAndGpuPlanner` — task properties (`recipe_name`, `result_path`, `gpu_name`, `gpu_count`, `gpu_short`), grouping logic, sorting |
-| `planner/test_variant.py` | `Variant` — `__str__`, `gpu_short`, `gpu_count`, `__eq__`, `__hash__`, `_abbreviate()` |
-| `test_detect.py` | `_parse_sysfs_output()`, `detect_local_gpus()`, `detect_remote_gpus()` — PCI sysfs GPU detection, mixed GPU errors, mock SSH |
-| `test_hardware.py` | `resolve_instance_type()`, `gpu_short_name()`, `GPU_INSTANCE_TYPES` — hardware lookup tables |
-| `test_redact.py` | `emmy.redact.redact_secrets()`, `SecretRedactingFilter`, `install_redaction()`, `register_secret()` — value-based secret redaction for text and log records, plus end-to-end propagation through a real `FileHandler` (regression test for child-logger records bypassing logger-level filters) |
-| `benchmark/test_code_hash.py` | `BenchmarkTask.compute_code_hash()` — determinism, hex format |
-| `benchmark/test_run_dir.py` | `BenchmarkTask.create_run_dir()` — directory creation, naming format |
-| `benchmark/test_tasks_json.py` | `BenchmarkTask.write_tasks_json()`, `read_tasks_json()` — tasks.json round-trip |
-| `benchmark/test_results.py` | `parse_benchmark_metrics()`, `parse_system_info()`, `compose_json_result()` — structured JSON result parsing and composition |
-| `provisioning/test_cloudrift.py` | `emmy.provisioning.cloudrift._api_request()`, `_rent_instance()`, etc. — CloudRift API helpers |
-| `provisioning/test_gcp.py` | `emmy.provisioning.gcp._gcloud_*_cmd()` — GCP command builders |
-| `scripts/test_plot_mcr_sweep.py` | `load_results()` — benchmark JSON loading and sorting from `scripts/plot_mcr_sweep.py` |
-| `scripts/test_serving_image_release.py` | `docker/vllm-emmy-serve/model_slug.sh` and `scripts/check_serving_goldens.py` — the image-naming schema (slug rules, org-blindness, empty-slug rejection), the golden `model:` coverage rule (base-checkpoint prefix on `-` boundaries), and that every `models/<slug>.env` is complete and named by its own `SERVE_MODEL` |
-
-Unit tests use **fixtures from `conftest.py`** (`tmp_recipe_dir`, `sample_config`, `sample_config_multi`) to supply pre-built recipe directories and config dicts.
-
-### CLI Dry-Run Tests
-
-Test the full CLI pipeline end-to-end by invoking `emmy` as a subprocess with `--dry-run`. This exercises argument parsing, config loading, recipe resolution, and the deploy/bench orchestration — stopping just before any real side effects (SSH, Docker, file writes).
-
-| File | Covers |
-|------|--------|
-| `deploy/test_deploy_dryrun.py` | `deploy ssh`, `deploy local` — dry-run output, command sequence, variant resolution, teardown, CLI help |
-| `deploy/test_deploy_cloud_dryrun.py` | `deploy cloud` — dry-run output, deploy steps, error handling, CLI help |
-| `benchmark/test_bench_dryrun.py` | `bench` — dry-run output, deploy->benchmark->teardown sequence, variant filtering, `--no-teardown` flag, per-recipe result directories, experiment recipe dry-run, CLI help; `teardown` — CLI help |
-| `provisioning/test_vm_dryrun.py` | `vm create/delete gcp`, `vm create/delete cloudrift` — dry-run output, argparse validation, CLI help |
-
-CLI tests use the **`run_cli` fixture** (a subprocess wrapper) and **`make_bench_config`** (a factory for temporary `config.yaml` files). Both are defined in `conftest.py`.
+A test belongs to the lowest layer that can prove the property. Reach for a subprocess or a GPU only when the
+behavior genuinely lives there — each costs roughly an order of magnitude more wall time than the layer below it.
 
 ## Shared Fixtures (`conftest.py`)
 
@@ -189,7 +73,17 @@ CLI tests use the **`run_cli` fixture** (a subprocess wrapper) and **`make_bench
 - **Temp recipes** — unit tests and multi-instance edge cases create throwaway recipes via `tmp_path`.
 - **Plain functions** — no test classes; tests are grouped by file and separated with comment headers.
 - **Assertions on stdout** — dry-run tests verify that the correct commands and messages appear in the expected order.
-- **Mirror source layout** — test directories match `emmy/` subdirectories (e.g. `tests/deploy/` ↔ `emmy/deploy/`).
+- **Mirror source layout, subpackages included** — test directories match `emmy/` subdirectories (e.g.
+  `tests/deploy/` ↔ `emmy/deploy/`), and that holds all the way down: when a source package gains a subpackage,
+  its tests move into a matching test subpackage rather than staying flat beside their new siblings. One test
+  module per source module; a file covering several modules of a package sits at the level that owns them all.
+  The exceptions are the four kind-organized directories listed under **Directory Structure**.
+- **One file per subject, not per bug.** A behavior discovered later belongs in the file that already owns its
+  subject, as a new section with a comment header — not in a new file named after the incident. Several small
+  files re-declaring the same fixtures is the signal to merge them; a file whose sections share no scaffolding
+  and no subject is the signal to leave them apart.
+- **Known failures are marked inline** with `@pytest.mark.xfail`, carrying a reason that says what was
+  removed or broken and when it should come back.
 
 ## Running
 

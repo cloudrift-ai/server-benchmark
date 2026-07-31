@@ -595,9 +595,9 @@ def test_offer_audit_flags_pin_only_and_fall_through(monkeypatch, caplog):
     (fine while an offered sibling floors the shape); a shape whose entries are ALL
     pin-only FALLS THROUGH the deploy's golden floor and the audit returns True (the
     command exits 1) — the 4090 ``attention.hd512.s4096`` split-KV class, caught at
-    record time instead of in production benches. ``PLACE@cone: cut`` is the
-    guaranteed-unrealizable pin here: a plain matmul fork never offers the placement and
-    ``_golden_matches_row`` refuses PLACE as free."""
+    record time instead of in production benches. A warp mma TILE on an fp32 shape is the
+    guaranteed-unrealizable pin here: the f32 enumeration never offers the warp tier, so
+    no offered row carries the entry's TILE/WORK values."""
     import logging
 
     import pytest
@@ -612,11 +612,12 @@ def test_offer_audit_flags_pin_only_and_fall_through(monkeypatch, caplog):
             name=name, M=m, N=32, K=32, dtype="fp32", knobs=knobs, emmy_us=us, gpu_name="NVIDIA GeForce RTX 4090", compute_cap=(8, 9)
         )
 
+    warp_pin = {"WORK": "w2x2", "TILE": "mma_m16n8k16_f16_f32/f2x2/k2"}
     floored = [
-        cfg("audit.floored", 32, {"PLACE@cone": "cut"}, 10.0),  # pin-only; the sibling below floors the shape
+        cfg("audit.floored", 32, dict(warp_pin), 10.0),  # pin-only; the sibling below floors the shape
         cfg("audit.floored", 32, {}, 20.0),  # prefix-consistent with any offered row — the deploy floor
     ]
-    orphan = [cfg("audit.orphan", 48, {"PLACE@cone": "cut"}, 10.0)]  # ALL pin-only → falls through
+    orphan = [cfg("audit.orphan", 48, dict(warp_pin), 10.0)]  # ALL pin-only → falls through
     # The compile-time golden index reads GOLDEN_CONFIGS scoped to the audited card — patch it
     # so the verdicts are hermetic (no dependence on the repo's real 4090 recordings).
     monkeypatch.setattr(golden_mod, "GOLDEN_CONFIGS", floored + orphan)

@@ -22,6 +22,13 @@
 # compiles kernels; the llama.cpp build takes ~20 min); the evaluation itself is ~2
 # minutes per lane. The stock lane runs first, so a broken setup surfaces early.
 #
+#
+# CONTEXT RAISED TO 16384 (2026-07-31), up from the article's 8448. Both engines move
+# together so the A/B stays fair, but this recipe NO LONGER REPRODUCES THE PUBLISHED
+# TABLE — a run here and the article's numbers differ in protocol, not just in code, and
+# the difference is not a regression. Re-measure the whole grid before comparing anything
+# to the blog post, or check out the 8448 revision to reproduce it.
+#
 # Repro on a pre-allocated card (no cloud provisioning):
 #   emmy bench experiments/gemma-4-12B/gsm8k_rtx5090 --local
 command:
@@ -31,7 +38,8 @@ command:
     - pyproject.toml
     - requirements.txt
     - Makefile
-    # The Makefile `include`s docker/vllm-emmy-gemma4/config.env.
+    # The Makefile shells out to docker/vllm-emmy-serve/model_slug.sh at parse time;
+    # without docker/ staged, every make call prints a 'Command not found' line.
     - docker
   run: |
     set -uo pipefail
@@ -79,7 +87,7 @@ command:
         [ "$$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)" -lt 2000 ] && break
         sleep 5
       done
-      env $$LANE_ENV ./venv/bin/emmy serve $$MODEL --generate --dtype float16 --max-model-len 8448 \
+      env $$LANE_ENV ./venv/bin/emmy serve $$MODEL --generate --dtype float16 --max-model-len 16384 \
         --no-enable-prefix-caching --tokenizer $$TOK "$$@" > $task_dir/serve_$$label.log 2>&1 &
       pid=$$!
       for i in $$(seq 1 360); do

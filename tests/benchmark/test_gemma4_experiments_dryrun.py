@@ -16,6 +16,11 @@ from emmy.recipe.recipe import load_recipe
 
 EXP = "experiments/gemma-4-12B"
 
+# Raised from the article's 8448 on 2026-07-31. Every vLLM lane shares it — stock and emmy
+# alike — so the A/B stays fair; but the numbers a run produces at this context are NO LONGER
+# the published ones, and comparing them to the article is a cross-protocol comparison.
+CONTEXT_LEN = 16384
+
 
 def _exp(project_root, name):
     return os.path.join(project_root, EXP, name)
@@ -30,7 +35,7 @@ def test_serving_ab_expands_to_18_lane_points(project_root):
     for t in tasks:
         b = t.recipe.benchmark
         assert b.seed == 0 and b.temperature == 0 and b.ignore_eos is True
-        assert t.recipe.engine.llm.context_length == 8448
+        assert t.recipe.engine.llm.context_length == CONTEXT_LEN
 
     # The article's six workload points, per lane.
     points = {(t.recipe.benchmark.random_input_len, t.recipe.benchmark.max_concurrency) for t in tasks}
@@ -82,7 +87,7 @@ def test_mtp_smoke_test_expands_to_32_lane_points(project_root):
     for t in tasks:
         b = t.recipe.benchmark
         assert b.seed == 0 and b.temperature == 0 and b.ignore_eos is True
-        assert t.recipe.engine.llm.context_length == 8448
+        assert t.recipe.engine.llm.context_length == CONTEXT_LEN
         assert t.recipe.engine.llm.gpu_memory_utilization == 0.96
 
     stock = [t for t in tasks if "vllm-openai" in t.recipe.engine.llm.vllm.image]

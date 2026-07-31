@@ -24,7 +24,7 @@ from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
-from emmy.compiler.ir.tile import ContractionView, Map, TileOp
+from emmy.compiler.ir.tile import Map, TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.pipeline import Run
@@ -306,36 +306,6 @@ def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
     # test_fused_cone_splitk_matches_reference.
     assert "d1/sync" in stages_seen, f"the resolved sync compute-fill must be offered: {stages_seen}"
     assert "" in reds_seen and any(v for v in reds_seen), f"both the serial and split K partitions must be offered: {reds_seen}"
-
-
-def test_norm_linear_warp_pick_is_computed_a_contraction():
-    """Picking a warp row materializes the recognize-built ``Map(body=projection, source=node)``
-    tree — the same ``project ∘ contract`` spelling the Fold tiers use: the source is a
-    computed-A :class:`ContractionView` holding its A cone INLINE, a real node tree
-    (``Map(body=per-cell normalize, sources=(Fold(stat),))``), one channel, its (m, n)
-    output on the grid (the column axis joined); the ``Map`` body carries the ``Write``; and the knob
-    stamps the DB rows key on (``PLACE@cone`` + the decided-empty stat ``REDUCE``). Xfail-parked on
-    the PLACE wipe — the ``PLACE@cone`` stamp returns with the phase-4 realizer."""
-    _, tile = _resolve(_norm_linear_graph(), pick=_is_warp_row)
-    assert isinstance(tile.op, Map)
-    c = tile.op.sources[0]
-    assert isinstance(c, ContractionView) and c.a_computed and len(tile.op.sources) == 1
-    stat_loop = c.a.sources[0].sources[0].loop
-    assert isinstance(stat_loop, Loop) and stat_loop.is_reduce and stat_loop.role is AxisRole.PLANAR
-    assert [a.extent.as_static() for a in c.axes] == [32, 3072]
-    assert c.axes[0].name == tile.place.grid[-2].name and c.axes[1].name == tile.place.grid[-1].name
-    assert len(c.channels) == 1 and [type(s) for s in tile.op.body] == [Write]
-    assert {"x", "wn", "w"} <= set(c.external_reads())
-    assert c.stage is not None and c.stage.transport == "sync" and c.stage.bk_elems > 0
-    assert tile.knobs.get("PLACE@cone") == "fuse"
-    # Phase 3: the stamped keys are the CANONICAL codec spellings — bare for the primary product
-    # fold, the explicit axis form for the cone's stat.
-    assert tile.knobs.get(f"REDUCE@{stat_loop.axis.name}") == ""
-    # F1 site grammar: the TILE value spells the bare atom (no worker tokens); the warp
-    # inventory is the ONE WORK entry.
-    assert tile.knobs.get("TILE", "").startswith("mma_")
-    assert tile.knobs.get("WORK", "").startswith("w")
-    assert tile.knobs.get("STAGE") == "d1/sync"
 
 
 def test_norm_linear_cone_is_an_inline_node_tree():

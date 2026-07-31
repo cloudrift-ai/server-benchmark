@@ -527,18 +527,20 @@ def test_golden_flops_never_overestimates_and_gates_dyn_reduce(monkeypatch):
 
 
 def test_fused_golden_requires_a_cone_anchor():
-    """A RECORDED fused computed-A entry must anchor itself to the cone fork — a ``d*/sync``
-    STAGE or ``PLACE@cone: cut``. The deploy join's over-fire safety rests on "a fused golden's
-    config can't realize on a plain gmem-A matmul": a gmem-direct STAGE + plain warp tile WOULD
-    realize there, deploying a cross-family config. Key-only instances (empty knobs) are exempt."""
+    """A RECORDED fused computed-A entry must anchor itself to the cone fork with a ``d*/sync``
+    STAGE — the compute-fill only a computed-A contraction offers. The deploy join's over-fire
+    safety rests on "a fused golden's config can't realize on a plain gmem-A matmul": a
+    gmem-direct STAGE + plain warp tile WOULD realize there, deploying a cross-family config.
+    Key-only instances (empty knobs) and phase-4 ROUTING entries (``PLACE`` keys only — the cut
+    set, no schedules to anchor) are exempt."""
     common = dict(M=32, H=3840, N=4096, gpu_name="X", compute_cap=(12, 0))
     NormLinearGoldenConfig(name="ok.sync", knobs={"TILE": "a:mma_m16n8k16_f16_f32/w1x16/f2x2/k2", "STAGE": "d2/sync"}, **common)
     NormLinearGoldenConfig(name="ok.axis", knobs={"STAGE@a3": "d1/sync"}, **common)
-    NormLinearGoldenConfig(name="ok.cut", knobs={"PLACE@cone": "cut"}, **common)
+    NormLinearGoldenConfig(name="ok.routing", knobs={"PLACE@cone": "cut"}, **common)
     NormLinearGoldenConfig(name="ok.keyonly", knobs={}, **common)
-    with pytest.raises(ValueError, match="cone"):
+    with pytest.raises(ValueError, match="sync STAGE"):
         NormLinearGoldenConfig(name="bad.gmem", knobs={"TILE": "w1x16/f2x2", "STAGE": "d2/tma/ring"}, **common)
-    with pytest.raises(ValueError, match="cone"):
+    with pytest.raises(ValueError, match="sync STAGE"):
         # ``cp.async`` contains "sync" as a substring — the segment match must not accept it.
         MlpGeGluGoldenConfig(
             name="bad.cp", M=32, H=3840, inter=15360, knobs={"STAGE": "d2/cp.async/ring"}, gpu_name="X", compute_cap=(12, 0)

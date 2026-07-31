@@ -16,7 +16,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
-from emmy.compiler.ir.schedule import ReducePlan, TilePlan
+from emmy.compiler.ir.schedule import ReducePlan, TilePlan, Workers
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.knob import axis_of, family_of, family_value
@@ -84,11 +84,27 @@ def test_schedule_leaf_set_equals_catalog():
 
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_matmul_graph(), decide)
     assert rows, "no TILE fork was emitted for the matmul"
-    tiles = {str(family_value(r, "TILE")) for r in rows}
+
+    # F1 site grammar: a row spells its TILE/REDUCE values site-locally and its worker widths once
+    # in WORK, so the catalog identity is recovered by decoding each value against the row's
+    # inventory and re-spelling the self-contained form the catalog functions return.
+    def full_tile(r: dict) -> str:
+        site = str(family_value(r, "TILE") or "")
+        work = Workers.parse(str(r.get("WORK", "")))
+        if not site and work is not None and work.units[1] > 1:
+            # A bare par grid spells site-locally as TILE "" + a 2-D thread inventory (the f1x1
+            # register sub-tile suppresses); a 1-D inventory is the coop reduce's, not a tile's.
+            return TilePlan(units=work.units).spell()
+        return TilePlan.parse_site(site, work).spell()
+
+    def full_reduce(r: dict) -> str:
+        return ReducePlan.parse_site(str(family_value(r, "REDUCE") or ""), Workers.parse(str(r.get("WORK", "")))).spell()
+
+    tiles = {full_tile(r) for r in rows}
     assert tiles == set(scalar_tile_moves())
     by_tile: dict[str, list[dict]] = {}
     for r in rows:
-        by_tile.setdefault(str(family_value(r, "TILE")), []).append(r)
+        by_tile.setdefault(full_tile(r), []).append(r)
     percell = by_tile[""]
     # The per-cell tier offers serial + every coop/ILP move whose fold fits the reduce extent
     # (``_reduce_specs``'s ``coop <= extent and reg <= extent`` gate) — so the wide ``b64``–``b512``
@@ -99,19 +115,15 @@ def test_schedule_leaf_set_equals_catalog():
     legal_coop = {
         m for m in coop_reduce_moves() if (p := ReducePlan.parse(m)).coop <= 64 and p.reg <= 64 and (p.coop_transposed or p.coop == 1)
     }
-    assert {str(family_value(r, "REDUCE")) for r in percell} == {"", *legal_coop}
+    assert {full_reduce(r) for r in percell} == {"", *legal_coop}
     assert all(family_value(r, "STAGE") == "" for r in percell), "per-cell has no operand slab to stage (decided-empty)"
     # Every tiled tile is the full (resolved stages) × (serial + split widths) product, the split
     # rows carrying the SAME stage spellings as the unsplit rows (staging composes with split-K).
-    # Each DEFERRED-KERNEL split (``g<w>k`` — a partial + finalize pair) additionally mirrors a
-    # ``PLACE@fin=fuse`` sibling (the finalize-inline offer, evidence-only), so those widths count
-    # twice.
     n_reduces = 1 + len(splitk_moves(warp=False))
-    n_fin_mirrors = sum(1 for m in splitk_moves(warp=False) if ReducePlan.parse(m).finalize == "kernel")
     for tile_spec, tiled in by_tile.items():
         if not tile_spec:
             continue
-        stages = {str(family_value(r, "STAGE")) for r in tiled if not family_value(r, "REDUCE")}
+        stages = {str(family_value(r, "STAGE")) for r in tiled if not full_reduce(r)}
         # A masked-N tile (tile_n overhangs the fixture's N=64) declines cp.async / TMA staging — the
         # B-slab fill would fault a row-crossing copy — so it rides gmem-direct only, mirroring the
         # warp tier's refusal. A clean tile carries the full resolved stage spellings.
@@ -120,15 +132,15 @@ def test_schedule_leaf_set_equals_catalog():
             assert stages == {""}, f"{tile_spec}: masked-N must decline staging: {stages}"
         else:
             assert {"", "d1/cp"} <= stages, f"{tile_spec}: missing the base resolved stages: {stages}"
-        splits = {str(family_value(r, "REDUCE")) for r in tiled if family_value(r, "REDUCE")}
+        splits = {full_reduce(r) for r in tiled if full_reduce(r)}
         assert splits == set(splitk_moves(warp=False)), f"{tile_spec}: {splits}"
-        split_stages = {str(family_value(r, "STAGE")) for r in tiled if family_value(r, "REDUCE")}
+        split_stages = {str(family_value(r, "STAGE")) for r in tiled if full_reduce(r)}
         assert split_stages == stages, f"{tile_spec}: split rows must carry the same stage spellings"
         # Every contraction row also spells the launch-order codec (``RASTER``, bare/root-global) —
         # the flat ``""`` and the grouped ``gm8`` siblings, crossing the whole (stage × reduce)
         # product; the fifth factor of the catalog.
         assert {r.get("RASTER") for r in tiled} == set(raster_moves()), f"{tile_spec}: RASTER family incomplete"
-        assert len(tiled) == len(stages) * (n_reduces + n_fin_mirrors) * len(raster_moves()), f"{tile_spec}: {len(tiled)} rows"
+        assert len(tiled) == len(stages) * n_reduces * len(raster_moves()), f"{tile_spec}: {len(tiled)} rows"
     # This matmul is BATCHED (a leading literal batch dim in A's gmem index). The leading dim is
     # tile/K-invariant, so TMA boxes it as an extent-1 dim with the operand's own origin expr
     # (``_tma_operand_rank_ok`` — the flash K/V convention extended to the matmul tiers; the gemma

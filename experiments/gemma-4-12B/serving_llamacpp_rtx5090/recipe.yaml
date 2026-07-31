@@ -4,8 +4,12 @@
 # llama-server, and drive the SAME five workload points with the same `vllm bench serve`
 # client and hygiene flags as the vLLM lanes (experiments/gemma-4-12B/serving_rtx5090).
 #
-# Per-point server configs follow the article: single-stream points on one 8448-ctx slot;
-# 4k/4k batched points on 8 slots x 8448; the 256/256 c=64 point needs 64x640 slots, which
+# Per-point server configs: single-stream points on one 16384-ctx slot, matching the vLLM
+# lanes' declared context. The 4k/4k batched points stay at 8 slots x 8448 ON PURPOSE —
+# llama.cpp preallocates the WHOLE KV up front, so 8 x 16384 = 131072 tokens would OOM,
+# and it would buy nothing: the workload is 4096 in + 4096 out = 8192 tokens, which fits
+# a 8448 slot either way. Context here is sized to the workload, not to a protocol knob.
+# The 256/256 c=64 point needs 64x640 slots, which
 # OOMs beside 23 GB of FP16 weights (llama.cpp allocates the full KV up front — no paged
 # allocator, no sliding-window exploitation), so that cell is expected to FAIL and the
 # failure is the article's footnote, not a harness bug.
@@ -63,7 +67,7 @@ command:
       grep -E "Output token throughput|Median TTFT|Median TPOT|Successful" $task_dir/$$1.txt
     }
 
-    serve 1 8448
+    serve 1 16384
     bench small_c1  256  256  1 16
     bench head_c1  4096 4096  1  8
     serve 8 67584

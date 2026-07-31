@@ -1,6 +1,6 @@
 #!/bin/sh
-# The frozen gemma-4 generative serve entrypoint — the arg set `emmy serve --generate`
-# builds, parameterized by the GEMMA4_* env (baked from config.env). The warm run
+# The frozen generative serve entrypoint — the arg set `emmy serve --generate` builds,
+# parameterized by the SERVE_* env (baked from models/<slug>.env). The warm run
 # mounts this script into the plain vllm-emmy image and the baked image ships it, so
 # the warmed and released invocations are literally the same — cache-key parity.
 #
@@ -12,12 +12,12 @@
 # benchmark protocol (every request does full prefill work). Keep in sync with
 # _generate_compile_args in emmy/commands/serve.py.
 exec python3 -m vllm.entrypoints.openai.api_server \
-    --model "${GEMMA4_MODEL}" \
+    --model "${SERVE_MODEL}" \
     --runner generate \
     --dtype float16 \
-    --max-model-len "${GEMMA4_MAX_MODEL_LEN}" \
-    --max-num-batched-tokens "${GEMMA4_MAX_NUM_BATCHED_TOKENS}" \
-    --gpu-memory-utilization "${GEMMA4_GPU_MEM_UTIL}" \
+    --max-model-len "${SERVE_MAX_MODEL_LEN}" \
+    --max-num-batched-tokens "${SERVE_MAX_NUM_BATCHED_TOKENS}" \
+    --gpu-memory-utilization "${SERVE_GPU_MEM_UTIL}" \
     --no-enable-prefix-caching \
     --hf-overrides '{"architectures": ["EmmyGenModel"]}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 64, 128, 256], "custom_ops": ["+rotary_embedding"]}' \

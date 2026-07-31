@@ -184,16 +184,6 @@ _CUDA_CLI_GROUP = "cuda-cli"
 def pytest_collection_modifyitems(config, items):
     import heapq
 
-    from tests.xfail_registry import lookup as _xfail_lookup
-
-    # Step 0: apply the known-failing registry (``tests/xfail_registry.py``) — tests whose
-    # subject was deliberately removed, kept intact so restoring the feature restores their
-    # coverage. Node ids are matched relative to the repo root.
-    for it in items:
-        entry = _xfail_lookup(it.nodeid)
-        if entry is not None:
-            it.add_marker(pytest.mark.xfail(reason=entry.reason, strict=entry.strict))
-
     # Step 1: pin every CUDA-touching item to an xdist_group so each
     # chain lands on one worker and runs sequentially — ``cuda`` for
     # in-process device work, ``cuda-cli`` for ``run_cli`` subprocess

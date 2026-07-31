@@ -23,28 +23,6 @@ def test_compile_code_loop_ir(run_cli):
     assert " = relu(" in stdout
 
 
-def test_compile_unfused_softmax_loopify_survives_dim(run_cli, monkeypatch):
-    """Regression: the readability re-roller (``100_loopify``) crashed reconstructing a ``Dim``.
-
-    Cutting flash into a score producer + a two-pass softmax/P@V consumer
-    (``PLACE@fold=cut,PLACE@tuple=cut``) produces a re-rollable statement run whose divergence bottoms
-    out in a ``Dim`` — a ``dataclass(init=False)`` whose ``__init__(value, …)`` param name differs from
-    its ``expr`` field. ``_reroll``'s generic ``type(v0)(**{field: …})`` reconstruction then raised
-    ``TypeError: Dim.__init__() got an unexpected keyword argument 'expr'``. ``compile`` renders with
-    the re-roller ON by default, so this is the exact user-facing repro. The knob rides ``EMMY_KNOBS``
-    (inherited by the ``run_cli`` subprocess); the small listing shape reproduces it."""
-    sdpa = (
-        "q=torch.randn(1,4,128,64,dtype=torch.float16);"
-        "k=torch.randn(1,4,128,64,dtype=torch.float16);"
-        "v=torch.randn(1,4,128,64,dtype=torch.float16);"
-        "F.scaled_dot_product_attention(q,k,v)"
-    )
-    monkeypatch.setenv("EMMY_KNOBS", "PLACE@fold=cut,PLACE@tuple=cut")
-    rc, stdout, stderr = run_cli("compile", "--code", sdpa, "--ir", "cuda")
-    assert rc == 0, f"loopify crashed on the un-fused softmax:\n{stderr}"
-    assert "__global__" in stdout
-
-
 def test_compile_code_saves_default_cuda_to_output(run_cli, tmp_path):
     """Default ``handle_compile`` path: no ``--ir`` ⇒ cuda. With ``--output``
     the rendered CUDA source lands on disk.

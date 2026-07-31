@@ -43,7 +43,7 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   matvec demotion is a formation fact. There is NO stored `step` SEQUENCE (deleted at step 7): the composed
   evaluations DERIVE — flash's kv stream λ-spells with its QK score a HOISTED operand edge and its PV
   synthesized+memoized inside the derived blocked evaluation (`Fold.step_stmts()` the one consumer read), and
-  split-K's outer reduce is the identity-lift composition (`ir.composed_contraction` the one read). A bare sum,
+  split-K's outer reduce is the identity-lift composition (`Fold.composed` the one read). A bare sum,
   RMSNorm's statistic and flash's stream are `Fold` at different monoid arities; a matmul, the fused gate⊗up edge,
   flash's QK score and the derived PV are the `Contraction` node kind (the kind IS the `CONTRACTION` role — no
   bilinear parse; a `Fold`'s role stays DERIVED (`Fold.role`), never stored: TWISTED off the derived twist family,
@@ -57,8 +57,8 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   `op_cache_key`'s TileOp arm and `Graph.structural_key`'s op field — never the lowered nest). An operand edge has
   two inhabitants
   — MATERIALIZED (a gmem `Load`) or COMPUTED (the node itself, stored INLINE; the cone via `_atomize.make_cone`).
-  **Edge iff closed** holds BY CONSTRUCTION (positional operand binding; `ir.captured_values` demoted to the
-  validation reading) and decides cut legality: closed subtrees may hoist to edges; combine's derived material —
+  **Edge iff closed** holds BY CONSTRUCTION (positional operand binding; the closure scan demoted to the
+  validation reading, living with its one consumer in `passes/lowering/tile/_cut.py`) and decides cut legality: closed subtrees may hoist to edges; combine's derived material —
   flash's PV, whose `P` reads the running state — sits BELOW the seam lattice, a derived schedule site excluded
   from PLACE (`Site.derived`), while flash's QK operand edge IS a PLACE
   site. **The `Contraction`'s placement/schedule fields are STAMPED, never stored**: the stored node is pure

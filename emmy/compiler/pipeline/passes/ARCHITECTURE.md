@@ -76,8 +76,8 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   no let table, no reference arm, and no resolve step:
   every downstream reader takes the cone's K seam straight off the view's `a` edge (`ops.cone_seam`); `lower`
   flattens it once, at the point of use. **Edge iff closed holds by construction**: operands bind POSITIONALLY to
-  lift params, so an operand cannot see the fold's state or its siblings — `ir.captured_values` is demoted to the
-  validation reading (1q), and closure is the precondition for lifting any subtree into its own kernel (a placement
+  lift params, so an operand cannot see the fold's state or its siblings — the closure scan is demoted to the
+  validation reading (1q) and lives with its one consumer, the cut (`_cut._captured_values`); closure is the precondition for lifting any subtree into its own kernel (a placement
   cut). Flash's `P = exp(s − m)` is `combine`'s derived singleton-specialization internals — material BELOW the seam
   lattice, never a cut target — and flash's QK score is a hoisted operand edge of the kv stream (step 7): closed by
   construction, reading only the enclosing iteration var, never state.
@@ -90,7 +90,7 @@ bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is reject
   `PLANAR` and takes the reduce tiers at schedule dispatch — no role rewrite. **The node kind IS the `CONTRACTION`
   role** (1s — `Contraction.role`, no bilinear parse), and **`Fold.role` stays derived, never stored** (1l):
   `TWISTED` off the stored combine's twist family, `CONTRACTION` off the composed split-K
-  operand (`ir.composed_contraction`), `PLANAR` otherwise — so "a contraction" below
+  operand (`Fold.composed`), `PLANAR` otherwise — so "a contraction" below
   always means the stored node, and the lowered `Loop`'s annotation falls out of the same read; the schedule fork only
   stamps a `tile` onto a `replace()` copy (`_schedule._contraction_node`), and `_factor.factorize` reads the facts off
   the placed node instead of `lower()`-ing the contraction and pattern-matching the result. A `STAGE` pin follows the same rule: the
@@ -179,13 +179,13 @@ value name = expectation). The COMPOSED evaluations derive too (step 7): flash's
 contraction SYNTHESIZED — and memoized, one identity per stored fold — inside the derived blocked evaluation
 (`ir._twisted_derived_step`, byte-identical to the retired in-step spelling); split-K's outer reduce is the
 IDENTITY-LIFT composition over its one inline sliced contraction node (combine at that singleton embeds the operand
-verbatim — no outer `Accum`s; `ir.composed_contraction` is the one read of the composition, shared by `Fold.role` and
+verbatim — no outer `Accum`s; `Fold.composed` is the one read of the composition, shared by `Fold.role` and
 `030_split_reduce`'s structural arm). `Fold.step_stmts()` is the public per-cell read every former `.step` consumer
 goes through; `.loop` splices only the operand edges the derived step did not consume. `Fold.from_loop` returns
 `None` for a non-λ-representable loop (an effectful / raw-block body — the callers keep the raw-loop-IR `Map`
 escape), and its byte-identity gate compares the derived body/axis/unroll only — the role annotation is the
 fold's own derived read, so an unbindable matvec captures a CONTRACTION-shaped loop and derives `PLANAR` (the 1l
-demotion, now a formation fact; `_extract_lift` accepts any PURE prefix, and `ir.demote_operands` un-hoists a
+demotion, now a formation fact; `_extract_lift` accepts any PURE prefix, and `Fold.demoted()` un-hoists a
 demoted cone into the lift body). Kernel identity is the α-INVARIANT TERM HASH (`ops.term_key`: canonical
 renumbering in first-appearance walk order plus hash-time ANF body-order canonicalization — the stored term is never
 reordered, the lowered nest keeps storage order, identity does not; the lowered-nest identity is retired), consumed
@@ -208,7 +208,8 @@ out per copy. The interim `effectful_lambda` is DELETED — what remains impure 
 that are not recognized algebra (the un-recognized flat escape cell, `030`'s finalize — `Init` seeds + the
 un-annotated `StateMerge` merge `Loop` — the prologue'd split partial, and the coop norm→linear/geglu sibling's
 composed contraction tail), formed through the one Map-private `_loop_ir_fn` arm and dying with the recognizer's
-growth toward totality. `captured_values` demoted to the validation reading of edge-iff-closed.
+growth toward totality. The closure scan (`_cut._captured_values`) demoted to the validation reading of
+edge-iff-closed.
 
 **The site-local value grammar + `WORK` (step 7).** Knob KEYS address tree sites (the path codec); since step 7 the
 VALUES are site-local too, with the kernel-global worker inventory spelled exactly ONCE in the `WORK` family:
@@ -256,7 +257,7 @@ roots on the pass-scan restart and resolve their OWN `(kind, shape)` entries thr
 recursively: the cone piece re-recognizes as the rms_norm shape and its own entry (or a bare pin) cuts the statistic
 out, yielding the cascade statistic + scale + plain matmul, every piece joining an EXISTING golden kind's evidence.
 **Fuse is the default by ABSENCE** — no routing entry and no pin leaves recognition byte-untouched (digest-verified),
-and cut is evidence/pin-only. Cut legality is structural: single-component CLOSED children only (`captured_values`
+and cut is evidence/pin-only. Cut legality is structural: single-component CLOSED children only (`_captured_values`
 in its demoted validation role — flash's state-capturing `P` is simply not cuttable), and the pure-copy degenerate
 (cutting an empty-body root `Map`'s only source, whose parent would merely copy the workspace out — the
 non-terminating case) is refused. Loop fusion brakes on `__cut_` workspace producers — a decided placement is not

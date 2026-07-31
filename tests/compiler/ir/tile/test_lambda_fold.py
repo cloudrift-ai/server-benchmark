@@ -68,7 +68,7 @@ def _view(arity: int = 2) -> Contraction:
 
 def test_as_fold_is_lambda_spelled_and_loop_byte_identical() -> None:
     """``as_fold`` is the node's DERIVED λ reading — the algebra spelling ``Reduction`` (the
-    cross-partition programs) and ``demote_operands`` consume. Its derived loop must stay
+    cross-partition programs) and ``Fold.demoted`` consume. Its derived loop must stay
     byte-identical to the node's own synthesized loop at every arity."""
     for arity in (1, 2):
         view = _view(arity)

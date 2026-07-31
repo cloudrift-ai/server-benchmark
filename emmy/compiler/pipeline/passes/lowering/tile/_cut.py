@@ -35,7 +35,17 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import _member_reads
-from emmy.compiler.ir.tile.ir import Contraction, Fold, Map, _operand_name, effect_tail
+from emmy.compiler.ir.tile.ir import (
+    Contraction,
+    Fold,
+    Map,
+    _operand_name,
+    _operand_result_names,
+    deep_defines,
+    deep_reads,
+    effect_tail,
+    stmt_axis_names,
+)
 from emmy.compiler.ir.tile.ops import lower
 from emmy.compiler.ir.tile.path import Site, family_sites, resolve, sites, spell
 from emmy.compiler.pipeline.knob import family_of, parse_knob_spec
@@ -155,25 +165,61 @@ def _routing_entry(ctx, knobs: dict, root=None):
     return min(entries, key=lambda g: g.emmy_us or float("inf"))
 
 
+def _axis_names(root) -> set[str]:
+    """Every ITERATION-SPACE name in ``root``'s tree — the structural nodes' axes plus every loop
+    induction variable in their bodies, over the ONE node walk (``path.sites``). An induction
+    variable is bound by the enclosing loop nest, not by any value tree, so a subtree reading one
+    is never capturing a value."""
+    out: set[str] = set()
+    for site in sites(root):
+        node = site.node
+        if isinstance(node, Fold):
+            out.add(node.axis.name)
+            out |= stmt_axis_names(node.step_stmts())
+        elif isinstance(node, Map):
+            out |= stmt_axis_names(node.body)
+        elif isinstance(node, Contraction):
+            out.add(node.k_axis.name)
+    return out
+
+
+def _captured_values(root, axes: set[str]) -> tuple[str, ...]:
+    """The VALUE names ``root``'s subtree reads but does not itself define — its capture set, with
+    iteration-space names (``axes``) excluded.
+
+    DEMOTED to a validation check at 1q: operands bind POSITIONALLY to lift params, so an edge
+    cannot see the fold's state or its siblings — **edge iff closed holds by construction** — and
+    the cut is the one decision that still consults the scan. It is the executable statement of
+    that invariant, and the honest reading of the one legal capture: flash's ``P = exp(s − m)``
+    genuinely reads the online-softmax carrier's running max, updated by the merge stmts of the
+    very loop step that consumes it (legal: an inline operand's one home is always inside the
+    scope it captures from) — which is why that seam is not cuttable.
+
+    Returned sorted, so callers can put it straight into an error message."""
+    stmts = list(lower(root))
+    defs: set[str] = set()
+    for s in stmts:
+        defs |= deep_defines(s)
+    return tuple(sorted(deep_reads(stmts) - defs - axes))
+
+
 def _cuttable(root, site: Site, stores: tuple, free: tuple) -> bool:
     """Structural cut legality — the plan's edge-iff-closed reading plus two v1 shape gates:
 
     - the child produces ONE component (a product fold's per-component separation is
       deliberately forfeited at tile level — the sanctioned cut for the fused edge is the
       shared ``a`` operand, never a channel);
-    - the child is CLOSED over values (``captured_values`` — its demoted validation role: a
+    - the child is CLOSED over values (:func:`_captured_values` — its demoted validation role: a
       state-capturing composition like flash's ``P`` sits in the step at its semantic position
       and is simply not cuttable);
     - the seam is not the pure-copy degenerate: cutting a root ``Map``'s only source when the
       projection body is empty and the store is a plain write leaves a parent that merely
       copies the workspace back out — the child IS the kernel, the tree does not shrink, and
       the recursion never terminates."""
-    from emmy.compiler.ir.tile.ir import _operand_name, _operand_result_names, axis_names, captured_values  # noqa: PLC0415
-
     child = site.node
     if len(_operand_result_names(child)) != 1:
         return False
-    if captured_values(child, axis_names(root) | {a.name for a in free}):
+    if _captured_values(child, _axis_names(root) | {a.name for a in free}):
         return False
     trivial_body = isinstance(root, Map) and not len(root.body) and all(st.sweep is None for st in stores)
     if trivial_body and any(s is child for s in root.sources):
@@ -187,7 +233,7 @@ def _cuttable(root, site: Site, stores: tuple, free: tuple) -> bool:
     probe = Load(name=_operand_name(child), input="__seam_probe", index=())
     parent_tree = _replace_edge(root, child, probe)
     sweep_axes = {st.sweep.name for st in stores if st.sweep is not None}  # boundary-store sweeps live off-term (1q)
-    if captured_values(parent_tree, axis_names(parent_tree) | sweep_axes | {a.name for a in free}):
+    if _captured_values(parent_tree, _axis_names(parent_tree) | sweep_axes | {a.name for a in free}):
         return False
     return True
 

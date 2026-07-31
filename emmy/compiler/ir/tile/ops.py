@@ -19,7 +19,7 @@ from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.schedule import ReducePlan
 from emmy.compiler.ir.stmt import Assign, Body, Loop, StridedLoop
 from emmy.compiler.ir.stmt.base import Stmt, pretty_body
-from emmy.compiler.ir.tile.ir import Contraction, Fold, Map, effect_tail
+from emmy.compiler.ir.tile.ir import Contraction, Fold, Map, deep_defines, deep_reads, effect_tail
 
 
 def cone_seam(cone) -> tuple[tuple, tuple, tuple[str, ...]]:
@@ -33,13 +33,11 @@ def cone_seam(cone) -> tuple[tuple, tuple, tuple[str, ...]]:
     a prologue whose defs go unread is dropped (nothing to bridge). The ONE seam both sides read:
     the scheduler sizes the stat rows into the sync stage's smem budget, the materializer fills
     them (``sync_stat_fill``)."""
-    from emmy.compiler.ir.tile.ir import _deep_defines, _deep_reads  # noqa: PLC0415
-
     if not isinstance(cone, Map) or not cone.sources:
         return (), tuple(cone.body) if isinstance(cone, Map) else (), ()
     pro = tuple(lower(cone.sources[0]))
     cell = tuple(cone.body)
-    stats = tuple(sorted({nm for s in pro for nm in _deep_defines(s)} & _deep_reads(list(cell))))
+    stats = tuple(sorted({nm for s in pro for nm in deep_defines(s)} & deep_reads(list(cell))))
     return (pro, cell, stats) if stats else ((), cell, ())
 
 

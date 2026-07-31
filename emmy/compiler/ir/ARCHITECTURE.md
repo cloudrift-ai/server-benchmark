@@ -413,6 +413,12 @@ at the point of use (1s), never stored. The `Kernel` / `TileSchedule` wrapper is
 structurally off the node (`ops.axis_role` — the contraction IS the `Contraction` kind; a fold's role derives),
 not a bespoke Python type per schedule.
 
+There is exactly ONE node walk over a stored term — `tile/path.py::sites` — shared by the key resolver, the
+stampers, the seam enumerator and every plain "walk the nodes" reader (take `.node` off each site). `tile/ir.py`
+keeps only the generic *stmt* walks the node kinds derive through (`deep_reads` / `deep_defines` /
+`stmt_axis_names` / `refs_axis`); a helper used by exactly one pass lives with that pass instead (the cut's
+closure predicate in `passes/lowering/tile/_cut.py`, the fragment-loader row step in `passes/lowering/_addr.py`).
+
 The schedule type system lives at the ir root in `schedule.py` (used by both the tile IR and the kernel
 materializer, so it sits beside `atom.py`, not under `tile/`) — the merge of the former
 `tile/{schedule,codec,role}.py`: the schedule value types, the codec ser/de engine, and the warp-spec role

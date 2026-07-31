@@ -67,11 +67,11 @@ from emmy.compiler.ir.tile import (
     TileOp,
     TilePlan,
 )
-from emmy.compiler.ir.tile.ir import gmem_row_stride
 from emmy.compiler.ir.tile.ops import axis_role, cone_seam, nodify_reduce, projection_tail, reduce_loop, sched_of, seal_workers
 from emmy.compiler.ir.tile.ops import lower as lower_op
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.knob import canon_family_value, family_of, values_equal
+from emmy.compiler.pipeline.passes.lowering._addr import gmem_row_stride
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import make_cone, map_cone, semiring_binding
 from emmy.compiler.pipeline.pipeline import LoweringError
 from emmy.compiler.pipeline.search.space import (
@@ -1609,7 +1609,7 @@ def _splitk_option(
     # sliced contraction operand, its combine the componentwise additive ⊕ over the same
     # accumulator names — the reassociation ``fold_k = fold_{ksplit} ∘ fold_{kslice}``. The
     # derived step embeds the operand verbatim (the shared-accumulator ×1-fold simplification),
-    # and the outer fold DERIVES role=CONTRACTION off the composition (``ir.composed_contraction``).
+    # and the outer fold DERIVES role=CONTRACTION off the composition (``Fold.composed``).
     accs = tuple(inner_fold.defines())
     ident_lift = Lambda(params=(ksplit.name, *accs), body=Body(()), results=accs)
     o_init, o_combine = M(*(["add"] * len(accs)), names=accs)

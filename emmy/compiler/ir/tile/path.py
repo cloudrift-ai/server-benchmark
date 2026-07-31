@@ -127,9 +127,12 @@ def _walk(node, prefix: tuple[str, ...], out: list[tuple[object, tuple[str, ...]
 
 
 def sites(root) -> tuple[Site, ...]:
-    """Every structural node in ``root``'s tree as a :class:`Site`, root first (the ONE walk the
-    resolver, the stampers and the seam enumerator share). Ordinals are assigned in traversal order
-    among sites with identical ``(segments, axis)``."""
+    """Every structural node in ``root``'s tree as a :class:`Site`, root first — the ONE node walk
+    in the layer, shared by the resolver, the stampers, the seam enumerator and every plain
+    "walk the nodes" reader (``.node`` off each site; ``_cut``'s axis scan). An inline operand
+    subtree has exactly one home (its edge), so the tree stays a tree and no visited set is
+    needed. Ordinals are assigned in traversal order among sites with identical
+    ``(segments, axis)``."""
     if root is None:
         return ()
     nodes: list[tuple[object, tuple[str, ...], bool]] = []

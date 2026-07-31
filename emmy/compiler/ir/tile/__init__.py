@@ -26,10 +26,12 @@ from emmy.compiler.ir.tile.ir import (
     Map,
     Store,
     TileOp,
-    composed_contraction,
-    demote_operands,
+    deep_defines,
+    deep_reads,
     effect_tail,
+    refs_axis,
     split_effects,
+    stmt_axis_names,
 )
 
 __all__ = [
@@ -48,8 +50,10 @@ __all__ = [
     "TileOp",
     "TilePlan",
     "WarpSpec",
-    "composed_contraction",
-    "demote_operands",
+    "deep_defines",
+    "deep_reads",
     "effect_tail",
+    "refs_axis",
     "split_effects",
+    "stmt_axis_names",
 ]

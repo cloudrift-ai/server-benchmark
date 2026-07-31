@@ -4,8 +4,8 @@ A computed operand is stored INLINE on its edge (there is no let table and no na
 "these two matmuls read the same A" is ONE ``Contraction`` with one ``a`` edge and N product
 :class:`Channel`\\ s ``(b_i, acc_i)``. These pin the node's derived product loop (shared A lifted
 once, N-component product-monoid carrier), the arity-vs-copies distinction, the inline-arm
-canonicalization through ``rewrite``, and the ``captured_values`` closure predicate a placement cut
-asks before lifting a subtree.
+canonicalization through ``rewrite``, and the closure predicate a placement cut asks before
+lifting a subtree (``_cut._captured_values``).
 """
 
 from __future__ import annotations
@@ -17,8 +17,9 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.stmt.passes import rewrite
 from emmy.compiler.ir.tile import Channel, Contraction, Map
-from emmy.compiler.ir.tile.ir import axis_names, captured_values, tree_nodes
 from emmy.compiler.ir.tile.ops import lower
+from emmy.compiler.ir.tile.path import sites
+from emmy.compiler.pipeline.passes.lowering.tile._cut import _axis_names, _captured_values
 
 
 def _cone(name: str = "xhat") -> Map:
@@ -98,9 +99,9 @@ def test_a_computed_operand_is_stored_inline_and_flattens_on_the_edge() -> None:
     assert node.a_name == "xhat"
 
 
-def test_tree_nodes_walks_inline_operand_edges() -> None:
+def test_the_node_walk_covers_inline_operand_edges() -> None:
     fold = _product().as_fold()
-    assert _product().a in list(tree_nodes(fold))  # the cone edge, walked off the STORED fold
+    assert _product().a in [s.node for s in sites(fold)]  # the cone edge, walked off the STORED fold
 
 
 def test_external_reads_cover_every_channel() -> None:
@@ -125,21 +126,21 @@ def _capturing_cone(name: str = "xhat") -> Map:
 def test_a_capturing_inline_operand_is_legal_but_reports_its_capture() -> None:
     """Flash's ``P`` is exactly this: an inline operand reading the running max its own loop step
     updates. Legal to build and lower (its one home is in scope) — just not cuttable, which
-    ``captured_values`` is the predicate for."""
+    ``_captured_values`` is the predicate for."""
     node = _node(_capturing_cone(), ("acc_g", "Wg"))
     fold = node.as_fold()
     assert lower(fold)  # lowers fine — position in the enclosing body is what makes it legal
     cone = node.a
-    axes = axis_names(fold) | {a.name for a in node.axes}  # the output axes are placement facts
-    assert captured_values(cone, axes | axis_names(cone)) == ("m_run",)
+    axes = _axis_names(fold) | {a.name for a in node.axes}  # the output axes are placement facts
+    assert _captured_values(cone, axes | _axis_names(cone)) == ("m_run",)
 
 
 def test_iteration_variables_are_not_captures() -> None:
     """The dominant free names in any cone are loop induction variables (``m`` / ``k``), bound by
     the enclosing nest — excluding them is what makes the predicate mean anything."""
     cone = _cone()
-    assert captured_values(cone, set()) == ("k", "m")  # unfiltered: the axes show up
-    assert captured_values(cone, {"m", "k"}) == ()  # filtered: closed
+    assert _captured_values(cone, set()) == ("k", "m")  # unfiltered: the axes show up
+    assert _captured_values(cone, {"m", "k"}) == ()  # filtered: closed
 
 
 # --- canonicalization: inline arms rewrite like any other subtree -------------------------------- #

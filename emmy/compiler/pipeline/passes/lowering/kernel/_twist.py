@@ -71,7 +71,8 @@ from emmy.compiler.ir.kernel.ir import (
 from emmy.compiler.ir.schedule import FoldMove, Level, ReduceStage
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Cond, Init, Load, Select, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile.ir import Contraction, Fold, Map, gmem_row_stride
+from emmy.compiler.ir.tile.ir import Contraction, Fold, Map
+from emmy.compiler.pipeline.passes.lowering._addr import gmem_row_stride
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _clamp_last, _f16acc, unroll_ok
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,

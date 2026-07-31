@@ -424,14 +424,14 @@ def test_stored_node_kinds_are_stmts() -> None:
 
 def test_a_generic_body_walk_reaches_a_composed_nodes_children() -> None:
     """The protocol that matters: ``nested()`` exposes a composed node's body, so the generic deep
-    walks (``_deep_defines`` and friends) descend into it instead of stopping at — or crashing on —
+    walks (``deep_defines`` and friends) descend into it instead of stopping at — or crashing on —
     the node. This is the shape ``030_split_reduce`` produces: a ``Map`` group inside a partial."""
-    from emmy.compiler.ir.tile.ir import _deep_defines
+    from emmy.compiler.ir.tile.ir import deep_defines
 
     inner = Assign(name="g", op="copy", args=("x",))
     group = Map(body=Body((inner,)))
     assert group.nested() == (Body((inner,)),)
-    assert "g" in _deep_defines(Loop(axis=Axis("k", 8), body=Body((group,))))
+    assert "g" in deep_defines(Loop(axis=Axis("k", 8), body=Body((group,))))
 
 
 def test_a_composed_step_keeps_its_position_when_flattened() -> None:
@@ -520,12 +520,12 @@ def test_both_edges_may_be_computed_at_once() -> None:
 
 
 def test_an_inline_b_edge_is_walked_like_any_other_node() -> None:
-    """``tree_nodes`` descends every operand edge of the STORED fold — the one node walk the
-    path/seam enumerators share."""
-    from emmy.compiler.ir.tile.ir import tree_nodes
+    """``path.sites`` descends every operand edge of the STORED fold — the one node walk in the
+    layer, shared by the resolver, the stampers and the seam enumerator."""
+    from emmy.compiler.ir.tile.path import sites
 
     c = _computed_b_contraction()
-    assert c.b in list(tree_nodes(c))
+    assert c.b in [s.node for s in sites(c)]
 
 
 # --- the ONE worker inventory (1r): TileOp.work derived from the TILE slices ---------------------- #

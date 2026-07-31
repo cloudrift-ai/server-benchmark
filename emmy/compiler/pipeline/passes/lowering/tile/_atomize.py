@@ -34,7 +34,7 @@ from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.tile import Channel, Contraction, Fold, Map, Store
-from emmy.compiler.ir.tile.ir import _refs_axis
+from emmy.compiler.ir.tile.ir import refs_axis
 from emmy.compiler.pipeline.pipeline import LoweringError
 
 
@@ -95,7 +95,7 @@ def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Map:
     prologue once per tile row and the body per cell."""
     pro: list = []
     rest = list(cell)
-    while rest and not _refs_axis(rest[0], k_name):
+    while rest and not refs_axis(rest[0], k_name):
         pro.append(rest.pop(0))
     prologue = Map(body=Body((*sweep, *pro)), sources=() if stat is None else (stat,))
     src = (prologue,) if (pro or sweep or stat is not None) else ()

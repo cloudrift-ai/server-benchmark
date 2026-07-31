@@ -72,7 +72,6 @@ from emmy.compiler.ir.tile import (
     Map,
     Placement,
     TileOp,
-    demote_operands,
     split_effects,
 )
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
@@ -364,7 +363,7 @@ def _demote_planar(node):
     **derives** ``PLANAR`` (``Fold.role``), the same route :func:`_nodify_contraction` leaves an
     unbindable cell on, applied post-nodification."""
     src = node.sources[0] if isinstance(node, Map) else node
-    red = demote_operands(src)
+    red = src.demoted()
     projection = Body(tuple(node.body) if isinstance(node, Map) else ())
     return Map(body=projection, sources=(red,)) if len(projection) else red
 

@@ -317,7 +317,7 @@ def test_norm_linear_cone_is_an_inline_node_tree():
     addressable (and later cuttable) in its own right. Lowering flattens the whole thing back to the
     identical ``[stat loop, …, cone]`` stmt run. The stored form is the role=CONTRACTION fold; the
     ``Contraction`` reading is the PLACED stamp (``Contraction.placed``)."""
-    from emmy.compiler.ir.tile.ir import _refs_axis
+    from emmy.compiler.ir.tile.ir import refs_axis
     from emmy.compiler.ir.tile.ops import cone_seam, lower
 
     _, tile = _resolve(_norm_linear_graph(), pick=_is_warp_row)
@@ -334,8 +334,8 @@ def test_norm_linear_cone_is_an_inline_node_tree():
     # The seam IS the boundary: prologue row-invariant, body k-varying, stats the bridged values.
     pro, cell, stats = cone_seam(cone)
     assert pro == tuple(lower(cone.sources[0])) and cell == tuple(cone.body)
-    assert not any(_refs_axis(s, c.k_axis.name) for s in pro), "the prologue never indexes K — it runs once per row"
-    assert any(_refs_axis(s, c.k_axis.name) for s in cell), "the per-cell body is the k-varying remainder"
+    assert not any(refs_axis(s, c.k_axis.name) for s in pro), "the prologue never indexes K — it runs once per row"
+    assert any(refs_axis(s, c.k_axis.name) for s in cell), "the per-cell body is the k-varying remainder"
     assert stats, "the statistic bridges through the stat smem rows"
     # The operand body is the flattened cone verbatim: the stat loop, its sweep, then the cone.
     assert c.a_body == tuple(lower(cone)) == (*pro, *cell)

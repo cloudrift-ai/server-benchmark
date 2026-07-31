@@ -37,10 +37,12 @@ on the edge). Tree ownership gives an inline node exactly one consumer — its
 parent — so sharing needs no reference arm. The node boundary a reader wants
 (``ops.cone_seam``'s prologue / per-cell split) is read straight off the edge;
 ``lower`` flattens it once, at the point of use. A subtree that reads no value
-name from its enclosing body is **closed** (:func:`captured_values`); closure is
+name from its enclosing body is **closed**; closure is
 the precondition for lifting any subtree into its own kernel (a placement cut),
 and nothing else requires it — flash's ``P`` legitimately captures the running
-max its own loop step updates, and that seam is simply not cuttable.
+max its own loop step updates, and that seam is simply not cuttable. The
+predicate lives with its one consumer, the placement cut
+(``passes/lowering/tile/_cut``), not here.
 
 **Every structural node is a ``Stmt``.** A composed step occupies a statement
 position in another node's body — flash's ``Σ_dd Q·K`` and ``Σ_j P·V`` in a
@@ -51,7 +53,8 @@ ahead of them. Composition therefore rides the sequence, not a hoisted operand
 tuple, and uniform ``Stmt``-hood is what makes a node a legal member of a
 ``Body`` (generic walks reach its children through ``nested()`` like any block
 stmt's). ``Map.sources`` are the exception on purpose: they are node EDGES,
-reached by the node-aware walk (:func:`tree_nodes`), like a contraction operand.
+reached by the node-aware walk (``path.sites`` — the ONE walk over the tree),
+like a contraction operand.
 
 The combine lives entirely in the ``op`` wrapper (the :class:`Map` /
 :class:`Fold` / :class:`Contraction` nodes here + ``ir/stmt/algebra``). A
@@ -122,7 +125,7 @@ def _splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ..
     at: dict[int, list] = {}
     for edge in operands:  # first-use indexes against the ORIGINAL stmts — ties keep tuple order
         name = _operand_name(edge)
-        idx = next((i for i, st in enumerate(stmts) if name in _deep_reads([st])), len(stmts))
+        idx = next((i for i, st in enumerate(stmts) if name in deep_reads([st])), len(stmts))
         at.setdefault(idx, []).append(edge)
     out: list[Stmt] = []
     for i, st in enumerate((*stmts, None)):
@@ -533,9 +536,38 @@ class Fold(Stmt):
           schedule dispatch. No role rewrite anywhere."""
         if component_ops(self.combine) is None:
             return AxisRole.TWISTED
-        if composed_contraction(self) is not None:
+        if self.composed is not None:
             return AxisRole.CONTRACTION  # split-K: the outer additive reduce over the sliced node
         return AxisRole.PLANAR
+
+    @property
+    def composed(self) -> Contraction | None:
+        """The single sliced :class:`Contraction` this outer reduce COMPOSES (split-K's
+        reassociation ``fold_k = fold_{ksplit} ∘ fold_{kslice}``), or ``None`` — the identity-lift
+        λ spelling (one inline node operand carrying the outer's exact accumulator state). The ONE
+        read ``030_split_reduce`` and the derived :attr:`role` share."""
+        if len(self.lift.body) or len(self.operands) != 1:
+            return None
+        inner = self.operands[0]
+        return inner if isinstance(inner, Contraction) else None
+
+    def demoted(self) -> Fold:
+        """The operand hoist UNDONE — every edge moves INLINE into the lift body as a stmt (a
+        materialized ``Load`` verbatim, a computed node as the structural NODE — a term is a value,
+        legal in a pure ``Lambda``), each placed before the first read of its bound name (ties in
+        operand order — the splice rule). With no operand edges the bilinear parse declines, so the
+        fold DERIVES ``PLANAR`` and takes the reduce tiers at dispatch; ``_flatten_nodes`` flattens
+        the inline node at lowering, so the derived loop is byte-identical to the hoisted
+        spelling's (the demotion is a spelling change, never a semantics change)."""
+        lam = self.lift
+        assert lam is not None, "demoted: a λ-spelled fold only"
+        body = list(lam.body)
+        for edge in reversed(self.operands):
+            name = _operand_name(edge)
+            idx = next((i for i, st in enumerate(body) if name in deep_reads([st])), len(body))
+            body.insert(idx, edge)
+        lift = Lambda(params=(lam.params[0],), body=Body(tuple(body)), results=lam.results)
+        return Fold(axis=self.axis, unroll=self.unroll, lift=lift, init=self.init, combine=self.combine, dtypes=self.dtypes)
 
     @cached_property
     def _derived_twisted(self) -> tuple[Stmt, ...]:
@@ -653,26 +685,26 @@ class Side:
         return _ext_expr(self.axis)
 
 
-def _deep_defines(s: Stmt) -> set[str]:
+def deep_defines(s: Stmt) -> set[str]:
     """Every SSA name defined in ``s`` (deep — a stat reduce ``Loop``'s ``Accum`` counts)."""
     out = set(s.defines())
     for b in s.nested():
         for child in b:
-            out |= _deep_defines(child)
+            out |= deep_defines(child)
     return out
 
 
-def _deep_reads(stmts: list[Stmt]) -> set[str]:
+def deep_reads(stmts: list[Stmt]) -> set[str]:
     """Every SSA name read anywhere in ``stmts`` (deep)."""
     out: set[str] = set()
     for s in stmts:
         out |= set(s.deps())
         for b in s.nested():
-            out |= _deep_reads(list(b))
+            out |= deep_reads(list(b))
     return out
 
 
-def _stmt_axis_names(stmts) -> set[str]:
+def stmt_axis_names(stmts) -> set[str]:
     """Every loop induction variable bound anywhere in ``stmts`` (deep). A composed structural node
     sitting in the body needs no special case — it is a ``Stmt``, so its children are reached through
     the same ``nested()`` walk as any block stmt's."""
@@ -682,47 +714,8 @@ def _stmt_axis_names(stmts) -> set[str]:
         if ax is not None and hasattr(ax, "name"):
             out.add(ax.name)
         for b in s.nested():
-            out |= _stmt_axis_names(b)
+            out |= stmt_axis_names(b)
     return out
-
-
-def axis_names(root) -> set[str]:
-    """Every ITERATION-SPACE name in ``root``'s tree — the structural nodes' axes plus every loop
-    induction variable in their bodies. An induction variable is bound by the enclosing loop nest,
-    not by any value tree, so a subtree reading one is never capturing a value."""
-    out: set[str] = set()
-    for node in tree_nodes(root):
-        if isinstance(node, Fold):
-            out.add(node.axis.name)
-            out |= _stmt_axis_names(node.step_stmts())
-        elif isinstance(node, Map):
-            out |= _stmt_axis_names(node.body)
-        elif isinstance(node, Contraction):
-            out.add(node.k_axis.name)
-    return out
-
-
-def captured_values(root, axes: set[str]) -> tuple[str, ...]:
-    """The VALUE names ``root``'s subtree reads but does not itself define — its capture set, with
-    iteration-space names (``axes``) excluded.
-
-    DEMOTED to a validation assert at 1q: operands bind POSITIONALLY to lift params, so an edge
-    cannot see the fold's state or its siblings — **edge iff closed holds by construction** — and
-    no decision consults this scan anymore. It remains the executable check behind that invariant
-    (tests assert closure structurally) and the honest reading of the one legal capture: flash's
-    ``P = exp(s − m)`` genuinely reads the online-softmax carrier's
-    running max, updated by the merge stmts of the very loop step that consumes it (legal: an inline
-    operand's one home is always inside the scope it captures from) — which is
-    why that seam is not cuttable.
-
-    Returned sorted, so callers can put it straight into an error message."""
-    from emmy.compiler.ir.tile.ops import lower  # noqa: PLC0415 — avoid an import cycle
-
-    stmts = list(lower(root))
-    defs: set[str] = set()
-    for s in stmts:
-        defs |= _deep_defines(s)
-    return tuple(sorted(_deep_reads(stmts) - defs - axes))
 
 
 def _operand_body(op) -> tuple[Stmt, ...]:
@@ -827,44 +820,12 @@ def split_effects(stmts) -> tuple[tuple[Stmt, ...], tuple[Store, ...]] | None:
     return tuple(rest), tuple(stores)
 
 
-def _refs_axis(s: Stmt, name: str) -> bool:
+def refs_axis(s: Stmt, name: str) -> bool:
     """``s`` references axis ``name`` in any index expr (deep)."""
     idx = getattr(s, "index", None)
     if idx and any(name in e.free_vars() for e in idx):
         return True
-    return any(_refs_axis(child, name) for b in s.nested() for child in b)
-
-
-def gmem_row_stride(load: Load, axis_name: str, inputs) -> int | None:
-    """The flattened gmem stride between successive ``axis_name`` rows of ``load``'s buffer — the
-    fragment loaders' row step (``ldm``). The axis var must appear in exactly ONE index component,
-    affinely; the stride is its coefficient times the product of the buffer extents AFTER that
-    component. ``head_dim`` for the canonical ``(batch…, row, dd)`` layout; ``H·D`` for an
-    un-transposed ``(B, S, H, D)`` trace, where assuming the trailing extent read the WRONG rows
-    (the gemma layer-0 NaN: resident-Q fragments at ``ldm=head_dim`` on a 4096-stride layout).
-    ``None`` when underivable — axis absent or split across components, a non-affine use, an
-    unknown buffer, or a symbolic trailing extent — the schedule gate's decline signal."""
-    from emmy.compiler.ir.expr import affine_form  # noqa: PLC0415 — avoid a module-import cycle
-
-    t = inputs.get(load.input) if inputs else None
-    if t is None:
-        return None
-    positions = [i for i, e in enumerate(load.index) if axis_name in e.free_vars()]
-    if len(positions) != 1:
-        return None
-    pos = positions[0]
-    form = affine_form(load.index[pos], {axis_name})
-    if form is None:
-        return None
-    coef = form[1].get(axis_name, 0)
-    if coef <= 0:
-        return None
-    stride = coef
-    for d in tuple(t.shape)[pos + 1 :]:
-        if not d.is_static:
-            return None
-        stride *= d.as_static()
-    return stride
+    return any(refs_axis(child, name) for b in s.nested() for child in b)
 
 
 @dataclass(frozen=True)
@@ -909,7 +870,7 @@ class Contraction(Stmt):
     ``structural_key`` digests (the node IS keyed as an intermediate ``KernelOp``). The atom selects
     the codegen — there is no separate ``Leaf`` / per-atom subclass. :meth:`as_fold` remains the
     node's DERIVED λ reading — the flat ``(init, combine)`` algebra spelling ``Reduction`` (the
-    cross-partition programs) and :func:`demote_operands` consume."""
+    cross-partition programs) and :meth:`Fold.demoted` consume."""
 
     pure = True  # a term is a value — its internals are its own; legal inside a stored ``Lambda``
 
@@ -1040,7 +1001,7 @@ class Contraction(Stmt):
         the ``lift`` the bilinear ``λ(k, b, a, b₂…). (b·a, a·b₂, …)``, and the flat ``(init,
         combine)`` the componentwise additive combine threading the channel accumulator names —
         the ONE algebra spelling the fold-generic machinery consumes: ``Reduction`` (the
-        cross-partition merge programs) and :func:`demote_operands` (the PLANAR demotion). The
+        cross-partition merge programs) and :meth:`demoted` (the PLANAR demotion). The
         operand tuple order and the lift arg spellings reproduce the historical synthesis exactly
         (primary lift ``(b, a)``, further channels ``(a, b_i)``), so the derived serial step +
         first-use splice yield a loop whose body/axis are byte-identical to :attr:`loop`
@@ -1084,6 +1045,17 @@ class Contraction(Stmt):
         """Always ``CONTRACTION`` — the node kind IS the role (the stored-node successor of the
         fold's bilinear-parse derivation)."""
         return AxisRole.CONTRACTION
+
+    @property
+    def composed(self) -> Contraction | None:
+        """Always ``None`` — a contraction IS the cell, it composes no inner node. Present so a
+        ``Fold | Contraction`` head reads :attr:`Fold.composed` without an isinstance guard."""
+        return None
+
+    def demoted(self) -> Fold:
+        """:meth:`Fold.demoted` on this node's λ reading — the demotion works on the λ spelling,
+        which is where the hoisted edges are there to move inline."""
+        return self.as_fold().demoted()
 
     @property
     def m_axis(self) -> Axis:
@@ -1154,7 +1126,7 @@ class Contraction(Stmt):
         return replace(self, tile=TilePlan(), lead_axes=(), stage=None, axes=None)
 
     # ---- the stmt protocol (see ``Fold``): the operand edges are node EDGES, reached by the
-    # node-aware walk (:func:`tree_nodes`) — ``nested()`` stays the no-children default. ---------- #
+    # node-aware walk (``path.sites``) — ``nested()`` stays the no-children default. ---------- #
     def defines(self) -> tuple[str, ...]:
         return tuple(ch.acc for ch in self.channels)
 
@@ -1295,7 +1267,7 @@ class Map(Stmt):
         return Map(fn=_loop_ir_fn(self.fn.params, Body.coerce(body), self.fn.results), sources=self.sources)
 
     # ---- the stmt protocol (see ``Fold``): ``sources`` are NOT nested bodies — they are node
-    # edges, reached by the node-aware walk (:func:`tree_nodes`), the same way a ``Contraction``'s
+    # edges, reached by the node-aware walk (``path.sites``), the same way a ``Contraction``'s
     # operand is. ---------- #
     def nested(self) -> tuple[Body, ...]:
         return (self.fn.body,)
@@ -1354,77 +1326,6 @@ def _(s: Contraction, rename, sigma, axis_fn):
         axes=tuple(axis_fn(ax) for ax in s.axes) if s.axes is not None else None,
         lead_axes=tuple(axis_fn(ax) for ax in s.lead_axes),
     )
-
-
-def demote_operands(fold: Fold) -> Fold:
-    """The operand hoist UNDONE — every edge moves INLINE into the lift body as a stmt (a
-    materialized ``Load`` verbatim, a computed node as the structural NODE — a term is a value,
-    legal in a pure ``Lambda``), each placed before the first read of its bound name (ties in
-    operand order — the splice rule). With no operand edges the bilinear parse declines, so the
-    fold DERIVES ``PLANAR`` and takes the reduce tiers at dispatch; ``_flatten_nodes`` flattens
-    the inline node at lowering, so the derived loop is byte-identical to the hoisted spelling's
-    (the demotion is a spelling change, never a semantics change)."""
-    if isinstance(fold, Contraction):
-        fold = fold.as_fold()  # the demotion works on the λ spelling — hoisted edges to move inline
-    lam = fold.lift
-    assert lam is not None, "demote_operands: a λ-spelled fold only"
-    body = list(lam.body)
-    for edge in reversed(fold.operands):
-        name = _operand_name(edge)
-        idx = next((i for i, st in enumerate(body) if name in _deep_reads([st])), len(body))
-        body.insert(idx, edge)
-    lift = Lambda(params=(lam.params[0],), body=Body(tuple(body)), results=lam.results)
-    return Fold(axis=fold.axis, unroll=fold.unroll, lift=lift, init=fold.init, combine=fold.combine, dtypes=fold.dtypes)
-
-
-def composed_contraction(fold):
-    """The single sliced :class:`Contraction` an outer reduce COMPOSES (split-K's reassociation
-    ``fold_k = fold_{ksplit} ∘ fold_{kslice}``), or ``None`` — the identity-lift λ spelling (one
-    inline node operand carrying the outer's exact accumulator state). The ONE read
-    ``030_split_reduce`` and the derived :attr:`Fold.role` share."""
-    if not isinstance(fold, Fold) or len(fold.lift.body) or len(fold.operands) != 1:
-        return None
-    inner = fold.operands[0]
-    return inner if isinstance(inner, Contraction) else None
-
-
-def _stmt_nodes(s: Stmt):
-    """Every structural node reachable from stmt ``s`` (deep through nested bodies)."""
-    if isinstance(s, (Map, Fold, Contraction)):
-        yield from tree_nodes(s)
-        return
-    for b in s.nested():
-        for child in b:
-            yield from _stmt_nodes(child)
-
-
-def tree_nodes(op):
-    """Every structural node in ``op``'s tree, root first — the ONE node walk the path/seam
-    enumerators share. An inline operand subtree has exactly one home (its edge), so the tree
-    stays a tree and no visited set is needed."""
-    if op is None:
-        return
-    yield op
-    if isinstance(op, Map):
-        for src in op.sources:
-            yield from tree_nodes(src)
-        for s in op.body:
-            yield from _stmt_nodes(s)
-    elif isinstance(op, Fold):
-        for edge in op.operands:
-            if isinstance(edge, (Map, Fold, Contraction)):
-                yield from tree_nodes(edge)
-        edge_ids = {id(e) for e in op.operands}
-        # The derived blocked evaluation's synthesized nodes (flash's PV) are tree members too;
-        # an operand edge embedded at its derived head position is skipped — its walk is above.
-        for s in op.step_stmts():
-            if id(s) in edge_ids:
-                continue
-            yield from _stmt_nodes(s)
-    elif isinstance(op, Contraction):
-        for edge in (op.a, *(ch.b for ch in op.channels)):
-            if isinstance(edge, (Map, Fold, Contraction)):
-                yield from tree_nodes(edge)
 
 
 @dataclass
@@ -1500,7 +1401,10 @@ __all__ = [
     "Fold",
     "Store",
     "TileOp",
+    "deep_defines",
+    "deep_reads",
     "effect_tail",
+    "refs_axis",
     "split_effects",
-    "tree_nodes",
+    "stmt_axis_names",
 ]

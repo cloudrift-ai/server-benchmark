@@ -250,8 +250,10 @@ class dissolved at 1r) — ONE program, `combine : S × S → S` a pure `Lambda`
 results carry the fold's REAL accumulator names; the serial streaming step is NEVER stored (it derives as combine
 specialized at the singleton), so update-vs-combine consistency holds by construction. `M(op…)` is the free
 componentwise pair constructor (DEGENERATE is the derived `component_ops(combine)` shape predicate, not a storage
-arm; `rename_combine` carries the rename lockstep incl. the twisted regeneration rule; the per-component accumulator
-dtype survives only as the optional `Fold.dtypes` precision side-tuple); a twisted monoid's
+arm; `rename_combine` carries the rename lockstep incl. the twisted regeneration rule). A `Fold` carries NO
+precision: accumulator dtype is a KERNEL-IR fact, stamped on the lowered `Accum` by the Init-placement pass, and a
+reduce `Loop` arriving with a typed `Accum` declines recognition (`_extract_lift`) rather than dropping it. A twisted
+monoid's
 combine is the exp/LSE generator's program, selected structurally, never by a stored family name. The module also
 ships the executable SPEC: `eval_lambda` / `foldmap_eval`, the ~20-line denotational evaluator the agreement
 (`⟦tree⟧ == lowered loop`) and ASSOCIATIVITY property tests in `tests/compiler/ir/stmt/test_lambda_monoid.py` run

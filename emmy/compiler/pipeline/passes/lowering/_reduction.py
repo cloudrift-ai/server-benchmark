@@ -77,21 +77,13 @@ class Reduction:
     def twisted(self) -> bool:
         return self.ops is None
 
-    @property
-    def component_dtypes(self) -> tuple:
-        """The per-component accumulator dtype, ``None``-filled when unset."""
-        return self.fold.dtypes or (None,) * len(self.fold.combine.results)
-
     @cached_property
     def combine_states(self) -> tuple[Assign, ...]:
-        """The cross-partition state⊕state fold program — the stored combine's body (re-emitted
-        with the accumulator dtypes for a degenerate ⊕, whose stored program is dtype-free)."""
+        """The cross-partition state⊕state fold program — the stored combine's body, re-emitted
+        for a degenerate ⊕ (whose stored program is dtype-free, like the fold itself)."""
         if self.ops is None:
             return tuple(self.fold.combine.body)
-        return tuple(
-            Assign(name=n, op=op, args=(n, o), dtype=dt)
-            for n, op, o, dt in zip(self.names, self.ops, self.state_b, self.component_dtypes, strict=True)
-        )
+        return tuple(Assign(name=n, op=op, args=(n, o)) for n, op, o in zip(self.names, self.ops, self.state_b, strict=True))
 
     def state_merge(self, other: tuple[str, ...]) -> StateMerge:
         """A one-shot :class:`StateMerge` stmt folding this state with a second fully-reduced

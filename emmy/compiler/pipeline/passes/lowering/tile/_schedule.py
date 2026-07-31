@@ -1616,7 +1616,7 @@ def _splitk_option(
     accs = tuple(inner_fold.defines())
     ident_lift = Lambda(params=(ksplit.name, *accs), body=Body(()), results=accs)
     o_init, o_combine = M(*(["add"] * len(accs)), names=accs)
-    op = Fold(axis=ksplit, operands=(inner_fold,), lift=ident_lift, init=o_init, combine=o_combine, dtypes=(None,) * len(accs))
+    op = Fold(axis=ksplit, operands=(inner_fold,), lift=ident_lift, init=o_init, combine=o_combine)
     outer_fold = op
     # The projection rides the ``Map`` wrapper — its ONE home; ``030_split_reduce`` reads it there and
     # retargets it (per-partition atomic store / a deferred finalize after the cross-partition sums).

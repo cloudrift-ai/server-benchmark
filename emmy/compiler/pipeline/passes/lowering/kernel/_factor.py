@@ -617,7 +617,7 @@ def emit_combine(
     red, t: str, n_threads: int, *, warp_size: int = 32, segmented: bool = False, inner: tuple[str, int] | None = None
 ) -> list[Stmt]:
     """Build the cross-thread combine of a cooperative reduce — the algebra read off the
-    ``red`` fold NODE's stored ``(combine, dtypes)`` — over ``n_threads`` cooperating threads,
+    ``red`` fold NODE's stored ``combine`` — over ``n_threads`` cooperating threads,
     reassigning the carried state in place.
 
     The mechanism per level is derived by :meth:`ReduceStage.combine`:

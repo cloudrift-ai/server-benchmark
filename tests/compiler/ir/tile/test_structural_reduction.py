@@ -250,7 +250,6 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
         lift=Lambda(params=(ksplit.name, *accs), body=Body(()), results=accs),
         init=init,
         combine=combine,
-        dtypes=(None,) * len(accs),
     )
 
     # The outer fold derives CONTRACTION off its composed step — the one non-bilinear arm.

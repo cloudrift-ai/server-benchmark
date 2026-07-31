@@ -270,10 +270,7 @@ def _fold_derived_step(fold: Fold) -> tuple[Stmt, ...]:
         # the sliced fold in place — its own ``Accum``\\ s carry across both loops — with NO
         # outer folds.
         return (fold.operands[0],)
-    dts = fold.dtypes or (None,) * len(names)
-    accums = tuple(
-        Accum(name=names[i], value=str(lam.results[i]), op=ops[i], dtype=dts[i], axes=(fold.axis.name,)) for i in range(len(names))
-    )
+    accums = tuple(Accum(name=names[i], value=str(lam.results[i]), op=ops[i], axes=(fold.axis.name,)) for i in range(len(names)))
     after: dict[str, list[int]] = {}
     for i, r in enumerate(lam.results):
         if isinstance(r, str):
@@ -290,12 +287,12 @@ def _fold_derived_step(fold: Fold) -> tuple[Stmt, ...]:
     return tuple(out)
 
 
-def _extract_lift(loop: Loop, like: Fold | None = None) -> tuple[Lambda, tuple, Lambda, tuple] | None:
+def _extract_lift(loop: Loop, like: Fold | None = None) -> tuple[Lambda, tuple, Lambda] | None:
     """Read the λ spelling off a reduce ``Loop`` whose body is the dissolved ``[pure lift stmts…,
     Accum folds]`` sequence — ANNOTATION-FREE: every fact (accumulator names, channel ops, folded
-    values, dtypes) is read off the body's ``Accum``\\ s themselves, and threads into
+    values) is read off the body's ``Accum``\\ s themselves, and threads into
     :func:`~emmy.compiler.ir.stmt.algebra.M` with the loop's REAL accumulator names. Returns
-    ``(lift, init, combine, dtypes)`` — the flat ⊕ pair — or ``None`` when the shape does not read
+    ``(lift, init, combine)`` — the flat ⊕ pair — or ``None`` when the shape does not read
     off cleanly (a composed step, an effectful stmt, an identity-less op) — the caller keeps the
     raw-loop escape. A TWISTED (exp-family) loop has no self-describing ``Accum`` spelling (its
     merge interleaves ``base``-``Accum`` folds with ψ rescales), so it extracts only against a
@@ -321,10 +318,15 @@ def _extract_lift(loop: Loop, like: Fold | None = None) -> tuple[Lambda, tuple, 
         init, combine = M(*(a.op for a in accums), names=names)
     except ValueError:
         return None  # an undefined result / identity-less op — not the canonical dissolved shape
-    return lift, init, combine, tuple(a.dtype for a in accums)
+    if any(a.dtype is not None for a in accums):
+        # A typed accumulator is PRECISION, which the λ spelling does not carry — the derived
+        # ``Accum``\\ s come back dtype-free, so the byte-identity gate would reject the fold
+        # anyway. Decline here and keep the raw-loop escape rather than silently dropping it.
+        return None
+    return lift, init, combine
 
 
-def _extract_twisted_self(loop: Loop) -> tuple[Lambda, tuple, Lambda, tuple] | None:
+def _extract_twisted_self(loop: Loop) -> tuple[Lambda, tuple, Lambda] | None:
     """Reconstruct the exp-family λ spelling from a TWISTED reduce ``Loop``'s body ALONE — no
     side-band algebra: the state is ``(the maximum-Accum, the add-Accums in body order)`` (the
     generator emits them exactly there), the pivot term is the maximum's folded score, and each
@@ -365,11 +367,11 @@ def _extract_twisted_self(loop: Loop) -> tuple[Lambda, tuple, Lambda, tuple] | N
             return None
         other = tuple(f"{n}__o" for n in names)
         combine = Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
-        return lift, (float("-inf"),) + (0.0,) * len(adds), combine, ()
+        return lift, (float("-inf"),) + (0.0,) * len(adds), combine
     return None
 
 
-def _extract_twisted_lift(loop: Loop, like: Fold) -> tuple[Lambda, tuple, Lambda, tuple] | None:
+def _extract_twisted_lift(loop: Loop, like: Fold) -> tuple[Lambda, tuple, Lambda] | None:
     """Read the λ spelling off an exp-family TWISTED reduce ``Loop`` against the ``like`` fold
     that carries its algebra (the 030 split partial — the sliced loop's state names are the
     original fold's): the body must be ``[pure score prefix…, the dissolved streaming merge]``
@@ -394,13 +396,11 @@ def _extract_twisted_lift(loop: Loop, like: Fold) -> tuple[Lambda, tuple, Lambda
         return None  # a composed step keeps the step spelling
     if not terms or not isinstance(terms[0], str):
         return None
-    if any(dt is not None for dt in like.dtypes):
-        return None  # a dtype-carrying exp component has no side-tuple spelling yet
     try:
         lift = Lambda(params=(loop.axis.name,), body=Body(prefix), results=terms)
     except ValueError:
         return None
-    return lift, (float("-inf"),) + (0.0,) * (len(names) - 1), like.combine, ()
+    return lift, (float("-inf"),) + (0.0,) * (len(names) - 1), like.combine
 
 
 @dataclass(frozen=True)
@@ -453,13 +453,10 @@ class Fold(Stmt):
     # (params: the iteration var first, then one per operand edge, bound POSITIONALLY) plus the
     # TRUE monoid's flat ``(init, combine)`` pair whose combine carries the REAL accumulator
     # names (its results). The serial step, the ``Accum`` forms and the ``carrier`` annotation
-    # are DERIVED (:func:`_fold_derived_step` / ``__post_init__``). ``dtypes`` is the optional
-    # per-component ACCUMULATOR dtype side-tuple (precision, not algebra — it pins the lowered
-    # ``Accum`` dtypes). ---------------------------------------------------------------------- #
+    # are DERIVED (:func:`_fold_derived_step` / ``__post_init__``). ------------------------------ #
     lift: Lambda = field(kw_only=True)
     init: tuple = ()  # the ⊕ seeds — op identities for a plain fold; (−inf, 0, …) LSE
     combine: Lambda = field(kw_only=True)  # S × S → S — THE ⊕ (one program)
-    dtypes: tuple = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.init, tuple):
@@ -510,8 +507,8 @@ class Fold(Stmt):
         lifted = _extract_lift(loop, like)
         if lifted is None:
             return None
-        lift, init, combine, dts = lifted
-        fold = cls(axis=loop.axis, unroll=loop.unroll, lift=lift, init=init, combine=combine, dtypes=dts)
+        lift, init, combine = lifted
+        fold = cls(axis=loop.axis, unroll=loop.unroll, lift=lift, init=init, combine=combine)
         # The byte-identity gate — a non-reproducible BODY keeps the raw-loop escape. The role
         # annotation is the fold's own DERIVED read, deliberately excluded: an unbindable matvec
         # captures a CONTRACTION-shaped loop and derives PLANAR — the 1l demotion, now a
@@ -567,7 +564,7 @@ class Fold(Stmt):
             idx = next((i for i, st in enumerate(body) if name in deep_reads([st])), len(body))
             body.insert(idx, edge)
         lift = Lambda(params=(lam.params[0],), body=Body(tuple(body)), results=lam.results)
-        return Fold(axis=self.axis, unroll=self.unroll, lift=lift, init=self.init, combine=self.combine, dtypes=self.dtypes)
+        return Fold(axis=self.axis, unroll=self.unroll, lift=lift, init=self.init, combine=self.combine)
 
     @cached_property
     def _derived_twisted(self) -> tuple[Stmt, ...]:
@@ -1016,9 +1013,6 @@ class Contraction(Stmt):
             body=Body(tuple(body)),
             results=tuple(f"{acc}__v" for acc in accs),
         )
-        # The synthesized product loop's ``Accum``\\ s carry no dtype (the historical
-        # ``component_dtypes`` read None-filled) — spell that literally, no loop round-trip.
-        dtypes = (None,) * len(self.channels)
         init, combine = M(*(["add"] * len(accs)), names=accs)
         return Fold(
             axis=self.k_axis,
@@ -1026,7 +1020,6 @@ class Contraction(Stmt):
             lift=lift,
             init=init,
             combine=combine,
-            dtypes=dtypes,
         )
 
     # ---- params: the node's own reduce axis + the (m, n) output axes unpacked ---------- #

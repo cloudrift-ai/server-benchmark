@@ -22,7 +22,7 @@ bounds it itself.
 
 The weights live in the repo-checked artifact ``offline_weights.json`` next to
 this module (override with ``EMMY_OFFLINE_FILE`` / ``emmy eval … --offline-file``
-to A/B a candidate fit), written by ``scripts/golden_knob_heuristics.py`` jointly
+to A/B a candidate fit), written by ``emmy fit --artifact`` jointly
 over EVERY kernel regime — fp32-scalar / fp16-warp matmul, cooperative reduce, and
 pointwise goldens — so one un-gated linear model over the shared ``D_*`` features
 (plus ``MMA_tier``) ranks them all. Two weight sets, selected at score time on the
@@ -72,14 +72,14 @@ def _load_artifact(path_str: str) -> dict:
         raise RuntimeError(
             f"offline prior weights artifact missing or unreadable: {path_str} "
             f"(set EMMY_OFFLINE_FILE to a fitted artifact or regenerate the default "
-            f"with scripts/golden_knob_heuristics.py)"
+            f"with 'emmy fit --artifact')"
         )
     found = obj.get("feat_ver")
     if not isinstance(found, int) or found != FEATURIZER_VERSION:
         raise RuntimeError(
             f"offline prior weights artifact {path_str} has feat_ver={found!r}, "
             f"expected {FEATURIZER_VERSION} — its weight keys are spelled in a different "
-            f"featurizer vocabulary. Refit it: scripts/golden_knob_heuristics.py"
+            f"featurizer vocabulary. Refit it: emmy fit --artifact"
         )
     missing = [k for k in ("weights", "weights_dynamic", "params") if k not in obj]
     missing += [f"params.{k}" for k in _PARAM_KEYS if k not in obj.get("params", {})]

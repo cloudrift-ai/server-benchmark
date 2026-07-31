@@ -402,7 +402,7 @@ def tile_signature(knobs: dict) -> tuple:
     knobs (``TILE`` / ``REDUCE`` / ``STAGE``, bare or ``@<axis>``-suffixed alike). Two configs
     with equal signatures are the same kernel variant whichever key form spelled them, so this
     is the bridge for matching a recorded golden YAML row against the native enumeration's
-    candidate rows (``scripts/golden_knob_heuristics.py`` / ``search/golden_eval.evaluate_golden``).
+    candidate rows (``emmy fit``'s case builder / ``search/golden_eval.evaluate_golden``).
     The K-chunk (``TilePlan.bk``) is part of the identity — without it every ``k<n>`` sibling in
     a warp pool joined ambiguously (a golden recorded at ``k4`` matched the ``k1`` candidate).
     Operand staging (the ``STAGE`` codec) is part of the identity — a staged and a gmem-direct

@@ -1,5 +1,5 @@
 """The extracted OfflinePrior fit core (``search/prior/fit``) — the two preservation
-guarantees the extraction from ``scripts/golden_knob_heuristics.py`` must keep:
+guarantees the extraction from the original fit script must keep:
 
 1. The fit is a pure, deterministic function of (cases, seed): the same inputs
    produce a byte-identical weights artifact, so a refit is reproducible and an
@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
-from emmy.compiler.pipeline.search.prior.fit import build_artifact, feature_matrix, fit_weights, rank_of_golden, raw_weights
+from emmy.compiler.pipeline.search.prior.fit import Group, build_artifact, feature_matrix, fit_weights, rank_of_golden, raw_weights
 from emmy.compiler.pipeline.search.prior.offline import _DEFAULT_FILE, OfflinePrior
 
 # The features the OfflinePrior scores OUTSIDE the linear weights (the hardcoded
@@ -27,8 +27,8 @@ _GATE_FEATURES = {"D_finalize_kernel", "D_splitk", "D_scalar_on_warp_eligible", 
 
 
 def _synthetic_cases(n_cases=6, n_rows=40, n_feats=8, seed=1234):
-    """A small fixed case set in the fitter's input shape: (name, tier, golden_idx,
-    feature dict rows), with sparse rows so the ``feats.get(k, 0.0)`` path is live."""
+    """A small fixed case set in the fitter's input shape (:class:`Group`), with sparse
+    rows so the absent-feature = 0.0 path (the matrix packing's zero columns) is live."""
     rng = np.random.default_rng(seed)
     names = [f"D_f{i}" for i in range(n_feats)]
     cases = []
@@ -38,7 +38,7 @@ def _synthetic_cases(n_cases=6, n_rows=40, n_feats=8, seed=1234):
             row = {n: float(rng.integers(-4, 5)) for n in names}
             feats.append({k: v for k, v in row.items() if rng.random() > 0.25})
         tier = ["thread", "warp", "reduce", "dyn"][c % 4]
-        cases.append((f"case{c}", tier, int(rng.integers(0, n_rows)), feats))
+        cases.append(Group.from_dicts(f"x/case{c}", f"case{c}", tier, "x", int(rng.integers(0, n_rows)), feats))
     return cases, names
 
 
@@ -46,8 +46,8 @@ def _run_fit(samples=200):
     """The script's two-stage fit (static, then dynamic seeded from static) on the
     fixed synthetic case set, assembled into artifact JSON bytes."""
     cases, names = _synthetic_cases()
-    static_cases = [c for c in cases if c[1] != "dyn"]
-    dyn_cases = [c for c in cases if c[1] == "dyn"]
+    static_cases = [c for c in cases if c.tier != "dyn"]
+    dyn_cases = [c for c in cases if c.tier == "dyn"]
     rng = np.random.default_rng(0)
     static_w, _, _, static_sd = fit_weights(static_cases, names, np.ones(len(names)), seed_w=np.zeros(len(names)), rng=rng, samples=samples)
     dyn_w, _, _, dyn_sd = fit_weights(dyn_cases, names, static_sd, seed_w=static_w, rng=rng, samples=samples)

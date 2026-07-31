@@ -17,6 +17,12 @@
 #
 # Runs from the repo venv when present, else from PATH (the vllm-emmy container has the
 # emmy wheel on system python and no venv — mount just this script and run it there).
+#
+# `set -u` but deliberately NOT `set -e`: the whole point of the loop below is to attempt
+# every shape and TALLY the failures, so aborting on the first failing compile would report
+# one bad kernel instead of the full picture a gate needs. Every step that must not fail
+# silently is therefore checked explicitly — see the enumeration guard below, and the
+# per-shape `fail` counter that the final exit status is computed from.
 set -u
 cd "$(dirname "$0")/.." 2>/dev/null || true
 MODEL="${MODEL:?set MODEL to the HF model id being preflighted}"
@@ -32,14 +38,19 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 # Select by the golden's recorded `model:` provenance, not by a name prefix: the prefix is a
 # naming convention that drifts per model, while the provenance is the field that actually
 # says which checkpoint a shape came from. Same matcher as the release gate.
-names=$(CUDA_VISIBLE_DEVICES= MODEL="$MODEL" "$PY" -c "
+if ! names=$(CUDA_VISIBLE_DEVICES= MODEL="$MODEL" "$PY" -c "
 import os, sys
 sys.path.insert(0, 'scripts')
 from check_serving_goldens import covers, model_slug
 from emmy.compiler.pipeline.search.golden import GOLDEN_CONFIGS
 target = model_slug(os.environ['MODEL'])
 print('\n'.join(sorted({g.name for g in GOLDEN_CONFIGS if covers(g.model, target)})))
-")
+"); then
+  # A non-zero enumeration may still have printed a PARTIAL list on stdout. Preflighting a
+  # silent subset is worse than not preflighting: it gates a rental on a green summary that
+  # covered only some of the model's shapes.
+  echo "FAIL: golden enumeration errored for $MODEL (see the traceback above)"; exit 1
+fi
 # An empty enumeration (import error above, or no goldens for this model) must be a hard FAIL —
 # otherwise the loop below never runs and "0 OK, 0 FAIL" gates a rental on zero compiles.
 [ -n "$names" ] || { echo "FAIL: no goldens enumerated for $MODEL (import error, or none recorded — run scripts/check_serving_goldens.py)"; exit 1; }

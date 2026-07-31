@@ -1,6 +1,6 @@
 ---
 name: reproduce-article-benchmarks
-description: Use this skill when the user asks to "re-run the benchmarks from the article", "reproduce the blog post numbers", "validate that <article url> still holds", "check the latest code still performs like the published post", or otherwise wants a published article's benchmarks re-measured with emmy and compared against what was published. Works for any article — it reads the article itself, finds the experiments/recipes in this repo that back it, reports whether the code has moved since any pinned docker image was published (and offers to rebuild), asks where the hardware comes from (auto-provisioned cloud VM, a pre-allocated remote host, or a local GPU), runs the benchmarks, and reports the deltas.
+description: Use this skill when the user asks to "re-run the benchmarks from the article", "reproduce the blog post numbers", "validate that <article url> still holds", "check the latest code still performs like the published post", or otherwise wants a published article's benchmarks re-measured with emmy and compared against what was published. Works for any article — it reads the article itself (fetch the URL), finds the experiments/recipes in this repo that back it, reports whether the code has moved since any pinned docker image was published (and offers to rebuild), asks where the hardware comes from (auto-provisioned cloud VM, a pre-allocated remote host, or a local GPU), runs the benchmarks, and reports the deltas.
 version: 0.1.0
 ---
 
@@ -17,9 +17,21 @@ The deliverable is one comparison: measured vs published, per cell, with the set
 **A regression is a finding to hand back, never something to diagnose or fix inside the run** — a repro session's
 entire value is that it is a clean, uncontaminated measurement.
 
+## Step 0 — A scratch directory
+
+Later steps write logs and modified recipe copies to `$SCRATCH`. Set it first: unset, `"$SCRATCH/<suite>"` expands
+to `/<suite>`, so a recipe override lands at the filesystem root instead of somewhere disposable. Use the session's
+scratchpad directory if the environment provides one, otherwise make one:
+
+```bash
+export SCRATCH="${SCRATCH:-$(mktemp -d -t emmy-repro)}"; echo "$SCRATCH"
+```
+
+Keep results out of the checkout — a repro run should leave the working tree exactly as it found it.
+
 ## Step 1 — Read the article
 
-`WebFetch` the URL and extract, explicitly:
+Fetch the article URL and extract, explicitly:
 
 - every results table, with its **exact numbers, units, and column meaning** (tok/s vs ms; mean vs median vs p99);
 - the **lanes** each table compares (stock engine / emmy / a precision fork / a third-party engine / a speculation
@@ -136,8 +148,14 @@ Three paths; default to the first.
      or the tag misrepresents what was measured.
 
 A prebuilt image is warmed at one serving shape and one kernel fork; lanes outside that set fall back to compiling
-on boot. Check the image's `ARCHITECTURE.md` for what its warm actually covers, and treat any gap as **boot cost,
-not numerics** — the kernels are the same, the first boot is just slow, and it can exceed a healthcheck window.
+on boot. Check the image's `ARCHITECTURE.md` for what its warm actually covers, and treat any gap as **boot cost**:
+each lane still runs the kernels its own configuration selects and produces that configuration's numbers — it just
+builds them instead of finding them baked. The first boot can be slow enough to exceed a healthcheck window.
+
+Note the two gaps differ. A lane at an unwarmed *shape* (a different decode bucket, say) runs the **same** kernels
+and only misses the execution-plan pack. A lane under a different *kernel fork* (`EMMY_FAST_MATH`) deliberately
+selects **different** kernels — that is what the fork is — so nothing baked could have served it. Neither changes
+what the lane measures; don't describe either as "the same kernels" without saying which case you mean.
 
 **Overriding an image without editing the repo.** Recipes hardcode `engine.llm.vllm.image` and `emmy bench` has no
 override flag. Copy the experiment to the scratch dir and rewrite it there, so the checkout stays clean:

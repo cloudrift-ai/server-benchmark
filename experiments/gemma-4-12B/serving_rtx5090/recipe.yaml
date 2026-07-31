@@ -25,15 +25,19 @@
 # capture `docker inspect`'s digest (or the tag list) alongside any numbers you intend to
 # compare against the article; `latest` today is digest b9756d62 = the 58733e02 build.
 #
-# What the baked artifacts do NOT cover — both are BOOT COST, not numerics; every lane
-# still runs the same kernels and reports comparable numbers, it just pays for them once:
+# What the baked artifacts do NOT cover. Both cost only BOOT TIME — each lane still runs the
+# kernels its own configuration selects, and reports the numbers that configuration is meant
+# to produce; it just pays to build them once instead of finding them baked:
 #   - the pack is keyed on the serving shape, of which EMMY_GEN_DECODE_BUCKET is part, so
 #     the c=4/c=8 (bucket 8) and c=64 (bucket 64) lanes miss it and re-run the compiler
 #     frontend per program (~50 min of host CPU measured at an uncovered width). That can
 #     exceed the compose healthcheck window on a low-core host — see the image's
 #     ARCHITECTURE.md. serving_mtp_rtx5090 already accepts the same trade.
-#   - the baked cubins are the STANDARD fork, so the six EMMY_FAST_MATH lanes recompile
-#     their kernels on first boot (cubin-cached thereafter).
+#   - the baked cubins are the STANDARD fork's. The six EMMY_FAST_MATH lanes deliberately
+#     select DIFFERENT kernels (f16-accumulate mma, __expf — that is what the fork is), so
+#     nothing baked can serve them and they compile their own on first boot (cubin-cached
+#     thereafter). Their numbers are the fast-math lane's numbers either way; only the
+#     first boot is slower.
 # Re-warming the image at the width/fork a lane needs removes both; the article's numbers
 # were measured with a warm cache either way.
 #

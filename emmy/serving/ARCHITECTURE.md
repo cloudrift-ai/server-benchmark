@@ -185,7 +185,10 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   FULL_DECODE_ONLY` (full cudagraphs need no torch.compile — vLLM wraps the model in its `CUDAGraphWrapper`) and
   `cudagraph_capture_sizes` laddered up to `--max-num-seqs` (sizes at or below the decode bucket run the static
   decode twin; sizes above it capture the device-resident symbolic programs — both paths are capture-validated,
-  `test_gen_capture_gpu` / the two-size live-replay test; over-bucket capture was worth +10.6% req/s at c=64,
+  `test_gen_capture_gpu` / the two-size live-replay test, and BOTH drop their output clones under the outer
+  capture (`run_device_sym` mirrors `run_device`'s captured no-clone branch — the graph's fixed kernel order
+  makes the views safe, and the per-layer clone D2D nodes leave the captured graph; the uncaptured paths keep
+  the clone); over-bucket capture was worth +10.6% req/s at c=64,
   and a decode bucket matched to the concurrency beats riding the symbolic captures — the bucket-64 golden set
   took c=64 TPOT 35.4 → 22.5 ms, and the bucket-8 set (m8 goldens, 2026-07-25) took c=4 TPOT 19.6 → 18.9 and
   c=8 21.4 → 20.6 on the same per-lane-knob rule). The mixed prefill+decode cells take a second per-workload

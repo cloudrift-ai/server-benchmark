@@ -103,7 +103,16 @@ class _Program:
         wall). No per-T graph capture: at prefill widths the dispatch hides behind the GPU work,
         and chunked-prefill ``T`` varies step to step — a per-T graph cache would re-capture
         constantly. Requires the program to have been built with a ``capacity`` feed
-        (:func:`_compile_split`); ``set_sym_values`` raises past it."""
+        (:func:`_compile_split`); ``set_sym_values`` raises past it.
+
+        Under an OUTER capture (an over-bucket decode size in vLLM's capture ladder) the output
+        clones drop, mirroring :meth:`run_device`'s captured branch: the outer graph's fixed
+        kernel order guarantees every consumer (RoPE, attention, the next twin's prefix upload)
+        reads before this program's next-replay overwrite, and each layer runs its own program
+        instance. ``set_sym_values`` stays capture-safe because vLLM's uncaptured per-size warmup
+        has already populated this sym key's TMA descriptor overlay — the descriptor H2D never
+        lands inside the capture window. The uncaptured path keeps the clone: there the buffers
+        may be rewritten before the caller consumes the view."""
         import cupy as cp
         import torch
 
@@ -116,6 +125,8 @@ class _Program:
             self.program.upload_prefix_device(feed)
             self.program.run_once()
             outs = self.program.output_prefix_device({"num_tokens": t})
+            if torch.cuda.is_current_stream_capturing():
+                return [torch.from_dlpack(outs[n]) for n in self.output_names]
             return [torch.from_dlpack(outs[n]).clone() for n in self.output_names]
 
 

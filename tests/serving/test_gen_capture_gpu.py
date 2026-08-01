@@ -72,13 +72,16 @@ def test_run_device_sym_inside_outer_capture_replays_live():
     graphs = {}
     ins = {}
     outs = {}
+    out_backing_ptr = prog.program.arrays[prog.output_names[0]].data.ptr
     for t in (24, 40):
         x = torch.randn(t, 16, dtype=torch.float16, device="cuda")
-        warm = prog.run_device_sym([x])[0].clone()  # uncaptured warmup at this exact width
+        warm = prog.run_device_sym([x])[0]  # uncaptured warmup at this exact width
+        assert warm.data_ptr() != out_backing_ptr  # uncaptured path must CLONE (buffer is reused)
         assert torch.allclose(warm, ref_mod(x), rtol=1e-2, atol=1e-2)
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g):
             out = prog.run_device_sym([x])[0]
+        assert out.data_ptr() == out_backing_ptr  # captured path must be a VIEW (A1: no clone nodes)
         graphs[t], ins[t], outs[t] = g, x, out
 
     for t in (24, 40):

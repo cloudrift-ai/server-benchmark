@@ -414,9 +414,11 @@ the structural-IR root `op` directly — a `Map` / `Fold` / `Contraction` (the t
 edge + its `Channel`s and nothing more, so a node's `==` / `hash` / `ops.term_key` is its algebra — two kernels
 differing only in tile key identically, and no emission path can leak a schedule into a stored term. The placement +
 schedule a tier needs is bound to the node at the point of use as a lowering-side view
-(`passes/lowering/_placed.Placed`, the `_reduction.Reduction` pattern): it holds the `(m, n)` output axes, the
-`TilePlan` / `Stage` and the `Side` geometry derived from them — the tiled CELL's reading — and proxies every
-algebra read through to the node. The `Kernel` / `TileSchedule` wrapper is gone. A kernel's structure is read
+(`passes/lowering/_placed.Placed`, the `_reduction.Reduction` pattern), a thin (node, `TilePlan`, `Stage`) triple
+that proxies every algebra read through to the node. The **geometry is the slice's own**: a `TilePlan` carries the
+`(m, n)` output axes it tiles (`axes`, bound by `.at(m, n)`) and derives the `Side` pair from them, so the tiled
+CELL's reading is a function of the schedule slice alone. `axes` is `compare=False` — placement is not a search
+dimension, so it never reaches `spell()`, a stamped knob row, a golden or a prior key. The `Kernel` / `TileSchedule` wrapper is gone. A kernel's structure is read
 structurally off the node (`ops.axis_role` — the contraction IS the `Contraction` kind; a fold's role derives),
 not a bespoke Python type per schedule.
 

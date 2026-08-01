@@ -65,8 +65,7 @@ from emmy.compiler.ir.tile import (
     TileOp,
     TilePlan,
 )
-from emmy.compiler.ir.tile.ops import axis_role, cone_seam, head, nodify_reduce, projection_tail, reduce_loop, sched_of, seal_workers
-from emmy.compiler.ir.tile.ops import lower as lower_op
+from emmy.compiler.ir.tile.ops import axis_role, cone_seam, head, node_loads, nodify_reduce, projection_tail, sched_of, seal_workers
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.knob import canon_family_value, family_of, values_equal
 from emmy.compiler.pipeline.passes.lowering._addr import gmem_row_stride
@@ -353,17 +352,13 @@ def _matvec_b_kstride(kernel, carrier, place) -> int | None:
     means k-major (canonical ``B[k, n]``)."""
     nonunit = {a.name for a in place.free if not (a.extent.is_static and a.extent.as_static() == 1)}
     k_name = carrier.axis.name
-
-    def loads(stmts):
-        for s in stmts:
-            if isinstance(s, Load):
-                yield s
-            for b in s.nested():
-                yield from loads(b)
-
     a_seen = False
     strides = set()
-    for ld in loads(lower_op(kernel.op)):
+    # The operand structure is the NODE's (``node_loads`` — the edges plus the demoted matvec's
+    # inline lift loads), not a lowered nest's: the emitted kernel reads exactly these. A
+    # post-reduce projection load can never be indexed by the reduce axis, so the old whole-kernel
+    # walk saw the same set after its ``k_name not in used`` filter.
+    for ld in node_loads(kernel.op):
         used = set().union(*(e.free_vars() for e in ld.index)) if ld.index else set()
         if k_name not in used:
             continue
@@ -515,7 +510,7 @@ def _has_contraction_tail(stmts: list[Stmt]) -> bool:
     return False
 
 
-def _shared_row_buf(carrier_body, tail: list[Stmt], grid_vars: tuple, raxis: Axis, inputs: dict) -> str | None:
+def _shared_row_buf(carrier_loads: list[Load], tail: list[Stmt], grid_vars: tuple, raxis: Axis, inputs: dict) -> str | None:
     """The input buffer reused as a CTA-shared ROW across the reduce + a contraction tail — an
     input read in the carrier reduce at ``(grid…, raxis)`` AND in the tail at ``(grid…, k)``,
     whose trailing dim is the (static) reduce extent. That row (e.g. RMSNorm's ``x[m, :]``,
@@ -525,9 +520,7 @@ def _shared_row_buf(carrier_body, tail: list[Stmt], grid_vars: tuple, raxis: Axi
         return None
     n = len(grid_vars)
     carrier_bufs = {
-        s.input
-        for s in _scalar_loads(list(carrier_body))
-        if len(s.index) == n + 1 and tuple(s.index[:n]) == grid_vars and s.index[-1] == Var(raxis.name)
+        s.input for s in carrier_loads if len(s.index) == n + 1 and tuple(s.index[:n]) == grid_vars and s.index[-1] == Var(raxis.name)
     }
     for s in _scalar_loads(tail):
         if s.input in carrier_bufs and len(s.index) == n + 1 and tuple(s.index[:n]) == grid_vars:
@@ -542,10 +535,13 @@ def _row_stage(tile, place) -> Stage | None:
     row — gmem-direct). Reads the reduce loop / projection tail off the node tree (the same stmts the
     materializer emits) and the operand shapes off ``tile.inputs`` (seeded from the recognized
     ``LoopOp``); the stamped stage is the depth-1 ``sync`` transport with ``smem`` naming the row."""
-    rloop = reduce_loop(tile.op)
+    red = head(tile.op)
+    if red is None:
+        return None
     tail = projection_tail(tile)
     grid_vars = tuple(Var(a.name) for a in place.grid)
-    buf = _shared_row_buf(rloop.body, tail, grid_vars, rloop.axis, tile.inputs)
+    carrier_loads = [ld for ld in node_loads(red) if ld.is_scalar]
+    buf = _shared_row_buf(carrier_loads, tail, grid_vars, red.axis, tile.inputs)
     return Stage(transport="sync", smem=(buf,)) if buf is not None else None
 
 

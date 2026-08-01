@@ -16,12 +16,12 @@ kind, sealed through the one `grid_tile` finalizer (the article's "schedule sepa
 
 - **OUTPUT-tiled** (a contraction — warp / register tile) — the `Contraction` IS the stored node (1s,
   `ir/tile/ir.py`), its operand→role binding resolved recognize-side (`010_recognize._nodify_contraction` /
-  `_atomize.bind_prologue_contraction` — the ONLY nodification sites; `_view.contraction_view` just places), so
+  `_atomize.bind_prologue_contraction` — the ONLY nodification sites; the schedule just places), so
   `_bind` only **synthesizes its bare grid-`Write`** (needs `root.output`, so it can't ride the node) and
   **expands** it through the shared tiling layer (below); the leaf type selects the codegen
   (mma / scalar). An unbindable contraction (a non-`Load` operand) keeps the `Map` form and falls through to the
   degenerate arm here. (This build was a separate `005_contract` pass, then folded into materialize, and now lives
-  recognize-side so the node exists before scheduling; `_view.contraction_view` only PLACES it, and declines with
+  recognize-side so the node exists before scheduling; the schedule only PLACES it, and declines with
   `LoweringError` when there is no `(m, n)` grid pair to place onto.)
 - **REDUCE-tiled** (`_tile_reduce_axis`, a `PLANAR` / `TWISTED` reduce — or a non-output-tiled `CONTRACTION` — whose
   `ReducePlan` cooperates / register-folds) — the reduce axis is tiled instead: `coop` lanes across the CTA's threads
@@ -93,8 +93,8 @@ peel — the sinks, the sweep's coop `StridedLoop` distribution, the split reali
 stream the stored-`Write` era carried. The
 recursion, the binder, the reduce-axis tiling, and the shared-row staging apply live in `_factor.py`; the four tiling
 levels every tier seals through are `_tiling.py`, which knows a `Side` pair, integer counts and three callables — no
-node kinds, no algebra, no `Ctx`. That is the decide/realize seam: the tile schedule picks the plan, `_tiling` is where a
-plan becomes bound `Axis` objects. **There is no
+node kinds, no algebra, no `Ctx`. That is the decide/realize seam: the tile schedule picks the plan, `_tiling` is
+where a plan becomes bound `Axis` objects. **There is no
 kind-specific path — no flash / attention special case.** Flash is the `TWISTED` fold composing two `Contraction` nodes, so its
 Q@K / P@V contractions and its streaming reduce factorize through this one recursion (scalar block=1 today). A
 tensor-core flash tier is a matter of the contractions carrying an mma `TilePlan` (a schedule field on the node) and
@@ -153,8 +153,8 @@ structurally different primitives — sit behind one `fill`/`commit`/`wait` seam
 supplies only the slab drain leaf via `_AtomOps.staged_drain` (the shared inner `ldmatrix` drain
 `_staged_inner_atom_loop`, or the scalar `_scalar_drain`). The staging **decision** does not live here at all: the
 `Stage` on the `TileOp` arrives **already resolved** by the scheduler (transport eligibility, the slab K-chunk
-`bk_elems`, the depth clamps — or `None`, gmem-direct), and `state` (which slots the operand fragments) and the shared `reduce` (which emits the loop) apply it
-verbatim. The `Stage` spells two buffering levels:
+`bk_elems`, the depth clamps — or `None`, gmem-direct), and `state` (which slots the operand fragments) and the
+shared `reduce` (which emits the loop) apply it verbatim. The `Stage` spells two buffering levels:
 `d<depth>` is the gmem→smem ring (cp.async commit group / TMA mbarrier-phased prefetch over the K-slab loop),
 `p<reg_depth>` is the smem→register double-buffer (the `ldmatrix` ping-pong over the inner atom-K steps). Staging is a
 **pure perf transform** — an ineligible kernel (masked N, symbolic / non-divisible K, or a computed-A
@@ -281,7 +281,7 @@ fits the 64K regfile. Stores are guarded to the compute band (`grid_tile`), and 
 account for the aux band (`Tile.aux_threads`). Accuracy-gated, not bit-identical — the split changes scheduling.
 
 The **scalar** contraction tier stages too, under the same `STAGE` codec, through the **same** `_staged` driver — the
-scheduler's `_resolve_scalar_stage` sizes the slab (the depth-aware fit-to-smem K-chunk `bk_elems`, not a codec field;
+scheduler's scalar stage resolver sizes the slab (the depth-aware fit-to-smem K-chunk `bk_elems`, not a codec field;
 the depth steps down when no chunk fits) and its `staged_drain` is the plain-`Load` inner loop (`_scalar_drain`,
 reading the ring slot via the same slot-row seam as the mma drain). `depth >= 2` is the scalar gmem→smem prefetch
 ring — the identical `staged_kloop` cp.async / TMA-mbarrier phases the warp tier runs; only `p<n>` (the
@@ -292,7 +292,7 @@ loop) and marking the inner drain `Loop(seed=False)` so it folds without re-decl
 masked **N** or a transposed **B** declines staging (gmem-direct) — the B-slab fill would fault a row-crossing copy.
 Unstaged is byte-identical gmem-direct.
 
-**Split-K composes with staging.** `_splitk_option` resolves a `STAGE` spec against the SLICED inner view
+**Split-K composes with staging.** The split-K option resolves a `STAGE` spec against the SLICED inner view
 (the `kslice` extent + the `ksplit`-offset operand indices) and `030_split_reduce` threads the resolved `Stage` onto its
 partial `TileOp`s, so the partial kernel's K-loop stages its slice through the same pipeline (the TMA box origin is
 the operand's own index evaluated at the tile base — an offset operand lands the box at absolute coordinates).
@@ -335,9 +335,10 @@ at schedule time (the additive `(m, kv)` score bias, a non-exp family), never he
 **Shared-row staging (`_tile_reduce_axis`) — the reduce tier's `sync` transport.** The fused norm→linear prologue is a
 cooperative reduce: an input row folded by the cooperative reduce AND re-read per output column of a contraction tail (a
 free-axis `Loop` over an inner reduce). Like the contraction tiers, it is **`Stage`-driven**: the scheduler
-(the shared-row stage detection, narrow so a plain softmax sum or a bare reduction is untouched) detects that one row and stamps
-a depth-1 `sync` `Stage` whose `smem` names it — a derived schedule field, never a knob. `_tile_reduce_axis` only *applies*
-it: the row is filled cooperatively via `_stage.sync_row_fill` — the **same `_stage.py` fill module** the warp tier's
+(the shared-row stage detection, narrow so a plain softmax sum or a bare reduction is untouched) detects that one row
+and stamps a depth-1 `sync` `Stage` whose `smem` names it — a derived schedule field, never a knob.
+`_tile_reduce_axis` only *applies* it: the row is filled cooperatively via `_stage.sync_row_fill` — the **same
+`_stage.py` fill module** the warp tier's
 cp.async / TMA fills live in, indexed off the same linear-tid / thread-count seam — and both readers are rewritten to
 the slab (`_restage_loads`). So every staging decision rides a `Stage` on the schedule and every transport (`sync` 1-D
 row · cp.async / TMA 2-D slab) lowers through one module. A contraction operand `Stage` never sets `smem`, which is how

@@ -95,7 +95,7 @@ class Candidate:
         # ``inputs`` are still ``_seed_io_placeholders``' ``(f32, ())`` stubs —
         # ``is_alive``'s node-identity check cannot see an op swap, and a rule
         # reading placeholder dtypes mis-schedules (gemma o_proj deployed a
-        # scalar tile 16x its own measured mma rows because ``_warp_atoms``
+        # scalar tile 16x its own measured mma rows because the warp atom gate
         # read the placeholder f32). Same contract as the match-time refresh;
         # idempotent when nothing changed.
         for nid in match.consumed:

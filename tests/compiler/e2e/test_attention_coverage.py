@@ -341,7 +341,7 @@ def test_flash_chain_pin_selects_chain_on_warp_eligible_shape(monkeypatch):
 # =========================================================================== #
 # These cases expect a fp16/bf16 SDPA to lower to a single ``mma.sync`` kernel (the warp chain:
 # tiled + atomized contractions, fragment online-softmax, C->A register repack) — realized through the
-# ONE pipeline: ``_schedule._twisted_warp_options`` stamps the mma ``TilePlan``\ s on the Q@K / P@V
+# ONE pipeline: the twisted warp enumeration stamps the mma ``TilePlan``\ s on the Q@K / P@V
 # ``Contraction``\ s and ``_bind``'s reduce arm realizes the TWISTED carrier at fragment residence
 # (``_twist``). No private emitter exists; a bespoke path would be the mandate violation the
 # demolition removed. Unpinned, the warp rows are fork SIBLINGS of the chain / reduce-partition

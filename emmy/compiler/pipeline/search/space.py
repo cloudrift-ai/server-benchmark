@@ -340,7 +340,7 @@ def scalar_tile_moves() -> list[TilePlan]:
 # (N=4096) and gate/up (N=15360) fused edges at M=32 (5090). ``(2, 8)`` is its M=64 sibling (a second
 # M warp-unit once the decode bucket doubles): the lm_head.m64 golden winner — w1x8 leaves 2x on the
 # table there (2392 vs 1215 µs, 5090) — and the best fused-geglu tile at the same M. Per-node legality — the atom's operand
-# dtype and the ``_check_warp_static_k`` K-divisibility — is the scheduler's (``_schedule``), not the grid's.
+# dtype and the warp static-K divisibility — is the scheduler's, not the grid's.
 # (WM, WN) / (FM, FN)
 _WARP_UNITS: tuple[tuple[int, int], ...] = (
     (1, 1),
@@ -404,7 +404,7 @@ def stage_moves(*, warp: bool) -> list[str]:
     """The operand-staging ``STAGE`` codec candidates — gmem-direct ``""`` first (the conservative
     option-0), then the transport / depth / double-buffer variants. Both tiers offer the gmem→smem
     prefetch ring depths (the scalar ring lands on the same ``staged_kloop`` phases; its slab
-    K-chunk is depth-aware, derived in ``_resolve_scalar_stage``); the ``p2`` smem→register
+    K-chunk is depth-aware, derived by the scalar stage resolver); the ``p2`` smem→register
     double-buffer is an ``ldmatrix`` transform, warp-only. Emission is resolver-gated in
     ``_schedule`` — a candidate is offered only when it RESOLVES against the built node, and the
     row carries the resolved spelling."""
@@ -421,7 +421,7 @@ def splitk_moves(*, warp: bool) -> list[ReducePlan]:
     """The cross-CTA split-K ``REDUCE`` candidates, both tiers each: the deferred-kernel finalize
     (an f32 workspace + sibling combine kernel) and the in-place atomic (one kernel — the partial
     ``atomicAdd``\\ s into the zero-init'd output; the mma tier rides ``RegStore.atomic``'s
-    packed-pair red). The scheduler's ``atomic_ok`` gate (``_reduce_candidates``) keeps atomic rows
+    packed-pair red). The scheduler's ``atomic_ok`` gate keeps atomic rows
     off multi-fold / non-distributive-projection nodes. These EXTEND the serial option-0."""
     del warp  # both tiers share the catalog; per-node legality lives in the scheduler's gates
     return [ReducePlan.of(cta=w, finalize=f) for w in SPLITK_WIDTHS for f in ("kernel", "atomic")]
@@ -429,15 +429,15 @@ def splitk_moves(*, warp: bool) -> list[ReducePlan]:
 
 def coop_reduce_moves() -> list[ReducePlan]:
     """The cooperative / ILP K-partition ``REDUCE`` candidates for a NON-output-tiled contraction
-    (``_coop_reduce_spec``'s contract — the per-cell tier folds K across the coop threads / ILP
+    (the coop reduce spec's contract — the per-cell tier folds K across the coop threads / ILP
     register chains). These EXTEND the serial option-0. The 16- / 32-wide coop folds are recorded
     reduce-golden winners (the wide-row folds) — kept enumerable so the reduce goldens stay
     reachable. The 64–512-wide folds are the memory-bound normalizer band: a wide-K softmax /
     rms_norm saturates bandwidth only with a full-block coop row (``softmax.k2048`` wants 512 —
-    2.6× over 32). The scheduler's ``_coop_reduce_spec`` declines a band wider than the row has
+    2.6× over 32). The scheduler's coop reduce spec declines a band wider than the row has
     work for, so enumerating them is safe on small K. The TRANSPOSED band is the k-major-B matvec
     partition (warp lanes sweep the output axis — the M=1 gemv tier's coalescing fix);
-    ``_reduce_candidates`` gates it structurally (plain contraction, 32-divisible inner free axis)
+    The reduce-candidate enumeration gates it structurally (plain contraction, 32-divisible inner free axis)
     AND by layout: the band is offered only on k-major B, and the plain band only on K-contiguous B
     at the matvec tier. Measurement used to decide the layout, but ShapeKey is layout-blind —
     cross-orientation golden/evidence rows tie, and a cold/tied pick landed the band on the wrong

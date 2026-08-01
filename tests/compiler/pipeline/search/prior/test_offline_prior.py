@@ -18,7 +18,7 @@ Three sections, one subject:
   (masked-tier) weight set ranked scalar split-K rows first — the qwen3-emb / gemma-4-e2b layer-0
   projection deploys landed scalar at 5-20x the -O3 cost of their enumerated mma siblings — because
   no feature told the prior the alternative existed. The ``S_warp_eligible`` kernel stamp
-  (``_schedule._tile_rows``) + ``D_scalar_on_warp_eligible`` / ``D_splitk_roundtrip``
+  (the contraction row product) + ``D_scalar_on_warp_eligible`` / ``D_splitk_roundtrip``
   (``features._geom_feats``) + the hard-coded ``OfflinePrior`` gates close that.
 """
 

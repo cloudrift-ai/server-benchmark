@@ -163,7 +163,7 @@ def _demoted_edge_loop() -> Loop:
 
 
 def test_demoted_edge_algebra_reads_off_the_stored_params() -> None:
-    """``_demoted_warp_option`` reads the fused edge's ⊕ / ⊗ off ``combine`` and ``lift`` — never
+    """The demoted warp option reads the fused edge's ⊕ / ⊗ off ``combine`` and ``lift`` — never
     off a derived step. This pins that the two agree, since that tier is pin-driven and neither the
     off-GPU suite nor ``digest_kernels.py`` reaches it.
 

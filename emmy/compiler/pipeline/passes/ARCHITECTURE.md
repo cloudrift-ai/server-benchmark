@@ -74,8 +74,8 @@ coverage until that entire cone has been measured.
 ## Resolve the hardware-atom binding once, structurally, at the tile level
 
 The same invariant applies *across* the tile→kernel boundary: the kernel materializer must not re-recognize structure
-the tile IR already holds. The **atomize** step (`lowering/tile/_atomize.py`, called when a warp / register-tiled option is built — *not* a
-standalone pass) resolves the algebra→hardware-atom binding once at
+the tile IR already holds. The **atomize** step (`lowering/tile/_atomize.py`, called when a warp / register-tiled
+option is built — *not* a standalone pass) resolves the algebra→hardware-atom binding once at
 RECOGNIZE time (`010_recognize._nodify_contraction` / `_atomize.bind_prologue_contraction`) and feeds it into the
 `Contraction`, so materialize reads the operands /
 `acc` off the node and only `factorize`s (the projection is peeled off the wrapping `Map` — its one home). Resolving it
@@ -124,9 +124,9 @@ passes later:
   `TWISTED` off the stored combine's twist family, `CONTRACTION` off the composed split-K
   operand (`Fold.composed`), `PLANAR` otherwise — so "a contraction" below
   always means the stored node, and the lowered `Loop`'s annotation falls out of the same read; the schedule fork only
-  stamps a `tile` onto a `replace()` copy (`_view.contraction_view`), and `_factor.factorize` reads the facts off
+  stamps a `tile` onto a `replace()` copy, and `_factor.factorize` reads the facts off
   the placed node instead of `lower()`-ing the contraction and pattern-matching the result. A `STAGE` pin follows the same rule: the
-  option builders resolve it against the built node ONCE (`_resolve_warp_stage` / `_resolve_scalar_stage` — transport
+  option builders resolve it against the built node ONCE (the warp / scalar stage resolvers — transport
   eligibility, the slab K-chunk `bk_elems`, the depth clamps) and stamp the resolved `Stage` (or `None`, gmem-direct)
   on the `TileOp`, so the materializer's one staged driver applies it verbatim, deciding nothing. Fitting the smem
   budget is part of resolving: a tile whose single depth-1 slot already exceeds it declines to gmem-direct (the warp
@@ -135,13 +135,13 @@ passes later:
   un-lowered `TileOp` in the tune's terminal (issue #327). TMA's box rank follows the flash convention on the matmul
   tiers too: the box's data plane is the operand's trailing 2 gmem dims, and extra LEADING dims ride as extent-1 box
   dims whose origin coordinates are the operand's own index exprs — eligible when those exprs don't move with the
-  tile or the K loop (`_tma_operand_rank_ok`), so a model's `[1, seq, K]` unit-batch view stages exactly like the
+  tile or the K loop (the TMA operand box-rank rule), so a model's `[1, seq, K]` unit-batch view stages exactly like the
   rank-2 snippet twin (the gemma in-model matmuls' TMA lockout). A **transposed B** (the serving `F.linear` layout —
   B given `(N, K)`, K gmem-contiguous, `Contraction.b_trans`) stages on the warp tier through an **N-major slab**:
   the B slot takes A's geometry (`tile_n × bk`, K the inner dim — stride-1 in gmem and smem alike, so cp.async chunks
   and the TMA box stay contiguous; `Operand.trans` stamps the layout) and the drain is the plain no-`.trans`
   ldmatrix (`LdmatrixLoad(b_trans=True)` — the same staged path flash's K slab rides). Both operands' inner span is
-  then the K chunk, so the eligibility alignment gates on K alone (`_can_stage_warp` / `_can_stage_warp_tma`) and
+  then the K chunk, so the eligibility alignment gates on K alone (the warp cp.async / TMA staging gates) and
   the B swizzle mode derives from `bk_elems` like A's. Historically the transports declined transposed B and the
   serving `.lin` forks ran gmem-direct only — the 1.3–2.75× gap class to cuBLAS on the 5090 goldens. The scalar
   tier still declines it (its plain-`Load` drain has no transposed variant; pin-only tier). The **sync compute-fill**
@@ -254,8 +254,8 @@ finalize MODE, not an axis token). `seal_workers` (`ir/tile/ops.py`) is the one 
 band off the resolved `WarpSpec`, failing loudly on cross-site disagreement (one kernel, one inventory; a 1-thread
 register-strip inventory stays empty — per-cell launch geometry remains derived). The enumeration itself speaks
 TYPED SLICES end to end — the `search/space.py` catalogs hand out `TilePlan` / `ReducePlan` objects built
-structurally, and env pins resolve into the same objects ONCE at the top — so a codec string is spelled exactly once per family,
-where a row becomes stored state (the fork row and the stamped `TileOp.knobs`). `_materialize`
+structurally, and env pins resolve into the same objects ONCE at the top — so a codec string is spelled exactly once
+per family, where a row becomes stored state (the fork row and the stamped `TileOp.knobs`). `_materialize`
 dispatches warp-vs-scalar on the PARSED plan, and `resolve_site_tile` is the one rule disambiguating an empty site
 `TILE` beside a thread `WORK` from the coop tier. The retired embedded-worker spellings RAISE — the worker widths
 have one home, so a value carrying its own cannot decode into a second, self-contained reading that silently
@@ -328,15 +328,15 @@ contraction-fold leaf keyed `TILE@<k_axis>` in a hierarchical `build_fork_tree`;
 The producer band is the fourth level (option-0 `""` = uniform SIMT — since step 7 a resolved band
 is spelled in `WORK`'s `+p<n>` suffix, never a per-row `WSPEC` key) — offered only on a warp row over a
 resolved **TMA** stage without a cross-CTA split, and resolved/thread-budget-gated at materialization
-(`_wspec_workers`; an ineligible spec degrades to uniform). A computed-A (fused-cone) contraction enumerates its own
+(an ineligible spec degrades to uniform). A computed-A (fused-cone) contraction enumerates its own
 warp-only rows (the mandatory resolved `sync` compute-fill stage at BOTH depths
 (`d1` + the asymmetric B-only prefetch ring `d2` as fork siblings — the M=512 occupancy loss inverts at decode M,
 so the depth is measured per shape), crossed with the shared `RASTER` launch-order candidates (its B stripes
 re-stream per M-tile row, exactly the grouped order's L2 reuse — `gn8` measured −8% on the gemma gate_up fused
 edge, 5090) and — single-channel nodes only — the **redundant-statistic split-K** rows: the contraction K slices
 across CTAs while the k-invariant stat prologue stays full-row in every partition (each recomputes it, cheap
-exactly on the small-free decode shapes the `_SPLITK_MAX_CTAS` gate admits), the per-cell cone σ-reindexed to
-absolute k and the `Map`-wrapper projection folded into the deferred finalize (`_splitk_option`'s computed-A arm
+exactly on the small-free decode shapes the split-K CTA-count cap admits), the per-cell cone σ-reindexed to
+absolute k and the `Map`-wrapper projection folded into the deferred finalize (the split-K option's computed-A arm
 → `030_split_reduce`'s structural path). Multi-channel (gate/up) nodes split too: the synthesized fold loop
 carries the true N-component identity-family carrier (one additive state per channel), the partial stores each
 channel's raw C fragment to its `ws[comp, ksplit, *cell]` slice (the per-acc `RegStore` arm — no ⊗-combine in
@@ -395,7 +395,7 @@ way, and on gemma-4 it consistently spliced the cheap cast into its CONSUMERS in
 buffer alive. `optimization/007_sink_narrowing_cast` makes it deterministic, retyping the producer's OUTPUT and
 dropping the copy whenever the producer's SOLE consumer is the cast. It is a retype, not a numeric change (an
 elementwise op computes in its inputs' promoted precision and rounds on store), and it is what keeps a norm→matmul
-edge on the plain mma tier: a mixed-dtype A has no copy transport, so without it `_demote_mixed_a` diverts the
+edge on the plain mma tier: a mixed-dtype A has no copy transport, so without it the mixed-dtype A demotion diverts the
 projection onto the `sync` compute-fill, which has no weight-prefetch ring — measured on gemma-4's gate/up as
 1.12 TB/s against the 1.61 TB/s a clean-f16-A `d2/tma/ring` sibling reached on the same 118 MB
 weight. **A causal stream tile-skips**: when the score

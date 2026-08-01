@@ -952,7 +952,7 @@ class Stage:
     (decided by the tile schedule). A stage stamped on a ``TileOp`` is **RESOLVED**, not the raw
     pin: the scheduler runs eligibility + sizing against the node ONCE
     (resolved schedule-side for a contraction's operand
-    pipeline, ``_row_stage`` for the reduce tier's shared row) and stamps the result — or ``None``
+    pipeline, the shared-row detection for the reduce tier) and stamps the result — or ``None``
     when the pin can't engage (gmem-direct) — so the materializer applies it verbatim, deciding
     nothing. Two fields are derived at resolution and never spelled by the codec: ``smem`` (empty
     for a contraction pipeline — both operands stage; the ONE detected row buffer for the

@@ -318,7 +318,7 @@ def test_scalar_masked_n_stage_declines(monkeypatch) -> None:
     """A masked-N (overhanging inner dim) SCALAR-tier contraction must DECLINE cp.async / TMA
     staging: the B-slab fill would clamp a chunk-start column into a row-crossing gmem address and
     hang the kernel on the misaligned 16 B copy (the warp tier refuses masked-N the same way via
-    ``_can_stage_warp``; a transposed B also stays gmem-direct on the scalar tier — its N-major
+    the warp staging gate; a transposed B also stays gmem-direct on the scalar tier — its N-major
     slab staging is warp-only, ``test_matmul_mma_trans_b_staged``). The pin resolves to
     gmem-direct — ``stage=None``, OFF-stamped."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
@@ -1438,7 +1438,7 @@ def test_bf16_operands_stage_via_cp_async(monkeypatch):
 
 # --- split-K finalizes on the warp tier --------------------------------------
 # MMA split-K rides the structural ``Fold(axis=ksplit, step=[Contraction(k_axis=kslice)])`` fork
-# (``_schedule._splitk_option``): the inner ``Contraction`` factorizes to mma exactly like a non-split
+# (the split-K option): the inner ``Contraction`` factorizes to mma exactly like a non-split
 # matmul. Deferred (``g2k``): ``030_split_reduce`` retargets each partition's C-fragment into a
 # ``ws[ksplit, M, N]`` workspace summed by a sibling additive finalize kernel — NO codegen
 # ``atomicAdd``. Atomic (``g2a``): ONE kernel — each partition's C-fragment ``atomicAdd``\\ s into the

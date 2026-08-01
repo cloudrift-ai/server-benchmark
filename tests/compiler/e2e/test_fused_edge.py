@@ -7,7 +7,7 @@ linear); the MONOID producer (RMSNorm → Linear) is the one special case (its s
 structural pin lives with ``test_fused_prologue_compiles_in_budget``).
 
 The **warp tier** engages under a warp ``TILE`` pin: the demoted cone nodifies to a computed-A
-``Contraction`` (``_schedule._demoted_warp_option``) and the producer COMPUTE-FILLS the A slab the
+``Contraction`` (the demoted warp option) and the producer COMPUTE-FILLS the A slab the
 ``ldmatrix`` drain reads (the mma tier's ``sync`` transport). The MONOID (rmsnorm) cone is
 recognize-nodified (``010_recognize``'s ``bind_prologue_contraction`` merge): its statistic reduce
 rides the A cone as a per-row prologue (``sync_stat_fill``), the warp rows are real fork siblings
@@ -373,7 +373,7 @@ def test_mixed_dtype_matmul_demotes_a_to_mma(tier, monkeypatch):
     """An **f32-A × f16-B** matmul — the erased-downcast signature (torch cannot execute a mixed
     matmul, so the model itself rounded A; the tracer maps ``to``/``type_as`` to pass-throughs,
     e.g. Gemma's ``self._norm(x.float()).type_as(x)`` feeding every f16-weight projection) —
-    reaches the mma tier through the demoting cone wrap (``_demote_mixed_a``): the sync
+    reaches the mma tier through the demoting cone wrap: the sync
     compute-fill converts the f32 value on the slab store, since the copy transports move raw
     bytes and cannot. The scalar cell pins nothing and just checks the mixed kernel still
     compiles and matches; both compare against the f16-rounded-A reference."""
@@ -405,7 +405,7 @@ def test_sdpa_consumer_projection_reaches_mma(monkeypatch):
     warp ``TILE`` pin. The flash rewrite splices a REBUILT projection op into the graph mid-batch;
     a later match applying against the swapped op used to read ``_seed_io_placeholders``'
     ``(f32, ())`` stubs (``Match.is_alive`` snapshots node identity and cannot see an op swap), so
-    ``_warp_atoms`` refused the all-f16 contraction and the deploy fell to a scalar tile — 16x its
+    the warp atom gate refused the all-f16 contraction and the deploy fell to a scalar tile — 16x its
     own measured mma rows on the gemma-4-12B layer. ``Candidate.try_rewrite``'s apply-time
     ``populate_io`` refresh restores the graph-true dtypes; this pins it."""
     monkeypatch.setenv("EMMY_TILE", _WARP_TILE)

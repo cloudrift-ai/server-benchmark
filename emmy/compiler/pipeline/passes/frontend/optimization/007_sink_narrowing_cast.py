@@ -8,7 +8,7 @@ the wide producer buffer survives and every consumer loads it wide.
 
 Measured cost of that on the gemma-4 post twins: the pre-FF RMSNorm wrote ``float* mul_3`` and the
 gate/up projections read ``const float* mul_3``. A mixed-dtype A operand has no plain mma tier — the
-copy transports move raw bytes and cannot convert — so `_demote_mixed_a` routed both projections onto
+copy transports move raw bytes and cannot convert — so the mixed-dtype A demotion routed both projections onto
 the ``sync`` compute-fill, which has no weight-prefetch ring. They streamed their 118 MB weight at
 1.12 TB/s where the neighbouring down_proj, whose A is a clean f16 buffer and which therefore rides
 ``d2/tma/ring``, hit 1.61 TB/s on the identical weight footprint.

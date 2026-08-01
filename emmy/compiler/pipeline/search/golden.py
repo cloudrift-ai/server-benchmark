@@ -691,7 +691,7 @@ class AttentionGoldenConfig(GoldenConfig):
         # kernel keys its tile differently at pin time), so it MUST record a single bare TILE. A
         # dynamic FAST-MATH golden records the sibling-atom **PV plan** as that bare TILE (the exact
         # string its static twin stamps on TILE@<pv_k>) — the pinned branch of
-        # ``_twisted_warp_options`` recovers the geometry from it and keeps scores f32-accumulate.
+        # the twisted warp enumeration recovers the geometry from it and keeps scores f32-accumulate.
         keyed = [k for k in self.knobs if k.startswith("TILE@")]
         if self.dynamic and keyed:
             raise ValueError(

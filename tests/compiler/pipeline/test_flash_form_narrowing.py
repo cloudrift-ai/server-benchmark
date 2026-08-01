@@ -1,6 +1,6 @@
 """Per-node ``TILE`` pins must select the flash fork row whose stamped spelling matches.
 
-The unit tests over the old ``_schedule._narrow_flash_forms`` helper went with the scheduler; what
+The unit tests over the old flash-form narrowing helper went with the scheduler; what
 survives is the end-to-end pin contract, which is a property of ANY scheduler: a static attention
 golden pins ``TILE@dd`` / ``TILE@pj`` AND ``STAGE``, and the resolved row must stamp exactly the
 pinned pair (a stage-pinned fast path must not bypass the tile narrowing — the findings-5 F2

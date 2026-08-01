@@ -75,7 +75,7 @@ def test_schedule_leaf_set_equals_catalog():
     - every clean tiled tile rides the RESOLVED stage spellings (gmem-direct + the resolver-deduped
       cp.async / TMA ring depths) × (serial + the divisor-guarded split-K widths); a masked-N tile
       (tile_n overhangs N) declines staging and rides gmem-direct only — staging composes with
-      split-K (``_splitk_option`` re-resolves against the sliced inner node and ``030_split_reduce`` threads
+      split-K (the split-K option re-resolves against the sliced inner node and ``030_split_reduce`` threads
       the stage onto the partial).
     """
     from emmy.compiler.pipeline.search.space import coop_reduce_moves, raster_moves, splitk_moves
@@ -111,7 +111,7 @@ def test_schedule_leaf_set_equals_catalog():
         by_tile.setdefault(full_tile(r), []).append(r)
     percell = by_tile[TilePlan()]
     # The per-cell tier offers serial + every coop/ILP move whose fold fits the reduce extent
-    # (``_reduce_specs``'s ``coop <= extent and reg <= extent`` gate) — so the wide ``b64``–``b512``
+    # (the reduce spec's ``coop <= extent and reg <= extent`` gate) — so the wide ``b64``–``b512``
     # folds drop out on this K=64 matmul, exactly as they would on any reduce narrower than the fold.
     # Layout gates the bands too (WS5): this fixture's B is canonical ``B[k, n]``, so the plain
     # coop moves (lanes interleaved along K — uncoalesced on k-major B) are refused and only the
@@ -145,7 +145,7 @@ def test_schedule_leaf_set_equals_catalog():
         assert len(tiled) == len(stages) * n_reduces * len(raster_moves()), f"{where}: {len(tiled)} rows"
     # This matmul is BATCHED (a leading literal batch dim in A's gmem index). The leading dim is
     # tile/K-invariant, so TMA boxes it as an extent-1 dim with the operand's own origin expr
-    # (``_tma_operand_rank_ok`` — the flash K/V convention extended to the matmul tiers; the gemma
+    # (the TMA operand box-rank rule — the flash K/V convention extended to the matmul tiers; the gemma
     # ``[1, seq, K]`` unit-batch views were the motivating decline) and resolves wherever the box
     # fits the 1..256 hardware range — an oversized register tile still declines per-tile.
     all_stages = {str(family_value(r, "STAGE")) for r in rows}
@@ -184,7 +184,7 @@ def _fp16_matmul_graph() -> Graph:
 def test_warp_staged_rows_fit_the_smem_budget():
     """Every enumerated warp row with a non-empty ``STAGE`` fits its depth-1 operand slot in the
     ctx smem budget, and an over-budget tile still rides gmem-direct. The 256×256 ``w4x4/f4x8``
-    tile at ``k8`` needs a 128 KiB slot — over any current cap — and ``_resolve_warp_stage`` used
+    tile at ``k8`` needs a 128 KiB slot — over any current cap — and the warp stage resolver used
     to floor the depth clamp at 1 instead of declining, so the row sailed through the fork and
     died at materialize (`validate(ctx)`), leaving an un-lowered ``TileOp`` in the tune's terminal
     (issue #327)."""
@@ -253,7 +253,7 @@ def test_bare_reduce_forks_the_coop_catalog():
     # (site value, WORK) pair — the 16- and 32-wide folds both spell "coop" but ride distinct
     # t16 / t32 inventories.
     offered = [(str(family_value(r, "REDUCE")), str(r.get("WORK", ""))) for r in rows]
-    assert offered[0] == ("", "")  # 2048 free cells > _FREE_CAP: the conservative heuristic pick leads
+    assert offered[0] == ("", "")  # 2048 free cells over the free-grid cap: the conservative heuristic pick leads
 
     # This bare reduce meets the transposed band's structural gate (scalar tail, no
     # shared-row stage, static K, 32-divisible free grid), so the FULL catalog is offered —

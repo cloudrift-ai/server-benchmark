@@ -266,7 +266,7 @@ def impossible_kernel_reason(row: NodeRow) -> str | None:
     """The *validity* companion to :func:`implausible_value_reason` — the reason the row's
     stamped kernel could never have launched, or ``None``. A ``cp.async``-staged warp tile
     whose slab (``depth · (tile_m + tile_n) · bk_elems · elem_bytes``, the
-    ``_resolve_warp_stage`` sizing) exceeds the card's dynamic-smem opt-in cap cannot
+    warp stage sizing) exceeds the card's dynamic-smem opt-in cap cannot
     materialize — pre-#330 code stamped such stages anyway, the materializer rejected the
     main kernel, and the bench recorded the surviving combine kernel's cached µs as an
     ``ok`` measurement of the whole op. On shapes too small for the latency floor to

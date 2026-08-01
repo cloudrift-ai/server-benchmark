@@ -3,7 +3,7 @@
 A :class:`Prior` is **one global model** consulted by the MCTS to rank candidates
 via PUCT (``tune``) and by the greedy driver to pick knobs (``compile`` / ``run``).
 Unlike the earlier online-refit-every-few-benches design, it is trained in
-**batches**: every tuned op's value-of-position rows are streamed into a bounded
+**batches**: every tuned op's training rows are streamed into a bounded
 dataset (:meth:`add_rows`), and the model is refit (:meth:`maybe_refit`) on a
 **dataset-size-tiered cadence** (:data:`REFIT_SCHEDULE`) — frequently while the
 model is data-poor, then progressively less often as returns diminish: every
@@ -14,9 +14,10 @@ neither grows without bound nor over-weights recent ops. The model is therefore
 *fixed during a single op's search*, and exploration comes from PUCT's own term,
 not per-bench refitting.
 
-Training signal is **value-of-position**: real benches exist only at leaves, but
-the prior ranks partial-knob siblings at every fork level, so the label for any
-node is the best (min) latency over its benched descendants (``1/best_reward``).
+Training labels credit a partial config with its best completion: real benches
+exist only at leaves, but the prior ranks partial-knob siblings at every fork
+level, so the label for any node is the best (min) latency over its benched
+descendants (``1/best_reward``).
 The search hands :meth:`add_rows` ``(knobs, median_latency_µs)`` rows for leaves
 *and* branches — the prior regresses on latency, and the reward conversion lives
 in the MCTS selection loop. :meth:`score` / :meth:`mean_score` return ``0`` until
@@ -55,8 +56,8 @@ _O3_OPT = 3.0
 # model's own reservoir, :meth:`Prior._reservoir_calibration`) below which :attr:`Prior.trustworthy`
 # is False and ``FallbackPrior`` keeps deploys / PUCT on the offline prior. In-sample Spearman is a
 # deliberately lenient tripwire: a genuinely trained model scores ~+0.85, while the failure class it
-# guards (model and rows not speaking the same feature vocabulary — e.g. a checkpoint that crossed a
-# ``FEATURIZER_VERSION`` bump, RTX 5090 sweep-6 finding 2) collapses to ~0. A model that can't rank
+# guards (model and rows built with different featurizer versions' feature names — e.g. a checkpoint
+# that crossed a ``FEATURIZER_VERSION`` bump, RTX 5090 sweep-6 finding 2) collapses to ~0. A model that can't rank
 # even its own training data must not own decisions.
 CALIBRATION_MIN = 0.5
 # Minimum rows an op group needs to contribute to the calibration median (smaller groups are noise).
@@ -133,13 +134,13 @@ class Prior(ABC):
         default maps element-wise (fine for the cheap offline prior)."""
         return [self.mean_score(k) for k in knobs_list]
 
-    # --- features seam (attribution / ablation / offline fitting) ----------
+    # --- scoring already-featurized rows (attribution / ablation / offline fitting) ----------
 
     def mean_score_features(self, feats: dict) -> float:
         """:meth:`mean_score` on an ALREADY-featurized row (``features.knob_features``
-        output). The seam the attribution diagnostics and the offline fitter score
-        through: they featurize once, then mask / perturb individual features —
-        which have no knob-level spelling — before scoring. Contract:
+        output). The entry point the attribution diagnostics and the offline fitter
+        score through: they featurize once, then mask / perturb individual features —
+        which no knob value maps back to — before scoring. Contract:
         ``mean_score_features(knob_features(knobs)) == mean_score(knobs)``, and a
         DELETED key carries each model's own absent-feature semantics (``0.0`` term
         for the linear offline prior, ``NaN`` routing for CatBoost)."""
@@ -152,7 +153,7 @@ class Prior(ABC):
     def explain_features(self, feats: dict) -> dict[str, float] | None:
         """Signed per-term decomposition of this model's opinion on a featurized row,
         in the model's own ranking-quality units (HIGHER = predicted faster) — the
-        blame view diffs two rows' terms to attribute a misranking to features.
+        attribution report diffs two rows' terms to attribute a misranking to features.
         ``None`` when the model has no decomposition (the default; the offline
         prior returns an exact one, a tree model may return SHAP values). Exactness
         contract, when implemented: the terms sum to the model's full quality score
@@ -165,8 +166,8 @@ class Prior(ABC):
     def sig_groups(index: dict[frozenset, list], sig: frozenset) -> list[list]:
         """The index groups compatible with a candidate's ``S_*`` signature: the
         exact hit when present, else every group agreeing on all *shared* keys.
-        A key present on one side only is featurizer-vocabulary drift, not a
-        shape difference — the deploy candidate's base can carry scheduler
+        A key present on one side only means the featurizer gained or lost a
+        feature between recordings, not a shape difference — the deploy candidate's base can carry scheduler
         stamps neither the reservoir rows nor persisted perf rows have (#311's
         ``S_warp_eligible`` appears in no reservoir/perf row), and a
         strict-equality join lets one added feature silently disable an entire
@@ -208,8 +209,8 @@ class Prior(ABC):
         knob prefix is consistent with the **fastest -O3 reservoir row** of the
         same op (``S_*`` signature). A candidate is consistent with a measured row
         when every tunable knob the candidate specifies matches the row (knobs the
-        candidate hasn't decided yet are free — value-of-position semantics, so a
-        partial fork prefix inherits the best measured outcome under it).
+        candidate hasn't decided yet are free, so a partial fork prefix inherits
+        the best measured outcome among its completions).
 
         Returns ``(index, measured_µs)`` or ``None`` when no candidate has
         evidence. This is what keeps the greedy deploy from preferring an
@@ -230,7 +231,8 @@ class Prior(ABC):
             cand_tun = {k: v for k, v in cand.items() if not k.startswith(("S_", "H_"))}
             for measured in self.sig_groups(index, sig):
                 for row_tun, us in measured:
-                    # Value-of-position join (``evidence_row_vouches``).
+                    # A row counts as evidence when it matches every knob the candidate
+                    # has decided; undecided knobs are free (``evidence_row_vouches``).
                     if not evidence_row_vouches(cand_tun, row_tun):
                         continue
                     # Tie on µs (one measured row matching several candidates) breaks by
@@ -259,7 +261,7 @@ class Prior(ABC):
     # --- dataset + batched refit ------------------------------------------
 
     def add_rows(self, rows: list[tuple[dict, float]]) -> None:
-        """Stream value-of-position rows into the bounded dataset via reservoir
+        """Stream training rows into the bounded dataset via reservoir
         sampling (Algorithm R): under the cap they append; at the cap each new row
         replaces a uniformly-random existing one with the correct probability, so
         ``_dataset`` stays a uniform sample of every row ever seen."""
@@ -320,9 +322,9 @@ class Prior(ABC):
         under :data:`_CALIBRATION_MIN_GROUP` rows skipped. ``None`` when nothing is
         measurable (no fitted model, no big-enough group, scipy absent). In-sample by
         design: it costs one vectorized predict over rows already in memory, never
-        blocks a genuinely trained model, and catches exactly the "model and rows
-        don't speak the same feature language" collapse (constant predictions →
-        ρ ≈ 0)."""
+        blocks a genuinely trained model, and catches exactly the collapse where
+        the model and its rows no longer share feature names (constant
+        predictions → ρ ≈ 0)."""
         if not self.fitted or not self._dataset:
             return None
         try:
@@ -373,9 +375,10 @@ class Prior(ABC):
     # --- end-of-run sanity stats ------------------------------------------
 
     def summary(self, label: str) -> str:
-        """A compact stats block judging the prior by *which picks* it made —
-        silly-pick rate before vs after the model warmed up, and the prior's
-        self-calibration on its post-warmup picks."""
+        """A compact stats block judging the prior by *which picks* it made — how
+        often it picked a config at least 2x slower than the best, before vs after
+        the model's first fit, and the rank correlation between predicted and
+        measured latency on the post-fit picks."""
         oks = [(k, us) for k, us, st in self.trajectory if st == "ok" and us > 0]
         n = len(self.trajectory)
         if not oks:

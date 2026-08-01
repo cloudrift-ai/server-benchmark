@@ -1,5 +1,5 @@
 """The ``emmy fit`` run harness — full-train fit, cross-validation, and metrics/artifact
-assembly as one pure function, the run shape every trainer × data cell shares.
+assembly as one pure function, the run structure shared by every trainer and dataset combination.
 
 :func:`run_fit` owns the *shape* of a fit run and none of its *content*: the trainer
 arrives as two callables (``full_train_fit`` for the shippable model, ``fit_model`` for

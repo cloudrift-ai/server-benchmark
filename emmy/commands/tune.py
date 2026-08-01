@@ -153,8 +153,8 @@ def _tune_backend(device_id: int | None = None):
     with the worker and the **parent** CUDA stream stays clean. Tight per-variant
     budgets: tune benches isolated single kernels at -Xcicc -O1 (fast), but the
     big-N warp-MMA variants (fp16 N=28672, ``matmul.mlp_gate_up.h4096``) need ~5 s
-    of cicc even then — a 4 s compile budget bench_fail-locks that whole family out
-    of the sweep, hence 12 s; 2 s run is ample and the wall SIGKILLs any runaway
+    of cicc even then — a 4 s compile budget would record that whole family as
+    bench failures and lock it out of the sweep, hence 12 s; 2 s run is ample and the wall SIGKILLs any runaway
     (keeping a ~2 s margin over compile+run). ``device_id`` pins the async bench
     worker to a physical GPU (multi-GPU tune)."""
     from emmy.compiler.backend.cuda.backend import CudaBackend

@@ -15,8 +15,9 @@ import numpy as np
 def rank_of_golden(scores: np.ndarray, gidx: int) -> int:
     """0-based rank of the golden by descending score. Ties count AGAINST the golden
     (``>=``): greedy deploy breaks score ties by enumeration order, and option-0 is the
-    per-cell / gmem-direct row — a tie IS a miss at deploy time. (The old ``>`` tie-optimism
-    let a fit with zero ``D_stage_*`` weights report top-1 golden ranks while the deploy pick
+    per-cell / gmem-direct row — a tie IS a miss at deploy time. (The old ``>`` convention,
+    which counted ties in the golden's favor, let a fit with zero ``D_stage_*`` weights
+    report top-1 golden ranks while the deploy pick
     landed on the per-cell row — the 2026-07-02 sweep's 5-15x regressions.)
 
     This is the FIT OBJECTIVE's rank (all ties count, emission order ignored) — the
@@ -31,9 +32,9 @@ def dual_rank(scores, gidx: int) -> tuple[int, int]:
     score-ties earlier in emission order, i.e. exactly the rows a greedy argmin deploys
     ahead of the golden. ``rank_optimistic`` counts strictly-greater rows only — fair when
     tied rows are genuine equivalents. The difference is the tie-plateau width at the
-    golden's score: a large gap flags a saturated/undecided scorer (the 2026-07 exp-squash
-    bug scored "top-1" on the optimistic count while cold deploys shipped emission-order
-    picks 12-29x off)."""
+    golden's score: a large gap flags a saturated/undecided scorer (the 2026-07 bug where
+    the scoring exponential saturated scored "top-1" on the optimistic count while cold
+    deploys shipped emission-order picks 12-29x off)."""
     s = np.asarray(scores, dtype=float)
     g = s[gidx]
     optimistic = int((s > g).sum())

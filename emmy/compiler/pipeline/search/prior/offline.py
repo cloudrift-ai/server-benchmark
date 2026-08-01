@@ -12,8 +12,8 @@ behind :class:`~emmy.compiler.pipeline.search.prior.fallback.FallbackPrior`.
 ``score`` returns a positive latency *proxy* (``exp(-scale · wᵀfeatures)``),
 **lower is better** — matching ``OnlinePrior``'s polarity. The proxy is not
 calibrated µs; only its ordering (greedy argmin / PUCT relative ``P``) matters.
-Because ordering is the whole contract, the squash must never saturate over live
-qualities: the exp argument is clipped only at the float-safety bound (±700), so
+Because ordering is the whole contract, the exponential must never saturate over
+live quality scores: the exp argument is clipped only at the float-safety bound (±700), so
 equal qualities — and only equal qualities — score equal. (A former ±80 *quality*
 clip sat inside the live range and collapsed every good tile onto one plateau;
 greedy then deployed by emission order.) The proxy's magnitude may therefore span
@@ -28,13 +28,13 @@ pointwise goldens — so one un-gated linear model over the shared ``D_*`` featu
 (plus ``MMA_tier``) ranks them all. Two weight sets, selected at score time on the
 stamped ``S_ext_n_symbolic_axis`` flag: ``weights`` for static shapes,
 ``weights_dynamic`` for symbolic-axis (masked-tile) kernels — a masked tile prices
-differently from its static twin (boundary-guard tax on small tiles, staged
+differently from its static counterpart (boundary-guard tax on small tiles, staged
 prologues locked out, occupancy over a free-dim product that excludes the symbolic
 axis), and the TMA-conditioned ``D_tma_*`` terms are where the one model prices
 Hopper/Blackwell tiles separately. Per-refit history rides the artifact's
 ``provenance`` block and the findings reports, not this docstring. The artifact is
-version-gated on ``feat_ver`` — the weight keys are spelled in the featurizer
-vocabulary, so a cross-version file is meaningless and loading it is a hard error
+version-gated on ``feat_ver`` — the weight keys are that featurizer version's
+feature names, so a cross-version file is meaningless and loading it is a hard error
 (refit, don't guess); a *retired* key inside a same-version file is merely a dead
 term (``feats.get(k, 0.0)``).
 """
@@ -51,8 +51,8 @@ from emmy.compiler.pipeline.search.prior.base import Prior
 
 _DEFAULT_FILE = Path(__file__).parent / "offline_weights.json"
 
-# The artifact's five scalar scoring params, in the spelling shared by the JSON
-# ``params`` block and ``OfflinePrior.__init__`` kwargs.
+# The artifact's five scalar scoring params, named identically in the JSON
+# ``params`` block and the ``OfflinePrior.__init__`` kwargs.
 _PARAM_KEYS = (
     "scale",
     "atomic_free_split_threshold",
@@ -179,9 +179,9 @@ class OfflinePrior(Prior):
         return self.score(knobs)
 
     def mean_score_features(self, feats: dict) -> float:
-        """:meth:`score` from an already-featurized row — the seam the attribution
-        diagnostics mask individual features through (a deleted key scores as its
-        ``0.0`` no-opinion default, which for a linear model is exact term removal)."""
+        """:meth:`score` from an already-featurized row — the entry point the
+        attribution diagnostics use to mask individual features (a deleted key scores
+        as its ``0.0`` no-opinion default, which for a linear model is exact term removal)."""
         w_set = self._w_dyn if feats.get("S_ext_n_symbolic_axis", 0.0) > 0 else self._w
         quality = sum(w * feats.get(k, 0.0) for k, w in w_set.items())
         # Deferred-kernel split-K finalize gate (local term — see __init__). The
@@ -214,7 +214,7 @@ class OfflinePrior(Prior):
     def explain_features(self, feats: dict) -> dict[str, float]:
         """EXACT per-term decomposition of the quality score (higher = predicted
         faster): each nonzero linear term by its feature name, plus the three
-        hardcoded interaction gates as ``gate:*`` pseudo-terms — a blame table that
+        hardcoded interaction gates as ``gate:*`` pseudo-terms — an attribution table that
         omitted the ±40 scalar-on-warp gate would misattribute exactly the misses it
         dominates. Invariant (unit-tested): the terms sum to the same quality
         :meth:`mean_score_features` exponentiates, so a two-row term diff is the

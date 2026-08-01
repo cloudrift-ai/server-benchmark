@@ -243,6 +243,10 @@ density of the `tune-model` reports (`plans/*-tune-findings.md`; executed ones a
 `git log --diff-filter=D --name-only -- 'plans/*findings*'` + `git show <commit>^:<path>`). Note friction and findings
 **as they happen** during steps 1–6 — don't reconstruct from memory at the end.
 
+Use established terminology only — terms from the repo-root `GLOSSARY.md`, other established repo/field terms, or
+plain language. Do not coin labels; before saving, re-read the report and replace any invented term with the correct
+established term or a plain-word explanation.
+
 - **Header**: date, GPU, the exact sweep command, wall time, and the category tally (N replaced / N added / N
   unchanged / N worse).
 - **A `## Fork sibling regret` section** (`emmy eval online --dataset nodes`, this card's `-O1` block). The command

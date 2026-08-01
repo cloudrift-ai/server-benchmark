@@ -65,7 +65,7 @@ def _median(vals: list[float]) -> float:
 
 def _per_card(entries: list[tuple[Group, tuple[int, int]]]) -> dict:
     """Per-card aggregates over ``(case, (rank, rank_optimistic))`` rows: count, median
-    and top-k coverage in BOTH tie flavors. Cards never pool."""
+    and top-k coverage under both tie conventions. Cards never pool."""
     by_gpu: dict[str, list[tuple[int, int]]] = {}
     for case, ranks in entries:
         by_gpu.setdefault(case.gpu, []).append(ranks)

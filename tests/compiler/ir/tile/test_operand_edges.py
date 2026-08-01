@@ -16,9 +16,9 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.stmt.passes import rewrite
 from emmy.compiler.ir.tile import Channel, Contraction, Map
-from emmy.compiler.ir.tile.ops import lower
+from emmy.compiler.ir.tile.ops import axis_names, lower
 from emmy.compiler.ir.tile.path import sites
-from emmy.compiler.pipeline.passes.lowering.tile._cut import _axis_names, _captured_values
+from emmy.compiler.pipeline.passes.lowering.tile._cut import _captured_values
 
 
 def _cone(name: str = "xhat") -> Map:
@@ -130,8 +130,8 @@ def test_a_capturing_inline_operand_is_legal_but_reports_its_capture() -> None:
     cone = node.a
     # The output axes are the CALLER's placement — never on the node — so the cut supplies them
     # from ``TileOp.place`` alongside the term's own iteration names.
-    axes = _axis_names(fold) | {"m", "n"}
-    assert _captured_values(cone, axes | _axis_names(cone)) == ("m_run",)
+    axes = axis_names(fold) | {"m", "n"}
+    assert _captured_values(cone, axes | axis_names(cone)) == ("m_run",)
 
 
 def test_iteration_variables_are_not_captures() -> None:

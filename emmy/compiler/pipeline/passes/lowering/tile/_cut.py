@@ -44,9 +44,8 @@ from emmy.compiler.ir.tile.ir import (
     deep_defines,
     deep_reads,
     effect_tail,
-    stmt_axis_names,
 )
-from emmy.compiler.ir.tile.ops import lower
+from emmy.compiler.ir.tile.ops import axis_names, lower
 from emmy.compiler.ir.tile.path import Site, family_sites, resolve, sites, spell
 from emmy.compiler.pipeline.knob import family_of, parse_knob_spec
 from emmy.compiler.pipeline.passes.loop.stamp._stamp import restamp_structural_features
@@ -165,24 +164,6 @@ def _routing_entry(ctx, knobs: dict, root=None):
     return min(entries, key=lambda g: g.emmy_us or float("inf"))
 
 
-def _axis_names(root) -> set[str]:
-    """Every ITERATION-SPACE name in ``root``'s tree — the structural nodes' axes plus every loop
-    induction variable in their bodies, over the ONE node walk (``path.sites``). An induction
-    variable is bound by the enclosing loop nest, not by any value tree, so a subtree reading one
-    is never capturing a value."""
-    out: set[str] = set()
-    for site in sites(root):
-        node = site.node
-        if isinstance(node, Fold):
-            out.add(node.axis.name)
-            out |= stmt_axis_names(node.step_stmts())
-        elif isinstance(node, Map):
-            out |= stmt_axis_names(node.body)
-        elif isinstance(node, Contraction):
-            out.add(node.k_axis.name)
-    return out
-
-
 def _captured_values(root, axes: set[str]) -> tuple[str, ...]:
     """The VALUE names ``root``'s subtree reads but does not itself define — its capture set, with
     iteration-space names (``axes``) excluded.
@@ -219,7 +200,7 @@ def _cuttable(root, site: Site, stores: tuple, free: tuple) -> bool:
     child = site.node
     if len(_operand_result_names(child)) != 1:
         return False
-    if _captured_values(child, _axis_names(root) | {a.name for a in free}):
+    if _captured_values(child, axis_names(root) | {a.name for a in free}):
         return False
     trivial_body = isinstance(root, Map) and not len(root.body) and all(st.sweep is None for st in stores)
     if trivial_body and any(s is child for s in root.sources):
@@ -233,7 +214,7 @@ def _cuttable(root, site: Site, stores: tuple, free: tuple) -> bool:
     probe = Load(name=_operand_name(child), input="__seam_probe", index=())
     parent_tree = _replace_edge(root, child, probe)
     sweep_axes = {st.sweep.name for st in stores if st.sweep is not None}  # boundary-store sweeps live off-term (1q)
-    if _captured_values(parent_tree, _axis_names(parent_tree) | sweep_axes | {a.name for a in free}):
+    if _captured_values(parent_tree, axis_names(parent_tree) | sweep_axes | {a.name for a in free}):
         return False
     return True
 

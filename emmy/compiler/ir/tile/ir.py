@@ -150,9 +150,18 @@ def _derived_expect_fold(o: str, p_name: str, v_edge: Load) -> Contraction:
     flash's ``Oblk = Σ_j P·V``, a :class:`Contraction` node (1s). A is the
     register-resident softmax weight ``P`` — a one-stmt cone node whose one legal capture is the
     running max the same derived merge updates — and B is the fold's own expectation operand edge
-    (the value ``Load``)."""
-    prologue = Map(body=Body((Assign(name=f"{o}__p", op="copy", args=(p_name,)),)))
-    cone = Map(body=Body(()), sources=(prologue,))
+    (the value ``Load``).
+
+    A's ``copy`` is the REFERENCE, not a no-op: an operand edge's two inhabitants are a gmem
+    ``Load`` and an inline node, with no let table and no name-reference arm, so pointing at an
+    already-computed register value means wrapping it in the smallest node that yields one. The
+    rename is load-bearing too — ``p_name`` is a positional temp of the generated twist program,
+    while ``{o}__p`` is derived from the accumulator name and is stable.
+
+    There is no wrapping ``Map(body=(), sources=(<this>,))`` cone shape around it: an empty cell
+    carries no information (``cone_seam`` bridges no stats either way, both spellings lower to
+    this one stmt, and the lowered CUDA is byte-identical), so the edge IS the one-stmt node."""
+    cone = Map(body=Body((Assign(name=f"{o}__p", op="copy", args=(p_name,)),)))
     k = Axis(name="pj", extent=Dim(1))  # block=1: a singleton intra-block reduce
     return Contraction(k_axis=k, a=cone, channels=(Channel(b=v_edge, acc=f"{o}__pv"),))
 

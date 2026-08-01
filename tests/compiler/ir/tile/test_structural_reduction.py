@@ -19,7 +19,7 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import Channel, Contraction, Fold, Map, ReducePlan, TileOp
-from emmy.compiler.ir.tile.ops import axis_role, lower, reduce_loop, reduce_plan
+from emmy.compiler.ir.tile.ops import axis_role, cone_seam, lower, reduce_loop, reduce_plan
 
 
 def _sum_loop() -> Loop:
@@ -323,6 +323,12 @@ def test_flash_op_is_a_two_contraction_tree() -> None:
     assert pv.a_computed and pv.a_name == "O_i__p", "PV's A operand is the inline exp weight P"
     assert pv.a.out == "O_i__p"
     assert pv.acc == "O_i__pv"
+    # A is the ONE-STMT node itself, not an identity ``Map`` wrapping a prologue in the cone shape:
+    # the copy is the reference (an edge is a Load or an inline node — no name-reference arm), and
+    # with an empty cell the wrapper carried nothing (``cone_seam`` bridges no stats either way).
+    assert not pv.a.sources, "PV's A is the one-stmt cone itself — no empty-cell cone wrapper"
+    assert [s.pretty()[0].strip() for s in pv.a_body] == ["O_i__p = copy(m_i__t5)"]
+    assert cone_seam(pv.a) == ((), tuple(pv.a.body), ()), "an empty-cell wrapper bridged no stats — the seam is the node"
     # The reduce loop flattens BOTH folds; the O-fold reads the PV output (no inline v·P).
     (kv_loop,) = lower(red)
     o_fold = next(s for s in kv_loop.body if isinstance(s, Accum) and s.name == "O_i")

@@ -16,7 +16,7 @@ from __future__ import annotations
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.schedule import Placement, ReducePlan
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Lambda, Load, Loop, Write
 from emmy.compiler.ir.tile import Channel, Contraction, Fold, Map, Store, TileOp
 from emmy.compiler.ir.tile.ops import Sched, pretty
 
@@ -68,8 +68,9 @@ def test_fold_dump_shows_every_stored_param() -> None:
     assert "├─ init: (0)" in text
     assert "├─ lift: λ(k) -> (v1)" in text
     assert "├─ combine: λ(acc0, acc0__o) -> (acc0)" in text
-    # The lift's own body nests under it — the stored program, not a synthesized one.
-    assert "│  in0 = load x[m, k]" in text
+    # The lift's own body nests two under its signature — the stored program, read as the
+    # binder's body rather than as a sibling of the branch labels.
+    assert "│    in0 = load x[m, k]" in text
 
 
 def test_contraction_dump_shows_the_k_axis_and_every_channel() -> None:
@@ -114,6 +115,103 @@ def test_the_derived_step_is_labelled_and_opt_out() -> None:
     fold = _stat_fold()
     assert "└─ derived step" in "\n".join(pretty(fold))
     assert "derived" not in "\n".join(pretty(fold, derived=False))
+
+
+def _split_k() -> Fold:
+    """Split-K's outer reduce — the identity-lift composition, whose derived step EMBEDS the very
+    ``Contraction`` object stored on its one operand edge."""
+    inner = Contraction(
+        k_axis=Axis("kslice", 128),
+        a=Load(name="a_e", input="x", index=(Var("m"), Var("kslice"))),
+        channels=(Channel(b=Load(name="b_e", input="w", index=(Var("kslice"), Var("n"))), acc="acc0"),),
+    )
+    return Fold(
+        axis=Axis("ksplit", 4),
+        operands=(inner,),
+        lift=Lambda(params=("ksplit", "acc0"), body=Body(()), results=("acc0",)),
+        init=(0.0,),
+        combine=Lambda(
+            params=("acc0", "acc0__o"),
+            body=Body((Assign(name="acc0", op="add", args=("acc0", "acc0__o")),)),
+            results=("acc0",),
+        ),
+    )
+
+
+def test_a_step_node_already_stored_on_an_edge_points_back_instead_of_recopying() -> None:
+    """The derived step embeds its operand edges at their derived positions — the SAME objects.
+    Expanding them twice would read as two nodes, so the second appearance is a back-reference."""
+    fold = _split_k()
+    assert any(s is fold.operands[0] for s in fold.step_stmts())  # the premise: one object
+    text = "\n".join(pretty(fold))
+    step = text.split("derived step")[1]
+    assert "‹↑ operand[0]›" in step
+    # The params are expanded ONCE, under the edge — not again below.
+    assert step.count("a: a_e = load x[m, kslice]") == 0
+    assert text.count("a: a_e = load x[m, kslice]") == 1
+
+
+def test_a_node_the_step_synthesized_expands_in_place() -> None:
+    """A node with no edge above — flash's PV, memoized on the fold — has only this appearance,
+    so its own operand edges are rendered here. Eliding them would hide real stored params."""
+    fold = _split_k()
+    ctx_free = "\n".join(pretty(fold))
+    assert "‹↑ operand[0]›" in ctx_free
+
+    # Same node, NOT reachable as an edge: it expands rather than pointing at nothing.
+    lone = _split_k().operands[0]
+    text = "\n".join(pretty(Map(fn=None, sources=(), body=Body((lone,)))))
+    assert "‹↑" not in text
+    assert "├─ a: a_e = load x[m, kslice]" in text and "└─ b: b_e = load w[kslice, n]" in text
+
+
+# --- a λ that is not closed says so -------------------------------------------------------------- #
+
+
+def _capturing_cone() -> Map:
+    """The flash ``P = exp(s − m)`` shape — a cone that READS a value the enclosing body defines
+    (``m_run``, the carrier's running max) instead of producing it."""
+    return Map(
+        body=Body(
+            (
+                Load(name="p_e", input="x", index=(Var("m"), Var("k"))),
+                Assign(name="p", op="subtract", args=("p_e", "m_run")),
+            )
+        )
+    )
+
+
+def test_a_lambda_that_captures_an_enclosing_value_shows_its_capture_set() -> None:
+    """Without this the λ prints as though it were closed — and being closed is exactly what
+    decides whether a subtree can become an operand edge. ``m`` / ``k`` here are iteration space
+    (placement + the contraction's own axis); only ``m_run`` is a captured VALUE."""
+    node = _product(a=_capturing_cone())
+    tile = TileOp(op=node, name="k_flashish", place=Placement(free=(Axis("m", 128),), grid=(Axis("m", 128),), mapped=True))
+    text = tile.pretty_body()
+    assert "[captures m_run]" in text
+    assert "captures k" not in text and "captures m," not in text
+
+
+def test_iteration_vars_are_not_captures() -> None:
+    """A λ reading an axis is not capturing — the nest binds it. This covers the three places an
+    axis can come from: the term's own axes, the placement, and a boundary store's sweep."""
+    m, n = Axis("m", 128), Axis("n", 64)
+    body = Body((Load(name="w_e", input="w", index=(Var("m"), Var("n"))), Assign(name="o", op="multiply", args=("acc0", "w_e"))))
+    tile = TileOp(
+        op=Map(fn=None, sources=(_stat_fold(),), body=body),
+        name="k_stat",
+        place=Placement(free=(m, n), grid=(m,), mapped=True),
+        stores=(Store(write=Write(output="y", index=(Var("m"), Var("n")), value="o"), sweep=n),),
+    )
+    # ``m`` comes from the placement, ``n`` from the output sweep — the sweep axis left the term
+    # at 1q, so a dump reading only the term would wrongly call it captured.
+    assert "captures" not in tile.pretty_body()
+
+
+def test_the_capture_set_is_omitted_when_the_iteration_space_is_unknown() -> None:
+    """A bare term has no placement, so its grid coordinates are indistinguishable from captured
+    values. The dump declines to answer rather than claim the λ is closed."""
+    assert "captures" not in "\n".join(pretty(_capturing_cone()))
 
 
 # --- schedule slices annotate from the TileOp, never from the term ------------------------------ #

@@ -82,7 +82,13 @@ passes later:
   validation reading (1q) and lives with its one consumer, the cut (`_cut._captured_values`); closure is the precondition for lifting any subtree into its own kernel (a placement
   cut). Flash's `P = exp(s − m)` is `combine`'s derived singleton-specialization internals — material BELOW the seam
   lattice, never a cut target — and flash's QK score is a hoisted operand edge of the kv stream (step 7): closed by
-  construction, reading only the enclosing iteration var, never state.
+  construction, reading only the enclosing iteration var, never state. The derived PV contraction's A edge is
+  precisely where "no reference arm" becomes visible: `P` is already in a register, and since an edge is a `Load` or
+  an inline node and nothing else, pointing at it means wrapping it in the one-stmt node `{o}__p = copy(P)`
+  (`_derived_expect_fold`) — the copy IS the reference, and the rename off the accumulator name keeps it stable
+  against the twist program's positional temps. That node is the edge directly; there is no empty-cell
+  `Map(body=(), sources=(…,))` cone wrapper around it, since with no per-cell work `cone_seam` bridges no stats
+  either way and both spellings lower identically.
   Binding off the lift rather than off "the first (m, k)-indexed `Load`" is load-bearing: a cone-INTERNAL load is
   (m, k)-indexed too, so the positional rule bound gemma's GeGLU combine as `gate @ W` and silently dropped the gelu and
   the up projection. Refusing to bind a stat-free cone at all is equally wrong — it demotes the cell to a PLANAR

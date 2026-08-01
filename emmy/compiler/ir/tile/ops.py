@@ -103,6 +103,32 @@ def sched_of(tile) -> Sched:
     return Sched(tile.op, tile.schedule)
 
 
+def axis_names(root) -> set[str]:
+    """Every ITERATION-SPACE name in ``root``'s tree — the structural nodes' axes plus every loop
+    induction variable in their bodies, over the ONE node walk (``path.sites``). An induction
+    variable is bound by the enclosing loop nest, not by any value tree, so a subtree reading one
+    is never capturing a value.
+
+    The ONE reading that separates the two kinds of free name a λ body can carry: an iteration var
+    (bound by the nest, free by construction) and a captured VALUE. The cut's closure predicate
+    (``_cut._captured_values``) subtracts this set, and the structural dump shows what remains as
+    the λ's capture set."""
+    from emmy.compiler.ir.tile.ir import stmt_axis_names  # noqa: PLC0415
+    from emmy.compiler.ir.tile.path import sites  # noqa: PLC0415 — path imports ir; keep ops light
+
+    out: set[str] = set()
+    for site in sites(root):
+        node = site.node
+        if isinstance(node, Fold):
+            out.add(node.axis.name)
+            out |= stmt_axis_names(node.step_stmts())
+        elif isinstance(node, Map):
+            out |= stmt_axis_names(node.body)
+        elif isinstance(node, Contraction):
+            out.add(node.k_axis.name)
+    return out
+
+
 def projection_tail(tile) -> list[Stmt]:
     """The kernel's EFFECTFUL projection stmt stream — the root ``Map``'s (pure) body with the
     kernel-boundary ``TileOp.stores`` reconstituted (:func:`~emmy.compiler.ir.tile.ir.effect_tail`).
@@ -511,15 +537,42 @@ _TEE, _ELBOW, _PIPE, _GAP = "├─ ", "└─ ", "│  ", "   "
 class _Ctx:
     """The dump's read-only context — the owning ``TileOp``'s schedule view plus its site table,
     so each node can be annotated with the slices keyed against it and with the ``derived`` bit
-    the path walker assigns. ``None`` everywhere when a bare term is printed without its op."""
+    the path walker assigns (``None`` everywhere when a bare term is printed without its op), plus
+    ``shown``: the branch label each already-expanded node was printed under. A derived step
+    EMBEDS its fold's operand edges at their derived positions (the same objects — flash's QK
+    score), so those print as a header pointing back at the edge above instead of a second copy,
+    while a node the step SYNTHESIZED (flash's PV) has no edge above and expands in place."""
 
-    def __init__(self, tile, derived: bool) -> None:
+    def __init__(self, tile, derived: bool, root=None) -> None:
         self.derived = derived
         self.sched = sched_of(tile) if tile is not None and tile.op is not None else None
         self.sites = {}
+        self.shown: dict[int, str] = {}
         if self.sched is not None:
             for site in self.sched._all_sites():
                 self.sites.setdefault(id(site.node), site)
+        # The ITERATION-SPACE names of the whole tree (:func:`axis_names`), plus the placement's
+        # free/grid axes — an axis is bound by the enclosing nest, so a λ reading one is not
+        # capturing. What is left over in a λ's free names IS its capture set.
+        # The ITERATION SPACE a capture set is measured against. Only the OWNING ``TileOp`` knows
+        # it in full: the term's own axes (:func:`axis_names`), the placement's free/grid axes, and
+        # a boundary store's sweep axis (off-term since 1q) — the same three the cut's closure
+        # check unions. Without a tile the placement is unknown, so ``captures`` declines to
+        # answer rather than report grid coordinates as captured values.
+        self.axes = None if tile is None else axis_names(root) if root is not None else set()
+        if tile is not None:
+            self.axes |= {a.name for a in (*tile.place.free, *tile.place.grid)}
+            self.axes |= {st.sweep.name for st in tile.stores if st.sweep is not None}
+
+    def captures(self, lam) -> tuple[str, ...]:
+        """The VALUE names ``lam``'s body reads but neither binds nor takes from the iteration
+        space — the same reading the cut's closure predicate applies
+        (``_cut._captured_values``). Non-empty means the λ is NOT closed, which is exactly what
+        makes a subtree unhoistable to an operand edge: flash's ``P = exp(s − m)`` reads the
+        online-softmax carrier's running max, so it can never be an edge and its seam is not
+        cuttable. Empty when the iteration space is unknown (no owning ``TileOp``) — an unanswered
+        question prints as no annotation, never as "closed"."""
+        return () if self.axes is None else tuple(sorted(lam.free_names() - self.axes))
 
     def note(self, node) -> str:
         """The schedule annotation for ``node`` — its ``derived``-site marker and every slice the
@@ -537,11 +590,17 @@ class _Ctx:
         return f"   ⟨{' '.join(bits)}⟩" if bits else ""
 
 
-def _lam_sig(lam) -> str:
+def _lam_sig(lam, ctx: _Ctx | None = None) -> str:
     """A lambda's one-line signature. A float result is the ι literal injected in the lift
-    (softmax's singleton ``(x, 1)``), which has no def to name."""
+    (softmax's singleton ``(x, 1)``), which has no def to name.
+
+    A non-empty CAPTURE set is spelled between the params and the results — without it a λ that
+    reads an enclosing value would print as though it were closed, which is the one property the
+    reader most needs (an unclosed subtree can never become an operand edge)."""
     rs = ", ".join(r if isinstance(r, str) else format(r, "g") for r in lam.results)
-    return f"λ({', '.join(lam.params)}) -> ({rs})"
+    cap = ctx.captures(lam) if ctx is not None else ()
+    free = f" [captures {', '.join(cap)}]" if cap else ""
+    return f"λ({', '.join(lam.params)}){free} -> ({rs})"
 
 
 def _axis_span(axis) -> str:
@@ -562,25 +621,34 @@ def _head(node, ctx: _Ctx) -> str:
     elif isinstance(node, Contraction):
         text = node.pretty()[0].strip()
     elif isinstance(node, Map):
-        text = f"Map {_lam_sig(node.fn)}" + ("" if node.sources else "  ‹pointwise›")
+        text = f"Map {_lam_sig(node.fn, ctx)}" + ("" if node.sources else "  ‹pointwise›")
     else:
         return str(node)
     return text + ctx.note(node)
 
 
 def _stmts(stmts, ctx: _Ctx):
-    """Render a stored stmt sequence. A structural NODE occupying a statement position — a
-    composed step's inline node, the derived evaluation's synthesized contraction — prints as its
-    annotated header, not a nested dump: its storage is the edge above (already shown), and what
-    is worth seeing here is that it is a node and which slices key against it."""
+    """Render a λ body (a ``lift`` / ``combine`` / ``Map.fn``, or the derived step read the same
+    way) — indented two under the signature line that binds it, so the program reads as the
+    binder's body rather than as a sibling of the branch labels.
+
+    A structural NODE occupying a statement position is one of two things, and they must not look
+    alike: a node the enclosing fold ALREADY stores on an operand edge (the derived step embeds it
+    at its derived position — flash's QK score) prints as a header pointing back at that branch,
+    since its params are expanded there and a second copy would read as a second node; a node the
+    step SYNTHESIZED (flash's PV, memoized on the fold) has no edge above, so it expands here —
+    this is its only appearance, and its own operand edges are as real as any other's."""
 
     def render(cont: str) -> list[str]:
         out: list[str] = []
         for s in stmts:
-            if isinstance(s, (Fold, Contraction, Map)):
-                out.append(f"{cont}{_head(s, ctx)}")
-            else:
-                out.extend(pretty_body(Body((s,)), cont))
+            if not isinstance(s, (Fold, Contraction, Map)):
+                out.extend(pretty_body(Body((s,)), cont + "  "))
+                continue
+            at = ctx.shown.get(id(s))
+            out.append(f"{cont}  {_head(s, ctx)}" + (f"   ‹↑ {at}›" if at else ""))
+            if at is None:
+                out.extend(_branch(_items(s, ctx), cont + "  "))
         return out
 
     return render
@@ -592,9 +660,11 @@ def _subtree(node, ctx: _Ctx):
 
 def _edge(label: str, edge, ctx: _Ctx) -> tuple[str, object]:
     """One operand edge as a tree item — a ``Load`` is a leaf spelled inline, a computed edge
-    recurses into the node stored on it."""
+    recurses into the node stored on it (recording where, so a derived step embedding that same
+    object points back here instead of expanding a second copy)."""
     if isinstance(edge, Load):
         return f"{label}: {edge.pretty()[0].strip()}   ‹materialized›", lambda cont: []
+    ctx.shown.setdefault(id(edge), label)
     return f"{label}: {_head(edge, ctx)}   ‹computed›", _subtree(edge, ctx)
 
 
@@ -604,8 +674,8 @@ def _items(node, ctx: _Ctx) -> list[tuple[str, object]]:
     if isinstance(node, Fold):
         init = ", ".join(x if isinstance(x, str) else format(x, "g") for x in node.init)
         items.append((f"init: ({init})", lambda cont: []))
-        items.append((f"lift: {_lam_sig(node.lift)}", _stmts(node.lift.body, ctx)))
-        items.append((f"combine: {_lam_sig(node.combine)}", _stmts(node.combine.body, ctx)))
+        items.append((f"lift: {_lam_sig(node.lift, ctx)}", _stmts(node.lift.body, ctx)))
+        items.append((f"combine: {_lam_sig(node.combine, ctx)}", _stmts(node.combine.body, ctx)))
         items += [_edge(f"operand[{i}]", e, ctx) for i, e in enumerate(node.operands)]
         if ctx.derived:
             items.append(("derived step", _stmts(node.step_stmts(), ctx)))
@@ -614,7 +684,9 @@ def _items(node, ctx: _Ctx) -> list[tuple[str, object]]:
         one = len(node.channels) == 1
         items += [_edge("b" if one else f"channel[{i}] -> {ch.acc}", ch.b, ctx) for i, ch in enumerate(node.channels)]
     elif isinstance(node, Map):
-        items += [(f"source[{i}]: {_head(s, ctx)}", _subtree(s, ctx)) for i, s in enumerate(node.sources)]
+        for i, s in enumerate(node.sources):
+            ctx.shown.setdefault(id(s), f"source[{i}]")
+            items.append((f"source[{i}]: {_head(s, ctx)}", _subtree(s, ctx)))
         if len(node.fn.body):
             items.append(("body", _stmts(node.fn.body, ctx)))
     return items
@@ -634,7 +706,7 @@ def pretty(op, indent: str = "", *, tile=None, derived: bool = True) -> list[str
     params, its operand edges recursed into, and (unless ``derived=False``) the derived per-cell
     step beneath. Pass ``tile`` — the owning ``TileOp`` — to annotate each node with the schedule
     slices keyed against it. A bare stmt falls back to its own pretty."""
-    ctx = _Ctx(tile, derived)
+    ctx = _Ctx(tile, derived, root=op)
     if isinstance(op, (Fold, Contraction, Map)):
         return [f"{indent}{_head(op, ctx)}", *_branch(_items(op, ctx), indent)]
     if isinstance(op, Stmt):

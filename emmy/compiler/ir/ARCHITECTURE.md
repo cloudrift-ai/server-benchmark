@@ -476,9 +476,20 @@ downstream in `lowering/kernel` against the op tree + schedule. The older tile-l
 term directly, so it has to show what the term IS. Each node prints its kind and stored params as labelled branches
 (a `Fold`'s `init` / `lift` / `combine` / `operands`, a `Contraction`'s `a` and one branch per `Channel`, a `Map`'s
 binder signature and `sources`), and every operand edge is recursed into and tagged with its inhabitant — `‹computed›`
-for an inline node subtree, `‹materialized›` for a leaf gmem `Load`. The synthesized loop reading a node lowers to is
+for an inline node subtree, `‹materialized›` for a leaf gmem `Load`. A λ signature carries its CAPTURE SET when
+non-empty (`λ() [captures m_i__t5] -> (…)`) — the free names that are not iteration vars, the same reading the cut's
+closure predicate applies (`axis_names`, relocated to `tile/ops.py` so the dump and `_cut._captured_values` share one
+definition; the iteration space is the term's axes ∪ the placement's free/grid ∪ the boundary stores' sweep axes).
+Without a capture set a λ reads as closed, and closure is precisely what decides whether a subtree can hoist to an
+operand edge — flash's `P = exp(s − m)` captures the carrier's running max, which is why its seam is not cuttable. The
+set is measured only when the owning `TileOp` is supplied; a bare term has no placement, so the annotation is omitted
+rather than reporting grid coordinates as captures. The synthesized loop reading a node lowers to is
 DERIVED, so it sits under an explicit `derived step` branch (`pretty(op, derived=False)` drops it) and cannot be
-mistaken for storage; a structural node occupying a statement position inside one prints as its annotated header only.
+mistaken for storage. A structural node occupying a statement position inside one is rendered by where its params
+live: a node the enclosing fold already stores on an operand edge (the derived step embeds those objects at their
+derived positions — flash's QK score) prints as a header back-referencing that branch, `‹↑ operand[i]›`, since a second
+expansion would read as a second node; a node the step SYNTHESIZED (flash's PV, memoized on the fold) has no edge above
+and expands in place, its own edges included — that is its only appearance.
 The caller facts that live BESIDE the term get their own regions — `place` / `work` / `wspec` above it, `stores`
 below — and schedule slices annotate a node as `⟨TILE=… REDUCE=… STAGE=…⟩` only when the owning `TileOp` is supplied
 (`pretty(op, tile=…)`), read through `Sched` and the path codec, so nothing on the term can carry one. A `derived-site`

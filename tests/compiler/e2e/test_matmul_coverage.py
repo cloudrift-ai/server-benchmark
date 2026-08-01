@@ -334,19 +334,6 @@ def test_scalar_masked_n_stage_declines(monkeypatch) -> None:
         assert family_value(tile_op.knobs, "STAGE") == "", (stage, tile_op.knobs)  # OFF-stamped (gmem-direct)
 
 
-def test_tma_allowed_cc_floor() -> None:
-    """TMA (``cp.async.bulk.tensor``) is a Hopper (sm_90) feature — Ada / Ampere have no TMA and nvcc
-    has no ``sm_89a`` target. :func:`_tma_allowed` (the floor both the matmul and warp-flash stage
-    enumerations gate on) admits TMA at sm_90+ only, mirroring the frontend TMA-fold gate."""
-    from emmy.compiler.pipeline.passes.lowering.tile._schedule import _tma_allowed  # noqa: PLC0415
-
-    assert not _tma_allowed(Context.from_target((8, 0)))  # Ampere — no TMA
-    assert not _tma_allowed(Context.from_target((8, 9)))  # Ada — no TMA (this repo's RTX 4080)
-    assert _tma_allowed(Context.from_target((9, 0)))  # Hopper — TMA
-    assert _tma_allowed(Context.from_target((12, 0)))  # Blackwell — TMA
-    assert _tma_allowed(None)  # no target (direct unit-test drive) — allow; never reaches nvcc
-
-
 def test_tma_stage_declines_below_sm90(monkeypatch) -> None:
     """A ``d*/tma*`` STAGE pin below sm_90 DECLINES to gmem-direct rather than being resolved into a
     kernel the backend cannot compile (``nvcc fatal: Unsupported gpu architecture 'sm_89a'``). The

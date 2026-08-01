@@ -325,7 +325,7 @@ codec's atom token and priced by the `MMA_acc_bits` feature; f16 only (mma.sync 
 1024`) with per-cell `""` as the conservative option-0, crossed with the warp / reduce / stage move families
 for an unpinned contraction so `compile` / `tune` explores the space (each row → a structural
 contraction-fold leaf keyed `TILE@<k_axis>` in a hierarchical `build_fork_tree`; an env pin wins via `Knob.narrow`).
-`wspec_moves()` is the fourth level (the producer band; option-0 `""` = uniform SIMT — since step 7 a resolved band
+The producer band is the fourth level (option-0 `""` = uniform SIMT — since step 7 a resolved band
 is spelled in `WORK`'s `+p<n>` suffix, never a per-row `WSPEC` key) — offered only on a warp row over a
 resolved **TMA** stage without a cross-CTA split, and resolved/thread-budget-gated at materialization
 (`_wspec_workers`; an ineligible spec degrades to uniform). A computed-A (fused-cone) contraction enumerates its own

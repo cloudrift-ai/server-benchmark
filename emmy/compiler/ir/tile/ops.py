@@ -204,41 +204,6 @@ def head(op):
     return node if isinstance(node, (Fold, Contraction)) else None
 
 
-def node_loads(op) -> list[Load]:
-    """Every gmem ``Load`` the term reads, as a deep walk over the STORED structure: an operand
-    edge's MATERIALIZED inhabitant, plus the loads sitting inline in a lift / projection body,
-    recursing through a COMPUTED edge's own node.
-
-    The node-native equivalent of scanning a lowered nest for ``Load``\\ s — without synthesizing
-    one. The two agree by construction: a nest's loads ARE these edges, placed by
-    ``_splice_operands`` / ``_flatten_nodes``, so the walk sees exactly what the emitted kernel
-    reads. Order is edges-then-body per node, matching the splice; callers that care about a
-    specific operand should read that edge directly (``Contraction.a`` / ``Channel.b``) rather
-    than filter this stream."""
-    out: list[Load] = []
-
-    def walk(n) -> None:
-        if isinstance(n, Load):
-            out.append(n)
-            return
-        if isinstance(n, Fold):
-            for e in n.operands:
-                walk(e)
-        elif isinstance(n, Contraction):
-            walk(n.a)
-            for c in n.channels:
-                walk(c.b)
-        elif isinstance(n, Map):
-            for s in n.sources:
-                walk(s)
-        for b in n.nested():
-            for s in b:
-                walk(s)
-
-    walk(op)
-    return out
-
-
 def reduce_loop(op):
     """The kernel's outermost **annotated** reduce ``Loop`` (its ``role`` stamped by recognition),
     or ``None`` for a pure pointwise / flat-fallback ``Map`` (no annotated reduce). A

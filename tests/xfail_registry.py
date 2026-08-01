@@ -64,23 +64,18 @@ NODEIDS: frozenset[str] = frozenset(
         "tests/compiler/e2e/test_matmul_coverage.py::test_scalar_masked_n_stage_declines",
         "tests/compiler/e2e/test_matmul_coverage.py::test_scalar_matmul_stages_through_pipeline",
         "tests/compiler/e2e/test_matmul_coverage.py::test_tile_block_over_thread_limit_rejected",
-        "tests/compiler/e2e/test_matmul_coverage.py::test_tma_allowed_cc_floor",
         "tests/compiler/e2e/test_matmul_coverage.py::test_tma_stage_declines_below_sm90",
         "tests/compiler/e2e/test_matmul_coverage.py::test_tma_staged_slab_is_swizzled",
         "tests/compiler/e2e/test_matmul_coverage.py::test_trans_b_offers_staged_rows",
         "tests/compiler/e2e/test_matmul_coverage.py::test_transposed_b_symbolic_k_zero_fills",
         "tests/compiler/e2e/test_matmul_coverage.py::test_warp_matmul_stamps_wspec",
         "tests/compiler/e2e/test_matmul_coverage.py::test_warp_static_k_indivisible_rejected",
-        # tests/compiler/ir/tile/test_structural_reduction.py
-        "tests/compiler/ir/tile/test_structural_reduction.py::test_factor_k_splits_the_axis_with_distinct_names",
-        "tests/compiler/ir/tile/test_structural_reduction.py::test_splitk_reduction_over_contraction_is_no_double_reduce",
         # tests/compiler/passes/test_delegate_zero_init.py
         "tests/compiler/passes/test_delegate_zero_init.py::test_first_atomic_keeps_its_memset",
         "tests/compiler/passes/test_delegate_zero_init.py::test_oversized_accumulator_keeps_its_memset",
         "tests/compiler/passes/test_delegate_zero_init.py::test_second_atomic_delegates_to_first",
         # tests/compiler/passes/test_move_catalog.py
         "tests/compiler/passes/test_move_catalog.py::test_bare_reduce_forks_the_coop_catalog",
-        "tests/compiler/passes/test_move_catalog.py::test_factor_k_refuses_non_dividing_pin_width",
         "tests/compiler/passes/test_move_catalog.py::test_schedule_leaf_set_equals_catalog",
         "tests/compiler/passes/test_move_catalog.py::test_schedule_leaves_key_tile_canonically",
         "tests/compiler/passes/test_move_catalog.py::test_warp_staged_rows_fit_the_smem_budget",

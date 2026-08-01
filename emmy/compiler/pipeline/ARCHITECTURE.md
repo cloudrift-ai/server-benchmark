@@ -1075,7 +1075,7 @@ smem — the wide (64-key) streaming block's staging (flash stream only; the mat
 a stamped row family: realized rows spell the band as `WORK`'s `+p<np>` suffix (the absorb — producer/aux warps are
 inventory), and `SCHEDULE_FAMILIES` no longer lists it; `ingest_row` strips a stray `WSPEC` key off a stored /
 pinned row before matching (no realized row carries one). The `EMMY_WSPEC` pin is still accepted and the fork level
-still enumerates (`wspec_moves`). Legal on a warp `TILE` over a resolved **TMA** `STAGE` within the thread budget
+still enumerates. Legal on a warp `TILE` over a resolved **TMA** `STAGE` within the thread budget
 (`block_threads + 32·aux ≤ 1024`, `32·aux ≤ block_threads`); anything else — including the reserved producer `q`
 param — degrades to uniform. Empty = uniform SIMT. Materialized as the staged K-loop's producer/compute band split
 (`_stage._wspec_kloop`).

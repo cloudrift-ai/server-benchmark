@@ -130,14 +130,6 @@ WORK = Knob(
 )
 
 
-def wspec_moves() -> list[str]:
-    """The warp-specialization ``WSPEC`` codec candidates — uniform ``""`` first (the conservative
-    option-0), then the producer-band splits. Per-row legality (a warp tile over a resolved TMA
-    stage, the ``block_threads + 32·aux ≤ 1024`` and ``32·aux ≤ block_threads`` thread budgets) is
-    the scheduler's (the scheduler's)."""
-    return ["", "p1", "p2"]
-
-
 def _raster_features(val) -> dict[str, float]:
     """The ``RASTER`` sub-features for the priors — the stripe group size (``0.0`` = the flat
     N-fastest order) and the orientation flag (``1.0`` = ``gn``, the transposed grouping)."""
@@ -177,19 +169,6 @@ def raster_moves() -> list[str]:
     the search/goldens to arbitrate per shape, never a blanket policy. ``gn<G>`` spellings are
     pin-only until a shape wants them."""
     return ["", "gm8"]
-
-
-def map_tile_moves() -> list[TilePlan]:
-    """The pointwise-map register-strip candidates — the **scalar output tile** (the same
-    ``f<fn>`` register sub-tile a contraction's output rides, here with no ``n`` unit-tile / atom since
-    the grid already parallelizes a pure ``Map``). ``f<r>`` hands each thread ``r`` **contiguous**
-    inner-axis elements (blocked: thread t owns ``[t·r, t·r+r)``) as ``r`` grouped loads + ``r`` grouped
-    writes, which ``050_vectorize_loads`` / ``080_vectorize_stores`` merge into one ``float<r>`` access
-    — matching torch's ``vectorized_elementwise_kernel<r>``. Option-0 (``""``, 1 elem/thread) leads.
-    Legality (a static inner free axis divisible by r) is the scheduler's (the scheduler's).
-    The ladder stops at ``f4``: ``f8`` regressed both pointwise goldens (register pressure — 22 vs 14
-    regs — outweighs the wider access), so it's left out until a shape wants it."""
-    return [TilePlan(regs=(2, 1)), TilePlan(regs=(4, 1))]
 
 
 # --- Kernel-lowering policy knobs -------------------------------------------

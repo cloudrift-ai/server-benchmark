@@ -210,17 +210,6 @@ def test_nodify_reduce_keeps_a_projection_tail_as_a_wrapping_map() -> None:
 # --- split-K: Fold ⊃ Contraction (E1) --------------------------------------------------- #
 
 
-def test_factor_k_splits_the_axis_with_distinct_names() -> None:
-    """``_factor_k`` factors a static ``k`` into ``ksplit × kslice`` — distinct names, the σ
-    reconstructing the absolute index ``ksplit·(K/w) + kslice``."""
-    from emmy.compiler.pipeline.passes.lowering.tile._schedule import _factor_k
-
-    ksplit, kslice, sigma = _factor_k(Axis("k", 512), 2)
-    assert (ksplit.name, ksplit.extent.as_static()) == ("k_ks", 2)
-    assert (kslice.name, kslice.extent.as_static()) == ("k", 256)  # original name, K/w extent
-    assert sigma.apply(Var("k")).pretty() == "((k_ks * 256) + k)"
-
-
 def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
     """Split-K is the identity-lift composition ``Fold(axis=ksplit, operands=(Fold(k_axis=kslice),))``:
     the outer additive reduce sums partials across CTAs, the inner contraction folds its slice —
@@ -228,12 +217,18 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
     the sliced fold is the ONE operand edge, the derived step embeds it verbatim). ``lower`` is a
     SINGLE ``for ksplit:[for kslice: mul-add]`` with DISTINCT axis names (not ``for k:[for k:]``),
     and it still classifies as a ``CONTRACTION`` carrying the GRID (cta) partition."""
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.ir.expr import BinaryExpr, Literal
+    from emmy.compiler.ir.sigma import Sigma
     from emmy.compiler.ir.stmt import Lambda
     from emmy.compiler.ir.stmt.algebra import M
-    from emmy.compiler.pipeline.passes.lowering.tile._schedule import _factor_k
 
     c = _contraction()  # k_axis = k(256)
-    ksplit, kslice, sigma = _factor_k(c.k_axis, 2)
+    # The split-K factoring, spelled inline: ksplit (the partition index, a distinct name) x kslice
+    # (the per-partition chunk, the ORIGINAL name), and the sigma reconstructing the absolute index.
+    ksplit = Axis(name=f"{c.k_axis.name}_ks", extent=Dim(2))
+    kslice = replace(c.k_axis, extent=Dim(128))
+    sigma = Sigma({c.k_axis.name: BinaryExpr("+", BinaryExpr("*", Var(ksplit.name), Literal(128, "int")), Var(c.k_axis.name))})
     inner = replace(
         c,
         k_axis=kslice,

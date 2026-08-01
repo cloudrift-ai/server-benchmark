@@ -424,7 +424,7 @@ class Fold(Stmt):
     ``_factor._tile_reduce_axis`` expander stay byte-identical to the bare-loop form.
 
     The **scheduling param** is the ``reduce`` partition (:class:`ReducePlan` — GRID split / BLOCK coop
-    / REG ILP), stamped onto the node by ``020_schedule`` (its decided value lives **here** on the node
+    / REG ILP), stamped onto the node by the schedule (its decided value lives **here** on the node
     — read via ``ops.reduce_plan``). ``lower`` ignores it (it's metadata the materializer / ``030_split_reduce``
     read), so it leaves ``op_cache_key`` byte-identical."""
 
@@ -1254,7 +1254,7 @@ class TileOp(Op):
     untouched. The contraction operand→role binding is not a
     ``TileOp`` field either — a tiled contraction carries its A operand / channels on
     its stored fold (``op``), the single source of truth, resolved recognize-side
-    (``010_recognize._nodify_contraction``); ``_view.contraction_view`` only PLACES that node."""
+    (``010_recognize._nodify_contraction``); the placed reading only PLACES that node."""
 
     op: object = None
     name: str = ""
@@ -1304,7 +1304,7 @@ class TileOp(Op):
 
     def _pretty_place(self) -> list[str]:
         """The geometry lines above the term — the placement (free axes and their grid binding,
-        or ``unmapped`` before ``020_schedule`` decides one) and the kernel's one worker
+        or ``unmapped`` before the schedule decides one) and the kernel's one worker
         inventory. Omitted entirely when nothing has been decided yet."""
         out = []
         axes = lambda a: ", ".join(x.name for x in a)  # noqa: E731

@@ -35,7 +35,7 @@ exp-family LSE combine before projecting. Pays where the un-split grid starves t
 heads / short query axis); pin ``REDUCE=g<n>k``.
 
 **Two shapes of contraction split-K.** A structural ``Fold(axis=ksplit,
-source=Contraction(k_axis=kslice))`` (built by ``_schedule._splitk_option``) has its K axis already
+source=Contraction(k_axis=kslice))`` (built schedule-side) has its K axis already
 factored + operands offset, so :func:`_split_contraction` makes the partial the **bare Contraction**
 — it factorizes to **mma** (or scalar) through ``_factor.factorize``, ``ksplit`` prefixed as a lead
 grid axis, no ``_slice_loop``. The residual path below (a plain-sum ``sum`` split, or a coop/ILP
@@ -411,7 +411,7 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     cta = plan.cta
     rax = rloop.axis
     # Structural split-K: ``op`` is ``Fold(axis=ksplit, step=[Contraction(k_axis=kslice)])`` —
-    # the axis is already factored + operands offset (``_schedule._splitk_option``), so the partial
+    # the axis is already factored + operands offset (built schedule-side), so the partial
     # is the **bare Contraction** (→ ``factorize`` → mma / scalar), no ``_slice_loop``.
     # The projection (when the split node carries one) rides the ``Map`` wrapper over the split
     # ``Fold`` — its ONE home; peel it here and hand it to the realizer.

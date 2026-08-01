@@ -35,7 +35,7 @@ top-level layer/pass picture see `compiler/ARCHITECTURE.md`.
   type. `010_recognize` lifts the `Map` (a thin `Body` wrapper over
   the annotated loop nest, each reduce `Loop` carrying its `AxisRole` —
   the ONLY loop annotation; the algebra is the body itself) with an UNMAPPED `Placement`;
-  `020_schedule` maps the free
+  The tile schedule maps the free
   axes onto the grid and decides the reduce `ReducePlan` via the single
   `REDUCE` codec knob (`g<n>` cta / `coop` (its width in `WORK`) / `r<n>` reg; the
   decision hierarchy = env pin > search/prior fork > conservative
@@ -205,7 +205,7 @@ A reduce is a contraction not by "two loads" but by the genuine algebra — the 
 operands) and contracts ≥ 2 distinct operand buffers (`x·x` is a squared reduce, not a
 contraction). Recognition stamps the `CONTRACTION` role on that form (keeping the matmul's
 `Accum` a loose `Accum` rather than degenerate-folding it like a plain reduce);
-`020_schedule` gates flash structurally (a reduce loop nested inside a reduce loop); the mma
+The schedule gates flash structurally (a reduce loop nested inside a reduce loop); the mma
 atom tier reads the operands off the annotated loop to pick the tensor-core cell.
 
 **The `Algebra` bundle is retired** — the stored term keeps exactly ONE spelling of ⊕, the
@@ -439,7 +439,7 @@ registry in one module.
 partitioned across, coarse→fine: `GRID` (split-K across CTAs), `BLOCK` (cooperative threads within a CTA), `REG`
 (ILP register-fold), `SERIAL` (the per-thread remainder). The per-level combine `Fold` (`SHFL` lane butterfly /
 `SMEM` block tree / `ATOMIC` cross-CTA finalize) is **derived** from the level (`ReduceStage.combine`), not stored
-or tuned. The single `REDUCE` codec knob decides the plan in `020_schedule`; the combine itself stays in the op
+or tuned. The single `REDUCE` codec knob decides the plan schedule-side; the combine itself stays in the op
 tree.
 
 The schedule codecs — `REDUCE`, `TILE` (scalar or warp `TilePlan`), `STAGE`, and `WSPEC` — share one

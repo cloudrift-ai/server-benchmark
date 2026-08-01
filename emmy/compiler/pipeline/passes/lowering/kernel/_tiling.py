@@ -1,6 +1,6 @@
 """The generic tiling layer — where a schedule's PLAN becomes actual :class:`Axis` objects.
 
-``020_schedule`` decides (a ``TilePlan`` / ``ReducePlan`` / ``Stage``, and which axis plays m, n or
+The schedule decides (a ``TilePlan`` / ``ReducePlan`` / ``Stage``, and which axis plays m, n or
 k); nothing it produces is an axis a kernel loops over. This module is the other half: the four
 levels a contraction's output cell is tiled through — GRID block / UNIT / REGISTER / ATOM —
 realized as the bound ``Tile`` axes plus the per-cell coordinate arithmetic that indexes them.

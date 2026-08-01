@@ -944,15 +944,19 @@ cards and regimes — regret is a within-fork ratio, so it compares safely.
 
 `lowering/tile/` lowers each fused `LoopOp` to a kernel-ready `TileOp` over the block-DAG Tile IR (`ir/tile/ir.py`):
 `010_recognize` (lift `LoopOp` → `TileOp`, recognize the flash / softmax streaming forms, annotate each reduce
-`Loop` with its `AxisRole` — the only loop annotation; the algebra is the body — then schedule inline via the
-`_schedule` helper — no separate `020` pass: map free axes to the
-grid, pick the reduce partition + output `TILE` fragment, and **atomize** — resolve the algebra→hardware-atom binding
-structurally onto the schedule as each warp / cooperative option is built, so an unbindable atom is rejected at fork
-construction; `_atomize.py`) → `030_split_reduce` (cross-CTA split-K as a graph rewrite). It **never dispatches on a named
+`Loop` with its `AxisRole` — the only loop annotation; the algebra is the body — and **atomize**: resolve the
+algebra→hardware-atom binding structurally onto the node, so an unbindable atom never becomes one; `_atomize.py`) →
+`030_split_reduce` (cross-CTA split-K as a graph rewrite). It **never dispatches on a named
 shape** — every decision is gated on the derived role of the stored fold (`PLANAR` / `CONTRACTION` / `TWISTED`; flash
 attention is the `TWISTED` fold on the streaming schedule, a twisted monoid is a monoid, selected structurally), not
 on a matmul / pointwise / attention archetype. The full design lives in
 [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md).
+
+The step BETWEEN those two — schedule enumeration: mapping the free axes onto the grid and forking the per-node
+`TILE` / `REDUCE` / `STAGE` / `WORK` / `RASTER` families — has been REMOVED pending the generic recursive
+enumerator. Recognition, the codec, the move catalog and the materializer are untouched; nothing currently maps a
+`TileOp`, so every compile that reaches scheduling fails and rides `tests/xfail_registry.py`. See the leading
+section of [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md) for the contract the replacement must meet.
 
 ## Tunable knobs
 
@@ -960,7 +964,7 @@ A **`Knob`** (`knob.py`) is the canonical schema for one tuning dimension: name,
 `STR`), candidate `hints` (advisory — the rule still validates structural fit), and a help string. Rules stamp values
 into `TileOp.knobs` dicts; the autotuner reads those back as the per-hop knob delta in the `lowering` table. Every
 knob is declared **in `search/space.py`** — the single home for the whole tunable surface — and imported by the rule
-(`lowering/tile/_schedule`, the helper `020_schedule` drives) that resolves it. Declaring a `Knob` IS
+that resolves it (for the schedule codecs, the absent tile scheduler). Declaring a `Knob` IS
 registering it (`Knob.__post_init__`); `knob.registry()` imports `space.py` before answering, so the set is complete
 in any process — no module scanning, no manual registration. `knob.py`
 also owns the `EMMY_<KNOB>` env namespace (decode per `Knob` type; `config.py` remains the sole owner of
@@ -999,8 +1003,8 @@ a wrong or un-launchable kernel:
 ### Registered knobs
 
 All declared in `search/space.py`; see [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md) for the per-rule mechanics.
-The "owning rule" for the schedule codecs is `lowering/tile/020_schedule` (through the `_schedule` helper) — there is no
-separate `020_schedule` pass.
+The "owning rule" for the schedule codecs is the tile scheduler, which is currently absent (see above); their
+codecs, spellings and consumers are unchanged.
 
 **`WORK`** (STR codec, stamped by `seal_workers` at option assembly) — the kernel-global **worker inventory**,
 spelled exactly once per row (step 7): `w<M>x<N>[+p<np>]` (warps — the mma tier; `+p<np>` the dedicated producer
@@ -1009,7 +1013,7 @@ band the retired per-row `WSPEC` key spelled) / `t<N>x<M>` (the scalar thread ti
 discriminator IS the worker kind — never a per-`TILE` spelling — and `seal_workers` derives the inventory from the
 resolved site slices, failing loudly on cross-site disagreement (one kernel, one inventory).
 
-**`TILE`** (STR codec, `020_schedule`) — the **output-fragment** codec, site-local since step 7. A
+**`TILE`** (STR codec, the tile schedule) — the **output-fragment** codec, site-local since step 7. A
 contraction's output tile is *either* the **scalar** register sub-tile `f<fn>[x<fm>]` *or* the **warp** tensor-core
 mma tile `<atom>/f<FM>x<FN>[/k<bk>]` (atom + register sub-tile + K-chunk) — no worker tokens; the worker halves live
 in `WORK`, and `resolve_site_tile` disambiguates an empty site `TILE` beside a thread `WORK` from the coop tier.
@@ -1018,7 +1022,7 @@ the worker widths have exactly one home, so a value carrying its own cannot deco
 reading. The `a:scalar` / `a:none` aliases stay pin-only vocabulary for the scalar tier (stripped at parse, never
 stored).
 
-**`REDUCE`** (STR codec, `020_schedule`) — the reduce-axis partition codec, site-local since step 7:
+**`REDUCE`** (STR codec, the tile schedule) — the reduce-axis partition codec, site-local since step 7:
 `[g<n>[a|k]][/coop[-t]][/r<n>]` — `g` cross-CTA split-K (+ finalize letter), `coop` the cooperative-thread fold
 (its WIDTH lives in `WORK`; `-t` the transposed lane map), `r` ILP register fold. Empty = serial (the
 per-thread remainder is derived, never spelled); the retired `b<n>` coop-width spelling raises. The
@@ -1056,7 +1060,7 @@ hand every re-tune / `eval golden` / drift-gate consumer the wrong kernel to reb
 contractions and the LayerNorm statistic reduce now deploy off the prior; adding a LayerNorm-cone kind is what would
 let them be recorded.
 
-**`STAGE`** (STR codec, `020_schedule` → `lowering/kernel/010_materialize`) — the operand-staging codec
+**`STAGE`** (STR codec, the tile schedule → `lowering/kernel/010_materialize`) — the operand-staging codec
 `d<depth>/sync|cp|tma[/ring][/alt][/p<reg_depth>]` on the typed `Stage` schedule struct (composes with both fragments
 of the `TILE` knob): `d<depth>` the gmem→smem ring depth, `sync`/`cp.async`/TMA transport, `p<reg_depth>` the
 smem→register double-buffer. `stage=None` (unset / unparseable) = gmem-direct. Also rides the warp-flash TWISTED
@@ -1076,7 +1080,7 @@ still enumerates (`wspec_moves`). Legal on a warp `TILE` over a resolved **TMA**
 param — degrades to uniform. Empty = uniform SIMT. Materialized as the staged K-loop's producer/compute band split
 (`_stage._wspec_kloop`).
 
-**`RASTER`** (STR codec, `020_schedule` → `lowering/kernel/010_materialize`) — the CTA launch-order
+**`RASTER`** (STR codec, the tile schedule → `lowering/kernel/010_materialize`) — the CTA launch-order
 codec (bare/root-global; the fifth schedule-fork level): `gm<G>` iterates `G` M block-tiles fastest per
 launch stripe so consecutive CTAs share the streamed B slab (L2 reuse — the flat order streams B from DRAM once per
 M-row: `A + C + B×2` measured on the 4090's `mlp_gate_up`, 503.6 vs cuBLAS's 365.8 MB); `gn<G>` is the transpose
@@ -1089,7 +1093,7 @@ shape-dependent (±2–4% measured), so the search/goldens arbitrate per shape.
 loop extents + operand dtypes). Not tunable — identity facts that make a knob dict a complete variant identity (the
 online prior's feature vector). Skipped by `format_tuning_knobs`.
 
-**`FAST_MATH` / `F16_MMA_F32_ACC` / `FAST_EXP`** (BOOL, pin-only, `_schedule._f16acc_allowed` /
+**`FAST_MATH` / `F16_MMA_F32_ACC` / `FAST_EXP`** (BOOL, pin-only, the f16-accumulate enumeration gate /
 `lowering/kernel/085_fast_exp`) — the **precision-trading family**, never silently on. Precedence per knob: its own
 pin > the `FAST_MATH` umbrella > off (`space.precision_pin`). `FAST_EXP` swaps libm `expf` for `__expf`;
 `F16_MMA_F32_ACC` offers the f16-accumulate mma atom forks (`a:mma_m16n8k16_f16_f16` — chunked f32 register promote;
@@ -1152,7 +1156,7 @@ moveset are also documented there.
 | `loop/fusion/`            | `split_shared_indexmap` (first) fuses a fan-out pure-indexmap `LoopOp` into all its consumers in one rewrite; `merge_loop_ops` then splices adjacent single-consumer `LoopOp` pairs; `dedup_loads` drops identical `(input, index)` Loads; `fold_output_reshape` retargets a producer's `Write` through a graph-output memcpy-identity flatten (verified exactly over the finite domain; clean affine re-decomposition onto the output strides) — the copy kernel the splicer can't take (reduce-bearing producer × div/mod reader σ). Folding scalar-constant broadcasts into consumers cuts Qwen3-Embedding-0.6B from 394 → 337 kernels. |
 | `loop/recognize/`         | Empty (retired) — flash / online-softmax recognition moved into `lowering/tile/010_recognize` (the `_flash` / `_softmax` helpers), so the loop dialect carries no pattern recognizers. |
 | `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) + `stamp_structural_features` (the `S_*` dict). Runs last in the loop dialect — after fusion and recognition — so every kernel is named / stamped against its final body. |
-| `lowering/tile/`          | `LoopOp → TileOp` over the block-DAG Tile IR: `010_recognize` (structural — reads the algebra off the `LoopOp` body and emits an UNMAPPED `TileOp`) → `020_schedule` (maps the grid, picks the reduce/output fragment, and **atomizes** — resolves the algebra→atom binding onto the schedule via `_atomize.py` when each option is built, rejecting an unbindable atom at fork construction) → `030_split_reduce`. Dispatch is on the fold algebra (`MAP` / `SEMIRING` / `MONOID`), never a named shape. |
+| `lowering/tile/`          | `LoopOp → TileOp` over the block-DAG Tile IR: `010_recognize` (structural — reads the algebra off the `LoopOp` body and emits an UNMAPPED `TileOp`) → the schedule step (REMOVED — see Part 9) → `030_split_reduce`. Dispatch is on the fold algebra (`MAP` / `SEMIRING` / `MONOID`), never a named shape. |
 | `lowering/kernel/`        | `010_materialize` is a `TileOp → KernelOp` tier dispatcher (scalar / `_reduce`). A tiled `CONTRACTION` arrives as a high-level `Contraction` node already **built recognize-side** (`lowering/tile/010_recognize._nodify_contraction` — one flat node splitting the algebra params (axes / operands / acc / epilogue) from the schedule, which the fork places onto the grid via `_view.contraction_view`), so materialize only synthesizes its bare grid-`Write` and **expands** it through the one atom-generic `_factor.factorize` over the shared tiling layer (in `_factor.py`) (the geometry is derived on the PLACED `TilePlan` slice, the algebra on the node; `_atom.reduce_codegen` emits the shared K-loop and a swappable `store` sink, dispatched off the atom). Then the Kernel-IR peepholes: `030_stamp_types` (+ `040_demote_to_write_dtype`) resolve dtypes, `050_vectorize_loads` / `080_vectorize_stores` / `095_interleave_loads` pack/reorder memory ops, `110_drop_redundant_syncs`. See [`passes/lowering/kernel/ARCHITECTURE.md`](passes/lowering/kernel/ARCHITECTURE.md). |
 | `lowering/cuda/`          | `delegate_zero_init` (first) moves an atomic accumulator's per-launch zero-init off the runtime memset and into a dataflow-predecessor kernel as a `ZeroPrologue` stmt (CTA 0 writes zero words; stream order guarantees happen-before) — one CUDA-graph MEMSET node saved per site; the capture's first launch, symbolic-shaped accumulators, and accumulators past the one-CTA break-even cap (`_MAX_DELEGATED_WORDS`, 64 KB — CTA 0 zeroes serially, so a large buffer costs more than the MEMSET node it replaces) keep their memset, and the slab planner starts the buffer's live interval at the delegating launch (`CudaOp.zero_prologues`). `lower_kernelop` then renders the `KernelOp` body to a `__global__` source string (`ir/kernel/render.py::render_kernelop`) and mutates the node's op to `CudaOp` in place. |
 

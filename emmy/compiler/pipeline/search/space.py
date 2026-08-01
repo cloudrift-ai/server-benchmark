@@ -12,8 +12,8 @@ of the pipeline it loaded. When adding a knob, declare it here and import it int
 
 Scope note: this module holds the **static** space only — the declared dimensions and their bounded
 candidate grids. Per-kernel legality (the warp static-K divisibility check, the stage resolvers, coop
-eligibility, the ``_COOP_*`` constants) stays with the scheduler in
-``passes/lowering/tile/_schedule.py`` — the legal subset is a function of the node.
+eligibility, the ``_COOP_*`` constants) stays with the tile scheduler — the legal subset is a
+function of the node.
 
 The ``TILE`` / ``REDUCE`` grids hand out the **typed schedule slices** themselves
 (:class:`~emmy.compiler.ir.schedule.TilePlan` / :class:`~emmy.compiler.ir.schedule.ReducePlan`,
@@ -24,9 +24,8 @@ scheduler spells each row ONCE, site-local, where it becomes stored state. The `
 Two groups:
 
 - **Schedule codec knobs** (``REDUCE`` / ``TILE`` / ``STAGE`` / ``WSPEC`` / ``RASTER``) — the tile-lowering schedule
-  fork points that spell the ir schedule codecs (:mod:`emmy.compiler.ir.schedule`). Decided in
-  ``lowering/tile/020_schedule`` and materialized in
-  ``lowering/kernel/010_materialize``. Each is the **ephemeral** codec spelling: it resolves into a
+  fork points that spell the ir schedule codecs (:mod:`emmy.compiler.ir.schedule`). Decided by the
+  tile schedule and materialized in ``lowering/kernel/010_materialize``. Each is the **ephemeral** codec spelling: it resolves into a
   schedule slice (``ReducePlan`` / ``TilePlan`` / ``Stage`` / ``WarpSpec``) and rides on ``TileOp.knobs``
   so the online prior featurizes / tunes the decision. ``off=""`` (the conservative serial / per-cell /
   gmem-direct / uniform default) is auto-stamped on kernels the pass doesn't schedule.
@@ -52,7 +51,7 @@ REDUCE = Knob(
     KnobType.STR,
     help="Reduce-axis partition codec, site-local (g<n>[a|k] cta / coop[-t] / r<n> reg; empty=serial; "
     "the coop WIDTH lives in WORK). "
-    "Decided in lowering/tile/020_schedule, materialized in lowering/kernel/010_materialize.",
+    "Decided in the tile schedule, materialized in lowering/kernel/010_materialize.",
     off="",
 )
 
@@ -68,7 +67,7 @@ TILE = Knob(
     KnobType.STR,
     help="Output-fragment codec, site-local — scalar tile (f<fn>[x<fm>]) OR warp mma tile "
     "(<atom>/f<FM>x<FN>[/k<bk>]); empty=per-cell, the worker widths live in WORK. "
-    "Decided in lowering/tile/020_schedule, materialized in lowering/kernel/010_materialize.",
+    "Decided in the tile schedule, materialized in lowering/kernel/010_materialize.",
     off="",
 )
 
@@ -80,7 +79,7 @@ STAGE = Knob(
     "STAGE",
     KnobType.STR,
     help="Operand-staging codec (d<depth>/sync|cp|tma[/ring][/alt][/p<reg_depth>]; empty=gmem-direct). "
-    "Decided in lowering/tile/020_schedule, materialized in lowering/kernel/010_materialize.",
+    "Decided in the tile schedule, materialized in lowering/kernel/010_materialize.",
     off="",
 )
 
@@ -135,7 +134,7 @@ def wspec_moves() -> list[str]:
     """The warp-specialization ``WSPEC`` codec candidates — uniform ``""`` first (the conservative
     option-0), then the producer-band splits. Per-row legality (a warp tile over a resolved TMA
     stage, the ``block_threads + 32·aux ≤ 1024`` and ``32·aux ≤ block_threads`` thread budgets) is
-    the scheduler's (``_schedule._wspec_candidates`` / ``_wspec_workers``)."""
+    the scheduler's (the scheduler's)."""
     return ["", "p1", "p2"]
 
 
@@ -162,7 +161,7 @@ RASTER = Knob(
     "(m, n) block-tile grid (gm<G>: G M block-tiles iterate fastest per stripe, L2 reuse of the "
     "streamed B operand; gn<G>: the transpose, A streamed; empty = flat N-fastest row-major). "
     "Kernel-scoped like WSPEC (no @<axis> key); changes no per-CTA work or layout, only the "
-    "block-id decode. Decided in lowering/tile/020_schedule (the _schedule row product), applied "
+    "block-id decode. Decided by the tile schedule (the row product), applied "
     "at the kernel materializer's grid_tile seal; 2-D-tiled contraction grids only.",
     features=_raster_features,
     off="",
@@ -187,7 +186,7 @@ def map_tile_moves() -> list[TilePlan]:
     inner-axis elements (blocked: thread t owns ``[t·r, t·r+r)``) as ``r`` grouped loads + ``r`` grouped
     writes, which ``050_vectorize_loads`` / ``080_vectorize_stores`` merge into one ``float<r>`` access
     — matching torch's ``vectorized_elementwise_kernel<r>``. Option-0 (``""``, 1 elem/thread) leads.
-    Legality (a static inner free axis divisible by r) is the scheduler's (``_schedule._map_strip_fork``).
+    Legality (a static inner free axis divisible by r) is the scheduler's (the scheduler's).
     The ladder stops at ``f4``: ``f8`` regressed both pointwise goldens (register pressure — 22 vs 14
     regs — outweighs the wider access), so it's left out until a shape wants it."""
     return [TilePlan(regs=(2, 1)), TilePlan(regs=(4, 1))]
@@ -404,7 +403,7 @@ def warp_tile_moves(atom_names: tuple[str, ...]) -> list[TilePlan]:
 # score n-atoms per streaming key block. The conservative pair leads (one warp, the ``2·atom_n``
 # key block — today's deterministic stamp), so a cold tie keeps the historical geometry. Per-node
 # legality (kv / query-row divisibility, the dtype atom) is the scheduler's
-# (``_schedule._twisted_warp_options``), not the grid's.
+# (the twisted warp options), not the grid's.
 _FLASH_WARPS: tuple[int, ...] = (1, 2, 4)  # warps per CTA, each owning its own query-row block
 _FLASH_KEY_ATOMS: tuple[int, ...] = (2, 4, 8, 16)  # score n-atoms per streaming block (bn = n·atom_n keys)
 _FLASH_QTILES: tuple[int, ...] = (1, 2)  # register query tiles per warp (reg_m — FA-2's in-flight ILP)
@@ -417,7 +416,7 @@ def twisted_warp_moves() -> list[tuple[int, int, int]]:
     ``TILE`` codec's ``f<FM>x<FN>`` reg_m): each warp streams ``q_tiles`` independent ``(m, l, O)``
     chains against shared K/V fragments — FA-2's in-flight ILP, hiding the per-step
     mma → rowmax → exp → rescale dependency chain without more warps. Each triple resolves into
-    the Q@K / P@V mma :class:`TilePlan`\\ s in ``_schedule._twisted_warp_options`` (the ``TILE``
+    the Q@K / P@V mma :class:`TilePlan`\\ s in the twisted warp options (the ``TILE``
     codec spells the full plan; this grid only generates the free geometry — ``bk`` is shape-derived)."""
     return [(um, nt, fm) for fm in _FLASH_QTILES for um in _FLASH_WARPS for nt in _FLASH_KEY_ATOMS]
 

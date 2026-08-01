@@ -84,6 +84,13 @@ behavior genuinely lives there — each costs roughly an order of magnitude more
   and no subject is the signal to leave them apart.
 - **Known failures are marked inline** with `@pytest.mark.xfail`, carrying a reason that says what was
   removed or broken and when it should come back.
+- **One exception: the xfail registry** (`tests/xfail_registry.py`). When a whole subsystem is removed on purpose,
+  the casualties span dozens of files and inline marks would bury the intent in unrelated modules; the registry
+  lists the exact node ids in one place with one reason, and the root `conftest.py` applies a non-strict
+  `xfail` mark at collection. Exact ids, never path globs — each id is an acceptance obligation for the
+  replacement, and the file shrinking to empty is the completion gate. Today it holds the tests the removed tile
+  scheduler took down. Reach for it only for a deliberate removal of that size; an ordinary known failure still
+  gets an inline mark.
 
 ## Running
 

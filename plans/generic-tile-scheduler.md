@@ -390,12 +390,23 @@ the warp/stage-pin routing block at the top of the twisted branch retire.
 - **Node identity is untouched** — the walk reads terms, never mutates them; `term_key` / `op_cache_key` unchanged.
 - **The bare-`TILE` dynamic-attention pin any-of** stays until symbolic keyed resolution exists.
 
+## Status — the ground is cleared
+
+The old scheduler is DELETED (`_schedule.py`, `_view.py`, the `020_schedule` rule). Recognition, the codec, the move
+catalog and the materializer are untouched — the sections above describing the hand-written paths now read as the
+behavior to REPRODUCE, not code to refactor. Row-list equality against the old enumeration is therefore no longer
+available as a phase gate; what replaces it is `tests/xfail_registry.py`: 111 exact node ids, every one an
+acceptance obligation, measured on a CPU-only box (GPU-gated ids get appended when observed). A phase is done when
+the ids it restores are deleted from the registry; the refactor is done when the registry is empty. Byte-identity
+via `scripts/digest_kernels.py` still applies for pinned/golden rows, against kernels dumped before the removal.
+
 ## Migration — one phase per recursion depth, each gated
 
 Verification harness first, then port shallowest-to-deepest. Per-phase gates, all CPU-only except the last:
 
-- **Row-list equality**: enumerate the fork rows (the knob dicts, ordered) old vs new for the corpus — the eight
-  example expressions above plus every golden shape. A scratch harness driving `schedule()` both ways; not shipped.
+- **Registry shrink**: the ids the phase restores are deleted from `tests/xfail_registry.py` and the suite is green
+  without them. Row ORDER is still semantic — assert the ordered row list per corpus shape (the eight example
+  expressions above plus every golden shape) against the spellings recorded in the golden corpus.
 - **`scripts/digest_kernels.py` byte-identity** on the materialized kernels for pinned/golden rows.
 - `make test`, `make lint`.
 

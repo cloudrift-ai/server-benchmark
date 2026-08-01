@@ -102,7 +102,11 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   any node back to the same loop nest — no stored `Monoid`/`Semiring` kind. Flash is the `TWISTED` fold on the
   streaming schedule, its QK a hoisted operand-edge `Contraction` and its PV the derived evaluation's
   synthesized contraction node — a twisted monoid is a monoid,
-  selected structurally not as a distinct kind) →
+  selected structurally not as a distinct kind). **The SCHEDULE step is currently absent** — candidate enumeration
+  and composition (free axes → grid, the per-node `TILE`/`REDUCE`/`STAGE`/`WORK`/`RASTER` fork) was removed to make
+  room for a generic recursive enumerator; recognition, the codec, the move catalog and the materializer are
+  untouched, nothing maps a `TileOp` today, and the compiles that reach scheduling are xfailed through
+  `tests/xfail_registry.py` →
   [`emmy/compiler/pipeline/passes/ARCHITECTURE.md`](emmy/compiler/pipeline/passes/ARCHITECTURE.md)
 - **Terminology** (the stable vocabulary for comments, docs, reports, and user-facing text) →
   [`GLOSSARY.md`](GLOSSARY.md)

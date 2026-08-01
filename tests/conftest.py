@@ -11,6 +11,8 @@ import pytest
 import torch
 import yaml
 
+from tests.xfail_registry import scheduling_xfail
+
 # Cross-process GPU lock for CUDA tests. Set on conftest import so every
 # xdist worker (and any subprocess it spawns) coordinates on the same
 # path. With this set, ``CudaBackend.run`` (via
@@ -183,6 +185,14 @@ _CUDA_CLI_GROUP = "cuda-cli"
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
     import heapq
+
+    # Step 0: xfail everything the removed tile scheduler took down with it. Non-strict, so a
+    # partially restored scheduler reports XPASS (``-rX``) instead of failing — the registry
+    # shrinking to empty is the completion gate. See ``tests/xfail_registry.py``.
+    for it in items:
+        reason = scheduling_xfail(it.nodeid)
+        if reason is not None:
+            it.add_marker(pytest.mark.xfail(reason=reason, strict=False))
 
     # Step 1: pin every CUDA-touching item to an xdist_group so each
     # chain lands on one worker and runs sequentially — ``cuda`` for

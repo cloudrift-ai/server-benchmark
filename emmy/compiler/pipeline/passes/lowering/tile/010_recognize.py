@@ -6,7 +6,7 @@ body and lifts the per-cell compute into a :class:`~emmy.compiler.ir.tile.ir.Map
 **annotated loop nest** (the reduce ``Loop`` stamped with its
 :class:`~emmy.compiler.ir.axis.AxisRole` — the only loop annotation; the algebra is the body),
 wrapped in a :class:`~emmy.compiler.ir.tile.ir.TileOp` whose ``place`` carries just the free axes.
-That op IS the rewrite's result. ``020_schedule`` picks it up on the next rule sweep, maps the free
+That op IS the rewrite's result. The schedule picks it up on the next rule sweep, maps the free
 axes onto the grid and offers the scheduling forks; materialization back to loop IR happens in
 ``lowering/kernel``.
 
@@ -47,7 +47,7 @@ step unconditional — no knobs):
    (a real node tree — the per-row statistic its ``Fold`` source)
    (``_atomize.bind_prologue_contraction``, structure-only), its column axis joining the grid.
    Recognition only *builds* that reading (for the routing router's reference tree, below);
-   ``020_schedule`` re-derives it and merges both forms' candidates into ONE fork, because which
+   The schedule re-derives it and merges both forms' candidates into ONE fork, because which
    of the two a row realizes is a decision about the SCHEDULE.
 
 Flash must precede online-softmax which must precede the lift: each later step consumes the
@@ -352,7 +352,7 @@ def _project(fold: Fold, projection: Body) -> tuple[Map | Fold, tuple]:
 def _lift(stmts: list[Stmt], output: str) -> tuple[Map | Fold | Contraction, tuple, tuple]:
     """Peel the free axes and lift the per-cell compute, returning ``(root node, free axes,
     boundary stores)``. The free axes are the schedule's (carried on the ``TileOp``, not the node);
-    ``020_schedule`` maps them onto the grid, and the ``stores`` ride
+    The schedule maps them onto the grid, and the ``stores`` ride
     ``TileOp.stores`` (1q). A ``CONTRACTION`` cell
     nodifies to a :class:`Contraction` once the free axes are output-ordered (the binding needs
     the final ``(m, n)``)."""
@@ -416,7 +416,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | None:
     # the ``< seq_len`` cap masking the tail). Register-tiled symbolic axes mask their tail
     # cell (clamp-read + guarded write) in ``lowering/kernel``.
     # Wrap the lifted node + its unmapped placement in an UNMAPPED ``TileOp`` — recognition's
-    # OUTPUT. ``020_schedule`` picks it up on the next rule sweep, maps the free axes onto the grid
+    # OUTPUT. The schedule picks it up on the next rule sweep, maps the free axes onto the grid
     # and offers the per-axis scheduling forks (``REDUCE`` partition / ``TILE`` output tile).
     # ``inputs`` is seeded from the matched ``LoopOp`` (the matcher populated its real Tensors) so
     # the scheduler can read operand shapes (the shared-row stage detection); the matcher refreshes
@@ -435,7 +435,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | None:
     if seam is not None:
         return realize_cut(match, root, route_tree, route_free, route_stores, seam)
     # Recognition ends here: the UNMAPPED tile is the rewrite's result. The MONOID-producer
-    # composition (``pro``) is re-derived by ``020_schedule`` — it is a decision about the SCHEDULE
+    # composition (``pro``) is re-derived by the schedule — it is a decision about the SCHEDULE
     # (which of the two readings of this one loop each fork row realizes), not about the structure,
     # and it needs the schedule results to arbitrate (a warp ``TILE`` pin keeps the contraction
     # rows alone; a contraction form with no legal row demotes back to the PLANAR reduce).

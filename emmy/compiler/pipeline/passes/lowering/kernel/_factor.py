@@ -38,7 +38,7 @@ strategy + the one :func:`~...kernel._stage.staged_kloop`); the ONE atom-agnosti
 It is driven off the node's ``STAGE`` codec →
 :class:`~...schedule.Stage` (``d<depth>`` gmem→smem ring · ``sync``/``cp``/``tma`` transport ·
 ``p<n>`` smem→register double-buffer). The **scalar** contraction tier stays gmem-direct. The fused
-norm→linear **shared-row** prologue is Stage-driven too: ``020_schedule`` detects the reused input row
+norm→linear **shared-row** prologue is Stage-driven too: the schedule detects the reused input row
 and stamps a ``sync`` :class:`~...schedule.Stage` whose ``smem`` names it; :func:`_tile_reduce_axis` only
 applies it (the 1-D ``sync_row_fill`` + the load rewrite). Leading ``_`` so the pass loader skips this
 module."""
@@ -783,7 +783,7 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
 
     # Shared-row staging (the fused norm→linear prologue): an input row folded by the cooperative
     # reduce AND re-read per output column of a contraction tail rides a first-class ``sync``
-    # :class:`Stage` whose ``smem`` names the row — DETECTED scheduler-side (``_schedule._row_stage``)
+    # :class:`Stage` whose ``smem`` names the row — DETECTED scheduler-side (schedule-side)
     # and only APPLIED here: fill the row into smem once (cooperatively) and rewrite both readers to
     # the slab. Only the cooperative tier (coop > 1) is ever stamped; a contraction operand ``Stage``
     # (the coop-K matmul's pinned pipeline) never sets ``smem``, so it passes through untouched.

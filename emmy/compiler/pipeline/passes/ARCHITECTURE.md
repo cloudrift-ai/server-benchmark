@@ -7,6 +7,30 @@ specializations**: it dispatches on the fold algebra (`MAP` / `SEMIRING` / `MONO
 (matmul / pointwise / attention) — flash attention is the `MONOID` algebra on the streaming schedule (a twisted
 monoid is a monoid), selected structurally, not a distinct kind.
 
+## The tile SCHEDULER is currently absent
+
+Schedule **enumeration and composition** — the step that decided a `TileOp`'s `place` (free axes → grid) and its
+`schedule` slices, and offered them as a fork — has been REMOVED to clear the ground for a demand-driven recursive
+enumerator over the stored term. What went: the whole-tree candidate paths (the contraction tile × stage × raster
+product, the reduce-partition families, the computed-A rows, the flash form fork, the pin-narrowing and demotion
+backtracking) and the rule that drove them.
+
+What did NOT go, and is the contract the replacement must meet:
+
+- **Recognition** (`010_recognize`, `_flash`, `_softmax`, `_atomize`, `_cut`) — unchanged. It still emits an
+  UNMAPPED `TileOp` carrying the term and its free axes.
+- **The codec** — `TILE` / `REDUCE` / `STAGE` / `WORK` / `RASTER` value grammars, the tree-path key codec
+  (`ir/tile/path.py`), the typed slices (`TilePlan` / `ReducePlan` / `Stage` in `ir/schedule.py`), the move catalog
+  (`search/space.py`), `seal_workers`, and every stored/golden spelling. Frozen; a scheduler that changes a
+  spelling is wrong by definition.
+- **The materializer** (`lowering/kernel/*`) and the split rewrite (`030_split_reduce`) — unchanged. They consume
+  the same schedule slices off the `TileOp`.
+
+Consequence: nothing today maps a `TileOp`, so every compile that reaches scheduling fails. Those tests are
+xfailed through `tests/xfail_registry.py`, whose node-id list is the acceptance obligation for the new scheduler —
+it shrinking to empty is the completion gate. Passages below that describe enumeration families and their legality
+gates are kept deliberately: they are the behavior to reproduce, not code that exists right now.
+
 ## No shape-specific pattern matching
 
 A pass must not dispatch on enumerated shapes ("if this is the gated-MLP body do X, if it is the QK^T body do Y").
@@ -50,14 +74,14 @@ coverage until that entire cone has been measured.
 ## Resolve the hardware-atom binding once, structurally, at the tile level
 
 The same invariant applies *across* the tile→kernel boundary: the kernel materializer must not re-recognize structure
-the tile IR already holds. The **atomize** step (`lowering/tile/_atomize.py`, called from `020_schedule` when it builds
-the warp / register-tiled option — *not* a standalone pass) resolves the algebra→hardware-atom binding once at
+the tile IR already holds. The **atomize** step (`lowering/tile/_atomize.py`, called when a warp / register-tiled option is built — *not* a
+standalone pass) resolves the algebra→hardware-atom binding once at
 RECOGNIZE time (`010_recognize._nodify_contraction` / `_atomize.bind_prologue_contraction`) and feeds it into the
 `Contraction`, so materialize reads the operands /
 `acc` off the node and only `factorize`s (the projection is peeled off the wrapping `Map` — its one home). Resolving it
 before the schedule means an atom that **cannot** be
 bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) never becomes a node at all: it keeps the `Map`
-form, and the fork's `_view.contraction_view` declines it (alongside `_check_warp_static_k`) instead of failing several
+form, and the placed contraction reading declines it instead of failing several
 passes later:
 
 - a `CONTRACTION` contraction → the `(a, b, acc, projection)` operand→role facts
@@ -148,9 +172,9 @@ passes later:
   N-component product-monoid accumulator set) — a product-monoid fold: components never interact
   per step; the combine — SwiGLU — is projection, riding the wrapping `Map.fn`. Channels whose B layouts disagree
   were never legally fusable, so they simply never product (a formation gate, not a node assert).
-  `020_schedule` offers it as a fork SIBLING of the
+  It is offered as a fork SIBLING of the
   cooperative reduce form (option-0 stays the coop row; the warp mma rows ride the mandatory `sync` compute-fill;
-  dtype / geometry legality stays schedule-side in `_computed_a_rows`). This retired the pin-only
+  dtype / geometry legality stays schedule-side). This retired the pin-only
   `_prologue_warp_option` rescue. The **degenerate M=1** composition (per-token decode: the unit row axis elided,
   `free = ()`) binds too — a synthesized unit free axis keeps the column grid; without it the fused kernel
   schedules at grid 1, ~300× off the memory floor. SSA renames track the stored algebra through the `Fold`
@@ -159,7 +183,7 @@ passes later:
 - a cooperative / ILP reduce (`PLANAR` / `TWISTED`, or a non-output-tiled `CONTRACTION`) needs **no** binding here — its
   accumulator dtype + the shuffle/tree fold mechanism are **derived** at materialize time (`emit_combine` off the fold
   node's `Reduction` view + `ReduceStage.combine`), never stored. Its one schedule-time staging decision follows the same
-  resolve-once-structurally rule: `_schedule._row_stage` detects the fused norm→linear shared row when the cooperative
+  resolve-once-structurally rule: the schedule detects the fused norm→linear shared row when the cooperative
   partition is chosen and stamps a `sync` `Stage` naming it (`smem`) on the `TileOp` — a derived schedule field, not a
   knob — so `_factor._tile_reduce_axis` only applies it, never re-detects.
 
@@ -230,9 +254,8 @@ finalize MODE, not an axis token). `seal_workers` (`ir/tile/ops.py`) is the one 
 band off the resolved `WarpSpec`, failing loudly on cross-site disagreement (one kernel, one inventory; a 1-thread
 register-strip inventory stays empty — per-cell launch geometry remains derived). The enumeration itself speaks
 TYPED SLICES end to end — the `search/space.py` catalogs hand out `TilePlan` / `ReducePlan` objects built
-structurally, and env pins resolve into the same objects ONCE at the top (`_schedule._pinned_tile` /
-`_pinned_reduce`) — so a codec string is spelled exactly once per family, where a row becomes stored state
-(`_schedule._site_row` for fork rows, `_site_knobs` for the stamped `TileOp.knobs`). `_materialize`
+structurally, and env pins resolve into the same objects ONCE at the top — so a codec string is spelled exactly once per family,
+where a row becomes stored state (the fork row and the stamped `TileOp.knobs`). `_materialize`
 dispatches warp-vs-scalar on the PARSED plan, and `resolve_site_tile` is the one rule disambiguating an empty site
 `TILE` beside a thread `WORK` from the coop tier. The retired embedded-worker spellings RAISE — the worker widths
 have one home, so a value carrying its own cannot decode into a second, self-contained reading that silently
@@ -291,7 +314,7 @@ f32-accumulate HMMA runs at HALF the f16-accumulate rate, so this atom keeps the
 accumulator and the lowering promote-folds the packed f16 partials into f32 shadow fragments per K chunk
 (`FragmentPromote` — the staged bk slab is the cadence; gmem-direct promotes every `_atom._F16ACC_STEPS` steps plus a
 final fold; flash promotes the P@V accumulator per streaming KV block, folded in at the `O·α` rescale point, while the
-score node ALWAYS stays f32-accumulate). Precision-gated enumeration, off by default: `_schedule._f16acc_allowed` —
+score node ALWAYS stays f32-accumulate). Precision-gated enumeration, off by default —
 the precise `EMMY_F16_MMA_F32_ACC` pin is authoritative on any target, else the `EMMY_FAST_MATH` umbrella offers it on
 the consumer-die ccs only (`_F16ACC_CCS`); a `TILE` pin naming the atom (or the flash golden's axis-keyed
 `TILE@<pv_k>` spelling) bypasses the gate — pins are authoritative. The realized fork is identified by the `TILE`
@@ -299,14 +322,14 @@ codec's atom token and priced by the `MMA_acc_bits` feature; f16 only (mma.sync 
 
 **The move catalog** (`search/space.py`) is the permitted-move enumeration the schedule emit forks over, keyed on
 `AxisRole`: `scalar_tile_moves()` is the legality-guarded scalar register-tile product (`par × reg`, `block_threads ≤
-1024`) with per-cell `""` as the conservative option-0, crossed with the warp / reduce / stage move families by
-`_schedule._tile_rows` for an unpinned contraction so `compile` / `tune` explores the space (each row → a structural
+1024`) with per-cell `""` as the conservative option-0, crossed with the warp / reduce / stage move families
+for an unpinned contraction so `compile` / `tune` explores the space (each row → a structural
 contraction-fold leaf keyed `TILE@<k_axis>` in a hierarchical `build_fork_tree`; an env pin wins via `Knob.narrow`).
 `wspec_moves()` is the fourth level (the producer band; option-0 `""` = uniform SIMT — since step 7 a resolved band
 is spelled in `WORK`'s `+p<n>` suffix, never a per-row `WSPEC` key) — offered only on a warp row over a
 resolved **TMA** stage without a cross-CTA split, and resolved/thread-budget-gated at materialization
 (`_wspec_workers`; an ineligible spec degrades to uniform). A computed-A (fused-cone) contraction enumerates its own
-warp-only rows (`_schedule._computed_a_rows` — the mandatory resolved `sync` compute-fill stage at BOTH depths
+warp-only rows (the mandatory resolved `sync` compute-fill stage at BOTH depths
 (`d1` + the asymmetric B-only prefetch ring `d2` as fork siblings — the M=512 occupancy loss inverts at decode M,
 so the depth is measured per shape), crossed with the shared `RASTER` launch-order candidates (its B stripes
 re-stream per M-tile row, exactly the grouped order's L2 reuse — `gn8` measured −8% on the gemma gate_up fused
@@ -324,7 +347,7 @@ structurally-different schedules as ONE prior-ranked fork — the warp (fragment
 `twisted_warp_moves()`'s `(warps-per-CTA × key-atoms-per-block × query-tiles-per-warp)` geometry grid (option-0 = the
 conservative one-warp / `2·atom_n` block / one tile; the third dimension is the `TILE` codec's `f<FM>x<FN>` reg_m —
 each warp streams `fm` independent `(m, l, O)` chains against shared K/V fragments, FA-2's in-flight ILP; the Q@K /
-P@V mma `TilePlan`s are derived per point, `_schedule._twisted_warp_options`), the scalar
+P@V mma `TilePlan`s are derived per point), the scalar
 register-vector CHAIN (the FA-2 shared-score form), then the cooperative / per-cell reduce-partition escapes — every
 leaf row spelling the same `TILE@<qk_k>` / `TILE@<pv_k>` / `REDUCE@<kv>` key set plus its ONE `WORK` inventory
 (decided-empty where a form doesn't tile). A cross-CTA `REDUCE=g<n>k` pin selects the **flash split-KV** warp rows
@@ -344,10 +367,10 @@ under `g2k` on the 5090). Any
 other non-empty `REDUCE` pin remains the scalar escape; a **warp** `TILE` pin keeps the mma rows alone (loud on a
 divisibility violation, declining with a log line when the pin doesn't fit the flash form — a bare warp pin may target
 another kernel), while a non-warp `TILE` pin narrows the flash rows by their stamped per-node spellings
-(`_schedule._narrow_flash_forms`, codec-canonicalized so `a:scalar` ≡ `""` and `f64x1` ≡ `f64`): `TILE=a:scalar` keeps
+(codec-canonicalized so `a:scalar` ≡ `""` and `f64x1` ≡ `f64`): `TILE=a:scalar` keeps
 the per-cell tier, `TILE=a:scalar,TILE@<pv_k>=f<d>` pins the CHAIN row deterministically, and an unmatched pin keeps
 the full prior-ranked fork. Each warp geometry row crosses with its **K/V operand-stage** candidates (`STAGE@<kv>` —
-`_schedule._twisted_stage_candidates`: gmem-direct option-0, then the resolver-gated cp.async AND TMA ring depths — the
+gmem-direct option-0, then the resolver-gated cp.async AND TMA ring depths — the
 batched K/V operands encode as rank-N TMA boxes with leading extent-1 dims, the load's own batch/head index exprs
 riding as origin coords; cp.async slabs take the +16 B row pad, TMA slabs stay dense under the hardware swizzle; the
 resolved `Stage` rides the `TileOp` and the streaming step becomes the `staged_kloop` drain, K/V slabs kept in each

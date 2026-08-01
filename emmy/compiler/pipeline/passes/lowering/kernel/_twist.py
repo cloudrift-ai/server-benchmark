@@ -2,7 +2,7 @@
 
 The one ``_bind`` pipeline calls :func:`realize_warp_twist` when the reduce arm's tree carries a
 warp tile (:func:`warp_source` — the stream's head :class:`Contraction` stamped with an mma
-:class:`TilePlan` by ``020_schedule``): the streaming reduce keeps its per-step values in mma
+:class:`TilePlan` by the schedule): the streaming reduce keeps its per-step values in mma
 C-fragments instead of scalars, so every piece of the scalar lowering is *realized* at the new
 residence — the fragment row of the placement-keyed fold (a within-warp ``FragmentRowReduce``
 ``__shfl`` move where the scalar tier folds in-thread):
@@ -27,7 +27,7 @@ residence — the fragment row of the placement-keyed fold (a within-warp ``Frag
   no smem round-trip, no sync; gated at schedule time);
 - the projection tail (``O / l``) realizes as an in-place ``FragmentApply`` + the ``RegStore``
   output close;
-- a resolved K/V ``Stage`` on the streaming ``Fold`` node (``_schedule._resolve_twisted_stage``,
+- a resolved K/V ``Stage`` on the streaming ``Fold`` node (resolved schedule-side,
   cp.async or TMA over a block-divisible-or-symbolic kv) re-parents the streaming step under the same
   ``staged_kloop`` skeleton the matmul tier runs: the K/V slabs fill per KV block (each in its
   operand's own layout — verbatim row copies, so staged stays bit-identical to gmem-direct) and
@@ -37,7 +37,7 @@ residence — the fragment row of the placement-keyed fold (a within-warp ``Frag
   a stamped ``WSPEC`` split rides ``_wspec_kloop`` with the wrapped elected fill tid.
 
 Nothing here keys on a kernel *identity* — the walk reads node structure, channel algebra, and the
-stamped schedule; an unrealizable tree is rejected at schedule time (``_schedule._twisted_warp_
+stamped schedule; an unrealizable tree is rejected at schedule time (the twisted warp
 option`` never stamps the warp tile), so a raise here is an invariant breach, not a fallback.
 Leading ``_`` so the pass loader skips this module."""
 
@@ -752,7 +752,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         return [s for stmts, _reads in _stream_segments(k_slot, v_slot, staged) for s in stmts]
 
     if stage is not None:
-        # The staged K/V stream: the resolved ``Stage`` (``_schedule._resolve_twisted_stage`` —
+        # The staged K/V stream: the resolved ``Stage`` (resolved schedule-side —
         # block-divisible or symbolic kv) rides the SAME ``staged_kloop`` skeleton the matmul tier
         # runs, the streaming step as its drain. The K slab keeps K's own N-major layout (``bn`` key
         # rows × head_dim) and the V slab V's K-major one (``bn`` key rows × d_v) — the fills are

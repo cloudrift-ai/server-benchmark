@@ -8,7 +8,7 @@ one of the two concrete strategies — :class:`_MmaOps` (tensor-core ``ldmatrix`
 ``RegStore`` sink) or :class:`_ScalarOps` (plain ``Load``\ s + an ``fma`` cell, the replicated-
 ``epilogue`` sink). The K-loop itself is ONE driver on the base strategy (:meth:`_AtomOps.reduce`),
 deciding nothing: the **scheduler-resolved** ``stage`` (eligibility + sizing ran once in
-``020_schedule`` — ``_resolve_warp_stage`` / ``_resolve_scalar_stage``; ``None`` = gmem-direct)
+the scheduler; ``None`` = gmem-direct)
 picks its form — gmem-direct through the shared :func:`_contract_kloop` spine, or staged through
 the shared :func:`_staged` fill→drain skeleton (over the one ``_stage.staged_kloop``) — and the
 atom supplies only descriptor reads: the four gmem leaf constructors (:meth:`gmem_leaves`), the
@@ -531,7 +531,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     :class:`Transport` (a cp.async prefetch ring or the TMA box-copy producer) and run the one
     :func:`staged_kloop`; the atom supplies only the slab drain leaf (:meth:`_AtomOps.staged_drain`
     — ``ldmatrix`` + ``mma.sync`` vs plain-``Load`` fma) and the slab element dtype. ``ops.stage``
-    is the **scheduler-RESOLVED** stage (``_schedule._resolve_warp_stage`` / ``_resolve_scalar_stage``
+    is the **scheduler-RESOLVED** stage (the scheduler
     ran eligibility + sizing once) — its ``transport`` / ``bk_elems`` / ``depth`` / ``reg_depth``
     are applied verbatim, no decision here. A pure perf transform, numerically identical to
     gmem-direct (mma: bit-identical). ``depth == 1`` is the single-buffer degenerate; ``depth >= 2``
@@ -729,7 +729,7 @@ def _scalar_drain(
 class _AtomOps:
     """The per-atom codegen **strategy** — the one seam every tiled contraction dispatches through.
     Bound to the contraction ``c`` + its **scheduler-resolved** operand ``stage`` (``None`` =
-    gmem-direct; eligibility + sizing already ran in ``020_schedule``) and ``inputs``, it supplies
+    gmem-direct; eligibility + sizing already ran schedule-side) and ``inputs``, it supplies
     the three ``grid_tile`` callables — ``state(cells)`` (accumulator decls), :meth:`reduce` (the
     K-loop — **shared on this base**, one loop over atoms), ``store(i, j, offset, mn)`` (the
     per-cell sink; ``mn`` is the contraction's ``(m, n)`` :class:`Side` pair). The two concrete

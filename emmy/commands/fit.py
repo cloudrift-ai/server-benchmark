@@ -1,9 +1,9 @@
 """``emmy fit`` — fit an offline-prior artifact and cross-validate it, writing a per-run
 metrics file.
 
-The Phase-4 fitter entry point: one pipeline, two orthogonal switches — ``--trainer``
-(model class) × ``--data`` (training data). Only the ``linear`` × ``golden`` cell exists
-today (the incumbent trainer on the golden dataset); the other cells arrive with the
+The fitter entry point: one pipeline, two orthogonal switches — ``--trainer``
+(model class) × ``--data`` (training data). Only the ``linear`` × ``golden`` combination exists
+today (the incumbent trainer on the golden dataset); the other combinations arrive with the
 measurement-freeze training work and until then are rejected loudly.
 
 A run writes ``<out>/metrics.json`` — the deterministic, diff-able record two fits are
@@ -104,8 +104,8 @@ def _snippet_rows(snippet: str, ctx: Context) -> list[dict]:
     trace) and capture the RESTORED schedule fork's leaf rows via the same live-fork capture the
     matmul path uses (``golden_eval.enumerate_graph``). A reduce offers its ``REDUCE@<axis>``
     partitions; a pointwise kernel forks nothing today, so its pool is empty and the golden is
-    reported un-enumerable (an honest read of the live space, not a reconstruction of the
-    demolished one)."""
+    reported un-enumerable — reflecting the live search space rather than reconstructing
+    one that no longer exists."""
     from emmy.commands.trace import graph_from_code  # noqa: PLC0415
 
     graph = graph_from_code(snippet)[0]
@@ -125,11 +125,11 @@ def build_golden_groups(features_spec: str = DEFAULT_FEATURES) -> tuple[list[Gro
     pool ``eval offline`` and the greedy deploy rank over (fp32 → thread tier,
     fp16/bf16 → warp tier; the block-DAG rework moved the scalar↔warp choice to a
     structural fork, so a real fp16 matmul ranks within the warp tier alone, no
-    scalar rows in the pool). A dynamic (``.dynM``) golden enumerates its hint-sized
-    static twin's pool and featurizes with the symbolic-axis stamp (its own weight
-    set). Reduce / pointwise goldens trace their snippet and capture the restored
+    scalar rows in the pool). A dynamic (``.dynM``) golden enumerates the pool of its
+    static counterpart at the hint size and featurizes with the symbolic-axis stamp
+    (its own weight set). Reduce / pointwise goldens trace their snippet and capture the restored
     schedule fork's rows (``_snippet_rows``); a regime the live tree doesn't fork
-    (pointwise) reports un-enumerable rather than reconstructing the demolished space.
+    (pointwise) reports un-enumerable rather than reconstructing a search space that no longer exists.
 
     Each golden is reconstructed under its OWN card's context
     (``Context.from_target(cap, gpu_name=…)``, mirroring ``Sample.from_golden``):
@@ -157,7 +157,7 @@ def build_golden_groups(features_spec: str = DEFAULT_FEATURES) -> tuple[list[Gro
             dyn = bool(g.dynamic)
             base = _base(ctx, g.M, g.N, g.K, dynamic=dyn)
             # A fast-math golden's row only exists in the gate-on enumeration (the same
-            # self-gating seam as ``golden_eval.evaluate_golden``) — pin the gate for the
+            # gate pinning ``golden_eval.evaluate_golden`` uses) — pin the gate for the
             # reconstruction so the f16-accumulate rows are present and the fit anchors
             # their ``MMA_acc_bits`` discriminator.
             if g.fast_math:
@@ -177,8 +177,9 @@ def build_golden_groups(features_spec: str = DEFAULT_FEATURES) -> tuple[list[Gro
             continue
         # Match the legacy-recorded golden against the native candidate rows by
         # schema-agnostic structural signature (free-axis slots + reduce decomp +
-        # atom) — the candidates speak native ``MOVE@element``, the golden YAML legacy
-        # GEMM-letters, so a per-key tuple compare never lines up.
+        # atom) — the candidate rows use the native ``MOVE@element`` keys while the
+        # golden YAML records legacy GEMM-letter keys, so comparing key-value tuples
+        # directly never matches.
         want = features.tile_signature(g.knobs)
         gidx = next((i for i, r in enumerate(rows) if features.tile_signature(r) == want), None)
         if gidx is None:

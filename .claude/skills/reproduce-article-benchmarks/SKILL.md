@@ -250,6 +250,9 @@ Judge deltas honestly:
   comparisons each deviation weakens. A best-effort reproduction is a legitimate result; an undisclosed one is not.
 - **Say what you did not measure.** Recipes skipped, cells that failed, tables with no backing recipe, a
   command-recipe-only run that never touched the image question. Silence reads as coverage.
+- **Use established terminology only** — terms from the repo-root `GLOSSARY.md`, other established repo/field
+  terms, or plain language. Do not coin labels; before delivering the report, replace any invented term with the
+  correct established term or a plain-word explanation.
 
 ## Common pitfalls
 

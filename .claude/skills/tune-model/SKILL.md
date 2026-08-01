@@ -211,6 +211,9 @@ doc's structure:
   online ⇒ training data / calibration). Never paste raw eval output or quote an unlabeled "prior" number.
 - **Repro / artifacts** tail: log + dump locations and copy-pasteable repro blocks (compile-only repros that
   need no GPU are the most valuable).
+- **Use established terminology only** — terms from the repo-root `GLOSSARY.md`, other established repo/field
+  terms, or plain language. Do not coin labels; before saving, re-read the report and replace any invented term
+  with the correct established term or a plain-word explanation.
 - Wrap to ~120 chars (repo-wide markdown rule); tables may overflow.
 
 ## Step 6 — workflow retrospective (always include)

@@ -96,6 +96,8 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   synthesized contraction node — a twisted monoid is a monoid,
   selected structurally not as a distinct kind) →
   [`emmy/compiler/pipeline/passes/ARCHITECTURE.md`](emmy/compiler/pipeline/passes/ARCHITECTURE.md)
+- **Terminology** (the stable vocabulary for comments, docs, reports, and user-facing text) →
+  [`GLOSSARY.md`](GLOSSARY.md)
 
 When the user asks about a CLI flag, recipe field, or matrix combinator, read the relevant ARCHITECTURE.md before
 answering — they hold the detail that is no longer in this file or the README.
@@ -202,6 +204,10 @@ These are invariants — they hold for every doc change, no exceptions:
   and rot immediately. Name a module/symbol only when it is a genuine entry point, and refer to it by name, not line.
 - **CLAUDE.md routes; it does not duplicate.** Each subsystem's detail lives in its nearest `ARCHITECTURE.md`; CLAUDE.md
   points there. Do not re-enumerate the CLI, env vars, or any reference list that already has a canonical home.
+- **Only use established terminology — [`GLOSSARY.md`](GLOSSARY.md) is the stable vocabulary.** In code comments,
+  documentation, reports, commit messages, PR bodies, and when communicating with the user, use glossary terms, other
+  established repo/field terms, or plain language. Never coin new labels; replace any invented term with the correct
+  established term or a plain-word explanation.
 
 **Wrap every `.md` file in the repo to ~120 characters.** This includes `README.md`, every `ARCHITECTURE.md`, every file
 under `docs/`, and any other markdown anywhere in the tree. Do NOT wrap at 70–80 characters — that is the default
@@ -231,12 +237,15 @@ You MUST complete ALL of the following checks before every commit. These are not
 8. **Prune `plans/`**: if the change executed/landed a plan, **delete that plan file**. Then enforce the cap — if
    `plans/` holds more than 10 files, remove the executed/obsolete ones; if all remaining plans are still incomplete,
    remove the oldest. Never add a `plans/*.md` reference to durable docs or code (see Documentation Conventions).
-9. **Run tests**: `make test` — fix any failures before proceeding
-10. **Run linter**: `make lint` — if it fails, run `make format` and re-check
+9. **Check terminology**: review every text this change adds or edits — code comments, docstrings, docs, report
+   text, the commit message and PR body — against [`GLOSSARY.md`](GLOSSARY.md). Remove any invented terms and
+   replace them with the correct established term or a plain-word explanation (see Documentation Conventions).
+10. **Run tests**: `make test` — fix any failures before proceeding
+11. **Run linter**: `make lint` — if it fails, run `make format` and re-check
 
 ### Submitting
 
-11. Push and open a PR
+12. Push and open a PR
 
 # Behavioral Guidelines:
 

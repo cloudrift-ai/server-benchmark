@@ -52,7 +52,7 @@ def eval_weights(mats: list[np.ndarray], gidx: list[int], w: np.ndarray) -> list
 
 def l2_penalty(w: np.ndarray, sd: np.ndarray) -> float:
     """Sum of squared RAW-space weights for a z-space weight vector (raw = w_z / sd, the
-    artifact spelling — see :func:`raw_weights`). Unweighted by any λ: the loss composes
+    format the artifact stores — see :func:`raw_weights`). Unweighted by any λ: the loss composes
     it as ``objective + l2 * l2_penalty``."""
     return float(np.sum((w / sd) ** 2))
 
@@ -131,7 +131,7 @@ def raw_weights(names, best_w, sd) -> dict[str, float]:
 @dataclass
 class TwoStageFit:
     """One trainer invocation's fitted weight sets, in raw-feature space
-    (:func:`raw_weights` — the artifact spelling). ``dyn_raw`` / ``dyn_ranks`` are
+    (:func:`raw_weights` — the format the artifact stores). ``dyn_raw`` / ``dyn_ranks`` are
     ``None`` when the input had no dynamic cases: the CALLER decides the fallback
     (the script carries the incumbent's dynamic set forward; a CV fold treats the
     set as unfittable rather than silently substituting a stale vector)."""
@@ -143,8 +143,8 @@ class TwoStageFit:
 
     def score_rows(self, group: Group) -> np.ndarray | None:
         """The group's per-row linear scores (higher = predicted faster) under the raw
-        weight sets — the artifact-spelling scoring, exactly what the shipped prior
-        ranks with (away from the interaction gates). The static-vs-dynamic weight-set
+        weight sets — scored exactly as the shipped prior ranks, in the format the
+        artifact stores (away from the interaction gates). The static-vs-dynamic weight-set
         selection lives HERE and nowhere else on the fit side. ``None`` when the group
         needs the dynamic set and this fit has none (an unfittable fold — callers
         exclude it up front)."""

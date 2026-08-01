@@ -112,8 +112,8 @@ class OnlinePrior(Prior):
         return float(np.exp(self._model.predict(x)[0]))
 
     def mean_scores_features(self, feats_list: list[dict]) -> list[float]:
-        """The featurized half of :meth:`mean_scores` — also the seam the attribution
-        diagnostics mask through: a deleted key fills to ``NaN``, CatBoost's absent
+        """The featurized half of :meth:`mean_scores` — also the entry point the
+        attribution diagnostics mask features through: a deleted key fills to ``NaN``, CatBoost's absent
         semantics. NOTE: masked queries are out-of-distribution for a model trained
         without feature dropout (the attribution caller flags this) — the planned
         offline fitter's masking augmentation is what makes them honest."""
@@ -129,7 +129,7 @@ class OnlinePrior(Prior):
     def to_json(self) -> dict | None:
         """Serialize the CatBoost model (native ``cbm`` blob, base64'd) + the
         reservoir dataset + counters (``None`` when there's nothing yet).
-        ``feat_ver`` stamps the knob vocabulary the rows are spelled in
+        ``feat_ver`` records which featurizer version's feature names the rows use
         (:data:`~emmy.compiler.pipeline.search.features.FEATURIZER_VERSION`);
         ``calibration`` carries the last fit's reservoir Spearman so a loaded
         checkpoint keeps its ``trustworthy`` verdict."""
@@ -150,15 +150,15 @@ class OnlinePrior(Prior):
         """Reconstruct a checkpointed prior from :meth:`to_json` — model (for
         inference / warm-start) plus the reservoir dataset (so a tune keeps
         accumulating). A checkpoint from another ``FEATURIZER_VERSION`` is dropped
-        WHOLE — model and rows alike: its rows are spelled in a knob vocabulary this
-        featurizer can't read, and a model refit on them collapses to constant
+        WHOLE — model and rows alike: its rows use feature names this featurizer
+        version can't read, and a model refit on them collapses to constant
         predictions (worse-than-random ranking; the 2026-07 tile-IR rebuild's
         stale-checkpoint failure). A missing stamp means the retired version 1.
         Otherwise tolerant of a stale checkpoint: an incompatible / corrupt
         model blob is dropped (the rows are still salvaged and a refit rebuilds
         the model), so e.g. a pre-CatBoost prior file migrates instead of crashing."""
         if int(obj.get("feat_ver", 1)) != FEATURIZER_VERSION:
-            return cls()  # cross-vocabulary checkpoint — start fresh
+            return cls()  # checkpoint from another featurizer version — start fresh
         p = cls()
         p._cols = obj.get("cols")
         cal = obj.get("calibration")

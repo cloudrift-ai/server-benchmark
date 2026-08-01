@@ -2,16 +2,16 @@
 
 A group is one shape's featurized candidate pool on one card, with whatever supervision exists for it. Today
 that supervision is a single pinned verified-optimum row (``pinned_idx`` — the golden's index in the pool);
-the freeze-trained cells add per-row measured labels when they land, so builders other than the golden case
-builder can populate groups from measurement sources. Groups are built by plain functions (the golden builder
+the planned measurement-freeze datasets add per-row measured labels when they land, so builders other than the
+golden case builder can populate groups from measurement sources. Groups are built by plain functions (the golden builder
 lives in ``emmy/commands/fit.py`` — case building needs the snippet tracer, which ``pipeline/`` must not
 import) and consumed by trainers and the CV harness through this one shape; there is no iterator/batching
 layer — the whole dataset is a small in-memory list.
 
 Rows are ndarray-backed, not dict-backed: ``feats`` is one float64 matrix (rows × ``feat_names``), packed
 once by :meth:`Group.from_dicts` from the builder's transient per-row feature dicts. A per-row dict of ~63
-floats costs ~4 KB; the full golden dataset is ~2.5 M rows, and the dict spelling (~10 GB) OOM-killed whole
-fit runs — the matrix spelling is ~20× smaller and :meth:`matrix` reproduces ``feats.get(k, 0.0)`` semantics
+floats costs ~4 KB; the full golden dataset is ~2.5 M rows, and the dict representation (~10 GB) OOM-killed whole
+fit runs — the matrix representation is ~20× smaller and :meth:`matrix` reproduces ``feats.get(k, 0.0)`` semantics
 bit-identically (an absent feature is a zero column).
 
 ``key`` is ``"<gpu>/<name>"``, disambiguated by the builder when one name records several parity entries
@@ -67,7 +67,7 @@ class Group:
 
     @classmethod
     def from_dicts(cls, key: str, name: str, tier: str, gpu: str, pinned_idx: int, feats: list[dict[str, float]]) -> Group:
-        """Pack per-row feature dicts into the matrix spelling: ``feat_names`` is the sorted
+        """Pack per-row feature dicts into the matrix representation: ``feat_names`` is the sorted
         union of the pool's keys, the matrix a column per name (absent key = 0.0). Callers
         drop the dicts after this — the matrix is the stored representation."""
         names = tuple(sorted({k for f in feats for k in f}))
@@ -76,7 +76,7 @@ class Group:
     def matrix(self, names: list[str]) -> np.ndarray:
         """The pool projected onto ``names`` — column ``j`` is the stored ``names[j]`` column,
         or zeros when the pool never saw that feature: exactly ``feats.get(k, 0.0)`` per row,
-        so scoring/fitting against any name vocabulary matches the dict spelling bit for bit."""
+        so scoring/fitting against any feature-name list matches the per-dict representation bit for bit."""
         idx = {n: j for j, n in enumerate(self.feat_names)}
         out = np.zeros((len(self.feats), len(names)))
         for j, n in enumerate(names):

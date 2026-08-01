@@ -2,10 +2,10 @@
 
 The warp matmul materializer needs to know which operand is the mma ``a`` vs ``b`` (by
 axis-in-index), the fold accumulator, and the projection epilogue.
-:func:`semiring_binding` reads them **structurally** off the lowered ``CONTRACTION`` reduce loop
+:func:`bind_contraction` reads them **structurally** off the annotated ``CONTRACTION`` reduce loop
 — the operand ``Load``\\ s indexed over the K axis, the fold ``Accum`` target — and returns them as
-the ``(a_load, b_load, acc, epilogue)`` facts that ``_view.contraction_view`` stamps onto the
-:class:`~emmy.compiler.ir.tile.ir.Contraction` structural node at fork-emit (the node
+the ``(a_load, b_load, acc, epilogue)`` facts ``010_recognize._nodify_contraction`` stamps onto the
+:class:`~emmy.compiler.ir.tile.ir.Contraction` structural node at RECOGNIZE time (the node
 is then the single source of truth — it re-derives ``b_trans`` off ``b`` itself). Reading the
 binding **structurally** off the annotated loop — not a stored node kind — is what keeps the ⊗/⊕
 algebra a property of the loop, so no per-algebra op-tree node class is needed. The cooperative reduce
@@ -159,23 +159,6 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
     return a_leaf, b_leaf, acc, epilogue
 
 
-def semiring_binding(node, grid) -> tuple[Load | list, Load, str, Body]:
-    """The root contraction's ``(a_load, b_load, acc, epilogue)`` facts: lower ``node`` to loop-IR,
-    find its ``CONTRACTION`` reduce loop, take the projection ``epilogue`` (the stmts after the loop
-    — the ``Map`` body, or empty for a bare contraction), and delegate to :func:`bind_contraction`.
-    ``node`` is the kernel op, ``grid`` the placement's output axes."""
-    if len(grid) < 2:
-        raise LoweringError("warp tier: contraction output needs an (m, n) grid")
-    from emmy.compiler.ir.tile.ops import lower  # noqa: PLC0415 — avoid an import cycle
-
-    stmts = lower(node)
-    ridx = next((i for i, s in enumerate(stmts) if isinstance(s, Loop) and s.role is AxisRole.CONTRACTION), None)
-    if ridx is None:
-        raise LoweringError("warp tier: no contraction loop to bind")
-    epilogue = Body(tuple(stmts[ridx + 1 :]))
-    return bind_contraction(stmts[ridx], grid[-2].name, grid[-1].name, epilogue)
-
-
 def _cone_value_key(name: str, defs: dict) -> tuple:
     """The canonical value tree of SSA ``name`` within a k-loop body — Loads keyed by (buffer,
     index), Assigns by (op, child keys), a name defined outside the body by itself. Two folds
@@ -327,4 +310,4 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Map, Axis, tuple] | None
     return Map(body=Body((*prefix, *tail_ops)), sources=(node,)), n_ax, (Store(write=write),)
 
 
-__all__ = ["bind_contraction", "bind_prologue_contraction", "make_cone", "map_cone", "semiring_binding"]
+__all__ = ["bind_contraction", "bind_prologue_contraction", "make_cone", "map_cone"]

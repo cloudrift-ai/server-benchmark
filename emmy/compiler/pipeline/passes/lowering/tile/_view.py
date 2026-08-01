@@ -3,10 +3,12 @@
 :mod:`~emmy.compiler.pipeline.passes.lowering._placed` owns the view TYPE — a stored
 :class:`~emmy.compiler.ir.tile.ir.Contraction` bound to its caller's placement + schedule facts.
 This module owns the two CONSTRUCTORS that read those facts off a recognized tree: the tiled
-contraction leaf (:func:`contraction_view`, seam #1 — a still-``Map`` form is BOUND here, so the
-node itself is built at fork-emit) and the flash streaming pair (:func:`twisted_pair`). Both are
-pure readings: they take an op tree + a placement and return views, deciding no schedule and
-stamping no ``TileOp`` — that stays with ``_schedule``, their one caller.
+contraction leaf (:func:`contraction_view`) and the flash streaming pair (:func:`twisted_pair`).
+Both are pure readings: they take an op tree + a placement and return views, deciding no schedule
+and stamping no ``TileOp`` — that stays with ``_schedule``, their one caller. Neither BUILDS a
+node: every contraction is nodified recognize-side (``010_recognize._nodify_contraction`` /
+``_atomize.bind_prologue_contraction``), so a tree that reaches here without one is not schedulable
+as a contraction and ``contraction_view`` declines with ``LoweringError``.
 
 A view is the TILED CELL's reading — the node, the ``(m, n)`` output axes and a ``TilePlan``. The
 schedule's legality gates (the smem slot sizing, the N-mask / TMA-box refusals, the block-thread
@@ -27,26 +29,28 @@ from __future__ import annotations
 
 from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.schedule import TilePlan
-from emmy.compiler.ir.stmt import Body, Load
-from emmy.compiler.ir.tile import Channel, Contraction, Fold, Map
-from emmy.compiler.ir.tile.ops import reduce_loop
+from emmy.compiler.ir.stmt import Body
+from emmy.compiler.ir.tile import Contraction, Fold, Map
 from emmy.compiler.pipeline.passes.lowering._placed import Placed
 from emmy.compiler.pipeline.passes.lowering._placed import place as place_view
-from emmy.compiler.pipeline.passes.lowering.tile._atomize import make_cone, semiring_binding
+from emmy.compiler.pipeline.pipeline import LoweringError
 
 
 def contraction_view(node, place, tile_plan: TilePlan) -> tuple[Placed, Body]:
-    """The high-level :class:`Contraction` structural node for a tiled ``CONTRACTION`` leaf. A
-    kernel recognition already nodified (the per-cell scalar contraction — ``_nodify_contraction``
-    in ``010_recognize``) only swaps the ``tile`` schedule field; a still-``Map`` form (a fused /
-    flash-side contraction) is bound here at fork-emit (seam #1): the ``(a_load, b_load, acc,
-    epilogue)`` operand→role facts resolve structurally (:func:`semiring_binding`) — raising
-    ``LoweringError`` on an unbindable atom — plus the resolved ``tile_plan`` from the schedule
-    fork, and the (m, n) output / K axes off the ``Map``. Returns ``(node, projection)`` — the
-    projection has ONE home, the wrapping ``Map``'s body, so the option builders re-wrap it and
-    materialize peels it into the store tail (the synthesized grid-``Write`` for a bare contraction
-    stays a materialize concern — it needs ``root.output``). A computed-A cone the binding resolves
-    is stored INLINE on the ``a`` edge (:func:`make_cone`)."""
+    """The PLACED reading of a tiled ``CONTRACTION`` leaf — the recognize-side
+    :class:`Contraction` node bound to the placement's trailing ``(m, n)`` grid axes and the
+    schedule fork's ``tile_plan``. Recognition nodified every contraction
+    (``010_recognize._nodify_contraction`` for the per-cell scalar,
+    ``_atomize.bind_prologue_contraction`` for the fused cone), so this only reads: the operand→role
+    binding is NOT redone here. Returns ``(view, projection)`` — the projection has ONE home, the
+    wrapping ``Map``'s body, so the option builders re-wrap it and materialize peels it into the
+    store tail (the synthesized grid-``Write`` for a bare contraction stays a materialize concern —
+    it needs ``root.output``).
+
+    Raises ``LoweringError`` when the tree holds no placeable contraction — in practice a
+    ``Map(Contraction)`` on a 1-D grid (a matvec-shaped decode cell), whose ``(m, n)`` output pair
+    does not exist. ``_schedule`` catches it into the ``probe is None`` route: the per-cell / reduce
+    tiers, which need no view."""
     grid = list(place.grid)
     if isinstance(node, Map) and len(node.sources) == 1 and isinstance(node.sources[0], Contraction) and len(grid) >= 2:
         # The recognizer's ``Map(body=projection, sources=(Contraction,))`` spelling — the ONE
@@ -55,20 +59,9 @@ def contraction_view(node, place, tile_plan: TilePlan) -> tuple[Placed, Body]:
         return place_view(node.sources[0], grid[-2], grid[-1], tile=tile_plan), node.body
     if isinstance(node, Contraction) and len(grid) >= 2:
         return place_view(node, grid[-2], grid[-1], tile=tile_plan), Body(())
-    a_load, b_load, acc, epilogue = semiring_binding(node, place.grid)
-    kaxis = reduce_loop(node).axis
-    return (
-        place_view(
-            Contraction(
-                k_axis=kaxis,
-                a=a_load if isinstance(a_load, Load) else make_cone(a_load, kaxis.name),
-                channels=(Channel(b=b_load, acc=acc),),
-            ),
-            grid[-2],
-            grid[-1],
-            tile=tile_plan,
-        ),
-        epilogue,
+    raise LoweringError(
+        f"warp tier: no bindable contraction to place — need a (Map-wrapped) Contraction node over an (m, n) grid, "
+        f"got {type(node).__name__} on a {len(grid)}-D grid"
     )
 
 

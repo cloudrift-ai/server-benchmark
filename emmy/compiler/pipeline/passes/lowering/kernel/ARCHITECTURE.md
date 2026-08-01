@@ -15,13 +15,14 @@ kind, sealed through the one `grid_tile` finalizer (the article's "schedule sepa
 `(output-tiling) × (reduce-folding)` space:
 
 - **OUTPUT-tiled** (a contraction — warp / register tile) — the `Contraction` IS the stored node (1s,
-  `ir/tile/ir.py`), its operand→role binding resolved recognize-side (`010_recognize._nodify_contraction`; the raw
-  still-`Map` forms bind at fork-emit via `_view.contraction_view` / `_atomize.semiring_binding`), so
+  `ir/tile/ir.py`), its operand→role binding resolved recognize-side (`010_recognize._nodify_contraction` /
+  `_atomize.bind_prologue_contraction` — the ONLY nodification sites; `_view.contraction_view` just places), so
   `_bind` only **synthesizes its bare grid-`Write`** (needs `root.output`, so it can't ride the node) and
   **expands** it through the shared tiling layer (below); the leaf type selects the codegen
   (mma / scalar). An unbindable contraction (a non-`Load` operand) keeps the `Map` form and falls through to the
   degenerate arm here. (This build was a separate `005_contract` pass, then folded into materialize, and now lives
-  recognize-side so the node's `tile` / `bind` exist before scheduling — seam #1.)
+  recognize-side so the node exists before scheduling; `_view.contraction_view` only PLACES it, and declines with
+  `LoweringError` when there is no `(m, n)` grid pair to place onto.)
 - **REDUCE-tiled** (`_tile_reduce_axis`, a `PLANAR` / `TWISTED` reduce — or a non-output-tiled `CONTRACTION` — whose
   `ReducePlan` cooperates / register-folds) — the reduce axis is tiled instead: `coop` lanes across the CTA's threads
   (its unit level) and `reg` ILP chains across per-thread accumulators (its register level), then a REG-tree fold, the

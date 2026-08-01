@@ -825,7 +825,7 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], tuple[str, str, str
     head = kernel.op.sources[0] if isinstance(kernel.op, Map) and kernel.op.sources else kernel.op
     if isinstance(head, (Fold, Contraction)):
         keys = tuple(_family_key(kernel.op, f.name, head) for f in (TILE, STAGE, REDUCE))
-    else:  # a still-Map contraction (bound at fork-emit) — no node to key on; bare is canonical
+    else:  # a raw-loop-IR Map (recognition never nodified it) — no node to key on; bare is canonical
         keys = (TILE.name, STAGE.name, REDUCE.name)
     try:
         probe, proj = contraction_view(kernel.op, place, TilePlan())

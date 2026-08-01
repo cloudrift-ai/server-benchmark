@@ -51,12 +51,14 @@ coverage until that entire cone has been measured.
 
 The same invariant applies *across* the tile→kernel boundary: the kernel materializer must not re-recognize structure
 the tile IR already holds. The **atomize** step (`lowering/tile/_atomize.py`, called from `020_schedule` when it builds
-the warp / register-tiled option — *not* a standalone pass) resolves the algebra→hardware-atom binding once at fork-emit
-and feeds it into the `Contraction` (`_view.contraction_view`), so materialize reads the operands /
+the warp / register-tiled option — *not* a standalone pass) resolves the algebra→hardware-atom binding once at
+RECOGNIZE time (`010_recognize._nodify_contraction` / `_atomize.bind_prologue_contraction`) and feeds it into the
+`Contraction`, so materialize reads the operands /
 `acc` off the node and only `factorize`s (the projection is peeled off the wrapping `Map` — its one home). Resolving it
-at option-build time means an atom that **cannot** be
-bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) is rejected at fork construction, alongside
-`_check_warp_static_k`, instead of failing several passes later:
+before the schedule means an atom that **cannot** be
+bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) never becomes a node at all: it keeps the `Map`
+form, and the fork's `_view.contraction_view` declines it (alongside `_check_warp_static_k`) instead of failing several
+passes later:
 
 - a `CONTRACTION` contraction → the `(a, b, acc, projection)` operand→role facts
   (`_atomize.bind_contraction`): the operands are named by the ⊗ **lift** (the `Assign` the fold accumulates) — B is its

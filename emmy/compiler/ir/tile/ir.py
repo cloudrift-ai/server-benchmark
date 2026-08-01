@@ -1288,8 +1288,8 @@ class TileOp(Op):
     accessor); ``lower`` never sees the slices, so kernel identity (``op_cache_key``) is
     untouched. The contraction operand→role binding is not a
     ``TileOp`` field either — a tiled contraction carries its A operand / channels on
-    its stored fold (``op``), the single source of truth; ``_view.contraction_view``
-    resolves them via ``_atomize.semiring_binding``."""
+    its stored fold (``op``), the single source of truth, resolved recognize-side
+    (``010_recognize._nodify_contraction``); ``_view.contraction_view`` only PLACES that node."""
 
     op: object = None
     name: str = ""

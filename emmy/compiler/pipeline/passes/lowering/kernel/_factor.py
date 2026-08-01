@@ -58,8 +58,6 @@ from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, S
 from emmy.compiler.ir.tile import FoldMove, Level, ReducePlan, ReduceStage
 from emmy.compiler.ir.tile.ir import Contraction, Fold, Map, effect_tail
 from emmy.compiler.ir.tile.ops import cone_seam
-from emmy.compiler.pipeline.passes.lowering._placed import Placed
-from emmy.compiler.pipeline.passes.lowering._placed import place as place_view
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction, loop_state_head
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import copy_cell, reduce_codegen, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import sync_row_fill
@@ -290,29 +288,29 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None) -> Tile:
       one-thread-per-cell fold: the per-cell body (:func:`_emit`; a serial reduce ``Loop`` sits
       inside it) + ``tail`` + the ``out_val`` store glue is the whole fold region."""
     grid = tuple(ctx.grid)
-    if isinstance(op, Contraction) and ctx.sched.tile_of(op) is not None and len(grid) >= 2:
-        # The STORED node is pure algebra; the tiled reading is STAMPED here — its output axes the
-        # kernel grid's trailing pair, its tile / stage the schedule slices. Everything OUTSIDE that
-        # cell (the leading batch / ksplit grid axes) stays the grid's own fact, read off ``grid``
-        # below. A stored node WITHOUT a TILE slice takes the reduce tiers instead (the per-cell /
-        # coop-K forms), where the whole grid rides untiled.
-        op = place_view(op, grid[-2], grid[-1], tile=ctx.sched.tile_of(op), stage=ctx.sched.stage_of(op))
-    if isinstance(op, Placed):
+    # The OUTPUT-tiled dispatch: a stored ``Contraction`` whose schedule holds a TILE slice, over a
+    # grid with an ``(m, n)`` pair to place it on. The node is pure algebra; the tiled reading comes
+    # off the slice, PLACED here on the kernel grid's trailing pair (``TilePlan.at``) — so the
+    # geometry the atom reads is the slice's own, not a separate view object's. A stored node
+    # WITHOUT a TILE slice takes the reduce tiers instead (the per-cell / coop-K forms), where the
+    # whole grid rides untiled.
+    tile = ctx.sched.tile_of(op) if isinstance(op, Contraction) else None
+    if tile is not None and len(grid) >= 2:
+        c, tile = op, tile.at(grid[-2], grid[-1])
         epi = list(tail)
         if not has_write(epi):
-            epi = with_store(epi, ctx.output, grid, op.out)
-        c = op
+            epi = with_store(epi, ctx.output, grid, c.out)
         # The cone's K seam, read straight off the inline operand node (``None`` for a gmem-``Load``
         # A — its whole body is the per-cell fill).
         seam = cone_seam(c.a) if c.a_computed else None
         # The leading (batch / ksplit) grid axes ride untiled below the ``(m, n)`` cell — the GRID's
-        # fact, not the placed view's, so they are threaded to the emission that needs them (the
+        # fact, not the tiled cell's, so they are threaded to the emission that needs them (the
         # per-cell rename's shared coordinates) from here, where the kernel grid is in hand.
         lead = grid[:-2]
-        state_decls, reduce_region = reduce_codegen(c, c.stage, ctx.inputs, ctx.workers, seam, lead)
-        sink = store if store is not None else store_sink(c, Body(tuple(epi)), lead)
-        t = unit_tile(register_tile(atomize(c.atom.shape[:2]), c.mn), c.mn)
-        mn, bt, lanes = c.mn, c.block_threads, c.atom.lanes
+        state_decls, reduce_region = reduce_codegen(c, tile, ctx.sched.stage_of(c), ctx.inputs, ctx.workers, seam, lead)
+        sink = store if store is not None else store_sink(c, tile, Body(tuple(epi)), lead)
+        t = unit_tile(register_tile(atomize(tile.atom.shape[:2]), tile.mn), tile.mn)
+        mn, bt, lanes = tile.mn, tile.launch_threads, tile.atom.lanes
     else:
         # The reduce partition rides the :class:`Fold` node; ``None`` for a pure pointwise /
         # scalar per-cell ``Map`` (no partition). Every partitioned reduce — monoid, flash, coop-K /

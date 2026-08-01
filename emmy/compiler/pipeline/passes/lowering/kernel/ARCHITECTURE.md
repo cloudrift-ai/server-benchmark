@@ -47,24 +47,24 @@ register value); the **tensor-core seam** is the view arm in `_bind` — an outp
 extends `Handle` with the mma fragment descriptor `(mma_role, shape, dtype)` and `_emit`'s `Ctx` grows the warp binding +
 the inbound `wires` (flash's score fragment feeding P@V's A operand).
 
-The `Placed` view (`lowering/_placed.py`) is the stored node BOUND to the caller facts — never a copy of it with
-fields stamped on: output axes off the placement (the trailing grid for a root kernel, `Ctx.free` for the flash
-realizer), `tile`/`stage` off the `TileOp.schedule` slices, and every algebra read proxied through to the node.
-It is binding-driven for both atoms, with **no per-atom subclass**, and cleanly
-splits the **placement/schedule the view owns** (the m/n output `axes`, the `TilePlan`/`Stage`, and the `Side`
+The output-tiled arm travels as **`(node, tile)`** — the stored `Contraction` and its PLACED `TilePlan` slice. There
+is no fused view object in `_bind` / `_atom`: `_factor._bind` dispatches on "a `Contraction` with a TILE slice over a
+grid with an `(m, n)` pair", places the slice on the trailing grid pair (`TilePlan.at`) and threads the two on. It is
+binding-driven for both atoms, with **no per-atom subclass**, and cleanly
+splits the **placement/schedule the slice owns** (its `axes` and the `Side`
 geometry derived from them — the tiled CELL and nothing outside it, so the kernel's leading batch axes stay the
-grid's fact and reach the per-cell rename from `_factor`) from the **algebra the node owns** (what to
+grid's fact and reach the per-cell rename from `_factor` as its own `lead`) from the **algebra the node owns** (what to
 contract: the `k_axis`, the shared `a` operand edge plus the product `channels` `(b_i, acc_i)` — every edge a gmem `Load` (materialized) or the
 computed node itself, stored inline (flash PV's
 `P = exp(S − M)`, produced from an in-register score, not a gmem address); a projection
 is NEVER a node field, its one home is the wrapping `Map.body`. The edges share ONE type: the A/B asymmetry that is real
 — A is M-resident and compute-fillable, B is the K×N operand the loop streams — is a SCHEDULE fact, so each staged /
 mma tier states `isinstance(c.b, Load)` as an eligibility precondition and declines a computed B to gmem-direct)
-from the **schedule** (one `tile: TilePlan` field carrying the leaf `atom` — a tensor-core `AtomKind` / the scalar
+from the **schedule** (the `TilePlan` slice carrying the leaf `atom` — a tensor-core `AtomKind` / the scalar
 `ScalarAtom`, `ir/atom.py` — plus the unit/register widths + K-chunk). The per-CTA geometry (the `(m, n)` `Side` pair —
-tile width / mask / block+unit var names — plus `block_threads`) is **derived** on the node from `tile` × `axes`
-(`@property`). Keeping the schedule a single swappable
-field is what lets the same operand/`acc` params be tiled by a *different* `TilePlan` — the seam the flash inner QK/PV
+tile width / mask / block+unit var names — plus `launch_threads`) is **derived on the slice**, from its widths × its
+own `axes` (`@property`). Keeping the schedule a single swappable
+slice is what lets the same operand/`acc` params be tiled by a *different* `TilePlan` — the seam the flash inner QK/PV
 reuse needs.
 
 A symbolic / non-divisible tail is **clamp-to-identity** (the masked overhang folds a no-op or guards its store); the

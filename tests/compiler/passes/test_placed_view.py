@@ -87,7 +87,7 @@ def test_the_lead_grid_axes_survive_the_per_cell_rename() -> None:
     The batched scalar-tile shape that reaches this is absent from the corpus (a batched matmul
     takes the warp tier, and a bare matmul's epilogue is empty), so the mechanism is pinned here."""
     p = _placed()
-    prot = _scalar_protected(p, (Axis("bt", 8),))
+    prot = _scalar_protected(p.node, p.tile, (Axis("bt", 8),))
     assert "bt" in prot and {"m_b", "m_u", "n_b", "n_u", "k"} <= prot
 
     body = (Load(name="a", input="A", index=(Var("bt"), Var("m"), Var("k"))),)
@@ -97,7 +97,7 @@ def test_the_lead_grid_axes_survive_the_per_cell_rename() -> None:
 
     # Unthreaded (the schedule-side probes, which have no grid and no per-cell emission): the
     # shared coordinate is captured by the rename — the failure the threading prevents.
-    [captured] = copy_cell(body, Sigma({}), "__ar0", _scalar_protected(p))
+    [captured] = copy_cell(body, Sigma({}), "__ar0", _scalar_protected(p.node, p.tile))
     assert captured.index[0] == Var("bt__ar0")
 
 

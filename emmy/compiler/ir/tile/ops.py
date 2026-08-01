@@ -103,6 +103,25 @@ def sched_of(tile) -> Sched:
     return Sched(tile.op, tile.schedule)
 
 
+def unplaced_slices(tile) -> list[tuple[str, object]]:
+    """The kernel's schedule entries that NO stored node carries — the keys addressing DERIVED
+    material (flash's synthesized PV, ``TILE@pj``), sorted by key.
+
+    Every other slice reaches its reader by annotating the node it keys against. These cannot: the
+    node they address is a consequence of the stored params, not one of them. They are a schedule
+    fact either way, so the dump prints them in its schedule region rather than reconstructing the
+    derived node inside the term to hang them on. Empty for a kernel whose sites are all stored —
+    which, measured over the frontend's kernels, is all of them but causal flash."""
+    if tile.op is None or not tile.schedule:
+        return []
+    from emmy.compiler.ir.tile.path import sites  # noqa: PLC0415 — path imports ir; keep ops light
+
+    sched = sched_of(tile)
+    stored = [s.node for s in sites(tile.op) if not s.derived]
+    claimed = {k for nd in stored for f in ("TILE", "REDUCE", "STAGE") if (k := sched.key(f, nd)) is not None}
+    return sorted((k, v) for k, v in tile.schedule.items() if k not in claimed)
+
+
 def axis_names(root) -> set[str]:
     """Every ITERATION-SPACE name in ``root``'s tree — the structural nodes' axes plus every loop
     induction variable in their bodies, over the ONE node walk (``path.sites``). An induction
@@ -519,41 +538,38 @@ def term_key(root) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# The structural dump — the STORED term as a tree.
+# The structural dump — the STORED term as a tree, and NOTHING derived.
 #
 # The tile term is a tree of three node kinds over operand EDGES, and every fact a pass
 # dispatches on is a stored param on a node (this module's whole premise). The dump renders
 # exactly that: each node's own header, its stored params as labelled branches, and each operand
 # edge recursed into — so an inline COMPUTED edge is visibly a subtree and a MATERIALIZED one
-# visibly a leaf ``Load``. The synthesized loop nest a node lowers to is DERIVED, so it prints
-# under an explicit ``derived`` branch (opt out with ``derived=False``) and never masquerades as
-# storage. Schedule slices are not on the term at all — they annotate a node from the owning
-# ``TileOp.schedule`` when one is supplied.
+# visibly a leaf ``Load``.
+#
+# It renders NO derived material. The structure is already complete in the stored tree — the
+# operand edges and their nesting — and a derived evaluation (the per-cell step, the synthesized
+# nodes inside it, the loop nest a node lowers to) is a CONSEQUENCE of the stored params, exactly
+# as re-derivable as ``lower()``'s output. Printing it beside storage is the inversion this module
+# exists to prevent, and it is bulk: measured over eight kernels the step branch restated
+# ``lift`` + ``combine`` and contributed no schedule site on seven of them. ``--ir loop`` is where
+# a reader goes for a body.
+#
+# Schedule slices are not on the term at all — they annotate a node from the owning
+# ``TileOp.schedule`` when one is supplied. The one slice that can address DERIVED material
+# (flash's synthesized PV, ``TILE@pj``) has no stored node to annotate, so it prints in the
+# ``schedule`` region beside the term rather than dragging the derived node into it.
 # --------------------------------------------------------------------------- #
 
 _TEE, _ELBOW, _PIPE, _GAP = "├─ ", "└─ ", "│  ", "   "
 
 
 class _Ctx:
-    """The dump's read-only context — the owning ``TileOp``'s schedule view plus its site table,
-    so each node can be annotated with the slices keyed against it and with the ``derived`` bit
-    the path walker assigns (``None`` everywhere when a bare term is printed without its op), plus
-    ``shown``: the branch label each already-expanded node was printed under. A derived step
-    EMBEDS its fold's operand edges at their derived positions (the same objects — flash's QK
-    score), so those print as a header pointing back at the edge above instead of a second copy,
-    while a node the step SYNTHESIZED (flash's PV) has no edge above and expands in place."""
+    """The dump's read-only context — the owning ``TileOp``'s schedule view (so each STORED node
+    can be annotated with the slices keyed against it) and the iteration space a λ's capture set
+    is measured against. ``None`` everywhere when a bare term is printed without its op."""
 
-    def __init__(self, tile, derived: bool, root=None) -> None:
-        self.derived = derived
+    def __init__(self, tile, root=None) -> None:
         self.sched = sched_of(tile) if tile is not None and tile.op is not None else None
-        self.sites = {}
-        self.shown: dict[int, str] = {}
-        if self.sched is not None:
-            for site in self.sched._all_sites():
-                self.sites.setdefault(id(site.node), site)
-        # The ITERATION-SPACE names of the whole tree (:func:`axis_names`), plus the placement's
-        # free/grid axes — an axis is bound by the enclosing nest, so a λ reading one is not
-        # capturing. What is left over in a λ's free names IS its capture set.
         # The ITERATION SPACE a capture set is measured against. Only the OWNING ``TileOp`` knows
         # it in full: the term's own axes (:func:`axis_names`), the placement's free/grid axes, and
         # a boundary store's sweep axis (off-term since 1q) — the same three the cut's closure
@@ -575,14 +591,11 @@ class _Ctx:
         return () if self.axes is None else tuple(sorted(lam.free_names() - self.axes))
 
     def note(self, node) -> str:
-        """The schedule annotation for ``node`` — its ``derived``-site marker and every slice the
-        kernel keys against it, spelled by the codec (``''`` = the family's decided-empty)."""
+        """The schedule annotation for ``node`` — every slice the kernel keys against it, spelled
+        by the codec (``''`` = the family's decided-empty)."""
         if self.sched is None:
             return ""
         bits = []
-        site = self.sites.get(id(node))
-        if site is not None and site.derived:
-            bits.append("derived-site")
         for family in ("TILE", "REDUCE", "STAGE"):
             slice_ = self.sched.get(family, node)
             if slice_ is not None:
@@ -615,40 +628,34 @@ def _kind(edge) -> str:
 
 
 def _head(node, ctx: _Ctx) -> str:
-    """One node's header line — its kind and the stored params that fit on a line."""
+    """One node's header line — its kind and the stored params that fit on a line. A λ-valued
+    field is NOT one of them: its signature belongs on its own branch, next to the body it binds
+    (``lift:`` / ``combine:`` / ``fn:``), not one screenful above it."""
     if isinstance(node, Fold):
         text = f"Fold[{_axis_span(node.axis)}] {node.role.name.lower()}" + (" unroll" if node.unroll else "")
     elif isinstance(node, Contraction):
         text = node.pretty()[0].strip()
     elif isinstance(node, Map):
-        text = f"Map {_lam_sig(node.fn, ctx)}" + ("" if node.sources else "  ‹pointwise›")
+        text = "Map" + ("" if node.sources else "  ‹pointwise›")
     else:
         return str(node)
     return text + ctx.note(node)
 
 
 def _stmts(stmts, ctx: _Ctx):
-    """Render a λ body (a ``lift`` / ``combine`` / ``Map.fn``, or the derived step read the same
-    way) — indented two under the signature line that binds it, so the program reads as the
-    binder's body rather than as a sibling of the branch labels.
-
-    A structural NODE occupying a statement position is one of two things, and they must not look
-    alike: a node the enclosing fold ALREADY stores on an operand edge (the derived step embeds it
-    at its derived position — flash's QK score) prints as a header pointing back at that branch,
-    since its params are expanded there and a second copy would read as a second node; a node the
-    step SYNTHESIZED (flash's PV, memoized on the fold) has no edge above, so it expands here —
-    this is its only appearance, and its own operand edges are as real as any other's."""
+    """Render a λ body (a ``lift`` / ``combine`` / ``Map.fn``) — indented two under the signature
+    line that binds it, so the program reads as the binder's body rather than as a sibling of the
+    branch labels. A structural NODE may occupy a statement position here (a demoted cone's inline
+    node); it expands in place, since a lift body is storage like any other."""
 
     def render(cont: str) -> list[str]:
         out: list[str] = []
         for s in stmts:
-            if not isinstance(s, (Fold, Contraction, Map)):
-                out.extend(pretty_body(Body((s,)), cont + "  "))
-                continue
-            at = ctx.shown.get(id(s))
-            out.append(f"{cont}  {_head(s, ctx)}" + (f"   ‹↑ {at}›" if at else ""))
-            if at is None:
+            if isinstance(s, (Fold, Contraction, Map)):
+                out.append(f"{cont}  {_head(s, ctx)}")
                 out.extend(_branch(_items(s, ctx), cont + "  "))
+            else:
+                out.extend(pretty_body(Body((s,)), cont + "  "))
         return out
 
     return render
@@ -660,16 +667,15 @@ def _subtree(node, ctx: _Ctx):
 
 def _edge(label: str, edge, ctx: _Ctx) -> tuple[str, object]:
     """One operand edge as a tree item — a ``Load`` is a leaf spelled inline, a computed edge
-    recurses into the node stored on it (recording where, so a derived step embedding that same
-    object points back here instead of expanding a second copy)."""
+    recurses into the node stored on it."""
     if isinstance(edge, Load):
         return f"{label}: {edge.pretty()[0].strip()}   ‹materialized›", lambda cont: []
-    ctx.shown.setdefault(id(edge), label)
     return f"{label}: {_head(edge, ctx)}   ‹computed›", _subtree(edge, ctx)
 
 
 def _items(node, ctx: _Ctx) -> list[tuple[str, object]]:
-    """A node's tree children — its stored params first, the derived reading last."""
+    """A node's STORED children, each a labelled branch. Nothing derived: the step, the
+    synthesized nodes inside it and the lowered nest are all consequences of these params."""
     items: list[tuple[str, object]] = []
     if isinstance(node, Fold):
         init = ", ".join(x if isinstance(x, str) else format(x, "g") for x in node.init)
@@ -677,18 +683,15 @@ def _items(node, ctx: _Ctx) -> list[tuple[str, object]]:
         items.append((f"lift: {_lam_sig(node.lift, ctx)}", _stmts(node.lift.body, ctx)))
         items.append((f"combine: {_lam_sig(node.combine, ctx)}", _stmts(node.combine.body, ctx)))
         items += [_edge(f"operand[{i}]", e, ctx) for i, e in enumerate(node.operands)]
-        if ctx.derived:
-            items.append(("derived step", _stmts(node.step_stmts(), ctx)))
     elif isinstance(node, Contraction):
         items.append(_edge("a", node.a, ctx))
         one = len(node.channels) == 1
         items += [_edge("b" if one else f"channel[{i}] -> {ch.acc}", ch.b, ctx) for i, ch in enumerate(node.channels)]
     elif isinstance(node, Map):
-        for i, s in enumerate(node.sources):
-            ctx.shown.setdefault(id(s), f"source[{i}]")
-            items.append((f"source[{i}]: {_head(s, ctx)}", _subtree(s, ctx)))
-        if len(node.fn.body):
-            items.append(("body", _stmts(node.fn.body, ctx)))
+        items += [(f"source[{i}]: {_head(s, ctx)}", _subtree(s, ctx)) for i, s in enumerate(node.sources)]
+        # Always emitted, even for an empty body: the branch carries the SIGNATURE, and a node's
+        # binder is storage whether or not it computes anything (an identity projection binds too).
+        items.append((f"fn: {_lam_sig(node.fn, ctx)}", _stmts(node.fn.body, ctx)))
     return items
 
 
@@ -701,12 +704,14 @@ def _branch(items: list[tuple[str, object]], cont: str) -> list[str]:
     return out
 
 
-def pretty(op, indent: str = "", *, tile=None, derived: bool = True) -> list[str]:
-    """Structurally pretty-print a kernel op (for dumps) as the STORED tree — each node's kind and
-    params, its operand edges recursed into, and (unless ``derived=False``) the derived per-cell
-    step beneath. Pass ``tile`` — the owning ``TileOp`` — to annotate each node with the schedule
-    slices keyed against it. A bare stmt falls back to its own pretty."""
-    ctx = _Ctx(tile, derived, root=op)
+def pretty(op, indent: str = "", *, tile=None) -> list[str]:
+    """Structurally pretty-print a kernel op (for dumps) as the STORED tree and nothing else —
+    each node's kind and params, its operand edges recursed into. No derived material: the
+    per-cell step, the nodes synthesized inside it and the lowered nest all follow from these
+    params (``--ir loop`` is where a body lives). Pass ``tile`` — the owning ``TileOp`` — to
+    annotate each node with the schedule slices keyed against it. A bare stmt falls back to its
+    own pretty."""
+    ctx = _Ctx(tile, root=op)
     if isinstance(op, (Fold, Contraction, Map)):
         return [f"{indent}{_head(op, ctx)}", *_branch(_items(op, ctx), indent)]
     if isinstance(op, Stmt):
@@ -719,6 +724,7 @@ __all__ = [
     "axis_role",
     "Sched",
     "cone_seam",
+    "unplaced_slices",
     "contraction_loop",
     "lower",
     "nodify_reduce",
@@ -728,5 +734,6 @@ __all__ = [
     "reduce_plan",
     "sched_of",
     "seal_workers",
+    "axis_names",
     "term_key",
 ]

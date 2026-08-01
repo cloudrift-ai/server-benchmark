@@ -1275,25 +1275,32 @@ class TileOp(Op):
     work: object = None
 
     def pretty_body(self) -> str:
-        """Render the kernel structurally (the dump view) — no lowering: the caller facts that
-        live BESIDE the term (``place`` / ``workers`` / ``work``), then the ``op`` tree with each
-        node's schedule slices annotated from ``schedule``, then the kernel-boundary ``stores``
-        (the root ``Write``\\ s live here since 1q, so a dump without them would hide where the
-        kernel's output lands). The three regions are the three owners — geometry, algebra,
-        boundary — kept visibly apart."""
-        from emmy.compiler.ir.tile.ops import pretty  # noqa: PLC0415
+        """Render the kernel structurally (the dump view) — no lowering and nothing derived: the
+        caller facts that live BESIDE the term (``place`` / ``workers`` / ``work``), then the
+        STORED ``op`` tree with each node's schedule slices annotated from ``schedule``, then any
+        schedule entry no stored node carries (``ops.unplaced_slices`` — a slice keyed against
+        DERIVED material, which the term deliberately does not show), then the kernel-boundary
+        ``stores`` (the root ``Write``\\ s live here since 1q, so a dump without them would hide
+        where the kernel's output lands). The regions are the owners — geometry, algebra,
+        schedule, boundary — kept visibly apart."""
+        from emmy.compiler.ir.tile.ops import pretty, unplaced_slices  # noqa: PLC0415
 
         if self.op is None:
             return ""
         lines = [f"    {line}" for line in self._pretty_place()]
         lines += pretty(self.op, "    ", tile=self)
-        if self.stores:
-            lines.append("    stores")
-            for i, st in enumerate(self.stores):
-                tee = "└─" if i == len(self.stores) - 1 else "├─"
-                sweep = f"sweep({st.sweep.name}) " if st.sweep is not None else ""
-                lines += [f"    {tee} {sweep}{line.strip()}" for line in st.write.pretty()]
+        lines += self._pretty_region("schedule", [f"{k} = {v.spell() or '·'}" for k, v in unplaced_slices(self)])
+        stores = [f"{f'sweep({st.sweep.name}) ' if st.sweep else ''}{ln.strip()}" for st in self.stores for ln in st.write.pretty()]
+        lines += self._pretty_region("stores", stores)
         return "\n".join(lines)
+
+    @staticmethod
+    def _pretty_region(title: str, rows: list[str]) -> list[str]:
+        """One titled region below the term, its rows as tree branches. Empty rows print nothing —
+        an absent region IS the decided-empty, same as an absent schedule key."""
+        if not rows:
+            return []
+        return [f"    {title}", *(f"    {'└─' if i == len(rows) - 1 else '├─'} {r}" for i, r in enumerate(rows))]
 
     def _pretty_place(self) -> list[str]:
         """The geometry lines above the term — the placement (free axes and their grid binding,

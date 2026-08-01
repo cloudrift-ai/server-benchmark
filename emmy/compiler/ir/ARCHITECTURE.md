@@ -475,26 +475,33 @@ downstream in `lowering/kernel` against the op tree + schedule. The older tile-l
 `.txt` artifacts print) renders the STORED tree as a tree, never a lowered nest — the dump is where a reader meets the
 term directly, so it has to show what the term IS. Each node prints its kind and stored params as labelled branches
 (a `Fold`'s `init` / `lift` / `combine` / `operands`, a `Contraction`'s `a` and one branch per `Channel`, a `Map`'s
-binder signature and `sources`), and every operand edge is recursed into and tagged with its inhabitant — `‹computed›`
-for an inline node subtree, `‹materialized›` for a leaf gmem `Load`. A λ signature carries its CAPTURE SET when
+`sources` and `fn`), and every operand edge is recursed into and tagged with its inhabitant — `‹computed›`
+for an inline node subtree, `‹materialized›` for a leaf gmem `Load`. **A λ-valued field labels its own branch with its
+signature and nests its body two under it** — `lift:` / `combine:` / `fn:` all read the same way, so a binder is always
+adjacent to what it binds; none of them ride the node header, where on a big fold the signature sat a screenful above
+its stmts. The `fn:` branch is emitted even for an empty body, since the branch carries the signature and an identity
+projection binds too. A λ signature carries its CAPTURE SET when
 non-empty (`λ() [captures m_i__t5] -> (…)`) — the free names that are not iteration vars, the same reading the cut's
 closure predicate applies (`axis_names`, relocated to `tile/ops.py` so the dump and `_cut._captured_values` share one
 definition; the iteration space is the term's axes ∪ the placement's free/grid ∪ the boundary stores' sweep axes).
 Without a capture set a λ reads as closed, and closure is precisely what decides whether a subtree can hoist to an
 operand edge — flash's `P = exp(s − m)` captures the carrier's running max, which is why its seam is not cuttable. The
 set is measured only when the owning `TileOp` is supplied; a bare term has no placement, so the annotation is omitted
-rather than reporting grid coordinates as captures. The synthesized loop reading a node lowers to is
-DERIVED, so it sits under an explicit `derived step` branch (`pretty(op, derived=False)` drops it) and cannot be
-mistaken for storage. A structural node occupying a statement position inside one is rendered by where its params
-live: a node the enclosing fold already stores on an operand edge (the derived step embeds those objects at their
-derived positions — flash's QK score) prints as a header back-referencing that branch, `‹↑ operand[i]›`, since a second
-expansion would read as a second node; a node the step SYNTHESIZED (flash's PV, memoized on the fold) has no edge above
-and expands in place, its own edges included — that is its only appearance.
-The caller facts that live BESIDE the term get their own regions — `place` / `work` / `wspec` above it, `stores`
-below — and schedule slices annotate a node as `⟨TILE=… REDUCE=… STAGE=…⟩` only when the owning `TileOp` is supplied
-(`pretty(op, tile=…)`), read through `Sched` and the path codec, so nothing on the term can carry one. A `derived-site`
-marker on a node is the path walker's bit: a real schedule site below the seam lattice (flash's synthesized PV), never
-a `PLACE` target.
+rather than reporting grid coordinates as captures.
+
+**Nothing DERIVED is printed** — not the per-cell step, not the nodes synthesized inside it, not the lowered nest.
+The structure is already complete in the stored tree: the operand edges and their nesting say it, and a derived
+evaluation follows from the same params, as re-derivable as `lower()`'s output. Printing one beside storage is the
+inversion this layer exists to prevent, and it was the bulk of the output — measured over eight frontend kernels the
+step branch restated `lift` + `combine` and contributed no schedule site on seven of them (flash 50 → 28 term lines,
+softmax 31 → 21). `--ir loop` is where a reader goes for a body.
+
+The caller facts that live BESIDE the term get their own regions — `place` / `work` / `wspec` above it, `schedule` and
+`stores` below. Schedule slices annotate a node as `⟨TILE=… REDUCE=… STAGE=…⟩` only when the owning `TileOp` is
+supplied (`pretty(op, tile=…)`), read through `Sched` and the path codec, so nothing on the term can carry one. The one
+slice whose site is DERIVED (flash's synthesized PV, `TILE@pj`) has no stored node to annotate: `ops.unplaced_slices`
+reports it and it prints in the `schedule` region, rather than reconstructing the derived node inside the term to hang
+it on. That region is empty — and therefore absent — for every kernel whose sites are all stored.
 
 ## `kernel/`
 

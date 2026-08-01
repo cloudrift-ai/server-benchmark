@@ -22,23 +22,27 @@ it says nothing about how work is split across a GPU.
 | --- | --- | --- |
 | `Fold` | `axis`, `lift` λ, the monoid's `(init, combine)`, `operands` | `Fold[<axis> in 0..N] <role>` |
 | `Contraction` | `k_axis`, the shared `a` edge, the product `Channel`s `(b_i, acc_i)` | `Contraction [Σ k in 0..N] a @ b -> acc` |
-| `Map` | `fn: Lambda`, `sources` | `Map λ(params) -> (results)` |
+| `Map` | `fn: Lambda`, `sources` | `Map` (its λ rides the `fn:` branch) |
 
 The tile dump renders that tree *as a tree*. Reading it:
 
 - **Branches are stored params.** A `Fold` shows `init` / `lift` / `combine` / `operand[i]`; a `Contraction` shows `a`
-  and one branch per channel; a `Map` shows `source[i]` and its `body`. The λ bodies nest under their signatures.
+  and one branch per channel; a `Map` shows `source[i]` and `fn`. Every λ-valued field reads the same way — the
+  signature labels the branch and its body nests two under it, so a binder is always adjacent to what it binds.
 - **Operand edges recurse and are tagged.** `‹materialized›` is a leaf gmem `Load`; `‹computed›` is an inline node,
-  and its own subtree is printed below it. Those are the only two inhabitants of an edge. A node that appears twice —
-  an edge the derived step also embeds — is expanded once and back-referenced as `‹↑ operand[i]›` the second time.
+  and its own subtree is printed below it. Those are the only two inhabitants of an edge.
 - **A λ signature names what it captures.** `[captures …]` lists the free names that are not iteration vars. Empty
   (so omitted) means closed — and closed is what lets a subtree hoist to an operand edge.
-- **`derived step` is not storage.** It is the per-cell evaluation synthesized from the stored params
-  (`Fold.step_stmts()`). `pretty(op, derived=False)` drops it. Likewise `role` on a `Fold` is derived (`Fold.role`),
-  never stored: `TWISTED` off the twist family, `CONTRACTION` off a composed split-K operand, `PLANAR` otherwise.
-- **The three regions are three owners.** `place` / `work` above the term is geometry; the tree is algebra; `stores`
-  below is the kernel boundary. Schedule slices print as `⟨TILE=… REDUCE=… STAGE=…⟩` beside a node — they come from
-  `TileOp.schedule` keyed by the tree-path codec, never from the term itself.
+- **Nothing derived is printed** — not the per-cell step (`Fold.step_stmts()`), not the nodes synthesized inside it,
+  not the lowered nest. All of it follows from the params above, and the structure is already complete in the edges and
+  their nesting. `--ir loop` is where a body lives. `role` on a `Fold` is derived too (`Fold.role`), never stored:
+  `TWISTED` off the twist family, `CONTRACTION` off a composed split-K operand, `PLANAR` otherwise — it rides the
+  header because it is a one-word reading of the params, not a program.
+- **The regions are the owners.** `place` / `work` above the term is geometry; the tree is algebra; `schedule` and
+  `stores` below are the schedule dict and the kernel boundary. Slices normally print as `⟨TILE=… REDUCE=… STAGE=…⟩`
+  beside the node they key against (from `TileOp.schedule`, via the tree-path codec — never from the term itself); a
+  slice whose site is *derived* has no stored node to annotate, so it lands in the `schedule` region instead. An empty
+  region is omitted.
 
 ---
 
@@ -70,17 +74,15 @@ torch.randn(8, 512, 1024).sum(dim=-1)
     ├─ init: (0)
     ├─ lift: λ(a2) -> (in0)
     │    in0 = load x[a0, a1, a2]
-    ├─ combine: λ(acc0, acc0__o) -> (acc0)
-    │    acc0 = add(acc0, acc0__o)
-    └─ derived step
-         in0 = load x[a0, a1, a2]
-         acc0 <- add(acc0, in0)
+    └─ combine: λ(acc0, acc0__o) -> (acc0)
+         acc0 = add(acc0, acc0__o)
 ```
 
 The simplest case, and it already shows the whole vocabulary: identity lift, the `(0, add)` monoid spelled as an `init`
-seed plus a two-argument `combine`, and the derived step that specializes that combine at the singleton. The batch axes
-`a0`/`a1` are gone from the term — they are the kernel's grid, a `place` fact. Note this fold has *no* operand branch:
-the load stayed inline in the lift.
+seed plus a two-argument `combine`. The per-cell step — that combine specialized at the singleton, `acc0 <- add(acc0,
+in0)` — is derived and therefore not printed; it is also impure (an `Accum` mutating loop-carried state), which is why
+it could never have been one of the stored λs. The batch axes `a0`/`a1` are gone from the term too — they are the
+kernel's grid, a `place` fact. Note this fold has *no* operand branch: the load stayed inline in the lift.
 
 ## 2. RMSNorm — `Map` over a `Fold`, plus a sweep store
 
@@ -116,19 +118,15 @@ torch.nn.functional.rms_norm(torch.randn(4, 512, 1024), (1024,), torch.randn(102
 === 0: k_rms_norm_6175eb ===
     place  free=(a0, a1)  grid=(a0, a1)
     work   t128
-    Map λ(acc0) -> (v6)
+    Map
     ├─ source[0]: Fold[a2 in 0..1024] planar   ⟨REDUCE=coop⟩
     │  ├─ init: (0)
     │  ├─ lift: λ(a2) -> (v1)
     │  │    in2 = load x0[a0, a1, a2]
     │  │    v1 = multiply(in2, in2)
-    │  ├─ combine: λ(acc0, acc0__o) -> (acc0)
-    │  │    acc0 = add(acc0, acc0__o)
-    │  └─ derived step
-    │       in2 = load x0[a0, a1, a2]
-    │       v1 = multiply(in2, in2)
-    │       acc0 <- add(acc0, v1)
-    └─ body
+    │  └─ combine: λ(acc0, acc0__o) -> (acc0)
+    │       acc0 = add(acc0, acc0__o)
+    └─ fn: λ(acc0) -> (v6)
          v0 = reciprocal(1024)
          v2 = multiply(acc0, v0)
          v3 = add(1e-06, v2)
@@ -141,8 +139,8 @@ torch.nn.functional.rms_norm(torch.randn(4, 512, 1024), (1024,), torch.randn(102
     └─ sweep(a3) rms_norm[a0, a1, a3] = v6
 ```
 
-The `Map`'s binder makes the wiring explicit: `λ(acc0) -> (v6)` says the projection consumes exactly the fold's one
-accumulator and produces `v6`. The statistic is the `Fold` (square lift, sum monoid); the second `for a3` nest of the
+The `Map`'s binder makes the wiring explicit: `fn: λ(acc0) -> (v6)` says the projection consumes exactly the fold's one
+accumulator and produces `v6` — and it labels the branch holding the body it binds, so the two are read together. The statistic is the `Fold` (square lift, sum monoid); the second `for a3` nest of the
 loop form is gone — the per-cell normalize is `Map.fn`, and the output sweep is a `Store` decoration, reconstituted on
 demand by `effect_tail`. That is the shape of the "cone": row-invariant prologue above the seam, per-cell body below.
 
@@ -181,32 +179,22 @@ torch.nn.functional.softmax(torch.randn(8, 512, 512), dim=-1)
 === 0: k_softmax_efaac1 ===
     place  free=(a0, a1)  grid=(a0, a1)
     work   t128
-    Map λ(acc0, acc1) -> (v5)
+    Map
     ├─ source[0]: Fold[a2 in 0..512] twisted   ⟨REDUCE=coop⟩
     │  ├─ init: (-inf, 0)
     │  ├─ lift: λ(a2) -> (acc0__osin, 1)
     │  │    acc0__osin = load x[a0, a1, a2]
-    │  ├─ combine: λ(acc0, acc1, acc0__o, acc1__o) -> (acc0, acc1)
-    │  │    acc0__o__t0 = maximum(acc0, acc0__o)
-    │  │    acc0__o__t1 = subtract(acc0, acc0__o__t0)
-    │  │    acc0__o__t2 = exp(acc0__o__t1)
-    │  │    acc0__o__t3 = multiply(acc1, acc0__o__t2)
-    │  │    acc0__o__t4 = subtract(acc0__o, acc0__o__t0)
-    │  │    acc0__o__t5 = exp(acc0__o__t4)
-    │  │    acc0__o__t6 = multiply(acc1__o, acc0__o__t5)
-    │  │    acc1 = add(acc0__o__t3, acc0__o__t6)
-    │  │    acc0 = copy(acc0__o__t0)
-    │  └─ derived step
-    │       acc0__osin = load x[a0, a1, a2]
-    │       acc0__t0 = maximum(acc0, acc0__osin)
-    │       acc0__t1 = subtract(acc0, acc0__t0)
-    │       acc0__t2 = exp(acc0__t1)
-    │       acc0__t3 = multiply(acc1, acc0__t2)
-    │       acc0__t4 = subtract(acc0__osin, acc0__t0)
-    │       acc0__t5 = exp(acc0__t4)
-    │       f32 acc1 <- add(acc0__t3, acc0__t5)
-    │       f32 acc0 <- maximum(acc0, acc0__osin)
-    └─ body
+    │  └─ combine: λ(acc0, acc1, acc0__o, acc1__o) -> (acc0, acc1)
+    │       acc0__o__t0 = maximum(acc0, acc0__o)
+    │       acc0__o__t1 = subtract(acc0, acc0__o__t0)
+    │       acc0__o__t2 = exp(acc0__o__t1)
+    │       acc0__o__t3 = multiply(acc1, acc0__o__t2)
+    │       acc0__o__t4 = subtract(acc0__o, acc0__o__t0)
+    │       acc0__o__t5 = exp(acc0__o__t4)
+    │       acc0__o__t6 = multiply(acc1__o, acc0__o__t5)
+    │       acc1 = add(acc0__o__t3, acc0__o__t6)
+    │       acc0 = copy(acc0__o__t0)
+    └─ fn: λ(acc0, acc1) -> (v5)
          v2 = reciprocal(acc1)
          in2 = load x[a0, a1, a3]
          v3 = subtract(in2, acc0)
@@ -221,10 +209,10 @@ Same node kind as example 1 — only the monoid arity differs. The tree makes th
 — the ι injection spelled as a literal result, which is why it has no def to name.
 
 The `combine` branch is the actual novelty. It is a genuine two-argument `S × S → S` monoid over `(m, l)`: take the
-componentwise max, rescale *both* sides by `exp(m_side − m_new)`, add. The `derived step` below it is that same program
-specialized at the singleton — which is why the right operand's rescale collapses (`acc0__o__t6` disappears, `exp` of
-the new element's offset multiplies by 1). Three loop passes collapse to one streaming pass, and `twisted` is derived
-from the combine's shape, not stored.
+componentwise max, rescale *both* sides by `exp(m_side − m_new)`, add. The streaming form the loop IR shows is that
+same program specialized at the singleton, where the right operand's rescale collapses — derived, so the dump does not
+restate it. Three loop passes collapse to one streaming pass, and `twisted` is derived from the combine's shape, not
+stored.
 
 ## 4. Matmul — `Contraction`
 
@@ -293,11 +281,11 @@ torch.relu(torch.randn(512, 1024) @ torch.randn(1024, 1024) + torch.randn(1024))
 === 0: k_matmul_9f4c41 ===
     place  free=(a0, a1)  grid=(a0, a1)
     work   t32x8
-    Map λ(acc0) -> (v2)
+    Map
     ├─ source[0]: Contraction [Σ a2 in 0..1024] x0 @ x1 -> acc0   ⟨TILE=f2x8 STAGE=d2/cp/ring⟩
     │  ├─ a: in1 = load x0[a0, a2]   ‹materialized›
     │  └─ b: in2 = load x1[a2, a1]   ‹materialized›
-    └─ body
+    └─ fn: λ(acc0) -> (v2)
          in0 = load x2[a1]
          v1 = add(acc0, in0)
          v2 = relu(v1)
@@ -306,7 +294,7 @@ torch.relu(torch.randn(512, 1024) @ torch.randn(1024, 1024) + torch.randn(1024))
 ```
 
 `Map(fn=bias+relu, sources=(Contraction,))`. Compare with example 4: the `source[0]` subtree is structurally identical
-— same header, same two edges, its own `⟨TILE=…⟩` — and everything the epilogue added lives in the `body` branch and
+— same header, same two edges, its own `⟨TILE=…⟩` — and everything the epilogue added lives in the `fn` branch and
 the `stores` region. Fusion here is literally a wrapper, not an edit to the contraction.
 
 ## 6. SwiGLU — the concatenated gate⊗up projection, then a pointwise kernel
@@ -398,8 +386,8 @@ torch.nn.functional.silu(torch.randn(8, 512, 1024)) * torch.randn(8, 512, 1024)
 ```
 === 0: k_mul_pointwise ===
     place  free=(a0, a1, a2)  grid=(a0, a1, a2)
-    Map λ() -> (v5__u3)  ‹pointwise›
-    └─ body
+    Map  ‹pointwise›
+    └─ fn: λ() -> (v5__u3)
          in1__u0 = load x0[a0, a1, ((a2 * 4) + 0)]
          in2__u0 = load x1[a0, a1, ((a2 * 4) + 0)]
          …
@@ -469,7 +457,7 @@ F.scaled_dot_product_attention(q, k, v, is_causal=True)  # (1, 8, 512, 64) each
 ```
 === 0: scaled_dot_product_attention -> scaled_dot_product_attention ===
     place  free=(b0, b1, m, d)  grid=(b0, b1, m)
-    Map λ(m_i, l_i, O_i) -> (O_i__proj)
+    Map
     ├─ source[0]: Fold[kv in 0..512] twisted
     │  ├─ init: (-inf, 0, 0)
     │  ├─ lift: λ(kv, sacc, v_e) -> (s_causal, 1, v_e)
@@ -494,31 +482,11 @@ F.scaled_dot_product_attention(q, k, v, is_causal=True)  # (1, 8, 512, 64) each
     │  ├─ operand[0]: Contraction [Σ dd in 0..64] x0 @ x1 trans -> sacc   ‹computed›
     │  │  ├─ a: q_e = load x0[b0, b1, m, dd]   ‹materialized›
     │  │  └─ b: k_e = load x1[b0, b1, kv, dd]   ‹materialized›
-    │  ├─ operand[1]: v_e = load x2[b0, b1, kv, d]   ‹materialized›
-    │  └─ derived step
-    │       Contraction [Σ dd in 0..64] x0 @ x1 trans -> sacc   ‹↑ operand[0]›
-    │       scale_c = load _flash_scale[]
-    │       s = multiply(sacc, scale_c)
-    │       ninf_c = load _flash_ninf[]
-    │       s_causal = s when ((kv <= m))
-    │                  ninf_c when (1)
-    │       m_i__t0 = maximum(m_i, s_causal)
-    │       m_i__t1 = subtract(m_i, m_i__t0)
-    │       m_i__t2 = exp(m_i__t1)
-    │       m_i__t3 = multiply(l_i, m_i__t2)
-    │       m_i__t4 = subtract(s_causal, m_i__t0)
-    │       m_i__t5 = exp(m_i__t4)
-    │       m_i__t6 = multiply(O_i, m_i__t2)
-    │       f32 l_i <- add(m_i__t3, m_i__t5)
-    │       Contraction [Σ pj in 0..1] O_i__p @ x2 -> O_i__pv   ⟨derived-site TILE=f64⟩
-    │       ├─ a: Map λ() [captures m_i__t5] -> (O_i__p)  ‹pointwise›   ⟨derived-site⟩   ‹computed›
-    │       │  └─ body
-    │       │       O_i__p = copy(m_i__t5)
-    │       └─ b: v_e = load x2[b0, b1, kv, d]   ‹materialized›
-    │       f32 O_i <- add(m_i__t6, O_i__pv)
-    │       f32 m_i <- maximum(m_i, s_causal)
-    └─ body
+    │  └─ operand[1]: v_e = load x2[b0, b1, kv, d]   ‹materialized›
+    └─ fn: λ(m_i, l_i, O_i) -> (O_i__proj)
          O_i__proj = divide(O_i, l_i)
+    schedule
+    └─ TILE@pj = f64
     stores
     └─ scaled_dot_product_attention[0, b1, m, d] = O_i__proj
 ```
@@ -528,20 +496,19 @@ This is the payoff example, and the tree earns its keep here:
 - The whole thing is *the same `Fold` node kind* as `sum(dim=-1)`, on the streaming schedule with the softmax twist —
   a twisted monoid is a monoid, selected structurally, not a distinct kind. `init: (-inf, 0, 0)` and
   `lift: λ(kv, sacc, v_e) -> (s_causal, 1, v_e)` say the state is the triple `(m, l, O)` with singleton `(s, 1, v)`.
-- **QK is a stored operand edge; PV is not**, and the dump distinguishes them by *where their params live*. QK is
-  `operand[0]`, a `‹computed›` `Contraction` with its own two-edge subtree; where the derived step reaches it, that is
-  the very same object, so it prints as a back-reference `‹↑ operand[0]›` rather than a second copy. PV has no edge
-  above it — synthesized and memoized inside the derived blocked evaluation — so it expands in place, and what that
-  expansion reveals is the point: its `a` is a *computed* cone whose λ prints `[captures m_i__t5]`. That capture is
-  `P = exp(s − m)` read off the **running state**, and it is exactly why PV cannot be an edge: it is not closed.
-  (The `copy` is not a no-op — it is the *reference*. An edge is a `Load` or an inline node, with no name-reference
-  arm, so pointing at a value already in a register means wrapping it in the smallest node that yields one.) QK reads only `q`/`k`, so it
-  may hoist and is a PLACE site; PV is combine material below the seam lattice, a real schedule site
-  (`⟨derived-site TILE=f64⟩`) but excluded from PLACE (`Site.derived`). "Edge iff closed" is legible right here.
+- **QK is a stored operand edge; PV is not** — and only QK appears. QK is `operand[0]`, a `‹computed›` `Contraction`
+  with its own two-edge subtree, because it is *closed*: it reads `q` and `k` and the enclosing iteration vars, nothing
+  else, so it may hoist to an edge and is a PLACE site. PV reads `P = exp(s − m)`, i.e. the **running state**, so it
+  can never be an edge; it is synthesized inside the derived evaluation, and since the dump shows only storage it does
+  not appear at all. "Edge iff closed" is exactly the line between what is printed and what is not.
 - The lift's params `(kv, sacc, v_e)` bind the operand edges **positionally** — `sacc` is `operand[0]`'s output,
   `v_e` is `operand[1]`. That binding is the whole reason there is no let table and no name-reference arm.
 - There is no stored `step` sequence. `_flash_scale` / `_flash_ninf` are constant loads, and
   `O_i__proj = divide(O_i, l_i)` in the `Map` body is the projection λ.
+- **`schedule` holds the one slice with no stored home.** `TILE@pj = f64` is a decided tile for the synthesized PV
+  contraction — a real schedule site (`Site.derived`), below the seam lattice and excluded from PLACE. Its node is
+  derived, so rather than reconstruct it inside the term the dump reports the slice where it actually lives: the
+  schedule dict. Every other kernel here has all its keys on stored nodes, so none of them show this region.
 
 Also note what is *absent*: no `work` line and no `⟨TILE=…⟩` on the outer fold, because this dump is taken before the
 flash schedule is decided. The dump shows decided facts only — an undecided slice is simply not printed.
@@ -563,7 +530,8 @@ flash schedule is decided. The dump shows decided facts only — an undecided sl
 
 The recurring pattern: **loop IR spells iteration, tile IR spells algebra.** Everything the loop form encodes about
 *how* to iterate — passes over a row, materialized intermediates, batch nesting, unroll — is either derived on demand
-from the tile node (`op.lower()`, `Fold.step_stmts()`, `Fold.composed`) or moved off the term entirely onto the
+from the tile node (`op.lower()`, `Fold.step_stmts()`, `Fold.composed`) — and so absent from the dump — or moved off
+the term entirely onto the
 `TileOp`'s `place` / `schedule` / `stores`. That separation is what lets the schedule search mutate the plan while the
 term stays immutable and its α-invariant `term_key` stays the kernel's identity.
 

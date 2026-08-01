@@ -1,24 +1,29 @@
-"""The structural dump (``ops.pretty`` / ``TileOp.pretty_body``) — the STORED tree, as a tree.
+"""The structural dump (``ops.pretty`` / ``TileOp.pretty_body``) — the STORED tree, as a tree, and
+NOTHING derived.
 
 The dump is the one place a reader meets the tile term directly, so what it shows has to be what
 the term IS: each node's kind and stored params, an operand edge recursed into (a computed edge is
 visibly a subtree, a materialized one visibly a leaf ``Load``), and the caller facts that live
-BESIDE the term — placement, workers, boundary stores — in their own regions. The derived loop
-reading is labelled ``derived`` and nothing else may masquerade as storage.
+BESIDE the term — placement, workers, schedule, boundary stores — in their own regions. A derived
+evaluation (the per-cell step, the nodes synthesized inside it, the lowered nest) is a CONSEQUENCE
+of the stored params and is never printed: showing it beside storage is the inversion the layer
+exists to prevent, and it was the bulk of the output.
 
-These pin: (a) every stored param of each node kind reaches the dump; (b) edges nest and are
-labelled by inhabitant; (c) the derived reading is separated from the stored one; (d) schedule
-slices annotate a node only when the owning ``TileOp`` supplies them — never from the term.
+These pin: (a) every stored param of each node kind reaches the dump; (b) edges nest, are labelled
+by inhabitant, and appear exactly once; (c) nothing derived appears — including the one slice whose
+site is synthesized, which lands in the schedule region rather than reconstructing its node;
+(d) schedule slices annotate a node only when the owning ``TileOp`` supplies them — never from the
+term; (e) a λ that is not closed says what it captures.
 """
 
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.schedule import Placement, ReducePlan
+from emmy.compiler.ir.schedule import Placement, ReducePlan, TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Lambda, Load, Loop, Write
 from emmy.compiler.ir.tile import Channel, Contraction, Fold, Map, Store, TileOp
-from emmy.compiler.ir.tile.ops import Sched, pretty
+from emmy.compiler.ir.tile.ops import Sched, pretty, unplaced_slices
 
 
 def _stat_fold() -> Fold:
@@ -67,7 +72,7 @@ def test_fold_dump_shows_every_stored_param() -> None:
     assert text.splitlines()[0] == "Fold[k in 0..512] planar"
     assert "├─ init: (0)" in text
     assert "├─ lift: λ(k) -> (v1)" in text
-    assert "├─ combine: λ(acc0, acc0__o) -> (acc0)" in text
+    assert "└─ combine: λ(acc0, acc0__o) -> (acc0)" in text
     # The lift's own body nests two under its signature — the stored program, read as the
     # binder's body rather than as a sibling of the branch labels.
     assert "│    in0 = load x[m, k]" in text
@@ -83,11 +88,22 @@ def test_contraction_dump_shows_the_k_axis_and_every_channel() -> None:
 
 
 def test_map_dump_shows_the_binder_and_its_sources() -> None:
+    """A ``Map``'s storage is ``fn`` + ``sources``. The binder rides its OWN branch, next to the
+    body it binds — not the header, which on a big fold sat a screenful above its stmts. Every
+    λ-valued field reads the same way: ``lift:`` / ``combine:`` / ``fn:``, signature then body."""
     m = Map(fn=None, sources=(_stat_fold(),), body=Body((Assign(name="o", op="rsqrt", args=("acc0",)),)))
     text = "\n".join(pretty(m))
-    assert text.splitlines()[0].startswith("Map λ(acc0) -> (o)")
+    assert text.splitlines()[0] == "Map"
     assert "├─ source[0]: Fold[k in 0..512] planar" in text
-    assert "└─ body" in text
+    assert "└─ fn: λ(acc0) -> (o)" in text
+    assert "     o = rsqrt(acc0)" in text  # the body, indented two under the signature
+
+
+def test_the_fn_branch_survives_an_empty_body() -> None:
+    """The branch carries the SIGNATURE, so it is emitted even with nothing to compute — an
+    identity projection still binds, and dropping the branch would lose the binder entirely."""
+    text = "\n".join(pretty(Map(fn=None, sources=(_stat_fold(),), body=Body(()))))
+    assert "└─ fn: λ(acc0) -> (acc0)" in text
 
 
 def test_a_sourceless_map_is_marked_pointwise() -> None:
@@ -108,18 +124,12 @@ def test_a_computed_edge_nests_as_a_subtree_a_materialized_one_is_a_leaf() -> No
     assert any("xhat = multiply(xhat_e, xhat_s)" in ln for ln in lines)
 
 
-# --- the derived reading is labelled, and suppressible ------------------------------------------ #
-
-
-def test_the_derived_step_is_labelled_and_opt_out() -> None:
-    fold = _stat_fold()
-    assert "└─ derived step" in "\n".join(pretty(fold))
-    assert "derived" not in "\n".join(pretty(fold, derived=False))
+# --- nothing DERIVED reaches the dump ------------------------------------------------------------ #
 
 
 def _split_k() -> Fold:
-    """Split-K's outer reduce — the identity-lift composition, whose derived step EMBEDS the very
-    ``Contraction`` object stored on its one operand edge."""
+    """Split-K's outer reduce — the identity-lift composition over one ``Contraction`` edge. Its
+    derived step embeds that very object, so a dump that printed the step would show it twice."""
     inner = Contraction(
         k_axis=Axis("kslice", 128),
         a=Load(name="a_e", input="x", index=(Var("m"), Var("kslice"))),
@@ -138,31 +148,43 @@ def _split_k() -> Fold:
     )
 
 
-def test_a_step_node_already_stored_on_an_edge_points_back_instead_of_recopying() -> None:
-    """The derived step embeds its operand edges at their derived positions — the SAME objects.
-    Expanding them twice would read as two nodes, so the second appearance is a back-reference."""
-    fold = _split_k()
-    assert any(s is fold.operands[0] for s in fold.step_stmts())  # the premise: one object
+def test_the_derived_step_is_not_printed() -> None:
+    """The step is a CONSEQUENCE of ``lift`` + ``combine``, as re-derivable as ``lower()``'s
+    output — printing it beside storage is the inversion the dump exists to prevent, and it was
+    the bulk of the output. ``--ir loop`` is where a body lives."""
+    fold = _stat_fold()
     text = "\n".join(pretty(fold))
-    step = text.split("derived step")[1]
-    assert "‹↑ operand[0]›" in step
-    # The params are expanded ONCE, under the edge — not again below.
-    assert step.count("a: a_e = load x[m, kslice]") == 0
+    assert "derived" not in text
+    # The step's serial form — the combine specialized at the singleton, an ``Accum`` — is exactly
+    # what must not appear: it is impure, so it is not even spellable as one of the stored λs.
+    assert "acc0 <- add" not in text
+    assert [type(s).__name__ for s in fold.step_stmts()][-1] == "Accum"  # the premise
+
+
+def test_an_edge_is_rendered_once_not_once_per_derived_position() -> None:
+    """The step embeds its operand edges at their derived positions, so printing it duplicated
+    every edge. With storage only, each edge appears exactly once — under its own branch."""
+    fold = _split_k()
+    assert any(s is fold.operands[0] for s in fold.step_stmts())  # the premise: one object, two positions
+    text = "\n".join(pretty(fold))
+    assert text.count("Contraction [Σ kslice in 0..128]") == 1
     assert text.count("a: a_e = load x[m, kslice]") == 1
 
 
-def test_a_node_the_step_synthesized_expands_in_place() -> None:
-    """A node with no edge above — flash's PV, memoized on the fold — has only this appearance,
-    so its own operand edges are rendered here. Eliding them would hide real stored params."""
-    fold = _split_k()
-    ctx_free = "\n".join(pretty(fold))
-    assert "‹↑ operand[0]›" in ctx_free
-
-    # Same node, NOT reachable as an edge: it expands rather than pointing at nothing.
-    lone = _split_k().operands[0]
-    text = "\n".join(pretty(Map(fn=None, sources=(), body=Body((lone,)))))
-    assert "‹↑" not in text
-    assert "├─ a: a_e = load x[m, kslice]" in text and "└─ b: b_e = load w[kslice, n]" in text
+def test_a_slice_keyed_against_derived_material_prints_in_the_schedule_region() -> None:
+    """The one thing the derived branch carried that storage cannot: a slice whose site is a
+    synthesized node. It is a SCHEDULE fact, so it lands in the schedule region — the term is not
+    reconstructed to hang it on."""
+    fold = _stat_fold()
+    tile = TileOp(op=fold, name="k_stat")
+    tile.schedule["TILE@pj"] = TilePlan(regs=(64, 1))  # a key no stored node claims
+    assert unplaced_slices(tile) == [("TILE@pj", tile.schedule["TILE@pj"])]
+    text = tile.pretty_body()
+    assert "    schedule" in text and "└─ TILE@pj = f64" in text
+    # A kernel whose every key lands on a stored node has no such region at all.
+    plain = TileOp(op=fold, name="k_stat")
+    Sched(plain.op, plain.schedule).put("REDUCE", fold, ReducePlan.of(reg=4))
+    assert unplaced_slices(plain) == [] and "schedule" not in plain.pretty_body()
 
 
 # --- a λ that is not closed says so -------------------------------------------------------------- #

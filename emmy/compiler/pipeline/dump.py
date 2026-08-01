@@ -427,7 +427,8 @@ def _inline_scalar_loads(body: str, scalar_inputs: dict[str, float]) -> str:
     and substitute the literal value at every use site in the body."""
     import re
 
-    pat = re.compile(r"^(\s*)(\w+)\s*=\s*load\s+(\S+)\[0\]\s*$")
+    # The prefix is whitespace at loop-IR level and a tree connector in the tile dump.
+    pat = re.compile(r"^(.*?)(\w+)\s*=\s*load\s+(\S+)\[0\]\s*$")
     name_to_lit: dict[str, str] = {}
     out_lines: list[str] = []
     for line in body.splitlines():

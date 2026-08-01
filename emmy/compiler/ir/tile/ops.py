@@ -492,19 +492,151 @@ def term_key(root) -> str:
     return text
 
 
-def pretty(op, indent: str = "") -> list[str]:
-    """Structurally pretty-print a kernel op (for dumps) — a
-    :class:`~emmy.compiler.ir.tile.ir.Fold` as a typed header over its synthesized
-    loop nest, the ``Map``'s body (its annotated reduce ``Loop`` + projection), or a bare stmt's own
-    pretty."""
-    if isinstance(op, Fold):
-        head = f"{indent}Fold[{op.axis.name}] {op.role.name.lower()}"
-        return [head, *pretty_body(Body(op.lower()), indent + "    ")]
-    if isinstance(op, Contraction):
-        return [*op.pretty(indent), *pretty_body(Body(op.lower()), indent + "    ")]
-    if isinstance(op, Map):
-        src = [line for s in op.sources for line in pretty(s, indent)]
-        return [*src, *pretty_body(op.body, indent)]
+# --------------------------------------------------------------------------- #
+# The structural dump — the STORED term as a tree.
+#
+# The tile term is a tree of three node kinds over operand EDGES, and every fact a pass
+# dispatches on is a stored param on a node (this module's whole premise). The dump renders
+# exactly that: each node's own header, its stored params as labelled branches, and each operand
+# edge recursed into — so an inline COMPUTED edge is visibly a subtree and a MATERIALIZED one
+# visibly a leaf ``Load``. The synthesized loop nest a node lowers to is DERIVED, so it prints
+# under an explicit ``derived`` branch (opt out with ``derived=False``) and never masquerades as
+# storage. Schedule slices are not on the term at all — they annotate a node from the owning
+# ``TileOp.schedule`` when one is supplied.
+# --------------------------------------------------------------------------- #
+
+_TEE, _ELBOW, _PIPE, _GAP = "├─ ", "└─ ", "│  ", "   "
+
+
+class _Ctx:
+    """The dump's read-only context — the owning ``TileOp``'s schedule view plus its site table,
+    so each node can be annotated with the slices keyed against it and with the ``derived`` bit
+    the path walker assigns. ``None`` everywhere when a bare term is printed without its op."""
+
+    def __init__(self, tile, derived: bool) -> None:
+        self.derived = derived
+        self.sched = sched_of(tile) if tile is not None and tile.op is not None else None
+        self.sites = {}
+        if self.sched is not None:
+            for site in self.sched._all_sites():
+                self.sites.setdefault(id(site.node), site)
+
+    def note(self, node) -> str:
+        """The schedule annotation for ``node`` — its ``derived``-site marker and every slice the
+        kernel keys against it, spelled by the codec (``''`` = the family's decided-empty)."""
+        if self.sched is None:
+            return ""
+        bits = []
+        site = self.sites.get(id(node))
+        if site is not None and site.derived:
+            bits.append("derived-site")
+        for family in ("TILE", "REDUCE", "STAGE"):
+            slice_ = self.sched.get(family, node)
+            if slice_ is not None:
+                bits.append(f"{family}={slice_.spell() or '·'}")
+        return f"   ⟨{' '.join(bits)}⟩" if bits else ""
+
+
+def _lam_sig(lam) -> str:
+    """A lambda's one-line signature. A float result is the ι literal injected in the lift
+    (softmax's singleton ``(x, 1)``), which has no def to name."""
+    rs = ", ".join(r if isinstance(r, str) else format(r, "g") for r in lam.results)
+    return f"λ({', '.join(lam.params)}) -> ({rs})"
+
+
+def _axis_span(axis) -> str:
+    win = getattr(axis, "window", None)
+    parent = f" ⊂ {win.parent.name}" if win is not None and win.parent is not None else ""
+    return f"{axis.name} in 0..{axis.extent}{parent}"
+
+
+def _kind(edge) -> str:
+    """An operand edge's inhabitant — the two things an input can be."""
+    return "materialized" if isinstance(edge, Load) else "computed"
+
+
+def _head(node, ctx: _Ctx) -> str:
+    """One node's header line — its kind and the stored params that fit on a line."""
+    if isinstance(node, Fold):
+        text = f"Fold[{_axis_span(node.axis)}] {node.role.name.lower()}" + (" unroll" if node.unroll else "")
+    elif isinstance(node, Contraction):
+        text = node.pretty()[0].strip()
+    elif isinstance(node, Map):
+        text = f"Map {_lam_sig(node.fn)}" + ("" if node.sources else "  ‹pointwise›")
+    else:
+        return str(node)
+    return text + ctx.note(node)
+
+
+def _stmts(stmts, ctx: _Ctx):
+    """Render a stored stmt sequence. A structural NODE occupying a statement position — a
+    composed step's inline node, the derived evaluation's synthesized contraction — prints as its
+    annotated header, not a nested dump: its storage is the edge above (already shown), and what
+    is worth seeing here is that it is a node and which slices key against it."""
+
+    def render(cont: str) -> list[str]:
+        out: list[str] = []
+        for s in stmts:
+            if isinstance(s, (Fold, Contraction, Map)):
+                out.append(f"{cont}{_head(s, ctx)}")
+            else:
+                out.extend(pretty_body(Body((s,)), cont))
+        return out
+
+    return render
+
+
+def _subtree(node, ctx: _Ctx):
+    return lambda cont: _branch(_items(node, ctx), cont)
+
+
+def _edge(label: str, edge, ctx: _Ctx) -> tuple[str, object]:
+    """One operand edge as a tree item — a ``Load`` is a leaf spelled inline, a computed edge
+    recurses into the node stored on it."""
+    if isinstance(edge, Load):
+        return f"{label}: {edge.pretty()[0].strip()}   ‹materialized›", lambda cont: []
+    return f"{label}: {_head(edge, ctx)}   ‹computed›", _subtree(edge, ctx)
+
+
+def _items(node, ctx: _Ctx) -> list[tuple[str, object]]:
+    """A node's tree children — its stored params first, the derived reading last."""
+    items: list[tuple[str, object]] = []
+    if isinstance(node, Fold):
+        init = ", ".join(x if isinstance(x, str) else format(x, "g") for x in node.init)
+        items.append((f"init: ({init})", lambda cont: []))
+        items.append((f"lift: {_lam_sig(node.lift)}", _stmts(node.lift.body, ctx)))
+        items.append((f"combine: {_lam_sig(node.combine)}", _stmts(node.combine.body, ctx)))
+        items += [_edge(f"operand[{i}]", e, ctx) for i, e in enumerate(node.operands)]
+        if ctx.derived:
+            items.append(("derived step", _stmts(node.step_stmts(), ctx)))
+    elif isinstance(node, Contraction):
+        items.append(_edge("a", node.a, ctx))
+        one = len(node.channels) == 1
+        items += [_edge("b" if one else f"channel[{i}] -> {ch.acc}", ch.b, ctx) for i, ch in enumerate(node.channels)]
+    elif isinstance(node, Map):
+        items += [(f"source[{i}]: {_head(s, ctx)}", _subtree(s, ctx)) for i, s in enumerate(node.sources)]
+        if len(node.fn.body):
+            items.append(("body", _stmts(node.fn.body, ctx)))
+    return items
+
+
+def _branch(items: list[tuple[str, object]], cont: str) -> list[str]:
+    out: list[str] = []
+    for i, (head, sub) in enumerate(items):
+        last = i == len(items) - 1
+        out.append(f"{cont}{_ELBOW if last else _TEE}{head}")
+        out.extend(sub(cont + (_GAP if last else _PIPE)))
+    return out
+
+
+def pretty(op, indent: str = "", *, tile=None, derived: bool = True) -> list[str]:
+    """Structurally pretty-print a kernel op (for dumps) as the STORED tree — each node's kind and
+    params, its operand edges recursed into, and (unless ``derived=False``) the derived per-cell
+    step beneath. Pass ``tile`` — the owning ``TileOp`` — to annotate each node with the schedule
+    slices keyed against it. A bare stmt falls back to its own pretty."""
+    ctx = _Ctx(tile, derived)
+    if isinstance(op, (Fold, Contraction, Map)):
+        return [f"{indent}{_head(op, ctx)}", *_branch(_items(op, ctx), indent)]
     if isinstance(op, Stmt):
         return list(op.pretty(indent))
     return [f"{indent}{op!r}"]

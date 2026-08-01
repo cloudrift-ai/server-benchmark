@@ -466,11 +466,24 @@ param — degrades to uniform silently; a legal one stamps and the staged K-loop
 (`lowering/kernel/_stage._wspec_kloop`).
 
 `tile/ops.py` `lower(op)` returns the `Map`'s body verbatim — the loop nest with its annotated reduce `Loop`s, the
-carriers already dissolved into loose folds + the streaming `merge` at recognition; `pretty(op)` renders it for
-dumps. The tensor-core, cooperative-combine, staging (cp.async / TMA), and warp-specialization tiers are materialized
+carriers already dissolved into loose folds + the streaming `merge` at recognition. The tensor-core, cooperative-combine, staging (cp.async / TMA), and warp-specialization tiers are materialized
 downstream in `lowering/kernel` against the op tree + schedule. The older tile-level `GridTile` / `ThreadTile` /
 `Stage` structures were removed in the tile-IR rebuild and are being rebuilt there as the schedules return (see
 `pipeline/passes/ARCHITECTURE.md`).
+
+**The structural dump** (`ops.pretty` / `TileOp.pretty_body`, what `emmy compile --ir tile` and the `EMMY_DUMP_DIR`
+`.txt` artifacts print) renders the STORED tree as a tree, never a lowered nest — the dump is where a reader meets the
+term directly, so it has to show what the term IS. Each node prints its kind and stored params as labelled branches
+(a `Fold`'s `init` / `lift` / `combine` / `operands`, a `Contraction`'s `a` and one branch per `Channel`, a `Map`'s
+binder signature and `sources`), and every operand edge is recursed into and tagged with its inhabitant — `‹computed›`
+for an inline node subtree, `‹materialized›` for a leaf gmem `Load`. The synthesized loop reading a node lowers to is
+DERIVED, so it sits under an explicit `derived step` branch (`pretty(op, derived=False)` drops it) and cannot be
+mistaken for storage; a structural node occupying a statement position inside one prints as its annotated header only.
+The caller facts that live BESIDE the term get their own regions — `place` / `work` / `wspec` above it, `stores`
+below — and schedule slices annotate a node as `⟨TILE=… REDUCE=… STAGE=…⟩` only when the owning `TileOp` is supplied
+(`pretty(op, tile=…)`), read through `Sched` and the path codec, so nothing on the term can carry one. A `derived-site`
+marker on a node is the path walker's bit: a real schedule site below the seam lattice (flash's synthesized PV), never
+a `PLACE` target.
 
 ## `kernel/`
 

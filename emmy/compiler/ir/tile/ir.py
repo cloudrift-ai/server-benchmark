@@ -1043,7 +1043,7 @@ class Contraction(Stmt):
         # Algebra only — the placement / schedule the old stamped fields printed here belongs to
         # the placed ``TilePlan`` slice, and ``TileOp.pretty_body`` prints the schedule slices beside the term.
         ops = f"{src(self.a, self.a_name)} @ {bs}{t} -> {accs}"
-        return [f"{indent}Contraction [Σ {self.k_axis.name}] {ops}"]
+        return [f"{indent}Contraction [Σ {self.k_axis.name} in 0..{self.k_axis.extent}] {ops}"]
 
 
 def _loop_ir_fn(params, body, results) -> Lambda:
@@ -1266,18 +1266,40 @@ class TileOp(Op):
     work: object = None
 
     def pretty_body(self) -> str:
-        """Render the ``op`` tree structurally (the dump view) — no lowering — plus the
-        kernel-boundary ``stores`` (the root ``Write``\\ s live here since 1q, so a dump without
-        them would hide where the kernel's output lands)."""
+        """Render the kernel structurally (the dump view) — no lowering: the caller facts that
+        live BESIDE the term (``place`` / ``workers`` / ``work``), then the ``op`` tree with each
+        node's schedule slices annotated from ``schedule``, then the kernel-boundary ``stores``
+        (the root ``Write``\\ s live here since 1q, so a dump without them would hide where the
+        kernel's output lands). The three regions are the three owners — geometry, algebra,
+        boundary — kept visibly apart."""
         from emmy.compiler.ir.tile.ops import pretty  # noqa: PLC0415
 
         if self.op is None:
             return ""
-        lines = pretty(self.op, "    ")
-        for st in self.stores:
-            sweep = f" sweep({st.sweep.name})" if st.sweep is not None else ""
-            lines += [f"    store{sweep}: {line.strip()}" for line in st.write.pretty()]
+        lines = [f"    {line}" for line in self._pretty_place()]
+        lines += pretty(self.op, "    ", tile=self)
+        if self.stores:
+            lines.append("    stores")
+            for i, st in enumerate(self.stores):
+                tee = "└─" if i == len(self.stores) - 1 else "├─"
+                sweep = f"sweep({st.sweep.name}) " if st.sweep is not None else ""
+                lines += [f"    {tee} {sweep}{line.strip()}" for line in st.write.pretty()]
         return "\n".join(lines)
+
+    def _pretty_place(self) -> list[str]:
+        """The geometry lines above the term — the placement (free axes and their grid binding,
+        or ``unmapped`` before ``020_schedule`` decides one) and the kernel's one worker
+        inventory. Omitted entirely when nothing has been decided yet."""
+        out = []
+        axes = lambda a: ", ".join(x.name for x in a)  # noqa: E731
+        if self.place.free or self.place.grid:
+            grid = f"grid=({axes(self.place.grid)})" if self.place.is_mapped else "unmapped"
+            out.append(f"place  free=({axes(self.place.free)})  {grid}")
+        if self.work is not None:
+            out.append(f"work   {self.work.spell()}")
+        if self.workers is not None:
+            out.append(f"wspec  {self.workers.spell()}")
+        return out
 
 
 __all__ = [

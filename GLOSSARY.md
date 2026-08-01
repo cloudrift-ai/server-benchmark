@@ -41,8 +41,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Operation (op)** — One unit of computation, such as add, matrix multiplication, softmax, or RMSNorm.
 - **Graph** — A representation of a program as nodes connected by data-flow edges. A node usually represents an
   operation; an edge means that one operation uses a value produced by another.
-- **Node** — One item in a graph. In Emmy, it stores an operation, its input node IDs, output tensor information,
-  and optional metadata.
+- **Node** — One item in a graph. In Emmy, it stores an operation, the names of the input buffers it reads (usually
+  the producing node's ID), one or more output tensors, and optional hints.
 - **Intermediate representation (IR)** — A compiler's internal description of a program. Emmy uses several IR
   stages. Early stages resemble PyTorch; later stages explicitly describe loops, GPU threads, memory, and CUDA
   source.
@@ -165,7 +165,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **MCTS (Monte Carlo tree search)** — A search method that treats decisions as a tree and balances trying promising
   branches with exploring less-tested ones.
 - **Prior** — In Emmy, a ranker that estimates which schedule will be fast before the current candidate is measured.
-  The offline prior is fixed; the online prior learns from collected measurements.
+  The offline prior is fitted ahead of time (by `emmy fit`, on the golden dataset) and ships with the repo; the
+  online prior learns from collected measurements.
 - **Golden configuration** — A reviewed, GPU-specific schedule and latency for a standard problem shape. It is
   trusted deployment evidence and a regression reference.
 - **Evidence** — A compatible recorded measurement used to select between schedule candidates.

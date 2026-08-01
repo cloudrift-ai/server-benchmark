@@ -79,7 +79,6 @@ from typing import TYPE_CHECKING
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import Op
-from emmy.compiler.ir.expr import Expr, Literal
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.stmt import (
     Accum,
@@ -99,19 +98,6 @@ from emmy.compiler.ir.stmt.body import _member_reads
 
 if TYPE_CHECKING:
     pass
-
-
-def _ext_expr(axis: Axis) -> Expr:
-    """The axis extent as an ``Expr`` — a literal int (static) or the symbolic ``Dim`` expr."""
-    return Literal(axis.extent.as_static(), "int") if axis.extent.is_static else axis.extent.expr
-
-
-def _overhangs(axis: Axis, tile: int) -> bool:
-    """True iff a ``tile``-wide CTA block overhangs ``axis`` (symbolic or non-divisible extent) —
-    so its tail must be masked."""
-    if tile <= 1:
-        return False
-    return not (axis.extent.is_static and axis.extent.as_static() % tile == 0)
 
 
 def _splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ...]:
@@ -651,37 +637,6 @@ class Fold(Stmt):
         raise AssertionError("Fold must be lowered (ops.lower) before render")
 
 
-@dataclass(frozen=True)
-class Side:
-    """One tiled output axis of a contraction — the outer ``m`` or inner ``n`` — paired with its
-    derived per-CTA tile geometry. The two ride as a ``(m, n)`` pair (:attr:`Contraction.mn`)
-    mirroring the schedule's ``(m, n)`` tuples (``TilePlan.units`` / ``regs``), so the factorizer
-    threads one object per axis instead of a dozen loose ``*_m`` / ``*_n`` args. The tile width,
-    unit / register counts, and bound block/unit var names are stamped by :meth:`Contraction._side`;
-    the ``mask`` / ``ext`` are derived from the axis + width."""
-
-    axis: Axis  # the output axis (a param)
-    tile: int  # the per-CTA width = units · reg · atom_dim
-    units: int  # parallel units on this axis (warps for mma / threads for scalar)
-    reg: int  # register sub-cells per unit on this axis
-    block: str  # the bound grid-block var (the axis name + ``_b``)
-    unit: str  # the bound unit var (the axis name + ``_u``)
-
-    @property
-    def name(self) -> str:
-        return self.axis.name
-
-    @property
-    def mask(self) -> bool:
-        """True iff a ``tile``-wide CTA block overhangs the axis (its tail must be masked)."""
-        return _overhangs(self.axis, self.tile)
-
-    @property
-    def ext(self) -> Expr:
-        """The axis extent as an ``Expr`` — a static literal or the symbolic ``Dim`` expr."""
-        return _ext_expr(self.axis)
-
-
 def deep_defines(s: Stmt) -> set[str]:
     """Every SSA name defined in ``s`` (deep — a stat reduce ``Loop``'s ``Accum`` counts)."""
     out = set(s.defines())
@@ -865,7 +820,8 @@ class Contraction(Stmt):
     ``for k: acc += a*b`` register-tiled loop — then run the projection peeled off the wrapping
     ``Map`` (``acc`` is the SSA name the synthesized reduce produces and the projection consumes). The
     operand buffers ride :meth:`external_reads`; the node has no nested ``Body``. ``_factor.factorize``
-    reads the placement-derived geometry (the ``(m, n)`` :class:`Side` pair — ``tile`` / ``mask`` /
+    reads the placement-derived geometry (the ``(m, n)`` :class:`~emmy.compiler.ir.schedule.Side`
+    pair — ``tile`` / ``mask`` /
     ``block`` / ``unit`` per axis — plus ``block_threads``) off the ``Placed`` view; only
     ``b_trans``, a gmem LAYOUT fact of the stored ``b`` edge, stays on the node. The atom selects
     the codegen — there is no separate ``Leaf`` / per-atom subclass. :meth:`as_fold` remains the

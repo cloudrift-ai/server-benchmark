@@ -22,8 +22,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
-from emmy.compiler.ir.schedule import Stage, TilePlan
-from emmy.compiler.ir.tile.ir import Contraction, Side
+from emmy.compiler.ir.schedule import Side, Stage, TilePlan
+from emmy.compiler.ir.tile.ir import Contraction
 
 if TYPE_CHECKING:
     from emmy.compiler.ir.atom import Atom

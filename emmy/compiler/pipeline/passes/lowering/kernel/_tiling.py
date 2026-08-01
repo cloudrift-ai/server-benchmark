@@ -33,8 +33,8 @@ from dataclasses import dataclass, replace
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, Literal, Var
 from emmy.compiler.ir.kernel import Tile
+from emmy.compiler.ir.schedule import Side
 from emmy.compiler.ir.stmt import Body, Cond, Stmt
-from emmy.compiler.ir.tile.ir import Side
 
 
 def shrink_axis(axis: Axis, reg: int) -> Axis:

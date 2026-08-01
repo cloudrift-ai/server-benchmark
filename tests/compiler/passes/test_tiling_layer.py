@@ -14,8 +14,8 @@ from dataclasses import replace
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.schedule import Side
 from emmy.compiler.ir.stmt import Body, Write
-from emmy.compiler.ir.tile.ir import Side
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, shrink_axis, unit_tile
 
 

@@ -36,10 +36,9 @@ from emmy.compiler.ir.kernel.ir import (
     RegFragment,
     RegStore,
 )
-from emmy.compiler.ir.schedule import Stage
+from emmy.compiler.ir.schedule import Side, Stage
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile.ir import Side
 from emmy.compiler.pipeline.passes.lowering._placed import Placed
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (

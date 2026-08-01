@@ -59,6 +59,7 @@ from typing import Any
 
 from emmy.compiler.ir.atom import SCALAR_ATOM, Atom, AtomKind, atom_for
 from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.expr import Expr, Literal
 
 # ===========================================================================================
 # Codec engine — the ser/de source of truth for the inventory-free schedule codecs below (STAGE /
@@ -1085,6 +1086,54 @@ class Raster:
 _RASTER_RE = re.compile(r"g([mn])(\d+)")
 
 
+def _ext_expr(axis: Axis) -> Expr:
+    """The axis extent as an ``Expr`` — a literal int (static) or the symbolic ``Dim`` expr."""
+    return Literal(axis.extent.as_static(), "int") if axis.extent.is_static else axis.extent.expr
+
+
+def _overhangs(axis: Axis, tile: int) -> bool:
+    """True iff a ``tile``-wide CTA block overhangs ``axis`` (symbolic or non-divisible extent) —
+    so its tail must be masked."""
+    if tile <= 1:
+        return False
+    return not (axis.extent.is_static and axis.extent.as_static() % tile == 0)
+
+
+@dataclass(frozen=True)
+class Side:
+    """One tiled output axis of a contraction — the outer ``m`` or inner ``n`` — paired with its
+    derived per-CTA tile geometry. The two ride as a ``(m, n)`` pair (:attr:`Contraction.mn`)
+    mirroring :class:`TilePlan`'s own ``units`` / ``regs`` tuples, so the factorizer
+    threads one object per axis instead of a dozen loose ``*_m`` / ``*_n`` args. The tile width,
+    unit / register counts, and bound block/unit var names are derived from an axis + a
+    :class:`TilePlan`; the ``mask`` / ``ext`` follow from the axis + width.
+
+    Lives here, beside ``TilePlan``, because it is SCHEDULE geometry, not algebra: ``ir/tile/ir.py``
+    already imports this module, so a tile-side home would make the schedule slice unable to derive
+    its own ``(m, n)`` reading."""
+
+    axis: Axis  # the output axis (a param)
+    tile: int  # the per-CTA width = units · reg · atom_dim
+    units: int  # parallel units on this axis (warps for mma / threads for scalar)
+    reg: int  # register sub-cells per unit on this axis
+    block: str  # the bound grid-block var (the axis name + ``_b``)
+    unit: str  # the bound unit var (the axis name + ``_u``)
+
+    @property
+    def name(self) -> str:
+        return self.axis.name
+
+    @property
+    def mask(self) -> bool:
+        """True iff a ``tile``-wide CTA block overhangs the axis (its tail must be masked)."""
+        return _overhangs(self.axis, self.tile)
+
+    @property
+    def ext(self) -> Expr:
+        """The axis extent as an ``Expr`` — a static literal or the symbolic ``Dim`` expr."""
+        return _ext_expr(self.axis)
+
+
 __all__ = [
     "AtomKind",
     "Emit",
@@ -1093,6 +1142,7 @@ __all__ = [
     "FoldMove",
     "Level",
     "Placement",
+    "Side",
     "ROLE_REGISTRY",
     "ReducePlan",
     "ReduceStage",

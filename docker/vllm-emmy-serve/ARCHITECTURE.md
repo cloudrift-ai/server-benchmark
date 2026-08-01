@@ -158,13 +158,14 @@ The full release session on a rented card (each step from the repo checkout; hos
 
    A pulled tag must come from the SAME commit you release from (the wheel is part of the cubin `source`); when in
    doubt, build on the rental. To pin a non-default tag for every later target: `make VLLM_EMMY_TAG=… <target>`.
-2. Preflight the toolchain with the **image's** nvcc — mount just the script; it needs no repo or GPU in-container
-   (the emmy wheel + nvcc are in the image; it hides CUDA and resolves goldens off-GPU):
+2. Preflight the toolchain with the **image's** nvcc — mount the `scripts/` directory (the preflight imports its
+   sibling `check_serving_goldens`, so a single-file mount dies on `ModuleNotFoundError`); it needs no repo root or
+   GPU in-container (the emmy wheel + nvcc are in the image; it hides CUDA and resolves goldens off-GPU):
 
    ```bash
-   docker run --rm --entrypoint bash -v "$PWD/scripts/preflight_serving_kernels.sh":/preflight.sh \
+   docker run --rm --entrypoint bash -v "$PWD/scripts":/scripts:ro \
        -e MODEL=google/gemma-4-12B-it -e ARCH=sm_120 \
-       cloudriftai/vllm-emmy:TAG /preflight.sh          # expect: <N> OK, 0 FAIL
+       cloudriftai/vllm-emmy:TAG /scripts/preflight_serving_kernels.sh   # expect: <N> OK, 0 FAIL
    ```
 
    The enumeration is this model's golden set (the same matcher as step 0), so the preflight covers exactly the

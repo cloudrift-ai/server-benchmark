@@ -29,8 +29,8 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   **`Contraction`** node (1s) — every recognized contraction stores as this kind: its own reduce `k_axis`, the
   shared `a` operand edge and the product `Channel`s `(b_i, acc_i)` (arity N = the fused gate⊗up edge; sharing is
   the node's arity) and NOTHING ELSE — placement (`(m, n)` axes, the leading grid axes) and schedule
-  (`TilePlan`/`Stage`) are caller facts living on the `TileOp` (`place` / the `schedule` dict), bound to the node
-  at the point of use as the lowering-side view `passes/lowering/_placed.Placed`; `as_fold()` survives only as the
+  (`TilePlan`/`Stage`) are caller facts living on the `TileOp` (`place` / the `schedule` dict), the `(m, n)` axes
+  bound onto the `TilePlan` slice at the point of use (`TilePlan.at`); `as_fold()` survives only as the
   node's DERIVED λ reading, consumed by the cross-partition `Reduction`
   machinery and the PLANAR demotion, its loop body byte-identical to the node's own) — and the lift/projection
   wrapper `Map` (`fn: Lambda` + `sources`, bound positionally; `fn.results` replaced the `out` last-def convention).
@@ -64,12 +64,13 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   from PLACE (`Site.derived`), while flash's QK operand edge IS a PLACE
   site. **A `Contraction` carries NO placement and NO schedule**: the node is pure algebra (`k_axis` + the `a`
   edge + `Channel`s), so its identity (`==` / `hash` / `term_key`) is its algebra alone, and the placed reading
-  the tensor-core/staged tiers require — the `(m, n)` `Side` geometry + `tile`/`stage` — is a lowering-side VIEW
-  (`passes/lowering/_placed.place(node, m, n, tile, stage) -> Placed`, the `_reduction.Reduction` pattern)
-  built from the CALLER's placement axes (trailing grid for a root kernel; `place.free` threads to the
-  materializer via `Ctx.free` for flash) and the `TileOp.schedule` slices; the view proxies every algebra read to
-  the node and owns only the placement-derived geometry (`ir.shared_operand` is the placement-free cone read).
-  The view reads the TILED CELL: what lies OUTSIDE it — the kernel's leading batch/ksplit grid axes, the
+  the tensor-core/staged tiers require — the `(m, n)` `Side` geometry — is the SCHEDULE SLICE's:
+  `TilePlan.at(m, n)` binds the CALLER's placement axes (trailing grid for a root kernel; `place.free` threads to
+  the materializer via `Ctx.free` for flash) onto the slice, which then derives `mn`/`m`/`n`/`launch_threads`
+  (`axes` is `compare=False`, so placement never reaches `spell()`, a knob row, a golden or a prior key).
+  Node and slice travel as a `(node, tile)` PAIR — algebra and geometry from their own owners, no fused view type
+  (`ir.shared_operand` is the placement-free cone read).
+  The slice reads the TILED CELL: what lies OUTSIDE it — the kernel's leading batch/ksplit grid axes, the
   per-cell rename's shared coordinates — is the grid's fact, threaded to `kernel/_atom` by `_factor`. The A/B asymmetry that is real — A M-resident/compute-fillable, B streamed — is a
   SCHEDULE fact read off the node's roles (`isinstance(c.b, Load)` eligibility gates), not a storage fact. A cone's
   SOURCE is the row-invariant prologue (the per-row statistic) and its `body` the per-cell normalize, so the K seam

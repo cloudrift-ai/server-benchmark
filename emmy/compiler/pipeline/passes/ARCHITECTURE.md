@@ -68,9 +68,9 @@ passes later:
   no statistic prologue) — plus the fold accumulator and the projection. The STORED form is the `Contraction`
   NODE itself (1s — the third stored node kind): pure algebra — `k_axis` + the shared `a` edge + the product
   `Channel`s `(b_i, acc_i)`, sharing the node's ARITY — and NOTHING else: placement and schedule are not node
-  fields at all. The PLACED reading the tiers require is a lowering-side VIEW (`_placed.Placed` — output axes off
-  the caller's placement, `tile`/`stage` off the `TileOp.schedule` slices, every algebra read proxied to the
-  node), so a schedule can never ride a stored term. `as_fold()` is the node's DERIVED λ reading (the flat `(init, combine)` algebra
+  fields at all. The PLACED reading the tiers require is the SCHEDULE SLICE: a `TilePlan` carries the `(m, n)`
+  output axes it tiles (`TilePlan.at`, from the caller's placement) and derives the `Side` geometry from them, so
+  node and slice travel as a pair and a schedule can never ride a stored term. `as_fold()` is the node's DERIVED λ reading (the flat `(init, combine)` algebra
   spelling `Reduction` and the PLANAR demotion consume; its derived loop body is byte-identical to the node's own,
   unit-tested).
   An **operand is an edge** with two inhabitants — the two things an input can be: MATERIALIZED (a gmem `Load`) or

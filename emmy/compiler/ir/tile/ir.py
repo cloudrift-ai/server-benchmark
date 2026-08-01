@@ -804,7 +804,7 @@ class Contraction(Stmt):
     node: the schedule slices' one home is ``TileOp.schedule`` (keyed by the tree-path codec
     against this very node, read through ``ops.Sched``), the placement's is ``TileOp.place``, and a
     tier binds both to the node at the point of use as a lowering-side VIEW
-    (``passes/lowering/_placed.Placed``, the ``_reduction.Reduction`` pattern). So a node's
+    (a placed ``TilePlan`` slice for the geometry, the node itself for the algebra). So a node's
     identity IS its algebra — ``==`` / ``hash`` / :func:`ops.term_key` cannot see a schedule, and
     no emission path can leak one into a stored term. :func:`ops.lower` / ``ops.reduce_loop``
     flatten it to the
@@ -822,7 +822,7 @@ class Contraction(Stmt):
     operand buffers ride :meth:`external_reads`; the node has no nested ``Body``. ``_factor.factorize``
     reads the placement-derived geometry (the ``(m, n)`` :class:`~emmy.compiler.ir.schedule.Side`
     pair — ``tile`` / ``mask`` /
-    ``block`` / ``unit`` per axis — plus ``block_threads``) off the ``Placed`` view; only
+    ``block`` / ``unit`` per axis — plus ``launch_threads``) off the placed ``TilePlan``; only
     ``b_trans``, a gmem LAYOUT fact of the stored ``b`` edge, stays on the node. The atom selects
     the codegen — there is no separate ``Leaf`` / per-atom subclass. :meth:`as_fold` remains the
     node's DERIVED λ reading — the flat ``(init, combine)`` algebra spelling ``Reduction`` (the
@@ -1041,7 +1041,7 @@ class Contraction(Stmt):
         bs = ",".join(src(ch.b, _operand_name(ch.b)) for ch in self.channels)
         accs = ",".join(ch.acc for ch in self.channels)
         # Algebra only — the placement / schedule the old stamped fields printed here belongs to
-        # the ``Placed`` view, and ``TileOp.pretty_body`` prints the schedule slices beside the term.
+        # the placed ``TilePlan`` slice, and ``TileOp.pretty_body`` prints the schedule slices beside the term.
         ops = f"{src(self.a, self.a_name)} @ {bs}{t} -> {accs}"
         return [f"{indent}Contraction [Σ {self.k_axis.name}] {ops}"]
 

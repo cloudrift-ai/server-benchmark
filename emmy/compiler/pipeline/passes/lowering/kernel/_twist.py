@@ -43,6 +43,7 @@ Leading ``_`` so the pass loader skips this module."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 from emmy.compiler.dtype import F32
@@ -67,13 +68,11 @@ from emmy.compiler.ir.kernel.ir import (
     RegFragment,
     RegStore,
 )
-from emmy.compiler.ir.schedule import FoldMove, Level, ReduceStage
+from emmy.compiler.ir.schedule import FoldMove, Level, ReduceStage, TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Cond, Init, Load, Select, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile.ir import Contraction, Fold, Map
 from emmy.compiler.pipeline.passes.lowering._addr import gmem_row_stride
-from emmy.compiler.pipeline.passes.lowering._placed import Placed
-from emmy.compiler.pipeline.passes.lowering._placed import place as place_view
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _clamp_last, _f16acc, unroll_ok
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
@@ -106,7 +105,7 @@ _COMPS = ("0", "1")
 _PAD = 8
 
 #: The per-CTA warp index axis (bound by the ``Tile`` decode when the schedule maps more than one
-#: warp per CTA — ``qk.tile.units[0] > 1``); each warp owns its own ``atom_m`` query-row block.
+#: warp per CTA — ``qk_t.units[0] > 1``); each warp owns its own ``atom_m`` query-row block.
 FLASH_WARP_AXIS = "_wq"
 
 #: Negation of a comparison — a ``Select`` KEEPS where its predicate holds; a ``FragmentMask``
@@ -171,7 +170,8 @@ def _reads(s: Stmt) -> set[str]:
 
 
 def _frag_contraction(
-    c: Placed,
+    c: Contraction,
+    tile: TilePlan,
     tiles: list[tuple[tuple[str, ...], tuple[str, ...]]],
     *,
     n_sub,
@@ -201,10 +201,10 @@ def _frag_contraction(
     axis on the slab ROW either way), ``b_slot`` is the ring-slot row offset, ``b_ldm`` the slab
     row stride, and the caller passes SLAB-LOCAL ``n_sub`` / ``k_sub`` origins (the resolver
     guaranteed exact cover, so no B-side masks ride the staged path)."""
-    atom = c.tile.atom
+    atom = tile.atom
     shape = atom.shape
-    nt = c.tile.regs[1]  # output n-atoms per step (warp order (FM, FN))
-    n_name, k_name = c.n_axis.name, c.k_axis.name
+    nt = tile.regs[1]  # output n-atoms per step (warp order (FM, FN))
+    n_name, k_name = tile.axes[1].name, c.k_axis.name
     b_trans = c.b_trans
     if b_slab is not None:
         ldm_b = b_ldm
@@ -217,7 +217,7 @@ def _frag_contraction(
         assert b_gmem_ldm is not None, "_frag_contraction: gmem-direct B needs the derived row stride"
         ldm_b = b_gmem_ldm
 
-    bk = c.tile.bk
+    bk = tile.bk
     # ``reg_depth == 2`` (the ``STAGE`` codec's ``p2``, staged drains with ≥ 2 atom-K steps): the
     # two-slot ldmatrix ping-pong — step ``s+1``'s B fragments load into the alternate slot while
     # step ``s``'s mmas consume the current one, breaking the WAR hazard on the fragment
@@ -303,7 +303,7 @@ def _frag_contraction(
     return out
 
 
-def _realize_prologue(stmts, qk: Placed, frags: tuple[str, ...], col_bases, row_base: Expr, state) -> tuple[list, list]:
+def _realize_prologue(stmts, qk: TilePlan, frags: tuple[str, ...], col_bases, row_base: Expr, state) -> tuple[list, list]:
     """Realize the score prologue (the plain stmts between the head contraction and the carrier's
     streaming merge) at fragment residence, stmt kind by stmt kind. Returns ``(hoisted, stream)`` —
     the loop-invariant scalar ``Load``\\ s (hoisted above the stream when a realized stmt reads
@@ -312,15 +312,15 @@ def _realize_prologue(stmts, qk: Placed, frags: tuple[str, ...], col_bases, row_
     hoisted: list[Load] = []
     stream: list[Stmt] = []
     score = qk.acc
-    m_name, n_name = qk.m_axis.name, qk.n_axis.name
+    m_name, n_name = qk.axes[0].name, qk.axes[1].name
     # An additive score bias (the explicit SDPA ``attn_mask``): a per-``(m, kv)`` tensor ``Load``
     # awaiting its ``add`` — realized as a :class:`FragmentBiasAdd` per score fragment when the add
     # consumes it. The load-index template substitutes the fragment coordinate vars for the axis
     # vars; a SYMBOLIC extent clamps the coordinate to the last valid index (cp-style clamp-read —
     # the duplicates land on cells the boundary FragmentMask / store guard discards).
     pending: dict[str, Load] = {}
-    row_coord: Expr = Var(FRAG_ROW) if qk.m_axis.extent.is_static else _clamp_last(Var(FRAG_ROW), _ext(qk.m_axis))
-    col_coord: Expr = Var(FRAG_COL) if qk.n_axis.extent.is_static else _clamp_last(Var(FRAG_COL), _ext(qk.n_axis))
+    row_coord: Expr = Var(FRAG_ROW) if qk.axes[0].extent.is_static else _clamp_last(Var(FRAG_ROW), _ext(qk.axes[0]))
+    col_coord: Expr = Var(FRAG_COL) if qk.axes[1].extent.is_static else _clamp_last(Var(FRAG_COL), _ext(qk.axes[1]))
     for s in stmts:
         if isinstance(s, Contraction):
             continue  # the expect fold — regenerated from its channel
@@ -362,7 +362,7 @@ def _realize_prologue(stmts, qk: Placed, frags: tuple[str, ...], col_bases, row_
     return [ld for ld in hoisted if set(ld.names) & used], stream
 
 
-def _causal_stream(stmts, qk: Placed) -> bool:
+def _causal_stream(stmts, qk: TilePlan) -> bool:
     """True when the score prologue carries the causal coordinate ``Select`` — keep ``kv ≤ m`` over
     the contraction's own axis vars. Structural: the triangular kv bound below derives from the
     predicate's shape, never from a kernel identity (an additive-mask or unmasked stream has no
@@ -374,15 +374,15 @@ def _causal_stream(stmts, qk: Placed) -> bool:
                 isinstance(keep, BinaryExpr)
                 and keep.op == "<="
                 and isinstance(keep.left, Var)
-                and keep.left.name == qk.n_axis.name
+                and keep.left.name == qk.axes[1].name
                 and isinstance(keep.right, Var)
-                and keep.right.name == qk.m_axis.name
+                and keep.right.name == qk.axes[0].name
             ):
                 return True
     return False
 
 
-def _banded_stream(stmts, qk: Placed) -> int | None:
+def _banded_stream(stmts, qk: TilePlan) -> int | None:
     """The sliding-window width W when the score prologue carries the band coordinate ``Select``
     — keep ``kv > m − W`` over the contraction's own axis vars. Structural, like
     :func:`_causal_stream`: the banded kv stream START below derives from the predicate's shape."""
@@ -393,23 +393,23 @@ def _banded_stream(stmts, qk: Placed) -> int | None:
                 isinstance(keep, BinaryExpr)
                 and keep.op == ">"
                 and isinstance(keep.left, Var)
-                and keep.left.name == qk.n_axis.name
+                and keep.left.name == qk.axes[1].name
                 and isinstance(keep.right, BinaryExpr)
                 and keep.right.op == "-"
                 and isinstance(keep.right.left, Var)
-                and keep.right.left.name == qk.m_axis.name
+                and keep.right.left.name == qk.axes[0].name
                 and isinstance(keep.right.right, Literal)
             ):
                 return int(keep.right.right.value)
     return None
 
 
-def _pv_streamed(pv: Placed, kv_axis: Axis) -> Placed:
+def _pv_streamed(pv: Contraction, kv_axis: Axis) -> Contraction:
     """The expect contraction with its singleton intra-block axis swapped for the STREAM axis — the
     scalar tree contracts one key per step (``k_axis = pj``, extent 1); the fragment tier contracts
     the whole block, whose keys ride the stream axis in the value ``Load``'s index (``tile.bk = 1``:
     the block is one atom-K step)."""
-    return pv.replace_node(k_axis=kv_axis)
+    return replace(pv, k_axis=kv_axis)
 
 
 def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], list[Stmt]]:
@@ -424,23 +424,25 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # originals); the score's stream axis is the fold's own, read through a slice partial's window
     # PARENT so the view carries the pre-slice geometry the fragment clamps were built against.
     kv_parent = red.axis.window.parent if red.axis.window is not None else red.axis
-    qk: Placed = place_view(partial[0], ctx.free[-2], kv_parent, tile=ctx.sched.tile_of(partial[0]))
+    qk: Contraction = partial[0]
+    qk_t: TilePlan = ctx.sched.tile_of(qk).at(ctx.free[-2], kv_parent)
     pv_fold = next(s for s in partial[1:] if isinstance(s, Contraction))
-    pv: Placed = place_view(pv_fold, ctx.free[-2], ctx.free[-1], tile=ctx.sched.tile_of(pv_fold))
-    atom = qk.tile.atom
+    pv: Contraction = pv_fold
+    pv_t: TilePlan = ctx.sched.tile_of(pv_fold).at(ctx.free[-2], ctx.free[-1])
+    atom = qk_t.atom
     shape = atom.shape
     atom_n = shape[1]
-    nt = qk.tile.regs[1]  # score n-atoms per streaming block
-    nd = pv.tile.regs[1]  # output n-atoms (d_v / atom_n)
+    nt = qk_t.regs[1]  # score n-atoms per streaming block
+    nd = pv_t.regs[1]  # output n-atoms (d_v / atom_n)
     bn = nt * atom_n  # the streaming KV block width
-    d_v = pv.n_axis.extent.as_static()
+    d_v = pv_t.axes[1].extent.as_static()
 
     # The ambient warp cell: the last grid axis is the shrunk query-block axis (``um`` warps per
     # CTA, each owning ``atom_m`` query rows — the ``FLASH_WARP_AXIS`` term is bound by the
     # ``Tile`` decode when ``um > 1``); the stream rides the reduce axis in ``bn``-key blocks.
     grid = tuple(ctx.grid)
-    um = qk.tile.units[0]  # warps per CTA over the query rows
-    fm = qk.tile.regs[0]  # register query tiles per warp (FA-2's in-flight ILP)
+    um = qk_t.units[0]  # warps per CTA over the query rows
+    fm = qk_t.regs[0]  # register query tiles per warp (FA-2's in-flight ILP)
     m_blk: Expr = Var(grid[-1].name)
     if um > 1:
         m_blk = BinaryExpr("+", BinaryExpr("*", m_blk, Literal(um, "int")), Var(FLASH_WARP_AXIS))
@@ -453,7 +455,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     kv0 = Axis(name=f"{kv_axis.name}0", extent=kv_axis.extent)
     kv0_var = Var(kv0.name)
     symbolic_k = not kv_axis.extent.is_static
-    symbolic_q = not qk.m_axis.extent.is_static
+    symbolic_q = not qk_t.axes[0].extent.is_static
     seq = _ext(kv_axis)
     # A cross-CTA slice partial (flash split-KV): the fold walks its LOCAL ``[0, B)`` window
     # (``seq`` is the slice length after ``030_split_reduce`` shrank the axis) and ``red.offset`` is the
@@ -485,7 +487,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # subtracted; an above-the-diagonal slice goes negative and the loop runs zero steps).
     kv_end: Expr | None = local_kv_end  # a symbolic slice stops at its own end even un-causal
     cta_rows = Literal(um * fm * shape[0], "int")
-    if _causal_stream(partial[1:], qk):
+    if _causal_stream(partial[1:], qk_t):
         causal_rows = BinaryExpr("*", BinaryExpr("+", Var(grid[-1].name), Literal(1, "int")), cta_rows)
         if kv_off is not None:
             causal_rows = BinaryExpr("-", causal_rows, kv_off)
@@ -500,7 +502,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # start is slice-local (base subtracted; a below-the-band slice floors past its own end and the
     # loop runs zero steps). Truncating '/' on a negative pre-max value is dodged by the ternary.
     kv_start: Expr | None = None
-    window = _banded_stream(partial[1:], qk)
+    window = _banded_stream(partial[1:], qk_t)
     if window is not None:
         start_rows: Expr = BinaryExpr("-", BinaryExpr("*", Var(grid[-1].name), cta_rows), Literal(window - 1, "int"))
         if kv_off is not None:
@@ -522,13 +524,13 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # fragments, hoisted Q fragments, and repacked P fragments (the ``_q<i>`` suffix; ``fm == 1``
     # keeps today's bare names). The tiles are independent ``(m, l, O)`` chains against shared K/V
     # fragments — the per-warp ILP that hides the mma → rowmax → exp → rescale dependency chain.
-    pv_bk = max(1, pv.tile.bk)
+    pv_bk = max(1, pv_t.bk)
     # An f16-accumulate PV atom (the ``_f16acc`` sibling — full-rate HMMA on the consumer dies):
     # the P@V mma targets packed f16 fragments (``_h<j>``) and each streaming block promote-folds
     # them into the f32 output shadows, which keep the ``ofrags`` names the rescale / projection /
     # store read — the KV block IS the promote cadence, and the partial is overflow-safe (Σp ≤ 1
     # per row, so a block's f16 partial is bounded by max|V|). Scores (Q@Kᵀ) stay f32-accumulate.
-    pv_f16acc = _f16acc(pv.tile.atom)
+    pv_f16acc = _f16acc(pv_t.atom)
     qtiles: list[SimpleNamespace] = []
     for i in range(fm):
         sfx = f"_q{i}" if fm > 1 else ""
@@ -542,7 +544,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
                 pfrags=tuple(f"_p{sfx}_f{t}" for t in range(nt)),
                 ofrags=tuple(f"{expect_name}{sfx}_f{j}" for j in range(nd)),
                 ohfrags=tuple(f"{expect_name}{sfx}_h{j}" for j in range(nd)) if pv_f16acc else (),
-                qa=tuple(f"_{qk.acc}{sfx}_a{s}" for s in range(qk.tile.bk)),
+                qa=tuple(f"_{qk.acc}{sfx}_a{s}" for s in range(qk_t.bk)),
                 pa=tuple(f"_pa{sfx}{s}" for s in range(pv_bk)) if pv_bk > 1 else (f"_pa{sfx}",),
             )
         )
@@ -567,9 +569,9 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # trace strides its rows by ``H·D``, and the old ``head_dim`` assumption read the wrong rows
     # (the gemma layer-0 NaN). Canonical ``(batch…, row, dd)`` layouts derive the same values as
     # before (bit-identical). The schedule gate guarantees derivability.
-    q_gmem_ldm = gmem_row_stride(qk.a, qk.m_axis.name, ctx.inputs)
-    k_gmem_ldm = gmem_row_stride(qk.b, qk.n_axis.name if qk.b_trans else qk.k_axis.name, ctx.inputs)
-    v_gmem_ldm = gmem_row_stride(pv.b, pv.n_axis.name if pv.b_trans else kv_axis.name, ctx.inputs)
+    q_gmem_ldm = gmem_row_stride(qk.a, qk_t.axes[0].name, ctx.inputs)
+    k_gmem_ldm = gmem_row_stride(qk.b, qk_t.axes[1].name if qk.b_trans else qk.k_axis.name, ctx.inputs)
+    v_gmem_ldm = gmem_row_stride(pv.b, pv_t.axes[1].name if pv.b_trans else kv_axis.name, ctx.inputs)
     assert q_gmem_ldm and k_gmem_ldm and v_gmem_ldm, "warp twist: underivable gmem row stride (schedule-gate breach)"
 
     def _q_frag_stmts(qt, i: int) -> list[Stmt]:
@@ -594,7 +596,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         # the stream axis — structural: the contraction binder puts the m-carrying load on A), so
         # they load ONCE ahead of the stream — ``bk`` resident fragments per tile instead of
         # ``bk`` gmem fills per KV block. Same loads, same values: bit-identical to the in-loop form.
-        q_guard = (qt.row_base, _ext(qk.m_axis)) if symbolic_q else None
+        q_guard = (qt.row_base, _ext(qk_t.axes[0])) if symbolic_q else None
         q_kzero_bound = _ext(qk.k_axis) if qk.k_axis.extent.as_static() % atom.atom_k else None
         for s, qaf in enumerate(qt.qa):
             k_base = Literal(s * atom.atom_k, "int")
@@ -604,7 +606,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
                 LdmatrixLoad(
                     frag=qaf,
                     src_buffer=qk.a.input,
-                    src_index=_idx(qk.a, {qk.m_axis.name: qt.row_base, qk.k_axis.name: k_base}),
+                    src_index=_idx(qk.a, {qk_t.axes[0].name: qt.row_base, qk.k_axis.name: k_base}),
                     role="a",
                     ldm=q_gmem_ldm,
                     staged=False,
@@ -639,17 +641,18 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             for f in qt.ohfrags:
                 # The per-block packed f16 P@V targets — zero-inited per step (block-scoped, like
                 # the score fragments); the promote below folds them into the f32 ``ofrags`` shadows.
-                stream.append(RegFragment(name=f, role="c", shape=shape, dtype=pv.tile.atom.operand_dtype("c")))
+                stream.append(RegFragment(name=f, role="c", shape=shape, dtype=pv_t.atom.operand_dtype("c")))
         qk_mask: dict[str, tuple] = {}
         if symbolic_k:
             # The guard bound is ABSOLUTE — ``_frag_contraction``'s gmem guards compare the
             # operand's own (absolute) coordinates (``col_bases`` / ``_abs_kv(kv0)``), so a slice
             # partial bounds at its absolute end, not the window-local one.
-            qk_mask[qk.n_axis.name] = (kv0_var, abs_kv_end)
+            qk_mask[qk_t.axes[1].name] = (kv0_var, abs_kv_end)
         if qk.k_axis.extent.as_static() % atom.atom_k:
             qk_mask[qk.k_axis.name] = (Literal(0, "int"), _ext(qk.k_axis))
         stream += _frag_contraction(
             qk,
+            qk_t,
             [(qt.sfrags, qt.qa) for qt in qtiles],
             # Staged: the K slab is slot-local (its rows are this block's keys), so the score
             # column origin is the in-block offset; the absolute ``col_bases`` still name the
@@ -667,7 +670,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         qk_seg, stream = stream, []
 
         for qi, qt in enumerate(qtiles):
-            hoisted, pro = _realize_prologue(partial[1:], qk, qt.sfrags, col_bases, qt.row_base, set(names))
+            hoisted, pro = _realize_prologue(partial[1:], qk_t, qt.sfrags, col_bases, qt.row_base, set(names))
             if qi == 0:  # the hoisted scalar constants (the 1/√d scale) are tile-invariant
                 state.extend(hoisted)
             stream += pro
@@ -714,6 +717,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         pv_mask = {kv_axis.name: (kv0_var, abs_kv_end)} if symbolic_k else {}  # absolute bound (k_sub is _abs_kv)
         stream += _frag_contraction(
             _pv_streamed(pv, kv_axis),
+            pv_t,
             [((qt.ohfrags if pv_f16acc else qt.ofrags), qt.pa) for qt in qtiles],
             n_sub=lambda j: Literal(j * atom_n, "int"),
             # Staged: the V slab is slot-local too (K rows are this block's keys). Gmem-direct
@@ -763,7 +767,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
         n_chunks = kv_axis.extent.ceil_div(bn) if symbolic_k else kv_axis.extent.as_static() // bn
         head_dim = qk.k_axis.extent.as_static()
         k_load, v_load = qk.b, pv.b
-        kn, kk, vn = qk.n_axis.name, qk.k_axis.name, pv.n_axis.name
+        kn, kk, vn = qk_t.axes[1].name, qk.k_axis.name, pv_t.axes[1].name
 
         def _key_row(k0: Expr, row) -> Expr:
             # cp.async has no OOB zero-fill — clamp a symbolic tail's key rows to the last valid
@@ -829,14 +833,14 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
                 # row (cp.async has no OOB zero-fill) — their outputs are store-guarded (the
                 # ``RegStore`` m_guard), so the duplicates are never written back.
                 r = BinaryExpr("+", cta_row0, row)
-                return _clamp_last(r, _ext(qk.m_axis)) if symbolic_q else r
+                return _clamp_last(r, _ext(qk_t.axes[0])) if symbolic_q else r
 
             state.append(slab_smem("_q_smem", q_rows, q_ldm, _cuda(atom.operand_dtype("a")), align=16))
             state += cp_async_fill(
                 slab="_q_smem",
                 shape=(q_rows, head_dim_s),
                 src=qk.a.input,
-                gmem_index=lambda row, col: _idx(qk.a, {qk.m_axis.name: _q_row(row), qk.k_axis.name: col}),
+                gmem_index=lambda row, col: _idx(qk.a, {qk_t.axes[0].name: _q_row(row), qk.k_axis.name: col}),
                 cta=cta,
                 elem_bytes=elem_bytes,
                 name="q",
@@ -907,7 +911,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     # broadcast dims). Split it off the projection stmts; each fragment store reuses the template with
     # the row (m) axis → the query-tile base and the column (n) axis → the atom-n literal. Absent it,
     # fall back to the bare ``(batch…, row, n)`` grid store (the head-major identity).
-    m_name, n_name = qk.m_axis.name, pv.n_axis.name
+    m_name, n_name = qk_t.axes[0].name, pv_t.axes[1].name
 
     # A cross-CTA slice partial stores the RAW carrier state instead of projecting (``030_split_reduce``
     # replaced the projection with one ``Write`` per state component into the ``__partial``
@@ -926,7 +930,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
             # rows would otherwise write their (m, l, O) into the ws rows of the NEXT batch/head
             # plane (the ws m extent is the runtime seq, not the CTA-padded one) — the split
             # partial's counterpart of the projection store's ``m_guard``.
-            m_guard = (qt.row_base, _ext(qk.m_axis)) if symbolic_q else None
+            m_guard = (qt.row_base, _ext(qk_t.axes[0])) if symbolic_q else None
             o_tmpl = by_state[expect_name]
             for j, f in enumerate(qt.ofrags):
                 sub = {m_name: qt.row_base, n_name: Literal(j * atom_n, "int")}
@@ -939,7 +943,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
                     tmpl = by_state[comp]
                     idx = tuple(row_expr if (isinstance(e, Var) and e.name == m_name) else e for e in tmpl.index)
                     row_writes.append(Write(output=ctx.output, index=idx, value=f"{comp}{qt.sfx}{c}"))
-                cond = t_zero if m_guard is None else BinaryExpr("&&", t_zero, BinaryExpr("<", row_expr, _ext(qk.m_axis)))
+                cond = t_zero if m_guard is None else BinaryExpr("&&", t_zero, BinaryExpr("<", row_expr, _ext(qk_t.axes[0])))
                 close.append(Cond(cond=cond, body=tuple(row_writes)))
         return state, fold, close
 
@@ -956,7 +960,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
                     close.append(FragmentApply(out=f, op=s.op, args=(f, *others), kinds=(FRAG, *kinds), in_place=True))
                 continue
             raise NotImplementedError(f"fragment realizer: unrealizable projection stmt {type(s).__name__}")
-        m_guard = (qt.row_base, _ext(qk.m_axis)) if symbolic_q else None
+        m_guard = (qt.row_base, _ext(qk_t.axes[0])) if symbolic_q else None
         for j, f in enumerate(qt.ofrags):
             col_lit = Literal(j * atom_n, "int")
             if store_tmpl is not None:

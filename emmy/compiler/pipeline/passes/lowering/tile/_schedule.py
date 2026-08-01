@@ -680,7 +680,9 @@ def _tile_area(plan: TilePlan) -> int:
     return max(plan.units_m * plan.reg_m * am * plan.units_n * plan.reg_n * an, 1)
 
 
-def _stage_candidates(kernel, probe, plan: TilePlan, budget: int = STATIC_SMEM_CAP, tma_ok: bool = True) -> list[str]:
+def _stage_candidates(
+    kernel, con: Contraction | None, axes, plan: TilePlan, budget: int = STATIC_SMEM_CAP, tma_ok: bool = True
+) -> list[str]:
     """The RESOLVED operand-stage spellings for one tile candidate — gmem-direct ``""`` first, then
     every grid move that resolves against the node with this ``plan`` (:func:`_resolve_warp_stage` /
     :func:`_resolve_scalar_stage`); the row carries the resolved spelling so the leaf identity, the
@@ -688,15 +690,15 @@ def _stage_candidates(kernel, probe, plan: TilePlan, budget: int = STATIC_SMEM_C
     alone, or gmem-direct when it declines (the standard pin-validity degrade). ``tma_ok`` is the
     target's TMA availability (:func:`_tma_allowed`): below sm_90 a ``d*/tma*`` move / pin declines
     here (stays gmem-direct) rather than being offered and failing to compile."""
-    if probe is None or not plan.is_tiled:
+    if con is None or not plan.is_tiled:
         return [""]  # per-cell / unbindable — no operand slab to stage
-    node = replace(probe, tile=plan)
+    tile = plan.at(*axes)
 
     def resolve(spec: str) -> str | None:
         st = Stage.parse(spec)
         if st.transport == "tma" and not tma_ok:
             return None  # TMA is Hopper+ (sm_90); nvcc has no sm_89a — decline below it
-        r = _resolve_warp_stage(node, st, budget) if plan.is_warp else _resolve_scalar_stage(node, st, kernel.inputs, budget)
+        r = _resolve_warp_stage(con, tile, st, budget) if plan.is_warp else _resolve_scalar_stage(con, tile, st, kernel.inputs, budget)
         return r.spell() if r is not None else None
 
     if STAGE.raw() is not None:
@@ -885,7 +887,7 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], tuple[str, str, str
                     "load (a data-dependent index) — the fragment epilogue cannot thread it; "
                     "drop the atom token to use the scalar tier."
                 )
-        for stage in _stage_candidates(kernel, probe, plan, _smem_budget(ctx), _tma_allowed(ctx)):
+        for stage in _stage_candidates(kernel, con, probe.axes if probe else (), plan, _smem_budget(ctx), _tma_allowed(ctx)):
             for red in _reduce_candidates(kernel, place, plan, con, len(probe.channels) if probe else 1):
                 # A staged split row is legal: ``_splitk_option`` re-resolves the stage against the
                 # SLICED inner node (the warp slice divisibility already held in
@@ -1024,7 +1026,7 @@ def _can_stage_warp_tma(
     return all((x * elem_bytes) % 16 == 0 for x in inner)
 
 
-def _resolve_warp_stage(c: Placed, stage: Stage, budget: int = STATIC_SMEM_CAP) -> Stage | None:
+def _resolve_warp_stage(c: Contraction, tile: TilePlan, stage: Stage, budget: int = STATIC_SMEM_CAP) -> Stage | None:
     """Resolve a pinned operand ``Stage`` against the warp (mma) contraction ``c`` — TMA > cp.async >
     gmem-direct (``None``). The resolved stage carries ``bk_elems`` (the codec-spelled ``TilePlan.bk``
     in elements), ``depth`` clamped so the ring's slots fit the smem ``budget`` (the device's dynamic
@@ -1038,10 +1040,10 @@ def _resolve_warp_stage(c: Placed, stage: Stage, budget: int = STATIC_SMEM_CAP) 
     if stage.alt:
         return None  # the alternating single-slab pipeline is the warp-flash stream's (K/V phase split + staged Q)
 
-    atom = c.atom
+    atom = tile.atom
     a_nbytes = atom.operand_dtype("a").nbytes
-    bk = c.tile.bk
-    m, n = c.m, c.n
+    bk = tile.bk
+    m, n = tile.m, tile.n
     # The TMA box's data plane is the operand's TRAILING 2 gmem dims; extra leading (batch)
     # dims ride as extent-1 box dims with the operand's own origin exprs — eligible when those
     # exprs don't move with the tile or the K loop (:func:`_tma_operand_rank_ok`; the model's
@@ -1071,7 +1073,7 @@ def _resolve_warp_stage(c: Placed, stage: Stage, budget: int = STATIC_SMEM_CAP) 
     return replace(stage, depth=depth, ring=stage.ring and depth >= 2, reg_depth=min(stage.reg_depth, bk), bk_elems=bk_elems)
 
 
-def _resolve_scalar_stage(c: Placed, stage: Stage, inputs, budget: int = STATIC_SMEM_CAP) -> Stage | None:
+def _resolve_scalar_stage(c: Contraction, tile: TilePlan, stage: Stage, inputs, budget: int = STATIC_SMEM_CAP) -> Stage | None:
     """Resolve a pinned operand ``Stage`` against the scalar register-tile contraction ``c``, or
     ``None`` (gmem-direct). Staging is **opt-in behind a ``STAGE`` pin**: eligible when the transport
     is ``tma`` / ``cp.async`` and K is static (a computed-A contraction never reaches here — it keeps
@@ -1098,7 +1100,7 @@ def _resolve_scalar_stage(c: Placed, stage: Stage, inputs, budget: int = STATIC_
     # gmem-direct on THIS tier only: the warp tier stages it into an N-major slab, but the scalar
     # drain reads the slab by ``(k, n)`` coords and has no transposed variant (pin-only tier, no
     # serving fork rides it).
-    if c.n.mask or c.b_trans:
+    if tile.n.mask or c.b_trans:
         return None
     # Staging transports a gmem OPERAND: both edges must be materialized. A computed B (a fused
     # per-column prologue) has no gmem address to copy from, so the tier declines and the node stays
@@ -1108,20 +1110,21 @@ def _resolve_scalar_stage(c: Placed, stage: Stage, inputs, budget: int = STATIC_
     # TMA's box encodes extra leading (batch) dims as extent-1 dims when they are tile/K-invariant
     # (:func:`_tma_operand_rank_ok`); cp.async's fill closure carries them verbatim, no rank gate.
     if stage.transport == "tma" and not (
-        _tma_operand_rank_ok(c.a.index, c.m.axis.name, c.k_axis.name) and _tma_operand_rank_ok(c.b.index, c.n.axis.name, c.k_axis.name)
+        _tma_operand_rank_ok(c.a.index, tile.m.axis.name, c.k_axis.name)
+        and _tma_operand_rank_ok(c.b.index, tile.n.axis.name, c.k_axis.name)
     ):
         return None
     # Staging needs the CTA to BE one (tile_m × tile_n) output tile (the cooperative fill / drain
     # contract). A register-only tile (units 1×1, ``block_threads`` None) launches the scalar
     # default block over unrelated cells — no CTA-shared slab to fill; stay gmem-direct.
-    if c.block_threads is None:
+    if tile.launch_threads is None:
         return None
     K = c.k_axis.extent.as_static()
     elem_bytes = inputs[c.a.input].dtype.nbytes
     # TMA hardware: every box dim must be 1..256 — the slot shapes are A (tile_m, bk) / B (bk,
     # tile_n), and bk never exceeds 128, so the gate is on the tile widths (an oversized scalar
     # register tile like tile_n=832 must decline TMA; cp.async has no box).
-    if stage.transport == "tma" and max(c.m.tile, c.n.tile) > 256:
+    if stage.transport == "tma" and max(tile.m.tile, tile.n.tile) > 256:
         return None
     # Every staged transport needs 16 B-aligned inner global strides — A's is K (row-major
     # (M,K)), B's is N ((K,N)). TMA: cuTensorMapEncodeTiled's global-stride rule (crashes at
@@ -1131,7 +1134,7 @@ def _resolve_scalar_stage(c: Placed, stage: Stage, inputs, budget: int = STATIC_
     # + watchdog hang — the ninth-sweep e2e regression on a (8,3) fp32 B; the Gemma
     # ``k_linear_reduce`` bench_fail cluster shares the signature and likely the class).
     # Gate both transports: an odd-stride shape stays gmem-direct.
-    n_ext = c.n.axis.extent
+    n_ext = tile.n.axis.extent
     if not n_ext.is_static or ((K * elem_bytes) % 16 or (n_ext.as_static() * elem_bytes) % 16):
         return None
     # Per-operand slot bytes: A's slab is (tile_m × bk) at A's element size, B's (bk × tile_n) at
@@ -1140,7 +1143,7 @@ def _resolve_scalar_stage(c: Placed, stage: Stage, inputs, budget: int = STATIC_
     b_bytes = inputs[c.b.input].dtype.nbytes if c.b.input in inputs else elem_bytes
     depth, bk_elems = max(1, stage.depth), 0
     while depth >= 1:
-        cap = budget // (depth * max(1, c.m.tile * elem_bytes + c.n.tile * b_bytes))
+        cap = budget // (depth * max(1, tile.m.tile * elem_bytes + tile.n.tile * b_bytes))
         bk_elems = next((v for v in (128, 64, 32, 16, 8, 4) if v <= cap and K % v == 0), 0)
         if bk_elems >= 4:
             break
@@ -1175,9 +1178,9 @@ def prologue_knob_bases(con_root, stat_fold) -> tuple[dict, dict, str]:
     return con, map_, stat_key
 
 
-def _resolve_sync_stage(c: Placed, budget: int = STATIC_SMEM_CAP, want_depth: int = 1) -> Stage | None:
+def _resolve_sync_stage(c: Contraction, tile: TilePlan, budget: int = STATIC_SMEM_CAP, want_depth: int = 1) -> Stage | None:
     """The ``sync`` compute-fill :class:`Stage` for a **computed-A** warp contraction with tile plan
-    ``c.tile`` — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A; cp.async /
+    ``tile`` — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A; cp.async /
     TMA are copy transports that cannot evaluate a producer cone), so there is no gmem-direct ``""``
     sibling and a ``STAGE`` pin degrades to this resolved row. ``None`` when the slabs don't fit
     the 48 KiB smem budget: the A/B operand slabs plus one fp32 row per bridged statistic
@@ -1197,16 +1200,16 @@ def _resolve_sync_stage(c: Placed, budget: int = STATIC_SMEM_CAP, want_depth: in
     device's per-block dynamic-smem opt-in cap (``ctx.max_dynamic_smem`` — the backend declares
     an ``extern __shared__`` pool and sets the func attribute past the 48 KiB static cap),
     falling back to the static cap when no context reaches the schedule."""
-    atom = c.atom
-    bk_elems = c.tile.bk * atom.atom_k
+    atom = tile.atom
+    bk_elems = tile.bk * atom.atom_k
     a_nbytes = atom.operand_dtype("a").nbytes
     _, _, stats = cone_seam(c.a) if c.a_computed else ((), (), ())
     # One A slab + one B slab per fold channel (the multi-channel gate/up node fills a B slab per
     # projection) + one fp32 stat row per bridged statistic. Only the B slabs multiply by the
     # ring depth (the asymmetric ring above).
-    a_bytes = c.m.tile * bk_elems * a_nbytes
-    b_bytes = len(c.channels) * c.n.tile * bk_elems * a_nbytes
-    stat_bytes = len(stats) * c.m.tile * 4
+    a_bytes = tile.m.tile * bk_elems * a_nbytes
+    b_bytes = len(c.channels) * tile.n.tile * bk_elems * a_nbytes
+    stat_bytes = len(stats) * tile.m.tile * 4
     if a_bytes + b_bytes + stat_bytes > budget:
         return None
     depth = want_depth if want_depth >= 2 and a_bytes + stat_bytes + want_depth * b_bytes <= budget else 1
@@ -1247,7 +1250,7 @@ def _computed_a_rows(
         _check_warp_static_k(kernel, pin)
         if not probe.k_axis.extent.is_static:
             raise ValueError("warp TILE pin on a fused-cone contraction: K must be static (the sync compute-fill has no K mask).")
-        if replace(probe, tile=pin).n.mask:
+        if pin.at(*probe.axes).n.mask:
             raise ValueError(
                 f"warp TILE pin on a fused-cone contraction: the tile's N width must exactly cover the static "
                 f"output columns (N={probe.axes[1].extent}, no N mask in the sync compute-fill); pick a dividing tile."
@@ -1256,9 +1259,7 @@ def _computed_a_rows(
     else:
         atoms = _with_f16acc(_warp_atoms(kernel, probe.node, Body(tail)), ctx)
         tiles = [
-            p
-            for p in warp_tile_moves(atoms)
-            if _warp_move_ok(kernel, p) and probe.k_axis.extent.is_static and not replace(probe, tile=p).n.mask
+            p for p in warp_tile_moves(atoms) if _warp_move_ok(kernel, p) and probe.k_axis.extent.is_static and not p.at(*probe.axes).n.mask
         ]
     # Depths: a STAGE pin is authoritative; unpinned rows enumerate the d1 compute-fill AND the
     # asymmetric B-only prefetch ring at d2 as fork siblings. The ring was measured a LOSS on the
@@ -1278,7 +1279,7 @@ def _computed_a_rows(
     for plan in tiles:
         spellings: list[str] = []
         for want_depth in depths:
-            stage = _resolve_sync_stage(replace(probe, tile=plan), budget, want_depth)
+            stage = _resolve_sync_stage(probe.node, plan.at(*probe.axes), budget, want_depth)
             if stage is None:
                 if pin is not None:
                     raise ValueError(
@@ -1447,14 +1448,18 @@ def _splitk_option(
     if inner.a_computed:
         # The sync compute-fill is MANDATORY for a computed-A partial (same contract as
         # ``_warp_option``); resolve it against the SLICED node at the row's spelled depth.
-        stage = _resolve_sync_stage(inner, budget, Stage.parse(stage_spec).depth if stage_spec else 1)
+        stage = _resolve_sync_stage(inner.node, inner.tile, budget, Stage.parse(stage_spec).depth if stage_spec else 1)
         if stage is None:
             raise ValueError(
                 f"split-K on a fused-cone contraction: the sync slabs exceed the {budget} B smem budget at TILE {wt.spell()!r}"
             )
     elif stage_spec:
         st = Stage.parse(stage_spec)
-        stage = _resolve_warp_stage(inner, st, budget) if wt.is_warp else _resolve_scalar_stage(inner, st, tile.inputs, budget)
+        stage = (
+            _resolve_warp_stage(inner.node, inner.tile, st, budget)
+            if wt.is_warp
+            else _resolve_scalar_stage(inner.node, inner.tile, st, tile.inputs, budget)
+        )
     # The state is the sliced node's own — the 1-component additive accumulator for a plain
     # matmul, the N-component product-monoid state for a multi-channel (gate/up) node — so the
     # split finalize folds exactly the state the kernel accumulates.
@@ -1514,10 +1519,10 @@ def _warp_option(
     # ``bk_elems`` are derived, not codec-spelled, so the row's ``"d1/sync"`` re-resolves here);
     # a Load-operand node resolves the copy transports as usual.
     if node.a_computed:
-        stage = _resolve_sync_stage(node, budget, Stage.parse(stage_spec).depth if stage_spec else 1)
+        stage = _resolve_sync_stage(node.node, node.tile, budget, Stage.parse(stage_spec).depth if stage_spec else 1)
         assert stage is not None, "computed-A row enumerated past its smem budget"  # _computed_a_rows resolved this
     else:
-        stage = _resolve_warp_stage(node, Stage.parse(stage_spec), budget) if stage_spec else None
+        stage = _resolve_warp_stage(node.node, node.tile, Stage.parse(stage_spec), budget) if stage_spec else None
     # Re-wrap the recognizer's projecting ``Map`` around the STORED node (materialize peels it into
     # the store tail — the same ``project ∘ contract`` spelling the reduce tiers use). The emitted
     # term embeds the UNSTAMPED node — the resolved tile/stage live in ``TileOp.schedule``.
@@ -1597,7 +1602,7 @@ def _tile_option(
             # Only a built Contraction node can engage operand staging — resolve the pin against it
             # (per-cell / coop-K / unbindable forms store nothing: nothing downstream would read a stage).
             if stage_spec:
-                stage = _resolve_scalar_stage(node, Stage.parse(stage_spec), tile.inputs, budget)
+                stage = _resolve_scalar_stage(node.node, node.tile, Stage.parse(stage_spec), tile.inputs, budget)
             fold = node.node
             op = Map(body=proj, sources=(fold,)) if len(proj) else fold
             slices = [("TILE", fold, node.tile), ("STAGE", fold, stage)]

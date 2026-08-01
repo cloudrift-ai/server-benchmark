@@ -56,13 +56,14 @@ def test_replace_node_edits_the_algebra_and_keeps_the_binding() -> None:
     assert swapped.axes == p.axes and swapped.tile == p.tile  # the binding rode along
 
 
-def test_pv_streamed_swaps_the_stream_axis_on_a_placed_pv() -> None:
+def test_pv_streamed_swaps_the_stream_axis_on_the_stored_node() -> None:
     """The warp-flash PV contracts the whole key block, so its intra-block axis is swapped for the
-    stream axis — an ALGEBRA edit on a placed node."""
+    stream axis — a pure ALGEBRA edit, so it takes and returns the stored node and the caller's
+    placed ``TilePlan`` is untouched."""
     p = _placed()
-    got = _pv_streamed(p, Axis("kv", 256))
-    assert isinstance(got, Placed) and got.k_axis.name == "kv"
-    assert got.tile == p.tile and got.axes == p.axes
+    got = _pv_streamed(p.node, Axis("kv", 256))
+    assert isinstance(got, Contraction) and got.k_axis.name == "kv"
+    assert p.tile.axes == p.axes  # the slice still carries the placement the swap never saw
 
 
 def test_demote_mixed_a_rewrites_the_a_edge_on_the_stored_node() -> None:

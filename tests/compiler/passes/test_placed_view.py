@@ -12,6 +12,7 @@ regression visible off-GPU.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 from emmy.compiler.dtype import F16, F32
@@ -64,14 +65,16 @@ def test_pv_streamed_swaps_the_stream_axis_on_a_placed_pv() -> None:
     assert got.tile == p.tile and got.axes == p.axes
 
 
-def test_demote_mixed_a_rewrites_the_a_edge_on_a_placed_node() -> None:
+def test_demote_mixed_a_rewrites_the_a_edge_on_the_stored_node() -> None:
     """A mixed-dtype (f32-A × 16-bit-B) contraction re-expresses its A ``Load`` as a computed cone
-    so it can ride the demoting sync compute-fill — again an algebra edit through the view."""
+    so it can ride the demoting sync compute-fill. The rewrite is pure ALGEBRA, so it takes and
+    returns the stored :class:`Contraction`; the caller re-binds it to its own placement."""
     kernel = SimpleNamespace(inputs={"A": SimpleNamespace(dtype=F32, shape=()), "B": SimpleNamespace(dtype=F16, shape=())})
     p = _placed()
-    out = _demote_mixed_a(kernel, p)
-    assert isinstance(out, Placed) and out.a_computed  # the A edge became an inline cone
-    assert out.tile == p.tile and out.axes == p.axes
+    out = _demote_mixed_a(kernel, p.node)
+    assert isinstance(out, Contraction) and out.a_computed  # the A edge became an inline cone
+    rebound = replace(p, node=out)  # what ``_warp_option`` / ``_tile_rows`` do with the result
+    assert rebound.tile == p.tile and rebound.axes == p.axes and rebound.a_computed
 
 
 def test_the_lead_grid_axes_survive_the_per_cell_rename() -> None:
@@ -101,4 +104,4 @@ def test_the_lead_grid_axes_survive_the_per_cell_rename() -> None:
 def test_demote_mixed_a_passes_through_a_uniform_dtype_contraction() -> None:
     kernel = SimpleNamespace(inputs={"A": SimpleNamespace(dtype=F16, shape=()), "B": SimpleNamespace(dtype=F16, shape=())})
     p = _placed()
-    assert _demote_mixed_a(kernel, p) is p
+    assert _demote_mixed_a(kernel, p.node) is p.node  # identity ⇒ the caller keeps its binding

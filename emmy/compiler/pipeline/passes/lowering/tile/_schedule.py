@@ -597,29 +597,32 @@ def _fragment_epilogue_ok(epilogue: Body) -> bool:
     return True
 
 
-def _warp_atoms(kernel, probe, proj: Body | None = None) -> tuple[str, ...]:
+def _warp_atoms(kernel, con: Contraction | None, proj: Body | None = None) -> tuple[str, ...]:
     """The dtype-eligible tensor-core atom names for this contraction, ``()`` when the warp tier
-    doesn't apply (unbindable node, a non-16-bit operand dtype, or a fragment-unrealizable gather
+    doesn't apply (no node, a non-16-bit operand dtype, or a fragment-unrealizable gather
     epilogue). A computed-A (fused-cone) node reads its operand dtype off the cone's K-indexed
     ``Load`` — the value the sync compute-fill stores to the A slab. A cone whose leaf is **f32**
     may still ride the folds' 16-bit atom (:func:`_demoted_atoms`) — the fill demotes on the slab
     store; the plain-``Load`` form stays 16-bit-only here (copy transports move raw bytes and can
-    never convert) and reaches the warp tier through :func:`_demote_mixed_a`'s cone wrap instead."""
-    if probe is None or not kernel.inputs:
+    never convert) and reaches the warp tier through :func:`_demote_mixed_a`'s cone wrap instead.
+
+    Takes the STORED node, not a :class:`Placed`: every read here is algebra (the operand edges +
+    the K axis), so the placement / tile the view carries would be an unread argument."""
+    if con is None or not kernel.inputs:
         return ()
     if not _fragment_epilogue_ok(Body(()) if proj is None else proj):
         return ()
-    if isinstance(probe.a, Load):
-        ld = probe.a
+    if isinstance(con.a, Load):
+        ld = con.a
     else:
-        kname = probe.k_axis.name
-        cone = probe.a_body  # the inline cone's K-indexed leaf carries the dtype
+        kname = con.k_axis.name
+        cone = con.a_body  # the inline cone's K-indexed leaf carries the dtype
         ld = next((st for st in cone if isinstance(st, Load) and kname in {v for e in st.index for v in e.free_vars()}), None)
     t = kernel.inputs.get(ld.input) if ld is not None else None
     atoms = _ATOMS_BY_DTYPE.get(getattr(getattr(t, "dtype", None), "name", None), ())
-    if atoms or isinstance(probe.a, Load) or getattr(getattr(t, "dtype", None), "name", None) != "f32":
+    if atoms or isinstance(con.a, Load) or getattr(getattr(t, "dtype", None), "name", None) != "f32":
         return atoms
-    return _demoted_atoms(kernel, probe)
+    return _demoted_atoms(kernel, con)
 
 
 def _demoted_atoms(kernel, con) -> tuple[str, ...]:
@@ -643,20 +646,21 @@ def _demoted_atoms(kernel, con) -> tuple[str, ...]:
     return ()
 
 
-def _demote_mixed_a(kernel, con):
+def _demote_mixed_a(kernel, con: Contraction | None) -> Contraction | None:
     """A mixed-dtype contraction — plain f32-A ``Load`` against 16-bit folds
     (:func:`_demoted_atoms`) — re-expressed as a computed-A cone (a one-``Load`` ``Map`` stored
     inline on the ``a`` edge), so it rides the mandatory ``sync`` compute-fill whose slab
     store demotes the value to the atom dtype. The copy transports (gmem-direct ldmatrix / cp.async
     / TMA) move raw bytes and cannot convert, which is why the demotion routes through the cone form
     instead of the plain warp tier. Anything else (already-computed A, non-Load A, 16-bit A,
-    non-16-bit folds) returns unchanged."""
+    non-16-bit folds) returns unchanged. Takes and returns the STORED node — the rewrite is pure
+    algebra (the ``a`` edge), so a caller holding a :class:`Placed` re-binds the result itself."""
     if con is None or not isinstance(con.a, Load):
         return con
     a_t = kernel.inputs.get(con.a.input)
     if getattr(getattr(a_t, "dtype", None), "name", None) != "f32" or not _demoted_atoms(kernel, con):
         return con
-    return con.replace_node(a=make_cone([con.a], con.k_axis.name))
+    return replace(con, a=make_cone([con.a], con.k_axis.name))
 
 
 def _warp_move_ok(kernel, plan: TilePlan) -> bool:
@@ -707,7 +711,7 @@ def _stage_candidates(kernel, probe, plan: TilePlan, budget: int = STATIC_SMEM_C
     return out
 
 
-def _reduce_candidates(kernel, place, plan: TilePlan, probe: Placed | None = None, channels: int = 1) -> list[ReducePlan]:
+def _reduce_candidates(kernel, place, plan: TilePlan, con: Contraction | None = None, channels: int = 1) -> list[ReducePlan]:
     """The reduce-partition candidates for one tile candidate — serial first (option-0),
     then the legal coop / ILP moves (per-cell tier only — the non-output-tiled contract) and the
     divisor- and occupancy-guarded split-K moves (both finalizes, both tiers). An **atomic**
@@ -736,7 +740,7 @@ def _reduce_candidates(kernel, place, plan: TilePlan, probe: Placed | None = Non
                 continue
             if p.coop_transposed:
                 # The transposed lane swap needs the structure its emitter assumes: a plain
-                # CONTRACTION per-cell tier (``probe`` built — the fused monoid rows ride
+                # CONTRACTION per-cell tier (a node is present — the fused monoid rows ride
                 # shared-row staging the transposed layout can't), a static innermost free
                 # axis divisible by the 32-lane sweep, and a 32-multiple coop. A composite
                 # split+transposed composite (the deployable long-K form) additionally needs the split
@@ -749,8 +753,8 @@ def _reduce_candidates(kernel, place, plan: TilePlan, probe: Placed | None = Non
                 # the transposed emitter sweeps.
                 inner = next((a for a in reversed(place.free) if not (a.extent.is_static and a.extent.as_static() == 1)), None)
                 if not (
-                    probe is not None
-                    and not probe.b_trans
+                    con is not None
+                    and not con.b_trans
                     and p.coop % 32 == 0
                     and inner is not None
                     and inner.extent.is_static
@@ -758,7 +762,7 @@ def _reduce_candidates(kernel, place, plan: TilePlan, probe: Placed | None = Non
                     and (not p.needs_split or k % p.cta == 0)
                 ):
                     continue
-            elif p.coop > 1 and probe is not None and not probe.b_trans:
+            elif p.coop > 1 and con is not None and not con.b_trans:
                 continue  # WS5: the plain band interleaves lanes along K — uncoalesced on canonical ``B[k, n]``
             out.append(p)
     free = prod(_hint_extent(a) for a in place.free) if place.free else 1
@@ -776,7 +780,7 @@ def _reduce_candidates(kernel, place, plan: TilePlan, probe: Placed | None = Non
         # it must distribute too. Multi-fold (gate/up) nodes never offer the atomic — the per-channel
         # ⊗-combine needs the deferred finalize kernel.
         tail = tuple(projection_tail(kernel))
-        atomic_ok = probe is not None and channels == 1 and (len(tail) == 0 or projection_distributes(tail, (probe.acc,)))
+        atomic_ok = con is not None and channels == 1 and (len(tail) == 0 or projection_distributes(tail, (con.acc,)))
         for sp in splitk_moves(warp=plan.is_warp):
             if sp.finalize == "atomic" and not atomic_ok:
                 continue  # non-distributive fused projection — 030_split_reduce would raise; don't offer
@@ -831,6 +835,7 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], tuple[str, str, str
         probe, proj = contraction_view(kernel.op, place, TilePlan())
     except LoweringError:
         probe, proj = None, Body(())
+    con = probe.node if probe is not None else None  # the ALGEBRA half — what the dtype / partition gates read
     if probe is not None and probe.a_computed:
         rows = _computed_a_rows(kernel, place, probe, keys, _smem_budget(ctx), ctx, proj=proj)
         return _filter_work(rows, lambda r: r.get(WORK.name, "")), keys
@@ -838,7 +843,7 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], tuple[str, str, str
     warp_offered = False
     demoted_rows: list[dict] = []
     if probe is not None:
-        atoms = _with_f16acc(_warp_atoms(kernel, probe, proj=proj), ctx)
+        atoms = _with_f16acc(_warp_atoms(kernel, con, proj=proj), ctx)
         if atoms:
             warp_moves = [p for p in warp_tile_moves(atoms) if _warp_move_ok(kernel, p)]
             tiles += warp_moves
@@ -847,9 +852,10 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], tuple[str, str, str
             # Mixed-dtype (f32-A × 16-bit-B) contraction: the warp tier rides the demoting
             # sync compute-fill through the cone form — pre-assembled rows (TILE+STAGE+REDUCE
             # resolved, warp pins handled inside); the scalar rows below stay fork siblings.
-            demoted = _demote_mixed_a(kernel, probe)
-            if demoted is not probe:
-                demoted_rows = _computed_a_rows(kernel, place, demoted, keys, _smem_budget(ctx), ctx, proj)
+            demoted = _demote_mixed_a(kernel, con)
+            if demoted is not con:
+                # Re-bind the rewritten algebra to the SAME placement / tile the probe carried.
+                demoted_rows = _computed_a_rows(kernel, place, replace(probe, node=demoted), keys, _smem_budget(ctx), ctx, proj)
                 warp_offered = bool(demoted_rows)
     # An env pin is authoritative: it resolves ONCE against the WORK pin into the plan it denotes
     # (the pin-only ``a:scalar`` / ``a:none`` aliases resolve to the scalar tier, so the alias
@@ -880,7 +886,7 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], tuple[str, str, str
                     "drop the atom token to use the scalar tier."
                 )
         for stage in _stage_candidates(kernel, probe, plan, _smem_budget(ctx), _tma_allowed(ctx)):
-            for red in _reduce_candidates(kernel, place, plan, probe, len(probe.channels) if probe else 1):
+            for red in _reduce_candidates(kernel, place, plan, con, len(probe.channels) if probe else 1):
                 # A staged split row is legal: ``_splitk_option`` re-resolves the stage against the
                 # SLICED inner node (the warp slice divisibility already held in
                 # ``_reduce_candidates``) and ``030_split_reduce`` threads it onto the partial kernel.
@@ -1236,7 +1242,7 @@ def _computed_a_rows(
         return []
     pin = _pinned_tile()
     if pin is not None:
-        if not pin.is_warp or not _warp_atoms(kernel, probe, Body(tail)):
+        if not pin.is_warp or not _warp_atoms(kernel, probe.node, Body(tail)):
             return []  # a scalar/empty pin, or no dtype-eligible atom (fp32) — the reduce sibling's business
         _check_warp_static_k(kernel, pin)
         if not probe.k_axis.extent.is_static:
@@ -1248,7 +1254,7 @@ def _computed_a_rows(
             )
         tiles = [pin]
     else:
-        atoms = _with_f16acc(_warp_atoms(kernel, probe, Body(tail)), ctx)
+        atoms = _with_f16acc(_warp_atoms(kernel, probe.node, Body(tail)), ctx)
         tiles = [
             p
             for p in warp_tile_moves(atoms)
@@ -1282,7 +1288,7 @@ def _computed_a_rows(
             if stage.spell() in spellings:
                 continue  # d2 clamped to d1 — same resolved pipeline, one row
             spellings.append(stage.spell())
-            for red in _reduce_candidates(kernel, place, plan, probe, len(probe.channels)):
+            for red in _reduce_candidates(kernel, place, plan, probe.node, len(probe.channels)):
                 for raster in _raster_candidates(place):
                     row = _site_row(keys, plan, stage.spell(), red, 0, raster, {})
                     if row is not None:
@@ -1501,7 +1507,9 @@ def _warp_option(
     # unbindable atom (a non-Load operand: a computed-cone / demoted matmul) raises and is rejected
     # at fork construction, like the static-K check.
     node, proj = contraction_view(tile.op, place, wt)
-    node = _demote_mixed_a(tile, node)
+    demoted = _demote_mixed_a(tile, node.node)
+    if demoted is not node.node:
+        node = replace(node, node=demoted)  # the algebra changed; the placement / tile ride along
     # A computed-A node's stage is the mandatory resolved ``sync`` compute-fill (its ``smem`` /
     # ``bk_elems`` are derived, not codec-spelled, so the row's ``"d1/sync"`` re-resolves here);
     # a Load-operand node resolves the copy transports as usual.

@@ -52,7 +52,7 @@ from emmy.compiler.ir.schedule import (
 )
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Lambda, Load, Loop, Stmt, Write
-from emmy.compiler.ir.stmt.algebra import M
+from emmy.compiler.ir.stmt.algebra import M, component_ops
 from emmy.compiler.ir.stmt.passes import projection_distributes
 from emmy.compiler.ir.tile import (
     Channel,
@@ -1932,7 +1932,10 @@ def _stamp_twisted_split(rows: list[TileOp], plan: ReducePlan) -> list[TileOp]:
     out: list[TileOp] = []
     for r in rows:
         red = head(r.op)
-        score = red.step_stmts()[0]
+        # The stream's QK score IS the fold's inline-node operand edge — the derived blocked
+        # evaluation places those at its head in operand order (``_twisted_derived_step``), so this
+        # is the same object the schedule sites were keyed on, without deriving the step.
+        score = next(e for e in red.operands if isinstance(e, (Fold, Map, Contraction)))
         score_tile = sched_of(r).tile_of(score)
         bn = score_tile.regs[1] * score_tile.atom.shape[1]
         ext = red.axis.extent
@@ -1985,9 +1988,15 @@ def _twisted_chain_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp
 def _composes(red: Fold) -> bool:
     """True when the reduce COMPOSES another structural node (split-K's sliced contraction,
     flash's hoisted score edge) — the ONE test for a composed reduce, so a "bare statistic
-    reduce" test is just its negation. A λ-spelled composed fold carries the node on an operand
-    edge; the stored ``step`` arm covers the residual composed spellings."""
-    return any(isinstance(s, (Map, Fold, Contraction)) for s in red.step_stmts()) or any(
+    reduce" test is just its negation.
+
+    Both places a node can be STORED: an operand edge (the hoisted score), or inline in the lift
+    body (the cone-as-a-node the demotion leaves there). That is the whole answer for a
+    DEGENERATE fold, whose derived step is just the lift body with the combine's ``Accum``\\ s
+    interleaved — no need to derive it. A TWISTED fold additionally SYNTHESIZES a node in its
+    blocked evaluation (flash's PV, built from a ``Load``-bound expectation edge), which this does
+    not report; every caller is PLANAR-gated, where that arm is unreachable."""
+    return any(isinstance(s, (Map, Fold, Contraction)) for s in red.lift.body) or any(
         isinstance(e, (Map, Fold, Contraction)) for e in red.operands
     )
 
@@ -2009,13 +2018,16 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     red = head(op)
     if not isinstance(red, Fold) or red.role is not AxisRole.PLANAR or _composes(red):
         return None
-    body = list(red.step_stmts())
-    accums = [st for st in body if isinstance(st, Accum)]
-    if len(accums) != 1 or accums[0].op.name != "add":
+    # Read the algebra off the STORED params, not off a derived step: for a degenerate fold the
+    # derivation is exactly "the lift body, with one ``Accum(name=combine.results[i],
+    # value=lift.results[i], op=⊕ᵢ)`` per component interleaved" — so the single additive ⊕ is
+    # ``component_ops(combine)`` and the value it folds is the lift's result term.
+    ops_ = component_ops(red.combine)
+    if ops_ is None or len(ops_) != 1 or ops_[0].name != "add":
         return None
-    acc = accums[0]
+    body = list(red.lift.body)
     defs = {st.name: st for st in body if isinstance(st, Assign)}
-    lift = defs.get(acc.value)
+    lift = defs.get(str(red.lift.results[0]))
     if lift is None or lift.op.name != "multiply" or len(lift.args) != 2:
         return None
     grid = list(place.grid)
@@ -2060,7 +2072,7 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     fold = Contraction(
         k_axis=k_ax,
         a=make_cone(list(cone), k_ax.name),
-        channels=(Channel(b=loads[b_name], acc=acc.name),),
+        channels=(Channel(b=loads[b_name], acc=red.combine.results[0]),),  # the accumulator name IS the combine's result
     )
     stage = Stage(transport="sync", smem=(fold.a_name,), bk_elems=bk_elems)
     emitted = Map(body=epilogue, sources=(fold,)) if len(epilogue) else fold
@@ -2233,7 +2245,7 @@ def _twisted_warp_options(
     if pair is None:
         return []
     red, head_fold, pv_fold, head_ax, pv_ax = pair
-    head, pv = head_fold, pv_fold
+    qk, pv = head_fold, pv_fold
     op = tile.op
     # The canonical codec keys for the flash tree (phase 3): the two contractions by their axes
     # (``TILE@dd`` / ``TILE@pj``), the stream fold — the primary — bare.
@@ -2241,12 +2253,12 @@ def _twisted_warp_options(
     pv_key = _family_key(op, TILE.name, pv_fold)
     red_key = _family_key(op, REDUCE.name, red)
     stage_key = _family_key(op, STAGE.name, red)
-    if not isinstance(head.a, Load):
+    if not isinstance(qk.a, Load):
         return []
     terms = tuple(red.lift.results)
     if len(terms) != 3 or isinstance(terms[1], str) or not isinstance(terms[2], str):
         return []
-    q_tensor = tile.inputs.get(head.a.input) if tile.inputs else None
+    q_tensor = tile.inputs.get(qk.a.input) if tile.inputs else None
     atom_name = {"f16": "mma_m16n8k16_f16_f32", "bf16": "mma_m16n8k16_bf16_f32"}.get(
         getattr(getattr(q_tensor, "dtype", None), "name", None)
     )
@@ -2256,12 +2268,16 @@ def _twisted_warp_options(
     if not atom.c_to_a_repack:
         return []  # the fragment realizer feeds P@V via the C→A register repack — an atom without it has no tier
     atom_m, atom_n, atom_k = atom.shape
-    head_dim, d_v = head.k_axis.extent, pv_ax[1].extent
+    head_dim, d_v = qk.k_axis.extent, pv_ax[1].extent
     if not (head_dim.is_static and head_dim.as_static() > 0 and d_v.is_static and d_v.as_static() % atom_n == 0):
         return []
     kv_ext, m_ext = red.axis.extent, head_ax[0].extent
     m_name, kv_name = head_ax[0].name, red.axis.name
-    for s in list(red.step_stmts())[1:]:
+    # The score prologue is the STORED lift body — the derived blocked evaluation is
+    # ``(*inline-node edges, *lift.body, *merge)``, and only the lift body contributes top-level
+    # ``Load``\\ s (the head edges are nodes; the merge is generated, its expectation ``Load``
+    # buried inside the synthesized PV contraction, which this scan never saw either).
+    for s in red.lift.body:
         if isinstance(s, Load) and s.index and not {v for e in s.index for v in e.free_vars()} <= {m_name, kv_name}:
             return []  # a score bias indexed beyond (m, kv) — no fragment realization for it
         # An additive (m, kv) score bias (the explicit SDPA attn_mask) IS realizable: the fragment
@@ -2281,15 +2297,15 @@ def _twisted_warp_options(
             and not any(kv_name in e.free_vars() for e in (*idx[:-2], idx[-1]))
         )
 
-    tma_ok = tma_ok and _kv_penultimate(head.b) and _kv_penultimate(pv.b)
+    tma_ok = tma_ok and _kv_penultimate(qk.b) and _kv_penultimate(pv.b)
     # The fragment loaders step gmem rows at the buffer's REAL row stride, derived from the load
     # index + buffer shape (``gmem_row_stride`` — H·D on an un-transposed (B, S, H, D) trace,
     # where the old trailing-extent assumption read the wrong rows: the gemma layer-0 NaN).
     # Underivable strides (an axis split across index components, a non-affine use, a symbolic
     # trailing extent) have no fragment realization — decline the tier.
     strides = (
-        gmem_row_stride(head.a, m_name, tile.inputs),
-        gmem_row_stride(head.b, head_ax[1].name if head.b_trans else head.k_axis.name, tile.inputs),
+        gmem_row_stride(qk.a, m_name, tile.inputs),
+        gmem_row_stride(qk.b, head_ax[1].name if qk.b_trans else qk.k_axis.name, tile.inputs),
         gmem_row_stride(pv.b, pv_ax[1].name if pv.b_trans else kv_name, tile.inputs),
     )
     if any(s is None for s in strides):
@@ -2402,8 +2418,8 @@ def _twisted_warp_options(
             return getattr(getattr(t, "dtype", None), "name", None)
 
         b_dt = atom.operand_dtype("b").name
-        kv_stage_ok = _buf_dtype_name(head.b) == b_dt and _buf_dtype_name(pv.b) == b_dt
-        q_stage_ok = _buf_dtype_name(head.a) == atom.operand_dtype("a").name
+        kv_stage_ok = _buf_dtype_name(qk.b) == b_dt and _buf_dtype_name(pv.b) == b_dt
+        q_stage_ok = _buf_dtype_name(qk.a) == atom.operand_dtype("a").name
         # An overhanging head-dim atom uses the gmem fragment loaders' K-zero helpers. Async
         # staging currently has no zero-fill contract for the row's padding bytes, so keep this
         # geometry gmem-direct until the transports learn that mask.

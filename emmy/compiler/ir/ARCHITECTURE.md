@@ -183,10 +183,13 @@ reduce loop where it needs it, never a Python type:
   HAS a `Body`, it is not one; there is no `source` / nested-node field — composition is
   just stmt order in the body.
 - A reduction is a `Map` whose body holds the **annotated reduce `Loop`** followed by its
-  projection. The `Loop` carries its `AxisRole` (`loop.role`);
-  `ops.reduce_loop(op)` returns the outermost annotated reduce `Loop` and
-  `ops.axis_role(op)` reads its role — `PLANAR` (plain `sum`/`max`/`mean`), `TWISTED`
-  (online-softmax / flash), `CONTRACTION` (matmul), or `FREE` (pointwise / flat fallback).
+  projection. The `Loop` carries its `AxisRole` (`loop.role`); `ops.axis_role(op)` reads that role —
+  `PLANAR` (plain `sum`/`max`/`mean`), `TWISTED` (online-softmax / flash), `CONTRACTION` (matmul), or
+  `FREE` (pointwise / flat fallback) — off the NODE (`ops.head`, whose `role` is derived), falling back to
+  the annotated `Loop` only for the raw-loop-IR escape. `ops.reduce_loop(op)` still returns the outermost
+  annotated reduce `Loop`, but only for callers that consume a body: reading a node FACT off a synthesized
+  nest is the inversion `ops` exists to prevent (`Fold.loop` splices every edge and flattens every nested
+  node just to hand back the property it was given).
 - A contraction is a `Map` whose reduce `Loop` is `CONTRACTION`: the `⊗` lift `Assign` sits
   in the loop body and the additive fold `Accum` IS the loop-level algebra spelling. The shared
   builder `ops.contraction_loop(lift, fold, operand_bodies, reduce_axis)` builds it in the

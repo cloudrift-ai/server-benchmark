@@ -96,7 +96,9 @@ The `README.md` is intentionally short — example-driven, no narrative. For det
   worker tokens — so the stamped row IS the stored/golden spelling (the enumeration itself threads TYPED
   `TilePlan`/`ReducePlan` slices and spells each row ONCE; the retired embedded-worker spellings RAISE, and the
   golden corpus was re-spelled mechanically). Dispatch reads the
-  role/algebra off the node (`ops.axis_role`/`reduce_loop` recurse through `Map.sources`), and `ops.lower` flattens
+  role/algebra off the node — `ops.head` reaches it through the projection `Map` and every scheduling FACT
+  (`ops.axis_role`, the reduce `Axis`, the operand edges via `ops.node_loads`) is a stored param on it, so no
+  scheduling decision synthesizes a nest; `reduce_loop`/`ops.lower` are for callers that consume a body, and flatten
   any node back to the same loop nest — no stored `Monoid`/`Semiring` kind. Flash is the `TWISTED` fold on the
   streaming schedule, its QK a hoisted operand-edge `Contraction` and its PV the derived evaluation's
   synthesized contraction node — a twisted monoid is a monoid,

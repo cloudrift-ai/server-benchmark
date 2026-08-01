@@ -144,3 +144,59 @@ def test_rewrite_renames_lift_monoid_and_carrier_in_lockstep() -> None:
     assert out.lift.params == ("k", "b0v", "av", "b1v")
     assert out.lift.results == ("r0__v", "r1__v")
     assert [s.name for s in out.loop.body if isinstance(s, Accum)] == ["r0", "r1"]
+
+
+def _demoted_edge_loop() -> Loop:
+    """The DEMOTED fused edge — ``acc += f(x) * w[k, n]`` over ``k``: a computed pure-MAP cone A
+    (the producer) times a gmem ``Load`` B, its loads kept INLINE in the lift (recognition's
+    unbindable-contraction route), so the fold derives ``PLANAR``."""
+    body = Body(
+        (
+            Load(name="x_e", input="x", index=(Var("m"), Var("k"))),
+            Assign(name="a_e", op="multiply", args=("x_e", "scale")),
+            Load(name="b_e", input="w", index=(Var("k"), Var("n"))),
+            Assign(name="p", op="multiply", args=("a_e", "b_e")),
+            Accum(name="acc", value="p", op="add", axes=("k",)),
+        )
+    )
+    return Loop(axis=Axis("k", 1024), body=body, role=AxisRole.PLANAR)
+
+
+def test_demoted_edge_algebra_reads_off_the_stored_params() -> None:
+    """``_demoted_warp_option`` reads the fused edge's ⊕ / ⊗ off ``combine`` and ``lift`` — never
+    off a derived step. This pins that the two agree, since that tier is pin-driven and neither the
+    off-GPU suite nor ``digest_kernels.py`` reaches it.
+
+    The equivalence is structural: the degenerate arm of the derived step interleaves exactly one
+    ``Accum(name=combine.results[i], value=lift.results[i], op=⊕ᵢ)`` per component into the lift
+    body, so every field the tier reads has a stored home."""
+    fold = Fold.from_loop(_demoted_edge_loop())
+    assert fold is not None and fold.role is AxisRole.PLANAR
+
+    derived = list(fold.step_stmts())
+    accums = [s for s in derived if isinstance(s, Accum)]
+    assert len(accums) == 1
+
+    ops = component_ops(fold.combine)
+    assert ops is not None and len(ops) == 1
+    assert ops[0].name == accums[0].op.name == "add"  # the ⊕ — off ``combine``, not the Accum
+    assert str(fold.lift.results[0]) == accums[0].value  # the folded value — off the lift's result
+    assert fold.combine.results[0] == accums[0].name  # the accumulator name — off ``combine``
+    # The ⊗ lift stmt and every operand Load have their home in the lift body: dropping the derived
+    # step loses nothing the tier parses.
+    assert [s for s in derived if isinstance(s, Assign)] == [s for s in fold.lift.body if isinstance(s, Assign)]
+    assert [s for s in derived if isinstance(s, Load)] == [s for s in fold.lift.body if isinstance(s, Load)]
+
+
+def test_demoted_edge_composes_test_reads_stored_structure() -> None:
+    """``_composes`` (the "bare statistic reduce" negation) scans the two places a node can be
+    STORED — an operand edge, or inline in the lift body — instead of the derived step."""
+    fold = Fold.from_loop(_demoted_edge_loop())
+    assert fold is not None
+    stored = any(isinstance(s, (Contraction, Fold)) for s in fold.lift.body) or any(
+        isinstance(e, (Contraction, Fold)) for e in fold.operands
+    )
+    step = any(isinstance(s, (Contraction, Fold)) for s in fold.step_stmts()) or any(
+        isinstance(e, (Contraction, Fold)) for e in fold.operands
+    )
+    assert stored is step is False

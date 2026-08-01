@@ -55,6 +55,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field as dc_field
+from dataclasses import replace as dc_replace
 from typing import Any
 
 from emmy.compiler.ir.atom import SCALAR_ATOM, Atom, AtomKind, atom_for
@@ -630,6 +631,13 @@ class TilePlan:
     units: tuple[int, int] = (1, 1)  # warp (WM, WN) m-then-n / scalar (par_n, par_m) n-then-m
     regs: tuple[int, int] = (1, 1)  # warp (FM, FN) m-then-n / scalar (reg_n, reg_m) n-then-m
     bk: int = 1  # K-chunk per inner mma step, in atom_k units (mma only; 1 for scalar)
+    #: The PLACEMENT this tile is over — the ``(m, n)`` output axes the widths above tile. Bound by
+    #: the caller that owns the grid (:meth:`at`), so the slice derives its own ``(m, n)`` reading
+    #: (:attr:`mn`) instead of a separate view object carrying axes beside the plan.
+    #: ``compare=False``: the axes are placement, not a search dimension — two plans differing only
+    #: in placement are the SAME tile, so enumeration dedup, the stamped row and ``spell()`` (which
+    #: never reads them) are untouched, and no axis can leak into a knob value / golden / prior key.
+    axes: tuple[Axis, Axis] | None = dc_field(default=None, compare=False, repr=False)
 
     def spell(self) -> str:
         """The ``TILE`` codec value for this tile — SITE-LOCAL: the worker tokens live in the
@@ -729,6 +737,43 @@ class TilePlan:
     def tile_n(self) -> int:
         """The per-CTA output cols = ``units_n · reg_n · atom_n``."""
         return self.units_n * self.reg_n * self.atom.atom_n
+
+    @property
+    def launch_threads(self) -> int | None:
+        """:attr:`block_threads`, or ``None`` for the scalar default block size — the reading the
+        launch / WSPEC gates want (``1`` thread per CTA is "unset", not a real block)."""
+        bt = self.block_threads
+        return bt if bt > 1 else None
+
+    def at(self, m_axis: Axis, n_axis: Axis) -> TilePlan:
+        """This tile BOUND to its placement — the ``(m, n)`` output axes it tiles. The caller that
+        owns the grid decides them (the trailing grid pair for a root kernel; a flash consumer
+        supplies its own), so a plan travels axis-free through the enumeration and picks up its
+        placement where the geometry is actually read."""
+        return dc_replace(self, axes=(m_axis, n_axis))
+
+    # ---- the (m, n) output sides: each axis paired with its derived per-CTA tile geometry (width /
+    # unit / register counts) + the bound block/unit var names (the original m/n names live in the
+    # operand indices, so the bound axes take a fresh ``_b`` / ``_u`` suffix). --------------------- #
+    @property
+    def mn(self) -> tuple[Side, Side]:
+        """The ``(m, n)`` output :class:`Side` pair — each placed axis with its derived geometry.
+        Requires :meth:`at` to have bound the placement; :attr:`m` / :attr:`n` index it."""
+        if self.axes is None:
+            raise ValueError("TilePlan.mn: the tile is unplaced — bind the (m, n) output axes with .at(m, n) first")
+        dims = ((self.tile_m, self.units_m, self.reg_m), (self.tile_n, self.units_n, self.reg_n))
+        return tuple(
+            Side(axis=ax, tile=tile, units=units, reg=reg, block=ax.name + "_b", unit=ax.name + "_u")
+            for ax, (tile, units, reg) in zip(self.axes, dims, strict=True)
+        )
+
+    @property
+    def m(self) -> Side:
+        return self.mn[0]
+
+    @property
+    def n(self) -> Side:
+        return self.mn[1]
 
 
 @dataclass(frozen=True)

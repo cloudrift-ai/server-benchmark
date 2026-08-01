@@ -44,6 +44,14 @@ class Placed:
     # anyway a schedule RESULT, living in ``TileOp.schedule`` and threaded back in at materialize.
     stage: Stage | None = None  # schedule: the resolved operand smem pipeline (None = gmem-direct)
 
+    def __post_init__(self) -> None:
+        """Bind the view's placement onto the ``tile`` slice, so the plan alone derives the ``(m,
+        n)`` geometry. Every re-tiling of a view goes through ``dataclasses.replace(v, tile=plan)``
+        with a plan straight out of the move catalog (axis-free), so binding here is what keeps
+        those copies placed — the caller never has to remember ``.at``."""
+        if self.tile.axes is None:
+            object.__setattr__(self, "tile", self.tile.at(*self.axes))
+
     def __getattr__(self, name: str):
         """Every ALGEBRA read proxies to the stored node — `a` / `b` / `channels` / `k_axis` /
         `out` / `acc` / `a_computed` / `b_trans` / `loop` / `as_fold()` and the rest. Only the
@@ -71,44 +79,34 @@ class Placed:
     def atom(self) -> Atom:
         return self.tile.atom
 
-    # ---- the (m, n) output sides: each axis paired with its derived per-CTA tile geometry (width /
-    # unit / register counts, read off the ``tile``) + the bound block/unit var names (the original
-    # m/n names live in the operand indices, so the bound axes take a fresh ``_b`` / ``_u`` suffix).
-    # ``_factor`` threads these as the ``(m, n)`` pair, mirroring the schedule's tuples. ---------- #
+    # The ``(m, n)`` geometry is the PLAN's — the placement rides on it (``TilePlan.axes``), so the
+    # Side pair derives there and this view only forwards. Nothing here re-derives a width.
     @property
     def mn(self) -> tuple[Side, Side]:
-        """The ``(m, n)`` output sides — each output axis paired with its derived per-CTA tile
-        geometry (width / unit / register counts, read off the ``tile``). Built as the pair;
-        :attr:`m` / :attr:`n` index it."""
-        t = self.tile
-        dims = ((t.tile_m, t.units_m, t.reg_m), (t.tile_n, t.units_n, t.reg_n))
-        return tuple(
-            Side(axis=ax, tile=tile, units=units, reg=reg, block=ax.name + "_b", unit=ax.name + "_u")
-            for ax, (tile, units, reg) in zip(self.axes, dims, strict=True)
-        )
+        """The ``(m, n)`` output sides — forwarded to :attr:`TilePlan.mn`."""
+        return self.tile.mn
 
     @property
     def m(self) -> Side:
-        return self.mn[0]
+        return self.tile.m
 
     @property
     def n(self) -> Side:
-        return self.mn[1]
+        return self.tile.n
 
     @property
     def block_threads(self) -> int | None:
-        bt = self.tile.block_threads
-        return bt if bt > 1 else None  # None ⇒ the scalar default block size
+        return self.tile.launch_threads
 
 
 def place(node: Contraction, m_axis: Axis, n_axis: Axis, tile: TilePlan | None = None, stage: Stage | None = None) -> Placed:
-    """Bind ``node`` to its caller placement + schedule facts — the successor of the retired
-    ``Contraction.placed`` field stamp. The output axes are the CALLER's placement (the trailing
-    grid axes for a root kernel; a flash consumer supplies its own), the ``tile`` / ``stage`` the
-    CALLER's schedule slices read from ``TileOp.schedule``.
+    """Bind ``node`` to its caller placement + schedule facts. The output axes are the CALLER's
+    placement (the trailing grid axes for a root kernel; a flash consumer supplies its own) — they
+    are bound onto the ``tile`` slice itself (:meth:`TilePlan.at`), so the geometry the tiers read
+    is a function of the slice alone.
 
     The view is the TILED CELL's reading — the ``(m, n)`` pair and nothing outside it. A kernel's
     LEADING (batch / ksplit) grid axes are not bound here: the emission that needs them
     (``kernel/_atom``'s per-cell rename) takes them from the caller that owns the grid, so the
     view never carries a placement fact it cannot decide."""
-    return Placed(node=node, axes=(m_axis, n_axis), tile=tile if tile is not None else TilePlan(), stage=stage)
+    return Placed(node=node, axes=(m_axis, n_axis), tile=(tile if tile is not None else TilePlan()).at(m_axis, n_axis), stage=stage)

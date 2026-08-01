@@ -1429,7 +1429,10 @@ def test_warp_chain_gqa_static_matches_torch(monkeypatch, Hq, Hkv, S, D):
 def test_warp_chain_gqa_dynamic_matches_torch(monkeypatch, seq):
     """Symbolic ``seq_len`` warp-chain flash with **GQA** (``Hq=4 / Hkv=2``, group 2). ``_Gqa`` traces
     as GQA+causal, so this also exercises the causal mask composed with the symbolic boundary mask.
-    ONE cached kernel carrying ``int seq_len``; matches torch GQA+causal SDPA at seq ∈ {8,16,37,64}."""
+    ONE cached kernel carrying ``int seq_len``; matches torch GQA+causal SDPA at seq ∈ {8,16,37,64}.
+    ``REDUCE`` is pinned serial: unpinned, the cold offline pick for this shape is the ``g4k``
+    reduce-partition warp sibling (two kernels) — the fused single-kernel chain is what this case pins."""
+    monkeypatch.setenv("EMMY_REDUCE", "")
     B, Hq, Hkv, D = 1, 4, 2, 32
     sd = torch.export.Dim("seq_len", min=4, max=4096)
     seed = (

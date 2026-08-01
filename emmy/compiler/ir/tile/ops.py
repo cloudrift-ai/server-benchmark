@@ -3,8 +3,11 @@ r"""The geometry-free compute layer — node lowering and the structural reads.
 A kernel's compute is a stored :class:`~emmy.compiler.ir.tile.ir.Fold` (a bare reduce), a
 :class:`~emmy.compiler.ir.tile.ir.Contraction` (a contraction cell — 1s), or a
 :class:`~emmy.compiler.ir.tile.ir.Map` (a pure pointwise cell, or the projection wrapper over its
-source node). The algebra is read **structurally** off the node — :func:`axis_role` /
-:func:`reduce_loop` recurse through ``Map.sources``; a fold's role is derived, never stored.
+source node). :func:`head` is the ONE accessor reaching that node through the projection ``Map``,
+and every structural fact a pass dispatches on — :func:`axis_role`, the reduce ``Axis``, the
+operand edges — is a STORED param on it (a fold's role is derived from those params, never
+stored). Reading a node fact off a SYNTHESIZED nest is the inversion this module exists to
+prevent: :func:`reduce_loop` / :func:`lower` are for callers that consume a body.
 
 This module is the thin lowering of any node back to its loop nest (:func:`lower` — a fold
 flattens through :attr:`Fold.loop`, a wrapping projection appends) plus the shared
@@ -142,6 +145,20 @@ def seal_workers(tile) -> None:
     tile.knobs["WORK"] = work.spell() if work is not None else ""
 
 
+def head(op):
+    """The kernel's compute NODE — a :class:`~emmy.compiler.ir.tile.ir.Fold` /
+    :class:`~emmy.compiler.ir.tile.ir.Contraction`, bare or under its projection ``Map`` — or
+    ``None`` for a pure pointwise cell / the raw-loop-IR escape (a ``Map`` with no sources).
+
+    The ONE accessor for "which node is this kernel about", replacing the hand-spelled
+    ``op.sources[0] if isinstance(op, Map) and op.sources else op`` ternary at every reader. Every
+    node-level fact the scheduler dispatches on — the :class:`~emmy.compiler.ir.axis.AxisRole`, the
+    reduce ``Axis``, the operand edges — is a STORED param on what this returns, so a scheduling
+    read never needs :func:`reduce_loop` (which synthesizes a whole nest) to reach it."""
+    node = op.sources[0] if isinstance(op, Map) and op.sources else op
+    return node if isinstance(node, (Fold, Contraction)) else None
+
+
 def reduce_loop(op):
     """The kernel's outermost **annotated** reduce ``Loop`` (its ``role`` stamped by recognition),
     or ``None`` for a pure pointwise / flat-fallback ``Map`` (no annotated reduce). A
@@ -150,7 +167,11 @@ def reduce_loop(op):
     :attr:`Contraction.loop`); a ``Map``
     is read off the top-level body — the annotated reduce loop is a top-level stmt (a
     single-flat-reduce cell); a nested / multi reduce stays un-annotated (``role=FREE`` — flat
-    fallback) and is invisible here, so it materializes on the scalar tier."""
+    fallback) and is invisible here, so it materializes on the scalar tier.
+
+    For the LOOP NEST itself — a caller that consumes a body. A node-level FACT (the role, the
+    reduce axis, the operand edges) is a stored param on :func:`head`'s node: read it there, not
+    off a nest synthesized to be thrown away."""
     if isinstance(op, (Fold, Contraction)):
         return op.loop
     if isinstance(op, Map) and op.sources:
@@ -168,11 +189,10 @@ def reduce_plan(tile):
     per-cell ``Map`` has no partition). An unstamped fold reads the empty plan (the scalar serial
     fold), matching the retired node field's default. The single accessor the materializer /
     ``030_split_reduce`` read."""
-    op = tile.op
-    head = op.sources[0] if isinstance(op, Map) and op.sources else op
-    if not isinstance(head, (Fold, Contraction)):
+    node = head(tile.op)
+    if node is None:
         return None
-    plan = sched_of(tile).reduce_of(head)
+    plan = sched_of(tile).reduce_of(node)
     return plan if plan is not None else ReducePlan()
 
 
@@ -194,14 +214,11 @@ def nodify_reduce(op, like=None):
     must be a top-level stmt of ``op.body`` with no prologue ahead of it (true for a split partial /
     bare sum: the reduce is the body's head); a projection tail after it becomes the wrapping
     ``Map`` body."""
-    if isinstance(op, (Fold, Contraction)) and op.role is AxisRole.CONTRACTION:
-        return op, op
-    head = op.sources[0] if isinstance(op, Map) and op.sources else None
-    if isinstance(head, (Fold, Contraction)) and head.role is AxisRole.CONTRACTION:
-        return op, head
+    node = head(op)
+    if node is not None and node.role is AxisRole.CONTRACTION:
+        return op, node  # a bare node IS its own head — the contraction keys its own plan
     if like is None:
-        self_head = head if head is not None else op
-        like = self_head if isinstance(self_head, Fold) else None
+        like = node if isinstance(node, Fold) else None
     rloop = reduce_loop(op)
     red = Fold.from_loop(rloop, like)
     if red is None:  # not λ-representable (a raw-block slice) — the caller keeps the flat spelling
@@ -214,13 +231,24 @@ def nodify_reduce(op, like=None):
 
 
 def axis_role(op) -> AxisRole:
-    """The reduce :class:`~emmy.compiler.ir.axis.AxisRole` of a kernel's outermost reduction,
-    read **structurally** off the annotated reduce loop (no stored kind tag): a ``CONTRACTION``
-    contraction, a ``TWISTED`` (online-softmax / flash) or ``PLANAR`` (plain ``sum`` / ``max`` /
-    ``mean``) reduce, or ``FREE`` for a pure pointwise / flat-fallback ``Map``. This is what the
-    schedule / materialize passes dispatch on."""
-    rl = reduce_loop(op)
-    return rl.role if rl is not None else AxisRole.FREE
+    """The reduce :class:`~emmy.compiler.ir.axis.AxisRole` of a kernel's outermost reduction: a
+    ``CONTRACTION`` contraction, a ``TWISTED`` (online-softmax / flash) or ``PLANAR`` (plain
+    ``sum`` / ``max`` / ``mean``) reduce, or ``FREE`` for a pure pointwise / flat-fallback
+    ``Map``. This is what the schedule / materialize passes dispatch on.
+
+    Read off the NODE (:func:`head`) — the role is that node's own derived property
+    (``Fold.role`` / the ``Contraction`` kind), so the dispatch costs a field access. The
+    annotated-``Loop`` scan survives only for the raw-loop-IR escape (an un-recognized cell,
+    ``030``'s finalize, the coop fused-tail sibling): no node to ask, the stamped ``Loop.role``
+    IS the fact. Never synthesize a nest to answer this — :attr:`Fold.loop` splices every operand
+    edge and flattens nested nodes, and hands back the same property it was given."""
+    node = head(op)
+    if node is not None:
+        return node.role
+    for s in op.body:  # the escape: a flat Map whose recognition-stamped reduce Loop is a top-level stmt
+        if isinstance(s, (Loop, StridedLoop)) and s.role.is_reduce:
+            return s.role
+    return AxisRole.FREE
 
 
 def lower(op) -> list[Stmt]:

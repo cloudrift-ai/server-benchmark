@@ -67,7 +67,7 @@ from emmy.compiler.ir.tile import (
     split_effects,
 )
 from emmy.compiler.ir.tile.ir import effect_tail
-from emmy.compiler.ir.tile.ops import Sched, lower, nodify_reduce, projection_tail, reduce_loop, reduce_plan, sched_of, seal_workers
+from emmy.compiler.ir.tile.ops import Sched, head, lower, nodify_reduce, projection_tail, reduce_loop, reduce_plan, sched_of, seal_workers
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
 
@@ -293,10 +293,10 @@ def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Map, plan: R
     projection (``O/l`` + the layout-aware store) per output element. Deferred-kernel finalize
     only — the twisted ``e^{Δm}`` rescale can't be an atomic."""
     (red,) = op.sources
-    head = red.step_stmts()[0]  # the role=CONTRACTION score fold (the hoisted operand edge) — its tile is the schedule read
+    score = red.step_stmts()[0]  # the role=CONTRACTION score fold (the hoisted operand edge) — its tile is the schedule read
     cta = plan.cta
     src_sched = sched_of(tile)
-    head_tile = src_sched.tile_of(head)
+    head_tile = src_sched.tile_of(score)
     atom_n = head_tile.atom.shape[1]
     bn = head_tile.regs[1] * atom_n
     ext = red.axis.extent
@@ -406,8 +406,8 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     # The fold NODE carries the algebra (``reduce_plan`` guaranteed a ``Fold`` head) — every
     # algebra read below (state names, identities, the cross-partition combine) is off the node,
     # never a loop annotation.
-    fold_node = op.sources[0] if isinstance(op, Map) and op.sources else op
-    assert isinstance(fold_node, (Fold, Contraction)), "split-reduce fires on node-form kernels only (reduce_plan gates on a node head)"
+    fold_node = head(op)
+    assert fold_node is not None, "split-reduce fires on node-form kernels only (reduce_plan gates on a node head)"
     cta = plan.cta
     rax = rloop.axis
     # Structural split-K: ``op`` is ``Fold(axis=ksplit, step=[Contraction(k_axis=kslice)])`` —
@@ -429,8 +429,8 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     # partial (the scalar residual path below would drop it to the per-cell tier).
     if isinstance(op, Map) and len(op.sources) == 1 and isinstance(op.sources[0], Fold) and op.sources[0].role is AxisRole.TWISTED:
         red_stmts = op.sources[0].step_stmts()
-        head = red_stmts[0] if len(red_stmts) else None
-        head_tile = sched_of(tile).tile_of(head) if isinstance(head, (Fold, Contraction)) else None
+        score = red_stmts[0] if len(red_stmts) else None
+        head_tile = sched_of(tile).tile_of(score) if isinstance(score, (Fold, Contraction)) else None
         if head_tile is not None and head_tile.is_warp:
             # A symbolic kv splits too: ``_split_twisted_warp`` builds the bn-aligned runtime slice
             # width and the absolute ``bound`` the realizer stops/masks against.

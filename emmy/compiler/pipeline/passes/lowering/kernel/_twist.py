@@ -72,6 +72,7 @@ from emmy.compiler.ir.schedule import FoldMove, Level, ReduceStage, TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Cond, Init, Load, Select, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile.ir import Contraction, Fold, Map
+from emmy.compiler.ir.tile.ops import head
 from emmy.compiler.pipeline.passes.lowering._addr import gmem_row_stride
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _clamp_last, _f16acc, unroll_ok
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
@@ -417,7 +418,7 @@ def realize_warp_twist(op, ctx, tail: tuple) -> tuple[list[Stmt], list[Stmt], li
     close)`` triple the one ``_bind`` pipeline seals (state = the handoff slab + running stats +
     output fragments + hoisted scalars; fold = the streaming :class:`StridedLoop`; close = the
     realized projection + the fragment output store). See the module docstring for the walk."""
-    red: Fold = op.sources[0] if isinstance(op, Map) else op
+    red: Fold = head(op)
     partial = list(red.step_stmts())
     # The stored steps are role=CONTRACTION folds; the realizer works on their DERIVED views. The
     # query / value axes come off the placement's free axes (``Ctx.free`` — the un-shrunk

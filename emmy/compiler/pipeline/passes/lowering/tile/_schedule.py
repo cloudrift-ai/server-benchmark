@@ -65,7 +65,7 @@ from emmy.compiler.ir.tile import (
     TileOp,
     TilePlan,
 )
-from emmy.compiler.ir.tile.ops import axis_role, cone_seam, nodify_reduce, projection_tail, reduce_loop, sched_of, seal_workers
+from emmy.compiler.ir.tile.ops import axis_role, cone_seam, head, nodify_reduce, projection_tail, reduce_loop, sched_of, seal_workers
 from emmy.compiler.ir.tile.ops import lower as lower_op
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.knob import canon_family_value, family_of, values_equal
@@ -322,7 +322,7 @@ def _pick_coop(extent: int, free: int, *, has_tail: bool = False) -> int:
 
 
 def _coop_carrier(kernel):
-    """The cooperative-eligible reduce ``Loop`` of ``kernel`` (read for its ``axis``), or ``None``
+    """The cooperative-eligible reduce NODE of ``kernel`` (read for its ``axis``), or ``None``
     (keep serial).
 
     Eligible: a ``PLANAR`` / ``TWISTED`` reduce loop — **degenerate** (plain ``sum`` / ``max`` /
@@ -334,11 +334,11 @@ def _coop_carrier(kernel):
     **symbolic** (dynamic ``seq_len``): each lane strides it to the runtime extent (the ``< seq_len``
     bound is the masked tail). A ``CONTRACTION`` (its output tile is ``_tile_option`` / ``_warp_option``;
     a cross-CTA split-K is the ``_splitk_option`` fork) or a flat-``Map`` fallback (multi /
-    nested-non-flash reduce — no annotated reduce loop) is not eligible here and keeps the serial fold."""
-    rl = reduce_loop(kernel.op)
-    if rl is None or rl.role not in (AxisRole.PLANAR, AxisRole.TWISTED):
+    nested-non-flash reduce — no reduce node) is not eligible here and keeps the serial fold."""
+    red = head(kernel.op)
+    if red is None or red.role not in (AxisRole.PLANAR, AxisRole.TWISTED):
         return None
-    return rl
+    return red
 
 
 def _matvec_b_kstride(kernel, carrier, place) -> int | None:
@@ -724,7 +724,7 @@ def _reduce_candidates(kernel, place, plan: TilePlan, con: Contraction | None = 
     contract: a GRID split rides every tile (an invalid warp slice / atomic-on-non-distributive
     raises in :func:`_splitk_option` / ``030_split_reduce``, as a pin should), a coop / ILP
     partition applies to the per-cell tier only (a tiled candidate has no row under it)."""
-    ext = reduce_loop(kernel.op).axis.extent
+    ext = head(kernel.op).axis.extent
     if REDUCE.raw() is not None:
         split = _splitk_pin()
         if split is not None:
@@ -827,9 +827,9 @@ def _tile_rows(kernel, place, ctx=None) -> tuple[list[dict], tuple[str, str, str
     narrow each family (resolved once — :func:`_pinned_tile` / :func:`_pinned_reduce`); the
     unpinned families come from the ``search/space.py`` move catalog, legality-guarded here (the
     per-node half of the space)."""
-    head = kernel.op.sources[0] if isinstance(kernel.op, Map) and kernel.op.sources else kernel.op
-    if isinstance(head, (Fold, Contraction)):
-        keys = tuple(_family_key(kernel.op, f.name, head) for f in (TILE, STAGE, REDUCE))
+    node = head(kernel.op)
+    if node is not None:
+        keys = tuple(_family_key(kernel.op, f.name, node) for f in (TILE, STAGE, REDUCE))
     else:  # a raw-loop-IR Map (recognition never nodified it) — no node to key on; bare is canonical
         keys = (TILE.name, STAGE.name, REDUCE.name)
     try:
@@ -1330,7 +1330,7 @@ def _check_warp_static_k(kernel, wt) -> None:
     fine: it reaches the masked tier (ceil-div grid + boundary ``Cond`` + zero-filled partial
     slab), so guard only the static case. Raising here surfaces a clean compile error instead
     of a numerically-wrong kernel."""
-    ext = reduce_loop(kernel.op).axis.extent
+    ext = head(kernel.op).axis.extent
     if not ext.is_static:
         return
     k = ext.as_static()
@@ -1612,10 +1612,8 @@ def _tile_option(
     # ``TILE`` / ``REDUCE`` / ``STAGE`` key by the canonical codec spelling. STAGE stamps the
     # RESOLVED spelling, and only when resolution took (see ``_warp_option`` — the same
     # honest-stamping rule).
-    head = tile.op.sources[0] if isinstance(tile.op, Map) and tile.op.sources else tile.op
-    tkey, skey, rkey = (
-        (_family_key(tile.op, f.name, head) if isinstance(head, (Fold, Contraction)) else f.name) for f in (TILE, STAGE, REDUCE)
-    )
+    node = head(tile.op)
+    tkey, skey, rkey = ((_family_key(tile.op, f.name, node) if node is not None else f.name) for f in (TILE, STAGE, REDUCE))
     stamped = {**knobs, tkey: plan.spell(), rkey: rplan.spell() if rplan is not None else ""}
     stamped[skey] = stage.spell() if stage is not None else ""
     out = TileOp(op=op, name=name, place=place, knobs=_site_knobs(stamped), stores=tile.stores)
@@ -1937,10 +1935,10 @@ def _stamp_twisted_split(rows: list[TileOp], plan: ReducePlan) -> list[TileOp]:
     the bn-aligned runtime slice width and the absolute ``bound`` the realizer stops/masks against."""
     out: list[TileOp] = []
     for r in rows:
-        red = (r.op.sources[0] if r.op.sources else None) if isinstance(r.op, Map) else r.op
-        head = red.step_stmts()[0]
-        head_tile = sched_of(r).tile_of(head)
-        bn = head_tile.regs[1] * head_tile.atom.shape[1]
+        red = head(r.op)
+        score = red.step_stmts()[0]
+        score_tile = sched_of(r).tile_of(score)
+        bn = score_tile.regs[1] * score_tile.atom.shape[1]
         ext = red.axis.extent
         if ext.is_static and (ext.as_static() % plan.cta != 0 or (ext.as_static() // plan.cta) % bn != 0):
             continue
@@ -2012,9 +2010,8 @@ def _demoted_warp_option(tile: TileOp, place, name: str, knobs: dict) -> TileOp 
     if wt is None or not wt.is_warp:
         return None
     op = tile.op
-    src = op.sources[0] if isinstance(op, Map) and len(op.sources) == 1 else None
-    red = src if isinstance(src, Fold) else (op if isinstance(op, Fold) else None)
-    if red is None or red.role is not AxisRole.PLANAR or _composes(red):
+    red = head(op)
+    if not isinstance(red, Fold) or red.role is not AxisRole.PLANAR or _composes(red):
         return None
     body = list(red.step_stmts())
     accums = [st for st in body if isinstance(st, Accum)]

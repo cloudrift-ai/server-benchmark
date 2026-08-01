@@ -43,6 +43,7 @@ from __future__ import annotations
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.tile import Map, Placement, TileOp
+from emmy.compiler.ir.tile.ops import head
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import Fork
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
@@ -70,8 +71,7 @@ def _demote_planar(node):
     to the old flatten-and-refold) — and with no operand edges the bilinear parse declines, so the
     fold **derives** ``PLANAR`` (``Fold.role``), the same route ``_nodify_contraction`` leaves an
     unbindable cell on, applied post-nodification."""
-    src = node.sources[0] if isinstance(node, Map) else node
-    red = src.demoted()
+    red = head(node).demoted()
     projection = Body(tuple(node.body) if isinstance(node, Map) else ())
     return Map(body=projection, sources=(red,)) if len(projection) else red
 

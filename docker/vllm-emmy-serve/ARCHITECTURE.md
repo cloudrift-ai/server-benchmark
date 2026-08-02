@@ -83,6 +83,18 @@ compose healthcheck's own boot window (`start_period` 1200s + 180 × 10s probes 
 override a coin flip on host core count rather than a supported configuration. Recipes that need a width outside the
 warmed set should either re-warm the image at that width or expect the deploy to be killed as unhealthy.
 
+**So an image bakes a pack per serving shape it is meant to serve, not just the pinned one.** `SERVE_WARM_SHAPES` in
+`models/<slug>.env` lists the extra shapes as `<decode_bucket>:<prefill_bucket>:<max_num_batched_tokens>[:fm]` (an
+empty field keeps the pinned value); `warm.sh` runs the offline fixpoint once per shape and each writes its own pack
+directory, and `verify.sh` boots the baked image once per shape and asserts the pack HIT plus zero new cubins. Packs
+are a few MB, so the cost is warm time, not image size. The `:fm` suffix exists because the precision gate is part of
+the pack's environment key — a `EMMY_FAST_MATH=1` boot can never hit a standard-lane pack, and before that key
+existed it silently *did*, serving standard kernels under the fast-math label (fixed 2026-08-01). What this is worth:
+in the 2026-08-01 article reproduction 24 of 28 emmy benchmark cells missed the pack at ~12 min of frontend each,
+about 4.5 hours of the session — and every customer following the documented per-workload knobs pays the same on
+every boot. An extra shape that will not converge is reported loudly but does **not** fail the release: the pinned
+shape is the contract, and the degraded outcome for the others is a cold boot, not a broken image.
+
 ## Files
 
 - `models/<slug>.env` — the pinned serving config, one file per model (the filename IS the slug). Every value is cache-key-relevant; it must be **final before warming**

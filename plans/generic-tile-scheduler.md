@@ -2,7 +2,7 @@
 
 ## The actual defect
 
-The tile IR is compositional (`Map` / `Fold` / `Contraction`) and the schedule output is compositional
+The tile IR is compositional (one `Fold` node kind — see the next section) and the schedule output is compositional
 (`TileOp.schedule`, per-node slices keyed by the tree-path codec). The deleted `_schedule.py` was compositional in
 ONE of its three arms and not in the other two, and that asymmetry — not "hand-written whole-tree paths" in general —
 is where the complexity lived:
@@ -22,6 +22,126 @@ row union, pins had to be narrowed per path, and every new composition needed an
 is the one the corpus supports.
 
 **Read the Status section before costing anything.** The old scheduler is DELETED; this is a reconstruction.
+
+## The IR beneath it — the unified `Fold`
+
+This plan assumes the tile IR has collapsed to ONE stored node kind. The collapse is a **prerequisite, not a
+consequence**: it changes the site walk, the role derivation and the emitter dispatch this design rests on, and doing
+it after the scheduler is rebuilt means rebuilding it twice.
+
+```
+Fold(
+    axis:     Axis | None,             # None = the zero-axis node (what `Map` was)
+    operands: tuple[Load | Fold, ...], # the operand EDGES, bound POSITIONALLY to the lift params
+    lift:     Lambda,                  # λ(k, v₁…vₙ) → S — the ONE joint stored per-element function
+    init:     tuple,                   # the ⊕ seeds; () at zero axes
+    combine:  Lambda,                  # S × S → S — THE ⊕; absent at zero axes
+)
+```
+
+**There is no `Edge` type**, and introducing one is a live question rather than a settled part of this design (see
+"The one open decision"). An operand edge is the union it already is — MATERIALIZED (a gmem `Load`, whose `input` +
+`index` ARE the source/access pair) or COMPUTED (the node itself, stored inline, its one consumer its parent).
+
+Three things move, and each deletes a case this plan otherwise has to carry.
+
+**The projection stops being a field.** `Map(fn, sources=(Fold,))` becomes a zero-axis `Fold` whose one operand is the
+reducing fold; the projection IS the outer node's `lift`. Composition supplies what the `fn` field did, so RMSNorm's
+normalize, softmax's, the relu epilogue and flash's `divide(O, l)` are the same shape at the same depth. No node
+carries both a per-element and a per-cell lambda.
+
+**The access function is the edge's.** A materialized edge already IS `(source, access)` — `Load.input` +
+`Load.index`, which is where the fact already lives (`b_trans` reads it today). This is what makes A/B **derived**:
+A is the operand whose access omits the N free axis, B the one whose access omits M. That derivation is total —
+including for a computed A: flash's PV is `O[d] += Σ_j P[j]·V[j,d]`, and `P`'s access omits `d` while `V`'s does
+not. No stored `a` field, no `shared` index, no bilinear parse.
+
+**The kind derives from arity.** Nothing stores a role:
+
+| shape | axis | operands | lift / combine | derived role |
+| --- | --- | --- | --- | --- |
+| pure pointwise | none | 0 | — | FREE |
+| projection over a node | none | 1 | — | FREE |
+| bare reduce / stat | one | 0–1 | any / componentwise | PLANAR |
+| contraction | one | 2+ | `multiply` over distinct params / `add` | CONTRACTION |
+| split-K outer reduce | one | 1 (a contraction) | identity / `add` | CONTRACTION |
+| streaming (flash, online softmax) | one | 1+ | any / exp-family | TWISTED |
+| unbindable matvec | one | 0 (loads inline) | any / `add` | PLANAR |
+
+The last two rows are the load-bearing ones and both already hold: the matvec demotion is a FORMATION fact
+(recognition keeps its loads inline in the lift, so there are no edges to parse and the row falls through to PLANAR),
+and `demoted()` — the collapse variant below — is exactly "move the edges inline", which flips CONTRACTION to PLANAR
+by the same table. The variant mechanism and the role derivation stop being two mechanisms.
+
+### What it changes for this plan
+
+**`type(node)` dispatch stops existing as an option.** The next section argued emitters must key on `AxisRole` rather
+than node type. Under the collapse there is no type key to reach for and the argument is free. The three-arm
+asymmetry named in "The actual defect" loses its last structural excuse: CONTRACTION, TWISTED and FREE are three
+readings of one node, so an arm that builds `TileOp`s eagerly is visibly a special case rather than a different kind.
+
+**`family_sites` restates without losing a site.** `REDUCE`/`STAGE` take every fold WITH an axis; `TILE` takes the
+`role is CONTRACTION` folds plus the root zero-axis fold with no operands (the register-strip tier — a non-root
+operandless fold, e.g. a one-load demoted cone, is still not a strip target); `PLACE` every non-root, non-derived
+site. `Site.axis` is already `None` for the pointwise node, so the zero-axis fold needs no new case.
+
+**Keys survive — under one hard constraint.** `_SEGMENT_TOKENS` is `{"map", "fold", "a", "b"}` and spelling is
+short-path-canonical (bare → `FAMILY@<axis>` → anchored path subsequence). Checked against the stored corpus: the
+only path-spelled keys anywhere in the golden YAMLs are `TILE@pj` (45), `TILE@dd` (42), `PLACE@cone` (60),
+`PLACE@stat` (4), `PLACE@fin` (1) — all AXIS names, segment-independent — and **`PLACE@a` (9 rows), which is the
+A-edge SEGMENT**. Nothing stored spells `map` or `fold`. So:
+
+> The frozen-key invariant survives the collapse **iff `path._walk` keeps emitting `a` / `b` edge labels for
+> contraction-role folds**, now derived at walk time from the operands' accesses instead of read off `node.a` /
+> `node.channels`.
+
+That is the one constraint the collapse imposes on `path.py`, it is checkable in isolation, and `PLACE@a`'s nine
+golden rows are its test.
+
+**Per-operand lifts are a DERIVED view, never storage.** "Different lift per operand, one combine" is the right
+reading of a contraction — but the per-operand part is a canonical partition of the existing `lift.body` (a stmt
+reading one operand's bound name belongs to that operand; a stmt reading several is the joint step), not new fields.
+It must stay derived because kernel identity is `repr()` of the stored term (`ops.term_key`): a stored partition
+means two recognitions that split the same algebra differently key apart, splitting cache and evidence for identical
+kernels. Derived, it costs nothing and unlocks the fused per-operand prologue the `Contraction` docstring already
+anticipates (qk-norm / RoPE folded into a score, on-the-fly dequant) — which is a STAGE-family concern, so phase 2
+should expose `operand_lift(i)` even though no emitter reads it yet.
+
+### The one open decision
+
+**A computed edge's access — and with it, whether an `Edge` TYPE exists at all.** A materialized edge's access is its
+`Load.index`. A computed edge (the fused cone, flash's `P`) has none: its access is implicit in the enclosing nest.
+Two readings, and the choice decides whether "uniform edges" is real or nominal:
+
+- **(a) derived — no new type.** `Load | Fold` stays the union it is today; a computed edge's access is read off its
+  own node's axes. No duplication, no migration, and the A/B rule gets a second path that must agree with the first.
+- **(b) stored — a real `Edge(source, access)` wrapper.** Every edge carries an explicit access and A/B derivation is
+  one rule. Cost: a computed edge's access partly restates what its own placement implies — the
+  two-spellings-of-one-fact this IR keeps deleting.
+
+**The lean is (a), and the reason is `Stmt`-hood, not taste.** Every structural node is a `Stmt` today, which is what
+lets an inline node occupy a statement position: `_splice_operands` splices an edge's producing stmts straight into a
+`Body`, and `_flatten_nodes` lowers it in place. An `Edge` wrapper is not a `Stmt`, so both would have to unwrap,
+`path._walk` would recurse through a non-node level, and the `rewrite` registry would need a handler for a thing that
+is not a term. That is a structural tax paid on every walk in the layer, to buy uniformity in one derivation.
+
+(b) earns a second look only if the A/B rule's two paths turn out to disagree in practice. Settle it as P0.5's first
+commit; everything else in this section holds either way.
+
+### What the collapse does NOT do
+
+**It does not re-spell terms.** Hoisting a load to an operand edge stays recognition's decision, exactly as today —
+a bare sum keeps its load INLINE in the lift, a contraction hoists both operands because the schedule needs their
+addresses. The collapse renames the node kind and moves the projection down one level; it does not hoist anything.
+This is what bounds its blast radius, and it is why examples 1–3 and 7 below are byte-identical to their current
+dumps but for the header word.
+
+**But it does change `term_key`.** `ops.term_key` is `repr()` of the canonically-renumbered term, so a changed class
+name and a changed nesting for the projection change the key for every term — and with it `op_cache_key` and
+`Graph.structural_key`'s op field. Consequence, to be planned for rather than discovered: **the cubin cache and every
+recorded DB / reservoir measurement are orphaned** (they key on `(ctx.structural_key, op_cache_key)`), while the
+golden corpus survives untouched because it keys on knob spellings. That makes the collapse cheap for correctness and
+expensive for evidence — do it BEFORE the phase-2 measurement work, never after.
 
 ## Design
 
@@ -56,14 +176,17 @@ order, which `fork.Level` supports unchanged.
 ### Emitters are keyed on `AxisRole`, not `type(node)`
 
 The IR already decided this: *"Detection stamps each loop with its role so scheduling dispatches on the axis's job,
-never on a node type"* (`ir/axis.py`), *"The schedule is flat and kind-free"* (`ir/schedule.py`). A type key is
-strictly coarser — `Fold` spans PLANAR, TWISTED and CONTRACTION — so it would re-dispatch on `.role` internally.
-Half the dispatch is free anyway, since `family_sites` already keys `TILE` on the CONTRACTION role.
+never on a node type"* (`ir/axis.py`), *"The schedule is flat and kind-free"* (`ir/schedule.py`). Under the unified
+`Fold` there is no type key left to reach for, so this section is a statement of what the emitters key on rather than
+an argument against an alternative: **`ops.axis_role`, derived per the arity table above.** Half the dispatch is free
+anyway, since `family_sites` already keys `TILE` on the CONTRACTION role.
 
 The escapes depend on this. For an un-recognized loop-IR cell, `030`'s finalize and the coop fused-tail sibling,
 `head()` is `None` and `ops.axis_role` falls back to the stamped `Loop.role`, landing them on the reduce entry with a
-single scalar row — as today. Under a type key they would all be `Map` and take the strip fork: a silently WRONG
-entry, which is worse than an omission.
+single scalar row — as today. This is the case the collapse makes MORE important, not less: pre-collapse they were
+all `Map`, and a type key would have sent them to the strip fork (a silently wrong entry, worse than an omission);
+post-collapse they are zero-axis folds indistinguishable from a real pointwise cell by shape alone, so the
+`Loop.role` fallback is the only thing separating them. Phase 3 must assert it directly.
 
 ### Term variants — the one new mechanism
 
@@ -72,8 +195,8 @@ Four moves rewrite the term rather than decorating it, and each therefore yields
 
 | variant | what it does | who did it |
 | --- | --- | --- |
-| strip | unrolls the `Map` body ×r, α-renames SSA, fans out `TileOp.stores`, divides the inner extent | `_map_strip_option` |
-| split-K | builds `Fold(axis=ksplit, source=Contraction(k_axis=kslice))`, σ-reindexes operands | `_splitk_option` + `_factor_k` |
+| strip | unrolls the zero-axis fold's `lift` ×r, α-renames SSA, fans out `TileOp.stores`, divides the inner extent | `_map_strip_option` |
+| split-K | wraps the sliced contraction fold in an identity-lift `Fold(axis=ksplit)`, σ-reindexes operands | `_splitk_option` + `_factor_k` |
 | collapse | splices a computed edge inline (`Fold.demoted()`), removing its schedule site | `_demote_planar` / `_demoted_warp_option` |
 | mixed-A promotion | turns a MATERIALIZED f32 A edge into a computed cone so the sync compute-fill can convert it | `_demote_mixed_a` |
 
@@ -338,6 +461,15 @@ the registry to `strict=True`. Write the full-corpus golden-reachability loop ov
 `evaluate_golden(...).rank is not None` — ~10 lines on existing API; it xfails until phase 2 and then gates for
 free. **Nothing here depends on the design.**
 
+**P0.5 — the `Fold` collapse (blocks the spike).** `Map` and `Contraction` fold into the unified `Fold`; the
+projection moves to the zero-axis node's `lift`; `a` / `b` become derived edge labels. Order matters within it:
+the multi-node `.loop` splice and `path._walk`'s label derivation land FIRST, green on `digest_kernels` against P0's
+baseline (a pure no-op on today's trees), then the class merge, then the `family_sites` restatement. Gates:
+`digest_kernels` byte-identical; `PLACE@a`'s nine golden rows still resolve; the golden-reachability test still
+passes. **Do it here and not later** — it orphans the cubin cache and every DB/reservoir row (see Risks), which
+is nearly free now and expensive once phase 2 has measured anything. Resolve the computed-edge access question
+(see "The one open decision") as its first commit.
+
 **SPIKE (1–2 days) — one shape end to end.** Restore `020_schedule` + `assemble` + the three CONTRACTION candidate
 functions for a plain matmul only. Gate: `pytest tests/compiler/passes/test_move_catalog.py
 tests/compiler/e2e/test_matmul_coverage.py`. This proves site enumeration → typed slices → `seal_workers` →
@@ -371,7 +503,10 @@ sweep.
 ## Invariants
 
 - **Every role emits rows; no role builds `TileOp`s directly.** This is the success criterion.
-- **Knob KEYS and VALUE spellings are frozen.** No codec exemption is taken.
+- **ONE stored node kind.** Role, the A/B edge labels and the per-operand lifts are all DERIVED; nothing that a
+  reading can produce gets a field. A new stored field on `Fold` is a design regression, not an optimization.
+- **Knob KEYS and VALUE spellings are frozen** — which, post-collapse, means `path._walk` must keep emitting the
+  `a` / `b` edge labels. Term keys are NOT frozen (the collapse changes them once, by design).
 - **Uniform key sets per fork**, `""` as a decided empty — prefix-consistency for the evidence pick.
 - **Bare `REDUCE` is the contraction's K fold, never the cone's stat** — both readings of a fused term spell against
   the contraction tree. (The earlier proposal to let each reading spell its own keys is dropped: it would change
@@ -402,18 +537,346 @@ Previously unstated and each otherwise discovered mid-phase:
 
 ## Worked examples
 
-The acceptance corpus. Dumps live in the pre-deletion kernel dumps and `scripts/digest_kernels.py`'s case list.
+The acceptance corpus: for each shape the new walk must enumerate the SAME rows, in the same stored spellings. Dumps
+come from the pre-deletion kernel dumps and `scripts/digest_kernels.py`'s case list, **re-spelled in the unified
+`Fold`** — that re-spelling is itself part of the acceptance, since it is what phase 0 must produce.
 
-| # | expression | term | what the emitters must produce |
-| --- | --- | --- | --- |
-| 1 | `randn(8,512,1024).sum(-1)` | root `Fold`, PLANAR | the reduce family: conservative COOP first (not serial — the per-family exception), then the catalog, then guarded `g<n>`/`r<n>` |
-| 2 | `rms_norm(...)` | `Map(fn, sources=(Fold,))` + sweep `Store` | fold rows + the sweep; the shared-row `sync` stage is a stage value on a twice-read materialized edge, gated on a contraction tail, and is NOT a knob |
-| 3 | `softmax(...)` | `Map` over TWISTED `Fold` | identical to 2 — twisted changes combine COST, never which values are legal |
-| 4 | `A @ B` | root `Contraction` | the tile × stage × reduce × raster product — the arm that already worked |
-| 5 | `relu(A@B + bias)` | `Map` over `Contraction` | example 4 plus one filter (the fragment-epilogue gather refusal) |
-| 6 | SwiGLU gate⊗up | `Map(combine, sources=(Contraction,))`, arity 2 | the computed-A rows; the cone's stat fold spells against the CONTRACTION tree; the `020` merge is a row union |
-| 7 | `silu(x) * y` | `Map(sources=())` + `Store`s | grid-map + the strip rewrite, where `r` is the spelled `TILE` value |
-| 8 | causal SDPA | `Map` over TWISTED `Fold`, computed QK + derived PV | five fold families as ROWS: warp streaming (row 15: `WN = 1`), chain (`WORK=""`), per-cell (the collapse variant), coop, split-KV — the same `g<n>` move as matmul split-K |
+Reading the annotations: `←` marks the axis → grid/warp/thread mapping for the schedule shown. Thread `WORK` is
+`t<N>x<M>` and scalar `TILE` is `f<fn>[x<fm>]` (both **n-then-m**); warp `WORK` `w<M>x<N>` and warp `TILE`
+`<atom>/f<FM>x<FN>` are m-then-n. `operand[a]` / `operand[b]` are the DERIVED edge labels (accesses omitting N / M
+respectively) — the `a` / `b` path segments `PLACE@a` depends on; `operand[i]` means the label does not apply.
+
+### 1. Bare reduction — one axis, no edges, PLANAR
+
+```python
+torch.randn(8, 512, 1024).sum(dim=-1)
+```
+
+```
+=== 0: k_sum_1_reduce ===
+    place  free=(a0, a1)  grid=(a0, a1)           ← a0, a1 → blockIdx: one CTA per output cell (8·512 = 4096 CTAs)
+    work   t128                                   ← the coop row's worker demand: a 128-thread cooperative band
+    Fold[a2 in 0..1024]  planar   ⟨REDUCE=coop⟩   ← a2 → lane ⊗ serial: lane l folds elements l, l+128, … (8 each),
+    ├─ init: (0)                                     then a 7-step cross-lane tree combine
+    ├─ lift: λ(a2) -> (in0)
+    │    in0 = load x[a0, a1, a2]                 ← INLINE, not an edge: the collapse hoists nothing (see above)
+    └─ combine: λ(acc0, acc0__o) -> (acc0)
+         acc0 = add(acc0, acc0__o)                ← the SAME λ is the cross-lane merge: combine is carrier-generic
+```
+
+Unchanged by the collapse, character for character — the baseline case for "this is a node-kind rename, not a term
+rewrite". Depth-0 walk, no operands, so the arity table lands it on PLANAR. The fold emitter produces
+`_reduce_specs`' rows verbatim: serial option-0 (this free grid is past `_FREE_CAP`, so the heuristic stays scalar),
+then the coop catalog — each `t<n>` row's worker demand IS its `WORK` inventory, nothing to unify against — then
+guarded `g<n>` / `r<n>`. The `t128` row shown is the evidence/prior pick among those catalog rows.
+
+### 2. RMSNorm — a zero-axis fold over a one-axis fold, plus a sweep store
+
+```python
+torch.nn.functional.rms_norm(torch.randn(4, 512, 1024), (1024,), torch.randn(1024))
+```
+
+```
+=== 0: k_rms_norm_6175eb ===
+    place  free=(a0, a1)  grid=(a0, a1)               ← one CTA per row: 4·512 = 2048 CTAs
+    work   t128
+    Fold  free                                        ← the ZERO-AXIS node: what `Map` was. Its lift IS the
+    ├─ operand[0]: acc0 ← Fold[a2 in 0..1024]  planar   ⟨REDUCE=coop⟩      projection; no `fn` field exists
+    │  ├─ init: (0)                                   ← a2 → 128 lanes × 8 serial + tree combine
+    │  ├─ lift: λ(a2) -> (v1)
+    │  │    in2 = load x0[a0, a1, a2]                 ← coalesced band read of the row
+    │  │    v1 = multiply(in2, in2)
+    │  └─ combine: λ(acc0, acc0__o) -> (acc0)
+    │       acc0 = add(acc0, acc0__o)
+    └─ lift: λ(acc0) -> (v6)                          ← runs once per OUTPUT cell of the sweep, on its owning lane
+         v0 = reciprocal(1024)
+         v2 = multiply(acc0, v0)
+         v3 = add(1e-06, v2)
+         v4 = rsqrt(v3)
+         in3 = load x0[a0, a1, a3]                    ← the TWICE-READ edge (also read in the inner lift): the
+         v5 = multiply(in3, v4)                          shared-row stage move's site — its benefit gate (a
+         in4 = load x1[a3]                               contraction tail) declines here, so it stays gmem-direct
+         v6 = multiply(in4, v5)
+    stores
+    └─ sweep(a3) rms_norm[a0, a1, a3] = v6            ← a3 → the SAME 128 lanes: each writes 1024/128 = 8 cells
+```
+
+The outer node delegates to its one operand (demand: the per-cell scalar state) and the sweep distributes the output
+row over the coop band. The two nodes are now the same kind at two depths, which is the whole point: the outer
+emitter is the FREE entry and the inner the PLANAR entry, selected by `ops.axis_role`, with no wrapper type in
+between. The shared-row `sync` stage stops being the `_shared_row_buf` shape-matcher and becomes a stage move on a
+twice-read materialized edge — offered only when the tail contracts over a new axis (the fused norm→linear shape,
+example 6's depth-1 form), which is today's `_has_contraction_tail` gate, kept for row equality.
+
+### 3. Softmax — the same shape, twisted combine
+
+```python
+torch.nn.functional.softmax(torch.randn(8, 512, 512), dim=-1)
+```
+
+```
+=== 0: k_softmax_efaac1 ===
+    place  free=(a0, a1)  grid=(a0, a1)               ← one CTA per row: 8·512 = 4096 CTAs
+    work   t128
+    Fold  free
+    ├─ operand[0]: (acc0, acc1) ← Fold[a2 in 0..512]  twisted   ⟨REDUCE=coop⟩
+    │  ├─ init: (-inf, 0)                             ← a2 → 128 lanes × 4 serial; each lane's running state is
+    │  ├─ lift: λ(a2) -> (acc0__osin, 1)                 the PAIR (m, l) — arity is the only difference from ex. 1
+    │  │    acc0__osin = load x[a0, a1, a2]
+    │  └─ combine: λ(acc0, acc1, acc0__o, acc1__o) -> (acc0, acc1)
+    │       acc0__o__t0 = maximum(acc0, acc0__o)      ← the cross-lane tree merge runs THIS λ on (m, l) pairs —
+    │       …                                            the twisted rescale, same code as the serial step
+    │       acc0 = copy(acc0__o__t0)
+    └─ lift: λ(acc0, acc1) -> (v5)                    ← BOTH components bind as params (positional binding over the
+         …                                               edge's result components) — normalize per output cell
+    stores
+    └─ sweep(a3) softmax[a0, a1, a3] = v5             ← a3 → the same lanes: 512/128 = 4 cells each
+```
+
+Identical walk to example 2 — twisted changes what the combine COSTS, never which fold moves are legal, so no new
+path exists for softmax at all. Under the collapse the claim "same node kind as example 1, only the monoid arity
+differs" is now literally true of the storage, not just of the algebra.
+
+### 4. Matmul — one axis, two edges, CONTRACTION
+
+```python
+torch.randn(1024, 4096) @ torch.randn(4096, 4096)
+```
+
+```
+=== 0: k_matmul_c1b5ce ===
+    place  free=(a0, a1)  grid=(a0, a1)     ← block-tiled: a0 (m) in 224-row tiles, a1 (n) in 128-col tiles
+    work   t64x16                           ← 1024 threads/CTA as a 64(n) × 16(m) unit grid
+    Fold[a2 in 0..4096]  contraction   ⟨TILE=f2x14 STAGE=d2/cp/ring⟩
+    │                                       ← a2 (K) → SERIAL per thread, chunked by the depth-2 cp.async ring;
+    │                                          f2x14: each thread owns a 14(m) × 2(n) register fragment, so the
+    │                                          CTA tile is (16·14) × (64·2) = 224 × 128 → ⌈1024/224⌉ × 32 CTAs
+    ├─ operand[a]: in1 ← x0[a0, a2]   ‹materialized›   ← access omits a1 (the N axis) ⇒ A: M-resident, staged
+    ├─ operand[b]: in0 ← x1[a2, a1]   ‹materialized›   ← access omits a0 (the M axis) ⇒ B: the streamed K×N slab,
+    ├─ init: (0)                                          double-buffered against compute
+    ├─ lift: λ(a2, in1, in0) -> (acc0__v)
+    │    acc0__v = multiply(in1, in0)      ← the JOINT step: a function of both operands, so it is neither
+    └─ combine: λ(acc0, acc0__o) -> (acc0)    operand's per-operand lift. This is why `lift` stays ONE lambda
+         acc0 = add(acc0, acc0__o)
+```
+
+The role is read off the shape — two operands, a `multiply` lift over distinct params, an `add` combine — and the
+A/B labels off the accesses. Nothing here is stored that was not stored before; the `Contraction`-specific fields
+(`a`, `channels`) have become a derived reading, which is the direction `as_fold()` already pointed.
+
+Depth-0: the CONTRACTION emitter's tile × stage × reduce × raster product — `_tile_rows` almost unchanged, minus
+the `contraction_view` shape-probe. The warp sibling family maps the same axes differently: `WORK=w<M>x<N>`
+puts 32-lane warps on an (m, n) warp grid, `TILE=<atom>/f<FM>x<FN>[/k<bk>]` gives each warp an
+(FM·atom_m) × (FN·atom_n) fragment tile, and a2 advances in `atom_k`-element mma steps, `bk` per smem stage. Split-K
+(`g<n>`) additionally maps a2 across `n` CTAs plus a finalize.
+
+### 5. Epilogue fusion — a zero-axis fold over example 4
+
+```python
+torch.relu(torch.randn(512, 1024) @ torch.randn(1024, 1024) + torch.randn(1024))
+```
+
+```
+=== 0: k_matmul_9f4c41 ===
+    place  free=(a0, a1)  grid=(a0, a1)     ← a0 in 64-row tiles, a1 in 64-col tiles → 8 × 16 = 128 CTAs
+    work   t32x8                            ← 256 threads/CTA as a 32(n) × 8(m) unit grid
+    Fold  free
+    ├─ operand[0]: acc0 ← Fold[a2 in 0..1024]  contraction   ⟨TILE=f2x8 STAGE=d2/cp/ring⟩
+    │  │                                    ← a2 serial per thread over the cp.async ring; f2x8: 8(m) × 2(n)
+    │  │                                       registers per thread → CTA tile (8·8) × (32·2) = 64 × 64
+    │  ├─ operand[a]: in1 ← x0[a0, a2]   ‹materialized›
+    │  ├─ operand[b]: in2 ← x1[a2, a1]   ‹materialized›
+    │  ├─ init: (0)
+    │  ├─ lift: λ(a2, in1, in2) -> (acc0__v)
+    │  │    acc0__v = multiply(in1, in2)
+    │  └─ combine: λ(acc0, acc0__o) -> (acc0)
+    │       acc0 = add(acc0, acc0__o)
+    └─ lift: λ(acc0) -> (v2)                ← runs per REGISTER CELL after the K loop, before the store —
+         in0 = load x2[a1]                     16 cells per thread, no extra parallel structure of its own
+         v1 = add(acc0, in0)
+         v2 = relu(v1)
+    stores
+    └─ relu[a0, a1] = v2                    ← each thread stores its 8×2 fragment
+```
+
+Example 4's product with one local filter at the outer node: the fragment-epilogue gather check (a warp row folds the
+outer lift into the per-fragment `RegEpilogue`, so a data-dependent gather index refuses the warp tier). The operand
+subtree is byte-identical to example 4's node, so the candidate enumeration is identical **by construction** rather
+than by parallel code — and post-collapse the outer node is not a different kind, so "identical by construction" now
+means the same emitter ran.
+
+### 6. SwiGLU — the gate⊗up projection, then a pointwise kernel
+
+```python
+class SwiGLU(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gate = nn.Linear(1024, 2816, bias=False)
+        self.up = nn.Linear(1024, 2816, bias=False)
+
+    def forward(self, x):
+        return F.silu(self.gate(x)) * self.up(x)
+```
+
+```
+=== 0: k_linear_reduce_6eecae ===
+    place  free=(a0, a1)  grid=(a0, a1)     ← a0 (m) in 160-row tiles, a1 (n) in 128-col tiles
+    work   t32x16                           ← 512 threads/CTA as a 32(n) × 16(m) unit grid
+    Fold[a2 in 0..1024]  contraction   ⟨TILE=f4x10⟩
+    │                                       ← a2 serial per thread, gmem-direct (no STAGE picked here);
+    │                                          f4x10: 10(m) × 4(n) registers → CTA tile 160 × 128
+    ├─ operand[a]: in1 ← x[a0, a2]                          ‹materialized›
+    ├─ operand[b]: in0 ← linear__cat__linear_1_w[a1, a2]    ‹materialized›
+    │                                       ← the access has a2 LAST ⇒ B is N-major (the F.linear layout), K
+    │                                          contiguous per row. `b_trans` is this access read, nothing more:
+    │                                          the WS5 layout gates and the warp tier's N-major slab read it
+    ├─ init: (0)                                locally off the edge, as they do today
+    ├─ lift: λ(a2, in1, in0) -> (acc0__v)
+    │    acc0__v = multiply(in1, in0)
+    └─ combine: λ(acc0, acc0__o) -> (acc0)
+         acc0 = add(acc0, acc0__o)
+    stores
+    └─ linear__cat__linear_1_reduce[a0, 0, a1] = acc0
+```
+
+Kernel 1 (silu·mul) is example 7's shape. This trace concatenated gate|up pre-recognition, so the node has arity 1.
+The **arity-2 form** is the depth-1 case, and it is where "sharing is arity" becomes visible without a `Channel`
+type — one shared edge read by two lift terms:
+
+```
+    Fold[a2 in 0..1024]  contraction  (2 components)
+    ├─ operand[a]: cone ← Fold  free   ‹computed›   ← access omits a1 ⇒ A. The per-k-block A slab is produced by
+    │  └─ …the normalized/projected A row…             the sync compute-fill: a producer phase where the CTA's
+    ├─ operand[b]: in0 ← w_gate[a1, a2]  ‹materialized›   threads cooperatively evaluate the cone for the current
+    ├─ operand[b]: in3 ← w_up[a1, a2]    ‹materialized›   k-block into smem, sync, then both components consume it
+    ├─ init: (0, 0)
+    ├─ lift: λ(a2, cone, in0, in3) -> (acc_g__v, acc_u__v)
+    │    acc_g__v = multiply(cone, in0)   ← ONE edge, TWO terms. No privileged operand slot, no let table, no
+    │    acc_u__v = multiply(cone, in3)      `Channel` — the shared edge appears in both terms and that IS the
+    └─ combine: λ(acc_g, acc_u, acc_g__o, acc_u__o) -> (acc_g, acc_u)   arity
+         acc_g = add(acc_g, acc_g__o)
+         acc_u = add(acc_u, acc_u__o)
+```
+
+The cone's inner stat fold answers with its own `REDUCE@<axis>` slice from its own emitter (retiring
+`prologue_knob_bases`' hand-threading), and the `020` MONOID-producer merge (two term readings of one loop) reduces
+to "run `candidates` on each reading, union the rows", the decided-empty stamps computed generically as "families
+whose site the other tree lacks". Note the cone edge's `PLACE@cone` key and the A-edge `PLACE@a` key are exactly the
+segment spellings the collapse must preserve.
+
+### 7. Pure pointwise — a zero-axis fold with no operands
+
+```python
+torch.nn.functional.silu(torch.randn(8, 512, 1024)) * torch.randn(8, 512, 1024)
+```
+
+```
+=== 0: k_mul_pointwise ===
+    place  free=(a0, a1, a2)  grid=(a0, a1, a2)   ← EVERY axis → grid; one THREAD per grid cell (per-cell tier —
+    Fold  free  ‹pointwise›                          no work line, launch geometry derived by the materializer)
+    └─ lift: λ() -> (v5__u3)
+         in1__u0 = load x0[a0, a1, ((a2 * 4) + 0)]   ← ×4 unroll strip: a2's grid extent is 1024/4 = 256 and each
+         in2__u0 = load x1[a0, a1, ((a2 * 4) + 0)]      thread owns 4 CONSECUTIVE cells — a vector-width access
+         …                                              per lane, lanes still coalesced across a2
+    stores
+    ├─ mul[a0, a1, ((a2 * 4) + 0)] = v5__u0
+    ├─ mul[a0, a1, ((a2 * 4) + 1)] = v5__u1
+    ├─ mul[a0, a1, ((a2 * 4) + 2)] = v5__u2
+    └─ mul[a0, a1, ((a2 * 4) + 3)] = v5__u3
+```
+
+Trivial depth-0: the operandless-zero-axis emitter's grid-map + strip moves (`_map_strip_fork` verbatim), where `r`
+is the spelled `TILE` value. **This is the shape that now collides with the loop-IR escapes** — `030`'s finalize and
+the un-recognized flat cell are also zero-axis folds with no operands. They are separated only by `ops.axis_role`'s
+`Loop.role` fallback, per the emitter-dispatch section; `family_sites`' root-only rule is the second guard.
+
+### 8. Causal SDPA — the flash rewrite
+
+```python
+F.scaled_dot_product_attention(q, k, v, is_causal=True)  # (1, 8, 512, 64) each
+```
+
+```
+=== 0: scaled_dot_product_attention ===
+    place  free=(b0, b1, m, d)  grid=(b0, b1, m)   ← b0·b1 (batch · heads) → blockIdx on EVERY family; how m and d
+    Fold  free                                        map is what the fork decides (annotated per family below)
+    ├─ operand[0]: (m_i, l_i, O_i) ← Fold[kv in 0..512]  twisted
+    │  │                                          ← kv NEVER maps to the grid un-split: it is the STREAM — serial
+    │  ├─ init: (-inf, 0, 0)                         bn-blocks per CTA; the g<n>k move splits it across n CTAs
+    │  ├─ operand[0]: sacc ← Fold[dd in 0..64]  contraction   ‹computed›   ⟨TILE@dd⟩
+    │  │  │                                       ← the streaming demand lands HERE: "produce a (bm × bn) score
+    │  │  │                                          block per kv-block, fragment residency"
+    │  │  ├─ operand[a]: q_e ← x0[b0, b1, m, dd]   ‹materialized›   ← access omits kv ⇒ A: the Q tile loads ONCE
+    │  │  ├─ operand[b]: k_e ← x1[b0, b1, kv, dd]  ‹materialized›      and stays resident across the stream;
+    │  │  ├─ init: (0)                                                 K slab staged per kv-block (cp.async / TMA),
+    │  │  ├─ lift: λ(dd, q_e, k_e) -> (sacc__v)                        dd → serial mma k-steps (64 / atom_k = 4)
+    │  │  │    sacc__v = multiply(q_e, k_e)
+    │  │  └─ combine: λ(sacc, sacc__o) -> (sacc)
+    │  │       sacc = add(sacc, sacc__o)
+    │  ├─ operand[1]: v_e ← x2[b0, b1, kv, d]   ‹materialized›   ← V slab staged per kv-block, consumed by the
+    │  ├─ lift: λ(kv, sacc, v_e) -> (s_causal, 1, v_e)              DERIVED PV contraction below the seam
+    │  │    scale_c = load _flash_scale[]          ← (m, l, O) running state stays register/fragment-resident
+    │  │    s = multiply(sacc, scale_c)               across the whole stream — the demand the fold puts on ITSELF
+    │  │    ninf_c = load _flash_ninf[]
+    │  │    s_causal = s when ((kv <= m))          ← causal mask per streamed block (whole blocks skippable when
+    │  │               ninf_c when (1)                kv-block > m-block — a raster/legality fact, not algebra)
+    │  └─ combine: λ(m_i, l_i, O_i, m_i__o, l_i__o, O_i__o) -> (m_i, l_i, O_i)
+    │       …                                      ← the per-block rescale; on the coop family the SAME λ is the
+    │                                                 cross-lane merge of (m, l, O) triples
+    └─ lift: λ(m_i, l_i, O_i) -> (O_i__proj)
+         O_i__proj = divide(O_i, l_i)              ← once per (m, d) output cell, at stream end
+    schedule
+    └─ TILE@pj = f64                               ← the DERIVED PV contraction's slice — a synthesized node inside
+    stores                                            the twisted evaluation, `Site.derived`, never a PLACE target
+    └─ scaled_dot_product_attention[0, b1, m, d] = O_i__proj
+```
+
+Flash is where the collapse pays: the term is now **one node kind at three depths** — a zero-axis projection over a
+twisted stream over a contraction — and the derived PV is a fourth instance of the same kind rather than a synthesized
+member of a different class. The `a` / `b` labels on the QK edges are derived (`q_e`'s access omits `kv`, `k_e`'s
+omits `m`), and the PV's A is the register-resident `P` whose access omits `d` — the case that makes access-derived
+labelling worth having, since no `isinstance(_, Load)` test reaches it.
+
+The dump is pre-schedule (no `work` line), so the annotation shows where each family's decision lands. The fold's
+move families and their axis mappings:
+
+- **WARP streaming** (`_twisted_warp_options` today; dtype-gated OFF for this f32 `randn` trace — joins on f16/bf16
+  models): grid = (b0·b1, m/bm). m → bm query rows held as warp mma fragments (bm = WM·FM·atom_m from `WORK` +
+  `TILE@dd`); kv → serial stream, bn keys per step (bn = WN·FN·atom_n — the kv-block ↔ score-tile coupling
+  `_stamp_twisted_split` hand-computes IS the unification check on the QK edge); dd → mma k-steps; d → PV fragment
+  columns via `TILE@pj`. ONE `WORK=w<M>x<N>` inventory shared by the QK child and the derived PV. Constraint-table
+  row 15 applies: `WN = 1`.
+- **CHAIN** (FA-2 scalar, `_twisted_chain_option`): grid = (b0, b1, m) — one THREAD per query row; d → a per-thread
+  register vector (`TILE@pj=f64`, legal since d = 64 ≤ the register budget); kv → serial per thread, the score
+  computed ONCE per key and shared across all 64 columns. `WORK=""`.
+- **Per-cell**: grid = (b0, b1, m, d) — one thread per output cell; kv serial; the QK edge collapses inline (the
+  collapse variant — the edges move into the lift, so the node derives PLANAR by the arity table), so the score
+  recomputes per d — the redundant form the chain exists to beat.
+- **Coop**: grid = (b0, b1, m, d), a `t<n>` band splits kv across lanes within the CTA; the cross-lane merge of
+  (m, l, O) triples is the fold's own combine λ — carrier-generic, same machinery as examples 1–3.
+- **Split-KV** (`g<n>k`): composes with the warp rows — kv → n CTAs × serial stream; each partial keeps fragment
+  residency; `030_split_reduce` realizes the partial + LSE-combine finalize. This is the generic kernel-finalize
+  `g<n>` fold move (the twisted carrier is combine-relocatable), the same move as matmul split-K — legality (kv
+  divides, slices block-whole) plus unification replace `_stamp_twisted_split`.
+
+Pins (`TILE@dd` / `TILE@pj` / `REDUCE@<kv>`) narrow at their paths like every other kernel; `_narrow_flash_forms` and
+the warp/stage-pin routing block at the top of the twisted branch retire.
+
+### Summary — what each hand-written path becomes
+
+| Today | Under the walk |
+| --- | --- |
+| `_tile_rows` (contraction product) | the CONTRACTION emitter, depth-0 |
+| `_reduce_specs` + `_coop_carrier` | the PLANAR emitter, depth-0 |
+| `_row_stage` / `_shared_row_buf` shape-match | stage move on a twice-read materialized edge (gate kept) |
+| `_computed_a_rows` + `prologue_knob_bases` | depth-1 recursion; the child fold spells its own slices |
+| `020`'s MONOID-producer merge | candidate-union of two term readings; decided-empty generic |
+| `twisted_pair` + `_twisted_warp_options` | TWISTED emitter + child recursion + unification |
+| `_twisted_chain_option` | a row in the TWISTED emitter |
+| `_stamp_twisted_split` + matmul split-K | ONE `g<n>` fold move (atomic / kernel-finalize legality) |
+| `_narrow_flash_forms` + per-path pin escapes | per-path narrowing of local candidate lists |
+| `_demote_planar` / `_demoted_warp_option` | the collapse variant — edges inline, role falls to PLANAR |
+| `Contraction.a` / `.channels` / `.b_trans` | derived readings of `operands` + their accesses |
 
 Not covered by these eight and not to be dropped: the `PLACE=cut` re-recognized pieces (18 golden rows, each its own
 kernel), `rope` / `embedding` (which record `{WORK: ''}` and nothing else — a zero-choice enumeration, benign but it
@@ -424,6 +887,19 @@ and recognition, not from this enumeration.
 
 ## Risks
 
+- **The collapse orphans measured evidence.** `ops.term_key` is `repr()` of the canonicalized term, so a changed
+  class name and the projection's changed nesting change `op_cache_key` and `Graph.structural_key` for EVERY term.
+  The cubin cache and every DB / reservoir row keyed on `(ctx.structural_key, op_cache_key)` stop matching; goldens
+  survive because they key on knob spellings. Correctness-cheap, evidence-expensive — which is exactly why P0.5 sits
+  before phase 2 and not after.
+- **The collapse can silently lose a path segment.** `_SEGMENT_TOKENS` is `{"map", "fold", "a", "b"}` and the stored
+  corpus depends on `a` (`PLACE@a`, 9 rows) while depending on `map` / `fold` nowhere. If `path._walk`'s derived
+  labelling regresses, those nine rows do not fail loudly — they re-spell to a path form and read as a different
+  site. Assert them by name in P0.5, not by set membership.
+- **Zero-axis folds are now ambiguous by shape.** The pointwise cell, `030`'s finalize and the un-recognized escape
+  are all operandless zero-axis folds; only `ops.axis_role`'s `Loop.role` fallback and `family_sites`' root-only rule
+  separate them. Pre-collapse the type distinguished nothing either, but the failure was loud; now it is a wrong
+  emitter. Phase 3 asserts it directly.
 - **The reconstruction is the risk.** ~2460 lines exist only in `git show`, their tests were deleted with them, and
   for several predicates — `_demote_mixed_a` above all — NOTHING in the 107-id registry re-asserts them. The
   predicate module and the spike are the mitigations.

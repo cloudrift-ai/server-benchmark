@@ -173,7 +173,10 @@ it before answering any CLI-flag question. Quickstart for the common paths:
 
 Quick test models / scripts (for local iteration):
 
-- Ungated Llama-arch smoke model: `TinyLlama/TinyLlama-1.1B-Chat-v1.0`; GPU embedding model (0.6B): `Qwen/Qwen3-Embedding-0.6B`
+- Ungated generative smoke model: `Qwen/Qwen3-0.6B` (Qwen3 arch — same family as the embedding smoke model;
+  serving-validated on a 4080, tuned TPOT 1.28x stock; defaults to thinking mode — pass `enable_thinking: false`
+  in chat probes for terse outputs). `TinyLlama/TinyLlama-1.1B-Chat-v1.0` stays as the ungated **Llama-arch**
+  smoke model. GPU embedding model (0.6B): `Qwen/Qwen3-Embedding-0.6B`
 - Benchmark/profiling helpers live under `scripts/` (`bench_block.py`, `bench_model_kernels.py`, `bench_golden_set.py`,
   `bench_gen_*.py`, `profile_gen_decode.py`, `capture_gen_twins.py`, `new_models.py`, `merge_node_db.py`,
   `remote_node_collect.py`, `golden_neighbor_bench.py`, `digest_kernels.py` — the kernel-source byte-identity

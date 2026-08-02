@@ -906,25 +906,39 @@ class EmmyGenRunner:
         return self._post[layer].run_device_sym([attn_out, residual])[0]
 
     def post_attn_backing(self, layer: int, rows: int):
-        """A torch CUDA view of the M=1 post twin's ``attn_out`` INPUT backing (first ``rows``
-        rows), or ``None`` when the m1 tier is off / this layer fell back. vLLM's paged attention
-        writes into this view under ``EMMY_GEN_ALIAS_ATTN`` so :meth:`_Program.run_device`'s
-        prefix upload self-copy-skips — the seam copy drops out of the captured decode graph.
-        The backing is allocated once per program, so the pointer is stable across steps.
+        """A torch CUDA view (first ``rows`` rows) of the ``attn_out`` INPUT backing of the post
+        program that :meth:`forward_layer_post_device` will route ``rows`` to — EVERY tier since
+        A4: M=1, the decode bucket, the exact prefill chunk, and the symbolic program. vLLM's
+        paged attention writes into this view under ``EMMY_GEN_ALIAS_ATTN`` so the post upload
+        self-copy-skips — the attention→post seam copy drops from captured decode graphs (static
+        and over-bucket sym alike) and skips on eager chunk steps. ``None`` when no tier covers
+        ``rows`` or the alias cannot be honored — notably RIDER widths: the step splits across
+        two programs, and one contiguous attention output cannot alias two buffers.
 
-        The wrap is CACHED per layer: ``torch.from_dlpack`` on a cupy array negotiates a stream
-        sync, which INVALIDATES an in-flight CUDA-graph capture — the view must be minted on an
-        uncaptured (warmup) step and only re-served under capture. An uncached layer asked for
-        mid-capture returns ``None`` (the caller falls back to the ordinary copy path)."""
-        if self._post_m1 is None:
+        The tier routing MUST mirror :meth:`forward_layer_post_device` — a mismatch is still
+        correct (the upload simply copies) but silently loses the skip. The wrap is CACHED per
+        ``(layer, tier)``: ``torch.from_dlpack`` on a cupy array negotiates a stream sync, which
+        INVALIDATES an in-flight CUDA-graph capture — the view must be minted on an uncaptured
+        (warmup) step and only re-served under capture. An uncached entry asked for mid-capture
+        returns ``None`` (the caller falls back to the ordinary copy path)."""
+        if rows == 1 and self._post_m1 is not None:
+            handle, tier = self._post_m1[layer], "m1"
+        elif self._post_decode is not None and rows <= self._decode_bucket:
+            handle, tier = self._post_decode[layer], "decode"
+        elif self._post_prefill is not None and rows == self._prefill_bucket:
+            handle, tier = self._post_prefill[layer], "chunk"
+        elif 0 < rows - self._prefill_bucket <= self.rider_width:
+            return None  # rider split: two programs, no single contiguous attn_out backing
+        elif self._prefill_capacity and rows <= self._prefill_capacity:
+            handle, tier = self._post[layer], "sym"
+        else:
             return None
-        handle = self._post_m1[layer]
         if handle is None:
             return None
-        views = getattr(self, "_post_m1_attn_views", None)
+        views = getattr(self, "_post_attn_views", None)
         if views is None:
-            views = self._post_m1_attn_views = {}
-        view = views.get(layer)
+            views = self._post_attn_views = {}
+        view = views.get((layer, tier))
         if view is None:
             import torch  # noqa: PLC0415
 
@@ -933,7 +947,7 @@ class EmmyGenRunner:
             arr = handle.program.arrays.get("attn_out")
             if arr is None:
                 return None
-            view = views[layer] = torch.from_dlpack(arr)
+            view = views[(layer, tier)] = torch.from_dlpack(arr)
         return view[:rows]
 
     def final_norm_device(self, hidden):

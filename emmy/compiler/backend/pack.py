@@ -72,11 +72,20 @@ def _safe_name(program: str) -> str:
 
 def pack_path(root: Path | str, key: dict) -> Path:
     """The directory for one pack under the ``EMMY_PACK_DIR`` root: a human-readable model
-    label plus a digest of the full validity key, so packs for different models / serving
-    shapes coexist under one root."""
+    label plus a digest of BOTH halves of the validity key — the serving shape (``key``) and
+    the environment (:func:`_environment`) — so every (shape, environment) combination gets
+    its own directory.
+
+    The environment half is load-bearing in the PATH, not just in the manifest: two lanes that
+    differ only in environment (the ``FAST_MATH`` precision gate is the live case) build the
+    same ``key`` and would otherwise share one directory, where the second warm silently
+    overwrites the first. Found by baking a multi-shape image (2026-08-02): the three
+    fast-math shapes clobbered their standard-lane twins, leaving 5 directories for 8 shapes
+    and a pinned-shape boot that mismatched its own pack and fell back to a full compile."""
+    env_digest = hashlib.sha1(json.dumps(_environment(), sort_keys=True).encode()).hexdigest()[:8]
     digest = hashlib.sha1(json.dumps(key, sort_keys=True).encode()).hexdigest()[:12]
     label = _safe_name(str(key.get("model", "model")).split("/")[-1])
-    return Path(root) / f"{label}-{digest}"
+    return Path(root) / f"{label}-{digest}-{env_digest}"
 
 
 def save_pack(pack_dir: Path | str, plans: dict[str, ExecutionPlan], *, key: dict, provenance: dict | None = None) -> Path:
